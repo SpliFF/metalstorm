@@ -3285,7 +3285,7 @@ static bool CanGiveOrders(const lua_State* L)
  * @param params CreateCommandParams Parameters for the given command.
  * @param options CreateCommandOptions?
  * @param timeout integer?
- * @return nil|true
+ * @return boolean
  */
 int LuaUnsyncedCtrl::GiveOrder(lua_State* L)
 {
@@ -3310,7 +3310,7 @@ int LuaUnsyncedCtrl::GiveOrder(lua_State* L)
  * @param params CreateCommandParams? Parameters for the given command.
  * @param options CreateCommandOptions?
  * @param timeout integer?
- * @return nil|true
+ * @return boolean
  */
 int LuaUnsyncedCtrl::GiveOrderToUnit(lua_State* L)
 {
@@ -3344,7 +3344,7 @@ int LuaUnsyncedCtrl::GiveOrderToUnit(lua_State* L)
  * @param params CreateCommandParams? Parameters for the given command.
  * @param options CreateCommandOptions?
  * @param timeout integer?
- * @return nil|true
+ * @return boolean orderGiven
  */
 int LuaUnsyncedCtrl::GiveOrderToUnitMap(lua_State* L)
 {
@@ -3378,7 +3378,7 @@ int LuaUnsyncedCtrl::GiveOrderToUnitMap(lua_State* L)
  * @param params CreateCommandParams? Parameters for the given command.
  * @param options CreateCommandOptions?
  * @param timeout integer?
- * @return nil|true
+ * @return boolean ordersGiven `true` if any orders were sent, otherwise `false`.
  */
 int LuaUnsyncedCtrl::GiveOrderToUnitArray(lua_State* L)
 {
@@ -3407,7 +3407,7 @@ int LuaUnsyncedCtrl::GiveOrderToUnitArray(lua_State* L)
  * @function Spring.GiveOrderArrayToUnit
  * @param unitID integer Unit ID.
  * @param commands CreateCommand[]
- * @return boolean ordersGiven
+ * @return boolean ordersGiven `true` if any orders were sent, otherwise `false`.
  */
 int LuaUnsyncedCtrl::GiveOrderArrayToUnit(lua_State* L)
 {
@@ -3441,7 +3441,7 @@ int LuaUnsyncedCtrl::GiveOrderArrayToUnit(lua_State* L)
  * @function Spring.GiveOrderArrayToUnitMap
  * @param unitMap table<integer, any> A table with unit IDs as keys.
  * @param commands CreateCommand[]
- * @return boolean ordersGiven
+ * @return boolean ordersGiven `true` if any orders were sent, otherwise `false`.
  */
 int LuaUnsyncedCtrl::GiveOrderArrayToUnitMap(lua_State* L)
 {
@@ -3471,9 +3471,8 @@ int LuaUnsyncedCtrl::GiveOrderArrayToUnitMap(lua_State* L)
 
 
 /***
- *
  * @function Spring.GiveOrderArrayToUnitArray
- * @param unitArray number[] array of unit ids
+ * @param unitIDs integer[] Array of unit IDs.
  * @param commands CreateCommand[]
  * @param pairwise boolean? (Default: `false`) When `false`, assign all commands to each unit.
  *
@@ -3482,7 +3481,7 @@ int LuaUnsyncedCtrl::GiveOrderArrayToUnitMap(lua_State* L)
  * If `len(unitArray) < len(cmdArray)` only the first `len(unitArray)` commands
  * will be assigned, and vice-versa.
  *
- * @return nil|boolean
+ * @return boolean ordersGiven `true` if any orders were sent, otherwise `false`.
  */
 int LuaUnsyncedCtrl::GiveOrderArrayToUnitArray(lua_State* L)
 {
