@@ -160,6 +160,7 @@ void DumpState(int newMinFrameNum, int newMaxFrameNum, int newFramePeriod, std::
 			file << "maxFrame: " << gMaxFrameNum << "\n";
 			file << "randSeed: " << gsRNG.GetLastSeed() << "\n";
 			file << "initSeed: " << gsRNG.GetInitSeed() << "\n";
+			file << "genState: " << gsRNG.GetGenState() << "\n";
 			file << "  gameID: " << DumpGameID(game->gameID) << "\n";
 			file << " syncVer: " << SpringVersion::GetSync() << "\n";
 		}
