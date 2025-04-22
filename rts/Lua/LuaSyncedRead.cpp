@@ -1423,44 +1423,37 @@ int LuaSyncedRead::GetHeadingFromFacing(lua_State* L)
 ******************************************************************************/
 
 
-/*** Side spec
+/***
+ * Side spec
  *
  * @class SideSpec
  *
- * Used when returning arrays of side specifications, is itself an array with
- * positional values as below:
+ * Returned when getting arrays of side specifications.
  *
- * @field sideName string
- * @field caseName string
+ * @field sideName string Lowercase side name.
+ * @field caseName string Original case side name.
  * @field startUnit string
- */
-
-
-/***
- *
- * @function Spring.GetSideData
- *
- * @param sideName string
- *
- * @return nil|string startUnit
- * @return string caseSensitiveSideName
+ * @see Spring.GetSideData
  */
 
 /***
- *
  * @function Spring.GetSideData
- *
+ * @param sideName string Case-insensitive side name.
+ * @return string? startUnit
+ * @return string? caseName Original case side name.
+ * 
+ */
+
+/***
+ * @function Spring.GetSideData
  * @param sideID integer
- *
- * @return nil|string sideName
- * @return string startUnit
- * @return string caseSensitiveSideName
+ * @return string? sideName Lowercase side name.
+ * @return string? startUnit
+ * @return string? caseName Original case side name.
  */
 
 /***
- *
  * @function Spring.GetSideData
- *
  * @return SideSpec[] sideArray
  */
 int LuaSyncedRead::GetSideData(lua_State* L)
