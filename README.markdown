@@ -4,7 +4,7 @@ Visit the [Official Website](https://beyond-all-reason.github.io/RecoilEngine/)
 
 ### Get the engine sources
 
-    git clone https://github.com/beyond-all-reason/spring --recursive
+    git clone https://github.com/beyond-all-reason/RecoilEngine --recursive
 
 Recoil is a fork and continuation of an RTS [engine](https://github.com/spring/spring) version 105.0
 
@@ -39,7 +39,7 @@ spring_bar_{BAR105}105.1.1-1050-g5075cc0
 If you aren't seeeing these (often, when you've cloned your fork of the repository and not the upstream version), try the following:
 
 ```bash
-git remote add upstream git@github.com:beyond-all-reason/spring.git
+git remote add upstream git@github.com:beyond-all-reason/RecoilEngine.git
 git fetch --all --tags
 ```
 
@@ -54,7 +54,7 @@ The most simple set of commands will be:
 
 ```bash
 cmake .
-make
+ninja
 ```
 
 ### License
