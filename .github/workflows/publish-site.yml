@@ -7,7 +7,7 @@ env:
   EMMYLUA_CLI_VERSION: "0.6.0"
 jobs:
   publish:
-    if: github.repository == 'beyond-all-reason/spring' || github.event_name == 'workflow_dispatch'
+    if: github.repository == 'beyond-all-reason/RecoilEngine' || github.event_name == 'workflow_dispatch'
     name: Publish Site
     runs-on: ubuntu-latest
     permissions:
