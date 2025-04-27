@@ -251,6 +251,7 @@ if    (SYNCCHECK)
 endif (SYNCCHECK)
 
 option(SYNC_HISTORY "Save sync history (for semidebug builds)" FALSE)
+set(SYNC_HISTORY ON CACHE BOOL "Force enable save sync history" FORCE)
 if    (SYNC_HISTORY)
 	add_definitions(-DSYNC_HISTORY)
 endif (SYNC_HISTORY)
