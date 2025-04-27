@@ -12,6 +12,35 @@
 unsigned CSyncChecker::g_checksum;
 int CSyncChecker::inSyncedCode;
 
+void CSyncChecker::NewFrame()
+{
+	g_checksum = 0xfade1eaf;
+#ifdef SYNC_HISTORY
+	LogHistory();
+#endif // SYNC_HISTORY
+}
+
+void CSyncChecker::debugSyncCheckThreading()
+{
+	assert(ThreadPool::GetThreadNum() == 0);
+}
+
+void CSyncChecker::Sync(const void* p, unsigned size)
+{
+#ifdef DEBUG_SYNC_MT_CHECK
+	// Sync calls should not be occurring in multi-threaded sections
+	debugSyncCheckThreading();
+#endif
+	// most common cases first, make it easy for compiler to optimize for it
+	// simple xor is not enough to detect multiple zeroes, e.g.
+	g_checksum = spring::LiteHash(p, size, g_checksum);
+	//LOG("[Sync::Checker] chksum=%u\n", g_checksum);
+
+#ifdef SYNC_HISTORY
+	LogHistory();
+#endif // SYNC_HISTORY
+}
+
 #ifdef SYNC_HISTORY
 
 unsigned CSyncChecker::nextHistoryIndex = 0;
@@ -48,9 +77,4 @@ std::tuple<unsigned, unsigned, unsigned*> CSyncChecker::GetFrameHistory(unsigned
 
 #endif // SYNC_HISTORY
 
-void CSyncChecker::debugSyncCheckThreading()
-{
-    assert(ThreadPool::GetThreadNum() == 0);
-}
-
-#endif // SYNCDEBUG
+#endif // SYNCCHECK

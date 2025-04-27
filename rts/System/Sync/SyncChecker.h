@@ -7,7 +7,7 @@
 
 #include "System/SpringHash.h"
 
-#include <assert.h>
+#include <cassert>
 #include <array>
 
 static constexpr size_t MAX_SYNC_HISTORY = 2500000; // 10MB, ~= 10 seconds of typical midgame
@@ -33,27 +33,9 @@ class CSyncChecker {
 		 * Keeps a running checksum over all assignments to synced variables.
 		 */
 		static unsigned GetChecksum() { return g_checksum; }
-		static void NewFrame() {
-			g_checksum = 0xfade1eaf;
-			#ifdef SYNC_HISTORY
-			LogHistory();
-			#endif // SYNC_HISTORY
-		}
+		static void NewFrame();
 		static void debugSyncCheckThreading();
-		static void Sync(const void* p, unsigned size) {
-#ifdef DEBUG_SYNC_MT_CHECK
-			// Sync calls should not be occurring in multi-threaded sections
-			debugSyncCheckThreading();
-#endif
-			// most common cases first, make it easy for compiler to optimize for it
-			// simple xor is not enough to detect multiple zeroes, e.g.
-			g_checksum = spring::LiteHash(p, size, g_checksum);
-			//LOG("[Sync::Checker] chksum=%u\n", g_checksum);
-
-			#ifdef SYNC_HISTORY
-			LogHistory();
-			#endif // SYNC_HISTORY
-		}
+		static void Sync(const void* p, unsigned size);
 		#ifdef SYNC_HISTORY
 		static std::tuple<unsigned, unsigned, unsigned*> GetFrameHistory(unsigned rewindFrames);
 		static std::pair<unsigned, unsigned*> GetHistory() { return std::make_pair(nextHistoryIndex, logs.data()); };
