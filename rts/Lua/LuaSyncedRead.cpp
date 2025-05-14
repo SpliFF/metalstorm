@@ -6177,13 +6177,13 @@ static void PackCommandQueue(lua_State* L, const CCommandQueue& commands, size_t
 	}
 }
 
+// FIXME: Probably more aptly named `Spring.GetUnitCommand`? It's just default argument that gets current command. Also in line with `Spring.GetUnitCommands`.
 /***
  *
  * @function Spring.GetUnitCurrentCommand
  *
  * @param unitID integer Unit id.
- * @param cmdIndex integer Command index to get. If negative will count from the end of the queue,
- * for example -1 will be the last command.
+ * @param cmdIndex integer? (Default: `0`) Command index to get. If negative will count from the end of the queue, e.g. -1 will be the last command.
  * @return CMD cmdID
  * @return integer|CommandOptionBit options
  * @return integer tag
