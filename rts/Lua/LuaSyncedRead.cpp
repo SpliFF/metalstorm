@@ -6178,16 +6178,21 @@ static void PackCommandQueue(lua_State* L, const CCommandQueue& commands, size_t
 }
 
 // FIXME: Probably more aptly named `Spring.GetUnitCommand`? It's just default argument that gets current command. Also in line with `Spring.GetUnitCommands`.
-/***
+/*** Get a command from a units command queue.
+ * 
+ * For factories, this function uses the command queue automatically assigned to new units.
+ * 
+ * @see Spring.GetFactoryCommands for getting factory build queue commands
  *
  * @function Spring.GetUnitCurrentCommand
  *
- * @param unitID integer Unit id.
+ * @param unitID integer unitID when invalid this function returns nil.
  * @param cmdIndex integer? (Default: `0`) Command index to get. If negative will count from the end of the queue, e.g. -1 will be the last command.
- * @return CMD cmdID
- * @return integer|CommandOptionBit options
- * @return integer tag
- * @return number ... Command parameters.
+ * @return CMD? cmdID
+ * @return integer|CommandOptionBit|nil options
+ * @return integer|nil tag
+ * @return number? ... Command parameters.
+ *
  */
 int LuaSyncedRead::GetUnitCurrentCommand(lua_State* L)
 {
