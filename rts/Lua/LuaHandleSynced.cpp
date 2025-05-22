@@ -2120,16 +2120,191 @@ int CSyncedLuaHandle::GetWatchWeaponDef(lua_State* L) {
 	return 1;
 }
 
+/*** Register/deregister callins working per defID.
+ *
+ * Some of the engine callins can result in so many callins the engine doesn't forward them until registered
+ * through the following SetWatch* methods.
+ *
+ * The GetWatch* methods can be used to query the currently registered defIDs.
+ *
+ * @section watch_methods
+ */
+
+/*** Query whether any callins are registered for a unitDefID.
+ *
+ * @function Script.GetWatchUnit
+ *
+ * @param unitDefID integer
+ * @return boolean watched Watch status.
+ *
+ * @see Script.SetWatchUnit
+ */
+
 GetWatchDef(Unit)
+
+
+/*** Query whether any callins are registered for a featureDefID.
+ *
+ * @function Script.GetWatchFeature
+ *
+ * @param featureDefID integer
+ * @return boolean watched `true` if callins are registered, otherwise `false`.
+ *
+ * @see Script.SetWatchFeature
+ */
+
 GetWatchDef(Feature)
+
+
+/*** Query whether any callins are registered for a weaponDefID.
+ *
+ * @function Script.GetWatchWeapon
+ *
+ * Same as calling:
+ * ```lua
+ * Script.GetWatchExplosion(weaponDefID) or Script.GetWatchProjectile(weaponDefID) or Script.GetWatchAllowTarget(weaponDefID)
+ * ```
+ *
+ * @param weaponDefID integer
+ * @return boolean watched True if watch is enabled for any weaponDefID callins.
+ *
+ * @see Script.SetWatchWeapon
+ */
+
+/*** Query whether explosion callins are registered for a weaponDefID.
+ *
+ * @function Script.GetWatchExplosion
+ *
+ * @param weaponDefID integer
+ * @return boolean watched `true` if callins are registered, otherwise `false`.
+ *
+ * @see Script.SetWatchExplosion
+ */
+
 GetWatchDef(Explosion)
+
+
+/*** Query whether projectile callins are registered for a weaponDefID.
+ *
+ * @function Script.GetWatchProjectile
+ *
+ * @param weaponDefID integer
+ * @return boolean watched `true` if callins are registered, otherwise `false`.
+ *
+ * @see Script.SetWatchProjectile
+ */
+
 GetWatchDef(Projectile)
+
+
+/*** Query whether weapon targeting callins are registered for a weaponDefID.
+ *
+ * @function Script.GetWatchAllowTarget
+ *
+ * @param weaponDefID integer
+ * @return boolean watched `true` if callins are registered, otherwise `false`.
+ *
+ * @see Script.SetWatchAllowTarget
+ */
+
 GetWatchDef(AllowTarget)
 
+
+/*** Register or deregister unitDefID for expensive callins.
+ *
+ * @function Script.SetWatchUnit
+ *
+ * @param unitDefID integer
+ * @param watch boolean Whether to register or deregister.
+ *
+ * @see Script.GetWatchUnit
+ * @see Callins:UnitFeatureCollision
+ * @see Callins:UnitUnitCollision
+ * @see Callins:UnitMoveFailed
+ */
+
 SetWatchDef(Unit)
+
+
+/*** Register or deregister featureDefID for expensive callins.
+ *
+ * @function Script.SetWatchFeature
+ *
+ * @param featureDefID integer
+ * @param watch boolean Whether to register or deregister.
+ *
+ * @see Script.GetWatchFeature
+ * @see Callins:UnitFeatureCollision
+ */
+
 SetWatchDef(Feature)
+
+
+/*** Register or deregister weaponDefID for all expensive callins.
+ *
+ * @function Script.SetWatchWeapon
+ *
+ * Equivalent to calling:
+ *
+ * ```lua
+ * Script.SetWatchExplosion(weaponDefID)
+ * Script.SetWatchProjectile(weaponDefID)
+ * Script.SetWatchAllowTarget(weaponDefID)
+ * ```
+ *
+ * Generally it's better to use those methods to avoid registering uneeded callins.
+ *
+ * @param weaponDefID integer
+ * @param watch boolean Whether to register or deregister.
+ *
+ * @see Script.GetWatchWeapon
+ * @see Script.SetWatchExplosion
+ * @see Script.SetWatchProjectile
+ * @see Script.SetWatchAllowTarget
+ */
+
+/*** Register or deregister weaponDefID for explosion callins.
+ *
+ * @function Script.SetWatchExplosion
+ *
+ * @param weaponDefID integer
+ * @param watch boolean Whether to register or deregister.
+ *
+ * @see Script.GetWatchExplosion
+ * @see Callins:Explosion
+ */
+
 SetWatchDef(Explosion)
+
+
+/*** Register or deregister weaponDefID for expensive projectile callins.
+ *
+ * @function Script.SetWatchProjectile
+ *
+ * @param weaponDefID integer weaponDefID for weapons or -1 to watch for debris.
+ * @param watch boolean Whether to register or deregister.
+ *
+ * @see Script.GetWatchProjectile
+ * @see Callins:ProjectileCreated
+ * @see Callins:ProjectileDestroyed
+ */
+
 SetWatchDef(Projectile)
+
+
+/*** Register or deregister weaponDefID for weapon targeting callins.
+ *
+ * @function Script.SetWatchAllowTarget
+ *
+ * @param weaponDefID integer
+ * @param watch boolean Whether to register or deregister.
+ *
+ * @see Script.GetWatchAllowTarget
+ * @see SyncedCallins:AllowWeaponTargetCheck
+ * @see SyncedCallins:AllowWeaponTarget
+ * @see SyncedCallins:AllowWeaponInterceptTarget
+ */
+
 SetWatchDef(AllowTarget)
 
 #undef GetWatchDef
