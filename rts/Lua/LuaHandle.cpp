@@ -2067,7 +2067,8 @@ void CLuaHandle::FeatureDamaged(
  * Projectiles
  * @section projectiles
  *
- * The following Callins are only called for weaponDefIDs registered via Script.SetWatchWeapon.
+ * The following Callins are only called for weaponDefIDs registered
+ * via Script.SetWatchWeapon or Script.SetWatchProjectile.
 ******************************************************************************/
 
 /*** Called when the projectile is created.
@@ -2080,6 +2081,8 @@ void CLuaHandle::FeatureDamaged(
  * @param proOwnerID integer
  * @param weaponDefID integer
  *
+ * @see Script.SetWatchProjectile
+ * @see Script.SetWatchWeapon
  */
 void CLuaHandle::ProjectileCreated(const CProjectile* p)
 {
@@ -2126,6 +2129,9 @@ void CLuaHandle::ProjectileCreated(const CProjectile* p)
  * @param proID integer
  * @param ownerID integer
  * @param proWeaponDefID integer
+ *
+ * @see Script.SetWatchProjectile
+ * @see Script.SetWatchWeapon
  */
 void CLuaHandle::ProjectileDestroyed(const CProjectile* p)
 {
@@ -2177,13 +2183,19 @@ void CLuaHandle::ProjectileDestroyed(const CProjectile* p)
  *
  * @function Callins:Explosion
  *
+ * Only called for weaponDefIDs registered via Script.SetWatchExplosion or Script.SetWatchWeapon.
+ *
  * @param weaponDefID integer
  * @param px number
  * @param py number
  * @param pz number
  * @param attackerID integer
  * @param projectileID integer
+  *
  * @return boolean noGfx if then no graphical effects are drawn by the engine for this explosion.
+ *
+ * @see Script.SetWatchExplosion
+ * @see Script.SetWatchWeapon
  */
 bool CLuaHandle::Explosion(int weaponDefID, int projectileID, const float3& pos, const CUnit* owner)
 {

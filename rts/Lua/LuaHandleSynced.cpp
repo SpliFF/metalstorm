@@ -1696,11 +1696,18 @@ bool CSyncedLuaHandle::ShieldPreDamaged(
 /*** Determines if this weapon can automatically generate targets itself. See also commandFire weaponDef tag.
  *
  * @function SyncedCallins:AllowWeaponTargetCheck
+ *
+ * Only called for weaponDefIDs registered via `Script.SetWatchAllowTarget` or `Script.SetWatchWeapon`.
+ *
  * @param attackerID integer
  * @param attackerWeaponNum integer
  * @param attackerWeaponDefID integer
+ *
  * @return boolean allowCheck
  * @return boolean ignoreCheck
+ *
+ * @see Script.SetWatchAllowTarget
+ * @see Script.SetWatchWeapon
  */
 int CSyncedLuaHandle::AllowWeaponTargetCheck(unsigned int attackerID, unsigned int attackerWeaponNum, unsigned int attackerWeaponDefID)
 {
@@ -1736,13 +1743,20 @@ int CSyncedLuaHandle::AllowWeaponTargetCheck(unsigned int attackerID, unsigned i
 /*** Controls blocking of a specific target from being considered during a weapon's periodic auto-targeting sweep.
  *
  * @function SyncedCallins:AllowWeaponTarget
+ *
+ * Only called for weaponDefIDs registered via `Script.SetWatchAllowTarget` or `Script.SetWatchWeapon`.
+ *
  * @param attackerID integer
  * @param targetID integer
  * @param attackerWeaponNum integer
  * @param attackerWeaponDefID integer
  * @param defPriority number
+ *
  * @return boolean allowed
  * @return number the new priority for this target (if you don't want to change it, return defPriority). Lower priority targets are targeted first.
+ *
+ * @see Script.SetWatchAllowTarget
+ * @see Script.SetWatchWeapon
  */
 bool CSyncedLuaHandle::AllowWeaponTarget(
 	unsigned int attackerID,
@@ -1800,13 +1814,16 @@ bool CSyncedLuaHandle::AllowWeaponTarget(
  *
  * @function SyncedCallins:AllowWeaponInterceptTarget
  *
- * Only called for weaponDefIDs registered via Script.SetWatchWeapon.
+ * Only called for weaponDefIDs registered via `Script.SetWatchAllowTarget` or `Script.SetWatchWeapon`.
  *
  * @param interceptorUnitID integer
  * @param interceptorWeaponID integer
  * @param targetProjectileID integer
  *
  * @return boolean allowed
+ *
+ * @see Script.SetWatchAllowTarget
+ * @see Script.SetWatchWeapon
  */
 bool CSyncedLuaHandle::AllowWeaponInterceptTarget(
 	const CUnit* interceptorUnit,
