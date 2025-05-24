@@ -342,22 +342,8 @@ void CMouseHandler::MousePress(int x, int y, int button)
 		return;
 	}
 
-	// limited receivers for MMB
-	if (button == SDL_BUTTON_MIDDLE) {
-		if (!locked) {
-			if (luaInputReceiver->MousePress(x, y, button)) {
-				activeReceiver = luaInputReceiver;
-				return;
-			}
-			if ((minimap != nullptr) && minimap->FullProxy()) {
-				if (minimap->MousePress(x, y, button)) {
-					activeReceiver = minimap;
-					return;
-				}
-			}
-		}
+	if (button == SDL_BUTTON_MIDDLE && locked)
 		return;
-	}
 
 	if (luaInputReceiver->MousePress(x, y, button)) {
 		if (activeReceiver == nullptr)
@@ -378,6 +364,8 @@ void CMouseHandler::MousePress(int x, int y, int button)
 	}
 
 	if (button >= ACTION_BUTTON_MIN && activeController != nullptr && activeController->MousePress(x, y, button)) {
+		if (activeController->GetInputReceiver())
+			activeReceiver = activeController->GetInputReceiver();
 		return;
 	}
 
