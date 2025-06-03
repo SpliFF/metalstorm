@@ -17,8 +17,6 @@
 #include "CommandAI/FactoryCAI.h"
 #include "CommandAI/AirCAI.h"
 #include "CommandAI/BuilderCAI.h"
-#include "CommandAI/CommandAI.h"
-#include "CommandAI/FactoryCAI.h"
 #include "CommandAI/MobileCAI.h"
 #include "CommandAI/BuilderCaches.h"
 
@@ -169,7 +167,7 @@ void CUnit::SanityCheck() const
 	pos.AssertNaNs();
 	midPos.AssertNaNs();
 	relMidPos.AssertNaNs();
-	preFramePos.AssertNaNs();
+	preFrameTra.AssertNaNs();
 
 	speed.AssertNaNs();
 
@@ -185,10 +183,24 @@ void CUnit::SanityCheck() const
 	}
 }
 
+void CUnit::UpdatePrevFrameTransform()
+{
+	for (auto& lmp : localModel.pieces) {
+		lmp.SavePrevModelSpaceTransform();
+	}
+
+	if (!prevFrameNeedsUpdate)
+		return;
+
+	preFrameTra = Transform{ CQuaternion::MakeFrom(GetTransformMatrix(true)), pos };
+	prevFrameNeedsUpdate = false;
+}
+
 
 void CUnit::PreInit(const UnitLoadParams& params)
 {
 	ZoneScoped;
+
 	// if this is < 0, UnitHandler will give us a random ID
 	id = params.unitID;
 	featureDefID = -1;
@@ -238,7 +250,7 @@ void CUnit::PreInit(const UnitLoadParams& params)
 	upright  = unitDef->upright;
 
 	SetVelocity(params.speed);
-	Move(preFramePos = params.pos.cClampInMap(), false);
+	Move(params.pos.cClampInMap(), false);
 
 	UpdateDirVectors(!upright && IsOnGround(), false, 0.0f);
 	SetMidAndAimPos(model->relMidPos, model->relMidPos, true);
@@ -528,7 +540,7 @@ void CUnit::ForcedMove(const float3& newPos)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	UnBlock();
-	Move((preFramePos = newPos) - pos, true);
+	Move(newPos - pos, true);
 	Block();
 
 	eventHandler.UnitMoved(this);
@@ -655,7 +667,6 @@ void CUnit::Update()
 
 	UpdatePhysicalState(0.1f);
 	UpdatePosErrorParams(true, false);
-	UpdateTransportees(); // none if already dead
 
 	if (beingBuilt)
 		return;
@@ -722,7 +733,7 @@ void CUnit::UpdateTransportees()
 			// slave transportee orientation to piece
 			if (tu.piece >= 0) {
 				const CMatrix44f& transMat = GetTransformMatrix(true);
-				const CMatrix44f& pieceMat = script->GetPieceMatrix(tu.piece);
+				const auto pieceMat = script->GetPieceMatrix(tu.piece);
 
 				transportee->SetDirVectors(transMat * pieceMat);
 			}
@@ -2939,7 +2950,6 @@ CR_REG_METADATA(CUnit, (
 	CR_MEMBER(maxRange),
 	CR_MEMBER(lastMuzzleFlameSize),
 
-	CR_MEMBER(preFramePos),
 	CR_MEMBER(lastMuzzleFlameDir),
 	CR_MEMBER(flankingBonusDir),
 

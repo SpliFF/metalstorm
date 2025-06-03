@@ -219,11 +219,15 @@ void CFactory::UpdateBuild(CUnit* buildee) {
 	const int buildPiece = script->QueryBuildInfo();
 
 	const float3& buildPos = CalcBuildPos(buildPiece);
-	const CMatrix44f& buildPieceMat = script->GetPieceMatrix(buildPiece);
+	const auto& buildPieceTra = script->GetPieceTransform(buildPiece);
 
 	// see CMatrix44f::CMatrix44f(const float3 pos, const float3 x, const float3 y, const float3 z)
-	// frontdir.x, frontdir.z
-	const int buildPieceHeading = GetHeadingFromVector(buildPieceMat[8], buildPieceMat[10]);
+	// this used to be const int buildPieceHeading = GetHeadingFromVector(buildPieceMat[8], buildPieceMat[10]);
+	// i.e. frontdir.x, frontdir.z
+	// so rotate the forward vector by buildPieceTra.r to recover frontdir.x, frontdir.z
+	const float3 xzVec = buildPieceTra.r * FwdVector;
+	const int buildPieceHeading = GetHeadingFromVector(xzVec.x, xzVec.z);
+
 	const int buildFaceHeading = GetHeadingFromFacing(buildFacing);
 
 	float3 buildeePos = buildPos;

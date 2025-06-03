@@ -58,6 +58,7 @@ CR_REG_METADATA(CFeature, (
 
 	CR_MEMBER(solidOnTop),
 	CR_MEMBER(transMatrix),
+
 	CR_POSTLOAD(PostLoad)
 ))
 
@@ -153,6 +154,8 @@ void CFeature::Initialize(const FeatureLoadParams& params)
 	RECOIL_DETAILED_TRACY_ZONE;
 	const CSolidObject* po = params.parentObj;
 
+	prevFrameNeedsUpdate = true;
+
 	def = params.featureDef;
 	udef = params.unitDef;
 
@@ -227,7 +230,6 @@ void CFeature::Initialize(const FeatureLoadParams& params)
 
 	UpdateMidAndAimPos();
 	UpdateTransformAndPhysState();
-
 
 	collisionVolume = def->collisionVolume;
 	selectionVolume = def->selectionVolume;
@@ -471,7 +473,7 @@ void CFeature::ForcedMove(const float3& newPos)
 	// remove from managers
 	quadField.RemoveFeature(this);
 
-	const float3 oldPos = pos;
+	prevFrameNeedsUpdate = true;
 
 	UnBlock();
 	Move(newPos - pos, true);
@@ -481,7 +483,7 @@ void CFeature::ForcedMove(const float3& newPos)
 	// (features are only Update()'d when in the FH queue)
 	UpdateTransformAndPhysState();
 
-	eventHandler.FeatureMoved(this, oldPos);
+	eventHandler.FeatureMoved(this, preFrameTra.t);
 
 	// insert into managers
 	quadField.AddFeature(this);
@@ -494,6 +496,8 @@ void CFeature::ForcedSpin(const float3& newDir)
 	// update local direction-vectors
 	CSolidObject::ForcedSpin(newDir);
 	UpdateTransform(pos, true);
+
+	prevFrameNeedsUpdate = true;
 }
 
 void CFeature::ForcedSpin(const float3& newFrontDir, const float3& newRightDir)
@@ -502,6 +506,8 @@ void CFeature::ForcedSpin(const float3& newFrontDir, const float3& newRightDir)
 	// update local direction-vectors
 	CSolidObject::ForcedSpin(newFrontDir, newRightDir);
 	UpdateTransform(pos, true);
+
+	prevFrameNeedsUpdate = true;
 }
 
 
@@ -510,6 +516,8 @@ void CFeature::UpdateTransformAndPhysState()
 	RECOIL_DETAILED_TRACY_ZONE;
 	UpdateDirVectors(!def->upright && IsOnGround(), true, 0.0f);
 	UpdateTransform(pos, true);
+
+	prevFrameNeedsUpdate = true;
 
 	UpdatePhysicalStateBit(CSolidObject::PSTATE_BIT_MOVING, (SetSpeed(speed) != 0.0f));
 	UpdatePhysicalState(0.1f);
@@ -569,7 +577,7 @@ bool CFeature::UpdateVelocity(
 bool CFeature::UpdatePosition()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const float3 oldPos = pos;
+	prevFrameNeedsUpdate = true;
 	// const float4 oldSpd = speed;
 
 	if (moveCtrl.enabled) {
@@ -603,8 +611,8 @@ bool CFeature::UpdatePosition()
 	Block(); // does the check if wanted itself
 
 	// use an exact comparison for the y-component (gravity is small)
-	if (!pos.equals(oldPos, float3(float3::cmp_eps(), 0.0f, float3::cmp_eps()))) {
-		eventHandler.FeatureMoved(this, oldPos);
+	if (!pos.equals(preFrameTra.t, float3(float3::cmp_eps(), 0.0f, float3::cmp_eps()))) {
+		eventHandler.FeatureMoved(this, preFrameTra.t);
 		return true;
 	}
 
@@ -616,6 +624,14 @@ bool CFeature::UpdatePosition()
 	return (moveCtrl.enabled);
 }
 
+void CFeature::UpdatePrevFrameTransform()
+{
+	if (!prevFrameNeedsUpdate)
+		return;
+
+	preFrameTra = Transform{ CQuaternion::MakeFrom(GetTransformMatrix(true)), pos };
+	prevFrameNeedsUpdate = false;
+}
 
 bool CFeature::Update()
 {

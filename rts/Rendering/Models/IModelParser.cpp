@@ -97,7 +97,7 @@ static void LoadDummyModel(S3DModel& model)
 	model.numPieces = 1;
 	// give it one empty piece
 	model.AddPiece(g3DOParser.AllocPiece());
-	model.FlattenPieceTree(model.GetRootPiece()); //useless except for setting up matAlloc
+	model.FlattenPieceTree(model.GetRootPiece()); //useless except for setting up traAlloc
 	model.GetRootPiece()->SetCollisionVolume(CollisionVolume('b', 'z', -UpVector, ZeroVector));
 	model.loadStatus = S3DModel::LoadStatus::LOADED;
 }
