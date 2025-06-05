@@ -28,8 +28,10 @@ public:
 
 	void DisableCurrentMode() override;
 	void SetMode(const std::string& name) override;
+	bool HasMode(const std::string& name) const override;
 	void ToggleMode(const std::string& name) override;
 	const std::string& GetMode() const override;
+	const std::vector<std::string> GetModes() const override;
 
 	GLuint GetCurrentInfoTexture() const override;
 	int2 GetCurrentInfoTextureSize() const override;
@@ -66,8 +68,10 @@ public:
 
 	void DisableCurrentMode() override {}
 	void SetMode(const std::string& name) override {}
+	bool HasMode(const std::string& name) const override { return false; }
 	void ToggleMode(const std::string& name) override {}
 	const std::string& GetMode() const override { static const std::string modeMock = ""; return modeMock; }
+	const std::vector<std::string> GetModes() const override { return std::vector<std::string>(); };
 
 	GLuint GetCurrentInfoTexture() const override { return 0; }
 	int2 GetCurrentInfoTextureSize() const override { return int2{ 1, 1 }; }
