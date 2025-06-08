@@ -289,6 +289,9 @@ void CUnitHandler::DeleteUnit(CUnit* delUnit)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(delUnit->isDead);
+
+	spring::VectorErase(unitsJustAdded, delUnit);
+
 	// we want to call RenderUnitDestroyed while the unit is still valid
 	eventHandler.RenderUnitDestroyed(delUnit);
 

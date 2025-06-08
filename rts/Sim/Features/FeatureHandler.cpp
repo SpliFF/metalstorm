@@ -253,6 +253,8 @@ bool CFeatureHandler::UpdateFeature(CFeature* feature)
 	if (feature->deleteMe) {
 		Sim::registry.destroy(feature->entityReference);
 
+		spring::VectorErase(featuresJustAdded, feature);
+
 		eventHandler.RenderFeatureDestroyed(feature);
 		eventHandler.FeatureDestroyed(feature);
 
