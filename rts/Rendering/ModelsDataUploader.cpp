@@ -45,6 +45,11 @@ namespace Impl {
 	{
 		auto& ul = memStorage.GetUpdateList();
 
+		if (!ssbo || !ssbo->IsValid()) {
+			ul.ResetNeedUpdateAll();
+			return;
+		}
+
 		//resize handling
 		const uint32_t elemCount = uploader.GetElemsCount();
 		const uint32_t storageElemCount = memStorage.GetSize();
