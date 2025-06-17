@@ -698,8 +698,6 @@ bool LuaConstGL::PushEntries(lua_State* L)
 	/*** @field GL.STENCIL_ATTACHMENT_EXT integer */
 	PUSH_GL(STENCIL_ATTACHMENT_EXT);
 
-	return true;
-
 	/******************************************************************************
 	 * OpenGL Object Types
 	 * @section objecttypes
@@ -725,6 +723,8 @@ bool LuaConstGL::PushEntries(lua_State* L)
 	PUSH_GL(FRAMEBUFFER);
 
 	return true;
+
+#undef PUSH_GL
 }
 
 
