@@ -3112,6 +3112,8 @@ int LuaUnsyncedCtrl::SetNanoProjectileParams(lua_State* L)
 ******************************************************************************/
 
 
+static constexpr const char* ConfigReadOnlyAdjectives[] = { "read-only", "deprecated" };
+
 /***
  *
  * @function Spring.SetConfigInt
@@ -3126,7 +3128,8 @@ int LuaUnsyncedCtrl::SetConfigInt(lua_State* L)
 
 	// don't allow to change a read-only variable
 	if (configHandler->IsReadOnly(key)) {
-		LOG_L(L_ERROR, "[%s] key \"%s\" is read-only", __func__, key.c_str());
+		const auto deprecated = configHandler->IsDeprecated(key);
+		LOG_L(L_ERROR, "[%s] key \"%s\" is %s", __func__, key.c_str(), ConfigReadOnlyAdjectives[deprecated]);
 		return 0;
 	}
 
@@ -3153,7 +3156,8 @@ int LuaUnsyncedCtrl::SetConfigFloat(lua_State* L)
 	const std::string& key = luaL_checkstring(L, 1);
 
 	if (configHandler->IsReadOnly(key)) {
-		LOG_L(L_ERROR, "[%s] key \"%s\" is read-only", __func__, key.c_str());
+		const auto deprecated = configHandler->IsDeprecated(key);
+		LOG_L(L_ERROR, "[%s] key \"%s\" is %s", __func__, key.c_str(), ConfigReadOnlyAdjectives[deprecated]);
 		return 0;
 	}
 
@@ -3177,7 +3181,8 @@ int LuaUnsyncedCtrl::SetConfigString(lua_State* L)
 	const std::string& val = luaL_checkstring(L, 2);
 
 	if (configHandler->IsReadOnly(key)) {
-		LOG_L(L_ERROR, "[%s] key \"%s\" is read-only", __func__, key.c_str());
+		const auto deprecated = configHandler->IsDeprecated(key);
+		LOG_L(L_ERROR, "[%s] key \"%s\" is %s", __func__, key.c_str(), ConfigReadOnlyAdjectives[deprecated]);
 		return 0;
 	}
 
