@@ -479,6 +479,8 @@ bool LuaConstGL::PushEntries(lua_State* L)
 	PUSH_GL(TEXTURE_1D);
 	/*** @field GL.TEXTURE_2D integer */
 	PUSH_GL(TEXTURE_2D);
+	/*** @field GL.TEXTURE_2D_ARRAY integer */
+	PUSH_GL(TEXTURE_2D_ARRAY);
 	/*** @field GL.TEXTURE_3D integer */
 	PUSH_GL(TEXTURE_3D);
 	/*** @field GL.TEXTURE_CUBE_MAP integer */
