@@ -4774,10 +4774,10 @@ int LuaOpenGL::BindImageTexture(lua_State* L)
 	++argNum;
 	//layer
 	GLint layer = 0;
-	GLboolean layered = GL_FALSE;
+	GLboolean layered = GL_TRUE;
 	if (!lua_isnil(L, argNum)) {
 		layer = luaL_optnumber(L, argNum, 0);
-		layered = GL_TRUE;
+		layered = GL_FALSE;
 	}
 
 	++argNum;
