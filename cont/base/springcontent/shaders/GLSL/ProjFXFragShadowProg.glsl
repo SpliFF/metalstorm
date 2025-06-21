@@ -29,7 +29,8 @@ void main() {
 	
 	color.rgb = mix(vec3(dot(color.rgb, LUMA)), color.rgb, shadowColorMode);
 
-	if (AlphaDiscard(color.a))
+	float l = dot(color.rgb, LUMA);
+	if (AlphaDiscard(l))
 		discard;
 
 	// use "multiply" blending R = S * D, but it needs to account for alpha too

@@ -42,6 +42,8 @@ bool AlphaDiscard(float a) {
 	return ((alphaTestGT + alphaTestLT + alphaCtrl.w) == 0.0);
 }
 
+const vec3 LUMA = vec3(0.299, 0.587, 0.114);
+
 void main() {
 	vec4 c0 = texture(atlasTex, vUV.xy);
 	vec4 c1 = texture(atlasTex, vUV.zw);
@@ -64,6 +66,7 @@ void main() {
 	}
 	#endif
 
-	if (AlphaDiscard(fragColor.a))
+	float l = dot(color.rgb, LUMA);
+	if (AlphaDiscard(l))
 		discard;
 }
