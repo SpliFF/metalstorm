@@ -91,14 +91,15 @@ namespace Impl {
 						});
 						seenNormal = true;
 					} break;
+					// note the UV.y is inverted!!!
 					case hashString("TEXCOORD_0"): {
 						fastgltf::iterateAccessorWithIndex<fastgltf::math::fvec2>(asset, accessor, [&](const auto& val, std::size_t idx) {
-							verts[prevVertSize + idx].texCoords[0] = float2(val.x(), val.y());
+							verts[prevVertSize + idx].texCoords[0] = float2(val.x(), 1.0f - val.y());
 						});
 					} break;
 					case hashString("TEXCOORD_1"): {
 						fastgltf::iterateAccessorWithIndex<fastgltf::math::fvec2>(asset, accessor, [&](const auto& val, std::size_t idx) {
-							verts[prevVertSize + idx].texCoords[1] = float2(val.x(), val.y());
+							verts[prevVertSize + idx].texCoords[1] = float2(val.x(), 1.0f - val.y());
 						});
 						seenTex2 = true;
 					} break;
@@ -331,27 +332,6 @@ namespace Impl {
 
 		return transforms;
 	}
-
-	void FlipCoordSystemHandedness(S3DModel& model) {
-		for (auto* piece : model.pieceObjects) {
-			for (auto& vert : piece->GetVerticesVec()) {
-				vert.pos.x = -vert.pos.x;
-				// the math below is questionable
-				vert.normal.x = -vert.normal.x;
-				vert.sTangent.x = -vert.sTangent.x;
-				vert.tTangent.y = -vert.tTangent.y;
-				vert.tTangent.z = -vert.tTangent.z;
-			}
-
-			for (size_t i = 0, N = piece->GetIndicesVec().size(); i < N; i += 3) {
-				auto& indVec = piece->GetIndicesVec();
-				std::swap(
-					indVec[i + 0],
-					indVec[i + 2]
-				);
-			}
-		}
-	}
 }
 
 void CGLTFParser::Load(S3DModel& model, const std::string& modelFilePath)
@@ -459,7 +439,10 @@ void CGLTFParser::Load(S3DModel& model, const std::string& modelFilePath)
 	model.mins = DEF_MIN_SIZE;
 	model.maxs = DEF_MAX_SIZE;
 
-	const auto initTransform = Transform{};
+	// GLTF model MUST be exported with Z axis UP. We will rotate it here by ourselves
+	const auto initTransform = (optionalModelParams.s3oCompat.value_or(false)) ?
+		Transform(CQuaternion(0, -math::HALFSQRT2, -math::HALFSQRT2, 0)):
+		Transform(CQuaternion( math::HALFSQRT2, 0, 0, -math::HALFSQRT2));
 
 	const auto defaultSceneIdx = asset.defaultScene.value_or(0);
 
@@ -527,9 +510,6 @@ void CGLTFParser::Load(S3DModel& model, const std::string& modelFilePath)
 		else
 			Skinning::ReparentMeshesTrianglesToBones(&model, allSkinnedMeshes);
 	}
-
-	if (optionalModelParams.s3oCompat.value_or(false))
-		Impl::FlipCoordSystemHandedness(model);
 
 	// will also calculate pieces / model bounding box
 	ModelUtils::ApplyModelProperties(&model, optionalModelParams);
@@ -615,7 +595,6 @@ GLTFPiece* CGLTFParser::LoadPiece(S3DModel* model, GLTFPiece* parentPiece, const
 	piece->SetBakedTransform(bakedTransform); // bakedRotAngles are not read or supported for GLTF
 	piece->offset = pieceTransform.t;
 	piece->scale = pieceTransform.s;
-	piece->goffset = piece->offset + ((parentPiece != nullptr) ? parentPiece->goffset : ZeroVector);
 
 	for (const auto childNodeIndex : node.children) {
 		auto* childPiece = LoadPiece(model, piece, asset, childNodeIndex);
