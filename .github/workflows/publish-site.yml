@@ -39,7 +39,7 @@ jobs:
           path: rts/Lua/library/
       - name: Install emmylua_doc_cli
         run: |
-          cargo install emmylua_doc_cli --version "${EMMYLUA_CLI_VERSION}" --locket
+          cargo install emmylua_doc_cli --version "${EMMYLUA_CLI_VERSION}" --locked
       - name: Generate docs using emmylua_doc_cli
         run: |
           emmylua_doc_cli \
