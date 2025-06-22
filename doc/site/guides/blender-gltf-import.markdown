@@ -50,7 +50,7 @@ Your model inside Blender SHOULD be positioned Z-up. Effects of other positionin
 
 ![image]({{ site.baseurl }}/assets/guides/blender-gltf-1.png)
 
-Before you export the model it might be convinient to define the **Scene**'s custom properties that are respected by the Recoil loader
+Before you export the model it might be convenient to define the **Scene**'s custom properties that are respected by the Recoil loader
 
 ![image]({{ site.baseurl }}/assets/guides/blender-gltf-1b.png)
 
