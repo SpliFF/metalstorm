@@ -82,30 +82,25 @@ If both the custom Scene attributes in the GLTF file and the Lua file are presen
 ### Export step list
 
 1. Go to  File --> Export --> glTF 2.0.
-
+<br>
 ![image]({{ site.baseurl }}/assets/guides/blender-gltf-2.png)
-
 2. Select `binary glTF format (.glb)` as the file format. Make sure to include `Custom properties` if you chose to define them.
 *`.gltf` (text) format is nice for debugging, the engine might load it, but it's never been tested any thoroughly.*
-
+<br>
 ![image]({{ site.baseurl }}/assets/guides/blender-gltf-3.png)
-
 3. You MUST make sure to unclick `+Y up`.
-
+<br>
 ![image]({{ site.baseurl }}/assets/guides/blender-gltf-4.png)
-
 4. Make sure to export `UVs`, `Normals`, `Tangents`.
-
+<br>
 ![image]({{ site.baseurl }}/assets/guides/blender-gltf-5.png)
-
 5. The rest of the settings are listed on the screenshots below.
-
+<br>
 ![image]({{ site.baseurl }}/assets/guides/blender-gltf-6.png)
-
+<br>
 ![image]({{ site.baseurl }}/assets/guides/blender-gltf-7.png)
-
 6. Finally choose the folder and filename and press `Export glTF 2.0` button.
-
+<br>
 ![image]({{ site.baseurl }}/assets/guides/blender-gltf-8.png)
 
 ## Load the GLTF model in Recoil
