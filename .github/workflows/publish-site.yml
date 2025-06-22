@@ -35,10 +35,11 @@ jobs:
         with:
           name: ${{github.run_id}}-library
           path: rts/Lua/library/
-      - uses: taiki-e/install-action@v2
+      - name: Install emmylua_doc_cli
+        uses: taiki-e/cache-cargo-install-action@v2
         with:
           tool: emmylua_doc_cli@0.8.1
-      - name: Generate docs using emmylua_doc_cli
+      - name: Generate Lua docs
         run: |
           emmylua_doc_cli \
             -i rts/Lua/library \
