@@ -172,7 +172,8 @@ namespace Impl {
 		PieceObject* piece,
 		const S3DModel* model,
 		const aiNode* pieceNode,
-		const LuaTable& pieceTable
+		const LuaTable& pieceTable,
+		const CQuaternion* optRotation
 	) {
 		RECOIL_DETAILED_TRACY_ZONE;
 		aiVector3D aiScaleVec;
@@ -239,8 +240,11 @@ namespace Impl {
 		// and <scales> so the baked part reduces to R
 		//
 		// note: for all non-AssImp models this is identity!
+		auto Quat = CQuaternion(aiRotateQuat.x, aiRotateQuat.y, aiRotateQuat.z, aiRotateQuat.w);
+		if (optRotation)
+			Quat = (*optRotation) * Quat;
 
-		Transform bakedTransform(CQuaternion::FromEulerYPRNeg(-bakedRotAngles) * CQuaternion(aiRotateQuat.x, aiRotateQuat.y, aiRotateQuat.z, aiRotateQuat.w), ZeroVector, 1.0f);
+		Transform bakedTransform(CQuaternion::FromEulerYPRNeg(-bakedRotAngles) * Quat, ZeroVector, 1.0f);
 		piece->SetBakedTransform(bakedTransform);
 	}
 
@@ -579,7 +583,11 @@ void CAssParser::Load(S3DModel& model, const std::string& modelFilePath)
 	FindTextures(&model, scene, modelTable, modelPath, modelName);
 	LOG_SL(LOG_SECTION_MODEL, L_INFO, "Loading textures. Tex1: '%s' Tex2: '%s'", model.texs[0].c_str(), model.texs[1].c_str());
 
-	textureHandlerS3O.PreloadTexture(&model, modelTable.GetBool("fliptextures", true), modelTable.GetBool("invertteamcolor", true));
+	textureHandlerS3O.PreloadTexture(
+		&model,
+		modelTable.GetBool("fliptextures", true),   // "true" is the incorrect default, but has to be retained to be compatible
+		modelTable.GetBool("invertteamcolor", true) // "true" is the incorrect default, but has to be retained to be compatible
+	);
 
 	// Check if bones exist
 	const auto boneNames = Impl::GetBoneNames(scene);
@@ -587,7 +595,14 @@ void CAssParser::Load(S3DModel& model, const std::string& modelFilePath)
 
 	// Load all pieces in the model
 	LOG_SL(LOG_SECTION_MODEL, L_INFO, "Loading pieces from root node '%s'", scene->mRootNode->mName.data);
-	LoadPiece(&model, scene->mRootNode, scene, modelTable, meshNames, pieceMap, parentMap);
+
+	if (modelTable.GetBool("s3ocompat", false)) {
+		const auto rootPieceRot = CQuaternion(0, 1, 0, 0); // rotate 180 around Y
+		LoadPiece(&model, scene->mRootNode, scene, modelTable, meshNames, pieceMap, parentMap, &rootPieceRot);
+	} else {
+		LoadPiece(&model, scene->mRootNode, scene, modelTable, meshNames, pieceMap, parentMap);
+	}
+
 
 	// Update piece hierarchy based on metadata
 	BuildPieceHierarchy(&model, pieceMap, parentMap);
@@ -719,20 +734,22 @@ void CAssParser::LoadPieceTransformations(
 	SAssPiece* piece,
 	const S3DModel* model,
 	const aiNode* pieceNode,
-	const LuaTable& pieceTable
+	const LuaTable& pieceTable,
+	const CQuaternion* optRotation
 ) {
 	RECOIL_DETAILED_TRACY_ZONE;
-	Impl::LoadPieceTransformations<SAssPiece>(piece, model, pieceNode, pieceTable);
+	Impl::LoadPieceTransformations<SAssPiece>(piece, model, pieceNode, pieceTable, optRotation);
 }
 
 void CAssParser::LoadPieceTransformations(
 	SPseudoAssPiece* piece,
 	const S3DModel* model,
 	const aiNode* pieceNode,
-	const LuaTable& pieceTable
+	const LuaTable& pieceTable,
+	const CQuaternion* optRotation
 ) {
 	RECOIL_DETAILED_TRACY_ZONE;
-	Impl::LoadPieceTransformations<SPseudoAssPiece>(piece, model, pieceNode, pieceTable);
+	Impl::LoadPieceTransformations<SPseudoAssPiece>(piece, model, pieceNode, pieceTable, optRotation);
 }
 
 void CAssParser::SetPieceName(
@@ -967,7 +984,8 @@ SAssPiece* CAssParser::LoadPiece(
 	const LuaTable& modelTable,
 	const std::vector<std::string>& skipList,
 	ModelPieceMap& pieceMap,
-	ParentNameMap& parentMap
+	ParentNameMap& parentMap,
+	const CQuaternion* optRotation
 ) {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (std::find(skipList.begin(), skipList.end(), std::string(pieceNode->mName.data)) != skipList.end())
@@ -994,8 +1012,7 @@ SAssPiece* CAssParser::LoadPiece(
 	if (pieceTable.IsValid())
 		LOG_SL(LOG_SECTION_PIECE, L_INFO, "Found metadata for piece '%s'", piece->name.c_str());
 
-
-	LoadPieceTransformations(piece, model, pieceNode, pieceTable);
+	LoadPieceTransformations(piece, model, pieceNode, pieceTable, optRotation);
 	LoadPieceGeometry(piece, model, pieceNode, scene);
 	SetPieceParentName(piece, model, pieceNode, pieceTable, parentMap);
 

@@ -66,7 +66,11 @@ void CS3OParser::Load(S3DModel& model, const std::string& name)
 	model.mins = DEF_MIN_SIZE;
 	model.maxs = DEF_MAX_SIZE;
 
-	textureHandlerS3O.PreloadTexture(&model);
+	textureHandlerS3O.PreloadTexture(
+		&model,
+		false,
+		false
+	);
 
 	model.FlattenPieceTree(LoadPiece(&model, nullptr, fileBuf, header.rootPiece));
 

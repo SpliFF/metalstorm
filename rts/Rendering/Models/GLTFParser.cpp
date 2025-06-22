@@ -441,8 +441,8 @@ void CGLTFParser::Load(S3DModel& model, const std::string& modelFilePath)
 
 	// GLTF model MUST be exported with Z axis UP. We will rotate it here by ourselves
 	const auto initTransform = (optionalModelParams.s3oCompat.value_or(false)) ?
-		Transform(CQuaternion(0, -math::HALFSQRT2, -math::HALFSQRT2, 0)):
-		Transform(CQuaternion( math::HALFSQRT2, 0, 0, -math::HALFSQRT2));
+		Transform(CQuaternion(0, -math::HALFSQRT2, -math::HALFSQRT2, 0)): // Rotate so xyz ==> (-x,z, y)
+		Transform(CQuaternion( math::HALFSQRT2, 0, 0, -math::HALFSQRT2)); // Rotate so xyz ==> ( x,z,-y)
 
 	const auto defaultSceneIdx = asset.defaultScene.value_or(0);
 

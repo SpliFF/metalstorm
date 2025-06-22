@@ -16,6 +16,7 @@ struct aiNode;
 struct aiScene;
 class LuaTable;
 struct SPseudoAssPiece;
+class CQuaternion;
 
 struct SAssPiece: public S3DModelPiece
 {
@@ -72,13 +73,15 @@ private:
 		SAssPiece* piece,
 		const S3DModel* model,
 		const aiNode* pieceNode,
-		const LuaTable& pieceTable
+		const LuaTable& pieceTable,
+		const CQuaternion* optRotation = nullptr
 	);
 	static void LoadPieceTransformations(
 		SPseudoAssPiece* piece,
 		const S3DModel* model,
 		const aiNode* pieceNode,
-		const LuaTable& pieceTable
+		const LuaTable& pieceTable,
+		const CQuaternion* optRotation = nullptr
 	);
 	static void LoadPieceGeometry(
 		SAssPiece* piece,
@@ -95,7 +98,8 @@ private:
 		const LuaTable& modelTable,
 		const std::vector<std::string>& skipList,
 		ModelPieceMap& pieceMap,
-		ParentNameMap& parentMap
+		ParentNameMap& parentMap,
+		const CQuaternion* optRotation = nullptr
 	);
 
 	static void BuildPieceHierarchy(S3DModel* model, ModelPieceMap& pieceMap, const ParentNameMap& parentMap);
