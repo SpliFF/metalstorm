@@ -56,6 +56,7 @@ void CFeatureHandler::Kill() {
 	featureMemPool.clear();
 
 	activeFeatureIDs.clear();
+	featuresJustAdded.clear();
 	deletedFeatureIDs.clear();
 	features.clear();
 	updateFeatures.clear();
@@ -116,7 +117,6 @@ CFeature* CFeatureHandler::LoadFeature(const FeatureLoadParams& params) {
 
 	// calls back into AddFeature
 	feature->Initialize(params);
-	featuresJustAdded.emplace_back(feature);
 	return feature;
 }
 
@@ -130,6 +130,7 @@ void CFeatureHandler::InsertActiveFeature(CFeature* feature)
 	assert(features[feature->id] == nullptr);
 
 	activeFeatureIDs.insert(feature->id);
+	featuresJustAdded.emplace_back(feature);
 	features[feature->id] = feature;
 }
 
@@ -253,13 +254,12 @@ bool CFeatureHandler::UpdateFeature(CFeature* feature)
 	if (feature->deleteMe) {
 		Sim::registry.destroy(feature->entityReference);
 
-		spring::VectorErase(featuresJustAdded, feature);
-
 		eventHandler.RenderFeatureDestroyed(feature);
 		eventHandler.FeatureDestroyed(feature);
 
 		deletedFeatureIDs.push_back(feature->id);
 		activeFeatureIDs.erase(feature->id);
+		spring::VectorErase(featuresJustAdded, feature);
 
 		features[feature->id] = nullptr;
 
