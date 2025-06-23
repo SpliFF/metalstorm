@@ -11,10 +11,12 @@
 #include "Sim/Features/Feature.h"
 #include "Sim/Projectiles/Projectile.h"
 
+struct CExplosionParams;
 class CWeapon;
 struct Command;
 struct BuildInfo;
 class LuaMaterial;
+struct WeaponDef;
 
 class CEventHandler
 {
@@ -135,7 +137,7 @@ class CEventHandler
 		void ProjectileCreated(const CProjectile* proj, int allyTeam);
 		void ProjectileDestroyed(const CProjectile* proj, int allyTeam);
 
-		bool Explosion(int weaponDefID, int projectileID, const float3& pos, const CUnit* owner);
+		bool Explosion(int weaponDefID, const WeaponDef* weaponDef, const CExplosionParams& params);
 
 		void StockpileChanged(const CUnit* unit,
 		                      const CWeapon* weapon, int oldCount);
@@ -702,7 +704,7 @@ inline void CEventHandler::UnsyncedHeightMapUpdate(const SRectangle& rect)
 
 
 
-inline bool CEventHandler::Explosion(int weaponDefID, int projectileID, const float3& pos, const CUnit* owner)
+inline bool CEventHandler::Explosion(int weaponDefID, const WeaponDef* weaponDef, const CExplosionParams& params)
 {
 	auto& clients = listExplosion;
 
@@ -712,7 +714,7 @@ inline bool CEventHandler::Explosion(int weaponDefID, int projectileID, const fl
 		// discard return-value from clients lacking full-read access
 		// (redundant for synced gadgets; watchWeaponDefs is checked)
 		// NOTE: the call-in may remove itself from the client list
-		if (!ec->Explosion(weaponDefID, projectileID, pos, owner) || !ec->GetFullRead()) {
+		if (!ec->Explosion(weaponDefID, weaponDef, params) || !ec->GetFullRead()) {
 			i += (i < clients.size() && ec == clients[i]);
 			continue;
 		}

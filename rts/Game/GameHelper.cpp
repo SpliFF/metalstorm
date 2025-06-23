@@ -267,7 +267,7 @@ void CGameHelper::Explosion(const CExplosionParams& params) {
 	const float altitude = (params.pos).y - realHeight;
 
 	// NOTE: event triggers before damage is applied to objects
-	const bool noGfx = eventHandler.Explosion(weaponDefID, params.projectileID, params.pos, params.owner);
+	const bool noGfx = eventHandler.Explosion(weaponDefID, weaponDef, params);
 
 	if (luaUI != nullptr && weaponDef != nullptr)
 		luaUI->ShockFront(params.pos, weaponDef->cameraShake, damageAOE);

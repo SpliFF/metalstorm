@@ -20,6 +20,7 @@
 using std::string;
 using std::vector;
 
+struct CExplosionParams;
 class CSolidObject;
 class CUnit;
 class CWeapon;
@@ -33,6 +34,7 @@ struct UnitDef;
 struct BuildInfo;
 struct FeatureDef;
 class LuaMaterial;
+struct WeaponDef;
 
 #ifndef zipFile
 	// might be defined through zip.h already
@@ -200,7 +202,7 @@ class CEventClient
 		virtual void StockpileChanged(const CUnit* unit,
 		                              const CWeapon* weapon, int oldCount) {}
 
-		virtual bool Explosion(int weaponID, int projectileID, const float3& pos, const CUnit* owner) { return false; }
+		virtual bool Explosion(int weaponID, const WeaponDef* weaponDef, const CExplosionParams& params) { return false; }
 
 
 		virtual bool CommandFallback(const CUnit* unit, const Command& cmd) { return false; }

@@ -17,6 +17,8 @@ class LuaTable;
 class float3;
 class CUnit;
 class IExplosionGenerator;
+struct WeaponDef;
+struct CExplosionParams;
 
 struct SExpGenSpawnableMemberInfo;
 
@@ -57,6 +59,8 @@ public:
 
 	IExplosionGenerator* LoadGenerator(const char* tag, const char* pre = "");
 	IExplosionGenerator* GetGenerator(unsigned int expGenID);
+
+	bool PredictExplosionVisible(const WeaponDef* weaponDef, const CExplosionParams& params, int allyTeamID);
 
 	bool GenExplosion(
 		unsigned int expGenID,
@@ -169,6 +173,8 @@ public:
 	static unsigned int GetFlagsFromTable(const LuaTable& table);
 	static unsigned int GetFlagsFromHeight(float height, float groundHeight);
 
+	unsigned int CommonVisibleFlags(unsigned int visibilityFlags) const;
+
 	/// @throws content_error/runtime_error on errors
 	bool Load(CExplosionGeneratorHandler* handler, const char* tag) override;
 	bool Reload(CExplosionGeneratorHandler* handler, const char* tag) override;
@@ -193,6 +199,7 @@ public:
 		CEG_SPWF_UNDERWATER = 1 << 5,  // TODO: UNDERVOIDWATER?
 		CEG_SPWF_UNIT       = 1 << 6,  // only execute when the explosion hits a unit
 		CEG_SPWF_NO_UNIT    = 1 << 7,  // only execute when the explosion doesn't hit a unit (environment)
+		CEG_SPWF_ALWAYS_VISIBLE = 1 << 31,
 	};
 
 	enum {

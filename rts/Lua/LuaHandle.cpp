@@ -18,10 +18,12 @@
 #include "LuaUtils.h"
 #include "LuaZip.h"
 #include "Game/Game.h"
+#include "Game/GameHelper.h"
 #include "Game/Action.h"
 #include "Game/GlobalUnsynced.h"
 #include "Game/Players/Player.h"
 #include "Game/Players/PlayerHandler.h"
+#include "Sim/Misc/LosHandler.h"
 #include "Net/Protocol/NetProtocol.h"
 #include "Game/UI/KeySet.h"
 #include "Game/UI/MiniMap.h"
@@ -29,6 +31,7 @@
 #include "Rml/Backends/RmlUi_Backend.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/TeamHandler.h"
+#include "Sim/Projectiles/ExplosionGenerator.h"
 #include "Sim/Projectiles/Projectile.h"
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectile.h"
 #include "Sim/Features/FeatureDef.h"
@@ -2210,6 +2213,16 @@ void CLuaHandle::ProjectileDestroyed(const CProjectile* p)
 
 /******************************************************************************/
 
+/***
+ * Helper to get Explosion visibility.
+ */
+
+bool CLuaHandle::IsExplosionVisible(const WeaponDef* weaponDef, const CExplosionParams& params)
+{
+	const int allyTeamID = CLuaHandle::GetHandleReadAllyTeam(L);
+	return explGenHandler.PredictExplosionVisible(weaponDef, params, allyTeamID);
+}
+
 /*** Called when an explosion occurs.
  *
  * @function Callins:Explosion
@@ -2228,7 +2241,7 @@ void CLuaHandle::ProjectileDestroyed(const CProjectile* p)
  * @see Script.SetWatchExplosion
  * @see Script.SetWatchWeapon
  */
-bool CLuaHandle::Explosion(int weaponDefID, int projectileID, const float3& pos, const CUnit* owner)
+bool CLuaHandle::Explosion(int weaponDefID, const WeaponDef* weaponDef, const CExplosionParams& params)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// piece-projectile collision (*ALL* other
@@ -2236,10 +2249,15 @@ bool CLuaHandle::Explosion(int weaponDefID, int projectileID, const float3& pos,
 	if (weaponDefID < 0)
 		return false;
 
-	// if empty, we are not a LuaHandleSynced
+	// if empty, we are a handle with no explosion watch support.
 	if (watchExplosionDefs.empty())
 		return false;
 	if (!watchExplosionDefs[weaponDefID])
+		return false;
+
+	bool synced = GetHandleSynced(L);
+
+	if (!synced && !IsExplosionVisible(weaponDef, params))
 		return false;
 
 	LUA_CALL_IN_CHECK(L, false);
@@ -2250,15 +2268,15 @@ bool CLuaHandle::Explosion(int weaponDefID, int projectileID, const float3& pos,
 		return false;
 
 	lua_pushnumber(L, weaponDefID);
-	lua_pushnumber(L, pos.x);
-	lua_pushnumber(L, pos.y);
-	lua_pushnumber(L, pos.z);
-	if (owner != nullptr) {
-		lua_pushnumber(L, owner->id);
+	lua_pushnumber(L, params.pos.x);
+	lua_pushnumber(L, params.pos.y);
+	lua_pushnumber(L, params.pos.z);
+	if (params.owner != nullptr) {
+		lua_pushnumber(L, params.owner->id);
 	} else {
 		lua_pushnil(L); // for backward compatibility
 	}
-	lua_pushnumber(L, projectileID);
+	lua_pushnumber(L, params.projectileID);
 
 	// call the routine
 	if (!RunCallIn(L, cmdStr, 6, 1))
@@ -2267,7 +2285,7 @@ bool CLuaHandle::Explosion(int weaponDefID, int projectileID, const float3& pos,
 	// get the results
 	const bool retval = luaL_optboolean(L, -1, false);
 	lua_pop(L, 1);
-	return retval;
+	return synced && retval;
 }
 
 
