@@ -9,8 +9,11 @@
 #include "Rendering/GL/myGL.h"
 
 
-/***
- * OpenGL Constants
+/*** Constants for OpenGL API
+ *
+ * For callouts related to OpenGL usage in Recoil, see `gl`.
+ *
+ * @see gl
  * @enum GL
  */
 

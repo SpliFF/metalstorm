@@ -83,8 +83,11 @@
 CONFIG(bool, LuaShaders).defaultValue(true).headlessValue(false).safemodeValue(false);
 CONFIG(int, DeprecatedGLWarnLevel).defaultValue(0).headlessValue(0).safemodeValue(0);
 
-/***
- * Lua OpenGL API
+/*** Callouts for OpenGL API
+ *
+ * Only setters and getters for OpenGL usage in Recoil, see `GL` for constants.
+ *
+ * @see GL
  * @table gl
  */
 
