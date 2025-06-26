@@ -5087,24 +5087,6 @@ int LuaSyncedCtrl::SetFeaturePieceVisible(lua_State* L)
 ******************************************************************************/
 
 /***
- * @class ProjectileParams
- * @field pos float3
- * @field speed float3
- * @field spread float3
- * @field error float3
- * @field owner integer
- * @field team integer
- * @field ttl number
- * @field gravity number
- * @field tracking number
- * @field maxRange number
- * @field startAlpha number
- * @field endAlpha number
- * @field model string
- * @field cegTag string
- */
-
-/***
  * @function Spring.SetProjectileAlwaysVisible
  * @param projectileID integer
  * @param alwaysVisible boolean
@@ -5422,7 +5404,10 @@ int LuaSyncedCtrl::SetProjectileSpinSpeed(lua_State* L) { return 0; } // FIXME: 
 int LuaSyncedCtrl::SetProjectileSpinVec(lua_State* L) { return 0; } // FIXME: DELETE ME
 
 
-/***
+/*** Set piece projectile params
+ *
+ * Non passed or nil args don't set params.
+ *
  * @function Spring.SetPieceProjectileParams
  * @param projectileID integer
  * @param explosionFlags number?
@@ -5431,7 +5416,6 @@ int LuaSyncedCtrl::SetProjectileSpinVec(lua_State* L) { return 0; } // FIXME: DE
  * @param spinVectorX number?
  * @param spinVectorY number?
  * @param spinVectorZ number?
- * @return nil
  */
 int LuaSyncedCtrl::SetPieceProjectileParams(lua_State* L)
 {
@@ -6990,6 +6974,24 @@ int LuaSyncedCtrl::SetUnitLoadingTransport(lua_State* L)
 	return 0;
 }
 
+/***
+ * @class ProjectileParams
+ * @field pos xyz
+ * @field speed xyz
+ * @field spread xyz
+ * @field error xyz
+ * @field end xyz
+ * @field owner integer
+ * @field team integer
+ * @field ttl number
+ * @field gravity number
+ * @field tracking number
+ * @field maxRange number
+ * @field startAlpha number
+ * @field endAlpha number
+ * @field model string
+ * @field cegTag string
+ */
 
 /***
  *
