@@ -1244,6 +1244,10 @@ void CFontTexture::LoadGlyph(std::shared_ptr<FontFace>& f, char32_t ch, unsigned
 
 	int width  = slot->bitmap.width;
 	int height = slot->bitmap.rows;
+
+	if (width <= 0 || height <= 0)
+		return;
+
 	const int olSize = 2 * outlineSize;
 	const int channels = slot->bitmap.pixel_mode == FT_PIXEL_MODE_BGRA ? 4 : 1;
 
