@@ -4726,12 +4726,30 @@ int LuaOpenGL::MultiTexGen(lua_State* L)
 
 /***
  * @function gl.BindImageTexture
+ * 
+ * For format parameters refer to
+ * https://registry.khronos.org/OpenGL-Refpages/gl4/html/glBindImageTexture.xhtml
+ * and
+ * https://beyond-all-reason.github.io/RecoilEngine/lua-api/types/GL#rgba32f
+ * 
+ * Example uses
+ * local my_texture_id = gl.CreateTexture(...)
+ * 
+ * -- bind layer 1 of my_texture_id if it supports layered bindings to image unit 0
+ * gl.BindImageTexture(0, my_texture_id, 0, 1, GL.READ_WRITE, GL.RGBA16F)
+ * 
+ * -- bind all layers of my_texture_id if it supports layered bindings to image unit 0
+ * gl.BindImageTexture(0, my_texture_id, 0, nil, GL.READ_WRITE, GL.RGBA16F)
+ * 
+ * -- unbind any texture attached to image unit 0
+ * gl.BindImageTexture(0, nil, nil, nil, nil, GL.RGBA16F)
+ * 
  * @param unit integer
- * @param texID string?
- * @param level integer?
- * @param layer integer?
- * @param access integer?
- * @param format integer?
+ * @param texID nil | string (nil breaks any existing binding to the image unit)
+ * @param level nil | integer (Default: 0)
+ * @param layer nil | integer (nil binds the entire texture(array/cube), an integer binds a specific layer, ignored by gl if the texture does not support layered bindings)
+ * @param access nil|GL.READ_ONLY|GL.WRITE_ONLY|GL.READ_WRITE (Default: `GL.READ_WRITE`)
+ * @param format integer (Example: GL.RGBA16F)
  */
 int LuaOpenGL::BindImageTexture(lua_State* L)
 {
@@ -4785,7 +4803,7 @@ int LuaOpenGL::BindImageTexture(lua_State* L)
 
 	++argNum;
 	//access
-	GLenum access = luaL_optnumber(L, argNum, 0);
+	GLenum access = luaL_optnumber(L, argNum, GL_READ_WRITE);
 	if (access != GL_READ_ONLY && access != GL_WRITE_ONLY && access != GL_READ_WRITE)
 		luaL_error(L, "%s Invalid access specified %d. The access must be GL_READ_ONLY or GL_WRITE_ONLY or GL_READ_WRITE.", __func__, access);
 
