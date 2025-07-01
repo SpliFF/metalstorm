@@ -25,7 +25,7 @@ jobs:
             rts/Lua
             rts/Rml/SolLua
           path: recoil
-
+      
       # NOTE: This step is duplicated in `publish-site.yml`
       - name: Generate Lua library
         working-directory: recoil

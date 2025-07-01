@@ -1,7 +1,3 @@
-_site
-.sass-cache
-.jekyll-cache
-.jekyll-metadata
-.bundle
-vendor
-/lua-api/
+# lua site generation
+temp
+!content/docs/lua-api/_index

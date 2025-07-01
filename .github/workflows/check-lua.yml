@@ -22,7 +22,7 @@ jobs:
           sparse-checkout: |
             rts/Lua
             rts/Rml/SolLua
-
+      
       - name: Generate Lua library
         run: |
           npm install -g lua-doc-extractor@3

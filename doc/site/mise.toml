@@ -1,0 +1,104 @@
+[tools]
+	hugo = "0.147.9"
+	"aqua:jqlang/jq" = "1.8.0"
+	"aqua:ip7z/7zip" = "24.09"
+	"cargo-binstall" = "latest"
+	"cargo:emmylua_doc_cli" = "0.8.2"
+	python = "3.13.5"
+	# "aqua:gohugoio/hugo" = "0.147.9"
+
+[env]
+	LUA_DOC_EXTRACTOR_VERSION = "3"
+	EMMYLUA_DOC_CLI_VERSION = "0.8.2"
+	REPO_REF = "https://github.com/beyond-all-reason/RecoilEngine/blob/master"
+
+[vars]
+	lua_library_dir = 'rts/Lua/library'
+	lua_doc_gen_dest = 'rts/Lua/library/generated'
+	lua_doc_paths = 'rts/{Lua,Rml/SolLua}/**/*.cpp'
+	site_temp_dir = 'doc/site/temp'
+	latest_release_data = 'data/latest_release.json'
+
+[tasks]
+	[tasks.server]
+	description = "Run the site server locally"
+	run = "hugo server --navigateToChanged"
+
+	[tasks.server_full]
+	depends = ["lua_pages", "binary_pages"]
+	description = "Run the site server locally, with all possible content"
+	run = "hugo server --navigateToChanged"
+
+	[tasks.lua_pages]
+	description = "Generate Lua API Pages"
+	tools."cargo-binstall" = "latest"
+	tools."cargo:emmylua_doc_cli" = "0.8.2"
+	tools.python = "3.13.5"
+	depends = ["lua_library"]
+	dir = "../../"
+	run = [
+		"emmylua_doc_cli -i {{vars.lua_library_dir}} -o {{vars.site_temp_dir}} --override-template doc/site/emmylua-doc-cli-template",
+		"python3 doc/site/scripts/generate_from_meta.py {{vars.site_temp_dir}} doc/site/content/docs/lua-api",
+	]
+
+	[tasks.binary_pages]
+	depends = ["latest_release_data"]
+	description = "Generate Docs from Recoil binary"
+	tools."aqua:jqlang/jq" = "1.8.0"
+	tools."aqua:ip7z/7zip" = "24.09"
+	run = '''
+		download_url=$(jq -r '.assets[] | select(.name | contains("_linux-64-minimal-portable")).browser_download_url' {{vars.latest_release_data}})
+
+		temp_dir=temp/release
+		rm -rf $temp_dir
+		mkdir -p $temp_dir
+		cd $temp_dir
+
+		echo "> downloading latest engine release from $download_url"
+		curl -L $download_url -o engine.7z
+
+		echo "> extracting release binary"
+		7z -y e engine.7z spring
+
+		data_dir="../../data"
+
+		config_file="$data_dir/configs.json"
+		wdefs_file="$data_dir/weapondefs.json"
+		commands_file="$data_dir/unsynced_commands.json"
+		synced_commands_file="$data_dir/synced_commands.json"
+
+		echo "> writing $config_file"
+		rm -f $config_file
+		./spring --list-config-vars | grep -v "^\[t=" > $config_file
+
+		echo "> writing $wdefs_file"
+		rm -f $wdefs_file
+		./spring --list-def-tags | grep -v "^\[t=" > $wdefs_file
+
+		echo "> writing $commands_file"
+		rm -f $commands_file
+		./spring --list-unsynced-commands | grep -v "^\[t=" > $commands_file
+
+		echo "> writing $synced_commands_file"
+		rm -f $synced_commands_file
+		./spring --list-synced-commands | grep -v "^\[t=" > $synced_commands_file
+	'''
+
+
+	[tasks.lua_library]
+	description = "Generate Lua Docs"
+	tools.node = "22.17.0"
+	dir = "../../"
+	run = [
+		"npm install -g lua-doc-extractor@3",
+		"lua-doc-extractor --src \"{{vars.lua_doc_paths}}\" --dest {{vars.lua_doc_gen_dest}} --repo $REPO_REF"
+	]
+
+	[tasks.latest_release_data]
+	description = "Get latest release data"
+	run = [
+		"rm -f temp/latest_release.json",
+		"mkdir -p temp",
+		"curl -s https://api.github.com/repos/beyond-all-reason/RecoilEngine/releases/latest > temp/latest_release.json",
+		"mv temp/latest_release.json {{vars.latest_release_data}}",
+	]
