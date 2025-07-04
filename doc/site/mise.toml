@@ -4,7 +4,6 @@
 	"aqua:ip7z/7zip" = "24.09"
 	"cargo-binstall" = "latest"
 	"cargo:emmylua_doc_cli" = "0.8.2"
-	python = "3.13.5"
 	# "aqua:gohugoio/hugo" = "0.147.9"
 
 [env]
@@ -13,10 +12,13 @@
 	REPO_REF = "https://github.com/beyond-all-reason/RecoilEngine/blob/master"
 
 [vars]
+	site_dir = 'doc/site'
+	site_temp_dir = 'doc/site/temp'
 	lua_library_dir = 'rts/Lua/library'
 	lua_doc_gen_dest = 'rts/Lua/library/generated'
 	lua_doc_paths = 'rts/{Lua,Rml/SolLua}/**/*.cpp'
-	site_temp_dir = 'doc/site/temp'
+	lua_pages_dir = 'doc/site/content/docs/lua-api'
+	emmylua_cli_template = 'doc/site/emmylua-doc-cli-template'
 	latest_release_data = 'data/latest_release.json'
 
 [tasks]
@@ -33,12 +35,18 @@
 	description = "Generate Lua API Pages"
 	tools."cargo-binstall" = "latest"
 	tools."cargo:emmylua_doc_cli" = "0.8.2"
-	tools.python = "3.13.5"
 	depends = ["lua_library"]
 	dir = "../../"
 	run = [
-		"emmylua_doc_cli -i {{vars.lua_library_dir}} -o {{vars.site_temp_dir}} --override-template doc/site/emmylua-doc-cli-template",
-		"python3 doc/site/scripts/generate_from_meta.py {{vars.site_temp_dir}} doc/site/content/docs/lua-api",
+		"emmylua_doc_cli -i {{vars.lua_library_dir}} -o {{vars.lua_pages_dir}} --override-template {{vars.emmylua_cli_template}}",
+		# emmylua_doc_cli does this dumb shit where they hardcode a `docs` dir
+		"mv {{vars.lua_pages_dir}}/docs/index.md {{vars.lua_pages_dir}}/_index.md",
+		"cp -R {{vars.lua_pages_dir}}/docs/* {{vars.lua_pages_dir}}",
+		"rm -rf {{vars.lua_pages_dir}}/docs",
+		# Hugo requires _index.md for root categories
+		"cp {{vars.emmylua_cli_template}}/globals_index.md {{vars.lua_pages_dir}}/globals/_index.md",
+		"cp {{vars.emmylua_cli_template}}/modules_index.md {{vars.lua_pages_dir}}/modules/_index.md",
+		"cp {{vars.emmylua_cli_template}}/types_index.md {{vars.lua_pages_dir}}/types/_index.md"
 	]
 
 	[tasks.binary_pages]
@@ -91,7 +99,7 @@
 	dir = "../../"
 	run = [
 		"npm install -g lua-doc-extractor@3",
-		"lua-doc-extractor --src \"{{vars.lua_doc_paths}}\" --dest {{vars.lua_doc_gen_dest}} --repo $REPO_REF"
+		"lua-doc-extractor --src \"{{vars.lua_doc_paths}}\" --dest {{vars.lua_doc_gen_dest}} --repo $REPO_REF",
 	]
 
 	[tasks.latest_release_data]

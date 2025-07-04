@@ -1,6 +1,7 @@
----
-title: "{{ doc.name }}"
----
++++
+title = "{{ doc.name }}"
++++
+
 ## class {{ doc.name }}
 
 {% if doc.supers %}

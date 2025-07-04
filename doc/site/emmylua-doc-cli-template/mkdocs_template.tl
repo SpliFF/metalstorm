@@ -22,7 +22,7 @@ theme:
     - social-share
     - theme-switcher
 nav:
-  - Home: index.md
+  - Home: _index.md
   {% if types %}
   - Types:
     {% for item in types -%}

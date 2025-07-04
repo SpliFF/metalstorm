@@ -1,6 +1,6 @@
----
-title: {{ doc.name }}
----
++++
+title = "{{ doc.name }}"
++++
 
 ## alias {{ doc.name }}
 ---

@@ -1,6 +1,6 @@
----
-title: {{ doc.name }}
----
++++
+title = "{{ doc.name }}"
++++
 
 ## enum {{ doc.name }}
 ---

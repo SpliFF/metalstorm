@@ -1,3 +1,10 @@
 # lua site generation
-temp
-!content/docs/lua-api/_index
+/temp
+
+# Lua Language Server doc output
+/data/doc.json
+/data/doc.md
+
+# Site building resources
+/content/docs/lua-api
+/public

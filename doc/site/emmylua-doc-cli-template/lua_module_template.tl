@@ -1,6 +1,7 @@
----
-title: {{ doc.name }}
----
++++
+title = "{{ doc.name }}"
++++
+
 # global {{ doc.name }}
 
 {% if doc.property.description %}

@@ -17,9 +17,9 @@ migrating from Spring.
 Rendering fonts now obeys GL color state. This means that sometimes text will
 not be the same color as previously. To get back previous behaviour, you might
 need to add
-[`gl.Color`]({{% ref "docs/lua-api/GL#gl.Color" %}})
+[`gl.Color`]({{% ref "docs/lua-api/globals/GL#gl.Color" %}})
 in front of
-[`gl.Text`]({{% ref "docs/lua-api/GL#gl.Text" %}})
+[`gl.Text`]({{% ref "docs/lua-api/globals/GL#gl.Text" %}})
 calls. Alternatively, you can add inline colour codes (`\255\rrr\ggg\bbb`).
 
 ### Spring.Marker usage
@@ -77,8 +77,10 @@ Instead use the second return value, e.g.:
 ```
 
 ## Stop command on manual share
+
 Manually shared units no longer receive the Stop command.
 Replicate the previous behaviour via the `UnitGiven` callin:
+
 ```lua
 function wupget:UnitGiven(unitID, unitDefID, newTeam)
 	if newTeam == Spring.GetMyTeamID() then -- if doing in unsynced
@@ -90,10 +92,10 @@ end
 ## Defs
 
 - Hovercraft and ships brought out of water no longer forced to be upright.
-To get back previous behaviour, put the `upright = true` tag in all unit defs
-whose move def is of the hovercraft or ship type.
+  To get back previous behaviour, put the `upright = true` tag in all unit defs
+  whose move def is of the hovercraft or ship type.
 - Units with `useFootPrintCollisionVolume` but no `collisionVolumeScales` set
-will now use the footprint volume (previously mistakenly used the model's sphere).
+  will now use the footprint volume (previously mistakenly used the model's sphere).
 
   To keep the old hitvolume, set `useFootPrintCollisionVolume` to false for units
   with no `collisionVolumeScales`. Assuming you apply `lowerkeys` to unit defs,
@@ -106,13 +108,14 @@ will now use the footprint volume (previously mistakenly used the model's sphere
     end
   end
   ```
+
 - Tree feature defs `treetype0` through `treetype16` are now provided by the
-basecontent archive instead of the engine.
+  basecontent archive instead of the engine.
 
   No known games ship their own basecontent and they would know what to do if so.
 
 - The `firestarter` weapon tag no longer capped at 10000 in defs (which
-becomes 100 in Lua WeaponDefs after rescale), now uncapped.
+  becomes 100 in Lua WeaponDefs after rescale), now uncapped.
 
   To get back previous behaviour, put the following in weapon defs
   post-processing:
@@ -126,16 +129,16 @@ becomes 100 in Lua WeaponDefs after rescale), now uncapped.
   ```
 
 - It is heavily recommended to replace `acceleration` and `brakeRate`
-with `maxAcc` and `maxDec` respectively (possibly in post-processing).
-While the old spelling still works the way it always did, at some point
-in the future it will be changed from elmo/frame to elmo/second.
+  with `maxAcc` and `maxDec` respectively (possibly in post-processing).
+  While the old spelling still works the way it always did, at some point
+  in the future it will be changed from elmo/frame to elmo/second.
 
 ## Camera modifiers
 
 The following keyboard modifiers were unhardcoded from engine:
 
 - On spring camera: rotating on the x (pitch) or y (yaw) axis with ALT and
-middle mouse button pressed while moving the cursor.
+  middle mouse button pressed while moving the cursor.
 - Resetting camera settings on ALT pressed and mousewheelscroll down.
 - Rotating on the x axis (pitch) with CTRL pressed and mousewheelscroll.
 
@@ -173,6 +176,7 @@ but there is no concrete timeline for that yet.
 Functions for iterating synced proxy tables: `snext`, `spairs` and `sipairs` have been removed.
 These have been able to be replaced by the regular `next`, `pairs` and `ipairs` for some time
 already (so the change can be done before migrating):
+
 ```diff
  local syncedProxyTable = SYNCED.foo
 -for key, value in spairs(syncedProxyTable) do
@@ -183,25 +187,28 @@ already (so the change can be done before migrating):
 
 - Paletted image files are no longer accepted. Convert your images not to be paletted.
 - The return value from the
-[`UnitUnitCollision`](https://beyond-all-reason.github.io/spring/ldoc/modules/LuaHandle.html#UnitUnitCollision)
-callin is now ignored and there is only one event for each collision.
-There is no way to get back the old behaviour for now,
-but if someone needs it it could be arranged.
+  [`UnitUnitCollision`](https://beyond-all-reason.github.io/spring/ldoc/modules/LuaHandle.html#UnitUnitCollision)
+  callin is now ignored and there is only one event for each collision.
+  There is no way to get back the old behaviour for now,
+  but if someone needs it it could be arranged.
 - Removed the following constants:
+
   - `Platform.glSupport16bitDepthBuffer`
   - `Platform.glSupport24bitDepthBuffer`
   - `Platform.glSupport32bitDepthBuffer`
 
   To get back previous behaviour, replace with
+
   ```lua
   Platform.glSupportDepthBufferBitDepth >= 16 -- or 24, or 32, respectively
   ```
+
 - Removed LOD rendering (2D unit billboards when zoomed out far), including the
-`/distdraw` command and the `UnitLodDist` springsettings entry
+  `/distdraw` command and the `UnitLodDist` springsettings entry
 - Removed the `AdvSky` springsetting and the `/dynamicsky` command,
-which made clouds move across the sky. You cannot easily get back
-previous behaviour, though you can probably achieve something similar
-by rendering moving clouds yourself.
+  which made clouds move across the sky. You cannot easily get back
+  previous behaviour, though you can probably achieve something similar
+  by rendering moving clouds yourself.
 - The deprecated `Game.allowTeamColors`, whose value was always `true`, has been removed. Note that this inverts logic if you used it like a bool.
 - The default `/screenshot` format was changed to PNG. Check any automated processing you do on these.
 - Screenshots and replay demo files now have a different filename format, with an UTC timestamp. Check any automated file parsing you might have.
