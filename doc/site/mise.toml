@@ -104,9 +104,11 @@
 
 	[tasks.latest_release_data]
 	description = "Get latest release data"
+	tools."aqua:jqlang/jq" = "{{env.JQ_VERSION}}"
 	run = [
 		"rm -f temp/latest_release.json",
 		"mkdir -p temp",
 		"curl -s https://api.github.com/repos/beyond-all-reason/RecoilEngine/releases/latest > temp/latest_release.json",
 		"mv temp/latest_release.json {{vars.latest_release_data}}",
+		"jq '.' {{vars.latest_release_data}}"
 	]
