@@ -104,7 +104,7 @@
 
 	[tasks.latest_release_data]
 	description = "Get latest release data"
-	tools."aqua:jqlang/jq" = "{{env.JQ_VERSION}}"
+	tools."aqua:jqlang/jq" = "1.8.0"
 	run = [
 		"rm -f temp/latest_release.json",
 		"mkdir -p temp",
