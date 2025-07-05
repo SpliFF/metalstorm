@@ -7,6 +7,11 @@ on:
     paths:
       - rts/Lua/**
       - rts/Rml/SolLua/**/*.cpp
+      - doc/site/mise.toml
+env:
+  RECOIL_LUA_LIBRARY_DIR: "rts/Lua/library"
+  LUA_DOC_EXTRACTOR_SOURCE_REF: "https://github.com/${{ github.repository }}/blob/${{ github.sha }}"
+  LUA_DOC_EXTRACTOR_VERSION: "3"
 jobs:
   generate-library:
     if: github.repository == 'beyond-all-reason/RecoilEngine' || github.event_name == 'workflow_dispatch'
@@ -24,16 +29,19 @@ jobs:
           sparse-checkout: |
             rts/Lua
             rts/Rml/SolLua
+            doc/site/mise.toml
           path: recoil
-      
-      # NOTE: This step is duplicated in `publish-site.yml`
+
+      - uses: jdx/mise-action@v2
+        with:
+          working_directory: ./recoil/doc/site
+          mise_toml: |
+            [tools]
+            "npm:lua-doc-extractor" = "{{env.LUA_DOC_EXTRACTOR_VERSION}}"
+
       - name: Generate Lua library
-        working-directory: recoil
-        run: |
-          npm install -g lua-doc-extractor@3
-          lua-doc-extractor "rts/Lua/**/*.cpp" "rts/Rml/SolLua/**/*.cpp" \
-            --dest rts/Lua/library/generated \
-            --repo https://github.com/${{ github.repository }}/blob/${{ github.sha }}
+        working-directory: ./recoil/doc/site
+        run: mise run lua_library
 
       - name: Check out library repo
         uses: actions/checkout@v4
@@ -45,7 +53,7 @@ jobs:
       - name: Copy changes into library repo
         run: |
           rm -rf library/library
-          cp -r recoil/rts/Lua/library library
+          cp -r "recoil/${{env.RECOIL_LUA_LIBRARY_DIR}}" library
 
       # Always try to update library repo (even if generation did not make changes).
       # Hand-written files may have changed without generated output changing,
@@ -58,6 +66,6 @@ jobs:
           repository: ./library
           commit_message: |
             Update library
-            Generated from https://github.com/${{ github.repository }}/commit/${{ github.sha }}
+            Generated from ${{env.LUA_DOC_EXTRACTOR_SOURCE_REF}}
 
             ${{ github.event.head_commit.message }}

@@ -1,44 +1,45 @@
 [tools]
-	hugo = "0.147.9"
-	"aqua:jqlang/jq" = "1.8.0"
-	"aqua:ip7z/7zip" = "24.09"
-	"cargo-binstall" = "latest"
-	"cargo:emmylua_doc_cli" = "0.8.2"
-	# "aqua:gohugoio/hugo" = "0.147.9"
+	# We only install tools required for each task on each task, unless all tasks use a tool here
+	# For CI when we need to install and cache all tools, see mise.ci.toml
 
 [env]
-	LUA_DOC_EXTRACTOR_VERSION = "3"
-	EMMYLUA_DOC_CLI_VERSION = "0.8.2"
-	REPO_REF = "https://github.com/beyond-all-reason/RecoilEngine/blob/master"
+	HUGO_VERSION = "0.147.9"
+	LUA_DOC_EXTRACTOR_VERSION = "3" # lua_library lua_check
+	EMMYLUA_DOC_CLI_VERSION = "0.8.2" # lua_pages lua_library lua_check
+	LUA_LANGUAGE_SERVER_VERSION = "3.15.0" # lua_check
+	JQ_VERSION = "1.8.0" # binary_pages
+	7Z_VERSION = "24.09" # binary_pages
+	LUA_DOC_EXTRACTOR_SOURCE_REF = "https://github.com/beyond-all-reason/RecoilEngine/blob/master"
+	RECOIL_LUA_LIBRARY_DIR = "rts/Lua/library"
 
 [vars]
+	lua_doc_gen_dest = "$RECOIL_LUA_LIBRARY_DIR/generated"
 	site_dir = 'doc/site'
-	site_temp_dir = 'doc/site/temp'
-	lua_library_dir = 'rts/Lua/library'
-	lua_doc_gen_dest = 'rts/Lua/library/generated'
+	site_temp_dir = "{{vars.site_dir}}/temp"
 	lua_doc_paths = 'rts/{Lua,Rml/SolLua}/**/*.cpp'
-	lua_pages_dir = 'doc/site/content/docs/lua-api'
-	emmylua_cli_template = 'doc/site/emmylua-doc-cli-template'
+	lua_pages_dir = "{{vars.site_dir}}/content/docs/lua-api"
+	emmylua_cli_template = "{{vars.site_dir}}/emmylua-doc-cli-template"
 	latest_release_data = 'data/latest_release.json'
 
 [tasks]
 	[tasks.server]
 	description = "Run the site server locally"
+	tools.hugo = "{{env.HUGO_VERSION}}"
 	run = "hugo server --navigateToChanged"
 
 	[tasks.server_full]
 	depends = ["lua_pages", "binary_pages"]
 	description = "Run the site server locally, with all possible content"
+	tools.hugo = "{{env.HUGO_VERSION}}"
 	run = "hugo server --navigateToChanged"
 
 	[tasks.lua_pages]
 	description = "Generate Lua API Pages"
-	tools."cargo-binstall" = "latest"
-	tools."cargo:emmylua_doc_cli" = "0.8.2"
+	tools."cargo:emmylua_doc_cli" = "{{env.EMMYLUA_DOC_CLI_VERSION}}"
 	depends = ["lua_library"]
 	dir = "../../"
 	run = [
-		"emmylua_doc_cli -i {{vars.lua_library_dir}} -o {{vars.lua_pages_dir}} --override-template {{vars.emmylua_cli_template}}",
+		"emmylua_doc_cli -i $RECOIL_LUA_LIBRARY_DIR -o {{vars.lua_pages_dir}} --override-template {{vars.emmylua_cli_template}}",
 		# emmylua_doc_cli does this dumb shit where they hardcode a `docs` dir
 		"mv {{vars.lua_pages_dir}}/docs/index.md {{vars.lua_pages_dir}}/_index.md",
 		"cp -R {{vars.lua_pages_dir}}/docs/* {{vars.lua_pages_dir}}",
@@ -52,8 +53,8 @@
 	[tasks.binary_pages]
 	depends = ["latest_release_data"]
 	description = "Generate Docs from Recoil binary"
-	tools."aqua:jqlang/jq" = "1.8.0"
-	tools."aqua:ip7z/7zip" = "24.09"
+	tools."aqua:jqlang/jq" = "{{env.JQ_VERSION}}"
+	tools."aqua:ip7z/7zip" = "{{env.7Z_VERSION}}"
 	run = '''
 		download_url=$(jq -r '.assets[] | select(.name | contains("_linux-64-minimal-portable")).browser_download_url' {{vars.latest_release_data}})
 
@@ -92,19 +93,26 @@
 		./spring --list-synced-commands | grep -v "^\[t=" > $synced_commands_file
 	'''
 
+	[tasks.lua_check]
+	description = "Sanity check lua library with lua language server"
+	depends = ["lua_library"]
+	tools.lua-language-server = "{{env.LUA_LANGUAGE_SERVER_VERSION}}"
+	dir = "../../"
+	run = [
+		"lua-language-server --check \"${RECOIL_LUA_LIBRARY_DIR}\""
+	]
 
 	[tasks.lua_library]
 	description = "Generate Lua Docs"
-	tools.node = "22.17.0"
+	tools."npm:lua-doc-extractor" = "{{env.LUA_DOC_EXTRACTOR_VERSION}}"
 	dir = "../../"
 	run = [
-		"npm install -g lua-doc-extractor@3",
-		"lua-doc-extractor --src \"{{vars.lua_doc_paths}}\" --dest {{vars.lua_doc_gen_dest}} --repo $REPO_REF",
+		"lua-doc-extractor --src \"{{vars.lua_doc_paths}}\" --dest {{vars.lua_doc_gen_dest}} --repo \"${LUA_DOC_EXTRACTOR_SOURCE_REF}\""
 	]
 
 	[tasks.latest_release_data]
 	description = "Get latest release data"
-	tools."aqua:jqlang/jq" = "1.8.0"
+	tools."aqua:jqlang/jq" = "{{env.JQ_VERSION}}"
 	run = [
 		"rm -f temp/latest_release.json",
 		"mkdir -p temp",

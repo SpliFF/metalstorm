@@ -21,7 +21,7 @@
 	  }}
 	{{ with try (resources.GetRemote $url $opts) }}
 		{{ with .Err }}
-			{{ errorf "uh oh sisters! unable to get remote resource %s: %s" $url .}}
+			{{ warnf "The %q shortcode was unable to fetch github contributors from %s (%s). See %s" .Name $url . .Position }}
 		{{ else }}
 			{{ $deserialized := .Value | transform.Unmarshal }}
 
@@ -32,7 +32,7 @@
 			{{$data = append $data $deserialized }}
 		{{ end }}
 	{{ else }}
-		{{ errorf "uh oh sisters! unable to get remote resource %s: %s" $url .}}
+		{{ warnf "The %q shortcode was unable to fetch github contributors from %s (%s). See %s" .Name $url . .Position }}
 	{{ end }}
 {{ end }}
 

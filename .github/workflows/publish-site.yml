@@ -8,6 +8,16 @@ permissions:
   contents: read
   pages: write
   id-token: write
+env:
+  RECOIL_LUA_LIBRARY_DIR: "rts/Lua/library"
+  LUA_DOC_EXTRACTOR_SOURCE_REF: "https://github.com/${{ github.repository }}/blob/${{ github.sha }}"
+  HUGO_VERSION: "0.147.9"
+  LUA_DOC_EXTRACTOR_VERSION: "3"
+  EMMYLUA_DOC_CLI_VERSION: "0.8.2"
+  LUA_LANGUAGE_SERVER_VERSION: "3.15.0"
+  JQ_VERSION: "1.8.0"
+  7Z_VERSION: "24.09"
+  MISE_ENV: "ci"
 jobs:
   build:
     if: github.repository == 'beyond-all-reason/RecoilEngine' || github.event_name == 'workflow_dispatch'
@@ -18,19 +28,19 @@ jobs:
     concurrency:
       group: "pages"
       cancel-in-progress: false
-    env:
-      TZ: America/Los_Angeles
     steps:
       - name: Install Dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install --fix-missing -y libsdl2-2.0-0 libopenal1 gpg sudo curl
-      - name: Install Dart Sass
-        run: sudo snap install dart-sass
+          sudo apt-get install --fix-missing -y libsdl2-2.0-0 libopenal1 curl
       - name: Checkout Source Repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          sparse-checkout: |
+            doc/site
+            rts/Lua
+            rts/Rml/SolLua
       - name: Cache Restore
         id: cache-restore
         uses: actions/cache/restore@v4

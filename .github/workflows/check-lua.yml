@@ -5,12 +5,19 @@ on:
     paths:
       - rts/Lua/**
       - rts/Rml/SolLua/**/*.cpp
+      - doc/site/mise.toml
   push:
     branches:
       - master
     paths:
       - rts/Lua/**
       - rts/Rml/SolLua/**/*.cpp
+      - doc/site/mise.toml
+env:
+  RECOIL_LUA_LIBRARY_DIR: "rts/Lua/library"
+  LUA_DOC_EXTRACTOR_SOURCE_REF: "https://github.com/${{ github.repository }}/blob/${{ github.sha }}"
+  LUA_DOC_EXTRACTOR_VERSION: "3"
+  LUA_LANGUAGE_SERVER_VERSION: "3.15.0"
 jobs:
   check-library:
     name: Check library
@@ -22,35 +29,23 @@ jobs:
           sparse-checkout: |
             rts/Lua
             rts/Rml/SolLua
-      
-      - name: Generate Lua library
-        run: |
-          npm install -g lua-doc-extractor@3
-          lua-doc-extractor "rts/Lua/**/*.cpp" "rts/Rml/SolLua/**/*.cpp" \
-            --dest rts/Lua/library/generated \
-            --repo https://github.com/${{ github.repository }}/blob/${{ github.sha }} \
-            --error
+            doc/site/mise.toml
 
-      - name: Install dra
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/devmatteini/dra/refs/heads/main/install.sh | bash -s -- --to ./dra
+      - uses: jdx/mise-action@v2
+        with:
+          working_directory: ./doc/site
+          mise_toml: |
+            [tools]
+            lua-language-server = "{{env.LUA_LANGUAGE_SERVER_VERSION}}"
+            "npm:lua-doc-extractor" = "{{env.LUA_DOC_EXTRACTOR_VERSION}}"
 
-      - name: Install Lua Language Server
-        run: |
-          ./dra download \
-            --select "lua-language-server-{tag}-linux-x64.tar.gz" \
-            LuaLS/lua-language-server \
-            --output lls.tar.gz
-          mkdir lls
-          tar -xvzf lls.tar.gz -C lls
+      - name: Run lua-language-server --check
+        working-directory: ./doc/site
+        run: mise run lua_check
 
-      - name: Check 
-        run: |
-          ./lls/bin/lua-language-server --check rts/Lua/library
-      
       - name: Upload Lua Library artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: ${{github.run_id}}-library
-          path: rts/Lua/library/
+          path: ${{env.RECOIL_LUA_LIBRARY_DIR}}
