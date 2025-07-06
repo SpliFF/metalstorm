@@ -1,5 +1,8 @@
 +++
 title = "Running changelog"
+[cascade]
+  [cascade.params]
+    type = "docs"
 +++
 
 This is the bleeding-edge changelog **since version 2025.03**, which is still in the pre-release phase.
