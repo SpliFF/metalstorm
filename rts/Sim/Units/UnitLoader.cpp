@@ -339,7 +339,8 @@ void CUnitLoader::GiveUnits(const std::string& objectName, float3 pos, int amoun
 					auto* feature = featureHandler.LoadFeature(params);
 
 					// special treatment because features spawned with cheats appear before the gameframe
-					feature->UpdatePrevFrameTransform();
+					if (feature)
+						feature->UpdatePrevFrameTransform();
 
 					--total;
 				}
