@@ -3892,11 +3892,11 @@ int LuaSyncedRead::GetUnitSeismicSignature(lua_State* L)
 	return 1;
 }
 
-/***
+/*** Get whether unit leaves static radar ghosts.
  *
  * @function Spring.GetUnitLeavesGhost
  * @number unitID
- * @treturn nil|number
+ * @return number?
  */
 int LuaSyncedRead::GetUnitLeavesGhost(lua_State* L)
 {

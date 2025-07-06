@@ -994,14 +994,15 @@ int LuaSyncedCtrl::KillTeam(lua_State* L)
 }
 
 
-/*** 
- * Declare game over.
+/*** Declare game over.
  * 
  * @function Spring.GameOver
- * @param winningAllyTeamIDs integer[] A list of winning ally team IDs. Pass
- * multiple winners to declare a draw. Pass no arguments if undecided (e.g.
- * when dropped from the host).
- * @returns integer Number of accepted (valid) ally teams.
+ * @param winningAllyTeamIDs integer[] A list of winning ally team IDs.
+ *
+ * Pass multiple winners to declare a draw.
+ * Pass no arguments if undecided (e.g. when dropped from the host).
+ *
+ * @return integer Number of accepted (valid) ally teams.
  */
 int LuaSyncedCtrl::GameOver(lua_State* L)
 {
@@ -2866,17 +2867,13 @@ int LuaSyncedCtrl::SetUnitSeismicSignature(lua_State* L)
 	return 0;
 }
 
-/***
+/*** Set whether unit leaves static radar ghosts.
+ *
  * @function Spring.SetUnitLeavesGhost
  *
- * Change the unit leavesGhost attribute.
- *
- * Controls unit having static radar ghosts.
- *
  * @number unitID
- * @bool leavesGhost
- * @bool[opt] leaveDeadGhost leave a dead ghost behind if disabling and the unit had a live static ghost.
- * @treturn nil
+ * @param leavesGhost bool
+ * @param leaveDeadGhost bool? (Default: `false`) leave a dead ghost behind if disabling and the unit had a live static ghost.
  */
 int LuaSyncedCtrl::SetUnitLeavesGhost(lua_State* L)
 {
