@@ -4712,7 +4712,7 @@ int LuaUnsyncedRead::GetGroundDecalTexture(lua_State* L)
  */
 int LuaUnsyncedRead::GetGroundDecalTextures(lua_State* L)
 {
-	const auto& texNames = groundDecals->GetDecalTextures(luaL_optboolean(L, 2, true));
+	const auto& texNames = groundDecals->GetDecalTextures(luaL_optboolean(L, 1, true));
 	LuaUtils::PushStringVector(L, texNames);
 
 	return 1;
