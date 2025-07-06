@@ -2872,8 +2872,8 @@ int LuaSyncedCtrl::SetUnitSeismicSignature(lua_State* L)
  * @function Spring.SetUnitLeavesGhost
  *
  * @number unitID
- * @param leavesGhost bool
- * @param leaveDeadGhost bool? (Default: `false`) leave a dead ghost behind if disabling and the unit had a live static ghost.
+ * @param leavesGhost boolean
+ * @param leaveDeadGhost boolean? (Default: `false`) leave a dead ghost behind if disabling and the unit had a live static ghost.
  */
 int LuaSyncedCtrl::SetUnitLeavesGhost(lua_State* L)
 {
