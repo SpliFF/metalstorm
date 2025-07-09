@@ -1040,12 +1040,16 @@ void CFontTexture::LoadWantedGlyphs(char32_t begin, char32_t end)
 	LoadWantedGlyphs(wanted);
 }
 
-void CFontTexture::LoadWantedGlyphs(const std::vector<char32_t>& wanted)
+void CFontTexture::LoadWantedGlyphs(const std::vector<char32_t>& allWanted)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 #ifndef HEADLESS
-	if (wanted.empty())
+	if (allWanted.empty())
 		return;
+
+	// filter out duplicated elements from the wanted list
+	std::vector<char32_t> wanted(allWanted);
+	spring::VectorSortUnique(wanted);
 
 	assert(CFontTexture::sync.GetThreadSafety() || Threading::IsMainThread());
 	auto lock = CFontTexture::sync.GetScopedLock();
@@ -1068,7 +1072,6 @@ void CFontTexture::LoadWantedGlyphs(const std::vector<char32_t>& wanted)
 			//failedAttemptsToReplace.emplace(c, 0);
 		}
 	}
-	spring::VectorSortUnique(map);
 
 	if (map.empty())
 		return;
