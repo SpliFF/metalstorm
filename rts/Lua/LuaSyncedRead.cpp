@@ -1435,6 +1435,7 @@ int LuaSyncedRead::GetHeadingFromFacing(lua_State* L)
  * Side spec
  *
  * @class SideSpec
+ * @x_helper
  *
  * Returned when getting arrays of side specifications.
  *
@@ -1984,6 +1985,7 @@ int LuaSyncedRead::GetTeamDamageStats(lua_State* L)
 
 /***
  * @class TeamStats
+ * @x_helper
  * @field time number
  * @field frame number
  * @field metalUsed number
@@ -3255,6 +3257,7 @@ static inline bool UnitInPlanes(const float3& pos, const float radius, const vec
 
 /***
  * @class Plane
+ * @x_helper
  * @field normalVecX number
  * @field normalVecY number
  * @field normalVecZ number
@@ -3703,7 +3706,9 @@ int LuaSyncedRead::GetProjectilesInSphere(lua_State* L)
 ******************************************************************************/
 
 
-/***
+/*** Get whether a unitID is valid
+ *
+ * Dead units are not valid.
  *
  * @function Spring.ValidUnitID
  * @param unitID integer
@@ -3718,6 +3723,7 @@ int LuaSyncedRead::ValidUnitID(lua_State* L)
 
 /***
  * @class UnitState
+ * @x_helper
  * @field firestate number
  * @field movestate number
  * @field repeat boolean
@@ -4311,6 +4317,7 @@ int LuaSyncedRead::GetUnitCosts(lua_State* L)
 
 /***
  * @class ResourceCost
+ * @x_helper
  * @field metal number
  * @field energy number
  */
@@ -5893,6 +5900,7 @@ int LuaSyncedRead::GetUnitFeatureSeparation(lua_State* L)
 
 /***
  * @class UnitDefDimensions
+ * @x_helper
  * @field height number
  * @field radius number
  * @field midx number
@@ -6161,6 +6169,7 @@ int LuaSyncedRead::GetUnitMoveTypeData(lua_State* L)
 
 /***
  * @class Command
+ * @x_helper
  * @field id integer
  * @field params number[]?
  * @field options CommandOptions?
@@ -6545,7 +6554,7 @@ int LuaSyncedRead::GetFactoryCounts(lua_State* L)
  *
  * @param unitID integer
  * @param count 0 Returns the number of commands in the units queue.
- * @return integer The number of commands in the unit queue.
+ * @return integer cmdCount The number of commands in the unit queue.
  *
  */
 
@@ -7111,19 +7120,20 @@ int LuaSyncedRead::GetFeatureResurrect(lua_State* L)
 /***
  *
  * @function Spring.GetFeatureLastAttackedPiece
- * Returns nil if no feature found with ID.
  * @param featureID integer
  * @return string|""|nil Last hit piece name
- * @return integer frame it was last hit on
+ * @return integer? frame it was last hit on, nil when featureID is not valid
  */
 int LuaSyncedRead::GetFeatureLastAttackedPiece(lua_State* L)
 {
 	return (GetSolidObjectLastHitPiece(L, ParseFeature(L, __func__, 1)));
 }
 
-/***
+/*** Parameters related to a collision volume.
+ *
  * @class CollisionVolumeData
- * A collection of information relating to a collision volume.
+ * @x_helper
+ *
  * @field type "ellipsoid"|"cylinder"|"box"|"sphere" type
  * @field scaleX number
  * @field scaleY number
@@ -8485,6 +8495,7 @@ static int GetSolidObjectPieceList(lua_State* L, const CSolidObject* o)
 
 /***
  * @class PieceInfo
+ * @x_helper
  * @field name string
  * @field parent string
  * @field children string[] names

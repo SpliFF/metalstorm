@@ -3098,6 +3098,7 @@ bool CLuaHandle::KeyMapChanged()
 /*** Key Modifier Params
  *
  * @class KeyModifiers
+ * @x_helper
  *
  * @field right boolean Right mouse key pressed
  * @field alt boolean Alt key pressed

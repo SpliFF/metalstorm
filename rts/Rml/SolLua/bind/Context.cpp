@@ -280,8 +280,8 @@ void bind_context(sol::table& namespace_table, SolLuaPlugin* slp)
 {
 	// clang-format off
 
-	/***
-	 * Holds documents and a data model.
+	/*** Holds documents and a data model.
+	 *
 	 * The Context class has no constructor; it must be instantiated through the CreateContext() function. It has the following functions and properties:
 	 * @class RmlUi.Context
 	 */

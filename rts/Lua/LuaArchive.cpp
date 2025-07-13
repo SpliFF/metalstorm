@@ -155,6 +155,7 @@ int LuaArchive::GetArchivePath(lua_State* L)
 
 /***
  * @class ArchiveInfo
+ * @x_helper
  * @field name string
  * @field shortname string
  * @field version string
@@ -298,13 +299,15 @@ int LuaArchive::GetNameFromRapidTag(lua_State* L)
 
 /***
  * @class AIInfo
+ * @x_helper
  * @field shortName string
  * @field version string
  */
 
-/***
- * Gets a list of all Spring AIs. The optional gameName and mapName parameters
- * can be used to include game/map specific LuaAIs in the list.
+/*** Get a list of all Spring AIs.
+ *
+ * The optional gameName and mapName parameters can be used to include game/map
+ * specific LuaAIs in the list.
  * 
  * @function VFS.GetAvailableAIs
  * @param gameArchiveName string?

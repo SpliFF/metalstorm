@@ -710,6 +710,7 @@ static inline bool SetMoveTypeValue(lua_State* L, AMoveType* moveType, int keyId
 
 /***
  * @class GenericMoveType
+ * @x_helper
  * @field maxSpeed number?
  * @field maxWantedSpeed number?
  * @field maneuverLeash number?
@@ -777,6 +778,7 @@ static int SetMoveTypeData(lua_State* L, AMoveType* moveType, const char* caller
 
 /***
  * @class HoverAirMoveType : GenericMoveType
+ * @x_helper
  * @field collide boolean?
  * @field dontLand boolean?
  * @field airStrafe boolean?
@@ -834,6 +836,7 @@ int LuaSyncedMoveCtrl::SetGunshipMoveTypeData(lua_State* L)
 
 /***
  * @class StrafeAirMoveType : GenericMoveType
+ * @x_helper
  * @field collide boolean?
  * @field useSmoothMesh boolean?
  * @field loopbackAttack boolean?
@@ -906,6 +909,7 @@ int LuaSyncedMoveCtrl::SetAirMoveTypeData(lua_State* L)
 
 /***
  * @class GroundMoveType : GenericMoveType
+ * @x_helper
  * @field atGoal boolean?
  * @field atEndOfPath boolean?
  * @field pushResistant boolean?

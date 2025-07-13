@@ -283,9 +283,10 @@ bool LuaConstCMD::PushEntries(lua_State* L)
 	 * ```lua
 	 * Spring.GiveOrderToUnit(unitID, CMD.ATTACK, {1000,100,1000})
 	 * ```
-	 * @see Spring.GiveOrderToUnit
-	 * @see Callins:UnitCmdDone
 	 */
+	 // Fields can't @see
+	 // @see Spring.GiveOrderToUnit
+	 // @see Callins:UnitCmdDone
 	PUSH_CMD(ATTACK);
 	/*** @field CMD.AREA_ATTACK 21 */
 	PUSH_CMD(AREA_ATTACK);

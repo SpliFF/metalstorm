@@ -5,8 +5,8 @@ draft = false
 +++
 
 <div style="text-align: center;">
-<h2>Recoil is a battle tested open-source RTS engine that, allied with a flexible Lua API, allows you to implement the perfect UI and mechanics for your game with the ability to support thousands of complex units simultaneously.</h2>
-<h4>Some of the games Recoil powers:</h4>
+<h2 data-notoc="">Recoil is a battle tested open-source RTS engine that, allied with a flexible Lua API, allows you to implement the perfect UI and mechanics for your game with the ability to support thousands of complex units simultaneously.</h2>
+<h4 data-notoc="">Some of the games Recoil powers:</h4>
 </div>
 
 {{< cards cols=2 >}}

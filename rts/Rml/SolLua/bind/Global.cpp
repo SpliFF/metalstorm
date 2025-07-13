@@ -103,7 +103,9 @@
 	 void bind_global(sol::table& namespace_table, SolLuaPlugin* slp)
 	 {
 		/***
-		 * Represents an owned element. This type is mainly used to modify the DOM tree by passing the object into other elements. For example `RmlUi.Element:AppendChild()`.
+		 * Represents an owned element.
+		 *
+		 * This type is mainly used to modify the DOM tree by passing the object into other elements. For example `RmlUi.Element:AppendChild()`.
 		 * A current limitation in the Lua plugin is that Element member properties and functions cannot be used directly on this type.
 		 * @class RmlUi.ElementPtr
 		 */

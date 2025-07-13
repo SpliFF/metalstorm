@@ -129,8 +129,10 @@ namespace Rml::SolLua
 			}
 		);
 
-		/***
-		 * Document derives from Element. Document has no constructor; it must be instantiated through a Context object instead, either by loading an external RML file or creating an empty document. It has the following functions and properties:
+		/*** Document derives from Element.
+		 *
+		 * Document has no constructor; it must be instantiated through a Context object instead, either by loading an external RML file or creating an empty document. It has the following functions and properties:
+		 *
 		 * @class RmlUi.Document : RmlUi.Element
 		 */
 		

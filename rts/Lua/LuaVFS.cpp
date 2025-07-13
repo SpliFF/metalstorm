@@ -24,8 +24,9 @@
 #include "System/Misc/TracyDefs.h"
 #include <tracy/TracyLua.hpp>
 
-/***
- * The Virtual File System is an unified layer to access (read-only) the
+/*** Unified IO for archive and filesystem
+ *
+ * The Virtual File System is a unified layer to access (read-only) the
  * different archives used at runtime. So you can access map, game & config
  * files via the same interface.
  * 
@@ -691,7 +692,7 @@ int LuaVFS::GetArchiveContainingFile(lua_State* L)
  * @function VFS.UseArchive
  * @param archiveName string
  * @param fun(...) func
- * @return any ... Results of of the given function
+ * @return any ... Results of the given function
  */
 int LuaVFS::UseArchive(lua_State* L)
 {
