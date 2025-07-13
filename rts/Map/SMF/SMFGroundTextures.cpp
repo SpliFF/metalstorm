@@ -86,6 +86,12 @@ CSMFGroundTextures::CSMFGroundTextures(CSMFReadMap* rm): smfMap(rm)
 	}
 }
 
+CSMFGroundTextures::~CSMFGroundTextures()
+{
+	// explicitly kill textures, as doing so in the static destructor is too late (GLAD is already unloaded)
+	squares.clear();
+}
+
 void CSMFGroundTextures::LoadTiles(CSMFMapFile& file)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
