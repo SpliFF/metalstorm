@@ -244,8 +244,7 @@ vec4 SLerp(vec4 qa, vec4 qb, float t) {
 	float ratioA = sin((1.0 - t) * halfTheta);
 	float ratioB = sin((      t) * halfTheta);
 
-	// qa * ratioA + qb * ratioB
-	// is already normalized in theory, but in practice it still needs renormalization.
+	// needs normalization because we skip the division by sinHalfTheta
 	return normalize(qa * ratioA + qb * ratioB);
 }
 
