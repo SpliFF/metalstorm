@@ -190,7 +190,7 @@ inline void CModelDrawerDataBase<T>::UpdateObjectTrasform(const T* o)
 			continue;
 		}
 
-		stma.UpdateForced(2 * (1 + i) + 0, lmp.GetPrevModelSpaceTransform());
+		stma.UpdateForced(2 * (1 + i) + 0, lmp.GetEffectivePrevModelSpaceTransform());
 		stma.UpdateForced(2 * (1 + i) + 1, lmpTransform);
 
 		lmp.ResetWasUpdated();

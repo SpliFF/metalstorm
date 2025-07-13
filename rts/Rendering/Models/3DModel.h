@@ -423,6 +423,7 @@ struct LocalModelPiece
 	LocalModelPiece()
 		: dirty(true)
 		, wasUpdated{ true }
+		, noInterpolation { false }
 	{}
 	LocalModelPiece(const S3DModelPiece* piece);
 
@@ -464,6 +465,10 @@ struct LocalModelPiece
 	void SetPosition(const float3& p) { SetPosOrRot(p, pos); } // anim-script only
 	void SetRotation(const float3& r) { SetPosOrRot(r, rot); } // anim-script only
 
+	void SetRotationNoInterpolation(bool noInterpolate) { noInterpolation[0] = noInterpolate; }
+	void SetPositionNoInterpolation(bool noInterpolate) { noInterpolation[1] = noInterpolate; }
+	void SetScalingNoInterpolation (bool noInterpolate) { noInterpolation[2] = noInterpolate; }
+
 	auto GetWasUpdated() const { return wasUpdated[0] || wasUpdated[1]; }
 	void ResetWasUpdated() const; /*fake*/
 
@@ -497,7 +502,7 @@ struct LocalModelPiece
 	void SetScriptVisible(bool b);
 
 	void SavePrevModelSpaceTransform();
-	const auto& GetPrevModelSpaceTransform() const { return prevModelSpaceTra; }
+	Transform GetEffectivePrevModelSpaceTransform() const;
 private:
 	Transform prevModelSpaceTra;
 
@@ -512,6 +517,7 @@ private:
 	CollisionVolume colvol;
 
 	mutable std::array<bool, 2> wasUpdated; // currFrame, prevFrame
+	mutable std::array<bool, 3> noInterpolation; // rotate, move, scale
 	mutable bool dirty;
 	bool scriptSetVisible; // TODO: add (visibility) maxradius!
 public:

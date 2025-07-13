@@ -38,6 +38,7 @@ CR_REG_METADATA(LocalModelPiece, (
 
 	CR_IGNORED(dirty),
 	CR_IGNORED(wasUpdated),
+	CR_IGNORED(noInterpolation),
 	CR_IGNORED(modelSpaceTra),
 	CR_IGNORED(pieceSpaceTra),
 
@@ -467,6 +468,7 @@ LocalModelPiece::LocalModelPiece(const S3DModelPiece* piece)
 	: colvol(piece->GetCollisionVolume())
 	, dirty(true)
 	, wasUpdated{ true }
+	, noInterpolation{ false }
 
 	, scriptSetVisible(true)
 	, blockScriptAnims(false)
@@ -523,6 +525,9 @@ void LocalModelPiece::ResetWasUpdated() const
 	// wasUpdated[0] || wasUpdated[1] at least twice after such situation
 	// happens, thus uploading prevModelSpaceTra in UpdateObjectTrasform() too
 	wasUpdated[1] = std::exchange(wasUpdated[0], false);
+
+	// use this call to also reset noInterpolation
+	noInterpolation = { false };
 }
 
 const Transform& LocalModelPiece::GetModelSpaceTransform() const
@@ -550,6 +555,19 @@ void LocalModelPiece::SetScriptVisible(bool b)
 void LocalModelPiece::SavePrevModelSpaceTransform()
 {
 	prevModelSpaceTra = GetModelSpaceTransform();
+}
+
+Transform LocalModelPiece::GetEffectivePrevModelSpaceTransform() const
+{
+	if (!noInterpolation[0] && !noInterpolation[1] && !noInterpolation[2])
+		return prevModelSpaceTra;
+
+	const auto& lmpTransform = GetModelSpaceTransform();
+	return Transform {
+		noInterpolation[0] ? lmpTransform.r : prevModelSpaceTra.r,
+		noInterpolation[1] ? lmpTransform.t : prevModelSpaceTra.t,
+		noInterpolation[2] ? lmpTransform.s : prevModelSpaceTra.s
+	};
 }
 
 void LocalModelPiece::UpdateChildTransformRec(bool updateChildTransform) const

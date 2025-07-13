@@ -232,6 +232,38 @@ bool CUnitScript::TickAnimFinished(int deltaTime)
 	return (HaveAnimations());
 }
 
+bool CUnitScript::TickMoveAnim(int tickRate, LocalModelPiece& lmp, AnimInfo& ai)
+{
+	float3 pos = lmp.GetPosition();
+	const bool ret = MoveToward(pos[ai.axis], ai.dest, ai.speed / tickRate);
+	lmp.SetPosition(pos);
+	lmp.SetPositionNoInterpolation(false);
+
+	return ret;
+}
+
+bool CUnitScript::TickTurnAnim(int tickRate, LocalModelPiece& lmp, AnimInfo& ai)
+{
+	float3 rot = lmp.GetRotation();
+	rot[ai.axis] = ClampRad(rot[ai.axis]);
+	const bool ret = TurnToward(rot[ai.axis], ai.dest, ai.speed / tickRate);
+	lmp.SetRotation(rot);
+	lmp.SetRotationNoInterpolation(false);
+
+	return ret;
+}
+
+bool CUnitScript::TickSpinAnim(int tickRate, LocalModelPiece& lmp, AnimInfo& ai)
+{
+	float3 rot = lmp.GetRotation();
+	rot[ai.axis] = ClampRad(rot[ai.axis]);
+	const bool ret = DoSpin(rot[ai.axis], ai.dest, ai.speed, ai.accel, tickRate);
+	lmp.SetRotation(rot);
+	lmp.SetRotationNoInterpolation(false);
+
+	return ret;
+}
+
 CUnitScript::AnimContainerTypeIt CUnitScript::FindAnim(AnimType type, int piece, int axis)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
@@ -417,6 +449,7 @@ void CUnitScript::MoveNow(int piece, int axis, float destination)
 	pos[axis] = ofs[axis] + destination;
 
 	p->SetPosition(pos);
+	p->SetPositionNoInterpolation(true);
 }
 
 
@@ -435,6 +468,7 @@ void CUnitScript::TurnNow(int piece, int axis, float destination)
 	rot[axis] = destination;
 
 	p->SetRotation(rot);
+	p->SetRotationNoInterpolation(true);
 }
 
 
