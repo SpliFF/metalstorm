@@ -175,7 +175,7 @@ bool CGuiHandler::EnableLuaUI(bool enableCommand)
 		}
 	}
 
-	LOG_L(L_NOTICE, "[GUIHandler] Reloading LuaUI/RmlGui", __func__);
+	LOG_L(L_NOTICE, "[GUIHandler] Reloading LuaUI/RmlGui");
 	CLuaUI::FreeHandler();
 	RmlGui::Shutdown();
 	//CLuaUI load also initialises RmlGui
