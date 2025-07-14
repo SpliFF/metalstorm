@@ -256,13 +256,17 @@ bool CTextureAtlas::CreateTexture()
 
 void CTextureAtlas::BindTexture()
 {
-	assert(atlasTex);
+	if (!initialized)
+		return;
+
 	atlasTex->Bind();
 }
 
 void CTextureAtlas::UnbindTexture()
 {
-	assert(atlasTex);
+	if (!initialized)
+		return;
+
 	atlasTex->Unbind();
 }
 
