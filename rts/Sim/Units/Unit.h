@@ -242,6 +242,7 @@ public:
 	void ForcedKillUnit(CUnit* attacker, bool selfDestruct, bool reclaimed, int weaponDefID = 0);
 	virtual void KillUnit(CUnit* attacker, bool selfDestruct, bool reclaimed, int weaponDefID = 0);
 	virtual void IncomingMissile(CMissileProjectile* missile);
+	CFeature* CreateWreck(int wreckLevel, int smokeTime);
 
 	void TempHoldFire(int cmdID);
 	void SetHoldFire(bool b) { onTempHoldFire = b; }

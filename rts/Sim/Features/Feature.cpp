@@ -425,21 +425,28 @@ void CFeature::DoDamage(
 	eventHandler.FeatureDamaged(this, attacker, baseDamage, weaponDefID, projectileID);
 
 	if (health <= 0.0f && def->destructable) {
-		FeatureLoadParams params = {nullptr, nullptr, featureDefHandler->GetFeatureDefByID(def->deathFeatureDefID), pos, speed, -1, team, -1, heading, buildFacing, 0, 0};
-		CFeature* deathFeature = featureHandler.CreateWreckage(params);
-
-		if (deathFeature != nullptr) {
-			// if a partially reclaimed corpse got blasted,
-			// ensure its wreck is not worth the full amount
-			// (which might be more than the amount remaining)
-			deathFeature->resources *= resources / defResources;
-		}
+		CreateWreck(0, 0);
 
 		featureHandler.DeleteFeature(this);
 		blockHeightChanges = false;
 	}
 }
 
+
+CFeature* CFeature::CreateWreck(int wreckLevel, int smokeTime)
+{
+	FeatureLoadParams params = {nullptr, nullptr, featureDefHandler->GetFeatureDefByID(def->deathFeatureDefID), pos, speed, -1, team, -1, heading, buildFacing, wreckLevel, smokeTime};
+	CFeature* deathFeature = featureHandler.CreateWreckage(params);
+
+	if (deathFeature != nullptr) {
+		// if a partially reclaimed corpse got blasted,
+		// ensure its wreck is not worth the full amount
+		// (which might be more than the amount remaining)
+		deathFeature->resources *= resources / defResources;
+	}
+
+	return deathFeature;
+}
 
 
 void CFeature::DependentDied(CObject *o)

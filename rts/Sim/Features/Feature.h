@@ -102,6 +102,8 @@ public:
 	CMatrix44f GetTransformMatrix(bool synced = false, bool fullread = false) const override final { return transMatrix[synced]; }
 	const CMatrix44f& GetTransformMatrixRef(bool synced = false) const { return transMatrix[synced]; }
 
+	CFeature* CreateWreck(int wreckLevel, int smokeTime);
+
 private:
 	void PostLoad();
 

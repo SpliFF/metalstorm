@@ -163,6 +163,9 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(DestroyFeature);
 	REGISTER_LUA_CFUNC(TransferFeature);
 
+	REGISTER_LUA_CFUNC(CreateUnitWreck);
+	REGISTER_LUA_CFUNC(CreateFeatureWreck);
+
 	REGISTER_LUA_CFUNC(SetUnitCosts);
 	REGISTER_LUA_CFUNC(SetUnitResourcing);
 	REGISTER_LUA_CFUNC(SetUnitStorage);
@@ -5084,6 +5087,75 @@ int LuaSyncedCtrl::SetFeaturePieceVisible(lua_State* L)
 {
 	return (SetSolidObjectPieceVisible(L, ParseFeature(L, __func__, 1)));
 }
+
+
+/******************************************************************************
+ * Wrecks
+ * @section wrecks
+******************************************************************************/
+
+
+/*** Create a wreck from a unit
+ *
+ * @function Spring.CreateUnitWreck
+ *
+ * @param unitID integer
+ * @param wreckLevel integer (Default: `1`) Wreck index to use.
+ * @param doSmoke boolean (Default: `true`) Wreck emits smoke when `true`. 
+ * @return integer? featureID The wreck featureID, or nil if it couldn't be created or unit doesn't exist.
+ */
+int LuaSyncedCtrl::CreateUnitWreck(lua_State* L)
+{
+	CheckAllowGameChanges(L);
+	CUnit* unit = ParseUnit(L, __func__, 1);
+
+	if (unit == nullptr)
+		return 0;
+
+	const int wreckLevel = luaL_optint(L, 2, 1) - 1;
+	const int doSmoke = luaL_optboolean(L, 3, true);
+
+	CFeature* wreck = unit->CreateWreck(wreckLevel, doSmoke ? 1 : 0);
+
+	if (wreck) {
+		lua_pushinteger(L, wreck->id);
+		return 1;
+	}
+
+	return 0;
+}
+
+
+/*** Create a wreck from a feature
+ *
+ * @function Spring.CreateFeatureWreck
+ *
+ * @param featureID integer
+ * @param wreckLevel integer (Default: `1`) Wreck index to use.
+ * @param doSmoke boolean (Default: `false`) Wreck emits smoke when `true`.
+ * @return integer? featureID The wreck featureID, or nil if it couldn't be created or unit doesn't exist.
+ */
+
+int LuaSyncedCtrl::CreateFeatureWreck(lua_State* L)
+{
+	CheckAllowGameChanges(L);
+	CFeature* feature = ParseFeature(L, __func__, 1);
+
+	if (feature == nullptr)
+		return 0;
+
+	const int wreckLevel = luaL_optint(L, 2, 1) - 1;
+	const int doSmoke = luaL_optboolean(L, 3, false);
+
+	CFeature* wreck = feature->CreateWreck(wreckLevel, doSmoke ? 1 : 0);
+	if (wreck) {
+		lua_pushinteger(L, wreck->id);
+		return 1;
+	}
+
+	return 0;
+}
+
 
 /******************************************************************************
  * Projectiles

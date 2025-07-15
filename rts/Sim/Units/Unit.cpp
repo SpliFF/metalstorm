@@ -110,7 +110,7 @@ CUnit::~CUnit()
 	//   and the CreateWreckage() call to be as low as possible to prevent
 	//   position discontinuities
 	if (delayedWreckLevel >= 0)
-		featureHandler.CreateWreckage({this, unitDef, featureDefHandler->GetFeatureDefByID(featureDefID),  {}, {},  -1, team, -1,  heading, buildFacing,  delayedWreckLevel - 1, 1});
+		CreateWreck(delayedWreckLevel - 1, 1);
 
 	if (deathExpDamages != nullptr)
 		DynDamageArray::DecRef(deathExpDamages);
@@ -144,6 +144,12 @@ CUnit::~CUnit()
 	// ScriptCallback may reference weapons, so delete the script first
 	CWeaponLoader::FreeWeapons(this);
 	quadField.RemoveUnit(this);
+}
+
+
+CFeature* CUnit::CreateWreck(int wreckLevel, int smokeTime)
+{
+	return featureHandler.CreateWreckage({this, unitDef, featureDefHandler->GetFeatureDefByID(featureDefID),  {}, {},  -1, team, -1,  heading, buildFacing,  wreckLevel, smokeTime});
 }
 
 
