@@ -5172,8 +5172,8 @@ int LuaSyncedCtrl::SetFeaturePieceVisible(lua_State* L)
  * @function Spring.CreateUnitWreck
  *
  * @param unitID integer
- * @param wreckLevel integer (Default: `1`) Wreck index to use.
- * @param doSmoke boolean (Default: `true`) Wreck emits smoke when `true`. 
+ * @param wreckLevel integer? (Default: `1`) Wreck index to use.
+ * @param doSmoke boolean? (Default: `true`) Wreck emits smoke when `true`. 
  * @return integer? featureID The wreck featureID, or nil if it couldn't be created or unit doesn't exist.
  */
 int LuaSyncedCtrl::CreateUnitWreck(lua_State* L)
@@ -5203,8 +5203,8 @@ int LuaSyncedCtrl::CreateUnitWreck(lua_State* L)
  * @function Spring.CreateFeatureWreck
  *
  * @param featureID integer
- * @param wreckLevel integer (Default: `1`) Wreck index to use.
- * @param doSmoke boolean (Default: `false`) Wreck emits smoke when `true`.
+ * @param wreckLevel integer? (Default: `1`) Wreck index to use.
+ * @param doSmoke boolean? (Default: `false`) Wreck emits smoke when `true`.
  * @return integer? featureID The wreck featureID, or nil if it couldn't be created or unit doesn't exist.
  */
 
