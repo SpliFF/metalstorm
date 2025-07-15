@@ -4,6 +4,7 @@
 #define LUA_SYNCED_CTRL_H
 
 struct lua_State;
+class CFeature;
 
 constexpr int MAX_CMD_RECURSION_DEPTH = 16;
 
@@ -31,6 +32,8 @@ class LuaSyncedCtrl
 		inline static bool inHeightMap = false;
 		inline static bool inOriginalHeightMap = false;
 		inline static bool inSmoothMesh = false;
+
+		static void DestroyFeatureCommon(lua_State* L, CFeature* feature);
 
 	private:
 		// all LuaHandleSynced
