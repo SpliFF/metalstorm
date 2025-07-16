@@ -221,6 +221,8 @@ class LuaSyncedRead {
 		static int GetFeatureLastAttackedPiece(lua_State* L);
 		static int GetFeatureCollisionVolumeData(lua_State* L);
 		static int GetFeaturePieceCollisionVolumeData(lua_State* L);
+		static int GetFeatureFireTime(lua_State* L);
+		static int GetFeatureSmokeTime(lua_State* L);
 
 		static int GetFeatureRulesParam(lua_State* L);
 		static int GetFeatureRulesParams(lua_State* L);
