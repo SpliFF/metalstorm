@@ -50,8 +50,7 @@ private:
 		const WeaponDef* wd;
 	};
 private:
-	void BindAtlasTextures();
-	void BindCommonTextures();
+	void BindTextures();
 	void UnbindTextures();
 	void AddExplosion(AddExplosionInfo&& explInfo);
 	void MoveSolidObject(const CSolidObject* object, const float3& pos);
@@ -111,7 +110,8 @@ public:
 	const GroundDecal* GetDecalById(uint32_t id) const override;
 	bool SetDecalTexture(uint32_t id, const std::string& texName, bool mainTex) override;
 	std::string GetDecalTexture(uint32_t id, bool mainTex) const override;
-	const std::vector<std::string> GetDecalTextures(bool mainTex) const override;
+	const std::vector<std::string> GetDecalTextures(const std::optional<bool>& mainTex) const override;
+	const std::vector<std::string> GetDecalTextureFileNames(const std::vector<std::string>& texList) const override;
 	const CSolidObject* GetDecalSolidObjectOwner(uint32_t id) const override;
 
 	void SetUnitLeaveTracks(CUnit* unit, bool leaveTracks) override;
@@ -123,10 +123,10 @@ private:
 
 	uint32_t GetDepthBufferTextureTarget() const;
 
-	void GenerateAtlasTextures();
+	void GenerateAtlasTexture();
 	void ReloadDecalShaders();
 
-	void AddTexToAtlas(const std::string& name, const std::string& filename, bool mainTex, bool convertOldBMP);
+	void AddTexToAtlas(const std::string& name, const std::string& filename, bool convertOldBMP);
 
 	void AddTrack(const CUnit* unit, const float3& newPos, bool forceEval = false);
 
@@ -154,8 +154,7 @@ private:
 	};
 	int maxUniqueScars;
 
-	std::unique_ptr<CTextureRenderAtlas> atlasMain;
-	std::unique_ptr<CTextureRenderAtlas> atlasNorm;
+	std::unique_ptr<CTextureRenderAtlas> atlasTex;
 
 	Shader::IProgramObject* decalShader;
 
@@ -164,6 +163,7 @@ private:
 	spring::unordered_map<int, UnitMinMaxHeight> unitMinMaxHeights; // for tracks
 	spring::unordered_map<uint32_t, size_t> idToPos;
 	spring::unordered_map<uint32_t, std::tuple<const CColorMap*, std::pair<size_t, size_t>>> idToCmInfo;
+	spring::unordered_map<std::string, std::string> texFileNames;
 
 	UpdateList decalsUpdateList;
 
