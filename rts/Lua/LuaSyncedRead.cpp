@@ -8249,28 +8249,22 @@ int LuaSyncedRead::IsPosInAirLos(lua_State* L)
 	return 1;
 }
 
-
-/***
+/*** Get unit los state (bitmask)
+ *
  * @function Spring.GetUnitLosState
  * @param unitID integer
  * @param allyTeamID integer?
  * @param raw true Return a bitmask.
- * @return integer? bitmask
- * A bitmask integer, or `nil` if `unitID` is invalid.
- *
- * Bitmask bits:
- * - `1`: `LOS_INLOS` the unit is currently in the los of the allyteam,
- * - `2`: `LOS_INRADAR` the unit is currently in radar from the allyteam,
- * - `4`: `LOS_PREVLOS` the unit has previously been in los from the allyteam,
- * - `8`: `LOS_CONTRADAR` the unit has continuously been in radar since it was last inlos by the allyteam
+ * @return LosMask|integer? bitmask A bitmask of `LosMask` bits
  */
-/***
+
+/*** Get unit los state (table)
+ *
  * @function Spring.GetUnitLosState
  * @param unitID integer
  * @param allyTeamID integer?
- * @param raw false? Return a bitmask.
- * @return { los: boolean, radar: boolean, typed: boolean }? los
- * A table of LOS state, or `nil` if `unitID` is invalid.
+ * @param raw false? Return a table.
+ * @return table<"los"|"radar"|"typed",boolean>? los A table of LOS state names as keys and booleans as values, or `nil` if `unitID` is invalid.
  */
 int LuaSyncedRead::GetUnitLosState(lua_State* L)
 {

@@ -2701,30 +2701,31 @@ static unsigned char ParseLosBits(lua_State* L, int index, unsigned char bits)
 	return 0;
 }
 
+/***
+ * @alias LosTable table<"los"|"radar"|"prevLos"|"contRadar",boolean>
+ */
 
 /***
+ * @enum LosMask
+ * @x_helper
+ * @field INLOS 1 the unit is currently in the los of the allyteam
+ * @field INRADAR 2 the unit is currently in radar from the allyteam
+ * @field PREVLOS 4 the unit has previously been in los from the allyteam
+ * @field CONTRADAR 8 the unit has continuously been in radar since it was last inlos by the allyteam
+ */
+
+/*** Set visibility status mask for a unit and team
+ *
+ * Use this to allow or disallow a unit from having its visibility status
+ * against a certain team updated by the engine.
+ *
+ * @see Spring.SetUnitLosState
  * @function Spring.SetUnitLosMask
- *
- * The 3rd argument is either the bit-and combination of the following numbers:
- *
- *     LOS_INLOS = 1
- *     LOS_INRADAR = 2
- *     LOS_PREVLOS = 4
- *     LOS_CONTRADAR = 8
- *
- * or a table of the following form:
- *
- *     losTypes = {
- *     [los = boolean,]
- *     [radar = boolean,]
- *     [prevLos = boolean,]
- *     [contRadar = boolean]
- *     }
  *
  * @param unitID integer
  * @param allyTeam number
- * @param losTypes number|table
- * @return nil
+ * @param losTypes LosTable|LosMask|integer A bitmask of `LosMask` bits or a
+ * table. True bits disable engine updates to visibility.
  */
 int LuaSyncedCtrl::SetUnitLosMask(lua_State* L)
 {
@@ -2750,12 +2751,28 @@ int LuaSyncedCtrl::SetUnitLosMask(lua_State* L)
 }
 
 
-/***
+/*** Set current visibility status for a unit and team
+ *
+ * Note this state will not be persisted if the visibility state is not masked.
+ *
+ * Use it to change visibility state, once you set the unit to not receive
+ * engine visibility updates.
+ *
+ * A few notes on certain bits:
+ *
+ * - `contradar`: True when the unit entered los at some point, remains set
+ *   until radar is lost. Useful for tracking the unit type in radar, if you
+ *   lost los you still know what unit type that radar dot refers to.
+ * - `prevlos`: True when the unit has entered los at least once, useful for
+ *   tracking building locations (controls whether a ghost appears or not in
+ *   the location)
+ *
+ * @see Spring.SetUnitLosMask
  * @function Spring.SetUnitLosState
  * @param unitID integer
  * @param allyTeam number
- * @param los number|table
- * @return nil
+ * @param losTypes LosTable|LosMask|integer A bitmask of `LosMask` bits or a
+ * table
  */
 int LuaSyncedCtrl::SetUnitLosState(lua_State* L)
 {
