@@ -6,6 +6,7 @@
 #include "Sim/Projectiles/ExplosionListener.h"
 #include "Sim/Units/CommandAI/Command.h"
 #include "Sim/Misc/GlobalConstants.h"
+#include "System/TemplateUtils.hpp"
 #include "System/EventClient.h"
 #include "System/float3.h"
 #include "System/float4.h"
@@ -78,7 +79,7 @@ public:
 			return std::holds_alternative<T*>(hitObject);
 		}
 		else {
-			return false;
+			static_assert(Recoil::always_false_v<T>, "T* is not a valid alternative for VariantType");
 		}
 	}
 private:

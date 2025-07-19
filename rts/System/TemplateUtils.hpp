@@ -224,6 +224,11 @@ namespace Recoil {
 			"The visitor does not include all necessary overloads for the given variant");
 		return std::visit(std::forward<Visitor>(visitor), std::forward<Variant>(variant));
 	}
+
+	// useful in the context of static_assert(always_false_v<T>, ...)
+	// https://stackoverflow.com/a/76675119
+	template <typename T>
+	constexpr bool always_false_v = false;
 }
 
 namespace Concepts {
