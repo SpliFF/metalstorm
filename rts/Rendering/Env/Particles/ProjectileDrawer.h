@@ -158,8 +158,8 @@ private:
 
 	std::vector<const AtlasedTexture*> smokeTextures;
 
-	/// projectiles container {modelless, model}
-	std::array<std::vector<CProjectile*>, 2> renderProjectiles;
+	/// projectiles container
+	std::vector<CProjectile*> renderProjectiles;
 
 	/// projectiles with a model, binned by model type and textures
 	std::array<ModelRenderContainer<CProjectile>, MODELTYPE_CNT> modelRenderers;
