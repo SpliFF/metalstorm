@@ -129,7 +129,9 @@ public:
 		if (basePattern) {
 			FcPatternDestroy(basePattern);
 		}
-		FcFini();
+		// Not calling FcFini since it can cause problems on shutdown because of conflicts with window
+		// decorations also using fontconfig.
+		//FcFini();
 		config = nullptr;
 		#endif
 	}
@@ -253,7 +255,7 @@ public:
 
 	void InitFailed() {
 		FcConfigDestroy(config);
-		FcFini();
+		//FcFini();
 		config = nullptr;
 	}
 	static bool InitSingletonFontconfig(bool console) { return singleton->InitFontconfig(console); }
