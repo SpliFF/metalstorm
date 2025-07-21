@@ -87,7 +87,7 @@ bool LuaConstEngine::PushEntries(lua_State* L)
 #ifndef HEADLESS
 	bool newIndicators = fontHandler.disableOldColorIndicators;
 #else
-	bool newIndicators = configHandler->GetBool("TextDisableOldColorIndicators");
+	bool newIndicators = true;
 #endif
 	lua_createtable(L, 0, 3);
 		LuaPushNamedChar(L, "Color"          , static_cast<char>(newIndicators ? CglFont::ColorCodeIndicator : CglFont::OldColorCodeIndicator)  );
