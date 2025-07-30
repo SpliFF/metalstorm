@@ -2725,14 +2725,14 @@ int LuaUnsyncedRead::GetCameraNames(lua_State* L)
 
 /***
  * @function Spring.GetCameraState
- * @param useReturns false
- * @return CameraState cameraState
+ * @param useTable false
+ * @return CameraName name
+ * @return any ... depends on the current controller mode.
  */
 /***
  * @function Spring.GetCameraState
- * @param useReturns true? (Default: `true`) Return multiple values instead of a table.
- * @return CameraName name
- * @return any ... depend on current controller mode.
+ * @param useTable true? (Default: `true`) Return a table instead of multiple values.
+ * @return CameraState cameraState
  */
 int LuaUnsyncedRead::GetCameraState(lua_State* L)
 {
