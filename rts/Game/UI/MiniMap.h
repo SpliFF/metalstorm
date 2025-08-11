@@ -162,6 +162,7 @@ protected:
 
 	bool showButtons = false;
 	bool drawProjectiles = false;
+	bool drawPings = false;
 	bool useIcons = true;
 
 	bool renderToTexture = true;

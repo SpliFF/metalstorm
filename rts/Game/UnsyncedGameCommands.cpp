@@ -2963,7 +2963,24 @@ public:
 
 class MiniMapActionExecutor : public IUnsyncedActionExecutor {
 public:
-	MiniMapActionExecutor() : IUnsyncedActionExecutor("MiniMap", "FIXME document subcommands") {
+	MiniMapActionExecutor() : IUnsyncedActionExecutor("MiniMap", "Various subcommands to control the minimap", false, {
+			{"fullproxy [0|1]", "Enable (1) or disable (0) full proxy mode. No argument toggles."},
+			{"icons [0|1]", "Enable (1) or disable (0) unit icons. No argument toggles."},
+			{"unitexp <float>", "Set unit size exponent (float)."},
+			{"unitsize <float>", "Set base unit size (float, min 0.0)."},
+			{"drawcommands [<int>]", "Set draw commands level (int >= 0). No argument toggles between 0 and 1."},
+			{"drawprojectiles [0|1]", "Enable (1) or disable (0) drawing projectiles. No argument toggles."},
+			{"drawpings [0|1]", "Enable (1) or disable (0) drawing pings. No argument toggles. Disabling clears pings."},
+			{"simplecolors [0|1]", "Enable (1) or disable (0) simple minimap colors. No argument toggles."},
+			{"geo <geometry>", "Set minimap geometry (not available in dualscreen mode)."},
+			{"geometry <geometry>", "Set minimap geometry (not available in dualscreen mode)."},
+			{"min [0|1]", "Minimize (1) or restore (0) minimap (not available in dualscreen mode). No argument toggles."},
+			{"minimize [0|1]", "Minimize (1) or restore (0) minimap (not available in dualscreen mode). No argument toggles."},
+			{"max [0|1]", "Maximize (1) or restore (0) minimap (not available in dualscreen mode). No argument toggles."},
+			{"maximize [0|1]", "Maximize (1) or restore (0) minimap (not available in dualscreen mode). No argument toggles."},
+			{"maxspect [0|1]", "Maximize (1) or restore (0) minimap with aspect ratio (not available in dualscreen mode). No argument toggles."},
+			{"mouseevents [0|1]", "Enable (1) or disable (0) mouse interaction. No argument toggles."},
+			}) {
 	}
 
 	bool Execute(const UnsyncedAction& action) const final {
