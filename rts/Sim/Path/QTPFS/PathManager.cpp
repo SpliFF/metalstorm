@@ -138,6 +138,15 @@ namespace QTPFS {
 
 		return registry.try_get<UnsyncedIPath>(entityId);
 	};
+
+	PathSearch* GetSearch(QTPFS::entity entityId) {
+		if (!registry.valid(entityId)) return nullptr;
+
+		PathSearch* path = registry.try_get<PathSearch>(entityId);
+		if (path != nullptr) return path;
+
+		return registry.try_get<UnsyncedPathSearch>(entityId);
+	};
 }
 
 QTPFS::PathManager::PathManager() {
@@ -146,6 +155,7 @@ QTPFS::PathManager::PathManager() {
 	NodeLayer::InitStatic();
 	PathManager::InitStatic();
 	PathSearch::InitStatic();
+	UnsyncedPathSearch::InitStatic();
 
 	assert(registry.alive() == 0);
 
@@ -167,16 +177,21 @@ QTPFS::PathManager::~PathManager() {
 		bool isPath = registry.all_of<IPath>(entity);
 		bool isUnsyncedPath = registry.all_of<UnsyncedIPath>(entity);
 		bool isSearch = registry.all_of<PathSearch>(entity);
+		bool isUnsyncedSearch = registry.all_of<UnsyncedPathSearch>(entity);
 		if (isPath) {
-			const IPath& path = registry.get<IPath>(entity);
+			LOG("%s: IPath %x still active!", __func__, entt::to_integral(entity));
 			registry.destroy(entity);
 		}
 		if (isUnsyncedPath) {
-			const IPath& path = registry.get<UnsyncedIPath>(entity);
+			LOG("%s: UnsyncedIPath %x still active!", __func__, entt::to_integral(entity));
 			registry.destroy(entity);
 		}
 		if (isSearch) {
-			const PathSearch& search = registry.get<PathSearch>(entity);
+			LOG("%s: PathSearch %x still active!", __func__, entt::to_integral(entity));
+			registry.destroy(entity);
+		}
+		if (isUnsyncedSearch) {
+			LOG("%s: UnsyncedPathSearch %x still active!", __func__, entt::to_integral(entity));
 			registry.destroy(entity);
 		}
 	});
@@ -839,8 +854,7 @@ void QTPFS::PathManager::ThreadUpdate() {
 
 bool QTPFS::PathManager::InitializeSearch(QTPFS::entity searchEntity) {
 	ZoneScoped;
-	assert(registry.all_of<PathSearch>(searchEntity));
-	PathSearch* search = &registry.get<PathSearch>(searchEntity);
+	PathSearch* search = GetSearch(searchEntity);
 
 	if (search->initialized)
 		return true;
@@ -900,6 +914,7 @@ bool QTPFS::PathManager::InitializeSearch(QTPFS::entity searchEntity) {
 void QTPFS::PathManager::ReadyQueuedSearches() {
 	RECOIL_DETAILED_TRACY_ZONE;
 	{
+		// Only synced searches get queued for batch processing.
 		auto pathView = registry.view<PathSearch>();
 
 		// Go through in reverse order to minimize reshuffling EnTT will do with the grouping.
@@ -925,6 +940,7 @@ void QTPFS::PathManager::ExecuteQueuedSearches() {
 
 	ReadyQueuedSearches();
 
+	// Only synced searches get queued for batch processing.
 	auto pathView = registry.group<PathSearch, ProcessPath>();
 
 	// execute pending searches collected via
@@ -1249,6 +1265,13 @@ unsigned int QTPFS::PathManager::QueueSearch(
 			return &(registry.emplace<UnsyncedIPath>(entityId));
 	};
 
+	auto createNewSearch = [](QTPFS::entity entityId, bool synced) -> PathSearch* {
+		if (synced)
+			return &(registry.emplace<PathSearch>(entityId, PATH_SEARCH_ASTAR));
+		else
+			return &(registry.emplace<UnsyncedPathSearch>(entityId, PATH_SEARCH_ASTAR));
+	};
+
 	IPath* newPath = createNewPath(pathEntity, synced);
 
 	// Every synced path gets one. It gets changed in a multi-threaded section, so we can't add them on demand.
@@ -1259,7 +1282,7 @@ unsigned int QTPFS::PathManager::QueueSearch(
 		object = nullptr;
 
 	QTPFS::entity searchEntity = registry.create();
-	PathSearch* newSearch = &registry.emplace<PathSearch>(searchEntity, PATH_SEARCH_ASTAR);
+	PathSearch* newSearch = createNewSearch(searchEntity, synced);
 
 	assert(targetPoint.x >= 0.f);
 	assert(targetPoint.z >= 0.f);
@@ -1364,6 +1387,8 @@ unsigned int QTPFS::PathManager::RequeueSearch(
 	newSearch->initialized = false;
 	newSearch->allowPartialSearch = allowPartialSearch;
 	newSearch->synced = oldPath->IsSynced();
+
+	assert(newSearch->synced == true);
 
 	newSearch->tryPathRepair = allowRepair;
 
@@ -1516,7 +1541,7 @@ unsigned int QTPFS::PathManager::ExecuteImmediateSearch(unsigned int pathId){
 	assert(registry.valid(pathSearchEntity));
 	InitializeSearch(pathSearchEntity);
 
-	PathSearch& pathSearch = registry.get<PathSearch>(pathSearchEntity);
+	PathSearch& pathSearch = *GetSearch(pathSearchEntity);
 	int pathType = pathSearch.GetPathType();
 	NodeLayer& nodeLayer = nodeLayers[pathType];
 	ExecuteSearch(&pathSearch, nodeLayer, pathType);
