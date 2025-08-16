@@ -185,6 +185,7 @@ else  (UNIX AND NOT MINGW)
 		add_definitions(-D_ENABLE_EXTENDED_ALIGNED_STORAGE)
 		add_definitions(-DNOMINMAX -DWIN32_LEAN_AND_MEAN)
 		add_compile_options(/bigobj)
+		add_compile_options(/utf-8) ## new FMT refuses to compile w/o it
 		#set(EXE_FLAGS WIN32)
 	endif()
 endif (UNIX AND NOT MINGW)
