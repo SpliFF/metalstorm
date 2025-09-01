@@ -162,11 +162,12 @@ namespace spring {
 
 		void Del(const TKey& key) {
 			const auto kpIt = kpMap.find(key);
-
 			assert(kpIt != kpMap.end());
 
 			const size_t posToDel = kpIt->second;
 			const size_t lastPos  = vault.size() - 1;
+
+			kpMap.erase(kpIt);
 
 			if (posToDel != lastPos) {
 				const TKey& lastKey = pkVec.back();
@@ -177,8 +178,6 @@ namespace spring {
 
 			vault.pop_back();
 			pkVec.pop_back();
-
-			kpMap.erase(kpIt);
 
 			freeKeys.emplace_back(key);
 		}
