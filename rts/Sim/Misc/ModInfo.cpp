@@ -130,6 +130,8 @@ void CModInfo::ResetState()
 		allowTake = true;
 
 		allowEnginePlayerlist = true;
+
+		useStartPositionSelecter = true;
 	}
 	{
 		// make windChangeReportPeriod equal to EnvResourceHandler::WIND_UPDATE_RATE = 15 * GAME_SPEED;
@@ -190,6 +192,8 @@ void CModInfo::Init(const std::string& modFileName)
 		nativeExcessSharing = system.GetBool("nativeExcessSharing", nativeExcessSharing);
 		allowTake = system.GetBool("allowTake", allowTake);
 		allowEnginePlayerlist = system.GetBool("allowEnginePlayerlist", allowEnginePlayerlist);
+
+		useStartPositionSelecter = system.GetBool("useStartPositionSelecter", useStartPositionSelecter);
 	}
 
 	{

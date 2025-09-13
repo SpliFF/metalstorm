@@ -332,7 +332,9 @@ bool LuaUnsyncedCtrl::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(SetWindowMinimized);
 	REGISTER_LUA_CFUNC(SetWindowMaximized);
 	REGISTER_LUA_CFUNC(SetMiniMapRotation);
-	
+
+	REGISTER_LUA_CFUNC(RequestStartPosition);
+
 	REGISTER_LUA_CFUNC(Yield);
 
 	return true;
@@ -715,6 +717,32 @@ int LuaUnsyncedCtrl::SendMessageToAllyTeam(lua_State* L)
 {
 	if (luaL_checkint(L, 1) == gu->myAllyTeam)
 		PrintMessage(L, luaL_checksstring(L, 2));
+
+	return 0;
+}
+
+/*** @function Spring.RequestStartPosition
+ *
+ * Requests a startpoint, as if clicking the spot with the native GUI.
+ *
+ * @param x number
+ * @param y number
+ * @param z number
+ * @param ready? boolean
+ */
+int LuaUnsyncedCtrl::RequestStartPosition(lua_State* L) {
+	const float3 pickPos =
+		{ luaL_checkfloat(L, 1)
+		, luaL_checkfloat(L, 2)
+		, luaL_checkfloat(L, 3)
+	};
+	const bool isReady = luaL_optboolean(L, 4, playerHandler.Player(gu->myPlayerNum)->IsReadyToStart());
+
+	const int readyState = isReady
+		? CPlayer::PLAYER_RDYSTATE_READIED
+		: CPlayer::PLAYER_RDYSTATE_UPDATED
+	;
+	clientNet->Send(CBaseNetProtocol::Get().SendStartPos(gu->myPlayerNum, gu->myTeam, readyState, pickPos.x, pickPos.y, pickPos.z));
 
 	return 0;
 }

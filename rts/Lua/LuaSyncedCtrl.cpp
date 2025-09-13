@@ -142,6 +142,9 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(GameOver);
 	REGISTER_LUA_CFUNC(SetGlobalLos);
 
+	REGISTER_LUA_CFUNC(SetPlayerReadyState);
+	REGISTER_LUA_CFUNC(SetTeamStartPosition);
+
 	REGISTER_LUA_CFUNC(AddTeamResource);
 	REGISTER_LUA_CFUNC(UseTeamResource);
 	REGISTER_LUA_CFUNC(SetTeamResource);
@@ -945,6 +948,63 @@ int LuaSyncedCtrl::AssignPlayerToTeam(lua_State* L)
 	return 0;
 }
 
+/*** Set the starting position of a team.
+ *
+ * If the position argument is outside the team's startbox, the position is clamped.
+ * 
+ * @function Spring.SetTeamStartPosition
+ * @param teamID integer
+ * @param x number left position (elmos)
+ * @param y number vertical position (elmos)
+ * @param z number top position (elmos)
+ * @return boolean true if the position was set, false if the teamID is invalid
+ */
+int LuaSyncedCtrl::SetTeamStartPosition(lua_State* L)
+{
+	const unsigned int teamID = luaL_checkint(L, 1);
+	float3 pickPos =
+		{ luaL_checkfloat(L, 2)
+		, luaL_checkfloat(L, 3)
+		, luaL_checkfloat(L, 4)
+	};
+
+	if (!teamHandler.IsValidTeam(teamID)) {
+		lua_pushboolean(L, false);
+		return 1;
+	}
+
+	CTeam* team = teamHandler.Team(teamID);
+	team->ClampStartPosInStartBox(&pickPos);
+	team->SetStartPos(pickPos);
+
+	lua_pushboolean(L, true);
+	return 1;
+}
+
+/*** Set the ready state of a player.
+ *
+ * Use to mark a player (un)ready in the pregame phase.
+ *
+ * @function Spring.SetPlayerReadyState
+ * @param playerID integer
+ * @param ready boolean
+ * @return boolean true if the state was set, false if the playerID was invalid
+ */
+int LuaSyncedCtrl::SetPlayerReadyState(lua_State* L)
+{
+	const unsigned int playerID = luaL_checkint(L, 1);
+	const bool isReady = luaL_checkboolean(L, 2);
+
+	if (!playerHandler.IsValidPlayer(playerID)) {
+		lua_pushboolean(L, false);
+		return 1;
+	}
+
+	playerHandler.Player(playerID)->SetReadyToStart(isReady);
+
+	lua_pushboolean(L, true);
+	return 1;
+}
 
 /*** Changes access to global line of sight for a team and its allies.
  *

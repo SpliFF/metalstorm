@@ -236,9 +236,11 @@ public:
 
 	// how often to report wind speed/direction to wind gens
 	int windChangeReportPeriod;
+
+	// If true, players can select their start position by clicking the map
+	bool useStartPositionSelecter;
 };
 
 extern CModInfo modInfo;
 
 #endif // MOD_INFO_H
-
