@@ -105,6 +105,8 @@ void Skinning::ReparentMeshesTrianglesToBones(S3DModel* model, const std::vector
 						std::swap(targVert.boneWeights[0], targVert.boneWeights[3]);
 						std::swap(targVert.boneIDsHigh[0], targVert.boneIDsHigh[3]);
 
+						// bad idea as if the big weight was removed from the targVert.boneIDs[3], the rest will get too much of the effect
+						#if 0
 						// renormalize weights (optional but nice for debugging)
 						float sumWeights = 0.0f;
 						for (const auto& bw : targVert.boneWeights) {
@@ -113,6 +115,7 @@ void Skinning::ReparentMeshesTrianglesToBones(S3DModel* model, const std::vector
 						for (auto& bw : targVert.boneWeights) {
 							bw = static_cast<uint8_t>(std::clamp(math::round(static_cast<float>(bw) / sumWeights), 0.0f, 255.0f));
 						}
+						#endif
 					}
 				}
 
@@ -214,6 +217,8 @@ void Skinning::ReparentCompleteMeshesToBones(S3DModel* model, const std::vector<
 					std::swap(targVert.boneWeights[0], targVert.boneWeights[3]);
 					std::swap(targVert.boneIDsHigh[0], targVert.boneIDsHigh[3]);
 
+					// bad idea as if the big weight was removed from the targVert.boneIDs[3], the rest will get too much of the effect
+					#if 0
 					// renormalize weights (optional but nice for debugging)
 					float sumWeights = 0.0f;
 					for (const auto& bw : targVert.boneWeights) {
@@ -222,6 +227,7 @@ void Skinning::ReparentCompleteMeshesToBones(S3DModel* model, const std::vector<
 					for (auto& bw : targVert.boneWeights) {
 						bw = static_cast<uint8_t>(std::clamp(math::round(static_cast<float>(bw) / sumWeights), 0.0f, 255.0f));
 					}
+					#endif
 				}
 			}
 

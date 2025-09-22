@@ -267,13 +267,6 @@ void GetModelSpaceVertex(out vec4 msPosition, out vec3 msNormal)
 	vec4 piecePos = vec4(pos, 1.0);
 	vec4 normal4 = vec4(normal, 0.0);
 
-	vec4 weights = vec4(
-		float(GetUnpackedValue(bonesInfo.y, 0u)) / 255.0,
-		float(GetUnpackedValue(bonesInfo.y, 1u)) / 255.0,
-		float(GetUnpackedValue(bonesInfo.y, 2u)) / 255.0,
-		float(GetUnpackedValue(bonesInfo.y, 3u)) / 255.0
-	) * float(tx.trSc.w > 0.0);
-
 	uint bID0 = GetUnpackedValue(bonesInfo.x, 0u) + (GetUnpackedValue(bonesInfo.z, 0u) << 8u); //first boneID
 	
 	Transform tx;
@@ -289,17 +282,21 @@ void GetModelSpaceVertex(out vec4 msPosition, out vec3 msNormal)
 		//tx = transforms[instData.x + 2u * (1u + bID0) + 1u];
 	}
 
+	vec4 weights = vec4(
+		float(GetUnpackedValue(bonesInfo.y, 0u)) / 255.0,
+		float(GetUnpackedValue(bonesInfo.y, 1u)) / 255.0,
+		float(GetUnpackedValue(bonesInfo.y, 2u)) / 255.0,
+		float(GetUnpackedValue(bonesInfo.y, 3u)) / 255.0
+	) * float(tx.trSc.w > 0.0);
+
 	msPosition = ApplyTransform(tx, piecePos);
 	msNormal   = ApplyTransform(tx, normal4).xyz;
 
 	if (staticModel || weights[0] == 1.0)
 		return;
 
-	float wSum = 0.0;
-
 	msPosition *= weights[0];
 	msNormal   *= weights[0];
-	wSum       += weights[0];
 
 	Transform bposeTra = transforms[instData.w + bID0];
 
@@ -325,14 +322,7 @@ void GetModelSpaceVertex(out vec4 msPosition, out vec3 msNormal)
 
 		msPosition += txPiecePos    * weights[bi];
 		msNormal   += txPieceNormal * weights[bi];
-		wSum       += weights[bi];
 	}
-
-	if (wSum == 0.0)
-		wSum = 1.0;
-
-	msPosition /= wSum;
-	msNormal   /= wSum;
 }
 
 void main(void)
