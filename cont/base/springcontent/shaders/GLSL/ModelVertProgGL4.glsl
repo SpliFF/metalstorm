@@ -272,7 +272,7 @@ void GetModelSpaceVertex(out vec4 msPosition, out vec3 msNormal)
 		float(GetUnpackedValue(bonesInfo.y, 1u)) / 255.0,
 		float(GetUnpackedValue(bonesInfo.y, 2u)) / 255.0,
 		float(GetUnpackedValue(bonesInfo.y, 3u)) / 255.0
-	);
+	) * float(tx.trSc.w > 0.0);
 
 	uint bID0 = GetUnpackedValue(bonesInfo.x, 0u) + (GetUnpackedValue(bonesInfo.z, 0u) << 8u); //first boneID
 	
@@ -289,7 +289,6 @@ void GetModelSpaceVertex(out vec4 msPosition, out vec3 msNormal)
 		//tx = transforms[instData.x + 2u * (1u + bID0) + 1u];
 	}
 
-	weights[0] *= float(tx.trSc.w > 0.0);
 	msPosition = ApplyTransform(tx, piecePos);
 	msNormal   = ApplyTransform(tx, normal4).xyz;
 
@@ -318,8 +317,6 @@ void GetModelSpaceVertex(out vec4 msPosition, out vec3 msNormal)
 			timeInfo.w
 		);
 
-		weights[bi] *= float(boneTx.trSc.w > 0.0);
-
 		// emulate boneTx * bposeInvTra * bposeTra * piecePos
 		vec4 txPiecePos = ApplyTransform(ApplyTransform(boneTx, ApplyTransform(bposeInvTra, bposeTra)), piecePos);
 
@@ -330,6 +327,9 @@ void GetModelSpaceVertex(out vec4 msPosition, out vec3 msNormal)
 		msNormal   += txPieceNormal * weights[bi];
 		wSum       += weights[bi];
 	}
+
+	if (wSum == 0.0)
+		wSum = 1.0;
 
 	msPosition /= wSum;
 	msNormal   /= wSum;

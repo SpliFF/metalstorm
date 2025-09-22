@@ -14,7 +14,7 @@ namespace Skinning {
 		std::vector<uint32_t> indcs;
 	};
 
-	static std::vector<size_t> boneWeights;
+	static std::vector<std::pair<size_t, size_t>> boneWeights;
 
 	uint16_t GetBoneID(const SVertexData& vert, size_t wi);
 
