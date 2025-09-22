@@ -3,6 +3,8 @@
 #include <vector>
 #include <numeric>
 #include <algorithm>
+#include <unordered_set>
+#include <unordered_map>
 
 #include "GLTFParser.h"
 #include "3DModel.h"
@@ -195,7 +197,8 @@ namespace Impl {
 		}
 	}
 
-	void ReplaceNodeIndexWithPieceIndex(std::vector<SVertexData>& verts, const spring::unordered_map<size_t, size_t>& nodeIdxToPieceIdx) {
+	template<typename UM>
+	void ReplaceNodeIndexWithPieceIndex(std::vector<SVertexData>& verts, const UM& nodeIdxToPieceIdx) {
 		for (auto& vert : verts) {
 			for (size_t wi = 0; wi < vert.boneIDsLow.size(); ++wi) {
 				const auto nodeIdx = Skinning::GetBoneID(vert, wi);
@@ -210,7 +213,8 @@ namespace Impl {
 		}
 	}
 
-	void CondTransformSkinsToModelSpace(std::vector<SVertexData>& verts, size_t nodeIdx, const spring::unordered_map<size_t, Transform>& transforms) {
+	template<typename UM>
+	void TransformSkinsToModelSpace(std::vector<SVertexData>& verts, size_t nodeIdx, const UM& transforms) {
 		auto it = transforms.find(nodeIdx);
 		assert(it != transforms.end());
 
@@ -219,10 +223,8 @@ namespace Impl {
 		if likely(it->second.IsIdentity())
 			return;
 
-		auto invTransform = it->second.InvertAffineNormalized();
-
 		for (auto& vert : verts) {
-			vert.TransformBy(invTransform);
+			vert.TransformBy(it->second);
 		}
 	}
 
@@ -477,7 +479,7 @@ void CGLTFParser::Load(S3DModel& model, const std::string& modelFilePath)
 		auto& skinnedMesh = allSkinnedMeshes.emplace_back();
 
 		Impl::ReadGeometryData(asset, mesh.primitives, skinnedMesh.verts, skinnedMesh.indcs, ni, &skin);
-		Impl::CondTransformSkinsToModelSpace(skinnedMesh.verts, ni, modelTransforms);
+		Impl::TransformSkinsToModelSpace(skinnedMesh.verts, ni, modelTransforms);
 		Impl::ReplaceNodeIndexWithPieceIndex(skinnedMesh.verts, nodeIdxToPieceIdx);
 	}
 
@@ -503,6 +505,9 @@ void CGLTFParser::Load(S3DModel& model, const std::string& modelFilePath)
 	}
 
 	if (!allSkinnedMeshes.empty()) {
+		// Skinning::<> code below needs correct bposeTransforms
+		model.SetPieceMatrices();
+
 		// if numMeshes >= numBones reparent the whole meshes
 		// else reparent meshes per-triangle
 		if (allSkinnedMeshes.size() >= allBones.size())
