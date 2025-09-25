@@ -26,6 +26,7 @@ See [the 2025.04 page]({{% ref "changelogs/changelog-2025-04" %}}) for the upcom
 - default value for `LogRepeatLimit` springsetting 10 → 0, see below.
 - area resurrect command now puts a leash on repair sub-commands (behaviour change, but also the repair subcommands now have 5 args instead of 1).
 - widgets can now sign up to receive the `widget:Explosion` callin. There are some arcane visibility rules that boil down to it revealing much more info than the existing `widget:ShockFront` callin.
+- removed the 10 mutator limit, can now have arbitrarily many (this may affect lobbies, autohosts etc who may have assumed the limit).
 - fully removed support for 32-bit builds.
 
 ### Deprecation notice
@@ -147,6 +148,7 @@ Numberless `animParams` used as a fallback.
 
 ### Misc
 
+- removed the 10 mutator limit, can now have arbitrarily many.
 - add `accurateLeading` numerical unit weapon tag (note, not weaponDef). Controls how many extra accuracy iterations are done when calculating shots.
 0: current behaviour (single iteration, fails to hit at large speed disparities and/or weird angles).
 1: one extra iteration, enough to get a perfect solution for non-ballistic shots and usually good enough for non-extreme ballistic shots too.
