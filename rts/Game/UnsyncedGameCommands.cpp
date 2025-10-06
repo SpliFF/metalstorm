@@ -1159,7 +1159,7 @@ public:
 	SpecFullViewActionExecutor() : IUnsyncedActionExecutor(
 		"SpecFullView",
 		"Sets or toggles LOS settings if the local user is a spectator. Fullview: See everything, otherwise visibility is determined by the current team. Fullselect: Whether all units can be selected",
-		false, 
+		false,
 		{
 			{"", "Toggles both Fullview and Fullselect from current values"},
 			{"0", "Not Fullview, Not Fullselect"},
@@ -1259,7 +1259,7 @@ public:
 	GroupActionExecutor() : IUnsyncedActionExecutor("Group", "Manage control groups", false, {
 			{"<n>", "Select group <n>, also focuses on second call (deprecated)"},
 			{"select <n>", "Select group <n>"},
-			{"focus <n>", "Focus camera on group <n>"},
+			{"focus <n> [smoothness]", "Focus camera on group <n> with optional camera smoothness"},
 			{"set <n>", "Set current selected units as group <n>"},
 			{"add <n>", "Add current selected units to group <n> (does not change selection)"},
 			{"unset", "Deassign control group for currently selected units"},
@@ -1296,6 +1296,7 @@ public:
 				groupId = StringToInt(args[0], &parseFailure);
 				break;
 			case 2:
+			case 3: // NOTE: Right now GroupCommand's longest command only has 3 args
 				subCommand = args[0];
 				groupId = StringToInt(args[1], &parseFailure);
 				break;
@@ -1310,9 +1311,14 @@ public:
 		if (groupId < 0 || groupId > 9)
 			return WrongSyntax("groupId must be single digit number");
 
+		// NOTE: This only works with group commands that take exactly 1 required argument
+		std::vector<std::string> extraArgs = {};
+		for (int i = 2; i < args.size(); i++)
+			extraArgs.push_back(args[i]);
+
 		// Finally, actually run the command.
 		bool error;
-		const bool halt = uiGroupHandlers[gu->myTeam].GroupCommand(groupId, subCommand, error);
+		const bool halt = uiGroupHandlers[gu->myTeam].GroupCommand(groupId, subCommand, extraArgs, error);
 
 		if (error)
 			return WrongSyntax("subcommand " + subCommand + " not found");
@@ -4237,4 +4243,3 @@ void UnsyncedGameCommands::DestroyInstance(bool reload) {
 	spring::SafeDestruct(singleton);
 	std::memset(ugcSingletonMem, 0, sizeof(ugcSingletonMem));
 }
-
