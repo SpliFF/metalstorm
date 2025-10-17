@@ -302,6 +302,9 @@ void ModelUtils::GetModelParams(const LuaTable& modelTable, ModelParams& modelPa
 		value = modelTable.Get(key, T{});
 	};
 
+	CondGetLuaValue(modelParams.texs[0], "tex1");
+	CondGetLuaValue(modelParams.texs[1], "tex2");
+
 	CondGetLuaValue(modelParams.mins, "mins");
 	CondGetLuaValue(modelParams.maxs, "maxs");
 
