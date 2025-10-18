@@ -179,7 +179,7 @@ jobs:
 
           EOF
       - name: Save
-        if: github.event_name != 'pull_request'
+        #if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         id: save-artifact
         with:
