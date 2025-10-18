@@ -676,6 +676,7 @@ void CMobileCAI::ExecuteObjectAttack(Command& c)
 	RECOIL_DETAILED_TRACY_ZONE;
 	bool tryTargetRotate  = false;
 	bool tryTargetHeading = false;
+	bool tryOwnerRotation = false; // if a weapon doesn't swivel to aim we've got to know about it to rotate the owner instead
 
 	float edgeFactor = 0.0f; // percent offset to target center
 
@@ -715,8 +716,10 @@ void CMobileCAI::ExecuteObjectAttack(Command& c)
 
 		edgeFactor = math::fabs(w->weaponDef->targetBorder);
 
-		if (tryTargetRotate || tryTargetHeading)
+		if (tryTargetRotate)
 			break;
+
+		tryOwnerRotation |= w->WantOwnerRotation();
 	}
 
 	// if w->AttackUnit() returned true then we are already
@@ -752,7 +755,7 @@ void CMobileCAI::ExecuteObjectAttack(Command& c)
 
 	// target is probably close enough
 	if (targetMidPosDist2D < (owner->maxRange * 0.9f)) {
-		if (owner->unitDef->IsHoveringAirUnit() || (targetMidPosVec.SqLength2D() < 1024)) {
+		if (owner->unitDef->IsHoveringAirUnit() || (targetMidPosVec.SqLength2D() < 1024) || tryOwnerRotation) {
 			StopMove();
 			owner->moveType->KeepPointingTo(orderTarget->midPos, minPointingDist, true);
 			return;
@@ -789,9 +792,12 @@ void CMobileCAI::ExecuteObjectAttack(Command& c)
 		// otherwise it will move us to the exact target position which should fix issues with
 		// low-range (mainly melee) weapons
 		SetGoal(targetErrPos - norm * CalcTargetRadius(orderTarget, orderTarget->radius, edgeFactor * 0.8f), owner->pos);
+		if (lastCloseInTry < (gs->frameNum + MAX_CLOSE_IN_RETRY_TICKS)) {
+			if (tryOwnerRotation)
+				owner->moveType->KeepPointingTo(orderTarget->midPos, minPointingDist, true);
 
-		if (lastCloseInTry < (gs->frameNum + MAX_CLOSE_IN_RETRY_TICKS))
 			lastCloseInTry = gs->frameNum;
+		}
 	}
 }
 
