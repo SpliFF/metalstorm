@@ -685,7 +685,7 @@ void CGame::PostLoadSimulation(LuaParser* defsParser)
 	CUnitScriptFactory::InitStatic();
 	CUnitScriptEngine::InitStatic();
 	MoveTypeFactory::InitStatic();
-	CWeaponLoader::InitStatic();
+	CWeaponLoader::InitStatic(unitDefHandler);
 
 	unitHandler.Init();
 	featureHandler.Init();
