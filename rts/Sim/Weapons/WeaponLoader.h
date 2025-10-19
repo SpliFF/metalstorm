@@ -7,7 +7,7 @@ class CUnit;
 class CWeapon;
 struct UnitDefWeapon;
 struct WeaponDef;
-struct CUnitDefHandler;
+class CUnitDefHandler;
 
 class CWeaponLoader {
 public:
