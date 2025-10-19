@@ -24,6 +24,7 @@
 #include "System/ContainerUtil.h"
 #include "System/SafeUtil.h"
 #include "System/StringUtil.h"
+#include "Rendering/Models/3DModelPiece.hpp"
 
 #include "System/Misc/TracyDefs.h"
 
@@ -50,7 +51,10 @@ void CLuaUnitScript::PostLoad()
 
 	for (auto& p: unit->localModel.pieces) {
 		pieces.push_back(&p);
+		if (!p.parent)
+			rootPiece = &p;
 	}
+	assert(rootPiece);
 
 	L = handle->GetLuaState();
 
@@ -83,10 +87,11 @@ static inline LocalModelPiece* ParseLocalModelPiece(lua_State* L, CUnitScript* s
 	RECOIL_DETAILED_TRACY_ZONE;
 	const int piece = luaL_checkint(L, 1) - 1;
 
-	if (!script->PieceExists(piece))
+	auto* p = script->SafeGetPiece(piece);
+	if (!p)
 		luaL_error(L, "%s(): Invalid piecenumber", caller);
 
-	return (script->GetScriptLocalModelPiece(piece));
+	return p;
 }
 
 static inline int ToLua(lua_State* L, const float3& v)
@@ -260,7 +265,10 @@ CLuaUnitScript::CLuaUnitScript(lua_State* L, CUnit* unit)
 	}
 	for (auto& p: unit->localModel.pieces) {
 		pieces.push_back(&p);
+		if (!p.parent)
+			rootPiece = &p;
 	}
+	assert(rootPiece);
 }
 
 
@@ -1028,6 +1036,7 @@ bool CLuaUnitScript::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(StopSpin);
 	REGISTER_LUA_CFUNC(Turn);
 	REGISTER_LUA_CFUNC(Move);
+	REGISTER_LUA_CFUNC(Scale);
 	REGISTER_LUA_CFUNC(MultiSetPieceVisibility);
 	REGISTER_LUA_CFUNC(MultiSpin);
 	REGISTER_LUA_CFUNC(MultiStopSpin);
@@ -1467,6 +1476,28 @@ int CLuaUnitScript::Move(lua_State* L)
 		activeScript->MoveNow(piece, axis, dest);
 	} else {
 		activeScript->Move(piece, axis, speed, dest);
+	}
+
+	return 0;
+}
+
+int CLuaUnitScript::Scale(lua_State* L)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	// void Scale(int speed, int destination);
+	// void ScaleNow(int destination);
+	if (activeScript == nullptr)
+		return 0;
+
+	const int piece = luaL_checkint(L, 1) - 1;
+	const float dest = luaL_checkfloat(L, 2);
+	const float speed = luaL_optfloat(L, 3, 0.0f); // speed == 0 -> ScaleNow
+
+	if (speed == 0.0f) {
+		activeScript->ScaleNow(piece, dest);
+	}
+	else {
+		activeScript->Scale(piece, speed, dest);
 	}
 
 	return 0;
