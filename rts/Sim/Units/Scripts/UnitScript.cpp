@@ -260,7 +260,8 @@ void CUnitScript::TickAllAnims(int deltaTime)
 #endif
 #ifdef _DEBUG
 	for (auto* p : pieces) {
-		assert(!p->GetDirty());
+		// NOTE: p can actually be nullptr when the cob script mentions pieces that don't exist in the model!
+		if (p) assert(!p->GetDirty());
 	}
 #endif // _DEBUG
 
