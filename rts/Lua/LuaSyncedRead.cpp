@@ -327,7 +327,6 @@ bool LuaSyncedRead::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(GetProjectileDirection);
 	REGISTER_LUA_CFUNC(GetProjectileVelocity);
 	REGISTER_LUA_CFUNC(GetProjectileGravity);
-	REGISTER_LUA_CFUNC(GetPieceProjectileParams);
 	REGISTER_LUA_CFUNC(GetProjectileTarget);
 	REGISTER_LUA_CFUNC(GetProjectileIsIntercepted);
 	REGISTER_LUA_CFUNC(GetProjectileTimeToLive);
@@ -337,6 +336,8 @@ bool LuaSyncedRead::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(GetProjectileType);
 	REGISTER_LUA_CFUNC(GetProjectileDefID);
 	REGISTER_LUA_CFUNC(GetProjectileDamages);
+	REGISTER_LUA_CFUNC(GetPieceProjectileParams);
+	REGISTER_LUA_CFUNC(GetPieceProjectileName);
 
 	REGISTER_LUA_CFUNC(IsPosInMap);
 	REGISTER_LUA_CFUNC(GetWaterPlaneLevel);
@@ -7511,8 +7512,6 @@ int LuaSyncedRead::GetProjectileType(lua_State* L)
  *
  * @function Spring.GetProjectileDefID
  *
- * Using this to get a weaponDefID is HIGHLY preferred to indexing WeaponDefNames via GetProjectileName
- *
  * @param projectileID integer
  * @return number?
  */
@@ -7532,6 +7531,30 @@ int LuaSyncedRead::GetProjectileDefID(lua_State* L)
 		return 0;
 
 	lua_pushnumber(L, wdef->id);
+	return 1;
+}
+
+/*** Returns the name of the model piece from which a piece projectile was spawned. Returns nil for other projectiles including weapons
+ *
+ * @function Spring.GetPieceProjectileName
+ * @param projectileID integer
+ * @return string? pieceName
+ */
+int LuaSyncedRead::GetPieceProjectileName(lua_State* L)
+{
+	const auto* pro = ParseProjectile(L, __func__, 1);
+
+	if (pro == nullptr)
+		return 0;
+
+	if (!pro->piece)
+		return 0;
+
+	const auto* ppro = static_cast <const CPieceProjectile*> (pro);
+	if (ppro == nullptr || ppro->omp == nullptr) // FIXME: assert? neither should happen if pro->piece was true
+		return 0;
+
+	lua_pushsstring(L, ppro->omp->name);
 	return 1;
 }
 
