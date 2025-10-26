@@ -1134,6 +1134,7 @@ int LuaSyncedCtrl::SetWind(lua_State* L)
 }
 
 /*** Adds metal or energy resources to the specified team.
+ * Counts as production in post-game graph statistics.
  *
  * @function Spring.AddTeamResource
  * @param teamID integer
@@ -1171,6 +1172,7 @@ int LuaSyncedCtrl::AddTeamResource(lua_State* L)
 
 /***
  * Consumes metal or energy resources of the specified team.
+ * Counts as usage in post-game graph statistics.
  *
  * @function Spring.UseTeamResource
  * @param teamID integer
@@ -1181,6 +1183,7 @@ int LuaSyncedCtrl::AddTeamResource(lua_State* L)
  */
 /***
  * Consumes metal and/or energy resources of the specified team.
+ * Counts as usage in post-game graph statistics.
  *
  * @function Spring.UseTeamResource
  * @param teamID integer
