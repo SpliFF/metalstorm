@@ -19,17 +19,15 @@ public:
 	struct SAtlasEntry
 	{
 		SAtlasEntry() = default;
-		SAtlasEntry(const int2 _size, std::string _name, void* _data = nullptr)
+		SAtlasEntry(const int2 _size, std::string _name)
 			: size(_size)
 			, name(std::move(_name))
 			, texCoords()
-			, data(_data)
 		{}
 
 		int2 size;
 		std::string name;
 		AtlasedTexture texCoords;
-		void* data = nullptr;
 	};
 public:
 	IAtlasAllocator() = default;
@@ -39,14 +37,15 @@ public:
 public:
 	virtual bool Allocate() = 0;
 	virtual int GetNumTexLevels() const = 0;
+	virtual int GetReqNumTexLevels() const = 0;
 	virtual uint32_t GetNumPages() const = 0;
 	void SetMaxTexLevel(int maxLevels) { numLevels = maxLevels; };
 public:
-	void AddEntry(const SAtlasEntry& ae) { AddEntry(ae.name, ae.size, ae.data); }
-	void AddEntry(const std::string& name, int2 size, void* data = nullptr)
+	void AddEntry(const SAtlasEntry& ae) { AddEntry(ae.name, ae.size); }
+	void AddEntry(const std::string& name, const int2& size)
 	{
 		minDim = argmin(minDim, size.x, size.y);
-		entries[name] = SAtlasEntry(size, name, data);
+		entries[name] = SAtlasEntry(size, name);
 	}
 
 	auto FindEntry(const std::string& name) const
@@ -61,12 +60,6 @@ public:
 		return it->second.texCoords;
 	}
 	const auto& GetEntry(const std::string& name) const { return GetEntry(FindEntry(name));	}
-
-	void*& GetEntryData(const std::string& name)
-	{
-		return entries[name].data;
-	}
-
 	const auto& GetEntries() const { return entries; }
 
 	AtlasedTexture GetTexCoords(const spring::unordered_map<std::string, SAtlasEntry>::const_iterator& it)
