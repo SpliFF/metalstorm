@@ -639,9 +639,10 @@ void CUnitDrawerData::RenderUnitDestroyed(const CUnit* unit)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	CUnit* u = const_cast<CUnit*>(unit);
-	u->currentIconIndex = icon::INVALID_ICON_INDEX;
 
 	UpdateUnitGhosts(unit, unit->leavesGhost);
+	// must happen after UpdateUnitGhosts()
+	u->currentIconIndex = icon::INVALID_ICON_INDEX;
 
 	DelObject(unit, true);	
 

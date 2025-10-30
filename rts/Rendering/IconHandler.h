@@ -96,8 +96,8 @@ namespace icon {
 
 			const auto& GetIconsMap() const { return iconsMap; }
 			const auto& GetIconsData() const { return iconsData; }
-			const auto& GetIconData(const std::string& iconName) const { return iconsData[*iconsMap.try_get(iconName)]; }
-			const auto& GetIconData(size_t iconIdx) const { return iconsData[iconIdx]; }
+			const IconData& GetIconData(const std::string& iconName) const;
+			const IconData& GetIconData(size_t iconIdx) const;
 			size_t GetIconIdx(const std::string& iconName) const;
 			size_t GetIconIdxOrDefault(const std::string& iconName) const;
 			std::pair<bool, spring::unordered_map<std::string, size_t>::const_iterator> FindIconIdx(const std::string& iconName) const;

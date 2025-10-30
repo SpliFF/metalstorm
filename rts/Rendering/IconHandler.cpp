@@ -236,6 +236,19 @@ std::pair<bool, spring::unordered_map<std::string, size_t>::const_iterator> CIco
 	return std::make_pair(it != iconsMap.end(), it);
 }
 
+const IconData& CIconHandler::GetIconData(const std::string& iconName) const
+{
+	const auto* ptrIconIdx = iconsMap.try_get(iconName);
+	assert(ptrIconIdx != nullptr);
+	return iconsData[*ptrIconIdx];
+}
+
+const IconData& CIconHandler::GetIconData(size_t iconIdx) const
+{
+	assert(iconIdx < iconsData.size());
+	return iconsData[iconIdx];
+}
+
 size_t CIconHandler::GetIconIdx(const std::string& iconName) const
 {
 	if (const auto& [found, it] = FindIconIdx(iconName); found)
