@@ -712,6 +712,13 @@ void CUnitDrawerData::ReviewPrevLos(const CUnit* unit)
 	}
 }
 
+void CUnitDrawerData::PlayerChanged(int playerID)
+{
+	for (auto* unit : unsortedObjects) {
+		UpdateCurrentUnitIcon(unit);
+	}
+}
+
 void CUnitDrawerData::RemoveDeadGhost(GhostSolidObject* gso, std::vector<GhostSolidObject*>& dgb, int index)
 {
 	groundDecals->GhostDestroyed(gso);

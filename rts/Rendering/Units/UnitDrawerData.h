@@ -43,7 +43,8 @@ public:
 			eventName == "RenderUnitPreCreated" ||
 			eventName == "RenderUnitCreated" || eventName == "RenderUnitDestroyed" ||
 			eventName == "UnitEnteredRadar"  || eventName == "UnitEnteredLos"      ||
-			eventName == "UnitLeftRadar"     || eventName == "UnitLeftLos"         ;
+			eventName == "UnitLeftRadar"     || eventName == "UnitLeftLos"         ||
+			eventName == "PlayerChanged";
 	}
 
 	void RenderUnitPreCreated(const CUnit* unit) override;
@@ -55,6 +56,8 @@ public:
 
 	void UnitEnteredLos(const CUnit* unit, int allyTeam) override;
 	void UnitLeftLos(const CUnit* unit, int allyTeam) override;
+
+	void PlayerChanged(int playerID) override;
 
 	bool UpdateUnitGhosts(const CUnit* unit, const bool addNewGhost);
 	void UnitLeavesGhostChanged(const CUnit* unit, const bool leaveDeadGhost);
