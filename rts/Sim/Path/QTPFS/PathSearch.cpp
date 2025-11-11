@@ -565,9 +565,9 @@ void QTPFS::PathSearch::InitStartingSearchNodes() {
 		int relativeLimit = nodeLayer->GetNumOpenNodes() * relativeModifier;
 		int absoluteLimit = std::max(MAP_MAX_NODES_SEARCHED, modInfo.qtMaxNodesSearched);
 
-		fwdNodeSearchLimit = std::max(absoluteLimit, relativeLimit) >> 1;
+		nodeSearchLimit = std::max(absoluteLimit, relativeLimit) >> 1;
 	} else {
-		fwdNodeSearchLimit = std::numeric_limits<int>::max();
+		nodeSearchLimit = std::numeric_limits<int>::max();
 	}
 
 	searchThreadData->ResetQueue();
@@ -654,39 +654,37 @@ bool QTPFS::PathSearch::IsNodeActive(const SearchNode& curSearchNode) const {
 
 static float CircularEaseOut(float t) {
 	RECOIL_DETAILED_TRACY_ZONE;
-	// Only using 0-1 range, the sqrt is too intense early on.
-	return /*math::sqrt(*/ 1 - Square(t-1); //);
+	// Only using 0-1 range.
+	return math::sqrt( 1 - Square(t-1) );
 }
 
-void QTPFS::PathSearch::SetForwardSearchLimit() {
+void QTPFS::PathSearch::SetNodeSearchLimit() {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (pathOwner == nullptr) return;
 
 	auto& fwd = directionalSearchData[SearchThreadData::SEARCH_FORWARD];
-	auto& bwd = directionalSearchData[SearchThreadData::SEARCH_BACKWARD];
 
-	/* These values have been chosen by testing and analysis. They give a reasonable starting point
-	 * balancing performance gains against the chance that a poor path will result. I suspect these
-	 * can be improved, but this will need further stress testing.
-	 * 
-	 * TODO: make into mod rules so that games can calibrate them.
-	 */
-	float dist = 0.f;
+	// math::SQRT2 is the ratio of the distance between a square's diagonals and it's side. (approx 1.41)
+	// We need to approximate the average distance a QTPFS node presents. Just using the length would leave us quite
+	// short because paths generally don't cross nodes on only orthogonal angles. Using the diagonal lenth may be too
+	// much. So let's take the average of the two.
+	constexpr float LENGTH_ADJUST_RATIO = (1.f + math::SQRT2) * 0.5;
 
-	if (hCostMult != 0.f) {
-		dist = bwd.minSearchNode->GetPathCost(NODE_PATH_COST_H) / hCostMult;
-	}
-	else {
-		dist = fwd.tgtPoint.distance2D(fwd.srcPoint);
-	}
+	const float dist = fwd.tgtPoint.distance2D(fwd.srcPoint);
+	const float avgNodeLength = math::sqrt(float(mapDims.mapSquares) / float(nodeLayer->GetNumLeafNodes())) * LENGTH_ADJUST_RATIO * SQUARE_SIZE;
+
+	// Approximate the distance the pathing system can search out to. The calculation takes into account that we use
+	// bi-directional path finding.
+	const float maxDist = math::sqrt(modInfo.qtMaxNodesSearched>>1) * 2 * avgNodeLength;
 
 	constexpr int minNodesSearched = 256;
-
 	const int limit = modInfo.qtMaxNodesSearched>>1;
-	const float maxDist = modInfo.qtMaxNodesSearched;
 
 	const float interp = std::clamp(dist / maxDist, 0.f, 1.f);
-	fwdNodeSearchLimit = std::max(minNodesSearched, int(limit * CircularEaseOut(interp)));
+	nodeSearchLimit = std::max(minNodesSearched, int(limit * CircularEaseOut(interp)));
+
+	// LOG("%s: Pathing ease out for layer %d is (srchMax: %d, sqrs: %d, nodes: %d, dist: %f, avg: %f, max: %f) %d", __func__, nodeLayer->GetNodelayer(),
+	// 	modInfo.qtMaxNodesSearched, mapDims.mapSquares, nodeLayer->GetNumLeafNodes(), dist, avgNodeLength, maxDist, nodeSearchLimit);
 }
 
 // #pragma GCC push_options
@@ -918,7 +916,7 @@ bool QTPFS::PathSearch::ExecutePathSearch() {
 			// several scenarios that impact performance.
 			// 1. Maps with huge islands.
 			// 2. Players wall off the map in PvE modes, create huge artificial islands.
-			if (fwdNodesSearched >= fwdNodeSearchLimit)
+			if (fwdNodesSearched >= nodeSearchLimit)
 				searchThreadData->ResetQueue(SearchThreadData::SEARCH_FORWARD);
 
 			assert(curSearchNode->GetNeighborEdgeTransitionPoint().x != 0.f
@@ -1053,7 +1051,7 @@ bool QTPFS::PathSearch::ExecutePathSearch() {
 
 			// We're done with the forward path and we expect the reverse path to fail so stop it right there.
 			if ((*fwd.openNodes).empty() && expectIncompletePartialSearch){
-				SetForwardSearchLimit();
+				SetNodeSearchLimit();
 			// 	searchEarlyDrop = true;
 			// 	//bwd.tgtSearchNode = curSearchNode;
 			// 	searchThreadData->ResetQueue(SearchThreadData::SEARCH_BACKWARD);
@@ -1067,7 +1065,7 @@ bool QTPFS::PathSearch::ExecutePathSearch() {
 			// if (curSearchNode->GetIndex() == 20076 && (searchID == 7340095 || searchID == 10485810) /*&& pathOwner != nullptr && pathOwner->id == 30809 */ && gs->frameNum == 10213)
 			// 	LOG("Whoops!");
 
-			if (bwdNodesSearched >= fwdNodeSearchLimit)
+			if (bwdNodesSearched >= nodeSearchLimit)
 				searchThreadData->ResetQueue(SearchThreadData::SEARCH_BACKWARD);
 
 			assert(curSearchNode->GetNeighborEdgeTransitionPoint().x != 0.f
@@ -1154,7 +1152,7 @@ bool QTPFS::PathSearch::ExecutePathSearch() {
 			// Limit forward search to avoid excessively costly searches when the path cannot be
 			// joined. This should be okay for partial searches as well.
 			if ((*bwd.openNodes).empty() && !bwdPathConnected)
-				SetForwardSearchLimit();
+				SetNodeSearchLimit();
 		}
 
 		// stop if forward search is done, even if reverse search can continue. If forward search
