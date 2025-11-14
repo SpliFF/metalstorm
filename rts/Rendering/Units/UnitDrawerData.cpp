@@ -253,20 +253,6 @@ void CUnitDrawerData::UpdateUnitIconsByUnitDef(const UnitDef* ud)
 	}
 }
 
-const std::vector<GhostSolidObject*> CUnitDrawerData::GetDeadGhostBuildings() const
-{
-	std::vector<GhostSolidObject*> dgb;
-
-	for (int at = 0; at < teamHandler.ActiveAllyTeams(); ++at) {
-		for (uint32_t mt = MODELTYPE_3DO; mt < MODELTYPE_CNT; ++mt) {
-			const auto& thisDgb = GetDeadGhostBuildings(at, mt);
-			dgb.insert(dgb.end(), thisDgb.begin(), thisDgb.end());
-		}
-	}
-
-	return dgb;
-}
-
 void CUnitDrawerData::UpdateCurrentUnitIcon(const CUnit* unit)
 {
 	RECOIL_DETAILED_TRACY_ZONE;

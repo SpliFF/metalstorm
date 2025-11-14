@@ -1,6 +1,8 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 #pragma once
 
+#include <ranges>
+
 #include "System/float3.h"
 #include "Rendering/Common/ModelDrawerData.h"
 #include "Rendering/UnitDefImage.h"
@@ -130,7 +132,11 @@ public:
 	const auto& GetTempOpaqueDrawUnits(int modelType) const { return savedData.tempOpaqueUnits[modelType]; }
 	const auto& GetTempAlphaDrawUnits(int modelType) const { return  savedData.tempAlphaUnits[modelType]; }
 
-	const std::vector<GhostSolidObject*> GetDeadGhostBuildings() const;
+	auto GetDeadGhostBuildings(int allyTeam) const {
+		assert((unsigned)gu->myAllyTeam < savedData.deadGhostBuildings.size());
+		return std::views::join(savedData.deadGhostBuildings[allyTeam]);
+	}
+
 	const auto& GetDeadGhostBuildings(int allyTeam, int modelType) const {
 		assert((unsigned)gu->myAllyTeam < savedData.deadGhostBuildings.size());
 		return savedData.deadGhostBuildings[allyTeam][modelType];
