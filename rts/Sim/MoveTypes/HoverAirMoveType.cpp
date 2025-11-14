@@ -806,7 +806,7 @@ bool CHoverAirMoveType::UpdateAirPhysics()
 
 	// copy vertical speed
 	const float verticalSpeed = spd.y;
-	const float ownerMinHeight = std::min(owner->midPos.y - owner->radius, pos.y);
+	const float ownerMinHeight = owner->midPos.y - owner->radius;
 
 	// absolute ground heights at pos and brakePos
 	// if this aircraft uses the smoothmesh, these values are
@@ -829,8 +829,8 @@ bool CHoverAirMoveType::UpdateAirPhysics()
 	// UpdateAirPhysics() so we ignore terrain while we are in those states
 	bool crashed = false;
 	if (modInfo.allowAircraftToHitGround) {
-		const bool cpGroundContact = (ownerMinHeight - cpGroundHeight <= 8.0f);
-		const bool bpGroundContact = (ownerMinHeight - bpGroundHeight <= 8.0f);
+		const bool cpGroundContact = (cpGroundHeight > ownerMinHeight);
+		const bool bpGroundContact = (bpGroundHeight > ownerMinHeight);
 		const bool   handleContact = (aircraftState != AIRCRAFT_LANDED && aircraftState != AIRCRAFT_TAKEOFF);
 
 		if (cpGroundContact && aircraftState == AIRCRAFT_CRASHING)
@@ -964,7 +964,8 @@ bool CHoverAirMoveType::Update()
 			UpdateHovering();
 			break;
 		case AIRCRAFT_CRASHING: {
-			if (UpdateAirPhysics()) {
+			if (UpdateAirPhysics()
+					|| (CGround::GetHeightAboveWater(owner->pos.x, owner->pos.z) + 5.0f + owner->radius) > owner->pos.y){
 				owner->ForcedKillUnit(nullptr, true, false, -CSolidObject::DAMAGE_AIRCRAFT_CRASHED);
 			} else {
 				#define SPIN_DIR(o) ((o->id & 1) * 2 - 1)
