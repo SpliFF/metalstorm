@@ -409,7 +409,7 @@ void CSolidObject::SetHeadingFromDirection() {
 	quat.ANormalize();
 
 	const float3 fDir = quat * frontdir;
-	assert(epscmp(fDir.y, 0.0f, float3::cmp_eps()));
+	assert(epscmp(fDir.y, 0.0f, float3::apx_eps()));
 
 	heading = GetHeadingFromVector(fDir.x, fDir.z);
 }
