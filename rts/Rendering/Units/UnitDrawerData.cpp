@@ -153,14 +153,13 @@ CUnitDrawerData::~CUnitDrawerData()
 			auto& dgb = savedData.deadGhostBuildings[allyTeam][modelType];
 
 			for (auto& gso : dgb) {
-				if (gso->DecRef()) {
-					gso = nullptr;
+				auto* tmpGso = std::exchange(gso, nullptr);
+				if (tmpGso->DecRef())
 					continue;
-				}
 
 				// <ghost> might be the gbOwner of a decal; groundDecals is deleted after us
-				groundDecals->GhostDestroyed(gso);
-				ghostMemPool.free(gso);
+				groundDecals->GhostDestroyed(tmpGso);
+				ghostMemPool.free(tmpGso);
 			}
 			dgb.clear();
 			lgb.clear();
