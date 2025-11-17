@@ -44,6 +44,8 @@ CR_REG_METADATA(GhostSolidObject, (
 	CR_MEMBER(radius),
 	CR_MEMBER(iconRadius),
 
+	CR_MEMBER(refCount),
+
 	CR_MEMBER(facing),
 	CR_MEMBER(team),
 	CR_IGNORED(currentIconIndex),
@@ -151,15 +153,21 @@ CUnitDrawerData::~CUnitDrawerData()
 			auto& dgb = savedData.deadGhostBuildings[allyTeam][modelType];
 
 			for (auto& gso : dgb) {
+				if (gso->DecRef()) {
+					gso = nullptr;
+					continue;
+				}
+
 				// <ghost> might be the gbOwner of a decal; groundDecals is deleted after us
 				groundDecals->GhostDestroyed(gso);
 				ghostMemPool.free(gso);
 			}
-
 			dgb.clear();
 			lgb.clear();
 		}
 	}
+	assert(ghostMemPool.allocs() == 0);
+	ghostMemPool.clear();
 
 	configHandler->RemoveObserver(this);
 }
@@ -593,6 +601,7 @@ bool CUnitDrawerData::UpdateUnitGhosts(const CUnit* unit, const bool addNewGhost
 				gso->pos = u->pos;
 				gso->midPos = u->midPos;
 				gso->modelName = gsoModel->name;
+				gso->refCount = 0;
 				gso->facing = u->buildFacing;
 				gso->dir = u->frontdir;
 				gso->team = u->team;
@@ -609,6 +618,7 @@ bool CUnitDrawerData::UpdateUnitGhosts(const CUnit* unit, const bool addNewGhost
 			// <gso> can be inserted for multiple allyteams
 			// (the ref-counter saves us come deletion time)
 			savedData.deadGhostBuildings[allyTeam][gsoModel->type].push_back(gso);
+			gso->IncRef();
 
 			u->losStatus[allyTeam] &= ~LOS_PREVLOS;
 			if (allyTeam == gu->myAllyTeam)
@@ -707,8 +717,11 @@ void CUnitDrawerData::PlayerChanged(int playerID)
 
 void CUnitDrawerData::RemoveDeadGhost(GhostSolidObject* gso, std::vector<GhostSolidObject*>& dgb, int index)
 {
-	groundDecals->GhostDestroyed(gso);
-	ghostMemPool.free(gso);
+	if (!gso->DecRef()) {
+		groundDecals->GhostDestroyed(gso);
+		ghostMemPool.free(gso);
+	}
+
 	dgb[index] = dgb.back();
 	dgb.pop_back();
 }
