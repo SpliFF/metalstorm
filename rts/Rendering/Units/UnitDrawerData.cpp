@@ -607,7 +607,9 @@ bool CUnitDrawerData::UpdateUnitGhosts(const CUnit* unit, const bool addNewGhost
 				gso->radius = u->radius;
 				gso->GetModel();
 
-				gso->currentIconIndex = u->currentIconIndex;
+				// gso is a shared object, we can't rely on the u->currentIconIndex being representative in case the team changes
+				gso->currentIconIndex = icon::iconHandler.GetIconIdxOrDefault(unit->definedIconName);
+
 				gso->iconRadius = u->iconRadius;
 
 				groundDecals->GhostCreated(u, gso);

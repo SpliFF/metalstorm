@@ -458,12 +458,13 @@ void CUnitDrawerGLSL::DrawUnitMiniMapIcons() const
 			else
 				currentColor = teamHandler.Team(ghost->team)->color;
 
-			const auto& iconIdx = ghost->currentIconIndex;
+			const size_t iconIndex = minimap->UseUnitIcons() ? ghost->currentIconIndex : defIconIdx;
 
-			if (iconIdx == icon::INVALID_ICON_INDEX)
+			assert(iconIndex != icon::INVALID_ICON_INDEX);
+			if (iconIndex == icon::INVALID_ICON_INDEX)
 				continue;
 
-			const auto& iconData = icon::iconHandler.GetIconData(iconIdx);
+			const auto& iconData = icon::iconHandler.GetIconData(iconIndex);
 
 			const float iconScale = iconData.GetSize();
 			const float3& pos = ghost->midPos;
@@ -472,7 +473,7 @@ void CUnitDrawerGLSL::DrawUnitMiniMapIcons() const
 			currentColor.g *= ghostIconDimming;
 			currentColor.b *= ghostIconDimming;
 
-			DrawUnitMiniMapIcon(rb, ghost->currentIconIndex, iconScale, pos, currentColor);
+			DrawUnitMiniMapIcon(rb, iconIndex, iconScale, pos, currentColor);
 		}
 	}
 
@@ -716,9 +717,10 @@ void CUnitDrawerGLSL::DrawUnitIconsScreen() const
 			if (pos.z > 1.0f || pos.z < 0.0f)
 				continue;
 
-			const auto& iconIdx = ghost->currentIconIndex;
+			const auto& iconIndex = ghost->currentIconIndex;
 
-			if (iconIdx == icon::INVALID_ICON_INDEX)
+			assert(iconIndex != icon::INVALID_ICON_INDEX);
+			if (iconIndex == icon::INVALID_ICON_INDEX)
 				continue;
 
 			currentColor = teamHandler.Team(ghost->team)->color;
@@ -726,7 +728,7 @@ void CUnitDrawerGLSL::DrawUnitIconsScreen() const
 			currentColor.g *= ghostIconDimming;
 			currentColor.b *= ghostIconDimming;
 
-			DrawUnitIconScreen(rb, iconIdx, pos, currentColor, ghost->radius, false);
+			DrawUnitIconScreen(rb, iconIndex, pos, currentColor, ghost->radius, false);
 		}
 	}
 
