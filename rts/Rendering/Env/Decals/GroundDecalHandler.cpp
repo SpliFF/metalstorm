@@ -800,6 +800,11 @@ void CGroundDecalHandler::Draw()
 
 	const bool visWater = smfDrawer->GetReadMap()->HasVisibleWater();
 
+	if (decalShader->IsReloadRequested()) {
+		ReloadDecalShaders();
+		decalShader->SetReloadComplete();
+	}
+
 	decalShader->SetFlag("HAVE_SHADOWS", shadowHandler.ShadowsLoaded());
 	decalShader->SetFlag("HAVE_INFOTEX", infoTextureHandler->IsEnabled());
 	decalShader->SetFlag("SMF_WATER_ABSORPTION", visWater);
