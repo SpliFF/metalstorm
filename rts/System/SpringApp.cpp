@@ -90,6 +90,7 @@
 #include "System/Log/DefaultFilter.h"
 #include "System/LogOutput.h"
 #include "System/Platform/errorhandler.h"
+#include "System/Platform/ConsoleInit.hpp"
 #include "System/Platform/CrashHandler.h"
 #include "System/Platform/Threading.h"
 #include "System/Platform/Watchdog.h"
@@ -198,6 +199,7 @@ SpringApp::SpringApp(int argc, char** argv)
 	gflags::SetUsageMessage("Usage: " + std::string(argv[0]) + " [options] [path_to_script.txt or demo.sdfz]");
 	gflags::SetVersionString(SpringVersion::GetFull());
 	gflags::ParseCommandLineFlags(&argc, &argv, true);
+	Recoil::InitConsole();
 
 	// also initializes configHandler and logOutput
 	ParseCmdLine(argc, argv);
@@ -329,7 +331,7 @@ bool SpringApp::InitPlatformLibs()
 		// suppress dialog box if gdb helpers aren't found
 		const UINT oldErrorMode = SetErrorMode(SEM_FAILCRITICALERRORS);
 
-		if (LoadLibrary("gdbmacros.dll"))
+		if (LoadLibrary(L"gdbmacros.dll"))
 			LOG_L(L_DEBUG, "[SpringApp::%s] QTCreator's gdbmacros.dll loaded", __func__);
 
 		SetErrorMode(oldErrorMode);
