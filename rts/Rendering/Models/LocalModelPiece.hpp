@@ -95,6 +95,8 @@ struct LocalModelPiece
 
 	void SavePrevModelSpaceTransform();
 	Transform GetEffectivePrevModelSpaceTransform() const;
+
+	void PostLoad();
 private:
 	float3 pos;      // translation relative to parent LMP, *INITIALLY* equal to original->offset
 	float3 rot;      // orientation relative to parent LMP, in radians (updated by scripts)
