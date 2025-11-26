@@ -1203,10 +1203,6 @@ bool SpringApp::MainEventHandler(const SDL_Event& event)
 					globalRendering->SetWindowInputGrabbing(false);
 				} break;
 
-				case SDL_WINDOWEVENT_DISPLAY_CHANGED: {
-					LOG("[SpringApp::%s][SDL_WINDOWEVENT_DISPLAY_CHANGED]\n", __func__);
-				} break;
-
 				case SDL_WINDOWEVENT_CLOSE: {
 					gu->globalQuit = true;
 				} break;
