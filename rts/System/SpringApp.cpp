@@ -181,6 +181,7 @@ static void ConsolePrintInitialize(const std::string& configSource, bool safemod
 
 static void FlushExit()
 {
+	LOG_CLEANUP();
 	std::fflush(stdout);
 }
 
