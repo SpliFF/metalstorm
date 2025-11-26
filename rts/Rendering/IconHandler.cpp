@@ -37,6 +37,14 @@ void CIconHandler::Kill()
 }
 
 
+void CIconHandler::DumpAtlasTextures() const
+{
+	if (atlasTextureIDs[0])
+		glSaveTexture(atlasTextureIDs[0], "IconsAtlas1.png");
+	if (atlasTextureIDs[1])
+		glSaveTexture(atlasTextureIDs[1], "IconsAtlas2.png");
+}
+
 void CIconHandler::LoadIcons(const std::string& filename)
 {
 	LuaParser luaParser(filename, SPRING_VFS_MOD_BASE, SPRING_VFS_MOD_BASE);
@@ -204,8 +212,13 @@ void CIconHandler::Update()
 
 		//atlas.SetMaxTexLevel(/*atlas.GetAllocator()->GetReqNumTexLevels()*/);
 		atlas.SetMaxTexLevel(DEFAULT_NUM_OF_TEXTURE_LEVELS);
+
 		bool res = atlas.Finalize();
-		assert(res);
+		if (!res) {
+			// this can also happen in cases when the OpenGL context was lost
+			// don't reset atlasNeedsUpdate.reset(i); and try next time
+			continue;
+		}
 
 		for (const auto& [iconName, _] : atlas.GetNameToUniqueSubTexMap()) {
 			auto& item = iconsData[*iconsMap.try_get(iconName)];
@@ -224,10 +237,7 @@ void CIconHandler::Update()
 		glDeleteTextures(1, &atlasTextureIDs[i]);
 		atlasTextureIDs[i] = 0;
 
-		// only makes sense in case of valid atlas
-		if (res)
-			atlasTextureIDs[i] = atlas.DisownTexture();
-
+		atlasTextureIDs[i] = atlas.DisownTexture();
 		atlasNeedsUpdate.reset(i);
 	}
 
