@@ -255,11 +255,6 @@ bool FileSystem::IsPathOnSpinningDisk(const std::string& path)
 		return true;
 	}
 
-	if (volHandle == INVALID_HANDLE_VALUE) {
-		LOG_L(L_WARNING, "[%s] GetVolumeHandleForFile error: '%s'", __func__, Platform::GetLastErrorAsString().c_str());
-		return true;
-	}
-
 	STORAGE_PROPERTY_QUERY query{};
 	query.PropertyId = StorageDeviceSeekPenaltyProperty;
 	query.QueryType = PropertyStandardQuery;
