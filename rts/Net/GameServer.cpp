@@ -795,7 +795,7 @@ float CGameServer::GetDemoTime() const {
 
 void CGameServer::Update()
 {
-	const float tdif = (spring_gettime() - lastUpdate).toMilliSecsf() * 0.001f;
+	const float tdif = (spring_gettime() - lastUpdate).toSecsf();
 
 	gameTime += tdif;
 	lastUpdate = spring_gettime();
