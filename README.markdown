@@ -19,7 +19,7 @@ You can use a pre-compiled binary, usually, you want to use an installer or a pa
 
 ### Compiling
 
-Detailed instructions for how to compile Recoil can be found [here](https://github.com/beyond-all-reason/RecoilEngine/wiki/Building-and-developing-engine-without-docker) or [here](https://github.com/beyond-all-reason/RecoilEngine/wiki/SpringRTS-Build-Environment-(Docker))
+Detailed instructions for how to compile Recoil can be found in the docker-build-v2 README (recommended, or [here](https://github.com/beyond-all-reason/RecoilEngine/wiki/Building-and-developing-engine-without-docker) or [here](https://github.com/beyond-all-reason/RecoilEngine/wiki/SpringRTS-Build-Environment-(Docker)) for legacy docker builds).
 
 Use `master` as the primary branch.
 
