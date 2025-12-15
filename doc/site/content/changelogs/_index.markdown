@@ -5,8 +5,7 @@ title = "Running changelog"
     type = "docs"
 +++
 
-This is the bleeding-edge changelog **since version 2025.04**, which is still in the pre-release phase.
-See [the 2025.04 page]({{% ref "changelogs/changelog-2025-04" %}}) for the upcoming release.
+This is the bleeding-edge changelog since version 2025.04.11, for **pre-release 2025.06**.
 
 ## Caveats
 
