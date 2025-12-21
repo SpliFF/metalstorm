@@ -165,7 +165,7 @@ int spring::exitCode = spring::EXIT_CODE_SUCCESS;
 static unsigned int reloadCount = 0;
 static unsigned int killedCount = 0;
 
-
+static constexpr auto RECOIL_SDL_WINDOWEVENT_DISPLAY_CHANGED = 18;
 
 // initialize basic systems for command line help / output
 static void ConsolePrintInitialize(const std::string& configSource, bool safemode)
@@ -1202,6 +1202,12 @@ bool SpringApp::MainEventHandler(const SDL_Event& event)
 
 					// and make sure to un-capture mouse
 					globalRendering->SetWindowInputGrabbing(false);
+				} break;
+				// replace with normal SDL_WINDOWEVENT_DISPLAY_CHANGED when our Linux SDL2 is updated
+				case RECOIL_SDL_WINDOWEVENT_DISPLAY_CHANGED: {
+					LOG("[SpringApp::%s][SDL_WINDOWEVENT_DISPLAY_CHANGED] to display %d\n", __func__, event.window.data1);
+					// try to reinit GL context
+					globalRendering->MakeCurrentContext(false);
 				} break;
 
 				case SDL_WINDOWEVENT_CLOSE: {
