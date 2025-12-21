@@ -187,6 +187,12 @@ Numberless `animParams` used as a fallback.
 - add synced `Spring.SetPlayerReadyState(playerID, bool ready) -> bool ok`.
 - add unsynced `Spring.RequestStartPosition(x, y, z, bool? ready) -> nil`, sends a request to start at given position. Equivalent to the native picker.
 
+### RmlUi
+
+- added `RmlUi.GetDocumentPathRequests(string docPath) -> {"filePath", "filePath", ...}` which tracks all of the files opened by an RmlUi LoadDocument call
+- added `RmlUi.ClearDocumentPathRequests(string docPath) -> nil` to clear tracked LoadDocument files
+
+### Misc
 ### Resource flow
 - add 'system.nativeExcessSharing' modrule, controls whether the resource sharing level (aka "red slider") applies. Note that this also prevents excess from flowing back to the allyteam. If you want excess to flow to allies and only block changing the share level, use the existing `gadget:AllowResourceLevel`.
 - add `Game.nativeExcessResource` to read back the above.
