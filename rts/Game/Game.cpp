@@ -1358,6 +1358,7 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 
 	lineDrawer.UpdateLineStipple();
 
+	icon::iconHandler.Update();
 	CNamedTextures::Update();
 
 	// always update InfoTexture and SoundListener at <= 30Hz (even when paused)
