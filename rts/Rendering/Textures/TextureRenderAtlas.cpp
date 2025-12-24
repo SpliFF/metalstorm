@@ -133,13 +133,17 @@ CTextureRenderAtlas::~CTextureRenderAtlas()
 bool CTextureRenderAtlas::TextureExists(const std::string& texName)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	return atlasFinalized && nameToUniqueSubTexStr.contains(texName);
+	auto it = nameToUniqueSubTexStr.find(texName);
+	if (it == nameToUniqueSubTexStr.end())
+		return false;
+
+	return atlasAllocator->contains(it->second);
 }
 
 bool CTextureRenderAtlas::TextureExists(const std::string& texName, const std::string& texBackupName)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	return atlasFinalized && (nameToUniqueSubTexStr.contains(texName) || nameToUniqueSubTexStr.contains(texBackupName));
+	return TextureExists(texName) || TextureExists(texBackupName);
 }
 
 bool CTextureRenderAtlas::AddTexFromFile(const std::string& name, const std::string& fileName, const float4& subTexCoords)

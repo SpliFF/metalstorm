@@ -281,8 +281,7 @@ void CGroundDecalHandler::AddTexturesFromTable()
 		AddTexToAtlas(normName, normTexFileName, false, ERR_MSG_SCAR1);
 
 		// check if loaded for real
-		// can't use atlas->TextureExists() as it's only populated after Finalize()
-		maxUniqueScars += atlasTex->GetAllocator()->contains(mainName);
+		maxUniqueScars += atlasTex->TextureExists(mainName);
 	}
 
 	// fill the gaps in case the loop above failed to load some of the scar textures
