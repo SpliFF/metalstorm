@@ -30,7 +30,14 @@ CIconHandler iconHandler;
 
 void CIconHandler::Kill()
 {
+	defaultIconIdx = INVALID_ICON_INDEX;
+
 	glDeleteTextures(2, atlasTextureIDs.data());
+	atlasTextureIDs = { 0 };
+	atlasTextureSizes = { int2{0, 0}, int2{0, 0} };
+
+	atlases = { nullptr };
+	atlasNeedsUpdate = { false };
 
 	iconsMap.clear();
 	iconsData.clear();
@@ -116,6 +123,7 @@ bool CIconHandler::CreateAtlasTexture(size_t atlasIdx)
 			return false;
 
 		glDeleteTextures(1, &atlasTextureIDs[atlasIdx]);
+		atlasTextureIDs[atlasIdx] = 0; // just in case
 		atlasTextureIDs[atlasIdx] = bm.CreateMipMapTexture();
 		atlasTextureSizes[atlasIdx] = int2(bm.xsize, bm.ysize);
 
@@ -128,8 +136,10 @@ bool CIconHandler::CreateAtlasTexture(size_t atlasIdx)
 
 	atlasTextureSizes[atlasIdx] = atlas->GetAtlasSize();
 
-	if (atlasTextureIDs[atlasIdx])
+	if (atlasTextureIDs[atlasIdx]) {
 		glDeleteTextures(1, &atlasTextureIDs[atlasIdx]);
+		atlasTextureIDs[atlasIdx] = 0; // just in case
+	}
 
 	atlasTextureIDs[atlasIdx] = atlas->DisownTexture();
 	atlas = nullptr;
