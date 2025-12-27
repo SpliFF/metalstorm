@@ -1499,7 +1499,7 @@ namespace {
 				return false;
 
 			std::vector<uint8_t> buffer; buffer.resize(sz);
-			sz = ilSaveL(type, buffer.data(), sz);
+
 			if (ilSaveL(type, buffer.data(), sz) != sz)
 				return false;
 
