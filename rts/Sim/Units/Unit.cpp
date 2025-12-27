@@ -2295,7 +2295,7 @@ static bool LimitToFullStorage(const CUnit* u, const CTeam* team, SResourceOrder
 		GetScale(order->use[i], team->res[i], &scale);
 
 		if (u->harvestStorage.empty()) {
-			GetScale(order->add[i], team->resStorage.res[i] - team->res[i], &scale);
+			GetScale(order->add[i], team->resStorage[i] - team->res[i], &scale);
 		} else {
 			GetScale(order->add[i], u->harvestStorage[i] - u->harvested[i], &scale);
 		}
