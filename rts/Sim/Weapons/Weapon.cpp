@@ -511,7 +511,7 @@ bool CWeapon::UpdateStockpile()
 	if (!weaponDef->stockpile)
 		return true;
 
-	if (numStockpileQued > 0) {
+	if (weaponDef->stockpileTime > 0.0f && numStockpileQued > 0) {
 		const float p = 1.0f / weaponDef->stockpileTime;
 
 		if (owner->UseResources(weaponDef->cost * p))
