@@ -104,6 +104,12 @@ fi
 # the host. Another option we handle is Docker Desktop, which runs containers
 # in a separate VM and does special remapping for mounted volumes, except when
 # we run from WSL because then it's WSL that's the VM.
+#
+# Because this heuristic might not work in some esoteric setups we haven't
+# foreseen, we allow specifying behavior with FORCE_UID_FLAGS and
+# FORCE_NO_UID_FLAGS environment variables. We also try to detect the
+# misconfiguration inside the container and error out with instructions to set
+# the variables and report the issue.
 UID_FLAGS=""
 if [[ -n "${FORCE_UID_FLAGS:-}" ]] || (
        [[ -z "${FORCE_NO_UID_FLAGS:-}" && "$RUNTIME" == "docker" ]] &&
@@ -141,7 +147,21 @@ $RUNTIME run -it --rm \
     $IMAGE \
     bash -c '
 set -e
-echo "$@"
+
+if [[ "$(id -u)" != "$(stat -c %u /build/src)" ]]; then
+  echo "Error: Inside the container, the user ($(id -u)) does not match"
+  echo "the owner of the source code files ($(stat -c %u /build/src))."
+  echo ""
+  echo "This likely means that the script failed to apply heuristics and"
+  echo "set flags for the runtime correctly. Please report this issue on"
+  echo "GitHub and include information about your environment and output"
+  echo "of \`docker info\`."
+  echo ""
+  echo "As a workaround, try setting the environment variable"
+  echo "FORCE_UID_FLAGS=1 or FORCE_NO_UID_FLAGS=1."
+  exit 1
+fi
+
 cd /build/src/docker-build-v2/scripts
 $CONFIGURE && ./configure.sh "$@"
 if $COMPILE; then
