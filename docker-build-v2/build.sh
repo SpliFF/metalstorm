@@ -10,7 +10,7 @@ if [[ $(id -u) -eq 0 ]]; then
   echo "See official docs: https://docs.docker.com/engine/install/linux-postinstall/"
 fi
 
-USAGE="Usage: $0 [--help] [--configure|--compile] [-j|--jobs {number_of_jobs}] {windows|linux} [cmake_flag...]"
+USAGE="Usage: $0 [-h|--help] [--configure|--compile] [-j|--jobs {number_of_jobs}] {windows|linux} [cmake_flag...]"
 export CONFIGURE=true
 export COMPILE=true
 export CMAKE_BUILD_PARALLEL_LEVEL=
@@ -29,10 +29,10 @@ while (( $# > 0 )); do
       COMPILE=true
       shift
       ;;
-    --help)
+    -h|--help)
       echo $USAGE
       echo "Options:"
-      echo "  --help       print this help message"
+      echo "  -h, --help   print this help message"
       echo "  --configure  only configure, don't compile"
       echo "  --compile    only compile, don't configure"
       echo "  -j, --jobs   number of concurrent processes to use when building"
@@ -165,7 +165,11 @@ fi
 cd /build/src/docker-build-v2/scripts
 $CONFIGURE && ./configure.sh "$@"
 if $COMPILE; then
-  ./compile.sh
+  if $CONFIGURE; then
+    ./compile.sh
+  else
+    ./compile.sh "$@"
+  fi
   # When compiling for windows, we must strip debug info because windows does
   # not handle the output binary size...
   if [[ $ENGINE_PLATFORM =~ .*windows ]]; then
