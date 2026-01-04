@@ -29,7 +29,7 @@ When executing commands in the Usage section, make sure that Docker is running, 
 #### WSL Setup
 
 1. Set up WSL following [official documentation tutorial](https://learn.microsoft.com/en-us/windows/wsl/setup/environment). WSL *2* is required.
-2. You can install [Docker Desktop](https://docs.docker.com/desktop/) on Windows following [official instructions](https://docs.docker.com/desktop/setup/install/windows-install/), or set up the container runtime inside of the WSL following [Linux Setup instructions](#linux-setup). Docker Desktop can be more convenient, a setup inside WSL can have a bit better performance.
+2. You can install [Docker Desktop](https://docs.docker.com/desktop/) on Windows following [official instructions](https://docs.docker.com/desktop/setup/install/windows-install/), or set up the container runtime inside of the WSL following [Linux Setup instructions](#linux-setup).
 
 > [!IMPORTANT]
 > Make sure you have the engine source checked out *inside* of the WSL file system, not directly on the Windows disk, before proceeding to the [Usage](#usage) section. There is a large overhead when accessing files outside of WSL especially for workflows like compilation. If source code is checked out outside of WSL, the overhead will be similar to the "Native Setup" described in the previous section.

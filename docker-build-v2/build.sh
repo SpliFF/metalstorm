@@ -102,11 +102,12 @@ fi
 # This is not the case when using rootless podman or docker, because the root
 # inside of container is mapped via user namespaces to the calling user on
 # the host. Another option we handle is Docker Desktop, which runs containers
-# in a separate VM and does special remapping for mounted volumes.
+# in a separate VM and does special remapping for mounted volumes, except when
+# we run from WSL because then it's WSL that's the VM.
 UID_FLAGS=""
 if [[ -n "${FORCE_UID_FLAGS:-}" ]] || (
        [[ -z "${FORCE_NO_UID_FLAGS:-}" && "$RUNTIME" == "docker" ]] &&
-       [[ "$(docker info -f '{{.OperatingSystem}}')" != "Docker Desktop" ]] &&
+       [[ "$(docker info -f '{{.OperatingSystem}}')" != "Docker Desktop" || -n "${WSL_DISTRO_NAME:-}" ]] &&
        ! docker info -f '{{.SecurityOptions}}' | grep -q rootless
    ); then
     UID_FLAGS="-v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro --user=$(id -u):$(id -g)"
