@@ -93,6 +93,30 @@ static float heightMapAmountChanged = 0.0f;
 static float originalHeightMapAmountChanged = 0.0f;
 static float smoothMeshAmountChanged = 0.0f;
 
+namespace Impl {
+	int SetObjectPieceMatrix(lua_State* L, CSolidObject* so)
+	{
+		if (so == nullptr)
+			return 0;
+
+		LocalModelPiece* lmp = ParseObjectLocalModelPiece(L, so, 2);
+
+		if (lmp == nullptr)
+			return 0;
+
+		CMatrix44f mat;
+
+		if (LuaUtils::ParseFloatArray(L, 3, &mat.m[0], 16) == -1)
+			return 0;
+
+		if (lmp->SetPieceSpaceMatrix(mat))
+			lmp->SetDirty();
+
+		lua_pushboolean(L, lmp->blockScriptAnims);
+		return 1;
+	}
+}
+
 /***
 Synced Lua API
 @see rts/Lua/LuaSyncedCtrl.cpp
@@ -274,6 +298,7 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(SetFeatureCollisionVolumeData);
 	REGISTER_LUA_CFUNC(SetFeaturePieceCollisionVolumeData);
 	REGISTER_LUA_CFUNC(SetFeaturePieceVisible);
+	REGISTER_LUA_CFUNC(SetFeaturePieceMatrix);
 
 	REGISTER_LUA_CFUNC(SetFeatureFireTime);
 	REGISTER_LUA_CFUNC(SetFeatureSmokeTime);
@@ -3767,30 +3792,12 @@ int LuaSyncedCtrl::SetUnitPieceParent(lua_State* L)
  * @param unitID integer
  * @param pieceNum number
  * @param matrix number[] an array of 16 floats
- * @return nil
+ * @return boolean? valid - if the matrix can be used for the purpose of defining the piece spatial transformation. Blocks the piece animation, if true.
  */
 int LuaSyncedCtrl::SetUnitPieceMatrix(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
-
-	if (unit == nullptr)
-		return 0;
-
-	LocalModelPiece* lmp = ParseObjectLocalModelPiece(L, unit, 2);
-
-	if (lmp == nullptr)
-		return 0;
-
-	CMatrix44f mat;
-
-	if (LuaUtils::ParseFloatArray(L, 3, &mat.m[0], 16) == -1)
-		return 0;
-
-	if (lmp->SetPieceSpaceMatrix(mat))
-		lmp->SetDirty();
-
-	lua_pushboolean(L, lmp->blockScriptAnims);
-	return 1;
+	return Impl::SetObjectPieceMatrix(L, unit);
 }
 
 
@@ -5338,6 +5345,21 @@ int LuaSyncedCtrl::SetFeaturePieceCollisionVolumeData(lua_State* L)
 int LuaSyncedCtrl::SetFeaturePieceVisible(lua_State* L)
 {
 	return (SetSolidObjectPieceVisible(L, ParseFeature(L, __func__, 1)));
+}
+
+/*** Sets the local (i.e. parent-relative) matrix of the given piece, for a feature.
+ *
+ * @function Spring.SetFeaturePieceMatrix
+ *
+ * @param featureID integer
+ * @param pieceIndex number
+ * @param matrix number[] an array of 16 floats
+ * @return boolean? valid - if the matrix can be used for the purpose of defining the piece spatial transformation
+ */
+int LuaSyncedCtrl::SetFeaturePieceMatrix(lua_State* L)
+{
+	CFeature* feature = ParseFeature(L, __func__, 1);
+	return Impl::SetObjectPieceMatrix(L, feature);
 }
 
 
