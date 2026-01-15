@@ -3886,6 +3886,7 @@ int LuaUnsyncedCtrl::SetLastMessagePosition(lua_State* L)
  * @param z number
  * @param text string? (Default: `""`)
  * @param localOnly boolean?
+ * @param playerID number? Local labels pretend they are from this player
  * @return nil
  */
 int LuaUnsyncedCtrl::MarkerAddPoint(lua_State* L)
