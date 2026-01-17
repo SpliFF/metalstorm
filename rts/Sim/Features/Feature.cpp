@@ -462,6 +462,7 @@ void CFeature::DependentDied(CObject *o)
 void CFeature::SetVelocity(const float3& v)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+
 	CWorldObject::SetVelocity(v * moveCtrl.velocityMask);
 	CWorldObject::SetSpeed(v * moveCtrl.velocityMask);
 
@@ -477,6 +478,10 @@ void CFeature::SetVelocity(const float3& v)
 void CFeature::ForcedMove(const float3& newPos)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+
+	// shouldn't rely on preFrameTra.t here, as ForcedMove can be called multiple times a synced frame
+	// and we better convey each movement separately
+	const float3 oldPos = pos;
 	// remove from managers
 	quadField.RemoveFeature(this);
 
@@ -488,7 +493,7 @@ void CFeature::ForcedMove(const float3& newPos)
 	// (features are only Update()'d when in the FH queue)
 	UpdateTransformAndPhysState();
 
-	eventHandler.FeatureMoved(this, preFrameTra.t);
+	eventHandler.FeatureMoved(this, oldPos);
 
 	// insert into managers
 	quadField.AddFeature(this);
@@ -583,6 +588,9 @@ bool CFeature::UpdateVelocity(
 bool CFeature::UpdatePosition()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+
+	// can't rely on preFrameTra.t here, as it's getting updated with every change of the position on creationFrame
+	const float3 oldPos = pos;
 	// const float4 oldSpd = speed;
 
 	if (moveCtrl.enabled) {
@@ -622,8 +630,8 @@ bool CFeature::UpdatePosition()
 	Block(); // does the check if wanted itself
 
 	// use an exact comparison for the y-component (gravity is small)
-	if (!pos.equals(preFrameTra.t, float3(float3::cmp_eps(), 0.0f, float3::cmp_eps()))) {
-		eventHandler.FeatureMoved(this, preFrameTra.t);
+	if (!pos.equals(oldPos, float3(float3::cmp_eps(), 0.0f, float3::cmp_eps())) || gs->frameNum == creationFrame) {
+		eventHandler.FeatureMoved(this, oldPos);
 		return true;
 	}
 
@@ -632,7 +640,7 @@ bool CFeature::UpdatePosition()
 	// nullify the vector to prevent visual extrapolation jitter
 	SetVelocityAndSpeed(mix({ZeroVector, 0.0f}, speed * moveCtrl.velocityMask, moveCtrl.enabled));
 
-	return (moveCtrl.enabled);
+	return moveCtrl.enabled;
 }
 
 bool CFeature::Update()
