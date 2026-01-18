@@ -392,7 +392,7 @@ float3 CSolidObject::GetWantedUpDir(bool useGroundNormal, bool useObjectNormal, 
 
 
 
-void CSolidObject::SetDirVectorsEuler(const float3 angles)
+void CSolidObject::SetDirVectorsEuler(const float3& angles)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	CMatrix44f matrix;
