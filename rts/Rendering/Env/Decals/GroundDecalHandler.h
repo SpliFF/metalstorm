@@ -203,7 +203,7 @@ private:
 	void GenerateAtlasTexture();
 	bool ReloadDecalShaders();
 
-	void AddTexToAtlas(const std::string& name, const std::string& filename, bool convertOldBMP, const std::string& errMsg);
+	void AddTexToAtlas(const std::string& name, const std::string& filename, bool convertOldBMP, const std::string& errMsg, bool reportMissingFile);
 
 	void AddTrack(const CUnit* unit, const float3& newPos, bool forceEval = false);
 

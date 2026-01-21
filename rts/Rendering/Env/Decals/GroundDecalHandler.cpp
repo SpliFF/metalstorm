@@ -154,7 +154,13 @@ CGroundDecalHandler::~CGroundDecalHandler()
 }
 
 namespace Impl {
-	auto LoadTexture(const std::string& name, bool convertDecalBitmap, const std::string& errMsg)
+	enum class LoadResult {
+		SUCCESS = 0,
+		FILE_NOT_FOUND = 1,
+		BITMAP_ERROR = 2
+	};
+
+	std::tuple<LoadResult, CBitmap, std::string> LoadTexture(const std::string& name, bool convertDecalBitmap, const std::string& errMsg)
 	{
 		RECOIL_DETAILED_TRACY_ZONE;
 		std::string fileName = StringToLower(name);
@@ -170,9 +176,13 @@ namespace Impl {
 		if (!CFileHandler::FileExists(fullName, SPRING_VFS_ALL))
 			fullName = std::string("unittextures/") + fileName;
 
+		if (!CFileHandler::FileExists(fullName, SPRING_VFS_ALL)) {
+			return std::make_tuple(LoadResult::FILE_NOT_FOUND, CBitmap(), fileName);
+		}
+
 		CBitmap bm;
 		if (!bm.Load(fullName))
-			throw content_error(fmt::format(", {} file: \"{}\"", errMsg, fileName));
+			return std::make_tuple(LoadResult::BITMAP_ERROR, CBitmap(), fullName);
 
 		if (convertDecalBitmap && FileSystem::GetExtension(fullName) == "bmp") {
 			// bitmaps don't have an alpha channel
@@ -195,7 +205,7 @@ namespace Impl {
 		}
 		// non BMP scar textures doesn't follow the above historic convention, so keep them as is
 
-		return std::make_tuple(bm, fullName);
+		return std::make_tuple(LoadResult::SUCCESS, bm, fullName);
 	}
 }
 
@@ -205,16 +215,20 @@ static inline std::string GetExtraTextureName(const std::string& mainTex) {
 	return mainTex.substr(0, dotPos) + "_normal" + (dotPos == string::npos ? "" : mainTex.substr(dotPos));
 }
 
-void CGroundDecalHandler::AddTexToAtlas(const std::string& name, const std::string& filename, bool convertOldBMP, const std::string& errMsg) {
+void CGroundDecalHandler::AddTexToAtlas(const std::string& name, const std::string& filename, bool convertOldBMP, const std::string& errMsg, bool reportMissingFile) {
 	RECOIL_DETAILED_TRACY_ZONE;
-	try {
-		const auto& [bm, fn] = Impl::LoadTexture(filename, convertOldBMP, errMsg);
+
+	const auto [res, bm, fn] = Impl::LoadTexture(filename, convertOldBMP, errMsg);
+	if (res == Impl::LoadResult::SUCCESS) {
 		if (atlasTex->AddTexFromBitmap(name, bm, filename)) {
 			texFileNames.emplace(name, fn);
 		}
 	}
-	catch (const content_error& err) {
-		LOG_L(L_WARNING, "%s", err.what());
+	else if (res == Impl::LoadResult::BITMAP_ERROR) {
+		LOG_L(L_WARNING, "%s", fmt::format("{}. Failed loading decal bitmap: \"{}\"", errMsg, fn).c_str());
+	}
+	else if (reportMissingFile) {
+		LOG_L(L_WARNING, "%s", fmt::format("{}. Decal file not found: \"{}\"", errMsg, fn).c_str());
 	}
 }
 
@@ -243,8 +257,8 @@ void CGroundDecalHandler::AddBuildingDecalTextures()
 
 			const std::string ERR_MSG = fmt::format("Error loading a ground decal texture from {}Defs, def.name = {}", defName, soDef.name);
 
-			AddTexToAtlas(mainTex, mainTex, false, ERR_MSG);
-			AddTexToAtlas(normTex, normTex, false, ERR_MSG);
+			AddTexToAtlas(mainTex, mainTex, false, ERR_MSG,  true);
+			AddTexToAtlas(normTex, normTex, false, ERR_MSG, false);
 		}
 	};
 
@@ -278,8 +292,8 @@ void CGroundDecalHandler::AddTexturesFromTable()
 		const auto mainName = IntToString(i, "mainscar_%i");
 		const auto normName = IntToString(i, "normscar_%i");
 
-		AddTexToAtlas(mainName, mainTexFileName,  true, ERR_MSG_SCAR1);
-		AddTexToAtlas(normName, normTexFileName, false, ERR_MSG_SCAR1);
+		AddTexToAtlas(mainName, mainTexFileName,  true, ERR_MSG_SCAR1,  true);
+		AddTexToAtlas(normName, normTexFileName, false, ERR_MSG_SCAR1, false);
 
 		// check if loaded for real
 		maxUniqueScars += atlasTex->TextureExists(mainName);
@@ -303,8 +317,8 @@ void CGroundDecalHandler::AddTexturesFromTable()
 				const std::string mainTexFileName = scarMainTextures[extraTexNum++ % scarsExtraNum];
 				const std::string normTexFileName = GetExtraTextureName(mainTexFileName);
 
-				AddTexToAtlas(mainName, mainTexFileName,  true, ERR_MSG_SCAR2);
-				AddTexToAtlas(normName, normTexFileName, false, ERR_MSG_SCAR2);
+				AddTexToAtlas(mainName, mainTexFileName,  true, ERR_MSG_SCAR2,  true);
+				AddTexToAtlas(normName, normTexFileName, false, ERR_MSG_SCAR2, false);
 
 				maxUniqueScars += atlasTex->GetAllocator()->contains(mainName);
 			}
@@ -325,8 +339,8 @@ void CGroundDecalHandler::AddTexturesFromTable()
 		const auto mainName = IntToString(i, "maindecal_%i");
 		const auto normName = IntToString(i, "normdecal_%i");
 
-		AddTexToAtlas(mainName, mainTexFileName,  true, ERR_MSG_DECAL);
-		AddTexToAtlas(normName, normTexFileName, false, ERR_MSG_DECAL);
+		AddTexToAtlas(mainName, mainTexFileName,  true, ERR_MSG_DECAL,  true);
+		AddTexToAtlas(normName, normTexFileName, false, ERR_MSG_DECAL, false);
 	}
 }
 
@@ -342,8 +356,8 @@ void CGroundDecalHandler::AddGroundTrackTextures()
 		const auto normName = mainName + "_norm";
 		const std::string normTexFileName = GetExtraTextureName(mainTexFileName);
 
-		AddTexToAtlas(mainName, mainTexFileName,  true, ERR_MSG);
-		AddTexToAtlas(normName, normTexFileName, false, ERR_MSG);
+		AddTexToAtlas(mainName, mainTexFileName,  true, ERR_MSG,  true);
+		AddTexToAtlas(normName, normTexFileName, false, ERR_MSG, false);
 	}
 }
 
