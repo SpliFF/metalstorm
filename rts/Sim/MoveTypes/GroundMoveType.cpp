@@ -456,8 +456,7 @@ static float3 CalcSpeedVectorExclGravity(const CUnit* owner, const CGroundMoveTy
 					mapInfo->atmosphere.fluidDensity,
 					mapInfo->water.fluidDensity,
 					owner->unitDef->atmosphericDragCoefficient,
-					rollingResistanceCoeff,
-					owner->unitDef->myGravity
+					rollingResistanceCoeff
 				)).Length()
 			);
 		}
@@ -1520,8 +1519,7 @@ void CGroundMoveType::UpdateSkid()
 			mapInfo->atmosphere.fluidDensity,
 			mapInfo->water.fluidDensity,
 			owner->unitDef->atmosphericDragCoefficient,
-			owner->unitDef->groundFrictionCoefficient,
-			owner->unitDef->myGravity
+			owner->unitDef->groundFrictionCoefficient
 		)
 	);
 
@@ -1661,8 +1659,7 @@ void CGroundMoveType::UpdateControlledDrop()
 			mapInfo->atmosphere.fluidDensity,
 			mapInfo->water.fluidDensity,
 			owner->unitDef->atmosphericDragCoefficient,
-			owner->unitDef->groundFrictionCoefficient * 10,
-			owner->unitDef->myGravity
+			owner->unitDef->groundFrictionCoefficient * 10
 		)
 	);
 	owner->SetSpeed(spd);
