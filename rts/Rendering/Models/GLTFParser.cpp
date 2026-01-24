@@ -74,7 +74,10 @@ namespace Impl {
 
 					if (primAttIt == prim.attributes.cbegin()) {
 						verts.resize(prevVertSize + accessor.count);
-						vertexWeights.resize(accessor.count, { std::make_pair(SVertexData::INVALID_BONEID, 0.0f) } );
+						vertexWeights.resize(accessor.count);
+						for (auto& weights : vertexWeights) {
+							weights.fill(std::make_pair(SVertexData::INVALID_BONEID, 0.0f));
+						}
 					}
 
 					if (!accessor.bufferViewIndex.has_value())

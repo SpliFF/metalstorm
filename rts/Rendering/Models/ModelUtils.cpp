@@ -22,6 +22,8 @@ void Skinning::ReparentMeshesTrianglesToBones(S3DModel* model, const std::vector
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 
+	std::vector<std::pair<size_t, size_t>> boneWeights;
+
 	for (const auto& mesh : meshes) {
 		const auto& verts = mesh.verts;
 		const auto& indcs = mesh.indcs;
@@ -166,6 +168,7 @@ void Skinning::ReparentMeshesTrianglesToBones(S3DModel* model, const std::vector
 void Skinning::ReparentCompleteMeshesToBones(S3DModel* model, const std::vector<SkinnedMesh>& meshes) {
 	RECOIL_DETAILED_TRACY_ZONE;
 
+	std::vector<std::pair<size_t, size_t>> boneWeights;
 
 	for (const auto& mesh : meshes) {
 		const auto& verts = mesh.verts;
