@@ -56,7 +56,7 @@ strict rules to protect maintainers.
 
 ## AI is Welcome Here
 
-Recoil is written with plenty of AI assistance, and many maintainers embrace
+Recoil is written with some of AI assistance, and many maintainers embrace
 AI tools as a productive tool in their workflow. As a project, we welcome
 AI as a tool!
 
@@ -70,6 +70,6 @@ that this policy is anti-AI in nature.
 
 ### Attribution
 
-This policy originates from https://github.com/Recoil-org/Recoil/blob/main/AI_POLICY.md
+This policy originates from https://github.com/ghostty-org/ghostty/blob/main/AI_POLICY.md
 
 We're grateful to the authors for the well thought and excellently written text.
