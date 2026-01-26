@@ -617,6 +617,11 @@ add_dependencies(generateSources generateVersionFiles)
 # As the libs are required by all the other sub-projects, we add them first
 add_subdirectory(rts/lib)
 
+# Fix for MinGW assembler limitations with large object files
+if(MINGW)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wa,-mbig-obj")
+endif()
+
 if    (NOT "${AI_TYPES}" STREQUAL "NONE")
 	add_subdirectory(AI)
 endif (NOT "${AI_TYPES}" STREQUAL "NONE")
