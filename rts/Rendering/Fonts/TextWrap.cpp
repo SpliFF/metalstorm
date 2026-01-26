@@ -39,13 +39,12 @@ uint32_t CTextWrap::SkipColorCodes(const spring::u8string& text, uint32_t idx, C
 	RECOIL_DETAILED_TRACY_ZONE;
 
 	auto AdvanceAndCopy = [&text, cctPtr](uint32_t& idx, uint32_t c) {
-		uint32_t oldIdx = idx;
-		idx += c;
-
-		if (cctPtr && oldIdx != idx) {
-			std::fill(cctPtr->begin(), cctPtr->end(), 0);
-			std::memcpy(cctPtr->data(), &text[oldIdx], idx - oldIdx);
+		if (cctPtr) {
+			std::fill(cctPtr->storage.begin(), cctPtr->storage.end(), 0);
+			std::memcpy(cctPtr->storage.data(), &text[idx], c);
+			cctPtr->size = static_cast<uint8_t>(c);
 		}
+		idx += c;
 	};
 
 	while (idx < text.size()) {

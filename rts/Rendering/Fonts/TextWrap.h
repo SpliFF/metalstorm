@@ -30,9 +30,12 @@ public:
 	static constexpr char8_t CR = '\r';
 	static constexpr char8_t LF = '\n';
 public:
-	using ColorCodeText = std::array<char8_t, 1 + 4 + 4 + 1>; // reserve for [I,R,G,B,A,R,G,B,A] + \0
+	struct ColorCodeText {
+		std::array<char8_t, 1 + 4 + 4 + 1> storage; // reserve for [I,R,G,B,A,R,G,B,A] + \0
+		uint8_t size;
+	};
 	struct ColorCode {
-		auto tostring() const { return std::string(reinterpret_cast<const char*>(colorText.data())); }
+		auto tostring() const { return std::string(reinterpret_cast<const char*>(colorText.storage.data()), colorText.size); }
 		ColorCodeText colorText;
 		uint32_t pos;
 	};
