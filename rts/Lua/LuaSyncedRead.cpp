@@ -203,6 +203,7 @@ bool LuaSyncedRead::PushEntries(lua_State* L)
 
 	REGISTER_LUA_CFUNC(GetUnitTooltip);
 	REGISTER_LUA_CFUNC(GetUnitDefID);
+	REGISTER_LUA_CFUNC(GetUnitMoveDefID);
 	REGISTER_LUA_CFUNC(GetUnitTeam);
 	REGISTER_LUA_CFUNC(GetUnitAllyTeam);
 	REGISTER_LUA_CFUNC(GetUnitNeutral);
@@ -4119,6 +4120,39 @@ int LuaSyncedRead::GetUnitDefID(lua_State* L)
 	lua_pushnumber(L, LuaUtils::EffectiveUnitDef(L, unit)->id);
 	return 1;
 }
+
+/***
+* @function Spring.GetUnitMoveDefID
+*
+* Returns a numerical movedef ID and its name. For things that have
+* no movedef, returns `false` (to tell them apart from unreadable
+* units while keeping the `if not x` pattern usable). For now, the
+* numerical ID is not too useful so you can use the name, but this
+* may get deprecated at some point.
+* 
+* @param unitID integer
+*
+* @return integer|boolean|nil moveDefID
+* @return string? moveDefName
+*/
+
+int LuaSyncedRead::GetUnitMoveDefID(lua_State* L) 
+{
+	const auto unit = ParseInLosUnit(L, __func__, 1);
+	if (unit == nullptr)
+		return 0;
+
+	const auto moveDef = unit->moveDef;
+	if (moveDef == nullptr) {
+		lua_pushboolean(L, false);
+		return 1;
+	}
+
+	lua_pushnumber(L, moveDef->pathType);
+	lua_pushsstring(L, moveDef->name);
+	return 2;
+}
+
 
 
 /***
