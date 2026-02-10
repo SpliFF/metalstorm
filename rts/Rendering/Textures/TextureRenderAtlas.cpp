@@ -280,7 +280,7 @@ int CTextureRenderAtlas::GetMinDim() const
 	return atlasAllocator->GetMinDim();
 }
 
-const int2& CTextureRenderAtlas::GetAtlasSize() const
+const uint2& CTextureRenderAtlas::GetAtlasSize() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	return atlasAllocator->GetAtlasSize();
@@ -358,7 +358,7 @@ bool CTextureRenderAtlas::CreateAtlasTexture()
 	const auto numLevels = atlasAllocator->GetNumTexLevels();
 	const auto numPages = atlasAllocator->GetNumPages();
 
-	const auto atlasSize = atlasAllocator->GetAtlasSize();
+	const auto& atlasSize = atlasAllocator->GetAtlasSize();
 
 	{
 		GL::TextureCreationParams tcp{

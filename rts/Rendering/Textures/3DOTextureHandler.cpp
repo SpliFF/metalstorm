@@ -58,14 +58,14 @@ void C3DOTextureHandler::Init()
 	}
 
 	const bool allocated = atlasAlloc->Allocate();
-	const int2 curAtlasSize = atlasAlloc->GetAtlasSize();
-	const int2 maxAtlasSize = atlasAlloc->GetMaxSize();
+	const auto& curAtlasSize = atlasAlloc->GetAtlasSize();
+	const auto& maxAtlasSize = atlasAlloc->GetMaxSize();
 
 	if (!allocated) {
 		// either the algorithm simply failed to fit all
 		// textures or the textures would really not fit
 		LOG_L(L_WARNING,
-			"[%s] failed to allocate 3DO texture-atlas memory (size=%dx%d max=%dx%d)",
+			"[%s] failed to allocate 3DO texture-atlas memory (size=%ux%u max=%ux%u)",
 			__func__,
 			curAtlasSize.x, curAtlasSize.y,
 			maxAtlasSize.x, maxAtlasSize.y
