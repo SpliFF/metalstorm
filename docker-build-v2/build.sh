@@ -135,11 +135,22 @@ else
   P="/"
 fi
 
+# Handle git worktrees: the container needs access to the shared .git directory
+# for version generation. In a worktree, --absolute-git-dir returns the
+# worktree-specific dir while --git-common-dir returns the shared .git root.
+WORKTREE_MOUNTS=""
+GIT_DIR=$(git rev-parse --absolute-git-dir)
+GIT_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir)
+if [[ "$GIT_DIR" != "$GIT_COMMON_DIR" ]]; then
+  WORKTREE_MOUNTS="-v $GIT_COMMON_DIR:$GIT_COMMON_DIR:ro"
+fi
+
 $RUNTIME run -it --rm \
     -v "$CWD${P}":/build/src:z,ro \
     -v "$CWD${P}.cache${P}ccache-$OS":/build/cache:z,rw \
     -v "$CWD${P}build-$OS":/build/out:z,rw \
     $UID_FLAGS \
+    $WORKTREE_MOUNTS \
     -e CONFIGURE \
     -e COMPILE \
     -e CMAKE_BUILD_PARALLEL_LEVEL \
