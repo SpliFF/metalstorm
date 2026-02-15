@@ -104,7 +104,7 @@ public:
 	virtual void Activate();
 	virtual void Deactivate();
 
-	void ForcedMove(const float3& newPos);
+	void ForcedMove(const float3& newPos) override;
 
 	void DeleteScript();
 	void EnableScriptMoveType();

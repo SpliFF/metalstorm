@@ -815,7 +815,6 @@ static int SetSolidObjectPhysicalState(lua_State* L, CSolidObject* o)
 	drag.y = std::clamp(luaL_optnumber(L, 12, drag.y), 0.0f, 1.0f);
 	drag.z = std::clamp(luaL_optnumber(L, 13, drag.z), 0.0f, 1.0f);
 
-	o->Move(pos, false);
 	o->SetDirVectorsEuler(rot);
 	// do not need ForcedSpin, above three calls cover it
 	o->ForcedMove(pos);
