@@ -195,8 +195,8 @@ public:
 
 	void SetUnitLeaveTracks(CUnit* unit, bool leaveTracks) override;
 private:
-	static void BindVertexAtrribs();
-	static void UnbindVertexAtrribs();
+	static void BindVertexAttributes();
+	static void UnbindVertexAttributes();
 
 	uint32_t GetDepthBufferTextureTarget() const;
 

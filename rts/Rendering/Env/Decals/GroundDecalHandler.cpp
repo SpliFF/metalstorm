@@ -382,7 +382,7 @@ uint32_t CGroundDecalHandler::GetNextId()
 	return 0;
 }
 
-void CGroundDecalHandler::BindVertexAtrribs()
+void CGroundDecalHandler::BindVertexAttributes()
 {
 	for (int i = 0; i <= 8; ++i) {
 		glEnableVertexAttribArray(i);
@@ -400,7 +400,7 @@ void CGroundDecalHandler::BindVertexAtrribs()
 	}
 }
 
-void CGroundDecalHandler::UnbindVertexAtrribs()
+void CGroundDecalHandler::UnbindVertexAttributes()
 {
 	for (const AttributeDef& ad : GroundDecal::attributeDefs) {
 		glDisableVertexAttribArray(ad.index);
@@ -772,11 +772,11 @@ void CGroundDecalHandler::Draw()
 
 		instVBO.Bind();
 		instVBO.New(decals.capacity() * sizeof(GroundDecal), GL_STREAM_DRAW);
-		BindVertexAtrribs();
+		BindVertexAttributes();
 
 		vao.Unbind();
 
-		UnbindVertexAtrribs();
+		UnbindVertexAttributes();
 		instVBO.Unbind();
 		decalsUpdateList.SetNeedUpdateAll();
 	}
@@ -1428,7 +1428,7 @@ void CGroundDecalHandler::AddTrack(const CUnit* unit, const float3& newPos, bool
 	// replace the old entry
 	decalOwners[unit] = decals.size() - 1;
 
-	idToPos[newDecal.info.id], decals.size() - 1;
+	idToPos[newDecal.info.id] = decals.size() - 1;
 	decalsUpdateList.EmplaceBackUpdate();
 }
 
