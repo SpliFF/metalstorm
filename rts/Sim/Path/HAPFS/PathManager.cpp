@@ -443,7 +443,7 @@ unsigned int CPathManager::RequestPath(
 		return 0;
 
 	if (synced && !immediateResult) {
-		assert(!ThreadPool::inMultiThreadedSection);
+		assert(!ThreadPool::IsInMultiThreadedSection());
 
 		PathSearch* existingSearch = nullptr;
 		auto searchView = registry.view<PathSearch>();
