@@ -62,6 +62,9 @@ CProjectileDrawer* projectileDrawer = nullptr;
 // ~EventClient)
 alignas(CProjectileDrawer) static std::byte projectileDrawerMem[sizeof(CProjectileDrawer)];
 
+TypedRenderBuffer<VA_TYPE_C> CProjectileDrawer::minimapLinesRB = { 1 << 12, 0 };
+TypedRenderBuffer<VA_TYPE_C> CProjectileDrawer::minimapPointsRB = { 1 << 14, 0 };
+
 
 void CProjectileDrawer::InitStatic() {
 	RECOIL_DETAILED_TRACY_ZONE;
@@ -76,6 +79,10 @@ void CProjectileDrawer::KillStatic(bool reload) {
 
 	if (reload)
 		return;
+
+	// Clean up minimap render buffers before OpenGL context is destroyed
+	minimapLinesRB = {};
+	minimapPointsRB = {};
 
 	spring::SafeDestruct(projectileDrawer);
 	memset(projectileDrawerMem, 0, sizeof(projectileDrawerMem));
@@ -630,11 +637,11 @@ void CProjectileDrawer::DrawProjectilesMiniMap()
 	sh.Enable();
 	{
 		ZoneScopedN("DrawProjectilesMiniMap::MiniMapLinesRB");
-		CProjectile::GetMiniMapLinesRB().DrawArrays(GL_LINES);
+		GetMiniMapLinesRB().DrawArrays(GL_LINES);
 	}
 	{
 		ZoneScopedN("DrawProjectilesMiniMap::MiniMapPointsRB");
-		CProjectile::GetMiniMapPointsRB().DrawArrays(GL_POINTS);
+		GetMiniMapPointsRB().DrawArrays(GL_POINTS);
 	}
 	sh.Disable();
 
