@@ -19,8 +19,6 @@ if (WIN32)
 	add_definitions(-DUNICODE -D_UNICODE)
 endif()
 
-add_definitions(-DFMT_HEADER_ONLY) #for fmt lib
-
 option(INSTALL_PORTABLE "Make a portable installation (instead of regular system installation)" TRUE)
 
 # Allow to set PREFER_STATIC_LIBS from env, defaults to false
