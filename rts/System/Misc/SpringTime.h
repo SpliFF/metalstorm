@@ -29,10 +29,10 @@ namespace spring_clock {
 	template<> int64_t ToMilliSecs<int64_t>(int64_t ns) { return (ns / int64_t(1e6)); }
 	template<> int64_t ToMicroSecs<int64_t>(int64_t ns) { return (ns / int64_t(1e3)); }
 
-	template<typename T> static int64_t FromSecs     (const T  s) { return static_cast<T>( s * int64_t(1e9)); }
-	template<typename T> static int64_t FromMilliSecs(const T ms) { return static_cast<T>(ms * int64_t(1e6)); }
-	template<typename T> static int64_t FromMicroSecs(const T us) { return static_cast<T>(us * int64_t(1e3)); }
-	template<typename T> static int64_t FromNanoSecs (const T ns) { return static_cast<T>(ns               ); }
+	template<typename T> static int64_t FromSecs     (const T  s) { return ( s * int64_t(1e9)); }
+	template<typename T> static int64_t FromMilliSecs(const T ms) { return (ms * int64_t(1e6)); }
+	template<typename T> static int64_t FromMicroSecs(const T us) { return (us * int64_t(1e3)); }
+	template<typename T> static int64_t FromNanoSecs (const T ns) { return static_cast<int64_t>(ns); }
 
 	void PushTickRate(bool hres = false);
 	void PopTickRate();
