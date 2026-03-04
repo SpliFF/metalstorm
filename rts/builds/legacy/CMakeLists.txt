@@ -85,9 +85,7 @@ add_executable(engine-legacy ${EXE_FLAGS} ${engineSources} ${ENGINE_ICON} ${engi
 target_link_libraries(engine-legacy ${engineLibraries} Game)
 
 if(MSVC)
-    foreach(natvis_file ${RECOIL_NATVIS_FILES})
-        target_sources(engine-legacy PRIVATE "${natvis_file}")
-    endforeach()
+    target_link_libraries(engine-legacy engine-natvis)
 endif()
 
 
