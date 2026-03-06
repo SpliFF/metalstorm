@@ -115,7 +115,7 @@ All source files must begin with the GPL license header:
 ```
 
 ### Include Guards
-Use `#pragma once` for new headers, migrate ifdef guards to `#pragma once` wheneve you edit a header
+Use `#pragma once` for new headers, migrate ifdef guards to `#pragma once` whenever you edit a header file.
 
 ### Naming Conventions
 
@@ -125,13 +125,12 @@ Use `#pragma once` for new headers, migrate ifdef guards to `#pragma once` whene
 
 **Functions and Methods:**
 - PascalCase for public methods: `DrawSelf()`, `HandleEvent()`
-- camelCase acceptable for private/internal methods
 - Getters/setters: `GetMajor()`, `Label()`
 
 **Variables:**
 - Member variables: camelCase or snake_case: `label`, `clicked`, `hovered`
 - Local variables: camelCase preferred
-- Boolean variables: often use `is_`, `has_` prefixes or simple names: `hovered`, `clicked`
+- Boolean variables: often use `is`, `has` prefixes or simple names: `Hovered`, `Clicked`
 
 **Constants:**
 - Compile-time constants: UPPER_CASE or PascalCase
