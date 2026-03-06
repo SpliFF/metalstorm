@@ -44,6 +44,7 @@ cmake --build . -j$(nproc)
 - `PROFILE` - Profiling build
 
 ### Build Targets
+- `engine-legacy` - Main engine build
 - `engine-headless` - Headless server build
 - `engine-dedicated` - Dedicated server build
 - `tests` - Build all test executables
@@ -114,15 +115,7 @@ All source files must begin with the GPL license header:
 ```
 
 ### Include Guards
-Use traditional `#ifndef` guards (not `#pragma once`):
-```cpp
-#ifndef CLASS_NAME_H
-#define CLASS_NAME_H
-
-// ... content ...
-
-#endif
-```
+Use `#pragma once` for new headers, migrate ifdef guards to `#pragma once` wheneve you edit a header
 
 ### Naming Conventions
 
