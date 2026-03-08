@@ -324,10 +324,15 @@ else   (UNIX)
 	include_directories("${COREFOUNDATION_LIBRARY}/Headers")
 endif  (WIN32)
 
-find_package(Valgrind)
-if    (VALGRIND_FOUND)
-	add_definitions(-DUSE_VALGRIND)
-endif (VALGRIND_FOUND)
+option(USE_VALGRIND "Try to support Valgrind" FALSE)
+if    (USE_VALGRIND)
+	find_package(Valgrind)
+	if    (VALGRIND_FOUND)
+		add_definitions(-DUSE_VALGRIND)
+	else  (VALGRIND_FOUND)
+		message(SEND_ERROR "USE_VALGRIND is requested, but Valgrind is not found")
+	endif (VALGRIND_FOUND)
+endif (USE_VALGRIND)
 
 include (CheckSymbolExists)
 check_symbol_exists(strnlen string.h HAVE_STRNLEN)
@@ -613,6 +618,8 @@ add_dependencies(generateSources generateVersionFiles)
 ### Where the other CMakeLists.txt are
 
 # As the libs are required by all the other sub-projects, we add them first
+# Options that affect lib selection must be declared here, before rts/lib is processed
+option(USE_MIMALLOC "Use mimalloc memory allocator" TRUE)
 add_subdirectory(rts/lib)
 
 # Fix for MinGW assembler limitations with large object files
