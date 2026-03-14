@@ -1159,7 +1159,7 @@ int CUnitScript::GetUnitVal(int val, int p1, int p2, int p3, int p4)
 	case UPRIGHT:
 		return !!unit->upright;
 	case POW: {
-		const auto res = math::pow((p1 * 1.0f) / COBSCALE, (p2 * 1.0f) / COBSCALE) * COBSCALE;
+		const auto res = math::pow(static_cast<float>(p1) / COBSCALE, static_cast<float>(p2) / COBSCALE) * COBSCALE;
 		if likely(!math::isnan(res)) {
 			return spring::SafeCast<int>(res);
 		}
