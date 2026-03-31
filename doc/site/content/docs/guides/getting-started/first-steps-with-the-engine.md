@@ -234,16 +234,10 @@ The Recoil homepage lists [all games using the engine](/) with varying complexit
 
 Two games are particularly suited for newcomers:
 
-{{% cards %}}
-{{% card title="RecoilExampleMod" subtitle="Minimal template" link="https://github.com/DarkBlueDiamond/RecoilExampleMod" %}}
-A basic game template showing the fundamental structure of a Recoil game.
-Each folder is documented, making it easy to understand how games are organized.
-{{% /card %}}
-{{% card title="VroomRTS" subtitle="Simple gameplay" link="https://github.com/DarkBlueDiamond/VroomRTS" %}}
-A straightforward RTS game with vehicle combat. Good for understanding basic
-game mechanics without overwhelming complexity.
-{{% /card %}}
-{{% /cards %}}
+{{< cards >}}
+{{< card title="RecoilExampleMod" subtitle="A basic game template showing the fundamental structure of a Recoil game. Each folder is documented, making it easy to understand how games are organized." link="https://github.com/DarkBlueDiamond/RecoilExampleMod" >}}
+{{< card title="VroomRTS" subtitle="A straightforward RTS game with vehicle combat. Good for understanding basic game mechanics without overwhelming complexity." link="https://github.com/DarkBlueDiamond/VroomRTS" >}}
+{{< /cards >}}
 
 ### Modifying Existing Games
 
