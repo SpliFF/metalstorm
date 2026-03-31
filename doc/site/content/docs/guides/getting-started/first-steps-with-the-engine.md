@@ -6,6 +6,10 @@ Recoil Engine is a powerful open-source RTS engine that lets you create large-sc
 real-time strategy games using Lua scripting. This guide will help you set up your
 development environment and run your first game.
 
+> [!NOTE]
+> The engine binary is currently named `spring`. This is a temporary name inherited from
+> the original Spring RTS engine and will be renamed to `recoil` in a future release.
+
 ## Quick Start
 
 The fastest way to get started with Recoil game development:
@@ -52,13 +56,13 @@ your-game/
 You can also enable isolation via command line:
 
 ```bash
-./recoil --isolation
+./spring --isolation
 ```
 
 To specify a custom isolation directory:
 
 ```bash
-./recoil --isolation --isolation-dir /path/to/game/data
+./spring --isolation --isolation-dir /path/to/game/data
 ```
 
 ### Write Directory
@@ -69,13 +73,13 @@ the write directory.
 
 **Command-line option:**
 ```bash
-./recoil --write-dir /path/to/writable/dir
+./spring --write-dir /path/to/writable/dir
 ```
 
 **Environment variable:**
 ```bash
 export SPRING_WRITEDIR=/path/to/writable/dir
-./recoil
+./spring
 ```
 
 **Priority order for write directory:**
@@ -99,7 +103,7 @@ export SPRING_WRITEDIR=/path/to/writable/dir
 
 ```bash
 # Portable setup: read from /media/game, write to /home/user/saves
-./recoil --isolation --isolation-dir /media/game --write-dir /home/user/saves
+./spring --isolation --isolation-dir /media/game --write-dir /home/user/saves
 ```
 
 ### User Data Directories (Default for Installed Engines)
@@ -154,12 +158,63 @@ games/
 └── MyGame-1.0.sd7        # Release version
 ```
 
-The `.sdd` extension tells the engine to treat the directory as a game/map archive,
-allowing you to edit files directly without repacking.
+A `.sdd` is **just a normal directory** — there is no special format, archive, or build step.
+The only requirement is that the directory name ends with `.sdd`. You can create one with
+a simple `mkdir MyGame.sdd` and start adding files. The engine detects the `.sdd` suffix
+and reads the directory contents directly, so any changes you make to files inside it take
+effect the next time you start a game — no repacking needed.
 
-> [!NOTE]
-> Development directories (`.sdd`) are convenient but slower to load.
-> Use archives for production releases.
+### Cloning a Game for Development
+
+Clone a beginner-friendly game directly into your `games/` directory with the `.sdd`
+extension so the engine picks it up immediately:
+
+**RecoilExampleMod — minimal template:**
+```bash
+cd recoil-engine/games/
+git clone https://github.com/DarkBlueDiamond/RecoilExampleMod.git RecoilExampleMod.sdd
+```
+
+**VroomRTS — simple gameplay:**
+```bash
+cd recoil-engine/games/
+git clone https://github.com/DarkBlueDiamond/VroomRTS.git VroomRTS.sdd
+```
+
+After cloning, your engine directory will look like this:
+
+```
+recoil-engine/
+├── spring                  # Engine binary
+├── games/
+│   ├── RecoilExampleMod.sdd/    # Cloned from GitHub
+│   │   ├── ModInfo.lua
+│   │   ├── LuaRules/
+│   │   ├── LuaUI/
+│   │   ├── units/
+│   │   └── ...
+│   └── VroomRTS.sdd/            # Cloned from GitHub
+│       ├── ModInfo.lua
+│       ├── LuaRules/
+│       ├── LuaUI/
+│       ├── units/
+│       └── ...
+├── maps/                        # Place downloaded maps here
+└── base/
+```
+
+Now launch the engine and select either game from the menu:
+
+```bash
+./spring
+```
+
+To update a cloned game to the latest version:
+
+```bash
+cd recoil-engine/games/RecoilExampleMod.sdd/
+git pull
+```
 
 ## Content Delivery with Rapid
 
