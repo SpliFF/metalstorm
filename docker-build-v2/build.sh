@@ -95,7 +95,7 @@ cd "$(dirname "$(readlink -f "$0")")/.."
 # that people forget to update and initialize them. Let's block the build when
 # we detect that it's the case and allow to continue after creation of escape
 # hatch file.
-UNSYNCED_SUBMODULES="$(git submodule status --recursive | grep -E '^(\+|-)' | awk '{ print " - " $2 }')"
+UNSYNCED_SUBMODULES="$(git submodule status --recursive | { grep -E '^(\+|-)' || test $? = 1; } | awk '{ print " - " $2 }')"
 if [[ -n "$UNSYNCED_SUBMODULES" ]]; then
   echo "WARNING: You have unsynced git submodules!"
   echo ""
