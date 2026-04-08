@@ -13,6 +13,7 @@
 #include "Server/EntityStateSerializer.h"
 #include "Server/ContentServer.h"
 #include "Server/CombatEventCollector.h"
+#include "Server/StandingOrders.h"
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
@@ -445,6 +446,11 @@ int main(int argc, char* argv[])
                 net.Send(clientId, frame.data(), frame.size());
             });
         }
+        }
+
+        // Evaluate standing orders every ~1s (30 ticks)
+        if (sim.GetFrameNum() > 0 && (sim.GetFrameNum() % 30) == 0) {
+            standingOrders.Evaluate();
         }
 
         // Broadcast combat events to all connected clients
