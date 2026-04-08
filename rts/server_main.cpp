@@ -13,6 +13,10 @@
 #include "Server/EntityStateSerializer.h"
 #include "Server/ContentServer.h"
 #include "Server/CombatEventCollector.h"
+#include "Sim/Units/UnitHandler.h"
+#include "Sim/Units/Unit.h"
+#include "Sim/Units/CommandAI/CommandAI.h"
+#include "Sim/Units/CommandAI/Command.h"
 #include "Sim/Misc/GlobalConstants.h"
 #include "Map/ReadMap.h"
 #include "System/FileSystem/FileHandler.h"
@@ -322,12 +326,37 @@ int main(int argc, char* argv[])
                     }
                     session->lastCommandSeq = cmd->sequence();
 
-                    // TODO: validate squad ownership, feed to sim
-                    std::fprintf(stderr, "[cmd] client %u (%s): cmd=%d seq=%u squads=%d params=%d\n",
-                        msg.clientId, session->username.c_str(),
-                        cmd->command_id(), cmd->sequence(),
-                        cmd->squad_ids() ? cmd->squad_ids()->size() : 0,
-                        cmd->params() ? cmd->params()->size() : 0);
+                    // Build a Command from the PlayerCommand message
+                    {
+                        Command simCmd(cmd->command_id(), static_cast<unsigned char>(cmd->options()));
+                        if (cmd->timeout_frames() > 0)
+                            simCmd.SetTimeOut(static_cast<int>(cmd->timeout_frames()));
+
+                        // Copy parameters
+                        if (cmd->params()) {
+                            for (unsigned i = 0; i < cmd->params()->size(); i++)
+                                simCmd.PushParam(cmd->params()->Get(i));
+                        }
+
+                        // Route command to each target unit
+                        int routed = 0;
+                        if (cmd->squad_ids()) {
+                            for (unsigned i = 0; i < cmd->squad_ids()->size(); i++) {
+                                uint32_t unitId = cmd->squad_ids()->Get(i);
+                                CUnit* unit = unitHandler.GetUnit(unitId);
+                                if (unit == nullptr || unit->isDead)
+                                    continue;
+                                // TODO: validate team ownership (unit->team == session->team)
+                                unit->commandAI->GiveCommand(simCmd);
+                                routed++;
+                            }
+                        }
+
+                        std::fprintf(stderr, "[cmd] client %u (%s): cmd=%d seq=%u routed=%d/%d\n",
+                            msg.clientId, session->username.c_str(),
+                            cmd->command_id(), cmd->sequence(),
+                            routed, cmd->squad_ids() ? (int)cmd->squad_ids()->size() : 0);
+                    }
                     break;
                 }
                 case SpringWeb::ClientPayload_ViewportUpdate: {
