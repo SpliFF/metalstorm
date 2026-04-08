@@ -15,6 +15,7 @@
 #include "Server/CombatEventCollector.h"
 #include "Server/StandingOrders.h"
 #include "Server/AI/AIRuntimePool.h"
+#include "Server/PerfMetrics.h"
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
@@ -152,6 +153,13 @@ int main(int argc, char* argv[])
         return {.contentType = "application/json", .body = std::move(body), .status = 200};
     });
 
+    // Performance metrics endpoint
+    net.AddHttpGet("/api/metrics", [](const std::string&) -> HttpResponse {
+        std::string json = perfMetrics.ToJSON();
+        std::vector<uint8_t> body(json.begin(), json.end());
+        return {.contentType = "application/json", .body = std::move(body), .status = 200};
+    });
+
     // --- Content server ---
     ContentServer content;
     {
@@ -211,6 +219,7 @@ int main(int argc, char* argv[])
             }
         }
 
+        perfMetrics.BeginTick();
         sessions.ResetTickCounters();
 
         // Drain inbound messages from clients
@@ -482,6 +491,11 @@ int main(int argc, char* argv[])
             net.Broadcast(batch.data(), batch.size());
         }
         }
+
+        perfMetrics.SetFrame(sim.GetFrameNum());
+        perfMetrics.SetClientCount(net.GetClientCount());
+        perfMetrics.SetAICount(static_cast<int>(aiPool.GetAICount()));
+        perfMetrics.EndTick();
 
         // Periodic status
         int frame = sim.GetFrameNum();
