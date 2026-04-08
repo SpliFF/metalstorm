@@ -51,5 +51,8 @@ CMakeUserPresets.json
 springsettings.cfg
 infolog.txt
 
+# Server data (SQLite databases, runtime state)
+/data/
+
 # VS Code user settings (workspace file IS committed, user prefs are not)
 .vscode/*.code-snippets

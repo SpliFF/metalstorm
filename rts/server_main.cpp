@@ -56,7 +56,7 @@ int main(int argc, char* argv[])
 
     // --- Database ---
     Database db;
-    if (!db.Open("spring-server.db")) {
+    if (!db.Open("data/spring-server.db")) {
         std::fprintf(stderr, "[spring-server] ERROR: failed to open database\n");
         return 1;
     }
