@@ -82,6 +82,8 @@ int main(int argc, char* argv[])
         CFileHandler::AddContentRoot(mapPath);
         std::fprintf(stderr, "[spring-server] map content: %s\n", mapPath.c_str());
     }
+    // Engine base content (gamedata/defs.lua, system.lua, gadgets, etc.)
+    CFileHandler::AddContentRoot("cont/base/springcontent");
     // Always search cwd as fallback
     CFileHandler::AddContentRoot(".");
 

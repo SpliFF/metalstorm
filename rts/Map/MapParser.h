@@ -16,6 +16,7 @@ public:
 	static std::string GetMapConfigName(const std::string& mapFileName);
 
 public:
+	MapParser() : parser("", "", 0) {} // default: no map
 	MapParser(const std::string& mapFileName);
 
 	// no-copy

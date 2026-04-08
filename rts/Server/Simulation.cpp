@@ -37,10 +37,14 @@
 #include "Lua/LuaParser.h"
 #include "Lua/LuaSyncedRead.h"
 #include "Map/MapDamage.h"
+#include "Map/MapInfo.h"
+#include "Sim/Misc/ModInfo.h"
 #include "System/EventHandler.h"
+#include "System/Config/ConfigHandler.h"
 #include "System/Log/ILog.h"
 
 #include <cstdio>
+
 
 CSimulation::CSimulation() = default;
 CSimulation::~CSimulation() noexcept = default;
@@ -97,28 +101,23 @@ void CSimulation::InitSubsystems()
 
     // Order follows CGame::PreLoadSimulation + PostLoadSimulation
 
-    // Move defs (needs defsParser)
-    moveDefHandler.Init(defsParser.get());
+    // Provide a default mapInfo if no map is loaded
+    if (mapInfo == nullptr)
+        mapInfo = new CMapInfo();
 
-    // Damage types
+    // Load mod rules (gamedata/modrules.lua)
+    std::fprintf(stderr, "[sim]   modInfo.Init...\n");
+    modInfo.Init("");
+
+    // --- Map-independent subsystems ---
+
     damageArrayHandler.Init(defsParser.get());
-
-    // Explosion generators
     explGenHandler.Init();
-
-    // Common def handler
     CommonDefHandler::InitStatic();
-
-    // Weapon definitions
     weaponDefHandler->Init(defsParser.get());
-
-    // Unit definitions
     unitDefHandler->Init(defsParser.get());
-
-    // Feature definitions
     featureDefHandler->Init(defsParser.get());
 
-    // Script engine
     CUnit::InitStatic();
     CCommandAI::InitCommandDescriptionCache();
     CUnitScriptFactory::InitStatic();
@@ -126,11 +125,17 @@ void CSimulation::InitSubsystems()
     MoveTypeFactory::InitStatic();
     CWeaponLoader::InitStatic();
 
-    // Core sim handlers
     helper->Init();
     unitHandler.Init();
     featureHandler.Init();
     projectileHandler.Init();
+
+    // --- Map-dependent subsystems (deferred until map is loaded) ---
+    // moveDefHandler.Init(defsParser.get())  — needs mapInfo->terrainTypes
+    // CLosHandler::InitStatic()              — needs map dimensions
+    // IPathManager::GetInstance()            — needs map
+    // IMapDamage::InitMapDamage()            — needs map
+    // featureDefHandler->LoadFeatureDefsFromMap() — needs readMap
 
     std::fprintf(stderr, "[sim] subsystems initialised\n");
 }
@@ -139,6 +144,7 @@ void CSimulation::InitSubsystems()
 void CSimulation::Init()
 {
     // Initialise global state objects
+    ConfigHandler::Instantiate("", false);
     gs->Init();
     gu->Init();
 

@@ -28,6 +28,7 @@ public:
 	 * @param mapFileName full path to map-file aka SMF
 	 * @param mapHumanName human-readable mapname e.g. DeltaSiegeDry
 	 */
+	CMapInfo() {} ///< Default: no map, all fields zero-initialized
 	CMapInfo(const std::string& mapInfoFile, const std::string& mapHumanName);
 	~CMapInfo();
 
@@ -60,20 +61,20 @@ public:
 
 	/** Global settings, ie. from "MAP" section. */
 	struct map_t {
-		std::string name;         ///< The human name as passed to the constructor.
-		std::string description;  ///< "MAP\\Description"
+		std::string name;
+		std::string description;
 		std::string author;
 
-		float hardness;           ///< "MAP\\MapHardness"
-		float gravity;            ///< negative elmos/frame^2 (NOT positive elmos/second^2 as in mapfile)
-		float tidalStrength;
-		float maxMetal;           ///< what metal value 255 in the metal map is worth
-		float extractorRadius;    ///< extraction radius for mines
-		float voidAlphaMin;
+		float hardness = 0.0f;
+		float gravity = -130.0f / 900.0f; // Spring default
+		float tidalStrength = 0.0f;
+		float maxMetal = 0.02f;
+		float extractorRadius = 0.0f;
+		float voidAlphaMin = 0.0f;
 
-		bool  notDeformable;
-		bool  voidWater;
-		bool  voidGround;
+		bool  notDeformable = false;
+		bool  voidWater = false;
+		bool  voidGround = false;
 	} map;
 
 	/** GUI settings (used by CGuiHandler) */
