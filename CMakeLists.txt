@@ -159,7 +159,8 @@ target_include_directories(spring-server PRIVATE
     ${GENERATED_DIR}
 )
 find_package(ZLIB REQUIRED)
-target_link_libraries(spring-server PRIVATE lua uws flatbuffers ZLIB::ZLIB)
+find_package(SQLite3 REQUIRED)
+target_link_libraries(spring-server PRIVATE lua uws flatbuffers ZLIB::ZLIB SQLite::SQLite3)
 
 # Link platform libraries
 if(UNIX AND NOT APPLE)

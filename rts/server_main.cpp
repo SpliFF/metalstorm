@@ -8,6 +8,7 @@
 #include "Server/Simulation.h"
 #include "Server/NetworkServer.h"
 #include "Server/Protocol.h"
+#include "Server/Database.h"
 #include "Sim/Misc/GlobalConstants.h"
 #include "System/Misc/SpringTime.h"
 
@@ -16,11 +17,24 @@
 #include <atomic>
 #include <thread>
 #include <chrono>
+#include <random>
 
 static std::atomic<bool> keepRunning{true};
 
 static void signalHandler(int) {
     keepRunning.store(false);
+}
+
+/// Generate a random hex session token.
+static std::string generateToken(int length = 32) {
+    static const char hex[] = "0123456789abcdef";
+    static std::mt19937 rng(std::random_device{}());
+    std::uniform_int_distribution<int> dist(0, 15);
+    std::string token;
+    token.reserve(length);
+    for (int i = 0; i < length; i++)
+        token += hex[dist(rng)];
+    return token;
 }
 
 int main(int argc, char* argv[])
@@ -38,6 +52,13 @@ int main(int argc, char* argv[])
     // Initialise Spring's time system
     spring_clock::PushTickRate(true);
     spring_time::setstarttime(spring_time::gettime(true));
+
+    // --- Database ---
+    Database db;
+    if (!db.Open("spring-server.db")) {
+        std::fprintf(stderr, "[spring-server] ERROR: failed to open database\n");
+        return 1;
+    }
 
     // --- Network ---
     NetworkServer net;
@@ -104,6 +125,70 @@ int main(int argc, char* argv[])
                         hs->client_version() ? hs->client_version()->c_str() : "unknown");
                     break;
                 }
+                case SpringWeb::ClientPayload_AuthRequest: {
+                    auto* auth = clientMsg->payload_as_AuthRequest();
+                    const char* username = auth->username() ? auth->username()->c_str() : "";
+                    const char* passHash = auth->password_hash() ? auth->password_hash()->c_str() : "";
+
+                    // Try token-based reconnection first
+                    if (auth->token() && auth->token()->size() > 0) {
+                        int64_t userId = db.ValidateSession(auth->token()->str());
+                        if (userId > 0) {
+                            auto resp = Protocol::BuildAuthResponse(
+                                SpringWeb::AuthStatus_OK, auth->token()->str(),
+                                static_cast<uint32_t>(userId));
+                            net.Send(msg.clientId, resp.data(), resp.size());
+                            std::fprintf(stderr, "[auth] client %u reconnected as user %lld\n",
+                                msg.clientId, userId);
+                            break;
+                        }
+                    }
+
+                    // Look up or create user
+                    auto user = db.FindUser(username);
+                    if (!user) {
+                        // Auto-register for now (Phase 1 MVP)
+                        int64_t newId = db.CreateUser(username, passHash);
+                        if (newId == 0) {
+                            auto resp = Protocol::BuildAuthResponse(
+                                SpringWeb::AuthStatus_InvalidCredentials, "", 0,
+                                "Registration failed");
+                            net.Send(msg.clientId, resp.data(), resp.size());
+                            break;
+                        }
+                        user = db.FindUser(username);
+                    }
+
+                    // Check password
+                    if (user->passwordHash != passHash) {
+                        auto resp = Protocol::BuildAuthResponse(
+                            SpringWeb::AuthStatus_InvalidCredentials, "", 0,
+                            "Wrong password");
+                        net.Send(msg.clientId, resp.data(), resp.size());
+                        break;
+                    }
+
+                    // Check ban
+                    if (user->isBanned) {
+                        auto resp = Protocol::BuildAuthResponse(
+                            SpringWeb::AuthStatus_AccountBanned, "", 0,
+                            "Account banned");
+                        net.Send(msg.clientId, resp.data(), resp.size());
+                        break;
+                    }
+
+                    // Create session
+                    std::string token = generateToken();
+                    db.CreateSession(user->id, token);
+
+                    auto resp = Protocol::BuildAuthResponse(
+                        SpringWeb::AuthStatus_OK, token,
+                        static_cast<uint32_t>(user->id));
+                    net.Send(msg.clientId, resp.data(), resp.size());
+                    std::fprintf(stderr, "[auth] client %u authenticated as '%s' (id=%lld)\n",
+                        msg.clientId, username, user->id);
+                    break;
+                }
                 case SpringWeb::ClientPayload_PlayerCommand: {
                     // TODO: validate and feed to sim
                     auto* cmd = clientMsg->payload_as_PlayerCommand();
@@ -129,6 +214,7 @@ int main(int argc, char* argv[])
     std::fprintf(stderr, "[spring-server] shutting down (frame %d)...\n", sim.GetFrameNum());
     net.Stop();
     sim.Kill();
+    db.Close();
     std::fprintf(stderr, "[spring-server] exited cleanly\n");
 
     return 0;
