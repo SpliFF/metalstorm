@@ -11,6 +11,7 @@
 #include "Server/Database.h"
 #include "Server/ClientSession.h"
 #include "Server/EntityStateSerializer.h"
+#include "Server/ContentServer.h"
 #include "Sim/Misc/GlobalConstants.h"
 #include "Map/ReadMap.h"
 #include "System/FileSystem/FileHandler.h"
@@ -140,6 +141,15 @@ int main(int argc, char* argv[])
         std::vector<uint8_t> body(buf, buf + len);
         return {.contentType = "application/json", .body = std::move(body), .status = 200};
     });
+
+    // --- Content server ---
+    ContentServer content;
+    {
+        std::vector<std::string> contentRoots;
+        if (!gamePath.empty()) contentRoots.push_back(gamePath);
+        if (!mapPath.empty()) contentRoots.push_back(mapPath);
+        content.Init(net, contentRoots);
+    }
 
     if (!net.Start(port)) {
         std::fprintf(stderr, "[spring-server] ERROR: failed to start network server\n");
