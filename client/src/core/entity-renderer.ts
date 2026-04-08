@@ -30,7 +30,7 @@ const TEAM_COLORS = [
 ];
 
 /** Per-entity metadata needed for rendering. */
-interface EntityMeta {
+export interface EntityMeta {
     defId: number;
     team: number;
     healthScale: number;  // 0.3–1.0
@@ -184,6 +184,22 @@ export class EntityRenderer {
 
     get entityCount(): number {
         return this.entityMeta.size;
+    }
+
+    /** Get metadata for all entities (for input hit testing). */
+    getEntities(): IterableIterator<[number, EntityMeta]> {
+        return this.entityMeta.entries();
+    }
+
+    /** Get interpolated position for a specific entity. */
+    getEntityPosition(id: number): { x: number; y: number; z: number } | null {
+        return this.interpolator.getInterpolated(id);
+    }
+
+    /** Remove a specific entity (on EntityDestroy from server). */
+    removeEntity(id: number): void {
+        this.entityMeta.delete(id);
+        this.interpolator.remove(id);
     }
 
     dispose(): void {

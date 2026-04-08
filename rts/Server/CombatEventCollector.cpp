@@ -2,3 +2,4 @@
 #include "CombatEventCollector.h"
 
 CombatEventCollector combatEvents;
+UnitDeathCollector unitDeaths;

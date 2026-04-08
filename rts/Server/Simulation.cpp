@@ -49,6 +49,8 @@
 #include "Sim/Misc/Team.h"
 #include "Sim/Units/UnitLoader.h"
 #include "Sim/Units/UnitDefHandler.h"
+#include "Sim/Units/CommandAI/CommandAI.h"
+#include "Sim/Units/CommandAI/Command.h"
 #include "System/EventHandler.h"
 #include "System/Config/ConfigHandler.h"
 #include "System/Log/ILog.h"
@@ -243,41 +245,53 @@ void CSimulation::SetupTestGame()
     std::fprintf(stderr, "[sim] setting up test game...\n");
 
     auto& teams = teamHandler.GetTeams();
-
-    // List some available unit names
     const auto& defs = unitDefHandler->GetUnitDefsVec();
-    if (defs.size() > 1) {
-        std::fprintf(stderr, "[sim] sample unit defs: ");
-        for (size_t i = 1; i < std::min(defs.size(), size_t(6)); i++)
-            std::fprintf(stderr, "'%s' ", defs[i].name.c_str());
-        std::fprintf(stderr, "...\n");
+
+    // Try to find Paper Tanks units by name first
+    const char* wantedNames[] = {"pt_lighttank", "pt_heavytank", "pt_artillery", "pt_scout"};
+    std::vector<const UnitDef*> spawnDefs;
+
+    for (const char* name : wantedNames) {
+        for (size_t i = 1; i < defs.size(); i++) {
+            if (defs[i].name == name) {
+                spawnDefs.push_back(&defs[i]);
+                break;
+            }
+        }
     }
 
-    // Pick up to 4 land-capable unit types from the loaded defs
-    std::vector<const UnitDef*> spawnDefs;
-    for (size_t i = 1; i < defs.size() && spawnDefs.size() < 4; i++) {
-        if (defs[i].canmove && !defs[i].IsAirUnit())
-            spawnDefs.push_back(&defs[i]);
+    // Fallback: pick any movable land units
+    if (spawnDefs.empty()) {
+        for (size_t i = 1; i < defs.size() && spawnDefs.size() < 4; i++) {
+            if (defs[i].canmove && !defs[i].IsAirUnit())
+                spawnDefs.push_back(&defs[i]);
+        }
     }
 
     if (spawnDefs.empty()) {
-        std::fprintf(stderr, "[sim] WARNING: no spawnable land unit defs found\n");
+        std::fprintf(stderr, "[sim] WARNING: no spawnable unit defs found\n");
         return;
     }
-    std::fprintf(stderr, "[sim] selected %zu unit types to spawn: ", spawnDefs.size());
+    std::fprintf(stderr, "[sim] spawning: ");
     for (auto* d : spawnDefs) std::fprintf(stderr, "'%s' ", d->name.c_str());
     std::fprintf(stderr, "\n");
-    std::fflush(stderr);
 
-    int spawned = 0;
+    // Place teams close enough to fight (600 elmos apart)
+    float3 mapCenter(mapDims.mapx * SQUARE_SIZE * 0.5f, 0.0f,
+                     mapDims.mapy * SQUARE_SIZE * 0.5f);
+    float3 teamBase[2] = {
+        float3(mapCenter.x - 300.0f, 0.0f, mapCenter.z),
+        float3(mapCenter.x + 300.0f, 0.0f, mapCenter.z),
+    };
+
+    std::vector<CUnit*> spawnedUnits[2];
+
     for (int team = 0; team < 2; team++) {
-        float3 basePos = teams[team].GetStartPos();
-
         for (size_t d = 0; d < spawnDefs.size(); d++) {
             for (int i = 0; i < 3; i++) {
-                float3 pos = basePos;
-                pos.x += (i - 1) * 200.0f;
-                pos.z += (d * 200.0f) - 300.0f;
+                float3 pos = teamBase[team];
+                pos.x += (team == 0 ? -1 : 1) * d * 80.0f;
+                pos.z += (i - 1) * 80.0f;
 
                 UnitLoadParams params;
                 params.unitDef = spawnDefs[d];
@@ -293,7 +307,7 @@ void CSimulation::SetupTestGame()
                 try {
                     CUnit* unit = unitLoader->LoadUnit(params);
                     if (unit != nullptr)
-                        spawned++;
+                        spawnedUnits[team].push_back(unit);
                 } catch (const std::exception& e) {
                     std::fprintf(stderr, "[sim] failed to spawn '%s': %s\n",
                         spawnDefs[d]->name.c_str(), e.what());
@@ -302,8 +316,20 @@ void CSimulation::SetupTestGame()
         }
     }
 
-    std::fprintf(stderr, "[sim] spawned %d test units (%u defs available)\n",
-        spawned, unitDefHandler->NumUnitDefs());
+    int totalSpawned = spawnedUnits[0].size() + spawnedUnits[1].size();
+    std::fprintf(stderr, "[sim] spawned %d units (%zu vs %zu)\n",
+        totalSpawned, spawnedUnits[0].size(), spawnedUnits[1].size());
+
+    // Give attack-move commands toward the opposing team so they fight
+    for (int team = 0; team < 2; team++) {
+        float3 targetPos = teamBase[1 - team]; // attack toward other team
+        for (CUnit* unit : spawnedUnits[team]) {
+            Command cmd(CMD_FIGHT, 0, targetPos);
+            unit->commandAI->GiveCommand(cmd);
+        }
+    }
+
+    std::fprintf(stderr, "[sim] units ordered to fight\n");
 }
 
 

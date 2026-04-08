@@ -492,6 +492,15 @@ int main(int argc, char* argv[])
         }
         }
 
+        // Broadcast unit deaths as EntityDestroy messages
+        {
+        auto deaths = unitDeaths.Drain();
+        for (const auto& death : deaths) {
+            auto msg = Protocol::BuildEntityDestroy(death.unitId, 1, death.x, death.y, death.z);
+            net.Broadcast(msg.data(), msg.size());
+        }
+        }
+
         perfMetrics.SetFrame(sim.GetFrameNum());
         perfMetrics.SetClientCount(net.GetClientCount());
         perfMetrics.SetAICount(static_cast<int>(aiPool.GetAICount()));

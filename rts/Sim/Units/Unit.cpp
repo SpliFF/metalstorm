@@ -1297,6 +1297,9 @@ void CUnit::DoDamage(
 	if (health > 0.0f)
 		return;
 
+	// Record death for EntityDestroy broadcast before kill
+	unitDeaths.Push(static_cast<uint32_t>(id), pos.x, pos.y, pos.z);
+
 	KillUnit(attacker, false, false);
 
 	if (!isDead)

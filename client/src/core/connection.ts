@@ -20,6 +20,7 @@ import { ServerError } from '../protocol/spring-web/server-error.js';
 import { AuthStatus } from '../protocol/spring-web/auth-status.js';
 import { GameEventBatch } from '../protocol/spring-web/game-event-batch.js';
 import { CombatEvent } from '../protocol/spring-web/combat-event.js';
+import { EntityDestroy } from '../protocol/spring-web/entity-destroy.js';
 import { ServerClock } from './clock.js';
 import { parseEntityState, type EntityStateSnapshot } from './entity-state.js';
 
@@ -49,6 +50,7 @@ export interface ConnectionEvents {
     onServerError?: (code: number, message: string) => void;
     onEntityState?: (snapshot: EntityStateSnapshot, isDelta: boolean) => void;
     onCombatEvents?: (events: CombatEventInfo[], frame: number) => void;
+    onEntityDestroy?: (entityId: number, x: number, y: number, z: number) => void;
     onServerMessage?: (msg: ServerMessage) => void;
 }
 
@@ -220,6 +222,9 @@ export class Connection {
             case ServerPayload.GameEventBatch:
                 this.handleGameEventBatch(msg);
                 break;
+            case ServerPayload.EntityDestroy:
+                this.handleEntityDestroy(msg);
+                break;
             default:
                 this.events.onServerMessage?.(msg);
                 break;
@@ -283,5 +288,16 @@ export class Connection {
             }
             this.events.onCombatEvents(events, frame);
         }
+    }
+
+    private handleEntityDestroy(msg: ServerMessage): void {
+        const destroy = msg.payload(new EntityDestroy()) as EntityDestroy;
+        const pos = destroy.position();
+        this.events.onEntityDestroy?.(
+            destroy.entityId(),
+            pos ? pos.x() : 0,
+            pos ? pos.y() : 0,
+            pos ? pos.z() : 0,
+        );
     }
 }

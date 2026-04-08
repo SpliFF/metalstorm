@@ -48,3 +48,30 @@ private:
 
 /// Global combat event collector, accessible from weapon code.
 extern CombatEventCollector combatEvents;
+
+/// Tracks unit deaths for EntityDestroy broadcast.
+struct UnitDeathEvent {
+    uint32_t unitId;
+    float x, y, z;
+};
+
+class UnitDeathCollector {
+public:
+    void Push(uint32_t unitId, float x, float y, float z) {
+        std::lock_guard<std::mutex> lock(mutex);
+        events.push_back({unitId, x, y, z});
+    }
+
+    std::vector<UnitDeathEvent> Drain() {
+        std::lock_guard<std::mutex> lock(mutex);
+        std::vector<UnitDeathEvent> drained;
+        drained.swap(events);
+        return drained;
+    }
+
+private:
+    std::mutex mutex;
+    std::vector<UnitDeathEvent> events;
+};
+
+extern UnitDeathCollector unitDeaths;

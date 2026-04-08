@@ -107,4 +107,13 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameEventBatch, batch.Union());
 }
 
+/// Build an EntityDestroy message.
+inline std::vector<uint8_t> BuildEntityDestroy(uint32_t entityId, uint8_t destructionType,
+                                                float x, float y, float z) {
+    flatbuffers::FlatBufferBuilder fbb(128);
+    auto pos = SpringWeb::Vec3(x, y, z);
+    auto destroy = SpringWeb::CreateEntityDestroy(fbb, entityId, destructionType, &pos);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_EntityDestroy, destroy.Union());
+}
+
 } // namespace Protocol
