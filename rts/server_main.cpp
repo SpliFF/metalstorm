@@ -14,6 +14,7 @@
 #include "Server/ContentServer.h"
 #include "Server/CombatEventCollector.h"
 #include "Server/StandingOrders.h"
+#include "Server/AI/AIRuntimePool.h"
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
@@ -106,6 +107,9 @@ int main(int argc, char* argv[])
 
     // --- Sessions ---
     SessionManager sessions;
+
+    // --- AI ---
+    AIRuntimePool aiPool;
 
     // --- Network ---
     NetworkServer net;
@@ -451,6 +455,22 @@ int main(int argc, char* argv[])
         // Evaluate standing orders every ~1s (30 ticks)
         if (sim.GetFrameNum() > 0 && (sim.GetFrameNum() % 30) == 0) {
             standingOrders.Evaluate();
+        }
+
+        // Tick AI runtime and drain AI commands
+        aiPool.Tick(sim.GetFrameNum());
+        {
+            auto aiCmds = aiPool.DrainCommands();
+            for (const auto& cmd : aiCmds) {
+                CUnit* unit = unitHandler.GetUnit(cmd.unitId);
+                if (unit == nullptr || unit->isDead) continue;
+                if (unit->team != cmd.teamId) continue; // validate ownership
+
+                Command simCmd(cmd.commandId, cmd.options);
+                for (int i = 0; i < cmd.numParams; i++)
+                    simCmd.PushParam(cmd.params[i]);
+                unit->commandAI->GiveCommand(simCmd);
+            }
         }
 
         // Broadcast combat events to all connected clients
