@@ -54,5 +54,8 @@ infolog.txt
 # Server data (SQLite databases, runtime state)
 /data/
 
+# Game content (maps, games — large external files, not committed)
+/content/
+
 # VS Code user settings (workspace file IS committed, user prefs are not)
 .vscode/*.code-snippets
