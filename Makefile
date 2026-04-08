@@ -1,9 +1,11 @@
-.PHONY: setup build build-release test test-cpp test-client test-all dev-client clean
+.PHONY: setup build build-release test test-cpp test-client test-all dev-client generate-protocol clean
 
 # First-time setup
 setup:
 	cmake --preset debug
 	cd client && npm install
+	$(MAKE) generate-protocol
+	mkdir -p data
 	@echo ""
 	@echo "Setup complete. Run 'make build' to build the server."
 	@echo "Run 'make dev-client' to start the client dev server."
@@ -11,6 +13,11 @@ setup:
 # Build
 build:
 	cmake --build build/debug
+
+# Generate FlatBuffers bindings for both C++ and TypeScript
+generate-protocol: build
+	mkdir -p client/src/protocol
+	build/debug/_deps/flatbuffers-build/flatc --ts --gen-object-api -o client/src/protocol/ schemas/protocol.fbs
 
 build-release:
 	cmake --preset release
