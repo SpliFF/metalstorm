@@ -12,6 +12,7 @@
 #include "Server/ClientSession.h"
 #include "Server/EntityStateSerializer.h"
 #include "Sim/Misc/GlobalConstants.h"
+#include "Map/ReadMap.h"
 #include "System/FileSystem/FileHandler.h"
 #include "System/Misc/SpringTime.h"
 
@@ -101,6 +102,45 @@ int main(int argc, char* argv[])
 
     // --- Network ---
     NetworkServer net;
+
+    // HTTP endpoints for terrain data (handlers check readMap at request time)
+    net.AddHttpGet("/api/map/heightmap", [](const std::string&) -> HttpResponse {
+        if (readMap == nullptr)
+            return {.contentType = "text/plain", .body = {}, .status = 404};
+
+        const float* hm = readMap->GetCornerHeightMapSynced();
+        int w = mapDims.mapxp1;
+        int h = mapDims.mapyp1;
+
+        // Binary format: u32 width, u32 height, then f32[w*h] row-major
+        size_t headerSize = 8;
+        size_t dataSize = w * h * sizeof(float);
+        std::vector<uint8_t> body(headerSize + dataSize);
+
+        uint32_t wu = static_cast<uint32_t>(w);
+        uint32_t hu = static_cast<uint32_t>(h);
+        memcpy(body.data(), &wu, 4);
+        memcpy(body.data() + 4, &hu, 4);
+        memcpy(body.data() + 8, hm, dataSize);
+
+        return {.contentType = "application/octet-stream", .body = std::move(body), .status = 200};
+    });
+
+    net.AddHttpGet("/api/map/info", [](const std::string&) -> HttpResponse {
+        if (readMap == nullptr)
+            return {.contentType = "text/plain", .body = {}, .status = 404};
+
+        // Simple JSON with map dimensions
+        char buf[256];
+        int len = snprintf(buf, sizeof(buf),
+            "{\"mapx\":%d,\"mapy\":%d,\"squareSize\":%d,\"widthElmos\":%d,\"heightElmos\":%d}",
+            mapDims.mapx, mapDims.mapy, SQUARE_SIZE,
+            mapDims.mapx * SQUARE_SIZE, mapDims.mapy * SQUARE_SIZE);
+
+        std::vector<uint8_t> body(buf, buf + len);
+        return {.contentType = "application/json", .body = std::move(body), .status = 200};
+    });
+
     if (!net.Start(port)) {
         std::fprintf(stderr, "[spring-server] ERROR: failed to start network server\n");
         return 1;

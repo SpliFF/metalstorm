@@ -12,6 +12,7 @@
 #include <App.h>
 
 #include <cstdio>
+#include <string>
 #include <string_view>
 
 /// Per-connection user data stored by uWebSockets.
@@ -50,6 +51,10 @@ NetworkServer::NetworkServer() : impl(std::make_unique<Impl>()) {}
 
 NetworkServer::~NetworkServer() {
     Stop();
+}
+
+void NetworkServer::AddHttpGet(const std::string& pattern, HttpGetHandler handler) {
+    httpGetHandlers.emplace_back(pattern, std::move(handler));
 }
 
 bool NetworkServer::Start(int port) {
@@ -101,6 +106,23 @@ void NetworkServer::Broadcast(const uint8_t* data, size_t len) {
 
 void NetworkServer::NetworkThreadFunc(int port) {
     uWS::App app;
+
+    // Register HTTP GET endpoints
+    for (auto& [pattern, handler] : httpGetHandlers) {
+        app.get(pattern, [&handler](auto* res, auto* req) {
+            std::string url(req->getUrl());
+            auto result = handler(url);
+
+            res->writeStatus(result.status == 200 ? "200 OK" : "404 Not Found");
+            res->writeHeader("Content-Type", result.contentType);
+            res->writeHeader("Access-Control-Allow-Origin", "*");
+            res->writeHeader("Cache-Control", "public, max-age=3600");
+            std::string_view body(
+                reinterpret_cast<const char*>(result.body.data()),
+                result.body.size());
+            res->end(body);
+        });
+    }
 
     app.ws<ClientData>("/*", {
         .compression = uWS::DISABLED,
