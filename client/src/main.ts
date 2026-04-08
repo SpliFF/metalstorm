@@ -7,11 +7,15 @@
 import { Engine, Scene, FreeCamera, Vector3, HemisphericLight, Color4 } from '@babylonjs/core';
 import { Connection, type ConnectionState } from './core/connection.js';
 import { EntityRenderer } from './core/entity-renderer.js';
+import { CombatFX } from './core/combat-fx.js';
+import { AudioManager } from './core/audio.js';
 import { loadTerrain } from './core/terrain.js';
 
 let engine: Engine | null = null;
 let connection: Connection | null = null;
 let entityRenderer: EntityRenderer | null = null;
+let combatFX: CombatFX | null = null;
+let audioManager: AudioManager | null = null;
 
 function showStatus(message: string): void {
     const el = document.getElementById('status');
@@ -64,6 +68,13 @@ async function initScene(): Promise<Scene> {
     // Entity renderer
     entityRenderer = new EntityRenderer(scene);
 
+    // Audio and combat effects
+    audioManager = new AudioManager();
+    combatFX = new CombatFX(scene, audioManager);
+
+    // Resume audio on first click (browser autoplay policy)
+    canvas.addEventListener('click', () => audioManager?.resume(), { once: true });
+
     // Load terrain heightmap from server (async, non-blocking)
     const serverBase = `http://${window.location.hostname || 'localhost'}:9001`;
     loadTerrain(scene, serverBase).then((terrainMesh) => {
@@ -78,15 +89,22 @@ async function initScene(): Promise<Scene> {
     let lastViewportSend = 0;
     const VIEWPORT_INTERVAL = 100;
 
+    let lastFrameTime = performance.now();
+
     engine.runRenderLoop(() => {
+        const now = performance.now();
+        const dt = (now - lastFrameTime) / 1000;
+        lastFrameTime = now;
+
         // Interpolate entity positions before rendering
         entityRenderer?.tick();
+        combatFX?.tick(dt);
         scene.render();
 
-        const now = performance.now();
-        if (now - lastViewportSend > VIEWPORT_INTERVAL) {
+        const vpNow = performance.now();
+        if (vpNow - lastViewportSend > VIEWPORT_INTERVAL) {
             sendCameraViewport(camera);
-            lastViewportSend = now;
+            lastViewportSend = vpNow;
         }
     });
 
@@ -138,6 +156,9 @@ function connectToServer(): void {
         },
         onEntityState(snapshot, isDelta) {
             entityRenderer?.update(snapshot, isDelta);
+        },
+        onCombatEvents(events) {
+            combatFX?.onCombatEvents(events);
         },
     });
 
