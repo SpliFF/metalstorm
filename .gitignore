@@ -55,7 +55,10 @@ infolog.txt
 /data/
 
 # Game content (maps, games — large external files, not committed)
-/content/
+/content/*
+!/content/games/
+/content/games/*
+!/content/games/papertanks/
 
 # Game cache
 /cache/
