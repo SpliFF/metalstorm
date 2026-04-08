@@ -32,6 +32,7 @@ public:
 
     bool IsRunning() const { return running; }
     bool HasDefs() const { return defsLoaded; }
+    bool HasMap() const { return mapLoaded; }
 
 private:
     bool LoadDefs();

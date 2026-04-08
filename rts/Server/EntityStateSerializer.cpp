@@ -3,14 +3,17 @@
  */
 
 #include "EntityStateSerializer.h"
+#include "ClientSession.h"
 
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/UnitDef.h"
+#include "Sim/Misc/QuadField.h"
 #include "System/float3.h"
 
 #include <cstring>
 #include <cmath>
+#include <unordered_set>
 
 namespace EntityState {
 
@@ -113,6 +116,42 @@ std::vector<uint8_t> SerializeUnits(
     }
 
     return buf;
+}
+
+std::vector<uint8_t> SerializeViewportUnits(
+    const Viewport* viewports, int numViewports,
+    uint16_t fieldMask)
+{
+    // Collect unique units across all active viewports
+    std::unordered_set<int> seen;
+    std::vector<CUnit*> units;
+
+    constexpr float MARGIN = 256.0f; // extra margin to prevent pop-in
+
+    for (int v = 0; v < numViewports; v++) {
+        const Viewport& vp = viewports[v];
+        if (!vp.active || vp.width <= 0.0f || vp.height <= 0.0f)
+            continue;
+
+        // Expand viewport rect by margin
+        float halfW = (vp.width  * 0.5f) + MARGIN;
+        float halfH = (vp.height * 0.5f) + MARGIN;
+
+        // TODO: apply rotation to the query rect (for now, axis-aligned)
+        float3 mins(vp.centerX - halfW, -1e9f, vp.centerZ - halfH);
+        float3 maxs(vp.centerX + halfW,  1e9f, vp.centerZ + halfH);
+
+        QuadFieldQuery qfQuery;
+        quadField.GetUnitsExact(qfQuery, mins, maxs);
+
+        for (CUnit* u : *qfQuery.units) {
+            if (u != nullptr && !u->isDead && seen.insert(u->id).second) {
+                units.push_back(u);
+            }
+        }
+    }
+
+    return SerializeUnits(units, fieldMask);
 }
 
 } // namespace EntityState

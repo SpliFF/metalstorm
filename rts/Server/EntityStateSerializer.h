@@ -26,6 +26,7 @@
 #include <vector>
 
 class CUnit;
+struct Viewport;
 
 namespace EntityState {
 
@@ -48,6 +49,12 @@ std::vector<uint8_t> SerializeAllUnits(uint16_t fieldMask = FIELD_ALL);
 /// Serialize a specific set of units.
 std::vector<uint8_t> SerializeUnits(
     const std::vector<CUnit*>& units,
+    uint16_t fieldMask = FIELD_ALL);
+
+/// Serialize units visible within a set of viewports.
+/// Uses QuadField spatial queries. Requires a loaded map.
+std::vector<uint8_t> SerializeViewportUnits(
+    const Viewport* viewports, int numViewports,
     uint16_t fieldMask = FIELD_ALL);
 
 } // namespace EntityState

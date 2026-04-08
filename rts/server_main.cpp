@@ -279,6 +279,32 @@ int main(int argc, char* argv[])
                         cmd->params() ? cmd->params()->size() : 0);
                     break;
                 }
+                case SpringWeb::ClientPayload_ViewportUpdate: {
+                    auto* session = sessions.GetSession(msg.clientId);
+                    if (!session) {
+                        auto err = Protocol::BuildServerError(401, "Not authenticated");
+                        net.Send(msg.clientId, err.data(), err.size());
+                        break;
+                    }
+
+                    auto* vpu = clientMsg->payload_as_ViewportUpdate();
+                    int vpId = vpu->viewport_id();
+                    if (vpId >= MAX_VIEWPORTS) {
+                        auto err = Protocol::BuildServerError(400, "Invalid viewport ID");
+                        net.Send(msg.clientId, err.data(), err.size());
+                        break;
+                    }
+
+                    auto& vp = session->viewports[vpId];
+                    vp.centerX   = vpu->center_x();
+                    vp.centerZ   = vpu->center_z();
+                    vp.width     = vpu->width();
+                    vp.height    = vpu->height();
+                    vp.rotation  = vpu->rotation();
+                    vp.zoomLevel = vpu->zoom_level();
+                    vp.active    = (vp.width > 0.0f && vp.height > 0.0f);
+                    break;
+                }
                 default:
                     break;
             }
@@ -286,17 +312,40 @@ int main(int argc, char* argv[])
 
         sim.SimFrame();
 
-        // Broadcast entity state to connected clients every 3 ticks (~10 Hz)
+        // Send entity state to connected clients every 3 ticks (~10 Hz)
+        // Clients with viewports get spatially filtered data;
+        // clients without viewports get all units (fallback).
         {
         int curFrame = sim.GetFrameNum();
         if (curFrame >= 0 && (curFrame % 3) == 0 && net.GetClientCount() > 0) {
-            auto stateData = EntityState::SerializeAllUnits();
-            // Prepend envelope byte 0x02
-            std::vector<uint8_t> stateFrame;
-            stateFrame.reserve(1 + stateData.size());
-            stateFrame.push_back(0x02);
-            stateFrame.insert(stateFrame.end(), stateData.begin(), stateData.end());
-            net.Broadcast(stateFrame.data(), stateFrame.size());
+            // Pre-serialize full state for clients without viewports
+            std::vector<uint8_t> fullState;
+            bool fullStateSerialized = false;
+
+            sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+                std::vector<uint8_t> stateData;
+
+                if (session.HasViewport() && sim.HasMap()) {
+                    // Viewport-filtered: query QuadField per viewport
+                    stateData = EntityState::SerializeViewportUnits(
+                        session.viewports.data(),
+                        static_cast<int>(session.viewports.size()));
+                } else {
+                    // No viewport yet — send everything
+                    if (!fullStateSerialized) {
+                        fullState = EntityState::SerializeAllUnits();
+                        fullStateSerialized = true;
+                    }
+                    stateData = fullState;
+                }
+
+                // Prepend envelope byte 0x02
+                std::vector<uint8_t> frame;
+                frame.reserve(1 + stateData.size());
+                frame.push_back(0x02);
+                frame.insert(frame.end(), stateData.begin(), stateData.end());
+                net.Send(clientId, frame.data(), frame.size());
+            });
         }
         }
 

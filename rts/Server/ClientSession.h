@@ -7,11 +7,26 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 
 using ClientID = uint32_t;
+
+/// A rectangular viewport in world space (XZ plane).
+struct Viewport {
+    float centerX = 0.0f;
+    float centerZ = 0.0f;
+    float width   = 0.0f;
+    float height  = 0.0f;
+    float rotation = 0.0f;     // radians around Y axis
+    float zoomLevel = 1.0f;
+    bool active = false;
+};
+
+/// Maximum number of viewports per client (main + minimap + PiP).
+static constexpr int MAX_VIEWPORTS = 4;
 
 struct ClientSession {
     ClientID clientId = 0;
@@ -21,6 +36,16 @@ struct ClientSession {
     int team = -1;              // -1 = unassigned
     uint32_t lastCommandSeq = 0;
     int commandsThisTick = 0;
+
+    /// Per-client viewports (indexed by viewport_id).
+    std::array<Viewport, MAX_VIEWPORTS> viewports{};
+
+    /// Whether this client has any active viewport.
+    bool HasViewport() const {
+        for (const auto& vp : viewports)
+            if (vp.active) return true;
+        return false;
+    }
 };
 
 class SessionManager {
@@ -56,6 +81,15 @@ public:
         std::lock_guard<std::mutex> lock(mutex);
         for (auto& [id, session] : sessions) {
             session.commandsThisTick = 0;
+        }
+    }
+
+    /// Iterate all sessions under lock. Callback receives (ClientID, ClientSession&).
+    template<typename Fn>
+    void ForEachSession(Fn&& fn) {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (auto& [id, session] : sessions) {
+            fn(id, session);
         }
     }
 

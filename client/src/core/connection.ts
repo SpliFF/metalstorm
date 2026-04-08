@@ -14,6 +14,7 @@ import { Handshake } from '../protocol/spring-web/handshake.js';
 import { AuthRequest } from '../protocol/spring-web/auth-request.js';
 import { AuthResponse } from '../protocol/spring-web/auth-response.js';
 import { Ping } from '../protocol/spring-web/ping.js';
+import { ViewportUpdate } from '../protocol/spring-web/viewport-update.js';
 import { Pong } from '../protocol/spring-web/pong.js';
 import { ServerError } from '../protocol/spring-web/server-error.js';
 import { AuthStatus } from '../protocol/spring-web/auth-status.js';
@@ -92,6 +93,20 @@ export class Connection {
         }
         this.cleanup();
         this.setState('disconnected');
+    }
+
+    /** Send a viewport update to the server. */
+    sendViewportUpdate(
+        viewportId: number,
+        centerX: number, centerZ: number,
+        width: number, height: number,
+        rotation: number, zoomLevel: number
+    ): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(128);
+        const vp = ViewportUpdate.createViewportUpdate(
+            builder, viewportId, centerX, centerZ, width, height, rotation, zoomLevel);
+        this.sendClientMessage(builder, ClientPayload.ViewportUpdate, vp);
     }
 
     /** Send a raw FlatBuffers ClientMessage. */
