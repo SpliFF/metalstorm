@@ -153,6 +153,9 @@ public:
 
 	unsigned int GetNumTeamsInAllyTeam(unsigned int allyTeam, bool countDeadTeams) const;
 
+	std::vector<CTeam>& GetTeams() { return teams; }
+	std::vector< ::AllyTeam >& GetAllyTeams() { return allyTeams; }
+
 	void GameFrame(int frameNum);
 
 	void UpdateTeamUnitLimitsPreSpawn(int liveTeamNum);

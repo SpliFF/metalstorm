@@ -37,6 +37,7 @@ private:
     bool LoadDefs();
     bool LoadMap(const std::string& mapName);
     void InitSubsystems(bool hasMap);
+    void SetupTestGame();
 
     bool running = false;
     bool defsLoaded = false;

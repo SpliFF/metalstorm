@@ -45,9 +45,14 @@
 #include "Sim/Misc/SmoothHeightMesh.h"
 #include "Sim/Misc/GroundBlockingObjectMap.h"
 #include "Sim/Misc/BuildingMaskMap.h"
+#include "Sim/Misc/AllyTeam.h"
+#include "Sim/Misc/Team.h"
+#include "Sim/Units/UnitLoader.h"
+#include "Sim/Units/UnitDefHandler.h"
 #include "System/EventHandler.h"
 #include "System/Config/ConfigHandler.h"
 #include "System/Log/ILog.h"
+#include "System/Platform/Threading.h"
 #include "System/FileSystem/FileHandler.h"
 #include "System/FileSystem/FileSystem.h"
 
@@ -210,6 +215,9 @@ void CSimulation::InitSubsystems(bool hasMap)
         envResHandler.LoadTidal(mapInfo->map.tidalStrength);
         envResHandler.LoadWind(mapInfo->atmosphere.minWind, mapInfo->atmosphere.maxWind);
 
+        // Init heightmap digests for LOS system
+        readMap->InitHeightMapDigestVectors(losHandler->los.size);
+
         // Finalize pathfinder (pre-computes caches)
         pathManager->Finalize();
 
@@ -222,8 +230,84 @@ void CSimulation::InitSubsystems(bool hasMap)
 }
 
 
+void CSimulation::SetupTestGame()
+{
+    if (!defsLoaded || !mapLoaded)
+        return;
+
+    std::fprintf(stderr, "[sim] setting up test game...\n");
+
+    auto& teams = teamHandler.GetTeams();
+
+    // List some available unit names
+    const auto& defs = unitDefHandler->GetUnitDefsVec();
+    if (defs.size() > 1) {
+        std::fprintf(stderr, "[sim] sample unit defs: ");
+        for (size_t i = 1; i < std::min(defs.size(), size_t(6)); i++)
+            std::fprintf(stderr, "'%s' ", defs[i].name.c_str());
+        std::fprintf(stderr, "...\n");
+    }
+
+    // Pick up to 4 land-capable unit types from the loaded defs
+    std::vector<const UnitDef*> spawnDefs;
+    for (size_t i = 1; i < defs.size() && spawnDefs.size() < 4; i++) {
+        if (defs[i].canmove && !defs[i].IsAirUnit())
+            spawnDefs.push_back(&defs[i]);
+    }
+
+    if (spawnDefs.empty()) {
+        std::fprintf(stderr, "[sim] WARNING: no spawnable land unit defs found\n");
+        return;
+    }
+    std::fprintf(stderr, "[sim] selected %zu unit types to spawn: ", spawnDefs.size());
+    for (auto* d : spawnDefs) std::fprintf(stderr, "'%s' ", d->name.c_str());
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+
+    int spawned = 0;
+    for (int team = 0; team < 2; team++) {
+        float3 basePos = teams[team].GetStartPos();
+
+        for (size_t d = 0; d < spawnDefs.size(); d++) {
+            for (int i = 0; i < 3; i++) {
+                float3 pos = basePos;
+                pos.x += (i - 1) * 200.0f;
+                pos.z += (d * 200.0f) - 300.0f;
+
+                UnitLoadParams params;
+                params.unitDef = spawnDefs[d];
+                params.builder = nullptr;
+                params.pos = pos;
+                params.speed = ZeroVector;
+                params.unitID = -1;
+                params.teamID = team;
+                params.facing = (team == 0) ? 2 : 0;
+                params.beingBuilt = false;
+                params.flattenGround = false;
+
+                try {
+                    CUnit* unit = unitLoader->LoadUnit(params);
+                    if (unit != nullptr)
+                        spawned++;
+                } catch (const std::exception& e) {
+                    std::fprintf(stderr, "[sim] failed to spawn '%s': %s\n",
+                        spawnDefs[d]->name.c_str(), e.what());
+                }
+            }
+        }
+    }
+
+    std::fprintf(stderr, "[sim] spawned %d test units (%u defs available)\n",
+        spawned, unitDefHandler->NumUnitDefs());
+}
+
+
 void CSimulation::Init(const std::string& mapName)
 {
+    // Tell the threading system this is the main thread
+    Threading::SetMainThread();
+    Threading::SetGameLoadThread();
+
     // Initialise global state objects
     ConfigHandler::Instantiate("", false);
     gs->Init();
@@ -240,9 +324,35 @@ void CSimulation::Init(const std::string& mapName)
     // Try to load the map
     bool hasMap = LoadMap(mapName);
 
+    // Set up minimal teams (needed before unitHandler.Init sizes its arrays)
+    {
+        auto& allyTeams = teamHandler.GetAllyTeams();
+        allyTeams.resize(2);
+        allyTeams[0].allies = {true, false};
+        allyTeams[1].allies = {false, true};
+
+        auto& teams = teamHandler.GetTeams();
+        teams.resize(2);
+        for (int i = 0; i < 2; i++) {
+            teams[i].teamNum = i;
+            teams[i].teamAllyteam = i;
+            teams[i].SetDefaultColor(i);
+            teams[i].SetMaxUnits(MAX_UNITS / 2);
+            if (hasMap) {
+                teams[i].SetStartPos(float3(
+                    mapDims.mapx * SQUARE_SIZE * (0.25f + 0.5f * i),
+                    0.0f,
+                    mapDims.mapy * SQUARE_SIZE * 0.5f));
+            }
+        }
+    }
+
     // Initialise all subsystems
     InitSubsystems(hasMap);
     mapLoaded = hasMap;
+
+    // Spawn test units if we have defs + map
+    SetupTestGame();
 
     running = true;
     std::fprintf(stderr, "[sim] initialised (frame %d, defs=%s, map=%s)\n",
