@@ -118,12 +118,12 @@ private:
 /******************************************************************************/
 
 class LuaParser {
-private:
 	friend class LuaTable;
+
+public:
 	// prevent implicit bool-to-string conversion
 	struct boolean { bool b; };
 
-public:
 	LuaParser() = default;
 	LuaParser(const std::string& fileName, const std::string& fileModes, const std::string& accessModes, const boolean& synced = {false}, const boolean& setup = {true});
 	LuaParser(const std::string& textChunk, const std::string& accessModes, int = 0, const boolean& synced = {false}, const boolean& setup = {true});

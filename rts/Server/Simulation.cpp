@@ -13,18 +13,127 @@
 #include "Sim/Misc/Wind.h"
 #include "Sim/Misc/InterceptHandler.h"
 #include "Sim/Misc/LosHandler.h"
+#include "Sim/Misc/DamageArrayHandler.h"
+#include "Sim/Misc/CommonDefHandler.h"
 #include "Sim/Units/UnitHandler.h"
+#include "Sim/Units/UnitDefHandler.h"
+#include "Sim/Units/Unit.h"
+#include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Units/Scripts/UnitScriptEngine.h"
-#include "Sim/Projectiles/ProjectileHandler.h"
+#include "Sim/Units/Scripts/UnitScriptFactory.h"
+#include "Sim/Weapons/WeaponDefHandler.h"
+#include "Sim/Weapons/WeaponLoader.h"
 #include "Sim/Features/FeatureHandler.h"
+#include "Sim/Features/FeatureDefHandler.h"
+#include "Sim/MoveTypes/MoveDefHandler.h"
+#include "Sim/MoveTypes/MoveTypeFactory.h"
+#include "Sim/Projectiles/ProjectileHandler.h"
+#include "Sim/Projectiles/ExplosionGenerator.h"
 #include "Sim/Path/IPathManager.h"
 #include "Game/GameHelper.h"
 #include "Game/Players/PlayerHandler.h"
 #include "Game/WaitCommandsAI.h"
 #include "Game/GlobalUnsynced.h"
+#include "Lua/LuaParser.h"
+#include "Lua/LuaSyncedRead.h"
 #include "Map/MapDamage.h"
 #include "System/EventHandler.h"
 #include "System/Log/ILog.h"
+
+#include <cstdio>
+
+CSimulation::CSimulation() = default;
+CSimulation::~CSimulation() noexcept = default;
+
+bool CSimulation::LoadDefs()
+{
+    std::fprintf(stderr, "[sim] loading game definitions from gamedata/defs.lua...\n");
+
+    defsParser = std::make_unique<LuaParser>(
+        "gamedata/defs.lua",
+        SPRING_VFS_MOD_BASE,
+        SPRING_VFS_ZIP,
+        LuaParser::boolean{true},   // synced
+        LuaParser::boolean{false}   // don't auto-setup — we call SetupLua manually
+    );
+
+    defsParser->SetupLua(true, true);
+
+    // Provide Spring.GetModOptions / Spring.GetMapOptions
+    // (returns empty tables until a real game setup is loaded)
+    defsParser->GetTable("Spring");
+    defsParser->AddFunc("GetModOptions", LuaSyncedRead::GetModOptions);
+    defsParser->AddFunc("GetMapOptions", LuaSyncedRead::GetMapOptions);
+    defsParser->EndTable();
+
+    if (!defsParser->Execute()) {
+        std::fprintf(stderr, "[sim] ERROR: defs parser failed: %s\n",
+            defsParser->GetErrorLog().c_str());
+        return false;
+    }
+
+    const LuaTable root = defsParser->GetRoot();
+    if (!root.IsValid()) {
+        std::fprintf(stderr, "[sim] ERROR: defs parser returned no root table\n");
+        return false;
+    }
+
+    // Verify required tables exist
+    const char* requiredTables[] = {"UnitDefs", "FeatureDefs", "WeaponDefs", "ArmorDefs", "MoveDefs"};
+    for (const char* name : requiredTables) {
+        if (!root.SubTable(name).IsValid()) {
+            std::fprintf(stderr, "[sim] ERROR: missing required table '%s'\n", name);
+            return false;
+        }
+    }
+
+    std::fprintf(stderr, "[sim] game definitions loaded successfully\n");
+    return true;
+}
+
+void CSimulation::InitSubsystems()
+{
+    std::fprintf(stderr, "[sim] initialising subsystems...\n");
+
+    // Order follows CGame::PreLoadSimulation + PostLoadSimulation
+
+    // Move defs (needs defsParser)
+    moveDefHandler.Init(defsParser.get());
+
+    // Damage types
+    damageArrayHandler.Init(defsParser.get());
+
+    // Explosion generators
+    explGenHandler.Init();
+
+    // Common def handler
+    CommonDefHandler::InitStatic();
+
+    // Weapon definitions
+    weaponDefHandler->Init(defsParser.get());
+
+    // Unit definitions
+    unitDefHandler->Init(defsParser.get());
+
+    // Feature definitions
+    featureDefHandler->Init(defsParser.get());
+
+    // Script engine
+    CUnit::InitStatic();
+    CCommandAI::InitCommandDescriptionCache();
+    CUnitScriptFactory::InitStatic();
+    CUnitScriptEngine::InitStatic();
+    MoveTypeFactory::InitStatic();
+    CWeaponLoader::InitStatic();
+
+    // Core sim handlers
+    helper->Init();
+    unitHandler.Init();
+    featureHandler.Init();
+    projectileHandler.Init();
+
+    std::fprintf(stderr, "[sim] subsystems initialised\n");
+}
 
 
 void CSimulation::Init()
@@ -33,32 +142,27 @@ void CSimulation::Init()
     gs->Init();
     gu->Init();
 
-    // The full subsystem initialisation chain (map loading, def parsing,
-    // unitHandler.Init(), etc.) is a later step — it requires map files
-    // and game content on disk. For now we just mark ourselves as running
-    // so the tick loop can execute empty frames.
-    //
-    // TODO (Phase 1): Load map, parse defs, then call:
-    //   helper->Init()
-    //   unitHandler.Init()
-    //   featureHandler.Init()
-    //   projectileHandler.Init()
-    //   CUnitScriptEngine::InitStatic()
-    //   CLosHandler::InitStatic()  (needs map dims)
-    //   IPathManager::GetInstance() (needs map)
-    //   IMapDamage::InitMapDamage() (needs map)
-    //   teamHandler.LoadFromSetup()
-    //   playerHandler.LoadFromSetup()
+    // Try to load game definitions.
+    // If no game content is configured, this will fail gracefully
+    // and the sim will run with empty defs (useful for testing).
+    if (LoadDefs()) {
+        InitSubsystems();
+        defsLoaded = true;
+    } else {
+        std::fprintf(stderr, "[sim] WARNING: running without game definitions\n");
+    }
 
     running = true;
-    LOG("[Simulation] initialised (frame %d)", gs->frameNum);
+    std::fprintf(stderr, "[sim] initialised (frame %d, defs=%s)\n",
+        gs->frameNum, defsLoaded ? "loaded" : "empty");
 }
 
 void CSimulation::Kill()
 {
     running = false;
+    defsParser.reset();
     gs->Kill();
-    LOG("[Simulation] shut down");
+    std::fprintf(stderr, "[sim] shut down\n");
 }
 
 void CSimulation::SimFrame()
