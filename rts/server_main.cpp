@@ -11,6 +11,7 @@
 #include "Server/Database.h"
 #include "Server/ClientSession.h"
 #include "Sim/Misc/GlobalConstants.h"
+#include "System/FileSystem/FileHandler.h"
 #include "System/Misc/SpringTime.h"
 
 #include <csignal>
@@ -44,8 +45,25 @@ int main(int argc, char* argv[])
     std::signal(SIGTERM, signalHandler);
 
     int port = 9001;
-    if (argc > 1) {
-        port = std::atoi(argv[1]);
+    std::string gamePath;
+    std::string mapPath;
+    std::string dbPath = "data/spring-server.db";
+
+    // Simple arg parsing: --port N, --game PATH, --map PATH, --db PATH
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "--port" && i + 1 < argc) {
+            port = std::atoi(argv[++i]);
+        } else if (arg == "--game" && i + 1 < argc) {
+            gamePath = argv[++i];
+        } else if (arg == "--map" && i + 1 < argc) {
+            mapPath = argv[++i];
+        } else if (arg == "--db" && i + 1 < argc) {
+            dbPath = argv[++i];
+        } else if (arg[0] != '-') {
+            // Legacy: bare number = port
+            port = std::atoi(argv[i]);
+        }
     }
 
     std::fprintf(stderr, "[spring-server] starting...\n");
@@ -54,9 +72,22 @@ int main(int argc, char* argv[])
     spring_clock::PushTickRate(true);
     spring_time::setstarttime(spring_time::gettime(true));
 
+    // --- Content roots ---
+    // Game content is searched first, then map, then cwd
+    if (!gamePath.empty()) {
+        CFileHandler::AddContentRoot(gamePath);
+        std::fprintf(stderr, "[spring-server] game content: %s\n", gamePath.c_str());
+    }
+    if (!mapPath.empty()) {
+        CFileHandler::AddContentRoot(mapPath);
+        std::fprintf(stderr, "[spring-server] map content: %s\n", mapPath.c_str());
+    }
+    // Always search cwd as fallback
+    CFileHandler::AddContentRoot(".");
+
     // --- Database ---
     Database db;
-    if (!db.Open("data/spring-server.db")) {
+    if (!db.Open(dbPath)) {
         std::fprintf(stderr, "[spring-server] ERROR: failed to open database\n");
         return 1;
     }
