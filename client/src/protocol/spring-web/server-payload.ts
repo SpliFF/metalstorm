@@ -11,6 +11,10 @@ import { GameInfo, GameInfoT } from '../spring-web/game-info.js';
 import { Pong, PongT } from '../spring-web/pong.js';
 import { ReconnectResponse, ReconnectResponseT } from '../spring-web/reconnect-response.js';
 import { ResourceUpdate, ResourceUpdateT } from '../spring-web/resource-update.js';
+import { RoomListUpdate, RoomListUpdateT } from '../spring-web/room-list-update.js';
+import { RoomPlayerJoined, RoomPlayerJoinedT } from '../spring-web/room-player-joined.js';
+import { RoomPlayerLeft, RoomPlayerLeftT } from '../spring-web/room-player-left.js';
+import { RoomStateUpdate, RoomStateUpdateT } from '../spring-web/room-state-update.js';
 import { ServerError, ServerErrorT } from '../spring-web/server-error.js';
 
 
@@ -25,13 +29,17 @@ export enum ServerPayload {
   ChatReceive = 7,
   GameInfo = 8,
   ReconnectResponse = 9,
-  ServerError = 10
+  ServerError = 10,
+  RoomListUpdate = 11,
+  RoomStateUpdate = 12,
+  RoomPlayerJoined = 13,
+  RoomPlayerLeft = 14
 }
 
 export function unionToServerPayload(
   type: ServerPayload,
-  accessor: (obj:AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|Pong|ReconnectResponse|ResourceUpdate|ServerError) => AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|Pong|ReconnectResponse|ResourceUpdate|ServerError|null
-): AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|Pong|ReconnectResponse|ResourceUpdate|ServerError|null {
+  accessor: (obj:AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError) => AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|null
+): AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|null {
   switch(ServerPayload[type]) {
     case 'NONE': return null; 
     case 'AuthResponse': return accessor(new AuthResponse())! as AuthResponse;
@@ -44,15 +52,19 @@ export function unionToServerPayload(
     case 'GameInfo': return accessor(new GameInfo())! as GameInfo;
     case 'ReconnectResponse': return accessor(new ReconnectResponse())! as ReconnectResponse;
     case 'ServerError': return accessor(new ServerError())! as ServerError;
+    case 'RoomListUpdate': return accessor(new RoomListUpdate())! as RoomListUpdate;
+    case 'RoomStateUpdate': return accessor(new RoomStateUpdate())! as RoomStateUpdate;
+    case 'RoomPlayerJoined': return accessor(new RoomPlayerJoined())! as RoomPlayerJoined;
+    case 'RoomPlayerLeft': return accessor(new RoomPlayerLeft())! as RoomPlayerLeft;
     default: return null;
   }
 }
 
 export function unionListToServerPayload(
   type: ServerPayload, 
-  accessor: (index: number, obj:AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|Pong|ReconnectResponse|ResourceUpdate|ServerError) => AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|Pong|ReconnectResponse|ResourceUpdate|ServerError|null, 
+  accessor: (index: number, obj:AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError) => AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|null, 
   index: number
-): AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|Pong|ReconnectResponse|ResourceUpdate|ServerError|null {
+): AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|null {
   switch(ServerPayload[type]) {
     case 'NONE': return null; 
     case 'AuthResponse': return accessor(index, new AuthResponse())! as AuthResponse;
@@ -65,6 +77,10 @@ export function unionListToServerPayload(
     case 'GameInfo': return accessor(index, new GameInfo())! as GameInfo;
     case 'ReconnectResponse': return accessor(index, new ReconnectResponse())! as ReconnectResponse;
     case 'ServerError': return accessor(index, new ServerError())! as ServerError;
+    case 'RoomListUpdate': return accessor(index, new RoomListUpdate())! as RoomListUpdate;
+    case 'RoomStateUpdate': return accessor(index, new RoomStateUpdate())! as RoomStateUpdate;
+    case 'RoomPlayerJoined': return accessor(index, new RoomPlayerJoined())! as RoomPlayerJoined;
+    case 'RoomPlayerLeft': return accessor(index, new RoomPlayerLeft())! as RoomPlayerLeft;
     default: return null;
   }
 }

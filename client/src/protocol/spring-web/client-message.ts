@@ -12,6 +12,13 @@ import { Handshake, HandshakeT } from '../spring-web/handshake.js';
 import { Ping, PingT } from '../spring-web/ping.js';
 import { PlayerCommand, PlayerCommandT } from '../spring-web/player-command.js';
 import { ReconnectRequest, ReconnectRequestT } from '../spring-web/reconnect-request.js';
+import { RoomCreate, RoomCreateT } from '../spring-web/room-create.js';
+import { RoomJoin, RoomJoinT } from '../spring-web/room-join.js';
+import { RoomKick, RoomKickT } from '../spring-web/room-kick.js';
+import { RoomLeave, RoomLeaveT } from '../spring-web/room-leave.js';
+import { RoomReady, RoomReadyT } from '../spring-web/room-ready.js';
+import { RoomStartGame, RoomStartGameT } from '../spring-web/room-start-game.js';
+import { RoomTeamSelect, RoomTeamSelectT } from '../spring-web/room-team-select.js';
 import { ViewportUpdate, ViewportUpdateT } from '../spring-web/viewport-update.js';
 
 
@@ -100,7 +107,7 @@ unpackTo(_o: ClientMessageT): void {
 export class ClientMessageT implements flatbuffers.IGeneratedObject {
 constructor(
   public payloadType: ClientPayload = ClientPayload.NONE,
-  public payload: AckT|AuthRequestT|ChatSendT|HandshakeT|PingT|PlayerCommandT|ReconnectRequestT|ViewportUpdateT|null = null
+  public payload: AckT|AuthRequestT|ChatSendT|HandshakeT|PingT|PlayerCommandT|ReconnectRequestT|RoomCreateT|RoomJoinT|RoomKickT|RoomLeaveT|RoomReadyT|RoomStartGameT|RoomTeamSelectT|ViewportUpdateT|null = null
 ){}
 
 

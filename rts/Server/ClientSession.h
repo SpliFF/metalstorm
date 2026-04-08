@@ -45,6 +45,12 @@ struct ClientSession {
     /// Delta compression cache — tracks last-sent entity state.
     EntityDeltaCache deltaCache;
 
+    /// Last known frame for reconnection state recovery.
+    int lastKnownFrame = -1;
+
+    /// Whether this session is disconnected but eligible for reconnection.
+    bool disconnected = false;
+
     /// Whether this client has any active viewport.
     bool HasViewport() const {
         for (const auto& vp : viewports)

@@ -84,6 +84,39 @@ table ReconnectRequest {
     last_snapshot_seq: uint32;
 }
 
+// ============================================================
+// Lobby messages (client → server)
+// ============================================================
+
+table RoomCreate {
+    name: string;
+    map_name: string;
+    game_name: string;
+    max_players: uint8 = 8;
+    password: string;           // empty = no password
+}
+
+table RoomJoin {
+    room_id: uint32;
+    password: string;
+}
+
+table RoomLeave {}
+
+table RoomTeamSelect {
+    team: uint8;
+}
+
+table RoomReady {
+    ready: bool;
+}
+
+table RoomKick {
+    player_id: uint32;
+}
+
+table RoomStartGame {}
+
 // Union of all client→server message types
 union ClientPayload {
     Handshake,
@@ -94,6 +127,13 @@ union ClientPayload {
     ChatSend,
     Ack,
     ReconnectRequest,
+    RoomCreate,
+    RoomJoin,
+    RoomLeave,
+    RoomTeamSelect,
+    RoomReady,
+    RoomKick,
+    RoomStartGame,
 }
 
 table ClientMessage {
@@ -196,6 +236,65 @@ table ServerError {
     message: string;
 }
 
+// ============================================================
+// Lobby messages (server → client)
+// ============================================================
+
+enum RoomState : uint8 {
+    Configuring = 0,
+    Filling,
+    ReadyCheck,
+    Loading,
+    Active,
+    Ended,
+}
+
+table RoomPlayerInfo {
+    player_id: uint32;
+    username: string;
+    team: uint8;
+    ready: bool;
+    is_spectator: bool;
+    is_host: bool;
+}
+
+table RoomListEntry {
+    room_id: uint32;
+    name: string;
+    map_name: string;
+    game_name: string;
+    state: RoomState;
+    player_count: uint8;
+    max_players: uint8;
+    has_password: bool;
+    host_name: string;
+}
+
+table RoomListUpdate {
+    rooms: [RoomListEntry];
+}
+
+table RoomStateUpdate {
+    room_id: uint32;
+    state: RoomState;
+    name: string;
+    map_name: string;
+    game_name: string;
+    players: [RoomPlayerInfo];
+    countdown_seconds: uint8;   // 0 = no countdown
+}
+
+table RoomPlayerJoined {
+    room_id: uint32;
+    player: RoomPlayerInfo;
+}
+
+table RoomPlayerLeft {
+    room_id: uint32;
+    player_id: uint32;
+    reason: string;
+}
+
 // Union of all server→client message types
 union ServerPayload {
     AuthResponse,
@@ -208,6 +307,10 @@ union ServerPayload {
     GameInfo,
     ReconnectResponse,
     ServerError,
+    RoomListUpdate,
+    RoomStateUpdate,
+    RoomPlayerJoined,
+    RoomPlayerLeft,
 }
 
 table ServerMessage {

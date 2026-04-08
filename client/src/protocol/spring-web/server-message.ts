@@ -13,6 +13,10 @@ import { GameInfo, GameInfoT } from '../spring-web/game-info.js';
 import { Pong, PongT } from '../spring-web/pong.js';
 import { ReconnectResponse, ReconnectResponseT } from '../spring-web/reconnect-response.js';
 import { ResourceUpdate, ResourceUpdateT } from '../spring-web/resource-update.js';
+import { RoomListUpdate, RoomListUpdateT } from '../spring-web/room-list-update.js';
+import { RoomPlayerJoined, RoomPlayerJoinedT } from '../spring-web/room-player-joined.js';
+import { RoomPlayerLeft, RoomPlayerLeftT } from '../spring-web/room-player-left.js';
+import { RoomStateUpdate, RoomStateUpdateT } from '../spring-web/room-state-update.js';
 import { ServerError, ServerErrorT } from '../spring-web/server-error.js';
 import { ServerPayload, unionToServerPayload, unionListToServerPayload } from '../spring-web/server-payload.js';
 
@@ -94,7 +98,7 @@ unpackTo(_o: ServerMessageT): void {
 export class ServerMessageT implements flatbuffers.IGeneratedObject {
 constructor(
   public payloadType: ServerPayload = ServerPayload.NONE,
-  public payload: AuthResponseT|ChatReceiveT|EntityCreateT|EntityDestroyT|GameEventBatchT|GameInfoT|PongT|ReconnectResponseT|ResourceUpdateT|ServerErrorT|null = null
+  public payload: AuthResponseT|ChatReceiveT|EntityCreateT|EntityDestroyT|GameEventBatchT|GameInfoT|PongT|ReconnectResponseT|ResourceUpdateT|RoomListUpdateT|RoomPlayerJoinedT|RoomPlayerLeftT|RoomStateUpdateT|ServerErrorT|null = null
 ){}
 
 
