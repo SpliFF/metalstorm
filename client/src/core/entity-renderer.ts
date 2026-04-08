@@ -46,16 +46,18 @@ export class EntityRenderer {
         this.templateMesh.isVisible = false;
     }
 
-    /** Apply a new entity state snapshot — create, update, and remove meshes. */
-    update(snapshot: EntityStateSnapshot): void {
+    /**
+     * Apply an entity state snapshot.
+     * @param isDelta If true, this is a delta update — only changed entities
+     *   are included; missing entities are kept. If false, it's a full
+     *   snapshot — entities not in the snapshot are removed.
+     */
+    update(snapshot: EntityStateSnapshot, isDelta: boolean = false): void {
         const { count, entityIds, positionsX, positionsY, positionsZ, headings, health, teams } = snapshot;
         if (!entityIds) return;
 
-        const seen = new Set<number>();
-
         for (let i = 0; i < count; i++) {
             const id = entityIds[i];
-            seen.add(id);
 
             let mesh = this.meshes.get(id);
             if (!mesh) {
@@ -64,8 +66,6 @@ export class EntityRenderer {
                 this.meshes.set(id, mesh);
             }
 
-            // Position — Spring coords: X = right, Y = up, Z = forward
-            // Babylon coords: same convention (Y-up)
             if (positionsX && positionsZ) {
                 mesh.position.x = positionsX[i];
                 mesh.position.z = positionsZ[i];
@@ -73,30 +73,29 @@ export class EntityRenderer {
             if (positionsY) {
                 mesh.position.y = positionsY[i];
             }
-
-            // Heading — u16 (0–65535) maps to 0°–360°
             if (headings) {
                 mesh.rotation.y = (headings[i] / 65535) * Math.PI * 2;
             }
-
-            // Team colour
             if (teams) {
                 const teamIdx = teams[i] % this.materials.length;
                 mesh.material = this.materials[teamIdx];
             }
-
-            // Health — scale Y to show damage (simple visual indicator)
             if (health) {
                 const ratio = health[i] / 65535;
-                mesh.scaling.y = 0.3 + ratio * 0.7; // 30%–100% height
+                mesh.scaling.y = 0.3 + ratio * 0.7;
             }
         }
 
-        // Remove meshes for entities no longer in the snapshot
-        for (const [id, mesh] of this.meshes) {
-            if (!seen.has(id)) {
-                mesh.dispose();
-                this.meshes.delete(id);
+        // On full snapshots, remove entities not present
+        if (!isDelta) {
+            const seen = new Set<number>();
+            for (let i = 0; i < count; i++) seen.add(entityIds[i]);
+
+            for (const [id, mesh] of this.meshes) {
+                if (!seen.has(id)) {
+                    mesh.dispose();
+                    this.meshes.delete(id);
+                }
             }
         }
     }

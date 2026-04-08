@@ -57,5 +57,8 @@ infolog.txt
 # Game content (maps, games — large external files, not committed)
 /content/
 
+# Game cache
+/cache/
+
 # VS Code user settings (workspace file IS committed, user prefs are not)
 .vscode/*.code-snippets

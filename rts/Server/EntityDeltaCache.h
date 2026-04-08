@@ -1,0 +1,53 @@
+/**
+ * EntityDeltaCache — per-client cache of last-sent entity state.
+ *
+ * Tracks the most recent values sent to each client so that delta
+ * updates only include entities whose state has actually changed.
+ * Uses thresholds to avoid sending tiny floating-point jitter.
+ */
+#pragma once
+
+#include <cstdint>
+#include <cmath>
+#include <unordered_map>
+#include <vector>
+
+class CUnit;
+
+struct CachedEntityState {
+    float posX = 0.0f;
+    float posY = 0.0f;
+    float posZ = 0.0f;
+    uint16_t heading = 0;
+    uint16_t health = 0;
+    uint16_t defId = 0;
+    uint8_t team = 0;
+};
+
+class EntityDeltaCache {
+public:
+    /// Position change threshold (in elmos). Below this, position is
+    /// considered unchanged. Prevents sending micro-jitter.
+    static constexpr float POS_THRESHOLD = 0.5f;
+
+    /// Check if a unit's state has changed since last send.
+    bool HasChanged(const CUnit* unit) const;
+
+    /// Update the cache with the unit's current state.
+    void Update(const CUnit* unit);
+
+    /// Remove an entity from the cache (on death/removal).
+    void Remove(uint32_t entityId) { cache.erase(entityId); }
+
+    /// Clear the entire cache (on reconnect or full snapshot).
+    void Clear() { cache.clear(); }
+
+    /// Get the set of entity IDs that were cached but are no longer
+    /// in the given live set. These are entities that left the view
+    /// or were destroyed. Populates `removed` and clears those entries.
+    void FindRemoved(const std::vector<CUnit*>& liveUnits,
+                     std::vector<uint32_t>& removed);
+
+private:
+    std::unordered_map<uint32_t, CachedEntityState> cache;
+};

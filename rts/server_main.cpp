@@ -313,36 +313,54 @@ int main(int argc, char* argv[])
         sim.SimFrame();
 
         // Send entity state to connected clients every 3 ticks (~10 Hz)
-        // Clients with viewports get spatially filtered data;
-        // clients without viewports get all units (fallback).
+        // Full snapshot every 30 ticks (~1s), delta updates otherwise.
+        // Envelope: 0x02 = full snapshot, 0x03 = delta update.
         {
         int curFrame = sim.GetFrameNum();
         if (curFrame >= 0 && (curFrame % 3) == 0 && net.GetClientCount() > 0) {
-            // Pre-serialize full state for clients without viewports
-            std::vector<uint8_t> fullState;
-            bool fullStateSerialized = false;
+            bool isFullSnapshot = (curFrame % 30) == 0;
 
             sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
-                std::vector<uint8_t> stateData;
-
+                // Collect candidate units (viewport-filtered or all)
+                std::vector<CUnit*> candidates;
                 if (session.HasViewport() && sim.HasMap()) {
-                    // Viewport-filtered: query QuadField per viewport
-                    stateData = EntityState::SerializeViewportUnits(
+                    candidates = EntityState::CollectViewportUnits(
                         session.viewports.data(),
                         static_cast<int>(session.viewports.size()));
                 } else {
-                    // No viewport yet — send everything
-                    if (!fullStateSerialized) {
-                        fullState = EntityState::SerializeAllUnits();
-                        fullStateSerialized = true;
-                    }
-                    stateData = fullState;
+                    candidates = EntityState::CollectAllUnits();
                 }
 
-                // Prepend envelope byte 0x02
+                uint8_t envelope;
+                std::vector<uint8_t> stateData;
+
+                if (isFullSnapshot) {
+                    // Full snapshot — send all candidates, reset cache
+                    envelope = 0x02;
+                    stateData = EntityState::SerializeUnits(candidates);
+                    session.deltaCache.Clear();
+                    for (CUnit* u : candidates)
+                        session.deltaCache.Update(u);
+                } else {
+                    // Delta — only send changed entities
+                    std::vector<CUnit*> changed;
+                    for (CUnit* u : candidates) {
+                        if (session.deltaCache.HasChanged(u))
+                            changed.push_back(u);
+                    }
+
+                    // Update cache for changed entities
+                    for (CUnit* u : changed)
+                        session.deltaCache.Update(u);
+
+                    envelope = 0x03;
+                    stateData = EntityState::SerializeUnits(changed);
+                }
+
+                // Prepend envelope byte
                 std::vector<uint8_t> frame;
                 frame.reserve(1 + stateData.size());
-                frame.push_back(0x02);
+                frame.push_back(envelope);
                 frame.insert(frame.end(), stateData.begin(), stateData.end());
                 net.Send(clientId, frame.data(), frame.size());
             });

@@ -118,11 +118,20 @@ std::vector<uint8_t> SerializeUnits(
     return buf;
 }
 
-std::vector<uint8_t> SerializeViewportUnits(
-    const Viewport* viewports, int numViewports,
-    uint16_t fieldMask)
+std::vector<CUnit*> CollectAllUnits() {
+    const auto& activeUnits = unitHandler.GetActiveUnits();
+    std::vector<CUnit*> units;
+    units.reserve(activeUnits.size());
+    for (CUnit* u : activeUnits) {
+        if (u != nullptr && !u->isDead)
+            units.push_back(u);
+    }
+    return units;
+}
+
+std::vector<CUnit*> CollectViewportUnits(
+    const Viewport* viewports, int numViewports)
 {
-    // Collect unique units across all active viewports
     std::unordered_set<int> seen;
     std::vector<CUnit*> units;
 
@@ -133,7 +142,6 @@ std::vector<uint8_t> SerializeViewportUnits(
         if (!vp.active || vp.width <= 0.0f || vp.height <= 0.0f)
             continue;
 
-        // Expand viewport rect by margin
         float halfW = (vp.width  * 0.5f) + MARGIN;
         float halfH = (vp.height * 0.5f) + MARGIN;
 
@@ -151,7 +159,14 @@ std::vector<uint8_t> SerializeViewportUnits(
         }
     }
 
-    return SerializeUnits(units, fieldMask);
+    return units;
+}
+
+std::vector<uint8_t> SerializeViewportUnits(
+    const Viewport* viewports, int numViewports,
+    uint16_t fieldMask)
+{
+    return SerializeUnits(CollectViewportUnits(viewports, numViewports), fieldMask);
 }
 
 } // namespace EntityState

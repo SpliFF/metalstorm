@@ -57,4 +57,12 @@ std::vector<uint8_t> SerializeViewportUnits(
     const Viewport* viewports, int numViewports,
     uint16_t fieldMask = FIELD_ALL);
 
+/// Collect units visible within a set of viewports (without serializing).
+/// Used when the caller needs to apply delta filtering before serialization.
+std::vector<CUnit*> CollectViewportUnits(
+    const Viewport* viewports, int numViewports);
+
+/// Collect all active (non-dead) units.
+std::vector<CUnit*> CollectAllUnits();
+
 } // namespace EntityState

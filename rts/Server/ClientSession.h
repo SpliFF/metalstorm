@@ -6,6 +6,8 @@
  */
 #pragma once
 
+#include "EntityDeltaCache.h"
+
 #include <cstdint>
 #include <array>
 #include <mutex>
@@ -39,6 +41,9 @@ struct ClientSession {
 
     /// Per-client viewports (indexed by viewport_id).
     std::array<Viewport, MAX_VIEWPORTS> viewports{};
+
+    /// Delta compression cache — tracks last-sent entity state.
+    EntityDeltaCache deltaCache;
 
     /// Whether this client has any active viewport.
     bool HasViewport() const {

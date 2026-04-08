@@ -22,7 +22,8 @@ import { ServerClock } from './clock.js';
 import { parseEntityState, type EntityStateSnapshot } from './entity-state.js';
 
 const ENVELOPE_FLATBUFFERS = 0x01;
-const ENVELOPE_ENTITY_STATE = 0x02;
+const ENVELOPE_ENTITY_STATE_FULL = 0x02;
+const ENVELOPE_ENTITY_STATE_DELTA = 0x03;
 const PROTOCOL_VERSION = 1;
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'handshake' | 'authenticating' | 'connected';
@@ -32,7 +33,7 @@ export interface ConnectionEvents {
     onAuthenticated?: (playerId: number, token: string) => void;
     onAuthFailed?: (message: string) => void;
     onServerError?: (code: number, message: string) => void;
-    onEntityState?: (snapshot: EntityStateSnapshot) => void;
+    onEntityState?: (snapshot: EntityStateSnapshot, isDelta: boolean) => void;
     onServerMessage?: (msg: ServerMessage) => void;
 }
 
@@ -177,9 +178,11 @@ export class Connection {
         if (data.length < 2) return;
 
         const envelope = data[0];
-        if (envelope === ENVELOPE_ENTITY_STATE) {
+        if (envelope === ENVELOPE_ENTITY_STATE_FULL || envelope === ENVELOPE_ENTITY_STATE_DELTA) {
             const snapshot = parseEntityState(data.subarray(1));
-            if (snapshot) this.events.onEntityState?.(snapshot);
+            if (snapshot) {
+                this.events.onEntityState?.(snapshot, envelope === ENVELOPE_ENTITY_STATE_DELTA);
+            }
             return;
         }
         if (envelope !== ENVELOPE_FLATBUFFERS) {

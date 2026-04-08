@@ -142,8 +142,8 @@ function connectToServer(): void {
         onServerError(code: number, message: string) {
             console.warn(`[client] server error ${code}: ${message}`);
         },
-        onEntityState(snapshot) {
-            entityRenderer?.update(snapshot);
+        onEntityState(snapshot, isDelta) {
+            entityRenderer?.update(snapshot, isDelta);
         },
     });
 
