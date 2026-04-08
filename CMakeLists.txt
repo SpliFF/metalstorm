@@ -74,6 +74,9 @@ file(GLOB_RECURSE MAP_SOURCES rts/Map/*.cpp)
 # Lua binding sources
 file(GLOB_RECURSE LUA_BINDING_SOURCES rts/Lua/*.cpp)
 
+# Server sources
+file(GLOB_RECURSE SERVER_SOURCES rts/Server/*.cpp)
+
 # === spring-server executable ===
 add_executable(spring-server
     rts/server_main.cpp
@@ -82,6 +85,7 @@ add_executable(spring-server
     ${SIM_SOURCES}
     ${MAP_SOURCES}
     ${LUA_BINDING_SOURCES}
+    ${SERVER_SOURCES}
 )
 
 target_include_directories(spring-server PRIVATE
