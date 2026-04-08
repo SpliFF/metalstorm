@@ -104,6 +104,43 @@ elseif(APPLE)
     endif()
 endif()
 
+# === Tests (doctest) ===
+include(FetchContent)
+FetchContent_Declare(
+    doctest
+    GIT_REPOSITORY https://github.com/doctest/doctest.git
+    GIT_TAG v2.4.12
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(doctest)
+
+file(GLOB TEST_SOURCES tests/*.cpp)
+if(TEST_SOURCES)
+    add_executable(spring-tests
+        ${TEST_SOURCES}
+        ${SYSTEM_SOURCES}
+        ${GAME_SOURCES}
+        ${SIM_SOURCES}
+        ${MAP_SOURCES}
+        ${LUA_BINDING_SOURCES}
+    )
+    target_include_directories(spring-tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/rts
+        ${CMAKE_SOURCE_DIR}/rts/lib
+        ${CMAKE_SOURCE_DIR}/rts/lib/lua/include
+        ${CMAKE_SOURCE_DIR}/rts/lib/lua/src
+    )
+    target_link_libraries(spring-tests PRIVATE lua ZLIB::ZLIB doctest::doctest)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(spring-tests PRIVATE pthread dl)
+    elseif(APPLE)
+        target_link_libraries(spring-tests PRIVATE pthread dl)
+        if(COCOA_FRAMEWORK)
+            target_link_libraries(spring-tests PRIVATE ${COCOA_FRAMEWORK})
+        endif()
+    endif()
+endif()
+
 # === compile_commands.json symlink for clangd ===
 if(CMAKE_EXPORT_COMPILE_COMMANDS)
     file(CREATE_LINK

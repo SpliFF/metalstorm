@@ -17,13 +17,16 @@ build-release:
 	cmake --build build/release
 
 # Tests
+test: build
+	./build/debug/spring-tests
+
 test-cpp: build
 	./build/debug/spring-server
 
 test-client:
 	cd client && npx vitest run
 
-test-all: test-cpp test-client
+test-all: test test-cpp test-client
 
 # Development
 dev-client:
