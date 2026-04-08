@@ -10,6 +10,7 @@
 #include "Server/Protocol.h"
 #include "Server/Database.h"
 #include "Server/ClientSession.h"
+#include "Server/EntityStateSerializer.h"
 #include "Sim/Misc/GlobalConstants.h"
 #include "System/FileSystem/FileHandler.h"
 #include "System/Misc/SpringTime.h"
@@ -284,6 +285,20 @@ int main(int argc, char* argv[])
         }
 
         sim.SimFrame();
+
+        // Broadcast entity state to connected clients every 3 ticks (~10 Hz)
+        {
+        int curFrame = sim.GetFrameNum();
+        if (curFrame >= 0 && (curFrame % 3) == 0 && net.GetClientCount() > 0) {
+            auto stateData = EntityState::SerializeAllUnits();
+            // Prepend envelope byte 0x02
+            std::vector<uint8_t> stateFrame;
+            stateFrame.reserve(1 + stateData.size());
+            stateFrame.push_back(0x02);
+            stateFrame.insert(stateFrame.end(), stateData.begin(), stateData.end());
+            net.Broadcast(stateFrame.data(), stateFrame.size());
+        }
+        }
 
         // Periodic status
         int frame = sim.GetFrameNum();
