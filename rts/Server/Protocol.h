@@ -8,6 +8,7 @@
 #pragma once
 
 #include "protocol_generated.h"
+#include "CombatEventCollector.h"
 #include <flatbuffers/flatbuffers.h>
 #include <cstdint>
 #include <vector>
@@ -77,6 +78,33 @@ inline std::vector<uint8_t> BuildServerError(uint16_t code, const std::string& m
     flatbuffers::FlatBufferBuilder fbb(256);
     auto err = SpringWeb::CreateServerErrorDirect(fbb, code, msg.c_str());
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_ServerError, err.Union());
+}
+
+/// Build a GameEventBatch containing combat events.
+inline std::vector<uint8_t> BuildCombatEventBatch(
+    uint32_t frame,
+    const std::vector<CombatEventData>& events)
+{
+    flatbuffers::FlatBufferBuilder fbb(256 + events.size() * 32);
+
+    std::vector<flatbuffers::Offset<SpringWeb::CombatEvent>> combatOffsets;
+    combatOffsets.reserve(events.size());
+
+    for (const auto& e : events) {
+        auto pos = SpringWeb::Vec3(e.position.x, e.position.y, e.position.z);
+        combatOffsets.push_back(SpringWeb::CreateCombatEvent(
+            fbb,
+            e.attackerId,
+            e.targetId,
+            e.weaponDefId,
+            static_cast<SpringWeb::CombatResult>(e.result),
+            e.damage,
+            &pos));
+    }
+
+    auto combatVec = fbb.CreateVector(combatOffsets);
+    auto batch = SpringWeb::CreateGameEventBatch(fbb, frame, 0, combatVec);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameEventBatch, batch.Union());
 }
 
 } // namespace Protocol

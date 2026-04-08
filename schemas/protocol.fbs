@@ -2,7 +2,8 @@
 //
 // Every WebSocket binary frame starts with a u8 envelope_type byte:
 //   0x01 = FlatBuffers message (this schema)
-//   0x02 = Entity state update (custom binary, Tier 2)
+//   0x02 = Entity state full snapshot (custom binary, Tier 2)
+//   0x03 = Entity state delta update (custom binary, Tier 2)
 //
 // After the envelope byte, the remaining bytes are a FlatBuffers buffer
 // whose root type is ServerMessage (server→client) or ClientMessage (client→server).
@@ -125,6 +126,23 @@ table EntityDestroy {
     position: Vec3;
 }
 
+// Combat event result
+enum CombatResult : uint8 {
+    Hit = 0,
+    Miss,
+    Blocked,       // shield/armour absorbed
+    Kill,          // target destroyed
+}
+
+table CombatEvent {
+    attacker_id: uint32;
+    target_id: uint32;
+    weapon_def_id: uint16;
+    result: CombatResult;
+    damage: float;
+    position: Vec3;            // Impact point
+}
+
 table GameEvent {
     topic: string;
     frame: uint32;
@@ -136,6 +154,7 @@ table GameEvent {
 table GameEventBatch {
     frame: uint32;
     events: [GameEvent];
+    combat_events: [CombatEvent];
 }
 
 table ResourceUpdate {

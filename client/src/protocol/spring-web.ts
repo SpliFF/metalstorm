@@ -10,6 +10,8 @@ export { ChatReceive, ChatReceiveT } from './spring-web/chat-receive.js';
 export { ChatSend, ChatSendT } from './spring-web/chat-send.js';
 export { ClientMessage, ClientMessageT } from './spring-web/client-message.js';
 export { ClientPayload } from './spring-web/client-payload.js';
+export { CombatEvent, CombatEventT } from './spring-web/combat-event.js';
+export { CombatResult } from './spring-web/combat-result.js';
 export { EntityCreate, EntityCreateT } from './spring-web/entity-create.js';
 export { EntityDestroy, EntityDestroyT } from './spring-web/entity-destroy.js';
 export { GameEvent, GameEventT } from './spring-web/game-event.js';

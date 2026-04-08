@@ -18,6 +18,8 @@ import { ViewportUpdate } from '../protocol/spring-web/viewport-update.js';
 import { Pong } from '../protocol/spring-web/pong.js';
 import { ServerError } from '../protocol/spring-web/server-error.js';
 import { AuthStatus } from '../protocol/spring-web/auth-status.js';
+import { GameEventBatch } from '../protocol/spring-web/game-event-batch.js';
+import { CombatEvent } from '../protocol/spring-web/combat-event.js';
 import { ServerClock } from './clock.js';
 import { parseEntityState, type EntityStateSnapshot } from './entity-state.js';
 
@@ -28,12 +30,25 @@ const PROTOCOL_VERSION = 1;
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'handshake' | 'authenticating' | 'connected';
 
+/** Parsed combat event for client consumption. */
+export interface CombatEventInfo {
+    attackerId: number;
+    targetId: number;
+    weaponDefId: number;
+    result: number;     // 0=hit, 1=miss, 2=blocked, 3=kill
+    damage: number;
+    x: number;
+    y: number;
+    z: number;
+}
+
 export interface ConnectionEvents {
     onStateChange?: (state: ConnectionState) => void;
     onAuthenticated?: (playerId: number, token: string) => void;
     onAuthFailed?: (message: string) => void;
     onServerError?: (code: number, message: string) => void;
     onEntityState?: (snapshot: EntityStateSnapshot, isDelta: boolean) => void;
+    onCombatEvents?: (events: CombatEventInfo[], frame: number) => void;
     onServerMessage?: (msg: ServerMessage) => void;
 }
 
@@ -202,6 +217,9 @@ export class Connection {
             case ServerPayload.ServerError:
                 this.handleServerError(msg);
                 break;
+            case ServerPayload.GameEventBatch:
+                this.handleGameEventBatch(msg);
+                break;
             default:
                 this.events.onServerMessage?.(msg);
                 break;
@@ -239,5 +257,31 @@ export class Connection {
     private handleServerError(msg: ServerMessage): void {
         const err = msg.payload(new ServerError()) as ServerError;
         this.events.onServerError?.(err.code(), err.message() ?? 'Unknown error');
+    }
+
+    private handleGameEventBatch(msg: ServerMessage): void {
+        const batch = msg.payload(new GameEventBatch()) as GameEventBatch;
+        const frame = batch.frame();
+
+        const combatCount = batch.combatEventsLength();
+        if (combatCount > 0 && this.events.onCombatEvents) {
+            const events: CombatEventInfo[] = [];
+            for (let i = 0; i < combatCount; i++) {
+                const ce = batch.combatEvents(i);
+                if (!ce) continue;
+                const pos = ce.position();
+                events.push({
+                    attackerId: ce.attackerId(),
+                    targetId: ce.targetId(),
+                    weaponDefId: ce.weaponDefId(),
+                    result: ce.result(),
+                    damage: ce.damage(),
+                    x: pos ? pos.x() : 0,
+                    y: pos ? pos.y() : 0,
+                    z: pos ? pos.z() : 0,
+                });
+            }
+            this.events.onCombatEvents(events, frame);
+        }
     }
 }

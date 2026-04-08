@@ -12,6 +12,7 @@
 #include "Server/ClientSession.h"
 #include "Server/EntityStateSerializer.h"
 #include "Server/ContentServer.h"
+#include "Server/CombatEventCollector.h"
 #include "Sim/Misc/GlobalConstants.h"
 #include "Map/ReadMap.h"
 #include "System/FileSystem/FileHandler.h"
@@ -414,6 +415,16 @@ int main(int argc, char* argv[])
                 frame.insert(frame.end(), stateData.begin(), stateData.end());
                 net.Send(clientId, frame.data(), frame.size());
             });
+        }
+        }
+
+        // Broadcast combat events to all connected clients
+        {
+        auto events = combatEvents.Drain();
+        if (!events.empty() && net.GetClientCount() > 0) {
+            auto batch = Protocol::BuildCombatEventBatch(
+                static_cast<uint32_t>(sim.GetFrameNum()), events);
+            net.Broadcast(batch.data(), batch.size());
         }
         }
 

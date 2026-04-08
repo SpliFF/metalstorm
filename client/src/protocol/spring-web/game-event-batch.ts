@@ -4,6 +4,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 
+import { CombatEvent, CombatEventT } from '../spring-web/combat-event.js';
 import { GameEvent, GameEventT } from '../spring-web/game-event.js';
 
 
@@ -40,8 +41,18 @@ eventsLength():number {
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
+combatEvents(index: number, obj?:CombatEvent):CombatEvent|null {
+  const offset = this.bb!.__offset(this.bb_pos, 8);
+  return offset ? (obj || new CombatEvent()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
+}
+
+combatEventsLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 8);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
 static startGameEventBatch(builder:flatbuffers.Builder) {
-  builder.startObject(2);
+  builder.startObject(3);
 }
 
 static addFrame(builder:flatbuffers.Builder, frame:number) {
@@ -64,22 +75,40 @@ static startEventsVector(builder:flatbuffers.Builder, numElems:number) {
   builder.startVector(4, numElems, 4);
 }
 
+static addCombatEvents(builder:flatbuffers.Builder, combatEventsOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(2, combatEventsOffset, 0);
+}
+
+static createCombatEventsVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startCombatEventsVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
 static endGameEventBatch(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOffset:flatbuffers.Offset, combatEventsOffset:flatbuffers.Offset):flatbuffers.Offset {
   GameEventBatch.startGameEventBatch(builder);
   GameEventBatch.addFrame(builder, frame);
   GameEventBatch.addEvents(builder, eventsOffset);
+  GameEventBatch.addCombatEvents(builder, combatEventsOffset);
   return GameEventBatch.endGameEventBatch(builder);
 }
 
 unpack(): GameEventBatchT {
   return new GameEventBatchT(
     this.frame(),
-    this.bb!.createObjList<GameEvent, GameEventT>(this.events.bind(this), this.eventsLength())
+    this.bb!.createObjList<GameEvent, GameEventT>(this.events.bind(this), this.eventsLength()),
+    this.bb!.createObjList<CombatEvent, CombatEventT>(this.combatEvents.bind(this), this.combatEventsLength())
   );
 }
 
@@ -87,22 +116,26 @@ unpack(): GameEventBatchT {
 unpackTo(_o: GameEventBatchT): void {
   _o.frame = this.frame();
   _o.events = this.bb!.createObjList<GameEvent, GameEventT>(this.events.bind(this), this.eventsLength());
+  _o.combatEvents = this.bb!.createObjList<CombatEvent, CombatEventT>(this.combatEvents.bind(this), this.combatEventsLength());
 }
 }
 
 export class GameEventBatchT implements flatbuffers.IGeneratedObject {
 constructor(
   public frame: number = 0,
-  public events: (GameEventT)[] = []
+  public events: (GameEventT)[] = [],
+  public combatEvents: (CombatEventT)[] = []
 ){}
 
 
 pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const events = GameEventBatch.createEventsVector(builder, builder.createObjectOffsetList(this.events));
+  const combatEvents = GameEventBatch.createCombatEventsVector(builder, builder.createObjectOffsetList(this.combatEvents));
 
   return GameEventBatch.createGameEventBatch(builder,
     this.frame,
-    events
+    events,
+    combatEvents
   );
 }
 }

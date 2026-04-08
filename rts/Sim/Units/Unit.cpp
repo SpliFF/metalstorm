@@ -1,5 +1,6 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
+#include "Server/CombatEventCollector.h"
 #include "System/Sync/SyncedPrimitiveBase.h"
 #include "UnitDef.h"
 #include "Unit.h"
@@ -1261,6 +1262,18 @@ void CUnit::DoDamage(
 
 	{
 		eventHandler.UnitDamaged(this, attacker, baseDamage, weaponDefID, projectileID, isParalyzer);
+
+		// Emit combat event for network streaming
+		if (!isCollision && attacker != nullptr && baseDamage > 0.0f) {
+			CombatEventData evt;
+			evt.attackerId = static_cast<uint32_t>(attacker->id);
+			evt.targetId = static_cast<uint32_t>(id);
+			evt.weaponDefId = static_cast<uint16_t>(std::max(0, weaponDefID));
+			evt.damage = baseDamage;
+			evt.position = pos;
+			evt.result = (health <= 0.0f) ? 3 : 0; // 3=kill, 0=hit
+			combatEvents.Push(evt);
+		}
 
 		// unit might have been killed via Lua from within UnitDamaged (e.g.
 		// through a recursive DoDamage call from AddUnitDamage or directly
