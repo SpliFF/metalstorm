@@ -9,6 +9,7 @@
 #include "Server/NetworkServer.h"
 #include "Server/Protocol.h"
 #include "Server/Database.h"
+#include "Server/ClientSession.h"
 #include "Sim/Misc/GlobalConstants.h"
 #include "System/Misc/SpringTime.h"
 
@@ -60,6 +61,9 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    // --- Sessions ---
+    SessionManager sessions;
+
     // --- Network ---
     NetworkServer net;
     if (!net.Start(port)) {
@@ -97,6 +101,8 @@ int main(int argc, char* argv[])
                 std::fprintf(stderr, "[spring-server] WARNING: sim fell behind, skipped %d ticks\n", skipped);
             }
         }
+
+        sessions.ResetTickCounters();
 
         // Drain inbound messages from clients
         auto messages = net.DrainInbound();
@@ -185,15 +191,43 @@ int main(int argc, char* argv[])
                         SpringWeb::AuthStatus_OK, token,
                         static_cast<uint32_t>(user->id));
                     net.Send(msg.clientId, resp.data(), resp.size());
+                    sessions.AddSession(msg.clientId, user->id, user->username, user->role);
                     std::fprintf(stderr, "[auth] client %u authenticated as '%s' (id=%lld)\n",
                         msg.clientId, username, user->id);
                     break;
                 }
                 case SpringWeb::ClientPayload_PlayerCommand: {
-                    // TODO: validate and feed to sim
+                    auto* session = sessions.GetSession(msg.clientId);
+                    if (!session) {
+                        auto err = Protocol::BuildServerError(401, "Not authenticated");
+                        net.Send(msg.clientId, err.data(), err.size());
+                        break;
+                    }
+
+                    // Rate limiting
+                    if (session->commandsThisTick >= SessionManager::MAX_COMMANDS_PER_TICK) {
+                        auto err = Protocol::BuildServerError(429, "Command rate limit exceeded");
+                        net.Send(msg.clientId, err.data(), err.size());
+                        break;
+                    }
+                    session->commandsThisTick++;
+
                     auto* cmd = clientMsg->payload_as_PlayerCommand();
-                    std::fprintf(stderr, "[spring-server] command from client %u: id=%d seq=%u\n",
-                        msg.clientId, cmd->command_id(), cmd->sequence());
+
+                    // Sequence validation (must be monotonically increasing)
+                    if (cmd->sequence() <= session->lastCommandSeq && session->lastCommandSeq > 0) {
+                        auto err = Protocol::BuildServerError(400, "Stale command sequence");
+                        net.Send(msg.clientId, err.data(), err.size());
+                        break;
+                    }
+                    session->lastCommandSeq = cmd->sequence();
+
+                    // TODO: validate squad ownership, feed to sim
+                    std::fprintf(stderr, "[cmd] client %u (%s): cmd=%d seq=%u squads=%d params=%d\n",
+                        msg.clientId, session->username.c_str(),
+                        cmd->command_id(), cmd->sequence(),
+                        cmd->squad_ids() ? cmd->squad_ids()->size() : 0,
+                        cmd->params() ? cmd->params()->size() : 0);
                     break;
                 }
                 default:
