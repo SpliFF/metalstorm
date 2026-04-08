@@ -1,0 +1,230 @@
+/**
+ * NetworkServer — uWebSockets-based WebSocket server.
+ *
+ * Runs uWS::App on a dedicated thread. The sim thread communicates
+ * via a mutex-protected inbound queue (network→sim) and uses
+ * uWS::Loop::defer() for outbound messages (sim→network).
+ */
+
+#include "NetworkServer.h"
+
+// uWebSockets includes
+#include <App.h>
+
+#include <cstdio>
+#include <string_view>
+
+/// Per-connection user data stored by uWebSockets.
+struct ClientData {
+    ClientID id;
+};
+
+/// Internal state that depends on uWS types (kept out of the header).
+struct NetworkServer::Impl {
+    // The uWS event loop, used for cross-thread defer()
+    struct us_loop_t* loop = nullptr;
+
+    // Listen socket — closed to trigger app.run() exit
+    us_listen_socket_t* listenSocket = nullptr;
+
+    // Active WebSocket connections, keyed by ClientID.
+    // Only accessed from the network thread.
+    struct ClientEntry {
+        uWS::WebSocket<false, true, ClientData>* ws;
+    };
+    std::mutex clientsMutex;
+    std::vector<ClientEntry> clients;
+    ClientID nextId = 1;
+
+    // Outbound queue (sim thread pushes, network thread drains via defer)
+    struct OutboundMessage {
+        ClientID targetId;  // 0 = broadcast
+        std::vector<uint8_t> data;
+    };
+    std::mutex outboundMutex;
+    std::vector<OutboundMessage> outboundQueue;
+};
+
+
+NetworkServer::NetworkServer() : impl(std::make_unique<Impl>()) {}
+
+NetworkServer::~NetworkServer() {
+    Stop();
+}
+
+bool NetworkServer::Start(int port) {
+    if (running.load())
+        return false;
+
+    running.store(true);
+    networkThread = std::thread(&NetworkServer::NetworkThreadFunc, this, port);
+    return true;
+}
+
+void NetworkServer::Stop() {
+    if (!running.load())
+        return;
+
+    running.store(false);
+
+    // Wake the uWS loop so it can check the running flag and exit
+    if (impl->loop) {
+        uWS::Loop::get(impl->loop)->defer([this]() {
+            // The loop will exit after this deferred callback
+        });
+    }
+
+    if (networkThread.joinable())
+        networkThread.join();
+}
+
+std::vector<InboundMessage> NetworkServer::DrainInbound() {
+    std::lock_guard<std::mutex> lock(inboundMutex);
+    std::vector<InboundMessage> drained;
+    drained.swap(inboundQueue);
+    return drained;
+}
+
+void NetworkServer::Send(ClientID clientId, const uint8_t* data, size_t len) {
+    std::lock_guard<std::mutex> lock(impl->outboundMutex);
+    impl->outboundQueue.push_back({clientId, {data, data + len}});
+
+    // Wake the network thread to process outbound
+    if (impl->loop) {
+        uWS::Loop::get(impl->loop)->defer([]() {});
+    }
+}
+
+void NetworkServer::Broadcast(const uint8_t* data, size_t len) {
+    Send(0, data, len); // ClientID 0 = broadcast
+}
+
+void NetworkServer::NetworkThreadFunc(int port) {
+    uWS::App app;
+
+    app.ws<ClientData>("/*", {
+        .compression = uWS::DISABLED,
+        .maxPayloadLength = 64 * 1024,  // 64 KB per PLAN-network.md
+        .idleTimeout = 120,
+        .maxBackpressure = 1024 * 1024,
+        .sendPingsAutomatically = true,
+
+        .open = [this](auto* ws) {
+            auto* data = ws->getUserData();
+            data->id = impl->nextId++;
+
+            {
+                std::lock_guard<std::mutex> lock(impl->clientsMutex);
+                impl->clients.push_back({ws});
+            }
+            clientCount.fetch_add(1);
+
+            std::fprintf(stderr, "[net] client %u connected (%d total)\n",
+                data->id, clientCount.load());
+        },
+
+        .message = [this](auto* ws, std::string_view message, uWS::OpCode opCode) {
+            if (opCode != uWS::OpCode::BINARY)
+                return;
+
+            auto* data = ws->getUserData();
+
+            // Push to inbound queue for the sim thread
+            InboundMessage msg;
+            msg.clientId = data->id;
+            msg.data.assign(
+                reinterpret_cast<const uint8_t*>(message.data()),
+                reinterpret_cast<const uint8_t*>(message.data()) + message.size()
+            );
+
+            {
+                std::lock_guard<std::mutex> lock(inboundMutex);
+                inboundQueue.push_back(std::move(msg));
+            }
+        },
+
+        .close = [this](auto* ws, int /*code*/, std::string_view /*message*/) {
+            auto* data = ws->getUserData();
+            ClientID id = data->id;
+
+            {
+                std::lock_guard<std::mutex> lock(impl->clientsMutex);
+                auto& clients = impl->clients;
+                clients.erase(
+                    std::remove_if(clients.begin(), clients.end(),
+                        [id](const Impl::ClientEntry& e) {
+                            return e.ws->getUserData()->id == id;
+                        }),
+                    clients.end()
+                );
+            }
+            clientCount.fetch_sub(1);
+
+            std::fprintf(stderr, "[net] client %u disconnected (%d remaining)\n",
+                id, clientCount.load());
+        },
+    });
+
+    app.listen(port, [this, port](auto* listenSocket) {
+        impl->listenSocket = listenSocket;
+        if (listenSocket) {
+            std::fprintf(stderr, "[net] listening on port %d\n", port);
+        } else {
+            std::fprintf(stderr, "[net] ERROR: failed to bind port %d\n", port);
+        }
+    });
+
+    // Store the loop pointer for cross-thread defer()
+    impl->loop = (struct us_loop_t*)uWS::Loop::get();
+
+    // Set up a pre-iteration callback to process outbound messages
+    // and check the running flag
+    uWS::Loop::get()->addPreHandler(this, [this](uWS::Loop*) {
+        // Process outbound messages
+        std::vector<Impl::OutboundMessage> outbound;
+        {
+            std::lock_guard<std::mutex> lock(impl->outboundMutex);
+            outbound.swap(impl->outboundQueue);
+        }
+
+        for (auto& msg : outbound) {
+            std::string_view sv(reinterpret_cast<const char*>(msg.data.data()), msg.data.size());
+
+            if (msg.targetId == 0) {
+                // Broadcast
+                std::lock_guard<std::mutex> lock(impl->clientsMutex);
+                for (auto& entry : impl->clients) {
+                    entry.ws->send(sv, uWS::OpCode::BINARY, false);
+                }
+            } else {
+                // Targeted send
+                std::lock_guard<std::mutex> lock(impl->clientsMutex);
+                for (auto& entry : impl->clients) {
+                    if (entry.ws->getUserData()->id == msg.targetId) {
+                        entry.ws->send(sv, uWS::OpCode::BINARY, false);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Check if we should shut down
+        if (!running.load()) {
+            // Close the listen socket so app.run() will eventually return
+            if (impl->listenSocket) {
+                us_listen_socket_close(0, impl->listenSocket);
+                impl->listenSocket = nullptr;
+            }
+            // Close all client connections
+            std::lock_guard<std::mutex> lock(impl->clientsMutex);
+            for (auto& entry : impl->clients) {
+                entry.ws->close();
+            }
+        }
+    });
+
+    app.run();
+
+    impl->loop = nullptr;
+    std::fprintf(stderr, "[net] network thread exiting\n");
+}

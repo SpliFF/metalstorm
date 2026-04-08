@@ -2,11 +2,11 @@
  * spring-server entry point
  *
  * Headless authoritative game server. Runs the simulation at a fixed
- * 30 Hz tick rate. Network (uWebSockets) and storage (SQLite) are
- * integrated in later Phase 1 steps.
+ * 30 Hz tick rate with a WebSocket server for client connections.
  */
 
 #include "Server/Simulation.h"
+#include "Server/NetworkServer.h"
 #include "Sim/Misc/GlobalConstants.h"
 #include "System/Misc/SpringTime.h"
 
@@ -27,11 +27,23 @@ int main(int argc, char* argv[])
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
 
+    int port = 9001;
+    if (argc > 1) {
+        port = std::atoi(argv[1]);
+    }
+
     std::fprintf(stderr, "[spring-server] starting...\n");
 
-    // Initialise Spring's time system (must happen before anything uses spring_gettime)
+    // Initialise Spring's time system
     spring_clock::PushTickRate(true);
     spring_time::setstarttime(spring_time::gettime(true));
+
+    // --- Network ---
+    NetworkServer net;
+    if (!net.Start(port)) {
+        std::fprintf(stderr, "[spring-server] ERROR: failed to start network server\n");
+        return 1;
+    }
 
     // --- Simulation ---
     CSimulation sim;
@@ -41,7 +53,7 @@ int main(int argc, char* argv[])
     const auto tickInterval = std::chrono::microseconds(1'000'000 / GAME_SPEED);
     auto nextTick = std::chrono::steady_clock::now();
 
-    std::fprintf(stderr, "[spring-server] entering sim loop at %d Hz\n", GAME_SPEED);
+    std::fprintf(stderr, "[spring-server] entering sim loop at %d Hz (port %d)\n", GAME_SPEED, port);
 
     while (keepRunning.load()) {
         // Wait for next tick
@@ -64,20 +76,26 @@ int main(int argc, char* argv[])
             }
         }
 
-        // TODO: drain commands from network here
-        // sim.ProcessCommands(net.drainCommands());
+        // Drain inbound messages from clients
+        auto messages = net.DrainInbound();
+        for (auto& msg : messages) {
+            // TODO: parse as FlatBuffers commands and feed to sim
+            // For now, echo back as proof of connectivity
+            net.Send(msg.clientId, msg.data.data(), msg.data.size());
+        }
 
         sim.SimFrame();
 
         // Periodic status
         int frame = sim.GetFrameNum();
         if (frame > 0 && (frame % (GAME_SPEED * 10)) == 0) {
-            std::fprintf(stderr, "[spring-server] frame %d (%.1f game-seconds)\n",
-                frame, frame / (float)GAME_SPEED);
+            std::fprintf(stderr, "[spring-server] frame %d (%.1fs) clients=%d\n",
+                frame, frame / (float)GAME_SPEED, net.GetClientCount());
         }
     }
 
     std::fprintf(stderr, "[spring-server] shutting down (frame %d)...\n", sim.GetFrameNum());
+    net.Stop();
     sim.Kill();
     std::fprintf(stderr, "[spring-server] exited cleanly\n");
 

@@ -26,6 +26,43 @@ endif()
 # Include paths — the rts/ directory is the root for Spring includes
 include_directories(${CMAKE_SOURCE_DIR}/rts)
 
+# === uWebSockets (WebSocket server) ===
+include(FetchContent)
+
+FetchContent_Declare(
+    uSockets
+    GIT_REPOSITORY https://github.com/uNetworking/uSockets.git
+    GIT_TAG v0.8.8
+    GIT_SHALLOW TRUE
+    GIT_SUBMODULES ""
+)
+FetchContent_MakeAvailable(uSockets)
+
+# Compile uSockets from source (minimal: TCP only, no TLS)
+add_library(usockets STATIC
+    ${usockets_SOURCE_DIR}/src/bsd.c
+    ${usockets_SOURCE_DIR}/src/context.c
+    ${usockets_SOURCE_DIR}/src/loop.c
+    ${usockets_SOURCE_DIR}/src/socket.c
+    ${usockets_SOURCE_DIR}/src/eventing/epoll_kqueue.c
+)
+target_include_directories(usockets PUBLIC ${usockets_SOURCE_DIR}/src)
+target_compile_definitions(usockets PRIVATE LIBUS_NO_SSL)
+
+FetchContent_Declare(
+    uWebSockets
+    GIT_REPOSITORY https://github.com/uNetworking/uWebSockets.git
+    GIT_TAG v20.76.0
+    GIT_SHALLOW TRUE
+    GIT_SUBMODULES ""
+)
+FetchContent_MakeAvailable(uWebSockets)
+
+# uWebSockets is header-only, depends on uSockets
+add_library(uws INTERFACE)
+target_include_directories(uws INTERFACE ${uwebsockets_SOURCE_DIR}/src)
+target_link_libraries(uws INTERFACE usockets)
+
 # === Bundled Lua 5.1 (Spring's C++ build of Lua) ===
 file(GLOB LUA_SOURCES rts/lib/lua/src/*.cpp)
 list(FILTER LUA_SOURCES EXCLUDE REGEX "lua\\.cpp$|luac\\.cpp$")
@@ -95,7 +132,7 @@ target_include_directories(spring-server PRIVATE
     ${CMAKE_SOURCE_DIR}/rts/lib/lua/src
 )
 find_package(ZLIB REQUIRED)
-target_link_libraries(spring-server PRIVATE lua ZLIB::ZLIB)
+target_link_libraries(spring-server PRIVATE lua uws ZLIB::ZLIB)
 
 # Link platform libraries
 if(UNIX AND NOT APPLE)
