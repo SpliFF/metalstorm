@@ -7,6 +7,7 @@
 
 #include "Server/Simulation.h"
 #include "Server/NetworkServer.h"
+#include "Server/Protocol.h"
 #include "Sim/Misc/GlobalConstants.h"
 #include "System/Misc/SpringTime.h"
 
@@ -79,9 +80,40 @@ int main(int argc, char* argv[])
         // Drain inbound messages from clients
         auto messages = net.DrainInbound();
         for (auto& msg : messages) {
-            // TODO: parse as FlatBuffers commands and feed to sim
-            // For now, echo back as proof of connectivity
-            net.Send(msg.clientId, msg.data.data(), msg.data.size());
+            auto* clientMsg = Protocol::ParseClientMessage(msg.data.data(), msg.data.size());
+            if (!clientMsg || !clientMsg->payload()) {
+                auto err = Protocol::BuildServerError(400, "Invalid message");
+                net.Send(msg.clientId, err.data(), err.size());
+                continue;
+            }
+
+            switch (clientMsg->payload_type()) {
+                case SpringWeb::ClientPayload_Ping: {
+                    auto* ping = clientMsg->payload_as_Ping();
+                    auto pong = Protocol::BuildPong(
+                        ping->client_time(),
+                        static_cast<uint64_t>(sim.GetFrameNum()));
+                    net.Send(msg.clientId, pong.data(), pong.size());
+                    break;
+                }
+                case SpringWeb::ClientPayload_Handshake: {
+                    auto* hs = clientMsg->payload_as_Handshake();
+                    std::fprintf(stderr, "[spring-server] handshake from client %u: v%d %s\n",
+                        msg.clientId,
+                        hs->protocol_version(),
+                        hs->client_version() ? hs->client_version()->c_str() : "unknown");
+                    break;
+                }
+                case SpringWeb::ClientPayload_PlayerCommand: {
+                    // TODO: validate and feed to sim
+                    auto* cmd = clientMsg->payload_as_PlayerCommand();
+                    std::fprintf(stderr, "[spring-server] command from client %u: id=%d seq=%u\n",
+                        msg.clientId, cmd->command_id(), cmd->sequence());
+                    break;
+                }
+                default:
+                    break;
+            }
         }
 
         sim.SimFrame();

@@ -1,0 +1,199 @@
+// Spring Web Protocol — FlatBuffers schema
+//
+// Every WebSocket binary frame starts with a u8 envelope_type byte:
+//   0x01 = FlatBuffers message (this schema)
+//   0x02 = Entity state update (custom binary, Tier 2)
+//
+// After the envelope byte, the remaining bytes are a FlatBuffers buffer
+// whose root type is ServerMessage (server→client) or ClientMessage (client→server).
+
+namespace SpringWeb;
+
+// ============================================================
+// Enums
+// ============================================================
+
+enum AuthStatus : uint8 {
+    OK = 0,
+    InvalidCredentials,
+    AccountBanned,
+    ServerFull,
+    VersionMismatch,
+}
+
+// ============================================================
+// Common types
+// ============================================================
+
+struct Vec3 {
+    x: float;
+    y: float;
+    z: float;
+}
+
+// ============================================================
+// Client → Server messages
+// ============================================================
+
+table Handshake {
+    protocol_version: uint16;
+    client_version: string;
+}
+
+table AuthRequest {
+    username: string;
+    password_hash: string;      // bcrypt hash, not plaintext
+    token: string;              // JWT for reconnection (alternative to user/pass)
+}
+
+table PlayerCommand {
+    sequence: uint32;           // Monotonic sequence number
+    command_id: int16;          // CMD_MOVE, CMD_ATTACK, etc. (negative = build)
+    squad_ids: [uint32];        // Target squads
+    params: [float];            // Command parameters
+    options: uint8;             // SHIFT=queue, ALT=override, etc.
+    timeout_frames: uint32;     // 0 = no timeout
+}
+
+table ViewportUpdate {
+    viewport_id: uint8;
+    center_x: float;
+    center_z: float;
+    width: float;
+    height: float;
+    rotation: float;            // Radians around Y axis
+    zoom_level: float;
+}
+
+table Ping {
+    client_time: uint64;
+}
+
+table ChatSend {
+    text: string;
+    destination: uint8;         // 0=all, 1=allies, 2=spectators
+}
+
+table Ack {
+    last_received_seq: uint32;
+}
+
+table ReconnectRequest {
+    token: string;
+    last_snapshot_seq: uint32;
+}
+
+// Union of all client→server message types
+union ClientPayload {
+    Handshake,
+    AuthRequest,
+    PlayerCommand,
+    ViewportUpdate,
+    Ping,
+    ChatSend,
+    Ack,
+    ReconnectRequest,
+}
+
+table ClientMessage {
+    payload: ClientPayload;
+}
+
+// ============================================================
+// Server → Client messages
+// ============================================================
+
+table AuthResponse {
+    status: AuthStatus;
+    token: string;              // JWT session token (on success)
+    player_id: uint32;
+    message: string;            // Error description (on failure)
+}
+
+table EntityCreate {
+    entity_id: uint32;
+    def_id: uint16;
+    owner_team: uint8;
+    position: Vec3;
+    heading: uint16;
+    health: uint16;
+}
+
+table EntityDestroy {
+    entity_id: uint32;
+    destruction_type: uint8;    // Normal, explode, fade, etc.
+    position: Vec3;
+}
+
+table GameEvent {
+    topic: string;
+    frame: uint32;
+    entity_id: uint32;
+    position: Vec3;
+    payload: [uint8];           // Opaque event payload
+}
+
+table GameEventBatch {
+    frame: uint32;
+    events: [GameEvent];
+}
+
+table ResourceUpdate {
+    team: uint8;
+    metal: float;
+    max_metal: float;
+    energy: float;
+    max_energy: float;
+    metal_income: float;
+    energy_income: float;
+}
+
+table Pong {
+    client_time: uint64;        // Echoed back
+    server_time: uint64;
+}
+
+table ChatReceive {
+    sender_id: uint32;
+    sender_name: string;
+    text: string;
+    destination: uint8;
+}
+
+table GameInfo {
+    map_name: string;
+    game_name: string;
+    game_speed: float;
+    frame: uint32;
+    paused: bool;
+}
+
+table ReconnectResponse {
+    status: uint8;              // 0=OK (delta), 1=FULL_SYNC
+}
+
+table ServerError {
+    code: uint16;
+    message: string;
+}
+
+// Union of all server→client message types
+union ServerPayload {
+    AuthResponse,
+    EntityCreate,
+    EntityDestroy,
+    GameEventBatch,
+    ResourceUpdate,
+    Pong,
+    ChatReceive,
+    GameInfo,
+    ReconnectResponse,
+    ServerError,
+}
+
+table ServerMessage {
+    payload: ServerPayload;
+}
+
+// Root types — one for each direction
+root_type ClientMessage;

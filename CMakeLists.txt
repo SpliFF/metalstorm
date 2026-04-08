@@ -63,6 +63,31 @@ add_library(uws INTERFACE)
 target_include_directories(uws INTERFACE ${uwebsockets_SOURCE_DIR}/src)
 target_link_libraries(uws INTERFACE usockets)
 
+# === FlatBuffers (protocol serialisation) ===
+set(FLATBUFFERS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(FLATBUFFERS_INSTALL OFF CACHE BOOL "" FORCE)
+set(FLATBUFFERS_BUILD_FLATHASH OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    flatbuffers
+    GIT_REPOSITORY https://github.com/google/flatbuffers.git
+    GIT_TAG v24.3.25
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(flatbuffers)
+
+# Generate C++ headers from .fbs schemas
+set(SCHEMA_DIR ${CMAKE_SOURCE_DIR}/schemas)
+set(GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
+file(MAKE_DIRECTORY ${GENERATED_DIR})
+
+add_custom_command(
+    OUTPUT ${GENERATED_DIR}/protocol_generated.h
+    COMMAND flatc --cpp --gen-object-api -o ${GENERATED_DIR} ${SCHEMA_DIR}/protocol.fbs
+    DEPENDS ${SCHEMA_DIR}/protocol.fbs flatc
+    COMMENT "Generating FlatBuffers C++ headers from protocol.fbs"
+)
+add_custom_target(generate_flatbuffers DEPENDS ${GENERATED_DIR}/protocol_generated.h)
+
 # === Bundled Lua 5.1 (Spring's C++ build of Lua) ===
 file(GLOB LUA_SOURCES rts/lib/lua/src/*.cpp)
 list(FILTER LUA_SOURCES EXCLUDE REGEX "lua\\.cpp$|luac\\.cpp$")
@@ -125,14 +150,16 @@ add_executable(spring-server
     ${SERVER_SOURCES}
 )
 
+add_dependencies(spring-server generate_flatbuffers)
 target_include_directories(spring-server PRIVATE
     ${CMAKE_SOURCE_DIR}/rts
     ${CMAKE_SOURCE_DIR}/rts/lib
     ${CMAKE_SOURCE_DIR}/rts/lib/lua/include
     ${CMAKE_SOURCE_DIR}/rts/lib/lua/src
+    ${GENERATED_DIR}
 )
 find_package(ZLIB REQUIRED)
-target_link_libraries(spring-server PRIVATE lua uws ZLIB::ZLIB)
+target_link_libraries(spring-server PRIVATE lua uws flatbuffers ZLIB::ZLIB)
 
 # Link platform libraries
 if(UNIX AND NOT APPLE)
