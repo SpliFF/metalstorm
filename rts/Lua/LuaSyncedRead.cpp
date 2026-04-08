@@ -67,6 +67,7 @@
 #include "System/SpringMath.h"
 #include "System/FileSystem/FileHandler.h"
 #include "System/FileSystem/FileSystem.h"
+#include "System/StringHash.h"
 #include "System/StringUtil.h"
 
 #include <cctype>

@@ -69,6 +69,7 @@
 #include "System/EventHandler.h"
 #include "System/ObjectDependenceTypes.h"
 #include "System/Log/ILog.h"
+#include "System/StringHash.h"
 #include "System/Sync/SyncedPrimitiveBase.h"
 
 using std::max;
@@ -588,9 +589,9 @@ static int SetSolidObjectPhysicalState(lua_State* L, CSolidObject* o)
 	rot.y = luaL_checknumber(L, 9);
 	rot.z = luaL_checknumber(L, 10);
 
-	drag.x = Clamp(luaL_optnumber(L, 11, drag.x), 0.0f, 1.0f);
-	drag.y = Clamp(luaL_optnumber(L, 12, drag.y), 0.0f, 1.0f);
-	drag.z = Clamp(luaL_optnumber(L, 13, drag.z), 0.0f, 1.0f);
+	drag.x = Clamp(static_cast<float>(luaL_optnumber(L, 11, drag.x)), 0.0f, 1.0f);
+	drag.y = Clamp(static_cast<float>(luaL_optnumber(L, 12, drag.y)), 0.0f, 1.0f);
+	drag.z = Clamp(static_cast<float>(luaL_optnumber(L, 13, drag.z)), 0.0f, 1.0f);
 
 	o->Move(pos, false);
 	o->SetDirVectorsEuler(rot);
@@ -2502,7 +2503,7 @@ int LuaSyncedCtrl::SetUnitPosErrorParams(lua_State* L)
 	unit->nextPosErrorUpdate = luaL_optint(L, 8, unit->nextPosErrorUpdate);
 
 	if (lua_isnumber(L, 9) && lua_isboolean(L, 10))
-		unit->SetPosErrorBit(Clamp(lua_tointeger(L, 9), 0, teamHandler.ActiveAllyTeams()), lua_toboolean(L, 10));
+		unit->SetPosErrorBit(Clamp(static_cast<int>(lua_tointeger(L, 9)), 0, teamHandler.ActiveAllyTeams()), lua_toboolean(L, 10));
 
 	return 0;
 }
@@ -2974,11 +2975,11 @@ int LuaSyncedCtrl::SetFeatureResources(lua_State* L)
 	feature->defResources.metal  = std::max(0.0f, luaL_optfloat(L, 6, feature->defResources.metal));
 	feature->defResources.energy = std::max(0.0f, luaL_optfloat(L, 7, feature->defResources.energy));
 
-	feature->resources.metal  = Clamp(luaL_checknumber(L, 2), 0.0f, feature->defResources.metal );
-	feature->resources.energy = Clamp(luaL_checknumber(L, 3), 0.0f, feature->defResources.energy);
+	feature->resources.metal  = Clamp(luaL_checkfloat(L, 2), 0.0f, feature->defResources.metal );
+	feature->resources.energy = Clamp(luaL_checkfloat(L, 3), 0.0f, feature->defResources.energy);
 
-	feature->reclaimTime = Clamp(luaL_optnumber(L, 4, feature->reclaimTime), 1.0f, 1000000.0f);
-	feature->reclaimLeft = Clamp(luaL_optnumber(L, 5, feature->reclaimLeft), 0.0f,       1.0f);
+	feature->reclaimTime = Clamp(luaL_optfloat(L, 4, feature->reclaimTime), 1.0f, 1000000.0f);
+	feature->reclaimLeft = Clamp(luaL_optfloat(L, 5, feature->reclaimLeft), 0.0f,       1.0f);
 	return 0;
 }
 
@@ -3005,7 +3006,7 @@ int LuaSyncedCtrl::SetFeatureResurrect(lua_State* L)
 	if (!lua_isnoneornil(L, 3))
 		feature->buildFacing = LuaUtils::ParseFacing(L, __func__, 3);
 
-	feature->resurrectProgress = Clamp(luaL_optnumber(L, 4, feature->resurrectProgress), 0.0f, 1.0f);
+	feature->resurrectProgress = Clamp(luaL_optfloat(L, 4, feature->resurrectProgress), 0.0f, 1.0f);
 	return 0;
 }
 

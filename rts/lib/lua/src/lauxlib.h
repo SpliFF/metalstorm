@@ -285,8 +285,10 @@ typedef struct luaL_Stream {
 #define luaL_optunsigned(L,a,d)	\
 	((lua_Unsigned)luaL_optinteger(L,a,(lua_Integer)(d)))
 
-#define luaL_checkint(L,n)	((int)luaL_checkinteger(L, (n)))
-#define luaL_optint(L,n,d)	((int)luaL_optinteger(L, (n), (d)))
+// Lenient: accept floats and truncate (Lua 5.1 behaviour).
+// Spring games pass float results to C functions expecting ints.
+#define luaL_checkint(L,n)	((int)luaL_checknumber(L, (n)))
+#define luaL_optint(L,n,d)	((int)luaL_optnumber(L, (n), (lua_Number)(d)))
 
 #define luaL_checklong(L,n)	((long)luaL_checkinteger(L, (n)))
 #define luaL_optlong(L,n,d)	((long)luaL_optinteger(L, (n), (d)))

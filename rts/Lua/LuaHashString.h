@@ -7,7 +7,6 @@
 #include <string>
 
 #include "LuaInclude.h"
-#include "System/StringHash.h"
 
 
 struct LuaHashString {
@@ -37,8 +36,10 @@ struct LuaHashString {
 		}
 
 		inline void GetGlobal(lua_State* L) const {
+			lua_pushglobaltable(L);
 			Push(L);
-			lua_rawget(L, LUA_GLOBALSINDEX);
+			lua_rawget(L, -2);
+			lua_remove(L, -2); // remove global table
 		}
 		inline bool GetGlobalFunc(lua_State* L) const {
 			GetGlobal(L);
@@ -104,7 +105,7 @@ struct LuaHashString {
 //       peculiar things will happen. => Only use raw strings (and not variables) in name.
 
 #define HSTR_PUSH(L, name) \
-	{ lua_pushhstring(L, COMPILE_TIME_HASH(name), name, sizeof(name) - 1); }
+	{ lua_pushlstring(L, name, sizeof(name) - 1); }
 
 #define HSTR_PUSH_BOOL(L, name, val) \
 	{ HSTR_PUSH(L, name); lua_pushboolean(L, val); lua_rawset(L, -3); }
@@ -116,7 +117,7 @@ struct LuaHashString {
 	{ HSTR_PUSH(L, name); lua_pushsstring(L, val); lua_rawset(L, -3); }
 
 #define HSTR_PUSH_CSTRING(L, name, val) \
-	{ HSTR_PUSH(L, name); lua_pushhstring(L, COMPILE_TIME_HASH(val), val, sizeof(val) - 1); lua_rawset(L, -3); }
+	{ HSTR_PUSH(L, name); lua_pushlstring(L, val, sizeof(val) - 1); lua_rawset(L, -3); }
 
 #define HSTR_PUSH_CFUNC(L, name, val) \
 	{ HSTR_PUSH(L, name); lua_pushcfunction(L, val); lua_rawset(L, -3); }

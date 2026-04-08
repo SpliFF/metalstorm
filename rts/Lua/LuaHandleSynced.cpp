@@ -49,6 +49,7 @@
 #include "System/FileSystem/FileHandler.h"
 #include "System/Log/ILog.h"
 #include "System/SpringMath.h"
+#include "System/StringHash.h"
 
 
 

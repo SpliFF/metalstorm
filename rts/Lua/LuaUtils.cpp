@@ -16,6 +16,7 @@
 #include "System/Log/ILog.h"
 #include "System/UnorderedMap.hpp"
 #include "System/UnorderedSet.hpp"
+#include "System/StringHash.h"
 #include "System/StringUtil.h"
 
 #if !defined UNITSYNC && !defined DEDICATED && !defined BUILDING_AI

@@ -88,13 +88,14 @@ add_custom_command(
 )
 add_custom_target(generate_flatbuffers DEPENDS ${GENERATED_DIR}/protocol_generated.h)
 
-# === Bundled Lua 5.1 (Spring's C++ build of Lua) ===
+# === Lua 5.4.7 (standard upstream, compiled as C++) ===
 file(GLOB LUA_SOURCES rts/lib/lua/src/*.cpp)
-list(FILTER LUA_SOURCES EXCLUDE REGEX "lua\\.cpp$|luac\\.cpp$")
-list(APPEND LUA_SOURCES rts/lib/lua/include/LuaUser.cpp)
 add_library(lua STATIC ${LUA_SOURCES})
 target_include_directories(lua PUBLIC rts/lib/lua/include rts/lib/lua/src)
-target_compile_definitions(lua PRIVATE LUA_USE_POSIX LUA_USE_DLOPEN)
+if(UNIX)
+    target_compile_definitions(lua PRIVATE LUA_USE_POSIX)
+    target_link_libraries(lua m)
+endif()
 
 # === Collect all sim sources ===
 

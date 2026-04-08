@@ -6,8 +6,6 @@
 #include <algorithm>
 #include <climits>
 
-#include "lib/streflop/streflop_cond.h"
-
 #include "System/float3.h"
 #include "System/float4.h"
 #include "LuaInclude.h"
