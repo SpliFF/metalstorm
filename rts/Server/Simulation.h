@@ -8,6 +8,7 @@
 #pragma once
 
 #include <memory>
+#include <string>
 
 class LuaParser;
 
@@ -17,7 +18,8 @@ public:
     ~CSimulation() noexcept;
 
     /// Initialise all sim subsystems. Must be called before SimFrame().
-    void Init();
+    /// mapName is the path to the .smf file (empty = no map).
+    void Init(const std::string& mapName = "");
 
     /// Shut down all sim subsystems.
     void Kill();
@@ -32,13 +34,12 @@ public:
     bool HasDefs() const { return defsLoaded; }
 
 private:
-    /// Parse gamedata/defs.lua via LuaParser. Returns false if not found.
     bool LoadDefs();
-
-    /// Initialise sim handlers from parsed defs.
-    void InitSubsystems();
+    bool LoadMap(const std::string& mapName);
+    void InitSubsystems(bool hasMap);
 
     bool running = false;
     bool defsLoaded = false;
+    bool mapLoaded = false;
     std::unique_ptr<LuaParser> defsParser;
 };

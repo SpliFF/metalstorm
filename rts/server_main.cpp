@@ -17,9 +17,10 @@
 #include <csignal>
 #include <cstdio>
 #include <atomic>
-#include <thread>
 #include <chrono>
+#include <filesystem>
 #include <random>
+#include <thread>
 
 static std::atomic<bool> keepRunning{true};
 
@@ -105,8 +106,22 @@ int main(int argc, char* argv[])
     }
 
     // --- Simulation ---
+    // Find .smf file in the map directory
+    std::string smfPath;
+    if (!mapPath.empty()) {
+        namespace fs = std::filesystem;
+        for (auto& entry : fs::recursive_directory_iterator(mapPath)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".smf") {
+                smfPath = entry.path().string();
+                break;
+            }
+        }
+        if (smfPath.empty())
+            std::fprintf(stderr, "[spring-server] WARNING: no .smf file found in %s\n", mapPath.c_str());
+    }
+
     CSimulation sim;
-    sim.Init();
+    sim.Init(smfPath);
 
     // --- Fixed-timestep loop at GAME_SPEED Hz (30 Hz) ---
     const auto tickInterval = std::chrono::microseconds(1'000'000 / GAME_SPEED);

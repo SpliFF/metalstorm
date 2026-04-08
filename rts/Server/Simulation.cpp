@@ -38,12 +38,21 @@
 #include "Lua/LuaSyncedRead.h"
 #include "Map/MapDamage.h"
 #include "Map/MapInfo.h"
+#include "Map/ReadMap.h"
+#include "Map/MetalMap.h"
 #include "Sim/Misc/ModInfo.h"
+#include "Sim/Misc/QuadField.h"
+#include "Sim/Misc/SmoothHeightMesh.h"
+#include "Sim/Misc/GroundBlockingObjectMap.h"
+#include "Sim/Misc/BuildingMaskMap.h"
 #include "System/EventHandler.h"
 #include "System/Config/ConfigHandler.h"
 #include "System/Log/ILog.h"
+#include "System/FileSystem/FileHandler.h"
+#include "System/FileSystem/FileSystem.h"
 
 #include <cstdio>
+#include <filesystem>
 
 
 CSimulation::CSimulation() = default;
@@ -95,21 +104,73 @@ bool CSimulation::LoadDefs()
     return true;
 }
 
-void CSimulation::InitSubsystems()
+bool CSimulation::LoadMap(const std::string& mapName)
+{
+    if (mapName.empty())
+        return false;
+
+    // Find the .smf file
+    std::string smfPath;
+    namespace fs = std::filesystem;
+
+    if (fs::exists(mapName) && fs::is_regular_file(mapName)) {
+        smfPath = mapName;
+    } else {
+        // Search for .smf files in the map directory
+        auto mapFiles = CFileHandler::DirList("maps", "*.smf");
+        if (!mapFiles.empty()) {
+            smfPath = CFileHandler::GetFileAbsolutePath(mapFiles[0]);
+        }
+    }
+
+    if (smfPath.empty()) {
+        std::fprintf(stderr, "[sim] ERROR: no .smf file found for map '%s'\n", mapName.c_str());
+        return false;
+    }
+
+    std::fprintf(stderr, "[sim] loading map: %s\n", smfPath.c_str());
+
+    // Create CMapInfo from the map's mapinfo.lua
+    // MapParser looks for mapinfo.lua in content roots (the map directory)
+    try {
+        mapInfo = new CMapInfo(smfPath, FileSystem::GetBasename(smfPath));
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[sim] ERROR: failed to load map info: %s\n", e.what());
+        return false;
+    }
+
+    // Load the SMF heightmap
+    try {
+        readMap = CReadMap::LoadMap(smfPath);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[sim] ERROR: failed to load SMF: %s\n", e.what());
+        return false;
+    }
+
+    if (readMap == nullptr) {
+        std::fprintf(stderr, "[sim] ERROR: CReadMap::LoadMap returned null\n");
+        return false;
+    }
+
+    std::fprintf(stderr, "[sim] map loaded: %dx%d (%dx%d elmos)\n",
+        mapDims.mapx, mapDims.mapy,
+        mapDims.mapx * SQUARE_SIZE, mapDims.mapy * SQUARE_SIZE);
+    return true;
+}
+
+
+void CSimulation::InitSubsystems(bool hasMap)
 {
     std::fprintf(stderr, "[sim] initialising subsystems...\n");
-
-    // Order follows CGame::PreLoadSimulation + PostLoadSimulation
 
     // Provide a default mapInfo if no map is loaded
     if (mapInfo == nullptr)
         mapInfo = new CMapInfo();
 
     // Load mod rules (gamedata/modrules.lua)
-    std::fprintf(stderr, "[sim]   modInfo.Init...\n");
     modInfo.Init("");
 
-    // --- Map-independent subsystems ---
+    // --- Always-init subsystems ---
 
     damageArrayHandler.Init(defsParser.get());
     explGenHandler.Init();
@@ -130,37 +191,64 @@ void CSimulation::InitSubsystems()
     featureHandler.Init();
     projectileHandler.Init();
 
-    // --- Map-dependent subsystems (deferred until map is loaded) ---
-    // moveDefHandler.Init(defsParser.get())  — needs mapInfo->terrainTypes
-    // CLosHandler::InitStatic()              — needs map dimensions
-    // IPathManager::GetInstance()            — needs map
-    // IMapDamage::InitMapDamage()            — needs map
-    // featureDefHandler->LoadFeatureDefsFromMap() — needs readMap
+    // --- Map-dependent subsystems ---
+    if (hasMap) {
+        smoothGround.Init(float3::maxxpos, float3::maxzpos, SQUARE_SIZE * 2, SQUARE_SIZE * 40);
+        quadField.Init(int2(mapDims.mapx, mapDims.mapy), CQuadField::BASE_QUAD_SIZE);
+
+        moveDefHandler.Init(defsParser.get());
+        CLosHandler::InitStatic();
+        mapDamage = IMapDamage::InitMapDamage();
+        pathManager = IPathManager::GetInstance(modInfo.pathFinderSystem);
+
+        groundBlockingObjectMap.Init(mapDims.mapSquares);
+        buildingMaskMap.Init(mapDims.hmapx * mapDims.hmapy);
+
+        featureDefHandler->LoadFeatureDefsFromMap();
+        featureHandler.LoadFeaturesFromMap();
+
+        envResHandler.LoadTidal(mapInfo->map.tidalStrength);
+        envResHandler.LoadWind(mapInfo->atmosphere.minWind, mapInfo->atmosphere.maxWind);
+
+        // Finalize pathfinder (pre-computes caches)
+        pathManager->Finalize();
+
+        std::fprintf(stderr, "[sim] map-dependent subsystems initialised\n");
+    } else {
+        std::fprintf(stderr, "[sim] map-dependent subsystems skipped (no map)\n");
+    }
 
     std::fprintf(stderr, "[sim] subsystems initialised\n");
 }
 
 
-void CSimulation::Init()
+void CSimulation::Init(const std::string& mapName)
 {
     // Initialise global state objects
     ConfigHandler::Instantiate("", false);
     gs->Init();
     gu->Init();
 
-    // Try to load game definitions.
-    // If no game content is configured, this will fail gracefully
-    // and the sim will run with empty defs (useful for testing).
-    if (LoadDefs()) {
-        InitSubsystems();
-        defsLoaded = true;
-    } else {
+    // Try to load game definitions
+    if (!LoadDefs()) {
         std::fprintf(stderr, "[sim] WARNING: running without game definitions\n");
+        running = true;
+        return;
     }
+    defsLoaded = true;
+
+    // Try to load the map
+    bool hasMap = LoadMap(mapName);
+
+    // Initialise all subsystems
+    InitSubsystems(hasMap);
+    mapLoaded = hasMap;
 
     running = true;
-    std::fprintf(stderr, "[sim] initialised (frame %d, defs=%s)\n",
-        gs->frameNum, defsLoaded ? "loaded" : "empty");
+    std::fprintf(stderr, "[sim] initialised (frame %d, defs=%s, map=%s)\n",
+        gs->frameNum,
+        defsLoaded ? "loaded" : "empty",
+        mapLoaded ? "loaded" : "none");
 }
 
 void CSimulation::Kill()
