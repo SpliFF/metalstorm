@@ -18,8 +18,10 @@ import { Pong } from '../protocol/spring-web/pong.js';
 import { ServerError } from '../protocol/spring-web/server-error.js';
 import { AuthStatus } from '../protocol/spring-web/auth-status.js';
 import { ServerClock } from './clock.js';
+import { parseEntityState, type EntityStateSnapshot } from './entity-state.js';
 
 const ENVELOPE_FLATBUFFERS = 0x01;
+const ENVELOPE_ENTITY_STATE = 0x02;
 const PROTOCOL_VERSION = 1;
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'handshake' | 'authenticating' | 'connected';
@@ -29,6 +31,7 @@ export interface ConnectionEvents {
     onAuthenticated?: (playerId: number, token: string) => void;
     onAuthFailed?: (message: string) => void;
     onServerError?: (code: number, message: string) => void;
+    onEntityState?: (snapshot: EntityStateSnapshot) => void;
     onServerMessage?: (msg: ServerMessage) => void;
 }
 
@@ -159,8 +162,12 @@ export class Connection {
         if (data.length < 2) return;
 
         const envelope = data[0];
+        if (envelope === ENVELOPE_ENTITY_STATE) {
+            const snapshot = parseEntityState(data.subarray(1));
+            if (snapshot) this.events.onEntityState?.(snapshot);
+            return;
+        }
         if (envelope !== ENVELOPE_FLATBUFFERS) {
-            // TODO: handle entity state updates (envelope 0x02)
             return;
         }
 

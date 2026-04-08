@@ -4,11 +4,13 @@
  * Connects to the game server, authenticates, and renders the game world.
  */
 
-import { Engine, Scene, FreeCamera, Vector3, HemisphericLight, MeshBuilder, Color4 } from '@babylonjs/core';
+import { Engine, Scene, FreeCamera, Vector3, HemisphericLight, MeshBuilder, Color4, Color3, StandardMaterial } from '@babylonjs/core';
 import { Connection, type ConnectionState } from './core/connection.js';
+import { EntityRenderer } from './core/entity-renderer.js';
 
 let engine: Engine | null = null;
 let connection: Connection | null = null;
+let entityRenderer: EntityRenderer | null = null;
 
 function showStatus(message: string): void {
     const el = document.getElementById('status');
@@ -16,26 +18,40 @@ function showStatus(message: string): void {
 }
 
 /**
- * Initialise Babylon.js with a placeholder scene.
- * Will be replaced with real terrain + entity rendering when state streaming works.
+ * Initialise Babylon.js scene.
+ *
+ * Spring map coordinates are large (thousands of "elmos") so the camera
+ * is positioned high and far back to see the spawned units.
  */
-function initScene(): void {
+function initScene(): Scene {
     const canvas = document.getElementById('game-canvas') as HTMLCanvasElement;
-    if (!canvas) return;
 
     engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
     const scene = new Scene(engine);
     scene.clearColor = new Color4(0.05, 0.08, 0.12, 1);
 
-    const camera = new FreeCamera('camera', new Vector3(0, 50, -80), scene);
-    camera.setTarget(new Vector3(0, 0, 0));
+    // Camera positioned to overlook a typical Spring map area
+    // Units spawn around (1500, ~40, 3200) based on test data
+    const camera = new FreeCamera('camera', new Vector3(1600, 800, 2400), scene);
+    camera.setTarget(new Vector3(1600, 0, 3200));
     camera.attachControl(canvas, true);
+    camera.speed = 50;        // faster movement for large maps
+    camera.minZ = 1;
+    camera.maxZ = 50000;
 
     new HemisphericLight('light', new Vector3(0.3, 1, 0.2), scene);
 
-    // Placeholder ground
-    const ground = MeshBuilder.CreateGround('ground', { width: 200, height: 200 }, scene);
-    ground.position.y = 0;
+    // Ground plane at y=0 (large enough for a Spring map)
+    const ground = MeshBuilder.CreateGround('ground', { width: 8192, height: 8192 }, scene);
+    ground.position.x = 4096;
+    ground.position.z = 4096;
+    const groundMat = new StandardMaterial('groundMat', scene);
+    groundMat.diffuseColor = new Color3(0.15, 0.2, 0.1);
+    groundMat.specularColor = new Color3(0, 0, 0);
+    ground.material = groundMat;
+
+    // Entity renderer
+    entityRenderer = new EntityRenderer(scene);
 
     engine.runRenderLoop(() => {
         scene.render();
@@ -44,15 +60,16 @@ function initScene(): void {
     window.addEventListener('resize', () => {
         engine?.resize();
     });
+
+    return scene;
 }
 
 /**
  * Connect to the game server.
  */
 function connectToServer(): void {
-    // Default server URL — same host, port 9001
     const serverUrl = `ws://${window.location.hostname || 'localhost'}:9001`;
-    const username = 'player1'; // TODO: lobby UI for login
+    const username = 'player1';
     const password = 'pass';
 
     connection = new Connection({
@@ -85,6 +102,9 @@ function connectToServer(): void {
         },
         onServerError(code: number, message: string) {
             console.warn(`[client] server error ${code}: ${message}`);
+        },
+        onEntityState(snapshot) {
+            entityRenderer?.update(snapshot);
         },
     });
 
