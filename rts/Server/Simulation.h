@@ -11,6 +11,8 @@
 #include <string>
 
 class LuaParser;
+class LuaScriptContext;
+class ScriptEventDispatcher;
 
 class CSimulation {
 public:
@@ -39,9 +41,11 @@ private:
     bool LoadMap(const std::string& mapName);
     void InitSubsystems(bool hasMap);
     void SetupTestGame();
+    void InitScripting();
 
     bool running = false;
     bool defsLoaded = false;
     bool mapLoaded = false;
+    bool scriptingLoaded = false;
     std::unique_ptr<LuaParser> defsParser;
 };

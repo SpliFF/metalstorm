@@ -56,6 +56,11 @@
 #include "System/FileSystem/FileHandler.h"
 #include "System/FileSystem/FileSystem.h"
 
+#include "System/Scripting/ScriptEventDispatcher.h"
+#include "Lua/LuaScriptContext.h"
+#include "Lua/LuaRules.h"
+#include "Lua/LuaGaia.h"
+
 #include <cstdio>
 #include <filesystem>
 
@@ -302,6 +307,44 @@ void CSimulation::SetupTestGame()
 }
 
 
+void CSimulation::InitScripting()
+{
+    if (!defsLoaded)
+        return;
+
+    std::fprintf(stderr, "[sim] initialising scripting...\n");
+
+    // Create the script event dispatcher
+    scriptDispatcher = new ScriptEventDispatcher();
+    scriptDispatcher->Register();
+
+    // Try to load LuaRules (game logic scripts)
+    if (CLuaRules::LoadHandler(true)) {
+        std::fprintf(stderr, "[sim] LuaRules loaded\n");
+
+        // Wrap the synced handle as a LuaScriptContext
+        auto* ctx = new LuaScriptContext(&luaRules->syncedLuaHandle);
+        scriptDispatcher->AddContext(ctx);
+        scriptingLoaded = true;
+    } else {
+        std::fprintf(stderr, "[sim] LuaRules not available (no LuaRules/main.lua)\n");
+    }
+
+    // Try to load LuaGaia (environment scripts)
+    if (CLuaGaia::LoadHandler(true)) {
+        std::fprintf(stderr, "[sim] LuaGaia loaded\n");
+
+        auto* ctx = new LuaScriptContext(&luaGaia->syncedLuaHandle);
+        scriptDispatcher->AddContext(ctx);
+        scriptingLoaded = true;
+    } else {
+        std::fprintf(stderr, "[sim] LuaGaia not available (no LuaGaia/main.lua)\n");
+    }
+
+    std::fprintf(stderr, "[sim] scripting initialised (%zu contexts)\n",
+        scriptDispatcher->GetContexts().size());
+}
+
 void CSimulation::Init(const std::string& mapName)
 {
     // Tell the threading system this is the main thread
@@ -353,6 +396,9 @@ void CSimulation::Init(const std::string& mapName)
 
     // Spawn test units if we have defs + map
     SetupTestGame();
+
+    // Start game scripting (LuaRules, LuaGaia) via the abstraction layer
+    InitScripting();
 
     running = true;
     std::fprintf(stderr, "[sim] initialised (frame %d, defs=%s, map=%s)\n",
