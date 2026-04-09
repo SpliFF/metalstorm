@@ -44,6 +44,7 @@ export class LobbyUI {
     private currentRoom: CurrentRoom | null = null;
     private onGameStart?: (gameServerPort: number) => void;
     private myPlayerId = 0;
+    private pendingRejoinRoomId = 0;
     private availableMaps: { id: string; name: string; mapx: number; mapy: number; widthElmos: number; heightElmos: number }[] = [];
 
     constructor(onGameStart?: (gameServerPort: number) => void) {
@@ -67,15 +68,22 @@ export class LobbyUI {
             <div class="lobby-card"><h1>Spring RTS Web</h1><p class="msg">Reconnecting...</p></div>
         `;
 
+        const savedRoomId = localStorage.getItem('springrts-game-room');
+        const savedPort = localStorage.getItem('springrts-game-port');
+
         this.connection = this.createConnection(
             (msg: string) => {
-                // Auto-login failed — fall back to login screen
                 console.log('[lobby] auto-login failed:', msg);
                 localStorage.removeItem('springrts-token');
+                localStorage.removeItem('springrts-game-room');
+                localStorage.removeItem('springrts-game-port');
                 this.showLogin();
             },
         );
-        // Connect with empty password but a saved token
+
+        // After auth succeeds, check for saved game
+        this.pendingRejoinRoomId = savedRoomId ? parseInt(savedRoomId) : 0;
+
         this.connection.connect(CONFIG.wsUrl, username, '', token);
     }
 
@@ -88,8 +96,27 @@ export class LobbyUI {
             },
             onAuthenticated: (playerId: number, token: string) => {
                 this.myPlayerId = playerId;
-                // Persist session for auto-login
                 localStorage.setItem('springrts-token', token);
+
+                // If we have a saved game to rejoin, try it
+                if (this.pendingRejoinRoomId > 0) {
+                    const roomId = this.pendingRejoinRoomId;
+                    this.pendingRejoinRoomId = 0;
+                    console.log(`[lobby] rejoining room ${roomId}`);
+                    this.sendJoinRoom(roomId);
+                    // handleRoomState will fire onGameStart if the room is active.
+                    // If not, fall back to browser after a delay.
+                    setTimeout(() => {
+                        if (!this.currentRoom || this.currentRoom.state < 3) {
+                            console.log('[lobby] saved game no longer active');
+                            localStorage.removeItem('springrts-game-room');
+                            localStorage.removeItem('springrts-game-port');
+                            this.showBrowser();
+                        }
+                    }, 2000);
+                    return;
+                }
+
                 this.showBrowser();
             },
             onAuthFailed: (message: string) => {
@@ -426,9 +453,18 @@ export class LobbyUI {
 
         // Loading or Active → start game (need a port to connect to)
         if (this.currentRoom.state >= 3 && this.currentRoom.gameServerPort > 0) {
+            // Persist game info for reconnection on reload
+            localStorage.setItem('springrts-game-room', String(this.currentRoom.id));
+            localStorage.setItem('springrts-game-port', String(this.currentRoom.gameServerPort));
             this.hide();
             this.onGameStart?.(this.currentRoom.gameServerPort);
             return;
+        }
+
+        // Game ended — clear saved game
+        if (this.currentRoom.state >= 5) {
+            localStorage.removeItem('springrts-game-room');
+            localStorage.removeItem('springrts-game-port');
         }
 
         this.showRoom();

@@ -157,6 +157,9 @@ function showGameOver(frame: number): void {
 
     document.getElementById('return-lobby-btn')!.onclick = () => {
         overlay.remove();
+        // Clear saved game state
+        localStorage.removeItem('springrts-game-room');
+        localStorage.removeItem('springrts-game-port');
         // Hide game, show lobby
         const canvas = document.getElementById('game-canvas') as HTMLCanvasElement;
         canvas.style.display = 'none';
