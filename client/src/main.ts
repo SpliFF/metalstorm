@@ -11,6 +11,7 @@ import { AudioManager } from './core/audio.js';
 import { InputManager } from './core/input-manager.js';
 import { loadTerrain } from './core/terrain.js';
 import { LobbyUI } from './lobby/lobby-ui.js';
+import { Minimap } from './core/minimap.js';
 import type { Connection } from './core/connection.js';
 
 let engine: Engine | null = null;
@@ -19,6 +20,7 @@ let combatFX: CombatFX | null = null;
 let audioManager: AudioManager | null = null;
 let inputManager: InputManager | null = null;
 let lobbyUI: LobbyUI | null = null;
+let minimap: Minimap | null = null;
 
 // --- HUD ---
 
@@ -33,6 +35,10 @@ function createHUD(): void {
         </div>
         <div id="hud-selection" class="hud-panel">
             <span id="hud-selected">No selection</span>
+        </div>
+        <div id="hud-minimap" class="hud-panel">
+            <div id="minimap-container"></div>
+            <button id="detach-minimap-btn" style="margin-top:4px;font-size:11px;padding:4px 8px;">Detach ↗</button>
         </div>
         <div id="hud-help" class="hud-panel">
             Left click: select &nbsp; Right click: move/attack &nbsp; S: stop &nbsp; Shift: queue
@@ -58,6 +64,9 @@ function createHUD(): void {
         }
         #hud-selection {
             position: absolute; bottom: 48px; left: 8px; min-width: 200px;
+        }
+        #hud-minimap {
+            position: absolute; bottom: 48px; right: 8px;
         }
         #hud-help {
             position: absolute; bottom: 8px; left: 8px; right: 8px;
@@ -191,7 +200,30 @@ function startGame(connection: Connection): void {
     });
 
     // Input
-    inputManager = new InputManager(scene, camera, entityRenderer, connection);
+    inputManager = new InputManager(scene, camera, entityRenderer, connection,
+        (ids) => minimap?.setSelection(ids));
+
+    // Minimap (fetch map dimensions, default to 8192x8192)
+    const serverBase2 = `http://${window.location.hostname || 'localhost'}:9001`;
+    fetch(`${serverBase2}/api/map/info`).then(r => r.ok ? r.json() : null).then(info => {
+        const mw = info?.widthElmos ?? 8192;
+        const mh = info?.heightElmos ?? 8192;
+        const container = document.getElementById('minimap-container');
+        if (container && entityRenderer) {
+            minimap = new Minimap(
+                { mapWidth: mw, mapHeight: mh, parentElement: container, size: 200 },
+                entityRenderer, connection);
+            minimap.onCameraMove = (x, z) => {
+                camera.position.x = x;
+                camera.position.z = z - 400;
+                camera.setTarget(new Vector3(x, 0, z));
+            };
+            // Detach button
+            document.getElementById('detach-minimap-btn')?.addEventListener('click', () => {
+                minimap?.detach();
+            });
+        }
+    }).catch(() => {});
 
     // Wire connection callbacks for game state
     connection.setEvents({
@@ -241,6 +273,7 @@ function startGame(connection: Connection): void {
                 currentFrame,
                 inputManager?.selection ?? [],
             );
+            minimap?.render();
         }
     });
 

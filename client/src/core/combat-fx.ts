@@ -18,7 +18,8 @@ import {
     Vector3,
 } from '@babylonjs/core';
 import type { CombatEventInfo } from './connection.js';
-import { AudioManager, type SoundRequest } from './audio.js';
+import { AudioManager } from './audio.js';
+import { createSynthSounds } from './synth-sounds.js';
 
 /** An active visual effect with a remaining lifetime. */
 interface ActiveEffect {
@@ -37,9 +38,18 @@ export class CombatFX {
     private tracerMat: StandardMaterial;
     private killMat: StandardMaterial;
 
+    private synthSounds: Map<string, AudioBuffer> | null = null;
+
     constructor(scene: Scene, audio?: AudioManager) {
         this.scene = scene;
         this.audio = audio ?? null;
+
+        // Generate procedural sounds
+        if (this.audio) {
+            try {
+                this.synthSounds = createSynthSounds(this.audio.context);
+            } catch { /* AudioContext not ready yet */ }
+        }
 
         this.impactMat = new StandardMaterial('impactFxMat', scene);
         this.impactMat.diffuseColor = new Color3(1.0, 0.6, 0.1);
@@ -81,6 +91,12 @@ export class CombatFX {
         mesh.material = this.impactMat;
 
         this.effects.push({ mesh, lifetime: 0.15 });
+
+        // Play impact sound
+        const buf = this.synthSounds?.get('impact');
+        if (buf && this.audio) {
+            this.audio.play({ buffer: buf, x, y, z, priority: 1, volume: 0.3 });
+        }
     }
 
     /** Spawn an explosion effect (for kills). */
@@ -92,12 +108,10 @@ export class CombatFX {
 
         this.effects.push({ mesh, lifetime: 0.5 });
 
-        // Play explosion sound if audio is available
-        if (this.audio) {
-            const buf = this.audio.getBuffer('explosion');
-            if (buf) {
-                this.audio.play({ buffer: buf, x, y, z, priority: 5 });
-            }
+        // Play explosion sound
+        const buf = this.synthSounds?.get('explosion');
+        if (buf && this.audio) {
+            this.audio.play({ buffer: buf, x, y, z, priority: 5, volume: 0.6 });
         }
     }
 

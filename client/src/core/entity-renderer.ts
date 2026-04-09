@@ -1,11 +1,9 @@
 /**
- * EntityRenderer — manages Babylon.js thin instances from entity state.
+ * EntityRenderer — thin-instanced entity rendering with shape variety.
  *
- * Groups entities by def_id and renders each group as a single draw call
- * using Babylon.js thin instances. Each unit type gets one base mesh;
- * individual entities are 4x4 transform matrices on that mesh.
- *
- * Uses snapshot interpolation for smooth movement between ~10Hz updates.
+ * Groups entities by (shape, team) for batched draw calls.
+ * Shape is derived from defId until real models are loaded.
+ * Uses snapshot interpolation for smooth movement.
  */
 
 import {
@@ -21,19 +19,26 @@ import {
 import type { EntityStateSnapshot } from './entity-state.js';
 import { EntityInterpolator } from './entity-interpolator.js';
 
-// Team colours
 const TEAM_COLORS = [
-    new Color3(0.2, 0.5, 1.0),   // team 0 — blue
-    new Color3(1.0, 0.3, 0.2),   // team 1 — red
-    new Color3(0.2, 0.8, 0.3),   // team 2 — green
-    new Color3(1.0, 0.8, 0.1),   // team 3 — yellow
+    new Color3(0.2, 0.5, 1.0),
+    new Color3(1.0, 0.3, 0.2),
+    new Color3(0.2, 0.8, 0.3),
+    new Color3(1.0, 0.8, 0.1),
 ];
 
-/** Per-entity metadata needed for rendering. */
+// Shape types — different geometries for visual distinction
+enum UnitShape { Box = 0, Cylinder, Cone, Sphere }
+const SHAPE_COUNT = 4;
+
+/** Map defId to a shape. */
+function defIdToShape(defId: number): UnitShape {
+    return (defId % SHAPE_COUNT) as UnitShape;
+}
+
 export interface EntityMeta {
     defId: number;
     team: number;
-    healthScale: number;  // 0.3–1.0
+    healthScale: number;
 }
 
 export class EntityRenderer {
@@ -42,11 +47,11 @@ export class EntityRenderer {
     private entityMeta = new Map<number, EntityMeta>();
     private teamMaterials: StandardMaterial[] = [];
 
-    // Thin instance base meshes keyed by defId
-    private baseMeshes = new Map<number, Mesh>();
+    // Template meshes per shape (hidden, used as source for thin instances)
+    private shapeMeshes: Mesh[] = [];
 
-    // Default base mesh for unknown def IDs
-    private defaultMesh: Mesh;
+    // Render meshes keyed by `shape * TEAM_COUNT + team`
+    private renderMeshes = new Map<number, Mesh>();
 
     constructor(scene: Scene) {
         this.scene = scene;
@@ -58,16 +63,19 @@ export class EntityRenderer {
             this.teamMaterials.push(mat);
         }
 
-        // Default placeholder mesh (box) — used until real models are loaded
-        this.defaultMesh = MeshBuilder.CreateBox('defMesh_default', { size: 16 }, scene);
-        this.defaultMesh.isVisible = false;
-        // Enable thin instances on the default mesh
-        this.defaultMesh.thinInstanceEnablePicking = false;
+        // Create shape templates
+        const box = MeshBuilder.CreateBox('shape_box', { width: 16, height: 12, depth: 20 }, scene);
+        const cyl = MeshBuilder.CreateCylinder('shape_cyl', { height: 14, diameter: 18, tessellation: 8 }, scene);
+        const cone = MeshBuilder.CreateCylinder('shape_cone', { height: 16, diameterTop: 0, diameterBottom: 16, tessellation: 8 }, scene);
+        const sphere = MeshBuilder.CreateSphere('shape_sphere', { diameter: 14, segments: 6 }, scene);
+
+        this.shapeMeshes = [box, cyl, cone, sphere];
+        for (const m of this.shapeMeshes) {
+            m.isVisible = false;
+            m.thinInstanceEnablePicking = false;
+        }
     }
 
-    /**
-     * Feed a new server snapshot. Updates interpolator targets and entity metadata.
-     */
     update(snapshot: EntityStateSnapshot, isDelta: boolean = false): void {
         const { count, entityIds, positionsX, positionsY, positionsZ, headings, health, defIds, teams } = snapshot;
         if (!entityIds) return;
@@ -77,7 +85,6 @@ export class EntityRenderer {
         for (let i = 0; i < count; i++) {
             const id = entityIds[i];
 
-            // Push position into interpolator
             this.interpolator.pushState(
                 id,
                 positionsX ? positionsX[i] : 0,
@@ -87,7 +94,6 @@ export class EntityRenderer {
                 now,
             );
 
-            // Update metadata
             let meta = this.entityMeta.get(id);
             if (!meta) {
                 meta = { defId: 0, team: 0, healthScale: 1.0 };
@@ -98,11 +104,9 @@ export class EntityRenderer {
             if (health) meta.healthScale = 0.3 + (health[i] / 65535) * 0.7;
         }
 
-        // On full snapshots, remove entities not present
         if (!isDelta) {
             const seen = new Set<number>();
             for (let i = 0; i < count; i++) seen.add(entityIds[i]);
-
             for (const id of this.entityMeta.keys()) {
                 if (!seen.has(id)) {
                     this.entityMeta.delete(id);
@@ -112,105 +116,93 @@ export class EntityRenderer {
         }
     }
 
-    /**
-     * Rebuild thin instance matrices from interpolated positions.
-     * Call every render frame.
-     */
     tick(): void {
         const now = performance.now();
+        const teamCount = this.teamMaterials.length;
 
-        // Group entities by team (for now; later group by defId + team)
-        // Each team gets its own set of thin instances on the default mesh
-        const teamMatrices: Float32Array[] = [];
-        const teamCounts: number[] = [];
-        for (let t = 0; t < this.teamMaterials.length; t++) {
-            teamMatrices.push(new Float32Array(this.entityMeta.size * 16));
-            teamCounts.push(0);
-        }
+        // Collect matrices grouped by (shape, team)
+        const groups = new Map<number, { matrices: number[]; count: number }>();
 
         for (const [id, meta] of this.entityMeta) {
             const lerped = this.interpolator.getInterpolated(id, now);
             if (!lerped) continue;
 
-            const teamIdx = meta.team % this.teamMaterials.length;
-            const rotation = (lerped.heading / 65535) * Math.PI * 2;
+            const shape = defIdToShape(meta.defId);
+            const teamIdx = meta.team % teamCount;
+            const groupKey = shape * teamCount + teamIdx;
 
+            let group = groups.get(groupKey);
+            if (!group) {
+                group = { matrices: [], count: 0 };
+                groups.set(groupKey, group);
+            }
+
+            const rotation = (lerped.heading / 65535) * Math.PI * 2;
             const matrix = Matrix.Compose(
                 new Vector3(1, meta.healthScale, 1),
                 Quaternion.RotationYawPitchRoll(rotation, 0, 0),
                 new Vector3(lerped.x, lerped.y, lerped.z),
             );
 
-            const offset = teamCounts[teamIdx] * 16;
-            matrix.copyToArray(teamMatrices[teamIdx], offset);
-            teamCounts[teamIdx]++;
+            // Push 16 floats
+            const arr = new Float32Array(16);
+            matrix.copyToArray(arr, 0);
+            for (let j = 0; j < 16; j++) group.matrices.push(arr[j]);
+            group.count++;
         }
 
-        // Apply thin instances per team
-        // We use separate mesh clones per team (with different materials)
-        this.ensureTeamMeshes();
-        for (let t = 0; t < this.teamMaterials.length; t++) {
-            const mesh = this.getTeamMesh(t);
-            if (teamCounts[t] > 0) {
+        // Update render meshes
+        for (let shape = 0; shape < SHAPE_COUNT; shape++) {
+            for (let team = 0; team < teamCount; team++) {
+                const key = shape * teamCount + team;
+                const group = groups.get(key);
+                let mesh = this.renderMeshes.get(key);
+
+                if (!group || group.count === 0) {
+                    if (mesh) {
+                        mesh.isVisible = false;
+                        mesh.thinInstanceCount = 0;
+                    }
+                    continue;
+                }
+
+                if (!mesh) {
+                    mesh = this.shapeMeshes[shape].clone(`render_${shape}_${team}`);
+                    mesh.material = this.teamMaterials[team];
+                    this.renderMeshes.set(key, mesh);
+                }
+
                 mesh.isVisible = true;
-                mesh.thinInstanceSetBuffer(
-                    'matrix',
-                    teamMatrices[t].subarray(0, teamCounts[t] * 16),
-                    16, false
-                );
-                mesh.thinInstanceCount = teamCounts[t];
-            } else {
-                mesh.isVisible = false;
-                mesh.thinInstanceCount = 0;
+                const buf = new Float32Array(group.matrices);
+                mesh.thinInstanceSetBuffer('matrix', buf, 16, false);
+                mesh.thinInstanceCount = group.count;
             }
         }
-    }
-
-    private teamMeshes: Mesh[] = [];
-
-    private ensureTeamMeshes(): void {
-        if (this.teamMeshes.length > 0) return;
-        for (let t = 0; t < this.teamMaterials.length; t++) {
-            const mesh = this.defaultMesh.clone(`teamMesh_${t}`);
-            mesh.material = this.teamMaterials[t];
-            mesh.isVisible = false;
-            this.teamMeshes.push(mesh);
-        }
-    }
-
-    private getTeamMesh(team: number): Mesh {
-        return this.teamMeshes[team % this.teamMeshes.length];
     }
 
     get entityCount(): number {
         return this.entityMeta.size;
     }
 
-    /** Get metadata for all entities (for input hit testing). */
     getEntities(): IterableIterator<[number, EntityMeta]> {
         return this.entityMeta.entries();
     }
 
-    /** Get interpolated position for a specific entity. */
     getEntityPosition(id: number): { x: number; y: number; z: number } | null {
         return this.interpolator.getInterpolated(id);
     }
 
-    /** Remove a specific entity (on EntityDestroy from server). */
     removeEntity(id: number): void {
         this.entityMeta.delete(id);
         this.interpolator.remove(id);
     }
 
     dispose(): void {
-        for (const mesh of this.teamMeshes) mesh.dispose();
-        this.teamMeshes = [];
-        for (const mesh of this.baseMeshes.values()) mesh.dispose();
-        this.baseMeshes.clear();
-        this.defaultMesh.dispose();
+        for (const mesh of this.renderMeshes.values()) mesh.dispose();
+        this.renderMeshes.clear();
+        for (const mesh of this.shapeMeshes) mesh.dispose();
         this.entityMeta.clear();
         this.interpolator.clear();
         for (const mat of this.teamMaterials) mat.dispose();
     }
 }
-

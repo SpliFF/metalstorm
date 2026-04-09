@@ -34,6 +34,8 @@ const POOL_SIZE = 96;
 
 export class AudioManager {
     private ctx: AudioContext;
+    /** Expose AudioContext for procedural sound generation. */
+    get context(): AudioContext { return this.ctx; }
     private masterGain: GainNode;
     private voices: Voice[] = [];
     private bufferCache = new Map<string, AudioBuffer>();
