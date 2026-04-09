@@ -75,12 +75,24 @@ void NetworkServer::Stop() {
     // Wake the uWS loop so it can check the running flag and exit
     if (impl->loop) {
         uWS::Loop::get(impl->loop)->defer([this]() {
-            // The loop will exit after this deferred callback
+            // The preHandler will close sockets and let app.run() exit
         });
     }
 
-    if (networkThread.joinable())
+    if (networkThread.joinable()) {
+        // Re-wake periodically in case the first defer was lost
+        std::thread killer([this]() {
+            for (int i = 0; i < 20; i++) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (!running.load() && impl->loop) {
+                    try { uWS::Loop::get(impl->loop)->defer([](){}); } catch (...) {}
+                }
+            }
+        });
+        killer.detach();
+
         networkThread.join();
+    }
 }
 
 std::vector<InboundMessage> NetworkServer::DrainInbound() {
