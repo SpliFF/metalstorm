@@ -1,8 +1,5 @@
 /**
- * TerrainTexture — loads the minimap image and applies it to the terrain mesh.
- *
- * Uses the server-decoded BMP minimap (1024x1024) as a standard image
- * texture on the heightmap mesh. No custom KTX2/BC1 handling needed.
+ * TerrainTexture — loads the minimap PNG and applies it to the terrain mesh.
  */
 
 import {
@@ -13,9 +10,6 @@ import {
     Color3,
 } from '@babylonjs/core';
 
-/**
- * Load the minimap texture and apply it to the terrain mesh.
- */
 export async function loadTerrainTexture(
     scene: Scene,
     mapBaseUrl: string,
@@ -23,13 +17,10 @@ export async function loadTerrainTexture(
 ): Promise<void> {
     if (!terrainMesh) return;
 
-    const imageUrl = `${mapBaseUrl}/minimap.bmp`;
+    const imageUrl = `${mapBaseUrl}/minimap.png`;
 
-    // Load as a standard Babylon.js texture (handles BMP natively)
     const texture = new Texture(imageUrl, scene, false, true, Texture.BILINEAR_SAMPLINGMODE, () => {
         console.log('[terrain-tex] minimap texture loaded');
-
-        // Apply to terrain mesh material
         const mat = terrainMesh.material as StandardMaterial;
         if (mat) {
             mat.diffuseTexture = texture;

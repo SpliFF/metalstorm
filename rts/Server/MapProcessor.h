@@ -48,20 +48,9 @@ public:
     MapMetadata GetMap(sqlite3* db, const std::string& mapId);
 
 private:
-    /// Read SMF header and locate SMT file.
     bool ReadMapHeaders(const std::string& mapDir, MapMetadata& meta);
-
-    /// Process a single map: extract textures to KTX2.
     bool ProcessMap(const MapMetadata& meta);
-
-    /// Write a KTX2 file containing BC1/DXT1 data.
-    bool WriteKTX2(const std::string& path, int width, int height,
-                   const std::vector<uint8_t>& bc1Data, int mipLevels = 1);
-
-    /// Composite SMT tiles into a full-map KTX2 texture (tiled into chunks).
     bool ProcessMapTexture(const MapMetadata& meta);
-
-    /// Extract minimap from SMF as KTX2.
     bool ProcessMinimap(const MapMetadata& meta);
 
     /// Store metadata in SQLite.

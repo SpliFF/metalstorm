@@ -294,7 +294,7 @@ async function startGame(gameServerPort: number): Promise<void> {
 
             // Load minimap background texture
             if (mapDataUrl) {
-                minimap.loadBackground(mapDataUrl + '/minimap.bmp');
+                minimap.loadBackground(mapDataUrl + '/minimap.png');
             }
 
             minimap.onCameraMove = (x, z) => {
