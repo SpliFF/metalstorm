@@ -75,7 +75,7 @@ int CUnitDefHandler::PushNewUnitDef(const std::string& unitName, const LuaTable&
 		newDef.SetNoCost(true);
 		newDef.SetNoCost(noCost);
 	} catch (const content_error& err) {
-		LOG_L(L_ERROR, "%s", err.what());
+		LOG_L(L_WARNING, "%s", err.what());
 		return 0;
 	}
 

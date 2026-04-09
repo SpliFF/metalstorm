@@ -97,6 +97,12 @@ bool CSimulation::LoadDefs()
         return false;
     }
 
+    // Log any non-fatal errors from the parser
+    if (!defsParser->GetErrorLog().empty()) {
+        std::fprintf(stderr, "[sim] defs parser log: %s\n",
+            defsParser->GetErrorLog().c_str());
+    }
+
     const LuaTable root = defsParser->GetRoot();
     if (!root.IsValid()) {
         std::fprintf(stderr, "[sim] ERROR: defs parser returned no root table\n");
@@ -187,8 +193,15 @@ void CSimulation::InitSubsystems(bool hasMap)
     damageArrayHandler.Init(defsParser.get());
     explGenHandler.Init();
     CommonDefHandler::InitStatic();
+
+    // moveDefHandler must init before unitDefHandler (units reference move classes)
+    if (hasMap)
+        moveDefHandler.Init(defsParser.get());
+
     weaponDefHandler->Init(defsParser.get());
     unitDefHandler->Init(defsParser.get());
+    std::fprintf(stderr, "[sim] loaded %u unit defs, %u weapon defs\n",
+        unitDefHandler->NumUnitDefs(), weaponDefHandler->NumWeaponDefs());
     featureDefHandler->Init(defsParser.get());
 
     CUnit::InitStatic();
@@ -208,7 +221,7 @@ void CSimulation::InitSubsystems(bool hasMap)
         smoothGround.Init(float3::maxxpos, float3::maxzpos, SQUARE_SIZE * 2, SQUARE_SIZE * 40);
         quadField.Init(int2(mapDims.mapx, mapDims.mapy), CQuadField::BASE_QUAD_SIZE);
 
-        moveDefHandler.Init(defsParser.get());
+        // moveDefHandler already initialized above (before unitDefHandler)
         CLosHandler::InitStatic();
         mapDamage = IMapDamage::InitMapDamage();
         pathManager = IPathManager::GetInstance(modInfo.pathFinderSystem);

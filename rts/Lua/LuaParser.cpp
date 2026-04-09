@@ -133,6 +133,7 @@ void LuaParser::SetupEnv(bool isSyncedCtxt, bool isDefsParser)
 		"  setfenv = function(f, t) return f end\n"
 		"  getfenv = function(f) return _G end\n"
 		"end\n"
+		"module = module or function() end\n"
 	);
 
 	// delete some dangerous/unsynced functions
