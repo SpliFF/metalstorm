@@ -275,10 +275,7 @@ async function startGame(gameServerPort: number): Promise<void> {
             if (maps.length > 0) {
                 const mapId = maps[0].id;
                 mapDataUrl = `${lobbyHttpUrl}/api/maps/data/${mapId}`;
-                loadTerrainTexture(scene, mapDataUrl, terrainMesh ?? undefined).then(chunks => {
-                    if (chunks.length > 0)
-                        console.log(`[client] loaded ${chunks.length} map texture chunks`);
-                });
+                loadTerrainTexture(scene, mapDataUrl, terrainMesh ?? undefined);
             }
         }
     } catch { /* lobby not reachable from game context — texture loading skipped */ }
@@ -297,7 +294,7 @@ async function startGame(gameServerPort: number): Promise<void> {
 
             // Load minimap background texture
             if (mapDataUrl) {
-                minimap.loadBackground(mapDataUrl + '/minimap.ktx2');
+                minimap.loadBackground(mapDataUrl + '/minimap.bmp');
             }
 
             minimap.onCameraMove = (x, z) => {

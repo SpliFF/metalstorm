@@ -53,7 +53,15 @@ bool RoomManager::JoinRoom(
     bool isActive = (room.state == ERoomState::Loading || room.state == ERoomState::Active);
     if (!isActive && room.state != ERoomState::Filling) return false;
     if (!room.password.empty() && password != room.password) return false;
-    if (room.FindPlayer(playerId)) return false; // already in room
+
+    // If player is already in the room, update their clientId (reconnection)
+    auto* existing = room.FindPlayer(playerId);
+    if (existing) {
+        existing->clientId = clientId;
+        std::fprintf(stderr, "[room] player '%s' reconnected to room %u (updated clientId)\n",
+            username.c_str(), roomId);
+        return true;
+    }
 
     RoomPlayer player;
     player.playerId = playerId;

@@ -245,6 +245,56 @@ bool MapProcessor::ProcessMinimap(const MapMetadata& meta) {
     f.read(reinterpret_cast<char*>(data.data()), mip0Size);
     if (!f.good()) return false;
 
+    std::string ktxPath = meta.processedDir + "/minimap.ktx2";
+
+    // Also write a BMP version (universally loadable by browsers)
+    {
+        const int W = 1024, H = 1024;
+        std::vector<uint8_t> rgb(W * H * 3);
+        int bw = W / 4, bh = H / 4;
+        for (int by = 0; by < bh; by++) {
+            for (int bx = 0; bx < bw; bx++) {
+                const uint8_t* src = &data[(by * bw + bx) * 8];
+                uint16_t c0 = src[0] | (src[1] << 8);
+                uint16_t c1 = src[2] | (src[3] << 8);
+                uint32_t bits = src[4] | (src[5]<<8) | (src[6]<<16) | (static_cast<uint32_t>(src[7])<<24);
+                uint8_t colors[4][3];
+                colors[0][0]=((c0>>11)&0x1f)*255/31; colors[0][1]=((c0>>5)&0x3f)*255/63; colors[0][2]=(c0&0x1f)*255/31;
+                colors[1][0]=((c1>>11)&0x1f)*255/31; colors[1][1]=((c1>>5)&0x3f)*255/63; colors[1][2]=(c1&0x1f)*255/31;
+                if (c0 > c1) {
+                    for (int i=0;i<3;i++) { colors[2][i]=(2*colors[0][i]+colors[1][i])/3; colors[3][i]=(colors[0][i]+2*colors[1][i])/3; }
+                } else {
+                    for (int i=0;i<3;i++) colors[2][i]=(colors[0][i]+colors[1][i])/2;
+                    colors[3][0]=colors[3][1]=colors[3][2]=0;
+                }
+                for (int py=0;py<4;py++) for (int px=0;px<4;px++) {
+                    int idx = (bits>>(2*(py*4+px)))&3;
+                    int x=bx*4+px, y=by*4+py, o=(y*W+x)*3;
+                    rgb[o]=colors[idx][0]; rgb[o+1]=colors[idx][1]; rgb[o+2]=colors[idx][2];
+                }
+            }
+        }
+        // Write BMP
+        int rowBytes=W*3, padRow=(4-(rowBytes%4))%4, imgSize=(rowBytes+padRow)*H, fileSize=54+imgSize;
+        std::vector<uint8_t> bmp(fileSize, 0);
+        bmp[0]='B'; bmp[1]='M';
+        memcpy(&bmp[2],&fileSize,4);
+        int off=54; memcpy(&bmp[10],&off,4);
+        int dib=40; memcpy(&bmp[14],&dib,4);
+        memcpy(&bmp[18],&W,4);
+        int negH=-H; memcpy(&bmp[22],&negH,4);
+        short planes=1,bpp=24;
+        memcpy(&bmp[26],&planes,2); memcpy(&bmp[28],&bpp,2);
+        memcpy(&bmp[34],&imgSize,4);
+        int d=54;
+        for (int y=0;y<H;y++) {
+            for (int x=0;x<W;x++) { int s=(y*W+x)*3; bmp[d++]=rgb[s+2]; bmp[d++]=rgb[s+1]; bmp[d++]=rgb[s]; }
+            d+=padRow;
+        }
+        std::ofstream bmpOut(meta.processedDir + "/minimap.bmp", std::ios::binary);
+        bmpOut.write(reinterpret_cast<const char*>(bmp.data()), bmp.size());
+    }
+
     std::string outPath = meta.processedDir + "/minimap.ktx2";
     return WriteKTX2(outPath, 1024, 1024, data, 1);
 }
