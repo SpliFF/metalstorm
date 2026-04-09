@@ -404,8 +404,42 @@ int main(int argc, char* argv[])
                     const char* username = auth->username() ? auth->username()->c_str() : "";
                     const char* passHash = auth->password_hash() ? auth->password_hash()->c_str() : "";
 
+                    // Try token-based reconnection first
+                    if (auth->token() && auth->token()->size() > 0) {
+                        int64_t userId = db.ValidateSession(auth->token()->str());
+                        if (userId > 0) {
+                            auto user = db.FindUser(username);
+                            if (user && user->id == userId) {
+                                auto resp = Protocol::BuildAuthResponse(
+                                    SpringWeb::AuthStatus_OK, auth->token()->str(),
+                                    static_cast<uint32_t>(userId));
+                                net.Send(msg.clientId, resp.data(), resp.size());
+                                sessions.AddSession(msg.clientId, userId, user->username, user->role);
+                                std::fprintf(stderr, "[lobby] '%s' reconnected via token\n", username);
+
+                                auto allRooms = rooms.GetAllRooms();
+                                auto listMsg = Protocol::BuildRoomListUpdate(allRooms);
+                                net.Send(msg.clientId, listMsg.data(), listMsg.size());
+                                break;
+                            }
+                        }
+                        // Token invalid — fall through to password auth
+                        // If password is empty, reject (this was a token-only attempt)
+                        if (strlen(passHash) == 0) {
+                            auto resp = Protocol::BuildAuthResponse(
+                                SpringWeb::AuthStatus_InvalidCredentials, "", 0, "Session expired");
+                            net.Send(msg.clientId, resp.data(), resp.size());
+                            break;
+                        }
+                    }
+
                     auto user = db.FindUser(username);
                     if (!user) {
+                        if (strlen(passHash) == 0) {
+                            auto resp = Protocol::BuildAuthResponse(SpringWeb::AuthStatus_InvalidCredentials, "", 0, "Enter a password");
+                            net.Send(msg.clientId, resp.data(), resp.size());
+                            break;
+                        }
                         int64_t newId = db.CreateUser(username, passHash);
                         if (newId == 0) {
                             auto resp = Protocol::BuildAuthResponse(SpringWeb::AuthStatus_InvalidCredentials, "", 0, "Registration failed");

@@ -78,9 +78,13 @@ export class Connection {
         Object.assign(this.events, overrides);
     }
 
-    /** Connect to the server and authenticate. */
-    connect(url: string, username: string, password: string): void {
+    /** Connect to the server and authenticate.
+     *  Pass token (instead of password) for session reconnection. */
+    connect(url: string, username: string, password: string, token?: string): void {
         if (this.ws) this.disconnect();
+
+        // Store token for reconnection auth
+        if (token) this.sessionToken = token;
 
         this.setState('connecting');
         this.ws = new WebSocket(url);

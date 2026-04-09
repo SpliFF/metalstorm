@@ -68,18 +68,15 @@ export class LobbyUI {
         `;
 
         this.connection = this.createConnection(
-            () => {}, // no error element for auto-login
-        );
-        // Connect with the saved token for reconnection
-        this.connection.connect(CONFIG.wsUrl, username, token);
-
-        // If it fails, fall back to login screen after a timeout
-        setTimeout(() => {
-            if (!this.connection?.authenticated) {
+            (msg: string) => {
+                // Auto-login failed — fall back to login screen
+                console.log('[lobby] auto-login failed:', msg);
                 localStorage.removeItem('springrts-token');
                 this.showLogin();
-            }
-        }, 3000);
+            },
+        );
+        // Connect with empty password but a saved token
+        this.connection.connect(CONFIG.wsUrl, username, '', token);
     }
 
     getConnection(): Connection | null { return this.connection; }
