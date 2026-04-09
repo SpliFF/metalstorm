@@ -48,6 +48,21 @@ struct GameRoom {
     int countdownSeconds = 0;
     uint16_t gameServerPort = 0;   // set when game server is spawned
 
+    /// Original player roster at game start (for reconnection).
+    /// Maps playerId → team. Set when room transitions to Loading.
+    std::unordered_map<uint32_t, uint8_t> originalRoster;
+
+    /// Check if a player was in the original game roster.
+    bool WasOriginalPlayer(uint32_t playerId) const {
+        return originalRoster.count(playerId) > 0;
+    }
+
+    /// Get original team for a reconnecting player. Returns -1 if not found.
+    int GetOriginalTeam(uint32_t playerId) const {
+        auto it = originalRoster.find(playerId);
+        return (it != originalRoster.end()) ? static_cast<int>(it->second) : -1;
+    }
+
     // --- Helpers ---
 
     RoomPlayer* FindPlayer(uint32_t playerId) {

@@ -48,31 +48,52 @@ bool RoomManager::JoinRoom(
     if (it == rooms.end()) return false;
 
     GameRoom& room = it->second;
-    if (room.state != ERoomState::Filling) return false;
+
+    // Allow joining Active/Loading rooms (reconnect or spectate)
+    bool isActive = (room.state == ERoomState::Loading || room.state == ERoomState::Active);
+    if (!isActive && room.state != ERoomState::Filling) return false;
     if (!room.password.empty() && password != room.password) return false;
-    if (!asSpectator && room.IsFull()) return false;
     if (room.FindPlayer(playerId)) return false; // already in room
 
     RoomPlayer player;
     player.playerId = playerId;
     player.clientId = clientId;
     player.username = username;
-    player.isSpectator = asSpectator;
-    // Auto-assign team (alternate 0/1)
-    if (!asSpectator) {
-        int team0 = 0, team1 = 0;
-        for (const auto& p : room.players) {
-            if (!p.isSpectator) {
-                if (p.team == 0) team0++;
-                else team1++;
-            }
-        }
-        player.team = (team0 <= team1) ? 0 : 1;
-    }
-    room.players.push_back(player);
 
-    std::fprintf(stderr, "[room] player '%s' joined room %u%s\n",
-        username.c_str(), roomId, asSpectator ? " (spectator)" : "");
+    if (isActive) {
+        // Check if this player was in the original roster (reconnecting)
+        int originalTeam = room.GetOriginalTeam(playerId);
+        if (originalTeam >= 0) {
+            player.isSpectator = false;
+            player.team = static_cast<uint8_t>(originalTeam);
+            player.ready = true;
+            std::fprintf(stderr, "[room] player '%s' RECONNECTED to room %u team %d\n",
+                username.c_str(), roomId, originalTeam);
+        } else {
+            // New player joining active game = spectator
+            player.isSpectator = true;
+            std::fprintf(stderr, "[room] player '%s' joined room %u as spectator (in progress)\n",
+                username.c_str(), roomId);
+        }
+    } else {
+        // Filling state — normal join
+        player.isSpectator = asSpectator;
+        if (!asSpectator) {
+            if (room.IsFull()) return false;
+            int team0 = 0, team1 = 0;
+            for (const auto& p : room.players) {
+                if (!p.isSpectator) {
+                    if (p.team == 0) team0++;
+                    else team1++;
+                }
+            }
+            player.team = (team0 <= team1) ? 0 : 1;
+        }
+        std::fprintf(stderr, "[room] player '%s' joined room %u%s\n",
+            username.c_str(), roomId, asSpectator ? " (spectator)" : "");
+    }
+
+    room.players.push_back(player);
     return true;
 }
 

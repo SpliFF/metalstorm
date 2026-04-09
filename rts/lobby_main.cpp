@@ -374,6 +374,12 @@ int main(int argc, char* argv[])
                             mapPath = candidate.string();
                     }
 
+                    // Save original player roster for reconnection
+                    for (const auto& p : room->players) {
+                        if (!p.isSpectator)
+                            room->originalRoster[p.playerId] = p.team;
+                    }
+
                     // Spawn game server
                     auto inst = spawnGameServer(room->id, gamePath, mapPath, dbPath);
                     gameServers[room->id] = inst;

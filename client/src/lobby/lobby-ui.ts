@@ -50,10 +50,62 @@ export class LobbyUI {
         this.onGameStart = onGameStart;
         this.container = document.getElementById('lobby') as HTMLDivElement;
         this.injectStyles();
-        this.showLogin();
+
+        // Try auto-login with saved session
+        const savedUser = localStorage.getItem('springrts-username');
+        const savedToken = localStorage.getItem('springrts-token');
+        if (savedUser && savedToken) {
+            this.tryAutoLogin(savedUser, savedToken);
+        } else {
+            this.showLogin();
+        }
+    }
+
+    private tryAutoLogin(username: string, token: string): void {
+        this.container.style.display = 'flex';
+        this.container.innerHTML = `
+            <div class="lobby-card"><h1>Spring RTS Web</h1><p class="msg">Reconnecting...</p></div>
+        `;
+
+        this.connection = this.createConnection(
+            () => {}, // no error element for auto-login
+        );
+        // Connect with the saved token for reconnection
+        this.connection.connect(CONFIG.wsUrl, username, token);
+
+        // If it fails, fall back to login screen after a timeout
+        setTimeout(() => {
+            if (!this.connection?.authenticated) {
+                localStorage.removeItem('springrts-token');
+                this.showLogin();
+            }
+        }, 3000);
     }
 
     getConnection(): Connection | null { return this.connection; }
+
+    private createConnection(onError: (msg: string) => void): Connection {
+        return new Connection({
+            onStateChange: (state: ConnectionState) => {
+                if (state === 'disconnected') onError('Disconnected from server');
+            },
+            onAuthenticated: (playerId: number, token: string) => {
+                this.myPlayerId = playerId;
+                // Persist session for auto-login
+                localStorage.setItem('springrts-token', token);
+                this.showBrowser();
+            },
+            onAuthFailed: (message: string) => {
+                localStorage.removeItem('springrts-token');
+                onError(message);
+            },
+            onServerError: (_code: number, message: string) => onError(message),
+            onServerMessage: (msg: ServerMessage) => this.handleServerMessage(msg),
+            onEntityState: () => {},
+            onCombatEvents: () => {},
+            onEntityDestroy: () => {},
+        });
+    }
     show(): void { this.container.style.display = 'flex'; }
     hide(): void { this.container.style.display = 'none'; }
 
@@ -105,27 +157,10 @@ export class LobbyUI {
         msgEl.textContent = 'Connecting...';
         msgEl.className = 'msg';
 
-        this.connection = new Connection({
-            onStateChange: (state: ConnectionState) => {
-                if (state === 'disconnected') { msgEl.textContent = 'Disconnected'; msgEl.className = 'msg error'; }
-            },
-            onAuthenticated: (playerId: number, _token: string) => {
-                this.myPlayerId = playerId;
-                this.showBrowser();
-            },
-            onAuthFailed: (message: string) => {
-                msgEl.textContent = message;
-                msgEl.className = 'msg error';
-            },
-            onServerError: (_code: number, message: string) => {
-                msgEl.textContent = message;
-                msgEl.className = 'msg error';
-            },
-            onServerMessage: (msg: ServerMessage) => this.handleServerMessage(msg),
-            onEntityState: () => {},
-            onCombatEvents: () => {},
-            onEntityDestroy: () => {},
-        });
+        localStorage.setItem('springrts-username', user);
+        this.connection = this.createConnection(
+            (msg: string) => { msgEl.textContent = msg; msgEl.className = 'msg error'; },
+        );
         this.connection.connect(CONFIG.wsUrl, user, pass);
     }
 
@@ -234,8 +269,8 @@ export class LobbyUI {
                     ${r.playerCount}/${r.maxPlayers} players ·
                     Host: ${this.esc(r.hostName)}
                 </div>
-                <button class="join-btn" data-id="${r.id}"${r.state > 1 ? ' disabled' : ''}>
-                    ${r.state > 1 ? 'In Progress' : 'Join'}
+                <button class="join-btn" data-id="${r.id}"${r.state >= 5 ? ' disabled' : ''}>
+                    ${r.state >= 3 && r.state < 5 ? 'Watch / Rejoin' : (r.state >= 5 ? 'Ended' : 'Join')}
                 </button>
             </div>
         `).join('');
