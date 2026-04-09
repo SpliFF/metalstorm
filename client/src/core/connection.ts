@@ -71,6 +71,11 @@ export class Connection {
     get authenticated(): boolean { return this._state === 'connected'; }
     get serverClock(): ServerClock { return this.clock; }
 
+    /** Update event callbacks (merges with existing). */
+    setEvents(overrides: Partial<ConnectionEvents>): void {
+        Object.assign(this.events, overrides);
+    }
+
     /** Connect to the server and authenticate. */
     connect(url: string, username: string, password: string): void {
         if (this.ws) this.disconnect();

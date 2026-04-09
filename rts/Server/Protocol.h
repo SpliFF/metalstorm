@@ -9,6 +9,7 @@
 
 #include "protocol_generated.h"
 #include "CombatEventCollector.h"
+#include "RoomManager.h"
 #include <flatbuffers/flatbuffers.h>
 #include <cstdint>
 #include <vector>
@@ -114,6 +115,57 @@ inline std::vector<uint8_t> BuildEntityDestroy(uint32_t entityId, uint8_t destru
     auto pos = SpringWeb::Vec3(x, y, z);
     auto destroy = SpringWeb::CreateEntityDestroy(fbb, entityId, destructionType, &pos);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_EntityDestroy, destroy.Union());
+}
+
+/// Build a RoomStateUpdate message.
+inline std::vector<uint8_t> BuildRoomStateUpdate(const GameRoom& room) {
+    flatbuffers::FlatBufferBuilder fbb(512);
+
+    std::vector<flatbuffers::Offset<SpringWeb::RoomPlayerInfo>> playerOffsets;
+    for (const auto& p : room.players) {
+        auto nameOff = fbb.CreateString(p.username);
+        playerOffsets.push_back(SpringWeb::CreateRoomPlayerInfo(
+            fbb, p.playerId, nameOff, p.team, p.ready, p.isSpectator, p.isHost));
+    }
+    auto playersVec = fbb.CreateVector(playerOffsets);
+    auto nameOff = fbb.CreateString(room.name);
+    auto mapOff = fbb.CreateString(room.mapName);
+    auto gameOff = fbb.CreateString(room.gameName);
+
+    auto update = SpringWeb::CreateRoomStateUpdate(
+        fbb, room.id, static_cast<SpringWeb::RoomState>(room.state),
+        nameOff, mapOff, gameOff, playersVec,
+        static_cast<uint8_t>(room.countdownSeconds));
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_RoomStateUpdate, update.Union());
+}
+
+/// Build a RoomListUpdate with all rooms.
+inline std::vector<uint8_t> BuildRoomListUpdate(const std::vector<GameRoom*>& rooms) {
+    flatbuffers::FlatBufferBuilder fbb(256 + rooms.size() * 128);
+
+    std::vector<flatbuffers::Offset<SpringWeb::RoomListEntry>> entries;
+    for (const auto* r : rooms) {
+        auto nameOff = fbb.CreateString(r->name);
+        auto mapOff = fbb.CreateString(r->mapName);
+        auto gameOff = fbb.CreateString(r->gameName);
+        // Find host name
+        std::string hostName;
+        for (const auto& p : r->players) {
+            if (p.isHost) { hostName = p.username; break; }
+        }
+        auto hostOff = fbb.CreateString(hostName);
+
+        entries.push_back(SpringWeb::CreateRoomListEntry(
+            fbb, r->id, nameOff, mapOff, gameOff,
+            static_cast<SpringWeb::RoomState>(r->state),
+            static_cast<uint8_t>(r->PlayerCount()),
+            r->maxPlayers,
+            !r->password.empty(),
+            hostOff));
+    }
+    auto vec = fbb.CreateVector(entries);
+    auto update = SpringWeb::CreateRoomListUpdate(fbb, vec);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_RoomListUpdate, update.Union());
 }
 
 } // namespace Protocol
