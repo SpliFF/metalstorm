@@ -242,13 +242,13 @@ async function startGame(gameServerPort: number): Promise<void> {
     camera.maxZ = 50000;
 
     const ambient = new HemisphericLight('ambient', new Vector3(0, 1, 0), scene);
-    ambient.intensity = 0.4;
-    ambient.diffuse = new Color3(0.6, 0.65, 0.8);
-    ambient.groundColor = new Color3(0.15, 0.1, 0.05);
+    ambient.intensity = 0.7;
+    ambient.diffuse = new Color3(0.8, 0.85, 1.0);
+    ambient.groundColor = new Color3(0.3, 0.25, 0.2);
 
     const sun = new DirectionalLight('sun', new Vector3(-0.5, -1, 0.3).normalize(), scene);
-    sun.intensity = 1.2;
-    sun.diffuse = new Color3(1.0, 0.95, 0.8);
+    sun.intensity = 1.5;
+    sun.diffuse = new Color3(1.0, 0.95, 0.85);
 
     entityRenderer = new EntityRenderer(scene);
     audioManager = new AudioManager();
