@@ -80,9 +80,20 @@ static GameServerInstance spawnGameServer(
     if (std::filesystem::exists("./build/release/spring-server"))
         serverBin = "./build/release/spring-server";
 
+    // Create log directory
+    std::filesystem::create_directories("data/logs");
+    std::string logPath = "data/logs/game-" + std::to_string(roomId) + ".log";
+
     pid_t pid = fork();
     if (pid == 0) {
-        // Child process — exec the game server
+        // Child process — redirect stdout/stderr to log file
+        FILE* logFile = fopen(logPath.c_str(), "w");
+        if (logFile) {
+            dup2(fileno(logFile), STDOUT_FILENO);
+            dup2(fileno(logFile), STDERR_FILENO);
+            fclose(logFile);
+        }
+
         std::string portStr = std::to_string(inst.port);
         execlp(serverBin.c_str(), serverBin.c_str(),
                "--port", portStr.c_str(),
@@ -91,7 +102,7 @@ static GameServerInstance spawnGameServer(
                "--db", dbPath.c_str(),
                nullptr);
         // If execlp returns, it failed
-        std::fprintf(stderr, "[lobby] ERROR: failed to exec game server: %s\n", serverBin.c_str());
+        fprintf(stderr, "ERROR: failed to exec game server: %s\n", serverBin.c_str());
         _exit(1);
     } else if (pid > 0) {
         inst.pid = pid;
