@@ -43,6 +43,7 @@ export class LobbyUI {
     private currentRoom: CurrentRoom | null = null;
     private onGameStart?: () => void;
     private myPlayerId = 0;
+    private availableMaps: { id: string; name: string; mapx: number; mapy: number; widthElmos: number; heightElmos: number }[] = [];
 
     constructor(onGameStart?: () => void) {
         this.onGameStart = onGameStart;
@@ -130,6 +131,13 @@ export class LobbyUI {
     showBrowser(): void {
         this.currentScreen = 'browser';
         this.currentRoom = null;
+
+        // Fetch available maps
+        fetch(`${CONFIG.httpUrl}/api/maps`).then(r => r.ok ? r.json() : []).then(maps => {
+            this.availableMaps = maps;
+            this.renderMapOptions();
+        }).catch(() => {});
+
         this.container.innerHTML = `
             <div class="lobby-panel">
                 <div class="lobby-header">
@@ -140,6 +148,10 @@ export class LobbyUI {
                 <div id="create-form" class="create-form" style="display:none">
                     <h3>Create Game</h3>
                     <input type="text" id="new-room-name" placeholder="Room name" value="My Game">
+                    <div class="map-select-label">Map:</div>
+                    <div id="map-selector" class="map-grid">
+                        <div class="empty-state">Loading maps...</div>
+                    </div>
                     <div class="btn-row">
                         <button id="do-create-btn" class="primary">Create</button>
                         <button id="cancel-create-btn" class="secondary">Cancel</button>
@@ -155,9 +167,49 @@ export class LobbyUI {
         };
         document.getElementById('do-create-btn')!.onclick = () => {
             const name = (document.getElementById('new-room-name') as HTMLInputElement).value || 'Game';
-            this.sendCreateRoom(name);
+            const selected = this.container.querySelector('.map-card.selected');
+            const mapId = selected?.getAttribute('data-map-id') ?? '';
+            this.sendCreateRoom(name, mapId);
         };
         this.renderRoomList();
+    }
+
+    private selectedMapId = '';
+
+    private renderMapOptions(): void {
+        const el = document.getElementById('map-selector');
+        if (!el) return;
+
+        if (this.availableMaps.length === 0) {
+            el.innerHTML = '<div class="empty-state">No maps found in content/maps/</div>';
+            return;
+        }
+
+        el.innerHTML = this.availableMaps.map(m => {
+            const sizeKm = ((m.widthElmos / 1000) * (m.heightElmos / 1000)).toFixed(1);
+            const thumbUrl = `${CONFIG.httpUrl}/api/maps/thumb/${encodeURIComponent(m.id)}`;
+            return `
+                <div class="map-card ${m.id === this.selectedMapId ? 'selected' : ''}" data-map-id="${this.esc(m.id)}">
+                    <div class="map-thumb" style="background-image:url('${thumbUrl}')"></div>
+                    <div class="map-label">${this.esc(m.name)}</div>
+                    <div class="map-size">${m.mapx}×${m.mapy} (${sizeKm} km²)</div>
+                </div>
+            `;
+        }).join('');
+
+        // Auto-select first map
+        if (!this.selectedMapId && this.availableMaps.length > 0) {
+            this.selectedMapId = this.availableMaps[0].id;
+            this.container.querySelector('.map-card')?.classList.add('selected');
+        }
+
+        el.querySelectorAll('.map-card').forEach(card => {
+            (card as HTMLElement).onclick = () => {
+                el.querySelectorAll('.map-card').forEach(c => c.classList.remove('selected'));
+                card.classList.add('selected');
+                this.selectedMapId = card.getAttribute('data-map-id') ?? '';
+            };
+        });
     }
 
     private renderRoomList(): void {
@@ -250,13 +302,15 @@ export class LobbyUI {
 
     // ===================== NETWORK =====================
 
-    private sendCreateRoom(name: string): void {
+    private sendCreateRoom(name: string, mapId: string = ''): void {
         if (!this.connection?.authenticated) return;
         const b = new flatbuffers.Builder(256);
         const nOff = b.createString(name);
+        const mOff = b.createString(mapId);
         const gOff = b.createString('papertanks');
         RoomCreate.startRoomCreate(b);
         RoomCreate.addName(b, nOff);
+        RoomCreate.addMapName(b, mOff);
         RoomCreate.addGameName(b, gOff);
         RoomCreate.addMaxPlayers(b, 8);
         this.connection.sendClientMessage(b, ClientPayload.RoomCreate, RoomCreate.endRoomCreate(b));
@@ -426,6 +480,20 @@ export class LobbyUI {
             }
             .player-status { font-size:12px; color:#888; min-width:60px; text-align:right; }
             .room-actions { display:flex; gap:10px; }
+            .map-select-label { font-size:13px; color:#888; margin-bottom:4px; }
+            .map-grid { display:flex; gap:8px; flex-wrap:wrap; max-height:200px; overflow-y:auto; }
+            .map-card {
+                width:140px; background:#0f1626; border:2px solid transparent;
+                border-radius:8px; cursor:pointer; overflow:hidden; transition:border-color .15s;
+            }
+            .map-card:hover { border-color:#445; }
+            .map-card.selected { border-color:#4cc9f0; }
+            .map-thumb {
+                width:140px; height:100px; background-color:#1a2a1a;
+                background-size:cover; background-position:center;
+            }
+            .map-label { padding:6px 8px 2px; font-size:12px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+            .map-size { padding:0 8px 6px; font-size:10px; color:#666; }
         `;
         document.head.appendChild(s);
     }
