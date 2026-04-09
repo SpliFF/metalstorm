@@ -149,7 +149,7 @@ export function buildTerrainMesh(
     const mat = new StandardMaterial('terrainMat', scene);
     mat.diffuseColor = new Color3(0.35, 0.45, 0.25);
     mat.specularColor = new Color3(0.05, 0.05, 0.05);
-    mat.backFaceCulling = true;
+    mat.backFaceCulling = false;
     mesh.material = mat;
 
     return mesh;

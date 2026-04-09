@@ -169,7 +169,7 @@ function showGameOver(frame: number): void {
     };
 }
 
-function startGame(connection: Connection): void {
+async function startGame(connection: Connection): Promise<void> {
     showHUD();
 
     const canvas = document.getElementById('game-canvas') as HTMLCanvasElement;
@@ -179,10 +179,25 @@ function startGame(connection: Connection): void {
     const scene = new Scene(engine);
     scene.clearColor = new Color4(0.05, 0.08, 0.12, 1);
 
-    const camera = new FreeCamera('camera', new Vector3(1600, 800, 2400), scene);
-    camera.setTarget(new Vector3(1600, 0, 3200));
+    // Fetch map info to position camera correctly
+    let mapW = 8192, mapH = 8192;
+    try {
+        const infoResp = await fetch(`${CONFIG.httpUrl}/api/map/info`);
+        if (infoResp.ok) {
+            const info = await infoResp.json();
+            mapW = info.widthElmos ?? 8192;
+            mapH = info.heightElmos ?? 8192;
+        }
+    } catch { /* use defaults */ }
+
+    const mapCenterX = mapW / 2;
+    const mapCenterZ = mapH / 2;
+
+    const camera = new FreeCamera('camera',
+        new Vector3(mapCenterX, 1200, mapCenterZ - 1500), scene);
+    camera.setTarget(new Vector3(mapCenterX, 0, mapCenterZ));
     camera.attachControl(canvas, true);
-    camera.speed = 50;
+    camera.speed = 80;
     camera.minZ = 1;
     camera.maxZ = 50000;
 
@@ -195,8 +210,7 @@ function startGame(connection: Connection): void {
     canvas.addEventListener('click', () => audioManager?.resume(), { once: true });
 
     // Load terrain
-    const serverBase = CONFIG.httpUrl;
-    loadTerrain(scene, serverBase).then((mesh) => {
+    loadTerrain(scene, CONFIG.httpUrl).then((mesh) => {
         if (mesh) console.log('[client] terrain loaded');
     });
 
@@ -204,27 +218,23 @@ function startGame(connection: Connection): void {
     inputManager = new InputManager(scene, camera, entityRenderer, connection,
         (ids) => minimap?.setSelection(ids));
 
-    // Minimap (fetch map dimensions, default to 8192x8192)
-    const serverBase2 = CONFIG.httpUrl;
-    fetch(`${serverBase2}/api/map/info`).then(r => r.ok ? r.json() : null).then(info => {
-        const mw = info?.widthElmos ?? 8192;
-        const mh = info?.heightElmos ?? 8192;
+    // Minimap
+    {
         const container = document.getElementById('minimap-container');
         if (container && entityRenderer) {
             minimap = new Minimap(
-                { mapWidth: mw, mapHeight: mh, parentElement: container, size: 200 },
+                { mapWidth: mapW, mapHeight: mapH, parentElement: container, size: 200 },
                 entityRenderer, connection);
             minimap.onCameraMove = (x, z) => {
                 camera.position.x = x;
-                camera.position.z = z - 400;
+                camera.position.z = z - 800;
                 camera.setTarget(new Vector3(x, 0, z));
             };
-            // Detach button
             document.getElementById('detach-minimap-btn')?.addEventListener('click', () => {
                 minimap?.detach();
             });
         }
-    }).catch(() => {});
+    }
 
     // Wire connection callbacks for game state
     connection.setEvents({
