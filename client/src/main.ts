@@ -12,8 +12,7 @@ import { InputManager } from './core/input-manager.js';
 import { loadTerrain } from './core/terrain.js';
 import { LobbyUI } from './lobby/lobby-ui.js';
 import { Minimap } from './core/minimap.js';
-import { CONFIG } from './config.js';
-import type { Connection } from './core/connection.js';
+import { Connection } from './core/connection.js';
 
 let engine: Engine | null = null;
 let entityRenderer: EntityRenderer | null = null;
@@ -169,84 +168,25 @@ function showGameOver(frame: number): void {
     };
 }
 
-async function startGame(connection: Connection): Promise<void> {
+async function startGame(gameServerPort: number): Promise<void> {
     showHUD();
 
     const canvas = document.getElementById('game-canvas') as HTMLCanvasElement;
     canvas.style.display = 'block';
 
-    engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
-    const scene = new Scene(engine);
-    scene.clearColor = new Color4(0.05, 0.08, 0.12, 1);
+    // Build game server URL
+    const host = window.location.hostname || 'localhost';
+    const gameWsUrl = `ws://${host}:${gameServerPort}`;
+    const gameHttpUrl = `http://${host}:${gameServerPort}`;
 
-    // Fetch map info to position camera correctly
-    let mapW = 8192, mapH = 8192;
-    try {
-        const infoResp = await fetch(`${CONFIG.httpUrl}/api/map/info`);
-        if (infoResp.ok) {
-            const info = await infoResp.json();
-            mapW = info.widthElmos ?? 8192;
-            mapH = info.heightElmos ?? 8192;
-        }
-    } catch { /* use defaults */ }
-
-    const mapCenterX = mapW / 2;
-    const mapCenterZ = mapH / 2;
-
-    const camera = new FreeCamera('camera',
-        new Vector3(mapCenterX, 1200, mapCenterZ - 1500), scene);
-    camera.setTarget(new Vector3(mapCenterX, 0, mapCenterZ));
-    camera.attachControl(canvas, true);
-    camera.speed = 80;
-    camera.minZ = 1;
-    camera.maxZ = 50000;
-
-    // Ambient sky light
-    const ambient = new HemisphericLight('ambient', new Vector3(0, 1, 0), scene);
-    ambient.intensity = 0.4;
-    ambient.diffuse = new Color3(0.6, 0.65, 0.8);
-    ambient.groundColor = new Color3(0.15, 0.1, 0.05);
-
-    // Directional sunlight
-    const sun = new DirectionalLight('sun', new Vector3(-0.5, -1, 0.3).normalize(), scene);
-    sun.intensity = 1.2;
-    sun.diffuse = new Color3(1.0, 0.95, 0.8);
-
-    entityRenderer = new EntityRenderer(scene);
-    audioManager = new AudioManager();
-    combatFX = new CombatFX(scene, audioManager);
-
-    canvas.addEventListener('click', () => audioManager?.resume(), { once: true });
-
-    // Load terrain
-    loadTerrain(scene, CONFIG.httpUrl).then((mesh) => {
-        if (mesh) console.log('[client] terrain loaded');
-    });
-
-    // Input
-    inputManager = new InputManager(scene, camera, entityRenderer, connection,
-        (ids) => minimap?.setSelection(ids));
-
-    // Minimap
-    {
-        const container = document.getElementById('minimap-container');
-        if (container && entityRenderer) {
-            minimap = new Minimap(
-                { mapWidth: mapW, mapHeight: mapH, parentElement: container, size: 200 },
-                entityRenderer, connection);
-            minimap.onCameraMove = (x, z) => {
-                camera.position.x = x;
-                camera.position.z = z - 800;
-                camera.setTarget(new Vector3(x, 0, z));
-            };
-            document.getElementById('detach-minimap-btn')?.addEventListener('click', () => {
-                minimap?.detach();
-            });
-        }
-    }
-
-    // Wire connection callbacks for game state
-    connection.setEvents({
+    // Connect to the game server (separate from lobby connection)
+    const gameConn = new Connection({
+        onAuthenticated() {
+            console.log(`[game] connected to game server on port ${gameServerPort}`);
+        },
+        onAuthFailed(msg: string) {
+            console.error(`[game] auth failed: ${msg}`);
+        },
         onEntityState(snapshot, isDelta) {
             entityRenderer?.update(snapshot, isDelta);
             currentFrame++;
@@ -266,6 +206,83 @@ async function startGame(connection: Connection): Promise<void> {
         },
     });
 
+    // Use same credentials — game server auto-registers too
+    // TODO: pass session token from lobby for proper auth
+    gameConn.connect(gameWsUrl, 'player1', 'pass');
+
+    engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
+    const scene = new Scene(engine);
+    scene.clearColor = new Color4(0.05, 0.08, 0.12, 1);
+
+    // Fetch map info from game server to position camera
+    let mapW = 8192, mapH = 8192;
+    // Wait a moment for the game server to start, then fetch
+    for (let attempt = 0; attempt < 10; attempt++) {
+        try {
+            const infoResp = await fetch(`${gameHttpUrl}/api/map/info`);
+            if (infoResp.ok) {
+                const info = await infoResp.json();
+                mapW = info.widthElmos ?? 8192;
+                mapH = info.heightElmos ?? 8192;
+                break;
+            }
+        } catch { /* server not ready yet */ }
+        await new Promise(r => setTimeout(r, 500));
+    }
+
+    const mapCenterX = mapW / 2;
+    const mapCenterZ = mapH / 2;
+
+    const camera = new FreeCamera('camera',
+        new Vector3(mapCenterX, 1200, mapCenterZ - 1500), scene);
+    camera.setTarget(new Vector3(mapCenterX, 0, mapCenterZ));
+    camera.attachControl(canvas, true);
+    camera.speed = 80;
+    camera.minZ = 1;
+    camera.maxZ = 50000;
+
+    const ambient = new HemisphericLight('ambient', new Vector3(0, 1, 0), scene);
+    ambient.intensity = 0.4;
+    ambient.diffuse = new Color3(0.6, 0.65, 0.8);
+    ambient.groundColor = new Color3(0.15, 0.1, 0.05);
+
+    const sun = new DirectionalLight('sun', new Vector3(-0.5, -1, 0.3).normalize(), scene);
+    sun.intensity = 1.2;
+    sun.diffuse = new Color3(1.0, 0.95, 0.8);
+
+    entityRenderer = new EntityRenderer(scene);
+    audioManager = new AudioManager();
+    combatFX = new CombatFX(scene, audioManager);
+
+    canvas.addEventListener('click', () => audioManager?.resume(), { once: true });
+
+    // Load terrain from game server
+    loadTerrain(scene, gameHttpUrl).then((mesh) => {
+        if (mesh) console.log('[client] terrain loaded');
+    });
+
+    // Input
+    inputManager = new InputManager(scene, camera, entityRenderer, gameConn,
+        (ids) => minimap?.setSelection(ids));
+
+    // Minimap
+    {
+        const container = document.getElementById('minimap-container');
+        if (container && entityRenderer) {
+            minimap = new Minimap(
+                { mapWidth: mapW, mapHeight: mapH, parentElement: container, size: 200 },
+                entityRenderer, gameConn);
+            minimap.onCameraMove = (x, z) => {
+                camera.position.x = x;
+                camera.position.z = z - 800;
+                camera.setTarget(new Vector3(x, 0, z));
+            };
+            document.getElementById('detach-minimap-btn')?.addEventListener('click', () => {
+                minimap?.detach();
+            });
+        }
+    }
+
     // Render loop
     let lastViewportSend = 0;
     let lastFrameTime = performance.now();
@@ -281,7 +298,7 @@ async function startGame(connection: Connection): Promise<void> {
         scene.render();
 
         if (now - lastViewportSend > 100) {
-            sendCameraViewport(camera, connection);
+            sendCameraViewport(camera, gameConn);
             lastViewportSend = now;
         }
 
@@ -310,11 +327,7 @@ document.addEventListener('DOMContentLoaded', () => {
     canvas.style.display = 'none';
 
     // Show lobby
-    lobbyUI = new LobbyUI(() => {
-        // Game start callback — lobby hides, game scene starts
-        const conn = lobbyUI?.getConnection();
-        if (conn) {
-            startGame(conn);
-        }
+    lobbyUI = new LobbyUI((gameServerPort: number) => {
+        startGame(gameServerPort);
     });
 });

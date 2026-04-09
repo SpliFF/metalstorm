@@ -282,6 +282,7 @@ table RoomStateUpdate {
     game_name: string;
     players: [RoomPlayerInfo];
     countdown_seconds: uint8;   // 0 = no countdown
+    game_server_port: uint16;   // port of spawned game server (0 = not started)
 }
 
 table RoomPlayerJoined {

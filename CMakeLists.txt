@@ -174,6 +174,48 @@ elseif(APPLE)
     endif()
 endif()
 
+# === spring-lobby executable (lightweight lobby server) ===
+set(LOBBY_SERVER_SOURCES
+    rts/Server/Database.cpp
+    rts/Server/NetworkServer.cpp
+    rts/Server/PerfMetrics.cpp
+    rts/Server/RatingSystem.cpp
+    rts/Server/RoomManager.cpp
+)
+set(LOBBY_LOG_SOURCES
+    rts/System/Log/Backend.cpp
+    rts/System/Log/DefaultFilter.cpp
+    rts/System/Log/DefaultFormatter.cpp
+    rts/System/Log/FileSink.cpp
+    rts/System/Log/FramePrefixer.cpp
+    rts/System/Log/LogSinkHandler.cpp
+    rts/System/Log/LogUtil.c
+    rts/System/Log/OutputDebugStringSink.cpp
+    rts/System/Log/StreamSink.cpp
+)
+add_executable(spring-lobby
+    rts/lobby_main.cpp
+    ${LOBBY_SERVER_SOURCES}
+    ${LOBBY_LOG_SOURCES}
+    rts/System/SafeCStrings.c
+)
+add_dependencies(spring-lobby generate_flatbuffers)
+target_include_directories(spring-lobby PRIVATE
+    ${CMAKE_SOURCE_DIR}/rts
+    ${CMAKE_SOURCE_DIR}/rts/lib
+    ${GENERATED_DIR}
+)
+target_link_libraries(spring-lobby PRIVATE uws flatbuffers ZLIB::ZLIB SQLite::SQLite3)
+if(UNIX)
+    target_link_libraries(spring-lobby PRIVATE pthread dl)
+endif()
+if(APPLE)
+    find_library(COCOA_FRAMEWORK_LOBBY Cocoa)
+    if(COCOA_FRAMEWORK_LOBBY)
+        target_link_libraries(spring-lobby PRIVATE ${COCOA_FRAMEWORK_LOBBY})
+    endif()
+endif()
+
 # === Tests (doctest) ===
 include(FetchContent)
 FetchContent_Declare(

@@ -46,6 +46,7 @@ struct GameRoom {
 
     std::vector<RoomPlayer> players;
     int countdownSeconds = 0;
+    uint16_t gameServerPort = 0;   // set when game server is spawned
 
     // --- Helpers ---
 

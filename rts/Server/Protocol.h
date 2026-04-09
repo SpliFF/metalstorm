@@ -147,7 +147,8 @@ inline std::vector<uint8_t> BuildRoomStateUpdate(const GameRoom& room) {
     auto update = SpringWeb::CreateRoomStateUpdate(
         fbb, room.id, static_cast<SpringWeb::RoomState>(room.state),
         nameOff, mapOff, gameOff, playersVec,
-        static_cast<uint8_t>(room.countdownSeconds));
+        static_cast<uint8_t>(room.countdownSeconds),
+        room.gameServerPort);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_RoomStateUpdate, update.Union());
 }
 

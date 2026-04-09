@@ -1,6 +1,6 @@
 procs:
-  server:
-    shell: "./build/debug/spring-server --port 8011 --game content/games/papertanks --map content/maps/scorched_crossing_v2.4 --db data/spring-server.db"
+  lobby:
+    shell: "./build/debug/spring-lobby --port 8011 --game content/games/papertanks --maps content/maps --db data/spring-server.db"
     stop: SIGINT
 
   client:

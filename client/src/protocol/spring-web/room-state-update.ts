@@ -72,8 +72,13 @@ countdownSeconds():number {
   return offset ? this.bb!.readUint8(this.bb_pos + offset) : 0;
 }
 
+gameServerPort():number {
+  const offset = this.bb!.__offset(this.bb_pos, 18);
+  return offset ? this.bb!.readUint16(this.bb_pos + offset) : 0;
+}
+
 static startRoomStateUpdate(builder:flatbuffers.Builder) {
-  builder.startObject(7);
+  builder.startObject(8);
 }
 
 static addRoomId(builder:flatbuffers.Builder, roomId:number) {
@@ -116,12 +121,16 @@ static addCountdownSeconds(builder:flatbuffers.Builder, countdownSeconds:number)
   builder.addFieldInt8(6, countdownSeconds, 0);
 }
 
+static addGameServerPort(builder:flatbuffers.Builder, gameServerPort:number) {
+  builder.addFieldInt16(7, gameServerPort, 0);
+}
+
 static endRoomStateUpdate(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createRoomStateUpdate(builder:flatbuffers.Builder, roomId:number, state:RoomState, nameOffset:flatbuffers.Offset, mapNameOffset:flatbuffers.Offset, gameNameOffset:flatbuffers.Offset, playersOffset:flatbuffers.Offset, countdownSeconds:number):flatbuffers.Offset {
+static createRoomStateUpdate(builder:flatbuffers.Builder, roomId:number, state:RoomState, nameOffset:flatbuffers.Offset, mapNameOffset:flatbuffers.Offset, gameNameOffset:flatbuffers.Offset, playersOffset:flatbuffers.Offset, countdownSeconds:number, gameServerPort:number):flatbuffers.Offset {
   RoomStateUpdate.startRoomStateUpdate(builder);
   RoomStateUpdate.addRoomId(builder, roomId);
   RoomStateUpdate.addState(builder, state);
@@ -130,6 +139,7 @@ static createRoomStateUpdate(builder:flatbuffers.Builder, roomId:number, state:R
   RoomStateUpdate.addGameName(builder, gameNameOffset);
   RoomStateUpdate.addPlayers(builder, playersOffset);
   RoomStateUpdate.addCountdownSeconds(builder, countdownSeconds);
+  RoomStateUpdate.addGameServerPort(builder, gameServerPort);
   return RoomStateUpdate.endRoomStateUpdate(builder);
 }
 
@@ -141,7 +151,8 @@ unpack(): RoomStateUpdateT {
     this.mapName(),
     this.gameName(),
     this.bb!.createObjList<RoomPlayerInfo, RoomPlayerInfoT>(this.players.bind(this), this.playersLength()),
-    this.countdownSeconds()
+    this.countdownSeconds(),
+    this.gameServerPort()
   );
 }
 
@@ -154,6 +165,7 @@ unpackTo(_o: RoomStateUpdateT): void {
   _o.gameName = this.gameName();
   _o.players = this.bb!.createObjList<RoomPlayerInfo, RoomPlayerInfoT>(this.players.bind(this), this.playersLength());
   _o.countdownSeconds = this.countdownSeconds();
+  _o.gameServerPort = this.gameServerPort();
 }
 }
 
@@ -165,7 +177,8 @@ constructor(
   public mapName: string|Uint8Array|null = null,
   public gameName: string|Uint8Array|null = null,
   public players: (RoomPlayerInfoT)[] = [],
-  public countdownSeconds: number = 0
+  public countdownSeconds: number = 0,
+  public gameServerPort: number = 0
 ){}
 
 
@@ -182,7 +195,8 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     mapName,
     gameName,
     players,
-    this.countdownSeconds
+    this.countdownSeconds,
+    this.gameServerPort
   );
 }
 }

@@ -33,6 +33,7 @@ interface RoomPlayerInfo {
 interface CurrentRoom {
     id: number; name: string; mapName: string;
     state: number; players: RoomPlayerInfo[];
+    gameServerPort: number;
 }
 
 export class LobbyUI {
@@ -41,11 +42,11 @@ export class LobbyUI {
     private currentScreen: LobbyScreen = 'login';
     private rooms: RoomInfo[] = [];
     private currentRoom: CurrentRoom | null = null;
-    private onGameStart?: () => void;
+    private onGameStart?: (gameServerPort: number) => void;
     private myPlayerId = 0;
     private availableMaps: { id: string; name: string; mapx: number; mapy: number; widthElmos: number; heightElmos: number }[] = [];
 
-    constructor(onGameStart?: () => void) {
+    constructor(onGameStart?: (gameServerPort: number) => void) {
         this.onGameStart = onGameStart;
         this.container = document.getElementById('lobby') as HTMLDivElement;
         this.injectStyles();
@@ -388,12 +389,13 @@ export class LobbyUI {
         this.currentRoom = {
             id: u.roomId(), name: u.name() ?? '', mapName: u.mapName() ?? '',
             state: u.state(), players,
+            gameServerPort: u.gameServerPort(),
         };
 
-        // Loading or Active → start game
-        if (this.currentRoom.state >= 3) {
+        // Loading or Active → start game (need a port to connect to)
+        if (this.currentRoom.state >= 3 && this.currentRoom.gameServerPort > 0) {
             this.hide();
-            this.onGameStart?.();
+            this.onGameStart?.(this.currentRoom.gameServerPort);
             return;
         }
 
