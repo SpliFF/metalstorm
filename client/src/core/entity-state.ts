@@ -45,10 +45,14 @@ export interface EntityStateSnapshot {
  * Parse a Tier 2 binary entity state buffer (after stripping the envelope byte).
  * Returns typed array views into the underlying ArrayBuffer — no copies.
  */
-export function parseEntityState(data: Uint8Array): EntityStateSnapshot | null {
-    if (data.byteLength < 4) return null;
+export function parseEntityState(input: Uint8Array): EntityStateSnapshot | null {
+    if (input.byteLength < 4) return null;
 
-    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    // Copy to an aligned buffer so typed array views work correctly
+    const data = new Uint8Array(input.length);
+    data.set(input);
+
+    const view = new DataView(data.buffer, 0, data.byteLength);
     const count = view.getUint16(0, true);
     const fieldMask = view.getUint16(2, true);
 
@@ -67,35 +71,35 @@ export function parseEntityState(data: Uint8Array): EntityStateSnapshot | null {
     };
 
     if (fieldMask & FIELD_ENTITY_IDS) {
-        result.entityIds = new Uint32Array(data.buffer, data.byteOffset + offset, count);
+        result.entityIds = new Uint32Array(data.buffer, offset, count);
         offset += count * 4;
     }
     if (fieldMask & FIELD_POSITION_X) {
-        result.positionsX = new Float32Array(data.buffer, data.byteOffset + offset, count);
+        result.positionsX = new Float32Array(data.buffer, offset, count);
         offset += count * 4;
     }
     if (fieldMask & FIELD_POSITION_Y) {
-        result.positionsY = new Float32Array(data.buffer, data.byteOffset + offset, count);
+        result.positionsY = new Float32Array(data.buffer, offset, count);
         offset += count * 4;
     }
     if (fieldMask & FIELD_POSITION_Z) {
-        result.positionsZ = new Float32Array(data.buffer, data.byteOffset + offset, count);
+        result.positionsZ = new Float32Array(data.buffer, offset, count);
         offset += count * 4;
     }
     if (fieldMask & FIELD_HEADING) {
-        result.headings = new Uint16Array(data.buffer, data.byteOffset + offset, count);
+        result.headings = new Uint16Array(data.buffer, offset, count);
         offset += count * 2;
     }
     if (fieldMask & FIELD_HEALTH) {
-        result.health = new Uint16Array(data.buffer, data.byteOffset + offset, count);
+        result.health = new Uint16Array(data.buffer, offset, count);
         offset += count * 2;
     }
     if (fieldMask & FIELD_DEF_ID) {
-        result.defIds = new Uint16Array(data.buffer, data.byteOffset + offset, count);
+        result.defIds = new Uint16Array(data.buffer, offset, count);
         offset += count * 2;
     }
     if (fieldMask & FIELD_TEAM) {
-        result.teams = new Uint8Array(data.buffer, data.byteOffset + offset, count);
+        result.teams = new Uint8Array(data.buffer, offset, count);
         offset += count;
     }
 

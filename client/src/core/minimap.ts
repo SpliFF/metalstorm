@@ -12,6 +12,9 @@ import { EntityRenderer, type EntityMeta } from './entity-renderer.js';
 import { CommandBuffer, CMD } from './command-buffer.js';
 import type { Connection } from './connection.js';
 
+// Re-export for minimap to decode BC1 from KTX2
+const KTX2_MAGIC = [0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A];
+
 const TEAM_COLORS = ['#3388ff', '#ff4444', '#44cc44', '#ffcc22'];
 
 export interface MinimapConfig {
@@ -34,6 +37,7 @@ export class Minimap {
     private mapHeight: number;
     private canvasSize: number;
     private selectedIds: Set<number> = new Set();
+    private backgroundImage: ImageBitmap | null = null;
 
     // Callback to move the main camera
     onCameraMove?: (x: number, z: number) => void;
@@ -79,6 +83,57 @@ export class Minimap {
         }
     }
 
+    /** Load the minimap background image from a KTX2 file URL. */
+    async loadBackground(url: string): Promise<void> {
+        try {
+            const resp = await fetch(url);
+            if (!resp.ok) return;
+            const buf = await resp.arrayBuffer();
+            const view = new DataView(buf);
+
+            // Verify KTX2 magic
+            for (let i = 0; i < 12; i++) {
+                if (view.getUint8(i) !== KTX2_MAGIC[i]) return;
+            }
+            const width = view.getUint32(20, true);
+            const height = view.getUint32(24, true);
+            const dataOffset = Number(view.getBigUint64(80, true));
+            const dataLength = Number(view.getBigUint64(88, true));
+            const bc1 = new Uint8Array(buf, dataOffset, dataLength);
+
+            // Decode BC1 to RGBA
+            const rgba = new Uint8ClampedArray(width * height * 4);
+            const bw = width >> 2, bh = height >> 2;
+            for (let by = 0; by < bh; by++) {
+                for (let bx = 0; bx < bw; bx++) {
+                    const off = (by * bw + bx) * 8;
+                    const c0 = bc1[off] | (bc1[off+1] << 8);
+                    const c1 = bc1[off+2] | (bc1[off+3] << 8);
+                    const bits = bc1[off+4] | (bc1[off+5]<<8) | (bc1[off+6]<<16) | ((bc1[off+7]<<24)>>>0);
+                    const r = (c: number) => ((c>>11)&0x1f)*255/31;
+                    const g = (c: number) => ((c>>5)&0x3f)*255/63;
+                    const b = (c: number) => (c&0x1f)*255/31;
+                    const colors = [
+                        [r(c0),g(c0),b(c0)], [r(c1),g(c1),b(c1)],
+                        c0>c1 ? [0,0,0].map((_,i)=>(2*[r(c0),g(c0),b(c0)][i]+[r(c1),g(c1),b(c1)][i])/3) : [0,0,0].map((_,i)=>([r(c0),g(c0),b(c0)][i]+[r(c1),g(c1),b(c1)][i])/2),
+                        c0>c1 ? [0,0,0].map((_,i)=>([r(c0),g(c0),b(c0)][i]+2*[r(c1),g(c1),b(c1)][i])/3) : [0,0,0],
+                    ];
+                    for (let py=0;py<4;py++) for (let px=0;px<4;px++) {
+                        const idx = (bits>>(2*(py*4+px)))&3;
+                        const x=bx*4+px, y=by*4+py, o=(y*width+x)*4;
+                        rgba[o]=colors[idx][0]; rgba[o+1]=colors[idx][1]; rgba[o+2]=colors[idx][2]; rgba[o+3]=255;
+                    }
+                }
+            }
+
+            const imageData = new ImageData(rgba, width, height);
+            this.backgroundImage = await createImageBitmap(imageData);
+            console.log(`[minimap] background loaded: ${width}x${height}`);
+        } catch (e) {
+            console.warn('[minimap] failed to load background:', e);
+        }
+    }
+
     /** Update selection highlight (called when main view selection changes). */
     setSelection(ids: number[]): void {
         this.selectedIds = new Set(ids);
@@ -94,26 +149,12 @@ export class Minimap {
         const scaleX = w / this.mapWidth;
         const scaleZ = h / this.mapHeight;
 
-        // Background
-        ctx.fillStyle = '#0a0f0a';
-        ctx.fillRect(0, 0, w, h);
-
-        // Grid lines (every 1024 elmos)
-        ctx.strokeStyle = '#1a2a1a';
-        ctx.lineWidth = 0.5;
-        for (let x = 0; x < this.mapWidth; x += 1024) {
-            const px = x * scaleX;
-            ctx.beginPath();
-            ctx.moveTo(px, 0);
-            ctx.lineTo(px, h);
-            ctx.stroke();
-        }
-        for (let z = 0; z < this.mapHeight; z += 1024) {
-            const pz = z * scaleZ;
-            ctx.beginPath();
-            ctx.moveTo(0, pz);
-            ctx.lineTo(w, pz);
-            ctx.stroke();
+        // Background — minimap image or dark fallback
+        if (this.backgroundImage) {
+            ctx.drawImage(this.backgroundImage, 0, 0, w, h);
+        } else {
+            ctx.fillStyle = '#0a0f0a';
+            ctx.fillRect(0, 0, w, h);
         }
 
         // Draw entities

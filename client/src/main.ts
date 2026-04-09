@@ -266,17 +266,15 @@ async function startGame(gameServerPort: number): Promise<void> {
     if (terrainMesh) console.log('[client] terrain heightmap loaded');
 
     // Load map textures from lobby server (KTX2 chunks processed at startup)
-    // We need the map ID — extract from the room's mapName
-    // For now, use a placeholder; the lobby URL serves processed data
     const lobbyHttpUrl = `http://${host}:${CONFIG.gameServerPort}`;
-    // TODO: get map ID from room state. For now try all maps endpoint
+    let mapDataUrl = '';
     try {
         const mapsResp = await fetch(`${lobbyHttpUrl}/api/maps`);
         if (mapsResp.ok) {
             const maps = await mapsResp.json();
             if (maps.length > 0) {
-                const mapId = maps[0].id; // use first map for now
-                const mapDataUrl = `${lobbyHttpUrl}/api/maps/data/${mapId}`;
+                const mapId = maps[0].id;
+                mapDataUrl = `${lobbyHttpUrl}/api/maps/data/${mapId}`;
                 loadTerrainTexture(scene, mapDataUrl, terrainMesh ?? undefined).then(chunks => {
                     if (chunks.length > 0)
                         console.log(`[client] loaded ${chunks.length} map texture chunks`);
@@ -296,6 +294,12 @@ async function startGame(gameServerPort: number): Promise<void> {
             minimap = new Minimap(
                 { mapWidth: mapW, mapHeight: mapH, parentElement: container, size: 200 },
                 entityRenderer, gameConn);
+
+            // Load minimap background texture
+            if (mapDataUrl) {
+                minimap.loadBackground(mapDataUrl + '/minimap.ktx2');
+            }
+
             minimap.onCameraMove = (x, z) => {
                 camera.position.x = x;
                 camera.position.z = z - 800;
