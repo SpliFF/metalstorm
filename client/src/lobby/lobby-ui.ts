@@ -55,6 +55,7 @@ export class LobbyUI {
         // Try auto-login with saved session
         const savedUser = localStorage.getItem('springrts-username');
         const savedToken = localStorage.getItem('springrts-token');
+        console.log(`[lobby] init: savedUser=${savedUser ?? 'null'} savedToken=${savedToken ? savedToken.substring(0,8) + '...' : 'null'}`);
         if (savedUser && savedToken) {
             this.tryAutoLogin(savedUser, savedToken);
         } else {
@@ -62,10 +63,12 @@ export class LobbyUI {
         }
     }
 
+    private autoLoginAttempts = 0;
+
     private tryAutoLogin(username: string, token: string): void {
         this.container.style.display = 'flex';
         this.container.innerHTML = `
-            <div class="lobby-card"><h1>Spring RTS Web</h1><p class="msg">Reconnecting...</p></div>
+            <div class="lobby-card"><h1>Spring RTS Web</h1><p class="msg">Reconnecting${this.autoLoginAttempts > 0 ? ` (attempt ${this.autoLoginAttempts + 1})` : ''}...</p></div>
         `;
 
         const savedRoomId = localStorage.getItem('springrts-game-room');
@@ -73,17 +76,23 @@ export class LobbyUI {
 
         this.connection = this.createConnection(
             (msg: string) => {
-                console.log('[lobby] auto-login failed:', msg);
-                localStorage.removeItem('springrts-token');
-                localStorage.removeItem('springrts-game-room');
-                localStorage.removeItem('springrts-game-port');
-                this.showLogin();
+                this.autoLoginAttempts++;
+                if (this.autoLoginAttempts < 5) {
+                    // Retry — server might still be starting
+                    console.log(`[lobby] auto-login attempt ${this.autoLoginAttempts} failed: ${msg}, retrying...`);
+                    setTimeout(() => this.tryAutoLogin(username, token), 1000);
+                } else {
+                    console.log('[lobby] auto-login failed after retries:', msg);
+                    this.autoLoginAttempts = 0;
+                    localStorage.removeItem('springrts-token');
+                    localStorage.removeItem('springrts-game-room');
+                    localStorage.removeItem('springrts-game-port');
+                    this.showLogin();
+                }
             },
         );
 
-        // After auth succeeds, check for saved game
         this.pendingRejoinRoomId = savedRoomId ? parseInt(savedRoomId) : 0;
-
         this.connection.connect(CONFIG.wsUrl, username, '', token);
     }
 
@@ -96,6 +105,7 @@ export class LobbyUI {
             },
             onAuthenticated: (playerId: number, token: string) => {
                 this.myPlayerId = playerId;
+                console.log(`[lobby] AUTH OK: playerId=${playerId} token=${token?.substring(0,8)}... saving to localStorage`);
                 localStorage.setItem('springrts-token', token);
 
                 // If we have a saved game to rejoin, try it

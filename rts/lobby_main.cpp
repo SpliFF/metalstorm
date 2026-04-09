@@ -405,8 +405,12 @@ int main(int argc, char* argv[])
                     const char* passHash = auth->password_hash() ? auth->password_hash()->c_str() : "";
 
                     // Try token-based reconnection first
-                    if (auth->token() && auth->token()->size() > 0) {
+                    bool hasToken = auth->token() && auth->token()->size() > 0;
+                    std::fprintf(stderr, "[lobby] auth: user='%s' hasToken=%d passLen=%zu\n",
+                        username, hasToken, strlen(passHash));
+                    if (hasToken) {
                         int64_t userId = db.ValidateSession(auth->token()->str());
+                        std::fprintf(stderr, "[lobby] token validation: userId=%lld\n", userId);
                         if (userId > 0) {
                             auto user = db.FindUser(username);
                             if (user && user->id == userId) {
