@@ -89,7 +89,16 @@ export function buildTerrainMesh(
     const numVertices = gridW * gridH;
     const positions = new Float32Array(numVertices * 3);
     const normals = new Float32Array(numVertices * 3);
+    const colors = new Float32Array(numVertices * 4);
     const uvs = new Float32Array(numVertices * 2);
+
+    // Find height range for colour mapping
+    let minH = Infinity, maxH = -Infinity;
+    for (let i = 0; i < heightData.length; i++) {
+        if (heightData[i] < minH) minH = heightData[i];
+        if (heightData[i] > maxH) maxH = heightData[i];
+    }
+    const hRange = Math.max(maxH - minH, 1);
 
     // Fill vertex positions
     for (let gz = 0; gz < gridH; gz++) {
@@ -105,6 +114,37 @@ export function buildTerrainMesh(
             positions[idx * 3 + 0] = worldX;
             positions[idx * 3 + 1] = worldY;
             positions[idx * 3 + 2] = worldZ;
+
+            // Height-based vertex colour
+            const t = (worldY - minH) / hRange; // 0..1
+            if (worldY < 0) {
+                // Below water: blue tint
+                colors[idx * 4 + 0] = 0.15;
+                colors[idx * 4 + 1] = 0.2;
+                colors[idx * 4 + 2] = 0.35;
+            } else if (t < 0.2) {
+                // Low: sandy/beach
+                colors[idx * 4 + 0] = 0.55 + t;
+                colors[idx * 4 + 1] = 0.5 + t * 0.5;
+                colors[idx * 4 + 2] = 0.3;
+            } else if (t < 0.6) {
+                // Mid: green
+                colors[idx * 4 + 0] = 0.25;
+                colors[idx * 4 + 1] = 0.35 + (t - 0.2) * 0.5;
+                colors[idx * 4 + 2] = 0.15;
+            } else if (t < 0.85) {
+                // High: brown/rock
+                colors[idx * 4 + 0] = 0.35 + (t - 0.6) * 0.4;
+                colors[idx * 4 + 1] = 0.25 + (t - 0.6) * 0.2;
+                colors[idx * 4 + 2] = 0.15;
+            } else {
+                // Peak: light grey/snow
+                const s = 0.5 + (t - 0.85) * 2;
+                colors[idx * 4 + 0] = s;
+                colors[idx * 4 + 1] = s;
+                colors[idx * 4 + 2] = s * 0.95;
+            }
+            colors[idx * 4 + 3] = 1.0; // alpha
 
             uvs[idx * 2 + 0] = gx / (gridW - 1);
             uvs[idx * 2 + 1] = gz / (gridH - 1);
@@ -142,15 +182,17 @@ export function buildTerrainMesh(
     vertexData.positions = positions;
     vertexData.indices = indices;
     vertexData.normals = normals;
+    vertexData.colors = colors;
     vertexData.uvs = uvs;
     vertexData.applyToMesh(mesh);
 
-    // Material
+    // Material using vertex colours
     const mat = new StandardMaterial('terrainMat', scene);
-    mat.diffuseColor = new Color3(0.35, 0.45, 0.25);
-    mat.specularColor = new Color3(0.05, 0.05, 0.05);
+    mat.diffuseColor = new Color3(1, 1, 1); // let vertex colours drive colour
+    mat.specularColor = new Color3(0.1, 0.1, 0.1);
     mat.backFaceCulling = false;
     mesh.material = mat;
+    mesh.hasVertexAlpha = false;
 
     return mesh;
 }

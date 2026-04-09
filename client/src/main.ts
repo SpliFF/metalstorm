@@ -4,7 +4,7 @@
  * Flow: Login → Room Browser → Room Setup → Game
  */
 
-import { Engine, Scene, FreeCamera, Vector3, HemisphericLight, Color4 } from '@babylonjs/core';
+import { Engine, Scene, FreeCamera, Vector3, HemisphericLight, DirectionalLight, Color3, Color4 } from '@babylonjs/core';
 import { EntityRenderer } from './core/entity-renderer.js';
 import { CombatFX } from './core/combat-fx.js';
 import { AudioManager } from './core/audio.js';
@@ -201,7 +201,16 @@ async function startGame(connection: Connection): Promise<void> {
     camera.minZ = 1;
     camera.maxZ = 50000;
 
-    new HemisphericLight('light', new Vector3(0.3, 1, 0.2), scene);
+    // Ambient sky light
+    const ambient = new HemisphericLight('ambient', new Vector3(0, 1, 0), scene);
+    ambient.intensity = 0.4;
+    ambient.diffuse = new Color3(0.6, 0.65, 0.8);
+    ambient.groundColor = new Color3(0.15, 0.1, 0.05);
+
+    // Directional sunlight
+    const sun = new DirectionalLight('sun', new Vector3(-0.5, -1, 0.3).normalize(), scene);
+    sun.intensity = 1.2;
+    sun.diffuse = new Color3(1.0, 0.95, 0.8);
 
     entityRenderer = new EntityRenderer(scene);
     audioManager = new AudioManager();
