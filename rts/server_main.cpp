@@ -430,113 +430,88 @@ int main(int argc, char* argv[])
                     vp.active    = (vp.width > 0.0f && vp.height > 0.0f);
                     break;
                 }
+                // --- Room message helpers ---
+                // Broadcasts room state to members + room list to everyone
+                #define BROADCAST_ROOM_UPDATE(roomPtr) do { \
+                    if (roomPtr) { \
+                        auto _sm = Protocol::BuildRoomStateUpdate(*roomPtr); \
+                        for (const auto& _p : roomPtr->players) \
+                            net.Send(_p.clientId, _sm.data(), _sm.size()); \
+                    } \
+                    auto _all = rooms.GetAllRooms(); \
+                    auto _lm = Protocol::BuildRoomListUpdate(_all); \
+                    net.Broadcast(_lm.data(), _lm.size()); \
+                } while(0)
+
                 case SpringWeb::ClientPayload_RoomCreate: {
                     auto* session = sessions.GetSession(msg.clientId);
-                    if (!session) { net.Send(msg.clientId, Protocol::BuildServerError(401, "Not authenticated").data(), Protocol::BuildServerError(401, "Not authenticated").size()); break; }
+                    if (!session) { auto e = Protocol::BuildServerError(401, "Auth required"); net.Send(msg.clientId, e.data(), e.size()); break; }
 
                     auto* rc = clientMsg->payload_as_RoomCreate();
                     uint32_t roomId = rooms.CreateRoom(
                         rc->name() ? rc->name()->str() : "Game",
                         rc->map_name() ? rc->map_name()->str() : "",
                         rc->game_name() ? rc->game_name()->str() : "",
-                        rc->max_players(),
+                        rc->max_players() > 0 ? rc->max_players() : 8,
                         rc->password() ? rc->password()->str() : "",
                         static_cast<uint32_t>(session->userId), msg.clientId, session->username);
-
-                    // Send room state to the creator
-                    auto* room = rooms.GetRoom(roomId);
-                    if (room) {
-                        auto stateMsg = Protocol::BuildRoomStateUpdate(*room);
-                        net.Send(msg.clientId, stateMsg.data(), stateMsg.size());
-                    }
-                    // Broadcast updated room list to all clients
-                    {
-                        auto allRooms = rooms.GetAllRooms();
-                        auto listMsg = Protocol::BuildRoomListUpdate(allRooms);
-                        net.Broadcast(listMsg.data(), listMsg.size());
-                    }
+                    BROADCAST_ROOM_UPDATE(rooms.GetRoom(roomId));
                     break;
                 }
                 case SpringWeb::ClientPayload_RoomJoin: {
                     auto* session = sessions.GetSession(msg.clientId);
-                    if (!session) { net.Send(msg.clientId, Protocol::BuildServerError(401, "Not authenticated").data(), Protocol::BuildServerError(401, "Not authenticated").size()); break; }
+                    if (!session) { auto e = Protocol::BuildServerError(401, "Auth required"); net.Send(msg.clientId, e.data(), e.size()); break; }
 
                     auto* rj = clientMsg->payload_as_RoomJoin();
-                    bool ok = rooms.JoinRoom(
-                        rj->room_id(),
-                        static_cast<uint32_t>(session->userId), msg.clientId,
-                        session->username,
-                        rj->password() ? rj->password()->str() : "");
-
-                    if (!ok) {
-                        auto err = Protocol::BuildServerError(403, "Cannot join room");
-                        net.Send(msg.clientId, err.data(), err.size());
+                    if (!rooms.JoinRoom(rj->room_id(), static_cast<uint32_t>(session->userId),
+                                        msg.clientId, session->username,
+                                        rj->password() ? rj->password()->str() : "")) {
+                        auto e = Protocol::BuildServerError(403, "Cannot join room");
+                        net.Send(msg.clientId, e.data(), e.size());
                         break;
                     }
-                    // Broadcast room state to all players in the room
-                    auto* room = rooms.GetRoom(rj->room_id());
-                    if (room) {
-                        auto stateMsg = Protocol::BuildRoomStateUpdate(*room);
-                        for (const auto& p : room->players)
-                            net.Send(p.clientId, stateMsg.data(), stateMsg.size());
-                    }
+                    BROADCAST_ROOM_UPDATE(rooms.GetRoom(rj->room_id()));
                     break;
                 }
                 case SpringWeb::ClientPayload_RoomLeave: {
                     auto* session = sessions.GetSession(msg.clientId);
                     if (!session) break;
-
                     auto* room = rooms.FindRoomByClient(msg.clientId);
                     if (room) {
-                        uint32_t roomId = room->id;
-                        rooms.LeaveRoom(roomId, static_cast<uint32_t>(session->userId));
-                        // Broadcast updated state to remaining players
-                        auto* updatedRoom = rooms.GetRoom(roomId);
-                        if (updatedRoom) {
-                            auto stateMsg = Protocol::BuildRoomStateUpdate(*updatedRoom);
-                            for (const auto& p : updatedRoom->players)
-                                net.Send(p.clientId, stateMsg.data(), stateMsg.size());
-                        }
+                        uint32_t rid = room->id;
+                        rooms.LeaveRoom(rid, static_cast<uint32_t>(session->userId));
+                        BROADCAST_ROOM_UPDATE(rooms.GetRoom(rid));
                     }
                     break;
                 }
                 case SpringWeb::ClientPayload_RoomTeamSelect: {
                     auto* session = sessions.GetSession(msg.clientId);
                     if (!session) break;
-
                     auto* room = rooms.FindRoomByClient(msg.clientId);
                     if (room) {
-                        auto* rts = clientMsg->payload_as_RoomTeamSelect();
-                        rooms.SetTeam(room->id, static_cast<uint32_t>(session->userId), rts->team());
-                        auto stateMsg = Protocol::BuildRoomStateUpdate(*room);
-                        for (const auto& p : room->players)
-                            net.Send(p.clientId, stateMsg.data(), stateMsg.size());
+                        rooms.SetTeam(room->id, static_cast<uint32_t>(session->userId),
+                                      clientMsg->payload_as_RoomTeamSelect()->team());
+                        BROADCAST_ROOM_UPDATE(room);
                     }
                     break;
                 }
                 case SpringWeb::ClientPayload_RoomReady: {
                     auto* session = sessions.GetSession(msg.clientId);
                     if (!session) break;
-
                     auto* room = rooms.FindRoomByClient(msg.clientId);
                     if (room) {
-                        auto* rr = clientMsg->payload_as_RoomReady();
-                        rooms.SetReady(room->id, static_cast<uint32_t>(session->userId), rr->ready());
-                        auto stateMsg = Protocol::BuildRoomStateUpdate(*room);
-                        for (const auto& p : room->players)
-                            net.Send(p.clientId, stateMsg.data(), stateMsg.size());
+                        rooms.SetReady(room->id, static_cast<uint32_t>(session->userId),
+                                       clientMsg->payload_as_RoomReady()->ready());
+                        BROADCAST_ROOM_UPDATE(room);
                     }
                     break;
                 }
                 case SpringWeb::ClientPayload_RoomStartGame: {
                     auto* session = sessions.GetSession(msg.clientId);
                     if (!session) break;
-
                     auto* room = rooms.FindRoomByClient(msg.clientId);
                     if (room && rooms.StartGame(room->id, static_cast<uint32_t>(session->userId))) {
-                        auto stateMsg = Protocol::BuildRoomStateUpdate(*room);
-                        for (const auto& p : room->players)
-                            net.Send(p.clientId, stateMsg.data(), stateMsg.size());
+                        BROADCAST_ROOM_UPDATE(room);
                     }
                     break;
                 }
@@ -546,11 +521,9 @@ int main(int argc, char* argv[])
 
                     auto* room = rooms.FindRoomByClient(msg.clientId);
                     if (room) {
-                        auto* rk = clientMsg->payload_as_RoomKick();
-                        rooms.KickPlayer(room->id, static_cast<uint32_t>(session->userId), rk->player_id());
-                        auto stateMsg = Protocol::BuildRoomStateUpdate(*room);
-                        for (const auto& p : room->players)
-                            net.Send(p.clientId, stateMsg.data(), stateMsg.size());
+                        rooms.KickPlayer(room->id, static_cast<uint32_t>(session->userId),
+                                         clientMsg->payload_as_RoomKick()->player_id());
+                        BROADCAST_ROOM_UPDATE(room);
                     }
                     break;
                 }
