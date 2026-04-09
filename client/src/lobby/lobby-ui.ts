@@ -7,6 +7,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 import { Connection, type ConnectionState, type CombatEventInfo } from '../core/connection.js';
+import { CONFIG } from '../config.js';
 import { ClientPayload } from '../protocol/spring-web/client-payload.js';
 import { RoomCreate } from '../protocol/spring-web/room-create.js';
 import { RoomJoin } from '../protocol/spring-web/room-join.js';
@@ -118,7 +119,7 @@ export class LobbyUI {
         const errEl = document.getElementById('login-error')!;
         errEl.textContent = 'Connecting...';
 
-        const serverUrl = `ws://${window.location.hostname || 'localhost'}:9001`;
+        const serverUrl = CONFIG.wsUrl;
         this.connection = new Connection({
             onStateChange: (state: ConnectionState) => {
                 if (state === 'disconnected') {

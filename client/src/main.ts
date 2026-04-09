@@ -12,6 +12,7 @@ import { InputManager } from './core/input-manager.js';
 import { loadTerrain } from './core/terrain.js';
 import { LobbyUI } from './lobby/lobby-ui.js';
 import { Minimap } from './core/minimap.js';
+import { CONFIG } from './config.js';
 import type { Connection } from './core/connection.js';
 
 let engine: Engine | null = null;
@@ -194,7 +195,7 @@ function startGame(connection: Connection): void {
     canvas.addEventListener('click', () => audioManager?.resume(), { once: true });
 
     // Load terrain
-    const serverBase = `http://${window.location.hostname || 'localhost'}:9001`;
+    const serverBase = CONFIG.httpUrl;
     loadTerrain(scene, serverBase).then((mesh) => {
         if (mesh) console.log('[client] terrain loaded');
     });
@@ -204,7 +205,7 @@ function startGame(connection: Connection): void {
         (ids) => minimap?.setSelection(ids));
 
     // Minimap (fetch map dimensions, default to 8192x8192)
-    const serverBase2 = `http://${window.location.hostname || 'localhost'}:9001`;
+    const serverBase2 = CONFIG.httpUrl;
     fetch(`${serverBase2}/api/map/info`).then(r => r.ok ? r.json() : null).then(info => {
         const mw = info?.widthElmos ?? 8192;
         const mh = info?.heightElmos ?? 8192;

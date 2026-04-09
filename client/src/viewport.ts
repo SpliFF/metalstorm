@@ -12,6 +12,7 @@
 import { Connection } from './core/connection.js';
 import { CommandBuffer, CMD } from './core/command-buffer.js';
 import { parseEntityState, type EntityStateSnapshot } from './core/entity-state.js';
+import { CONFIG } from './config.js';
 
 const TEAM_COLORS = ['#3388ff', '#ff4444', '#44cc44', '#ffcc22'];
 
@@ -48,7 +49,7 @@ try {
 } catch { /* ok */ }
 
 // Connection
-const serverUrl = `ws://${window.location.hostname || 'localhost'}:9001`;
+const serverUrl = CONFIG.wsUrl;
 const connection = new Connection({
     onStateChange(state) {
         statusEl.textContent = state;
