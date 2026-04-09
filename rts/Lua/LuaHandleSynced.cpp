@@ -100,7 +100,7 @@ bool CUnsyncedLuaHandle::Init(const std::string& code, const std::string& file)
 	lua_pushnil(L); lua_setglobal(L, "loadstring"); // replaced
 	lua_pushnil(L); lua_setglobal(L, "require");
 
-	lua_pushvalue(L, LUA_GLOBALSINDEX);
+	lua_pushglobaltable(L);
 
 	AddBasicCalls(L);
 
@@ -395,13 +395,13 @@ bool CSyncedLuaHandle::Init(const std::string& code, const std::string& file)
 	lua_pushnil(L); lua_setglobal(L, "gcinfo");
 	lua_pushnil(L); lua_setglobal(L, "collectgarbage");
 
-	lua_pushvalue(L, LUA_GLOBALSINDEX);
+	lua_pushglobaltable(L);
 	LuaPushNamedCFunc(L, "loadstring", CSplitLuaHandle::LoadStringData);
 	LuaPushNamedCFunc(L, "pairs", SyncedPairs);
 	LuaPushNamedCFunc(L, "next",  SyncedNext);
 	lua_pop(L, 1);
 
-	lua_pushvalue(L, LUA_GLOBALSINDEX);
+	lua_pushglobaltable(L);
 
 	AddBasicCalls(L); // into Global
 

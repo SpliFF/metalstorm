@@ -27,7 +27,12 @@ static spring::mutex gMutex;
 
 size_t LuaMemPool::GetPoolCount() { return (gCount.load()); }
 
-LuaMemPool* LuaMemPool::GetSharedPtr() { return gSharedPool; }
+LuaMemPool* LuaMemPool::GetSharedPtr() {
+	if (gSharedPool == nullptr) {
+		gSharedPool = new(gSharedPoolMem.data()) LuaMemPool(false);
+	}
+	return gSharedPool;
+}
 LuaMemPool* LuaMemPool::AcquirePtr(bool shared, bool owned)
 {
 	LuaMemPool* p = GetSharedPtr();

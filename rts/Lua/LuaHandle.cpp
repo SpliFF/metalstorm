@@ -518,7 +518,7 @@ bool CLuaHandle::HasCallIn(lua_State* L, const string& name) const
 // 	const bool found = !lua_isfunction(L, -1);
 // 	lua_pop(L, 1);
 
-	lua_pushvalue(L, LUA_GLOBALSINDEX);
+	lua_pushglobaltable(L);
 	lua_pushsstring(L, name); // push the function name
 	lua_rawget(L, -2);        // get the function
 	const bool found = lua_isfunction(L, -1);
@@ -2602,7 +2602,7 @@ int CLuaHandle::CallOutGetSelectTeam(lua_State* L)
 int CLuaHandle::CallOutGetGlobal(lua_State* L)
 {
 	if (devMode) {
-		lua_pushvalue(L, LUA_GLOBALSINDEX);
+		lua_pushglobaltable(L);
 		return 1;
 	}
 	return 0;

@@ -1,19 +1,7 @@
 procs:
   server:
-    shell: >
-      ./build/debug/spring-server
-      --port ${GAME_SERVER_PORT:-8011}
-      --game content/games/papertanks
-      --map content/maps/scorched_crossing_v2.4
-      --db data/spring-server.db
-    env:
-      GAME_SERVER_PORT: "${GAME_SERVER_PORT:-8011}"
-    stop:
-      signal: SIGINT
+    shell: "./build/debug/spring-server --port 8011 --game content/games/papertanks --map content/maps/scorched_crossing_v2.4 --db data/spring-server.db"
+    stop: SIGINT
 
   client:
-    shell: >
-      cd client && npx vite dev --port ${WEB_SERVER_PORT:-8012}
-    env:
-      GAME_SERVER_PORT: "${GAME_SERVER_PORT:-8011}"
-      WEB_SERVER_PORT: "${WEB_SERVER_PORT:-8012}"
+    shell: "cd client && GAME_SERVER_PORT=8011 npx vite dev --port 8012"

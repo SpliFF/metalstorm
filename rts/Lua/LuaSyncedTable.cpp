@@ -29,7 +29,7 @@ static int SyncTableIndex(lua_State* dstL)
 	const int dstTop = lua_gettop(dstL);
 
 	// copy the index & get value
-	lua_pushvalue(srcL, LUA_GLOBALSINDEX);
+	lua_pushglobaltable(srcL);
 	const int keyCopied = LuaUtils::CopyData(srcL, dstL, 1);
 	assert(keyCopied > 0);
 	lua_rawget(srcL, -2);

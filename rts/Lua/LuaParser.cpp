@@ -124,6 +124,17 @@ void LuaParser::SetupEnv(bool isSyncedCtxt, bool isDefsParser)
 {
 	LuaLibs::OpenSynced(L, false);
 
+	// Lua 5.1 compat: register functions removed in 5.2+
+	// Spring's base Lua scripts (system.lua, mapinfo.lua) use these.
+	luaL_dostring(L,
+		"unpack = unpack or table.unpack\n"
+		"loadstring = loadstring or load\n"
+		"if not setfenv then\n"
+		"  setfenv = function(f, t) return f end\n"
+		"  getfenv = function(f) return _G end\n"
+		"end\n"
+	);
+
 	// delete some dangerous/unsynced functions
 	lua_pushnil(L); lua_setglobal(L, "dofile");
 	lua_pushnil(L); lua_setglobal(L, "loadfile");
@@ -311,7 +322,7 @@ void LuaParser::PushParam()
 	if (initDepth > 0) {
 		lua_rawset(L, -3);
 	} else {
-		lua_rawset(L, LUA_GLOBALSINDEX);
+		lua_rawset_global(L);
 	}
 }
 
@@ -327,7 +338,7 @@ void LuaParser::GetTable(const std::string& name, bool overwrite)
 		lua_newtable(L);
 	} else {
 		lua_pushsstring(L, name);
-		lua_gettable(L, (initDepth == 0) ? LUA_GLOBALSINDEX : -3);
+		if (initDepth == 0) { lua_gettable_global(L); } else { lua_gettable(L, -3); }
 		if (!lua_istable(L, -1)) {
 			lua_pop(L, 1);
 			lua_newtable(L);
@@ -349,7 +360,7 @@ void LuaParser::GetTable(int index, bool overwrite)
 		lua_newtable(L);
 	} else {
 		lua_pushnumber(L, index);
-		lua_gettable(L, (initDepth == 0) ? LUA_GLOBALSINDEX : -3);
+		if (initDepth == 0) { lua_gettable_global(L); } else { lua_gettable(L, -3); }
 		if (!lua_istable(L, -1)) {
 			lua_pop(L, 1);
 			lua_newtable(L);
