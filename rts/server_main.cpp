@@ -29,6 +29,7 @@
 #include <csignal>
 #include <cstdio>
 #include <atomic>
+#include <fstream>
 #include <chrono>
 #include <filesystem>
 #include <random>
@@ -193,6 +194,27 @@ int main(int argc, char* argv[])
 
     CSimulation sim;
     sim.Init(smfPath);
+
+    // --- Load AI for team 1 ---
+    {
+        // Try to load the Paper Tanks AI script
+        std::string aiScriptPath;
+        if (!gamePath.empty())
+            aiScriptPath = gamePath + "/ai/basic_ai.lua";
+
+        if (!aiScriptPath.empty()) {
+            std::ifstream aiFile(aiScriptPath);
+            if (aiFile.is_open()) {
+                std::string aiCode((std::istreambuf_iterator<char>(aiFile)),
+                                    std::istreambuf_iterator<char>());
+                if (aiPool.AddAI("PaperTanksAI", 1, 1, aiCode)) {
+                    std::fprintf(stderr, "[spring-server] AI loaded for team 1\n");
+                }
+            } else {
+                std::fprintf(stderr, "[spring-server] no AI script found at %s\n", aiScriptPath.c_str());
+            }
+        }
+    }
 
     // --- Fixed-timestep loop at GAME_SPEED Hz (30 Hz) ---
     const auto tickInterval = std::chrono::microseconds(1'000'000 / GAME_SPEED);
@@ -538,6 +560,33 @@ int main(int argc, char* argv[])
         }
 
         sim.SimFrame();
+
+        // Check win condition every ~1s (30 ticks) after frame 30
+        static int winningTeam = -1;
+        {
+        int frame = sim.GetFrameNum();
+        if (frame > 30 && (frame % 30) == 0 && winningTeam < 0) {
+            // Count alive units per team
+            int alive[2] = {0, 0};
+            const auto& activeUnits = unitHandler.GetActiveUnits();
+            for (CUnit* u : activeUnits) {
+                if (u && !u->isDead && u->team >= 0 && u->team < 2)
+                    alive[u->team]++;
+            }
+
+            if (alive[0] == 0 && alive[1] > 0) winningTeam = 1;
+            else if (alive[1] == 0 && alive[0] > 0) winningTeam = 0;
+
+            if (winningTeam >= 0) {
+                std::fprintf(stderr, "[spring-server] GAME OVER: team %d wins (frame %d)\n",
+                    winningTeam, frame);
+                // Broadcast GameInfo with paused=true to signal game over
+                auto gameOver = Protocol::BuildGameInfo("", "", 0.0f,
+                    static_cast<uint32_t>(frame), true);
+                net.Broadcast(gameOver.data(), gameOver.size());
+            }
+        }
+        }
 
         // Send entity state to connected clients every 3 ticks (~10 Hz)
         // Full snapshot every 30 ticks (~1s), delta updates otherwise.

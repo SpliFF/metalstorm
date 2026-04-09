@@ -117,6 +117,18 @@ inline std::vector<uint8_t> BuildEntityDestroy(uint32_t entityId, uint8_t destru
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_EntityDestroy, destroy.Union());
 }
 
+/// Build a GameInfo message (map, game, speed, frame, paused).
+inline std::vector<uint8_t> BuildGameInfo(
+    const std::string& mapName, const std::string& gameName,
+    float speed, uint32_t frame, bool paused)
+{
+    flatbuffers::FlatBufferBuilder fbb(256);
+    auto mapOff = fbb.CreateString(mapName);
+    auto gameOff = fbb.CreateString(gameName);
+    auto info = SpringWeb::CreateGameInfo(fbb, mapOff, gameOff, speed, frame, paused);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameInfo, info.Union());
+}
+
 /// Build a RoomStateUpdate message.
 inline std::vector<uint8_t> BuildRoomStateUpdate(const GameRoom& room) {
     flatbuffers::FlatBufferBuilder fbb(512);

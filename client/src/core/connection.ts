@@ -21,6 +21,7 @@ import { AuthStatus } from '../protocol/spring-web/auth-status.js';
 import { GameEventBatch } from '../protocol/spring-web/game-event-batch.js';
 import { CombatEvent } from '../protocol/spring-web/combat-event.js';
 import { EntityDestroy } from '../protocol/spring-web/entity-destroy.js';
+import { GameInfo } from '../protocol/spring-web/game-info.js';
 import { ServerClock } from './clock.js';
 import { parseEntityState, type EntityStateSnapshot } from './entity-state.js';
 
@@ -51,6 +52,7 @@ export interface ConnectionEvents {
     onEntityState?: (snapshot: EntityStateSnapshot, isDelta: boolean) => void;
     onCombatEvents?: (events: CombatEventInfo[], frame: number) => void;
     onEntityDestroy?: (entityId: number, x: number, y: number, z: number) => void;
+    onGameOver?: (frame: number) => void;
     onServerMessage?: (msg: ServerMessage) => void;
 }
 
@@ -230,6 +232,13 @@ export class Connection {
             case ServerPayload.EntityDestroy:
                 this.handleEntityDestroy(msg);
                 break;
+            case ServerPayload.GameInfo: {
+                const info = msg.payload(new GameInfo()) as GameInfo;
+                if (info.paused()) {
+                    this.events.onGameOver?.(info.frame());
+                }
+                break;
+            }
             default:
                 this.events.onServerMessage?.(msg);
                 break;

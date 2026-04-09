@@ -111,6 +111,54 @@ function sendCameraViewport(camera: FreeCamera, connection: Connection): void {
 
 let currentFrame = 0;
 
+function showGameOver(frame: number): void {
+    const overlay = document.createElement('div');
+    overlay.id = 'game-over-overlay';
+    overlay.innerHTML = `
+        <div class="game-over-card">
+            <h1>Game Over</h1>
+            <p>Battle ended at frame ${frame}</p>
+            <button id="return-lobby-btn">Return to Lobby</button>
+        </div>
+    `;
+    overlay.style.cssText = `
+        position: fixed; inset: 0; z-index: 200;
+        background: rgba(0,0,0,0.75);
+        display: flex; align-items: center; justify-content: center;
+        font-family: system-ui, sans-serif; color: #e0e0e0;
+    `;
+    const cardStyle = document.createElement('style');
+    cardStyle.textContent = `
+        .game-over-card {
+            background: #16213e; border-radius: 12px; padding: 40px;
+            text-align: center; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+        }
+        .game-over-card h1 { color: #f07; margin: 0 0 12px; }
+        .game-over-card p { color: #888; margin: 0 0 24px; }
+        .game-over-card button {
+            padding: 12px 28px; border: none; border-radius: 6px;
+            background: #4cc9f0; color: #0f1626; font-weight: 600;
+            cursor: pointer; font-size: 15px;
+        }
+    `;
+    document.head.appendChild(cardStyle);
+    document.body.appendChild(overlay);
+
+    document.getElementById('return-lobby-btn')!.onclick = () => {
+        overlay.remove();
+        // Hide game, show lobby
+        const canvas = document.getElementById('game-canvas') as HTMLCanvasElement;
+        canvas.style.display = 'none';
+        const hud = document.getElementById('game-hud');
+        if (hud) hud.style.display = 'none';
+        engine?.stopRenderLoop();
+        engine?.dispose();
+        engine = null;
+        lobbyUI?.showBrowser();
+        lobbyUI?.show();
+    };
+}
+
 function startGame(connection: Connection): void {
     showHUD();
 
@@ -160,6 +208,9 @@ function startGame(connection: Connection): void {
                 attackerId: 0, targetId: entityId, weaponDefId: 0,
                 result: 3, damage: 500, x, y, z,
             }]);
+        },
+        onGameOver(frame) {
+            showGameOver(frame);
         },
     });
 
