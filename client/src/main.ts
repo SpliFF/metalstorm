@@ -10,9 +10,11 @@ import { CombatFX } from './core/combat-fx.js';
 import { AudioManager } from './core/audio.js';
 import { InputManager } from './core/input-manager.js';
 import { loadTerrain } from './core/terrain.js';
+import { loadTerrainTexture } from './core/terrain-texture.js';
 import { LobbyUI } from './lobby/lobby-ui.js';
 import { Minimap } from './core/minimap.js';
 import { Connection } from './core/connection.js';
+import { CONFIG } from './config.js';
 
 let engine: Engine | null = null;
 let entityRenderer: EntityRenderer | null = null;
@@ -256,10 +258,29 @@ async function startGame(gameServerPort: number): Promise<void> {
 
     canvas.addEventListener('click', () => audioManager?.resume(), { once: true });
 
-    // Load terrain from game server
-    loadTerrain(scene, gameHttpUrl).then((mesh) => {
-        if (mesh) console.log('[client] terrain loaded');
-    });
+    // Load terrain heightmap mesh from game server
+    const terrainMesh = await loadTerrain(scene, gameHttpUrl);
+    if (terrainMesh) console.log('[client] terrain heightmap loaded');
+
+    // Load map textures from lobby server (KTX2 chunks processed at startup)
+    // We need the map ID — extract from the room's mapName
+    // For now, use a placeholder; the lobby URL serves processed data
+    const lobbyHttpUrl = `http://${host}:${CONFIG.gameServerPort}`;
+    // TODO: get map ID from room state. For now try all maps endpoint
+    try {
+        const mapsResp = await fetch(`${lobbyHttpUrl}/api/maps`);
+        if (mapsResp.ok) {
+            const maps = await mapsResp.json();
+            if (maps.length > 0) {
+                const mapId = maps[0].id; // use first map for now
+                const mapDataUrl = `${lobbyHttpUrl}/api/maps/data/${mapId}`;
+                loadTerrainTexture(scene, mapDataUrl, terrainMesh ?? undefined).then(chunks => {
+                    if (chunks.length > 0)
+                        console.log(`[client] loaded ${chunks.length} map texture chunks`);
+                });
+            }
+        }
+    } catch { /* lobby not reachable from game context — texture loading skipped */ }
 
     // Input
     inputManager = new InputManager(scene, camera, entityRenderer, gameConn,
