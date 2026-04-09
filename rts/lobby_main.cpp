@@ -13,8 +13,9 @@
 #include "Server/Database.h"
 #include "Server/ClientSession.h"
 #include "Server/RoomManager.h"
-#include "Server/RatingSystem.h"
-#include "Server/PerfMetrics.h"
+#include "Server/MapProcessor.h"
+
+#include <sqlite3.h>
 
 #include <csignal>
 #include <cstdio>
@@ -220,13 +221,77 @@ int main(int argc, char* argv[])
     SessionManager sessions;
     RoomManager rooms;
 
+    // --- Map processing ---
+    // Access the raw sqlite3* handle for MapProcessor
+    // (Database wrapper doesn't expose it, so we open a second connection)
+    sqlite3* mapDb = nullptr;
+    sqlite3_open(dbPath.c_str(), &mapDb);
+    {
+        MapProcessor mapProc;
+        mapProc.ScanAndProcess(mapsDir, "data", mapDb);
+    }
+
     // --- Game server instances ---
     std::unordered_map<uint32_t, GameServerInstance> gameServers; // roomId → instance
 
     // --- Network ---
     NetworkServer net;
 
-    // Available maps endpoint
+    // Maps endpoint — serves from SQLite
+    net.AddHttpGet("/api/maps", [mapDb](const std::string&) -> HttpResponse {
+        MapProcessor proc;
+        auto maps = proc.GetAllMaps(mapDb);
+        std::string json = "[";
+        bool first = true;
+        for (const auto& m : maps) {
+            if (!first) json += ",";
+            first = false;
+            char buf[512];
+            snprintf(buf, sizeof(buf),
+                "{\"id\":\"%s\",\"name\":\"%s\",\"mapx\":%d,\"mapy\":%d,"
+                "\"widthElmos\":%d,\"heightElmos\":%d,"
+                "\"minHeight\":%.1f,\"maxHeight\":%.1f,"
+                "\"tilesX\":%d,\"tilesZ\":%d}",
+                m.id.c_str(), m.name.c_str(), m.mapx, m.mapy,
+                m.widthElmos, m.heightElmos, m.minHeight, m.maxHeight,
+                m.tilesX, m.tilesZ);
+            json += buf;
+        }
+        json += "]";
+        std::vector<uint8_t> body(json.begin(), json.end());
+        return {.contentType = "application/json", .body = std::move(body), .status = 200};
+    });
+
+    // Serve processed map files (KTX2 textures, layout.json, etc.)
+    net.AddHttpGet("/api/maps/data/*", [](const std::string& url) -> HttpResponse {
+        // URL: /api/maps/data/{mapId}/{filename}
+        std::string rest = url.substr(std::string("/api/maps/data/").size());
+        std::string filePath = "data/maps/" + rest;
+
+        // Security: reject path traversal
+        if (filePath.find("..") != std::string::npos)
+            return {.contentType = "text/plain", .body = {}, .status = 403};
+
+        namespace fs = std::filesystem;
+        if (!fs::exists(filePath) || !fs::is_regular_file(filePath))
+            return {.contentType = "text/plain", .body = {}, .status = 404};
+
+        std::ifstream f(filePath, std::ios::binary);
+        std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
+                                   std::istreambuf_iterator<char>());
+
+        // Content type from extension
+        std::string ext = fs::path(filePath).extension().string();
+        std::string ct = "application/octet-stream";
+        if (ext == ".ktx2") ct = "image/ktx2";
+        else if (ext == ".json") ct = "application/json";
+        else if (ext == ".png") ct = "image/png";
+
+        return {.contentType = ct, .body = std::move(data), .status = 200};
+    });
+
+    // Map thumbnail — serve minimap.ktx2 or fall back to BMP extraction
+    // (replaces the old /api/maps/thumb/* endpoint)
     net.AddHttpGet("/api/maps", [&mapsDir](const std::string&) -> HttpResponse {
         namespace fs = std::filesystem;
         std::string json = "[";

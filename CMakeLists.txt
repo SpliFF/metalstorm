@@ -181,6 +181,7 @@ set(LOBBY_SERVER_SOURCES
     rts/Server/PerfMetrics.cpp
     rts/Server/RatingSystem.cpp
     rts/Server/RoomManager.cpp
+    rts/Server/MapProcessor.cpp
 )
 set(LOBBY_LOG_SOURCES
     rts/System/Log/Backend.cpp
