@@ -117,6 +117,12 @@ table RoomKick {
 
 table RoomStartGame {}
 
+/// Host-only request to end a running game. Terminates the spring-server
+/// subprocess for this room; the room transitions to Ended when the
+/// process is reaped by the lobby health-check loop. Ignored if the
+/// sender is not the room host or the room is not in an active state.
+table RoomEndGame {}
+
 // Union of all client→server message types
 union ClientPayload {
     Handshake,
@@ -134,6 +140,7 @@ union ClientPayload {
     RoomReady,
     RoomKick,
     RoomStartGame,
+    RoomEndGame,
 }
 
 table ClientMessage {

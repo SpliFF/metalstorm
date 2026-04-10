@@ -695,6 +695,45 @@ int main(int argc, char* argv[])
                     }
                     break;
                 }
+                case SpringWeb::ClientPayload_RoomEndGame: {
+                    // Host-only: terminate a running game subprocess.
+                    // Authorisation: sender must be the room host, and
+                    // the room must be in a game-in-progress state
+                    // (Loading or Active). We kill the subprocess via
+                    // SIGTERM; the health-check loop below reaps it and
+                    // transitions the room to Ended, which broadcasts
+                    // the room update to all remaining clients.
+                    REQUIRE_SESSION(session);
+                    auto* room = rooms.FindRoomByClient(msg.clientId);
+                    if (!room) break;
+                    if (room->hostPlayerId != static_cast<uint32_t>(session->userId)) {
+                        std::fprintf(stderr,
+                            "[lobby] RoomEndGame rejected: user %lld not host of room %u\n",
+                            static_cast<long long>(session->userId), room->id);
+                        break;
+                    }
+                    if (room->state != ERoomState::Loading &&
+                        room->state != ERoomState::Active) {
+                        std::fprintf(stderr,
+                            "[lobby] RoomEndGame rejected: room %u not in game state\n",
+                            room->id);
+                        break;
+                    }
+                    auto it = gameServers.find(room->id);
+                    if (it != gameServers.end() && isProcessAlive(it->second.pid)) {
+                        kill(it->second.pid, SIGTERM);
+                        std::fprintf(stderr,
+                            "[lobby] host ended game for room %u (pid %d)\n",
+                            room->id, it->second.pid);
+                    } else {
+                        // No subprocess to kill — transition the room
+                        // directly. Unusual but shouldn't leave the
+                        // room stuck in Loading/Active forever.
+                        rooms.SetRoomState(room->id, ERoomState::Ended);
+                        BROADCAST_ROOM_UPDATE(room);
+                    }
+                    break;
+                }
                 default:
                     break;
 

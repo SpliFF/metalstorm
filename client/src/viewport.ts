@@ -21,6 +21,12 @@ const params = new URLSearchParams(window.location.search);
 const mapWidth = parseInt(params.get('mapW') ?? '8192');
 const mapHeight = parseInt(params.get('mapH') ?? '8192');
 const token = params.get('token') ?? localStorage.getItem('springrts-session-token') ?? '';
+// Port of the game server this viewport should connect to. Passed by
+// Minimap.detach() as a URL param; falls back to localStorage (set by
+// the lobby when the player joined a game), and finally to the default
+// lobby URL as a last resort. Without this, the viewport connects to
+// the lobby server and never receives any entity state.
+const gamePort = params.get('port') ?? localStorage.getItem('springrts-game-port') ?? '';
 
 const statusEl = document.getElementById('viewport-status')!;
 const canvas = document.getElementById('viewport-canvas') as HTMLCanvasElement;
@@ -48,8 +54,10 @@ try {
     };
 } catch { /* ok */ }
 
-// Connection
-const serverUrl = CONFIG.wsUrl;
+// Connection. Prefer the game server URL built from the port param;
+// fall back to CONFIG.wsUrl (lobby) only if no game is active.
+const host = window.location.hostname || 'localhost';
+const serverUrl = gamePort ? `ws://${host}:${gamePort}` : CONFIG.wsUrl;
 const connection = new Connection({
     onStateChange(state) {
         statusEl.textContent = state;

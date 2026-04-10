@@ -33,6 +33,7 @@ export { ReconnectRequest, ReconnectRequestT } from './spring-web/reconnect-requ
 export { ReconnectResponse, ReconnectResponseT } from './spring-web/reconnect-response.js';
 export { ResourceUpdate, ResourceUpdateT } from './spring-web/resource-update.js';
 export { RoomCreate, RoomCreateT } from './spring-web/room-create.js';
+export { RoomEndGame, RoomEndGameT } from './spring-web/room-end-game.js';
 export { RoomJoin, RoomJoinT } from './spring-web/room-join.js';
 export { RoomKick, RoomKickT } from './spring-web/room-kick.js';
 export { RoomLeave, RoomLeaveT } from './spring-web/room-leave.js';

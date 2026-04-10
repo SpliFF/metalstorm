@@ -290,7 +290,19 @@ export class Minimap {
     /** Open this minimap in a detached browser window. */
     detach(): Window | null {
         const token = localStorage.getItem('springrts-session-token') ?? '';
-        const url = `/viewport.html?mapW=${this.mapWidth}&mapH=${this.mapHeight}&token=${encodeURIComponent(token)}`;
+        // The detached viewport needs to connect to the *game server*, not
+        // the lobby — otherwise it authenticates fine but never receives
+        // any entity state. startGame() persists the game server port to
+        // localStorage; pass it through as a URL param for the viewport
+        // page to consume.
+        const gamePort = localStorage.getItem('springrts-game-port') ?? '';
+        const params = new URLSearchParams({
+            mapW: String(this.mapWidth),
+            mapH: String(this.mapHeight),
+            token,
+        });
+        if (gamePort) params.set('port', gamePort);
+        const url = `/viewport.html?${params.toString()}`;
         return window.open(url, 'springrts-minimap',
             `width=${this.canvasSize + 20},height=${this.canvasSize + 20},resizable=yes`);
     }

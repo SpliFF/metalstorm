@@ -11,6 +11,7 @@ import { RoomJoin } from '../protocol/spring-web/room-join.js';
 import { RoomReady } from '../protocol/spring-web/room-ready.js';
 import { RoomTeamSelect } from '../protocol/spring-web/room-team-select.js';
 import { RoomStartGame } from '../protocol/spring-web/room-start-game.js';
+import { RoomEndGame } from '../protocol/spring-web/room-end-game.js';
 import { RoomLeave } from '../protocol/spring-web/room-leave.js';
 import { ServerMessage } from '../protocol/spring-web/server-message.js';
 import { ServerPayload } from '../protocol/spring-web/server-payload.js';
@@ -198,6 +199,19 @@ export class LobbyUI {
         this.connection.connect(CONFIG.wsUrl, user, pass);
     }
 
+    /// Land on the most appropriate lobby screen after the game canvas
+    /// is hidden (e.g. after the user clicks Quit mid-game). If the
+    /// player is still a member of a room, show the room view so the
+    /// host still has access to the End Game button — otherwise show
+    /// the room browser.
+    showAfterGame(): void {
+        if (this.currentRoom) {
+            this.showRoom();
+        } else {
+            this.showBrowser();
+        }
+    }
+
     showBrowser(): void {
         this.currentScreen = 'browser';
         this.currentRoom = null;
@@ -325,6 +339,10 @@ export class LobbyUI {
         const stateLabels = ['Setup', 'Waiting', 'Ready Check', 'Loading', 'In Progress', 'Ended'];
         const myPlayer = r.players.find(p => p.playerId === this.myPlayerId);
         const amHost = myPlayer?.isHost ?? false;
+        // Room is considered "running" once the host has clicked Start
+        // Game — either Loading (3) or Active/In Progress (4).
+        const gameRunning = r.state === 3 || r.state === 4;
+        const preGame = r.state < 3;
 
         this.container.innerHTML = `
             <div class="lobby-panel">
@@ -352,15 +370,29 @@ export class LobbyUI {
                 </div>
 
                 <div class="room-actions">
-                    <button id="ready-btn" class="${myPlayer?.ready ? 'secondary' : ''}">${myPlayer?.ready ? 'Unready' : 'Ready'}</button>
-                    ${amHost ? '<button id="start-btn" class="primary">Start Game</button>' : ''}
+                    ${preGame ? `<button id="ready-btn" class="${myPlayer?.ready ? 'secondary' : ''}">${myPlayer?.ready ? 'Unready' : 'Ready'}</button>` : ''}
+                    ${preGame && amHost ? '<button id="start-btn" class="primary">Start Game</button>' : ''}
+                    ${gameRunning ? '<button id="rejoin-btn" class="primary">Rejoin Game</button>' : ''}
+                    ${gameRunning && amHost ? '<button id="endgame-btn" class="danger">End Game</button>' : ''}
                 </div>
             </div>
         `;
 
         document.getElementById('leave-btn')!.onclick = () => this.sendLeave();
-        document.getElementById('ready-btn')!.onclick = () => this.sendReady(!myPlayer?.ready);
-        document.getElementById('start-btn')?.addEventListener('click', () => this.sendStartGame());
+        document.getElementById('ready-btn')?.addEventListener('click',
+            () => this.sendReady(!myPlayer?.ready));
+        document.getElementById('start-btn')?.addEventListener('click',
+            () => this.sendStartGame());
+        document.getElementById('rejoin-btn')?.addEventListener('click', () => {
+            if (this.currentRoom && this.currentRoom.gameServerPort > 0) {
+                this.onGameStart?.(this.currentRoom.gameServerPort);
+            }
+        });
+        document.getElementById('endgame-btn')?.addEventListener('click', () => {
+            if (confirm('End the game for everyone?')) {
+                this.sendEndGame();
+            }
+        });
 
         this.container.querySelectorAll('.team-select').forEach(sel => {
             (sel as HTMLSelectElement).onchange = (e) => {
@@ -424,6 +456,18 @@ export class LobbyUI {
         const b = new flatbuffers.Builder(16);
         RoomStartGame.startRoomStartGame(b);
         this.connection.sendClientMessage(b, ClientPayload.RoomStartGame, RoomStartGame.endRoomStartGame(b));
+    }
+
+    /// Host-only: tell the lobby to terminate the game server subprocess
+    /// for this room. The server validates that the sender is the host;
+    /// the room transitions to Ended via the existing health-check loop
+    /// once the subprocess exits. Non-host senders are silently ignored
+    /// by the server.
+    private sendEndGame(): void {
+        if (!this.connection?.authenticated) return;
+        const b = new flatbuffers.Builder(16);
+        RoomEndGame.startRoomEndGame(b);
+        this.connection.sendClientMessage(b, ClientPayload.RoomEndGame, RoomEndGame.endRoomEndGame(b));
     }
 
     // ===================== HANDLERS =====================
@@ -520,6 +564,8 @@ export class LobbyUI {
             button.secondary:hover { background:#445; }
             button.primary { background:#06d6a0; }
             button.primary:hover { background:#0be5af; }
+            button.danger { background:#aa3333; color:#fff; }
+            button.danger:hover { background:#cc3333; }
             .msg { font-size:13px; min-height:20px; margin:0; }
             .msg.error { color:#f07; }
             .hint { font-size:11px; color:#555; margin:0; }

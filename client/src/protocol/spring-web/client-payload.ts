@@ -10,6 +10,7 @@ import { Ping, PingT } from '../spring-web/ping.js';
 import { PlayerCommand, PlayerCommandT } from '../spring-web/player-command.js';
 import { ReconnectRequest, ReconnectRequestT } from '../spring-web/reconnect-request.js';
 import { RoomCreate, RoomCreateT } from '../spring-web/room-create.js';
+import { RoomEndGame, RoomEndGameT } from '../spring-web/room-end-game.js';
 import { RoomJoin, RoomJoinT } from '../spring-web/room-join.js';
 import { RoomKick, RoomKickT } from '../spring-web/room-kick.js';
 import { RoomLeave, RoomLeaveT } from '../spring-web/room-leave.js';
@@ -35,13 +36,14 @@ export enum ClientPayload {
   RoomTeamSelect = 12,
   RoomReady = 13,
   RoomKick = 14,
-  RoomStartGame = 15
+  RoomStartGame = 15,
+  RoomEndGame = 16
 }
 
 export function unionToClientPayload(
   type: ClientPayload,
-  accessor: (obj:Ack|AuthRequest|ChatSend|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomCreate|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomStartGame|RoomTeamSelect|ViewportUpdate) => Ack|AuthRequest|ChatSend|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomCreate|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomStartGame|RoomTeamSelect|ViewportUpdate|null
-): Ack|AuthRequest|ChatSend|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomCreate|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomStartGame|RoomTeamSelect|ViewportUpdate|null {
+  accessor: (obj:Ack|AuthRequest|ChatSend|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomStartGame|RoomTeamSelect|ViewportUpdate) => Ack|AuthRequest|ChatSend|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomStartGame|RoomTeamSelect|ViewportUpdate|null
+): Ack|AuthRequest|ChatSend|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomStartGame|RoomTeamSelect|ViewportUpdate|null {
   switch(ClientPayload[type]) {
     case 'NONE': return null; 
     case 'Handshake': return accessor(new Handshake())! as Handshake;
@@ -59,15 +61,16 @@ export function unionToClientPayload(
     case 'RoomReady': return accessor(new RoomReady())! as RoomReady;
     case 'RoomKick': return accessor(new RoomKick())! as RoomKick;
     case 'RoomStartGame': return accessor(new RoomStartGame())! as RoomStartGame;
+    case 'RoomEndGame': return accessor(new RoomEndGame())! as RoomEndGame;
     default: return null;
   }
 }
 
 export function unionListToClientPayload(
   type: ClientPayload, 
-  accessor: (index: number, obj:Ack|AuthRequest|ChatSend|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomCreate|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomStartGame|RoomTeamSelect|ViewportUpdate) => Ack|AuthRequest|ChatSend|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomCreate|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomStartGame|RoomTeamSelect|ViewportUpdate|null, 
+  accessor: (index: number, obj:Ack|AuthRequest|ChatSend|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomStartGame|RoomTeamSelect|ViewportUpdate) => Ack|AuthRequest|ChatSend|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomStartGame|RoomTeamSelect|ViewportUpdate|null, 
   index: number
-): Ack|AuthRequest|ChatSend|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomCreate|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomStartGame|RoomTeamSelect|ViewportUpdate|null {
+): Ack|AuthRequest|ChatSend|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomStartGame|RoomTeamSelect|ViewportUpdate|null {
   switch(ClientPayload[type]) {
     case 'NONE': return null; 
     case 'Handshake': return accessor(index, new Handshake())! as Handshake;
@@ -85,6 +88,7 @@ export function unionListToClientPayload(
     case 'RoomReady': return accessor(index, new RoomReady())! as RoomReady;
     case 'RoomKick': return accessor(index, new RoomKick())! as RoomKick;
     case 'RoomStartGame': return accessor(index, new RoomStartGame())! as RoomStartGame;
+    case 'RoomEndGame': return accessor(index, new RoomEndGame())! as RoomEndGame;
     default: return null;
   }
 }

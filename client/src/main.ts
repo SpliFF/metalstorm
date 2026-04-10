@@ -117,7 +117,13 @@ function quitToLobby(): void {
 
     // Tear down Babylon + the per-session helpers. Most of these hold
     // references to the engine/scene, so letting GC collect them is
-    // enough — we just drop our handles.
+    // enough — we just drop our handles. The minimap is an exception:
+    // it owns its own engine/canvas parented to #minimap-container,
+    // and that container persists across game sessions. Without an
+    // explicit dispose the next startGame() would append a second
+    // canvas to the container.
+    minimap?.dispose();
+    minimap = null;
     engine?.stopRenderLoop();
     engine?.dispose();
     engine = null;
@@ -125,7 +131,6 @@ function quitToLobby(): void {
     combatFX = null;
     audioManager = null;
     inputManager = null;
-    minimap = null;
 
     // Hide the game canvas and HUD. Any in-flight overlays (quit confirm,
     // game over) are removed here too so the lobby is the only thing left.
@@ -136,9 +141,12 @@ function quitToLobby(): void {
     document.getElementById('quit-confirm-overlay')?.remove();
     document.getElementById('game-over-overlay')?.remove();
 
-    // Show the lobby browser. The lobby WebSocket stayed connected the
-    // whole time — the player is simply back in the room list.
-    lobbyUI?.showBrowser();
+    // Show the lobby. The lobby WebSocket stayed connected the whole
+    // time. If the player is still a member of their room (the normal
+    // case after a mid-game quit) land on the room view so the host
+    // still sees the End Game button; otherwise fall through to the
+    // room browser.
+    lobbyUI?.showAfterGame();
     lobbyUI?.show();
 }
 

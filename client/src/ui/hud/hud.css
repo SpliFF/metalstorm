@@ -23,9 +23,15 @@
 }
 
 #hud-top-bar {
+    /* Span the full viewport width so we can right-align controls (quit,
+     * future game-speed, pause, etc.) on the far edge. The panel itself
+     * still opts back into pointer events so its buttons stay clickable;
+     * the gap between label spans is fixed, and `margin-left: auto` on
+     * the quit button pushes it to the right edge of the flex container. */
     position: absolute;
     top: 8px;
     left: 8px;
+    right: 8px;
     display: flex;
     gap: 24px;
     align-items: center;
