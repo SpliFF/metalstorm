@@ -18,6 +18,17 @@ import type { ParsedMapData } from './core/map-data.js';
 import { renderMapFeatures } from './core/feature-renderer.js';
 import { RTSCamera } from './core/rts-camera.js';
 import { LuaWidgetHost } from './core/lua-widget-host.js';
+import { injectStyle, renderTemplate } from './ui/ui.js';
+
+// UI templates + stylesheets. Each component lives under src/ui/<name>/
+// as plain .html + .css files so games can ship their own replacements.
+// Vite's `?raw` query returns the file contents as a string at build time.
+import hudHtml from './ui/hud/hud.html?raw';
+import hudCss from './ui/hud/hud.css?raw';
+import quitConfirmHtml from './ui/quit-confirm/quit-confirm.html?raw';
+import quitConfirmCss from './ui/quit-confirm/quit-confirm.css?raw';
+import gameOverHtml from './ui/game-over/game-over.html?raw';
+import gameOverCss from './ui/game-over/game-over.css?raw';
 
 let engine: Engine | null = null;
 let entityRenderer: EntityRenderer | null = null;
@@ -33,68 +44,17 @@ let gameConn: Connection | null = null;
 // --- HUD ---
 
 function createHUD(): void {
+    injectStyle('hud-style', hudCss);
+
     const hud = document.createElement('div');
     hud.id = 'game-hud';
     hud.style.display = 'none'; // hidden until game starts
-    hud.innerHTML = `
-        <div id="hud-top-bar" class="hud-panel">
-            <span id="hud-entities">Entities: 0</span>
-            <span id="hud-frame">Frame: 0</span>
-            <button id="hud-quit-btn" title="Quit to lobby (ESC)">Quit</button>
-        </div>
-        <div id="hud-selection" class="hud-panel">
-            <span id="hud-selected">No selection</span>
-        </div>
-        <div id="hud-minimap" class="hud-panel">
-            <div id="minimap-container"></div>
-            <button id="detach-minimap-btn" style="margin-top:4px;font-size:11px;padding:4px 8px;">Detach ↗</button>
-        </div>
-        <div id="hud-help" class="hud-panel">
-            Left click: select &nbsp; Right click: move/attack &nbsp; S: stop &nbsp; Shift: queue &nbsp; ESC: quit
-        </div>
-    `;
+    hud.innerHTML = hudHtml;
     document.body.appendChild(hud);
 
     document.getElementById('hud-quit-btn')?.addEventListener('click', () => {
         showQuitConfirm();
     });
-
-    const style = document.createElement('style');
-    style.textContent = `
-        #game-hud {
-            position: fixed; inset: 0; z-index: 10;
-            pointer-events: none;
-            font: 13px/1.4 system-ui, sans-serif; color: #e0e0e0;
-        }
-        .hud-panel {
-            pointer-events: auto;
-            background: rgba(0,0,0,0.7);
-            padding: 6px 12px; border-radius: 4px;
-        }
-        #hud-top-bar {
-            position: absolute; top: 8px; left: 8px;
-            display: flex; gap: 24px; align-items: center;
-        }
-        #hud-quit-btn {
-            pointer-events: auto;
-            padding: 4px 12px; margin-left: auto;
-            background: #552222; color: #f0c0c0;
-            border: 1px solid #882222; border-radius: 4px;
-            font: inherit; cursor: pointer;
-        }
-        #hud-quit-btn:hover { background: #772222; color: #fff; }
-        #hud-selection {
-            position: absolute; bottom: 48px; left: 8px; min-width: 200px;
-        }
-        #hud-minimap {
-            position: absolute; bottom: 48px; right: 8px;
-        }
-        #hud-help {
-            position: absolute; bottom: 8px; left: 8px; right: 8px;
-            text-align: center; font-size: 11px; color: #888;
-        }
-    `;
-    document.head.appendChild(style);
 }
 
 function showHUD(): void {
@@ -192,52 +152,13 @@ function showQuitConfirm(): void {
         return;
     }
 
+    injectStyle('quit-confirm-style', quitConfirmCss);
+
     const overlay = document.createElement('div');
     overlay.id = 'quit-confirm-overlay';
-    overlay.innerHTML = `
-        <div class="quit-card">
-            <h2>Quit to Lobby?</h2>
-            <p>Your game is still running. You can rejoin from the lobby.</p>
-            <div class="quit-buttons">
-                <button id="quit-cancel-btn">Cancel</button>
-                <button id="quit-confirm-btn">Quit to Lobby</button>
-            </div>
-        </div>
-    `;
-    overlay.style.cssText = `
-        position: fixed; inset: 0; z-index: 150;
-        background: rgba(0,0,0,0.7);
-        display: flex; align-items: center; justify-content: center;
-        font-family: system-ui, sans-serif; color: #e0e0e0;
-    `;
-
-    // One-shot style injection — guarded by an id so repeated quit
-    // prompts don't spam the head with duplicate <style> tags.
-    if (!document.getElementById('quit-confirm-style')) {
-        const style = document.createElement('style');
-        style.id = 'quit-confirm-style';
-        style.textContent = `
-            .quit-card {
-                background: #16213e; border-radius: 10px; padding: 28px 36px;
-                text-align: center; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
-                min-width: 320px;
-            }
-            .quit-card h2 { color: #e0e0e0; margin: 0 0 10px; font-size: 20px; }
-            .quit-card p { color: #888; margin: 0 0 20px; font-size: 13px; }
-            .quit-buttons { display: flex; gap: 10px; justify-content: center; }
-            .quit-buttons button {
-                padding: 10px 20px; border: none; border-radius: 5px;
-                font: inherit; font-weight: 600; cursor: pointer;
-            }
-            #quit-cancel-btn { background: #2a3a5a; color: #c0c0c0; }
-            #quit-cancel-btn:hover { background: #3a4a6a; color: #fff; }
-            #quit-confirm-btn { background: #aa3333; color: #fff; }
-            #quit-confirm-btn:hover { background: #cc3333; }
-        `;
-        document.head.appendChild(style);
-    }
-
+    overlay.innerHTML = quitConfirmHtml;
     document.body.appendChild(overlay);
+
     document.getElementById('quit-cancel-btn')?.addEventListener('click', () => {
         overlay.remove();
     });
@@ -247,41 +168,16 @@ function showQuitConfirm(): void {
 }
 
 function showGameOver(frame: number): void {
+    injectStyle('game-over-style', gameOverCss);
+
     const overlay = document.createElement('div');
     overlay.id = 'game-over-overlay';
-    overlay.innerHTML = `
-        <div class="game-over-card">
-            <h1>Game Over</h1>
-            <p>Battle ended at frame ${frame}</p>
-            <button id="return-lobby-btn">Return to Lobby</button>
-        </div>
-    `;
-    overlay.style.cssText = `
-        position: fixed; inset: 0; z-index: 200;
-        background: rgba(0,0,0,0.75);
-        display: flex; align-items: center; justify-content: center;
-        font-family: system-ui, sans-serif; color: #e0e0e0;
-    `;
-    const cardStyle = document.createElement('style');
-    cardStyle.textContent = `
-        .game-over-card {
-            background: #16213e; border-radius: 12px; padding: 40px;
-            text-align: center; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
-        }
-        .game-over-card h1 { color: #f07; margin: 0 0 12px; }
-        .game-over-card p { color: #888; margin: 0 0 24px; }
-        .game-over-card button {
-            padding: 12px 28px; border: none; border-radius: 6px;
-            background: #4cc9f0; color: #0f1626; font-weight: 600;
-            cursor: pointer; font-size: 15px;
-        }
-    `;
-    document.head.appendChild(cardStyle);
+    overlay.innerHTML = renderTemplate(gameOverHtml, { frame });
     document.body.appendChild(overlay);
 
-    document.getElementById('return-lobby-btn')!.onclick = () => {
+    document.getElementById('return-lobby-btn')?.addEventListener('click', () => {
         quitToLobby();
-    };
+    });
 }
 
 async function startGame(gameServerPort: number): Promise<void> {

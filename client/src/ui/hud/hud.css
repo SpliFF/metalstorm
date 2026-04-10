@@ -1,0 +1,77 @@
+/*
+ * In-game HUD overlay.
+ *
+ * The root #game-hud element is a full-viewport layer that lets clicks
+ * through by default (pointer-events: none); individual panels opt back
+ * in so their buttons and hover targets stay interactive.
+ */
+
+#game-hud {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    pointer-events: none;
+    font: 13px/1.4 system-ui, sans-serif;
+    color: #e0e0e0;
+}
+
+.hud-panel {
+    pointer-events: auto;
+    background: rgba(0, 0, 0, 0.7);
+    padding: 6px 12px;
+    border-radius: 4px;
+}
+
+#hud-top-bar {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    display: flex;
+    gap: 24px;
+    align-items: center;
+}
+
+#hud-quit-btn {
+    pointer-events: auto;
+    padding: 4px 12px;
+    margin-left: auto;
+    background: #552222;
+    color: #f0c0c0;
+    border: 1px solid #882222;
+    border-radius: 4px;
+    font: inherit;
+    cursor: pointer;
+}
+#hud-quit-btn:hover {
+    background: #772222;
+    color: #fff;
+}
+
+#hud-selection {
+    position: absolute;
+    bottom: 48px;
+    left: 8px;
+    min-width: 200px;
+}
+
+#hud-minimap {
+    position: absolute;
+    bottom: 48px;
+    right: 8px;
+}
+
+#detach-minimap-btn {
+    margin-top: 4px;
+    font-size: 11px;
+    padding: 4px 8px;
+}
+
+#hud-help {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    right: 8px;
+    text-align: center;
+    font-size: 11px;
+    color: #888;
+}

@@ -1,0 +1,44 @@
+/*
+ * Game over overlay — shown when the server signals onGameOver.
+ */
+
+#game-over-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    background: rgba(0, 0, 0, 0.75);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: system-ui, sans-serif;
+    color: #e0e0e0;
+}
+
+#game-over-overlay .game-over-card {
+    background: #16213e;
+    border-radius: 12px;
+    padding: 40px;
+    text-align: center;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+#game-over-overlay .game-over-card h1 {
+    color: #f07;
+    margin: 0 0 12px;
+}
+
+#game-over-overlay .game-over-card p {
+    color: #888;
+    margin: 0 0 24px;
+}
+
+#game-over-overlay .game-over-card button {
+    padding: 12px 28px;
+    border: none;
+    border-radius: 6px;
+    background: #4cc9f0;
+    color: #0f1626;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 15px;
+}

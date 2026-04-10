@@ -1,0 +1,71 @@
+/*
+ * Quit-to-lobby confirmation overlay.
+ *
+ * The #quit-confirm-overlay element is the full-viewport backdrop; the
+ * card inside it holds the copy and action buttons.
+ */
+
+#quit-confirm-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 150;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: system-ui, sans-serif;
+    color: #e0e0e0;
+}
+
+#quit-confirm-overlay .quit-card {
+    background: #16213e;
+    border-radius: 10px;
+    padding: 28px 36px;
+    text-align: center;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    min-width: 320px;
+}
+
+#quit-confirm-overlay .quit-card h2 {
+    color: #e0e0e0;
+    margin: 0 0 10px;
+    font-size: 20px;
+}
+
+#quit-confirm-overlay .quit-card p {
+    color: #888;
+    margin: 0 0 20px;
+    font-size: 13px;
+}
+
+#quit-confirm-overlay .quit-buttons {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+}
+
+#quit-confirm-overlay .quit-buttons button {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 5px;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+#quit-cancel-btn {
+    background: #2a3a5a;
+    color: #c0c0c0;
+}
+#quit-cancel-btn:hover {
+    background: #3a4a6a;
+    color: #fff;
+}
+
+#quit-confirm-btn {
+    background: #aa3333;
+    color: #fff;
+}
+#quit-confirm-btn:hover {
+    background: #cc3333;
+}
