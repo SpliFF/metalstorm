@@ -1,177 +1,184 @@
-// MapProcessor — SMF/SMT → PNG/KTX2 via external tools (magick, basisu).
+// MapProcessor — full map data extraction from SMF/SMT/mapinfo.lua.
 
 #include "MapProcessor.h"
+
+// Lua compiled as C++
+#include "lua.h"
+#include "lualib.h"
+#include "lauxlib.h"
+
+#include "System/FileSystem/LuaVFSSimple.h"
+#include "System/FileSystem/FileHandler.h"
+
 #include <sqlite3.h>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 
 namespace fs = std::filesystem;
 
-// SMF constants
 constexpr int SQUARE_SIZE = 8;
-constexpr int TILE_PIXELS = 32;
-constexpr int DXT1_BLOCK_SIZE = 8;
-constexpr int BLOCKS_PER_TILE = (32/4) * (32/4);
-constexpr int TILE_MIP0_SIZE = BLOCKS_PER_TILE * DXT1_BLOCK_SIZE; // 512
+constexpr int TILE_MIP0_SIZE = 512;
 constexpr int SMALL_TILE_SIZE = 680;
 
-static int bc1Size(int w, int h) {
-    return ((w+3)/4) * ((h+3)/4) * DXT1_BLOCK_SIZE;
-}
-
-/// Write a DDS file header for DXT1 data. This is a well-defined format
-/// that ImageMagick and other tools can read reliably.
-static bool writeDDS(const std::string& path, int width, int height,
-                     const uint8_t* dxt1Data, int dataSize) {
-    std::ofstream f(path, std::ios::binary);
-    if (!f.is_open()) return false;
-
-    uint8_t header[128] = {};
-    memcpy(header, "DDS ", 4);
-    auto w32 = [&](int off, uint32_t v) { memcpy(&header[off], &v, 4); };
-    w32(4, 124);  // dwSize
-    w32(8, 0x1 | 0x2 | 0x4 | 0x1000 | 0x80000); // flags
-    w32(12, height);
-    w32(16, width);
-    w32(20, dataSize); // pitchOrLinearSize
-    w32(76, 32); // pfSize
-    w32(80, 0x4); // pfFlags: FOURCC
-    memcpy(&header[84], "DXT1", 4);
-    w32(108, 0x1000); // caps: TEXTURE
-
-    f.write(reinterpret_cast<const char*>(header), 128);
-    f.write(reinterpret_cast<const char*>(dxt1Data), dataSize);
-    return f.good();
-}
-
-/// Run a shell command, return true if exit code 0.
-static bool runCmd(const std::string& cmd) {
-    int rc = std::system(cmd.c_str());
-    return (rc == 0);
-}
-
 // ============================================================
-// SQLite operations
+// Lua helpers for reading table fields
 // ============================================================
 
-void MapProcessor::EnsureTable(sqlite3* db) {
-    sqlite3_exec(db, R"(
-        CREATE TABLE IF NOT EXISTS maps (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            smf_path TEXT, smt_path TEXT,
-            mapx INTEGER, mapy INTEGER,
-            width_elmos INTEGER, height_elmos INTEGER,
-            min_height REAL, max_height REAL,
-            num_tiles INTEGER, tiles_x INTEGER, tiles_z INTEGER,
-            format_version INTEGER, processed_dir TEXT
-        );
-    )", nullptr, nullptr, nullptr);
-}
-
-void MapProcessor::StoreMetadata(sqlite3* db, const MapMetadata& m) {
-    sqlite3_stmt* stmt;
-    sqlite3_prepare_v2(db, R"(
-        INSERT OR REPLACE INTO maps
-        (id,name,smf_path,smt_path,mapx,mapy,width_elmos,height_elmos,
-         min_height,max_height,num_tiles,tiles_x,tiles_z,format_version,processed_dir)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    )", -1, &stmt, nullptr);
-    sqlite3_bind_text(stmt, 1, m.id.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, m.name.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 3, m.smfPath.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 4, m.smtPath.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 5, m.mapx);
-    sqlite3_bind_int(stmt, 6, m.mapy);
-    sqlite3_bind_int(stmt, 7, m.widthElmos);
-    sqlite3_bind_int(stmt, 8, m.heightElmos);
-    sqlite3_bind_double(stmt, 9, m.minHeight);
-    sqlite3_bind_double(stmt, 10, m.maxHeight);
-    sqlite3_bind_int(stmt, 11, m.numTiles);
-    sqlite3_bind_int(stmt, 12, m.tilesX);
-    sqlite3_bind_int(stmt, 13, m.tilesZ);
-    sqlite3_bind_int(stmt, 14, m.formatVersion);
-    sqlite3_bind_text(stmt, 15, m.processedDir.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-}
-
-std::vector<MapMetadata> MapProcessor::GetAllMaps(sqlite3* db) {
-    EnsureTable(db);
-    std::vector<MapMetadata> result;
-    sqlite3_stmt* stmt;
-    sqlite3_prepare_v2(db, "SELECT * FROM maps", -1, &stmt, nullptr);
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        MapMetadata m;
-        m.id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        m.name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-        m.smfPath = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-        m.smtPath = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-        m.mapx = sqlite3_column_int(stmt, 4);
-        m.mapy = sqlite3_column_int(stmt, 5);
-        m.widthElmos = sqlite3_column_int(stmt, 6);
-        m.heightElmos = sqlite3_column_int(stmt, 7);
-        m.minHeight = static_cast<float>(sqlite3_column_double(stmt, 8));
-        m.maxHeight = static_cast<float>(sqlite3_column_double(stmt, 9));
-        m.numTiles = sqlite3_column_int(stmt, 10);
-        m.tilesX = sqlite3_column_int(stmt, 11);
-        m.tilesZ = sqlite3_column_int(stmt, 12);
-        m.formatVersion = sqlite3_column_int(stmt, 13);
-        m.processedDir = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 14));
-        result.push_back(std::move(m));
-    }
-    sqlite3_finalize(stmt);
+static std::string luaGetString(lua_State* L, const char* field) {
+    lua_getfield(L, -1, field);
+    std::string result = lua_isstring(L, -1) ? lua_tostring(L, -1) : "";
+    lua_pop(L, 1);
     return result;
 }
 
-MapMetadata MapProcessor::GetMap(sqlite3* db, const std::string& mapId) {
-    EnsureTable(db);
-    MapMetadata m;
-    sqlite3_stmt* stmt;
-    sqlite3_prepare_v2(db, "SELECT * FROM maps WHERE id = ?", -1, &stmt, nullptr);
-    sqlite3_bind_text(stmt, 1, mapId.c_str(), -1, SQLITE_TRANSIENT);
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        m.id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        m.name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-        m.mapx = sqlite3_column_int(stmt, 4);
-        m.mapy = sqlite3_column_int(stmt, 5);
-        m.widthElmos = sqlite3_column_int(stmt, 6);
-        m.heightElmos = sqlite3_column_int(stmt, 7);
-        m.minHeight = static_cast<float>(sqlite3_column_double(stmt, 8));
-        m.maxHeight = static_cast<float>(sqlite3_column_double(stmt, 9));
-        m.tilesX = sqlite3_column_int(stmt, 11);
-        m.tilesZ = sqlite3_column_int(stmt, 12);
-        m.formatVersion = sqlite3_column_int(stmt, 13);
-        m.processedDir = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 14));
-    }
-    sqlite3_finalize(stmt);
-    return m;
+static float luaGetFloat(lua_State* L, const char* field, float def = 0) {
+    lua_getfield(L, -1, field);
+    float result = lua_isnumber(L, -1) ? static_cast<float>(lua_tonumber(L, -1)) : def;
+    lua_pop(L, 1);
+    return result;
 }
 
 // ============================================================
-// Map reading
+// mapinfo.lua parsing via Lua 5.4
 // ============================================================
 
-bool MapProcessor::ReadMapHeaders(const std::string& mapDir, MapMetadata& meta) {
+bool MapProcessor::ReadMapInfo(const std::string& mapDir, MapMetadata& meta) {
+    // Find SMF/SMT files
     for (auto& entry : fs::recursive_directory_iterator(mapDir)) {
         if (!entry.is_regular_file()) continue;
         auto ext = entry.path().extension().string();
         if (ext == ".smf" && meta.smfPath.empty()) meta.smfPath = entry.path().string();
         if (ext == ".smt" && meta.smtPath.empty()) meta.smtPath = entry.path().string();
     }
-    if (meta.smfPath.empty()) return false;
+    meta.hasLuaGaia = fs::is_directory(fs::path(mapDir) / "LuaGaia");
 
+    // Find and execute mapinfo.lua
+    std::string mapInfoPath;
+    for (auto& entry : fs::directory_iterator(mapDir)) {
+        if (entry.is_regular_file() && entry.path().filename() == "mapinfo.lua")
+            mapInfoPath = entry.path().string();
+    }
+
+    if (!mapInfoPath.empty()) {
+        // Save existing content roots, add map directory for VFS resolution
+        auto savedRoots = CFileHandler::GetContentRoots();
+        CFileHandler::AddContentRoot(mapDir);
+
+        lua_State* L = luaL_newstate();
+        luaL_openlibs(L);
+
+        // Lua 5.1 compat
+        luaL_dostring(L,
+            "unpack = unpack or table.unpack\n"
+            "loadstring = loadstring or load\n"
+            "if not setfenv then\n"
+            "  setfenv = function(f, t) return f end\n"
+            "  getfenv = function(f) return _G end\n"
+            "end\n"
+            "module = module or function() end\n"
+            "Spring = Spring or { Echo = print }\n"
+        );
+
+        // Real VFS backed by CFileHandler (plain directories)
+        LuaVFSSimple::Register(L);
+
+        // Common Lua utility functions that maps expect
+        luaL_dostring(L,
+            "function lowerkeys(t)\n"
+            "  local out = {}\n"
+            "  for k,v in pairs(t) do\n"
+            "    if type(k) == 'string' then out[k:lower()] = v\n"
+            "    else out[k] = v end\n"
+            "  end\n"
+            "  return out\n"
+            "end\n"
+            "function tmerge(dst, src)\n"
+            "  for k,v in pairs(src) do\n"
+            "    if type(v) == 'table' and type(dst[k]) == 'table' then tmerge(dst[k], v)\n"
+            "    else dst[k] = v end\n"
+            "  end\n"
+            "end\n"
+        );
+
+        if (luaL_dofile(L, mapInfoPath.c_str()) != LUA_OK) {
+            std::fprintf(stderr, "[mapproc] lua error in %s: %s\n",
+                mapInfoPath.c_str(), lua_tostring(L, -1));
+            lua_close(L);
+            // Restore content roots
+            CFileHandler::ClearContentRoots();
+            for (const auto& r : savedRoots) CFileHandler::AddContentRoot(r);
+        } else {
+            // mapinfo.lua typically returns a table
+            if (!lua_istable(L, -1))
+                lua_getglobal(L, "mapinfo");
+
+            if (lua_istable(L, -1)) {
+                meta.name = luaGetString(L, "name");
+                meta.shortName = luaGetString(L, "shortname");
+                meta.description = luaGetString(L, "description");
+                meta.author = luaGetString(L, "author");
+                meta.version = luaGetString(L, "version");
+                meta.gravity = luaGetFloat(L, "gravity", 130);
+                meta.tidalStrength = luaGetFloat(L, "tidalStrength", 0);
+                meta.maxMetal = luaGetFloat(L, "maxMetal", 2.0f);
+                meta.extractorRadius = luaGetFloat(L, "extractorRadius", 100.0f);
+
+                // Read start positions: teams = { [0] = {startPos = {x=..., z=...}}, ... }
+                lua_getfield(L, -1, "teams");
+                if (lua_istable(L, -1)) {
+                    lua_pushnil(L);
+                    while (lua_next(L, -2) != 0) {
+                        int teamIdx = -1;
+                        if (lua_isinteger(L, -2)) teamIdx = static_cast<int>(lua_tointeger(L, -2));
+                        else if (lua_isnumber(L, -2)) teamIdx = static_cast<int>(lua_tonumber(L, -2));
+
+                        if (teamIdx >= 0 && lua_istable(L, -1)) {
+                            // Try both "startPos" (original) and "startpos" (lowercased by Spring)
+                            lua_getfield(L, -1, "startPos");
+                            if (lua_isnil(L, -1)) { lua_pop(L, 1); lua_getfield(L, -1, "startpos"); }
+                            if (lua_istable(L, -1)) {
+                                MapStartPosition sp;
+                                sp.x = luaGetFloat(L, "x", 0);
+                                sp.z = luaGetFloat(L, "z", 0);
+                                if (teamIdx >= static_cast<int>(meta.startPositions.size()))
+                                    meta.startPositions.resize(teamIdx + 1);
+                                meta.startPositions[teamIdx] = sp;
+                            }
+                            lua_pop(L, 1); // pop startPos
+                        }
+                        lua_pop(L, 1); // pop value, keep key
+                    }
+                }
+                lua_pop(L, 1); // pop teams
+
+                std::fprintf(stderr, "[mapproc] mapinfo.lua: name='%s' author='%s' %zu start positions\n",
+                    meta.name.c_str(), meta.author.c_str(), meta.startPositions.size());
+            } else {
+                std::fprintf(stderr, "[mapproc] mapinfo.lua did not return a table\n");
+            }
+            lua_close(L);
+            // Restore content roots
+            CFileHandler::ClearContentRoots();
+            for (const auto& r : savedRoots) CFileHandler::AddContentRoot(r);
+        }
+    }
+
+    if (meta.name.empty()) meta.name = meta.id;
+    return !meta.smfPath.empty();
+}
+
+// ============================================================
+// SMF header reading
+// ============================================================
+
+bool MapProcessor::ReadSMFHeader(MapMetadata& meta) {
     std::ifstream f(meta.smfPath, std::ios::binary);
     if (!f.is_open()) return false;
 
-    char magic[16];
-    f.read(magic, 16);
-    int version, mapid;
-    f.read(reinterpret_cast<char*>(&version), 4);
-    f.read(reinterpret_cast<char*>(&mapid), 4);
+    f.seekg(24); // skip magic(16) + version(4) + mapid(4)
     f.read(reinterpret_cast<char*>(&meta.mapx), 4);
     f.read(reinterpret_cast<char*>(&meta.mapy), 4);
     f.seekg(12, std::ios::cur); // squareSize, texelPerSquare, tilesize
@@ -187,181 +194,302 @@ bool MapProcessor::ReadMapHeaders(const std::string& mapDir, MapMetadata& meta) 
 }
 
 // ============================================================
-// Processing: minimap
+// Binary data extraction
 // ============================================================
 
-bool MapProcessor::ProcessMinimap(const MapMetadata& meta) {
-    std::ifstream f(meta.smfPath, std::ios::binary);
-    if (!f.is_open()) return false;
+static bool extractRawBytes(const std::string& srcPath, int offset, int size, const std::string& dstPath) {
+    std::ifstream in(srcPath, std::ios::binary);
+    if (!in.is_open()) return false;
+    in.seekg(offset);
+    std::vector<char> buf(size);
+    in.read(buf.data(), size);
+    if (!in.good()) return false;
+    std::ofstream out(dstPath, std::ios::binary);
+    out.write(buf.data(), size);
+    return out.good();
+}
 
-    f.seekg(52);
-    int minimapPtr = 0;
-    f.read(reinterpret_cast<char*>(&minimapPtr), 4);
-    if (minimapPtr <= 0) return false;
+bool MapProcessor::ExtractBinaryData(const MapMetadata& meta) {
+    std::ifstream smf(meta.smfPath, std::ios::binary);
+    if (!smf.is_open()) return false;
 
-    f.seekg(minimapPtr);
-    int mip0Size = bc1Size(1024, 1024);
-    std::vector<uint8_t> data(mip0Size);
-    f.read(reinterpret_cast<char*>(data.data()), mip0Size);
-    if (!f.good()) return false;
+    // Data pointers start at offset 52 in SMF header
+    // (after magic[16] + version[4] + mapid[4] + mapx[4] + mapy[4] +
+    //  squareSize[4] + texelPerSquare[4] + tilesize[4] + minHeight[4] + maxHeight[4])
+    smf.seekg(52);
+    int heightmapPtr, typeMapPtr, tilesPtr, minimapPtr, metalmapPtr, featurePtr;
+    smf.read(reinterpret_cast<char*>(&heightmapPtr), 4);
+    smf.read(reinterpret_cast<char*>(&typeMapPtr), 4);
+    smf.read(reinterpret_cast<char*>(&tilesPtr), 4);
+    smf.read(reinterpret_cast<char*>(&minimapPtr), 4);
+    smf.read(reinterpret_cast<char*>(&metalmapPtr), 4);
+    smf.read(reinterpret_cast<char*>(&featurePtr), 4);
+    smf.close();
 
-    // Write as DDS (reliable format that tools understand)
-    std::string ddsPath = meta.processedDir + "/minimap.dds";
-    if (!writeDDS(ddsPath, 1024, 1024, data.data(), mip0Size)) return false;
+    int hmSize = (meta.mapx + 1) * (meta.mapy + 1) * 2;
+    int halfSize = (meta.mapx / 2) * (meta.mapy / 2);
 
-    // Convert DDS → PNG via ImageMagick
-    std::string pngPath = meta.processedDir + "/minimap.png";
-    if (!runCmd("magick \"" + ddsPath + "\" \"" + pngPath + "\" 2>/dev/null")) {
-        std::fprintf(stderr, "[mapproc] WARNING: magick failed for minimap, trying convert\n");
-        runCmd("convert \"" + ddsPath + "\" \"" + pngPath + "\" 2>/dev/null");
+    std::fprintf(stderr, "[mapproc] extracting: mapx=%d mapy=%d hmPtr=%d hmSize=%d\n",
+        meta.mapx, meta.mapy, heightmapPtr, hmSize);
+
+    bool ok = true;
+    if (!extractRawBytes(meta.smfPath, heightmapPtr, hmSize, meta.processedDir + "/heightmap.bin"))
+        std::fprintf(stderr, "[mapproc]   heightmap extraction failed\n");
+    if (!extractRawBytes(meta.smfPath, minimapPtr, 524288, meta.processedDir + "/minimap.dxt1"))
+        std::fprintf(stderr, "[mapproc]   minimap extraction failed\n");
+    if (!extractRawBytes(meta.smfPath, typeMapPtr, halfSize, meta.processedDir + "/typemap.bin"))
+        std::fprintf(stderr, "[mapproc]   typemap extraction failed\n");
+    if (!extractRawBytes(meta.smfPath, metalmapPtr, halfSize, meta.processedDir + "/metalmap.bin"))
+        std::fprintf(stderr, "[mapproc]   metalmap extraction failed\n");
+    ok = true; // individual failures logged above
+
+    // Tile index
+    {
+        std::ifstream sf(meta.smfPath, std::ios::binary);
+        sf.seekg(tilesPtr);
+        int numTileFiles, totalTiles;
+        sf.read(reinterpret_cast<char*>(&numTileFiles), 4);
+        sf.read(reinterpret_cast<char*>(&totalTiles), 4);
+        for (int i = 0; i < numTileFiles; i++) {
+            int n; sf.read(reinterpret_cast<char*>(&n), 4);
+            char c; do { sf.read(&c, 1); } while (c != 0);
+        }
+        int indexSize = meta.tilesX * meta.tilesZ * 4;
+        std::vector<char> idx(indexSize);
+        sf.read(idx.data(), indexSize);
+        std::ofstream out(meta.processedDir + "/tileindex.bin", std::ios::binary);
+        out.write(idx.data(), indexSize);
+        ok &= out.good();
     }
 
-    // Convert PNG → KTX2 via basisu
-    std::string ktx2Path = meta.processedDir + "/minimap.ktx2";
-    runCmd("basisu \"" + pngPath + "\" -output_file \"" + ktx2Path + "\" -ktx2 -q 200 2>/dev/null");
+    // Tile mip0 data from SMT
+    if (!meta.smtPath.empty()) {
+        std::ifstream smt(meta.smtPath, std::ios::binary);
+        smt.seekg(16); // skip magic
+        int smtVersion, smtNumTiles;
+        smt.read(reinterpret_cast<char*>(&smtVersion), 4);
+        smt.read(reinterpret_cast<char*>(&smtNumTiles), 4);
+        smt.seekg(32); // tile data starts after 32-byte header
 
-    // Keep the PNG as fallback (browsers load it natively)
-    // Clean up DDS
-    fs::remove(ddsPath);
+        std::ofstream out(meta.processedDir + "/tiles.dxt1", std::ios::binary);
+        std::vector<char> tileBuf(TILE_MIP0_SIZE);
+        for (int i = 0; i < smtNumTiles; i++) {
+            smt.read(tileBuf.data(), TILE_MIP0_SIZE);
+            out.write(tileBuf.data(), TILE_MIP0_SIZE);
+            smt.seekg(SMALL_TILE_SIZE - TILE_MIP0_SIZE, std::ios::cur);
+        }
+        ok &= out.good();
+        std::fprintf(stderr, "[mapproc] extracted %d tile mip0s (%d bytes each)\n",
+            smtNumTiles, TILE_MIP0_SIZE);
+    }
 
-    return fs::exists(pngPath);
+    return ok;
 }
 
 // ============================================================
-// Processing: map texture tiles
+// Feature extraction
 // ============================================================
 
-bool MapProcessor::ProcessMapTexture(const MapMetadata& meta) {
-    if (meta.smtPath.empty()) return false;
+bool MapProcessor::ExtractFeatures(MapMetadata& meta) {
+    std::ifstream smf(meta.smfPath, std::ios::binary);
+    if (!smf.is_open()) return false;
 
-    std::ifstream smtFile(meta.smtPath, std::ios::binary);
-    if (!smtFile.is_open()) return false;
+    smf.seekg(72); // featurePtr is at offset 72 in SMF header
+    int featurePtr;
+    smf.read(reinterpret_cast<char*>(&featurePtr), 4);
+    smf.seekg(featurePtr);
 
-    char smtMagic[16];
-    smtFile.read(smtMagic, 16);
-    int smtVersion, smtNumTiles, smtTileSize, smtCompression;
-    smtFile.read(reinterpret_cast<char*>(&smtVersion), 4);
-    smtFile.read(reinterpret_cast<char*>(&smtNumTiles), 4);
-    smtFile.read(reinterpret_cast<char*>(&smtTileSize), 4);
-    smtFile.read(reinterpret_cast<char*>(&smtCompression), 4);
+    int numFeatureTypes, numFeatures;
+    smf.read(reinterpret_cast<char*>(&numFeatureTypes), 4);
+    smf.read(reinterpret_cast<char*>(&numFeatures), 4);
 
-    std::fprintf(stderr, "[mapproc] SMT: %d tiles, %dx%d, compression=%d\n",
-        smtNumTiles, smtTileSize, smtTileSize, smtCompression);
-
-    // Read all tile mip0 data
-    std::vector<std::vector<uint8_t>> tileMip0(smtNumTiles);
-    for (int i = 0; i < smtNumTiles; i++) {
-        tileMip0[i].resize(TILE_MIP0_SIZE);
-        smtFile.read(reinterpret_cast<char*>(tileMip0[i].data()), TILE_MIP0_SIZE);
-        smtFile.seekg(SMALL_TILE_SIZE - TILE_MIP0_SIZE, std::ios::cur);
+    meta.featureTypes.clear();
+    for (int i = 0; i < numFeatureTypes; i++) {
+        std::string name;
+        char c;
+        while (smf.read(&c, 1) && c != 0) name += c;
+        meta.featureTypes.push_back(name);
     }
 
-    // Read tile index from SMF
-    std::ifstream smfFile(meta.smfPath, std::ios::binary);
-    if (!smfFile.is_open()) return false;
-
-    smfFile.seekg(56);
-    int tilesPtr = 0;
-    smfFile.read(reinterpret_cast<char*>(&tilesPtr), 4);
-    smfFile.seekg(tilesPtr);
-
-    int numTileFiles, totalTiles;
-    smfFile.read(reinterpret_cast<char*>(&numTileFiles), 4);
-    smfFile.read(reinterpret_cast<char*>(&totalTiles), 4);
-
-    for (int i = 0; i < numTileFiles; i++) {
-        int n; smfFile.read(reinterpret_cast<char*>(&n), 4);
-        char c; do { smfFile.read(&c, 1); } while (c != 0);
+    meta.features.clear();
+    meta.features.reserve(numFeatures);
+    for (int i = 0; i < numFeatures; i++) {
+        MapFeatureData feat;
+        smf.read(reinterpret_cast<char*>(&feat.featureType), 4);
+        smf.read(reinterpret_cast<char*>(&feat.x), 4);
+        smf.read(reinterpret_cast<char*>(&feat.y), 4);
+        smf.read(reinterpret_cast<char*>(&feat.z), 4);
+        smf.read(reinterpret_cast<char*>(&feat.rotation), 4);
+        smf.read(reinterpret_cast<char*>(&feat.relativeSize), 4);
+        meta.features.push_back(feat);
     }
 
-    int numIndices = meta.tilesX * meta.tilesZ;
-    std::vector<int> tileIndex(numIndices);
-    smfFile.read(reinterpret_cast<char*>(tileIndex.data()), numIndices * 4);
-
-    // Composite tiles into DDS chunk files, then convert via tools
-    constexpr int CHUNK_TILES = 8;
-    int chunksX = (meta.tilesX + CHUNK_TILES - 1) / CHUNK_TILES;
-    int chunksZ = (meta.tilesZ + CHUNK_TILES - 1) / CHUNK_TILES;
-
-    std::fprintf(stderr, "[mapproc] compositing %dx%d tiles into %dx%d chunks\n",
-        meta.tilesX, meta.tilesZ, chunksX, chunksZ);
-
-    for (int cz = 0; cz < chunksZ; cz++) {
-        for (int cx = 0; cx < chunksX; cx++) {
-            int startTX = cx * CHUNK_TILES;
-            int startTZ = cz * CHUNK_TILES;
-            int endTX = std::min(startTX + CHUNK_TILES, meta.tilesX);
-            int endTZ = std::min(startTZ + CHUNK_TILES, meta.tilesZ);
-            int chunkW = (endTX - startTX) * TILE_PIXELS;
-            int chunkH = (endTZ - startTZ) * TILE_PIXELS;
-
-            int chunkBC1Size = bc1Size(chunkW, chunkH);
-            std::vector<uint8_t> chunkData(chunkBC1Size, 0);
-            int chunkBlocksW = chunkW / 4;
-
-            for (int tz = startTZ; tz < endTZ; tz++) {
-                for (int tx = startTX; tx < endTX; tx++) {
-                    int tIdx = tileIndex[tz * meta.tilesX + tx];
-                    if (tIdx < 0 || tIdx >= smtNumTiles) continue;
-                    const auto& tile = tileMip0[tIdx];
-                    int localTX = tx - startTX;
-                    int localTZ = tz - startTZ;
-                    int tileBlocksW = TILE_PIXELS / 4;
-
-                    for (int bz = 0; bz < tileBlocksW; bz++) {
-                        int srcOff = bz * tileBlocksW * DXT1_BLOCK_SIZE;
-                        int dstBlockX = localTX * tileBlocksW;
-                        int dstBlockZ = localTZ * tileBlocksW + bz;
-                        int dstOff = (dstBlockZ * chunkBlocksW + dstBlockX) * DXT1_BLOCK_SIZE;
-                        memcpy(&chunkData[dstOff], &tile[srcOff], tileBlocksW * DXT1_BLOCK_SIZE);
-                    }
-                }
-            }
-
-            // Write chunk as DDS, convert to PNG via magick
-            char fname[64];
-            snprintf(fname, sizeof(fname), "chunk_%d_%d", cx, cz);
-            std::string ddsPath = meta.processedDir + "/" + fname + ".dds";
-            std::string pngPath = meta.processedDir + "/" + fname + ".png";
-
-            writeDDS(ddsPath, chunkW, chunkH, chunkData.data(), chunkBC1Size);
-            runCmd("magick \"" + ddsPath + "\" \"" + pngPath + "\" 2>/dev/null");
-            fs::remove(ddsPath);
-        }
-    }
-
-    // Write layout
-    {
-        char buf[256];
-        snprintf(buf, sizeof(buf),
-            "{\"chunksX\":%d,\"chunksZ\":%d,\"chunkTiles\":%d,\"chunkPixels\":%d,"
-            "\"tilesX\":%d,\"tilesZ\":%d,\"tilePixels\":%d}",
-            chunksX, chunksZ, CHUNK_TILES, CHUNK_TILES * TILE_PIXELS,
-            meta.tilesX, meta.tilesZ, TILE_PIXELS);
-        std::ofstream layoutFile(meta.processedDir + "/layout.json");
-        layoutFile << buf;
-    }
-
+    std::fprintf(stderr, "[mapproc] extracted %d features (%d types)\n",
+        numFeatures, numFeatureTypes);
     return true;
 }
 
 // ============================================================
-// Top-level processing
+// SQLite
 // ============================================================
 
-bool MapProcessor::ProcessMap(const MapMetadata& meta) {
+void MapProcessor::EnsureTable(sqlite3* db) {
+    sqlite3_exec(db, R"(
+        CREATE TABLE IF NOT EXISTS maps (
+            id TEXT PRIMARY KEY,
+            name TEXT, short_name TEXT, description TEXT,
+            author TEXT, version TEXT,
+            mapx INTEGER, mapy INTEGER,
+            width_elmos INTEGER, height_elmos INTEGER,
+            min_height REAL, max_height REAL,
+            gravity REAL, tidal_strength REAL,
+            max_metal REAL, extractor_radius REAL,
+            tiles_x INTEGER, tiles_z INTEGER, num_tiles INTEGER,
+            has_lua_gaia INTEGER,
+            num_features INTEGER, num_feature_types INTEGER,
+            start_positions TEXT,
+            format_version INTEGER,
+            processed_dir TEXT, source_path TEXT
+        );
+    )", nullptr, nullptr, nullptr);
+}
+
+void MapProcessor::StoreMetadata(sqlite3* db, const MapMetadata& m) {
+    std::string spStr;
+    for (const auto& sp : m.startPositions) {
+        if (!spStr.empty()) spStr += ";";
+        spStr += std::to_string(sp.x) + "," + std::to_string(sp.z);
+    }
+
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(db, R"(
+        INSERT OR REPLACE INTO maps
+        (id,name,short_name,description,author,version,
+         mapx,mapy,width_elmos,height_elmos,min_height,max_height,
+         gravity,tidal_strength,max_metal,extractor_radius,
+         tiles_x,tiles_z,num_tiles,has_lua_gaia,
+         num_features,num_feature_types,start_positions,
+         format_version,processed_dir,source_path)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    )", -1, &stmt, nullptr);
+
+    int i = 1;
+    sqlite3_bind_text(stmt, i++, m.id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, i++, m.name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, i++, m.shortName.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, i++, m.description.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, i++, m.author.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, i++, m.version.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, i++, m.mapx);
+    sqlite3_bind_int(stmt, i++, m.mapy);
+    sqlite3_bind_int(stmt, i++, m.widthElmos);
+    sqlite3_bind_int(stmt, i++, m.heightElmos);
+    sqlite3_bind_double(stmt, i++, m.minHeight);
+    sqlite3_bind_double(stmt, i++, m.maxHeight);
+    sqlite3_bind_double(stmt, i++, m.gravity);
+    sqlite3_bind_double(stmt, i++, m.tidalStrength);
+    sqlite3_bind_double(stmt, i++, m.maxMetal);
+    sqlite3_bind_double(stmt, i++, m.extractorRadius);
+    sqlite3_bind_int(stmt, i++, m.tilesX);
+    sqlite3_bind_int(stmt, i++, m.tilesZ);
+    sqlite3_bind_int(stmt, i++, m.numTiles);
+    sqlite3_bind_int(stmt, i++, m.hasLuaGaia ? 1 : 0);
+    sqlite3_bind_int(stmt, i++, static_cast<int>(m.features.size()));
+    sqlite3_bind_int(stmt, i++, static_cast<int>(m.featureTypes.size()));
+    sqlite3_bind_text(stmt, i++, spStr.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, i++, m.formatVersion);
+    sqlite3_bind_text(stmt, i++, m.processedDir.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, i++, m.sourcePath.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+std::vector<MapMetadata> MapProcessor::GetAllMaps(sqlite3* db) {
+    EnsureTable(db);
+    std::vector<MapMetadata> result;
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(db, "SELECT id,name,short_name,description,author,version,"
+        "mapx,mapy,width_elmos,height_elmos,min_height,max_height,"
+        "gravity,tidal_strength,max_metal,extractor_radius,"
+        "tiles_x,tiles_z,num_tiles,has_lua_gaia,"
+        "start_positions,format_version,processed_dir FROM maps", -1, &stmt, nullptr);
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        MapMetadata m;
+        int i = 0;
+        m.id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, i++));
+        m.name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, i++));
+        auto maybeStr = [&](int col) -> std::string {
+            auto t = sqlite3_column_text(stmt, col);
+            return t ? reinterpret_cast<const char*>(t) : "";
+        };
+        m.shortName = maybeStr(i++);
+        m.description = maybeStr(i++);
+        m.author = maybeStr(i++);
+        m.version = maybeStr(i++);
+        m.mapx = sqlite3_column_int(stmt, i++);
+        m.mapy = sqlite3_column_int(stmt, i++);
+        m.widthElmos = sqlite3_column_int(stmt, i++);
+        m.heightElmos = sqlite3_column_int(stmt, i++);
+        m.minHeight = static_cast<float>(sqlite3_column_double(stmt, i++));
+        m.maxHeight = static_cast<float>(sqlite3_column_double(stmt, i++));
+        m.gravity = static_cast<float>(sqlite3_column_double(stmt, i++));
+        m.tidalStrength = static_cast<float>(sqlite3_column_double(stmt, i++));
+        m.maxMetal = static_cast<float>(sqlite3_column_double(stmt, i++));
+        m.extractorRadius = static_cast<float>(sqlite3_column_double(stmt, i++));
+        m.tilesX = sqlite3_column_int(stmt, i++);
+        m.tilesZ = sqlite3_column_int(stmt, i++);
+        m.numTiles = sqlite3_column_int(stmt, i++);
+        m.hasLuaGaia = sqlite3_column_int(stmt, i++) != 0;
+        // Parse start positions
+        const char* spStr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, i++));
+        if (spStr && strlen(spStr) > 0) {
+            std::istringstream ss(spStr);
+            std::string pair;
+            while (std::getline(ss, pair, ';')) {
+                auto comma = pair.find(',');
+                if (comma != std::string::npos) {
+                    MapStartPosition sp;
+                    sp.x = std::stof(pair.substr(0, comma));
+                    sp.z = std::stof(pair.substr(comma + 1));
+                    m.startPositions.push_back(sp);
+                }
+            }
+        }
+        m.formatVersion = sqlite3_column_int(stmt, i++);
+        m.processedDir = maybeStr(i++);
+        result.push_back(std::move(m));
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+MapMetadata MapProcessor::GetMap(sqlite3* db, const std::string& mapId) {
+    auto all = GetAllMaps(db);
+    for (auto& m : all)
+        if (m.id == mapId) return m;
+    return {};
+}
+
+// ============================================================
+// Top-level
+// ============================================================
+
+bool MapProcessor::ProcessMap(MapMetadata& meta) {
     fs::create_directories(meta.processedDir);
 
-    bool ok = true;
-    if (!ProcessMinimap(meta)) {
-        std::fprintf(stderr, "[mapproc] WARNING: failed to process minimap for %s\n", meta.id.c_str());
-        ok = false;
+    if (!ReadSMFHeader(meta)) {
+        std::fprintf(stderr, "[mapproc] failed to read SMF header\n");
+        return false;
     }
-    if (!ProcessMapTexture(meta)) {
-        std::fprintf(stderr, "[mapproc] WARNING: failed to process textures for %s\n", meta.id.c_str());
-        ok = false;
+
+    if (!ExtractBinaryData(meta)) {
+        std::fprintf(stderr, "[mapproc] failed to extract binary data\n");
+        return false;
     }
-    return ok;
+
+    ExtractFeatures(meta);
+    return true;
 }
 
 void MapProcessor::ScanAndProcess(const std::string& mapsDir, const std::string& dataDir, sqlite3* db) {
@@ -376,27 +504,33 @@ void MapProcessor::ScanAndProcess(const std::string& mapsDir, const std::string&
         std::string mapId = mapDir.path().filename().string();
 
         MapMetadata existing = GetMap(db, mapId);
-        if (existing.formatVersion >= MAP_FORMAT_VERSION) {
+        std::string processedDir = dataDir + "/maps/" + mapId;
+        bool filesExist = fs::exists(processedDir + "/heightmap.bin");
+        if (existing.formatVersion >= MAP_FORMAT_VERSION && filesExist) {
             std::fprintf(stderr, "[mapproc] %s: up to date (v%d)\n", mapId.c_str(), existing.formatVersion);
             continue;
         }
 
         MapMetadata meta;
         meta.id = mapId;
-        meta.name = mapId;
+        meta.sourcePath = mapDir.path().string();
         meta.processedDir = dataDir + "/maps/" + mapId;
         meta.formatVersion = MAP_FORMAT_VERSION;
 
-        if (!ReadMapHeaders(mapDir.path().string(), meta)) {
+        if (!ReadMapInfo(mapDir.path().string(), meta)) {
             std::fprintf(stderr, "[mapproc] %s: no SMF file found, skipping\n", mapId.c_str());
             continue;
         }
 
-        std::fprintf(stderr, "[mapproc] processing %s (%dx%d, %d tiles)...\n",
-            mapId.c_str(), meta.mapx, meta.mapy, meta.numTiles);
+        std::fprintf(stderr, "[mapproc] processing %s \"%s\" (%dx%d)...\n",
+            mapId.c_str(), meta.name.c_str(), meta.mapx, meta.mapy);
 
-        ProcessMap(meta);
-        StoreMetadata(db, meta);
-        std::fprintf(stderr, "[mapproc] %s: done\n", mapId.c_str());
+        if (ProcessMap(meta)) {
+            StoreMetadata(db, meta);
+            std::fprintf(stderr, "[mapproc] %s: done (%d features, %d start positions, luaGaia=%s)\n",
+                mapId.c_str(), static_cast<int>(meta.features.size()),
+                static_cast<int>(meta.startPositions.size()),
+                meta.hasLuaGaia ? "yes" : "no");
+        }
     }
 }

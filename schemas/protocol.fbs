@@ -296,6 +296,79 @@ table RoomPlayerLeft {
     reason: string;
 }
 
+// ============================================================
+// Map messages
+// ============================================================
+
+struct MapStartPos {
+    x: float;
+    z: float;
+}
+
+/// Sent by the lobby for map selection UI.
+table MapInfo {
+    id: string;
+    name: string;
+    short_name: string;
+    description: string;
+    author: string;
+    version: string;
+    mapx: uint16;
+    mapy: uint16;
+    width_elmos: uint32;
+    height_elmos: uint32;
+    min_height: float;
+    max_height: float;
+    max_players: uint8;
+    start_positions: [MapStartPos];
+    gravity: float;
+    tidal_strength: float;
+    max_metal: float;
+    extractor_radius: float;
+    minimap_url: string;        // HTTP URL for raw DXT1 minimap (cacheable)
+    has_lua_gaia: bool;
+}
+
+/// List of maps for the lobby browser.
+table MapListUpdate {
+    maps: [MapInfo];
+}
+
+/// Map feature placed on the terrain.
+table MapFeature {
+    type_index: uint16;
+    x: float;
+    y: float;
+    z: float;
+    rotation: float;
+    relative_size: float;
+}
+
+/// Full map data sent by the game server on connect.
+/// Binary data (heightmap, tileindex, typemap, metalmap) embedded directly.
+/// Tile texture data served via HTTP separately (too large to embed).
+table MapData {
+    mapx: uint16;
+    mapy: uint16;
+    square_size: uint8;
+    min_height: float;
+    max_height: float;
+    tiles_x: uint16;
+    tiles_z: uint16;
+    num_tiles: uint32;
+    tile_size: uint8;           // pixels per tile (32)
+    start_positions: [MapStartPos];
+    feature_types: [string];
+    features: [MapFeature];
+    heightmap: [uint16];        // (mapx+1)*(mapy+1) corner heights
+    tileindex: [int32];         // tilesX*tilesZ tile indices
+    typemap: [ubyte];           // (mapx/2)*(mapy/2) terrain types
+    metalmap: [ubyte];          // (mapx/2)*(mapy/2) metal density
+    minimap_url: string;        // HTTP: raw DXT1 1024x1024 (cached from lobby)
+    tiles_url: string;          // HTTP: raw DXT1, 512 bytes per tile, concatenated
+    has_lua_gaia: bool;
+}
+
 // Union of all server→client message types
 union ServerPayload {
     AuthResponse,
@@ -312,6 +385,8 @@ union ServerPayload {
     RoomStateUpdate,
     RoomPlayerJoined,
     RoomPlayerLeft,
+    MapListUpdate,
+    MapData,
 }
 
 table ServerMessage {

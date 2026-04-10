@@ -198,6 +198,7 @@ add_executable(spring-lobby
     rts/lobby_main.cpp
     ${LOBBY_SERVER_SOURCES}
     ${LOBBY_LOG_SOURCES}
+    rts/System/FileSystem/LuaVFSSimple.cpp
     rts/System/SafeCStrings.c
 )
 add_dependencies(spring-lobby generate_flatbuffers)
@@ -206,7 +207,7 @@ target_include_directories(spring-lobby PRIVATE
     ${CMAKE_SOURCE_DIR}/rts/lib
     ${GENERATED_DIR}
 )
-target_link_libraries(spring-lobby PRIVATE uws flatbuffers ZLIB::ZLIB SQLite::SQLite3)
+target_link_libraries(spring-lobby PRIVATE lua uws flatbuffers ZLIB::ZLIB SQLite::SQLite3)
 if(UNIX)
     target_link_libraries(spring-lobby PRIVATE pthread dl)
 endif()
