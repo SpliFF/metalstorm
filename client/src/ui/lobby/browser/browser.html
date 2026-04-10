@@ -1,0 +1,19 @@
+<div class="lobby-panel">
+    <div class="lobby-header">
+        <h2>Game Rooms</h2>
+        <button id="create-room-btn">+ New Game</button>
+    </div>
+    <div id="room-list" class="room-list"></div>
+    <div id="create-form" class="create-form" style="display:none">
+        <h3>Create Game</h3>
+        <input type="text" id="new-room-name" placeholder="Room name" value="My Game">
+        <div class="map-select-label">Map:</div>
+        <div id="map-selector" class="map-grid">
+            <div class="empty-state">Loading maps...</div>
+        </div>
+        <div class="btn-row">
+            <button id="do-create-btn" class="primary">Create</button>
+            <button id="cancel-create-btn" class="secondary">Cancel</button>
+        </div>
+    </div>
+</div>

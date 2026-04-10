@@ -1,0 +1,251 @@
+/*
+ * Default lobby chrome — login form, room browser, room view.
+ *
+ * This stylesheet is bundled with the engine client and applied whenever
+ * no game-specific override is loaded. Games ship a replacement at
+ * `<game>/ui/lobby/lobby.css` to restyle the entire lobby — the loader
+ * fetches it from `/api/games/<id>/ui/lobby/lobby.css` and swaps it in
+ * place of this file at runtime.
+ *
+ * Selector contract for game overrides: the lobby creates a single
+ * `#lobby` root and switches its inner HTML between three screens.
+ * Hooks game stylesheets can rely on:
+ *
+ *   #lobby                       — full-viewport backdrop, flex centred
+ *   .lobby-card                  — login + reconnecting card
+ *   .lobby-panel                 — browser + room panel
+ *   .lobby-header                — title bar with optional buttons
+ *   .lobby-form                  — login form column
+ *   .room-list / .room-entry     — room browser list + each row
+ *   .map-grid / .map-card        — map picker grid + each card
+ *   .player-list / .player-row   — room view player list + each row
+ *   .room-actions                — room view footer button row
+ *   button.primary / .secondary / .danger — semantic button variants
+ */
+
+#lobby {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: #1a1a2e;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: system-ui, sans-serif;
+    color: #e0e0e0;
+}
+
+.lobby-card,
+.lobby-panel {
+    background: #16213e;
+    border-radius: 12px;
+    padding: 32px;
+    min-width: 360px;
+    max-width: 600px;
+    width: 100%;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.lobby-card h1 {
+    margin: 0 0 24px;
+    text-align: center;
+    color: #4cc9f0;
+}
+
+.lobby-form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.lobby-form input,
+.create-form input {
+    padding: 10px 14px;
+    border: 1px solid #334;
+    border-radius: 6px;
+    background: #0f1626;
+    color: #e0e0e0;
+    font-size: 14px;
+}
+
+.lobby-form input:focus,
+.create-form input:focus {
+    outline: none;
+    border-color: #4cc9f0;
+}
+
+button {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 6px;
+    background: #4cc9f0;
+    color: #0f1626;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 14px;
+    transition: background 0.15s;
+}
+button:hover { background: #7bdff2; }
+button:disabled { opacity: 0.4; cursor: default; }
+
+button.secondary { background: #334; color: #aaa; }
+button.secondary:hover { background: #445; }
+button.primary { background: #06d6a0; }
+button.primary:hover { background: #0be5af; }
+button.danger { background: #aa3333; color: #fff; }
+button.danger:hover { background: #cc3333; }
+
+.msg { font-size: 13px; min-height: 20px; margin: 0; }
+.msg.error { color: #f07; }
+.hint { font-size: 11px; color: #555; margin: 0; }
+
+.lobby-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+.lobby-header h2 { margin: 0; flex: 1; }
+
+.room-badge {
+    background: #334;
+    padding: 3px 10px;
+    border-radius: 10px;
+    font-size: 11px;
+    color: #4cc9f0;
+    white-space: nowrap;
+}
+
+/* ---- Room browser ---- */
+
+.room-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+.room-entry {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 4px 12px;
+    padding: 12px 16px;
+    background: #0f1626;
+    border-radius: 8px;
+    align-items: center;
+}
+.room-main { display: flex; align-items: center; gap: 8px; }
+.room-name { font-weight: 600; }
+.room-detail { grid-column: 1; color: #888; font-size: 12px; }
+.join-btn { grid-row: 1 / 3; grid-column: 2; }
+
+.empty-state { text-align: center; color: #555; padding: 32px; }
+
+.create-form {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid #334;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.create-form h3 { margin: 0; font-size: 15px; }
+.btn-row { display: flex; gap: 8px; }
+
+.map-select-label {
+    font-size: 13px;
+    color: #888;
+    margin-bottom: 4px;
+}
+
+.map-grid {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.map-card {
+    width: 140px;
+    background: #0f1626;
+    border: 2px solid transparent;
+    border-radius: 8px;
+    cursor: pointer;
+    overflow: hidden;
+    transition: border-color 0.15s;
+}
+.map-card:hover { border-color: #445; }
+.map-card.selected { border-color: #4cc9f0; }
+
+.map-thumb {
+    width: 140px;
+    height: 100px;
+    background-color: #1a2a1a;
+    background-size: cover;
+    background-position: center;
+}
+
+.map-label {
+    padding: 6px 8px 2px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.map-size {
+    padding: 0 8px 6px;
+    font-size: 10px;
+    color: #666;
+}
+
+/* ---- Room view ---- */
+
+.player-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 16px;
+}
+
+.player-row {
+    display: flex;
+    gap: 10px;
+    padding: 8px 12px;
+    background: #0f1626;
+    border-radius: 6px;
+    align-items: center;
+}
+.player-row.ready { border-left: 3px solid #06d6a0; }
+
+.player-icon {
+    width: 16px;
+    text-align: center;
+    color: #4cc9f0;
+}
+
+.player-name { flex: 1; font-weight: 500; }
+
+.team-select {
+    padding: 4px 8px;
+    background: #0f1626;
+    color: #e0e0e0;
+    border: 1px solid #334;
+    border-radius: 4px;
+    font-size: 12px;
+}
+
+.player-status {
+    font-size: 12px;
+    color: #888;
+    min-width: 60px;
+    text-align: right;
+}
+
+.room-actions {
+    display: flex;
+    gap: 10px;
+}

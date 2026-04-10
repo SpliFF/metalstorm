@@ -1,5 +1,13 @@
 /**
  * LobbyUI — login, room browser, room setup screens.
+ *
+ * The visual layer (HTML + CSS) lives under `client/src/ui/lobby/`. This
+ * file owns only the *behaviour* — handing data to the templates,
+ * wiring event listeners after each render, and routing protocol
+ * messages from the server. Templates are passed in via the
+ * constructor and can be hot-swapped at runtime via `setTemplates()`,
+ * which is what game-specific overrides ride on top of (see
+ * `client/src/ui/lobby/loader.ts`).
  */
 
 import * as flatbuffers from 'flatbuffers';
@@ -17,6 +25,13 @@ import { ServerMessage } from '../protocol/spring-web/server-message.js';
 import { ServerPayload } from '../protocol/spring-web/server-payload.js';
 import { RoomListUpdate } from '../protocol/spring-web/room-list-update.js';
 import { RoomStateUpdate } from '../protocol/spring-web/room-state-update.js';
+import { renderTemplate } from '../ui/ui.js';
+import {
+    getDefaultLobbyTemplates,
+    type LobbyTemplates,
+} from '../ui/lobby/loader.js';
+
+const ROOM_STATE_LABELS = ['Setup', 'Waiting', 'Ready Check', 'Loading', 'In Progress', 'Ended'];
 
 export type LobbyScreen = 'login' | 'browser' | 'room' | 'game';
 
@@ -47,9 +62,14 @@ export class LobbyUI {
     private myPlayerId = 0;
     private pendingRejoinRoomId = 0;
     private availableMaps: { id: string; name: string; mapx: number; mapy: number; widthElmos: number; heightElmos: number }[] = [];
+    private templates: LobbyTemplates;
 
-    constructor(onGameStart?: (gameServerPort: number) => void) {
+    constructor(
+        onGameStart?: (gameServerPort: number) => void,
+        templates?: LobbyTemplates,
+    ) {
         this.onGameStart = onGameStart;
+        this.templates = templates ?? getDefaultLobbyTemplates();
         this.container = document.getElementById('lobby') as HTMLDivElement;
         this.injectStyles();
 
@@ -64,13 +84,28 @@ export class LobbyUI {
         }
     }
 
+    /**
+     * Hot-swap the active template bundle and re-render the current
+     * screen. Used to apply game-specific UI overrides — see
+     * `loadGameLobbyTemplates` in `client/src/ui/lobby/loader.ts`.
+     */
+    setTemplates(templates: LobbyTemplates): void {
+        this.templates = templates;
+        this.injectStyles();
+        if (this.currentScreen === 'login') this.showLogin();
+        else if (this.currentScreen === 'browser') this.showBrowser();
+        else if (this.currentScreen === 'room') this.showRoom();
+    }
+
     private autoLoginAttempts = 0;
 
     private tryAutoLogin(username: string, token: string): void {
         this.container.style.display = 'flex';
-        this.container.innerHTML = `
-            <div class="lobby-card"><h1>Spring RTS Web</h1><p class="msg">Reconnecting${this.autoLoginAttempts > 0 ? ` (attempt ${this.autoLoginAttempts + 1})` : ''}...</p></div>
-        `;
+        this.container.innerHTML = renderTemplate(this.templates.reconnecting, {
+            attempt_suffix: this.autoLoginAttempts > 0
+                ? ` (attempt ${this.autoLoginAttempts + 1})`
+                : '',
+        });
 
         const savedRoomId = localStorage.getItem('springrts-game-room');
         const savedPort = localStorage.getItem('springrts-game-port');
@@ -160,19 +195,7 @@ export class LobbyUI {
     showLogin(): void {
         this.currentScreen = 'login';
         this.container.style.display = 'flex';
-        this.container.innerHTML = `
-            <div class="lobby-card">
-                <h1>Spring RTS Web</h1>
-                <form id="login-form" class="lobby-form">
-                    <input type="text" id="login-user" placeholder="Username" autofocus>
-                    <input type="password" id="login-pass" placeholder="Password">
-                    <input type="password" id="login-pass2" placeholder="Confirm password (new accounts)">
-                    <button type="submit" id="login-btn">Login / Register</button>
-                    <p id="login-msg" class="msg"></p>
-                    <p class="hint">New username? Enter a password twice to register.</p>
-                </form>
-            </div>
-        `;
+        this.container.innerHTML = this.templates.login;
         document.getElementById('login-form')!.onsubmit = (e) => {
             e.preventDefault();
             this.doLogin();
@@ -222,27 +245,7 @@ export class LobbyUI {
             this.renderMapOptions();
         }).catch(() => {});
 
-        this.container.innerHTML = `
-            <div class="lobby-panel">
-                <div class="lobby-header">
-                    <h2>Game Rooms</h2>
-                    <button id="create-room-btn">+ New Game</button>
-                </div>
-                <div id="room-list" class="room-list"></div>
-                <div id="create-form" class="create-form" style="display:none">
-                    <h3>Create Game</h3>
-                    <input type="text" id="new-room-name" placeholder="Room name" value="My Game">
-                    <div class="map-select-label">Map:</div>
-                    <div id="map-selector" class="map-grid">
-                        <div class="empty-state">Loading maps...</div>
-                    </div>
-                    <div class="btn-row">
-                        <button id="do-create-btn" class="primary">Create</button>
-                        <button id="cancel-create-btn" class="secondary">Cancel</button>
-                    </div>
-                </div>
-            </div>
-        `;
+        this.container.innerHTML = this.templates.browser;
         document.getElementById('create-room-btn')!.onclick = () => {
             document.getElementById('create-form')!.style.display = 'block';
         };
@@ -271,14 +274,13 @@ export class LobbyUI {
 
         el.innerHTML = this.availableMaps.map(m => {
             const sizeKm = ((m.widthElmos / 1000) * (m.heightElmos / 1000)).toFixed(1);
-            const thumbUrl = `${CONFIG.httpUrl}/api/maps/thumb/${encodeURIComponent(m.id)}`;
-            return `
-                <div class="map-card ${m.id === this.selectedMapId ? 'selected' : ''}" data-map-id="${this.esc(m.id)}">
-                    <div class="map-thumb" style="background-image:url('${thumbUrl}')"></div>
-                    <div class="map-label">${this.esc(m.name)}</div>
-                    <div class="map-size">${m.mapx}×${m.mapy} (${sizeKm} km²)</div>
-                </div>
-            `;
+            return renderTemplate(this.templates.browserMapCard, {
+                id: this.esc(m.id),
+                name: this.esc(m.name),
+                thumb_url: `${CONFIG.httpUrl}/api/maps/thumb/${encodeURIComponent(m.id)}`,
+                size_label: `${m.mapx}×${m.mapy} (${sizeKm} km²)`,
+                selected_class: m.id === this.selectedMapId ? 'selected' : '',
+            });
         }).join('');
 
         // Auto-select first map
@@ -305,23 +307,22 @@ export class LobbyUI {
             return;
         }
 
-        const stateLabels = ['Setup', 'Waiting', 'Ready Check', 'Loading', 'In Progress', 'Ended'];
-        el.innerHTML = this.rooms.map(r => `
-            <div class="room-entry">
-                <div class="room-main">
-                    <span class="room-name">${this.esc(r.name)}</span>
-                    <span class="room-badge">${stateLabels[r.state] || '?'}</span>
-                </div>
-                <div class="room-detail">
-                    ${r.mapName ? this.esc(r.mapName) : '<em>No map</em>'} ·
-                    ${r.playerCount}/${r.maxPlayers} players ·
-                    Host: ${this.esc(r.hostName)}
-                </div>
-                <button class="join-btn" data-id="${r.id}"${r.state >= 5 ? ' disabled' : ''}>
-                    ${r.state >= 3 && r.state < 5 ? 'Watch / Rejoin' : (r.state >= 5 ? 'Ended' : 'Join')}
-                </button>
-            </div>
-        `).join('');
+        el.innerHTML = this.rooms.map(r => {
+            const detail =
+                `${r.mapName ? this.esc(r.mapName) : '<em>No map</em>'} · ` +
+                `${r.playerCount}/${r.maxPlayers} players · ` +
+                `Host: ${this.esc(r.hostName)}`;
+            const joinLabel = r.state >= 5 ? 'Ended'
+                : (r.state >= 3 ? 'Watch / Rejoin' : 'Join');
+            return renderTemplate(this.templates.browserRoomEntry, {
+                id: r.id,
+                name: this.esc(r.name),
+                state: ROOM_STATE_LABELS[r.state] || '?',
+                detail,
+                join_label: joinLabel,
+                disabled_attr: r.state >= 5 ? ' disabled' : '',
+            });
+        }).join('');
 
         el.querySelectorAll('.join-btn:not([disabled])').forEach(btn => {
             (btn as HTMLElement).onclick = () => {
@@ -336,7 +337,6 @@ export class LobbyUI {
         if (!this.currentRoom) return;
         this.currentScreen = 'room';
         const r = this.currentRoom;
-        const stateLabels = ['Setup', 'Waiting', 'Ready Check', 'Loading', 'In Progress', 'Ended'];
         const myPlayer = r.players.find(p => p.playerId === this.myPlayerId);
         const amHost = myPlayer?.isHost ?? false;
         // Room is considered "running" once the host has clicked Start
@@ -344,39 +344,42 @@ export class LobbyUI {
         const gameRunning = r.state === 3 || r.state === 4;
         const preGame = r.state < 3;
 
-        this.container.innerHTML = `
-            <div class="lobby-panel">
-                <div class="lobby-header">
-                    <h2>${this.esc(r.name)}</h2>
-                    <span class="room-badge">${stateLabels[r.state] || '?'}</span>
-                    <button id="leave-btn" class="secondary">Leave</button>
-                </div>
+        // Pre-render each player row through the template so games can
+        // override the row layout.
+        const playersHtml = r.players.map(p => renderTemplate(this.templates.roomPlayerRow, {
+            pid: p.playerId,
+            name: this.esc(p.username),
+            host_icon: p.isHost ? '★' : '●',
+            ready_class: p.ready ? 'ready' : '',
+            select_disabled: p.playerId !== this.myPlayerId ? ' disabled' : '',
+            team0_selected: p.team === 0 ? ' selected' : '',
+            team1_selected: p.team === 1 ? ' selected' : '',
+            status: p.isSpectator ? 'Spectator' : (p.ready ? '✓ Ready' : '—'),
+        })).join('');
 
-                <div class="player-list">
-                    ${r.players.map(p => `
-                        <div class="player-row ${p.ready ? 'ready' : ''}">
-                            <span class="player-icon">${p.isHost ? '★' : '●'}</span>
-                            <span class="player-name">${this.esc(p.username)}</span>
-                            <select class="team-select" data-pid="${p.playerId}"
-                                    ${p.playerId !== this.myPlayerId ? 'disabled' : ''}>
-                                <option value="0" ${p.team === 0 ? 'selected' : ''}>Team 1</option>
-                                <option value="1" ${p.team === 1 ? 'selected' : ''}>Team 2</option>
-                            </select>
-                            <span class="player-status">
-                                ${p.isSpectator ? 'Spectator' : (p.ready ? '✓ Ready' : '—')}
-                            </span>
-                        </div>
-                    `).join('')}
-                </div>
+        // Action buttons depend on room state + whether the viewer is
+        // the host. We compose a small HTML fragment in JS rather than
+        // adding more conditional placeholders to the template.
+        const actions: string[] = [];
+        if (preGame) {
+            actions.push(`<button id="ready-btn" class="${myPlayer?.ready ? 'secondary' : ''}">${myPlayer?.ready ? 'Unready' : 'Ready'}</button>`);
+        }
+        if (preGame && amHost) {
+            actions.push('<button id="start-btn" class="primary">Start Game</button>');
+        }
+        if (gameRunning) {
+            actions.push('<button id="rejoin-btn" class="primary">Rejoin Game</button>');
+        }
+        if (gameRunning && amHost) {
+            actions.push('<button id="endgame-btn" class="danger">End Game</button>');
+        }
 
-                <div class="room-actions">
-                    ${preGame ? `<button id="ready-btn" class="${myPlayer?.ready ? 'secondary' : ''}">${myPlayer?.ready ? 'Unready' : 'Ready'}</button>` : ''}
-                    ${preGame && amHost ? '<button id="start-btn" class="primary">Start Game</button>' : ''}
-                    ${gameRunning ? '<button id="rejoin-btn" class="primary">Rejoin Game</button>' : ''}
-                    ${gameRunning && amHost ? '<button id="endgame-btn" class="danger">End Game</button>' : ''}
-                </div>
-            </div>
-        `;
+        this.container.innerHTML = renderTemplate(this.templates.room, {
+            name: this.esc(r.name),
+            state: ROOM_STATE_LABELS[r.state] || '?',
+            players_html: playersHtml,
+            actions_html: actions.join(''),
+        });
 
         document.getElementById('leave-btn')!.onclick = () => this.sendLeave();
         document.getElementById('ready-btn')?.addEventListener('click',
@@ -530,97 +533,18 @@ export class LobbyUI {
         return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
 
+    /**
+     * Replace (or insert) the lobby stylesheet from the active templates.
+     * Re-runnable: `setTemplates()` calls this on every hot-swap, so we
+     * always remove the previous tag instead of leaving stale rules
+     * behind from the engine default.
+     */
     private injectStyles(): void {
-        if (document.getElementById('lobby-styles')) return;
+        const existing = document.getElementById('lobby-styles');
+        if (existing) existing.remove();
         const s = document.createElement('style');
         s.id = 'lobby-styles';
-        s.textContent = `
-            #lobby {
-                position:fixed; inset:0; z-index:100;
-                background:#1a1a2e;
-                display:flex; align-items:center; justify-content:center;
-                font-family:system-ui,sans-serif; color:#e0e0e0;
-            }
-            .lobby-card, .lobby-panel {
-                background:#16213e; border-radius:12px; padding:32px;
-                min-width:360px; max-width:600px; width:100%;
-                box-shadow:0 8px 32px rgba(0,0,0,0.4);
-            }
-            .lobby-card h1 { margin:0 0 24px; text-align:center; color:#4cc9f0; }
-            .lobby-form { display:flex; flex-direction:column; gap:12px; }
-            .lobby-form input, .create-form input {
-                padding:10px 14px; border:1px solid #334; border-radius:6px;
-                background:#0f1626; color:#e0e0e0; font-size:14px;
-            }
-            .lobby-form input:focus, .create-form input:focus { outline:none; border-color:#4cc9f0; }
-            button {
-                padding:10px 20px; border:none; border-radius:6px;
-                background:#4cc9f0; color:#0f1626; font-weight:600;
-                cursor:pointer; font-size:14px; transition:background .15s;
-            }
-            button:hover { background:#7bdff2; }
-            button:disabled { opacity:0.4; cursor:default; }
-            button.secondary { background:#334; color:#aaa; }
-            button.secondary:hover { background:#445; }
-            button.primary { background:#06d6a0; }
-            button.primary:hover { background:#0be5af; }
-            button.danger { background:#aa3333; color:#fff; }
-            button.danger:hover { background:#cc3333; }
-            .msg { font-size:13px; min-height:20px; margin:0; }
-            .msg.error { color:#f07; }
-            .hint { font-size:11px; color:#555; margin:0; }
-            .lobby-header { display:flex; align-items:center; gap:12px; margin-bottom:16px; }
-            .lobby-header h2 { margin:0; flex:1; }
-            .room-badge {
-                background:#334; padding:3px 10px; border-radius:10px;
-                font-size:11px; color:#4cc9f0; white-space:nowrap;
-            }
-            .room-list { display:flex; flex-direction:column; gap:8px; max-height:400px; overflow-y:auto; }
-            .room-entry {
-                display:grid; grid-template-columns:1fr auto;
-                gap:4px 12px; padding:12px 16px;
-                background:#0f1626; border-radius:8px; align-items:center;
-            }
-            .room-main { display:flex; align-items:center; gap:8px; }
-            .room-name { font-weight:600; }
-            .room-detail { grid-column:1; color:#888; font-size:12px; }
-            .join-btn { grid-row:1/3; grid-column:2; }
-            .empty-state { text-align:center; color:#555; padding:32px; }
-            .create-form {
-                margin-top:16px; padding-top:16px; border-top:1px solid #334;
-                display:flex; flex-direction:column; gap:12px;
-            }
-            .create-form h3 { margin:0; font-size:15px; }
-            .btn-row { display:flex; gap:8px; }
-            .player-list { display:flex; flex-direction:column; gap:4px; margin-bottom:16px; }
-            .player-row {
-                display:flex; gap:10px; padding:8px 12px;
-                background:#0f1626; border-radius:6px; align-items:center;
-            }
-            .player-row.ready { border-left:3px solid #06d6a0; }
-            .player-icon { width:16px; text-align:center; color:#4cc9f0; }
-            .player-name { flex:1; font-weight:500; }
-            .team-select {
-                padding:4px 8px; background:#0f1626; color:#e0e0e0;
-                border:1px solid #334; border-radius:4px; font-size:12px;
-            }
-            .player-status { font-size:12px; color:#888; min-width:60px; text-align:right; }
-            .room-actions { display:flex; gap:10px; }
-            .map-select-label { font-size:13px; color:#888; margin-bottom:4px; }
-            .map-grid { display:flex; gap:8px; flex-wrap:wrap; max-height:200px; overflow-y:auto; }
-            .map-card {
-                width:140px; background:#0f1626; border:2px solid transparent;
-                border-radius:8px; cursor:pointer; overflow:hidden; transition:border-color .15s;
-            }
-            .map-card:hover { border-color:#445; }
-            .map-card.selected { border-color:#4cc9f0; }
-            .map-thumb {
-                width:140px; height:100px; background-color:#1a2a1a;
-                background-size:cover; background-position:center;
-            }
-            .map-label { padding:6px 8px 2px; font-size:12px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-            .map-size { padding:0 8px 6px; font-size:10px; color:#666; }
-        `;
+        s.textContent = this.templates.styles;
         document.head.appendChild(s);
     }
 }

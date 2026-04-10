@@ -370,6 +370,9 @@ int main(int argc, char* argv[])
         else if (ext == ".png") ct = "image/png";
         else if (ext == ".jpg" || ext == ".jpeg") ct = "image/jpeg";
         else if (ext == ".json") ct = "application/json";
+        else if (ext == ".html") ct = "text/html; charset=utf-8";
+        else if (ext == ".css") ct = "text/css; charset=utf-8";
+        else if (ext == ".js") ct = "application/javascript; charset=utf-8";
 
         return {
             .contentType = ct,

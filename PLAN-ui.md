@@ -6,6 +6,78 @@ Game UI is HTML/CSS/JS layered over the WebGL canvas. Spring's original Lua-base
 
 The WebGL canvas handles only map terrain, units, projectiles, and visual effects. Everything else — HUD, minimap, menus, chat, tooltips, command panels — is HTML.
 
+## Component extraction pattern (implemented)
+
+UI templates live as plain `.html` + `.css` files under `client/src/ui/<component>/`, imported via Vite's `?raw` query. Each file's contents land in the bundle as a string at build time — no runtime fetch, no dist paths to wire up. The long-term plan is for games to ship their own copies of these files to override the default look, so each component is kept self-contained (one root element, no cross-file assumptions).
+
+### Directory layout
+
+```
+client/src/ui/
+├── ui.ts                  # shared helpers (injectStyle, renderTemplate)
+├── hud/
+│   ├── hud.html           # top bar, selection panel, minimap container, help footer
+│   └── hud.css
+├── quit-confirm/
+│   ├── quit-confirm.html  # "are you sure?" overlay
+│   └── quit-confirm.css
+└── game-over/
+    ├── game-over.html     # post-match overlay with {{frame}} placeholder
+    └── game-over.css
+```
+
+### Shared helpers
+
+`client/src/ui/ui.ts` exports two functions:
+
+```typescript
+// Idempotent <style> injection guarded by an id. Safe to call from every
+// show/render entry point — subsequent calls with the same id are no-ops.
+export function injectStyle(id: string, css: string): void;
+
+// Substitute {{name}} placeholders in `template` with values from `vars`.
+// No HTML escaping — callers must pre-escape user-controlled input before
+// passing it in. For trusted static content (frame numbers, scores) this
+// is fine.
+export function renderTemplate(
+    template: string,
+    vars: Record<string, string | number>,
+): string;
+```
+
+### Usage
+
+```typescript
+import { injectStyle, renderTemplate } from './ui/ui.js';
+import gameOverHtml from './ui/game-over/game-over.html?raw';
+import gameOverCss  from './ui/game-over/game-over.css?raw';
+
+function showGameOver(frame: number): void {
+    injectStyle('game-over-style', gameOverCss);
+    const overlay = document.createElement('div');
+    overlay.id = 'game-over-overlay';
+    overlay.innerHTML = renderTemplate(gameOverHtml, { frame });
+    document.body.appendChild(overlay);
+    document.getElementById('return-lobby-btn')?.addEventListener('click', quitToLobby);
+}
+```
+
+### Conventions
+
+- Each template's **root element is omitted** — the caller creates a wrapper `div` with the component id, sets any per-instance attributes, and assigns the template to its `innerHTML`. This makes it easy to create multiple instances of the same component.
+- CSS files scope their rules under the wrapper id (e.g. `#quit-confirm-overlay .quit-card`) so a game shipping a custom replacement can't accidentally leak styles into other components.
+- `vite-env.d.ts` is not needed — `"types": ["vite/client"]` in `tsconfig.json` already provides the `?raw` import declarations.
+- Style injection uses a stable id per component (e.g. `"hud-style"`, `"quit-confirm-style"`). This fixes a latent class of bugs where re-entering a modal previously appended a fresh `<style>` tag on every call.
+
+### Game override path (future)
+
+Games will eventually be able to ship replacement templates. Two likely routes:
+
+1. **Build-time content pipeline** — games drop `ui/<component>/*.html` files into their content directory; a preprocessing step copies them into the client `dist/` and the `?raw` imports resolve the game's copy first via Vite path rewriting.
+2. **Runtime loader** — wrap the raw-imported strings in a loader that prefers `/api/content/<gameId>/ui/<component>/<file>` with the bundled default as a fallback.
+
+Neither is wired up yet — the current pattern ships defaults only. When adding game overrides, keep the same directory structure so replacement is file-for-file.
+
 ## HTML over WebGL
 
 ### Why this works

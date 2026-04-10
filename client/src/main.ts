@@ -19,6 +19,10 @@ import { renderMapFeatures } from './core/feature-renderer.js';
 import { RTSCamera } from './core/rts-camera.js';
 import { LuaWidgetHost } from './core/lua-widget-host.js';
 import { injectStyle, renderTemplate } from './ui/ui.js';
+import {
+    getDefaultLobbyTemplates,
+    loadGameLobbyTemplates,
+} from './ui/lobby/loader.js';
 
 // UI templates + stylesheets. Each component lives under src/ui/<name>/
 // as plain .html + .css files so games can ship their own replacements.
@@ -435,6 +439,27 @@ async function startGame(gameServerPort: number): Promise<void> {
 
 // --- Boot ---
 
+/// Resolve which game (if any) the lobby UI should style itself for at
+/// boot time. Order of precedence:
+///   1. `?game=<id>` URL query parameter (browser link, dev override)
+///   2. `springrts-game-id` localStorage key (sticky across reloads)
+///   3. none (engine default UI)
+///
+/// CLI startup of the client (e.g. `npm run dev -- --game papertanks`)
+/// is forwarded into the URL by the host launcher, so the same path
+/// covers both browser and packaged-app entry points.
+function resolveInitialGameId(): string | null {
+    const params = new URLSearchParams(window.location.search);
+    const fromUrl = params.get('game');
+    if (fromUrl) {
+        // Persist URL choices so a refresh keeps the same skin without
+        // having to re-pass the query string.
+        localStorage.setItem('springrts-game-id', fromUrl);
+        return fromUrl;
+    }
+    return localStorage.getItem('springrts-game-id');
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     createHUD();
 
@@ -452,8 +477,20 @@ document.addEventListener('DOMContentLoaded', () => {
         showQuitConfirm();
     });
 
-    // Show lobby
+    // Show lobby with the engine-default templates immediately so the
+    // login screen renders without waiting on a network round-trip.
     lobbyUI = new LobbyUI((gameServerPort: number) => {
         startGame(gameServerPort);
-    });
+    }, getDefaultLobbyTemplates());
+
+    // If a game id is known up front, fire-and-forget the override
+    // bundle fetch and hot-swap the templates as soon as it lands.
+    // Each per-file override falls back to the bundled default, so a
+    // missing or partial override gracefully degrades.
+    const initialGameId = resolveInitialGameId();
+    if (initialGameId) {
+        loadGameLobbyTemplates(initialGameId, CONFIG.httpUrl)
+            .then((templates) => lobbyUI?.setTemplates(templates))
+            .catch((err) => console.warn('[lobby] game UI override failed:', err));
+    }
 });

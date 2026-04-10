@@ -12,6 +12,12 @@ As of Phase 6 completion, the codebase has substantial infrastructure but limite
 - Player commands route through to CCommandAI
 - Combat events collected from DoDamage and broadcast to clients
 - Camera viewport filtering via QuadField
+- **Lobby + game server split** — `spring-lobby` runs the HTTP/WebSocket lobby, spawns a `spring-server` subprocess per room, monitors it via `waitpid`, transitions rooms to `Ended` when the process exits
+- **Map preprocessing pipeline** — mapinfo.lua parsing, SMF/SMT extraction, decal texture conversion via ImageMagick, feature def parsing, featureplacer Lua execution, S3O→glb model conversion via `any2gltf`, TGA→PNG texture conversion. See PLAN-content.md "Implemented: map feature pipeline".
+- **Feature rendering on the client** — `feature-renderer.ts` loads each unique feature def's `.glb` via Babylon `SceneLoader.ImportMeshAsync`, thin-instances all placements of that type. Placeholder fallback for defs with no model.
+- **LuaUI widgets** — fengari runtime, widget host, map-shipped widgets (lava layer, water shader) execute in a sandboxed Lua state with access to a `gl.*` command buffer bridge
+- **Quit-to-lobby flow** — HUD Quit button, global ESC handler, confirmation overlay, `quitToLobby()` cleanup path. Lobby WebSocket stays connected, so the player lands back on the room browser instantly without re-auth.
+- **UI component extraction** — HUD, quit-confirm, and game-over overlays live under `client/src/ui/<component>/` as `.html` + `.css` imported via Vite `?raw`. See PLAN-ui.md "Component extraction pattern".
 
 ### What's built but disconnected
 - **RoomManager** — fully implemented, not called from server_main
@@ -181,3 +187,25 @@ Sprint 4 (polish):          4.1 → 4.2 → 4.3 → 4.4
 ```
 
 Sprint 1 comes first because it validates that the core game loop works before building lobby UI around it. No point having a lobby that launches a broken game.
+
+---
+
+## Current TODO (bugs and small features)
+
+Short-horizon fixes the user has flagged during testing. These block the smooth lobby → game → quit → lobby loop.
+
+### Bugs
+
+1. **Minimap duplicates on game rejoin.** `createHUD()` only runs once on page load, so the `#minimap-container` div persists across game sessions. `quitToLobby()` nulls the `Minimap` handle but doesn't clear the DOM canvas it created inside that container — so the next `startGame()` call appends a second canvas. Fix: either clear `#minimap-container.innerHTML` in `quitToLobby()` or add a `Minimap.dispose()` that removes its own DOM children.
+2. **Detached minimap does not render.** The minimap "detach" button (in `hud.html`) is wired up but the resulting detached window never draws. Likely root cause: the detached canvas is moved/cloned out of `#minimap-container` but the minimap render loop still targets the original canvas reference. Need to check `client/src/core/minimap.ts` for what `detach()` does.
+
+### Small features
+
+3. **Expand HUD top bar across the viewport.** Currently `#hud-top-bar` is `left: 8px` only, so the quit button floats right next to the entity count. Should span `left: 8px; right: 8px` so the quit button (which already has `margin-left: auto`) sits at the far right edge. CSS-only change in `client/src/ui/hud/hud.css`.
+4. **Host "End Game" button in the lobby.** When a room is in `Active` state, the player who hosts it should see an "End Game" button in the lobby UI that terminates the `spring-server` subprocess for that room and transitions the room to `Ended`. Needs: a new FlatBuffers client→server message (e.g. `RoomEndGame`), a lobby-side handler in `lobby_main.cpp` that kills the game server (via the existing `gameServers` map by roomId) and flags the room, and a button in `client/src/lobby/lobby-ui.ts` shown only to the host.
+
+### Follow-ups deferred from this session
+
+- **Server-side "player left mid-game" handling.** `quitToLobby()` closes the game WebSocket but the server doesn't do anything special when it disconnects. A proper `PlayerLeave` protocol message + server-side handler (mark as leaver, remove squads from sim, optionally end the game if all humans gone) belongs in a future orders/session pass.
+- **Unit/projectile asset pipeline.** The feature pipeline (any2gltf + magick) is ready to generalise to units. A parallel `UnitProcessor` should run at game registration time over `<game>/objects3d/*.s3o` and emit `.glb` + `.png` into `data/games/<id>/models/`. Wire format: extend `UnitDef` in the `game_defs.json` to include `modelUrl` + `textureUrl`. Client would reuse the same `SceneLoader` + thin-instance pattern as `feature-renderer.ts`.
+- **Runtime game-override path for UI templates.** See PLAN-ui.md "Game override path (future)" — no code yet, just the directory convention.
