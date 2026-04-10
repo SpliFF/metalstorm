@@ -23,7 +23,7 @@
 struct sqlite3;
 
 /// Increment to reprocess all maps.
-constexpr int MAP_FORMAT_VERSION = 3;
+constexpr int MAP_FORMAT_VERSION = 6;
 
 struct MapStartPosition {
     float x = 0, z = 0;
@@ -34,6 +34,33 @@ struct MapFeatureData {
     float x = 0, y = 0, z = 0;
     float rotation = 0;
     float relativeSize = 1.0f;
+};
+
+/// Spring's splat detail texture system — 4 detail normal textures blended
+/// by a distribution map. This IS the map "decal" asset system.
+/// Filenames are the relative names in the processed dir (e.g. "splat_distr.png").
+/// Empty strings mean the texture is not defined by the map.
+struct MapDecalData {
+    std::string detailTex;             // fallback single detail texture
+    std::string specularTex;
+    std::string splatDetailTex;        // single splat texture (old mode)
+    std::string splatDistrTex;         // RGBA distribution map
+    std::string splatDetailNormalTex[4]; // 4 channel detail+normal+tangent+specular
+    std::string detailNormalTex;       // global detail normal map
+    float splatScales[4] = {0.02f, 0.02f, 0.02f, 0.02f};
+    float splatMults[4]  = {1.0f, 1.0f, 1.0f, 1.0f};
+};
+
+/// Water rendering properties. Spring's "water" system is also used for
+/// lava/acid/void-fill etc. — just the colour and damage tell you what it is.
+/// The water plane is at world Y = 0 by default; terrain below that is flooded.
+struct MapWaterData {
+    float baseColor[3]    = {0.0f, 0.4f, 0.7f};  // bulk colour at depth
+    float surfaceColor[3] = {0.75f, 0.8f, 0.85f}; // colour at the surface
+    float minColor[3]     = {0.0f, 0.2f, 0.4f};
+    float surfaceAlpha = 0.55f;
+    float damage = 0.0f;   // damage/sec to units in the water (lava = high)
+    bool  voidWater = false; // true = don't render water plane (void below)
 };
 
 struct MapMetadata {
@@ -62,6 +89,12 @@ struct MapMetadata {
     std::vector<MapStartPosition> startPositions;
     std::vector<std::string> featureTypes;
     std::vector<MapFeatureData> features;
+    MapDecalData decals;
+    MapWaterData water;
+    /// Relative paths (from the map source dir) to any .lua widgets the
+    /// map ships under LuaUI/Widgets/. Client fetches each one from
+    /// /api/maps/source/{id}/{path}.
+    std::vector<std::string> widgets;
 };
 
 class MapProcessor {
@@ -75,6 +108,8 @@ private:
     bool ReadSMFHeader(MapMetadata& meta);
     bool ExtractBinaryData(const MapMetadata& meta);
     bool ExtractFeatures(MapMetadata& meta);
+    bool ExtractDecalTextures(MapMetadata& meta);
+    void EnumerateWidgets(MapMetadata& meta);
     bool ProcessMap(MapMetadata& meta);
     void StoreMetadata(sqlite3* db, const MapMetadata& meta);
     static void EnsureTable(sqlite3* db);

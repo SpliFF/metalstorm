@@ -4,16 +4,18 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-import { MapFeature, MapFeatureT } from '../spring-web/map-feature.js';
-import { MapStartPos, MapStartPosT } from '../spring-web/map-start-pos.js';
+import { MapDecals } from '../spring-web/map-decals.js';
+import { MapFeature } from '../spring-web/map-feature.js';
+import { MapStartPos } from '../spring-web/map-start-pos.js';
+import { MapWater } from '../spring-web/map-water.js';
 
 
 /**
  * Full map data sent by the game server on connect.
  * Binary data (heightmap, tileindex, typemap, metalmap) embedded directly.
- * Tile texture data served via HTTP separately (too large to embed).
+ * Tile texture data and splat textures served via HTTP separately.
  */
-export class MapData implements flatbuffers.IUnpackableObject<MapDataT> {
+export class MapData {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):MapData {
@@ -182,13 +184,53 @@ tilesUrl(optionalEncoding?:any):string|Uint8Array|null {
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
-hasLuaGaia():boolean {
+mapDataUrl():string|null
+mapDataUrl(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+mapDataUrl(optionalEncoding?:any):string|Uint8Array|null {
   const offset = this.bb!.__offset(this.bb_pos, 40);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
+mapSourceUrl():string|null
+mapSourceUrl(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+mapSourceUrl(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 42);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
+decals(obj?:MapDecals):MapDecals|null {
+  const offset = this.bb!.__offset(this.bb_pos, 44);
+  return offset ? (obj || new MapDecals()).__init(this.bb!.__indirect(this.bb_pos + offset), this.bb!) : null;
+}
+
+water(obj?:MapWater):MapWater|null {
+  const offset = this.bb!.__offset(this.bb_pos, 46);
+  return offset ? (obj || new MapWater()).__init(this.bb!.__indirect(this.bb_pos + offset), this.bb!) : null;
+}
+
+hasLuaGaia():boolean {
+  const offset = this.bb!.__offset(this.bb_pos, 48);
   return offset ? !!this.bb!.readInt8(this.bb_pos + offset) : false;
 }
 
+/**
+ * Paths (relative to map_source_url) of .lua files under LuaUI/Widgets/
+ * that the client should load into fengari on map start.
+ */
+widgets(index: number):string
+widgets(index: number,optionalEncoding:flatbuffers.Encoding):string|Uint8Array
+widgets(index: number,optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 50);
+  return offset ? this.bb!.__string(this.bb!.__vector(this.bb_pos + offset) + index * 4, optionalEncoding) : null;
+}
+
+widgetsLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 50);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
 static startMapData(builder:flatbuffers.Builder) {
-  builder.startObject(19);
+  builder.startObject(24);
 }
 
 static addMapx(builder:flatbuffers.Builder, mapx:number) {
@@ -349,8 +391,40 @@ static addTilesUrl(builder:flatbuffers.Builder, tilesUrlOffset:flatbuffers.Offse
   builder.addFieldOffset(17, tilesUrlOffset, 0);
 }
 
+static addMapDataUrl(builder:flatbuffers.Builder, mapDataUrlOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(18, mapDataUrlOffset, 0);
+}
+
+static addMapSourceUrl(builder:flatbuffers.Builder, mapSourceUrlOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(19, mapSourceUrlOffset, 0);
+}
+
+static addDecals(builder:flatbuffers.Builder, decalsOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(20, decalsOffset, 0);
+}
+
+static addWater(builder:flatbuffers.Builder, waterOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(21, waterOffset, 0);
+}
+
 static addHasLuaGaia(builder:flatbuffers.Builder, hasLuaGaia:boolean) {
-  builder.addFieldInt8(18, +hasLuaGaia, +false);
+  builder.addFieldInt8(22, +hasLuaGaia, +false);
+}
+
+static addWidgets(builder:flatbuffers.Builder, widgetsOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(23, widgetsOffset, 0);
+}
+
+static createWidgetsVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startWidgetsVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
 }
 
 static endMapData(builder:flatbuffers.Builder):flatbuffers.Offset {
@@ -358,133 +432,4 @@ static endMapData(builder:flatbuffers.Builder):flatbuffers.Offset {
   return offset;
 }
 
-static createMapData(builder:flatbuffers.Builder, mapx:number, mapy:number, squareSize:number, minHeight:number, maxHeight:number, tilesX:number, tilesZ:number, numTiles:number, tileSize:number, startPositionsOffset:flatbuffers.Offset, featureTypesOffset:flatbuffers.Offset, featuresOffset:flatbuffers.Offset, heightmapOffset:flatbuffers.Offset, tileindexOffset:flatbuffers.Offset, typemapOffset:flatbuffers.Offset, metalmapOffset:flatbuffers.Offset, minimapUrlOffset:flatbuffers.Offset, tilesUrlOffset:flatbuffers.Offset, hasLuaGaia:boolean):flatbuffers.Offset {
-  MapData.startMapData(builder);
-  MapData.addMapx(builder, mapx);
-  MapData.addMapy(builder, mapy);
-  MapData.addSquareSize(builder, squareSize);
-  MapData.addMinHeight(builder, minHeight);
-  MapData.addMaxHeight(builder, maxHeight);
-  MapData.addTilesX(builder, tilesX);
-  MapData.addTilesZ(builder, tilesZ);
-  MapData.addNumTiles(builder, numTiles);
-  MapData.addTileSize(builder, tileSize);
-  MapData.addStartPositions(builder, startPositionsOffset);
-  MapData.addFeatureTypes(builder, featureTypesOffset);
-  MapData.addFeatures(builder, featuresOffset);
-  MapData.addHeightmap(builder, heightmapOffset);
-  MapData.addTileindex(builder, tileindexOffset);
-  MapData.addTypemap(builder, typemapOffset);
-  MapData.addMetalmap(builder, metalmapOffset);
-  MapData.addMinimapUrl(builder, minimapUrlOffset);
-  MapData.addTilesUrl(builder, tilesUrlOffset);
-  MapData.addHasLuaGaia(builder, hasLuaGaia);
-  return MapData.endMapData(builder);
-}
-
-unpack(): MapDataT {
-  return new MapDataT(
-    this.mapx(),
-    this.mapy(),
-    this.squareSize(),
-    this.minHeight(),
-    this.maxHeight(),
-    this.tilesX(),
-    this.tilesZ(),
-    this.numTiles(),
-    this.tileSize(),
-    this.bb!.createObjList<MapStartPos, MapStartPosT>(this.startPositions.bind(this), this.startPositionsLength()),
-    this.bb!.createScalarList<string>(this.featureTypes.bind(this), this.featureTypesLength()),
-    this.bb!.createObjList<MapFeature, MapFeatureT>(this.features.bind(this), this.featuresLength()),
-    this.bb!.createScalarList<number>(this.heightmap.bind(this), this.heightmapLength()),
-    this.bb!.createScalarList<number>(this.tileindex.bind(this), this.tileindexLength()),
-    this.bb!.createScalarList<number>(this.typemap.bind(this), this.typemapLength()),
-    this.bb!.createScalarList<number>(this.metalmap.bind(this), this.metalmapLength()),
-    this.minimapUrl(),
-    this.tilesUrl(),
-    this.hasLuaGaia()
-  );
-}
-
-
-unpackTo(_o: MapDataT): void {
-  _o.mapx = this.mapx();
-  _o.mapy = this.mapy();
-  _o.squareSize = this.squareSize();
-  _o.minHeight = this.minHeight();
-  _o.maxHeight = this.maxHeight();
-  _o.tilesX = this.tilesX();
-  _o.tilesZ = this.tilesZ();
-  _o.numTiles = this.numTiles();
-  _o.tileSize = this.tileSize();
-  _o.startPositions = this.bb!.createObjList<MapStartPos, MapStartPosT>(this.startPositions.bind(this), this.startPositionsLength());
-  _o.featureTypes = this.bb!.createScalarList<string>(this.featureTypes.bind(this), this.featureTypesLength());
-  _o.features = this.bb!.createObjList<MapFeature, MapFeatureT>(this.features.bind(this), this.featuresLength());
-  _o.heightmap = this.bb!.createScalarList<number>(this.heightmap.bind(this), this.heightmapLength());
-  _o.tileindex = this.bb!.createScalarList<number>(this.tileindex.bind(this), this.tileindexLength());
-  _o.typemap = this.bb!.createScalarList<number>(this.typemap.bind(this), this.typemapLength());
-  _o.metalmap = this.bb!.createScalarList<number>(this.metalmap.bind(this), this.metalmapLength());
-  _o.minimapUrl = this.minimapUrl();
-  _o.tilesUrl = this.tilesUrl();
-  _o.hasLuaGaia = this.hasLuaGaia();
-}
-}
-
-export class MapDataT implements flatbuffers.IGeneratedObject {
-constructor(
-  public mapx: number = 0,
-  public mapy: number = 0,
-  public squareSize: number = 0,
-  public minHeight: number = 0.0,
-  public maxHeight: number = 0.0,
-  public tilesX: number = 0,
-  public tilesZ: number = 0,
-  public numTiles: number = 0,
-  public tileSize: number = 0,
-  public startPositions: (MapStartPosT)[] = [],
-  public featureTypes: (string)[] = [],
-  public features: (MapFeatureT)[] = [],
-  public heightmap: (number)[] = [],
-  public tileindex: (number)[] = [],
-  public typemap: (number)[] = [],
-  public metalmap: (number)[] = [],
-  public minimapUrl: string|Uint8Array|null = null,
-  public tilesUrl: string|Uint8Array|null = null,
-  public hasLuaGaia: boolean = false
-){}
-
-
-pack(builder:flatbuffers.Builder): flatbuffers.Offset {
-  const startPositions = builder.createStructOffsetList(this.startPositions, MapData.startStartPositionsVector);
-  const featureTypes = MapData.createFeatureTypesVector(builder, builder.createObjectOffsetList(this.featureTypes));
-  const features = MapData.createFeaturesVector(builder, builder.createObjectOffsetList(this.features));
-  const heightmap = MapData.createHeightmapVector(builder, this.heightmap);
-  const tileindex = MapData.createTileindexVector(builder, this.tileindex);
-  const typemap = MapData.createTypemapVector(builder, this.typemap);
-  const metalmap = MapData.createMetalmapVector(builder, this.metalmap);
-  const minimapUrl = (this.minimapUrl !== null ? builder.createString(this.minimapUrl!) : 0);
-  const tilesUrl = (this.tilesUrl !== null ? builder.createString(this.tilesUrl!) : 0);
-
-  return MapData.createMapData(builder,
-    this.mapx,
-    this.mapy,
-    this.squareSize,
-    this.minHeight,
-    this.maxHeight,
-    this.tilesX,
-    this.tilesZ,
-    this.numTiles,
-    this.tileSize,
-    startPositions,
-    featureTypes,
-    features,
-    heightmap,
-    tileindex,
-    typemap,
-    metalmap,
-    minimapUrl,
-    tilesUrl,
-    this.hasLuaGaia
-  );
-}
 }

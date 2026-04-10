@@ -4,9 +4,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-
-
-export class RoomTeamSelect implements flatbuffers.IUnpackableObject<RoomTeamSelectT> {
+export class RoomTeamSelect {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):RoomTeamSelect {
@@ -46,29 +44,5 @@ static createRoomTeamSelect(builder:flatbuffers.Builder, team:number):flatbuffer
   RoomTeamSelect.startRoomTeamSelect(builder);
   RoomTeamSelect.addTeam(builder, team);
   return RoomTeamSelect.endRoomTeamSelect(builder);
-}
-
-unpack(): RoomTeamSelectT {
-  return new RoomTeamSelectT(
-    this.team()
-  );
-}
-
-
-unpackTo(_o: RoomTeamSelectT): void {
-  _o.team = this.team();
-}
-}
-
-export class RoomTeamSelectT implements flatbuffers.IGeneratedObject {
-constructor(
-  public team: number = 0
-){}
-
-
-pack(builder:flatbuffers.Builder): flatbuffers.Offset {
-  return RoomTeamSelect.createRoomTeamSelect(builder,
-    this.team
-  );
 }
 }

@@ -4,10 +4,10 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-import { RoomPlayerInfo, RoomPlayerInfoT } from '../spring-web/room-player-info.js';
+import { RoomPlayerInfo } from '../spring-web/room-player-info.js';
 
 
-export class RoomPlayerJoined implements flatbuffers.IUnpackableObject<RoomPlayerJoinedT> {
+export class RoomPlayerJoined {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):RoomPlayerJoined {
@@ -52,35 +52,4 @@ static endRoomPlayerJoined(builder:flatbuffers.Builder):flatbuffers.Offset {
   return offset;
 }
 
-
-unpack(): RoomPlayerJoinedT {
-  return new RoomPlayerJoinedT(
-    this.roomId(),
-    (this.player() !== null ? this.player()!.unpack() : null)
-  );
-}
-
-
-unpackTo(_o: RoomPlayerJoinedT): void {
-  _o.roomId = this.roomId();
-  _o.player = (this.player() !== null ? this.player()!.unpack() : null);
-}
-}
-
-export class RoomPlayerJoinedT implements flatbuffers.IGeneratedObject {
-constructor(
-  public roomId: number = 0,
-  public player: RoomPlayerInfoT|null = null
-){}
-
-
-pack(builder:flatbuffers.Builder): flatbuffers.Offset {
-  const player = (this.player !== null ? this.player!.pack(builder) : 0);
-
-  RoomPlayerJoined.startRoomPlayerJoined(builder);
-  RoomPlayerJoined.addRoomId(builder, this.roomId);
-  RoomPlayerJoined.addPlayer(builder, player);
-
-  return RoomPlayerJoined.endRoomPlayerJoined(builder);
-}
 }

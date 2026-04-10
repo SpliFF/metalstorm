@@ -22,8 +22,10 @@ import { GameEventBatch } from '../protocol/spring-web/game-event-batch.js';
 import { CombatEvent } from '../protocol/spring-web/combat-event.js';
 import { EntityDestroy } from '../protocol/spring-web/entity-destroy.js';
 import { GameInfo } from '../protocol/spring-web/game-info.js';
+import { MapData } from '../protocol/spring-web/map-data.js';
 import { ServerClock } from './clock.js';
 import { parseEntityState, type EntityStateSnapshot } from './entity-state.js';
+import { parseMapData, type ParsedMapData } from './map-data.js';
 
 const ENVELOPE_FLATBUFFERS = 0x01;
 const ENVELOPE_ENTITY_STATE_FULL = 0x02;
@@ -53,6 +55,7 @@ export interface ConnectionEvents {
     onCombatEvents?: (events: CombatEventInfo[], frame: number) => void;
     onEntityDestroy?: (entityId: number, x: number, y: number, z: number) => void;
     onGameOver?: (frame: number) => void;
+    onMapData?: (map: ParsedMapData) => void;
     onServerMessage?: (msg: ServerMessage) => void;
 }
 
@@ -79,39 +82,87 @@ export class Connection {
     }
 
     /** Connect to the server and authenticate.
-     *  Pass token (instead of password) for session reconnection. */
+     *  Pass token (instead of password) for session reconnection.
+     *
+     *  Retries a few times if the initial connection fails — the target
+     *  server may still be starting (common when the lobby spawns a game
+     *  server and immediately tells the client to connect to it).
+     */
     connect(url: string, username: string, password: string, token?: string): void {
         if (this.ws) this.disconnect();
 
         // Store token for reconnection auth
         if (token) this.sessionToken = token;
 
-        this.setState('connecting');
-        this.ws = new WebSocket(url);
-        this.ws.binaryType = 'arraybuffer';
+        this.pendingUrl = url;
+        this.pendingUsername = username;
+        this.pendingPassword = password;
+        this.connectAttempts = 0;
+        this.tryConnect();
+    }
 
-        this.ws.onopen = () => {
+    private pendingUrl = '';
+    private pendingUsername = '';
+    private pendingPassword = '';
+    private connectAttempts = 0;
+    private static readonly MAX_CONNECT_ATTEMPTS = 10;
+    private static readonly CONNECT_RETRY_DELAY_MS = 500;
+
+    private tryConnect(): void {
+        this.connectAttempts++;
+        this.setState('connecting');
+
+        const ws = new WebSocket(this.pendingUrl);
+        ws.binaryType = 'arraybuffer';
+        this.ws = ws;
+
+        // If the connect doesn't settle within the retry window, treat it
+        // as a failure so we can retry. Otherwise Chrome hangs in CONNECTING.
+        const connectTimer = setTimeout(() => {
+            if (ws.readyState === WebSocket.CONNECTING) {
+                try { ws.close(); } catch { /* ignore */ }
+            }
+        }, Connection.CONNECT_RETRY_DELAY_MS * 4);
+
+        let settled = false;
+
+        ws.onopen = () => {
+            settled = true;
+            clearTimeout(connectTimer);
             this.setState('handshake');
             this.sendHandshake();
             this.setState('authenticating');
-            this.sendAuthRequest(username, password);
+            this.sendAuthRequest(this.pendingUsername, this.pendingPassword);
         };
 
-        this.ws.onmessage = (event) => {
+        ws.onmessage = (event) => {
             if (event.data instanceof ArrayBuffer) {
                 this.handleBinaryMessage(new Uint8Array(event.data));
             }
         };
 
-        this.ws.onclose = () => {
-            this.cleanup();
-            this.setState('disconnected');
+        const handleFailure = () => {
+            if (settled && this._state === 'connected') {
+                // Real disconnect after a successful connection
+                this.cleanup();
+                this.setState('disconnected');
+                return;
+            }
+            clearTimeout(connectTimer);
+            if (this.ws !== ws) return; // superseded by a new attempt
+            // Initial connection failed — retry a few times
+            if (this.connectAttempts < Connection.MAX_CONNECT_ATTEMPTS) {
+                console.log(`[connection] connect attempt ${this.connectAttempts} failed, retrying...`);
+                setTimeout(() => this.tryConnect(), Connection.CONNECT_RETRY_DELAY_MS);
+            } else {
+                console.error(`[connection] giving up after ${this.connectAttempts} attempts`);
+                this.cleanup();
+                this.setState('disconnected');
+            }
         };
 
-        this.ws.onerror = () => {
-            this.cleanup();
-            this.setState('disconnected');
-        };
+        ws.onclose = handleFailure;
+        ws.onerror = handleFailure;
     }
 
     /** Disconnect from the server. */
@@ -240,6 +291,16 @@ export class Connection {
                 const info = msg.payload(new GameInfo()) as GameInfo;
                 if (info.paused()) {
                     this.events.onGameOver?.(info.frame());
+                }
+                break;
+            }
+            case ServerPayload.MapData: {
+                const fbMap = msg.payload(new MapData()) as MapData;
+                try {
+                    const parsed = parseMapData(fbMap);
+                    this.events.onMapData?.(parsed);
+                } catch (err) {
+                    console.error('[connection] failed to parse MapData:', err);
                 }
                 break;
             }

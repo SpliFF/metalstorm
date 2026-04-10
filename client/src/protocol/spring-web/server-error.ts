@@ -4,9 +4,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-
-
-export class ServerError implements flatbuffers.IUnpackableObject<ServerErrorT> {
+export class ServerError {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):ServerError {
@@ -58,35 +56,5 @@ static createServerError(builder:flatbuffers.Builder, code:number, messageOffset
   ServerError.addCode(builder, code);
   ServerError.addMessage(builder, messageOffset);
   return ServerError.endServerError(builder);
-}
-
-unpack(): ServerErrorT {
-  return new ServerErrorT(
-    this.code(),
-    this.message()
-  );
-}
-
-
-unpackTo(_o: ServerErrorT): void {
-  _o.code = this.code();
-  _o.message = this.message();
-}
-}
-
-export class ServerErrorT implements flatbuffers.IGeneratedObject {
-constructor(
-  public code: number = 0,
-  public message: string|Uint8Array|null = null
-){}
-
-
-pack(builder:flatbuffers.Builder): flatbuffers.Offset {
-  const message = (this.message !== null ? builder.createString(this.message!) : 0);
-
-  return ServerError.createServerError(builder,
-    this.code,
-    message
-  );
 }
 }

@@ -4,13 +4,13 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-import { MapStartPos, MapStartPosT } from '../spring-web/map-start-pos.js';
+import { MapStartPos } from '../spring-web/map-start-pos.js';
 
 
 /**
  * Sent by the lobby for map selection UI.
  */
-export class MapInfo implements flatbuffers.IUnpackableObject<MapInfoT> {
+export class MapInfo {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):MapInfo {
@@ -263,114 +263,5 @@ static createMapInfo(builder:flatbuffers.Builder, idOffset:flatbuffers.Offset, n
   MapInfo.addMinimapUrl(builder, minimapUrlOffset);
   MapInfo.addHasLuaGaia(builder, hasLuaGaia);
   return MapInfo.endMapInfo(builder);
-}
-
-unpack(): MapInfoT {
-  return new MapInfoT(
-    this.id(),
-    this.name(),
-    this.shortName(),
-    this.description(),
-    this.author(),
-    this.version(),
-    this.mapx(),
-    this.mapy(),
-    this.widthElmos(),
-    this.heightElmos(),
-    this.minHeight(),
-    this.maxHeight(),
-    this.maxPlayers(),
-    this.bb!.createObjList<MapStartPos, MapStartPosT>(this.startPositions.bind(this), this.startPositionsLength()),
-    this.gravity(),
-    this.tidalStrength(),
-    this.maxMetal(),
-    this.extractorRadius(),
-    this.minimapUrl(),
-    this.hasLuaGaia()
-  );
-}
-
-
-unpackTo(_o: MapInfoT): void {
-  _o.id = this.id();
-  _o.name = this.name();
-  _o.shortName = this.shortName();
-  _o.description = this.description();
-  _o.author = this.author();
-  _o.version = this.version();
-  _o.mapx = this.mapx();
-  _o.mapy = this.mapy();
-  _o.widthElmos = this.widthElmos();
-  _o.heightElmos = this.heightElmos();
-  _o.minHeight = this.minHeight();
-  _o.maxHeight = this.maxHeight();
-  _o.maxPlayers = this.maxPlayers();
-  _o.startPositions = this.bb!.createObjList<MapStartPos, MapStartPosT>(this.startPositions.bind(this), this.startPositionsLength());
-  _o.gravity = this.gravity();
-  _o.tidalStrength = this.tidalStrength();
-  _o.maxMetal = this.maxMetal();
-  _o.extractorRadius = this.extractorRadius();
-  _o.minimapUrl = this.minimapUrl();
-  _o.hasLuaGaia = this.hasLuaGaia();
-}
-}
-
-export class MapInfoT implements flatbuffers.IGeneratedObject {
-constructor(
-  public id: string|Uint8Array|null = null,
-  public name: string|Uint8Array|null = null,
-  public shortName: string|Uint8Array|null = null,
-  public description: string|Uint8Array|null = null,
-  public author: string|Uint8Array|null = null,
-  public version: string|Uint8Array|null = null,
-  public mapx: number = 0,
-  public mapy: number = 0,
-  public widthElmos: number = 0,
-  public heightElmos: number = 0,
-  public minHeight: number = 0.0,
-  public maxHeight: number = 0.0,
-  public maxPlayers: number = 0,
-  public startPositions: (MapStartPosT)[] = [],
-  public gravity: number = 0.0,
-  public tidalStrength: number = 0.0,
-  public maxMetal: number = 0.0,
-  public extractorRadius: number = 0.0,
-  public minimapUrl: string|Uint8Array|null = null,
-  public hasLuaGaia: boolean = false
-){}
-
-
-pack(builder:flatbuffers.Builder): flatbuffers.Offset {
-  const id = (this.id !== null ? builder.createString(this.id!) : 0);
-  const name = (this.name !== null ? builder.createString(this.name!) : 0);
-  const shortName = (this.shortName !== null ? builder.createString(this.shortName!) : 0);
-  const description = (this.description !== null ? builder.createString(this.description!) : 0);
-  const author = (this.author !== null ? builder.createString(this.author!) : 0);
-  const version = (this.version !== null ? builder.createString(this.version!) : 0);
-  const startPositions = builder.createStructOffsetList(this.startPositions, MapInfo.startStartPositionsVector);
-  const minimapUrl = (this.minimapUrl !== null ? builder.createString(this.minimapUrl!) : 0);
-
-  return MapInfo.createMapInfo(builder,
-    id,
-    name,
-    shortName,
-    description,
-    author,
-    version,
-    this.mapx,
-    this.mapy,
-    this.widthElmos,
-    this.heightElmos,
-    this.minHeight,
-    this.maxHeight,
-    this.maxPlayers,
-    startPositions,
-    this.gravity,
-    this.tidalStrength,
-    this.maxMetal,
-    this.extractorRadius,
-    minimapUrl,
-    this.hasLuaGaia
-  );
 }
 }

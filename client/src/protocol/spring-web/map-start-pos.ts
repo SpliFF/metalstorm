@@ -4,9 +4,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-
-
-export class MapStartPos implements flatbuffers.IUnpackableObject<MapStartPosT> {
+export class MapStartPos {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):MapStartPos {
@@ -34,32 +32,4 @@ static createMapStartPos(builder:flatbuffers.Builder, x: number, z: number):flat
   return builder.offset();
 }
 
-
-unpack(): MapStartPosT {
-  return new MapStartPosT(
-    this.x(),
-    this.z()
-  );
-}
-
-
-unpackTo(_o: MapStartPosT): void {
-  _o.x = this.x();
-  _o.z = this.z();
-}
-}
-
-export class MapStartPosT implements flatbuffers.IGeneratedObject {
-constructor(
-  public x: number = 0.0,
-  public z: number = 0.0
-){}
-
-
-pack(builder:flatbuffers.Builder): flatbuffers.Offset {
-  return MapStartPos.createMapStartPos(builder,
-    this.x,
-    this.z
-  );
-}
 }

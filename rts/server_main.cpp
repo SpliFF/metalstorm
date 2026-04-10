@@ -17,6 +17,8 @@
 #include "Server/AI/AIRuntimePool.h"
 #include "Server/PerfMetrics.h"
 #include "Server/RoomManager.h"
+#include "Server/MapProcessor.h"
+#include <sqlite3.h>
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
@@ -106,6 +108,37 @@ int main(int argc, char* argv[])
     if (!db.Open(dbPath)) {
         std::fprintf(stderr, "[spring-server] ERROR: failed to open database\n");
         return 1;
+    }
+
+    // --- Map metadata (from lobby's processing, stored in SQLite) ---
+    // Open a second raw sqlite3 connection so MapProcessor can query it.
+    MapMetadata mapMeta;
+    {
+        sqlite3* mapDb = nullptr;
+        if (sqlite3_open(dbPath.c_str(), &mapDb) == SQLITE_OK) {
+            // Derive map ID from the last component of mapPath
+            if (!mapPath.empty()) {
+                std::filesystem::path p(mapPath);
+                // Strip trailing slash if any
+                std::string mapId = p.filename().string();
+                if (mapId.empty() && p.has_parent_path())
+                    mapId = p.parent_path().filename().string();
+
+                MapProcessor proc;
+                mapMeta = proc.GetMap(mapDb, mapId);
+                if (mapMeta.id.empty()) {
+                    std::fprintf(stderr, "[spring-server] WARNING: map '%s' not in SQLite. "
+                        "Run spring-lobby first to process maps.\n", mapId.c_str());
+                } else {
+                    std::fprintf(stderr, "[spring-server] loaded map '%s' (%s): %dx%d, "
+                        "%zu features, %zu start positions\n",
+                        mapMeta.id.c_str(), mapMeta.name.c_str(),
+                        mapMeta.mapx, mapMeta.mapy,
+                        mapMeta.features.size(), mapMeta.startPositions.size());
+                }
+            }
+            sqlite3_close(mapDb);
+        }
     }
 
     // --- Sessions ---
@@ -384,6 +417,10 @@ int main(int argc, char* argv[])
                             net.Send(msg.clientId, resp.data(), resp.size());
                             std::fprintf(stderr, "[auth] client %u reconnected as user %lld\n",
                                 msg.clientId, userId);
+                            if (!mapMeta.id.empty()) {
+                                auto mapDataMsg = Protocol::BuildMapData(mapMeta);
+                                net.Send(msg.clientId, mapDataMsg.data(), mapDataMsg.size());
+                            }
                             break;
                         }
                     }
@@ -438,6 +475,12 @@ int main(int argc, char* argv[])
                         auto allRooms = rooms.GetAllRooms();
                         auto listMsg = Protocol::BuildRoomListUpdate(allRooms);
                         net.Send(msg.clientId, listMsg.data(), listMsg.size());
+                    }
+
+                    // Send MapData so the client can render terrain + features
+                    if (!mapMeta.id.empty()) {
+                        auto mapDataMsg = Protocol::BuildMapData(mapMeta);
+                        net.Send(msg.clientId, mapDataMsg.data(), mapDataMsg.size());
                     }
                     break;
                 }

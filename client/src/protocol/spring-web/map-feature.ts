@@ -4,12 +4,10 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-
-
 /**
  * Map feature placed on the terrain.
  */
-export class MapFeature implements flatbuffers.IUnpackableObject<MapFeatureT> {
+export class MapFeature {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):MapFeature {
@@ -99,49 +97,5 @@ static createMapFeature(builder:flatbuffers.Builder, typeIndex:number, x:number,
   MapFeature.addRotation(builder, rotation);
   MapFeature.addRelativeSize(builder, relativeSize);
   return MapFeature.endMapFeature(builder);
-}
-
-unpack(): MapFeatureT {
-  return new MapFeatureT(
-    this.typeIndex(),
-    this.x(),
-    this.y(),
-    this.z(),
-    this.rotation(),
-    this.relativeSize()
-  );
-}
-
-
-unpackTo(_o: MapFeatureT): void {
-  _o.typeIndex = this.typeIndex();
-  _o.x = this.x();
-  _o.y = this.y();
-  _o.z = this.z();
-  _o.rotation = this.rotation();
-  _o.relativeSize = this.relativeSize();
-}
-}
-
-export class MapFeatureT implements flatbuffers.IGeneratedObject {
-constructor(
-  public typeIndex: number = 0,
-  public x: number = 0.0,
-  public y: number = 0.0,
-  public z: number = 0.0,
-  public rotation: number = 0.0,
-  public relativeSize: number = 0.0
-){}
-
-
-pack(builder:flatbuffers.Builder): flatbuffers.Offset {
-  return MapFeature.createMapFeature(builder,
-    this.typeIndex,
-    this.x,
-    this.y,
-    this.z,
-    this.rotation,
-    this.relativeSize
-  );
 }
 }

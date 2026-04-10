@@ -159,6 +159,16 @@ static GameServerInstance spawnGameServer(
             fclose(logFile);
         }
 
+        // Close all other inherited file descriptors. uWebSockets sockets
+        // (our listen socket, all established WS client connections) do not
+        // get FD_CLOEXEC by default on macOS, so without this the child
+        // process ends up holding the parent's listen socket + every active
+        // WebSocket. That leaks state into spring-server and causes
+        // cross-talk between the lobby and game server.
+        int maxFd = static_cast<int>(sysconf(_SC_OPEN_MAX));
+        if (maxFd < 1024) maxFd = 1024;
+        for (int fd = 3; fd < maxFd; fd++) close(fd);
+
         std::string portStr = std::to_string(inst.port);
         execlp(serverBin.c_str(), serverBin.c_str(),
                "--port", portStr.c_str(),
@@ -237,7 +247,7 @@ int main(int argc, char* argv[])
     // --- Network ---
     NetworkServer net;
 
-    // Maps endpoint — serves from SQLite
+    // Maps endpoint — full metadata from SQLite
     net.AddHttpGet("/api/maps", [mapDb](const std::string&) -> HttpResponse {
         MapProcessor proc;
         auto maps = proc.GetAllMaps(mapDb);
@@ -246,15 +256,47 @@ int main(int argc, char* argv[])
         for (const auto& m : maps) {
             if (!first) json += ",";
             first = false;
-            char buf[512];
+
+            // Start positions array
+            std::string spJson = "[";
+            for (size_t i = 0; i < m.startPositions.size(); i++) {
+                if (i > 0) spJson += ",";
+                char spBuf[64];
+                snprintf(spBuf, sizeof(spBuf), "{\"x\":%.0f,\"z\":%.0f}",
+                    m.startPositions[i].x, m.startPositions[i].z);
+                spJson += spBuf;
+            }
+            spJson += "]";
+
+            // Escape description for JSON (basic: replace " and newlines)
+            std::string desc = m.description;
+            for (size_t p = 0; (p = desc.find('"', p)) != std::string::npos; p += 2)
+                desc.replace(p, 1, "\\\"");
+            for (size_t p = 0; (p = desc.find('\n', p)) != std::string::npos; p += 2)
+                desc.replace(p, 1, "\\n");
+
+            char buf[1024];
             snprintf(buf, sizeof(buf),
-                "{\"id\":\"%s\",\"name\":\"%s\",\"mapx\":%d,\"mapy\":%d,"
-                "\"widthElmos\":%d,\"heightElmos\":%d,"
+                "{\"id\":\"%s\",\"name\":\"%s\",\"shortName\":\"%s\","
+                "\"description\":\"%s\",\"author\":\"%s\",\"version\":\"%s\","
+                "\"mapx\":%d,\"mapy\":%d,\"widthElmos\":%d,\"heightElmos\":%d,"
                 "\"minHeight\":%.1f,\"maxHeight\":%.1f,"
-                "\"tilesX\":%d,\"tilesZ\":%d}",
-                m.id.c_str(), m.name.c_str(), m.mapx, m.mapy,
-                m.widthElmos, m.heightElmos, m.minHeight, m.maxHeight,
-                m.tilesX, m.tilesZ);
+                "\"gravity\":%.1f,\"tidalStrength\":%.1f,"
+                "\"maxMetal\":%.2f,\"extractorRadius\":%.1f,"
+                "\"tilesX\":%d,\"tilesZ\":%d,\"numTiles\":%d,"
+                "\"maxPlayers\":%zu,\"startPositions\":%s,"
+                "\"hasLuaGaia\":%s,"
+                "\"minimapUrl\":\"/api/maps/data/%s/minimap.dxt1\"}",
+                m.id.c_str(), m.name.c_str(), m.shortName.c_str(),
+                desc.c_str(), m.author.c_str(), m.version.c_str(),
+                m.mapx, m.mapy, m.widthElmos, m.heightElmos,
+                m.minHeight, m.maxHeight,
+                m.gravity, m.tidalStrength,
+                m.maxMetal, m.extractorRadius,
+                m.tilesX, m.tilesZ, m.numTiles,
+                m.startPositions.size(), spJson.c_str(),
+                m.hasLuaGaia ? "true" : "false",
+                m.id.c_str());
             json += buf;
         }
         json += "]";
@@ -262,7 +304,83 @@ int main(int argc, char* argv[])
         return {.contentType = "application/json", .body = std::move(body), .status = 200};
     });
 
-    // Serve processed map files (KTX2 textures, layout.json, etc.)
+    // Serve original map source files straight from content/maps/.
+    // Used by client-side Lua widgets for mapinfo.lua, LuaUI/Widgets/*.lua,
+    // and any image assets the widget references via Spring paths like
+    // ":a:LuaUI\\Images\\foo.png". No transformation — pure pass-through.
+    net.AddHttpGet("/api/maps/source/*", [mapsDir](const std::string& url) -> HttpResponse {
+        // URL: /api/maps/source/{mapId}/{relative/path}
+        std::string rest = url.substr(std::string("/api/maps/source/").size());
+        // Security: reject path traversal.
+        if (rest.find("..") != std::string::npos)
+            return {.contentType = "text/plain", .body = {}, .status = 403};
+
+        namespace fs = std::filesystem;
+        fs::path filePath = fs::path(mapsDir) / rest;
+        if (!fs::exists(filePath) || !fs::is_regular_file(filePath))
+            return {.contentType = "text/plain", .body = {}, .status = 404};
+
+        std::ifstream f(filePath, std::ios::binary);
+        std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
+                                   std::istreambuf_iterator<char>());
+
+        std::string ext = filePath.extension().string();
+        std::string ct = "application/octet-stream";
+        if (ext == ".lua") ct = "text/x-lua; charset=utf-8";
+        else if (ext == ".png") ct = "image/png";
+        else if (ext == ".jpg" || ext == ".jpeg") ct = "image/jpeg";
+        else if (ext == ".tga") ct = "image/x-tga";
+        else if (ext == ".dds") ct = "image/vnd-ms.dds";
+
+        return {
+            .contentType = ct,
+            .body = std::move(data),
+            .status = 200,
+            .cacheControl = "public, max-age=300",
+        };
+    });
+
+    // Serve GAME-VFS files (modinfo.lua, LuaUI/*, LuaRules/*, gamedata/*,
+    // units/*, weapons/*, etc.) from content/games/{gameId}/. In Spring's
+    // VFS layering this is the GAME archive — widgets, gadgets, and map
+    // scripts `include()` files from here, and the game can override
+    // engine defaults by placing its own copy under LuaUI/.
+    //
+    // Paper Tanks' minimal base lives at content/games/papertanks/LuaUI/
+    // and the client pre-fetches it before running any map widgets so
+    // globals like `WG` and `widgetHandler` are visible.
+    net.AddHttpGet("/api/vfs/game/*", [](const std::string& url) -> HttpResponse {
+        // URL: /api/vfs/game/{gameId}/{relative/path}
+        std::string rest = url.substr(std::string("/api/vfs/game/").size());
+        if (rest.find("..") != std::string::npos)
+            return {.contentType = "text/plain", .body = {}, .status = 403};
+
+        namespace fs = std::filesystem;
+        fs::path filePath = fs::path("content") / "games" / rest;
+        if (!fs::exists(filePath) || !fs::is_regular_file(filePath))
+            return {.contentType = "text/plain", .body = {}, .status = 404};
+
+        std::ifstream f(filePath, std::ios::binary);
+        std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
+                                   std::istreambuf_iterator<char>());
+
+        std::string ext = filePath.extension().string();
+        std::string ct = "application/octet-stream";
+        if (ext == ".lua") ct = "text/x-lua; charset=utf-8";
+        else if (ext == ".png") ct = "image/png";
+        else if (ext == ".jpg" || ext == ".jpeg") ct = "image/jpeg";
+        else if (ext == ".json") ct = "application/json";
+
+        return {
+            .contentType = ct,
+            .body = std::move(data),
+            .status = 200,
+            .cacheControl = "public, max-age=300",
+        };
+    });
+
+    // Serve processed map files (DXT1 tiles, heightmap, splat textures, etc.)
+    // These are static binary assets — safe to cache for long periods.
     net.AddHttpGet("/api/maps/data/*", [](const std::string& url) -> HttpResponse {
         // URL: /api/maps/data/{mapId}/{filename}
         std::string rest = url.substr(std::string("/api/maps/data/").size());
@@ -287,52 +405,12 @@ int main(int argc, char* argv[])
         else if (ext == ".json") ct = "application/json";
         else if (ext == ".png") ct = "image/png";
 
-        return {.contentType = ct, .body = std::move(data), .status = 200};
-    });
-
-    // Map thumbnail — serve minimap.ktx2 or fall back to BMP extraction
-    // (replaces the old /api/maps/thumb/* endpoint)
-    net.AddHttpGet("/api/maps", [&mapsDir](const std::string&) -> HttpResponse {
-        namespace fs = std::filesystem;
-        std::string json = "[";
-        bool first = true;
-        if (!fs::is_directory(mapsDir))
-            return {.contentType = "application/json", .body = {'[', ']'}, .status = 200};
-
-        for (auto& mapDir : fs::directory_iterator(mapsDir)) {
-            if (!mapDir.is_directory()) continue;
-            std::string smfPath;
-            for (auto& entry : fs::recursive_directory_iterator(mapDir.path())) {
-                if (entry.is_regular_file() && entry.path().extension() == ".smf") {
-                    smfPath = entry.path().string();
-                    break;
-                }
-            }
-            if (smfPath.empty()) continue;
-
-            int mapx = 0, mapy = 0;
-            {
-                std::ifstream f(smfPath, std::ios::binary);
-                if (f.is_open()) {
-                    f.seekg(24); // skip magic(16) + version(4) + mapid(4)
-                    f.read(reinterpret_cast<char*>(&mapx), 4);
-                    f.read(reinterpret_cast<char*>(&mapy), 4);
-                }
-            }
-
-            std::string dirName = mapDir.path().filename().string();
-            if (!first) json += ",";
-            first = false;
-            char buf[256];
-            snprintf(buf, sizeof(buf),
-                "{\"id\":\"%s\",\"name\":\"%s\",\"mapx\":%d,\"mapy\":%d,"
-                "\"widthElmos\":%d,\"heightElmos\":%d}",
-                dirName.c_str(), dirName.c_str(), mapx, mapy, mapx * 8, mapy * 8);
-            json += buf;
-        }
-        json += "]";
-        std::vector<uint8_t> body(json.begin(), json.end());
-        return {.contentType = "application/json", .body = std::move(body), .status = 200};
+        return {
+            .contentType = ct,
+            .body = std::move(data),
+            .status = 200,
+            .cacheControl = "public, max-age=3600",
+        };
     });
 
     // Map thumbnail endpoint
@@ -350,8 +428,12 @@ int main(int argc, char* argv[])
                 std::ifstream f(entry.path(), std::ios::binary);
                 std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
                                            std::istreambuf_iterator<char>());
-                return {.contentType = (ext == ".png") ? "image/png" : "image/jpeg",
-                        .body = std::move(data), .status = 200};
+                return {
+                    .contentType = (ext == ".png") ? "image/png" : "image/jpeg",
+                    .body = std::move(data),
+                    .status = 200,
+                    .cacheControl = "public, max-age=3600",
+                };
             }
         }
         // Fallback: extract minimap from SMF file
@@ -359,7 +441,12 @@ int main(int argc, char* argv[])
             if (entry.is_regular_file() && entry.path().extension() == ".smf") {
                 auto bmp = extractSMFMinimapBMP(entry.path().string());
                 if (!bmp.empty())
-                    return {.contentType = "image/bmp", .body = std::move(bmp), .status = 200};
+                    return {
+                        .contentType = "image/bmp",
+                        .body = std::move(bmp),
+                        .status = 200,
+                        .cacheControl = "public, max-age=3600",
+                    };
             }
         }
         return {.contentType = "text/plain", .body = {}, .status = 404};
@@ -424,6 +511,14 @@ int main(int argc, char* argv[])
                                 auto allRooms = rooms.GetAllRooms();
                                 auto listMsg = Protocol::BuildRoomListUpdate(allRooms);
                                 net.Send(msg.clientId, listMsg.data(), listMsg.size());
+
+                                // Send map list (FlatBuffer) so the client can show the browser
+                                {
+                                    MapProcessor proc;
+                                    auto allMaps = proc.GetAllMaps(mapDb);
+                                    auto mapListMsg = Protocol::BuildMapListUpdate(allMaps);
+                                    net.Send(msg.clientId, mapListMsg.data(), mapListMsg.size());
+                                }
                                 break;
                             }
                         }
@@ -470,6 +565,14 @@ int main(int argc, char* argv[])
                     auto allRooms = rooms.GetAllRooms();
                     auto listMsg = Protocol::BuildRoomListUpdate(allRooms);
                     net.Send(msg.clientId, listMsg.data(), listMsg.size());
+
+                    // Send map list (FlatBuffer)
+                    {
+                        MapProcessor proc;
+                        auto allMaps = proc.GetAllMaps(mapDb);
+                        auto mapListMsg = Protocol::BuildMapListUpdate(allMaps);
+                        net.Send(msg.clientId, mapListMsg.data(), mapListMsg.size());
+                    }
                     break;
                 }
 

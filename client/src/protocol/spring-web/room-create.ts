@@ -4,9 +4,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-
-
-export class RoomCreate implements flatbuffers.IUnpackableObject<RoomCreateT> {
+export class RoomCreate {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):RoomCreate {
@@ -94,50 +92,5 @@ static createRoomCreate(builder:flatbuffers.Builder, nameOffset:flatbuffers.Offs
   RoomCreate.addMaxPlayers(builder, maxPlayers);
   RoomCreate.addPassword(builder, passwordOffset);
   return RoomCreate.endRoomCreate(builder);
-}
-
-unpack(): RoomCreateT {
-  return new RoomCreateT(
-    this.name(),
-    this.mapName(),
-    this.gameName(),
-    this.maxPlayers(),
-    this.password()
-  );
-}
-
-
-unpackTo(_o: RoomCreateT): void {
-  _o.name = this.name();
-  _o.mapName = this.mapName();
-  _o.gameName = this.gameName();
-  _o.maxPlayers = this.maxPlayers();
-  _o.password = this.password();
-}
-}
-
-export class RoomCreateT implements flatbuffers.IGeneratedObject {
-constructor(
-  public name: string|Uint8Array|null = null,
-  public mapName: string|Uint8Array|null = null,
-  public gameName: string|Uint8Array|null = null,
-  public maxPlayers: number = 8,
-  public password: string|Uint8Array|null = null
-){}
-
-
-pack(builder:flatbuffers.Builder): flatbuffers.Offset {
-  const name = (this.name !== null ? builder.createString(this.name!) : 0);
-  const mapName = (this.mapName !== null ? builder.createString(this.mapName!) : 0);
-  const gameName = (this.gameName !== null ? builder.createString(this.gameName!) : 0);
-  const password = (this.password !== null ? builder.createString(this.password!) : 0);
-
-  return RoomCreate.createRoomCreate(builder,
-    name,
-    mapName,
-    gameName,
-    this.maxPlayers,
-    password
-  );
 }
 }

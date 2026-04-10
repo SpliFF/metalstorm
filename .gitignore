@@ -51,6 +51,11 @@ CMakeUserPresets.json
 springsettings.cfg
 infolog.txt
 
+# Environment files (dev secrets, port overrides)
+.env
+.env.local
+.env.*.local
+
 # Server data (SQLite databases, runtime state)
 /data/
 

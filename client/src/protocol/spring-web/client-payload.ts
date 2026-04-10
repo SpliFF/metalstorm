@@ -2,21 +2,21 @@
 
 /* eslint-disable @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any, @typescript-eslint/no-non-null-assertion */
 
-import { Ack, AckT } from '../spring-web/ack.js';
-import { AuthRequest, AuthRequestT } from '../spring-web/auth-request.js';
-import { ChatSend, ChatSendT } from '../spring-web/chat-send.js';
-import { Handshake, HandshakeT } from '../spring-web/handshake.js';
-import { Ping, PingT } from '../spring-web/ping.js';
-import { PlayerCommand, PlayerCommandT } from '../spring-web/player-command.js';
-import { ReconnectRequest, ReconnectRequestT } from '../spring-web/reconnect-request.js';
-import { RoomCreate, RoomCreateT } from '../spring-web/room-create.js';
-import { RoomJoin, RoomJoinT } from '../spring-web/room-join.js';
-import { RoomKick, RoomKickT } from '../spring-web/room-kick.js';
-import { RoomLeave, RoomLeaveT } from '../spring-web/room-leave.js';
-import { RoomReady, RoomReadyT } from '../spring-web/room-ready.js';
-import { RoomStartGame, RoomStartGameT } from '../spring-web/room-start-game.js';
-import { RoomTeamSelect, RoomTeamSelectT } from '../spring-web/room-team-select.js';
-import { ViewportUpdate, ViewportUpdateT } from '../spring-web/viewport-update.js';
+import { Ack } from '../spring-web/ack.js';
+import { AuthRequest } from '../spring-web/auth-request.js';
+import { ChatSend } from '../spring-web/chat-send.js';
+import { Handshake } from '../spring-web/handshake.js';
+import { Ping } from '../spring-web/ping.js';
+import { PlayerCommand } from '../spring-web/player-command.js';
+import { ReconnectRequest } from '../spring-web/reconnect-request.js';
+import { RoomCreate } from '../spring-web/room-create.js';
+import { RoomJoin } from '../spring-web/room-join.js';
+import { RoomKick } from '../spring-web/room-kick.js';
+import { RoomLeave } from '../spring-web/room-leave.js';
+import { RoomReady } from '../spring-web/room-ready.js';
+import { RoomStartGame } from '../spring-web/room-start-game.js';
+import { RoomTeamSelect } from '../spring-web/room-team-select.js';
+import { ViewportUpdate } from '../spring-web/viewport-update.js';
 
 
 export enum ClientPayload {

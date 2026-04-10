@@ -4,9 +4,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-
-
-export class RoomKick implements flatbuffers.IUnpackableObject<RoomKickT> {
+export class RoomKick {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):RoomKick {
@@ -46,29 +44,5 @@ static createRoomKick(builder:flatbuffers.Builder, playerId:number):flatbuffers.
   RoomKick.startRoomKick(builder);
   RoomKick.addPlayerId(builder, playerId);
   return RoomKick.endRoomKick(builder);
-}
-
-unpack(): RoomKickT {
-  return new RoomKickT(
-    this.playerId()
-  );
-}
-
-
-unpackTo(_o: RoomKickT): void {
-  _o.playerId = this.playerId();
-}
-}
-
-export class RoomKickT implements flatbuffers.IGeneratedObject {
-constructor(
-  public playerId: number = 0
-){}
-
-
-pack(builder:flatbuffers.Builder): flatbuffers.Offset {
-  return RoomKick.createRoomKick(builder,
-    this.playerId
-  );
 }
 }

@@ -2,22 +2,22 @@
 
 /* eslint-disable @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any, @typescript-eslint/no-non-null-assertion */
 
-import { AuthResponse, AuthResponseT } from '../spring-web/auth-response.js';
-import { ChatReceive, ChatReceiveT } from '../spring-web/chat-receive.js';
-import { EntityCreate, EntityCreateT } from '../spring-web/entity-create.js';
-import { EntityDestroy, EntityDestroyT } from '../spring-web/entity-destroy.js';
-import { GameEventBatch, GameEventBatchT } from '../spring-web/game-event-batch.js';
-import { GameInfo, GameInfoT } from '../spring-web/game-info.js';
-import { MapData, MapDataT } from '../spring-web/map-data.js';
-import { MapListUpdate, MapListUpdateT } from '../spring-web/map-list-update.js';
-import { Pong, PongT } from '../spring-web/pong.js';
-import { ReconnectResponse, ReconnectResponseT } from '../spring-web/reconnect-response.js';
-import { ResourceUpdate, ResourceUpdateT } from '../spring-web/resource-update.js';
-import { RoomListUpdate, RoomListUpdateT } from '../spring-web/room-list-update.js';
-import { RoomPlayerJoined, RoomPlayerJoinedT } from '../spring-web/room-player-joined.js';
-import { RoomPlayerLeft, RoomPlayerLeftT } from '../spring-web/room-player-left.js';
-import { RoomStateUpdate, RoomStateUpdateT } from '../spring-web/room-state-update.js';
-import { ServerError, ServerErrorT } from '../spring-web/server-error.js';
+import { AuthResponse } from '../spring-web/auth-response.js';
+import { ChatReceive } from '../spring-web/chat-receive.js';
+import { EntityCreate } from '../spring-web/entity-create.js';
+import { EntityDestroy } from '../spring-web/entity-destroy.js';
+import { GameEventBatch } from '../spring-web/game-event-batch.js';
+import { GameInfo } from '../spring-web/game-info.js';
+import { MapData } from '../spring-web/map-data.js';
+import { MapListUpdate } from '../spring-web/map-list-update.js';
+import { Pong } from '../spring-web/pong.js';
+import { ReconnectResponse } from '../spring-web/reconnect-response.js';
+import { ResourceUpdate } from '../spring-web/resource-update.js';
+import { RoomListUpdate } from '../spring-web/room-list-update.js';
+import { RoomPlayerJoined } from '../spring-web/room-player-joined.js';
+import { RoomPlayerLeft } from '../spring-web/room-player-left.js';
+import { RoomStateUpdate } from '../spring-web/room-state-update.js';
+import { ServerError } from '../spring-web/server-error.js';
 
 
 export enum ServerPayload {

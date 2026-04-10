@@ -344,9 +344,38 @@ table MapFeature {
     relative_size: float;
 }
 
+/// Water rendering properties. Spring's water system is also used for
+/// lava/acid/void-fill — the colour and damage distinguish them.
+/// Water plane is at world Y = 0; terrain below that is flooded.
+table MapWater {
+    base_color: [float];      // 3 floats — bulk colour at depth
+    surface_color: [float];   // 3 floats — colour at the surface
+    min_color: [float];       // 3 floats — minimum colour (used when deep)
+    surface_alpha: float;
+    damage: float;            // damage per second to units in water
+    void_water: bool;         // true = don't render plane, show void below
+}
+
+/// Splat/decal texture set — Spring's terrain detail texturing system.
+/// All URLs are HTTP paths to PNG files (relative to the lobby HTTP root).
+/// Empty string means the texture is not defined by the map.
+table MapDecals {
+    detail_tex: string;               // single detail texture fallback
+    specular_tex: string;
+    splat_detail_tex: string;         // old single-texture splat mode
+    splat_distr_tex: string;          // RGBA distribution map (weights)
+    splat_normal_0: string;           // per-channel detail+normal textures
+    splat_normal_1: string;
+    splat_normal_2: string;
+    splat_normal_3: string;
+    detail_normal_tex: string;        // global detail normal map
+    splat_scales: [float];            // 4 floats, UV scale per channel
+    splat_mults: [float];             // 4 floats, intensity per channel
+}
+
 /// Full map data sent by the game server on connect.
 /// Binary data (heightmap, tileindex, typemap, metalmap) embedded directly.
-/// Tile texture data served via HTTP separately (too large to embed).
+/// Tile texture data and splat textures served via HTTP separately.
 table MapData {
     mapx: uint16;
     mapy: uint16;
@@ -366,7 +395,14 @@ table MapData {
     metalmap: [ubyte];          // (mapx/2)*(mapy/2) metal density
     minimap_url: string;        // HTTP: raw DXT1 1024x1024 (cached from lobby)
     tiles_url: string;          // HTTP: raw DXT1, 512 bytes per tile, concatenated
+    map_data_url: string;       // HTTP base URL for all /{filename} processed assets
+    map_source_url: string;     // HTTP base URL for original map source files (Lua widgets, mapinfo.lua, author-supplied images)
+    decals: MapDecals;
+    water: MapWater;
     has_lua_gaia: bool;
+    /// Paths (relative to map_source_url) of .lua files under LuaUI/Widgets/
+    /// that the client should load into fengari on map start.
+    widgets: [string];
 }
 
 // Union of all server→client message types

@@ -4,9 +4,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-
-
-export class RoomLeave implements flatbuffers.IUnpackableObject<RoomLeaveT> {
+export class RoomLeave {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):RoomLeave {
@@ -36,21 +34,5 @@ static endRoomLeave(builder:flatbuffers.Builder):flatbuffers.Offset {
 static createRoomLeave(builder:flatbuffers.Builder):flatbuffers.Offset {
   RoomLeave.startRoomLeave(builder);
   return RoomLeave.endRoomLeave(builder);
-}
-
-unpack(): RoomLeaveT {
-  return new RoomLeaveT();
-}
-
-
-unpackTo(_o: RoomLeaveT): void {}
-}
-
-export class RoomLeaveT implements flatbuffers.IGeneratedObject {
-constructor(){}
-
-
-pack(builder:flatbuffers.Builder): flatbuffers.Offset {
-  return RoomLeave.createRoomLeave(builder);
 }
 }

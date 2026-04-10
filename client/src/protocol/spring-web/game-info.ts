@@ -4,9 +4,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-
-
-export class GameInfo implements flatbuffers.IUnpackableObject<GameInfoT> {
+export class GameInfo {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):GameInfo {
@@ -90,48 +88,5 @@ static createGameInfo(builder:flatbuffers.Builder, mapNameOffset:flatbuffers.Off
   GameInfo.addFrame(builder, frame);
   GameInfo.addPaused(builder, paused);
   return GameInfo.endGameInfo(builder);
-}
-
-unpack(): GameInfoT {
-  return new GameInfoT(
-    this.mapName(),
-    this.gameName(),
-    this.gameSpeed(),
-    this.frame(),
-    this.paused()
-  );
-}
-
-
-unpackTo(_o: GameInfoT): void {
-  _o.mapName = this.mapName();
-  _o.gameName = this.gameName();
-  _o.gameSpeed = this.gameSpeed();
-  _o.frame = this.frame();
-  _o.paused = this.paused();
-}
-}
-
-export class GameInfoT implements flatbuffers.IGeneratedObject {
-constructor(
-  public mapName: string|Uint8Array|null = null,
-  public gameName: string|Uint8Array|null = null,
-  public gameSpeed: number = 0.0,
-  public frame: number = 0,
-  public paused: boolean = false
-){}
-
-
-pack(builder:flatbuffers.Builder): flatbuffers.Offset {
-  const mapName = (this.mapName !== null ? builder.createString(this.mapName!) : 0);
-  const gameName = (this.gameName !== null ? builder.createString(this.gameName!) : 0);
-
-  return GameInfo.createGameInfo(builder,
-    mapName,
-    gameName,
-    this.gameSpeed,
-    this.frame,
-    this.paused
-  );
 }
 }

@@ -30,6 +30,9 @@ struct HttpResponse {
     std::string contentType = "application/octet-stream";
     std::vector<uint8_t> body;
     int status = 200;
+    /// Cache-Control header value. Default "no-store" means dynamic data
+    /// (not cached). Use "public, max-age=3600" for static assets.
+    std::string cacheControl = "no-store";
 };
 
 /// Handler for an HTTP GET endpoint.

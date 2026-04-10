@@ -4,9 +4,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-
-
-export class ReconnectRequest implements flatbuffers.IUnpackableObject<ReconnectRequestT> {
+export class ReconnectRequest {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):ReconnectRequest {
@@ -58,35 +56,5 @@ static createReconnectRequest(builder:flatbuffers.Builder, tokenOffset:flatbuffe
   ReconnectRequest.addToken(builder, tokenOffset);
   ReconnectRequest.addLastSnapshotSeq(builder, lastSnapshotSeq);
   return ReconnectRequest.endReconnectRequest(builder);
-}
-
-unpack(): ReconnectRequestT {
-  return new ReconnectRequestT(
-    this.token(),
-    this.lastSnapshotSeq()
-  );
-}
-
-
-unpackTo(_o: ReconnectRequestT): void {
-  _o.token = this.token();
-  _o.lastSnapshotSeq = this.lastSnapshotSeq();
-}
-}
-
-export class ReconnectRequestT implements flatbuffers.IGeneratedObject {
-constructor(
-  public token: string|Uint8Array|null = null,
-  public lastSnapshotSeq: number = 0
-){}
-
-
-pack(builder:flatbuffers.Builder): flatbuffers.Offset {
-  const token = (this.token !== null ? builder.createString(this.token!) : 0);
-
-  return ReconnectRequest.createReconnectRequest(builder,
-    token,
-    this.lastSnapshotSeq
-  );
 }
 }

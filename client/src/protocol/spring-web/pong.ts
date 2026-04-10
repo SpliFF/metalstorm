@@ -4,9 +4,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-
-
-export class Pong implements flatbuffers.IUnpackableObject<PongT> {
+export class Pong {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):Pong {
@@ -56,33 +54,5 @@ static createPong(builder:flatbuffers.Builder, clientTime:bigint, serverTime:big
   Pong.addClientTime(builder, clientTime);
   Pong.addServerTime(builder, serverTime);
   return Pong.endPong(builder);
-}
-
-unpack(): PongT {
-  return new PongT(
-    this.clientTime(),
-    this.serverTime()
-  );
-}
-
-
-unpackTo(_o: PongT): void {
-  _o.clientTime = this.clientTime();
-  _o.serverTime = this.serverTime();
-}
-}
-
-export class PongT implements flatbuffers.IGeneratedObject {
-constructor(
-  public clientTime: bigint = BigInt('0'),
-  public serverTime: bigint = BigInt('0')
-){}
-
-
-pack(builder:flatbuffers.Builder): flatbuffers.Offset {
-  return Pong.createPong(builder,
-    this.clientTime,
-    this.serverTime
-  );
 }
 }

@@ -4,9 +4,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-
-
-export class RoomPlayerInfo implements flatbuffers.IUnpackableObject<RoomPlayerInfoT> {
+export class RoomPlayerInfo {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):RoomPlayerInfo {
@@ -98,51 +96,5 @@ static createRoomPlayerInfo(builder:flatbuffers.Builder, playerId:number, userna
   RoomPlayerInfo.addIsSpectator(builder, isSpectator);
   RoomPlayerInfo.addIsHost(builder, isHost);
   return RoomPlayerInfo.endRoomPlayerInfo(builder);
-}
-
-unpack(): RoomPlayerInfoT {
-  return new RoomPlayerInfoT(
-    this.playerId(),
-    this.username(),
-    this.team(),
-    this.ready(),
-    this.isSpectator(),
-    this.isHost()
-  );
-}
-
-
-unpackTo(_o: RoomPlayerInfoT): void {
-  _o.playerId = this.playerId();
-  _o.username = this.username();
-  _o.team = this.team();
-  _o.ready = this.ready();
-  _o.isSpectator = this.isSpectator();
-  _o.isHost = this.isHost();
-}
-}
-
-export class RoomPlayerInfoT implements flatbuffers.IGeneratedObject {
-constructor(
-  public playerId: number = 0,
-  public username: string|Uint8Array|null = null,
-  public team: number = 0,
-  public ready: boolean = false,
-  public isSpectator: boolean = false,
-  public isHost: boolean = false
-){}
-
-
-pack(builder:flatbuffers.Builder): flatbuffers.Offset {
-  const username = (this.username !== null ? builder.createString(this.username!) : 0);
-
-  return RoomPlayerInfo.createRoomPlayerInfo(builder,
-    this.playerId,
-    username,
-    this.team,
-    this.ready,
-    this.isSpectator,
-    this.isHost
-  );
 }
 }

@@ -119,7 +119,17 @@ void NetworkServer::Broadcast(const uint8_t* data, size_t len) {
 void NetworkServer::NetworkThreadFunc(int port) {
     uWS::App app;
 
-    // Register HTTP GET endpoints
+    // Direct-register a raw wildcard route to prove uWS wildcards work in
+    // this build. If /rawping/foo doesn't 200, something is very wrong.
+    std::fprintf(stderr, "[net] registering /rawping/*\n");
+    app.get("/rawping/*", [](auto* res, auto* req) {
+        std::fprintf(stderr, "[rawping] url=%s\n", std::string(req->getUrl()).c_str());
+        res->writeStatus("200 OK");
+        res->end("pong");
+    });
+    std::fprintf(stderr, "[net] /rawping/* registered\n");
+
+    // Register HTTP GET endpoints from the stored handler list.
     for (auto& [pattern, handler] : httpGetHandlers) {
         app.get(pattern, [&handler](auto* res, auto* req) {
             std::string url(req->getUrl());
@@ -128,7 +138,7 @@ void NetworkServer::NetworkThreadFunc(int port) {
             res->writeStatus(result.status == 200 ? "200 OK" : "404 Not Found");
             res->writeHeader("Content-Type", result.contentType);
             res->writeHeader("Access-Control-Allow-Origin", "*");
-            res->writeHeader("Cache-Control", "public, max-age=3600");
+            res->writeHeader("Cache-Control", result.cacheControl);
             std::string_view body(
                 reinterpret_cast<const char*>(result.body.data()),
                 result.body.size());
@@ -249,11 +259,18 @@ void NetworkServer::NetworkThreadFunc(int port) {
                 us_listen_socket_close(0, impl->listenSocket);
                 impl->listenSocket = nullptr;
             }
-            // Close all client connections
-            std::lock_guard<std::mutex> lock(impl->clientsMutex);
-            for (auto& entry : impl->clients) {
-                entry.ws->close();
+            // Close all client connections.
+            // IMPORTANT: copy the socket list first, then close outside the
+            // lock. ws->close() synchronously invokes the .close callback
+            // which also takes clientsMutex — holding it here deadlocks
+            // (std::mutex is non-recursive).
+            std::vector<uWS::WebSocket<false, true, ClientData>*> toClose;
+            {
+                std::lock_guard<std::mutex> lock(impl->clientsMutex);
+                toClose.reserve(impl->clients.size());
+                for (auto& entry : impl->clients) toClose.push_back(entry.ws);
             }
+            for (auto* ws : toClose) ws->close();
         }
     });
 

@@ -4,13 +4,13 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-import { MapInfo, MapInfoT } from '../spring-web/map-info.js';
+import { MapInfo } from '../spring-web/map-info.js';
 
 
 /**
  * List of maps for the lobby browser.
  */
-export class MapListUpdate implements flatbuffers.IUnpackableObject<MapListUpdateT> {
+export class MapListUpdate {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):MapListUpdate {
@@ -67,31 +67,5 @@ static createMapListUpdate(builder:flatbuffers.Builder, mapsOffset:flatbuffers.O
   MapListUpdate.startMapListUpdate(builder);
   MapListUpdate.addMaps(builder, mapsOffset);
   return MapListUpdate.endMapListUpdate(builder);
-}
-
-unpack(): MapListUpdateT {
-  return new MapListUpdateT(
-    this.bb!.createObjList<MapInfo, MapInfoT>(this.maps.bind(this), this.mapsLength())
-  );
-}
-
-
-unpackTo(_o: MapListUpdateT): void {
-  _o.maps = this.bb!.createObjList<MapInfo, MapInfoT>(this.maps.bind(this), this.mapsLength());
-}
-}
-
-export class MapListUpdateT implements flatbuffers.IGeneratedObject {
-constructor(
-  public maps: (MapInfoT)[] = []
-){}
-
-
-pack(builder:flatbuffers.Builder): flatbuffers.Offset {
-  const maps = MapListUpdate.createMapsVector(builder, builder.createObjectOffsetList(this.maps));
-
-  return MapListUpdate.createMapListUpdate(builder,
-    maps
-  );
 }
 }

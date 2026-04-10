@@ -4,9 +4,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-
-
-export class Ack implements flatbuffers.IUnpackableObject<AckT> {
+export class Ack {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):Ack {
@@ -46,29 +44,5 @@ static createAck(builder:flatbuffers.Builder, lastReceivedSeq:number):flatbuffer
   Ack.startAck(builder);
   Ack.addLastReceivedSeq(builder, lastReceivedSeq);
   return Ack.endAck(builder);
-}
-
-unpack(): AckT {
-  return new AckT(
-    this.lastReceivedSeq()
-  );
-}
-
-
-unpackTo(_o: AckT): void {
-  _o.lastReceivedSeq = this.lastReceivedSeq();
-}
-}
-
-export class AckT implements flatbuffers.IGeneratedObject {
-constructor(
-  public lastReceivedSeq: number = 0
-){}
-
-
-pack(builder:flatbuffers.Builder): flatbuffers.Offset {
-  return Ack.createAck(builder,
-    this.lastReceivedSeq
-  );
 }
 }

@@ -4,9 +4,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-
-
-export class RoomPlayerLeft implements flatbuffers.IUnpackableObject<RoomPlayerLeftT> {
+export class RoomPlayerLeft {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):RoomPlayerLeft {
@@ -68,39 +66,5 @@ static createRoomPlayerLeft(builder:flatbuffers.Builder, roomId:number, playerId
   RoomPlayerLeft.addPlayerId(builder, playerId);
   RoomPlayerLeft.addReason(builder, reasonOffset);
   return RoomPlayerLeft.endRoomPlayerLeft(builder);
-}
-
-unpack(): RoomPlayerLeftT {
-  return new RoomPlayerLeftT(
-    this.roomId(),
-    this.playerId(),
-    this.reason()
-  );
-}
-
-
-unpackTo(_o: RoomPlayerLeftT): void {
-  _o.roomId = this.roomId();
-  _o.playerId = this.playerId();
-  _o.reason = this.reason();
-}
-}
-
-export class RoomPlayerLeftT implements flatbuffers.IGeneratedObject {
-constructor(
-  public roomId: number = 0,
-  public playerId: number = 0,
-  public reason: string|Uint8Array|null = null
-){}
-
-
-pack(builder:flatbuffers.Builder): flatbuffers.Offset {
-  const reason = (this.reason !== null ? builder.createString(this.reason!) : 0);
-
-  return RoomPlayerLeft.createRoomPlayerLeft(builder,
-    this.roomId,
-    this.playerId,
-    reason
-  );
 }
 }

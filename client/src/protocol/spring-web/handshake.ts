@@ -4,9 +4,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-
-
-export class Handshake implements flatbuffers.IUnpackableObject<HandshakeT> {
+export class Handshake {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):Handshake {
@@ -58,35 +56,5 @@ static createHandshake(builder:flatbuffers.Builder, protocolVersion:number, clie
   Handshake.addProtocolVersion(builder, protocolVersion);
   Handshake.addClientVersion(builder, clientVersionOffset);
   return Handshake.endHandshake(builder);
-}
-
-unpack(): HandshakeT {
-  return new HandshakeT(
-    this.protocolVersion(),
-    this.clientVersion()
-  );
-}
-
-
-unpackTo(_o: HandshakeT): void {
-  _o.protocolVersion = this.protocolVersion();
-  _o.clientVersion = this.clientVersion();
-}
-}
-
-export class HandshakeT implements flatbuffers.IGeneratedObject {
-constructor(
-  public protocolVersion: number = 0,
-  public clientVersion: string|Uint8Array|null = null
-){}
-
-
-pack(builder:flatbuffers.Builder): flatbuffers.Offset {
-  const clientVersion = (this.clientVersion !== null ? builder.createString(this.clientVersion!) : 0);
-
-  return Handshake.createHandshake(builder,
-    this.protocolVersion,
-    clientVersion
-  );
 }
 }
