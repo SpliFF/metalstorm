@@ -23,7 +23,7 @@
 struct sqlite3;
 
 /// Increment to reprocess all maps.
-constexpr int MAP_FORMAT_VERSION = 7;
+constexpr int MAP_FORMAT_VERSION = 8;
 
 struct MapStartPosition {
     float x = 0, z = 0;

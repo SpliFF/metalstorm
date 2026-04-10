@@ -184,6 +184,84 @@ void ParseFeatureDefFile(lua_State* L,
 }
 
 // ============================================================
+// Heightmap sampling
+// ============================================================
+//
+// Feature Y is part of the synced sim state — pathfinding, collision
+// volumes, line-of-sight, and projectile hits all care about it, so
+// the server must resolve it at preprocess time rather than leaving
+// it to the client. We read the raw uint16 corner heightmap that
+// ExtractBinaryData already wrote to <processedDir>/heightmap.bin and
+// bilinearly sample it at each featureplacer (x, z), applying the
+// same `minHeight + (raw/65535) * hRange` decode the client terrain
+// mesh uses so features end up flush with the rendered ground.
+
+struct HeightmapSampler {
+    std::vector<uint16_t> data;
+    int hmW = 0;     // (mapx + 1)
+    int hmH = 0;     // (mapy + 1)
+    float minHeight = 0;
+    float maxHeight = 0;
+    float squareSize = 8.0f;
+
+    bool valid() const { return !data.empty() && hmW > 0 && hmH > 0; }
+
+    /// Bilinear sample at world (x, z) in elmos. Clamps to map bounds.
+    float sample(float x, float z) const {
+        if (!valid()) return 0.0f;
+        float gxF = x / squareSize;
+        float gzF = z / squareSize;
+        if (gxF < 0) gxF = 0;
+        if (gzF < 0) gzF = 0;
+        if (gxF > hmW - 1.001f) gxF = hmW - 1.001f;
+        if (gzF > hmH - 1.001f) gzF = hmH - 1.001f;
+        const int gx0 = static_cast<int>(gxF);
+        const int gz0 = static_cast<int>(gzF);
+        const float fx = gxF - gx0;
+        const float fz = gzF - gz0;
+
+        const uint16_t h00 = data[gz0 * hmW + gx0];
+        const uint16_t h10 = data[gz0 * hmW + gx0 + 1];
+        const uint16_t h01 = data[(gz0 + 1) * hmW + gx0];
+        const uint16_t h11 = data[(gz0 + 1) * hmW + gx0 + 1];
+
+        const float raw =
+            h00 * (1 - fx) * (1 - fz) +
+            h10 * fx       * (1 - fz) +
+            h01 * (1 - fx) * fz +
+            h11 * fx       * fz;
+
+        return minHeight + (raw / 65535.0f) * (maxHeight - minHeight);
+    }
+};
+
+HeightmapSampler LoadHeightmap(const MapMetadata& meta) {
+    HeightmapSampler s;
+    s.hmW = meta.mapx + 1;
+    s.hmH = meta.mapy + 1;
+    s.minHeight = meta.minHeight;
+    s.maxHeight = meta.maxHeight;
+    s.squareSize = 8.0f;
+
+    const std::string path = meta.processedDir + "/heightmap.bin";
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) {
+        std::fprintf(stderr, "[features] heightmap.bin missing at %s, "
+            "feature Y will be 0 (expect sunken rocks)\n", path.c_str());
+        return s;
+    }
+    const size_t count = static_cast<size_t>(s.hmW) * s.hmH;
+    s.data.resize(count);
+    f.read(reinterpret_cast<char*>(s.data.data()),
+           static_cast<std::streamsize>(count * sizeof(uint16_t)));
+    if (!f) {
+        std::fprintf(stderr, "[features] short read on heightmap.bin\n");
+        s.data.clear();
+    }
+    return s;
+}
+
+// ============================================================
 // Step 2 — run mapconfig/featureplacer/config.lua
 // ============================================================
 //
@@ -202,9 +280,15 @@ float HeadingToRadians(float h) {
     return h * (2.0f * 3.14159265358979323846f / 65536.0f);
 }
 
+/// Matches the +5 elmo offset Spring's own `FP_featureplacer.lua`
+/// gadget adds: `CreateFeature(name, x, GetGroundHeight(x,z) + 5, z, rot)`.
+/// Keeps features from z-fighting with the terrain mesh underneath.
+constexpr float GROUND_PLACEMENT_OFFSET = 5.0f;
+
 void ParseFeaturePlacements(lua_State* L,
                             MapMetadata& meta,
-                            std::unordered_map<std::string, int>& nameToIndex) {
+                            std::unordered_map<std::string, int>& nameToIndex,
+                            const HeightmapSampler& heightmap) {
     const std::string configPath =
         meta.sourcePath + "/mapconfig/featureplacer/config.lua";
     if (!fs::exists(configPath)) return;
@@ -252,7 +336,12 @@ void ParseFeaturePlacements(lua_State* L,
                 MapFeatureData inst;
                 inst.featureType = typeIndex;
                 inst.x = x;
-                inst.y = 0; // resolved against the heightmap on the client
+                // Sample the ground at this (x, z) so the feature's Y
+                // ends up part of the synced sim state — pathfinding,
+                // LOS, projectile collision etc. all need a real Y, not
+                // zero. Matches Spring's LuaGaia featureplacer, which
+                // calls CreateFeature(name, x, GetGroundHeight(x,z)+5, z, rot).
+                inst.y = heightmap.sample(x, z) + GROUND_PLACEMENT_OFFSET;
                 inst.z = z;
                 inst.rotation = HeadingToRadians(rot);
                 inst.relativeSize = 1.0f;
@@ -477,10 +566,14 @@ void Process(MapMetadata& meta) {
     }
 
     // ---- Step 3: parse mapconfig/featureplacer/config.lua ----
+    // Load the heightmap first so ParseFeaturePlacements can resolve
+    // each placement's Y against the real terrain. ExtractBinaryData
+    // has already written heightmap.bin earlier in the pipeline.
     if (fs::exists(meta.sourcePath + "/mapconfig/featureplacer/config.lua")) {
+        HeightmapSampler heightmap = LoadHeightmap(meta);
         auto savedRoots = CFileHandler::GetContentRoots();
         lua_State* L = CreateMapLuaState(meta.sourcePath);
-        ParseFeaturePlacements(L, meta, nameToIndex);
+        ParseFeaturePlacements(L, meta, nameToIndex, heightmap);
         CloseMapLuaState(L);
         CFileHandler::ClearContentRoots();
         for (const auto& r : savedRoots) CFileHandler::AddContentRoot(r);
