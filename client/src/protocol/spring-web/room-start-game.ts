@@ -4,7 +4,9 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-export class RoomStartGame {
+
+
+export class RoomStartGame implements flatbuffers.IUnpackableObject<RoomStartGameT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):RoomStartGame {
@@ -34,5 +36,21 @@ static endRoomStartGame(builder:flatbuffers.Builder):flatbuffers.Offset {
 static createRoomStartGame(builder:flatbuffers.Builder):flatbuffers.Offset {
   RoomStartGame.startRoomStartGame(builder);
   return RoomStartGame.endRoomStartGame(builder);
+}
+
+unpack(): RoomStartGameT {
+  return new RoomStartGameT();
+}
+
+
+unpackTo(_o: RoomStartGameT): void {}
+}
+
+export class RoomStartGameT implements flatbuffers.IGeneratedObject {
+constructor(){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  return RoomStartGame.createRoomStartGame(builder);
 }
 }

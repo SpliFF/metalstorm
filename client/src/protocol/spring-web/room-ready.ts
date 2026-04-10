@@ -4,7 +4,9 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-export class RoomReady {
+
+
+export class RoomReady implements flatbuffers.IUnpackableObject<RoomReadyT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):RoomReady {
@@ -44,5 +46,29 @@ static createRoomReady(builder:flatbuffers.Builder, ready:boolean):flatbuffers.O
   RoomReady.startRoomReady(builder);
   RoomReady.addReady(builder, ready);
   return RoomReady.endRoomReady(builder);
+}
+
+unpack(): RoomReadyT {
+  return new RoomReadyT(
+    this.ready()
+  );
+}
+
+
+unpackTo(_o: RoomReadyT): void {
+  _o.ready = this.ready();
+}
+}
+
+export class RoomReadyT implements flatbuffers.IGeneratedObject {
+constructor(
+  public ready: boolean = false
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  return RoomReady.createRoomReady(builder,
+    this.ready
+  );
 }
 }

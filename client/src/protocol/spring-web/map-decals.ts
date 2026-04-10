@@ -4,12 +4,14 @@
 
 import * as flatbuffers from 'flatbuffers';
 
+
+
 /**
  * Splat/decal texture set — Spring's terrain detail texturing system.
  * All URLs are HTTP paths to PNG files (relative to the lobby HTTP root).
  * Empty string means the texture is not defined by the map.
  */
-export class MapDecals {
+export class MapDecals implements flatbuffers.IUnpackableObject<MapDecalsT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):MapDecals {
@@ -221,5 +223,81 @@ static createMapDecals(builder:flatbuffers.Builder, detailTexOffset:flatbuffers.
   MapDecals.addSplatScales(builder, splatScalesOffset);
   MapDecals.addSplatMults(builder, splatMultsOffset);
   return MapDecals.endMapDecals(builder);
+}
+
+unpack(): MapDecalsT {
+  return new MapDecalsT(
+    this.detailTex(),
+    this.specularTex(),
+    this.splatDetailTex(),
+    this.splatDistrTex(),
+    this.splatNormal0(),
+    this.splatNormal1(),
+    this.splatNormal2(),
+    this.splatNormal3(),
+    this.detailNormalTex(),
+    this.bb!.createScalarList<number>(this.splatScales.bind(this), this.splatScalesLength()),
+    this.bb!.createScalarList<number>(this.splatMults.bind(this), this.splatMultsLength())
+  );
+}
+
+
+unpackTo(_o: MapDecalsT): void {
+  _o.detailTex = this.detailTex();
+  _o.specularTex = this.specularTex();
+  _o.splatDetailTex = this.splatDetailTex();
+  _o.splatDistrTex = this.splatDistrTex();
+  _o.splatNormal0 = this.splatNormal0();
+  _o.splatNormal1 = this.splatNormal1();
+  _o.splatNormal2 = this.splatNormal2();
+  _o.splatNormal3 = this.splatNormal3();
+  _o.detailNormalTex = this.detailNormalTex();
+  _o.splatScales = this.bb!.createScalarList<number>(this.splatScales.bind(this), this.splatScalesLength());
+  _o.splatMults = this.bb!.createScalarList<number>(this.splatMults.bind(this), this.splatMultsLength());
+}
+}
+
+export class MapDecalsT implements flatbuffers.IGeneratedObject {
+constructor(
+  public detailTex: string|Uint8Array|null = null,
+  public specularTex: string|Uint8Array|null = null,
+  public splatDetailTex: string|Uint8Array|null = null,
+  public splatDistrTex: string|Uint8Array|null = null,
+  public splatNormal0: string|Uint8Array|null = null,
+  public splatNormal1: string|Uint8Array|null = null,
+  public splatNormal2: string|Uint8Array|null = null,
+  public splatNormal3: string|Uint8Array|null = null,
+  public detailNormalTex: string|Uint8Array|null = null,
+  public splatScales: (number)[] = [],
+  public splatMults: (number)[] = []
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  const detailTex = (this.detailTex !== null ? builder.createString(this.detailTex!) : 0);
+  const specularTex = (this.specularTex !== null ? builder.createString(this.specularTex!) : 0);
+  const splatDetailTex = (this.splatDetailTex !== null ? builder.createString(this.splatDetailTex!) : 0);
+  const splatDistrTex = (this.splatDistrTex !== null ? builder.createString(this.splatDistrTex!) : 0);
+  const splatNormal0 = (this.splatNormal0 !== null ? builder.createString(this.splatNormal0!) : 0);
+  const splatNormal1 = (this.splatNormal1 !== null ? builder.createString(this.splatNormal1!) : 0);
+  const splatNormal2 = (this.splatNormal2 !== null ? builder.createString(this.splatNormal2!) : 0);
+  const splatNormal3 = (this.splatNormal3 !== null ? builder.createString(this.splatNormal3!) : 0);
+  const detailNormalTex = (this.detailNormalTex !== null ? builder.createString(this.detailNormalTex!) : 0);
+  const splatScales = MapDecals.createSplatScalesVector(builder, this.splatScales);
+  const splatMults = MapDecals.createSplatMultsVector(builder, this.splatMults);
+
+  return MapDecals.createMapDecals(builder,
+    detailTex,
+    specularTex,
+    splatDetailTex,
+    splatDistrTex,
+    splatNormal0,
+    splatNormal1,
+    splatNormal2,
+    splatNormal3,
+    detailNormalTex,
+    splatScales,
+    splatMults
+  );
 }
 }

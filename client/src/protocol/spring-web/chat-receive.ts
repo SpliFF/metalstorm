@@ -4,7 +4,9 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-export class ChatReceive {
+
+
+export class ChatReceive implements flatbuffers.IUnpackableObject<ChatReceiveT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):ChatReceive {
@@ -78,5 +80,44 @@ static createChatReceive(builder:flatbuffers.Builder, senderId:number, senderNam
   ChatReceive.addText(builder, textOffset);
   ChatReceive.addDestination(builder, destination);
   return ChatReceive.endChatReceive(builder);
+}
+
+unpack(): ChatReceiveT {
+  return new ChatReceiveT(
+    this.senderId(),
+    this.senderName(),
+    this.text(),
+    this.destination()
+  );
+}
+
+
+unpackTo(_o: ChatReceiveT): void {
+  _o.senderId = this.senderId();
+  _o.senderName = this.senderName();
+  _o.text = this.text();
+  _o.destination = this.destination();
+}
+}
+
+export class ChatReceiveT implements flatbuffers.IGeneratedObject {
+constructor(
+  public senderId: number = 0,
+  public senderName: string|Uint8Array|null = null,
+  public text: string|Uint8Array|null = null,
+  public destination: number = 0
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  const senderName = (this.senderName !== null ? builder.createString(this.senderName!) : 0);
+  const text = (this.text !== null ? builder.createString(this.text!) : 0);
+
+  return ChatReceive.createChatReceive(builder,
+    this.senderId,
+    senderName,
+    text,
+    this.destination
+  );
 }
 }

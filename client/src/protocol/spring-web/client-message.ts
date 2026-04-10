@@ -4,10 +4,25 @@
 
 import * as flatbuffers from 'flatbuffers';
 
+import { Ack, AckT } from '../spring-web/ack.js';
+import { AuthRequest, AuthRequestT } from '../spring-web/auth-request.js';
+import { ChatSend, ChatSendT } from '../spring-web/chat-send.js';
 import { ClientPayload, unionToClientPayload, unionListToClientPayload } from '../spring-web/client-payload.js';
+import { Handshake, HandshakeT } from '../spring-web/handshake.js';
+import { Ping, PingT } from '../spring-web/ping.js';
+import { PlayerCommand, PlayerCommandT } from '../spring-web/player-command.js';
+import { ReconnectRequest, ReconnectRequestT } from '../spring-web/reconnect-request.js';
+import { RoomCreate, RoomCreateT } from '../spring-web/room-create.js';
+import { RoomJoin, RoomJoinT } from '../spring-web/room-join.js';
+import { RoomKick, RoomKickT } from '../spring-web/room-kick.js';
+import { RoomLeave, RoomLeaveT } from '../spring-web/room-leave.js';
+import { RoomReady, RoomReadyT } from '../spring-web/room-ready.js';
+import { RoomStartGame, RoomStartGameT } from '../spring-web/room-start-game.js';
+import { RoomTeamSelect, RoomTeamSelectT } from '../spring-web/room-team-select.js';
+import { ViewportUpdate, ViewportUpdateT } from '../spring-web/viewport-update.js';
 
 
-export class ClientMessage {
+export class ClientMessage implements flatbuffers.IUnpackableObject<ClientMessageT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):ClientMessage {
@@ -65,5 +80,43 @@ static createClientMessage(builder:flatbuffers.Builder, payloadType:ClientPayloa
   ClientMessage.addPayloadType(builder, payloadType);
   ClientMessage.addPayload(builder, payloadOffset);
   return ClientMessage.endClientMessage(builder);
+}
+
+unpack(): ClientMessageT {
+  return new ClientMessageT(
+    this.payloadType(),
+    (() => {
+      const temp = unionToClientPayload(this.payloadType(), this.payload.bind(this));
+      if(temp === null) { return null; }
+      return temp.unpack()
+  })()
+  );
+}
+
+
+unpackTo(_o: ClientMessageT): void {
+  _o.payloadType = this.payloadType();
+  _o.payload = (() => {
+      const temp = unionToClientPayload(this.payloadType(), this.payload.bind(this));
+      if(temp === null) { return null; }
+      return temp.unpack()
+  })();
+}
+}
+
+export class ClientMessageT implements flatbuffers.IGeneratedObject {
+constructor(
+  public payloadType: ClientPayload = ClientPayload.NONE,
+  public payload: AckT|AuthRequestT|ChatSendT|HandshakeT|PingT|PlayerCommandT|ReconnectRequestT|RoomCreateT|RoomJoinT|RoomKickT|RoomLeaveT|RoomReadyT|RoomStartGameT|RoomTeamSelectT|ViewportUpdateT|null = null
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  const payload = builder.createObjectOffset(this.payload);
+
+  return ClientMessage.createClientMessage(builder,
+    this.payloadType,
+    payload
+  );
 }
 }

@@ -4,11 +4,11 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-import { CombatEvent } from '../spring-web/combat-event.js';
-import { GameEvent } from '../spring-web/game-event.js';
+import { CombatEvent, CombatEventT } from '../spring-web/combat-event.js';
+import { GameEvent, GameEventT } from '../spring-web/game-event.js';
 
 
-export class GameEventBatch {
+export class GameEventBatch implements flatbuffers.IUnpackableObject<GameEventBatchT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):GameEventBatch {
@@ -102,5 +102,40 @@ static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOff
   GameEventBatch.addEvents(builder, eventsOffset);
   GameEventBatch.addCombatEvents(builder, combatEventsOffset);
   return GameEventBatch.endGameEventBatch(builder);
+}
+
+unpack(): GameEventBatchT {
+  return new GameEventBatchT(
+    this.frame(),
+    this.bb!.createObjList<GameEvent, GameEventT>(this.events.bind(this), this.eventsLength()),
+    this.bb!.createObjList<CombatEvent, CombatEventT>(this.combatEvents.bind(this), this.combatEventsLength())
+  );
+}
+
+
+unpackTo(_o: GameEventBatchT): void {
+  _o.frame = this.frame();
+  _o.events = this.bb!.createObjList<GameEvent, GameEventT>(this.events.bind(this), this.eventsLength());
+  _o.combatEvents = this.bb!.createObjList<CombatEvent, CombatEventT>(this.combatEvents.bind(this), this.combatEventsLength());
+}
+}
+
+export class GameEventBatchT implements flatbuffers.IGeneratedObject {
+constructor(
+  public frame: number = 0,
+  public events: (GameEventT)[] = [],
+  public combatEvents: (CombatEventT)[] = []
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  const events = GameEventBatch.createEventsVector(builder, builder.createObjectOffsetList(this.events));
+  const combatEvents = GameEventBatch.createCombatEventsVector(builder, builder.createObjectOffsetList(this.combatEvents));
+
+  return GameEventBatch.createGameEventBatch(builder,
+    this.frame,
+    events,
+    combatEvents
+  );
 }
 }

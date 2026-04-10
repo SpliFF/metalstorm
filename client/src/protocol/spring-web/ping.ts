@@ -4,7 +4,9 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-export class Ping {
+
+
+export class Ping implements flatbuffers.IUnpackableObject<PingT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):Ping {
@@ -44,5 +46,29 @@ static createPing(builder:flatbuffers.Builder, clientTime:bigint):flatbuffers.Of
   Ping.startPing(builder);
   Ping.addClientTime(builder, clientTime);
   return Ping.endPing(builder);
+}
+
+unpack(): PingT {
+  return new PingT(
+    this.clientTime()
+  );
+}
+
+
+unpackTo(_o: PingT): void {
+  _o.clientTime = this.clientTime();
+}
+}
+
+export class PingT implements flatbuffers.IGeneratedObject {
+constructor(
+  public clientTime: bigint = BigInt('0')
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  return Ping.createPing(builder,
+    this.clientTime
+  );
 }
 }

@@ -5,10 +5,10 @@
 import * as flatbuffers from 'flatbuffers';
 
 import { CombatResult } from '../spring-web/combat-result.js';
-import { Vec3 } from '../spring-web/vec3.js';
+import { Vec3, Vec3T } from '../spring-web/vec3.js';
 
 
-export class CombatEvent {
+export class CombatEvent implements flatbuffers.IUnpackableObject<CombatEventT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):CombatEvent {
@@ -89,4 +89,49 @@ static endCombatEvent(builder:flatbuffers.Builder):flatbuffers.Offset {
   return offset;
 }
 
+
+unpack(): CombatEventT {
+  return new CombatEventT(
+    this.attackerId(),
+    this.targetId(),
+    this.weaponDefId(),
+    this.result(),
+    this.damage(),
+    (this.position() !== null ? this.position()!.unpack() : null)
+  );
+}
+
+
+unpackTo(_o: CombatEventT): void {
+  _o.attackerId = this.attackerId();
+  _o.targetId = this.targetId();
+  _o.weaponDefId = this.weaponDefId();
+  _o.result = this.result();
+  _o.damage = this.damage();
+  _o.position = (this.position() !== null ? this.position()!.unpack() : null);
+}
+}
+
+export class CombatEventT implements flatbuffers.IGeneratedObject {
+constructor(
+  public attackerId: number = 0,
+  public targetId: number = 0,
+  public weaponDefId: number = 0,
+  public result: CombatResult = CombatResult.Hit,
+  public damage: number = 0.0,
+  public position: Vec3T|null = null
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  CombatEvent.startCombatEvent(builder);
+  CombatEvent.addAttackerId(builder, this.attackerId);
+  CombatEvent.addTargetId(builder, this.targetId);
+  CombatEvent.addWeaponDefId(builder, this.weaponDefId);
+  CombatEvent.addResult(builder, this.result);
+  CombatEvent.addDamage(builder, this.damage);
+  CombatEvent.addPosition(builder, (this.position !== null ? this.position!.pack(builder) : 0));
+
+  return CombatEvent.endCombatEvent(builder);
+}
 }

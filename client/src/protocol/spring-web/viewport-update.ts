@@ -4,7 +4,9 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-export class ViewportUpdate {
+
+
+export class ViewportUpdate implements flatbuffers.IUnpackableObject<ViewportUpdateT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):ViewportUpdate {
@@ -104,5 +106,53 @@ static createViewportUpdate(builder:flatbuffers.Builder, viewportId:number, cent
   ViewportUpdate.addRotation(builder, rotation);
   ViewportUpdate.addZoomLevel(builder, zoomLevel);
   return ViewportUpdate.endViewportUpdate(builder);
+}
+
+unpack(): ViewportUpdateT {
+  return new ViewportUpdateT(
+    this.viewportId(),
+    this.centerX(),
+    this.centerZ(),
+    this.width(),
+    this.height(),
+    this.rotation(),
+    this.zoomLevel()
+  );
+}
+
+
+unpackTo(_o: ViewportUpdateT): void {
+  _o.viewportId = this.viewportId();
+  _o.centerX = this.centerX();
+  _o.centerZ = this.centerZ();
+  _o.width = this.width();
+  _o.height = this.height();
+  _o.rotation = this.rotation();
+  _o.zoomLevel = this.zoomLevel();
+}
+}
+
+export class ViewportUpdateT implements flatbuffers.IGeneratedObject {
+constructor(
+  public viewportId: number = 0,
+  public centerX: number = 0.0,
+  public centerZ: number = 0.0,
+  public width: number = 0.0,
+  public height: number = 0.0,
+  public rotation: number = 0.0,
+  public zoomLevel: number = 0.0
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  return ViewportUpdate.createViewportUpdate(builder,
+    this.viewportId,
+    this.centerX,
+    this.centerZ,
+    this.width,
+    this.height,
+    this.rotation,
+    this.zoomLevel
+  );
 }
 }

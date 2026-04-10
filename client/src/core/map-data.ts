@@ -25,6 +25,30 @@ export interface MapFeatureInstance {
     relativeSize: number;
 }
 
+/**
+ * Definition of a feature type — parallel to `featureTypes[]` (same indices).
+ *
+ * `modelUrl` is an HTTP URL to a glTF 2.0 binary (`.glb`) converted from
+ * the original Spring `.s3o` by the server preprocessing pipeline (any2gltf).
+ * `textureUrl` is an HTTP URL to a `.png` converted from the original
+ * `.tga`/`.dds`. Either may be empty if the def has no model or asset
+ * conversion failed; the renderer falls back to a placeholder in that case.
+ */
+export interface MapFeatureDefInfo {
+    name: string;
+    modelUrl: string;
+    textureUrl: string;
+    footprintX: number;
+    footprintZ: number;
+    height: number;
+    radius: number;
+    blocking: boolean;
+    reclaimable: boolean;
+    metal: number;
+    energy: number;
+    damage: number;
+}
+
 export interface MapStartPosInfo {
     x: number;
     z: number;
@@ -63,6 +87,9 @@ export interface ParsedMapData {
     startPositions: MapStartPosInfo[];
     featureTypes: string[];
     features: MapFeatureInstance[];
+    /// Parallel to `featureTypes` (same indices). Each entry tells the
+    /// client how to render and interact with feature instances of that type.
+    featureDefs: MapFeatureDefInfo[];
     heightmap: Uint16Array;
     tileindex: Int32Array;
     typemap: Uint8Array;
@@ -114,6 +141,26 @@ export function parseMapData(fb: FbMapData): ParsedMapData {
             x: f.x(), y: f.y(), z: f.z(),
             rotation: f.rotation(),
             relativeSize: f.relativeSize(),
+        });
+    }
+
+    const featureDefs: MapFeatureDefInfo[] = [];
+    for (let i = 0; i < fb.featureDefsLength(); i++) {
+        const d = fb.featureDefs(i);
+        if (!d) continue;
+        featureDefs.push({
+            name: d.name() ?? '',
+            modelUrl: d.modelUrl() ?? '',
+            textureUrl: d.textureUrl() ?? '',
+            footprintX: d.footprintX(),
+            footprintZ: d.footprintZ(),
+            height: d.height(),
+            radius: d.radius(),
+            blocking: d.blocking(),
+            reclaimable: d.reclaimable(),
+            metal: d.metal(),
+            energy: d.energy(),
+            damage: d.damage(),
         });
     }
 
@@ -187,6 +234,7 @@ export function parseMapData(fb: FbMapData): ParsedMapData {
         startPositions,
         featureTypes,
         features,
+        featureDefs,
         heightmap, tileindex, typemap, metalmap,
         minimapUrl: fb.minimapUrl() ?? '',
         tilesUrl: fb.tilesUrl() ?? '',

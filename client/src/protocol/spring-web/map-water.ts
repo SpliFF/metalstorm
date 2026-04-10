@@ -4,12 +4,14 @@
 
 import * as flatbuffers from 'flatbuffers';
 
+
+
 /**
  * Water rendering properties. Spring's water system is also used for
  * lava/acid/void-fill — the colour and damage distinguish them.
  * Water plane is at world Y = 0; terrain below that is flooded.
  */
-export class MapWater {
+export class MapWater implements flatbuffers.IUnpackableObject<MapWaterT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):MapWater {
@@ -180,5 +182,53 @@ static createMapWater(builder:flatbuffers.Builder, baseColorOffset:flatbuffers.O
   MapWater.addDamage(builder, damage);
   MapWater.addVoidWater(builder, voidWater);
   return MapWater.endMapWater(builder);
+}
+
+unpack(): MapWaterT {
+  return new MapWaterT(
+    this.bb!.createScalarList<number>(this.baseColor.bind(this), this.baseColorLength()),
+    this.bb!.createScalarList<number>(this.surfaceColor.bind(this), this.surfaceColorLength()),
+    this.bb!.createScalarList<number>(this.minColor.bind(this), this.minColorLength()),
+    this.surfaceAlpha(),
+    this.damage(),
+    this.voidWater()
+  );
+}
+
+
+unpackTo(_o: MapWaterT): void {
+  _o.baseColor = this.bb!.createScalarList<number>(this.baseColor.bind(this), this.baseColorLength());
+  _o.surfaceColor = this.bb!.createScalarList<number>(this.surfaceColor.bind(this), this.surfaceColorLength());
+  _o.minColor = this.bb!.createScalarList<number>(this.minColor.bind(this), this.minColorLength());
+  _o.surfaceAlpha = this.surfaceAlpha();
+  _o.damage = this.damage();
+  _o.voidWater = this.voidWater();
+}
+}
+
+export class MapWaterT implements flatbuffers.IGeneratedObject {
+constructor(
+  public baseColor: (number)[] = [],
+  public surfaceColor: (number)[] = [],
+  public minColor: (number)[] = [],
+  public surfaceAlpha: number = 0.0,
+  public damage: number = 0.0,
+  public voidWater: boolean = false
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  const baseColor = MapWater.createBaseColorVector(builder, this.baseColor);
+  const surfaceColor = MapWater.createSurfaceColorVector(builder, this.surfaceColor);
+  const minColor = MapWater.createMinColorVector(builder, this.minColor);
+
+  return MapWater.createMapWater(builder,
+    baseColor,
+    surfaceColor,
+    minColor,
+    this.surfaceAlpha,
+    this.damage,
+    this.voidWater
+  );
 }
 }

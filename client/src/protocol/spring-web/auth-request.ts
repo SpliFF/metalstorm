@@ -4,7 +4,9 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-export class AuthRequest {
+
+
+export class AuthRequest implements flatbuffers.IUnpackableObject<AuthRequestT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):AuthRequest {
@@ -70,5 +72,41 @@ static createAuthRequest(builder:flatbuffers.Builder, usernameOffset:flatbuffers
   AuthRequest.addPasswordHash(builder, passwordHashOffset);
   AuthRequest.addToken(builder, tokenOffset);
   return AuthRequest.endAuthRequest(builder);
+}
+
+unpack(): AuthRequestT {
+  return new AuthRequestT(
+    this.username(),
+    this.passwordHash(),
+    this.token()
+  );
+}
+
+
+unpackTo(_o: AuthRequestT): void {
+  _o.username = this.username();
+  _o.passwordHash = this.passwordHash();
+  _o.token = this.token();
+}
+}
+
+export class AuthRequestT implements flatbuffers.IGeneratedObject {
+constructor(
+  public username: string|Uint8Array|null = null,
+  public passwordHash: string|Uint8Array|null = null,
+  public token: string|Uint8Array|null = null
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  const username = (this.username !== null ? builder.createString(this.username!) : 0);
+  const passwordHash = (this.passwordHash !== null ? builder.createString(this.passwordHash!) : 0);
+  const token = (this.token !== null ? builder.createString(this.token!) : 0);
+
+  return AuthRequest.createAuthRequest(builder,
+    username,
+    passwordHash,
+    token
+  );
 }
 }

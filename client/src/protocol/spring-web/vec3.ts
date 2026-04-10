@@ -4,7 +4,9 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-export class Vec3 {
+
+
+export class Vec3 implements flatbuffers.IUnpackableObject<Vec3T> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):Vec3 {
@@ -37,4 +39,36 @@ static createVec3(builder:flatbuffers.Builder, x: number, y: number, z: number):
   return builder.offset();
 }
 
+
+unpack(): Vec3T {
+  return new Vec3T(
+    this.x(),
+    this.y(),
+    this.z()
+  );
+}
+
+
+unpackTo(_o: Vec3T): void {
+  _o.x = this.x();
+  _o.y = this.y();
+  _o.z = this.z();
+}
+}
+
+export class Vec3T implements flatbuffers.IGeneratedObject {
+constructor(
+  public x: number = 0.0,
+  public y: number = 0.0,
+  public z: number = 0.0
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  return Vec3.createVec3(builder,
+    this.x,
+    this.y,
+    this.z
+  );
+}
 }

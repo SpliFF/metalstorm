@@ -4,10 +4,10 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-import { Vec3 } from '../spring-web/vec3.js';
+import { Vec3, Vec3T } from '../spring-web/vec3.js';
 
 
-export class EntityDestroy {
+export class EntityDestroy implements flatbuffers.IUnpackableObject<EntityDestroyT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):EntityDestroy {
@@ -61,4 +61,37 @@ static endEntityDestroy(builder:flatbuffers.Builder):flatbuffers.Offset {
   return offset;
 }
 
+
+unpack(): EntityDestroyT {
+  return new EntityDestroyT(
+    this.entityId(),
+    this.destructionType(),
+    (this.position() !== null ? this.position()!.unpack() : null)
+  );
+}
+
+
+unpackTo(_o: EntityDestroyT): void {
+  _o.entityId = this.entityId();
+  _o.destructionType = this.destructionType();
+  _o.position = (this.position() !== null ? this.position()!.unpack() : null);
+}
+}
+
+export class EntityDestroyT implements flatbuffers.IGeneratedObject {
+constructor(
+  public entityId: number = 0,
+  public destructionType: number = 0,
+  public position: Vec3T|null = null
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  EntityDestroy.startEntityDestroy(builder);
+  EntityDestroy.addEntityId(builder, this.entityId);
+  EntityDestroy.addDestructionType(builder, this.destructionType);
+  EntityDestroy.addPosition(builder, (this.position !== null ? this.position!.pack(builder) : 0));
+
+  return EntityDestroy.endEntityDestroy(builder);
+}
 }

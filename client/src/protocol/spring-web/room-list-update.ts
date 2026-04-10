@@ -4,10 +4,10 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-import { RoomListEntry } from '../spring-web/room-list-entry.js';
+import { RoomListEntry, RoomListEntryT } from '../spring-web/room-list-entry.js';
 
 
-export class RoomListUpdate {
+export class RoomListUpdate implements flatbuffers.IUnpackableObject<RoomListUpdateT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):RoomListUpdate {
@@ -64,5 +64,31 @@ static createRoomListUpdate(builder:flatbuffers.Builder, roomsOffset:flatbuffers
   RoomListUpdate.startRoomListUpdate(builder);
   RoomListUpdate.addRooms(builder, roomsOffset);
   return RoomListUpdate.endRoomListUpdate(builder);
+}
+
+unpack(): RoomListUpdateT {
+  return new RoomListUpdateT(
+    this.bb!.createObjList<RoomListEntry, RoomListEntryT>(this.rooms.bind(this), this.roomsLength())
+  );
+}
+
+
+unpackTo(_o: RoomListUpdateT): void {
+  _o.rooms = this.bb!.createObjList<RoomListEntry, RoomListEntryT>(this.rooms.bind(this), this.roomsLength());
+}
+}
+
+export class RoomListUpdateT implements flatbuffers.IGeneratedObject {
+constructor(
+  public rooms: (RoomListEntryT)[] = []
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  const rooms = RoomListUpdate.createRoomsVector(builder, builder.createObjectOffsetList(this.rooms));
+
+  return RoomListUpdate.createRoomListUpdate(builder,
+    rooms
+  );
 }
 }

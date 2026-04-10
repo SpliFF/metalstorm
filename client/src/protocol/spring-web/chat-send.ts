@@ -4,7 +4,9 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-export class ChatSend {
+
+
+export class ChatSend implements flatbuffers.IUnpackableObject<ChatSendT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):ChatSend {
@@ -56,5 +58,35 @@ static createChatSend(builder:flatbuffers.Builder, textOffset:flatbuffers.Offset
   ChatSend.addText(builder, textOffset);
   ChatSend.addDestination(builder, destination);
   return ChatSend.endChatSend(builder);
+}
+
+unpack(): ChatSendT {
+  return new ChatSendT(
+    this.text(),
+    this.destination()
+  );
+}
+
+
+unpackTo(_o: ChatSendT): void {
+  _o.text = this.text();
+  _o.destination = this.destination();
+}
+}
+
+export class ChatSendT implements flatbuffers.IGeneratedObject {
+constructor(
+  public text: string|Uint8Array|null = null,
+  public destination: number = 0
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  const text = (this.text !== null ? builder.createString(this.text!) : 0);
+
+  return ChatSend.createChatSend(builder,
+    text,
+    this.destination
+  );
 }
 }

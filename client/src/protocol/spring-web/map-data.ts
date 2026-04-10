@@ -4,10 +4,11 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-import { MapDecals } from '../spring-web/map-decals.js';
-import { MapFeature } from '../spring-web/map-feature.js';
-import { MapStartPos } from '../spring-web/map-start-pos.js';
-import { MapWater } from '../spring-web/map-water.js';
+import { MapDecals, MapDecalsT } from '../spring-web/map-decals.js';
+import { MapFeature, MapFeatureT } from '../spring-web/map-feature.js';
+import { MapFeatureDef, MapFeatureDefT } from '../spring-web/map-feature-def.js';
+import { MapStartPos, MapStartPosT } from '../spring-web/map-start-pos.js';
+import { MapWater, MapWaterT } from '../spring-web/map-water.js';
 
 
 /**
@@ -15,7 +16,7 @@ import { MapWater } from '../spring-web/map-water.js';
  * Binary data (heightmap, tileindex, typemap, metalmap) embedded directly.
  * Tile texture data and splat textures served via HTTP separately.
  */
-export class MapData {
+export class MapData implements flatbuffers.IUnpackableObject<MapDataT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):MapData {
@@ -110,106 +111,121 @@ featuresLength():number {
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
-heightmap(index: number):number|null {
+/**
+ * Parallel to `feature_types` (same indices). Each entry tells the
+ * client how to render and interact with feature instances of that
+ * type.
+ */
+featureDefs(index: number, obj?:MapFeatureDef):MapFeatureDef|null {
   const offset = this.bb!.__offset(this.bb_pos, 28);
+  return offset ? (obj || new MapFeatureDef()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
+}
+
+featureDefsLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 28);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
+heightmap(index: number):number|null {
+  const offset = this.bb!.__offset(this.bb_pos, 30);
   return offset ? this.bb!.readUint16(this.bb!.__vector(this.bb_pos + offset) + index * 2) : 0;
 }
 
 heightmapLength():number {
-  const offset = this.bb!.__offset(this.bb_pos, 28);
+  const offset = this.bb!.__offset(this.bb_pos, 30);
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
 heightmapArray():Uint16Array|null {
-  const offset = this.bb!.__offset(this.bb_pos, 28);
+  const offset = this.bb!.__offset(this.bb_pos, 30);
   return offset ? new Uint16Array(this.bb!.bytes().buffer, this.bb!.bytes().byteOffset + this.bb!.__vector(this.bb_pos + offset), this.bb!.__vector_len(this.bb_pos + offset)) : null;
 }
 
 tileindex(index: number):number|null {
-  const offset = this.bb!.__offset(this.bb_pos, 30);
+  const offset = this.bb!.__offset(this.bb_pos, 32);
   return offset ? this.bb!.readInt32(this.bb!.__vector(this.bb_pos + offset) + index * 4) : 0;
 }
 
 tileindexLength():number {
-  const offset = this.bb!.__offset(this.bb_pos, 30);
+  const offset = this.bb!.__offset(this.bb_pos, 32);
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
 tileindexArray():Int32Array|null {
-  const offset = this.bb!.__offset(this.bb_pos, 30);
+  const offset = this.bb!.__offset(this.bb_pos, 32);
   return offset ? new Int32Array(this.bb!.bytes().buffer, this.bb!.bytes().byteOffset + this.bb!.__vector(this.bb_pos + offset), this.bb!.__vector_len(this.bb_pos + offset)) : null;
 }
 
 typemap(index: number):number|null {
-  const offset = this.bb!.__offset(this.bb_pos, 32);
+  const offset = this.bb!.__offset(this.bb_pos, 34);
   return offset ? this.bb!.readUint8(this.bb!.__vector(this.bb_pos + offset) + index) : 0;
 }
 
 typemapLength():number {
-  const offset = this.bb!.__offset(this.bb_pos, 32);
+  const offset = this.bb!.__offset(this.bb_pos, 34);
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
 typemapArray():Uint8Array|null {
-  const offset = this.bb!.__offset(this.bb_pos, 32);
+  const offset = this.bb!.__offset(this.bb_pos, 34);
   return offset ? new Uint8Array(this.bb!.bytes().buffer, this.bb!.bytes().byteOffset + this.bb!.__vector(this.bb_pos + offset), this.bb!.__vector_len(this.bb_pos + offset)) : null;
 }
 
 metalmap(index: number):number|null {
-  const offset = this.bb!.__offset(this.bb_pos, 34);
+  const offset = this.bb!.__offset(this.bb_pos, 36);
   return offset ? this.bb!.readUint8(this.bb!.__vector(this.bb_pos + offset) + index) : 0;
 }
 
 metalmapLength():number {
-  const offset = this.bb!.__offset(this.bb_pos, 34);
+  const offset = this.bb!.__offset(this.bb_pos, 36);
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
 metalmapArray():Uint8Array|null {
-  const offset = this.bb!.__offset(this.bb_pos, 34);
+  const offset = this.bb!.__offset(this.bb_pos, 36);
   return offset ? new Uint8Array(this.bb!.bytes().buffer, this.bb!.bytes().byteOffset + this.bb!.__vector(this.bb_pos + offset), this.bb!.__vector_len(this.bb_pos + offset)) : null;
 }
 
 minimapUrl():string|null
 minimapUrl(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
 minimapUrl(optionalEncoding?:any):string|Uint8Array|null {
-  const offset = this.bb!.__offset(this.bb_pos, 36);
+  const offset = this.bb!.__offset(this.bb_pos, 38);
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
 tilesUrl():string|null
 tilesUrl(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
 tilesUrl(optionalEncoding?:any):string|Uint8Array|null {
-  const offset = this.bb!.__offset(this.bb_pos, 38);
+  const offset = this.bb!.__offset(this.bb_pos, 40);
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
 mapDataUrl():string|null
 mapDataUrl(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
 mapDataUrl(optionalEncoding?:any):string|Uint8Array|null {
-  const offset = this.bb!.__offset(this.bb_pos, 40);
+  const offset = this.bb!.__offset(this.bb_pos, 42);
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
 mapSourceUrl():string|null
 mapSourceUrl(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
 mapSourceUrl(optionalEncoding?:any):string|Uint8Array|null {
-  const offset = this.bb!.__offset(this.bb_pos, 42);
+  const offset = this.bb!.__offset(this.bb_pos, 44);
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
 decals(obj?:MapDecals):MapDecals|null {
-  const offset = this.bb!.__offset(this.bb_pos, 44);
+  const offset = this.bb!.__offset(this.bb_pos, 46);
   return offset ? (obj || new MapDecals()).__init(this.bb!.__indirect(this.bb_pos + offset), this.bb!) : null;
 }
 
 water(obj?:MapWater):MapWater|null {
-  const offset = this.bb!.__offset(this.bb_pos, 46);
+  const offset = this.bb!.__offset(this.bb_pos, 48);
   return offset ? (obj || new MapWater()).__init(this.bb!.__indirect(this.bb_pos + offset), this.bb!) : null;
 }
 
 hasLuaGaia():boolean {
-  const offset = this.bb!.__offset(this.bb_pos, 48);
+  const offset = this.bb!.__offset(this.bb_pos, 50);
   return offset ? !!this.bb!.readInt8(this.bb_pos + offset) : false;
 }
 
@@ -220,17 +236,17 @@ hasLuaGaia():boolean {
 widgets(index: number):string
 widgets(index: number,optionalEncoding:flatbuffers.Encoding):string|Uint8Array
 widgets(index: number,optionalEncoding?:any):string|Uint8Array|null {
-  const offset = this.bb!.__offset(this.bb_pos, 50);
+  const offset = this.bb!.__offset(this.bb_pos, 52);
   return offset ? this.bb!.__string(this.bb!.__vector(this.bb_pos + offset) + index * 4, optionalEncoding) : null;
 }
 
 widgetsLength():number {
-  const offset = this.bb!.__offset(this.bb_pos, 50);
+  const offset = this.bb!.__offset(this.bb_pos, 52);
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
 static startMapData(builder:flatbuffers.Builder) {
-  builder.startObject(24);
+  builder.startObject(25);
 }
 
 static addMapx(builder:flatbuffers.Builder, mapx:number) {
@@ -309,8 +325,24 @@ static startFeaturesVector(builder:flatbuffers.Builder, numElems:number) {
   builder.startVector(4, numElems, 4);
 }
 
+static addFeatureDefs(builder:flatbuffers.Builder, featureDefsOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(12, featureDefsOffset, 0);
+}
+
+static createFeatureDefsVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startFeatureDefsVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
 static addHeightmap(builder:flatbuffers.Builder, heightmapOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(12, heightmapOffset, 0);
+  builder.addFieldOffset(13, heightmapOffset, 0);
 }
 
 static createHeightmapVector(builder:flatbuffers.Builder, data:number[]|Uint16Array):flatbuffers.Offset;
@@ -331,7 +363,7 @@ static startHeightmapVector(builder:flatbuffers.Builder, numElems:number) {
 }
 
 static addTileindex(builder:flatbuffers.Builder, tileindexOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(13, tileindexOffset, 0);
+  builder.addFieldOffset(14, tileindexOffset, 0);
 }
 
 static createTileindexVector(builder:flatbuffers.Builder, data:number[]|Int32Array):flatbuffers.Offset;
@@ -352,7 +384,7 @@ static startTileindexVector(builder:flatbuffers.Builder, numElems:number) {
 }
 
 static addTypemap(builder:flatbuffers.Builder, typemapOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(14, typemapOffset, 0);
+  builder.addFieldOffset(15, typemapOffset, 0);
 }
 
 static createTypemapVector(builder:flatbuffers.Builder, data:number[]|Uint8Array):flatbuffers.Offset {
@@ -368,7 +400,7 @@ static startTypemapVector(builder:flatbuffers.Builder, numElems:number) {
 }
 
 static addMetalmap(builder:flatbuffers.Builder, metalmapOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(15, metalmapOffset, 0);
+  builder.addFieldOffset(16, metalmapOffset, 0);
 }
 
 static createMetalmapVector(builder:flatbuffers.Builder, data:number[]|Uint8Array):flatbuffers.Offset {
@@ -384,35 +416,35 @@ static startMetalmapVector(builder:flatbuffers.Builder, numElems:number) {
 }
 
 static addMinimapUrl(builder:flatbuffers.Builder, minimapUrlOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(16, minimapUrlOffset, 0);
+  builder.addFieldOffset(17, minimapUrlOffset, 0);
 }
 
 static addTilesUrl(builder:flatbuffers.Builder, tilesUrlOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(17, tilesUrlOffset, 0);
+  builder.addFieldOffset(18, tilesUrlOffset, 0);
 }
 
 static addMapDataUrl(builder:flatbuffers.Builder, mapDataUrlOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(18, mapDataUrlOffset, 0);
+  builder.addFieldOffset(19, mapDataUrlOffset, 0);
 }
 
 static addMapSourceUrl(builder:flatbuffers.Builder, mapSourceUrlOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(19, mapSourceUrlOffset, 0);
+  builder.addFieldOffset(20, mapSourceUrlOffset, 0);
 }
 
 static addDecals(builder:flatbuffers.Builder, decalsOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(20, decalsOffset, 0);
+  builder.addFieldOffset(21, decalsOffset, 0);
 }
 
 static addWater(builder:flatbuffers.Builder, waterOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(21, waterOffset, 0);
+  builder.addFieldOffset(22, waterOffset, 0);
 }
 
 static addHasLuaGaia(builder:flatbuffers.Builder, hasLuaGaia:boolean) {
-  builder.addFieldInt8(22, +hasLuaGaia, +false);
+  builder.addFieldInt8(23, +hasLuaGaia, +false);
 }
 
 static addWidgets(builder:flatbuffers.Builder, widgetsOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(23, widgetsOffset, 0);
+  builder.addFieldOffset(24, widgetsOffset, 0);
 }
 
 static createWidgetsVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
@@ -432,4 +464,141 @@ static endMapData(builder:flatbuffers.Builder):flatbuffers.Offset {
   return offset;
 }
 
+
+unpack(): MapDataT {
+  return new MapDataT(
+    this.mapx(),
+    this.mapy(),
+    this.squareSize(),
+    this.minHeight(),
+    this.maxHeight(),
+    this.tilesX(),
+    this.tilesZ(),
+    this.numTiles(),
+    this.tileSize(),
+    this.bb!.createObjList<MapStartPos, MapStartPosT>(this.startPositions.bind(this), this.startPositionsLength()),
+    this.bb!.createScalarList<string>(this.featureTypes.bind(this), this.featureTypesLength()),
+    this.bb!.createObjList<MapFeature, MapFeatureT>(this.features.bind(this), this.featuresLength()),
+    this.bb!.createObjList<MapFeatureDef, MapFeatureDefT>(this.featureDefs.bind(this), this.featureDefsLength()),
+    this.bb!.createScalarList<number>(this.heightmap.bind(this), this.heightmapLength()),
+    this.bb!.createScalarList<number>(this.tileindex.bind(this), this.tileindexLength()),
+    this.bb!.createScalarList<number>(this.typemap.bind(this), this.typemapLength()),
+    this.bb!.createScalarList<number>(this.metalmap.bind(this), this.metalmapLength()),
+    this.minimapUrl(),
+    this.tilesUrl(),
+    this.mapDataUrl(),
+    this.mapSourceUrl(),
+    (this.decals() !== null ? this.decals()!.unpack() : null),
+    (this.water() !== null ? this.water()!.unpack() : null),
+    this.hasLuaGaia(),
+    this.bb!.createScalarList<string>(this.widgets.bind(this), this.widgetsLength())
+  );
+}
+
+
+unpackTo(_o: MapDataT): void {
+  _o.mapx = this.mapx();
+  _o.mapy = this.mapy();
+  _o.squareSize = this.squareSize();
+  _o.minHeight = this.minHeight();
+  _o.maxHeight = this.maxHeight();
+  _o.tilesX = this.tilesX();
+  _o.tilesZ = this.tilesZ();
+  _o.numTiles = this.numTiles();
+  _o.tileSize = this.tileSize();
+  _o.startPositions = this.bb!.createObjList<MapStartPos, MapStartPosT>(this.startPositions.bind(this), this.startPositionsLength());
+  _o.featureTypes = this.bb!.createScalarList<string>(this.featureTypes.bind(this), this.featureTypesLength());
+  _o.features = this.bb!.createObjList<MapFeature, MapFeatureT>(this.features.bind(this), this.featuresLength());
+  _o.featureDefs = this.bb!.createObjList<MapFeatureDef, MapFeatureDefT>(this.featureDefs.bind(this), this.featureDefsLength());
+  _o.heightmap = this.bb!.createScalarList<number>(this.heightmap.bind(this), this.heightmapLength());
+  _o.tileindex = this.bb!.createScalarList<number>(this.tileindex.bind(this), this.tileindexLength());
+  _o.typemap = this.bb!.createScalarList<number>(this.typemap.bind(this), this.typemapLength());
+  _o.metalmap = this.bb!.createScalarList<number>(this.metalmap.bind(this), this.metalmapLength());
+  _o.minimapUrl = this.minimapUrl();
+  _o.tilesUrl = this.tilesUrl();
+  _o.mapDataUrl = this.mapDataUrl();
+  _o.mapSourceUrl = this.mapSourceUrl();
+  _o.decals = (this.decals() !== null ? this.decals()!.unpack() : null);
+  _o.water = (this.water() !== null ? this.water()!.unpack() : null);
+  _o.hasLuaGaia = this.hasLuaGaia();
+  _o.widgets = this.bb!.createScalarList<string>(this.widgets.bind(this), this.widgetsLength());
+}
+}
+
+export class MapDataT implements flatbuffers.IGeneratedObject {
+constructor(
+  public mapx: number = 0,
+  public mapy: number = 0,
+  public squareSize: number = 0,
+  public minHeight: number = 0.0,
+  public maxHeight: number = 0.0,
+  public tilesX: number = 0,
+  public tilesZ: number = 0,
+  public numTiles: number = 0,
+  public tileSize: number = 0,
+  public startPositions: (MapStartPosT)[] = [],
+  public featureTypes: (string)[] = [],
+  public features: (MapFeatureT)[] = [],
+  public featureDefs: (MapFeatureDefT)[] = [],
+  public heightmap: (number)[] = [],
+  public tileindex: (number)[] = [],
+  public typemap: (number)[] = [],
+  public metalmap: (number)[] = [],
+  public minimapUrl: string|Uint8Array|null = null,
+  public tilesUrl: string|Uint8Array|null = null,
+  public mapDataUrl: string|Uint8Array|null = null,
+  public mapSourceUrl: string|Uint8Array|null = null,
+  public decals: MapDecalsT|null = null,
+  public water: MapWaterT|null = null,
+  public hasLuaGaia: boolean = false,
+  public widgets: (string)[] = []
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  const startPositions = builder.createStructOffsetList(this.startPositions, MapData.startStartPositionsVector);
+  const featureTypes = MapData.createFeatureTypesVector(builder, builder.createObjectOffsetList(this.featureTypes));
+  const features = MapData.createFeaturesVector(builder, builder.createObjectOffsetList(this.features));
+  const featureDefs = MapData.createFeatureDefsVector(builder, builder.createObjectOffsetList(this.featureDefs));
+  const heightmap = MapData.createHeightmapVector(builder, this.heightmap);
+  const tileindex = MapData.createTileindexVector(builder, this.tileindex);
+  const typemap = MapData.createTypemapVector(builder, this.typemap);
+  const metalmap = MapData.createMetalmapVector(builder, this.metalmap);
+  const minimapUrl = (this.minimapUrl !== null ? builder.createString(this.minimapUrl!) : 0);
+  const tilesUrl = (this.tilesUrl !== null ? builder.createString(this.tilesUrl!) : 0);
+  const mapDataUrl = (this.mapDataUrl !== null ? builder.createString(this.mapDataUrl!) : 0);
+  const mapSourceUrl = (this.mapSourceUrl !== null ? builder.createString(this.mapSourceUrl!) : 0);
+  const decals = (this.decals !== null ? this.decals!.pack(builder) : 0);
+  const water = (this.water !== null ? this.water!.pack(builder) : 0);
+  const widgets = MapData.createWidgetsVector(builder, builder.createObjectOffsetList(this.widgets));
+
+  MapData.startMapData(builder);
+  MapData.addMapx(builder, this.mapx);
+  MapData.addMapy(builder, this.mapy);
+  MapData.addSquareSize(builder, this.squareSize);
+  MapData.addMinHeight(builder, this.minHeight);
+  MapData.addMaxHeight(builder, this.maxHeight);
+  MapData.addTilesX(builder, this.tilesX);
+  MapData.addTilesZ(builder, this.tilesZ);
+  MapData.addNumTiles(builder, this.numTiles);
+  MapData.addTileSize(builder, this.tileSize);
+  MapData.addStartPositions(builder, startPositions);
+  MapData.addFeatureTypes(builder, featureTypes);
+  MapData.addFeatures(builder, features);
+  MapData.addFeatureDefs(builder, featureDefs);
+  MapData.addHeightmap(builder, heightmap);
+  MapData.addTileindex(builder, tileindex);
+  MapData.addTypemap(builder, typemap);
+  MapData.addMetalmap(builder, metalmap);
+  MapData.addMinimapUrl(builder, minimapUrl);
+  MapData.addTilesUrl(builder, tilesUrl);
+  MapData.addMapDataUrl(builder, mapDataUrl);
+  MapData.addMapSourceUrl(builder, mapSourceUrl);
+  MapData.addDecals(builder, decals);
+  MapData.addWater(builder, water);
+  MapData.addHasLuaGaia(builder, this.hasLuaGaia);
+  MapData.addWidgets(builder, widgets);
+
+  return MapData.endMapData(builder);
+}
 }

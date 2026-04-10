@@ -4,10 +4,10 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-import { Vec3 } from '../spring-web/vec3.js';
+import { Vec3, Vec3T } from '../spring-web/vec3.js';
 
 
-export class EntityCreate {
+export class EntityCreate implements flatbuffers.IUnpackableObject<EntityCreateT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):EntityCreate {
@@ -88,4 +88,49 @@ static endEntityCreate(builder:flatbuffers.Builder):flatbuffers.Offset {
   return offset;
 }
 
+
+unpack(): EntityCreateT {
+  return new EntityCreateT(
+    this.entityId(),
+    this.defId(),
+    this.ownerTeam(),
+    (this.position() !== null ? this.position()!.unpack() : null),
+    this.heading(),
+    this.health()
+  );
+}
+
+
+unpackTo(_o: EntityCreateT): void {
+  _o.entityId = this.entityId();
+  _o.defId = this.defId();
+  _o.ownerTeam = this.ownerTeam();
+  _o.position = (this.position() !== null ? this.position()!.unpack() : null);
+  _o.heading = this.heading();
+  _o.health = this.health();
+}
+}
+
+export class EntityCreateT implements flatbuffers.IGeneratedObject {
+constructor(
+  public entityId: number = 0,
+  public defId: number = 0,
+  public ownerTeam: number = 0,
+  public position: Vec3T|null = null,
+  public heading: number = 0,
+  public health: number = 0
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  EntityCreate.startEntityCreate(builder);
+  EntityCreate.addEntityId(builder, this.entityId);
+  EntityCreate.addDefId(builder, this.defId);
+  EntityCreate.addOwnerTeam(builder, this.ownerTeam);
+  EntityCreate.addPosition(builder, (this.position !== null ? this.position!.pack(builder) : 0));
+  EntityCreate.addHeading(builder, this.heading);
+  EntityCreate.addHealth(builder, this.health);
+
+  return EntityCreate.endEntityCreate(builder);
+}
 }

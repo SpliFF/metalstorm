@@ -1,9 +1,16 @@
 /**
- * FeatureRenderer — placeholder rendering for map features.
+ * FeatureRenderer — render map features using their real models.
  *
- * Features are static map objects (trees, rocks, wrecks) placed by the mapper.
- * Until we have a proper model pipeline (Assimp + shared Entity base class),
- * we render each one as a thin-instanced box coloured by feature type.
+ * The server preprocessing pipeline converts each Spring `.s3o` model to
+ * glTF 2.0 binary (`.glb`) via the `any2gltf` tool, and each `.tga`
+ * texture to `.png` via ImageMagick. Both URLs are delivered in the
+ * `MapFeatureDefInfo` array on the parsed map data.
+ *
+ * For each feature type with a `modelUrl`, we load the glb once via
+ * Babylon's `SceneLoader`, take its first concrete mesh, then push every
+ * placement of that type into a thin-instance matrix buffer. Types with
+ * no model fall back to a small placeholder box so the player still sees
+ * something on the map.
  */
 
 import {
@@ -15,10 +22,18 @@ import {
     Matrix,
     Quaternion,
     Vector3,
+    SceneLoader,
+    Texture,
 } from '@babylonjs/core';
-import type { ParsedMapData, MapFeatureInstance } from './map-data.js';
+// Side-effect import: registers the glTF loader plugin so SceneLoader
+// can read our `.glb` files. Without this, .glb requests fail with
+// "Unable to find a plugin to load .glb files".
+import '@babylonjs/loaders/glTF/index.js';
 
-/// Hash a string to a stable RGB tint so each feature type gets its own colour.
+import type { ParsedMapData, MapFeatureInstance, MapFeatureDefInfo } from './map-data.js';
+
+/// Hash a string to a stable RGB tint — used only for placeholder boxes
+/// so each fallback type still gets a distinct colour.
 function typeColour(name: string): Color3 {
     let h = 2166136261;
     for (let i = 0; i < name.length; i++) {
@@ -32,15 +47,94 @@ function typeColour(name: string): Color3 {
     );
 }
 
-/// Rough default extents (elmos) per feature. Can be tuned per-type later.
-const DEFAULT_FEATURE_EXTENTS = 32;
+const PLACEHOLDER_EXTENT = 32;
+
+/// Build the per-instance matrix buffer for a list of placements.
+/// Each instance is positioned at (x, y, z) with a Y rotation by `rotation`
+/// (radians) and uniform scale by `relativeSize`. The y offset is the raw
+/// value from the placement; the renderer assumes the server has already
+/// resolved it against the heightmap, or zero if not.
+function buildInstanceMatrices(instances: MapFeatureInstance[]): Float32Array {
+    const matrices = new Float32Array(instances.length * 16);
+    for (let i = 0; i < instances.length; i++) {
+        const f = instances[i];
+        const scale = Math.max(0.25, f.relativeSize);
+        const rot = Quaternion.FromEulerAngles(0, f.rotation, 0);
+        const m = Matrix.Compose(
+            new Vector3(scale, scale, scale),
+            rot,
+            new Vector3(f.x, f.y, f.z),
+        );
+        m.copyToArray(matrices, i * 16);
+    }
+    return matrices;
+}
+
+/// Take the loaded glb's mesh list and pick the one we should thin-instance.
+/// SceneLoader returns the scene root + every imported child mesh; we want
+/// the first child that actually has geometry.
+function pickPrimaryMesh(meshes: import('@babylonjs/core').AbstractMesh[]): Mesh | null {
+    for (const m of meshes) {
+        if (m instanceof Mesh && m.getTotalVertices() > 0) {
+            return m;
+        }
+    }
+    return null;
+}
+
+/// Apply the per-feature texture (already a `.png` from the server pipeline)
+/// to the loaded mesh's material. Loaded glb materials reference the same
+/// texture by relative URI but Babylon resolves it relative to the glb URL —
+/// since both are served from `/api/maps/data/{id}/features/`, this
+/// generally Just Works without an explicit override. We still attach an
+/// explicit Texture so we can guarantee correct sampling settings.
+function applyTexture(mesh: Mesh, def: MapFeatureDefInfo, scene: Scene) {
+    if (!def.textureUrl) return;
+    const mat = mesh.material;
+    if (!mat || !(mat instanceof StandardMaterial)) {
+        // glTF materials are PBRMaterial by default; the loader handles
+        // the baseColorTexture binding for us. Nothing to do here.
+        return;
+    }
+    const tex = new Texture(def.textureUrl, scene);
+    tex.hasAlpha = false;
+    mat.diffuseTexture = tex;
+}
+
+/// Build a placeholder box mesh + thin instances for a feature type
+/// that has no convertible model.
+function renderPlaceholder(
+    scene: Scene,
+    typeName: string,
+    instances: MapFeatureInstance[],
+): Mesh {
+    const base = MeshBuilder.CreateBox(
+        `feature_placeholder_${typeName}`,
+        { size: PLACEHOLDER_EXTENT },
+        scene,
+    );
+    const mat = new StandardMaterial(`featureMat_${typeName}`, scene);
+    mat.diffuseColor = typeColour(typeName);
+    mat.specularColor = new Color3(0.1, 0.1, 0.1);
+    base.material = mat;
+    base.isPickable = false;
+    base.doNotSyncBoundingInfo = true;
+    base.thinInstanceSetBuffer('matrix', buildInstanceMatrices(instances), 16, true);
+    return base;
+}
 
 /**
- * Render every map feature as a thin-instanced box, grouped by type.
- * Returns the created meshes (one per type).
+ * Render every map feature using its converted glb model. Returns the list
+ * of root meshes — one per feature type that successfully loaded, plus one
+ * placeholder mesh per type that did not.
+ *
+ * Loading is asynchronous (each glb is fetched + parsed by Babylon), so this
+ * function returns a Promise that resolves once every type has been wired up.
+ * Placements with `typeIndex` outside the `featureDefs` array are silently
+ * dropped.
  */
-export function renderMapFeatures(scene: Scene, map: ParsedMapData): Mesh[] {
-    // Bucket features by type so each type becomes one thin-instance mesh
+export async function renderMapFeatures(scene: Scene, map: ParsedMapData): Promise<Mesh[]> {
+    // Bucket placements by type index.
     const buckets = new Map<number, MapFeatureInstance[]>();
     for (const f of map.features) {
         let b = buckets.get(f.typeIndex);
@@ -48,40 +142,81 @@ export function renderMapFeatures(scene: Scene, map: ParsedMapData): Mesh[] {
         b.push(f);
     }
 
-    const meshes: Mesh[] = [];
+    const results: Mesh[] = [];
+    let modelTypes = 0;
+    let placeholderTypes = 0;
+
+    // Issue all glb loads in parallel.
+    const promises: Promise<void>[] = [];
     for (const [typeIdx, instances] of buckets) {
         if (instances.length === 0) continue;
+        const def: MapFeatureDefInfo | undefined = map.featureDefs[typeIdx];
         const typeName = map.featureTypes[typeIdx] ?? `type_${typeIdx}`;
 
-        const base = MeshBuilder.CreateBox(
-            `feature_${typeName}`,
-            { size: DEFAULT_FEATURE_EXTENTS },
-            scene,
-        );
-        const mat = new StandardMaterial(`featureMat_${typeName}`, scene);
-        mat.diffuseColor = typeColour(typeName);
-        mat.specularColor = new Color3(0.1, 0.1, 0.1);
-        base.material = mat;
-        base.isPickable = false;
-        base.doNotSyncBoundingInfo = true;
-
-        // Build a per-instance matrix buffer
-        const matrices = new Float32Array(instances.length * 16);
-        for (let i = 0; i < instances.length; i++) {
-            const f = instances[i];
-            const scale = Math.max(0.25, f.relativeSize);
-            const rot = Quaternion.FromEulerAngles(0, f.rotation, 0);
-            const m = Matrix.Compose(
-                new Vector3(scale, scale * 2, scale),
-                rot,
-                new Vector3(f.x, f.y + (DEFAULT_FEATURE_EXTENTS * scale), f.z),
-            );
-            m.copyToArray(matrices, i * 16);
+        if (!def || !def.modelUrl) {
+            // No model — render placeholder synchronously.
+            results.push(renderPlaceholder(scene, typeName, instances));
+            placeholderTypes++;
+            continue;
         }
-        base.thinInstanceSetBuffer('matrix', matrices, 16, true);
-        meshes.push(base);
+
+        promises.push((async () => {
+            try {
+                // SceneLoader.ImportMeshAsync wants a base URL + filename pair.
+                // Split the URL at the last '/' so it can resolve sibling
+                // texture URIs relative to the glb.
+                const lastSlash = def.modelUrl.lastIndexOf('/');
+                const baseUrl = def.modelUrl.substring(0, lastSlash + 1);
+                const fileName = def.modelUrl.substring(lastSlash + 1);
+
+                const result = await SceneLoader.ImportMeshAsync(
+                    '', baseUrl, fileName, scene,
+                );
+
+                const primary = pickPrimaryMesh(result.meshes);
+                if (!primary) {
+                    console.warn(`[features] ${typeName}: glb has no geometry, falling back to placeholder`);
+                    results.push(renderPlaceholder(scene, typeName, instances));
+                    placeholderTypes++;
+                    return;
+                }
+
+                // Hide every imported mesh except the one we'll thin-instance,
+                // and detach the primary from the imported scene-root so its
+                // own transform stops chaining onto the placement matrices.
+                for (const m of result.meshes) {
+                    if (m !== primary) m.setEnabled(false);
+                }
+                primary.parent = null;
+                primary.position.set(0, 0, 0);
+                primary.rotationQuaternion = Quaternion.Identity();
+                primary.scaling.set(1, 1, 1);
+                primary.isPickable = false;
+                primary.doNotSyncBoundingInfo = true;
+
+                applyTexture(primary, def, scene);
+
+                primary.thinInstanceSetBuffer(
+                    'matrix',
+                    buildInstanceMatrices(instances),
+                    16,
+                    true,
+                );
+                results.push(primary);
+                modelTypes++;
+            } catch (err) {
+                console.warn(`[features] ${typeName}: failed to load ${def.modelUrl}, falling back to placeholder`, err);
+                results.push(renderPlaceholder(scene, typeName, instances));
+                placeholderTypes++;
+            }
+        })());
     }
 
-    console.log(`[features] rendered ${map.features.length} features in ${buckets.size} types`);
-    return meshes;
+    await Promise.all(promises);
+
+    console.log(
+        `[features] rendered ${map.features.length} placement(s) ` +
+        `across ${modelTypes} model type(s) and ${placeholderTypes} placeholder type(s)`,
+    );
+    return results;
 }

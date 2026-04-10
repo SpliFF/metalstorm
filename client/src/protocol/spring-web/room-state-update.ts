@@ -4,11 +4,11 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-import { RoomPlayerInfo } from '../spring-web/room-player-info.js';
+import { RoomPlayerInfo, RoomPlayerInfoT } from '../spring-web/room-player-info.js';
 import { RoomState } from '../spring-web/room-state.js';
 
 
-export class RoomStateUpdate {
+export class RoomStateUpdate implements flatbuffers.IUnpackableObject<RoomStateUpdateT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):RoomStateUpdate {
@@ -141,5 +141,62 @@ static createRoomStateUpdate(builder:flatbuffers.Builder, roomId:number, state:R
   RoomStateUpdate.addCountdownSeconds(builder, countdownSeconds);
   RoomStateUpdate.addGameServerPort(builder, gameServerPort);
   return RoomStateUpdate.endRoomStateUpdate(builder);
+}
+
+unpack(): RoomStateUpdateT {
+  return new RoomStateUpdateT(
+    this.roomId(),
+    this.state(),
+    this.name(),
+    this.mapName(),
+    this.gameName(),
+    this.bb!.createObjList<RoomPlayerInfo, RoomPlayerInfoT>(this.players.bind(this), this.playersLength()),
+    this.countdownSeconds(),
+    this.gameServerPort()
+  );
+}
+
+
+unpackTo(_o: RoomStateUpdateT): void {
+  _o.roomId = this.roomId();
+  _o.state = this.state();
+  _o.name = this.name();
+  _o.mapName = this.mapName();
+  _o.gameName = this.gameName();
+  _o.players = this.bb!.createObjList<RoomPlayerInfo, RoomPlayerInfoT>(this.players.bind(this), this.playersLength());
+  _o.countdownSeconds = this.countdownSeconds();
+  _o.gameServerPort = this.gameServerPort();
+}
+}
+
+export class RoomStateUpdateT implements flatbuffers.IGeneratedObject {
+constructor(
+  public roomId: number = 0,
+  public state: RoomState = RoomState.Configuring,
+  public name: string|Uint8Array|null = null,
+  public mapName: string|Uint8Array|null = null,
+  public gameName: string|Uint8Array|null = null,
+  public players: (RoomPlayerInfoT)[] = [],
+  public countdownSeconds: number = 0,
+  public gameServerPort: number = 0
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  const name = (this.name !== null ? builder.createString(this.name!) : 0);
+  const mapName = (this.mapName !== null ? builder.createString(this.mapName!) : 0);
+  const gameName = (this.gameName !== null ? builder.createString(this.gameName!) : 0);
+  const players = RoomStateUpdate.createPlayersVector(builder, builder.createObjectOffsetList(this.players));
+
+  return RoomStateUpdate.createRoomStateUpdate(builder,
+    this.roomId,
+    this.state,
+    name,
+    mapName,
+    gameName,
+    players,
+    this.countdownSeconds,
+    this.gameServerPort
+  );
 }
 }

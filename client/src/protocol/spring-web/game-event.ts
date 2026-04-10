@@ -4,10 +4,10 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-import { Vec3 } from '../spring-web/vec3.js';
+import { Vec3, Vec3T } from '../spring-web/vec3.js';
 
 
-export class GameEvent {
+export class GameEvent implements flatbuffers.IUnpackableObject<GameEventT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):GameEvent {
@@ -103,4 +103,48 @@ static endGameEvent(builder:flatbuffers.Builder):flatbuffers.Offset {
   return offset;
 }
 
+
+unpack(): GameEventT {
+  return new GameEventT(
+    this.topic(),
+    this.frame(),
+    this.entityId(),
+    (this.position() !== null ? this.position()!.unpack() : null),
+    this.bb!.createScalarList<number>(this.payload.bind(this), this.payloadLength())
+  );
+}
+
+
+unpackTo(_o: GameEventT): void {
+  _o.topic = this.topic();
+  _o.frame = this.frame();
+  _o.entityId = this.entityId();
+  _o.position = (this.position() !== null ? this.position()!.unpack() : null);
+  _o.payload = this.bb!.createScalarList<number>(this.payload.bind(this), this.payloadLength());
+}
+}
+
+export class GameEventT implements flatbuffers.IGeneratedObject {
+constructor(
+  public topic: string|Uint8Array|null = null,
+  public frame: number = 0,
+  public entityId: number = 0,
+  public position: Vec3T|null = null,
+  public payload: (number)[] = []
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  const topic = (this.topic !== null ? builder.createString(this.topic!) : 0);
+  const payload = GameEvent.createPayloadVector(builder, this.payload);
+
+  GameEvent.startGameEvent(builder);
+  GameEvent.addTopic(builder, topic);
+  GameEvent.addFrame(builder, this.frame);
+  GameEvent.addEntityId(builder, this.entityId);
+  GameEvent.addPosition(builder, (this.position !== null ? this.position!.pack(builder) : 0));
+  GameEvent.addPayload(builder, payload);
+
+  return GameEvent.endGameEvent(builder);
+}
 }

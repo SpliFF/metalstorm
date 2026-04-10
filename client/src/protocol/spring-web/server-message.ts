@@ -4,10 +4,26 @@
 
 import * as flatbuffers from 'flatbuffers';
 
+import { AuthResponse, AuthResponseT } from '../spring-web/auth-response.js';
+import { ChatReceive, ChatReceiveT } from '../spring-web/chat-receive.js';
+import { EntityCreate, EntityCreateT } from '../spring-web/entity-create.js';
+import { EntityDestroy, EntityDestroyT } from '../spring-web/entity-destroy.js';
+import { GameEventBatch, GameEventBatchT } from '../spring-web/game-event-batch.js';
+import { GameInfo, GameInfoT } from '../spring-web/game-info.js';
+import { MapData, MapDataT } from '../spring-web/map-data.js';
+import { MapListUpdate, MapListUpdateT } from '../spring-web/map-list-update.js';
+import { Pong, PongT } from '../spring-web/pong.js';
+import { ReconnectResponse, ReconnectResponseT } from '../spring-web/reconnect-response.js';
+import { ResourceUpdate, ResourceUpdateT } from '../spring-web/resource-update.js';
+import { RoomListUpdate, RoomListUpdateT } from '../spring-web/room-list-update.js';
+import { RoomPlayerJoined, RoomPlayerJoinedT } from '../spring-web/room-player-joined.js';
+import { RoomPlayerLeft, RoomPlayerLeftT } from '../spring-web/room-player-left.js';
+import { RoomStateUpdate, RoomStateUpdateT } from '../spring-web/room-state-update.js';
+import { ServerError, ServerErrorT } from '../spring-web/server-error.js';
 import { ServerPayload, unionToServerPayload, unionListToServerPayload } from '../spring-web/server-payload.js';
 
 
-export class ServerMessage {
+export class ServerMessage implements flatbuffers.IUnpackableObject<ServerMessageT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):ServerMessage {
@@ -57,5 +73,43 @@ static createServerMessage(builder:flatbuffers.Builder, payloadType:ServerPayloa
   ServerMessage.addPayloadType(builder, payloadType);
   ServerMessage.addPayload(builder, payloadOffset);
   return ServerMessage.endServerMessage(builder);
+}
+
+unpack(): ServerMessageT {
+  return new ServerMessageT(
+    this.payloadType(),
+    (() => {
+      const temp = unionToServerPayload(this.payloadType(), this.payload.bind(this));
+      if(temp === null) { return null; }
+      return temp.unpack()
+  })()
+  );
+}
+
+
+unpackTo(_o: ServerMessageT): void {
+  _o.payloadType = this.payloadType();
+  _o.payload = (() => {
+      const temp = unionToServerPayload(this.payloadType(), this.payload.bind(this));
+      if(temp === null) { return null; }
+      return temp.unpack()
+  })();
+}
+}
+
+export class ServerMessageT implements flatbuffers.IGeneratedObject {
+constructor(
+  public payloadType: ServerPayload = ServerPayload.NONE,
+  public payload: AuthResponseT|ChatReceiveT|EntityCreateT|EntityDestroyT|GameEventBatchT|GameInfoT|MapDataT|MapListUpdateT|PongT|ReconnectResponseT|ResourceUpdateT|RoomListUpdateT|RoomPlayerJoinedT|RoomPlayerLeftT|RoomStateUpdateT|ServerErrorT|null = null
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  const payload = builder.createObjectOffset(this.payload);
+
+  return ServerMessage.createServerMessage(builder,
+    this.payloadType,
+    payload
+  );
 }
 }

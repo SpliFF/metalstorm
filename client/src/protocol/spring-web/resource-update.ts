@@ -4,7 +4,9 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-export class ResourceUpdate {
+
+
+export class ResourceUpdate implements flatbuffers.IUnpackableObject<ResourceUpdateT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):ResourceUpdate {
@@ -104,5 +106,53 @@ static createResourceUpdate(builder:flatbuffers.Builder, team:number, metal:numb
   ResourceUpdate.addMetalIncome(builder, metalIncome);
   ResourceUpdate.addEnergyIncome(builder, energyIncome);
   return ResourceUpdate.endResourceUpdate(builder);
+}
+
+unpack(): ResourceUpdateT {
+  return new ResourceUpdateT(
+    this.team(),
+    this.metal(),
+    this.maxMetal(),
+    this.energy(),
+    this.maxEnergy(),
+    this.metalIncome(),
+    this.energyIncome()
+  );
+}
+
+
+unpackTo(_o: ResourceUpdateT): void {
+  _o.team = this.team();
+  _o.metal = this.metal();
+  _o.maxMetal = this.maxMetal();
+  _o.energy = this.energy();
+  _o.maxEnergy = this.maxEnergy();
+  _o.metalIncome = this.metalIncome();
+  _o.energyIncome = this.energyIncome();
+}
+}
+
+export class ResourceUpdateT implements flatbuffers.IGeneratedObject {
+constructor(
+  public team: number = 0,
+  public metal: number = 0.0,
+  public maxMetal: number = 0.0,
+  public energy: number = 0.0,
+  public maxEnergy: number = 0.0,
+  public metalIncome: number = 0.0,
+  public energyIncome: number = 0.0
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  return ResourceUpdate.createResourceUpdate(builder,
+    this.team,
+    this.metal,
+    this.maxMetal,
+    this.energy,
+    this.maxEnergy,
+    this.metalIncome,
+    this.energyIncome
+  );
 }
 }

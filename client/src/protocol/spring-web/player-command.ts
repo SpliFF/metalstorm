@@ -4,7 +4,9 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-export class PlayerCommand {
+
+
+export class PlayerCommand implements flatbuffers.IUnpackableObject<PlayerCommandT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):PlayerCommand {
@@ -148,5 +150,52 @@ static createPlayerCommand(builder:flatbuffers.Builder, sequence:number, command
   PlayerCommand.addOptions(builder, options);
   PlayerCommand.addTimeoutFrames(builder, timeoutFrames);
   return PlayerCommand.endPlayerCommand(builder);
+}
+
+unpack(): PlayerCommandT {
+  return new PlayerCommandT(
+    this.sequence(),
+    this.commandId(),
+    this.bb!.createScalarList<number>(this.squadIds.bind(this), this.squadIdsLength()),
+    this.bb!.createScalarList<number>(this.params.bind(this), this.paramsLength()),
+    this.options(),
+    this.timeoutFrames()
+  );
+}
+
+
+unpackTo(_o: PlayerCommandT): void {
+  _o.sequence = this.sequence();
+  _o.commandId = this.commandId();
+  _o.squadIds = this.bb!.createScalarList<number>(this.squadIds.bind(this), this.squadIdsLength());
+  _o.params = this.bb!.createScalarList<number>(this.params.bind(this), this.paramsLength());
+  _o.options = this.options();
+  _o.timeoutFrames = this.timeoutFrames();
+}
+}
+
+export class PlayerCommandT implements flatbuffers.IGeneratedObject {
+constructor(
+  public sequence: number = 0,
+  public commandId: number = 0,
+  public squadIds: (number)[] = [],
+  public params: (number)[] = [],
+  public options: number = 0,
+  public timeoutFrames: number = 0
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  const squadIds = PlayerCommand.createSquadIdsVector(builder, this.squadIds);
+  const params = PlayerCommand.createParamsVector(builder, this.params);
+
+  return PlayerCommand.createPlayerCommand(builder,
+    this.sequence,
+    this.commandId,
+    squadIds,
+    params,
+    this.options,
+    this.timeoutFrames
+  );
 }
 }

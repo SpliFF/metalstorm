@@ -4,7 +4,9 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-export class RoomJoin {
+
+
+export class RoomJoin implements flatbuffers.IUnpackableObject<RoomJoinT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):RoomJoin {
@@ -56,5 +58,35 @@ static createRoomJoin(builder:flatbuffers.Builder, roomId:number, passwordOffset
   RoomJoin.addRoomId(builder, roomId);
   RoomJoin.addPassword(builder, passwordOffset);
   return RoomJoin.endRoomJoin(builder);
+}
+
+unpack(): RoomJoinT {
+  return new RoomJoinT(
+    this.roomId(),
+    this.password()
+  );
+}
+
+
+unpackTo(_o: RoomJoinT): void {
+  _o.roomId = this.roomId();
+  _o.password = this.password();
+}
+}
+
+export class RoomJoinT implements flatbuffers.IGeneratedObject {
+constructor(
+  public roomId: number = 0,
+  public password: string|Uint8Array|null = null
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  const password = (this.password !== null ? builder.createString(this.password!) : 0);
+
+  return RoomJoin.createRoomJoin(builder,
+    this.roomId,
+    password
+  );
 }
 }

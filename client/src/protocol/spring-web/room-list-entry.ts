@@ -7,7 +7,7 @@ import * as flatbuffers from 'flatbuffers';
 import { RoomState } from '../spring-web/room-state.js';
 
 
-export class RoomListEntry {
+export class RoomListEntry implements flatbuffers.IUnpackableObject<RoomListEntryT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):RoomListEntry {
@@ -135,5 +135,66 @@ static createRoomListEntry(builder:flatbuffers.Builder, roomId:number, nameOffse
   RoomListEntry.addHasPassword(builder, hasPassword);
   RoomListEntry.addHostName(builder, hostNameOffset);
   return RoomListEntry.endRoomListEntry(builder);
+}
+
+unpack(): RoomListEntryT {
+  return new RoomListEntryT(
+    this.roomId(),
+    this.name(),
+    this.mapName(),
+    this.gameName(),
+    this.state(),
+    this.playerCount(),
+    this.maxPlayers(),
+    this.hasPassword(),
+    this.hostName()
+  );
+}
+
+
+unpackTo(_o: RoomListEntryT): void {
+  _o.roomId = this.roomId();
+  _o.name = this.name();
+  _o.mapName = this.mapName();
+  _o.gameName = this.gameName();
+  _o.state = this.state();
+  _o.playerCount = this.playerCount();
+  _o.maxPlayers = this.maxPlayers();
+  _o.hasPassword = this.hasPassword();
+  _o.hostName = this.hostName();
+}
+}
+
+export class RoomListEntryT implements flatbuffers.IGeneratedObject {
+constructor(
+  public roomId: number = 0,
+  public name: string|Uint8Array|null = null,
+  public mapName: string|Uint8Array|null = null,
+  public gameName: string|Uint8Array|null = null,
+  public state: RoomState = RoomState.Configuring,
+  public playerCount: number = 0,
+  public maxPlayers: number = 0,
+  public hasPassword: boolean = false,
+  public hostName: string|Uint8Array|null = null
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  const name = (this.name !== null ? builder.createString(this.name!) : 0);
+  const mapName = (this.mapName !== null ? builder.createString(this.mapName!) : 0);
+  const gameName = (this.gameName !== null ? builder.createString(this.gameName!) : 0);
+  const hostName = (this.hostName !== null ? builder.createString(this.hostName!) : 0);
+
+  return RoomListEntry.createRoomListEntry(builder,
+    this.roomId,
+    name,
+    mapName,
+    gameName,
+    this.state,
+    this.playerCount,
+    this.maxPlayers,
+    this.hasPassword,
+    hostName
+  );
 }
 }

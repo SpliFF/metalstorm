@@ -4,7 +4,9 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-export class ReconnectResponse {
+
+
+export class ReconnectResponse implements flatbuffers.IUnpackableObject<ReconnectResponseT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):ReconnectResponse {
@@ -44,5 +46,29 @@ static createReconnectResponse(builder:flatbuffers.Builder, status:number):flatb
   ReconnectResponse.startReconnectResponse(builder);
   ReconnectResponse.addStatus(builder, status);
   return ReconnectResponse.endReconnectResponse(builder);
+}
+
+unpack(): ReconnectResponseT {
+  return new ReconnectResponseT(
+    this.status()
+  );
+}
+
+
+unpackTo(_o: ReconnectResponseT): void {
+  _o.status = this.status();
+}
+}
+
+export class ReconnectResponseT implements flatbuffers.IGeneratedObject {
+constructor(
+  public status: number = 0
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  return ReconnectResponse.createReconnectResponse(builder,
+    this.status
+  );
 }
 }

@@ -7,7 +7,7 @@ import * as flatbuffers from 'flatbuffers';
 import { AuthStatus } from '../spring-web/auth-status.js';
 
 
-export class AuthResponse {
+export class AuthResponse implements flatbuffers.IUnpackableObject<AuthResponseT> {
   bb: flatbuffers.ByteBuffer|null = null;
   bb_pos = 0;
   __init(i:number, bb:flatbuffers.ByteBuffer):AuthResponse {
@@ -81,5 +81,44 @@ static createAuthResponse(builder:flatbuffers.Builder, status:AuthStatus, tokenO
   AuthResponse.addPlayerId(builder, playerId);
   AuthResponse.addMessage(builder, messageOffset);
   return AuthResponse.endAuthResponse(builder);
+}
+
+unpack(): AuthResponseT {
+  return new AuthResponseT(
+    this.status(),
+    this.token(),
+    this.playerId(),
+    this.message()
+  );
+}
+
+
+unpackTo(_o: AuthResponseT): void {
+  _o.status = this.status();
+  _o.token = this.token();
+  _o.playerId = this.playerId();
+  _o.message = this.message();
+}
+}
+
+export class AuthResponseT implements flatbuffers.IGeneratedObject {
+constructor(
+  public status: AuthStatus = AuthStatus.OK,
+  public token: string|Uint8Array|null = null,
+  public playerId: number = 0,
+  public message: string|Uint8Array|null = null
+){}
+
+
+pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  const token = (this.token !== null ? builder.createString(this.token!) : 0);
+  const message = (this.message !== null ? builder.createString(this.message!) : 0);
+
+  return AuthResponse.createAuthResponse(builder,
+    this.status,
+    token,
+    this.playerId,
+    message
+  );
 }
 }
