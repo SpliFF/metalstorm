@@ -50,10 +50,11 @@ function typeColour(name: string): Color3 {
 const PLACEHOLDER_EXTENT = 32;
 
 /// Build the per-instance matrix buffer for a list of placements.
-/// Each instance is positioned at (x, y, z) with a Y rotation by `rotation`
-/// (radians) and uniform scale by `relativeSize`. The y offset is the raw
-/// value from the placement; the renderer assumes the server has already
-/// resolved it against the heightmap, or zero if not.
+/// Each instance is positioned at the absolute world coordinates the
+/// server sent. Feature Y is part of the synced sim state (pathfinding,
+/// LOS, projectile collision all depend on it), so `FeatureProcessor`
+/// on the server samples the heightmap at placement time and stores
+/// the real ground Y — the client just renders what it's given.
 function buildInstanceMatrices(instances: MapFeatureInstance[]): Float32Array {
     const matrices = new Float32Array(instances.length * 16);
     for (let i = 0; i < instances.length; i++) {
@@ -102,7 +103,9 @@ function applyTexture(mesh: Mesh, def: MapFeatureDefInfo, scene: Scene) {
 }
 
 /// Build a placeholder box mesh + thin instances for a feature type
-/// that has no convertible model.
+/// whose model failed to load. Only used as a debug fallback from the
+/// catch branch — types with intentionally no model (decal-only
+/// features) are skipped entirely upstream.
 function renderPlaceholder(
     scene: Scene,
     typeName: string,
@@ -113,6 +116,11 @@ function renderPlaceholder(
         { size: PLACEHOLDER_EXTENT },
         scene,
     );
+    // CreateBox centres the mesh on its own origin, so a thin-instance
+    // at ground height would end up half-buried. Shift geometry up by
+    // half the extent and bake it in, so the origin sits at the base.
+    base.position.y = PLACEHOLDER_EXTENT / 2;
+    base.bakeCurrentTransformIntoVertices();
     const mat = new StandardMaterial(`featureMat_${typeName}`, scene);
     mat.diffuseColor = typeColour(typeName);
     mat.specularColor = new Color3(0.1, 0.1, 0.1);
@@ -144,6 +152,7 @@ export async function renderMapFeatures(scene: Scene, map: ParsedMapData): Promi
 
     const results: Mesh[] = [];
     let modelTypes = 0;
+    let skippedTypes = 0;
     let placeholderTypes = 0;
 
     // Issue all glb loads in parallel.
@@ -154,9 +163,14 @@ export async function renderMapFeatures(scene: Scene, map: ParsedMapData): Promi
         const typeName = map.featureTypes[typeIdx] ?? `type_${typeIdx}`;
 
         if (!def || !def.modelUrl) {
-            // No model — render placeholder synchronously.
-            results.push(renderPlaceholder(scene, typeName, instances));
-            placeholderTypes++;
+            // Intentionally model-less: decal-only features (geothermal
+            // vents, metal spots, engine default tree slots that were
+            // never authored with a .s3o, etc.). These exist in the sim
+            // for collision/resource purposes but should be invisible
+            // in the world — Spring renders them as nothing too. A
+            // placeholder here would clutter the view with a box per
+            // decal on every map.
+            skippedTypes++;
             continue;
         }
 
@@ -215,8 +229,9 @@ export async function renderMapFeatures(scene: Scene, map: ParsedMapData): Promi
     await Promise.all(promises);
 
     console.log(
-        `[features] rendered ${map.features.length} placement(s) ` +
-        `across ${modelTypes} model type(s) and ${placeholderTypes} placeholder type(s)`,
+        `[features] rendered ${map.features.length} placement(s) across ` +
+        `${modelTypes} model type(s), ${placeholderTypes} load-failure placeholder(s), ` +
+        `${skippedTypes} decal-only type(s) skipped`,
     );
     return results;
 }

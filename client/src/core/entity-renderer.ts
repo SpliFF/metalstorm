@@ -63,11 +63,27 @@ export class EntityRenderer {
             this.teamMaterials.push(mat);
         }
 
-        // Create shape templates
+        // Create shape templates. Each builder centres the mesh on
+        // its own origin, which would put half of every unit below the
+        // terrain when thin-instanced at ground height. Shift the
+        // geometry up by half its vertical extent and bake the
+        // translation into the vertices so the origin ends up at the
+        // base of the mesh.
         const box = MeshBuilder.CreateBox('shape_box', { width: 16, height: 12, depth: 20 }, scene);
+        box.position.y = 12 / 2;
+        box.bakeCurrentTransformIntoVertices();
+
         const cyl = MeshBuilder.CreateCylinder('shape_cyl', { height: 14, diameter: 18, tessellation: 8 }, scene);
+        cyl.position.y = 14 / 2;
+        cyl.bakeCurrentTransformIntoVertices();
+
         const cone = MeshBuilder.CreateCylinder('shape_cone', { height: 16, diameterTop: 0, diameterBottom: 16, tessellation: 8 }, scene);
+        cone.position.y = 16 / 2;
+        cone.bakeCurrentTransformIntoVertices();
+
         const sphere = MeshBuilder.CreateSphere('shape_sphere', { diameter: 14, segments: 6 }, scene);
+        sphere.position.y = 14 / 2;
+        sphere.bakeCurrentTransformIntoVertices();
 
         this.shapeMeshes = [box, cyl, cone, sphere];
         for (const m of this.shapeMeshes) {

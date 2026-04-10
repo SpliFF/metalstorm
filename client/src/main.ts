@@ -193,6 +193,32 @@ function showGameOver(frame: number): void {
 }
 
 async function startGame(gameServerPort: number): Promise<void> {
+    // Defensive teardown of any leftover session state. `quitToLobby`
+    // normally runs this on explicit quit, but a player can re-enter
+    // a game through paths that don't go via quitToLobby — for
+    // example the host's End Game button kills the game server and
+    // the next room's RoomStateUpdate transitions straight into a
+    // fresh startGame(). Without this, the old minimap canvas would
+    // stay parented to #minimap-container and the new Minimap would
+    // append a second canvas on top of it.
+    if (minimap) {
+        minimap.dispose();
+        minimap = null;
+    }
+    if (engine) {
+        engine.stopRenderLoop();
+        engine.dispose();
+        engine = null;
+    }
+    if (gameConn) {
+        gameConn.disconnect();
+        gameConn = null;
+    }
+    entityRenderer = null;
+    combatFX = null;
+    audioManager = null;
+    inputManager = null;
+
     showHUD();
 
     const canvas = document.getElementById('game-canvas') as HTMLCanvasElement;
