@@ -24,7 +24,6 @@ class LuaVFS {
 		static int SubDirs(lua_State* L, bool synced);
 
 		static int GetFileAbsolutePath(lua_State* L);
-		static int GetArchiveContainingFile(lua_State* L);
 
 		static int SyncInclude(lua_State* L);
 		static int SyncLoadFile(lua_State* L);
@@ -37,23 +36,6 @@ class LuaVFS {
 		static int UnsyncFileExists(lua_State* L);
 		static int UnsyncDirList(lua_State* L);
 		static int UnsyncSubDirs(lua_State* L);
-
-		static int UseArchive(lua_State* L); ///< temporary
-
-		static int CompressFolder(lua_State* L);
-		static int SevenZipFolder(lua_State* L, const std::string& folderPath, const std::string& zipFilePath, bool includeFolder, const std::string& modes);
-		/**
-		@brief Permanent mapping of files into VFS (only from unsynced)
-		
-		LuaParameters: (string Filename), (unsigned int checksum, optional)
-		*/
-		static int MapArchive(lua_State* L);
-		/**
-		@brief Unmaps archives mapped with MapArchive from VFS (only from unsynced)
-		
-		LuaParameters: (string Filename)
-		*/
-		static int UnmapArchive(lua_State* L);
 
 		static int ZlibCompress(lua_State* L);
 		static int ZlibDecompress(lua_State* L);
@@ -73,7 +55,7 @@ class LuaVFS {
 		static int UnpackS16(lua_State* L);
 		static int UnpackS32(lua_State* L);
 		static int UnpackF32(lua_State* L);
-		
+
 		static int CalculateHash(lua_State* L);
 };
 

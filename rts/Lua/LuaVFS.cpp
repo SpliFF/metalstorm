@@ -1,24 +1,13 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 
-#include <cmath>
-
 #include "LuaVFS.h"
 #include "LuaInclude.h"
-#include "LuaHandle.h"
 #include "LuaHashString.h"
-#include "LuaIO.h"
 #include "LuaUtils.h"
-#include "LuaZip.h"
 #include "System/FileSystem/FileHandler.h"
-#include "System/FileSystem/ArchiveScanner.h"
-#include "System/FileSystem/VFSHandler.h"
 #include "System/FileSystem/VFSModes.h"
-#include "System/FileSystem/FileSystem.h"
-#include "System/Log/ILog.h"
 #include "System/StringUtil.h"
-#include "System/TimeProfiler.h"
-// pr-downloader removed (rapid content system not used on the server)
 
 
 /******************************************************************************/
@@ -86,13 +75,7 @@ bool LuaVFS::PushUnsynced(lua_State* L)
 	HSTR_PUSH_CFUNC(L, "DirList",             UnsyncDirList);
 	HSTR_PUSH_CFUNC(L, "SubDirs",             UnsyncSubDirs);
 
-	HSTR_PUSH_CFUNC(L, "GetFileAbsolutePath",      GetFileAbsolutePath);
-	HSTR_PUSH_CFUNC(L, "GetArchiveContainingFile", GetArchiveContainingFile);
-
-	HSTR_PUSH_CFUNC(L, "UseArchive",     UseArchive);
-	HSTR_PUSH_CFUNC(L, "CompressFolder", CompressFolder);
-	HSTR_PUSH_CFUNC(L, "MapArchive",     MapArchive);
-	HSTR_PUSH_CFUNC(L, "UnmapArchive",   UnmapArchive);
+	HSTR_PUSH_CFUNC(L, "GetFileAbsolutePath", GetFileAbsolutePath);
 
 	return true;
 }
@@ -101,15 +84,11 @@ bool LuaVFS::PushUnsynced(lua_State* L)
 /******************************************************************************/
 /******************************************************************************/
 
-const string LuaVFS::GetModes(lua_State* L, int index, bool synced)
+const string LuaVFS::GetModes(lua_State* L, int index, bool /*synced*/)
 {
-	const bool vfsOnly = (synced && !CLuaHandle::GetDevMode());
-
-	const char* defModes = vfsOnly ? SPRING_VFS_ZIP : SPRING_VFS_RAW_FIRST;
-	// VFS-only mode forbids raw and menu access; concatenate the forbidden set manually.
-	const std::string badModes = vfsOnly ? (std::string(SPRING_VFS_RAW) + SPRING_VFS_MENU) : "";
-
-	return CFileHandler::ForbidModes(luaL_optstring(L, index, defModes), badModes);
+	// Server reads from plain directories — CFileHandler ignores mode strings.
+	// Just pass through whatever the caller specifies (or a default).
+	return luaL_optstring(L, index, SPRING_VFS_RAW_FIRST);
 }
 
 
@@ -334,138 +313,6 @@ int LuaVFS::GetFileAbsolutePath(lua_State* L)
 	lua_pushsstring(L, absolutePath);
 	return 1;
 }
-
-/******************************************************************************/
-/******************************************************************************/
-
-int LuaVFS::GetArchiveContainingFile(lua_State* L)
-{
-	const std::string filename = luaL_checkstring(L, 1);
-
-	// FIXME: return 0, keep searches within the Spring directory
-	// the path may point to a file or dir outside of any data-dir
-	// if (!LuaIO::IsSimplePath(filename)) return 0;
-
-	if (!CFileHandler::FileExists(filename, GetModes(L, 2, false)))
-		return 0;
-
-	const std::string& archiveName = CFileHandler::GetArchiveContainingFile(filename, GetModes(L, 2, false));
-
-	if (archiveName.empty())
-		return 0;
-
-	lua_pushsstring(L, archiveName);
-	return 1;
-}
-
-
-/******************************************************************************/
-/******************************************************************************/
-
-int LuaVFS::UseArchive(lua_State* L)
-{
-	// only from unsynced
-	if (CLuaHandle::GetHandleSynced(L))
-		return 0;
-
-	const std::string& archiveName = luaL_checkstring(L, 1);
-	const CArchiveScanner::ArchiveData& archiveData = archiveScanner->GetArchiveData(archiveName);
-	if (archiveData.IsEmpty())
-		luaL_error(L, "[VFS::%s] archive \"%s\" not found", __func__, archiveName.c_str());
-
-	constexpr int funcIndex = 2;
-	if (!lua_isfunction(L, funcIndex))
-		luaL_error(L, "[VFS::%s] second argument should be a function", __func__);
-
-	if (vfsHandler->HasArchive(archiveName))
-		luaL_error(L, "[VFS::%s] archive \"%s\" already loaded", __func__, archiveName.c_str());
-
-	// block other threads from getting the global until we are done
-	vfsHandler->GrabLock();
-	vfsHandler->SetName("LuaVFS");
-	vfsHandler->UnMapArchives(false);
-
-	// could be mod,map,etc
-	vfsHandler->AddArchive(archiveName, false);
-
-	const int callError = lua_pcall(L, lua_gettop(L) - funcIndex, LUA_MULTRET, 0);
-
-	vfsHandler->RemoveArchive(archiveName);
-	vfsHandler->ReMapArchives(false);
-	vfsHandler->SetName("SpringVFS");
-	vfsHandler->FreeLock();
-
-	if (callError != 0)
-		lua_error(L);
-
-	return (lua_gettop(L) - funcIndex + 1);
-}
-
-int LuaVFS::MapArchive(lua_State* L)
-{
-	// Archive system removed — no-op on server build.
-	luaL_error(L, "[VFS::%s] archive system not available on server", __func__);
-	return 0;
-}
-
-int LuaVFS::UnmapArchive(lua_State* L)
-{
-	// only from unsynced
-	if (CLuaHandle::GetHandleSynced(L))
-		return 0;
-
-	const std::string& archiveName = luaL_checkstring(L, 1);
-	const CArchiveScanner::ArchiveData& archiveData = archiveScanner->GetArchiveData(archiveName);
-	if (archiveData.IsEmpty())
-		luaL_error(L, "[VFS::%s] archive not found: %s", __func__, archiveName.c_str());
-
-	LOG("[LuaVFS::%s] archive=%s", __func__, archiveName.c_str());
-
-	if (!vfsHandler->RemoveArchive(archiveName))
-		luaL_error(L, "[VFS::%s] failed to remove archive: %s", __func__, archiveName.c_str());
-
-	lua_pushboolean(L, true);
-	return 1;
-}
-
-
-
-/******************************************************************************/
-
-int LuaVFS::CompressFolder(lua_State* L)
-{
-	const std::string& folderPath = luaL_checkstring(L, 1);
-	const std::string& archiveType = luaL_optstring(L, 2, "zip");
-
-	if (archiveType != "zip" && archiveType != "7z") //TODO: add 7z support
-		luaL_error(L, ("Unsupported archive type " + archiveType).c_str());
-
-	 // "sdz" is the default type if not specified
-	const std::string& compressedFilePath = luaL_optstring(L, 3, (folderPath + ".sdz").c_str());
-	const std::string& modes = GetModes(L, 5, false);
-
-	const bool includeFolder = luaL_optboolean(L, 4, false);
-
-	if (CFileHandler::FileExists(compressedFilePath, modes))
-		luaL_error(L, ("File already exists " + compressedFilePath).c_str());
-
-	if (archiveType == "zip") {
-		LuaZipFolder::ZipFolder(L, folderPath, compressedFilePath, includeFolder, modes);
-	} else if (archiveType == "7z") {
-		SevenZipFolder(L, folderPath, compressedFilePath, includeFolder, modes);
-	}
-
-	return 0;
-}
-
-/******************************************************************************/
-
-int LuaVFS::SevenZipFolder(lua_State* L, const string& folderPath, const string& zipFilePath, bool includeFolder, const string& modes)
-{
-	luaL_error(L, "7z-compression is not implemented yet.");
-	return 0;
-}
-
 
 int LuaVFS::ZlibCompress(lua_State* L)
 {

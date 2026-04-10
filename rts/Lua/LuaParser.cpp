@@ -12,12 +12,9 @@
 
 #include "LuaConstGame.h"
 #include "LuaConstEngine.h"
-#include "LuaEncoding.h"
-#include "LuaIO.h"
-#include "LuaLibs.h"
-#include "LuaVFS.h"
 #include "LuaUtils.h"
-#include "LuaMathExtra.h"
+
+#include "System/FileSystem/LuaVFSSimple.h"
 
 #include "Sim/Misc/GlobalSynced.h" // gsRNG
 #include "System/Log/ILog.h"
@@ -27,9 +24,6 @@
 #include "System/TimeProfiler.h"
 #include "System/ScopedFPUSettings.h"
 #include "System/StringUtil.h"
-
-#include "System/Misc/TracyDefs.h"
-#include <tracy/TracyLua.hpp>
 
 LuaParser* GetLuaParser(lua_State* L) {
 	assert(GetLuaContextData(L)->parser != nullptr);
@@ -122,7 +116,14 @@ void LuaParser::SetupLua(bool isSyncedCtxt, bool isDefsParser)
 
 void LuaParser::SetupEnv(bool isSyncedCtxt, bool isDefsParser)
 {
-	LuaLibs::OpenSynced(L, false);
+	LUA_OPEN_LIB(L, luaopen_base);
+	LUA_OPEN_LIB(L, luaopen_math);
+	LUA_OPEN_LIB(L, luaopen_table);
+	LUA_OPEN_LIB(L, luaopen_string);
+	//LUA_OPEN_LIB(L, luaopen_io);
+	//LUA_OPEN_LIB(L, luaopen_os);
+	//LUA_OPEN_LIB(L, luaopen_package);
+	//LUA_OPEN_LIB(L, luaopen_debug);
 
 	// Lua 5.1 compat: register functions removed in 5.2+
 	// Spring's base Lua scripts (system.lua, mapinfo.lua) use these.
@@ -147,7 +148,6 @@ void LuaParser::SetupEnv(bool isSyncedCtxt, bool isDefsParser)
 
 	{
 		lua_getglobal(L, "math");
-		LuaMathExtra::PushEntries(L);
 		if (isSyncedCtxt) {
 			LuaPushNamedCFunc(L, "random", Random);
 			LuaPushNamedCFunc(L, "randomseed", RandomSeed);
@@ -164,10 +164,6 @@ void LuaParser::SetupEnv(bool isSyncedCtxt, bool isDefsParser)
 	AddFunc("Echo", LuaUtils::Echo);
 	AddFunc("Log", LuaUtils::Log);
 	AddFunc("TimeCheck", TimeCheck);
-	EndTable();
-
-	GetTable("Encoding");
-	LuaEncoding::PushEntries(L);
 	EndTable();
 
 	GetTable("Script");
@@ -189,17 +185,9 @@ void LuaParser::SetupEnv(bool isSyncedCtxt, bool isDefsParser)
 	LuaConstEngine::PushEntries(L);
 	EndTable();
 
-	GetTable("VFS");
-	#if (!defined(UNITSYNC) && !defined(DEDICATED))
-	// no LuaConstVFS, but this will do
-	LuaVFS::PushCommon(L);
-	#endif
-	AddFunc("DirList",    DirList);
-	AddFunc("SubDirs",    SubDirs);
-	AddFunc("Include",    Include);
-	AddFunc("LoadFile",   LoadFile);
-	AddFunc("FileExists", FileExists);
-	EndTable();
+	// VFS table — use the consolidated LuaVFSSimple implementation
+	// (provides Include, LoadFile, FileExists, DirList, SubDirs + mode constants)
+	LuaVFSSimple::Register(L);
 
 	GetTable("LOG");
 	LuaUtils::PushLogEntries(L);
@@ -247,7 +235,6 @@ bool LuaParser::Execute()
 	char errorBuf[4096] = {0};
 	int errorNum = 0;
 
-	LuaUtils::TracyRemoveAlsoExtras(code.data());
 	if ((errorNum = luaL_loadbuffer(L, code.c_str(), code.size(), codeLabel.c_str())) != 0) {
 		SNPRINTF(errorBuf, sizeof(errorBuf), "[loadbuf] error %d (\"%s\") in %s", errorNum, lua_tostring(L, -1), codeLabel.c_str());
 		LUA_CLOSE(&L);
@@ -440,12 +427,6 @@ void LuaParser::AddString(const std::string& key, const std::string& value)
 	PushParam();
 }
 
-void LuaParser::PushFunc(bool(*func)(lua_State*))
-{
-	assert(initDepth > 0);
-	func(L);
-}
-
 
 /******************************************************************************/
 
@@ -543,48 +524,8 @@ int LuaParser::Random(lua_State* L)
 {
 	// both US and DS depend on LuaParser via MapParser, etc
 	#if (!defined(UNITSYNC) && !defined(DEDICATED))
-
-	switch (lua_gettop(L)) {
-		case 0: {
-			lua_pushnumber(L, gsRNG.NextFloat());
-			return 1;
-		} break;
-
-		case 1: {
-			if (lua_isnumber(L, 1)) {
-				const int u = lua_toint(L, 1);
-
-				if (u < 1)
-					luaL_error(L, "error: too small upper limit (%d) given to math.random(), should be >= 1 {LuaParser}", u);
-
-				lua_pushnumber(L, 1 + gsRNG.NextInt(u));
-				return 1;
-			}
-		} break;
-
-		case 2: {
-			if (lua_isnumber(L, 1) && lua_isnumber(L, 2)) {
-				const int lower = lua_toint(L, 1);
-				const int upper = lua_toint(L, 2);
-
-				if (lower > upper)
-					luaL_error(L, "Empty interval in math.random() {LuaParser}");
-
-				const float diff = (upper - lower);
-				const float r = gsRNG.NextFloat(); // [0,1], not [0,1) ?
-
-				lua_pushnumber(L, std::clamp(lower + int(r * (diff + 1)), lower, upper));
-				return 1;
-			}
-		} break;
-
-		default: {
-		} break;
-	}
-
-	luaL_error(L, "Incorrect arguments to math.random() {LuaParser}");
-	return 0;
-
+	lua_pushnumber(L, gsRNG.NextFloat());
+	return 1;
 	#else
 	return (DummyRandom(L));
 	#endif
@@ -592,163 +533,6 @@ int LuaParser::Random(lua_State* L)
 
 int LuaParser::DummyRandomSeed(lua_State* L) { return 0; }
 int LuaParser::DummyRandom(lua_State* L) { return 0; }
-
-/******************************************************************************/
-
-int LuaParser::DirList(lua_State* L)
-{
-	const LuaParser* currentParser = GetLuaParser(L);
-
-	const std::string& dir = luaL_checkstring(L, 1);
-
-	if (!LuaIO::IsSimplePath(dir))
-		return 0;
-
-	const std::string& pat = luaL_optstring(L, 2, "*");
-	const std::string& modes = CFileHandler::AllowModes(luaL_optstring(L, 3, currentParser->accessModes.c_str()), currentParser->accessModes);
-	const bool recursive = luaL_optboolean(L, 4, false);
-
-	LuaUtils::PushStringVector(L, CFileHandler::DirList(dir, pat, modes, recursive));
-	return 1;
-}
-
-
-int LuaParser::SubDirs(lua_State* L)
-{
-	const LuaParser* currentParser = GetLuaParser(L);
-
-	const std::string& dir = luaL_checkstring(L, 1);
-
-	if (!LuaIO::IsSimplePath(dir))
-		return 0;
-
-	const std::string& pat = luaL_optstring(L, 2, "*");
-	const std::string& modes = CFileHandler::AllowModes(luaL_optstring(L, 3, currentParser->accessModes.c_str()), currentParser->accessModes);
-	const bool recursive = luaL_optboolean(L, 4, false);
-
-	LuaUtils::PushStringVector(L, CFileHandler::SubDirs(dir, pat, modes, recursive));
-	return 1;
-}
-
-/******************************************************************************/
-
-int LuaParser::Include(lua_State* L)
-{
-	const LuaParser* currentParser = GetLuaParser(L);
-
-	// filename [, fenv]
-	const std::string& filename = luaL_checkstring(L, 1);
-
-	if (!LuaIO::IsSimplePath(filename))
-		luaL_error(L, "bad pathname");
-
-	const std::string& modes = CFileHandler::AllowModes(luaL_optstring(L, 3, currentParser->accessModes.c_str()), currentParser->accessModes);
-
-	CFileHandler fh(filename, modes);
-	if (!fh.FileExists()) {
-		char buf[1024];
-		SNPRINTF(buf, sizeof(buf), "Include() file missing '%s'\n", filename.c_str());
-		lua_pushstring(L, buf);
- 		lua_error(L);
-	}
-
-	std::string code;
-	if (!fh.LoadStringData(code)) {
-		char buf[1024];
-		SNPRINTF(buf, sizeof(buf), "Include() could not load '%s'\n", filename.c_str());
-		lua_pushstring(L, buf);
- 		lua_error(L);
-	}
-
-	LuaUtils::TracyRemoveAlsoExtras(code.data());
-	int error = luaL_loadbuffer(L, code.c_str(), code.size(), filename.c_str());
-	if (error != 0) {
-		char buf[1024];
-		SNPRINTF(buf, sizeof(buf), "error = %i, %s, %s\n", error, filename.c_str(), lua_tostring(L, -1));
-		lua_pushstring(L, buf);
-		lua_error(L);
-	}
-
-	// set the chunk's fenv to the current fenv, or a user table
-	if (lua_istable(L, 2)) {
-		lua_pushvalue(L, 2); // user fenv
-	} else {
-		LuaUtils::PushCurrentFuncEnv(L, __func__);
-	}
-
-	// set the include fenv to the current function's fenv
-	if (lua_setfenv(L, -2) == 0) {
-		luaL_error(L, "Include(): error with setfenv");
-	}
-
-	const int paramTop = lua_gettop(L) - 1;
-
-	error = lua_pcall(L, 0, LUA_MULTRET, 0);
-
-	if (error != 0) {
-		char buf[1024];
-		SNPRINTF(buf, sizeof(buf), "error = %i, %s, %s\n", error, filename.c_str(), lua_tostring(L, -1));
-		lua_pushstring(L, buf);
-		lua_error(L);
-	}
-
-	#if 0
-	spring::VectorInsertUnique(currentParser->accessedFiles, StringToLower(filename), true);
-	#endif
-	return (lua_gettop(L) - paramTop);
-}
-
-
-/******************************************************************************/
-
-int LuaParser::LoadFile(lua_State* L)
-{
-	const LuaParser* currentParser = GetLuaParser(L);
-
-	const std::string& filename = luaL_checkstring(L, 1);
-
-	if (!LuaIO::IsSimplePath(filename))
-		return 0;
-
-	const std::string& modes = CFileHandler::AllowModes(luaL_optstring(L, 2, currentParser->accessModes.c_str()), currentParser->accessModes);
-
-	CFileHandler fh(filename, modes);
-	if (!fh.FileExists()) {
-		lua_pushnil(L);
-		lua_pushstring(L, "missing file");
-		return 2;
-	}
-	std::string data;
-	if (!fh.LoadStringData(data)) {
-		lua_pushnil(L);
-		lua_pushstring(L, "could not load data");
-		return 2;
-	}
-	lua_pushstring(L, data.c_str());
-
-	#if 0
-	spring::VectorInsertUnique(currentParser->accessedFiles, StringToLower(filename), true);
-	#endif
-	return 1;
-}
-
-
-int LuaParser::FileExists(lua_State* L)
-{
-	const LuaParser* currentParser = GetLuaParser(L);
-
-	const std::string& filename = luaL_checkstring(L, 1);
-	// filter any modes not within the parser's allowed set
-	const std::string& argModes = luaL_optstring(L, 2, currentParser->accessModes.c_str());
-	const std::string& vfsModes = CFileHandler::AllowModes(argModes, currentParser->accessModes);
-
-	if (!LuaIO::IsSimplePath(filename))
-		return 0;
-
-	lua_pushboolean(L, CFileHandler::FileExists(filename, vfsModes));
-	return 1;
-}
-
 
 int LuaParser::DontMessWithMyCase(lua_State* L)
 {
@@ -1092,7 +876,7 @@ bool LuaTable::PushValue(const std::string& mixedKey) const
 /******************************************************************************/
 /******************************************************************************/
 //
-//  Key existence testing
+//  Key existance testing
 //
 
 bool LuaTable::KeyExists(int key) const
@@ -1414,7 +1198,7 @@ static bool ParseTableFloat(lua_State* L,
 	lua_pushnumber(L, index);
 	lua_gettable(L, tableIndex);
 	value = lua_tonumber(L, -1);
-	if unlikely(value == 0 && !lua_isnumber(L, -1) && !lua_isstring(L, -1)) {
+	if (unlikely(value == 0) && !lua_isnumber(L, -1) && !lua_isstring(L, -1)) {
 		lua_pop(L, 1);
 		return false;
 	}
@@ -1499,7 +1283,7 @@ int LuaTable::Get(const std::string& key, int def) const
 		return def;
 
 	const int value = lua_toint(L, -1);
-	if unlikely(value == 0 && !lua_isnumber(L, -1) && !lua_isstring(L, -1)) {
+	if (unlikely(value == 0) && !lua_isnumber(L, -1) && !lua_isstring(L, -1)) {
 		lua_pop(L, 1);
 		return def;
 	}
@@ -1529,7 +1313,7 @@ float LuaTable::Get(const std::string& key, float def) const
 		return def;
 
 	const float value = lua_tonumber(L, -1);
-	if unlikely(value == 0.0f && !lua_isnumber(L, -1) && !lua_isstring(L, -1)) {
+	if (unlikely(value == 0.f) && !lua_isnumber(L, -1) && !lua_isstring(L, -1)) {
 		lua_pop(L, 1);
 		return def;
 	}
@@ -1596,7 +1380,7 @@ int LuaTable::Get(int key, int def) const
 		return def;
 
 	const int value = lua_toint(L, -1);
-	if unlikely(value == 0 && !lua_isnumber(L, -1) && !lua_isstring(L, -1)) {
+	if (unlikely(value == 0) && !lua_isnumber(L, -1) && !lua_isstring(L, -1)) {
 		lua_pop(L, 1);
 		return def;
 	}
@@ -1626,7 +1410,7 @@ float LuaTable::Get(int key, float def) const
 		return def;
 
 	const float value = lua_tonumber(L, -1);
-	if unlikely(value == 0 && !lua_isnumber(L, -1) && !lua_isstring(L, -1)) {
+	if (unlikely(value == 0) && !lua_isnumber(L, -1) && !lua_isstring(L, -1)) {
 		lua_pop(L, 1);
 		return def;
 	}

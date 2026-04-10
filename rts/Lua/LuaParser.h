@@ -204,12 +204,7 @@ private:
 	static int DummyRandom(lua_State* L);
 	static int TimeCheck(lua_State* L);
 
-	// VFS call-outs
-	static int DirList(lua_State* L);
-	static int SubDirs(lua_State* L);
-	static int Include(lua_State* L);
-	static int LoadFile(lua_State* L);
-	static int FileExists(lua_State* L);
+	// VFS call-outs moved to LuaVFSSimple::Register()
 };
 
 
