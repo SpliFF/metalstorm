@@ -23,7 +23,7 @@
 struct sqlite3;
 
 /// Increment to reprocess all maps.
-constexpr int MAP_FORMAT_VERSION = 8;
+constexpr int MAP_FORMAT_VERSION = 9;
 
 struct MapStartPosition {
     float x = 0, z = 0;
@@ -138,6 +138,11 @@ private:
     bool ReadMapInfo(const std::string& mapDir, MapMetadata& meta);
     bool ReadSMFHeader(MapMetadata& meta);
     bool ExtractBinaryData(const MapMetadata& meta);
+    /// Decode the SMF's 1024×1024 DXT1 minimap and pipe the raw RGB
+    /// into `magick` to write `<processedDir>/minimap.webp`. Done once
+    /// at preprocess time — the /api/maps/thumb/<id> handler just
+    /// serves the resulting file directly.
+    bool ExtractMinimapWebP(const MapMetadata& meta);
     bool ExtractFeatures(MapMetadata& meta);
     bool ExtractDecalTextures(MapMetadata& meta);
     void EnumerateWidgets(MapMetadata& meta);

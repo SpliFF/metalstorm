@@ -331,8 +331,9 @@ bool MapProcessor::ExtractBinaryData(const MapMetadata& meta) {
     bool ok = true;
     if (!extractRawBytes(meta.smfPath, heightmapPtr, hmSize, meta.processedDir + "/heightmap.bin"))
         std::fprintf(stderr, "[mapproc]   heightmap extraction failed\n");
-    if (!extractRawBytes(meta.smfPath, minimapPtr, 524288, meta.processedDir + "/minimap.dxt1"))
-        std::fprintf(stderr, "[mapproc]   minimap extraction failed\n");
+    // Note: the raw 1024² DXT1 minimap is no longer extracted to disk —
+    // ExtractMinimapWebP() decodes it straight to a WebP thumbnail for
+    // the lobby preview. Nothing in the client ever consumed minimap.dxt1.
     if (!extractRawBytes(meta.smfPath, typeMapPtr, halfSize, meta.processedDir + "/typemap.bin"))
         std::fprintf(stderr, "[mapproc]   typemap extraction failed\n");
     if (!extractRawBytes(meta.smfPath, metalmapPtr, halfSize, meta.processedDir + "/metalmap.bin"))
@@ -380,6 +381,140 @@ bool MapProcessor::ExtractBinaryData(const MapMetadata& meta) {
     }
 
     return ok;
+}
+
+// ============================================================
+// Minimap WebP extraction
+// ============================================================
+//
+// Spring stores a 1024×1024 DXT1 minimap in each SMF file (actually a
+// 9-level mipchain, but we only need mip0). At preprocess time we
+// decode it to raw RGB and pipe that into `magick` to produce a tiny
+// WebP that the lobby can serve directly for the thumbnail preview.
+//
+// The previous implementation lived in lobby_main.cpp and re-decoded
+// the DXT1 + returned a 3MB BMP on every HTTP request. It also had a
+// hardcoded offset bug (reading heightmapPtr instead of minimapPtr),
+// which surfaced as a garbled preview for any map that didn't ship a
+// pre-rendered *minimap.png sibling.
+
+bool MapProcessor::ExtractMinimapWebP(const MapMetadata& meta) {
+    std::ifstream smf(meta.smfPath, std::ios::binary);
+    if (!smf.is_open()) return false;
+
+    // SMF header pointer table:
+    //   52: heightmapPtr  56: typeMapPtr  60: tilesPtr
+    //   64: minimapPtr    68: metalmapPtr 72: featurePtr
+    smf.seekg(64);
+    int minimapPtr = 0;
+    smf.read(reinterpret_cast<char*>(&minimapPtr), 4);
+    if (minimapPtr <= 0) return false;
+
+    constexpr int W = 1024, H = 1024;
+    smf.seekg(minimapPtr);
+    std::vector<uint8_t> dxt(W * H / 2); // 524288 bytes = mip0 at 1024²
+    smf.read(reinterpret_cast<char*>(dxt.data()),
+             static_cast<std::streamsize>(dxt.size()));
+    if (!smf.good()) return false;
+
+    // DXT1 → RGB. Each 8-byte block encodes a 4×4 pixel tile with two
+    // 16-bit RGB565 endpoints and a 32-bit 2-bit-per-pixel index.
+    std::vector<uint8_t> rgb(W * H * 3);
+    for (int by = 0; by < H / 4; ++by) {
+        for (int bx = 0; bx < W / 4; ++bx) {
+            const uint8_t* src = &dxt[(by * (W / 4) + bx) * 8];
+            const uint16_t c0 = static_cast<uint16_t>(src[0] | (src[1] << 8));
+            const uint16_t c1 = static_cast<uint16_t>(src[2] | (src[3] << 8));
+            const uint32_t bits =
+                static_cast<uint32_t>(src[4])       |
+                (static_cast<uint32_t>(src[5]) << 8)  |
+                (static_cast<uint32_t>(src[6]) << 16) |
+                (static_cast<uint32_t>(src[7]) << 24);
+
+            uint8_t colors[4][3];
+            colors[0][0] = static_cast<uint8_t>(((c0 >> 11) & 0x1f) * 255 / 31);
+            colors[0][1] = static_cast<uint8_t>(((c0 >>  5) & 0x3f) * 255 / 63);
+            colors[0][2] = static_cast<uint8_t>(( c0        & 0x1f) * 255 / 31);
+            colors[1][0] = static_cast<uint8_t>(((c1 >> 11) & 0x1f) * 255 / 31);
+            colors[1][1] = static_cast<uint8_t>(((c1 >>  5) & 0x3f) * 255 / 63);
+            colors[1][2] = static_cast<uint8_t>(( c1        & 0x1f) * 255 / 31);
+            if (c0 > c1) {
+                for (int i = 0; i < 3; ++i) {
+                    colors[2][i] = static_cast<uint8_t>((2 * colors[0][i] + colors[1][i]) / 3);
+                    colors[3][i] = static_cast<uint8_t>((colors[0][i] + 2 * colors[1][i]) / 3);
+                }
+            } else {
+                for (int i = 0; i < 3; ++i) {
+                    colors[2][i] = static_cast<uint8_t>((colors[0][i] + colors[1][i]) / 2);
+                }
+                colors[3][0] = colors[3][1] = colors[3][2] = 0;
+            }
+
+            for (int py = 0; py < 4; ++py) {
+                for (int px = 0; px < 4; ++px) {
+                    const int idx = (bits >> (2 * (py * 4 + px))) & 3;
+                    const int x = bx * 4 + px;
+                    const int y = by * 4 + py;
+                    const int o = (y * W + x) * 3;
+                    rgb[o + 0] = colors[idx][0];
+                    rgb[o + 1] = colors[idx][1];
+                    rgb[o + 2] = colors[idx][2];
+                }
+            }
+        }
+    }
+
+    // Spring stores the minimap stretched to a fixed 1024² regardless
+    // of the map's actual aspect ratio, so a 640×512 map's minimap is
+    // squashed vertically. Restore the aspect in the outputs we write
+    // by shrinking the shorter axis while keeping the longer at its
+    // target resolution (1024 for the full minimap, 256 for the
+    // thumbnail).
+    int fullW, fullH, thumbW, thumbH;
+    if (meta.mapx >= meta.mapy) {
+        fullW  = 1024;  fullH  = (1024 * meta.mapy) / meta.mapx;
+        thumbW = 256;   thumbH = (256  * meta.mapy) / meta.mapx;
+    } else {
+        fullH  = 1024;  fullW  = (1024 * meta.mapx) / meta.mapy;
+        thumbH = 256;   thumbW = (256  * meta.mapx) / meta.mapy;
+    }
+    if (fullH < 1)  fullH = 1;
+    if (thumbW < 1) thumbW = 1;
+    if (thumbH < 1) thumbH = 1;
+
+    // Pipe raw RGB into magick in a single invocation that writes two
+    // files: the full-size aspect-correct minimap.webp, then a
+    // downscaled thumbnail.webp for the lobby browser preview card.
+    // `-resize WxH!` forces exact dimensions (non-uniform scale),
+    // which is what we want since the source is the stretched SMF
+    // minimap being corrected back to the map's real aspect.
+    const std::string fullPath  = meta.processedDir + "/minimap.webp";
+    const std::string thumbPath = meta.processedDir + "/thumbnail.webp";
+    const std::string cmd =
+        "magick -size " + std::to_string(W) + "x" + std::to_string(H) +
+        " -depth 8 rgb:- "
+        "-resize " + std::to_string(fullW)  + "x" + std::to_string(fullH)  + "\\! "
+        "-write \"" + fullPath + "\" "
+        "-resize " + std::to_string(thumbW) + "x" + std::to_string(thumbH) + "\\! "
+        "\"" + thumbPath + "\" 2>&1";
+    FILE* p = popen(cmd.c_str(), "w");
+    if (!p) {
+        std::fprintf(stderr, "[mapproc] minimap: popen(magick) failed\n");
+        return false;
+    }
+    const size_t written = std::fwrite(rgb.data(), 1, rgb.size(), p);
+    const int rc = pclose(p);
+    if (rc != 0 || written != rgb.size()) {
+        std::fprintf(stderr,
+            "[mapproc] minimap: magick failed (rc=%d, wrote %zu/%zu)\n",
+            rc, written, rgb.size());
+        return false;
+    }
+
+    std::fprintf(stderr,
+        "[mapproc] wrote minimap.webp (%dx%d) + thumbnail.webp (%dx%d)\n",
+        fullW, fullH, thumbW, thumbH);
+    return true;
 }
 
 // ============================================================
@@ -966,6 +1101,7 @@ bool MapProcessor::ProcessMap(MapMetadata& meta) {
 
     ExtractFeatures(meta);             // SMF-embedded placements (binary)
     FeatureProcessor::Process(meta);   // Lua defs + featureplacer + asset conversion
+    ExtractMinimapWebP(meta);          // 1024² thumbnail for the lobby browser
     ExtractDecalTextures(meta);
     EnumerateWidgets(meta);
     return true;

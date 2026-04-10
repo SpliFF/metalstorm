@@ -46,70 +46,6 @@ static std::string generateToken(int length = 32) {
     return token;
 }
 
-/// Decode DXT1 minimap from SMF file and return as BMP bytes.
-static std::vector<uint8_t> extractSMFMinimapBMP(const std::string& smfPath) {
-    std::ifstream f(smfPath, std::ios::binary);
-    if (!f.is_open()) return {};
-
-    f.seekg(52); // offset to minimapPtr in SMF header
-    int minimapPtr = 0;
-    f.read(reinterpret_cast<char*>(&minimapPtr), 4);
-    if (minimapPtr <= 0) return {};
-
-    const int W = 1024, H = 1024;
-    f.seekg(minimapPtr);
-    std::vector<uint8_t> dxt(W * H / 2);
-    f.read(reinterpret_cast<char*>(dxt.data()), dxt.size());
-    if (!f.good()) return {};
-
-    // Decode DXT1 to RGB
-    std::vector<uint8_t> rgb(W * H * 3);
-    for (int by = 0; by < H / 4; by++) {
-        for (int bx = 0; bx < W / 4; bx++) {
-            const uint8_t* src = &dxt[(by * (W/4) + bx) * 8];
-            uint16_t c0 = src[0] | (src[1] << 8);
-            uint16_t c1 = src[2] | (src[3] << 8);
-            uint32_t bits = src[4] | (src[5]<<8) | (src[6]<<16) | (src[7]<<24);
-
-            uint8_t colors[4][3];
-            colors[0][0]=((c0>>11)&0x1f)*255/31; colors[0][1]=((c0>>5)&0x3f)*255/63; colors[0][2]=(c0&0x1f)*255/31;
-            colors[1][0]=((c1>>11)&0x1f)*255/31; colors[1][1]=((c1>>5)&0x3f)*255/63; colors[1][2]=(c1&0x1f)*255/31;
-            if (c0 > c1) {
-                for (int i=0;i<3;i++) { colors[2][i]=(2*colors[0][i]+colors[1][i])/3; colors[3][i]=(colors[0][i]+2*colors[1][i])/3; }
-            } else {
-                for (int i=0;i<3;i++) colors[2][i]=(colors[0][i]+colors[1][i])/2;
-                colors[3][0]=colors[3][1]=colors[3][2]=0;
-            }
-
-            for (int py=0;py<4;py++) for (int px=0;px<4;px++) {
-                int idx = (bits >> (2*(py*4+px))) & 3;
-                int x=bx*4+px, y=by*4+py, o=(y*W+x)*3;
-                rgb[o]=colors[idx][0]; rgb[o+1]=colors[idx][1]; rgb[o+2]=colors[idx][2];
-            }
-        }
-    }
-
-    // Encode as BMP (top-down, 24bpp)
-    int rowBytes = W * 3, padRow = (4-(rowBytes%4))%4;
-    int imgSize = (rowBytes+padRow)*H, fileSize = 54+imgSize;
-    std::vector<uint8_t> bmp(fileSize, 0);
-    bmp[0]='B'; bmp[1]='M';
-    memcpy(&bmp[2], &fileSize, 4);
-    int off=54; memcpy(&bmp[10], &off, 4);
-    int dib=40; memcpy(&bmp[14], &dib, 4);
-    memcpy(&bmp[18], &W, 4);
-    int negH=-H; memcpy(&bmp[22], &negH, 4);
-    short planes=1, bpp=24;
-    memcpy(&bmp[26], &planes, 2); memcpy(&bmp[28], &bpp, 2);
-    memcpy(&bmp[34], &imgSize, 4);
-    int d=54;
-    for (int y=0;y<H;y++) {
-        for (int x=0;x<W;x++) { int s=(y*W+x)*3; bmp[d++]=rgb[s+2]; bmp[d++]=rgb[s+1]; bmp[d++]=rgb[s]; }
-        d += padRow;
-    }
-    return bmp;
-}
-
 /// Tracks a spawned game server process.
 struct GameServerInstance {
     uint32_t roomId = 0;
@@ -419,40 +355,61 @@ int main(int argc, char* argv[])
         };
     });
 
-    // Map thumbnail endpoint
+    // Map thumbnail endpoint. Serves the preprocessed small WebP
+    // (aspect-correct, max 256px on the longer axis) that
+    // MapProcessor::ExtractMinimapWebP wrote to
+    // data/maps/<id>/thumbnail.webp at preprocess time. The full-size
+    // minimap.webp sits next to it for consumers that want the larger
+    // version via the generic /api/maps/data/* route.
+    //
+    // The shipped-*minimap.png/jpg fallback is preserved for maps
+    // where preprocess failed (e.g. missing magick) — most modern
+    // maps never hit it.
     net.AddHttpGet("/api/maps/thumb/*", [&mapsDir](const std::string& url) -> HttpResponse {
-        std::string mapId = url.substr(std::string("/api/maps/thumb/").size());
+        const std::string mapId = url.substr(std::string("/api/maps/thumb/").size());
+        if (mapId.find("..") != std::string::npos)
+            return {.contentType = "text/plain", .body = {}, .status = 403};
+
         namespace fs = std::filesystem;
-        fs::path mapDir = fs::path(mapsDir) / mapId;
-        if (!fs::is_directory(mapDir))
-            return {.contentType = "text/plain", .body = {}, .status = 404};
-        for (auto& entry : fs::recursive_directory_iterator(mapDir)) {
-            if (!entry.is_regular_file()) continue;
-            auto fname = entry.path().filename().string();
-            auto ext = entry.path().extension().string();
-            if (fname.find("minimap") != std::string::npos && (ext == ".png" || ext == ".jpg")) {
-                std::ifstream f(entry.path(), std::ios::binary);
-                std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
-                                           std::istreambuf_iterator<char>());
-                return {
-                    .contentType = (ext == ".png") ? "image/png" : "image/jpeg",
-                    .body = std::move(data),
-                    .status = 200,
-                    .cacheControl = "public, max-age=3600",
-                };
-            }
+
+        // Primary: preprocessed small WebP (256px on the longer axis)
+        const fs::path processedWebp =
+            fs::path("data") / "maps" / mapId / "thumbnail.webp";
+        if (fs::is_regular_file(processedWebp)) {
+            std::ifstream f(processedWebp, std::ios::binary);
+            std::vector<uint8_t> data(
+                (std::istreambuf_iterator<char>(f)),
+                std::istreambuf_iterator<char>());
+            return {
+                .contentType = "image/webp",
+                .body = std::move(data),
+                .status = 200,
+                .cacheControl = "public, max-age=3600",
+            };
         }
-        // Fallback: extract minimap from SMF file
-        for (auto& entry : fs::recursive_directory_iterator(mapDir)) {
-            if (entry.is_regular_file() && entry.path().extension() == ".smf") {
-                auto bmp = extractSMFMinimapBMP(entry.path().string());
-                if (!bmp.empty())
+
+        // Fallback: a *minimap.png/jpg shipped alongside the SMF by
+        // the map author. Kept for resilience against preprocess
+        // failure; most modern maps will never hit this path.
+        fs::path mapDir = fs::path(mapsDir) / mapId;
+        if (fs::is_directory(mapDir)) {
+            for (auto& entry : fs::recursive_directory_iterator(mapDir)) {
+                if (!entry.is_regular_file()) continue;
+                const auto fname = entry.path().filename().string();
+                const auto ext = entry.path().extension().string();
+                if (fname.find("minimap") != std::string::npos &&
+                    (ext == ".png" || ext == ".jpg")) {
+                    std::ifstream f(entry.path(), std::ios::binary);
+                    std::vector<uint8_t> data(
+                        (std::istreambuf_iterator<char>(f)),
+                        std::istreambuf_iterator<char>());
                     return {
-                        .contentType = "image/bmp",
-                        .body = std::move(bmp),
+                        .contentType = (ext == ".png") ? "image/png" : "image/jpeg",
+                        .body = std::move(data),
                         .status = 200,
                         .cacheControl = "public, max-age=3600",
                     };
+                }
             }
         }
         return {.contentType = "text/plain", .body = {}, .status = 404};
