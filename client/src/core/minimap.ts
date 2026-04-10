@@ -62,6 +62,10 @@ export class Minimap {
     private teamMeshes: Mesh[] = [];
     // Selection ring mesh (thin-instanced white ring).
     private selectionMesh: Mesh | null = null;
+    // Map id parsed out of the loadBackground URL. Used by detach() so
+    // the popup viewport can fetch the same map's thumbnail as its
+    // backdrop.
+    private mapId: string = '';
 
     /** Callback to move the main camera when the minimap is clicked. */
     onCameraMove?: (x: number, z: number) => void;
@@ -149,6 +153,13 @@ export class Minimap {
      * reuse the same DXT1 upload path as the main terrain.
      */
     async loadBackground(mapBaseUrl: string, dims: MapDimensions): Promise<void> {
+        // mapBaseUrl looks like "http://host:port/api/maps/data/<mapId>".
+        // We just need the last path component for the detached viewport
+        // backdrop fetch.
+        const trimmed = mapBaseUrl.replace(/\/+$/, '');
+        const lastSlash = trimmed.lastIndexOf('/');
+        if (lastSlash >= 0) this.mapId = trimmed.substring(lastSlash + 1);
+
         try {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const gl = (this.engine as any)._gl as WebGL2RenderingContext;
@@ -302,6 +313,10 @@ export class Minimap {
             token,
         });
         if (gamePort) params.set('port', gamePort);
+        // Pass the map id so the viewport can fetch the same thumbnail
+        // we use in the lobby browser as its backdrop. Without this it
+        // renders entities on a black grid with no terrain context.
+        if (this.mapId) params.set('mapId', this.mapId);
         const url = `/viewport.html?${params.toString()}`;
         return window.open(url, 'springrts-minimap',
             `width=${this.canvasSize + 20},height=${this.canvasSize + 20},resizable=yes`);

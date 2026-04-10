@@ -27,6 +27,10 @@ const token = params.get('token') ?? localStorage.getItem('springrts-session-tok
 // lobby URL as a last resort. Without this, the viewport connects to
 // the lobby server and never receives any entity state.
 const gamePort = params.get('port') ?? localStorage.getItem('springrts-game-port') ?? '';
+// Map id for the terrain backdrop. Without this the viewport renders
+// entities on a black grid; with it we fetch the same minimap thumb
+// the lobby browser uses and draw it underneath.
+const mapId = params.get('mapId') ?? '';
 
 const statusEl = document.getElementById('viewport-status')!;
 const canvas = document.getElementById('viewport-canvas') as HTMLCanvasElement;
@@ -58,6 +62,21 @@ try {
 // fall back to CONFIG.wsUrl (lobby) only if no game is active.
 const host = window.location.hostname || 'localhost';
 const serverUrl = gamePort ? `ws://${host}:${gamePort}` : CONFIG.wsUrl;
+
+// Map terrain backdrop. Loaded asynchronously from the lobby's
+// /api/maps/thumb/{id} endpoint. We just hold an Image and check its
+// `complete` flag in render() — the load is fire-and-forget so the
+// viewport keeps working even if the request fails (entities just
+// render on the black grid as before).
+let mapThumb: HTMLImageElement | null = null;
+if (mapId) {
+    const img = new Image();
+    img.onload = () => { mapThumb = img; };
+    img.onerror = () => { /* fall back to grid */ };
+    // Lobby HTTP is on the same host as the game WebSocket but on the
+    // lobby's port. The configured CONFIG.httpUrl points there.
+    img.src = `${CONFIG.httpUrl}/api/maps/thumb/${encodeURIComponent(mapId)}`;
+}
 const connection = new Connection({
     onStateChange(state) {
         statusEl.textContent = state;
@@ -114,8 +133,17 @@ function render(): void {
     ctx.fillStyle = '#0a0f0a';
     ctx.fillRect(0, 0, w, h);
 
-    // Grid
-    ctx.strokeStyle = '#1a2a1a';
+    // Terrain backdrop. Stretched to the full canvas; the source thumb
+    // is the SMF minimap so its aspect matches the map exactly. If it
+    // hasn't loaded yet (or never loaded) the grid below still renders.
+    if (mapThumb && mapThumb.complete && mapThumb.naturalWidth > 0) {
+        ctx.drawImage(mapThumb, 0, 0, w, h);
+    }
+
+    // Grid — kept on top of the terrain so 1km cells stay legible at
+    // any zoom. Use a subtle dark green stroke that works against both
+    // the black fallback and the textured terrain.
+    ctx.strokeStyle = mapThumb ? 'rgba(0,0,0,0.25)' : '#1a2a1a';
     ctx.lineWidth = 0.5;
     for (let x = 0; x < mapWidth; x += 1024) {
         ctx.beginPath();
