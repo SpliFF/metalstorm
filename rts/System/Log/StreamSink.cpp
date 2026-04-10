@@ -3,12 +3,20 @@
 #include "StreamSink.h"
 #include "Backend.h"
 
+#include <iostream>
 #include <ostream>
 #include <string>
 #include <cstring>
 
 
-static std::ostream* logStreamInt = NULL;
+// Default the stream sink to stderr so every LOG_L() / LOG_SI() call
+// shows up in the headless server's log file (and thus the mprocs
+// game-logs panel, which tails those files). Without this default,
+// the sink is registered but `logStreamInt` stayed NULL until some
+// caller set it — which never happened after the client UI that used
+// to wire `std::cout` was removed — and every log record was
+// silently dropped. Callers can still override via the setter below.
+static std::ostream* logStreamInt = &std::cerr;
 
 void log_sink_stream_setLogStream(std::ostream* logStream) {
 	logStreamInt = logStream;

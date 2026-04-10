@@ -1667,25 +1667,61 @@ CSplitLuaHandle::~CSplitLuaHandle()
 
 bool CSplitLuaHandle::InitSynced()
 {
+	// Distinguish the three failure modes so callers (and operators
+	// reading the log) can tell the difference between "the game
+	// doesn't ship synced scripts" and "the synced scripts crashed
+	// during load". The generic false-return we used to emit made
+	// every failure look like a missing file.
 	if (!IsValid()) {
+		std::fprintf(stderr,
+			"[lua:%s] synced Lua state is invalid before load — "
+			"underlying state init failed; cannot run synced scripts\n",
+			syncedLuaHandle.GetName().c_str());
 		KillLua();
 		return false;
 	}
 
-	const std::string syncedCode = LoadFile(GetSyncedFileName(), GetInitFileModes());
+	const std::string syncedFile = GetSyncedFileName();
+	const std::string syncedCode = LoadFile(syncedFile, GetInitFileModes());
 	if (syncedCode.empty()) {
+		// Could be "file not found" or "file exists but is empty".
+		// Probe via a second FileHandler just to make the distinction
+		// in the log — it's the single most common boot-time stumble
+		// when adding a new game and forgetting the scripts.
+		CFileHandler probe(syncedFile, GetInitFileModes());
+		if (!probe.FileExists()) {
+			std::fprintf(stderr,
+				"[lua:%s] %s not found in any content root; "
+				"skipping synced scripts\n",
+				syncedLuaHandle.GetName().c_str(), syncedFile.c_str());
+		} else {
+			std::fprintf(stderr,
+				"[lua:%s] %s is empty or unreadable; "
+				"skipping synced scripts\n",
+				syncedLuaHandle.GetName().c_str(), syncedFile.c_str());
+		}
 		KillLua();
 		return false;
 	}
 
-	const bool haveSynced = syncedLuaHandle.Init(syncedCode, GetUnsyncedFileName());
+	// NOTE: upstream Spring passes GetUnsyncedFileName() here by mistake,
+	// which makes every Lua error in LuaRules/main.lua get attributed to
+	// LuaRules/draw.lua in the diagnostic output. Fixed to pass the
+	// actual file we loaded.
+	const bool haveSynced = syncedLuaHandle.Init(syncedCode, syncedFile);
 
 	if (!IsValid() || !haveSynced) {
+		std::fprintf(stderr,
+			"[lua:%s] synced Lua state failed to initialise %s — "
+			"check the error above for the Lua error message\n",
+			syncedLuaHandle.GetName().c_str(), syncedFile.c_str());
 		KillLua();
 		return false;
 	}
 
 	syncedLuaHandle.CheckStack();
+	std::fprintf(stderr, "[lua:%s] loaded %s (%zu bytes)\n",
+		syncedLuaHandle.GetName().c_str(), syncedFile.c_str(), syncedCode.size());
 	return true;
 }
 

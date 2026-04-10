@@ -357,27 +357,27 @@ void CSimulation::InitScripting()
     scriptDispatcher = new ScriptEventDispatcher();
     scriptDispatcher->Register();
 
-    // Try to load LuaRules (game logic scripts)
+    // Try to load LuaRules (game-wide synced gadgets) and LuaGaia
+    // (map/environment synced gadgets). Either can be absent — the
+    // underlying InitSynced() logs the precise reason (file missing,
+    // empty, Lua syntax error, etc.) so we don't second-guess it here
+    // with a misleading "no main.lua" message.
     if (CLuaRules::LoadHandler(true)) {
-        std::fprintf(stderr, "[sim] LuaRules loaded\n");
-
-        // Wrap the synced handle as a LuaScriptContext
         auto* ctx = new LuaScriptContext(&luaRules->syncedLuaHandle);
         scriptDispatcher->AddContext(ctx);
         scriptingLoaded = true;
+        std::fprintf(stderr, "[sim] LuaRules attached to event dispatcher\n");
     } else {
-        std::fprintf(stderr, "[sim] LuaRules not available (no LuaRules/main.lua)\n");
+        std::fprintf(stderr, "[sim] LuaRules not loaded (see [lua:LuaRules] above for reason)\n");
     }
 
-    // Try to load LuaGaia (environment scripts)
     if (CLuaGaia::LoadHandler(true)) {
-        std::fprintf(stderr, "[sim] LuaGaia loaded\n");
-
         auto* ctx = new LuaScriptContext(&luaGaia->syncedLuaHandle);
         scriptDispatcher->AddContext(ctx);
         scriptingLoaded = true;
+        std::fprintf(stderr, "[sim] LuaGaia attached to event dispatcher\n");
     } else {
-        std::fprintf(stderr, "[sim] LuaGaia not available (no LuaGaia/main.lua)\n");
+        std::fprintf(stderr, "[sim] LuaGaia not loaded (see [lua:LuaGaia] above for reason)\n");
     }
 
     std::fprintf(stderr, "[sim] scripting initialised (%zu contexts)\n",

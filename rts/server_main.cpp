@@ -57,6 +57,18 @@ static std::string generateToken(int length = 32) {
 
 int main(int argc, char* argv[])
 {
+    // spring-lobby spawns us with stdout/stderr redirected to
+    // `data/logs/game-<roomId>.log` via dup2(). With the redirect in
+    // place, libc's auto-detection flips stderr to fully-buffered mode
+    // (isatty(fd 2) == false), which means fprintf(stderr, …) calls
+    // queue inside stdio's internal buffer until the process exits —
+    // so the `game-logs` mprocs panel never shows live progress or
+    // diagnostics. Force line-buffering on both streams up front so
+    // every printf/fprintf flushes at the end of its line, regardless
+    // of where the stream happens to be pointed.
+    std::setvbuf(stdout, nullptr, _IOLBF, 4096);
+    std::setvbuf(stderr, nullptr, _IOLBF, 4096);
+
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
 
