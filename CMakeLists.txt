@@ -255,6 +255,14 @@ if(TEST_SOURCES)
     endif()
 endif()
 
+# === any2gltf — content preprocessing tool ===
+#
+# Standalone CLI built on modern upstream Assimp (v6.0.4 via FetchContent).
+# Converts any model file Assimp can read — plus our custom S3O importer
+# plugin — into glTF 2.0. The server invokes this binary as part of the
+# map content preprocessing pipeline (see Server/FeatureProcessor.cpp).
+add_subdirectory(tools/any2gltf)
+
 # === compile_commands.json symlink for clangd ===
 if(CMAKE_EXPORT_COMPILE_COMMANDS)
     file(CREATE_LINK
