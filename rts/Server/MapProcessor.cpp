@@ -1,6 +1,7 @@
 // MapProcessor — full map data extraction from SMF/SMT/mapinfo.lua.
 
 #include "MapProcessor.h"
+#include "FeatureProcessor.h"
 
 // Lua compiled as C++
 #include "lua.h"
@@ -571,7 +572,7 @@ void MapProcessor::EnsureTable(sqlite3* db) {
     {
         sqlite3_stmt* stmt = nullptr;
         int rc = sqlite3_prepare_v2(db,
-            "SELECT widgets FROM maps LIMIT 1", -1, &stmt, nullptr);
+            "SELECT feature_defs FROM maps LIMIT 1", -1, &stmt, nullptr);
         sqlite3_finalize(stmt);
         if (rc != SQLITE_OK) {
             // Table missing or out-of-date schema — drop and recreate.
@@ -605,6 +606,10 @@ void MapProcessor::EnsureTable(sqlite3* db) {
             splat_scales TEXT, splat_mults TEXT,
             -- Features stored as pipe-delimited type list + semi-delimited instance list
             feature_types TEXT, features_blob TEXT,
+            -- FeatureDef list, parallel to feature_types. Each record is
+            --   name,model,texture,footX,footZ,height,radius,blocking,reclaim,metal,energy,damage
+            -- with records pipe-separated.
+            feature_defs TEXT,
             -- Water (Spring's water system, also used for lava/acid)
             water_base_color TEXT, water_surface_color TEXT, water_min_color TEXT,
             water_surface_alpha REAL, water_damage REAL, void_water INTEGER,
@@ -637,6 +642,25 @@ void MapProcessor::StoreMetadata(sqlite3* db, const MapMetadata& m) {
         snprintf(buf, sizeof(buf), "%d,%.1f,%.1f,%.1f,%.3f,%.3f",
             f.featureType, f.x, f.y, f.z, f.rotation, f.relativeSize);
         featuresStr += buf;
+    }
+
+    // Feature defs: pipe-delimited records, one per featureType. Each
+    // record is comma-separated:
+    //   name,model,texture,footX,footZ,height,radius,blocking,reclaim,metal,energy,damage
+    // Empty model/texture fields are written as empty (e.g. "GreyRock1,,,...").
+    std::string defsStr;
+    {
+        for (const auto& d : m.featureDefs) {
+            if (!defsStr.empty()) defsStr += "|";
+            char buf[256];
+            snprintf(buf, sizeof(buf),
+                "%s,%s,%s,%d,%d,%.3f,%.3f,%d,%d,%d,%d,%d",
+                d.name.c_str(), d.modelFile.c_str(), d.textureFile.c_str(),
+                d.footprintX, d.footprintZ, d.height, d.radius,
+                d.blocking ? 1 : 0, d.reclaimable ? 1 : 0,
+                d.metal, d.energy, d.damage);
+            defsStr += buf;
+        }
     }
 
     // Splat params: comma-separated
@@ -674,12 +698,12 @@ void MapProcessor::StoreMetadata(sqlite3* db, const MapMetadata& m) {
          detail_tex,specular_tex,splat_detail_tex,splat_distr_tex,
          splat_normal_0,splat_normal_1,splat_normal_2,splat_normal_3,
          detail_normal_tex,splat_scales,splat_mults,
-         feature_types,features_blob,
+         feature_types,features_blob,feature_defs,
          water_base_color,water_surface_color,water_min_color,
          water_surface_alpha,water_damage,void_water,
          widgets)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                ?,?,?,?,?,?,?,?,?,?,?,?,?,
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?,
                 ?)
     )", -1, &stmt, nullptr);
@@ -724,6 +748,7 @@ void MapProcessor::StoreMetadata(sqlite3* db, const MapMetadata& m) {
     sqlite3_bind_text(stmt, i++, splatMultsStr.c_str(),  -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, i++, typesStr.c_str(),       -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, i++, featuresStr.c_str(),    -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, i++, defsStr.c_str(),        -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, i++, waterBaseStr.c_str(),    -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, i++, waterSurfaceStr.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, i++, waterMinStr.c_str(),     -1, SQLITE_TRANSIENT);
@@ -757,7 +782,7 @@ std::vector<MapMetadata> MapProcessor::GetAllMaps(sqlite3* db) {
         "detail_tex,specular_tex,splat_detail_tex,splat_distr_tex,"
         "splat_normal_0,splat_normal_1,splat_normal_2,splat_normal_3,"
         "detail_normal_tex,splat_scales,splat_mults,"
-        "feature_types,features_blob,"
+        "feature_types,features_blob,feature_defs,"
         "water_base_color,water_surface_color,water_min_color,"
         "water_surface_alpha,water_damage,void_water,widgets FROM maps", -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
@@ -860,6 +885,38 @@ std::vector<MapMetadata> MapProcessor::GetAllMaps(sqlite3* db) {
             }
         }
 
+        // Feature defs blob: pipe-delimited records, each comma-separated:
+        //   name,model,texture,footX,footZ,height,radius,blocking,reclaim,metal,energy,damage
+        std::string defsBlob = maybeStr(i++);
+        if (!defsBlob.empty()) {
+            std::istringstream ss(defsBlob);
+            std::string rec;
+            while (std::getline(ss, rec, '|')) {
+                MapFeatureDef d;
+                std::vector<std::string> fields;
+                {
+                    std::istringstream rs(rec);
+                    std::string tok;
+                    while (std::getline(rs, tok, ',')) fields.push_back(tok);
+                }
+                if (fields.size() >= 12) {
+                    d.name        = fields[0];
+                    d.modelFile   = fields[1];
+                    d.textureFile = fields[2];
+                    try { d.footprintX  = std::stoi(fields[3]); } catch (...) {}
+                    try { d.footprintZ  = std::stoi(fields[4]); } catch (...) {}
+                    try { d.height      = std::stof(fields[5]); } catch (...) {}
+                    try { d.radius      = std::stof(fields[6]); } catch (...) {}
+                    d.blocking    = fields[7] != "0";
+                    d.reclaimable = fields[8] != "0";
+                    try { d.metal       = std::stoi(fields[9]); } catch (...) {}
+                    try { d.energy      = std::stoi(fields[10]); } catch (...) {}
+                    try { d.damage      = std::stoi(fields[11]); } catch (...) {}
+                    m.featureDefs.push_back(std::move(d));
+                }
+            }
+        }
+
         // Water
         parseFloats(maybeStr(i++).c_str(), m.water.baseColor,    3);
         parseFloats(maybeStr(i++).c_str(), m.water.surfaceColor, 3);
@@ -907,7 +964,8 @@ bool MapProcessor::ProcessMap(MapMetadata& meta) {
         return false;
     }
 
-    ExtractFeatures(meta);
+    ExtractFeatures(meta);             // SMF-embedded placements (binary)
+    FeatureProcessor::Process(meta);   // Lua defs + featureplacer + asset conversion
     ExtractDecalTextures(meta);
     EnumerateWidgets(meta);
     return true;

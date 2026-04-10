@@ -23,7 +23,7 @@
 struct sqlite3;
 
 /// Increment to reprocess all maps.
-constexpr int MAP_FORMAT_VERSION = 6;
+constexpr int MAP_FORMAT_VERSION = 7;
 
 struct MapStartPosition {
     float x = 0, z = 0;
@@ -34,6 +34,30 @@ struct MapFeatureData {
     float x = 0, y = 0, z = 0;
     float rotation = 0;
     float relativeSize = 1.0f;
+};
+
+/// Definition of a feature type referenced by `MapFeatureData::featureType`.
+/// Parsed from the map's `features/*.lua` files (Spring's `featureDefs` table)
+/// and converted to web-ready assets by FeatureProcessor:
+///   - the original `.s3o` model is converted to a `.glb` via any2gltf
+///   - the original `.tga`/`.dds` texture is converted to `.png` via magick
+///
+/// Filenames in `modelFile`/`textureFile` are relative to the map's processed
+/// data directory (`processedDir/features/`); the client fetches them via
+/// `/api/maps/data/{mapId}/features/{filename}`.
+struct MapFeatureDef {
+    std::string name;          // canonical name (lowercased Spring def key)
+    std::string modelFile;     // e.g. "GreyRock1.glb" — empty if no model
+    std::string textureFile;   // e.g. "GreyRock1.png" — empty if no texture
+    int   footprintX = 1;
+    int   footprintZ = 1;
+    float height = 0;          // visual height in elmos (from def)
+    float radius = 0;          // collision/picking radius in elmos
+    bool  blocking = true;
+    bool  reclaimable = false;
+    int   metal = 0;
+    int   energy = 0;
+    int   damage = 0;          // hit points
 };
 
 /// Spring's splat detail texture system — 4 detail normal textures blended
@@ -87,8 +111,15 @@ struct MapMetadata {
     bool hasLuaGaia = false;
 
     std::vector<MapStartPosition> startPositions;
+    /// Type names — strings indexed by `MapFeatureData::featureType`.
+    /// Populated from both SMF-embedded features and the Lua featureplacer.
     std::vector<std::string> featureTypes;
+    /// Per-instance placements (position, rotation, etc.).
     std::vector<MapFeatureData> features;
+    /// Definitions for each unique feature type referenced above.
+    /// Parallel to `featureTypes` (same indices) but contains the model
+    /// path, footprint, etc. parsed from the map's `features/*.lua`.
+    std::vector<MapFeatureDef> featureDefs;
     MapDecalData decals;
     MapWaterData water;
     /// Relative paths (from the map source dir) to any .lua widgets the

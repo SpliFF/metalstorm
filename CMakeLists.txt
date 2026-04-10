@@ -200,8 +200,15 @@ add_executable(spring-lobby
     ${LOBBY_LOG_SOURCES}
     rts/System/FileSystem/LuaVFSSimple.cpp
     rts/System/SafeCStrings.c
+    rts/Server/FeatureProcessor.cpp
 )
-add_dependencies(spring-lobby generate_flatbuffers)
+add_dependencies(spring-lobby generate_flatbuffers any2gltf)
+target_compile_definitions(spring-lobby PRIVATE
+    # Absolute path to the any2gltf binary inside this build tree.
+    # The lobby map preprocessor calls it via popen() to convert
+    # feature S3O models into glTF 2.0.
+    ANY2GLTF_BINARY_PATH="$<TARGET_FILE:any2gltf>"
+)
 target_include_directories(spring-lobby PRIVATE
     ${CMAKE_SOURCE_DIR}/rts
     ${CMAKE_SOURCE_DIR}/rts/lib

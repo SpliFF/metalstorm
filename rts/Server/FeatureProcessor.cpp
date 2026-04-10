@@ -1,0 +1,517 @@
+// FeatureProcessor — see header for pipeline overview.
+
+#include "FeatureProcessor.h"
+#include "MapProcessor.h"
+
+#include "lua.h"
+#include "lualib.h"
+#include "lauxlib.h"
+
+#include "System/FileSystem/LuaVFSSimple.h"
+#include "System/FileSystem/FileHandler.h"
+
+#include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#ifndef ANY2GLTF_BINARY_PATH
+#define ANY2GLTF_BINARY_PATH "any2gltf"
+#endif
+
+namespace fs = std::filesystem;
+
+namespace {
+
+// ============================================================
+// Lua helpers
+// ============================================================
+
+std::string luaGetString(lua_State* L, const char* field) {
+    lua_getfield(L, -1, field);
+    std::string s = lua_isstring(L, -1) ? lua_tostring(L, -1) : "";
+    lua_pop(L, 1);
+    return s;
+}
+
+float luaGetFloat(lua_State* L, const char* field, float def = 0.0f) {
+    lua_getfield(L, -1, field);
+    float v = def;
+    if (lua_isnumber(L, -1)) {
+        v = static_cast<float>(lua_tonumber(L, -1));
+    } else if (lua_isstring(L, -1)) {
+        // Spring def files often quote numeric fields ("17", "26").
+        try { v = std::stof(lua_tostring(L, -1)); } catch (...) {}
+    }
+    lua_pop(L, 1);
+    return v;
+}
+
+int luaGetInt(lua_State* L, const char* field, int def = 0) {
+    return static_cast<int>(luaGetFloat(L, field, static_cast<float>(def)));
+}
+
+bool luaGetBool(lua_State* L, const char* field, bool def = false) {
+    lua_getfield(L, -1, field);
+    bool v = def;
+    if (lua_isboolean(L, -1)) v = lua_toboolean(L, -1) != 0;
+    else if (lua_isnumber(L, -1)) v = lua_tonumber(L, -1) != 0;
+    lua_pop(L, 1);
+    return v;
+}
+
+std::string toLower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    return s;
+}
+
+// Boilerplate Lua state initialiser used by both feature-def loading and
+// the featureplacer execution. Sets up Spring 5.1 compatibility shims and
+// the LuaVFSSimple bindings backed by `mapDir` as a content root.
+lua_State* CreateMapLuaState(const std::string& mapDir) {
+    CFileHandler::AddContentRoot(mapDir);
+
+    lua_State* L = luaL_newstate();
+    luaL_openlibs(L);
+    luaL_dostring(L,
+        "unpack = unpack or table.unpack\n"
+        "loadstring = loadstring or load\n"
+        "if not setfenv then\n"
+        "  setfenv = function(f, t) return f end\n"
+        "  getfenv = function(f) return _G end\n"
+        "end\n"
+        "module = module or function() end\n"
+        "Spring = Spring or { Echo = print, GetGameFrame = function() return 0 end }\n"
+        "function lowerkeys(t)\n"
+        "  if type(t) ~= 'table' then return t end\n"
+        "  local out = {}\n"
+        "  for k,v in pairs(t) do\n"
+        "    if type(k) == 'string' then out[k:lower()] = v\n"
+        "    else out[k] = v end\n"
+        "  end\n"
+        "  return out\n"
+        "end\n"
+    );
+    LuaVFSSimple::Register(L);
+    return L;
+}
+
+void CloseMapLuaState(lua_State* L) {
+    lua_close(L);
+    // The map dir was added as a content root in CreateMapLuaState; the
+    // caller restores root state by clearing then re-adding any prior
+    // roots. Each call here pushes one root, so popping the back keeps
+    // global VFS state consistent.
+    auto roots = CFileHandler::GetContentRoots();
+    if (!roots.empty()) {
+        roots.pop_back();
+        CFileHandler::ClearContentRoots();
+        for (const auto& r : roots) CFileHandler::AddContentRoot(r);
+    }
+}
+
+// ============================================================
+// Step 1 — parse features/*.lua
+// ============================================================
+//
+// A typical Spring feature def file looks like:
+//
+//     return lowerkeys({
+//       GreyRock1 = { object = "GreyRock1.s3o", footprintX = 9, ... },
+//       GreyRock2 = { ... },
+//     })
+//
+// We `dofile` each `.lua` under `features/`, expect a table return value,
+// and walk top-level keys as feature def names.
+
+void ParseFeatureDef(lua_State* L,
+                     const std::string& key,
+                     std::vector<MapFeatureDef>& out) {
+    if (!lua_istable(L, -1)) return;
+
+    MapFeatureDef def;
+    def.name = toLower(key);
+
+    // Spring source field is `object` (relative path of .s3o, optional
+    // subdirectory like `objects3d/foo.s3o` or just `foo.s3o`).
+    def.modelFile = luaGetString(L, "object");
+
+    def.footprintX = luaGetInt(L, "footprintx", 1);
+    if (def.footprintX <= 0) def.footprintX = luaGetInt(L, "footprintX", 1);
+    def.footprintZ = luaGetInt(L, "footprintz", 1);
+    if (def.footprintZ <= 0) def.footprintZ = luaGetInt(L, "footprintZ", 1);
+
+    def.height = luaGetFloat(L, "height", 0);
+    def.radius = luaGetFloat(L, "radius", 0);
+
+    def.blocking    = luaGetBool(L, "blocking",    true);
+    def.reclaimable = luaGetBool(L, "reclaimable", false);
+    def.metal  = luaGetInt(L, "metal",  0);
+    def.energy = luaGetInt(L, "energy", 0);
+    def.damage = luaGetInt(L, "damage", 0);
+
+    out.push_back(std::move(def));
+}
+
+void ParseFeatureDefFile(lua_State* L,
+                         const fs::path& path,
+                         std::vector<MapFeatureDef>& out) {
+    if (luaL_dofile(L, path.string().c_str()) != LUA_OK) {
+        std::fprintf(stderr, "[features] lua error in %s: %s\n",
+            path.string().c_str(), lua_tostring(L, -1));
+        lua_pop(L, 1);
+        return;
+    }
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        return;
+    }
+
+    // Iterate top-level keys → each is one feature def name.
+    lua_pushnil(L);
+    while (lua_next(L, -2) != 0) {
+        if (lua_isstring(L, -2) && lua_istable(L, -1)) {
+            ParseFeatureDef(L, lua_tostring(L, -2), out);
+        }
+        lua_pop(L, 1); // value, keep key
+    }
+    lua_pop(L, 1); // pop table
+}
+
+// ============================================================
+// Step 2 — run mapconfig/featureplacer/config.lua
+// ============================================================
+//
+//     return {
+//       objectlist = {
+//         { name = 'GreyRock3', x = 1600, z = 300, rot = "10000" },
+//         ...
+//       },
+//       unitlist = {}, buildinglist = {},
+//     }
+//
+// Each entry's `rot` is in Spring's int "heading" units (16-bit angle):
+// 0..65535 maps to 0..2π. We convert to radians here.
+
+float HeadingToRadians(float h) {
+    return h * (2.0f * 3.14159265358979323846f / 65536.0f);
+}
+
+void ParseFeaturePlacements(lua_State* L,
+                            MapMetadata& meta,
+                            std::unordered_map<std::string, int>& nameToIndex) {
+    const std::string configPath =
+        meta.sourcePath + "/mapconfig/featureplacer/config.lua";
+    if (!fs::exists(configPath)) return;
+
+    if (luaL_dofile(L, configPath.c_str()) != LUA_OK) {
+        std::fprintf(stderr, "[features] featureplacer error: %s\n",
+            lua_tostring(L, -1));
+        lua_pop(L, 1);
+        return;
+    }
+    if (!lua_istable(L, -1)) { lua_pop(L, 1); return; }
+
+    lua_getfield(L, -1, "objectlist");
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 2);
+        return;
+    }
+
+    int added = 0;
+    int skipped = 0;
+    const int len = static_cast<int>(lua_rawlen(L, -1));
+    for (int i = 1; i <= len; ++i) {
+        lua_rawgeti(L, -1, i);
+        if (lua_istable(L, -1)) {
+            std::string name = toLower(luaGetString(L, "name"));
+            float x   = luaGetFloat(L, "x", 0);
+            float z   = luaGetFloat(L, "z", 0);
+            float rot = luaGetFloat(L, "rot", 0);
+
+            if (name.empty()) {
+                ++skipped;
+            } else {
+                auto it = nameToIndex.find(name);
+                int typeIndex;
+                if (it == nameToIndex.end()) {
+                    // Unknown name (no def file loaded for it). Register a
+                    // type entry anyway so the wire format is consistent —
+                    // the client will fall back to a placeholder.
+                    typeIndex = static_cast<int>(meta.featureTypes.size());
+                    meta.featureTypes.push_back(name);
+                    nameToIndex[name] = typeIndex;
+                } else {
+                    typeIndex = it->second;
+                }
+                MapFeatureData inst;
+                inst.featureType = typeIndex;
+                inst.x = x;
+                inst.y = 0; // resolved against the heightmap on the client
+                inst.z = z;
+                inst.rotation = HeadingToRadians(rot);
+                inst.relativeSize = 1.0f;
+                meta.features.push_back(inst);
+                ++added;
+            }
+        }
+        lua_pop(L, 1); // pop entry
+    }
+    lua_pop(L, 2); // pop objectlist + outer table
+
+    std::fprintf(stderr,
+        "[features] featureplacer: %d placement(s) added, %d skipped\n",
+        added, skipped);
+}
+
+// ============================================================
+// Step 3 — convert assets via any2gltf + magick
+// ============================================================
+
+/// Run a shell command, capturing combined stdout+stderr. Returns the
+/// exit code; the captured output is logged on failure.
+int RunCommand(const std::string& cmd) {
+    FILE* p = popen(cmd.c_str(), "r");
+    if (!p) return -1;
+    char buf[256];
+    std::string out;
+    while (fgets(buf, sizeof(buf), p)) out += buf;
+    int rc = pclose(p);
+    if (rc != 0) {
+        std::fprintf(stderr, "[features] command failed (%d): %s\n  %s\n",
+            rc, cmd.c_str(), out.c_str());
+    }
+    return rc;
+}
+
+/// Find the source S3O file referenced by a feature def. Spring resolves
+/// `object = "GreyRock1.s3o"` against `objects3d/`, but some maps drop
+/// the prefix or use absolute-from-map paths. Try a small list of
+/// candidates and return the first hit.
+std::string ResolveModelPath(const std::string& mapDir, const std::string& ref) {
+    if (ref.empty()) return {};
+    std::vector<fs::path> candidates;
+    candidates.push_back(fs::path(mapDir) / ref);
+    candidates.push_back(fs::path(mapDir) / "objects3d" / ref);
+    if (ref.rfind("objects3d/", 0) == 0)
+        candidates.push_back(fs::path(mapDir) / ref.substr(strlen("objects3d/")));
+
+    for (const auto& p : candidates) {
+        if (fs::exists(p)) return p.string();
+    }
+    // Case-insensitive last resort: scan objects3d/.
+    fs::path objDir = fs::path(mapDir) / "objects3d";
+    if (fs::is_directory(objDir)) {
+        const std::string wantLower = toLower(fs::path(ref).filename().string());
+        for (auto& entry : fs::directory_iterator(objDir)) {
+            if (!entry.is_regular_file()) continue;
+            if (toLower(entry.path().filename().string()) == wantLower)
+                return entry.path().string();
+        }
+    }
+    return {};
+}
+
+/// Find the texture referenced by an S3O. The S3O file's tex1 field is
+/// just a basename (e.g. "GreyRock1.tga"); Spring searches `unittextures/`
+/// for it. Return the first matching path on disk.
+std::string ResolveTexturePath(const std::string& mapDir, const std::string& basename) {
+    if (basename.empty()) return {};
+    std::vector<fs::path> candidates;
+    candidates.push_back(fs::path(mapDir) / "unittextures" / basename);
+    candidates.push_back(fs::path(mapDir) / basename);
+    candidates.push_back(fs::path(mapDir) / "objects3d" / basename);
+
+    for (const auto& p : candidates) {
+        if (fs::exists(p)) return p.string();
+    }
+    // Case-insensitive scan of unittextures/.
+    fs::path texDir = fs::path(mapDir) / "unittextures";
+    if (fs::is_directory(texDir)) {
+        const std::string wantLower = toLower(basename);
+        for (auto& entry : fs::directory_iterator(texDir)) {
+            if (!entry.is_regular_file()) continue;
+            if (toLower(entry.path().filename().string()) == wantLower)
+                return entry.path().string();
+        }
+    }
+    return {};
+}
+
+/// Read the diffuse texture filename out of an S3O header without parsing
+/// the rest of the file. Used to know which texture to convert before
+/// (or after) running any2gltf.
+std::string ReadS3OTexture1(const std::string& s3oPath) {
+    FILE* f = std::fopen(s3oPath.c_str(), "rb");
+    if (!f) return {};
+    char header[52];
+    if (std::fread(header, 1, sizeof(header), f) != sizeof(header)) {
+        std::fclose(f);
+        return {};
+    }
+    if (std::memcmp(header, "Spring unit", 11) != 0) {
+        std::fclose(f);
+        return {};
+    }
+    uint32_t tex1Off;
+    std::memcpy(&tex1Off, header + 44, 4);
+    if (tex1Off == 0) { std::fclose(f); return {}; }
+    if (std::fseek(f, tex1Off, SEEK_SET) != 0) { std::fclose(f); return {}; }
+    char buf[256] = {0};
+    std::fread(buf, 1, sizeof(buf) - 1, f);
+    std::fclose(f);
+    return std::string(buf);
+}
+
+void ConvertAssetsForDef(MapMetadata& meta, MapFeatureDef& def) {
+    const std::string srcModel = ResolveModelPath(meta.sourcePath, def.modelFile);
+    if (srcModel.empty()) {
+        std::fprintf(stderr, "[features]   %s: model not found ('%s'), skipping\n",
+            def.name.c_str(), def.modelFile.c_str());
+        def.modelFile.clear();
+        return;
+    }
+
+    fs::path featuresDir = fs::path(meta.processedDir) / "features";
+    fs::create_directories(featuresDir);
+
+    // ---- Texture: read the S3O's tex1 field, find on disk, convert ----
+    std::string texBasename = ReadS3OTexture1(srcModel);
+    std::string convertedTextureName;
+    if (!texBasename.empty()) {
+        const std::string srcTex = ResolveTexturePath(meta.sourcePath, texBasename);
+        if (!srcTex.empty()) {
+            // Output filename: same stem, .png extension.
+            const std::string stem = fs::path(texBasename).stem().string();
+            convertedTextureName = stem + ".png";
+            const fs::path dstTex = featuresDir / convertedTextureName;
+            // Skip if up-to-date.
+            if (!fs::exists(dstTex) ||
+                fs::last_write_time(srcTex) > fs::last_write_time(dstTex)) {
+                std::string cmd = "magick \"" + srcTex + "\" \"" +
+                                  dstTex.string() + "\" 2>&1";
+                if (RunCommand(cmd) != 0) {
+                    convertedTextureName.clear();
+                }
+            }
+        } else {
+            std::fprintf(stderr, "[features]   %s: texture '%s' not found in unittextures/\n",
+                def.name.c_str(), texBasename.c_str());
+        }
+    }
+    def.textureFile = convertedTextureName;
+
+    // ---- Model: any2gltf src.s3o features/Name.glb [--texture-ext png] ----
+    const std::string stem = fs::path(srcModel).stem().string();
+    const std::string dstName = stem + ".glb";
+    const fs::path dst = featuresDir / dstName;
+    if (!fs::exists(dst) ||
+        fs::last_write_time(srcModel) > fs::last_write_time(dst)) {
+        std::string cmd = std::string("\"") + ANY2GLTF_BINARY_PATH + "\"";
+        if (!convertedTextureName.empty()) {
+            cmd += " --texture-ext png";
+        }
+        cmd += " \"" + srcModel + "\" \"" + dst.string() + "\" 2>&1";
+        if (RunCommand(cmd) != 0) {
+            std::fprintf(stderr, "[features]   %s: any2gltf failed, no model\n",
+                def.name.c_str());
+            def.modelFile.clear();
+            return;
+        }
+    }
+    def.modelFile = dstName;
+}
+
+} // namespace
+
+// ============================================================
+// Public entry point
+// ============================================================
+
+namespace FeatureProcessor {
+
+void Process(MapMetadata& meta) {
+    // ---- Step 1: parse features/*.lua to populate featureDefs ----
+    fs::path featuresDir = fs::path(meta.sourcePath) / "features";
+    if (!fs::is_directory(featuresDir)) {
+        // Some maps have no Lua feature defs (only SMF-embedded features).
+        // That's fine — we still want to run the placer pass below in case
+        // it references defs from a sibling game.
+    } else {
+        auto savedRoots = CFileHandler::GetContentRoots();
+        lua_State* L = CreateMapLuaState(meta.sourcePath);
+
+        for (auto& entry : fs::directory_iterator(featuresDir)) {
+            if (!entry.is_regular_file()) continue;
+            if (entry.path().extension() != ".lua") continue;
+            ParseFeatureDefFile(L, entry.path(), meta.featureDefs);
+        }
+
+        CloseMapLuaState(L);
+        // Restore exact pre-call state of content roots.
+        CFileHandler::ClearContentRoots();
+        for (const auto& r : savedRoots) CFileHandler::AddContentRoot(r);
+
+        std::fprintf(stderr, "[features] parsed %zu feature def(s) from %s/features/\n",
+            meta.featureDefs.size(), meta.id.c_str());
+    }
+
+    // ---- Step 2: register featureTypes from defs (so type indices are
+    //               consistent across the SMF-extracted features and the
+    //               featureplacer-extracted ones) ----
+    std::unordered_map<std::string, int> nameToIndex;
+    for (size_t i = 0; i < meta.featureTypes.size(); ++i) {
+        nameToIndex[toLower(meta.featureTypes[i])] = static_cast<int>(i);
+    }
+    for (auto& def : meta.featureDefs) {
+        if (nameToIndex.find(def.name) == nameToIndex.end()) {
+            const int idx = static_cast<int>(meta.featureTypes.size());
+            meta.featureTypes.push_back(def.name);
+            nameToIndex[def.name] = idx;
+        }
+    }
+
+    // ---- Step 3: parse mapconfig/featureplacer/config.lua ----
+    if (fs::exists(meta.sourcePath + "/mapconfig/featureplacer/config.lua")) {
+        auto savedRoots = CFileHandler::GetContentRoots();
+        lua_State* L = CreateMapLuaState(meta.sourcePath);
+        ParseFeaturePlacements(L, meta, nameToIndex);
+        CloseMapLuaState(L);
+        CFileHandler::ClearContentRoots();
+        for (const auto& r : savedRoots) CFileHandler::AddContentRoot(r);
+    }
+
+    // ---- Step 4: re-align featureDefs to be parallel to featureTypes ----
+    // featureTypes is the canonical index list; featureDefs is what we
+    // serialise alongside it. Build a parallel-indexed defs vector.
+    std::vector<MapFeatureDef> alignedDefs(meta.featureTypes.size());
+    for (size_t i = 0; i < meta.featureTypes.size(); ++i) {
+        alignedDefs[i].name = meta.featureTypes[i];
+    }
+    for (const auto& def : meta.featureDefs) {
+        auto it = nameToIndex.find(def.name);
+        if (it != nameToIndex.end()) {
+            alignedDefs[it->second] = def;
+        }
+    }
+    meta.featureDefs = std::move(alignedDefs);
+
+    // ---- Step 5: convert assets for each def that has a model ----
+    int converted = 0;
+    int skipped = 0;
+    for (auto& def : meta.featureDefs) {
+        if (def.modelFile.empty()) { ++skipped; continue; }
+        ConvertAssetsForDef(meta, def);
+        if (!def.modelFile.empty()) ++converted;
+    }
+    std::fprintf(stderr,
+        "[features] %s: %d def(s) converted, %d skipped, %zu placement(s)\n",
+        meta.id.c_str(), converted, skipped, meta.features.size());
+}
+
+} // namespace FeatureProcessor

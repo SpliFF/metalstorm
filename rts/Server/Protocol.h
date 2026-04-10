@@ -262,6 +262,35 @@ inline std::vector<uint8_t> BuildMapData(const MapMetadata& m) {
     }
     auto featuresOff = fbb.CreateVector(featOffs);
 
+    // Feature defs — parallel to feature_types. Each entry's model/texture
+    // URLs point at the converted assets in the map's processed dir.
+    std::vector<flatbuffers::Offset<SpringWeb::MapFeatureDef>> defOffs;
+    defOffs.reserve(m.featureDefs.size());
+    for (const auto& d : m.featureDefs) {
+        auto nameOff = fbb.CreateString(d.name);
+        auto modelOff = d.modelFile.empty()
+            ? fbb.CreateString("")
+            : fbb.CreateString("/api/maps/data/" + m.id + "/features/" + d.modelFile);
+        auto texOff = d.textureFile.empty()
+            ? fbb.CreateString("")
+            : fbb.CreateString("/api/maps/data/" + m.id + "/features/" + d.textureFile);
+        SpringWeb::MapFeatureDefBuilder fdb(fbb);
+        fdb.add_name(nameOff);
+        fdb.add_model_url(modelOff);
+        fdb.add_texture_url(texOff);
+        fdb.add_footprint_x(static_cast<uint16_t>(d.footprintX));
+        fdb.add_footprint_z(static_cast<uint16_t>(d.footprintZ));
+        fdb.add_height(d.height);
+        fdb.add_radius(d.radius);
+        fdb.add_blocking(d.blocking);
+        fdb.add_reclaimable(d.reclaimable);
+        fdb.add_metal(d.metal);
+        fdb.add_energy(d.energy);
+        fdb.add_damage(d.damage);
+        defOffs.push_back(fdb.Finish());
+    }
+    auto featureDefsOff = fbb.CreateVector(defOffs);
+
     // --- Decals ---
     auto decalUrl = [&](const std::string& f) {
         if (f.empty()) return fbb.CreateString("");
@@ -331,6 +360,7 @@ inline std::vector<uint8_t> BuildMapData(const MapMetadata& m) {
     mdb.add_start_positions(spsOff);
     mdb.add_feature_types(typesOff);
     mdb.add_features(featuresOff);
+    mdb.add_feature_defs(featureDefsOff);
     if (!hmOff.IsNull()) mdb.add_heightmap(hmOff);
     if (!tiOff.IsNull()) mdb.add_tileindex(tiOff);
     mdb.add_typemap(tmOff);

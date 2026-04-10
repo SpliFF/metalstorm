@@ -404,6 +404,9 @@ int main(int argc, char* argv[])
         if (ext == ".ktx2") ct = "image/ktx2";
         else if (ext == ".json") ct = "application/json";
         else if (ext == ".png") ct = "image/png";
+        else if (ext == ".webp") ct = "image/webp";
+        else if (ext == ".glb") ct = "model/gltf-binary";
+        else if (ext == ".gltf") ct = "model/gltf+json";
 
         return {
             .contentType = ct,

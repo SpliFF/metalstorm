@@ -344,6 +344,34 @@ table MapFeature {
     relative_size: float;
 }
 
+/// Definition of a feature type — corresponds 1:1 with an entry in
+/// `MapData.feature_types` (same indices). Tells the client how to render
+/// and interact with feature instances of this type. Parsed by the server
+/// from the map's `features/*.lua` and converted into web-ready assets:
+///
+///   - `model_url` is an HTTP URL to a glTF 2.0 binary (`.glb`)
+///     converted from the original `.s3o` via the any2gltf tool.
+///   - `texture_url` is an HTTP URL to a PNG converted from the
+///     original `.tga`/`.dds` via ImageMagick.
+///
+/// Both URLs may be empty strings if the def has no model (e.g. an
+/// invisible decal feature) or its assets failed to convert; in that
+/// case the client falls back to a placeholder.
+table MapFeatureDef {
+    name: string;             // canonical lowercase def key
+    model_url: string;        // HTTP path to .glb (relative to lobby root)
+    texture_url: string;      // HTTP path to .png (relative to lobby root)
+    footprint_x: uint16;
+    footprint_z: uint16;
+    height: float;
+    radius: float;
+    blocking: bool;
+    reclaimable: bool;
+    metal: int32;
+    energy: int32;
+    damage: int32;            // hit points
+}
+
 /// Water rendering properties. Spring's water system is also used for
 /// lava/acid/void-fill — the colour and damage distinguish them.
 /// Water plane is at world Y = 0; terrain below that is flooded.
@@ -389,6 +417,10 @@ table MapData {
     start_positions: [MapStartPos];
     feature_types: [string];
     features: [MapFeature];
+    /// Parallel to `feature_types` (same indices). Each entry tells the
+    /// client how to render and interact with feature instances of that
+    /// type.
+    feature_defs: [MapFeatureDef];
     heightmap: [uint16];        // (mapx+1)*(mapy+1) corner heights
     tileindex: [int32];         // tilesX*tilesZ tile indices
     typemap: [ubyte];           // (mapx/2)*(mapy/2) terrain types
