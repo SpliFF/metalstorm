@@ -26,6 +26,9 @@ let audioManager: AudioManager | null = null;
 let inputManager: InputManager | null = null;
 let lobbyUI: LobbyUI | null = null;
 let minimap: Minimap | null = null;
+/// Game server WebSocket. Non-null while a game is active. Hoisted out
+/// of startGame() so the quit-to-lobby handler can close it cleanly.
+let gameConn: Connection | null = null;
 
 // --- HUD ---
 
@@ -37,6 +40,7 @@ function createHUD(): void {
         <div id="hud-top-bar" class="hud-panel">
             <span id="hud-entities">Entities: 0</span>
             <span id="hud-frame">Frame: 0</span>
+            <button id="hud-quit-btn" title="Quit to lobby (ESC)">Quit</button>
         </div>
         <div id="hud-selection" class="hud-panel">
             <span id="hud-selected">No selection</span>
@@ -46,10 +50,14 @@ function createHUD(): void {
             <button id="detach-minimap-btn" style="margin-top:4px;font-size:11px;padding:4px 8px;">Detach ↗</button>
         </div>
         <div id="hud-help" class="hud-panel">
-            Left click: select &nbsp; Right click: move/attack &nbsp; S: stop &nbsp; Shift: queue
+            Left click: select &nbsp; Right click: move/attack &nbsp; S: stop &nbsp; Shift: queue &nbsp; ESC: quit
         </div>
     `;
     document.body.appendChild(hud);
+
+    document.getElementById('hud-quit-btn')?.addEventListener('click', () => {
+        showQuitConfirm();
+    });
 
     const style = document.createElement('style');
     style.textContent = `
@@ -65,8 +73,16 @@ function createHUD(): void {
         }
         #hud-top-bar {
             position: absolute; top: 8px; left: 8px;
-            display: flex; gap: 24px;
+            display: flex; gap: 24px; align-items: center;
         }
+        #hud-quit-btn {
+            pointer-events: auto;
+            padding: 4px 12px; margin-left: auto;
+            background: #552222; color: #f0c0c0;
+            border: 1px solid #882222; border-radius: 4px;
+            font: inherit; cursor: pointer;
+        }
+        #hud-quit-btn:hover { background: #772222; color: #fff; }
         #hud-selection {
             position: absolute; bottom: 48px; left: 8px; min-width: 200px;
         }
@@ -125,6 +141,111 @@ function sendCameraViewport(camera: FreeCamera, connection: Connection): void {
 
 let currentFrame = 0;
 
+/// Tear down the active game session and show the lobby browser. Safe to
+/// call from any in-game context: "Quit" button, ESC-confirm, Game Over
+/// overlay, or an error handler. No-op if no game is active.
+function quitToLobby(): void {
+    // Close the game WebSocket cleanly before disposing the renderer —
+    // that way any "player left" hint reaches the game server before
+    // our send queue gets torn down.
+    gameConn?.disconnect();
+    gameConn = null;
+
+    // Clear saved game state so a page refresh lands on the lobby.
+    localStorage.removeItem('springrts-game-room');
+    localStorage.removeItem('springrts-game-port');
+
+    // Tear down Babylon + the per-session helpers. Most of these hold
+    // references to the engine/scene, so letting GC collect them is
+    // enough — we just drop our handles.
+    engine?.stopRenderLoop();
+    engine?.dispose();
+    engine = null;
+    entityRenderer = null;
+    combatFX = null;
+    audioManager = null;
+    inputManager = null;
+    minimap = null;
+
+    // Hide the game canvas and HUD. Any in-flight overlays (quit confirm,
+    // game over) are removed here too so the lobby is the only thing left.
+    const canvas = document.getElementById('game-canvas') as HTMLCanvasElement | null;
+    if (canvas) canvas.style.display = 'none';
+    const hud = document.getElementById('game-hud');
+    if (hud) hud.style.display = 'none';
+    document.getElementById('quit-confirm-overlay')?.remove();
+    document.getElementById('game-over-overlay')?.remove();
+
+    // Show the lobby browser. The lobby WebSocket stayed connected the
+    // whole time — the player is simply back in the room list.
+    lobbyUI?.showBrowser();
+    lobbyUI?.show();
+}
+
+/// Show an "are you sure?" overlay with Quit / Cancel buttons. Toggle-safe:
+/// calling this while the overlay is already visible closes it instead
+/// (so ESC works as an open/close toggle).
+function showQuitConfirm(): void {
+    const existing = document.getElementById('quit-confirm-overlay');
+    if (existing) {
+        existing.remove();
+        return;
+    }
+
+    const overlay = document.createElement('div');
+    overlay.id = 'quit-confirm-overlay';
+    overlay.innerHTML = `
+        <div class="quit-card">
+            <h2>Quit to Lobby?</h2>
+            <p>Your game is still running. You can rejoin from the lobby.</p>
+            <div class="quit-buttons">
+                <button id="quit-cancel-btn">Cancel</button>
+                <button id="quit-confirm-btn">Quit to Lobby</button>
+            </div>
+        </div>
+    `;
+    overlay.style.cssText = `
+        position: fixed; inset: 0; z-index: 150;
+        background: rgba(0,0,0,0.7);
+        display: flex; align-items: center; justify-content: center;
+        font-family: system-ui, sans-serif; color: #e0e0e0;
+    `;
+
+    // One-shot style injection — guarded by an id so repeated quit
+    // prompts don't spam the head with duplicate <style> tags.
+    if (!document.getElementById('quit-confirm-style')) {
+        const style = document.createElement('style');
+        style.id = 'quit-confirm-style';
+        style.textContent = `
+            .quit-card {
+                background: #16213e; border-radius: 10px; padding: 28px 36px;
+                text-align: center; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+                min-width: 320px;
+            }
+            .quit-card h2 { color: #e0e0e0; margin: 0 0 10px; font-size: 20px; }
+            .quit-card p { color: #888; margin: 0 0 20px; font-size: 13px; }
+            .quit-buttons { display: flex; gap: 10px; justify-content: center; }
+            .quit-buttons button {
+                padding: 10px 20px; border: none; border-radius: 5px;
+                font: inherit; font-weight: 600; cursor: pointer;
+            }
+            #quit-cancel-btn { background: #2a3a5a; color: #c0c0c0; }
+            #quit-cancel-btn:hover { background: #3a4a6a; color: #fff; }
+            #quit-confirm-btn { background: #aa3333; color: #fff; }
+            #quit-confirm-btn:hover { background: #cc3333; }
+        `;
+        document.head.appendChild(style);
+    }
+
+    document.body.appendChild(overlay);
+    document.getElementById('quit-cancel-btn')?.addEventListener('click', () => {
+        overlay.remove();
+    });
+    document.getElementById('quit-confirm-btn')?.addEventListener('click', () => {
+        quitToLobby();
+    });
+}
+
 function showGameOver(frame: number): void {
     const overlay = document.createElement('div');
     overlay.id = 'game-over-overlay';
@@ -159,20 +280,7 @@ function showGameOver(frame: number): void {
     document.body.appendChild(overlay);
 
     document.getElementById('return-lobby-btn')!.onclick = () => {
-        overlay.remove();
-        // Clear saved game state
-        localStorage.removeItem('springrts-game-room');
-        localStorage.removeItem('springrts-game-port');
-        // Hide game, show lobby
-        const canvas = document.getElementById('game-canvas') as HTMLCanvasElement;
-        canvas.style.display = 'none';
-        const hud = document.getElementById('game-hud');
-        if (hud) hud.style.display = 'none';
-        engine?.stopRenderLoop();
-        engine?.dispose();
-        engine = null;
-        lobbyUI?.showBrowser();
-        lobbyUI?.show();
+        quitToLobby();
     };
 }
 
@@ -288,8 +396,12 @@ async function startGame(gameServerPort: number): Promise<void> {
             console.log(`[water] plane rendered: baseColor=(${r.toFixed(2)},${g.toFixed(2)},${b.toFixed(2)}) damage=${map.water.damage}`);
         }
 
-        // Render features as placeholder boxes
-        renderMapFeatures(scene, map);
+        // Render features. Loads each unique feature def's .glb model
+        // asynchronously and thin-instances every placement of that type.
+        // Types without a converted model fall back to placeholder boxes.
+        renderMapFeatures(scene, map).catch((err) => {
+            console.error('[features] renderMapFeatures failed', err);
+        });
 
         // Wire the minimap: update dimensions and load the same DXT1 atlas
         // as the main terrain via its own Babylon engine.
@@ -323,8 +435,13 @@ async function startGame(gameServerPort: number): Promise<void> {
         }
     };
 
-    // Connect to the game server (separate from lobby connection)
-    const gameConn = new Connection({
+    // Connect to the game server (separate from lobby connection).
+    // Assigned to the module-level `gameConn` so the quit handler can
+    // close it cleanly from outside this function. We also keep a
+    // non-null local alias `conn` for use inside this function —
+    // TypeScript can't narrow the module-level binding across the
+    // async callbacks below, so we hand them `conn` instead.
+    const conn: Connection = new Connection({
         onAuthenticated() {
             console.log(`[game] connected to game server on port ${gameServerPort}`);
         },
@@ -350,13 +467,14 @@ async function startGame(gameServerPort: number): Promise<void> {
             showGameOver(frame);
         },
     });
+    gameConn = conn;
 
     // Use same credentials — game server auto-registers too
     // TODO: pass session token from lobby for proper auth
-    gameConn.connect(gameWsUrl, 'player1', 'pass');
+    conn.connect(gameWsUrl, 'player1', 'pass');
 
     // Input
-    inputManager = new InputManager(scene, camera, entityRenderer, gameConn,
+    inputManager = new InputManager(scene, camera, entityRenderer, conn,
         (ids) => minimap?.setSelection(ids));
 
     // Minimap (initial size — rebound on MapData arrival)
@@ -365,7 +483,7 @@ async function startGame(gameServerPort: number): Promise<void> {
         if (container && entityRenderer) {
             minimap = new Minimap(
                 { mapWidth: 8192, mapHeight: 8192, parentElement: container, size: 200 },
-                entityRenderer, gameConn);
+                entityRenderer, conn);
 
             minimap.onCameraMove = (x, z) => {
                 rtsCamera.focusOn(x, z);
@@ -392,7 +510,7 @@ async function startGame(gameServerPort: number): Promise<void> {
         scene.render();
 
         if (now - lastViewportSend > 100) {
-            sendCameraViewport(camera, gameConn);
+            sendCameraViewport(camera, conn);
             lastViewportSend = now;
         }
 
@@ -419,6 +537,16 @@ document.addEventListener('DOMContentLoaded', () => {
     // Hide canvas until game starts
     const canvas = document.getElementById('game-canvas') as HTMLCanvasElement;
     canvas.style.display = 'none';
+
+    // Global ESC handler: toggle the quit-to-lobby confirmation. Only
+    // active while a game is running (detected by a non-null `engine`),
+    // so ESC stays free for lobby UI dialogs.
+    window.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        if (!engine) return;
+        e.preventDefault();
+        showQuitConfirm();
+    });
 
     // Show lobby
     lobbyUI = new LobbyUI((gameServerPort: number) => {
