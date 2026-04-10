@@ -433,11 +433,32 @@ void CSimulation::Init(const std::string& mapName)
     InitSubsystems(hasMap);
     mapLoaded = hasMap;
 
-    // Spawn test units if we have defs + map
-    SetupTestGame();
-
-    // Start game scripting (LuaRules, LuaGaia) via the abstraction layer
+    // Start game scripting (LuaRules, LuaGaia) BEFORE spawning any
+    // units. If we spawned first, every UnitCreated / UnitFinished
+    // event would fire before the gadget handler had a chance to
+    // register its listeners — gadgets would load into a world full
+    // of units they never saw being born. Real Spring games rely on
+    // game_spawn.lua firing from GameStart to create starting units,
+    // which avoids the ordering problem entirely; we preserve that
+    // invariant here so ported gadgets behave the same way.
     InitScripting();
+
+    // Fire GameStart once LuaRules is live. Real Spring calls this
+    // after the loading screen finishes; we do it immediately after
+    // script init since there's no loading screen to wait for.
+    // Without this, gadget:GameStart() callins never fire and
+    // anything that initialises team state / spawns starting units
+    // from there silently does nothing.
+    if (scriptingLoaded) {
+        std::fprintf(stderr, "[sim] firing GameStart\n");
+        eventHandler.GameStart();
+    }
+
+    // Spawn test units for development / headless integration
+    // testing. In a real game this call goes away — starting units
+    // come from a LuaRules `game_spawn` gadget, which runs at this
+    // point because GameStart has now fired.
+    SetupTestGame();
 
     running = true;
     std::fprintf(stderr, "[sim] initialised (frame %d, defs=%s, map=%s)\n",
