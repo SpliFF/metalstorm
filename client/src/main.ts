@@ -4,17 +4,20 @@
  * Flow: Login → Room Browser → Room Setup → Game
  */
 
-import { Engine, Scene, FreeCamera, Vector3, HemisphericLight, DirectionalLight, Color3, Color4 } from '@babylonjs/core';
+import { Engine, Scene, FreeCamera, Mesh, MeshBuilder, StandardMaterial, Vector3, HemisphericLight, DirectionalLight, Color3, Color4 } from '@babylonjs/core';
 import { EntityRenderer } from './core/entity-renderer.js';
 import { CombatFX } from './core/combat-fx.js';
 import { AudioManager } from './core/audio.js';
 import { InputManager } from './core/input-manager.js';
-import { loadTerrain } from './core/terrain.js';
-import { loadTerrainTexture } from './core/terrain-texture.js';
+import { buildTerrainMesh, loadTerrainTextures, type MapDimensions } from './core/terrain.js';
 import { LobbyUI } from './lobby/lobby-ui.js';
 import { Minimap } from './core/minimap.js';
 import { Connection } from './core/connection.js';
 import { CONFIG } from './config.js';
+import type { ParsedMapData } from './core/map-data.js';
+import { renderMapFeatures } from './core/feature-renderer.js';
+import { RTSCamera } from './core/rts-camera.js';
+import { LuaWidgetHost } from './core/lua-widget-host.js';
 
 let engine: Engine | null = null;
 let entityRenderer: EntityRenderer | null = null;
@@ -182,7 +185,143 @@ async function startGame(gameServerPort: number): Promise<void> {
     // Build game server URL
     const host = window.location.hostname || 'localhost';
     const gameWsUrl = `ws://${host}:${gameServerPort}`;
-    const gameHttpUrl = `http://${host}:${gameServerPort}`;
+    const lobbyHttpUrl = CONFIG.httpUrl; // static asset host
+
+    engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
+    const scene = new Scene(engine);
+    scene.clearColor = new Color4(0.05, 0.08, 0.12, 1);
+
+    // Default camera pointing at origin — repositioned when MapData arrives
+    const camera = new FreeCamera('camera', new Vector3(0, 1200, -1500), scene);
+    camera.setTarget(new Vector3(0, 0, 0));
+    camera.minZ = 1;
+    camera.maxZ = 50000;
+
+    // RTS controls — WASD pan, wheel zoom, edge scrolling. Replaces the
+    // default FreeCamera mouse-look input.
+    const rtsCamera = new RTSCamera(camera, canvas, {
+        minHeight: 150,
+        maxHeight: 6000,
+        panSpeed: 1000,
+        // Small per-notch step; tick() eases the actual distance toward
+        // the target over several frames for a smooth feel.
+        zoomStep: 0.08,
+    });
+
+    const ambient = new HemisphericLight('ambient', new Vector3(0, 1, 0), scene);
+    ambient.intensity = 0.7;
+    ambient.diffuse = new Color3(0.8, 0.85, 1.0);
+    ambient.groundColor = new Color3(0.3, 0.25, 0.2);
+
+    const sun = new DirectionalLight('sun', new Vector3(-0.5, -1, 0.3).normalize(), scene);
+    sun.intensity = 1.5;
+    sun.diffuse = new Color3(1.0, 0.95, 0.85);
+
+    entityRenderer = new EntityRenderer(scene);
+    audioManager = new AudioManager();
+    combatFX = new CombatFX(scene, audioManager);
+
+    canvas.addEventListener('click', () => audioManager?.resume(), { once: true });
+
+    // Terrain state — populated when MapData arrives
+    let terrainMesh: Mesh | null = null;
+    let currentMapData: ParsedMapData | null = null;
+    let currentWidgetHost: LuaWidgetHost | null = null;
+
+    const onMapData = (map: ParsedMapData): void => {
+        if (currentMapData) {
+            console.log('[client] ignoring duplicate MapData');
+            return;
+        }
+        currentMapData = map;
+        console.log(`[client] MapData received: ${map.mapx}x${map.mapy}, ` +
+            `${map.features.length} features, ${map.startPositions.length} start positions`);
+
+        // Absolute URL for HTTP resources (lobby-served)
+        const mapBaseUrl = lobbyHttpUrl + map.mapDataUrl;
+
+        // Position camera at map centre
+        const cx = map.widthElmos / 2;
+        const cz = map.heightElmos / 2;
+        camera.position.set(cx, 1200, cz - 1500);
+        camera.setTarget(new Vector3(cx, 0, cz));
+        rtsCamera.recomputeAxes();
+        rtsCamera.focusOn(cx, cz);
+
+        // Build terrain mesh from embedded heightmap
+        const mapDims: MapDimensions = {
+            mapx: map.mapx, mapy: map.mapy,
+            minHeight: map.minHeight, maxHeight: map.maxHeight,
+            tilesX: map.tilesX, tilesZ: map.tilesZ,
+        };
+        terrainMesh = buildTerrainMesh(scene, mapDims, map.heightmap);
+        console.log('[client] terrain mesh built from MapData heightmap');
+
+        // Load DXT1 tile textures via HTTP
+        if (map.tilesX > 0 && map.tilesZ > 0) {
+            loadTerrainTextures(scene, terrainMesh, mapBaseUrl, mapDims).catch(e => {
+                console.warn('[client] terrain texture loading failed:', e);
+            });
+        }
+
+        // Render the fallback water plane. Maps with voidWater=true have
+        // disabled Spring's built-in water renderer, typically because
+        // they ship a Lua widget to draw custom fluid (lava, acid, etc.)
+        // — the widget host below will run that widget.
+        if (!map.water.voidWater) {
+            const water = MeshBuilder.CreateGround('water', {
+                width: map.widthElmos,
+                height: map.heightElmos,
+            }, scene);
+            water.position.x = map.widthElmos / 2;
+            water.position.z = map.heightElmos / 2;
+            water.position.y = 0;
+            water.isPickable = false;
+            const wmat = new StandardMaterial('waterMat', scene);
+            const [r, g, b] = map.water.baseColor;
+            wmat.diffuseColor = new Color3(r, g, b);
+            wmat.emissiveColor = new Color3(r * 0.3, g * 0.3, b * 0.3);
+            wmat.specularColor = new Color3(0.2, 0.2, 0.2);
+            wmat.alpha = Math.max(0.4, map.water.surfaceAlpha);
+            wmat.backFaceCulling = false;
+            water.material = wmat;
+            console.log(`[water] plane rendered: baseColor=(${r.toFixed(2)},${g.toFixed(2)},${b.toFixed(2)}) damage=${map.water.damage}`);
+        }
+
+        // Render features as placeholder boxes
+        renderMapFeatures(scene, map);
+
+        // Wire the minimap: update dimensions and load the same DXT1 atlas
+        // as the main terrain via its own Babylon engine.
+        if (minimap) {
+            minimap.setMapDimensions(map.widthElmos, map.heightElmos);
+            minimap.loadBackground(mapBaseUrl, mapDims);
+        }
+
+        // Load any LuaUI widgets the map ships (mapinfo.lua water shaders,
+        // lava layer rendering, etc.). Widgets are fetched from
+        // /api/maps/source/{mapId}/... and executed via fengari.
+        if (map.widgets.length > 0) {
+            const host = new LuaWidgetHost(scene, camera, {
+                ...map,
+                // Make the source URL absolute so widget fetches resolve
+                // against the lobby HTTP server, not the Vite dev server.
+                mapSourceUrl: lobbyHttpUrl + map.mapSourceUrl,
+            }, {
+                // Pre-fetch Paper Tanks' LuaUI base and run it in every
+                // widget's Lua state before the widget's own source, so
+                // widgetHandler / WG / LUAUI_DIRNAME are in scope.
+                // TODO: derive gameId from the room's selected game.
+                gameId: 'papertanks',
+            });
+            void host.loadWidgets(map.widgets).then(() => {
+                console.log(`[client] ${map.widgets.length} widget(s) loaded`);
+            }).catch(e => {
+                console.warn('[client] widget loading failed:', e);
+            });
+            currentWidgetHost = host;
+        }
+    };
 
     // Connect to the game server (separate from lobby connection)
     const gameConn = new Connection({
@@ -192,6 +331,7 @@ async function startGame(gameServerPort: number): Promise<void> {
         onAuthFailed(msg: string) {
             console.error(`[game] auth failed: ${msg}`);
         },
+        onMapData,
         onEntityState(snapshot, isDelta) {
             entityRenderer?.update(snapshot, isDelta);
             currentFrame++;
@@ -215,92 +355,20 @@ async function startGame(gameServerPort: number): Promise<void> {
     // TODO: pass session token from lobby for proper auth
     gameConn.connect(gameWsUrl, 'player1', 'pass');
 
-    engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
-    const scene = new Scene(engine);
-    scene.clearColor = new Color4(0.05, 0.08, 0.12, 1);
-
-    // Fetch map info from game server to position camera
-    let mapW = 8192, mapH = 8192;
-    // Wait a moment for the game server to start, then fetch
-    for (let attempt = 0; attempt < 10; attempt++) {
-        try {
-            const infoResp = await fetch(`${gameHttpUrl}/api/map/info`);
-            if (infoResp.ok) {
-                const info = await infoResp.json();
-                mapW = info.widthElmos ?? 8192;
-                mapH = info.heightElmos ?? 8192;
-                break;
-            }
-        } catch { /* server not ready yet */ }
-        await new Promise(r => setTimeout(r, 500));
-    }
-
-    const mapCenterX = mapW / 2;
-    const mapCenterZ = mapH / 2;
-
-    const camera = new FreeCamera('camera',
-        new Vector3(mapCenterX, 1200, mapCenterZ - 1500), scene);
-    camera.setTarget(new Vector3(mapCenterX, 0, mapCenterZ));
-    camera.attachControl(canvas, true);
-    camera.speed = 80;
-    camera.minZ = 1;
-    camera.maxZ = 50000;
-
-    const ambient = new HemisphericLight('ambient', new Vector3(0, 1, 0), scene);
-    ambient.intensity = 0.7;
-    ambient.diffuse = new Color3(0.8, 0.85, 1.0);
-    ambient.groundColor = new Color3(0.3, 0.25, 0.2);
-
-    const sun = new DirectionalLight('sun', new Vector3(-0.5, -1, 0.3).normalize(), scene);
-    sun.intensity = 1.5;
-    sun.diffuse = new Color3(1.0, 0.95, 0.85);
-
-    entityRenderer = new EntityRenderer(scene);
-    audioManager = new AudioManager();
-    combatFX = new CombatFX(scene, audioManager);
-
-    canvas.addEventListener('click', () => audioManager?.resume(), { once: true });
-
-    // Load terrain heightmap mesh from game server
-    const terrainMesh = await loadTerrain(scene, gameHttpUrl);
-    if (terrainMesh) console.log('[client] terrain heightmap loaded');
-
-    // Load map textures from lobby server (KTX2 chunks processed at startup)
-    const lobbyHttpUrl = `http://${host}:${CONFIG.gameServerPort}`;
-    let mapDataUrl = '';
-    try {
-        const mapsResp = await fetch(`${lobbyHttpUrl}/api/maps`);
-        if (mapsResp.ok) {
-            const maps = await mapsResp.json();
-            if (maps.length > 0) {
-                const mapId = maps[0].id;
-                mapDataUrl = `${lobbyHttpUrl}/api/maps/data/${mapId}`;
-                loadTerrainTexture(scene, mapDataUrl, terrainMesh ?? undefined);
-            }
-        }
-    } catch { /* lobby not reachable from game context — texture loading skipped */ }
-
     // Input
     inputManager = new InputManager(scene, camera, entityRenderer, gameConn,
         (ids) => minimap?.setSelection(ids));
 
-    // Minimap
+    // Minimap (initial size — rebound on MapData arrival)
     {
         const container = document.getElementById('minimap-container');
         if (container && entityRenderer) {
             minimap = new Minimap(
-                { mapWidth: mapW, mapHeight: mapH, parentElement: container, size: 200 },
+                { mapWidth: 8192, mapHeight: 8192, parentElement: container, size: 200 },
                 entityRenderer, gameConn);
 
-            // Load minimap background texture
-            if (mapDataUrl) {
-                minimap.loadBackground(mapDataUrl + '/minimap.png');
-            }
-
             minimap.onCameraMove = (x, z) => {
-                camera.position.x = x;
-                camera.position.z = z - 800;
-                camera.setTarget(new Vector3(x, 0, z));
+                rtsCamera.focusOn(x, z);
             };
             document.getElementById('detach-minimap-btn')?.addEventListener('click', () => {
                 minimap?.detach();
@@ -318,6 +386,7 @@ async function startGame(gameServerPort: number): Promise<void> {
         const dt = (now - lastFrameTime) / 1000;
         lastFrameTime = now;
 
+        rtsCamera.tick();
         entityRenderer?.tick();
         combatFX?.tick(dt);
         scene.render();

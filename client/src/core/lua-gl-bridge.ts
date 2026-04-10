@@ -1,0 +1,910 @@
+/**
+ * LuaGLBridge — implements the Spring `gl.*` Lua API against a raw WebGL2
+ * context. This is the minimum surface area needed to run the
+ * `lava_layer.lua` widget from Scorched Crossing.
+ *
+ * Scope for this first pass:
+ *   - gl.CreateShader / UseShader / DeleteShader / Uniform* / GetShaderLog
+ *       with GLSL 150 compatibility → GLSL ES 300 translation
+ *   - gl.CreateTexture / DeleteTexture / Texture(unit, handle|path|false)
+ *   - gl.CreateFBO / ActiveFBO / DeleteFBO
+ *   - gl.GetVAO with a DrawArrays(mode, count, first, instanceCount) method
+ *   - gl.Blending / DepthTest / DepthMask / PushAttrib / PopAttrib / Clear
+ *   - Immediate mode (BeginEnd / Vertex / TexCoord / Color / Rect) — stubbed
+ *     out for now; the lava widget's immediate-mode path is only used by
+ *     its auxiliary smoothHM texture which we bypass by feeding the real
+ *     terrain heightmap as the heightmap sampler instead.
+ *
+ * The bridge needs a raw WebGL2RenderingContext. In our setup Babylon.js
+ * owns the canvas and context, so we grab it from the engine.
+ *
+ * State hygiene: between widget calls Babylon does not know about shader
+ * programs or buffers we bound. Before widget draw calls we snapshot
+ * minimal GL state (program, active texture bindings, blend/depth) and
+ * restore it afterwards so the next Babylon frame is undisturbed.
+ */
+import { markOpaque, type LuaValue } from './lua-runtime.js';
+
+/** Handle returned by gl.CreateShader — opaque to Lua. */
+export interface LuaShaderHandle {
+    __type: 'shader';
+    program: WebGLProgram;
+    uniforms: Map<string, WebGLUniformLocation>;
+}
+
+/** Handle returned by gl.CreateTexture. */
+export interface LuaTextureHandle {
+    __type: 'texture';
+    tex: WebGLTexture;
+    width: number;
+    height: number;
+}
+
+/** Handle returned by gl.CreateFBO. */
+export interface LuaFBOHandle {
+    __type: 'fbo';
+    fbo: WebGLFramebuffer;
+    colorAttachments: LuaTextureHandle[];
+}
+
+/**
+ * Handle returned by gl.GetVAO. Must be a plain Lua table (not opaque
+ * userdata) so the widget can call `VAO:DrawArrays(...)` / `VAO:Delete()`
+ * — Lua's method-call sugar (`:`) requires the value to be indexable
+ * with a metatable, which lightuserdata lacks.
+ *
+ * The DrawArrays/Delete functions receive the VAO table as their first
+ * argument via the `:` sugar and must ignore it.
+ */
+export interface LuaVAOHandle {
+    __type: 'vao';
+    DrawArrays(
+        _self: LuaValue,
+        mode: LuaValue,
+        count: LuaValue,
+        first: LuaValue,
+        instanceCount: LuaValue,
+    ): void;
+    Delete(_self: LuaValue): void;
+}
+
+/** Textures bound by name — Spring's engine texture slots like "$heightmap". */
+export interface EngineTextures {
+    /** Heightmap sampler in [0,1] normalised form. */
+    heightmap?: WebGLTexture;
+    /** Shadow map (optional — stubbed to 1x1 white). */
+    shadow?: WebGLTexture;
+    /** Info tex (optional — stubbed to 1x1 black). */
+    info?: WebGLTexture;
+}
+
+/**
+ * Cache of image-loaded textures keyed by normalised path. Populated
+ * lazily as Lua code references them.
+ */
+type TextureCache = Map<string, LuaTextureHandle>;
+
+/**
+ * Per-ActiveFBO-call state. We don't actually bind the real framebuffer
+ * and draw immediate-mode quads — instead we redirect `gl.Color` / `gl.Rect`
+ * into a CPU pixel buffer sized to the color0 attachment, then at the end
+ * of the callback we upload the buffer to the attachment via texSubImage2D.
+ *
+ * This lets the lava_layer widget build its coast-detection heightmap
+ * texture without us having to implement full OpenGL immediate mode.
+ */
+interface ActiveFBOState {
+    fbo: LuaFBOHandle;
+    width: number;
+    height: number;
+    pixels: Uint8ClampedArray;
+    // Current color in 8-bit RGBA (written by gl.Color).
+    currentColor: [number, number, number, number];
+}
+
+export class LuaGLBridge {
+    private gl: WebGL2RenderingContext;
+    /** Map source URL base — used to resolve `:a:LuaUI\\Images\\foo.png` → HTTP fetch. */
+    private mapSourceUrl: string;
+    private engineTex: EngineTextures;
+    /** Currently bound shader — tracked so gl.Uniform* calls target the right program. */
+    private currentShader: LuaShaderHandle | null = null;
+    /** Immediate-mode state — written by gl.Color/gl.Rect inside gl.ActiveFBO.
+     *  Null outside of ActiveFBO. */
+    private activeFBOState: ActiveFBOState | null = null;
+    private textureCache: TextureCache = new Map();
+    /** 1x1 fallback textures. */
+    private whiteTex: WebGLTexture | null = null;
+    private blackTex: WebGLTexture | null = null;
+
+    constructor(gl: WebGL2RenderingContext, mapSourceUrl: string, engineTex: EngineTextures = {}) {
+        this.gl = gl;
+        this.mapSourceUrl = mapSourceUrl;
+        this.engineTex = engineTex;
+        this.whiteTex = this.createSolidTexture(255, 255, 255, 255);
+        this.blackTex = this.createSolidTexture(0, 0, 0, 255);
+    }
+
+    /** Build the `gl` global for the Lua runtime. */
+    buildGlGlobal(): Record<string, LuaValue> {
+        const gl: Record<string, LuaValue> = {};
+        gl['CreateShader'] = (opts: LuaValue) => this.createShader(opts);
+        gl['UseShader'] = (handle: LuaValue) => this.useShader(handle);
+        gl['DeleteShader'] = (handle: LuaValue) => this.deleteShader(handle);
+        gl['GetShaderLog'] = () => this.lastShaderLog;
+        gl['Uniform'] = (name: LuaValue, ...args: LuaValue[]) =>
+            this.setUniform(name, args);
+        gl['UniformInt'] = (name: LuaValue, ...args: LuaValue[]) =>
+            this.setUniformInt(name, args);
+        gl['UniformMatrix'] = (name: LuaValue, ...args: LuaValue[]) =>
+            this.setUniformMatrix(name, args);
+        gl['UniformArray'] = (name: LuaValue, _type: LuaValue, arr: LuaValue) =>
+            this.setUniformArray(name, arr);
+
+        gl['CreateTexture'] = (a: LuaValue, b: LuaValue, c: LuaValue) =>
+            this.createTexture(a, b, c);
+        gl['DeleteTexture'] = (h: LuaValue) => this.deleteTexture(h);
+        gl['Texture'] = (unit: LuaValue, handleOrPath: LuaValue) =>
+            this.bindTexture(unit, handleOrPath);
+
+        gl['CreateFBO'] = (opts: LuaValue) => this.createFBO(opts);
+        gl['ActiveFBO'] = (fbo: LuaValue, callback: LuaValue) => this.activeFBO(fbo, callback);
+        gl['DeleteFBO'] = (h: LuaValue) => this.deleteFBO(h);
+
+        gl['GetVAO'] = () => this.getVAO();
+
+        gl['Blending'] = (a: LuaValue, b: LuaValue) => this.blending(a, b);
+        gl['DepthTest'] = (on: LuaValue) => this.depthTest(on);
+        gl['DepthMask'] = (on: LuaValue) => this.depthMask(on);
+        gl['PushAttrib'] = (_bits: LuaValue) => { /* state snapshotted by host */ };
+        gl['PopAttrib'] = () => { /* state restored by host */ };
+        gl['Clear'] = (...args: LuaValue[]) => this.clear(args);
+
+        // Matrix stack — no-op because the ActiveFBO pixel-buffer path
+        // interprets glRect coordinates as direct pixel coords (the
+        // widget calls glOrtho(0, SIZE, 0, SIZE), which is identity for
+        // our purposes).
+        gl['MatrixMode'] = (_m: LuaValue) => { };
+        gl['PushMatrix'] = () => { };
+        gl['PopMatrix'] = () => { };
+        gl['LoadIdentity'] = () => { };
+        gl['Ortho'] = (..._args: LuaValue[]) => { };
+
+        // Immediate mode — only valid inside ActiveFBO for our use case.
+        gl['Color'] = (...args: LuaValue[]) => this.color(args);
+        gl['Rect'] = (...args: LuaValue[]) => this.rect(args);
+        gl['BeginEnd'] = (_mode: LuaValue, _fn: LuaValue) => { /* unused */ };
+        gl['Vertex'] = (..._args: LuaValue[]) => { };
+        gl['TexCoord'] = (..._args: LuaValue[]) => { };
+        gl['MultiTexCoord'] = (..._args: LuaValue[]) => { };
+
+        return gl;
+    }
+
+    // ============================================================
+    // Immediate-mode pixel-buffer emulation (used inside ActiveFBO)
+    // ============================================================
+
+    private color(args: LuaValue[]): void {
+        if (!this.activeFBOState) return;
+        const r = clamp01(Number(args[0] ?? 1));
+        const g = clamp01(Number(args[1] ?? 1));
+        const b = clamp01(Number(args[2] ?? 1));
+        const a = clamp01(Number(args[3] ?? 1));
+        this.activeFBOState.currentColor = [
+            Math.round(r * 255),
+            Math.round(g * 255),
+            Math.round(b * 255),
+            Math.round(a * 255),
+        ];
+    }
+
+    private rect(args: LuaValue[]): void {
+        const st = this.activeFBOState;
+        if (!st) return;
+        const x1 = Number(args[0]);
+        const y1 = Number(args[1]);
+        const x2 = Number(args[2]);
+        const y2 = Number(args[3]);
+        if (!Number.isFinite(x1) || !Number.isFinite(y1) ||
+            !Number.isFinite(x2) || !Number.isFinite(y2)) return;
+        const ix1 = Math.max(0, Math.min(st.width,  Math.floor(Math.min(x1, x2))));
+        const iy1 = Math.max(0, Math.min(st.height, Math.floor(Math.min(y1, y2))));
+        const ix2 = Math.max(0, Math.min(st.width,  Math.ceil (Math.max(x1, x2))));
+        const iy2 = Math.max(0, Math.min(st.height, Math.ceil (Math.max(y1, y2))));
+        const [cr, cg, cb, ca] = st.currentColor;
+        const w = st.width;
+        const px = st.pixels;
+        for (let y = iy1; y < iy2; y++) {
+            let idx = (y * w + ix1) * 4;
+            for (let x = ix1; x < ix2; x++) {
+                px[idx]     = cr;
+                px[idx + 1] = cg;
+                px[idx + 2] = cb;
+                px[idx + 3] = ca;
+                idx += 4;
+            }
+        }
+    }
+
+    private clear(args: LuaValue[]): void {
+        if (!this.activeFBOState) return;
+        // glClear(mask, r, g, b, a) — lava widget passes (COLOR_BIT, 0,0,0,0).
+        const r = clamp01(Number(args[1] ?? 0));
+        const g = clamp01(Number(args[2] ?? 0));
+        const b = clamp01(Number(args[3] ?? 0));
+        const a = clamp01(Number(args[4] ?? 0));
+        const cr = Math.round(r * 255);
+        const cg = Math.round(g * 255);
+        const cb = Math.round(b * 255);
+        const ca = Math.round(a * 255);
+        const px = this.activeFBOState.pixels;
+        for (let i = 0; i < px.length; i += 4) {
+            px[i] = cr; px[i + 1] = cg; px[i + 2] = cb; px[i + 3] = ca;
+        }
+    }
+
+    /** Expose the last shader error for gl.GetShaderLog(). */
+    private lastShaderLog = '';
+
+    // ============================================================
+    // Shader management
+    // ============================================================
+
+    /**
+     * Translate Spring's `#version 150 compatibility` GLSL into something
+     * WebGL2 (GLSL ES 300) accepts. Spring shaders use core-profile
+     * features (in/out, texture(), flat qualifier) that map cleanly to
+     * GLSL ES 300, but GLSL ES is strict about implicit int→float
+     * conversions that GLSL 150 allows. We do a pragmatic set of regex
+     * fixups that cover the patterns used in real map widgets (tested
+     * against scorched_crossing's lava_layer shader).
+     */
+    private translateGLSL(src: string, stage: 'vertex' | 'fragment'): string {
+        // Strip Spring's version directive entirely.
+        let s = src.replace(/#version\s+\d+\s*(compatibility|core)?\s*/g, '');
+        // Inject ES 300 header with precision qualifiers. Fragment needs
+        // high precision for the lava math.
+        const header = stage === 'vertex'
+            ? '#version 300 es\nprecision highp float;\nprecision highp int;\n'
+            : '#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\nprecision highp sampler2DShadow;\n';
+        s = header + s;
+        // GLSL ES 300 doesn't support `sampler2DShadow` without a
+        // specific texture format — map it to a normal sampler2D; we
+        // stub the shadow texture anyway.
+        s = s.replace(/sampler2DShadow/g, 'sampler2D');
+
+        // ---- Int → float promotions ----
+        //
+        // GLSL ES 300 is strict: you cannot assign an integer literal to
+        // a float, multiply/divide an int by a float, or construct a
+        // float array from mixed-type literals. Spring's 150-compat
+        // shaders do all of these. We rewrite them:
+
+        // 1. `const float NAME = -?INT;` → append `.0` to the literal.
+        //    e.g. `const float MIN_HEIGHT = -100;` → `= -100.0;`
+        s = s.replace(
+            /(\bconst\s+float\s+\w+\s*=\s*)(-?\d+)(\s*;)/g,
+            '$1$2.0$3',
+        );
+
+        // 2. Integer literals inside `float[N](...)` array constructors.
+        //    `float[NUM_LAYERS](1, 6.6, 8.4, ...)` must become
+        //    `float[NUM_LAYERS](1.0, 6.6, 8.4, ...)`. We match the whole
+        //    constructor body and replace bare ints with `.0` form.
+        //    The look-ahead `(?![\w.])` rejects *any* digit or dot that
+        //    follows — critical because otherwise `\d+` would backtrack
+        //    from `34` to `3`, then happily append `.0` and produce the
+        //    garbage `3.04.6` out of `34.6`.
+        s = s.replace(
+            /(\bfloat\s*\[[^\]]*\]\s*\()([^)]*)(\))/g,
+            (_, start, body, end) => {
+                const fixed = body.replace(
+                    /(^|[^\w.])(-?\d+)(?![\w.])/g,
+                    '$1$2.0',
+                );
+                return start + fixed + end;
+            },
+        );
+
+        // 3. Bare int literal on LHS of arithmetic: `2*PI` → `2.0*PI`,
+        //    `1+ scalePeriodFactor` → `1.0+ scalePeriodFactor`,
+        //    `1 + 0.2*x` → `1.0 + 0.2*x`.
+        //    - Negative look-behind `(?<![\w.])` avoids `x1`, `.1`, `21`.
+        //    - Negative look-ahead `(?![\w.])` avoids `1.0`, `1e5`, `1x`.
+        //    - We don't require what comes *after* the operator, so
+        //      `1 + 0.2*x` matches (RHS is another number literal).
+        s = s.replace(
+            /(?<![\w.])(-?\d+)(?![\w.])(\s*[*/+\-])/g,
+            '$1.0$2',
+        );
+
+        // 4. Bare int literal on RHS of arithmetic after an identifier,
+        //    `)`, or member access: `/13` → `/13.0`, `gameSeconds/2` →
+        //    `gameSeconds/2.0`. Look-ahead avoids `10.0`, `10e5`, `10]`.
+        s = s.replace(
+            /([A-Za-z_)](?:\.\w+)?\s*[*/+\-]\s*)(-?\d+)(?![\w.\]])/g,
+            '$1$2.0',
+        );
+
+        // 4b. Bare int literal on RHS of comparison with a float-valued
+        //    swizzle/member access: `uvCoords.x >= 0` → `uvCoords.x >= 0.0`.
+        //    We *require* the `.member` on the LHS because plain-identifier
+        //    comparisons may be against an `int` varying (e.g. the lava
+        //    widget's `if (layerNumber < 4)` — `layerNumber` is `flat in int`
+        //    and must stay an integer comparison).
+        s = s.replace(
+            /([A-Za-z_)]\.\w+\s*(?:>=|<=|==|!=|>|<)\s*)(-?\d+)(?![\w.\]])/g,
+            '$1$2.0',
+        );
+
+        // 4c. Assignment of bare int literal to a float variable:
+        //    `fFactor = 0;` → `fFactor = 0.0;`. We can't distinguish
+        //    `int i = 0;` from `float f = 0;` via regex alone, so we
+        //    apply this per-line and skip any line that declares an
+        //    integer type (`int`, `uint`, `ivec*`, `uvec*`, `bvec*`) or
+        //    opens a for-loop counter. That rules out the declaration
+        //    cases while catching pure reassignments like the lava
+        //    widget's `fFactor = 0;`.
+        s = s.split('\n').map(line => {
+            if (/\b(int|uint|ivec[234]|uvec[234]|bvec[234])\b/.test(line)) return line;
+            if (/\bfor\s*\(/.test(line)) return line;
+            return line.replace(
+                /(\b\w+\s*=\s*)(-?\d+)(\s*;)/g,
+                '$1$2.0$3',
+            );
+        }).join('\n');
+
+        // 5. `gl_InstanceID` used as a float operand. It's still an int
+        //    (so array indexing `a[gl_InstanceID]` stays valid), but any
+        //    arithmetic op with a float identifier must cast it.
+        //    We catch the two canonical patterns `float_expr * gl_InstanceID`
+        //    and `gl_InstanceID * float_expr` — anything where the ID is
+        //    adjacent to an arithmetic operator outside a bracket context.
+        s = s.replace(
+            /([*/+\-])\s*gl_InstanceID\b(?!\s*\])/g,
+            '$1 float(gl_InstanceID)',
+        );
+        s = s.replace(
+            /\bgl_InstanceID\s*([*/+\-])/g,
+            'float(gl_InstanceID) $1',
+        );
+
+        return s;
+    }
+
+    private createShader(opts: LuaValue): LuaShaderHandle | null {
+        if (!opts || typeof opts !== 'object' || Array.isArray(opts)) {
+            this.lastShaderLog = 'CreateShader: options must be a table';
+            return null;
+        }
+        const rec = opts as Record<string, LuaValue>;
+        const vsSrc = rec['vertex'];
+        const fsSrc = rec['fragment'];
+        if (typeof vsSrc !== 'string' || typeof fsSrc !== 'string') {
+            this.lastShaderLog = 'CreateShader: missing vertex/fragment source';
+            return null;
+        }
+        const gl = this.gl;
+        const vs = gl.createShader(gl.VERTEX_SHADER)!;
+        gl.shaderSource(vs, this.translateGLSL(vsSrc, 'vertex'));
+        gl.compileShader(vs);
+        if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
+            this.lastShaderLog = 'VS: ' + (gl.getShaderInfoLog(vs) ?? '');
+            gl.deleteShader(vs);
+            console.warn('[gl.CreateShader]', this.lastShaderLog);
+            return null;
+        }
+        const fs = gl.createShader(gl.FRAGMENT_SHADER)!;
+        gl.shaderSource(fs, this.translateGLSL(fsSrc, 'fragment'));
+        gl.compileShader(fs);
+        if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+            this.lastShaderLog = 'FS: ' + (gl.getShaderInfoLog(fs) ?? '');
+            gl.deleteShader(vs);
+            gl.deleteShader(fs);
+            console.warn('[gl.CreateShader]', this.lastShaderLog);
+            return null;
+        }
+        const program = gl.createProgram()!;
+        gl.attachShader(program, vs);
+        gl.attachShader(program, fs);
+        gl.linkProgram(program);
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            this.lastShaderLog = 'LINK: ' + (gl.getProgramInfoLog(program) ?? '');
+            gl.deleteProgram(program);
+            gl.deleteShader(vs);
+            gl.deleteShader(fs);
+            console.warn('[gl.CreateShader]', this.lastShaderLog);
+            return null;
+        }
+        gl.deleteShader(vs);
+        gl.deleteShader(fs);
+
+        const handle: LuaShaderHandle = markOpaque({
+            __type: 'shader',
+            program,
+            uniforms: new Map(),
+        });
+
+        // Apply default uniformInt and uniformFloat blocks from opts so
+        // the widget doesn't have to call gl.Uniform for each default.
+        const savedProgram = gl.getParameter(gl.CURRENT_PROGRAM);
+        gl.useProgram(program);
+        const ui = rec['uniformInt'];
+        if (ui && typeof ui === 'object' && !Array.isArray(ui)) {
+            for (const [k, v] of Object.entries(ui as Record<string, LuaValue>)) {
+                const loc = this.getUniformLocation(handle, k);
+                if (loc) gl.uniform1i(loc, Number(v));
+            }
+        }
+        const uf = rec['uniformFloat'];
+        if (uf && typeof uf === 'object' && !Array.isArray(uf)) {
+            for (const [k, v] of Object.entries(uf as Record<string, LuaValue>)) {
+                const loc = this.getUniformLocation(handle, k);
+                if (!loc) continue;
+                if (Array.isArray(v)) {
+                    if (v.length === 1) gl.uniform1f(loc, Number(v[0]));
+                    else if (v.length === 2) gl.uniform2f(loc, Number(v[0]), Number(v[1]));
+                    else if (v.length === 3) gl.uniform3f(loc, Number(v[0]), Number(v[1]), Number(v[2]));
+                    else if (v.length === 4) gl.uniform4f(loc, Number(v[0]), Number(v[1]), Number(v[2]), Number(v[3]));
+                } else if (typeof v === 'object' && v !== null) {
+                    // Lua table passed as object — walk keys as integer indices
+                    const arr = Object.values(v as Record<string, LuaValue>).map(Number);
+                    if (arr.length === 1) gl.uniform1f(loc, arr[0]);
+                    else if (arr.length === 2) gl.uniform2f(loc, arr[0], arr[1]);
+                    else if (arr.length === 3) gl.uniform3f(loc, arr[0], arr[1], arr[2]);
+                    else if (arr.length === 4) gl.uniform4f(loc, arr[0], arr[1], arr[2], arr[3]);
+                } else {
+                    gl.uniform1f(loc, Number(v));
+                }
+            }
+        }
+        gl.useProgram(savedProgram);
+        return handle;
+    }
+
+    private useShader(handle: LuaValue): void {
+        if (!handle || (typeof handle === 'number' && handle === 0)) {
+            this.gl.useProgram(null);
+            this.currentShader = null;
+            return;
+        }
+        const h = handle as LuaShaderHandle;
+        if (h.__type !== 'shader') return;
+        this.gl.useProgram(h.program);
+        this.currentShader = h;
+    }
+
+    private deleteShader(handle: LuaValue): void {
+        if (!handle || typeof handle !== 'object' || Array.isArray(handle)) return;
+        const h = handle as unknown as LuaShaderHandle;
+        if (h.__type !== 'shader') return;
+        this.gl.deleteProgram(h.program);
+    }
+
+    private getUniformLocation(shader: LuaShaderHandle, name: string): WebGLUniformLocation | null {
+        if (shader.uniforms.has(name)) return shader.uniforms.get(name) ?? null;
+        const loc = this.gl.getUniformLocation(shader.program, name);
+        if (loc) shader.uniforms.set(name, loc);
+        return loc;
+    }
+
+    private setUniform(name: LuaValue, args: LuaValue[]): void {
+        if (!this.currentShader) return;
+        const loc = this.getUniformLocation(this.currentShader, String(name));
+        if (!loc) return;
+        const gl = this.gl;
+        // Spring's gl.Uniform handles both scalar and matching-value variants.
+        if (args.length === 1) {
+            // Could be a string like "view" for a special matrix — widget
+            // uses this with UniformMatrix, not Uniform. Scalar case here.
+            gl.uniform1f(loc, Number(args[0]));
+        } else if (args.length === 2) {
+            gl.uniform2f(loc, Number(args[0]), Number(args[1]));
+        } else if (args.length === 3) {
+            gl.uniform3f(loc, Number(args[0]), Number(args[1]), Number(args[2]));
+        } else if (args.length >= 4) {
+            gl.uniform4f(loc, Number(args[0]), Number(args[1]), Number(args[2]), Number(args[3]));
+        }
+    }
+
+    private setUniformInt(name: LuaValue, args: LuaValue[]): void {
+        if (!this.currentShader) return;
+        const loc = this.getUniformLocation(this.currentShader, String(name));
+        if (!loc) return;
+        const gl = this.gl;
+        if (args.length === 1) gl.uniform1i(loc, Number(args[0]));
+        else if (args.length === 2) gl.uniform2i(loc, Number(args[0]), Number(args[1]));
+        else if (args.length === 3) gl.uniform3i(loc, Number(args[0]), Number(args[1]), Number(args[2]));
+        else if (args.length >= 4) gl.uniform4i(loc, Number(args[0]), Number(args[1]), Number(args[2]), Number(args[3]));
+    }
+
+    /** Cached matrices fed into UniformMatrix("view"/"projection"). */
+    viewMatrix: Float32Array | null = null;
+    projectionMatrix: Float32Array | null = null;
+
+    private setUniformMatrix(name: LuaValue, args: LuaValue[]): void {
+        if (!this.currentShader) return;
+        const loc = this.getUniformLocation(this.currentShader, String(name));
+        if (!loc) return;
+        const gl = this.gl;
+        // Spring accepts either a matrix name ("view"/"projection"/"camera"/
+        // "shadow") or 16 floats / a Lua table.
+        if (args.length === 1 && typeof args[0] === 'string') {
+            const matName = args[0];
+            let mat: Float32Array | null = null;
+            if (matName === 'view' || matName === 'modelview') mat = this.viewMatrix;
+            else if (matName === 'projection') mat = this.projectionMatrix;
+            if (mat) gl.uniformMatrix4fv(loc, false, mat);
+            return;
+        }
+        if (args.length === 16) {
+            const m = new Float32Array(16);
+            for (let i = 0; i < 16; i++) m[i] = Number(args[i]);
+            gl.uniformMatrix4fv(loc, false, m);
+        }
+    }
+
+    private setUniformArray(name: LuaValue, arr: LuaValue): void {
+        if (!this.currentShader || !arr) return;
+        const loc = this.getUniformLocation(this.currentShader, String(name));
+        if (!loc) return;
+        // Not used by lava_layer beyond constants — stub.
+        void loc;
+    }
+
+    // ============================================================
+    // Textures
+    // ============================================================
+
+    private createSolidTexture(r: number, g: number, b: number, a: number): WebGLTexture {
+        const gl = this.gl;
+        const tex = gl.createTexture()!;
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+            new Uint8Array([r, g, b, a]));
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        return tex;
+    }
+
+    /**
+     * gl.CreateTexture has two forms:
+     *   gl.CreateTexture(width, height, opts) — allocates an empty texture
+     *   gl.CreateTexture(path)                — loads from an image path
+     */
+    private createTexture(a: LuaValue, b: LuaValue, c: LuaValue): LuaTextureHandle | null {
+        const gl = this.gl;
+        if (typeof a === 'string') {
+            // Path form — load via image fetch. Return an empty handle now,
+            // populate when the image arrives.
+            const path = a;
+            const tex = this.createSolidTexture(255, 0, 255, 255); // magenta placeholder
+            const handle: LuaTextureHandle = markOpaque({
+                __type: 'texture',
+                tex,
+                width: 1, height: 1,
+            });
+            const normalised = this.normaliseTexturePath(path);
+            const url = `${this.mapSourceUrl}/${normalised}`;
+            // Fire off async load; replace data when ready.
+            void this.loadImageInto(url, handle);
+            this.textureCache.set(normalised, handle);
+            return handle;
+        }
+        if (typeof a === 'number' && typeof b === 'number') {
+            const width = a;
+            const height = b;
+            const opts = (c && typeof c === 'object' && !Array.isArray(c))
+                ? c as Record<string, LuaValue>
+                : {};
+            const format = Number(opts['format'] ?? gl.RGBA);
+            const minFilter = Number(opts['min_filter'] ?? gl.LINEAR);
+            const magFilter = Number(opts['mag_filter'] ?? gl.LINEAR);
+            const wrapS = Number(opts['wrap_s'] ?? gl.CLAMP_TO_EDGE);
+            const wrapT = Number(opts['wrap_t'] ?? gl.CLAMP_TO_EDGE);
+            const tex = gl.createTexture()!;
+            gl.bindTexture(gl.TEXTURE_2D, tex);
+            // Use a web-safe internal format. Spring passes GL.RGBA (0x1908).
+            const internalFormat = (format === gl.RGBA) ? gl.RGBA8 : gl.RGBA8;
+            gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, width, height, 0,
+                gl.RGBA, gl.UNSIGNED_BYTE, null);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, minFilter);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, magFilter);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrapS);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrapT);
+            return markOpaque({ __type: 'texture' as const, tex, width, height });
+        }
+        return null;
+    }
+
+    private normaliseTexturePath(path: string): string {
+        // Reuse the Spring path normaliser from lua-spring-api
+        // (duplicated locally to avoid a circular import).
+        let p = path;
+        if (p.startsWith(':') && p.length >= 3 && p[2] === ':') p = p.substring(3);
+        p = p.replace(/\\/g, '/');
+        if (p.startsWith('/')) p = p.substring(1);
+        return p;
+    }
+
+    private async loadImageInto(url: string, handle: LuaTextureHandle): Promise<void> {
+        try {
+            const res = await fetch(url);
+            if (!res.ok) {
+                console.warn(`[gl.CreateTexture] ${url}: ${res.status}`);
+                return;
+            }
+            const blob = await res.blob();
+            const bitmap = await createImageBitmap(blob);
+            const gl = this.gl;
+            gl.bindTexture(gl.TEXTURE_2D, handle.tex);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, bitmap.width, bitmap.height,
+                0, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+            gl.generateMipmap(gl.TEXTURE_2D);
+            handle.width = bitmap.width;
+            handle.height = bitmap.height;
+            console.log(`[gl.CreateTexture] loaded ${url} (${bitmap.width}x${bitmap.height})`);
+        } catch (e) {
+            console.warn(`[gl.CreateTexture] ${url}: ${e}`);
+        }
+    }
+
+    private deleteTexture(handle: LuaValue): void {
+        if (!handle || typeof handle !== 'object' || Array.isArray(handle)) return;
+        const h = handle as unknown as LuaTextureHandle;
+        if (h.__type !== 'texture') return;
+        this.gl.deleteTexture(h.tex);
+    }
+
+    /**
+     * gl.Texture(unit, handle_or_path_or_false).
+     *
+     * - false → unbind the unit
+     * - string starting with `$` → engine texture (heightmap/shadow/info)
+     * - string path → fetch + bind
+     * - handle → bind that texture
+     */
+    private bindTexture(unitV: LuaValue, handleOrPath: LuaValue): void {
+        const gl = this.gl;
+        const unit = Number(unitV);
+        if (!Number.isFinite(unit) || unit < 0 || unit > 7) return;
+        gl.activeTexture(gl.TEXTURE0 + unit);
+        if (handleOrPath === false || handleOrPath === null || handleOrPath === undefined) {
+            gl.bindTexture(gl.TEXTURE_2D, null);
+            return;
+        }
+        if (typeof handleOrPath === 'string') {
+            const s = handleOrPath;
+            if (s.startsWith('$')) {
+                // Engine texture
+                let tex: WebGLTexture | null = null;
+                if (s === '$heightmap') tex = this.engineTex.heightmap ?? this.whiteTex;
+                else if (s === '$shadow') tex = this.engineTex.shadow ?? this.whiteTex;
+                else if (s === '$info') tex = this.engineTex.info ?? this.blackTex;
+                gl.bindTexture(gl.TEXTURE_2D, tex);
+                return;
+            }
+            // File path — fetch if not cached
+            const normalised = this.normaliseTexturePath(s);
+            let handle = this.textureCache.get(normalised);
+            if (!handle) {
+                handle = markOpaque({
+                    __type: 'texture' as const,
+                    tex: this.createSolidTexture(255, 0, 255, 255),
+                    width: 1, height: 1,
+                });
+                this.textureCache.set(normalised, handle);
+                void this.loadImageInto(`${this.mapSourceUrl}/${normalised}`, handle);
+            }
+            gl.bindTexture(gl.TEXTURE_2D, handle.tex);
+            return;
+        }
+        if (typeof handleOrPath === 'object' && handleOrPath !== null) {
+            const h = handleOrPath as unknown as LuaTextureHandle;
+            if (h.__type === 'texture') {
+                gl.bindTexture(gl.TEXTURE_2D, h.tex);
+            }
+        }
+    }
+
+    // ============================================================
+    // FBOs
+    // ============================================================
+
+    private createFBO(opts: LuaValue): LuaFBOHandle | null {
+        if (!opts || typeof opts !== 'object' || Array.isArray(opts)) return null;
+        const rec = opts as Record<string, LuaValue>;
+        const gl = this.gl;
+        const fbo = gl.createFramebuffer()!;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+        const attachments: LuaTextureHandle[] = [];
+        for (let i = 0; i < 4; i++) {
+            const key = `color${i}`;
+            const t = rec[key];
+            if (t && typeof t === 'object' && !Array.isArray(t)) {
+                const th = t as unknown as LuaTextureHandle;
+                if (th.__type === 'texture') {
+                    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i,
+                        gl.TEXTURE_2D, th.tex, 0);
+                    attachments.push(th);
+                }
+            }
+        }
+        const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        if (status !== gl.FRAMEBUFFER_COMPLETE) {
+            console.warn(`[gl.CreateFBO] incomplete: 0x${status.toString(16)}`);
+            gl.deleteFramebuffer(fbo);
+            return null;
+        }
+        return markOpaque({ __type: 'fbo' as const, fbo, colorAttachments: attachments });
+    }
+
+    /**
+     * gl.ActiveFBO(fbo, callback) — Spring's API for rendering into an
+     * off-screen target. We don't actually bind the real framebuffer;
+     * instead we set up a CPU pixel buffer sized to the color0 attachment,
+     * invoke the Lua callback (which calls gl.Color/gl.Rect/gl.Clear into
+     * the buffer), then upload the buffer to the attachment texture.
+     *
+     * This mirrors the effect of immediate-mode rendering without our
+     * needing to implement glBegin/glVertex/glColor state-machine draw
+     * emulation. Good enough for the lava_layer coast-detection texture,
+     * which is the only widget path that currently uses ActiveFBO.
+     */
+    private activeFBO(fboV: LuaValue, callbackV: LuaValue): void {
+        if (!fboV || typeof fboV !== 'object' || Array.isArray(fboV)) return;
+        const fbo = fboV as unknown as LuaFBOHandle;
+        if (fbo.__type !== 'fbo' || fbo.colorAttachments.length === 0) return;
+        if (typeof callbackV !== 'function') return;
+        const target = fbo.colorAttachments[0];
+        // Seed the pixel buffer with the existing texture contents? Not
+        // strictly necessary — the lava widget calls glClear first. Start
+        // with zeros.
+        this.activeFBOState = {
+            fbo,
+            width: target.width,
+            height: target.height,
+            pixels: new Uint8ClampedArray(target.width * target.height * 4),
+            currentColor: [255, 255, 255, 255],
+        };
+        try {
+            (callbackV as (...a: LuaValue[]) => LuaValue | undefined)();
+        } catch (e) {
+            console.warn('[gl.ActiveFBO] callback threw:', e);
+        }
+        // Upload the pixel buffer to the attachment texture.
+        const gl = this.gl;
+        const savedBinding = gl.getParameter(gl.TEXTURE_BINDING_2D) as WebGLTexture | null;
+        gl.bindTexture(gl.TEXTURE_2D, target.tex);
+        gl.texSubImage2D(
+            gl.TEXTURE_2D, 0, 0, 0, target.width, target.height,
+            gl.RGBA, gl.UNSIGNED_BYTE,
+            new Uint8Array(this.activeFBOState.pixels.buffer),
+        );
+        gl.bindTexture(gl.TEXTURE_2D, savedBinding);
+        this.activeFBOState = null;
+    }
+
+    private deleteFBO(handle: LuaValue): void {
+        if (!handle || typeof handle !== 'object' || Array.isArray(handle)) return;
+        const h = handle as unknown as LuaFBOHandle;
+        if (h.__type !== 'fbo') return;
+        this.gl.deleteFramebuffer(h.fbo);
+    }
+
+    // ============================================================
+    // VAO
+    // ============================================================
+
+    /**
+     * gl.GetVAO returns a VAO wrapper. The lava_layer widget uses this to
+     * draw an instanced empty quad — the shader generates positions from
+     * gl_VertexID and gl_InstanceID with no vertex attributes required.
+     *
+     * In strict WebGL2 a drawArraysInstanced call with zero enabled
+     * attributes is permitted but some drivers silently drop the draw.
+     * We bind a tiny dummy buffer to attribute 0 so at least one stream
+     * is active — the shader never reads it (it uses gl_VertexID) but
+     * the presence of an enabled attribute satisfies the validator.
+     *
+     * Returned as a plain (non-opaque) table so the widget can invoke
+     * methods via `VAO:DrawArrays(...)` — the `:` sugar passes the table
+     * as the first argument, which our closures ignore.
+     */
+    private getVAO(): LuaVAOHandle {
+        const gl = this.gl;
+        const vao = gl.createVertexArray()!;
+        gl.bindVertexArray(vao);
+        const dummy = gl.createBuffer()!;
+        gl.bindBuffer(gl.ARRAY_BUFFER, dummy);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(4), gl.STATIC_DRAW);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 1, gl.FLOAT, false, 0, 0);
+        gl.bindVertexArray(null);
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+        return {
+            __type: 'vao' as const,
+            DrawArrays: (_self, mode, count, first, instanceCount) => {
+                const m = Number(mode);
+                const c = Number(count);
+                const f = Number(first);
+                const ic = Math.max(1, Number(instanceCount ?? 1));
+                gl.bindVertexArray(vao);
+                gl.drawArraysInstanced(m, f, c, ic);
+                gl.bindVertexArray(null);
+            },
+            Delete: (_self) => {
+                gl.deleteVertexArray(vao);
+                gl.deleteBuffer(dummy);
+            },
+        };
+    }
+
+    // ============================================================
+    // Fixed-function state
+    // ============================================================
+
+    private blending(a: LuaValue, b: LuaValue): void {
+        const gl = this.gl;
+        if (a === false) {
+            gl.disable(gl.BLEND);
+            return;
+        }
+        if (a === true) {
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+            return;
+        }
+        if (typeof a === 'string') {
+            // Spring's named modes — "reset" = additive/default off
+            gl.enable(gl.BLEND);
+            if (a === 'reset') gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+            else if (a === 'add') gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+            else if (a === 'alpha') gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+            else if (a === 'disable') gl.disable(gl.BLEND);
+            return;
+        }
+        if (typeof a === 'number' && typeof b === 'number') {
+            gl.enable(gl.BLEND);
+            gl.blendFunc(a, b);
+        }
+    }
+
+    private depthTest(v: LuaValue): void {
+        const gl = this.gl;
+        if (v === true || v === 1) gl.enable(gl.DEPTH_TEST);
+        else if (v === false || v === 0) gl.disable(gl.DEPTH_TEST);
+    }
+
+    private depthMask(v: LuaValue): void {
+        const gl = this.gl;
+        gl.depthMask(v === true || v === 1);
+    }
+
+    /** Called by the host each frame to refresh the camera matrices. */
+    setCameraMatrices(view: Float32Array, projection: Float32Array): void {
+        this.viewMatrix = view;
+        this.projectionMatrix = projection;
+    }
+
+    /** Called when the engine heightmap texture is ready. */
+    setEngineHeightmap(tex: WebGLTexture): void {
+        this.engineTex.heightmap = tex;
+    }
+}
+
+function clamp01(n: number): number {
+    if (!Number.isFinite(n)) return 0;
+    if (n < 0) return 0;
+    if (n > 1) return 1;
+    return n;
+}

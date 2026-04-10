@@ -19,6 +19,7 @@
   "dependencies": {
     "@babylonjs/core": "^9.1.0",
     "@babylonjs/loaders": "^9.1.0",
+    "fengari-web": "^0.1.4",
     "flatbuffers": "^25.9.23",
     "svelte": "^5.55.1"
   }
