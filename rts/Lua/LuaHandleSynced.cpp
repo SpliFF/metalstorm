@@ -104,6 +104,11 @@ bool CUnsyncedLuaHandle::Init(const std::string& code, const std::string& file)
 
 	AddBasicCalls(L);
 
+	// Lua 5.1 → 5.4 compat shims — see CSyncedLuaHandle::Init for
+	// rationale. Gadgets loaded via gadgets.lua need these in both
+	// the synced and unsynced states.
+	LuaUtils::Register51CompatShims(L);
+
 	// remove Script.Kill()
 	lua_getglobal(L, "Script");
 		LuaPushNamedNil(L, "Kill");
@@ -404,6 +409,12 @@ bool CSyncedLuaHandle::Init(const std::string& code, const std::string& file)
 	lua_pushglobaltable(L);
 
 	AddBasicCalls(L); // into Global
+
+	// Lua 5.1 → 5.4 compat shims (setfenv/getfenv/unpack). Published
+	// Spring games still depend on these — gadgets.lua uses setfenv
+	// to give each gadget its own sandbox env — and the canonical
+	// gadgetHandler fails to load without them.
+	LuaUtils::Register51CompatShims(L);
 
 	// adjust the math.random() and math.randomseed() calls
 	lua_getglobal(L, "math");

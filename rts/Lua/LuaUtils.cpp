@@ -323,6 +323,20 @@ static void PushCurrentFunc(lua_State* L, const char* caller)
 static void PushFunctionEnv(lua_State* L, const char* caller, int funcIndex)
 {
 	lua_getfenv(L, funcIndex);
+
+	// If the fenv isn't even a table yet — e.g. the caller is a C
+	// closure whose first upvalue is something other than a table, or
+	// a Lua 5.4 function compiled without any captured globals so it
+	// has no _ENV upvalue at all — fall back to the globals table.
+	// This matches what Lua 5.1's `getfenv` would have returned for
+	// a C function and keeps gadgets.lua's `loadstring(code, name)`
+	// path working when the caller doesn't have a classical fenv.
+	// This is a normal fallback, not an error, so it's silent.
+	if (!lua_istable(L, -1)) {
+		lua_pop(L, 1);
+		lua_pushglobaltable(L);
+	}
+
 	lua_pushliteral(L, "__fenv");
 	lua_rawget(L, -2);
 	if (lua_isnil(L, -1)) {
@@ -332,6 +346,12 @@ static void PushFunctionEnv(lua_State* L, const char* caller, int funcIndex)
 	}
 
 	if (!lua_istable(L, -1)) {
+		// This should now be unreachable given the fallback above,
+		// but keep the check as a belt-and-braces assertion so we
+		// never pass a non-table to lua_setfenv.
+		std::fprintf(stderr,
+			"[lua] %s(): __fenv proxy resolved to a %s, not a table\n",
+			caller, luaL_typename(L, -1));
 		luaL_error(L, "%s() invalid fenv", caller);
 	}
 }
@@ -1384,4 +1404,174 @@ void LuaUtils::PushCommandDesc(lua_State* L, const SCommandDescription& cd)
 
 	// CmdDesc["params"] = {[1] = "string1", [2] = "string2", ...}
 	lua_settable(L, -3);
+}
+
+
+/******************************************************************************/
+/******************************************************************************/
+//
+//  Lua 5.1 → 5.4 compatibility shims
+//
+//  Most Spring games (Zero-K, BA, BAR, Metalstorm, every map shipping
+//  a LuaGaia gadget) were written against Lua 5.1. Our engine runs
+//  Lua 5.4 which removed several core builtins outright. Rather than
+//  forcing every game author to port their scripts up front, we
+//  provide wrappers that emulate the 5.1 behaviour where possible,
+//  and emit a one-time deprecation warning the first time each is
+//  used so developers know what to migrate and why.
+//
+//  The set of shims provided here is intentionally minimal — only
+//  what actual published Spring games are known to call. Adding more
+//  is cheap (each is 10-20 lines) and should happen the moment a
+//  game hits a `nil value` error on a removed builtin.
+
+namespace {
+
+/// Emit a one-shot deprecation warning for a 5.1 builtin. Uses a
+/// single upvalue (a boolean stored as a light-userdata flag) to
+/// ensure each call site only fires once per Lua state — otherwise
+/// gadgets.lua's 200+ setfenv calls would drown the log.
+void DeprecationWarn(lua_State* L,
+                     const char* name,
+                     const char* advice)
+{
+	// Upvalue 1 is a boolean: true once warned.
+	if (lua_toboolean(L, lua_upvalueindex(1)))
+		return;
+
+	lua_Debug ar;
+	std::string where = "?";
+	if (lua_getstack(L, 1, &ar) && lua_getinfo(L, "Sl", &ar)) {
+		char buf[256];
+		SNPRINTF(buf, sizeof(buf), "%s:%d", ar.short_src, ar.currentline);
+		where = buf;
+	}
+
+	std::fprintf(stderr,
+		"[lua compat] deprecated Lua 5.1 builtin `%s` used at %s\n"
+		"             %s\n"
+		"             (further uses will be silently shimmed)\n",
+		name, where.c_str(), advice);
+
+	// Mark warned — replace upvalue 1 with `true`.
+	lua_pushboolean(L, 1);
+	lua_replace(L, lua_upvalueindex(1));
+}
+
+// Lua 5.1 setfenv(f, table): set the environment of function f to
+// the given table. In 5.4, functions have an `_ENV` upvalue instead;
+// we set upvalue 1 via lua_setfenv's C-side shim.
+//
+// setfenv(0, t) and setfenv(level, t) set the env of a stack frame
+// (level 0 = current, 1 = caller …). We only support positive
+// function arguments and level numbers up to a reasonable depth —
+// most real-world uses pass an explicit function.
+int Compat_setfenv(lua_State* L)
+{
+	DeprecationWarn(L, "setfenv",
+		"Lua 5.4 removed setfenv/getfenv. For chunks loaded with "
+		"load()/loadstring(), set the environment via the 4th arg: "
+		"  load(code, name, 't', env). Per-function environments "
+		"are no longer supported; wrap the code in a closure that "
+		"captures the desired upvalues instead.");
+
+	luaL_checktype(L, 2, LUA_TTABLE);
+
+	if (lua_isnumber(L, 1)) {
+		const int level = static_cast<int>(lua_tointeger(L, 1));
+		lua_Debug ar;
+		if (lua_getstack(L, level, &ar) == 0)
+			return luaL_error(L, "setfenv: invalid level %d", level);
+		if (lua_getinfo(L, "f", &ar) == 0 || !lua_isfunction(L, -1))
+			return luaL_error(L, "setfenv: could not resolve level %d", level);
+		// Stack: [level, t, func]  — put t on top then setfenv on func
+		lua_pushvalue(L, 2);                // [..., func, t]
+		if (lua_setfenv(L, -2) == 0)        // sets upvalue 1 of func
+			return luaL_error(L, "setfenv: failed to set env for level %d", level);
+		lua_pop(L, 1);                      // pop the func
+		return 0;
+	}
+
+	if (!lua_isfunction(L, 1))
+		return luaL_error(L, "setfenv: first arg must be a function or level number");
+
+	// Stack: [func, t]
+	lua_pushvalue(L, 2);                    // [func, t, t]
+	if (lua_setfenv(L, 1) == 0)             // sets upvalue 1 of arg 1 (func)
+		return luaL_error(L, "setfenv: failed to set env on function (is it a C function?)");
+	lua_pushvalue(L, 1);                    // return the function, per 5.1 contract
+	return 1;
+}
+
+// Lua 5.1 getfenv(f_or_level): return the environment of f, or of
+// the function at the given stack level. Defaults to level 1 (the
+// caller of getfenv).
+int Compat_getfenv(lua_State* L)
+{
+	DeprecationWarn(L, "getfenv",
+		"Lua 5.4 removed setfenv/getfenv. Read `_ENV` directly in "
+		"the scope you care about, or use debug.getupvalue(f, 1) "
+		"which returns the `_ENV` upvalue of function f.");
+
+	int level = 1;
+	if (lua_isnumber(L, 1)) {
+		level = static_cast<int>(lua_tointeger(L, 1));
+	} else if (lua_isfunction(L, 1)) {
+		lua_getfenv(L, 1);
+		return 1;
+	}
+
+	if (level == 0) {
+		lua_pushglobaltable(L);
+		return 1;
+	}
+
+	lua_Debug ar;
+	if (lua_getstack(L, level, &ar) == 0)
+		return luaL_error(L, "getfenv: invalid level %d", level);
+	if (lua_getinfo(L, "f", &ar) == 0)
+		return luaL_error(L, "getfenv: could not resolve level %d", level);
+	lua_getfenv(L, -1);
+	lua_remove(L, -2); // remove the function, leave env on top
+	return 1;
+}
+
+// Lua 5.1 unpack(t [, i [, j]]): moved to table.unpack in 5.2+.
+// Most published gadgets still call the bare name.
+int Compat_unpack(lua_State* L)
+{
+	DeprecationWarn(L, "unpack",
+		"Lua 5.4 moved `unpack` into the table library. "
+		"Use `table.unpack(t, i, j)` instead.");
+
+	// Delegate to table.unpack, which exists in 5.4.
+	lua_getglobal(L, "table");
+	lua_getfield(L, -1, "unpack");
+	lua_remove(L, -2); // remove 'table'
+	lua_insert(L, 1);  // move table.unpack before the original args
+	lua_call(L, lua_gettop(L) - 1, LUA_MULTRET);
+	return lua_gettop(L);
+}
+
+// Helper: register a C function with an upvalue slot for the
+// one-shot deprecation flag.
+void PushCompatCFunc(lua_State* L, lua_CFunction fn)
+{
+	lua_pushboolean(L, 0); // upvalue 1 = "not warned yet"
+	lua_pushcclosure(L, fn, 1);
+}
+
+} // namespace
+
+
+void LuaUtils::Register51CompatShims(lua_State* L)
+{
+	PushCompatCFunc(L, Compat_setfenv);
+	lua_setglobal(L, "setfenv");
+
+	PushCompatCFunc(L, Compat_getfenv);
+	lua_setglobal(L, "getfenv");
+
+	PushCompatCFunc(L, Compat_unpack);
+	lua_setglobal(L, "unpack");
 }

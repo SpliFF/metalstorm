@@ -17,7 +17,17 @@
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 
-local SAFEWRAP = 0
+-- spring-web fork: default to ALWAYS wrap gadget callins in pcall.
+-- Upstream Spring ships SAFEWRAP = 0 which leaves every gadget
+-- unguarded — a single broken gadget's error propagates out of
+-- gadgetHandler:Initialize() and takes down the entire synced Lua
+-- state, rather than being isolated and the gadget unloaded. For
+-- incremental game development where you're expected to iterate on
+-- gadgets and occasionally break them, this is the wrong default.
+-- Setting to 2 here turns on the existing SafeWrap machinery that
+-- catches per-callin errors and removes the offending gadget via
+-- gadgetHandler:RemoveGadget().
+local SAFEWRAP = 2
 -- 0: disabled
 -- 1: enabled, but can be overriden by gadget.GetInfo().unsafe
 -- 2: always enabled
@@ -229,6 +239,17 @@ function gadgetHandler:LoadGadget(filename)
   self:FinalizeGadget(gadget, filename, basename)
   local name = gadget.ghInfo.name
 
+  -- spring-web fork: wire up the SafeWrap machinery that upstream
+  -- Spring defines but never calls. Without this, a single broken
+  -- gadget (buggy Initialize, missing Spring API, bad feature def
+  -- lookup, etc.) throws an uncaught error out of the whole
+  -- gadgetHandler:Initialize() chain and kills the synced Lua state.
+  -- With it, per-callin pcalls catch errors, log the gadget name and
+  -- traceback, and RemoveGadget() unloads the offender. SafeWrap
+  -- needs ghInfo (for the name in error messages), so this has to
+  -- run after FinalizeGadget.
+  self:SafeWrapGadget(gadget)
+
   err = self:ValidateGadget(gadget)
   if (err) then
     Spring.Log(LOG_SECTION, LOG.ERROR, 'Failed to load: ' .. basename .. '  (' .. err .. ')')
@@ -415,7 +436,11 @@ local function SafeWrap(func, funcName)
 end
 
 
-local function SafeWrapGadget(gadget)
+-- spring-web fork: upstream Spring declares SafeWrapGadget as a
+-- local but never calls it. We moved it onto gadgetHandler as a
+-- method so LoadGadget can invoke it via self: at call-time (the
+-- forward-reference to a later local in the chunk wouldn't work).
+function gadgetHandler:SafeWrapGadget(gadget)
   if (SAFEWRAP <= 0) then
     return
   elseif (SAFEWRAP == 1) then

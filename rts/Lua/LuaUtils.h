@@ -138,6 +138,16 @@ class LuaUtils {
 
 		static void PushCurrentFuncEnv(lua_State* L, const char* caller);
 
+		/// Register Lua 5.1 → 5.4 compatibility shims as globals on the
+		/// given state: `setfenv`, `getfenv`, `unpack`, etc. Many
+		/// Spring games (and the canonical gadgets.lua) still use
+		/// these removed builtins. Each shim fires a one-time
+		/// deprecation warning the first time it's called per state,
+		/// pointing at the recommended 5.4 idiom so game developers
+		/// can migrate incrementally without everything erroring out
+		/// on day one.
+		static void Register51CompatShims(lua_State* L);
+
 		static void* GetUserData(lua_State* L, int index, const string& type);
 
 		static int IsEngineMinVersion(lua_State* L);
