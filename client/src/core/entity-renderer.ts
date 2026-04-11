@@ -47,10 +47,13 @@ export class EntityRenderer {
     private entityMeta = new Map<number, EntityMeta>();
     private teamMaterials: StandardMaterial[] = [];
 
-    // Template meshes per shape (hidden, used as source for thin instances)
-    private shapeMeshes: Mesh[] = [];
-
-    // Render meshes keyed by `shape * TEAM_COUNT + team`
+    // Render meshes keyed by `shape * TEAM_COUNT + team`.
+    // Each (shape, team) pair owns its own Mesh + Geometry so thin-
+    // instance matrix buffers don't collide. Do NOT use Mesh.clone()
+    // here — clones share the source geometry, and
+    // `thinInstanceSetBuffer('matrix', ...)` attaches its buffer to
+    // `geometry._userVertexBuffers`, so the last clone to update wins
+    // and the other team vanishes as the camera moves.
     private renderMeshes = new Map<number, Mesh>();
 
     constructor(scene: Scene) {
@@ -62,34 +65,48 @@ export class EntityRenderer {
             mat.specularColor = new Color3(0.3, 0.3, 0.3);
             this.teamMaterials.push(mat);
         }
+    }
 
-        // Create shape templates. Each builder centres the mesh on
-        // its own origin, which would put half of every unit below the
-        // terrain when thin-instanced at ground height. Shift the
-        // geometry up by half its vertical extent and bake the
-        // translation into the vertices so the origin ends up at the
-        // base of the mesh.
-        const box = MeshBuilder.CreateBox('shape_box', { width: 16, height: 12, depth: 20 }, scene);
-        box.position.y = 12 / 2;
-        box.bakeCurrentTransformIntoVertices();
-
-        const cyl = MeshBuilder.CreateCylinder('shape_cyl', { height: 14, diameter: 18, tessellation: 8 }, scene);
-        cyl.position.y = 14 / 2;
-        cyl.bakeCurrentTransformIntoVertices();
-
-        const cone = MeshBuilder.CreateCylinder('shape_cone', { height: 16, diameterTop: 0, diameterBottom: 16, tessellation: 8 }, scene);
-        cone.position.y = 16 / 2;
-        cone.bakeCurrentTransformIntoVertices();
-
-        const sphere = MeshBuilder.CreateSphere('shape_sphere', { diameter: 14, segments: 6 }, scene);
-        sphere.position.y = 14 / 2;
-        sphere.bakeCurrentTransformIntoVertices();
-
-        this.shapeMeshes = [box, cyl, cone, sphere];
-        for (const m of this.shapeMeshes) {
-            m.isVisible = false;
-            m.thinInstanceEnablePicking = false;
+    /**
+     * Build a fresh Mesh for one (shape, team) pair. Each shape is
+     * shifted upward by half its vertical extent and baked so that
+     * `thinInstanceSetBuffer` can place the base of the mesh exactly
+     * at the given world y. The mesh opts out of frustum culling
+     * (`alwaysSelectAsActiveMesh = true`) because the vertex-space
+     * bounding box doesn't account for thin-instance transforms, so
+     * the whole batch vanishes as soon as the template's origin
+     * crosses the frustum edge — which is exactly the wink-out the
+     * user reported.
+     */
+    private buildMesh(shape: UnitShape, team: number): Mesh {
+        const name = `render_${shape}_${team}`;
+        let mesh: Mesh;
+        let height: number;
+        switch (shape) {
+            case UnitShape.Box:
+                height = 12;
+                mesh = MeshBuilder.CreateBox(name, { width: 16, height, depth: 20 }, this.scene);
+                break;
+            case UnitShape.Cylinder:
+                height = 14;
+                mesh = MeshBuilder.CreateCylinder(name, { height, diameter: 18, tessellation: 8 }, this.scene);
+                break;
+            case UnitShape.Cone:
+                height = 16;
+                mesh = MeshBuilder.CreateCylinder(name, { height, diameterTop: 0, diameterBottom: 16, tessellation: 8 }, this.scene);
+                break;
+            case UnitShape.Sphere:
+            default:
+                height = 14;
+                mesh = MeshBuilder.CreateSphere(name, { diameter: 14, segments: 6 }, this.scene);
+                break;
         }
+        mesh.position.y = height / 2;
+        mesh.bakeCurrentTransformIntoVertices();
+        mesh.material = this.teamMaterials[team];
+        mesh.thinInstanceEnablePicking = false;
+        mesh.alwaysSelectAsActiveMesh = true;
+        return mesh;
     }
 
     update(snapshot: EntityStateSnapshot, isDelta: boolean = false): void {
@@ -183,8 +200,7 @@ export class EntityRenderer {
                 }
 
                 if (!mesh) {
-                    mesh = this.shapeMeshes[shape].clone(`render_${shape}_${team}`);
-                    mesh.material = this.teamMaterials[team];
+                    mesh = this.buildMesh(shape as UnitShape, team);
                     this.renderMeshes.set(key, mesh);
                 }
 
@@ -216,7 +232,6 @@ export class EntityRenderer {
     dispose(): void {
         for (const mesh of this.renderMeshes.values()) mesh.dispose();
         this.renderMeshes.clear();
-        for (const mesh of this.shapeMeshes) mesh.dispose();
         this.entityMeta.clear();
         this.interpolator.clear();
         for (const mat of this.teamMaterials) mat.dispose();
