@@ -221,6 +221,43 @@ bool MapProcessor::ReadMapInfo(const std::string& mapDir, MapMetadata& meta) {
                 }
                 lua_pop(L, 1); // pop splats
 
+                // smf = { minheight, maxheight } — the sim reads these
+                // as overrides for the SMF header's baked-in height
+                // range (see SMFReadMap::LoadHeightMap). We have to
+                // mirror that here or the client-side terrain is
+                // rendered at a different scale from the sim, and
+                // units spawn above or below the visible ground.
+                lua_getfield(L, -1, "smf");
+                if (lua_istable(L, -1)) {
+                    // mapinfo.lua files use lowerkeys() so lowercase is
+                    // canonical; fall back to camelCase just in case.
+                    auto hasKey = [&](const char* k) {
+                        lua_getfield(L, -1, k);
+                        const bool present = !lua_isnil(L, -1);
+                        lua_pop(L, 1);
+                        return present;
+                    };
+                    const bool hasMin = hasKey("minheight") || hasKey("minHeight");
+                    const bool hasMax = hasKey("maxheight") || hasKey("maxHeight");
+                    if (hasMin || hasMax) {
+                        meta.mapInfoHeightOverride = true;
+                        // If only one of the two is set we keep the
+                        // other at 0 until ReadSMFHeader fills it in
+                        // from the SMF header (unusual but possible).
+                        if (hasMin) {
+                            float v = luaGetFloat(L, "minheight", 0);
+                            if (v == 0) v = luaGetFloat(L, "minHeight", 0);
+                            meta.minHeight = v;
+                        }
+                        if (hasMax) {
+                            float v = luaGetFloat(L, "maxheight", 0);
+                            if (v == 0) v = luaGetFloat(L, "maxHeight", 0);
+                            meta.maxHeight = v;
+                        }
+                    }
+                }
+                lua_pop(L, 1); // pop smf
+
                 // Read start positions: teams = { [0] = {startPos = {x=..., z=...}}, ... }
                 lua_getfield(L, -1, "teams");
                 if (lua_istable(L, -1)) {
@@ -277,8 +314,17 @@ bool MapProcessor::ReadSMFHeader(MapMetadata& meta) {
     f.read(reinterpret_cast<char*>(&meta.mapx), 4);
     f.read(reinterpret_cast<char*>(&meta.mapy), 4);
     f.seekg(12, std::ios::cur); // squareSize, texelPerSquare, tilesize
-    f.read(reinterpret_cast<char*>(&meta.minHeight), 4);
-    f.read(reinterpret_cast<char*>(&meta.maxHeight), 4);
+
+    // If mapinfo.lua provided height overrides, keep them — we read
+    // the SMF values into throwaway locals so the file cursor still
+    // advances. Otherwise fill meta.min/maxHeight from the SMF.
+    float smfMinHeight = 0.0f, smfMaxHeight = 0.0f;
+    f.read(reinterpret_cast<char*>(&smfMinHeight), 4);
+    f.read(reinterpret_cast<char*>(&smfMaxHeight), 4);
+    if (!meta.mapInfoHeightOverride) {
+        meta.minHeight = smfMinHeight;
+        meta.maxHeight = smfMaxHeight;
+    }
 
     meta.widthElmos = meta.mapx * SQUARE_SIZE;
     meta.heightElmos = meta.mapy * SQUARE_SIZE;

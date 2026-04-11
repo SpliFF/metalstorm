@@ -23,7 +23,7 @@
 struct sqlite3;
 
 /// Increment to reprocess all maps.
-constexpr int MAP_FORMAT_VERSION = 9;
+constexpr int MAP_FORMAT_VERSION = 10;
 
 struct MapStartPosition {
     float x = 0, z = 0;
@@ -97,6 +97,13 @@ struct MapMetadata {
     int mapx = 0, mapy = 0;
     int widthElmos = 0, heightElmos = 0;
     float minHeight = 0, maxHeight = 0;
+    /// If the map's `mapinfo.lua` provides `smf.minheight`/`smf.maxheight`
+    /// the sim uses those values instead of the SMF header's baked-in
+    /// range when decoding the uint16 heightmap. We mirror that behaviour
+    /// here so the client-side terrain render scale matches the sim's,
+    /// otherwise units spawned at ground y=f(heightmap) float above or
+    /// sink below the visually rendered terrain.
+    bool mapInfoHeightOverride = false;
     float gravity = 130;
     float tidalStrength = 0;
     float maxMetal = 2.0f;
