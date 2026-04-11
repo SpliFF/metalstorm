@@ -39,7 +39,7 @@ struct MapFeatureData {
 /// Definition of a feature type referenced by `MapFeatureData::featureType`.
 /// Parsed from the map's `features/*.lua` files (Spring's `featureDefs` table)
 /// and converted to web-ready assets by FeatureProcessor:
-///   - the original `.s3o` model is converted to a `.glb` via any2gltf
+///   - the original `.s3o` model is converted to a `.glb` via modelimporter
 ///   - the original `.tga`/`.dds` texture is converted to `.png` via magick
 ///
 /// Filenames in `modelFile`/`textureFile` are relative to the map's processed

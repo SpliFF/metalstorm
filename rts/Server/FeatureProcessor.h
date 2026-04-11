@@ -11,7 +11,7 @@
 //      This is what most modern Spring maps use instead of embedding
 //      placements in the SMF binary section.
 //   3. For each unique FeatureDef referenced by a placement, convert
-//      its `.s3o` model to `.glb` via the `any2gltf` CLI, and convert
+//      its `.s3o` model to `.glb` via the `modelimporter` CLI, and convert
 //      the referenced texture (`.tga`/`.dds`/etc.) to `.png` via
 //      ImageMagick. Outputs land in `processedDir/features/`.
 //

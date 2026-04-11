@@ -19,8 +19,12 @@
 #include <unordered_map>
 #include <vector>
 
-#ifndef ANY2GLTF_BINARY_PATH
-#define ANY2GLTF_BINARY_PATH "any2gltf"
+// Absolute path to the modelimporter binary, injected at build time
+// via target_compile_definitions in the top-level CMakeLists. Falls
+// back to a bare name for source-tree-relative invocations where
+// the binary happens to be on $PATH (unit tests, manual runs).
+#ifndef MODELIMPORTER_BINARY_PATH
+#define MODELIMPORTER_BINARY_PATH "modelimporter"
 #endif
 
 namespace fs = std::filesystem;
@@ -359,7 +363,7 @@ void ParseFeaturePlacements(lua_State* L,
 }
 
 // ============================================================
-// Step 3 — convert assets via any2gltf + magick
+// Step 3 — convert assets via modelimporter + magick
 // ============================================================
 
 /// Run a shell command, capturing combined stdout+stderr. Returns the
@@ -434,7 +438,7 @@ std::string ResolveTexturePath(const std::string& mapDir, const std::string& bas
 
 /// Read the diffuse texture filename out of an S3O header without parsing
 /// the rest of the file. Used to know which texture to convert before
-/// (or after) running any2gltf.
+/// (or after) running modelimporter.
 std::string ReadS3OTexture1(const std::string& s3oPath) {
     FILE* f = std::fopen(s3oPath.c_str(), "rb");
     if (!f) return {};
@@ -495,19 +499,19 @@ void ConvertAssetsForDef(MapMetadata& meta, MapFeatureDef& def) {
     }
     def.textureFile = convertedTextureName;
 
-    // ---- Model: any2gltf src.s3o features/Name.glb [--texture-ext png] ----
+    // ---- Model: modelimporter src.s3o features/Name.glb [--texture-ext png] ----
     const std::string stem = fs::path(srcModel).stem().string();
     const std::string dstName = stem + ".glb";
     const fs::path dst = featuresDir / dstName;
     if (!fs::exists(dst) ||
         fs::last_write_time(srcModel) > fs::last_write_time(dst)) {
-        std::string cmd = std::string("\"") + ANY2GLTF_BINARY_PATH + "\"";
+        std::string cmd = std::string("\"") + MODELIMPORTER_BINARY_PATH + "\"";
         if (!convertedTextureName.empty()) {
             cmd += " --texture-ext png";
         }
         cmd += " \"" + srcModel + "\" \"" + dst.string() + "\" 2>&1";
         if (RunCommand(cmd) != 0) {
-            std::fprintf(stderr, "[features]   %s: any2gltf failed, no model\n",
+            std::fprintf(stderr, "[features]   %s: modelimporter failed, no model\n",
                 def.name.c_str());
             def.modelFile.clear();
             return;

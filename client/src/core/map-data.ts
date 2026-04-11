@@ -29,7 +29,7 @@ export interface MapFeatureInstance {
  * Definition of a feature type — parallel to `featureTypes[]` (same indices).
  *
  * `modelUrl` is an HTTP URL to a glTF 2.0 binary (`.glb`) converted from
- * the original Spring `.s3o` by the server preprocessing pipeline (any2gltf).
+ * the original Spring `.s3o` by the server preprocessing pipeline (modelimporter).
  * `textureUrl` is an HTTP URL to a `.png` converted from the original
  * `.tga`/`.dds`. Either may be empty if the def has no model or asset
  * conversion failed; the renderer falls back to a placeholder in that case.

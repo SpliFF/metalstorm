@@ -2,7 +2,7 @@
  * FeatureRenderer — render map features using their real models.
  *
  * The server preprocessing pipeline converts each Spring `.s3o` model to
- * glTF 2.0 binary (`.glb`) via the `any2gltf` tool, and each `.tga`
+ * glTF 2.0 binary (`.glb`) via the `modelimporter` tool, and each `.tga`
  * texture to `.png` via ImageMagick. Both URLs are delivered in the
  * `MapFeatureDefInfo` array on the parsed map data.
  *

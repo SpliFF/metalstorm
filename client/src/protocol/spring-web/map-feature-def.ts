@@ -13,7 +13,7 @@ import * as flatbuffers from 'flatbuffers';
  * from the map's `features/*.lua` and converted into web-ready assets:
  *
  *   - `model_url` is an HTTP URL to a glTF 2.0 binary (`.glb`)
- *     converted from the original `.s3o` via the any2gltf tool.
+ *     converted from the original `.s3o` via the modelimporter tool.
  *   - `texture_url` is an HTTP URL to a PNG converted from the
  *     original `.tga`/`.dds` via ImageMagick.
  *

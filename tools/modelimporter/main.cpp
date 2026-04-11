@@ -1,4 +1,4 @@
-// any2gltf — convert any Assimp-supported model file to glTF 2.0.
+// modelimporter — convert any Assimp-supported model file to glTF 2.0.
 //
 // Pipeline:
 //     <input>  -> Assimp Importer (built-in formats + S3O plugin)
@@ -7,13 +7,14 @@
 //                 -> <output>
 //
 // Usage:
-//     any2gltf <input> <output>
+//     modelimporter <input> <output>
 //
 // Output format is selected from the extension of <output>:
 //     .gltf  -> "gltf2" exporter (JSON + sidecar .bin)
 //     .glb   -> "glb2"  exporter (single binary file)
 
 #include "S3OImporter.h"
+#include "MetaLuaWriter.h"
 
 #include <assimp/Importer.hpp>
 #include <assimp/Exporter.hpp>
@@ -27,22 +28,34 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
 
 namespace {
 
 void PrintUsage(const char* argv0) {
     std::fprintf(stderr,
-        "any2gltf — convert any model file to glTF 2.0\n"
+        "modelimporter — convert any model file to glTF 2.0 and emit\n"
+        "                a sibling .meta.lua engine-metadata file.\n"
         "\n"
         "usage: %s [options] <input> <output>\n"
         "\n"
         "  <input>   path to a model file Assimp can read.\n"
         "            Spring RTS .s3o files are supported via the\n"
-        "            built-in S3O importer plugin.\n"
+        "            built-in S3O importer plugin. The full list of\n"
+        "            supported formats is whatever upstream Assimp\n"
+        "            v6.0.4 bundles (OBJ, FBX, COLLADA/DAE, BLEND,\n"
+        "            3DS, LWO, STL, PLY, glTF/glTF2, X, MD2/MD3/MD5,\n"
+        "            and ~40 others).\n"
         "  <output>  path to write — extension selects format:\n"
         "              .gltf  -> JSON + sidecar .bin\n"
         "              .glb   -> single binary file\n"
+        "\n"
+        "            A sibling <output>.meta.lua is also written\n"
+        "            containing the engine metadata the synced sim\n"
+        "            needs at runtime (bounding sphere/box, piece\n"
+        "            tree, attachment points). Authored overrides\n"
+        "            from <input>.meta.lua are merged on top.\n"
         "\n"
         "options:\n"
         "  --texture-ext <ext>   Rewrite all referenced texture file\n"
@@ -50,6 +63,9 @@ void PrintUsage(const char* argv0) {
         "                        Useful when the source file points at\n"
         "                        legacy .tga assets that are being\n"
         "                        converted in a sibling pipeline step.\n"
+        "  --no-meta             Do not emit the sibling .meta.lua file.\n"
+        "                        Only useful if the caller manages\n"
+        "                        metadata out-of-band.\n"
         "\n", argv0);
 }
 
@@ -117,6 +133,7 @@ const char* PickExporter(const std::string& outPath) {
 
 int main(int argc, char** argv) {
     std::string inPath, outPath, textureExt;
+    bool emitMeta = true;
 
     // Tiny hand-rolled arg parser — keeps the binary dependency-free.
     for (int i = 1; i < argc; ++i) {
@@ -127,6 +144,8 @@ int main(int argc, char** argv) {
             if (!textureExt.empty() && textureExt[0] == '.') {
                 textureExt.erase(0, 1);
             }
+        } else if (a == "--no-meta") {
+            emitMeta = false;
         } else if (a == "-h" || a == "--help") {
             PrintUsage(argv[0]);
             return 0;
@@ -135,7 +154,7 @@ int main(int argc, char** argv) {
         } else if (outPath.empty()) {
             outPath = a;
         } else {
-            std::fprintf(stderr, "any2gltf: unexpected argument '%s'\n", a.c_str());
+            std::fprintf(stderr, "modelimporter: unexpected argument '%s'\n", a.c_str());
             PrintUsage(argv[0]);
             return 1;
         }
@@ -148,7 +167,7 @@ int main(int argc, char** argv) {
     const char* exporterId = PickExporter(outPath);
     if (!exporterId) {
         std::fprintf(stderr,
-            "any2gltf: output extension must be .gltf or .glb (got '%s')\n",
+            "modelimporter: output extension must be .gltf or .glb (got '%s')\n",
             outPath.c_str());
         return 2;
     }
@@ -178,7 +197,7 @@ int main(int argc, char** argv) {
 
     const aiScene* scene = importer.ReadFile(inPath, kFlags);
     if (!scene) {
-        std::fprintf(stderr, "any2gltf: failed to read '%s': %s\n",
+        std::fprintf(stderr, "modelimporter: failed to read '%s': %s\n",
                      inPath.c_str(), importer.GetErrorString());
         Assimp::DefaultLogger::kill();
         return 3;
@@ -194,15 +213,49 @@ int main(int argc, char** argv) {
     Assimp::Exporter exporter;
     const aiReturn rc = exporter.Export(scene, exporterId, outPath);
     if (rc != aiReturn_SUCCESS) {
-        std::fprintf(stderr, "any2gltf: glTF export failed: %s\n",
+        std::fprintf(stderr, "modelimporter: glTF export failed: %s\n",
                      exporter.GetErrorString());
         Assimp::DefaultLogger::kill();
         return 4;
     }
 
-    std::fprintf(stderr, "any2gltf: %s -> %s (%u meshes, %u materials)\n",
-                 inPath.c_str(), outPath.c_str(),
-                 scene->mNumMeshes, scene->mNumMaterials);
+    // Emit the sibling <output>.meta.lua unless the caller opted
+    // out via --no-meta. We compute the path by replacing the
+    // output extension (.glb / .gltf) with .meta.lua. An authored
+    // override file at <input>.meta.lua is passed through and
+    // merged by MetaLuaWriter.
+    if (emitMeta) {
+        namespace fs = std::filesystem;
+        const fs::path outP     = outPath;
+        const fs::path metaPath = fs::path(outP).replace_extension(".meta.lua");
+
+        // Look for an authored override next to the source file.
+        const fs::path authoredPath =
+            fs::path(inPath).replace_extension(".meta.lua");
+        const std::string authoredArg =
+            fs::exists(authoredPath) ? authoredPath.string() : std::string{};
+
+        if (!MetaLuaWriter::Write(scene, metaPath.string(), authoredArg)) {
+            std::fprintf(stderr,
+                "modelimporter: failed to write %s\n",
+                metaPath.string().c_str());
+            Assimp::DefaultLogger::kill();
+            return 5;
+        }
+
+        std::fprintf(stderr,
+            "modelimporter: %s -> %s (%u meshes, %u materials) + %s%s\n",
+            inPath.c_str(), outPath.c_str(),
+            scene->mNumMeshes, scene->mNumMaterials,
+            metaPath.filename().string().c_str(),
+            authoredArg.empty() ? "" : " [authored override merged]");
+    } else {
+        std::fprintf(stderr,
+            "modelimporter: %s -> %s (%u meshes, %u materials)\n",
+            inPath.c_str(), outPath.c_str(),
+            scene->mNumMeshes, scene->mNumMaterials);
+    }
+
     Assimp::DefaultLogger::kill();
     return 0;
 }

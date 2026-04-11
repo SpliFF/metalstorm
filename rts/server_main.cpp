@@ -109,6 +109,23 @@ int main(int argc, char* argv[])
     if (!mapPath.empty()) {
         CFileHandler::AddContentRoot(mapPath);
         std::fprintf(stderr, "[spring-server] map content: %s\n", mapPath.c_str());
+
+        // Also expose the preprocessed data dir for this map as a
+        // content root, so SolidObjectDef::LoadModel can find the
+        // `<feature>.meta.lua` files the modelimporter writes there.
+        // Layout convention (set by FeatureProcessor):
+        //     data/maps/<mapId>/features/<stem>.meta.lua
+        // The map id is the basename of mapPath (e.g.
+        // "scorched_crossing_v2.4").
+        namespace fs = std::filesystem;
+        const std::string mapId = fs::path(mapPath).filename().string();
+        const std::string processedFeatures = "data/maps/" + mapId + "/features";
+        if (fs::is_directory(processedFeatures)) {
+            CFileHandler::AddContentRoot(processedFeatures);
+            std::fprintf(stderr,
+                "[spring-server] processed map features: %s\n",
+                processedFeatures.c_str());
+        }
     }
     // Engine base content (gamedata/defs.lua, system.lua, gadgets, etc.)
     CFileHandler::AddContentRoot("cont/base/springcontent");

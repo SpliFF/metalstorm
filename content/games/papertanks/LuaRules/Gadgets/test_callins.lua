@@ -43,6 +43,19 @@ end
 
 function gadget:GameStart()
     Spring.Echo("[test_callins] GameStart fired")
+
+    -- Quick sanity: try to spawn a GreyRock feature (which has a
+    -- .meta.lua preprocessed alongside its .glb) and log its radius.
+    -- If the meta loader is wired correctly, radius should be ~113.
+    -- If the fallback fires, radius will be 1.
+    if Spring.CreateFeature and Spring.GetFeatureRadius then
+        local fid = Spring.CreateFeature("GreyRock1", 3584, 0, 3584, 0, Spring.GetGaiaTeamID())
+        if fid then
+            local r = Spring.GetFeatureRadius(fid)
+            Spring.Echo(string.format(
+                "[test_callins] spawned GreyRock1 feature id=%d radius=%.2f", fid, r))
+        end
+    end
 end
 
 function gadget:GameFrame(frame)

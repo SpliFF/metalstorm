@@ -202,12 +202,13 @@ add_executable(spring-lobby
     rts/System/SafeCStrings.c
     rts/Server/FeatureProcessor.cpp
 )
-add_dependencies(spring-lobby generate_flatbuffers any2gltf)
+add_dependencies(spring-lobby generate_flatbuffers modelimporter)
 target_compile_definitions(spring-lobby PRIVATE
-    # Absolute path to the any2gltf binary inside this build tree.
-    # The lobby map preprocessor calls it via popen() to convert
-    # feature S3O models into glTF 2.0.
-    ANY2GLTF_BINARY_PATH="$<TARGET_FILE:any2gltf>"
+    # Absolute path to the modelimporter binary inside this build
+    # tree. The lobby map preprocessor calls it via popen() to
+    # convert Spring .s3o (and any other Assimp-supported format)
+    # into glTF 2.0 binary + a sibling .meta.lua engine-metadata file.
+    MODELIMPORTER_BINARY_PATH="$<TARGET_FILE:modelimporter>"
 )
 target_include_directories(spring-lobby PRIVATE
     ${CMAKE_SOURCE_DIR}/rts
@@ -262,13 +263,16 @@ if(TEST_SOURCES)
     endif()
 endif()
 
-# === any2gltf — content preprocessing tool ===
+# === modelimporter — content preprocessing tool ===
 #
 # Standalone CLI built on modern upstream Assimp (v6.0.4 via FetchContent).
-# Converts any model file Assimp can read — plus our custom S3O importer
-# plugin — into glTF 2.0. The server invokes this binary as part of the
-# map content preprocessing pipeline (see Server/FeatureProcessor.cpp).
-add_subdirectory(tools/any2gltf)
+# Converts any model file Assimp can read — OBJ, FBX, COLLADA, BLEND,
+# 3DS, LWO, STL, PLY, glTF, plus our custom S3O importer plugin — into
+# glTF 2.0 binary, and emits a sibling .meta.lua file containing the
+# engine-metadata the synced sim needs (bounding radius/height, piece
+# tree, attachment points, ...). The lobby map preprocessor invokes
+# this binary via popen() — see rts/Server/FeatureProcessor.cpp.
+add_subdirectory(tools/modelimporter)
 
 # === compile_commands.json symlink for clangd ===
 if(CMAKE_EXPORT_COMPILE_COMMANDS)
