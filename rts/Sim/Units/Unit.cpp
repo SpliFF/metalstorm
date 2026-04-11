@@ -419,8 +419,31 @@ void CUnit::FinishedBuilding(bool postInit)
 	SetEnergyStorage(unitDef->energyStorage);
 
 
-	// Sets the frontdir in sync with heading.
+	// Re-sync frontdir with heading after PostInit, then re-build
+	// the whole orthonormal basis so rightdir/updir stay consistent.
+	// Upstream Spring only reassigns frontdir here and leaves the
+	// stale rightdir/updir alone — which is fine for unit rendering
+	// (they're recomputed on the next GroundMoveType tick) but
+	// breaks LuaSyncedRead::GetSolidObjectRotation if a gadget
+	// reads the rotation before that tick runs. On sloped terrain
+	// the resulting transform is non-orthonormal and used to trip
+	// an assertion in debug builds.
+	//
+	// We preserve the original intent (keep the y component of
+	// frontdir so aircraft pitch isn't zeroed) and then run the
+	// same recovery code UpdateDirVectors uses.
 	frontdir = GetVectorFromHeading(heading) + (UpVector * frontdir.y);
+	{
+		float3 newFront = frontdir;
+		float3 newUp    = updir;
+		float3 newRight = newFront.cross(newUp);
+		if (newRight.SqLength() < 1e-6f) {
+			const float3 aux = (math::fabs(newUp.x) > 0.9f) ? UpVector : RgtVector;
+			newRight = aux.cross(newUp);
+		}
+		rightdir = newRight.Normalize();
+		frontdir = updir.cross(rightdir).Normalize();
+	}
 
 	eventHandler.UnitFinished(this);
 

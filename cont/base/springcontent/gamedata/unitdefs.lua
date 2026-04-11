@@ -127,23 +127,31 @@ end
 --  Basic checks to kill unitDefs that will crash ".give all"
 --
 
+-- spring-web fork: in a headless server build the unit model is
+-- only used for rendering (which happens on the client), piece
+-- scripts, and projectile hit geometry. None of those are fatal
+-- at load time — we can still spawn and simulate a unit with no
+-- .s3o file on disk, as long as it has a collision volume defined
+-- in its def. Upstream Spring stripped these defs entirely which
+-- meant a game shipping placeholder/clientside-only models (Paper
+-- Tanks, early prototypes) had zero spawnable units. Now we just
+-- warn and keep the def.
 for name, def in pairs(unitDefs) do
-  local cob = 'scripts/'   .. name .. '.cob'
-
   local obj = def.objectName or def.objectname
   if (obj == nil) then
     unitDefs[name] = nil
     Spring.Log(section, LOG.ERROR, 'removed ' .. name ..
                 ' unitDef, missing objectname param')
-    for k,v in pairs(def) do print('',k,v) end
   else
     local objfile = 'objects3d/' .. obj
     if ((not VFS.FileExists(objfile))           and
         (not VFS.FileExists(objfile .. '.3do')) and
         (not VFS.FileExists(objfile .. '.s3o'))) then
-      unitDefs[name] = nil
-      Spring.Log(section, LOG.ERROR, 'removed ' .. name
-                  .. ' unitDef, missing model file  (' .. obj .. ')')
+      Spring.Log(section, LOG.NOTICE, name
+                  .. ': no model file under objects3d/ (' .. obj
+                  .. '); keeping the def — collision will use the'
+                  .. ' def\'s collisionVolume params and rendering'
+                  .. ' is the client\'s problem')
     end
   end
 end

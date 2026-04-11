@@ -65,6 +65,7 @@
 #include "Sim/Weapons/WeaponDefHandler.h"
 #include "System/bitops.h"
 #include "System/SpringMath.h"
+#include "System/UnorderedSet.hpp"
 #include "System/FileSystem/FileHandler.h"
 #include "System/FileSystem/FileSystem.h"
 #include "System/StringHash.h"
@@ -587,9 +588,47 @@ static int GetSolidObjectRotation(lua_State* L, const CSolidObject* o)
 		return 0;
 
 	const CMatrix44f& matrix = o->GetTransformMatrix(CLuaHandle::GetHandleSynced(L));
-	const float3 angles = matrix.GetEulerAnglesLftHand();
 
-	assert(matrix.IsOrthoNormal());
+	// Defensive check instead of an assert: a non-orthonormal
+	// transform indicates an object with a degenerate/bad scale
+	// (common for features spawned at 0,0,0 before their real
+	// position is set, or for units with a zeroed MoveType at the
+	// frame they're created). Rather than crashing the whole sim
+	// we return zero euler angles and log once per unit id — a
+	// gadget that relies on GetUnitRotation can still reason
+	// about the return value, and the log tells the developer
+	// exactly which object misbehaved.
+	if (!matrix.IsOrthoNormal()) {
+		// Log once per object id so the sim log stays readable.
+		// Include the axis lengths so developers can tell whether
+		// it's a scale problem (lengths != 1) or a shear problem
+		// (dot products != 0).
+		static spring::unsynced_set<int> warnedIds;
+		if (warnedIds.insert(o->id).second) {
+			const float3 x = matrix.GetX();
+			const float3 y = matrix.GetY();
+			const float3 z = matrix.GetZ();
+			std::fprintf(stderr,
+				"[lua] GetSolidObjectRotation(id=%d): transform "
+				"matrix is not orthonormal — returning zero euler "
+				"angles.\n"
+				"      x=(%.3f,%.3f,%.3f) |x|=%.4f\n"
+				"      y=(%.3f,%.3f,%.3f) |y|=%.4f\n"
+				"      z=(%.3f,%.3f,%.3f) |z|=%.4f\n"
+				"      dots x·y=%.4f y·z=%.4f x·z=%.4f\n",
+				o->id,
+				x.x, x.y, x.z, x.Length(),
+				y.x, y.y, y.z, y.Length(),
+				z.x, z.y, z.z, z.Length(),
+				x.dot(y), y.dot(z), x.dot(z));
+		}
+		lua_pushnumber(L, 0);
+		lua_pushnumber(L, 0);
+		lua_pushnumber(L, 0);
+		return 3;
+	}
+
+	const float3 angles = matrix.GetEulerAnglesLftHand();
 
 	lua_pushnumber(L, angles[CMatrix44f::ANGLE_P]);
 	lua_pushnumber(L, angles[CMatrix44f::ANGLE_Y]);

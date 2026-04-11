@@ -111,6 +111,9 @@ end
 --  Basic checks to remove invalid weapons
 --
 
+-- spring-web fork: same rationale as unitdefs.lua — projectile
+-- models are a client-side rendering concern. Keep the weapon
+-- def and let the client pick a placeholder.
 for name, def in pairs(weaponDefs) do
   local model = def.model
   if ((type(model) == 'string') and (#model > 0)) then
@@ -118,8 +121,9 @@ for name, def in pairs(weaponDefs) do
     if ((not VFS.FileExists(modelFile))           and
         (not VFS.FileExists(modelFile .. '.3do')) and
         (not VFS.FileExists(modelFile .. '.s3o'))) then
-      weaponDefs[name] = nil
-      Spring.Log(section, LOG.ERROR, 'removed ' .. name .. ' weaponDef, missing model')
+      Spring.Log(section, LOG.NOTICE, name
+                  .. ': no projectile model under objects3d/ ('
+                  .. model .. '); keeping the def')
     end
   end
 end

@@ -400,10 +400,27 @@ void CSolidObject::SetFacingFromHeading() { buildFacing = GetFacingFromHeading(h
 
 void CSolidObject::UpdateDirVectors(bool useGroundNormal, bool useObjectNormal)
 {
-	updir    = GetWantedUpDir(useGroundNormal, useObjectNormal);
-	frontdir = GetVectorFromHeading(heading);
-	rightdir = (frontdir.cross(updir)).Normalize();
-	frontdir = updir.cross(rightdir);
+	float3 newUp    = GetWantedUpDir(useGroundNormal, useObjectNormal);
+	float3 newFront = GetVectorFromHeading(heading);
+
+	// If frontdir and updir are parallel (which happens on steep
+	// terrain when GetWantedUpDir returns something close to the
+	// forward axis, or when a unit is spawned facing straight up
+	// along a cliff normal), the cross product collapses to zero
+	// and we'd end up with a degenerate basis — which later makes
+	// GetTransformMatrix produce a non-orthonormal matrix and
+	// crash LuaSyncedRead's rotation accessor. Detect + recover.
+	float3 newRight = newFront.cross(newUp);
+	if (newRight.SqLength() < 1e-6f) {
+		const float3 aux = (math::fabs(newUp.x) > 0.9f) ? UpVector : RgtVector;
+		newRight = aux.cross(newUp);
+	}
+	newRight = newRight.Normalize();
+	newFront = newUp.cross(newRight).Normalize();
+
+	updir    = newUp;
+	rightdir = newRight;
+	frontdir = newFront;
 }
 
 

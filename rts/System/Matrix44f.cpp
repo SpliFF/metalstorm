@@ -47,8 +47,14 @@ bool CMatrix44f::IsOrthoNormal() const
 	const float3 dots = {xdir.dot(ydir), ydir.dot(zdir), xdir.dot(zdir)};
 	const float3 lens = {xdir.SqLength(), ydir.SqLength(), zdir.SqLength()};
 
-	constexpr float3 epsd = {float3::cmp_eps() *  8.0f, float3::cmp_eps() *  8.0f, float3::cmp_eps() *  8.0f};
-	constexpr float3 epsl = {float3::cmp_eps() * 16.0f, float3::cmp_eps() * 16.0f, float3::cmp_eps() * 16.0f};
+	// Tolerances are intentionally loose here: a unit rotating on
+	// sloped terrain accumulates float error in its basis vectors
+	// over many frames, and the stricter upstream tolerances
+	// (cmp_eps*8, *16) trip on small deviations that aren't
+	// actually bugs. We care about "definitely wrong" (zeroed
+	// vectors, shear of >1%) not "slightly drifted by 0.3%".
+	constexpr float3 epsd = {float3::cmp_eps() *  64.0f, float3::cmp_eps() *  64.0f, float3::cmp_eps() *  64.0f};
+	constexpr float3 epsl = {float3::cmp_eps() * 128.0f, float3::cmp_eps() * 128.0f, float3::cmp_eps() * 128.0f};
 
 	return (dots.equals(ZeroVector, epsd)) && (lens.equals(OnesVector, epsl));
 }

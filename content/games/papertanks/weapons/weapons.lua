@@ -1,5 +1,22 @@
 -- Paper Tanks: Weapon Definitions
 return {
+    -- A silent no-op "death explosion" used by any unit that doesn't
+    -- define its own `explodeAs` / `selfDestructAs`. Spring's engine
+    -- looks up a weapon called NOWEAPON as the fallback for missing
+    -- explode weapons; without a definition here (or an explicit
+    -- explodeAs on every unit) every unit def logs an error at load
+    -- time. Games are free to override this with something flashier.
+    NOWEAPON = {
+        name        = "No Weapon",
+        weapontype  = "Cannon",
+        range       = 10,
+        reloadtime  = 1,
+        damage      = { default = 0 },
+        areaofeffect = 0,
+        soundstart  = "",
+        noexplode   = 1,
+    },
+
     PT_LIGHTCANNON = {
         name = "Light Cannon",
         weapontype = "Cannon",

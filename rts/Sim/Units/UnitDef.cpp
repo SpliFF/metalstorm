@@ -558,14 +558,42 @@ UnitDef::UnitDef(const LuaTable& udTable, const std::string& unitName, int id)
 	modelName = udTable.GetString("objectName", "");
 	scriptName = "scripts/" + udTable.GetString("script", unitName + ".cob");
 
-	deathExpWeaponDef = weaponDefHandler->GetWeaponDef(udTable.GetString("explodeAs", ""));
-	selfdExpWeaponDef = weaponDefHandler->GetWeaponDef(udTable.GetString("selfDestructAs", udTable.GetString("explodeAs", "")));
+	const std::string explodeAs = udTable.GetString("explodeAs", "");
+	const std::string selfdAs   = udTable.GetString("selfDestructAs", explodeAs);
 
-	if (deathExpWeaponDef == nullptr && (deathExpWeaponDef = weaponDefHandler->GetWeaponDef("NOWEAPON")) == nullptr) {
-		LOG_L(L_ERROR, "Couldn't find WeaponDef NOWEAPON and explodeAs for %s is missing!", unitName.c_str());
+	deathExpWeaponDef = weaponDefHandler->GetWeaponDef(explodeAs);
+	selfdExpWeaponDef = weaponDefHandler->GetWeaponDef(selfdAs);
+
+	// Helper to emit a developer-friendly error pointing the game
+	// author at the exact lua file that needs fixing and the two
+	// ways out of this situation (explicit per-unit value or a
+	// game-wide NOWEAPON fallback).
+	auto explainMissing = [&](const char* field, const std::string& wanted) {
+		std::fprintf(stderr,
+			"[unitdef] %s: weapon '%s' referenced by `%s` is not defined.\n"
+			"          fix one of the following:\n"
+			"            - add `%s = \"<name>\"` to the unit def with\n"
+			"              the name of an existing weapon, or\n"
+			"            - define a fallback weapon named `NOWEAPON`\n"
+			"              in your game's weapons/*.lua (a silent\n"
+			"              0-damage Cannon is fine), which every unit\n"
+			"              without an explicit %s will default to.\n",
+			unitName.c_str(),
+			wanted.empty() ? "(unset)" : wanted.c_str(),
+			field, field, field);
+	};
+
+	if (deathExpWeaponDef == nullptr) {
+		deathExpWeaponDef = weaponDefHandler->GetWeaponDef("NOWEAPON");
+		if (deathExpWeaponDef == nullptr) {
+			explainMissing("explodeAs", explodeAs);
+		}
 	}
-	if (selfdExpWeaponDef == nullptr && (selfdExpWeaponDef = weaponDefHandler->GetWeaponDef("NOWEAPON")) == nullptr) {
-		LOG_L(L_ERROR, "Couldn't find WeaponDef NOWEAPON and selfDestructAs for %s is missing!", unitName.c_str());
+	if (selfdExpWeaponDef == nullptr) {
+		selfdExpWeaponDef = weaponDefHandler->GetWeaponDef("NOWEAPON");
+		if (selfdExpWeaponDef == nullptr) {
+			explainMissing("selfDestructAs", selfdAs);
+		}
 	}
 
 	power = udTable.GetFloat("power", (metal + (energy / 60.0f)));
