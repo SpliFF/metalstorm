@@ -348,6 +348,20 @@ bool CWeapon::CallAimingScript(bool waitForAim)
 	if (!CanCallAimingScript(angleGood &= CheckAimingAngle()))
 		return false;
 
+	// Script-less units (e.g. Paper Tanks before it ships unit scripts)
+	// share a single CNullUnitScript singleton whose AimWeapon is a
+	// no-op. Without intervention here angleGood would stay false
+	// forever: `angleGood &= !waitForAim` below zeroes it, then the
+	// null AimWeapon never signals completion and CanFire rejects
+	// every shot. Short-circuit: with no animation to wait for, the
+	// aim is trivially "good".
+	if (owner->script == &CNullUnitScript::value) {
+		angleGood = true;
+		lastRequestedDir = wantedDir;
+		lastAimedFrame = gs->frameNum;
+		return true;
+	}
+
 	// if false, block further firing until AimWeapon has finished
 	angleGood &= !waitForAim;
 

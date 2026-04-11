@@ -57,6 +57,9 @@ public:
 
 	// weapon callins
 	int   QueryWeapon(int weaponNum) override { return -1; }
+	// AimWeapon is a no-op: CWeapon::CallAimingScript detects the
+	// null-script singleton and short-circuits aim-success instead
+	// of calling this.
 	void  AimWeapon(int weaponNum, float heading, float pitch) override {}
 	void  AimShieldWeapon(CPlasmaRepulser* weapon) override {}
 	int   AimFromWeapon(int weaponNum) override { return -1; }

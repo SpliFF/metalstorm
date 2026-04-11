@@ -22,7 +22,7 @@ return {
         canstop = true,
         canguard = true,
         weapons = {
-            [1] = { def = "PT_FLAK", onlytargetcategory = "AIR" },
+            [1] = { name = "PT_FLAK", onlytargetcategory = "AIR" },
         },
     },
 }

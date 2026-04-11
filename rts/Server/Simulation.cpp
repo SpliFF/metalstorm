@@ -289,22 +289,35 @@ void CSimulation::SetupTestGame()
     for (auto* d : spawnDefs) std::fprintf(stderr, "'%s' ", d->name.c_str());
     std::fprintf(stderr, "\n");
 
-    // Place teams close enough to fight (600 elmos apart)
+    // Place teams close enough to fight. We want every unit within
+    // the shortest weapon range (250 for scout MG) so even the
+    // shortest-range unit can shoot immediately. Team centres are
+    // 200 apart on the x axis; units fan out along z inside each
+    // team's column.
     float3 mapCenter(mapDims.mapx * SQUARE_SIZE * 0.5f, 0.0f,
                      mapDims.mapy * SQUARE_SIZE * 0.5f);
     float3 teamBase[2] = {
-        float3(mapCenter.x - 300.0f, 0.0f, mapCenter.z),
-        float3(mapCenter.x + 300.0f, 0.0f, mapCenter.z),
+        float3(mapCenter.x - 100.0f, 0.0f, mapCenter.z),
+        float3(mapCenter.x + 100.0f, 0.0f, mapCenter.z),
     };
 
     std::vector<CUnit*> spawnedUnits[2];
+
+    const int totalPerTeam = static_cast<int>(spawnDefs.size()) * 3;
 
     for (int team = 0; team < 2; team++) {
         for (size_t d = 0; d < spawnDefs.size(); d++) {
             for (int i = 0; i < 3; i++) {
                 float3 pos = teamBase[team];
-                pos.x += (team == 0 ? -1 : 1) * d * 80.0f;
-                pos.z += (i - 1) * 80.0f;
+                // Spread all units along z, centred on mapCenter.z.
+                // Use signed-int math — unsigned underflow from
+                // size_t arithmetic happily produces astronomical
+                // values.
+                const int unitIdx = static_cast<int>(d) * 3 + i;
+                pos.z += (unitIdx - (totalPerTeam - 1) * 0.5f) * 40.0f;
+                // y is left at 0 intentionally — CUnitLoader::LoadUnit
+                // ground-clamps non-flying unit spawn positions for
+                // us, so we don't need to sample the heightmap here.
 
                 UnitLoadParams params;
                 params.unitDef = spawnDefs[d];
@@ -333,9 +346,11 @@ void CSimulation::SetupTestGame()
     std::fprintf(stderr, "[sim] spawned %d units (%zu vs %zu)\n",
         totalSpawned, spawnedUnits[0].size(), spawnedUnits[1].size());
 
-    // Give attack-move commands toward the opposing team so they fight
+    // Give attack-move commands toward the opposing team's base so
+    // each unit advances toward the enemy and auto-acquires targets
+    // along the way.
     for (int team = 0; team < 2; team++) {
-        float3 targetPos = teamBase[1 - team]; // attack toward other team
+        const float3 targetPos = teamBase[1 - team];
         for (CUnit* unit : spawnedUnits[team]) {
             Command cmd(CMD_FIGHT, 0, targetPos);
             unit->commandAI->GiveCommand(cmd);

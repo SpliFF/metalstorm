@@ -103,6 +103,26 @@ CUnit* CUnitLoader::LoadUnit(const UnitLoadParams& params)
 			const_cast<UnitLoadParams&>(params).teamID = teamHandler.GaiaTeamID();
 		}
 
+		// Ground-clamp the spawn position so callers don't have to
+		// sample the heightmap themselves. Non-flying units get
+		// snapped onto the terrain surface at their (x, z); flying
+		// units (aircraft, gunships) keep whatever y the caller
+		// specified so they can legitimately spawn in the air from
+		// a carrier or custom pad.
+		//
+		// We clamp BOTH directions: a y above ground is "in the
+		// sky" and leads to the unit taking several frames to fall,
+		// which in turn breaks target acquisition on frame 0 (the
+		// LoS handler updates based on the ballistic y, which a
+		// falling unit hasn't reached yet); a y below ground means
+		// the unit starts inside the terrain collision mesh.
+		if (!ud->canfly) {
+			const float groundY = CGround::GetHeightReal(params.pos.x, params.pos.z, true);
+			if (params.pos.y != groundY) {
+				const_cast<UnitLoadParams&>(params).pos.y = groundY;
+			}
+		}
+
 		unit = CUnitHandler::NewUnit(ud);
 		unit->entityReference = Sim::registry.create();
 

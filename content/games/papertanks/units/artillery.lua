@@ -23,7 +23,7 @@ return {
         canguard = true,
         hightrajectory = 1,
         weapons = {
-            [1] = { def = "PT_ARTY" },
+            [1] = { name = "PT_ARTY" },
         },
     },
 }

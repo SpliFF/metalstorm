@@ -23,7 +23,7 @@ return {
         canguard = true,
         stealth = false,
         weapons = {
-            [1] = { def = "PT_MG" },
+            [1] = { name = "PT_MG" },
         },
     },
 }

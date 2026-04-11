@@ -21,6 +21,10 @@ return {
         name = "Light Cannon",
         weapontype = "Cannon",
         range = 350,
+        -- weaponVelocity is REQUIRED for Cannon weapons. Without it
+        -- the ballistic range calculator returns 0 and auto-target
+        -- rejects every candidate as out-of-range.
+        weaponvelocity = 500,
         reloadtime = 1.5,
         accuracy = 100,
         areaofeffect = 32,
@@ -35,6 +39,7 @@ return {
         name = "Heavy Cannon",
         weapontype = "Cannon",
         range = 450,
+        weaponvelocity = 600,
         reloadtime = 3.0,
         accuracy = 80,
         areaofeffect = 64,
@@ -49,6 +54,7 @@ return {
         name = "Artillery Shell",
         weapontype = "Cannon",
         range = 900,
+        weaponvelocity = 400,
         reloadtime = 5.0,
         accuracy = 200,
         areaofeffect = 96,
@@ -64,6 +70,7 @@ return {
         name = "Machine Gun",
         weapontype = "Cannon",
         range = 250,
+        weaponvelocity = 700,
         reloadtime = 0.3,
         accuracy = 150,
         areaofeffect = 8,
@@ -78,6 +85,7 @@ return {
         name = "Flak Gun",
         weapontype = "Cannon",
         range = 600,
+        weaponvelocity = 650,
         reloadtime = 0.8,
         accuracy = 200,
         areaofeffect = 48,

@@ -28,7 +28,7 @@ return {
         trackstretch = 1,
         tracktype = "StdTank",
         weapons = {
-            [1] = { def = "PT_HEAVYCANNON" },
+            [1] = { name = "PT_HEAVYCANNON" },
         },
     },
 }
