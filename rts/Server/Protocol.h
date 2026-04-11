@@ -142,6 +142,19 @@ inline std::vector<uint8_t> BuildRoomStateUpdate(const GameRoom& room) {
             fbb, p.playerId, nameOff, p.team, p.ready, p.isSpectator, p.isHost));
     }
     auto playersVec = fbb.CreateVector(playerOffsets);
+
+    // AI slot roster: matches the order the host added them. The
+    // client keys removal operations by index into this array, so
+    // the server must emit the exact same order it holds internally.
+    std::vector<flatbuffers::Offset<SpringWeb::RoomAISlot>> aiSlotOffsets;
+    for (const auto& s : room.aiSlots) {
+        auto aiIdOff = fbb.CreateString(s.aiId);
+        auto displayOff = fbb.CreateString(s.displayName);
+        aiSlotOffsets.push_back(SpringWeb::CreateRoomAISlot(
+            fbb, aiIdOff, displayOff, s.team));
+    }
+    auto aiSlotsVec = fbb.CreateVector(aiSlotOffsets);
+
     auto nameOff = fbb.CreateString(room.name);
     auto mapOff = fbb.CreateString(room.mapName);
     auto gameOff = fbb.CreateString(room.gameName);
@@ -150,8 +163,53 @@ inline std::vector<uint8_t> BuildRoomStateUpdate(const GameRoom& room) {
         fbb, room.id, static_cast<SpringWeb::RoomState>(room.state),
         nameOff, mapOff, gameOff, playersVec,
         static_cast<uint8_t>(room.countdownSeconds),
-        room.gameServerPort);
+        room.gameServerPort, aiSlotsVec);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_RoomStateUpdate, update.Union());
+}
+
+/// Build an AIListUpdate from a discovered-AI vector. Called by
+/// the lobby in response to AIListRequest, plus once after room
+/// join so the client UI has something to populate its "Add AI"
+/// dropdown with.
+template<typename AIInfoT>
+inline std::vector<uint8_t> BuildAIListUpdate(const std::vector<AIInfoT>& ais) {
+    flatbuffers::FlatBufferBuilder fbb(512);
+    std::vector<flatbuffers::Offset<SpringWeb::RoomAIInfo>> offsets;
+    offsets.reserve(ais.size());
+    for (const auto& ai : ais) {
+        auto idOff = fbb.CreateString(ai.id);
+        auto nameOff = fbb.CreateString(ai.displayName);
+        auto descOff = fbb.CreateString(ai.description);
+        offsets.push_back(SpringWeb::CreateRoomAIInfo(
+            fbb, idOff, nameOff, descOff, ai.isEngineProvided));
+    }
+    auto aisVec = fbb.CreateVector(offsets);
+    auto update = SpringWeb::CreateAIListUpdate(fbb, aisVec);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_AIListUpdate, update.Union());
+}
+
+/// Build a GameListUpdate from a discovered-games vector. Called
+/// by the lobby in response to GameListRequest. Templated on the
+/// caller's GameInfo type so we can pass in either the lobby's
+/// GameDiscovery::GameInfo directly or a thin proxy struct —
+/// anything with `id`, `displayName`, `description`, `version`
+/// string members works.
+template<typename GameInfoT>
+inline std::vector<uint8_t> BuildGameListUpdate(const std::vector<GameInfoT>& games) {
+    flatbuffers::FlatBufferBuilder fbb(512);
+    std::vector<flatbuffers::Offset<SpringWeb::LobbyGameInfo>> offsets;
+    offsets.reserve(games.size());
+    for (const auto& g : games) {
+        auto idOff = fbb.CreateString(g.id);
+        auto nameOff = fbb.CreateString(g.displayName);
+        auto descOff = fbb.CreateString(g.description);
+        auto verOff = fbb.CreateString(g.version);
+        offsets.push_back(SpringWeb::CreateLobbyGameInfo(
+            fbb, idOff, nameOff, descOff, verOff));
+    }
+    auto gamesVec = fbb.CreateVector(offsets);
+    auto update = SpringWeb::CreateGameListUpdate(fbb, gamesVec);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameListUpdate, update.Union());
 }
 
 /// Read entire binary file into a vector. Returns empty on failure.

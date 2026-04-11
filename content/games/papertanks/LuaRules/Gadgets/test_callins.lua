@@ -59,12 +59,10 @@ function gadget:GameStart()
 end
 
 function gadget:GameFrame(frame)
-    -- Per-frame is too noisy; log the first frame and then every
-    -- 30 frames (once per game second at the default 30Hz tick).
+    -- Per-frame is too noisy; we only want to prove the callin fires
+    -- at least once. The previous per-second heartbeat was silenced
+    -- because it drowned out everything else in the server log.
     logOnce("GameFrame", frame)
-    if frame > 0 and frame % 30 == 0 then
-        Spring.Echo(string.format("[test_callins] GameFrame heartbeat t=%ds", frame / 30))
-    end
 end
 
 function gadget:UnitCreated(unitID, unitDefID, teamID, builderID)

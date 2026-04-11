@@ -15,6 +15,8 @@
 #include "Server/RoomManager.h"
 #include "Server/MapProcessor.h"
 #include "Server/GameProcessor.h"
+#include "Server/AI/AIDiscovery.h"
+#include "Server/GameDiscovery.h"
 
 #include <sqlite3.h>
 
@@ -66,9 +68,15 @@ static int findFreePort(int base = 9100) {
 }
 
 /// Spawn a spring-server process for a game room.
+///
+/// `aiSlots` is the room's AI roster at game-start time. Each slot is
+/// passed to the child process as a `--ai <id>:<team>` argument; the
+/// server runs its own AIDiscovery against the same game path and
+/// resolves each id to a main.lua it can actually run.
 static GameServerInstance spawnGameServer(
     uint32_t roomId, const std::string& gamePath,
-    const std::string& mapPath, const std::string& dbPath)
+    const std::string& mapPath, const std::string& dbPath,
+    const std::vector<RoomAISlot>& aiSlots)
 {
     GameServerInstance inst;
     inst.roomId = roomId;
@@ -85,6 +93,15 @@ static GameServerInstance spawnGameServer(
     // Create log directory
     std::filesystem::create_directories("data/logs");
     std::string logPath = "data/logs/game-" + std::to_string(roomId) + ".log";
+
+    // Assemble the --ai arguments outside the fork so their string
+    // storage outlives the execvp call in the child. Each slot becomes
+    // two argv entries: "--ai" followed by "<id>:<team>".
+    std::vector<std::string> aiArgStorage;
+    aiArgStorage.reserve(aiSlots.size());
+    for (const auto& slot : aiSlots) {
+        aiArgStorage.push_back(slot.aiId + ":" + std::to_string(slot.team));
+    }
 
     pid_t pid = fork();
     if (pid == 0) {
@@ -107,20 +124,30 @@ static GameServerInstance spawnGameServer(
         for (int fd = 3; fd < maxFd; fd++) close(fd);
 
         std::string portStr = std::to_string(inst.port);
-        execlp(serverBin.c_str(), serverBin.c_str(),
-               "--port", portStr.c_str(),
-               "--game", gamePath.c_str(),
-               "--map", mapPath.c_str(),
-               "--db", dbPath.c_str(),
-               nullptr);
-        // If execlp returns, it failed
+
+        // Build argv: fixed args first, then one "--ai <spec>" pair
+        // per AI slot. The trailing nullptr terminates for execvp.
+        std::vector<const char*> argv;
+        argv.push_back(serverBin.c_str());
+        argv.push_back("--port"); argv.push_back(portStr.c_str());
+        argv.push_back("--game"); argv.push_back(gamePath.c_str());
+        argv.push_back("--map");  argv.push_back(mapPath.c_str());
+        argv.push_back("--db");   argv.push_back(dbPath.c_str());
+        for (const auto& spec : aiArgStorage) {
+            argv.push_back("--ai");
+            argv.push_back(spec.c_str());
+        }
+        argv.push_back(nullptr);
+
+        execvp(serverBin.c_str(), const_cast<char* const*>(argv.data()));
+        // If execvp returns, it failed
         fprintf(stderr, "ERROR: failed to exec game server: %s\n", serverBin.c_str());
         _exit(1);
     } else if (pid > 0) {
         inst.pid = pid;
         inst.state = GameServerInstance::Starting;
-        std::fprintf(stderr, "[lobby] spawned game server pid=%d port=%d for room %u\n",
-            pid, inst.port, roomId);
+        std::fprintf(stderr, "[lobby] spawned game server pid=%d port=%d for room %u (%zu AI)\n",
+            pid, inst.port, roomId, aiSlots.size());
     } else {
         std::fprintf(stderr, "[lobby] ERROR: fork failed\n");
         inst.state = GameServerInstance::Crashed;
@@ -144,15 +171,27 @@ int main(int argc, char* argv[])
 
     int port = 8011;
     std::string dbPath = "data/spring-server.db";
-    std::string gamePath = "content/games/papertanks";
+    std::string gamesDir = "content/games";
     std::string mapsDir = "content/maps";
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "--port" && i + 1 < argc) port = std::atoi(argv[++i]);
         else if (arg == "--db" && i + 1 < argc) dbPath = argv[++i];
-        else if (arg == "--game" && i + 1 < argc) gamePath = argv[++i];
+        else if (arg == "--games-dir" && i + 1 < argc) gamesDir = argv[++i];
         else if (arg == "--maps" && i + 1 < argc) mapsDir = argv[++i];
+        else if (arg == "--game" && i + 1 < argc) {
+            // Back-compat: `--game <path>` is translated into
+            // `--games-dir <parent>` so existing scripts that point
+            // at a single game folder still work. The lobby now
+            // always scans a root directory of games rather than
+            // running one-game-at-a-time.
+            const std::string single = argv[++i];
+            namespace fs = std::filesystem;
+            const fs::path p(single);
+            if (p.has_parent_path())
+                gamesDir = p.parent_path().string();
+        }
     }
 
     std::fprintf(stderr, "[lobby] starting on port %d...\n", port);
@@ -178,22 +217,31 @@ int main(int argc, char* argv[])
         mapProc.ScanAndProcess(mapsDir, "data", mapDb);
     }
 
-    // --- Game processing ---
-    // Walk <gamePath>/objects3d/ and convert every supported 3D file
-    // into data/games/<gameId>/models/<stem>.glb + .config.json via
-    // the modelimporter CLI. The sim picks up each config file at
-    // unit-def load time via SolidObjectDef::LoadModel; spring-server
-    // adds the models/ dir as a content root at startup so the
-    // bare-name lookup resolves either the .config.json or an
-    // author-supplied .config.lua.
-    if (!gamePath.empty()) {
-        std::filesystem::path gp(gamePath);
-        std::string gameId = gp.filename().string();
-        if (gameId.empty() && gp.has_parent_path())
-            gameId = gp.parent_path().filename().string();
-        if (!gameId.empty()) {
-            GameProcessor::Process(gamePath, gameId, "data");
-        }
+    // --- Game discovery ---
+    // Enumerate every subdirectory of `gamesDir` that ships a
+    // game.config.lua (or .json) via ConfigReader. This builds the
+    // list shown in the lobby's "create game" dropdown and, for each
+    // game, the set of AI plugins that game + the engine provide.
+    // The result is immutable for the lifetime of the lobby process
+    // — authors who add a new game must restart the lobby.
+    const std::string enginePath = "content/engine";
+    const std::vector<GameDiscovery::GameInfo> availableGames =
+        GameDiscovery::Discover(gamesDir);
+
+    // --- Per-game processing & AI discovery ---
+    // Each discovered game gets:
+    //   1. a GameProcessor run over its objects3d/ directory so any
+    //      .s3o models get converted to .glb + .config.json before
+    //      spring-server loads them,
+    //   2. an AIDiscovery scan covering content/engine/ai and the
+    //      game's own ai/ folder, cached by game id so AIListRequest
+    //      replies are cheap per-room lookups rather than rescans.
+    std::unordered_map<std::string, std::string> gamePathsById;
+    std::unordered_map<std::string, std::vector<AIDiscovery::AIInfo>> aisByGame;
+    for (const auto& g : availableGames) {
+        gamePathsById[g.id] = g.folderPath;
+        GameProcessor::Process(g.folderPath, g.id, "data");
+        aisByGame[g.id] = AIDiscovery::Discover(enginePath, g.folderPath);
     }
 
     // --- Game server instances ---
@@ -577,10 +625,32 @@ int main(int argc, char* argv[])
                 case SpringWeb::ClientPayload_RoomCreate: {
                     REQUIRE_SESSION(session);
                     auto* rc = clientMsg->payload_as_RoomCreate();
+
+                    // Validate that the requested game is one the
+                    // lobby actually discovered. If the client passes
+                    // an empty game name we pick the first available
+                    // one as a convenience default (matches how older
+                    // clients that haven't fetched the game list
+                    // behave). An unknown name is a hard rejection
+                    // so the room never enters a state we can't
+                    // launch from.
+                    std::string requestedGame = rc->game_name() ? rc->game_name()->str() : "";
+                    if (requestedGame.empty() && !availableGames.empty()) {
+                        requestedGame = availableGames[0].id;
+                    }
+                    if (gamePathsById.find(requestedGame) == gamePathsById.end()) {
+                        auto e = Protocol::BuildServerError(400,
+                            requestedGame.empty()
+                                ? "No games available on this lobby"
+                                : "Unknown game");
+                        net.Send(msg.clientId, e.data(), e.size());
+                        break;
+                    }
+
                     uint32_t roomId = rooms.CreateRoom(
                         rc->name() ? rc->name()->str() : "Game",
                         rc->map_name() ? rc->map_name()->str() : "",
-                        rc->game_name() ? rc->game_name()->str() : "",
+                        requestedGame,
                         rc->max_players() > 0 ? rc->max_players() : 8,
                         rc->password() ? rc->password()->str() : "",
                         static_cast<uint32_t>(session->userId), msg.clientId, session->username);
@@ -651,8 +721,25 @@ int main(int argc, char* argv[])
                             room->originalRoster[p.playerId] = p.team;
                     }
 
-                    // Spawn game server
-                    auto inst = spawnGameServer(room->id, gamePath, mapPath, dbPath);
+                    // Resolve the room's game id to its on-disk path.
+                    // Unknown game name is a silent fail rather than a
+                    // crash — the RoomCreate handler validates this
+                    // when the room is first created, so hitting the
+                    // unknown path here means something corrupted the
+                    // room state between create and start.
+                    auto gpIt = gamePathsById.find(room->gameName);
+                    if (gpIt == gamePathsById.end()) {
+                        std::fprintf(stderr,
+                            "[lobby] RoomStartGame: unknown game '%s' for room %u\n",
+                            room->gameName.c_str(), room->id);
+                        break;
+                    }
+                    const std::string& roomGamePath = gpIt->second;
+
+                    // Spawn game server, handing off the AI slot
+                    // roster so the sim can load each plugin for the
+                    // team the host assigned it to.
+                    auto inst = spawnGameServer(room->id, roomGamePath, mapPath, dbPath, room->aiSlots);
                     gameServers[room->id] = inst;
 
                     // Store port on the room so clients get it via RoomStateUpdate
@@ -709,6 +796,93 @@ int main(int argc, char* argv[])
                         // directly. Unusual but shouldn't leave the
                         // room stuck in Loading/Active forever.
                         rooms.SetRoomState(room->id, ERoomState::Ended);
+                        BROADCAST_ROOM_UPDATE(room);
+                    }
+                    break;
+                }
+                case SpringWeb::ClientPayload_GameListRequest: {
+                    // Any authenticated client can fetch the game
+                    // list — the lobby UI requests it on first
+                    // login so the create-room dropdown has content
+                    // before the user clicks "New Game".
+                    REQUIRE_SESSION(session);
+                    auto listMsg = Protocol::BuildGameListUpdate(availableGames);
+                    net.Send(msg.clientId, listMsg.data(), listMsg.size());
+                    break;
+                }
+                case SpringWeb::ClientPayload_AIListRequest: {
+                    // Anyone in a session can ask for the AI list —
+                    // the lobby UI needs it for the host-only "Add AI"
+                    // dropdown, but non-host clients also render AI
+                    // display names next to slots, so everyone gets it.
+                    // The list is per-game: each game has its own
+                    // ai/ folder which merges with the engine's, so
+                    // we look up by the caller's current room's game
+                    // name. A client that isn't in any room gets an
+                    // empty reply (they shouldn't have a reason to
+                    // ask before joining a room, but sending an
+                    // empty list is cheaper than a special-case
+                    // error).
+                    REQUIRE_SESSION(session);
+                    auto* room = rooms.FindRoomByClient(msg.clientId);
+                    static const std::vector<AIDiscovery::AIInfo> emptyList;
+                    const std::vector<AIDiscovery::AIInfo>* list = &emptyList;
+                    if (room) {
+                        auto it = aisByGame.find(room->gameName);
+                        if (it != aisByGame.end()) list = &it->second;
+                    }
+                    auto listMsg = Protocol::BuildAIListUpdate(*list);
+                    net.Send(msg.clientId, listMsg.data(), listMsg.size());
+                    break;
+                }
+                case SpringWeb::ClientPayload_RoomAddAI: {
+                    REQUIRE_SESSION(session);
+                    auto* room = rooms.FindRoomByClient(msg.clientId);
+                    if (!room) break;
+                    auto* addAI = clientMsg->payload_as_RoomAddAI();
+                    if (!addAI || !addAI->ai_id()) break;
+
+                    // Resolve the requested id against the discovered
+                    // set FOR THIS ROOM'S GAME so we can reject typos
+                    // and cross-game leakage (an id that exists in
+                    // game A's ai/ folder shouldn't be addable to a
+                    // game B room).
+                    auto it = aisByGame.find(room->gameName);
+                    if (it == aisByGame.end()) {
+                        std::fprintf(stderr,
+                            "[lobby] RoomAddAI rejected: room %u has unknown game '%s'\n",
+                            room->id, room->gameName.c_str());
+                        break;
+                    }
+                    const std::string requestedId = addAI->ai_id()->str();
+                    const AIDiscovery::AIInfo* match = nullptr;
+                    for (const auto& ai : it->second) {
+                        if (ai.id == requestedId) { match = &ai; break; }
+                    }
+                    if (!match) {
+                        std::fprintf(stderr,
+                            "[lobby] RoomAddAI rejected: unknown AI id '%s' for game '%s'\n",
+                            requestedId.c_str(), room->gameName.c_str());
+                        break;
+                    }
+
+                    if (rooms.AddAISlot(room->id,
+                                        static_cast<uint32_t>(session->userId),
+                                        match->id, match->displayName,
+                                        addAI->team())) {
+                        BROADCAST_ROOM_UPDATE(room);
+                    }
+                    break;
+                }
+                case SpringWeb::ClientPayload_RoomRemoveAI: {
+                    REQUIRE_SESSION(session);
+                    auto* room = rooms.FindRoomByClient(msg.clientId);
+                    if (!room) break;
+                    auto* rmAI = clientMsg->payload_as_RoomRemoveAI();
+                    if (!rmAI) break;
+                    if (rooms.RemoveAISlot(room->id,
+                                           static_cast<uint32_t>(session->userId),
+                                           rmAI->slot_index())) {
                         BROADCAST_ROOM_UPDATE(room);
                     }
                     break;

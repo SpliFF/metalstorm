@@ -2,6 +2,8 @@
 
 /* eslint-disable @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any, @typescript-eslint/no-non-null-assertion */
 
+export { AIListRequest, AIListRequestT } from './spring-web/ailist-request.js';
+export { AIListUpdate, AIListUpdateT } from './spring-web/ailist-update.js';
 export { Ack, AckT } from './spring-web/ack.js';
 export { AuthRequest, AuthRequestT } from './spring-web/auth-request.js';
 export { AuthResponse, AuthResponseT } from './spring-web/auth-response.js';
@@ -17,7 +19,10 @@ export { EntityDestroy, EntityDestroyT } from './spring-web/entity-destroy.js';
 export { GameEvent, GameEventT } from './spring-web/game-event.js';
 export { GameEventBatch, GameEventBatchT } from './spring-web/game-event-batch.js';
 export { GameInfo, GameInfoT } from './spring-web/game-info.js';
+export { GameListRequest, GameListRequestT } from './spring-web/game-list-request.js';
+export { GameListUpdate, GameListUpdateT } from './spring-web/game-list-update.js';
 export { Handshake, HandshakeT } from './spring-web/handshake.js';
+export { LobbyGameInfo, LobbyGameInfoT } from './spring-web/lobby-game-info.js';
 export { MapData, MapDataT } from './spring-web/map-data.js';
 export { MapDecals, MapDecalsT } from './spring-web/map-decals.js';
 export { MapFeature, MapFeatureT } from './spring-web/map-feature.js';
@@ -32,6 +37,9 @@ export { Pong, PongT } from './spring-web/pong.js';
 export { ReconnectRequest, ReconnectRequestT } from './spring-web/reconnect-request.js';
 export { ReconnectResponse, ReconnectResponseT } from './spring-web/reconnect-response.js';
 export { ResourceUpdate, ResourceUpdateT } from './spring-web/resource-update.js';
+export { RoomAIInfo, RoomAIInfoT } from './spring-web/room-aiinfo.js';
+export { RoomAISlot, RoomAISlotT } from './spring-web/room-aislot.js';
+export { RoomAddAI, RoomAddAIT } from './spring-web/room-add-ai.js';
 export { RoomCreate, RoomCreateT } from './spring-web/room-create.js';
 export { RoomEndGame, RoomEndGameT } from './spring-web/room-end-game.js';
 export { RoomJoin, RoomJoinT } from './spring-web/room-join.js';
@@ -43,6 +51,7 @@ export { RoomPlayerInfo, RoomPlayerInfoT } from './spring-web/room-player-info.j
 export { RoomPlayerJoined, RoomPlayerJoinedT } from './spring-web/room-player-joined.js';
 export { RoomPlayerLeft, RoomPlayerLeftT } from './spring-web/room-player-left.js';
 export { RoomReady, RoomReadyT } from './spring-web/room-ready.js';
+export { RoomRemoveAI, RoomRemoveAIT } from './spring-web/room-remove-ai.js';
 export { RoomStartGame, RoomStartGameT } from './spring-web/room-start-game.js';
 export { RoomState } from './spring-web/room-state.js';
 export { RoomStateUpdate, RoomStateUpdateT } from './spring-web/room-state-update.js';

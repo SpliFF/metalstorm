@@ -61,33 +61,38 @@ bool ModelConfigLoader::LoadInto(S3DModel& out, const std::string& basePath) {
     }
 
     // ---- Schema version check ----
-    // `metaVersion` is mandatory on files produced by the current
+    // `configVersion` is mandatory on files produced by the current
     // modelimporter. A missing key means the file was produced by a
     // pre-versioning build and should be regenerated. An older-
     // than-current version means the file is from an earlier schema
     // and the reader may need to apply a workaround — there's
     // nothing to work around yet (we're at v1), so we just log and
-    // carry on.
-    constexpr int kSupportedMetaVersion = 1;
-    const int metaVersion = root.GetInt("metaVersion", 0);
-    if (metaVersion == 0) {
+    // carry on. For one release we also accept the legacy
+    // `metaVersion` key that the pre-rename modelimporter emitted,
+    // so caches under data/ keep working until they're refreshed.
+    constexpr int kSupportedConfigVersion = 1;
+    int configVersion = root.GetInt("configVersion", 0);
+    if (configVersion == 0)
+        configVersion = root.GetInt("metaVersion", 0);
+
+    if (configVersion == 0) {
         std::fprintf(stderr,
-            "[config] %s: no `metaVersion` field — file predates the "
+            "[config] %s: no `configVersion` field — file predates the "
             "versioned schema. Run `modelimporter --update-meta` to "
             "regenerate.\n",
             basePath.c_str());
-    } else if (metaVersion < kSupportedMetaVersion) {
+    } else if (configVersion < kSupportedConfigVersion) {
         std::fprintf(stderr,
-            "[config] %s: metaVersion=%d is older than this engine "
+            "[config] %s: configVersion=%d is older than this engine "
             "supports (%d). Run `modelimporter --update-meta` to "
             "regenerate; the sim will continue with best-effort "
             "parsing.\n",
-            basePath.c_str(), metaVersion, kSupportedMetaVersion);
-    } else if (metaVersion > kSupportedMetaVersion) {
+            basePath.c_str(), configVersion, kSupportedConfigVersion);
+    } else if (configVersion > kSupportedConfigVersion) {
         std::fprintf(stderr,
-            "[config] %s: metaVersion=%d is newer than this engine "
+            "[config] %s: configVersion=%d is newer than this engine "
             "understands (%d). Some fields may be ignored.\n",
-            basePath.c_str(), metaVersion, kSupportedMetaVersion);
+            basePath.c_str(), configVersion, kSupportedConfigVersion);
     }
 
     // ---- Top-level bounds ----

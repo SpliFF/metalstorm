@@ -10,10 +10,10 @@
 // so the sim code reading the fields stays in the existing
 // `LuaTable` world.
 //
-// Schema (as of kCurrentMetaVersion = 1):
+// Schema (as of kCurrentConfigVersion = 1):
 //
 //     {
-//       "metaVersion": 1,
+//       "configVersion": 1,
 //       "radius": 50.131,
 //       "height": 56.492,
 //       "midpos": [mx, my, mz],
@@ -44,12 +44,12 @@ struct aiScene;
 
 namespace JsonWriter {
 
-/// Current meta schema version emitted by Write(). Bump whenever
+/// Current config schema version emitted by Write(). Bump whenever
 /// the `.config.json` format changes in a way older readers
 /// wouldn't handle correctly. The engine-side reader in
 /// ModelConfigLoader has its own copy of this constant and warns
-/// when the file's `metaVersion` is missing or older than its own.
-constexpr int kCurrentMetaVersion = 1;
+/// when the file's `configVersion` is missing or older than its own.
+constexpr int kCurrentConfigVersion = 1;
 
 /// Extract metadata from `scene` and write `outPath`, overwriting
 /// any existing file at that location. Callers are responsible for

@@ -292,7 +292,7 @@ bool JsonWriter::Write(const aiScene* scene, const std::string& outPath)
     out << "{\n";
 
     // Schema version — the engine-side reader branches on this.
-    out << "  \"metaVersion\": " << JsonWriter::kCurrentMetaVersion << ",\n";
+    out << "  \"configVersion\": " << JsonWriter::kCurrentConfigVersion << ",\n";
     out << "\n";
 
     // Bounds

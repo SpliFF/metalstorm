@@ -123,6 +123,33 @@ table RoomStartGame {}
 /// sender is not the room host or the room is not in an active state.
 table RoomEndGame {}
 
+/// Host-only request to add an AI player to a team slot in the current
+/// room. `ai_id` must match one of the ids the server returned in its
+/// most recent AIListUpdate; unknown ids are rejected. Ignored if the
+/// sender is not the room host or the room is past the Filling state.
+table RoomAddAI {
+    ai_id: string;
+    team: uint8;
+}
+
+/// Host-only request to remove an AI slot from the current room by
+/// its index in the RoomStateUpdate.ai_slots vector. Ignored if the
+/// sender is not the room host.
+table RoomRemoveAI {
+    slot_index: uint8;
+}
+
+/// Request the server's current list of available AI plugins for
+/// the current room's game. Response is an AIListUpdate. Any client
+/// can issue this (not host-only) so team-picking UIs can display
+/// AI metadata without waiting for a slot to exist.
+table AIListRequest {}
+
+/// Request the server's list of discovered games under content/games.
+/// Response is a GameListUpdate. Sent by the lobby UI on first
+/// login so the "create game" dropdown can be populated.
+table GameListRequest {}
+
 // Union of all client→server message types
 union ClientPayload {
     Handshake,
@@ -141,6 +168,10 @@ union ClientPayload {
     RoomKick,
     RoomStartGame,
     RoomEndGame,
+    RoomAddAI,
+    RoomRemoveAI,
+    AIListRequest,
+    GameListRequest,
 }
 
 table ClientMessage {
@@ -265,6 +296,26 @@ table RoomPlayerInfo {
     is_host: bool;
 }
 
+/// An AI player occupying a slot in a room's roster. Unlike human
+/// players, AI slots have no playerId / clientId — they only exist
+/// on the lobby server until the game starts, at which point the
+/// game server spawns an AIRuntimePool entry for each slot.
+table RoomAISlot {
+    ai_id: string;          // stable id (folder name), e.g. "null"
+    display_name: string;   // human-readable label from ai.config
+    team: uint8;
+}
+
+/// One available AI plugin, enumerated from content/engine/ai + the
+/// current game's content/games/<game>/ai directory. Sent as part
+/// of AIListUpdate when a client subscribes to a room's AI list.
+table RoomAIInfo {
+    ai_id: string;
+    display_name: string;
+    description: string;
+    is_engine_provided: bool;
+}
+
 table RoomListEntry {
     room_id: uint32;
     name: string;
@@ -290,6 +341,33 @@ table RoomStateUpdate {
     players: [RoomPlayerInfo];
     countdown_seconds: uint8;   // 0 = no countdown
     game_server_port: uint16;   // port of spawned game server (0 = not started)
+    ai_slots: [RoomAISlot];     // AI players added by the host
+}
+
+/// Reply to AIListRequest. Lists every AI plugin the server
+/// discovered under the current game + engine roots. The client
+/// uses this to populate the host's "Add AI" dropdown. The list
+/// is stable for the lifetime of the lobby process; clients may
+/// cache it and skip re-requesting unless they change game.
+table AIListUpdate {
+    ais: [RoomAIInfo];
+}
+
+/// One game plugin discovered under content/games. Shown in the
+/// lobby's create-room dropdown. Named `LobbyGameInfo` to avoid
+/// colliding with the existing `GameInfo` table which represents
+/// live-sim state (map/game speed/frame/paused).
+table LobbyGameInfo {
+    id: string;          // stable folder-name id, used as game_name in RoomCreate
+    display_name: string;
+    description: string;
+    version: string;
+}
+
+/// Reply to GameListRequest. Lists every game the lobby
+/// discovered at startup.
+table GameListUpdate {
+    games: [LobbyGameInfo];
 }
 
 table RoomPlayerJoined {
@@ -462,6 +540,8 @@ union ServerPayload {
     RoomPlayerLeft,
     MapListUpdate,
     MapData,
+    AIListUpdate,
+    GameListUpdate,
 }
 
 table ServerMessage {

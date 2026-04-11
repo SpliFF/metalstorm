@@ -2,19 +2,23 @@
 
 /* eslint-disable @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any, @typescript-eslint/no-non-null-assertion */
 
+import { AIListRequest, AIListRequestT } from '../spring-web/ailist-request.js';
 import { Ack, AckT } from '../spring-web/ack.js';
 import { AuthRequest, AuthRequestT } from '../spring-web/auth-request.js';
 import { ChatSend, ChatSendT } from '../spring-web/chat-send.js';
+import { GameListRequest, GameListRequestT } from '../spring-web/game-list-request.js';
 import { Handshake, HandshakeT } from '../spring-web/handshake.js';
 import { Ping, PingT } from '../spring-web/ping.js';
 import { PlayerCommand, PlayerCommandT } from '../spring-web/player-command.js';
 import { ReconnectRequest, ReconnectRequestT } from '../spring-web/reconnect-request.js';
+import { RoomAddAI, RoomAddAIT } from '../spring-web/room-add-ai.js';
 import { RoomCreate, RoomCreateT } from '../spring-web/room-create.js';
 import { RoomEndGame, RoomEndGameT } from '../spring-web/room-end-game.js';
 import { RoomJoin, RoomJoinT } from '../spring-web/room-join.js';
 import { RoomKick, RoomKickT } from '../spring-web/room-kick.js';
 import { RoomLeave, RoomLeaveT } from '../spring-web/room-leave.js';
 import { RoomReady, RoomReadyT } from '../spring-web/room-ready.js';
+import { RoomRemoveAI, RoomRemoveAIT } from '../spring-web/room-remove-ai.js';
 import { RoomStartGame, RoomStartGameT } from '../spring-web/room-start-game.js';
 import { RoomTeamSelect, RoomTeamSelectT } from '../spring-web/room-team-select.js';
 import { ViewportUpdate, ViewportUpdateT } from '../spring-web/viewport-update.js';
@@ -37,13 +41,17 @@ export enum ClientPayload {
   RoomReady = 13,
   RoomKick = 14,
   RoomStartGame = 15,
-  RoomEndGame = 16
+  RoomEndGame = 16,
+  RoomAddAI = 17,
+  RoomRemoveAI = 18,
+  AIListRequest = 19,
+  GameListRequest = 20
 }
 
 export function unionToClientPayload(
   type: ClientPayload,
-  accessor: (obj:Ack|AuthRequest|ChatSend|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomStartGame|RoomTeamSelect|ViewportUpdate) => Ack|AuthRequest|ChatSend|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomStartGame|RoomTeamSelect|ViewportUpdate|null
-): Ack|AuthRequest|ChatSend|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomStartGame|RoomTeamSelect|ViewportUpdate|null {
+  accessor: (obj:AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomStartGame|RoomTeamSelect|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomStartGame|RoomTeamSelect|ViewportUpdate|null
+): AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomStartGame|RoomTeamSelect|ViewportUpdate|null {
   switch(ClientPayload[type]) {
     case 'NONE': return null; 
     case 'Handshake': return accessor(new Handshake())! as Handshake;
@@ -62,15 +70,19 @@ export function unionToClientPayload(
     case 'RoomKick': return accessor(new RoomKick())! as RoomKick;
     case 'RoomStartGame': return accessor(new RoomStartGame())! as RoomStartGame;
     case 'RoomEndGame': return accessor(new RoomEndGame())! as RoomEndGame;
+    case 'RoomAddAI': return accessor(new RoomAddAI())! as RoomAddAI;
+    case 'RoomRemoveAI': return accessor(new RoomRemoveAI())! as RoomRemoveAI;
+    case 'AIListRequest': return accessor(new AIListRequest())! as AIListRequest;
+    case 'GameListRequest': return accessor(new GameListRequest())! as GameListRequest;
     default: return null;
   }
 }
 
 export function unionListToClientPayload(
   type: ClientPayload, 
-  accessor: (index: number, obj:Ack|AuthRequest|ChatSend|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomStartGame|RoomTeamSelect|ViewportUpdate) => Ack|AuthRequest|ChatSend|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomStartGame|RoomTeamSelect|ViewportUpdate|null, 
+  accessor: (index: number, obj:AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomStartGame|RoomTeamSelect|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomStartGame|RoomTeamSelect|ViewportUpdate|null, 
   index: number
-): Ack|AuthRequest|ChatSend|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomStartGame|RoomTeamSelect|ViewportUpdate|null {
+): AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomStartGame|RoomTeamSelect|ViewportUpdate|null {
   switch(ClientPayload[type]) {
     case 'NONE': return null; 
     case 'Handshake': return accessor(index, new Handshake())! as Handshake;
@@ -89,6 +101,10 @@ export function unionListToClientPayload(
     case 'RoomKick': return accessor(index, new RoomKick())! as RoomKick;
     case 'RoomStartGame': return accessor(index, new RoomStartGame())! as RoomStartGame;
     case 'RoomEndGame': return accessor(index, new RoomEndGame())! as RoomEndGame;
+    case 'RoomAddAI': return accessor(index, new RoomAddAI())! as RoomAddAI;
+    case 'RoomRemoveAI': return accessor(index, new RoomRemoveAI())! as RoomRemoveAI;
+    case 'AIListRequest': return accessor(index, new AIListRequest())! as AIListRequest;
+    case 'GameListRequest': return accessor(index, new GameListRequest())! as GameListRequest;
     default: return null;
   }
 }

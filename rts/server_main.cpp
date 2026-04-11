@@ -15,6 +15,7 @@
 #include "Server/CombatEventCollector.h"
 #include "Server/StandingOrders.h"
 #include "Server/AI/AIRuntimePool.h"
+#include "Server/AI/AIDiscovery.h"
 #include "Server/PerfMetrics.h"
 #include "Server/RoomManager.h"
 #include "Server/MapProcessor.h"
@@ -27,6 +28,7 @@
 #include "Map/ReadMap.h"
 #include "System/FileSystem/FileHandler.h"
 #include "System/Misc/SpringTime.h"
+#include "System/SpringMath.h"
 
 #include <csignal>
 #include <cstdio>
@@ -69,6 +71,17 @@ int main(int argc, char* argv[])
     std::setvbuf(stdout, nullptr, _IOLBF, 4096);
     std::setvbuf(stderr, nullptr, _IOLBF, 4096);
 
+    // Populate SpringMath's heading→vector lookup table before any
+    // sim code runs. Upstream Spring called this from SpringApp.cpp
+    // init; that file was deleted in Phase 0 along with every other
+    // rendering-side bootstrap, so the call was silently dropped. Without
+    // it, headingToVectorTable[] stays zero-initialised, every
+    // GetVectorFromHeading() returns (0,0,0), UpdateDirVectors falls
+    // into its degenerate-basis recovery path, and frontdir gets pinned
+    // to +X for every unit — which is why move orders all marched east
+    // regardless of the target.
+    SpringMath::Init();
+
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
 
@@ -77,7 +90,18 @@ int main(int argc, char* argv[])
     std::string mapPath;
     std::string dbPath = "data/spring-server.db";
 
-    // Simple arg parsing: --port N, --game PATH, --map PATH, --db PATH
+    // AI slot requests from the lobby. Each `--ai <id>:<team>` pair
+    // becomes one entry here; we resolve them against AIDiscovery
+    // after content roots are set up. Empty list = no AI players
+    // (human-only or dev-smoketest spawn).
+    struct RequestedAI {
+        std::string id;
+        int team = 0;
+    };
+    std::vector<RequestedAI> requestedAIs;
+
+    // Simple arg parsing: --port N, --game PATH, --map PATH, --db PATH,
+    // --ai id:team (repeatable)
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "--port" && i + 1 < argc) {
@@ -88,6 +112,21 @@ int main(int argc, char* argv[])
             mapPath = argv[++i];
         } else if (arg == "--db" && i + 1 < argc) {
             dbPath = argv[++i];
+        } else if (arg == "--ai" && i + 1 < argc) {
+            // Format: <id>:<team>. We parse here and resolve later,
+            // once we have a discovered AI list to look up against.
+            const std::string spec = argv[++i];
+            const auto colon = spec.find(':');
+            if (colon == std::string::npos) {
+                std::fprintf(stderr,
+                    "[spring-server] ignoring malformed --ai '%s' "
+                    "(expected id:team)\n", spec.c_str());
+                continue;
+            }
+            RequestedAI rq;
+            rq.id = spec.substr(0, colon);
+            rq.team = std::atoi(spec.substr(colon + 1).c_str());
+            requestedAIs.push_back(std::move(rq));
         } else if (arg[0] != '-') {
             // Legacy: bare number = port
             port = std::atoi(argv[i]);
@@ -371,25 +410,61 @@ int main(int argc, char* argv[])
     CSimulation sim;
     sim.Init(smfPath);
 
-    // --- Load AI for team 1 ---
-    {
-        // Try to load the Paper Tanks AI script
-        std::string aiScriptPath;
-        if (!gamePath.empty())
-            aiScriptPath = gamePath + "/ai/basic_ai.lua";
+    // --- AI slot resolution ---
+    //
+    // The lobby passes zero or more `--ai <id>:<team>` pairs on the
+    // command line, one per AI slot the host added before starting.
+    // Resolve each id against the server's own AIDiscovery run over
+    // the same game path the lobby scanned, so a plugin shadowing
+    // an engine default resolves the same way in both tiers. For
+    // each resolved plugin we slurp its main.lua into memory and
+    // hand it to AIRuntimePool::AddAI, which spawns a worker thread
+    // running the Lua VM.
+    //
+    // A failed resolution is a soft error: log it, move on. One bad
+    // AI entry shouldn't stop the game from starting for the rest
+    // of the roster.
+    if (!requestedAIs.empty()) {
+        const std::string enginePath = "content/engine";
+        const auto discovered = AIDiscovery::Discover(enginePath, gamePath);
 
-        if (!aiScriptPath.empty()) {
-            std::ifstream aiFile(aiScriptPath);
-            if (aiFile.is_open()) {
-                std::string aiCode((std::istreambuf_iterator<char>(aiFile)),
+        for (const auto& rq : requestedAIs) {
+            const AIDiscovery::AIInfo* match = nullptr;
+            for (const auto& ai : discovered) {
+                if (ai.id == rq.id) { match = &ai; break; }
+            }
+            if (!match) {
+                std::fprintf(stderr,
+                    "[spring-server] --ai %s:%d: no matching plugin found, skipping\n",
+                    rq.id.c_str(), rq.team);
+                continue;
+            }
+
+            std::ifstream mainFile(match->entryPath);
+            if (!mainFile.is_open()) {
+                std::fprintf(stderr,
+                    "[spring-server] --ai %s:%d: failed to open entry '%s'\n",
+                    rq.id.c_str(), rq.team, match->entryPath.c_str());
+                continue;
+            }
+            const std::string code((std::istreambuf_iterator<char>(mainFile)),
                                     std::istreambuf_iterator<char>());
-                if (aiPool.AddAI("PaperTanksAI", 1, 1, aiCode)) {
-                    std::fprintf(stderr, "[spring-server] AI loaded for team 1\n");
-                }
+
+            // allyTeam defaults to the team id until we grow a real
+            // alliance concept — teams are their own ally for now.
+            const int allyTeam = rq.team;
+            if (aiPool.AddAI(match->id, rq.team, allyTeam, code)) {
+                std::fprintf(stderr,
+                    "[spring-server] loaded AI '%s' (%s) on team %d\n",
+                    match->displayName.c_str(), match->id.c_str(), rq.team);
             } else {
-                std::fprintf(stderr, "[spring-server] no AI script found at %s\n", aiScriptPath.c_str());
+                std::fprintf(stderr,
+                    "[spring-server] failed to init AI '%s' on team %d\n",
+                    match->id.c_str(), rq.team);
             }
         }
+    } else {
+        std::fprintf(stderr, "[spring-server] no AI slots configured; human-only game\n");
     }
 
     // --- Fixed-timestep loop at GAME_SPEED Hz (30 Hz) ---

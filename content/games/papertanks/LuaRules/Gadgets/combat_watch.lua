@@ -75,7 +75,10 @@ function gadget:GameFrame(frame)
         parts[#parts + 1] = string.format("team%d=%d(hp=%d)", team, n, math.floor(hp[team] or 0))
     end
     table.sort(parts)
-    Spring.Echo(string.format("[combat] t=%ds %s", frame / 30, table.concat(parts, " ")))
+    -- Per-second team/hp summary silenced to keep the server log readable
+    -- while debugging other subsystems. Re-enable if combat regressions
+    -- start showing up again.
+    -- Spring.Echo(string.format("[combat] t=%ds %s", frame / 30, table.concat(parts, " ")))
 
     -- Every 5 seconds, also dump one sample unit per team's position
     -- so we can see if they're moving toward each other.

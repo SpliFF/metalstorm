@@ -34,6 +34,20 @@ struct RoomPlayer {
     bool isHost = false;
 };
 
+/// An AI player slot in a room. Populated by the host via
+/// RoomAddAI messages before the game starts. At game launch, the
+/// lobby translates these into `--ai id:team` args for spring-server,
+/// which runs its own AIDiscovery and loads the matching plugin.
+///
+/// Unlike RoomPlayer, AI slots have no playerId or clientId — they
+/// don't consume a session. A room can have arbitrarily many AI
+/// slots up to a per-room limit enforced by RoomManager.
+struct RoomAISlot {
+    std::string aiId;         // stable id (folder name), matches AIInfo::id
+    std::string displayName;  // human-readable label from ai.config
+    uint8_t team = 0;
+};
+
 struct GameRoom {
     uint32_t id = 0;
     std::string name;
@@ -45,6 +59,13 @@ struct GameRoom {
     uint32_t hostPlayerId = 0;
 
     std::vector<RoomPlayer> players;
+
+    /// AI players slotted into this room by the host. Empty until
+    /// the host adds the first one. Preserved across room state
+    /// transitions up to game start, at which point the roster is
+    /// handed off to spring-server via --ai command-line args.
+    std::vector<RoomAISlot> aiSlots;
+
     int countdownSeconds = 0;
     uint16_t gameServerPort = 0;   // set when game server is spawned
 
@@ -118,6 +139,22 @@ public:
 
     /// Kick a player (host only).
     bool KickPlayer(uint32_t roomId, uint32_t requesterId, uint32_t targetId);
+
+    /// Add an AI slot to the room (host only). `aiId` / `displayName`
+    /// are opaque strings from the lobby's AIDiscovery list; the
+    /// caller is responsible for validating the id against the
+    /// discovered set before calling. Returns true on success.
+    /// Fails if the requester is not the host, the room is past
+    /// Filling (too late to add AI), or the AI slot cap is reached.
+    bool AddAISlot(uint32_t roomId, uint32_t requesterId,
+                   const std::string& aiId,
+                   const std::string& displayName,
+                   uint8_t team);
+
+    /// Remove the AI slot at `slotIndex` (host only). Out-of-range
+    /// indices are silently ignored.
+    bool RemoveAISlot(uint32_t roomId, uint32_t requesterId,
+                      uint8_t slotIndex);
 
     /// Start the game (host triggers, requires all players ready).
     bool StartGame(uint32_t roomId, uint32_t requesterId);

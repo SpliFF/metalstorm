@@ -346,18 +346,13 @@ void CSimulation::SetupTestGame()
     std::fprintf(stderr, "[sim] spawned %d units (%zu vs %zu)\n",
         totalSpawned, spawnedUnits[0].size(), spawnedUnits[1].size());
 
-    // Give attack-move commands toward the opposing team's base so
-    // each unit advances toward the enemy and auto-acquires targets
-    // along the way.
-    for (int team = 0; team < 2; team++) {
-        const float3 targetPos = teamBase[1 - team];
-        for (CUnit* unit : spawnedUnits[team]) {
-            Command cmd(CMD_FIGHT, 0, targetPos);
-            unit->commandAI->GiveCommand(cmd);
-        }
-    }
-
-    std::fprintf(stderr, "[sim] units ordered to fight\n");
+    // Units spawn idle — strategic direction is delegated to the
+    // AI slot system (content/engine/ai, content/games/<game>/ai)
+    // which the lobby host opts into before game start. Spring's
+    // normal FIRESTATE_FIREATWILL default is preserved, so a parked
+    // unit still returns fire on enemies in range; only strategic
+    // movement/attack decisions are now the AI's responsibility.
+    std::fprintf(stderr, "[sim] units spawned idle (AI opt-in via lobby)\n");
 }
 
 

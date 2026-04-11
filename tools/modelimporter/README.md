@@ -90,13 +90,13 @@ the `.lua` form — if one already exists on disk, the importer
 treats the model's metadata as fully author-owned and skips the
 meta write entirely.
 
-### Schema (`metaVersion = 1`)
+### Schema (`configVersion = 1`)
 
 JSON form as emitted by modelimporter:
 
 ```json
 {
-  "metaVersion": 1,
+  "configVersion": 1,
 
   "radius": 50.131,
   "height": 56.492,
@@ -122,11 +122,11 @@ JSON form as emitted by modelimporter:
 The equivalent Lua form (for hand-authored `.config.lua`) is the
 same table with Lua syntax; piece arrays become Lua sequences indexed
 from 1, `parent` is still 0-based (with `-1` for the root), and
-`metaVersion` is still required:
+`configVersion` is still required:
 
 ```lua
 return {
-  metaVersion = 1,
+  configVersion = 1,
 
   radius = 50.131,
   height = 56.492,
@@ -171,9 +171,9 @@ Recognised attachment-point prefixes (case-insensitive):
 | `emit_<name>` | `emit` | Particle emitters |
 | `hp_<name>`, `hpoint_<name>` | `hp` | Generic hardpoints |
 
-### `metaVersion`
+### `configVersion`
 
-Every config file must carry a `metaVersion` integer. The engine-side
+Every config file must carry a `configVersion` integer. The engine-side
 loader ([`ModelConfigLoader`](../../rts/Sim/Objects/ModelConfigLoader.cpp))
 compares it against the version it was built against:
 
@@ -184,10 +184,14 @@ compares it against the version it was built against:
 - **newer than the engine's version** — warning about ignored
   fields, but the sim continues with best-effort parsing.
 
-Bump `kCurrentMetaVersion` in
-[`JsonWriter.h`](JsonWriter.h) and `kSupportedMetaVersion` in
+Bump `kCurrentConfigVersion` in
+[`JsonWriter.h`](JsonWriter.h) and `kSupportedConfigVersion` in
 [`ModelConfigLoader.cpp`](../../rts/Sim/Objects/ModelConfigLoader.cpp)
 in the same commit whenever the generated schema changes.
+
+For one release the loader also accepts the legacy `metaVersion`
+field as a synonym, so existing `data/` caches from the pre-rename
+build keep loading until the next rebuild pass refreshes them.
 
 ### Ownership rules
 

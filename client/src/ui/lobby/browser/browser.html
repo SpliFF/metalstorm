@@ -7,6 +7,10 @@
     <div id="create-form" class="create-form" style="display:none">
         <h3>Create Game</h3>
         <input type="text" id="new-room-name" placeholder="Room name" value="My Game">
+        <div class="map-select-label">Game:</div>
+        <select id="game-select" class="game-select" disabled>
+            <option value="">Loading games…</option>
+        </select>
         <div class="map-select-label">Map:</div>
         <div id="map-selector" class="map-grid">
             <div class="empty-state">Loading maps...</div>

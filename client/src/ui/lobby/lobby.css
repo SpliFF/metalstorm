@@ -159,6 +159,20 @@ button.danger:hover { background: #cc3333; }
     margin-bottom: 4px;
 }
 
+/* Game picker in the create-room form. Matches `.create-form input`
+ * padding/border so the two fields look like a coherent pair. */
+.game-select {
+    padding: 10px 14px;
+    border: 1px solid #334;
+    border-radius: 6px;
+    background: #0f1626;
+    color: #e0e0e0;
+    font-size: 14px;
+    margin-bottom: 12px;
+}
+.game-select:focus { outline: none; border-color: #4cc9f0; }
+.game-select:disabled { color: #556; }
+
 .map-grid {
     display: flex;
     gap: 8px;
@@ -248,4 +262,48 @@ button.danger:hover { background: #cc3333; }
 .room-actions {
     display: flex;
     gap: 10px;
+}
+
+/* AI slot rows and the host-only add-AI control sit in the same
+ * .player-list container as human players, so they inherit the
+ * .player-row layout. Extra rules below tint the AI rows a little
+ * differently and give the remove / add widgets some breathing room. */
+
+.player-row.ai-row {
+    background: #121a2c;
+    border-left: 3px solid #4cc9f0;
+    opacity: 0.95;
+}
+
+.ai-team-label {
+    font-size: 12px;
+    color: #9ab;
+    min-width: 60px;
+}
+
+.ai-remove-btn {
+    background: transparent;
+    color: #f77;
+    border: 1px solid #533;
+    border-radius: 4px;
+    padding: 2px 8px;
+    cursor: pointer;
+    font-size: 12px;
+}
+.ai-remove-btn:hover { background: #411; color: #fbb; }
+
+.ai-add-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    padding: 8px 12px;
+    margin-top: 4px;
+    background: #0c1220;
+    border-radius: 6px;
+    border: 1px dashed #334;
+}
+.ai-add-row .muted { color: #667; font-size: 12px; }
+.ai-add-row .primary {
+    padding: 4px 12px;
+    font-size: 12px;
 }

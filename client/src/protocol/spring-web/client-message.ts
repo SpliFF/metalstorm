@@ -4,20 +4,24 @@
 
 import * as flatbuffers from 'flatbuffers';
 
+import { AIListRequest, AIListRequestT } from '../spring-web/ailist-request.js';
 import { Ack, AckT } from '../spring-web/ack.js';
 import { AuthRequest, AuthRequestT } from '../spring-web/auth-request.js';
 import { ChatSend, ChatSendT } from '../spring-web/chat-send.js';
 import { ClientPayload, unionToClientPayload, unionListToClientPayload } from '../spring-web/client-payload.js';
+import { GameListRequest, GameListRequestT } from '../spring-web/game-list-request.js';
 import { Handshake, HandshakeT } from '../spring-web/handshake.js';
 import { Ping, PingT } from '../spring-web/ping.js';
 import { PlayerCommand, PlayerCommandT } from '../spring-web/player-command.js';
 import { ReconnectRequest, ReconnectRequestT } from '../spring-web/reconnect-request.js';
+import { RoomAddAI, RoomAddAIT } from '../spring-web/room-add-ai.js';
 import { RoomCreate, RoomCreateT } from '../spring-web/room-create.js';
 import { RoomEndGame, RoomEndGameT } from '../spring-web/room-end-game.js';
 import { RoomJoin, RoomJoinT } from '../spring-web/room-join.js';
 import { RoomKick, RoomKickT } from '../spring-web/room-kick.js';
 import { RoomLeave, RoomLeaveT } from '../spring-web/room-leave.js';
 import { RoomReady, RoomReadyT } from '../spring-web/room-ready.js';
+import { RoomRemoveAI, RoomRemoveAIT } from '../spring-web/room-remove-ai.js';
 import { RoomStartGame, RoomStartGameT } from '../spring-web/room-start-game.js';
 import { RoomTeamSelect, RoomTeamSelectT } from '../spring-web/room-team-select.js';
 import { ViewportUpdate, ViewportUpdateT } from '../spring-web/viewport-update.js';
@@ -108,7 +112,7 @@ unpackTo(_o: ClientMessageT): void {
 export class ClientMessageT implements flatbuffers.IGeneratedObject {
 constructor(
   public payloadType: ClientPayload = ClientPayload.NONE,
-  public payload: AckT|AuthRequestT|ChatSendT|HandshakeT|PingT|PlayerCommandT|ReconnectRequestT|RoomCreateT|RoomEndGameT|RoomJoinT|RoomKickT|RoomLeaveT|RoomReadyT|RoomStartGameT|RoomTeamSelectT|ViewportUpdateT|null = null
+  public payload: AIListRequestT|AckT|AuthRequestT|ChatSendT|GameListRequestT|HandshakeT|PingT|PlayerCommandT|ReconnectRequestT|RoomAddAIT|RoomCreateT|RoomEndGameT|RoomJoinT|RoomKickT|RoomLeaveT|RoomReadyT|RoomRemoveAIT|RoomStartGameT|RoomTeamSelectT|ViewportUpdateT|null = null
 ){}
 
 

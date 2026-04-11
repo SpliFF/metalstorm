@@ -152,6 +152,70 @@ bool RoomManager::SetReady(uint32_t roomId, uint32_t playerId, bool ready) {
     return true;
 }
 
+/// Hard cap on how many AI slots a single room can hold. Mostly a
+/// sanity check — the real limit comes from the game's max-team
+/// count, but that lives in the game definition, not the lobby.
+/// 16 is comfortably larger than any realistic RTS team layout.
+static constexpr size_t kMaxAISlotsPerRoom = 16;
+
+bool RoomManager::AddAISlot(
+    uint32_t roomId, uint32_t requesterId,
+    const std::string& aiId,
+    const std::string& displayName,
+    uint8_t team)
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    auto it = rooms.find(roomId);
+    if (it == rooms.end()) return false;
+    GameRoom& room = it->second;
+
+    // Host-only. The lobby main loop also checks this, but defence
+    // in depth keeps the RoomManager self-consistent if another
+    // code path forgets the guard.
+    if (room.hostPlayerId != requesterId) return false;
+
+    // Only allowed before the game starts — once the room is in
+    // Loading/Active/Ended, the AI roster has already been handed
+    // off to spring-server and changing it in the lobby would have
+    // no effect anyway.
+    if (room.state != ERoomState::Filling &&
+        room.state != ERoomState::Configuring &&
+        room.state != ERoomState::ReadyCheck) {
+        return false;
+    }
+
+    if (room.aiSlots.size() >= kMaxAISlotsPerRoom) return false;
+    if (aiId.empty()) return false;
+
+    RoomAISlot slot;
+    slot.aiId = aiId;
+    slot.displayName = displayName.empty() ? aiId : displayName;
+    slot.team = team;
+    room.aiSlots.push_back(std::move(slot));
+
+    std::fprintf(stderr, "[room] room %u: host added AI '%s' to team %u (slots=%zu)\n",
+        roomId, aiId.c_str(), static_cast<unsigned>(team), room.aiSlots.size());
+    return true;
+}
+
+bool RoomManager::RemoveAISlot(
+    uint32_t roomId, uint32_t requesterId, uint8_t slotIndex)
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    auto it = rooms.find(roomId);
+    if (it == rooms.end()) return false;
+    GameRoom& room = it->second;
+
+    if (room.hostPlayerId != requesterId) return false;
+    if (slotIndex >= room.aiSlots.size()) return false;
+
+    const std::string removedId = room.aiSlots[slotIndex].aiId;
+    room.aiSlots.erase(room.aiSlots.begin() + slotIndex);
+    std::fprintf(stderr, "[room] room %u: host removed AI '%s' (slot %u)\n",
+        roomId, removedId.c_str(), static_cast<unsigned>(slotIndex));
+    return true;
+}
+
 bool RoomManager::KickPlayer(uint32_t roomId, uint32_t requesterId, uint32_t targetId) {
     std::lock_guard<std::mutex> lock(mutex);
     auto it = rooms.find(roomId);

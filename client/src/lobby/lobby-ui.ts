@@ -21,6 +21,12 @@ import { RoomTeamSelect } from '../protocol/spring-web/room-team-select.js';
 import { RoomStartGame } from '../protocol/spring-web/room-start-game.js';
 import { RoomEndGame } from '../protocol/spring-web/room-end-game.js';
 import { RoomLeave } from '../protocol/spring-web/room-leave.js';
+import { RoomAddAI } from '../protocol/spring-web/room-add-ai.js';
+import { RoomRemoveAI } from '../protocol/spring-web/room-remove-ai.js';
+import { AIListRequest } from '../protocol/spring-web/ailist-request.js';
+import { AIListUpdate } from '../protocol/spring-web/ailist-update.js';
+import { GameListRequest } from '../protocol/spring-web/game-list-request.js';
+import { GameListUpdate } from '../protocol/spring-web/game-list-update.js';
 import { ServerMessage } from '../protocol/spring-web/server-message.js';
 import { ServerPayload } from '../protocol/spring-web/server-payload.js';
 import { RoomListUpdate } from '../protocol/spring-web/room-list-update.js';
@@ -46,9 +52,39 @@ interface RoomPlayerInfo {
     ready: boolean; isSpectator: boolean; isHost: boolean;
 }
 
+/// An AI player that the host has added to the room before game
+/// start. Same shape as the wire type — see RoomAISlot in
+/// schemas/protocol.fbs.
+interface RoomAISlotInfo {
+    aiId: string;
+    displayName: string;
+    team: number;
+}
+
+/// One AI plugin the server discovered under content/engine/ai or
+/// the current game's content/games/<game>/ai directory. Used to
+/// populate the host's "Add AI" dropdown.
+interface AvailableAIInfo {
+    id: string;
+    displayName: string;
+    description: string;
+    isEngineProvided: boolean;
+}
+
+/// One discovered game the lobby can host. Populated from
+/// GameListUpdate; drives the "create game" dropdown in the
+/// browser screen. The `id` is what RoomCreate.game_name carries.
+interface AvailableGameInfo {
+    id: string;
+    displayName: string;
+    description: string;
+    version: string;
+}
+
 interface CurrentRoom {
-    id: number; name: string; mapName: string;
+    id: number; name: string; mapName: string; gameName: string;
     state: number; players: RoomPlayerInfo[];
+    aiSlots: RoomAISlotInfo[];
     gameServerPort: number;
 }
 
@@ -63,6 +99,30 @@ export class LobbyUI {
     private pendingRejoinRoomId = 0;
     private availableMaps: { id: string; name: string; mapx: number; mapy: number; widthElmos: number; heightElmos: number }[] = [];
     private templates: LobbyTemplates;
+
+    /// Cached result of the most recent AIListUpdate the server sent.
+    /// The AI list is per-game, so this cache is invalidated whenever
+    /// the current room's game changes (see handleRoomState). Populated
+    /// by sendAIListRequest() and consumed by the host-only "Add AI"
+    /// dropdown in showRoom().
+    private availableAIs: AvailableAIInfo[] = [];
+
+    /// The game id the cached `availableAIs` was fetched for. Used to
+    /// detect when we enter a room running a different game and need
+    /// to refresh the AI list before the UI can populate correctly.
+    private availableAIsForGame: string = '';
+
+    /// Cached result of the most recent GameListUpdate. Fetched once
+    /// on first login; the lobby's game roster is immutable for the
+    /// process lifetime, so a single request covers every future
+    /// create-room interaction. Powers the game dropdown in the
+    /// create-room form.
+    private availableGames: AvailableGameInfo[] = [];
+
+    /// The game id the user has selected in the create-room form.
+    /// Defaults to the first discovered game once GameListUpdate
+    /// arrives. Passed to RoomCreate.game_name on create.
+    private selectedGameId: string = '';
 
     constructor(
         onGameStart?: (gameServerPort: number) => void,
@@ -187,6 +247,12 @@ export class LobbyUI {
             case ServerPayload.RoomStateUpdate:
                 this.handleRoomState(msg);
                 break;
+            case ServerPayload.AIListUpdate:
+                this.handleAIList(msg);
+                break;
+            case ServerPayload.GameListUpdate:
+                this.handleGameList(msg);
+                break;
         }
     }
 
@@ -245,6 +311,14 @@ export class LobbyUI {
             this.renderMapOptions();
         }).catch(() => {});
 
+        // Fetch the game list if we haven't already. Immutable for
+        // the lobby's lifetime, so a single request per session is
+        // enough — handleGameList() re-renders the dropdown when
+        // the response arrives.
+        if (this.availableGames.length === 0) {
+            this.sendGameListRequest();
+        }
+
         this.container.innerHTML = this.templates.browser;
         document.getElementById('create-room-btn')!.onclick = () => {
             document.getElementById('create-form')!.style.display = 'block';
@@ -258,7 +332,37 @@ export class LobbyUI {
             const mapId = selected?.getAttribute('data-map-id') ?? '';
             this.sendCreateRoom(name, mapId);
         };
+
+        // Populate the game dropdown if the list has already arrived.
+        // The template owns the <select id="game-select"> element —
+        // we just fill it with <option> children and attach a change
+        // handler that updates `selectedGameId`.
+        this.renderGameOptions();
         this.renderRoomList();
+    }
+
+    /// Repopulate the `<select id="game-select">` inside the
+    /// create-room form with the cached game list. Safe to call
+    /// before the list arrives — renders nothing and waits for
+    /// handleGameList() to call us back once the response is in.
+    private renderGameOptions(): void {
+        const sel = document.getElementById('game-select') as HTMLSelectElement | null;
+        if (!sel) return;
+        if (this.availableGames.length === 0) {
+            sel.innerHTML = '<option value="">Loading games…</option>';
+            sel.disabled = true;
+            return;
+        }
+        sel.innerHTML = this.availableGames.map(g => {
+            const label = this.esc(g.displayName)
+                + (g.version ? ` (${this.esc(g.version)})` : '');
+            const selAttr = g.id === this.selectedGameId ? ' selected' : '';
+            return `<option value="${this.esc(g.id)}"${selAttr}>${label}</option>`;
+        }).join('');
+        sel.disabled = false;
+        sel.onchange = () => {
+            this.selectedGameId = sel.value;
+        };
     }
 
     private selectedMapId = '';
@@ -357,6 +461,50 @@ export class LobbyUI {
             status: p.isSpectator ? 'Spectator' : (p.ready ? '✓ Ready' : '—'),
         })).join('');
 
+        // AI slot rows — one per entry in the room's aiSlots vector.
+        // Non-hosts see a read-only row with the AI name and team.
+        // The host gets a remove button per slot; the add-AI dropdown
+        // is rendered below the slot list rather than per-slot.
+        const aiRowsHtml = r.aiSlots.map((slot, idx) => {
+            const nameText = this.esc(slot.displayName || slot.aiId);
+            const teamLabel = `Team ${slot.team + 1}`;
+            const removeBtn = (amHost && preGame)
+                ? `<button class="ai-remove-btn" data-slot="${idx}" title="Remove AI">✕</button>`
+                : '';
+            return `<div class="player-row ai-row"><span class="player-icon">🤖</span>`
+                + `<span class="player-name">${nameText}</span>`
+                + `<span class="ai-team-label">${teamLabel}</span>`
+                + `<span class="player-status">AI</span>`
+                + removeBtn
+                + `</div>`;
+        }).join('');
+
+        // Host-only: "Add AI" row, rendered below the AI slots. Lists
+        // every discovered plugin. Shows a disabled placeholder if the
+        // list hasn't arrived yet (server responds asynchronously).
+        let addAIHtml = '';
+        if (amHost && preGame) {
+            if (this.availableAIs.length === 0) {
+                addAIHtml =
+                    `<div class="ai-add-row"><span class="muted">Loading AI list…</span></div>`;
+            } else {
+                const options = this.availableAIs.map(ai => {
+                    const label = this.esc(ai.displayName)
+                        + (ai.isEngineProvided ? ' (engine)' : '');
+                    return `<option value="${this.esc(ai.id)}">${label}</option>`;
+                }).join('');
+                addAIHtml =
+                    `<div class="ai-add-row">`
+                    + `<select id="ai-add-select" class="team-select">${options}</select>`
+                    + `<select id="ai-add-team" class="team-select">`
+                    + `<option value="0">Team 1</option>`
+                    + `<option value="1">Team 2</option>`
+                    + `</select>`
+                    + `<button id="ai-add-btn" class="primary">Add AI</button>`
+                    + `</div>`;
+            }
+        }
+
         // Action buttons depend on room state + whether the viewer is
         // the host. We compose a small HTML fragment in JS rather than
         // adding more conditional placeholders to the template.
@@ -377,7 +525,7 @@ export class LobbyUI {
         this.container.innerHTML = renderTemplate(this.templates.room, {
             name: this.esc(r.name),
             state: ROOM_STATE_LABELS[r.state] || '?',
-            players_html: playersHtml,
+            players_html: playersHtml + aiRowsHtml + addAIHtml,
             actions_html: actions.join(''),
         });
 
@@ -397,10 +545,38 @@ export class LobbyUI {
             }
         });
 
-        this.container.querySelectorAll('.team-select').forEach(sel => {
+        // The team-select dropdown is reused both as a player team
+        // picker AND as the host's "add-AI" dropdowns; we only want
+        // the change handler on the player-row selects (which carry
+        // a data-pid attribute). Filter by that attribute so the
+        // add-AI row's selects don't try to reassign the player's team.
+        this.container.querySelectorAll('.team-select[data-pid]').forEach(sel => {
             (sel as HTMLSelectElement).onchange = (e) => {
                 const team = parseInt((e.target as HTMLSelectElement).value);
                 this.sendTeamSelect(team);
+            };
+        });
+
+        // Host-only: AI add + remove buttons. The add control reads
+        // from the two dropdowns the host-only render branch emits
+        // above; the remove buttons carry their slot index as a
+        // data-slot attribute so one listener handles all of them.
+        const addBtn = document.getElementById('ai-add-btn') as HTMLButtonElement | null;
+        if (addBtn) {
+            addBtn.onclick = () => {
+                const aiSel = document.getElementById('ai-add-select') as HTMLSelectElement | null;
+                const teamSel = document.getElementById('ai-add-team') as HTMLSelectElement | null;
+                if (!aiSel || !teamSel) return;
+                const aiId = aiSel.value;
+                const team = parseInt(teamSel.value);
+                if (aiId) this.sendAddAI(aiId, team);
+            };
+        }
+        this.container.querySelectorAll('.ai-remove-btn').forEach(btn => {
+            (btn as HTMLButtonElement).onclick = (e) => {
+                const el = e.currentTarget as HTMLButtonElement;
+                const idx = parseInt(el.dataset.slot ?? '-1');
+                if (idx >= 0) this.sendRemoveAI(idx);
             };
         });
     }
@@ -412,7 +588,12 @@ export class LobbyUI {
         const b = new flatbuffers.Builder(256);
         const nOff = b.createString(name);
         const mOff = b.createString(mapId);
-        const gOff = b.createString('papertanks');
+        // Send whichever game the user picked in the create-room
+        // dropdown. If the game list hasn't arrived yet (unlikely
+        // but possible on a very fast double-click post-login), we
+        // send an empty string and the server picks its first
+        // discovered game as a default.
+        const gOff = b.createString(this.selectedGameId);
         RoomCreate.startRoomCreate(b);
         RoomCreate.addName(b, nOff);
         RoomCreate.addMapName(b, mOff);
@@ -473,6 +654,56 @@ export class LobbyUI {
         this.connection.sendClientMessage(b, ClientPayload.RoomEndGame, RoomEndGame.endRoomEndGame(b));
     }
 
+    /// Ask the server for the list of AI plugins it discovered under
+    /// content/engine/ai and the current game's content/games/<game>/ai.
+    /// The server replies asynchronously with an AIListUpdate that
+    /// handleAIList() caches into `availableAIs`.
+    private sendAIListRequest(): void {
+        if (!this.connection?.authenticated) return;
+        const b = new flatbuffers.Builder(16);
+        AIListRequest.startAIListRequest(b);
+        this.connection.sendClientMessage(
+            b, ClientPayload.AIListRequest, AIListRequest.endAIListRequest(b));
+    }
+
+    /// Ask the server for the list of games discovered under
+    /// content/games. Sent once on first login; the lobby's game
+    /// roster is immutable for the process lifetime so we don't
+    /// re-fetch. Response is a GameListUpdate handled by
+    /// handleGameList().
+    private sendGameListRequest(): void {
+        if (!this.connection?.authenticated) return;
+        const b = new flatbuffers.Builder(16);
+        GameListRequest.startGameListRequest(b);
+        this.connection.sendClientMessage(
+            b, ClientPayload.GameListRequest, GameListRequest.endGameListRequest(b));
+    }
+
+    /// Host-only: add an AI player to the current room's roster.
+    /// `aiId` must be one of the ids the server reported in its most
+    /// recent AIListUpdate; unknown ids are rejected by the lobby.
+    private sendAddAI(aiId: string, team: number): void {
+        if (!this.connection?.authenticated) return;
+        const b = new flatbuffers.Builder(64);
+        const idOff = b.createString(aiId);
+        RoomAddAI.startRoomAddAI(b);
+        RoomAddAI.addAiId(b, idOff);
+        RoomAddAI.addTeam(b, team);
+        this.connection.sendClientMessage(
+            b, ClientPayload.RoomAddAI, RoomAddAI.endRoomAddAI(b));
+    }
+
+    /// Host-only: remove the AI slot at `slotIndex` (as ordered in
+    /// the most recent RoomStateUpdate.aiSlots vector).
+    private sendRemoveAI(slotIndex: number): void {
+        if (!this.connection?.authenticated) return;
+        const b = new flatbuffers.Builder(16);
+        RoomRemoveAI.startRoomRemoveAI(b);
+        RoomRemoveAI.addSlotIndex(b, slotIndex);
+        this.connection.sendClientMessage(
+            b, ClientPayload.RoomRemoveAI, RoomRemoveAI.endRoomRemoveAI(b));
+    }
+
     // ===================== HANDLERS =====================
 
     private handleRoomList(msg: ServerMessage): void {
@@ -490,6 +721,61 @@ export class LobbyUI {
         if (this.currentScreen === 'browser') this.renderRoomList();
     }
 
+    /// Cache the server's AI plugin list. If the host is currently
+    /// viewing the room screen, re-render so the "Add AI" dropdown
+    /// can populate immediately without a second round-trip. The
+    /// list is tagged with the game id it came from so we can
+    /// detect cache staleness when the current room's game changes.
+    private handleAIList(msg: ServerMessage): void {
+        const u = msg.payload(new AIListUpdate()) as AIListUpdate;
+        this.availableAIs = [];
+        for (let i = 0; i < u.aisLength(); i++) {
+            const ai = u.ais(i);
+            if (!ai) continue;
+            this.availableAIs.push({
+                id: ai.aiId() ?? '',
+                displayName: ai.displayName() ?? '',
+                description: ai.description() ?? '',
+                isEngineProvided: ai.isEngineProvided(),
+            });
+        }
+        // Tag the cache with whichever game we're currently in —
+        // the server routes AIListRequest by the caller's current
+        // room's game, so this list matches room.gameName at the
+        // time of the reply.
+        this.availableAIsForGame = this.currentRoom?.gameName ?? '';
+        if (this.currentScreen === 'room') {
+            this.showRoom();
+        }
+    }
+
+    /// Cache the server's discovered game list. If the browser
+    /// screen is currently open, re-render so the create-room
+    /// dropdown populates without waiting for the next show.
+    private handleGameList(msg: ServerMessage): void {
+        const u = msg.payload(new GameListUpdate()) as GameListUpdate;
+        this.availableGames = [];
+        for (let i = 0; i < u.gamesLength(); i++) {
+            const g = u.games(i);
+            if (!g) continue;
+            this.availableGames.push({
+                id: g.id() ?? '',
+                displayName: g.displayName() ?? '',
+                description: g.description() ?? '',
+                version: g.version() ?? '',
+            });
+        }
+        // Auto-select the first game so a user who immediately
+        // clicks "New Game" after login has a valid selection
+        // without having to touch the dropdown.
+        if (!this.selectedGameId && this.availableGames.length > 0) {
+            this.selectedGameId = this.availableGames[0].id;
+        }
+        if (this.currentScreen === 'browser') {
+            this.renderGameOptions();
+        }
+    }
+
     private handleRoomState(msg: ServerMessage): void {
         const u = msg.payload(new RoomStateUpdate()) as RoomStateUpdate;
         const players: RoomPlayerInfo[] = [];
@@ -502,11 +788,31 @@ export class LobbyUI {
                 isSpectator: p.isSpectator(), isHost: p.isHost(),
             });
         }
+        const aiSlots: RoomAISlotInfo[] = [];
+        for (let i = 0; i < u.aiSlotsLength(); i++) {
+            const s = u.aiSlots(i);
+            if (!s) continue;
+            aiSlots.push({
+                aiId: s.aiId() ?? '',
+                displayName: s.displayName() ?? '',
+                team: s.team(),
+            });
+        }
+        const newGameName = u.gameName() ?? '';
         this.currentRoom = {
             id: u.roomId(), name: u.name() ?? '', mapName: u.mapName() ?? '',
-            state: u.state(), players,
+            gameName: newGameName,
+            state: u.state(), players, aiSlots,
             gameServerPort: u.gameServerPort(),
         };
+
+        // The AI list is per-game (each game has its own ai/ folder
+        // merged with the engine's), so refresh whenever we enter
+        // a room running a different game than the currently cached
+        // list, or when we don't have a cached list at all.
+        if (this.availableAIsForGame !== newGameName) {
+            this.sendAIListRequest();
+        }
 
         // Loading or Active → start game (need a port to connect to)
         if (this.currentRoom.state >= 3 && this.currentRoom.gameServerPort > 0) {

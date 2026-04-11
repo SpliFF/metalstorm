@@ -193,6 +193,9 @@ set(LOBBY_SERVER_SOURCES
     rts/Server/RatingSystem.cpp
     rts/Server/RoomManager.cpp
     rts/Server/MapProcessor.cpp
+    rts/Server/AI/AIDiscovery.cpp
+    rts/Server/GameDiscovery.cpp
+    rts/Server/ConfigReader.cpp
 )
 set(LOBBY_LOG_SOURCES
     rts/System/Log/Backend.cpp
@@ -226,6 +229,8 @@ target_compile_definitions(spring-lobby PRIVATE
 target_include_directories(spring-lobby PRIVATE
     ${CMAKE_SOURCE_DIR}/rts
     ${CMAKE_SOURCE_DIR}/rts/lib
+    ${CMAKE_SOURCE_DIR}/rts/lib/lua/include
+    ${CMAKE_SOURCE_DIR}/rts/lib/lua/src
     ${GENERATED_DIR}
 )
 target_link_libraries(spring-lobby PRIVATE lua uws flatbuffers ZLIB::ZLIB SQLite::SQLite3)
@@ -286,6 +291,16 @@ endif()
 # tree, attachment points, ...). The lobby map preprocessor invokes
 # this binary via popen() — see rts/Server/FeatureProcessor.cpp.
 add_subdirectory(tools/modelimporter)
+
+# === gameconverter — content preprocessing tool ===
+#
+# Standalone CLI that prepares a legacy Spring-archive game for use
+# with spring-web. Writes `game.config.lua` (wrapper around
+# modinfo.lua) and `lobby.config.lua` (wrapper around modoptions.lua),
+# runs modelimporter over every model under objects3d/, and migrates
+# legacy AI layouts to the `ai/<name>/main.lua + ai.config.lua`
+# convention. See tools/gameconverter/README.md for details.
+add_subdirectory(tools/gameconverter)
 
 # === compile_commands.json symlink for clangd ===
 if(CMAKE_EXPORT_COMPILE_COMMANDS)
