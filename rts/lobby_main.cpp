@@ -180,11 +180,12 @@ int main(int argc, char* argv[])
 
     // --- Game processing ---
     // Walk <gamePath>/objects3d/ and convert every supported 3D file
-    // into data/games/<gameId>/models/<stem>.glb + .meta.lua via the
-    // modelimporter CLI. The sim picks up each .meta.lua at unit-def
-    // load time via SolidObjectDef::LoadModel; spring-server adds the
-    // models/ dir as a content root at startup so the bare-name
-    // lookup resolves.
+    // into data/games/<gameId>/models/<stem>.glb + .config.json via
+    // the modelimporter CLI. The sim picks up each config file at
+    // unit-def load time via SolidObjectDef::LoadModel; spring-server
+    // adds the models/ dir as a content root at startup so the
+    // bare-name lookup resolves either the .config.json or an
+    // author-supplied .config.lua.
     if (!gamePath.empty()) {
         std::filesystem::path gp(gamePath);
         std::string gameId = gp.filename().string();

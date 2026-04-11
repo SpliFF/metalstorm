@@ -10,14 +10,16 @@
 //      the file header, resolve it against the game's `unittextures/`
 //      directory, and convert the texture to `.png` via ImageMagick.
 //   3. Shell out to the `modelimporter` CLI to convert the model to
-//      glTF 2.0 binary and emit a sibling `.meta.lua` containing the
-//      engine-metadata the synced sim needs (bounding sphere, height,
-//      piece tree, attachment points).
+//      glTF 2.0 binary and emit a sibling `.config.json` containing
+//      the engine metadata the synced sim needs (bounding sphere,
+//      height, piece tree, attachment points). A pre-existing
+//      `.config.lua` (author-owned Lua form) takes precedence and
+//      the JSON write is skipped for that model.
 //
 // Outputs land under `<dataDir>/games/<gameId>/models/`, and that
 // directory is added as a content root by spring-server at startup
-// so `SolidObjectDef::LoadModel` resolves each unit's `.meta.lua` via
-// the existing content-root search path — see rts/server_main.cpp.
+// so `SolidObjectDef::LoadModel` resolves each unit's config file
+// via the existing content-root search path — see rts/server_main.cpp.
 //
 // The step is idempotent: a file is only re-converted when its source
 // mtime is newer than the existing outputs. Per-file failures are

@@ -2,13 +2,13 @@
 # and emit engine metadata alongside it.
 #
 # Pipeline:  <input> → Assimp importer (built-in + S3O plugin) → glTF2 exporter
-#                                                          → <model>.meta.lua
+#                                                          → <model>.config.json
 #
 # Supported input formats are whatever Assimp ships upstream (OBJ, FBX,
 # COLLADA, BLEND, 3DS, LWO, STL, PLY, DAE, MD2/3/5, X, glTF, etc) plus
 # Spring RTS .s3o via our own BaseImporter plugin. Output is always
-# glTF 2.0 binary (.glb), optionally with a sibling .meta.lua metadata
-# file for the synced sim to read without needing Assimp itself.
+# glTF 2.0 binary (.glb), with a sibling <stem>.config.json file the
+# synced sim reads via LuaConfig without needing Assimp itself.
 #
 # The tool fetches a clean upstream Assimp v6.0.4 (no patches, no
 # streflop, no Spring fork) via FetchContent and builds a small
@@ -80,7 +80,7 @@ endif()
 add_executable(modelimporter
     main.cpp
     S3OImporter.cpp
-    MetaLuaWriter.cpp
+    JsonWriter.cpp
 )
 target_include_directories(modelimporter PRIVATE
     ${assimp_SOURCE_DIR}/include

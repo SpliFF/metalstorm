@@ -1,0 +1,16 @@
+// Auto-generated from rts/lib/lua/json-lua/json.lua via configure_file.
+// DO NOT EDIT — edit the source .lua file and rebuild instead.
+//
+// The source is Jeffrey Friedl's JSON.lua (vendored via the
+// jiyinyiyong/json-lua distribution). Licensed CC-BY 3.0; the
+// original author notice and URLs are preserved inside the source
+// text below.
+#pragma once
+
+namespace LuaJson {
+
+constexpr const char* kJsonLuaSource = R"LUA(
+@SPRING_JSON_LUA_SOURCE@
+)LUA";
+
+} // namespace LuaJson

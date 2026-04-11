@@ -13,6 +13,7 @@
 #include "LuaConstGame.h"
 #include "LuaConstEngine.h"
 #include "LuaUtils.h"
+#include "LuaJsonSrc.h" // generated: embeds rts/lib/lua/json-lua/json.lua
 
 #include "System/FileSystem/LuaVFSSimple.h"
 
@@ -192,6 +193,29 @@ void LuaParser::SetupEnv(bool isSyncedCtxt, bool isDefsParser)
 	GetTable("LOG");
 	LuaUtils::PushLogEntries(L);
 	EndTable();
+
+	// Preload the vendored JSON library so both user scripts and the
+	// LuaConfig loader can call `json.encode` / `json.decode`. Friedl's
+	// JSON.lua (in rts/lib/lua/json-lua/json.lua, embedded at build time
+	// as LuaJson::kJsonLuaSource) returns a module instance where the
+	// methods use colon-call syntax (`self:decode`). We stash the raw
+	// instance as `_jsonRaw` and expose a dot-call wrapper named `json`
+	// that forwards to it — authors can use whichever style they prefer.
+	if (luaL_dostring(L, LuaJson::kJsonLuaSource) == 0) {
+		lua_setglobal(L, "_jsonRaw");
+		luaL_dostring(L,
+			"json = {\n"
+			"  decode        = function(s, ...) return _jsonRaw:decode(s, ...) end,\n"
+			"  encode        = function(t, ...) return _jsonRaw:encode(t, ...) end,\n"
+			"  encode_pretty = function(t, ...) return _jsonRaw:encode_pretty(t, ...) end,\n"
+			"}\n"
+		);
+	} else {
+		std::fprintf(stderr,
+			"[lua] failed to preload json library: %s\n",
+			lua_tostring(L, -1));
+		lua_pop(L, 1);
+	}
 }
 
 

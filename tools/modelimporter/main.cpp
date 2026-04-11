@@ -14,7 +14,7 @@
 //     .glb   -> "glb2"  exporter (single binary file)
 
 #include "S3OImporter.h"
-#include "MetaLuaWriter.h"
+#include "JsonWriter.h"
 
 #include <assimp/Importer.hpp>
 #include <assimp/Exporter.hpp>
@@ -36,7 +36,7 @@ namespace {
 void PrintUsage(const char* argv0) {
     std::fprintf(stderr,
         "modelimporter — convert any model file to glTF 2.0 and emit\n"
-        "                a sibling .meta.lua engine-metadata file.\n"
+        "                a sibling .config.json engine-metadata file.\n"
         "\n"
         "usage: %s [options] <input> <output>\n"
         "\n"
@@ -51,13 +51,15 @@ void PrintUsage(const char* argv0) {
         "              .gltf  -> JSON + sidecar .bin\n"
         "              .glb   -> single binary file\n"
         "\n"
-        "            A sibling <output>.meta.lua is also written\n"
-        "            containing the engine metadata the synced sim\n"
-        "            needs at runtime (bounding sphere/box, piece\n"
-        "            tree, attachment points). Once the meta file\n"
-        "            exists on disk it belongs to the author: the\n"
-        "            importer will never rewrite it unless\n"
-        "            --update-meta is passed explicitly.\n"
+        "            A sibling <stem>.config.json is also written with\n"
+        "            the engine metadata the synced sim needs at\n"
+        "            runtime (bounding sphere/box, piece tree,\n"
+        "            attachment points). Ownership rules:\n"
+        "              - If <stem>.config.lua exists, the importer\n"
+        "                writes nothing — the author owns the meta.\n"
+        "              - Else if <stem>.config.json exists, it's\n"
+        "                preserved unless --update-meta is passed.\n"
+        "              - Else a fresh .config.json is written.\n"
         "\n"
         "options:\n"
         "  --texture-ext <ext>   Rewrite all referenced texture file\n"
@@ -65,14 +67,13 @@ void PrintUsage(const char* argv0) {
         "                        Useful when the source file points at\n"
         "                        legacy .tga assets that are being\n"
         "                        converted in a sibling pipeline step.\n"
-        "  --update-meta         Overwrite the output .meta.lua even if\n"
-        "                        it already exists. Use this after a\n"
-        "                        schema bump or when you want to pull\n"
-        "                        changes from the source model back\n"
-        "                        into a meta file you've been editing.\n"
-        "  --no-meta             Do not touch the sibling .meta.lua at\n"
-        "                        all. Only useful if the caller manages\n"
-        "                        metadata out-of-band.\n"
+        "  --update-meta         Overwrite the output .config.json even\n"
+        "                        if it already exists. Has no effect\n"
+        "                        if a .config.lua exists — that always\n"
+        "                        wins.\n"
+        "  --no-meta             Do not touch the sibling config file\n"
+        "                        at all. Only useful if the caller\n"
+        "                        manages metadata out-of-band.\n"
         "\n", argv0);
 }
 
@@ -229,37 +230,61 @@ int main(int argc, char** argv) {
         return 4;
     }
 
-    // Handle the sibling <output>.meta.lua. Ownership rule:
-    //   - If the file doesn't exist, write a fresh extraction.
-    //   - If the file exists and --update-meta was passed, overwrite it.
-    //   - If the file exists and --update-meta was NOT passed, leave it
-    //     alone. Once on disk, the meta file belongs to the author.
-    // --no-meta opts out of both cases.
+    // Handle the sibling <output>.config.json. The file follows the
+    // project-wide .config.lua / .config.json ownership rules, in
+    // priority order:
+    //
+    //   1. If <output>.config.lua exists → do nothing. The author has
+    //      taken full control of this model's metadata via Lua and we
+    //      never mix engine output into hand-edited files.
+    //   2. Else if <output>.config.json does not exist → write a fresh
+    //      extraction.
+    //   3. Else if --update-meta was passed → overwrite.
+    //   4. Else → leave the existing .config.json untouched.
+    //
+    // --no-meta opts out of everything in this block.
     if (emitMeta) {
         namespace fs = std::filesystem;
-        const fs::path metaPath = fs::path(outPath).replace_extension(".meta.lua");
-        const bool exists = fs::exists(metaPath);
-        const bool willWrite = !exists || updateMeta;
+        const fs::path outP = outPath;
+        // .config.json isn't a single dotted extension to `replace_extension`;
+        // strip the .glb/.gltf with stem() and append the full suffix.
+        const fs::path luaConfigPath  = outP.parent_path() / (outP.stem().string() + ".config.lua");
+        const fs::path jsonConfigPath = outP.parent_path() / (outP.stem().string() + ".config.json");
 
-        if (willWrite) {
-            if (!MetaLuaWriter::Write(scene, metaPath.string())) {
+        const bool hasLua  = fs::exists(luaConfigPath);
+        const bool hasJson = fs::exists(jsonConfigPath);
+
+        const char* metaStatus = nullptr;
+        if (hasLua) {
+            metaStatus = " [author-owned .config.lua, skipped]";
+        } else if (!hasJson) {
+            if (!JsonWriter::Write(scene, jsonConfigPath.string())) {
                 std::fprintf(stderr,
                     "modelimporter: failed to write %s\n",
-                    metaPath.string().c_str());
+                    jsonConfigPath.string().c_str());
                 Assimp::DefaultLogger::kill();
                 return 5;
             }
+            metaStatus = " [fresh]";
+        } else if (updateMeta) {
+            if (!JsonWriter::Write(scene, jsonConfigPath.string())) {
+                std::fprintf(stderr,
+                    "modelimporter: failed to write %s\n",
+                    jsonConfigPath.string().c_str());
+                Assimp::DefaultLogger::kill();
+                return 5;
+            }
+            metaStatus = " [updated]";
+        } else {
+            metaStatus = " [kept existing]";
         }
 
-        const char* metaStatus =
-            !exists       ? " [fresh]"        :
-            updateMeta    ? " [updated]"      :
-                            " [kept existing]";
+        const fs::path& displayedPath = hasLua ? luaConfigPath : jsonConfigPath;
         std::fprintf(stderr,
             "modelimporter: %s -> %s (%u meshes, %u materials) + %s%s\n",
             inPath.c_str(), outPath.c_str(),
             scene->mNumMeshes, scene->mNumMaterials,
-            metaPath.filename().string().c_str(),
+            displayedPath.filename().string().c_str(),
             metaStatus);
     } else {
         std::fprintf(stderr,

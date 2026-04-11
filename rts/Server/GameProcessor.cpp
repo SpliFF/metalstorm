@@ -134,7 +134,7 @@ void Process(const std::string& gamePath,
     if (objectsDir.empty()) {
         // Not an error — a minimal game (Paper Tanks right now) may
         // ship no model files at all. The log line is still useful
-        // so it's obvious why no .meta.lua files got written.
+        // so it's obvious why no .config.json files got written.
         std::fprintf(stderr,
             "[games] %s: no objects3d/ directory under %s, "
             "nothing to convert\n",
@@ -167,20 +167,23 @@ void Process(const std::string& gamePath,
         }
 
         const std::string stem = src.stem().string();
-        const fs::path dstGlb  = outDir / (stem + ".glb");
-        const fs::path dstMeta = outDir / (stem + ".meta.lua");
+        const fs::path dstGlb     = outDir / (stem + ".glb");
+        const fs::path dstJson    = outDir / (stem + ".config.json");
+        const fs::path dstLua     = outDir / (stem + ".config.lua");
+        const bool     hasConfig  = fs::exists(dstJson) || fs::exists(dstLua);
 
         // Idempotent skip: regenerate only when the glb is missing
-        // or older than the source. The meta file's mtime is
-        // deliberately NOT part of this comparison — once the meta
-        // exists on disk it's author-owned and modelimporter will
-        // refuse to touch it without --update-meta, so including it
-        // here would cause an infinite rebuild loop whenever the
-        // source is newer than a preserved-on-purpose meta file.
-        // If the meta is missing we still need to rebuild so that
-        // modelimporter has a chance to write a fresh one.
+        // or older than the source. The config file's mtime is
+        // deliberately NOT part of this comparison — once the
+        // config exists on disk it's author-owned and modelimporter
+        // will refuse to touch it without --update-meta, so
+        // including it here would cause an infinite rebuild loop
+        // whenever the source is newer than a preserved-on-purpose
+        // config file. If the config is missing we still need to
+        // rebuild so that modelimporter has a chance to write a
+        // fresh .config.json.
         bool needsRebuild = true;
-        if (fs::exists(dstGlb) && fs::exists(dstMeta)) {
+        if (fs::exists(dstGlb) && hasConfig) {
             const auto srcMt = fs::last_write_time(src);
             const auto glbMt = fs::last_write_time(dstGlb);
             if (srcMt <= glbMt) {

@@ -2,8 +2,8 @@
 
 Content-preprocessing CLI that converts any 3D model file the project
 supports into glTF 2.0 binary (`.glb`) and emits a sibling
-`<output>.meta.lua` file with the engine metadata the synced sim reads
-at runtime.
+`<stem>.config.json` file with the engine metadata the synced sim
+reads at runtime.
 
 The pipeline is:
 
@@ -12,10 +12,12 @@ The pipeline is:
     → Assimp importer (built-in formats + S3O plugin)
         → aiScene
             ├─ Assimp glTF2 exporter → <output>.glb
-            └─ MetaLuaWriter         → <output>.meta.lua
-                                       (only if the file does not
-                                        already exist, or if
-                                        --update-meta is passed)
+            └─ JsonWriter            → <stem>.config.json
+                                       (skipped if <stem>.config.lua
+                                        exists; also skipped if the
+                                        .config.json already exists
+                                        and --update-meta wasn't
+                                        passed)
 ```
 
 The set of accepted inputs is whatever the linked Assimp build
@@ -44,8 +46,8 @@ Options:
 | Option | Description |
 |---|---|
 | `--texture-ext <ext>` | Rewrite every referenced texture filename's extension to `<ext>` (e.g. `png`, `webp`). Used by the content pipeline to swap legacy `.tga` references for converted `.png` files. |
-| `--update-meta` | Overwrite the output `<output>.meta.lua` even if it already exists. Without this flag, an existing meta file is left untouched — once on disk, the meta file belongs to the author. |
-| `--no-meta` | Skip touching the sibling `<output>.meta.lua` entirely. Only useful if the caller manages metadata out-of-band. |
+| `--update-meta` | Overwrite the output `<stem>.config.json` even if it already exists. Has no effect when a `<stem>.config.lua` is present — that always wins. |
+| `--no-meta` | Skip touching the sibling config file entirely. Only useful if the caller manages metadata out-of-band. |
 
 The output format is selected from the output extension:
 
@@ -67,56 +69,98 @@ ImageMagick alongside the modelimporter call; see
 [`rts/Server/FeatureProcessor.cpp`](../../rts/Server/FeatureProcessor.cpp)
 and [`rts/Server/GameProcessor.cpp`](../../rts/Server/GameProcessor.cpp)).
 
-## `.meta.lua` — engine metadata sidecar
+## `.config.json` / `.config.lua` — engine metadata sidecar
 
 The synced sim never opens the `.glb`. Everything it needs at runtime
-lives in a sibling `<output>.meta.lua` written by
-[`MetaLuaWriter`](MetaLuaWriter.cpp) from the same `aiScene` the glTF
-export consumed. Keeping the metadata in a plain text Lua file means
-`spring-server` doesn't link Assimp and authors can hand-edit any
-field without touching the binary.
+lives in a sibling config file that follows the project-wide
+`.config.json` / `.config.lua` convention implemented by
+[`LuaConfig::Load`](../../rts/Lua/LuaConfigLoader.h):
 
-### Schema
+- **`<stem>.config.json`** — canonical, machine-readable form.
+  Modelimporter writes this by default; third-party tools, data
+  editors, and non-Lua pipelines can produce or consume it too.
+- **`<stem>.config.lua`** — optional authoring form. If present it
+  wins over any adjacent `.config.json`. Use it when you need
+  dynamic behaviour: string templates, math, loading other files,
+  or decoding the JSON form and layering edits on top via the
+  `json` global that LuaParser installs in every state.
+
+Modelimporter itself only writes JSON. It never reads or writes
+the `.lua` form — if one already exists on disk, the importer
+treats the model's metadata as fully author-owned and skips the
+meta write entirely.
+
+### Schema (`metaVersion = 1`)
+
+JSON form as emitted by modelimporter:
+
+```json
+{
+  "metaVersion": 1,
+
+  "radius": 50.131,
+  "height": 56.492,
+  "midpos": [mx, my, mz],
+  "mins":   [x1, y1, z1],
+  "maxs":   [x2, y2, z2],
+
+  "pieces": [
+    { "name": "base",   "parent": -1, "offset": [...], "mins": [...], "maxs": [...] },
+    { "name": "turret", "parent":  0, "offset": [...], "mins": [...], "maxs": [...] },
+    { "name": "barrel", "parent":  1, "offset": [...], "mins": [...], "maxs": [...] }
+  ],
+
+  "attachments": [
+    { "kind": "aim",  "name": "aimpos1",     "piece": 2 },
+    { "kind": "fire", "name": "firepos",     "piece": 2 },
+    { "kind": "emit", "name": "emit_exhaust","piece": 0 },
+    { "kind": "hp",   "name": "hp_antenna",  "piece": 1 }
+  ]
+}
+```
+
+The equivalent Lua form (for hand-authored `.config.lua`) is the
+same table with Lua syntax; piece arrays become Lua sequences indexed
+from 1, `parent` is still 0-based (with `-1` for the root), and
+`metaVersion` is still required:
 
 ```lua
-local meta = {
-    -- Schema version. Engine-side reader branches on this. Bumped
-    -- when the file format changes in a backwards-incompatible way.
-    metaVersion = 1,
+return {
+  metaVersion = 1,
 
-    -- Bounding sphere and AABB in model-local coordinates.
-    radius = 50.131,
-    height = 56.492,
-    midpos = {x, y, z},
-    mins   = {x, y, z},
-    maxs   = {x, y, z},
+  radius = 50.131,
+  height = 56.492,
+  midpos = { mx, my, mz },
+  mins   = { x1, y1, z1 },
+  maxs   = { x2, y2, z2 },
 
-    -- Piece tree flattened in pre-order. `parent` is a 0-based index
-    -- into this same list; -1 marks the root. Each piece's `offset`
-    -- is the local translation of its node transform; `mins`/`maxs`
-    -- are the AABB of the piece's own meshes (children are separate
-    -- entries). The synthetic Assimp scene-root wrapper is skipped
-    -- when it's meshless, single-child, and identity-transformed, so
-    -- the piece list matches what game authors actually modelled.
-    pieces = {
-        { name = "base",    parent = -1, offset = {...}, mins = {...}, maxs = {...} },
-        { name = "turret",  parent = 0,  offset = {...}, mins = {...}, maxs = {...} },
-        { name = "barrel",  parent = 1,  offset = {...}, mins = {...}, maxs = {...} },
-        -- ...
-    },
+  pieces = {
+    { name = "base",   parent = -1, offset = {...}, mins = {...}, maxs = {...} },
+    { name = "turret", parent =  0, offset = {...}, mins = {...}, maxs = {...} },
+  },
 
-    -- Optional — only emitted if the source model has pieces whose
-    -- names match Spring's attachment-point naming conventions.
-    attachments = {
-        { kind = "aim",  name = "aimpos1", piece = 2 },
-        { kind = "fire", name = "firepos", piece = 2 },
-        { kind = "emit", name = "emit_exhaust", piece = 0 },
-        { kind = "hp",   name = "hp_antenna",   piece = 1 },
-    },
+  attachments = {
+    { kind = "aim", name = "aimpos1", piece = 2 },
+  },
 }
-
-return meta
 ```
+
+Field meanings:
+
+- **`radius`** — bounding sphere around the model origin.
+- **`height`** — max-Y minus min-Y of the AABB.
+- **`midpos`** — AABB centre, used as the default aim target.
+- **`mins` / `maxs`** — full model-space AABB.
+- **`pieces`** — piece tree flattened in pre-order. Each piece's
+  `offset` is the local translation of its node transform;
+  `mins`/`maxs` are the AABB of that piece's own meshes only
+  (descendants become separate entries). The synthetic Assimp
+  scene-root wrapper is skipped when it's meshless, single-child,
+  and identity-transformed, so the piece list matches what game
+  authors actually modelled.
+- **`attachments`** — optional; emitted only if the source model
+  has pieces whose names match Spring's attachment-point naming
+  conventions.
 
 Recognised attachment-point prefixes (case-insensitive):
 
@@ -129,9 +173,8 @@ Recognised attachment-point prefixes (case-insensitive):
 
 ### `metaVersion`
 
-Every generated file carries a `metaVersion` integer at the top of
-the table. The engine-side loader
-([`MetaLuaModelLoader`](../../rts/Sim/Objects/MetaLuaModelLoader.cpp))
+Every config file must carry a `metaVersion` integer. The engine-side
+loader ([`ModelConfigLoader`](../../rts/Sim/Objects/ModelConfigLoader.cpp))
 compares it against the version it was built against:
 
 - **missing** — the file predates the versioned schema; a warning
@@ -142,61 +185,76 @@ compares it against the version it was built against:
   fields, but the sim continues with best-effort parsing.
 
 Bump `kCurrentMetaVersion` in
-[`MetaLuaWriter.h`](MetaLuaWriter.h) and `kSupportedMetaVersion` in
-[`MetaLuaModelLoader.cpp`](../../rts/Sim/Objects/MetaLuaModelLoader.cpp)
+[`JsonWriter.h`](JsonWriter.h) and `kSupportedMetaVersion` in
+[`ModelConfigLoader.cpp`](../../rts/Sim/Objects/ModelConfigLoader.cpp)
 in the same commit whenever the generated schema changes.
 
-### Ownership and `--update-meta`
+### Ownership rules
 
-The modelimporter treats the meta file as **author-owned once it
-exists on disk**. There is no merging, no override layering, no
-authored-vs-generated distinction inside the file. The rule is:
+The modelimporter treats both config forms as **author-owned**.
+The priority order is:
 
-| Current state | `--update-meta` | Action |
-|---|---|---|
-| meta file does not exist | *(ignored)* | write a fresh extraction |
-| meta file exists | not passed | leave the file alone, log `[kept existing]` |
-| meta file exists | passed | overwrite with a fresh extraction, log `[updated]` |
+| `.config.lua` | `.config.json` | `--update-meta` | Action |
+|---|---|---|---|
+| present   | *(ignored)* | *(ignored)* | log `[author-owned .config.lua, skipped]`, write nothing |
+| absent    | absent      | *(ignored)* | write a fresh `.config.json`, log `[fresh]` |
+| absent    | present     | not passed  | keep `.config.json`, log `[kept existing]` |
+| absent    | present     | passed      | overwrite `.config.json`, log `[updated]` |
 
-This means the standard workflow for hand-editing is:
+So the standard workflow for hand-editing is one of:
 
-1. Run `modelimporter tank.s3o tank.glb` once — fresh meta file is
-   written with everything the extractor could figure out.
-2. Edit `tank.meta.lua` directly (override the radius, add a custom
-   attachment point, swap in a hand-written piece tree, whatever).
-3. Subsequent `modelimporter tank.s3o tank.glb` runs — the meta file
-   is preserved verbatim; only the `.glb` is regenerated from the
-   source.
-4. If the source model is updated in a way that invalidates your
-   edits (new pieces, rescaled geometry), re-run with
-   `modelimporter --update-meta tank.s3o tank.glb` to blow away the
-   old file and start over from the extractor's output.
+1. **Pure JSON workflow.** Run `modelimporter tank.s3o tank.glb` once
+   to get a fresh `tank.config.json`, edit that file in place, re-run
+   modelimporter whenever the source model changes (the `.glb` will
+   regenerate but your `.config.json` will be preserved). Re-run with
+   `--update-meta` when you want to start over from the extractor's
+   output.
+
+2. **Lua takeover.** Write your own `tank.config.lua` next to
+   `tank.glb` in the output directory. The importer sees it and
+   leaves all metadata alone on every subsequent run. Use this
+   when you want dynamic behaviour — for example starting from the
+   extractor's JSON defaults and layering edits on top:
+   ```lua
+   -- tank.config.lua
+   local defaults = json.decode(VFS.LoadFile("tank.config.json"))
+   defaults.radius = 60
+   defaults.attachments = defaults.attachments or {}
+   table.insert(defaults.attachments,
+       { kind = "fire", name = "firepos_alt", piece = 5 })
+   return defaults
+   ```
+   The `json` global is registered by every LuaParser state, so any
+   authored `.config.lua` has access to `json.decode` / `json.encode`
+   out of the box.
 
 The automated content pipelines
 ([`FeatureProcessor`](../../rts/Server/FeatureProcessor.cpp) for map
 features, [`GameProcessor`](../../rts/Server/GameProcessor.cpp) for
 game unit/feature models) deliberately **do not** pass
-`--update-meta`. Once a meta file has been generated for a given
-model, they preserve it across runs even if the source `.s3o`
-changes, so hand-edits aren't silently lost by a rebuild. Pass
-`--update-meta` manually when you want to refresh.
+`--update-meta`. Once a config file has been generated for a given
+model, they preserve it across runs even if the source changes, so
+hand-edits aren't silently lost by a rebuild. Pass `--update-meta`
+manually when you want to refresh.
 
 ### Consumption
 
-On the sim side, [`MetaLuaModelLoader`](../../rts/Sim/Objects/MetaLuaModelLoader.cpp)
-reads the file via Spring's `LuaParser` and populates an `S3DModel`
-stub with `radius`, `height`, `relMidPos`, `mins`, `maxs`, and the
-piece tree. Parent/child links are wired up in a second pass after
-all pieces have been copied so pointers don't dangle across vector
-reallocations.
+On the sim side, [`ModelConfigLoader`](../../rts/Sim/Objects/ModelConfigLoader.cpp)
+dispatches through `LuaConfig::Load`, which tries
+`<stem>.config.lua` first and falls back to `<stem>.config.json` via
+the vendored [json-lua library](../../rts/lib/lua/json-lua/json.lua).
+Both forms end up as a `LuaTable` so the reader code stays in the
+existing Spring field-read API. Parent/child links in the piece
+tree are wired up in a second pass after all pieces have been copied
+so pointers don't dangle across vector reallocations.
 
 `SolidObjectDef::LoadModel` calls into the loader lazily the first
-time a unit or feature def is instantiated, searching for the meta
-file via the content-root chain (`objects3d/`, `features/`, bare
-lookup). If nothing is found the def spawns with default bounds
-(`radius = 1`, `height = 1`) and a one-line warning on stderr — the
-simulation keeps running so you can iterate on missing assets without
-restarting the server.
+time a unit or feature def is instantiated, searching for the
+config file via the content-root chain (`objects3d/`, `features/`,
+bare lookup). If nothing is found the def spawns with default
+bounds (`radius = 1`, `height = 1`) and a one-line warning on
+stderr — the simulation keeps running so you can iterate on
+missing assets without restarting the server.
 
 ## Building
 

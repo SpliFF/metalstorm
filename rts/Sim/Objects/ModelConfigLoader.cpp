@@ -1,18 +1,21 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
-#include "MetaLuaModelLoader.h"
+#include "ModelConfigLoader.h"
 
+#include "Lua/LuaConfigLoader.h"
 #include "Lua/LuaParser.h"
 #include "Sim/Units/Scripts/LocalModelPieceStub.h"
 
 #include <cstdio>
-#include <filesystem>
+#include <memory>
 
 namespace {
 
-/// Pull a float3 field from a piece sub-table. `.meta.lua` stores
-/// pieces as `{ offset = {x,y,z}, mins = {...}, maxs = {...} }`
-/// which LuaParser exposes as nested sub-tables indexed by 1/2/3.
+/// Pull a float3 field from a sub-table. Both the Lua and JSON
+/// forms of the config expose a `{x, y, z}` triple as a nested
+/// sub-table indexed by 1/2/3 — Friedl's JSON decoder maps JSON
+/// arrays to 1-indexed Lua tables, which is exactly what
+/// `LuaTable` expects.
 float3 ReadFloat3Field(const LuaTable& parent, const char* key, const float3& fallback) {
     const LuaTable t = parent.SubTable(key);
     if (!t.IsValid())
@@ -25,86 +28,66 @@ float3 ReadFloat3Field(const LuaTable& parent, const char* key, const float3& fa
 
 } // namespace
 
-S3DModel* MetaLuaModelLoader::Load(const std::string& metaPath) {
+S3DModel* ModelConfigLoader::Load(const std::string& basePath) {
     auto* model = new S3DModel();
-    if (!LoadInto(*model, metaPath)) {
+    if (!LoadInto(*model, basePath)) {
         delete model;
         return nullptr;
     }
     return model;
 }
 
-bool MetaLuaModelLoader::LoadInto(S3DModel& out, const std::string& metaPath) {
-    namespace fs = std::filesystem;
+bool ModelConfigLoader::LoadInto(S3DModel& out, const std::string& basePath) {
+    if (basePath.empty())
+        return false;
 
-    if (metaPath.empty() || !fs::exists(metaPath)) {
-        // Caller is expected to have probed the file already; a
-        // silent miss here just means "no metadata, keep defaults".
+    // LuaConfig::Load tries <basePath>.config.lua first, then
+    // <basePath>.config.json. Both end up in the same LuaParser-backed
+    // representation so the rest of this function is format-agnostic.
+    std::unique_ptr<LuaParser> parser = LuaConfig::Load(basePath);
+    if (!parser) {
+        // Caller is expected to have probed for the file already; a
+        // silent miss here just means "no config, keep defaults".
         return false;
     }
 
-    // LuaParser wants an accessMode + fileMode pair for VFS
-    // routing. Neither applies to our plain-directory filesystem;
-    // SPRING_VFS_RAW lets it open the file directly without
-    // searching content roots.
-    LuaParser parser(
-        metaPath,
-        SPRING_VFS_RAW,
-        SPRING_VFS_RAW,
-        LuaParser::boolean{false},  // not synced — parsed at unit load
-        LuaParser::boolean{true});  // auto-setup
-
-    if (!parser.Execute()) {
-        std::fprintf(stderr,
-            "[meta] failed to parse %s:\n"
-            "       %s\n",
-            metaPath.c_str(), parser.GetErrorLog().c_str());
-        return false;
-    }
-    if (!parser.GetErrorLog().empty()) {
-        std::fprintf(stderr,
-            "[meta] non-fatal warnings parsing %s:\n"
-            "       %s\n",
-            metaPath.c_str(), parser.GetErrorLog().c_str());
-    }
-
-    const LuaTable root = parser.GetRoot();
+    const LuaTable root = parser->GetRoot();
     if (!root.IsValid()) {
         std::fprintf(stderr,
-            "[meta] %s: root is not a table (did the file forget "
-            "`return meta`?)\n",
-            metaPath.c_str());
+            "[config] %s: root is not a table (did the file forget "
+            "`return <table>`?)\n",
+            basePath.c_str());
         return false;
     }
 
     // ---- Schema version check ----
-    // `metaVersion` is mandatory on new files (emitted by the
-    // current MetaLuaWriter). A missing key means the file was
-    // produced by a pre-versioning build of modelimporter and
-    // should be regenerated. An older-than-current version means
-    // the file is from an earlier schema and the reader may need
-    // to apply a workaround — there's nothing to work around yet
-    // (we're at v1), so we just log and carry on.
+    // `metaVersion` is mandatory on files produced by the current
+    // modelimporter. A missing key means the file was produced by a
+    // pre-versioning build and should be regenerated. An older-
+    // than-current version means the file is from an earlier schema
+    // and the reader may need to apply a workaround — there's
+    // nothing to work around yet (we're at v1), so we just log and
+    // carry on.
     constexpr int kSupportedMetaVersion = 1;
     const int metaVersion = root.GetInt("metaVersion", 0);
     if (metaVersion == 0) {
         std::fprintf(stderr,
-            "[meta] %s: no `metaVersion` field — file predates the "
-            "versioned schema. Run `modelimporter --update-meta` "
-            "to regenerate.\n",
-            metaPath.c_str());
+            "[config] %s: no `metaVersion` field — file predates the "
+            "versioned schema. Run `modelimporter --update-meta` to "
+            "regenerate.\n",
+            basePath.c_str());
     } else if (metaVersion < kSupportedMetaVersion) {
         std::fprintf(stderr,
-            "[meta] %s: metaVersion=%d is older than this engine "
+            "[config] %s: metaVersion=%d is older than this engine "
             "supports (%d). Run `modelimporter --update-meta` to "
             "regenerate; the sim will continue with best-effort "
             "parsing.\n",
-            metaPath.c_str(), metaVersion, kSupportedMetaVersion);
+            basePath.c_str(), metaVersion, kSupportedMetaVersion);
     } else if (metaVersion > kSupportedMetaVersion) {
         std::fprintf(stderr,
-            "[meta] %s: metaVersion=%d is newer than this engine "
+            "[config] %s: metaVersion=%d is newer than this engine "
             "understands (%d). Some fields may be ignored.\n",
-            metaPath.c_str(), metaVersion, kSupportedMetaVersion);
+            basePath.c_str(), metaVersion, kSupportedMetaVersion);
     }
 
     // ---- Top-level bounds ----
@@ -122,8 +105,8 @@ bool MetaLuaModelLoader::LoadInto(S3DModel& out, const std::string& metaPath) {
         out.pieces.reserve(numPieces);
 
         // First pass: copy fields. We can't set up parent/children
-        // pointers yet because pushing into the vector may
-        // reallocate and invalidate earlier addresses.
+        // pointers yet because pushing into the vector may reallocate
+        // and invalidate earlier addresses.
         std::vector<int> parentIndices;
         parentIndices.reserve(numPieces);
 
@@ -141,8 +124,8 @@ bool MetaLuaModelLoader::LoadInto(S3DModel& out, const std::string& metaPath) {
             out.pieces.push_back(std::move(piece));
         }
 
-        // Second pass: link parent/children. `parent` index from
-        // the meta file is 0-based; -1 marks the root.
+        // Second pass: link parent/children. `parent` index is
+        // 0-based into the flat list; -1 marks the root.
         for (size_t i = 0; i < out.pieces.size(); ++i) {
             const int parentIdx = parentIndices[i];
             if (parentIdx >= 0 && static_cast<size_t>(parentIdx) < out.pieces.size()) {
@@ -154,10 +137,10 @@ bool MetaLuaModelLoader::LoadInto(S3DModel& out, const std::string& metaPath) {
         out.numPieces = static_cast<int>(out.pieces.size());
     }
 
-    out.metaPath = metaPath;
+    out.metaPath = basePath;
 
     std::fprintf(stderr,
-        "[meta] loaded %s: radius=%.2f height=%.2f pieces=%d\n",
-        metaPath.c_str(), out.radius, out.height, out.numPieces);
+        "[config] loaded %s: radius=%.2f height=%.2f pieces=%d\n",
+        basePath.c_str(), out.radius, out.height, out.numPieces);
     return true;
 }

@@ -1,9 +1,8 @@
-// MetaLuaWriter — see header for rationale.
+// JsonWriter — see header for schema and ownership rules.
 
-#include "MetaLuaWriter.h"
+#include "JsonWriter.h"
 
 #include <assimp/scene.h>
-#include <assimp/postprocess.h>
 
 #include <algorithm>
 #include <cmath>
@@ -17,7 +16,8 @@
 namespace {
 
 // -----------------------------------------------------------------
-// Geometry extraction
+// Geometry extraction (identical to the old .meta.lua writer — the
+// schema fields are the same, only the serialiser changed)
 // -----------------------------------------------------------------
 
 /// Axis-aligned bounding box in model space.
@@ -47,8 +47,7 @@ struct Aabb {
     }
 };
 
-/// Apply a transform to a vector by multiplying through the matrix,
-/// ignoring the w row since Assimp scene transforms are affine.
+/// Transform a point by a 4x4 affine matrix (ignore the w row).
 inline void TransformPoint(const aiMatrix4x4& m, float x, float y, float z,
                            float& ox, float& oy, float& oz)
 {
@@ -57,9 +56,7 @@ inline void TransformPoint(const aiMatrix4x4& m, float x, float y, float z,
     oz = m.c1 * x + m.c2 * y + m.c3 * z + m.c4;
 }
 
-/// Accumulate vertices from every mesh referenced by `node` (and all
-/// its descendants) into `out`, transformed into the model's root
-/// coordinate space by composing node transforms along the way.
+/// Accumulate world-space mesh vertices under `node` into `out`.
 void CollectWorldspaceVertices(const aiScene* scene,
                                const aiNode* node,
                                const aiMatrix4x4& parentXform,
@@ -81,9 +78,9 @@ void CollectWorldspaceVertices(const aiScene* scene,
     }
 }
 
-/// Compute a bounding sphere radius around the model origin from an
-/// AABB. Not the tightest possible — a full Welzl sphere is overkill
-/// for a preprocess step, and the sim only needs an upper bound.
+/// Bounding sphere around the model origin, derived from the AABB.
+/// Not the tightest possible — a full Welzl sphere is overkill for
+/// a preprocess step and the sim only needs an upper bound.
 float RadiusFromAabb(const Aabb& b) {
     const float ax = std::max(std::fabs(b.minX), std::fabs(b.maxX));
     const float ay = std::max(std::fabs(b.minY), std::fabs(b.maxY));
@@ -105,8 +102,8 @@ struct PieceRecord {
 /// Walk the aiNode hierarchy starting at `node` in pre-order,
 /// flattening it into `pieces`. Each piece's offset is taken from
 /// the local translation component of its node transform; mins/maxs
-/// are the AABB of this node's direct meshes (not including
-/// descendants, which become separate pieces).
+/// are the AABB of this node's direct meshes only (descendants
+/// become separate pieces).
 void FlattenPieces(const aiScene* scene,
                    const aiNode* node,
                    int parentIndex,
@@ -120,7 +117,6 @@ void FlattenPieces(const aiScene* scene,
     rec.offsetY = m.b4;
     rec.offsetZ = m.c4;
 
-    // Direct-mesh bounds (in the node's own local space, not world).
     for (unsigned int i = 0; i < node->mNumMeshes; ++i) {
         const aiMesh* mesh = scene->mMeshes[node->mMeshes[i]];
         for (unsigned int v = 0; v < mesh->mNumVertices; ++v) {
@@ -139,15 +135,16 @@ void FlattenPieces(const aiScene* scene,
 }
 
 // -----------------------------------------------------------------
-// Attachment points
+// Attachment point detection
 // -----------------------------------------------------------------
 
-/// Classify a piece name as an attachment point. Matches Spring's
-/// piece-naming conventions plus the common modeller shorthands:
-///   aimpos, aim_<N>    — weapon aim positions
-///   firepos, fire_<N>  — projectile emission points
-///   emit_<name>        — particle emitters
-///   hp_<name>, hpoint_ — generic hardpoints
+/// Classify a piece name as an attachment point. Case-insensitive.
+/// Matches the common Spring modelling conventions:
+///   aim, aim_<N>      — weapon aim positions
+///   fire, fire_<N>    — projectile emission points
+///   emit_<name>       — particle emitters
+///   hp_<name>,
+///   hpoint_<name>     — generic hardpoints
 bool IsAttachmentName(const std::string& name, std::string& outKind) {
     auto startsWith = [&](const char* prefix) {
         const size_t n = std::strlen(prefix);
@@ -163,46 +160,69 @@ bool IsAttachmentName(const std::string& name, std::string& outKind) {
 }
 
 // -----------------------------------------------------------------
-// Lua serialiser
+// JSON serialiser — we only emit numbers, strings, arrays and
+// objects, and both the keys and field names are ASCII, so a
+// minimal handrolled writer is simpler than pulling in a JSON
+// library. All state flows through a single `std::ostream&`.
 // -----------------------------------------------------------------
 
-/// Header comment emitted at the top of every generated file. Makes
-/// it obvious at a glance that the file is engine output and also
-/// serves as a human-readable pointer to the --update-meta flow.
-constexpr const char* kGeneratorMarker =
-    "-- Generated by modelimporter. Edit freely — re-run with\n"
-    "-- `modelimporter --update-meta <input> <output>` to regenerate\n"
-    "-- from the source model. Without --update-meta, an existing\n"
-    "-- meta file is never overwritten.";
-
-/// Format a float for the lua output. We want enough precision for
-/// collision / rendering needs (~5 decimal digits) but not so much
-/// that the files become illegible.
-std::string FloatLit(float v) {
+/// Format a float for JSON output. ~5 significant digits is enough
+/// for collision/rendering needs and keeps the files diffable.
+std::string JsonNumber(float v) {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%.5g", v);
+    // JSON requires the literal values `Infinity`/`NaN` (non-standard
+    // extensions) or simply doesn't allow them. Our float fields are
+    // always finite by construction (we seed AABB with infinity but
+    // MakeZeroIfInvalid zeroes it out before we get here), but clamp
+    // defensively anyway so we never emit `inf` / `nan`.
+    if (std::strcmp(buf, "inf")  == 0 ||
+        std::strcmp(buf, "-inf") == 0 ||
+        std::strcmp(buf, "nan")  == 0) {
+        return "0";
+    }
     return buf;
 }
 
-/// Escape a string for inclusion inside a double-quoted lua literal.
-/// We only need to handle \ and " — piece names never contain
-/// control characters in any real content.
-std::string EscapeString(const std::string& s) {
+/// Escape a string for inclusion inside a JSON "…" literal. Follows
+/// RFC 8259 escaping rules: `\"`, `\\`, control chars as `\uXXXX`.
+std::string JsonString(const std::string& s) {
     std::string out;
     out.reserve(s.size() + 2);
-    for (char c : s) {
-        if (c == '\\' || c == '"') out.push_back('\\');
-        out.push_back(c);
+    out.push_back('"');
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b";  break;
+            case '\f': out += "\\f";  break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (c < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out.push_back(static_cast<char>(c));
+                }
+        }
     }
+    out.push_back('"');
     return out;
+}
+
+/// Helper for writing a `[x, y, z]` triple on one line.
+std::string Vec3(float x, float y, float z) {
+    return "[" + JsonNumber(x) + ", " + JsonNumber(y) + ", " + JsonNumber(z) + "]";
 }
 
 } // namespace
 
 // =====================================================================
 
-bool MetaLuaWriter::Write(const aiScene* scene,
-                          const std::string& outPath)
+bool JsonWriter::Write(const aiScene* scene, const std::string& outPath)
 {
     // ---- Extract bounding box and bounding sphere ----
     Aabb bounds;
@@ -221,25 +241,11 @@ bool MetaLuaWriter::Write(const aiScene* scene,
     //
     // Most Assimp importers — ours included — wrap the real model
     // root in a synthetic scene-root `aiNode` for scene-graph
-    // hygiene (a glTF export needs a root and various post-
-    // processing steps assume one). Our S3O importer does the
-    // same, producing a meshless `S3O_<filename>` node with the
-    // actual piece tree as its single child. The wrapper has no
-    // meaning to the sim: every piece consumer downstream
-    // (Spring.GetUnitPieceList, COB script indices, Shatter)
-    // sees it as a phantom first entry that game authors can't
-    // meaningfully reference and would have to work around.
-    //
-    // Skip the scene root only if it's unambiguously a synthetic
-    // wrapper:
-    //   - meshless
-    //   - exactly one child
-    //   - identity transform (no offset/rotation/scale that we'd
-    //     lose by descending past it)
-    // Any other shape — a real multi-root model, a root with its
-    // own geometry, or a pass-through node with a non-trivial
-    // transform — keeps the original root so we don't silently
-    // drop authored data.
+    // hygiene (glTF expects a root, various post-processing steps
+    // assume one). Skip that wrapper only if it's unambiguously
+    // synthetic: meshless, single-child, identity-transformed. Any
+    // other shape keeps the original root so we don't silently drop
+    // authored data.
     std::vector<PieceRecord> pieces;
     if (scene->mRootNode != nullptr) {
         const aiNode* pieceRoot = scene->mRootNode;
@@ -258,7 +264,7 @@ bool MetaLuaWriter::Write(const aiScene* scene,
         FlattenPieces(scene, pieceRoot, -1, pieces);
     }
 
-    // ---- Collect attachment points from the piece tree ----
+    // ---- Collect attachment points ----
     struct Attachment {
         std::string kind;
         std::string name;
@@ -272,7 +278,7 @@ bool MetaLuaWriter::Write(const aiScene* scene,
         }
     }
 
-    // ---- Write the meta.lua ----
+    // ---- Write the JSON file ----
     std::ofstream out(outPath, std::ios::binary);
     if (!out) {
         std::fprintf(stderr,
@@ -281,50 +287,51 @@ bool MetaLuaWriter::Write(const aiScene* scene,
         return false;
     }
 
-    out << kGeneratorMarker << "\n\n";
-
-    out << "local meta = {\n";
+    // Hand-indented for readability — the file is small and the
+    // schema is fixed, so a pretty-printer would be overkill.
+    out << "{\n";
 
     // Schema version — the engine-side reader branches on this.
-    // Bump `kCurrentMetaVersion` in MetaLuaWriter.h whenever the
-    // layout changes in a way an older reader wouldn't handle.
-    out << "    metaVersion = " << MetaLuaWriter::kCurrentMetaVersion << ",\n\n";
+    out << "  \"metaVersion\": " << JsonWriter::kCurrentMetaVersion << ",\n";
+    out << "\n";
 
     // Bounds
-    out << "    radius = " << FloatLit(radius) << ",\n";
-    out << "    height = " << FloatLit(height) << ",\n";
-    out << "    midpos = {" << FloatLit(midX) << ", " << FloatLit(midY) << ", " << FloatLit(midZ) << "},\n";
-    out << "    mins   = {" << FloatLit(bounds.minX) << ", " << FloatLit(bounds.minY) << ", " << FloatLit(bounds.minZ) << "},\n";
-    out << "    maxs   = {" << FloatLit(bounds.maxX) << ", " << FloatLit(bounds.maxY) << ", " << FloatLit(bounds.maxZ) << "},\n";
+    out << "  \"radius\": " << JsonNumber(radius) << ",\n";
+    out << "  \"height\": " << JsonNumber(height) << ",\n";
+    out << "  \"midpos\": " << Vec3(midX, midY, midZ) << ",\n";
+    out << "  \"mins\":   " << Vec3(bounds.minX, bounds.minY, bounds.minZ) << ",\n";
+    out << "  \"maxs\":   " << Vec3(bounds.maxX, bounds.maxY, bounds.maxZ) << ",\n";
 
-    // Pieces — flat list ordered by pre-order walk. Parent index
-    // refers back into the same list (0-based); lua consumers add 1
-    // when addressing. -1 for the root.
-    out << "\n    pieces = {\n";
+    // Pieces — flat list ordered by pre-order walk.
+    out << "\n  \"pieces\": [\n";
     for (size_t i = 0; i < pieces.size(); ++i) {
         const auto& p = pieces[i];
-        out << "        { name = \"" << EscapeString(p.name) << "\""
-            << ", parent = " << p.parentIndex
-            << ", offset = {" << FloatLit(p.offsetX) << ", " << FloatLit(p.offsetY) << ", " << FloatLit(p.offsetZ) << "}"
-            << ", mins = {" << FloatLit(p.localBounds.minX) << ", " << FloatLit(p.localBounds.minY) << ", " << FloatLit(p.localBounds.minZ) << "}"
-            << ", maxs = {" << FloatLit(p.localBounds.maxX) << ", " << FloatLit(p.localBounds.maxY) << ", " << FloatLit(p.localBounds.maxZ) << "}"
-            << " },\n";
+        out << "    { \"name\": " << JsonString(p.name)
+            << ", \"parent\": " << p.parentIndex
+            << ", \"offset\": " << Vec3(p.offsetX, p.offsetY, p.offsetZ)
+            << ", \"mins\": "   << Vec3(p.localBounds.minX, p.localBounds.minY, p.localBounds.minZ)
+            << ", \"maxs\": "   << Vec3(p.localBounds.maxX, p.localBounds.maxY, p.localBounds.maxZ)
+            << " }";
+        if (i + 1 < pieces.size()) out << ",";
+        out << "\n";
     }
-    out << "    },\n";
+    out << "  ]";
 
-    // Attachments (optional — only written if any were discovered).
+    // Attachments (optional — only emitted if any were discovered).
     if (!attachments.empty()) {
-        out << "\n    attachments = {\n";
-        for (const auto& a : attachments) {
-            out << "        { kind = \"" << EscapeString(a.kind) << "\""
-                << ", name = \"" << EscapeString(a.name) << "\""
-                << ", piece = " << a.pieceIndex
-                << " },\n";
+        out << ",\n\n  \"attachments\": [\n";
+        for (size_t i = 0; i < attachments.size(); ++i) {
+            const auto& a = attachments[i];
+            out << "    { \"kind\": " << JsonString(a.kind)
+                << ", \"name\": " << JsonString(a.name)
+                << ", \"piece\": " << a.pieceIndex
+                << " }";
+            if (i + 1 < attachments.size()) out << ",";
+            out << "\n";
         }
-        out << "    },\n";
+        out << "  ]";
     }
 
-    out << "}\n\n";
-    out << "return meta\n";
+    out << "\n}\n";
     return out.good();
 }

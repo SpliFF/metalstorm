@@ -8,10 +8,12 @@
  * mid-position, per-piece offsets and the piece tree topology for
  * script animation and local coordinate transforms.
  *
- * These are populated from a preprocessed `<model>.meta.lua` file
- * written by the modelimporter tool at content-preprocess time —
- * see tools/modelimporter/MetaLuaWriter.cpp for the emitter and
- * rts/Sim/Objects/MetaLuaModelLoader.cpp for the reader.
+ * These are populated from a preprocessed `<model>.config.json`
+ * (or hand-authored `<model>.config.lua`) file written by the
+ * modelimporter tool at content-preprocess time — see
+ * tools/modelimporter/JsonWriter.cpp for the emitter and
+ * rts/Sim/Objects/ModelConfigLoader.cpp for the reader, which
+ * dispatches between the two forms via LuaConfig::Load.
  */
 
 #ifndef LOCAL_MODEL_PIECE_STUB_H
@@ -35,7 +37,7 @@ struct S3DModelPiece {
 
 	/// Piece name as extracted from the source model. Used by unit
 	/// scripts to look up pieces by name and by the attachment-
-	/// point scanner in MetaLuaModelLoader.
+	/// point scanner in ModelConfigLoader.
 	std::string name;
 
 	/// Parent / children links form the piece tree. `parent`
@@ -67,10 +69,10 @@ struct S3DModel {
 	std::vector<S3DModelPiece> pieces;
 	int numPieces = 0;
 
-	/// Absolute on-disk path of the `.meta.lua` the model was
-	/// populated from. Useful for diagnostics and for reloading at
-	/// dev time if the file changes. Empty if the model was
-	/// default-initialised without a meta file.
+	/// Absolute on-disk base path (no suffix) of the config file
+	/// the model was populated from. Useful for diagnostics and
+	/// for reloading at dev time if the file changes. Empty if
+	/// the model was default-initialised without a config file.
 	std::string metaPath;
 };
 

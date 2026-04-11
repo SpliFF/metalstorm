@@ -88,6 +88,17 @@ add_custom_command(
 )
 add_custom_target(generate_flatbuffers DEPENDS ${GENERATED_DIR}/protocol_generated.h)
 
+# === Embed rts/lib/lua/json-lua/json.lua into a generated C header ===
+# LuaParser preloads this into every Lua state so `json.encode` /
+# `json.decode` are available as globals. See rts/Lua/LuaParser.cpp.
+set(JSON_LUA_SOURCE_FILE ${CMAKE_SOURCE_DIR}/rts/lib/lua/json-lua/json.lua)
+file(READ ${JSON_LUA_SOURCE_FILE} SPRING_JSON_LUA_SOURCE)
+configure_file(
+    ${CMAKE_SOURCE_DIR}/rts/Lua/LuaJsonSrc.h.in
+    ${GENERATED_DIR}/LuaJsonSrc.h
+    @ONLY
+)
+
 # === Lua 5.4.7 (standard upstream, compiled as C++) ===
 file(GLOB LUA_SOURCES rts/lib/lua/src/*.cpp)
 add_library(lua STATIC ${LUA_SOURCES})
@@ -208,7 +219,8 @@ target_compile_definitions(spring-lobby PRIVATE
     # Absolute path to the modelimporter binary inside this build
     # tree. The lobby map preprocessor calls it via popen() to
     # convert Spring .s3o (and any other Assimp-supported format)
-    # into glTF 2.0 binary + a sibling .meta.lua engine-metadata file.
+    # into glTF 2.0 binary + a sibling .config.json engine-metadata
+    # file (loaded at runtime via LuaConfig).
     MODELIMPORTER_BINARY_PATH="$<TARGET_FILE:modelimporter>"
 )
 target_include_directories(spring-lobby PRIVATE

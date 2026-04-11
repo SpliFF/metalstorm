@@ -108,9 +108,10 @@ int main(int argc, char* argv[])
 
         // Also expose the preprocessed game models dir as a content
         // root, so SolidObjectDef::LoadModel can find each unit's
-        // `<modelName>.meta.lua` via the bare-name lookup.
+        // `<modelName>.config.json` / `<modelName>.config.lua` via
+        // the bare-name lookup.
         // Layout convention (set by GameProcessor at lobby startup):
-        //     data/games/<gameId>/models/<stem>.meta.lua
+        //     data/games/<gameId>/models/<stem>.config.json
         namespace fs = std::filesystem;
         std::string gameId = fs::path(gamePath).filename().string();
         if (gameId.empty() && fs::path(gamePath).has_parent_path())
@@ -129,9 +130,9 @@ int main(int argc, char* argv[])
 
         // Also expose the preprocessed data dir for this map as a
         // content root, so SolidObjectDef::LoadModel can find the
-        // `<feature>.meta.lua` files the modelimporter writes there.
-        // Layout convention (set by FeatureProcessor):
-        //     data/maps/<mapId>/features/<stem>.meta.lua
+        // `<feature>.config.json` files the modelimporter writes
+        // there. Layout convention (set by FeatureProcessor):
+        //     data/maps/<mapId>/features/<stem>.config.json
         // The map id is the basename of mapPath (e.g.
         // "scorched_crossing_v2.4").
         namespace fs = std::filesystem;
