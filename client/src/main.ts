@@ -147,13 +147,14 @@ function quitToLobby(): void {
     // canvas to the container.
     minimap?.dispose();
     minimap = null;
+    inputManager?.dispose();
+    inputManager = null;
     engine?.stopRenderLoop();
     engine?.dispose();
     engine = null;
     entityRenderer = null;
     combatFX = null;
     audioManager = null;
-    inputManager = null;
 
     // Hide the game canvas and HUD. Any in-flight overlays (quit confirm,
     // game over) are removed here too so the lobby is the only thing left.

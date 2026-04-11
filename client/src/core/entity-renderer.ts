@@ -57,6 +57,13 @@ export class EntityRenderer {
     // and the other team vanishes as the camera moves.
     private renderMeshes = new Map<number, Mesh>();
 
+    // Selection ring — flat torus, thin-instanced at each selected
+    // unit's ground position. Created lazily the first time a
+    // selection is set to avoid paying for the mesh when nothing is
+    // selected.
+    private selectionMesh: Mesh | null = null;
+    private selectedIds: number[] = [];
+
     constructor(scene: Scene) {
         this.scene = scene;
 
@@ -66,6 +73,11 @@ export class EntityRenderer {
             mat.specularColor = new Color3(0.3, 0.3, 0.3);
             this.teamMaterials.push(mat);
         }
+    }
+
+    /** Replace the selected-unit id list. Called by InputManager. */
+    setSelection(ids: readonly number[]): void {
+        this.selectedIds = ids.slice();
     }
 
     /**
@@ -129,6 +141,91 @@ export class EntityRenderer {
         // standard RTS X-ray compromise.
         mesh.renderingGroupId = 1;
         return mesh;
+    }
+
+    /**
+     * Build the selection-ring template on first use. A flat torus
+     * sitting on the ground plane. Rendered in group 2 (above units)
+     * with an unlit yellow emissive material so it's always visible.
+     */
+    private ensureSelectionMesh(): Mesh {
+        if (this.selectionMesh) return this.selectionMesh;
+        const mesh = MeshBuilder.CreateTorus('selection_ring', {
+            diameter: 26,
+            thickness: 3,
+            tessellation: 24,
+        }, this.scene);
+        // Flatten vertically so it hugs the ground instead of looking
+        // like a floating doughnut.
+        mesh.scaling.y = 0.15;
+        mesh.bakeCurrentTransformIntoVertices();
+
+        const mat = new StandardMaterial('selectionMat', this.scene);
+        mat.diffuseColor = new Color3(0, 0, 0);
+        mat.emissiveColor = new Color3(1.0, 0.9, 0.2);
+        mat.specularColor = new Color3(0, 0, 0);
+        mat.disableLighting = true;
+        mesh.material = mat;
+
+        mesh.thinInstanceEnablePicking = false;
+        mesh.alwaysSelectAsActiveMesh = true;
+        mesh.setBoundingInfo(new BoundingInfo(
+            new Vector3(-1e6, -1e6, -1e6),
+            new Vector3(1e6, 1e6, 1e6),
+        ));
+        // Group 2: draw after terrain (0) and units (1) so the ring
+        // always sits on top, even when the camera is near-horizontal.
+        mesh.renderingGroupId = 2;
+        mesh.isVisible = false;
+        this.selectionMesh = mesh;
+        return mesh;
+    }
+
+    /**
+     * Update the selection-ring thin instances from the current
+     * `selectedIds` + interpolated entity positions. Called each tick
+     * after the main per-team buffer update.
+     */
+    private updateSelectionRings(now: number): void {
+        if (this.selectedIds.length === 0) {
+            if (this.selectionMesh) {
+                this.selectionMesh.isVisible = false;
+                this.selectionMesh.thinInstanceCount = 0;
+            }
+            return;
+        }
+
+        const mesh = this.ensureSelectionMesh();
+        const matrices: number[] = [];
+        let count = 0;
+        const tmp = new Float32Array(16);
+        for (const id of this.selectedIds) {
+            const p = this.interpolator.getInterpolated(id, now);
+            if (!p) continue;
+            // Lift the ring a hair above ground so it doesn't z-fight
+            // with the terrain mesh (units render in group 1 which
+            // depth-tests against terrain; the ring is group 2 so the
+            // offset is just a safety margin).
+            const m = Matrix.Compose(
+                new Vector3(1, 1, 1),
+                Quaternion.Identity(),
+                new Vector3(p.x, p.y + 1.0, p.z),
+            );
+            m.copyToArray(tmp, 0);
+            for (let j = 0; j < 16; j++) matrices.push(tmp[j]);
+            count++;
+        }
+
+        if (count === 0) {
+            mesh.isVisible = false;
+            mesh.thinInstanceCount = 0;
+            return;
+        }
+
+        mesh.isVisible = true;
+        const buf = new Float32Array(matrices);
+        mesh.thinInstanceSetBuffer('matrix', buf, 16, false);
+        mesh.thinInstanceCount = count;
     }
 
     update(snapshot: EntityStateSnapshot, isDelta: boolean = false): void {
@@ -236,6 +333,10 @@ export class EntityRenderer {
                 // momentarily reflects stale data during motion.
             }
         }
+
+        // Selection rings piggyback on the same tick cadence so they
+        // track unit motion frame-accurately.
+        this.updateSelectionRings(now);
     }
 
     get entityCount(): number {
@@ -258,6 +359,11 @@ export class EntityRenderer {
     dispose(): void {
         for (const mesh of this.renderMeshes.values()) mesh.dispose();
         this.renderMeshes.clear();
+        if (this.selectionMesh) {
+            this.selectionMesh.dispose();
+            this.selectionMesh = null;
+        }
+        this.selectedIds = [];
         this.entityMeta.clear();
         this.interpolator.clear();
         for (const mat of this.teamMaterials) mat.dispose();
