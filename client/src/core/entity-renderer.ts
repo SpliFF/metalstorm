@@ -15,6 +15,7 @@ import {
     Quaternion,
     StandardMaterial,
     Color3,
+    BoundingInfo,
 } from '@babylonjs/core';
 import type { EntityStateSnapshot } from './entity-state.js';
 import { EntityInterpolator } from './entity-interpolator.js';
@@ -106,14 +107,26 @@ export class EntityRenderer {
         mesh.material = this.teamMaterials[team];
         mesh.thinInstanceEnablePicking = false;
         mesh.alwaysSelectAsActiveMesh = true;
+        // Pin a giant world-space bounding box at build time and
+        // never refresh it. Thin instances span the whole map and
+        // update every frame, so calling `thinInstanceRefreshBoundingInfo`
+        // each tick introduces a timing window where Babylon can
+        // consult a stale box between updates — the user saw this as
+        // occasional unit batches winking out during camera motion.
+        // A fixed ±1e6 box is trivially big enough that every
+        // internal culling / LOD / sort path passes, and since
+        // `alwaysSelectAsActiveMesh` is also on, the frustum test
+        // is bypassed entirely anyway.
+        mesh.setBoundingInfo(new BoundingInfo(
+            new Vector3(-1e6, -1e6, -1e6),
+            new Vector3(1e6, 1e6, 1e6),
+        ));
         // Units render in a higher group than terrain (group 0) so
-        // they never get occluded by hills when the camera looks
-        // across the map. This trades a bit of strict realism (units
-        // are technically visible through terrain) for a playable
-        // view — with the low-resolution client-side terrain mesh
-        // mismatching the server's sub-vertex unit placement, units
-        // frequently sit a few elmos inside a triangle and get
-        // culled by depth test from horizontal camera angles.
+        // the low-resolution client-side terrain mesh (step 2 on
+        // wanderlust) doesn't occasionally cover the base of a unit
+        // whose server-side ground y lands inside a terrain triangle.
+        // Trade-off: units are visible through hills, which is a
+        // standard RTS X-ray compromise.
         mesh.renderingGroupId = 1;
         return mesh;
     }
@@ -217,14 +230,10 @@ export class EntityRenderer {
                 const buf = new Float32Array(group.matrices);
                 mesh.thinInstanceSetBuffer('matrix', buf, 16, false);
                 mesh.thinInstanceCount = group.count;
-                // Without this the mesh's bounding info still reflects
-                // the template geometry at origin, so Babylon's per-
-                // frame culling can miss the real instance positions
-                // even with `alwaysSelectAsActiveMesh = true` on some
-                // render paths. Refreshing each frame is cheap for
-                // the handful of entities we have and guarantees the
-                // bounding box follows the actual instances.
-                mesh.thinInstanceRefreshBoundingInfo(false);
+                // No bounding-info refresh here on purpose — see the
+                // giant fixed box set in buildMesh(). Refreshing every
+                // frame introduces a timing window where the box
+                // momentarily reflects stale data during motion.
             }
         }
     }
