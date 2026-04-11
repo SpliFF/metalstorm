@@ -106,6 +106,15 @@ export class EntityRenderer {
         mesh.material = this.teamMaterials[team];
         mesh.thinInstanceEnablePicking = false;
         mesh.alwaysSelectAsActiveMesh = true;
+        // Units render in a higher group than terrain (group 0) so
+        // they never get occluded by hills when the camera looks
+        // across the map. This trades a bit of strict realism (units
+        // are technically visible through terrain) for a playable
+        // view — with the low-resolution client-side terrain mesh
+        // mismatching the server's sub-vertex unit placement, units
+        // frequently sit a few elmos inside a triangle and get
+        // culled by depth test from horizontal camera angles.
+        mesh.renderingGroupId = 1;
         return mesh;
     }
 
