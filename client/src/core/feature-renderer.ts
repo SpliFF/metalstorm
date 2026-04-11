@@ -126,8 +126,14 @@ function renderPlaceholder(
     mat.specularColor = new Color3(0.1, 0.1, 0.1);
     base.material = mat;
     base.isPickable = false;
-    base.doNotSyncBoundingInfo = true;
     base.thinInstanceSetBuffer('matrix', buildInstanceMatrices(instances), 16, true);
+    // Thin-instance batches are culled by the template mesh's bounding
+    // info, which is a tiny box at the origin — not the union of all
+    // instance world positions. Without these two calls the CPU-side
+    // frustum test drops the entire batch the moment the origin goes
+    // off-screen, and features wink out in zoom / pan passes.
+    base.alwaysSelectAsActiveMesh = true;
+    base.thinInstanceRefreshBoundingInfo(false);
     return base;
 }
 
@@ -206,7 +212,6 @@ export async function renderMapFeatures(scene: Scene, map: ParsedMapData): Promi
                 primary.rotationQuaternion = Quaternion.Identity();
                 primary.scaling.set(1, 1, 1);
                 primary.isPickable = false;
-                primary.doNotSyncBoundingInfo = true;
 
                 applyTexture(primary, def, scene);
 
@@ -216,6 +221,13 @@ export async function renderMapFeatures(scene: Scene, map: ParsedMapData): Promi
                     16,
                     true,
                 );
+                // See renderPlaceholder() above for why these two calls
+                // are required — without them the whole thin-instance
+                // batch is frustum-culled when the template origin
+                // leaves the view, so feature types wink out one by
+                // one as the camera zooms in.
+                primary.alwaysSelectAsActiveMesh = true;
+                primary.thinInstanceRefreshBoundingInfo(false);
                 results.push(primary);
                 modelTypes++;
             } catch (err) {
