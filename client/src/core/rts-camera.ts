@@ -126,23 +126,43 @@ export class RTSCamera {
         this.mouseInCanvas = false;
     };
 
-    // Middle-mouse press on the canvas. Start an orbit drag; subsequent
-    // move/up events come through window-level listeners so we don't
-    // lose the drag when the cursor leaves the canvas.
-    private onMouseDown = (e: MouseEvent): void => {
+    // Middle-mouse press on the canvas starts an orbit drag. We use
+    // pointer events (not mouse events) because Babylon hooks pointer
+    // events via scene.onPointerObservable, and modern browsers don't
+    // always generate compatibility `mousedown` events for middle
+    // button on a canvas that already has a pointer-event listener.
+    // Pointer capture then guarantees that pointermove/pointerup keep
+    // being delivered to the canvas even when the cursor leaves it.
+    private capturedPointerId = -1;
+
+    private onPointerDown = (e: PointerEvent): void => {
         if (e.button !== 1) return; // middle button only
-        if (e.target !== this.canvas) return;
-        // Stops the browser's middle-click autoscroll marker on some
-        // platforms; also keeps focus on the canvas.
+        // Swallow default middle-click behaviour (autoscroll marker,
+        // "open in new tab" compat click) and stop the event from
+        // reaching Babylon's pointer observable, so a stray middle-
+        // click can never be mistaken for a selection/command.
         e.preventDefault();
+        e.stopPropagation();
         this.orbitDragging = true;
         this.orbitLastX = e.clientX;
         this.orbitLastY = e.clientY;
-        window.addEventListener('mousemove', this.onWindowMouseMove);
-        window.addEventListener('mouseup', this.onWindowMouseUp);
+        try {
+            this.canvas.setPointerCapture(e.pointerId);
+            this.capturedPointerId = e.pointerId;
+        } catch {
+            // setPointerCapture can throw if the pointer id is gone
+            // (very rare — e.g. if the browser released the pointer
+            // between dispatch and handler run). Fall back to window
+            // listeners so we still see move/up events.
+            window.addEventListener('pointermove', this.onPointerMove);
+            window.addEventListener('pointerup', this.onPointerUp);
+            return;
+        }
+        this.canvas.addEventListener('pointermove', this.onPointerMove);
+        this.canvas.addEventListener('pointerup', this.onPointerUp);
     };
 
-    private onWindowMouseMove = (e: MouseEvent): void => {
+    private onPointerMove = (e: PointerEvent): void => {
         if (!this.orbitDragging) return;
         const dx = e.clientX - this.orbitLastX;
         const dy = e.clientY - this.orbitLastY;
@@ -153,11 +173,17 @@ export class RTSCamera {
         }
     };
 
-    private onWindowMouseUp = (e: MouseEvent): void => {
+    private onPointerUp = (e: PointerEvent): void => {
         if (e.button !== 1) return;
         this.orbitDragging = false;
-        window.removeEventListener('mousemove', this.onWindowMouseMove);
-        window.removeEventListener('mouseup', this.onWindowMouseUp);
+        if (this.capturedPointerId >= 0) {
+            try { this.canvas.releasePointerCapture(this.capturedPointerId); } catch { /* already released */ }
+            this.capturedPointerId = -1;
+        }
+        this.canvas.removeEventListener('pointermove', this.onPointerMove);
+        this.canvas.removeEventListener('pointerup', this.onPointerUp);
+        window.removeEventListener('pointermove', this.onPointerMove);
+        window.removeEventListener('pointerup', this.onPointerUp);
     };
 
     constructor(camera: FreeCamera, canvas: HTMLCanvasElement, config: RTSCameraConfig = {}) {
@@ -187,7 +213,11 @@ export class RTSCamera {
         canvas.addEventListener('wheel', this.onWheel, { passive: false });
         canvas.addEventListener('mousemove', this.onMouseMove);
         canvas.addEventListener('mouseleave', this.onMouseLeave);
-        canvas.addEventListener('mousedown', this.onMouseDown);
+        // Pointerdown runs in the capture phase so it fires before any
+        // other canvas-attached pointer listener (e.g. Babylon's scene
+        // observable). That lets us stopPropagation on middle-button
+        // events without missing them ourselves.
+        canvas.addEventListener('pointerdown', this.onPointerDown, { capture: true });
         // Some browsers open an autoscroll marker on middle-click.
         // auxclick is the cleanest way to suppress it without also
         // breaking left/right click handling in InputManager.
@@ -486,13 +516,21 @@ export class RTSCamera {
         this.canvas.removeEventListener('wheel', this.onWheel);
         this.canvas.removeEventListener('mousemove', this.onMouseMove);
         this.canvas.removeEventListener('mouseleave', this.onMouseLeave);
-        this.canvas.removeEventListener('mousedown', this.onMouseDown);
+        this.canvas.removeEventListener('pointerdown', this.onPointerDown, { capture: true } as EventListenerOptions);
         this.canvas.removeEventListener('auxclick', this.onAuxClick);
-        // Defensively detach the window-level drag listeners in case
-        // the camera is disposed mid-drag.
+        // Defensively detach any drag-time listeners in case the
+        // camera is disposed mid-drag. These are registered on
+        // either the canvas (normal path) or window (setPointerCapture
+        // fallback path) so we have to try both.
         if (this.orbitDragging) {
-            window.removeEventListener('mousemove', this.onWindowMouseMove);
-            window.removeEventListener('mouseup', this.onWindowMouseUp);
+            this.canvas.removeEventListener('pointermove', this.onPointerMove);
+            this.canvas.removeEventListener('pointerup', this.onPointerUp);
+            window.removeEventListener('pointermove', this.onPointerMove);
+            window.removeEventListener('pointerup', this.onPointerUp);
+            if (this.capturedPointerId >= 0) {
+                try { this.canvas.releasePointerCapture(this.capturedPointerId); } catch { /* already released */ }
+                this.capturedPointerId = -1;
+            }
             this.orbitDragging = false;
         }
     }
