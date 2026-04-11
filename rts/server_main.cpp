@@ -105,6 +105,23 @@ int main(int argc, char* argv[])
     if (!gamePath.empty()) {
         CFileHandler::AddContentRoot(gamePath);
         std::fprintf(stderr, "[spring-server] game content: %s\n", gamePath.c_str());
+
+        // Also expose the preprocessed game models dir as a content
+        // root, so SolidObjectDef::LoadModel can find each unit's
+        // `<modelName>.meta.lua` via the bare-name lookup.
+        // Layout convention (set by GameProcessor at lobby startup):
+        //     data/games/<gameId>/models/<stem>.meta.lua
+        namespace fs = std::filesystem;
+        std::string gameId = fs::path(gamePath).filename().string();
+        if (gameId.empty() && fs::path(gamePath).has_parent_path())
+            gameId = fs::path(gamePath).parent_path().filename().string();
+        const std::string processedModels = "data/games/" + gameId + "/models";
+        if (fs::is_directory(processedModels)) {
+            CFileHandler::AddContentRoot(processedModels);
+            std::fprintf(stderr,
+                "[spring-server] processed game models: %s\n",
+                processedModels.c_str());
+        }
     }
     if (!mapPath.empty()) {
         CFileHandler::AddContentRoot(mapPath);

@@ -14,6 +14,7 @@
 #include "Server/ClientSession.h"
 #include "Server/RoomManager.h"
 #include "Server/MapProcessor.h"
+#include "Server/GameProcessor.h"
 
 #include <sqlite3.h>
 
@@ -175,6 +176,23 @@ int main(int argc, char* argv[])
     {
         MapProcessor mapProc;
         mapProc.ScanAndProcess(mapsDir, "data", mapDb);
+    }
+
+    // --- Game processing ---
+    // Walk <gamePath>/objects3d/ and convert every supported 3D file
+    // into data/games/<gameId>/models/<stem>.glb + .meta.lua via the
+    // modelimporter CLI. The sim picks up each .meta.lua at unit-def
+    // load time via SolidObjectDef::LoadModel; spring-server adds the
+    // models/ dir as a content root at startup so the bare-name
+    // lookup resolves.
+    if (!gamePath.empty()) {
+        std::filesystem::path gp(gamePath);
+        std::string gameId = gp.filename().string();
+        if (gameId.empty() && gp.has_parent_path())
+            gameId = gp.parent_path().filename().string();
+        if (!gameId.empty()) {
+            GameProcessor::Process(gamePath, gameId, "data");
+        }
     }
 
     // --- Game server instances ---

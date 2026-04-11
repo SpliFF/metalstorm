@@ -201,6 +201,7 @@ add_executable(spring-lobby
     rts/System/FileSystem/LuaVFSSimple.cpp
     rts/System/SafeCStrings.c
     rts/Server/FeatureProcessor.cpp
+    rts/Server/GameProcessor.cpp
 )
 add_dependencies(spring-lobby generate_flatbuffers modelimporter)
 target_compile_definitions(spring-lobby PRIVATE
