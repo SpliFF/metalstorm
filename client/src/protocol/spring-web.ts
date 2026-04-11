@@ -40,6 +40,7 @@ export { ResourceUpdate, ResourceUpdateT } from './spring-web/resource-update.js
 export { RoomAIInfo, RoomAIInfoT } from './spring-web/room-aiinfo.js';
 export { RoomAISlot, RoomAISlotT } from './spring-web/room-aislot.js';
 export { RoomAddAI, RoomAddAIT } from './spring-web/room-add-ai.js';
+export { RoomCloseRoom, RoomCloseRoomT } from './spring-web/room-close-room.js';
 export { RoomCreate, RoomCreateT } from './spring-web/room-create.js';
 export { RoomEndGame, RoomEndGameT } from './spring-web/room-end-game.js';
 export { RoomJoin, RoomJoinT } from './spring-web/room-join.js';
@@ -52,6 +53,7 @@ export { RoomPlayerJoined, RoomPlayerJoinedT } from './spring-web/room-player-jo
 export { RoomPlayerLeft, RoomPlayerLeftT } from './spring-web/room-player-left.js';
 export { RoomReady, RoomReadyT } from './spring-web/room-ready.js';
 export { RoomRemoveAI, RoomRemoveAIT } from './spring-web/room-remove-ai.js';
+export { RoomSetAITeam, RoomSetAITeamT } from './spring-web/room-set-aiteam.js';
 export { RoomSetStartPos, RoomSetStartPosT } from './spring-web/room-set-start-pos.js';
 export { RoomStartGame, RoomStartGameT } from './spring-web/room-start-game.js';
 export { RoomState } from './spring-web/room-state.js';

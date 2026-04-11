@@ -253,6 +253,18 @@ async function startGame(gameServerPort: number): Promise<void> {
     const scene = new Scene(engine);
     scene.clearColor = new Color4(0.05, 0.08, 0.12, 1);
 
+    // Preserve the depth buffer across rendering groups so water
+    // (group 1) depth-tests against the terrain already drawn in
+    // group 0, and units (group 2) depth-test against both. Babylon
+    // defaults to auto-clearing depth + stencil at the start of
+    // every rendering group, which would let an opaque water plane
+    // render on top of a mountain just because it's in a higher
+    // group. See entity-renderer.ts + the water block below for
+    // the corresponding renderingGroupId assignments.
+    scene.setRenderingAutoClearDepthStencil(1, false, true, true);
+    scene.setRenderingAutoClearDepthStencil(2, false, true, true);
+    scene.setRenderingAutoClearDepthStencil(3, false, true, true);
+
     // Default camera pointing at origin — repositioned when MapData arrives
     const camera = new FreeCamera('camera', new Vector3(0, 1200, -1500), scene);
     camera.setTarget(new Vector3(0, 0, 0));
@@ -340,6 +352,21 @@ async function startGame(gameServerPort: number): Promise<void> {
             water.position.z = map.heightElmos / 2;
             water.position.y = 0;
             water.isPickable = false;
+            // Put water in its own rendering group *after* terrain
+            // (which stays in the default group 0). Scene-level
+            // `setRenderingAutoClearDepthStencil(1, false)` below
+            // preserves the depth buffer from group 0 into group 1,
+            // so the water depth-tests against every terrain fragment
+            // already in the buffer and cannot render on top of a
+            // mountain by winning the opaque front-to-back sort.
+            // Before this, fully-opaque water on maps with
+            // `surfaceAlpha = 1.0` (Scorched Crossing's lava) could
+            // appear to float on top of terrain at oblique camera
+            // angles because Babylon's bounding-sphere sort flipped
+            // the water plane ahead of terrain in the opaque queue,
+            // and the combination with backFaceCulling=false made
+            // the z-resolution unreliable right at the y=0 plane.
+            water.renderingGroupId = 1;
             const wmat = new StandardMaterial('waterMat', scene);
             const [r, g, b] = map.water.baseColor;
             wmat.diffuseColor = new Color3(r, g, b);
@@ -348,7 +375,7 @@ async function startGame(gameServerPort: number): Promise<void> {
             wmat.alpha = Math.max(0.4, map.water.surfaceAlpha);
             wmat.backFaceCulling = false;
             water.material = wmat;
-            console.log(`[water] plane rendered: baseColor=(${r.toFixed(2)},${g.toFixed(2)},${b.toFixed(2)}) damage=${map.water.damage}`);
+            console.log(`[water] plane rendered: baseColor=(${r.toFixed(2)},${g.toFixed(2)},${b.toFixed(2)}) damage=${map.water.damage} alpha=${wmat.alpha.toFixed(2)}`);
         }
 
         // Render features. Loads each unique feature def's .glb model

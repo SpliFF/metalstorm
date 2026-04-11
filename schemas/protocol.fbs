@@ -123,6 +123,14 @@ table RoomStartGame {}
 /// sender is not the room host or the room is not in an active state.
 table RoomEndGame {}
 
+/// Host-only request to close (delete) the entire room. Kills the
+/// game subprocess if one is still running, removes the room from
+/// the lobby's room list, and leaves every member in the browser
+/// view. Symmetric with RoomCreate — once the close broadcast goes
+/// out, the room id no longer resolves. Rejected if the sender is
+/// not the current room host.
+table RoomCloseRoom {}
+
 /// Host-only request to add an AI player to a team slot in the current
 /// room. `ai_id` must match one of the ids the server returned in its
 /// most recent AIListUpdate; unknown ids are rejected. Ignored if the
@@ -137,6 +145,15 @@ table RoomAddAI {
 /// sender is not the room host.
 table RoomRemoveAI {
     slot_index: uint8;
+}
+
+/// Host-only request to re-assign an AI slot to a different team.
+/// Targets the slot by its index in the RoomStateUpdate.ai_slots
+/// vector. Ignored if the sender is not the room host or the index
+/// is out of range. Does not affect the slot's start position.
+table RoomSetAITeam {
+    slot_index: uint8;
+    team: uint8;
 }
 
 /// Assign a map start position to a player or AI slot in the current
@@ -194,6 +211,8 @@ union ClientPayload {
     AIListRequest,
     GameListRequest,
     RoomSetStartPos,
+    RoomCloseRoom,
+    RoomSetAITeam,
 }
 
 table ClientMessage {
@@ -582,6 +601,44 @@ union ServerPayload {
 
 table ServerMessage {
     payload: ServerPayload;
+}
+
+// ============================================================
+// IPC messages (sim → lobby, over a private pipe)
+// ============================================================
+//
+// The lobby spawns each game server as a child process and keeps
+// a one-way pipe open for the duration of the game. The sim writes
+// length-prefixed IpcMessage frames to that pipe whenever something
+// lobby-relevant happens. The same FlatBuffers machinery used for
+// the client-facing protocol applies here — one schema, one
+// serialiser, one way to add new events — but this channel has a
+// deliberately separate root type (IpcMessage) because the sender
+// and message set are different from ClientMessage/ServerMessage.
+//
+// Wire format on the pipe:
+//     u32 length  (little-endian)
+//     <length> bytes of FlatBuffers data (root = IpcMessage)
+//
+// The length prefix lets the lobby read frames incrementally from
+// a non-blocking fd without peeking inside the FlatBuffers buffer.
+// Adding a new event means appending a table + a union entry here
+// and wiring a dispatch case on the lobby side.
+
+/// Sim has finished its boot sequence (LuaRules + gadgets loaded,
+/// GameStart event fired, starting units spawned) and is now
+/// running the simulation loop proper. Triggers the room state
+/// transition from Loading → Active.
+table GameStarted {
+    frame: uint32;   // sim frame number at the moment GameStart fired
+}
+
+union IpcPayload {
+    GameStarted,
+}
+
+table IpcMessage {
+    payload: IpcPayload;
 }
 
 // Root types — one for each direction

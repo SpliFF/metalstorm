@@ -16,6 +16,7 @@
 #include "Server/StandingOrders.h"
 #include "Server/AI/AIRuntimePool.h"
 #include "Server/AI/AIDiscovery.h"
+#include "Server/LobbyIpc.h"
 #include "Server/PerfMetrics.h"
 #include "Server/RoomManager.h"
 #include "Server/MapProcessor.h"
@@ -25,6 +26,7 @@
 #include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Units/CommandAI/Command.h"
 #include "Sim/Misc/GlobalConstants.h"
+#include "Sim/Misc/TeamHandler.h"
 #include "Map/ReadMap.h"
 #include "System/FileSystem/FileHandler.h"
 #include "System/Misc/SpringTime.h"
@@ -85,6 +87,13 @@ int main(int argc, char* argv[])
 
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
+    // Ignore SIGPIPE so a dead sim→lobby event pipe (e.g. lobby
+    // restarted while the game is running) only surfaces as an
+    // EPIPE return from write() — which LobbyIpc::WriteFrame
+    // handles by disabling the channel. Without this the default
+    // SIGPIPE action would terminate the sim the first time it
+    // tried to report an event to a vanished parent.
+    std::signal(SIGPIPE, SIG_IGN);
 
     int port = 9001;
     std::string gamePath;
@@ -135,8 +144,17 @@ int main(int argc, char* argv[])
         return out;
     };
 
+    // Sim → lobby event pipe file descriptor. The lobby passes
+    // this via `--event-fd <n>` when spawning us so the sim can
+    // post FlatBuffers IpcMessage frames (currently just
+    // GameStarted) back over the pipe. A value of -1 means no
+    // lobby is listening — the sim runs fine without an event
+    // channel, it just can't tell anyone it transitioned.
+    int eventFd = -1;
+
     // Simple arg parsing: --port N, --game PATH, --map PATH, --db PATH,
-    // --player username:team:pos (repeatable), --ai id:team:pos (repeatable)
+    // --event-fd N, --player username:team:pos (repeatable),
+    // --ai id:team:pos (repeatable)
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "--port" && i + 1 < argc) {
@@ -147,6 +165,8 @@ int main(int argc, char* argv[])
             mapPath = argv[++i];
         } else if (arg == "--db" && i + 1 < argc) {
             dbPath = argv[++i];
+        } else if (arg == "--event-fd" && i + 1 < argc) {
+            eventFd = std::atoi(argv[++i]);
         } else if (arg == "--player" && i + 1 < argc) {
             const std::string spec = argv[++i];
             const auto parts = splitSpec(spec);
@@ -186,6 +206,11 @@ int main(int argc, char* argv[])
     }
 
     std::fprintf(stderr, "[spring-server] starting...\n");
+
+    // Install the event-pipe fd so the sim can post GameStarted
+    // (and future events) back to the lobby. If the fd is -1 the
+    // helper stays disabled and every Send*() call is a no-op.
+    LobbyIpc::Init(eventFd);
 
     // Initialise Spring's time system
     spring_clock::PushTickRate(true);
@@ -985,14 +1010,29 @@ int main(int argc, char* argv[])
             bool isFullSnapshot = (curFrame % 30) == 0;
 
             sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+                // Map session->team to its ally team so the
+                // visibility filter can skip enemy units that
+                // aren't in this ally team's LOS. We look up the
+                // ally team via teamHandler rather than caching on
+                // the session so the mapping stays correct if a
+                // future alliance-swap feature changes it mid-game.
+                // session->team == -1 is the dev-mode permissive
+                // path: no roster was handed off, so every session
+                // sees every unit (viewerAllyTeam=-1 disables the
+                // LOS filter in the collector).
+                int viewerAllyTeam = -1;
+                if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
+                    viewerAllyTeam = teamHandler.AllyTeam(session.team);
+
                 // Collect candidate units (viewport-filtered or all)
                 std::vector<CUnit*> candidates;
                 if (session.HasViewport() && sim.HasMap()) {
                     candidates = EntityState::CollectViewportUnits(
                         session.viewports.data(),
-                        static_cast<int>(session.viewports.size()));
+                        static_cast<int>(session.viewports.size()),
+                        viewerAllyTeam);
                 } else {
-                    candidates = EntityState::CollectAllUnits();
+                    candidates = EntityState::CollectAllUnits(viewerAllyTeam);
                 }
 
                 uint8_t envelope;

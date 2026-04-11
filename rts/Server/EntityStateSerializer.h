@@ -59,10 +59,22 @@ std::vector<uint8_t> SerializeViewportUnits(
 
 /// Collect units visible within a set of viewports (without serializing).
 /// Used when the caller needs to apply delta filtering before serialization.
+///
+/// When `viewerAllyTeam >= 0`, results are filtered for that ally team's
+/// visibility: every own-allyteam unit is included unconditionally, and
+/// enemy units are only included if losHandler reports them in LOS. Pass
+/// -1 to disable the per-team filter (returns everything in the viewport
+/// regardless of ownership — used for the legacy dev-mode permissive
+/// path and for spectators who should see everything).
 std::vector<CUnit*> CollectViewportUnits(
-    const Viewport* viewports, int numViewports);
+    const Viewport* viewports, int numViewports,
+    int viewerAllyTeam = -1);
 
 /// Collect all active (non-dead) units.
-std::vector<CUnit*> CollectAllUnits();
+///
+/// When `viewerAllyTeam >= 0`, applies the same per-ally-team visibility
+/// filter as CollectViewportUnits. This is the no-viewport fallback path
+/// used when a session has no active viewport registered yet.
+std::vector<CUnit*> CollectAllUnits(int viewerAllyTeam = -1);
 
 } // namespace EntityState

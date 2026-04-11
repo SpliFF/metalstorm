@@ -147,6 +147,15 @@ public:
     /// Kick a player (host only).
     bool KickPlayer(uint32_t roomId, uint32_t requesterId, uint32_t targetId);
 
+    /// Close (delete) a room entirely. Host only. Returns true if
+    /// the room existed and the requester was the host, in which
+    /// case the room is removed from the internal map and any
+    /// subsequent lookup by id returns nullptr. Callers are
+    /// responsible for killing any associated game subprocess
+    /// *before* calling this; RoomManager doesn't know about the
+    /// gameServers map maintained in lobby_main.
+    bool CloseRoom(uint32_t roomId, uint32_t requesterId);
+
     /// Add an AI slot to the room (host only). `aiId` / `displayName`
     /// are opaque strings from the lobby's AIDiscovery list; the
     /// caller is responsible for validating the id against the
@@ -162,6 +171,12 @@ public:
     /// indices are silently ignored.
     bool RemoveAISlot(uint32_t roomId, uint32_t requesterId,
                       uint8_t slotIndex);
+
+    /// Reassign the AI slot at `slotIndex` to a different team
+    /// (host only). Start position is preserved. Returns false if
+    /// the requester is not the host or the index is out of range.
+    bool SetAITeam(uint32_t roomId, uint32_t requesterId,
+                   uint8_t slotIndex, uint8_t team);
 
     /// Set the start position for a player slot.
     ///
@@ -198,6 +213,15 @@ public:
 
     /// Transition a room to a new state.
     void SetRoomState(uint32_t roomId, ERoomState newState);
+
+    /// Recycle a room after its game subprocess has exited. Puts
+    /// the room back into Filling state, clears per-player ready
+    /// flags, zeroes the stored gameServerPort, and drops the
+    /// original-roster reconnection map. Called by the health-check
+    /// loop in lobby_main when a game's subprocess dies so the
+    /// same room can immediately host another game without the
+    /// host having to close + recreate it. No-op on unknown roomId.
+    void ResetRoomForNextGame(uint32_t roomId);
 
     /// Get a room by ID.
     GameRoom* GetRoom(uint32_t roomId);

@@ -12,6 +12,7 @@ import { Ping, PingT } from '../spring-web/ping.js';
 import { PlayerCommand, PlayerCommandT } from '../spring-web/player-command.js';
 import { ReconnectRequest, ReconnectRequestT } from '../spring-web/reconnect-request.js';
 import { RoomAddAI, RoomAddAIT } from '../spring-web/room-add-ai.js';
+import { RoomCloseRoom, RoomCloseRoomT } from '../spring-web/room-close-room.js';
 import { RoomCreate, RoomCreateT } from '../spring-web/room-create.js';
 import { RoomEndGame, RoomEndGameT } from '../spring-web/room-end-game.js';
 import { RoomJoin, RoomJoinT } from '../spring-web/room-join.js';
@@ -19,6 +20,7 @@ import { RoomKick, RoomKickT } from '../spring-web/room-kick.js';
 import { RoomLeave, RoomLeaveT } from '../spring-web/room-leave.js';
 import { RoomReady, RoomReadyT } from '../spring-web/room-ready.js';
 import { RoomRemoveAI, RoomRemoveAIT } from '../spring-web/room-remove-ai.js';
+import { RoomSetAITeam, RoomSetAITeamT } from '../spring-web/room-set-aiteam.js';
 import { RoomSetStartPos, RoomSetStartPosT } from '../spring-web/room-set-start-pos.js';
 import { RoomStartGame, RoomStartGameT } from '../spring-web/room-start-game.js';
 import { RoomTeamSelect, RoomTeamSelectT } from '../spring-web/room-team-select.js';
@@ -47,13 +49,15 @@ export enum ClientPayload {
   RoomRemoveAI = 18,
   AIListRequest = 19,
   GameListRequest = 20,
-  RoomSetStartPos = 21
+  RoomSetStartPos = 21,
+  RoomCloseRoom = 22,
+  RoomSetAITeam = 23
 }
 
 export function unionToClientPayload(
   type: ClientPayload,
-  accessor: (obj:AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate|null
-): AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate|null {
+  accessor: (obj:AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate|null
+): AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate|null {
   switch(ClientPayload[type]) {
     case 'NONE': return null; 
     case 'Handshake': return accessor(new Handshake())! as Handshake;
@@ -77,15 +81,17 @@ export function unionToClientPayload(
     case 'AIListRequest': return accessor(new AIListRequest())! as AIListRequest;
     case 'GameListRequest': return accessor(new GameListRequest())! as GameListRequest;
     case 'RoomSetStartPos': return accessor(new RoomSetStartPos())! as RoomSetStartPos;
+    case 'RoomCloseRoom': return accessor(new RoomCloseRoom())! as RoomCloseRoom;
+    case 'RoomSetAITeam': return accessor(new RoomSetAITeam())! as RoomSetAITeam;
     default: return null;
   }
 }
 
 export function unionListToClientPayload(
   type: ClientPayload, 
-  accessor: (index: number, obj:AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate|null, 
+  accessor: (index: number, obj:AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate|null, 
   index: number
-): AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate|null {
+): AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate|null {
   switch(ClientPayload[type]) {
     case 'NONE': return null; 
     case 'Handshake': return accessor(index, new Handshake())! as Handshake;
@@ -109,6 +115,8 @@ export function unionListToClientPayload(
     case 'AIListRequest': return accessor(index, new AIListRequest())! as AIListRequest;
     case 'GameListRequest': return accessor(index, new GameListRequest())! as GameListRequest;
     case 'RoomSetStartPos': return accessor(index, new RoomSetStartPos())! as RoomSetStartPos;
+    case 'RoomCloseRoom': return accessor(index, new RoomCloseRoom())! as RoomCloseRoom;
+    case 'RoomSetAITeam': return accessor(index, new RoomSetAITeam())! as RoomSetAITeam;
     default: return null;
   }
 }

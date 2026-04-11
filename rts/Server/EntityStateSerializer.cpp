@@ -9,6 +9,8 @@
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Misc/QuadField.h"
+#include "Sim/Misc/LosHandler.h"
+#include "Sim/Misc/TeamHandler.h"
 #include "System/float3.h"
 
 #include <cstring>
@@ -118,19 +120,39 @@ std::vector<uint8_t> SerializeUnits(
     return buf;
 }
 
-std::vector<CUnit*> CollectAllUnits() {
+/// Per-ally-team visibility check. Own-allyteam units are always
+/// visible; enemy units require LOS from `viewerAllyTeam`. `viewerAllyTeam
+/// < 0` disables the filter — the legacy permissive path used by
+/// dev-smoketest sessions (no roster handoff) and spectators who are
+/// expected to see the whole map.
+static bool IsUnitVisibleTo(const CUnit* u, int viewerAllyTeam) {
+    if (viewerAllyTeam < 0) return true;
+    const int unitAllyTeam = teamHandler.AllyTeam(u->team);
+    if (unitAllyTeam == viewerAllyTeam) return true;
+    // LosHandler::InLos takes the *viewer* ally team. Units outside
+    // any LOS tile are hidden from the wire entirely; this is fog
+    // of war in its simplest form. Radar-only visibility (ghost
+    // markers, reduced-fidelity updates) is a future pass — for
+    // now, either the viewer can see you or you don't exist to
+    // them.
+    return losHandler->InLos(u, viewerAllyTeam);
+}
+
+std::vector<CUnit*> CollectAllUnits(int viewerAllyTeam) {
     const auto& activeUnits = unitHandler.GetActiveUnits();
     std::vector<CUnit*> units;
     units.reserve(activeUnits.size());
     for (CUnit* u : activeUnits) {
-        if (u != nullptr && !u->isDead)
-            units.push_back(u);
+        if (u == nullptr || u->isDead) continue;
+        if (!IsUnitVisibleTo(u, viewerAllyTeam)) continue;
+        units.push_back(u);
     }
     return units;
 }
 
 std::vector<CUnit*> CollectViewportUnits(
-    const Viewport* viewports, int numViewports)
+    const Viewport* viewports, int numViewports,
+    int viewerAllyTeam)
 {
     std::unordered_set<int> seen;
     std::vector<CUnit*> units;
@@ -153,9 +175,10 @@ std::vector<CUnit*> CollectViewportUnits(
         quadField.GetUnitsExact(qfQuery, mins, maxs);
 
         for (CUnit* u : *qfQuery.units) {
-            if (u != nullptr && !u->isDead && seen.insert(u->id).second) {
-                units.push_back(u);
-            }
+            if (u == nullptr || u->isDead) continue;
+            if (!seen.insert(u->id).second) continue;
+            if (!IsUnitVisibleTo(u, viewerAllyTeam)) continue;
+            units.push_back(u);
         }
     }
 
@@ -166,7 +189,9 @@ std::vector<uint8_t> SerializeViewportUnits(
     const Viewport* viewports, int numViewports,
     uint16_t fieldMask)
 {
-    return SerializeUnits(CollectViewportUnits(viewports, numViewports), fieldMask);
+    return SerializeUnits(
+        CollectViewportUnits(viewports, numViewports, /*viewerAllyTeam*/ -1),
+        fieldMask);
 }
 
 } // namespace EntityState

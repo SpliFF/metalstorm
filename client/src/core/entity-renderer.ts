@@ -133,13 +133,19 @@ export class EntityRenderer {
             new Vector3(-1e6, -1e6, -1e6),
             new Vector3(1e6, 1e6, 1e6),
         ));
-        // Units render in a higher group than terrain (group 0) so
-        // the low-resolution client-side terrain mesh (step 2 on
+        // Group layout:
+        //   0 — terrain + features (default)
+        //   1 — water plane (added by main.ts when the map has water)
+        //   2 — units (this mesh)
+        //   3 — selection rings
+        //
+        // Units render in a higher group than terrain so the
+        // low-resolution client-side terrain mesh (step 2 on
         // wanderlust) doesn't occasionally cover the base of a unit
         // whose server-side ground y lands inside a terrain triangle.
         // Trade-off: units are visible through hills, which is a
         // standard RTS X-ray compromise.
-        mesh.renderingGroupId = 1;
+        mesh.renderingGroupId = 2;
         return mesh;
     }
 
@@ -173,9 +179,10 @@ export class EntityRenderer {
             new Vector3(-1e6, -1e6, -1e6),
             new Vector3(1e6, 1e6, 1e6),
         ));
-        // Group 2: draw after terrain (0) and units (1) so the ring
-        // always sits on top, even when the camera is near-horizontal.
-        mesh.renderingGroupId = 2;
+        // Group 3: draw after terrain (0), water (1), and units (2)
+        // so the ring always sits on top, even when the camera is
+        // near-horizontal.
+        mesh.renderingGroupId = 3;
         mesh.isVisible = false;
         this.selectionMesh = mesh;
         return mesh;

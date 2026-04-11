@@ -39,6 +39,7 @@
 #include "Map/MapDamage.h"
 #include "Map/MapInfo.h"
 #include "Map/MapParser.h"
+#include "Server/LobbyIpc.h"
 #include "Map/ReadMap.h"
 #include "Map/MetalMap.h"
 #include "Sim/Misc/ModInfo.h"
@@ -550,6 +551,11 @@ void CSimulation::Init(const std::string& mapName)
     if (scriptingLoaded) {
         std::fprintf(stderr, "[sim] firing GameStart\n");
         eventHandler.GameStart();
+        // Tell the lobby we've made it past the boot sequence so
+        // it can transition the room from Loading to Active. No-op
+        // if no event pipe was provided on the command line (dev
+        // smoketest path).
+        LobbyIpc::SendGameStarted(static_cast<uint32_t>(gs->frameNum));
     }
 
     // Spawn test units for development / headless integration

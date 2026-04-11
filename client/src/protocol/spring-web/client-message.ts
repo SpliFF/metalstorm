@@ -15,6 +15,7 @@ import { Ping, PingT } from '../spring-web/ping.js';
 import { PlayerCommand, PlayerCommandT } from '../spring-web/player-command.js';
 import { ReconnectRequest, ReconnectRequestT } from '../spring-web/reconnect-request.js';
 import { RoomAddAI, RoomAddAIT } from '../spring-web/room-add-ai.js';
+import { RoomCloseRoom, RoomCloseRoomT } from '../spring-web/room-close-room.js';
 import { RoomCreate, RoomCreateT } from '../spring-web/room-create.js';
 import { RoomEndGame, RoomEndGameT } from '../spring-web/room-end-game.js';
 import { RoomJoin, RoomJoinT } from '../spring-web/room-join.js';
@@ -22,6 +23,7 @@ import { RoomKick, RoomKickT } from '../spring-web/room-kick.js';
 import { RoomLeave, RoomLeaveT } from '../spring-web/room-leave.js';
 import { RoomReady, RoomReadyT } from '../spring-web/room-ready.js';
 import { RoomRemoveAI, RoomRemoveAIT } from '../spring-web/room-remove-ai.js';
+import { RoomSetAITeam, RoomSetAITeamT } from '../spring-web/room-set-aiteam.js';
 import { RoomSetStartPos, RoomSetStartPosT } from '../spring-web/room-set-start-pos.js';
 import { RoomStartGame, RoomStartGameT } from '../spring-web/room-start-game.js';
 import { RoomTeamSelect, RoomTeamSelectT } from '../spring-web/room-team-select.js';
@@ -113,7 +115,7 @@ unpackTo(_o: ClientMessageT): void {
 export class ClientMessageT implements flatbuffers.IGeneratedObject {
 constructor(
   public payloadType: ClientPayload = ClientPayload.NONE,
-  public payload: AIListRequestT|AckT|AuthRequestT|ChatSendT|GameListRequestT|HandshakeT|PingT|PlayerCommandT|ReconnectRequestT|RoomAddAIT|RoomCreateT|RoomEndGameT|RoomJoinT|RoomKickT|RoomLeaveT|RoomReadyT|RoomRemoveAIT|RoomSetStartPosT|RoomStartGameT|RoomTeamSelectT|ViewportUpdateT|null = null
+  public payload: AIListRequestT|AckT|AuthRequestT|ChatSendT|GameListRequestT|HandshakeT|PingT|PlayerCommandT|ReconnectRequestT|RoomAddAIT|RoomCloseRoomT|RoomCreateT|RoomEndGameT|RoomJoinT|RoomKickT|RoomLeaveT|RoomReadyT|RoomRemoveAIT|RoomSetAITeamT|RoomSetStartPosT|RoomStartGameT|RoomTeamSelectT|ViewportUpdateT|null = null
 ){}
 
 

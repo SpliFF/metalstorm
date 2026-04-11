@@ -20,9 +20,11 @@ import { RoomReady } from '../protocol/spring-web/room-ready.js';
 import { RoomTeamSelect } from '../protocol/spring-web/room-team-select.js';
 import { RoomStartGame } from '../protocol/spring-web/room-start-game.js';
 import { RoomEndGame } from '../protocol/spring-web/room-end-game.js';
+import { RoomCloseRoom } from '../protocol/spring-web/room-close-room.js';
 import { RoomLeave } from '../protocol/spring-web/room-leave.js';
 import { RoomAddAI } from '../protocol/spring-web/room-add-ai.js';
 import { RoomRemoveAI } from '../protocol/spring-web/room-remove-ai.js';
+import { RoomSetAITeam } from '../protocol/spring-web/room-set-aiteam.js';
 import { RoomSetStartPos } from '../protocol/spring-web/room-set-start-pos.js';
 import { AIListRequest } from '../protocol/spring-web/ailist-request.js';
 import { AIListUpdate } from '../protocol/spring-web/ailist-update.js';
@@ -462,10 +464,18 @@ export class LobbyUI {
         const r = this.currentRoom;
         const myPlayer = r.players.find(p => p.playerId === this.myPlayerId);
         const amHost = myPlayer?.isHost ?? false;
-        // Room is considered "running" once the host has clicked Start
-        // Game — either Loading (3) or Active/In Progress (4).
+        // Room is considered "running" while the host has an active
+        // game subprocess — either Loading (3) or Active/In Progress (4).
         const gameRunning = r.state === 3 || r.state === 4;
-        const preGame = r.state < 3;
+        // Rooms persist across game sessions: after a game ends
+        // members stay in the room to chat, adjust settings, and
+        // launch another round. For UI purposes we treat both the
+        // initial pre-game states (0-2) and the post-game Ended
+        // state (5+) as "preGame" — Ready / Start Game controls
+        // reappear and the host can kick off a fresh game without
+        // recreating the room. The only durable exit is the host
+        // clicking Close Room.
+        const preGame = r.state < 3 || r.state >= 5;
 
         // Start-position metadata for the room's current map.
         // `availableMaps` is populated on showBrowser() from /api/maps;
@@ -543,22 +553,33 @@ export class LobbyUI {
         }).join('');
 
         // AI slot rows — one per entry in the room's aiSlots vector.
-        // Non-hosts see a read-only row with the AI name and team.
-        // The host gets a remove button per slot plus the start-pos
-        // select; the add-AI dropdown is rendered below the slot
-        // list rather than per-slot.
+        // Non-hosts see a row with a disabled team dropdown (so the
+        // AI's team is still visible) and no remove button. The host
+        // gets an editable team dropdown, a remove button, and the
+        // start-pos select. The add-AI row below the slot list is
+        // a separate control for creating new slots.
         const aiRowsHtml = r.aiSlots.map((slot, idx) => {
             const nameText = this.esc(slot.displayName || slot.aiId);
-            const teamLabel = `Team ${slot.team + 1}`;
             const removeBtn = (amHost && preGame)
                 ? `<button class="ai-remove-btn" data-slot="${idx}" title="Remove AI">✕</button>`
                 : '';
             const canEdit = preGame && amHost;
             const posSel = renderStartPosSelect(
                 slot.startPos, `ai:${idx}`, canEdit);
+            // Team dropdown mirrors the player-row layout: a two-option
+            // select tagged with data-slot so the change handler below
+            // can resolve it back to the slot index without replaying
+            // the whole roster. Disabled for non-hosts and while a
+            // game is running.
+            const teamDisabled = canEdit ? '' : ' disabled';
+            const teamSel =
+                `<select class="ai-team-select" data-slot="${idx}"${teamDisabled}>`
+                + `<option value="0"${slot.team === 0 ? ' selected' : ''}>Team 1</option>`
+                + `<option value="1"${slot.team === 1 ? ' selected' : ''}>Team 2</option>`
+                + `</select>`;
             return `<div class="player-row ai-row"><span class="player-icon">🤖</span>`
                 + `<span class="player-name">${nameText}</span>`
-                + `<span class="ai-team-label">${teamLabel}</span>`
+                + teamSel
                 + posSel
                 + `<span class="player-status">AI</span>`
                 + removeBtn
@@ -607,6 +628,13 @@ export class LobbyUI {
         if (gameRunning && amHost) {
             actions.push('<button id="endgame-btn" class="danger">End Game</button>');
         }
+        // Close Room is always available to the host, independent
+        // of game state. End Game stops the current sim but keeps
+        // the room; Close Room deletes the room entirely and boots
+        // every member back to the browser.
+        if (amHost) {
+            actions.push('<button id="closeroom-btn" class="danger">Close Room</button>');
+        }
 
         this.container.innerHTML = renderTemplate(this.templates.room, {
             name: this.esc(r.name),
@@ -622,12 +650,29 @@ export class LobbyUI {
             () => this.sendStartGame());
         document.getElementById('rejoin-btn')?.addEventListener('click', () => {
             if (this.currentRoom && this.currentRoom.gameServerPort > 0) {
+                // Mirror the hide + save dance that handleRoomState
+                // does on the first game start. Without this the
+                // lobby stays overlaid on the game canvas after the
+                // click and the user just sees the room view again
+                // with no visible change — which reads as "Rejoin
+                // didn't work" even though startGame() runs fine
+                // underneath. Also re-persist the port so a page
+                // refresh post-rejoin lands back in the game rather
+                // than the lobby.
+                localStorage.setItem('springrts-game-room', String(this.currentRoom.id));
+                localStorage.setItem('springrts-game-port', String(this.currentRoom.gameServerPort));
+                this.hide();
                 this.onGameStart?.(this.currentRoom.gameServerPort);
             }
         });
         document.getElementById('endgame-btn')?.addEventListener('click', () => {
             if (confirm('End the game for everyone?')) {
                 this.sendEndGame();
+            }
+        });
+        document.getElementById('closeroom-btn')?.addEventListener('click', () => {
+            if (confirm('Close this room? All members will be returned to the lobby.')) {
+                this.sendCloseRoom();
             }
         });
 
@@ -663,6 +708,18 @@ export class LobbyUI {
                 const el = e.currentTarget as HTMLButtonElement;
                 const idx = parseInt(el.dataset.slot ?? '-1');
                 if (idx >= 0) this.sendRemoveAI(idx);
+            };
+        });
+        // Per-AI-row team dropdowns. Each one carries its slot
+        // index as a data-slot attribute so one listener handles
+        // every row. Host-only; non-hosts have the select rendered
+        // in disabled state above and the change event never fires.
+        this.container.querySelectorAll('.ai-team-select').forEach(sel => {
+            (sel as HTMLSelectElement).onchange = (e) => {
+                const el = e.target as HTMLSelectElement;
+                const idx = parseInt(el.dataset.slot ?? '-1');
+                const team = parseInt(el.value);
+                if (idx >= 0) this.sendSetAITeam(idx, team);
             };
         });
 
@@ -769,6 +826,21 @@ export class LobbyUI {
         this.connection.sendClientMessage(b, ClientPayload.RoomEndGame, RoomEndGame.endRoomEndGame(b));
     }
 
+    /// Host-only: delete the entire room. Unlike sendEndGame (which
+    /// only stops a running sim and leaves the room intact so the
+    /// host can start another round), this removes the room from
+    /// the lobby and kicks every member back to the browser. The
+    /// server validates host ownership and then broadcasts an
+    /// updated room list; handleRoomList notices the current room
+    /// is gone and falls back to the browser automatically.
+    private sendCloseRoom(): void {
+        if (!this.connection?.authenticated) return;
+        const b = new flatbuffers.Builder(16);
+        RoomCloseRoom.startRoomCloseRoom(b);
+        this.connection.sendClientMessage(
+            b, ClientPayload.RoomCloseRoom, RoomCloseRoom.endRoomCloseRoom(b));
+    }
+
     /// Ask the server for the list of AI plugins it discovered under
     /// content/engine/ai and the current game's content/games/<game>/ai.
     /// The server replies asynchronously with an AIListUpdate that
@@ -819,6 +891,19 @@ export class LobbyUI {
             b, ClientPayload.RoomRemoveAI, RoomRemoveAI.endRoomRemoveAI(b));
     }
 
+    /// Host-only: re-assign an AI slot to a different team. The
+    /// slot's start position is preserved. Server rejects if the
+    /// sender is not the room host or the index is out of range.
+    private sendSetAITeam(slotIndex: number, team: number): void {
+        if (!this.connection?.authenticated) return;
+        const b = new flatbuffers.Builder(16);
+        RoomSetAITeam.startRoomSetAITeam(b);
+        RoomSetAITeam.addSlotIndex(b, slotIndex);
+        RoomSetAITeam.addTeam(b, team);
+        this.connection.sendClientMessage(
+            b, ClientPayload.RoomSetAITeam, RoomSetAITeam.endRoomSetAITeam(b));
+    }
+
     /// Assign a map start position to a player or AI slot.
     ///
     /// Call with one of:
@@ -862,6 +947,28 @@ export class LobbyUI {
                 state: r.state(), hasPassword: r.hasPassword(), hostName: r.hostName() ?? '',
             });
         }
+
+        // If the room we're currently in no longer exists in the
+        // list, the host must have closed it. Fall back to the
+        // browser. This is how RoomCloseRoom signals the rest of
+        // the room's members — we notice our room id is gone,
+        // clear the cached state, and land on the browser view.
+        // Note: we only do this for clients in the room view;
+        // clients already in the browser just see the room
+        // disappear from the list (which renderRoomList handles
+        // below).
+        if (this.currentRoom &&
+            !this.rooms.some(r => r.id === this.currentRoom!.id)) {
+            console.log(`[lobby] current room ${this.currentRoom.id} no longer exists, returning to browser`);
+            this.currentRoom = null;
+            localStorage.removeItem('springrts-game-room');
+            localStorage.removeItem('springrts-game-port');
+            if (this.currentScreen === 'room') {
+                this.showBrowser();
+                return;
+            }
+        }
+
         if (this.currentScreen === 'browser') this.renderRoomList();
     }
 
@@ -960,8 +1067,18 @@ export class LobbyUI {
             this.sendAIListRequest();
         }
 
-        // Loading or Active → start game (need a port to connect to)
-        if (this.currentRoom.state >= 3 && this.currentRoom.gameServerPort > 0) {
+        // Loading (3) or Active (4) → game is running, jump to the
+        // game canvas. We do NOT include Ended (5+) in this check —
+        // Ended is the post-game state where the subprocess has
+        // already exited and there's nothing to connect to. Without
+        // the explicit upper bound, quitting a game back to the
+        // room and then clicking End Game would trigger the health-
+        // check loop to flip the room to Ended, broadcast a new
+        // RoomStateUpdate, and this code would auto-fire onGameStart
+        // again — dragging the user straight back into the dead
+        // game canvas instead of leaving them in the room view.
+        const gameRunning = this.currentRoom.state === 3 || this.currentRoom.state === 4;
+        if (gameRunning && this.currentRoom.gameServerPort > 0) {
             // Persist game info for reconnection on reload
             localStorage.setItem('springrts-game-room', String(this.currentRoom.id));
             localStorage.setItem('springrts-game-port', String(this.currentRoom.gameServerPort));
@@ -970,7 +1087,15 @@ export class LobbyUI {
             return;
         }
 
-        // Game ended — clear saved game
+        // Game ended — clear the saved-game localStorage keys so a
+        // page refresh lands on the lobby rather than trying to
+        // rejoin a dead subprocess. But *stay in the room*: a room
+        // persists across game sessions so members can chat, adjust
+        // settings, and launch another game without recreating
+        // everything. The Ended state is rendered below as a
+        // pregame-equivalent where the host sees Ready / Start Game
+        // controls again. Only an explicit Close Room by the host
+        // removes the room.
         if (this.currentRoom.state >= 5) {
             localStorage.removeItem('springrts-game-room');
             localStorage.removeItem('springrts-game-port');

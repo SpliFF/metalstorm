@@ -216,6 +216,28 @@ bool RoomManager::RemoveAISlot(
     return true;
 }
 
+bool RoomManager::SetAITeam(
+    uint32_t roomId, uint32_t requesterId,
+    uint8_t slotIndex, uint8_t team)
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    auto it = rooms.find(roomId);
+    if (it == rooms.end()) return false;
+    GameRoom& room = it->second;
+
+    // Host-only, same as AddAISlot / RemoveAISlot. AI slots have
+    // no intrinsic owner besides the host.
+    if (room.hostPlayerId != requesterId) return false;
+    if (slotIndex >= room.aiSlots.size()) return false;
+
+    room.aiSlots[slotIndex].team = team;
+    std::fprintf(stderr, "[room] room %u: ai slot %u (%s) team -> %u\n",
+        roomId, static_cast<unsigned>(slotIndex),
+        room.aiSlots[slotIndex].aiId.c_str(),
+        static_cast<unsigned>(team));
+    return true;
+}
+
 /// Helper: returns true if `pos` is already held by any player or
 /// AI slot in `room` — EXCLUDING the slot identified by
 /// `excludePlayerId` / `excludeAISlot`, so a caller that's trying
@@ -365,6 +387,18 @@ void RoomManager::AutoAssignStartPositions(
     }
 }
 
+bool RoomManager::CloseRoom(uint32_t roomId, uint32_t requesterId) {
+    std::lock_guard<std::mutex> lock(mutex);
+    auto it = rooms.find(roomId);
+    if (it == rooms.end()) return false;
+    if (it->second.hostPlayerId != requesterId) return false;
+
+    std::fprintf(stderr, "[room] room %u: host closed (was '%s')\n",
+        roomId, it->second.name.c_str());
+    rooms.erase(it);
+    return true;
+}
+
 bool RoomManager::KickPlayer(uint32_t roomId, uint32_t requesterId, uint32_t targetId) {
     std::lock_guard<std::mutex> lock(mutex);
     auto it = rooms.find(roomId);
@@ -393,6 +427,40 @@ bool RoomManager::StartGame(uint32_t roomId, uint32_t requesterId) {
     room.state = ERoomState::Loading;
     std::fprintf(stderr, "[room] room %u transitioning to LOADING\n", roomId);
     return true;
+}
+
+void RoomManager::ResetRoomForNextGame(uint32_t roomId) {
+    std::lock_guard<std::mutex> lock(mutex);
+    auto it = rooms.find(roomId);
+    if (it == rooms.end()) return;
+    GameRoom& room = it->second;
+
+    // Back to Filling so RoomManager::StartGame accepts the next
+    // Start request. The client's showRoom() already treats Ended
+    // as a pregame-equivalent for UI purposes; going back to
+    // Filling makes the *state machine* match the UI state too
+    // and avoids a dedicated "ended-but-startable" gate inside
+    // StartGame.
+    room.state = ERoomState::Filling;
+
+    // Clear ready flags so everyone consciously opts in to the
+    // next game. Reusing stale ready flags from the previous round
+    // would let the host start another game before anyone had
+    // time to react — which feels like a silent protocol
+    // violation even if it happens to work.
+    for (auto& p : room.players)
+        p.ready = false;
+
+    // The stored port belongs to the dead subprocess. Leaving it
+    // would cause handleRoomState on clients that reconnect post-
+    // reset to auto-jump into a dead game canvas.
+    room.gameServerPort = 0;
+
+    // The reconnection roster is for the game that just ended.
+    // A fresh one will be built on the next RoomStartGame.
+    room.originalRoster.clear();
+
+    std::fprintf(stderr, "[room] room %u recycled for next game\n", roomId);
 }
 
 void RoomManager::SetRoomState(uint32_t roomId, ERoomState newState) {
