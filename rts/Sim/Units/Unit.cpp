@@ -528,6 +528,19 @@ void CUnit::ForcedKillUnit(CUnit* attacker, bool selfDestruct, bool reclaimed, b
 
 	// start running the unit's kill-script
 	script->Killed();
+
+	// CNullUnitScript::Killed is a no-op, so for script-less units
+	// (everything in Paper Tanks until it ships real COB/Lua unit
+	// scripts) `deathScriptFinished` never flips true and the
+	// UnitHandler's `QueueDeleteUnit` loop skips them forever.
+	// Result: dead units stay in `activeUnits`, `Spring.GetAllUnits`
+	// keeps returning them, and any gadget counting living units
+	// sees stale totals. Finish the death sequence synchronously
+	// here — there's no animation thread to wait for, and we don't
+	// ship death feature defs (wreckLevel = -1 means no wreck).
+	if (script == &CNullUnitScript::value) {
+		KilledScriptFinished(-1);
+	}
 }
 
 
