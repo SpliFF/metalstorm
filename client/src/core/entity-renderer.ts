@@ -208,6 +208,14 @@ export class EntityRenderer {
                 const buf = new Float32Array(group.matrices);
                 mesh.thinInstanceSetBuffer('matrix', buf, 16, false);
                 mesh.thinInstanceCount = group.count;
+                // Without this the mesh's bounding info still reflects
+                // the template geometry at origin, so Babylon's per-
+                // frame culling can miss the real instance positions
+                // even with `alwaysSelectAsActiveMesh = true` on some
+                // render paths. Refreshing each frame is cheap for
+                // the handful of entities we have and guarantees the
+                // bounding box follows the actual instances.
+                mesh.thinInstanceRefreshBoundingInfo(false);
             }
         }
     }
