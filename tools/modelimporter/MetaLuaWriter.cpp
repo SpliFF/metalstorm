@@ -230,9 +230,44 @@ bool MetaLuaWriter::Write(const aiScene* scene,
     const float midZ = (bounds.minZ + bounds.maxZ) * 0.5f;
 
     // ---- Flatten the piece tree ----
+    //
+    // Most Assimp importers — ours included — wrap the real model
+    // root in a synthetic scene-root `aiNode` for scene-graph
+    // hygiene (a glTF export needs a root and various post-
+    // processing steps assume one). Our S3O importer does the
+    // same, producing a meshless `S3O_<filename>` node with the
+    // actual piece tree as its single child. The wrapper has no
+    // meaning to the sim: every piece consumer downstream
+    // (Spring.GetUnitPieceList, COB script indices, Shatter)
+    // sees it as a phantom first entry that game authors can't
+    // meaningfully reference and would have to work around.
+    //
+    // Skip the scene root only if it's unambiguously a synthetic
+    // wrapper:
+    //   - meshless
+    //   - exactly one child
+    //   - identity transform (no offset/rotation/scale that we'd
+    //     lose by descending past it)
+    // Any other shape — a real multi-root model, a root with its
+    // own geometry, or a pass-through node with a non-trivial
+    // transform — keeps the original root so we don't silently
+    // drop authored data.
     std::vector<PieceRecord> pieces;
     if (scene->mRootNode != nullptr) {
-        FlattenPieces(scene, scene->mRootNode, -1, pieces);
+        const aiNode* pieceRoot = scene->mRootNode;
+        const aiMatrix4x4& rt = pieceRoot->mTransformation;
+        const bool identity =
+            rt.a1 == 1 && rt.a2 == 0 && rt.a3 == 0 && rt.a4 == 0 &&
+            rt.b1 == 0 && rt.b2 == 1 && rt.b3 == 0 && rt.b4 == 0 &&
+            rt.c1 == 0 && rt.c2 == 0 && rt.c3 == 1 && rt.c4 == 0;
+
+        if (pieceRoot->mNumMeshes == 0 &&
+            pieceRoot->mNumChildren == 1 &&
+            identity) {
+            pieceRoot = pieceRoot->mChildren[0];
+        }
+
+        FlattenPieces(scene, pieceRoot, -1, pieces);
     }
 
     // ---- Collect attachment points from the piece tree ----
