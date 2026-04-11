@@ -239,8 +239,9 @@ async function startGame(gameServerPort: number): Promise<void> {
     camera.minZ = 1;
     camera.maxZ = 50000;
 
-    // RTS controls — WASD pan, wheel zoom, edge scrolling. Replaces the
-    // default FreeCamera mouse-look input.
+    // RTS controls — WASD pan, wheel zoom, edge scrolling, and
+    // middle-mouse drag to yaw/tilt. Replaces the default FreeCamera
+    // mouse-look input.
     const rtsCamera = new RTSCamera(camera, canvas, {
         minHeight: 150,
         maxHeight: 6000,

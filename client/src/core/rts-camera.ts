@@ -2,13 +2,17 @@
  * RTSCamera — top-down tactical camera controls.
  *
  * Handles:
- *   - WASD / arrow keys → pan on the XZ plane
- *   - Mouse wheel      → zoom (changes camera height and target distance)
- *   - Edge-scrolling   → pan when the mouse nears a screen edge
+ *   - WASD / arrow keys       → pan on the XZ plane
+ *   - Mouse wheel             → zoom (changes camera height and target distance)
+ *   - Edge-scrolling          → pan when the mouse nears a screen edge
+ *   - Middle-mouse + drag     → orbit the camera around its look-at point
+ *                               (horizontal drag yaws, vertical drag tilts)
  *
- * The camera keeps a fixed look direction (looking forward+down) and only
- * its world-space position changes. It does NOT use Babylon's built-in
- * FreeCamera input system.
+ * The camera keeps a fixed look-at target on the Y=0 plane. Pan moves both
+ * the camera and look-at together; yaw/tilt rotate the camera around the
+ * look-at; zoom eases the camera's distance to the look-at without moving
+ * the look-at itself. It does NOT use Babylon's built-in FreeCamera input
+ * system.
  */
 
 import { FreeCamera, Vector3 } from '@babylonjs/core';
@@ -24,6 +28,8 @@ export interface RTSCameraConfig {
     zoomStep?: number;
     /** Edge-scroll threshold in pixels. 0 to disable. */
     edgeScrollPixels?: number;
+    /** Radians of yaw / tilt per pixel of middle-mouse drag. */
+    orbitSpeed?: number;
 }
 
 export class RTSCamera {
@@ -34,6 +40,7 @@ export class RTSCamera {
     private panSpeed: number;
     private zoomStep: number;
     private edgeScrollPixels: number;
+    private orbitSpeed: number;
 
     private keys = new Set<string>();
     private mouseX = 0;
@@ -41,6 +48,19 @@ export class RTSCamera {
     private mouseInCanvas = false;
     private lastTickTime = performance.now();
     private disposed = false;
+
+    // Middle-mouse orbit state. Last drag position is in client-space
+    // (window pixels, not canvas-relative) because we attach the move/up
+    // listeners to `window` for the duration of the drag so the orbit
+    // keeps tracking even if the cursor leaves the canvas.
+    private orbitDragging = false;
+    private orbitLastX = 0;
+    private orbitLastY = 0;
+    // Pitch is clamped so the camera never flattens past horizontal
+    // (looking sideways is useless for an RTS) or tips right over the
+    // top (which flips the view upside-down).
+    private readonly minPitchRad = 10 * Math.PI / 180;
+    private readonly maxPitchRad = 89 * Math.PI / 180;
 
     // Target camera-to-target distance. tick() eases the actual distance
     // toward this value for smooth zoom. Populated lazily on the first
@@ -106,6 +126,40 @@ export class RTSCamera {
         this.mouseInCanvas = false;
     };
 
+    // Middle-mouse press on the canvas. Start an orbit drag; subsequent
+    // move/up events come through window-level listeners so we don't
+    // lose the drag when the cursor leaves the canvas.
+    private onMouseDown = (e: MouseEvent): void => {
+        if (e.button !== 1) return; // middle button only
+        if (e.target !== this.canvas) return;
+        // Stops the browser's middle-click autoscroll marker on some
+        // platforms; also keeps focus on the canvas.
+        e.preventDefault();
+        this.orbitDragging = true;
+        this.orbitLastX = e.clientX;
+        this.orbitLastY = e.clientY;
+        window.addEventListener('mousemove', this.onWindowMouseMove);
+        window.addEventListener('mouseup', this.onWindowMouseUp);
+    };
+
+    private onWindowMouseMove = (e: MouseEvent): void => {
+        if (!this.orbitDragging) return;
+        const dx = e.clientX - this.orbitLastX;
+        const dy = e.clientY - this.orbitLastY;
+        this.orbitLastX = e.clientX;
+        this.orbitLastY = e.clientY;
+        if (dx !== 0 || dy !== 0) {
+            this.orbitBy(dx, dy);
+        }
+    };
+
+    private onWindowMouseUp = (e: MouseEvent): void => {
+        if (e.button !== 1) return;
+        this.orbitDragging = false;
+        window.removeEventListener('mousemove', this.onWindowMouseMove);
+        window.removeEventListener('mouseup', this.onWindowMouseUp);
+    };
+
     constructor(camera: FreeCamera, canvas: HTMLCanvasElement, config: RTSCameraConfig = {}) {
         this.camera = camera;
         this.canvas = canvas;
@@ -114,6 +168,9 @@ export class RTSCamera {
         this.panSpeed = config.panSpeed ?? 800;
         this.zoomStep = config.zoomStep ?? 0.15;
         this.edgeScrollPixels = config.edgeScrollPixels ?? 8;
+        // 0.006 rad/px ≈ a full 360° sweep after dragging ~1050 px, which
+        // feels roughly right for a 1080p-ish canvas.
+        this.orbitSpeed = config.orbitSpeed ?? 0.006;
 
         // Detach Babylon's default input so it doesn't fight our handlers
         camera.detachControl();
@@ -130,7 +187,19 @@ export class RTSCamera {
         canvas.addEventListener('wheel', this.onWheel, { passive: false });
         canvas.addEventListener('mousemove', this.onMouseMove);
         canvas.addEventListener('mouseleave', this.onMouseLeave);
+        canvas.addEventListener('mousedown', this.onMouseDown);
+        // Some browsers open an autoscroll marker on middle-click.
+        // auxclick is the cleanest way to suppress it without also
+        // breaking left/right click handling in InputManager.
+        canvas.addEventListener('auxclick', this.onAuxClick);
     }
+
+    // Swallow middle-button auxclicks on the canvas so the browser
+    // doesn't interpret them as "open link in new tab" / autoscroll
+    // once the orbit drag ends.
+    private onAuxClick = (e: MouseEvent): void => {
+        if (e.button === 1) e.preventDefault();
+    };
 
     /**
      * Update the camera each frame. Call this from the render loop with
@@ -279,6 +348,99 @@ export class RTSCamera {
     }
 
     /**
+     * Orbit the camera around `lookAt` by mouse-delta pixels:
+     *   horizontal drag (dx) → yaw around the world-Y axis
+     *   vertical drag (dy)   → tilt by changing the elevation angle
+     *
+     * The distance from `lookAt` to the camera is preserved, so this
+     * doesn't interact with the zoom path. The final height is still
+     * clamped by [minHeight, maxHeight] via the pitch limits plus a
+     * safety clamp so steep tilts on a distant view don't pop the
+     * camera above the max.
+     *
+     * Drag directions: right = world rotates counter-clockwise under
+     * us (the view appears to swing right); down = view tilts
+     * further overhead.
+     */
+    private orbitBy(dx: number, dy: number): void {
+        let ox = this.camera.position.x - this.lookAt.x;
+        let oy = this.camera.position.y - this.lookAt.y;
+        let oz = this.camera.position.z - this.lookAt.z;
+
+        const radius = Math.sqrt(ox * ox + oy * oy + oz * oz);
+        if (radius < 0.0001) return;
+
+        // ---- Yaw around world Y ----
+        // Rotate (ox, oz) by -dx * orbitSpeed. Right-drag (+dx) should
+        // feel like "the world turns left under me", which means we
+        // rotate the offset clockwise when looking down from +Y.
+        const yaw = -dx * this.orbitSpeed;
+        const cy = Math.cos(yaw);
+        const sy = Math.sin(yaw);
+        const rx = ox * cy + oz * sy;
+        const rz = -ox * sy + oz * cy;
+        ox = rx;
+        oz = rz;
+
+        // ---- Tilt (pitch) ----
+        // Convert to (horizontalDist, verticalOffset) polar coords
+        // around `lookAt` and rotate by -dy * orbitSpeed. Drag up (-dy)
+        // lowers pitch → more horizontal view; drag down raises pitch
+        // → more overhead view.
+        const horiz = Math.sqrt(ox * ox + oz * oz);
+        let pitch = Math.atan2(oy, horiz);
+        pitch += dy * this.orbitSpeed;
+        if (pitch < this.minPitchRad) pitch = this.minPitchRad;
+        if (pitch > this.maxPitchRad) pitch = this.maxPitchRad;
+
+        const newHoriz = radius * Math.cos(pitch);
+        const newVert  = radius * Math.sin(pitch);
+
+        // Preserve the (already yaw-rotated) horizontal direction.
+        if (horiz > 0.0001) {
+            const scale = newHoriz / horiz;
+            ox *= scale;
+            oz *= scale;
+        } else {
+            // Degenerate case: camera directly above lookAt. Fall back
+            // to +Z so we still have a sensible direction.
+            ox = 0;
+            oz = newHoriz;
+        }
+        oy = newVert;
+
+        // Clamp absolute camera height — pitch alone isn't enough if
+        // the look-at itself is elevated (unlikely, but cheap to guard).
+        let cameraY = this.lookAt.y + oy;
+        if (cameraY < this.minHeight) {
+            oy = this.minHeight - this.lookAt.y;
+            cameraY = this.minHeight;
+        } else if (cameraY > this.maxHeight) {
+            oy = this.maxHeight - this.lookAt.y;
+            cameraY = this.maxHeight;
+        }
+
+        this.camera.position.x = this.lookAt.x + ox;
+        this.camera.position.y = cameraY;
+        this.camera.position.z = this.lookAt.z + oz;
+        this.camera.setTarget(this.lookAt);
+
+        // WASD uses the projected forward/right axes of the camera, so
+        // rotating the view needs to update them or W starts walking
+        // the camera sideways relative to where you're looking.
+        this.updateAxes();
+
+        // Zoom tracks `targetDistance` independently; a pure orbit
+        // shouldn't re-trigger smoothing. Sync it to the new actual
+        // distance (unchanged mathematically, but this avoids any drift
+        // from the tiny clamp above).
+        if (this.targetDistance >= 0) {
+            this.targetDistance = Math.sqrt(
+                ox * ox + oy * oy + oz * oz);
+        }
+    }
+
+    /**
      * Called when the camera is repositioned externally (e.g. when MapData
      * arrives and we centre on the map). Re-seeds the explicit look-at
      * point from the camera's current rotation and recomputes axes.
@@ -324,5 +486,14 @@ export class RTSCamera {
         this.canvas.removeEventListener('wheel', this.onWheel);
         this.canvas.removeEventListener('mousemove', this.onMouseMove);
         this.canvas.removeEventListener('mouseleave', this.onMouseLeave);
+        this.canvas.removeEventListener('mousedown', this.onMouseDown);
+        this.canvas.removeEventListener('auxclick', this.onAuxClick);
+        // Defensively detach the window-level drag listeners in case
+        // the camera is disposed mid-drag.
+        if (this.orbitDragging) {
+            window.removeEventListener('mousemove', this.onWindowMouseMove);
+            window.removeEventListener('mouseup', this.onWindowMouseUp);
+            this.orbitDragging = false;
+        }
     }
 }
