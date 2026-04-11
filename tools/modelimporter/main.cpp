@@ -54,8 +54,10 @@ void PrintUsage(const char* argv0) {
         "            A sibling <output>.meta.lua is also written\n"
         "            containing the engine metadata the synced sim\n"
         "            needs at runtime (bounding sphere/box, piece\n"
-        "            tree, attachment points). Authored overrides\n"
-        "            from <input>.meta.lua are merged on top.\n"
+        "            tree, attachment points). Once the meta file\n"
+        "            exists on disk it belongs to the author: the\n"
+        "            importer will never rewrite it unless\n"
+        "            --update-meta is passed explicitly.\n"
         "\n"
         "options:\n"
         "  --texture-ext <ext>   Rewrite all referenced texture file\n"
@@ -63,8 +65,13 @@ void PrintUsage(const char* argv0) {
         "                        Useful when the source file points at\n"
         "                        legacy .tga assets that are being\n"
         "                        converted in a sibling pipeline step.\n"
-        "  --no-meta             Do not emit the sibling .meta.lua file.\n"
-        "                        Only useful if the caller manages\n"
+        "  --update-meta         Overwrite the output .meta.lua even if\n"
+        "                        it already exists. Use this after a\n"
+        "                        schema bump or when you want to pull\n"
+        "                        changes from the source model back\n"
+        "                        into a meta file you've been editing.\n"
+        "  --no-meta             Do not touch the sibling .meta.lua at\n"
+        "                        all. Only useful if the caller manages\n"
         "                        metadata out-of-band.\n"
         "\n", argv0);
 }
@@ -134,6 +141,7 @@ const char* PickExporter(const std::string& outPath) {
 int main(int argc, char** argv) {
     std::string inPath, outPath, textureExt;
     bool emitMeta = true;
+    bool updateMeta = false;
 
     // Tiny hand-rolled arg parser — keeps the binary dependency-free.
     for (int i = 1; i < argc; ++i) {
@@ -146,6 +154,8 @@ int main(int argc, char** argv) {
             }
         } else if (a == "--no-meta") {
             emitMeta = false;
+        } else if (a == "--update-meta") {
+            updateMeta = true;
         } else if (a == "-h" || a == "--help") {
             PrintUsage(argv[0]);
             return 0;
@@ -219,36 +229,38 @@ int main(int argc, char** argv) {
         return 4;
     }
 
-    // Emit the sibling <output>.meta.lua unless the caller opted
-    // out via --no-meta. We compute the path by replacing the
-    // output extension (.glb / .gltf) with .meta.lua. An authored
-    // override file at <input>.meta.lua is passed through and
-    // merged by MetaLuaWriter.
+    // Handle the sibling <output>.meta.lua. Ownership rule:
+    //   - If the file doesn't exist, write a fresh extraction.
+    //   - If the file exists and --update-meta was passed, overwrite it.
+    //   - If the file exists and --update-meta was NOT passed, leave it
+    //     alone. Once on disk, the meta file belongs to the author.
+    // --no-meta opts out of both cases.
     if (emitMeta) {
         namespace fs = std::filesystem;
-        const fs::path outP     = outPath;
-        const fs::path metaPath = fs::path(outP).replace_extension(".meta.lua");
+        const fs::path metaPath = fs::path(outPath).replace_extension(".meta.lua");
+        const bool exists = fs::exists(metaPath);
+        const bool willWrite = !exists || updateMeta;
 
-        // Look for an authored override next to the source file.
-        const fs::path authoredPath =
-            fs::path(inPath).replace_extension(".meta.lua");
-        const std::string authoredArg =
-            fs::exists(authoredPath) ? authoredPath.string() : std::string{};
-
-        if (!MetaLuaWriter::Write(scene, metaPath.string(), authoredArg)) {
-            std::fprintf(stderr,
-                "modelimporter: failed to write %s\n",
-                metaPath.string().c_str());
-            Assimp::DefaultLogger::kill();
-            return 5;
+        if (willWrite) {
+            if (!MetaLuaWriter::Write(scene, metaPath.string())) {
+                std::fprintf(stderr,
+                    "modelimporter: failed to write %s\n",
+                    metaPath.string().c_str());
+                Assimp::DefaultLogger::kill();
+                return 5;
+            }
         }
 
+        const char* metaStatus =
+            !exists       ? " [fresh]"        :
+            updateMeta    ? " [updated]"      :
+                            " [kept existing]";
         std::fprintf(stderr,
             "modelimporter: %s -> %s (%u meshes, %u materials) + %s%s\n",
             inPath.c_str(), outPath.c_str(),
             scene->mNumMeshes, scene->mNumMaterials,
             metaPath.filename().string().c_str(),
-            authoredArg.empty() ? "" : " [authored override merged]");
+            metaStatus);
     } else {
         std::fprintf(stderr,
             "modelimporter: %s -> %s (%u meshes, %u materials)\n",

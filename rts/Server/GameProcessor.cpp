@@ -170,16 +170,20 @@ void Process(const std::string& gamePath,
         const fs::path dstGlb  = outDir / (stem + ".glb");
         const fs::path dstMeta = outDir / (stem + ".meta.lua");
 
-        // Idempotent skip: regenerate only when source is newer than
-        // both outputs (or either is missing). Texture conversion
-        // below is independent — the glb references the png by name,
-        // so a png update doesn't invalidate the glb.
+        // Idempotent skip: regenerate only when the glb is missing
+        // or older than the source. The meta file's mtime is
+        // deliberately NOT part of this comparison — once the meta
+        // exists on disk it's author-owned and modelimporter will
+        // refuse to touch it without --update-meta, so including it
+        // here would cause an infinite rebuild loop whenever the
+        // source is newer than a preserved-on-purpose meta file.
+        // If the meta is missing we still need to rebuild so that
+        // modelimporter has a chance to write a fresh one.
         bool needsRebuild = true;
         if (fs::exists(dstGlb) && fs::exists(dstMeta)) {
-            const auto srcMt  = fs::last_write_time(src);
-            const auto glbMt  = fs::last_write_time(dstGlb);
-            const auto metaMt = fs::last_write_time(dstMeta);
-            if (srcMt <= glbMt && srcMt <= metaMt) {
+            const auto srcMt = fs::last_write_time(src);
+            const auto glbMt = fs::last_write_time(dstGlb);
+            if (srcMt <= glbMt) {
                 needsRebuild = false;
             }
         }

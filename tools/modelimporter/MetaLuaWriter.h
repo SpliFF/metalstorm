@@ -6,6 +6,7 @@
 // parser and populates an S3DModel struct. Fields needed by the sim
 // as of 2026-04:
 //
+//   metaVersion  — schema version; the reader branches on this
 //   radius       — bounding sphere
 //   height       — max Y - min Y
 //   mins, maxs   — full AABB
@@ -13,9 +14,14 @@
 //   pieces[]     — piece tree: name, parent index, offset, mins/maxs
 //   attachments  — named attachment points (aim_*, emit_*, hpoint_*)
 //
-// If the source tree already has an authored `<source>.meta.lua`
-// next to the source model, the writer merges it on top of the
-// auto-extracted values — authored fields always win.
+// Once a `.meta.lua` file exists on disk it belongs to the author:
+// modelimporter never mixes engine output into a hand-edited file.
+// The driver (main.cpp) is responsible for checking whether the
+// output file exists and whether it's stale before calling Write().
+// Re-running modelimporter without `--update-meta` on an existing
+// file leaves the file untouched; with `--update-meta` the file is
+// overwritten with a fresh extraction.
+
 #pragma once
 
 #include <string>
@@ -24,15 +30,21 @@ struct aiScene;
 
 namespace MetaLuaWriter {
 
-/// Extract metadata from `scene` and write `outPath`. If
-/// `authoredSource` is non-empty and the file exists, parse it as
-/// a lua return-table and overlay its fields on top of the
-/// extracted ones before writing the merged output.
+/// Current meta schema version emitted by Write(). Bump whenever
+/// the `.meta.lua` format changes in a way that older readers
+/// wouldn't handle correctly (new required keys, renamed fields,
+/// changed field semantics). The engine-side reader in
+/// MetaLuaModelLoader has its own copy of this constant and warns
+/// when the file's `metaVersion` is missing or older than its own.
+constexpr int kCurrentMetaVersion = 1;
+
+/// Extract metadata from `scene` and write `outPath`, overwriting
+/// any existing file at that location. The caller is responsible
+/// for checking existence and staleness (via source-mtime vs
+/// meta-mtime, or an explicit `--update-meta` flag) before invoking.
 ///
 /// Returns true on success, false if the file couldn't be opened
 /// for writing.
-bool Write(const aiScene* scene,
-           const std::string& outPath,
-           const std::string& authoredSource = "");
+bool Write(const aiScene* scene, const std::string& outPath);
 
 } // namespace MetaLuaWriter

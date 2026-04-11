@@ -77,6 +77,36 @@ bool MetaLuaModelLoader::LoadInto(S3DModel& out, const std::string& metaPath) {
         return false;
     }
 
+    // ---- Schema version check ----
+    // `metaVersion` is mandatory on new files (emitted by the
+    // current MetaLuaWriter). A missing key means the file was
+    // produced by a pre-versioning build of modelimporter and
+    // should be regenerated. An older-than-current version means
+    // the file is from an earlier schema and the reader may need
+    // to apply a workaround — there's nothing to work around yet
+    // (we're at v1), so we just log and carry on.
+    constexpr int kSupportedMetaVersion = 1;
+    const int metaVersion = root.GetInt("metaVersion", 0);
+    if (metaVersion == 0) {
+        std::fprintf(stderr,
+            "[meta] %s: no `metaVersion` field — file predates the "
+            "versioned schema. Run `modelimporter --update-meta` "
+            "to regenerate.\n",
+            metaPath.c_str());
+    } else if (metaVersion < kSupportedMetaVersion) {
+        std::fprintf(stderr,
+            "[meta] %s: metaVersion=%d is older than this engine "
+            "supports (%d). Run `modelimporter --update-meta` to "
+            "regenerate; the sim will continue with best-effort "
+            "parsing.\n",
+            metaPath.c_str(), metaVersion, kSupportedMetaVersion);
+    } else if (metaVersion > kSupportedMetaVersion) {
+        std::fprintf(stderr,
+            "[meta] %s: metaVersion=%d is newer than this engine "
+            "understands (%d). Some fields may be ignored.\n",
+            metaPath.c_str(), metaVersion, kSupportedMetaVersion);
+    }
+
     // ---- Top-level bounds ----
     out.radius    = root.GetFloat("radius", 1.0f);
     out.height    = root.GetFloat("height", 1.0f);
