@@ -54,6 +54,13 @@ try {
     channel.onmessage = (e) => {
         if (e.data.type === 'selection') {
             selectedIds = new Set(e.data.unitIds);
+        } else if (e.data.type === 'gameEnded') {
+            // Main window left the game (quit, end-game, disconnect).
+            // Close ourselves so the popup doesn't linger as an
+            // orphaned WebSocket into a dead game server. The popup
+            // was opened by the main window, so window.close() is
+            // allowed here without requiring a user gesture.
+            try { window.close(); } catch { /* noop */ }
         }
     };
 } catch { /* ok */ }
@@ -101,8 +108,11 @@ const connection = new Connection({
     },
 });
 
-// Connect with the same credentials (token-based reconnection)
-connection.connect(serverUrl, 'viewport', token);
+// Connect with the same credentials (token-based reconnection).
+// The 4th argument is the session token — passing it as password
+// would leave sessionToken state empty and the game server would
+// fall through to password auth, which never works for a token.
+connection.connect(serverUrl, 'viewport', '', token);
 
 // Command buffer for right-click commands
 const commandBuffer = new CommandBuffer(connection);

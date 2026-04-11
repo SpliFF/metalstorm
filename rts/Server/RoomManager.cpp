@@ -216,6 +216,155 @@ bool RoomManager::RemoveAISlot(
     return true;
 }
 
+/// Helper: returns true if `pos` is already held by any player or
+/// AI slot in `room` — EXCLUDING the slot identified by
+/// `excludePlayerId` / `excludeAISlot`, so a caller that's trying
+/// to re-set its own slot's position (e.g. to the same value)
+/// doesn't collide with itself.
+static bool IsStartPosTaken(const GameRoom& room, int8_t pos,
+                            uint32_t excludePlayerId,
+                            int excludeAISlot)
+{
+    if (pos < 0) return false;
+    for (const auto& p : room.players) {
+        if (p.playerId == excludePlayerId) continue;
+        if (p.startPos == pos) return true;
+    }
+    for (size_t i = 0; i < room.aiSlots.size(); ++i) {
+        if (static_cast<int>(i) == excludeAISlot) continue;
+        if (room.aiSlots[i].startPos == pos) return true;
+    }
+    return false;
+}
+
+bool RoomManager::SetPlayerStartPos(
+    uint32_t roomId, uint32_t requesterId,
+    uint32_t targetPlayerId, int8_t posIndex,
+    int8_t maxStartPos)
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    auto it = rooms.find(roomId);
+    if (it == rooms.end()) return false;
+    GameRoom& room = it->second;
+
+    // Permission: player can set own slot; host can set any slot.
+    // A targetPlayerId of 0 is shorthand for "the requester's
+    // own slot" — callers on the wire protocol side use this so
+    // non-host clients don't need to know their own id ahead of
+    // the RoomStateUpdate that carries it.
+    uint32_t actualTarget = targetPlayerId != 0 ? targetPlayerId : requesterId;
+    if (actualTarget != requesterId && room.hostPlayerId != requesterId)
+        return false;
+
+    auto* target = room.FindPlayer(actualTarget);
+    if (!target) return false;
+
+    // Range: -1 (clear) or [0, maxStartPos).
+    if (posIndex < -1) return false;
+    if (posIndex >= 0 && (maxStartPos <= 0 || posIndex >= maxStartPos))
+        return false;
+
+    // Occupancy: can't take a slot already held by someone else.
+    // Setting to the same value we already hold is a no-op, and
+    // setting to -1 (clear) never collides.
+    if (posIndex >= 0 &&
+        IsStartPosTaken(room, posIndex, actualTarget, -1))
+        return false;
+
+    target->startPos = posIndex;
+    std::fprintf(stderr, "[room] room %u: player %u start pos -> %d\n",
+        roomId, actualTarget, static_cast<int>(posIndex));
+    return true;
+}
+
+bool RoomManager::SetAIStartPos(
+    uint32_t roomId, uint32_t requesterId,
+    uint8_t slotIndex, int8_t posIndex,
+    int8_t maxStartPos)
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    auto it = rooms.find(roomId);
+    if (it == rooms.end()) return false;
+    GameRoom& room = it->second;
+
+    // Host-only. AI slots don't have a natural "owner" besides the
+    // room host.
+    if (room.hostPlayerId != requesterId) return false;
+    if (slotIndex >= room.aiSlots.size()) return false;
+
+    if (posIndex < -1) return false;
+    if (posIndex >= 0 && (maxStartPos <= 0 || posIndex >= maxStartPos))
+        return false;
+
+    if (posIndex >= 0 &&
+        IsStartPosTaken(room, posIndex, /*excludePlayerId*/ 0,
+                        static_cast<int>(slotIndex)))
+        return false;
+
+    room.aiSlots[slotIndex].startPos = posIndex;
+    std::fprintf(stderr, "[room] room %u: ai slot %u (%s) start pos -> %d\n",
+        roomId, static_cast<unsigned>(slotIndex),
+        room.aiSlots[slotIndex].aiId.c_str(),
+        static_cast<int>(posIndex));
+    return true;
+}
+
+void RoomManager::AutoAssignStartPositions(
+    uint32_t roomId, int8_t maxStartPos)
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    auto it = rooms.find(roomId);
+    if (it == rooms.end()) return;
+    GameRoom& room = it->second;
+
+    if (maxStartPos <= 0) return;
+
+    // Build a set of positions already held by any slot.
+    std::vector<bool> taken(static_cast<size_t>(maxStartPos), false);
+    auto mark = [&](int8_t p) {
+        if (p >= 0 && p < maxStartPos) taken[p] = true;
+    };
+    for (const auto& p : room.players) mark(p.startPos);
+    for (const auto& s : room.aiSlots) mark(s.startPos);
+
+    // Walk unassigned slots in stable order (players first so humans
+    // get the low-numbered spawns, which tend to be the nicer ones
+    // on most maps) and hand out the next available index. Slots
+    // that still can't be assigned (more slots than the map has
+    // positions) stay at -1; SetupTestGame falls back to a derived
+    // default for those.
+    int8_t nextFree = 0;
+    auto nextAvailable = [&]() -> int8_t {
+        while (nextFree < maxStartPos && taken[nextFree]) nextFree++;
+        if (nextFree >= maxStartPos) return -1;
+        taken[nextFree] = true;
+        return nextFree++;
+    };
+
+    int assigned = 0;
+    for (auto& p : room.players) {
+        if (p.isSpectator) continue;
+        if (p.startPos >= 0) continue;
+        const int8_t pick = nextAvailable();
+        if (pick < 0) break;
+        p.startPos = pick;
+        assigned++;
+    }
+    for (auto& s : room.aiSlots) {
+        if (s.startPos >= 0) continue;
+        const int8_t pick = nextAvailable();
+        if (pick < 0) break;
+        s.startPos = pick;
+        assigned++;
+    }
+
+    if (assigned > 0) {
+        std::fprintf(stderr,
+            "[room] room %u: auto-assigned %d start position(s)\n",
+            roomId, assigned);
+    }
+}
+
 bool RoomManager::KickPlayer(uint32_t roomId, uint32_t requesterId, uint32_t targetId) {
     std::lock_guard<std::mutex> lock(mutex);
     auto it = rooms.find(roomId);

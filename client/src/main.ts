@@ -397,8 +397,8 @@ async function startGame(gameServerPort: number): Promise<void> {
     // TypeScript can't narrow the module-level binding across the
     // async callbacks below, so we hand them `conn` instead.
     const conn: Connection = new Connection({
-        onAuthenticated() {
-            console.log(`[game] connected to game server on port ${gameServerPort}`);
+        onAuthenticated(_playerId, _token, team) {
+            console.log(`[game] connected to game server on port ${gameServerPort} (team=${team})`);
         },
         onAuthFailed(msg: string) {
             console.error(`[game] auth failed: ${msg}`);
@@ -424,9 +424,17 @@ async function startGame(gameServerPort: number): Promise<void> {
     });
     gameConn = conn;
 
-    // Use same credentials — game server auto-registers too
-    // TODO: pass session token from lobby for proper auth
-    conn.connect(gameWsUrl, 'player1', 'pass');
+    // Auth against the game server using the same username + token
+    // the user picked up from the lobby login. The game server shares
+    // the lobby's SQLite DB and has a token-reconnect code path that
+    // validates the token, looks up the username, and cross-checks
+    // it against the --player roster the lobby handed off at spawn
+    // time. Without this, the game server sees the anonymous
+    // "player1" dev shim and rejects it with "Not in this room's
+    // roster" whenever the lobby is actually enforcing auth.
+    const savedUser = localStorage.getItem('springrts-username') ?? '';
+    const savedToken = localStorage.getItem('springrts-token') ?? '';
+    conn.connect(gameWsUrl, savedUser, '', savedToken);
 
     // Input
     inputManager = new InputManager(scene, camera, entityRenderer, conn,

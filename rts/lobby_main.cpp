@@ -69,13 +69,26 @@ static int findFreePort(int base = 9100) {
 
 /// Spawn a spring-server process for a game room.
 ///
-/// `aiSlots` is the room's AI roster at game-start time. Each slot is
-/// passed to the child process as a `--ai <id>:<team>` argument; the
-/// server runs its own AIDiscovery against the same game path and
+/// `playerRoster` is the list of human players the lobby accepted
+/// into the room (non-spectators). Each one becomes a
+/// `--player <username>:<team>:<posIdx>` argument pair; the sim
+/// uses this to map authenticated WebSocket sessions back to
+/// their lobby-assigned team.
+///
+/// `aiSlots` is the room's AI roster at game-start time. Each slot
+/// becomes a `--ai <id>:<team>:<posIdx>` argument pair; the sim
+/// runs its own AIDiscovery against the same game path and
 /// resolves each id to a main.lua it can actually run.
+///
+/// Both rosters must have `startPos` populated (or -1 if the map
+/// has no start positions at all). The lobby calls
+/// AutoAssignStartPositions before this function to fill in any
+/// -1 values, so a well-formed handoff always carries a concrete
+/// slot assignment per team.
 static GameServerInstance spawnGameServer(
     uint32_t roomId, const std::string& gamePath,
     const std::string& mapPath, const std::string& dbPath,
+    const std::vector<RoomPlayer>& playerRoster,
     const std::vector<RoomAISlot>& aiSlots)
 {
     GameServerInstance inst;
@@ -94,13 +107,25 @@ static GameServerInstance spawnGameServer(
     std::filesystem::create_directories("data/logs");
     std::string logPath = "data/logs/game-" + std::to_string(roomId) + ".log";
 
-    // Assemble the --ai arguments outside the fork so their string
-    // storage outlives the execvp call in the child. Each slot becomes
-    // two argv entries: "--ai" followed by "<id>:<team>".
+    // Assemble the --player and --ai arguments outside the fork so
+    // their string storage outlives the execvp call in the child.
+    // Player spec format:  <username>:<team>:<posIdx>
+    // AI spec format:      <id>:<team>:<posIdx>
+    std::vector<std::string> playerArgStorage;
+    playerArgStorage.reserve(playerRoster.size());
+    for (const auto& p : playerRoster) {
+        playerArgStorage.push_back(
+            p.username + ":" +
+            std::to_string(static_cast<int>(p.team)) + ":" +
+            std::to_string(static_cast<int>(p.startPos)));
+    }
     std::vector<std::string> aiArgStorage;
     aiArgStorage.reserve(aiSlots.size());
     for (const auto& slot : aiSlots) {
-        aiArgStorage.push_back(slot.aiId + ":" + std::to_string(slot.team));
+        aiArgStorage.push_back(
+            slot.aiId + ":" +
+            std::to_string(static_cast<int>(slot.team)) + ":" +
+            std::to_string(static_cast<int>(slot.startPos)));
     }
 
     pid_t pid = fork();
@@ -125,14 +150,21 @@ static GameServerInstance spawnGameServer(
 
         std::string portStr = std::to_string(inst.port);
 
-        // Build argv: fixed args first, then one "--ai <spec>" pair
-        // per AI slot. The trailing nullptr terminates for execvp.
+        // Build argv: fixed args first, then one "--player <spec>"
+        // pair per human slot, then one "--ai <spec>" pair per AI
+        // slot. Player args come first so spring-server's own arg
+        // parser doesn't care about ordering — it reads them into
+        // separate vectors either way.
         std::vector<const char*> argv;
         argv.push_back(serverBin.c_str());
         argv.push_back("--port"); argv.push_back(portStr.c_str());
         argv.push_back("--game"); argv.push_back(gamePath.c_str());
         argv.push_back("--map");  argv.push_back(mapPath.c_str());
         argv.push_back("--db");   argv.push_back(dbPath.c_str());
+        for (const auto& spec : playerArgStorage) {
+            argv.push_back("--player");
+            argv.push_back(spec.c_str());
+        }
         for (const auto& spec : aiArgStorage) {
             argv.push_back("--ai");
             argv.push_back(spec.c_str());
@@ -146,8 +178,9 @@ static GameServerInstance spawnGameServer(
     } else if (pid > 0) {
         inst.pid = pid;
         inst.state = GameServerInstance::Starting;
-        std::fprintf(stderr, "[lobby] spawned game server pid=%d port=%d for room %u (%zu AI)\n",
-            pid, inst.port, roomId, aiSlots.size());
+        std::fprintf(stderr, "[lobby] spawned game server pid=%d port=%d for room %u "
+            "(%zu players, %zu AI)\n",
+            pid, inst.port, roomId, playerRoster.size(), aiSlots.size());
     } else {
         std::fprintf(stderr, "[lobby] ERROR: fork failed\n");
         inst.state = GameServerInstance::Crashed;
@@ -715,6 +748,28 @@ int main(int argc, char* argv[])
                             mapPath = candidate.string();
                     }
 
+                    // Look up the map's start-position count so
+                    // auto-assignment knows the upper bound before
+                    // we hand the roster off to the game server.
+                    // Empty-map rooms go through with maxStartPos=0
+                    // and the game server falls back to its own
+                    // defaults for spawn placement.
+                    int8_t maxStartPos = 0;
+                    if (!room->mapName.empty()) {
+                        MapProcessor proc;
+                        auto mapMeta = proc.GetMap(mapDb, room->mapName);
+                        maxStartPos = static_cast<int8_t>(
+                            std::min<size_t>(mapMeta.startPositions.size(), 127));
+                    }
+
+                    // Any slots still at startPos=-1 get assigned
+                    // concrete indices now, using the same rules as
+                    // a manual set (ascending, first-available).
+                    // This keeps backwards compatibility with the
+                    // old "click Start Game and the host didn't
+                    // touch the dropdown" flow.
+                    rooms.AutoAssignStartPositions(room->id, maxStartPos);
+
                     // Save original player roster for reconnection
                     for (const auto& p : room->players) {
                         if (!p.isSpectator)
@@ -736,10 +791,17 @@ int main(int argc, char* argv[])
                     }
                     const std::string& roomGamePath = gpIt->second;
 
-                    // Spawn game server, handing off the AI slot
-                    // roster so the sim can load each plugin for the
-                    // team the host assigned it to.
-                    auto inst = spawnGameServer(room->id, roomGamePath, mapPath, dbPath, room->aiSlots);
+                    // Spawn game server, handing off both the
+                    // player roster and the AI slot roster so the
+                    // sim can map connecting sessions back to
+                    // their lobby-assigned teams and spawn units
+                    // at each team's chosen start position.
+                    std::vector<RoomPlayer> playerRoster;
+                    for (const auto& p : room->players) {
+                        if (!p.isSpectator) playerRoster.push_back(p);
+                    }
+                    auto inst = spawnGameServer(room->id, roomGamePath, mapPath, dbPath,
+                                                playerRoster, room->aiSlots);
                     gameServers[room->id] = inst;
 
                     // Store port on the room so clients get it via RoomStateUpdate
@@ -885,6 +947,48 @@ int main(int argc, char* argv[])
                                            rmAI->slot_index())) {
                         BROADCAST_ROOM_UPDATE(room);
                     }
+                    break;
+                }
+                case SpringWeb::ClientPayload_RoomSetStartPos: {
+                    // Assign a map start position to a player or AI
+                    // slot. Looks up the room's map to find the max
+                    // start-pos index, then delegates to RoomManager
+                    // which handles permission + occupancy. Either
+                    // targetPlayerId or targetAiSlot must identify
+                    // the target (mutually exclusive).
+                    REQUIRE_SESSION(session);
+                    auto* room = rooms.FindRoomByClient(msg.clientId);
+                    if (!room) break;
+                    auto* sp = clientMsg->payload_as_RoomSetStartPos();
+                    if (!sp) break;
+
+                    // Resolve the map for this room to get the
+                    // start-pos count. Empty mapName is a hard
+                    // reject: there's no pool to pick from.
+                    if (room->mapName.empty()) break;
+                    MapProcessor proc;
+                    auto mapMeta = proc.GetMap(mapDb, room->mapName);
+                    const int8_t maxStartPos = static_cast<int8_t>(
+                        std::min<size_t>(mapMeta.startPositions.size(), 127));
+                    if (maxStartPos <= 0) {
+                        std::fprintf(stderr,
+                            "[lobby] RoomSetStartPos rejected: map '%s' has no start positions\n",
+                            room->mapName.c_str());
+                        break;
+                    }
+
+                    const uint32_t requesterId = static_cast<uint32_t>(session->userId);
+                    const int8_t posIndex = sp->pos_index();
+                    bool ok = false;
+                    if (sp->target_ai_slot() >= 0) {
+                        ok = rooms.SetAIStartPos(room->id, requesterId,
+                            static_cast<uint8_t>(sp->target_ai_slot()),
+                            posIndex, maxStartPos);
+                    } else {
+                        ok = rooms.SetPlayerStartPos(room->id, requesterId,
+                            sp->target_player_id(), posIndex, maxStartPos);
+                    }
+                    if (ok) BROADCAST_ROOM_UPDATE(room);
                     break;
                 }
                 default:

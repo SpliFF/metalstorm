@@ -32,11 +32,15 @@ struct RoomPlayer {
     bool ready = false;
     bool isSpectator = false;
     bool isHost = false;
+    /// Map start position index (into the map's start_positions
+    /// array). -1 means "unassigned" — the lobby auto-fills on
+    /// game start if it's still -1 at that point.
+    int8_t startPos = -1;
 };
 
 /// An AI player slot in a room. Populated by the host via
 /// RoomAddAI messages before the game starts. At game launch, the
-/// lobby translates these into `--ai id:team` args for spring-server,
+/// lobby translates these into `--ai id:team:pos` args for spring-server,
 /// which runs its own AIDiscovery and loads the matching plugin.
 ///
 /// Unlike RoomPlayer, AI slots have no playerId or clientId — they
@@ -46,6 +50,9 @@ struct RoomAISlot {
     std::string aiId;         // stable id (folder name), matches AIInfo::id
     std::string displayName;  // human-readable label from ai.config
     uint8_t team = 0;
+    /// Same semantics as RoomPlayer.startPos — -1 means auto-fill
+    /// at game start.
+    int8_t startPos = -1;
 };
 
 struct GameRoom {
@@ -155,6 +162,36 @@ public:
     /// indices are silently ignored.
     bool RemoveAISlot(uint32_t roomId, uint32_t requesterId,
                       uint8_t slotIndex);
+
+    /// Set the start position for a player slot.
+    ///
+    /// Permissions: a player can only set their own slot; the host
+    /// can set any player's slot. `posIndex == -1` clears the slot
+    /// (it'll be auto-assigned at game start).
+    ///
+    /// Returns false if the requester lacks permission, the target
+    /// player doesn't exist in the room, the position is out of
+    /// range for `maxStartPos`, or the position is already taken
+    /// by another slot.
+    bool SetPlayerStartPos(uint32_t roomId, uint32_t requesterId,
+                           uint32_t targetPlayerId, int8_t posIndex,
+                           int8_t maxStartPos);
+
+    /// Set the start position for an AI slot. Host-only; otherwise
+    /// same semantics as SetPlayerStartPos.
+    bool SetAIStartPos(uint32_t roomId, uint32_t requesterId,
+                       uint8_t slotIndex, int8_t posIndex,
+                       int8_t maxStartPos);
+
+    /// Auto-assign unassigned start positions in the room. Called
+    /// by the lobby at game-start time so any slot that still has
+    /// `startPos == -1` gets a concrete index before the roster is
+    /// handed off to spring-server. Positions are picked in
+    /// ascending order from the pool `[0, maxStartPos)`, skipping
+    /// anything already taken. Slots that can't be auto-assigned
+    /// (not enough unique positions in the map) are left at -1
+    /// and the caller decides whether to proceed or error.
+    void AutoAssignStartPositions(uint32_t roomId, int8_t maxStartPos);
 
     /// Start the game (host triggers, requires all players ready).
     bool StartGame(uint32_t roomId, uint32_t requesterId);

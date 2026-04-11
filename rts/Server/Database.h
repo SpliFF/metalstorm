@@ -38,6 +38,12 @@ public:
     /// Look up a user by username. Returns nullopt if not found.
     std::optional<UserRecord> FindUser(const std::string& username);
 
+    /// Look up a user by integer id. Used by the game server's
+    /// token-reconnect path which starts with a validated user id
+    /// and needs the username back to check the lobby-supplied
+    /// roster.
+    std::optional<UserRecord> FindUserById(int64_t userId);
+
     /// Store a session token for a user. Returns true on success.
     bool CreateSession(int64_t userId, const std::string& token);
 

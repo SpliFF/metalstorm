@@ -56,8 +56,20 @@ isHost():boolean {
   return offset ? !!this.bb!.readInt8(this.bb_pos + offset) : false;
 }
 
+/**
+ * Map start position index assigned to this player. -1 means
+ * "unassigned, auto-fill at game start". Indices refer to the
+ * map's `start_positions` array (see MapInfo). Positions are
+ * exclusive within a room: no two slots can hold the same
+ * index at the same time.
+ */
+startPos():number {
+  const offset = this.bb!.__offset(this.bb_pos, 16);
+  return offset ? this.bb!.readInt8(this.bb_pos + offset) : -1;
+}
+
 static startRoomPlayerInfo(builder:flatbuffers.Builder) {
-  builder.startObject(6);
+  builder.startObject(7);
 }
 
 static addPlayerId(builder:flatbuffers.Builder, playerId:number) {
@@ -84,12 +96,16 @@ static addIsHost(builder:flatbuffers.Builder, isHost:boolean) {
   builder.addFieldInt8(5, +isHost, +false);
 }
 
+static addStartPos(builder:flatbuffers.Builder, startPos:number) {
+  builder.addFieldInt8(6, startPos, -1);
+}
+
 static endRoomPlayerInfo(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createRoomPlayerInfo(builder:flatbuffers.Builder, playerId:number, usernameOffset:flatbuffers.Offset, team:number, ready:boolean, isSpectator:boolean, isHost:boolean):flatbuffers.Offset {
+static createRoomPlayerInfo(builder:flatbuffers.Builder, playerId:number, usernameOffset:flatbuffers.Offset, team:number, ready:boolean, isSpectator:boolean, isHost:boolean, startPos:number):flatbuffers.Offset {
   RoomPlayerInfo.startRoomPlayerInfo(builder);
   RoomPlayerInfo.addPlayerId(builder, playerId);
   RoomPlayerInfo.addUsername(builder, usernameOffset);
@@ -97,6 +113,7 @@ static createRoomPlayerInfo(builder:flatbuffers.Builder, playerId:number, userna
   RoomPlayerInfo.addReady(builder, ready);
   RoomPlayerInfo.addIsSpectator(builder, isSpectator);
   RoomPlayerInfo.addIsHost(builder, isHost);
+  RoomPlayerInfo.addStartPos(builder, startPos);
   return RoomPlayerInfo.endRoomPlayerInfo(builder);
 }
 
@@ -107,7 +124,8 @@ unpack(): RoomPlayerInfoT {
     this.team(),
     this.ready(),
     this.isSpectator(),
-    this.isHost()
+    this.isHost(),
+    this.startPos()
   );
 }
 
@@ -119,6 +137,7 @@ unpackTo(_o: RoomPlayerInfoT): void {
   _o.ready = this.ready();
   _o.isSpectator = this.isSpectator();
   _o.isHost = this.isHost();
+  _o.startPos = this.startPos();
 }
 }
 
@@ -129,7 +148,8 @@ constructor(
   public team: number = 0,
   public ready: boolean = false,
   public isSpectator: boolean = false,
-  public isHost: boolean = false
+  public isHost: boolean = false,
+  public startPos: number = -1
 ){}
 
 
@@ -142,7 +162,8 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     this.team,
     this.ready,
     this.isSpectator,
-    this.isHost
+    this.isHost,
+    this.startPos
   );
 }
 }

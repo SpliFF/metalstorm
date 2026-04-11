@@ -30,6 +30,7 @@
 #include "System/Misc/SpringTime.h"
 #include "System/SpringMath.h"
 
+#include <array>
 #include <csignal>
 #include <cstdio>
 #include <atomic>
@@ -90,18 +91,52 @@ int main(int argc, char* argv[])
     std::string mapPath;
     std::string dbPath = "data/spring-server.db";
 
-    // AI slot requests from the lobby. Each `--ai <id>:<team>` pair
-    // becomes one entry here; we resolve them against AIDiscovery
-    // after content roots are set up. Empty list = no AI players
-    // (human-only or dev-smoketest spawn).
+    // Human player roster from the lobby. Each `--player <username>:<team>:<pos>`
+    // entry gets one slot here. The sim uses this for two things:
+    //   1. At AuthRequest time, look up the authenticating username
+    //      to decide which team the session belongs to (rejects
+    //      usernames not in the roster so a random WebSocket
+    //      client can't materialise onto an arbitrary team).
+    //   2. At SetupTestGame time, spawn units on each team slot at
+    //      the requested map start position.
+    struct RequestedPlayer {
+        std::string username;
+        int team = 0;
+        int startPos = -1;
+    };
+    std::vector<RequestedPlayer> requestedPlayers;
+
+    // AI slot requests from the lobby. Each `--ai <id>:<team>:<pos>`
+    // pair becomes one entry here; we resolve them against
+    // AIDiscovery after content roots are set up. Empty list = no
+    // AI players (human-only or dev-smoketest spawn).
     struct RequestedAI {
         std::string id;
         int team = 0;
+        int startPos = -1;
     };
     std::vector<RequestedAI> requestedAIs;
 
+    // Parse a "field1:field2:field3" spec used by --player and --ai.
+    // Returns {field1, field2, field3}; missing trailing fields are
+    // left empty so callers can check and fall back to defaults.
+    auto splitSpec = [](const std::string& spec) {
+        std::array<std::string, 3> out;
+        size_t prev = 0;
+        for (int i = 0; i < 3; ++i) {
+            const size_t next = spec.find(':', prev);
+            if (next == std::string::npos) {
+                out[i] = spec.substr(prev);
+                break;
+            }
+            out[i] = spec.substr(prev, next - prev);
+            prev = next + 1;
+        }
+        return out;
+    };
+
     // Simple arg parsing: --port N, --game PATH, --map PATH, --db PATH,
-    // --ai id:team (repeatable)
+    // --player username:team:pos (repeatable), --ai id:team:pos (repeatable)
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "--port" && i + 1 < argc) {
@@ -112,20 +147,37 @@ int main(int argc, char* argv[])
             mapPath = argv[++i];
         } else if (arg == "--db" && i + 1 < argc) {
             dbPath = argv[++i];
-        } else if (arg == "--ai" && i + 1 < argc) {
-            // Format: <id>:<team>. We parse here and resolve later,
-            // once we have a discovered AI list to look up against.
+        } else if (arg == "--player" && i + 1 < argc) {
             const std::string spec = argv[++i];
-            const auto colon = spec.find(':');
-            if (colon == std::string::npos) {
+            const auto parts = splitSpec(spec);
+            if (parts[0].empty()) {
+                std::fprintf(stderr,
+                    "[spring-server] ignoring malformed --player '%s' "
+                    "(expected username:team:pos)\n", spec.c_str());
+                continue;
+            }
+            RequestedPlayer rq;
+            rq.username = parts[0];
+            rq.team = parts[1].empty() ? 0 : std::atoi(parts[1].c_str());
+            rq.startPos = parts[2].empty() ? -1 : std::atoi(parts[2].c_str());
+            requestedPlayers.push_back(std::move(rq));
+        } else if (arg == "--ai" && i + 1 < argc) {
+            // Format: <id>:<team>:<pos>. We parse here and resolve
+            // later, once we have a discovered AI list to look up
+            // against. Accepts the legacy 2-tuple form too, for
+            // dev-smoketest invocations that predate start positions.
+            const std::string spec = argv[++i];
+            const auto parts = splitSpec(spec);
+            if (parts[0].empty()) {
                 std::fprintf(stderr,
                     "[spring-server] ignoring malformed --ai '%s' "
-                    "(expected id:team)\n", spec.c_str());
+                    "(expected id:team[:pos])\n", spec.c_str());
                 continue;
             }
             RequestedAI rq;
-            rq.id = spec.substr(0, colon);
-            rq.team = std::atoi(spec.substr(colon + 1).c_str());
+            rq.id = parts[0];
+            rq.team = parts[1].empty() ? 0 : std::atoi(parts[1].c_str());
+            rq.startPos = parts[2].empty() ? -1 : std::atoi(parts[2].c_str());
             requestedAIs.push_back(std::move(rq));
         } else if (arg[0] != '-') {
             // Legacy: bare number = port
@@ -408,7 +460,36 @@ int main(int argc, char* argv[])
     }
 
     CSimulation sim;
+
+    // Hand the roster to the sim before Init() runs SetupTestGame.
+    // Merge human players and AI slots into a single RosterEntry
+    // vector — the sim doesn't distinguish the two, it just needs
+    // to know what teams exist and where each one spawns. Empty
+    // vector preserves the legacy 2-team dev fallback.
+    {
+        std::vector<RosterEntry> merged;
+        merged.reserve(requestedPlayers.size() + requestedAIs.size());
+        for (const auto& rp : requestedPlayers)
+            merged.push_back({rp.team, rp.startPos});
+        for (const auto& rq : requestedAIs)
+            merged.push_back({rq.team, rq.startPos});
+        sim.SetRoster(std::move(merged));
+    }
+
     sim.Init(smfPath);
+
+    // --- Player roster lookup ---
+    //
+    // Build a `username -> team` map from the --player args so the
+    // AuthRequest handler can stamp the session's team on login.
+    // If the roster is empty (dev smoketest: spring-server invoked
+    // directly without a lobby) we leave every session at team=-1,
+    // which the PlayerCommand handler treats as "permissive" so
+    // the dev case keeps working without special-casing.
+    std::unordered_map<std::string, int> playerTeamByUsername;
+    for (const auto& rp : requestedPlayers) {
+        playerTeamByUsername[rp.username] = rp.team;
+    }
 
     // --- AI slot resolution ---
     //
@@ -529,16 +610,59 @@ int main(int argc, char* argv[])
                     const char* username = auth->username() ? auth->username()->c_str() : "";
                     const char* passHash = auth->password_hash() ? auth->password_hash()->c_str() : "";
 
+                    // Helper: resolve a username against the lobby-
+                    // supplied roster. Returns the assigned team, or
+                    // -1 if the roster is empty (dev-mode permissive)
+                    // OR the username isn't in the roster at all.
+                    // Callers use -1 as a reject signal when the
+                    // roster is non-empty.
+                    auto resolveTeam = [&](const std::string& name) -> int {
+                        if (playerTeamByUsername.empty()) return -1;
+                        auto it = playerTeamByUsername.find(name);
+                        return (it != playerTeamByUsername.end()) ? it->second : -1;
+                    };
+                    const bool rosterRequired = !playerTeamByUsername.empty();
+
                     // Try token-based reconnection first
                     if (auth->token() && auth->token()->size() > 0) {
                         int64_t userId = db.ValidateSession(auth->token()->str());
                         if (userId > 0) {
+                            // Look up the username from the userId so we
+                            // can cross-check against the lobby roster.
+                            auto reconnectUser = db.FindUserById(userId);
+                            if (!reconnectUser) {
+                                auto resp = Protocol::BuildAuthResponse(
+                                    SpringWeb::AuthStatus_InvalidCredentials,
+                                    "", 0, "Session user missing");
+                                net.Send(msg.clientId, resp.data(), resp.size());
+                                break;
+                            }
+                            const int team = resolveTeam(reconnectUser->username);
+                            if (rosterRequired && team < 0) {
+                                auto resp = Protocol::BuildAuthResponse(
+                                    SpringWeb::AuthStatus_InvalidCredentials,
+                                    "", 0, "Not in this room's roster");
+                                net.Send(msg.clientId, resp.data(), resp.size());
+                                break;
+                            }
                             auto resp = Protocol::BuildAuthResponse(
                                 SpringWeb::AuthStatus_OK, auth->token()->str(),
-                                static_cast<uint32_t>(userId));
+                                static_cast<uint32_t>(userId), "",
+                                static_cast<int8_t>(team));
                             net.Send(msg.clientId, resp.data(), resp.size());
-                            std::fprintf(stderr, "[auth] client %u reconnected as user %lld\n",
-                                msg.clientId, userId);
+                            // Register the session — previously the
+                            // token path skipped this, which meant a
+                            // reconnected client had no session and
+                            // every PlayerCommand bounced at the
+                            // REQUIRE_SESSION guard.
+                            sessions.AddSession(msg.clientId, userId,
+                                reconnectUser->username, reconnectUser->role);
+                            if (auto* s = sessions.GetSession(msg.clientId))
+                                s->team = team;
+                            std::fprintf(stderr,
+                                "[auth] client %u reconnected as '%s' (id=%lld) team=%d\n",
+                                msg.clientId, reconnectUser->username.c_str(),
+                                userId, team);
                             if (!mapMeta.id.empty()) {
                                 auto mapDataMsg = Protocol::BuildMapData(mapMeta);
                                 net.Send(msg.clientId, mapDataMsg.data(), mapDataMsg.size());
@@ -580,17 +704,35 @@ int main(int argc, char* argv[])
                         break;
                     }
 
+                    // Roster membership: reject anyone the lobby
+                    // didn't pre-authorise for this game. Dev-mode
+                    // (empty roster) skips this check.
+                    const int team = resolveTeam(user->username);
+                    if (rosterRequired && team < 0) {
+                        auto resp = Protocol::BuildAuthResponse(
+                            SpringWeb::AuthStatus_InvalidCredentials,
+                            "", 0, "Not in this room's roster");
+                        net.Send(msg.clientId, resp.data(), resp.size());
+                        std::fprintf(stderr,
+                            "[auth] client %u rejected: '%s' not in roster\n",
+                            msg.clientId, user->username.c_str());
+                        break;
+                    }
+
                     // Create session
                     std::string token = generateToken();
                     db.CreateSession(user->id, token);
 
                     auto resp = Protocol::BuildAuthResponse(
                         SpringWeb::AuthStatus_OK, token,
-                        static_cast<uint32_t>(user->id));
+                        static_cast<uint32_t>(user->id), "",
+                        static_cast<int8_t>(team));
                     net.Send(msg.clientId, resp.data(), resp.size());
                     sessions.AddSession(msg.clientId, user->id, user->username, user->role);
-                    std::fprintf(stderr, "[auth] client %u authenticated as '%s' (id=%lld)\n",
-                        msg.clientId, username, user->id);
+                    if (auto* s = sessions.GetSession(msg.clientId))
+                        s->team = team;
+                    std::fprintf(stderr, "[auth] client %u authenticated as '%s' (id=%lld) team=%d\n",
+                        msg.clientId, username, user->id, team);
 
                     // Send room list to newly authenticated client
                     {
@@ -644,24 +786,36 @@ int main(int argc, char* argv[])
                                 simCmd.PushParam(cmd->params()->Get(i));
                         }
 
-                        // Route command to each target unit
+                        // Route command to each target unit, dropping
+                        // any that don't belong to this session's
+                        // team. session->team == -1 means "no roster
+                        // restriction" (dev smoketest or spectator)
+                        // and lets the command through unchanged,
+                        // which preserves the old behaviour when the
+                        // lobby isn't in the loop.
                         int routed = 0;
+                        int rejectedTeam = 0;
                         if (cmd->squad_ids()) {
                             for (unsigned i = 0; i < cmd->squad_ids()->size(); i++) {
                                 uint32_t unitId = cmd->squad_ids()->Get(i);
                                 CUnit* unit = unitHandler.GetUnit(unitId);
                                 if (unit == nullptr || unit->isDead)
                                     continue;
-                                // TODO: validate team ownership (unit->team == session->team)
+                                if (session->team >= 0 && unit->team != session->team) {
+                                    rejectedTeam++;
+                                    continue;
+                                }
                                 unit->commandAI->GiveCommand(simCmd);
                                 routed++;
                             }
                         }
 
-                        std::fprintf(stderr, "[cmd] client %u (%s): cmd=%d seq=%u routed=%d/%d\n",
-                            msg.clientId, session->username.c_str(),
+                        std::fprintf(stderr,
+                            "[cmd] client %u (%s, team=%d): cmd=%d seq=%u routed=%d rejected=%d/%d\n",
+                            msg.clientId, session->username.c_str(), session->team,
                             cmd->command_id(), cmd->sequence(),
-                            routed, cmd->squad_ids() ? (int)cmd->squad_ids()->size() : 0);
+                            routed, rejectedTeam,
+                            cmd->squad_ids() ? (int)cmd->squad_ids()->size() : 0);
                     }
                     break;
                 }

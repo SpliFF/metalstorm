@@ -49,8 +49,17 @@ team():number {
   return offset ? this.bb!.readUint8(this.bb_pos + offset) : 0;
 }
 
+/**
+ * Same semantics as RoomPlayerInfo.start_pos — -1 means the
+ * lobby will auto-assign at game start.
+ */
+startPos():number {
+  const offset = this.bb!.__offset(this.bb_pos, 10);
+  return offset ? this.bb!.readInt8(this.bb_pos + offset) : -1;
+}
+
 static startRoomAISlot(builder:flatbuffers.Builder) {
-  builder.startObject(3);
+  builder.startObject(4);
 }
 
 static addAiId(builder:flatbuffers.Builder, aiIdOffset:flatbuffers.Offset) {
@@ -65,16 +74,21 @@ static addTeam(builder:flatbuffers.Builder, team:number) {
   builder.addFieldInt8(2, team, 0);
 }
 
+static addStartPos(builder:flatbuffers.Builder, startPos:number) {
+  builder.addFieldInt8(3, startPos, -1);
+}
+
 static endRoomAISlot(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createRoomAISlot(builder:flatbuffers.Builder, aiIdOffset:flatbuffers.Offset, displayNameOffset:flatbuffers.Offset, team:number):flatbuffers.Offset {
+static createRoomAISlot(builder:flatbuffers.Builder, aiIdOffset:flatbuffers.Offset, displayNameOffset:flatbuffers.Offset, team:number, startPos:number):flatbuffers.Offset {
   RoomAISlot.startRoomAISlot(builder);
   RoomAISlot.addAiId(builder, aiIdOffset);
   RoomAISlot.addDisplayName(builder, displayNameOffset);
   RoomAISlot.addTeam(builder, team);
+  RoomAISlot.addStartPos(builder, startPos);
   return RoomAISlot.endRoomAISlot(builder);
 }
 
@@ -82,7 +96,8 @@ unpack(): RoomAISlotT {
   return new RoomAISlotT(
     this.aiId(),
     this.displayName(),
-    this.team()
+    this.team(),
+    this.startPos()
   );
 }
 
@@ -91,6 +106,7 @@ unpackTo(_o: RoomAISlotT): void {
   _o.aiId = this.aiId();
   _o.displayName = this.displayName();
   _o.team = this.team();
+  _o.startPos = this.startPos();
 }
 }
 
@@ -98,7 +114,8 @@ export class RoomAISlotT implements flatbuffers.IGeneratedObject {
 constructor(
   public aiId: string|Uint8Array|null = null,
   public displayName: string|Uint8Array|null = null,
-  public team: number = 0
+  public team: number = 0,
+  public startPos: number = -1
 ){}
 
 
@@ -109,7 +126,8 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   return RoomAISlot.createRoomAISlot(builder,
     aiId,
     displayName,
-    this.team
+    this.team,
+    this.startPos
   );
 }
 }

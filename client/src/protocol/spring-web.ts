@@ -52,6 +52,7 @@ export { RoomPlayerJoined, RoomPlayerJoinedT } from './spring-web/room-player-jo
 export { RoomPlayerLeft, RoomPlayerLeftT } from './spring-web/room-player-left.js';
 export { RoomReady, RoomReadyT } from './spring-web/room-ready.js';
 export { RoomRemoveAI, RoomRemoveAIT } from './spring-web/room-remove-ai.js';
+export { RoomSetStartPos, RoomSetStartPosT } from './spring-web/room-set-start-pos.js';
 export { RoomStartGame, RoomStartGameT } from './spring-web/room-start-game.js';
 export { RoomState } from './spring-web/room-state.js';
 export { RoomStateUpdate, RoomStateUpdateT } from './spring-web/room-state-update.js';

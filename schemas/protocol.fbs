@@ -139,6 +139,27 @@ table RoomRemoveAI {
     slot_index: uint8;
 }
 
+/// Assign a map start position to a player or AI slot in the current
+/// room. Start positions are indices into the map's start_positions
+/// array (see MapInfo) — the game server uses them to decide where
+/// each team spawns at game start.
+///
+/// Addressing rules:
+///   - target_player_id = 0 and target_ai_slot = -1: "my own slot"
+///     (any player can do this; assigns to the sender).
+///   - target_player_id > 0: target that player's slot. Host only.
+///   - target_ai_slot >= 0: target that AI slot. Host only.
+///   - pos_index = -1 clears the assignment (will be auto-filled
+///     at game start).
+///
+/// The server rejects the request if `pos_index` is already held by
+/// another slot in the same room, or is out of range for the map.
+table RoomSetStartPos {
+    target_player_id: uint32 = 0;
+    target_ai_slot: int8 = -1;
+    pos_index: int8;
+}
+
 /// Request the server's current list of available AI plugins for
 /// the current room's game. Response is an AIListUpdate. Any client
 /// can issue this (not host-only) so team-picking UIs can display
@@ -172,6 +193,7 @@ union ClientPayload {
     RoomRemoveAI,
     AIListRequest,
     GameListRequest,
+    RoomSetStartPos,
 }
 
 table ClientMessage {
@@ -187,6 +209,11 @@ table AuthResponse {
     token: string;              // JWT session token (on success)
     player_id: uint32;
     message: string;            // Error description (on failure)
+    /// Team id assigned by the lobby for this session (game server
+    /// only — on the lobby this stays at 0). -1 means unassigned /
+    /// spectator. The client stores this so it can scope unit
+    /// rendering, command validation, and UI chrome to "my team".
+    team: int8 = -1;
 }
 
 table EntityCreate {
@@ -294,6 +321,12 @@ table RoomPlayerInfo {
     ready: bool;
     is_spectator: bool;
     is_host: bool;
+    /// Map start position index assigned to this player. -1 means
+    /// "unassigned, auto-fill at game start". Indices refer to the
+    /// map's `start_positions` array (see MapInfo). Positions are
+    /// exclusive within a room: no two slots can hold the same
+    /// index at the same time.
+    start_pos: int8 = -1;
 }
 
 /// An AI player occupying a slot in a room's roster. Unlike human
@@ -304,6 +337,9 @@ table RoomAISlot {
     ai_id: string;          // stable id (folder name), e.g. "null"
     display_name: string;   // human-readable label from ai.config
     team: uint8;
+    /// Same semantics as RoomPlayerInfo.start_pos — -1 means the
+    /// lobby will auto-assign at game start.
+    start_pos: int8 = -1;
 }
 
 /// One available AI plugin, enumerated from content/engine/ai + the

@@ -49,8 +49,19 @@ message(optionalEncoding?:any):string|Uint8Array|null {
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
+/**
+ * Team id assigned by the lobby for this session (game server
+ * only — on the lobby this stays at 0). -1 means unassigned /
+ * spectator. The client stores this so it can scope unit
+ * rendering, command validation, and UI chrome to "my team".
+ */
+team():number {
+  const offset = this.bb!.__offset(this.bb_pos, 12);
+  return offset ? this.bb!.readInt8(this.bb_pos + offset) : -1;
+}
+
 static startAuthResponse(builder:flatbuffers.Builder) {
-  builder.startObject(4);
+  builder.startObject(5);
 }
 
 static addStatus(builder:flatbuffers.Builder, status:AuthStatus) {
@@ -69,17 +80,22 @@ static addMessage(builder:flatbuffers.Builder, messageOffset:flatbuffers.Offset)
   builder.addFieldOffset(3, messageOffset, 0);
 }
 
+static addTeam(builder:flatbuffers.Builder, team:number) {
+  builder.addFieldInt8(4, team, -1);
+}
+
 static endAuthResponse(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createAuthResponse(builder:flatbuffers.Builder, status:AuthStatus, tokenOffset:flatbuffers.Offset, playerId:number, messageOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createAuthResponse(builder:flatbuffers.Builder, status:AuthStatus, tokenOffset:flatbuffers.Offset, playerId:number, messageOffset:flatbuffers.Offset, team:number):flatbuffers.Offset {
   AuthResponse.startAuthResponse(builder);
   AuthResponse.addStatus(builder, status);
   AuthResponse.addToken(builder, tokenOffset);
   AuthResponse.addPlayerId(builder, playerId);
   AuthResponse.addMessage(builder, messageOffset);
+  AuthResponse.addTeam(builder, team);
   return AuthResponse.endAuthResponse(builder);
 }
 
@@ -88,7 +104,8 @@ unpack(): AuthResponseT {
     this.status(),
     this.token(),
     this.playerId(),
-    this.message()
+    this.message(),
+    this.team()
   );
 }
 
@@ -98,6 +115,7 @@ unpackTo(_o: AuthResponseT): void {
   _o.token = this.token();
   _o.playerId = this.playerId();
   _o.message = this.message();
+  _o.team = this.team();
 }
 }
 
@@ -106,7 +124,8 @@ constructor(
   public status: AuthStatus = AuthStatus.OK,
   public token: string|Uint8Array|null = null,
   public playerId: number = 0,
-  public message: string|Uint8Array|null = null
+  public message: string|Uint8Array|null = null,
+  public team: number = -1
 ){}
 
 
@@ -118,7 +137,8 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     this.status,
     token,
     this.playerId,
-    message
+    message,
+    this.team
   );
 }
 }

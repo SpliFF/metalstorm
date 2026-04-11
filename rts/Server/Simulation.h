@@ -9,15 +9,31 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 class LuaParser;
 class LuaScriptContext;
 class ScriptEventDispatcher;
 
+/// One entry in the game-start roster. Both human players and AI
+/// slots feed the same struct — CSimulation doesn't care which is
+/// which, it just needs to know what teams exist and where each one
+/// spawns. The handoff from spring-server::main fills the vector
+/// from its --player and --ai CLI args.
+struct RosterEntry {
+    int team = 0;        // sim team id
+    int startPosIdx = -1;  // index into the map's teams[] array; -1 = auto
+};
+
 class CSimulation {
 public:
     CSimulation();
     ~CSimulation() noexcept;
+
+    /// Install the game-start roster. Called by spring-server::main
+    /// after parsing --player / --ai args, before Init(). Passing an
+    /// empty vector keeps the legacy 2-team dev fallback path.
+    void SetRoster(std::vector<RosterEntry> roster) { rosterEntries = std::move(roster); }
 
     /// Initialise all sim subsystems. Must be called before SimFrame().
     /// mapName is the path to the .smf file (empty = no map).
@@ -48,4 +64,10 @@ private:
     bool mapLoaded = false;
     bool scriptingLoaded = false;
     std::unique_ptr<LuaParser> defsParser;
+
+    /// Game-start roster installed via SetRoster() before Init().
+    /// Empty = legacy dev fallback (SetupTestGame spawns 2 hardcoded
+    /// teams at the map centre). Non-empty = one spawn per entry at
+    /// the map's corresponding start position.
+    std::vector<RosterEntry> rosterEntries;
 };

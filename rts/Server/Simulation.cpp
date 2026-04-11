@@ -38,6 +38,7 @@
 #include "Lua/LuaSyncedRead.h"
 #include "Map/MapDamage.h"
 #include "Map/MapInfo.h"
+#include "Map/MapParser.h"
 #include "Map/ReadMap.h"
 #include "Map/MetalMap.h"
 #include "Sim/Misc/ModInfo.h"
@@ -255,9 +256,8 @@ void CSimulation::SetupTestGame()
     if (!defsLoaded || !mapLoaded)
         return;
 
-    std::fprintf(stderr, "[sim] setting up test game...\n");
+    std::fprintf(stderr, "[sim] setting up game...\n");
 
-    auto& teams = teamHandler.GetTeams();
     const auto& defs = unitDefHandler->GetUnitDefsVec();
 
     // Try to find Paper Tanks units by name first
@@ -289,35 +289,84 @@ void CSimulation::SetupTestGame()
     for (auto* d : spawnDefs) std::fprintf(stderr, "'%s' ", d->name.c_str());
     std::fprintf(stderr, "\n");
 
-    // Place teams close enough to fight. We want every unit within
-    // the shortest weapon range (250 for scout MG) so even the
-    // shortest-range unit can shoot immediately. Team centres are
-    // 200 apart on the x axis; units fan out along z inside each
-    // team's column.
-    float3 mapCenter(mapDims.mapx * SQUARE_SIZE * 0.5f, 0.0f,
-                     mapDims.mapy * SQUARE_SIZE * 0.5f);
-    float3 teamBase[2] = {
-        float3(mapCenter.x - 100.0f, 0.0f, mapCenter.z),
-        float3(mapCenter.x + 100.0f, 0.0f, mapCenter.z),
+    const float3 mapCenter(mapDims.mapx * SQUARE_SIZE * 0.5f, 0.0f,
+                           mapDims.mapy * SQUARE_SIZE * 0.5f);
+
+    // Build the effective roster. When the lobby passes --player /
+    // --ai args, rosterEntries is already filled and we spawn one
+    // team per entry at that entry's map start position. When the
+    // vector is empty (direct CLI invocation for dev smoketests),
+    // fall back to the historical 2-team "teams in the middle of
+    // the map" layout so the smoketest keeps working.
+    std::vector<RosterEntry> effective = rosterEntries;
+    const bool usingFallback = effective.empty();
+    if (usingFallback) {
+        effective.push_back({0, -1});
+        effective.push_back({1, -1});
+    }
+
+    // Resolve the map's start positions once via MapParser. mapinfo
+    // stores them under `teams[i].startPos = {x, z}`; MapParser's
+    // GetStartPos returns false if the team index has no entry. We
+    // look up on demand rather than caching so the parser's error
+    // messages surface through the normal log.
+    const std::string mapConfig = MapParser::GetMapConfigName(mapInfo->map.name);
+    MapParser mapParser(mapConfig);
+
+    auto teamStartPos = [&](int posIdx, float3& out) -> bool {
+        if (posIdx < 0) return false;
+        if (!mapParser.IsValid()) return false;
+        return mapParser.GetStartPos(posIdx, out);
     };
 
-    std::vector<CUnit*> spawnedUnits[2];
+    // Track spawn counts per team for logging. We don't care about
+    // a specific upper bound — the handler serves N teams and we
+    // emit a per-team count at the end.
+    std::vector<int> spawnedPerTeam;
 
-    const int totalPerTeam = static_cast<int>(spawnDefs.size()) * 3;
+    for (size_t e = 0; e < effective.size(); ++e) {
+        const RosterEntry& entry = effective[e];
+        const int team = entry.team;
 
-    for (int team = 0; team < 2; team++) {
+        // Resolve spawn origin: prefer the authored start position;
+        // fall back to a deterministic grid layout around the map
+        // centre so even a map with no `teams[]` table gives
+        // playable spawns. Fallback layout is a square-ish ring
+        // spaced 200 elmos apart to keep small maps visible and
+        // large maps from stacking units on top of each other.
+        float3 origin = mapCenter;
+        if (!teamStartPos(entry.startPosIdx, origin)) {
+            if (usingFallback) {
+                // Preserve the legacy "teams 100 elmos apart on x"
+                // layout so dev smoketests look identical.
+                origin.x = mapCenter.x + (team == 0 ? -100.0f : 100.0f);
+            } else {
+                // Spread entries in a ring around the map centre
+                // by angle derived from their index.
+                const float angle =
+                    (static_cast<float>(e) / effective.size()) * 6.2831853f;
+                const float radius = 400.0f;
+                origin.x = mapCenter.x + radius * std::cos(angle);
+                origin.z = mapCenter.z + radius * std::sin(angle);
+            }
+            std::fprintf(stderr,
+                "[sim] team %d: no map start pos (idx=%d), using fallback (%.0f, %.0f)\n",
+                team, entry.startPosIdx, origin.x, origin.z);
+        }
+
+        int spawnedThisTeam = 0;
+        const int totalPerTeam = static_cast<int>(spawnDefs.size()) * 3;
         for (size_t d = 0; d < spawnDefs.size(); d++) {
             for (int i = 0; i < 3; i++) {
-                float3 pos = teamBase[team];
-                // Spread all units along z, centred on mapCenter.z.
-                // Use signed-int math — unsigned underflow from
-                // size_t arithmetic happily produces astronomical
-                // values.
+                float3 pos = origin;
+                // Spread units along z, centred on origin.z. Use
+                // signed-int math — unsigned underflow from size_t
+                // arithmetic happily produces astronomical values.
                 const int unitIdx = static_cast<int>(d) * 3 + i;
                 pos.z += (unitIdx - (totalPerTeam - 1) * 0.5f) * 40.0f;
                 // y is left at 0 intentionally — CUnitLoader::LoadUnit
-                // ground-clamps non-flying unit spawn positions for
-                // us, so we don't need to sample the heightmap here.
+                // ground-clamps non-flying unit spawn positions
+                // for us.
 
                 UnitLoadParams params;
                 params.unitDef = spawnDefs[d];
@@ -326,25 +375,43 @@ void CSimulation::SetupTestGame()
                 params.speed = ZeroVector;
                 params.unitID = -1;
                 params.teamID = team;
-                params.facing = (team == 0) ? 2 : 0;
+                // Face units toward the map centre so multi-team
+                // games look sensible. Heading is 0..65535 unsigned;
+                // we just pick one of four cardinal facings based
+                // on the dominant axis of (centre - origin).
+                const float dx = mapCenter.x - origin.x;
+                const float dz = mapCenter.z - origin.z;
+                if (std::fabs(dx) > std::fabs(dz))
+                    params.facing = (dx > 0) ? 1 : 3; // east or west
+                else
+                    params.facing = (dz > 0) ? 0 : 2; // south or north
                 params.beingBuilt = false;
                 params.flattenGround = false;
 
                 try {
                     CUnit* unit = unitLoader->LoadUnit(params);
                     if (unit != nullptr)
-                        spawnedUnits[team].push_back(unit);
-                } catch (const std::exception& e) {
-                    std::fprintf(stderr, "[sim] failed to spawn '%s': %s\n",
-                        spawnDefs[d]->name.c_str(), e.what());
+                        spawnedThisTeam++;
+                } catch (const std::exception& ex) {
+                    std::fprintf(stderr, "[sim] failed to spawn '%s' for team %d: %s\n",
+                        spawnDefs[d]->name.c_str(), team, ex.what());
                 }
             }
         }
+        if (static_cast<size_t>(team) >= spawnedPerTeam.size())
+            spawnedPerTeam.resize(team + 1, 0);
+        spawnedPerTeam[team] += spawnedThisTeam;
     }
 
-    int totalSpawned = spawnedUnits[0].size() + spawnedUnits[1].size();
-    std::fprintf(stderr, "[sim] spawned %d units (%zu vs %zu)\n",
-        totalSpawned, spawnedUnits[0].size(), spawnedUnits[1].size());
+    int total = 0;
+    for (int n : spawnedPerTeam) total += n;
+    std::fprintf(stderr, "[sim] spawned %d units across %zu team(s):",
+        total, effective.size());
+    for (size_t t = 0; t < spawnedPerTeam.size(); ++t) {
+        if (spawnedPerTeam[t] > 0)
+            std::fprintf(stderr, " t%zu=%d", t, spawnedPerTeam[t]);
+    }
+    std::fprintf(stderr, "\n");
 
     // Units spawn idle — strategic direction is delegated to the
     // AI slot system (content/engine/ai, content/games/<game>/ai)
@@ -416,23 +483,44 @@ void CSimulation::Init(const std::string& mapName)
     // Try to load the map
     bool hasMap = LoadMap(mapName);
 
-    // Set up minimal teams (needed before unitHandler.Init sizes its arrays)
+    // Set up teams + ally teams based on the roster.
+    //
+    // The team count is driven by the highest team id used in the
+    // roster (plus one), so a roster of e.g. {team=0, team=2}
+    // creates three teams 0..2 — team 1 is unused but still exists
+    // as a slot so the id stays stable. Empty roster falls back to
+    // the legacy 2-team layout. Each non-Gaia team is its own ally
+    // team for now (teamAllyteam == team), which preserves Spring's
+    // "everyone is their own ally until modinfo says otherwise"
+    // default.
+    int maxTeamId = -1;
+    for (const auto& e : rosterEntries)
+        if (e.team > maxTeamId) maxTeamId = e.team;
+    const int teamCount = std::max(2, maxTeamId + 1);
+
     {
         auto& allyTeams = teamHandler.GetAllyTeams();
-        allyTeams.resize(2);
-        allyTeams[0].allies = {true, false};
-        allyTeams[1].allies = {false, true};
+        allyTeams.resize(teamCount);
+        for (int i = 0; i < teamCount; i++) {
+            allyTeams[i].allies.assign(teamCount, false);
+            allyTeams[i].allies[i] = true;
+        }
 
         auto& teams = teamHandler.GetTeams();
-        teams.resize(2);
-        for (int i = 0; i < 2; i++) {
+        teams.resize(teamCount);
+        for (int i = 0; i < teamCount; i++) {
             teams[i].teamNum = i;
             teams[i].teamAllyteam = i;
             teams[i].SetDefaultColor(i);
-            teams[i].SetMaxUnits(MAX_UNITS / 2);
+            teams[i].SetMaxUnits(MAX_UNITS / std::max(1, teamCount));
             if (hasMap) {
+                // Start positions are set for real in SetupTestGame
+                // once MapParser has had a chance to resolve them
+                // against the map's teams[] table. The placeholder
+                // here is only used by sim code that reads
+                // team->startPos before a unit has been spawned.
                 teams[i].SetStartPos(float3(
-                    mapDims.mapx * SQUARE_SIZE * (0.25f + 0.5f * i),
+                    mapDims.mapx * SQUARE_SIZE * 0.5f,
                     0.0f,
                     mapDims.mapy * SQUARE_SIZE * 0.5f));
             }

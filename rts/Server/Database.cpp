@@ -115,6 +115,31 @@ std::optional<UserRecord> Database::FindUser(const std::string& username) {
     return user;
 }
 
+std::optional<UserRecord> Database::FindUserById(int64_t userId) {
+    const char* sql = "SELECT id, username, password_hash, role, is_banned FROM users WHERE id = ?";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return std::nullopt;
+
+    sqlite3_bind_int64(stmt, 1, userId);
+
+    if (sqlite3_step(stmt) != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        return std::nullopt;
+    }
+
+    UserRecord user;
+    user.id = sqlite3_column_int64(stmt, 0);
+    user.username = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+    user.passwordHash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+    user.role = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+    user.isBanned = sqlite3_column_int(stmt, 4) != 0;
+
+    sqlite3_finalize(stmt);
+    return user;
+}
+
 bool Database::CreateSession(int64_t userId, const std::string& token) {
     const char* sql = "INSERT INTO sessions (token, user_id) VALUES (?, ?)";
     sqlite3_stmt* stmt = nullptr;

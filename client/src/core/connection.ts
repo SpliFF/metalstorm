@@ -46,9 +46,14 @@ export interface CombatEventInfo {
     z: number;
 }
 
+/// Lobby vs game-server session roles. The game server stamps a
+/// real team id on the session during AuthRequest; the lobby
+/// leaves it at -1. Code outside Connection reads this via
+/// `Connection.myTeam` to scope unit rendering, selection, and
+/// command validation.
 export interface ConnectionEvents {
     onStateChange?: (state: ConnectionState) => void;
-    onAuthenticated?: (playerId: number, token: string) => void;
+    onAuthenticated?: (playerId: number, token: string, team: number) => void;
     onAuthFailed?: (message: string) => void;
     onServerError?: (code: number, message: string) => void;
     onEntityState?: (snapshot: EntityStateSnapshot, isDelta: boolean) => void;
@@ -65,6 +70,10 @@ export class Connection {
     private events: ConnectionEvents;
     private sessionToken: string | null = null;
     private playerId: number = 0;
+    /// Team id assigned by the game server at auth time. -1 when
+    /// connected to the lobby (which doesn't track teams on a
+    /// per-connection basis) or when no roster applies.
+    public myTeam: number = -1;
     private clock = new ServerClock();
     private pingInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -315,8 +324,12 @@ export class Connection {
         if (auth.status() === AuthStatus.OK) {
             this.sessionToken = auth.token() ?? null;
             this.playerId = auth.playerId();
+            // Game server stamps a real team id (0..N); lobby leaves
+            // the field at -1. Consumers (entity renderer, selection,
+            // minimap colouring) read this via `myTeam`.
+            this.myTeam = auth.team();
             this.setState('connected');
-            this.events.onAuthenticated?.(this.playerId, this.sessionToken ?? '');
+            this.events.onAuthenticated?.(this.playerId, this.sessionToken ?? '', this.myTeam);
 
             // Start periodic pings for clock sync
             this.pingInterval = setInterval(() => this.sendPing(), 30000);

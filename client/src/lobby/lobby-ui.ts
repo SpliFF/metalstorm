@@ -23,6 +23,7 @@ import { RoomEndGame } from '../protocol/spring-web/room-end-game.js';
 import { RoomLeave } from '../protocol/spring-web/room-leave.js';
 import { RoomAddAI } from '../protocol/spring-web/room-add-ai.js';
 import { RoomRemoveAI } from '../protocol/spring-web/room-remove-ai.js';
+import { RoomSetStartPos } from '../protocol/spring-web/room-set-start-pos.js';
 import { AIListRequest } from '../protocol/spring-web/ailist-request.js';
 import { AIListUpdate } from '../protocol/spring-web/ailist-update.js';
 import { GameListRequest } from '../protocol/spring-web/game-list-request.js';
@@ -50,6 +51,8 @@ interface RoomInfo {
 interface RoomPlayerInfo {
     playerId: number; username: string; team: number;
     ready: boolean; isSpectator: boolean; isHost: boolean;
+    /// Map start position index assigned to this player. -1 = unset.
+    startPos: number;
 }
 
 /// An AI player that the host has added to the room before game
@@ -59,6 +62,9 @@ interface RoomAISlotInfo {
     aiId: string;
     displayName: string;
     team: number;
+    /// Map start position index assigned to this AI. -1 = unset
+    /// (the lobby auto-fills at game start).
+    startPos: number;
 }
 
 /// One AI plugin the server discovered under content/engine/ai or
@@ -97,7 +103,20 @@ export class LobbyUI {
     private onGameStart?: (gameServerPort: number) => void;
     private myPlayerId = 0;
     private pendingRejoinRoomId = 0;
-    private availableMaps: { id: string; name: string; mapx: number; mapy: number; widthElmos: number; heightElmos: number }[] = [];
+    private availableMaps: {
+        id: string;
+        name: string;
+        mapx: number;
+        mapy: number;
+        widthElmos: number;
+        heightElmos: number;
+        /// Authored start positions from the map's mapinfo.lua. Used
+        /// to populate the per-slot start-pos dropdown in the room
+        /// view. Missing / empty means the map has no authored
+        /// positions and the sim will fall back to its own default
+        /// placement.
+        startPositions?: { x: number; z: number }[];
+    }[] = [];
     private templates: LobbyTemplates;
 
     /// Cached result of the most recent AIListUpdate the server sent.
@@ -448,32 +467,99 @@ export class LobbyUI {
         const gameRunning = r.state === 3 || r.state === 4;
         const preGame = r.state < 3;
 
-        // Pre-render each player row through the template so games can
-        // override the row layout.
-        const playersHtml = r.players.map(p => renderTemplate(this.templates.roomPlayerRow, {
-            pid: p.playerId,
-            name: this.esc(p.username),
-            host_icon: p.isHost ? '★' : '●',
-            ready_class: p.ready ? 'ready' : '',
-            select_disabled: p.playerId !== this.myPlayerId ? ' disabled' : '',
-            team0_selected: p.team === 0 ? ' selected' : '',
-            team1_selected: p.team === 1 ? ' selected' : '',
-            status: p.isSpectator ? 'Spectator' : (p.ready ? '✓ Ready' : '—'),
-        })).join('');
+        // Start-position metadata for the room's current map.
+        // `availableMaps` is populated on showBrowser() from /api/maps;
+        // if the user landed on a room before the fetch completed
+        // (e.g. via reconnection), the list is empty and the dropdown
+        // renders as "Loading positions…". An empty start_positions
+        // array is a legitimate map shape too — the sim will fall
+        // back to its own default placement and we hide the dropdown.
+        const currentMap = this.availableMaps.find(m => m.id === r.mapName);
+        const startPositions = currentMap?.startPositions ?? [];
+        const mapHasStartPositions = startPositions.length > 0;
+
+        // Build a "which slot owns which position index" reverse map
+        // so the dropdown can mark already-taken slots as unavailable
+        // to everyone except the slot that already owns them.
+        const posOwner = new Map<number, string>(); // posIdx -> owner label
+        for (const p of r.players) {
+            if (p.startPos >= 0) posOwner.set(p.startPos, p.username);
+        }
+        for (const s of r.aiSlots) {
+            if (s.startPos >= 0) posOwner.set(s.startPos, s.displayName || s.aiId);
+        }
+
+        // Small helper: build the HTML fragment for one start-pos
+        // dropdown. `ownerKey` tags the resulting <select> so the
+        // change handler wiring below can resolve it back to its
+        // target. `canEdit` greys the control out when the viewer
+        // doesn't own the slot (non-host, non-self).
+        const renderStartPosSelect = (
+            currentPos: number,
+            ownerKey: string,
+            canEdit: boolean,
+        ): string => {
+            if (!mapHasStartPositions) return '';
+            const disabledAttr = canEdit ? '' : ' disabled';
+            const options: string[] = [
+                `<option value="-1"${currentPos < 0 ? ' selected' : ''}>Unassigned</option>`,
+            ];
+            for (let i = 0; i < startPositions.length; i++) {
+                const owner = posOwner.get(i);
+                const selectedAttr = i === currentPos ? ' selected' : '';
+                // A position is selectable if it's free OR it's the
+                // slot's current assignment (so re-picking the same
+                // value is a no-op rather than a permission error).
+                const taken = owner !== undefined && i !== currentPos;
+                const label = `Pos ${i + 1}` + (taken ? ` (${this.esc(owner!)})` : '');
+                const optDisabled = taken ? ' disabled' : '';
+                options.push(
+                    `<option value="${i}"${selectedAttr}${optDisabled}>${label}</option>`);
+            }
+            return `<select class="startpos-select" data-owner="${this.esc(ownerKey)}"${disabledAttr}>`
+                + options.join('')
+                + `</select>`;
+        };
+
+        // Pre-render each player row through the template so games
+        // can restyle the row layout. The `{{startpos_html}}`
+        // placeholder receives the start-pos select (possibly
+        // empty if the map ships no positions).
+        const playersHtml = r.players.map(p => {
+            const canEdit = preGame && (p.playerId === this.myPlayerId || amHost);
+            const posSel = renderStartPosSelect(
+                p.startPos, `player:${p.playerId}`, canEdit);
+            return renderTemplate(this.templates.roomPlayerRow, {
+                pid: p.playerId,
+                name: this.esc(p.username),
+                host_icon: p.isHost ? '★' : '●',
+                ready_class: p.ready ? 'ready' : '',
+                select_disabled: p.playerId !== this.myPlayerId ? ' disabled' : '',
+                team0_selected: p.team === 0 ? ' selected' : '',
+                team1_selected: p.team === 1 ? ' selected' : '',
+                status: p.isSpectator ? 'Spectator' : (p.ready ? '✓ Ready' : '—'),
+                startpos_html: posSel,
+            });
+        }).join('');
 
         // AI slot rows — one per entry in the room's aiSlots vector.
         // Non-hosts see a read-only row with the AI name and team.
-        // The host gets a remove button per slot; the add-AI dropdown
-        // is rendered below the slot list rather than per-slot.
+        // The host gets a remove button per slot plus the start-pos
+        // select; the add-AI dropdown is rendered below the slot
+        // list rather than per-slot.
         const aiRowsHtml = r.aiSlots.map((slot, idx) => {
             const nameText = this.esc(slot.displayName || slot.aiId);
             const teamLabel = `Team ${slot.team + 1}`;
             const removeBtn = (amHost && preGame)
                 ? `<button class="ai-remove-btn" data-slot="${idx}" title="Remove AI">✕</button>`
                 : '';
+            const canEdit = preGame && amHost;
+            const posSel = renderStartPosSelect(
+                slot.startPos, `ai:${idx}`, canEdit);
             return `<div class="player-row ai-row"><span class="player-icon">🤖</span>`
                 + `<span class="player-name">${nameText}</span>`
                 + `<span class="ai-team-label">${teamLabel}</span>`
+                + posSel
                 + `<span class="player-status">AI</span>`
                 + removeBtn
                 + `</div>`;
@@ -577,6 +663,35 @@ export class LobbyUI {
                 const el = e.currentTarget as HTMLButtonElement;
                 const idx = parseInt(el.dataset.slot ?? '-1');
                 if (idx >= 0) this.sendRemoveAI(idx);
+            };
+        });
+
+        // Start-position dropdowns. The `data-owner` attribute
+        // encodes the target: "player:<playerId>" for a human row
+        // (including the viewer's own), "ai:<slotIndex>" for an
+        // AI row. We translate into the right sendSetStartPos call
+        // without the host needing to know which flavour they're
+        // editing; the server re-validates the permission on its
+        // side regardless.
+        this.container.querySelectorAll('.startpos-select').forEach(sel => {
+            (sel as HTMLSelectElement).onchange = (e) => {
+                const el = e.target as HTMLSelectElement;
+                const owner = el.dataset.owner ?? '';
+                const posIndex = parseInt(el.value);
+                if (owner.startsWith('player:')) {
+                    const pid = parseInt(owner.substring('player:'.length));
+                    // Use 'self' shorthand when the viewer owns the
+                    // slot so the server's "self" path handles it
+                    // without requiring host privilege.
+                    if (pid === this.myPlayerId) {
+                        this.sendSetStartPos({ kind: 'self' }, posIndex);
+                    } else {
+                        this.sendSetStartPos({ kind: 'player', playerId: pid }, posIndex);
+                    }
+                } else if (owner.startsWith('ai:')) {
+                    const idx = parseInt(owner.substring('ai:'.length));
+                    this.sendSetStartPos({ kind: 'ai', slotIndex: idx }, posIndex);
+                }
             };
         });
     }
@@ -704,6 +819,35 @@ export class LobbyUI {
             b, ClientPayload.RoomRemoveAI, RoomRemoveAI.endRoomRemoveAI(b));
     }
 
+    /// Assign a map start position to a player or AI slot.
+    ///
+    /// Call with one of:
+    ///   - `target = { kind: 'self' }`     — own slot (any client can do this)
+    ///   - `target = { kind: 'player', playerId }` — host only, another player
+    ///   - `target = { kind: 'ai', slotIndex }`    — host only, an AI slot
+    ///
+    /// `posIndex` is the index into the map's start_positions array,
+    /// or -1 to clear the assignment. The server validates permission
+    /// + occupancy and silently rejects on failure.
+    private sendSetStartPos(
+        target: { kind: 'self' } | { kind: 'player'; playerId: number } | { kind: 'ai'; slotIndex: number },
+        posIndex: number,
+    ): void {
+        if (!this.connection?.authenticated) return;
+        const b = new flatbuffers.Builder(16);
+        RoomSetStartPos.startRoomSetStartPos(b);
+        if (target.kind === 'player') {
+            RoomSetStartPos.addTargetPlayerId(b, target.playerId);
+        } else if (target.kind === 'ai') {
+            RoomSetStartPos.addTargetAiSlot(b, target.slotIndex);
+        }
+        // kind === 'self' leaves target_player_id = 0 which the
+        // server interprets as "the requester's own slot".
+        RoomSetStartPos.addPosIndex(b, posIndex);
+        this.connection.sendClientMessage(
+            b, ClientPayload.RoomSetStartPos, RoomSetStartPos.endRoomSetStartPos(b));
+    }
+
     // ===================== HANDLERS =====================
 
     private handleRoomList(msg: ServerMessage): void {
@@ -786,6 +930,7 @@ export class LobbyUI {
                 playerId: p.playerId(), username: p.username() ?? '',
                 team: p.team(), ready: p.ready(),
                 isSpectator: p.isSpectator(), isHost: p.isHost(),
+                startPos: p.startPos(),
             });
         }
         const aiSlots: RoomAISlotInfo[] = [];
@@ -796,6 +941,7 @@ export class LobbyUI {
                 aiId: s.aiId() ?? '',
                 displayName: s.displayName() ?? '',
                 team: s.team(),
+                startPos: s.startPos(),
             });
         }
         const newGameName = u.gameName() ?? '';

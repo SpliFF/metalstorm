@@ -281,6 +281,19 @@ button.danger:hover { background: #cc3333; }
     min-width: 60px;
 }
 
+/* Start-position dropdown appears next to the team select in each
+ * player and AI row. Uses the same visual treatment as .team-select
+ * so the row reads as one coherent control strip. */
+.startpos-select {
+    padding: 4px 8px;
+    background: #0f1626;
+    color: #e0e0e0;
+    border: 1px solid #334;
+    border-radius: 4px;
+    font-size: 12px;
+}
+.startpos-select:disabled { color: #667; border-color: #223; }
+
 .ai-remove-btn {
     background: transparent;
     color: #f77;

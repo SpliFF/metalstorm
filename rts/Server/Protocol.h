@@ -66,13 +66,15 @@ inline std::vector<uint8_t> BuildAuthResponse(
     SpringWeb::AuthStatus status,
     const std::string& token,
     uint32_t playerId,
-    const std::string& message = "")
+    const std::string& message = "",
+    int8_t team = -1)
 {
     flatbuffers::FlatBufferBuilder fbb(256);
     auto resp = SpringWeb::CreateAuthResponseDirect(fbb, status,
         token.empty() ? nullptr : token.c_str(),
         playerId,
-        message.empty() ? nullptr : message.c_str());
+        message.empty() ? nullptr : message.c_str(),
+        team);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_AuthResponse, resp.Union());
 }
 
@@ -139,7 +141,8 @@ inline std::vector<uint8_t> BuildRoomStateUpdate(const GameRoom& room) {
     for (const auto& p : room.players) {
         auto nameOff = fbb.CreateString(p.username);
         playerOffsets.push_back(SpringWeb::CreateRoomPlayerInfo(
-            fbb, p.playerId, nameOff, p.team, p.ready, p.isSpectator, p.isHost));
+            fbb, p.playerId, nameOff, p.team, p.ready, p.isSpectator,
+            p.isHost, p.startPos));
     }
     auto playersVec = fbb.CreateVector(playerOffsets);
 
@@ -151,7 +154,7 @@ inline std::vector<uint8_t> BuildRoomStateUpdate(const GameRoom& room) {
         auto aiIdOff = fbb.CreateString(s.aiId);
         auto displayOff = fbb.CreateString(s.displayName);
         aiSlotOffsets.push_back(SpringWeb::CreateRoomAISlot(
-            fbb, aiIdOff, displayOff, s.team));
+            fbb, aiIdOff, displayOff, s.team, s.startPos));
     }
     auto aiSlotsVec = fbb.CreateVector(aiSlotOffsets);
 

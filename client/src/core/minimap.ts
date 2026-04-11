@@ -298,8 +298,18 @@ export class Minimap {
         }
     }
 
+    /// The detached viewport popup, if the user has opened one. We
+    /// keep the handle around so `dispose()` can actively close it
+    /// when the main window leaves the game — without this the
+    /// popup stays alive as an orphaned WebSocket to a game server
+    /// that's either stopped or now belongs to a different room.
+    private detachedWindow: Window | null = null;
+
     /** Open this minimap in a detached browser window. */
     detach(): Window | null {
+        // If a popup is already open from a previous detach(), reuse
+        // it rather than stacking a second one. window.open() with
+        // the same target name reloads the existing popup in place.
         const token = localStorage.getItem('springrts-session-token') ?? '';
         // The detached viewport needs to connect to the *game server*, not
         // the lobby — otherwise it authenticates fine but never receives
@@ -318,8 +328,9 @@ export class Minimap {
         // renders entities on a black grid with no terrain context.
         if (this.mapId) params.set('mapId', this.mapId);
         const url = `/viewport.html?${params.toString()}`;
-        return window.open(url, 'springrts-minimap',
+        this.detachedWindow = window.open(url, 'springrts-minimap',
             `width=${this.canvasSize + 20},height=${this.canvasSize + 20},resizable=yes`);
+        return this.detachedWindow;
     }
 
     private handleClick(e: MouseEvent): void {
@@ -356,6 +367,20 @@ export class Minimap {
     }
 
     dispose(): void {
+        // Tell any detached viewport popup to close itself. We send
+        // the broadcast *before* closing our own channel so the
+        // message actually goes out — BroadcastChannel is fire-and-
+        // forget, but closing the channel in the same tick
+        // sometimes swallows the final post on Chrome. Also try the
+        // direct `window.close()` path as a backup; popups that
+        // were opened by this same window are allowed to be closed
+        // by it without requiring user interaction.
+        this.channel?.postMessage({ type: 'gameEnded' });
+        if (this.detachedWindow && !this.detachedWindow.closed) {
+            try { this.detachedWindow.close(); } catch { /* cross-origin or gone */ }
+        }
+        this.detachedWindow = null;
+
         this.scene.dispose();
         this.engine.dispose();
         this.canvas.remove();
