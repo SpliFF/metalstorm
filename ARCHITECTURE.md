@@ -97,6 +97,9 @@ build/debug/_deps/flatbuffers-build/flatc --cpp -o rts/ schemas/protocol.fbs
 | `core/map-data.ts` | Parses MapData FlatBuffer into `ParsedMapData` (heightmap, features, tiles, URLs). |
 | `core/lua-widget-host.ts` | Fengari Lua runtime for map widgets (lava, water shaders). |
 | `lobby/lobby-ui.ts` | Full lobby UI: login, room browser, room setup, AI slots, start positions. |
+| `ui/ui.ts` | Shared helpers: `injectStyle()`, `renderTemplate()`. |
+| `ui/game/loader.ts` | In-game template loader: `GameTemplates` interface, bundled defaults, `loadGameTemplates()` fetcher. |
+| `ui/lobby/loader.ts` | Lobby template loader: `LobbyTemplates` interface, bundled defaults, `loadGameLobbyTemplates()` fetcher. |
 | `ui/hud/hud.html+css` | In-game HUD (entity count, selection, quit button). |
 | `ui/quit-confirm/` | Quit confirmation overlay. |
 | `ui/game-over/` | Game over results overlay. |
@@ -357,5 +360,4 @@ first entity/projectile state update that references it.
 Playable end-to-end: lobby → create room → start game → fight → game-over → return to lobby.
 Player disconnect handling: server detects WebSocket close, fires `PlayerRemoved` Lua callin, broadcasts `PlayerLeft` to remaining clients, cleans up session. Default engine gadget ends game when no humans remain.
 
-**Next tasks (PLAN-next-steps.md follow-ups):**
-1. Runtime game-override UI templates
+All tasks from PLAN-next-steps.md are complete.

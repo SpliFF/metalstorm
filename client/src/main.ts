@@ -25,16 +25,16 @@ import {
     getDefaultLobbyTemplates,
     loadGameLobbyTemplates,
 } from './ui/lobby/loader.js';
+import {
+    getDefaultGameTemplates,
+    loadGameTemplates,
+    type GameTemplates,
+} from './ui/game/loader.js';
 
-// UI templates + stylesheets. Each component lives under src/ui/<name>/
-// as plain .html + .css files so games can ship their own replacements.
-// Vite's `?raw` query returns the file contents as a string at build time.
-import hudHtml from './ui/hud/hud.html?raw';
-import hudCss from './ui/hud/hud.css?raw';
-import quitConfirmHtml from './ui/quit-confirm/quit-confirm.html?raw';
-import quitConfirmCss from './ui/quit-confirm/quit-confirm.css?raw';
-import gameOverHtml from './ui/game-over/game-over.html?raw';
-import gameOverCss from './ui/game-over/game-over.css?raw';
+// Active in-game templates. Starts with engine defaults; overwritten when
+// a game id is resolved (URL param, localStorage, or room selection).
+// createHUD / showQuitConfirm / showGameOver read from this at call time.
+let gameTemplates: GameTemplates = getDefaultGameTemplates();
 
 let engine: Engine | null = null;
 let entityRenderer: EntityRenderer | null = null;
@@ -51,12 +51,16 @@ let gameConn: Connection | null = null;
 // --- HUD ---
 
 function createHUD(): void {
-    injectStyle('hud-style', hudCss);
+    // Remove a previous HUD if present (e.g. after a template hot-swap).
+    document.getElementById('game-hud')?.remove();
+    document.getElementById('hud-style')?.remove();
+
+    injectStyle('hud-style', gameTemplates.hudCss);
 
     const hud = document.createElement('div');
     hud.id = 'game-hud';
     hud.style.display = 'none'; // hidden until game starts
-    hud.innerHTML = hudHtml;
+    hud.innerHTML = gameTemplates.hudHtml;
     document.body.appendChild(hud);
 
     document.getElementById('hud-quit-btn')?.addEventListener('click', () => {
@@ -188,11 +192,11 @@ function showQuitConfirm(): void {
         return;
     }
 
-    injectStyle('quit-confirm-style', quitConfirmCss);
+    injectStyle('quit-confirm-style', gameTemplates.quitConfirmCss);
 
     const overlay = document.createElement('div');
     overlay.id = 'quit-confirm-overlay';
-    overlay.innerHTML = quitConfirmHtml;
+    overlay.innerHTML = gameTemplates.quitConfirmHtml;
     document.body.appendChild(overlay);
 
     document.getElementById('quit-cancel-btn')?.addEventListener('click', () => {
@@ -204,11 +208,11 @@ function showQuitConfirm(): void {
 }
 
 function showGameOver(frame: number): void {
-    injectStyle('game-over-style', gameOverCss);
+    injectStyle('game-over-style', gameTemplates.gameOverCss);
 
     const overlay = document.createElement('div');
     overlay.id = 'game-over-overlay';
-    overlay.innerHTML = renderTemplate(gameOverHtml, { frame });
+    overlay.innerHTML = renderTemplate(gameTemplates.gameOverHtml, { frame });
     document.body.appendChild(overlay);
 
     document.getElementById('return-lobby-btn')?.addEventListener('click', () => {
@@ -608,5 +612,16 @@ document.addEventListener('DOMContentLoaded', () => {
         loadGameLobbyTemplates(initialGameId, CONFIG.httpUrl)
             .then((templates) => lobbyUI?.setTemplates(templates))
             .catch((err) => console.warn('[lobby] game UI override failed:', err));
+
+        loadGameTemplates(initialGameId, CONFIG.httpUrl)
+            .then((templates) => {
+                gameTemplates = templates;
+                // Re-create HUD with the game's overridden templates. The
+                // HUD was already built above with engine defaults — swap
+                // it now that the override has landed. Re-attaches the
+                // quit button listener.
+                createHUD();
+            })
+            .catch((err) => console.warn('[game] game UI override failed:', err));
     }
 });
