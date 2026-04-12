@@ -46,6 +46,7 @@
 #include <filesystem>
 #include <random>
 #include <thread>
+#include <unordered_set>
 
 static std::atomic<bool> keepRunning{true};
 
@@ -537,6 +538,33 @@ int main(int argc, char* argv[])
     std::unordered_map<ClientID, int> clientPlayerNum;
     int nextPlayerNum = 0;
 
+    // --- Waiting-for-players ---
+    //
+    // GameStart is deferred until all roster players have connected
+    // and registered CPlayers. This matches real Spring's behaviour
+    // where GameStart fires after all clients signal "loaded".
+    // Track which roster usernames have connected so we know when
+    // everyone is in. Dev-mode (empty roster) fires GameStart
+    // immediately since there's nobody to wait for.
+    std::unordered_set<std::string> connectedRosterPlayers;
+    const size_t rosterPlayersNeeded = requestedPlayers.size();
+
+    auto checkAndFireGameStart = [&]() {
+        if (sim.HasGameStarted())
+            return;
+        if (connectedRosterPlayers.size() < rosterPlayersNeeded)
+            return;
+        std::fprintf(stderr, "[spring-server] all %zu roster players connected, firing GameStart\n",
+            rosterPlayersNeeded);
+        sim.FireGameStart();
+    };
+
+    // Dev-mode: no roster means no players to wait for
+    if (rosterPlayersNeeded == 0) {
+        std::fprintf(stderr, "[spring-server] no player roster (dev mode), firing GameStart immediately\n");
+        sim.FireGameStart();
+    }
+
     // --- AI slot resolution ---
     //
     // The lobby passes zero or more `--ai <id>:<team>` pairs on the
@@ -598,6 +626,10 @@ int main(int argc, char* argv[])
     const auto tickInterval = std::chrono::microseconds(1'000'000 / GAME_SPEED);
     auto nextTick = std::chrono::steady_clock::now();
 
+    if (sim.IsWaitingForPlayers()) {
+        std::fprintf(stderr, "[spring-server] waiting for %zu player(s) to connect before starting game...\n",
+            rosterPlayersNeeded);
+    }
     std::fprintf(stderr, "[spring-server] entering sim loop at %d Hz (port %d)\n", GAME_SPEED, port);
 
     while (keepRunning.load()) {
@@ -722,6 +754,11 @@ int main(int argc, char* argv[])
                                 "[auth] client %u reconnected as '%s' (id=%lld) team=%d\n",
                                 msg.clientId, reconnectUser->username.c_str(),
                                 userId, team);
+                            // Track roster connection for GameStart
+                            if (playerTeamByUsername.count(reconnectUser->username)) {
+                                connectedRosterPlayers.insert(reconnectUser->username);
+                                checkAndFireGameStart();
+                            }
                             if (!mapMeta.id.empty()) {
                                 auto mapDataMsg = Protocol::BuildMapData(mapMeta);
                                 net.Send(msg.clientId, mapDataMsg.data(), mapDataMsg.size());
@@ -820,6 +857,12 @@ int main(int argc, char* argv[])
                     }
                     std::fprintf(stderr, "[auth] client %u authenticated as '%s' (id=%lld) team=%d\n",
                         msg.clientId, username, user->id, team);
+
+                    // Track roster connection for GameStart
+                    if (playerTeamByUsername.count(user->username)) {
+                        connectedRosterPlayers.insert(user->username);
+                        checkAndFireGameStart();
+                    }
 
                     // Send room list to newly authenticated client
                     {
@@ -1076,7 +1119,9 @@ int main(int argc, char* argv[])
             }
         }
 
-        sim.SimFrame();
+        // Only tick the sim after GameStart has fired (all players in)
+        if (sim.HasGameStarted())
+            sim.SimFrame();
 
         // Check win condition every ~1s (30 ticks) after frame 30
         static int winningTeam = -1;

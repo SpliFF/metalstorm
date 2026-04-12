@@ -252,175 +252,20 @@ void CSimulation::InitSubsystems(bool hasMap)
 }
 
 
-void CSimulation::SetupTestGame()
+void CSimulation::FireGameStart()
 {
-    if (!defsLoaded || !mapLoaded)
+    if (!scriptingLoaded || gameStarted)
         return;
 
-    std::fprintf(stderr, "[sim] setting up game...\n");
+    std::fprintf(stderr, "[sim] firing GameStart\n");
+    eventHandler.GameStart();
+    gameStarted = true;
 
-    const auto& defs = unitDefHandler->GetUnitDefsVec();
-
-    // Try to find Paper Tanks units by name first
-    const char* wantedNames[] = {"pt_lighttank", "pt_heavytank", "pt_artillery", "pt_scout"};
-    std::vector<const UnitDef*> spawnDefs;
-
-    for (const char* name : wantedNames) {
-        for (size_t i = 1; i < defs.size(); i++) {
-            if (defs[i].name == name) {
-                spawnDefs.push_back(&defs[i]);
-                break;
-            }
-        }
-    }
-
-    // Fallback: pick any movable land units
-    if (spawnDefs.empty()) {
-        for (size_t i = 1; i < defs.size() && spawnDefs.size() < 4; i++) {
-            if (defs[i].canmove && !defs[i].IsAirUnit())
-                spawnDefs.push_back(&defs[i]);
-        }
-    }
-
-    if (spawnDefs.empty()) {
-        std::fprintf(stderr, "[sim] WARNING: no spawnable unit defs found\n");
-        return;
-    }
-    std::fprintf(stderr, "[sim] spawning: ");
-    for (auto* d : spawnDefs) std::fprintf(stderr, "'%s' ", d->name.c_str());
-    std::fprintf(stderr, "\n");
-
-    const float3 mapCenter(mapDims.mapx * SQUARE_SIZE * 0.5f, 0.0f,
-                           mapDims.mapy * SQUARE_SIZE * 0.5f);
-
-    // Build the effective roster. When the lobby passes --player /
-    // --ai args, rosterEntries is already filled and we spawn one
-    // team per entry at that entry's map start position. When the
-    // vector is empty (direct CLI invocation for dev smoketests),
-    // fall back to the historical 2-team "teams in the middle of
-    // the map" layout so the smoketest keeps working.
-    std::vector<RosterEntry> effective = rosterEntries;
-    const bool usingFallback = effective.empty();
-    if (usingFallback) {
-        effective.push_back({0, -1});
-        effective.push_back({1, -1});
-    }
-
-    // Resolve the map's start positions once via MapParser. mapinfo
-    // stores them under `teams[i].startPos = {x, z}`; MapParser's
-    // GetStartPos returns false if the team index has no entry. We
-    // look up on demand rather than caching so the parser's error
-    // messages surface through the normal log.
-    const std::string mapConfig = MapParser::GetMapConfigName(mapInfo->map.name);
-    MapParser mapParser(mapConfig);
-
-    auto teamStartPos = [&](int posIdx, float3& out) -> bool {
-        if (posIdx < 0) return false;
-        if (!mapParser.IsValid()) return false;
-        return mapParser.GetStartPos(posIdx, out);
-    };
-
-    // Track spawn counts per team for logging. We don't care about
-    // a specific upper bound — the handler serves N teams and we
-    // emit a per-team count at the end.
-    std::vector<int> spawnedPerTeam;
-
-    for (size_t e = 0; e < effective.size(); ++e) {
-        const RosterEntry& entry = effective[e];
-        const int team = entry.team;
-
-        // Resolve spawn origin: prefer the authored start position;
-        // fall back to a deterministic grid layout around the map
-        // centre so even a map with no `teams[]` table gives
-        // playable spawns. Fallback layout is a square-ish ring
-        // spaced 200 elmos apart to keep small maps visible and
-        // large maps from stacking units on top of each other.
-        float3 origin = mapCenter;
-        if (!teamStartPos(entry.startPosIdx, origin)) {
-            if (usingFallback) {
-                // Preserve the legacy "teams 100 elmos apart on x"
-                // layout so dev smoketests look identical.
-                origin.x = mapCenter.x + (team == 0 ? -100.0f : 100.0f);
-            } else {
-                // Spread entries in a ring around the map centre
-                // by angle derived from their index.
-                const float angle =
-                    (static_cast<float>(e) / effective.size()) * 6.2831853f;
-                const float radius = 400.0f;
-                origin.x = mapCenter.x + radius * std::cos(angle);
-                origin.z = mapCenter.z + radius * std::sin(angle);
-            }
-            std::fprintf(stderr,
-                "[sim] team %d: no map start pos (idx=%d), using fallback (%.0f, %.0f)\n",
-                team, entry.startPosIdx, origin.x, origin.z);
-        }
-
-        int spawnedThisTeam = 0;
-        const int totalPerTeam = static_cast<int>(spawnDefs.size()) * 3;
-        for (size_t d = 0; d < spawnDefs.size(); d++) {
-            for (int i = 0; i < 3; i++) {
-                float3 pos = origin;
-                // Spread units along z, centred on origin.z. Use
-                // signed-int math — unsigned underflow from size_t
-                // arithmetic happily produces astronomical values.
-                const int unitIdx = static_cast<int>(d) * 3 + i;
-                pos.z += (unitIdx - (totalPerTeam - 1) * 0.5f) * 40.0f;
-                // y is left at 0 intentionally — CUnitLoader::LoadUnit
-                // ground-clamps non-flying unit spawn positions
-                // for us.
-
-                UnitLoadParams params;
-                params.unitDef = spawnDefs[d];
-                params.builder = nullptr;
-                params.pos = pos;
-                params.speed = ZeroVector;
-                params.unitID = -1;
-                params.teamID = team;
-                // Face units toward the map centre so multi-team
-                // games look sensible. Heading is 0..65535 unsigned;
-                // we just pick one of four cardinal facings based
-                // on the dominant axis of (centre - origin).
-                const float dx = mapCenter.x - origin.x;
-                const float dz = mapCenter.z - origin.z;
-                if (std::fabs(dx) > std::fabs(dz))
-                    params.facing = (dx > 0) ? 1 : 3; // east or west
-                else
-                    params.facing = (dz > 0) ? 0 : 2; // south or north
-                params.beingBuilt = false;
-                params.flattenGround = false;
-
-                try {
-                    CUnit* unit = unitLoader->LoadUnit(params);
-                    if (unit != nullptr)
-                        spawnedThisTeam++;
-                } catch (const std::exception& ex) {
-                    std::fprintf(stderr, "[sim] failed to spawn '%s' for team %d: %s\n",
-                        spawnDefs[d]->name.c_str(), team, ex.what());
-                }
-            }
-        }
-        if (static_cast<size_t>(team) >= spawnedPerTeam.size())
-            spawnedPerTeam.resize(team + 1, 0);
-        spawnedPerTeam[team] += spawnedThisTeam;
-    }
-
-    int total = 0;
-    for (int n : spawnedPerTeam) total += n;
-    std::fprintf(stderr, "[sim] spawned %d units across %zu team(s):",
-        total, effective.size());
-    for (size_t t = 0; t < spawnedPerTeam.size(); ++t) {
-        if (spawnedPerTeam[t] > 0)
-            std::fprintf(stderr, " t%zu=%d", t, spawnedPerTeam[t]);
-    }
-    std::fprintf(stderr, "\n");
-
-    // Units spawn idle — strategic direction is delegated to the
-    // AI slot system (content/engine/ai, content/games/<game>/ai)
-    // which the lobby host opts into before game start. Spring's
-    // normal FIRESTATE_FIREATWILL default is preserved, so a parked
-    // unit still returns fire on enemies in range; only strategic
-    // movement/attack decisions are now the AI's responsibility.
-    std::fprintf(stderr, "[sim] units spawned idle (AI opt-in via lobby)\n");
+    // Tell the lobby we've made it past the boot sequence so
+    // it can transition the room from Loading to Active. No-op
+    // if no event pipe was provided on the command line (dev
+    // smoketest path).
+    LobbyIpc::SendGameStarted(static_cast<uint32_t>(gs->frameNum));
 }
 
 
@@ -547,37 +392,12 @@ void CSimulation::Init(const std::string& mapName)
     InitSubsystems(hasMap);
     mapLoaded = hasMap;
 
-    // Start game scripting (LuaRules, LuaGaia) BEFORE spawning any
-    // units. If we spawned first, every UnitCreated / UnitFinished
-    // event would fire before the gadget handler had a chance to
-    // register its listeners — gadgets would load into a world full
-    // of units they never saw being born. Real Spring games rely on
-    // game_spawn.lua firing from GameStart to create starting units,
-    // which avoids the ordering problem entirely; we preserve that
-    // invariant here so ported gadgets behave the same way.
+    // Load game scripting (LuaRules, LuaGaia). Gadgets initialise
+    // their data structures but GameStart does NOT fire yet — that
+    // waits until all players have connected and registered CPlayers
+    // via FireGameStart(). Real Spring also defers GameStart until
+    // all clients signal "loaded".
     InitScripting();
-
-    // Fire GameStart once LuaRules is live. Real Spring calls this
-    // after the loading screen finishes; we do it immediately after
-    // script init since there's no loading screen to wait for.
-    // Without this, gadget:GameStart() callins never fire and
-    // anything that initialises team state / spawns starting units
-    // from there silently does nothing.
-    if (scriptingLoaded) {
-        std::fprintf(stderr, "[sim] firing GameStart\n");
-        eventHandler.GameStart();
-        // Tell the lobby we've made it past the boot sequence so
-        // it can transition the room from Loading to Active. No-op
-        // if no event pipe was provided on the command line (dev
-        // smoketest path).
-        LobbyIpc::SendGameStarted(static_cast<uint32_t>(gs->frameNum));
-    }
-
-    // Spawn test units for development / headless integration
-    // testing. In a real game this call goes away — starting units
-    // come from a LuaRules `game_spawn` gadget, which runs at this
-    // point because GameStart has now fired.
-    SetupTestGame();
 
     running = true;
     std::fprintf(stderr, "[sim] initialised (frame %d, defs=%s, map=%s)\n",

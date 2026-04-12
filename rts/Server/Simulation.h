@@ -37,7 +37,21 @@ public:
 
     /// Initialise all sim subsystems. Must be called before SimFrame().
     /// mapName is the path to the .smf file (empty = no map).
+    /// After Init(), the sim is ready but GameStart has NOT fired.
+    /// Call FireGameStart() once all players have connected.
     void Init(const std::string& mapName = "");
+
+    /// Fire the GameStart event into Lua and begin the game.
+    /// Must be called after Init() and after all players are
+    /// registered with playerHandler. Gadgets that spawn starting
+    /// units (e.g. start_unit_setup.lua) run during this call.
+    void FireGameStart();
+
+    /// True after Init(), false after FireGameStart().
+    bool IsWaitingForPlayers() const { return scriptingLoaded && !gameStarted; }
+
+    /// True after FireGameStart() has run.
+    bool HasGameStarted() const { return gameStarted; }
 
     /// Shut down all sim subsystems.
     void Kill();
@@ -56,13 +70,13 @@ private:
     bool LoadDefs();
     bool LoadMap(const std::string& mapName);
     void InitSubsystems(bool hasMap);
-    void SetupTestGame();
     void InitScripting();
 
     bool running = false;
     bool defsLoaded = false;
     bool mapLoaded = false;
     bool scriptingLoaded = false;
+    bool gameStarted = false;
     std::unique_ptr<LuaParser> defsParser;
 
     /// Game-start roster installed via SetRoster() before Init().
