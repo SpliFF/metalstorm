@@ -13,6 +13,7 @@ import { GameListUpdate, GameListUpdateT } from '../spring-web/game-list-update.
 import { GameUnitDefs, GameUnitDefsT } from '../spring-web/game-unit-defs.js';
 import { MapData, MapDataT } from '../spring-web/map-data.js';
 import { MapListUpdate, MapListUpdateT } from '../spring-web/map-list-update.js';
+import { PlayerLeft, PlayerLeftT } from '../spring-web/player-left.js';
 import { Pong, PongT } from '../spring-web/pong.js';
 import { ReconnectResponse, ReconnectResponseT } from '../spring-web/reconnect-response.js';
 import { ResourceUpdate, ResourceUpdateT } from '../spring-web/resource-update.js';
@@ -43,13 +44,14 @@ export enum ServerPayload {
   MapData = 16,
   AIListUpdate = 17,
   GameListUpdate = 18,
-  GameUnitDefs = 19
+  GameUnitDefs = 19,
+  PlayerLeft = 20
 }
 
 export function unionToServerPayload(
   type: ServerPayload,
-  accessor: (obj:AIListUpdate|AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameUnitDefs|MapData|MapListUpdate|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError) => AIListUpdate|AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameUnitDefs|MapData|MapListUpdate|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|null
-): AIListUpdate|AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameUnitDefs|MapData|MapListUpdate|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|null {
+  accessor: (obj:AIListUpdate|AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameUnitDefs|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError) => AIListUpdate|AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameUnitDefs|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|null
+): AIListUpdate|AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameUnitDefs|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|null {
   switch(ServerPayload[type]) {
     case 'NONE': return null; 
     case 'AuthResponse': return accessor(new AuthResponse())! as AuthResponse;
@@ -71,15 +73,16 @@ export function unionToServerPayload(
     case 'AIListUpdate': return accessor(new AIListUpdate())! as AIListUpdate;
     case 'GameListUpdate': return accessor(new GameListUpdate())! as GameListUpdate;
     case 'GameUnitDefs': return accessor(new GameUnitDefs())! as GameUnitDefs;
+    case 'PlayerLeft': return accessor(new PlayerLeft())! as PlayerLeft;
     default: return null;
   }
 }
 
 export function unionListToServerPayload(
   type: ServerPayload, 
-  accessor: (index: number, obj:AIListUpdate|AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameUnitDefs|MapData|MapListUpdate|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError) => AIListUpdate|AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameUnitDefs|MapData|MapListUpdate|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|null, 
+  accessor: (index: number, obj:AIListUpdate|AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameUnitDefs|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError) => AIListUpdate|AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameUnitDefs|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|null, 
   index: number
-): AIListUpdate|AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameUnitDefs|MapData|MapListUpdate|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|null {
+): AIListUpdate|AuthResponse|ChatReceive|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameUnitDefs|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|null {
   switch(ServerPayload[type]) {
     case 'NONE': return null; 
     case 'AuthResponse': return accessor(index, new AuthResponse())! as AuthResponse;
@@ -101,6 +104,7 @@ export function unionListToServerPayload(
     case 'AIListUpdate': return accessor(index, new AIListUpdate())! as AIListUpdate;
     case 'GameListUpdate': return accessor(index, new GameListUpdate())! as GameListUpdate;
     case 'GameUnitDefs': return accessor(index, new GameUnitDefs())! as GameUnitDefs;
+    case 'PlayerLeft': return accessor(index, new PlayerLeft())! as PlayerLeft;
     default: return null;
   }
 }

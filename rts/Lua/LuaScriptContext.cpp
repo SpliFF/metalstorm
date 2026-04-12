@@ -124,6 +124,15 @@ void LuaScriptContext::HandleEvent(const ScriptEvent& event) {
         case ScriptEventType::PlayerChanged:
             handle->PlayerChanged(event.intData[0]);
             break;
+        case ScriptEventType::PlayerAdded:
+            handle->PlayerAdded(event.intData[0]);
+            break;
+        case ScriptEventType::PlayerRemoved:
+            handle->PlayerRemoved(event.intData[0], event.intData[1]);
+            break;
+        case ScriptEventType::GameOver:
+            handle->GameOver({});
+            break;
         default:
             // Events not yet bridged — the CLuaHandle still receives
             // them directly from CEventHandler for now

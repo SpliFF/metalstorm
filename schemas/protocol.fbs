@@ -320,6 +320,18 @@ table ServerError {
     message: string;
 }
 
+/// Broadcast to remaining clients when a player disconnects from
+/// the game server. The game's Lua scripts decide what happens next
+/// (kill units, pause, hand to AI, etc.) — this message is purely
+/// informational so clients can update their UI.
+table PlayerLeft {
+    player_id: uint32;
+    username: string;
+    team: int8;
+    /// 0 = voluntary quit, 1 = kicked, 2 = connection timeout
+    reason: uint8;
+}
+
 // ============================================================
 // Lobby messages (server → client)
 // ============================================================
@@ -628,6 +640,7 @@ union ServerPayload {
     AIListUpdate,
     GameListUpdate,
     GameUnitDefs,
+    PlayerLeft,
 }
 
 table ServerMessage {

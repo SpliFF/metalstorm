@@ -56,6 +56,10 @@ public:
     /// Called from the sim thread each tick.
     std::vector<InboundMessage> DrainInbound();
 
+    /// Drain ClientIDs that disconnected since the last call.
+    /// Called from the sim thread each tick, after DrainInbound().
+    std::vector<ClientID> DrainDisconnects();
+
     /// Send a binary message to a specific client.
     /// Thread-safe — can be called from the sim thread.
     void Send(ClientID clientId, const uint8_t* data, size_t len);
@@ -80,6 +84,10 @@ private:
     // Inbound message queue (network thread writes, sim thread reads)
     std::mutex inboundMutex;
     std::vector<InboundMessage> inboundQueue;
+
+    // Disconnect queue (network thread writes, sim thread reads)
+    std::mutex disconnectMutex;
+    std::vector<ClientID> disconnectQueue;
 
     // Opaque pointer to uWS loop for cross-thread wakeup
     struct Impl;

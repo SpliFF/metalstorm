@@ -38,6 +38,7 @@ export { MapStartPos, MapStartPosT } from './spring-web/map-start-pos.js';
 export { MapWater, MapWaterT } from './spring-web/map-water.js';
 export { Ping, PingT } from './spring-web/ping.js';
 export { PlayerCommand, PlayerCommandT } from './spring-web/player-command.js';
+export { PlayerLeft, PlayerLeftT } from './spring-web/player-left.js';
 export { Pong, PongT } from './spring-web/pong.js';
 export { ReconnectRequest, ReconnectRequestT } from './spring-web/reconnect-request.js';
 export { ReconnectResponse, ReconnectResponseT } from './spring-web/reconnect-response.js';

@@ -122,6 +122,16 @@ inline std::vector<uint8_t> BuildEntityDestroy(uint32_t entityId, uint8_t destru
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_EntityDestroy, destroy.Union());
 }
 
+/// Build a PlayerLeft message (broadcast to remaining clients on disconnect).
+inline std::vector<uint8_t> BuildPlayerLeft(
+    uint32_t playerId, const std::string& username, int8_t team, uint8_t reason)
+{
+    flatbuffers::FlatBufferBuilder fbb(256);
+    auto nameOff = fbb.CreateString(username);
+    auto pl = SpringWeb::CreatePlayerLeft(fbb, playerId, nameOff, team, reason);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_PlayerLeft, pl.Union());
+}
+
 /// Build a GameInfo message (map, game, speed, frame, paused).
 inline std::vector<uint8_t> BuildGameInfo(
     const std::string& mapName, const std::string& gameName,

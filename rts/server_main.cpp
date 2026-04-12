@@ -28,6 +28,8 @@
 #include "Sim/Units/CommandAI/Command.h"
 #include "Sim/Misc/GlobalConstants.h"
 #include "Sim/Misc/TeamHandler.h"
+#include "Game/Players/PlayerHandler.h"
+#include "System/EventHandler.h"
 #include "Map/ReadMap.h"
 #include "System/FileSystem/FileHandler.h"
 #include "System/Misc/SpringTime.h"
@@ -527,6 +529,12 @@ int main(int argc, char* argv[])
         playerTeamByUsername[rp.username] = rp.team;
     }
 
+    // Map WebSocket clientId → Spring playerNum so we can fire
+    // eventHandler.PlayerRemoved() with the correct id on disconnect.
+    // Populated during auth, consumed during disconnect handling.
+    std::unordered_map<ClientID, int> clientPlayerNum;
+    int nextPlayerNum = 0;
+
     // --- AI slot resolution ---
     //
     // The lobby passes zero or more `--ai <id>:<team>` pairs on the
@@ -696,6 +704,18 @@ int main(int argc, char* argv[])
                                 reconnectUser->username, reconnectUser->role);
                             if (auto* s = sessions.GetSession(msg.clientId))
                                 s->team = team;
+                            // Register a Spring CPlayer so Lua can
+                            // query player info and receive callins.
+                            {
+                                int pNum = nextPlayerNum++;
+                                CPlayer p;
+                                p.name = reconnectUser->username;
+                                p.team = team;
+                                p.active = true;
+                                p.playerNum = pNum;
+                                playerHandler.AddPlayer(p);
+                                clientPlayerNum[msg.clientId] = pNum;
+                            }
                             std::fprintf(stderr,
                                 "[auth] client %u reconnected as '%s' (id=%lld) team=%d\n",
                                 msg.clientId, reconnectUser->username.c_str(),
@@ -789,6 +809,18 @@ int main(int argc, char* argv[])
                     sessions.AddSession(msg.clientId, user->id, user->username, user->role);
                     if (auto* s = sessions.GetSession(msg.clientId))
                         s->team = team;
+                    // Register a Spring CPlayer so Lua can query
+                    // player info and receive callins.
+                    {
+                        int pNum = nextPlayerNum++;
+                        CPlayer p;
+                        p.name = user->username;
+                        p.team = team;
+                        p.active = true;
+                        p.playerNum = pNum;
+                        playerHandler.AddPlayer(p);
+                        clientPlayerNum[msg.clientId] = pNum;
+                    }
                     std::fprintf(stderr, "[auth] client %u authenticated as '%s' (id=%lld) team=%d\n",
                         msg.clientId, username, user->id, team);
 
@@ -1008,6 +1040,45 @@ int main(int argc, char* argv[])
                 }
                 default:
                     break;
+            }
+        }
+
+        // --- Handle client disconnects ---
+        // The network thread pushes disconnected ClientIDs to a queue;
+        // we drain it here and fire the Lua PlayerRemoved callin so
+        // game scripts can decide what to do (kill units, pause, hand
+        // to AI, end the game, etc.). We also broadcast a PlayerLeft
+        // FlatBuffers message so remaining clients can update their UI.
+        {
+            auto disconnects = net.DrainDisconnects();
+            for (ClientID dcId : disconnects) {
+                auto* session = sessions.GetSession(dcId);
+                if (!session) continue;
+
+                std::fprintf(stderr,
+                    "[player] '%s' (client %u, team %d) disconnected\n",
+                    session->username.c_str(), dcId, session->team);
+
+                // Broadcast PlayerLeft to remaining clients
+                auto plMsg = Protocol::BuildPlayerLeft(
+                    static_cast<uint32_t>(session->userId),
+                    session->username,
+                    static_cast<int8_t>(session->team),
+                    0 /* reason: voluntary quit */);
+                net.Broadcast(plMsg.data(), plMsg.size());
+
+                // Fire the Spring PlayerRemoved callin into Lua so
+                // game gadgets can react (the callin signature is
+                // gadget:PlayerRemoved(playerId, reason)).
+                auto pIt = clientPlayerNum.find(dcId);
+                if (pIt != clientPlayerNum.end()) {
+                    int pNum = pIt->second;
+                    playerHandler.PlayerLeft(pNum, 0);
+                    eventHandler.PlayerRemoved(pNum, 0);
+                    clientPlayerNum.erase(pIt);
+                }
+
+                sessions.RemoveSession(dcId);
             }
         }
 

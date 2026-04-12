@@ -125,6 +125,9 @@ struct ReconnectResponseBuilder;
 struct ServerError;
 struct ServerErrorBuilder;
 
+struct PlayerLeft;
+struct PlayerLeftBuilder;
+
 struct RoomPlayerInfo;
 struct RoomPlayerInfoBuilder;
 
@@ -529,11 +532,12 @@ enum ServerPayload : uint8_t {
   ServerPayload_AIListUpdate = 17,
   ServerPayload_GameListUpdate = 18,
   ServerPayload_GameUnitDefs = 19,
+  ServerPayload_PlayerLeft = 20,
   ServerPayload_MIN = ServerPayload_NONE,
-  ServerPayload_MAX = ServerPayload_GameUnitDefs
+  ServerPayload_MAX = ServerPayload_PlayerLeft
 };
 
-inline const ServerPayload (&EnumValuesServerPayload())[20] {
+inline const ServerPayload (&EnumValuesServerPayload())[21] {
   static const ServerPayload values[] = {
     ServerPayload_NONE,
     ServerPayload_AuthResponse,
@@ -554,13 +558,14 @@ inline const ServerPayload (&EnumValuesServerPayload())[20] {
     ServerPayload_MapData,
     ServerPayload_AIListUpdate,
     ServerPayload_GameListUpdate,
-    ServerPayload_GameUnitDefs
+    ServerPayload_GameUnitDefs,
+    ServerPayload_PlayerLeft
   };
   return values;
 }
 
 inline const char * const *EnumNamesServerPayload() {
-  static const char * const names[21] = {
+  static const char * const names[22] = {
     "NONE",
     "AuthResponse",
     "EntityCreate",
@@ -581,13 +586,14 @@ inline const char * const *EnumNamesServerPayload() {
     "AIListUpdate",
     "GameListUpdate",
     "GameUnitDefs",
+    "PlayerLeft",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameServerPayload(ServerPayload e) {
-  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_GameUnitDefs)) return "";
+  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_PlayerLeft)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesServerPayload()[index];
 }
@@ -670,6 +676,10 @@ template<> struct ServerPayloadTraits<SpringWeb::GameListUpdate> {
 
 template<> struct ServerPayloadTraits<SpringWeb::GameUnitDefs> {
   static const ServerPayload enum_value = ServerPayload_GameUnitDefs;
+};
+
+template<> struct ServerPayloadTraits<SpringWeb::PlayerLeft> {
+  static const ServerPayload enum_value = ServerPayload_PlayerLeft;
 };
 
 bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *obj, ServerPayload type);
@@ -3242,6 +3252,98 @@ inline ::flatbuffers::Offset<ServerError> CreateServerErrorDirect(
       _fbb,
       code,
       message__);
+}
+
+/// Broadcast to remaining clients when a player disconnects from
+/// the game server. The game's Lua scripts decide what happens next
+/// (kill units, pause, hand to AI, etc.) — this message is purely
+/// informational so clients can update their UI.
+struct PlayerLeft FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef PlayerLeftBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_PLAYER_ID = 4,
+    VT_USERNAME = 6,
+    VT_TEAM = 8,
+    VT_REASON = 10
+  };
+  uint32_t player_id() const {
+    return GetField<uint32_t>(VT_PLAYER_ID, 0);
+  }
+  const ::flatbuffers::String *username() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_USERNAME);
+  }
+  int8_t team() const {
+    return GetField<int8_t>(VT_TEAM, 0);
+  }
+  /// 0 = voluntary quit, 1 = kicked, 2 = connection timeout
+  uint8_t reason() const {
+    return GetField<uint8_t>(VT_REASON, 0);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_PLAYER_ID, 4) &&
+           VerifyOffset(verifier, VT_USERNAME) &&
+           verifier.VerifyString(username()) &&
+           VerifyField<int8_t>(verifier, VT_TEAM, 1) &&
+           VerifyField<uint8_t>(verifier, VT_REASON, 1) &&
+           verifier.EndTable();
+  }
+};
+
+struct PlayerLeftBuilder {
+  typedef PlayerLeft Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_player_id(uint32_t player_id) {
+    fbb_.AddElement<uint32_t>(PlayerLeft::VT_PLAYER_ID, player_id, 0);
+  }
+  void add_username(::flatbuffers::Offset<::flatbuffers::String> username) {
+    fbb_.AddOffset(PlayerLeft::VT_USERNAME, username);
+  }
+  void add_team(int8_t team) {
+    fbb_.AddElement<int8_t>(PlayerLeft::VT_TEAM, team, 0);
+  }
+  void add_reason(uint8_t reason) {
+    fbb_.AddElement<uint8_t>(PlayerLeft::VT_REASON, reason, 0);
+  }
+  explicit PlayerLeftBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<PlayerLeft> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<PlayerLeft>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<PlayerLeft> CreatePlayerLeft(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t player_id = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> username = 0,
+    int8_t team = 0,
+    uint8_t reason = 0) {
+  PlayerLeftBuilder builder_(_fbb);
+  builder_.add_username(username);
+  builder_.add_player_id(player_id);
+  builder_.add_reason(reason);
+  builder_.add_team(team);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<PlayerLeft> CreatePlayerLeftDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t player_id = 0,
+    const char *username = nullptr,
+    int8_t team = 0,
+    uint8_t reason = 0) {
+  auto username__ = username ? _fbb.CreateString(username) : 0;
+  return SpringWeb::CreatePlayerLeft(
+      _fbb,
+      player_id,
+      username__,
+      team,
+      reason);
 }
 
 struct RoomPlayerInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -5827,6 +5929,9 @@ struct ServerMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const SpringWeb::GameUnitDefs *payload_as_GameUnitDefs() const {
     return payload_type() == SpringWeb::ServerPayload_GameUnitDefs ? static_cast<const SpringWeb::GameUnitDefs *>(payload()) : nullptr;
   }
+  const SpringWeb::PlayerLeft *payload_as_PlayerLeft() const {
+    return payload_type() == SpringWeb::ServerPayload_PlayerLeft ? static_cast<const SpringWeb::PlayerLeft *>(payload()) : nullptr;
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_PAYLOAD_TYPE, 1) &&
@@ -5910,6 +6015,10 @@ template<> inline const SpringWeb::GameListUpdate *ServerMessage::payload_as<Spr
 
 template<> inline const SpringWeb::GameUnitDefs *ServerMessage::payload_as<SpringWeb::GameUnitDefs>() const {
   return payload_as_GameUnitDefs();
+}
+
+template<> inline const SpringWeb::PlayerLeft *ServerMessage::payload_as<SpringWeb::PlayerLeft>() const {
+  return payload_as_PlayerLeft();
 }
 
 struct ServerMessageBuilder {
@@ -6240,6 +6349,10 @@ inline bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *o
     }
     case ServerPayload_GameUnitDefs: {
       auto ptr = reinterpret_cast<const SpringWeb::GameUnitDefs *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case ServerPayload_PlayerLeft: {
+      auto ptr = reinterpret_cast<const SpringWeb::PlayerLeft *>(obj);
       return verifier.VerifyTable(ptr);
     }
     default: return true;

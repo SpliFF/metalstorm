@@ -44,7 +44,7 @@ build/debug/_deps/flatbuffers-build/flatc --cpp -o rts/ schemas/protocol.fbs
 
 | File | Purpose |
 |------|---------|
-| `server_main.cpp` | Game server entry. Auth, message dispatch, sim loop, entity streaming, win detection. |
+| `server_main.cpp` | Game server entry. Auth (registers CPlayer), message dispatch, disconnect handling (fires PlayerRemoved callin), sim loop, entity streaming, win detection. |
 | `lobby_main.cpp` | Lobby entry. Room management, game/map preprocessing, child process spawning, HTTP routes. |
 | `Server/Simulation.h/.cpp` | Initialises Spring subsystems, ticks physics/units/weapons/features each frame. |
 | `Server/NetworkServer.h/.cpp` | uWebSockets server. WebSocket + HTTP on same port. Send/broadcast helpers. |
@@ -113,6 +113,161 @@ build/debug/_deps/flatbuffers-build/flatc --cpp -o rts/ schemas/protocol.fbs
 Generated bindings:
 - C++: `rts/protocol_generated.h`
 - TypeScript: `client/src/protocol/spring-web/*.ts`
+
+### Lua Scripting System
+
+The Lua scripting system is the primary extension point for game logic. Game authors write Lua gadgets that run inside the server's simulation loop and respond to engine events. **All gameplay behavior** — win conditions, unit spawning, player-leave handling, resource rules, etc. — should be defined in Lua, not hardcoded in C++.
+
+#### Architecture Overview
+
+```
+C++ Engine Subsystems (units taking damage, dying, moving, etc.)
+        │
+        ▼
+CEventHandler  ─────────────────────────────►  CLuaHandle (direct, legacy)
+        │
+        ▼
+ScriptEventDispatcher (CEventClient)
+        │  converts C++ pointer-based events → entity-ID ScriptEvent structs
+        ▼
+IScriptContext instances (priority-ordered)
+        │
+        ├── LuaScriptContext (adapter) ──► CLuaHandle ──► LuaRules gadgets
+        └── LuaScriptContext (adapter) ──► CLuaHandle ──► LuaGaia gadgets
+```
+
+**Dual dispatch (transitional):** CLuaHandle still registers directly with CEventHandler in addition to receiving events through the ScriptEventDispatcher. This means Lua gadgets receive most events via the direct path. The ScriptEventDispatcher bridges a subset of events (see below). Over time, all events should route exclusively through the dispatcher so non-Lua contexts (future JS, AI thread pool) receive them too.
+
+#### Key Files
+
+| File | Purpose |
+|------|---------|
+| `rts/System/Scripting/ScriptEventDispatcher.h/.cpp` | CEventClient that bridges C++ events → ScriptEvent → IScriptContext instances |
+| `rts/System/Scripting/ScriptEvent.h` | Typed event payloads with entity IDs (not pointers). ~60 event types defined in `ScriptEventType` namespace |
+| `rts/System/Scripting/IScriptContext.h` | Language-agnostic interface. `HandleEvent()` for notifications, `HandleControlEvent()` for events that can block/modify sim state |
+| `rts/System/Scripting/ScriptPermissions.h` | Per-context permission model (synced, fullCtrl, fullRead, team access) |
+| `rts/Lua/LuaScriptContext.h/.cpp` | Adapter: wraps CLuaHandle as an IScriptContext. Converts ScriptEvent entity IDs back to C++ pointers for CLuaHandle methods |
+| `rts/Lua/LuaHandle.h/.cpp` | Base class for all Lua contexts. `HasCallIn(L, name)` checks if a Lua function exists; `RunCallIn()` executes it |
+| `rts/Lua/LuaHandleSynced.h` | Split synced/unsynced Lua states. CSyncedLuaHandle for sim-affecting code |
+| `rts/Lua/LuaRules.h/.cpp` | Game-wide gadget system. Loads `LuaRules/main.lua` (synced) and `LuaRules/draw.lua` (unsynced). Full access permissions |
+| `rts/Lua/LuaGaia.h/.cpp` | Map/environment gadgets. Same structure as LuaRules but for map-specific logic |
+| `rts/Lua/LuaSyncedCtrl.cpp` | C++ functions exposed to Lua as `Spring.*` — the synced API (150+ functions) |
+| `rts/Lua/LuaSyncedRead.cpp` | Read-only Lua API for querying game state (`Spring.GetUnitHealth()`, etc.) |
+| `rts/System/EventHandler.h/.cpp` | Engine event dispatcher. All CEventClient instances register here |
+
+#### Initialization Sequence
+
+In `CSimulation::InitScripting()` (called from `Simulation::Init()`):
+
+1. Create `ScriptEventDispatcher` singleton, register with `eventHandler`
+2. `CLuaRules::LoadHandler(true)` — loads `LuaRules/main.lua` from game content root
+3. Wrap in `LuaScriptContext`, add to dispatcher
+4. `CLuaGaia::LoadHandler(true)` — loads `LuaGaia/main.lua` from map content root
+5. Wrap in `LuaScriptContext`, add to dispatcher
+6. `eventHandler.GameStart()` — fires the `GameStart` callin to all contexts
+
+LuaRules looks for `LuaRules/main.lua` in the game's content root (e.g. `content/games/papertanks/LuaRules/main.lua`). LuaGaia looks in the map's content root. Engine-level base content is at `cont/base/springcontent/`.
+
+#### Event Types
+
+**Notification events** (engine → Lua, no return value):
+
+| Category | Events |
+|----------|--------|
+| Game lifecycle | `GamePreload`, `GameStart`, `GameOver`, `GameFrame` |
+| Team/Player | `TeamDied`, `TeamChanged`, `PlayerChanged`, `PlayerAdded`, `PlayerRemoved` |
+| Unit lifecycle | `UnitCreated`, `UnitFinished`, `UnitFromFactory`, `UnitDestroyed`, `UnitTaken`, `UnitGiven` |
+| Unit state | `UnitIdle`, `UnitCommand`, `UnitCmdDone`, `UnitDamaged`, `UnitStunned`, `UnitExperience`, `UnitMoved`, `UnitMoveFailed` |
+| Unit visibility | `UnitEnteredRadar`, `UnitEnteredLos`, `UnitLeftRadar`, `UnitLeftLos`, `UnitSeismicPing` |
+| Unit physics | `UnitEnteredWater`, `UnitEnteredAir`, `UnitLeftWater`, `UnitLeftAir`, `UnitLoaded`, `UnitUnloaded` |
+| Unit stealth | `UnitCloaked`, `UnitDecloaked` |
+| Features | `FeatureCreated`, `FeatureDestroyed`, `FeatureDamaged`, `FeatureMoved` |
+| Projectiles | `ProjectileCreated`, `ProjectileDestroyed` |
+| Misc | `StockpileChanged`, `Explosion` |
+
+**Control events** (engine → Lua, return value alters sim behavior):
+
+| Event | Effect |
+|-------|--------|
+| `AllowCommand` | Return `false` to veto a player command |
+| `AllowUnitCreation` | Return `false` to prevent unit construction |
+| `AllowUnitTransfer` | Return `false` to prevent unit transfer between teams |
+| `AllowUnitBuildStep` | Return `false` to block a build step |
+| `CommandFallback` | Handle custom command types |
+| `UnitPreDamaged` | Modify damage amount before application |
+
+#### ScriptEvent Dispatch Bridge Status
+
+Events currently bridged through `LuaScriptContext::HandleEvent()` (ScriptEventDispatcher → CLuaHandle):
+
+- `GameFrame`, `GameStart`, `GamePreload`, `GameOver`
+- `UnitCreated`, `UnitFinished`, `UnitDestroyed`, `UnitIdle`, `UnitDamaged`, `UnitMoved`
+- `TeamDied`, `PlayerChanged`, `PlayerAdded`, `PlayerRemoved`
+
+Events **not yet bridged** (Lua still receives these via CLuaHandle's direct CEventHandler registration):
+
+- `UnitFromFactory`, `UnitTaken`, `UnitGiven`, `UnitCommand`, `UnitCmdDone`
+- `UnitStunned`, `UnitExperience`, `UnitMoveFailed`, `UnitSeismicPing`
+- All visibility events (`UnitEnteredRadar`, etc.)
+- All feature/projectile events (though the dispatcher has C++ overrides, the context switch skips them)
+- Most control events (only `Explosion` is bridged; `AllowCommand` dispatcher override exists but isn't bridged at context level)
+
+This means these events work for Lua but would NOT reach a future non-Lua IScriptContext.
+
+#### Lua API (Spring.* functions)
+
+Game scripts call engine functions via the `Spring` table. Key categories:
+
+| Category | Functions | Notes |
+|----------|-----------|-------|
+| **Game control** | `GameOver({winningAllyTeams})`, `KillTeam(teamId)`, `AssignPlayerToTeam(playerId, teamId)` | `GameOver` fires the `GameOver` callin then signals game end |
+| **Unit create/destroy** | `CreateUnit(defName, x, y, z, facing, team)`, `DestroyUnit(unitId, selfDestr, reclaimed)`, `TransferUnit(unitId, newTeam)` | |
+| **Unit commands** | `GiveOrderToUnit(unitId, cmdId, params, options)`, `GiveOrderToUnitArray(unitIds, cmdId, params, options)` | |
+| **Unit state** | `SetUnitHealth(unitId, health)`, `SetUnitMaxHealth(unitId, maxHealth)`, `SetUnitExperience(unitId, exp)`, `SetUnitPosition(unitId, x, y, z)`, `AddUnitDamage(unitId, damage)` | 50+ unit state setters |
+| **Unit queries** | `GetUnitHealth(unitId)`, `GetUnitTeam(unitId)`, `GetUnitPosition(unitId)`, `GetTeamUnits(teamId)`, `GetAllUnits()` | In LuaSyncedRead.cpp |
+| **Resources** | `AddTeamResource(teamId, type, amount)`, `SetTeamResource(teamId, type, amount)`, `ShareTeamResource(fromTeam, toTeam, type, amount)` | |
+| **Game rules** | `SetGameRulesParam(name, value)`, `SetTeamRulesParam(teamId, name, value)`, `SetUnitRulesParam(unitId, name, value)` | Key-value store readable by all contexts |
+| **Features** | `CreateFeature(defName, x, y, z, heading)`, `DestroyFeature(featureId)`, `SetFeatureHealth(featureId, health)` | |
+| **Projectiles** | `SpawnProjectile(ownerId, params)`, `DeleteProjectile(projId)`, `SpawnExplosion(params)` | |
+| **Terrain** | `SetHeightMap(x, z, height)`, `AdjustHeightMap(x, z, delta)`, `SetMapSquareTerrainType(x, z, type)` | |
+
+Full API is defined in `LuaSyncedCtrl.cpp` (mutating) and `LuaSyncedRead.cpp` (queries). Functions are registered into the `Spring` global table via `REGISTER_LUA_CFUNC()` macros.
+
+#### Writing a Gadget
+
+A LuaRules gadget is a Lua file loaded by `LuaRules/main.lua`. The standard pattern:
+
+```lua
+function gadget:GetInfo()
+    return {
+        name    = "My Gadget",
+        desc    = "Does something",
+        author  = "Author",
+        layer   = 0,       -- execution priority (lower = earlier)
+        enabled = true,
+    }
+end
+
+-- Callins: define any of the event handler functions
+function gadget:GameStart()
+    -- runs once when the game starts
+end
+
+function gadget:GameFrame(frame)
+    -- runs every sim tick (30 Hz)
+end
+
+function gadget:UnitDestroyed(unitId, unitDefId, unitTeam, attackerId, attackerDefId, attackerTeam)
+    -- a unit died
+end
+
+function gadget:PlayerRemoved(playerId, reason)
+    -- a player disconnected — game decides what to do
+    -- reason: 0 = left, 1 = kicked, 2 = timeout
+end
+```
+
+Engine base gadgets live in `cont/base/springcontent/LuaRules/`. Game-specific gadgets live in `content/games/<game>/LuaRules/`. The engine base gadgets load first, providing default behaviors that games can override.
 
 ### Content & Data
 
@@ -188,8 +343,8 @@ Fallback: procedural shapes (box/cylinder/cone/sphere) when no .glb exists
 ## Current Status (2026-04-12)
 
 Playable end-to-end: lobby → create room → start game → fight → game-over → return to lobby.
+Player disconnect handling: server detects WebSocket close, fires `PlayerRemoved` Lua callin, broadcasts `PlayerLeft` to remaining clients, cleans up session. Default engine gadget ends game when no humans remain.
 
 **Next tasks (PLAN-next-steps.md follow-ups):**
-1. Server-side "player left mid-game" — PlayerLeave protocol message + handler
-2. Projectile asset pipeline (unit models done, projectiles remain)
-3. Runtime game-override UI templates
+1. Projectile asset pipeline (unit models done, projectiles remain)
+2. Runtime game-override UI templates

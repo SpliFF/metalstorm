@@ -25,6 +25,7 @@ import { GameInfo } from '../protocol/spring-web/game-info.js';
 import { MapData } from '../protocol/spring-web/map-data.js';
 import { GameUnitDefs } from '../protocol/spring-web/game-unit-defs.js';
 import { GameUnitDef } from '../protocol/spring-web/game-unit-def.js';
+import { PlayerLeft } from '../protocol/spring-web/player-left.js';
 import { ServerClock } from './clock.js';
 import { parseEntityState, type EntityStateSnapshot } from './entity-state.js';
 import { parseMapData, type ParsedMapData } from './map-data.js';
@@ -70,6 +71,7 @@ export interface ConnectionEvents {
     onCombatEvents?: (events: CombatEventInfo[], frame: number) => void;
     onEntityDestroy?: (entityId: number, x: number, y: number, z: number) => void;
     onGameOver?: (frame: number) => void;
+    onPlayerLeft?: (playerId: number, username: string, team: number, reason: number) => void;
     onMapData?: (map: ParsedMapData) => void;
     onUnitDefs?: (defs: UnitDefInfo[]) => void;
     onServerMessage?: (msg: ServerMessage) => void;
@@ -350,6 +352,12 @@ export class Connection {
                 }
                 console.log(`[connection] received ${defs.length} unit def(s)`);
                 this.events.onUnitDefs?.(defs);
+                break;
+            }
+            case ServerPayload.PlayerLeft: {
+                const pl = msg.payload(new PlayerLeft()) as PlayerLeft;
+                console.log(`[connection] player left: ${pl.username()} (team ${pl.team()}, reason ${pl.reason()})`);
+                this.events.onPlayerLeft?.(pl.playerId(), pl.username() ?? '', pl.team(), pl.reason());
                 break;
             }
             default:

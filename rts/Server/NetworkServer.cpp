@@ -102,6 +102,13 @@ std::vector<InboundMessage> NetworkServer::DrainInbound() {
     return drained;
 }
 
+std::vector<ClientID> NetworkServer::DrainDisconnects() {
+    std::lock_guard<std::mutex> lock(disconnectMutex);
+    std::vector<ClientID> drained;
+    drained.swap(disconnectQueue);
+    return drained;
+}
+
 void NetworkServer::Send(ClientID clientId, const uint8_t* data, size_t len) {
     std::lock_guard<std::mutex> lock(impl->outboundMutex);
     impl->outboundQueue.push_back({clientId, {data, data + len}});
@@ -203,6 +210,12 @@ void NetworkServer::NetworkThreadFunc(int port) {
                 );
             }
             clientCount.fetch_sub(1);
+
+            // Notify the sim thread so it can fire Lua callins
+            {
+                std::lock_guard<std::mutex> lock(disconnectMutex);
+                disconnectQueue.push_back(id);
+            }
 
             std::fprintf(stderr, "[net] client %u disconnected (%d remaining)\n",
                 id, clientCount.load());
