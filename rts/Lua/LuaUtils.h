@@ -148,6 +148,10 @@ class LuaUtils {
 		/// on day one.
 		static void Register51CompatShims(lua_State* L);
 
+		// Lua 5.1 compat: math.max/min that coerce string args to numbers
+		static int Compat_math_max(lua_State* L);
+		static int Compat_math_min(lua_State* L);
+
 		static void* GetUserData(lua_State* L, int index, const string& type);
 
 		static int IsEngineMinVersion(lua_State* L);

@@ -9,14 +9,15 @@
 #include <cstring>
 #include <cstdio>
 
-// Version placeholders — replaced by build system in production builds
-#define SPRING_VERSION_ENGINE_MAJOR      "100"
+// Version: based on Spring 104+ codebase. Set to 105 so game compat
+// layers (e.g. ZK's engine_compat.lua) apply the correct API wrappers.
+#define SPRING_VERSION_ENGINE_MAJOR      "105"
 #define SPRING_VERSION_ENGINE_PATCH_SET  "0"
-#define SPRING_VERSION_ENGINE_COMMITS    "0"
+#define SPRING_VERSION_ENGINE_COMMITS    "2000"
 #define SPRING_VERSION_ENGINE_HASH       "unknown"
 #define SPRING_VERSION_ENGINE_BRANCH     "springweb"
 #define SPRING_VERSION_ENGINE_ADDITIONAL ""
-#define SPRING_VERSION_ENGINE            "100.0"
+#define SPRING_VERSION_ENGINE            "105.0"
 #define SPRING_VERSION_ENGINE_RELEASE    false
 
 /**

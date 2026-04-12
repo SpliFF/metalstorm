@@ -150,6 +150,50 @@ constexpr char kPlaySoundStreamAdvice[] =
     "music/streamed audio is a client-side concern. Emit a server "
     "event to trigger playback on the client.";
 
+constexpr char kSetCustomCommandDrawDataName[] = "SetCustomCommandDrawData";
+constexpr char kSetCustomCommandDrawDataAdvice[] =
+    "command draw data is a client-side rendering concern.";
+
+constexpr char kSpawnCEGName[] = "SpawnCEG";
+constexpr char kSpawnCEGAdvice[] =
+    "CEG (custom explosion generators) are a client-side visual effect.";
+
+constexpr char kMarkerAddPointName[] = "MarkerAddPoint";
+constexpr char kMarkerAddPointAdvice[] =
+    "map markers are a client-side UI feature.";
+
+constexpr char kMarkerAddLineName[] = "MarkerAddLine";
+constexpr char kMarkerAddLineAdvice[] =
+    "map markers are a client-side UI feature.";
+
+constexpr char kMarkerErasePositionName[] = "MarkerErasePosition";
+constexpr char kMarkerErasePositionAdvice[] =
+    "map markers are a client-side UI feature.";
+
+constexpr char kSendCommandsName[] = "SendCommands";
+constexpr char kSendCommandsAdvice[] =
+    "Spring.SendCommands() is a client-side console command dispatcher.";
+
+constexpr char kSetDrawGroundName[] = "SetDrawGround";
+constexpr char kSetDrawGroundAdvice[] =
+    "SetDrawGround is a client rendering toggle.";
+
+constexpr char kSetDrawSkyName[] = "SetDrawSky";
+constexpr char kSetDrawSkyAdvice[] =
+    "SetDrawSky is a client rendering toggle.";
+
+constexpr char kSetDrawWaterName[] = "SetDrawWater";
+constexpr char kSetDrawWaterAdvice[] =
+    "SetDrawWater is a client rendering toggle.";
+
+constexpr char kSetSunLightingName[] = "SetSunLighting";
+constexpr char kSetSunLightingAdvice[] =
+    "sun lighting is a client rendering parameter.";
+
+constexpr char kSetAtmosphereName[] = "SetAtmosphere";
+constexpr char kSetAtmosphereAdvice[] =
+    "atmosphere settings are a client rendering parameter.";
+
 /// Register a noop stub with its own per-call-site upvalue slot.
 template <const char* Name, const char* Advice>
 void PushNoopStub(lua_State* L)
@@ -157,6 +201,40 @@ void PushNoopStub(lua_State* L)
     lua_pushboolean(L, 0); // upvalue 1 = "not warned yet"
     lua_pushcclosure(L, ServerNoopStub<Name, Advice>, 1);
 }
+
+/// Silent noop — no warning, returns 0 results. Used for rendering/
+/// client functions that gadgets call but have no server effect.
+int SilentNoop(lua_State* /*L*/)
+{
+    return 0;
+}
+
+/// Noop that returns a single number (0). For GetTimer etc.
+int NoopReturnZero(lua_State* L)
+{
+    lua_pushnumber(L, 0);
+    return 1;
+}
+
+/// For GetTimer — returns a userdata-like number (used with DiffTimers).
+int NoopGetTimer(lua_State* L)
+{
+    lua_pushnumber(L, 0);
+    return 1;
+}
+
+/// For DiffTimers — returns elapsed ms (always 0 on server).
+int NoopDiffTimers(lua_State* L)
+{
+    lua_pushnumber(L, 0);
+    return 1;
+}
+
+/// Register a noop stub for a rendering/client API function.
+#define REGISTER_NOOP_STUB(funcName) \
+    lua_pushstring(L, #funcName); \
+    PushNoopStub<k##funcName##Name, k##funcName##Advice>(L); \
+    lua_rawset(L, -3)
 
 } // namespace
 
@@ -170,17 +248,40 @@ bool LuaUnsyncedCtrl::PushEntries(lua_State* L)
 
     // Server-side noop stubs for client/render/audio APIs.
     // See the ServerNoopStub template above for rationale.
-    lua_pushstring(L, "LoadSoundDef");
-    PushNoopStub<kLoadSoundDefName, kLoadSoundDefAdvice>(L);
-    lua_rawset(L, -3);
+    REGISTER_NOOP_STUB(LoadSoundDef);
+    REGISTER_NOOP_STUB(PlaySoundFile);
+    REGISTER_NOOP_STUB(PlaySoundStream);
+    REGISTER_NOOP_STUB(SetCustomCommandDrawData);
+    REGISTER_NOOP_STUB(SpawnCEG);
+    REGISTER_NOOP_STUB(MarkerAddPoint);
+    REGISTER_NOOP_STUB(MarkerAddLine);
+    REGISTER_NOOP_STUB(MarkerErasePosition);
+    REGISTER_NOOP_STUB(SendCommands);
+    REGISTER_NOOP_STUB(SetDrawGround);
+    REGISTER_NOOP_STUB(SetDrawSky);
+    REGISTER_NOOP_STUB(SetDrawWater);
+    REGISTER_NOOP_STUB(SetSunLighting);
+    REGISTER_NOOP_STUB(SetAtmosphere);
 
-    lua_pushstring(L, "PlaySoundFile");
-    PushNoopStub<kPlaySoundFileName, kPlaySoundFileAdvice>(L);
-    lua_rawset(L, -3);
+    // Silent noops for frequently-called rendering functions
+    LuaPushNamedCFunc(L, "AssignMouseCursor", SilentNoop);
+    LuaPushNamedCFunc(L, "ReplaceMouseCursor", SilentNoop);
+    LuaPushNamedCFunc(L, "SetMouseCursor", SilentNoop);
+    LuaPushNamedCFunc(L, "WarpMouse", SilentNoop);
 
-    lua_pushstring(L, "PlaySoundStream");
-    PushNoopStub<kPlaySoundStreamName, kPlaySoundStreamAdvice>(L);
-    lua_rawset(L, -3);
+    // Timing functions (used for profiling in gadgets)
+    LuaPushNamedCFunc(L, "GetTimer", NoopGetTimer);
+    LuaPushNamedCFunc(L, "DiffTimers", NoopDiffTimers);
+
+    // UnitRendering table (client-side visual overrides)
+    lua_createtable(L, 0, 4);
+    LuaPushNamedCFunc(L, "SetUnitLuaDraw", SilentNoop);
+    LuaPushNamedCFunc(L, "SetFeatureLuaDraw", SilentNoop);
+    LuaPushNamedCFunc(L, "SetUnitNoDraw", SilentNoop);
+    LuaPushNamedCFunc(L, "SetFeatureNoDraw", SilentNoop);
+    lua_setfield(L, -2, "UnitRendering");
+
+    #undef REGISTER_NOOP_STUB
 
     return true;
 }

@@ -497,23 +497,28 @@ void CSimulation::Init(const std::string& mapName)
     int maxTeamId = -1;
     for (const auto& e : rosterEntries)
         if (e.team > maxTeamId) maxTeamId = e.team;
-    const int teamCount = std::max(2, maxTeamId + 1);
+    const int playerTeamCount = std::max(2, maxTeamId + 1);
+    // +1 for the Gaia team (neutral/environment), +1 for its ally team
+    const int gaiaTeamIdx     = playerTeamCount;
+    const int gaiaAllyTeamIdx = playerTeamCount;
+    const int totalTeams      = playerTeamCount + 1;
+    const int totalAllyTeams  = playerTeamCount + 1;
 
     {
         auto& allyTeams = teamHandler.GetAllyTeams();
-        allyTeams.resize(teamCount);
-        for (int i = 0; i < teamCount; i++) {
-            allyTeams[i].allies.assign(teamCount, false);
+        allyTeams.resize(totalAllyTeams);
+        for (int i = 0; i < totalAllyTeams; i++) {
+            allyTeams[i].allies.assign(totalAllyTeams, false);
             allyTeams[i].allies[i] = true;
         }
 
         auto& teams = teamHandler.GetTeams();
-        teams.resize(teamCount);
-        for (int i = 0; i < teamCount; i++) {
+        teams.resize(totalTeams);
+        for (int i = 0; i < playerTeamCount; i++) {
             teams[i].teamNum = i;
             teams[i].teamAllyteam = i;
             teams[i].SetDefaultColor(i);
-            teams[i].SetMaxUnits(MAX_UNITS / std::max(1, teamCount));
+            teams[i].SetMaxUnits(MAX_UNITS / std::max(1, totalTeams));
             if (hasMap) {
                 // Start positions are set for real in SetupTestGame
                 // once MapParser has had a chance to resolve them
@@ -526,6 +531,16 @@ void CSimulation::Init(const std::string& mapName)
                     mapDims.mapy * SQUARE_SIZE * 0.5f));
             }
         }
+
+        // Gaia team: neutral/environment, its own ally team, no allies
+        teams[gaiaTeamIdx].teamNum = gaiaTeamIdx;
+        teams[gaiaTeamIdx].teamAllyteam = gaiaAllyTeamIdx;
+        teams[gaiaTeamIdx].SetDefaultColor(gaiaTeamIdx);
+        teams[gaiaTeamIdx].SetMaxUnits(MAX_UNITS / std::max(1, totalTeams));
+
+        teamHandler.SetGaiaTeamID(gaiaTeamIdx);
+        teamHandler.SetGaiaAllyTeamID(gaiaAllyTeamIdx);
+        gs->useLuaGaia = true;
     }
 
     // Initialise all subsystems

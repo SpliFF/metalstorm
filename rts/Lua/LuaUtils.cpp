@@ -1564,6 +1564,38 @@ void PushCompatCFunc(lua_State* L, lua_CFunction fn)
 } // namespace
 
 
+// Lua 5.1 math.max/math.min coerced string arguments to numbers.
+// Lua 5.4 does not — `math.max(1, "30")` raises an error.  Many
+// Spring games (ZK, BAR) pass customParams values (which are always
+// strings) directly into math.max/min.  Rather than patching every
+// gadget, shim the original behaviour.
+int LuaUtils::Compat_math_max(lua_State* L)
+{
+	int n = lua_gettop(L);
+	luaL_argcheck(L, n >= 1, 1, "value expected");
+	lua_Number best = luaL_checknumber(L, 1);
+	for (int i = 2; i <= n; i++) {
+		lua_Number v = luaL_checknumber(L, i); // coerces strings to numbers
+		if (v > best) best = v;
+	}
+	lua_pushnumber(L, best);
+	return 1;
+}
+
+int LuaUtils::Compat_math_min(lua_State* L)
+{
+	int n = lua_gettop(L);
+	luaL_argcheck(L, n >= 1, 1, "value expected");
+	lua_Number best = luaL_checknumber(L, 1);
+	for (int i = 2; i <= n; i++) {
+		lua_Number v = luaL_checknumber(L, i);
+		if (v < best) best = v;
+	}
+	lua_pushnumber(L, best);
+	return 1;
+}
+
+
 void LuaUtils::Register51CompatShims(lua_State* L)
 {
 	PushCompatCFunc(L, Compat_setfenv);
@@ -1574,4 +1606,12 @@ void LuaUtils::Register51CompatShims(lua_State* L)
 
 	PushCompatCFunc(L, Compat_unpack);
 	lua_setglobal(L, "unpack");
+
+	// Override math.max/min with coercing versions
+	lua_getglobal(L, "math");
+	lua_pushcfunction(L, Compat_math_max);
+	lua_setfield(L, -2, "max");
+	lua_pushcfunction(L, Compat_math_min);
+	lua_setfield(L, -2, "min");
+	lua_pop(L, 1); // pop math table
 }

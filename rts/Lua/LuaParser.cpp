@@ -156,6 +156,10 @@ void LuaParser::SetupEnv(bool isSyncedCtxt, bool isDefsParser)
 			LuaPushNamedCFunc(L, "random", DummyRandom);
 			LuaPushNamedCFunc(L, "randomseed", DummyRandomSeed);
 		}
+		// Lua 5.1 compat: math.max/min coerced string args to numbers.
+		// Needed because TDF values and customParams are strings.
+		LuaPushNamedCFunc(L, "max", LuaUtils::Compat_math_max);
+		LuaPushNamedCFunc(L, "min", LuaUtils::Compat_math_min);
 		lua_pop(L, 1); // pop "math"
 	}
 

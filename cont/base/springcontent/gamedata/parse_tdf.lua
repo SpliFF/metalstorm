@@ -121,6 +121,11 @@ ParseValue = function()
   local s, e, v, p = text:find('^([^\n;]*);+()', pos)
   if (v) then
     pos = p
+    -- auto-convert numeric values so downstream Lua can use math.max etc.
+    local n = tonumber(v)
+    if (n ~= nil) then
+      return n
+    end
     return v
   end
   Crash('could not find value, missing ";" ?')

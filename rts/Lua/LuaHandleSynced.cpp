@@ -88,6 +88,7 @@ bool CUnsyncedLuaHandle::Init(const std::string& code, const std::string& file)
 	LUA_OPEN_LIB(L, luaopen_math);
 	LUA_OPEN_LIB(L, luaopen_table);
 	LUA_OPEN_LIB(L, luaopen_string);
+	LUA_OPEN_LIB(L, luaopen_coroutine); // needed by unit scripts and gadgets (safe in server-authoritative model)
 	//LUA_OPEN_LIB(L, luaopen_io);
 	//LUA_OPEN_LIB(L, luaopen_os);
 	//LUA_OPEN_LIB(L, luaopen_package);
@@ -378,6 +379,7 @@ bool CSyncedLuaHandle::Init(const std::string& code, const std::string& file)
 	SPRING_LUA_OPEN_LIB(L, luaopen_math);
 	SPRING_LUA_OPEN_LIB(L, luaopen_table);
 	SPRING_LUA_OPEN_LIB(L, luaopen_string);
+	SPRING_LUA_OPEN_LIB(L, luaopen_coroutine); // needed by unit scripts and gadgets (safe in server-authoritative model)
 	//SPRING_LUA_OPEN_LIB(L, luaopen_io);
 	//SPRING_LUA_OPEN_LIB(L, luaopen_os);
 	//SPRING_LUA_OPEN_LIB(L, luaopen_package);

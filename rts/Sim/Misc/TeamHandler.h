@@ -127,6 +127,8 @@ public:
 	// accessors
 	int GaiaTeamID() const { return gaiaTeamID; }
 	int GaiaAllyTeamID() const { return gaiaAllyTeamID; }
+	void SetGaiaTeamID(int id) { gaiaTeamID = id; }
+	void SetGaiaAllyTeamID(int id) { gaiaAllyTeamID = id; }
 
 	// number of teams and allyteams that were *INITIALLY* part
 	// of a game (teams.size() and allyTeams.size() are runtime
