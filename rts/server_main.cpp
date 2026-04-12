@@ -11,6 +11,7 @@
 #include "Server/Database.h"
 #include "Server/ClientSession.h"
 #include "Server/EntityStateSerializer.h"
+#include "Server/ProjectileStateSerializer.h"
 #include "Server/ContentServer.h"
 #include "Server/CombatEventCollector.h"
 #include "Server/StandingOrders.h"
@@ -23,6 +24,7 @@
 #include <sqlite3.h>
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/UnitDefHandler.h"
+#include "Sim/Weapons/WeaponDefHandler.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Units/CommandAI/Command.h"
@@ -724,12 +726,7 @@ int main(int argc, char* argv[])
                                 auto mapDataMsg = Protocol::BuildMapData(mapMeta);
                                 net.Send(msg.clientId, mapDataMsg.data(), mapDataMsg.size());
                             }
-                            // Send unit def registry so client can preload models
-                            if (unitDefHandler && !gameId.empty()) {
-                                auto udMsg = Protocol::BuildGameUnitDefs(
-                                    unitDefHandler->GetUnitDefsVec(), gameId);
-                                net.Send(msg.clientId, udMsg.data(), udMsg.size());
-                            }
+                            // Defs stream incrementally via entity/projectile state.
                             break;
                         }
                         // Token was present but ValidateSession failed.
@@ -836,12 +833,9 @@ int main(int argc, char* argv[])
                         auto mapDataMsg = Protocol::BuildMapData(mapMeta);
                         net.Send(msg.clientId, mapDataMsg.data(), mapDataMsg.size());
                     }
-                    // Send unit def registry so client can preload models
-                    if (unitDefHandler && !gameId.empty()) {
-                        auto udMsg = Protocol::BuildGameUnitDefs(
-                            unitDefHandler->GetUnitDefsVec(), gameId);
-                        net.Send(msg.clientId, udMsg.data(), udMsg.size());
-                    }
+                    // Unit and weapon defs are NOT sent eagerly on auth.
+                    // They stream incrementally as the client encounters
+                    // new entity/projectile types during state updates.
                     break;
                 }
                 case SpringWeb::ClientPayload_PlayerCommand: {
@@ -1122,14 +1116,7 @@ int main(int argc, char* argv[])
             sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
                 // Map session->team to its ally team so the
                 // visibility filter can skip enemy units that
-                // aren't in this ally team's LOS. We look up the
-                // ally team via teamHandler rather than caching on
-                // the session so the mapping stays correct if a
-                // future alliance-swap feature changes it mid-game.
-                // session->team == -1 is the dev-mode permissive
-                // path: no roster was handed off, so every session
-                // sees every unit (viewerAllyTeam=-1 disables the
-                // LOS filter in the collector).
+                // aren't in this ally team's LOS.
                 int viewerAllyTeam = -1;
                 if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
                     viewerAllyTeam = teamHandler.AllyTeam(session.team);
@@ -1145,25 +1132,41 @@ int main(int argc, char* argv[])
                     candidates = EntityState::CollectAllUnits(viewerAllyTeam);
                 }
 
+                // Incremental def streaming: send defs for any unit
+                // types this client hasn't seen yet. Defs arrive
+                // before the entity state that references them so
+                // the client always has the def when it needs to
+                // render the entity.
+                if (unitDefHandler && !gameId.empty()) {
+                    std::vector<uint16_t> newDefIds;
+                    for (const CUnit* u : candidates) {
+                        uint16_t defId = static_cast<uint16_t>(u->unitDef->id);
+                        if (session.knownUnitDefs.insert(defId).second) {
+                            newDefIds.push_back(defId);
+                        }
+                    }
+                    if (!newDefIds.empty()) {
+                        auto defMsg = Protocol::BuildGameUnitDefsSubset(
+                            unitDefHandler->GetUnitDefsVec(), newDefIds, gameId);
+                        net.Send(clientId, defMsg.data(), defMsg.size());
+                    }
+                }
+
                 uint8_t envelope;
                 std::vector<uint8_t> stateData;
 
                 if (isFullSnapshot) {
-                    // Full snapshot — send all candidates, reset cache
                     envelope = 0x02;
                     stateData = EntityState::SerializeUnits(candidates);
                     session.deltaCache.Clear();
                     for (CUnit* u : candidates)
                         session.deltaCache.Update(u);
                 } else {
-                    // Delta — only send changed entities
                     std::vector<CUnit*> changed;
                     for (CUnit* u : candidates) {
                         if (session.deltaCache.HasChanged(u))
                             changed.push_back(u);
                     }
-
-                    // Update cache for changed entities
                     for (CUnit* u : changed)
                         session.deltaCache.Update(u);
 
@@ -1171,13 +1174,62 @@ int main(int argc, char* argv[])
                     stateData = EntityState::SerializeUnits(changed);
                 }
 
-                // Prepend envelope byte
                 std::vector<uint8_t> frame;
                 frame.reserve(1 + stateData.size());
                 frame.push_back(envelope);
                 frame.insert(frame.end(), stateData.begin(), stateData.end());
                 net.Send(clientId, frame.data(), frame.size());
             });
+        }
+        }
+
+        // Send projectile state to all clients every 3 ticks (~10 Hz).
+        // Per-client: send weapon defs for any new weapon types first,
+        // then the full projectile snapshot.
+        {
+        int curFrame = sim.GetFrameNum();
+        if (curFrame >= 0 && (curFrame % 3) == 0 && net.GetClientCount() > 0) {
+            auto projData = ProjectileState::SerializeAllProjectiles();
+            if (!projData.empty()) {
+                std::vector<uint8_t> projFrame;
+                projFrame.reserve(1 + projData.size());
+                projFrame.push_back(Protocol::ENVELOPE_PROJECTILE_STATE);
+                projFrame.insert(projFrame.end(), projData.begin(), projData.end());
+
+                sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+                    // Stream weapon defs for any new weapon types
+                    // referenced in this batch of projectiles.
+                    if (weaponDefHandler) {
+                        // Parse the weapon_def_id array out of projData.
+                        // Header: u16 count, u16 fieldMask. If bit 1 set,
+                        // weapon_def_ids follow the projectile_ids array.
+                        const uint16_t projCount = *reinterpret_cast<const uint16_t*>(projData.data());
+                        const uint16_t fieldMask = *reinterpret_cast<const uint16_t*>(projData.data() + 2);
+                        const bool hasIds = (fieldMask & 0x01) != 0;
+                        const bool hasWdIds = (fieldMask & 0x02) != 0;
+
+                        if (hasWdIds && projCount > 0) {
+                            size_t wdOffset = 4;
+                            if (hasIds) wdOffset += projCount * sizeof(uint32_t);
+                            const uint16_t* wdIds = reinterpret_cast<const uint16_t*>(projData.data() + wdOffset);
+
+                            std::vector<uint16_t> newWdIds;
+                            for (uint16_t i = 0; i < projCount; i++) {
+                                if (session.knownWeaponDefs.insert(wdIds[i]).second) {
+                                    newWdIds.push_back(wdIds[i]);
+                                }
+                            }
+                            if (!newWdIds.empty()) {
+                                auto wdMsg = Protocol::BuildGameWeaponDefsSubset(
+                                    weaponDefHandler->GetWeaponDefsVec(), newWdIds);
+                                net.Send(clientId, wdMsg.data(), wdMsg.size());
+                            }
+                        }
+                    }
+
+                    net.Send(clientId, projFrame.data(), projFrame.size());
+                });
+            }
         }
         }
 

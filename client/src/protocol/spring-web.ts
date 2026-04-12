@@ -24,6 +24,8 @@ export { GameListUpdate, GameListUpdateT } from './spring-web/game-list-update.j
 export { GameStarted, GameStartedT } from './spring-web/game-started.js';
 export { GameUnitDef, GameUnitDefT } from './spring-web/game-unit-def.js';
 export { GameUnitDefs, GameUnitDefsT } from './spring-web/game-unit-defs.js';
+export { GameWeaponDef, GameWeaponDefT } from './spring-web/game-weapon-def.js';
+export { GameWeaponDefs, GameWeaponDefsT } from './spring-web/game-weapon-defs.js';
 export { Handshake, HandshakeT } from './spring-web/handshake.js';
 export { IpcMessage, IpcMessageT } from './spring-web/ipc-message.js';
 export { IpcPayload } from './spring-web/ipc-payload.js';
@@ -40,6 +42,7 @@ export { Ping, PingT } from './spring-web/ping.js';
 export { PlayerCommand, PlayerCommandT } from './spring-web/player-command.js';
 export { PlayerLeft, PlayerLeftT } from './spring-web/player-left.js';
 export { Pong, PongT } from './spring-web/pong.js';
+export { ProjectileVisualType } from './spring-web/projectile-visual-type.js';
 export { ReconnectRequest, ReconnectRequestT } from './spring-web/reconnect-request.js';
 export { ReconnectResponse, ReconnectResponseT } from './spring-web/reconnect-response.js';
 export { ResourceUpdate, ResourceUpdateT } from './spring-web/resource-update.js';

@@ -11,6 +11,7 @@
 #include "CombatEventCollector.h"
 #include "RoomManager.h"
 #include "MapProcessor.h"
+#include "Sim/Projectiles/WeaponProjectiles/WeaponProjectileTypes.h"
 #include <flatbuffers/flatbuffers.h>
 #include <cstdint>
 #include <filesystem>
@@ -21,6 +22,7 @@ namespace Protocol {
 
 constexpr uint8_t ENVELOPE_FLATBUFFERS = 0x01;
 constexpr uint8_t ENVELOPE_ENTITY_STATE = 0x02;
+constexpr uint8_t ENVELOPE_PROJECTILE_STATE = 0x04;
 
 /// Build a framed ServerMessage (envelope byte + FlatBuffers payload).
 inline std::vector<uint8_t> BuildServerMessage(
@@ -479,12 +481,34 @@ inline std::vector<uint8_t> BuildRoomListUpdate(const std::vector<GameRoom*>& ro
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_RoomListUpdate, update.Union());
 }
 
+/// Build one GameUnitDef FlatBuffer entry for a single unit def.
+/// Factored out so both the bulk and incremental senders can reuse it.
+template<typename UnitDefT>
+inline flatbuffers::Offset<SpringWeb::GameUnitDef> BuildSingleUnitDef(
+    flatbuffers::FlatBufferBuilder& fbb,
+    const UnitDefT& ud,
+    const std::filesystem::path& modelsDir,
+    const std::string& gameId)
+{
+    namespace fs = std::filesystem;
+    auto nameOff = fbb.CreateString(ud.name);
+
+    std::string modelUrl;
+    if (!ud.modelName.empty()) {
+        std::string stem = fs::path(ud.modelName).stem().string();
+        fs::path glbPath = modelsDir / (stem + ".glb");
+        if (fs::exists(glbPath)) {
+            modelUrl = "/api/games/data/" + gameId + "/models/" + stem + ".glb";
+        }
+    }
+    auto modelOff = fbb.CreateString(modelUrl);
+    auto texOff = fbb.CreateString("");
+
+    return SpringWeb::CreateGameUnitDef(
+        fbb, static_cast<uint16_t>(ud.id), nameOff, modelOff, texOff);
+}
+
 /// Build a GameUnitDefs message listing every unit type and its model URL.
-/// `gameId` is the game directory basename (e.g. "papertanks").
-/// For each def with a modelName, checks whether the preprocessed .glb
-/// exists at data/games/<gameId>/models/<stem>.glb and builds the URL
-/// accordingly. Defs without a model get empty URLs (client falls back
-/// to procedural shapes).
 template<typename UnitDefVec>
 inline std::vector<uint8_t> BuildGameUnitDefs(
     const UnitDefVec& defs,
@@ -492,38 +516,118 @@ inline std::vector<uint8_t> BuildGameUnitDefs(
 {
     namespace fs = std::filesystem;
     const fs::path modelsDir = fs::path("data/games") / gameId / "models";
-
     flatbuffers::FlatBufferBuilder fbb(1024);
 
     std::vector<flatbuffers::Offset<SpringWeb::GameUnitDef>> offsets;
-    // UnitDef id=0 is not a valid def, skip it
     for (size_t i = 1; i < defs.size(); i++) {
-        const auto& ud = defs[i];
-        auto nameOff = fbb.CreateString(ud.name);
-
-        std::string modelUrl;
-        if (!ud.modelName.empty()) {
-            // Strip extension from modelName to get the stem
-            std::string stem = fs::path(ud.modelName).stem().string();
-            fs::path glbPath = modelsDir / (stem + ".glb");
-            if (fs::exists(glbPath)) {
-                modelUrl = "/api/games/data/" + gameId + "/models/" + stem + ".glb";
-            }
-        }
-
-        auto modelOff = fbb.CreateString(modelUrl);
-        // Texture URL left empty — glTF loader resolves textures
-        // relative to the .glb URL automatically.
-        auto texOff = fbb.CreateString("");
-
-        offsets.push_back(SpringWeb::CreateGameUnitDef(
-            fbb, static_cast<uint16_t>(ud.id), nameOff, modelOff, texOff));
+        offsets.push_back(BuildSingleUnitDef(fbb, defs[i], modelsDir, gameId));
     }
 
     auto defsVec = fbb.CreateVector(offsets);
     auto baseOff = fbb.CreateString("");
     auto msg = SpringWeb::CreateGameUnitDefs(fbb, defsVec, baseOff);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameUnitDefs, msg.Union());
+}
+
+/// Build a GameUnitDefs message containing only the specified def IDs.
+/// Used for incremental streaming — only send defs the client hasn't seen.
+template<typename UnitDefVec>
+inline std::vector<uint8_t> BuildGameUnitDefsSubset(
+    const UnitDefVec& allDefs,
+    const std::vector<uint16_t>& defIds,
+    const std::string& gameId)
+{
+    namespace fs = std::filesystem;
+    const fs::path modelsDir = fs::path("data/games") / gameId / "models";
+    flatbuffers::FlatBufferBuilder fbb(512);
+
+    std::vector<flatbuffers::Offset<SpringWeb::GameUnitDef>> offsets;
+    for (uint16_t id : defIds) {
+        if (id > 0 && static_cast<size_t>(id) < allDefs.size()) {
+            offsets.push_back(BuildSingleUnitDef(fbb, allDefs[id], modelsDir, gameId));
+        }
+    }
+
+    auto defsVec = fbb.CreateVector(offsets);
+    auto baseOff = fbb.CreateString("");
+    auto msg = SpringWeb::CreateGameUnitDefs(fbb, defsVec, baseOff);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameUnitDefs, msg.Union());
+}
+
+/// Map Spring's projectile type bitmask to the FlatBuffers ProjectileVisualType enum.
+inline SpringWeb::ProjectileVisualType MapProjectileVisualType(unsigned int projType) {
+    if (projType & WEAPON_BEAMLASER_PROJECTILE)      return SpringWeb::ProjectileVisualType_BeamLaser;
+    if (projType & WEAPON_LARGEBEAMLASER_PROJECTILE)  return SpringWeb::ProjectileVisualType_BeamLaser;
+    if (projType & WEAPON_LASER_PROJECTILE)           return SpringWeb::ProjectileVisualType_Laser;
+    if (projType & WEAPON_MISSILE_PROJECTILE)         return SpringWeb::ProjectileVisualType_Missile;
+    if (projType & WEAPON_STARBURST_PROJECTILE)       return SpringWeb::ProjectileVisualType_Missile;
+    if (projType & WEAPON_TORPEDO_PROJECTILE)         return SpringWeb::ProjectileVisualType_Missile;
+    if (projType & WEAPON_LIGHTNING_PROJECTILE)        return SpringWeb::ProjectileVisualType_Lightning;
+    if (projType & WEAPON_FLAME_PROJECTILE)           return SpringWeb::ProjectileVisualType_Flame;
+    if (projType & WEAPON_FIREBALL_PROJECTILE)        return SpringWeb::ProjectileVisualType_Flame;
+    // Cannon, EMG, Explosive, and anything else → Cannon
+    return SpringWeb::ProjectileVisualType_Cannon;
+}
+
+/// Build one GameWeaponDef FlatBuffer entry for a single weapon def.
+template<typename WeaponDefT>
+inline flatbuffers::Offset<SpringWeb::GameWeaponDef> BuildSingleWeaponDef(
+    flatbuffers::FlatBufferBuilder& fbb,
+    const WeaponDefT& wd)
+{
+    auto nameOff = fbb.CreateString(wd.name);
+    auto visualType = MapProjectileVisualType(wd.projectileType);
+
+    SpringWeb::GameWeaponDefBuilder wdb(fbb);
+    wdb.add_def_id(static_cast<uint16_t>(wd.id));
+    wdb.add_name(nameOff);
+    wdb.add_visual_type(visualType);
+    wdb.add_projectile_speed(wd.projectilespeed);
+    wdb.add_range(wd.range);
+    wdb.add_aoe(wd.damages.damageAreaOfEffect);
+    wdb.add_size(wd.size);
+    wdb.add_intensity(wd.intensity);
+    wdb.add_color_r(wd.visuals.color.x);
+    wdb.add_color_g(wd.visuals.color.y);
+    wdb.add_color_b(wd.visuals.color.z);
+    wdb.add_duration(wd.duration);
+    wdb.add_high_trajectory(wd.highTrajectory == 1);
+    return wdb.Finish();
+}
+
+/// Build a GameWeaponDefs message listing every weapon type and its visual params.
+template<typename WeaponDefVec>
+inline std::vector<uint8_t> BuildGameWeaponDefs(const WeaponDefVec& defs) {
+    flatbuffers::FlatBufferBuilder fbb(1024);
+
+    std::vector<flatbuffers::Offset<SpringWeb::GameWeaponDef>> offsets;
+    for (size_t i = 1; i < defs.size(); i++) {
+        offsets.push_back(BuildSingleWeaponDef(fbb, defs[i]));
+    }
+
+    auto defsVec = fbb.CreateVector(offsets);
+    auto msg = SpringWeb::CreateGameWeaponDefs(fbb, defsVec);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameWeaponDefs, msg.Union());
+}
+
+/// Build a GameWeaponDefs message containing only the specified def IDs.
+template<typename WeaponDefVec>
+inline std::vector<uint8_t> BuildGameWeaponDefsSubset(
+    const WeaponDefVec& allDefs,
+    const std::vector<uint16_t>& defIds)
+{
+    flatbuffers::FlatBufferBuilder fbb(512);
+
+    std::vector<flatbuffers::Offset<SpringWeb::GameWeaponDef>> offsets;
+    for (uint16_t id : defIds) {
+        if (id > 0 && static_cast<size_t>(id) < allDefs.size()) {
+            offsets.push_back(BuildSingleWeaponDef(fbb, allDefs[id]));
+        }
+    }
+
+    auto defsVec = fbb.CreateVector(offsets);
+    auto msg = SpringWeb::CreateGameWeaponDefs(fbb, defsVec);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameWeaponDefs, msg.Union());
 }
 
 } // namespace Protocol

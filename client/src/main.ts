@@ -6,6 +6,8 @@
 
 import { Engine, Scene, FreeCamera, Mesh, MeshBuilder, StandardMaterial, Vector3, HemisphericLight, DirectionalLight, Color3, Color4 } from '@babylonjs/core';
 import { EntityRenderer } from './core/entity-renderer.js';
+import { ProjectileRenderer } from './core/projectile-renderer.js';
+import { DefCache } from './core/def-cache.js';
 import { CombatFX } from './core/combat-fx.js';
 import { AudioManager } from './core/audio.js';
 import { InputManager } from './core/input-manager.js';
@@ -36,6 +38,7 @@ import gameOverCss from './ui/game-over/game-over.css?raw';
 
 let engine: Engine | null = null;
 let entityRenderer: EntityRenderer | null = null;
+let projectileRenderer: ProjectileRenderer | null = null;
 let combatFX: CombatFX | null = null;
 let audioManager: AudioManager | null = null;
 let inputManager: InputManager | null = null;
@@ -153,6 +156,7 @@ function quitToLobby(): void {
     engine?.dispose();
     engine = null;
     entityRenderer = null;
+    projectileRenderer = null;
     combatFX = null;
     audioManager = null;
 
@@ -293,8 +297,15 @@ async function startGame(gameServerPort: number): Promise<void> {
     sun.diffuse = new Color3(1.0, 0.95, 0.85);
 
     entityRenderer = new EntityRenderer(scene);
+    projectileRenderer = new ProjectileRenderer(scene);
     audioManager = new AudioManager();
     combatFX = new CombatFX(scene, audioManager);
+
+    // DefCache accumulates defs as the server streams them incrementally.
+    // Listeners forward new defs to the renderers that need them.
+    const defCache = new DefCache();
+    defCache.onUnitDefs((newDefs) => entityRenderer?.setUnitDefs(newDefs));
+    defCache.onWeaponDefs((newDefs) => projectileRenderer?.setWeaponDefs(newDefs));
 
     canvas.addEventListener('click', () => audioManager?.resume(), { once: true });
 
@@ -446,11 +457,17 @@ async function startGame(gameServerPort: number): Promise<void> {
         },
         onMapData,
         onUnitDefs(defs) {
-            entityRenderer?.setUnitDefs(defs);
+            defCache.addUnitDefs(defs);
+        },
+        onWeaponDefs(defs) {
+            defCache.addWeaponDefs(defs);
         },
         onEntityState(snapshot, isDelta) {
             entityRenderer?.update(snapshot, isDelta);
             currentFrame++;
+        },
+        onProjectileState(snapshot) {
+            projectileRenderer?.updateFromState(snapshot);
         },
         onCombatEvents(events) {
             combatFX?.onCombatEvents(events);

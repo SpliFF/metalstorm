@@ -4,6 +4,7 @@
 //   0x01 = FlatBuffers message (this schema)
 //   0x02 = Entity state full snapshot (custom binary, Tier 2)
 //   0x03 = Entity state delta update (custom binary, Tier 2)
+//   0x04 = Projectile state snapshot (custom binary)
 //
 // After the envelope byte, the remaining bytes are a FlatBuffers buffer
 // whose root type is ServerMessage (server→client) or ClientMessage (client→server).
@@ -449,6 +450,51 @@ table RoomPlayerLeft {
 }
 
 // ============================================================
+// Game weapon definition messages
+// ============================================================
+
+/// Projectile visual category — tells the client how to render
+/// in-flight projectiles for this weapon. Maps loosely to Spring's
+/// weapon projectile types but collapsed into fewer visual buckets
+/// (e.g. EMG and Explosive both render as "Cannon" shells).
+enum ProjectileVisualType : uint8 {
+    Cannon = 0,        // ballistic shell (explosive, EMG, fireball)
+    Laser = 1,         // short beam segment (laser cannon)
+    BeamLaser = 2,     // instant-hit continuous beam
+    Missile = 3,       // guided/ballistic missile (missile, starburst, torpedo)
+    Lightning = 4,     // lightning bolt
+    Flame = 5,         // flamethrower stream
+}
+
+/// Definition of one weapon type. Sent once at game start so the
+/// client can render projectiles with appropriate visuals.
+table GameWeaponDef {
+    def_id: uint16;
+    name: string;
+    visual_type: ProjectileVisualType;
+    projectile_speed: float;    // elmos per frame
+    range: float;
+    aoe: float;                 // area of effect radius
+    size: float;                // visual size multiplier
+    intensity: float;           // glow/brightness
+    /// RGB color hint (3 floats, 0-1). Client uses this to tint
+    /// the projectile mesh/trail. Defaults to weapon-type defaults
+    /// if all zeros.
+    color_r: float;
+    color_g: float;
+    color_b: float;
+    duration: float;            // beam duration (beam weapons only)
+    high_trajectory: bool;      // arcs high (artillery)
+}
+
+/// Sent by the game server after successful auth, alongside
+/// GameUnitDefs. Contains every weapon type the game defines so
+/// the client can render projectiles with correct visuals.
+table GameWeaponDefs {
+    defs: [GameWeaponDef];
+}
+
+// ============================================================
 // Game unit definition messages
 // ============================================================
 
@@ -641,6 +687,7 @@ union ServerPayload {
     GameListUpdate,
     GameUnitDefs,
     PlayerLeft,
+    GameWeaponDefs,
 }
 
 table ServerMessage {

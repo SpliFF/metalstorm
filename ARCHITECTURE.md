@@ -50,6 +50,7 @@ build/debug/_deps/flatbuffers-build/flatc --cpp -o rts/ schemas/protocol.fbs
 | `Server/NetworkServer.h/.cpp` | uWebSockets server. WebSocket + HTTP on same port. Send/broadcast helpers. |
 | `Server/Protocol.h` | FlatBuffers message builders (BuildAuthResponse, BuildMapData, BuildGameUnitDefs, etc.). |
 | `Server/EntityStateSerializer.h/.cpp` | Serialises unit state to Tier 2 binary (struct-of-arrays, field-masked). |
+| `Server/ProjectileStateSerializer.h/.cpp` | Serialises synced weapon projectiles to envelope 0x04 binary. |
 | `Server/EntityDeltaCache.h/.cpp` | Per-client delta tracking to reduce bandwidth. |
 | `Server/ContentServer.h/.cpp` | Scans content roots, serves assets at `/api/content/assets/*`. |
 | `Server/Database.h/.cpp` | SQLite wrapper (accounts, sessions). |
@@ -81,6 +82,7 @@ build/debug/_deps/flatbuffers-build/flatc --cpp -o rts/ schemas/protocol.fbs
 | `config.ts` | Server URL, API base paths. |
 | `core/connection.ts` | WebSocket to server. FlatBuffers dispatch. Events: `onMapData`, `onUnitDefs`, `onEntityState`, `onCombatEvents`, etc. |
 | `core/entity-renderer.ts` | Renders units. Preloads .glb models via `setUnitDefs()`, thin-instances by (defId, team). Fallback: procedural shapes. |
+| `core/def-cache.ts` | Accumulates incrementally streamed unit + weapon defs; notifies renderers. |
 | `core/entity-state.ts` | Parses Tier 2 binary snapshots (struct-of-arrays with field mask). |
 | `core/entity-interpolator.ts` | Smooths entity positions between server ticks. |
 | `core/feature-renderer.ts` | Loads map feature .glb models, thin-instances by type. Pattern reference for entity-renderer. |
@@ -88,6 +90,8 @@ build/debug/_deps/flatbuffers-build/flatc --cpp -o rts/ schemas/protocol.fbs
 | `core/rts-camera.ts` | Orbital pan/zoom/rotate camera with viewport updates. |
 | `core/input-manager.ts` | Click-to-select (ray cast), right-click-to-command, drag-box select, keyboard shortcuts. |
 | `core/minimap.ts` | Minimap canvas with entity dots, click-to-pan, detachable popup window. |
+| `core/projectile-state.ts` | Parses envelope 0x04 binary projectile snapshots. |
+| `core/projectile-renderer.ts` | Renders in-flight projectiles (thin instances, per-weapon-type shapes). |
 | `core/combat-fx.ts` | Explosion/impact VFX on combat events. |
 | `core/audio.ts` | Web Audio: synth sounds for combat, background music. |
 | `core/map-data.ts` | Parses MapData FlatBuffer into `ParsedMapData` (heightmap, features, tiles, URLs). |
@@ -103,8 +107,9 @@ build/debug/_deps/flatbuffers-build/flatc --cpp -o rts/ schemas/protocol.fbs
 - `0x01` = FlatBuffers (root: ServerMessage or ClientMessage)
 - `0x02` = Entity state full snapshot (custom binary)
 - `0x03` = Entity state delta (custom binary)
+- `0x04` = Projectile state snapshot (custom binary)
 
-**Key server→client messages:** AuthResponse, MapData, GameUnitDefs, EntityCreate, EntityDestroy, GameEventBatch (contains CombatEvents), GameInfo, RoomStateUpdate, RoomListUpdate.
+**Key server→client messages:** AuthResponse, MapData, GameUnitDefs, GameWeaponDefs, EntityCreate, EntityDestroy, GameEventBatch (contains CombatEvents), GameInfo, RoomStateUpdate, RoomListUpdate.
 
 **Key client→server messages:** AuthRequest, PlayerCommand, ViewportUpdate, RoomCreate/Join/Leave/Ready/StartGame/EndGame, RoomAddAI/RemoveAI.
 
@@ -332,13 +337,20 @@ Client → server: ViewportUpdate (camera position/zoom)
 Client: interpolates entities between ticks, renders via Babylon.js
 ```
 
-### Model Loading
+### Def + Model Loading
 ```
 Lobby startup: GameProcessor converts <game>/objects3d/*.s3o → data/games/<id>/models/*.glb
-Game auth: server sends GameUnitDefs (defId → /api/games/data/<id>/models/<stem>.glb)
-Client: EntityRenderer.setUnitDefs() → SceneLoader.ImportMeshAsync per defId → thin instances
+Entity streaming: server sends GameUnitDefs (incremental, per-client, only new defIds)
+Projectile streaming: server sends GameWeaponDefs (incremental, per-client, only new defIds)
+Client: DefCache accumulates defs → EntityRenderer.setUnitDefs() (additive batches)
+Client: DefCache → ProjectileRenderer.setWeaponDefs() (per-type mesh + material)
+Model loading: SceneLoader.ImportMeshAsync per defId → thin instances
 Fallback: procedural shapes (box/cylinder/cone/sphere) when no .glb exists
 ```
+
+Defs are streamed on-demand: the server tracks `knownUnitDefs` and `knownWeaponDefs`
+per ClientSession and sends each def exactly once per game session, just before the
+first entity/projectile state update that references it.
 
 ## Current Status (2026-04-12)
 
@@ -346,5 +358,4 @@ Playable end-to-end: lobby → create room → start game → fight → game-ove
 Player disconnect handling: server detects WebSocket close, fires `PlayerRemoved` Lua callin, broadcasts `PlayerLeft` to remaining clients, cleans up session. Default engine gadget ends game when no humans remain.
 
 **Next tasks (PLAN-next-steps.md follow-ups):**
-1. Projectile asset pipeline (unit models done, projectiles remain)
-2. Runtime game-override UI templates
+1. Runtime game-override UI templates

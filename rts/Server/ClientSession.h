@@ -13,6 +13,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 using ClientID = uint32_t;
 
@@ -57,6 +58,15 @@ struct ClientSession {
             if (vp.active) return true;
         return false;
     }
+
+    /// Unit def IDs this client has been sent. The server checks this
+    /// before streaming entity state — if an entity's defId is not in
+    /// the set, the server sends the def first.
+    std::unordered_set<uint16_t> knownUnitDefs;
+
+    /// Weapon def IDs this client has been sent. Same pattern —
+    /// checked before streaming projectile state.
+    std::unordered_set<uint16_t> knownWeaponDefs;
 };
 
 class SessionManager {

@@ -26,13 +26,17 @@ import { MapData } from '../protocol/spring-web/map-data.js';
 import { GameUnitDefs } from '../protocol/spring-web/game-unit-defs.js';
 import { GameUnitDef } from '../protocol/spring-web/game-unit-def.js';
 import { PlayerLeft } from '../protocol/spring-web/player-left.js';
+import { GameWeaponDefs } from '../protocol/spring-web/game-weapon-defs.js';
+import { GameWeaponDef } from '../protocol/spring-web/game-weapon-def.js';
 import { ServerClock } from './clock.js';
 import { parseEntityState, type EntityStateSnapshot } from './entity-state.js';
+import { parseProjectileState, type ProjectileStateSnapshot } from './projectile-state.js';
 import { parseMapData, type ParsedMapData } from './map-data.js';
 
 const ENVELOPE_FLATBUFFERS = 0x01;
 const ENVELOPE_ENTITY_STATE_FULL = 0x02;
 const ENVELOPE_ENTITY_STATE_DELTA = 0x03;
+const ENVELOPE_PROJECTILE_STATE = 0x04;
 const PROTOCOL_VERSION = 1;
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'handshake' | 'authenticating' | 'connected';
@@ -57,6 +61,23 @@ export interface UnitDefInfo {
     textureUrl: string;
 }
 
+/** Parsed weapon definition — visual params for projectile rendering. */
+export interface WeaponDefInfo {
+    defId: number;
+    name: string;
+    visualType: number;     // ProjectileVisualType enum
+    projectileSpeed: number;
+    range: number;
+    aoe: number;
+    size: number;
+    intensity: number;
+    colorR: number;
+    colorG: number;
+    colorB: number;
+    duration: number;
+    highTrajectory: boolean;
+}
+
 /// Lobby vs game-server session roles. The game server stamps a
 /// real team id on the session during AuthRequest; the lobby
 /// leaves it at -1. Code outside Connection reads this via
@@ -74,6 +95,8 @@ export interface ConnectionEvents {
     onPlayerLeft?: (playerId: number, username: string, team: number, reason: number) => void;
     onMapData?: (map: ParsedMapData) => void;
     onUnitDefs?: (defs: UnitDefInfo[]) => void;
+    onWeaponDefs?: (defs: WeaponDefInfo[]) => void;
+    onProjectileState?: (snapshot: ProjectileStateSnapshot) => void;
     onServerMessage?: (msg: ServerMessage) => void;
 }
 
@@ -297,6 +320,13 @@ export class Connection {
             }
             return;
         }
+        if (envelope === ENVELOPE_PROJECTILE_STATE) {
+            const snapshot = parseProjectileState(data.subarray(1));
+            if (snapshot) {
+                this.events.onProjectileState?.(snapshot);
+            }
+            return;
+        }
         if (envelope !== ENVELOPE_FLATBUFFERS) {
             return;
         }
@@ -358,6 +388,32 @@ export class Connection {
                 const pl = msg.payload(new PlayerLeft()) as PlayerLeft;
                 console.log(`[connection] player left: ${pl.username()} (team ${pl.team()}, reason ${pl.reason()})`);
                 this.events.onPlayerLeft?.(pl.playerId(), pl.username() ?? '', pl.team(), pl.reason());
+                break;
+            }
+            case ServerPayload.GameWeaponDefs: {
+                const fbDefs = msg.payload(new GameWeaponDefs()) as GameWeaponDefs;
+                const defs: WeaponDefInfo[] = [];
+                for (let i = 0; i < fbDefs.defsLength(); i++) {
+                    const d = fbDefs.defs(i, new GameWeaponDef());
+                    if (!d) continue;
+                    defs.push({
+                        defId: d.defId(),
+                        name: d.name() ?? '',
+                        visualType: d.visualType(),
+                        projectileSpeed: d.projectileSpeed(),
+                        range: d.range(),
+                        aoe: d.aoe(),
+                        size: d.size(),
+                        intensity: d.intensity(),
+                        colorR: d.colorR(),
+                        colorG: d.colorG(),
+                        colorB: d.colorB(),
+                        duration: d.duration(),
+                        highTrajectory: d.highTrajectory(),
+                    });
+                }
+                console.log(`[connection] received ${defs.length} weapon def(s)`);
+                this.events.onWeaponDefs?.(defs);
                 break;
             }
             default:

@@ -161,6 +161,12 @@ struct RoomPlayerJoinedBuilder;
 struct RoomPlayerLeft;
 struct RoomPlayerLeftBuilder;
 
+struct GameWeaponDef;
+struct GameWeaponDefBuilder;
+
+struct GameWeaponDefs;
+struct GameWeaponDefsBuilder;
+
 struct GameUnitDef;
 struct GameUnitDefBuilder;
 
@@ -511,6 +517,52 @@ inline const char *EnumNameRoomState(RoomState e) {
   return EnumNamesRoomState()[index];
 }
 
+/// Projectile visual category — tells the client how to render
+/// in-flight projectiles for this weapon. Maps loosely to Spring's
+/// weapon projectile types but collapsed into fewer visual buckets
+/// (e.g. EMG and Explosive both render as "Cannon" shells).
+enum ProjectileVisualType : uint8_t {
+  ProjectileVisualType_Cannon = 0,
+  ProjectileVisualType_Laser = 1,
+  ProjectileVisualType_BeamLaser = 2,
+  ProjectileVisualType_Missile = 3,
+  ProjectileVisualType_Lightning = 4,
+  ProjectileVisualType_Flame = 5,
+  ProjectileVisualType_MIN = ProjectileVisualType_Cannon,
+  ProjectileVisualType_MAX = ProjectileVisualType_Flame
+};
+
+inline const ProjectileVisualType (&EnumValuesProjectileVisualType())[6] {
+  static const ProjectileVisualType values[] = {
+    ProjectileVisualType_Cannon,
+    ProjectileVisualType_Laser,
+    ProjectileVisualType_BeamLaser,
+    ProjectileVisualType_Missile,
+    ProjectileVisualType_Lightning,
+    ProjectileVisualType_Flame
+  };
+  return values;
+}
+
+inline const char * const *EnumNamesProjectileVisualType() {
+  static const char * const names[7] = {
+    "Cannon",
+    "Laser",
+    "BeamLaser",
+    "Missile",
+    "Lightning",
+    "Flame",
+    nullptr
+  };
+  return names;
+}
+
+inline const char *EnumNameProjectileVisualType(ProjectileVisualType e) {
+  if (::flatbuffers::IsOutRange(e, ProjectileVisualType_Cannon, ProjectileVisualType_Flame)) return "";
+  const size_t index = static_cast<size_t>(e);
+  return EnumNamesProjectileVisualType()[index];
+}
+
 enum ServerPayload : uint8_t {
   ServerPayload_NONE = 0,
   ServerPayload_AuthResponse = 1,
@@ -533,11 +585,12 @@ enum ServerPayload : uint8_t {
   ServerPayload_GameListUpdate = 18,
   ServerPayload_GameUnitDefs = 19,
   ServerPayload_PlayerLeft = 20,
+  ServerPayload_GameWeaponDefs = 21,
   ServerPayload_MIN = ServerPayload_NONE,
-  ServerPayload_MAX = ServerPayload_PlayerLeft
+  ServerPayload_MAX = ServerPayload_GameWeaponDefs
 };
 
-inline const ServerPayload (&EnumValuesServerPayload())[21] {
+inline const ServerPayload (&EnumValuesServerPayload())[22] {
   static const ServerPayload values[] = {
     ServerPayload_NONE,
     ServerPayload_AuthResponse,
@@ -559,13 +612,14 @@ inline const ServerPayload (&EnumValuesServerPayload())[21] {
     ServerPayload_AIListUpdate,
     ServerPayload_GameListUpdate,
     ServerPayload_GameUnitDefs,
-    ServerPayload_PlayerLeft
+    ServerPayload_PlayerLeft,
+    ServerPayload_GameWeaponDefs
   };
   return values;
 }
 
 inline const char * const *EnumNamesServerPayload() {
-  static const char * const names[22] = {
+  static const char * const names[23] = {
     "NONE",
     "AuthResponse",
     "EntityCreate",
@@ -587,13 +641,14 @@ inline const char * const *EnumNamesServerPayload() {
     "GameListUpdate",
     "GameUnitDefs",
     "PlayerLeft",
+    "GameWeaponDefs",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameServerPayload(ServerPayload e) {
-  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_PlayerLeft)) return "";
+  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_GameWeaponDefs)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesServerPayload()[index];
 }
@@ -680,6 +735,10 @@ template<> struct ServerPayloadTraits<SpringWeb::GameUnitDefs> {
 
 template<> struct ServerPayloadTraits<SpringWeb::PlayerLeft> {
   static const ServerPayload enum_value = ServerPayload_PlayerLeft;
+};
+
+template<> struct ServerPayloadTraits<SpringWeb::GameWeaponDefs> {
+  static const ServerPayload enum_value = ServerPayload_GameWeaponDefs;
 };
 
 bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *obj, ServerPayload type);
@@ -4360,6 +4419,261 @@ inline ::flatbuffers::Offset<RoomPlayerLeft> CreateRoomPlayerLeftDirect(
       reason__);
 }
 
+/// Definition of one weapon type. Sent once at game start so the
+/// client can render projectiles with appropriate visuals.
+struct GameWeaponDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef GameWeaponDefBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_DEF_ID = 4,
+    VT_NAME = 6,
+    VT_VISUAL_TYPE = 8,
+    VT_PROJECTILE_SPEED = 10,
+    VT_RANGE = 12,
+    VT_AOE = 14,
+    VT_SIZE = 16,
+    VT_INTENSITY = 18,
+    VT_COLOR_R = 20,
+    VT_COLOR_G = 22,
+    VT_COLOR_B = 24,
+    VT_DURATION = 26,
+    VT_HIGH_TRAJECTORY = 28
+  };
+  uint16_t def_id() const {
+    return GetField<uint16_t>(VT_DEF_ID, 0);
+  }
+  const ::flatbuffers::String *name() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_NAME);
+  }
+  SpringWeb::ProjectileVisualType visual_type() const {
+    return static_cast<SpringWeb::ProjectileVisualType>(GetField<uint8_t>(VT_VISUAL_TYPE, 0));
+  }
+  float projectile_speed() const {
+    return GetField<float>(VT_PROJECTILE_SPEED, 0.0f);
+  }
+  float range() const {
+    return GetField<float>(VT_RANGE, 0.0f);
+  }
+  float aoe() const {
+    return GetField<float>(VT_AOE, 0.0f);
+  }
+  float size() const {
+    return GetField<float>(VT_SIZE, 0.0f);
+  }
+  float intensity() const {
+    return GetField<float>(VT_INTENSITY, 0.0f);
+  }
+  /// RGB color hint (3 floats, 0-1). Client uses this to tint
+  /// the projectile mesh/trail. Defaults to weapon-type defaults
+  /// if all zeros.
+  float color_r() const {
+    return GetField<float>(VT_COLOR_R, 0.0f);
+  }
+  float color_g() const {
+    return GetField<float>(VT_COLOR_G, 0.0f);
+  }
+  float color_b() const {
+    return GetField<float>(VT_COLOR_B, 0.0f);
+  }
+  float duration() const {
+    return GetField<float>(VT_DURATION, 0.0f);
+  }
+  bool high_trajectory() const {
+    return GetField<uint8_t>(VT_HIGH_TRAJECTORY, 0) != 0;
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint16_t>(verifier, VT_DEF_ID, 2) &&
+           VerifyOffset(verifier, VT_NAME) &&
+           verifier.VerifyString(name()) &&
+           VerifyField<uint8_t>(verifier, VT_VISUAL_TYPE, 1) &&
+           VerifyField<float>(verifier, VT_PROJECTILE_SPEED, 4) &&
+           VerifyField<float>(verifier, VT_RANGE, 4) &&
+           VerifyField<float>(verifier, VT_AOE, 4) &&
+           VerifyField<float>(verifier, VT_SIZE, 4) &&
+           VerifyField<float>(verifier, VT_INTENSITY, 4) &&
+           VerifyField<float>(verifier, VT_COLOR_R, 4) &&
+           VerifyField<float>(verifier, VT_COLOR_G, 4) &&
+           VerifyField<float>(verifier, VT_COLOR_B, 4) &&
+           VerifyField<float>(verifier, VT_DURATION, 4) &&
+           VerifyField<uint8_t>(verifier, VT_HIGH_TRAJECTORY, 1) &&
+           verifier.EndTable();
+  }
+};
+
+struct GameWeaponDefBuilder {
+  typedef GameWeaponDef Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_def_id(uint16_t def_id) {
+    fbb_.AddElement<uint16_t>(GameWeaponDef::VT_DEF_ID, def_id, 0);
+  }
+  void add_name(::flatbuffers::Offset<::flatbuffers::String> name) {
+    fbb_.AddOffset(GameWeaponDef::VT_NAME, name);
+  }
+  void add_visual_type(SpringWeb::ProjectileVisualType visual_type) {
+    fbb_.AddElement<uint8_t>(GameWeaponDef::VT_VISUAL_TYPE, static_cast<uint8_t>(visual_type), 0);
+  }
+  void add_projectile_speed(float projectile_speed) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_PROJECTILE_SPEED, projectile_speed, 0.0f);
+  }
+  void add_range(float range) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_RANGE, range, 0.0f);
+  }
+  void add_aoe(float aoe) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_AOE, aoe, 0.0f);
+  }
+  void add_size(float size) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_SIZE, size, 0.0f);
+  }
+  void add_intensity(float intensity) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_INTENSITY, intensity, 0.0f);
+  }
+  void add_color_r(float color_r) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_COLOR_R, color_r, 0.0f);
+  }
+  void add_color_g(float color_g) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_COLOR_G, color_g, 0.0f);
+  }
+  void add_color_b(float color_b) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_COLOR_B, color_b, 0.0f);
+  }
+  void add_duration(float duration) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_DURATION, duration, 0.0f);
+  }
+  void add_high_trajectory(bool high_trajectory) {
+    fbb_.AddElement<uint8_t>(GameWeaponDef::VT_HIGH_TRAJECTORY, static_cast<uint8_t>(high_trajectory), 0);
+  }
+  explicit GameWeaponDefBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<GameWeaponDef> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<GameWeaponDef>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<GameWeaponDef> CreateGameWeaponDef(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint16_t def_id = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> name = 0,
+    SpringWeb::ProjectileVisualType visual_type = SpringWeb::ProjectileVisualType_Cannon,
+    float projectile_speed = 0.0f,
+    float range = 0.0f,
+    float aoe = 0.0f,
+    float size = 0.0f,
+    float intensity = 0.0f,
+    float color_r = 0.0f,
+    float color_g = 0.0f,
+    float color_b = 0.0f,
+    float duration = 0.0f,
+    bool high_trajectory = false) {
+  GameWeaponDefBuilder builder_(_fbb);
+  builder_.add_duration(duration);
+  builder_.add_color_b(color_b);
+  builder_.add_color_g(color_g);
+  builder_.add_color_r(color_r);
+  builder_.add_intensity(intensity);
+  builder_.add_size(size);
+  builder_.add_aoe(aoe);
+  builder_.add_range(range);
+  builder_.add_projectile_speed(projectile_speed);
+  builder_.add_name(name);
+  builder_.add_def_id(def_id);
+  builder_.add_high_trajectory(high_trajectory);
+  builder_.add_visual_type(visual_type);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<GameWeaponDef> CreateGameWeaponDefDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint16_t def_id = 0,
+    const char *name = nullptr,
+    SpringWeb::ProjectileVisualType visual_type = SpringWeb::ProjectileVisualType_Cannon,
+    float projectile_speed = 0.0f,
+    float range = 0.0f,
+    float aoe = 0.0f,
+    float size = 0.0f,
+    float intensity = 0.0f,
+    float color_r = 0.0f,
+    float color_g = 0.0f,
+    float color_b = 0.0f,
+    float duration = 0.0f,
+    bool high_trajectory = false) {
+  auto name__ = name ? _fbb.CreateString(name) : 0;
+  return SpringWeb::CreateGameWeaponDef(
+      _fbb,
+      def_id,
+      name__,
+      visual_type,
+      projectile_speed,
+      range,
+      aoe,
+      size,
+      intensity,
+      color_r,
+      color_g,
+      color_b,
+      duration,
+      high_trajectory);
+}
+
+/// Sent by the game server after successful auth, alongside
+/// GameUnitDefs. Contains every weapon type the game defines so
+/// the client can render projectiles with correct visuals.
+struct GameWeaponDefs FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef GameWeaponDefsBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_DEFS = 4
+  };
+  const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::GameWeaponDef>> *defs() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::GameWeaponDef>> *>(VT_DEFS);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_DEFS) &&
+           verifier.VerifyVector(defs()) &&
+           verifier.VerifyVectorOfTables(defs()) &&
+           verifier.EndTable();
+  }
+};
+
+struct GameWeaponDefsBuilder {
+  typedef GameWeaponDefs Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_defs(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::GameWeaponDef>>> defs) {
+    fbb_.AddOffset(GameWeaponDefs::VT_DEFS, defs);
+  }
+  explicit GameWeaponDefsBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<GameWeaponDefs> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<GameWeaponDefs>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<GameWeaponDefs> CreateGameWeaponDefs(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::GameWeaponDef>>> defs = 0) {
+  GameWeaponDefsBuilder builder_(_fbb);
+  builder_.add_defs(defs);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<GameWeaponDefs> CreateGameWeaponDefsDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const std::vector<::flatbuffers::Offset<SpringWeb::GameWeaponDef>> *defs = nullptr) {
+  auto defs__ = defs ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::GameWeaponDef>>(*defs) : 0;
+  return SpringWeb::CreateGameWeaponDefs(
+      _fbb,
+      defs__);
+}
+
 /// Definition of one unit type. Sent once at game start so the client
 /// knows what model/texture to load for each def_id it sees in entity
 /// state snapshots. Parallel to MapFeatureDef but for dynamic entities.
@@ -5932,6 +6246,9 @@ struct ServerMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const SpringWeb::PlayerLeft *payload_as_PlayerLeft() const {
     return payload_type() == SpringWeb::ServerPayload_PlayerLeft ? static_cast<const SpringWeb::PlayerLeft *>(payload()) : nullptr;
   }
+  const SpringWeb::GameWeaponDefs *payload_as_GameWeaponDefs() const {
+    return payload_type() == SpringWeb::ServerPayload_GameWeaponDefs ? static_cast<const SpringWeb::GameWeaponDefs *>(payload()) : nullptr;
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_PAYLOAD_TYPE, 1) &&
@@ -6019,6 +6336,10 @@ template<> inline const SpringWeb::GameUnitDefs *ServerMessage::payload_as<Sprin
 
 template<> inline const SpringWeb::PlayerLeft *ServerMessage::payload_as<SpringWeb::PlayerLeft>() const {
   return payload_as_PlayerLeft();
+}
+
+template<> inline const SpringWeb::GameWeaponDefs *ServerMessage::payload_as<SpringWeb::GameWeaponDefs>() const {
+  return payload_as_GameWeaponDefs();
 }
 
 struct ServerMessageBuilder {
@@ -6353,6 +6674,10 @@ inline bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *o
     }
     case ServerPayload_PlayerLeft: {
       auto ptr = reinterpret_cast<const SpringWeb::PlayerLeft *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case ServerPayload_GameWeaponDefs: {
+      auto ptr = reinterpret_cast<const SpringWeb::GameWeaponDefs *>(obj);
       return verifier.VerifyTable(ptr);
     }
     default: return true;

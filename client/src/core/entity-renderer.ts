@@ -91,15 +91,23 @@ export class EntityRenderer {
     }
 
     /**
-     * Load unit def models from server-provided registry. Called once
-     * when GameUnitDefs arrives. Models are fetched in parallel.
+     * Register unit defs and start loading their models. Called
+     * incrementally as the server streams defs for newly encountered
+     * unit types — safe to call multiple times with overlapping sets.
      */
     setUnitDefs(defs: UnitDefInfo[]): void {
         const loadPromises: Promise<void>[] = [];
         let loaded = 0;
         let skipped = 0;
+        let alreadyKnown = 0;
 
         for (const def of defs) {
+            // Skip defs we already know about
+            if (this.defModelUrls.has(def.defId)) {
+                alreadyKnown++;
+                continue;
+            }
+
             this.defModelUrls.set(def.defId, def.modelUrl);
 
             if (!def.modelUrl) {
@@ -115,11 +123,16 @@ export class EntityRenderer {
             }));
         }
 
-        this.modelsReady = Promise.all(loadPromises).then(() => {
-            console.log(
-                `[entity-renderer] models ready: ${loaded} loaded, ${skipped} fallback`
-            );
-        });
+        if (loadPromises.length > 0 || skipped > 0) {
+            const batchReady = Promise.all(loadPromises).then(() => {
+                console.log(
+                    `[entity-renderer] defs batch: ${loaded} loaded, ${skipped} fallback` +
+                    (alreadyKnown > 0 ? `, ${alreadyKnown} already known` : '')
+                );
+            });
+            // Chain onto any outstanding load promises
+            this.modelsReady = this.modelsReady.then(() => batchReady);
+        }
     }
 
     private async loadModel(def: UnitDefInfo): Promise<ModelTemplate | null> {
