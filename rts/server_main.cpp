@@ -649,7 +649,8 @@ int main(int argc, char* argv[])
                     const bool rosterRequired = !playerTeamByUsername.empty();
 
                     // Try token-based reconnection first
-                    if (auth->token() && auth->token()->size() > 0) {
+                    const bool hasToken = auth->token() && auth->token()->size() > 0;
+                    if (hasToken) {
                         int64_t userId = db.ValidateSession(auth->token()->str());
                         if (userId > 0) {
                             // Look up the username from the userId so we
@@ -692,6 +693,21 @@ int main(int argc, char* argv[])
                                 auto mapDataMsg = Protocol::BuildMapData(mapMeta);
                                 net.Send(msg.clientId, mapDataMsg.data(), mapDataMsg.size());
                             }
+                            break;
+                        }
+                        // Token was present but ValidateSession failed.
+                        // If no password was supplied this is a pure
+                        // reconnect attempt and falling through into
+                        // the password branch would surface as a
+                        // misleading "Wrong password" error — reject
+                        // cleanly with "Session expired" so the client
+                        // can drop the stale token and re-auth. Mirrors
+                        // the lobby's behaviour at lobby_main.cpp.
+                        if (strlen(passHash) == 0) {
+                            auto resp = Protocol::BuildAuthResponse(
+                                SpringWeb::AuthStatus_InvalidCredentials,
+                                "", 0, "Session expired");
+                            net.Send(msg.clientId, resp.data(), resp.size());
                             break;
                         }
                     }

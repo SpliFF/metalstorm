@@ -275,6 +275,16 @@ int main(int argc, char* argv[])
 {
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
+    // Ignore SIGPIPE. The lobby writes to a handful of things that
+    // can get their peer closed under us: WebSocket client sockets,
+    // stdout/stderr (captured by mprocs or similar), and — not yet
+    // but soon — outbound connections to game servers as part of
+    // the restart-recovery work. Default SIGPIPE action terminates
+    // the process the first time any of those hit a closed peer,
+    // which turns a transient write failure into a lobby crash.
+    // Ignoring it means write() returns EPIPE instead, which every
+    // reasonable caller already handles as "peer went away".
+    std::signal(SIGPIPE, SIG_IGN);
 
     int port = 8011;
     std::string dbPath = "data/spring-server.db";

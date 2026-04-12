@@ -133,10 +133,18 @@ export class Connection {
             }
         }, Connection.CONNECT_RETRY_DELAY_MS * 4);
 
-        let settled = false;
+        let opened = false;
+        // A failed WebSocket fires BOTH `error` and `close` (in that
+        // order). Without this guard we'd retry twice per failed
+        // attempt, and each retry would itself double on its next
+        // failure — a single lobby restart would surface as an
+        // exponential burst of 2, 4, 8, 16 concurrent reconnect
+        // attempts hitting the server at once, all authing with the
+        // same token. One-shot the failure handler per attempt.
+        let failed = false;
 
         ws.onopen = () => {
-            settled = true;
+            opened = true;
             clearTimeout(connectTimer);
             this.setState('handshake');
             this.sendHandshake();
@@ -151,7 +159,10 @@ export class Connection {
         };
 
         const handleFailure = () => {
-            if (settled && this._state === 'connected') {
+            if (failed) return;
+            failed = true;
+
+            if (opened && this._state === 'connected') {
                 // Real disconnect after a successful connection
                 this.cleanup();
                 this.setState('disconnected');
