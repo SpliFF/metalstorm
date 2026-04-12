@@ -1,8 +1,11 @@
 /**
- * EntityRenderer — thin-instanced entity rendering with shape variety.
+ * EntityRenderer — thin-instanced entity rendering with real models.
  *
- * Groups entities by (shape, team) for batched draw calls.
- * Shape is derived from defId until real models are loaded.
+ * When the server sends GameUnitDefs, this renderer preloads each
+ * unit type's .glb model. Entities are grouped by (defId, team) for
+ * batched draw calls via thin instances. Defs without a model fall
+ * back to coloured procedural shapes (box/cylinder/cone/sphere).
+ *
  * Uses snapshot interpolation for smooth movement.
  */
 
@@ -16,9 +19,13 @@ import {
     StandardMaterial,
     Color3,
     BoundingInfo,
+    SceneLoader,
 } from '@babylonjs/core';
+// Register glTF loader plugin so SceneLoader can read .glb files.
+import '@babylonjs/loaders/glTF/index.js';
 import type { EntityStateSnapshot } from './entity-state.js';
 import { EntityInterpolator } from './entity-interpolator.js';
+import type { UnitDefInfo } from './connection.js';
 
 const TEAM_COLORS = [
     new Color3(0.2, 0.5, 1.0),
@@ -27,11 +34,10 @@ const TEAM_COLORS = [
     new Color3(1.0, 0.8, 0.1),
 ];
 
-// Shape types — different geometries for visual distinction
+// Fallback shape types for defs without models
 enum UnitShape { Box = 0, Cylinder, Cone, Sphere }
 const SHAPE_COUNT = 4;
 
-/** Map defId to a shape. */
 function defIdToShape(defId: number): UnitShape {
     return (defId % SHAPE_COUNT) as UnitShape;
 }
@@ -42,25 +48,34 @@ export interface EntityMeta {
     healthScale: number;
 }
 
+/** Loaded model template for a unit def — the mesh used as thin-instance source. */
+interface ModelTemplate {
+    mesh: Mesh;
+}
+
 export class EntityRenderer {
     private scene: Scene;
     private interpolator = new EntityInterpolator();
     private entityMeta = new Map<number, EntityMeta>();
     private teamMaterials: StandardMaterial[] = [];
 
-    // Render meshes keyed by `shape * TEAM_COUNT + team`.
-    // Each (shape, team) pair owns its own Mesh + Geometry so thin-
-    // instance matrix buffers don't collide. Do NOT use Mesh.clone()
-    // here — clones share the source geometry, and
-    // `thinInstanceSetBuffer('matrix', ...)` attaches its buffer to
-    // `geometry._userVertexBuffers`, so the last clone to update wins
-    // and the other team vanishes as the camera moves.
-    private renderMeshes = new Map<number, Mesh>();
+    // --- Model loading ---
+    /** defId → loaded model template (null = no model, use fallback shape). */
+    private modelTemplates = new Map<number, ModelTemplate | null>();
+    /** Resolves when all model preloading is complete. */
+    private modelsReady: Promise<void> = Promise.resolve();
+    /** defId → modelUrl for logging/debugging. */
+    private defModelUrls = new Map<number, string>();
 
-    // Selection ring — flat torus, thin-instanced at each selected
-    // unit's ground position. Created lazily the first time a
-    // selection is set to avoid paying for the mesh when nothing is
-    // selected.
+    // --- Render meshes ---
+    // Keyed by a string `"model:{defId}:{team}"` or `"shape:{shape}:{team}"`.
+    // Each key owns its own Mesh so thin-instance buffers don't collide.
+    private renderMeshes = new Map<string, Mesh>();
+
+    // --- Fallback shape meshes (created on demand) ---
+    private shapeMeshes = new Map<number, Mesh>();
+
+    // Selection ring
     private selectionMesh: Mesh | null = null;
     private selectedIds: number[] = [];
 
@@ -75,24 +90,102 @@ export class EntityRenderer {
         }
     }
 
+    /**
+     * Load unit def models from server-provided registry. Called once
+     * when GameUnitDefs arrives. Models are fetched in parallel.
+     */
+    setUnitDefs(defs: UnitDefInfo[]): void {
+        const loadPromises: Promise<void>[] = [];
+        let loaded = 0;
+        let skipped = 0;
+
+        for (const def of defs) {
+            this.defModelUrls.set(def.defId, def.modelUrl);
+
+            if (!def.modelUrl) {
+                this.modelTemplates.set(def.defId, null);
+                skipped++;
+                continue;
+            }
+
+            loadPromises.push(this.loadModel(def).then(tmpl => {
+                this.modelTemplates.set(def.defId, tmpl);
+                if (tmpl) loaded++;
+                else skipped++;
+            }));
+        }
+
+        this.modelsReady = Promise.all(loadPromises).then(() => {
+            console.log(
+                `[entity-renderer] models ready: ${loaded} loaded, ${skipped} fallback`
+            );
+        });
+    }
+
+    private async loadModel(def: UnitDefInfo): Promise<ModelTemplate | null> {
+        try {
+            const lastSlash = def.modelUrl.lastIndexOf('/');
+            const baseUrl = def.modelUrl.substring(0, lastSlash + 1);
+            const fileName = def.modelUrl.substring(lastSlash + 1);
+
+            const result = await SceneLoader.ImportMeshAsync(
+                '', baseUrl, fileName, this.scene,
+            );
+
+            // Pick the first mesh with actual geometry
+            let primary: Mesh | null = null;
+            for (const m of result.meshes) {
+                if (m instanceof Mesh && m.getTotalVertices() > 0) {
+                    primary = m;
+                    break;
+                }
+            }
+
+            if (!primary) {
+                console.warn(`[entity-renderer] ${def.name}: glb has no geometry`);
+                return null;
+            }
+
+            // Hide all imported meshes except the primary, and detach
+            // it from the import root so its transform is independent.
+            for (const m of result.meshes) {
+                if (m !== primary) m.setEnabled(false);
+            }
+            primary.parent = null;
+            primary.position.set(0, 0, 0);
+            primary.rotationQuaternion = Quaternion.Identity();
+            primary.scaling.set(1, 1, 1);
+            primary.isPickable = false;
+            primary.isVisible = false; // Hidden until instances are set
+            primary.thinInstanceEnablePicking = false;
+            primary.alwaysSelectAsActiveMesh = true;
+            primary.setBoundingInfo(new BoundingInfo(
+                new Vector3(-1e6, -1e6, -1e6),
+                new Vector3(1e6, 1e6, 1e6),
+            ));
+            primary.renderingGroupId = 2;
+
+            return { mesh: primary };
+        } catch (err) {
+            console.warn(
+                `[entity-renderer] ${def.name}: failed to load ${def.modelUrl}`,
+                err,
+            );
+            return null;
+        }
+    }
+
     /** Replace the selected-unit id list. Called by InputManager. */
     setSelection(ids: readonly number[]): void {
         this.selectedIds = ids.slice();
     }
 
     /**
-     * Build a fresh Mesh for one (shape, team) pair. Each shape is
-     * shifted upward by half its vertical extent and baked so that
-     * `thinInstanceSetBuffer` can place the base of the mesh exactly
-     * at the given world y. The mesh opts out of frustum culling
-     * (`alwaysSelectAsActiveMesh = true`) because the vertex-space
-     * bounding box doesn't account for thin-instance transforms, so
-     * the whole batch vanishes as soon as the template's origin
-     * crosses the frustum edge — which is exactly the wink-out the
-     * user reported.
+     * Build a fallback Mesh for one (shape, team) pair. Each shape is
+     * shifted upward by half its height and baked so the base sits at y=0.
      */
-    private buildMesh(shape: UnitShape, team: number): Mesh {
-        const name = `render_${shape}_${team}`;
+    private buildFallbackMesh(shape: UnitShape, team: number): Mesh {
+        const name = `render_fallback_${shape}_${team}`;
         let mesh: Mesh;
         let height: number;
         switch (shape) {
@@ -119,40 +212,75 @@ export class EntityRenderer {
         mesh.material = this.teamMaterials[team];
         mesh.thinInstanceEnablePicking = false;
         mesh.alwaysSelectAsActiveMesh = true;
-        // Pin a giant world-space bounding box at build time and
-        // never refresh it. Thin instances span the whole map and
-        // update every frame, so calling `thinInstanceRefreshBoundingInfo`
-        // each tick introduces a timing window where Babylon can
-        // consult a stale box between updates — the user saw this as
-        // occasional unit batches winking out during camera motion.
-        // A fixed ±1e6 box is trivially big enough that every
-        // internal culling / LOD / sort path passes, and since
-        // `alwaysSelectAsActiveMesh` is also on, the frustum test
-        // is bypassed entirely anyway.
         mesh.setBoundingInfo(new BoundingInfo(
             new Vector3(-1e6, -1e6, -1e6),
             new Vector3(1e6, 1e6, 1e6),
         ));
-        // Group layout:
-        //   0 — terrain + features (default)
-        //   1 — water plane (added by main.ts when the map has water)
-        //   2 — units (this mesh)
-        //   3 — selection rings
-        //
-        // Units render in a higher group than terrain so the
-        // low-resolution client-side terrain mesh (step 2 on
-        // wanderlust) doesn't occasionally cover the base of a unit
-        // whose server-side ground y lands inside a terrain triangle.
-        // Trade-off: units are visible through hills, which is a
-        // standard RTS X-ray compromise.
         mesh.renderingGroupId = 2;
         return mesh;
     }
 
+    /** Compute the render-group key for a (defId, team) pair. */
+    private renderKey(defId: number, team: number): string {
+        const tmpl = this.modelTemplates.get(defId);
+        if (tmpl) return `model:${defId}:${team}`;
+        const shape = defIdToShape(defId);
+        const teamIdx = team % this.teamMaterials.length;
+        return `shape:${shape}:${teamIdx}`;
+    }
+
     /**
-     * Build the selection-ring template on first use. A flat torus
-     * sitting on the ground plane. Rendered in group 2 (above units)
-     * with an unlit yellow emissive material so it's always visible.
+     * Get or create a render mesh for a (defId, team) pair. If a model
+     * template exists for this defId, clone it and apply team material.
+     * Otherwise fall back to a procedural shape.
+     */
+    private getOrCreateRenderMesh(defId: number, team: number): Mesh {
+        const tmpl = this.modelTemplates.get(defId);
+        if (tmpl) {
+            const key = `model:${defId}:${team}`;
+            let mesh = this.renderMeshes.get(key);
+            if (!mesh) {
+                // Clone the template so each team gets its own thin-instance buffer
+                mesh = tmpl.mesh.clone(`unit_${defId}_team${team}`);
+                mesh.makeGeometryUnique();
+
+                // Apply team colour. For PBR materials (from glTF), tint the
+                // albedo. For StandardMaterial, set diffuse. We create a fresh
+                // material instance so teams don't share.
+                const teamColor = TEAM_COLORS[team % TEAM_COLORS.length];
+                const mat = new StandardMaterial(`unit_${defId}_team${team}_mat`, this.scene);
+                mat.diffuseColor = teamColor;
+                mat.specularColor = new Color3(0.3, 0.3, 0.3);
+                mesh.material = mat;
+
+                mesh.isPickable = false;
+                mesh.isVisible = false;
+                mesh.thinInstanceEnablePicking = false;
+                mesh.alwaysSelectAsActiveMesh = true;
+                mesh.setBoundingInfo(new BoundingInfo(
+                    new Vector3(-1e6, -1e6, -1e6),
+                    new Vector3(1e6, 1e6, 1e6),
+                ));
+                mesh.renderingGroupId = 2;
+                this.renderMeshes.set(key, mesh);
+            }
+            return mesh;
+        }
+
+        // Fallback: procedural shape
+        const shape = defIdToShape(defId);
+        const teamIdx = team % this.teamMaterials.length;
+        const key = `shape:${shape}:${teamIdx}`;
+        let mesh = this.renderMeshes.get(key);
+        if (!mesh) {
+            mesh = this.buildFallbackMesh(shape, teamIdx);
+            this.renderMeshes.set(key, mesh);
+        }
+        return mesh;
+    }
+
+    /**
+     * Build the selection-ring template on first use.
      */
     private ensureSelectionMesh(): Mesh {
         if (this.selectionMesh) return this.selectionMesh;
@@ -161,8 +289,6 @@ export class EntityRenderer {
             thickness: 3,
             tessellation: 24,
         }, this.scene);
-        // Flatten vertically so it hugs the ground instead of looking
-        // like a floating doughnut.
         mesh.scaling.y = 0.15;
         mesh.bakeCurrentTransformIntoVertices();
 
@@ -179,20 +305,12 @@ export class EntityRenderer {
             new Vector3(-1e6, -1e6, -1e6),
             new Vector3(1e6, 1e6, 1e6),
         ));
-        // Group 3: draw after terrain (0), water (1), and units (2)
-        // so the ring always sits on top, even when the camera is
-        // near-horizontal.
         mesh.renderingGroupId = 3;
         mesh.isVisible = false;
         this.selectionMesh = mesh;
         return mesh;
     }
 
-    /**
-     * Update the selection-ring thin instances from the current
-     * `selectedIds` + interpolated entity positions. Called each tick
-     * after the main per-team buffer update.
-     */
     private updateSelectionRings(now: number): void {
         if (this.selectedIds.length === 0) {
             if (this.selectionMesh) {
@@ -209,10 +327,6 @@ export class EntityRenderer {
         for (const id of this.selectedIds) {
             const p = this.interpolator.getInterpolated(id, now);
             if (!p) continue;
-            // Lift the ring a hair above ground so it doesn't z-fight
-            // with the terrain mesh (units render in group 1 which
-            // depth-tests against terrain; the ring is group 2 so the
-            // offset is just a safety margin).
             const m = Matrix.Compose(
                 new Vector3(1, 1, 1),
                 Quaternion.Identity(),
@@ -277,23 +391,20 @@ export class EntityRenderer {
 
     tick(): void {
         const now = performance.now();
-        const teamCount = this.teamMaterials.length;
 
-        // Collect matrices grouped by (shape, team)
-        const groups = new Map<number, { matrices: number[]; count: number }>();
+        // Collect matrices grouped by render mesh key
+        const groups = new Map<string, { mesh: Mesh; matrices: number[]; count: number }>();
 
         for (const [id, meta] of this.entityMeta) {
             const lerped = this.interpolator.getInterpolated(id, now);
             if (!lerped) continue;
 
-            const shape = defIdToShape(meta.defId);
-            const teamIdx = meta.team % teamCount;
-            const groupKey = shape * teamCount + teamIdx;
-
-            let group = groups.get(groupKey);
+            const key = this.renderKey(meta.defId, meta.team);
+            let group = groups.get(key);
             if (!group) {
-                group = { matrices: [], count: 0 };
-                groups.set(groupKey, group);
+                const mesh = this.getOrCreateRenderMesh(meta.defId, meta.team);
+                group = { mesh, matrices: [], count: 0 };
+                groups.set(key, group);
             }
 
             const rotation = (lerped.heading / 65535) * Math.PI * 2;
@@ -303,46 +414,30 @@ export class EntityRenderer {
                 new Vector3(lerped.x, lerped.y, lerped.z),
             );
 
-            // Push 16 floats
             const arr = new Float32Array(16);
             matrix.copyToArray(arr, 0);
             for (let j = 0; j < 16; j++) group.matrices.push(arr[j]);
             group.count++;
         }
 
-        // Update render meshes
-        for (let shape = 0; shape < SHAPE_COUNT; shape++) {
-            for (let team = 0; team < teamCount; team++) {
-                const key = shape * teamCount + team;
-                const group = groups.get(key);
-                let mesh = this.renderMeshes.get(key);
+        // Update render meshes — show groups with instances, hide empty ones
+        const activeKeys = new Set<string>();
+        for (const [key, group] of groups) {
+            activeKeys.add(key);
+            group.mesh.isVisible = true;
+            const buf = new Float32Array(group.matrices);
+            group.mesh.thinInstanceSetBuffer('matrix', buf, 16, false);
+            group.mesh.thinInstanceCount = group.count;
+        }
 
-                if (!group || group.count === 0) {
-                    if (mesh) {
-                        mesh.isVisible = false;
-                        mesh.thinInstanceCount = 0;
-                    }
-                    continue;
-                }
-
-                if (!mesh) {
-                    mesh = this.buildMesh(shape as UnitShape, team);
-                    this.renderMeshes.set(key, mesh);
-                }
-
-                mesh.isVisible = true;
-                const buf = new Float32Array(group.matrices);
-                mesh.thinInstanceSetBuffer('matrix', buf, 16, false);
-                mesh.thinInstanceCount = group.count;
-                // No bounding-info refresh here on purpose — see the
-                // giant fixed box set in buildMesh(). Refreshing every
-                // frame introduces a timing window where the box
-                // momentarily reflects stale data during motion.
+        // Hide meshes that had instances last frame but don't this frame
+        for (const [rKey, mesh] of this.renderMeshes) {
+            if (!activeKeys.has(rKey)) {
+                mesh.isVisible = false;
+                mesh.thinInstanceCount = 0;
             }
         }
 
-        // Selection rings piggyback on the same tick cadence so they
-        // track unit motion frame-accurately.
         this.updateSelectionRings(now);
     }
 
@@ -366,6 +461,11 @@ export class EntityRenderer {
     dispose(): void {
         for (const mesh of this.renderMeshes.values()) mesh.dispose();
         this.renderMeshes.clear();
+        // Dispose model templates
+        for (const tmpl of this.modelTemplates.values()) {
+            if (tmpl) tmpl.mesh.dispose();
+        }
+        this.modelTemplates.clear();
         if (this.selectionMesh) {
             this.selectionMesh.dispose();
             this.selectionMesh = null;

@@ -22,6 +22,7 @@
 #include "Server/MapProcessor.h"
 #include <sqlite3.h>
 #include "Sim/Units/UnitHandler.h"
+#include "Sim/Units/UnitDefHandler.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Units/CommandAI/Command.h"
@@ -203,6 +204,16 @@ int main(int argc, char* argv[])
             // Legacy: bare number = port
             port = std::atoi(argv[i]);
         }
+    }
+
+    // Derive gameId from gamePath basename (e.g. "papertanks" from
+    // "content/games/papertanks"). Used for model URL construction.
+    std::string gameId;
+    if (!gamePath.empty()) {
+        namespace fs = std::filesystem;
+        gameId = fs::path(gamePath).filename().string();
+        if (gameId.empty() && fs::path(gamePath).has_parent_path())
+            gameId = fs::path(gamePath).parent_path().filename().string();
     }
 
     std::fprintf(stderr, "[spring-server] starting...\n");
@@ -693,6 +704,12 @@ int main(int argc, char* argv[])
                                 auto mapDataMsg = Protocol::BuildMapData(mapMeta);
                                 net.Send(msg.clientId, mapDataMsg.data(), mapDataMsg.size());
                             }
+                            // Send unit def registry so client can preload models
+                            if (unitDefHandler && !gameId.empty()) {
+                                auto udMsg = Protocol::BuildGameUnitDefs(
+                                    unitDefHandler->GetUnitDefsVec(), gameId);
+                                net.Send(msg.clientId, udMsg.data(), udMsg.size());
+                            }
                             break;
                         }
                         // Token was present but ValidateSession failed.
@@ -786,6 +803,12 @@ int main(int argc, char* argv[])
                     if (!mapMeta.id.empty()) {
                         auto mapDataMsg = Protocol::BuildMapData(mapMeta);
                         net.Send(msg.clientId, mapDataMsg.data(), mapDataMsg.size());
+                    }
+                    // Send unit def registry so client can preload models
+                    if (unitDefHandler && !gameId.empty()) {
+                        auto udMsg = Protocol::BuildGameUnitDefs(
+                            unitDefHandler->GetUnitDefsVec(), gameId);
+                        net.Send(msg.clientId, udMsg.data(), udMsg.size());
                     }
                     break;
                 }

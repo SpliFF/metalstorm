@@ -445,6 +445,9 @@ async function startGame(gameServerPort: number): Promise<void> {
             localStorage.removeItem('springrts-token');
         },
         onMapData,
+        onUnitDefs(defs) {
+            entityRenderer?.setUnitDefs(defs);
+        },
         onEntityState(snapshot, isDelta) {
             entityRenderer?.update(snapshot, isDelta);
             currentFrame++;

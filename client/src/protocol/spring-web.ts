@@ -21,7 +21,12 @@ export { GameEventBatch, GameEventBatchT } from './spring-web/game-event-batch.j
 export { GameInfo, GameInfoT } from './spring-web/game-info.js';
 export { GameListRequest, GameListRequestT } from './spring-web/game-list-request.js';
 export { GameListUpdate, GameListUpdateT } from './spring-web/game-list-update.js';
+export { GameStarted, GameStartedT } from './spring-web/game-started.js';
+export { GameUnitDef, GameUnitDefT } from './spring-web/game-unit-def.js';
+export { GameUnitDefs, GameUnitDefsT } from './spring-web/game-unit-defs.js';
 export { Handshake, HandshakeT } from './spring-web/handshake.js';
+export { IpcMessage, IpcMessageT } from './spring-web/ipc-message.js';
+export { IpcPayload } from './spring-web/ipc-payload.js';
 export { LobbyGameInfo, LobbyGameInfoT } from './spring-web/lobby-game-info.js';
 export { MapData, MapDataT } from './spring-web/map-data.js';
 export { MapDecals, MapDecalsT } from './spring-web/map-decals.js';

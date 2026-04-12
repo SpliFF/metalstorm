@@ -23,6 +23,8 @@ import { CombatEvent } from '../protocol/spring-web/combat-event.js';
 import { EntityDestroy } from '../protocol/spring-web/entity-destroy.js';
 import { GameInfo } from '../protocol/spring-web/game-info.js';
 import { MapData } from '../protocol/spring-web/map-data.js';
+import { GameUnitDefs } from '../protocol/spring-web/game-unit-defs.js';
+import { GameUnitDef } from '../protocol/spring-web/game-unit-def.js';
 import { ServerClock } from './clock.js';
 import { parseEntityState, type EntityStateSnapshot } from './entity-state.js';
 import { parseMapData, type ParsedMapData } from './map-data.js';
@@ -46,6 +48,14 @@ export interface CombatEventInfo {
     z: number;
 }
 
+/** Parsed unit definition — maps defId to its model URL. */
+export interface UnitDefInfo {
+    defId: number;
+    name: string;
+    modelUrl: string;
+    textureUrl: string;
+}
+
 /// Lobby vs game-server session roles. The game server stamps a
 /// real team id on the session during AuthRequest; the lobby
 /// leaves it at -1. Code outside Connection reads this via
@@ -61,6 +71,7 @@ export interface ConnectionEvents {
     onEntityDestroy?: (entityId: number, x: number, y: number, z: number) => void;
     onGameOver?: (frame: number) => void;
     onMapData?: (map: ParsedMapData) => void;
+    onUnitDefs?: (defs: UnitDefInfo[]) => void;
     onServerMessage?: (msg: ServerMessage) => void;
 }
 
@@ -322,6 +333,23 @@ export class Connection {
                 } catch (err) {
                     console.error('[connection] failed to parse MapData:', err);
                 }
+                break;
+            }
+            case ServerPayload.GameUnitDefs: {
+                const fbDefs = msg.payload(new GameUnitDefs()) as GameUnitDefs;
+                const defs: UnitDefInfo[] = [];
+                for (let i = 0; i < fbDefs.defsLength(); i++) {
+                    const d = fbDefs.defs(i, new GameUnitDef());
+                    if (!d) continue;
+                    defs.push({
+                        defId: d.defId(),
+                        name: d.name() ?? '',
+                        modelUrl: d.modelUrl() ?? '',
+                        textureUrl: d.textureUrl() ?? '',
+                    });
+                }
+                console.log(`[connection] received ${defs.length} unit def(s)`);
+                this.events.onUnitDefs?.(defs);
                 break;
             }
             default:

@@ -539,6 +539,40 @@ int main(int argc, char* argv[])
         };
     });
 
+    // Serve processed game files (unit models, textures, etc.)
+    // Parallel to /api/maps/data/* but for game content preprocessed
+    // by GameProcessor into data/games/<gameId>/models/.
+    net.AddHttpGet("/api/games/data/*", [](const std::string& url) -> HttpResponse {
+        // URL: /api/games/data/{gameId}/models/{filename}
+        std::string rest = url.substr(std::string("/api/games/data/").size());
+        std::string filePath = "data/games/" + rest;
+
+        if (filePath.find("..") != std::string::npos)
+            return {.contentType = "text/plain", .body = {}, .status = 403};
+
+        namespace fs = std::filesystem;
+        if (!fs::exists(filePath) || !fs::is_regular_file(filePath))
+            return {.contentType = "text/plain", .body = {}, .status = 404};
+
+        std::ifstream f(filePath, std::ios::binary);
+        std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
+                                   std::istreambuf_iterator<char>());
+
+        std::string ext = fs::path(filePath).extension().string();
+        std::string ct = "application/octet-stream";
+        if (ext == ".glb") ct = "model/gltf-binary";
+        else if (ext == ".gltf") ct = "model/gltf+json";
+        else if (ext == ".png") ct = "image/png";
+        else if (ext == ".json") ct = "application/json";
+
+        return {
+            .contentType = ct,
+            .body = std::move(data),
+            .status = 200,
+            .cacheControl = "public, max-age=3600",
+        };
+    });
+
     // Map thumbnail endpoint. Serves the preprocessed small WebP
     // (aspect-correct, max 256px on the longer axis) that
     // MapProcessor::ExtractMinimapWebP wrote to

@@ -437,6 +437,36 @@ table RoomPlayerLeft {
 }
 
 // ============================================================
+// Game unit definition messages
+// ============================================================
+
+/// Definition of one unit type. Sent once at game start so the client
+/// knows what model/texture to load for each def_id it sees in entity
+/// state snapshots. Parallel to MapFeatureDef but for dynamic entities.
+///
+/// `model_url` and `texture_url` are HTTP paths relative to the game
+/// server root, pointing at preprocessed `.glb` and `.png` files under
+/// `data/games/<gameId>/models/`. Either may be empty if the unit type
+/// has no model or preprocessing failed — the client falls back to a
+/// coloured procedural shape.
+table GameUnitDef {
+    def_id: uint16;
+    name: string;
+    model_url: string;
+    texture_url: string;
+}
+
+/// Sent by the game server after successful auth, before entity state
+/// streaming begins. Contains every unit type the game defines so the
+/// client can preload models.
+table GameUnitDefs {
+    defs: [GameUnitDef];
+    /// Base URL for model/texture paths (e.g. "/api/content/assets/").
+    /// Client prepends this to each def's model_url/texture_url.
+    base_url: string;
+}
+
+// ============================================================
 // Map messages
 // ============================================================
 
@@ -597,6 +627,7 @@ union ServerPayload {
     MapData,
     AIListUpdate,
     GameListUpdate,
+    GameUnitDefs,
 }
 
 table ServerMessage {

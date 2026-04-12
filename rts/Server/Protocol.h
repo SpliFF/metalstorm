@@ -13,6 +13,7 @@
 #include "MapProcessor.h"
 #include <flatbuffers/flatbuffers.h>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <vector>
 
@@ -466,6 +467,53 @@ inline std::vector<uint8_t> BuildRoomListUpdate(const std::vector<GameRoom*>& ro
     auto vec = fbb.CreateVector(entries);
     auto update = SpringWeb::CreateRoomListUpdate(fbb, vec);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_RoomListUpdate, update.Union());
+}
+
+/// Build a GameUnitDefs message listing every unit type and its model URL.
+/// `gameId` is the game directory basename (e.g. "papertanks").
+/// For each def with a modelName, checks whether the preprocessed .glb
+/// exists at data/games/<gameId>/models/<stem>.glb and builds the URL
+/// accordingly. Defs without a model get empty URLs (client falls back
+/// to procedural shapes).
+template<typename UnitDefVec>
+inline std::vector<uint8_t> BuildGameUnitDefs(
+    const UnitDefVec& defs,
+    const std::string& gameId)
+{
+    namespace fs = std::filesystem;
+    const fs::path modelsDir = fs::path("data/games") / gameId / "models";
+
+    flatbuffers::FlatBufferBuilder fbb(1024);
+
+    std::vector<flatbuffers::Offset<SpringWeb::GameUnitDef>> offsets;
+    // UnitDef id=0 is not a valid def, skip it
+    for (size_t i = 1; i < defs.size(); i++) {
+        const auto& ud = defs[i];
+        auto nameOff = fbb.CreateString(ud.name);
+
+        std::string modelUrl;
+        if (!ud.modelName.empty()) {
+            // Strip extension from modelName to get the stem
+            std::string stem = fs::path(ud.modelName).stem().string();
+            fs::path glbPath = modelsDir / (stem + ".glb");
+            if (fs::exists(glbPath)) {
+                modelUrl = "/api/games/data/" + gameId + "/models/" + stem + ".glb";
+            }
+        }
+
+        auto modelOff = fbb.CreateString(modelUrl);
+        // Texture URL left empty — glTF loader resolves textures
+        // relative to the .glb URL automatically.
+        auto texOff = fbb.CreateString("");
+
+        offsets.push_back(SpringWeb::CreateGameUnitDef(
+            fbb, static_cast<uint16_t>(ud.id), nameOff, modelOff, texOff));
+    }
+
+    auto defsVec = fbb.CreateVector(offsets);
+    auto baseOff = fbb.CreateString("");
+    auto msg = SpringWeb::CreateGameUnitDefs(fbb, defsVec, baseOff);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameUnitDefs, msg.Union());
 }
 
 } // namespace Protocol
