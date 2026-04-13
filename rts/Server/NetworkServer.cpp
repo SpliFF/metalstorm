@@ -60,6 +60,10 @@ void NetworkServer::AddHttpGet(const std::string& pattern, HttpGetHandler handle
     httpGetHandlers.emplace_back(pattern, std::move(handler));
 }
 
+void NetworkServer::AddHttpPost(const std::string& pattern, HttpPostHandler handler) {
+    httpPostHandlers.emplace_back(pattern, std::move(handler));
+}
+
 bool NetworkServer::Start(int port) {
     if (running.load())
         return false;
@@ -155,6 +159,47 @@ void NetworkServer::NetworkThreadFunc(int port) {
             res->end(body);
         });
     }
+
+    // Register HTTP POST endpoints.
+    for (auto& [pattern, handler] : httpPostHandlers) {
+        app.post(pattern, [&handler](auto* res, auto* req) {
+            std::string url(req->getUrl());
+            std::string body;
+
+            // uWS streams POST bodies — we need to buffer the full body
+            // before calling the handler. For our API payloads this is
+            // always small (< 64KB).
+            res->onData([res, url, &handler, body = std::make_shared<std::string>()](
+                            std::string_view chunk, bool isLast) mutable {
+                body->append(chunk);
+                if (!isLast) return;
+
+                auto result = handler(url, *body);
+                res->writeStatus(result.status == 200 ? "200 OK"
+                    : result.status == 400 ? "400 Bad Request"
+                    : result.status == 401 ? "401 Unauthorized"
+                    : result.status == 404 ? "404 Not Found"
+                    : "500 Internal Server Error");
+                res->writeHeader("Content-Type", result.contentType);
+                res->writeHeader("Access-Control-Allow-Origin", "*");
+                res->writeHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+                res->writeHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+                std::string_view respBody(
+                    reinterpret_cast<const char*>(result.body.data()),
+                    result.body.size());
+                res->end(respBody);
+            });
+            res->onAborted([]() {});
+        });
+    }
+
+    // CORS preflight for POST endpoints
+    app.options("/*", [](auto* res, auto* /*req*/) {
+        res->writeHeader("Access-Control-Allow-Origin", "*");
+        res->writeHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        res->writeHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+        res->end();
+    });
 
     app.ws<ClientData>("/*", {
         .compression = uWS::DISABLED,

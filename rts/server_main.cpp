@@ -511,6 +511,56 @@ int main(int argc, char* argv[])
         content.Init(net, contentRoots);
     }
 
+    // --- HTTP exec endpoint (for CLI/curl access) ---
+    net.AddHttpPost("/api/exec", [&luaExecEngine](const std::string&, const std::string& body) -> HttpResponse {
+        // Parse JSON body: {"scope":"...", "code":"..."}
+        // Minimal JSON parsing — no dependency on a JSON library.
+        auto extractField = [&](const std::string& key) -> std::string {
+            std::string needle = "\"" + key + "\"";
+            auto pos = body.find(needle);
+            if (pos == std::string::npos) return "";
+            pos = body.find(':', pos + needle.size());
+            if (pos == std::string::npos) return "";
+            pos = body.find('"', pos + 1);
+            if (pos == std::string::npos) return "";
+            auto end = pos + 1;
+            while (end < body.size() && body[end] != '"') {
+                if (body[end] == '\\') end++; // skip escaped char
+                end++;
+            }
+            return body.substr(pos + 1, end - pos - 1);
+        };
+
+        std::string scope = extractField("scope");
+        std::string code = extractField("code");
+
+        if (scope.empty() || code.empty()) {
+            std::string err = R"({"success":false,"output":"missing scope or code"})";
+            return {.contentType = "application/json",
+                    .body = {err.begin(), err.end()}, .status = 400};
+        }
+
+        auto result = luaExecEngine.ExecSync(scope, code, 5000);
+
+        // Build JSON response (escape output for JSON)
+        std::string escaped;
+        for (char c : result.output) {
+            switch (c) {
+                case '"': escaped += "\\\""; break;
+                case '\\': escaped += "\\\\"; break;
+                case '\n': escaped += "\\n"; break;
+                case '\r': escaped += "\\r"; break;
+                case '\t': escaped += "\\t"; break;
+                default: escaped += c;
+            }
+        }
+
+        std::string json = "{\"success\":" + std::string(result.success ? "true" : "false")
+            + ",\"output\":\"" + escaped + "\"}";
+        return {.contentType = "application/json",
+                .body = {json.begin(), json.end()}, .status = 200};
+    });
+
     if (!net.Start(port)) {
         SLOG(SPRING_LOG_ERROR, "failed to start network server");
         springlog_shutdown();
@@ -1174,15 +1224,20 @@ int main(int argc, char* argv[])
             springlog_set_frame(sim.GetFrameNum());
         }
 
-        // Process pending console commands (from WS thread)
+        // Process pending console commands (from WS thread or HTTP)
         {
             LuaExecRequest req;
             while (luaExecEngine.TryPop(req)) {
                 auto result = ExecuteLuaExecRequest(req);
-                auto resp = Protocol::BuildConsoleResponse(
-                    result.requestId, result.scope, result.success,
-                    result.output, result.success ? 0 : 4);
-                net.Send(result.clientId, resp.data(), resp.size());
+                // Deliver to sync waiters (HTTP POST /api/exec)
+                luaExecEngine.DeliverResult(result);
+                // Send to WS client if this came from a WS connection
+                if (result.clientId != 0) {
+                    auto resp = Protocol::BuildConsoleResponse(
+                        result.requestId, result.scope, result.success,
+                        result.output, result.success ? 0 : 4);
+                    net.Send(result.clientId, resp.data(), resp.size());
+                }
             }
         }
 

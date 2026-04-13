@@ -625,6 +625,104 @@ int main(int argc, char* argv[])
                 .cacheControl = "no-cache"};
     });
 
+    // --- HTTP exec endpoint (for CLI/curl access to lobby commands) ---
+    net.AddHttpPost("/api/exec", [&rooms, &gameServers, mapDb](const std::string&, const std::string& body) -> HttpResponse {
+        // Minimal JSON parsing
+        auto extractField = [&](const std::string& key) -> std::string {
+            std::string needle = "\"" + key + "\"";
+            auto pos = body.find(needle);
+            if (pos == std::string::npos) return "";
+            pos = body.find(':', pos + needle.size());
+            if (pos == std::string::npos) return "";
+            pos = body.find('"', pos + 1);
+            if (pos == std::string::npos) return "";
+            auto end = pos + 1;
+            while (end < body.size() && body[end] != '"') {
+                if (body[end] == '\\') end++;
+                end++;
+            }
+            return body.substr(pos + 1, end - pos - 1);
+        };
+
+        std::string scope = extractField("scope");
+        std::string code = extractField("code");
+        bool success = true;
+        std::string output;
+
+        if (scope == "sql") {
+            std::string upper = code;
+            for (auto& c : upper) c = (char)toupper((unsigned char)c);
+            bool rejected = false;
+            for (const char* kw : {"INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE"}) {
+                if (upper.find(kw) != std::string::npos) { rejected = true; break; }
+            }
+            if (rejected) {
+                output = "read-only: mutation queries not allowed";
+                success = false;
+            } else {
+                char* errMsg = nullptr;
+                auto callback = [](void* data, int ncols, char** vals, char** names) -> int {
+                    auto* out = static_cast<std::string*>(data);
+                    if (!out->empty()) *out += "\\n";
+                    for (int i = 0; i < ncols; i++) {
+                        if (i > 0) *out += " | ";
+                        *out += std::string(names[i]) + "=" + (vals[i] ? vals[i] : "NULL");
+                    }
+                    return 0;
+                };
+                int rc = sqlite3_exec(mapDb, code.c_str(), callback, &output, &errMsg);
+                if (rc != SQLITE_OK) {
+                    output = errMsg ? errMsg : "unknown error";
+                    if (errMsg) sqlite3_free(errMsg);
+                    success = false;
+                }
+                if (output.empty()) output = "(no results)";
+            }
+        } else if (scope == "lobby") {
+            if (code == "rooms") {
+                auto allRooms = rooms.GetAllRooms();
+                for (const auto* r : allRooms) {
+                    if (!r) continue;
+                    if (!output.empty()) output += "\\n";
+                    output += "Room " + std::to_string(r->id) + ": " + r->name
+                        + " (" + std::to_string(r->players.size()) + " players)";
+                }
+                if (output.empty()) output = "(no rooms)";
+            } else if (code == "process list") {
+                for (const auto& [rid, inst] : gameServers) {
+                    if (!output.empty()) output += "\\n";
+                    output += "Room " + std::to_string(rid)
+                        + ": pid=" + std::to_string(inst.pid)
+                        + " port=" + std::to_string(inst.port);
+                }
+                if (output.empty()) output = "(no game servers)";
+            } else {
+                output = "unknown lobby command: " + code;
+                success = false;
+            }
+        } else {
+            output = "unknown scope (lobby handles: sql, lobby)";
+            success = false;
+        }
+
+        // JSON escape
+        std::string escaped;
+        for (char c : output) {
+            switch (c) {
+                case '"': escaped += "\\\""; break;
+                case '\\': escaped += "\\\\"; break;
+                case '\n': escaped += "\\n"; break;
+                case '\r': escaped += "\\r"; break;
+                case '\t': escaped += "\\t"; break;
+                default: escaped += c;
+            }
+        }
+        std::string json = "{\"success\":" + std::string(success ? "true" : "false")
+            + ",\"output\":\"" + escaped + "\"}";
+        return {.contentType = "application/json",
+                .body = {json.begin(), json.end()}, .status = 200};
+    });
+
     if (!net.Start(port)) {
         SLOG(SPRING_LOG_ERROR, "failed to start network");
         springlog_shutdown();

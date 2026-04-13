@@ -38,6 +38,9 @@ struct HttpResponse {
 /// Handler for an HTTP GET endpoint.
 using HttpGetHandler = std::function<HttpResponse(const std::string& url)>;
 
+/// Handler for an HTTP POST endpoint. Receives URL and request body.
+using HttpPostHandler = std::function<HttpResponse(const std::string& url, const std::string& body)>;
+
 class NetworkServer {
 public:
     NetworkServer();
@@ -51,6 +54,9 @@ public:
 
     /// Register an HTTP GET endpoint. Must be called before Start().
     void AddHttpGet(const std::string& pattern, HttpGetHandler handler);
+
+    /// Register an HTTP POST endpoint. Must be called before Start().
+    void AddHttpPost(const std::string& pattern, HttpPostHandler handler);
 
     /// Drain all inbound messages received since the last call.
     /// Called from the sim thread each tick.
@@ -74,8 +80,9 @@ public:
 private:
     void NetworkThreadFunc(int port);
 
-    // HTTP GET handlers registered before Start()
+    // HTTP handlers registered before Start()
     std::vector<std::pair<std::string, HttpGetHandler>> httpGetHandlers;
+    std::vector<std::pair<std::string, HttpPostHandler>> httpPostHandlers;
 
     std::thread networkThread;
     std::atomic<bool> running{false};

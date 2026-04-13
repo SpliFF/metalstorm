@@ -322,6 +322,9 @@ if(UNIX)
     target_link_libraries(spring-logserver PRIVATE pthread dl)
 endif()
 
+# === springcli — CLI tool + libspringapi ===
+add_subdirectory(tools/springcli)
+
 # === compile_commands.json symlink for clangd ===
 if(CMAKE_EXPORT_COMPILE_COMMANDS)
     file(CREATE_LINK
