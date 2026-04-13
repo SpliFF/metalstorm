@@ -335,6 +335,14 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 	if (!LuaMetalMap::PushCtrlEntries(L))
 		return false;
 
+	// Debug API
+	REGISTER_LUA_CFUNC(Debug);
+	REGISTER_LUA_CFUNC(Warn);
+	REGISTER_LUA_CFUNC(Assert);
+	REGISTER_LUA_CFUNC(DumpTable);
+	REGISTER_LUA_CFUNC(Inspect);
+	REGISTER_LUA_CFUNC(Breakpoint);
+
 	return true;
 }
 
@@ -4803,6 +4811,135 @@ int LuaSyncedCtrl::RemoveUnitCmdDesc(lua_State* L)
 	return 0;
 }
 
+
+/******************************************************************************/
+/* Debug API                                                                   */
+/******************************************************************************/
+
+#include "System/SpringLog/SpringLog.h"
+
+// Helper: get the calling handle's name for use as log scope
+static const char* GetHandleScope(lua_State* L) {
+	CLuaHandle* h = CLuaHandle::GetHandle(L);
+	return h ? h->GetName().c_str() : "lua";
+}
+
+// Helper: build a string from all args using tostring
+static std::string ArgsToString(lua_State* L, int startArg = 1) {
+	std::string msg;
+	int n = lua_gettop(L);
+	for (int i = startArg; i <= n; i++) {
+		if (i > startArg) msg += "\t";
+		luaL_tolstring(L, i, nullptr);
+		const char* s = lua_tostring(L, -1);
+		if (s) msg += s;
+		lua_pop(L, 1);
+	}
+	return msg;
+}
+
+// Helper: dump a table to string with depth limit
+static std::string DumpTableImpl(lua_State* L, int idx, int maxDepth, int depth = 0) {
+	if (depth > maxDepth) return "{...}";
+	if (!lua_istable(L, idx)) {
+		luaL_tolstring(L, idx, nullptr);
+		std::string s = lua_tostring(L, -1);
+		lua_pop(L, 1);
+		return s;
+	}
+
+	std::string indent(depth * 2, ' ');
+	std::string innerIndent((depth + 1) * 2, ' ');
+	std::string result = "{\n";
+
+	lua_pushnil(L);
+	int count = 0;
+	while (lua_next(L, idx < 0 ? idx - 1 : idx)) {
+		if (count > 100) { result += innerIndent + "...\n"; lua_pop(L, 1); break; }
+		result += innerIndent;
+		// Key
+		if (lua_type(L, -2) == LUA_TSTRING)
+			result += std::string("[\"") + lua_tostring(L, -2) + "\"] = ";
+		else {
+			luaL_tolstring(L, -2, nullptr);
+			result += std::string("[") + lua_tostring(L, -1) + "] = ";
+			lua_pop(L, 1);
+		}
+		// Value
+		result += DumpTableImpl(L, -1, maxDepth, depth + 1) + ",\n";
+		lua_pop(L, 1);
+		count++;
+	}
+	result += indent + "}";
+	return result;
+}
+
+int LuaSyncedCtrl::Debug(lua_State* L)
+{
+	std::string msg = ArgsToString(L);
+	springlog_log(SPRING_LOG_DEBUG, "lua", GetHandleScope(L),
+		springlog_get_frame(), "%s", msg.c_str());
+	return 0;
+}
+
+int LuaSyncedCtrl::Warn(lua_State* L)
+{
+	std::string msg = ArgsToString(L);
+	springlog_log(SPRING_LOG_WARNING, "lua", GetHandleScope(L),
+		springlog_get_frame(), "%s", msg.c_str());
+	return 0;
+}
+
+int LuaSyncedCtrl::Assert(lua_State* L)
+{
+	if (lua_toboolean(L, 1)) return 0;
+	const char* msg = luaL_optstring(L, 2, "assertion failed");
+	springlog_log(SPRING_LOG_ERROR, "lua", GetHandleScope(L),
+		springlog_get_frame(), "ASSERT: %s", msg);
+	return luaL_error(L, "%s", msg);
+}
+
+int LuaSyncedCtrl::DumpTable(lua_State* L)
+{
+	luaL_checktype(L, 1, LUA_TTABLE);
+	const char* label = luaL_optstring(L, 2, "table");
+	int maxDepth = (int)luaL_optinteger(L, 3, 3);
+	std::string dump = DumpTableImpl(L, 1, maxDepth);
+	springlog_log(SPRING_LOG_NOTICE, "lua", GetHandleScope(L),
+		springlog_get_frame(), "%s = %s", label, dump.c_str());
+	return 0;
+}
+
+int LuaSyncedCtrl::Inspect(lua_State* L)
+{
+	int n = lua_gettop(L);
+	std::string msg;
+	for (int i = 1; i <= n; i += 2) {
+		if (i > 1) msg += "\n";
+		const char* name = (i + 1 <= n) ? luaL_checkstring(L, i) : "?";
+		int valIdx = (i + 1 <= n) ? i + 1 : i;
+		if (lua_istable(L, valIdx)) {
+			msg += std::string(name) + " = " + DumpTableImpl(L, valIdx, 2);
+		} else {
+			luaL_tolstring(L, valIdx, nullptr);
+			msg += std::string(name) + " = " + lua_tostring(L, -1);
+			lua_pop(L, 1);
+		}
+	}
+	springlog_log(SPRING_LOG_NOTICE, "lua", GetHandleScope(L),
+		springlog_get_frame(), "%s", msg.c_str());
+	return 0;
+}
+
+int LuaSyncedCtrl::Breakpoint(lua_State* L)
+{
+	const char* label = luaL_optstring(L, 1, "");
+	springlog_log(SPRING_LOG_NOTICE, "lua", GetHandleScope(L),
+		springlog_get_frame(), "BREAKPOINT hit%s%s",
+		label[0] ? ": " : "", label);
+	// TODO(Tier 9): actual breakpoint pause support
+	return 0;
+}
 
 /******************************************************************************/
 /******************************************************************************/

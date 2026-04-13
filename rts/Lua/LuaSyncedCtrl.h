@@ -268,6 +268,14 @@ class LuaSyncedCtrl
 		static int SetExperienceGrade(lua_State* L);
 
 		static int SetRadarErrorParams(lua_State* L);
+
+		// Debug API
+		static int Debug(lua_State* L);
+		static int Warn(lua_State* L);
+		static int Assert(lua_State* L);
+		static int DumpTable(lua_State* L);
+		static int Inspect(lua_State* L);
+		static int Breakpoint(lua_State* L);
 };
 
 
