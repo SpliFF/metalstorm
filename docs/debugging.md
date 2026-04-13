@@ -857,6 +857,125 @@ Found 3 Lua errors:
 
 ---
 
+## springcli — Command-Line Tool
+
+`springcli` is a standalone CLI for interacting with Spring servers from bash, scripts, and Claude automation. It uses HTTP (not WebSocket/FlatBuffers) so it works with plain `curl`-like simplicity.
+
+### Building
+
+```bash
+cmake --build build/debug --target springcli
+# Binary: build/debug/tools/springcli/springcli
+```
+
+### Commands
+
+```bash
+# Game server commands (scope: server)
+springcli state --server http://localhost:9100
+springcli frame --server http://localhost:9100
+springcli defs  --server http://localhost:9100
+springcli units --server http://localhost:9100 --team 0
+springcli pause --server http://localhost:9100
+springcli unpause --server http://localhost:9100
+springcli speed 2.0 --server http://localhost:9100
+
+# Lua execution
+springcli lua "return Spring.GetAllUnits()" --server http://localhost:9100
+springcli lua "return Spring.GetUnitHealth(1)" --server http://localhost:9100
+springcli exec LuaRules "return 1+1" --server http://localhost:9100
+springcli exec LuaGaia "return Spring.GetGameFrame()" --server http://localhost:9100
+
+# Multi-line Lua (quotes handle newlines)
+springcli lua 'local t = {} for i=1,5 do t[i]=i*i end return t' --server http://localhost:9100
+
+# Lobby commands
+springcli sql "SELECT id, username FROM users" --lobby http://localhost:8011
+springcli exec lobby "process list" --server http://localhost:8011
+springcli processes --lobby http://localhost:8011
+
+# Log server queries
+springcli logs --log-server http://localhost:8010 --level 4 --limit 10
+springcli logs --log-server http://localhost:8010 --search "runtime error"
+
+# Raw HTTP (escape hatch)
+springcli get http://localhost:8010/api/logs/sources
+springcli post http://localhost:8011/api/exec '{"scope":"sql","code":"SELECT 1"}'
+```
+
+### Environment Variables
+
+Set these to avoid repeating `--server` / `--lobby` / `--log-server`:
+
+```bash
+export SPRING_SERVER=http://localhost:9100
+export SPRING_LOBBY=http://localhost:8011
+export SPRING_LOG_SERVER=http://localhost:8010
+
+# Now just:
+springcli state
+springcli lua "return 42"
+springcli sql "SELECT count(*) FROM users"
+```
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--server URL` | Game server (default: `$SPRING_SERVER` or `localhost:9100`) |
+| `--lobby URL` | Lobby server (default: `$SPRING_LOBBY` or `localhost:8011`) |
+| `--log-server URL` | Log server (default: `$SPRING_LOG_SERVER` or `localhost:8010`) |
+| `--scope SCOPE` | Lua scope for `lua` command (default: LuaRules) |
+| `--level N` | Min log level for `logs` command |
+| `--section S` | Filter logs by section |
+| `--search Q` | Search log messages |
+| `--limit N` | Max results (default: 50) |
+| `--team N` | Filter units by team |
+| `--json` | Output raw JSON |
+| `-q` | Quiet: output only the result value, no "error:" prefix |
+
+### Exit Codes
+
+- `0` — success
+- `1` — command failed (Lua error, connection failed, etc.)
+- `2` — usage error (missing arguments)
+
+### HTTP Exec API
+
+`springcli` uses `POST /api/exec` endpoints added to both servers:
+
+```bash
+# Equivalent to: springcli exec server state
+curl -s -X POST http://localhost:9100/api/exec \
+  -H "Content-Type: application/json" \
+  -d '{"scope":"server","code":"state"}'
+# → {"success":true,"output":"frame=1234 teams=3 units=5"}
+
+# Equivalent to: springcli sql "SELECT 1"
+curl -s -X POST http://localhost:8011/api/exec \
+  -H "Content-Type: application/json" \
+  -d '{"scope":"sql","code":"SELECT 1"}'
+# → {"success":true,"output":"1=1"}
+```
+
+### libspringapi
+
+The CLI is built on `libspringapi`, a static C++ library with a simple HTTP-based API:
+
+```cpp
+#include "springapi.h"
+
+auto r = springapi::exec("http://localhost:9100", "LuaRules", "return 42");
+// r.success == true, r.output == "42"
+
+auto logs = springapi::getLogs("http://localhost:8010", 0, 4, 10);
+auto procs = springapi::getProcesses("http://localhost:8011");
+```
+
+Zero external dependencies — uses raw POSIX sockets for HTTP.
+
+---
+
 ## mprocs Development Environment
 
 The `mprocs.yaml` file defines the development process group:
