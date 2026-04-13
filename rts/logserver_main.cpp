@@ -9,6 +9,7 @@
 #include "System/SpringLog/SpringLogSqlite.h"
 #include "protocol_generated.h"
 
+#include <sqlite3.h>
 #include <App.h>  // uWebSockets
 
 #include <cstdio>
@@ -152,6 +153,28 @@ int main(int argc, char** argv) {
 
     // Init SQLite sink
     springlog_sqlite_init(g_dbPath.c_str());
+
+    // Create game_sessions table for post-mortem tracking
+    {
+        sqlite3* sessDb = nullptr;
+        if (sqlite3_open(g_dbPath.c_str(), &sessDb) == SQLITE_OK) {
+            sqlite3_exec(sessDb,
+                "CREATE TABLE IF NOT EXISTS game_sessions ("
+                "  session_id TEXT PRIMARY KEY,"
+                "  room_id INTEGER,"
+                "  game_name TEXT,"
+                "  map_name TEXT,"
+                "  started_at INTEGER,"
+                "  ended_at INTEGER,"
+                "  end_reason TEXT,"
+                "  exit_code INTEGER,"
+                "  player_count INTEGER,"
+                "  ai_count INTEGER"
+                ")", nullptr, nullptr, nullptr);
+            sqlite3_close(sessDb);
+        }
+    }
+
     SLOG(SPRING_LOG_NOTICE, "starting on port %d, db=%s", g_port, g_dbPath.c_str());
 
     // uWebSockets app
@@ -209,8 +232,40 @@ int main(int argc, char** argv) {
                ->end(json);
         })
         .get("/api/logs/sources", [](auto* res, auto* /*req*/) {
-            // Return a simple status response
             std::string json = R"({"status":"ok"})";
+            res->writeHeader("Content-Type", "application/json")
+               ->writeHeader("Access-Control-Allow-Origin", "*")
+               ->end(json);
+        })
+        .get("/api/sessions", [](auto* res, auto* /*req*/) {
+            // List recent game sessions from SQLite
+            sqlite3* db = nullptr;
+            std::string json = "[]";
+            if (sqlite3_open(g_dbPath.c_str(), &db) == SQLITE_OK) {
+                json = "[";
+                bool first = true;
+                auto cb = [](void* data, int ncols, char** vals, char** /*names*/) -> int {
+                    auto& out = *static_cast<std::pair<std::string*, bool*>*>(data);
+                    if (!*out.second) *out.first += ",";
+                    *out.second = false;
+                    char buf[512];
+                    snprintf(buf, sizeof(buf),
+                        R"({"session_id":"%s","room_id":%s,"game_name":"%s","map_name":"%s","started_at":%s,"ended_at":%s,"end_reason":"%s","exit_code":%s})",
+                        vals[0] ? vals[0] : "", vals[1] ? vals[1] : "0",
+                        vals[2] ? vals[2] : "", vals[3] ? vals[3] : "",
+                        vals[4] ? vals[4] : "0", vals[5] ? vals[5] : "0",
+                        vals[6] ? vals[6] : "", vals[7] ? vals[7] : "0");
+                    *out.first += buf;
+                    return 0;
+                };
+                auto pair = std::make_pair(&json, &first);
+                sqlite3_exec(db,
+                    "SELECT session_id, room_id, game_name, map_name, started_at, ended_at, end_reason, exit_code "
+                    "FROM game_sessions ORDER BY started_at DESC LIMIT 50",
+                    cb, &pair, nullptr);
+                json += "]";
+                sqlite3_close(db);
+            }
             res->writeHeader("Content-Type", "application/json")
                ->writeHeader("Access-Control-Allow-Origin", "*")
                ->end(json);
