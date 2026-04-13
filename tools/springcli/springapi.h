@@ -40,18 +40,36 @@ struct ProcessInfo {
     std::string game;
 };
 
+// ─── Authentication ───
+
+/// Login result.
+struct AuthResult {
+    bool success;
+    std::string token;
+    std::string error;
+    int64_t userId;
+    std::string username;
+    std::string role;
+};
+
+/// Login to a server. Returns a token for subsequent requests.
+AuthResult login(const std::string& serverUrl,
+                 const std::string& username, const std::string& password);
+
+/// Register a new account. Auto-logs in on success.
+AuthResult registerUser(const std::string& serverUrl,
+                        const std::string& username, const std::string& password);
+
 // ─── Command execution ───
 
 /// Execute a command in a scope on the game server.
-/// scope: "LuaRules", "LuaGaia", "server", etc.
-/// Uses POST /api/exec on the game server.
+/// `token` is the auth token from login(). Pass empty for unauthenticated (will fail if server requires auth).
 ExecResult exec(const std::string& serverUrl, const std::string& scope,
-                const std::string& code);
+                const std::string& code, const std::string& token = "");
 
 /// Execute a lobby-scope command (sql, lobby).
-/// Uses POST /api/exec on the lobby.
 ExecResult lobbyExec(const std::string& lobbyUrl, const std::string& scope,
-                     const std::string& code);
+                     const std::string& code, const std::string& token = "");
 
 // ─── Log queries ───
 
@@ -77,6 +95,7 @@ std::string getProcesses(const std::string& lobbyUrl);
 std::string httpGet(const std::string& url);
 
 /// Perform an HTTP POST with a JSON body and return the response body.
-std::string httpPost(const std::string& url, const std::string& jsonBody);
+std::string httpPost(const std::string& url, const std::string& jsonBody,
+                     const std::string& authToken = "");
 
 } // namespace springapi

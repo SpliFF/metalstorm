@@ -164,17 +164,20 @@ void NetworkServer::NetworkThreadFunc(int port) {
     for (auto& [pattern, handler] : httpPostHandlers) {
         app.post(pattern, [&handler](auto* res, auto* req) {
             std::string url(req->getUrl());
-            std::string body;
 
-            // uWS streams POST bodies — we need to buffer the full body
-            // before calling the handler. For our API payloads this is
-            // always small (< 64KB).
-            res->onData([res, url, &handler, body = std::make_shared<std::string>()](
+            // Capture headers before onData (req is only valid in this callback)
+            auto headers = std::make_shared<HttpRequestHeaders>();
+            headers->authorization = std::string(req->getHeader("authorization"));
+            headers->contentType = std::string(req->getHeader("content-type"));
+
+            // uWS streams POST bodies — buffer the full body
+            // before calling the handler.
+            res->onData([res, url, &handler, headers, body = std::make_shared<std::string>()](
                             std::string_view chunk, bool isLast) mutable {
                 body->append(chunk);
                 if (!isLast) return;
 
-                auto result = handler(url, *body);
+                auto result = handler(url, *body, *headers);
                 res->writeStatus(result.status == 200 ? "200 OK"
                     : result.status == 400 ? "400 Bad Request"
                     : result.status == 401 ? "401 Unauthorized"

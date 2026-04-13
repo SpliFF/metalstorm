@@ -51,7 +51,8 @@ bool parseUrl(const std::string& url, std::string& host, int& port, std::string&
 
 // Perform a raw HTTP request and return the response body.
 std::string httpRequest(const std::string& method, const std::string& url,
-                        const std::string& body = "") {
+                        const std::string& body = "",
+                        const std::string& authToken = "") {
     std::string host, path;
     int port;
     if (!parseUrl(url, host, port, path)) return "";
@@ -79,6 +80,9 @@ std::string httpRequest(const std::string& method, const std::string& url,
     req << method << " " << path << " HTTP/1.1\r\n";
     req << "Host: " << host << ":" << port << "\r\n";
     req << "Connection: close\r\n";
+    if (!authToken.empty()) {
+        req << "Authorization: Bearer " << authToken << "\r\n";
+    }
     if (!body.empty()) {
         req << "Content-Type: application/json\r\n";
         req << "Content-Length: " << body.size() << "\r\n";
@@ -180,20 +184,73 @@ std::string httpGet(const std::string& url) {
     return httpRequest("GET", url);
 }
 
-std::string httpPost(const std::string& url, const std::string& jsonBody) {
-    return httpRequest("POST", url, jsonBody);
+std::string httpPost(const std::string& url, const std::string& jsonBody,
+                     const std::string& authToken) {
+    return httpRequest("POST", url, jsonBody, authToken);
+}
+
+AuthResult login(const std::string& serverUrl,
+                 const std::string& username, const std::string& password) {
+    std::string body = "{\"username\":\"" + jsonEscape(username)
+        + "\",\"password\":\"" + jsonEscape(password) + "\"}";
+    std::string url = serverUrl;
+    if (url.back() != '/') url += '/';
+    url += "api/auth/login";
+
+    std::string resp = httpPost(url, body);
+    if (resp.empty()) return {false, "", "connection failed"};
+
+    AuthResult r;
+    r.token = jsonExtract(resp, "token");
+    r.error = jsonExtract(resp, "error");
+    r.success = !r.token.empty();
+    if (r.success) {
+        r.username = jsonExtract(resp, "username");
+        r.role = jsonExtract(resp, "role");
+        std::string uid = jsonExtract(resp, "user_id");
+        r.userId = uid.empty() ? 0 : std::atoll(uid.c_str());
+    }
+    return r;
+}
+
+AuthResult registerUser(const std::string& serverUrl,
+                        const std::string& username, const std::string& password) {
+    std::string body = "{\"username\":\"" + jsonEscape(username)
+        + "\",\"password\":\"" + jsonEscape(password) + "\"}";
+    std::string url = serverUrl;
+    if (url.back() != '/') url += '/';
+    url += "api/auth/register";
+
+    std::string resp = httpPost(url, body);
+    if (resp.empty()) return {false, "", "connection failed"};
+
+    AuthResult r;
+    r.token = jsonExtract(resp, "token");
+    r.error = jsonExtract(resp, "error");
+    r.success = !r.token.empty();
+    if (r.success) {
+        r.username = jsonExtract(resp, "username");
+        r.role = jsonExtract(resp, "role");
+        std::string uid = jsonExtract(resp, "user_id");
+        r.userId = uid.empty() ? 0 : std::atoll(uid.c_str());
+    }
+    return r;
 }
 
 ExecResult exec(const std::string& serverUrl, const std::string& scope,
-                const std::string& code) {
+                const std::string& code, const std::string& token) {
     std::string body = "{\"scope\":\"" + jsonEscape(scope)
         + "\",\"code\":\"" + jsonEscape(code) + "\"}";
     std::string url = serverUrl;
     if (url.back() != '/') url += '/';
     url += "api/exec";
 
-    std::string resp = httpPost(url, body);
+    std::string resp = httpPost(url, body, token);
     if (resp.empty()) return {false, "connection failed"};
+
+    // Check for auth error
+    std::string error = jsonExtract(resp, "error");
+    if (!error.empty()) return {false, error};
 
     ExecResult r;
     r.success = jsonExtract(resp, "success") == "true";
@@ -202,8 +259,8 @@ ExecResult exec(const std::string& serverUrl, const std::string& scope,
 }
 
 ExecResult lobbyExec(const std::string& lobbyUrl, const std::string& scope,
-                     const std::string& code) {
-    return exec(lobbyUrl, scope, code); // same endpoint
+                     const std::string& code, const std::string& token) {
+    return exec(lobbyUrl, scope, code, token);
 }
 
 std::string getLogs(const std::string& logServerUrl, int roomId,

@@ -78,6 +78,9 @@ int main(int argc, char** argv) {
     std::string lobbyUrl = envOr("SPRING_LOBBY", "http://localhost:8011");
     std::string logServerUrl = envOr("SPRING_LOG_SERVER", "http://localhost:8010");
     std::string scope = "LuaRules";
+    std::string user = envOr("SPRING_USER", "");
+    std::string pass = envOr("SPRING_PASS", "");
+    std::string token = envOr("SPRING_TOKEN", "");
     int level = 0, limit = 50, team = -1;
     std::string section, search;
     bool rawJson = false, quiet = false;
@@ -89,6 +92,9 @@ int main(int argc, char** argv) {
             else if (strcmp(argv[i], "--lobby") == 0 && i+1 < argc) lobbyUrl = argv[++i];
             else if (strcmp(argv[i], "--log-server") == 0 && i+1 < argc) logServerUrl = argv[++i];
             else if (strcmp(argv[i], "--scope") == 0 && i+1 < argc) scope = argv[++i];
+            else if (strcmp(argv[i], "--user") == 0 && i+1 < argc) user = argv[++i];
+            else if (strcmp(argv[i], "--pass") == 0 && i+1 < argc) pass = argv[++i];
+            else if (strcmp(argv[i], "--token") == 0 && i+1 < argc) token = argv[++i];
             else if (strcmp(argv[i], "--level") == 0 && i+1 < argc) level = atoi(argv[++i]);
             else if (strcmp(argv[i], "--section") == 0 && i+1 < argc) section = argv[++i];
             else if (strcmp(argv[i], "--search") == 0 && i+1 < argc) search = argv[++i];
@@ -99,7 +105,39 @@ int main(int argc, char** argv) {
         }
     };
 
+    // Helper: ensure we have a token, auto-login if user/pass provided
+    auto ensureAuth = [&](const std::string& targetUrl) -> bool {
+        if (!token.empty()) return true;
+        if (user.empty() || pass.empty()) {
+            fprintf(stderr, "error: auth required — use --user/--pass, --token, or set SPRING_TOKEN\n");
+            return false;
+        }
+        auto auth = springapi::login(targetUrl, user, pass);
+        if (!auth.success) {
+            fprintf(stderr, "error: login failed: %s\n", auth.error.c_str());
+            return false;
+        }
+        token = auth.token;
+        return true;
+    };
+
     std::string cmd = argv[1];
+
+    // ─── login ───
+    if (cmd == "login") {
+        parseOpts(2);
+        if (user.empty() || pass.empty()) {
+            fprintf(stderr, "Usage: springcli login --user USER --pass PASS [--server URL]\n");
+            return 2;
+        }
+        auto auth = springapi::login(serverUrl, user, pass);
+        if (auth.success) {
+            printf("%s\n", auth.token.c_str());
+        } else {
+            fprintf(stderr, "error: %s\n", auth.error.c_str());
+        }
+        return auth.success ? 0 : 1;
+    }
 
     // ─── exec <scope> <code> ───
     if (cmd == "exec") {
@@ -107,8 +145,9 @@ int main(int argc, char** argv) {
         std::string execScope = argv[2];
         std::string code = argv[3];
         parseOpts(4);
+        if (!ensureAuth(serverUrl)) return 1;
 
-        auto r = springapi::exec(serverUrl, execScope, code);
+        auto r = springapi::exec(serverUrl, execScope, code, token);
         if (rawJson) {
             printf("{\"success\":%s,\"output\":\"%s\"}\n",
                    r.success ? "true" : "false", r.output.c_str());
@@ -126,8 +165,9 @@ int main(int argc, char** argv) {
         if (argc < 3) { fprintf(stderr, "Usage: springcli lua <code> [--scope S] [--server URL]\n"); return 2; }
         std::string code = argv[2];
         parseOpts(3);
+        if (!ensureAuth(serverUrl)) return 1;
 
-        auto r = springapi::exec(serverUrl, scope, code);
+        auto r = springapi::exec(serverUrl, scope, code, token);
         if (quiet) {
             printf("%s\n", r.output.c_str());
         } else {
@@ -141,15 +181,17 @@ int main(int argc, char** argv) {
     if (cmd == "state" || cmd == "frame" || cmd == "defs" ||
         cmd == "pause" || cmd == "unpause") {
         parseOpts(2);
-        auto r = springapi::exec(serverUrl, "server", cmd);
+        if (!ensureAuth(serverUrl)) return 1;
+        auto r = springapi::exec(serverUrl, "server", cmd, token);
         printf("%s\n", r.output.c_str());
         return r.success ? 0 : 1;
     }
 
     if (cmd == "units") {
         parseOpts(2);
+        if (!ensureAuth(serverUrl)) return 1;
         std::string code = team >= 0 ? "units " + std::to_string(team) : "units";
-        auto r = springapi::exec(serverUrl, "server", code);
+        auto r = springapi::exec(serverUrl, "server", code, token);
         printf("%s\n", r.output.c_str());
         return r.success ? 0 : 1;
     }
@@ -157,7 +199,8 @@ int main(int argc, char** argv) {
     if (cmd == "speed") {
         if (argc < 3) { fprintf(stderr, "Usage: springcli speed <N>\n"); return 2; }
         parseOpts(3);
-        auto r = springapi::exec(serverUrl, "server", "speed " + std::string(argv[2]));
+        if (!ensureAuth(serverUrl)) return 1;
+        auto r = springapi::exec(serverUrl, "server", "speed " + std::string(argv[2]), token);
         printf("%s\n", r.output.c_str());
         return r.success ? 0 : 1;
     }
@@ -192,7 +235,8 @@ int main(int argc, char** argv) {
         if (argc < 3) { fprintf(stderr, "Usage: springcli sql <query> [--lobby URL]\n"); return 2; }
         std::string query = argv[2];
         parseOpts(3);
-        auto r = springapi::lobbyExec(lobbyUrl, "sql", query);
+        if (!ensureAuth(lobbyUrl)) return 1;
+        auto r = springapi::lobbyExec(lobbyUrl, "sql", query, token);
         if (quiet) {
             printf("%s\n", r.output.c_str());
         } else {

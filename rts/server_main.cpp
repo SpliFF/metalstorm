@@ -22,6 +22,7 @@
 #include "Server/MapProcessor.h"
 #include "Server/LuaExecEngine.h"
 #include "Server/LuaDebugger.h"
+#include "Server/HttpAuth.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogNet.h"
 #include "System/SpringLog/SpringLogSqlite.h"
@@ -511,54 +512,28 @@ int main(int argc, char* argv[])
         content.Init(net, contentRoots);
     }
 
-    // --- HTTP exec endpoint (for CLI/curl access) ---
-    net.AddHttpPost("/api/exec", [&luaExecEngine](const std::string&, const std::string& body) -> HttpResponse {
-        // Parse JSON body: {"scope":"...", "code":"..."}
-        // Minimal JSON parsing — no dependency on a JSON library.
-        auto extractField = [&](const std::string& key) -> std::string {
-            std::string needle = "\"" + key + "\"";
-            auto pos = body.find(needle);
-            if (pos == std::string::npos) return "";
-            pos = body.find(':', pos + needle.size());
-            if (pos == std::string::npos) return "";
-            pos = body.find('"', pos + 1);
-            if (pos == std::string::npos) return "";
-            auto end = pos + 1;
-            while (end < body.size() && body[end] != '"') {
-                if (body[end] == '\\') end++; // skip escaped char
-                end++;
-            }
-            return body.substr(pos + 1, end - pos - 1);
-        };
+    // --- HTTP auth + exec endpoints ---
+    HttpAuth::RegisterEndpoints(net, db);
 
-        std::string scope = extractField("scope");
-        std::string code = extractField("code");
+    net.AddHttpPost("/api/exec", [&luaExecEngine, &db](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+        // Validate auth token
+        int64_t userId = HttpAuth::ValidateToken(db, headers.authorization);
+        if (userId <= 0) {
+            return HttpAuth::JsonResponse(401, R"({"error":"unauthorized — use POST /api/auth/login first"})");
+        }
+
+        std::string scope = HttpAuth::JsonField(body, "scope");
+        std::string code = HttpAuth::JsonField(body, "code");
 
         if (scope.empty() || code.empty()) {
-            std::string err = R"({"success":false,"output":"missing scope or code"})";
-            return {.contentType = "application/json",
-                    .body = {err.begin(), err.end()}, .status = 400};
+            return HttpAuth::JsonResponse(400, R"({"success":false,"output":"missing scope or code"})");
         }
 
         auto result = luaExecEngine.ExecSync(scope, code, 5000);
 
-        // Build JSON response (escape output for JSON)
-        std::string escaped;
-        for (char c : result.output) {
-            switch (c) {
-                case '"': escaped += "\\\""; break;
-                case '\\': escaped += "\\\\"; break;
-                case '\n': escaped += "\\n"; break;
-                case '\r': escaped += "\\r"; break;
-                case '\t': escaped += "\\t"; break;
-                default: escaped += c;
-            }
-        }
-
         std::string json = "{\"success\":" + std::string(result.success ? "true" : "false")
-            + ",\"output\":\"" + escaped + "\"}";
-        return {.contentType = "application/json",
-                .body = {json.begin(), json.end()}, .status = 200};
+            + ",\"output\":\"" + HttpAuth::JsonEscape(result.output) + "\"}";
+        return HttpAuth::JsonResponse(200, json);
     });
 
     if (!net.Start(port)) {

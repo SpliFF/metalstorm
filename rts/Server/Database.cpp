@@ -160,14 +160,18 @@ bool Database::CreateSession(int64_t userId, const std::string& token) {
     return rc == SQLITE_DONE;
 }
 
-int64_t Database::ValidateSession(const std::string& token) {
-    const char* sql = "SELECT user_id FROM sessions WHERE token = ?";
+int64_t Database::ValidateSession(const std::string& token, int maxAgeSeconds) {
+    // Check token exists and hasn't expired
+    const char* sql =
+        "SELECT user_id FROM sessions WHERE token = ? "
+        "AND created_at > datetime('now', '-' || ? || ' seconds')";
     sqlite3_stmt* stmt = nullptr;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
         return 0;
 
     sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 2, maxAgeSeconds);
 
     int64_t userId = 0;
     if (sqlite3_step(stmt) == SQLITE_ROW) {

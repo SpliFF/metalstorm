@@ -48,7 +48,8 @@ public:
     bool CreateSession(int64_t userId, const std::string& token);
 
     /// Validate a session token. Returns the user ID if valid, 0 if invalid.
-    int64_t ValidateSession(const std::string& token);
+    /// Tokens older than maxAgeSeconds are considered expired.
+    int64_t ValidateSession(const std::string& token, int maxAgeSeconds = 86400);
 
     /// Revoke a session token.
     void RevokeSession(const std::string& token);

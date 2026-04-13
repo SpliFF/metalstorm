@@ -38,8 +38,15 @@ struct HttpResponse {
 /// Handler for an HTTP GET endpoint.
 using HttpGetHandler = std::function<HttpResponse(const std::string& url)>;
 
-/// Handler for an HTTP POST endpoint. Receives URL and request body.
-using HttpPostHandler = std::function<HttpResponse(const std::string& url, const std::string& body)>;
+/// HTTP request headers passed to POST handlers.
+struct HttpRequestHeaders {
+    std::string authorization;
+    std::string contentType;
+};
+
+/// Handler for an HTTP POST endpoint. Receives URL, body, and headers.
+using HttpPostHandler = std::function<HttpResponse(const std::string& url, const std::string& body,
+                                                    const HttpRequestHeaders& headers)>;
 
 class NetworkServer {
 public:
