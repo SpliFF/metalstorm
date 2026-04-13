@@ -68,8 +68,10 @@ bool LuaConstGame::PushEntries(lua_State* L)
 		LuaPushNamedNumber(L, "gravity"        , -mapInfo->map.gravity * GAME_SPEED * GAME_SPEED);
 	}
 
-	if (!modInfo.filename.empty()) {
-		// mod-info; values are meaningless prior to Game::Load
+	{
+		// mod-info: always push modrules values — our server doesn't
+		// use archive scanning so modInfo.filename is always empty,
+		// but modrules.lua is parsed and the values are valid.
 		LuaPushNamedString(L, "gameName"     , modInfo.humanName);
 		LuaPushNamedString(L, "gameShortName", modInfo.shortName);
 		LuaPushNamedString(L, "gameVersion"  , modInfo.version);

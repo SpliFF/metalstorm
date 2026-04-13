@@ -172,7 +172,8 @@ In `CSimulation::InitScripting()` (called from `Simulation::Init()`):
 3. Wrap in `LuaScriptContext`, add to dispatcher
 4. `CLuaGaia::LoadHandler(true)` — loads `LuaGaia/main.lua` from map content root
 5. Wrap in `LuaScriptContext`, add to dispatcher
-6. `eventHandler.GameStart()` — fires the `GameStart` callin to all contexts
+
+GameStart does **not** fire during Init. It fires later via `CSimulation::FireGameStart()`, called by `server_main.cpp` once all `--player` roster entries have authenticated. This ensures CPlayers are registered in `playerHandler` before gadgets query them (e.g. `start_unit_setup.lua` uses `GetPlayerList()` to spawn commanders).
 
 LuaRules looks for `LuaRules/main.lua` in the game's content root (e.g. `content/games/papertanks/LuaRules/main.lua`). LuaGaia looks in the map's content root. Engine-level base content is at `cont/base/springcontent/`.
 
@@ -324,10 +325,16 @@ Client ← lobby WS: AuthResponse + RoomListUpdate
 Client → lobby WS: RoomCreate / RoomJoin
 Client → lobby WS: RoomReady / RoomStartGame
   Lobby spawns spring-server subprocess
-  Sim boots → IPC pipe → GameStarted
-Client ← lobby WS: RoomStateUpdate (state=Active, game_server_port=N)
+  Sim boots, loads defs + map + gadgets (GameStart NOT yet fired)
+  Server waits for all --player roster entries to authenticate
+Client ← lobby WS: RoomStateUpdate (state=Loading, game_server_port=N)
 Client → game WS:  AuthRequest (token reconnect)
-Client ← game WS:  AuthResponse + MapData + GameUnitDefs
+Client ← game WS:  AuthResponse + MapData
+  (repeat for each player in roster)
+  All roster players connected → FireGameStart()
+    → gadgets spawn starting units (start_unit_setup.lua)
+    → IPC pipe → GameStarted
+Client ← lobby WS: RoomStateUpdate (state=Active)
 ```
 
 ### Gameplay Loop
@@ -360,4 +367,6 @@ first entity/projectile state update that references it.
 Playable end-to-end: lobby → create room → start game → fight → game-over → return to lobby.
 Player disconnect handling: server detects WebSocket close, fires `PlayerRemoved` Lua callin, broadcasts `PlayerLeft` to remaining clients, cleans up session. Default engine gadget ends game when no humans remain.
 
-All tasks from PLAN-next-steps.md are complete.
+All tasks from PLAN-next-steps.md are complete. Current work: Zero-K game support (PLAN-convert-zk.md).
+
+**ZK Phase A complete:** 197/236 gadgets boot, sim ticks at 30Hz. GameStart deferred until all roster players connect (game gadgets handle unit spawning, not the engine). Next: runtime testing with connected clients.

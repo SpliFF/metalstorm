@@ -4,11 +4,12 @@
 #include "ModInfo.h"
 
 #include "Lua/LuaParser.h"
+#include "Lua/LuaConfigLoader.h"
 #include "Lua/LuaSyncedRead.h"
 #include "Lua/LuaAllocState.h"
 #include "Map/ReadMap.h"
 #include "System/Log/ILog.h"
-#include "System/FileSystem/ArchiveScanner.h"
+#include "System/FileSystem/FileHandler.h"
 #include "System/Exceptions.h"
 #include "System/SpringMath.h"
 
@@ -157,32 +158,75 @@ void CModInfo::ResetState()
 	}
 }
 
-void CModInfo::Init(const std::string& modFileName)
+
+/// Try loading `rules.config.lua` / `rules.config.json` via the
+/// unified LuaConfig loader. Resolves through content roots so
+/// games can ship these under `gamedata/`.
+static std::unique_ptr<LuaParser> TryLoadRulesConfig()
 {
-	{
-		filename = modFileName;
-		humanNameVersioned = archiveScanner->GameHumanNameFromArchive(modFileName);
+	const std::string baseName = "gamedata/rules";
 
-		const CArchiveScanner::ArchiveData& md = archiveScanner->GetArchiveData(humanNameVersioned);
+	// Use FileExists (which searches content roots) to probe,
+	// then GetFileAbsolutePath to get the resolved path for LuaConfig.
+	if (CFileHandler::FileExists(baseName + LuaConfig::kLuaSuffix)) {
+		std::string absBase = CFileHandler::GetFileAbsolutePath(baseName + LuaConfig::kLuaSuffix);
+		absBase.resize(absBase.size() - strlen(LuaConfig::kLuaSuffix));
+		return LuaConfig::Load(absBase);
+	}
+	if (CFileHandler::FileExists(baseName + LuaConfig::kJsonSuffix)) {
+		std::string absBase = CFileHandler::GetFileAbsolutePath(baseName + LuaConfig::kJsonSuffix);
+		absBase.resize(absBase.size() - strlen(LuaConfig::kJsonSuffix));
+		return LuaConfig::Load(absBase);
+	}
+	return nullptr;
+}
 
-		humanName   = md.GetName();
-		shortName   = md.GetShortName();
-		version     = md.GetVersion();
-		mutator     = md.GetMutator();
-		description = md.GetDescription();
+/// Fall back to the legacy `gamedata/modrules.lua` path used by
+/// existing Spring games (e.g. Zero-K). Uses a full LuaParser
+/// with `Spring.GetModOptions()` injected so the Lua can compute
+/// values from lobby settings.
+static std::unique_ptr<LuaParser> TryLoadLegacyModRules()
+{
+	auto parser = std::make_unique<LuaParser>(
+		"gamedata/modrules.lua",
+		SPRING_VFS_MOD_BASE,
+		SPRING_VFS_ZIP);
+
+	parser->GetTable("Spring");
+	parser->AddFunc("GetModOptions", LuaSyncedRead::GetModOptions);
+	parser->EndTable();
+	parser->Execute();
+
+	if (!parser->IsValid()) {
+		LOG_L(L_ERROR, "[ModInfo] error \"%s\" loading gamedata/modrules.lua",
+			parser->GetErrorLog().c_str());
+		return nullptr;
+	}
+	return parser;
+}
+
+
+void CModInfo::Init(const std::string& /*modFileName*/)
+{
+	// Game identity (name, version, etc.) is populated by the
+	// game.config.lua / game.config.json path in GameDiscovery
+	// and Simulation — not here. modinfo.lua compatibility is
+	// handled inside game.config.lua itself.
+
+	// --- Game rules ---
+	// Try the new convention first (rules.config.lua / .json), fall
+	// back to the legacy modrules.lua for existing games like ZK.
+	std::unique_ptr<LuaParser> parser = TryLoadRulesConfig();
+	if (!parser)
+		parser = TryLoadLegacyModRules();
+
+	// If neither exists, all values stay at their ResetState defaults.
+	if (!parser) {
+		LOG_L(L_WARNING, "[ModInfo] no rules config found, using defaults");
+		return;
 	}
 
-	LuaParser parser("gamedata/modrules.lua", SPRING_VFS_MOD_BASE, SPRING_VFS_ZIP);
-	// customize the defs environment
-	parser.GetTable("Spring");
-	parser.AddFunc("GetModOptions", LuaSyncedRead::GetModOptions);
-	parser.EndTable();
-	parser.Execute();
-
-	if (!parser.IsValid())
-		LOG_L(L_ERROR, "[ModInfo::%s] error \"%s\" loading mod-rules, using defaults", __func__, parser.GetErrorLog().c_str());
-
-	const LuaTable& root = parser.GetRoot();
+	const LuaTable& root = parser->GetRoot();
 
 	{
 		// system
@@ -420,4 +464,3 @@ void CModInfo::Init(const std::string& modFileName)
 	smoothMeshSmoothRadius                   = std::max  (smoothMeshSmoothRadius                  ,    1          );
 	unitQuadPositionUpdateRate               = std::clamp(unitQuadPositionUpdateRate              ,    1    ,   15);
 }
-

@@ -263,12 +263,14 @@ if(TEST_SOURCES)
         ${SIM_SOURCES}
         ${MAP_SOURCES}
         ${LUA_BINDING_SOURCES}
+        ${CMAKE_SOURCE_DIR}/rts/Server/CombatEventCollector.cpp
     )
     target_include_directories(spring-tests PRIVATE
         ${CMAKE_SOURCE_DIR}/rts
         ${CMAKE_SOURCE_DIR}/rts/lib
         ${CMAKE_SOURCE_DIR}/rts/lib/lua/include
         ${CMAKE_SOURCE_DIR}/rts/lib/lua/src
+        ${GENERATED_DIR}
     )
     target_link_libraries(spring-tests PRIVATE lua ZLIB::ZLIB doctest::doctest)
     if(UNIX AND NOT APPLE)
