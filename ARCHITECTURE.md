@@ -362,11 +362,11 @@ Defs are streamed on-demand: the server tracks `knownUnitDefs` and `knownWeaponD
 per ClientSession and sends each def exactly once per game session, just before the
 first entity/projectile state update that references it.
 
-## Current Status (2026-04-12)
+## Current Status (2026-04-13)
 
 Playable end-to-end: lobby → create room → start game → fight → game-over → return to lobby.
 Player disconnect handling: server detects WebSocket close, fires `PlayerRemoved` Lua callin, broadcasts `PlayerLeft` to remaining clients, cleans up session. Default engine gadget ends game when no humans remain.
 
 All tasks from PLAN-next-steps.md are complete. Current work: Zero-K game support (PLAN-convert-zk.md).
 
-**ZK Phase A complete:** 197/236 gadgets boot, sim ticks at 30Hz. GameStart deferred until all roster players connect (game gadgets handle unit spawning, not the engine). Next: runtime testing with connected clients.
+**ZK Phase A complete:** 197/236 gadgets boot, sim ticks at 30Hz. GameStart deferred until all roster players connect (game gadgets handle unit spawning, not the engine). Runtime testing in progress — commander spawning hits a Lua error in `unit_attributes_generic.lua` (Game table population fix committed, needs re-verification). Current priority: building debugging tools to speed up Lua error iteration before resuming ZK work.
