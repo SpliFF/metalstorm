@@ -21,6 +21,7 @@
 #include "Server/RoomManager.h"
 #include "Server/MapProcessor.h"
 #include "Server/LuaExecEngine.h"
+#include "Server/LuaDebugger.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogNet.h"
 #include "System/SpringLog/SpringLogSqlite.h"
@@ -1167,7 +1168,8 @@ int main(int argc, char* argv[])
         }
 
         // Only tick the sim after GameStart has fired (all players in)
-        if (sim.HasGameStarted()) {
+        // Skip sim tick when debugger has paused at a breakpoint
+        if (sim.HasGameStarted() && !g_luaDebugger.IsPaused()) {
             sim.SimFrame();
             springlog_set_frame(sim.GetFrameNum());
         }

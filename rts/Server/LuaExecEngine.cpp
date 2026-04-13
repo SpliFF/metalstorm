@@ -14,13 +14,13 @@
 #include "Sim/Weapons/WeaponDefHandler.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/GlobalSynced.h"
+#include "Server/LuaDebugger.h"
 
 
-extern "C" {
+// Lua compiled as C++ in this project
 #include <lua.h>
 #include <lauxlib.h>
 #include <lualib.h>
-}
 
 #include <sstream>
 #include <string>
@@ -174,6 +174,46 @@ std::string ExecuteServerCommand(const std::string& cmd) {
             return buf;
         }
         return "invalid speed (0-100)";
+    }
+    // Debugger commands
+    if (cmd == "continue" || cmd == "c") {
+        g_luaDebugger.Continue();
+        return "resumed";
+    }
+    if (cmd == "step" || cmd == "s") {
+        g_luaDebugger.StepLine();
+        return "stepping";
+    }
+    if (cmd == "step_over" || cmd == "n") {
+        g_luaDebugger.StepOver();
+        return "step over";
+    }
+    if (cmd == "step_out" || cmd == "o") {
+        g_luaDebugger.StepOut();
+        return "step out";
+    }
+    if (cmd.rfind("break ", 0) == 0) {
+        // "break file.lua:42"
+        std::string spec = cmd.substr(6);
+        auto colon = spec.rfind(':');
+        if (colon == std::string::npos) return "usage: break file.lua:line";
+        std::string file = spec.substr(0, colon);
+        int line = std::atoi(spec.substr(colon + 1).c_str());
+        int id = g_luaDebugger.AddBreakpoint(file, line);
+        return "breakpoint " + std::to_string(id) + " set";
+    }
+    if (cmd == "break clear") {
+        g_luaDebugger.ClearBreakpoints();
+        return "all breakpoints cleared";
+    }
+    if (cmd == "break list") {
+        auto bps = g_luaDebugger.ListBreakpoints();
+        if (bps.empty()) return "(no breakpoints)";
+        std::ostringstream ss;
+        for (const auto& bp : bps) {
+            ss << "#" << bp.id << " " << bp.file << ":" << bp.line << "\n";
+        }
+        return ss.str();
     }
     return "unknown command: " + cmd;
 }
