@@ -368,49 +368,108 @@ CREATE TABLE game_sessions (
 
 ## Browser Debug Console
 
-An in-game overlay that shows log entries and accepts commands. It connects directly to the log server for log streaming.
+A tabbed in-game overlay for log viewing and command execution. Each tab has independent scope, filters, history, and output. Tabs can be popped out to standalone windows.
 
 ### Opening the Console
 
 - Press **backtick (`)** to toggle the console
-- Or call `debugConsole.show()` from code
+- Or call `debugConsole.show()` from code / browser devtools
 
-The console survives lobby restarts -- its connection to the log server is independent.
+The console survives lobby restarts -- its log server connection is independent.
+
+### Tabs
+
+The tab bar shows all open console sessions. Each tab is an independent workspace:
+
+- **Click** a tab label to switch to it
+- **+** button creates a new tab (defaults to LuaRules scope)
+- **x** closes a tab (closing the last tab hides the console)
+- **arrow** button pops the tab out to its own browser window
+
+Each tab maintains its own:
+- Execution scope (LuaRules, server, sql, etc.)
+- Log level/section/scope/search filters
+- Command history (Up/Down arrows)
+- Output buffer
+
+### Dock / Undock
+
+Click the arrow button on any tab to pop it out to a standalone window. The popout window contains the full panel (filters, output, command input) and works independently. Closing the popout window re-docks the tab back into the main console.
+
+Use this to keep a Lua REPL open in one window while monitoring logs filtered to errors in another.
 
 ### Log Viewer
 
-The output area displays log entries color-coded by level:
+Each tab's output area displays log entries color-coded by level:
 
 | Level | Color |
 |-------|-------|
-| DEBUG | grey (#888) |
-| INFO | light grey (#aaa) |
-| NOTICE | white (#ccc) |
-| WARNING | yellow (#fc0), yellow background tint |
-| ERROR | red (#f55), red background tint |
-| FATAL | bright red (#f00), bold |
+| DEBUG | grey |
+| INFO | light grey |
+| NOTICE | white |
+| WARNING | yellow, tinted background |
+| ERROR | red, tinted background |
+| FATAL | bright red, bold |
 
-Each line shows:
+**Filtering** (per tab, in the filter bar):
 
-```
-[frame] [process:section:scope] message
-```
+- **Level dropdown** -- minimum level (default: NOTICE)
+- **Section** -- filter by section name (substring, case-insensitive)
+- **Scope** -- filter by scope name (substring, case-insensitive)
+- **Search** -- filter by message text (substring, case-insensitive)
+- **Clear** -- clear the tab's output
 
-**Filtering:**
-
-- **Level dropdown** -- set minimum level (default: NOTICE)
-- **Section** -- filter by section name (substring match, case-insensitive)
-- **Scope** -- filter by scope name (substring match, case-insensitive)
-- **Search** -- filter by message text (substring match, case-insensitive)
-
-Auto-scroll pauses when you scroll up manually and resumes when you scroll to the bottom.
+Auto-scroll pauses when you scroll up and resumes when you scroll to the bottom.
 
 ### Command Input
 
-The bottom bar has a scope selector dropdown and a text input. Type code or commands and press **Enter** to execute.
+The bottom bar has a scope selector, prompt, and a multi-line textarea.
 
-- **Up/Down arrows** navigate command history
-- History is per-session (not persisted across page reloads)
+- **Enter** -- execute the command
+- **Shift+Enter** -- insert a newline (for multi-line Lua scripts)
+- **Up/Down arrows** -- navigate command history (when input is empty)
+- **Copy/paste** -- standard clipboard operations work in the textarea and output
+
+Multi-line example:
+
+```
+LuaRules> local t = {}
+          for i = 1, 5 do
+            t[i] = i * i
+          end
+          return t
+  {[1] = 1, [2] = 4, [3] = 9, [4] = 16, [5] = 25}
+```
+
+### Programmatic API
+
+The debug console exposes a `debugConsole.exec()` method for automation. This is the preferred way for Claude (via chrome tools) and scripts to execute commands -- no DOM event simulation needed.
+
+```javascript
+// Available on window.debugConsole after init()
+
+// Execute a command and get the result
+const result = await debugConsole.exec('server', 'frame');
+// result = { success: true, output: "1234" }
+
+// Lua execution
+const r = await debugConsole.exec('LuaRules', 'return Spring.GetAllUnits()');
+// r = { success: true, output: "{1, 2, 3}" }
+
+// Multi-line Lua
+const r2 = await debugConsole.exec('LuaRules', `
+local t = {}
+for i = 1, 5 do t[i] = i * i end
+return t
+`);
+// r2 = { success: true, output: "{[1] = 1, [2] = 4, ...}" }
+
+// Error handling
+const r3 = await debugConsole.exec('LuaRules', 'bad syntax');
+// r3 = { success: false, output: "syntax error: ..." }
+```
+
+The `exec()` method sends a `ConsoleCommand` FlatBuffer to the game server and returns a Promise that resolves when the `ConsoleResponse` arrives (10s timeout).
 
 ### Execution Scopes
 
@@ -424,19 +483,6 @@ The bottom bar has a scope selector dropdown and a text input. Type code or comm
 
 Switch scopes with the dropdown or the `/connect` meta-command.
 
-Lua expressions are automatically wrapped in `return` for convenience:
-
-```
-LuaRules> Spring.GetAllUnits()
-  {1, 2, 3, 4, 5}
-
-LuaRules> Spring.GetUnitHealth(1)
-  1000
-
-LuaRules> for i=1,3 do Spring.Echo("hello " .. i) end
-  ok
-```
-
 ### Meta-Commands
 
 These work in all scopes and start with `/`:
@@ -445,8 +491,9 @@ These work in all scopes and start with `/`:
 |---------|-------------|
 | `/connect <scope>` | Switch execution scope |
 | `/scopes` | List available scopes |
-| `/clear` | Clear the output |
+| `/clear` | Clear the tab's output |
 | `/inspector` | Toggle Babylon.js scene inspector |
+| `/help` | Show all commands and shortcuts |
 
 ### Server Commands
 
