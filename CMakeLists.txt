@@ -63,6 +63,21 @@ add_library(uws INTERFACE)
 target_include_directories(uws INTERFACE ${uwebsockets_SOURCE_DIR}/src)
 target_link_libraries(uws INTERFACE usockets)
 
+# === libdatachannel (WebRTC data channels) ===
+# Workaround: libdatachannel's plog dep uses old cmake_minimum_required
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+set(NO_MEDIA ON CACHE BOOL "" FORCE)          # data channels only, no audio/video
+set(NO_WEBSOCKET ON CACHE BOOL "" FORCE)      # we have our own HTTP, don't need WS
+set(NO_EXAMPLES ON CACHE BOOL "" FORCE)
+set(NO_TESTS ON CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    libdatachannel
+    GIT_REPOSITORY https://github.com/paullouisageneau/libdatachannel.git
+    GIT_TAG v0.22.5
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(libdatachannel)
+
 # === FlatBuffers (protocol serialisation) ===
 set(FLATBUFFERS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(FLATBUFFERS_INSTALL OFF CACHE BOOL "" FORCE)
@@ -176,7 +191,7 @@ target_include_directories(spring-server PRIVATE
     ${GENERATED_DIR}
 )
 find_package(ZLIB REQUIRED)
-target_link_libraries(spring-server PRIVATE lua uws flatbuffers ZLIB::ZLIB SQLite::SQLite3 springlog springlog-net springlog-sqlite)
+target_link_libraries(spring-server PRIVATE lua uws flatbuffers ZLIB::ZLIB SQLite::SQLite3 springlog springlog-net springlog-sqlite LibDataChannel::LibDataChannelStatic)
 
 # Link platform libraries
 if(UNIX AND NOT APPLE)

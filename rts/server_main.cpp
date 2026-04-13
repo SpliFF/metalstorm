@@ -23,6 +23,7 @@
 #include "Server/LuaExecEngine.h"
 #include "Server/LuaDebugger.h"
 #include "Server/HttpAuth.h"
+#include "Server/WebRTCServer.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogNet.h"
 #include "System/SpringLog/SpringLogSqlite.h"
@@ -536,6 +537,43 @@ int main(int argc, char* argv[])
         return HttpAuth::JsonResponse(200, json);
     });
 
+    // --- WebRTC signaling endpoints ---
+    WebRTCServer rtcServer;
+
+    net.AddHttpPost("/api/rtc/offer", [&rtcServer, &db](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+        int64_t userId = HttpAuth::ValidateToken(db, headers.authorization);
+        if (userId <= 0) {
+            return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+        }
+        std::string sdpOffer = HttpAuth::JsonField(body, "sdp");
+        if (sdpOffer.empty()) {
+            return HttpAuth::JsonResponse(400, R"({"error":"missing sdp field"})");
+        }
+        auto result = rtcServer.HandleOffer(sdpOffer, headers.authorization);
+        if (!result.success) {
+            return HttpAuth::JsonResponse(500, "{\"error\":\"" + HttpAuth::JsonEscape(result.error) + "\"}");
+        }
+        std::string json = "{\"client_id\":" + std::to_string(result.clientId)
+            + ",\"sdp\":\"" + HttpAuth::JsonEscape(result.sdpAnswer) + "\"}";
+        return HttpAuth::JsonResponse(200, json);
+    });
+
+    net.AddHttpPost("/api/rtc/candidate", [&rtcServer, &db](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+        int64_t userId = HttpAuth::ValidateToken(db, headers.authorization);
+        if (userId <= 0) {
+            return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+        }
+        std::string candidate = HttpAuth::JsonField(body, "candidate");
+        std::string mid = HttpAuth::JsonField(body, "mid");
+        std::string clientIdStr = HttpAuth::JsonField(body, "client_id");
+        uint32_t clientId = clientIdStr.empty() ? 0 : (uint32_t)std::atoi(clientIdStr.c_str());
+        if (clientId == 0) {
+            return HttpAuth::JsonResponse(400, R"({"error":"missing client_id"})");
+        }
+        bool ok = rtcServer.AddCandidate(clientId, candidate, mid);
+        return HttpAuth::JsonResponse(200, ok ? R"({"ok":true})" : R"({"ok":false})");
+    });
+
     if (!net.Start(port)) {
         SLOG(SPRING_LOG_ERROR, "failed to start network server");
         springlog_shutdown();
@@ -715,6 +753,13 @@ int main(int argc, char* argv[])
 
         // Drain inbound messages from clients
         auto messages = net.DrainInbound();
+        // Also drain WebRTC data channel messages
+        {
+            auto rtcMessages = rtcServer.DrainInbound();
+            messages.insert(messages.end(),
+                std::make_move_iterator(rtcMessages.begin()),
+                std::make_move_iterator(rtcMessages.end()));
+        }
         for (auto& msg : messages) {
             auto* clientMsg = Protocol::ParseClientMessage(msg.data.data(), msg.data.size());
             if (!clientMsg || !clientMsg->payload()) {
