@@ -18,6 +18,7 @@
 #include "Server/AI/AIDiscovery.h"
 #include "Server/GameDiscovery.h"
 #include "System/SpringLog/SpringLog.h"
+#include <cctype>
 
 #include <sqlite3.h>
 
@@ -1177,6 +1178,88 @@ int main(int argc, char* argv[])
                     if (ok) BROADCAST_ROOM_UPDATE(room);
                     break;
                 }
+                case SpringWeb::ClientPayload_ConsoleCommand: {
+                    auto* cc = clientMsg->payload_as_ConsoleCommand();
+                    if (!cc) break;
+                    std::string scope = cc->scope() ? cc->scope()->str() : "";
+                    std::string command = cc->command() ? cc->command()->str() : "";
+                    uint32_t reqId = cc->request_id();
+
+                    if (scope == "sql") {
+                        // Read-only SQL query proxy
+                        // Simple keyword check to reject mutations
+                        std::string upper = command;
+                        for (auto& c : upper) c = (char)toupper((unsigned char)c);
+                        bool rejected = false;
+                        for (const char* kw : {"INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE"}) {
+                            if (upper.find(kw) != std::string::npos) { rejected = true; break; }
+                        }
+                        if (rejected) {
+                            auto resp = Protocol::BuildConsoleResponse(reqId, scope, false,
+                                "Read-only: mutation queries not allowed");
+                            net.Send(msg.clientId, resp.data(), resp.size());
+                            break;
+                        }
+                        // Execute query
+                        std::string result;
+                        char* errMsg = nullptr;
+                        auto callback = [](void* data, int ncols, char** vals, char** names) -> int {
+                            auto* out = static_cast<std::string*>(data);
+                            if (!out->empty()) *out += "\n";
+                            for (int i = 0; i < ncols; i++) {
+                                if (i > 0) *out += " | ";
+                                *out += std::string(names[i]) + "=" + (vals[i] ? vals[i] : "NULL");
+                            }
+                            return 0;
+                        };
+                        int rc = sqlite3_exec(mapDb, command.c_str(), callback, &result, &errMsg);
+                        if (rc != SQLITE_OK) {
+                            std::string err = errMsg ? errMsg : "unknown error";
+                            if (errMsg) sqlite3_free(errMsg);
+                            auto resp = Protocol::BuildConsoleResponse(reqId, scope, false, err);
+                            net.Send(msg.clientId, resp.data(), resp.size());
+                        } else {
+                            if (result.empty()) result = "(no results)";
+                            auto resp = Protocol::BuildConsoleResponse(reqId, scope, true, result);
+                            net.Send(msg.clientId, resp.data(), resp.size());
+                        }
+                    }
+                    else if (scope == "lobby") {
+                        // Built-in lobby commands
+                        std::string result;
+                        if (command == "rooms") {
+                            auto allRooms = rooms.GetAllRooms();
+                            for (const auto* r : allRooms) {
+                                if (!r) continue;
+                                if (!result.empty()) result += "\n";
+                                result += "Room " + std::to_string(r->id) + ": " + r->name
+                                    + " (" + std::to_string(r->players.size()) + " players)";
+                            }
+                            if (result.empty()) result = "(no rooms)";
+                        }
+                        else if (command == "process list") {
+                            for (const auto& [rid, inst] : gameServers) {
+                                if (!result.empty()) result += "\n";
+                                result += "Room " + std::to_string(rid)
+                                    + ": pid=" + std::to_string(inst.pid)
+                                    + " port=" + std::to_string(inst.port);
+                            }
+                            if (result.empty()) result = "(no game servers)";
+                        }
+                        else {
+                            result = "unknown lobby command: " + command;
+                        }
+                        auto resp = Protocol::BuildConsoleResponse(reqId, scope, true, result);
+                        net.Send(msg.clientId, resp.data(), resp.size());
+                    }
+                    else {
+                        auto resp = Protocol::BuildConsoleResponse(reqId, scope, false,
+                            "unknown scope (lobby handles: sql, lobby)");
+                        net.Send(msg.clientId, resp.data(), resp.size());
+                    }
+                    break;
+                }
+
                 default:
                     break;
 
