@@ -1,0 +1,866 @@
+# Debugging & Logging Guide
+
+This document covers the unified logging system, browser debug console, Lua debugging API, interactive debugger, network inspector, and Claude/MCP integration. It is written for both engine developers working on the C++ server and game authors writing Lua gadgets.
+
+---
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Architecture Overview](#architecture-overview)
+- [Unified Logging (libspringlog)](#unified-logging-libspringlog)
+  - [Log Levels](#log-levels)
+  - [C API](#c-api)
+  - [C++ Macros](#c-macros)
+  - [Output Formats](#output-formats)
+  - [Optional Sinks](#optional-sinks)
+  - [Environment Variables](#environment-variables)
+  - [CLI Flags](#cli-flags)
+- [Log Server (spring-logserver)](#log-server-spring-logserver)
+  - [Running the Log Server](#running-the-log-server)
+  - [HTTP Query API](#http-query-api)
+  - [WebSocket Protocol](#websocket-protocol)
+  - [Ring Buffer](#ring-buffer)
+  - [SQLite Persistence](#sqlite-persistence)
+- [Browser Debug Console](#browser-debug-console)
+  - [Opening the Console](#opening-the-console)
+  - [Log Viewer](#log-viewer)
+  - [Command Input](#command-input)
+  - [Execution Scopes](#execution-scopes)
+  - [Meta-Commands](#meta-commands)
+  - [Server Commands](#server-commands)
+  - [Network Inspector](#network-inspector)
+- [Lua Debug API](#lua-debug-api)
+  - [Spring.Debug](#springdebug)
+  - [Spring.Warn](#springwarn)
+  - [Spring.Assert](#springassert)
+  - [Spring.DumpTable](#springdumptable)
+  - [Spring.Inspect](#springinspect)
+  - [Spring.Log](#springlog)
+  - [Spring.Echo / Spring.Error](#springecho--springerror)
+- [Interactive Lua Debugger](#interactive-lua-debugger)
+  - [Setting Breakpoints](#setting-breakpoints)
+  - [Stepping](#stepping)
+  - [Stack and Variable Inspection](#stack-and-variable-inspection)
+  - [Sim Pause Behavior](#sim-pause-behavior)
+- [SQL Query Proxy](#sql-query-proxy)
+- [Process Management](#process-management)
+- [Game Session Tracking](#game-session-tracking)
+- [Babylon.js Inspector](#babylonjs-inspector)
+- [Claude / MCP Integration](#claude--mcp-integration)
+  - [MCP Server Setup](#mcp-server-setup)
+  - [Available Tools](#available-tools)
+- [mprocs Development Environment](#mprocs-development-environment)
+- [Extending the System](#extending-the-system)
+  - [Adding a Custom Sink](#adding-a-custom-sink)
+  - [Adding a Server Command](#adding-a-server-command)
+
+---
+
+## Quick Start
+
+Start the full development stack with [mprocs](https://github.com/pvolok/mprocs):
+
+```bash
+make build                    # Build all C++ targets
+mprocs                        # Starts logserver, lobby, client dev server, log tails
+```
+
+Or start processes individually:
+
+```bash
+# Terminal 1: Log server (start first)
+./build/debug/spring-logserver --port 8010 --db data/debug.db
+
+# Terminal 2: Lobby
+./build/debug/spring-lobby --port 8011 --game content/games/papertanks \
+  --maps content/maps --games-dir content/games --db data/spring-server.db
+
+# Terminal 3: Client dev server
+cd client && GAME_SERVER_PORT=8011 npx vite dev --port 8012
+```
+
+Open `http://localhost:8012` in a browser, then press **backtick (`)** to open the debug console.
+
+---
+
+## Architecture Overview
+
+```
+                          spring-logserver (:8010)
+                            SQLite (debug.db)
+                            Ring buffer (2000/source)
+                            HTTP query API
+                                 |
+          +-----------+----------+-----------+
+          |           |                      |
+     spring-lobby  spring-server        browser client
+     (springlog)   (springlog)          debug console
+          |           |                connects to
+          |           |                log server WS
+          +-----------+
+           game servers
+           spawned by lobby
+```
+
+Every process uses `libspringlog` for logging. Log entries go to stdout/stderr and optionally to the log server (via `springlog-net`) or a local SQLite database (via `springlog-sqlite`). The browser debug console connects directly to the log server for log streaming and to the game server for command execution.
+
+**Key files:**
+
+| Component | Files |
+|-----------|-------|
+| Core logging library | `rts/System/SpringLog/SpringLog.h`, `SpringLog.cpp` |
+| Network sink | `rts/System/SpringLog/SpringLogNet.h/.cpp` |
+| SQLite sink | `rts/System/SpringLog/SpringLogSqlite.h/.cpp` |
+| Legacy bridge | `rts/System/SpringLogBridge.h/.cpp` |
+| Log server | `rts/logserver_main.cpp` |
+| Command execution | `rts/Server/LuaExecEngine.h/.cpp` |
+| Lua debugger | `rts/Server/LuaDebugger.h/.cpp` |
+| Lua debug API | `rts/Lua/LuaSyncedCtrl.cpp` (bottom) |
+| Browser console | `client/src/core/debug-console.ts` |
+| Network inspector | `client/src/core/net-inspector.ts` |
+| MCP server | `tools/debug-mcp/server.js` |
+
+---
+
+## Unified Logging (libspringlog)
+
+`libspringlog` is a shared library with a C-compatible API. Every executable in the project links it. It provides structured log records with level, section, scope, process name, sim frame, and message.
+
+### Log Levels
+
+| Level | Value | Use for |
+|-------|-------|---------|
+| `SPRING_LOG_DEBUG` | 0 | Verbose diagnostic output, command routing details |
+| `SPRING_LOG_INFO` | 1 | Normal operation (map loaded, subsystem initialized) |
+| `SPRING_LOG_NOTICE` | 2 | Important state changes (player connected, game started) |
+| `SPRING_LOG_WARNING` | 3 | Non-fatal issues (malformed args, missing optional files) |
+| `SPRING_LOG_ERROR` | 4 | Failures (database open failed, Lua syntax error) |
+| `SPRING_LOG_FATAL` | 5 | Unrecoverable errors |
+
+The default minimum level is `NOTICE`. Messages below the minimum are silently dropped.
+
+### C API
+
+```c
+#include "System/SpringLog/SpringLog.h"
+
+// Initialize at process start
+springlog_init("my-process", SPRING_LOG_OUTPUT_CONSOLE);
+
+// Log a message
+springlog_log(SPRING_LOG_NOTICE, "section", "scope", frame, "format %s", arg);
+
+// Set simulation frame (call each tick)
+springlog_set_frame(frameNum);
+
+// Register a custom sink
+int sinkId = springlog_add_sink(mySinkFn, myUserdata);
+
+// Clean up
+springlog_shutdown();
+```
+
+### C++ Macros
+
+Every C++ source file that logs should define `LOG_SECTION` at the top:
+
+```cpp
+#include "System/SpringLog/SpringLog.h"
+#define LOG_SECTION "sim"
+
+// Simple log (uses LOG_SECTION, current frame)
+SLOG(SPRING_LOG_NOTICE, "loaded %u unit defs", count);
+
+// Log with explicit scope (for Lua handles, AI names)
+SLOG_SCOPED(SPRING_LOG_ERROR, "LuaRules", "runtime error: %s", msg);
+```
+
+The `SLOG` macro expands to:
+
+```cpp
+springlog_log(level, LOG_SECTION, "", springlog_get_frame(), fmt, ...)
+```
+
+### Output Formats
+
+**Console** (stdout for level < ERROR, stderr for ERROR and above):
+
+```
+[spring-server:sim] loaded 42 unit defs
+[spring-server:lua:LuaRules] runtime error in callin 'GameFrame': ...
+```
+
+**File** (structured, machine-parseable):
+
+```
+@L|NOTICE|sim||1234|loaded 42 unit defs
+@L|ERROR|lua|LuaRules|1234|runtime error in callin 'GameFrame': ...
+```
+
+### Optional Sinks
+
+**Network sink** (`springlog-net`) -- buffers log entries for transmission to the log server via WebSocket + FlatBuffers. Currently collects entries in memory; the WS client connection is not yet wired.
+
+```cpp
+#include "System/SpringLog/SpringLogNet.h"
+springlog_net_init("ws://localhost:8010", "auth-token");
+// ... logging ...
+springlog_net_shutdown();
+```
+
+**SQLite sink** (`springlog-sqlite`) -- writes log entries to a local SQLite database on a background thread. Batches writes in transactions (every 1 second or 100 entries). Only persists entries at NOTICE level and above.
+
+```cpp
+#include "System/SpringLog/SpringLogSqlite.h"
+springlog_sqlite_init("data/debug.db");
+// ... logging ...
+springlog_sqlite_shutdown();
+```
+
+### Environment Variables
+
+| Variable | Effect |
+|----------|--------|
+| `SPRING_LOG_LEVEL` | Set min level: `debug`, `info`, `notice`, `warning`, `error`, `fatal` |
+| `SPRING_LOG_FILE` | Enable file sink at the given path |
+| `SPRING_DEBUG=1` | Set min level to DEBUG |
+
+### CLI Flags
+
+These flags are parsed by the executable's own argument handling (not by libspringlog):
+
+| Flag | Applies to | Effect |
+|------|-----------|--------|
+| `--log-file <path>` | server, lobby | Enable file sink |
+| `--log-level <level>` | server, lobby, tools | Set minimum level |
+| `--log-server <url>` | server, tools | Connect to log server (springlog-net) |
+| `--log-sqlite <path>` | server | Enable SQLite sink |
+| `--debug` | server, lobby | Set level to DEBUG |
+| `--log-messages` | server | Log every dispatched WS message type + size |
+
+---
+
+## Log Server (spring-logserver)
+
+A dedicated process that collects, stores, and streams log entries. It is the single source of truth for all logs in the system.
+
+### Running the Log Server
+
+```bash
+./build/debug/spring-logserver --port 8010 --db data/debug.db
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--port` | 8010 | HTTP + WebSocket listen port |
+| `--db` | `data/debug.db` | SQLite database path |
+| `--log-level` | notice | Minimum level for the log server's own logs |
+
+### HTTP Query API
+
+All endpoints return JSON with `Access-Control-Allow-Origin: *`.
+
+**GET /api/logs/:roomId**
+
+Fetch recent log entries from the ring buffer.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `roomId` (path) | int | required | Room ID (use `0` for all sources) |
+| `limit` | int | 200 | Maximum entries to return |
+| `level` | int | 0 | Minimum log level |
+| `section` | string | | Filter by section (exact match) |
+| `scope` | string | | Filter by scope (exact match) |
+
+Response:
+
+```json
+[
+  {
+    "id": 42,
+    "timestamp": 1713024000000,
+    "level": 4,
+    "section": "lua",
+    "scope": "LuaRules",
+    "process": "spring-server",
+    "frame": 1234,
+    "message": "runtime error in callin 'GameFrame': ..."
+  }
+]
+```
+
+**GET /api/logs/search**
+
+Full-text search across all log entries.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `q` | string | required | Search text (substring match on message) |
+| `limit` | int | 200 | Maximum results |
+| `level` | int | 0 | Minimum log level |
+
+**GET /api/sessions**
+
+List recent game sessions.
+
+```json
+[
+  {
+    "session_id": "abc-123",
+    "room_id": 1,
+    "game_name": "papertanks",
+    "map_name": "wanderlust2.1",
+    "started_at": 1713024000,
+    "ended_at": 1713025000,
+    "end_reason": "normal",
+    "exit_code": 0
+  }
+]
+```
+
+**GET /api/logs/sources**
+
+Returns `{"status":"ok"}` (health check).
+
+### WebSocket Protocol
+
+Connect to the log server's WS endpoint at `ws://localhost:8010/`. All messages use the standard Spring Web envelope: `[0x01, ...FlatBuffers data]`.
+
+**Client -> Log Server:**
+
+| Message | Purpose |
+|---------|---------|
+| `LogIngest { entries: [LogEntryMsg] }` | Push log entries for storage |
+| `LogSubscribe { room_id, min_level, section_filter, scope_filter }` | Start receiving log stream |
+| `LogUnsubscribe {}` | Stop receiving log stream |
+
+**Log Server -> Client:**
+
+| Message | Purpose |
+|---------|---------|
+| `LogBatch { room_id, entries: [LogEntryMsg], latest_id }` | Streamed log entries |
+
+### Ring Buffer
+
+The log server maintains per-source ring buffers (keyed by `room_id`) plus an aggregate buffer (source 0). Each buffer holds up to 2000 entries. When full, the oldest entry is evicted. Entries are assigned monotonically increasing IDs for cursor-based pagination.
+
+### SQLite Persistence
+
+The log server's SQLite sink uses the same `debug_logs` schema as `springlog-sqlite`. Additionally, it creates a `game_sessions` table:
+
+```sql
+CREATE TABLE game_sessions (
+    session_id TEXT PRIMARY KEY,
+    room_id INTEGER,
+    game_name TEXT,
+    map_name TEXT,
+    started_at INTEGER,
+    ended_at INTEGER,
+    end_reason TEXT,       -- "normal", "crash", "killed", "timeout"
+    exit_code INTEGER,
+    player_count INTEGER,
+    ai_count INTEGER
+);
+```
+
+---
+
+## Browser Debug Console
+
+An in-game overlay that shows log entries and accepts commands. It connects directly to the log server for log streaming.
+
+### Opening the Console
+
+- Press **backtick (`)** to toggle the console
+- Or call `debugConsole.show()` from code
+
+The console survives lobby restarts -- its connection to the log server is independent.
+
+### Log Viewer
+
+The output area displays log entries color-coded by level:
+
+| Level | Color |
+|-------|-------|
+| DEBUG | grey (#888) |
+| INFO | light grey (#aaa) |
+| NOTICE | white (#ccc) |
+| WARNING | yellow (#fc0), yellow background tint |
+| ERROR | red (#f55), red background tint |
+| FATAL | bright red (#f00), bold |
+
+Each line shows:
+
+```
+[frame] [process:section:scope] message
+```
+
+**Filtering:**
+
+- **Level dropdown** -- set minimum level (default: NOTICE)
+- **Section** -- filter by section name (substring match, case-insensitive)
+- **Scope** -- filter by scope name (substring match, case-insensitive)
+- **Search** -- filter by message text (substring match, case-insensitive)
+
+Auto-scroll pauses when you scroll up manually and resumes when you scroll to the bottom.
+
+### Command Input
+
+The bottom bar has a scope selector dropdown and a text input. Type code or commands and press **Enter** to execute.
+
+- **Up/Down arrows** navigate command history
+- History is per-session (not persisted across page reloads)
+
+### Execution Scopes
+
+| Scope | Target | What it runs |
+|-------|--------|-------------|
+| `LuaRules` | Game server | Lua code in the LuaRules synced state |
+| `LuaGaia` | Game server | Lua code in the LuaGaia synced state |
+| `server` | Game server | Built-in server commands (see below) |
+| `lobby` | Lobby server | Built-in lobby commands |
+| `sql` | Lobby server | Read-only SQL against the game database |
+
+Switch scopes with the dropdown or the `/connect` meta-command.
+
+Lua expressions are automatically wrapped in `return` for convenience:
+
+```
+LuaRules> Spring.GetAllUnits()
+  {1, 2, 3, 4, 5}
+
+LuaRules> Spring.GetUnitHealth(1)
+  1000
+
+LuaRules> for i=1,3 do Spring.Echo("hello " .. i) end
+  ok
+```
+
+### Meta-Commands
+
+These work in all scopes and start with `/`:
+
+| Command | Description |
+|---------|-------------|
+| `/connect <scope>` | Switch execution scope |
+| `/scopes` | List available scopes |
+| `/clear` | Clear the output |
+| `/inspector` | Toggle Babylon.js scene inspector |
+
+### Server Commands
+
+Available when scope is `server`:
+
+| Command | Output |
+|---------|--------|
+| `frame` | Current simulation frame number |
+| `state` | `frame=N teams=N units=N` |
+| `units` | List all units (max 100) with id, def, team, health |
+| `units <teamId>` | List units for a specific team |
+| `defs` | Count of loaded unit and weapon definitions |
+| `pause` | Pause the simulation |
+| `unpause` | Resume the simulation |
+| `speed <multiplier>` | Set game speed (0-100) |
+| `break <file>:<line>` | Set a Lua breakpoint |
+| `break list` | List all breakpoints |
+| `break clear` | Remove all breakpoints |
+| `continue` / `c` | Resume from breakpoint |
+| `step` / `s` | Step one Lua line |
+| `step_over` / `n` | Step over (stay at current call depth) |
+| `step_out` / `o` | Step out (return to caller) |
+
+**Lobby scope commands:**
+
+| Command | Output |
+|---------|--------|
+| `rooms` | List all active rooms |
+| `process list` | List game server processes (pid, port) |
+
+### Network Inspector
+
+Toggle the **Net** checkbox in the console header to enable the network message inspector. When enabled, all inbound and outbound WebSocket messages are decoded and logged:
+
+```
+[INFO] [client:net] <- [FlatBuffers] AuthResponse (128 bytes)
+[INFO] [client:net] -> [FlatBuffers] ViewportUpdate (64 bytes)
+[INFO] [client:net] <- [EntityState] (2048 bytes)
+```
+
+The inspector decodes the envelope byte (FlatBuffers, EntityState, EntityDelta, ProjectileState) and, for FlatBuffers messages, extracts the payload type name (AuthResponse, MapData, PlayerCommand, etc.).
+
+---
+
+## Lua Debug API
+
+These functions are available in all synced Lua contexts (LuaRules, LuaGaia). They route through the unified logging system with the calling handle's name as the scope.
+
+### Spring.Debug
+
+```lua
+Spring.Debug(arg1, arg2, ...)
+```
+
+Log at **DEBUG** level. Arguments are converted to strings via `tostring()` and joined with tabs. Useful for verbose diagnostic output that should be hidden by default.
+
+### Spring.Warn
+
+```lua
+Spring.Warn(arg1, arg2, ...)
+```
+
+Log at **WARNING** level. Same argument handling as `Debug`. Use for recoverable issues that should be visible during development.
+
+### Spring.Assert
+
+```lua
+Spring.Assert(condition, message)
+```
+
+If `condition` is falsy, logs at **ERROR** level with an "ASSERT:" prefix and raises a Lua error (halts the current callin). If `condition` is truthy, does nothing.
+
+```lua
+local unit = Spring.GetUnitByID(unitId)
+Spring.Assert(unit, "unit " .. unitId .. " not found")
+-- if unit is nil, this logs "ASSERT: unit 42 not found" and errors
+```
+
+### Spring.DumpTable
+
+```lua
+Spring.DumpTable(table, label, maxDepth)
+```
+
+Pretty-print a table to the log at **NOTICE** level with recursive indentation.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `table` | table | required | The table to dump |
+| `label` | string | `"table"` | Label shown before the dump |
+| `maxDepth` | integer | 3 | Maximum nesting depth (deeper shows `{...}`) |
+
+```lua
+Spring.DumpTable(UnitDefs[1], "tank_def", 2)
+-- Logs:
+-- [lua:LuaRules] tank_def = {
+--   ["name"] = "tank",
+--   ["maxHealth"] = 1000,
+--   ["weapons"] = {
+--     [1] = {...},
+--   },
+-- }
+```
+
+Tables with more than 100 entries are truncated with `...`.
+
+### Spring.Inspect
+
+```lua
+Spring.Inspect(name1, value1, name2, value2, ...)
+```
+
+Log name-value pairs at **NOTICE** level. Tables are auto-expanded to depth 2. Intended for quick variable inspection during development.
+
+```lua
+local hp = Spring.GetUnitHealth(unitId)
+local pos = {Spring.GetUnitPosition(unitId)}
+Spring.Inspect("hp", hp, "pos", pos)
+-- Logs:
+-- [lua:LuaRules] hp = 850
+-- pos = {[1] = 1024.5, [2] = 100.0, [3] = 512.3}
+```
+
+### Spring.Log
+
+```lua
+Spring.Log(section, level, arg1, arg2, ...)
+```
+
+Log with an explicit section and level. The `level` parameter accepts numeric LOG constants (10=debug, 20=info, 30=notice, 40=warning, 50=error, 60=fatal) or string names (`"debug"`, `"info"`, `"notice"`, `"warning"`, `"error"`, `"fatal"`).
+
+```lua
+Spring.Log("my_gadget", "warning", "resource pool low:", amount)
+```
+
+### Spring.Echo / Spring.Error
+
+```lua
+Spring.Echo(arg1, arg2, ...)    -- logs at NOTICE level
+Spring.Error(message)            -- raises a Lua error (like error())
+```
+
+`Spring.Echo` routes through springlog at NOTICE level. `Spring.Error` calls `luaL_error()` which raises a Lua exception (caught by the callin error handler in LuaHandle.cpp, which logs the traceback).
+
+---
+
+## Interactive Lua Debugger
+
+The debugger lets you set breakpoints in server-side Lua code, pause the simulation, and inspect the call stack and variables.
+
+### Setting Breakpoints
+
+From the debug console (scope `server`):
+
+```
+server> break LuaRules/Gadgets/unit_spawner.lua:42
+  breakpoint 1 set
+
+server> break list
+  #1 LuaRules/Gadgets/unit_spawner.lua:42
+
+server> break clear
+  all breakpoints cleared
+```
+
+Breakpoint file matching is substring-based -- `unit_spawner.lua:42` will match any source file whose path contains `unit_spawner.lua`.
+
+From Lua code:
+
+```lua
+Spring.Breakpoint("checking spawn logic")
+-- logs: "BREAKPOINT hit: checking spawn logic"
+-- (actual pause not yet wired from Lua side)
+```
+
+### Stepping
+
+When paused at a breakpoint, use these commands:
+
+| Command | Shortcut | Behavior |
+|---------|----------|----------|
+| `continue` | `c` | Resume execution |
+| `step` | `s` | Execute one line, then pause |
+| `step_over` | `n` | Execute until returning to the same call depth |
+| `step_out` | `o` | Execute until the current function returns |
+
+### Stack and Variable Inspection
+
+The debugger provides these inspection functions (callable from `LuaExecEngine` when paused):
+
+- **Call stack** -- file, line, function name, type (Lua/C/main) for each frame (up to 50 levels)
+- **Locals** -- name, type, and string value of all local variables in a given frame (up to 100 variables)
+- **Upvalues** -- captured variables from enclosing scopes
+- **Eval** -- evaluate an expression in the paused context
+
+These are accessible programmatically via the `LuaDebugger` C++ API but are not yet wired to console commands.
+
+### Sim Pause Behavior
+
+When a breakpoint fires, the debugger sets a `paused` flag. The main simulation loop checks this flag each tick:
+
+```cpp
+if (sim.HasGameStarted() && !g_luaDebugger.IsPaused()) {
+    sim.SimFrame();
+}
+```
+
+While paused, the server still processes WebSocket messages (including console commands) but does not advance the simulation. This means the entire game halts -- all players see a frozen game state until the breakpoint is continued.
+
+The debug hook is installed with `LUA_MASKLINE`, which fires on every Lua line. This has a performance cost -- only attach the hook when actively debugging.
+
+---
+
+## SQL Query Proxy
+
+The lobby handles `ConsoleCommand` messages with scope `"sql"`, executing read-only SQL queries against the game database (`spring-server.db`).
+
+From the debug console (scope `sql`):
+
+```
+sql> SELECT id, username, role FROM users
+  id=1 | username=alice | role=admin
+  id=2 | username=bob | role=player
+
+sql> SELECT COUNT(*) FROM maps
+  COUNT(*)=5
+```
+
+**Safety:** The proxy rejects queries containing `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, or `CREATE` (case-insensitive keyword check). Only `SELECT` and other read-only statements are allowed.
+
+---
+
+## Process Management
+
+**HTTP API** (served by the lobby):
+
+```
+GET /api/processes
+```
+
+Returns a JSON array of all game server instances:
+
+```json
+[
+  {
+    "room_id": 1,
+    "port": 9100,
+    "pid": 12345,
+    "state": "running",
+    "map": "content/maps/wanderlust2.1",
+    "game": "content/games/papertanks"
+  }
+]
+```
+
+States: `starting`, `running`, `ended`, `crashed`.
+
+**Console commands** (scope `lobby`):
+
+```
+lobby> process list
+  Room 1: pid=12345 port=9100
+```
+
+**Restart resilience:** The lobby writes spawned game server info to a `game_servers` SQLite table. On startup, stale entries from a previous run are cleaned up. This table is the foundation for re-adopting orphaned game servers after a lobby restart (not yet fully wired).
+
+---
+
+## Game Session Tracking
+
+The log server maintains a `game_sessions` table for post-mortem analysis:
+
+```sql
+CREATE TABLE game_sessions (
+    session_id TEXT PRIMARY KEY,
+    room_id INTEGER,
+    game_name TEXT,
+    map_name TEXT,
+    started_at INTEGER,
+    ended_at INTEGER,
+    end_reason TEXT,       -- "normal", "crash", "killed", "timeout"
+    exit_code INTEGER,
+    player_count INTEGER,
+    ai_count INTEGER
+);
+```
+
+Query via the HTTP API:
+
+```
+GET http://localhost:8010/api/sessions
+```
+
+---
+
+## Babylon.js Inspector
+
+The Babylon.js built-in inspector shows the scene graph, materials, textures, performance counters, and allows live material editing.
+
+**Toggle:**
+
+- Press **F12** (when the game is running)
+- Or type `/inspector` in the debug console
+
+The inspector renders as an embedded panel alongside the game canvas. Call `debugConsole.setScene(scene)` from `main.ts` after creating the Babylon.js scene to enable this integration.
+
+---
+
+## Claude / MCP Integration
+
+The MCP server (`tools/debug-mcp/server.js`) lets Claude query logs, execute commands, read source files, and manage game servers.
+
+### MCP Server Setup
+
+```bash
+cd tools/debug-mcp
+npm install
+```
+
+Configure in `.claude/settings.local.json`:
+
+```json
+{
+  "mcpServers": {
+    "spring-debug": {
+      "command": "node",
+      "args": ["tools/debug-mcp/server.js"],
+      "env": {
+        "LOG_SERVER_URL": "http://localhost:8010",
+        "LOBBY_URL": "http://localhost:8011"
+      }
+    }
+  }
+}
+```
+
+### Available Tools
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `get_logs` | `roomId`, `level`, `section`, `scope`, `limit` | Fetch recent log entries from the log server |
+| `search_logs` | `query`, `roomId`, `level`, `limit` | Full-text search across all logs |
+| `exec_lua` | `scope`, `code`, `roomId` | Execute Lua code in a specific scope |
+| `get_game_state` | `roomId` | Get sim state summary |
+| `list_units` | `team`, `roomId` | List units, optionally by team |
+| `list_processes` | | List game server processes (via lobby HTTP) |
+| `get_lua_source` | `gamePath`, `filePath` | Read a Lua source file from disk |
+| `list_gadgets` | `roomId` | List loaded Lua gadgets |
+| `query_db` | `query`, `db` | SQL query against game or debug database |
+| `list_sessions` | | List recent game sessions |
+
+**Example Claude interaction:**
+
+```
+User: Check if there are any Lua errors in the last game
+
+Claude: [uses get_logs with level=4 (ERROR), section="lua"]
+Found 3 Lua errors:
+  [142] [ERROR] [spring-server:lua:LuaRules] runtime error in 'GameFrame': ...
+```
+
+---
+
+## mprocs Development Environment
+
+The `mprocs.yaml` file defines the development process group:
+
+| Process | Command | Purpose |
+|---------|---------|---------|
+| `logserver` | `./build/debug/spring-logserver --port 8010 --db data/debug.db` | Log collection |
+| `lobby` | `./build/debug/spring-lobby --port 8011 ...` | Game lobby |
+| `client` | `cd client && npx vite dev --port 8012` | Browser client |
+| `game-logs` | `tail -F data/logs/game-*.log` | Raw log file tail |
+| `lua-errors` | `tail ... \| grep -iE '(error\|warning\|FATAL)'` | Filtered error view |
+
+Start with `mprocs` from the project root. Each process runs in its own pane.
+
+---
+
+## Extending the System
+
+### Adding a Custom Sink
+
+Register a function that receives every log record:
+
+```cpp
+#include "System/SpringLog/SpringLog.h"
+
+void MyCustomSink(const SpringLogRecord* record, void* userdata) {
+    // record->level, record->section, record->scope,
+    // record->process, record->frame, record->message
+    // are all valid for the duration of this call.
+    MySystem* sys = static_cast<MySystem*>(userdata);
+    sys->HandleLog(record);
+}
+
+// Register (returns an ID for later removal)
+int sinkId = springlog_add_sink(MyCustomSink, mySystemPtr);
+
+// Remove when done
+springlog_remove_sink(sinkId);
+```
+
+Custom sinks are called under the global log mutex. Keep processing fast -- buffer entries and process them on another thread if needed.
+
+### Adding a Server Command
+
+Add a new case in `ExecuteServerCommand()` in `rts/Server/LuaExecEngine.cpp`:
+
+```cpp
+if (cmd == "my_command") {
+    // Access any sim state via global objects
+    return "result string";
+}
+```
+
+The result is sent back to the caller as a `ConsoleResponse` FlatBuffer message. Return a string starting with `"unknown command:"` to signal failure.
