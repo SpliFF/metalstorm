@@ -155,10 +155,11 @@ int main(int argc, char* argv[])
     std::string logServer;
     std::string logSqlite;
     bool debugMode = false;
+    bool logMessages = false;
 
     // Simple arg parsing: --port N, --game PATH, --map PATH, --db PATH,
     // --log-file PATH, --log-level LEVEL, --log-server URL,
-    // --log-sqlite PATH, --debug,
+    // --log-sqlite PATH, --debug, --log-messages,
     // --player username:team:pos (repeatable),
     // --ai id:team:pos (repeatable)
     for (int i = 1; i < argc; i++) {
@@ -181,6 +182,8 @@ int main(int argc, char* argv[])
             logSqlite = argv[++i];
         } else if (arg == "--debug") {
             debugMode = true;
+        } else if (arg == "--log-messages") {
+            logMessages = true;
         } else if (arg == "--player" && i + 1 < argc) {
             const std::string spec = argv[++i];
             const auto parts = splitSpec(spec);
@@ -692,6 +695,11 @@ int main(int argc, char* argv[])
                 auto err = Protocol::BuildServerError(400, "Invalid message");
                 net.Send(msg.clientId, err.data(), err.size());
                 continue;
+            }
+
+            if (logMessages) {
+                SLOG(SPRING_LOG_DEBUG, "msg: client=%u type=%d size=%zu",
+                    msg.clientId, (int)clientMsg->payload_type(), msg.data.size());
             }
 
             switch (clientMsg->payload_type()) {

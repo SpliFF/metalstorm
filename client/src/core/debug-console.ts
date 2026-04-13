@@ -21,6 +21,7 @@ import { ClientMessage } from '../protocol/spring-web/client-message.js';
 import { ClientPayload } from '../protocol/spring-web/client-payload.js';
 import { ConsoleCommand } from '../protocol/spring-web/console-command.js';
 import { ConsoleResponse } from '../protocol/spring-web/console-response.js';
+import { setNetInspectorEnabled } from './net-inspector.js';
 
 const LEVEL_NAMES = ['DEBUG', 'INFO', 'NOTICE', 'WARN', 'ERROR', 'FATAL'];
 const LEVEL_CLASSES = ['debug', 'info', 'notice', 'warning', 'error', 'fatal'];
@@ -122,6 +123,12 @@ export class DebugConsole {
         searchInput?.addEventListener('input', () => {
             this.searchFilter = searchInput.value.trim().toLowerCase();
             this.rerender();
+        });
+
+        // Net inspector toggle
+        const netToggle = document.getElementById('debug-net-toggle') as HTMLInputElement;
+        netToggle?.addEventListener('change', () => {
+            setNetInspectorEnabled(netToggle.checked);
         });
 
         // Scope selector
