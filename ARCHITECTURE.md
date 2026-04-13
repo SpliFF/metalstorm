@@ -24,6 +24,7 @@ build/debug/_deps/flatbuffers-build/flatc --cpp -o rts/ schemas/protocol.fbs
 |--------|------------|------|
 | `spring-lobby` | `rts/lobby_main.cpp` | HTTP + WebSocket lobby server. Manages rooms, spawns game servers, preprocesses maps/games at startup. |
 | `spring-server` | `rts/server_main.cpp` | Headless game sim. One per active room, spawned by lobby as a child process. Runs sim at 30Hz, streams entity state. |
+| `spring-logserver` | `rts/logserver_main.cpp` | Dedicated log collection server. Receives LogIngest via WS, stores in SQLite (debug.db), streams to subscribers, serves HTTP query API. |
 
 ### spring-lobby CLI
 
@@ -59,9 +60,14 @@ build/debug/_deps/flatbuffers-build/flatc --cpp -o rts/ schemas/protocol.fbs
 | `Server/GameProcessor.h/.cpp` | Scans `objects3d/`, converts S3O→glb via modelimporter, converts textures. |
 | `Server/CombatEventCollector.h/.cpp` | Hooks DoDamage, collects hit/miss/kill events for broadcast. |
 | `Server/ClientSession.h` | Per-client auth state, team, viewport. |
-| `Server/LobbyIpc.h/.cpp` | Sim→lobby pipe: sends GameStarted when sim boots. |
+| `Server/LuaExecEngine.h/.cpp` | Thread-safe console command queue + Lua/server scope execution. |
+| `Server/LuaDebugger.h/.cpp` | Lua breakpoints, stack inspection, step/continue, sim pause. |
 | `Server/AI/AIRuntimePool.h/.cpp` | Pool of Lua AI runtimes, one per AI player. |
 | `Server/AI/AIDiscovery.h/.cpp` | Scans `content/engine/ai/` + game ai dirs for plugins. |
+| `System/SpringLog/SpringLog.h/.cpp` | Unified logging library (libspringlog). C/C++ API, console + file sinks, pluggable custom sinks. |
+| `System/SpringLog/SpringLogNet.h/.cpp` | Optional WS+FlatBuffers network sink for pushing logs to log server. |
+| `System/SpringLog/SpringLogSqlite.h/.cpp` | Optional SQLite persistence sink for local log storage. |
+| `System/SpringLogBridge.h/.cpp` | Routes legacy Spring LOG() macros through springlog. |
 
 ### Simulation (`rts/Sim/`)
 
@@ -96,6 +102,8 @@ build/debug/_deps/flatbuffers-build/flatc --cpp -o rts/ schemas/protocol.fbs
 | `core/audio.ts` | Web Audio: synth sounds for combat, background music. |
 | `core/map-data.ts` | Parses MapData FlatBuffer into `ParsedMapData` (heightmap, features, tiles, URLs). |
 | `core/lua-widget-host.ts` | Fengari Lua runtime for map widgets (lava, water shaders). |
+| `core/debug-console.ts` | Debug console: log viewer, scope-aware command input, log server WS, Babylon.js inspector toggle. |
+| `core/net-inspector.ts` | Network message inspector: decodes WS envelope + FlatBuffer types for debug console. |
 | `lobby/lobby-ui.ts` | Full lobby UI: login, room browser, room setup, AI slots, start positions. |
 | `ui/ui.ts` | Shared helpers: `injectStyle()`, `renderTemplate()`. |
 | `ui/game/loader.ts` | In-game template loader: `GameTemplates` interface, bundled defaults, `loadGameTemplates()` fetcher. |
@@ -112,11 +120,11 @@ build/debug/_deps/flatbuffers-build/flatc --cpp -o rts/ schemas/protocol.fbs
 - `0x03` = Entity state delta (custom binary)
 - `0x04` = Projectile state snapshot (custom binary)
 
-**Key server→client messages:** AuthResponse, MapData, GameUnitDefs, GameWeaponDefs, EntityCreate, EntityDestroy, GameEventBatch (contains CombatEvents), GameInfo, RoomStateUpdate, RoomListUpdate.
+**Key server→client messages:** AuthResponse, MapData, GameUnitDefs, GameWeaponDefs, EntityCreate, EntityDestroy, GameEventBatch (contains CombatEvents), GameInfo, RoomStateUpdate, RoomListUpdate, LogBatch, ConsoleResponse, GameStarted.
 
-**Key client→server messages:** AuthRequest, PlayerCommand, ViewportUpdate, RoomCreate/Join/Leave/Ready/StartGame/EndGame, RoomAddAI/RemoveAI.
+**Key client→server messages:** AuthRequest, PlayerCommand, ViewportUpdate, RoomCreate/Join/Leave/Ready/StartGame/EndGame, RoomAddAI/RemoveAI, LogIngest, LogSubscribe, LogUnsubscribe, ConsoleCommand.
 
-**IPC (sim→lobby pipe):** GameStarted (triggers Loading→Active room transition).
+**IPC:** Pipe-based IPC removed. GameStarted is now a ServerPayload message sent over WebSocket.
 
 Generated bindings:
 - C++: `rts/protocol_generated.h`
@@ -304,8 +312,10 @@ data/
 | `/api/maps/thumb/<mapId>` | Map thumbnail (WebP/PNG) |
 | `/api/vfs/game/<gameId>/*` | Game source files (Lua scripts, images) |
 | `/api/games/data/<gameId>/*` | Preprocessed game assets (unit models, textures) |
+| `/api/processes` | JSON list of game server instances (pid, port, state, map, game) |
 
 ### Game server (`spring-server`)
+
 
 | Route | Serves |
 |-------|--------|
@@ -315,6 +325,15 @@ data/
 | `/api/metrics` | JSON performance stats |
 | `/api/content/manifest` | JSON index of all servable assets |
 | `/api/content/assets/*` | Individual asset files from content roots |
+
+### Log server (`spring-logserver`)
+
+| Route | Serves |
+|-------|--------|
+| `/api/logs/<roomId>` | Recent log entries (params: level, section, scope, limit) |
+| `/api/logs/search` | Full-text log search (params: q, level, section, scope, limit) |
+| `/api/logs/sources` | Connected log source status |
+| `/api/sessions` | Recent game sessions (from game_sessions table) |
 
 ## Data Flow
 
@@ -369,4 +388,15 @@ Player disconnect handling: server detects WebSocket close, fires `PlayerRemoved
 
 All tasks from PLAN-next-steps.md are complete. Current work: Zero-K game support (PLAN-convert-zk.md).
 
-**ZK Phase A complete:** 197/236 gadgets boot, sim ticks at 30Hz. GameStart deferred until all roster players connect (game gadgets handle unit spawning, not the engine). Runtime testing in progress — commander spawning hits a Lua error in `unit_attributes_generic.lua` (Game table population fix committed, needs re-verification). Current priority: building debugging tools to speed up Lua error iteration before resuming ZK work.
+**ZK Phase A complete:** 197/236 gadgets boot, sim ticks at 30Hz. GameStart deferred until all roster players connect.
+
+**Debugging infrastructure complete (PLAN-debugging-implementation.md, all 12 tiers):**
+- Unified logging (libspringlog) with console/file/network/SQLite sinks
+- Dedicated log server (spring-logserver) with ring buffer + SQLite + HTTP query API
+- Browser debug console with log streaming, scope-aware command input, network inspector
+- Lua execution engine (LuaRules/LuaGaia/server scopes via ConsoleCommand)
+- Lua debugger with breakpoints, stack/locals inspection, step/continue
+- Spring.Debug/Warn/Assert/DumpTable/Inspect Lua API
+- SQL query proxy, process management API, game session tracking
+- MCP server for Claude integration (tools/debug-mcp)
+- Pipe-based LobbyIpc removed, replaced by WebSocket + FlatBuffers
