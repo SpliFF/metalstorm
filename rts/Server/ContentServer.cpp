@@ -2,6 +2,9 @@
 
 #include "ContentServer.h"
 #include "NetworkServer.h"
+#include "System/SpringLog/SpringLog.h"
+
+#define LOG_SECTION "content"
 
 #include <cstdio>
 #include <filesystem>
@@ -18,7 +21,7 @@ void ContentServer::Init(NetworkServer& net, const std::vector<std::string>& con
     }
 
     cachedManifest = BuildManifest();
-    std::fprintf(stderr, "[content] scanned %zu assets from %zu roots\n",
+    SLOG(SPRING_LOG_INFO, "scanned %zu assets from %zu roots",
         assets.size(), roots.size());
 
     // Manifest endpoint

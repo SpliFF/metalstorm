@@ -9,6 +9,9 @@
 #include "System/EventHandler.h"
 #include "System/FileSystem/FileHandler.h"
 #include "System/Log/ILog.h"
+#include "System/SpringLog/SpringLog.h"
+
+#define LOG_SECTION "sim"
 
 #include <cstdio>
 #include <filesystem>
@@ -209,11 +212,11 @@ S3DModel* EnsureLoaded(S3DModel*& cached, const std::string& modelName) {
         }
     }
 
-    std::fprintf(stderr,
-        "[model] %s: no .config.lua/.config.json found under content "
+    SLOG(SPRING_LOG_WARNING,
+        "%s: no .config.lua/.config.json found under content "
         "roots. Spawning with default bounds radius=1 height=1 — "
         "gadgets that read Spring.GetUnitRadius may see unexpected "
-        "values.\n",
+        "values.",
         modelName.c_str());
     return cached;
 }

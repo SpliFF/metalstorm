@@ -17,6 +17,7 @@
 #include "Server/GameProcessor.h"
 #include "Server/AI/AIDiscovery.h"
 #include "Server/GameDiscovery.h"
+#include "System/SpringLog/SpringLog.h"
 
 #include <sqlite3.h>
 
@@ -33,11 +34,11 @@
 #include <unordered_map>
 
 #include <sys/types.h>
-#include <cerrno>
 #include <cstring>
-#include <fcntl.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#define LOG_SECTION "lobby"
 
 static std::atomic<bool> keepRunning{true};
 static void signalHandler(int) { keepRunning.store(false); }
@@ -60,20 +61,6 @@ struct GameServerInstance {
     std::string mapPath;
     std::string gamePath;
     enum State { Starting, Running, Ended, Crashed } state = Starting;
-
-    /// Read end of the sim→lobby event pipe. The lobby polls this
-    /// non-blockingly in the main loop, reads length-prefixed
-    /// FlatBuffers IpcMessage frames, and dispatches on the payload
-    /// type (currently just GameStarted). -1 when no pipe has been
-    /// opened yet; closed and reset to -1 when the game server
-    /// process exits.
-    int eventFdRead = -1;
-
-    /// Incremental read buffer for the event pipe. Non-blocking
-    /// reads can return partial frames; we accumulate here until
-    /// a full length-prefixed frame is available, then drain and
-    /// dispatch all complete frames in one pass.
-    std::vector<uint8_t> eventReadBuf;
 };
 
 /// Find a free port by trying to bind briefly.
@@ -102,12 +89,6 @@ static int findFreePort(int base = 9100) {
 /// AutoAssignStartPositions before this function to fill in any
 /// -1 values, so a well-formed handoff always carries a concrete
 /// slot assignment per team.
-/// Well-known fd number the child uses for the sim→lobby event
-/// pipe. Comes right after stdin/out/err. We dup the pipe write
-/// end onto this fd inside the child so the existing "close all
-/// fds from 3 upward" loop can explicitly skip it.
-static constexpr int kEventPipeChildFd = 3;
-
 static GameServerInstance spawnGameServer(
     uint32_t roomId, const std::string& gamePath,
     const std::string& mapPath, const std::string& dbPath,
@@ -129,21 +110,6 @@ static GameServerInstance spawnGameServer(
     // Create log directory
     std::filesystem::create_directories("data/logs");
     std::string logPath = "data/logs/game-" + std::to_string(roomId) + ".log";
-
-    // Event pipe: unidirectional sim → lobby. The lobby keeps the
-    // read end and polls it non-blockingly in the main loop; the
-    // sim dups the write end onto kEventPipeChildFd and writes
-    // length-prefixed FlatBuffers IpcMessage frames through it.
-    // Failure to create the pipe is non-fatal — we just skip the
-    // event channel and fall back to "no state transitions from
-    // the sim", which matches pre-feature behaviour.
-    int eventPipe[2] = { -1, -1 };
-    if (pipe(eventPipe) != 0) {
-        std::fprintf(stderr,
-            "[lobby] pipe() failed for room %u: %s (event channel disabled)\n",
-            roomId, strerror(errno));
-        eventPipe[0] = eventPipe[1] = -1;
-    }
 
     // Assemble the --player and --ai arguments outside the fork so
     // their string storage outlives the execvp call in the child.
@@ -176,38 +142,19 @@ static GameServerInstance spawnGameServer(
             fclose(logFile);
         }
 
-        // If the event pipe was created, park its write end on a
-        // well-known fd number so the sim can find it and so the
-        // fd-close loop below can explicitly skip it. Close the
-        // read end in the child — it belongs to the lobby.
-        if (eventPipe[1] >= 0) {
-            close(eventPipe[0]);
-            if (eventPipe[1] != kEventPipeChildFd) {
-                dup2(eventPipe[1], kEventPipeChildFd);
-                close(eventPipe[1]);
-            }
-        }
-
-        // Close all other inherited file descriptors. uWebSockets sockets
-        // (our listen socket, all established WS client connections) do not
-        // get FD_CLOEXEC by default on macOS, so without this the child
-        // process ends up holding the parent's listen socket + every active
-        // WebSocket. That leaks state into spring-server and causes
-        // cross-talk between the lobby and game server. Skip
-        // kEventPipeChildFd so the sim→lobby event channel survives.
+        // Close all inherited file descriptors (except stdin/out/err).
+        // uWebSockets sockets (our listen socket, all established WS client
+        // connections) do not get FD_CLOEXEC by default on macOS, so without
+        // this the child process ends up holding the parent's listen socket
+        // + every active WebSocket. That leaks state into spring-server and
+        // causes cross-talk between the lobby and game server.
         int maxFd = static_cast<int>(sysconf(_SC_OPEN_MAX));
         if (maxFd < 1024) maxFd = 1024;
         for (int fd = 3; fd < maxFd; fd++) {
-            if (fd == kEventPipeChildFd && eventPipe[1] >= 0) continue;
             close(fd);
         }
 
         std::string portStr = std::to_string(inst.port);
-        // --event-fd arg string lives here so its c_str() is
-        // stable through the execvp call.
-        std::string eventFdStr;
-        if (eventPipe[1] >= 0)
-            eventFdStr = std::to_string(kEventPipeChildFd);
 
         // Build argv: fixed args first, then one "--player <spec>"
         // pair per human slot, then one "--ai <spec>" pair per AI
@@ -220,10 +167,6 @@ static GameServerInstance spawnGameServer(
         argv.push_back("--game"); argv.push_back(gamePath.c_str());
         argv.push_back("--map");  argv.push_back(mapPath.c_str());
         argv.push_back("--db");   argv.push_back(dbPath.c_str());
-        if (!eventFdStr.empty()) {
-            argv.push_back("--event-fd");
-            argv.push_back(eventFdStr.c_str());
-        }
         for (const auto& spec : playerArgStorage) {
             argv.push_back("--player");
             argv.push_back(spec.c_str());
@@ -239,24 +182,13 @@ static GameServerInstance spawnGameServer(
         fprintf(stderr, "ERROR: failed to exec game server: %s\n", serverBin.c_str());
         _exit(1);
     } else if (pid > 0) {
-        // Parent: close the write end (the child owns it now) and
-        // stash the read end on the instance. Mark non-blocking so
-        // the main loop's reader can drain whatever's available
-        // each tick without stalling.
-        if (eventPipe[1] >= 0) {
-            close(eventPipe[1]);
-            int flags = fcntl(eventPipe[0], F_GETFL, 0);
-            if (flags >= 0)
-                fcntl(eventPipe[0], F_SETFL, flags | O_NONBLOCK);
-            inst.eventFdRead = eventPipe[0];
-        }
         inst.pid = pid;
         inst.state = GameServerInstance::Starting;
-        std::fprintf(stderr, "[lobby] spawned game server pid=%d port=%d for room %u "
-            "(%zu players, %zu AI)\n",
+        SLOG(SPRING_LOG_NOTICE, "spawned game server pid=%d port=%d for room %u "
+            "(%zu players, %zu AI)",
             pid, inst.port, roomId, playerRoster.size(), aiSlots.size());
     } else {
-        std::fprintf(stderr, "[lobby] ERROR: fork failed\n");
+        SLOG(SPRING_LOG_ERROR, "fork failed");
         inst.state = GameServerInstance::Crashed;
     }
 
@@ -290,6 +222,9 @@ int main(int argc, char* argv[])
     std::string dbPath = "data/spring-server.db";
     std::string gamesDir = "content/games";
     std::string mapsDir = "content/maps";
+    std::string logFile;
+    int logLevel = SPRING_LOG_NOTICE;
+    bool debugMode = false;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -297,6 +232,9 @@ int main(int argc, char* argv[])
         else if (arg == "--db" && i + 1 < argc) dbPath = argv[++i];
         else if (arg == "--games-dir" && i + 1 < argc) gamesDir = argv[++i];
         else if (arg == "--maps" && i + 1 < argc) mapsDir = argv[++i];
+        else if (arg == "--log-file" && i + 1 < argc) logFile = argv[++i];
+        else if (arg == "--log-level" && i + 1 < argc) logLevel = std::atoi(argv[++i]);
+        else if (arg == "--debug") { debugMode = true; logLevel = SPRING_LOG_DEBUG; }
         else if (arg == "--game" && i + 1 < argc) {
             // Back-compat: `--game <path>` is translated into
             // `--games-dir <parent>` so existing scripts that point
@@ -311,12 +249,22 @@ int main(int argc, char* argv[])
         }
     }
 
-    std::fprintf(stderr, "[lobby] starting on port %d...\n", port);
+    // --- Logging ---
+    uint32_t logOutputs = SPRING_LOG_OUTPUT_CONSOLE;
+    if (!logFile.empty())
+        logOutputs |= SPRING_LOG_OUTPUT_FILE;
+    springlog_init("spring-lobby", logOutputs);
+    springlog_set_min_level(logLevel);
+    if (!logFile.empty())
+        springlog_set_file(logFile.c_str());
+
+    SLOG(SPRING_LOG_NOTICE, "starting on port %d...", port);
 
     // --- Database ---
     Database db;
     if (!db.Open(dbPath)) {
-        std::fprintf(stderr, "[lobby] ERROR: failed to open database\n");
+        SLOG(SPRING_LOG_ERROR, "failed to open database");
+        springlog_shutdown();
         return 1;
     }
 
@@ -634,11 +582,12 @@ int main(int argc, char* argv[])
     });
 
     if (!net.Start(port)) {
-        std::fprintf(stderr, "[lobby] ERROR: failed to start network\n");
+        SLOG(SPRING_LOG_ERROR, "failed to start network");
+        springlog_shutdown();
         return 1;
     }
 
-    std::fprintf(stderr, "[lobby] running (port %d)\n", port);
+    SLOG(SPRING_LOG_NOTICE, "running (port %d)", port);
 
     // --- Main loop (10 Hz for lobby, no sim) ---
     while (keepRunning.load()) {
@@ -663,7 +612,7 @@ int main(int argc, char* argv[])
                 }
                 case SpringWeb::ClientPayload_Handshake: {
                     auto* hs = clientMsg->payload_as_Handshake();
-                    std::fprintf(stderr, "[lobby] handshake from client %u: v%d\n",
+                    SLOG(SPRING_LOG_INFO, "handshake from client %u: v%d",
                         msg.clientId, hs->protocol_version());
                     break;
                 }
@@ -674,11 +623,11 @@ int main(int argc, char* argv[])
 
                     // Try token-based reconnection first
                     bool hasToken = auth->token() && auth->token()->size() > 0;
-                    std::fprintf(stderr, "[lobby] auth: user='%s' hasToken=%d passLen=%zu\n",
+                    SLOG(SPRING_LOG_DEBUG, "auth: user='%s' hasToken=%d passLen=%zu",
                         username, hasToken, strlen(passHash));
                     if (hasToken) {
                         int64_t userId = db.ValidateSession(auth->token()->str());
-                        std::fprintf(stderr, "[lobby] token validation: userId=%lld\n", userId);
+                        SLOG(SPRING_LOG_DEBUG, "token validation: userId=%lld", userId);
                         if (userId > 0) {
                             auto user = db.FindUser(username);
                             if (user && user->id == userId) {
@@ -687,7 +636,7 @@ int main(int argc, char* argv[])
                                     static_cast<uint32_t>(userId));
                                 net.Send(msg.clientId, resp.data(), resp.size());
                                 sessions.AddSession(msg.clientId, userId, user->username, user->role);
-                                std::fprintf(stderr, "[lobby] '%s' reconnected via token\n", username);
+                                SLOG(SPRING_LOG_INFO, "'%s' reconnected via token", username);
 
                                 auto allRooms = rooms.GetAllRooms();
                                 auto listMsg = Protocol::BuildRoomListUpdate(allRooms);
@@ -727,7 +676,7 @@ int main(int argc, char* argv[])
                             break;
                         }
                         user = db.FindUser(username);
-                        std::fprintf(stderr, "[lobby] registered new user '%s'\n", username);
+                        SLOG(SPRING_LOG_NOTICE, "registered new user '%s'", username);
                     }
                     if (user->passwordHash != passHash) {
                         auto resp = Protocol::BuildAuthResponse(SpringWeb::AuthStatus_InvalidCredentials, "", 0, "Wrong password");
@@ -740,7 +689,7 @@ int main(int argc, char* argv[])
                     auto resp = Protocol::BuildAuthResponse(SpringWeb::AuthStatus_OK, token, static_cast<uint32_t>(user->id));
                     net.Send(msg.clientId, resp.data(), resp.size());
                     sessions.AddSession(msg.clientId, user->id, user->username, user->role);
-                    std::fprintf(stderr, "[lobby] '%s' authenticated (id=%lld)\n", username, user->id);
+                    SLOG(SPRING_LOG_INFO, "'%s' authenticated (id=%lld)", username, user->id);
 
                     // Send room list
                     auto allRooms = rooms.GetAllRooms();
@@ -902,8 +851,7 @@ int main(int argc, char* argv[])
                     // room state between create and start.
                     auto gpIt = gamePathsById.find(room->gameName);
                     if (gpIt == gamePathsById.end()) {
-                        std::fprintf(stderr,
-                            "[lobby] RoomStartGame: unknown game '%s' for room %u\n",
+                        SLOG(SPRING_LOG_WARNING, "RoomStartGame: unknown game '%s' for room %u",
                             room->gameName.c_str(), room->id);
                         break;
                     }
@@ -927,7 +875,7 @@ int main(int argc, char* argv[])
 
                     BROADCAST_ROOM_UPDATE(room);
 
-                    std::fprintf(stderr, "[lobby] room %u: game server on port %d\n",
+                    SLOG(SPRING_LOG_NOTICE, "room %u: game server on port %d",
                         room->id, inst.port);
                     break;
                 }
@@ -956,8 +904,7 @@ int main(int argc, char* argv[])
                     if (!room) break;
                     const uint32_t closingRoomId = room->id;
                     if (room->hostPlayerId != static_cast<uint32_t>(session->userId)) {
-                        std::fprintf(stderr,
-                            "[lobby] RoomCloseRoom rejected: user %lld not host of room %u\n",
+                        SLOG(SPRING_LOG_WARNING, "RoomCloseRoom rejected: user %lld not host of room %u",
                             static_cast<long long>(session->userId), closingRoomId);
                         break;
                     }
@@ -980,8 +927,7 @@ int main(int argc, char* argv[])
                     auto gsIt = gameServers.find(closingRoomId);
                     if (gsIt != gameServers.end() && isProcessAlive(gsIt->second.pid)) {
                         kill(gsIt->second.pid, SIGTERM);
-                        std::fprintf(stderr,
-                            "[lobby] closing room %u: killed game server pid %d\n",
+                        SLOG(SPRING_LOG_NOTICE, "closing room %u: killed game server pid %d",
                             closingRoomId, gsIt->second.pid);
                     }
                     if (gsIt != gameServers.end())
@@ -993,8 +939,7 @@ int main(int argc, char* argv[])
                         // and hold no cross-process locks — but if
                         // it does, at least don't leak the game
                         // server state.
-                        std::fprintf(stderr,
-                            "[lobby] RoomCloseRoom: CloseRoom unexpectedly failed for room %u\n",
+                        SLOG(SPRING_LOG_WARNING, "RoomCloseRoom: CloseRoom unexpectedly failed for room %u",
                             closingRoomId);
                         break;
                     }
@@ -1023,23 +968,20 @@ int main(int argc, char* argv[])
                     auto* room = rooms.FindRoomByClient(msg.clientId);
                     if (!room) break;
                     if (room->hostPlayerId != static_cast<uint32_t>(session->userId)) {
-                        std::fprintf(stderr,
-                            "[lobby] RoomEndGame rejected: user %lld not host of room %u\n",
+                        SLOG(SPRING_LOG_WARNING, "RoomEndGame rejected: user %lld not host of room %u",
                             static_cast<long long>(session->userId), room->id);
                         break;
                     }
                     if (room->state != ERoomState::Loading &&
                         room->state != ERoomState::Active) {
-                        std::fprintf(stderr,
-                            "[lobby] RoomEndGame rejected: room %u not in game state\n",
+                        SLOG(SPRING_LOG_WARNING, "RoomEndGame rejected: room %u not in game state",
                             room->id);
                         break;
                     }
                     auto it = gameServers.find(room->id);
                     if (it != gameServers.end() && isProcessAlive(it->second.pid)) {
                         kill(it->second.pid, SIGTERM);
-                        std::fprintf(stderr,
-                            "[lobby] host ended game for room %u (pid %d)\n",
+                        SLOG(SPRING_LOG_NOTICE, "host ended game for room %u (pid %d)",
                             room->id, it->second.pid);
                     } else {
                         // No subprocess to kill — transition the room
@@ -1099,8 +1041,7 @@ int main(int argc, char* argv[])
                     // game B room).
                     auto it = aisByGame.find(room->gameName);
                     if (it == aisByGame.end()) {
-                        std::fprintf(stderr,
-                            "[lobby] RoomAddAI rejected: room %u has unknown game '%s'\n",
+                        SLOG(SPRING_LOG_WARNING, "RoomAddAI rejected: room %u has unknown game '%s'",
                             room->id, room->gameName.c_str());
                         break;
                     }
@@ -1110,8 +1051,7 @@ int main(int argc, char* argv[])
                         if (ai.id == requestedId) { match = &ai; break; }
                     }
                     if (!match) {
-                        std::fprintf(stderr,
-                            "[lobby] RoomAddAI rejected: unknown AI id '%s' for game '%s'\n",
+                        SLOG(SPRING_LOG_WARNING, "RoomAddAI rejected: unknown AI id '%s' for game '%s'",
                             requestedId.c_str(), room->gameName.c_str());
                         break;
                     }
@@ -1175,8 +1115,7 @@ int main(int argc, char* argv[])
                     const int8_t maxStartPos = static_cast<int8_t>(
                         std::min<size_t>(mapMeta.startPositions.size(), 127));
                     if (maxStartPos <= 0) {
-                        std::fprintf(stderr,
-                            "[lobby] RoomSetStartPos rejected: map '%s' has no start positions\n",
+                        SLOG(SPRING_LOG_WARNING, "RoomSetStartPos rejected: map '%s' has no start positions",
                             room->mapName.c_str());
                         break;
                     }
@@ -1203,137 +1142,13 @@ int main(int argc, char* argv[])
             }
         }
 
-        // Drain each live game server's sim→lobby event pipe.
-        // Frames are length-prefixed FlatBuffers IpcMessages. We
-        // read whatever's available on the non-blocking fd and
-        // keep a rolling buffer so partial frames survive to the
-        // next tick. Anything that parses as a GameStarted flips
-        // the room from Loading to Active.
-        for (auto& [roomId, inst] : gameServers) {
-            if (inst.eventFdRead < 0) continue;
-
-            // Pump the non-blocking read end. Loop so we handle
-            // multiple small frames arriving in one tick without
-            // starving other instances.
-            uint8_t chunk[512];
-            while (true) {
-                ssize_t n = read(inst.eventFdRead, chunk, sizeof(chunk));
-                if (n > 0) {
-                    inst.eventReadBuf.insert(inst.eventReadBuf.end(),
-                        chunk, chunk + n);
-                    continue;
-                }
-                if (n == 0) {
-                    // Writer closed the pipe. The subprocess may
-                    // still be alive (unlikely but possible), so
-                    // leave the instance in its current state and
-                    // let the health check reap it. Closing the
-                    // read fd here avoids a subsequent EBADF loop.
-                    close(inst.eventFdRead);
-                    inst.eventFdRead = -1;
-                    break;
-                }
-                // n < 0: EAGAIN/EWOULDBLOCK is the expected exit
-                // for a non-blocking read with nothing pending.
-                // Anything else is a real error worth logging
-                // once; we tear the fd down so we stop retrying.
-                if (errno == EAGAIN || errno == EWOULDBLOCK)
-                    break;
-                std::fprintf(stderr,
-                    "[lobby] event pipe read error for room %u: %s\n",
-                    roomId, strerror(errno));
-                close(inst.eventFdRead);
-                inst.eventFdRead = -1;
-                break;
-            }
-
-            // Dispatch any complete frames in the accumulator.
-            // Wire format: u32 length (LE), then `length` bytes
-            // of FlatBuffers data rooted at IpcMessage.
-            while (inst.eventReadBuf.size() >= 4) {
-                const uint8_t* data = inst.eventReadBuf.data();
-                const uint32_t frameLen =
-                    static_cast<uint32_t>(data[0])       |
-                    (static_cast<uint32_t>(data[1]) << 8)  |
-                    (static_cast<uint32_t>(data[2]) << 16) |
-                    (static_cast<uint32_t>(data[3]) << 24);
-                // Guard against a bogus length that would eat
-                // the whole heap — any reasonable IpcMessage is
-                // a few hundred bytes at most.
-                if (frameLen == 0 || frameLen > 64 * 1024) {
-                    std::fprintf(stderr,
-                        "[lobby] event pipe: bad frame length %u from room %u, resyncing\n",
-                        frameLen, roomId);
-                    inst.eventReadBuf.clear();
-                    break;
-                }
-                if (inst.eventReadBuf.size() < 4 + frameLen) break;
-
-                // Parse via the standard FlatBuffers verifier so
-                // a malformed frame doesn't crash the lobby. The
-                // schema's `root_type` is ClientMessage, so the
-                // codegen doesn't emit a `VerifyIpcMessageBuffer`
-                // helper — we use the generic templated
-                // verifier instead, which works for any table.
-                flatbuffers::Verifier verifier(data + 4, frameLen);
-                if (verifier.VerifyBuffer<SpringWeb::IpcMessage>(nullptr)) {
-                    const auto* ipc = flatbuffers::GetRoot<SpringWeb::IpcMessage>(data + 4);
-                    if (ipc->payload_type() == SpringWeb::IpcPayload_GameStarted) {
-                        const auto* gs = ipc->payload_as_GameStarted();
-                        std::fprintf(stderr,
-                            "[lobby] room %u: sim reported GameStarted at frame %u\n",
-                            roomId, gs ? gs->frame() : 0);
-                        // Transition the room from Loading to
-                        // Active and broadcast so clients render
-                        // "In Progress" instead of "Loading".
-                        // Instance state follows the same beat so
-                        // the existing health-check guard still
-                        // applies (Starting|Running → reap on
-                        // subprocess exit).
-                        if (inst.state == GameServerInstance::Starting)
-                            inst.state = GameServerInstance::Running;
-                        rooms.SetRoomState(roomId, ERoomState::Active);
-                        if (auto* room = rooms.GetRoom(roomId)) {
-                            auto stateMsg = Protocol::BuildRoomStateUpdate(*room);
-                            for (const auto& p : room->players)
-                                net.Send(p.clientId, stateMsg.data(), stateMsg.size());
-                        }
-                        auto allRooms = rooms.GetAllRooms();
-                        auto listMsg = Protocol::BuildRoomListUpdate(allRooms);
-                        net.Broadcast(listMsg.data(), listMsg.size());
-                    }
-                } else {
-                    std::fprintf(stderr,
-                        "[lobby] event pipe: verifier rejected frame from room %u\n",
-                        roomId);
-                }
-
-                // Drop the consumed frame. The remaining bytes
-                // (if any) form the start of the next one.
-                inst.eventReadBuf.erase(
-                    inst.eventReadBuf.begin(),
-                    inst.eventReadBuf.begin() + 4 + frameLen);
-            }
-        }
-
         // Check game server health every loop iteration
         for (auto& [roomId, inst] : gameServers) {
             if (inst.state == GameServerInstance::Starting || inst.state == GameServerInstance::Running) {
                 if (!isProcessAlive(inst.pid)) {
                     inst.state = GameServerInstance::Ended;
-                    std::fprintf(stderr, "[lobby] game server for room %u (pid %d) has exited\n",
+                    SLOG(SPRING_LOG_NOTICE, "game server for room %u (pid %d) has exited",
                         roomId, inst.pid);
-
-                    // Close the event pipe read end. The sim is
-                    // gone so nothing will write to it again; if
-                    // the next game spawned for this room opens
-                    // a fresh pipe we don't want to accidentally
-                    // reuse the old fd number.
-                    if (inst.eventFdRead >= 0) {
-                        close(inst.eventFdRead);
-                        inst.eventFdRead = -1;
-                    }
-                    inst.eventReadBuf.clear();
 
                     // Recycle the room: transition back to Filling,
                     // clear ready flags, zero gameServerPort, drop
@@ -1367,18 +1182,19 @@ int main(int argc, char* argv[])
         }
     }
 
-    std::fprintf(stderr, "[lobby] shutting down...\n");
+    SLOG(SPRING_LOG_NOTICE, "shutting down...");
 
     // Kill any running game servers
     for (auto& [roomId, inst] : gameServers) {
         if (isProcessAlive(inst.pid)) {
             kill(inst.pid, SIGTERM);
-            std::fprintf(stderr, "[lobby] killed game server pid %d\n", inst.pid);
+            SLOG(SPRING_LOG_NOTICE, "killed game server pid %d", inst.pid);
         }
     }
 
     net.Stop();
     db.Close();
-    std::fprintf(stderr, "[lobby] exited cleanly\n");
+    SLOG(SPRING_LOG_NOTICE, "exited cleanly");
+    springlog_shutdown();
     return 0;
 }

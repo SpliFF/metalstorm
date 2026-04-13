@@ -7,10 +7,9 @@ import * as flatbuffers from 'flatbuffers';
 
 
 /**
- * Sim has finished its boot sequence (LuaRules + gadgets loaded,
- * GameStart event fired, starting units spawned) and is now
- * running the simulation loop proper. Triggers the room state
- * transition from Loading → Active.
+ * Game server has finished boot and started ticking. Sent from
+ * game server to lobby over the admin WS connection. Triggers
+ * room state transition from Loading → Active.
  */
 export class GameStarted implements flatbuffers.IUnpackableObject<GameStartedT> {
   bb: flatbuffers.ByteBuffer|null = null;

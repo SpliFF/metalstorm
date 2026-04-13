@@ -12,6 +12,7 @@ cmake_minimum_required(VERSION 3.25)
 add_executable(gameconverter
     main.cpp
 )
+target_link_libraries(gameconverter PRIVATE springlog springlog-net)
 set_target_properties(gameconverter PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED ON

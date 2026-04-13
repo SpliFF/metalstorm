@@ -5,6 +5,9 @@
 #include "Lua/LuaConfigLoader.h"
 #include "Lua/LuaParser.h"
 #include "Sim/Units/Scripts/LocalModelPieceStub.h"
+#include "System/SpringLog/SpringLog.h"
+
+#define LOG_SECTION "model-config"
 
 #include <cstdio>
 #include <memory>
@@ -53,9 +56,9 @@ bool ModelConfigLoader::LoadInto(S3DModel& out, const std::string& basePath) {
 
     const LuaTable root = parser->GetRoot();
     if (!root.IsValid()) {
-        std::fprintf(stderr,
-            "[config] %s: root is not a table (did the file forget "
-            "`return <table>`?)\n",
+        SLOG(SPRING_LOG_ERROR,
+            "%s: root is not a table (did the file forget "
+            "`return <table>`?)",
             basePath.c_str());
         return false;
     }
@@ -76,22 +79,22 @@ bool ModelConfigLoader::LoadInto(S3DModel& out, const std::string& basePath) {
         configVersion = root.GetInt("metaVersion", 0);
 
     if (configVersion == 0) {
-        std::fprintf(stderr,
-            "[config] %s: no `configVersion` field — file predates the "
+        SLOG(SPRING_LOG_WARNING,
+            "%s: no `configVersion` field — file predates the "
             "versioned schema. Run `modelimporter --update-meta` to "
-            "regenerate.\n",
+            "regenerate.",
             basePath.c_str());
     } else if (configVersion < kSupportedConfigVersion) {
-        std::fprintf(stderr,
-            "[config] %s: configVersion=%d is older than this engine "
+        SLOG(SPRING_LOG_WARNING,
+            "%s: configVersion=%d is older than this engine "
             "supports (%d). Run `modelimporter --update-meta` to "
             "regenerate; the sim will continue with best-effort "
-            "parsing.\n",
+            "parsing.",
             basePath.c_str(), configVersion, kSupportedConfigVersion);
     } else if (configVersion > kSupportedConfigVersion) {
-        std::fprintf(stderr,
-            "[config] %s: configVersion=%d is newer than this engine "
-            "understands (%d). Some fields may be ignored.\n",
+        SLOG(SPRING_LOG_NOTICE,
+            "%s: configVersion=%d is newer than this engine "
+            "understands (%d). Some fields may be ignored.",
             basePath.c_str(), configVersion, kSupportedConfigVersion);
     }
 
@@ -144,8 +147,8 @@ bool ModelConfigLoader::LoadInto(S3DModel& out, const std::string& basePath) {
 
     out.metaPath = basePath;
 
-    std::fprintf(stderr,
-        "[config] loaded %s: radius=%.2f height=%.2f pieces=%d\n",
+    SLOG(SPRING_LOG_INFO,
+        "loaded %s: radius=%.2f height=%.2f pieces=%d",
         basePath.c_str(), out.radius, out.height, out.numPieces);
     return true;
 }

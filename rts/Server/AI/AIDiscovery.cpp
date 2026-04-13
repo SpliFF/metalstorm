@@ -10,6 +10,9 @@
 
 #include "AIDiscovery.h"
 #include "../ConfigReader.h"
+#include "System/SpringLog/SpringLog.h"
+
+#define LOG_SECTION "ai"
 
 #include <algorithm>
 #include <cctype>
@@ -42,8 +45,8 @@ bool LoadOne(const fs::path& folder, bool isEngine, AIDiscovery::AIInfo& out) {
     // plugin folder.
     auto cfg = ConfigReader::Config::Load((folder / "ai").string());
     if (!cfg) {
-        std::fprintf(stderr,
-            "[ai] skipping %s: no ai.config.lua or ai.config.json found\n",
+        SLOG(SPRING_LOG_WARNING,
+            "skipping %s: no ai.config.lua or ai.config.json found",
             folder.string().c_str());
         return false;
     }
@@ -53,8 +56,8 @@ bool LoadOne(const fs::path& folder, bool isEngine, AIDiscovery::AIInfo& out) {
     // reason a config file exists.
     const std::string name = cfg->GetString("name", "");
     if (name.empty()) {
-        std::fprintf(stderr,
-            "[ai] skipping %s: ai.config is missing `name` field\n",
+        SLOG(SPRING_LOG_WARNING,
+            "skipping %s: ai.config is missing `name` field",
             folder.string().c_str());
         return false;
     }
@@ -67,8 +70,8 @@ bool LoadOne(const fs::path& folder, bool isEngine, AIDiscovery::AIInfo& out) {
     const std::string entryName = cfg->GetString("entry", "main.lua");
     const fs::path entryPath = folder / entryName;
     if (!fs::exists(entryPath)) {
-        std::fprintf(stderr,
-            "[ai] skipping %s: entry file '%s' not found\n",
+        SLOG(SPRING_LOG_WARNING,
+            "skipping %s: entry file '%s' not found",
             folder.string().c_str(), entryName.c_str());
         return false;
     }
@@ -140,12 +143,12 @@ std::vector<AIInfo> Discover(
     }
     std::reverse(out.begin(), out.end());
 
-    std::fprintf(stderr,
-        "[ai] discovered %zu AI plugin(s) "
-        "(engine root: %s, game root: %s)\n",
+    SLOG(SPRING_LOG_INFO,
+        "discovered %zu AI plugin(s) "
+        "(engine root: %s, game root: %s)",
         out.size(), enginePath.c_str(), gamePath.c_str());
     for (const auto& info : out) {
-        std::fprintf(stderr, "[ai]   - %s (%s)%s\n",
+        SLOG(SPRING_LOG_INFO, "  - %s (%s)%s",
             info.displayName.c_str(),
             info.id.c_str(),
             info.isEngineProvided ? " [engine]" : "");

@@ -17,6 +17,9 @@
 
 #include "GameDiscovery.h"
 #include "ConfigReader.h"
+#include "System/SpringLog/SpringLog.h"
+
+#define LOG_SECTION "game-disc"
 
 #include <algorithm>
 #include <cctype>
@@ -66,8 +69,8 @@ bool LoadOne(const fs::path& folder, GameDiscovery::GameInfo& out) {
     // field in an early-draft config.
     if (name.empty()) {
         name = folder.filename().string();
-        std::fprintf(stderr,
-            "[game] %s: config has no `name` field, using folder name\n",
+        SLOG(SPRING_LOG_WARNING,
+            "%s: config has no `name` field, using folder name",
             folder.string().c_str());
     }
 
@@ -88,8 +91,8 @@ std::vector<GameInfo> Discover(const std::string& gamesDir) {
 
     const fs::path root(gamesDir);
     if (!fs::exists(root) || !fs::is_directory(root)) {
-        std::fprintf(stderr,
-            "[game] games directory '%s' does not exist\n",
+        SLOG(SPRING_LOG_ERROR,
+            "games directory '%s' does not exist",
             gamesDir.c_str());
         return out;
     }
@@ -108,10 +111,10 @@ std::vector<GameInfo> Discover(const std::string& gamesDir) {
             return a.id < b.id;
         });
 
-    std::fprintf(stderr, "[game] discovered %zu game(s) in '%s'\n",
+    SLOG(SPRING_LOG_INFO, "discovered %zu game(s) in '%s'",
         out.size(), gamesDir.c_str());
     for (const auto& info : out) {
-        std::fprintf(stderr, "[game]   - %s (%s)%s%s\n",
+        SLOG(SPRING_LOG_INFO, "  - %s (%s)%s%s",
             info.displayName.c_str(), info.id.c_str(),
             info.version.empty() ? "" : " v",
             info.version.c_str());

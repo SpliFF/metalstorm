@@ -6,8 +6,12 @@ import { AIListRequest, AIListRequestT } from '../spring-web/ailist-request.js';
 import { Ack, AckT } from '../spring-web/ack.js';
 import { AuthRequest, AuthRequestT } from '../spring-web/auth-request.js';
 import { ChatSend, ChatSendT } from '../spring-web/chat-send.js';
+import { ConsoleCommand, ConsoleCommandT } from '../spring-web/console-command.js';
 import { GameListRequest, GameListRequestT } from '../spring-web/game-list-request.js';
 import { Handshake, HandshakeT } from '../spring-web/handshake.js';
+import { LogIngest, LogIngestT } from '../spring-web/log-ingest.js';
+import { LogSubscribe, LogSubscribeT } from '../spring-web/log-subscribe.js';
+import { LogUnsubscribe, LogUnsubscribeT } from '../spring-web/log-unsubscribe.js';
 import { Ping, PingT } from '../spring-web/ping.js';
 import { PlayerCommand, PlayerCommandT } from '../spring-web/player-command.js';
 import { ReconnectRequest, ReconnectRequestT } from '../spring-web/reconnect-request.js';
@@ -51,13 +55,17 @@ export enum ClientPayload {
   GameListRequest = 20,
   RoomSetStartPos = 21,
   RoomCloseRoom = 22,
-  RoomSetAITeam = 23
+  RoomSetAITeam = 23,
+  LogIngest = 24,
+  LogSubscribe = 25,
+  LogUnsubscribe = 26,
+  ConsoleCommand = 27
 }
 
 export function unionToClientPayload(
   type: ClientPayload,
-  accessor: (obj:AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate|null
-): AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate|null {
+  accessor: (obj:AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate|null
+): AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate|null {
   switch(ClientPayload[type]) {
     case 'NONE': return null; 
     case 'Handshake': return accessor(new Handshake())! as Handshake;
@@ -83,15 +91,19 @@ export function unionToClientPayload(
     case 'RoomSetStartPos': return accessor(new RoomSetStartPos())! as RoomSetStartPos;
     case 'RoomCloseRoom': return accessor(new RoomCloseRoom())! as RoomCloseRoom;
     case 'RoomSetAITeam': return accessor(new RoomSetAITeam())! as RoomSetAITeam;
+    case 'LogIngest': return accessor(new LogIngest())! as LogIngest;
+    case 'LogSubscribe': return accessor(new LogSubscribe())! as LogSubscribe;
+    case 'LogUnsubscribe': return accessor(new LogUnsubscribe())! as LogUnsubscribe;
+    case 'ConsoleCommand': return accessor(new ConsoleCommand())! as ConsoleCommand;
     default: return null;
   }
 }
 
 export function unionListToClientPayload(
   type: ClientPayload, 
-  accessor: (index: number, obj:AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate|null, 
+  accessor: (index: number, obj:AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate|null, 
   index: number
-): AIListRequest|Ack|AuthRequest|ChatSend|GameListRequest|Handshake|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate|null {
+): AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate|null {
   switch(ClientPayload[type]) {
     case 'NONE': return null; 
     case 'Handshake': return accessor(index, new Handshake())! as Handshake;
@@ -117,6 +129,10 @@ export function unionListToClientPayload(
     case 'RoomSetStartPos': return accessor(index, new RoomSetStartPos())! as RoomSetStartPos;
     case 'RoomCloseRoom': return accessor(index, new RoomCloseRoom())! as RoomCloseRoom;
     case 'RoomSetAITeam': return accessor(index, new RoomSetAITeam())! as RoomSetAITeam;
+    case 'LogIngest': return accessor(index, new LogIngest())! as LogIngest;
+    case 'LogSubscribe': return accessor(index, new LogSubscribe())! as LogSubscribe;
+    case 'LogUnsubscribe': return accessor(index, new LogUnsubscribe())! as LogUnsubscribe;
+    case 'ConsoleCommand': return accessor(index, new ConsoleCommand())! as ConsoleCommand;
     default: return null;
   }
 }

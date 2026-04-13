@@ -8,6 +8,9 @@
 // std::string copies.
 
 #include "ConfigReader.h"
+#include "System/SpringLog/SpringLog.h"
+
+#define LOG_SECTION "config"
 
 // The `lua` target's include directories (rts/lib/lua/include) are
 // already on spring-lobby's include path, so this picks up the
@@ -168,13 +171,13 @@ lua_State* NewState() {
     // The json.lua distribution returns the module via OBJDEF; that
     // table is left on the stack after pcall completes.
     if (luaL_loadstring(L, LuaJson::kJsonLuaSource) != LUA_OK) {
-        std::fprintf(stderr, "[config] json.lua load error: %s\n",
+        SLOG(SPRING_LOG_ERROR, "json.lua load error: %s",
             lua_tostring(L, -1));
         lua_close(L);
         return nullptr;
     }
     if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
-        std::fprintf(stderr, "[config] json.lua run error: %s\n",
+        SLOG(SPRING_LOG_ERROR, "json.lua run error: %s",
             lua_tostring(L, -1));
         lua_close(L);
         return nullptr;
@@ -191,21 +194,21 @@ lua_State* NewState() {
 /// hard failure because every field read afterwards would be junk.
 bool LoadLuaFile(lua_State* L, const fs::path& path) {
     if (luaL_loadfile(L, path.string().c_str()) != LUA_OK) {
-        std::fprintf(stderr, "[config] parse error in %s: %s\n",
+        SLOG(SPRING_LOG_ERROR, "parse error in %s: %s",
             path.string().c_str(), lua_tostring(L, -1));
         lua_pop(L, 1);
         return false;
     }
     if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
-        std::fprintf(stderr, "[config] exec error in %s: %s\n",
+        SLOG(SPRING_LOG_ERROR, "exec error in %s: %s",
             path.string().c_str(), lua_tostring(L, -1));
         lua_pop(L, 1);
         return false;
     }
     if (!lua_istable(L, -1)) {
-        std::fprintf(stderr,
-            "[config] %s: root value is not a table "
-            "(did the script forget `return { ... }`?)\n",
+        SLOG(SPRING_LOG_ERROR,
+            "%s: root value is not a table "
+            "(did the script forget `return { ... }`?)",
             path.string().c_str());
         lua_pop(L, 1);
         return false;
@@ -221,7 +224,7 @@ bool LoadLuaFile(lua_State* L, const fs::path& path) {
 bool LoadJsonFile(lua_State* L, const fs::path& path) {
     const std::string raw = ReadFileText(path);
     if (raw.empty()) {
-        std::fprintf(stderr, "[config] %s: empty or unreadable JSON\n",
+        SLOG(SPRING_LOG_ERROR, "%s: empty or unreadable JSON",
             path.string().c_str());
         return false;
     }
@@ -254,20 +257,20 @@ bool LoadJsonFile(lua_State* L, const fs::path& path) {
 
     const std::string srcName = "@" + path.string();
     if (luaL_loadbuffer(L, shim.data(), shim.size(), srcName.c_str()) != LUA_OK) {
-        std::fprintf(stderr, "[config] JSON wrap error in %s: %s\n",
+        SLOG(SPRING_LOG_ERROR, "JSON wrap error in %s: %s",
             path.string().c_str(), lua_tostring(L, -1));
         lua_pop(L, 1);
         return false;
     }
     if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
-        std::fprintf(stderr, "[config] JSON decode error in %s: %s\n",
+        SLOG(SPRING_LOG_ERROR, "JSON decode error in %s: %s",
             path.string().c_str(), lua_tostring(L, -1));
         lua_pop(L, 1);
         return false;
     }
     if (!lua_istable(L, -1)) {
-        std::fprintf(stderr,
-            "[config] %s: decoded JSON is not an object\n",
+        SLOG(SPRING_LOG_ERROR,
+            "%s: decoded JSON is not an object",
             path.string().c_str());
         lua_pop(L, 1);
         return false;

@@ -3,6 +3,9 @@
 #include "AIScriptContext.h"
 #include "AICommandQueue.h"
 #include "LuaInclude.h"
+#include "System/SpringLog/SpringLog.h"
+
+#define LOG_SECTION "ai"
 
 #include <cstdio>
 
@@ -47,20 +50,20 @@ bool AIScriptContext::Init(const std::string& code, const std::string& source) {
     // Load and execute the AI script
     int err = luaL_loadbuffer(L, code.c_str(), code.size(), source.c_str());
     if (err != LUA_OK) {
-        std::fprintf(stderr, "[AI:%s] load error: %s\n", name.c_str(), lua_tostring(L, -1));
+        SLOG_SCOPED(SPRING_LOG_ERROR, name.c_str(), "load error: %s", lua_tostring(L, -1));
         lua_pop(L, 1);
         return false;
     }
 
     err = lua_pcall(L, 0, 0, 0);
     if (err != LUA_OK) {
-        std::fprintf(stderr, "[AI:%s] init error: %s\n", name.c_str(), lua_tostring(L, -1));
+        SLOG_SCOPED(SPRING_LOG_ERROR, name.c_str(), "init error: %s", lua_tostring(L, -1));
         lua_pop(L, 1);
         return false;
     }
 
     running.store(true);
-    std::fprintf(stderr, "[AI:%s] initialised for team %d\n", name.c_str(), teamId);
+    SLOG_SCOPED(SPRING_LOG_INFO, name.c_str(), "initialised for team %d", teamId);
     return true;
 }
 
@@ -125,8 +128,8 @@ void AIScriptContext::ProcessSnapshot() {
     lua_pushinteger(L, currentSnapshot.frame);
     int err = lua_pcall(L, 1, 0, 0);
     if (err != LUA_OK) {
-        std::fprintf(stderr, "[AI:%s] onUpdate error: %s\n",
-            name.c_str(), lua_tostring(L, -1));
+        SLOG_SCOPED(SPRING_LOG_ERROR, name.c_str(), "onUpdate error: %s",
+            lua_tostring(L, -1));
         lua_pop(L, 1);
     }
 }

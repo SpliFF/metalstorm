@@ -7,72 +7,92 @@
 // logging API (Spring.Echo / Spring.Log / Spring.Error) to exist in
 // both the synced and unsynced Lua contexts.
 //
-// The implementation uses the shared `LuaUtils::Echo` — the same
-// one that `LuaParser` already binds — and adds `Log` and `Error`.
+// All three route through springlog_log so every sink (stderr, file,
+// network) sees the messages.
 
 #include "LuaUnsyncedCtrl.h"
 #include "LuaUtils.h"
+#include "System/SpringLog/SpringLog.h"
+
+#include <cstdio>
+#include <string>
 
 extern "C" {
 #include "lua.h"
 #include "lauxlib.h"
 }
 
+#define LOG_SECTION "lua"
+
 namespace {
 
 // Spring.Log(section, level, msg, …) — mirrors the Spring API surface
-// that gadgets actually invoke. We don't have a multi-sink log router
-// in the sim yet, so for now we just format everything as one stderr
-// line prefixed with the section and level. `level` can be a string
-// ("error" / "warning" / "info" / "debug") or an integer from the LOG
-// table the engine already binds (LOG.INFO = 30, LOG.WARNING = 40, …).
+// that gadgets actually invoke. Routes through springlog_log so all
+// sinks (stderr, file, network) see the message. `level` can be a
+// string ("error"/"warning"/"info"/"debug") or an integer from the
+// LOG table the engine already binds (LOG.INFO = 30, LOG.WARNING = 40, …).
 int Log(lua_State* L)
 {
     // Section defaults to "lua" so empty-string callers (e.g.
     // gadgets.lua's `local LOG_SECTION = ""` which has a FIXME note
-    // about never being registered) still produce a sensible prefix
-    // instead of `[lua::…]`.
+    // about never being registered) still produce a sensible prefix.
     const char* section = "lua";
     if (lua_type(L, 1) == LUA_TSTRING) {
         const char* s = lua_tostring(L, 1);
         if (s && s[0] != '\0') section = s;
     }
 
-    // Level first — distinguish number from string explicitly
-    // because lua_isstring returns true for numbers too in Lua 5.4
-    // (auto-coerce), which would otherwise turn LOG.INFO into the
-    // literal string "30.0".
-    const char* level = "info";
+    // Map Lua level to SpringLogLevel. Distinguish number from string
+    // explicitly because lua_isstring returns true for numbers too in
+    // Lua 5.4 (auto-coerce).
+    int logLevel = SPRING_LOG_INFO;
     const int levelType = lua_type(L, 2);
     if (levelType == LUA_TNUMBER) {
         const int lvl = static_cast<int>(lua_tonumber(L, 2));
-        if      (lvl >= 60) level = "fatal";
-        else if (lvl >= 50) level = "error";
-        else if (lvl >= 40) level = "warning";
-        else if (lvl >= 30) level = "notice";
-        else if (lvl >= 20) level = "info";
-        else                level = "debug";
+        if      (lvl >= 60) logLevel = SPRING_LOG_FATAL;
+        else if (lvl >= 50) logLevel = SPRING_LOG_ERROR;
+        else if (lvl >= 40) logLevel = SPRING_LOG_WARNING;
+        else if (lvl >= 30) logLevel = SPRING_LOG_NOTICE;
+        else if (lvl >= 20) logLevel = SPRING_LOG_INFO;
+        else                logLevel = SPRING_LOG_DEBUG;
     } else if (levelType == LUA_TSTRING) {
-        level = lua_tostring(L, 2);
-    }
-
-    std::fprintf(stderr, "[%s:%s] ", section, level);
-    const int nargs = lua_gettop(L);
-    for (int i = 3; i <= nargs; ++i) {
-        if (i > 3) std::fputc(' ', stderr);
-        if (lua_type(L, i) == LUA_TSTRING) {
-            std::fputs(lua_tostring(L, i), stderr);
-        } else if (lua_type(L, i) == LUA_TNUMBER) {
-            std::fprintf(stderr, "%g", lua_tonumber(L, i));
-        } else if (lua_isboolean(L, i)) {
-            std::fputs(lua_toboolean(L, i) ? "true" : "false", stderr);
-        } else if (lua_isnil(L, i)) {
-            std::fputs("nil", stderr);
-        } else {
-            std::fprintf(stderr, "<%s>", luaL_typename(L, i));
+        const char* s = lua_tostring(L, 2);
+        if (s) {
+            switch (s[0]) {
+                case 'f': case 'F': logLevel = SPRING_LOG_FATAL;   break;
+                case 'e': case 'E': logLevel = SPRING_LOG_ERROR;   break;
+                case 'w': case 'W': logLevel = SPRING_LOG_WARNING; break;
+                case 'n': case 'N': logLevel = SPRING_LOG_NOTICE;  break;
+                case 'i': case 'I': logLevel = SPRING_LOG_INFO;    break;
+                case 'd': case 'D': logLevel = SPRING_LOG_DEBUG;   break;
+            }
         }
     }
-    std::fputc('\n', stderr);
+
+    // Build the message string from all remaining arguments.
+    std::string msg;
+    const int nargs = lua_gettop(L);
+    for (int i = 3; i <= nargs; ++i) {
+        if (i > 3) msg += ' ';
+        if (lua_type(L, i) == LUA_TSTRING) {
+            msg += lua_tostring(L, i);
+        } else if (lua_type(L, i) == LUA_TNUMBER) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%g", lua_tonumber(L, i));
+            msg += buf;
+        } else if (lua_isboolean(L, i)) {
+            msg += lua_toboolean(L, i) ? "true" : "false";
+        } else if (lua_isnil(L, i)) {
+            msg += "nil";
+        } else {
+            msg += '<';
+            msg += luaL_typename(L, i);
+            msg += '>';
+        }
+    }
+
+    springlog_log(logLevel, section, "", springlog_get_frame(),
+                  "%s", msg.c_str());
     return 0;
 }
 
@@ -118,11 +138,9 @@ int ServerNoopStub(lua_State* L)
             SNPRINTF(buf, sizeof(buf), "%s:%d", ar.short_src, ar.currentline);
             where = buf;
         }
-        std::fprintf(stderr,
-            "[server stub] Spring.%s() called at %s\n"
-            "              %s\n"
-            "              (silently returning nil; further calls "
-            "will be suppressed)\n",
+        SLOG(SPRING_LOG_WARNING,
+            "Spring.%s() called at %s  %s  "
+            "(silently returning nil; further calls will be suppressed)",
             StubName, where.c_str(), Advice);
         lua_pushboolean(L, 1);
         lua_replace(L, lua_upvalueindex(1));
@@ -230,6 +248,29 @@ int NoopDiffTimers(lua_State* L)
     return 1;
 }
 
+// Spring.Echo(…) — route through springlog at NOTICE level. Uses
+// Lua's tostring() for each argument, comma-separated, matching
+// the LuaUtils::Echo formatting convention.
+int EchoSpringLog(lua_State* L)
+{
+    std::string msg;
+    const int nargs = lua_gettop(L);
+    lua_getglobal(L, "tostring");
+    for (int i = 1; i <= nargs; ++i) {
+        lua_pushvalue(L, -1);  // tostring function
+        lua_pushvalue(L, i);   // value
+        lua_pcall(L, 1, 1, 0);
+        const char* s = lua_tostring(L, -1);
+        if (i > 1) msg += ", ";
+        if (s) msg += s;
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1); // pop tostring
+    springlog_log(SPRING_LOG_NOTICE, LOG_SECTION, "", springlog_get_frame(),
+                  "%s", msg.c_str());
+    return 0;
+}
+
 /// Register a noop stub for a rendering/client API function.
 #define REGISTER_NOOP_STUB(funcName) \
     lua_pushstring(L, #funcName); \
@@ -242,7 +283,7 @@ bool LuaUnsyncedCtrl::PushEntries(lua_State* L)
 {
     if (!lua_istable(L, -1)) return false;
 
-    LuaPushNamedCFunc(L, "Echo",  LuaUtils::Echo);
+    LuaPushNamedCFunc(L, "Echo",  EchoSpringLog);
     LuaPushNamedCFunc(L, "Log",   Log);
     LuaPushNamedCFunc(L, "Error", Error);
 

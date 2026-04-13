@@ -1,6 +1,10 @@
 procs:
+  logserver:
+    shell: "./build/debug/spring-logserver --port 8010 --db data/debug.db"
+    stop: SIGINT
+
   lobby:
-    shell: "./build/debug/spring-lobby --port 8011 --game content/games/papertanks --maps content/maps --db data/spring-server.db"
+    shell: "./build/debug/spring-lobby --port 8011 --game content/games/papertanks --maps content/maps --games-dir content/games --db data/spring-server.db"
     stop: SIGINT
 
   client:

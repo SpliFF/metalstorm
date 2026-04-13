@@ -1,6 +1,10 @@
 // RoomManager — game room lifecycle management.
 
 #include "RoomManager.h"
+#include "System/SpringLog/SpringLog.h"
+
+#define LOG_SECTION "lobby"
+
 #include <algorithm>
 #include <cstdio>
 
@@ -32,7 +36,7 @@ uint32_t RoomManager::CreateRoom(
     host.isHost = true;
     room.players.push_back(host);
 
-    std::fprintf(stderr, "[room] created room %u '%s' (host=%s, map=%s)\n",
+    SLOG(SPRING_LOG_INFO, "created room %u '%s' (host=%s, map=%s)",
         id, name.c_str(), hostUsername.c_str(), mapName.c_str());
     return id;
 }
@@ -58,7 +62,7 @@ bool RoomManager::JoinRoom(
     auto* existing = room.FindPlayer(playerId);
     if (existing) {
         existing->clientId = clientId;
-        std::fprintf(stderr, "[room] player '%s' reconnected to room %u (updated clientId)\n",
+        SLOG(SPRING_LOG_INFO, "player '%s' reconnected to room %u (updated clientId)",
             username.c_str(), roomId);
         return true;
     }
@@ -75,12 +79,12 @@ bool RoomManager::JoinRoom(
             player.isSpectator = false;
             player.team = static_cast<uint8_t>(originalTeam);
             player.ready = true;
-            std::fprintf(stderr, "[room] player '%s' RECONNECTED to room %u team %d\n",
+            SLOG(SPRING_LOG_INFO, "player '%s' RECONNECTED to room %u team %d",
                 username.c_str(), roomId, originalTeam);
         } else {
             // New player joining active game = spectator
             player.isSpectator = true;
-            std::fprintf(stderr, "[room] player '%s' joined room %u as spectator (in progress)\n",
+            SLOG(SPRING_LOG_INFO, "player '%s' joined room %u as spectator (in progress)",
                 username.c_str(), roomId);
         }
     } else {
@@ -97,7 +101,7 @@ bool RoomManager::JoinRoom(
             }
             player.team = (team0 <= team1) ? 0 : 1;
         }
-        std::fprintf(stderr, "[room] player '%s' joined room %u%s\n",
+        SLOG(SPRING_LOG_INFO, "player '%s' joined room %u%s",
             username.c_str(), roomId, asSpectator ? " (spectator)" : "");
     }
 
@@ -123,10 +127,10 @@ void RoomManager::LeaveRoom(uint32_t roomId, uint32_t playerId) {
         if (!players.empty()) {
             players[0].isHost = true;
             room.hostPlayerId = players[0].playerId;
-            std::fprintf(stderr, "[room] host left room %u, promoted '%s'\n",
+            SLOG(SPRING_LOG_INFO, "host left room %u, promoted '%s'",
                 roomId, players[0].username.c_str());
         } else {
-            std::fprintf(stderr, "[room] room %u empty, removing\n", roomId);
+            SLOG(SPRING_LOG_INFO, "room %u empty, removing", roomId);
             rooms.erase(it);
         }
     }
@@ -193,7 +197,7 @@ bool RoomManager::AddAISlot(
     slot.team = team;
     room.aiSlots.push_back(std::move(slot));
 
-    std::fprintf(stderr, "[room] room %u: host added AI '%s' to team %u (slots=%zu)\n",
+    SLOG(SPRING_LOG_INFO, "room %u: host added AI '%s' to team %u (slots=%zu)",
         roomId, aiId.c_str(), static_cast<unsigned>(team), room.aiSlots.size());
     return true;
 }
@@ -211,7 +215,7 @@ bool RoomManager::RemoveAISlot(
 
     const std::string removedId = room.aiSlots[slotIndex].aiId;
     room.aiSlots.erase(room.aiSlots.begin() + slotIndex);
-    std::fprintf(stderr, "[room] room %u: host removed AI '%s' (slot %u)\n",
+    SLOG(SPRING_LOG_INFO, "room %u: host removed AI '%s' (slot %u)",
         roomId, removedId.c_str(), static_cast<unsigned>(slotIndex));
     return true;
 }
@@ -231,7 +235,7 @@ bool RoomManager::SetAITeam(
     if (slotIndex >= room.aiSlots.size()) return false;
 
     room.aiSlots[slotIndex].team = team;
-    std::fprintf(stderr, "[room] room %u: ai slot %u (%s) team -> %u\n",
+    SLOG(SPRING_LOG_INFO, "room %u: ai slot %u (%s) team -> %u",
         roomId, static_cast<unsigned>(slotIndex),
         room.aiSlots[slotIndex].aiId.c_str(),
         static_cast<unsigned>(team));
@@ -294,7 +298,7 @@ bool RoomManager::SetPlayerStartPos(
         return false;
 
     target->startPos = posIndex;
-    std::fprintf(stderr, "[room] room %u: player %u start pos -> %d\n",
+    SLOG(SPRING_LOG_DEBUG, "room %u: player %u start pos -> %d",
         roomId, actualTarget, static_cast<int>(posIndex));
     return true;
 }
@@ -324,7 +328,7 @@ bool RoomManager::SetAIStartPos(
         return false;
 
     room.aiSlots[slotIndex].startPos = posIndex;
-    std::fprintf(stderr, "[room] room %u: ai slot %u (%s) start pos -> %d\n",
+    SLOG(SPRING_LOG_DEBUG, "room %u: ai slot %u (%s) start pos -> %d",
         roomId, static_cast<unsigned>(slotIndex),
         room.aiSlots[slotIndex].aiId.c_str(),
         static_cast<int>(posIndex));
@@ -381,8 +385,8 @@ void RoomManager::AutoAssignStartPositions(
     }
 
     if (assigned > 0) {
-        std::fprintf(stderr,
-            "[room] room %u: auto-assigned %d start position(s)\n",
+        SLOG(SPRING_LOG_INFO,
+            "room %u: auto-assigned %d start position(s)",
             roomId, assigned);
     }
 }
@@ -393,7 +397,7 @@ bool RoomManager::CloseRoom(uint32_t roomId, uint32_t requesterId) {
     if (it == rooms.end()) return false;
     if (it->second.hostPlayerId != requesterId) return false;
 
-    std::fprintf(stderr, "[room] room %u: host closed (was '%s')\n",
+    SLOG(SPRING_LOG_INFO, "room %u: host closed (was '%s')",
         roomId, it->second.name.c_str());
     rooms.erase(it);
     return true;
@@ -425,7 +429,7 @@ bool RoomManager::StartGame(uint32_t roomId, uint32_t requesterId) {
     if (!room.AllReady()) return false;
 
     room.state = ERoomState::Loading;
-    std::fprintf(stderr, "[room] room %u transitioning to LOADING\n", roomId);
+    SLOG(SPRING_LOG_INFO, "room %u transitioning to LOADING", roomId);
     return true;
 }
 
@@ -460,7 +464,7 @@ void RoomManager::ResetRoomForNextGame(uint32_t roomId) {
     // A fresh one will be built on the next RoomStartGame.
     room.originalRoster.clear();
 
-    std::fprintf(stderr, "[room] room %u recycled for next game\n", roomId);
+    SLOG(SPRING_LOG_INFO, "room %u recycled for next game", roomId);
 }
 
 void RoomManager::SetRoomState(uint32_t roomId, ERoomState newState) {

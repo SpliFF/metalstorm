@@ -3,6 +3,10 @@
  */
 
 #include "Database.h"
+#include "System/SpringLog/SpringLog.h"
+
+#define LOG_SECTION "db"
+
 #include <sqlite3.h>
 #include <cstdio>
 
@@ -19,7 +23,7 @@ bool Database::Open(const std::string& path) {
 
     int rc = sqlite3_open(path.c_str(), &db);
     if (rc != SQLITE_OK) {
-        std::fprintf(stderr, "[db] ERROR: failed to open %s: %s\n",
+        SLOG(SPRING_LOG_ERROR, "failed to open %s: %s",
             path.c_str(), sqlite3_errmsg(db));
         sqlite3_close(db);
         db = nullptr;
@@ -30,7 +34,7 @@ bool Database::Open(const std::string& path) {
     sqlite3_exec(db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
 
     CreateTables();
-    std::fprintf(stderr, "[db] opened %s\n", path.c_str());
+    SLOG(SPRING_LOG_INFO, "opened %s", path.c_str());
     return true;
 }
 
@@ -63,7 +67,7 @@ void Database::CreateTables() {
     char* errMsg = nullptr;
     int rc = sqlite3_exec(db, sql, nullptr, nullptr, &errMsg);
     if (rc != SQLITE_OK) {
-        std::fprintf(stderr, "[db] ERROR creating tables: %s\n", errMsg);
+        SLOG(SPRING_LOG_ERROR, "error creating tables: %s", errMsg);
         sqlite3_free(errMsg);
     }
 }

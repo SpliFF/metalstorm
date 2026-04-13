@@ -189,6 +189,69 @@ table AIListRequest {}
 /// login so the "create game" dropdown can be populated.
 table GameListRequest {}
 
+// ============================================================
+// Logging + Debug messages (shared between client/server/tools)
+// ============================================================
+
+/// A single structured log entry. Used in LogIngest (inbound)
+/// and LogBatch (outbound streaming to subscribers).
+table LogEntryMsg {
+    id: uint64;
+    timestamp: uint64;
+    level: uint8;
+    section: string;
+    scope: string;
+    process: string;
+    message: string;
+    frame: uint32;
+}
+
+/// Any process → log server: batch of log entries for ingestion.
+table LogIngest {
+    entries: [LogEntryMsg];
+}
+
+/// Subscribe to log streaming from the log server.
+table LogSubscribe {
+    room_id: uint32;
+    min_level: uint8;
+    section_filter: string;
+    scope_filter: string;
+}
+
+/// Unsubscribe from log streaming.
+table LogUnsubscribe {}
+
+/// Log server → subscriber: streamed batch of log entries.
+table LogBatch {
+    room_id: uint32;
+    entries: [LogEntryMsg];
+    latest_id: uint64;
+}
+
+/// Execute a command in a specific scope (Lua context, lobby, server).
+table ConsoleCommand {
+    scope: string;          // "LuaRules", "LuaGaia", "LuaAI:basic_ai", "lobby", "server"
+    command: string;        // Lua code or built-in command
+    request_id: uint32;
+}
+
+/// Game server has finished boot and started ticking. Sent from
+/// game server to lobby over the admin WS connection. Triggers
+/// room state transition from Loading → Active.
+table GameStarted {
+    frame: uint32;
+}
+
+/// Response to a ConsoleCommand.
+table ConsoleResponse {
+    request_id: uint32;
+    scope: string;
+    success: bool;
+    output: string;
+    level: uint8;
+}
+
 // Union of all client→server message types
 union ClientPayload {
     Handshake,
@@ -214,6 +277,10 @@ union ClientPayload {
     RoomSetStartPos,
     RoomCloseRoom,
     RoomSetAITeam,
+    LogIngest,
+    LogSubscribe,
+    LogUnsubscribe,
+    ConsoleCommand,
 }
 
 table ClientMessage {
@@ -688,48 +755,13 @@ union ServerPayload {
     GameUnitDefs,
     PlayerLeft,
     GameWeaponDefs,
+    LogBatch,
+    ConsoleResponse,
+    GameStarted,
 }
 
 table ServerMessage {
     payload: ServerPayload;
-}
-
-// ============================================================
-// IPC messages (sim → lobby, over a private pipe)
-// ============================================================
-//
-// The lobby spawns each game server as a child process and keeps
-// a one-way pipe open for the duration of the game. The sim writes
-// length-prefixed IpcMessage frames to that pipe whenever something
-// lobby-relevant happens. The same FlatBuffers machinery used for
-// the client-facing protocol applies here — one schema, one
-// serialiser, one way to add new events — but this channel has a
-// deliberately separate root type (IpcMessage) because the sender
-// and message set are different from ClientMessage/ServerMessage.
-//
-// Wire format on the pipe:
-//     u32 length  (little-endian)
-//     <length> bytes of FlatBuffers data (root = IpcMessage)
-//
-// The length prefix lets the lobby read frames incrementally from
-// a non-blocking fd without peeking inside the FlatBuffers buffer.
-// Adding a new event means appending a table + a union entry here
-// and wiring a dispatch case on the lobby side.
-
-/// Sim has finished its boot sequence (LuaRules + gadgets loaded,
-/// GameStart event fired, starting units spawned) and is now
-/// running the simulation loop proper. Triggers the room state
-/// transition from Loading → Active.
-table GameStarted {
-    frame: uint32;   // sim frame number at the moment GameStart fired
-}
-
-union IpcPayload {
-    GameStarted,
-}
-
-table IpcMessage {
-    payload: IpcPayload;
 }
 
 // Root types — one for each direction

@@ -17,11 +17,17 @@
 #include "Server/StandingOrders.h"
 #include "Server/AI/AIRuntimePool.h"
 #include "Server/AI/AIDiscovery.h"
-#include "Server/LobbyIpc.h"
 #include "Server/PerfMetrics.h"
 #include "Server/RoomManager.h"
 #include "Server/MapProcessor.h"
+#include "System/SpringLog/SpringLog.h"
+#include "System/SpringLog/SpringLogNet.h"
+#include "System/SpringLog/SpringLogSqlite.h"
+#include "System/SpringLogBridge.h"
 #include <sqlite3.h>
+
+#define LOG_SECTION "server"
+
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/UnitDefHandler.h"
 #include "Sim/Weapons/WeaponDefHandler.h"
@@ -68,17 +74,10 @@ static std::string generateToken(int length = 32) {
 
 int main(int argc, char* argv[])
 {
-    // spring-lobby spawns us with stdout/stderr redirected to
-    // `data/logs/game-<roomId>.log` via dup2(). With the redirect in
-    // place, libc's auto-detection flips stderr to fully-buffered mode
-    // (isatty(fd 2) == false), which means fprintf(stderr, …) calls
-    // queue inside stdio's internal buffer until the process exits —
-    // so the `game-logs` mprocs panel never shows live progress or
-    // diagnostics. Force line-buffering on both streams up front so
-    // every printf/fprintf flushes at the end of its line, regardless
-    // of where the stream happens to be pointed.
-    std::setvbuf(stdout, nullptr, _IOLBF, 4096);
-    std::setvbuf(stderr, nullptr, _IOLBF, 4096);
+    // Initialise unified logging as early as possible so every
+    // subsequent log call goes through springlog.
+    springlog_init("spring-server", SPRING_LOG_OUTPUT_CONSOLE);
+    SpringLogBridge::Install();
 
     // Populate SpringMath's heading→vector lookup table before any
     // sim code runs. Upstream Spring called this from SpringApp.cpp
@@ -93,12 +92,8 @@ int main(int argc, char* argv[])
 
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
-    // Ignore SIGPIPE so a dead sim→lobby event pipe (e.g. lobby
-    // restarted while the game is running) only surfaces as an
-    // EPIPE return from write() — which LobbyIpc::WriteFrame
-    // handles by disabling the channel. Without this the default
-    // SIGPIPE action would terminate the sim the first time it
-    // tried to report an event to a vanished parent.
+    // Ignore SIGPIPE so writes to closed sockets / pipes surface
+    // as EPIPE errors instead of terminating the process.
     std::signal(SIGPIPE, SIG_IGN);
 
     int port = 9001;
@@ -150,16 +145,17 @@ int main(int argc, char* argv[])
         return out;
     };
 
-    // Sim → lobby event pipe file descriptor. The lobby passes
-    // this via `--event-fd <n>` when spawning us so the sim can
-    // post FlatBuffers IpcMessage frames (currently just
-    // GameStarted) back over the pipe. A value of -1 means no
-    // lobby is listening — the sim runs fine without an event
-    // channel, it just can't tell anyone it transitioned.
-    int eventFd = -1;
+    // --- Logging CLI flags ---
+    std::string logFile;
+    std::string logLevel;
+    std::string logServer;
+    std::string logSqlite;
+    bool debugMode = false;
 
     // Simple arg parsing: --port N, --game PATH, --map PATH, --db PATH,
-    // --event-fd N, --player username:team:pos (repeatable),
+    // --log-file PATH, --log-level LEVEL, --log-server URL,
+    // --log-sqlite PATH, --debug,
+    // --player username:team:pos (repeatable),
     // --ai id:team:pos (repeatable)
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -171,15 +167,23 @@ int main(int argc, char* argv[])
             mapPath = argv[++i];
         } else if (arg == "--db" && i + 1 < argc) {
             dbPath = argv[++i];
-        } else if (arg == "--event-fd" && i + 1 < argc) {
-            eventFd = std::atoi(argv[++i]);
+        } else if (arg == "--log-file" && i + 1 < argc) {
+            logFile = argv[++i];
+        } else if (arg == "--log-level" && i + 1 < argc) {
+            logLevel = argv[++i];
+        } else if (arg == "--log-server" && i + 1 < argc) {
+            logServer = argv[++i];
+        } else if (arg == "--log-sqlite" && i + 1 < argc) {
+            logSqlite = argv[++i];
+        } else if (arg == "--debug") {
+            debugMode = true;
         } else if (arg == "--player" && i + 1 < argc) {
             const std::string spec = argv[++i];
             const auto parts = splitSpec(spec);
             if (parts[0].empty()) {
-                std::fprintf(stderr,
-                    "[spring-server] ignoring malformed --player '%s' "
-                    "(expected username:team:pos)\n", spec.c_str());
+                SLOG(SPRING_LOG_WARNING,
+                    "ignoring malformed --player '%s' (expected username:team:pos)",
+                    spec.c_str());
                 continue;
             }
             RequestedPlayer rq;
@@ -195,9 +199,9 @@ int main(int argc, char* argv[])
             const std::string spec = argv[++i];
             const auto parts = splitSpec(spec);
             if (parts[0].empty()) {
-                std::fprintf(stderr,
-                    "[spring-server] ignoring malformed --ai '%s' "
-                    "(expected id:team[:pos])\n", spec.c_str());
+                SLOG(SPRING_LOG_WARNING,
+                    "ignoring malformed --ai '%s' (expected id:team[:pos])",
+                    spec.c_str());
                 continue;
             }
             RequestedAI rq;
@@ -221,12 +225,32 @@ int main(int argc, char* argv[])
             gameId = fs::path(gamePath).parent_path().filename().string();
     }
 
-    std::fprintf(stderr, "[spring-server] starting...\n");
+    // --- Apply logging CLI flags ---
+    if (debugMode)
+        springlog_set_min_level(SPRING_LOG_DEBUG);
+    if (!logLevel.empty()) {
+        // Accept level names or numeric values
+        int lvl = -1;
+        if (logLevel == "debug")   lvl = SPRING_LOG_DEBUG;
+        else if (logLevel == "info")    lvl = SPRING_LOG_INFO;
+        else if (logLevel == "notice")  lvl = SPRING_LOG_NOTICE;
+        else if (logLevel == "warning") lvl = SPRING_LOG_WARNING;
+        else if (logLevel == "error")   lvl = SPRING_LOG_ERROR;
+        else if (logLevel == "fatal")   lvl = SPRING_LOG_FATAL;
+        else lvl = std::atoi(logLevel.c_str());
+        if (lvl >= 0)
+            springlog_set_min_level(lvl);
+    }
+    if (!logFile.empty()) {
+        springlog_set_file(logFile.c_str());
+        springlog_set_outputs(SPRING_LOG_OUTPUT_CONSOLE | SPRING_LOG_OUTPUT_FILE);
+    }
+    if (!logSqlite.empty())
+        springlog_sqlite_init(logSqlite.c_str());
+    if (!logServer.empty())
+        springlog_net_init(logServer.c_str(), "");
 
-    // Install the event-pipe fd so the sim can post GameStarted
-    // (and future events) back to the lobby. If the fd is -1 the
-    // helper stays disabled and every Send*() call is a no-op.
-    LobbyIpc::Init(eventFd);
+    SLOG(SPRING_LOG_NOTICE, "starting...");
 
     // Initialise Spring's time system
     spring_clock::PushTickRate(true);
@@ -236,7 +260,7 @@ int main(int argc, char* argv[])
     // Game content is searched first, then map, then cwd
     if (!gamePath.empty()) {
         CFileHandler::AddContentRoot(gamePath);
-        std::fprintf(stderr, "[spring-server] game content: %s\n", gamePath.c_str());
+        SLOG(SPRING_LOG_NOTICE, "game content: %s", gamePath.c_str());
 
         // Also expose the preprocessed game models dir as a content
         // root, so SolidObjectDef::LoadModel can find each unit's
@@ -251,14 +275,13 @@ int main(int argc, char* argv[])
         const std::string processedModels = "data/games/" + gameId + "/models";
         if (fs::is_directory(processedModels)) {
             CFileHandler::AddContentRoot(processedModels);
-            std::fprintf(stderr,
-                "[spring-server] processed game models: %s\n",
+            SLOG(SPRING_LOG_NOTICE, "processed game models: %s",
                 processedModels.c_str());
         }
     }
     if (!mapPath.empty()) {
         CFileHandler::AddContentRoot(mapPath);
-        std::fprintf(stderr, "[spring-server] map content: %s\n", mapPath.c_str());
+        SLOG(SPRING_LOG_NOTICE, "map content: %s", mapPath.c_str());
 
         // Also expose the preprocessed data dir for this map as a
         // content root, so SolidObjectDef::LoadModel can find the
@@ -272,8 +295,7 @@ int main(int argc, char* argv[])
         const std::string processedFeatures = "data/maps/" + mapId + "/features";
         if (fs::is_directory(processedFeatures)) {
             CFileHandler::AddContentRoot(processedFeatures);
-            std::fprintf(stderr,
-                "[spring-server] processed map features: %s\n",
+            SLOG(SPRING_LOG_NOTICE, "processed map features: %s",
                 processedFeatures.c_str());
         }
     }
@@ -285,7 +307,8 @@ int main(int argc, char* argv[])
     // --- Database ---
     Database db;
     if (!db.Open(dbPath)) {
-        std::fprintf(stderr, "[spring-server] ERROR: failed to open database\n");
+        SLOG(SPRING_LOG_ERROR, "failed to open database");
+        springlog_shutdown();
         return 1;
     }
 
@@ -306,11 +329,11 @@ int main(int argc, char* argv[])
                 MapProcessor proc;
                 mapMeta = proc.GetMap(mapDb, mapId);
                 if (mapMeta.id.empty()) {
-                    std::fprintf(stderr, "[spring-server] WARNING: map '%s' not in SQLite. "
-                        "Run spring-lobby first to process maps.\n", mapId.c_str());
+                    SLOG(SPRING_LOG_WARNING, "map '%s' not in SQLite. "
+                        "Run spring-lobby first to process maps.", mapId.c_str());
                 } else {
-                    std::fprintf(stderr, "[spring-server] loaded map '%s' (%s): %dx%d, "
-                        "%zu features, %zu start positions\n",
+                    SLOG(SPRING_LOG_NOTICE, "loaded map '%s' (%s): %dx%d, "
+                        "%zu features, %zu start positions",
                         mapMeta.id.c_str(), mapMeta.name.c_str(),
                         mapMeta.mapx, mapMeta.mapy,
                         mapMeta.features.size(), mapMeta.startPositions.size());
@@ -481,7 +504,8 @@ int main(int argc, char* argv[])
     }
 
     if (!net.Start(port)) {
-        std::fprintf(stderr, "[spring-server] ERROR: failed to start network server\n");
+        SLOG(SPRING_LOG_ERROR, "failed to start network server");
+        springlog_shutdown();
         return 1;
     }
 
@@ -497,7 +521,7 @@ int main(int argc, char* argv[])
             }
         }
         if (smfPath.empty())
-            std::fprintf(stderr, "[spring-server] WARNING: no .smf file found in %s\n", mapPath.c_str());
+            SLOG(SPRING_LOG_WARNING, "no .smf file found in %s", mapPath.c_str());
     }
 
     CSimulation sim;
@@ -554,14 +578,14 @@ int main(int argc, char* argv[])
             return;
         if (connectedRosterPlayers.size() < rosterPlayersNeeded)
             return;
-        std::fprintf(stderr, "[spring-server] all %zu roster players connected, firing GameStart\n",
+        SLOG(SPRING_LOG_NOTICE, "all %zu roster players connected, firing GameStart",
             rosterPlayersNeeded);
         sim.FireGameStart();
     };
 
     // Dev-mode: no roster means no players to wait for
     if (rosterPlayersNeeded == 0) {
-        std::fprintf(stderr, "[spring-server] no player roster (dev mode), firing GameStart immediately\n");
+        SLOG(SPRING_LOG_NOTICE, "no player roster (dev mode), firing GameStart immediately");
         sim.FireGameStart();
     }
 
@@ -589,16 +613,16 @@ int main(int argc, char* argv[])
                 if (ai.id == rq.id) { match = &ai; break; }
             }
             if (!match) {
-                std::fprintf(stderr,
-                    "[spring-server] --ai %s:%d: no matching plugin found, skipping\n",
+                SLOG(SPRING_LOG_WARNING,
+                    "--ai %s:%d: no matching plugin found, skipping",
                     rq.id.c_str(), rq.team);
                 continue;
             }
 
             std::ifstream mainFile(match->entryPath);
             if (!mainFile.is_open()) {
-                std::fprintf(stderr,
-                    "[spring-server] --ai %s:%d: failed to open entry '%s'\n",
+                SLOG(SPRING_LOG_ERROR,
+                    "--ai %s:%d: failed to open entry '%s'",
                     rq.id.c_str(), rq.team, match->entryPath.c_str());
                 continue;
             }
@@ -609,17 +633,17 @@ int main(int argc, char* argv[])
             // alliance concept — teams are their own ally for now.
             const int allyTeam = rq.team;
             if (aiPool.AddAI(match->id, rq.team, allyTeam, code)) {
-                std::fprintf(stderr,
-                    "[spring-server] loaded AI '%s' (%s) on team %d\n",
+                SLOG(SPRING_LOG_NOTICE,
+                    "loaded AI '%s' (%s) on team %d",
                     match->displayName.c_str(), match->id.c_str(), rq.team);
             } else {
-                std::fprintf(stderr,
-                    "[spring-server] failed to init AI '%s' on team %d\n",
+                SLOG(SPRING_LOG_ERROR,
+                    "failed to init AI '%s' on team %d",
                     match->id.c_str(), rq.team);
             }
         }
     } else {
-        std::fprintf(stderr, "[spring-server] no AI slots configured; human-only game\n");
+        SLOG(SPRING_LOG_NOTICE, "no AI slots configured; human-only game");
     }
 
     // --- Fixed-timestep loop at GAME_SPEED Hz (30 Hz) ---
@@ -627,10 +651,10 @@ int main(int argc, char* argv[])
     auto nextTick = std::chrono::steady_clock::now();
 
     if (sim.IsWaitingForPlayers()) {
-        std::fprintf(stderr, "[spring-server] waiting for %zu player(s) to connect before starting game...\n",
+        SLOG(SPRING_LOG_NOTICE, "waiting for %zu player(s) to connect before starting game...",
             rosterPlayersNeeded);
     }
-    std::fprintf(stderr, "[spring-server] entering sim loop at %d Hz (port %d)\n", GAME_SPEED, port);
+    SLOG(SPRING_LOG_NOTICE, "entering sim loop at %d Hz (port %d)", GAME_SPEED, port);
 
     while (keepRunning.load()) {
         // Wait for next tick
@@ -649,7 +673,7 @@ int main(int argc, char* argv[])
                 skipped++;
             }
             if (skipped > 0) {
-                std::fprintf(stderr, "[spring-server] WARNING: sim fell behind, skipped %d ticks\n", skipped);
+                SLOG(SPRING_LOG_WARNING, "sim fell behind, skipped %d ticks", skipped);
             }
         }
 
@@ -677,7 +701,7 @@ int main(int argc, char* argv[])
                 }
                 case SpringWeb::ClientPayload_Handshake: {
                     auto* hs = clientMsg->payload_as_Handshake();
-                    std::fprintf(stderr, "[spring-server] handshake from client %u: v%d %s\n",
+                    SLOG(SPRING_LOG_INFO, "handshake from client %u: v%d %s",
                         msg.clientId,
                         hs->protocol_version(),
                         hs->client_version() ? hs->client_version()->c_str() : "unknown");
@@ -750,8 +774,8 @@ int main(int argc, char* argv[])
                                 playerHandler.AddPlayer(p);
                                 clientPlayerNum[msg.clientId] = pNum;
                             }
-                            std::fprintf(stderr,
-                                "[auth] client %u reconnected as '%s' (id=%lld) team=%d\n",
+                            SLOG(SPRING_LOG_NOTICE,
+                                "client %u reconnected as '%s' (id=%lld) team=%d",
                                 msg.clientId, reconnectUser->username.c_str(),
                                 userId, team);
                             // Track roster connection for GameStart
@@ -825,8 +849,8 @@ int main(int argc, char* argv[])
                             SpringWeb::AuthStatus_InvalidCredentials,
                             "", 0, "Not in this room's roster");
                         net.Send(msg.clientId, resp.data(), resp.size());
-                        std::fprintf(stderr,
-                            "[auth] client %u rejected: '%s' not in roster\n",
+                        SLOG(SPRING_LOG_WARNING,
+                            "client %u rejected: '%s' not in roster",
                             msg.clientId, user->username.c_str());
                         break;
                     }
@@ -855,7 +879,7 @@ int main(int argc, char* argv[])
                         playerHandler.AddPlayer(p);
                         clientPlayerNum[msg.clientId] = pNum;
                     }
-                    std::fprintf(stderr, "[auth] client %u authenticated as '%s' (id=%lld) team=%d\n",
+                    SLOG(SPRING_LOG_NOTICE, "client %u authenticated as '%s' (id=%lld) team=%d",
                         msg.clientId, username, user->id, team);
 
                     // Track roster connection for GameStart
@@ -943,8 +967,8 @@ int main(int argc, char* argv[])
                             }
                         }
 
-                        std::fprintf(stderr,
-                            "[cmd] client %u (%s, team=%d): cmd=%d seq=%u routed=%d rejected=%d/%d\n",
+                        SLOG(SPRING_LOG_DEBUG,
+                            "cmd: client %u (%s, team=%d): cmd=%d seq=%u routed=%d rejected=%d/%d",
                             msg.clientId, session->username.c_str(), session->team,
                             cmd->command_id(), cmd->sequence(),
                             routed, rejectedTeam,
@@ -1092,8 +1116,8 @@ int main(int argc, char* argv[])
                 auto* session = sessions.GetSession(dcId);
                 if (!session) continue;
 
-                std::fprintf(stderr,
-                    "[player] '%s' (client %u, team %d) disconnected\n",
+                SLOG(SPRING_LOG_NOTICE,
+                    "player '%s' (client %u, team %d) disconnected",
                     session->username.c_str(), dcId, session->team);
 
                 // Broadcast PlayerLeft to remaining clients
@@ -1120,8 +1144,10 @@ int main(int argc, char* argv[])
         }
 
         // Only tick the sim after GameStart has fired (all players in)
-        if (sim.HasGameStarted())
+        if (sim.HasGameStarted()) {
             sim.SimFrame();
+            springlog_set_frame(sim.GetFrameNum());
+        }
 
         // Check win condition every ~1s (30 ticks) after frame 30
         static int winningTeam = -1;
@@ -1140,7 +1166,7 @@ int main(int argc, char* argv[])
             else if (alive[1] == 0 && alive[0] > 0) winningTeam = 0;
 
             if (winningTeam >= 0) {
-                std::fprintf(stderr, "[spring-server] GAME OVER: team %d wins (frame %d)\n",
+                SLOG(SPRING_LOG_NOTICE, "GAME OVER: team %d wins (frame %d)",
                     winningTeam, frame);
                 // Broadcast GameInfo with paused=true to signal game over
                 auto gameOver = Protocol::BuildGameInfo("", "", 0.0f,
@@ -1326,16 +1352,23 @@ int main(int argc, char* argv[])
         // Periodic status
         int frame = sim.GetFrameNum();
         if (frame > 0 && (frame % (GAME_SPEED * 10)) == 0) {
-            std::fprintf(stderr, "[spring-server] frame %d (%.1fs) clients=%d\n",
+            SLOG(SPRING_LOG_INFO, "frame %d (%.1fs) clients=%d",
                 frame, frame / (float)GAME_SPEED, net.GetClientCount());
         }
     }
 
-    std::fprintf(stderr, "[spring-server] shutting down (frame %d)...\n", sim.GetFrameNum());
+    SLOG(SPRING_LOG_NOTICE, "shutting down (frame %d)...", sim.GetFrameNum());
     net.Stop();
     sim.Kill();
     db.Close();
-    std::fprintf(stderr, "[spring-server] exited cleanly\n");
+    SLOG(SPRING_LOG_NOTICE, "exited cleanly");
+
+    // Tear down optional sinks before the core logger
+    if (!logServer.empty())
+        springlog_net_shutdown();
+    if (!logSqlite.empty())
+        springlog_sqlite_shutdown();
+    springlog_shutdown();
 
     return 0;
 }

@@ -99,6 +99,10 @@ configure_file(
     @ONLY
 )
 
+# === SpringLog (unified logging library) ===
+find_package(SQLite3 REQUIRED)
+add_subdirectory(rts/System/SpringLog)
+
 # === Lua 5.4.7 (standard upstream, compiled as C++) ===
 file(GLOB LUA_SOURCES rts/lib/lua/src/*.cpp)
 add_library(lua STATIC ${LUA_SOURCES})
@@ -115,8 +119,9 @@ file(GLOB_RECURSE SYSTEM_SOURCES
     rts/System/*.cpp
     rts/System/*.c
 )
-# Exclude bundled libraries (they have their own targets)
+# Exclude bundled libraries and SpringLog (they have their own targets)
 list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "rts/lib/")
+list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "rts/System/SpringLog/")
 
 # Platform filtering — only compile for the current OS
 if(NOT WIN32)
@@ -171,8 +176,7 @@ target_include_directories(spring-server PRIVATE
     ${GENERATED_DIR}
 )
 find_package(ZLIB REQUIRED)
-find_package(SQLite3 REQUIRED)
-target_link_libraries(spring-server PRIVATE lua uws flatbuffers ZLIB::ZLIB SQLite::SQLite3)
+target_link_libraries(spring-server PRIVATE lua uws flatbuffers ZLIB::ZLIB SQLite::SQLite3 springlog springlog-net springlog-sqlite)
 
 # Link platform libraries
 if(UNIX AND NOT APPLE)
@@ -233,7 +237,7 @@ target_include_directories(spring-lobby PRIVATE
     ${CMAKE_SOURCE_DIR}/rts/lib/lua/src
     ${GENERATED_DIR}
 )
-target_link_libraries(spring-lobby PRIVATE lua uws flatbuffers ZLIB::ZLIB SQLite::SQLite3)
+target_link_libraries(spring-lobby PRIVATE lua uws flatbuffers ZLIB::ZLIB SQLite::SQLite3 springlog springlog-net)
 if(UNIX)
     target_link_libraries(spring-lobby PRIVATE pthread dl)
 endif()
@@ -272,7 +276,7 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/lib/lua/src
         ${GENERATED_DIR}
     )
-    target_link_libraries(spring-tests PRIVATE lua ZLIB::ZLIB doctest::doctest)
+    target_link_libraries(spring-tests PRIVATE lua ZLIB::ZLIB doctest::doctest springlog)
     if(UNIX AND NOT APPLE)
         target_link_libraries(spring-tests PRIVATE pthread dl)
     elseif(APPLE)
@@ -303,6 +307,20 @@ add_subdirectory(tools/modelimporter)
 # legacy AI layouts to the `ai/<name>/main.lua + ai.config.lua`
 # convention. See tools/gameconverter/README.md for details.
 add_subdirectory(tools/gameconverter)
+
+# === spring-logserver (dedicated log collection + streaming server) ===
+add_executable(spring-logserver
+    rts/logserver_main.cpp
+)
+add_dependencies(spring-logserver generate_flatbuffers)
+target_include_directories(spring-logserver PRIVATE
+    ${CMAKE_SOURCE_DIR}/rts
+    ${GENERATED_DIR}
+)
+target_link_libraries(spring-logserver PRIVATE springlog springlog-sqlite uws flatbuffers SQLite::SQLite3 ZLIB::ZLIB)
+if(UNIX)
+    target_link_libraries(spring-logserver PRIVATE pthread dl)
+endif()
 
 # === compile_commands.json symlink for clangd ===
 if(CMAKE_EXPORT_COMPILE_COMMANDS)

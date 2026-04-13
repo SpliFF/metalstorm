@@ -1,0 +1,24 @@
+<div id="debug-console" class="debug-console hidden">
+    <div class="debug-console-header">
+        <span class="debug-console-title">Debug Console</span>
+        <div class="debug-console-filters">
+            <select id="debug-level-filter" title="Min log level">
+                <option value="0">DEBUG</option>
+                <option value="1">INFO</option>
+                <option value="2" selected>NOTICE</option>
+                <option value="3">WARN</option>
+                <option value="4">ERROR</option>
+                <option value="5">FATAL</option>
+            </select>
+            <input id="debug-section-filter" type="text" placeholder="section" title="Filter by section" />
+            <input id="debug-scope-filter" type="text" placeholder="scope" title="Filter by scope" />
+            <input id="debug-search-filter" type="text" placeholder="search..." title="Search messages" />
+        </div>
+        <div class="debug-console-controls">
+            <span id="debug-status" class="debug-status disconnected" title="Log server connection">&#x25cf;</span>
+            <button id="debug-clear-btn" title="Clear">Clear</button>
+            <button id="debug-close-btn" title="Close">&times;</button>
+        </div>
+    </div>
+    <div id="debug-console-output" class="debug-console-output"></div>
+</div>

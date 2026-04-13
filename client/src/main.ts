@@ -21,6 +21,7 @@ import { renderMapFeatures } from './core/feature-renderer.js';
 import { RTSCamera } from './core/rts-camera.js';
 import { LuaWidgetHost } from './core/lua-widget-host.js';
 import { injectStyle, renderTemplate } from './ui/ui.js';
+import { debugConsole } from './core/debug-console.js';
 import {
     getDefaultLobbyTemplates,
     loadGameLobbyTemplates,
@@ -582,6 +583,7 @@ function resolveInitialGameId(): string | null {
 
 document.addEventListener('DOMContentLoaded', () => {
     createHUD();
+    debugConsole.init();
 
     // Hide canvas until game starts
     const canvas = document.getElementById('game-canvas') as HTMLCanvasElement;

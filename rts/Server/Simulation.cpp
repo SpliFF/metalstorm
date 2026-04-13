@@ -39,7 +39,11 @@
 #include "Map/MapDamage.h"
 #include "Map/MapInfo.h"
 #include "Map/MapParser.h"
-#include "Server/LobbyIpc.h"
+// LobbyIpc removed — GameStarted is now sent over WebSocket (Tier 2)
+#include "System/SpringLog/SpringLog.h"
+
+#define LOG_SECTION "sim"
+
 #include "Map/ReadMap.h"
 #include "Map/MetalMap.h"
 #include "Sim/Misc/ModInfo.h"
@@ -74,7 +78,7 @@ CSimulation::~CSimulation() noexcept = default;
 
 bool CSimulation::LoadDefs()
 {
-    std::fprintf(stderr, "[sim] loading game definitions from gamedata/defs.lua...\n");
+    SLOG(SPRING_LOG_INFO, "loading game definitions from gamedata/defs.lua...");
 
     defsParser = std::make_unique<LuaParser>(
         "gamedata/defs.lua",
@@ -94,20 +98,20 @@ bool CSimulation::LoadDefs()
     defsParser->EndTable();
 
     if (!defsParser->Execute()) {
-        std::fprintf(stderr, "[sim] ERROR: defs parser failed: %s\n",
+        SLOG(SPRING_LOG_ERROR, "defs parser failed: %s",
             defsParser->GetErrorLog().c_str());
         return false;
     }
 
     // Log any non-fatal errors from the parser
     if (!defsParser->GetErrorLog().empty()) {
-        std::fprintf(stderr, "[sim] defs parser log: %s\n",
+        SLOG(SPRING_LOG_NOTICE, "defs parser log: %s",
             defsParser->GetErrorLog().c_str());
     }
 
     const LuaTable root = defsParser->GetRoot();
     if (!root.IsValid()) {
-        std::fprintf(stderr, "[sim] ERROR: defs parser returned no root table\n");
+        SLOG(SPRING_LOG_ERROR, "defs parser returned no root table");
         return false;
     }
 
@@ -115,12 +119,12 @@ bool CSimulation::LoadDefs()
     const char* requiredTables[] = {"UnitDefs", "FeatureDefs", "WeaponDefs", "ArmorDefs", "MoveDefs"};
     for (const char* name : requiredTables) {
         if (!root.SubTable(name).IsValid()) {
-            std::fprintf(stderr, "[sim] ERROR: missing required table '%s'\n", name);
+            SLOG(SPRING_LOG_ERROR, "missing required table '%s'", name);
             return false;
         }
     }
 
-    std::fprintf(stderr, "[sim] game definitions loaded successfully\n");
+    SLOG(SPRING_LOG_INFO, "game definitions loaded successfully");
     return true;
 }
 
@@ -144,18 +148,18 @@ bool CSimulation::LoadMap(const std::string& mapName)
     }
 
     if (smfPath.empty()) {
-        std::fprintf(stderr, "[sim] ERROR: no .smf file found for map '%s'\n", mapName.c_str());
+        SLOG(SPRING_LOG_ERROR, "no .smf file found for map '%s'", mapName.c_str());
         return false;
     }
 
-    std::fprintf(stderr, "[sim] loading map: %s\n", smfPath.c_str());
+    SLOG(SPRING_LOG_INFO, "loading map: %s", smfPath.c_str());
 
     // Create CMapInfo from the map's mapinfo.lua
     // MapParser looks for mapinfo.lua in content roots (the map directory)
     try {
         mapInfo = new CMapInfo(smfPath, FileSystem::GetBasename(smfPath));
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "[sim] ERROR: failed to load map info: %s\n", e.what());
+        SLOG(SPRING_LOG_ERROR, "failed to load map info: %s", e.what());
         return false;
     }
 
@@ -163,16 +167,16 @@ bool CSimulation::LoadMap(const std::string& mapName)
     try {
         readMap = CReadMap::LoadMap(smfPath);
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "[sim] ERROR: failed to load SMF: %s\n", e.what());
+        SLOG(SPRING_LOG_ERROR, "failed to load SMF: %s", e.what());
         return false;
     }
 
     if (readMap == nullptr) {
-        std::fprintf(stderr, "[sim] ERROR: CReadMap::LoadMap returned null\n");
+        SLOG(SPRING_LOG_ERROR, "CReadMap::LoadMap returned null");
         return false;
     }
 
-    std::fprintf(stderr, "[sim] map loaded: %dx%d (%dx%d elmos)\n",
+    SLOG(SPRING_LOG_INFO, "map loaded: %dx%d (%dx%d elmos)",
         mapDims.mapx, mapDims.mapy,
         mapDims.mapx * SQUARE_SIZE, mapDims.mapy * SQUARE_SIZE);
     return true;
@@ -181,7 +185,7 @@ bool CSimulation::LoadMap(const std::string& mapName)
 
 void CSimulation::InitSubsystems(bool hasMap)
 {
-    std::fprintf(stderr, "[sim] initialising subsystems...\n");
+    SLOG(SPRING_LOG_INFO, "initialising subsystems...");
 
     // Provide a default mapInfo if no map is loaded
     if (mapInfo == nullptr)
@@ -202,7 +206,7 @@ void CSimulation::InitSubsystems(bool hasMap)
 
     weaponDefHandler->Init(defsParser.get());
     unitDefHandler->Init(defsParser.get());
-    std::fprintf(stderr, "[sim] loaded %u unit defs, %u weapon defs\n",
+    SLOG(SPRING_LOG_INFO, "loaded %u unit defs, %u weapon defs",
         unitDefHandler->NumUnitDefs(), weaponDefHandler->NumWeaponDefs());
     featureDefHandler->Init(defsParser.get());
 
@@ -243,12 +247,12 @@ void CSimulation::InitSubsystems(bool hasMap)
         // Finalize pathfinder (pre-computes caches)
         pathManager->Finalize();
 
-        std::fprintf(stderr, "[sim] map-dependent subsystems initialised\n");
+        SLOG(SPRING_LOG_INFO, "map-dependent subsystems initialised");
     } else {
-        std::fprintf(stderr, "[sim] map-dependent subsystems skipped (no map)\n");
+        SLOG(SPRING_LOG_INFO, "map-dependent subsystems skipped (no map)");
     }
 
-    std::fprintf(stderr, "[sim] subsystems initialised\n");
+    SLOG(SPRING_LOG_INFO, "subsystems initialised");
 }
 
 
@@ -257,15 +261,12 @@ void CSimulation::FireGameStart()
     if (!scriptingLoaded || gameStarted)
         return;
 
-    std::fprintf(stderr, "[sim] firing GameStart\n");
+    springlog_log(SPRING_LOG_NOTICE, "sim", "", springlog_get_frame(),
+                  "firing GameStart");
     eventHandler.GameStart();
     gameStarted = true;
 
-    // Tell the lobby we've made it past the boot sequence so
-    // it can transition the room from Loading to Active. No-op
-    // if no event pipe was provided on the command line (dev
-    // smoketest path).
-    LobbyIpc::SendGameStarted(static_cast<uint32_t>(gs->frameNum));
+    // TODO(Tier 2): Send GameStarted over WebSocket to lobby
 }
 
 
@@ -274,7 +275,7 @@ void CSimulation::InitScripting()
     if (!defsLoaded)
         return;
 
-    std::fprintf(stderr, "[sim] initialising scripting...\n");
+    SLOG(SPRING_LOG_INFO, "initialising scripting...");
 
     // Create the script event dispatcher
     scriptDispatcher = new ScriptEventDispatcher();
@@ -289,21 +290,21 @@ void CSimulation::InitScripting()
         auto* ctx = new LuaScriptContext(&luaRules->syncedLuaHandle);
         scriptDispatcher->AddContext(ctx);
         scriptingLoaded = true;
-        std::fprintf(stderr, "[sim] LuaRules attached to event dispatcher\n");
+        SLOG(SPRING_LOG_INFO, "LuaRules attached to event dispatcher");
     } else {
-        std::fprintf(stderr, "[sim] LuaRules not loaded (see [lua:LuaRules] above for reason)\n");
+        SLOG(SPRING_LOG_NOTICE, "LuaRules not loaded (see lua:LuaRules above for reason)");
     }
 
     if (CLuaGaia::LoadHandler(true)) {
         auto* ctx = new LuaScriptContext(&luaGaia->syncedLuaHandle);
         scriptDispatcher->AddContext(ctx);
         scriptingLoaded = true;
-        std::fprintf(stderr, "[sim] LuaGaia attached to event dispatcher\n");
+        SLOG(SPRING_LOG_INFO, "LuaGaia attached to event dispatcher");
     } else {
-        std::fprintf(stderr, "[sim] LuaGaia not loaded (see [lua:LuaGaia] above for reason)\n");
+        SLOG(SPRING_LOG_NOTICE, "LuaGaia not loaded (see lua:LuaGaia above for reason)");
     }
 
-    std::fprintf(stderr, "[sim] scripting initialised (%zu contexts)\n",
+    SLOG(SPRING_LOG_INFO, "scripting initialised (%zu contexts)",
         scriptDispatcher->GetContexts().size());
 }
 
@@ -320,7 +321,7 @@ void CSimulation::Init(const std::string& mapName)
 
     // Try to load game definitions
     if (!LoadDefs()) {
-        std::fprintf(stderr, "[sim] WARNING: running without game definitions\n");
+        SLOG(SPRING_LOG_WARNING, "running without game definitions");
         running = true;
         return;
     }
@@ -400,7 +401,7 @@ void CSimulation::Init(const std::string& mapName)
     InitScripting();
 
     running = true;
-    std::fprintf(stderr, "[sim] initialised (frame %d, defs=%s, map=%s)\n",
+    SLOG(SPRING_LOG_INFO, "initialised (frame %d, defs=%s, map=%s)",
         gs->frameNum,
         defsLoaded ? "loaded" : "empty",
         mapLoaded ? "loaded" : "none");
@@ -411,7 +412,7 @@ void CSimulation::Kill()
     running = false;
     defsParser.reset();
     gs->Kill();
-    std::fprintf(stderr, "[sim] shut down\n");
+    SLOG(SPRING_LOG_INFO, "shut down");
 }
 
 void CSimulation::SimFrame()

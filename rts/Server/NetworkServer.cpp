@@ -7,6 +7,9 @@
  */
 
 #include "NetworkServer.h"
+#include "System/SpringLog/SpringLog.h"
+
+#define LOG_SECTION "net"
 
 // uWebSockets includes
 #include <App.h>
@@ -128,13 +131,13 @@ void NetworkServer::NetworkThreadFunc(int port) {
 
     // Direct-register a raw wildcard route to prove uWS wildcards work in
     // this build. If /rawping/foo doesn't 200, something is very wrong.
-    std::fprintf(stderr, "[net] registering /rawping/*\n");
+    SLOG(SPRING_LOG_DEBUG, "registering /rawping/*");
     app.get("/rawping/*", [](auto* res, auto* req) {
-        std::fprintf(stderr, "[rawping] url=%s\n", std::string(req->getUrl()).c_str());
+        SLOG(SPRING_LOG_DEBUG, "rawping url=%s", std::string(req->getUrl()).c_str());
         res->writeStatus("200 OK");
         res->end("pong");
     });
-    std::fprintf(stderr, "[net] /rawping/* registered\n");
+    SLOG(SPRING_LOG_DEBUG, "/rawping/* registered");
 
     // Register HTTP GET endpoints from the stored handler list.
     for (auto& [pattern, handler] : httpGetHandlers) {
@@ -170,7 +173,7 @@ void NetworkServer::NetworkThreadFunc(int port) {
             }
             clientCount.fetch_add(1);
 
-            std::fprintf(stderr, "[net] client %u connected (%d total)\n",
+            SLOG(SPRING_LOG_INFO, "client %u connected (%d total)",
                 data->id, clientCount.load());
         },
 
@@ -217,7 +220,7 @@ void NetworkServer::NetworkThreadFunc(int port) {
                 disconnectQueue.push_back(id);
             }
 
-            std::fprintf(stderr, "[net] client %u disconnected (%d remaining)\n",
+            SLOG(SPRING_LOG_INFO, "client %u disconnected (%d remaining)",
                 id, clientCount.load());
         },
     });
@@ -225,9 +228,9 @@ void NetworkServer::NetworkThreadFunc(int port) {
     app.listen(port, [this, port](auto* listenSocket) {
         impl->listenSocket = listenSocket;
         if (listenSocket) {
-            std::fprintf(stderr, "[net] listening on port %d\n", port);
+            SLOG(SPRING_LOG_NOTICE, "listening on port %d", port);
         } else {
-            std::fprintf(stderr, "[net] ERROR: failed to bind port %d\n", port);
+            SLOG(SPRING_LOG_ERROR, "failed to bind port %d", port);
         }
     });
 
@@ -290,5 +293,5 @@ void NetworkServer::NetworkThreadFunc(int port) {
     app.run();
 
     impl->loop = nullptr;
-    std::fprintf(stderr, "[net] network thread exiting\n");
+    SLOG(SPRING_LOG_INFO, "network thread exiting");
 }

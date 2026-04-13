@@ -7,6 +7,10 @@
 #include "LuaUtils.h"
 #include "LuaConfig.h"
 
+#include "System/SpringLog/SpringLog.h"
+
+#define LOG_SECTION "lua"
+
 #include "Game/GameVersion.h"
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Objects/SolidObjectDef.h"
@@ -349,8 +353,8 @@ static void PushFunctionEnv(lua_State* L, const char* caller, int funcIndex)
 		// This should now be unreachable given the fallback above,
 		// but keep the check as a belt-and-braces assertion so we
 		// never pass a non-table to lua_setfenv.
-		std::fprintf(stderr,
-			"[lua] %s(): __fenv proxy resolved to a %s, not a table\n",
+		SLOG(SPRING_LOG_ERROR,
+			"%s(): __fenv proxy resolved to a %s, not a table",
 			caller, luaL_typename(L, -1));
 		luaL_error(L, "%s() invalid fenv", caller);
 	}
@@ -1447,10 +1451,9 @@ void DeprecationWarn(lua_State* L,
 		where = buf;
 	}
 
-	std::fprintf(stderr,
-		"[lua compat] deprecated Lua 5.1 builtin `%s` used at %s\n"
-		"             %s\n"
-		"             (further uses will be silently shimmed)\n",
+	SLOG(SPRING_LOG_WARNING,
+		"deprecated Lua 5.1 builtin `%s` used at %s: %s "
+		"(further uses will be silently shimmed)",
 		name, where.c_str(), advice);
 
 	// Mark warned — replace upvalue 1 with `true`.

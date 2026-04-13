@@ -9,6 +9,9 @@
 
 #include "System/FileSystem/LuaVFSSimple.h"
 #include "System/FileSystem/FileHandler.h"
+#include "System/SpringLog/SpringLog.h"
+
+#define LOG_SECTION "feature-proc"
 
 #include <algorithm>
 #include <cctype>
@@ -166,7 +169,7 @@ void ParseFeatureDefFile(lua_State* L,
                          const fs::path& path,
                          std::vector<MapFeatureDef>& out) {
     if (luaL_dofile(L, path.string().c_str()) != LUA_OK) {
-        std::fprintf(stderr, "[features] lua error in %s: %s\n",
+        SLOG(SPRING_LOG_ERROR, "lua error in %s: %s",
             path.string().c_str(), lua_tostring(L, -1));
         lua_pop(L, 1);
         return;
@@ -250,8 +253,8 @@ HeightmapSampler LoadHeightmap(const MapMetadata& meta) {
     const std::string path = meta.processedDir + "/heightmap.bin";
     std::ifstream f(path, std::ios::binary);
     if (!f.is_open()) {
-        std::fprintf(stderr, "[features] heightmap.bin missing at %s, "
-            "feature Y will be 0 (expect sunken rocks)\n", path.c_str());
+        SLOG(SPRING_LOG_WARNING, "heightmap.bin missing at %s, "
+            "feature Y will be 0 (expect sunken rocks)", path.c_str());
         return s;
     }
     const size_t count = static_cast<size_t>(s.hmW) * s.hmH;
@@ -259,7 +262,7 @@ HeightmapSampler LoadHeightmap(const MapMetadata& meta) {
     f.read(reinterpret_cast<char*>(s.data.data()),
            static_cast<std::streamsize>(count * sizeof(uint16_t)));
     if (!f) {
-        std::fprintf(stderr, "[features] short read on heightmap.bin\n");
+        SLOG(SPRING_LOG_WARNING, "short read on heightmap.bin");
         s.data.clear();
     }
     return s;
@@ -298,7 +301,7 @@ void ParseFeaturePlacements(lua_State* L,
     if (!fs::exists(configPath)) return;
 
     if (luaL_dofile(L, configPath.c_str()) != LUA_OK) {
-        std::fprintf(stderr, "[features] featureplacer error: %s\n",
+        SLOG(SPRING_LOG_ERROR, "featureplacer error: %s",
             lua_tostring(L, -1));
         lua_pop(L, 1);
         return;
@@ -357,8 +360,8 @@ void ParseFeaturePlacements(lua_State* L,
     }
     lua_pop(L, 2); // pop objectlist + outer table
 
-    std::fprintf(stderr,
-        "[features] featureplacer: %d placement(s) added, %d skipped\n",
+    SLOG(SPRING_LOG_INFO,
+        "featureplacer: %d placement(s) added, %d skipped",
         added, skipped);
 }
 
@@ -376,7 +379,7 @@ int RunCommand(const std::string& cmd) {
     while (fgets(buf, sizeof(buf), p)) out += buf;
     int rc = pclose(p);
     if (rc != 0) {
-        std::fprintf(stderr, "[features] command failed (%d): %s\n  %s\n",
+        SLOG(SPRING_LOG_ERROR, "command failed (%d): %s\n  %s",
             rc, cmd.c_str(), out.c_str());
     }
     return rc;
@@ -464,7 +467,7 @@ std::string ReadS3OTexture1(const std::string& s3oPath) {
 void ConvertAssetsForDef(MapMetadata& meta, MapFeatureDef& def) {
     const std::string srcModel = ResolveModelPath(meta.sourcePath, def.modelFile);
     if (srcModel.empty()) {
-        std::fprintf(stderr, "[features]   %s: model not found ('%s'), skipping\n",
+        SLOG(SPRING_LOG_WARNING, "%s: model not found ('%s'), skipping",
             def.name.c_str(), def.modelFile.c_str());
         def.modelFile.clear();
         return;
@@ -493,7 +496,7 @@ void ConvertAssetsForDef(MapMetadata& meta, MapFeatureDef& def) {
                 }
             }
         } else {
-            std::fprintf(stderr, "[features]   %s: texture '%s' not found in unittextures/\n",
+            SLOG(SPRING_LOG_WARNING, "%s: texture '%s' not found in unittextures/",
                 def.name.c_str(), texBasename.c_str());
         }
     }
@@ -511,7 +514,7 @@ void ConvertAssetsForDef(MapMetadata& meta, MapFeatureDef& def) {
         }
         cmd += " \"" + srcModel + "\" \"" + dst.string() + "\" 2>&1";
         if (RunCommand(cmd) != 0) {
-            std::fprintf(stderr, "[features]   %s: modelimporter failed, no model\n",
+            SLOG(SPRING_LOG_ERROR, "%s: modelimporter failed, no model",
                 def.name.c_str());
             def.modelFile.clear();
             return;
@@ -550,7 +553,7 @@ void Process(MapMetadata& meta) {
         CFileHandler::ClearContentRoots();
         for (const auto& r : savedRoots) CFileHandler::AddContentRoot(r);
 
-        std::fprintf(stderr, "[features] parsed %zu feature def(s) from %s/features/\n",
+        SLOG(SPRING_LOG_INFO, "parsed %zu feature def(s) from %s/features/",
             meta.featureDefs.size(), meta.id.c_str());
     }
 
@@ -606,8 +609,8 @@ void Process(MapMetadata& meta) {
         ConvertAssetsForDef(meta, def);
         if (!def.modelFile.empty()) ++converted;
     }
-    std::fprintf(stderr,
-        "[features] %s: %d def(s) converted, %d skipped, %zu placement(s)\n",
+    SLOG(SPRING_LOG_INFO,
+        "%s: %d def(s) converted, %d skipped, %zu placement(s)",
         meta.id.c_str(), converted, skipped, meta.features.size());
 }
 

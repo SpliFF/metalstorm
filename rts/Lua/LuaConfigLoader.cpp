@@ -4,6 +4,9 @@
 #include "LuaParser.h"
 
 #include "System/FileSystem/VFSModes.h"
+#include "System/SpringLog/SpringLog.h"
+
+#define LOG_SECTION "lua-config"
 
 #include <cstdio>
 #include <filesystem>
@@ -50,16 +53,14 @@ std::unique_ptr<LuaParser> LoadFromLuaFile(const std::string& luaPath) {
         LuaParser::boolean{true});  // auto-setup
 
     if (!parser->Execute()) {
-        std::fprintf(stderr,
-            "[config] failed to parse %s:\n"
-            "         %s\n",
+        SLOG(SPRING_LOG_ERROR,
+            "failed to parse %s: %s",
             luaPath.c_str(), parser->GetErrorLog().c_str());
         return nullptr;
     }
     if (!parser->GetErrorLog().empty()) {
-        std::fprintf(stderr,
-            "[config] non-fatal warnings parsing %s:\n"
-            "         %s\n",
+        SLOG(SPRING_LOG_WARNING,
+            "non-fatal warnings parsing %s: %s",
             luaPath.c_str(), parser->GetErrorLog().c_str());
     }
     return parser;
@@ -75,8 +76,8 @@ std::unique_ptr<LuaParser> LoadFromJsonFile(const std::string& jsonPath) {
     // way to hand it to the parser.
     const std::string payload = ReadFileBytes(jsonPath);
     if (payload.empty()) {
-        std::fprintf(stderr,
-            "[config] %s: empty or unreadable\n",
+        SLOG(SPRING_LOG_ERROR,
+            "%s: empty or unreadable",
             jsonPath.c_str());
         return nullptr;
     }
@@ -92,9 +93,8 @@ std::unique_ptr<LuaParser> LoadFromJsonFile(const std::string& jsonPath) {
         LuaParser::boolean{true});
 
     if (!parser->Execute()) {
-        std::fprintf(stderr,
-            "[config] failed to decode %s as JSON:\n"
-            "         %s\n",
+        SLOG(SPRING_LOG_ERROR,
+            "failed to decode %s as JSON: %s",
             jsonPath.c_str(), parser->GetErrorLog().c_str());
         return nullptr;
     }

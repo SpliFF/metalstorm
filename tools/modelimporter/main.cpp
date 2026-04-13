@@ -15,6 +15,10 @@
 
 #include "S3OImporter.h"
 #include "JsonWriter.h"
+#include "SpringLog.h"
+#include "SpringLogNet.h"
+
+#define LOG_SECTION "model-import"
 
 #include <assimp/Importer.hpp>
 #include <assimp/Exporter.hpp>
@@ -34,8 +38,8 @@
 namespace {
 
 void PrintUsage(const char* argv0) {
-    std::fprintf(stderr,
-        "modelimporter — convert any model file to glTF 2.0 and emit\n"
+    SLOG(SPRING_LOG_NOTICE,
+        "convert any model file to glTF 2.0 and emit\n"
         "                a sibling .config.json engine-metadata file.\n"
         "\n"
         "usage: %s [options] <input> <output>\n"
@@ -74,7 +78,9 @@ void PrintUsage(const char* argv0) {
         "  --no-meta             Do not touch the sibling config file\n"
         "                        at all. Only useful if the caller\n"
         "                        manages metadata out-of-band.\n"
-        "\n", argv0);
+        "  --log-server <url>    Send logs to a springlog server.\n"
+        "  --log-level <level>   Set minimum log level (debug/info/\n"
+        "                        notice/warning/error).", argv0);
 }
 
 /// Replace the file extension of `path` with `newExt` (no leading dot needed).
@@ -140,7 +146,10 @@ const char* PickExporter(const std::string& outPath) {
 } // namespace
 
 int main(int argc, char** argv) {
+    springlog_init("modelimporter", SPRING_LOG_OUTPUT_CONSOLE);
+
     std::string inPath, outPath, textureExt;
+    std::string logServerUrl;
     bool emitMeta = true;
     bool updateMeta = false;
 
@@ -157,29 +166,47 @@ int main(int argc, char** argv) {
             emitMeta = false;
         } else if (a == "--update-meta") {
             updateMeta = true;
+        } else if (a == "--log-server" && i + 1 < argc) {
+            logServerUrl = argv[++i];
+        } else if (a == "--log-level" && i + 1 < argc) {
+            const std::string lvl = argv[++i];
+            if (lvl == "debug")        springlog_set_min_level(SPRING_LOG_DEBUG);
+            else if (lvl == "info")    springlog_set_min_level(SPRING_LOG_INFO);
+            else if (lvl == "notice")  springlog_set_min_level(SPRING_LOG_NOTICE);
+            else if (lvl == "warning") springlog_set_min_level(SPRING_LOG_WARNING);
+            else if (lvl == "error")   springlog_set_min_level(SPRING_LOG_ERROR);
         } else if (a == "-h" || a == "--help") {
             PrintUsage(argv[0]);
+            springlog_shutdown();
             return 0;
         } else if (inPath.empty()) {
             inPath = a;
         } else if (outPath.empty()) {
             outPath = a;
         } else {
-            std::fprintf(stderr, "modelimporter: unexpected argument '%s'\n", a.c_str());
+            SLOG(SPRING_LOG_ERROR, "unexpected argument '%s'", a.c_str());
             PrintUsage(argv[0]);
+            springlog_shutdown();
             return 1;
         }
     }
+
+    if (!logServerUrl.empty()) {
+        springlog_net_init(logServerUrl.c_str(), "");
+    }
+
     if (inPath.empty() || outPath.empty()) {
         PrintUsage(argv[0]);
+        springlog_shutdown();
         return 1;
     }
 
     const char* exporterId = PickExporter(outPath);
     if (!exporterId) {
-        std::fprintf(stderr,
-            "modelimporter: output extension must be .gltf or .glb (got '%s')\n",
+        SLOG(SPRING_LOG_ERROR,
+            "output extension must be .gltf or .glb (got '%s')",
             outPath.c_str());
+        springlog_shutdown();
         return 2;
     }
 
@@ -208,9 +235,10 @@ int main(int argc, char** argv) {
 
     const aiScene* scene = importer.ReadFile(inPath, kFlags);
     if (!scene) {
-        std::fprintf(stderr, "modelimporter: failed to read '%s': %s\n",
-                     inPath.c_str(), importer.GetErrorString());
+        SLOG(SPRING_LOG_ERROR, "failed to read '%s': %s",
+             inPath.c_str(), importer.GetErrorString());
         Assimp::DefaultLogger::kill();
+        springlog_shutdown();
         return 3;
     }
 
@@ -224,9 +252,10 @@ int main(int argc, char** argv) {
     Assimp::Exporter exporter;
     const aiReturn rc = exporter.Export(scene, exporterId, outPath);
     if (rc != aiReturn_SUCCESS) {
-        std::fprintf(stderr, "modelimporter: glTF export failed: %s\n",
-                     exporter.GetErrorString());
+        SLOG(SPRING_LOG_ERROR, "glTF export failed: %s",
+             exporter.GetErrorString());
         Assimp::DefaultLogger::kill();
+        springlog_shutdown();
         return 4;
     }
 
@@ -259,19 +288,19 @@ int main(int argc, char** argv) {
             metaStatus = " [author-owned .config.lua, skipped]";
         } else if (!hasJson) {
             if (!JsonWriter::Write(scene, jsonConfigPath.string())) {
-                std::fprintf(stderr,
-                    "modelimporter: failed to write %s\n",
+                SLOG(SPRING_LOG_ERROR, "failed to write %s",
                     jsonConfigPath.string().c_str());
                 Assimp::DefaultLogger::kill();
+                springlog_shutdown();
                 return 5;
             }
             metaStatus = " [fresh]";
         } else if (updateMeta) {
             if (!JsonWriter::Write(scene, jsonConfigPath.string())) {
-                std::fprintf(stderr,
-                    "modelimporter: failed to write %s\n",
+                SLOG(SPRING_LOG_ERROR, "failed to write %s",
                     jsonConfigPath.string().c_str());
                 Assimp::DefaultLogger::kill();
+                springlog_shutdown();
                 return 5;
             }
             metaStatus = " [updated]";
@@ -280,19 +309,18 @@ int main(int argc, char** argv) {
         }
 
         const fs::path& displayedPath = hasLua ? luaConfigPath : jsonConfigPath;
-        std::fprintf(stderr,
-            "modelimporter: %s -> %s (%u meshes, %u materials) + %s%s\n",
+        SLOG(SPRING_LOG_NOTICE, "%s -> %s (%u meshes, %u materials) + %s%s",
             inPath.c_str(), outPath.c_str(),
             scene->mNumMeshes, scene->mNumMaterials,
             displayedPath.filename().string().c_str(),
             metaStatus);
     } else {
-        std::fprintf(stderr,
-            "modelimporter: %s -> %s (%u meshes, %u materials)\n",
+        SLOG(SPRING_LOG_NOTICE, "%s -> %s (%u meshes, %u materials)",
             inPath.c_str(), outPath.c_str(),
             scene->mNumMeshes, scene->mNumMaterials);
     }
 
     Assimp::DefaultLogger::kill();
+    springlog_shutdown();
     return 0;
 }

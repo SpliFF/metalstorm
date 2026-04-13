@@ -4,6 +4,9 @@
 #include "AIStateSnapshot.h"
 
 #include "Sim/Misc/TeamHandler.h"
+#include "System/SpringLog/SpringLog.h"
+
+#define LOG_SECTION "ai"
 
 #include <cstdio>
 
@@ -18,13 +21,13 @@ bool AIRuntimePool::AddAI(const std::string& name, int teamId, int allyTeamId,
     auto ctx = std::make_unique<AIScriptContext>(name, teamId, allyTeamId);
 
     if (!ctx->Init(scriptCode, name + ".lua")) {
-        std::fprintf(stderr, "[AIPool] failed to initialise AI '%s' for team %d\n",
+        SLOG(SPRING_LOG_ERROR, "failed to initialise AI '%s' for team %d",
             name.c_str(), teamId);
         return false;
     }
 
     aiContexts.push_back(std::move(ctx));
-    std::fprintf(stderr, "[AIPool] added AI '%s' for team %d (%zu total)\n",
+    SLOG(SPRING_LOG_INFO, "added AI '%s' for team %d (%zu total)",
         name.c_str(), teamId, aiContexts.size());
     return true;
 }
@@ -54,5 +57,5 @@ void AIRuntimePool::Shutdown() {
         ctx->Shutdown();
     }
     aiContexts.clear();
-    std::fprintf(stderr, "[AIPool] shut down\n");
+    SLOG(SPRING_LOG_INFO, "shut down");
 }

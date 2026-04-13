@@ -19,7 +19,10 @@
 
 #include "Sim/Misc/GlobalSynced.h" // gsRNG
 #include "System/Log/ILog.h"
+#include "System/SpringLog/SpringLog.h"
 #include "System/FileSystem/FileHandler.h"
+
+#define LOG_SECTION "lua"
 #include "System/Misc/SpringTime.h"
 #include "System/ContainerUtil.h"
 #include "System/TimeProfiler.h"
@@ -215,8 +218,8 @@ void LuaParser::SetupEnv(bool isSyncedCtxt, bool isDefsParser)
 			"}\n"
 		);
 	} else {
-		std::fprintf(stderr,
-			"[lua] failed to preload json library: %s\n",
+		SLOG(SPRING_LOG_ERROR,
+			"failed to preload json library: %s",
 			lua_tostring(L, -1));
 		lua_pop(L, 1);
 	}

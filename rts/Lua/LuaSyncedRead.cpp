@@ -70,6 +70,9 @@
 #include "System/FileSystem/FileSystem.h"
 #include "System/StringHash.h"
 #include "System/StringUtil.h"
+#include "System/SpringLog/SpringLog.h"
+
+#define LOG_SECTION "lua"
 
 #include <cctype>
 
@@ -608,14 +611,14 @@ static int GetSolidObjectRotation(lua_State* L, const CSolidObject* o)
 			const float3 x = matrix.GetX();
 			const float3 y = matrix.GetY();
 			const float3 z = matrix.GetZ();
-			std::fprintf(stderr,
-				"[lua] GetSolidObjectRotation(id=%d): transform "
+			SLOG(SPRING_LOG_WARNING,
+				"GetSolidObjectRotation(id=%d): transform "
 				"matrix is not orthonormal — returning zero euler "
-				"angles.\n"
-				"      x=(%.3f,%.3f,%.3f) |x|=%.4f\n"
-				"      y=(%.3f,%.3f,%.3f) |y|=%.4f\n"
-				"      z=(%.3f,%.3f,%.3f) |z|=%.4f\n"
-				"      dots x·y=%.4f y·z=%.4f x·z=%.4f\n",
+				"angles. "
+				"x=(%.3f,%.3f,%.3f) |x|=%.4f "
+				"y=(%.3f,%.3f,%.3f) |y|=%.4f "
+				"z=(%.3f,%.3f,%.3f) |z|=%.4f "
+				"dots x.y=%.4f y.z=%.4f x.z=%.4f",
 				o->id,
 				x.x, x.y, x.z, x.Length(),
 				y.x, y.y, y.z, y.Length(),

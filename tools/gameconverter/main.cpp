@@ -56,6 +56,11 @@
 // converter is cheap to run from CI or on every lobby startup as a
 // pre-flight, and it never destroys hand-authored metadata.
 
+#include "SpringLog.h"
+#include "SpringLogNet.h"
+
+#define LOG_SECTION "game-convert"
+
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -118,7 +123,7 @@ bool WriteFileText(const fs::path& path, const std::string& text) {
     fs::create_directories(path.parent_path(), ec);
     std::ofstream f(path);
     if (!f.is_open()) {
-        std::fprintf(stderr, "[gameconverter] failed to open %s for writing\n",
+        SLOG(SPRING_LOG_ERROR, "failed to open %s for writing",
             path.string().c_str());
         return false;
     }
@@ -193,16 +198,14 @@ const char* kGameConfigTemplate =
 bool ConvertGameConfig(const fs::path& gameDir, bool force) {
     const fs::path modInfo = ResolveCaseInsensitive(gameDir, "modinfo.lua");
     if (modInfo.empty()) {
-        std::fprintf(stderr,
-            "[gameconverter] %s: no modinfo.lua found — skipping game.config.lua\n",
+        SLOG(SPRING_LOG_WARNING, "%s: no modinfo.lua found — skipping game.config.lua",
             gameDir.string().c_str());
         return false;
     }
 
     const fs::path outPath = gameDir / "game.config.lua";
     if (fs::exists(outPath) && !force) {
-        std::fprintf(stderr,
-            "[gameconverter] %s: game.config.lua already exists (use --force to overwrite)\n",
+        SLOG(SPRING_LOG_INFO, "%s: game.config.lua already exists (use --force to overwrite)",
             gameDir.string().c_str());
         return true;
     }
@@ -210,7 +213,7 @@ bool ConvertGameConfig(const fs::path& gameDir, bool force) {
     if (!WriteFileText(outPath, kGameConfigTemplate))
         return false;
 
-    std::fprintf(stderr, "[gameconverter] wrote %s\n", outPath.string().c_str());
+    SLOG(SPRING_LOG_NOTICE, "wrote %s", outPath.string().c_str());
     return true;
 }
 
@@ -271,15 +274,13 @@ bool ConvertLobbyConfig(const fs::path& gameDir, bool force) {
     // options" at discovery time.
     const fs::path modOptions = ResolveCaseInsensitive(gameDir, "modoptions.lua");
     if (modOptions.empty()) {
-        std::fprintf(stderr,
-            "[gameconverter] %s: no modoptions.lua (empty lobby options)\n",
+        SLOG(SPRING_LOG_INFO, "%s: no modoptions.lua (empty lobby options)",
             gameDir.string().c_str());
     }
 
     const fs::path outPath = gameDir / "lobby.config.lua";
     if (fs::exists(outPath) && !force) {
-        std::fprintf(stderr,
-            "[gameconverter] %s: lobby.config.lua already exists (use --force to overwrite)\n",
+        SLOG(SPRING_LOG_INFO, "%s: lobby.config.lua already exists (use --force to overwrite)",
             gameDir.string().c_str());
         return true;
     }
@@ -287,7 +288,7 @@ bool ConvertLobbyConfig(const fs::path& gameDir, bool force) {
     if (!WriteFileText(outPath, kLobbyConfigTemplate))
         return false;
 
-    std::fprintf(stderr, "[gameconverter] wrote %s\n", outPath.string().c_str());
+    SLOG(SPRING_LOG_NOTICE, "wrote %s", outPath.string().c_str());
     return true;
 }
 
@@ -322,8 +323,7 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
     // covers both papertanks and zk.
     const fs::path source = ResolveSubDir(gameDir, "objects3d");
     if (source.empty()) {
-        std::fprintf(stderr,
-            "[gameconverter] %s: no objects3d/ directory, skipping model conversion\n",
+        SLOG(SPRING_LOG_INFO, "%s: no objects3d/ directory, skipping model conversion",
             gameDir.string().c_str());
         return 0;
     }
@@ -364,14 +364,12 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
             converted++;
         } else {
             failed++;
-            std::fprintf(stderr,
-                "[gameconverter] modelimporter failed on %s\n%s\n",
+            SLOG(SPRING_LOG_ERROR, "modelimporter failed on %s\n%s",
                 entry.path().string().c_str(), output.c_str());
         }
     }
 
-    std::fprintf(stderr,
-        "[gameconverter] %s: models %d converted, %d up-to-date, %d failed\n",
+    SLOG(SPRING_LOG_NOTICE, "%s: models %d converted, %d up-to-date, %d failed",
         gameDir.string().c_str(), converted, skipped, failed);
     return failed;
 }
@@ -389,8 +387,7 @@ bool WriteAIConfig(const fs::path& aiDir, const std::string& displayName,
 {
     const fs::path outPath = aiDir / "ai.config.lua";
     if (fs::exists(outPath)) {
-        std::fprintf(stderr,
-            "[gameconverter] %s: ai.config.lua already exists, leaving alone\n",
+        SLOG(SPRING_LOG_INFO, "%s: ai.config.lua already exists, leaving alone",
             aiDir.string().c_str());
         return true;
     }
@@ -411,7 +408,7 @@ bool WriteAIConfig(const fs::path& aiDir, const std::string& displayName,
 
     if (!WriteFileText(outPath, body))
         return false;
-    std::fprintf(stderr, "[gameconverter] wrote %s\n", outPath.string().c_str());
+    SLOG(SPRING_LOG_NOTICE, "wrote %s", outPath.string().c_str());
     return true;
 }
 
@@ -428,8 +425,7 @@ bool WriteAIConfig(const fs::path& aiDir, const std::string& displayName,
 void MigrateAIs(const fs::path& gameDir) {
     const fs::path aiRoot = gameDir / "ai";
     if (!fs::exists(aiRoot) || !fs::is_directory(aiRoot)) {
-        std::fprintf(stderr,
-            "[gameconverter] %s: no ai/ directory, skipping AI migration\n",
+        SLOG(SPRING_LOG_INFO, "%s: no ai/ directory, skipping AI migration",
             gameDir.string().c_str());
         return;
     }
@@ -449,8 +445,7 @@ void MigrateAIs(const fs::path& gameDir) {
             if (!fs::exists(newMain)) {
                 fs::rename(p, newMain, ec);
                 if (ec) {
-                    std::fprintf(stderr,
-                        "[gameconverter] failed to move %s → %s: %s\n",
+                    SLOG(SPRING_LOG_ERROR, "failed to move %s -> %s: %s",
                         p.string().c_str(), newMain.string().c_str(),
                         ec.message().c_str());
                     continue;
@@ -483,8 +478,7 @@ void MigrateAIs(const fs::path& gameDir) {
         }
     }
 
-    std::fprintf(stderr,
-        "[gameconverter] %s: AI migration — %d flat .lua moved, %d folder(s) stubbed\n",
+    SLOG(SPRING_LOG_NOTICE, "%s: AI migration — %d flat .lua moved, %d folder(s) stubbed",
         gameDir.string().c_str(), flatMoved, folderStubbed);
 }
 
@@ -493,8 +487,8 @@ void MigrateAIs(const fs::path& gameDir) {
 // ---------------------------------------------------------------
 
 void PrintUsage(const char* argv0) {
-    std::fprintf(stderr,
-        "gameconverter — prepare a legacy Spring-archive game for spring-web.\n"
+    SLOG(SPRING_LOG_NOTICE,
+        "prepare a legacy Spring-archive game for spring-web.\n"
         "\n"
         "usage: %s [options] <game-dir>\n"
         "\n"
@@ -512,17 +506,23 @@ void PrintUsage(const char* argv0) {
         "                      wrapper and the AI layout.\n"
         "  --skip-ai           Do not touch ai/ — leave the legacy layout\n"
         "                      in place.\n"
+        "  --log-server <url>  Send logs to a springlog server.\n"
+        "  --log-level <level> Set minimum log level (debug/info/\n"
+        "                      notice/warning/error).\n"
         "\n"
         "Each step is idempotent: re-running the tool on a converted game\n"
-        "is a no-op unless --force is passed or a source file changed.\n",
+        "is a no-op unless --force is passed or a source file changed.",
         argv0);
 }
 
 } // namespace
 
 int main(int argc, char* argv[]) {
+    springlog_init("gameconverter", SPRING_LOG_OUTPUT_CONSOLE);
+
     std::string gameDirArg;
     std::string modelImporterArg;
+    std::string logServerUrl;
     bool force = false;
     bool skipModels = false;
     bool skipAI = false;
@@ -533,29 +533,45 @@ int main(int argc, char* argv[]) {
         else if (arg == "--skip-models") skipModels = true;
         else if (arg == "--skip-ai") skipAI = true;
         else if (arg == "--modelimporter" && i + 1 < argc) modelImporterArg = argv[++i];
-        else if (arg == "-h" || arg == "--help") { PrintUsage(argv[0]); return 0; }
+        else if (arg == "--log-server" && i + 1 < argc) logServerUrl = argv[++i];
+        else if (arg == "--log-level" && i + 1 < argc) {
+            const std::string lvl = argv[++i];
+            if (lvl == "debug")        springlog_set_min_level(SPRING_LOG_DEBUG);
+            else if (lvl == "info")    springlog_set_min_level(SPRING_LOG_INFO);
+            else if (lvl == "notice")  springlog_set_min_level(SPRING_LOG_NOTICE);
+            else if (lvl == "warning") springlog_set_min_level(SPRING_LOG_WARNING);
+            else if (lvl == "error")   springlog_set_min_level(SPRING_LOG_ERROR);
+        }
+        else if (arg == "-h" || arg == "--help") { PrintUsage(argv[0]); springlog_shutdown(); return 0; }
         else if (!arg.empty() && arg[0] == '-') {
-            std::fprintf(stderr, "[gameconverter] unknown option: %s\n", arg.c_str());
+            SLOG(SPRING_LOG_ERROR, "unknown option: %s", arg.c_str());
             PrintUsage(argv[0]);
+            springlog_shutdown();
             return 2;
         }
         else gameDirArg = arg;
     }
 
+    if (!logServerUrl.empty()) {
+        springlog_net_init(logServerUrl.c_str(), "");
+    }
+
     if (gameDirArg.empty()) {
         PrintUsage(argv[0]);
+        springlog_shutdown();
         return 2;
     }
 
     const fs::path gameDir = fs::absolute(gameDirArg);
     if (!fs::exists(gameDir) || !fs::is_directory(gameDir)) {
-        std::fprintf(stderr, "[gameconverter] not a directory: %s\n",
+        SLOG(SPRING_LOG_ERROR, "not a directory: %s",
             gameDir.string().c_str());
+        springlog_shutdown();
         return 1;
     }
 
     const std::string gameId = ToLower(gameDir.filename().string());
-    std::fprintf(stderr, "[gameconverter] processing game '%s' at %s\n",
+    SLOG(SPRING_LOG_NOTICE, "processing game '%s' at %s",
         gameId.c_str(), gameDir.string().c_str());
 
     // Resolve the modelimporter path. The default location is
@@ -572,10 +588,11 @@ int main(int argc, char* argv[]) {
         modelImporterBin = "build/debug/tools/modelimporter/modelimporter";
     }
     if (!skipModels && !fs::exists(modelImporterBin)) {
-        std::fprintf(stderr,
-            "[gameconverter] modelimporter not found at %s — build it first,\n"
-            "                or pass --modelimporter <path> / --skip-models\n",
+        SLOG(SPRING_LOG_ERROR,
+            "modelimporter not found at %s — build it first, "
+            "or pass --modelimporter <path> / --skip-models",
             modelImporterBin.string().c_str());
+        springlog_shutdown();
         return 1;
     }
 
@@ -591,6 +608,7 @@ int main(int argc, char* argv[]) {
         MigrateAIs(gameDir);
     }
 
-    std::fprintf(stderr, "[gameconverter] done (%d failures)\n", failed);
+    SLOG(SPRING_LOG_NOTICE, "done (%d failures)", failed);
+    springlog_shutdown();
     return failed == 0 ? 0 : 1;
 }

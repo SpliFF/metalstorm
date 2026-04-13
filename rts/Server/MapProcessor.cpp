@@ -2,6 +2,7 @@
 
 #include "MapProcessor.h"
 #include "FeatureProcessor.h"
+#include "System/SpringLog/SpringLog.h"
 
 // Lua compiled as C++
 #include "lua.h"
@@ -17,6 +18,8 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+
+#define LOG_SECTION "map-proc"
 
 namespace fs = std::filesystem;
 
@@ -105,7 +108,7 @@ bool MapProcessor::ReadMapInfo(const std::string& mapDir, MapMetadata& meta) {
         );
 
         if (luaL_dofile(L, mapInfoPath.c_str()) != LUA_OK) {
-            std::fprintf(stderr, "[mapproc] lua error in %s: %s\n",
+            SLOG(SPRING_LOG_ERROR, "lua error in %s: %s",
                 mapInfoPath.c_str(), lua_tostring(L, -1));
             lua_close(L);
             // Restore content roots
@@ -286,10 +289,10 @@ bool MapProcessor::ReadMapInfo(const std::string& mapDir, MapMetadata& meta) {
                 }
                 lua_pop(L, 1); // pop teams
 
-                std::fprintf(stderr, "[mapproc] mapinfo.lua: name='%s' author='%s' %zu start positions\n",
+                SLOG(SPRING_LOG_INFO, "mapinfo.lua: name='%s' author='%s' %zu start positions",
                     meta.name.c_str(), meta.author.c_str(), meta.startPositions.size());
             } else {
-                std::fprintf(stderr, "[mapproc] mapinfo.lua did not return a table\n");
+                SLOG(SPRING_LOG_WARNING, "mapinfo.lua did not return a table");
             }
             lua_close(L);
             // Restore content roots
@@ -371,19 +374,19 @@ bool MapProcessor::ExtractBinaryData(const MapMetadata& meta) {
     int hmSize = (meta.mapx + 1) * (meta.mapy + 1) * 2;
     int halfSize = (meta.mapx / 2) * (meta.mapy / 2);
 
-    std::fprintf(stderr, "[mapproc] extracting: mapx=%d mapy=%d hmPtr=%d hmSize=%d\n",
+    SLOG(SPRING_LOG_INFO, "extracting: mapx=%d mapy=%d hmPtr=%d hmSize=%d",
         meta.mapx, meta.mapy, heightmapPtr, hmSize);
 
     bool ok = true;
     if (!extractRawBytes(meta.smfPath, heightmapPtr, hmSize, meta.processedDir + "/heightmap.bin"))
-        std::fprintf(stderr, "[mapproc]   heightmap extraction failed\n");
+        SLOG(SPRING_LOG_ERROR, "heightmap extraction failed");
     // Note: the raw 1024² DXT1 minimap is no longer extracted to disk —
     // ExtractMinimapWebP() decodes it straight to a WebP thumbnail for
     // the lobby preview. Nothing in the client ever consumed minimap.dxt1.
     if (!extractRawBytes(meta.smfPath, typeMapPtr, halfSize, meta.processedDir + "/typemap.bin"))
-        std::fprintf(stderr, "[mapproc]   typemap extraction failed\n");
+        SLOG(SPRING_LOG_ERROR, "typemap extraction failed");
     if (!extractRawBytes(meta.smfPath, metalmapPtr, halfSize, meta.processedDir + "/metalmap.bin"))
-        std::fprintf(stderr, "[mapproc]   metalmap extraction failed\n");
+        SLOG(SPRING_LOG_ERROR, "metalmap extraction failed");
     ok = true; // individual failures logged above
 
     // Tile index
@@ -422,7 +425,7 @@ bool MapProcessor::ExtractBinaryData(const MapMetadata& meta) {
             smt.seekg(SMALL_TILE_SIZE - TILE_MIP0_SIZE, std::ios::cur);
         }
         ok &= out.good();
-        std::fprintf(stderr, "[mapproc] extracted %d tile mip0s (%d bytes each)\n",
+        SLOG(SPRING_LOG_INFO, "extracted %d tile mip0s (%d bytes each)",
             smtNumTiles, TILE_MIP0_SIZE);
     }
 
@@ -545,20 +548,18 @@ bool MapProcessor::ExtractMinimapWebP(const MapMetadata& meta) {
         "\"" + thumbPath + "\" 2>&1";
     FILE* p = popen(cmd.c_str(), "w");
     if (!p) {
-        std::fprintf(stderr, "[mapproc] minimap: popen(magick) failed\n");
+        SLOG(SPRING_LOG_ERROR, "minimap: popen(magick) failed");
         return false;
     }
     const size_t written = std::fwrite(rgb.data(), 1, rgb.size(), p);
     const int rc = pclose(p);
     if (rc != 0 || written != rgb.size()) {
-        std::fprintf(stderr,
-            "[mapproc] minimap: magick failed (rc=%d, wrote %zu/%zu)\n",
+        SLOG(SPRING_LOG_ERROR, "minimap: magick failed (rc=%d, wrote %zu/%zu)",
             rc, written, rgb.size());
         return false;
     }
 
-    std::fprintf(stderr,
-        "[mapproc] wrote minimap.webp (%dx%d) + thumbnail.webp (%dx%d)\n",
+    SLOG(SPRING_LOG_INFO, "wrote minimap.webp (%dx%d) + thumbnail.webp (%dx%d)",
         fullW, fullH, thumbW, thumbH);
     return true;
 }
@@ -612,7 +613,7 @@ static DecalFailReason shellEscapeAndConvert(const std::string& srcPath, const s
     while (fgets(buf, sizeof(buf), p)) out += buf;
     int rc = pclose(p);
     if (rc != 0) {
-        std::fprintf(stderr, "[mapproc]   magick failed (%d): %s => %s\n  %s\n",
+        SLOG(SPRING_LOG_ERROR, "magick failed (%d): %s => %s  %s",
             rc, srcPath.c_str(), dstPath.c_str(), out.c_str());
         return DecalFailReason::ConvertError;
     }
@@ -657,14 +658,14 @@ bool MapProcessor::ExtractDecalTextures(MapMetadata& meta) {
         std::string src = resolveTexturePath(meta.sourcePath, field);
         if (src.empty()) {
             // Optional asset — quiet log, just mark it as unavailable
-            std::fprintf(stderr, "[mapproc]   decal '%s' missing: %s\n", dstName, field.c_str());
+            SLOG(SPRING_LOG_DEBUG, "decal '%s' missing: %s", dstName, field.c_str());
             field.clear();
             return;
         }
         std::string dst = meta.processedDir + "/" + dstName;
         DecalFailReason r = shellEscapeAndConvert(src, dst);
         if (r == DecalFailReason::UnsupportedFormat) {
-            std::fprintf(stderr, "[mapproc]   decal '%s' unsupported format (skipped): %s\n",
+            SLOG(SPRING_LOG_DEBUG, "decal '%s' unsupported format (skipped): %s",
                 dstName, field.c_str());
             field.clear();
             return;
@@ -694,7 +695,7 @@ bool MapProcessor::ExtractDecalTextures(MapMetadata& meta) {
     if (!meta.decals.detailNormalTex.empty())   found++;
     for (int i = 0; i < 4; i++)
         if (!meta.decals.splatDetailNormalTex[i].empty()) found++;
-    std::fprintf(stderr, "[mapproc] extracted %d decal textures\n", found);
+    SLOG(SPRING_LOG_INFO, "extracted %d decal textures", found);
     return true;
 }
 
@@ -736,7 +737,7 @@ bool MapProcessor::ExtractFeatures(MapMetadata& meta) {
         meta.features.push_back(feat);
     }
 
-    std::fprintf(stderr, "[mapproc] extracted %d features (%d types)\n",
+    SLOG(SPRING_LOG_INFO, "extracted %d features (%d types)",
         numFeatures, numFeatureTypes);
     return true;
 }
@@ -967,7 +968,7 @@ std::vector<MapMetadata> MapProcessor::GetAllMaps(sqlite3* db) {
         "water_base_color,water_surface_color,water_min_color,"
         "water_surface_alpha,water_damage,void_water,widgets FROM maps", -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        std::fprintf(stderr, "[mapproc] GetAllMaps: SQL prepare failed: %s\n",
+        SLOG(SPRING_LOG_ERROR, "GetAllMaps: SQL prepare failed: %s",
             sqlite3_errmsg(db));
         return result;
     }
@@ -1136,12 +1137,12 @@ bool MapProcessor::ProcessMap(MapMetadata& meta) {
     fs::create_directories(meta.processedDir);
 
     if (!ReadSMFHeader(meta)) {
-        std::fprintf(stderr, "[mapproc] failed to read SMF header\n");
+        SLOG(SPRING_LOG_ERROR, "failed to read SMF header");
         return false;
     }
 
     if (!ExtractBinaryData(meta)) {
-        std::fprintf(stderr, "[mapproc] failed to extract binary data\n");
+        SLOG(SPRING_LOG_ERROR, "failed to extract binary data");
         return false;
     }
 
@@ -1169,14 +1170,14 @@ void MapProcessor::EnumerateWidgets(MapMetadata& meta) {
         std::string rel = "LuaUI/Widgets/" + entry.path().filename().string();
         meta.widgets.push_back(rel);
     }
-    std::fprintf(stderr, "[mapproc] %s: found %zu LuaUI widget(s)\n",
+    SLOG(SPRING_LOG_INFO, "%s: found %zu LuaUI widget(s)",
         meta.id.c_str(), meta.widgets.size());
 }
 
 void MapProcessor::ScanAndProcess(const std::string& mapsDir, const std::string& dataDir, sqlite3* db) {
     EnsureTable(db);
     if (!fs::is_directory(mapsDir)) {
-        std::fprintf(stderr, "[mapproc] maps directory not found: %s\n", mapsDir.c_str());
+        SLOG(SPRING_LOG_ERROR, "maps directory not found: %s", mapsDir.c_str());
         return;
     }
 
@@ -1188,7 +1189,7 @@ void MapProcessor::ScanAndProcess(const std::string& mapsDir, const std::string&
         std::string processedDir = dataDir + "/maps/" + mapId;
         bool filesExist = fs::exists(processedDir + "/heightmap.bin");
         if (existing.formatVersion >= MAP_FORMAT_VERSION && filesExist) {
-            std::fprintf(stderr, "[mapproc] %s: up to date (v%d)\n", mapId.c_str(), existing.formatVersion);
+            SLOG(SPRING_LOG_DEBUG, "%s: up to date (v%d)", mapId.c_str(), existing.formatVersion);
             continue;
         }
 
@@ -1199,16 +1200,16 @@ void MapProcessor::ScanAndProcess(const std::string& mapsDir, const std::string&
         meta.formatVersion = MAP_FORMAT_VERSION;
 
         if (!ReadMapInfo(mapDir.path().string(), meta)) {
-            std::fprintf(stderr, "[mapproc] %s: no SMF file found, skipping\n", mapId.c_str());
+            SLOG(SPRING_LOG_WARNING, "%s: no SMF file found, skipping", mapId.c_str());
             continue;
         }
 
-        std::fprintf(stderr, "[mapproc] processing %s \"%s\" (%dx%d)...\n",
+        SLOG(SPRING_LOG_INFO, "processing %s \"%s\" (%dx%d)...",
             mapId.c_str(), meta.name.c_str(), meta.mapx, meta.mapy);
 
         if (ProcessMap(meta)) {
             StoreMetadata(db, meta);
-            std::fprintf(stderr, "[mapproc] %s: done (%d features, %d start positions, luaGaia=%s)\n",
+            SLOG(SPRING_LOG_INFO, "%s: done (%d features, %d start positions, luaGaia=%s)",
                 mapId.c_str(), static_cast<int>(meta.features.size()),
                 static_cast<int>(meta.startPositions.size()),
                 meta.hasLuaGaia ? "yes" : "no");

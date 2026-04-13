@@ -1,6 +1,7 @@
 // GameProcessor — see header for pipeline overview.
 
 #include "GameProcessor.h"
+#include "System/SpringLog/SpringLog.h"
 
 #include <algorithm>
 #include <cctype>
@@ -10,6 +11,8 @@
 #include <filesystem>
 #include <string>
 #include <system_error>
+
+#define LOG_SECTION "game-proc"
 
 // Absolute path to the modelimporter binary, injected at build time
 // via target_compile_definitions in the top-level CMakeLists. Falls
@@ -39,7 +42,7 @@ int RunCommand(const std::string& cmd) {
     while (fgets(buf, sizeof(buf), p)) out += buf;
     int rc = pclose(p);
     if (rc != 0) {
-        std::fprintf(stderr, "[games] command failed (%d): %s\n  %s\n",
+        SLOG(SPRING_LOG_ERROR, "command failed (%d): %s  %s",
             rc, cmd.c_str(), out.c_str());
     }
     return rc;
@@ -135,9 +138,8 @@ void Process(const std::string& gamePath,
         // Not an error — a minimal game (Paper Tanks right now) may
         // ship no model files at all. The log line is still useful
         // so it's obvious why no .config.json files got written.
-        std::fprintf(stderr,
-            "[games] %s: no objects3d/ directory under %s, "
-            "nothing to convert\n",
+        SLOG(SPRING_LOG_INFO, "%s: no objects3d/ directory under %s, "
+            "nothing to convert",
             gameId.c_str(), gamePath.c_str());
         return;
     }
@@ -147,8 +149,7 @@ void Process(const std::string& gamePath,
     std::error_code ec;
     fs::create_directories(outDir, ec);
     if (ec) {
-        std::fprintf(stderr,
-            "[games] %s: failed to create %s: %s\n",
+        SLOG(SPRING_LOG_ERROR, "%s: failed to create %s: %s",
             gameId.c_str(), outDir.string().c_str(), ec.message().c_str());
         return;
     }
@@ -214,9 +215,8 @@ void Process(const std::string& gamePath,
                         }
                     }
                 } else {
-                    std::fprintf(stderr,
-                        "[games]   %s: texture '%s' for %s not found "
-                        "in unittextures/\n",
+                    SLOG(SPRING_LOG_WARNING, "%s: texture '%s' for %s not found "
+                        "in unittextures/",
                         gameId.c_str(), texBasename.c_str(),
                         src.filename().string().c_str());
                 }
@@ -234,8 +234,7 @@ void Process(const std::string& gamePath,
         }
         cmd += " \"" + src.string() + "\" \"" + dstGlb.string() + "\" 2>&1";
         if (RunCommand(cmd) != 0) {
-            std::fprintf(stderr,
-                "[games]   %s: modelimporter failed on %s\n",
+            SLOG(SPRING_LOG_ERROR, "%s: modelimporter failed on %s",
                 gameId.c_str(), src.filename().string().c_str());
             ++failed;
             continue;
@@ -243,9 +242,8 @@ void Process(const std::string& gamePath,
         ++converted;
     }
 
-    std::fprintf(stderr,
-        "[games] %s: %d converted, %d up-to-date, %d failed, "
-        "%d non-model skipped (output: %s)\n",
+    SLOG(SPRING_LOG_INFO, "%s: %d converted, %d up-to-date, %d failed, "
+        "%d non-model skipped (output: %s)",
         gameId.c_str(), converted, uptodate, failed, skipped,
         outDir.string().c_str());
 }

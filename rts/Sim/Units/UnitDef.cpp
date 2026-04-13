@@ -5,6 +5,9 @@
 #include "Game/GameSetup.h"
 #include "Lua/LuaParser.h"
 #include "Map/MapInfo.h"
+#include "System/SpringLog/SpringLog.h"
+
+#define LOG_SECTION "sim"
 #include "Sim/Misc/CategoryHandler.h"
 #include "Sim/Misc/CollisionVolume.h"
 #include "Sim/Misc/DamageArrayHandler.h"
@@ -569,15 +572,15 @@ UnitDef::UnitDef(const LuaTable& udTable, const std::string& unitName, int id)
 	// ways out of this situation (explicit per-unit value or a
 	// game-wide NOWEAPON fallback).
 	auto explainMissing = [&](const char* field, const std::string& wanted) {
-		std::fprintf(stderr,
-			"[unitdef] %s: weapon '%s' referenced by `%s` is not defined.\n"
-			"          fix one of the following:\n"
-			"            - add `%s = \"<name>\"` to the unit def with\n"
-			"              the name of an existing weapon, or\n"
-			"            - define a fallback weapon named `NOWEAPON`\n"
-			"              in your game's weapons/*.lua (a silent\n"
-			"              0-damage Cannon is fine), which every unit\n"
-			"              without an explicit %s will default to.\n",
+		SLOG(SPRING_LOG_WARNING,
+			"%s: weapon '%s' referenced by `%s` is not defined. "
+			"Fix one of the following: "
+			"add `%s = \"<name>\"` to the unit def with "
+			"the name of an existing weapon, or "
+			"define a fallback weapon named `NOWEAPON` "
+			"in your game's weapons/*.lua (a silent "
+			"0-damage Cannon is fine), which every unit "
+			"without an explicit %s will default to.",
 			unitName.c_str(),
 			wanted.empty() ? "(unset)" : wanted.c_str(),
 			field, field, field);

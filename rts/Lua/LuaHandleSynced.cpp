@@ -48,7 +48,10 @@
 #include "System/creg/SerializeLuaState.h"
 #include "System/FileSystem/FileHandler.h"
 #include "System/Log/ILog.h"
+#include "System/SpringLog/SpringLog.h"
 #include "System/SpringMath.h"
+
+#define LOG_SECTION "lua"
 #include "System/StringHash.h"
 
 
@@ -1686,10 +1689,9 @@ bool CSplitLuaHandle::InitSynced()
 	// during load". The generic false-return we used to emit made
 	// every failure look like a missing file.
 	if (!IsValid()) {
-		std::fprintf(stderr,
-			"[lua:%s] synced Lua state is invalid before load — "
-			"underlying state init failed; cannot run synced scripts\n",
-			syncedLuaHandle.GetName().c_str());
+		SLOG_SCOPED(SPRING_LOG_ERROR, syncedLuaHandle.GetName().c_str(),
+			"synced Lua state is invalid before load — "
+			"underlying state init failed; cannot run synced scripts");
 		KillLua();
 		return false;
 	}
@@ -1703,15 +1705,15 @@ bool CSplitLuaHandle::InitSynced()
 		// when adding a new game and forgetting the scripts.
 		CFileHandler probe(syncedFile, GetInitFileModes());
 		if (!probe.FileExists()) {
-			std::fprintf(stderr,
-				"[lua:%s] %s not found in any content root; "
-				"skipping synced scripts\n",
-				syncedLuaHandle.GetName().c_str(), syncedFile.c_str());
+			SLOG_SCOPED(SPRING_LOG_WARNING, syncedLuaHandle.GetName().c_str(),
+				"%s not found in any content root; "
+				"skipping synced scripts",
+				syncedFile.c_str());
 		} else {
-			std::fprintf(stderr,
-				"[lua:%s] %s is empty or unreadable; "
-				"skipping synced scripts\n",
-				syncedLuaHandle.GetName().c_str(), syncedFile.c_str());
+			SLOG_SCOPED(SPRING_LOG_WARNING, syncedLuaHandle.GetName().c_str(),
+				"%s is empty or unreadable; "
+				"skipping synced scripts",
+				syncedFile.c_str());
 		}
 		KillLua();
 		return false;
@@ -1724,17 +1726,18 @@ bool CSplitLuaHandle::InitSynced()
 	const bool haveSynced = syncedLuaHandle.Init(syncedCode, syncedFile);
 
 	if (!IsValid() || !haveSynced) {
-		std::fprintf(stderr,
-			"[lua:%s] synced Lua state failed to initialise %s — "
-			"check the error above for the Lua error message\n",
-			syncedLuaHandle.GetName().c_str(), syncedFile.c_str());
+		SLOG_SCOPED(SPRING_LOG_ERROR, syncedLuaHandle.GetName().c_str(),
+			"synced Lua state failed to initialise %s — "
+			"check the error above for the Lua error message",
+			syncedFile.c_str());
 		KillLua();
 		return false;
 	}
 
 	syncedLuaHandle.CheckStack();
-	std::fprintf(stderr, "[lua:%s] loaded %s (%zu bytes)\n",
-		syncedLuaHandle.GetName().c_str(), syncedFile.c_str(), syncedCode.size());
+	SLOG_SCOPED(SPRING_LOG_INFO, syncedLuaHandle.GetName().c_str(),
+		"loaded %s (%zu bytes)",
+		syncedFile.c_str(), syncedCode.size());
 	return true;
 }
 

@@ -35,11 +35,14 @@
 #include "System/ScopedFPUSettings.h"
 #include "System/StringUtil.h"
 #include "System/Log/ILog.h"
+#include "System/SpringLog/SpringLog.h"
 
 #include "LuaInclude.h"
 
 
 #include <string>
+
+#define LOG_SECTION "lua"
 
 // Map drawing action constants — InMapDraw system was removed.
 // Defined here to satisfy references in the map draw call-in handler.
@@ -407,14 +410,11 @@ bool CLuaHandle::RunCallInTraceback(lua_State* L, const LuaHashString& hs, int i
 	const char* hsn = hs.GetString();
 	const char* es = LuaErrorString(error);
 
-	// Surface Lua runtime errors directly to stderr. Spring's log
-	// system isn't reliably wired to stdout/stderr in our headless
-	// build, and a silent Lua failure during startup is the most
-	// confusing thing a new game developer can hit.
-	std::fprintf(stderr,
-		"[lua:%s] runtime error in callin '%s': %s\n"
-		"         %s\n",
-		hn.c_str(), hsn, es,
+	// Surface Lua runtime errors through the unified log so they
+	// reach stderr, log file, and any attached sinks.
+	SLOG_SCOPED(SPRING_LOG_ERROR, hn.c_str(),
+		"runtime error in callin '%s': %s  %s",
+		hsn, es,
 		traceStr.empty() ? "(no traceback)" : traceStr.c_str());
 	LOG_L(L_ERROR, "[%s::%s] error=%i (%s) callin=%s trace=%s", hn.c_str(), __func__, error, es, hsn, traceStr.c_str());
 
@@ -440,16 +440,12 @@ bool CLuaHandle::LoadCode(lua_State* L, const string& code, const string& debug)
 	const int error = luaL_loadbuffer(L, code.c_str(), code.size(), debug.c_str());
 
 	if (error != 0) {
-		// Parse/syntax error during load. This is the single most
-		// common thing game developers hit when adding new scripts,
-		// so we dup the error to stderr as well as the LOG sink so
-		// they see it immediately without needing to know how
-		// Spring's log backend is wired.
+		// Parse/syntax error during load. Route through unified log
+		// so it reaches stderr, log file, and any attached sinks.
 		const char* msg = lua_tostring(L, -1);
-		std::fprintf(stderr,
-			"[lua:%s] %s parse error: %s (%s)\n"
-			"         msg: %s\n",
-			name.c_str(), debug.c_str(),
+		SLOG_SCOPED(SPRING_LOG_ERROR, name.c_str(),
+			"%s parse error: %s (%s)  msg: %s",
+			debug.c_str(),
 			LuaErrorString(error),
 			(error == LUA_ERRSYNTAX ? "syntax error" : "load error"),
 			msg ? msg : "(no message)");
