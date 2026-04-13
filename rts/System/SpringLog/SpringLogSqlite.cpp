@@ -112,6 +112,7 @@ int springlog_sqlite_init(const char* dbPath) {
         "  source_file TEXT,"
         "  source_line INTEGER"
         ");"
+        "CREATE INDEX IF NOT EXISTS idx_debug_logs_room ON debug_logs(room_id, timestamp);"
         "CREATE INDEX IF NOT EXISTS idx_debug_logs_level ON debug_logs(level, timestamp);"
         "CREATE INDEX IF NOT EXISTS idx_debug_logs_scope ON debug_logs(scope, timestamp);"
         "CREATE INDEX IF NOT EXISTS idx_debug_logs_process ON debug_logs(process, timestamp);";
