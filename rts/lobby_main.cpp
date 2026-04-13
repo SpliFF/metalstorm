@@ -277,6 +277,23 @@ int main(int argc, char* argv[])
     // (Database wrapper doesn't expose it, so we open a second connection)
     sqlite3* mapDb = nullptr;
     sqlite3_open(dbPath.c_str(), &mapDb);
+
+    // Create game_servers table for lobby restart resilience
+    if (mapDb) {
+        sqlite3_exec(mapDb,
+            "CREATE TABLE IF NOT EXISTS game_servers ("
+            "  room_id INTEGER PRIMARY KEY,"
+            "  port INTEGER NOT NULL,"
+            "  pid INTEGER NOT NULL,"
+            "  map_path TEXT,"
+            "  game_path TEXT,"
+            "  started_at INTEGER DEFAULT (strftime('%s','now')),"
+            "  state TEXT DEFAULT 'starting'"
+            ")", nullptr, nullptr, nullptr);
+        // Clean up stale entries from a previous lobby run
+        sqlite3_exec(mapDb, "DELETE FROM game_servers", nullptr, nullptr, nullptr);
+    }
+
     {
         MapProcessor mapProc;
         mapProc.ScanAndProcess(mapsDir, "data", mapDb);
@@ -579,6 +596,32 @@ int main(int argc, char* argv[])
             }
         }
         return {.contentType = "text/plain", .body = {}, .status = 404};
+    });
+
+    // --- Process management API ---
+    net.AddHttpGet("/api/processes", [&gameServers](const std::string&) -> HttpResponse {
+        std::string json = "[";
+        bool first = true;
+        for (const auto& [roomId, inst] : gameServers) {
+            if (!first) json += ",";
+            first = false;
+            const char* stateStr = "unknown";
+            switch (inst.state) {
+                case GameServerInstance::Starting: stateStr = "starting"; break;
+                case GameServerInstance::Running:  stateStr = "running"; break;
+                case GameServerInstance::Ended:    stateStr = "ended"; break;
+                case GameServerInstance::Crashed:  stateStr = "crashed"; break;
+            }
+            char buf[256];
+            snprintf(buf, sizeof(buf),
+                R"({"room_id":%u,"port":%d,"pid":%d,"state":"%s","map":"%s","game":"%s"})",
+                roomId, inst.port, (int)inst.pid, stateStr,
+                inst.mapPath.c_str(), inst.gamePath.c_str());
+            json += buf;
+        }
+        json += "]";
+        return {.contentType = "application/json", .body = {json.begin(), json.end()}, .status = 200,
+                .cacheControl = "no-cache"};
     });
 
     if (!net.Start(port)) {

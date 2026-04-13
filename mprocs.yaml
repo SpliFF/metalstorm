@@ -12,3 +12,6 @@ procs:
 
   game-logs:
     shell: "mkdir -p data/logs && tail -F data/logs/game-*.log 2>/dev/null || (echo 'Waiting for game servers...' && sleep 999999)"
+
+  lua-errors:
+    shell: "mkdir -p data/logs && tail -F data/logs/game-*.log 2>/dev/null | grep --line-buffered -iE '(error|warning|FATAL)' || (echo 'Watching for Lua errors...' && sleep 999999)"
