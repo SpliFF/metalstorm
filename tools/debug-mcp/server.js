@@ -118,6 +118,26 @@ const TOOLS = [
             },
         },
     },
+    {
+        name: 'query_db',
+        description: 'Execute a read-only SQL query against the game database (via lobby) or debug database (via log server).',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                query: { type: 'string', description: 'SQL query (read-only)' },
+                db: { type: 'string', description: 'Database: "game" or "debug"', enum: ['game', 'debug'], default: 'game' },
+            },
+            required: ['query'],
+        },
+    },
+    {
+        name: 'list_sessions',
+        description: 'List recent game sessions from the log server.',
+        inputSchema: {
+            type: 'object',
+            properties: {},
+        },
+    },
 ];
 
 // --- Tool execution ---
@@ -184,6 +204,25 @@ async function executeTool(name, args) {
 
         case 'list_gadgets': {
             return `list_gadgets — requires WebSocket exec of "show gadgets" in LuaRules scope`;
+        }
+
+        case 'query_db': {
+            if (args.db === 'debug') {
+                // Query debug.db via log server search
+                return `query_db(debug): would search debug logs — use search_logs instead`;
+            }
+            // Query game DB via lobby sql scope — requires WS
+            return `query_db(game): query="${args.query}" — requires WebSocket exec in sql scope`;
+        }
+
+        case 'list_sessions': {
+            const url = `${LOG_SERVER_URL}/api/sessions`;
+            const data = await fetchJson(url);
+            if (!data.length) return 'No game sessions found.';
+            return data.map(s =>
+                `${s.session_id}: room=${s.room_id} game=${s.game_name} map=${s.map_name} ` +
+                `reason=${s.end_reason || 'running'} exit=${s.exit_code || '-'}`
+            ).join('\n');
         }
 
         default:
