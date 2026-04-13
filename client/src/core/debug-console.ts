@@ -22,6 +22,7 @@ import { ClientPayload } from '../protocol/spring-web/client-payload.js';
 import { ConsoleCommand } from '../protocol/spring-web/console-command.js';
 import { ConsoleResponse } from '../protocol/spring-web/console-response.js';
 import { setNetInspectorEnabled } from './net-inspector.js';
+import type { Scene } from '@babylonjs/core';
 
 const LEVEL_NAMES = ['DEBUG', 'INFO', 'NOTICE', 'WARN', 'ERROR', 'FATAL'];
 const LEVEL_CLASSES = ['debug', 'info', 'notice', 'warning', 'error', 'fatal'];
@@ -62,6 +63,7 @@ export class DebugConsole {
     private nextRequestId = 1;
     private gameWs: WebSocket | null = null;
     private gameWsUrl = '';
+    private scene: Scene | null = null;
 
     constructor() {
         this.setupKeyboard();
@@ -71,6 +73,24 @@ export class DebugConsole {
     setLogServerUrl(url: string): void {
         this.logServerUrl = url;
         if (this.visible) this.connect();
+    }
+
+    /** Set the Babylon.js scene for inspector toggle */
+    setScene(scene: Scene): void {
+        this.scene = scene;
+    }
+
+    /** Toggle Babylon.js inspector */
+    async toggleInspector(): Promise<void> {
+        if (!this.scene) {
+            this.appendCommandLine('No scene available', 'exec-error');
+            return;
+        }
+        if (this.scene.debugLayer.isVisible()) {
+            this.scene.debugLayer.hide();
+        } else {
+            await this.scene.debugLayer.show({ embedMode: true });
+        }
     }
 
     /** Set game server WS for command forwarding */
@@ -211,6 +231,7 @@ export class DebugConsole {
             return;
         }
         if (cmd === '/clear') { this.clear(); return; }
+        if (cmd === '/inspector') { this.toggleInspector(); return; }
         if (cmd === '/scopes') {
             this.appendCommandLine('Available scopes: LuaRules, LuaGaia, server');
             return;
@@ -420,11 +441,14 @@ export class DebugConsole {
     private setupKeyboard(): void {
         window.addEventListener('keydown', (e) => {
             if (e.key === '`' && !e.ctrlKey && !e.altKey && !e.metaKey) {
-                // Don't toggle if user is typing in an input
                 const tag = (e.target as HTMLElement)?.tagName;
                 if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
                 e.preventDefault();
                 this.toggle();
+            }
+            if (e.key === 'F12' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+                e.preventDefault();
+                this.toggleInspector();
             }
         });
     }
