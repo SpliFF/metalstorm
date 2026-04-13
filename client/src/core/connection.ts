@@ -103,6 +103,9 @@ export interface ConnectionEvents {
 export class Connection {
     private ws: WebSocket | null = null;
     private _state: ConnectionState = 'disconnected';
+
+    /** Expose the raw WebSocket for debug console command forwarding. */
+    getWebSocket(): WebSocket | null { return this.ws; }
     private events: ConnectionEvents;
     private sessionToken: string | null = null;
     private playerId: number = 0;

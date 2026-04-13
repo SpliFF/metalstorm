@@ -442,14 +442,10 @@ async function startGame(gameServerPort: number): Promise<void> {
     const conn: Connection = new Connection({
         onAuthenticated(_playerId, token, team) {
             console.log(`[game] connected to game server on port ${gameServerPort} (team=${team})`);
-            // Persist any token the game server handed back. The game
-            // server's token-reconnect path echoes the caller's token,
-            // but its password path mints a fresh one via CreateSession
-            // — either way, keeping localStorage in sync with the
-            // latest known-good session row means a subsequent rejoin
-            // (or page refresh) can re-auth without ending up stuck on
-            // a stale token the DB no longer knows about.
             if (token) localStorage.setItem('springrts-token', token);
+            // Wire debug console to game server WS for command execution
+            const ws = conn.getWebSocket();
+            if (ws) debugConsole.setGameWs(ws);
         },
         onAuthFailed(msg: string) {
             console.error(`[game] auth failed: ${msg}`);
