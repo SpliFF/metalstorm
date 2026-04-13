@@ -19,6 +19,8 @@ import { LogBatch } from '../protocol/spring-web/log-batch.js';
 import { LogSubscribe } from '../protocol/spring-web/log-subscribe.js';
 import { ClientMessage } from '../protocol/spring-web/client-message.js';
 import { ClientPayload } from '../protocol/spring-web/client-payload.js';
+import { ConsoleCommand } from '../protocol/spring-web/console-command.js';
+import { ConsoleResponse } from '../protocol/spring-web/console-response.js';
 
 const LEVEL_NAMES = ['DEBUG', 'INFO', 'NOTICE', 'WARN', 'ERROR', 'FATAL'];
 const LEVEL_CLASSES = ['debug', 'info', 'notice', 'warning', 'error', 'fatal'];
@@ -52,6 +54,14 @@ export class DebugConsole {
     private scopeFilter = '';
     private searchFilter = '';
 
+    // Command execution
+    private currentScope = 'LuaRules';
+    private commandHistory: string[] = [];
+    private historyIndex = -1;
+    private nextRequestId = 1;
+    private gameWs: WebSocket | null = null;
+    private gameWsUrl = '';
+
     constructor() {
         this.setupKeyboard();
     }
@@ -60,6 +70,16 @@ export class DebugConsole {
     setLogServerUrl(url: string): void {
         this.logServerUrl = url;
         if (this.visible) this.connect();
+    }
+
+    /** Set game server WS for command forwarding */
+    setGameWs(ws: WebSocket): void {
+        this.gameWs = ws;
+        // Listen for ConsoleResponse on the game WS
+        ws.addEventListener('message', (evt) => {
+            if (!(evt.data instanceof ArrayBuffer)) return;
+            this.handleGameMessage(new Uint8Array(evt.data));
+        });
     }
 
     /** Inject DOM and wire events */
@@ -104,6 +124,38 @@ export class DebugConsole {
             this.rerender();
         });
 
+        // Scope selector
+        const scopeSelect = document.getElementById('debug-scope-select') as HTMLSelectElement;
+        const promptEl = document.getElementById('debug-prompt');
+        scopeSelect?.addEventListener('change', () => {
+            this.currentScope = scopeSelect.value;
+            if (promptEl) promptEl.textContent = `${this.currentScope}>`;
+        });
+
+        // Command input
+        const cmdInput = document.getElementById('debug-command-input') as HTMLInputElement;
+        cmdInput?.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && cmdInput.value.trim()) {
+                this.executeCommand(cmdInput.value.trim());
+                cmdInput.value = '';
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                if (this.historyIndex < this.commandHistory.length - 1) {
+                    this.historyIndex++;
+                    cmdInput.value = this.commandHistory[this.commandHistory.length - 1 - this.historyIndex];
+                }
+            } else if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                if (this.historyIndex > 0) {
+                    this.historyIndex--;
+                    cmdInput.value = this.commandHistory[this.commandHistory.length - 1 - this.historyIndex];
+                } else {
+                    this.historyIndex = -1;
+                    cmdInput.value = '';
+                }
+            }
+        });
+
         // Auto-scroll pause on user scroll up
         this.output?.addEventListener('scroll', () => {
             if (!this.output) return;
@@ -137,6 +189,76 @@ export class DebugConsole {
         if (this.passesFilter(entry)) {
             this.appendLine(entry);
         }
+    }
+
+    /** Execute a command in the current scope */
+    private executeCommand(cmd: string): void {
+        // Handle meta-commands
+        if (cmd.startsWith('/connect ')) {
+            this.currentScope = cmd.slice(9).trim();
+            const scopeSelect = document.getElementById('debug-scope-select') as HTMLSelectElement;
+            if (scopeSelect) scopeSelect.value = this.currentScope;
+            const promptEl = document.getElementById('debug-prompt');
+            if (promptEl) promptEl.textContent = `${this.currentScope}>`;
+            this.appendCommandLine(`Switched to ${this.currentScope}`);
+            return;
+        }
+        if (cmd === '/clear') { this.clear(); return; }
+        if (cmd === '/scopes') {
+            this.appendCommandLine('Available scopes: LuaRules, LuaGaia, server');
+            return;
+        }
+
+        this.commandHistory.push(cmd);
+        this.historyIndex = -1;
+
+        // Show the command in output
+        this.appendCommandLine(`${this.currentScope}> ${cmd}`, 'exec-input');
+
+        // Send via game WS
+        if (!this.gameWs || this.gameWs.readyState !== WebSocket.OPEN) {
+            this.appendCommandLine('Not connected to game server', 'exec-error');
+            return;
+        }
+
+        const builder = new flatbuffers.Builder(256);
+        const scopeOff = builder.createString(this.currentScope);
+        const cmdOff = builder.createString(cmd);
+        const cc = ConsoleCommand.createConsoleCommand(builder, scopeOff, cmdOff, this.nextRequestId++);
+        const payload = ClientMessage.createClientMessage(builder, ClientPayload.ConsoleCommand, cc);
+        builder.finish(payload);
+
+        const fbBytes = builder.asUint8Array();
+        const frame = new Uint8Array(1 + fbBytes.length);
+        frame[0] = 0x01;
+        frame.set(fbBytes, 1);
+        this.gameWs.send(frame.buffer);
+    }
+
+    private handleGameMessage(data: Uint8Array): void {
+        if (data.length < 2 || data[0] !== 0x01) return;
+
+        const buf = new flatbuffers.ByteBuffer(data.slice(1));
+        const msg = ServerMessage.getRootAsServerMessage(buf);
+        if (!msg) return;
+
+        if (msg.payloadType() === ServerPayload.ConsoleResponse) {
+            const resp = msg.payload(new ConsoleResponse()) as ConsoleResponse;
+            if (!resp) return;
+            const output = resp.output() ?? '';
+            const cls = resp.success() ? 'exec-output' : 'exec-error';
+            this.appendCommandLine(output, cls);
+        }
+    }
+
+    private appendCommandLine(text: string, cls = ''): void {
+        if (!this.output) return;
+        const div = document.createElement('div');
+        div.className = `debug-line ${cls}`;
+        div.textContent = text;
+        this.output.appendChild(div);
+        this.lineCount++;
+        if (this.autoScroll) this.output.scrollTop = this.output.scrollHeight;
     }
 
     /** Connect to the log server WebSocket */

@@ -20,6 +20,7 @@
 #include "Server/PerfMetrics.h"
 #include "Server/RoomManager.h"
 #include "Server/MapProcessor.h"
+#include "Server/LuaExecEngine.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogNet.h"
 #include "System/SpringLog/SpringLogSqlite.h"
@@ -126,6 +127,9 @@ int main(int argc, char* argv[])
         int startPos = -1;
     };
     std::vector<RequestedAI> requestedAIs;
+
+    // Console command execution queue (pushed by WS thread, drained by sim)
+    LuaExecEngine luaExecEngine;
 
     // Parse a "field1:field2:field3" spec used by --player and --ai.
     // Returns {field1, field2, field3}; missing trailing fields are
@@ -1099,6 +1103,17 @@ int main(int argc, char* argv[])
                     }
                     break;
                 }
+                case SpringWeb::ClientPayload_ConsoleCommand: {
+                    auto* cc = clientMsg->payload_as_ConsoleCommand();
+                    if (!cc) break;
+                    LuaExecRequest req;
+                    req.requestId = cc->request_id();
+                    req.scope = cc->scope() ? cc->scope()->str() : "server";
+                    req.code = cc->command() ? cc->command()->str() : "";
+                    req.clientId = msg.clientId;
+                    luaExecEngine.Push(std::move(req));
+                    break;
+                }
                 default:
                     break;
             }
@@ -1147,6 +1162,18 @@ int main(int argc, char* argv[])
         if (sim.HasGameStarted()) {
             sim.SimFrame();
             springlog_set_frame(sim.GetFrameNum());
+        }
+
+        // Process pending console commands (from WS thread)
+        {
+            LuaExecRequest req;
+            while (luaExecEngine.TryPop(req)) {
+                auto result = ExecuteLuaExecRequest(req);
+                auto resp = Protocol::BuildConsoleResponse(
+                    result.requestId, result.scope, result.success,
+                    result.output, result.success ? 0 : 4);
+                net.Send(result.clientId, resp.data(), resp.size());
+            }
         }
 
         // Check win condition every ~1s (30 ticks) after frame 30

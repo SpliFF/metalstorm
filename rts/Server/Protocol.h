@@ -88,6 +88,27 @@ inline std::vector<uint8_t> BuildServerError(uint16_t code, const std::string& m
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_ServerError, err.Union());
 }
 
+/// Build a ConsoleResponse.
+inline std::vector<uint8_t> BuildConsoleResponse(
+    uint32_t requestId,
+    const std::string& scope,
+    bool success,
+    const std::string& output,
+    uint8_t level = 0)
+{
+    flatbuffers::FlatBufferBuilder fbb(256 + output.size());
+    auto resp = SpringWeb::CreateConsoleResponseDirect(fbb,
+        requestId, scope.c_str(), success, output.c_str(), level);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_ConsoleResponse, resp.Union());
+}
+
+/// Build a GameStarted message (game server → lobby).
+inline std::vector<uint8_t> BuildGameStarted(uint32_t frame) {
+    flatbuffers::FlatBufferBuilder fbb(64);
+    auto gs = SpringWeb::CreateGameStarted(fbb, frame);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameStarted, gs.Union());
+}
+
 /// Build a GameEventBatch containing combat events.
 inline std::vector<uint8_t> BuildCombatEventBatch(
     uint32_t frame,

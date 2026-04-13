@@ -21,4 +21,13 @@
         </div>
     </div>
     <div id="debug-console-output" class="debug-console-output"></div>
+    <div class="debug-console-input-bar">
+        <select id="debug-scope-select" title="Execution scope">
+            <option value="LuaRules">LuaRules</option>
+            <option value="LuaGaia">LuaGaia</option>
+            <option value="server">server</option>
+        </select>
+        <span id="debug-prompt" class="debug-prompt">LuaRules&gt;</span>
+        <input id="debug-command-input" type="text" placeholder="Enter command..." autocomplete="off" />
+    </div>
 </div>

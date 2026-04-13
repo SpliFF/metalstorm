@@ -100,3 +100,45 @@
 .debug-line.level-error .msg { color: #f55; }
 .debug-line.level-fatal { background: rgba(255, 0, 0, 0.12); }
 .debug-line.level-fatal .msg { color: #f00; font-weight: bold; }
+
+.debug-console-input-bar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    background: rgba(25, 25, 35, 0.98);
+    border-top: 1px solid #333;
+    flex-shrink: 0;
+}
+.debug-console-input-bar select {
+    background: #1a1a24;
+    color: #8af;
+    border: 1px solid #444;
+    border-radius: 3px;
+    padding: 2px 4px;
+    font-size: 11px;
+    font-family: inherit;
+}
+.debug-prompt {
+    color: #8af;
+    font-weight: bold;
+    white-space: nowrap;
+}
+.debug-console-input-bar input {
+    flex: 1;
+    background: #111;
+    color: #eee;
+    border: 1px solid #444;
+    border-radius: 3px;
+    padding: 4px 6px;
+    font-size: 12px;
+    font-family: inherit;
+}
+.debug-console-input-bar input:focus {
+    outline: none;
+    border-color: #68f;
+}
+
+.debug-line.exec-input { color: #8af; }
+.debug-line.exec-output { color: #af8; }
+.debug-line.exec-error { color: #f88; }
