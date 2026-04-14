@@ -1,0 +1,517 @@
+{
+	"info": {
+		"name": "Spring RTS Web",
+		"description": "HTTP API for Spring RTS Web servers.\n\nSetup:\n1. Set the `lobby_url`, `game_url`, and `log_url` collection variables\n2. Run \"Login\" to populate the `token` variable\n3. All authenticated requests use the token automatically\n\nSee docs/api.md for full reference.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{"key": "lobby_url", "value": "http://localhost:8011"},
+		{"key": "game_url", "value": "http://localhost:9100"},
+		{"key": "log_url", "value": "http://localhost:8010"},
+		{"key": "token", "value": ""},
+		{"key": "username", "value": "test1"},
+		{"key": "password", "value": "test"}
+	],
+	"auth": {
+		"type": "bearer",
+		"bearer": [{"key": "token", "value": "{{token}}"}]
+	},
+	"item": [
+		{
+			"name": "Auth",
+			"item": [
+				{
+					"name": "Login",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"    var data = pm.response.json();",
+									"    pm.collectionVariables.set('token', data.token);",
+									"    pm.test('Login successful', function() {",
+									"        pm.expect(data.token).to.be.a('string');",
+									"        pm.expect(data.user_id).to.be.a('number');",
+									"    });",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"auth": {"type": "noauth"},
+						"method": "POST",
+						"url": "{{lobby_url}}/api/auth/login",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"username\":\"{{username}}\",\"password\":\"{{password}}\"}"
+						}
+					}
+				},
+				{
+					"name": "Register",
+					"request": {
+						"auth": {"type": "noauth"},
+						"method": "POST",
+						"url": "{{lobby_url}}/api/auth/register",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"username\":\"newplayer\",\"password\":\"secret\"}"
+						}
+					}
+				},
+				{
+					"name": "Version",
+					"request": {
+						"auth": {"type": "noauth"},
+						"method": "GET",
+						"url": "{{lobby_url}}/api/version"
+					}
+				}
+			]
+		},
+		{
+			"name": "Rooms",
+			"item": [
+				{
+					"name": "List Rooms",
+					"request": {
+						"auth": {"type": "noauth"},
+						"method": "GET",
+						"url": "{{lobby_url}}/api/rooms"
+					}
+				},
+				{
+					"name": "Create Room",
+					"request": {
+						"method": "POST",
+						"url": "{{lobby_url}}/api/rooms",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"name\":\"Test Room\",\"map\":\"scorched_crossing_v2.4\",\"game\":\"papertanks\"}"
+						}
+					}
+				},
+				{
+					"name": "Join Room",
+					"request": {
+						"method": "POST",
+						"url": "{{lobby_url}}/api/rooms/join",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"room_id\":1}"
+						}
+					}
+				},
+				{
+					"name": "Set Team",
+					"request": {
+						"method": "POST",
+						"url": "{{lobby_url}}/api/rooms/team",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"team\":0}"
+						}
+					}
+				},
+				{
+					"name": "Set Start Position",
+					"request": {
+						"method": "POST",
+						"url": "{{lobby_url}}/api/rooms/startpos",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"pos\":0}"
+						}
+					}
+				},
+				{
+					"name": "Ready",
+					"request": {
+						"method": "POST",
+						"url": "{{lobby_url}}/api/rooms/ready",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"ready\":true}"
+						}
+					}
+				},
+				{
+					"name": "Unready",
+					"request": {
+						"method": "POST",
+						"url": "{{lobby_url}}/api/rooms/ready",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"ready\":false}"
+						}
+					}
+				},
+				{
+					"name": "Add AI",
+					"request": {
+						"method": "POST",
+						"url": "{{lobby_url}}/api/rooms/ai/add",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"ai_id\":\"basic_ai\",\"name\":\"Basic AI\",\"team\":1}"
+						}
+					}
+				},
+				{
+					"name": "Remove AI",
+					"request": {
+						"method": "POST",
+						"url": "{{lobby_url}}/api/rooms/ai/remove",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"slot_index\":0}"
+						}
+					}
+				},
+				{
+					"name": "Kick Player",
+					"request": {
+						"method": "POST",
+						"url": "{{lobby_url}}/api/rooms/kick",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"target_player_id\":0}"
+						}
+					}
+				},
+				{
+					"name": "Start Game",
+					"request": {
+						"method": "POST",
+						"url": "{{lobby_url}}/api/rooms/start",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {"mode": "raw", "raw": "{}"}
+					}
+				},
+				{
+					"name": "Leave Room",
+					"request": {
+						"method": "POST",
+						"url": "{{lobby_url}}/api/rooms/leave",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {"mode": "raw", "raw": "{}"}
+					}
+				},
+				{
+					"name": "Close Room",
+					"request": {
+						"method": "POST",
+						"url": "{{lobby_url}}/api/rooms/close",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {"mode": "raw", "raw": "{}"}
+					}
+				}
+			]
+		},
+		{
+			"name": "Lobby Exec",
+			"item": [
+				{
+					"name": "List Rooms (exec)",
+					"request": {
+						"method": "POST",
+						"url": "{{lobby_url}}/api/exec",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"scope\":\"lobby\",\"code\":\"rooms\"}"
+						}
+					}
+				},
+				{
+					"name": "Process List",
+					"request": {
+						"method": "POST",
+						"url": "{{lobby_url}}/api/exec",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"scope\":\"lobby\",\"code\":\"process list\"}"
+						}
+					}
+				},
+				{
+					"name": "SQL Query",
+					"request": {
+						"method": "POST",
+						"url": "{{lobby_url}}/api/exec",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"scope\":\"sql\",\"code\":\"SELECT id, username, role FROM users LIMIT 10\"}"
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Maps & Assets",
+			"item": [
+				{
+					"name": "List Maps",
+					"request": {
+						"auth": {"type": "noauth"},
+						"method": "GET",
+						"url": "{{lobby_url}}/api/maps"
+					}
+				},
+				{
+					"name": "Map Thumbnail",
+					"request": {
+						"auth": {"type": "noauth"},
+						"method": "GET",
+						"url": "{{lobby_url}}/api/maps/thumb/scorched_crossing_v2.4"
+					}
+				},
+				{
+					"name": "Processes",
+					"request": {
+						"auth": {"type": "noauth"},
+						"method": "GET",
+						"url": "{{lobby_url}}/api/processes"
+					}
+				}
+			]
+		},
+		{
+			"name": "Game Server",
+			"item": [
+				{
+					"name": "Map Info",
+					"request": {
+						"auth": {"type": "noauth"},
+						"method": "GET",
+						"url": "{{game_url}}/api/map/info"
+					}
+				},
+				{
+					"name": "Metrics",
+					"request": {
+						"auth": {"type": "noauth"},
+						"method": "GET",
+						"url": "{{game_url}}/api/metrics"
+					}
+				},
+				{
+					"name": "Exec: Frame",
+					"request": {
+						"method": "POST",
+						"url": "{{game_url}}/api/exec",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"scope\":\"server\",\"code\":\"frame\"}"
+						}
+					}
+				},
+				{
+					"name": "Exec: State",
+					"request": {
+						"method": "POST",
+						"url": "{{game_url}}/api/exec",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"scope\":\"server\",\"code\":\"state\"}"
+						}
+					}
+				},
+				{
+					"name": "Exec: Units",
+					"request": {
+						"method": "POST",
+						"url": "{{game_url}}/api/exec",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"scope\":\"server\",\"code\":\"units\"}"
+						}
+					}
+				},
+				{
+					"name": "Exec: Defs",
+					"request": {
+						"method": "POST",
+						"url": "{{game_url}}/api/exec",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"scope\":\"server\",\"code\":\"defs\"}"
+						}
+					}
+				},
+				{
+					"name": "Exec: Pause",
+					"request": {
+						"method": "POST",
+						"url": "{{game_url}}/api/exec",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"scope\":\"server\",\"code\":\"pause\"}"
+						}
+					}
+				},
+				{
+					"name": "Exec: Unpause",
+					"request": {
+						"method": "POST",
+						"url": "{{game_url}}/api/exec",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"scope\":\"server\",\"code\":\"unpause\"}"
+						}
+					}
+				},
+				{
+					"name": "Lua: Math",
+					"request": {
+						"method": "POST",
+						"url": "{{game_url}}/api/exec",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"scope\":\"LuaRules\",\"code\":\"return 1+1\"}"
+						}
+					}
+				},
+				{
+					"name": "Lua: GetAllUnits",
+					"request": {
+						"method": "POST",
+						"url": "{{game_url}}/api/exec",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"scope\":\"LuaRules\",\"code\":\"return Spring.GetAllUnits()\"}"
+						}
+					}
+				},
+				{
+					"name": "Lua: GetGameFrame",
+					"request": {
+						"method": "POST",
+						"url": "{{game_url}}/api/exec",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"scope\":\"LuaRules\",\"code\":\"return Spring.GetGameFrame()\"}"
+						}
+					}
+				},
+				{
+					"name": "Lua: Multi-line",
+					"request": {
+						"method": "POST",
+						"url": "{{game_url}}/api/exec",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"scope\":\"LuaRules\",\"code\":\"local t={} for i=1,5 do t[i]=i*i end return t\"}"
+						}
+					}
+				},
+				{
+					"name": "WebRTC: Offer",
+					"request": {
+						"method": "POST",
+						"url": "{{game_url}}/api/rtc/offer",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\"sdp\":\"v=0\\r\\no=- 0 0 IN IP4 127.0.0.1\\r\\n\"}"
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Log Server",
+			"item": [
+				{
+					"name": "Health Check",
+					"request": {
+						"auth": {"type": "noauth"},
+						"method": "GET",
+						"url": "{{log_url}}/api/logs/sources"
+					}
+				},
+				{
+					"name": "Recent Logs (all)",
+					"request": {
+						"auth": {"type": "noauth"},
+						"method": "GET",
+						"url": {
+							"raw": "{{log_url}}/api/logs/0?limit=20&level=0",
+							"host": ["{{log_url}}"],
+							"path": ["api", "logs", "0"],
+							"query": [
+								{"key": "limit", "value": "20"},
+								{"key": "level", "value": "0"}
+							]
+						}
+					}
+				},
+				{
+					"name": "Error Logs Only",
+					"request": {
+						"auth": {"type": "noauth"},
+						"method": "GET",
+						"url": {
+							"raw": "{{log_url}}/api/logs/0?limit=50&level=4",
+							"host": ["{{log_url}}"],
+							"path": ["api", "logs", "0"],
+							"query": [
+								{"key": "limit", "value": "50"},
+								{"key": "level", "value": "4"}
+							]
+						}
+					}
+				},
+				{
+					"name": "Search Logs",
+					"request": {
+						"auth": {"type": "noauth"},
+						"method": "GET",
+						"url": {
+							"raw": "{{log_url}}/api/logs/search?q=error&limit=20",
+							"host": ["{{log_url}}"],
+							"path": ["api", "logs", "search"],
+							"query": [
+								{"key": "q", "value": "error"},
+								{"key": "limit", "value": "20"}
+							]
+						}
+					}
+				},
+				{
+					"name": "Game Sessions",
+					"request": {
+						"auth": {"type": "noauth"},
+						"method": "GET",
+						"url": "{{log_url}}/api/sessions"
+					}
+				}
+			]
+		}
+	]
+}
