@@ -337,7 +337,11 @@ if(UNIX)
     target_link_libraries(spring-logserver PRIVATE pthread dl)
 endif()
 
-# === springcli — CLI tool + libspringapi ===
+# === libspringapi (standalone client library) ===
+set(SPRINGAPI_WEBRTC ON CACHE BOOL "Enable WebRTC in libspringapi" FORCE)
+add_subdirectory(libspringapi)
+
+# === springcli — CLI tool ===
 add_subdirectory(tools/springcli)
 
 # === compile_commands.json symlink for clangd ===

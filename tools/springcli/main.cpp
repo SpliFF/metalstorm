@@ -19,7 +19,7 @@
 //
 // Exit codes: 0 = success, 1 = error/failure, 2 = usage error
 
-#include "springapi.h"
+#include "springapi/springapi.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -236,7 +236,7 @@ int main(int argc, char** argv) {
         std::string query = argv[2];
         parseOpts(3);
         if (!ensureAuth(lobbyUrl)) return 1;
-        auto r = springapi::lobbyExec(lobbyUrl, "sql", query, token);
+        auto r = springapi::exec(lobbyUrl, "sql", query, token);
         if (quiet) {
             printf("%s\n", r.output.c_str());
         } else {

@@ -1,9 +1,7 @@
-// libspringapi — HTTP-based API for Spring RTS Web servers.
-//
-// Uses raw POSIX sockets for HTTP. No external dependencies
-// beyond the C standard library and POSIX networking.
+// libspringapi — HTTP implementation.
+// Uses raw POSIX sockets. Zero external dependencies.
 
-#include "springapi.h"
+#include "springapi/springapi.h"
 
 #include <cstring>
 #include <cstdio>
@@ -18,15 +16,11 @@ namespace springapi {
 
 namespace {
 
-// Parse "http://host:port" into host and port components.
-// Returns false if the URL doesn't match.
 bool parseUrl(const std::string& url, std::string& host, int& port, std::string& path) {
     std::string s = url;
-    // Strip protocol
     if (s.rfind("http://", 0) == 0) s = s.substr(7);
-    else if (s.rfind("https://", 0) == 0) return false; // no TLS support
+    else if (s.rfind("https://", 0) == 0) return false;
 
-    // Split host:port from path
     auto slashPos = s.find('/');
     std::string hostPort;
     if (slashPos != std::string::npos) {
@@ -37,7 +31,6 @@ bool parseUrl(const std::string& url, std::string& host, int& port, std::string&
         path = "/";
     }
 
-    // Split host and port
     auto colonPos = hostPort.rfind(':');
     if (colonPos != std::string::npos) {
         host = hostPort.substr(0, colonPos);
@@ -49,7 +42,6 @@ bool parseUrl(const std::string& url, std::string& host, int& port, std::string&
     return !host.empty() && port > 0;
 }
 
-// Perform a raw HTTP request and return the response body.
 std::string httpRequest(const std::string& method, const std::string& url,
                         const std::string& body = "",
                         const std::string& authToken = "") {
@@ -57,7 +49,6 @@ std::string httpRequest(const std::string& method, const std::string& url,
     int port;
     if (!parseUrl(url, host, port, path)) return "";
 
-    // Resolve host
     struct addrinfo hints{}, *res;
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
@@ -75,14 +66,12 @@ std::string httpRequest(const std::string& method, const std::string& url,
     }
     freeaddrinfo(res);
 
-    // Build HTTP request
     std::ostringstream req;
     req << method << " " << path << " HTTP/1.1\r\n";
     req << "Host: " << host << ":" << port << "\r\n";
     req << "Connection: close\r\n";
-    if (!authToken.empty()) {
+    if (!authToken.empty())
         req << "Authorization: Bearer " << authToken << "\r\n";
-    }
     if (!body.empty()) {
         req << "Content-Type: application/json\r\n";
         req << "Content-Length: " << body.size() << "\r\n";
@@ -93,7 +82,6 @@ std::string httpRequest(const std::string& method, const std::string& url,
     std::string reqStr = req.str();
     send(sock, reqStr.c_str(), reqStr.size(), 0);
 
-    // Read response
     std::string response;
     char buf[4096];
     while (true) {
@@ -103,16 +91,14 @@ std::string httpRequest(const std::string& method, const std::string& url,
     }
     close(sock);
 
-    // Strip HTTP headers — find \r\n\r\n
     auto headerEnd = response.find("\r\n\r\n");
     if (headerEnd == std::string::npos) return response;
 
     std::string respBody = response.substr(headerEnd + 4);
 
     // Handle chunked transfer encoding
-    auto tePos = response.find("Transfer-Encoding: chunked");
-    if (tePos != std::string::npos && tePos < headerEnd) {
-        // Decode chunked body
+    if (response.find("Transfer-Encoding: chunked") != std::string::npos &&
+        response.find("Transfer-Encoding: chunked") < headerEnd) {
         std::string decoded;
         size_t pos = 0;
         while (pos < respBody.size()) {
@@ -121,10 +107,9 @@ std::string httpRequest(const std::string& method, const std::string& url,
             long chunkSize = strtol(respBody.c_str() + pos, nullptr, 16);
             if (chunkSize <= 0) break;
             pos = lineEnd + 2;
-            if (pos + chunkSize <= respBody.size()) {
+            if (pos + chunkSize <= respBody.size())
                 decoded.append(respBody, pos, chunkSize);
-            }
-            pos += chunkSize + 2; // skip chunk data + \r\n
+            pos += chunkSize + 2;
         }
         return decoded;
     }
@@ -132,7 +117,32 @@ std::string httpRequest(const std::string& method, const std::string& url,
     return respBody;
 }
 
-// Simple JSON string escape
+} // namespace
+
+// ─── JSON helpers ───
+
+std::string jsonExtract(const std::string& json, const std::string& key) {
+    std::string needle = "\"" + key + "\"";
+    auto pos = json.find(needle);
+    if (pos == std::string::npos) return "";
+    pos = json.find(':', pos + needle.size());
+    if (pos == std::string::npos) return "";
+    pos++;
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) pos++;
+    if (pos >= json.size()) return "";
+    if (json[pos] == '"') {
+        auto end = pos + 1;
+        while (end < json.size() && json[end] != '"') {
+            if (json[end] == '\\') end++;
+            end++;
+        }
+        return json.substr(pos + 1, end - pos - 1);
+    }
+    auto end = json.find_first_of(",}\n ", pos);
+    if (end == std::string::npos) end = json.size();
+    return json.substr(pos, end - pos);
+}
+
 std::string jsonEscape(const std::string& s) {
     std::string out;
     for (char c : s) {
@@ -148,37 +158,7 @@ std::string jsonEscape(const std::string& s) {
     return out;
 }
 
-// Extract a string value from JSON by key. Minimal, no nesting.
-std::string jsonExtract(const std::string& json, const std::string& key) {
-    std::string needle = "\"" + key + "\"";
-    auto pos = json.find(needle);
-    if (pos == std::string::npos) return "";
-
-    pos = json.find(':', pos + needle.size());
-    if (pos == std::string::npos) return "";
-    pos++;
-    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) pos++;
-
-    if (pos >= json.size()) return "";
-
-    // String value
-    if (json[pos] == '"') {
-        auto end = pos + 1;
-        while (end < json.size() && json[end] != '"') {
-            if (json[end] == '\\') end++;
-            end++;
-        }
-        return json.substr(pos + 1, end - pos - 1);
-    }
-    // Boolean or number
-    auto end = json.find_first_of(",}\n ", pos);
-    if (end == std::string::npos) end = json.size();
-    return json.substr(pos, end - pos);
-}
-
-} // namespace
-
-// ─── Public API ───
+// ─── HTTP API ───
 
 std::string httpGet(const std::string& url) {
     return httpRequest("GET", url);
@@ -193,10 +173,7 @@ AuthResult login(const std::string& serverUrl,
                  const std::string& username, const std::string& password) {
     std::string body = "{\"username\":\"" + jsonEscape(username)
         + "\",\"password\":\"" + jsonEscape(password) + "\"}";
-    std::string url = serverUrl;
-    if (url.back() != '/') url += '/';
-    url += "api/auth/login";
-
+    std::string url = serverUrl + "/api/auth/login";
     std::string resp = httpPost(url, body);
     if (resp.empty()) return {false, "", "connection failed"};
 
@@ -207,7 +184,7 @@ AuthResult login(const std::string& serverUrl,
     if (r.success) {
         r.username = jsonExtract(resp, "username");
         r.role = jsonExtract(resp, "role");
-        std::string uid = jsonExtract(resp, "user_id");
+        auto uid = jsonExtract(resp, "user_id");
         r.userId = uid.empty() ? 0 : std::atoll(uid.c_str());
     }
     return r;
@@ -217,10 +194,7 @@ AuthResult registerUser(const std::string& serverUrl,
                         const std::string& username, const std::string& password) {
     std::string body = "{\"username\":\"" + jsonEscape(username)
         + "\",\"password\":\"" + jsonEscape(password) + "\"}";
-    std::string url = serverUrl;
-    if (url.back() != '/') url += '/';
-    url += "api/auth/register";
-
+    std::string url = serverUrl + "/api/auth/register";
     std::string resp = httpPost(url, body);
     if (resp.empty()) return {false, "", "connection failed"};
 
@@ -231,7 +205,7 @@ AuthResult registerUser(const std::string& serverUrl,
     if (r.success) {
         r.username = jsonExtract(resp, "username");
         r.role = jsonExtract(resp, "role");
-        std::string uid = jsonExtract(resp, "user_id");
+        auto uid = jsonExtract(resp, "user_id");
         r.userId = uid.empty() ? 0 : std::atoll(uid.c_str());
     }
     return r;
@@ -241,14 +215,10 @@ ExecResult exec(const std::string& serverUrl, const std::string& scope,
                 const std::string& code, const std::string& token) {
     std::string body = "{\"scope\":\"" + jsonEscape(scope)
         + "\",\"code\":\"" + jsonEscape(code) + "\"}";
-    std::string url = serverUrl;
-    if (url.back() != '/') url += '/';
-    url += "api/exec";
-
+    std::string url = serverUrl + "/api/exec";
     std::string resp = httpPost(url, body, token);
     if (resp.empty()) return {false, "connection failed"};
 
-    // Check for auth error
     std::string error = jsonExtract(resp, "error");
     if (!error.empty()) return {false, error};
 
@@ -256,11 +226,6 @@ ExecResult exec(const std::string& serverUrl, const std::string& scope,
     r.success = jsonExtract(resp, "success") == "true";
     r.output = jsonExtract(resp, "output");
     return r;
-}
-
-ExecResult lobbyExec(const std::string& lobbyUrl, const std::string& scope,
-                     const std::string& code, const std::string& token) {
-    return exec(lobbyUrl, scope, code, token);
 }
 
 std::string getLogs(const std::string& logServerUrl, int roomId,
