@@ -70,3 +70,8 @@ infolog.txt
 
 # VS Code user settings (workspace file IS committed, user prefs are not)
 .vscode/*.code-snippets
+
+# Claude Code — share skills via repo, keep everything else untracked
+!.claude/
+.claude/*
+!.claude/skills/
