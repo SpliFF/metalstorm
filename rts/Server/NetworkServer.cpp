@@ -7,6 +7,7 @@
  */
 
 #include "NetworkServer.h"
+#include "CacheControl.h"
 #include "System/SpringLog/SpringLog.h"
 
 #define LOG_SECTION "net"
@@ -153,6 +154,7 @@ void NetworkServer::NetworkThreadFunc(int port) {
             res->writeHeader("Content-Type", result.contentType);
             res->writeHeader("Access-Control-Allow-Origin", "*");
             res->writeHeader("Cache-Control", result.cacheControl);
+            res->writeHeader("X-Build-Stamp", CacheControl::BuildStamp());
             std::string_view body(
                 reinterpret_cast<const char*>(result.body.data()),
                 result.body.size());
@@ -187,6 +189,7 @@ void NetworkServer::NetworkThreadFunc(int port) {
                 res->writeHeader("Access-Control-Allow-Origin", "*");
                 res->writeHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
                 res->writeHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+                res->writeHeader("X-Build-Stamp", CacheControl::BuildStamp());
                 std::string_view respBody(
                     reinterpret_cast<const char*>(result.body.data()),
                     result.body.size());

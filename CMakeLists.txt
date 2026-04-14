@@ -5,6 +5,23 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Build stamp for cache-busting: git short hash + configure timestamp.
+# Changes on every cmake configure (rebuild), so asset URLs with ?v=<stamp>
+# naturally bust browser caches on new deployments.
+execute_process(
+    COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_SHORT_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT GIT_SHORT_HASH)
+    set(GIT_SHORT_HASH "unknown")
+endif()
+string(TIMESTAMP BUILD_TIME "%Y%m%d%H%M%S")
+set(SPRING_BUILD_STAMP "${GIT_SHORT_HASH}-${BUILD_TIME}")
+message(STATUS "Build stamp: ${SPRING_BUILD_STAMP}")
+
 # Headless server defines
 add_definitions(
     -DHEADLESS
@@ -13,6 +30,7 @@ add_definitions(
     -DNOT_USING_CREG
     -DAUTHORITATIVE_SERVER
     -DDEDICATED_NOSSE
+    -DSPRING_BUILD_STAMP="${SPRING_BUILD_STAMP}"
 )
 
 # Suppress warnings from legacy code during cleanup

@@ -23,6 +23,7 @@
 #include "Server/LuaExecEngine.h"
 #include "Server/LuaDebugger.h"
 #include "Server/HttpAuth.h"
+#include "Server/CacheControl.h"
 #include "Server/WebRTCServer.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogNet.h"
@@ -185,6 +186,8 @@ int main(int argc, char* argv[])
             logSqlite = argv[++i];
         } else if (arg == "--debug") {
             debugMode = true;
+        } else if (arg == "--no-cache") {
+            CacheControl::SetNoCache(true);
         } else if (arg == "--log-messages") {
             logMessages = true;
         } else if (arg == "--player" && i + 1 < argc) {

@@ -15,7 +15,7 @@ import { buildTerrainMesh, loadTerrainTextures, type MapDimensions } from './cor
 import { LobbyUI } from './lobby/lobby-ui.js';
 import { Minimap } from './core/minimap.js';
 import { Connection } from './core/connection.js';
-import { CONFIG } from './config.js';
+import { CONFIG, fetchBuildStamp, stampUrl } from './config.js';
 import type { ParsedMapData } from './core/map-data.js';
 import { renderMapFeatures } from './core/feature-renderer.js';
 import { RTSCamera } from './core/rts-camera.js';
@@ -587,7 +587,8 @@ function resolveInitialGameId(): string | null {
     return localStorage.getItem('springrts-game-id');
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+    await fetchBuildStamp();
     createHUD();
     debugConsole.init();
 

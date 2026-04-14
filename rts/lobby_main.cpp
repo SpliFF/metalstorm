@@ -18,6 +18,7 @@
 #include "Server/AI/AIDiscovery.h"
 #include "Server/GameDiscovery.h"
 #include "Server/HttpAuth.h"
+#include "Server/CacheControl.h"
 #include "System/SpringLog/SpringLog.h"
 #include <cctype>
 
@@ -237,6 +238,7 @@ int main(int argc, char* argv[])
         else if (arg == "--log-file" && i + 1 < argc) logFile = argv[++i];
         else if (arg == "--log-level" && i + 1 < argc) logLevel = std::atoi(argv[++i]);
         else if (arg == "--debug") { debugMode = true; logLevel = SPRING_LOG_DEBUG; }
+        else if (arg == "--no-cache") { CacheControl::SetNoCache(true); }
         else if (arg == "--game" && i + 1 < argc) {
             // Back-compat: `--game <path>` is translated into
             // `--games-dir <parent>` so existing scripts that point
@@ -427,7 +429,7 @@ int main(int argc, char* argv[])
             .contentType = ct,
             .body = std::move(data),
             .status = 200,
-            .cacheControl = "public, max-age=300",
+            .cacheControl = CacheControl::MetadataHeader(),
         };
     });
 
@@ -469,7 +471,7 @@ int main(int argc, char* argv[])
             .contentType = ct,
             .body = std::move(data),
             .status = 200,
-            .cacheControl = "public, max-age=300",
+            .cacheControl = CacheControl::MetadataHeader(),
         };
     });
 
@@ -506,7 +508,7 @@ int main(int argc, char* argv[])
             .contentType = ct,
             .body = std::move(data),
             .status = 200,
-            .cacheControl = "public, max-age=3600",
+            .cacheControl = CacheControl::StaticAssetHeader(),
         };
     });
 
@@ -540,7 +542,7 @@ int main(int argc, char* argv[])
             .contentType = ct,
             .body = std::move(data),
             .status = 200,
-            .cacheControl = "public, max-age=3600",
+            .cacheControl = CacheControl::StaticAssetHeader(),
         };
     });
 
@@ -573,7 +575,7 @@ int main(int argc, char* argv[])
                 .contentType = "image/webp",
                 .body = std::move(data),
                 .status = 200,
-                .cacheControl = "public, max-age=3600",
+                .cacheControl = CacheControl::StaticAssetHeader(),
             };
         }
 
@@ -596,7 +598,7 @@ int main(int argc, char* argv[])
                         .contentType = (ext == ".png") ? "image/png" : "image/jpeg",
                         .body = std::move(data),
                         .status = 200,
-                        .cacheControl = "public, max-age=3600",
+                        .cacheControl = CacheControl::StaticAssetHeader(),
                     };
                 }
             }
@@ -632,6 +634,16 @@ int main(int argc, char* argv[])
 
     // --- HTTP auth endpoints ---
     HttpAuth::RegisterEndpoints(net, db);
+
+    // Version endpoint — clients use this to get the build stamp for cache-busting
+    net.AddHttpGet("/api/version", [](const std::string&) -> HttpResponse {
+        std::string json = std::string("{\"engine\":\"springweb\"")
+            + ",\"stamp\":\"" + CacheControl::BuildStamp() + "\""
+            + ",\"no_cache\":" + (CacheControl::IsNoCache() ? "true" : "false") + "}";
+        return {.contentType = "application/json",
+                .body = {json.begin(), json.end()}, .status = 200,
+                .cacheControl = CacheControl::DynamicHeader()};
+    });
 
     // --- HTTP exec endpoint (for CLI/curl access to lobby commands) ---
     net.AddHttpPost("/api/exec", [&rooms, &gameServers, mapDb, &db](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {

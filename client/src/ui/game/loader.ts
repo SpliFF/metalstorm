@@ -12,6 +12,7 @@
  * don't need to know which source a template came from.
  */
 
+import { stampUrl } from '../../config.js';
 import hudHtml from '../hud/hud.html?raw';
 import hudCss from '../hud/hud.css?raw';
 import quitConfirmHtml from '../quit-confirm/quit-confirm.html?raw';
@@ -73,7 +74,7 @@ export async function loadGameTemplates(
     const fetchOne = async (key: keyof GameTemplates) => {
         const path = TEMPLATE_PATHS[key];
         try {
-            const res = await fetch(`${base}/${path}`);
+            const res = await fetch(stampUrl(`${base}/${path}`));
             if (res.ok) {
                 result[key] = await res.text();
             }

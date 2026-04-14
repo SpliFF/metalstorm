@@ -26,6 +26,7 @@ import '@babylonjs/loaders/glTF/index.js';
 import type { EntityStateSnapshot } from './entity-state.js';
 import { EntityInterpolator } from './entity-interpolator.js';
 import type { UnitDefInfo } from './connection.js';
+import { stampUrl } from '../config.js';
 
 const TEAM_COLORS = [
     new Color3(0.2, 0.5, 1.0),
@@ -142,7 +143,7 @@ export class EntityRenderer {
             const fileName = def.modelUrl.substring(lastSlash + 1);
 
             const result = await SceneLoader.ImportMeshAsync(
-                '', baseUrl, fileName, this.scene,
+                '', stampUrl(baseUrl), fileName, this.scene,
             );
 
             // Pick the first mesh with actual geometry

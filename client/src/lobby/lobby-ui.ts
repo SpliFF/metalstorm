@@ -12,7 +12,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 import { Connection, type ConnectionState } from '../core/connection.js';
-import { CONFIG } from '../config.js';
+import { CONFIG, stampUrl } from '../config.js';
 import { ClientPayload } from '../protocol/spring-web/client-payload.js';
 import { RoomCreate } from '../protocol/spring-web/room-create.js';
 import { RoomJoin } from '../protocol/spring-web/room-join.js';
@@ -327,7 +327,7 @@ export class LobbyUI {
         this.currentRoom = null;
 
         // Fetch available maps
-        fetch(`${CONFIG.httpUrl}/api/maps`).then(r => r.ok ? r.json() : []).then(maps => {
+        fetch(stampUrl(`${CONFIG.httpUrl}/api/maps`)).then(r => r.ok ? r.json() : []).then(maps => {
             this.availableMaps = maps;
             this.renderMapOptions();
         }).catch(() => {});
@@ -402,7 +402,7 @@ export class LobbyUI {
             return renderTemplate(this.templates.browserMapCard, {
                 id: this.esc(m.id),
                 name: this.esc(m.name),
-                thumb_url: `${CONFIG.httpUrl}/api/maps/thumb/${encodeURIComponent(m.id)}`,
+                thumb_url: stampUrl(`${CONFIG.httpUrl}/api/maps/thumb/${encodeURIComponent(m.id)}`),
                 size_label: `${m.mapx}×${m.mapy} (${sizeKm} km²)`,
                 selected_class: m.id === this.selectedMapId ? 'selected' : '',
             });

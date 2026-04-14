@@ -12,7 +12,7 @@
 import { Connection } from './core/connection.js';
 import { CommandBuffer, CMD } from './core/command-buffer.js';
 import { parseEntityState, type EntityStateSnapshot } from './core/entity-state.js';
-import { CONFIG } from './config.js';
+import { CONFIG, stampUrl } from './config.js';
 
 const TEAM_COLORS = ['#3388ff', '#ff4444', '#44cc44', '#ffcc22'];
 
@@ -82,7 +82,7 @@ if (mapId) {
     img.onerror = () => { /* fall back to grid */ };
     // Lobby HTTP is on the same host as the game WebSocket but on the
     // lobby's port. The configured CONFIG.httpUrl points there.
-    img.src = `${CONFIG.httpUrl}/api/maps/thumb/${encodeURIComponent(mapId)}`;
+    img.src = stampUrl(`${CONFIG.httpUrl}/api/maps/thumb/${encodeURIComponent(mapId)}`);
 }
 const connection = new Connection({
     onStateChange(state) {

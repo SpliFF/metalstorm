@@ -15,6 +15,7 @@
  * class) don't need to know which is which.
  */
 
+import { stampUrl } from '../../config.js';
 import lobbyCss from './lobby.css?raw';
 import reconnectingHtml from './reconnecting.html?raw';
 import loginHtml from './login/login.html?raw';
@@ -91,7 +92,7 @@ export async function loadGameLobbyTemplates(
     const fetchOne = async (key: keyof LobbyTemplates) => {
         const path = TEMPLATE_PATHS[key];
         try {
-            const res = await fetch(`${base}/${path}`);
+            const res = await fetch(stampUrl(`${base}/${path}`));
             if (res.ok) {
                 result[key] = await res.text();
             }

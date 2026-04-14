@@ -31,6 +31,7 @@ import {
 import '@babylonjs/loaders/glTF/index.js';
 
 import type { ParsedMapData, MapFeatureInstance, MapFeatureDefInfo } from './map-data.js';
+import { stampUrl } from '../config.js';
 
 /// Hash a string to a stable RGB tint — used only for placeholder boxes
 /// so each fallback type still gets a distinct colour.
@@ -190,7 +191,7 @@ export async function renderMapFeatures(scene: Scene, map: ParsedMapData): Promi
                 const fileName = def.modelUrl.substring(lastSlash + 1);
 
                 const result = await SceneLoader.ImportMeshAsync(
-                    '', baseUrl, fileName, scene,
+                    '', stampUrl(baseUrl), fileName, scene,
                 );
 
                 const primary = pickPrimaryMesh(result.meshes);
