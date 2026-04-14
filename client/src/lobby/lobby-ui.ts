@@ -858,13 +858,19 @@ export class LobbyUI {
         const data = await this.lobbyPost('/api/rooms', {
             name, map: mapId, game: this.selectedGameId,
         });
-        if (data?.id) this.updateCurrentRoomFromJson(data);
+        if (data?.id) {
+            this.updateCurrentRoomFromJson(data);
+            if (this.currentRoom) this.showRoom();
+        }
     }
 
     private async sendJoinRoom(roomId: number): Promise<void> {
         if (!this.authToken) return;
         const data = await this.lobbyPost('/api/rooms/join', { room_id: roomId });
-        if (data?.id) this.updateCurrentRoomFromJson(data);
+        if (data?.id) {
+            this.updateCurrentRoomFromJson(data);
+            if (this.currentRoom) this.showRoom();
+        }
     }
 
     private async sendLeave(): Promise<void> {

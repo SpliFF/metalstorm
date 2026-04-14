@@ -31,6 +31,7 @@ import { GameUnitDef } from '../protocol/spring-web/game-unit-def.js';
 import { PlayerLeft } from '../protocol/spring-web/player-left.js';
 import { GameWeaponDefs } from '../protocol/spring-web/game-weapon-defs.js';
 import { GameWeaponDef } from '../protocol/spring-web/game-weapon-def.js';
+import { AuthRequest } from '../protocol/spring-web/auth-request.js';
 import { ServerClock } from './clock.js';
 import { parseEntityState, type EntityStateSnapshot } from './entity-state.js';
 import { parseProjectileState, type ProjectileStateSnapshot } from './projectile-state.js';
@@ -332,8 +333,10 @@ export class Connection {
         // Wait for data channels to open
         await channelReady;
 
-        // Connected via WebRTC
+        // Connected via WebRTC — send auth over the data channel so the
+        // game server creates a ClientSession for us.
         console.log(`[connection] WebRTC connected (clientId=${this.rtcClientId})`);
+        this.sendAuthRequest();
         this.setState('connected');
         this.events.onAuthenticated?.(this.playerId, this.sessionToken ?? '', this.myTeam);
 
@@ -352,6 +355,19 @@ export class Connection {
         this.pc = null;
         this.cleanup();
         this.setState('disconnected');
+    }
+
+    private sendAuthRequest(): void {
+        const builder = new flatbuffers.Builder(256);
+        const usernameOff = builder.createString(this.pendingUsername);
+        const tokenOff = this.sessionToken
+            ? builder.createString(this.sessionToken) : 0;
+        const passwordOff = this.pendingPassword
+            ? builder.createString(this.pendingPassword) : 0;
+        const auth = AuthRequest.createAuthRequest(
+            builder, usernameOff, passwordOff, tokenOff);
+        this.sendClientMessage(builder, ClientPayload.AuthRequest, auth);
+        console.log(`[connection] sent AuthRequest for '${this.pendingUsername}'`);
     }
 
     sendViewportUpdate(

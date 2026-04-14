@@ -42,7 +42,13 @@
 #define LOG_SECTION "lobby"
 
 static std::atomic<bool> keepRunning{true};
+static std::atomic<bool> restartRequested{false};
 static void signalHandler(int) { keepRunning.store(false); }
+static void restartHandler(int) { restartRequested.store(true); keepRunning.store(false); }
+
+// Saved for self-restart via execvp
+static int savedArgc = 0;
+static char** savedArgv = nullptr;
 
 /// Tracks a spawned game server process.
 struct GameServerInstance {
@@ -196,8 +202,12 @@ static bool isProcessAlive(pid_t pid) {
 
 int main(int argc, char* argv[])
 {
+    savedArgc = argc;
+    savedArgv = argv;
+
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
+    std::signal(SIGHUP, restartHandler);
     // Ignore SIGPIPE. The lobby writes to a handful of things that
     // can get their peer closed under us: WebSocket client sockets,
     // stdout/stderr (captured by mprocs or similar), and — not yet
@@ -696,6 +706,10 @@ int main(int argc, char* argv[])
                         + " port=" + std::to_string(inst.port);
                 }
                 if (output.empty()) output = "(no game servers)";
+            } else if (code == "restart") {
+                output = "restarting lobby server...";
+                restartRequested.store(true);
+                keepRunning.store(false);
             } else {
                 output = "unknown lobby command: " + code;
                 success = false;
@@ -758,7 +772,10 @@ int main(int argc, char* argv[])
                 + ",\"team\":" + std::to_string(ai.team)
                 + ",\"start_pos\":" + std::to_string(ai.startPos) + "}";
         }
-        json += "]}";
+        json += "]";
+        if (room->gameServerPort > 0)
+            json += ",\"game_server_port\":" + std::to_string(room->gameServerPort);
+        json += "}";
         return json;
     };
 
@@ -1042,6 +1059,43 @@ int main(int argc, char* argv[])
                 }
             }
         }
+    }
+
+    if (restartRequested.load()) {
+        SLOG(SPRING_LOG_NOTICE, "restart requested — persisting game server state...");
+
+        // Persist running game servers to SQLite so the new process
+        // can re-adopt them without killing active games.
+        if (mapDb) {
+            sqlite3_exec(mapDb, "DELETE FROM game_servers", nullptr, nullptr, nullptr);
+            for (auto& [rid, inst] : gameServers) {
+                if (inst.state == GameServerInstance::Starting ||
+                    inst.state == GameServerInstance::Running) {
+                    std::string sql = "INSERT INTO game_servers (room_id, port, pid) VALUES ("
+                        + std::to_string(rid) + "," + std::to_string(inst.port)
+                        + "," + std::to_string(inst.pid) + ")";
+                    sqlite3_exec(mapDb, sql.c_str(), nullptr, nullptr, nullptr);
+                    SLOG(SPRING_LOG_NOTICE, "persisted game server room=%u port=%d pid=%d",
+                        rid, inst.port, inst.pid);
+                }
+            }
+            sqlite3_close(mapDb);
+            mapDb = nullptr;
+        }
+
+        net.Stop();
+        db.Close();
+        SLOG(SPRING_LOG_NOTICE, "re-exec'ing: %s", savedArgv[0]);
+        springlog_sqlite_shutdown();
+        springlog_shutdown();
+
+        // Re-exec with the same arguments — replaces this process
+        // in-place, so PID is preserved and process managers don't
+        // see a crash.
+        execvp(savedArgv[0], savedArgv);
+        // If execvp returns, it failed
+        fprintf(stderr, "ERROR: restart failed: %s\n", strerror(errno));
+        return 1;
     }
 
     SLOG(SPRING_LOG_NOTICE, "shutting down...");

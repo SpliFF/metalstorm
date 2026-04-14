@@ -36,6 +36,9 @@ WebRTCServer::OfferResult WebRTCServer::HandleOfferInner(const std::string& sdpO
     rtc::Configuration config;
     // STUN server for ICE candidate gathering (public Google STUN)
     config.iceServers.emplace_back("stun:stun.l.google.com:19302");
+    // MapData can be several MB for large maps (heightmap + tileindex).
+    // Default SCTP max message size is 256KB which is too small.
+    config.maxMessageSize = 16 * 1024 * 1024; // 16 MB
 
     auto pc = std::make_shared<rtc::PeerConnection>(config);
     uint32_t clientId;
@@ -126,12 +129,9 @@ WebRTCServer::OfferResult WebRTCServer::HandleOfferInner(const std::string& sdpO
         }
     });
 
-    // Set the remote description (client's offer)
+    // Set the remote description (client's offer).
+    // libdatachannel auto-generates the answer and transitions to stable.
     pc->setRemoteDescription(rtc::Description(sdpOffer, rtc::Description::Type::Offer));
-
-    // libdatachannel generates the answer automatically after setRemoteDescription
-    // We need to set local description explicitly to trigger answer generation
-    pc->setLocalDescription(rtc::Description::Type::Answer);
 
     auto desc = pc->localDescription();
     if (!desc) {
@@ -170,7 +170,12 @@ void WebRTCServer::SendReliable(uint32_t clientId, const uint8_t* data, size_t l
     if (it == peers_.end() || !it->second.connected) return;
     auto& dc = it->second.controlChannel;
     if (dc && dc->isOpen()) {
-        dc->send(reinterpret_cast<const std::byte*>(data), len);
+        try {
+            dc->send(reinterpret_cast<const std::byte*>(data), len);
+        } catch (const std::exception& e) {
+            SLOG(SPRING_LOG_ERROR, "SendReliable failed for client %u (%zu bytes): %s",
+                clientId, len, e.what());
+        }
     }
 }
 
@@ -180,7 +185,12 @@ void WebRTCServer::SendUnreliable(uint32_t clientId, const uint8_t* data, size_t
     if (it == peers_.end() || !it->second.connected) return;
     auto& dc = it->second.stateChannel;
     if (dc && dc->isOpen()) {
-        dc->send(reinterpret_cast<const std::byte*>(data), len);
+        try {
+            dc->send(reinterpret_cast<const std::byte*>(data), len);
+        } catch (const std::exception& e) {
+            SLOG(SPRING_LOG_ERROR, "SendUnreliable failed for client %u (%zu bytes): %s",
+                clientId, len, e.what());
+        }
     }
 }
 

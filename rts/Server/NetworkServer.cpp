@@ -189,14 +189,18 @@ struct NetworkServer::Impl {
     // ── Route dispatch ──
 
     HttpResponse DispatchGet(const std::string& url) {
+        // Strip query string — handlers receive the clean path only.
+        // Use QueryParam() if you need access to query parameters.
+        auto qpos = url.find('?');
+        const std::string path = (qpos != std::string::npos) ? url.substr(0, qpos) : url;
         // Try exact matches first, then wildcards
         for (auto& [pattern, handler] : *getHandlers) {
             if (pattern.find('*') == std::string::npos && RouteMatch(pattern, url))
-                return handler(url);
+                return handler(path);
         }
         for (auto& [pattern, handler] : *getHandlers) {
             if (pattern.find('*') != std::string::npos && RouteMatch(pattern, url))
-                return handler(url);
+                return handler(path);
         }
         return {.contentType = "text/plain", .body = {'4','0','4'}, .status = 404};
     }

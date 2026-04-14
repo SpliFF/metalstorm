@@ -182,6 +182,14 @@ const TOOLS = [
             properties: {},
         },
     },
+    {
+        name: 'restart_lobby',
+        description: 'Restart the lobby server in-place (re-exec with same args). Running game servers are preserved. Use after rebuilding spring-lobby.',
+        inputSchema: {
+            type: 'object',
+            properties: {},
+        },
+    },
 ];
 
 // --- Tool execution ---
@@ -262,6 +270,11 @@ async function executeTool(name, args) {
                 `${s.session_id}: room=${s.room_id} game=${s.game_name} map=${s.map_name} ` +
                 `reason=${s.end_reason || 'running'} exit=${s.exit_code || '-'}`
             ).join('\n');
+        }
+
+        case 'restart_lobby': {
+            const result = await execOnServer(LOBBY_URL, 'lobby', 'restart');
+            return result.output || 'Restart command sent.';
         }
 
         default:

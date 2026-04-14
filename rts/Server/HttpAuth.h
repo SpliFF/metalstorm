@@ -26,6 +26,7 @@ inline std::string GenerateToken(int length = 32) {
 }
 
 /// Extract a string field from a JSON body. Minimal parser, no nesting.
+/// Unescapes JSON escape sequences (\n, \r, \t, \\, \", \/).
 inline std::string JsonField(const std::string& body, const std::string& key) {
     std::string needle = "\"" + key + "\"";
     auto pos = body.find(needle);
@@ -36,14 +37,29 @@ inline std::string JsonField(const std::string& body, const std::string& key) {
     pos++;
     while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t')) pos++;
     if (pos >= body.size()) return "";
-    // Quoted string value
+    // Quoted string value — unescape as we go
     if (body[pos] == '"') {
-        auto end = pos + 1;
-        while (end < body.size() && body[end] != '"') {
-            if (body[end] == '\\') end++;
-            end++;
+        std::string result;
+        auto i = pos + 1;
+        while (i < body.size() && body[i] != '"') {
+            if (body[i] == '\\' && i + 1 < body.size()) {
+                char next = body[i + 1];
+                switch (next) {
+                    case 'n':  result += '\n'; break;
+                    case 'r':  result += '\r'; break;
+                    case 't':  result += '\t'; break;
+                    case '\\': result += '\\'; break;
+                    case '"':  result += '"';  break;
+                    case '/':  result += '/';  break;
+                    default:   result += '\\'; result += next; break;
+                }
+                i += 2;
+            } else {
+                result += body[i];
+                i++;
+            }
         }
-        return body.substr(pos + 1, end - pos - 1);
+        return result;
     }
     // Unquoted value (number, boolean, null)
     auto end = body.find_first_of(",}\n\r ", pos);

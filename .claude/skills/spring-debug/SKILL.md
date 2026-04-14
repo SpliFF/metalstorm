@@ -23,6 +23,7 @@ The `spring-debug` MCP server (declared in `.mcp.json`) connects to the running 
 | `list_units` | List units, optionally by team | Debugging combat, spawning |
 | `list_gadgets` | List loaded Lua gadgets | Checking which gadgets are active |
 | `get_lua_source` | Read a Lua file via the lobby's VFS HTTP endpoint | Reading gadget source when debugging errors |
+| `restart_lobby` | Restart the lobby server in-place (re-exec, preserves game servers) | After rebuilding spring-lobby binary |
 
 ## Server URLs (defaults)
 
@@ -41,6 +42,13 @@ The MCP server auto-authenticates via `SPRING_TOKEN` env var, or falls back to `
 - **Over curl**: Use MCP tools for structured queries (logs, SQL, exec). Use curl for testing raw HTTP endpoints or verifying headers/status codes.
 - **Over springcli**: MCP tools run in-process with Claude — no shell overhead. Use springcli for standalone CLI testing.
 - **Over browser console**: MCP tools work without a browser. Use browser console for client-side JS debugging.
+
+## Restarting the Lobby
+
+After rebuilding `spring-lobby`, use the `restart_lobby` MCP tool to restart it in-place. This:
+- Re-execs the process with the same CLI arguments (PID is preserved)
+- Persists running game server PIDs/ports to SQLite so active games survive the restart
+- Can also be triggered via `SIGHUP` signal or `POST /api/exec` with `{"scope":"lobby","code":"restart"}`
 
 ## Troubleshooting
 
