@@ -88,7 +88,7 @@ export class DebugConsole {
     private ws: WebSocket | null = null;
     private logServerUrl = '';
     private visible = false;
-    private gameWs: WebSocket | null = null;
+    private gameChannel: WebSocket | RTCDataChannel | null = null;
     private scene: Scene | null = null;
     private nextRequestId = 1;
 
@@ -111,12 +111,13 @@ export class DebugConsole {
 
     setScene(scene: Scene): void { this.scene = scene; }
 
-    setGameWs(ws: WebSocket): void {
-        this.gameWs = ws;
-        ws.addEventListener('message', (evt) => {
+    /** Set game channel for command forwarding. Accepts WebSocket or RTCDataChannel. */
+    setGameWs(channel: WebSocket | RTCDataChannel): void {
+        this.gameChannel = channel;
+        channel.addEventListener('message', ((evt: MessageEvent) => {
             if (!(evt.data instanceof ArrayBuffer)) return;
             this.handleGameMessage(new Uint8Array(evt.data));
-        });
+        }) as EventListener);
     }
 
     /**
@@ -130,7 +131,7 @@ export class DebugConsole {
      */
     exec(scope: string, code: string): Promise<{ success: boolean; output: string }> {
         return new Promise((resolve, reject) => {
-            if (!this.gameWs || this.gameWs.readyState !== WebSocket.OPEN) {
+            if (!this.isChannelOpen()) {
                 resolve({ success: false, output: 'Not connected to game server' });
                 return;
             }
@@ -578,7 +579,7 @@ body { background: #0f0f14; }
         const displayCmd = cmd.includes('\n') ? cmd.split('\n')[0] + '...' : cmd;
         this.appendText(tab, `${tab.scope}> ${displayCmd}`, 'exec-input');
 
-        if (!this.gameWs || this.gameWs.readyState !== WebSocket.OPEN) {
+        if (!this.isChannelOpen()) {
             this.appendText(tab, 'Not connected to game server', 'exec-error');
             return;
         }
@@ -594,7 +595,7 @@ body { background: #0f0f14; }
     }
 
     private sendConsoleCommand(scope: string, code: string, requestId: number): void {
-        if (!this.gameWs || this.gameWs.readyState !== WebSocket.OPEN) return;
+        if (!this.isChannelOpen()) return;
 
         const builder = new flatbuffers.Builder(256 + code.length);
         const scopeOff = builder.createString(scope);
@@ -607,7 +608,7 @@ body { background: #0f0f14; }
         const frame = new Uint8Array(1 + fbBytes.length);
         frame[0] = 0x01;
         frame.set(fbBytes, 1);
-        this.gameWs.send(frame.buffer);
+        this.gameChannel!.send(frame.buffer);
     }
 
     // ─── Message handling ───
@@ -773,6 +774,12 @@ body { background: #0f0f14; }
                 this.toggleInspector();
             }
         });
+    }
+
+    private isChannelOpen(): boolean {
+        if (!this.gameChannel) return false;
+        if (this.gameChannel instanceof WebSocket) return this.gameChannel.readyState === WebSocket.OPEN;
+        return this.gameChannel.readyState === 'open';
     }
 
     private esc(s: string): string {

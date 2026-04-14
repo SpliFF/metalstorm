@@ -1,8 +1,17 @@
 /**
- * Connection — manages WebSocket lifecycle to the game server.
+ * Connection — manages WebRTC + HTTP lifecycle to the game server.
  *
- * Handles connect/disconnect, envelope framing, FlatBuffers
- * serialisation, and dispatches parsed messages to handlers.
+ * Auth flow:
+ *   1. HTTP POST /api/auth/login → token
+ *   2. Create RTCPeerConnection with two negotiated data channels
+ *   3. HTTP POST /api/rtc/offer → SDP answer
+ *   4. Data channels open → game begins
+ *
+ * Channels:
+ *   "control" (id=0, reliable, ordered) — FlatBuffer messages
+ *   "state"   (id=1, unreliable, unordered) — entity/projectile state
+ *
+ * Falls back to WebSocket if WebRTC signaling fails (dev/testing).
  */
 
 import * as flatbuffers from 'flatbuffers';
@@ -41,19 +50,17 @@ const PROTOCOL_VERSION = 1;
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'handshake' | 'authenticating' | 'connected';
 
-/** Parsed combat event for client consumption. */
 export interface CombatEventInfo {
     attackerId: number;
     targetId: number;
     weaponDefId: number;
-    result: number;     // 0=hit, 1=miss, 2=blocked, 3=kill
+    result: number;
     damage: number;
     x: number;
     y: number;
     z: number;
 }
 
-/** Parsed unit definition — maps defId to its model URL. */
 export interface UnitDefInfo {
     defId: number;
     name: string;
@@ -61,11 +68,10 @@ export interface UnitDefInfo {
     textureUrl: string;
 }
 
-/** Parsed weapon definition — visual params for projectile rendering. */
 export interface WeaponDefInfo {
     defId: number;
     name: string;
-    visualType: number;     // ProjectileVisualType enum
+    visualType: number;
     projectileSpeed: number;
     range: number;
     aoe: number;
@@ -78,11 +84,6 @@ export interface WeaponDefInfo {
     highTrajectory: boolean;
 }
 
-/// Lobby vs game-server session roles. The game server stamps a
-/// real team id on the session during AuthRequest; the lobby
-/// leaves it at -1. Code outside Connection reads this via
-/// `Connection.myTeam` to scope unit rendering, selection, and
-/// command validation.
 export interface ConnectionEvents {
     onStateChange?: (state: ConnectionState) => void;
     onAuthenticated?: (playerId: number, token: string, team: number) => void;
@@ -101,20 +102,25 @@ export interface ConnectionEvents {
 }
 
 export class Connection {
-    private ws: WebSocket | null = null;
-    private _state: ConnectionState = 'disconnected';
+    // Transport — either WebRTC or WebSocket (fallback)
+    private pc: RTCPeerConnection | null = null;
+    private controlChannel: RTCDataChannel | null = null;
+    private stateChannel: RTCDataChannel | null = null;
+    private ws: WebSocket | null = null;  // fallback only
 
-    /** Expose the raw WebSocket for debug console command forwarding. */
-    getWebSocket(): WebSocket | null { return this.ws; }
+    private _state: ConnectionState = 'disconnected';
     private events: ConnectionEvents;
     private sessionToken: string | null = null;
     private playerId: number = 0;
-    /// Team id assigned by the game server at auth time. -1 when
-    /// connected to the lobby (which doesn't track teams on a
-    /// per-connection basis) or when no roster applies.
     public myTeam: number = -1;
     private clock = new ServerClock();
     private pingInterval: ReturnType<typeof setInterval> | null = null;
+    private httpBase = '';  // e.g. "http://localhost:9100"
+    private rtcClientId = 0;
+
+    /** Expose the control data channel for debug console. */
+    getWebSocket(): WebSocket | null { return this.ws; }
+    getControlChannel(): RTCDataChannel | null { return this.controlChannel; }
 
     constructor(events: ConnectionEvents = {}) {
         this.events = events;
@@ -124,24 +130,22 @@ export class Connection {
     get authenticated(): boolean { return this._state === 'connected'; }
     get serverClock(): ServerClock { return this.clock; }
 
-    /** Update event callbacks (merges with existing). */
     setEvents(overrides: Partial<ConnectionEvents>): void {
         Object.assign(this.events, overrides);
     }
 
-    /** Connect to the server and authenticate.
-     *  Pass token (instead of password) for session reconnection.
-     *
-     *  Retries a few times if the initial connection fails — the target
-     *  server may still be starting (common when the lobby spawns a game
-     *  server and immediately tells the client to connect to it).
+    /**
+     * Connect to the game server.
+     * `url` is the WebSocket URL (ws://host:port) — the HTTP base
+     * is derived from it for auth and signaling.
      */
     connect(url: string, username: string, password: string, token?: string): void {
-        if (this.ws) this.disconnect();
+        if (this.pc || this.ws) this.disconnect();
 
-        // Store token for reconnection auth
         if (token) this.sessionToken = token;
 
+        // Derive HTTP base from WS URL
+        this.httpBase = url.replace(/^ws:\/\//, 'http://').replace(/^wss:\/\//, 'https://');
         this.pendingUrl = url;
         this.pendingUsername = username;
         this.pendingPassword = password;
@@ -156,35 +160,196 @@ export class Connection {
     private static readonly MAX_CONNECT_ATTEMPTS = 10;
     private static readonly CONNECT_RETRY_DELAY_MS = 500;
 
-    private tryConnect(): void {
+    private async tryConnect(): Promise<void> {
         this.connectAttempts++;
         this.setState('connecting');
 
+        // Step 1: Authenticate via HTTP
+        try {
+            await this.httpAuth(this.pendingUsername, this.pendingPassword);
+        } catch (err) {
+            if (this.connectAttempts < Connection.MAX_CONNECT_ATTEMPTS) {
+                console.log(`[connection] auth attempt ${this.connectAttempts} failed, retrying...`);
+                setTimeout(() => this.tryConnect(), Connection.CONNECT_RETRY_DELAY_MS);
+                return;
+            }
+            console.error(`[connection] giving up after ${this.connectAttempts} attempts`);
+            this.events.onAuthFailed?.(`Connection failed: ${err}`);
+            this.setState('disconnected');
+            return;
+        }
+
+        // Step 2: Try WebRTC, fall back to WebSocket
+        this.setState('handshake');
+        try {
+            await this.connectWebRTC();
+        } catch (err) {
+            console.warn(`[connection] WebRTC failed (${err}), falling back to WebSocket`);
+            this.connectWebSocket();
+        }
+    }
+
+    // ─── HTTP Auth ───
+
+    private async httpAuth(username: string, password: string): Promise<void> {
+        this.setState('authenticating');
+
+        // Try token reconnection first
+        if (this.sessionToken) {
+            // Validate token by trying exec — if it fails, fall through to password
+            try {
+                const resp = await fetch(`${this.httpBase}/api/auth/validate`, {
+                    headers: { 'Authorization': `Bearer ${this.sessionToken}` },
+                });
+                if (resp.ok) {
+                    // Token still valid — we're authed
+                    return;
+                }
+            } catch { /* fall through */ }
+            // Token invalid, clear it
+            this.sessionToken = null;
+        }
+
+        // Password login
+        const resp = await fetch(`${this.httpBase}/api/auth/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password }),
+        });
+
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({ error: 'login failed' }));
+            throw new Error(data.error || `HTTP ${resp.status}`);
+        }
+
+        const data = await resp.json();
+        if (!data.token) throw new Error('no token in login response');
+
+        this.sessionToken = data.token;
+        this.playerId = data.user_id ?? 0;
+        this.myTeam = data.team ?? -1;
+    }
+
+    // ─── WebRTC ───
+
+    private async connectWebRTC(): Promise<void> {
+        const pc = new RTCPeerConnection({
+            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+        });
+        this.pc = pc;
+
+        // Create negotiated data channels matching the server
+        const controlChannel = pc.createDataChannel('control', {
+            negotiated: true,
+            id: 0,
+            ordered: true,
+        });
+        controlChannel.binaryType = 'arraybuffer';
+
+        const stateChannel = pc.createDataChannel('state', {
+            negotiated: true,
+            id: 1,
+            ordered: false,
+            maxRetransmits: 0,
+        });
+        stateChannel.binaryType = 'arraybuffer';
+
+        this.controlChannel = controlChannel;
+        this.stateChannel = stateChannel;
+
+        // Wire message handlers
+        controlChannel.onmessage = (e) => {
+            if (e.data instanceof ArrayBuffer) {
+                this.handleBinaryMessage(new Uint8Array(e.data));
+            }
+        };
+        stateChannel.onmessage = (e) => {
+            if (e.data instanceof ArrayBuffer) {
+                this.handleBinaryMessage(new Uint8Array(e.data));
+            }
+        };
+
+        // Wait for channels to open
+        const channelReady = new Promise<void>((resolve, reject) => {
+            let controlOpen = false;
+            let stateOpen = false;
+            const check = () => {
+                if (controlOpen && stateOpen) resolve();
+            };
+            controlChannel.onopen = () => { controlOpen = true; check(); };
+            stateChannel.onopen = () => { stateOpen = true; check(); };
+            controlChannel.onerror = (e) => reject(new Error('control channel error'));
+            pc.onconnectionstatechange = () => {
+                if (pc.connectionState === 'failed') reject(new Error('connection failed'));
+            };
+            setTimeout(() => reject(new Error('channel open timeout')), 10000);
+        });
+
+        // Create and send offer
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        // Wait for ICE gathering to complete (or timeout)
+        await new Promise<void>((resolve) => {
+            if (pc.iceGatheringState === 'complete') { resolve(); return; }
+            pc.onicegatheringstatechange = () => {
+                if (pc.iceGatheringState === 'complete') resolve();
+            };
+            setTimeout(resolve, 3000); // don't wait forever
+        });
+
+        // Send offer to server via HTTP
+        const sdpOffer = pc.localDescription?.sdp;
+        if (!sdpOffer) throw new Error('no local SDP');
+
+        const resp = await fetch(`${this.httpBase}/api/rtc/offer`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${this.sessionToken}`,
+            },
+            body: JSON.stringify({ sdp: sdpOffer }),
+        });
+
+        if (!resp.ok) {
+            throw new Error(`RTC offer failed: HTTP ${resp.status}`);
+        }
+
+        const answer = await resp.json();
+        if (!answer.sdp) throw new Error('no SDP in answer');
+
+        this.rtcClientId = answer.client_id;
+        await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
+
+        // Wait for data channels to open
+        await channelReady;
+
+        // Connected via WebRTC
+        console.log(`[connection] WebRTC connected (clientId=${this.rtcClientId})`);
+        this.setState('connected');
+        this.events.onAuthenticated?.(this.playerId, this.sessionToken ?? '', this.myTeam);
+
+        // Send handshake on control channel
+        this.sendHandshake();
+        // Send auth request so the server registers our session
+        this.sendAuthRequest(this.pendingUsername, this.pendingPassword);
+
+        this.pingInterval = setInterval(() => this.sendPing(), 30000);
+        this.sendPing();
+    }
+
+    // ─── WebSocket fallback ───
+
+    private connectWebSocket(): void {
         const ws = new WebSocket(this.pendingUrl);
         ws.binaryType = 'arraybuffer';
         this.ws = ws;
 
-        // If the connect doesn't settle within the retry window, treat it
-        // as a failure so we can retry. Otherwise Chrome hangs in CONNECTING.
-        const connectTimer = setTimeout(() => {
-            if (ws.readyState === WebSocket.CONNECTING) {
-                try { ws.close(); } catch { /* ignore */ }
-            }
-        }, Connection.CONNECT_RETRY_DELAY_MS * 4);
-
         let opened = false;
-        // A failed WebSocket fires BOTH `error` and `close` (in that
-        // order). Without this guard we'd retry twice per failed
-        // attempt, and each retry would itself double on its next
-        // failure — a single lobby restart would surface as an
-        // exponential burst of 2, 4, 8, 16 concurrent reconnect
-        // attempts hitting the server at once, all authing with the
-        // same token. One-shot the failure handler per attempt.
         let failed = false;
 
         ws.onopen = () => {
             opened = true;
-            clearTimeout(connectTimer);
             this.setState('handshake');
             this.sendHandshake();
             this.setState('authenticating');
@@ -200,18 +365,13 @@ export class Connection {
         const handleFailure = () => {
             if (failed) return;
             failed = true;
-
             if (opened && this._state === 'connected') {
-                // Real disconnect after a successful connection
                 this.cleanup();
                 this.setState('disconnected');
                 return;
             }
-            clearTimeout(connectTimer);
-            if (this.ws !== ws) return; // superseded by a new attempt
-            // Initial connection failed — retry a few times
             if (this.connectAttempts < Connection.MAX_CONNECT_ATTEMPTS) {
-                console.log(`[connection] connect attempt ${this.connectAttempts} failed, retrying...`);
+                console.log(`[connection] WS attempt ${this.connectAttempts} failed, retrying...`);
                 setTimeout(() => this.tryConnect(), Connection.CONNECT_RETRY_DELAY_MS);
             } else {
                 console.error(`[connection] giving up after ${this.connectAttempts} attempts`);
@@ -224,17 +384,21 @@ export class Connection {
         ws.onerror = handleFailure;
     }
 
-    /** Disconnect from the server. */
+    // ─── Send ───
+
     disconnect(): void {
-        if (this.ws) {
-            this.ws.close();
-            this.ws = null;
-        }
+        if (this.controlChannel) { try { this.controlChannel.close(); } catch {} }
+        if (this.stateChannel) { try { this.stateChannel.close(); } catch {} }
+        if (this.pc) { try { this.pc.close(); } catch {} }
+        if (this.ws) { try { this.ws.close(); } catch {} }
+        this.controlChannel = null;
+        this.stateChannel = null;
+        this.pc = null;
+        this.ws = null;
         this.cleanup();
         this.setState('disconnected');
     }
 
-    /** Send a viewport update to the server. */
     sendViewportUpdate(
         viewportId: number,
         centerX: number, centerZ: number,
@@ -248,7 +412,6 @@ export class Connection {
         this.sendClientMessage(builder, ClientPayload.ViewportUpdate, vp);
     }
 
-    /** Send a raw FlatBuffers ClientMessage. */
     sendClientMessage(builder: flatbuffers.Builder, payloadType: ClientPayload, payloadOffset: number): void {
         ClientMessage.startClientMessage(builder);
         ClientMessage.addPayloadType(builder, payloadType);
@@ -261,8 +424,22 @@ export class Connection {
         frame[0] = ENVELOPE_FLATBUFFERS;
         frame.set(buf, 1);
 
-        this.ws?.send(frame);
+        this.sendOnControl(frame);
     }
+
+    /** Send data on the control (reliable) channel. */
+    private sendOnControl(data: Uint8Array): void {
+        // Copy into a fresh ArrayBuffer for RTCDataChannel compatibility
+        const buf = new ArrayBuffer(data.byteLength);
+        new Uint8Array(buf).set(data);
+        if (this.controlChannel?.readyState === 'open') {
+            this.controlChannel.send(buf);
+        } else if (this.ws?.readyState === WebSocket.OPEN) {
+            this.ws.send(buf);
+        }
+    }
+
+    // ─── Internal ───
 
     private setState(state: ConnectionState): void {
         this._state = state;
@@ -290,8 +467,6 @@ export class Connection {
         const builder = new flatbuffers.Builder(256);
         const uOffset = builder.createString(username);
         const pOffset = builder.createString(password);
-
-        // If we have a session token, try reconnecting with it
         const tOffset = this.sessionToken
             ? builder.createString(this.sessionToken)
             : 0;
@@ -312,6 +487,8 @@ export class Connection {
         this.sendClientMessage(builder, ClientPayload.Ping, ping);
     }
 
+    // ─── Message handling (transport-agnostic) ───
+
     private handleBinaryMessage(data: Uint8Array): void {
         if (data.length < 2) return;
 
@@ -330,9 +507,7 @@ export class Connection {
             }
             return;
         }
-        if (envelope !== ENVELOPE_FLATBUFFERS) {
-            return;
-        }
+        if (envelope !== ENVELOPE_FLATBUFFERS) return;
 
         const buf = new flatbuffers.ByteBuffer(data.slice(1));
         const msg = ServerMessage.getRootAsServerMessage(buf);
@@ -428,18 +603,18 @@ export class Connection {
     private handleAuthResponse(msg: ServerMessage): void {
         const auth = msg.payload(new AuthResponse()) as AuthResponse;
         if (auth.status() === AuthStatus.OK) {
-            this.sessionToken = auth.token() ?? null;
+            this.sessionToken = auth.token() ?? this.sessionToken;
             this.playerId = auth.playerId();
-            // Game server stamps a real team id (0..N); lobby leaves
-            // the field at -1. Consumers (entity renderer, selection,
-            // minimap colouring) read this via `myTeam`.
             this.myTeam = auth.team();
-            this.setState('connected');
-            this.events.onAuthenticated?.(this.playerId, this.sessionToken ?? '', this.myTeam);
 
-            // Start periodic pings for clock sync
-            this.pingInterval = setInterval(() => this.sendPing(), 30000);
-            this.sendPing(); // Immediate first ping
+            // For WS fallback path, this is the real auth completion.
+            // For WebRTC, we already set connected in connectWebRTC().
+            if (this._state !== 'connected') {
+                this.setState('connected');
+                this.events.onAuthenticated?.(this.playerId, this.sessionToken ?? '', this.myTeam);
+                this.pingInterval = setInterval(() => this.sendPing(), 30000);
+                this.sendPing();
+            }
         } else {
             const message = auth.message() ?? 'Authentication failed';
             this.events.onAuthFailed?.(message);

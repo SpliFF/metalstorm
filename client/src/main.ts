@@ -443,9 +443,10 @@ async function startGame(gameServerPort: number): Promise<void> {
         onAuthenticated(_playerId, token, team) {
             console.log(`[game] connected to game server on port ${gameServerPort} (team=${team})`);
             if (token) localStorage.setItem('springrts-token', token);
-            // Wire debug console to game server WS for command execution
-            const ws = conn.getWebSocket();
-            if (ws) debugConsole.setGameWs(ws);
+            // Wire debug console to game server for command execution
+            // Prefer WebRTC control channel; fall back to WebSocket
+            const channel = conn.getControlChannel() ?? conn.getWebSocket();
+            if (channel) debugConsole.setGameWs(channel);
         },
         onAuthFailed(msg: string) {
             console.error(`[game] auth failed: ${msg}`);
