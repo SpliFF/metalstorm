@@ -446,7 +446,16 @@ async function startGame(gameServerPort: number): Promise<void> {
             // Wire debug console to game server for command execution
             // Prefer WebRTC control channel; fall back to WebSocket
             const channel = conn.getControlChannel() ?? conn.getWebSocket();
-            if (channel) debugConsole.setGameWs(channel);
+            console.log(`[game] debug console wiring: controlChannel=${!!conn.getControlChannel()}, ws=${!!conn.getWebSocket()}, channel=${!!channel}`);
+            if (channel) {
+                debugConsole.setGameWs(channel);
+            } else {
+                // Fallback: retry after a short delay (WS may not be accessible yet)
+                setTimeout(() => {
+                    const ch = conn.getControlChannel() ?? conn.getWebSocket();
+                    if (ch) debugConsole.setGameWs(ch);
+                }, 500);
+            }
         },
         onAuthFailed(msg: string) {
             console.error(`[game] auth failed: ${msg}`);

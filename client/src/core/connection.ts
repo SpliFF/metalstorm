@@ -182,6 +182,13 @@ export class Connection {
                 return; // WebRTC connected successfully
             } catch (err) {
                 console.warn(`[connection] WebRTC failed (${err}), falling back to WebSocket`);
+                // Clean up failed WebRTC state so getControlChannel() returns null
+                if (this.controlChannel) { try { this.controlChannel.close(); } catch {} }
+                if (this.stateChannel) { try { this.stateChannel.close(); } catch {} }
+                if (this.pc) { try { this.pc.close(); } catch {} }
+                this.controlChannel = null;
+                this.stateChannel = null;
+                this.pc = null;
             }
         }
 
