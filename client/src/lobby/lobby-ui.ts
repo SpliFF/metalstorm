@@ -106,7 +106,11 @@ export class LobbyUI {
     private myPlayerId = 0;
     private pendingRejoinRoomId = 0;
     private authToken = '';
-    private pollTimer: ReturnType<typeof setInterval> | null = null;
+    private roomEventSource: EventSource | null = null;
+    /// Tracks the room state at last full render so patchRoom() can
+    /// detect when the action buttons need to change (state bracket
+    /// shift) and fall back to a full re-render.
+    private lastRenderedRoomState = -1;
     private availableMaps: {
         id: string;
         name: string;
@@ -264,44 +268,56 @@ export class LobbyUI {
     }
 
     private startPolling(): void {
-        if (this.pollTimer) return;
-        this.pollRoomState();
-        this.pollTimer = setInterval(() => this.pollRoomState(), 2000);
+        if (this.roomEventSource) return;
+
+        // Fetch initial room list, then connect SSE for live updates
+        this.lobbyGet('/api/rooms').then(rooms => {
+            if (Array.isArray(rooms)) this.applyRoomList(rooms);
+        }).catch(() => {});
+
+        const es = new EventSource(`${CONFIG.httpUrl}/api/rooms/stream`);
+        this.roomEventSource = es;
+        es.addEventListener('rooms', (e: MessageEvent) => {
+            try {
+                const rooms = JSON.parse(e.data);
+                if (Array.isArray(rooms)) this.applyRoomList(rooms);
+            } catch { /* ignore parse errors */ }
+        });
+        es.onerror = () => {
+            // EventSource auto-reconnects; no manual retry needed
+        };
     }
 
     private stopPolling(): void {
-        if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
+        if (this.roomEventSource) {
+            this.roomEventSource.close();
+            this.roomEventSource = null;
+        }
     }
 
-    private async pollRoomState(): Promise<void> {
-        try {
-            const rooms = await this.lobbyGet('/api/rooms');
-            if (Array.isArray(rooms)) {
-                this.rooms = rooms.map((r: any) => ({
-                    id: r.id, name: r.name ?? '', mapName: r.map ?? '',
-                    playerCount: r.players?.length ?? 0, maxPlayers: 8,
-                    state: r.state ?? 0, hasPassword: false,
-                    hostName: r.players?.find((p: any) => p.is_host)?.username ?? '',
-                }));
+    private applyRoomList(rooms: any[]): void {
+        this.rooms = rooms.map((r: any) => ({
+            id: r.id, name: r.name ?? '', mapName: r.map ?? '',
+            playerCount: r.players?.length ?? 0, maxPlayers: 8,
+            state: r.state ?? 0, hasPassword: false,
+            hostName: r.players?.find((p: any) => p.is_host)?.username ?? '',
+        }));
 
-                // Check if our current room still exists
-                if (this.currentRoom) {
-                    const myRoom = rooms.find((r: any) => r.id === this.currentRoom!.id);
-                    if (!myRoom) {
-                        console.log(`[lobby] current room ${this.currentRoom.id} no longer exists`);
-                        this.currentRoom = null;
-                        localStorage.removeItem('springrts-game-room');
-                        localStorage.removeItem('springrts-game-port');
-                        if (this.currentScreen === 'room') { this.showBrowser(); return; }
-                    } else {
-                        // Update current room state from poll
-                        this.updateCurrentRoomFromJson(myRoom);
-                    }
-                }
-
-                if (this.currentScreen === 'browser') this.renderRoomList();
+        // Check if our current room still exists
+        if (this.currentRoom) {
+            const myRoom = rooms.find((r: any) => r.id === this.currentRoom!.id);
+            if (!myRoom) {
+                console.log(`[lobby] current room ${this.currentRoom.id} no longer exists`);
+                this.currentRoom = null;
+                localStorage.removeItem('springrts-game-room');
+                localStorage.removeItem('springrts-game-port');
+                if (this.currentScreen === 'room') { this.showBrowser(); return; }
+            } else {
+                this.updateCurrentRoomFromJson(myRoom);
             }
-        } catch { /* ignore poll failures */ }
+        }
+
+        if (this.currentScreen === 'browser') this.renderRoomList();
     }
 
     private updateCurrentRoomFromJson(r: any): void {
@@ -315,12 +331,18 @@ export class LobbyUI {
             aiId: s.ai_id ?? '', displayName: s.name ?? s.ai_id ?? '',
             team: s.team ?? 0, startPos: s.start_pos ?? -1,
         }));
+        const newGameName = r.game ?? '';
         this.currentRoom = {
             id: r.id, name: r.name ?? '', mapName: r.map ?? '',
-            gameName: r.game ?? '',
+            gameName: newGameName,
             state: r.state ?? 0, players, aiSlots,
             gameServerPort: r.game_server_port ?? 0,
         };
+
+        // Refresh AI list when entering a room with a different game
+        if (this.availableAIsForGame !== newGameName) {
+            this.sendAIListRequest();
+        }
 
         const gameRunning = this.currentRoom.state === 3 || this.currentRoom.state === 4;
         if (gameRunning && this.currentRoom.gameServerPort > 0) {
@@ -335,7 +357,9 @@ export class LobbyUI {
             localStorage.removeItem('springrts-game-room');
             localStorage.removeItem('springrts-game-port');
         }
-        if (this.currentScreen === 'room') this.showRoom();
+        if (this.currentScreen === 'room') {
+            if (!this.patchRoom()) this.showRoom();
+        }
     }
 
     handleServerMessage(msg: ServerMessage): void {
@@ -555,9 +579,74 @@ export class LobbyUI {
 
     // ===================== ROOM =====================
 
+    /// Patch the room DOM in-place without rebuilding innerHTML.
+    /// Returns true if the patch succeeded, false if a full re-render
+    /// is needed (structural change: player/AI count changed, state
+    /// bracket changed, etc.).
+    private patchRoom(): boolean {
+        if (!this.currentRoom) return false;
+        const r = this.currentRoom;
+
+        // Structural checks — if these changed, the DOM shape is
+        // different and we need a full re-render.
+        if (r.state !== this.lastRenderedRoomState) return false;
+        const playerRows = this.container.querySelectorAll('.player-row:not(.ai-row)');
+        const aiRows = this.container.querySelectorAll('.ai-row');
+        if (playerRows.length !== r.players.length) return false;
+        if (aiRows.length !== r.aiSlots.length) return false;
+
+        // Patch room header
+        const stateEl = this.container.querySelector('.room-state');
+        if (stateEl) stateEl.textContent = ROOM_STATE_LABELS[r.state] || '?';
+
+        // Patch player rows — update team select, ready status, start
+        // pos without touching innerHTML so focus/scroll are preserved.
+        r.players.forEach((p, i) => {
+            const row = playerRows[i];
+            if (!row) return;
+
+            // Team select
+            const teamSel = row.querySelector('.team-select[data-pid]') as HTMLSelectElement | null;
+            if (teamSel && teamSel !== document.activeElement) {
+                teamSel.value = String(p.team);
+            }
+
+            // Ready status
+            const statusEl = row.querySelector('.player-status');
+            if (statusEl) {
+                statusEl.textContent = p.isSpectator ? 'Spectator' : (p.ready ? '✓ Ready' : '—');
+            }
+
+            // Start pos select
+            const posSel = row.querySelector('.startpos-select') as HTMLSelectElement | null;
+            if (posSel && posSel !== document.activeElement) {
+                posSel.value = String(p.startPos);
+            }
+        });
+
+        // Patch AI rows
+        r.aiSlots.forEach((slot, i) => {
+            const row = aiRows[i];
+            if (!row) return;
+
+            const teamSel = row.querySelector('.ai-team-select') as HTMLSelectElement | null;
+            if (teamSel && teamSel !== document.activeElement) {
+                teamSel.value = String(slot.team);
+            }
+
+            const posSel = row.querySelector('.startpos-select') as HTMLSelectElement | null;
+            if (posSel && posSel !== document.activeElement) {
+                posSel.value = String(slot.startPos);
+            }
+        });
+
+        return true;
+    }
+
     private showRoom(): void {
         if (!this.currentRoom) return;
         this.currentScreen = 'room';
+        this.lastRenderedRoomState = this.currentRoom.state;
         const r = this.currentRoom;
         const myPlayer = r.players.find(p => p.playerId === this.myPlayerId);
         const amHost = myPlayer?.isHost ?? false;
@@ -953,9 +1042,9 @@ export class LobbyUI {
         if (data?.id) this.updateCurrentRoomFromJson(data);
     }
 
-    private sendSetAITeam(slotIndex: number, team: number): void {
-        // Not yet implemented as an HTTP endpoint — handled via polling
-        console.warn('[lobby] setAITeam not yet available over HTTP');
+    private async sendSetAITeam(slotIndex: number, team: number): Promise<void> {
+        const data = await this.lobbyPost('/api/rooms/ai/team', { slot_index: slotIndex, team });
+        if (data?.id) this.updateCurrentRoomFromJson(data);
     }
 
     private async sendSetStartPos(

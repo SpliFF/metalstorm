@@ -334,6 +334,9 @@ int main(int argc, char* argv[])
     // --- Network ---
     NetworkServer net;
 
+    // SSE channel for real-time room list pushes (replaces client polling)
+    uint32_t roomStreamChannel = net.AddSSE("/api/rooms/stream");
+
     // Maps endpoint — full metadata from SQLite
     net.AddHttpGet("/api/maps", [mapDb](const std::string&) -> HttpResponse {
         MapMetadataDb db;
@@ -887,6 +890,22 @@ int main(int argc, char* argv[])
         int64_t userId = requireAuth(headers); \
         if (userId <= 0) return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
 
+    // Broadcast the full room list to all SSE subscribers.
+    // Called after every room mutation so clients stay in sync.
+    auto broadcastRooms = [&]() {
+        auto allRooms = rooms.GetAllRooms();
+        std::string json = "[";
+        bool first = true;
+        for (const auto* r : allRooms) {
+            if (!r) continue;
+            if (!first) json += ",";
+            first = false;
+            json += roomToJson(r);
+        }
+        json += "]";
+        net.SendSSE(roomStreamChannel, json, "rooms");
+    };
+
     // POST /api/rooms — create a room
     net.AddHttpPost("/api/rooms", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
@@ -902,6 +921,7 @@ int main(int argc, char* argv[])
         uint32_t roomId = rooms.CreateRoom(name, mapName, gameName, 8, "",
             static_cast<uint32_t>(userId), 0 /*no WS clientId*/, user->username);
         auto* room = rooms.GetRoom(roomId);
+        broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(room));
     });
 
@@ -990,6 +1010,7 @@ int main(int argc, char* argv[])
         // Reset the room back to Filling so it can be reused
         rooms.ResetRoomForNextGame(room->id);
 
+        broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
     });
 
@@ -1006,6 +1027,7 @@ int main(int argc, char* argv[])
         if (!rooms.JoinRoom(roomId, static_cast<uint32_t>(userId), 0, user->username, password))
             return HttpAuth::JsonResponse(403, R"({"error":"cannot join room"})");
 
+        broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(roomId)));
     });
 
@@ -1016,6 +1038,7 @@ int main(int argc, char* argv[])
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
         uint32_t rid = room->id;
         rooms.LeaveRoom(rid, static_cast<uint32_t>(userId));
+        broadcastRooms();
         return HttpAuth::JsonResponse(200, R"({"ok":true})");
     });
 
@@ -1027,6 +1050,7 @@ int main(int argc, char* argv[])
         std::string readyStr = HttpAuth::JsonField(body, "ready");
         bool ready = (readyStr == "true" || readyStr == "1");
         rooms.SetReady(room->id, static_cast<uint32_t>(userId), ready);
+        broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
     });
 
@@ -1038,6 +1062,7 @@ int main(int argc, char* argv[])
         std::string teamStr = HttpAuth::JsonField(body, "team");
         uint8_t team = teamStr.empty() ? 0 : (uint8_t)std::atoi(teamStr.c_str());
         rooms.SetTeam(room->id, static_cast<uint32_t>(userId), team);
+        broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
     });
 
@@ -1052,6 +1077,7 @@ int main(int argc, char* argv[])
         std::string targetStr = HttpAuth::JsonField(body, "target_player_id");
         uint32_t target = targetStr.empty() ? static_cast<uint32_t>(userId) : (uint32_t)std::atoi(targetStr.c_str());
         rooms.SetPlayerStartPos(room->id, static_cast<uint32_t>(userId), target, pos, 6);
+        broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
     });
 
@@ -1064,6 +1090,7 @@ int main(int argc, char* argv[])
         uint32_t target = targetStr.empty() ? 0 : (uint32_t)std::atoi(targetStr.c_str());
         if (!rooms.KickPlayer(room->id, static_cast<uint32_t>(userId), target))
             return HttpAuth::JsonResponse(403, R"({"error":"cannot kick"})");
+        broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
     });
 
@@ -1074,6 +1101,7 @@ int main(int argc, char* argv[])
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
         if (!rooms.CloseRoom(room->id, static_cast<uint32_t>(userId)))
             return HttpAuth::JsonResponse(403, R"({"error":"cannot close room"})");
+        broadcastRooms();
         return HttpAuth::JsonResponse(200, R"({"ok":true})");
     });
 
@@ -1089,6 +1117,7 @@ int main(int argc, char* argv[])
         uint8_t team = teamStr.empty() ? 0 : (uint8_t)std::atoi(teamStr.c_str());
         if (!rooms.AddAISlot(room->id, static_cast<uint32_t>(userId), aiId, aiName, team))
             return HttpAuth::JsonResponse(400, R"({"error":"cannot add AI"})");
+        broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
     });
 
@@ -1101,6 +1130,22 @@ int main(int argc, char* argv[])
         uint8_t slotIndex = indexStr.empty() ? 0 : (uint8_t)std::atoi(indexStr.c_str());
         if (!rooms.RemoveAISlot(room->id, static_cast<uint32_t>(userId), slotIndex))
             return HttpAuth::JsonResponse(400, R"({"error":"cannot remove AI"})");
+        broadcastRooms();
+        return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
+    });
+
+    // POST /api/rooms/ai/team — change an AI slot's team
+    net.AddHttpPost("/api/rooms/ai/team", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
+        if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
+        std::string indexStr = HttpAuth::JsonField(body, "slot_index");
+        std::string teamStr = HttpAuth::JsonField(body, "team");
+        uint8_t slotIndex = indexStr.empty() ? 0 : (uint8_t)std::atoi(indexStr.c_str());
+        uint8_t team = teamStr.empty() ? 0 : (uint8_t)std::atoi(teamStr.c_str());
+        if (!rooms.SetAITeam(room->id, static_cast<uint32_t>(userId), slotIndex, team))
+            return HttpAuth::JsonResponse(400, R"({"error":"cannot set AI team"})");
+        broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
     });
 
@@ -1131,6 +1176,7 @@ int main(int argc, char* argv[])
             room->gameServerPort = inst.port;
         }
 
+        broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
     });
 
@@ -1160,6 +1206,7 @@ int main(int argc, char* argv[])
                     // clear ready flags, zero gameServerPort, drop
                     // reconnection roster.
                     rooms.ResetRoomForNextGame(roomId);
+                    broadcastRooms();
                 }
             }
         }

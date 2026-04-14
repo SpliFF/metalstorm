@@ -143,7 +143,7 @@ export class EntityRenderer {
             const fileName = def.modelUrl.substring(lastSlash + 1);
 
             const result = await SceneLoader.ImportMeshAsync(
-                '', stampUrl(baseUrl), fileName, this.scene,
+                '', baseUrl, stampUrl(fileName), this.scene,
             );
 
             // Pick the first mesh with actual geometry
