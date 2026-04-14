@@ -106,7 +106,7 @@ export class DebugConsole {
     private globalEntries: LogEntry[] = [];
 
     // HTTP log polling
-    private logPollTimer: ReturnType<typeof setInterval> | null = null;
+    private logEventSource: EventSource | null = null;
     private lastLogId = 0;
     private logPollUrl = '';
     private logHistoryFetched = false;
@@ -807,28 +807,46 @@ body { background: #0f0f14; display: flex; flex-direction: column; }
         }
     }
 
-    // ─── Log polling (HTTP) ───
+    // ─── Log streaming (SSE) + history backfill ───
 
     private startLogPolling(): void {
-        if (this.logPollTimer) return;
+        if (this.logEventSource) return;
         if (!this.logPollUrl) {
             const host = window.location.hostname || 'localhost';
             this.logPollUrl = `http://${host}:8010`;
         }
         this.setStatus(true);
-        // Fetch history on first open (last 500 entries), then poll for new
+
+        // Fetch history on first open (last 500 entries)
         if (!this.logHistoryFetched) {
             this.logHistoryFetched = true;
             this.fetchLogHistory();
         }
-        this.pollLogs();
-        this.logPollTimer = setInterval(() => this.pollLogs(), 2000);
+
+        // Connect SSE for real-time streaming (replaces 2s polling)
+        const sseUrl = `${this.logPollUrl}/api/logs/stream`;
+        const es = new EventSource(sseUrl);
+        this.logEventSource = es;
+
+        es.addEventListener('log', (event: MessageEvent) => {
+            try {
+                const e = JSON.parse(event.data);
+                this.ingestLogEntry(e);
+                for (const tab of this.tabs) this.rebuildSourceToggles(tab);
+            } catch { /* ignore malformed events */ }
+        });
+
+        es.onopen = () => this.setStatus(true);
+        es.onerror = () => {
+            this.setStatus(false);
+            // EventSource auto-reconnects — no manual retry needed
+        };
     }
 
     private stopLogPolling(): void {
-        if (this.logPollTimer) {
-            clearInterval(this.logPollTimer);
-            this.logPollTimer = null;
+        if (this.logEventSource) {
+            this.logEventSource.close();
+            this.logEventSource = null;
         }
     }
 
@@ -852,32 +870,6 @@ body { background: #0f0f14; display: flex; flex-direction: column; }
             // Rebuild source toggles now that we have data
             for (const tab of this.tabs) this.rebuildSourceToggles(tab);
         } catch { /* ignore */ }
-    }
-
-    private async pollLogs(): Promise<void> {
-        if (!this.logPollUrl) return;
-        try {
-            const url = `${this.logPollUrl}/api/logs/0?limit=100&level=0`;
-            const resp = await fetch(url);
-            if (!resp.ok) { this.setStatus(false); return; }
-            this.setStatus(true);
-            const entries: any[] = await resp.json();
-            if (!Array.isArray(entries)) return;
-
-            let newEntries = false;
-            for (const e of entries) {
-                if (e.id && e.id <= this.lastLogId) continue;
-                if (e.id) this.lastLogId = e.id;
-                this.ingestLogEntry(e);
-                newEntries = true;
-            }
-            // Rebuild toggles if we discovered new sources
-            if (newEntries) {
-                for (const tab of this.tabs) this.rebuildSourceToggles(tab);
-            }
-        } catch {
-            this.setStatus(false);
-        }
     }
 
     private knownSources = new Set<string>();

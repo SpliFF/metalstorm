@@ -1,14 +1,23 @@
 /**
- * NetworkServer — HTTP server running on a dedicated thread.
+ * NetworkServer — HTTP/2 + HTTP/1.1 server with SSE support.
  *
- * Serves HTTP GET/POST endpoints via uWebSockets. WebSocket transport
- * has been removed; real-time game traffic uses WebRTC instead.
+ * Built on nghttp2 for HTTP/2 (h2c cleartext) with automatic HTTP/1.1
+ * fallback. Protocol is auto-detected from the connection preface.
+ *
+ * Browsers use HTTP/1.1 (h2 requires TLS; use a reverse proxy for that).
+ * C++ clients (libspringapi) connect via h2c for multiplexed requests.
+ *
+ * SSE (Server-Sent Events) endpoints stream data to subscribers in
+ * real-time. Works on both HTTP/1.1 and HTTP/2.
+ *
+ * WebRTC data channels handle real-time game traffic (see WebRTCServer).
  */
 #pragma once
 
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -62,6 +71,16 @@ public:
     /// Register an HTTP POST endpoint. Must be called before Start().
     void AddHttpPost(const std::string& pattern, HttpPostHandler handler);
 
+    /// Register an SSE (Server-Sent Events) endpoint pattern.
+    /// Returns a channel ID for pushing events via SendSSE().
+    /// Must be called before Start().
+    uint32_t AddSSE(const std::string& pattern);
+
+    /// Push an SSE event to all connected subscribers of a channel.
+    /// Thread-safe: can be called from any thread.
+    void SendSSE(uint32_t channelId, const std::string& data,
+                 const std::string& event = "");
+
 private:
     void NetworkThreadFunc(int port);
 
@@ -72,7 +91,7 @@ private:
     std::thread networkThread;
     std::atomic<bool> running{false};
 
-    // Opaque pointer to uWS event loop for shutdown coordination
+    // Opaque implementation (nghttp2 sessions, connections, SSE state)
     struct Impl;
     std::unique_ptr<Impl> impl;
 };

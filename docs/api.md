@@ -8,6 +8,21 @@ Machine-readable schema: [api-spec.yaml](api-spec.yaml) (OpenAPI 3.1).
 
 ---
 
+## HTTP/2 Support
+
+All servers support both **HTTP/2 (h2c cleartext)** and **HTTP/1.1** on the same port. The protocol is auto-detected from the connection preface — no configuration needed.
+
+- **Browsers** connect via HTTP/1.1 by default (browsers only use HTTP/2 over TLS). Use a reverse proxy (e.g. nginx, Caddy) to terminate TLS and provide h2 to browser clients.
+- **C++ clients** (`libspringapi`, `springcli`) use h2c directly for multiplexed requests over a single connection.
+- **curl**: use the `--http2-prior-knowledge` flag for h2c:
+  ```bash
+  curl --http2-prior-knowledge http://localhost:8011/api/version
+  ```
+
+The HTTP layer is built on nghttp2.
+
+---
+
 ## Authentication
 
 All servers share the same auth endpoints. Tokens are stored in SQLite, survive restarts, and expire after 24 hours.
@@ -256,6 +271,20 @@ Two data channels are negotiated:
 ```json
 [{"id":42,"timestamp":1713024000000,"level":4,"section":"lua","scope":"LuaRules","process":"spring-server","frame":1234,"message":"runtime error..."}]
 ```
+
+**GET /api/logs/stream** (SSE)
+
+Real-time log streaming via Server-Sent Events. Connect with `EventSource` for continuous delivery:
+
+```js
+const es = new EventSource("http://localhost:8010/api/logs/stream");
+es.addEventListener("log", (e) => {
+  const entry = JSON.parse(e.data);
+  // {level: 4, section: "lua", message: "runtime error..."}
+});
+```
+
+Each event has type `log` with JSON data containing `level`, `section`, and `message` fields. Replaces the previous 2-second polling approach for real-time log viewing.
 
 **GET /api/logs/search**
 

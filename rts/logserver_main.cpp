@@ -1,13 +1,15 @@
 // spring-logserver — dedicated log collection and streaming server.
 //
 // Stores log entries in SQLite (debug.db), maintains per-source ring
-// buffers, and serves HTTP query endpoints for log retrieval.
+// buffers, serves HTTP query endpoints and SSE streaming for real-time
+// log delivery. Uses NetworkServer (HTTP/2 h2c + HTTP/1.1).
 
+#include "Server/NetworkServer.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogSqlite.h"
 
 #include <sqlite3.h>
-#include <App.h>  // uWebSockets
+#include <unistd.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -88,6 +90,8 @@ private:
 static LogBuffer g_logBuffer;
 static int g_port = 8010;
 static std::string g_dbPath = "data/debug.db";
+static NetworkServer* g_server = nullptr;
+static uint32_t g_logStreamChannel = 0;
 
 // --- HTTP helpers ---
 
@@ -115,6 +119,49 @@ static std::string LogEntryToJson(const BufferedLogEntry& e) {
         e.level, JsonEscape(e.section).c_str(), JsonEscape(e.scope).c_str(),
         JsonEscape(e.process).c_str(), e.frame, JsonEscape(e.message).c_str());
     return buf;
+}
+
+/// Extract a path segment after a prefix. E.g. "/api/logs/42" with
+/// prefix "/api/logs/" returns "42". Stops at '?' for query string.
+static std::string ExtractPathSegment(const std::string& url, const std::string& prefix) {
+    if (url.rfind(prefix, 0) != 0) return "";
+    auto rest = url.substr(prefix.size());
+    auto qpos = rest.find('?');
+    return (qpos != std::string::npos) ? rest.substr(0, qpos) : rest;
+}
+
+/// Extract query parameter value from URL.
+static std::string QueryParam(const std::string& url, const std::string& key) {
+    auto qpos = url.find('?');
+    if (qpos == std::string::npos) return "";
+    std::string qs = url.substr(qpos + 1);
+    std::string needle = key + "=";
+    auto pos = qs.find(needle);
+    while (pos != std::string::npos) {
+        if (pos == 0 || qs[pos - 1] == '&') {
+            auto valStart = pos + needle.size();
+            auto valEnd = qs.find('&', valStart);
+            return qs.substr(valStart, valEnd == std::string::npos ? valEnd : valEnd - valStart);
+        }
+        pos = qs.find(needle, pos + 1);
+    }
+    return "";
+}
+
+// --- Custom log sink that pushes to SSE subscribers ---
+
+static void logSinkCallback(const char* section, int level,
+                              const char* fmt, va_list args) {
+    if (!g_server) return;
+
+    char msg[1024];
+    vsnprintf(msg, sizeof(msg), fmt, args);
+
+    // Push to SSE subscribers as JSON
+    std::string json = "{\"level\":" + std::to_string(level)
+        + ",\"section\":\"" + JsonEscape(section ? section : "")
+        + "\",\"message\":\"" + JsonEscape(msg) + "\"}";
+    g_server->SendSSE(g_logStreamChannel, json, "log");
 }
 
 // --- Main ---
@@ -163,145 +210,152 @@ int main(int argc, char** argv) {
 
     SLOG(SPRING_LOG_NOTICE, "starting on port %d, db=%s", g_port, g_dbPath.c_str());
 
-    // uWebSockets app
-    uWS::App()
-        // --- HTTP log query endpoints ---
-        .get("/api/logs/:roomId", [](auto* res, auto* req) {
-            auto roomStr = std::string(req->getParameter("roomId"));
-            uint32_t roomId = (uint32_t)atoi(roomStr.c_str());
+    NetworkServer net;
+    g_server = &net;
 
-            // Parse query params
-            int limit = 200;
-            uint8_t minLevel = 0;
-            std::string section, scope;
-            auto qLimit = std::string(req->getQuery("limit"));
-            if (!qLimit.empty()) limit = atoi(qLimit.c_str());
-            auto qLevel = std::string(req->getQuery("level"));
-            if (!qLevel.empty()) minLevel = (uint8_t)atoi(qLevel.c_str());
-            section = std::string(req->getQuery("section"));
-            scope = std::string(req->getQuery("scope"));
+    // Register SSE channel for live log streaming
+    g_logStreamChannel = net.AddSSE("/api/logs/stream");
 
-            // Try ring buffer first, fall back to SQLite
-            auto entries = g_logBuffer.Query(roomId, 0, limit, minLevel, section, scope);
-            std::string json;
-            if (!entries.empty()) {
-                json = "[";
-                for (size_t i = 0; i < entries.size(); i++) {
-                    if (i > 0) json += ",";
-                    json += LogEntryToJson(entries[i]);
-                }
-                json += "]";
-            } else {
-                // Query SQLite directly
-                sqlite3* db = nullptr;
-                json = "[]";
-                if (sqlite3_open_v2(g_dbPath.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK) {
-                    std::string sql = "SELECT id, timestamp, level, section, scope, process, frame, message "
-                        "FROM debug_logs WHERE level >= " + std::to_string(minLevel);
-                    if (!section.empty()) sql += " AND section = '" + section + "'";
-                    if (!scope.empty()) sql += " AND scope = '" + scope + "'";
-                    sql += " ORDER BY id DESC LIMIT " + std::to_string(limit);
+    // --- HTTP log query endpoints ---
 
-                    json = "[";
-                    bool first = true;
-                    auto cb = [](void* data, int ncols, char** vals, char** /*names*/) -> int {
-                        auto* pair = static_cast<std::pair<std::string*, bool*>*>(data);
-                        if (!*pair->second) *pair->first += ",";
-                        *pair->second = false;
-                        char buf[1024];
-                        snprintf(buf, sizeof(buf),
-                            R"({"id":%s,"timestamp":%s,"level":%s,"section":"%s","scope":"%s","process":"%s","frame":%s,"message":"%s"})",
-                            vals[0] ? vals[0] : "0", vals[1] ? vals[1] : "0",
-                            vals[2] ? vals[2] : "0", vals[3] ? vals[3] : "",
-                            vals[4] ? vals[4] : "", vals[5] ? vals[5] : "",
-                            vals[6] ? vals[6] : "0", vals[7] ? vals[7] : "");
-                        *pair->first += buf;
-                        return 0;
-                    };
-                    auto pair = std::make_pair(&json, &first);
-                    sqlite3_exec(db, sql.c_str(), cb, &pair, nullptr);
-                    json += "]";
-                    sqlite3_close(db);
-                }
-            }
-            res->writeHeader("Content-Type", "application/json")
-               ->writeHeader("Access-Control-Allow-Origin", "*")
-               ->end(json);
-        })
-        .get("/api/logs/search", [](auto* res, auto* req) {
-            std::string query = std::string(req->getQuery("q"));
-            int limit = 200;
-            uint8_t minLevel = 0;
-            auto qLimit = std::string(req->getQuery("limit"));
-            if (!qLimit.empty()) limit = atoi(qLimit.c_str());
-            auto qLevel = std::string(req->getQuery("level"));
-            if (!qLevel.empty()) minLevel = (uint8_t)atoi(qLevel.c_str());
+    net.AddHttpGet("/api/logs/*", [](const std::string& url) -> HttpResponse {
+        // Extract roomId from path: /api/logs/42?limit=... → "42"
+        std::string roomStr = ExtractPathSegment(url, "/api/logs/");
+        if (roomStr.empty() || roomStr == "search" || roomStr == "sources" || roomStr == "stream")
+            return {.contentType = "text/plain", .body = {'4','0','4'}, .status = 404};
 
-            // Search across all sources
-            auto entries = g_logBuffer.Query(0, 0, limit * 5, minLevel);
-            std::string json = "[";
-            int count = 0;
-            for (auto& e : entries) {
-                if (count >= limit) break;
-                if (!query.empty() && e.message.find(query) == std::string::npos) continue;
-                if (count > 0) json += ",";
-                json += LogEntryToJson(e);
-                count++;
+        uint32_t roomId = (uint32_t)atoi(roomStr.c_str());
+
+        // Parse query params
+        int limit = 200;
+        uint8_t minLevel = 0;
+        std::string section, scope;
+        auto qLimit = QueryParam(url, "limit");
+        if (!qLimit.empty()) limit = atoi(qLimit.c_str());
+        auto qLevel = QueryParam(url, "level");
+        if (!qLevel.empty()) minLevel = (uint8_t)atoi(qLevel.c_str());
+        section = QueryParam(url, "section");
+        scope = QueryParam(url, "scope");
+
+        // Try ring buffer first, fall back to SQLite
+        auto entries = g_logBuffer.Query(roomId, 0, limit, minLevel, section, scope);
+        std::string json;
+        if (!entries.empty()) {
+            json = "[";
+            for (size_t i = 0; i < entries.size(); i++) {
+                if (i > 0) json += ",";
+                json += LogEntryToJson(entries[i]);
             }
             json += "]";
-            res->writeHeader("Content-Type", "application/json")
-               ->writeHeader("Access-Control-Allow-Origin", "*")
-               ->end(json);
-        })
-        .get("/api/logs/sources", [](auto* res, auto* /*req*/) {
-            std::string json = R"({"status":"ok"})";
-            res->writeHeader("Content-Type", "application/json")
-               ->writeHeader("Access-Control-Allow-Origin", "*")
-               ->end(json);
-        })
-        .get("/api/sessions", [](auto* res, auto* /*req*/) {
-            // List recent game sessions from SQLite
+        } else {
+            // Query SQLite directly
             sqlite3* db = nullptr;
-            std::string json = "[]";
-            if (sqlite3_open(g_dbPath.c_str(), &db) == SQLITE_OK) {
+            json = "[]";
+            if (sqlite3_open_v2(g_dbPath.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK) {
+                std::string sql = "SELECT id, timestamp, level, section, scope, process, frame, message "
+                    "FROM debug_logs WHERE level >= " + std::to_string(minLevel);
+                if (!section.empty()) sql += " AND section = '" + section + "'";
+                if (!scope.empty()) sql += " AND scope = '" + scope + "'";
+                sql += " ORDER BY id DESC LIMIT " + std::to_string(limit);
+
                 json = "[";
                 bool first = true;
                 auto cb = [](void* data, int ncols, char** vals, char** /*names*/) -> int {
-                    auto& out = *static_cast<std::pair<std::string*, bool*>*>(data);
-                    if (!*out.second) *out.first += ",";
-                    *out.second = false;
-                    char buf[512];
+                    auto* pair = static_cast<std::pair<std::string*, bool*>*>(data);
+                    if (!*pair->second) *pair->first += ",";
+                    *pair->second = false;
+                    char buf[1024];
                     snprintf(buf, sizeof(buf),
-                        R"({"session_id":"%s","room_id":%s,"game_name":"%s","map_name":"%s","started_at":%s,"ended_at":%s,"end_reason":"%s","exit_code":%s})",
-                        vals[0] ? vals[0] : "", vals[1] ? vals[1] : "0",
-                        vals[2] ? vals[2] : "", vals[3] ? vals[3] : "",
-                        vals[4] ? vals[4] : "0", vals[5] ? vals[5] : "0",
-                        vals[6] ? vals[6] : "", vals[7] ? vals[7] : "0");
-                    *out.first += buf;
+                        R"({"id":%s,"timestamp":%s,"level":%s,"section":"%s","scope":"%s","process":"%s","frame":%s,"message":"%s"})",
+                        vals[0] ? vals[0] : "0", vals[1] ? vals[1] : "0",
+                        vals[2] ? vals[2] : "0", vals[3] ? vals[3] : "",
+                        vals[4] ? vals[4] : "", vals[5] ? vals[5] : "",
+                        vals[6] ? vals[6] : "0", vals[7] ? vals[7] : "");
+                    *pair->first += buf;
                     return 0;
                 };
                 auto pair = std::make_pair(&json, &first);
-                sqlite3_exec(db,
-                    "SELECT session_id, room_id, game_name, map_name, started_at, ended_at, end_reason, exit_code "
-                    "FROM game_sessions ORDER BY started_at DESC LIMIT 50",
-                    cb, &pair, nullptr);
+                sqlite3_exec(db, sql.c_str(), cb, &pair, nullptr);
                 json += "]";
                 sqlite3_close(db);
             }
-            res->writeHeader("Content-Type", "application/json")
-               ->writeHeader("Access-Control-Allow-Origin", "*")
-               ->end(json);
-        })
-        .listen(g_port, [](auto* listenSocket) {
-            if (listenSocket) {
-                SLOG(SPRING_LOG_NOTICE, "listening on port %d", g_port);
-            } else {
-                SLOG(SPRING_LOG_FATAL, "failed to listen on port %d", g_port);
-                exit(1);
-            }
-        })
-        .run();
+        }
 
+        std::string body = json;
+        return {.contentType = "application/json",
+                .body = {body.begin(), body.end()}, .status = 200};
+    });
+
+    net.AddHttpGet("/api/logs/search", [](const std::string& url) -> HttpResponse {
+        std::string query = QueryParam(url, "q");
+        int limit = 200;
+        uint8_t minLevel = 0;
+        auto qLimit = QueryParam(url, "limit");
+        if (!qLimit.empty()) limit = atoi(qLimit.c_str());
+        auto qLevel = QueryParam(url, "level");
+        if (!qLevel.empty()) minLevel = (uint8_t)atoi(qLevel.c_str());
+
+        auto entries = g_logBuffer.Query(0, 0, limit * 5, minLevel);
+        std::string json = "[";
+        int count = 0;
+        for (auto& e : entries) {
+            if (count >= limit) break;
+            if (!query.empty() && e.message.find(query) == std::string::npos) continue;
+            if (count > 0) json += ",";
+            json += LogEntryToJson(e);
+            count++;
+        }
+        json += "]";
+        return {.contentType = "application/json",
+                .body = {json.begin(), json.end()}, .status = 200};
+    });
+
+    net.AddHttpGet("/api/logs/sources", [](const std::string&) -> HttpResponse {
+        std::string json = R"({"status":"ok"})";
+        return {.contentType = "application/json",
+                .body = {json.begin(), json.end()}, .status = 200};
+    });
+
+    net.AddHttpGet("/api/sessions", [](const std::string&) -> HttpResponse {
+        sqlite3* db = nullptr;
+        std::string json = "[]";
+        if (sqlite3_open(g_dbPath.c_str(), &db) == SQLITE_OK) {
+            json = "[";
+            bool first = true;
+            auto cb = [](void* data, int ncols, char** vals, char** /*names*/) -> int {
+                auto& out = *static_cast<std::pair<std::string*, bool*>*>(data);
+                if (!*out.second) *out.first += ",";
+                *out.second = false;
+                char buf[512];
+                snprintf(buf, sizeof(buf),
+                    R"({"session_id":"%s","room_id":%s,"game_name":"%s","map_name":"%s","started_at":%s,"ended_at":%s,"end_reason":"%s","exit_code":%s})",
+                    vals[0] ? vals[0] : "", vals[1] ? vals[1] : "0",
+                    vals[2] ? vals[2] : "", vals[3] ? vals[3] : "",
+                    vals[4] ? vals[4] : "0", vals[5] ? vals[5] : "0",
+                    vals[6] ? vals[6] : "", vals[7] ? vals[7] : "0");
+                *out.first += buf;
+                return 0;
+            };
+            auto pair = std::make_pair(&json, &first);
+            sqlite3_exec(db,
+                "SELECT session_id, room_id, game_name, map_name, started_at, ended_at, end_reason, exit_code "
+                "FROM game_sessions ORDER BY started_at DESC LIMIT 50",
+                cb, &pair, nullptr);
+            json += "]";
+            sqlite3_close(db);
+        }
+        return {.contentType = "application/json",
+                .body = {json.begin(), json.end()}, .status = 200};
+    });
+
+    net.Start(g_port);
+
+    // Run until interrupted — the network thread handles everything
+    SLOG(SPRING_LOG_NOTICE, "log server running, press Ctrl-C to stop");
+    pause();  // Wait for signal
+
+    net.Stop();
+    g_server = nullptr;
     springlog_sqlite_shutdown();
     springlog_shutdown();
     return 0;

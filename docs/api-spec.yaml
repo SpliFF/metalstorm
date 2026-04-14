@@ -3,10 +3,14 @@ info:
   title: Spring RTS Web API
   version: "1.0.0"
   description: |
-    HTTP API for Spring RTS Web servers. Three server types share this API:
+    HTTP API for Spring RTS Web servers. All servers support HTTP/2 (h2c
+    cleartext) and HTTP/1.1 on the same port, auto-detected from the
+    connection preface. For h2c: `curl --http2-prior-knowledge`.
+
+    Three server types share this API:
     - **Lobby** (default port 8011): auth, rooms, maps, processes
     - **Game server** (dynamic port): auth, exec, WebRTC signaling
-    - **Log server** (default port 8010): log queries, sessions
+    - **Log server** (default port 8010): log queries, sessions, SSE streaming
 
 servers:
   - url: http://localhost:8011
@@ -456,6 +460,23 @@ paths:
         - name: level
           in: query
           schema: { type: integer, default: 0 }
+
+  /api/logs/stream:
+    get:
+      summary: SSE stream for real-time log delivery
+      description: |
+        Server-Sent Events endpoint. Connect via EventSource for continuous
+        log streaming. Events have type "log" with JSON data containing
+        level, section, and message fields. Replaces polling /api/logs/{roomId}.
+      tags: [Logs]
+      responses:
+        "200":
+          description: SSE event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: "SSE events with type 'log' and JSON data"
 
   /api/sessions:
     get:

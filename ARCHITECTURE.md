@@ -22,9 +22,9 @@ build/debug/_deps/flatbuffers-build/flatc --cpp -o rts/ schemas/protocol.fbs
 
 | Binary | Entry point | Role |
 |--------|------------|------|
-| `spring-lobby` | `rts/lobby_main.cpp` | HTTP + WebSocket lobby server. Manages rooms, spawns game servers, preprocesses maps/games at startup. |
+| `spring-lobby` | `rts/lobby_main.cpp` | HTTP/2 + HTTP/1.1 lobby server. Manages rooms, spawns game servers, preprocesses maps/games at startup. |
 | `spring-server` | `rts/server_main.cpp` | Headless game sim. One per active room, spawned by lobby as a child process. Runs sim at 30Hz, streams entity state. |
-| `spring-logserver` | `rts/logserver_main.cpp` | Dedicated log collection server. Receives LogIngest via WS, stores in SQLite (debug.db), streams to subscribers, serves HTTP query API. |
+| `spring-logserver` | `rts/logserver_main.cpp` | Dedicated log collection server. Receives LogIngest via WS, stores in SQLite (debug.db), streams to subscribers, serves HTTP query API. SSE endpoint for live log streaming. |
 
 ### spring-lobby CLI
 
@@ -48,7 +48,7 @@ build/debug/_deps/flatbuffers-build/flatc --cpp -o rts/ schemas/protocol.fbs
 | `server_main.cpp` | Game server entry. Auth (registers CPlayer), message dispatch, disconnect handling (fires PlayerRemoved callin), sim loop, entity streaming, win detection. |
 | `lobby_main.cpp` | Lobby entry. Room management, game/map preprocessing, child process spawning, HTTP routes. |
 | `Server/Simulation.h/.cpp` | Initialises Spring subsystems, ticks physics/units/weapons/features each frame. |
-| `Server/NetworkServer.h/.cpp` | uWebSockets server. WebSocket + HTTP on same port. Send/broadcast helpers. |
+| `Server/NetworkServer.h/.cpp` | HTTP/2 (h2c via nghttp2) + HTTP/1.1 server. WebRTC data channels for game traffic. Send/broadcast helpers. |
 | `Server/Protocol.h` | FlatBuffers message builders (BuildAuthResponse, BuildMapData, BuildGameUnitDefs, etc.). |
 | `Server/EntityStateSerializer.h/.cpp` | Serialises unit state to Tier 2 binary (struct-of-arrays, field-masked). |
 | `Server/ProjectileStateSerializer.h/.cpp` | Serialises synced weapon projectiles to envelope 0x04 binary. |
@@ -125,6 +125,8 @@ build/debug/_deps/flatbuffers-build/flatc --cpp -o rts/ schemas/protocol.fbs
 **Key client→server messages:** AuthRequest, PlayerCommand, ViewportUpdate, RoomCreate/Join/Leave/Ready/StartGame/EndGame, RoomAddAI/RemoveAI, LogIngest, LogSubscribe, LogUnsubscribe, ConsoleCommand.
 
 **IPC:** Pipe-based IPC removed. GameStarted is now a ServerPayload message sent over WebSocket.
+
+**Transport:** All HTTP endpoints support both HTTP/2 (h2c, cleartext) and HTTP/1.1. Game state streaming uses WebRTC data channels.
 
 Generated bindings:
 - C++: `rts/protocol_generated.h`
@@ -333,6 +335,7 @@ data/
 | `/api/logs/<roomId>` | Recent log entries (params: level, section, scope, limit) |
 | `/api/logs/search` | Full-text log search (params: q, level, section, scope, limit) |
 | `/api/logs/sources` | Connected log source status |
+| `/api/logs/stream` | SSE live log stream (params: level, section, scope) |
 | `/api/sessions` | Recent game sessions (from game_sessions table) |
 
 ## Data Flow
@@ -387,6 +390,7 @@ Playable end-to-end: lobby → create room → start game → fight → game-ove
 Player disconnect handling: server detects WebSocket close, fires `PlayerRemoved` Lua callin, broadcasts `PlayerLeft` to remaining clients, cleans up session. Default engine gadget ends game when no humans remain.
 
 All tasks from PLAN-next-steps.md are complete. Current work: Zero-K game support (PLAN-convert-zk.md).
+HTTP/2 migration complete: all servers use nghttp2 for h2c + HTTP/1.1, replacing uWebSockets HTTP handling.
 
 **ZK Phase A complete:** 197/236 gadgets boot, sim ticks at 30Hz. GameStart deferred until all roster players connect.
 

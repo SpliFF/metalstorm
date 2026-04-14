@@ -17,12 +17,31 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(SPRINGAPI_WEBRTC "Enable WebRTC data channel support" OFF)
 option(SPRINGAPI_PYTHON "Build Python bindings" OFF)
 
-# --- Core library (HTTP only, zero dependencies) ---
+# --- nghttp2 (HTTP/2 client support) ---
+# Use parent target if building in engine tree, otherwise fetch
+if(TARGET nghttp2_static)
+    # Already available from engine build
+else()
+    include(FetchContent)
+    set(ENABLE_LIB_ONLY ON CACHE BOOL "" FORCE)
+    set(ENABLE_STATIC_LIB ON CACHE BOOL "" FORCE)
+    set(ENABLE_SHARED_LIB OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        nghttp2
+        GIT_REPOSITORY https://github.com/nghttp2/nghttp2.git
+        GIT_TAG v1.64.0
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(nghttp2)
+endif()
+
+# --- Core library (HTTP/2 via nghttp2) ---
 add_library(springapi STATIC
     src/http.cpp
     src/rtc.cpp
 )
 target_include_directories(springapi PUBLIC include)
+target_link_libraries(springapi PRIVATE nghttp2_static)
 
 # --- WebRTC support ---
 if(SPRINGAPI_WEBRTC)

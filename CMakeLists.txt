@@ -44,42 +44,35 @@ endif()
 # Include paths — the rts/ directory is the root for Spring includes
 include_directories(${CMAKE_SOURCE_DIR}/rts)
 
-# === uWebSockets (WebSocket server) ===
+# === nghttp2 (HTTP/2 library) ===
 include(FetchContent)
 
+# nghttp2: build only the static library, no tools/examples/docs.
+# Use manual FetchContent_Populate to scope variables without affecting
+# other dependencies (doctest, libdatachannel, etc.).
 FetchContent_Declare(
-    uSockets
-    GIT_REPOSITORY https://github.com/uNetworking/uSockets.git
-    GIT_TAG v0.8.8
+    nghttp2
+    GIT_REPOSITORY https://github.com/nghttp2/nghttp2.git
+    GIT_TAG v1.64.0
     GIT_SHALLOW TRUE
-    GIT_SUBMODULES ""
 )
-FetchContent_MakeAvailable(uSockets)
-
-# Compile uSockets from source (minimal: TCP only, no TLS)
-add_library(usockets STATIC
-    ${usockets_SOURCE_DIR}/src/bsd.c
-    ${usockets_SOURCE_DIR}/src/context.c
-    ${usockets_SOURCE_DIR}/src/loop.c
-    ${usockets_SOURCE_DIR}/src/socket.c
-    ${usockets_SOURCE_DIR}/src/eventing/epoll_kqueue.c
-)
-target_include_directories(usockets PUBLIC ${usockets_SOURCE_DIR}/src)
-target_compile_definitions(usockets PRIVATE LIBUS_NO_SSL)
-
-FetchContent_Declare(
-    uWebSockets
-    GIT_REPOSITORY https://github.com/uNetworking/uWebSockets.git
-    GIT_TAG v20.76.0
-    GIT_SHALLOW TRUE
-    GIT_SUBMODULES ""
-)
-FetchContent_MakeAvailable(uWebSockets)
-
-# uWebSockets is header-only, depends on uSockets
-add_library(uws INTERFACE)
-target_include_directories(uws INTERFACE ${uwebsockets_SOURCE_DIR}/src)
-target_link_libraries(uws INTERFACE usockets)
+FetchContent_GetProperties(nghttp2)
+if(NOT nghttp2_POPULATED)
+    FetchContent_Populate(nghttp2)
+    # Scope nghttp2 build options (not global cache)
+    set(NGHTTP2_SAVE_BUILD_SHARED ${BUILD_SHARED_LIBS})
+    set(NGHTTP2_SAVE_BUILD_STATIC ${BUILD_STATIC_LIBS})
+    set(NGHTTP2_SAVE_BUILD_TESTING ${BUILD_TESTING})
+    set(BUILD_SHARED_LIBS OFF)
+    set(BUILD_STATIC_LIBS ON)
+    set(BUILD_TESTING OFF)
+    set(ENABLE_LIB_ONLY ON)
+    set(ENABLE_DOC OFF CACHE BOOL "" FORCE)
+    add_subdirectory(${nghttp2_SOURCE_DIR} ${nghttp2_BINARY_DIR} EXCLUDE_FROM_ALL)
+    set(BUILD_SHARED_LIBS ${NGHTTP2_SAVE_BUILD_SHARED})
+    set(BUILD_STATIC_LIBS ${NGHTTP2_SAVE_BUILD_STATIC})
+    set(BUILD_TESTING ${NGHTTP2_SAVE_BUILD_TESTING})
+endif()
 
 # === libdatachannel (WebRTC data channels) ===
 # Workaround: libdatachannel's plog dep uses old cmake_minimum_required
@@ -209,7 +202,7 @@ target_include_directories(spring-server PRIVATE
     ${GENERATED_DIR}
 )
 find_package(ZLIB REQUIRED)
-target_link_libraries(spring-server PRIVATE lua uws flatbuffers ZLIB::ZLIB SQLite::SQLite3 springlog springlog-net springlog-sqlite LibDataChannel::LibDataChannelStatic)
+target_link_libraries(spring-server PRIVATE lua nghttp2_static flatbuffers ZLIB::ZLIB SQLite::SQLite3 springlog springlog-net springlog-sqlite LibDataChannel::LibDataChannelStatic)
 
 # Link platform libraries
 if(UNIX AND NOT APPLE)
@@ -270,7 +263,7 @@ target_include_directories(spring-lobby PRIVATE
     ${CMAKE_SOURCE_DIR}/rts/lib/lua/src
     ${GENERATED_DIR}
 )
-target_link_libraries(spring-lobby PRIVATE lua uws flatbuffers ZLIB::ZLIB SQLite::SQLite3 springlog springlog-net springlog-sqlite)
+target_link_libraries(spring-lobby PRIVATE lua nghttp2_static flatbuffers ZLIB::ZLIB SQLite::SQLite3 springlog springlog-net springlog-sqlite)
 if(UNIX)
     target_link_libraries(spring-lobby PRIVATE pthread dl)
 endif()
@@ -344,13 +337,14 @@ add_subdirectory(tools/gameconverter)
 # === spring-logserver (dedicated log collection + streaming server) ===
 add_executable(spring-logserver
     rts/logserver_main.cpp
+    rts/Server/NetworkServer.cpp
 )
 add_dependencies(spring-logserver generate_flatbuffers)
 target_include_directories(spring-logserver PRIVATE
     ${CMAKE_SOURCE_DIR}/rts
     ${GENERATED_DIR}
 )
-target_link_libraries(spring-logserver PRIVATE springlog springlog-sqlite uws flatbuffers SQLite::SQLite3 ZLIB::ZLIB)
+target_link_libraries(spring-logserver PRIVATE springlog springlog-sqlite nghttp2_static flatbuffers SQLite::SQLite3 ZLIB::ZLIB)
 if(UNIX)
     target_link_libraries(spring-logserver PRIVATE pthread dl)
 endif()

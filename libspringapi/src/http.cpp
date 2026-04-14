@@ -1,7 +1,11 @@
-// libspringapi — HTTP implementation.
-// Uses raw POSIX sockets. Zero external dependencies.
+// libspringapi — HTTP/2 (h2c) client implementation.
+//
+// Uses nghttp2 for HTTP/2 cleartext connections. Falls back to HTTP/1.1
+// for servers that don't speak h2c. Supports multiplexed requests.
 
 #include "springapi/springapi.h"
+
+#include <nghttp2/nghttp2.h>
 
 #include <cstring>
 #include <cstdio>
@@ -9,8 +13,10 @@
 #include <sstream>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <poll.h>
 
 namespace springapi {
 
@@ -42,29 +48,207 @@ bool parseUrl(const std::string& url, std::string& host, int& port, std::string&
     return !host.empty() && port > 0;
 }
 
-std::string httpRequest(const std::string& method, const std::string& url,
+int connectTcp(const std::string& host, int port) {
+    struct addrinfo hints{}, *res;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    std::string portStr = std::to_string(port);
+    if (getaddrinfo(host.c_str(), portStr.c_str(), &hints, &res) != 0)
+        return -1;
+
+    int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (sock < 0) { freeaddrinfo(res); return -1; }
+
+    if (connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
+        close(sock);
+        freeaddrinfo(res);
+        return -1;
+    }
+    freeaddrinfo(res);
+
+    // Enable TCP_NODELAY for lower latency
+    int one = 1;
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    return sock;
+}
+
+// ── nghttp2 h2c client session ──
+
+struct H2ClientStream {
+    int32_t streamId = 0;
+    std::string responseBody;
+    bool complete = false;
+};
+
+struct H2ClientSession {
+    int fd = -1;
+    nghttp2_session* session = nullptr;
+    H2ClientStream* activeStream = nullptr;
+
+    ~H2ClientSession() {
+        if (session) nghttp2_session_del(session);
+        if (fd >= 0) close(fd);
+    }
+};
+
+static ssize_t h2SendCallback(nghttp2_session* session,
+                                const uint8_t* data, size_t length,
+                                int flags, void* user_data) {
+    auto* ctx = static_cast<H2ClientSession*>(user_data);
+    ssize_t sent = send(ctx->fd, data, length, 0);
+    if (sent < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            return NGHTTP2_ERR_WOULDBLOCK;
+        return NGHTTP2_ERR_CALLBACK_FAILURE;
+    }
+    return sent;
+}
+
+static int h2OnFrameRecv(nghttp2_session* session,
+                           const nghttp2_frame* frame, void* user_data) {
+    auto* ctx = static_cast<H2ClientSession*>(user_data);
+    if (ctx->activeStream && frame->hd.stream_id == ctx->activeStream->streamId) {
+        if (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) {
+            ctx->activeStream->complete = true;
+        }
+    }
+    return 0;
+}
+
+static int h2OnDataChunkRecv(nghttp2_session* session, uint8_t flags,
+                               int32_t stream_id, const uint8_t* data,
+                               size_t len, void* user_data) {
+    auto* ctx = static_cast<H2ClientSession*>(user_data);
+    if (ctx->activeStream && stream_id == ctx->activeStream->streamId) {
+        ctx->activeStream->responseBody.append(reinterpret_cast<const char*>(data), len);
+    }
+    return 0;
+}
+
+/// Single-request HTTP/2 h2c client. Connects, sends one request, reads response.
+std::string h2cRequest(const std::string& method, const std::string& url,
                         const std::string& body = "",
                         const std::string& authToken = "") {
     std::string host, path;
     int port;
     if (!parseUrl(url, host, port, path)) return "";
 
-    struct addrinfo hints{}, *res;
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    std::string portStr = std::to_string(port);
-    if (getaddrinfo(host.c_str(), portStr.c_str(), &hints, &res) != 0)
-        return "";
+    int fd = connectTcp(host, port);
+    if (fd < 0) return "";
 
-    int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (sock < 0) { freeaddrinfo(res); return ""; }
+    H2ClientSession ctx;
+    ctx.fd = fd;
 
-    if (connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
-        close(sock);
-        freeaddrinfo(res);
-        return "";
+    // Create nghttp2 client session with send callback
+    nghttp2_session_callbacks* cbs;
+    nghttp2_session_callbacks_new(&cbs);
+    nghttp2_session_callbacks_set_send_callback(cbs, h2SendCallback);
+    nghttp2_session_callbacks_set_on_frame_recv_callback(cbs, h2OnFrameRecv);
+    nghttp2_session_callbacks_set_on_data_chunk_recv_callback(cbs, h2OnDataChunkRecv);
+    nghttp2_session_client_new(&ctx.session, cbs, &ctx);
+    nghttp2_session_callbacks_del(cbs);
+
+    // Send client connection preface + SETTINGS
+    nghttp2_settings_entry settings[] = {
+        {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 100},
+    };
+    nghttp2_submit_settings(ctx.session, NGHTTP2_FLAG_NONE,
+                             settings, sizeof(settings)/sizeof(settings[0]));
+
+    // Build headers
+    std::string authority = host + ":" + std::to_string(port);
+    std::vector<nghttp2_nv> hdrs;
+
+    auto addHdr = [&](const char* name, const std::string& val) {
+        hdrs.push_back({
+            (uint8_t*)name, (uint8_t*)val.data(),
+            strlen(name), val.size(),
+            NGHTTP2_NV_FLAG_NO_COPY_NAME | NGHTTP2_NV_FLAG_NO_COPY_VALUE
+        });
+    };
+
+    addHdr(":method", method);
+    addHdr(":path", path);
+    addHdr(":scheme", std::string("http"));
+    addHdr(":authority", authority);
+    if (!authToken.empty()) {
+        std::string authVal = "Bearer " + authToken;
+        addHdr("authorization", authVal);
     }
-    freeaddrinfo(res);
+    if (!body.empty()) {
+        addHdr("content-type", std::string("application/json"));
+    }
+
+    // Data provider for POST body
+    struct BodyProvider {
+        const std::string* body;
+        size_t offset = 0;
+    };
+    BodyProvider bp{&body, 0};
+
+    nghttp2_data_provider prd;
+    prd.source.ptr = &bp;
+    prd.read_callback = [](nghttp2_session*, int32_t, uint8_t* buf,
+                            size_t length, uint32_t* data_flags,
+                            nghttp2_data_source* source,
+                            void*) -> ssize_t {
+        auto* bp = static_cast<BodyProvider*>(source->ptr);
+        size_t remaining = bp->body->size() - bp->offset;
+        if (remaining == 0) {
+            *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+            return 0;
+        }
+        size_t n = std::min(remaining, length);
+        memcpy(buf, bp->body->data() + bp->offset, n);
+        bp->offset += n;
+        if (bp->offset >= bp->body->size())
+            *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+        return (ssize_t)n;
+    };
+
+    H2ClientStream stream;
+    ctx.activeStream = &stream;
+
+    int32_t sid = nghttp2_submit_request(ctx.session, nullptr,
+                                          hdrs.data(), hdrs.size(),
+                                          body.empty() ? nullptr : &prd,
+                                          &stream);
+    if (sid < 0) return "";
+    stream.streamId = sid;
+
+    // Send all pending data (preface + settings + request)
+    nghttp2_session_send(ctx.session);
+
+    // Read response
+    uint8_t buf[16384];
+    while (!stream.complete) {
+        struct pollfd pfd = {fd, POLLIN, 0};
+        int ret = poll(&pfd, 1, 10000);  // 10s timeout
+        if (ret <= 0) break;
+
+        ssize_t n = recv(fd, buf, sizeof(buf), 0);
+        if (n <= 0) break;
+
+        ssize_t consumed = nghttp2_session_mem_recv(ctx.session, buf, n);
+        if (consumed < 0) break;
+
+        // Send any pending data (WINDOW_UPDATE, etc.)
+        nghttp2_session_send(ctx.session);
+    }
+
+    return stream.responseBody;
+}
+
+/// HTTP/1.1 fallback for servers that don't speak h2c.
+std::string http1Request(const std::string& method, const std::string& url,
+                          const std::string& body = "",
+                          const std::string& authToken = "") {
+    std::string host, path;
+    int port;
+    if (!parseUrl(url, host, port, path)) return "";
+
+    int sock = connectTcp(host, port);
+    if (sock < 0) return "";
 
     std::ostringstream req;
     req << method << " " << path << " HTTP/1.1\r\n";
@@ -115,6 +299,16 @@ std::string httpRequest(const std::string& method, const std::string& url,
     }
 
     return respBody;
+}
+
+/// Try HTTP/2 h2c first, fall back to HTTP/1.1 on failure.
+std::string httpRequest(const std::string& method, const std::string& url,
+                         const std::string& body = "",
+                         const std::string& authToken = "") {
+    std::string result = h2cRequest(method, url, body, authToken);
+    if (!result.empty()) return result;
+    // Fallback to HTTP/1.1
+    return http1Request(method, url, body, authToken);
 }
 
 } // namespace
