@@ -3,8 +3,7 @@
  * Spring RTS Debug MCP Server
  *
  * Provides Claude with tools to query logs, execute Lua/commands,
- * inspect game state, and manage processes — all via the log server
- * HTTP API and lobby WebSocket.
+ * inspect game state, and manage processes — all via HTTP REST API.
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -16,11 +15,63 @@ import {
 
 const LOG_SERVER_URL = process.env.LOG_SERVER_URL || 'http://localhost:8010';
 const LOBBY_URL = process.env.LOBBY_URL || 'http://localhost:8011';
+const GAME_SERVER_URL = process.env.GAME_SERVER_URL || 'http://localhost:9100';
+const AUTH_USER = process.env.SPRING_USER || 'admin';
+const AUTH_PASS = process.env.SPRING_PASS || 'admin';
+
+// --- Auth token cache ---
+let authToken = process.env.SPRING_TOKEN || '';
+
+async function ensureAuth() {
+    if (authToken) return authToken;
+    try {
+        const resp = await fetch(`${LOBBY_URL}/api/auth/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: AUTH_USER, password: AUTH_PASS }),
+        });
+        if (resp.ok) {
+            const data = await resp.json();
+            if (data.token) { authToken = data.token; return authToken; }
+        }
+    } catch { /* fall through */ }
+    // Try register if login failed
+    try {
+        const resp = await fetch(`${LOBBY_URL}/api/auth/register`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: AUTH_USER, password: AUTH_PASS }),
+        });
+        if (resp.ok) {
+            const data = await resp.json();
+            if (data.token) { authToken = data.token; return authToken; }
+        }
+    } catch { /* fall through */ }
+    return '';
+}
 
 // --- HTTP helpers ---
 async function fetchJson(url) {
     const resp = await fetch(url);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+    return resp.json();
+}
+
+async function execOnServer(serverUrl, scope, code) {
+    const token = await ensureAuth();
+    if (!token) throw new Error('Not authenticated — set SPRING_TOKEN or SPRING_USER/SPRING_PASS');
+    const resp = await fetch(`${serverUrl}/api/exec`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ scope, code }),
+    });
+    if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(`exec failed (${resp.status}): ${text}`);
+    }
     return resp.json();
 }
 
@@ -56,25 +107,22 @@ const TOOLS = [
     },
     {
         name: 'exec_lua',
-        description: 'Execute Lua code in a specific scope on the game server. Use scope "LuaRules" for game-wide gadgets, "LuaGaia" for map gadgets. Expressions are auto-wrapped in "return" for convenience.',
+        description: 'Execute Lua code in a specific scope on the game server. Use scope "LuaRules" for game-wide gadgets, "LuaGaia" for map gadgets, "server" for server commands.',
         inputSchema: {
             type: 'object',
             properties: {
-                scope: { type: 'string', description: 'Lua scope', enum: ['LuaRules', 'LuaGaia', 'server'] },
+                scope: { type: 'string', description: 'Execution scope', enum: ['LuaRules', 'LuaGaia', 'server'] },
                 code: { type: 'string', description: 'Lua code or server command to execute' },
-                roomId: { type: 'number', description: 'Room ID (for future multi-game support)' },
             },
             required: ['scope', 'code'],
         },
     },
     {
         name: 'get_game_state',
-        description: 'Get current game state summary (frame, teams, unit count).',
+        description: 'Get current game state summary (frame, teams, unit count) from the game server.',
         inputSchema: {
             type: 'object',
-            properties: {
-                roomId: { type: 'number', description: 'Room ID' },
-            },
+            properties: {},
         },
     },
     {
@@ -84,7 +132,6 @@ const TOOLS = [
             type: 'object',
             properties: {
                 team: { type: 'number', description: 'Team ID (-1 for all)', default: -1 },
-                roomId: { type: 'number', description: 'Room ID' },
             },
         },
     },
@@ -98,34 +145,31 @@ const TOOLS = [
     },
     {
         name: 'get_lua_source',
-        description: 'Read a Lua source file from the game content directory. Useful for reading gadget source when debugging Lua errors.',
+        description: 'Read a Lua source file from the game content via HTTP. Path relative to game root.',
         inputSchema: {
             type: 'object',
             properties: {
-                gamePath: { type: 'string', description: 'Game path (e.g. "content/games/papertanks")' },
+                gameId: { type: 'string', description: 'Game ID (e.g. "papertanks")' },
                 filePath: { type: 'string', description: 'File path relative to game root (e.g. "LuaRules/Gadgets/unit_spawner.lua")' },
             },
-            required: ['gamePath', 'filePath'],
+            required: ['gameId', 'filePath'],
         },
     },
     {
         name: 'list_gadgets',
-        description: 'List loaded Lua gadgets and their status.',
+        description: 'List loaded Lua gadgets and their status on the game server.',
         inputSchema: {
             type: 'object',
-            properties: {
-                roomId: { type: 'number', description: 'Room ID' },
-            },
+            properties: {},
         },
     },
     {
         name: 'query_db',
-        description: 'Execute a read-only SQL query against the game database (via lobby) or debug database (via log server).',
+        description: 'Execute a read-only SQL query against the lobby database.',
         inputSchema: {
             type: 'object',
             properties: {
-                query: { type: 'string', description: 'SQL query (read-only)' },
-                db: { type: 'string', description: 'Database: "game" or "debug"', enum: ['game', 'debug'], default: 'game' },
+                query: { type: 'string', description: 'SQL query (read-only — INSERT/UPDATE/DELETE rejected)' },
             },
             required: ['query'],
         },
@@ -158,7 +202,6 @@ async function executeTool(name, args) {
         case 'search_logs': {
             const params = new URLSearchParams();
             params.set('q', args.query);
-            if (args.roomId) params.set('roomId', String(args.roomId));
             if (args.level) params.set('level', String(args.level));
             if (args.limit) params.set('limit', String(args.limit));
             const url = `${LOG_SERVER_URL}/api/logs/search?${params}`;
@@ -167,18 +210,21 @@ async function executeTool(name, args) {
         }
 
         case 'exec_lua': {
-            // For now, use the lobby HTTP as a proxy
-            // In the future this could go direct to game server WS
-            return `exec_lua: scope=${args.scope}, code="${args.code}" — requires WebSocket connection (not yet implemented in MCP server)`;
+            const result = await execOnServer(GAME_SERVER_URL, args.scope, args.code);
+            if (!result.success) return `Error: ${result.output || 'execution failed'}`;
+            return result.output || '(no output)';
         }
 
         case 'get_game_state': {
-            return `get_game_state — requires WebSocket exec of "state" in server scope`;
+            const result = await execOnServer(GAME_SERVER_URL, 'server', 'state');
+            return result.output || '(no state)';
         }
 
         case 'list_units': {
-            const cmd = args.team >= 0 ? `units ${args.team}` : 'units';
-            return `list_units: would exec "${cmd}" in server scope`;
+            const cmd = args.team !== undefined && args.team >= 0
+                ? `units ${args.team}` : 'units';
+            const result = await execOnServer(GAME_SERVER_URL, 'server', cmd);
+            return result.output || '(no units)';
         }
 
         case 'list_processes': {
@@ -191,28 +237,21 @@ async function executeTool(name, args) {
         }
 
         case 'get_lua_source': {
-            const fs = await import('fs');
-            const path = await import('path');
-            const fullPath = path.join(args.gamePath, args.filePath);
-            try {
-                const content = fs.readFileSync(fullPath, 'utf-8');
-                return content;
-            } catch (e) {
-                return `Error reading ${fullPath}: ${e.message}`;
-            }
+            const url = `${LOBBY_URL}/api/vfs/game/${args.gameId}/${args.filePath}`;
+            const resp = await fetch(url);
+            if (!resp.ok) return `Error: HTTP ${resp.status} fetching ${args.filePath}`;
+            return await resp.text();
         }
 
         case 'list_gadgets': {
-            return `list_gadgets — requires WebSocket exec of "show gadgets" in LuaRules scope`;
+            const result = await execOnServer(GAME_SERVER_URL, 'LuaRules', 'return table.concat(Spring.GetGadgetList(), "\\n")');
+            return result.output || '(no gadgets or game not running)';
         }
 
         case 'query_db': {
-            if (args.db === 'debug') {
-                // Query debug.db via log server search
-                return `query_db(debug): would search debug logs — use search_logs instead`;
-            }
-            // Query game DB via lobby sql scope — requires WS
-            return `query_db(game): query="${args.query}" — requires WebSocket exec in sql scope`;
+            const result = await execOnServer(LOBBY_URL, 'sql', args.query);
+            if (!result.success) return `Error: ${result.output || 'query failed'}`;
+            return result.output || '(empty result)';
         }
 
         case 'list_sessions': {

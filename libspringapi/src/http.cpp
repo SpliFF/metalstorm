@@ -155,10 +155,14 @@ std::string h2cRequest(const std::string& method, const std::string& url,
     nghttp2_submit_settings(ctx.session, NGHTTP2_FLAG_NONE,
                              settings, sizeof(settings)/sizeof(settings[0]));
 
-    // Build headers
+    // Build headers — store all value strings to keep them alive until
+    // nghttp2_submit_request copies the nv array.
     std::string authority = host + ":" + std::to_string(port);
-    std::vector<nghttp2_nv> hdrs;
+    std::string scheme = "http";
+    std::string authVal = authToken.empty() ? "" : "Bearer " + authToken;
+    std::string contentType = "application/json";
 
+    std::vector<nghttp2_nv> hdrs;
     auto addHdr = [&](const char* name, const std::string& val) {
         hdrs.push_back({
             (uint8_t*)name, (uint8_t*)val.data(),
@@ -169,15 +173,10 @@ std::string h2cRequest(const std::string& method, const std::string& url,
 
     addHdr(":method", method);
     addHdr(":path", path);
-    addHdr(":scheme", std::string("http"));
+    addHdr(":scheme", scheme);
     addHdr(":authority", authority);
-    if (!authToken.empty()) {
-        std::string authVal = "Bearer " + authToken;
-        addHdr("authorization", authVal);
-    }
-    if (!body.empty()) {
-        addHdr("content-type", std::string("application/json"));
-    }
+    if (!authToken.empty()) addHdr("authorization", authVal);
+    if (!body.empty()) addHdr("content-type", contentType);
 
     // Data provider for POST body
     struct BodyProvider {

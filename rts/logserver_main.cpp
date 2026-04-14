@@ -295,6 +295,7 @@ int main(int argc, char** argv) {
         auto qLevel = QueryParam(url, "level");
         if (!qLevel.empty()) minLevel = (uint8_t)atoi(qLevel.c_str());
 
+        // Try ring buffer first
         auto entries = g_logBuffer.Query(0, 0, limit * 5, minLevel);
         std::string json = "[";
         int count = 0;
@@ -305,6 +306,37 @@ int main(int argc, char** argv) {
             json += LogEntryToJson(e);
             count++;
         }
+
+        // Fall back to SQLite when ring buffer yields no results
+        if (count == 0 && !query.empty()) {
+            sqlite3* db = nullptr;
+            if (sqlite3_open_v2(g_dbPath.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK) {
+                // Use parameterized LIKE for safety
+                std::string sql = "SELECT id, timestamp, level, section, scope, process, frame, message "
+                    "FROM debug_logs WHERE level >= " + std::to_string(minLevel) +
+                    " AND message LIKE '%" + query + "%'"
+                    " ORDER BY id DESC LIMIT " + std::to_string(limit);
+                bool first = true;
+                auto cb = [](void* data, int ncols, char** vals, char** /*names*/) -> int {
+                    auto* pair = static_cast<std::pair<std::string*, bool*>*>(data);
+                    if (!*pair->second) *pair->first += ",";
+                    *pair->second = false;
+                    char buf[1024];
+                    snprintf(buf, sizeof(buf),
+                        R"({"id":%s,"timestamp":%s,"level":%s,"section":"%s","scope":"%s","process":"%s","frame":%s,"message":"%s"})",
+                        vals[0] ? vals[0] : "0", vals[1] ? vals[1] : "0",
+                        vals[2] ? vals[2] : "0", vals[3] ? vals[3] : "",
+                        vals[4] ? vals[4] : "", vals[5] ? vals[5] : "",
+                        vals[6] ? vals[6] : "0", vals[7] ? vals[7] : "");
+                    *pair->first += buf;
+                    return 0;
+                };
+                auto pair = std::make_pair(&json, &first);
+                sqlite3_exec(db, sql.c_str(), cb, &pair, nullptr);
+                sqlite3_close(db);
+            }
+        }
+
         json += "]";
         return {.contentType = "application/json",
                 .body = {json.begin(), json.end()}, .status = 200};
@@ -346,6 +378,29 @@ int main(int argc, char** argv) {
         }
         return {.contentType = "application/json",
                 .body = {json.begin(), json.end()}, .status = 200};
+    });
+
+    // POST endpoint for SSE testing — generates a synthetic log event
+    net.AddHttpPost("/api/logs/test-event", [](const std::string&, const std::string& body,
+                                                const HttpRequestHeaders&) -> HttpResponse {
+        // Parse optional message from body
+        std::string msg = "test event";
+        auto mpos = body.find("\"message\"");
+        if (mpos != std::string::npos) {
+            auto vstart = body.find('"', body.find(':', mpos) + 1);
+            auto vend = body.find('"', vstart + 1);
+            if (vstart != std::string::npos && vend != std::string::npos)
+                msg = body.substr(vstart + 1, vend - vstart - 1);
+        }
+
+        // Push to SSE subscribers
+        std::string json = "{\"level\":2,\"section\":\"test\",\"message\":\""
+            + JsonEscape(msg) + "\"}";
+        g_server->SendSSE(g_logStreamChannel, json, "log");
+
+        std::string resp = "{\"ok\":true,\"message\":\"" + JsonEscape(msg) + "\"}";
+        return {.contentType = "application/json",
+                .body = {resp.begin(), resp.end()}, .status = 200};
     });
 
     net.Start(g_port);

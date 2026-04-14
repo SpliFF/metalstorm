@@ -85,7 +85,7 @@ int main(int argc, char** argv) {
     std::string section, search;
     bool rawJson = false, quiet = false;
 
-    // Parse trailing options (after command + positional args)
+    // Parse ALL options from argv (works regardless of position)
     auto parseOpts = [&](int start) {
         for (int i = start; i < argc; i++) {
             if (strcmp(argv[i], "--server") == 0 && i+1 < argc) serverUrl = argv[++i];
@@ -102,8 +102,12 @@ int main(int argc, char** argv) {
             else if (strcmp(argv[i], "--team") == 0 && i+1 < argc) team = atoi(argv[++i]);
             else if (strcmp(argv[i], "--json") == 0) rawJson = true;
             else if (strcmp(argv[i], "-q") == 0) quiet = true;
+            else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) { usage(); exit(0); }
         }
     };
+
+    // Pre-parse global options so --lobby/--server/etc. work before or after the command
+    parseOpts(1);
 
     // Helper: ensure we have a token, auto-login if user/pass provided
     auto ensureAuth = [&](const std::string& targetUrl) -> bool {
@@ -121,7 +125,23 @@ int main(int argc, char** argv) {
         return true;
     };
 
-    std::string cmd = argv[1];
+    // Find the command — first non-option argument
+    std::string cmd;
+    int cmdIdx = 0;
+    for (int i = 1; i < argc; i++) {
+        if (argv[i][0] == '-') {
+            // Skip option + its value (if it takes one)
+            if (i+1 < argc && argv[i][0] == '-' && argv[i][1] == '-'
+                && strcmp(argv[i], "--json") != 0 && strcmp(argv[i], "-q") != 0
+                && strcmp(argv[i], "--help") != 0 && strcmp(argv[i], "-h") != 0)
+                i++;  // skip value
+            continue;
+        }
+        cmd = argv[i];
+        cmdIdx = i;
+        break;
+    }
+    if (cmd.empty()) { usage(); return 2; }
 
     // ─── login ───
     if (cmd == "login") {
@@ -141,9 +161,9 @@ int main(int argc, char** argv) {
 
     // ─── exec <scope> <code> ───
     if (cmd == "exec") {
-        if (argc < 4) { fprintf(stderr, "Usage: springcli exec <scope> <code> [--server URL]\n"); return 2; }
-        std::string execScope = argv[2];
-        std::string code = argv[3];
+        if (cmdIdx+2 >= argc) { fprintf(stderr, "Usage: springcli exec <scope> <code> [--server URL]\n"); return 2; }
+        std::string execScope = argv[cmdIdx+1];
+        std::string code = argv[cmdIdx+2];
         parseOpts(4);
         if (!ensureAuth(serverUrl)) return 1;
 
@@ -162,8 +182,8 @@ int main(int argc, char** argv) {
 
     // ─── lua <code> ───
     if (cmd == "lua") {
-        if (argc < 3) { fprintf(stderr, "Usage: springcli lua <code> [--scope S] [--server URL]\n"); return 2; }
-        std::string code = argv[2];
+        if (cmdIdx+1 >= argc) { fprintf(stderr, "Usage: springcli lua <code> [--scope S] [--server URL]\n"); return 2; }
+        std::string code = argv[cmdIdx+1];
         parseOpts(3);
         if (!ensureAuth(serverUrl)) return 1;
 
@@ -197,10 +217,10 @@ int main(int argc, char** argv) {
     }
 
     if (cmd == "speed") {
-        if (argc < 3) { fprintf(stderr, "Usage: springcli speed <N>\n"); return 2; }
+        if (cmdIdx+1 >= argc) { fprintf(stderr, "Usage: springcli speed <N>\n"); return 2; }
         parseOpts(3);
         if (!ensureAuth(serverUrl)) return 1;
-        auto r = springapi::exec(serverUrl, "server", "speed " + std::string(argv[2]), token);
+        auto r = springapi::exec(serverUrl, "server", "speed " + std::string(argv[cmdIdx+1]), token);
         printf("%s\n", r.output.c_str());
         return r.success ? 0 : 1;
     }
@@ -232,8 +252,8 @@ int main(int argc, char** argv) {
 
     // ─── sql ───
     if (cmd == "sql") {
-        if (argc < 3) { fprintf(stderr, "Usage: springcli sql <query> [--lobby URL]\n"); return 2; }
-        std::string query = argv[2];
+        if (cmdIdx+1 >= argc) { fprintf(stderr, "Usage: springcli sql <query> [--lobby URL]\n"); return 2; }
+        std::string query = argv[cmdIdx+1];
         parseOpts(3);
         if (!ensureAuth(lobbyUrl)) return 1;
         auto r = springapi::exec(lobbyUrl, "sql", query, token);
@@ -248,15 +268,15 @@ int main(int argc, char** argv) {
 
     // ─── Raw HTTP ───
     if (cmd == "get") {
-        if (argc < 3) { fprintf(stderr, "Usage: springcli get <url>\n"); return 2; }
-        auto result = springapi::httpGet(argv[2]);
+        if (cmdIdx+1 >= argc) { fprintf(stderr, "Usage: springcli get <url>\n"); return 2; }
+        auto result = springapi::httpGet(argv[cmdIdx+1]);
         printf("%s\n", result.c_str());
         return result.empty() ? 1 : 0;
     }
 
     if (cmd == "post") {
-        if (argc < 4) { fprintf(stderr, "Usage: springcli post <url> <json-body>\n"); return 2; }
-        auto result = springapi::httpPost(argv[2], argv[3]);
+        if (cmdIdx+2 >= argc) { fprintf(stderr, "Usage: springcli post <url> <json-body>\n"); return 2; }
+        auto result = springapi::httpPost(argv[cmdIdx+1], argv[cmdIdx+2]);
         printf("%s\n", result.c_str());
         return result.empty() ? 1 : 0;
     }

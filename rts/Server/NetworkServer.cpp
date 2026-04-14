@@ -589,7 +589,7 @@ struct NetworkServer::Impl {
 
     void AcceptConnections() {
         while (true) {
-            struct sockaddr_in addr;
+            struct sockaddr_in6 addr;
             socklen_t addrlen = sizeof(addr);
             int fd = accept(listenFd, (struct sockaddr*)&addr, &addrlen);
             if (fd < 0) break;
@@ -809,24 +809,27 @@ void NetworkServer::Stop() {
 // ═══════════════════════════════════════════════════════════════════════
 
 void NetworkServer::NetworkThreadFunc(int port) {
-    // Create listen socket
-    impl->listenFd = socket(AF_INET, SOCK_STREAM, 0);
+    // Create listen socket — dual-stack IPv6 (accepts both IPv4 and IPv6)
+    impl->listenFd = socket(AF_INET6, SOCK_STREAM, 0);
     if (impl->listenFd < 0) {
         SLOG(SPRING_LOG_ERROR, "socket() failed: %s", strerror(errno));
         return;
     }
 
     int one = 1;
+    int zero = 0;
     setsockopt(impl->listenFd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     #ifdef SO_REUSEPORT
     setsockopt(impl->listenFd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
     #endif
+    // Dual-stack: accept both IPv4 and IPv6 on the same socket
+    setsockopt(impl->listenFd, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof(zero));
     SetNonBlocking(impl->listenFd);
 
-    struct sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(port);
+    struct sockaddr_in6 addr{};
+    addr.sin6_family = AF_INET6;
+    addr.sin6_addr = in6addr_any;
+    addr.sin6_port = htons(port);
 
     if (bind(impl->listenFd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         SLOG(SPRING_LOG_ERROR, "bind(%d) failed: %s", port, strerror(errno));
