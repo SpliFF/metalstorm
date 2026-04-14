@@ -57,7 +57,10 @@ infolog.txt
 .env.*.local
 
 # Server data (SQLite databases, runtime state)
-/data/
+/data/games/*
+/data/maps/*
+/data/logs/*
+/data/*.db*
 
 # Game content (maps, games — large external files, not committed)
 /content/*
