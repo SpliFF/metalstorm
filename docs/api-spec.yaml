@@ -1,0 +1,294 @@
+openapi: "3.1.0"
+info:
+  title: Spring RTS Web API
+  version: "1.0.0"
+  description: |
+    HTTP API for Spring RTS Web servers. Three server types share this API:
+    - **Lobby** (default port 8011): auth, rooms, maps, processes
+    - **Game server** (dynamic port): auth, exec, WebRTC signaling
+    - **Log server** (default port 8010): log queries, sessions
+
+servers:
+  - url: http://localhost:8011
+    description: Lobby server
+  - url: http://localhost:9100
+    description: Game server (example port)
+  - url: http://localhost:8010
+    description: Log server
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Token from POST /api/auth/login
+
+  schemas:
+    AuthResult:
+      type: object
+      properties:
+        token: { type: string }
+        user_id: { type: integer }
+        username: { type: string }
+        role: { type: string, enum: [admin, player, spectator] }
+
+    ExecResult:
+      type: object
+      properties:
+        success: { type: boolean }
+        output: { type: string }
+
+    LogEntry:
+      type: object
+      properties:
+        id: { type: integer }
+        timestamp: { type: integer }
+        level: { type: integer, minimum: 0, maximum: 5 }
+        section: { type: string }
+        scope: { type: string }
+        process: { type: string }
+        message: { type: string }
+        frame: { type: integer }
+
+    ProcessInfo:
+      type: object
+      properties:
+        room_id: { type: integer }
+        port: { type: integer }
+        pid: { type: integer }
+        state: { type: string, enum: [starting, running, ended, crashed] }
+        map: { type: string }
+        game: { type: string }
+
+    RtcOffer:
+      type: object
+      required: [sdp]
+      properties:
+        sdp: { type: string, description: SDP offer from client }
+
+    RtcAnswer:
+      type: object
+      properties:
+        client_id: { type: integer }
+        sdp: { type: string, description: SDP answer from server }
+
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+
+paths:
+  /api/auth/login:
+    post:
+      summary: Login with username and password
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string }
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthResult" }
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/auth/register:
+    post:
+      summary: Register a new account (auto-login)
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string, minLength: 2, maxLength: 32 }
+                password: { type: string }
+      responses:
+        "201":
+          description: Account created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthResult" }
+        "409":
+          description: Username taken
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/exec:
+    post:
+      summary: Execute a command in a scope
+      tags: [Debug]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scope, code]
+              properties:
+                scope:
+                  type: string
+                  enum: [LuaRules, LuaGaia, server, lobby, sql]
+                code: { type: string }
+      responses:
+        "200":
+          description: Command result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecResult" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/rtc/offer:
+    post:
+      summary: WebRTC signaling — send SDP offer, receive answer
+      tags: [WebRTC]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RtcOffer" }
+      responses:
+        "200":
+          description: SDP answer
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RtcAnswer" }
+
+  /api/rtc/candidate:
+    post:
+      summary: WebRTC signaling — add ICE candidate
+      tags: [WebRTC]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [client_id, candidate, mid]
+              properties:
+                client_id: { type: integer }
+                candidate: { type: string }
+                mid: { type: string }
+
+  /api/processes:
+    get:
+      summary: List game server processes
+      tags: [Lobby]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ProcessInfo" }
+
+  /api/maps:
+    get:
+      summary: List available maps
+      tags: [Lobby]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    name: { type: string }
+
+  /api/logs/{roomId}:
+    get:
+      summary: Get recent log entries
+      tags: [Logs]
+      parameters:
+        - name: roomId
+          in: path
+          required: true
+          schema: { type: integer }
+          description: Room ID (0 for all sources)
+        - name: limit
+          in: query
+          schema: { type: integer, default: 200 }
+        - name: level
+          in: query
+          schema: { type: integer, default: 0 }
+          description: "Min level (0=DEBUG, 2=NOTICE, 4=ERROR)"
+        - name: section
+          in: query
+          schema: { type: string }
+        - name: scope
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/LogEntry" }
+
+  /api/logs/search:
+    get:
+      summary: Full-text search across logs
+      tags: [Logs]
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 200 }
+        - name: level
+          in: query
+          schema: { type: integer, default: 0 }
+
+  /api/sessions:
+    get:
+      summary: List recent game sessions
+      tags: [Logs]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    session_id: { type: string }
+                    room_id: { type: integer }
+                    game_name: { type: string }
+                    map_name: { type: string }
+                    started_at: { type: integer }
+                    ended_at: { type: integer }
+                    end_reason: { type: string }
+                    exit_code: { type: integer }
