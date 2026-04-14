@@ -131,7 +131,7 @@ struct MapMetadata {
     MapWaterData water;
     /// Relative paths (from the map source dir) to any .lua widgets the
     /// map ships under LuaUI/Widgets/. Client fetches each one from
-    /// /api/maps/source/{id}/{path}.
+    /// /api/maps/data/{id}/{path}.
     std::vector<std::string> widgets;
 };
 

@@ -133,6 +133,7 @@ void Process(const std::string& gamePath,
              const std::string& dataDir)
 {
     const fs::path gameRoot = gamePath;
+
     const fs::path objectsDir = FindSubdirectory(gameRoot, "objects3d");
     if (objectsDir.empty()) {
         // Not an error — a minimal game (Paper Tanks right now) may

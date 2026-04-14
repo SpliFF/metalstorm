@@ -29,7 +29,7 @@ export interface LuaWidgetHostOptions {
      * widget's Lua state before the widget's own source runs. If unset,
      * widgets run with only the JS-side Spring shim available.
      *
-     * The host fetches files from `/api/vfs/game/{gameId}/LuaUI/...`.
+     * The host fetches files from `/api/games/data/{gameId}/LuaUI/...`.
      */
     gameId?: string;
 
@@ -167,19 +167,19 @@ export class LuaWidgetHost {
      * file is downloaded once and its source text stored for repeated
      * execution per widget. The URL base is derived from the map's
      * own `mapSourceUrl` (which already contains the lobby HTTP prefix)
-     * and the game VFS endpoint `/api/vfs/game/{gameId}/`.
+     * and the game data endpoint `/api/games/data/{gameId}/`.
      */
     private async prefetchGameBase(): Promise<void> {
         const gameId = this.options.gameId;
         if (!gameId) return;
         const files = this.options.gameBaseFiles ?? ['widgets.lua'];
 
-        // Strip `/api/maps/source/{mapId}` off the map source URL to get
+        // Strip `/api/maps/data/{mapId}` off the map source URL to get
         // the lobby HTTP origin. `mapSourceUrl` is of the form
-        // `http://host:port/api/maps/source/{id}` — we want everything
+        // `http://host:port/api/maps/data/{id}` — we want everything
         // before `/api/`.
         const origin = this.map.mapSourceUrl.replace(/\/api\/.*$/, '');
-        const base = `${origin}/api/vfs/game/${gameId}/LuaUI`;
+        const base = `${origin}/api/games/data/${gameId}/LuaUI`;
 
         for (const rel of files) {
             const url = `${base}/${rel}`;

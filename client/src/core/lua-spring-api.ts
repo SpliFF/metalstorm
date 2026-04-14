@@ -264,7 +264,7 @@ export function buildSpringGlobals(ctx: SpringAPIContext): Record<string, LuaVal
     //
     // Path-like constants and the version string the base widgets.lua
     // might expect. Paper Tanks' game-level widgets.lua (fetched from
-    // /api/vfs/game/papertanks/LuaUI/widgets.lua) also sets these, but
+    // /api/games/data/papertanks/LuaUI/widgets.lua) also sets these, but
     // providing them here means widgets that run before the game base
     // is prefetched still see sane values.
     const LUAUI_DIRNAME = 'LuaUI/';

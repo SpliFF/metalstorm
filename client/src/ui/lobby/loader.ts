@@ -84,10 +84,9 @@ export async function loadGameLobbyTemplates(
     httpBase: string,
 ): Promise<LobbyTemplates> {
     const result = getDefaultLobbyTemplates();
-    // The lobby's existing /api/vfs/game/* handler maps to
-    // content/games/{id}/{path} on disk, so we just nest the lobby UI
-    // override files at <game>/ui/lobby/<path> and reuse it.
-    const base = `${httpBase}/api/vfs/game/${encodeURIComponent(gameId)}/ui/lobby`;
+    // Game content (source + converted) is served from data/games/{id}/
+    // via /api/games/data/*. Lobby UI overrides nest at <game>/ui/lobby/.
+    const base = `${httpBase}/api/games/data/${encodeURIComponent(gameId)}/ui/lobby`;
 
     const fetchOne = async (key: keyof LobbyTemplates) => {
         const path = TEMPLATE_PATHS[key];

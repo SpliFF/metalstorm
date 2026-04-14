@@ -434,7 +434,7 @@ inline std::vector<uint8_t> BuildMapData(const MapMetadata& m) {
     auto miniUrl = fbb.CreateString("/api/maps/data/" + m.id + "/minimap.dxt1");
     auto tilesUrl = fbb.CreateString("/api/maps/data/" + m.id + "/tiles.dxt1");
     auto baseUrl = fbb.CreateString("/api/maps/data/" + m.id);
-    auto sourceUrl = fbb.CreateString("/api/maps/source/" + m.id);
+    auto sourceUrl = fbb.CreateString("/api/maps/data/" + m.id);
 
     // --- Widget filenames (relative to mapSourceUrl) ---
     std::vector<flatbuffers::Offset<flatbuffers::String>> widgetOffs;

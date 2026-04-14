@@ -1155,9 +1155,8 @@ bool MapProcessor::ProcessMap(MapMetadata& meta) {
 }
 
 // Walk LuaUI/Widgets/ and collect all .lua filenames. These are shipped
-// to the client in MapData; the client fetches each one from the HTTP
-// source handler and runs it through fengari. No file copying or
-// preprocessing — .lua is text, served straight from content/maps.
+// to the client in MapData; the client fetches each one from
+// /api/maps/data/{id}/ and runs it through fengari.
 void MapProcessor::EnumerateWidgets(MapMetadata& meta) {
     meta.widgets.clear();
     fs::path widgetsDir = fs::path(meta.sourcePath) / "LuaUI" / "Widgets";
@@ -1188,6 +1187,7 @@ void MapProcessor::ScanAndProcess(const std::string& mapsDir, const std::string&
         MapMetadata existing = GetMap(db, mapId);
         std::string processedDir = dataDir + "/maps/" + mapId;
         bool filesExist = fs::exists(processedDir + "/heightmap.bin");
+
         if (existing.formatVersion >= MAP_FORMAT_VERSION && filesExist) {
             SLOG(SPRING_LOG_DEBUG, "%s: up to date (v%d)", mapId.c_str(), existing.formatVersion);
             continue;

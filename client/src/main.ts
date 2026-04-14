@@ -410,7 +410,7 @@ async function startGame(gameServerPort: number, mapName: string): Promise<void>
 
         // Load any LuaUI widgets the map ships (mapinfo.lua water shaders,
         // lava layer rendering, etc.). Widgets are fetched from
-        // /api/maps/source/{mapId}/... and executed via fengari.
+        // /api/maps/data/{mapId}/... and executed via fengari.
         if (map.widgets.length > 0) {
             const host = new LuaWidgetHost(scene, camera, {
                 ...map,

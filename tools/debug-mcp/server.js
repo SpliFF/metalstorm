@@ -245,7 +245,7 @@ async function executeTool(name, args) {
         }
 
         case 'get_lua_source': {
-            const url = `${LOBBY_URL}/api/vfs/game/${args.gameId}/${args.filePath}`;
+            const url = `${LOBBY_URL}/api/games/data/${args.gameId}/${args.filePath}`;
             const resp = await fetch(url);
             if (!resp.ok) return `Error: HTTP ${resp.status} fetching ${args.filePath}`;
             return await resp.text();

@@ -398,83 +398,10 @@ int main(int argc, char* argv[])
         return {.contentType = "application/json", .body = std::move(body), .status = 200};
     });
 
-    // Serve original map source files straight from content/maps/.
-    // Used by client-side Lua widgets for mapinfo.lua, LuaUI/Widgets/*.lua,
-    // and any image assets the widget references via Spring paths like
-    // ":a:LuaUI\\Images\\foo.png". No transformation — pure pass-through.
-    net.AddHttpGet("/api/maps/source/*", [mapsDir](const std::string& url) -> HttpResponse {
-        // URL: /api/maps/source/{mapId}/{relative/path}
-        std::string rest = url.substr(std::string("/api/maps/source/").size());
-        // Security: reject path traversal.
-        if (rest.find("..") != std::string::npos)
-            return {.contentType = "text/plain", .body = {}, .status = 403};
-
-        namespace fs = std::filesystem;
-        fs::path filePath = fs::path(mapsDir) / rest;
-        if (!fs::exists(filePath) || !fs::is_regular_file(filePath))
-            return {.contentType = "text/plain", .body = {}, .status = 404};
-
-        std::ifstream f(filePath, std::ios::binary);
-        std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
-                                   std::istreambuf_iterator<char>());
-
-        std::string ext = filePath.extension().string();
-        std::string ct = "application/octet-stream";
-        if (ext == ".lua") ct = "text/x-lua; charset=utf-8";
-        else if (ext == ".png") ct = "image/png";
-        else if (ext == ".jpg" || ext == ".jpeg") ct = "image/jpeg";
-        else if (ext == ".tga") ct = "image/x-tga";
-        else if (ext == ".dds") ct = "image/vnd-ms.dds";
-
-        return {
-            .contentType = ct,
-            .body = std::move(data),
-            .status = 200,
-            .cacheControl = CacheControl::MetadataHeader(),
-        };
-    });
-
-    // Serve GAME-VFS files (modinfo.lua, LuaUI/*, LuaRules/*, gamedata/*,
-    // units/*, weapons/*, etc.) from content/games/{gameId}/. In Spring's
-    // VFS layering this is the GAME archive — widgets, gadgets, and map
-    // scripts `include()` files from here, and the game can override
-    // engine defaults by placing its own copy under LuaUI/.
-    //
-    // Paper Tanks' minimal base lives at content/games/papertanks/LuaUI/
-    // and the client pre-fetches it before running any map widgets so
-    // globals like `WG` and `widgetHandler` are visible.
-    net.AddHttpGet("/api/vfs/game/*", [](const std::string& url) -> HttpResponse {
-        // URL: /api/vfs/game/{gameId}/{relative/path}
-        std::string rest = url.substr(std::string("/api/vfs/game/").size());
-        if (rest.find("..") != std::string::npos)
-            return {.contentType = "text/plain", .body = {}, .status = 403};
-
-        namespace fs = std::filesystem;
-        fs::path filePath = fs::path("content") / "games" / rest;
-        if (!fs::exists(filePath) || !fs::is_regular_file(filePath))
-            return {.contentType = "text/plain", .body = {}, .status = 404};
-
-        std::ifstream f(filePath, std::ios::binary);
-        std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
-                                   std::istreambuf_iterator<char>());
-
-        std::string ext = filePath.extension().string();
-        std::string ct = "application/octet-stream";
-        if (ext == ".lua") ct = "text/x-lua; charset=utf-8";
-        else if (ext == ".png") ct = "image/png";
-        else if (ext == ".jpg" || ext == ".jpeg") ct = "image/jpeg";
-        else if (ext == ".json") ct = "application/json";
-        else if (ext == ".html") ct = "text/html; charset=utf-8";
-        else if (ext == ".css") ct = "text/css; charset=utf-8";
-        else if (ext == ".js") ct = "application/javascript; charset=utf-8";
-
-        return {
-            .contentType = ct,
-            .body = std::move(data),
-            .status = 200,
-            .cacheControl = CacheControl::MetadataHeader(),
-        };
-    });
+    // /api/maps/source/* and /api/vfs/game/* are retired — use
+    // /api/maps/data/* and /api/games/data/* for all content.
+    // The offline converters (tools/mapconverter, tools/gameconverter)
+    // copy source files + converted assets into data/.
 
     // Serve processed map files (DXT1 tiles, heightmap, splat textures, etc.)
     // These are static binary assets — safe to cache for long periods.
@@ -629,7 +556,7 @@ int main(int argc, char* argv[])
                 json += ",\"minimapUrl\":\"/api/maps/data/" + m.id + "/minimap.dxt1\"";
                 json += ",\"tilesUrl\":\"/api/maps/data/" + m.id + "/tiles.dxt1\"";
                 json += ",\"mapDataUrl\":\"/api/maps/data/" + m.id + "\"";
-                json += ",\"mapSourceUrl\":\"/api/maps/source/" + m.id + "\"";
+                json += ",\"mapSourceUrl\":\"/api/maps/data/" + m.id + "\"";
 
                 json += "}";
 
@@ -645,7 +572,6 @@ int main(int argc, char* argv[])
 
         // Serve the file from disk
         std::string filePath = "data/maps/" + rest;
-
         namespace fs = std::filesystem;
         if (!fs::exists(filePath) || !fs::is_regular_file(filePath))
             return {.contentType = "text/plain", .body = {}, .status = 404};
@@ -657,12 +583,20 @@ int main(int argc, char* argv[])
         // Content type from extension
         std::string ext = fs::path(filePath).extension().string();
         std::string ct = "application/octet-stream";
-        if (ext == ".ktx2") ct = "image/ktx2";
+        if (ext == ".lua") ct = "text/x-lua; charset=utf-8";
         else if (ext == ".json") ct = "application/json";
         else if (ext == ".png") ct = "image/png";
+        else if (ext == ".jpg" || ext == ".jpeg") ct = "image/jpeg";
         else if (ext == ".webp") ct = "image/webp";
+        else if (ext == ".ktx2") ct = "image/ktx2";
+        else if (ext == ".tga") ct = "image/x-tga";
+        else if (ext == ".dds") ct = "image/vnd-ms.dds";
         else if (ext == ".glb") ct = "model/gltf-binary";
         else if (ext == ".gltf") ct = "model/gltf+json";
+        else if (ext == ".html") ct = "text/html; charset=utf-8";
+        else if (ext == ".css") ct = "text/css; charset=utf-8";
+        else if (ext == ".js") ct = "application/javascript; charset=utf-8";
+        else if (ext == ".txt") ct = "text/plain; charset=utf-8";
 
         return {
             .contentType = ct,
@@ -675,14 +609,14 @@ int main(int argc, char* argv[])
     // Serve processed game files (unit models, textures, etc.)
     // Parallel to /api/maps/data/* but for game content preprocessed
     // by GameProcessor into data/games/<gameId>/models/.
+    // Serve all game content from data/games/. The offline converter
+    // (tools/gameconverter) populates this with source + converted files.
     net.AddHttpGet("/api/games/data/*", [](const std::string& url) -> HttpResponse {
-        // URL: /api/games/data/{gameId}/models/{filename}
         std::string rest = url.substr(std::string("/api/games/data/").size());
-        std::string filePath = "data/games/" + rest;
-
-        if (filePath.find("..") != std::string::npos)
+        if (rest.find("..") != std::string::npos)
             return {.contentType = "text/plain", .body = {}, .status = 403};
 
+        std::string filePath = "data/games/" + rest;
         namespace fs = std::filesystem;
         if (!fs::exists(filePath) || !fs::is_regular_file(filePath))
             return {.contentType = "text/plain", .body = {}, .status = 404};
@@ -693,10 +627,15 @@ int main(int argc, char* argv[])
 
         std::string ext = fs::path(filePath).extension().string();
         std::string ct = "application/octet-stream";
-        if (ext == ".glb") ct = "model/gltf-binary";
-        else if (ext == ".gltf") ct = "model/gltf+json";
-        else if (ext == ".png") ct = "image/png";
+        if (ext == ".lua") ct = "text/x-lua; charset=utf-8";
         else if (ext == ".json") ct = "application/json";
+        else if (ext == ".png") ct = "image/png";
+        else if (ext == ".jpg" || ext == ".jpeg") ct = "image/jpeg";
+        else if (ext == ".glb") ct = "model/gltf-binary";
+        else if (ext == ".gltf") ct = "model/gltf+json";
+        else if (ext == ".html") ct = "text/html; charset=utf-8";
+        else if (ext == ".css") ct = "text/css; charset=utf-8";
+        else if (ext == ".js") ct = "application/javascript; charset=utf-8";
 
         return {
             .contentType = ct,

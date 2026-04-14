@@ -5,7 +5,7 @@
  * from `.html` + `.css` files under `client/src/ui/`. The engine ships a
  * default set; games can override any subset by shipping replacements at
  * `<game>/ui/<component>/<file>`, served by the lobby HTTP at
- * `/api/vfs/game/<id>/ui/<component>/<file>`.
+ * `/api/games/data/<id>/ui/<component>/<file>`.
  *
  * The loader returns the same `GameTemplates` shape whether or not
  * overrides exist, with per-file fallback to the bundled default. Callers
@@ -69,7 +69,7 @@ export async function loadGameTemplates(
     httpBase: string,
 ): Promise<GameTemplates> {
     const result = getDefaultGameTemplates();
-    const base = `${httpBase}/api/vfs/game/${encodeURIComponent(gameId)}/ui`;
+    const base = `${httpBase}/api/games/data/${encodeURIComponent(gameId)}/ui`;
 
     const fetchOne = async (key: keyof GameTemplates) => {
         const path = TEMPLATE_PATHS[key];
