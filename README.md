@@ -4,7 +4,13 @@ A fork of the [Spring RTS](https://springrts.com/) game engine redesigned around
 
 ## Current Status
 
-The game is playable end-to-end: lobby &rarr; create room &rarr; start game &rarr; fight &rarr; game-over &rarr; return to lobby.
+The game is technically playable end-to-end: lobby &rarr; create room &rarr; start game &rarr; fight &rarr; game-over &rarr; return to lobby.
+
+However the bundled demo game doesn't have any units yet and the AI doesn't do much anyway
+
+Porting existing Spring (Recoil) games like Zero-K and BAR is a work in progress.
+
+As a result this is pre-alpha code, interesting to play with but not actually a game yet.
 
 **Working features:**
 
@@ -138,6 +144,10 @@ docs/                       Developer documentation (API reference, debugging, c
 Spring RTS Web is a game _engine_. Gameplay is defined by _games_ &mdash; bundles of Lua scripts and assets. The bundled demo game is **Paper Tanks** (`content/games/papertanks/`).
 
 Game authors write Lua gadgets that run server-side in response to engine events (unit creation, damage, game start, etc.). The full synced API (`Spring.*` functions) is available for creating units, issuing commands, modifying terrain, and more. See [ARCHITECTURE.md](ARCHITECTURE.md) for the gadget writing guide and API reference.
+
+## Engine Development
+
+Building the new engine from the Spring RTS base has been greatly accelerated using Claude Code. This project is open to developers but AI coding is part of the process. The engine includes useful MCP servers and Claude skills to improve AI debugging.
 
 ## Documentation
 
