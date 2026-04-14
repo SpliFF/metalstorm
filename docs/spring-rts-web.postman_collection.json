@@ -1,7 +1,7 @@
 {
 	"info": {
 		"name": "Spring RTS Web",
-		"description": "HTTP API for Spring RTS Web servers.\n\nSetup:\n1. Set the `lobby_url`, `game_url`, and `log_url` collection variables\n2. Run \"Login\" to populate the `token` variable\n3. All authenticated requests use the token automatically\n\nSee docs/api.md for full reference.",
+		"description": "HTTP API for Spring RTS Web servers.\n\nSetup:\n1. Set the `lobby_url`, `game_url`, and `log_url` collection variables\n2. Set `username` and `password` variables\n3. All authenticated requests use Basic auth automatically — no login step needed\n\nAlternatively, run \"Login\" to get a Bearer token for the session.\n\nSee docs/api.md for full reference.",
 		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
 	},
 	"variable": [
@@ -13,8 +13,11 @@
 		{"key": "password", "value": "test"}
 	],
 	"auth": {
-		"type": "bearer",
-		"bearer": [{"key": "token", "value": "{{token}}"}]
+		"type": "basic",
+		"basic": [
+			{"key": "username", "value": "{{username}}"},
+			{"key": "password", "value": "{{password}}"}
+		]
 	},
 	"item": [
 		{

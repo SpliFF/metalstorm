@@ -44,15 +44,26 @@ curl -X POST http://localhost:8011/api/auth/register \
 
 **Errors:** 400 (invalid username length), 409 (username taken)
 
-### Using Tokens
+### Using Authentication
 
-Pass the token in the `Authorization` header for all authenticated endpoints:
+Two methods are supported on all authenticated endpoints:
+
+**Basic auth** (simplest — works with `curl -u`):
+
+```bash
+curl -u test1:test -X POST http://localhost:8011/api/exec \
+  -d '{"scope":"lobby","code":"rooms"}'
+```
+
+**Bearer token** (from login, for session reuse):
 
 ```bash
 curl -X POST http://localhost:8011/api/exec \
   -H "Authorization: Bearer 6411d75bcec17f69..." \
   -d '{"scope":"lobby","code":"rooms"}'
 ```
+
+Basic auth validates credentials directly on every request — no login step needed. Bearer tokens are validated against the session table (24h expiry). Both work on all endpoints that require authentication.
 
 ---
 

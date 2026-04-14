@@ -81,13 +81,71 @@ inline std::string ExtractBearerToken(const std::string& authHeader) {
     return authHeader; // Treat raw token as-is
 }
 
-/// Validate a token from the Authorization header. Returns user ID
-/// or 0 if invalid/expired. Tokens expire after 24 hours.
-inline int64_t ValidateToken(Database& db, const std::string& authHeader) {
+/// Base64 decode (minimal, for Basic auth only).
+inline std::string Base64Decode(const std::string& in) {
+    static const int T[128] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+        52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1
+    };
+    std::string out;
+    int val = 0, bits = -8;
+    for (unsigned char c : in) {
+        if (c > 127 || T[c] == -1) break;
+        val = (val << 6) + T[c];
+        bits += 6;
+        if (bits >= 0) { out += char((val >> bits) & 0xFF); bits -= 8; }
+    }
+    return out;
+}
+
+/// Parse "Authorization: Basic <base64(user:pass)>" into user and pass.
+/// Returns true if valid Basic auth header.
+inline bool ParseBasicAuth(const std::string& authHeader,
+                           std::string& username, std::string& password) {
+    if (authHeader.rfind("Basic ", 0) != 0) return false;
+    std::string decoded = Base64Decode(authHeader.substr(6));
+    auto colon = decoded.find(':');
+    if (colon == std::string::npos) return false;
+    username = decoded.substr(0, colon);
+    password = decoded.substr(colon + 1);
+    return !username.empty();
+}
+
+/// Validate auth from the Authorization header. Supports both:
+///   - "Bearer <token>" — validate session token (24h expiry)
+///   - "Basic <base64(user:pass)>" — inline login, creates a session
+/// Returns user ID or 0 if invalid.
+inline int64_t ValidateAuth(Database& db, const std::string& authHeader) {
     if (authHeader.empty()) return 0;
-    std::string token = ExtractBearerToken(authHeader);
-    if (token.empty()) return 0;
-    return db.ValidateSession(token, 86400); // 24h
+
+    // Try Bearer token first
+    if (authHeader.rfind("Bearer ", 0) == 0) {
+        std::string token = authHeader.substr(7);
+        if (!token.empty()) return db.ValidateSession(token, 86400);
+    }
+
+    // Try Basic auth — validate credentials directly
+    std::string username, password;
+    if (ParseBasicAuth(authHeader, username, password)) {
+        auto user = db.FindUser(username);
+        if (user && !user->isBanned && user->passwordHash == password) {
+            return user->id;
+        }
+    }
+
+    // Fallback: treat as raw token
+    return db.ValidateSession(authHeader, 86400);
+}
+
+/// Legacy alias — callers that used ValidateToken still work.
+inline int64_t ValidateToken(Database& db, const std::string& authHeader) {
+    return ValidateAuth(db, authHeader);
 }
 
 /// Register auth HTTP endpoints on a NetworkServer.

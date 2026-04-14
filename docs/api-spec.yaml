@@ -22,6 +22,10 @@ components:
       type: http
       scheme: bearer
       description: Token from POST /api/auth/login
+    basicAuth:
+      type: http
+      scheme: basic
+      description: Username and password (validated directly, no login step needed)
 
   schemas:
     AuthResult:
