@@ -88,12 +88,7 @@ bool CUnsyncedLuaHandle::Init(std::string code, const std::string& file)
 	watchExplosionDefs.resize(weaponDefHandler->NumWeaponDefs(), false);
 
 	// load the standard libraries
-	LuaLibs::OpenSynced(L, false);
-	//LUA_OPEN_LIB(L, luaopen_io);
-	//LUA_OPEN_LIB(L, luaopen_os);
-	//LUA_OPEN_LIB(L, luaopen_package);
-	//LUA_OPEN_LIB(L, luaopen_debug);
-	EnactDevMode();
+	LuaLibs::OpenUnsynced(L);
 
 	// delete some dangerous functions
 	lua_pushnil(L); lua_setglobal(L, "dofile");
@@ -164,13 +159,6 @@ bool CUnsyncedLuaHandle::Init(std::string code, const std::string& file)
 	eventHandler.AddClient(this);
 	return true;
 }
-
-
-void CUnsyncedLuaHandle::EnactDevMode() const
-{
-	SwapEnableModule(L, devMode, LUA_DBLIBNAME, luaopen_debug);
-}
-
 
 /***
  * @class UnsyncedCallins
