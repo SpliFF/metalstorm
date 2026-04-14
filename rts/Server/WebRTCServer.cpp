@@ -18,6 +18,21 @@ WebRTCServer::~WebRTCServer() {
 WebRTCServer::OfferResult WebRTCServer::HandleOffer(
     const std::string& sdpOffer, const std::string& /*authToken*/)
 {
+    // Guard against malformed/empty SDP that would crash libdatachannel
+    if (sdpOffer.empty() || sdpOffer.find("v=0") == std::string::npos) {
+        return {false, 0, "", "invalid SDP offer"};
+    }
+
+    try {
+    return HandleOfferInner(sdpOffer);
+    } catch (const std::exception& e) {
+        SLOG(SPRING_LOG_ERROR, "WebRTC offer failed: %s", e.what());
+        return {false, 0, "", std::string("WebRTC error: ") + e.what()};
+    }
+}
+
+WebRTCServer::OfferResult WebRTCServer::HandleOfferInner(const std::string& sdpOffer)
+{
     rtc::Configuration config;
     // STUN server for ICE candidate gathering (public Google STUN)
     config.iceServers.emplace_back("stun:stun.l.google.com:19302");

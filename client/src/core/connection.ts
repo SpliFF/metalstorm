@@ -164,29 +164,29 @@ export class Connection {
         this.connectAttempts++;
         this.setState('connecting');
 
-        // Step 1: Authenticate via HTTP
+        // Step 1: Try HTTP auth + WebRTC. If either fails, fall back
+        // to WebSocket with FlatBuffer auth (the original path).
+        let httpAuthOk = false;
         try {
             await this.httpAuth(this.pendingUsername, this.pendingPassword);
+            httpAuthOk = true;
         } catch (err) {
-            if (this.connectAttempts < Connection.MAX_CONNECT_ATTEMPTS) {
-                console.log(`[connection] auth attempt ${this.connectAttempts} failed, retrying...`);
-                setTimeout(() => this.tryConnect(), Connection.CONNECT_RETRY_DELAY_MS);
-                return;
-            }
-            console.error(`[connection] giving up after ${this.connectAttempts} attempts`);
-            this.events.onAuthFailed?.(`Connection failed: ${err}`);
-            this.setState('disconnected');
-            return;
+            console.log(`[connection] HTTP auth failed (${err}), will use WS auth`);
         }
 
-        // Step 2: Try WebRTC, fall back to WebSocket
-        this.setState('handshake');
-        try {
-            await this.connectWebRTC();
-        } catch (err) {
-            console.warn(`[connection] WebRTC failed (${err}), falling back to WebSocket`);
-            this.connectWebSocket();
+        if (httpAuthOk) {
+            // Try WebRTC since we have an HTTP token
+            this.setState('handshake');
+            try {
+                await this.connectWebRTC();
+                return; // WebRTC connected successfully
+            } catch (err) {
+                console.warn(`[connection] WebRTC failed (${err}), falling back to WebSocket`);
+            }
         }
+
+        // Fall back to WebSocket with FlatBuffer auth
+        this.connectWebSocket();
     }
 
     // ─── HTTP Auth ───

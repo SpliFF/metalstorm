@@ -80,6 +80,8 @@ private:
         bool connected = false;
     };
 
+    OfferResult HandleOfferInner(const std::string& sdpOffer);
+
     uint32_t nextClientId_ = 1;
     mutable std::mutex mutex_;
     std::unordered_map<uint32_t, PeerState> peers_;
