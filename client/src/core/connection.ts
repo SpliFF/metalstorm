@@ -476,6 +476,10 @@ export class Connection {
                 break;
             }
             case ServerPayload.MapData: {
+                // Legacy: MapData is now fetched via HTTP from the lobby
+                // server (metadata.json + binary .bin files). The game
+                // server no longer sends this message. Kept for backwards
+                // compatibility in case an older server is encountered.
                 const fbMap = msg.payload(new MapData()) as MapData;
                 try {
                     const parsed = parseMapData(fbMap);

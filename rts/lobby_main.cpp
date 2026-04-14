@@ -478,14 +478,173 @@ int main(int argc, char* argv[])
 
     // Serve processed map files (DXT1 tiles, heightmap, splat textures, etc.)
     // These are static binary assets — safe to cache for long periods.
-    net.AddHttpGet("/api/maps/data/*", [](const std::string& url) -> HttpResponse {
+    // Also serves a dynamically generated metadata.json for each map,
+    // containing all lightweight map info (dimensions, features, decals,
+    // water, etc.) so the client can fetch map data via HTTP instead of
+    // receiving it over the WebRTC data channel (which has a 256KB SCTP
+    // message size limit).
+    net.AddHttpGet("/api/maps/data/*", [mapDb](const std::string& url) -> HttpResponse {
         // URL: /api/maps/data/{mapId}/{filename}
         std::string rest = url.substr(std::string("/api/maps/data/").size());
-        std::string filePath = "data/maps/" + rest;
 
         // Security: reject path traversal
-        if (filePath.find("..") != std::string::npos)
+        if (rest.find("..") != std::string::npos)
             return {.contentType = "text/plain", .body = {}, .status = 403};
+
+        // Dynamic metadata.json endpoint — returns JSON with all
+        // lightweight map info. Binary arrays (heightmap, tileindex,
+        // typemap, metalmap) are fetched separately as .bin files.
+        auto slashPos = rest.find('/');
+        if (slashPos != std::string::npos) {
+            std::string mapId = rest.substr(0, slashPos);
+            std::string filename = rest.substr(slashPos + 1);
+            if (filename == "metadata.json") {
+                MapProcessor proc;
+                auto m = proc.GetMap(mapDb, mapId);
+                if (m.id.empty())
+                    return {.contentType = "text/plain", .body = {}, .status = 404};
+
+                // Build JSON metadata
+                std::string json = "{";
+                char buf[256];
+                snprintf(buf, sizeof(buf),
+                    "\"mapx\":%d,\"mapy\":%d,\"squareSize\":8,"
+                    "\"minHeight\":%.6f,\"maxHeight\":%.6f,"
+                    "\"tilesX\":%d,\"tilesZ\":%d,\"numTiles\":%d,\"tileSize\":32",
+                    m.mapx, m.mapy, m.minHeight, m.maxHeight,
+                    m.tilesX, m.tilesZ, m.numTiles);
+                json += buf;
+
+                // Start positions
+                json += ",\"startPositions\":[";
+                for (size_t i = 0; i < m.startPositions.size(); i++) {
+                    if (i > 0) json += ",";
+                    snprintf(buf, sizeof(buf), "{\"x\":%.1f,\"z\":%.1f}",
+                        m.startPositions[i].x, m.startPositions[i].z);
+                    json += buf;
+                }
+                json += "]";
+
+                // Feature types
+                json += ",\"featureTypes\":[";
+                for (size_t i = 0; i < m.featureTypes.size(); i++) {
+                    if (i > 0) json += ",";
+                    json += "\"" + HttpAuth::JsonEscape(m.featureTypes[i]) + "\"";
+                }
+                json += "]";
+
+                // Features
+                json += ",\"features\":[";
+                for (size_t i = 0; i < m.features.size(); i++) {
+                    if (i > 0) json += ",";
+                    const auto& f = m.features[i];
+                    snprintf(buf, sizeof(buf),
+                        "{\"typeIndex\":%d,\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,"
+                        "\"rotation\":%.4f,\"relativeSize\":%.4f}",
+                        f.featureType, f.x, f.y, f.z, f.rotation, f.relativeSize);
+                    json += buf;
+                }
+                json += "]";
+
+                // Feature defs
+                json += ",\"featureDefs\":[";
+                for (size_t i = 0; i < m.featureDefs.size(); i++) {
+                    if (i > 0) json += ",";
+                    const auto& d = m.featureDefs[i];
+                    std::string modelUrl = d.modelFile.empty()
+                        ? "" : "/api/maps/data/" + m.id + "/features/" + d.modelFile;
+                    std::string texUrl = d.textureFile.empty()
+                        ? "" : "/api/maps/data/" + m.id + "/features/" + d.textureFile;
+                    json += "{\"name\":\"" + HttpAuth::JsonEscape(d.name) + "\""
+                        + ",\"modelUrl\":\"" + HttpAuth::JsonEscape(modelUrl) + "\""
+                        + ",\"textureUrl\":\"" + HttpAuth::JsonEscape(texUrl) + "\""
+                        + ",\"footprintX\":" + std::to_string(d.footprintX)
+                        + ",\"footprintZ\":" + std::to_string(d.footprintZ);
+                    snprintf(buf, sizeof(buf),
+                        ",\"height\":%.2f,\"radius\":%.2f,"
+                        "\"blocking\":%s,\"reclaimable\":%s,"
+                        "\"metal\":%d,\"energy\":%d,\"damage\":%d}",
+                        d.height, d.radius,
+                        d.blocking ? "true" : "false",
+                        d.reclaimable ? "true" : "false",
+                        d.metal, d.energy, d.damage);
+                    json += buf;
+                }
+                json += "]";
+
+                // Decals
+                auto decalUrl = [&](const std::string& f) -> std::string {
+                    if (f.empty()) return "";
+                    return "/api/maps/data/" + m.id + "/" + f;
+                };
+                json += ",\"decals\":{"
+                    "\"detailTex\":\"" + HttpAuth::JsonEscape(decalUrl(m.decals.detailTex)) + "\""
+                    + ",\"specularTex\":\"" + HttpAuth::JsonEscape(decalUrl(m.decals.specularTex)) + "\""
+                    + ",\"splatDetailTex\":\"" + HttpAuth::JsonEscape(decalUrl(m.decals.splatDetailTex)) + "\""
+                    + ",\"splatDistrTex\":\"" + HttpAuth::JsonEscape(decalUrl(m.decals.splatDistrTex)) + "\""
+                    + ",\"splatNormal\":["
+                    + "\"" + HttpAuth::JsonEscape(decalUrl(m.decals.splatDetailNormalTex[0])) + "\""
+                    + ",\"" + HttpAuth::JsonEscape(decalUrl(m.decals.splatDetailNormalTex[1])) + "\""
+                    + ",\"" + HttpAuth::JsonEscape(decalUrl(m.decals.splatDetailNormalTex[2])) + "\""
+                    + ",\"" + HttpAuth::JsonEscape(decalUrl(m.decals.splatDetailNormalTex[3])) + "\""
+                    + "]"
+                    + ",\"detailNormalTex\":\"" + HttpAuth::JsonEscape(decalUrl(m.decals.detailNormalTex)) + "\"";
+                snprintf(buf, sizeof(buf),
+                    ",\"splatScales\":[%.6f,%.6f,%.6f,%.6f]"
+                    ",\"splatMults\":[%.6f,%.6f,%.6f,%.6f]}",
+                    m.decals.splatScales[0], m.decals.splatScales[1],
+                    m.decals.splatScales[2], m.decals.splatScales[3],
+                    m.decals.splatMults[0], m.decals.splatMults[1],
+                    m.decals.splatMults[2], m.decals.splatMults[3]);
+                json += buf;
+
+                // Water
+                snprintf(buf, sizeof(buf),
+                    ",\"water\":{"
+                    "\"baseColor\":[%.6f,%.6f,%.6f]"
+                    ",\"surfaceColor\":[%.6f,%.6f,%.6f]"
+                    ",\"minColor\":[%.6f,%.6f,%.6f]"
+                    ",\"surfaceAlpha\":%.6f"
+                    ",\"damage\":%.6f"
+                    ",\"voidWater\":%s}",
+                    m.water.baseColor[0], m.water.baseColor[1], m.water.baseColor[2],
+                    m.water.surfaceColor[0], m.water.surfaceColor[1], m.water.surfaceColor[2],
+                    m.water.minColor[0], m.water.minColor[1], m.water.minColor[2],
+                    m.water.surfaceAlpha, m.water.damage,
+                    m.water.voidWater ? "true" : "false");
+                json += buf;
+
+                // hasLuaGaia
+                json += std::string(",\"hasLuaGaia\":") + (m.hasLuaGaia ? "true" : "false");
+
+                // Widgets
+                json += ",\"widgets\":[";
+                for (size_t i = 0; i < m.widgets.size(); i++) {
+                    if (i > 0) json += ",";
+                    json += "\"" + HttpAuth::JsonEscape(m.widgets[i]) + "\"";
+                }
+                json += "]";
+
+                // URLs for binary data and source assets
+                json += ",\"minimapUrl\":\"/api/maps/data/" + m.id + "/minimap.dxt1\"";
+                json += ",\"tilesUrl\":\"/api/maps/data/" + m.id + "/tiles.dxt1\"";
+                json += ",\"mapDataUrl\":\"/api/maps/data/" + m.id + "\"";
+                json += ",\"mapSourceUrl\":\"/api/maps/source/" + m.id + "\"";
+
+                json += "}";
+
+                std::vector<uint8_t> body(json.begin(), json.end());
+                return {
+                    .contentType = "application/json",
+                    .body = std::move(body),
+                    .status = 200,
+                    .cacheControl = CacheControl::StaticAssetHeader(),
+                };
+            }
+        }
+
+        // Serve the file from disk
+        std::string filePath = "data/maps/" + rest;
 
         namespace fs = std::filesystem;
         if (!fs::exists(filePath) || !fs::is_regular_file(filePath))

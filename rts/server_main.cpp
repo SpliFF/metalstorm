@@ -857,10 +857,9 @@ int main(int argc, char* argv[])
                                 connectedRosterPlayers.insert(reconnectUser->username);
                                 checkAndFireGameStart();
                             }
-                            if (!mapMeta.id.empty()) {
-                                auto mapDataMsg = Protocol::BuildMapData(mapMeta);
-                                rtcServer.SendReliable(msg.clientId, mapDataMsg.data(), mapDataMsg.size());
-                            }
+                            // Map data is now served via HTTP from the lobby
+                            // server at /api/maps/data/{mapId}/metadata.json +
+                            // binary .bin files. No longer sent over WebRTC.
                             // Defs stream incrementally via entity/projectile state.
                             break;
                         }
@@ -969,11 +968,10 @@ int main(int argc, char* argv[])
                         rtcServer.SendReliable(msg.clientId, listMsg.data(), listMsg.size());
                     }
 
-                    // Send MapData so the client can render terrain + features
-                    if (!mapMeta.id.empty()) {
-                        auto mapDataMsg = Protocol::BuildMapData(mapMeta);
-                        rtcServer.SendReliable(msg.clientId, mapDataMsg.data(), mapDataMsg.size());
-                    }
+                    // Map data is now served via HTTP from the lobby server
+                    // at /api/maps/data/{mapId}/metadata.json + binary .bin
+                    // files. No longer sent as a FlatBuffer over WebRTC
+                    // (the 2+ MB MapData message exceeded SCTP's 256KB limit).
                     // Unit and weapon defs are NOT sent eagerly on auth.
                     // They stream incrementally as the client encounters
                     // new entity/projectile types during state updates.

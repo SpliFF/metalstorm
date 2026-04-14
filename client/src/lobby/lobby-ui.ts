@@ -102,7 +102,7 @@ export class LobbyUI {
     private currentScreen: LobbyScreen = 'login';
     private rooms: RoomInfo[] = [];
     private currentRoom: CurrentRoom | null = null;
-    private onGameStart?: (gameServerPort: number) => void;
+    private onGameStart?: (gameServerPort: number, mapName: string) => void;
     private myPlayerId = 0;
     private pendingRejoinRoomId = 0;
     private authToken = '';
@@ -148,7 +148,7 @@ export class LobbyUI {
     private selectedGameId: string = '';
 
     constructor(
-        onGameStart?: (gameServerPort: number) => void,
+        onGameStart?: (gameServerPort: number, mapName: string) => void,
         templates?: LobbyTemplates,
     ) {
         this.onGameStart = onGameStart;
@@ -326,8 +326,9 @@ export class LobbyUI {
         if (gameRunning && this.currentRoom.gameServerPort > 0) {
             localStorage.setItem('springrts-game-room', String(this.currentRoom.id));
             localStorage.setItem('springrts-game-port', String(this.currentRoom.gameServerPort));
+            this.stopPolling();
             this.hide();
-            this.onGameStart?.(this.currentRoom.gameServerPort);
+            this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapName);
             return;
         }
         if (this.currentRoom.state >= 5) {
@@ -758,7 +759,7 @@ export class LobbyUI {
                 localStorage.setItem('springrts-game-room', String(this.currentRoom.id));
                 localStorage.setItem('springrts-game-port', String(this.currentRoom.gameServerPort));
                 this.hide();
-                this.onGameStart?.(this.currentRoom.gameServerPort);
+                this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapName);
             }
         });
         document.getElementById('endgame-btn')?.addEventListener('click', () => {
@@ -1118,7 +1119,7 @@ export class LobbyUI {
             localStorage.setItem('springrts-game-room', String(this.currentRoom.id));
             localStorage.setItem('springrts-game-port', String(this.currentRoom.gameServerPort));
             this.hide();
-            this.onGameStart?.(this.currentRoom.gameServerPort);
+            this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapName);
             return;
         }
 

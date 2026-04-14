@@ -108,6 +108,153 @@ export interface ParsedMapData {
     heightElmos: number;
 }
 
+/**
+ * Fetch map data via HTTP from the lobby server.
+ *
+ * Fetches metadata.json (lightweight JSON with dimensions, features, decals,
+ * water, etc.) plus the binary arrays (heightmap, typemap, metalmap) in
+ * parallel. Tileindex is NOT fetched here — terrain.ts fetches it via its
+ * own cache path.
+ *
+ * This replaces the previous approach of sending a 2+ MB MapData FlatBuffer
+ * over WebRTC data channels, which exceeded the 256KB SCTP message size limit.
+ */
+export async function fetchMapDataHttp(lobbyBaseUrl: string, mapId: string): Promise<ParsedMapData> {
+    const base = `${lobbyBaseUrl}/api/maps/data/${mapId}`;
+
+    const [metaResp, hmBuf, tmBuf, mmBuf] = await Promise.all([
+        fetch(`${base}/metadata.json`).then(r => {
+            if (!r.ok) throw new Error(`metadata.json: ${r.status}`);
+            return r.json();
+        }),
+        fetch(`${base}/heightmap.bin`).then(r => {
+            if (!r.ok) throw new Error(`heightmap.bin: ${r.status}`);
+            return r.arrayBuffer();
+        }),
+        fetch(`${base}/typemap.bin`).then(r => {
+            if (!r.ok) throw new Error(`typemap.bin: ${r.status}`);
+            return r.arrayBuffer();
+        }),
+        fetch(`${base}/metalmap.bin`).then(r => {
+            if (!r.ok) throw new Error(`metalmap.bin: ${r.status}`);
+            return r.arrayBuffer();
+        }),
+    ]);
+
+    const meta = metaResp;
+    const mapx = meta.mapx ?? 0;
+    const mapy = meta.mapy ?? 0;
+    const squareSize = meta.squareSize ?? 8;
+
+    const startPositions: MapStartPosInfo[] = (meta.startPositions ?? []).map(
+        (sp: { x: number; z: number }) => ({ x: sp.x, z: sp.z })
+    );
+
+    const featureTypes: string[] = meta.featureTypes ?? [];
+
+    const features: MapFeatureInstance[] = (meta.features ?? []).map(
+        (f: { typeIndex: number; x: number; y: number; z: number; rotation: number; relativeSize: number }) => ({
+            typeIndex: f.typeIndex, x: f.x, y: f.y, z: f.z,
+            rotation: f.rotation, relativeSize: f.relativeSize,
+        })
+    );
+
+    const featureDefs: MapFeatureDefInfo[] = (meta.featureDefs ?? []).map(
+        (d: {
+            name: string; modelUrl: string; textureUrl: string;
+            footprintX: number; footprintZ: number;
+            height: number; radius: number;
+            blocking: boolean; reclaimable: boolean;
+            metal: number; energy: number; damage: number;
+        }) => ({
+            name: d.name ?? '', modelUrl: d.modelUrl ?? '', textureUrl: d.textureUrl ?? '',
+            footprintX: d.footprintX ?? 0, footprintZ: d.footprintZ ?? 0,
+            height: d.height ?? 0, radius: d.radius ?? 0,
+            blocking: d.blocking ?? true, reclaimable: d.reclaimable ?? false,
+            metal: d.metal ?? 0, energy: d.energy ?? 0, damage: d.damage ?? 0,
+        })
+    );
+
+    const md = meta.decals ?? {};
+    const decals: MapDecalsInfo = {
+        detailTex:       md.detailTex ?? '',
+        specularTex:     md.specularTex ?? '',
+        splatDetailTex:  md.splatDetailTex ?? '',
+        splatDistrTex:   md.splatDistrTex ?? '',
+        splatNormal: [
+            md.splatNormal?.[0] ?? '',
+            md.splatNormal?.[1] ?? '',
+            md.splatNormal?.[2] ?? '',
+            md.splatNormal?.[3] ?? '',
+        ],
+        detailNormalTex: md.detailNormalTex ?? '',
+        splatScales: [
+            md.splatScales?.[0] ?? 0.02,
+            md.splatScales?.[1] ?? 0.02,
+            md.splatScales?.[2] ?? 0.02,
+            md.splatScales?.[3] ?? 0.02,
+        ],
+        splatMults: [
+            md.splatMults?.[0] ?? 1.0,
+            md.splatMults?.[1] ?? 1.0,
+            md.splatMults?.[2] ?? 1.0,
+            md.splatMults?.[3] ?? 1.0,
+        ],
+    };
+
+    const mw = meta.water ?? {};
+    const water: MapWaterInfo = {
+        baseColor: [
+            mw.baseColor?.[0] ?? 0,
+            mw.baseColor?.[1] ?? 0.4,
+            mw.baseColor?.[2] ?? 0.7,
+        ],
+        surfaceColor: [
+            mw.surfaceColor?.[0] ?? 0.75,
+            mw.surfaceColor?.[1] ?? 0.8,
+            mw.surfaceColor?.[2] ?? 0.85,
+        ],
+        minColor: [
+            mw.minColor?.[0] ?? 0,
+            mw.minColor?.[1] ?? 0.2,
+            mw.minColor?.[2] ?? 0.4,
+        ],
+        surfaceAlpha: mw.surfaceAlpha ?? 0.55,
+        damage: mw.damage ?? 0,
+        voidWater: mw.voidWater ?? false,
+    };
+
+    const widgets: string[] = meta.widgets ?? [];
+
+    return {
+        mapx, mapy, squareSize,
+        minHeight: meta.minHeight ?? 0,
+        maxHeight: meta.maxHeight ?? 0,
+        tilesX: meta.tilesX ?? 0,
+        tilesZ: meta.tilesZ ?? 0,
+        numTiles: meta.numTiles ?? 0,
+        tileSize: meta.tileSize ?? 32,
+        startPositions,
+        featureTypes,
+        features,
+        featureDefs,
+        heightmap: new Uint16Array(hmBuf),
+        tileindex: new Int32Array(0), // terrain.ts fetches tileindex.bin separately
+        typemap: new Uint8Array(tmBuf),
+        metalmap: new Uint8Array(mmBuf),
+        minimapUrl: meta.minimapUrl ?? '',
+        tilesUrl: meta.tilesUrl ?? '',
+        mapDataUrl: meta.mapDataUrl ?? '',
+        mapSourceUrl: meta.mapSourceUrl ?? '',
+        decals,
+        water,
+        hasLuaGaia: meta.hasLuaGaia ?? false,
+        widgets,
+        widthElmos: mapx * squareSize,
+        heightElmos: mapy * squareSize,
+    };
+}
+
 /** Flatten a FlatBuffer MapData table into a plain object. */
 export function parseMapData(fb: FbMapData): ParsedMapData {
     // Copy the typed arrays so they survive past the FlatBuffer's lifetime.

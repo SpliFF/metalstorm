@@ -16,7 +16,7 @@ import { LobbyUI } from './lobby/lobby-ui.js';
 import { Minimap } from './core/minimap.js';
 import { Connection } from './core/connection.js';
 import { CONFIG, fetchBuildStamp, stampUrl } from './config.js';
-import type { ParsedMapData } from './core/map-data.js';
+import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
 import { renderMapFeatures } from './core/feature-renderer.js';
 import { RTSCamera } from './core/rts-camera.js';
 import { LuaWidgetHost } from './core/lua-widget-host.js';
@@ -221,7 +221,7 @@ function showGameOver(frame: number): void {
     });
 }
 
-async function startGame(gameServerPort: number): Promise<void> {
+async function startGame(gameServerPort: number, mapName: string): Promise<void> {
     // Defensive teardown of any leftover session state. `quitToLobby`
     // normally runs this on explicit quit, but a player can re-enter
     // a game through paths that don't go via quitToLobby — for
@@ -448,6 +448,17 @@ async function startGame(gameServerPort: number): Promise<void> {
             if (channel) {
                 debugConsole.setGameChannel(channel);
             }
+
+            // Fetch map data via HTTP from the lobby server. The map
+            // name doubles as the map id for the /api/maps/data/{id}/
+            // endpoints. This replaces the old MapData FlatBuffer that
+            // the game server used to send over WebRTC (which exceeded
+            // the 256KB SCTP message size limit for large maps).
+            fetchMapDataHttp(lobbyHttpUrl, mapName).then(mapData => {
+                onMapData(mapData);
+            }).catch(err => {
+                console.error('[client] failed to fetch map data via HTTP:', err);
+            });
         },
         onAuthFailed(msg: string) {
             console.error(`[game] auth failed: ${msg}`);
@@ -600,8 +611,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Show lobby with the engine-default templates immediately so the
     // login screen renders without waiting on a network round-trip.
-    lobbyUI = new LobbyUI((gameServerPort: number) => {
-        startGame(gameServerPort);
+    lobbyUI = new LobbyUI((gameServerPort: number, mapName: string) => {
+        startGame(gameServerPort, mapName);
     }, getDefaultLobbyTemplates());
 
     // If a game id is known up front, fire-and-forget the override
