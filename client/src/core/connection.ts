@@ -1,5 +1,5 @@
 /**
- * Connection — manages WebRTC + HTTP lifecycle to the game server.
+ * Connection — manages HTTP auth + WebRTC data channels to the game server.
  *
  * Auth flow:
  *   1. HTTP POST /api/auth/login → token
@@ -10,8 +10,6 @@
  * Channels:
  *   "control" (id=0, reliable, ordered) — FlatBuffer messages
  *   "state"   (id=1, unreliable, unordered) — entity/projectile state
- *
- * Falls back to WebSocket if WebRTC signaling fails (dev/testing).
  */
 
 import * as flatbuffers from 'flatbuffers';
@@ -19,14 +17,10 @@ import { ClientMessage } from '../protocol/spring-web/client-message.js';
 import { ClientPayload } from '../protocol/spring-web/client-payload.js';
 import { ServerMessage } from '../protocol/spring-web/server-message.js';
 import { ServerPayload } from '../protocol/spring-web/server-payload.js';
-import { Handshake } from '../protocol/spring-web/handshake.js';
-import { AuthRequest } from '../protocol/spring-web/auth-request.js';
-import { AuthResponse } from '../protocol/spring-web/auth-response.js';
 import { Ping } from '../protocol/spring-web/ping.js';
 import { ViewportUpdate } from '../protocol/spring-web/viewport-update.js';
 import { Pong } from '../protocol/spring-web/pong.js';
 import { ServerError } from '../protocol/spring-web/server-error.js';
-import { AuthStatus } from '../protocol/spring-web/auth-status.js';
 import { GameEventBatch } from '../protocol/spring-web/game-event-batch.js';
 import { CombatEvent } from '../protocol/spring-web/combat-event.js';
 import { EntityDestroy } from '../protocol/spring-web/entity-destroy.js';
@@ -46,8 +40,6 @@ const ENVELOPE_FLATBUFFERS = 0x01;
 const ENVELOPE_ENTITY_STATE_FULL = 0x02;
 const ENVELOPE_ENTITY_STATE_DELTA = 0x03;
 const ENVELOPE_PROJECTILE_STATE = 0x04;
-const PROTOCOL_VERSION = 1;
-
 export type ConnectionState = 'disconnected' | 'connecting' | 'handshake' | 'authenticating' | 'connected';
 
 export interface CombatEventInfo {
@@ -102,11 +94,10 @@ export interface ConnectionEvents {
 }
 
 export class Connection {
-    // Transport — either WebRTC or WebSocket (fallback)
+    // Transport — WebRTC only
     private pc: RTCPeerConnection | null = null;
     private controlChannel: RTCDataChannel | null = null;
     private stateChannel: RTCDataChannel | null = null;
-    private ws: WebSocket | null = null;  // fallback only
 
     private _state: ConnectionState = 'disconnected';
     private events: ConnectionEvents;
@@ -119,7 +110,6 @@ export class Connection {
     private rtcClientId = 0;
 
     /** Expose the control data channel for debug console. */
-    getWebSocket(): WebSocket | null { return this.ws; }
     getControlChannel(): RTCDataChannel | null { return this.controlChannel; }
 
     constructor(events: ConnectionEvents = {}) {
@@ -136,16 +126,15 @@ export class Connection {
 
     /**
      * Connect to the game server.
-     * `url` is the WebSocket URL (ws://host:port) — the HTTP base
-     * is derived from it for auth and signaling.
+     * `url` is the HTTP base URL (http://host:port) for auth and
+     * WebRTC signaling.
      */
     connect(url: string, username: string, password: string, token?: string): void {
-        if (this.pc || this.ws) this.disconnect();
+        if (this.pc) this.disconnect();
 
         if (token) this.sessionToken = token;
 
-        // Derive HTTP base from WS URL
-        this.httpBase = url.replace(/^ws:\/\//, 'http://').replace(/^wss:\/\//, 'https://');
+        this.httpBase = url;
         this.pendingUrl = url;
         this.pendingUsername = username;
         this.pendingPassword = password;
@@ -179,9 +168,20 @@ export class Connection {
             return;
         }
 
-        // Step 2: WebSocket connection (WebRTC upgrade path is future)
+        // Step 2: WebRTC data channels
         this.setState('handshake');
-        this.connectWebSocket();
+        try {
+            await this.connectWebRTC();
+        } catch (err) {
+            if (this.connectAttempts < Connection.MAX_CONNECT_ATTEMPTS) {
+                console.log(`[connection] WebRTC attempt ${this.connectAttempts} failed (${err}), retrying...`);
+                setTimeout(() => this.tryConnect(), Connection.CONNECT_RETRY_DELAY_MS);
+                return;
+            }
+            console.error(`[connection] giving up after ${this.connectAttempts} attempts`);
+            this.events.onAuthFailed?.(`WebRTC connection failed: ${err}`);
+            this.setState('disconnected');
+        }
     }
 
     // ─── HTTP Auth ───
@@ -337,59 +337,8 @@ export class Connection {
         this.setState('connected');
         this.events.onAuthenticated?.(this.playerId, this.sessionToken ?? '', this.myTeam);
 
-        // Send handshake on control channel
-        this.sendHandshake();
-        // Send auth request so the server registers our session
-        this.sendAuthRequest(this.pendingUsername, this.pendingPassword);
-
         this.pingInterval = setInterval(() => this.sendPing(), 30000);
         this.sendPing();
-    }
-
-    // ─── WebSocket fallback ───
-
-    private connectWebSocket(): void {
-        const ws = new WebSocket(this.pendingUrl);
-        ws.binaryType = 'arraybuffer';
-        this.ws = ws;
-
-        let opened = false;
-        let failed = false;
-
-        ws.onopen = () => {
-            opened = true;
-            this.setState('handshake');
-            this.sendHandshake();
-            this.setState('authenticating');
-            this.sendAuthRequest(this.pendingUsername, this.pendingPassword);
-        };
-
-        ws.onmessage = (event) => {
-            if (event.data instanceof ArrayBuffer) {
-                this.handleBinaryMessage(new Uint8Array(event.data));
-            }
-        };
-
-        const handleFailure = () => {
-            if (failed) return;
-            failed = true;
-            if (opened && this._state === 'connected') {
-                this.cleanup();
-                this.setState('disconnected');
-                return;
-            }
-            if (this.connectAttempts < Connection.MAX_CONNECT_ATTEMPTS) {
-                console.log(`[connection] WS attempt ${this.connectAttempts} failed, retrying...`);
-                setTimeout(() => this.tryConnect(), Connection.CONNECT_RETRY_DELAY_MS);
-            } else {
-                console.error(`[connection] giving up after ${this.connectAttempts} attempts`);
-                this.cleanup();
-                this.setState('disconnected');
-            }
-        };
-
-        ws.onclose = handleFailure;
-        ws.onerror = handleFailure;
     }
 
     // ─── Send ───
@@ -398,11 +347,9 @@ export class Connection {
         if (this.controlChannel) { try { this.controlChannel.close(); } catch {} }
         if (this.stateChannel) { try { this.stateChannel.close(); } catch {} }
         if (this.pc) { try { this.pc.close(); } catch {} }
-        if (this.ws) { try { this.ws.close(); } catch {} }
         this.controlChannel = null;
         this.stateChannel = null;
         this.pc = null;
-        this.ws = null;
         this.cleanup();
         this.setState('disconnected');
     }
@@ -442,8 +389,6 @@ export class Connection {
         new Uint8Array(buf).set(data);
         if (this.controlChannel?.readyState === 'open') {
             this.controlChannel.send(buf);
-        } else if (this.ws?.readyState === WebSocket.OPEN) {
-            this.ws.send(buf);
         }
     }
 
@@ -459,32 +404,6 @@ export class Connection {
             clearInterval(this.pingInterval);
             this.pingInterval = null;
         }
-    }
-
-    private sendHandshake(): void {
-        const builder = new flatbuffers.Builder(128);
-        const clientVersion = builder.createString('spring-web-client 0.1');
-        Handshake.startHandshake(builder);
-        Handshake.addProtocolVersion(builder, PROTOCOL_VERSION);
-        Handshake.addClientVersion(builder, clientVersion);
-        const hs = Handshake.endHandshake(builder);
-        this.sendClientMessage(builder, ClientPayload.Handshake, hs);
-    }
-
-    private sendAuthRequest(username: string, password: string): void {
-        const builder = new flatbuffers.Builder(256);
-        const uOffset = builder.createString(username);
-        const pOffset = builder.createString(password);
-        const tOffset = this.sessionToken
-            ? builder.createString(this.sessionToken)
-            : 0;
-
-        AuthRequest.startAuthRequest(builder);
-        AuthRequest.addUsername(builder, uOffset);
-        AuthRequest.addPasswordHash(builder, pOffset);
-        if (tOffset) AuthRequest.addToken(builder, tOffset);
-        const auth = AuthRequest.endAuthRequest(builder);
-        this.sendClientMessage(builder, ClientPayload.AuthRequest, auth);
     }
 
     private sendPing(): void {
@@ -521,9 +440,6 @@ export class Connection {
         const msg = ServerMessage.getRootAsServerMessage(buf);
 
         switch (msg.payloadType()) {
-            case ServerPayload.AuthResponse:
-                this.handleAuthResponse(msg);
-                break;
             case ServerPayload.Pong:
                 this.handlePong(msg);
                 break;
@@ -605,28 +521,6 @@ export class Connection {
             default:
                 this.events.onServerMessage?.(msg);
                 break;
-        }
-    }
-
-    private handleAuthResponse(msg: ServerMessage): void {
-        const auth = msg.payload(new AuthResponse()) as AuthResponse;
-        if (auth.status() === AuthStatus.OK) {
-            this.sessionToken = auth.token() ?? this.sessionToken;
-            this.playerId = auth.playerId();
-            this.myTeam = auth.team();
-
-            // For WS fallback path, this is the real auth completion.
-            // For WebRTC, we already set connected in connectWebRTC().
-            if (this._state !== 'connected') {
-                this.setState('connected');
-                this.events.onAuthenticated?.(this.playerId, this.sessionToken ?? '', this.myTeam);
-                this.pingInterval = setInterval(() => this.sendPing(), 30000);
-                this.sendPing();
-            }
-        } else {
-            const message = auth.message() ?? 'Authentication failed';
-            this.events.onAuthFailed?.(message);
-            this.disconnect();
         }
     }
 

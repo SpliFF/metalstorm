@@ -2,7 +2,8 @@
  * spring-server entry point
  *
  * Headless authoritative game server. Runs the simulation at a fixed
- * 30 Hz tick rate with a WebSocket server for client connections.
+ * 30 Hz tick rate. Clients connect via WebRTC data channels (signaled
+ * over HTTP). HTTP also serves map/game assets and REST API endpoints.
  */
 
 #include "Server/Simulation.h"
@@ -358,7 +359,7 @@ int main(int argc, char* argv[])
         }
     }
 
-    // --- Sessions ---
+    // --- Sessions & Rooms ---
     SessionManager sessions;
     RoomManager rooms;
 
@@ -622,19 +623,14 @@ int main(int argc, char* argv[])
     // --- Player roster lookup ---
     //
     // Build a `username -> team` map from the --player args so the
-    // AuthRequest handler can stamp the session's team on login.
-    // If the roster is empty (dev smoketest: spring-server invoked
-    // directly without a lobby) we leave every session at team=-1,
-    // which the PlayerCommand handler treats as "permissive" so
-    // the dev case keeps working without special-casing.
+    // WebRTC auth handler can stamp the session's team on login.
     std::unordered_map<std::string, int> playerTeamByUsername;
     for (const auto& rp : requestedPlayers) {
         playerTeamByUsername[rp.username] = rp.team;
     }
 
-    // Map WebSocket clientId → Spring playerNum so we can fire
+    // Map WebRTC clientId -> Spring playerNum so we can fire
     // eventHandler.PlayerRemoved() with the correct id on disconnect.
-    // Populated during auth, consumed during disconnect handling.
     std::unordered_map<ClientID, int> clientPlayerNum;
     int nextPlayerNum = 0;
 
@@ -643,9 +639,6 @@ int main(int argc, char* argv[])
     // GameStart is deferred until all roster players have connected
     // and registered CPlayers. This matches real Spring's behaviour
     // where GameStart fires after all clients signal "loaded".
-    // Track which roster usernames have connected so we know when
-    // everyone is in. Dev-mode (empty roster) fires GameStart
-    // immediately since there's nobody to wait for.
     std::unordered_set<std::string> connectedRosterPlayers;
     const size_t rosterPlayersNeeded = requestedPlayers.size();
 
@@ -756,20 +749,13 @@ int main(int argc, char* argv[])
         perfMetrics.BeginTick();
         sessions.ResetTickCounters();
 
-        // Drain inbound messages from clients
-        auto messages = net.DrainInbound();
-        // Also drain WebRTC data channel messages
-        {
-            auto rtcMessages = rtcServer.DrainInbound();
-            messages.insert(messages.end(),
-                std::make_move_iterator(rtcMessages.begin()),
-                std::make_move_iterator(rtcMessages.end()));
-        }
+        // Drain inbound messages from WebRTC data channels
+        auto messages = rtcServer.DrainInbound();
         for (auto& msg : messages) {
             auto* clientMsg = Protocol::ParseClientMessage(msg.data.data(), msg.data.size());
             if (!clientMsg || !clientMsg->payload()) {
                 auto err = Protocol::BuildServerError(400, "Invalid message");
-                net.Send(msg.clientId, err.data(), err.size());
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
                 continue;
             }
 
@@ -784,7 +770,7 @@ int main(int argc, char* argv[])
                     auto pong = Protocol::BuildPong(
                         ping->client_time(),
                         static_cast<uint64_t>(sim.GetFrameNum()));
-                    net.Send(msg.clientId, pong.data(), pong.size());
+                    rtcServer.SendReliable(msg.clientId, pong.data(), pong.size());
                     break;
                 }
                 case SpringWeb::ClientPayload_Handshake: {
@@ -825,7 +811,7 @@ int main(int argc, char* argv[])
                                 auto resp = Protocol::BuildAuthResponse(
                                     SpringWeb::AuthStatus_InvalidCredentials,
                                     "", 0, "Session user missing");
-                                net.Send(msg.clientId, resp.data(), resp.size());
+                                rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                                 break;
                             }
                             const int team = resolveTeam(reconnectUser->username);
@@ -833,14 +819,14 @@ int main(int argc, char* argv[])
                                 auto resp = Protocol::BuildAuthResponse(
                                     SpringWeb::AuthStatus_InvalidCredentials,
                                     "", 0, "Not in this room's roster");
-                                net.Send(msg.clientId, resp.data(), resp.size());
+                                rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                                 break;
                             }
                             auto resp = Protocol::BuildAuthResponse(
                                 SpringWeb::AuthStatus_OK, auth->token()->str(),
                                 static_cast<uint32_t>(userId), "",
                                 static_cast<int8_t>(team));
-                            net.Send(msg.clientId, resp.data(), resp.size());
+                            rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                             // Register the session — previously the
                             // token path skipped this, which meant a
                             // reconnected client had no session and
@@ -873,7 +859,7 @@ int main(int argc, char* argv[])
                             }
                             if (!mapMeta.id.empty()) {
                                 auto mapDataMsg = Protocol::BuildMapData(mapMeta);
-                                net.Send(msg.clientId, mapDataMsg.data(), mapDataMsg.size());
+                                rtcServer.SendReliable(msg.clientId, mapDataMsg.data(), mapDataMsg.size());
                             }
                             // Defs stream incrementally via entity/projectile state.
                             break;
@@ -890,7 +876,7 @@ int main(int argc, char* argv[])
                             auto resp = Protocol::BuildAuthResponse(
                                 SpringWeb::AuthStatus_InvalidCredentials,
                                 "", 0, "Session expired");
-                            net.Send(msg.clientId, resp.data(), resp.size());
+                            rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                             break;
                         }
                     }
@@ -904,7 +890,7 @@ int main(int argc, char* argv[])
                             auto resp = Protocol::BuildAuthResponse(
                                 SpringWeb::AuthStatus_InvalidCredentials, "", 0,
                                 "Registration failed");
-                            net.Send(msg.clientId, resp.data(), resp.size());
+                            rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                             break;
                         }
                         user = db.FindUser(username);
@@ -915,7 +901,7 @@ int main(int argc, char* argv[])
                         auto resp = Protocol::BuildAuthResponse(
                             SpringWeb::AuthStatus_InvalidCredentials, "", 0,
                             "Wrong password");
-                        net.Send(msg.clientId, resp.data(), resp.size());
+                        rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                         break;
                     }
 
@@ -924,7 +910,7 @@ int main(int argc, char* argv[])
                         auto resp = Protocol::BuildAuthResponse(
                             SpringWeb::AuthStatus_AccountBanned, "", 0,
                             "Account banned");
-                        net.Send(msg.clientId, resp.data(), resp.size());
+                        rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                         break;
                     }
 
@@ -936,7 +922,7 @@ int main(int argc, char* argv[])
                         auto resp = Protocol::BuildAuthResponse(
                             SpringWeb::AuthStatus_InvalidCredentials,
                             "", 0, "Not in this room's roster");
-                        net.Send(msg.clientId, resp.data(), resp.size());
+                        rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                         SLOG(SPRING_LOG_WARNING,
                             "client %u rejected: '%s' not in roster",
                             msg.clientId, user->username.c_str());
@@ -951,7 +937,7 @@ int main(int argc, char* argv[])
                         SpringWeb::AuthStatus_OK, token,
                         static_cast<uint32_t>(user->id), "",
                         static_cast<int8_t>(team));
-                    net.Send(msg.clientId, resp.data(), resp.size());
+                    rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                     sessions.AddSession(msg.clientId, user->id, user->username, user->role);
                     if (auto* s = sessions.GetSession(msg.clientId))
                         s->team = team;
@@ -980,13 +966,13 @@ int main(int argc, char* argv[])
                     {
                         auto allRooms = rooms.GetAllRooms();
                         auto listMsg = Protocol::BuildRoomListUpdate(allRooms);
-                        net.Send(msg.clientId, listMsg.data(), listMsg.size());
+                        rtcServer.SendReliable(msg.clientId, listMsg.data(), listMsg.size());
                     }
 
                     // Send MapData so the client can render terrain + features
                     if (!mapMeta.id.empty()) {
                         auto mapDataMsg = Protocol::BuildMapData(mapMeta);
-                        net.Send(msg.clientId, mapDataMsg.data(), mapDataMsg.size());
+                        rtcServer.SendReliable(msg.clientId, mapDataMsg.data(), mapDataMsg.size());
                     }
                     // Unit and weapon defs are NOT sent eagerly on auth.
                     // They stream incrementally as the client encounters
@@ -997,14 +983,14 @@ int main(int argc, char* argv[])
                     auto* session = sessions.GetSession(msg.clientId);
                     if (!session) {
                         auto err = Protocol::BuildServerError(401, "Not authenticated");
-                        net.Send(msg.clientId, err.data(), err.size());
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
                         break;
                     }
 
                     // Rate limiting
                     if (session->commandsThisTick >= SessionManager::MAX_COMMANDS_PER_TICK) {
                         auto err = Protocol::BuildServerError(429, "Command rate limit exceeded");
-                        net.Send(msg.clientId, err.data(), err.size());
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
                         break;
                     }
                     session->commandsThisTick++;
@@ -1014,7 +1000,7 @@ int main(int argc, char* argv[])
                     // Sequence validation (must be monotonically increasing)
                     if (cmd->sequence() <= session->lastCommandSeq && session->lastCommandSeq > 0) {
                         auto err = Protocol::BuildServerError(400, "Stale command sequence");
-                        net.Send(msg.clientId, err.data(), err.size());
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
                         break;
                     }
                     session->lastCommandSeq = cmd->sequence();
@@ -1068,7 +1054,7 @@ int main(int argc, char* argv[])
                     auto* session = sessions.GetSession(msg.clientId);
                     if (!session) {
                         auto err = Protocol::BuildServerError(401, "Not authenticated");
-                        net.Send(msg.clientId, err.data(), err.size());
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
                         break;
                     }
 
@@ -1076,7 +1062,7 @@ int main(int argc, char* argv[])
                     int vpId = vpu->viewport_id();
                     if (vpId >= MAX_VIEWPORTS) {
                         auto err = Protocol::BuildServerError(400, "Invalid viewport ID");
-                        net.Send(msg.clientId, err.data(), err.size());
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
                         break;
                     }
 
@@ -1096,16 +1082,16 @@ int main(int argc, char* argv[])
                     if (roomPtr) { \
                         auto _sm = Protocol::BuildRoomStateUpdate(*roomPtr); \
                         for (const auto& _p : roomPtr->players) \
-                            net.Send(_p.clientId, _sm.data(), _sm.size()); \
+                            rtcServer.SendReliable(_p.clientId, _sm.data(), _sm.size()); \
                     } \
                     auto _all = rooms.GetAllRooms(); \
                     auto _lm = Protocol::BuildRoomListUpdate(_all); \
-                    net.Broadcast(_lm.data(), _lm.size()); \
+                    rtcServer.BroadcastReliable(_lm.data(), _lm.size()); \
                 } while(0)
 
                 case SpringWeb::ClientPayload_RoomCreate: {
                     auto* session = sessions.GetSession(msg.clientId);
-                    if (!session) { auto e = Protocol::BuildServerError(401, "Auth required"); net.Send(msg.clientId, e.data(), e.size()); break; }
+                    if (!session) { auto e = Protocol::BuildServerError(401, "Auth required"); rtcServer.SendReliable(msg.clientId, e.data(), e.size()); break; }
 
                     auto* rc = clientMsg->payload_as_RoomCreate();
                     uint32_t roomId = rooms.CreateRoom(
@@ -1120,14 +1106,14 @@ int main(int argc, char* argv[])
                 }
                 case SpringWeb::ClientPayload_RoomJoin: {
                     auto* session = sessions.GetSession(msg.clientId);
-                    if (!session) { auto e = Protocol::BuildServerError(401, "Auth required"); net.Send(msg.clientId, e.data(), e.size()); break; }
+                    if (!session) { auto e = Protocol::BuildServerError(401, "Auth required"); rtcServer.SendReliable(msg.clientId, e.data(), e.size()); break; }
 
                     auto* rj = clientMsg->payload_as_RoomJoin();
                     if (!rooms.JoinRoom(rj->room_id(), static_cast<uint32_t>(session->userId),
                                         msg.clientId, session->username,
                                         rj->password() ? rj->password()->str() : "")) {
                         auto e = Protocol::BuildServerError(403, "Cannot join room");
-                        net.Send(msg.clientId, e.data(), e.size());
+                        rtcServer.SendReliable(msg.clientId, e.data(), e.size());
                         break;
                     }
                     BROADCAST_ROOM_UPDATE(rooms.GetRoom(rj->room_id()));
@@ -1210,7 +1196,7 @@ int main(int argc, char* argv[])
         // to AI, end the game, etc.). We also broadcast a PlayerLeft
         // FlatBuffers message so remaining clients can update their UI.
         {
-            auto disconnects = net.DrainDisconnects();
+            auto disconnects = rtcServer.DrainDisconnects();
             for (ClientID dcId : disconnects) {
                 auto* session = sessions.GetSession(dcId);
                 if (!session) continue;
@@ -1225,7 +1211,7 @@ int main(int argc, char* argv[])
                     session->username,
                     static_cast<int8_t>(session->team),
                     0 /* reason: voluntary quit */);
-                net.Broadcast(plMsg.data(), plMsg.size());
+                rtcServer.BroadcastReliable(plMsg.data(), plMsg.size());
 
                 // Fire the Spring PlayerRemoved callin into Lua so
                 // game gadgets can react (the callin signature is
@@ -1261,7 +1247,7 @@ int main(int argc, char* argv[])
                     auto resp = Protocol::BuildConsoleResponse(
                         result.requestId, result.scope, result.success,
                         result.output, result.success ? 0 : 4);
-                    net.Send(result.clientId, resp.data(), resp.size());
+                    rtcServer.SendReliable(result.clientId, resp.data(), resp.size());
                 }
             }
         }
@@ -1288,7 +1274,7 @@ int main(int argc, char* argv[])
                 // Broadcast GameInfo with paused=true to signal game over
                 auto gameOver = Protocol::BuildGameInfo("", "", 0.0f,
                     static_cast<uint32_t>(frame), true);
-                net.Broadcast(gameOver.data(), gameOver.size());
+                rtcServer.BroadcastReliable(gameOver.data(), gameOver.size());
             }
         }
         }
@@ -1298,7 +1284,7 @@ int main(int argc, char* argv[])
         // Envelope: 0x02 = full snapshot, 0x03 = delta update.
         {
         int curFrame = sim.GetFrameNum();
-        if (curFrame >= 0 && (curFrame % 3) == 0 && net.GetClientCount() > 0) {
+        if (curFrame >= 0 && (curFrame % 3) == 0 && rtcServer.GetClientCount() > 0) {
             bool isFullSnapshot = (curFrame % 30) == 0;
 
             sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
@@ -1336,7 +1322,7 @@ int main(int argc, char* argv[])
                     if (!newDefIds.empty()) {
                         auto defMsg = Protocol::BuildGameUnitDefsSubset(
                             unitDefHandler->GetUnitDefsVec(), newDefIds, gameId);
-                        net.Send(clientId, defMsg.data(), defMsg.size());
+                        rtcServer.SendReliable(clientId, defMsg.data(), defMsg.size());
                     }
                 }
 
@@ -1366,7 +1352,7 @@ int main(int argc, char* argv[])
                 frame.reserve(1 + stateData.size());
                 frame.push_back(envelope);
                 frame.insert(frame.end(), stateData.begin(), stateData.end());
-                net.Send(clientId, frame.data(), frame.size());
+                rtcServer.SendUnreliable(clientId, frame.data(), frame.size());
             });
         }
         }
@@ -1376,7 +1362,7 @@ int main(int argc, char* argv[])
         // then the full projectile snapshot.
         {
         int curFrame = sim.GetFrameNum();
-        if (curFrame >= 0 && (curFrame % 3) == 0 && net.GetClientCount() > 0) {
+        if (curFrame >= 0 && (curFrame % 3) == 0 && rtcServer.GetClientCount() > 0) {
             auto projData = ProjectileState::SerializeAllProjectiles();
             if (!projData.empty()) {
                 std::vector<uint8_t> projFrame;
@@ -1410,12 +1396,12 @@ int main(int argc, char* argv[])
                             if (!newWdIds.empty()) {
                                 auto wdMsg = Protocol::BuildGameWeaponDefsSubset(
                                     weaponDefHandler->GetWeaponDefsVec(), newWdIds);
-                                net.Send(clientId, wdMsg.data(), wdMsg.size());
+                                rtcServer.SendReliable(clientId, wdMsg.data(), wdMsg.size());
                             }
                         }
                     }
 
-                    net.Send(clientId, projFrame.data(), projFrame.size());
+                    rtcServer.SendUnreliable(clientId, projFrame.data(), projFrame.size());
                 });
             }
         }
@@ -1445,10 +1431,10 @@ int main(int argc, char* argv[])
         // Broadcast combat events to all connected clients
         {
         auto events = combatEvents.Drain();
-        if (!events.empty() && net.GetClientCount() > 0) {
+        if (!events.empty() && rtcServer.GetClientCount() > 0) {
             auto batch = Protocol::BuildCombatEventBatch(
                 static_cast<uint32_t>(sim.GetFrameNum()), events);
-            net.Broadcast(batch.data(), batch.size());
+            rtcServer.BroadcastReliable(batch.data(), batch.size());
         }
         }
 
@@ -1457,12 +1443,12 @@ int main(int argc, char* argv[])
         auto deaths = unitDeaths.Drain();
         for (const auto& death : deaths) {
             auto msg = Protocol::BuildEntityDestroy(death.unitId, 1, death.x, death.y, death.z);
-            net.Broadcast(msg.data(), msg.size());
+            rtcServer.BroadcastReliable(msg.data(), msg.size());
         }
         }
 
         perfMetrics.SetFrame(sim.GetFrameNum());
-        perfMetrics.SetClientCount(net.GetClientCount());
+        perfMetrics.SetClientCount(rtcServer.GetClientCount());
         perfMetrics.SetAICount(static_cast<int>(aiPool.GetAICount()));
         perfMetrics.EndTick();
 
@@ -1470,7 +1456,7 @@ int main(int argc, char* argv[])
         int frame = sim.GetFrameNum();
         if (frame > 0 && (frame % (GAME_SPEED * 10)) == 0) {
             SLOG(SPRING_LOG_INFO, "frame %d (%.1fs) clients=%d",
-                frame, frame / (float)GAME_SPEED, net.GetClientCount());
+                frame, frame / (float)GAME_SPEED, rtcServer.GetClientCount());
         }
     }
 

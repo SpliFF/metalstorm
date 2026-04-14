@@ -1,17 +1,14 @@
 /**
- * NetworkServer — WebSocket server running on a dedicated thread.
+ * NetworkServer — HTTP server running on a dedicated thread.
  *
- * Accepts client connections, receives binary messages, and provides
- * a thread-safe interface for the sim thread to drain inbound messages
- * and broadcast outbound data.
+ * Serves HTTP GET/POST endpoints via uWebSockets. WebSocket transport
+ * has been removed; real-time game traffic uses WebRTC instead.
  */
 #pragma once
 
 #include <atomic>
 #include <cstdint>
 #include <functional>
-#include <memory>
-#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -19,7 +16,7 @@
 /// Identifies a connected client.
 using ClientID = uint32_t;
 
-/// An inbound message from a client.
+/// An inbound message from a client (used by WebRTCServer).
 struct InboundMessage {
     ClientID clientId;
     std::vector<uint8_t> data;
@@ -65,25 +62,6 @@ public:
     /// Register an HTTP POST endpoint. Must be called before Start().
     void AddHttpPost(const std::string& pattern, HttpPostHandler handler);
 
-    /// Drain all inbound messages received since the last call.
-    /// Called from the sim thread each tick.
-    std::vector<InboundMessage> DrainInbound();
-
-    /// Drain ClientIDs that disconnected since the last call.
-    /// Called from the sim thread each tick, after DrainInbound().
-    std::vector<ClientID> DrainDisconnects();
-
-    /// Send a binary message to a specific client.
-    /// Thread-safe — can be called from the sim thread.
-    void Send(ClientID clientId, const uint8_t* data, size_t len);
-
-    /// Send a binary message to all connected clients.
-    /// Thread-safe — can be called from the sim thread.
-    void Broadcast(const uint8_t* data, size_t len);
-
-    /// Number of currently connected clients.
-    int GetClientCount() const { return clientCount.load(); }
-
 private:
     void NetworkThreadFunc(int port);
 
@@ -93,17 +71,8 @@ private:
 
     std::thread networkThread;
     std::atomic<bool> running{false};
-    std::atomic<int> clientCount{0};
 
-    // Inbound message queue (network thread writes, sim thread reads)
-    std::mutex inboundMutex;
-    std::vector<InboundMessage> inboundQueue;
-
-    // Disconnect queue (network thread writes, sim thread reads)
-    std::mutex disconnectMutex;
-    std::vector<ClientID> disconnectQueue;
-
-    // Opaque pointer to uWS loop for cross-thread wakeup
+    // Opaque pointer to uWS event loop for shutdown coordination
     struct Impl;
     std::unique_ptr<Impl> impl;
 };

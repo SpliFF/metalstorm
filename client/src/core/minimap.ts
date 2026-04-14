@@ -301,7 +301,7 @@ export class Minimap {
     /// The detached viewport popup, if the user has opened one. We
     /// keep the handle around so `dispose()` can actively close it
     /// when the main window leaves the game — without this the
-    /// popup stays alive as an orphaned WebSocket to a game server
+    /// popup stays alive as an orphaned connection to a game server
     /// that's either stopped or now belongs to a different room.
     private detachedWindow: Window | null = null;
 

@@ -57,7 +57,7 @@ try {
         } else if (e.data.type === 'gameEnded') {
             // Main window left the game (quit, end-game, disconnect).
             // Close ourselves so the popup doesn't linger as an
-            // orphaned WebSocket into a dead game server. The popup
+            // orphaned connection into a dead game server. The popup
             // was opened by the main window, so window.close() is
             // allowed here without requiring a user gesture.
             try { window.close(); } catch { /* noop */ }
@@ -66,9 +66,9 @@ try {
 } catch { /* ok */ }
 
 // Connection. Prefer the game server URL built from the port param;
-// fall back to CONFIG.wsUrl (lobby) only if no game is active.
+// fall back to CONFIG.httpUrl (lobby) only if no game is active.
 const host = window.location.hostname || 'localhost';
-const serverUrl = gamePort ? `ws://${host}:${gamePort}` : CONFIG.wsUrl;
+const serverUrl = gamePort ? `http://${host}:${gamePort}` : CONFIG.httpUrl;
 
 // Map terrain backdrop. Loaded asynchronously from the lobby's
 // /api/maps/thumb/{id} endpoint. We just hold an Image and check its
@@ -80,7 +80,7 @@ if (mapId) {
     const img = new Image();
     img.onload = () => { mapThumb = img; };
     img.onerror = () => { /* fall back to grid */ };
-    // Lobby HTTP is on the same host as the game WebSocket but on the
+    // Lobby HTTP is on the same host as the game server but on the
     // lobby's port. The configured CONFIG.httpUrl points there.
     img.src = stampUrl(`${CONFIG.httpUrl}/api/maps/thumb/${encodeURIComponent(mapId)}`);
 }

@@ -210,7 +210,7 @@ export class LobbyUI {
         );
 
         this.pendingRejoinRoomId = savedRoomId ? parseInt(savedRoomId) : 0;
-        this.connection.connect(CONFIG.wsUrl, username, '', token);
+        this.connection.connect(CONFIG.httpUrl, username, '', token);
     }
 
     getConnection(): Connection | null { return this.connection; }
@@ -306,7 +306,7 @@ export class LobbyUI {
         this.connection = this.createConnection(
             (msg: string) => { msgEl.textContent = msg; msgEl.className = 'msg error'; },
         );
-        this.connection.connect(CONFIG.wsUrl, user, pass);
+        this.connection.connect(CONFIG.httpUrl, user, pass);
     }
 
     /// Land on the most appropriate lobby screen after the game canvas

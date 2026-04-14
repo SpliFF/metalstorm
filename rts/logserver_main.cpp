@@ -1,13 +1,10 @@
 // spring-logserver — dedicated log collection and streaming server.
 //
-// Receives LogIngest from any authenticated WS client (game servers,
-// lobby, tools). Stores entries in SQLite (debug.db), maintains
-// per-source ring buffers, streams LogBatch to subscribers, and
-// serves HTTP query endpoints.
+// Stores log entries in SQLite (debug.db), maintains per-source ring
+// buffers, and serves HTTP query endpoints for log retrieval.
 
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogSqlite.h"
-#include "protocol_generated.h"
 
 #include <sqlite3.h>
 #include <App.h>  // uWebSockets
@@ -84,17 +81,6 @@ private:
     std::unordered_map<uint32_t, std::deque<BufferedLogEntry>> sources_;
     uint64_t nextId_ = 1;
     static constexpr size_t MAX_PER_SOURCE = 2000;
-};
-
-// --- Per-connection state ---
-
-struct ConnectionData {
-    bool authenticated = false;
-    bool subscribing = false;
-    uint32_t subscribeRoomId = 0;
-    uint8_t subscribeMinLevel = 0;
-    std::string sectionFilter;
-    std::string scopeFilter;
 };
 
 // --- Globals ---
@@ -305,62 +291,6 @@ int main(int argc, char** argv) {
             res->writeHeader("Content-Type", "application/json")
                ->writeHeader("Access-Control-Allow-Origin", "*")
                ->end(json);
-        })
-        // --- WebSocket for log ingestion + streaming ---
-        .ws<ConnectionData>("/*", {
-            .maxPayloadLength = 1024 * 1024,
-            .open = [](uWS::WebSocket<false, true, ConnectionData>* ws) {
-                auto* data = ws->getUserData();
-                data->authenticated = true; // TODO: proper auth
-                SLOG(SPRING_LOG_INFO, "log client connected");
-            },
-            .message = [](uWS::WebSocket<false, true, ConnectionData>* ws, std::string_view message, uWS::OpCode opCode) {
-                if (opCode != uWS::BINARY || message.size() < 2) return;
-
-                uint8_t envelope = (uint8_t)message[0];
-                if (envelope != 0x01) return;
-
-                auto* fbData = (const uint8_t*)message.data() + 1;
-
-                auto clientMsg = flatbuffers::GetRoot<SpringWeb::ClientMessage>(fbData);
-                if (!clientMsg || !clientMsg->payload()) return;
-
-                auto payloadType = clientMsg->payload_type();
-
-                if (payloadType == SpringWeb::ClientPayload_LogIngest) {
-                    auto* ingest = clientMsg->payload_as_LogIngest();
-                    if (!ingest || !ingest->entries()) return;
-
-                    for (auto* entry : *ingest->entries()) {
-                        BufferedLogEntry be;
-                        be.timestamp = entry->timestamp();
-                        be.level = entry->level();
-                        be.section = entry->section() ? entry->section()->str() : "";
-                        be.scope = entry->scope() ? entry->scope()->str() : "";
-                        be.process = entry->process() ? entry->process()->str() : "";
-                        be.message = entry->message() ? entry->message()->str() : "";
-                        be.frame = entry->frame();
-                        g_logBuffer.Append(0, std::move(be));
-                    }
-                }
-                else if (payloadType == SpringWeb::ClientPayload_LogSubscribe) {
-                    auto* sub = clientMsg->payload_as_LogSubscribe();
-                    auto* data = ws->getUserData();
-                    data->subscribing = true;
-                    data->subscribeRoomId = sub ? sub->room_id() : 0;
-                    data->subscribeMinLevel = sub ? sub->min_level() : 0;
-                    data->sectionFilter = sub && sub->section_filter() ? sub->section_filter()->str() : "";
-                    data->scopeFilter = sub && sub->scope_filter() ? sub->scope_filter()->str() : "";
-                    SLOG(SPRING_LOG_INFO, "client subscribed to logs (room=%u, level>=%d)",
-                         data->subscribeRoomId, data->subscribeMinLevel);
-                }
-                else if (payloadType == SpringWeb::ClientPayload_LogUnsubscribe) {
-                    ws->getUserData()->subscribing = false;
-                }
-            },
-            .close = [](uWS::WebSocket<false, true, ConnectionData>* /*ws*/, int /*code*/, std::string_view /*msg*/) {
-                SLOG(SPRING_LOG_INFO, "log client disconnected");
-            }
         })
         .listen(g_port, [](auto* listenSocket) {
             if (listenSocket) {

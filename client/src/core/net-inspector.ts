@@ -1,10 +1,9 @@
 /**
- * Network message inspector — intercepts and decodes WS messages
+ * Network message inspector — intercepts and decodes protocol messages
  * for display in the debug console's network tab.
  *
- * Hooks into a WebSocket to capture all inbound/outbound frames,
- * decodes envelope byte + FlatBuffer type, and logs to the debug
- * console.
+ * Hooks into inbound/outbound data channel frames, decodes envelope
+ * byte + FlatBuffer type, and logs to the debug console.
  */
 
 import * as flatbuffers from 'flatbuffers';

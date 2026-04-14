@@ -45,7 +45,7 @@ let audioManager: AudioManager | null = null;
 let inputManager: InputManager | null = null;
 let lobbyUI: LobbyUI | null = null;
 let minimap: Minimap | null = null;
-/// Game server WebSocket. Non-null while a game is active. Hoisted out
+/// Game server connection. Non-null while a game is active. Hoisted out
 /// of startGame() so the quit-to-lobby handler can close it cleanly.
 let gameConn: Connection | null = null;
 
@@ -136,7 +136,7 @@ let currentFrame = 0;
 /// call from any in-game context: "Quit" button, ESC-confirm, Game Over
 /// overlay, or an error handler. No-op if no game is active.
 function quitToLobby(): void {
-    // Close the game WebSocket cleanly before disposing the renderer —
+    // Close the game connection cleanly before disposing the renderer —
     // that way any "player left" hint reaches the game server before
     // our send queue gets torn down.
     gameConn?.disconnect();
@@ -174,7 +174,7 @@ function quitToLobby(): void {
     document.getElementById('quit-confirm-overlay')?.remove();
     document.getElementById('game-over-overlay')?.remove();
 
-    // Show the lobby. The lobby WebSocket stayed connected the whole
+    // Show the lobby. The lobby connection stayed open the whole
     // time. If the player is still a member of their room (the normal
     // case after a mid-game quit) land on the room view so the host
     // still sees the End Game button; otherwise fall through to the
@@ -255,7 +255,7 @@ async function startGame(gameServerPort: number): Promise<void> {
 
     // Build game server URL
     const host = window.location.hostname || 'localhost';
-    const gameWsUrl = `ws://${host}:${gameServerPort}`;
+    const gameHttpUrl = `http://${host}:${gameServerPort}`;
     const lobbyHttpUrl = CONFIG.httpUrl; // static asset host
 
     engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
@@ -444,17 +444,9 @@ async function startGame(gameServerPort: number): Promise<void> {
             console.log(`[game] connected to game server on port ${gameServerPort} (team=${team})`);
             if (token) localStorage.setItem('springrts-token', token);
             // Wire debug console to game server for command execution
-            // Prefer WebRTC control channel; fall back to WebSocket
-            const channel = conn.getControlChannel() ?? conn.getWebSocket();
-            console.log(`[game] debug console wiring: controlChannel=${!!conn.getControlChannel()}, ws=${!!conn.getWebSocket()}, channel=${!!channel}`);
+            const channel = conn.getControlChannel();
             if (channel) {
-                debugConsole.setGameWs(channel);
-            } else {
-                // Fallback: retry after a short delay (WS may not be accessible yet)
-                setTimeout(() => {
-                    const ch = conn.getControlChannel() ?? conn.getWebSocket();
-                    if (ch) debugConsole.setGameWs(ch);
-                }, 500);
+                debugConsole.setGameChannel(channel);
             }
         },
         onAuthFailed(msg: string) {
@@ -506,7 +498,7 @@ async function startGame(gameServerPort: number): Promise<void> {
     // roster" whenever the lobby is actually enforcing auth.
     const savedUser = localStorage.getItem('springrts-username') ?? '';
     const savedToken = localStorage.getItem('springrts-token') ?? '';
-    conn.connect(gameWsUrl, savedUser, '', savedToken);
+    conn.connect(gameHttpUrl, savedUser, '', savedToken);
 
     // Input
     inputManager = new InputManager(scene, camera, entityRenderer, conn,

@@ -7,8 +7,8 @@
  *   - Multi-line input (Shift+Enter for newlines, Enter to submit)
  *   - Programmatic API: debugConsole.exec(scope, code) for automation
  *   - Copy/paste: output is user-selectable, textarea supports clipboard
- *   - Log server WS for log streaming
- *   - Game server WS for command execution
+ *   - HTTP polling for log streaming
+ *   - WebRTC data channel for command execution
  *
  * Toggle with backtick (`) or call debugConsole.show().
  */
@@ -93,10 +93,9 @@ export class DebugConsole {
     private activeTabId = -1;
     private nextTabId = 1;
 
-    private ws: WebSocket | null = null;
     private logServerUrl = '';
     private visible = false;
-    private gameChannel: WebSocket | RTCDataChannel | null = null;
+    private gameChannel: RTCDataChannel | null = null;
     private scene: Scene | null = null;
     private nextRequestId = 1;
 
@@ -126,8 +125,8 @@ export class DebugConsole {
 
     setScene(scene: Scene): void { this.scene = scene; }
 
-    /** Set game channel for command forwarding. Accepts WebSocket or RTCDataChannel. */
-    setGameWs(channel: WebSocket | RTCDataChannel): void {
+    /** Set game channel for command forwarding via WebRTC data channel. */
+    setGameChannel(channel: RTCDataChannel): void {
         this.gameChannel = channel;
         channel.addEventListener('message', ((evt: MessageEvent) => {
             if (!(evt.data instanceof ArrayBuffer)) return;
@@ -980,9 +979,7 @@ body { background: #0f0f14; display: flex; flex-direction: column; }
     }
 
     private isChannelOpen(): boolean {
-        if (!this.gameChannel) return false;
-        if (this.gameChannel instanceof WebSocket) return this.gameChannel.readyState === WebSocket.OPEN;
-        return this.gameChannel.readyState === 'open';
+        return this.gameChannel !== null && this.gameChannel.readyState === 'open';
     }
 
     private esc(s: string): string {

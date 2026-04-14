@@ -12,7 +12,6 @@ const host = window.location.hostname || 'localhost';
 
 export const CONFIG = {
     gameServerPort: gamePort,
-    wsUrl: `ws://${host}:${gamePort}`,
     httpUrl: `http://${host}:${gamePort}`,
     /** Build stamp from the server — used for cache-busting asset URLs. */
     buildStamp: 'dev',
