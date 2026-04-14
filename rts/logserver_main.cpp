@@ -195,13 +195,49 @@ int main(int argc, char** argv) {
             section = std::string(req->getQuery("section"));
             scope = std::string(req->getQuery("scope"));
 
+            // Try ring buffer first, fall back to SQLite
             auto entries = g_logBuffer.Query(roomId, 0, limit, minLevel, section, scope);
-            std::string json = "[";
-            for (size_t i = 0; i < entries.size(); i++) {
-                if (i > 0) json += ",";
-                json += LogEntryToJson(entries[i]);
+            std::string json;
+            if (!entries.empty()) {
+                json = "[";
+                for (size_t i = 0; i < entries.size(); i++) {
+                    if (i > 0) json += ",";
+                    json += LogEntryToJson(entries[i]);
+                }
+                json += "]";
+            } else {
+                // Query SQLite directly
+                sqlite3* db = nullptr;
+                json = "[]";
+                if (sqlite3_open_v2(g_dbPath.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK) {
+                    std::string sql = "SELECT id, timestamp, level, section, scope, process, frame, message "
+                        "FROM debug_logs WHERE level >= " + std::to_string(minLevel);
+                    if (!section.empty()) sql += " AND section = '" + section + "'";
+                    if (!scope.empty()) sql += " AND scope = '" + scope + "'";
+                    sql += " ORDER BY id DESC LIMIT " + std::to_string(limit);
+
+                    json = "[";
+                    bool first = true;
+                    auto cb = [](void* data, int ncols, char** vals, char** /*names*/) -> int {
+                        auto* pair = static_cast<std::pair<std::string*, bool*>*>(data);
+                        if (!*pair->second) *pair->first += ",";
+                        *pair->second = false;
+                        char buf[1024];
+                        snprintf(buf, sizeof(buf),
+                            R"({"id":%s,"timestamp":%s,"level":%s,"section":"%s","scope":"%s","process":"%s","frame":%s,"message":"%s"})",
+                            vals[0] ? vals[0] : "0", vals[1] ? vals[1] : "0",
+                            vals[2] ? vals[2] : "0", vals[3] ? vals[3] : "",
+                            vals[4] ? vals[4] : "", vals[5] ? vals[5] : "",
+                            vals[6] ? vals[6] : "0", vals[7] ? vals[7] : "");
+                        *pair->first += buf;
+                        return 0;
+                    };
+                    auto pair = std::make_pair(&json, &first);
+                    sqlite3_exec(db, sql.c_str(), cb, &pair, nullptr);
+                    json += "]";
+                    sqlite3_close(db);
+                }
             }
-            json += "]";
             res->writeHeader("Content-Type", "application/json")
                ->writeHeader("Access-Control-Allow-Origin", "*")
                ->end(json);

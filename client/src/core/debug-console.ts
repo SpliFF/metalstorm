@@ -20,8 +20,6 @@ import css from '../ui/debug-console/debug-console.css?raw';
 import * as flatbuffers from 'flatbuffers';
 import { ServerMessage } from '../protocol/spring-web/server-message.js';
 import { ServerPayload } from '../protocol/spring-web/server-payload.js';
-import { LogBatch } from '../protocol/spring-web/log-batch.js';
-import { LogSubscribe } from '../protocol/spring-web/log-subscribe.js';
 import { ClientMessage } from '../protocol/spring-web/client-message.js';
 import { ClientPayload } from '../protocol/spring-web/client-payload.js';
 import { ConsoleCommand } from '../protocol/spring-web/console-command.js';
@@ -108,6 +106,11 @@ export class DebugConsole {
     // All entries (shared across tabs for filtering)
     private globalEntries: LogEntry[] = [];
 
+    // HTTP log polling
+    private logPollTimer: ReturnType<typeof setInterval> | null = null;
+    private lastLogId = 0;
+    private logPollUrl = ''; // derived from lobby/log server URL
+
     constructor() {
         this.setupKeyboard();
     }
@@ -116,7 +119,8 @@ export class DebugConsole {
 
     setLogServerUrl(url: string): void {
         this.logServerUrl = url;
-        if (this.visible) this.connectLogServer();
+        this.logPollUrl = url;
+        if (this.visible) this.startLogPolling();
     }
 
     setScene(scene: Scene): void { this.scene = scene; }
@@ -194,8 +198,7 @@ export class DebugConsole {
         if (!this.container) this.init();
         this.container!.classList.remove('hidden');
         this.visible = true;
-        if (this.logServerUrl && !this.ws) this.connectLogServer();
-        // Focus the active tab's input
+        this.startLogPolling();
         const tab = this.getTab(this.activeTabId);
         tab?.inputEl?.focus();
     }
@@ -203,6 +206,7 @@ export class DebugConsole {
     hide(): void {
         this.container?.classList.add('hidden');
         this.visible = false;
+        this.stopLogPolling();
     }
 
     addEntry(entry: LogEntry): void {
@@ -803,64 +807,60 @@ body { background: #0f0f14; display: flex; flex-direction: column; }
         }
     }
 
-    // ─── Log server connection ───
+    // ─── Log polling (HTTP) ───
 
-    private connectLogServer(): void {
-        if (!this.logServerUrl) return;
-        if (this.ws) { this.ws.close(); this.ws = null; }
+    private startLogPolling(): void {
+        if (this.logPollTimer) return;
+        if (!this.logPollUrl) {
+            // Auto-derive log server URL from current page host
+            const host = window.location.hostname || 'localhost';
+            this.logPollUrl = `http://${host}:8010`;
+        }
+        this.setStatus(true);
+        // Poll immediately, then every 2 seconds
+        this.pollLogs();
+        this.logPollTimer = setInterval(() => this.pollLogs(), 2000);
+    }
 
-        const wsUrl = this.logServerUrl.replace(/^http/, 'ws');
-        this.ws = new WebSocket(wsUrl);
-        this.ws.binaryType = 'arraybuffer';
+    private stopLogPolling(): void {
+        if (this.logPollTimer) {
+            clearInterval(this.logPollTimer);
+            this.logPollTimer = null;
+        }
+    }
 
-        this.ws.onopen = () => {
+    private async pollLogs(): Promise<void> {
+        if (!this.logPollUrl) return;
+        try {
+            // Fetch logs newer than lastLogId (cursor-based)
+            const url = `${this.logPollUrl}/api/logs/0?limit=100&level=0`;
+            const resp = await fetch(url);
+            if (!resp.ok) {
+                this.setStatus(false);
+                return;
+            }
             this.setStatus(true);
-            this.sendLogSubscribe();
-        };
-        this.ws.onmessage = (evt) => {
-            if (!(evt.data instanceof ArrayBuffer)) return;
-            this.handleLogMessage(new Uint8Array(evt.data));
-        };
-        this.ws.onclose = () => {
+            const entries: any[] = await resp.json();
+            if (!Array.isArray(entries)) return;
+
+            for (const e of entries) {
+                // Skip entries we've already seen
+                if (e.id && e.id <= this.lastLogId) continue;
+                if (e.id) this.lastLogId = e.id;
+
+                this.addEntry({
+                    id: e.id ?? 0,
+                    timestamp: e.timestamp ?? 0,
+                    level: e.level ?? 2,
+                    section: e.section ?? '',
+                    scope: e.scope ?? '',
+                    process: e.process ?? '',
+                    message: e.message ?? '',
+                    frame: e.frame ?? 0,
+                });
+            }
+        } catch {
             this.setStatus(false);
-            this.ws = null;
-            setTimeout(() => {
-                if (this.visible && this.logServerUrl) this.connectLogServer();
-            }, 3000);
-        };
-        this.ws.onerror = () => {};
-    }
-
-    private sendLogSubscribe(): void {
-        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-        const builder = new flatbuffers.Builder(128);
-        const sub = LogSubscribe.createLogSubscribe(builder, 0, 0, 0, 0);
-        const payload = ClientMessage.createClientMessage(builder, ClientPayload.LogSubscribe, sub);
-        builder.finish(payload);
-        const fbBytes = builder.asUint8Array();
-        const frame = new Uint8Array(1 + fbBytes.length);
-        frame[0] = 0x01;
-        frame.set(fbBytes, 1);
-        this.ws.send(frame.buffer);
-    }
-
-    private handleLogMessage(data: Uint8Array): void {
-        if (data.length < 2 || data[0] !== 0x01) return;
-        const buf = new flatbuffers.ByteBuffer(data.slice(1));
-        const msg = ServerMessage.getRootAsServerMessage(buf);
-        if (!msg || msg.payloadType() !== ServerPayload.LogBatch) return;
-
-        const batch = msg.payload(new LogBatch()) as LogBatch;
-        if (!batch) return;
-        for (let i = 0; i < batch.entriesLength(); i++) {
-            const e = batch.entries(i);
-            if (!e) continue;
-            this.addEntry({
-                id: Number(e.id()), timestamp: Number(e.timestamp()),
-                level: e.level(), section: e.section() ?? '',
-                scope: e.scope() ?? '', process: e.process() ?? '',
-                message: e.message() ?? '', frame: e.frame(),
-            });
         }
     }
 

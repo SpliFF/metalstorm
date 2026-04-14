@@ -258,8 +258,10 @@ int main(int argc, char* argv[])
         springlog_set_file(logFile.c_str());
         springlog_set_outputs(SPRING_LOG_OUTPUT_CONSOLE | SPRING_LOG_OUTPUT_FILE);
     }
-    if (!logSqlite.empty())
-        springlog_sqlite_init(logSqlite.c_str());
+    // Enable SQLite log sink — defaults to data/debug.db so the log
+    // server can query game server logs. Override with --log-sqlite.
+    if (logSqlite.empty()) logSqlite = "data/debug.db";
+    springlog_sqlite_init(logSqlite.c_str());
     if (!logServer.empty())
         springlog_net_init(logServer.c_str(), "");
 
@@ -1481,8 +1483,7 @@ int main(int argc, char* argv[])
     // Tear down optional sinks before the core logger
     if (!logServer.empty())
         springlog_net_shutdown();
-    if (!logSqlite.empty())
-        springlog_sqlite_shutdown();
+    springlog_sqlite_shutdown();
     springlog_shutdown();
 
     return 0;
