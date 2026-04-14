@@ -51,26 +51,36 @@ interface ConsoleTab {
     id: number;
     label: string;
     scope: string;
+
+    // Console pane state
+    history: string[];
+    historyIndex: number;
+    consoleLineCount: number;
+
+    // Log pane filter state
     minLevel: number;
     sectionFilter: string;
     scopeFilter: string;
     searchFilter: string;
-    history: string[];
-    historyIndex: number;
     entries: LogEntry[];
-    lineCount: number;
-    autoScroll: boolean;
+    logLineCount: number;
+    logAutoScroll: boolean;
 
-    // DOM (null when popped out)
+    // DOM refs
     tabEl: HTMLElement | null;
     panelEl: HTMLElement | null;
-    outputEl: HTMLElement | null;
+    // Console pane
+    consoleOutputEl: HTMLElement | null;
     inputEl: HTMLTextAreaElement | null;
     promptEl: HTMLElement | null;
     scopeSelectEl: HTMLSelectElement | null;
+    // Log pane
+    logOutputEl: HTMLElement | null;
 
-    // Popout
+    // Popout windows (one per pane)
     popoutWindow: Window | null;
+    consolePopout: Window | null;
+    logPopout: Window | null;
 }
 
 // ─── Main class ───
@@ -223,12 +233,13 @@ export class DebugConsole {
         const id = this.nextTabId++;
         const tab: ConsoleTab = {
             id, label: scope, scope,
+            history: [], historyIndex: -1, consoleLineCount: 0,
             minLevel: 2, sectionFilter: '', scopeFilter: '', searchFilter: '',
-            history: [], historyIndex: -1,
-            entries: [], lineCount: 0, autoScroll: true,
-            tabEl: null, panelEl: null, outputEl: null,
-            inputEl: null, promptEl: null, scopeSelectEl: null,
-            popoutWindow: null,
+            entries: [], logLineCount: 0, logAutoScroll: true,
+            tabEl: null, panelEl: null,
+            consoleOutputEl: null, inputEl: null, promptEl: null, scopeSelectEl: null,
+            logOutputEl: null,
+            popoutWindow: null, consolePopout: null, logPopout: null,
         };
         this.tabs.push(tab);
         this.buildTabDOM(tab);
@@ -304,7 +315,8 @@ export class DebugConsole {
         this.panelsEl.appendChild(panel);
 
         // Cache DOM refs
-        tab.outputEl = panel.querySelector('.debug-panel-output');
+        tab.consoleOutputEl = panel.querySelector('.debug-console-output');
+        tab.logOutputEl = panel.querySelector('.debug-log-output');
         tab.inputEl = panel.querySelector('textarea');
         tab.promptEl = panel.querySelector('.debug-prompt');
         tab.scopeSelectEl = panel.querySelector('.panel-scope-select');
@@ -319,26 +331,41 @@ export class DebugConsole {
         ).join('');
 
         return `
-            <div class="debug-panel-header">
-                <select class="panel-level-filter" title="Min log level">
-                    <option value="0">DEBUG</option>
-                    <option value="1">INFO</option>
-                    <option value="2" selected>NOTICE</option>
-                    <option value="3">WARN</option>
-                    <option value="4">ERROR</option>
-                    <option value="5">FATAL</option>
-                </select>
-                <input class="panel-section-filter" type="text" placeholder="section" title="Filter by section" />
-                <input class="panel-scope-filter" type="text" placeholder="scope" title="Filter by scope" />
-                <input class="panel-search-filter" type="text" placeholder="search..." title="Search" />
-                <button class="panel-clear-btn" title="Clear output">Clear</button>
-            </div>
-            <div class="debug-panel-output"></div>
-            <div class="debug-panel-input">
-                <select class="panel-scope-select" title="Execution scope">${scopeOpts}</select>
-                <span class="debug-prompt">LuaRules&gt;</span>
-                <textarea rows="1" placeholder="Enter command... (Shift+Enter for newline)" spellcheck="false"></textarea>
-                <span class="debug-input-hint">Enter: run | Shift+Enter: newline</span>
+            <div class="debug-split">
+                <div class="debug-pane debug-pane-console" style="width:40%">
+                    <div class="debug-pane-toolbar">
+                        <span class="pane-title">Console</span>
+                        <button class="pane-clear-btn" title="Clear">Clear</button>
+                        <button class="pane-undock-btn" title="Pop out console" data-pane="console">&#x2197;</button>
+                    </div>
+                    <div class="debug-console-output"></div>
+                    <div class="debug-panel-input">
+                        <select class="panel-scope-select" title="Execution scope">${scopeOpts}</select>
+                        <span class="debug-prompt">LuaRules&gt;</span>
+                        <textarea rows="1" placeholder="Enter command... (Shift+Enter for newline)" spellcheck="false"></textarea>
+                        <span class="debug-input-hint">Enter | Shift+Enter: newline</span>
+                    </div>
+                </div>
+                <div class="debug-split-handle" title="Drag to resize"></div>
+                <div class="debug-pane debug-pane-logs" style="width:60%">
+                    <div class="debug-pane-toolbar">
+                        <span class="pane-title">Logs</span>
+                        <select class="panel-level-filter" title="Min log level">
+                            <option value="0">DEBUG</option>
+                            <option value="1">INFO</option>
+                            <option value="2" selected>NOTICE</option>
+                            <option value="3">WARN</option>
+                            <option value="4">ERROR</option>
+                            <option value="5">FATAL</option>
+                        </select>
+                        <input class="panel-section-filter" type="text" placeholder="section" />
+                        <input class="panel-scope-filter" type="text" placeholder="scope" />
+                        <input class="panel-search-filter" type="text" placeholder="search..." />
+                        <button class="pane-clear-btn log-clear-btn" title="Clear">Clear</button>
+                        <button class="pane-undock-btn" title="Pop out logs" data-pane="logs">&#x2197;</button>
+                    </div>
+                    <div class="debug-log-output"></div>
+                </div>
             </div>
         `;
     }
@@ -346,38 +373,39 @@ export class DebugConsole {
     private wirePanelEvents(tab: ConsoleTab): void {
         const panel = tab.panelEl!;
 
-        // Level filter
+        // --- Log pane filters ---
         const levelFilter = panel.querySelector('.panel-level-filter') as HTMLSelectElement;
         levelFilter?.addEventListener('change', () => {
             tab.minLevel = parseInt(levelFilter.value, 10);
             this.rerenderTab(tab);
         });
-
-        // Section filter
         const sectionInput = panel.querySelector('.panel-section-filter') as HTMLInputElement;
         sectionInput?.addEventListener('input', () => {
             tab.sectionFilter = sectionInput.value.trim().toLowerCase();
             this.rerenderTab(tab);
         });
-
-        // Scope filter
         const scopeInput = panel.querySelector('.panel-scope-filter') as HTMLInputElement;
         scopeInput?.addEventListener('input', () => {
             tab.scopeFilter = scopeInput.value.trim().toLowerCase();
             this.rerenderTab(tab);
         });
-
-        // Search filter
         const searchInput = panel.querySelector('.panel-search-filter') as HTMLInputElement;
         searchInput?.addEventListener('input', () => {
             tab.searchFilter = searchInput.value.trim().toLowerCase();
             this.rerenderTab(tab);
         });
 
-        // Clear
-        panel.querySelector('.panel-clear-btn')?.addEventListener('click', () => {
+        // Console clear button
+        const consoleClearBtn = panel.querySelector('.debug-pane-console .pane-clear-btn');
+        consoleClearBtn?.addEventListener('click', () => {
+            if (tab.consoleOutputEl) { tab.consoleOutputEl.innerHTML = ''; tab.consoleLineCount = 0; }
+        });
+
+        // Log clear button
+        const logClearBtn = panel.querySelector('.log-clear-btn');
+        logClearBtn?.addEventListener('click', () => {
             tab.entries = [];
-            if (tab.outputEl) { tab.outputEl.innerHTML = ''; tab.lineCount = 0; }
+            if (tab.logOutputEl) { tab.logOutputEl.innerHTML = ''; tab.logLineCount = 0; }
         });
 
         // Scope selector
@@ -385,7 +413,6 @@ export class DebugConsole {
             tab.scope = tab.scopeSelectEl!.value;
             tab.label = tab.scope;
             if (tab.promptEl) tab.promptEl.textContent = `${tab.scope}>`;
-            // Update tab button label
             const labelEl = tab.tabEl?.querySelector('.tab-label');
             if (labelEl) labelEl.textContent = tab.scope;
         });
@@ -420,18 +447,53 @@ export class DebugConsole {
                     this.autoSizeTextarea(tab.inputEl!);
                 }
             });
+            tab.inputEl.addEventListener('input', () => this.autoSizeTextarea(tab.inputEl!));
+        }
 
-            // Auto-resize textarea as user types
-            tab.inputEl.addEventListener('input', () => {
-                this.autoSizeTextarea(tab.inputEl!);
+        // Log pane auto-scroll
+        tab.logOutputEl?.addEventListener('scroll', () => {
+            if (!tab.logOutputEl) return;
+            const { scrollTop, scrollHeight, clientHeight } = tab.logOutputEl;
+            tab.logAutoScroll = scrollTop + clientHeight >= scrollHeight - 20;
+        });
+
+        // --- Drag handle for split resize ---
+        const handle = panel.querySelector('.debug-split-handle');
+        if (handle) {
+            const split = panel.querySelector('.debug-split') as HTMLElement;
+            const consolePane = panel.querySelector('.debug-pane-console') as HTMLElement;
+            const logPane = panel.querySelector('.debug-pane-logs') as HTMLElement;
+
+            let dragging = false;
+            handle.addEventListener('mousedown', (e) => {
+                dragging = true;
+                e.preventDefault();
+                const doc = handle.ownerDocument;
+                const onMove = (ev: MouseEvent) => {
+                    if (!dragging || !split) return;
+                    const rect = split.getBoundingClientRect();
+                    const x = ev.clientX - rect.left;
+                    const pct = Math.max(15, Math.min(85, (x / rect.width) * 100));
+                    consolePane.style.width = `${pct}%`;
+                    logPane.style.width = `${100 - pct}%`;
+                };
+                const onUp = () => {
+                    dragging = false;
+                    doc.removeEventListener('mousemove', onMove);
+                    doc.removeEventListener('mouseup', onUp);
+                };
+                doc.addEventListener('mousemove', onMove);
+                doc.addEventListener('mouseup', onUp);
             });
         }
 
-        // Auto-scroll pause
-        tab.outputEl?.addEventListener('scroll', () => {
-            if (!tab.outputEl) return;
-            const { scrollTop, scrollHeight, clientHeight } = tab.outputEl;
-            tab.autoScroll = scrollTop + clientHeight >= scrollHeight - 20;
+        // --- Pane undock buttons ---
+        panel.querySelectorAll('.pane-undock-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const pane = (btn as HTMLElement).dataset.pane;
+                if (pane === 'console') this.undockPane(tab, 'console');
+                else if (pane === 'logs') this.undockPane(tab, 'logs');
+            });
         });
     }
 
@@ -443,22 +505,18 @@ export class DebugConsole {
     // ─── Undock / popout ───
 
     private undockTab(tabId: number): void {
+        // Full tab undock — pop the entire split panel into a window
         const tab = this.getTab(tabId);
         if (!tab) return;
-
-        // If already popped out, focus existing window
         if (tab.popoutWindow && !tab.popoutWindow.closed) {
             tab.popoutWindow.focus();
             return;
         }
-
         const popup = window.open('', `debug-tab-${tabId}`,
-            'width=700,height=500,menubar=no,toolbar=no,location=no,status=no');
+            'width=900,height=500,menubar=no,toolbar=no,location=no,status=no');
         if (!popup) return;
-
         tab.popoutWindow = popup;
 
-        // Build standalone popout HTML
         popup.document.write(`<!DOCTYPE html>
 <html><head><title>Debug: ${tab.scope}</title>
 <style>${css}
@@ -466,70 +524,120 @@ html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
 body { background: #0f0f14; }
 .debug-tab-panel { display: flex !important; height: 100vh; }
 </style></head>
-<body class="debug-popout-body"></body></html>`);
+<body></body></html>`);
         popup.document.close();
 
-        // Move the panel DOM into the popup
         const panelClone = tab.panelEl!.cloneNode(true) as HTMLElement;
         panelClone.classList.add('active');
         popup.document.body.appendChild(panelClone);
 
-        // Re-cache DOM refs to the popout elements
-        const oldOutput = tab.outputEl;
-        tab.outputEl = panelClone.querySelector('.debug-panel-output');
-        tab.inputEl = panelClone.querySelector('textarea');
-        tab.promptEl = panelClone.querySelector('.debug-prompt');
-        tab.scopeSelectEl = panelClone.querySelector('.panel-scope-select');
-
-        // Copy output content
-        if (oldOutput && tab.outputEl) {
-            tab.outputEl.innerHTML = oldOutput.innerHTML;
-        }
-
-        // Set scope selector to current
-        if (tab.scopeSelectEl) tab.scopeSelectEl.value = tab.scope;
-        if (tab.promptEl) tab.promptEl.textContent = `${tab.scope}>`;
-
-        // Re-wire events in the new DOM
-        tab.panelEl = panelClone;
+        this.recacheTabRefs(tab, panelClone);
         this.wirePanelEvents(tab);
-
-        // Hide from main console
-        const mainTabEl = this.tabListEl?.querySelector(`.debug-tab:nth-child(${this.tabs.indexOf(tab) + 1})`);
-        // Mark tab as undocked visually
         tab.tabEl?.classList.add('undocked');
 
-        // When popup closes, re-dock
-        popup.addEventListener('beforeunload', () => {
-            this.redockTab(tab);
-        });
-
+        popup.addEventListener('beforeunload', () => this.redockTab(tab));
         tab.inputEl?.focus();
+    }
+
+    private undockPane(tab: ConsoleTab, pane: 'console' | 'logs'): void {
+        const existing = pane === 'console' ? tab.consolePopout : tab.logPopout;
+        if (existing && !existing.closed) { existing.focus(); return; }
+
+        const title = pane === 'console' ? `Console: ${tab.scope}` : `Logs: ${tab.scope}`;
+        const popup = window.open('', `debug-${pane}-${tab.id}`,
+            'width=600,height=450,menubar=no,toolbar=no,location=no,status=no');
+        if (!popup) return;
+
+        if (pane === 'console') tab.consolePopout = popup;
+        else tab.logPopout = popup;
+
+        popup.document.write(`<!DOCTYPE html>
+<html><head><title>${title}</title>
+<style>${css}
+html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+body { background: #0f0f14; display: flex; flex-direction: column; }
+.debug-pane { width: 100% !important; height: 100vh; display: flex; flex-direction: column; }
+</style></head>
+<body></body></html>`);
+        popup.document.close();
+
+        // Clone the specific pane
+        const selector = pane === 'console' ? '.debug-pane-console' : '.debug-pane-logs';
+        const paneEl = tab.panelEl?.querySelector(selector);
+        if (!paneEl) return;
+        const clone = paneEl.cloneNode(true) as HTMLElement;
+        popup.document.body.appendChild(clone);
+
+        // Copy content
+        if (pane === 'console' && tab.consoleOutputEl) {
+            const newOut = clone.querySelector('.debug-console-output');
+            if (newOut) newOut.innerHTML = tab.consoleOutputEl.innerHTML;
+            // Rewire refs to the popout
+            tab.consoleOutputEl = newOut as HTMLElement;
+            tab.inputEl = clone.querySelector('textarea');
+            tab.promptEl = clone.querySelector('.debug-prompt');
+            tab.scopeSelectEl = clone.querySelector('.panel-scope-select');
+        } else if (pane === 'logs' && tab.logOutputEl) {
+            const newOut = clone.querySelector('.debug-log-output');
+            if (newOut) newOut.innerHTML = tab.logOutputEl.innerHTML;
+            tab.logOutputEl = newOut as HTMLElement;
+        }
+
+        // Wire events on the popout pane
+        // (Simplified: re-wire the whole panel since filters/input live in the clone)
+        const origPanel = tab.panelEl;
+        tab.panelEl = clone;
+        this.wirePanelEvents(tab);
+        tab.panelEl = origPanel;
+
+        // Hide the pane in the main panel
+        const mainPane = tab.panelEl?.querySelector(selector) as HTMLElement;
+        if (mainPane) mainPane.style.display = 'none';
+        const handle = tab.panelEl?.querySelector('.debug-split-handle') as HTMLElement;
+        if (handle) handle.style.display = 'none';
+        // Expand the remaining pane to full width
+        const otherSelector = pane === 'console' ? '.debug-pane-logs' : '.debug-pane-console';
+        const otherPane = tab.panelEl?.querySelector(otherSelector) as HTMLElement;
+        if (otherPane) otherPane.style.width = '100%';
+
+        popup.addEventListener('beforeunload', () => {
+            if (pane === 'console') tab.consolePopout = null;
+            else tab.logPopout = null;
+            // Re-show the pane in the main panel
+            if (mainPane) mainPane.style.display = '';
+            if (handle) handle.style.display = '';
+            if (otherPane) otherPane.style.width = '';
+            // Re-cache refs back to the main panel
+            this.recacheTabRefs(tab, tab.panelEl!);
+            this.wirePanelEvents(tab);
+            this.rerenderTab(tab);
+        });
+    }
+
+    private recacheTabRefs(tab: ConsoleTab, panel: HTMLElement): void {
+        tab.panelEl = panel;
+        tab.consoleOutputEl = panel.querySelector('.debug-console-output');
+        tab.logOutputEl = panel.querySelector('.debug-log-output');
+        tab.inputEl = panel.querySelector('textarea');
+        tab.promptEl = panel.querySelector('.debug-prompt');
+        tab.scopeSelectEl = panel.querySelector('.panel-scope-select');
+        if (tab.scopeSelectEl) tab.scopeSelectEl.value = tab.scope;
+        if (tab.promptEl) tab.promptEl.textContent = `${tab.scope}>`;
     }
 
     private redockTab(tab: ConsoleTab): void {
         tab.popoutWindow = null;
         tab.tabEl?.classList.remove('undocked');
 
-        // Rebuild the panel in the main console
         const oldPanel = this.panelsEl?.querySelector(`.debug-tab-panel:nth-child(${this.tabs.indexOf(tab) + 1})`);
         if (oldPanel) oldPanel.remove();
 
         const panel = document.createElement('div');
         panel.className = 'debug-tab-panel' + (tab.id === this.activeTabId ? ' active' : '');
         panel.innerHTML = this.buildPanelHTML(tab.id);
-        tab.panelEl = panel;
         this.panelsEl?.appendChild(panel);
 
-        // Re-cache refs
-        tab.outputEl = panel.querySelector('.debug-panel-output');
-        tab.inputEl = panel.querySelector('textarea');
-        tab.promptEl = panel.querySelector('.debug-prompt');
-        tab.scopeSelectEl = panel.querySelector('.panel-scope-select');
-
-        if (tab.scopeSelectEl) tab.scopeSelectEl.value = tab.scope;
-        if (tab.promptEl) tab.promptEl.textContent = `${tab.scope}>`;
-
+        this.recacheTabRefs(tab, panel);
         this.wirePanelEvents(tab);
         this.rerenderTab(tab);
     }
@@ -550,7 +658,8 @@ body { background: #0f0f14; }
         }
         if (cmd === '/clear') {
             tab.entries = [];
-            if (tab.outputEl) { tab.outputEl.innerHTML = ''; tab.lineCount = 0; }
+            if (tab.consoleOutputEl) { tab.consoleOutputEl.innerHTML = ''; tab.consoleLineCount = 0; }
+            if (tab.logOutputEl) { tab.logOutputEl.innerHTML = ''; tab.logLineCount = 0; }
             return;
         }
         if (cmd === '/inspector') { this.toggleInspector(); return; }
@@ -636,21 +745,23 @@ body { background: #0f0f14; }
     // ─── DOM helpers ───
 
     private appendText(tab: ConsoleTab, text: string, cls = ''): void {
-        if (!tab.outputEl) return;
+        const el = tab.consoleOutputEl;
+        if (!el) return;
         const div = document.createElement('div');
         div.className = `debug-line ${cls}`;
         div.textContent = text;
-        tab.outputEl.appendChild(div);
-        tab.lineCount++;
-        while (tab.lineCount > MAX_LINES && tab.outputEl.firstChild) {
-            tab.outputEl.removeChild(tab.outputEl.firstChild);
-            tab.lineCount--;
+        el.appendChild(div);
+        tab.consoleLineCount++;
+        while (tab.consoleLineCount > MAX_LINES && el.firstChild) {
+            el.removeChild(el.firstChild);
+            tab.consoleLineCount--;
         }
-        if (tab.autoScroll) tab.outputEl.scrollTop = tab.outputEl.scrollHeight;
+        el.scrollTop = el.scrollHeight;
     }
 
     private appendLogLine(tab: ConsoleTab, entry: LogEntry): void {
-        if (!tab.outputEl) return;
+        const el = tab.logOutputEl;
+        if (!el) return;
         const div = document.createElement('div');
         const levelClass = LEVEL_CLASSES[entry.level] ?? 'info';
         div.className = `debug-line level-${levelClass}`;
@@ -665,13 +776,13 @@ body { background: #0f0f14; }
             `<span class="scope">${this.esc(scopeStr)}]</span> ` +
             `<span class="msg">${this.esc(entry.message)}</span>`;
 
-        tab.outputEl.appendChild(div);
-        tab.lineCount++;
-        while (tab.lineCount > MAX_LINES && tab.outputEl.firstChild) {
-            tab.outputEl.removeChild(tab.outputEl.firstChild);
-            tab.lineCount--;
+        el.appendChild(div);
+        tab.logLineCount++;
+        while (tab.logLineCount > MAX_LINES && el.firstChild) {
+            el.removeChild(el.firstChild);
+            tab.logLineCount--;
         }
-        if (tab.autoScroll) tab.outputEl.scrollTop = tab.outputEl.scrollHeight;
+        if (tab.logAutoScroll) el.scrollTop = el.scrollHeight;
     }
 
     private tabPassesFilter(tab: ConsoleTab, entry: LogEntry): boolean {
@@ -683,9 +794,9 @@ body { background: #0f0f14; }
     }
 
     private rerenderTab(tab: ConsoleTab): void {
-        if (!tab.outputEl) return;
-        tab.outputEl.innerHTML = '';
-        tab.lineCount = 0;
+        if (!tab.logOutputEl) return;
+        tab.logOutputEl.innerHTML = '';
+        tab.logLineCount = 0;
         tab.entries = this.globalEntries.filter(e => this.tabPassesFilter(tab, e));
         for (const entry of tab.entries) {
             this.appendLogLine(tab, entry);

@@ -99,7 +99,23 @@
 .debug-tab-panel { flex: 1; display: none; flex-direction: column; overflow: hidden; }
 .debug-tab-panel.active { display: flex; }
 
-.debug-panel-header {
+/* === Split layout (console | handle | logs) === */
+
+.debug-split {
+    flex: 1;
+    display: flex;
+    flex-direction: row;
+    overflow: hidden;
+}
+
+.debug-pane {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-width: 100px;
+}
+
+.debug-pane-toolbar {
     display: flex;
     align-items: center;
     gap: 4px;
@@ -108,8 +124,14 @@
     border-bottom: 1px solid #2a2a3a;
     flex-shrink: 0;
 }
-.debug-panel-header select,
-.debug-panel-header input {
+.debug-pane-toolbar .pane-title {
+    font-weight: bold;
+    color: #8af;
+    font-size: 11px;
+    margin-right: 4px;
+}
+.debug-pane-toolbar select,
+.debug-pane-toolbar input {
     background: #1a1a24;
     color: #ccc;
     border: 1px solid #444;
@@ -118,13 +140,13 @@
     font-size: 11px;
     font-family: inherit;
 }
-.debug-panel-header input { width: 80px; }
-.debug-panel-header input:focus,
-.debug-panel-header select:focus {
+.debug-pane-toolbar input { width: 65px; }
+.debug-pane-toolbar input:focus,
+.debug-pane-toolbar select:focus {
     outline: none;
     border-color: #68f;
 }
-.debug-panel-header button {
+.debug-pane-toolbar button {
     background: #2a2a3a;
     color: #999;
     border: 1px solid #444;
@@ -133,11 +155,31 @@
     cursor: pointer;
     font-size: 10px;
 }
-.debug-panel-header button:hover { background: #3a3a4a; color: #ccc; }
+.debug-pane-toolbar button:hover { background: #3a3a4a; color: #ccc; }
 
-/* === Output area === */
+.pane-undock-btn {
+    margin-left: auto;
+    font-size: 12px !important;
+}
 
-.debug-panel-output {
+/* === Drag handle === */
+
+.debug-split-handle {
+    width: 5px;
+    cursor: col-resize;
+    background: #2a2a3a;
+    flex-shrink: 0;
+    transition: background 0.15s;
+}
+.debug-split-handle:hover,
+.debug-split-handle:active {
+    background: #68f;
+}
+
+/* === Output areas === */
+
+.debug-console-output,
+.debug-log-output {
     flex: 1;
     overflow-y: auto;
     padding: 4px 8px;
