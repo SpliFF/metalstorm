@@ -32,14 +32,23 @@ inline std::string JsonField(const std::string& body, const std::string& key) {
     if (pos == std::string::npos) return "";
     pos = body.find(':', pos + needle.size());
     if (pos == std::string::npos) return "";
-    pos = body.find('"', pos + 1);
-    if (pos == std::string::npos) return "";
-    auto end = pos + 1;
-    while (end < body.size() && body[end] != '"') {
-        if (body[end] == '\\') end++;
-        end++;
+    // Skip whitespace after colon
+    pos++;
+    while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t')) pos++;
+    if (pos >= body.size()) return "";
+    // Quoted string value
+    if (body[pos] == '"') {
+        auto end = pos + 1;
+        while (end < body.size() && body[end] != '"') {
+            if (body[end] == '\\') end++;
+            end++;
+        }
+        return body.substr(pos + 1, end - pos - 1);
     }
-    return body.substr(pos + 1, end - pos - 1);
+    // Unquoted value (number, boolean, null)
+    auto end = body.find_first_of(",}\n\r ", pos);
+    if (end == std::string::npos) end = body.size();
+    return body.substr(pos, end - pos);
 }
 
 /// Escape a string for JSON output.
