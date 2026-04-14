@@ -12,7 +12,7 @@
 #include "Server/Database.h"
 #include "Server/RoomManager.h"
 #include "Server/MapProcessor.h"
-#include "Server/GameProcessor.h"
+
 #include "Server/AI/AIDiscovery.h"
 #include "Server/GameDiscovery.h"
 #include "Server/HttpAuth.h"
@@ -282,7 +282,7 @@ int main(int argc, char* argv[])
     RoomManager rooms;
 
     // --- Map processing ---
-    // Access the raw sqlite3* handle for MapProcessor
+    // Access the raw sqlite3* handle for MapMetadataDb
     // (Database wrapper doesn't expose it, so we open a second connection)
     sqlite3* mapDb = nullptr;
     sqlite3_open(dbPath.c_str(), &mapDb);
@@ -303,10 +303,9 @@ int main(int argc, char* argv[])
         sqlite3_exec(mapDb, "DELETE FROM game_servers", nullptr, nullptr, nullptr);
     }
 
-    {
-        MapProcessor mapProc;
-        mapProc.ScanAndProcess(mapsDir, "data", mapDb);
-    }
+    // Map processing is handled offline by tools/mapconverter.
+    // The lobby reads pre-populated data/ + SQLite metadata.
+    MapMetadataDb::EnsureTable(mapDb);
 
     // --- Game discovery ---
     // Enumerate every subdirectory of `gamesDir` that ships a
@@ -319,19 +318,13 @@ int main(int argc, char* argv[])
     const std::vector<GameDiscovery::GameInfo> availableGames =
         GameDiscovery::Discover(gamesDir);
 
-    // --- Per-game processing & AI discovery ---
-    // Each discovered game gets:
-    //   1. a GameProcessor run over its objects3d/ directory so any
-    //      .s3o models get converted to .glb + .config.json before
-    //      spring-server loads them,
-    //   2. an AIDiscovery scan covering content/engine/ai and the
-    //      game's own ai/ folder, cached by game id so AIListRequest
-    //      replies are cheap per-room lookups rather than rescans.
+    // --- Per-game AI discovery ---
+    // Game model conversion is handled offline by tools/gameconverter.
+    // The lobby just discovers games and their AI plugins.
     std::unordered_map<std::string, std::string> gamePathsById;
     std::unordered_map<std::string, std::vector<AIDiscovery::AIInfo>> aisByGame;
     for (const auto& g : availableGames) {
         gamePathsById[g.id] = g.folderPath;
-        GameProcessor::Process(g.folderPath, g.id, "data");
         aisByGame[g.id] = AIDiscovery::Discover(enginePath, g.folderPath);
     }
 
@@ -343,8 +336,8 @@ int main(int argc, char* argv[])
 
     // Maps endpoint — full metadata from SQLite
     net.AddHttpGet("/api/maps", [mapDb](const std::string&) -> HttpResponse {
-        MapProcessor proc;
-        auto maps = proc.GetAllMaps(mapDb);
+        MapMetadataDb db;
+        auto maps = db.GetAllMaps(mapDb);
         std::string json = "[";
         bool first = true;
         for (const auto& m : maps) {
@@ -426,8 +419,8 @@ int main(int argc, char* argv[])
             std::string mapId = rest.substr(0, slashPos);
             std::string filename = rest.substr(slashPos + 1);
             if (filename == "metadata.json") {
-                MapProcessor proc;
-                auto m = proc.GetMap(mapDb, mapId);
+                MapMetadataDb db;
+                auto m = db.GetMap(mapDb, mapId);
                 if (m.id.empty())
                     return {.contentType = "text/plain", .body = {}, .status = 404};
 
@@ -645,16 +638,14 @@ int main(int argc, char* argv[])
         };
     });
 
-    // Map thumbnail endpoint. Serves the preprocessed small WebP
+    // Map thumbnail endpoint. Serves the preprocessed small PNG
     // (aspect-correct, max 256px on the longer axis) that
-    // MapProcessor::ExtractMinimapWebP wrote to
-    // data/maps/<id>/thumbnail.webp at preprocess time. The full-size
-    // minimap.webp sits next to it for consumers that want the larger
-    // version via the generic /api/maps/data/* route.
+    // mapconverter wrote to data/maps/<id>/thumbnail.png at preprocess
+    // time. The full-size minimap.png sits next to it for consumers
+    // that want the larger version via the generic /api/maps/data/*.
     //
     // The shipped-*minimap.png/jpg fallback is preserved for maps
-    // where preprocess failed (e.g. missing magick) — most modern
-    // maps never hit it.
+    // where preprocess failed — most modern maps never hit it.
     net.AddHttpGet("/api/maps/thumb/*", [&mapsDir](const std::string& url) -> HttpResponse {
         const std::string mapId = url.substr(std::string("/api/maps/thumb/").size());
         if (mapId.find("..") != std::string::npos)
@@ -662,7 +653,22 @@ int main(int argc, char* argv[])
 
         namespace fs = std::filesystem;
 
-        // Primary: preprocessed small WebP (256px on the longer axis)
+        // Primary: preprocessed small PNG (256px on the longer axis)
+        const fs::path processedPng =
+            fs::path("data") / "maps" / mapId / "thumbnail.png";
+        if (fs::is_regular_file(processedPng)) {
+            std::ifstream f(processedPng, std::ios::binary);
+            std::vector<uint8_t> data(
+                (std::istreambuf_iterator<char>(f)),
+                std::istreambuf_iterator<char>());
+            return {
+                .contentType = "image/png",
+                .body = std::move(data),
+                .status = 200,
+                .cacheControl = CacheControl::StaticAssetHeader(),
+            };
+        }
+        // Fallback: legacy WebP from previous mapconverter runs
         const fs::path processedWebp =
             fs::path("data") / "maps" / mapId / "thumbnail.webp";
         if (fs::is_regular_file(processedWebp)) {

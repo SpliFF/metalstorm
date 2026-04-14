@@ -30,6 +30,10 @@
 #define MODELIMPORTER_BINARY_PATH "modelimporter"
 #endif
 
+#ifndef TEXTURECONVERTER_BINARY_PATH
+#define TEXTURECONVERTER_BINARY_PATH "textureconverter"
+#endif
+
 namespace fs = std::filesystem;
 
 namespace {
@@ -489,7 +493,8 @@ void ConvertAssetsForDef(MapMetadata& meta, MapFeatureDef& def) {
             // Skip if up-to-date.
             if (!fs::exists(dstTex) ||
                 fs::last_write_time(srcTex) > fs::last_write_time(dstTex)) {
-                std::string cmd = "magick \"" + srcTex + "\" \"" +
+                std::string cmd = std::string("\"") + TEXTURECONVERTER_BINARY_PATH + "\""
+                                  " \"" + srcTex + "\" \"" +
                                   dstTex.string() + "\" 2>&1";
                 if (RunCommand(cmd) != 0) {
                     convertedTextureName.clear();

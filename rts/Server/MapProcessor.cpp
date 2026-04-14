@@ -17,7 +17,12 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <sstream>
+
+// Absolute path to the textureconverter binary, injected at build time
+// via target_compile_definitions. Falls back to a bare name.
+#ifndef TEXTURECONVERTER_BINARY_PATH
+#define TEXTURECONVERTER_BINARY_PATH "textureconverter"
+#endif
 
 #define LOG_SECTION "map-proc"
 
@@ -433,192 +438,46 @@ bool MapProcessor::ExtractBinaryData(const MapMetadata& meta) {
 }
 
 // ============================================================
-// Minimap WebP extraction
+// Minimap extraction via textureconverter
 // ============================================================
-//
-// Spring stores a 1024×1024 DXT1 minimap in each SMF file (actually a
-// 9-level mipchain, but we only need mip0). At preprocess time we
-// decode it to raw RGB and pipe that into `magick` to produce a tiny
-// WebP that the lobby can serve directly for the thumbnail preview.
-//
-// The previous implementation lived in lobby_main.cpp and re-decoded
-// the DXT1 + returned a 3MB BMP on every HTTP request. It also had a
-// hardcoded offset bug (reading heightmapPtr instead of minimapPtr),
-// which surfaced as a garbled preview for any map that didn't ship a
-// pre-rendered *minimap.png sibling.
 
 bool MapProcessor::ExtractMinimapWebP(const MapMetadata& meta) {
-    std::ifstream smf(meta.smfPath, std::ios::binary);
-    if (!smf.is_open()) return false;
-
-    // SMF header pointer table:
-    //   52: heightmapPtr  56: typeMapPtr  60: tilesPtr
-    //   64: minimapPtr    68: metalmapPtr 72: featurePtr
-    smf.seekg(64);
-    int minimapPtr = 0;
-    smf.read(reinterpret_cast<char*>(&minimapPtr), 4);
-    if (minimapPtr <= 0) return false;
-
-    constexpr int W = 1024, H = 1024;
-    smf.seekg(minimapPtr);
-    std::vector<uint8_t> dxt(W * H / 2); // 524288 bytes = mip0 at 1024²
-    smf.read(reinterpret_cast<char*>(dxt.data()),
-             static_cast<std::streamsize>(dxt.size()));
-    if (!smf.good()) return false;
-
-    // DXT1 → RGB. Each 8-byte block encodes a 4×4 pixel tile with two
-    // 16-bit RGB565 endpoints and a 32-bit 2-bit-per-pixel index.
-    std::vector<uint8_t> rgb(W * H * 3);
-    for (int by = 0; by < H / 4; ++by) {
-        for (int bx = 0; bx < W / 4; ++bx) {
-            const uint8_t* src = &dxt[(by * (W / 4) + bx) * 8];
-            const uint16_t c0 = static_cast<uint16_t>(src[0] | (src[1] << 8));
-            const uint16_t c1 = static_cast<uint16_t>(src[2] | (src[3] << 8));
-            const uint32_t bits =
-                static_cast<uint32_t>(src[4])       |
-                (static_cast<uint32_t>(src[5]) << 8)  |
-                (static_cast<uint32_t>(src[6]) << 16) |
-                (static_cast<uint32_t>(src[7]) << 24);
-
-            uint8_t colors[4][3];
-            colors[0][0] = static_cast<uint8_t>(((c0 >> 11) & 0x1f) * 255 / 31);
-            colors[0][1] = static_cast<uint8_t>(((c0 >>  5) & 0x3f) * 255 / 63);
-            colors[0][2] = static_cast<uint8_t>(( c0        & 0x1f) * 255 / 31);
-            colors[1][0] = static_cast<uint8_t>(((c1 >> 11) & 0x1f) * 255 / 31);
-            colors[1][1] = static_cast<uint8_t>(((c1 >>  5) & 0x3f) * 255 / 63);
-            colors[1][2] = static_cast<uint8_t>(( c1        & 0x1f) * 255 / 31);
-            if (c0 > c1) {
-                for (int i = 0; i < 3; ++i) {
-                    colors[2][i] = static_cast<uint8_t>((2 * colors[0][i] + colors[1][i]) / 3);
-                    colors[3][i] = static_cast<uint8_t>((colors[0][i] + 2 * colors[1][i]) / 3);
-                }
-            } else {
-                for (int i = 0; i < 3; ++i) {
-                    colors[2][i] = static_cast<uint8_t>((colors[0][i] + colors[1][i]) / 2);
-                }
-                colors[3][0] = colors[3][1] = colors[3][2] = 0;
-            }
-
-            for (int py = 0; py < 4; ++py) {
-                for (int px = 0; px < 4; ++px) {
-                    const int idx = (bits >> (2 * (py * 4 + px))) & 3;
-                    const int x = bx * 4 + px;
-                    const int y = by * 4 + py;
-                    const int o = (y * W + x) * 3;
-                    rgb[o + 0] = colors[idx][0];
-                    rgb[o + 1] = colors[idx][1];
-                    rgb[o + 2] = colors[idx][2];
-                }
-            }
-        }
-    }
-
-    // Spring stores the minimap stretched to a fixed 1024² regardless
-    // of the map's actual aspect ratio, so a 640×512 map's minimap is
-    // squashed vertically. Restore the aspect in the outputs we write
-    // by shrinking the shorter axis while keeping the longer at its
-    // target resolution (1024 for the full minimap, 256 for the
-    // thumbnail).
-    int fullW, fullH, thumbW, thumbH;
-    if (meta.mapx >= meta.mapy) {
-        fullW  = 1024;  fullH  = (1024 * meta.mapy) / meta.mapx;
-        thumbW = 256;   thumbH = (256  * meta.mapy) / meta.mapx;
-    } else {
-        fullH  = 1024;  fullW  = (1024 * meta.mapx) / meta.mapy;
-        thumbH = 256;   thumbW = (256  * meta.mapx) / meta.mapy;
-    }
-    if (fullH < 1)  fullH = 1;
-    if (thumbW < 1) thumbW = 1;
-    if (thumbH < 1) thumbH = 1;
-
-    // Pipe raw RGB into magick in a single invocation that writes two
-    // files: the full-size aspect-correct minimap.webp, then a
-    // downscaled thumbnail.webp for the lobby browser preview card.
-    // `-resize WxH!` forces exact dimensions (non-uniform scale),
-    // which is what we want since the source is the stretched SMF
-    // minimap being corrected back to the map's real aspect.
-    const std::string fullPath  = meta.processedDir + "/minimap.webp";
-    const std::string thumbPath = meta.processedDir + "/thumbnail.webp";
+    // textureconverter --smf-minimap extracts raw DXT1 data for the
+    // minimap (client loads via compressed texture) and a small PNG
+    // thumbnail for the lobby preview card.
+    const std::string fullPath = meta.processedDir + "/minimap.dxt1";
     const std::string cmd =
-        "magick -size " + std::to_string(W) + "x" + std::to_string(H) +
-        " -depth 8 rgb:- "
-        "-resize " + std::to_string(fullW)  + "x" + std::to_string(fullH)  + "\\! "
-        "-write \"" + fullPath + "\" "
-        "-resize " + std::to_string(thumbW) + "x" + std::to_string(thumbH) + "\\! "
-        "\"" + thumbPath + "\" 2>&1";
-    FILE* p = popen(cmd.c_str(), "w");
+        std::string("\"") + TEXTURECONVERTER_BINARY_PATH + "\""
+        " --smf-minimap"
+        " \"" + meta.smfPath + "\""
+        " \"" + fullPath + "\" 2>&1";
+    FILE* p = popen(cmd.c_str(), "r");
     if (!p) {
-        SLOG(SPRING_LOG_ERROR, "minimap: popen(magick) failed");
+        SLOG(SPRING_LOG_ERROR, "minimap: popen(textureconverter) failed");
         return false;
     }
-    const size_t written = std::fwrite(rgb.data(), 1, rgb.size(), p);
+    char buf[256];
+    std::string out;
+    while (fgets(buf, sizeof(buf), p)) out += buf;
     const int rc = pclose(p);
-    if (rc != 0 || written != rgb.size()) {
-        SLOG(SPRING_LOG_ERROR, "minimap: magick failed (rc=%d, wrote %zu/%zu)",
-            rc, written, rgb.size());
+    if (rc != 0) {
+        SLOG(SPRING_LOG_ERROR, "minimap: textureconverter failed (rc=%d): %s",
+            rc, out.c_str());
         return false;
     }
-
-    SLOG(SPRING_LOG_INFO, "wrote minimap.webp (%dx%d) + thumbnail.webp (%dx%d)",
-        fullW, fullH, thumbW, thumbH);
+    SLOG(SPRING_LOG_INFO, "extracted minimap + thumbnail via textureconverter");
     return true;
 }
 
 // ============================================================
 // Decal texture extraction (splat system)
 //
-// Converts source textures (.tga/.dds/.bmp/.png) referenced by mapinfo.lua
-// into PNG files in the processed directory with stable filenames:
-//   detail.png, specular.png, splat_distr.png,
-//   splat_detail.png, splat_normal_{0..3}.png, detail_normal.png
-// The metadata fields are rewritten to these stable filenames so the game
-// server and client don't need to know the original names/formats.
+// Copies or converts source textures referenced by mapinfo.lua into
+// the processed directory with stable filenames. DDS files are copied
+// as-is (GPU-compressed, served directly to the client for WebGL
+// compressed texture loading). TGA/BMP files are converted to PNG via
+// textureconverter.
 // ============================================================
-
-/// Reason a decal texture couldn't be extracted. Used for quieter logging
-/// of expected failures (missing optional assets, unsupported DDS variants).
-enum class DecalFailReason { None, MissingFile, UnsupportedFormat, ConvertError };
-
-/// Detect known-unsupported DDS variants so we can skip them quietly.
-/// RXGB is a GIMP-DDS normal-map format (DXT5 with swizzled channels).
-/// ImageMagick's DDS reader doesn't handle it.
-static bool isUnsupportedDds(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f.is_open()) return false;
-    char header[0x60];
-    f.read(header, sizeof(header));
-    if (f.gcount() < 0x58) return false;
-    if (memcmp(header, "DDS ", 4) != 0) return false;
-    // FourCC is at offset 0x54
-    char fourcc[5] = {0};
-    memcpy(fourcc, header + 0x54, 4);
-    if (strcmp(fourcc, "RXGB") == 0) return true;   // swizzled DXT5 normal
-    if (strcmp(fourcc, "ATI2") == 0) return true;   // BC5 normal
-    if (strcmp(fourcc, "BC5U") == 0) return true;
-    if (strcmp(fourcc, "BC4U") == 0) return true;
-    return false;
-}
-
-static DecalFailReason shellEscapeAndConvert(const std::string& srcPath, const std::string& dstPath) {
-    if (srcPath.empty()) return DecalFailReason::MissingFile;
-    if (!fs::exists(srcPath)) return DecalFailReason::MissingFile;
-    if (isUnsupportedDds(srcPath)) return DecalFailReason::UnsupportedFormat;
-
-    // Use magick to convert to PNG. Quote both paths.
-    std::string cmd = "magick \"" + srcPath + "\" \"" + dstPath + "\" 2>&1";
-    FILE* p = popen(cmd.c_str(), "r");
-    if (!p) return DecalFailReason::ConvertError;
-    char buf[256];
-    std::string out;
-    while (fgets(buf, sizeof(buf), p)) out += buf;
-    int rc = pclose(p);
-    if (rc != 0) {
-        SLOG(SPRING_LOG_ERROR, "magick failed (%d): %s => %s  %s",
-            rc, srcPath.c_str(), dstPath.c_str(), out.c_str());
-        return DecalFailReason::ConvertError;
-    }
-    return DecalFailReason::None;
-}
 
 /// Resolve a texture reference from mapinfo.lua to an on-disk path.
 /// Spring looks in the map's "maps/" subdirectory first, then relative to mapinfo.
@@ -653,39 +512,52 @@ static std::string resolveTexturePath(const std::string& mapDir, const std::stri
 }
 
 bool MapProcessor::ExtractDecalTextures(MapMetadata& meta) {
-    auto convertField = [&](std::string& field, const char* dstName) {
+    // For each decal texture: resolve the source, then run through
+    // textureconverter with a stable output name. DDS files are
+    // copied as-is (GPU loads them directly), TGA/BMP are converted
+    // to PNG.
+    auto convertField = [&](std::string& field, const char* baseName) {
         if (field.empty()) return;
         std::string src = resolveTexturePath(meta.sourcePath, field);
         if (src.empty()) {
-            // Optional asset — quiet log, just mark it as unavailable
-            SLOG(SPRING_LOG_DEBUG, "decal '%s' missing: %s", dstName, field.c_str());
+            SLOG(SPRING_LOG_DEBUG, "decal '%s' missing: %s", baseName, field.c_str());
             field.clear();
             return;
         }
-        std::string dst = meta.processedDir + "/" + dstName;
-        DecalFailReason r = shellEscapeAndConvert(src, dst);
-        if (r == DecalFailReason::UnsupportedFormat) {
-            SLOG(SPRING_LOG_DEBUG, "decal '%s' unsupported format (skipped): %s",
-                dstName, field.c_str());
-            field.clear();
-            return;
-        }
-        if (r != DecalFailReason::None) {
+
+        // Keep the source extension for the stable output name — DDS
+        // stays .dds, TGA becomes .png, etc.
+        std::string srcExt = fs::path(src).extension().string();
+        std::string dstExt = (srcExt == ".dds") ? ".dds" : ".png";
+        std::string dstName = std::string(baseName) + dstExt;
+        std::string dstPath = meta.processedDir + "/" + dstName;
+
+        std::string cmd = std::string("\"") + TEXTURECONVERTER_BINARY_PATH + "\""
+            " \"" + src + "\" \"" + dstPath + "\" 2>&1";
+        FILE* p = popen(cmd.c_str(), "r");
+        if (!p) { field.clear(); return; }
+        char buf[256];
+        std::string out;
+        while (fgets(buf, sizeof(buf), p)) out += buf;
+        int rc = pclose(p);
+        if (rc != 0) {
+            SLOG(SPRING_LOG_WARNING, "textureconverter failed (%d): %s  %s",
+                rc, src.c_str(), out.c_str());
             field.clear();
             return;
         }
         field = dstName;
     };
 
-    convertField(meta.decals.detailTex,       "detail.png");
-    convertField(meta.decals.specularTex,     "specular.png");
-    convertField(meta.decals.splatDetailTex,  "splat_detail.png");
-    convertField(meta.decals.splatDistrTex,   "splat_distr.png");
-    convertField(meta.decals.detailNormalTex, "detail_normal.png");
-    convertField(meta.decals.splatDetailNormalTex[0], "splat_normal_0.png");
-    convertField(meta.decals.splatDetailNormalTex[1], "splat_normal_1.png");
-    convertField(meta.decals.splatDetailNormalTex[2], "splat_normal_2.png");
-    convertField(meta.decals.splatDetailNormalTex[3], "splat_normal_3.png");
+    convertField(meta.decals.detailTex,       "detail");
+    convertField(meta.decals.specularTex,     "specular");
+    convertField(meta.decals.splatDetailTex,  "splat_detail");
+    convertField(meta.decals.splatDistrTex,   "splat_distr");
+    convertField(meta.decals.detailNormalTex, "detail_normal");
+    convertField(meta.decals.splatDetailNormalTex[0], "splat_normal_0");
+    convertField(meta.decals.splatDetailNormalTex[1], "splat_normal_1");
+    convertField(meta.decals.splatDetailNormalTex[2], "splat_normal_2");
+    convertField(meta.decals.splatDetailNormalTex[3], "splat_normal_3");
 
     int found = 0;
     if (!meta.decals.detailTex.empty())         found++;
@@ -740,393 +612,6 @@ bool MapProcessor::ExtractFeatures(MapMetadata& meta) {
     SLOG(SPRING_LOG_INFO, "extracted %d features (%d types)",
         numFeatures, numFeatureTypes);
     return true;
-}
-
-// ============================================================
-// SQLite
-// ============================================================
-
-void MapProcessor::EnsureTable(sqlite3* db) {
-    // Check whether the existing schema matches the current format version.
-    // If it doesn't (missing columns from a schema bump), drop the table so
-    // it gets recreated and all maps reprocessed. We detect "needs rebuild"
-    // by querying for a column that was added in the latest schema.
-    {
-        sqlite3_stmt* stmt = nullptr;
-        int rc = sqlite3_prepare_v2(db,
-            "SELECT feature_defs FROM maps LIMIT 1", -1, &stmt, nullptr);
-        sqlite3_finalize(stmt);
-        if (rc != SQLITE_OK) {
-            // Table missing or out-of-date schema — drop and recreate.
-            // sqlite3_prepare_v2 also fails if the table simply doesn't exist
-            // (that's fine — CREATE TABLE IF NOT EXISTS below handles both).
-            sqlite3_exec(db, "DROP TABLE IF EXISTS maps", nullptr, nullptr, nullptr);
-        }
-    }
-    sqlite3_exec(db, R"(
-        CREATE TABLE IF NOT EXISTS maps (
-            id TEXT PRIMARY KEY,
-            name TEXT, short_name TEXT, description TEXT,
-            author TEXT, version TEXT,
-            mapx INTEGER, mapy INTEGER,
-            width_elmos INTEGER, height_elmos INTEGER,
-            min_height REAL, max_height REAL,
-            gravity REAL, tidal_strength REAL,
-            max_metal REAL, extractor_radius REAL,
-            tiles_x INTEGER, tiles_z INTEGER, num_tiles INTEGER,
-            has_lua_gaia INTEGER,
-            num_features INTEGER, num_feature_types INTEGER,
-            start_positions TEXT,
-            format_version INTEGER,
-            processed_dir TEXT, source_path TEXT,
-            -- Decal/splat textures (stable filenames in processed_dir)
-            detail_tex TEXT, specular_tex TEXT,
-            splat_detail_tex TEXT, splat_distr_tex TEXT,
-            splat_normal_0 TEXT, splat_normal_1 TEXT,
-            splat_normal_2 TEXT, splat_normal_3 TEXT,
-            detail_normal_tex TEXT,
-            splat_scales TEXT, splat_mults TEXT,
-            -- Features stored as pipe-delimited type list + semi-delimited instance list
-            feature_types TEXT, features_blob TEXT,
-            -- FeatureDef list, parallel to feature_types. Each record is
-            --   name,model,texture,footX,footZ,height,radius,blocking,reclaim,metal,energy,damage
-            -- with records pipe-separated.
-            feature_defs TEXT,
-            -- Water (Spring's water system, also used for lava/acid)
-            water_base_color TEXT, water_surface_color TEXT, water_min_color TEXT,
-            water_surface_alpha REAL, water_damage REAL, void_water INTEGER,
-            -- Client-side Lua widgets shipped by the map (pipe-delimited paths)
-            widgets TEXT
-        );
-    )", nullptr, nullptr, nullptr);
-}
-
-void MapProcessor::StoreMetadata(sqlite3* db, const MapMetadata& m) {
-    std::string spStr;
-    for (const auto& sp : m.startPositions) {
-        if (!spStr.empty()) spStr += ";";
-        spStr += std::to_string(sp.x) + "," + std::to_string(sp.z);
-    }
-
-    // Feature types: pipe-delimited ("tree|rock|...")
-    std::string typesStr;
-    for (const auto& t : m.featureTypes) {
-        if (!typesStr.empty()) typesStr += "|";
-        typesStr += t;
-    }
-
-    // Features: semi-colon-delimited records "type,x,y,z,rot,size"
-    std::string featuresStr;
-    featuresStr.reserve(m.features.size() * 32);
-    for (const auto& f : m.features) {
-        if (!featuresStr.empty()) featuresStr += ";";
-        char buf[96];
-        snprintf(buf, sizeof(buf), "%d,%.1f,%.1f,%.1f,%.3f,%.3f",
-            f.featureType, f.x, f.y, f.z, f.rotation, f.relativeSize);
-        featuresStr += buf;
-    }
-
-    // Feature defs: pipe-delimited records, one per featureType. Each
-    // record is comma-separated:
-    //   name,model,texture,footX,footZ,height,radius,blocking,reclaim,metal,energy,damage
-    // Empty model/texture fields are written as empty (e.g. "GreyRock1,,,...").
-    std::string defsStr;
-    {
-        for (const auto& d : m.featureDefs) {
-            if (!defsStr.empty()) defsStr += "|";
-            char buf[256];
-            snprintf(buf, sizeof(buf),
-                "%s,%s,%s,%d,%d,%.3f,%.3f,%d,%d,%d,%d,%d",
-                d.name.c_str(), d.modelFile.c_str(), d.textureFile.c_str(),
-                d.footprintX, d.footprintZ, d.height, d.radius,
-                d.blocking ? 1 : 0, d.reclaimable ? 1 : 0,
-                d.metal, d.energy, d.damage);
-            defsStr += buf;
-        }
-    }
-
-    // Splat params: comma-separated
-    auto floatsToStr = [](const float* v, int n) {
-        std::string s;
-        for (int i = 0; i < n; i++) {
-            if (i > 0) s += ",";
-            char b[32]; snprintf(b, sizeof(b), "%.6f", v[i]);
-            s += b;
-        }
-        return s;
-    };
-    std::string splatScalesStr  = floatsToStr(m.decals.splatScales, 4);
-    std::string splatMultsStr   = floatsToStr(m.decals.splatMults,  4);
-    std::string waterBaseStr    = floatsToStr(m.water.baseColor,    3);
-    std::string waterSurfaceStr = floatsToStr(m.water.surfaceColor, 3);
-    std::string waterMinStr     = floatsToStr(m.water.minColor,     3);
-
-    // Widgets: pipe-delimited list of relative paths
-    std::string widgetsStr;
-    for (const auto& w : m.widgets) {
-        if (!widgetsStr.empty()) widgetsStr += "|";
-        widgetsStr += w;
-    }
-
-    sqlite3_stmt* stmt;
-    sqlite3_prepare_v2(db, R"(
-        INSERT OR REPLACE INTO maps
-        (id,name,short_name,description,author,version,
-         mapx,mapy,width_elmos,height_elmos,min_height,max_height,
-         gravity,tidal_strength,max_metal,extractor_radius,
-         tiles_x,tiles_z,num_tiles,has_lua_gaia,
-         num_features,num_feature_types,start_positions,
-         format_version,processed_dir,source_path,
-         detail_tex,specular_tex,splat_detail_tex,splat_distr_tex,
-         splat_normal_0,splat_normal_1,splat_normal_2,splat_normal_3,
-         detail_normal_tex,splat_scales,splat_mults,
-         feature_types,features_blob,feature_defs,
-         water_base_color,water_surface_color,water_min_color,
-         water_surface_alpha,water_damage,void_water,
-         widgets)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                ?,?,?,?,?,?,
-                ?)
-    )", -1, &stmt, nullptr);
-
-    int i = 1;
-    sqlite3_bind_text(stmt, i++, m.id.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, m.name.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, m.shortName.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, m.description.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, m.author.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, m.version.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, i++, m.mapx);
-    sqlite3_bind_int(stmt, i++, m.mapy);
-    sqlite3_bind_int(stmt, i++, m.widthElmos);
-    sqlite3_bind_int(stmt, i++, m.heightElmos);
-    sqlite3_bind_double(stmt, i++, m.minHeight);
-    sqlite3_bind_double(stmt, i++, m.maxHeight);
-    sqlite3_bind_double(stmt, i++, m.gravity);
-    sqlite3_bind_double(stmt, i++, m.tidalStrength);
-    sqlite3_bind_double(stmt, i++, m.maxMetal);
-    sqlite3_bind_double(stmt, i++, m.extractorRadius);
-    sqlite3_bind_int(stmt, i++, m.tilesX);
-    sqlite3_bind_int(stmt, i++, m.tilesZ);
-    sqlite3_bind_int(stmt, i++, m.numTiles);
-    sqlite3_bind_int(stmt, i++, m.hasLuaGaia ? 1 : 0);
-    sqlite3_bind_int(stmt, i++, static_cast<int>(m.features.size()));
-    sqlite3_bind_int(stmt, i++, static_cast<int>(m.featureTypes.size()));
-    sqlite3_bind_text(stmt, i++, spStr.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, i++, m.formatVersion);
-    sqlite3_bind_text(stmt, i++, m.processedDir.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, m.sourcePath.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, m.decals.detailTex.c_str(),        -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, m.decals.specularTex.c_str(),      -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, m.decals.splatDetailTex.c_str(),   -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, m.decals.splatDistrTex.c_str(),    -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, m.decals.splatDetailNormalTex[0].c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, m.decals.splatDetailNormalTex[1].c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, m.decals.splatDetailNormalTex[2].c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, m.decals.splatDetailNormalTex[3].c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, m.decals.detailNormalTex.c_str(),  -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, splatScalesStr.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, splatMultsStr.c_str(),  -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, typesStr.c_str(),       -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, featuresStr.c_str(),    -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, defsStr.c_str(),        -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, waterBaseStr.c_str(),    -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, waterSurfaceStr.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, i++, waterMinStr.c_str(),     -1, SQLITE_TRANSIENT);
-    sqlite3_bind_double(stmt, i++, m.water.surfaceAlpha);
-    sqlite3_bind_double(stmt, i++, m.water.damage);
-    sqlite3_bind_int(stmt, i++, m.water.voidWater ? 1 : 0);
-    sqlite3_bind_text(stmt, i++, widgetsStr.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-}
-
-// Parse "a,b,c,d" into out[0..n-1]. Missing entries left at defaults.
-static void parseFloats(const char* s, float* out, int n) {
-    if (!s || !*s) return;
-    std::istringstream ss(s);
-    std::string tok;
-    for (int i = 0; i < n && std::getline(ss, tok, ','); i++) {
-        try { out[i] = std::stof(tok); } catch (...) {}
-    }
-}
-
-std::vector<MapMetadata> MapProcessor::GetAllMaps(sqlite3* db) {
-    EnsureTable(db);
-    std::vector<MapMetadata> result;
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(db, "SELECT id,name,short_name,description,author,version,"
-        "mapx,mapy,width_elmos,height_elmos,min_height,max_height,"
-        "gravity,tidal_strength,max_metal,extractor_radius,"
-        "tiles_x,tiles_z,num_tiles,has_lua_gaia,"
-        "start_positions,format_version,processed_dir,"
-        "detail_tex,specular_tex,splat_detail_tex,splat_distr_tex,"
-        "splat_normal_0,splat_normal_1,splat_normal_2,splat_normal_3,"
-        "detail_normal_tex,splat_scales,splat_mults,"
-        "feature_types,features_blob,feature_defs,"
-        "water_base_color,water_surface_color,water_min_color,"
-        "water_surface_alpha,water_damage,void_water,widgets FROM maps", -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        SLOG(SPRING_LOG_ERROR, "GetAllMaps: SQL prepare failed: %s",
-            sqlite3_errmsg(db));
-        return result;
-    }
-
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        MapMetadata m;
-        int i = 0;
-        auto maybeStr = [&](int col) -> std::string {
-            auto t = sqlite3_column_text(stmt, col);
-            return t ? reinterpret_cast<const char*>(t) : "";
-        };
-        m.id = maybeStr(i++);
-        m.name = maybeStr(i++);
-        m.shortName = maybeStr(i++);
-        m.description = maybeStr(i++);
-        m.author = maybeStr(i++);
-        m.version = maybeStr(i++);
-        m.mapx = sqlite3_column_int(stmt, i++);
-        m.mapy = sqlite3_column_int(stmt, i++);
-        m.widthElmos = sqlite3_column_int(stmt, i++);
-        m.heightElmos = sqlite3_column_int(stmt, i++);
-        m.minHeight = static_cast<float>(sqlite3_column_double(stmt, i++));
-        m.maxHeight = static_cast<float>(sqlite3_column_double(stmt, i++));
-        m.gravity = static_cast<float>(sqlite3_column_double(stmt, i++));
-        m.tidalStrength = static_cast<float>(sqlite3_column_double(stmt, i++));
-        m.maxMetal = static_cast<float>(sqlite3_column_double(stmt, i++));
-        m.extractorRadius = static_cast<float>(sqlite3_column_double(stmt, i++));
-        m.tilesX = sqlite3_column_int(stmt, i++);
-        m.tilesZ = sqlite3_column_int(stmt, i++);
-        m.numTiles = sqlite3_column_int(stmt, i++);
-        m.hasLuaGaia = sqlite3_column_int(stmt, i++) != 0;
-        // Parse start positions
-        std::string spStr = maybeStr(i++);
-        if (!spStr.empty()) {
-            std::istringstream ss(spStr);
-            std::string pair;
-            while (std::getline(ss, pair, ';')) {
-                auto comma = pair.find(',');
-                if (comma != std::string::npos) {
-                    MapStartPosition sp;
-                    sp.x = std::stof(pair.substr(0, comma));
-                    sp.z = std::stof(pair.substr(comma + 1));
-                    m.startPositions.push_back(sp);
-                }
-            }
-        }
-        m.formatVersion = sqlite3_column_int(stmt, i++);
-        m.processedDir = maybeStr(i++);
-
-        // Decal textures
-        m.decals.detailTex     = maybeStr(i++);
-        m.decals.specularTex   = maybeStr(i++);
-        m.decals.splatDetailTex= maybeStr(i++);
-        m.decals.splatDistrTex = maybeStr(i++);
-        m.decals.splatDetailNormalTex[0] = maybeStr(i++);
-        m.decals.splatDetailNormalTex[1] = maybeStr(i++);
-        m.decals.splatDetailNormalTex[2] = maybeStr(i++);
-        m.decals.splatDetailNormalTex[3] = maybeStr(i++);
-        m.decals.detailNormalTex = maybeStr(i++);
-        parseFloats(maybeStr(i++).c_str(), m.decals.splatScales, 4);
-        parseFloats(maybeStr(i++).c_str(), m.decals.splatMults,  4);
-
-        // Feature types
-        std::string typesStr = maybeStr(i++);
-        if (!typesStr.empty()) {
-            std::istringstream ss(typesStr);
-            std::string t;
-            while (std::getline(ss, t, '|'))
-                m.featureTypes.push_back(t);
-        }
-
-        // Features blob: "type,x,y,z,rot,size;type,..."
-        std::string featBlob = maybeStr(i++);
-        if (!featBlob.empty()) {
-            std::istringstream ss(featBlob);
-            std::string rec;
-            while (std::getline(ss, rec, ';')) {
-                MapFeatureData f;
-                char* p = rec.data();
-                char* end = p + rec.size();
-                auto nextField = [&](float& out) {
-                    char* comma = (char*)memchr(p, ',', end - p);
-                    if (comma) *comma = 0;
-                    try { out = std::stof(p); } catch (...) {}
-                    p = comma ? comma + 1 : end;
-                };
-                float typeF = 0;
-                nextField(typeF);
-                f.featureType = static_cast<int>(typeF);
-                nextField(f.x);
-                nextField(f.y);
-                nextField(f.z);
-                nextField(f.rotation);
-                nextField(f.relativeSize);
-                m.features.push_back(f);
-            }
-        }
-
-        // Feature defs blob: pipe-delimited records, each comma-separated:
-        //   name,model,texture,footX,footZ,height,radius,blocking,reclaim,metal,energy,damage
-        std::string defsBlob = maybeStr(i++);
-        if (!defsBlob.empty()) {
-            std::istringstream ss(defsBlob);
-            std::string rec;
-            while (std::getline(ss, rec, '|')) {
-                MapFeatureDef d;
-                std::vector<std::string> fields;
-                {
-                    std::istringstream rs(rec);
-                    std::string tok;
-                    while (std::getline(rs, tok, ',')) fields.push_back(tok);
-                }
-                if (fields.size() >= 12) {
-                    d.name        = fields[0];
-                    d.modelFile   = fields[1];
-                    d.textureFile = fields[2];
-                    try { d.footprintX  = std::stoi(fields[3]); } catch (...) {}
-                    try { d.footprintZ  = std::stoi(fields[4]); } catch (...) {}
-                    try { d.height      = std::stof(fields[5]); } catch (...) {}
-                    try { d.radius      = std::stof(fields[6]); } catch (...) {}
-                    d.blocking    = fields[7] != "0";
-                    d.reclaimable = fields[8] != "0";
-                    try { d.metal       = std::stoi(fields[9]); } catch (...) {}
-                    try { d.energy      = std::stoi(fields[10]); } catch (...) {}
-                    try { d.damage      = std::stoi(fields[11]); } catch (...) {}
-                    m.featureDefs.push_back(std::move(d));
-                }
-            }
-        }
-
-        // Water
-        parseFloats(maybeStr(i++).c_str(), m.water.baseColor,    3);
-        parseFloats(maybeStr(i++).c_str(), m.water.surfaceColor, 3);
-        parseFloats(maybeStr(i++).c_str(), m.water.minColor,     3);
-        m.water.surfaceAlpha = static_cast<float>(sqlite3_column_double(stmt, i++));
-        m.water.damage       = static_cast<float>(sqlite3_column_double(stmt, i++));
-        m.water.voidWater    = sqlite3_column_int(stmt, i++) != 0;
-
-        // Widgets (pipe-delimited)
-        std::string widgetsStr = maybeStr(i++);
-        if (!widgetsStr.empty()) {
-            std::istringstream ss(widgetsStr);
-            std::string w;
-            while (std::getline(ss, w, '|'))
-                if (!w.empty()) m.widgets.push_back(w);
-        }
-
-        result.push_back(std::move(m));
-    }
-    sqlite3_finalize(stmt);
-    return result;
-}
-
-MapMetadata MapProcessor::GetMap(sqlite3* db, const std::string& mapId) {
-    auto all = GetAllMaps(db);
-    for (auto& m : all)
-        if (m.id == mapId) return m;
-    return {};
 }
 
 // ============================================================

@@ -59,6 +59,10 @@
 #include "SpringLog.h"
 #include "SpringLogNet.h"
 
+#ifndef TEXTURECONVERTER_BINARY_PATH
+#define TEXTURECONVERTER_BINARY_PATH "textureconverter"
+#endif
+
 #define LOG_SECTION "game-convert"
 
 #include <cctype>
@@ -293,8 +297,45 @@ bool ConvertLobbyConfig(const fs::path& gameDir, bool force) {
 }
 
 // ---------------------------------------------------------------
-// Step 3: model conversion via modelimporter
+// Step 3: model + texture conversion
 // ---------------------------------------------------------------
+
+/// Read the diffuse texture basename out of an S3O header.
+std::string ReadS3OTexture1(const std::string& s3oPath) {
+    FILE* f = std::fopen(s3oPath.c_str(), "rb");
+    if (!f) return {};
+    char header[52];
+    if (std::fread(header, 1, sizeof(header), f) != sizeof(header)) {
+        std::fclose(f);
+        return {};
+    }
+    if (std::memcmp(header, "Spring unit", 11) != 0) {
+        std::fclose(f);
+        return {};
+    }
+    uint32_t tex1Off;
+    std::memcpy(&tex1Off, header + 44, 4);
+    if (tex1Off == 0) { std::fclose(f); return {}; }
+    if (std::fseek(f, tex1Off, SEEK_SET) != 0) { std::fclose(f); return {}; }
+    char buf[256] = {0};
+    std::fread(buf, 1, sizeof(buf) - 1, f);
+    std::fclose(f);
+    return std::string(buf);
+}
+
+/// Case-insensitive texture lookup in a directory.
+std::string ResolveTexturePath(const fs::path& dir, const std::string& basename) {
+    if (basename.empty() || !fs::is_directory(dir)) return {};
+    const fs::path direct = dir / basename;
+    if (fs::exists(direct)) return direct.string();
+    const std::string wantLower = ToLower(basename);
+    for (auto& entry : fs::directory_iterator(dir)) {
+        if (!entry.is_regular_file()) continue;
+        if (ToLower(entry.path().filename().string()) == wantLower)
+            return entry.path().string();
+    }
+    return {};
+}
 
 /// File extensions we hand to modelimporter. Matches the broad
 /// set Assimp supports — the tool itself enforces format validity.
@@ -312,15 +353,10 @@ bool IsModelFile(const fs::path& p) {
 
 /// Walk every configured model root under `gameDir` and run
 /// modelimporter on every model file we find, writing the output
-/// under `data/games/<gameId>/models/<stem>.glb`. Mirrors what
-/// `GameProcessor::Process` does in the lobby but lives in a
-/// standalone tool so authors can run it offline.
+/// under `<gameDir>/models/<stem>.glb`. For S3O files, also
+/// converts the referenced texture via textureconverter.
 int ConvertModels(const fs::path& gameDir, const std::string& gameId,
                   const fs::path& modelImporterBin, bool force) {
-    // Single model root for now — objects3d/. Legacy Spring games
-    // also ship features/ meshes and a handful of odd special
-    // cases, but objects3d/ is the canonical unit-model folder and
-    // covers both papertanks and zk.
     const fs::path source = ResolveSubDir(gameDir, "objects3d");
     if (source.empty()) {
         SLOG(SPRING_LOG_INFO, "%s: no objects3d/ directory, skipping model conversion",
@@ -328,7 +364,8 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
         return 0;
     }
 
-    const fs::path outRoot = fs::path("data/games") / gameId / "models";
+    const fs::path unittexturesDir = ResolveSubDir(gameDir, "unittextures");
+    const fs::path outRoot = gameDir / "models";
     std::error_code ec;
     fs::create_directories(outRoot, ec);
 
@@ -341,9 +378,6 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
         const fs::path outPath = outRoot / (stem + ".glb");
 
         // mtime check: skip if the output is newer than the source
-        // unless the user passed --force. Same policy as
-        // GameProcessor, just re-implemented here so the CLI
-        // doesn't depend on any lobby code.
         if (!force && fs::exists(outPath)) {
             const auto srcTime = fs::last_write_time(entry.path(), ec);
             const auto dstTime = fs::last_write_time(outPath, ec);
@@ -353,12 +387,44 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
             }
         }
 
+        // Texture conversion for S3O files: read the tex1 basename,
+        // resolve it in unittextures/, convert via textureconverter.
+        bool hasTexture = false;
+        if (ToLower(entry.path().extension().string()) == ".s3o") {
+            const std::string texBasename = ReadS3OTexture1(entry.path().string());
+            if (!texBasename.empty() && !unittexturesDir.empty()) {
+                const std::string srcTex = ResolveTexturePath(unittexturesDir, texBasename);
+                if (!srcTex.empty()) {
+                    const std::string texStem = fs::path(texBasename).stem().string();
+                    const fs::path dstTex = outRoot / (texStem + ".png");
+                    if (!fs::exists(dstTex) ||
+                        fs::last_write_time(srcTex) > fs::last_write_time(dstTex)) {
+                        std::vector<std::string> texArgv = {
+                            TEXTURECONVERTER_BINARY_PATH,
+                            srcTex,
+                            dstTex.string(),
+                        };
+                        std::string texOut;
+                        if (!RunCommand(texArgv, texOut)) {
+                            SLOG(SPRING_LOG_WARNING, "texture conversion failed for %s",
+                                texBasename.c_str());
+                        }
+                    }
+                    hasTexture = true;
+                }
+            }
+        }
+
         std::vector<std::string> argv = {
             modelImporterBin.string(),
-            "--texture-ext", "png",
-            entry.path().string(),
-            outPath.string(),
         };
+        if (hasTexture) {
+            argv.push_back("--texture-ext");
+            argv.push_back("png");
+        }
+        argv.push_back(entry.path().string());
+        argv.push_back(outPath.string());
+
         std::string output;
         if (RunCommand(argv, output)) {
             converted++;
@@ -483,6 +549,42 @@ void MigrateAIs(const fs::path& gameDir) {
 }
 
 // ---------------------------------------------------------------
+// Source tree copy
+// ---------------------------------------------------------------
+
+/// Recursively copy `src` into `dst`, skipping files that already exist
+/// and are newer than the source (so converted outputs aren't clobbered).
+void CopySourceTree(const fs::path& src, const fs::path& dst) {
+    std::error_code ec;
+    fs::create_directories(dst, ec);
+
+    for (const auto& entry : fs::recursive_directory_iterator(src)) {
+        const auto rel = fs::relative(entry.path(), src, ec);
+        const auto target = dst / rel;
+
+        if (entry.is_directory()) {
+            fs::create_directories(target, ec);
+            continue;
+        }
+        if (!entry.is_regular_file()) continue;
+
+        if (fs::exists(target)) {
+            auto srcTime = fs::last_write_time(entry.path(), ec);
+            auto dstTime = fs::last_write_time(target, ec);
+            if (!ec && dstTime >= srcTime) continue;
+        }
+
+        fs::copy_file(entry.path(), target,
+                       fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            SLOG(SPRING_LOG_WARNING, "copy failed: %s -> %s: %s",
+                entry.path().string().c_str(), target.string().c_str(),
+                ec.message().c_str());
+        }
+    }
+}
+
+// ---------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------
 
@@ -495,6 +597,7 @@ void PrintUsage(const char* argv0) {
         "  <game-dir>   path to a game archive root, e.g. content/games/papertanks.\n"
         "\n"
         "options:\n"
+        "  --data-dir D        Output data directory (default: data).\n"
         "  --force             Overwrite existing game.config.lua / model\n"
         "                      outputs even if they look up to date.\n"
         "  --modelimporter P   Path to the modelimporter binary. Defaults to\n"
@@ -510,6 +613,7 @@ void PrintUsage(const char* argv0) {
         "  --log-level <level> Set minimum log level (debug/info/\n"
         "                      notice/warning/error).\n"
         "\n"
+        "The source tree is copied to data/games/<id>/ before processing.\n"
         "Each step is idempotent: re-running the tool on a converted game\n"
         "is a no-op unless --force is passed or a source file changed.",
         argv0);
@@ -522,6 +626,7 @@ int main(int argc, char* argv[]) {
 
     std::string gameDirArg;
     std::string modelImporterArg;
+    std::string dataDir = "data";
     std::string logServerUrl;
     bool force = false;
     bool skipModels = false;
@@ -532,6 +637,7 @@ int main(int argc, char* argv[]) {
         if (arg == "--force") force = true;
         else if (arg == "--skip-models") skipModels = true;
         else if (arg == "--skip-ai") skipAI = true;
+        else if (arg == "--data-dir" && i + 1 < argc) dataDir = argv[++i];
         else if (arg == "--modelimporter" && i + 1 < argc) modelImporterArg = argv[++i];
         else if (arg == "--log-server" && i + 1 < argc) logServerUrl = argv[++i];
         else if (arg == "--log-level" && i + 1 < argc) {
@@ -562,23 +668,25 @@ int main(int argc, char* argv[]) {
         return 2;
     }
 
-    const fs::path gameDir = fs::absolute(gameDirArg);
-    if (!fs::exists(gameDir) || !fs::is_directory(gameDir)) {
+    const fs::path sourceDir = fs::absolute(gameDirArg);
+    if (!fs::exists(sourceDir) || !fs::is_directory(sourceDir)) {
         SLOG(SPRING_LOG_ERROR, "not a directory: %s",
-            gameDir.string().c_str());
+            sourceDir.string().c_str());
         springlog_shutdown();
         return 1;
     }
 
-    const std::string gameId = ToLower(gameDir.filename().string());
-    SLOG(SPRING_LOG_NOTICE, "processing game '%s' at %s",
-        gameId.c_str(), gameDir.string().c_str());
+    const std::string gameId = ToLower(sourceDir.filename().string());
 
-    // Resolve the modelimporter path. The default location is
-    // whichever spring-web build tree we're running out of; the
-    // tool doesn't ship as a PATH-installable binary, so assuming
-    // the CI-style build layout keeps the CLI short. --modelimporter
-    // overrides this for authors running from a non-standard dir.
+    // Copy source tree to data/games/<id>/ so the lobby only reads
+    // from data/. All subsequent operations work on the copy.
+    const fs::path gameDir = fs::path(dataDir) / "games" / gameId;
+    SLOG(SPRING_LOG_NOTICE, "processing game '%s': %s -> %s",
+        gameId.c_str(), sourceDir.string().c_str(),
+        gameDir.string().c_str());
+    CopySourceTree(sourceDir, gameDir);
+
+    // Resolve the modelimporter path.
     fs::path modelImporterBin;
     if (!modelImporterArg.empty()) {
         modelImporterBin = modelImporterArg;

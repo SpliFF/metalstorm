@@ -222,7 +222,7 @@ set(LOBBY_SERVER_SOURCES
     rts/Server/PerfMetrics.cpp
     rts/Server/RatingSystem.cpp
     rts/Server/RoomManager.cpp
-    rts/Server/MapProcessor.cpp
+    rts/Server/MapMetadataDb.cpp
     rts/Server/AI/AIDiscovery.cpp
     rts/Server/GameDiscovery.cpp
     rts/Server/ConfigReader.cpp
@@ -242,20 +242,9 @@ add_executable(spring-lobby
     rts/lobby_main.cpp
     ${LOBBY_SERVER_SOURCES}
     ${LOBBY_LOG_SOURCES}
-    rts/System/FileSystem/LuaVFSSimple.cpp
     rts/System/SafeCStrings.c
-    rts/Server/FeatureProcessor.cpp
-    rts/Server/GameProcessor.cpp
 )
-add_dependencies(spring-lobby generate_flatbuffers modelimporter)
-target_compile_definitions(spring-lobby PRIVATE
-    # Absolute path to the modelimporter binary inside this build
-    # tree. The lobby map preprocessor calls it via popen() to
-    # convert Spring .s3o (and any other Assimp-supported format)
-    # into glTF 2.0 binary + a sibling .config.json engine-metadata
-    # file (loaded at runtime via LuaConfig).
-    MODELIMPORTER_BINARY_PATH="$<TARGET_FILE:modelimporter>"
-)
+add_dependencies(spring-lobby generate_flatbuffers)
 target_include_directories(spring-lobby PRIVATE
     ${CMAKE_SOURCE_DIR}/rts
     ${CMAKE_SOURCE_DIR}/rts/lib
@@ -333,6 +322,24 @@ add_subdirectory(tools/modelimporter)
 # legacy AI layouts to the `ai/<name>/main.lua + ai.config.lua`
 # convention. See tools/gameconverter/README.md for details.
 add_subdirectory(tools/gameconverter)
+
+# === mapconverter — map preprocessing tool ===
+#
+# Standalone CLI that copies a Spring map's source tree into data/maps/
+# and runs all conversion steps (SMF extraction, minimap WebP, feature
+# model conversion, decal textures, widget enumeration). Writes metadata
+# to SQLite. After this tool has run, the lobby just reads pre-populated
+# data/ — no conversion code needed at runtime.
+add_subdirectory(tools/mapconverter)
+
+# === textureconverter — image format conversion tool ===
+#
+# Standalone CLI using stb_image (header-only, bundled). Converts
+# TGA/PNG/BMP/JPG/DDS(DXT1) to PNG. Special --smf-minimap mode for
+# Spring map minimap extraction. Replaces the ImageMagick `magick`
+# dependency that mapconverter and gameconverter previously shelled
+# out to.
+add_subdirectory(tools/textureconverter)
 
 # === spring-logserver (dedicated log collection + streaming server) ===
 add_executable(spring-logserver

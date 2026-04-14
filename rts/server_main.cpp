@@ -328,25 +328,22 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    // --- Map metadata (from lobby's processing, stored in SQLite) ---
-    // Open a second raw sqlite3 connection so MapProcessor can query it.
+    // --- Map metadata (from mapconverter processing, stored in SQLite) ---
     MapMetadata mapMeta;
     {
         sqlite3* mapDb = nullptr;
         if (sqlite3_open(dbPath.c_str(), &mapDb) == SQLITE_OK) {
-            // Derive map ID from the last component of mapPath
             if (!mapPath.empty()) {
                 std::filesystem::path p(mapPath);
-                // Strip trailing slash if any
                 std::string mapId = p.filename().string();
                 if (mapId.empty() && p.has_parent_path())
                     mapId = p.parent_path().filename().string();
 
-                MapProcessor proc;
-                mapMeta = proc.GetMap(mapDb, mapId);
+                MapMetadataDb db;
+                mapMeta = db.GetMap(mapDb, mapId);
                 if (mapMeta.id.empty()) {
                     SLOG(SPRING_LOG_WARNING, "map '%s' not in SQLite. "
-                        "Run spring-lobby first to process maps.", mapId.c_str());
+                        "Run mapconverter first to process maps.", mapId.c_str());
                 } else {
                     SLOG(SPRING_LOG_NOTICE, "loaded map '%s' (%s): %dx%d, "
                         "%zu features, %zu start positions",

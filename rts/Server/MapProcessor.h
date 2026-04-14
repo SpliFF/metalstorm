@@ -135,25 +135,31 @@ struct MapMetadata {
     std::vector<std::string> widgets;
 };
 
-class MapProcessor {
+/// Read-only SQLite access for map metadata. Used by the lobby and
+/// game server to query pre-processed map data without needing any
+/// conversion dependencies (Lua, ImageMagick, modelimporter).
+class MapMetadataDb {
 public:
-    void ScanAndProcess(const std::string& mapsDir, const std::string& dataDir, sqlite3* db);
     std::vector<MapMetadata> GetAllMaps(sqlite3* db);
     MapMetadata GetMap(sqlite3* db, const std::string& mapId);
+    void StoreMetadata(sqlite3* db, const MapMetadata& meta);
+    static void EnsureTable(sqlite3* db);
+};
+
+/// Full map conversion pipeline. Depends on Lua, ImageMagick (magick),
+/// modelimporter, and FeatureProcessor. Only linked into the
+/// mapconverter CLI tool — the lobby and game server use MapMetadataDb.
+class MapProcessor : public MapMetadataDb {
+public:
+    void ScanAndProcess(const std::string& mapsDir, const std::string& dataDir, sqlite3* db);
 
 private:
     bool ReadMapInfo(const std::string& mapDir, MapMetadata& meta);
     bool ReadSMFHeader(MapMetadata& meta);
     bool ExtractBinaryData(const MapMetadata& meta);
-    /// Decode the SMF's 1024×1024 DXT1 minimap and pipe the raw RGB
-    /// into `magick` to write `<processedDir>/minimap.webp`. Done once
-    /// at preprocess time — the /api/maps/thumb/<id> handler just
-    /// serves the resulting file directly.
     bool ExtractMinimapWebP(const MapMetadata& meta);
     bool ExtractFeatures(MapMetadata& meta);
     bool ExtractDecalTextures(MapMetadata& meta);
     void EnumerateWidgets(MapMetadata& meta);
     bool ProcessMap(MapMetadata& meta);
-    void StoreMetadata(sqlite3* db, const MapMetadata& meta);
-    static void EnsureTable(sqlite3* db);
 };
