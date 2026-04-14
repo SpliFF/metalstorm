@@ -162,6 +162,31 @@
     font-size: 12px !important;
 }
 
+/* Source toggle buttons */
+.log-source-toggles {
+    display: flex;
+    gap: 2px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+.log-source-toggle {
+    font-size: 9px !important;
+    padding: 1px 5px !important;
+    border-width: 1px !important;
+    border-style: solid !important;
+    border-radius: 8px !important;
+    cursor: pointer;
+    opacity: 0.4;
+    transition: opacity 0.15s;
+    white-space: nowrap;
+}
+.log-source-toggle.active {
+    opacity: 1.0;
+}
+.log-source-toggle:hover {
+    opacity: 0.8;
+}
+
 /* === Drag handle === */
 
 .debug-split-handle {

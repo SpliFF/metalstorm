@@ -20,6 +20,7 @@
 #include "Server/HttpAuth.h"
 #include "Server/CacheControl.h"
 #include "System/SpringLog/SpringLog.h"
+#include "System/SpringLog/SpringLogSqlite.h"
 #include <cctype>
 
 #include <sqlite3.h>
@@ -261,6 +262,10 @@ int main(int argc, char* argv[])
     springlog_set_min_level(logLevel);
     if (!logFile.empty())
         springlog_set_file(logFile.c_str());
+
+    // Enable SQLite log sink so logs are visible in the debug console.
+    // Uses the same debug.db as the log server and game servers.
+    springlog_sqlite_init("data/debug.db");
 
     SLOG(SPRING_LOG_NOTICE, "starting on port %d...", port);
 
@@ -1647,6 +1652,7 @@ int main(int argc, char* argv[])
     net.Stop();
     db.Close();
     SLOG(SPRING_LOG_NOTICE, "exited cleanly");
+    springlog_sqlite_shutdown();
     springlog_shutdown();
     return 0;
 }

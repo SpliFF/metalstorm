@@ -270,7 +270,7 @@ target_include_directories(spring-lobby PRIVATE
     ${CMAKE_SOURCE_DIR}/rts/lib/lua/src
     ${GENERATED_DIR}
 )
-target_link_libraries(spring-lobby PRIVATE lua uws flatbuffers ZLIB::ZLIB SQLite::SQLite3 springlog springlog-net)
+target_link_libraries(spring-lobby PRIVATE lua uws flatbuffers ZLIB::ZLIB SQLite::SQLite3 springlog springlog-net springlog-sqlite)
 if(UNIX)
     target_link_libraries(spring-lobby PRIVATE pthread dl)
 endif()

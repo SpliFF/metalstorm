@@ -57,9 +57,9 @@ interface ConsoleTab {
 
     // Log pane filter state
     minLevel: number;
-    sectionFilter: string;
-    scopeFilter: string;
     searchFilter: string;
+    // Toggle-based source filtering: empty set = show all
+    hiddenSources: Set<string>; // "process:section" or "scope:X" keys to HIDE
     entries: LogEntry[];
     logLineCount: number;
     logAutoScroll: boolean;
@@ -109,7 +109,8 @@ export class DebugConsole {
     // HTTP log polling
     private logPollTimer: ReturnType<typeof setInterval> | null = null;
     private lastLogId = 0;
-    private logPollUrl = ''; // derived from lobby/log server URL
+    private logPollUrl = '';
+    private logHistoryFetched = false;
 
     constructor() {
         this.setupKeyboard();
@@ -238,7 +239,8 @@ export class DebugConsole {
         const tab: ConsoleTab = {
             id, label: scope, scope,
             history: [], historyIndex: -1, consoleLineCount: 0,
-            minLevel: 2, sectionFilter: '', scopeFilter: '', searchFilter: '',
+            minLevel: 2, searchFilter: '',
+            hiddenSources: new Set(),
             entries: [], logLineCount: 0, logAutoScroll: true,
             tabEl: null, panelEl: null,
             consoleOutputEl: null, inputEl: null, promptEl: null, scopeSelectEl: null,
@@ -355,15 +357,14 @@ export class DebugConsole {
                     <div class="debug-pane-toolbar">
                         <span class="pane-title">Logs</span>
                         <select class="panel-level-filter" title="Min log level">
-                            <option value="0">DEBUG</option>
-                            <option value="1">INFO</option>
-                            <option value="2" selected>NOTICE</option>
-                            <option value="3">WARN</option>
-                            <option value="4">ERROR</option>
+                            <option value="0">ALL</option>
+                            <option value="1">INFO+</option>
+                            <option value="2" selected>NOTICE+</option>
+                            <option value="3">WARN+</option>
+                            <option value="4">ERROR+</option>
                             <option value="5">FATAL</option>
                         </select>
-                        <input class="panel-section-filter" type="text" placeholder="section" />
-                        <input class="panel-scope-filter" type="text" placeholder="scope" />
+                        <span class="log-source-toggles"></span>
                         <input class="panel-search-filter" type="text" placeholder="search..." />
                         <button class="pane-clear-btn log-clear-btn" title="Clear">Clear</button>
                         <button class="pane-undock-btn" title="Pop out logs" data-pane="logs">&#x2197;</button>
@@ -383,21 +384,14 @@ export class DebugConsole {
             tab.minLevel = parseInt(levelFilter.value, 10);
             this.rerenderTab(tab);
         });
-        const sectionInput = panel.querySelector('.panel-section-filter') as HTMLInputElement;
-        sectionInput?.addEventListener('input', () => {
-            tab.sectionFilter = sectionInput.value.trim().toLowerCase();
-            this.rerenderTab(tab);
-        });
-        const scopeInput = panel.querySelector('.panel-scope-filter') as HTMLInputElement;
-        scopeInput?.addEventListener('input', () => {
-            tab.scopeFilter = scopeInput.value.trim().toLowerCase();
-            this.rerenderTab(tab);
-        });
         const searchInput = panel.querySelector('.panel-search-filter') as HTMLInputElement;
         searchInput?.addEventListener('input', () => {
             tab.searchFilter = searchInput.value.trim().toLowerCase();
             this.rerenderTab(tab);
         });
+
+        // Build source toggle buttons from discovered sources
+        this.rebuildSourceToggles(tab);
 
         // Console clear button
         const consoleClearBtn = panel.querySelector('.debug-pane-console .pane-clear-btn');
@@ -791,9 +785,16 @@ body { background: #0f0f14; display: flex; flex-direction: column; }
 
     private tabPassesFilter(tab: ConsoleTab, entry: LogEntry): boolean {
         if (entry.level < tab.minLevel) return false;
-        if (tab.sectionFilter && !entry.section.toLowerCase().includes(tab.sectionFilter)) return false;
-        if (tab.scopeFilter && !entry.scope.toLowerCase().includes(tab.scopeFilter)) return false;
         if (tab.searchFilter && !entry.message.toLowerCase().includes(tab.searchFilter)) return false;
+        // Toggle-based source filtering
+        if (tab.hiddenSources.size > 0) {
+            const processKey = `process:${entry.process}`;
+            const sectionKey = `section:${entry.section}`;
+            const scopeKey = entry.scope ? `scope:${entry.scope}` : '';
+            if (tab.hiddenSources.has(processKey)) return false;
+            if (tab.hiddenSources.has(sectionKey)) return false;
+            if (scopeKey && tab.hiddenSources.has(scopeKey)) return false;
+        }
         return true;
     }
 
@@ -812,12 +813,15 @@ body { background: #0f0f14; display: flex; flex-direction: column; }
     private startLogPolling(): void {
         if (this.logPollTimer) return;
         if (!this.logPollUrl) {
-            // Auto-derive log server URL from current page host
             const host = window.location.hostname || 'localhost';
             this.logPollUrl = `http://${host}:8010`;
         }
         this.setStatus(true);
-        // Poll immediately, then every 2 seconds
+        // Fetch history on first open (last 500 entries), then poll for new
+        if (!this.logHistoryFetched) {
+            this.logHistoryFetched = true;
+            this.fetchLogHistory();
+        }
         this.pollLogs();
         this.logPollTimer = setInterval(() => this.pollLogs(), 2000);
     }
@@ -829,39 +833,127 @@ body { background: #0f0f14; display: flex; flex-direction: column; }
         }
     }
 
+    /** Fetch historical logs (last 500 entries) to show context from
+     *  before the debug console was opened. */
+    private async fetchLogHistory(): Promise<void> {
+        if (!this.logPollUrl) return;
+        try {
+            const resp = await fetch(`${this.logPollUrl}/api/logs/0?limit=500&level=0`);
+            if (!resp.ok) return;
+            const entries: any[] = await resp.json();
+            if (!Array.isArray(entries)) return;
+
+            // History comes newest-first from SQLite; reverse for chronological
+            const sorted = entries.reverse();
+            for (const e of sorted) {
+                if (e.id && e.id <= this.lastLogId) continue;
+                if (e.id) this.lastLogId = e.id;
+                this.ingestLogEntry(e);
+            }
+            // Rebuild source toggles now that we have data
+            for (const tab of this.tabs) this.rebuildSourceToggles(tab);
+        } catch { /* ignore */ }
+    }
+
     private async pollLogs(): Promise<void> {
         if (!this.logPollUrl) return;
         try {
-            // Fetch logs newer than lastLogId (cursor-based)
             const url = `${this.logPollUrl}/api/logs/0?limit=100&level=0`;
             const resp = await fetch(url);
-            if (!resp.ok) {
-                this.setStatus(false);
-                return;
-            }
+            if (!resp.ok) { this.setStatus(false); return; }
             this.setStatus(true);
             const entries: any[] = await resp.json();
             if (!Array.isArray(entries)) return;
 
+            let newEntries = false;
             for (const e of entries) {
-                // Skip entries we've already seen
                 if (e.id && e.id <= this.lastLogId) continue;
                 if (e.id) this.lastLogId = e.id;
-
-                this.addEntry({
-                    id: e.id ?? 0,
-                    timestamp: e.timestamp ?? 0,
-                    level: e.level ?? 2,
-                    section: e.section ?? '',
-                    scope: e.scope ?? '',
-                    process: e.process ?? '',
-                    message: e.message ?? '',
-                    frame: e.frame ?? 0,
-                });
+                this.ingestLogEntry(e);
+                newEntries = true;
+            }
+            // Rebuild toggles if we discovered new sources
+            if (newEntries) {
+                for (const tab of this.tabs) this.rebuildSourceToggles(tab);
             }
         } catch {
             this.setStatus(false);
         }
+    }
+
+    private knownSources = new Set<string>();
+
+    private ingestLogEntry(e: any): void {
+        const entry: LogEntry = {
+            id: e.id ?? 0,
+            timestamp: e.timestamp ?? 0,
+            level: e.level ?? 2,
+            section: e.section ?? '',
+            scope: e.scope ?? '',
+            process: e.process ?? '',
+            message: e.message ?? '',
+            frame: e.frame ?? 0,
+        };
+        // Track sources for toggle buttons
+        if (entry.process) this.knownSources.add(`process:${entry.process}`);
+        if (entry.section) this.knownSources.add(`section:${entry.section}`);
+        if (entry.scope) this.knownSources.add(`scope:${entry.scope}`);
+
+        this.addEntry(entry);
+    }
+
+    /** Build toggle buttons for each discovered log source. */
+    private rebuildSourceToggles(tab: ConsoleTab): void {
+        const container = tab.panelEl?.querySelector('.log-source-toggles');
+        if (!container || this.knownSources.size === 0) return;
+
+        // Only rebuild if the source set has changed
+        const key = [...this.knownSources].sort().join(',');
+        if (container.getAttribute('data-sources') === key) return;
+        container.setAttribute('data-sources', key);
+
+        container.innerHTML = '';
+        // Group by type
+        const processes: string[] = [];
+        const sections: string[] = [];
+        const scopes: string[] = [];
+        for (const s of this.knownSources) {
+            if (s.startsWith('process:')) processes.push(s);
+            else if (s.startsWith('section:')) sections.push(s);
+            else if (s.startsWith('scope:')) scopes.push(s);
+        }
+
+        const addButtons = (items: string[], color: string) => {
+            for (const key of items.sort()) {
+                const label = key.split(':').slice(1).join(':');
+                const btn = document.createElement('button');
+                btn.className = 'log-source-toggle active';
+                btn.textContent = label;
+                btn.style.borderColor = color;
+                btn.title = `Toggle ${key}`;
+                btn.dataset.sourceKey = key;
+
+                if (tab.hiddenSources.has(key)) {
+                    btn.classList.remove('active');
+                }
+
+                btn.addEventListener('click', () => {
+                    if (tab.hiddenSources.has(key)) {
+                        tab.hiddenSources.delete(key);
+                        btn.classList.add('active');
+                    } else {
+                        tab.hiddenSources.add(key);
+                        btn.classList.remove('active');
+                    }
+                    this.rerenderTab(tab);
+                });
+                container.appendChild(btn);
+            }
+        };
+
+        addButtons(processes, '#88f');
+        addButtons(sections, '#8c8');
+        addButtons(scopes, '#ca8');
     }
 
     private setStatus(connected: boolean): void {
