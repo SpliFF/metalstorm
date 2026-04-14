@@ -59,6 +59,17 @@ make build        # build spring-server + spring-lobby + spring-logserver
 make dev-client   # Vite dev server on :5173
 ```
 
+### Import games and maps
+
+Use the converters in tools/ to import existing spring content or the demo in content/games/papertanks/ . Games and maps need to be extracted to a directory for import (converter doesn't read archives yet)
+
+```bash
+# Import a map
+ ./build/debug/mapconverter /path/to/your/map
+ # import a game
+ ./build/debug/gameconverter content/games/papertanks
+```
+
 ### Running
 
 Start the lobby server:
