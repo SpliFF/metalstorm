@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "spring-debug": {
+      "command": "node",
+      "args": ["tools/debug-mcp/server.js"],
+      "env": {
+        "LOG_SERVER_URL": "http://localhost:8010",
+        "LOBBY_URL": "http://localhost:8011"
+      }
+    }
+  }
+}
