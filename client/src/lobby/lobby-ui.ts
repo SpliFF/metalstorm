@@ -105,6 +105,8 @@ export class LobbyUI {
     private onGameStart?: (gameServerPort: number) => void;
     private myPlayerId = 0;
     private pendingRejoinRoomId = 0;
+    private authToken = '';
+    private pollTimer: ReturnType<typeof setInterval> | null = null;
     private availableMaps: {
         id: string;
         name: string;
@@ -180,7 +182,7 @@ export class LobbyUI {
 
     private autoLoginAttempts = 0;
 
-    private tryAutoLogin(username: string, token: string): void {
+    private async tryAutoLogin(username: string, token: string): Promise<void> {
         this.container.style.display = 'flex';
         this.container.innerHTML = renderTemplate(this.templates.reconnecting, {
             attempt_suffix: this.autoLoginAttempts > 0
@@ -188,70 +190,52 @@ export class LobbyUI {
                 : '',
         });
 
-        const savedRoomId = localStorage.getItem('springrts-game-room');
-        const savedPort = localStorage.getItem('springrts-game-port');
+        try {
+            const resp = await fetch(`${CONFIG.httpUrl}/api/auth/validate`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                },
+                body: '{}',
+            });
+            if (resp.ok) {
+                const data = await resp.json();
+                if (data.valid) {
+                    this.authToken = token;
+                    this.myPlayerId = data.user_id ?? 0;
+                    console.log(`[lobby] auto-login OK: user=${data.username}`);
+                    localStorage.setItem('springrts-token', token);
 
-        this.connection = this.createConnection(
-            (msg: string) => {
-                this.autoLoginAttempts++;
-                if (this.autoLoginAttempts < 5) {
-                    // Retry — server might still be starting
-                    console.log(`[lobby] auto-login attempt ${this.autoLoginAttempts} failed: ${msg}, retrying...`);
-                    setTimeout(() => this.tryAutoLogin(username, token), 1000);
-                } else {
-                    console.log('[lobby] auto-login failed after retries:', msg);
-                    this.autoLoginAttempts = 0;
-                    localStorage.removeItem('springrts-token');
-                    localStorage.removeItem('springrts-game-room');
-                    localStorage.removeItem('springrts-game-port');
-                    this.showLogin();
+                    const savedRoomId = localStorage.getItem('springrts-game-room');
+                    if (savedRoomId) {
+                        this.pendingRejoinRoomId = parseInt(savedRoomId);
+                        this.sendJoinRoom(this.pendingRejoinRoomId);
+                    }
+                    this.startPolling();
+                    this.showBrowser();
+                    return;
                 }
-            },
-        );
+            }
+        } catch { /* network error */ }
 
-        this.pendingRejoinRoomId = savedRoomId ? parseInt(savedRoomId) : 0;
-        this.connection.connect(CONFIG.httpUrl, username, '', token);
+        this.autoLoginAttempts++;
+        if (this.autoLoginAttempts < 5) {
+            console.log(`[lobby] auto-login attempt ${this.autoLoginAttempts} failed, retrying...`);
+            setTimeout(() => this.tryAutoLogin(username, token), 1000);
+        } else {
+            this.autoLoginAttempts = 0;
+            localStorage.removeItem('springrts-token');
+            this.showLogin();
+        }
     }
 
     getConnection(): Connection | null { return this.connection; }
 
-    private createConnection(onError: (msg: string) => void): Connection {
+    /// Create a Connection for the game server (WebRTC). Only used
+    /// when a game starts — not for lobby operations.
+    createGameConnection(): Connection {
         return new Connection({
-            onStateChange: (state: ConnectionState) => {
-                if (state === 'disconnected') onError('Disconnected from server');
-            },
-            onAuthenticated: (playerId: number, token: string) => {
-                this.myPlayerId = playerId;
-                console.log(`[lobby] AUTH OK: playerId=${playerId} token=${token?.substring(0,8)}... saving to localStorage`);
-                localStorage.setItem('springrts-token', token);
-
-                // If we have a saved game to rejoin, try it
-                if (this.pendingRejoinRoomId > 0) {
-                    const roomId = this.pendingRejoinRoomId;
-                    this.pendingRejoinRoomId = 0;
-                    console.log(`[lobby] rejoining room ${roomId}`);
-                    this.sendJoinRoom(roomId);
-                    // handleRoomState will fire onGameStart if the room is active.
-                    // If not, fall back to browser after a delay.
-                    setTimeout(() => {
-                        if (!this.currentRoom || this.currentRoom.state < 3) {
-                            console.log('[lobby] saved game no longer active');
-                            localStorage.removeItem('springrts-game-room');
-                            localStorage.removeItem('springrts-game-port');
-                            this.showBrowser();
-                        }
-                    }, 2000);
-                    return;
-                }
-
-                this.showBrowser();
-            },
-            onAuthFailed: (message: string) => {
-                localStorage.removeItem('springrts-token');
-                onError(message);
-            },
-            onServerError: (_code: number, message: string) => onError(message),
-            onServerMessage: (msg: ServerMessage) => this.handleServerMessage(msg),
             onEntityState: () => {},
             onCombatEvents: () => {},
             onEntityDestroy: () => {},
@@ -260,21 +244,103 @@ export class LobbyUI {
     show(): void { this.container.style.display = 'flex'; }
     hide(): void { this.container.style.display = 'none'; }
 
-    handleServerMessage(msg: ServerMessage): void {
-        switch (msg.payloadType()) {
-            case ServerPayload.RoomListUpdate:
-                this.handleRoomList(msg);
-                break;
-            case ServerPayload.RoomStateUpdate:
-                this.handleRoomState(msg);
-                break;
-            case ServerPayload.AIListUpdate:
-                this.handleAIList(msg);
-                break;
-            case ServerPayload.GameListUpdate:
-                this.handleGameList(msg);
-                break;
+    // ─── HTTP helpers for lobby operations ───
+
+    private async lobbyPost(path: string, body: Record<string, unknown> = {}): Promise<any> {
+        const resp = await fetch(`${CONFIG.httpUrl}${path}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${this.authToken}`,
+            },
+            body: JSON.stringify(body),
+        });
+        return resp.json();
+    }
+
+    private async lobbyGet(path: string): Promise<any> {
+        const resp = await fetch(stampUrl(`${CONFIG.httpUrl}${path}`));
+        return resp.ok ? resp.json() : null;
+    }
+
+    private startPolling(): void {
+        if (this.pollTimer) return;
+        this.pollRoomState();
+        this.pollTimer = setInterval(() => this.pollRoomState(), 2000);
+    }
+
+    private stopPolling(): void {
+        if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
+    }
+
+    private async pollRoomState(): Promise<void> {
+        try {
+            const rooms = await this.lobbyGet('/api/rooms');
+            if (Array.isArray(rooms)) {
+                this.rooms = rooms.map((r: any) => ({
+                    id: r.id, name: r.name ?? '', mapName: r.map ?? '',
+                    playerCount: r.players?.length ?? 0, maxPlayers: 8,
+                    state: r.state ?? 0, hasPassword: false,
+                    hostName: r.players?.find((p: any) => p.is_host)?.username ?? '',
+                }));
+
+                // Check if our current room still exists
+                if (this.currentRoom) {
+                    const myRoom = rooms.find((r: any) => r.id === this.currentRoom!.id);
+                    if (!myRoom) {
+                        console.log(`[lobby] current room ${this.currentRoom.id} no longer exists`);
+                        this.currentRoom = null;
+                        localStorage.removeItem('springrts-game-room');
+                        localStorage.removeItem('springrts-game-port');
+                        if (this.currentScreen === 'room') { this.showBrowser(); return; }
+                    } else {
+                        // Update current room state from poll
+                        this.updateCurrentRoomFromJson(myRoom);
+                    }
+                }
+
+                if (this.currentScreen === 'browser') this.renderRoomList();
+            }
+        } catch { /* ignore poll failures */ }
+    }
+
+    private updateCurrentRoomFromJson(r: any): void {
+        const players: RoomPlayerInfo[] = (r.players ?? []).map((p: any) => ({
+            playerId: p.player_id ?? 0, username: p.username ?? '',
+            team: p.team ?? 0, ready: p.ready ?? false,
+            isSpectator: false, isHost: p.is_host ?? false,
+            startPos: p.start_pos ?? -1,
+        }));
+        const aiSlots: RoomAISlotInfo[] = (r.ai_slots ?? []).map((s: any) => ({
+            aiId: s.ai_id ?? '', displayName: s.name ?? s.ai_id ?? '',
+            team: s.team ?? 0, startPos: s.start_pos ?? -1,
+        }));
+        this.currentRoom = {
+            id: r.id, name: r.name ?? '', mapName: r.map ?? '',
+            gameName: r.game ?? '',
+            state: r.state ?? 0, players, aiSlots,
+            gameServerPort: r.game_server_port ?? 0,
+        };
+
+        const gameRunning = this.currentRoom.state === 3 || this.currentRoom.state === 4;
+        if (gameRunning && this.currentRoom.gameServerPort > 0) {
+            localStorage.setItem('springrts-game-room', String(this.currentRoom.id));
+            localStorage.setItem('springrts-game-port', String(this.currentRoom.gameServerPort));
+            this.hide();
+            this.onGameStart?.(this.currentRoom.gameServerPort);
+            return;
         }
+        if (this.currentRoom.state >= 5) {
+            localStorage.removeItem('springrts-game-room');
+            localStorage.removeItem('springrts-game-port');
+        }
+        if (this.currentScreen === 'room') this.showRoom();
+    }
+
+    handleServerMessage(msg: ServerMessage): void {
+        // Room state updates now come from HTTP polling, not WebRTC.
+        // This method is kept for any game-server messages that might
+        // route through the lobby connection.
     }
 
     // ===================== LOGIN =====================
@@ -289,7 +355,7 @@ export class LobbyUI {
         };
     }
 
-    private doLogin(): void {
+    private async doLogin(): Promise<void> {
         const user = (document.getElementById('login-user') as HTMLInputElement).value.trim();
         const pass = (document.getElementById('login-pass') as HTMLInputElement).value;
         const pass2 = (document.getElementById('login-pass2') as HTMLInputElement).value;
@@ -302,11 +368,41 @@ export class LobbyUI {
         msgEl.textContent = 'Connecting...';
         msgEl.className = 'msg';
 
-        localStorage.setItem('springrts-username', user);
-        this.connection = this.createConnection(
-            (msg: string) => { msgEl.textContent = msg; msgEl.className = 'msg error'; },
-        );
-        this.connection.connect(CONFIG.httpUrl, user, pass);
+        try {
+            // Try login first, then register if login fails
+            let resp = await fetch(`${CONFIG.httpUrl}/api/auth/login`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: user, password: pass }),
+            });
+
+            if (!resp.ok && pass2) {
+                // Registration attempt (confirm password was provided)
+                resp = await fetch(`${CONFIG.httpUrl}/api/auth/register`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: user, password: pass }),
+                });
+            }
+
+            const data = await resp.json();
+            if (!resp.ok || !data.token) {
+                msgEl.textContent = data.error || 'Login failed';
+                msgEl.className = 'msg error';
+                return;
+            }
+
+            this.authToken = data.token;
+            this.myPlayerId = data.user_id ?? 0;
+            localStorage.setItem('springrts-username', user);
+            localStorage.setItem('springrts-token', data.token);
+            console.log(`[lobby] login OK: user=${user} id=${this.myPlayerId}`);
+            this.startPolling();
+            this.showBrowser();
+        } catch (err) {
+            msgEl.textContent = `Connection failed: ${err}`;
+            msgEl.className = 'msg error';
+        }
     }
 
     /// Land on the most appropriate lobby screen after the game canvas
@@ -755,182 +851,115 @@ export class LobbyUI {
 
     // ===================== NETWORK =====================
 
-    private sendCreateRoom(name: string, mapId: string = ''): void {
-        if (!this.connection?.authenticated) return;
-        const b = new flatbuffers.Builder(256);
-        const nOff = b.createString(name);
-        const mOff = b.createString(mapId);
-        // Send whichever game the user picked in the create-room
-        // dropdown. If the game list hasn't arrived yet (unlikely
-        // but possible on a very fast double-click post-login), we
-        // send an empty string and the server picks its first
-        // discovered game as a default.
-        const gOff = b.createString(this.selectedGameId);
-        RoomCreate.startRoomCreate(b);
-        RoomCreate.addName(b, nOff);
-        RoomCreate.addMapName(b, mOff);
-        RoomCreate.addGameName(b, gOff);
-        RoomCreate.addMaxPlayers(b, 8);
-        this.connection.sendClientMessage(b, ClientPayload.RoomCreate, RoomCreate.endRoomCreate(b));
+    // ─── Room operations (all HTTP POST) ───
+
+    private async sendCreateRoom(name: string, mapId: string = ''): Promise<void> {
+        if (!this.authToken) return;
+        const data = await this.lobbyPost('/api/rooms', {
+            name, map: mapId, game: this.selectedGameId,
+        });
+        if (data?.id) this.updateCurrentRoomFromJson(data);
     }
 
-    private sendJoinRoom(roomId: number): void {
-        if (!this.connection?.authenticated) return;
-        const b = new flatbuffers.Builder(64);
-        RoomJoin.startRoomJoin(b);
-        RoomJoin.addRoomId(b, roomId);
-        this.connection.sendClientMessage(b, ClientPayload.RoomJoin, RoomJoin.endRoomJoin(b));
+    private async sendJoinRoom(roomId: number): Promise<void> {
+        if (!this.authToken) return;
+        const data = await this.lobbyPost('/api/rooms/join', { room_id: roomId });
+        if (data?.id) this.updateCurrentRoomFromJson(data);
     }
 
-    private sendLeave(): void {
-        if (!this.connection?.authenticated) return;
-        const b = new flatbuffers.Builder(16);
-        RoomLeave.startRoomLeave(b);
-        this.connection.sendClientMessage(b, ClientPayload.RoomLeave, RoomLeave.endRoomLeave(b));
+    private async sendLeave(): Promise<void> {
+        if (!this.authToken) return;
+        await this.lobbyPost('/api/rooms/leave');
         this.currentRoom = null;
         this.showBrowser();
     }
 
-    private sendReady(ready: boolean): void {
-        if (!this.connection?.authenticated) return;
-        const b = new flatbuffers.Builder(16);
-        RoomReady.startRoomReady(b);
-        RoomReady.addReady(b, ready);
-        this.connection.sendClientMessage(b, ClientPayload.RoomReady, RoomReady.endRoomReady(b));
+    private async sendReady(ready: boolean): Promise<void> {
+        if (!this.authToken) return;
+        const data = await this.lobbyPost('/api/rooms/ready', { ready: ready ? 'true' : 'false' });
+        if (data?.id) this.updateCurrentRoomFromJson(data);
     }
 
-    private sendTeamSelect(team: number): void {
-        if (!this.connection?.authenticated) return;
-        const b = new flatbuffers.Builder(16);
-        RoomTeamSelect.startRoomTeamSelect(b);
-        RoomTeamSelect.addTeam(b, team);
-        this.connection.sendClientMessage(b, ClientPayload.RoomTeamSelect, RoomTeamSelect.endRoomTeamSelect(b));
+    private async sendTeamSelect(team: number): Promise<void> {
+        if (!this.authToken) return;
+        const data = await this.lobbyPost('/api/rooms/team', { team });
+        if (data?.id) this.updateCurrentRoomFromJson(data);
     }
 
-    private sendStartGame(): void {
-        if (!this.connection?.authenticated) return;
-        const b = new flatbuffers.Builder(16);
-        RoomStartGame.startRoomStartGame(b);
-        this.connection.sendClientMessage(b, ClientPayload.RoomStartGame, RoomStartGame.endRoomStartGame(b));
+    private async sendStartGame(): Promise<void> {
+        if (!this.authToken) return;
+        await this.lobbyPost('/api/rooms/start');
     }
 
-    /// Host-only: tell the lobby to terminate the game server subprocess
-    /// for this room. The server validates that the sender is the host;
-    /// the room transitions to Ended via the existing health-check loop
-    /// once the subprocess exits. Non-host senders are silently ignored
-    /// by the server.
-    private sendEndGame(): void {
-        if (!this.connection?.authenticated) return;
-        const b = new flatbuffers.Builder(16);
-        RoomEndGame.startRoomEndGame(b);
-        this.connection.sendClientMessage(b, ClientPayload.RoomEndGame, RoomEndGame.endRoomEndGame(b));
+    private async sendEndGame(): Promise<void> {
+        if (!this.authToken) return;
+        await this.lobbyPost('/api/rooms/end');
     }
 
-    /// Host-only: delete the entire room. Unlike sendEndGame (which
-    /// only stops a running sim and leaves the room intact so the
-    /// host can start another round), this removes the room from
-    /// the lobby and kicks every member back to the browser. The
-    /// server validates host ownership and then broadcasts an
-    /// updated room list; handleRoomList notices the current room
-    /// is gone and falls back to the browser automatically.
-    private sendCloseRoom(): void {
-        if (!this.connection?.authenticated) return;
-        const b = new flatbuffers.Builder(16);
-        RoomCloseRoom.startRoomCloseRoom(b);
-        this.connection.sendClientMessage(
-            b, ClientPayload.RoomCloseRoom, RoomCloseRoom.endRoomCloseRoom(b));
+    private async sendCloseRoom(): Promise<void> {
+        if (!this.authToken) return;
+        await this.lobbyPost('/api/rooms/close');
+        this.currentRoom = null;
+        this.showBrowser();
     }
 
-    /// Ask the server for the list of AI plugins it discovered under
-    /// content/engine/ai and the current game's content/games/<game>/ai.
-    /// The server replies asynchronously with an AIListUpdate that
-    /// handleAIList() caches into `availableAIs`.
-    private sendAIListRequest(): void {
-        if (!this.connection?.authenticated) return;
-        const b = new flatbuffers.Builder(16);
-        AIListRequest.startAIListRequest(b);
-        this.connection.sendClientMessage(
-            b, ClientPayload.AIListRequest, AIListRequest.endAIListRequest(b));
+    private async sendAIListRequest(): Promise<void> {
+        if (!this.currentRoom) return;
+        try {
+            const ais = await this.lobbyGet(`/api/ai/${this.currentRoom.gameName}`);
+            if (Array.isArray(ais)) {
+                this.availableAIs = ais.map((ai: any) => ({
+                    id: ai.id ?? '', displayName: ai.displayName ?? '',
+                    description: ai.description ?? '', isEngineProvided: ai.isEngineProvided ?? false,
+                }));
+                this.availableAIsForGame = this.currentRoom.gameName;
+                if (this.currentScreen === 'room') this.showRoom();
+            }
+        } catch { /* ignore */ }
     }
 
-    /// Ask the server for the list of games discovered under
-    /// content/games. Sent once on first login; the lobby's game
-    /// roster is immutable for the process lifetime so we don't
-    /// re-fetch. Response is a GameListUpdate handled by
-    /// handleGameList().
-    private sendGameListRequest(): void {
-        if (!this.connection?.authenticated) return;
-        const b = new flatbuffers.Builder(16);
-        GameListRequest.startGameListRequest(b);
-        this.connection.sendClientMessage(
-            b, ClientPayload.GameListRequest, GameListRequest.endGameListRequest(b));
+    private async sendGameListRequest(): Promise<void> {
+        try {
+            const games = await this.lobbyGet('/api/games');
+            if (Array.isArray(games)) {
+                this.availableGames = games.map((g: any) => ({
+                    id: g.id ?? '', displayName: g.displayName ?? '',
+                    description: g.description ?? '', version: g.version ?? '',
+                }));
+                if (!this.selectedGameId && this.availableGames.length > 0) {
+                    this.selectedGameId = this.availableGames[0].id;
+                }
+                if (this.currentScreen === 'browser') this.renderGameOptions();
+            }
+        } catch { /* ignore */ }
     }
 
-    /// Host-only: add an AI player to the current room's roster.
-    /// `aiId` must be one of the ids the server reported in its most
-    /// recent AIListUpdate; unknown ids are rejected by the lobby.
-    private sendAddAI(aiId: string, team: number): void {
-        if (!this.connection?.authenticated) return;
-        const b = new flatbuffers.Builder(64);
-        const idOff = b.createString(aiId);
-        RoomAddAI.startRoomAddAI(b);
-        RoomAddAI.addAiId(b, idOff);
-        RoomAddAI.addTeam(b, team);
-        this.connection.sendClientMessage(
-            b, ClientPayload.RoomAddAI, RoomAddAI.endRoomAddAI(b));
+    private async sendAddAI(aiId: string, team: number): Promise<void> {
+        if (!this.authToken) return;
+        const data = await this.lobbyPost('/api/rooms/ai/add', { ai_id: aiId, team });
+        if (data?.id) this.updateCurrentRoomFromJson(data);
     }
 
-    /// Host-only: remove the AI slot at `slotIndex` (as ordered in
-    /// the most recent RoomStateUpdate.aiSlots vector).
-    private sendRemoveAI(slotIndex: number): void {
-        if (!this.connection?.authenticated) return;
-        const b = new flatbuffers.Builder(16);
-        RoomRemoveAI.startRoomRemoveAI(b);
-        RoomRemoveAI.addSlotIndex(b, slotIndex);
-        this.connection.sendClientMessage(
-            b, ClientPayload.RoomRemoveAI, RoomRemoveAI.endRoomRemoveAI(b));
+    private async sendRemoveAI(slotIndex: number): Promise<void> {
+        if (!this.authToken) return;
+        const data = await this.lobbyPost('/api/rooms/ai/remove', { slot_index: slotIndex });
+        if (data?.id) this.updateCurrentRoomFromJson(data);
     }
 
-    /// Host-only: re-assign an AI slot to a different team. The
-    /// slot's start position is preserved. Server rejects if the
-    /// sender is not the room host or the index is out of range.
     private sendSetAITeam(slotIndex: number, team: number): void {
-        if (!this.connection?.authenticated) return;
-        const b = new flatbuffers.Builder(16);
-        RoomSetAITeam.startRoomSetAITeam(b);
-        RoomSetAITeam.addSlotIndex(b, slotIndex);
-        RoomSetAITeam.addTeam(b, team);
-        this.connection.sendClientMessage(
-            b, ClientPayload.RoomSetAITeam, RoomSetAITeam.endRoomSetAITeam(b));
+        // Not yet implemented as an HTTP endpoint — handled via polling
+        console.warn('[lobby] setAITeam not yet available over HTTP');
     }
 
-    /// Assign a map start position to a player or AI slot.
-    ///
-    /// Call with one of:
-    ///   - `target = { kind: 'self' }`     — own slot (any client can do this)
-    ///   - `target = { kind: 'player', playerId }` — host only, another player
-    ///   - `target = { kind: 'ai', slotIndex }`    — host only, an AI slot
-    ///
-    /// `posIndex` is the index into the map's start_positions array,
-    /// or -1 to clear the assignment. The server validates permission
-    /// + occupancy and silently rejects on failure.
-    private sendSetStartPos(
+    private async sendSetStartPos(
         target: { kind: 'self' } | { kind: 'player'; playerId: number } | { kind: 'ai'; slotIndex: number },
         posIndex: number,
-    ): void {
-        if (!this.connection?.authenticated) return;
-        const b = new flatbuffers.Builder(16);
-        RoomSetStartPos.startRoomSetStartPos(b);
-        if (target.kind === 'player') {
-            RoomSetStartPos.addTargetPlayerId(b, target.playerId);
-        } else if (target.kind === 'ai') {
-            RoomSetStartPos.addTargetAiSlot(b, target.slotIndex);
-        }
-        // kind === 'self' leaves target_player_id = 0 which the
-        // server interprets as "the requester's own slot".
-        RoomSetStartPos.addPosIndex(b, posIndex);
-        this.connection.sendClientMessage(
-            b, ClientPayload.RoomSetStartPos, RoomSetStartPos.endRoomSetStartPos(b));
+    ): Promise<void> {
+        if (!this.authToken) return;
+        const body: Record<string, unknown> = { pos: posIndex };
+        if (target.kind === 'player') body.target_player_id = target.playerId;
+        if (target.kind === 'ai') body.target_ai_slot = target.slotIndex;
+        await this.lobbyPost('/api/rooms/startpos', body);
     }
 
     // ===================== HANDLERS =====================

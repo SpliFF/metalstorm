@@ -799,6 +799,79 @@ int main(int argc, char* argv[])
         return HttpAuth::JsonResponse(200, json);
     });
 
+    // GET /api/games — list available games
+    net.AddHttpGet("/api/games", [&availableGames](const std::string&) -> HttpResponse {
+        std::string json = "[";
+        bool first = true;
+        for (const auto& g : availableGames) {
+            if (!first) json += ",";
+            first = false;
+            json += "{\"id\":\"" + HttpAuth::JsonEscape(g.id) + "\""
+                + ",\"displayName\":\"" + HttpAuth::JsonEscape(g.displayName) + "\""
+                + ",\"description\":\"" + HttpAuth::JsonEscape(g.description) + "\""
+                + ",\"version\":\"" + HttpAuth::JsonEscape(g.version) + "\"}";
+        }
+        json += "]";
+        return HttpAuth::JsonResponse(200, json);
+    });
+
+    // GET /api/ai/* — list AI plugins for a game
+    net.AddHttpGet("/api/ai/*", [&aisByGame](const std::string& url) -> HttpResponse {
+        std::string gameId = url.substr(std::string("/api/ai/").size());
+        if (gameId.empty())
+            return HttpAuth::JsonResponse(400, R"({"error":"missing game id"})");
+
+        auto it = aisByGame.find(gameId);
+        if (it == aisByGame.end())
+            return HttpAuth::JsonResponse(404, R"({"error":"game not found"})");
+
+        std::string json = "[";
+        bool first = true;
+        for (const auto& ai : it->second) {
+            if (!first) json += ",";
+            first = false;
+            json += "{\"id\":\"" + HttpAuth::JsonEscape(ai.id) + "\""
+                + ",\"displayName\":\"" + HttpAuth::JsonEscape(ai.displayName) + "\""
+                + ",\"description\":\"" + HttpAuth::JsonEscape(ai.description) + "\""
+                + ",\"isEngineProvided\":" + (ai.isEngineProvided ? "true" : "false") + "}";
+        }
+        json += "]";
+        return HttpAuth::JsonResponse(200, json);
+    });
+
+    // POST /api/rooms/end — end a running game (host-only, keeps room)
+    net.AddHttpPost("/api/rooms/end", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+        int64_t userId = HttpAuth::ValidateAuth(db, headers.authorization);
+        if (userId <= 0)
+            return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+
+        auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
+        if (!room)
+            return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
+
+        // Only the host can end the game
+        auto* player = room->FindPlayer(static_cast<uint32_t>(userId));
+        if (!player || !player->isHost)
+            return HttpAuth::JsonResponse(403, R"({"error":"only the host can end the game"})");
+
+        // Find and kill the game server process
+        auto gsIt = gameServers.find(room->id);
+        if (gsIt == gameServers.end() ||
+            (gsIt->second.state != GameServerInstance::Starting &&
+             gsIt->second.state != GameServerInstance::Running))
+            return HttpAuth::JsonResponse(400, R"({"error":"no running game server for this room"})");
+
+        kill(gsIt->second.pid, SIGTERM);
+        gsIt->second.state = GameServerInstance::Ended;
+        SLOG(SPRING_LOG_NOTICE, "host ended game for room %u (killed pid %d)",
+            room->id, gsIt->second.pid);
+
+        // Reset the room back to Filling so it can be reused
+        rooms.ResetRoomForNextGame(room->id);
+
+        return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
+    });
+
     // POST /api/rooms/join — join a room
     net.AddHttpPost("/api/rooms/join", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
