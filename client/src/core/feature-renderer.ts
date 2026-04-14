@@ -191,7 +191,7 @@ export async function renderMapFeatures(scene: Scene, map: ParsedMapData): Promi
                 const fileName = def.modelUrl.substring(lastSlash + 1);
 
                 const result = await SceneLoader.ImportMeshAsync(
-                    '', stampUrl(baseUrl), fileName, scene,
+                    '', baseUrl, stampUrl(fileName), scene,
                 );
 
                 const primary = pickPrimaryMesh(result.meshes);
