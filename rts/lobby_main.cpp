@@ -270,6 +270,10 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    // Clean up expired sessions on startup
+    int cleaned = db.CleanExpiredSessions(86400); // 24h
+    if (cleaned > 0) SLOG(SPRING_LOG_INFO, "cleaned %d expired session(s)", cleaned);
+
     // --- Sessions & Rooms ---
     SessionManager sessions;
     RoomManager rooms;

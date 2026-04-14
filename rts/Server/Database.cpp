@@ -193,3 +193,18 @@ void Database::RevokeSession(const std::string& token) {
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 }
+
+int Database::CleanExpiredSessions(int maxAgeSeconds) {
+    const char* sql =
+        "DELETE FROM sessions WHERE created_at <= datetime('now', '-' || ? || ' seconds')";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return 0;
+
+    sqlite3_bind_int(stmt, 1, maxAgeSeconds);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    return sqlite3_changes(db);
+}

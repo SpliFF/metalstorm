@@ -54,6 +54,10 @@ public:
     /// Revoke a session token.
     void RevokeSession(const std::string& token);
 
+    /// Delete all expired sessions (older than maxAgeSeconds).
+    /// Returns the number of sessions deleted.
+    int CleanExpiredSessions(int maxAgeSeconds = 86400);
+
 private:
     void CreateTables();
 
