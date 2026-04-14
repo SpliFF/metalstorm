@@ -164,35 +164,23 @@ export class Connection {
         this.connectAttempts++;
         this.setState('connecting');
 
-        // Step 1: Try HTTP auth + WebRTC. If either fails, fall back
-        // to WebSocket with FlatBuffer auth (the original path).
-        let httpAuthOk = false;
+        // Step 1: HTTP auth (token or password)
         try {
             await this.httpAuth(this.pendingUsername, this.pendingPassword);
-            httpAuthOk = true;
         } catch (err) {
-            console.log(`[connection] HTTP auth failed (${err}), will use WS auth`);
-        }
-
-        if (httpAuthOk) {
-            // Try WebRTC since we have an HTTP token
-            this.setState('handshake');
-            try {
-                await this.connectWebRTC();
-                return; // WebRTC connected successfully
-            } catch (err) {
-                console.warn(`[connection] WebRTC failed (${err}), falling back to WebSocket`);
-                // Clean up failed WebRTC state so getControlChannel() returns null
-                if (this.controlChannel) { try { this.controlChannel.close(); } catch {} }
-                if (this.stateChannel) { try { this.stateChannel.close(); } catch {} }
-                if (this.pc) { try { this.pc.close(); } catch {} }
-                this.controlChannel = null;
-                this.stateChannel = null;
-                this.pc = null;
+            if (this.connectAttempts < Connection.MAX_CONNECT_ATTEMPTS) {
+                console.log(`[connection] auth attempt ${this.connectAttempts} failed (${err}), retrying...`);
+                setTimeout(() => this.tryConnect(), Connection.CONNECT_RETRY_DELAY_MS);
+                return;
             }
+            console.error(`[connection] giving up after ${this.connectAttempts} attempts`);
+            this.events.onAuthFailed?.(`${err}`);
+            this.setState('disconnected');
+            return;
         }
 
-        // Fall back to WebSocket with FlatBuffer auth
+        // Step 2: WebSocket connection (WebRTC upgrade path is future)
+        this.setState('handshake');
         this.connectWebSocket();
     }
 
@@ -203,21 +191,34 @@ export class Connection {
 
         // Try token reconnection first
         if (this.sessionToken) {
-            // Validate token by trying exec — if it fails, fall through to password
-            try {
-                const resp = await fetch(`${this.httpBase}/api/auth/validate`, {
-                    headers: { 'Authorization': `Bearer ${this.sessionToken}` },
-                });
-                if (resp.ok) {
-                    // Token still valid — we're authed
+            const resp = await fetch(`${this.httpBase}/api/auth/validate`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${this.sessionToken}`,
+                    'Content-Type': 'application/json',
+                },
+                body: '{}',
+            });
+
+            if (resp.ok) {
+                const data = await resp.json();
+                if (data.valid) {
+                    this.playerId = data.user_id ?? this.playerId;
+                    this.myTeam = data.team ?? this.myTeam;
+                    console.log(`[connection] token valid for user '${data.username}'`);
                     return;
                 }
-            } catch { /* fall through */ }
-            // Token invalid, clear it
+            }
+            // Token rejected — clear it and try password
+            console.log('[connection] token expired or invalid');
             this.sessionToken = null;
         }
 
         // Password login
+        if (!password) {
+            throw new Error('no valid token and no password');
+        }
+
         const resp = await fetch(`${this.httpBase}/api/auth/login`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

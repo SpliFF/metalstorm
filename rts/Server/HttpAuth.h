@@ -216,12 +216,21 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db) {
         return JsonResponse(201, json);
     });
 
-    // GET /api/auth/validate — check if a token is still valid
-    net.AddHttpGet("/api/auth/validate", [&db](const std::string&) -> HttpResponse {
-        // Token comes from query param since GET has no body
-        // For simplicity, just return status. Real validation is
-        // done per-request by the auth middleware.
-        return JsonResponse(200, R"({"status":"ok"})");
+    // POST /api/auth/validate — check if a token is still valid
+    net.AddHttpPost("/api/auth/validate", [&db](const std::string&, const std::string&, const HttpRequestHeaders& headers) -> HttpResponse {
+        int64_t userId = ValidateAuth(db, headers.authorization);
+        if (userId <= 0) {
+            return JsonResponse(401, R"({"valid":false,"error":"invalid or expired token"})");
+        }
+        auto user = db.FindUserById(userId);
+        if (!user) {
+            return JsonResponse(401, R"({"valid":false,"error":"user not found"})");
+        }
+        std::string json = "{\"valid\":true"
+            ",\"user_id\":" + std::to_string(user->id) +
+            ",\"username\":\"" + JsonEscape(user->username) + "\""
+            ",\"role\":\"" + JsonEscape(user->role) + "\"}";
+        return JsonResponse(200, json);
     });
 }
 
