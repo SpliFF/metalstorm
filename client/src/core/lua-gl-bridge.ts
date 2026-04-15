@@ -20,6 +20,7 @@
  */
 import { markOpaque, type LuaValue } from './lua-runtime.js';
 import { ImmediateModeRenderer } from './lua-gl-immediate.js';
+import { createLuaFontObject } from './lua-gl-font.js';
 
 /** Handle returned by gl.CreateShader — opaque to Lua. */
 export interface LuaShaderHandle {
@@ -213,13 +214,20 @@ export class LuaGLBridge {
         gl['CallList'] = (id: LuaValue) => this.imm.callList(Number(id));
         gl['DeleteList'] = (id: LuaValue) => this.imm.deleteList(Number(id));
 
-        // ── Font (stubbed — separate implementation needed) ─────────
-        gl['LoadFont'] = (path: LuaValue, _size?: LuaValue, _outlineW?: LuaValue,
-            _outlineS?: LuaValue) => {
-            console.warn(`[gl.LoadFont] stub: ${path}`);
-            return null;
+        // ── Font ─────────────────────────────────────────────────────
+        gl['LoadFont'] = (path: LuaValue, size?: LuaValue, outlineW?: LuaValue,
+            outlineWeight?: LuaValue) => {
+            return createLuaFontObject(
+                this.gl, this.imm,
+                String(path ?? 'FreeSansBold.otf'),
+                Number(size ?? 12),
+                Number(outlineW ?? 0),
+                Number(outlineWeight ?? 0),
+            );
         };
-        gl['DeleteFont'] = (_handle: LuaValue) => { };
+        gl['DeleteFont'] = (_handle: LuaValue) => {
+            // Atlas cleanup handled by GC
+        };
 
         // ── Queries ─────────────────────────────────────────────────
         gl['GetViewSizes'] = () => {
