@@ -602,6 +602,70 @@ export class RTSCamera {
         this.startTransition(endPos, endLookAt, durationMs);
     }
 
+    /**
+     * Rotate the camera around the current look-at point.
+     * @param yawDeg   Degrees to rotate horizontally (positive = clockwise when viewed from above)
+     * @param pitchDeg Degrees to change elevation (positive = steeper / more overhead)
+     * @param durationMs Animation time. 0 = instant.
+     */
+    rotateAroundTarget(yawDeg: number, pitchDeg = 0, durationMs = 0): void {
+        // Compute the destination position by applying the rotation to
+        // the current camera offset from lookAt.
+        let ox = this.camera.position.x - this.lookAt.x;
+        let oy = this.camera.position.y - this.lookAt.y;
+        let oz = this.camera.position.z - this.lookAt.z;
+        const radius = Math.sqrt(ox * ox + oy * oy + oz * oz);
+        if (radius < 0.0001) return;
+
+        // Yaw
+        const yaw = yawDeg * Math.PI / 180;
+        const cy = Math.cos(yaw);
+        const sy = Math.sin(yaw);
+        const rx = ox * cy + oz * sy;
+        const rz = -ox * sy + oz * cy;
+        ox = rx;
+        oz = rz;
+
+        // Pitch
+        const horiz = Math.sqrt(ox * ox + oz * oz);
+        let pitch = Math.atan2(oy, horiz);
+        pitch += pitchDeg * Math.PI / 180;
+        pitch = Math.max(this.minPitchRad, Math.min(this.maxPitchRad, pitch));
+
+        const newHoriz = radius * Math.cos(pitch);
+        const newVert = radius * Math.sin(pitch);
+        if (horiz > 0.0001) {
+            const scale = newHoriz / horiz;
+            ox *= scale;
+            oz *= scale;
+        } else {
+            ox = 0;
+            oz = newHoriz;
+        }
+        oy = newVert;
+
+        // Clamp height
+        let cameraY = this.lookAt.y + oy;
+        if (cameraY < this.minHeight) oy = this.minHeight - this.lookAt.y;
+        else if (cameraY > this.maxHeight) oy = this.maxHeight - this.lookAt.y;
+
+        const endPos = new Vector3(
+            this.lookAt.x + ox,
+            this.lookAt.y + oy,
+            this.lookAt.z + oz,
+        );
+
+        if (durationMs <= 0) {
+            this.transition = null;
+            this.camera.position.copyFrom(endPos);
+            this.camera.setTarget(this.lookAt);
+            this.targetDistance = -1;
+            this.updateAxes();
+            return;
+        }
+        this.startTransition(endPos, this.lookAt.clone(), durationMs);
+    }
+
     /** Cancel any in-progress animated transition. */
     cancelTransition(): void {
         this.transition = null;

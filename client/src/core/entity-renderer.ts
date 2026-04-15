@@ -1,32 +1,116 @@
 /**
- * EntityRenderer — thin-instanced entity rendering with real models.
+ * EntityRenderer — per-piece thin-instanced entity rendering.
  *
- * When the server sends GameUnitDefs, this renderer preloads each
- * unit type's .glb model. Entities are grouped by (defId, team) for
- * batched draw calls via thin instances. Defs without a model fall
- * back to coloured procedural shapes (box/cylinder/cone/sphere).
+ * Each unit type's glb model is loaded and decomposed into pieces
+ * (chassis, turret, arms, legs, etc.). Each piece becomes a separate
+ * thin-instance source mesh. All units of the same type share the
+ * same piece meshes — 1000 tanks = 1 draw call per piece type, not
+ * 1000 draw calls.
  *
- * Uses snapshot interpolation for smooth movement.
+ * The piece hierarchy from the glb is preserved so individual pieces
+ * can be animated (turret rotation, walking legs) by overriding their
+ * local transforms. For now all pieces use their rest pose from the
+ * model file.
+ *
+ * Defs without a model fall back to a single procedural shape using
+ * thin instances (box/cylinder/cone/sphere).
  */
 
 import {
     Scene,
     MeshBuilder,
     Mesh,
+    TransformNode,
     Matrix,
     Vector3,
     Quaternion,
     StandardMaterial,
+    PBRMaterial,
     Color3,
     BoundingInfo,
     SceneLoader,
+    Texture,
 } from '@babylonjs/core';
-// Register glTF loader plugin so SceneLoader can read .glb files.
 import '@babylonjs/loaders/glTF/index.js';
+// Register DDS texture loader so Babylon can handle .dds files directly.
+import '@babylonjs/core/Materials/Textures/Loaders/ddsTextureLoader.js';
 import type { EntityStateSnapshot } from './entity-state.js';
 import { EntityInterpolator } from './entity-interpolator.js';
 import type { UnitDefInfo } from './connection.js';
 import { stampUrl } from '../config.js';
+
+/** Parsed model config from a .config.lua sidecar. */
+interface ModelConfig {
+    tex1?: string;
+    tex2?: string;
+    invertteamcolor?: boolean;
+}
+
+/**
+ * Fetch and parse a model's .config.lua sidecar file. The file is a
+ * simple Lua `return { key = value, ... }` table — we extract texture
+ * references with regexes rather than running a full Lua parser.
+ */
+async function fetchModelConfig(modelUrl: string): Promise<ModelConfig | null> {
+    // modelUrl is like /api/games/data/zk/models/strikecom.glb
+    // config is at /api/games/data/zk/models/strikecom.config.lua
+    const configUrl = modelUrl.replace(/\.glb$/, '.config.lua');
+    try {
+        const resp = await fetch(configUrl);
+        if (!resp.ok) return null;
+        const lua = await resp.text();
+
+        const tex1 = lua.match(/tex1\s*=\s*"([^"]+)"/)?.[1];
+        const tex2 = lua.match(/tex2\s*=\s*"([^"]+)"/)?.[1];
+        const invertMatch = lua.match(/invertteamcolor\s*=\s*(true|false)/);
+        const invertteamcolor = invertMatch ? invertMatch[1] === 'true' : undefined;
+
+        return { tex1, tex2, invertteamcolor };
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Resolve a texture filename from a config (e.g. "strikecom.dds") to
+ * a full URL. Textures live in `unittextures/` alongside `models/`.
+ */
+function resolveTextureUrl(modelUrl: string, textureName: string): string {
+    // modelUrl: /api/games/data/zk/models/strikecom.glb
+    // texture:  /api/games/data/zk/unittextures/strikecom.dds
+    const gameBase = modelUrl.substring(0, modelUrl.lastIndexOf('/models/'));
+    return `${gameBase}/unittextures/${textureName}`;
+}
+
+/**
+ * Apply legacy Spring textures (tex1 = diffuse, tex2 = team color mask)
+ * to all meshes in a model. Creates a StandardMaterial with the diffuse
+ * texture applied.
+ */
+function applyLegacyTextures(
+    meshes: Mesh[],
+    config: ModelConfig,
+    modelUrl: string,
+    scene: Scene,
+): void {
+    if (!config.tex1) return;
+
+    const tex1Url = resolveTextureUrl(modelUrl, config.tex1);
+    const diffuseTex = new Texture(tex1Url, scene);
+    diffuseTex.hasAlpha = false;
+
+    // TODO: tex2 is the team color mask — apply it as a second texture
+    // with a custom shader or material plugin to blend team color where
+    // the mask is bright. For now, just apply the diffuse texture.
+
+    for (const mesh of meshes) {
+        // Replace the default flat material with one that has the texture
+        const mat = new StandardMaterial(mesh.name + '_mat', scene);
+        mat.diffuseTexture = diffuseTex;
+        mat.specularColor = new Color3(0.2, 0.2, 0.2);
+        mesh.material = mat;
+    }
+}
 
 const TEAM_COLORS = [
     new Color3(0.2, 0.5, 1.0),
@@ -49,12 +133,33 @@ export interface EntityMeta {
     healthScale: number;
 }
 
-/** Loaded model template for a unit def — the mesh used as thin-instance source. */
-interface ModelTemplate {
+/** A single piece (body part) within a model template. */
+interface PieceInfo {
+    /** The mesh with vertices in piece-local space. */
     mesh: Mesh;
-    /** Vertical offset to shift the model up so its base sits at Y=0.
-     *  Computed from the bounding box minimum Y after import. */
+    /** Piece name from the glb node (e.g. "Turret", "LegLeft"). */
+    name: string;
+    /** Index of the parent piece (-1 for root-level pieces). */
+    parentIndex: number;
+    /** Local transform relative to parent (from glb hierarchy).
+     *  Multiply parent chain to get the rest-pose world matrix. */
+    localMatrix: Matrix;
+    /** Pre-computed rest-pose world matrix (product of all ancestors'
+     *  localMatrix values). Used directly when no animation override. */
+    restWorldMatrix: Matrix;
+}
+
+/** Loaded model template for a unit def. */
+interface ModelTemplate {
+    pieces: PieceInfo[];
+    /** Vertical offset so the model's base sits at Y=0. */
     yOffset: number;
+}
+
+/** Per-piece thin-instance render mesh, keyed by (defId, team, pieceIdx). */
+interface PieceRenderEntry {
+    mesh: Mesh;
+    pieceIdx: number;
 }
 
 export class EntityRenderer {
@@ -64,22 +169,19 @@ export class EntityRenderer {
     private teamMaterials: StandardMaterial[] = [];
 
     // --- Model loading ---
-    /** defId → loaded model template (null = no model, use fallback shape). */
     private modelTemplates = new Map<number, ModelTemplate | null>();
-    /** Resolves when all model preloading is complete. */
     private modelsReady: Promise<void> = Promise.resolve();
-    /** defId → modelUrl for logging/debugging. */
     private defModelUrls = new Map<number, string>();
 
     // --- Render meshes ---
-    // Keyed by a string `"model:{defId}:{team}"` or `"shape:{shape}:{team}"`.
-    // Each key owns its own Mesh so thin-instance buffers don't collide.
+    // Per-piece thin-instance meshes, keyed by "model:{defId}:{team}:{pieceIdx}"
+    // or "shape:{shape}:{team}" for fallbacks.
     private renderMeshes = new Map<string, Mesh>();
 
-    // --- Fallback shape meshes (created on demand) ---
+    // --- Fallback shape meshes ---
     private shapeMeshes = new Map<number, Mesh>();
 
-    // Selection ring
+    // Selection ring (still uses thin instances directly)
     private selectionMesh: Mesh | null = null;
     private selectedIds: number[] = [];
 
@@ -95,9 +197,7 @@ export class EntityRenderer {
     }
 
     /**
-     * Register unit defs and start loading their models. Called
-     * incrementally as the server streams defs for newly encountered
-     * unit types — safe to call multiple times with overlapping sets.
+     * Register unit defs and start loading their models.
      */
     setUnitDefs(defs: UnitDefInfo[]): void {
         const loadPromises: Promise<void>[] = [];
@@ -106,7 +206,6 @@ export class EntityRenderer {
         let alreadyKnown = 0;
 
         for (const def of defs) {
-            // Skip defs we already know about
             if (this.defModelUrls.has(def.defId)) {
                 alreadyKnown++;
                 continue;
@@ -134,7 +233,6 @@ export class EntityRenderer {
                     (alreadyKnown > 0 ? `, ${alreadyKnown} already known` : '')
                 );
             });
-            // Chain onto any outstanding load promises
             this.modelsReady = this.modelsReady.then(() => batchReady);
         }
     }
@@ -149,51 +247,145 @@ export class EntityRenderer {
                 '', baseUrl, stampUrl(fileName), this.scene,
             );
 
-            // Pick the first mesh with actual geometry
-            let primary: Mesh | null = null;
-            for (const m of result.meshes) {
-                if (m instanceof Mesh && m.getTotalVertices() > 0) {
-                    primary = m;
-                    break;
+            // Build piece list from the imported hierarchy. We need to
+            // map glb nodes to pieces, preserving parent relationships.
+            // The glb node tree may contain TransformNodes (no geometry)
+            // as structural parents — we keep those as pieces too so the
+            // hierarchy chain is unbroken.
+            const allNodes = result.meshes as (Mesh | TransformNode)[];
+            // Also include transform nodes that aren't meshes
+            for (const tn of result.transformNodes || []) {
+                if (!allNodes.includes(tn)) allNodes.push(tn);
+            }
+
+            // Map each node to an index for parent lookups
+            const nodeToIndex = new Map<TransformNode, number>();
+            for (let i = 0; i < allNodes.length; i++) {
+                nodeToIndex.set(allNodes[i], i);
+            }
+
+            // Compute world matrices while hierarchy is intact
+            for (const n of allNodes) n.computeWorldMatrix(true);
+
+            // Build piece infos
+            const pieces: PieceInfo[] = [];
+            const nodeTopiece = new Map<TransformNode, number>();
+
+            for (let i = 0; i < allNodes.length; i++) {
+                const node = allNodes[i];
+                const isMesh = node instanceof Mesh && node.getTotalVertices() > 0;
+
+                // Skip the __root__ container Babylon creates
+                if (node.name === '__root__') continue;
+
+                // Find parent piece index
+                let parentIndex = -1;
+                let p = node.parent;
+                while (p) {
+                    if (nodeTopiece.has(p as TransformNode)) {
+                        parentIndex = nodeTopiece.get(p as TransformNode)!;
+                        break;
+                    }
+                    p = p.parent;
+                }
+
+                // Get local matrix relative to parent
+                const localMatrix = node.getWorldMatrix().clone();
+                if (parentIndex >= 0) {
+                    // localMatrix = parentWorldInverse × worldMatrix
+                    const parentWorld = pieces[parentIndex].restWorldMatrix;
+                    const parentInv = Matrix.Invert(parentWorld);
+                    localMatrix.copyFrom(parentInv.multiply(node.getWorldMatrix()));
+                }
+
+                const restWorldMatrix = node.getWorldMatrix().clone();
+
+                const pieceIdx = pieces.length;
+                nodeTopiece.set(node, pieceIdx);
+
+                if (isMesh) {
+                    const mesh = node as Mesh;
+                    // Detach from hierarchy, keep vertices in piece-local space
+                    mesh.parent = null;
+                    mesh.position.set(0, 0, 0);
+                    mesh.rotationQuaternion = Quaternion.Identity();
+                    mesh.scaling.set(1, 1, 1);
+                    mesh.isPickable = false;
+                    mesh.isVisible = false;
+                    mesh.thinInstanceEnablePicking = false;
+                    mesh.alwaysSelectAsActiveMesh = true;
+                    mesh.setBoundingInfo(new BoundingInfo(
+                        new Vector3(-1e6, -1e6, -1e6),
+                        new Vector3(1e6, 1e6, 1e6),
+                    ));
+                    mesh.renderingGroupId = 2;
+
+                    pieces.push({
+                        mesh,
+                        name: node.name,
+                        parentIndex,
+                        localMatrix,
+                        restWorldMatrix,
+                    });
+                } else {
+                    // Structural node (no geometry) — still needed for
+                    // hierarchy chain. Use a dummy mesh reference.
+                    pieces.push({
+                        mesh: null!,
+                        name: node.name,
+                        parentIndex,
+                        localMatrix,
+                        restWorldMatrix,
+                    });
+                    // Hide the node
+                    node.setEnabled(false);
                 }
             }
 
-            if (!primary) {
+            // Filter to only pieces with geometry for rendering
+            const geometryPieces = pieces.filter(p => p.mesh != null);
+
+            if (geometryPieces.length === 0) {
                 console.warn(`[entity-renderer] ${def.name}: glb has no geometry`);
                 return null;
             }
 
-            // Compute bounding box BEFORE detaching from the import
-            // hierarchy so world transforms are included.
-            primary.refreshBoundingInfo();
-            const bb = primary.getBoundingInfo().boundingBox;
-            const yOffset = -bb.minimumWorld.y;
-
-            // Hide all imported meshes except the primary, and detach
-            // it from the import root so its transform is independent.
-            for (const m of result.meshes) {
-                if (m !== primary) m.setEnabled(false);
+            // Compute yOffset from rest-pose bounding boxes so the
+            // model's base sits at Y=0.
+            let minY = Infinity;
+            for (const p of geometryPieces) {
+                // Transform the piece-local bounding box by its rest
+                // world matrix to get the actual Y extent.
+                p.mesh.refreshBoundingInfo();
+                const bb = p.mesh.getBoundingInfo().boundingBox;
+                // Transform min/max corners by the rest world matrix
+                const corners = [
+                    Vector3.TransformCoordinates(bb.minimum, p.restWorldMatrix),
+                    Vector3.TransformCoordinates(bb.maximum, p.restWorldMatrix),
+                ];
+                for (const c of corners) {
+                    if (c.y < minY) minY = c.y;
+                }
             }
-            primary.parent = null;
-            primary.position.set(0, 0, 0);
-            primary.rotationQuaternion = Quaternion.Identity();
-            primary.scaling.set(1, 1, 1);
-            primary.isPickable = false;
-            primary.isVisible = false; // Hidden until instances are set
-            primary.thinInstanceEnablePicking = false;
-            primary.alwaysSelectAsActiveMesh = true;
-            primary.setBoundingInfo(new BoundingInfo(
-                new Vector3(-1e6, -1e6, -1e6),
-                new Vector3(1e6, 1e6, 1e6),
-            ));
-            primary.renderingGroupId = 2;
+            const yOffset = -minY;
+
+            // Fetch model config (tex1/tex2/etc) and apply textures.
+            // This runs in parallel with nothing — the model is already
+            // loaded, we just need the texture metadata.
+            const config = await fetchModelConfig(def.modelUrl);
+            if (config?.tex1) {
+                const meshesWithGeometry = geometryPieces.map(p => p.mesh);
+                applyLegacyTextures(meshesWithGeometry, config, def.modelUrl, this.scene);
+            }
 
             console.log(
                 `[entity-renderer] ${def.name}: model loaded, ` +
-                `yOffset=${yOffset.toFixed(1)}, verts=${primary.getTotalVertices()}`,
+                `${geometryPieces.length} piece(s) with geometry, ` +
+                `${pieces.length} total nodes, yOffset=${yOffset.toFixed(1)}` +
+                (config?.tex1 ? `, tex1=${config.tex1}` : ''),
             );
 
-            return { mesh: primary, yOffset };
+            return { pieces, yOffset };
         } catch (err) {
             console.warn(
                 `[entity-renderer] ${def.name}: failed to load ${def.modelUrl}`,
@@ -209,8 +401,7 @@ export class EntityRenderer {
     }
 
     /**
-     * Build a fallback Mesh for one (shape, team) pair. Each shape is
-     * shifted upward by half its height and baked so the base sits at y=0.
+     * Build a fallback Mesh for one (shape, team) pair.
      */
     private buildFallbackMesh(shape: UnitShape, team: number): Mesh {
         const name = `render_fallback_${shape}_${team}`;
@@ -248,57 +439,40 @@ export class EntityRenderer {
         return mesh;
     }
 
-    /** Compute the render-group key for a (defId, team) pair. */
-    private renderKey(defId: number, team: number): string {
-        const tmpl = this.modelTemplates.get(defId);
-        if (tmpl) return `model:${defId}:${team}`;
-        const shape = defIdToShape(defId);
-        const teamIdx = team % this.teamMaterials.length;
-        return `shape:${shape}:${teamIdx}`;
+    /**
+     * Get or create the thin-instance render mesh for a specific piece
+     * of a specific (defId, team). Clones the template piece mesh.
+     */
+    private getOrCreatePieceMesh(defId: number, team: number, pieceIdx: number, piece: PieceInfo): Mesh {
+        const key = `model:${defId}:${team}:${pieceIdx}`;
+        let mesh = this.renderMeshes.get(key);
+        if (!mesh) {
+            mesh = piece.mesh.clone(`unit_${defId}_t${team}_p${pieceIdx}_${piece.name}`);
+            mesh.makeGeometryUnique();
+
+            if (!mesh.material) {
+                const teamColor = TEAM_COLORS[team % TEAM_COLORS.length];
+                const mat = new StandardMaterial(`unit_${defId}_t${team}_p${pieceIdx}_mat`, this.scene);
+                mat.diffuseColor = teamColor;
+                mat.specularColor = new Color3(0.3, 0.3, 0.3);
+                mesh.material = mat;
+            }
+
+            mesh.isPickable = false;
+            mesh.isVisible = false;
+            mesh.thinInstanceEnablePicking = false;
+            mesh.alwaysSelectAsActiveMesh = true;
+            mesh.setBoundingInfo(new BoundingInfo(
+                new Vector3(-1e6, -1e6, -1e6),
+                new Vector3(1e6, 1e6, 1e6),
+            ));
+            mesh.renderingGroupId = 2;
+            this.renderMeshes.set(key, mesh);
+        }
+        return mesh;
     }
 
-    /**
-     * Get or create a render mesh for a (defId, team) pair. If a model
-     * template exists for this defId, clone it and apply team material.
-     * Otherwise fall back to a procedural shape.
-     */
-    private getOrCreateRenderMesh(defId: number, team: number): Mesh {
-        const tmpl = this.modelTemplates.get(defId);
-        if (tmpl) {
-            const key = `model:${defId}:${team}`;
-            let mesh = this.renderMeshes.get(key);
-            if (!mesh) {
-                // Clone the template so each team gets its own thin-instance buffer
-                mesh = tmpl.mesh.clone(`unit_${defId}_team${team}`);
-                mesh.makeGeometryUnique();
-
-                // Preserve the original material (PBR from glTF) if
-                // present — it has textures and proper lighting. Only
-                // fall back to a flat team-colour material when the
-                // model has no material at all.
-                if (!mesh.material) {
-                    const teamColor = TEAM_COLORS[team % TEAM_COLORS.length];
-                    const mat = new StandardMaterial(`unit_${defId}_team${team}_mat`, this.scene);
-                    mat.diffuseColor = teamColor;
-                    mat.specularColor = new Color3(0.3, 0.3, 0.3);
-                    mesh.material = mat;
-                }
-
-                mesh.isPickable = false;
-                mesh.isVisible = false;
-                mesh.thinInstanceEnablePicking = false;
-                mesh.alwaysSelectAsActiveMesh = true;
-                mesh.setBoundingInfo(new BoundingInfo(
-                    new Vector3(-1e6, -1e6, -1e6),
-                    new Vector3(1e6, 1e6, 1e6),
-                ));
-                mesh.renderingGroupId = 2;
-                this.renderMeshes.set(key, mesh);
-            }
-            return mesh;
-        }
-
-        // Fallback: procedural shape
+    private getFallbackMesh(defId: number, team: number): Mesh {
         const shape = defIdToShape(defId);
         const teamIdx = team % this.teamMaterials.length;
         const key = `shape:${shape}:${teamIdx}`;
@@ -423,39 +597,72 @@ export class EntityRenderer {
     tick(): void {
         const now = performance.now();
 
-        // Collect matrices grouped by render mesh key
+        // Collect per-piece instance matrices.
+        // Key: render mesh key → { mesh, matrices[], count }
         const groups = new Map<string, { mesh: Mesh; matrices: number[]; count: number }>();
 
         for (const [id, meta] of this.entityMeta) {
             const lerped = this.interpolator.getInterpolated(id, now);
             if (!lerped) continue;
 
-            const key = this.renderKey(meta.defId, meta.team);
-            let group = groups.get(key);
-            if (!group) {
-                const mesh = this.getOrCreateRenderMesh(meta.defId, meta.team);
-                group = { mesh, matrices: [], count: 0 };
-                groups.set(key, group);
-            }
-
-            const rotation = (lerped.heading / 65535) * Math.PI * 2;
-            // Apply yOffset from model bounding box so the base sits
-            // on the ground rather than the model being half-buried.
             const tmpl = this.modelTemplates.get(meta.defId);
-            const yOff = tmpl?.yOffset ?? 0;
-            const matrix = Matrix.Compose(
-                new Vector3(1, meta.healthScale, 1),
-                Quaternion.RotationYawPitchRoll(rotation, 0, 0),
-                new Vector3(lerped.x, lerped.y + yOff, lerped.z),
-            );
 
-            const arr = new Float32Array(16);
-            matrix.copyToArray(arr, 0);
-            for (let j = 0; j < 16; j++) group.matrices.push(arr[j]);
-            group.count++;
+            if (tmpl) {
+                // Entity world transform
+                const rotation = (lerped.heading / 65535) * Math.PI * 2;
+                const entityMatrix = Matrix.Compose(
+                    new Vector3(1, 1, 1),
+                    Quaternion.RotationYawPitchRoll(rotation, 0, 0),
+                    new Vector3(lerped.x, lerped.y + tmpl.yOffset, lerped.z),
+                );
+
+                // Push one instance matrix per piece with geometry
+                for (let pi = 0; pi < tmpl.pieces.length; pi++) {
+                    const piece = tmpl.pieces[pi];
+                    if (!piece.mesh) continue; // structural node, no geometry
+
+                    const key = `model:${meta.defId}:${meta.team}:${pi}`;
+                    let group = groups.get(key);
+                    if (!group) {
+                        const mesh = this.getOrCreatePieceMesh(meta.defId, meta.team, pi, piece);
+                        group = { mesh, matrices: [], count: 0 };
+                        groups.set(key, group);
+                    }
+
+                    // Instance matrix = entityWorld × pieceRestWorld
+                    // This places piece-local vertices into final world position.
+                    const instanceMatrix = piece.restWorldMatrix.multiply(entityMatrix);
+                    const arr = new Float32Array(16);
+                    instanceMatrix.copyToArray(arr, 0);
+                    for (let j = 0; j < 16; j++) group.matrices.push(arr[j]);
+                    group.count++;
+                }
+            } else {
+                // Fallback shape
+                const shape = defIdToShape(meta.defId);
+                const teamIdx = meta.team % this.teamMaterials.length;
+                const key = `shape:${shape}:${teamIdx}`;
+                let group = groups.get(key);
+                if (!group) {
+                    const mesh = this.getFallbackMesh(meta.defId, meta.team);
+                    group = { mesh, matrices: [], count: 0 };
+                    groups.set(key, group);
+                }
+
+                const rotation = (lerped.heading / 65535) * Math.PI * 2;
+                const matrix = Matrix.Compose(
+                    new Vector3(1, meta.healthScale, 1),
+                    Quaternion.RotationYawPitchRoll(rotation, 0, 0),
+                    new Vector3(lerped.x, lerped.y, lerped.z),
+                );
+                const arr = new Float32Array(16);
+                matrix.copyToArray(arr, 0);
+                for (let j = 0; j < 16; j++) group.matrices.push(arr[j]);
+                group.count++;
+            }
         }
 
-        // Update render meshes — show groups with instances, hide empty ones
+        // Update render meshes
         const activeKeys = new Set<string>();
         for (const [key, group] of groups) {
             activeKeys.add(key);
@@ -465,7 +672,7 @@ export class EntityRenderer {
             group.mesh.thinInstanceCount = group.count;
         }
 
-        // Hide meshes that had instances last frame but don't this frame
+        // Hide meshes not active this frame
         for (const [rKey, mesh] of this.renderMeshes) {
             if (!activeKeys.has(rKey)) {
                 mesh.isVisible = false;
@@ -496,9 +703,12 @@ export class EntityRenderer {
     dispose(): void {
         for (const mesh of this.renderMeshes.values()) mesh.dispose();
         this.renderMeshes.clear();
-        // Dispose model templates
         for (const tmpl of this.modelTemplates.values()) {
-            if (tmpl) tmpl.mesh.dispose();
+            if (tmpl) {
+                for (const p of tmpl.pieces) {
+                    if (p.mesh) p.mesh.dispose();
+                }
+            }
         }
         this.modelTemplates.clear();
         if (this.selectionMesh) {

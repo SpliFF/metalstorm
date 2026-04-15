@@ -668,6 +668,7 @@ int main(int argc, char* argv[])
         else if (ext == ".json") ct = "application/json";
         else if (ext == ".png") ct = "image/png";
         else if (ext == ".jpg" || ext == ".jpeg") ct = "image/jpeg";
+        else if (ext == ".dds") ct = "image/vnd-ms.dds";
         else if (ext == ".glb") ct = "model/gltf-binary";
         else if (ext == ".gltf") ct = "model/gltf+json";
         else if (ext == ".html") ct = "text/html; charset=utf-8";

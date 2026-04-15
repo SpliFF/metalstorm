@@ -303,6 +303,9 @@ async function startGame(gameServerPort: number, mapName: string): Promise<void>
         saveView: () => rtsCamera.saveView(),
         /** Restore a previously saved view. */
         restoreView: (view: any, durationMs?: number) => rtsCamera.restoreView(view, durationMs),
+        /** Rotate camera around current target by degrees. Positive yaw = clockwise from above. */
+        rotateAroundTarget: (yawDeg: number, pitchDeg?: number, durationMs?: number) =>
+            rtsCamera.rotateAroundTarget(yawDeg, pitchDeg, durationMs),
         /** Cancel any running camera animation. */
         cancel: () => rtsCamera.cancelTransition(),
         /** Whether an animation is currently running. */

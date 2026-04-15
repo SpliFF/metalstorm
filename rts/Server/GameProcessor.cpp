@@ -90,6 +90,18 @@ std::string ResolveTexturePath(const fs::path& unittexturesDir,
     return {};
 }
 
+/// Check if a sidecar metadata file exists for a model source file.
+/// Spring games use `<stem>.<ext>.lua` (e.g. `tank.dae.lua`) to store
+/// per-model metadata: texture references, origin overrides, piece
+/// transforms, etc. We copy these to `<stem>.config.lua` in the output
+/// directory so they participate in our standard LuaConfig system.
+fs::path FindSidecarLua(const fs::path& modelSource) {
+    // Try <full_filename>.lua (e.g. strikecom.dae.lua)
+    const fs::path sidecar = fs::path(modelSource.string() + ".lua");
+    if (fs::exists(sidecar)) return sidecar;
+    return {};
+}
+
 /// Gate on file extension to avoid spawning a process for stray
 /// `.txt`/`.dds`/etc. files that end up in an objects3d/ directory.
 /// Assimp itself supports a wider list internally but these are the
@@ -221,6 +233,23 @@ void Process(const std::string& gamePath,
                         gameId.c_str(), texBasename.c_str(),
                         src.filename().string().c_str());
                 }
+            }
+        }
+
+        // Copy the legacy sidecar metadata file (<model>.<ext>.lua) to
+        // <stem>.config.lua in the output directory. This must happen
+        // BEFORE running modelimporter because the importer skips
+        // writing .config.json when .config.lua exists — and the
+        // sidecar's author-specified data (textures, origin, etc.)
+        // should take precedence.
+        const fs::path sidecar = FindSidecarLua(src);
+        if (!sidecar.empty() && !fs::exists(dstLua)) {
+            std::error_code cpec;
+            fs::copy_file(sidecar, dstLua, cpec);
+            if (cpec) {
+                SLOG(SPRING_LOG_WARNING, "%s: failed to copy sidecar %s → %s: %s",
+                    gameId.c_str(), sidecar.filename().string().c_str(),
+                    dstLua.filename().string().c_str(), cpec.message().c_str());
             }
         }
 
