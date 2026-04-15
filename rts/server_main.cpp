@@ -275,7 +275,7 @@ int main(int argc, char* argv[])
     // --- Content roots ---
     // Game content is searched first, then map, then cwd
     if (!gamePath.empty()) {
-        CFileHandler::AddContentRoot(gamePath);
+        CFileHandler::AddContentRoot(gamePath, RootCategory::Mod);
         SLOG(SPRING_LOG_NOTICE, "game content: %s", gamePath.c_str());
 
         // Also expose the preprocessed game models dir as a content
@@ -290,13 +290,13 @@ int main(int argc, char* argv[])
             gameId = fs::path(gamePath).parent_path().filename().string();
         const std::string processedModels = "data/games/" + gameId + "/models";
         if (fs::is_directory(processedModels)) {
-            CFileHandler::AddContentRoot(processedModels);
+            CFileHandler::AddContentRoot(processedModels, RootCategory::Mod);
             SLOG(SPRING_LOG_NOTICE, "processed game models: %s",
                 processedModels.c_str());
         }
     }
     if (!mapPath.empty()) {
-        CFileHandler::AddContentRoot(mapPath);
+        CFileHandler::AddContentRoot(mapPath, RootCategory::Map);
         SLOG(SPRING_LOG_NOTICE, "map content: %s", mapPath.c_str());
 
         // Also expose the preprocessed data dir for this map as a
@@ -310,15 +310,15 @@ int main(int argc, char* argv[])
         const std::string mapId = fs::path(mapPath).filename().string();
         const std::string processedFeatures = "data/maps/" + mapId + "/features";
         if (fs::is_directory(processedFeatures)) {
-            CFileHandler::AddContentRoot(processedFeatures);
+            CFileHandler::AddContentRoot(processedFeatures, RootCategory::Map);
             SLOG(SPRING_LOG_NOTICE, "processed map features: %s",
                 processedFeatures.c_str());
         }
     }
     // Engine base content (gamedata/defs.lua, system.lua, gadgets, etc.)
-    CFileHandler::AddContentRoot("cont/base/springcontent");
+    CFileHandler::AddContentRoot("cont/base/springcontent", RootCategory::Base);
     // Always search cwd as fallback
-    CFileHandler::AddContentRoot(".");
+    CFileHandler::AddContentRoot(".", RootCategory::Raw);
 
     // --- Database ---
     Database db;

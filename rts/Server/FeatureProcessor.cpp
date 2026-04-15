@@ -85,7 +85,7 @@ std::string toLower(std::string s) {
 // the featureplacer execution. Sets up Spring 5.1 compatibility shims and
 // the LuaVFSSimple bindings backed by `mapDir` as a content root.
 lua_State* CreateMapLuaState(const std::string& mapDir) {
-    CFileHandler::AddContentRoot(mapDir);
+    CFileHandler::AddContentRoot(mapDir, RootCategory::Map);
 
     lua_State* L = luaL_newstate();
     luaL_openlibs(L);
@@ -118,11 +118,11 @@ void CloseMapLuaState(lua_State* L) {
     // caller restores root state by clearing then re-adding any prior
     // roots. Each call here pushes one root, so popping the back keeps
     // global VFS state consistent.
-    auto roots = CFileHandler::GetContentRoots();
+    auto roots = CFileHandler::GetCategorizedRoots();
     if (!roots.empty()) {
         roots.pop_back();
         CFileHandler::ClearContentRoots();
-        for (const auto& r : roots) CFileHandler::AddContentRoot(r);
+        for (const auto& r : roots) CFileHandler::AddContentRoot(r.path, r.category);
     }
 }
 
@@ -544,7 +544,7 @@ void Process(MapMetadata& meta) {
         // That's fine — we still want to run the placer pass below in case
         // it references defs from a sibling game.
     } else {
-        auto savedRoots = CFileHandler::GetContentRoots();
+        auto savedRoots = CFileHandler::GetCategorizedRoots();
         lua_State* L = CreateMapLuaState(meta.sourcePath);
 
         for (auto& entry : fs::directory_iterator(featuresDir)) {
@@ -556,7 +556,7 @@ void Process(MapMetadata& meta) {
         CloseMapLuaState(L);
         // Restore exact pre-call state of content roots.
         CFileHandler::ClearContentRoots();
-        for (const auto& r : savedRoots) CFileHandler::AddContentRoot(r);
+        for (const auto& r : savedRoots) CFileHandler::AddContentRoot(r.path, r.category);
 
         SLOG(SPRING_LOG_INFO, "parsed %zu feature def(s) from %s/features/",
             meta.featureDefs.size(), meta.id.c_str());
@@ -583,12 +583,12 @@ void Process(MapMetadata& meta) {
     // has already written heightmap.bin earlier in the pipeline.
     if (fs::exists(meta.sourcePath + "/mapconfig/featureplacer/config.lua")) {
         HeightmapSampler heightmap = LoadHeightmap(meta);
-        auto savedRoots = CFileHandler::GetContentRoots();
+        auto savedRoots = CFileHandler::GetCategorizedRoots();
         lua_State* L = CreateMapLuaState(meta.sourcePath);
         ParseFeaturePlacements(L, meta, nameToIndex, heightmap);
         CloseMapLuaState(L);
         CFileHandler::ClearContentRoots();
-        for (const auto& r : savedRoots) CFileHandler::AddContentRoot(r);
+        for (const auto& r : savedRoots) CFileHandler::AddContentRoot(r.path, r.category);
     }
 
     // ---- Step 4: re-align featureDefs to be parallel to featureTypes ----

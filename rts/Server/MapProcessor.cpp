@@ -73,8 +73,8 @@ bool MapProcessor::ReadMapInfo(const std::string& mapDir, MapMetadata& meta) {
 
     if (!mapInfoPath.empty()) {
         // Save existing content roots, add map directory for VFS resolution
-        auto savedRoots = CFileHandler::GetContentRoots();
-        CFileHandler::AddContentRoot(mapDir);
+        auto savedRoots = CFileHandler::GetCategorizedRoots();
+        CFileHandler::AddContentRoot(mapDir, RootCategory::Map);
 
         lua_State* L = luaL_newstate();
         luaL_openlibs(L);
@@ -118,7 +118,7 @@ bool MapProcessor::ReadMapInfo(const std::string& mapDir, MapMetadata& meta) {
             lua_close(L);
             // Restore content roots
             CFileHandler::ClearContentRoots();
-            for (const auto& r : savedRoots) CFileHandler::AddContentRoot(r);
+            for (const auto& r : savedRoots) CFileHandler::AddContentRoot(r.path, r.category);
         } else {
             // mapinfo.lua typically returns a table
             if (!lua_istable(L, -1))
@@ -302,7 +302,7 @@ bool MapProcessor::ReadMapInfo(const std::string& mapDir, MapMetadata& meta) {
             lua_close(L);
             // Restore content roots
             CFileHandler::ClearContentRoots();
-            for (const auto& r : savedRoots) CFileHandler::AddContentRoot(r);
+            for (const auto& r : savedRoots) CFileHandler::AddContentRoot(r.path, r.category);
         }
     }
 
