@@ -160,6 +160,7 @@ function quitToLobby(): void {
     engine?.stopRenderLoop();
     engine?.dispose();
     engine = null;
+    delete (window as any).camera;
     entityRenderer = null;
     projectileRenderer = null;
     combatFX = null;
@@ -176,9 +177,8 @@ function quitToLobby(): void {
 
     // Show the lobby. The lobby connection stayed open the whole
     // time. If the player is still a member of their room (the normal
-    // case after a mid-game quit) land on the room view so the host
-    // still sees the End Game button; otherwise fall through to the
-    // room browser.
+    // case after a mid-game quit) land on the room view; otherwise
+    // fall through to the room browser.
     lobbyUI?.showAfterGame();
     lobbyUI?.show();
 }
@@ -225,9 +225,8 @@ async function startGame(gameServerPort: number, mapName: string): Promise<void>
     // Defensive teardown of any leftover session state. `quitToLobby`
     // normally runs this on explicit quit, but a player can re-enter
     // a game through paths that don't go via quitToLobby — for
-    // example the host's End Game button kills the game server and
-    // the next room's RoomStateUpdate transitions straight into a
-    // fresh startGame(). Without this, the old minimap canvas would
+    // example a room state change transitions straight into a new
+    // startGame(). Without this, the old minimap canvas would
     // stay parented to #minimap-container and the new Minimap would
     // append a second canvas on top of it.
     if (minimap) {
@@ -291,6 +290,28 @@ async function startGame(gameServerPort: number, mapName: string): Promise<void>
         // the target over several frames for a smooth feel.
         zoomStep: 0.08,
     });
+
+    // Expose camera API globally for JS console, LuaUI bridge, and automation.
+    // All methods accept an optional durationMs parameter: 0 = instant jump,
+    // >0 = animate over that many milliseconds with smooth ease-in-out.
+    (window as any).camera = {
+        /** Move camera to look at world XZ position. */
+        focusOn: (x: number, z: number, durationMs?: number) => rtsCamera.focusOn(x, z, durationMs),
+        /** Move camera to look at a 3D world position, keeping current distance. */
+        lookAt: (x: number, y: number, z: number, durationMs?: number) => rtsCamera.lookAtPosition(x, y, z, durationMs),
+        /** Save current camera view for later restoration. */
+        saveView: () => rtsCamera.saveView(),
+        /** Restore a previously saved view. */
+        restoreView: (view: any, durationMs?: number) => rtsCamera.restoreView(view, durationMs),
+        /** Cancel any running camera animation. */
+        cancel: () => rtsCamera.cancelTransition(),
+        /** Whether an animation is currently running. */
+        get animating() { return rtsCamera.isAnimating; },
+        /** Current look-at position {x, y, z}. */
+        get target() { const t = rtsCamera.target; return { x: t.x, y: t.y, z: t.z }; },
+        /** Current camera position {x, y, z}. */
+        get position() { const p = rtsCamera.position; return { x: p.x, y: p.y, z: p.z }; },
+    };
 
     const ambient = new HemisphericLight('ambient', new Vector3(0, 1, 0), scene);
     ambient.intensity = 0.7;

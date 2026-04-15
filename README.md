@@ -81,7 +81,7 @@ Use the converters in tools/ to import existing spring content or the demo in co
 Start the lobby server:
 
 ```bash
-./build/debug/spring-lobby --port 8080 --maps content/maps --games-dir content/games
+./build/debug/spring-lobby --port 8011 --maps content/maps --games-dir content/games
 ```
 
 In another terminal, start the client dev server:

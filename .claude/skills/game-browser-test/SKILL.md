@@ -7,45 +7,31 @@ user-invocable: false
 
 # Browser Testing for Spring RTS Web
 
-Two MCP servers provide browser automation (both declared in `.mcp.json`):
+## IMPORTANT: Use chrome-devtools only
+
+**Always use `mcp__chrome-devtools__*` tools for browser automation. NEVER use `mcp__claude-in-chrome__*` tools.**
+
+The two MCP servers use different browser backends. Mixing them in a single session spawns a separate browser window, losing all page context. Even if claude-in-chrome tools are available, do not use them — use chrome-devtools exclusively.
 
 ## chrome-devtools (Chrome DevTools MCP)
 
-Full Chrome DevTools Protocol access via Puppeteer. Best for network inspection and performance analysis.
+Full Chrome DevTools Protocol access via Puppeteer. Handles all browser testing needs.
 
 Key tools for game testing:
 
 | Tool | Use for |
 |------|---------|
+| `list_pages` / `new_page` / `select_page` | Manage browser tabs |
 | `navigate_page` | Load `http://localhost:5173` (Vite dev) or `http://localhost:8012` |
-| `fill` / `click` | Fill login form, click buttons |
+| `fill` / `click` | Fill login form, click buttons (use `uid` from `take_snapshot`) |
 | `take_screenshot` | Capture visual state at each test step |
-| `take_snapshot` | Get page DOM/accessibility tree |
+| `take_snapshot` | Get page DOM/accessibility tree with clickable `uid` refs |
 | `list_network_requests` | Verify HTTP/2 vs HTTP/1.1, check CORS headers, find SSE connections |
 | `get_network_request` | Inspect specific request/response (headers, status, body) |
 | `evaluate_script` | Run JS in page context — check game state, connection status |
 | `list_console_messages` | Find errors, warnings, game log output |
 | `performance_start_trace` / `performance_stop_trace` | Profile render performance during gameplay |
 | `lighthouse_audit` | Run Lighthouse for performance/accessibility checks |
-
-## claude-in-chrome (Claude Chrome Extension)
-
-Available when the Claude Chrome extension is connected. Simpler API, works with the user's active browser.
-
-Key tools: `read_page`, `javascript_tool`, `form_input`, `computer` (click/type/screenshot), `read_console_messages`, `read_network_requests`.
-
-## Which to use
-
-| Scenario | Prefer |
-|----------|--------|
-| Network-level verification (HTTP/2, headers) | chrome-devtools |
-| Performance profiling | chrome-devtools |
-| Scripted lobby actions (create/join/start) | chrome-devtools (`evaluate_script`) |
-| Interactive debugging with user watching | claude-in-chrome |
-| Headless CI testing | chrome-devtools (with `--headless`) |
-| Quick screenshot of current state | either |
-
-**Default to chrome-devtools** for most testing tasks. It is more reliable for scripted actions and doesn't require the Chrome extension.
 
 ## Lobby JS API (`window.lobby`)
 
@@ -92,7 +78,7 @@ await lobby.startGame();         // launches the game server
 ## Test flow: Login and room creation
 
 ```
-1. Navigate to http://localhost:5173 (or whichever port Vite is on)
+1. Navigate to http://localhost:8012 (Vite dev server)
 2. Fill #login-user with username, #login-pass with password
 3. Optionally fill #login-pass2 for registration
 4. Submit the login form

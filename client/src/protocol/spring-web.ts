@@ -23,6 +23,7 @@ export { GameEventBatch, GameEventBatchT } from './spring-web/game-event-batch.j
 export { GameInfo, GameInfoT } from './spring-web/game-info.js';
 export { GameListRequest, GameListRequestT } from './spring-web/game-list-request.js';
 export { GameListUpdate, GameListUpdateT } from './spring-web/game-list-update.js';
+export { GameRestarting, GameRestartingT } from './spring-web/game-restarting.js';
 export { GameStarted, GameStartedT } from './spring-web/game-started.js';
 export { GameUnitDef, GameUnitDefT } from './spring-web/game-unit-def.js';
 export { GameUnitDefs, GameUnitDefsT } from './spring-web/game-unit-defs.js';

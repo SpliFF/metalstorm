@@ -8,6 +8,8 @@
 
 #include "Simulation.h"
 
+const std::unordered_map<int, std::string>* gAITeams = nullptr;
+
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/Wind.h"
@@ -388,6 +390,14 @@ void CSimulation::Init(const std::string& mapName)
         teamHandler.SetGaiaAllyTeamID(gaiaAllyTeamIdx);
         gs->useLuaGaia = true;
     }
+
+    // Populate AI team map from roster entries so Lua APIs
+    // (GetTeamInfo, GetTeamLuaAI) can report AI status.
+    for (const auto& e : rosterEntries) {
+        if (e.isAI)
+            aiTeams[e.team] = e.aiName;
+    }
+    gAITeams = &aiTeams;
 
     // Initialise all subsystems
     InitSubsystems(hasMap);

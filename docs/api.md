@@ -165,7 +165,7 @@ SQL mutations (INSERT, UPDATE, DELETE, DROP, ALTER, CREATE) are rejected.
 **GET /api/processes**
 
 ```json
-[{"room_id":1,"port":9100,"pid":12345,"state":"running","map":"content/maps/...","game":"content/games/..."}]
+[{"room_id":1,"port":9101,"pid":12345,"state":"running","map":"content/maps/...","game":"content/games/..."}]
 ```
 
 States: `starting`, `running`, `ended`, `crashed`.
@@ -207,7 +207,7 @@ The lobby spawns a game server per room. Port is in the `RoomStateUpdate` messag
 Lua expressions are auto-wrapped in `return` — `"return 1+1"` and `"1+1"` both work.
 
 ```bash
-curl -X POST http://localhost:9100/api/exec \
+curl -X POST http://localhost:<game-port>/api/exec \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"scope":"LuaRules","code":"return Spring.GetAllUnits()"}'
 # → {"success":true,"output":"{1, 2, 3}"}
@@ -347,7 +347,7 @@ springcli post http://localhost:8011/api/exec '{"scope":"lobby","code":"rooms"}'
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SPRING_SERVER` | `http://localhost:9100` | Game server URL |
+| `SPRING_SERVER` | (none) | Game server URL (dynamic — discover via `GET /api/processes` on lobby) |
 | `SPRING_LOBBY` | `http://localhost:8011` | Lobby URL |
 | `SPRING_LOG_SERVER` | `http://localhost:8010` | Log server URL |
 | `SPRING_TOKEN` | | Auth token (from `springcli login`) |

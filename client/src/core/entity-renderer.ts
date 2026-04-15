@@ -52,6 +52,9 @@ export interface EntityMeta {
 /** Loaded model template for a unit def — the mesh used as thin-instance source. */
 interface ModelTemplate {
     mesh: Mesh;
+    /** Vertical offset to shift the model up so its base sits at Y=0.
+     *  Computed from the bounding box minimum Y after import. */
+    yOffset: number;
 }
 
 export class EntityRenderer {
@@ -160,6 +163,12 @@ export class EntityRenderer {
                 return null;
             }
 
+            // Compute bounding box BEFORE detaching from the import
+            // hierarchy so world transforms are included.
+            primary.refreshBoundingInfo();
+            const bb = primary.getBoundingInfo().boundingBox;
+            const yOffset = -bb.minimumWorld.y;
+
             // Hide all imported meshes except the primary, and detach
             // it from the import root so its transform is independent.
             for (const m of result.meshes) {
@@ -179,7 +188,12 @@ export class EntityRenderer {
             ));
             primary.renderingGroupId = 2;
 
-            return { mesh: primary };
+            console.log(
+                `[entity-renderer] ${def.name}: model loaded, ` +
+                `yOffset=${yOffset.toFixed(1)}, verts=${primary.getTotalVertices()}`,
+            );
+
+            return { mesh: primary, yOffset };
         } catch (err) {
             console.warn(
                 `[entity-renderer] ${def.name}: failed to load ${def.modelUrl}`,
@@ -258,14 +272,17 @@ export class EntityRenderer {
                 mesh = tmpl.mesh.clone(`unit_${defId}_team${team}`);
                 mesh.makeGeometryUnique();
 
-                // Apply team colour. For PBR materials (from glTF), tint the
-                // albedo. For StandardMaterial, set diffuse. We create a fresh
-                // material instance so teams don't share.
-                const teamColor = TEAM_COLORS[team % TEAM_COLORS.length];
-                const mat = new StandardMaterial(`unit_${defId}_team${team}_mat`, this.scene);
-                mat.diffuseColor = teamColor;
-                mat.specularColor = new Color3(0.3, 0.3, 0.3);
-                mesh.material = mat;
+                // Preserve the original material (PBR from glTF) if
+                // present — it has textures and proper lighting. Only
+                // fall back to a flat team-colour material when the
+                // model has no material at all.
+                if (!mesh.material) {
+                    const teamColor = TEAM_COLORS[team % TEAM_COLORS.length];
+                    const mat = new StandardMaterial(`unit_${defId}_team${team}_mat`, this.scene);
+                    mat.diffuseColor = teamColor;
+                    mat.specularColor = new Color3(0.3, 0.3, 0.3);
+                    mesh.material = mat;
+                }
 
                 mesh.isPickable = false;
                 mesh.isVisible = false;
@@ -422,10 +439,14 @@ export class EntityRenderer {
             }
 
             const rotation = (lerped.heading / 65535) * Math.PI * 2;
+            // Apply yOffset from model bounding box so the base sits
+            // on the ground rather than the model being half-buried.
+            const tmpl = this.modelTemplates.get(meta.defId);
+            const yOff = tmpl?.yOffset ?? 0;
             const matrix = Matrix.Compose(
                 new Vector3(1, meta.healthScale, 1),
                 Quaternion.RotationYawPitchRoll(rotation, 0, 0),
-                new Vector3(lerped.x, lerped.y, lerped.z),
+                new Vector3(lerped.x, lerped.y + yOff, lerped.z),
             );
 
             const arr = new Float32Array(16);

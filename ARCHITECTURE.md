@@ -29,13 +29,16 @@ build/debug/_deps/flatbuffers-build/flatc --cpp -o rts/ schemas/protocol.fbs
 ### spring-lobby CLI
 
 ```
-./spring-lobby --port 8080 --maps content/maps --games-dir content/games
+./spring-lobby --port 8011 --maps content/maps --games-dir content/games
 ```
 
 ### spring-server CLI
 
+Game servers are spawned by the lobby with dynamically assigned ports. To discover running game server ports, use the lobby's process list API (`GET /api/processes`) or the `list_processes` MCP tool.
+
 ```
-./spring-server --port 9001 --game content/games/papertanks --map content/maps/wanderlust2.1 \
+# Example (ports are assigned dynamically — do not hardcode):
+./spring-server --port <dynamic> --game content/games/papertanks --map content/maps/wanderlust2.1 \
   --player "alice:0:0" --player "bob:1:1" --ai "basic_ai:2:-1" --event-fd 5
 ```
 

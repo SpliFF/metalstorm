@@ -6,7 +6,7 @@
 	},
 	"variable": [
 		{"key": "lobby_url", "value": "http://localhost:8011"},
-		{"key": "game_url", "value": "http://localhost:9100"},
+		{"key": "game_url", "value": "http://localhost:DISCOVER_VIA_PROCESSES_API"},
 		{"key": "log_url", "value": "http://localhost:8010"},
 		{"key": "token", "value": ""},
 		{"key": "username", "value": "test1"},

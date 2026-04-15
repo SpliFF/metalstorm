@@ -109,6 +109,14 @@ inline std::vector<uint8_t> BuildGameStarted(uint32_t frame) {
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameStarted, gs.Union());
 }
 
+/// Build a GameRestarting message — tells clients the server is about
+/// to execvp itself and they should reset + reconnect.
+inline std::vector<uint8_t> BuildGameRestarting() {
+    flatbuffers::FlatBufferBuilder fbb(64);
+    auto gr = SpringWeb::CreateGameRestarting(fbb);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameRestarting, gr.Union());
+}
+
 /// Build a GameEventBatch containing combat events.
 inline std::vector<uint8_t> BuildCombatEventBatch(
     uint32_t frame,

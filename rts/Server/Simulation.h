@@ -9,7 +9,12 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
+
+/// Global pointer to the per-team AI name map, set by CSimulation::Init().
+/// Consumed by LuaSyncedRead (GetTeamInfo, GetTeamLuaAI) to report AI status.
+extern const std::unordered_map<int, std::string>* gAITeams;
 
 class LuaParser;
 class LuaScriptContext;
@@ -23,6 +28,8 @@ class ScriptEventDispatcher;
 struct RosterEntry {
     int team = 0;        // sim team id
     int startPosIdx = -1;  // index into the map's teams[] array; -1 = auto
+    bool isAI = false;       // true for AI slots (from --ai)
+    std::string aiName;      // AI id (e.g. "Null AI"), empty for humans
 };
 
 class CSimulation {
@@ -84,4 +91,9 @@ private:
     /// teams at the map centre). Non-empty = one spawn per entry at
     /// the map's corresponding start position.
     std::vector<RosterEntry> rosterEntries;
+
+public:
+    /// Per-team AI info, populated by Init() from rosterEntries.
+    /// Maps teamId → AI name. Used by GetTeamInfo/GetTeamLuaAI Lua APIs.
+    std::unordered_map<int, std::string> aiTeams;
 };

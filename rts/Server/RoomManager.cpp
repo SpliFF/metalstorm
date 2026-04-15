@@ -109,31 +109,55 @@ bool RoomManager::JoinRoom(
     return true;
 }
 
-void RoomManager::LeaveRoom(uint32_t roomId, uint32_t playerId) {
+LeaveResult RoomManager::LeaveRoom(uint32_t roomId, uint32_t playerId) {
     std::lock_guard<std::recursive_mutex> lock(mutex);
 
     auto it = rooms.find(roomId);
-    if (it == rooms.end()) return;
+    if (it == rooms.end()) return LeaveResult::NotFound;
 
     GameRoom& room = it->second;
     auto& players = room.players;
+
+    // Check the player is actually in the room
+    bool found = false;
+    for (const auto& p : players)
+        if (p.playerId == playerId) { found = true; break; }
+    if (!found) return LeaveResult::NotFound;
+
+    bool wasHost = (playerId == room.hostPlayerId);
+
     players.erase(
         std::remove_if(players.begin(), players.end(),
             [playerId](const RoomPlayer& p) { return p.playerId == playerId; }),
         players.end());
 
-    // If host left, promote next player or delete room
-    if (playerId == room.hostPlayerId) {
-        if (!players.empty()) {
-            players[0].isHost = true;
-            room.hostPlayerId = players[0].playerId;
-            SLOG(SPRING_LOG_INFO, "host left room %u, promoted '%s'",
-                roomId, players[0].username.c_str());
-        } else {
-            SLOG(SPRING_LOG_INFO, "room %u empty, removing", roomId);
-            rooms.erase(it);
+    // Room is now empty of human players
+    if (players.empty()) {
+        if (room.persistent) {
+            // Persistent rooms survive with 0 humans.
+            // Host stays set to the original host.
+            SLOG(SPRING_LOG_INFO, "room %u: last human left (persistent, keeping)",
+                roomId);
+            return LeaveResult::StillPersistent;
         }
+        SLOG(SPRING_LOG_INFO, "room %u: last human left, abandoning", roomId);
+        // Don't erase here — caller needs the room data to find
+        // the game server. Caller calls DeleteRoom() after cleanup.
+        return LeaveResult::Abandoned;
     }
+
+    // Host left but other humans remain — transfer host
+    if (wasHost) {
+        // Pick a random human player as new host
+        size_t idx = static_cast<size_t>(rand()) % players.size();
+        players[idx].isHost = true;
+        room.hostPlayerId = players[idx].playerId;
+        SLOG(SPRING_LOG_INFO, "room %u: host left, promoted '%s'",
+            roomId, players[idx].username.c_str());
+        return LeaveResult::HostTransferred;
+    }
+
+    return LeaveResult::Left;
 }
 
 bool RoomManager::SetTeam(uint32_t roomId, uint32_t playerId, uint8_t team) {
@@ -391,16 +415,13 @@ void RoomManager::AutoAssignStartPositions(
     }
 }
 
-bool RoomManager::CloseRoom(uint32_t roomId, uint32_t requesterId) {
+void RoomManager::DeleteRoom(uint32_t roomId) {
     std::lock_guard<std::recursive_mutex> lock(mutex);
     auto it = rooms.find(roomId);
-    if (it == rooms.end()) return false;
-    if (it->second.hostPlayerId != requesterId) return false;
-
-    SLOG(SPRING_LOG_INFO, "room %u: host closed (was '%s')",
+    if (it == rooms.end()) return;
+    SLOG(SPRING_LOG_INFO, "room %u: deleted (was '%s')",
         roomId, it->second.name.c_str());
     rooms.erase(it);
-    return true;
 }
 
 bool RoomManager::KickPlayer(uint32_t roomId, uint32_t requesterId, uint32_t targetId) {

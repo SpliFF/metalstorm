@@ -11,6 +11,7 @@ import { EntityDestroy, EntityDestroyT } from '../spring-web/entity-destroy.js';
 import { GameEventBatch, GameEventBatchT } from '../spring-web/game-event-batch.js';
 import { GameInfo, GameInfoT } from '../spring-web/game-info.js';
 import { GameListUpdate, GameListUpdateT } from '../spring-web/game-list-update.js';
+import { GameRestarting, GameRestartingT } from '../spring-web/game-restarting.js';
 import { GameStarted, GameStartedT } from '../spring-web/game-started.js';
 import { GameUnitDefs, GameUnitDefsT } from '../spring-web/game-unit-defs.js';
 import { GameWeaponDefs, GameWeaponDefsT } from '../spring-web/game-weapon-defs.js';
@@ -53,13 +54,14 @@ export enum ServerPayload {
   GameWeaponDefs = 21,
   LogBatch = 22,
   ConsoleResponse = 23,
-  GameStarted = 24
+  GameStarted = 24,
+  GameRestarting = 25
 }
 
 export function unionToServerPayload(
   type: ServerPayload,
-  accessor: (obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|null
-): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|null {
+  accessor: (obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|null
+): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|null {
   switch(ServerPayload[type]) {
     case 'NONE': return null; 
     case 'AuthResponse': return accessor(new AuthResponse())! as AuthResponse;
@@ -86,15 +88,16 @@ export function unionToServerPayload(
     case 'LogBatch': return accessor(new LogBatch())! as LogBatch;
     case 'ConsoleResponse': return accessor(new ConsoleResponse())! as ConsoleResponse;
     case 'GameStarted': return accessor(new GameStarted())! as GameStarted;
+    case 'GameRestarting': return accessor(new GameRestarting())! as GameRestarting;
     default: return null;
   }
 }
 
 export function unionListToServerPayload(
   type: ServerPayload, 
-  accessor: (index: number, obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|null, 
+  accessor: (index: number, obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|null, 
   index: number
-): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|null {
+): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|null {
   switch(ServerPayload[type]) {
     case 'NONE': return null; 
     case 'AuthResponse': return accessor(index, new AuthResponse())! as AuthResponse;
@@ -121,6 +124,7 @@ export function unionListToServerPayload(
     case 'LogBatch': return accessor(index, new LogBatch())! as LogBatch;
     case 'ConsoleResponse': return accessor(index, new ConsoleResponse())! as ConsoleResponse;
     case 'GameStarted': return accessor(index, new GameStarted())! as GameStarted;
+    case 'GameRestarting': return accessor(index, new GameRestarting())! as GameRestarting;
     default: return null;
   }
 }

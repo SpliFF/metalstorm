@@ -239,6 +239,16 @@ const TOOLS = [
             properties: {},
         },
     },
+    {
+        name: 'restart_game',
+        description: 'Restart a running game server in-place (re-exec with same args). Clients are notified and will reconnect. Use after rebuilding spring-server.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                roomId: { type: 'number', description: 'Room ID (0 or omit for first active game)' },
+            },
+        },
+    },
 ];
 
 // --- Tool execution ---
@@ -336,6 +346,29 @@ async function executeTool(name, args) {
         case 'restart_lobby': {
             const result = await execOnServer(LOBBY_URL, 'lobby', 'restart');
             return result.output || 'Restart command sent.';
+        }
+
+        case 'restart_game': {
+            const server = getGameServerUrl(args.roomId);
+            if (!server) {
+                const servers = getGameServers();
+                if (servers.length === 0)
+                    return 'No game servers found in database. Is a game running?';
+                return `No active game server found. Available: ${servers.map(s => `room ${s.room_id} (${s.state})`).join(', ')}`;
+            }
+            const token = await ensureAuth();
+            const resp = await fetch(`${server.url}/api/restart`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+                },
+            });
+            if (!resp.ok) {
+                const text = await resp.text();
+                return `Restart failed (${resp.status}): ${text}`;
+            }
+            return `Restart command sent to game server on port ${server.port} (room ${server.room_id}).`;
         }
 
         default:

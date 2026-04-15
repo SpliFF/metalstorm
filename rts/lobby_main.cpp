@@ -923,6 +923,8 @@ int main(int argc, char* argv[])
         json += "]";
         if (room->gameServerPort > 0)
             json += ",\"game_server_port\":" + std::to_string(room->gameServerPort);
+        if (room->persistent)
+            json += ",\"persistent\":true";
         json += "}";
         return json;
     };
@@ -959,9 +961,13 @@ int main(int argc, char* argv[])
         if (name.empty()) name = "Game";
         if (gameName.empty() && !availableGames.empty()) gameName = availableGames[0].id;
 
+        std::string persistStr = HttpAuth::JsonField(body, "persistent");
+        bool persistent = (persistStr == "true" || persistStr == "1");
+
         uint32_t roomId = rooms.CreateRoom(name, mapName, gameName, 8, "",
             static_cast<uint32_t>(userId), 0 /*no WS clientId*/, user->username);
         auto* room = rooms.GetRoom(roomId);
+        if (room) room->persistent = persistent;
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(room));
     });
@@ -1021,40 +1027,11 @@ int main(int argc, char* argv[])
         return HttpAuth::JsonResponse(200, json);
     });
 
-    // POST /api/rooms/end — end a running game (host-only, keeps room)
-    net.AddHttpPost("/api/rooms/end", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
-        int64_t userId = HttpAuth::ValidateAuth(db, headers.authorization);
-        if (userId <= 0)
-            return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
-
-        auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
-        if (!room)
-            return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
-
-        // Only the host can end the game
-        auto* player = room->FindPlayer(static_cast<uint32_t>(userId));
-        if (!player || !player->isHost)
-            return HttpAuth::JsonResponse(403, R"({"error":"only the host can end the game"})");
-
-        // Find and kill the game server process
-        auto gsIt = gameServers.find(room->id);
-        if (gsIt == gameServers.end() ||
-            (gsIt->second.state != GameServerInstance::Starting &&
-             gsIt->second.state != GameServerInstance::Running))
-            return HttpAuth::JsonResponse(400, R"({"error":"no running game server for this room"})");
-
-        kill(gsIt->second.pid, SIGTERM);
-        gsIt->second.state = GameServerInstance::Ended;
-        removeGameServer(room->id);
-        SLOG(SPRING_LOG_NOTICE, "host ended game for room %u (killed pid %d)",
-            room->id, gsIt->second.pid);
-
-        // Reset the room back to Filling so it can be reused
-        rooms.ResetRoomForNextGame(room->id);
-
-        broadcastRooms();
-        return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
-    });
+    // NOTE: /api/rooms/end and /api/rooms/close are removed.
+    // Room lifecycle is handled entirely through /api/rooms/leave:
+    //   - Last human leaves non-persistent room → room abandoned, game killed
+    //   - Host leaves with others present → host transferred
+    //   - Persistent room → stays alive with 0 humans
 
     // POST /api/rooms/join — join a room
     net.AddHttpPost("/api/rooms/join", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
@@ -1073,15 +1050,41 @@ int main(int argc, char* argv[])
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(roomId)));
     });
 
-    // POST /api/rooms/leave
+    // POST /api/rooms/leave — leave a room. If this was the last
+    // human in a non-persistent room, the room is abandoned and any
+    // running game server is killed. If the host leaves with other
+    // humans still present, host is transferred to a random player.
     net.AddHttpPost("/api/rooms/leave", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
         uint32_t rid = room->id;
-        rooms.LeaveRoom(rid, static_cast<uint32_t>(userId));
+        auto result = rooms.LeaveRoom(rid, static_cast<uint32_t>(userId));
+
+        if (result == LeaveResult::Abandoned) {
+            // Kill the game server if one is running
+            auto gsIt = gameServers.find(rid);
+            if (gsIt != gameServers.end()) {
+                kill(gsIt->second.pid, SIGTERM);
+                gsIt->second.state = GameServerInstance::Ended;
+                removeGameServer(rid);
+                SLOG(SPRING_LOG_NOTICE, "room %u abandoned, killed game server pid %d",
+                    rid, gsIt->second.pid);
+            }
+            rooms.DeleteRoom(rid);
+        }
+
         broadcastRooms();
-        return HttpAuth::JsonResponse(200, R"({"ok":true})");
+        std::string resultStr;
+        switch (result) {
+            case LeaveResult::Left:            resultStr = "left"; break;
+            case LeaveResult::HostTransferred: resultStr = "host_transferred"; break;
+            case LeaveResult::Abandoned:       resultStr = "abandoned"; break;
+            case LeaveResult::StillPersistent: resultStr = "persistent"; break;
+            default:                           resultStr = "not_found"; break;
+        }
+        return HttpAuth::JsonResponse(200,
+            "{\"ok\":true,\"result\":\"" + resultStr + "\"}");
     });
 
     // POST /api/rooms/ready
@@ -1134,17 +1137,6 @@ int main(int argc, char* argv[])
             return HttpAuth::JsonResponse(403, R"({"error":"cannot kick"})");
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
-    });
-
-    // POST /api/rooms/close
-    net.AddHttpPost("/api/rooms/close", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
-        HTTP_ROOM_AUTH();
-        auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
-        if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
-        if (!rooms.CloseRoom(room->id, static_cast<uint32_t>(userId)))
-            return HttpAuth::JsonResponse(403, R"({"error":"cannot close room"})");
-        broadcastRooms();
-        return HttpAuth::JsonResponse(200, R"({"ok":true})");
     });
 
     // POST /api/rooms/ai/add

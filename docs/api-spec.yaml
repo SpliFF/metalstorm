@@ -15,8 +15,8 @@ info:
 servers:
   - url: http://localhost:8011
     description: Lobby server
-  - url: http://localhost:9100
-    description: Game server (example port)
+  - url: http://localhost:{gamePort}
+    description: Game server (dynamic port — discover via GET /api/processes on lobby)
   - url: http://localhost:8010
     description: Log server
 

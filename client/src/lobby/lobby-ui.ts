@@ -19,8 +19,6 @@ import { RoomJoin } from '../protocol/spring-web/room-join.js';
 import { RoomReady } from '../protocol/spring-web/room-ready.js';
 import { RoomTeamSelect } from '../protocol/spring-web/room-team-select.js';
 import { RoomStartGame } from '../protocol/spring-web/room-start-game.js';
-import { RoomEndGame } from '../protocol/spring-web/room-end-game.js';
-import { RoomCloseRoom } from '../protocol/spring-web/room-close-room.js';
 import { RoomLeave } from '../protocol/spring-web/room-leave.js';
 import { RoomAddAI } from '../protocol/spring-web/room-add-ai.js';
 import { RoomRemoveAI } from '../protocol/spring-web/room-remove-ai.js';
@@ -443,9 +441,8 @@ export class LobbyUI {
 
     /// Land on the most appropriate lobby screen after the game canvas
     /// is hidden (e.g. after the user clicks Quit mid-game). If the
-    /// player is still a member of a room, show the room view so the
-    /// host still has access to the End Game button — otherwise show
-    /// the room browser.
+    /// player is still a member of a room, show the room view;
+    /// otherwise show the room browser.
     showAfterGame(): void {
         if (this.currentRoom) {
             this.showRoom();
@@ -670,8 +667,7 @@ export class LobbyUI {
         // initial pre-game states (0-2) and the post-game Ended
         // state (5+) as "preGame" — Ready / Start Game controls
         // reappear and the host can kick off a fresh game without
-        // recreating the room. The only durable exit is the host
-        // clicking Close Room.
+        // recreating the room.
         const preGame = r.state < 3 || r.state >= 5;
 
         // Start-position metadata for the room's current map.
@@ -822,16 +818,8 @@ export class LobbyUI {
         if (gameRunning) {
             actions.push('<button id="rejoin-btn" class="primary">Rejoin Game</button>');
         }
-        if (gameRunning && amHost) {
-            actions.push('<button id="endgame-btn" class="danger">End Game</button>');
-        }
-        // Close Room is always available to the host, independent
-        // of game state. End Game stops the current sim but keeps
-        // the room; Close Room deletes the room entirely and boots
-        // every member back to the browser.
-        if (amHost) {
-            actions.push('<button id="closeroom-btn" class="danger">Close Room</button>');
-        }
+        // No "End Game" or "Close Room" buttons. Room lifecycle is
+        // handled via Leave: last human out kills the game and room.
 
         this.container.innerHTML = renderTemplate(this.templates.room, {
             name: this.esc(r.name),
@@ -862,16 +850,10 @@ export class LobbyUI {
                 this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapName);
             }
         });
-        document.getElementById('endgame-btn')?.addEventListener('click', () => {
-            if (confirm('End the game for everyone?')) {
-                this.endGame();
-            }
-        });
-        document.getElementById('closeroom-btn')?.addEventListener('click', () => {
-            if (confirm('Close this room? All members will be returned to the lobby.')) {
-                this.closeRoom();
-            }
-        });
+        // "End Game" and "Close Room" buttons removed — room lifecycle
+        // is handled entirely via Leave. When the last human leaves a
+        // non-persistent room, the server abandons it and kills the
+        // game. Host transfer happens automatically.
 
         // The team-select dropdown is reused both as a player team
         // picker AND as the host's "add-AI" dropdowns; we only want
@@ -998,17 +980,9 @@ export class LobbyUI {
         await this.lobbyPost('/api/rooms/start');
     }
 
-    async endGame(): Promise<void> {
-        if (!this.authToken) return;
-        await this.lobbyPost('/api/rooms/end');
-    }
-
-    async closeRoom(): Promise<void> {
-        if (!this.authToken) return;
-        await this.lobbyPost('/api/rooms/close');
-        this.currentRoom = null;
-        this.showBrowser();
-    }
+    // endGame() and closeRoom() removed — room lifecycle is handled
+    // entirely via leave(). The server handles abandonment, host
+    // transfer, and game server cleanup automatically.
 
     async refreshAIList(): Promise<void> {
         if (!this.currentRoom) return;
@@ -1225,13 +1199,10 @@ export class LobbyUI {
 
         // Game ended — clear the saved-game localStorage keys so a
         // page refresh lands on the lobby rather than trying to
-        // rejoin a dead subprocess. But *stay in the room*: a room
-        // persists across game sessions so members can chat, adjust
-        // settings, and launch another game without recreating
-        // everything. The Ended state is rendered below as a
-        // pregame-equivalent where the host sees Ready / Start Game
-        // controls again. Only an explicit Close Room by the host
-        // removes the room.
+        // rejoin a dead subprocess. Stay in the room: a room persists
+        // across game sessions so members can adjust settings and
+        // launch another game. The host leaving is what destroys the
+        // room (if no other humans remain).
         if (this.currentRoom.state >= 5) {
             localStorage.removeItem('springrts-game-room');
             localStorage.removeItem('springrts-game-port');

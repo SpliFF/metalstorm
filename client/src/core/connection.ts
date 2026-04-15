@@ -32,6 +32,8 @@ import { PlayerLeft } from '../protocol/spring-web/player-left.js';
 import { GameWeaponDefs } from '../protocol/spring-web/game-weapon-defs.js';
 import { GameWeaponDef } from '../protocol/spring-web/game-weapon-def.js';
 import { AuthRequest } from '../protocol/spring-web/auth-request.js';
+import { AuthResponse } from '../protocol/spring-web/auth-response.js';
+import { AuthStatus } from '../protocol/spring-web/auth-status.js';
 import { ServerClock } from './clock.js';
 import { parseEntityState, type EntityStateSnapshot } from './entity-state.js';
 import { parseProjectileState, type ProjectileStateSnapshot } from './projectile-state.js';
@@ -334,11 +336,11 @@ export class Connection {
         await channelReady;
 
         // Connected via WebRTC — send auth over the data channel so the
-        // game server creates a ClientSession for us.
+        // game server creates a ClientSession for us. Don't fire
+        // onAuthenticated yet — wait for the server's AuthResponse
+        // which carries the correct team assignment.
         console.log(`[connection] WebRTC connected (clientId=${this.rtcClientId})`);
         this.sendAuthRequest();
-        this.setState('connected');
-        this.events.onAuthenticated?.(this.playerId, this.sessionToken ?? '', this.myTeam);
 
         this.pingInterval = setInterval(() => this.sendPing(), 30000);
         this.sendPing();
@@ -456,6 +458,23 @@ export class Connection {
         const msg = ServerMessage.getRootAsServerMessage(buf);
 
         switch (msg.payloadType()) {
+            case ServerPayload.AuthResponse: {
+                const ar = msg.payload(new AuthResponse()) as AuthResponse;
+                if (ar.status() === AuthStatus.OK) {
+                    this.playerId = ar.playerId();
+                    this.myTeam = ar.team();
+                    if (ar.token()) this.sessionToken = ar.token();
+                    console.log(`[connection] AuthResponse OK: playerId=${this.playerId}, team=${this.myTeam}`);
+                    this.setState('connected');
+                    this.events.onAuthenticated?.(this.playerId, this.sessionToken ?? '', this.myTeam);
+                } else {
+                    const errMsg = ar.message() ?? 'auth failed';
+                    console.error(`[connection] AuthResponse rejected: ${errMsg}`);
+                    this.events.onAuthFailed?.(errMsg);
+                    this.disconnect();
+                }
+                break;
+            }
             case ServerPayload.Pong:
                 this.handlePong(msg);
                 break;
@@ -538,6 +557,10 @@ export class Connection {
                 this.events.onWeaponDefs?.(defs);
                 break;
             }
+            case ServerPayload.GameRestarting:
+                console.log('[connection] server restarting — reloading page');
+                window.location.reload();
+                break;
             default:
                 this.events.onServerMessage?.(msg);
                 break;

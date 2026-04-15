@@ -52,6 +52,7 @@
 #include <array>
 #include <csignal>
 #include <cstdio>
+#include <unistd.h>
 #include <atomic>
 #include <fstream>
 #include <chrono>
@@ -61,8 +62,18 @@
 #include <unordered_set>
 
 static std::atomic<bool> keepRunning{true};
+static std::atomic<bool> restartRequested{false};
+
+// Saved for self-restart via execvp
+static int savedArgc = 0;
+static char** savedArgv = nullptr;
 
 static void signalHandler(int) {
+    keepRunning.store(false);
+}
+
+static void restartHandler(int) {
+    restartRequested.store(true);
     keepRunning.store(false);
 }
 
@@ -80,6 +91,9 @@ static std::string generateToken(int length = 32) {
 
 int main(int argc, char* argv[])
 {
+    savedArgc = argc;
+    savedArgv = argv;
+
     // Initialise unified logging as early as possible so every
     // subsequent log call goes through springlog.
     springlog_init("spring-server", SPRING_LOG_OUTPUT_CONSOLE);
@@ -98,6 +112,7 @@ int main(int argc, char* argv[])
 
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
+    std::signal(SIGHUP, restartHandler);
     // Ignore SIGPIPE so writes to closed sockets / pipes surface
     // as EPIPE errors instead of terminating the process.
     std::signal(SIGPIPE, SIG_IGN);
@@ -519,6 +534,17 @@ int main(int argc, char* argv[])
     // --- HTTP auth + exec endpoints ---
     HttpAuth::RegisterEndpoints(net, db);
 
+    // Restart-in-place: re-exec this binary with the same argv.
+    // Clients get a GameRestarting message before the connection drops.
+    net.AddHttpPost("/api/restart", [](const std::string&, const std::string&, const HttpRequestHeaders&) -> HttpResponse {
+        SLOG(SPRING_LOG_NOTICE, "restart requested via /api/restart");
+        restartRequested.store(true);
+        keepRunning.store(false);
+        return {.contentType = "application/json",
+                .body = {'{',' ','"','o','k','"',':','t','r','u','e',' ','}'},
+                .status = 200};
+    });
+
     net.AddHttpPost("/api/exec", [&luaExecEngine, &db](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         // Validate auth token
         int64_t userId = HttpAuth::ValidateToken(db, headers.authorization);
@@ -609,9 +635,9 @@ int main(int argc, char* argv[])
         std::vector<RosterEntry> merged;
         merged.reserve(requestedPlayers.size() + requestedAIs.size());
         for (const auto& rp : requestedPlayers)
-            merged.push_back({rp.team, rp.startPos});
+            merged.push_back({rp.team, rp.startPos, false, ""});
         for (const auto& rq : requestedAIs)
-            merged.push_back({rq.team, rq.startPos});
+            merged.push_back({rq.team, rq.startPos, true, rq.id});
         sim.SetRoster(std::move(merged));
     }
 
@@ -1453,6 +1479,32 @@ int main(int argc, char* argv[])
             SLOG(SPRING_LOG_INFO, "frame %d (%.1fs) clients=%d",
                 frame, frame / (float)GAME_SPEED, rtcServer.GetClientCount());
         }
+    }
+
+    if (restartRequested.load()) {
+        SLOG(SPRING_LOG_NOTICE, "restart requested — notifying clients and re-exec'ing...");
+
+        // Tell clients to reset and reconnect
+        auto msg = Protocol::BuildGameRestarting();
+        rtcServer.BroadcastReliable(msg.data(), msg.size());
+
+        // Brief pause to let the message flush over WebRTC
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+        net.Stop();
+        sim.Kill();
+        db.Close();
+
+        SLOG(SPRING_LOG_NOTICE, "re-exec'ing: %s", savedArgv[0]);
+        if (!logServer.empty())
+            springlog_net_shutdown();
+        springlog_sqlite_shutdown();
+        springlog_shutdown();
+
+        execvp(savedArgv[0], savedArgv);
+        // If execvp returns, it failed
+        fprintf(stderr, "ERROR: restart failed: %s\n", strerror(errno));
+        return 1;
     }
 
     SLOG(SPRING_LOG_NOTICE, "shutting down (frame %d)...", sim.GetFrameNum());

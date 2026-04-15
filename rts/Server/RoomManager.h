@@ -55,6 +55,15 @@ struct RoomAISlot {
     int8_t startPos = -1;
 };
 
+/// Result of a LeaveRoom call, telling the caller what action to take.
+enum class LeaveResult : uint8_t {
+    Left,           // Player removed; room still has humans
+    HostTransferred,// Host left; new host assigned
+    Abandoned,      // Last human left non-persistent room; room deleted
+    StillPersistent,// Last human left a persistent room; room stays
+    NotFound,       // Room or player not found
+};
+
 struct GameRoom {
     uint32_t id = 0;
     std::string name;
@@ -64,6 +73,12 @@ struct GameRoom {
     uint8_t maxPlayers = 8;
     std::string password;      // empty = no password
     uint32_t hostPlayerId = 0;
+
+    /// When true, the room persists even with zero human players.
+    /// The original host retains host status indefinitely. Only
+    /// the persistent host can modify or end the game. Used for
+    /// AI testing, persistent worlds, etc.
+    bool persistent = false;
 
     std::vector<RoomPlayer> players;
 
@@ -135,8 +150,9 @@ public:
                   const std::string& username, const std::string& password,
                   bool asSpectator = false);
 
-    /// Leave a room.
-    void LeaveRoom(uint32_t roomId, uint32_t playerId);
+    /// Leave a room. Returns what happened so the caller can take
+    /// appropriate action (e.g. kill game server on Abandoned).
+    LeaveResult LeaveRoom(uint32_t roomId, uint32_t playerId);
 
     /// Set a player's team.
     bool SetTeam(uint32_t roomId, uint32_t playerId, uint8_t team);
@@ -147,14 +163,10 @@ public:
     /// Kick a player (host only).
     bool KickPlayer(uint32_t roomId, uint32_t requesterId, uint32_t targetId);
 
-    /// Close (delete) a room entirely. Host only. Returns true if
-    /// the room existed and the requester was the host, in which
-    /// case the room is removed from the internal map and any
-    /// subsequent lookup by id returns nullptr. Callers are
-    /// responsible for killing any associated game subprocess
-    /// *before* calling this; RoomManager doesn't know about the
-    /// gameServers map maintained in lobby_main.
-    bool CloseRoom(uint32_t roomId, uint32_t requesterId);
+    /// Delete a room unconditionally (internal use — called after
+    /// LeaveRoom returns Abandoned). Callers must kill any game
+    /// subprocess before calling this.
+    void DeleteRoom(uint32_t roomId);
 
     /// Add an AI slot to the room (host only). `aiId` / `displayName`
     /// are opaque strings from the lobby's AIDiscovery list; the

@@ -740,7 +740,7 @@ Returns a JSON array of all game server instances:
 [
   {
     "room_id": 1,
-    "port": 9100,
+    "port": 9101,
     "pid": 12345,
     "state": "running",
     "map": "content/maps/wanderlust2.1",
@@ -755,7 +755,7 @@ States: `starting`, `running`, `ended`, `crashed`.
 
 ```
 lobby> process list
-  Room 1: pid=12345 port=9100
+  Room 1: pid=12345 port=9101
 ```
 
 **Restart resilience:** The lobby writes spawned game server info to a `game_servers` SQLite table. On startup, stale entries from a previous run are cleaned up. This table is the foundation for re-adopting orphaned game servers after a lobby restart (not yet fully wired).
@@ -871,23 +871,28 @@ cmake --build build/debug --target springcli
 ### Commands
 
 ```bash
+# Game server port is dynamic — discover it first:
+#   springcli processes --lobby http://localhost:8011
+#   or: GET http://localhost:8011/api/processes
+# Then use the port from the response (shown as $PORT below).
+
 # Game server commands (scope: server)
-springcli state --server http://localhost:9100
-springcli frame --server http://localhost:9100
-springcli defs  --server http://localhost:9100
-springcli units --server http://localhost:9100 --team 0
-springcli pause --server http://localhost:9100
-springcli unpause --server http://localhost:9100
-springcli speed 2.0 --server http://localhost:9100
+springcli state --server http://localhost:$PORT
+springcli frame --server http://localhost:$PORT
+springcli defs  --server http://localhost:$PORT
+springcli units --server http://localhost:$PORT --team 0
+springcli pause --server http://localhost:$PORT
+springcli unpause --server http://localhost:$PORT
+springcli speed 2.0 --server http://localhost:$PORT
 
 # Lua execution
-springcli lua "return Spring.GetAllUnits()" --server http://localhost:9100
-springcli lua "return Spring.GetUnitHealth(1)" --server http://localhost:9100
-springcli exec LuaRules "return 1+1" --server http://localhost:9100
-springcli exec LuaGaia "return Spring.GetGameFrame()" --server http://localhost:9100
+springcli lua "return Spring.GetAllUnits()" --server http://localhost:$PORT
+springcli lua "return Spring.GetUnitHealth(1)" --server http://localhost:$PORT
+springcli exec LuaRules "return 1+1" --server http://localhost:$PORT
+springcli exec LuaGaia "return Spring.GetGameFrame()" --server http://localhost:$PORT
 
 # Multi-line Lua (quotes handle newlines)
-springcli lua 'local t = {} for i=1,5 do t[i]=i*i end return t' --server http://localhost:9100
+springcli lua 'local t = {} for i=1,5 do t[i]=i*i end return t' --server http://localhost:$PORT
 
 # Lobby commands
 springcli sql "SELECT id, username FROM users" --lobby http://localhost:8011
@@ -908,7 +913,7 @@ springcli post http://localhost:8011/api/exec '{"scope":"sql","code":"SELECT 1"}
 Set these to avoid repeating `--server` / `--lobby` / `--log-server`:
 
 ```bash
-export SPRING_SERVER=http://localhost:9100
+export SPRING_SERVER=http://localhost:$PORT  # dynamic — discover via springcli processes
 export SPRING_LOBBY=http://localhost:8011
 export SPRING_LOG_SERVER=http://localhost:8010
 
@@ -922,7 +927,7 @@ springcli sql "SELECT count(*) FROM users"
 
 | Flag | Description |
 |------|-------------|
-| `--server URL` | Game server (default: `$SPRING_SERVER` or `localhost:9100`) |
+| `--server URL` | Game server (dynamic port — discover via `springcli processes` or `GET /api/processes` on lobby) |
 | `--lobby URL` | Lobby server (default: `$SPRING_LOBBY` or `localhost:8011`) |
 | `--log-server URL` | Log server (default: `$SPRING_LOG_SERVER` or `localhost:8010`) |
 | `--scope SCOPE` | Lua scope for `lua` command (default: LuaRules) |
@@ -946,7 +951,7 @@ springcli sql "SELECT count(*) FROM users"
 
 ```bash
 # Equivalent to: springcli exec server state
-curl -s -X POST http://localhost:9100/api/exec \
+curl -s -X POST http://localhost:<game-port>/api/exec \
   -H "Content-Type: application/json" \
   -d '{"scope":"server","code":"state"}'
 # → {"success":true,"output":"frame=1234 teams=3 units=5"}
@@ -965,7 +970,7 @@ The CLI is built on `libspringapi`, a static C++ library with a simple HTTP-base
 ```cpp
 #include "springapi.h"
 
-auto r = springapi::exec("http://localhost:9100", "LuaRules", "return 42");
+auto r = springapi::exec("http://localhost:<game-port>", "LuaRules", "return 42");
 // r.success == true, r.output == "42"
 
 auto logs = springapi::getLogs("http://localhost:8010", 0, 4, 10);

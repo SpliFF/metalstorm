@@ -243,6 +243,11 @@ table GameStarted {
     frame: uint32;
 }
 
+/// Game server is about to restart itself (execvp). Clients should
+/// reset all game state and reconnect on the same port.
+table GameRestarting {
+}
+
 /// Response to a ConsoleCommand.
 table ConsoleResponse {
     request_id: uint32;
@@ -758,6 +763,7 @@ union ServerPayload {
     LogBatch,
     ConsoleResponse,
     GameStarted,
+    GameRestarting,
 }
 
 table ServerMessage {

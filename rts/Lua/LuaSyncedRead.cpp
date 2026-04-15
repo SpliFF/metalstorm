@@ -12,6 +12,7 @@
 #include "LuaRules.h"
 #include "LuaRulesParams.h"
 #include "LuaUtils.h"
+#include "Server/Simulation.h"
 #include "Game/GameSetup.h"
 #include "Game/GameHelper.h"
 #include "Game/Players/Player.h"
@@ -1234,10 +1235,17 @@ int LuaSyncedRead::GetTeamInfo(lua_State* L)
 	// read before modifying stack
 	const bool getTeamOpts = luaL_optboolean(L, 2, true);
 
+	// Check if this team is an AI team
+	bool isAI = false;
+	if (gAITeams) {
+		auto it = gAITeams->find(teamID);
+		isAI = (it != gAITeams->end());
+	}
+
 	lua_pushnumber(L,  team->teamNum);
 	lua_pushnumber(L,  team->GetLeader());
 	lua_pushboolean(L, team->isDead);
-	lua_pushboolean(L, false); // no skirmish AIs (ExternalAI removed)
+	lua_pushboolean(L, isAI);
 	lua_pushstring(L, team->GetSideName());
 	lua_pushnumber(L,  teamHandler.AllyTeam(team->teamNum));
 	lua_pushnumber(L, team->GetIncomeMultiplier());
@@ -1489,7 +1497,14 @@ int LuaSyncedRead::GetTeamStatsHistory(lua_State* L)
 
 int LuaSyncedRead::GetTeamLuaAI(lua_State* L)
 {
-	// ExternalAI system removed; no Lua AIs exist
+	const int teamID = luaL_checkint(L, 1);
+	if (gAITeams) {
+		auto it = gAITeams->find(teamID);
+		if (it != gAITeams->end()) {
+			lua_pushsstring(L, it->second);
+			return 1;
+		}
+	}
 	return 0;
 }
 

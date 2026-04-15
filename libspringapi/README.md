@@ -87,11 +87,11 @@ auto reg = springapi::registerUser("http://localhost:8011", "newplayer", "secret
 
 ```cpp
 // Execute on the game server (needs a token from login)
-auto r = springapi::exec("http://localhost:9100", "server", "state", auth.token);
+auto r = springapi::exec("http://localhost:<game-port>", "server", "state", auth.token);
 // r.success == true, r.output == "frame=1234 teams=3 units=5"
 
 // Lua execution
-auto lua = springapi::exec("http://localhost:9100", "LuaRules", "return 1+1", auth.token);
+auto lua = springapi::exec("http://localhost:<game-port>", "LuaRules", "return 1+1", auth.token);
 // lua.output == "2"
 
 // SQL query on the lobby
@@ -152,7 +152,7 @@ std::string safe = springapi::jsonEscape("line1\nline2");   // "line1\\nline2"
 ### WebRTC (optional, requires `-DSPRINGAPI_WEBRTC=ON`)
 
 ```cpp
-auto conn = springapi::connectRtc("http://localhost:9100", auth.token);
+auto conn = springapi::connectRtc("http://localhost:<game-port>", auth.token);
 if (!conn) { /* connection failed */ }
 
 // Receive messages
@@ -202,11 +202,11 @@ auth = api.login("http://localhost:8011", "test1", "test")
 print(f"token: {auth.token}, user: {auth.username}")
 
 # Execute
-result = api.exec("http://localhost:9100", "server", "state", auth.token)
+result = api.exec("http://localhost:<game-port>", "server", "state", auth.token)
 print(f"success={result.success}, output={result.output}")
 
 # Lua
-r = api.exec("http://localhost:9100", "LuaRules", "return 42", auth.token)
+r = api.exec("http://localhost:<game-port>", "LuaRules", "return 42", auth.token)
 
 # Logs
 logs = api.get_logs("http://localhost:8010", room_id=0, level=4, limit=10)
@@ -274,7 +274,7 @@ Your tool / lobby / bot
         ▼
    Spring servers
    ├── spring-lobby (:8011)
-   ├── spring-server (:9100+)
+   ├── spring-server (:dynamic)
    └── spring-logserver (:8010)
 ```
 

@@ -15,7 +15,17 @@
  * system.
  */
 
-import { FreeCamera, Vector3 } from '@babylonjs/core';
+import { FreeCamera, Vector3, Quaternion } from '@babylonjs/core';
+
+/** Pending animated camera transition. */
+interface CameraTransition {
+    startPos: Vector3;
+    endPos: Vector3;
+    startLookAt: Vector3;
+    endLookAt: Vector3;
+    durationMs: number;
+    elapsed: number;
+}
 
 export interface RTSCameraConfig {
     /** Minimum height above ground (elmos). */
@@ -70,6 +80,9 @@ export class RTSCamera {
     // ~12 = roughly 5 frames to settle at 60fps.
     private zoomSmoothing = 12;
 
+    // Active animated transition (null when idle).
+    private transition: CameraTransition | null = null;
+
     // Forward and right vectors projected onto the XZ plane.
     // Computed from the current camera look direction.
     private forward = new Vector3(0, 0, 1);
@@ -99,6 +112,8 @@ export class RTSCamera {
     private onWheel = (e: WheelEvent): void => {
         if (e.target !== this.canvas) return;
         e.preventDefault();
+        // User scroll cancels any animated transition
+        this.transition = null;
         // Initialise targetDistance on first wheel event from the actual
         // camera position, so we pick up wherever the camera currently is.
         if (this.targetDistance < 0) {
@@ -240,6 +255,13 @@ export class RTSCamera {
         const now = performance.now();
         const dt = Math.min((now - this.lastTickTime) / 1000, 0.1);
         this.lastTickTime = now;
+
+        // If an animated transition is active, advance it and skip
+        // normal input processing.
+        if (this.transition) {
+            this.tickTransition(dt);
+            return;
+        }
 
         // Pan speed scales with camera height so zoomed-out is faster
         const heightFactor = Math.max(0.3, this.camera.position.y / 1000);
@@ -499,13 +521,147 @@ export class RTSCamera {
         this.right.set(this.forward.z, 0, -this.forward.x);
     }
 
-    /** Teleport the camera to focus on a world position. */
-    focusOn(x: number, z: number): void {
-        // Keep the current height and look angle; just translate both
-        // camera position and look-at by the same XZ delta.
-        const dx = x - this.lookAt.x;
-        const dz = z - this.lookAt.z;
-        this.panBy(dx, dz);
+    /**
+     * Move the camera to focus on a world XZ position.
+     * @param x World X coordinate
+     * @param z World Z coordinate
+     * @param durationMs If 0 or omitted, teleport instantly. Otherwise
+     *   animate over this many milliseconds using ease-in-out.
+     */
+    focusOn(x: number, z: number, durationMs = 0): void {
+        if (durationMs <= 0) {
+            this.transition = null;
+            const dx = x - this.lookAt.x;
+            const dz = z - this.lookAt.z;
+            this.panBy(dx, dz);
+            return;
+        }
+        // Animate: keep same relative offset between camera and lookAt
+        const endLookAt = new Vector3(x, 0, z);
+        const offset = this.camera.position.subtract(this.lookAt);
+        const endPos = endLookAt.add(offset);
+        this.startTransition(endPos, endLookAt, durationMs);
+    }
+
+    /**
+     * Move the camera to look at an arbitrary 3D position, keeping the
+     * current distance from the target.
+     * @param x World X
+     * @param y World Y (height)
+     * @param z World Z
+     * @param durationMs Animation time. 0 = instant.
+     */
+    lookAtPosition(x: number, y: number, z: number, durationMs = 0): void {
+        const target = new Vector3(x, y, z);
+        const currentDist = Vector3.Distance(this.camera.position, this.lookAt);
+        // Compute the new camera position by maintaining the same offset
+        // direction from camera to lookAt, scaled to the same distance.
+        const dir = this.camera.position.subtract(this.lookAt).normalize();
+        const endPos = target.add(dir.scale(currentDist));
+        const endLookAt = target.clone();
+        if (durationMs <= 0) {
+            this.transition = null;
+            this.camera.position.copyFrom(endPos);
+            this.lookAt.copyFrom(endLookAt);
+            this.camera.setTarget(this.lookAt);
+            this.targetDistance = -1;
+            this.updateAxes();
+            return;
+        }
+        this.startTransition(endPos, endLookAt, durationMs);
+    }
+
+    /**
+     * Save the current camera view (position + look-at).
+     * Returns an opaque state object that can be passed to restoreView().
+     */
+    saveView(): { pos: Vector3; lookAt: Vector3 } {
+        return {
+            pos: this.camera.position.clone(),
+            lookAt: this.lookAt.clone(),
+        };
+    }
+
+    /**
+     * Restore a previously saved camera view.
+     * @param view The object returned from saveView()
+     * @param durationMs Animation time. 0 = instant.
+     */
+    restoreView(view: { pos: { x: number; y: number; z: number }; lookAt: { x: number; y: number; z: number } }, durationMs = 0): void {
+        const endPos = new Vector3(view.pos.x, view.pos.y, view.pos.z);
+        const endLookAt = new Vector3(view.lookAt.x, view.lookAt.y, view.lookAt.z);
+        if (durationMs <= 0) {
+            this.transition = null;
+            this.camera.position.copyFrom(endPos);
+            this.lookAt.copyFrom(endLookAt);
+            this.camera.setTarget(this.lookAt);
+            this.targetDistance = -1;
+            this.updateAxes();
+            return;
+        }
+        this.startTransition(endPos, endLookAt, durationMs);
+    }
+
+    /** Cancel any in-progress animated transition. */
+    cancelTransition(): void {
+        this.transition = null;
+    }
+
+    /** Whether an animated transition is currently running. */
+    get isAnimating(): boolean {
+        return this.transition !== null;
+    }
+
+    /** Current look-at position (read-only copy). */
+    get target(): Vector3 {
+        return this.lookAt.clone();
+    }
+
+    /** Current camera position (read-only copy). */
+    get position(): Vector3 {
+        return this.camera.position.clone();
+    }
+
+    // ─── Transition internals ───
+
+    private startTransition(endPos: Vector3, endLookAt: Vector3, durationMs: number): void {
+        this.transition = {
+            startPos: this.camera.position.clone(),
+            endPos,
+            startLookAt: this.lookAt.clone(),
+            endLookAt,
+            durationMs,
+            elapsed: 0,
+        };
+    }
+
+    /** Smooth-step ease-in-out: 3t^2 - 2t^3 */
+    private static smoothStep(t: number): number {
+        return t * t * (3 - 2 * t);
+    }
+
+    private tickTransition(dt: number): void {
+        const t = this.transition!;
+        t.elapsed += dt * 1000;
+
+        // Any user input (keys, orbit drag, wheel) cancels the animation
+        if (this.keys.size > 0 || this.orbitDragging) {
+            this.transition = null;
+            return;
+        }
+
+        const progress = Math.min(t.elapsed / t.durationMs, 1);
+        const alpha = RTSCamera.smoothStep(progress);
+
+        Vector3.LerpToRef(t.startPos, t.endPos, alpha, this.camera.position);
+        Vector3.LerpToRef(t.startLookAt, t.endLookAt, alpha, this.lookAt);
+        this.camera.setTarget(this.lookAt);
+
+        if (progress >= 1) {
+            this.transition = null;
+            this.targetDistance = -1;
+            this.updateAxes();
+        }
     }
 
     dispose(): void {

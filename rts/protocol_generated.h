@@ -137,6 +137,10 @@ struct GameStarted;
 struct GameStartedBuilder;
 struct GameStartedT;
 
+struct GameRestarting;
+struct GameRestartingBuilder;
+struct GameRestartingT;
+
 struct ConsoleResponse;
 struct ConsoleResponseBuilder;
 struct ConsoleResponseT;
@@ -1063,11 +1067,12 @@ enum ServerPayload : uint8_t {
   ServerPayload_LogBatch = 22,
   ServerPayload_ConsoleResponse = 23,
   ServerPayload_GameStarted = 24,
+  ServerPayload_GameRestarting = 25,
   ServerPayload_MIN = ServerPayload_NONE,
-  ServerPayload_MAX = ServerPayload_GameStarted
+  ServerPayload_MAX = ServerPayload_GameRestarting
 };
 
-inline const ServerPayload (&EnumValuesServerPayload())[25] {
+inline const ServerPayload (&EnumValuesServerPayload())[26] {
   static const ServerPayload values[] = {
     ServerPayload_NONE,
     ServerPayload_AuthResponse,
@@ -1093,13 +1098,14 @@ inline const ServerPayload (&EnumValuesServerPayload())[25] {
     ServerPayload_GameWeaponDefs,
     ServerPayload_LogBatch,
     ServerPayload_ConsoleResponse,
-    ServerPayload_GameStarted
+    ServerPayload_GameStarted,
+    ServerPayload_GameRestarting
   };
   return values;
 }
 
 inline const char * const *EnumNamesServerPayload() {
-  static const char * const names[26] = {
+  static const char * const names[27] = {
     "NONE",
     "AuthResponse",
     "EntityCreate",
@@ -1125,13 +1131,14 @@ inline const char * const *EnumNamesServerPayload() {
     "LogBatch",
     "ConsoleResponse",
     "GameStarted",
+    "GameRestarting",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameServerPayload(ServerPayload e) {
-  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_GameStarted)) return "";
+  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_GameRestarting)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesServerPayload()[index];
 }
@@ -1236,6 +1243,10 @@ template<> struct ServerPayloadTraits<SpringWeb::GameStarted> {
   static const ServerPayload enum_value = ServerPayload_GameStarted;
 };
 
+template<> struct ServerPayloadTraits<SpringWeb::GameRestarting> {
+  static const ServerPayload enum_value = ServerPayload_GameRestarting;
+};
+
 template<typename T> struct ServerPayloadUnionTraits {
   static const ServerPayload enum_value = ServerPayload_NONE;
 };
@@ -1334,6 +1345,10 @@ template<> struct ServerPayloadUnionTraits<SpringWeb::ConsoleResponseT> {
 
 template<> struct ServerPayloadUnionTraits<SpringWeb::GameStartedT> {
   static const ServerPayload enum_value = ServerPayload_GameStarted;
+};
+
+template<> struct ServerPayloadUnionTraits<SpringWeb::GameRestartingT> {
+  static const ServerPayload enum_value = ServerPayload_GameRestarting;
 };
 
 struct ServerPayloadUnion {
@@ -1557,6 +1572,14 @@ struct ServerPayloadUnion {
   const SpringWeb::GameStartedT *AsGameStarted() const {
     return type == ServerPayload_GameStarted ?
       reinterpret_cast<const SpringWeb::GameStartedT *>(value) : nullptr;
+  }
+  SpringWeb::GameRestartingT *AsGameRestarting() {
+    return type == ServerPayload_GameRestarting ?
+      reinterpret_cast<SpringWeb::GameRestartingT *>(value) : nullptr;
+  }
+  const SpringWeb::GameRestartingT *AsGameRestarting() const {
+    return type == ServerPayload_GameRestarting ?
+      reinterpret_cast<const SpringWeb::GameRestartingT *>(value) : nullptr;
   }
 };
 
@@ -3787,6 +3810,47 @@ inline ::flatbuffers::Offset<GameStarted> CreateGameStarted(
 }
 
 ::flatbuffers::Offset<GameStarted> CreateGameStarted(::flatbuffers::FlatBufferBuilder &_fbb, const GameStartedT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct GameRestartingT : public ::flatbuffers::NativeTable {
+  typedef GameRestarting TableType;
+};
+
+/// Game server is about to restart itself (execvp). Clients should
+/// reset all game state and reconnect on the same port.
+struct GameRestarting FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef GameRestartingT NativeTableType;
+  typedef GameRestartingBuilder Builder;
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           verifier.EndTable();
+  }
+  GameRestartingT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(GameRestartingT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<GameRestarting> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameRestartingT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct GameRestartingBuilder {
+  typedef GameRestarting Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  explicit GameRestartingBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<GameRestarting> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<GameRestarting>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<GameRestarting> CreateGameRestarting(
+    ::flatbuffers::FlatBufferBuilder &_fbb) {
+  GameRestartingBuilder builder_(_fbb);
+  return builder_.Finish();
+}
+
+::flatbuffers::Offset<GameRestarting> CreateGameRestarting(::flatbuffers::FlatBufferBuilder &_fbb, const GameRestartingT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
 struct ConsoleResponseT : public ::flatbuffers::NativeTable {
   typedef ConsoleResponse TableType;
@@ -8688,6 +8752,9 @@ struct ServerMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const SpringWeb::GameStarted *payload_as_GameStarted() const {
     return payload_type() == SpringWeb::ServerPayload_GameStarted ? static_cast<const SpringWeb::GameStarted *>(payload()) : nullptr;
   }
+  const SpringWeb::GameRestarting *payload_as_GameRestarting() const {
+    return payload_type() == SpringWeb::ServerPayload_GameRestarting ? static_cast<const SpringWeb::GameRestarting *>(payload()) : nullptr;
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_PAYLOAD_TYPE, 1) &&
@@ -8794,6 +8861,10 @@ template<> inline const SpringWeb::ConsoleResponse *ServerMessage::payload_as<Sp
 
 template<> inline const SpringWeb::GameStarted *ServerMessage::payload_as<SpringWeb::GameStarted>() const {
   return payload_as_GameStarted();
+}
+
+template<> inline const SpringWeb::GameRestarting *ServerMessage::payload_as<SpringWeb::GameRestarting>() const {
+  return payload_as_GameRestarting();
 }
 
 struct ServerMessageBuilder {
@@ -9727,6 +9798,29 @@ inline ::flatbuffers::Offset<GameStarted> CreateGameStarted(::flatbuffers::FlatB
   return SpringWeb::CreateGameStarted(
       _fbb,
       _frame);
+}
+
+inline GameRestartingT *GameRestarting::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<GameRestartingT>(new GameRestartingT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void GameRestarting::UnPackTo(GameRestartingT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+}
+
+inline ::flatbuffers::Offset<GameRestarting> GameRestarting::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameRestartingT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateGameRestarting(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<GameRestarting> CreateGameRestarting(::flatbuffers::FlatBufferBuilder &_fbb, const GameRestartingT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const GameRestartingT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  return SpringWeb::CreateGameRestarting(
+      _fbb);
 }
 
 inline ConsoleResponseT *ConsoleResponse::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
@@ -12187,6 +12281,10 @@ inline bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *o
       auto ptr = reinterpret_cast<const SpringWeb::GameStarted *>(obj);
       return verifier.VerifyTable(ptr);
     }
+    case ServerPayload_GameRestarting: {
+      auto ptr = reinterpret_cast<const SpringWeb::GameRestarting *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
     default: return true;
   }
 }
@@ -12302,6 +12400,10 @@ inline void *ServerPayloadUnion::UnPack(const void *obj, ServerPayload type, con
       auto ptr = reinterpret_cast<const SpringWeb::GameStarted *>(obj);
       return ptr->UnPack(resolver);
     }
+    case ServerPayload_GameRestarting: {
+      auto ptr = reinterpret_cast<const SpringWeb::GameRestarting *>(obj);
+      return ptr->UnPack(resolver);
+    }
     default: return nullptr;
   }
 }
@@ -12405,6 +12507,10 @@ inline ::flatbuffers::Offset<void> ServerPayloadUnion::Pack(::flatbuffers::FlatB
       auto ptr = reinterpret_cast<const SpringWeb::GameStartedT *>(value);
       return CreateGameStarted(_fbb, ptr, _rehasher).Union();
     }
+    case ServerPayload_GameRestarting: {
+      auto ptr = reinterpret_cast<const SpringWeb::GameRestartingT *>(value);
+      return CreateGameRestarting(_fbb, ptr, _rehasher).Union();
+    }
     default: return 0;
   }
 }
@@ -12505,6 +12611,10 @@ inline ServerPayloadUnion::ServerPayloadUnion(const ServerPayloadUnion &u) : typ
     }
     case ServerPayload_GameStarted: {
       value = new SpringWeb::GameStartedT(*reinterpret_cast<SpringWeb::GameStartedT *>(u.value));
+      break;
+    }
+    case ServerPayload_GameRestarting: {
+      value = new SpringWeb::GameRestartingT(*reinterpret_cast<SpringWeb::GameRestartingT *>(u.value));
       break;
     }
     default:
@@ -12631,6 +12741,11 @@ inline void ServerPayloadUnion::Reset() {
     }
     case ServerPayload_GameStarted: {
       auto ptr = reinterpret_cast<SpringWeb::GameStartedT *>(value);
+      delete ptr;
+      break;
+    }
+    case ServerPayload_GameRestarting: {
+      auto ptr = reinterpret_cast<SpringWeb::GameRestartingT *>(value);
       delete ptr;
       break;
     }

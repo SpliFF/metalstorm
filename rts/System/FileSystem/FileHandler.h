@@ -255,6 +255,10 @@ private:
 
     /// Get the root paths that match the given mode string.
     /// If modes is empty, returns all roots (backwards compat).
+    ///
+    /// Base roots (data/engine/) are always appended as a fallback,
+    /// mirroring original Spring where springcontent.sdz was an
+    /// implicit dependency of every game.
     static std::vector<std::string> GetRootsForModes(const std::string& modes) {
         std::vector<std::string> result;
 
@@ -265,11 +269,15 @@ private:
             return result;
         }
 
+        bool hasAllRoots = false;
+        bool hasBase = false;
+
         // Iterate mode chars, collect matching roots in order
         for (char c : modes) {
             int cat = GetRootCategoryForMode(c);
             if (cat == -2) {
                 // RAW — add all roots
+                hasAllRoots = true;
                 for (const auto& r : categorizedRoots)
                     result.push_back(r.path);
             } else if (cat == -3) {
@@ -277,12 +285,24 @@ private:
                 result.push_back(std::filesystem::current_path().string() + "/");
             } else if (cat >= 0) {
                 auto rc = static_cast<RootCategory>(cat);
+                if (rc == RootCategory::Base)
+                    hasBase = true;
                 for (const auto& r : categorizedRoots) {
                     if (r.category == rc)
                         result.push_back(r.path);
                 }
             }
             // cat == -1: unknown mode char, skip
+        }
+
+        // Always include Base roots — engine base content (LuaGadgets/,
+        // gamedata/, etc.) must be available regardless of mode, just as
+        // springcontent.sdz was an implicit dep in original Spring.
+        if (!hasAllRoots && !hasBase) {
+            for (const auto& r : categorizedRoots) {
+                if (r.category == RootCategory::Base)
+                    result.push_back(r.path);
+            }
         }
 
         return result;

@@ -13,6 +13,7 @@ import { EntityDestroy, EntityDestroyT } from '../spring-web/entity-destroy.js';
 import { GameEventBatch, GameEventBatchT } from '../spring-web/game-event-batch.js';
 import { GameInfo, GameInfoT } from '../spring-web/game-info.js';
 import { GameListUpdate, GameListUpdateT } from '../spring-web/game-list-update.js';
+import { GameRestarting, GameRestartingT } from '../spring-web/game-restarting.js';
 import { GameStarted, GameStartedT } from '../spring-web/game-started.js';
 import { GameUnitDefs, GameUnitDefsT } from '../spring-web/game-unit-defs.js';
 import { GameWeaponDefs, GameWeaponDefsT } from '../spring-web/game-weapon-defs.js';
@@ -108,7 +109,7 @@ unpackTo(_o: ServerMessageT): void {
 export class ServerMessageT implements flatbuffers.IGeneratedObject {
 constructor(
   public payloadType: ServerPayload = ServerPayload.NONE,
-  public payload: AIListUpdateT|AuthResponseT|ChatReceiveT|ConsoleResponseT|EntityCreateT|EntityDestroyT|GameEventBatchT|GameInfoT|GameListUpdateT|GameStartedT|GameUnitDefsT|GameWeaponDefsT|LogBatchT|MapDataT|MapListUpdateT|PlayerLeftT|PongT|ReconnectResponseT|ResourceUpdateT|RoomListUpdateT|RoomPlayerJoinedT|RoomPlayerLeftT|RoomStateUpdateT|ServerErrorT|null = null
+  public payload: AIListUpdateT|AuthResponseT|ChatReceiveT|ConsoleResponseT|EntityCreateT|EntityDestroyT|GameEventBatchT|GameInfoT|GameListUpdateT|GameRestartingT|GameStartedT|GameUnitDefsT|GameWeaponDefsT|LogBatchT|MapDataT|MapListUpdateT|PlayerLeftT|PongT|ReconnectResponseT|ResourceUpdateT|RoomListUpdateT|RoomPlayerJoinedT|RoomPlayerLeftT|RoomStateUpdateT|ServerErrorT|null = null
 ){}
 
 
