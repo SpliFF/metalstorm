@@ -118,6 +118,35 @@ export function buildSpringGlobals(ctx: SpringAPIContext): Record<string, LuaVal
         CLAMP: 0x2900,
         REPEAT: 0x2901,
         MIRRORED_REPEAT: 0x8370,
+        // Comparison functions (stencil, depth, alpha)
+        NEVER: 0x0200,
+        LESS: 0x0201,
+        EQUAL: 0x0202,
+        LEQUAL: 0x0203,
+        GREATER: 0x0204,
+        NOTEQUAL: 0x0205,
+        GEQUAL: 0x0206,
+        ALWAYS: 0x0207,
+        // Stencil operations
+        KEEP: 0x1E00,
+        REPLACE: 0x1E01,
+        INCR: 0x1E02,
+        DECR: 0x1E03,
+        INVERT: 0x150A,
+        INCR_WRAP: 0x8507,
+        DECR_WRAP: 0x8508,
+        // Polygon mode (not supported in WebGL but needed as constants)
+        POINT: 0x1B00,
+        LINE: 0x1B01,
+        FILL: 0x1B02,
+        FRONT: 0x0404,
+        BACK: 0x0405,
+        FRONT_AND_BACK: 0x0408,
+        // Internal formats for RBO
+        DEPTH24_STENCIL8: 0x88F0,
+        DEPTH_COMPONENT16: 0x81A5,
+        DEPTH_COMPONENT24: 0x81A6,
+        DEPTH_COMPONENT32F: 0x8CAC,
     };
 
     // --- Game table: static map/game constants. ---
@@ -223,7 +252,13 @@ export function buildSpringGlobals(ctx: SpringAPIContext): Record<string, LuaVal
         GetConfigFloat: (_key: LuaValue, def: LuaValue) => Number(def ?? 0),
         GetConfigString: (_key: LuaValue, def: LuaValue) => String(def ?? ''),
         GetModOptions: () => ({}),
-        GetViewGeometry: () => [1920, 1080, 0, 0],
+        GetViewGeometry: () => {
+            // Return real canvas size if available, else reasonable fallback
+            const c = typeof document !== 'undefined'
+                ? document.querySelector('canvas')
+                : null;
+            return [c?.width ?? 1920, c?.height ?? 1080, 0, 0];
+        },
         GetSpectatingState: () => [false, false, false],
         IsReplay: () => false,
         GetLocalPlayerID: () => 0,

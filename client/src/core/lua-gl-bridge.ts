@@ -1,29 +1,25 @@
 /**
- * LuaGLBridge — implements the Spring `gl.*` Lua API against a raw WebGL2
- * context. This is the minimum surface area needed to run the
- * `lava_layer.lua` widget from Scorched Crossing.
+ * LuaGLBridge — implements the Spring `gl.*` Lua API against WebGL2.
  *
- * Scope for this first pass:
- *   - gl.CreateShader / UseShader / DeleteShader / Uniform* / GetShaderLog
- *       with GLSL 150 compatibility → GLSL ES 300 translation
- *   - gl.CreateTexture / DeleteTexture / Texture(unit, handle|path|false)
- *   - gl.CreateFBO / ActiveFBO / DeleteFBO
- *   - gl.GetVAO with a DrawArrays(mode, count, first, instanceCount) method
- *   - gl.Blending / DepthTest / DepthMask / PushAttrib / PopAttrib / Clear
- *   - Immediate mode (BeginEnd / Vertex / TexCoord / Color / Rect) — stubbed
- *     out for now; the lava widget's immediate-mode path is only used by
- *     its auxiliary smoothHM texture which we bypass by feeding the real
- *     terrain heightmap as the heightmap sampler instead.
- *
- * The bridge needs a raw WebGL2RenderingContext. In our setup Babylon.js
- * owns the canvas and context, so we grab it from the engine.
+ * Covers the full surface area needed for Spring widgets including:
+ *   - Shader management (CreateShader, UseShader, Uniform*, GLSL translation)
+ *   - Texture management (CreateTexture, Texture, TextureInfo)
+ *   - FBO/RBO (CreateFBO, ActiveFBO, IsValidFBO, CreateRBO)
+ *   - VAO (GetVAO with instanced DrawArrays)
+ *   - Immediate-mode drawing (BeginEnd, Vertex, Color, TexCoord, Rect, TexRect)
+ *     via ImmediateModeRenderer vertex batcher
+ *   - Matrix stack (MatrixMode, Push/Pop, Translate, Scale, Rotate, Ortho)
+ *   - Fixed-function state (Blending, BlendFunc, BlendFuncSeparate, Scissor,
+ *     StencilTest/Func/Op, ColorMask, DepthTest, DepthMask, AlphaTest)
+ *   - Display lists (CreateList, CallList, DeleteList)
+ *   - Queries (GetViewSizes, TextureInfo)
  *
  * State hygiene: between widget calls Babylon does not know about shader
- * programs or buffers we bound. Before widget draw calls we snapshot
- * minimal GL state (program, active texture bindings, blend/depth) and
- * restore it afterwards so the next Babylon frame is undisturbed.
+ * programs or buffers we bound. The widget host snapshots/restores GL state
+ * so Babylon's state cache stays in sync.
  */
 import { markOpaque, type LuaValue } from './lua-runtime.js';
+import { ImmediateModeRenderer } from './lua-gl-immediate.js';
 
 /** Handle returned by gl.CreateShader — opaque to Lua. */
 export interface LuaShaderHandle {
@@ -84,23 +80,6 @@ export interface EngineTextures {
  */
 type TextureCache = Map<string, LuaTextureHandle>;
 
-/**
- * Per-ActiveFBO-call state. We don't actually bind the real framebuffer
- * and draw immediate-mode quads — instead we redirect `gl.Color` / `gl.Rect`
- * into a CPU pixel buffer sized to the color0 attachment, then at the end
- * of the callback we upload the buffer to the attachment via texSubImage2D.
- *
- * This lets the lava_layer widget build its coast-detection heightmap
- * texture without us having to implement full OpenGL immediate mode.
- */
-interface ActiveFBOState {
-    fbo: LuaFBOHandle;
-    width: number;
-    height: number;
-    pixels: Uint8ClampedArray;
-    // Current color in 8-bit RGBA (written by gl.Color).
-    currentColor: [number, number, number, number];
-}
 
 export class LuaGLBridge {
     private gl: WebGL2RenderingContext;
@@ -109,13 +88,19 @@ export class LuaGLBridge {
     private engineTex: EngineTextures;
     /** Currently bound shader — tracked so gl.Uniform* calls target the right program. */
     private currentShader: LuaShaderHandle | null = null;
-    /** Immediate-mode state — written by gl.Color/gl.Rect inside gl.ActiveFBO.
-     *  Null outside of ActiveFBO. */
-    private activeFBOState: ActiveFBOState | null = null;
     private textureCache: TextureCache = new Map();
     /** 1x1 fallback textures. */
     private whiteTex: WebGLTexture | null = null;
     private blackTex: WebGLTexture | null = null;
+    /** Immediate-mode renderer for gl.BeginEnd / gl.Rect / gl.TexRect etc. */
+    private imm: ImmediateModeRenderer;
+    /** Tracks the currently bound texture on unit 0 for immediate-mode textured flag. */
+    private boundTextureUnit0: WebGLTexture | null = null;
+    /** Tracks whether a texture is bound on unit 0 (for immediate-mode draw). */
+    private hasTextureUnit0 = false;
+    /** RBO handles for gl.CreateRBO / gl.DeleteRBO. */
+    private rboHandles = new Map<number, WebGLRenderbuffer>();
+    private nextRboId = 1;
 
     constructor(gl: WebGL2RenderingContext, mapSourceUrl: string, engineTex: EngineTextures = {}) {
         this.gl = gl;
@@ -123,11 +108,14 @@ export class LuaGLBridge {
         this.engineTex = engineTex;
         this.whiteTex = this.createSolidTexture(255, 255, 255, 255);
         this.blackTex = this.createSolidTexture(0, 0, 0, 255);
+        this.imm = new ImmediateModeRenderer(gl);
     }
 
     /** Build the `gl` global for the Lua runtime. */
     buildGlGlobal(): Record<string, LuaValue> {
         const gl: Record<string, LuaValue> = {};
+
+        // ── Shader management ───────────────────────────────────────
         gl['CreateShader'] = (opts: LuaValue) => this.createShader(opts);
         gl['UseShader'] = (handle: LuaValue) => this.useShader(handle);
         gl['DeleteShader'] = (handle: LuaValue) => this.deleteShader(handle);
@@ -141,106 +129,323 @@ export class LuaGLBridge {
         gl['UniformArray'] = (name: LuaValue, _type: LuaValue, arr: LuaValue) =>
             this.setUniformArray(name, arr);
 
+        // ── Texture management ──────────────────────────────────────
         gl['CreateTexture'] = (a: LuaValue, b: LuaValue, c: LuaValue) =>
             this.createTexture(a, b, c);
         gl['DeleteTexture'] = (h: LuaValue) => this.deleteTexture(h);
         gl['Texture'] = (unit: LuaValue, handleOrPath: LuaValue) =>
             this.bindTexture(unit, handleOrPath);
+        gl['TextureInfo'] = (handleOrPath: LuaValue) =>
+            this.textureInfo(handleOrPath);
 
+        // ── FBO / RBO ───────────────────────────────────────────────
         gl['CreateFBO'] = (opts: LuaValue) => this.createFBO(opts);
         gl['ActiveFBO'] = (fbo: LuaValue, callback: LuaValue) => this.activeFBO(fbo, callback);
         gl['DeleteFBO'] = (h: LuaValue) => this.deleteFBO(h);
+        gl['IsValidFBO'] = (h: LuaValue) => this.isValidFBO(h);
+        gl['CreateRBO'] = (w: LuaValue, h: LuaValue, opts: LuaValue) =>
+            this.createRBO(w, h, opts);
+        gl['DeleteRBO'] = (h: LuaValue) => this.deleteRBO(h);
 
+        // ── VAO ─────────────────────────────────────────────────────
         gl['GetVAO'] = () => this.getVAO();
 
+        // ── Fixed-function state ────────────────────────────────────
         gl['Blending'] = (a: LuaValue, b: LuaValue) => this.blending(a, b);
+        gl['BlendFunc'] = (src: LuaValue, dst: LuaValue) => this.blendFunc(src, dst);
+        gl['BlendFuncSeparate'] = (srcRGB: LuaValue, dstRGB: LuaValue,
+            srcA: LuaValue, dstA: LuaValue) =>
+            this.blendFuncSeparate(srcRGB, dstRGB, srcA, dstA);
         gl['DepthTest'] = (on: LuaValue) => this.depthTest(on);
         gl['DepthMask'] = (on: LuaValue) => this.depthMask(on);
+        gl['ColorMask'] = (r: LuaValue, g?: LuaValue, b?: LuaValue, a?: LuaValue) =>
+            this.colorMask(r, g, b, a);
+        gl['Scissor'] = (x: LuaValue, y?: LuaValue, w?: LuaValue, h?: LuaValue) =>
+            this.scissor(x, y, w, h);
+        gl['StencilTest'] = (on: LuaValue) => this.stencilTest(on);
+        gl['StencilFunc'] = (func: LuaValue, ref: LuaValue, mask: LuaValue) =>
+            this.stencilFunc(func, ref, mask);
+        gl['StencilOp'] = (sfail: LuaValue, dpfail: LuaValue, dppass: LuaValue) =>
+            this.stencilOp(sfail, dpfail, dppass);
+        gl['StencilMask'] = (mask: LuaValue) => this.stencilMask(mask);
+        gl['AlphaTest'] = (on: LuaValue, threshold?: LuaValue) =>
+            this.alphaTest(on, threshold);
+        gl['LineWidth'] = (w: LuaValue) => this.lineWidth(w);
+        gl['PolygonMode'] = (_face: LuaValue, _mode: LuaValue) => {
+            // WebGL2 doesn't support polygon mode — always fill
+        };
         gl['PushAttrib'] = (_bits: LuaValue) => { /* state snapshotted by host */ };
         gl['PopAttrib'] = () => { /* state restored by host */ };
         gl['Clear'] = (...args: LuaValue[]) => this.clear(args);
 
-        // Matrix stack — no-op because the ActiveFBO pixel-buffer path
-        // interprets glRect coordinates as direct pixel coords (the
-        // widget calls glOrtho(0, SIZE, 0, SIZE), which is identity for
-        // our purposes).
-        gl['MatrixMode'] = (_m: LuaValue) => { };
-        gl['PushMatrix'] = () => { };
-        gl['PopMatrix'] = () => { };
-        gl['LoadIdentity'] = () => { };
-        gl['Ortho'] = (..._args: LuaValue[]) => { };
+        // ── Matrix stack ────────────────────────────────────────────
+        gl['MatrixMode'] = (m: LuaValue) => this.imm.matrixMode(Number(m));
+        gl['PushMatrix'] = () => this.imm.pushMatrix();
+        gl['PopMatrix'] = () => this.imm.popMatrix();
+        gl['LoadIdentity'] = () => this.imm.loadIdentity();
+        gl['LoadMatrix'] = (...args: LuaValue[]) => this.loadMatrix(args);
+        gl['MultMatrix'] = (...args: LuaValue[]) => this.multMatrixGL(args);
+        gl['Translate'] = (x: LuaValue, y: LuaValue, z: LuaValue) =>
+            this.imm.translate(Number(x), Number(y), Number(z ?? 0));
+        gl['Scale'] = (x: LuaValue, y: LuaValue, z: LuaValue) =>
+            this.imm.scale(Number(x), Number(y), Number(z ?? 1));
+        gl['Rotate'] = (angle: LuaValue, x: LuaValue, y: LuaValue, z: LuaValue) =>
+            this.imm.rotate(Number(angle), Number(x), Number(y), Number(z));
+        gl['Ortho'] = (l: LuaValue, r: LuaValue, b: LuaValue, t: LuaValue,
+            n: LuaValue, f: LuaValue) =>
+            this.imm.ortho(Number(l), Number(r), Number(b), Number(t),
+                Number(n ?? -1), Number(f ?? 1));
+        gl['Billboard'] = () => this.imm.billboard();
 
-        // Immediate mode — only valid inside ActiveFBO for our use case.
+        // ── Immediate mode ──────────────────────────────────────────
         gl['Color'] = (...args: LuaValue[]) => this.color(args);
         gl['Rect'] = (...args: LuaValue[]) => this.rect(args);
-        gl['BeginEnd'] = (_mode: LuaValue, _fn: LuaValue) => { /* unused */ };
-        gl['Vertex'] = (..._args: LuaValue[]) => { };
-        gl['TexCoord'] = (..._args: LuaValue[]) => { };
-        gl['MultiTexCoord'] = (..._args: LuaValue[]) => { };
+        gl['TexRect'] = (...args: LuaValue[]) => this.texRect(args);
+        gl['BeginEnd'] = (mode: LuaValue, fn: LuaValue, ...extra: LuaValue[]) =>
+            this.beginEnd(mode, fn, extra);
+        gl['Vertex'] = (...args: LuaValue[]) => this.vertexGL(args);
+        gl['TexCoord'] = (...args: LuaValue[]) => this.texCoordGL(args);
+        gl['MultiTexCoord'] = (unit: LuaValue, s: LuaValue, t: LuaValue) =>
+            this.imm.multiTexCoord(Number(unit), Number(s), Number(t));
+
+        // ── Display lists ───────────────────────────────────────────
+        gl['CreateList'] = (fn: LuaValue) => this.createList(fn);
+        gl['CallList'] = (id: LuaValue) => this.imm.callList(Number(id));
+        gl['DeleteList'] = (id: LuaValue) => this.imm.deleteList(Number(id));
+
+        // ── Font (stubbed — separate implementation needed) ─────────
+        gl['LoadFont'] = (path: LuaValue, _size?: LuaValue, _outlineW?: LuaValue,
+            _outlineS?: LuaValue) => {
+            console.warn(`[gl.LoadFont] stub: ${path}`);
+            return null;
+        };
+        gl['DeleteFont'] = (_handle: LuaValue) => { };
+
+        // ── Queries ─────────────────────────────────────────────────
+        gl['GetViewSizes'] = () => {
+            const c = this.gl.canvas;
+            return [c.width, c.height];
+        };
 
         return gl;
     }
 
     // ============================================================
-    // Immediate-mode pixel-buffer emulation (used inside ActiveFBO)
+    // Immediate-mode drawing (real WebGL + FBO pixel-buffer fallback)
     // ============================================================
 
     private color(args: LuaValue[]): void {
-        if (!this.activeFBOState) return;
         const r = clamp01(Number(args[0] ?? 1));
         const g = clamp01(Number(args[1] ?? 1));
         const b = clamp01(Number(args[2] ?? 1));
         const a = clamp01(Number(args[3] ?? 1));
-        this.activeFBOState.currentColor = [
-            Math.round(r * 255),
-            Math.round(g * 255),
-            Math.round(b * 255),
-            Math.round(a * 255),
-        ];
+        this.imm.color(r, g, b, a);
     }
 
     private rect(args: LuaValue[]): void {
-        const st = this.activeFBOState;
-        if (!st) return;
         const x1 = Number(args[0]);
         const y1 = Number(args[1]);
         const x2 = Number(args[2]);
         const y2 = Number(args[3]);
         if (!Number.isFinite(x1) || !Number.isFinite(y1) ||
             !Number.isFinite(x2) || !Number.isFinite(y2)) return;
-        const ix1 = Math.max(0, Math.min(st.width,  Math.floor(Math.min(x1, x2))));
-        const iy1 = Math.max(0, Math.min(st.height, Math.floor(Math.min(y1, y2))));
-        const ix2 = Math.max(0, Math.min(st.width,  Math.ceil (Math.max(x1, x2))));
-        const iy2 = Math.max(0, Math.min(st.height, Math.ceil (Math.max(y1, y2))));
-        const [cr, cg, cb, ca] = st.currentColor;
-        const w = st.width;
-        const px = st.pixels;
-        for (let y = iy1; y < iy2; y++) {
-            let idx = (y * w + ix1) * 4;
-            for (let x = ix1; x < ix2; x++) {
-                px[idx]     = cr;
-                px[idx + 1] = cg;
-                px[idx + 2] = cb;
-                px[idx + 3] = ca;
-                idx += 4;
-            }
+        this.imm.setTextured(this.hasTextureUnit0, this.boundTextureUnit0);
+        this.imm.rect(x1, y1, x2, y2);
+    }
+
+    private texRect(args: LuaValue[]): void {
+        const x1 = Number(args[0]);
+        const y1 = Number(args[1]);
+        const x2 = Number(args[2]);
+        const y2 = Number(args[3]);
+        const s1 = Number(args[4] ?? 0);
+        const t1 = Number(args[5] ?? 0);
+        const s2 = Number(args[6] ?? 1);
+        const t2 = Number(args[7] ?? 1);
+        this.imm.setTextured(this.hasTextureUnit0, this.boundTextureUnit0);
+        this.imm.texRect(x1, y1, x2, y2, s1, t1, s2, t2);
+    }
+
+    private beginEnd(mode: LuaValue, fn: LuaValue, extra: LuaValue[]): void {
+        if (typeof fn !== 'function') return;
+        this.imm.setTextured(this.hasTextureUnit0, this.boundTextureUnit0);
+        this.imm.beginEnd(Number(mode), () => {
+            (fn as (...a: LuaValue[]) => void)(...extra);
+        });
+    }
+
+    private vertexGL(args: LuaValue[]): void {
+        this.imm.vertex(Number(args[0] ?? 0), Number(args[1] ?? 0));
+    }
+
+    private texCoordGL(args: LuaValue[]): void {
+        this.imm.texCoord(Number(args[0] ?? 0), Number(args[1] ?? 0));
+    }
+
+    private loadMatrix(args: LuaValue[]): void {
+        if (args.length >= 16) {
+            const m = new Float32Array(16);
+            for (let i = 0; i < 16; i++) m[i] = Number(args[i]);
+            this.imm.loadMatrix(m);
         }
     }
 
+    private multMatrixGL(args: LuaValue[]): void {
+        if (args.length >= 16) {
+            const m = new Float32Array(16);
+            for (let i = 0; i < 16; i++) m[i] = Number(args[i]);
+            this.imm.multMatrix(m);
+        }
+    }
+
+    private createList(fn: LuaValue): number {
+        if (typeof fn !== 'function') return 0;
+        return this.imm.createList(() => {
+            (fn as () => void)();
+        });
+    }
+
     private clear(args: LuaValue[]): void {
-        if (!this.activeFBOState) return;
-        // glClear(mask, r, g, b, a) — lava widget passes (COLOR_BIT, 0,0,0,0).
-        const r = clamp01(Number(args[1] ?? 0));
-        const g = clamp01(Number(args[2] ?? 0));
-        const b = clamp01(Number(args[3] ?? 0));
-        const a = clamp01(Number(args[4] ?? 0));
-        const cr = Math.round(r * 255);
-        const cg = Math.round(g * 255);
-        const cb = Math.round(b * 255);
-        const ca = Math.round(a * 255);
-        const px = this.activeFBOState.pixels;
-        for (let i = 0; i < px.length; i += 4) {
-            px[i] = cr; px[i + 1] = cg; px[i + 2] = cb; px[i + 3] = ca;
+        const gl = this.gl;
+        const mask = Number(args[0] ?? 0);
+        if (args.length >= 5) {
+            gl.clearColor(
+                clamp01(Number(args[1])),
+                clamp01(Number(args[2])),
+                clamp01(Number(args[3])),
+                clamp01(Number(args[4])),
+            );
+        }
+        let glMask = 0;
+        if (mask & 0x00004000) glMask |= gl.COLOR_BUFFER_BIT;
+        if (mask & 0x00000100) glMask |= gl.DEPTH_BUFFER_BIT;
+        if (mask & 0x00000400) glMask |= gl.STENCIL_BUFFER_BIT;
+        if (glMask) gl.clear(glMask);
+    }
+
+    // ============================================================
+    // State functions needed by Chili GUI
+    // ============================================================
+
+    private blendFunc(src: LuaValue, dst: LuaValue): void {
+        const gl = this.gl;
+        gl.enable(gl.BLEND);
+        gl.blendFunc(Number(src), Number(dst));
+    }
+
+    private blendFuncSeparate(srcRGB: LuaValue, dstRGB: LuaValue,
+        srcA: LuaValue, dstA: LuaValue): void {
+        const gl = this.gl;
+        gl.enable(gl.BLEND);
+        gl.blendFuncSeparate(Number(srcRGB), Number(dstRGB),
+            Number(srcA), Number(dstA));
+    }
+
+    private colorMask(r: LuaValue, g?: LuaValue, b?: LuaValue, a?: LuaValue): void {
+        const gl = this.gl;
+        if (typeof r === 'boolean' && g === undefined) {
+            // Single boolean form: gl.ColorMask(false) / gl.ColorMask(true)
+            gl.colorMask(r, r, r, r);
+        } else {
+            gl.colorMask(!!r, !!(g ?? r), !!(b ?? r), !!(a ?? r));
+        }
+    }
+
+    private scissor(x: LuaValue, y?: LuaValue, w?: LuaValue, h?: LuaValue): void {
+        const gl = this.gl;
+        if (x === false || x === null || x === undefined) {
+            gl.disable(gl.SCISSOR_TEST);
+            return;
+        }
+        gl.enable(gl.SCISSOR_TEST);
+        gl.scissor(Number(x), Number(y), Number(w), Number(h));
+    }
+
+    private stencilTest(on: LuaValue): void {
+        const gl = this.gl;
+        if (on === true || on === 1) gl.enable(gl.STENCIL_TEST);
+        else gl.disable(gl.STENCIL_TEST);
+    }
+
+    private stencilFunc(func: LuaValue, ref: LuaValue, mask: LuaValue): void {
+        this.gl.stencilFunc(Number(func), Number(ref), Number(mask));
+    }
+
+    private stencilOp(sfail: LuaValue, dpfail: LuaValue, dppass: LuaValue): void {
+        this.gl.stencilOp(Number(sfail), Number(dpfail), Number(dppass));
+    }
+
+    private stencilMask(mask: LuaValue): void {
+        this.gl.stencilMask(Number(mask));
+    }
+
+    private alphaTest(on: LuaValue, threshold?: LuaValue): void {
+        // WebGL2 has no fixed-function alpha test — emulated in the
+        // immediate-mode fragment shader via discard.
+        if (on === false || on === 0) {
+            this.imm.setAlphaThreshold(0);
+        } else {
+            this.imm.setAlphaThreshold(Number(threshold ?? 0));
+        }
+    }
+
+    private lineWidth(w: LuaValue): void {
+        // WebGL2 only supports lineWidth(1) on most implementations,
+        // but we call it anyway for compliance.
+        this.gl.lineWidth(Math.max(1, Number(w)));
+    }
+
+    private textureInfo(handleOrPath: LuaValue): Record<string, number> | null {
+        if (typeof handleOrPath === 'object' && handleOrPath !== null) {
+            const h = handleOrPath as unknown as LuaTextureHandle;
+            if (h.__type === 'texture') {
+                return { xsize: h.width, ysize: h.height };
+            }
+        }
+        if (typeof handleOrPath === 'string') {
+            const normalised = this.normaliseTexturePath(handleOrPath);
+            const cached = this.textureCache.get(normalised);
+            if (cached) {
+                return { xsize: cached.width, ysize: cached.height };
+            }
+        }
+        return null;
+    }
+
+    private isValidFBO(handle: LuaValue): boolean {
+        if (!handle || typeof handle !== 'object' || Array.isArray(handle)) return false;
+        const h = handle as unknown as LuaFBOHandle;
+        if (h.__type !== 'fbo') return false;
+        const gl = this.gl;
+        const saved = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, h.fbo);
+        const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, saved);
+        return status === gl.FRAMEBUFFER_COMPLETE;
+    }
+
+    private createRBO(w: LuaValue, h: LuaValue, opts: LuaValue): number {
+        const gl = this.gl;
+        const rbo = gl.createRenderbuffer();
+        if (!rbo) return 0;
+        gl.bindRenderbuffer(gl.RENDERBUFFER, rbo);
+        // Default to DEPTH24_STENCIL8 which is what Chili uses
+        const format = (opts && typeof opts === 'object' && !Array.isArray(opts))
+            ? Number((opts as Record<string, LuaValue>)['format'] ?? gl.DEPTH24_STENCIL8)
+            : gl.DEPTH24_STENCIL8;
+        gl.renderbufferStorage(gl.RENDERBUFFER, format, Number(w), Number(h));
+        gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+        const id = this.nextRboId++;
+        this.rboHandles.set(id, rbo);
+        return id;
+    }
+
+    private deleteRBO(handle: LuaValue): void {
+        const id = Number(handle);
+        const rbo = this.rboHandles.get(id);
+        if (rbo) {
+            this.gl.deleteRenderbuffer(rbo);
+            this.rboHandles.delete(id);
         }
     }
 
@@ -678,20 +883,30 @@ export class LuaGLBridge {
         gl.activeTexture(gl.TEXTURE0 + unit);
         if (handleOrPath === false || handleOrPath === null || handleOrPath === undefined) {
             gl.bindTexture(gl.TEXTURE_2D, null);
+            if (unit === 0) {
+                this.hasTextureUnit0 = false;
+                this.boundTextureUnit0 = null;
+            }
             return;
         }
+        const trackUnit0 = (tex: WebGLTexture | null) => {
+            if (unit === 0) {
+                this.hasTextureUnit0 = tex !== null;
+                this.boundTextureUnit0 = tex;
+            }
+        };
+
         if (typeof handleOrPath === 'string') {
             const s = handleOrPath;
             if (s.startsWith('$')) {
-                // Engine texture
                 let tex: WebGLTexture | null = null;
                 if (s === '$heightmap') tex = this.engineTex.heightmap ?? this.whiteTex;
                 else if (s === '$shadow') tex = this.engineTex.shadow ?? this.whiteTex;
                 else if (s === '$info') tex = this.engineTex.info ?? this.blackTex;
                 gl.bindTexture(gl.TEXTURE_2D, tex);
+                trackUnit0(tex);
                 return;
             }
-            // File path — fetch if not cached
             const normalised = this.normaliseTexturePath(s);
             let handle = this.textureCache.get(normalised);
             if (!handle) {
@@ -704,12 +919,14 @@ export class LuaGLBridge {
                 void this.loadImageInto(`${this.mapSourceUrl}/${normalised}`, handle);
             }
             gl.bindTexture(gl.TEXTURE_2D, handle.tex);
+            trackUnit0(handle.tex);
             return;
         }
         if (typeof handleOrPath === 'object' && handleOrPath !== null) {
             const h = handleOrPath as unknown as LuaTextureHandle;
             if (h.__type === 'texture') {
                 gl.bindTexture(gl.TEXTURE_2D, h.tex);
+                trackUnit0(h.tex);
             }
         }
     }
@@ -725,6 +942,7 @@ export class LuaGLBridge {
         const fbo = gl.createFramebuffer()!;
         gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
         const attachments: LuaTextureHandle[] = [];
+        // Color attachments (textures)
         for (let i = 0; i < 4; i++) {
             const key = `color${i}`;
             const t = rec[key];
@@ -735,6 +953,23 @@ export class LuaGLBridge {
                         gl.TEXTURE_2D, th.tex, 0);
                     attachments.push(th);
                 }
+            }
+        }
+        // Depth/stencil RBO attachment (Chili uses DEPTH24_STENCIL8)
+        const depthRbo = rec['depth'];
+        if (typeof depthRbo === 'number') {
+            const rbo = this.rboHandles.get(depthRbo);
+            if (rbo) {
+                gl.framebufferRenderbuffer(gl.FRAMEBUFFER,
+                    gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, rbo);
+            }
+        }
+        const stencilRbo = rec['stencil'];
+        if (typeof stencilRbo === 'number') {
+            const rbo = this.rboHandles.get(stencilRbo);
+            if (rbo) {
+                gl.framebufferRenderbuffer(gl.FRAMEBUFFER,
+                    gl.STENCIL_ATTACHMENT, gl.RENDERBUFFER, rbo);
             }
         }
         const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
@@ -748,49 +983,34 @@ export class LuaGLBridge {
     }
 
     /**
-     * gl.ActiveFBO(fbo, callback) — Spring's API for rendering into an
-     * off-screen target. We don't actually bind the real framebuffer;
-     * instead we set up a CPU pixel buffer sized to the color0 attachment,
-     * invoke the Lua callback (which calls gl.Color/gl.Rect/gl.Clear into
-     * the buffer), then upload the buffer to the attachment texture.
-     *
-     * This mirrors the effect of immediate-mode rendering without our
-     * needing to implement glBegin/glVertex/glColor state-machine draw
-     * emulation. Good enough for the lava_layer coast-detection texture,
-     * which is the only widget path that currently uses ActiveFBO.
+     * gl.ActiveFBO(fbo, callback) — bind the FBO and execute the callback.
+     * The immediate-mode renderer and all gl.* state functions draw into
+     * the bound framebuffer. When the callback returns, the previous
+     * framebuffer is restored.
      */
     private activeFBO(fboV: LuaValue, callbackV: LuaValue): void {
         if (!fboV || typeof fboV !== 'object' || Array.isArray(fboV)) return;
         const fbo = fboV as unknown as LuaFBOHandle;
         if (fbo.__type !== 'fbo' || fbo.colorAttachments.length === 0) return;
         if (typeof callbackV !== 'function') return;
+
+        const gl = this.gl;
+        const savedFBO = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
         const target = fbo.colorAttachments[0];
-        // Seed the pixel buffer with the existing texture contents? Not
-        // strictly necessary — the lava widget calls glClear first. Start
-        // with zeros.
-        this.activeFBOState = {
-            fbo,
-            width: target.width,
-            height: target.height,
-            pixels: new Uint8ClampedArray(target.width * target.height * 4),
-            currentColor: [255, 255, 255, 255],
-        };
+        const savedViewport = gl.getParameter(gl.VIEWPORT) as Int32Array;
+
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo.fbo);
+        gl.viewport(0, 0, target.width, target.height);
+
         try {
             (callbackV as (...a: LuaValue[]) => LuaValue | undefined)();
         } catch (e) {
             console.warn('[gl.ActiveFBO] callback threw:', e);
         }
-        // Upload the pixel buffer to the attachment texture.
-        const gl = this.gl;
-        const savedBinding = gl.getParameter(gl.TEXTURE_BINDING_2D) as WebGLTexture | null;
-        gl.bindTexture(gl.TEXTURE_2D, target.tex);
-        gl.texSubImage2D(
-            gl.TEXTURE_2D, 0, 0, 0, target.width, target.height,
-            gl.RGBA, gl.UNSIGNED_BYTE,
-            new Uint8Array(this.activeFBOState.pixels.buffer),
-        );
-        gl.bindTexture(gl.TEXTURE_2D, savedBinding);
-        this.activeFBOState = null;
+
+        gl.bindFramebuffer(gl.FRAMEBUFFER, savedFBO);
+        gl.viewport(savedViewport[0], savedViewport[1],
+            savedViewport[2], savedViewport[3]);
     }
 
     private deleteFBO(handle: LuaValue): void {
