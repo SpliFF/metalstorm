@@ -4,6 +4,10 @@
  *
  * Provides Claude with tools to query logs, execute Lua/commands,
  * inspect game state, and manage processes — all via HTTP REST API.
+ *
+ * Game server ports are discovered from the SQLite database (game_servers table)
+ * rather than a hardcoded URL, since the lobby assigns ports dynamically and
+ * games persist across lobby restarts.
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -12,10 +16,12 @@ import {
     CallToolRequestSchema,
     ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
+import Database from 'better-sqlite3';
+import { resolve } from 'path';
 
 const LOG_SERVER_URL = process.env.LOG_SERVER_URL || 'http://localhost:8010';
 const LOBBY_URL = process.env.LOBBY_URL || 'http://localhost:8011';
-const GAME_SERVER_URL = process.env.GAME_SERVER_URL || 'http://localhost:9100';
+const DB_PATH = process.env.SPRING_DB || resolve(process.env.PROJECT_ROOT || '.', 'data/spring-server.db');
 const AUTH_USER = process.env.SPRING_USER || 'admin';
 const AUTH_PASS = process.env.SPRING_PASS || 'admin';
 
@@ -50,6 +56,31 @@ async function ensureAuth() {
     return '';
 }
 
+// --- SQLite game server discovery ---
+function getGameServers() {
+    try {
+        const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
+        const rows = db.prepare('SELECT room_id, port, pid, map_path, game_path, state FROM game_servers').all();
+        db.close();
+        return rows;
+    } catch {
+        return [];
+    }
+}
+
+function getGameServerUrl(roomId) {
+    const servers = getGameServers();
+    let server;
+    if (roomId !== undefined && roomId > 0) {
+        server = servers.find(s => s.room_id === roomId);
+    } else {
+        // Pick the first active (starting/running) server
+        server = servers.find(s => s.state === 'starting' || s.state === 'running');
+    }
+    if (!server) return null;
+    return { url: `http://127.0.0.1:${server.port}`, ...server };
+}
+
 // --- HTTP helpers ---
 async function fetchJson(url) {
     const resp = await fetch(url);
@@ -73,6 +104,18 @@ async function execOnServer(serverUrl, scope, code) {
         throw new Error(`exec failed (${resp.status}): ${text}`);
     }
     return resp.json();
+}
+
+async function execOnGameServer(scope, code, roomId) {
+    const server = getGameServerUrl(roomId);
+    if (!server) {
+        const servers = getGameServers();
+        if (servers.length === 0) {
+            throw new Error('No game servers found in database. Is a game running?');
+        }
+        throw new Error(`No active game server found. Available: ${servers.map(s => `room ${s.room_id} (${s.state})`).join(', ')}`);
+    }
+    return execOnServer(server.url, scope, code);
 }
 
 // --- Tool definitions ---
@@ -113,6 +156,7 @@ const TOOLS = [
             properties: {
                 scope: { type: 'string', description: 'Execution scope', enum: ['LuaRules', 'LuaGaia', 'server'] },
                 code: { type: 'string', description: 'Lua code or server command to execute' },
+                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
             },
             required: ['scope', 'code'],
         },
@@ -122,7 +166,9 @@ const TOOLS = [
         description: 'Get current game state summary (frame, teams, unit count) from the game server.',
         inputSchema: {
             type: 'object',
-            properties: {},
+            properties: {
+                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
+            },
         },
     },
     {
@@ -132,12 +178,13 @@ const TOOLS = [
             type: 'object',
             properties: {
                 team: { type: 'number', description: 'Team ID (-1 for all)', default: -1 },
+                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
             },
         },
     },
     {
         name: 'list_processes',
-        description: 'List all game server processes managed by the lobby.',
+        description: 'List all game server processes (from SQLite database).',
         inputSchema: {
             type: 'object',
             properties: {},
@@ -160,7 +207,9 @@ const TOOLS = [
         description: 'List loaded Lua gadgets and their status on the game server.',
         inputSchema: {
             type: 'object',
-            properties: {},
+            properties: {
+                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
+            },
         },
     },
     {
@@ -218,29 +267,28 @@ async function executeTool(name, args) {
         }
 
         case 'exec_lua': {
-            const result = await execOnServer(GAME_SERVER_URL, args.scope, args.code);
+            const result = await execOnGameServer(args.scope, args.code, args.roomId);
             if (!result.success) return `Error: ${result.output || 'execution failed'}`;
             return result.output || '(no output)';
         }
 
         case 'get_game_state': {
-            const result = await execOnServer(GAME_SERVER_URL, 'server', 'state');
+            const result = await execOnGameServer('server', 'state', args.roomId);
             return result.output || '(no state)';
         }
 
         case 'list_units': {
             const cmd = args.team !== undefined && args.team >= 0
                 ? `units ${args.team}` : 'units';
-            const result = await execOnServer(GAME_SERVER_URL, 'server', cmd);
+            const result = await execOnGameServer('server', cmd, args.roomId);
             return result.output || '(no units)';
         }
 
         case 'list_processes': {
-            const url = `${LOBBY_URL}/api/processes`;
-            const data = await fetchJson(url);
-            if (!data.length) return 'No game server processes running.';
-            return data.map(p =>
-                `Room ${p.room_id}: pid=${p.pid}, port=${p.port}, state=${p.state}, game=${p.game}, map=${p.map}`
+            const servers = getGameServers();
+            if (!servers.length) return 'No game server processes found in database.';
+            return servers.map(s =>
+                `Room ${s.room_id}: port=${s.port}, pid=${s.pid}, state=${s.state}, game=${s.game_path || '?'}, map=${s.map_path || '?'}`
             ).join('\n');
         }
 
@@ -252,14 +300,27 @@ async function executeTool(name, args) {
         }
 
         case 'list_gadgets': {
-            const result = await execOnServer(GAME_SERVER_URL, 'LuaRules', 'return table.concat(Spring.GetGadgetList(), "\\n")');
+            const result = await execOnGameServer('LuaRules', 'return table.concat(Spring.GetGadgetList(), "\\n")', args.roomId);
             return result.output || '(no gadgets or game not running)';
         }
 
         case 'query_db': {
-            const result = await execOnServer(LOBBY_URL, 'sql', args.query);
-            if (!result.success) return `Error: ${result.output || 'query failed'}`;
-            return result.output || '(empty result)';
+            // Read-only query directly against SQLite
+            const queryLower = args.query.trim().toLowerCase();
+            if (queryLower.startsWith('insert') || queryLower.startsWith('update') ||
+                queryLower.startsWith('delete') || queryLower.startsWith('drop') ||
+                queryLower.startsWith('alter') || queryLower.startsWith('create')) {
+                return 'Error: only read-only queries are allowed';
+            }
+            try {
+                const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
+                const rows = db.prepare(args.query).all();
+                db.close();
+                if (!rows.length) return '(empty result)';
+                return JSON.stringify(rows, null, 2);
+            } catch (err) {
+                return `Error: ${err.message}`;
+            }
         }
 
         case 'list_sessions': {

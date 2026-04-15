@@ -9,8 +9,8 @@
       "args": ["tools/debug-mcp/server.js"],
       "env": {
         "LOBBY_URL": "http://127.0.0.1:8011",
-        "GAME_SERVER_URL": "http://127.0.0.1:9100",
-        "LOG_SERVER_URL": "http://127.0.0.1:8010"
+        "LOG_SERVER_URL": "http://127.0.0.1:8010",
+        "SPRING_DB": "data/spring-server.db"
       }
     }
   }

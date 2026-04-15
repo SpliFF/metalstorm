@@ -287,7 +287,9 @@ int main(int argc, char* argv[])
     sqlite3* mapDb = nullptr;
     sqlite3_open(dbPath.c_str(), &mapDb);
 
-    // Create game_servers table for lobby restart resilience
+    // Create game_servers table — maintained in real-time so external tools
+    // (MCP debug server, springcli) can discover running game server ports
+    // without querying the lobby HTTP API.
     if (mapDb) {
         sqlite3_exec(mapDb,
             "CREATE TABLE IF NOT EXISTS game_servers ("
@@ -299,9 +301,48 @@ int main(int argc, char* argv[])
             "  started_at INTEGER DEFAULT (strftime('%s','now')),"
             "  state TEXT DEFAULT 'starting'"
             ")", nullptr, nullptr, nullptr);
-        // Clean up stale entries from a previous lobby run
-        sqlite3_exec(mapDb, "DELETE FROM game_servers", nullptr, nullptr, nullptr);
+        // Clean up stale entries whose processes are no longer alive
+        {
+            sqlite3_stmt* stmt = nullptr;
+            sqlite3_prepare_v2(mapDb, "SELECT room_id, pid FROM game_servers", -1, &stmt, nullptr);
+            std::vector<uint32_t> staleRooms;
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                pid_t pid = sqlite3_column_int(stmt, 1);
+                if (!isProcessAlive(pid))
+                    staleRooms.push_back(sqlite3_column_int(stmt, 0));
+            }
+            sqlite3_finalize(stmt);
+            for (auto rid : staleRooms) {
+                std::string sql = "DELETE FROM game_servers WHERE room_id=" + std::to_string(rid);
+                sqlite3_exec(mapDb, sql.c_str(), nullptr, nullptr, nullptr);
+            }
+        }
     }
+
+    // Helper: persist a game server entry to SQLite
+    auto persistGameServer = [&](const GameServerInstance& inst) {
+        if (!mapDb) return;
+        const char* stateStr = "starting";
+        switch (inst.state) {
+            case GameServerInstance::Starting: stateStr = "starting"; break;
+            case GameServerInstance::Running:  stateStr = "running"; break;
+            case GameServerInstance::Ended:    stateStr = "ended"; break;
+            case GameServerInstance::Crashed:  stateStr = "crashed"; break;
+        }
+        char sql[512];
+        snprintf(sql, sizeof(sql),
+            "INSERT OR REPLACE INTO game_servers (room_id, port, pid, map_path, game_path, state) "
+            "VALUES (%u, %d, %d, '%s', '%s', '%s')",
+            inst.roomId, inst.port, (int)inst.pid,
+            inst.mapPath.c_str(), inst.gamePath.c_str(), stateStr);
+        sqlite3_exec(mapDb, sql, nullptr, nullptr, nullptr);
+    };
+
+    auto removeGameServer = [&](uint32_t roomId) {
+        if (!mapDb) return;
+        std::string sql = "DELETE FROM game_servers WHERE room_id=" + std::to_string(roomId);
+        sqlite3_exec(mapDb, sql.c_str(), nullptr, nullptr, nullptr);
+    };
 
     // Map processing is handled offline by tools/mapconverter.
     // The lobby reads pre-populated data/ + SQLite metadata.
@@ -1004,6 +1045,7 @@ int main(int argc, char* argv[])
 
         kill(gsIt->second.pid, SIGTERM);
         gsIt->second.state = GameServerInstance::Ended;
+        removeGameServer(room->id);
         SLOG(SPRING_LOG_NOTICE, "host ended game for room %u (killed pid %d)",
             room->id, gsIt->second.pid);
 
@@ -1173,6 +1215,7 @@ int main(int argc, char* argv[])
             auto inst = spawnGameServer(room->id, gamePath, mapPath, dbPath,
                 room->players, room->aiSlots);
             gameServers[room->id] = inst;
+            persistGameServer(inst);
             room->gameServerPort = inst.port;
         }
 
@@ -1199,6 +1242,7 @@ int main(int argc, char* argv[])
             if (inst.state == GameServerInstance::Starting || inst.state == GameServerInstance::Running) {
                 if (!isProcessAlive(inst.pid)) {
                     inst.state = GameServerInstance::Ended;
+                    removeGameServer(roomId);
                     SLOG(SPRING_LOG_NOTICE, "game server for room %u (pid %d) has exited",
                         roomId, inst.pid);
 
@@ -1215,18 +1259,13 @@ int main(int argc, char* argv[])
     if (restartRequested.load()) {
         SLOG(SPRING_LOG_NOTICE, "restart requested — persisting game server state...");
 
-        // Persist running game servers to SQLite so the new process
-        // can re-adopt them without killing active games.
+        // game_servers table is already up-to-date (maintained in real-time).
+        // Just close the database handle.
         if (mapDb) {
-            sqlite3_exec(mapDb, "DELETE FROM game_servers", nullptr, nullptr, nullptr);
             for (auto& [rid, inst] : gameServers) {
                 if (inst.state == GameServerInstance::Starting ||
                     inst.state == GameServerInstance::Running) {
-                    std::string sql = "INSERT INTO game_servers (room_id, port, pid) VALUES ("
-                        + std::to_string(rid) + "," + std::to_string(inst.port)
-                        + "," + std::to_string(inst.pid) + ")";
-                    sqlite3_exec(mapDb, sql.c_str(), nullptr, nullptr, nullptr);
-                    SLOG(SPRING_LOG_NOTICE, "persisted game server room=%u port=%d pid=%d",
+                    SLOG(SPRING_LOG_NOTICE, "preserving game server room=%u port=%d pid=%d",
                         rid, inst.port, inst.pid);
                 }
             }
