@@ -30,7 +30,7 @@ import type { Scene } from '@babylonjs/core';
 const LEVEL_NAMES = ['DEBUG', 'INFO', 'NOTICE', 'WARN', 'ERROR', 'FATAL'];
 const LEVEL_CLASSES = ['debug', 'info', 'notice', 'warning', 'error', 'fatal'];
 const MAX_LINES = 2000;
-const SCOPE_OPTIONS = ['LuaRules', 'LuaGaia', 'server', 'lobby', 'sql'];
+const SCOPE_OPTIONS = ['LuaRules', 'LuaGaia', 'LuaUI', 'server', 'lobby', 'sql'];
 
 interface LogEntry {
     id: number;

@@ -166,6 +166,36 @@ export class LuaRuntime {
     }
 
     /**
+     * Execute Lua source that returns a value. The source should contain
+     * a `return` statement. Returns the first return value as a JS value,
+     * or null on error.
+     */
+    evalString(source: string, chunkName: string = this.name): LuaValue {
+        const L = this.L;
+        const top = lua.lua_gettop(L);
+        const sourceBytes = to_luastring(source);
+        const nameBytes = to_luastring('=' + chunkName);
+        let status = lauxlib.luaL_loadbuffer(
+            L, sourceBytes, sourceBytes.length, nameBytes,
+        );
+        if (status !== lua.LUA_OK) {
+            lua.lua_settop(L, top);
+            return null;
+        }
+        status = lua.lua_pcall(L, 0, 1, 0);
+        if (status !== lua.LUA_OK) {
+            lua.lua_settop(L, top);
+            return null;
+        }
+        if (lua.lua_gettop(L) > top) {
+            const val = this.readValue(-1);
+            lua.lua_settop(L, top);
+            return val;
+        }
+        return null;
+    }
+
+    /**
      * Set a global. Accepts primitives, plain objects (→ Lua table),
      * arrays (→ Lua sequence), and functions (→ Lua C function that
      * marshals arguments back to JS).
