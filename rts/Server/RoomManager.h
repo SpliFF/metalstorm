@@ -236,7 +236,7 @@ public:
     void RemoveClient(ClientID clientId);
 
 private:
-    std::mutex mutex;
+    std::recursive_mutex mutex;
     std::unordered_map<uint32_t, GameRoom> rooms;
     uint32_t nextRoomId = 1;
 };

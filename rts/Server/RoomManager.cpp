@@ -15,7 +15,7 @@ uint32_t RoomManager::CreateRoom(
     uint32_t hostPlayerId, ClientID hostClientId,
     const std::string& hostUsername)
 {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::recursive_mutex> lock(mutex);
 
     uint32_t id = nextRoomId++;
     GameRoom& room = rooms[id];
@@ -46,7 +46,7 @@ bool RoomManager::JoinRoom(
     const std::string& username, const std::string& password,
     bool asSpectator)
 {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::recursive_mutex> lock(mutex);
 
     auto it = rooms.find(roomId);
     if (it == rooms.end()) return false;
@@ -110,7 +110,7 @@ bool RoomManager::JoinRoom(
 }
 
 void RoomManager::LeaveRoom(uint32_t roomId, uint32_t playerId) {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::recursive_mutex> lock(mutex);
 
     auto it = rooms.find(roomId);
     if (it == rooms.end()) return;
@@ -137,7 +137,7 @@ void RoomManager::LeaveRoom(uint32_t roomId, uint32_t playerId) {
 }
 
 bool RoomManager::SetTeam(uint32_t roomId, uint32_t playerId, uint8_t team) {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     auto it = rooms.find(roomId);
     if (it == rooms.end()) return false;
     auto* player = it->second.FindPlayer(playerId);
@@ -147,7 +147,7 @@ bool RoomManager::SetTeam(uint32_t roomId, uint32_t playerId, uint8_t team) {
 }
 
 bool RoomManager::SetReady(uint32_t roomId, uint32_t playerId, bool ready) {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     auto it = rooms.find(roomId);
     if (it == rooms.end()) return false;
     auto* player = it->second.FindPlayer(playerId);
@@ -168,7 +168,7 @@ bool RoomManager::AddAISlot(
     const std::string& displayName,
     uint8_t team)
 {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     auto it = rooms.find(roomId);
     if (it == rooms.end()) return false;
     GameRoom& room = it->second;
@@ -205,7 +205,7 @@ bool RoomManager::AddAISlot(
 bool RoomManager::RemoveAISlot(
     uint32_t roomId, uint32_t requesterId, uint8_t slotIndex)
 {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     auto it = rooms.find(roomId);
     if (it == rooms.end()) return false;
     GameRoom& room = it->second;
@@ -224,7 +224,7 @@ bool RoomManager::SetAITeam(
     uint32_t roomId, uint32_t requesterId,
     uint8_t slotIndex, uint8_t team)
 {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     auto it = rooms.find(roomId);
     if (it == rooms.end()) return false;
     GameRoom& room = it->second;
@@ -268,7 +268,7 @@ bool RoomManager::SetPlayerStartPos(
     uint32_t targetPlayerId, int8_t posIndex,
     int8_t maxStartPos)
 {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     auto it = rooms.find(roomId);
     if (it == rooms.end()) return false;
     GameRoom& room = it->second;
@@ -308,7 +308,7 @@ bool RoomManager::SetAIStartPos(
     uint8_t slotIndex, int8_t posIndex,
     int8_t maxStartPos)
 {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     auto it = rooms.find(roomId);
     if (it == rooms.end()) return false;
     GameRoom& room = it->second;
@@ -338,7 +338,7 @@ bool RoomManager::SetAIStartPos(
 void RoomManager::AutoAssignStartPositions(
     uint32_t roomId, int8_t maxStartPos)
 {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     auto it = rooms.find(roomId);
     if (it == rooms.end()) return;
     GameRoom& room = it->second;
@@ -392,7 +392,7 @@ void RoomManager::AutoAssignStartPositions(
 }
 
 bool RoomManager::CloseRoom(uint32_t roomId, uint32_t requesterId) {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     auto it = rooms.find(roomId);
     if (it == rooms.end()) return false;
     if (it->second.hostPlayerId != requesterId) return false;
@@ -404,7 +404,7 @@ bool RoomManager::CloseRoom(uint32_t roomId, uint32_t requesterId) {
 }
 
 bool RoomManager::KickPlayer(uint32_t roomId, uint32_t requesterId, uint32_t targetId) {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     auto it = rooms.find(roomId);
     if (it == rooms.end()) return false;
     if (it->second.hostPlayerId != requesterId) return false;
@@ -420,7 +420,7 @@ bool RoomManager::KickPlayer(uint32_t roomId, uint32_t requesterId, uint32_t tar
 }
 
 bool RoomManager::StartGame(uint32_t roomId, uint32_t requesterId) {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     auto it = rooms.find(roomId);
     if (it == rooms.end()) return false;
     GameRoom& room = it->second;
@@ -434,7 +434,7 @@ bool RoomManager::StartGame(uint32_t roomId, uint32_t requesterId) {
 }
 
 void RoomManager::ResetRoomForNextGame(uint32_t roomId) {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     auto it = rooms.find(roomId);
     if (it == rooms.end()) return;
     GameRoom& room = it->second;
@@ -468,18 +468,20 @@ void RoomManager::ResetRoomForNextGame(uint32_t roomId) {
 }
 
 void RoomManager::SetRoomState(uint32_t roomId, ERoomState newState) {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     auto it = rooms.find(roomId);
     if (it == rooms.end()) return;
     it->second.state = newState;
 }
 
 GameRoom* RoomManager::GetRoom(uint32_t roomId) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     auto it = rooms.find(roomId);
     return (it != rooms.end()) ? &it->second : nullptr;
 }
 
 std::vector<GameRoom*> RoomManager::GetAllRooms() {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     std::vector<GameRoom*> result;
     for (auto& [id, room] : rooms)
         result.push_back(&room);
@@ -487,6 +489,7 @@ std::vector<GameRoom*> RoomManager::GetAllRooms() {
 }
 
 GameRoom* RoomManager::FindRoomByClient(ClientID clientId) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     for (auto& [id, room] : rooms) {
         if (room.FindPlayerByClient(clientId))
             return &room;
@@ -495,6 +498,7 @@ GameRoom* RoomManager::FindRoomByClient(ClientID clientId) {
 }
 
 void RoomManager::RemoveClient(ClientID clientId) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     for (auto& [id, room] : rooms) {
         auto* player = room.FindPlayerByClient(clientId);
         if (player) {

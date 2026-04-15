@@ -316,7 +316,7 @@ int main(int argc, char* argv[])
         }
     }
     // Engine base content (gamedata/defs.lua, system.lua, gadgets, etc.)
-    CFileHandler::AddContentRoot("cont/base/springcontent", RootCategory::Base);
+    CFileHandler::AddContentRoot("data/engine", RootCategory::Base);
     // Always search cwd as fallback
     CFileHandler::AddContentRoot(".", RootCategory::Raw);
 

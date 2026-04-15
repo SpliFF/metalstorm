@@ -151,6 +151,17 @@ export class LobbyUI {
     /// arrives. Passed to RoomCreate.game_name on create.
     private selectedGameId: string = '';
 
+    // ─── Public read-only accessors for debugging / automation ───
+
+    get room(): CurrentRoom | null { return this.currentRoom; }
+    get screen(): LobbyScreen { return this.currentScreen; }
+    get token(): string { return this.authToken; }
+    get playerId(): number { return this.myPlayerId; }
+    get roomList(): RoomInfo[] { return this.rooms; }
+    get maps(): typeof this.availableMaps { return this.availableMaps; }
+    get games(): AvailableGameInfo[] { return this.availableGames; }
+    get ais(): AvailableAIInfo[] { return this.availableAIs; }
+
     constructor(
         onGameStart?: (gameServerPort: number, mapName: string) => void,
         templates?: LobbyTemplates,
@@ -214,7 +225,7 @@ export class LobbyUI {
                     const savedRoomId = localStorage.getItem('springrts-game-room');
                     if (savedRoomId) {
                         this.pendingRejoinRoomId = parseInt(savedRoomId);
-                        this.sendJoinRoom(this.pendingRejoinRoomId);
+                        this.joinRoom(this.pendingRejoinRoomId);
                     }
                     this.startPolling();
                     this.showBrowser();
@@ -250,7 +261,7 @@ export class LobbyUI {
 
     // ─── HTTP helpers for lobby operations ───
 
-    private async lobbyPost(path: string, body: Record<string, unknown> = {}): Promise<any> {
+    async lobbyPost(path: string, body: Record<string, unknown> = {}): Promise<any> {
         const resp = await fetch(`${CONFIG.httpUrl}${path}`, {
             method: 'POST',
             headers: {
@@ -262,7 +273,7 @@ export class LobbyUI {
         return resp.json();
     }
 
-    private async lobbyGet(path: string): Promise<any> {
+    async lobbyGet(path: string): Promise<any> {
         const resp = await fetch(stampUrl(`${CONFIG.httpUrl}${path}`));
         return resp.ok ? resp.json() : null;
     }
@@ -341,7 +352,7 @@ export class LobbyUI {
 
         // Refresh AI list when entering a room with a different game
         if (this.availableAIsForGame !== newGameName) {
-            this.sendAIListRequest();
+            this.refreshAIList();
         }
 
         const gameRunning = this.currentRoom.state === 3 || this.currentRoom.state === 4;
@@ -458,7 +469,7 @@ export class LobbyUI {
         // enough — handleGameList() re-renders the dropdown when
         // the response arrives.
         if (this.availableGames.length === 0) {
-            this.sendGameListRequest();
+            this.refreshGameList();
         }
 
         this.container.innerHTML = this.templates.browser;
@@ -472,7 +483,7 @@ export class LobbyUI {
             const name = (document.getElementById('new-room-name') as HTMLInputElement).value || 'Game';
             const selected = this.container.querySelector('.map-card.selected');
             const mapId = selected?.getAttribute('data-map-id') ?? '';
-            this.sendCreateRoom(name, mapId);
+            this.createRoom(name, mapId);
         };
 
         // Populate the game dropdown if the list has already arrived.
@@ -572,7 +583,7 @@ export class LobbyUI {
 
         el.querySelectorAll('.join-btn:not([disabled])').forEach(btn => {
             (btn as HTMLElement).onclick = () => {
-                this.sendJoinRoom(parseInt(btn.getAttribute('data-id')!));
+                this.joinRoom(parseInt(btn.getAttribute('data-id')!));
             };
         });
     }
@@ -829,11 +840,11 @@ export class LobbyUI {
             actions_html: actions.join(''),
         });
 
-        document.getElementById('leave-btn')!.onclick = () => this.sendLeave();
+        document.getElementById('leave-btn')!.onclick = () => this.leave();
         document.getElementById('ready-btn')?.addEventListener('click',
-            () => this.sendReady(!myPlayer?.ready));
+            () => this.ready(!myPlayer?.ready));
         document.getElementById('start-btn')?.addEventListener('click',
-            () => this.sendStartGame());
+            () => this.startGame());
         document.getElementById('rejoin-btn')?.addEventListener('click', () => {
             if (this.currentRoom && this.currentRoom.gameServerPort > 0) {
                 // Mirror the hide + save dance that handleRoomState
@@ -853,12 +864,12 @@ export class LobbyUI {
         });
         document.getElementById('endgame-btn')?.addEventListener('click', () => {
             if (confirm('End the game for everyone?')) {
-                this.sendEndGame();
+                this.endGame();
             }
         });
         document.getElementById('closeroom-btn')?.addEventListener('click', () => {
             if (confirm('Close this room? All members will be returned to the lobby.')) {
-                this.sendCloseRoom();
+                this.closeRoom();
             }
         });
 
@@ -870,7 +881,7 @@ export class LobbyUI {
         this.container.querySelectorAll('.team-select[data-pid]').forEach(sel => {
             (sel as HTMLSelectElement).onchange = (e) => {
                 const team = parseInt((e.target as HTMLSelectElement).value);
-                this.sendTeamSelect(team);
+                this.teamSelect(team);
             };
         });
 
@@ -886,14 +897,14 @@ export class LobbyUI {
                 if (!aiSel || !teamSel) return;
                 const aiId = aiSel.value;
                 const team = parseInt(teamSel.value);
-                if (aiId) this.sendAddAI(aiId, team);
+                if (aiId) this.addAI(aiId, team);
             };
         }
         this.container.querySelectorAll('.ai-remove-btn').forEach(btn => {
             (btn as HTMLButtonElement).onclick = (e) => {
                 const el = e.currentTarget as HTMLButtonElement;
                 const idx = parseInt(el.dataset.slot ?? '-1');
-                if (idx >= 0) this.sendRemoveAI(idx);
+                if (idx >= 0) this.removeAI(idx);
             };
         });
         // Per-AI-row team dropdowns. Each one carries its slot
@@ -905,7 +916,7 @@ export class LobbyUI {
                 const el = e.target as HTMLSelectElement;
                 const idx = parseInt(el.dataset.slot ?? '-1');
                 const team = parseInt(el.value);
-                if (idx >= 0) this.sendSetAITeam(idx, team);
+                if (idx >= 0) this.setAITeam(idx, team);
             };
         });
 
@@ -927,13 +938,13 @@ export class LobbyUI {
                     // slot so the server's "self" path handles it
                     // without requiring host privilege.
                     if (pid === this.myPlayerId) {
-                        this.sendSetStartPos({ kind: 'self' }, posIndex);
+                        this.setStartPos({ kind: 'self' }, posIndex);
                     } else {
-                        this.sendSetStartPos({ kind: 'player', playerId: pid }, posIndex);
+                        this.setStartPos({ kind: 'player', playerId: pid }, posIndex);
                     }
                 } else if (owner.startsWith('ai:')) {
                     const idx = parseInt(owner.substring('ai:'.length));
-                    this.sendSetStartPos({ kind: 'ai', slotIndex: idx }, posIndex);
+                    this.setStartPos({ kind: 'ai', slotIndex: idx }, posIndex);
                 }
             };
         });
@@ -943,7 +954,7 @@ export class LobbyUI {
 
     // ─── Room operations (all HTTP POST) ───
 
-    private async sendCreateRoom(name: string, mapId: string = ''): Promise<void> {
+    async createRoom(name: string, mapId: string = ''): Promise<void> {
         if (!this.authToken) return;
         const data = await this.lobbyPost('/api/rooms', {
             name, map: mapId, game: this.selectedGameId,
@@ -954,7 +965,7 @@ export class LobbyUI {
         }
     }
 
-    private async sendJoinRoom(roomId: number): Promise<void> {
+    async joinRoom(roomId: number): Promise<void> {
         if (!this.authToken) return;
         const data = await this.lobbyPost('/api/rooms/join', { room_id: roomId });
         if (data?.id) {
@@ -963,43 +974,43 @@ export class LobbyUI {
         }
     }
 
-    private async sendLeave(): Promise<void> {
+    async leave(): Promise<void> {
         if (!this.authToken) return;
         await this.lobbyPost('/api/rooms/leave');
         this.currentRoom = null;
         this.showBrowser();
     }
 
-    private async sendReady(ready: boolean): Promise<void> {
+    async ready(ready: boolean): Promise<void> {
         if (!this.authToken) return;
         const data = await this.lobbyPost('/api/rooms/ready', { ready: ready ? 'true' : 'false' });
         if (data?.id) this.updateCurrentRoomFromJson(data);
     }
 
-    private async sendTeamSelect(team: number): Promise<void> {
+    async teamSelect(team: number): Promise<void> {
         if (!this.authToken) return;
         const data = await this.lobbyPost('/api/rooms/team', { team });
         if (data?.id) this.updateCurrentRoomFromJson(data);
     }
 
-    private async sendStartGame(): Promise<void> {
+    async startGame(): Promise<void> {
         if (!this.authToken) return;
         await this.lobbyPost('/api/rooms/start');
     }
 
-    private async sendEndGame(): Promise<void> {
+    async endGame(): Promise<void> {
         if (!this.authToken) return;
         await this.lobbyPost('/api/rooms/end');
     }
 
-    private async sendCloseRoom(): Promise<void> {
+    async closeRoom(): Promise<void> {
         if (!this.authToken) return;
         await this.lobbyPost('/api/rooms/close');
         this.currentRoom = null;
         this.showBrowser();
     }
 
-    private async sendAIListRequest(): Promise<void> {
+    async refreshAIList(): Promise<void> {
         if (!this.currentRoom) return;
         try {
             const ais = await this.lobbyGet(`/api/ai/${this.currentRoom.gameName}`);
@@ -1014,7 +1025,7 @@ export class LobbyUI {
         } catch { /* ignore */ }
     }
 
-    private async sendGameListRequest(): Promise<void> {
+    async refreshGameList(): Promise<void> {
         try {
             const games = await this.lobbyGet('/api/games');
             if (Array.isArray(games)) {
@@ -1030,24 +1041,24 @@ export class LobbyUI {
         } catch { /* ignore */ }
     }
 
-    private async sendAddAI(aiId: string, team: number): Promise<void> {
+    async addAI(aiId: string, team: number): Promise<void> {
         if (!this.authToken) return;
         const data = await this.lobbyPost('/api/rooms/ai/add', { ai_id: aiId, team });
         if (data?.id) this.updateCurrentRoomFromJson(data);
     }
 
-    private async sendRemoveAI(slotIndex: number): Promise<void> {
+    async removeAI(slotIndex: number): Promise<void> {
         if (!this.authToken) return;
         const data = await this.lobbyPost('/api/rooms/ai/remove', { slot_index: slotIndex });
         if (data?.id) this.updateCurrentRoomFromJson(data);
     }
 
-    private async sendSetAITeam(slotIndex: number, team: number): Promise<void> {
+    async setAITeam(slotIndex: number, team: number): Promise<void> {
         const data = await this.lobbyPost('/api/rooms/ai/team', { slot_index: slotIndex, team });
         if (data?.id) this.updateCurrentRoomFromJson(data);
     }
 
-    private async sendSetStartPos(
+    async setStartPos(
         target: { kind: 'self' } | { kind: 'player'; playerId: number } | { kind: 'ai'; slotIndex: number },
         posIndex: number,
     ): Promise<void> {
@@ -1189,7 +1200,7 @@ export class LobbyUI {
         // a room running a different game than the currently cached
         // list, or when we don't have a cached list at all.
         if (this.availableAIsForGame !== newGameName) {
-            this.sendAIListRequest();
+            this.refreshAIList();
         }
 
         // Loading (3) or Active (4) → game is running, jump to the

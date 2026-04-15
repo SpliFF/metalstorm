@@ -40,9 +40,54 @@ Key tools: `read_page`, `javascript_tool`, `form_input`, `computer` (click/type/
 |----------|--------|
 | Network-level verification (HTTP/2, headers) | chrome-devtools |
 | Performance profiling | chrome-devtools |
+| Scripted lobby actions (create/join/start) | chrome-devtools (`evaluate_script`) |
 | Interactive debugging with user watching | claude-in-chrome |
 | Headless CI testing | chrome-devtools (with `--headless`) |
 | Quick screenshot of current state | either |
+
+**Default to chrome-devtools** for most testing tasks. It is more reliable for scripted actions and doesn't require the Chrome extension.
+
+## Lobby JS API (`window.lobby`)
+
+The `LobbyUI` instance is exposed on `window.lobby`. All lobby actions can be called directly from JS (via `evaluate_script` or browser console):
+
+```js
+// Room lifecycle
+await lobby.createRoom('test', 'pools_of_ilys_1.0.0')  // name, mapId
+await lobby.joinRoom(1)                                  // roomId
+await lobby.leave()
+await lobby.closeRoom()
+
+// Game setup
+await lobby.addAI('null', 1)        // aiId, team (0-indexed)
+await lobby.removeAI(0)             // slotIndex
+await lobby.setAITeam(0, 1)         // slotIndex, team
+await lobby.teamSelect(0)           // team for self
+await lobby.ready(true)             // toggle ready state
+await lobby.startGame()             // host only, requires ready + 2 teams
+await lobby.endGame()
+
+// Low-level
+await lobby.lobbyPost('/api/rooms/start')
+await lobby.lobbyGet('/api/rooms')
+```
+
+### Quick-start a game (scripted)
+
+To start a game from scratch in one script block:
+
+```js
+await lobby.createRoom('test', 'pools_of_ilys_1.0.0');
+await lobby.addAI('null', 1);   // AI on team 2 (index 1) — game needs 2 teams
+await lobby.ready(true);         // host must ready up
+await lobby.startGame();         // launches the game server
+```
+
+### Important: starting a game requires
+
+1. **At least 2 teams** — add an AI to team 2 (`lobby.addAI('null', 1)`)
+2. **Host must be Ready** — call `lobby.ready(true)` before `lobby.startGame()`
+3. Then call `lobby.startGame()`
 
 ## Test flow: Login and room creation
 
@@ -52,8 +97,7 @@ Key tools: `read_page`, `javascript_tool`, `form_input`, `computer` (click/type/
 3. Optionally fill #login-pass2 for registration
 4. Submit the login form
 5. Verify "Game Rooms" heading appears (browser screen)
-6. Click "+ New Game" to create a room
-7. Verify room state in the room view
+6. Use lobby JS API to create room, add AI, ready up, and start
 ```
 
 ## Test flow: Network verification (HTTP/2)

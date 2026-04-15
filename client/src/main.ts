@@ -614,6 +614,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     lobbyUI = new LobbyUI((gameServerPort: number, mapName: string) => {
         startGame(gameServerPort, mapName);
     }, getDefaultLobbyTemplates());
+    (window as any).lobby = lobbyUI;
 
     // If a game id is known up front, fire-and-forget the override
     // bundle fetch and hot-swap the templates as soon as it lands.
