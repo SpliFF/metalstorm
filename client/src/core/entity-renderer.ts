@@ -25,7 +25,8 @@ import {
     Vector3,
     Quaternion,
     StandardMaterial,
-    PBRMaterial,
+    ShaderMaterial,
+    Effect,
     Color3,
     BoundingInfo,
     SceneLoader,
@@ -46,14 +47,19 @@ interface ModelConfig {
     invertteamcolor?: boolean;
 }
 
+/** Loaded texture set for a unit def. */
+interface UnitTextures {
+    diffuse: Texture;
+    teamMask: Texture | null;
+    invertTeamColor: boolean;
+}
+
 /**
  * Fetch and parse a model's .config.lua sidecar file. The file is a
  * simple Lua `return { key = value, ... }` table — we extract texture
  * references with regexes rather than running a full Lua parser.
  */
 async function fetchModelConfig(modelUrl: string): Promise<ModelConfig | null> {
-    // modelUrl is like /api/games/data/zk/models/strikecom.glb
-    // config is at /api/games/data/zk/models/strikecom.config.lua
     const configUrl = modelUrl.replace(/\.glb$/, '.config.lua');
     try {
         const resp = await fetch(configUrl);
@@ -76,47 +82,153 @@ async function fetchModelConfig(modelUrl: string): Promise<ModelConfig | null> {
  * a full URL. Textures live in `unittextures/` alongside `models/`.
  */
 function resolveTextureUrl(modelUrl: string, textureName: string): string {
-    // modelUrl: /api/games/data/zk/models/strikecom.glb
-    // texture:  /api/games/data/zk/unittextures/strikecom.dds
     const gameBase = modelUrl.substring(0, modelUrl.lastIndexOf('/models/'));
     return `${gameBase}/unittextures/${textureName}`;
 }
 
+// ─── Team color shader ───
+// Spring's legacy team color: finalColor = tex1 * (1 - mask) + teamColor * mask
+// where mask = tex2.a (or 1 - tex2.a when invertteamcolor is set).
+
+// ─── Team color shader ───
+// Spring's legacy team color: finalColor = tex1 * (1 - mask) + teamColor * tex1 * mask
+// where mask = tex2.a (or 1 - tex2.a when invertteamcolor is set).
+// Uses Babylon's instancesDeclaration/instancesVertex includes for thin-instance support.
+
+const TEAMCOLOR_VERTEX = `
+    precision highp float;
+    attribute vec3 position;
+    attribute vec3 normal;
+    attribute vec2 uv;
+
+    #include<instancesDeclaration>
+
+    uniform mat4 viewProjection;
+
+    varying vec2 vUV;
+    varying vec3 vNormal;
+
+    void main() {
+        #include<instancesVertex>
+
+        vec4 wp = finalWorld * vec4(position, 1.0);
+        vNormal = normalize(mat3(finalWorld) * normal);
+        vUV = uv;
+        gl_Position = viewProjection * wp;
+    }
+`;
+
+const TEAMCOLOR_FRAGMENT = `
+    precision highp float;
+    uniform sampler2D diffuseTex;
+    uniform sampler2D teamMaskTex;
+    uniform vec3 teamColor;
+    uniform float hasTeamMask;
+    uniform float invertMask;
+    uniform vec3 lightDir;
+
+    varying vec2 vUV;
+    varying vec3 vNormal;
+
+    void main() {
+        vec4 base = texture2D(diffuseTex, vUV);
+        vec3 color = base.rgb;
+
+        if (hasTeamMask > 0.5) {
+            vec4 maskSample = texture2D(teamMaskTex, vUV);
+            float mask = maskSample.a;
+            if (invertMask > 0.5) mask = 1.0 - mask;
+            color = mix(base.rgb, teamColor * base.rgb, mask);
+        }
+
+        // Simple directional + ambient lighting
+        float NdotL = max(dot(vNormal, lightDir), 0.0);
+        vec3 lit = color * (0.4 + 0.6 * NdotL);
+        gl_FragColor = vec4(lit, 1.0);
+    }
+`;
+
+// Register the shader once
+Effect.ShadersStore['teamColorVertexShader'] = TEAMCOLOR_VERTEX;
+Effect.ShadersStore['teamColorFragmentShader'] = TEAMCOLOR_FRAGMENT;
+
 /**
- * Apply legacy Spring textures (tex1 = diffuse, tex2 = team color mask)
- * to all meshes in a model. Creates a StandardMaterial with the diffuse
- * texture applied.
+ * Create a team-color material for a unit piece. Uses the teamColor
+ * shader with diffuse + team mask textures. Supports thin instances
+ * via Babylon's instancesDeclaration/instancesVertex includes.
  */
-function applyLegacyTextures(
-    meshes: Mesh[],
+function createTeamColorMaterial(
+    name: string,
+    textures: UnitTextures,
+    teamColor: Color3,
+    scene: Scene,
+): ShaderMaterial {
+    const mat = new ShaderMaterial(name, scene, 'teamColor', {
+        attributes: ['position', 'normal', 'uv'],
+        uniforms: ['world', 'viewProjection', 'teamColor', 'hasTeamMask',
+                   'invertMask', 'lightDir'],
+        samplers: ['diffuseTex', 'teamMaskTex'],
+        defines: ['#define INSTANCES', '#define THIN_INSTANCES'],
+    });
+
+    mat.setTexture('diffuseTex', textures.diffuse);
+    mat.setColor3('teamColor', teamColor);
+    mat.setVector3('lightDir', new Vector3(-0.5, 1.0, 0.3).normalize());
+
+    if (textures.teamMask) {
+        mat.setTexture('teamMaskTex', textures.teamMask);
+        mat.setFloat('hasTeamMask', 1.0);
+        mat.setFloat('invertMask', textures.invertTeamColor ? 1.0 : 0.0);
+    } else {
+        mat.setFloat('hasTeamMask', 0.0);
+        mat.setFloat('invertMask', 0.0);
+    }
+
+    mat.backFaceCulling = true;
+    return mat;
+}
+
+/**
+ * Load textures referenced by a model config. Returns the loaded
+ * texture set, or null if no tex1 is configured.
+ */
+function loadUnitTextures(
     config: ModelConfig,
     modelUrl: string,
     scene: Scene,
-): void {
-    if (!config.tex1) return;
+): UnitTextures | null {
+    if (!config.tex1) return null;
 
     const tex1Url = resolveTextureUrl(modelUrl, config.tex1);
-    const diffuseTex = new Texture(tex1Url, scene);
-    diffuseTex.hasAlpha = false;
+    const diffuse = new Texture(tex1Url, scene);
+    diffuse.hasAlpha = false;
 
-    // TODO: tex2 is the team color mask — apply it as a second texture
-    // with a custom shader or material plugin to blend team color where
-    // the mask is bright. For now, just apply the diffuse texture.
-
-    for (const mesh of meshes) {
-        // Replace the default flat material with one that has the texture
-        const mat = new StandardMaterial(mesh.name + '_mat', scene);
-        mat.diffuseTexture = diffuseTex;
-        mat.specularColor = new Color3(0.2, 0.2, 0.2);
-        mesh.material = mat;
+    let teamMask: Texture | null = null;
+    if (config.tex2) {
+        const tex2Url = resolveTextureUrl(modelUrl, config.tex2);
+        teamMask = new Texture(tex2Url, scene);
+        teamMask.hasAlpha = true;
     }
+
+    return {
+        diffuse,
+        teamMask,
+        invertTeamColor: config.invertteamcolor ?? false,
+    };
 }
 
+// Spring engine's 10 default team colors (from TeamBase::teamDefaultColor).
 const TEAM_COLORS = [
-    new Color3(0.2, 0.5, 1.0),
-    new Color3(1.0, 0.3, 0.2),
-    new Color3(0.2, 0.8, 0.3),
-    new Color3(1.0, 0.8, 0.1),
+    new Color3(90/255, 90/255, 255/255),   // blue
+    new Color3(200/255, 0/255, 0/255),     // red
+    new Color3(255/255, 255/255, 255/255), // white
+    new Color3(38/255, 155/255, 32/255),   // green
+    new Color3(7/255, 31/255, 125/255),    // dark blue
+    new Color3(150/255, 10/255, 180/255),  // purple
+    new Color3(255/255, 255/255, 0/255),   // yellow
+    new Color3(50/255, 50/255, 50/255),    // black
+    new Color3(152/255, 200/255, 220/255), // light blue
+    new Color3(171/255, 171/255, 131/255), // tan
 ];
 
 // Fallback shape types for defs without models
@@ -154,6 +266,8 @@ interface ModelTemplate {
     pieces: PieceInfo[];
     /** Vertical offset so the model's base sits at Y=0. */
     yOffset: number;
+    /** Loaded textures (diffuse + team mask). Null if no textures. */
+    textures: UnitTextures | null;
 }
 
 /** Per-piece thin-instance render mesh, keyed by (defId, team, pieceIdx). */
@@ -369,23 +483,21 @@ export class EntityRenderer {
             }
             const yOffset = -minY;
 
-            // Fetch model config (tex1/tex2/etc) and apply textures.
-            // This runs in parallel with nothing — the model is already
-            // loaded, we just need the texture metadata.
+            // Fetch model config (tex1/tex2) and load textures.
+            // Textures are shared across all teams; team color is applied
+            // per-team via the shader uniform.
             const config = await fetchModelConfig(def.modelUrl);
-            if (config?.tex1) {
-                const meshesWithGeometry = geometryPieces.map(p => p.mesh);
-                applyLegacyTextures(meshesWithGeometry, config, def.modelUrl, this.scene);
-            }
+            const textures = config ? loadUnitTextures(config, def.modelUrl, this.scene) : null;
 
             console.log(
                 `[entity-renderer] ${def.name}: model loaded, ` +
                 `${geometryPieces.length} piece(s) with geometry, ` +
                 `${pieces.length} total nodes, yOffset=${yOffset.toFixed(1)}` +
-                (config?.tex1 ? `, tex1=${config.tex1}` : ''),
+                (config?.tex1 ? `, tex1=${config.tex1}` : '') +
+                (config?.tex2 ? `, tex2=${config.tex2}` : ''),
             );
 
-            return { pieces, yOffset };
+            return { pieces, yOffset, textures };
         } catch (err) {
             console.warn(
                 `[entity-renderer] ${def.name}: failed to load ${def.modelUrl}`,
@@ -450,8 +562,16 @@ export class EntityRenderer {
             mesh = piece.mesh.clone(`unit_${defId}_t${team}_p${pieceIdx}_${piece.name}`);
             mesh.makeGeometryUnique();
 
-            if (!mesh.material) {
-                const teamColor = TEAM_COLORS[team % TEAM_COLORS.length];
+            const tmpl = this.modelTemplates.get(defId);
+            const teamColor = TEAM_COLORS[team % TEAM_COLORS.length];
+
+            if (tmpl?.textures) {
+                // Use team color shader with diffuse + mask textures
+                const matName = `unit_${defId}_t${team}_p${pieceIdx}_mat`;
+                mesh.material = createTeamColorMaterial(
+                    matName, tmpl.textures, teamColor, this.scene);
+            } else if (!mesh.material) {
+                // No textures — flat team color fallback
                 const mat = new StandardMaterial(`unit_${defId}_t${team}_p${pieceIdx}_mat`, this.scene);
                 mat.diffuseColor = teamColor;
                 mat.specularColor = new Color3(0.3, 0.3, 0.3);
@@ -707,6 +827,10 @@ export class EntityRenderer {
             if (tmpl) {
                 for (const p of tmpl.pieces) {
                     if (p.mesh) p.mesh.dispose();
+                }
+                if (tmpl.textures) {
+                    tmpl.textures.diffuse.dispose();
+                    tmpl.textures.teamMask?.dispose();
                 }
             }
         }
