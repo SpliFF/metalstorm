@@ -19,7 +19,7 @@ import { CONFIG, fetchBuildStamp, stampUrl } from './config.js';
 import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
 import { renderMapFeatures } from './core/feature-renderer.js';
 import { RTSCamera } from './core/rts-camera.js';
-import { LuaWidgetHost } from './core/lua-widget-host.js';
+import { LuaWidgetManager } from './core/lua-widget-manager.js';
 import { injectStyle, renderTemplate } from './ui/ui.js';
 import { debugConsole } from './core/debug-console.js';
 import {
@@ -153,6 +153,11 @@ function quitToLobby(): void {
     // and that container persists across game sessions. Without an
     // explicit dispose the next startGame() would append a second
     // canvas to the container.
+    // Widget manager — inside the startGame scope, but we stash a
+    // dispose callback on window so quitToLobby can reach it.
+    (window as any).__widgetManagerDispose?.();
+    delete (window as any).__widgetManagerDispose;
+
     minimap?.dispose();
     minimap = null;
     inputManager?.dispose();
@@ -221,7 +226,7 @@ function showGameOver(frame: number): void {
     });
 }
 
-async function startGame(gameServerPort: number, mapName: string): Promise<void> {
+async function startGame(gameServerPort: number, mapId: string, gameId: string = ''): Promise<void> {
     // Defensive teardown of any leftover session state. `quitToLobby`
     // normally runs this on explicit quit, but a player can re-enter
     // a game through paths that don't go via quitToLobby — for
@@ -341,7 +346,7 @@ async function startGame(gameServerPort: number, mapName: string): Promise<void>
     // Terrain state — populated when MapData arrives
     let terrainMesh: Mesh | null = null;
     let currentMapData: ParsedMapData | null = null;
-    let currentWidgetHost: LuaWidgetHost | null = null;
+    let currentWidgetManager: LuaWidgetManager | null = null;
 
     const onMapData = (map: ParsedMapData): void => {
         if (currentMapData) {
@@ -432,28 +437,24 @@ async function startGame(gameServerPort: number, mapName: string): Promise<void>
             minimap.loadBackground(mapBaseUrl, mapDims);
         }
 
-        // Load any LuaUI widgets the map ships (mapinfo.lua water shaders,
-        // lava layer rendering, etc.). Widgets are fetched from
-        // /api/maps/data/{mapId}/... and executed via fengari.
-        if (map.widgets.length > 0) {
-            const host = new LuaWidgetHost(scene, camera, {
+        // Load LuaUI widgets via the widget manager. Discovers all
+        // available widgets for the game, fetches sources, and loads
+        // them in a single shared Lua state.
+        if (gameId) {
+            const mgr = new LuaWidgetManager(scene, camera, {
                 ...map,
-                // Make the source URL absolute so widget fetches resolve
-                // against the lobby HTTP server, not the Vite dev server.
                 mapSourceUrl: lobbyHttpUrl + map.mapSourceUrl,
             }, {
-                // Pre-fetch Paper Tanks' LuaUI base and run it in every
-                // widget's Lua state before the widget's own source, so
-                // widgetHandler / WG / LUAUI_DIRNAME are in scope.
-                // TODO: derive gameId from the room's selected game.
-                gameId: 'papertanks',
+                gameId,
+                lobbyUrl: lobbyHttpUrl,
             });
-            void host.loadWidgets(map.widgets).then(() => {
-                console.log(`[client] ${map.widgets.length} widget(s) loaded`);
+            void mgr.initialize().then(() => {
+                console.log(`[client] widget manager ready`);
             }).catch(e => {
-                console.warn('[client] widget loading failed:', e);
+                console.warn('[client] widget manager failed:', e);
             });
-            currentWidgetHost = host;
+            currentWidgetManager = mgr;
+            (window as any).__widgetManagerDispose = () => { mgr.dispose(); };
         }
     };
 
@@ -478,7 +479,7 @@ async function startGame(gameServerPort: number, mapName: string): Promise<void>
             // endpoints. This replaces the old MapData FlatBuffer that
             // the game server used to send over WebRTC (which exceeded
             // the 256KB SCTP message size limit for large maps).
-            fetchMapDataHttp(lobbyHttpUrl, mapName).then(mapData => {
+            fetchMapDataHttp(lobbyHttpUrl, mapId).then(mapData => {
                 onMapData(mapData);
             }).catch(err => {
                 console.error('[client] failed to fetch map data via HTTP:', err);
@@ -635,8 +636,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Show lobby with the engine-default templates immediately so the
     // login screen renders without waiting on a network round-trip.
-    lobbyUI = new LobbyUI((gameServerPort: number, mapName: string) => {
-        startGame(gameServerPort, mapName);
+    lobbyUI = new LobbyUI((gameServerPort: number, mapId: string, gameId: string) => {
+        startGame(gameServerPort, mapId, gameId);
     }, getDefaultLobbyTemplates());
     (window as any).lobby = lobbyUI;
 

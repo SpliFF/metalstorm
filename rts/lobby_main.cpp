@@ -655,7 +655,32 @@ int main(int argc, char* argv[])
 
         std::string filePath = "data/games/" + rest;
         namespace fs = std::filesystem;
-        if (!fs::exists(filePath) || !fs::is_regular_file(filePath))
+        if (!fs::exists(filePath))
+            return {.contentType = "text/plain", .body = {}, .status = 404};
+
+        // Directory listing: return JSON array of entries
+        if (fs::is_directory(filePath)) {
+            std::string json = "[";
+            bool first = true;
+            for (const auto& entry : fs::directory_iterator(filePath)) {
+                if (!first) json += ",";
+                first = false;
+                json += "{\"name\":\"" + entry.path().filename().string() + "\"";
+                json += ",\"type\":\"" + std::string(entry.is_directory() ? "dir" : "file") + "\"";
+                if (entry.is_regular_file())
+                    json += ",\"size\":" + std::to_string(entry.file_size());
+                json += "}";
+            }
+            json += "]";
+            std::vector<uint8_t> body(json.begin(), json.end());
+            return {
+                .contentType = "application/json",
+                .body = std::move(body),
+                .status = 200,
+            };
+        }
+
+        if (!fs::is_regular_file(filePath))
             return {.contentType = "text/plain", .body = {}, .status = 404};
 
         std::ifstream f(filePath, std::ios::binary);

@@ -43,7 +43,7 @@ const ROOM_STATE_LABELS = ['Setup', 'Waiting', 'Ready Check', 'Loading', 'In Pro
 export type LobbyScreen = 'login' | 'browser' | 'room' | 'game';
 
 interface RoomInfo {
-    id: number; name: string; mapName: string;
+    id: number; name: string; mapId: string;
     playerCount: number; maxPlayers: number;
     state: number; hasPassword: boolean; hostName: string;
 }
@@ -88,7 +88,7 @@ interface AvailableGameInfo {
 }
 
 interface CurrentRoom {
-    id: number; name: string; mapName: string; gameName: string;
+    id: number; name: string; mapId: string; gameId: string;
     state: number; players: RoomPlayerInfo[];
     aiSlots: RoomAISlotInfo[];
     gameServerPort: number;
@@ -100,7 +100,7 @@ export class LobbyUI {
     private currentScreen: LobbyScreen = 'login';
     private rooms: RoomInfo[] = [];
     private currentRoom: CurrentRoom | null = null;
-    private onGameStart?: (gameServerPort: number, mapName: string) => void;
+    private onGameStart?: (gameServerPort: number, mapId: string, gameId: string) => void;
     private myPlayerId = 0;
     private pendingRejoinRoomId = 0;
     private authToken = '';
@@ -161,7 +161,7 @@ export class LobbyUI {
     get ais(): AvailableAIInfo[] { return this.availableAIs; }
 
     constructor(
-        onGameStart?: (gameServerPort: number, mapName: string) => void,
+        onGameStart?: (gameServerPort: number, mapId: string, gameId: string) => void,
         templates?: LobbyTemplates,
     ) {
         this.onGameStart = onGameStart;
@@ -306,7 +306,7 @@ export class LobbyUI {
 
     private applyRoomList(rooms: any[]): void {
         this.rooms = rooms.map((r: any) => ({
-            id: r.id, name: r.name ?? '', mapName: r.map ?? '',
+            id: r.id, name: r.name ?? '', mapId: r.map ?? '',
             playerCount: r.players?.length ?? 0, maxPlayers: 8,
             state: r.state ?? 0, hasPassword: false,
             hostName: r.players?.find((p: any) => p.is_host)?.username ?? '',
@@ -342,8 +342,8 @@ export class LobbyUI {
         }));
         const newGameName = r.game ?? '';
         this.currentRoom = {
-            id: r.id, name: r.name ?? '', mapName: r.map ?? '',
-            gameName: newGameName,
+            id: r.id, name: r.name ?? '', mapId: r.map ?? '',
+            gameId: newGameName,
             state: r.state ?? 0, players, aiSlots,
             gameServerPort: r.game_server_port ?? 0,
         };
@@ -359,7 +359,7 @@ export class LobbyUI {
             localStorage.setItem('springrts-game-port', String(this.currentRoom.gameServerPort));
             this.stopPolling();
             this.hide();
-            this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapName);
+            this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId);
             return;
         }
         if (this.currentRoom.state >= 5) {
@@ -563,7 +563,7 @@ export class LobbyUI {
 
         el.innerHTML = this.rooms.map(r => {
             const detail =
-                `${r.mapName ? this.esc(r.mapName) : '<em>No map</em>'} · ` +
+                `${r.mapId ? this.esc(r.mapId) : '<em>No map</em>'} · ` +
                 `${r.playerCount}/${r.maxPlayers} players · ` +
                 `Host: ${this.esc(r.hostName)}`;
             const joinLabel = r.state >= 5 ? 'Ended'
@@ -677,7 +677,7 @@ export class LobbyUI {
         // renders as "Loading positions…". An empty start_positions
         // array is a legitimate map shape too — the sim will fall
         // back to its own default placement and we hide the dropdown.
-        const currentMap = this.availableMaps.find(m => m.id === r.mapName);
+        const currentMap = this.availableMaps.find(m => m.id === r.mapId);
         const startPositions = currentMap?.startPositions ?? [];
         const mapHasStartPositions = startPositions.length > 0;
 
@@ -847,7 +847,7 @@ export class LobbyUI {
                 localStorage.setItem('springrts-game-room', String(this.currentRoom.id));
                 localStorage.setItem('springrts-game-port', String(this.currentRoom.gameServerPort));
                 this.hide();
-                this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapName);
+                this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId);
             }
         });
         // "End Game" and "Close Room" buttons removed — room lifecycle
@@ -987,13 +987,13 @@ export class LobbyUI {
     async refreshAIList(): Promise<void> {
         if (!this.currentRoom) return;
         try {
-            const ais = await this.lobbyGet(`/api/ai/${this.currentRoom.gameName}`);
+            const ais = await this.lobbyGet(`/api/ai/${this.currentRoom.gameId}`);
             if (Array.isArray(ais)) {
                 this.availableAIs = ais.map((ai: any) => ({
                     id: ai.id ?? '', displayName: ai.displayName ?? '',
                     description: ai.description ?? '', isEngineProvided: ai.isEngineProvided ?? false,
                 }));
-                this.availableAIsForGame = this.currentRoom.gameName;
+                this.availableAIsForGame = this.currentRoom.gameId;
                 if (this.currentScreen === 'room') this.showRoom();
             }
         } catch { /* ignore */ }
@@ -1052,7 +1052,7 @@ export class LobbyUI {
             const r = update.rooms(i);
             if (!r) continue;
             this.rooms.push({
-                id: r.roomId(), name: r.name() ?? '', mapName: r.mapName() ?? '',
+                id: r.roomId(), name: r.name() ?? '', mapId: r.mapName() ?? '',
                 playerCount: r.playerCount(), maxPlayers: r.maxPlayers(),
                 state: r.state(), hasPassword: r.hasPassword(), hostName: r.hostName() ?? '',
             });
@@ -1104,7 +1104,7 @@ export class LobbyUI {
         // the server routes AIListRequest by the caller's current
         // room's game, so this list matches room.gameName at the
         // time of the reply.
-        this.availableAIsForGame = this.currentRoom?.gameName ?? '';
+        this.availableAIsForGame = this.currentRoom?.gameId ?? '';
         if (this.currentScreen === 'room') {
             this.showRoom();
         }
@@ -1163,8 +1163,8 @@ export class LobbyUI {
         }
         const newGameName = u.gameName() ?? '';
         this.currentRoom = {
-            id: u.roomId(), name: u.name() ?? '', mapName: u.mapName() ?? '',
-            gameName: newGameName,
+            id: u.roomId(), name: u.name() ?? '', mapId: u.mapName() ?? '',
+            gameId: newGameName,
             state: u.state(), players, aiSlots,
             gameServerPort: u.gameServerPort(),
         };
@@ -1193,7 +1193,7 @@ export class LobbyUI {
             localStorage.setItem('springrts-game-room', String(this.currentRoom.id));
             localStorage.setItem('springrts-game-port', String(this.currentRoom.gameServerPort));
             this.hide();
-            this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapName);
+            this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId);
             return;
         }
 
