@@ -135,8 +135,13 @@ const TEAMCOLOR_FRAGMENT = `
         vec3 color = base.rgb;
 
         if (hasTeamMask > 0.5) {
-            vec4 maskSample = texture2D(teamMaskTex, vUV);
-            float mask = maskSample.a;
+            vec4 t2 = texture2D(teamMaskTex, vUV);
+            // Spring S3O tex2 convention:
+            //   R = team color mask (where to tint)
+            //   G = reflectivity / specular
+            //   B = self-illumination
+            //   A = typically 1.0 (not used as mask)
+            float mask = t2.r;
             if (invertMask > 0.5) mask = 1.0 - mask;
             color = mix(base.rgb, teamColor * base.rgb, mask);
         }
