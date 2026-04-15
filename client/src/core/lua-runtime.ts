@@ -63,6 +63,27 @@ export function isOpaque(v: unknown): boolean {
     return typeof v === 'object' && v !== null && (v as { [LUA_OPAQUE]?: true })[LUA_OPAQUE] === true;
 }
 
+/**
+ * Wrapper that forces an array to be marshalled as a Lua table (1-indexed
+ * sequence) rather than as multiple return values. Use this when a Spring API
+ * function returns a Lua table — e.g. GetPlayerList returns {[1]=0, [2]=1},
+ * not two separate values 0 and 1.
+ */
+const LUA_TABLE = Symbol('lua_table');
+export class LuaTable {
+    [LUA_TABLE] = true as const;
+    items: LuaValue[];
+    constructor(items: LuaValue[]) {
+        this.items = items;
+    }
+}
+export function luaTable(...items: LuaValue[]): LuaTable {
+    return new LuaTable(items);
+}
+export function isLuaTable(v: unknown): v is LuaTable {
+    return typeof v === 'object' && v !== null && (v as { [LUA_TABLE]?: true })[LUA_TABLE] === true;
+}
+
 /** Argument types we marshal between JS and Lua. */
 export type LuaValue =
     | null
@@ -226,6 +247,14 @@ export class LuaRuntime {
             // Opaque handle (gl.*) — round-trip via lightuserdata so the
             // JS object reference stays intact.
             lua.lua_pushlightuserdata(L, v);
+        } else if (isLuaTable(v)) {
+            // Explicit Lua table wrapper — push as a 1-indexed sequence table.
+            const items = (v as LuaTable).items;
+            lua.lua_createtable(L, items.length, 0);
+            for (let i = 0; i < items.length; i++) {
+                this.pushValue(items[i]);
+                lua.lua_rawseti(L, -2, i + 1);
+            }
         } else if (Array.isArray(v)) {
             lua.lua_createtable(L, v.length, 0);
             for (let i = 0; i < v.length; i++) {

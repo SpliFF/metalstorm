@@ -13,7 +13,7 @@
  *   - VFS is pre-populated with fetched .lua sources keyed by path so
  *     VFS.Include can be synchronous.
  */
-import { LuaRuntime, type LuaValue } from './lua-runtime.js';
+import { LuaRuntime, type LuaValue, luaTable } from './lua-runtime.js';
 import { lua, to_luastring } from 'fengari-web';
 
 /** Context passed in when constructing the Spring shim. */
@@ -165,6 +165,15 @@ export function buildSpringGlobals(ctx: SpringAPIContext): Record<string, LuaVal
         mapY: Math.floor(ctx.mapSizeZ / squareSize),
         squareSize: squareSize,
         gameSpeed: 30,
+        // Game metadata — engine provides these from the mod archive
+        modName: 'Zero-K',
+        modShortName: 'ZK',
+        modDesc: '',
+        modVersion: '1.0',
+        gameName: 'Zero-K',
+        gameVersion: '1.0',
+        mapName: '',
+        mapHumanName: '',
     };
 
     // --- VFS mode constants ---
@@ -259,6 +268,15 @@ export function buildSpringGlobals(ctx: SpringAPIContext): Record<string, LuaVal
                 : null;
             return [c?.width ?? 1920, c?.height ?? 1080, 0, 0];
         },
+        GetViewSizes: () => {
+            const c = typeof document !== 'undefined'
+                ? document.querySelector('canvas')
+                : null;
+            return [c?.width ?? 1920, c?.height ?? 1080];
+        },
+        GetWindowGeometry: () => {
+            return [window?.innerWidth ?? 1920, window?.innerHeight ?? 1080, 0, 0];
+        },
         GetSpectatingState: () => [false, false, false],
         IsReplay: () => false,
         GetLocalPlayerID: () => 0,
@@ -277,6 +295,204 @@ export function buildSpringGlobals(ctx: SpringAPIContext): Record<string, LuaVal
         SetLosViewColors: (..._args: LuaValue[]) => {
             // No-op: the client renders its own LOS overlay out-of-band.
         },
+
+        // --- Config set (no-op in browser) ---
+        SetConfigInt: (_key: LuaValue, _val: LuaValue) => {},
+        SetConfigFloat: (_key: LuaValue, _val: LuaValue) => {},
+        SetConfigString: (_key: LuaValue, _val: LuaValue) => {},
+
+        // --- Logging ---
+        Log: (_section: LuaValue, _level: LuaValue, ...args: LuaValue[]) => {
+            console.log('[Spring.Log]', ...args.map(a => String(a ?? '')));
+        },
+
+        // --- Player/Team API (stubs returning minimal valid data) ---
+        // NOTE: Functions returning Lua tables use luaTable() wrapper.
+        // Plain JS arrays become multiple return values; luaTable() → single table.
+        GetPlayerList: () => luaTable(0),
+        GetPlayerInfo: (_playerId: LuaValue, _withKeys: LuaValue) => {
+            // Pre-104.0.536: name, active, spectator, teamID, allyTeamID, ping, cpuUsage, country, rank, customkeys
+            // Post-104.0.536 (what engine_compat expects): r1..r9, r10=customkeys(or desyncs), r11=customkeys(or desyncs)
+            // engine_compat swaps r10<->r11, so we need at least 11 returns.
+            // Returns: name, active, spectator, teamID, allyTeamID, ping, cpuUsage, country, rank, desyncs, customkeys, nbReadyMsgs
+            return ['Player', true, false, 0, 0, 0, 0, '', '', 0, {}, 0];
+        },
+        GetAllyTeamList: () => luaTable(0, 1),
+        GetTeamList: (_allyTeamId?: LuaValue) => luaTable(0, 1),
+        GetTeamInfo: (_teamId: LuaValue) => {
+            // teamID, leader, isDead, isAI, side, allyTeam, customKeys
+            return [Number(_teamId ?? 0), 0, false, false, '', 0, {}];
+        },
+        GetPlayerRulesParam: () => null,
+        GetTeamColor: (_teamId: LuaValue) => {
+            // Return RGBA floats (multiple return values)
+            const id = Number(_teamId ?? 0);
+            const colors = [
+                [0, 0, 1, 1], [1, 0, 0, 1], [0, 1, 0, 1], [1, 1, 0, 1],
+            ];
+            return colors[id % colors.length];
+        },
+        GetMyTeamID: () => 0,
+        GetMyAllyTeamID: () => 0,
+        GetTeamUnitCount: () => 0,
+
+        // --- Map draw mode ---
+        GetMapDrawMode: () => 'normal',
+
+        // --- Shock front (camera shake) ---
+        SetShockFrontFactors: () => {},
+
+        // --- Selection ---
+        GetSelectedUnits: () => luaTable(),
+        GetSelectedUnitsCount: () => 0,
+        GetSelectedUnitsSorted: () => ({}),
+        GetSelectedUnitsCounts: () => ({}),
+
+        // --- Unit queries (stubs) ---
+        GetUnitDefID: () => null,
+        GetUnitTeam: () => 0,
+        GetUnitPosition: () => [0, 0, 0],
+        GetUnitHealth: () => [100, 100, 0, 1, 0],
+        GetUnitStates: () => ({}),
+        GetUnitRulesParam: () => null,
+        GetUnitIsStunned: () => [false, false, false],
+        ValidUnitID: () => false,
+        GetUnitIsDead: () => true,
+
+        // --- Feature queries (stubs) ---
+        GetFeatureDefID: () => null,
+        ValidFeatureID: () => false,
+
+        // --- Misc ---
+        GetTimer: () => performance.now() / 1000,
+        DiffTimers: (t1: LuaValue, t2: LuaValue) => Number(t1 ?? 0) - Number(t2 ?? 0),
+        GetDrawFrame: () => 0,
+        GetFPS: () => 60,
+        WorldToScreenCoords: (_x: LuaValue, _y: LuaValue, _z: LuaValue) => [0, 0, 0],
+        GetCameraPosition: () => [0, 500, 0],
+        GetCameraDirection: () => [0, -1, 0],
+        GetCameraState: () => ({ px: 0, py: 500, pz: 0, rx: 0, ry: 0, rz: 0 }),
+        SetCameraState: () => {},
+        GetGroundInfo: (_x: LuaValue, _z: LuaValue) => [0, 0, 0, 0, 0, 0, '', 0],
+        GetGroundNormal: () => [0, 1, 0],
+        GetSmoothMeshHeight: (x: LuaValue, z: LuaValue) => {
+            return sampleHeight(ctx, Number(x), Number(z));
+        },
+        IsPosInLos: () => true,
+        IsPosInRadar: () => false,
+        GetUnitsInRectangle: () => luaTable(),
+        GetUnitsInCylinder: () => luaTable(),
+        GetVisibleUnits: () => luaTable(),
+        GetAllUnits: () => luaTable(),
+        GetTeamUnits: () => luaTable(),
+        GetTeamUnitsSorted: () => ({}),
+        GetTeamUnitDefCount: () => 0,
+
+        // --- Local team ---
+        GetLocalTeamID: () => 0,
+
+        // --- Game speed ---
+        GetGameSpeed: () => [1, 1, false], // speed, wantedSpeed, paused
+
+        // --- GUI state ---
+        IsGUIHidden: () => false,
+
+        // --- Ground extremes ---
+        GetGroundExtremes: () => [0, 100], // minHeight, maxHeight
+
+        // --- Custom command draw data ---
+        SetCustomCommandDrawData: () => {},
+
+        // --- Misc missing ---
+        MarkerAddPoint: () => {},
+        MarkerErasePosition: () => {},
+        SetActiveCommand: () => {},
+        GiveOrderToUnit: () => {},
+        GiveOrderToUnitArray: () => {},
+        GiveOrder: () => {},
+        GetUnitCommands: () => luaTable(),
+        GetFactoryCommands: () => luaTable(),
+        GetCommandQueue: () => luaTable(),
+        GetFullBuildQueue: () => luaTable(),
+        SelectUnitArray: () => {},
+        SetUnitGroup: () => {},
+        GetGroupList: () => ({}),
+        GetGroupUnits: () => luaTable(),
+        GetGroupUnitsSorted: () => ({}),
+        GetGroupUnitsCounts: () => ({}),
+
+        // --- Extension queries ---
+        HasExtension: () => true,
+
+        // --- Active command ---
+        GetActiveCommand: () => [0, 0, ''],
+
+        // --- Sun ---
+        GetSun: (_param: LuaValue) => {
+            const p = String(_param ?? '');
+            if (p === 'pos') return [500, 1000, 500];
+            if (p === 'dir') return [0.5, -0.7, 0.5];
+            if (p === 'specular') return [1, 1, 1];
+            if (p === 'diffuse') return [1, 1, 1];
+            if (p === 'ambient') return [0.3, 0.3, 0.3];
+            return [1, 1, 1];
+        },
+
+        // --- Team rules params ---
+        GetTeamRulesParam: () => null,
+
+        // --- Keyboard ---
+        GetKeyCode: (keyName: LuaValue) => {
+            // Map Spring key names to key codes (DOM KeyboardEvent.keyCode compatible)
+            const name = String(keyName ?? '').toLowerCase();
+            const map: Record<string, number> = {
+                'backspace': 8, 'tab': 9, 'return': 13, 'enter': 13,
+                'esc': 27, 'escape': 27, 'space': 32,
+                'delete': 127, 'del': 127,
+                'left': 276, 'right': 275, 'up': 273, 'down': 274,
+                'home': 278, 'end': 279,
+                'pageup': 280, 'pagedown': 281,
+                'insert': 277,
+                'shift': 304, 'ctrl': 306, 'alt': 308, 'meta': 310,
+                'a': 97, 'b': 98, 'c': 99, 'd': 100, 'e': 101,
+                'f': 102, 'g': 103, 'h': 104, 'i': 105, 'j': 106,
+                'k': 107, 'l': 108, 'm': 109, 'n': 110, 'o': 111,
+                'p': 112, 'q': 113, 'r': 114, 's': 115, 't': 116,
+                'u': 117, 'v': 118, 'w': 119, 'x': 120, 'y': 121, 'z': 122,
+                '0': 48, '1': 49, '2': 50, '3': 51, '4': 52,
+                '5': 53, '6': 54, '7': 55, '8': 56, '9': 57,
+            };
+            return map[name] ?? 0;
+        },
+        GetKeySymbol: (_keyCode: LuaValue) => {
+            return ['', ''];
+        },
+        GetKeyBindings: () => ({}),
+        GetActionHotKeys: () => luaTable(),
+
+        // --- Clipboard ---
+        GetClipboard: () => '',
+        SetClipboard: () => {},
+
+        // --- Mouse ---
+        GetMouseState: () => [0, 0, false, false, false],
+        WarpMouse: () => {},
+
+        // --- Team AI ---
+        GetTeamLuaAI: () => '',
+
+        // --- Engine info for camain/cawidgets bootstrap ---
+        Ping: () => {},
+        GetActivePage: () => 0,
+        ForceLayoutUpdate: () => {},
+        GetLastUpdateSeconds: () => 0.016,
+        MakeFont: () => {},
+        Yield: null as LuaValue,  // nil = no yielding
+
+        // --- Lua message passing ---
+        SendLuaUIMsg: () => {},
+        SendLuaRulesMsg: () => {},
+        SendLuaGaiaMsg: () => {},
     };
 
     // --- io stub ---
