@@ -137,14 +137,12 @@ export class LuaWidgetManager {
         container.appendChild(canvas);
         this.overlayCanvas = canvas;
 
-        // Resize observer
+        // Resize observer — after transferControlToOffscreen() the main thread
+        // can't set canvas.width/height directly, so we only notify the worker.
         const ro = new ResizeObserver(() => {
-            if (mainCanvas) {
-                canvas.width = mainCanvas.width;
-                canvas.height = mainCanvas.height;
-            }
-            this.worker?.postMessage({ type: 'resize',
-                width: canvas.width, height: canvas.height });
+            const w = mainCanvas?.width ?? window.innerWidth;
+            const h = mainCanvas?.height ?? window.innerHeight;
+            this.worker?.postMessage({ type: 'resize', width: w, height: h });
         });
         if (mainCanvas) ro.observe(mainCanvas);
 

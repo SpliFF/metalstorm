@@ -7,7 +7,7 @@ import * as flatbuffers from 'flatbuffers';
 
 
 /**
- * Request the server's list of discovered games under content/games.
+ * Request the server's list of discovered games under data/games.
  * Response is a GameListUpdate. Sent by the lobby UI on first
  * login so the "create game" dropdown can be populated.
  */

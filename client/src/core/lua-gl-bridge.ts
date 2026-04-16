@@ -112,6 +112,14 @@ export class LuaGLBridge {
         this.imm = new ImmediateModeRenderer(gl);
     }
 
+    /** Resize the OffscreenCanvas owned by this bridge's GL context. */
+    resizeCanvas(width: number, height: number): void {
+        const canvas = this.gl.canvas as OffscreenCanvas;
+        canvas.width = width;
+        canvas.height = height;
+        this.gl.viewport(0, 0, width, height);
+    }
+
     /** Build the `gl` global for the Lua runtime. */
     buildGlGlobal(): Record<string, LuaValue> {
         const gl: Record<string, LuaValue> = {};

@@ -195,7 +195,7 @@ int main(int argc, char** argv) {
                 "CREATE TABLE IF NOT EXISTS game_sessions ("
                 "  session_id TEXT PRIMARY KEY,"
                 "  room_id INTEGER,"
-                "  game_name TEXT,"
+                "  game_id TEXT,"
                 "  map_name TEXT,"
                 "  started_at INTEGER,"
                 "  ended_at INTEGER,"
@@ -360,7 +360,7 @@ int main(int argc, char** argv) {
                 *out.second = false;
                 char buf[512];
                 snprintf(buf, sizeof(buf),
-                    R"({"session_id":"%s","room_id":%s,"game_name":"%s","map_name":"%s","started_at":%s,"ended_at":%s,"end_reason":"%s","exit_code":%s})",
+                    R"({"session_id":"%s","room_id":%s,"game_id":"%s","map_name":"%s","started_at":%s,"ended_at":%s,"end_reason":"%s","exit_code":%s})",
                     vals[0] ? vals[0] : "", vals[1] ? vals[1] : "0",
                     vals[2] ? vals[2] : "", vals[3] ? vals[3] : "",
                     vals[4] ? vals[4] : "0", vals[5] ? vals[5] : "0",
@@ -370,7 +370,7 @@ int main(int argc, char** argv) {
             };
             auto pair = std::make_pair(&json, &first);
             sqlite3_exec(db,
-                "SELECT session_id, room_id, game_name, map_name, started_at, ended_at, end_reason, exit_code "
+                "SELECT session_id, room_id, game_id, map_name, started_at, ended_at, end_reason, exit_code "
                 "FROM game_sessions ORDER BY started_at DESC LIMIT 50",
                 cb, &pair, nullptr);
             json += "]";

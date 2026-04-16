@@ -44,9 +44,9 @@ mapName(optionalEncoding?:any):string|Uint8Array|null {
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
-gameName():string|null
-gameName(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
-gameName(optionalEncoding?:any):string|Uint8Array|null {
+gameId():string|null
+gameId(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+gameId(optionalEncoding?:any):string|Uint8Array|null {
   const offset = this.bb!.__offset(this.bb_pos, 10);
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
@@ -94,8 +94,8 @@ static addMapName(builder:flatbuffers.Builder, mapNameOffset:flatbuffers.Offset)
   builder.addFieldOffset(2, mapNameOffset, 0);
 }
 
-static addGameName(builder:flatbuffers.Builder, gameNameOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(3, gameNameOffset, 0);
+static addGameId(builder:flatbuffers.Builder, gameIdOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(3, gameIdOffset, 0);
 }
 
 static addState(builder:flatbuffers.Builder, state:RoomState) {
@@ -123,12 +123,12 @@ static endRoomListEntry(builder:flatbuffers.Builder):flatbuffers.Offset {
   return offset;
 }
 
-static createRoomListEntry(builder:flatbuffers.Builder, roomId:number, nameOffset:flatbuffers.Offset, mapNameOffset:flatbuffers.Offset, gameNameOffset:flatbuffers.Offset, state:RoomState, playerCount:number, maxPlayers:number, hasPassword:boolean, hostNameOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createRoomListEntry(builder:flatbuffers.Builder, roomId:number, nameOffset:flatbuffers.Offset, mapNameOffset:flatbuffers.Offset, gameIdOffset:flatbuffers.Offset, state:RoomState, playerCount:number, maxPlayers:number, hasPassword:boolean, hostNameOffset:flatbuffers.Offset):flatbuffers.Offset {
   RoomListEntry.startRoomListEntry(builder);
   RoomListEntry.addRoomId(builder, roomId);
   RoomListEntry.addName(builder, nameOffset);
   RoomListEntry.addMapName(builder, mapNameOffset);
-  RoomListEntry.addGameName(builder, gameNameOffset);
+  RoomListEntry.addGameId(builder, gameIdOffset);
   RoomListEntry.addState(builder, state);
   RoomListEntry.addPlayerCount(builder, playerCount);
   RoomListEntry.addMaxPlayers(builder, maxPlayers);
@@ -142,7 +142,7 @@ unpack(): RoomListEntryT {
     this.roomId(),
     this.name(),
     this.mapName(),
-    this.gameName(),
+    this.gameId(),
     this.state(),
     this.playerCount(),
     this.maxPlayers(),
@@ -156,7 +156,7 @@ unpackTo(_o: RoomListEntryT): void {
   _o.roomId = this.roomId();
   _o.name = this.name();
   _o.mapName = this.mapName();
-  _o.gameName = this.gameName();
+  _o.gameId = this.gameId();
   _o.state = this.state();
   _o.playerCount = this.playerCount();
   _o.maxPlayers = this.maxPlayers();
@@ -170,7 +170,7 @@ constructor(
   public roomId: number = 0,
   public name: string|Uint8Array|null = null,
   public mapName: string|Uint8Array|null = null,
-  public gameName: string|Uint8Array|null = null,
+  public gameId: string|Uint8Array|null = null,
   public state: RoomState = RoomState.Configuring,
   public playerCount: number = 0,
   public maxPlayers: number = 0,
@@ -182,14 +182,14 @@ constructor(
 pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const name = (this.name !== null ? builder.createString(this.name!) : 0);
   const mapName = (this.mapName !== null ? builder.createString(this.mapName!) : 0);
-  const gameName = (this.gameName !== null ? builder.createString(this.gameName!) : 0);
+  const gameId = (this.gameId !== null ? builder.createString(this.gameId!) : 0);
   const hostName = (this.hostName !== null ? builder.createString(this.hostName!) : 0);
 
   return RoomListEntry.createRoomListEntry(builder,
     this.roomId,
     name,
     mapName,
-    gameName,
+    gameId,
     this.state,
     this.playerCount,
     this.maxPlayers,

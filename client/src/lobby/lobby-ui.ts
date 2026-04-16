@@ -79,7 +79,7 @@ interface AvailableAIInfo {
 
 /// One discovered game the lobby can host. Populated from
 /// GameListUpdate; drives the "create game" dropdown in the
-/// browser screen. The `id` is what RoomCreate.game_name carries.
+/// browser screen. The `id` is what RoomCreate.game_id carries.
 interface AvailableGameInfo {
     id: string;
     displayName: string;
@@ -146,7 +146,7 @@ export class LobbyUI {
 
     /// The game id the user has selected in the create-room form.
     /// Defaults to the first discovered game once GameListUpdate
-    /// arrives. Passed to RoomCreate.game_name on create.
+    /// arrives. Passed to RoomCreate.game_id on create.
     private selectedGameId: string = '';
 
     // ─── Public read-only accessors for debugging / automation ───
@@ -340,16 +340,16 @@ export class LobbyUI {
             aiId: s.ai_id ?? '', displayName: s.name ?? s.ai_id ?? '',
             team: s.team ?? 0, startPos: s.start_pos ?? -1,
         }));
-        const newGameName = r.game ?? '';
+        const newGameId = r.game ?? '';
         this.currentRoom = {
             id: r.id, name: r.name ?? '', mapId: r.map ?? '',
-            gameId: newGameName,
+            gameId: newGameId,
             state: r.state ?? 0, players, aiSlots,
             gameServerPort: r.game_server_port ?? 0,
         };
 
         // Refresh AI list when entering a room with a different game
-        if (this.availableAIsForGame !== newGameName) {
+        if (this.availableAIsForGame !== newGameId) {
             this.refreshAIList();
         }
 
@@ -1102,7 +1102,7 @@ export class LobbyUI {
         }
         // Tag the cache with whichever game we're currently in —
         // the server routes AIListRequest by the caller's current
-        // room's game, so this list matches room.gameName at the
+        // room's game, so this list matches room.gameId at the
         // time of the reply.
         this.availableAIsForGame = this.currentRoom?.gameId ?? '';
         if (this.currentScreen === 'room') {
@@ -1161,10 +1161,10 @@ export class LobbyUI {
                 startPos: s.startPos(),
             });
         }
-        const newGameName = u.gameName() ?? '';
+        const newGameId = u.gameId() ?? '';
         this.currentRoom = {
             id: u.roomId(), name: u.name() ?? '', mapId: u.mapName() ?? '',
-            gameId: newGameName,
+            gameId: newGameId,
             state: u.state(), players, aiSlots,
             gameServerPort: u.gameServerPort(),
         };
@@ -1173,7 +1173,7 @@ export class LobbyUI {
         // merged with the engine's), so refresh whenever we enter
         // a room running a different game than the currently cached
         // list, or when we don't have a cached list at all.
-        if (this.availableAIsForGame !== newGameName) {
+        if (this.availableAIsForGame !== newGameId) {
             this.refreshAIList();
         }
 

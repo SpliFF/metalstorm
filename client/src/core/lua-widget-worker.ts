@@ -642,10 +642,8 @@ self.onmessage = async (e: MessageEvent) => {
             break;
 
         case 'resize':
-            // Update canvas size for DrawScreen
-            if (bridge) {
-                // The OffscreenCanvas size is set by the main thread via canvas.width/height
-                // before sending this message
+            if (bridge && msg.width && msg.height) {
+                bridge.resizeCanvas(msg.width, msg.height);
             }
             break;
 

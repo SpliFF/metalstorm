@@ -68,7 +68,7 @@ struct GameRoom {
     uint32_t id = 0;
     std::string name;
     std::string mapName;
-    std::string gameName;
+    std::string gameId;
     ERoomState state = ERoomState::Configuring;
     uint8_t maxPlayers = 8;
     std::string password;      // empty = no password
@@ -140,7 +140,7 @@ class RoomManager {
 public:
     /// Create a new room. Returns room ID.
     uint32_t CreateRoom(const std::string& name, const std::string& mapName,
-                        const std::string& gameName, uint8_t maxPlayers,
+                        const std::string& gameId, uint8_t maxPlayers,
                         const std::string& password,
                         uint32_t hostPlayerId, ClientID hostClientId,
                         const std::string& hostUsername);

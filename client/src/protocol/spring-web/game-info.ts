@@ -31,9 +31,9 @@ mapName(optionalEncoding?:any):string|Uint8Array|null {
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
-gameName():string|null
-gameName(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
-gameName(optionalEncoding?:any):string|Uint8Array|null {
+gameId():string|null
+gameId(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+gameId(optionalEncoding?:any):string|Uint8Array|null {
   const offset = this.bb!.__offset(this.bb_pos, 6);
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
@@ -61,8 +61,8 @@ static addMapName(builder:flatbuffers.Builder, mapNameOffset:flatbuffers.Offset)
   builder.addFieldOffset(0, mapNameOffset, 0);
 }
 
-static addGameName(builder:flatbuffers.Builder, gameNameOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(1, gameNameOffset, 0);
+static addGameId(builder:flatbuffers.Builder, gameIdOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(1, gameIdOffset, 0);
 }
 
 static addGameSpeed(builder:flatbuffers.Builder, gameSpeed:number) {
@@ -82,10 +82,10 @@ static endGameInfo(builder:flatbuffers.Builder):flatbuffers.Offset {
   return offset;
 }
 
-static createGameInfo(builder:flatbuffers.Builder, mapNameOffset:flatbuffers.Offset, gameNameOffset:flatbuffers.Offset, gameSpeed:number, frame:number, paused:boolean):flatbuffers.Offset {
+static createGameInfo(builder:flatbuffers.Builder, mapNameOffset:flatbuffers.Offset, gameIdOffset:flatbuffers.Offset, gameSpeed:number, frame:number, paused:boolean):flatbuffers.Offset {
   GameInfo.startGameInfo(builder);
   GameInfo.addMapName(builder, mapNameOffset);
-  GameInfo.addGameName(builder, gameNameOffset);
+  GameInfo.addGameId(builder, gameIdOffset);
   GameInfo.addGameSpeed(builder, gameSpeed);
   GameInfo.addFrame(builder, frame);
   GameInfo.addPaused(builder, paused);
@@ -95,7 +95,7 @@ static createGameInfo(builder:flatbuffers.Builder, mapNameOffset:flatbuffers.Off
 unpack(): GameInfoT {
   return new GameInfoT(
     this.mapName(),
-    this.gameName(),
+    this.gameId(),
     this.gameSpeed(),
     this.frame(),
     this.paused()
@@ -105,7 +105,7 @@ unpack(): GameInfoT {
 
 unpackTo(_o: GameInfoT): void {
   _o.mapName = this.mapName();
-  _o.gameName = this.gameName();
+  _o.gameId = this.gameId();
   _o.gameSpeed = this.gameSpeed();
   _o.frame = this.frame();
   _o.paused = this.paused();
@@ -115,7 +115,7 @@ unpackTo(_o: GameInfoT): void {
 export class GameInfoT implements flatbuffers.IGeneratedObject {
 constructor(
   public mapName: string|Uint8Array|null = null,
-  public gameName: string|Uint8Array|null = null,
+  public gameId: string|Uint8Array|null = null,
   public gameSpeed: number = 0.0,
   public frame: number = 0,
   public paused: boolean = false
@@ -124,11 +124,11 @@ constructor(
 
 pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const mapName = (this.mapName !== null ? builder.createString(this.mapName!) : 0);
-  const gameName = (this.gameName !== null ? builder.createString(this.gameName!) : 0);
+  const gameId = (this.gameId !== null ? builder.createString(this.gameId!) : 0);
 
   return GameInfo.createGameInfo(builder,
     mapName,
-    gameName,
+    gameId,
     this.gameSpeed,
     this.frame,
     this.paused

@@ -7,7 +7,7 @@ import * as flatbuffers from 'flatbuffers';
 
 
 /**
- * One game plugin discovered under content/games. Shown in the
+ * One game plugin discovered under data/games. Shown in the
  * lobby's create-room dropdown. Named `LobbyGameInfo` to avoid
  * colliding with the existing `GameInfo` table which represents
  * live-sim state (map/game speed/frame/paused).

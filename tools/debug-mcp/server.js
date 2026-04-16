@@ -60,7 +60,7 @@ async function ensureAuth() {
 function getGameServers() {
     try {
         const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
-        const rows = db.prepare('SELECT room_id, port, pid, map_path, game_path, state FROM game_servers').all();
+        const rows = db.prepare('SELECT room_id, port, pid, map_path, game_id, state FROM game_servers').all();
         db.close();
         return rows;
     } catch {
@@ -298,7 +298,7 @@ async function executeTool(name, args) {
             const servers = getGameServers();
             if (!servers.length) return 'No game server processes found in database.';
             return servers.map(s =>
-                `Room ${s.room_id}: port=${s.port}, pid=${s.pid}, state=${s.state}, game=${s.game_path || '?'}, map=${s.map_path || '?'}`
+                `Room ${s.room_id}: port=${s.port}, pid=${s.pid}, state=${s.state}, game=${s.game_id || '?'}, map=${s.map_path || '?'}`
             ).join('\n');
         }
 
@@ -338,7 +338,7 @@ async function executeTool(name, args) {
             const data = await fetchJson(url);
             if (!data.length) return 'No game sessions found.';
             return data.map(s =>
-                `${s.session_id}: room=${s.room_id} game=${s.game_name} map=${s.map_name} ` +
+                `${s.session_id}: room=${s.room_id} game=${s.game_id} map=${s.map_name} ` +
                 `reason=${s.end_reason || 'running'} exit=${s.exit_code || '-'}`
             ).join('\n');
         }

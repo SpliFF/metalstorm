@@ -19,281 +19,212 @@ struct Vec3;
 
 struct Handshake;
 struct HandshakeBuilder;
-struct HandshakeT;
 
 struct AuthRequest;
 struct AuthRequestBuilder;
-struct AuthRequestT;
 
 struct PlayerCommand;
 struct PlayerCommandBuilder;
-struct PlayerCommandT;
 
 struct ViewportUpdate;
 struct ViewportUpdateBuilder;
-struct ViewportUpdateT;
 
 struct Ping;
 struct PingBuilder;
-struct PingT;
 
 struct ChatSend;
 struct ChatSendBuilder;
-struct ChatSendT;
 
 struct Ack;
 struct AckBuilder;
-struct AckT;
 
 struct ReconnectRequest;
 struct ReconnectRequestBuilder;
-struct ReconnectRequestT;
 
 struct RoomCreate;
 struct RoomCreateBuilder;
-struct RoomCreateT;
 
 struct RoomJoin;
 struct RoomJoinBuilder;
-struct RoomJoinT;
 
 struct RoomLeave;
 struct RoomLeaveBuilder;
-struct RoomLeaveT;
 
 struct RoomTeamSelect;
 struct RoomTeamSelectBuilder;
-struct RoomTeamSelectT;
 
 struct RoomReady;
 struct RoomReadyBuilder;
-struct RoomReadyT;
 
 struct RoomKick;
 struct RoomKickBuilder;
-struct RoomKickT;
 
 struct RoomStartGame;
 struct RoomStartGameBuilder;
-struct RoomStartGameT;
 
 struct RoomEndGame;
 struct RoomEndGameBuilder;
-struct RoomEndGameT;
 
 struct RoomCloseRoom;
 struct RoomCloseRoomBuilder;
-struct RoomCloseRoomT;
 
 struct RoomAddAI;
 struct RoomAddAIBuilder;
-struct RoomAddAIT;
 
 struct RoomRemoveAI;
 struct RoomRemoveAIBuilder;
-struct RoomRemoveAIT;
 
 struct RoomSetAITeam;
 struct RoomSetAITeamBuilder;
-struct RoomSetAITeamT;
 
 struct RoomSetStartPos;
 struct RoomSetStartPosBuilder;
-struct RoomSetStartPosT;
 
 struct AIListRequest;
 struct AIListRequestBuilder;
-struct AIListRequestT;
 
 struct GameListRequest;
 struct GameListRequestBuilder;
-struct GameListRequestT;
 
 struct LogEntryMsg;
 struct LogEntryMsgBuilder;
-struct LogEntryMsgT;
 
 struct LogIngest;
 struct LogIngestBuilder;
-struct LogIngestT;
 
 struct LogSubscribe;
 struct LogSubscribeBuilder;
-struct LogSubscribeT;
 
 struct LogUnsubscribe;
 struct LogUnsubscribeBuilder;
-struct LogUnsubscribeT;
 
 struct LogBatch;
 struct LogBatchBuilder;
-struct LogBatchT;
 
 struct ConsoleCommand;
 struct ConsoleCommandBuilder;
-struct ConsoleCommandT;
 
 struct GameStarted;
 struct GameStartedBuilder;
-struct GameStartedT;
 
 struct GameRestarting;
 struct GameRestartingBuilder;
-struct GameRestartingT;
 
 struct ConsoleResponse;
 struct ConsoleResponseBuilder;
-struct ConsoleResponseT;
 
 struct ClientMessage;
 struct ClientMessageBuilder;
-struct ClientMessageT;
 
 struct AuthResponse;
 struct AuthResponseBuilder;
-struct AuthResponseT;
 
 struct EntityCreate;
 struct EntityCreateBuilder;
-struct EntityCreateT;
 
 struct EntityDestroy;
 struct EntityDestroyBuilder;
-struct EntityDestroyT;
 
 struct CombatEvent;
 struct CombatEventBuilder;
-struct CombatEventT;
 
 struct GameEvent;
 struct GameEventBuilder;
-struct GameEventT;
 
 struct GameEventBatch;
 struct GameEventBatchBuilder;
-struct GameEventBatchT;
 
 struct ResourceUpdate;
 struct ResourceUpdateBuilder;
-struct ResourceUpdateT;
 
 struct Pong;
 struct PongBuilder;
-struct PongT;
 
 struct ChatReceive;
 struct ChatReceiveBuilder;
-struct ChatReceiveT;
 
 struct GameInfo;
 struct GameInfoBuilder;
-struct GameInfoT;
 
 struct ReconnectResponse;
 struct ReconnectResponseBuilder;
-struct ReconnectResponseT;
 
 struct ServerError;
 struct ServerErrorBuilder;
-struct ServerErrorT;
 
 struct PlayerLeft;
 struct PlayerLeftBuilder;
-struct PlayerLeftT;
 
 struct RoomPlayerInfo;
 struct RoomPlayerInfoBuilder;
-struct RoomPlayerInfoT;
 
 struct RoomAISlot;
 struct RoomAISlotBuilder;
-struct RoomAISlotT;
 
 struct RoomAIInfo;
 struct RoomAIInfoBuilder;
-struct RoomAIInfoT;
 
 struct RoomListEntry;
 struct RoomListEntryBuilder;
-struct RoomListEntryT;
 
 struct RoomListUpdate;
 struct RoomListUpdateBuilder;
-struct RoomListUpdateT;
 
 struct RoomStateUpdate;
 struct RoomStateUpdateBuilder;
-struct RoomStateUpdateT;
 
 struct AIListUpdate;
 struct AIListUpdateBuilder;
-struct AIListUpdateT;
 
 struct LobbyGameInfo;
 struct LobbyGameInfoBuilder;
-struct LobbyGameInfoT;
 
 struct GameListUpdate;
 struct GameListUpdateBuilder;
-struct GameListUpdateT;
 
 struct RoomPlayerJoined;
 struct RoomPlayerJoinedBuilder;
-struct RoomPlayerJoinedT;
 
 struct RoomPlayerLeft;
 struct RoomPlayerLeftBuilder;
-struct RoomPlayerLeftT;
 
 struct GameWeaponDef;
 struct GameWeaponDefBuilder;
-struct GameWeaponDefT;
 
 struct GameWeaponDefs;
 struct GameWeaponDefsBuilder;
-struct GameWeaponDefsT;
 
 struct GameUnitDef;
 struct GameUnitDefBuilder;
-struct GameUnitDefT;
 
 struct GameUnitDefs;
 struct GameUnitDefsBuilder;
-struct GameUnitDefsT;
 
 struct MapStartPos;
 
 struct MapInfo;
 struct MapInfoBuilder;
-struct MapInfoT;
 
 struct MapListUpdate;
 struct MapListUpdateBuilder;
-struct MapListUpdateT;
 
 struct MapFeature;
 struct MapFeatureBuilder;
-struct MapFeatureT;
 
 struct MapFeatureDef;
 struct MapFeatureDefBuilder;
-struct MapFeatureDefT;
 
 struct MapWater;
 struct MapWaterBuilder;
-struct MapWaterT;
 
 struct MapDecals;
 struct MapDecalsBuilder;
-struct MapDecalsT;
 
 struct MapData;
 struct MapDataBuilder;
-struct MapDataT;
 
 struct ServerMessage;
 struct ServerMessageBuilder;
-struct ServerMessageT;
 
 enum AuthStatus : uint8_t {
   AuthStatus_OK = 0,
@@ -552,366 +483,6 @@ template<> struct ClientPayloadTraits<SpringWeb::LogUnsubscribe> {
 
 template<> struct ClientPayloadTraits<SpringWeb::ConsoleCommand> {
   static const ClientPayload enum_value = ClientPayload_ConsoleCommand;
-};
-
-template<typename T> struct ClientPayloadUnionTraits {
-  static const ClientPayload enum_value = ClientPayload_NONE;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::HandshakeT> {
-  static const ClientPayload enum_value = ClientPayload_Handshake;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::AuthRequestT> {
-  static const ClientPayload enum_value = ClientPayload_AuthRequest;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::PlayerCommandT> {
-  static const ClientPayload enum_value = ClientPayload_PlayerCommand;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::ViewportUpdateT> {
-  static const ClientPayload enum_value = ClientPayload_ViewportUpdate;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::PingT> {
-  static const ClientPayload enum_value = ClientPayload_Ping;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::ChatSendT> {
-  static const ClientPayload enum_value = ClientPayload_ChatSend;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::AckT> {
-  static const ClientPayload enum_value = ClientPayload_Ack;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::ReconnectRequestT> {
-  static const ClientPayload enum_value = ClientPayload_ReconnectRequest;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::RoomCreateT> {
-  static const ClientPayload enum_value = ClientPayload_RoomCreate;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::RoomJoinT> {
-  static const ClientPayload enum_value = ClientPayload_RoomJoin;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::RoomLeaveT> {
-  static const ClientPayload enum_value = ClientPayload_RoomLeave;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::RoomTeamSelectT> {
-  static const ClientPayload enum_value = ClientPayload_RoomTeamSelect;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::RoomReadyT> {
-  static const ClientPayload enum_value = ClientPayload_RoomReady;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::RoomKickT> {
-  static const ClientPayload enum_value = ClientPayload_RoomKick;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::RoomStartGameT> {
-  static const ClientPayload enum_value = ClientPayload_RoomStartGame;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::RoomEndGameT> {
-  static const ClientPayload enum_value = ClientPayload_RoomEndGame;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::RoomAddAIT> {
-  static const ClientPayload enum_value = ClientPayload_RoomAddAI;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::RoomRemoveAIT> {
-  static const ClientPayload enum_value = ClientPayload_RoomRemoveAI;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::AIListRequestT> {
-  static const ClientPayload enum_value = ClientPayload_AIListRequest;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::GameListRequestT> {
-  static const ClientPayload enum_value = ClientPayload_GameListRequest;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::RoomSetStartPosT> {
-  static const ClientPayload enum_value = ClientPayload_RoomSetStartPos;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::RoomCloseRoomT> {
-  static const ClientPayload enum_value = ClientPayload_RoomCloseRoom;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::RoomSetAITeamT> {
-  static const ClientPayload enum_value = ClientPayload_RoomSetAITeam;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::LogIngestT> {
-  static const ClientPayload enum_value = ClientPayload_LogIngest;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::LogSubscribeT> {
-  static const ClientPayload enum_value = ClientPayload_LogSubscribe;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::LogUnsubscribeT> {
-  static const ClientPayload enum_value = ClientPayload_LogUnsubscribe;
-};
-
-template<> struct ClientPayloadUnionTraits<SpringWeb::ConsoleCommandT> {
-  static const ClientPayload enum_value = ClientPayload_ConsoleCommand;
-};
-
-struct ClientPayloadUnion {
-  ClientPayload type;
-  void *value;
-
-  ClientPayloadUnion() : type(ClientPayload_NONE), value(nullptr) {}
-  ClientPayloadUnion(ClientPayloadUnion&& u) FLATBUFFERS_NOEXCEPT :
-    type(ClientPayload_NONE), value(nullptr)
-    { std::swap(type, u.type); std::swap(value, u.value); }
-  ClientPayloadUnion(const ClientPayloadUnion &);
-  ClientPayloadUnion &operator=(const ClientPayloadUnion &u)
-    { ClientPayloadUnion t(u); std::swap(type, t.type); std::swap(value, t.value); return *this; }
-  ClientPayloadUnion &operator=(ClientPayloadUnion &&u) FLATBUFFERS_NOEXCEPT
-    { std::swap(type, u.type); std::swap(value, u.value); return *this; }
-  ~ClientPayloadUnion() { Reset(); }
-
-  void Reset();
-
-  template <typename T>
-  void Set(T&& val) {
-    typedef typename std::remove_reference<T>::type RT;
-    Reset();
-    type = ClientPayloadUnionTraits<RT>::enum_value;
-    if (type != ClientPayload_NONE) {
-      value = new RT(std::forward<T>(val));
-    }
-  }
-
-  static void *UnPack(const void *obj, ClientPayload type, const ::flatbuffers::resolver_function_t *resolver);
-  ::flatbuffers::Offset<void> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr) const;
-
-  SpringWeb::HandshakeT *AsHandshake() {
-    return type == ClientPayload_Handshake ?
-      reinterpret_cast<SpringWeb::HandshakeT *>(value) : nullptr;
-  }
-  const SpringWeb::HandshakeT *AsHandshake() const {
-    return type == ClientPayload_Handshake ?
-      reinterpret_cast<const SpringWeb::HandshakeT *>(value) : nullptr;
-  }
-  SpringWeb::AuthRequestT *AsAuthRequest() {
-    return type == ClientPayload_AuthRequest ?
-      reinterpret_cast<SpringWeb::AuthRequestT *>(value) : nullptr;
-  }
-  const SpringWeb::AuthRequestT *AsAuthRequest() const {
-    return type == ClientPayload_AuthRequest ?
-      reinterpret_cast<const SpringWeb::AuthRequestT *>(value) : nullptr;
-  }
-  SpringWeb::PlayerCommandT *AsPlayerCommand() {
-    return type == ClientPayload_PlayerCommand ?
-      reinterpret_cast<SpringWeb::PlayerCommandT *>(value) : nullptr;
-  }
-  const SpringWeb::PlayerCommandT *AsPlayerCommand() const {
-    return type == ClientPayload_PlayerCommand ?
-      reinterpret_cast<const SpringWeb::PlayerCommandT *>(value) : nullptr;
-  }
-  SpringWeb::ViewportUpdateT *AsViewportUpdate() {
-    return type == ClientPayload_ViewportUpdate ?
-      reinterpret_cast<SpringWeb::ViewportUpdateT *>(value) : nullptr;
-  }
-  const SpringWeb::ViewportUpdateT *AsViewportUpdate() const {
-    return type == ClientPayload_ViewportUpdate ?
-      reinterpret_cast<const SpringWeb::ViewportUpdateT *>(value) : nullptr;
-  }
-  SpringWeb::PingT *AsPing() {
-    return type == ClientPayload_Ping ?
-      reinterpret_cast<SpringWeb::PingT *>(value) : nullptr;
-  }
-  const SpringWeb::PingT *AsPing() const {
-    return type == ClientPayload_Ping ?
-      reinterpret_cast<const SpringWeb::PingT *>(value) : nullptr;
-  }
-  SpringWeb::ChatSendT *AsChatSend() {
-    return type == ClientPayload_ChatSend ?
-      reinterpret_cast<SpringWeb::ChatSendT *>(value) : nullptr;
-  }
-  const SpringWeb::ChatSendT *AsChatSend() const {
-    return type == ClientPayload_ChatSend ?
-      reinterpret_cast<const SpringWeb::ChatSendT *>(value) : nullptr;
-  }
-  SpringWeb::AckT *AsAck() {
-    return type == ClientPayload_Ack ?
-      reinterpret_cast<SpringWeb::AckT *>(value) : nullptr;
-  }
-  const SpringWeb::AckT *AsAck() const {
-    return type == ClientPayload_Ack ?
-      reinterpret_cast<const SpringWeb::AckT *>(value) : nullptr;
-  }
-  SpringWeb::ReconnectRequestT *AsReconnectRequest() {
-    return type == ClientPayload_ReconnectRequest ?
-      reinterpret_cast<SpringWeb::ReconnectRequestT *>(value) : nullptr;
-  }
-  const SpringWeb::ReconnectRequestT *AsReconnectRequest() const {
-    return type == ClientPayload_ReconnectRequest ?
-      reinterpret_cast<const SpringWeb::ReconnectRequestT *>(value) : nullptr;
-  }
-  SpringWeb::RoomCreateT *AsRoomCreate() {
-    return type == ClientPayload_RoomCreate ?
-      reinterpret_cast<SpringWeb::RoomCreateT *>(value) : nullptr;
-  }
-  const SpringWeb::RoomCreateT *AsRoomCreate() const {
-    return type == ClientPayload_RoomCreate ?
-      reinterpret_cast<const SpringWeb::RoomCreateT *>(value) : nullptr;
-  }
-  SpringWeb::RoomJoinT *AsRoomJoin() {
-    return type == ClientPayload_RoomJoin ?
-      reinterpret_cast<SpringWeb::RoomJoinT *>(value) : nullptr;
-  }
-  const SpringWeb::RoomJoinT *AsRoomJoin() const {
-    return type == ClientPayload_RoomJoin ?
-      reinterpret_cast<const SpringWeb::RoomJoinT *>(value) : nullptr;
-  }
-  SpringWeb::RoomLeaveT *AsRoomLeave() {
-    return type == ClientPayload_RoomLeave ?
-      reinterpret_cast<SpringWeb::RoomLeaveT *>(value) : nullptr;
-  }
-  const SpringWeb::RoomLeaveT *AsRoomLeave() const {
-    return type == ClientPayload_RoomLeave ?
-      reinterpret_cast<const SpringWeb::RoomLeaveT *>(value) : nullptr;
-  }
-  SpringWeb::RoomTeamSelectT *AsRoomTeamSelect() {
-    return type == ClientPayload_RoomTeamSelect ?
-      reinterpret_cast<SpringWeb::RoomTeamSelectT *>(value) : nullptr;
-  }
-  const SpringWeb::RoomTeamSelectT *AsRoomTeamSelect() const {
-    return type == ClientPayload_RoomTeamSelect ?
-      reinterpret_cast<const SpringWeb::RoomTeamSelectT *>(value) : nullptr;
-  }
-  SpringWeb::RoomReadyT *AsRoomReady() {
-    return type == ClientPayload_RoomReady ?
-      reinterpret_cast<SpringWeb::RoomReadyT *>(value) : nullptr;
-  }
-  const SpringWeb::RoomReadyT *AsRoomReady() const {
-    return type == ClientPayload_RoomReady ?
-      reinterpret_cast<const SpringWeb::RoomReadyT *>(value) : nullptr;
-  }
-  SpringWeb::RoomKickT *AsRoomKick() {
-    return type == ClientPayload_RoomKick ?
-      reinterpret_cast<SpringWeb::RoomKickT *>(value) : nullptr;
-  }
-  const SpringWeb::RoomKickT *AsRoomKick() const {
-    return type == ClientPayload_RoomKick ?
-      reinterpret_cast<const SpringWeb::RoomKickT *>(value) : nullptr;
-  }
-  SpringWeb::RoomStartGameT *AsRoomStartGame() {
-    return type == ClientPayload_RoomStartGame ?
-      reinterpret_cast<SpringWeb::RoomStartGameT *>(value) : nullptr;
-  }
-  const SpringWeb::RoomStartGameT *AsRoomStartGame() const {
-    return type == ClientPayload_RoomStartGame ?
-      reinterpret_cast<const SpringWeb::RoomStartGameT *>(value) : nullptr;
-  }
-  SpringWeb::RoomEndGameT *AsRoomEndGame() {
-    return type == ClientPayload_RoomEndGame ?
-      reinterpret_cast<SpringWeb::RoomEndGameT *>(value) : nullptr;
-  }
-  const SpringWeb::RoomEndGameT *AsRoomEndGame() const {
-    return type == ClientPayload_RoomEndGame ?
-      reinterpret_cast<const SpringWeb::RoomEndGameT *>(value) : nullptr;
-  }
-  SpringWeb::RoomAddAIT *AsRoomAddAI() {
-    return type == ClientPayload_RoomAddAI ?
-      reinterpret_cast<SpringWeb::RoomAddAIT *>(value) : nullptr;
-  }
-  const SpringWeb::RoomAddAIT *AsRoomAddAI() const {
-    return type == ClientPayload_RoomAddAI ?
-      reinterpret_cast<const SpringWeb::RoomAddAIT *>(value) : nullptr;
-  }
-  SpringWeb::RoomRemoveAIT *AsRoomRemoveAI() {
-    return type == ClientPayload_RoomRemoveAI ?
-      reinterpret_cast<SpringWeb::RoomRemoveAIT *>(value) : nullptr;
-  }
-  const SpringWeb::RoomRemoveAIT *AsRoomRemoveAI() const {
-    return type == ClientPayload_RoomRemoveAI ?
-      reinterpret_cast<const SpringWeb::RoomRemoveAIT *>(value) : nullptr;
-  }
-  SpringWeb::AIListRequestT *AsAIListRequest() {
-    return type == ClientPayload_AIListRequest ?
-      reinterpret_cast<SpringWeb::AIListRequestT *>(value) : nullptr;
-  }
-  const SpringWeb::AIListRequestT *AsAIListRequest() const {
-    return type == ClientPayload_AIListRequest ?
-      reinterpret_cast<const SpringWeb::AIListRequestT *>(value) : nullptr;
-  }
-  SpringWeb::GameListRequestT *AsGameListRequest() {
-    return type == ClientPayload_GameListRequest ?
-      reinterpret_cast<SpringWeb::GameListRequestT *>(value) : nullptr;
-  }
-  const SpringWeb::GameListRequestT *AsGameListRequest() const {
-    return type == ClientPayload_GameListRequest ?
-      reinterpret_cast<const SpringWeb::GameListRequestT *>(value) : nullptr;
-  }
-  SpringWeb::RoomSetStartPosT *AsRoomSetStartPos() {
-    return type == ClientPayload_RoomSetStartPos ?
-      reinterpret_cast<SpringWeb::RoomSetStartPosT *>(value) : nullptr;
-  }
-  const SpringWeb::RoomSetStartPosT *AsRoomSetStartPos() const {
-    return type == ClientPayload_RoomSetStartPos ?
-      reinterpret_cast<const SpringWeb::RoomSetStartPosT *>(value) : nullptr;
-  }
-  SpringWeb::RoomCloseRoomT *AsRoomCloseRoom() {
-    return type == ClientPayload_RoomCloseRoom ?
-      reinterpret_cast<SpringWeb::RoomCloseRoomT *>(value) : nullptr;
-  }
-  const SpringWeb::RoomCloseRoomT *AsRoomCloseRoom() const {
-    return type == ClientPayload_RoomCloseRoom ?
-      reinterpret_cast<const SpringWeb::RoomCloseRoomT *>(value) : nullptr;
-  }
-  SpringWeb::RoomSetAITeamT *AsRoomSetAITeam() {
-    return type == ClientPayload_RoomSetAITeam ?
-      reinterpret_cast<SpringWeb::RoomSetAITeamT *>(value) : nullptr;
-  }
-  const SpringWeb::RoomSetAITeamT *AsRoomSetAITeam() const {
-    return type == ClientPayload_RoomSetAITeam ?
-      reinterpret_cast<const SpringWeb::RoomSetAITeamT *>(value) : nullptr;
-  }
-  SpringWeb::LogIngestT *AsLogIngest() {
-    return type == ClientPayload_LogIngest ?
-      reinterpret_cast<SpringWeb::LogIngestT *>(value) : nullptr;
-  }
-  const SpringWeb::LogIngestT *AsLogIngest() const {
-    return type == ClientPayload_LogIngest ?
-      reinterpret_cast<const SpringWeb::LogIngestT *>(value) : nullptr;
-  }
-  SpringWeb::LogSubscribeT *AsLogSubscribe() {
-    return type == ClientPayload_LogSubscribe ?
-      reinterpret_cast<SpringWeb::LogSubscribeT *>(value) : nullptr;
-  }
-  const SpringWeb::LogSubscribeT *AsLogSubscribe() const {
-    return type == ClientPayload_LogSubscribe ?
-      reinterpret_cast<const SpringWeb::LogSubscribeT *>(value) : nullptr;
-  }
-  SpringWeb::LogUnsubscribeT *AsLogUnsubscribe() {
-    return type == ClientPayload_LogUnsubscribe ?
-      reinterpret_cast<SpringWeb::LogUnsubscribeT *>(value) : nullptr;
-  }
-  const SpringWeb::LogUnsubscribeT *AsLogUnsubscribe() const {
-    return type == ClientPayload_LogUnsubscribe ?
-      reinterpret_cast<const SpringWeb::LogUnsubscribeT *>(value) : nullptr;
-  }
-  SpringWeb::ConsoleCommandT *AsConsoleCommand() {
-    return type == ClientPayload_ConsoleCommand ?
-      reinterpret_cast<SpringWeb::ConsoleCommandT *>(value) : nullptr;
-  }
-  const SpringWeb::ConsoleCommandT *AsConsoleCommand() const {
-    return type == ClientPayload_ConsoleCommand ?
-      reinterpret_cast<const SpringWeb::ConsoleCommandT *>(value) : nullptr;
-  }
 };
 
 bool VerifyClientPayload(::flatbuffers::Verifier &verifier, const void *obj, ClientPayload type);
@@ -1247,342 +818,6 @@ template<> struct ServerPayloadTraits<SpringWeb::GameRestarting> {
   static const ServerPayload enum_value = ServerPayload_GameRestarting;
 };
 
-template<typename T> struct ServerPayloadUnionTraits {
-  static const ServerPayload enum_value = ServerPayload_NONE;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::AuthResponseT> {
-  static const ServerPayload enum_value = ServerPayload_AuthResponse;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::EntityCreateT> {
-  static const ServerPayload enum_value = ServerPayload_EntityCreate;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::EntityDestroyT> {
-  static const ServerPayload enum_value = ServerPayload_EntityDestroy;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::GameEventBatchT> {
-  static const ServerPayload enum_value = ServerPayload_GameEventBatch;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::ResourceUpdateT> {
-  static const ServerPayload enum_value = ServerPayload_ResourceUpdate;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::PongT> {
-  static const ServerPayload enum_value = ServerPayload_Pong;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::ChatReceiveT> {
-  static const ServerPayload enum_value = ServerPayload_ChatReceive;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::GameInfoT> {
-  static const ServerPayload enum_value = ServerPayload_GameInfo;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::ReconnectResponseT> {
-  static const ServerPayload enum_value = ServerPayload_ReconnectResponse;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::ServerErrorT> {
-  static const ServerPayload enum_value = ServerPayload_ServerError;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::RoomListUpdateT> {
-  static const ServerPayload enum_value = ServerPayload_RoomListUpdate;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::RoomStateUpdateT> {
-  static const ServerPayload enum_value = ServerPayload_RoomStateUpdate;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::RoomPlayerJoinedT> {
-  static const ServerPayload enum_value = ServerPayload_RoomPlayerJoined;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::RoomPlayerLeftT> {
-  static const ServerPayload enum_value = ServerPayload_RoomPlayerLeft;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::MapListUpdateT> {
-  static const ServerPayload enum_value = ServerPayload_MapListUpdate;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::MapDataT> {
-  static const ServerPayload enum_value = ServerPayload_MapData;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::AIListUpdateT> {
-  static const ServerPayload enum_value = ServerPayload_AIListUpdate;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::GameListUpdateT> {
-  static const ServerPayload enum_value = ServerPayload_GameListUpdate;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::GameUnitDefsT> {
-  static const ServerPayload enum_value = ServerPayload_GameUnitDefs;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::PlayerLeftT> {
-  static const ServerPayload enum_value = ServerPayload_PlayerLeft;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::GameWeaponDefsT> {
-  static const ServerPayload enum_value = ServerPayload_GameWeaponDefs;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::LogBatchT> {
-  static const ServerPayload enum_value = ServerPayload_LogBatch;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::ConsoleResponseT> {
-  static const ServerPayload enum_value = ServerPayload_ConsoleResponse;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::GameStartedT> {
-  static const ServerPayload enum_value = ServerPayload_GameStarted;
-};
-
-template<> struct ServerPayloadUnionTraits<SpringWeb::GameRestartingT> {
-  static const ServerPayload enum_value = ServerPayload_GameRestarting;
-};
-
-struct ServerPayloadUnion {
-  ServerPayload type;
-  void *value;
-
-  ServerPayloadUnion() : type(ServerPayload_NONE), value(nullptr) {}
-  ServerPayloadUnion(ServerPayloadUnion&& u) FLATBUFFERS_NOEXCEPT :
-    type(ServerPayload_NONE), value(nullptr)
-    { std::swap(type, u.type); std::swap(value, u.value); }
-  ServerPayloadUnion(const ServerPayloadUnion &);
-  ServerPayloadUnion &operator=(const ServerPayloadUnion &u)
-    { ServerPayloadUnion t(u); std::swap(type, t.type); std::swap(value, t.value); return *this; }
-  ServerPayloadUnion &operator=(ServerPayloadUnion &&u) FLATBUFFERS_NOEXCEPT
-    { std::swap(type, u.type); std::swap(value, u.value); return *this; }
-  ~ServerPayloadUnion() { Reset(); }
-
-  void Reset();
-
-  template <typename T>
-  void Set(T&& val) {
-    typedef typename std::remove_reference<T>::type RT;
-    Reset();
-    type = ServerPayloadUnionTraits<RT>::enum_value;
-    if (type != ServerPayload_NONE) {
-      value = new RT(std::forward<T>(val));
-    }
-  }
-
-  static void *UnPack(const void *obj, ServerPayload type, const ::flatbuffers::resolver_function_t *resolver);
-  ::flatbuffers::Offset<void> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr) const;
-
-  SpringWeb::AuthResponseT *AsAuthResponse() {
-    return type == ServerPayload_AuthResponse ?
-      reinterpret_cast<SpringWeb::AuthResponseT *>(value) : nullptr;
-  }
-  const SpringWeb::AuthResponseT *AsAuthResponse() const {
-    return type == ServerPayload_AuthResponse ?
-      reinterpret_cast<const SpringWeb::AuthResponseT *>(value) : nullptr;
-  }
-  SpringWeb::EntityCreateT *AsEntityCreate() {
-    return type == ServerPayload_EntityCreate ?
-      reinterpret_cast<SpringWeb::EntityCreateT *>(value) : nullptr;
-  }
-  const SpringWeb::EntityCreateT *AsEntityCreate() const {
-    return type == ServerPayload_EntityCreate ?
-      reinterpret_cast<const SpringWeb::EntityCreateT *>(value) : nullptr;
-  }
-  SpringWeb::EntityDestroyT *AsEntityDestroy() {
-    return type == ServerPayload_EntityDestroy ?
-      reinterpret_cast<SpringWeb::EntityDestroyT *>(value) : nullptr;
-  }
-  const SpringWeb::EntityDestroyT *AsEntityDestroy() const {
-    return type == ServerPayload_EntityDestroy ?
-      reinterpret_cast<const SpringWeb::EntityDestroyT *>(value) : nullptr;
-  }
-  SpringWeb::GameEventBatchT *AsGameEventBatch() {
-    return type == ServerPayload_GameEventBatch ?
-      reinterpret_cast<SpringWeb::GameEventBatchT *>(value) : nullptr;
-  }
-  const SpringWeb::GameEventBatchT *AsGameEventBatch() const {
-    return type == ServerPayload_GameEventBatch ?
-      reinterpret_cast<const SpringWeb::GameEventBatchT *>(value) : nullptr;
-  }
-  SpringWeb::ResourceUpdateT *AsResourceUpdate() {
-    return type == ServerPayload_ResourceUpdate ?
-      reinterpret_cast<SpringWeb::ResourceUpdateT *>(value) : nullptr;
-  }
-  const SpringWeb::ResourceUpdateT *AsResourceUpdate() const {
-    return type == ServerPayload_ResourceUpdate ?
-      reinterpret_cast<const SpringWeb::ResourceUpdateT *>(value) : nullptr;
-  }
-  SpringWeb::PongT *AsPong() {
-    return type == ServerPayload_Pong ?
-      reinterpret_cast<SpringWeb::PongT *>(value) : nullptr;
-  }
-  const SpringWeb::PongT *AsPong() const {
-    return type == ServerPayload_Pong ?
-      reinterpret_cast<const SpringWeb::PongT *>(value) : nullptr;
-  }
-  SpringWeb::ChatReceiveT *AsChatReceive() {
-    return type == ServerPayload_ChatReceive ?
-      reinterpret_cast<SpringWeb::ChatReceiveT *>(value) : nullptr;
-  }
-  const SpringWeb::ChatReceiveT *AsChatReceive() const {
-    return type == ServerPayload_ChatReceive ?
-      reinterpret_cast<const SpringWeb::ChatReceiveT *>(value) : nullptr;
-  }
-  SpringWeb::GameInfoT *AsGameInfo() {
-    return type == ServerPayload_GameInfo ?
-      reinterpret_cast<SpringWeb::GameInfoT *>(value) : nullptr;
-  }
-  const SpringWeb::GameInfoT *AsGameInfo() const {
-    return type == ServerPayload_GameInfo ?
-      reinterpret_cast<const SpringWeb::GameInfoT *>(value) : nullptr;
-  }
-  SpringWeb::ReconnectResponseT *AsReconnectResponse() {
-    return type == ServerPayload_ReconnectResponse ?
-      reinterpret_cast<SpringWeb::ReconnectResponseT *>(value) : nullptr;
-  }
-  const SpringWeb::ReconnectResponseT *AsReconnectResponse() const {
-    return type == ServerPayload_ReconnectResponse ?
-      reinterpret_cast<const SpringWeb::ReconnectResponseT *>(value) : nullptr;
-  }
-  SpringWeb::ServerErrorT *AsServerError() {
-    return type == ServerPayload_ServerError ?
-      reinterpret_cast<SpringWeb::ServerErrorT *>(value) : nullptr;
-  }
-  const SpringWeb::ServerErrorT *AsServerError() const {
-    return type == ServerPayload_ServerError ?
-      reinterpret_cast<const SpringWeb::ServerErrorT *>(value) : nullptr;
-  }
-  SpringWeb::RoomListUpdateT *AsRoomListUpdate() {
-    return type == ServerPayload_RoomListUpdate ?
-      reinterpret_cast<SpringWeb::RoomListUpdateT *>(value) : nullptr;
-  }
-  const SpringWeb::RoomListUpdateT *AsRoomListUpdate() const {
-    return type == ServerPayload_RoomListUpdate ?
-      reinterpret_cast<const SpringWeb::RoomListUpdateT *>(value) : nullptr;
-  }
-  SpringWeb::RoomStateUpdateT *AsRoomStateUpdate() {
-    return type == ServerPayload_RoomStateUpdate ?
-      reinterpret_cast<SpringWeb::RoomStateUpdateT *>(value) : nullptr;
-  }
-  const SpringWeb::RoomStateUpdateT *AsRoomStateUpdate() const {
-    return type == ServerPayload_RoomStateUpdate ?
-      reinterpret_cast<const SpringWeb::RoomStateUpdateT *>(value) : nullptr;
-  }
-  SpringWeb::RoomPlayerJoinedT *AsRoomPlayerJoined() {
-    return type == ServerPayload_RoomPlayerJoined ?
-      reinterpret_cast<SpringWeb::RoomPlayerJoinedT *>(value) : nullptr;
-  }
-  const SpringWeb::RoomPlayerJoinedT *AsRoomPlayerJoined() const {
-    return type == ServerPayload_RoomPlayerJoined ?
-      reinterpret_cast<const SpringWeb::RoomPlayerJoinedT *>(value) : nullptr;
-  }
-  SpringWeb::RoomPlayerLeftT *AsRoomPlayerLeft() {
-    return type == ServerPayload_RoomPlayerLeft ?
-      reinterpret_cast<SpringWeb::RoomPlayerLeftT *>(value) : nullptr;
-  }
-  const SpringWeb::RoomPlayerLeftT *AsRoomPlayerLeft() const {
-    return type == ServerPayload_RoomPlayerLeft ?
-      reinterpret_cast<const SpringWeb::RoomPlayerLeftT *>(value) : nullptr;
-  }
-  SpringWeb::MapListUpdateT *AsMapListUpdate() {
-    return type == ServerPayload_MapListUpdate ?
-      reinterpret_cast<SpringWeb::MapListUpdateT *>(value) : nullptr;
-  }
-  const SpringWeb::MapListUpdateT *AsMapListUpdate() const {
-    return type == ServerPayload_MapListUpdate ?
-      reinterpret_cast<const SpringWeb::MapListUpdateT *>(value) : nullptr;
-  }
-  SpringWeb::MapDataT *AsMapData() {
-    return type == ServerPayload_MapData ?
-      reinterpret_cast<SpringWeb::MapDataT *>(value) : nullptr;
-  }
-  const SpringWeb::MapDataT *AsMapData() const {
-    return type == ServerPayload_MapData ?
-      reinterpret_cast<const SpringWeb::MapDataT *>(value) : nullptr;
-  }
-  SpringWeb::AIListUpdateT *AsAIListUpdate() {
-    return type == ServerPayload_AIListUpdate ?
-      reinterpret_cast<SpringWeb::AIListUpdateT *>(value) : nullptr;
-  }
-  const SpringWeb::AIListUpdateT *AsAIListUpdate() const {
-    return type == ServerPayload_AIListUpdate ?
-      reinterpret_cast<const SpringWeb::AIListUpdateT *>(value) : nullptr;
-  }
-  SpringWeb::GameListUpdateT *AsGameListUpdate() {
-    return type == ServerPayload_GameListUpdate ?
-      reinterpret_cast<SpringWeb::GameListUpdateT *>(value) : nullptr;
-  }
-  const SpringWeb::GameListUpdateT *AsGameListUpdate() const {
-    return type == ServerPayload_GameListUpdate ?
-      reinterpret_cast<const SpringWeb::GameListUpdateT *>(value) : nullptr;
-  }
-  SpringWeb::GameUnitDefsT *AsGameUnitDefs() {
-    return type == ServerPayload_GameUnitDefs ?
-      reinterpret_cast<SpringWeb::GameUnitDefsT *>(value) : nullptr;
-  }
-  const SpringWeb::GameUnitDefsT *AsGameUnitDefs() const {
-    return type == ServerPayload_GameUnitDefs ?
-      reinterpret_cast<const SpringWeb::GameUnitDefsT *>(value) : nullptr;
-  }
-  SpringWeb::PlayerLeftT *AsPlayerLeft() {
-    return type == ServerPayload_PlayerLeft ?
-      reinterpret_cast<SpringWeb::PlayerLeftT *>(value) : nullptr;
-  }
-  const SpringWeb::PlayerLeftT *AsPlayerLeft() const {
-    return type == ServerPayload_PlayerLeft ?
-      reinterpret_cast<const SpringWeb::PlayerLeftT *>(value) : nullptr;
-  }
-  SpringWeb::GameWeaponDefsT *AsGameWeaponDefs() {
-    return type == ServerPayload_GameWeaponDefs ?
-      reinterpret_cast<SpringWeb::GameWeaponDefsT *>(value) : nullptr;
-  }
-  const SpringWeb::GameWeaponDefsT *AsGameWeaponDefs() const {
-    return type == ServerPayload_GameWeaponDefs ?
-      reinterpret_cast<const SpringWeb::GameWeaponDefsT *>(value) : nullptr;
-  }
-  SpringWeb::LogBatchT *AsLogBatch() {
-    return type == ServerPayload_LogBatch ?
-      reinterpret_cast<SpringWeb::LogBatchT *>(value) : nullptr;
-  }
-  const SpringWeb::LogBatchT *AsLogBatch() const {
-    return type == ServerPayload_LogBatch ?
-      reinterpret_cast<const SpringWeb::LogBatchT *>(value) : nullptr;
-  }
-  SpringWeb::ConsoleResponseT *AsConsoleResponse() {
-    return type == ServerPayload_ConsoleResponse ?
-      reinterpret_cast<SpringWeb::ConsoleResponseT *>(value) : nullptr;
-  }
-  const SpringWeb::ConsoleResponseT *AsConsoleResponse() const {
-    return type == ServerPayload_ConsoleResponse ?
-      reinterpret_cast<const SpringWeb::ConsoleResponseT *>(value) : nullptr;
-  }
-  SpringWeb::GameStartedT *AsGameStarted() {
-    return type == ServerPayload_GameStarted ?
-      reinterpret_cast<SpringWeb::GameStartedT *>(value) : nullptr;
-  }
-  const SpringWeb::GameStartedT *AsGameStarted() const {
-    return type == ServerPayload_GameStarted ?
-      reinterpret_cast<const SpringWeb::GameStartedT *>(value) : nullptr;
-  }
-  SpringWeb::GameRestartingT *AsGameRestarting() {
-    return type == ServerPayload_GameRestarting ?
-      reinterpret_cast<SpringWeb::GameRestartingT *>(value) : nullptr;
-  }
-  const SpringWeb::GameRestartingT *AsGameRestarting() const {
-    return type == ServerPayload_GameRestarting ?
-      reinterpret_cast<const SpringWeb::GameRestartingT *>(value) : nullptr;
-  }
-};
-
 bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *obj, ServerPayload type);
 bool VerifyServerPayloadVector(::flatbuffers::Verifier &verifier, const ::flatbuffers::Vector<::flatbuffers::Offset<void>> *values, const ::flatbuffers::Vector<uint8_t> *types);
 
@@ -1638,14 +873,7 @@ FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) MapStartPos FLATBUFFERS_FINAL_CLASS {
 };
 FLATBUFFERS_STRUCT_END(MapStartPos, 8);
 
-struct HandshakeT : public ::flatbuffers::NativeTable {
-  typedef Handshake TableType;
-  uint16_t protocol_version = 0;
-  std::string client_version{};
-};
-
 struct Handshake FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef HandshakeT NativeTableType;
   typedef HandshakeBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_PROTOCOL_VERSION = 4,
@@ -1664,9 +892,6 @@ struct Handshake FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(client_version()) &&
            verifier.EndTable();
   }
-  HandshakeT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(HandshakeT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<Handshake> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const HandshakeT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct HandshakeBuilder {
@@ -1711,17 +936,7 @@ inline ::flatbuffers::Offset<Handshake> CreateHandshakeDirect(
       client_version__);
 }
 
-::flatbuffers::Offset<Handshake> CreateHandshake(::flatbuffers::FlatBufferBuilder &_fbb, const HandshakeT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct AuthRequestT : public ::flatbuffers::NativeTable {
-  typedef AuthRequest TableType;
-  std::string username{};
-  std::string password_hash{};
-  std::string token{};
-};
-
 struct AuthRequest FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef AuthRequestT NativeTableType;
   typedef AuthRequestBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_USERNAME = 4,
@@ -1747,9 +962,6 @@ struct AuthRequest FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(token()) &&
            verifier.EndTable();
   }
-  AuthRequestT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(AuthRequestT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<AuthRequest> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const AuthRequestT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct AuthRequestBuilder {
@@ -1803,20 +1015,7 @@ inline ::flatbuffers::Offset<AuthRequest> CreateAuthRequestDirect(
       token__);
 }
 
-::flatbuffers::Offset<AuthRequest> CreateAuthRequest(::flatbuffers::FlatBufferBuilder &_fbb, const AuthRequestT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct PlayerCommandT : public ::flatbuffers::NativeTable {
-  typedef PlayerCommand TableType;
-  uint32_t sequence = 0;
-  int16_t command_id = 0;
-  std::vector<uint32_t> squad_ids{};
-  std::vector<float> params{};
-  uint8_t options = 0;
-  uint32_t timeout_frames = 0;
-};
-
 struct PlayerCommand FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef PlayerCommandT NativeTableType;
   typedef PlayerCommandBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_SEQUENCE = 4,
@@ -1856,9 +1055,6 @@ struct PlayerCommand FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint32_t>(verifier, VT_TIMEOUT_FRAMES, 4) &&
            verifier.EndTable();
   }
-  PlayerCommandT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(PlayerCommandT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<PlayerCommand> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerCommandT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct PlayerCommandBuilder {
@@ -1932,21 +1128,7 @@ inline ::flatbuffers::Offset<PlayerCommand> CreatePlayerCommandDirect(
       timeout_frames);
 }
 
-::flatbuffers::Offset<PlayerCommand> CreatePlayerCommand(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerCommandT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct ViewportUpdateT : public ::flatbuffers::NativeTable {
-  typedef ViewportUpdate TableType;
-  uint8_t viewport_id = 0;
-  float center_x = 0.0f;
-  float center_z = 0.0f;
-  float width = 0.0f;
-  float height = 0.0f;
-  float rotation = 0.0f;
-  float zoom_level = 0.0f;
-};
-
 struct ViewportUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef ViewportUpdateT NativeTableType;
   typedef ViewportUpdateBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_VIEWPORT_ID = 4,
@@ -1989,9 +1171,6 @@ struct ViewportUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<float>(verifier, VT_ZOOM_LEVEL, 4) &&
            verifier.EndTable();
   }
-  ViewportUpdateT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(ViewportUpdateT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<ViewportUpdate> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ViewportUpdateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct ViewportUpdateBuilder {
@@ -2050,15 +1229,7 @@ inline ::flatbuffers::Offset<ViewportUpdate> CreateViewportUpdate(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<ViewportUpdate> CreateViewportUpdate(::flatbuffers::FlatBufferBuilder &_fbb, const ViewportUpdateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct PingT : public ::flatbuffers::NativeTable {
-  typedef Ping TableType;
-  uint64_t client_time = 0;
-};
-
 struct Ping FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef PingT NativeTableType;
   typedef PingBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_CLIENT_TIME = 4
@@ -2071,9 +1242,6 @@ struct Ping FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint64_t>(verifier, VT_CLIENT_TIME, 8) &&
            verifier.EndTable();
   }
-  PingT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(PingT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<Ping> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const PingT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct PingBuilder {
@@ -2102,16 +1270,7 @@ inline ::flatbuffers::Offset<Ping> CreatePing(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<Ping> CreatePing(::flatbuffers::FlatBufferBuilder &_fbb, const PingT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct ChatSendT : public ::flatbuffers::NativeTable {
-  typedef ChatSend TableType;
-  std::string text{};
-  uint8_t destination = 0;
-};
-
 struct ChatSend FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef ChatSendT NativeTableType;
   typedef ChatSendBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_TEXT = 4,
@@ -2130,9 +1289,6 @@ struct ChatSend FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint8_t>(verifier, VT_DESTINATION, 1) &&
            verifier.EndTable();
   }
-  ChatSendT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(ChatSendT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<ChatSend> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ChatSendT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct ChatSendBuilder {
@@ -2177,15 +1333,7 @@ inline ::flatbuffers::Offset<ChatSend> CreateChatSendDirect(
       destination);
 }
 
-::flatbuffers::Offset<ChatSend> CreateChatSend(::flatbuffers::FlatBufferBuilder &_fbb, const ChatSendT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct AckT : public ::flatbuffers::NativeTable {
-  typedef Ack TableType;
-  uint32_t last_received_seq = 0;
-};
-
 struct Ack FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef AckT NativeTableType;
   typedef AckBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_LAST_RECEIVED_SEQ = 4
@@ -2198,9 +1346,6 @@ struct Ack FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint32_t>(verifier, VT_LAST_RECEIVED_SEQ, 4) &&
            verifier.EndTable();
   }
-  AckT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(AckT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<Ack> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const AckT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct AckBuilder {
@@ -2229,16 +1374,7 @@ inline ::flatbuffers::Offset<Ack> CreateAck(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<Ack> CreateAck(::flatbuffers::FlatBufferBuilder &_fbb, const AckT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct ReconnectRequestT : public ::flatbuffers::NativeTable {
-  typedef ReconnectRequest TableType;
-  std::string token{};
-  uint32_t last_snapshot_seq = 0;
-};
-
 struct ReconnectRequest FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef ReconnectRequestT NativeTableType;
   typedef ReconnectRequestBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_TOKEN = 4,
@@ -2257,9 +1393,6 @@ struct ReconnectRequest FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint32_t>(verifier, VT_LAST_SNAPSHOT_SEQ, 4) &&
            verifier.EndTable();
   }
-  ReconnectRequestT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(ReconnectRequestT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<ReconnectRequest> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ReconnectRequestT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct ReconnectRequestBuilder {
@@ -2304,24 +1437,12 @@ inline ::flatbuffers::Offset<ReconnectRequest> CreateReconnectRequestDirect(
       last_snapshot_seq);
 }
 
-::flatbuffers::Offset<ReconnectRequest> CreateReconnectRequest(::flatbuffers::FlatBufferBuilder &_fbb, const ReconnectRequestT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct RoomCreateT : public ::flatbuffers::NativeTable {
-  typedef RoomCreate TableType;
-  std::string name{};
-  std::string map_name{};
-  std::string game_name{};
-  uint8_t max_players = 8;
-  std::string password{};
-};
-
 struct RoomCreate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef RoomCreateT NativeTableType;
   typedef RoomCreateBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_NAME = 4,
     VT_MAP_NAME = 6,
-    VT_GAME_NAME = 8,
+    VT_GAME_ID = 8,
     VT_MAX_PLAYERS = 10,
     VT_PASSWORD = 12
   };
@@ -2331,8 +1452,8 @@ struct RoomCreate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::String *map_name() const {
     return GetPointer<const ::flatbuffers::String *>(VT_MAP_NAME);
   }
-  const ::flatbuffers::String *game_name() const {
-    return GetPointer<const ::flatbuffers::String *>(VT_GAME_NAME);
+  const ::flatbuffers::String *game_id() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_GAME_ID);
   }
   uint8_t max_players() const {
     return GetField<uint8_t>(VT_MAX_PLAYERS, 8);
@@ -2346,16 +1467,13 @@ struct RoomCreate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(name()) &&
            VerifyOffset(verifier, VT_MAP_NAME) &&
            verifier.VerifyString(map_name()) &&
-           VerifyOffset(verifier, VT_GAME_NAME) &&
-           verifier.VerifyString(game_name()) &&
+           VerifyOffset(verifier, VT_GAME_ID) &&
+           verifier.VerifyString(game_id()) &&
            VerifyField<uint8_t>(verifier, VT_MAX_PLAYERS, 1) &&
            VerifyOffset(verifier, VT_PASSWORD) &&
            verifier.VerifyString(password()) &&
            verifier.EndTable();
   }
-  RoomCreateT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(RoomCreateT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<RoomCreate> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomCreateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct RoomCreateBuilder {
@@ -2368,8 +1486,8 @@ struct RoomCreateBuilder {
   void add_map_name(::flatbuffers::Offset<::flatbuffers::String> map_name) {
     fbb_.AddOffset(RoomCreate::VT_MAP_NAME, map_name);
   }
-  void add_game_name(::flatbuffers::Offset<::flatbuffers::String> game_name) {
-    fbb_.AddOffset(RoomCreate::VT_GAME_NAME, game_name);
+  void add_game_id(::flatbuffers::Offset<::flatbuffers::String> game_id) {
+    fbb_.AddOffset(RoomCreate::VT_GAME_ID, game_id);
   }
   void add_max_players(uint8_t max_players) {
     fbb_.AddElement<uint8_t>(RoomCreate::VT_MAX_PLAYERS, max_players, 8);
@@ -2392,12 +1510,12 @@ inline ::flatbuffers::Offset<RoomCreate> CreateRoomCreate(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     ::flatbuffers::Offset<::flatbuffers::String> name = 0,
     ::flatbuffers::Offset<::flatbuffers::String> map_name = 0,
-    ::flatbuffers::Offset<::flatbuffers::String> game_name = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> game_id = 0,
     uint8_t max_players = 8,
     ::flatbuffers::Offset<::flatbuffers::String> password = 0) {
   RoomCreateBuilder builder_(_fbb);
   builder_.add_password(password);
-  builder_.add_game_name(game_name);
+  builder_.add_game_id(game_id);
   builder_.add_map_name(map_name);
   builder_.add_name(name);
   builder_.add_max_players(max_players);
@@ -2408,32 +1526,23 @@ inline ::flatbuffers::Offset<RoomCreate> CreateRoomCreateDirect(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     const char *name = nullptr,
     const char *map_name = nullptr,
-    const char *game_name = nullptr,
+    const char *game_id = nullptr,
     uint8_t max_players = 8,
     const char *password = nullptr) {
   auto name__ = name ? _fbb.CreateString(name) : 0;
   auto map_name__ = map_name ? _fbb.CreateString(map_name) : 0;
-  auto game_name__ = game_name ? _fbb.CreateString(game_name) : 0;
+  auto game_id__ = game_id ? _fbb.CreateString(game_id) : 0;
   auto password__ = password ? _fbb.CreateString(password) : 0;
   return SpringWeb::CreateRoomCreate(
       _fbb,
       name__,
       map_name__,
-      game_name__,
+      game_id__,
       max_players,
       password__);
 }
 
-::flatbuffers::Offset<RoomCreate> CreateRoomCreate(::flatbuffers::FlatBufferBuilder &_fbb, const RoomCreateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct RoomJoinT : public ::flatbuffers::NativeTable {
-  typedef RoomJoin TableType;
-  uint32_t room_id = 0;
-  std::string password{};
-};
-
 struct RoomJoin FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef RoomJoinT NativeTableType;
   typedef RoomJoinBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_ROOM_ID = 4,
@@ -2452,9 +1561,6 @@ struct RoomJoin FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(password()) &&
            verifier.EndTable();
   }
-  RoomJoinT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(RoomJoinT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<RoomJoin> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomJoinT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct RoomJoinBuilder {
@@ -2499,22 +1605,12 @@ inline ::flatbuffers::Offset<RoomJoin> CreateRoomJoinDirect(
       password__);
 }
 
-::flatbuffers::Offset<RoomJoin> CreateRoomJoin(::flatbuffers::FlatBufferBuilder &_fbb, const RoomJoinT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct RoomLeaveT : public ::flatbuffers::NativeTable {
-  typedef RoomLeave TableType;
-};
-
 struct RoomLeave FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef RoomLeaveT NativeTableType;
   typedef RoomLeaveBuilder Builder;
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            verifier.EndTable();
   }
-  RoomLeaveT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(RoomLeaveT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<RoomLeave> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomLeaveT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct RoomLeaveBuilder {
@@ -2538,15 +1634,7 @@ inline ::flatbuffers::Offset<RoomLeave> CreateRoomLeave(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<RoomLeave> CreateRoomLeave(::flatbuffers::FlatBufferBuilder &_fbb, const RoomLeaveT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct RoomTeamSelectT : public ::flatbuffers::NativeTable {
-  typedef RoomTeamSelect TableType;
-  uint8_t team = 0;
-};
-
 struct RoomTeamSelect FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef RoomTeamSelectT NativeTableType;
   typedef RoomTeamSelectBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_TEAM = 4
@@ -2559,9 +1647,6 @@ struct RoomTeamSelect FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint8_t>(verifier, VT_TEAM, 1) &&
            verifier.EndTable();
   }
-  RoomTeamSelectT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(RoomTeamSelectT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<RoomTeamSelect> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomTeamSelectT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct RoomTeamSelectBuilder {
@@ -2590,15 +1675,7 @@ inline ::flatbuffers::Offset<RoomTeamSelect> CreateRoomTeamSelect(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<RoomTeamSelect> CreateRoomTeamSelect(::flatbuffers::FlatBufferBuilder &_fbb, const RoomTeamSelectT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct RoomReadyT : public ::flatbuffers::NativeTable {
-  typedef RoomReady TableType;
-  bool ready = false;
-};
-
 struct RoomReady FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef RoomReadyT NativeTableType;
   typedef RoomReadyBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_READY = 4
@@ -2611,9 +1688,6 @@ struct RoomReady FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint8_t>(verifier, VT_READY, 1) &&
            verifier.EndTable();
   }
-  RoomReadyT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(RoomReadyT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<RoomReady> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomReadyT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct RoomReadyBuilder {
@@ -2642,15 +1716,7 @@ inline ::flatbuffers::Offset<RoomReady> CreateRoomReady(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<RoomReady> CreateRoomReady(::flatbuffers::FlatBufferBuilder &_fbb, const RoomReadyT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct RoomKickT : public ::flatbuffers::NativeTable {
-  typedef RoomKick TableType;
-  uint32_t player_id = 0;
-};
-
 struct RoomKick FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef RoomKickT NativeTableType;
   typedef RoomKickBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_PLAYER_ID = 4
@@ -2663,9 +1729,6 @@ struct RoomKick FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint32_t>(verifier, VT_PLAYER_ID, 4) &&
            verifier.EndTable();
   }
-  RoomKickT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(RoomKickT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<RoomKick> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomKickT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct RoomKickBuilder {
@@ -2694,22 +1757,12 @@ inline ::flatbuffers::Offset<RoomKick> CreateRoomKick(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<RoomKick> CreateRoomKick(::flatbuffers::FlatBufferBuilder &_fbb, const RoomKickT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct RoomStartGameT : public ::flatbuffers::NativeTable {
-  typedef RoomStartGame TableType;
-};
-
 struct RoomStartGame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef RoomStartGameT NativeTableType;
   typedef RoomStartGameBuilder Builder;
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            verifier.EndTable();
   }
-  RoomStartGameT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(RoomStartGameT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<RoomStartGame> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomStartGameT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct RoomStartGameBuilder {
@@ -2733,26 +1786,16 @@ inline ::flatbuffers::Offset<RoomStartGame> CreateRoomStartGame(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<RoomStartGame> CreateRoomStartGame(::flatbuffers::FlatBufferBuilder &_fbb, const RoomStartGameT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct RoomEndGameT : public ::flatbuffers::NativeTable {
-  typedef RoomEndGame TableType;
-};
-
 /// Host-only request to end a running game. Terminates the spring-server
 /// subprocess for this room; the room transitions to Ended when the
 /// process is reaped by the lobby health-check loop. Ignored if the
 /// sender is not the room host or the room is not in an active state.
 struct RoomEndGame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef RoomEndGameT NativeTableType;
   typedef RoomEndGameBuilder Builder;
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            verifier.EndTable();
   }
-  RoomEndGameT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(RoomEndGameT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<RoomEndGame> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomEndGameT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct RoomEndGameBuilder {
@@ -2776,12 +1819,6 @@ inline ::flatbuffers::Offset<RoomEndGame> CreateRoomEndGame(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<RoomEndGame> CreateRoomEndGame(::flatbuffers::FlatBufferBuilder &_fbb, const RoomEndGameT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct RoomCloseRoomT : public ::flatbuffers::NativeTable {
-  typedef RoomCloseRoom TableType;
-};
-
 /// Host-only request to close (delete) the entire room. Kills the
 /// game subprocess if one is still running, removes the room from
 /// the lobby's room list, and leaves every member in the browser
@@ -2789,15 +1826,11 @@ struct RoomCloseRoomT : public ::flatbuffers::NativeTable {
 /// out, the room id no longer resolves. Rejected if the sender is
 /// not the current room host.
 struct RoomCloseRoom FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef RoomCloseRoomT NativeTableType;
   typedef RoomCloseRoomBuilder Builder;
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            verifier.EndTable();
   }
-  RoomCloseRoomT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(RoomCloseRoomT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<RoomCloseRoom> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomCloseRoomT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct RoomCloseRoomBuilder {
@@ -2821,20 +1854,11 @@ inline ::flatbuffers::Offset<RoomCloseRoom> CreateRoomCloseRoom(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<RoomCloseRoom> CreateRoomCloseRoom(::flatbuffers::FlatBufferBuilder &_fbb, const RoomCloseRoomT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct RoomAddAIT : public ::flatbuffers::NativeTable {
-  typedef RoomAddAI TableType;
-  std::string ai_id{};
-  uint8_t team = 0;
-};
-
 /// Host-only request to add an AI player to a team slot in the current
 /// room. `ai_id` must match one of the ids the server returned in its
 /// most recent AIListUpdate; unknown ids are rejected. Ignored if the
 /// sender is not the room host or the room is past the Filling state.
 struct RoomAddAI FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef RoomAddAIT NativeTableType;
   typedef RoomAddAIBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_AI_ID = 4,
@@ -2853,9 +1877,6 @@ struct RoomAddAI FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint8_t>(verifier, VT_TEAM, 1) &&
            verifier.EndTable();
   }
-  RoomAddAIT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(RoomAddAIT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<RoomAddAI> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomAddAIT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct RoomAddAIBuilder {
@@ -2900,18 +1921,10 @@ inline ::flatbuffers::Offset<RoomAddAI> CreateRoomAddAIDirect(
       team);
 }
 
-::flatbuffers::Offset<RoomAddAI> CreateRoomAddAI(::flatbuffers::FlatBufferBuilder &_fbb, const RoomAddAIT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct RoomRemoveAIT : public ::flatbuffers::NativeTable {
-  typedef RoomRemoveAI TableType;
-  uint8_t slot_index = 0;
-};
-
 /// Host-only request to remove an AI slot from the current room by
 /// its index in the RoomStateUpdate.ai_slots vector. Ignored if the
 /// sender is not the room host.
 struct RoomRemoveAI FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef RoomRemoveAIT NativeTableType;
   typedef RoomRemoveAIBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_SLOT_INDEX = 4
@@ -2924,9 +1937,6 @@ struct RoomRemoveAI FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint8_t>(verifier, VT_SLOT_INDEX, 1) &&
            verifier.EndTable();
   }
-  RoomRemoveAIT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(RoomRemoveAIT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<RoomRemoveAI> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomRemoveAIT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct RoomRemoveAIBuilder {
@@ -2955,20 +1965,11 @@ inline ::flatbuffers::Offset<RoomRemoveAI> CreateRoomRemoveAI(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<RoomRemoveAI> CreateRoomRemoveAI(::flatbuffers::FlatBufferBuilder &_fbb, const RoomRemoveAIT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct RoomSetAITeamT : public ::flatbuffers::NativeTable {
-  typedef RoomSetAITeam TableType;
-  uint8_t slot_index = 0;
-  uint8_t team = 0;
-};
-
 /// Host-only request to re-assign an AI slot to a different team.
 /// Targets the slot by its index in the RoomStateUpdate.ai_slots
 /// vector. Ignored if the sender is not the room host or the index
 /// is out of range. Does not affect the slot's start position.
 struct RoomSetAITeam FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef RoomSetAITeamT NativeTableType;
   typedef RoomSetAITeamBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_SLOT_INDEX = 4,
@@ -2986,9 +1987,6 @@ struct RoomSetAITeam FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint8_t>(verifier, VT_TEAM, 1) &&
            verifier.EndTable();
   }
-  RoomSetAITeamT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(RoomSetAITeamT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<RoomSetAITeam> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomSetAITeamT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct RoomSetAITeamBuilder {
@@ -3022,15 +2020,6 @@ inline ::flatbuffers::Offset<RoomSetAITeam> CreateRoomSetAITeam(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<RoomSetAITeam> CreateRoomSetAITeam(::flatbuffers::FlatBufferBuilder &_fbb, const RoomSetAITeamT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct RoomSetStartPosT : public ::flatbuffers::NativeTable {
-  typedef RoomSetStartPos TableType;
-  uint32_t target_player_id = 0;
-  int8_t target_ai_slot = -1;
-  int8_t pos_index = 0;
-};
-
 /// Assign a map start position to a player or AI slot in the current
 /// room. Start positions are indices into the map's start_positions
 /// array (see MapInfo) — the game server uses them to decide where
@@ -3047,7 +2036,6 @@ struct RoomSetStartPosT : public ::flatbuffers::NativeTable {
 /// The server rejects the request if `pos_index` is already held by
 /// another slot in the same room, or is out of range for the map.
 struct RoomSetStartPos FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef RoomSetStartPosT NativeTableType;
   typedef RoomSetStartPosBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_TARGET_PLAYER_ID = 4,
@@ -3070,9 +2058,6 @@ struct RoomSetStartPos FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<int8_t>(verifier, VT_POS_INDEX, 1) &&
            verifier.EndTable();
   }
-  RoomSetStartPosT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(RoomSetStartPosT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<RoomSetStartPos> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomSetStartPosT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct RoomSetStartPosBuilder {
@@ -3111,26 +2096,16 @@ inline ::flatbuffers::Offset<RoomSetStartPos> CreateRoomSetStartPos(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<RoomSetStartPos> CreateRoomSetStartPos(::flatbuffers::FlatBufferBuilder &_fbb, const RoomSetStartPosT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct AIListRequestT : public ::flatbuffers::NativeTable {
-  typedef AIListRequest TableType;
-};
-
 /// Request the server's current list of available AI plugins for
 /// the current room's game. Response is an AIListUpdate. Any client
 /// can issue this (not host-only) so team-picking UIs can display
 /// AI metadata without waiting for a slot to exist.
 struct AIListRequest FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef AIListRequestT NativeTableType;
   typedef AIListRequestBuilder Builder;
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            verifier.EndTable();
   }
-  AIListRequestT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(AIListRequestT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<AIListRequest> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const AIListRequestT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct AIListRequestBuilder {
@@ -3154,25 +2129,15 @@ inline ::flatbuffers::Offset<AIListRequest> CreateAIListRequest(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<AIListRequest> CreateAIListRequest(::flatbuffers::FlatBufferBuilder &_fbb, const AIListRequestT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct GameListRequestT : public ::flatbuffers::NativeTable {
-  typedef GameListRequest TableType;
-};
-
-/// Request the server's list of discovered games under content/games.
+/// Request the server's list of discovered games under data/games.
 /// Response is a GameListUpdate. Sent by the lobby UI on first
 /// login so the "create game" dropdown can be populated.
 struct GameListRequest FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef GameListRequestT NativeTableType;
   typedef GameListRequestBuilder Builder;
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            verifier.EndTable();
   }
-  GameListRequestT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(GameListRequestT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<GameListRequest> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameListRequestT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct GameListRequestBuilder {
@@ -3196,24 +2161,9 @@ inline ::flatbuffers::Offset<GameListRequest> CreateGameListRequest(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<GameListRequest> CreateGameListRequest(::flatbuffers::FlatBufferBuilder &_fbb, const GameListRequestT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct LogEntryMsgT : public ::flatbuffers::NativeTable {
-  typedef LogEntryMsg TableType;
-  uint64_t id = 0;
-  uint64_t timestamp = 0;
-  uint8_t level = 0;
-  std::string section{};
-  std::string scope{};
-  std::string process{};
-  std::string message{};
-  uint32_t frame = 0;
-};
-
 /// A single structured log entry. Used in LogIngest (inbound)
 /// and LogBatch (outbound streaming to subscribers).
 struct LogEntryMsg FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef LogEntryMsgT NativeTableType;
   typedef LogEntryMsgBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_ID = 4,
@@ -3265,9 +2215,6 @@ struct LogEntryMsg FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint32_t>(verifier, VT_FRAME, 4) &&
            verifier.EndTable();
   }
-  LogEntryMsgT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(LogEntryMsgT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<LogEntryMsg> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const LogEntryMsgT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct LogEntryMsgBuilder {
@@ -3357,20 +2304,8 @@ inline ::flatbuffers::Offset<LogEntryMsg> CreateLogEntryMsgDirect(
       frame);
 }
 
-::flatbuffers::Offset<LogEntryMsg> CreateLogEntryMsg(::flatbuffers::FlatBufferBuilder &_fbb, const LogEntryMsgT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct LogIngestT : public ::flatbuffers::NativeTable {
-  typedef LogIngest TableType;
-  std::vector<std::unique_ptr<SpringWeb::LogEntryMsgT>> entries{};
-  LogIngestT() = default;
-  LogIngestT(const LogIngestT &o);
-  LogIngestT(LogIngestT&&) FLATBUFFERS_NOEXCEPT = default;
-  LogIngestT &operator=(LogIngestT o) FLATBUFFERS_NOEXCEPT;
-};
-
 /// Any process → log server: batch of log entries for ingestion.
 struct LogIngest FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef LogIngestT NativeTableType;
   typedef LogIngestBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_ENTRIES = 4
@@ -3385,9 +2320,6 @@ struct LogIngest FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVectorOfTables(entries()) &&
            verifier.EndTable();
   }
-  LogIngestT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(LogIngestT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<LogIngest> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const LogIngestT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct LogIngestBuilder {
@@ -3425,19 +2357,8 @@ inline ::flatbuffers::Offset<LogIngest> CreateLogIngestDirect(
       entries__);
 }
 
-::flatbuffers::Offset<LogIngest> CreateLogIngest(::flatbuffers::FlatBufferBuilder &_fbb, const LogIngestT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct LogSubscribeT : public ::flatbuffers::NativeTable {
-  typedef LogSubscribe TableType;
-  uint32_t room_id = 0;
-  uint8_t min_level = 0;
-  std::string section_filter{};
-  std::string scope_filter{};
-};
-
 /// Subscribe to log streaming from the log server.
 struct LogSubscribe FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef LogSubscribeT NativeTableType;
   typedef LogSubscribeBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_ROOM_ID = 4,
@@ -3467,9 +2388,6 @@ struct LogSubscribe FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(scope_filter()) &&
            verifier.EndTable();
   }
-  LogSubscribeT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(LogSubscribeT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<LogSubscribe> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const LogSubscribeT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct LogSubscribeBuilder {
@@ -3529,23 +2447,13 @@ inline ::flatbuffers::Offset<LogSubscribe> CreateLogSubscribeDirect(
       scope_filter__);
 }
 
-::flatbuffers::Offset<LogSubscribe> CreateLogSubscribe(::flatbuffers::FlatBufferBuilder &_fbb, const LogSubscribeT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct LogUnsubscribeT : public ::flatbuffers::NativeTable {
-  typedef LogUnsubscribe TableType;
-};
-
 /// Unsubscribe from log streaming.
 struct LogUnsubscribe FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef LogUnsubscribeT NativeTableType;
   typedef LogUnsubscribeBuilder Builder;
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            verifier.EndTable();
   }
-  LogUnsubscribeT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(LogUnsubscribeT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<LogUnsubscribe> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const LogUnsubscribeT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct LogUnsubscribeBuilder {
@@ -3569,22 +2477,8 @@ inline ::flatbuffers::Offset<LogUnsubscribe> CreateLogUnsubscribe(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<LogUnsubscribe> CreateLogUnsubscribe(::flatbuffers::FlatBufferBuilder &_fbb, const LogUnsubscribeT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct LogBatchT : public ::flatbuffers::NativeTable {
-  typedef LogBatch TableType;
-  uint32_t room_id = 0;
-  std::vector<std::unique_ptr<SpringWeb::LogEntryMsgT>> entries{};
-  uint64_t latest_id = 0;
-  LogBatchT() = default;
-  LogBatchT(const LogBatchT &o);
-  LogBatchT(LogBatchT&&) FLATBUFFERS_NOEXCEPT = default;
-  LogBatchT &operator=(LogBatchT o) FLATBUFFERS_NOEXCEPT;
-};
-
 /// Log server → subscriber: streamed batch of log entries.
 struct LogBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef LogBatchT NativeTableType;
   typedef LogBatchBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_ROOM_ID = 4,
@@ -3609,9 +2503,6 @@ struct LogBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint64_t>(verifier, VT_LATEST_ID, 8) &&
            verifier.EndTable();
   }
-  LogBatchT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(LogBatchT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<LogBatch> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const LogBatchT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct LogBatchBuilder {
@@ -3663,18 +2554,8 @@ inline ::flatbuffers::Offset<LogBatch> CreateLogBatchDirect(
       latest_id);
 }
 
-::flatbuffers::Offset<LogBatch> CreateLogBatch(::flatbuffers::FlatBufferBuilder &_fbb, const LogBatchT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct ConsoleCommandT : public ::flatbuffers::NativeTable {
-  typedef ConsoleCommand TableType;
-  std::string scope{};
-  std::string command{};
-  uint32_t request_id = 0;
-};
-
 /// Execute a command in a specific scope (Lua context, lobby, server).
 struct ConsoleCommand FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef ConsoleCommandT NativeTableType;
   typedef ConsoleCommandBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_SCOPE = 4,
@@ -3699,9 +2580,6 @@ struct ConsoleCommand FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint32_t>(verifier, VT_REQUEST_ID, 4) &&
            verifier.EndTable();
   }
-  ConsoleCommandT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(ConsoleCommandT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<ConsoleCommand> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ConsoleCommandT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct ConsoleCommandBuilder {
@@ -3754,18 +2632,10 @@ inline ::flatbuffers::Offset<ConsoleCommand> CreateConsoleCommandDirect(
       request_id);
 }
 
-::flatbuffers::Offset<ConsoleCommand> CreateConsoleCommand(::flatbuffers::FlatBufferBuilder &_fbb, const ConsoleCommandT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct GameStartedT : public ::flatbuffers::NativeTable {
-  typedef GameStarted TableType;
-  uint32_t frame = 0;
-};
-
 /// Game server has finished boot and started ticking. Sent from
 /// game server to lobby over the admin WS connection. Triggers
 /// room state transition from Loading → Active.
 struct GameStarted FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef GameStartedT NativeTableType;
   typedef GameStartedBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_FRAME = 4
@@ -3778,9 +2648,6 @@ struct GameStarted FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint32_t>(verifier, VT_FRAME, 4) &&
            verifier.EndTable();
   }
-  GameStartedT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(GameStartedT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<GameStarted> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameStartedT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct GameStartedBuilder {
@@ -3809,24 +2676,14 @@ inline ::flatbuffers::Offset<GameStarted> CreateGameStarted(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<GameStarted> CreateGameStarted(::flatbuffers::FlatBufferBuilder &_fbb, const GameStartedT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct GameRestartingT : public ::flatbuffers::NativeTable {
-  typedef GameRestarting TableType;
-};
-
 /// Game server is about to restart itself (execvp). Clients should
 /// reset all game state and reconnect on the same port.
 struct GameRestarting FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef GameRestartingT NativeTableType;
   typedef GameRestartingBuilder Builder;
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            verifier.EndTable();
   }
-  GameRestartingT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(GameRestartingT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<GameRestarting> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameRestartingT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct GameRestartingBuilder {
@@ -3850,20 +2707,8 @@ inline ::flatbuffers::Offset<GameRestarting> CreateGameRestarting(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<GameRestarting> CreateGameRestarting(::flatbuffers::FlatBufferBuilder &_fbb, const GameRestartingT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct ConsoleResponseT : public ::flatbuffers::NativeTable {
-  typedef ConsoleResponse TableType;
-  uint32_t request_id = 0;
-  std::string scope{};
-  bool success = false;
-  std::string output{};
-  uint8_t level = 0;
-};
-
 /// Response to a ConsoleCommand.
 struct ConsoleResponse FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef ConsoleResponseT NativeTableType;
   typedef ConsoleResponseBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_REQUEST_ID = 4,
@@ -3898,9 +2743,6 @@ struct ConsoleResponse FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint8_t>(verifier, VT_LEVEL, 1) &&
            verifier.EndTable();
   }
-  ConsoleResponseT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(ConsoleResponseT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<ConsoleResponse> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ConsoleResponseT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct ConsoleResponseBuilder {
@@ -3967,15 +2809,7 @@ inline ::flatbuffers::Offset<ConsoleResponse> CreateConsoleResponseDirect(
       level);
 }
 
-::flatbuffers::Offset<ConsoleResponse> CreateConsoleResponse(::flatbuffers::FlatBufferBuilder &_fbb, const ConsoleResponseT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct ClientMessageT : public ::flatbuffers::NativeTable {
-  typedef ClientMessage TableType;
-  SpringWeb::ClientPayloadUnion payload{};
-};
-
 struct ClientMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef ClientMessageT NativeTableType;
   typedef ClientMessageBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_PAYLOAD_TYPE = 4,
@@ -4076,9 +2910,6 @@ struct ClientMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyClientPayload(verifier, payload(), payload_type()) &&
            verifier.EndTable();
   }
-  ClientMessageT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(ClientMessageT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<ClientMessage> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ClientMessageT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 template<> inline const SpringWeb::Handshake *ClientMessage::payload_as<SpringWeb::Handshake>() const {
@@ -4220,19 +3051,7 @@ inline ::flatbuffers::Offset<ClientMessage> CreateClientMessage(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<ClientMessage> CreateClientMessage(::flatbuffers::FlatBufferBuilder &_fbb, const ClientMessageT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct AuthResponseT : public ::flatbuffers::NativeTable {
-  typedef AuthResponse TableType;
-  SpringWeb::AuthStatus status = SpringWeb::AuthStatus_OK;
-  std::string token{};
-  uint32_t player_id = 0;
-  std::string message{};
-  int8_t team = -1;
-};
-
 struct AuthResponse FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef AuthResponseT NativeTableType;
   typedef AuthResponseBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_STATUS = 4,
@@ -4271,9 +3090,6 @@ struct AuthResponse FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<int8_t>(verifier, VT_TEAM, 1) &&
            verifier.EndTable();
   }
-  AuthResponseT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(AuthResponseT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<AuthResponse> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const AuthResponseT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct AuthResponseBuilder {
@@ -4340,24 +3156,7 @@ inline ::flatbuffers::Offset<AuthResponse> CreateAuthResponseDirect(
       team);
 }
 
-::flatbuffers::Offset<AuthResponse> CreateAuthResponse(::flatbuffers::FlatBufferBuilder &_fbb, const AuthResponseT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct EntityCreateT : public ::flatbuffers::NativeTable {
-  typedef EntityCreate TableType;
-  uint32_t entity_id = 0;
-  uint16_t def_id = 0;
-  uint8_t owner_team = 0;
-  std::unique_ptr<SpringWeb::Vec3> position{};
-  uint16_t heading = 0;
-  uint16_t health = 0;
-  EntityCreateT() = default;
-  EntityCreateT(const EntityCreateT &o);
-  EntityCreateT(EntityCreateT&&) FLATBUFFERS_NOEXCEPT = default;
-  EntityCreateT &operator=(EntityCreateT o) FLATBUFFERS_NOEXCEPT;
-};
-
 struct EntityCreate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef EntityCreateT NativeTableType;
   typedef EntityCreateBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_ENTITY_ID = 4,
@@ -4395,9 +3194,6 @@ struct EntityCreate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint16_t>(verifier, VT_HEALTH, 2) &&
            verifier.EndTable();
   }
-  EntityCreateT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(EntityCreateT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<EntityCreate> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const EntityCreateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct EntityCreateBuilder {
@@ -4451,21 +3247,7 @@ inline ::flatbuffers::Offset<EntityCreate> CreateEntityCreate(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<EntityCreate> CreateEntityCreate(::flatbuffers::FlatBufferBuilder &_fbb, const EntityCreateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct EntityDestroyT : public ::flatbuffers::NativeTable {
-  typedef EntityDestroy TableType;
-  uint32_t entity_id = 0;
-  uint8_t destruction_type = 0;
-  std::unique_ptr<SpringWeb::Vec3> position{};
-  EntityDestroyT() = default;
-  EntityDestroyT(const EntityDestroyT &o);
-  EntityDestroyT(EntityDestroyT&&) FLATBUFFERS_NOEXCEPT = default;
-  EntityDestroyT &operator=(EntityDestroyT o) FLATBUFFERS_NOEXCEPT;
-};
-
 struct EntityDestroy FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef EntityDestroyT NativeTableType;
   typedef EntityDestroyBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_ENTITY_ID = 4,
@@ -4488,9 +3270,6 @@ struct EntityDestroy FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<SpringWeb::Vec3>(verifier, VT_POSITION, 4) &&
            verifier.EndTable();
   }
-  EntityDestroyT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(EntityDestroyT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<EntityDestroy> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const EntityDestroyT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct EntityDestroyBuilder {
@@ -4529,24 +3308,7 @@ inline ::flatbuffers::Offset<EntityDestroy> CreateEntityDestroy(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<EntityDestroy> CreateEntityDestroy(::flatbuffers::FlatBufferBuilder &_fbb, const EntityDestroyT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct CombatEventT : public ::flatbuffers::NativeTable {
-  typedef CombatEvent TableType;
-  uint32_t attacker_id = 0;
-  uint32_t target_id = 0;
-  uint16_t weapon_def_id = 0;
-  SpringWeb::CombatResult result = SpringWeb::CombatResult_Hit;
-  float damage = 0.0f;
-  std::unique_ptr<SpringWeb::Vec3> position{};
-  CombatEventT() = default;
-  CombatEventT(const CombatEventT &o);
-  CombatEventT(CombatEventT&&) FLATBUFFERS_NOEXCEPT = default;
-  CombatEventT &operator=(CombatEventT o) FLATBUFFERS_NOEXCEPT;
-};
-
 struct CombatEvent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef CombatEventT NativeTableType;
   typedef CombatEventBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_ATTACKER_ID = 4,
@@ -4584,9 +3346,6 @@ struct CombatEvent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<SpringWeb::Vec3>(verifier, VT_POSITION, 4) &&
            verifier.EndTable();
   }
-  CombatEventT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(CombatEventT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<CombatEvent> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const CombatEventT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct CombatEventBuilder {
@@ -4640,23 +3399,7 @@ inline ::flatbuffers::Offset<CombatEvent> CreateCombatEvent(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<CombatEvent> CreateCombatEvent(::flatbuffers::FlatBufferBuilder &_fbb, const CombatEventT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct GameEventT : public ::flatbuffers::NativeTable {
-  typedef GameEvent TableType;
-  std::string topic{};
-  uint32_t frame = 0;
-  uint32_t entity_id = 0;
-  std::unique_ptr<SpringWeb::Vec3> position{};
-  std::vector<uint8_t> payload{};
-  GameEventT() = default;
-  GameEventT(const GameEventT &o);
-  GameEventT(GameEventT&&) FLATBUFFERS_NOEXCEPT = default;
-  GameEventT &operator=(GameEventT o) FLATBUFFERS_NOEXCEPT;
-};
-
 struct GameEvent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef GameEventT NativeTableType;
   typedef GameEventBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_TOPIC = 4,
@@ -4691,9 +3434,6 @@ struct GameEvent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVector(payload()) &&
            verifier.EndTable();
   }
-  GameEventT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(GameEventT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<GameEvent> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameEventT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct GameEventBuilder {
@@ -4760,21 +3500,7 @@ inline ::flatbuffers::Offset<GameEvent> CreateGameEventDirect(
       payload__);
 }
 
-::flatbuffers::Offset<GameEvent> CreateGameEvent(::flatbuffers::FlatBufferBuilder &_fbb, const GameEventT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct GameEventBatchT : public ::flatbuffers::NativeTable {
-  typedef GameEventBatch TableType;
-  uint32_t frame = 0;
-  std::vector<std::unique_ptr<SpringWeb::GameEventT>> events{};
-  std::vector<std::unique_ptr<SpringWeb::CombatEventT>> combat_events{};
-  GameEventBatchT() = default;
-  GameEventBatchT(const GameEventBatchT &o);
-  GameEventBatchT(GameEventBatchT&&) FLATBUFFERS_NOEXCEPT = default;
-  GameEventBatchT &operator=(GameEventBatchT o) FLATBUFFERS_NOEXCEPT;
-};
-
 struct GameEventBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef GameEventBatchT NativeTableType;
   typedef GameEventBatchBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_FRAME = 4,
@@ -4801,9 +3527,6 @@ struct GameEventBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVectorOfTables(combat_events()) &&
            verifier.EndTable();
   }
-  GameEventBatchT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(GameEventBatchT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<GameEventBatch> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameEventBatchT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct GameEventBatchBuilder {
@@ -4856,21 +3579,7 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatchDirect(
       combat_events__);
 }
 
-::flatbuffers::Offset<GameEventBatch> CreateGameEventBatch(::flatbuffers::FlatBufferBuilder &_fbb, const GameEventBatchT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct ResourceUpdateT : public ::flatbuffers::NativeTable {
-  typedef ResourceUpdate TableType;
-  uint8_t team = 0;
-  float metal = 0.0f;
-  float max_metal = 0.0f;
-  float energy = 0.0f;
-  float max_energy = 0.0f;
-  float metal_income = 0.0f;
-  float energy_income = 0.0f;
-};
-
 struct ResourceUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef ResourceUpdateT NativeTableType;
   typedef ResourceUpdateBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_TEAM = 4,
@@ -4913,9 +3622,6 @@ struct ResourceUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<float>(verifier, VT_ENERGY_INCOME, 4) &&
            verifier.EndTable();
   }
-  ResourceUpdateT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(ResourceUpdateT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<ResourceUpdate> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ResourceUpdateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct ResourceUpdateBuilder {
@@ -4974,16 +3680,7 @@ inline ::flatbuffers::Offset<ResourceUpdate> CreateResourceUpdate(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<ResourceUpdate> CreateResourceUpdate(::flatbuffers::FlatBufferBuilder &_fbb, const ResourceUpdateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct PongT : public ::flatbuffers::NativeTable {
-  typedef Pong TableType;
-  uint64_t client_time = 0;
-  uint64_t server_time = 0;
-};
-
 struct Pong FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef PongT NativeTableType;
   typedef PongBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_CLIENT_TIME = 4,
@@ -5001,9 +3698,6 @@ struct Pong FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint64_t>(verifier, VT_SERVER_TIME, 8) &&
            verifier.EndTable();
   }
-  PongT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(PongT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<Pong> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const PongT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct PongBuilder {
@@ -5037,18 +3731,7 @@ inline ::flatbuffers::Offset<Pong> CreatePong(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<Pong> CreatePong(::flatbuffers::FlatBufferBuilder &_fbb, const PongT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct ChatReceiveT : public ::flatbuffers::NativeTable {
-  typedef ChatReceive TableType;
-  uint32_t sender_id = 0;
-  std::string sender_name{};
-  std::string text{};
-  uint8_t destination = 0;
-};
-
 struct ChatReceive FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef ChatReceiveT NativeTableType;
   typedef ChatReceiveBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_SENDER_ID = 4,
@@ -5078,9 +3761,6 @@ struct ChatReceive FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint8_t>(verifier, VT_DESTINATION, 1) &&
            verifier.EndTable();
   }
-  ChatReceiveT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(ChatReceiveT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<ChatReceive> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ChatReceiveT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct ChatReceiveBuilder {
@@ -5140,23 +3820,11 @@ inline ::flatbuffers::Offset<ChatReceive> CreateChatReceiveDirect(
       destination);
 }
 
-::flatbuffers::Offset<ChatReceive> CreateChatReceive(::flatbuffers::FlatBufferBuilder &_fbb, const ChatReceiveT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct GameInfoT : public ::flatbuffers::NativeTable {
-  typedef GameInfo TableType;
-  std::string map_name{};
-  std::string game_name{};
-  float game_speed = 0.0f;
-  uint32_t frame = 0;
-  bool paused = false;
-};
-
 struct GameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef GameInfoT NativeTableType;
   typedef GameInfoBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_MAP_NAME = 4,
-    VT_GAME_NAME = 6,
+    VT_GAME_ID = 6,
     VT_GAME_SPEED = 8,
     VT_FRAME = 10,
     VT_PAUSED = 12
@@ -5164,8 +3832,8 @@ struct GameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::String *map_name() const {
     return GetPointer<const ::flatbuffers::String *>(VT_MAP_NAME);
   }
-  const ::flatbuffers::String *game_name() const {
-    return GetPointer<const ::flatbuffers::String *>(VT_GAME_NAME);
+  const ::flatbuffers::String *game_id() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_GAME_ID);
   }
   float game_speed() const {
     return GetField<float>(VT_GAME_SPEED, 0.0f);
@@ -5180,16 +3848,13 @@ struct GameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_MAP_NAME) &&
            verifier.VerifyString(map_name()) &&
-           VerifyOffset(verifier, VT_GAME_NAME) &&
-           verifier.VerifyString(game_name()) &&
+           VerifyOffset(verifier, VT_GAME_ID) &&
+           verifier.VerifyString(game_id()) &&
            VerifyField<float>(verifier, VT_GAME_SPEED, 4) &&
            VerifyField<uint32_t>(verifier, VT_FRAME, 4) &&
            VerifyField<uint8_t>(verifier, VT_PAUSED, 1) &&
            verifier.EndTable();
   }
-  GameInfoT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(GameInfoT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<GameInfo> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct GameInfoBuilder {
@@ -5199,8 +3864,8 @@ struct GameInfoBuilder {
   void add_map_name(::flatbuffers::Offset<::flatbuffers::String> map_name) {
     fbb_.AddOffset(GameInfo::VT_MAP_NAME, map_name);
   }
-  void add_game_name(::flatbuffers::Offset<::flatbuffers::String> game_name) {
-    fbb_.AddOffset(GameInfo::VT_GAME_NAME, game_name);
+  void add_game_id(::flatbuffers::Offset<::flatbuffers::String> game_id) {
+    fbb_.AddOffset(GameInfo::VT_GAME_ID, game_id);
   }
   void add_game_speed(float game_speed) {
     fbb_.AddElement<float>(GameInfo::VT_GAME_SPEED, game_speed, 0.0f);
@@ -5225,14 +3890,14 @@ struct GameInfoBuilder {
 inline ::flatbuffers::Offset<GameInfo> CreateGameInfo(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     ::flatbuffers::Offset<::flatbuffers::String> map_name = 0,
-    ::flatbuffers::Offset<::flatbuffers::String> game_name = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> game_id = 0,
     float game_speed = 0.0f,
     uint32_t frame = 0,
     bool paused = false) {
   GameInfoBuilder builder_(_fbb);
   builder_.add_frame(frame);
   builder_.add_game_speed(game_speed);
-  builder_.add_game_name(game_name);
+  builder_.add_game_id(game_id);
   builder_.add_map_name(map_name);
   builder_.add_paused(paused);
   return builder_.Finish();
@@ -5241,30 +3906,22 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfo(
 inline ::flatbuffers::Offset<GameInfo> CreateGameInfoDirect(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     const char *map_name = nullptr,
-    const char *game_name = nullptr,
+    const char *game_id = nullptr,
     float game_speed = 0.0f,
     uint32_t frame = 0,
     bool paused = false) {
   auto map_name__ = map_name ? _fbb.CreateString(map_name) : 0;
-  auto game_name__ = game_name ? _fbb.CreateString(game_name) : 0;
+  auto game_id__ = game_id ? _fbb.CreateString(game_id) : 0;
   return SpringWeb::CreateGameInfo(
       _fbb,
       map_name__,
-      game_name__,
+      game_id__,
       game_speed,
       frame,
       paused);
 }
 
-::flatbuffers::Offset<GameInfo> CreateGameInfo(::flatbuffers::FlatBufferBuilder &_fbb, const GameInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct ReconnectResponseT : public ::flatbuffers::NativeTable {
-  typedef ReconnectResponse TableType;
-  uint8_t status = 0;
-};
-
 struct ReconnectResponse FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef ReconnectResponseT NativeTableType;
   typedef ReconnectResponseBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_STATUS = 4
@@ -5277,9 +3934,6 @@ struct ReconnectResponse FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table 
            VerifyField<uint8_t>(verifier, VT_STATUS, 1) &&
            verifier.EndTable();
   }
-  ReconnectResponseT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(ReconnectResponseT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<ReconnectResponse> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ReconnectResponseT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct ReconnectResponseBuilder {
@@ -5308,16 +3962,7 @@ inline ::flatbuffers::Offset<ReconnectResponse> CreateReconnectResponse(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<ReconnectResponse> CreateReconnectResponse(::flatbuffers::FlatBufferBuilder &_fbb, const ReconnectResponseT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct ServerErrorT : public ::flatbuffers::NativeTable {
-  typedef ServerError TableType;
-  uint16_t code = 0;
-  std::string message{};
-};
-
 struct ServerError FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef ServerErrorT NativeTableType;
   typedef ServerErrorBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_CODE = 4,
@@ -5336,9 +3981,6 @@ struct ServerError FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(message()) &&
            verifier.EndTable();
   }
-  ServerErrorT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(ServerErrorT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<ServerError> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ServerErrorT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct ServerErrorBuilder {
@@ -5383,22 +4025,11 @@ inline ::flatbuffers::Offset<ServerError> CreateServerErrorDirect(
       message__);
 }
 
-::flatbuffers::Offset<ServerError> CreateServerError(::flatbuffers::FlatBufferBuilder &_fbb, const ServerErrorT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct PlayerLeftT : public ::flatbuffers::NativeTable {
-  typedef PlayerLeft TableType;
-  uint32_t player_id = 0;
-  std::string username{};
-  int8_t team = 0;
-  uint8_t reason = 0;
-};
-
 /// Broadcast to remaining clients when a player disconnects from
 /// the game server. The game's Lua scripts decide what happens next
 /// (kill units, pause, hand to AI, etc.) — this message is purely
 /// informational so clients can update their UI.
 struct PlayerLeft FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef PlayerLeftT NativeTableType;
   typedef PlayerLeftBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_PLAYER_ID = 4,
@@ -5428,9 +4059,6 @@ struct PlayerLeft FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint8_t>(verifier, VT_REASON, 1) &&
            verifier.EndTable();
   }
-  PlayerLeftT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(PlayerLeftT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<PlayerLeft> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerLeftT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct PlayerLeftBuilder {
@@ -5489,21 +4117,7 @@ inline ::flatbuffers::Offset<PlayerLeft> CreatePlayerLeftDirect(
       reason);
 }
 
-::flatbuffers::Offset<PlayerLeft> CreatePlayerLeft(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerLeftT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct RoomPlayerInfoT : public ::flatbuffers::NativeTable {
-  typedef RoomPlayerInfo TableType;
-  uint32_t player_id = 0;
-  std::string username{};
-  uint8_t team = 0;
-  bool ready = false;
-  bool is_spectator = false;
-  bool is_host = false;
-  int8_t start_pos = -1;
-};
-
 struct RoomPlayerInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef RoomPlayerInfoT NativeTableType;
   typedef RoomPlayerInfoBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_PLAYER_ID = 4,
@@ -5552,9 +4166,6 @@ struct RoomPlayerInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<int8_t>(verifier, VT_START_POS, 1) &&
            verifier.EndTable();
   }
-  RoomPlayerInfoT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(RoomPlayerInfoT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<RoomPlayerInfo> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomPlayerInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct RoomPlayerInfoBuilder {
@@ -5634,22 +4245,11 @@ inline ::flatbuffers::Offset<RoomPlayerInfo> CreateRoomPlayerInfoDirect(
       start_pos);
 }
 
-::flatbuffers::Offset<RoomPlayerInfo> CreateRoomPlayerInfo(::flatbuffers::FlatBufferBuilder &_fbb, const RoomPlayerInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct RoomAISlotT : public ::flatbuffers::NativeTable {
-  typedef RoomAISlot TableType;
-  std::string ai_id{};
-  std::string display_name{};
-  uint8_t team = 0;
-  int8_t start_pos = -1;
-};
-
 /// An AI player occupying a slot in a room's roster. Unlike human
 /// players, AI slots have no playerId / clientId — they only exist
 /// on the lobby server until the game starts, at which point the
 /// game server spawns an AIRuntimePool entry for each slot.
 struct RoomAISlot FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef RoomAISlotT NativeTableType;
   typedef RoomAISlotBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_AI_ID = 4,
@@ -5681,9 +4281,6 @@ struct RoomAISlot FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<int8_t>(verifier, VT_START_POS, 1) &&
            verifier.EndTable();
   }
-  RoomAISlotT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(RoomAISlotT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<RoomAISlot> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomAISlotT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct RoomAISlotBuilder {
@@ -5743,21 +4340,10 @@ inline ::flatbuffers::Offset<RoomAISlot> CreateRoomAISlotDirect(
       start_pos);
 }
 
-::flatbuffers::Offset<RoomAISlot> CreateRoomAISlot(::flatbuffers::FlatBufferBuilder &_fbb, const RoomAISlotT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct RoomAIInfoT : public ::flatbuffers::NativeTable {
-  typedef RoomAIInfo TableType;
-  std::string ai_id{};
-  std::string display_name{};
-  std::string description{};
-  bool is_engine_provided = false;
-};
-
 /// One available AI plugin, enumerated from content/engine/ai + the
-/// current game's content/games/<game>/ai directory. Sent as part
+/// current game's data/games/<game>/ai directory. Sent as part
 /// of AIListUpdate when a client subscribes to a room's AI list.
 struct RoomAIInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef RoomAIInfoT NativeTableType;
   typedef RoomAIInfoBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_AI_ID = 4,
@@ -5788,9 +4374,6 @@ struct RoomAIInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint8_t>(verifier, VT_IS_ENGINE_PROVIDED, 1) &&
            verifier.EndTable();
   }
-  RoomAIInfoT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(RoomAIInfoT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<RoomAIInfo> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomAIInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct RoomAIInfoBuilder {
@@ -5851,29 +4434,13 @@ inline ::flatbuffers::Offset<RoomAIInfo> CreateRoomAIInfoDirect(
       is_engine_provided);
 }
 
-::flatbuffers::Offset<RoomAIInfo> CreateRoomAIInfo(::flatbuffers::FlatBufferBuilder &_fbb, const RoomAIInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct RoomListEntryT : public ::flatbuffers::NativeTable {
-  typedef RoomListEntry TableType;
-  uint32_t room_id = 0;
-  std::string name{};
-  std::string map_name{};
-  std::string game_name{};
-  SpringWeb::RoomState state = SpringWeb::RoomState_Configuring;
-  uint8_t player_count = 0;
-  uint8_t max_players = 0;
-  bool has_password = false;
-  std::string host_name{};
-};
-
 struct RoomListEntry FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef RoomListEntryT NativeTableType;
   typedef RoomListEntryBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_ROOM_ID = 4,
     VT_NAME = 6,
     VT_MAP_NAME = 8,
-    VT_GAME_NAME = 10,
+    VT_GAME_ID = 10,
     VT_STATE = 12,
     VT_PLAYER_COUNT = 14,
     VT_MAX_PLAYERS = 16,
@@ -5889,8 +4456,8 @@ struct RoomListEntry FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::String *map_name() const {
     return GetPointer<const ::flatbuffers::String *>(VT_MAP_NAME);
   }
-  const ::flatbuffers::String *game_name() const {
-    return GetPointer<const ::flatbuffers::String *>(VT_GAME_NAME);
+  const ::flatbuffers::String *game_id() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_GAME_ID);
   }
   SpringWeb::RoomState state() const {
     return static_cast<SpringWeb::RoomState>(GetField<uint8_t>(VT_STATE, 0));
@@ -5914,8 +4481,8 @@ struct RoomListEntry FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(name()) &&
            VerifyOffset(verifier, VT_MAP_NAME) &&
            verifier.VerifyString(map_name()) &&
-           VerifyOffset(verifier, VT_GAME_NAME) &&
-           verifier.VerifyString(game_name()) &&
+           VerifyOffset(verifier, VT_GAME_ID) &&
+           verifier.VerifyString(game_id()) &&
            VerifyField<uint8_t>(verifier, VT_STATE, 1) &&
            VerifyField<uint8_t>(verifier, VT_PLAYER_COUNT, 1) &&
            VerifyField<uint8_t>(verifier, VT_MAX_PLAYERS, 1) &&
@@ -5924,9 +4491,6 @@ struct RoomListEntry FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(host_name()) &&
            verifier.EndTable();
   }
-  RoomListEntryT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(RoomListEntryT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<RoomListEntry> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomListEntryT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct RoomListEntryBuilder {
@@ -5942,8 +4506,8 @@ struct RoomListEntryBuilder {
   void add_map_name(::flatbuffers::Offset<::flatbuffers::String> map_name) {
     fbb_.AddOffset(RoomListEntry::VT_MAP_NAME, map_name);
   }
-  void add_game_name(::flatbuffers::Offset<::flatbuffers::String> game_name) {
-    fbb_.AddOffset(RoomListEntry::VT_GAME_NAME, game_name);
+  void add_game_id(::flatbuffers::Offset<::flatbuffers::String> game_id) {
+    fbb_.AddOffset(RoomListEntry::VT_GAME_ID, game_id);
   }
   void add_state(SpringWeb::RoomState state) {
     fbb_.AddElement<uint8_t>(RoomListEntry::VT_STATE, static_cast<uint8_t>(state), 0);
@@ -5976,7 +4540,7 @@ inline ::flatbuffers::Offset<RoomListEntry> CreateRoomListEntry(
     uint32_t room_id = 0,
     ::flatbuffers::Offset<::flatbuffers::String> name = 0,
     ::flatbuffers::Offset<::flatbuffers::String> map_name = 0,
-    ::flatbuffers::Offset<::flatbuffers::String> game_name = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> game_id = 0,
     SpringWeb::RoomState state = SpringWeb::RoomState_Configuring,
     uint8_t player_count = 0,
     uint8_t max_players = 0,
@@ -5984,7 +4548,7 @@ inline ::flatbuffers::Offset<RoomListEntry> CreateRoomListEntry(
     ::flatbuffers::Offset<::flatbuffers::String> host_name = 0) {
   RoomListEntryBuilder builder_(_fbb);
   builder_.add_host_name(host_name);
-  builder_.add_game_name(game_name);
+  builder_.add_game_id(game_id);
   builder_.add_map_name(map_name);
   builder_.add_name(name);
   builder_.add_room_id(room_id);
@@ -6000,7 +4564,7 @@ inline ::flatbuffers::Offset<RoomListEntry> CreateRoomListEntryDirect(
     uint32_t room_id = 0,
     const char *name = nullptr,
     const char *map_name = nullptr,
-    const char *game_name = nullptr,
+    const char *game_id = nullptr,
     SpringWeb::RoomState state = SpringWeb::RoomState_Configuring,
     uint8_t player_count = 0,
     uint8_t max_players = 0,
@@ -6008,14 +4572,14 @@ inline ::flatbuffers::Offset<RoomListEntry> CreateRoomListEntryDirect(
     const char *host_name = nullptr) {
   auto name__ = name ? _fbb.CreateString(name) : 0;
   auto map_name__ = map_name ? _fbb.CreateString(map_name) : 0;
-  auto game_name__ = game_name ? _fbb.CreateString(game_name) : 0;
+  auto game_id__ = game_id ? _fbb.CreateString(game_id) : 0;
   auto host_name__ = host_name ? _fbb.CreateString(host_name) : 0;
   return SpringWeb::CreateRoomListEntry(
       _fbb,
       room_id,
       name__,
       map_name__,
-      game_name__,
+      game_id__,
       state,
       player_count,
       max_players,
@@ -6023,19 +4587,7 @@ inline ::flatbuffers::Offset<RoomListEntry> CreateRoomListEntryDirect(
       host_name__);
 }
 
-::flatbuffers::Offset<RoomListEntry> CreateRoomListEntry(::flatbuffers::FlatBufferBuilder &_fbb, const RoomListEntryT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct RoomListUpdateT : public ::flatbuffers::NativeTable {
-  typedef RoomListUpdate TableType;
-  std::vector<std::unique_ptr<SpringWeb::RoomListEntryT>> rooms{};
-  RoomListUpdateT() = default;
-  RoomListUpdateT(const RoomListUpdateT &o);
-  RoomListUpdateT(RoomListUpdateT&&) FLATBUFFERS_NOEXCEPT = default;
-  RoomListUpdateT &operator=(RoomListUpdateT o) FLATBUFFERS_NOEXCEPT;
-};
-
 struct RoomListUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef RoomListUpdateT NativeTableType;
   typedef RoomListUpdateBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_ROOMS = 4
@@ -6050,9 +4602,6 @@ struct RoomListUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVectorOfTables(rooms()) &&
            verifier.EndTable();
   }
-  RoomListUpdateT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(RoomListUpdateT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<RoomListUpdate> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomListUpdateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct RoomListUpdateBuilder {
@@ -6090,34 +4639,14 @@ inline ::flatbuffers::Offset<RoomListUpdate> CreateRoomListUpdateDirect(
       rooms__);
 }
 
-::flatbuffers::Offset<RoomListUpdate> CreateRoomListUpdate(::flatbuffers::FlatBufferBuilder &_fbb, const RoomListUpdateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct RoomStateUpdateT : public ::flatbuffers::NativeTable {
-  typedef RoomStateUpdate TableType;
-  uint32_t room_id = 0;
-  SpringWeb::RoomState state = SpringWeb::RoomState_Configuring;
-  std::string name{};
-  std::string map_name{};
-  std::string game_name{};
-  std::vector<std::unique_ptr<SpringWeb::RoomPlayerInfoT>> players{};
-  uint8_t countdown_seconds = 0;
-  uint16_t game_server_port = 0;
-  std::vector<std::unique_ptr<SpringWeb::RoomAISlotT>> ai_slots{};
-  RoomStateUpdateT() = default;
-  RoomStateUpdateT(const RoomStateUpdateT &o);
-  RoomStateUpdateT(RoomStateUpdateT&&) FLATBUFFERS_NOEXCEPT = default;
-  RoomStateUpdateT &operator=(RoomStateUpdateT o) FLATBUFFERS_NOEXCEPT;
-};
-
 struct RoomStateUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef RoomStateUpdateT NativeTableType;
   typedef RoomStateUpdateBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_ROOM_ID = 4,
     VT_STATE = 6,
     VT_NAME = 8,
     VT_MAP_NAME = 10,
-    VT_GAME_NAME = 12,
+    VT_GAME_ID = 12,
     VT_PLAYERS = 14,
     VT_COUNTDOWN_SECONDS = 16,
     VT_GAME_SERVER_PORT = 18,
@@ -6135,8 +4664,8 @@ struct RoomStateUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::String *map_name() const {
     return GetPointer<const ::flatbuffers::String *>(VT_MAP_NAME);
   }
-  const ::flatbuffers::String *game_name() const {
-    return GetPointer<const ::flatbuffers::String *>(VT_GAME_NAME);
+  const ::flatbuffers::String *game_id() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_GAME_ID);
   }
   const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::RoomPlayerInfo>> *players() const {
     return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::RoomPlayerInfo>> *>(VT_PLAYERS);
@@ -6158,8 +4687,8 @@ struct RoomStateUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(name()) &&
            VerifyOffset(verifier, VT_MAP_NAME) &&
            verifier.VerifyString(map_name()) &&
-           VerifyOffset(verifier, VT_GAME_NAME) &&
-           verifier.VerifyString(game_name()) &&
+           VerifyOffset(verifier, VT_GAME_ID) &&
+           verifier.VerifyString(game_id()) &&
            VerifyOffset(verifier, VT_PLAYERS) &&
            verifier.VerifyVector(players()) &&
            verifier.VerifyVectorOfTables(players()) &&
@@ -6170,9 +4699,6 @@ struct RoomStateUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVectorOfTables(ai_slots()) &&
            verifier.EndTable();
   }
-  RoomStateUpdateT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(RoomStateUpdateT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<RoomStateUpdate> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomStateUpdateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct RoomStateUpdateBuilder {
@@ -6191,8 +4717,8 @@ struct RoomStateUpdateBuilder {
   void add_map_name(::flatbuffers::Offset<::flatbuffers::String> map_name) {
     fbb_.AddOffset(RoomStateUpdate::VT_MAP_NAME, map_name);
   }
-  void add_game_name(::flatbuffers::Offset<::flatbuffers::String> game_name) {
-    fbb_.AddOffset(RoomStateUpdate::VT_GAME_NAME, game_name);
+  void add_game_id(::flatbuffers::Offset<::flatbuffers::String> game_id) {
+    fbb_.AddOffset(RoomStateUpdate::VT_GAME_ID, game_id);
   }
   void add_players(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::RoomPlayerInfo>>> players) {
     fbb_.AddOffset(RoomStateUpdate::VT_PLAYERS, players);
@@ -6223,7 +4749,7 @@ inline ::flatbuffers::Offset<RoomStateUpdate> CreateRoomStateUpdate(
     SpringWeb::RoomState state = SpringWeb::RoomState_Configuring,
     ::flatbuffers::Offset<::flatbuffers::String> name = 0,
     ::flatbuffers::Offset<::flatbuffers::String> map_name = 0,
-    ::flatbuffers::Offset<::flatbuffers::String> game_name = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> game_id = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::RoomPlayerInfo>>> players = 0,
     uint8_t countdown_seconds = 0,
     uint16_t game_server_port = 0,
@@ -6231,7 +4757,7 @@ inline ::flatbuffers::Offset<RoomStateUpdate> CreateRoomStateUpdate(
   RoomStateUpdateBuilder builder_(_fbb);
   builder_.add_ai_slots(ai_slots);
   builder_.add_players(players);
-  builder_.add_game_name(game_name);
+  builder_.add_game_id(game_id);
   builder_.add_map_name(map_name);
   builder_.add_name(name);
   builder_.add_room_id(room_id);
@@ -6247,14 +4773,14 @@ inline ::flatbuffers::Offset<RoomStateUpdate> CreateRoomStateUpdateDirect(
     SpringWeb::RoomState state = SpringWeb::RoomState_Configuring,
     const char *name = nullptr,
     const char *map_name = nullptr,
-    const char *game_name = nullptr,
+    const char *game_id = nullptr,
     const std::vector<::flatbuffers::Offset<SpringWeb::RoomPlayerInfo>> *players = nullptr,
     uint8_t countdown_seconds = 0,
     uint16_t game_server_port = 0,
     const std::vector<::flatbuffers::Offset<SpringWeb::RoomAISlot>> *ai_slots = nullptr) {
   auto name__ = name ? _fbb.CreateString(name) : 0;
   auto map_name__ = map_name ? _fbb.CreateString(map_name) : 0;
-  auto game_name__ = game_name ? _fbb.CreateString(game_name) : 0;
+  auto game_id__ = game_id ? _fbb.CreateString(game_id) : 0;
   auto players__ = players ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::RoomPlayerInfo>>(*players) : 0;
   auto ai_slots__ = ai_slots ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::RoomAISlot>>(*ai_slots) : 0;
   return SpringWeb::CreateRoomStateUpdate(
@@ -6263,23 +4789,12 @@ inline ::flatbuffers::Offset<RoomStateUpdate> CreateRoomStateUpdateDirect(
       state,
       name__,
       map_name__,
-      game_name__,
+      game_id__,
       players__,
       countdown_seconds,
       game_server_port,
       ai_slots__);
 }
-
-::flatbuffers::Offset<RoomStateUpdate> CreateRoomStateUpdate(::flatbuffers::FlatBufferBuilder &_fbb, const RoomStateUpdateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct AIListUpdateT : public ::flatbuffers::NativeTable {
-  typedef AIListUpdate TableType;
-  std::vector<std::unique_ptr<SpringWeb::RoomAIInfoT>> ais{};
-  AIListUpdateT() = default;
-  AIListUpdateT(const AIListUpdateT &o);
-  AIListUpdateT(AIListUpdateT&&) FLATBUFFERS_NOEXCEPT = default;
-  AIListUpdateT &operator=(AIListUpdateT o) FLATBUFFERS_NOEXCEPT;
-};
 
 /// Reply to AIListRequest. Lists every AI plugin the server
 /// discovered under the current game + engine roots. The client
@@ -6287,7 +4802,6 @@ struct AIListUpdateT : public ::flatbuffers::NativeTable {
 /// is stable for the lifetime of the lobby process; clients may
 /// cache it and skip re-requesting unless they change game.
 struct AIListUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef AIListUpdateT NativeTableType;
   typedef AIListUpdateBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_AIS = 4
@@ -6302,9 +4816,6 @@ struct AIListUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVectorOfTables(ais()) &&
            verifier.EndTable();
   }
-  AIListUpdateT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(AIListUpdateT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<AIListUpdate> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const AIListUpdateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct AIListUpdateBuilder {
@@ -6342,22 +4853,11 @@ inline ::flatbuffers::Offset<AIListUpdate> CreateAIListUpdateDirect(
       ais__);
 }
 
-::flatbuffers::Offset<AIListUpdate> CreateAIListUpdate(::flatbuffers::FlatBufferBuilder &_fbb, const AIListUpdateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct LobbyGameInfoT : public ::flatbuffers::NativeTable {
-  typedef LobbyGameInfo TableType;
-  std::string id{};
-  std::string display_name{};
-  std::string description{};
-  std::string version{};
-};
-
-/// One game plugin discovered under content/games. Shown in the
+/// One game plugin discovered under data/games. Shown in the
 /// lobby's create-room dropdown. Named `LobbyGameInfo` to avoid
 /// colliding with the existing `GameInfo` table which represents
 /// live-sim state (map/game speed/frame/paused).
 struct LobbyGameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef LobbyGameInfoT NativeTableType;
   typedef LobbyGameInfoBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_ID = 4,
@@ -6389,9 +4889,6 @@ struct LobbyGameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(version()) &&
            verifier.EndTable();
   }
-  LobbyGameInfoT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(LobbyGameInfoT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<LobbyGameInfo> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const LobbyGameInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct LobbyGameInfoBuilder {
@@ -6453,21 +4950,9 @@ inline ::flatbuffers::Offset<LobbyGameInfo> CreateLobbyGameInfoDirect(
       version__);
 }
 
-::flatbuffers::Offset<LobbyGameInfo> CreateLobbyGameInfo(::flatbuffers::FlatBufferBuilder &_fbb, const LobbyGameInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct GameListUpdateT : public ::flatbuffers::NativeTable {
-  typedef GameListUpdate TableType;
-  std::vector<std::unique_ptr<SpringWeb::LobbyGameInfoT>> games{};
-  GameListUpdateT() = default;
-  GameListUpdateT(const GameListUpdateT &o);
-  GameListUpdateT(GameListUpdateT&&) FLATBUFFERS_NOEXCEPT = default;
-  GameListUpdateT &operator=(GameListUpdateT o) FLATBUFFERS_NOEXCEPT;
-};
-
 /// Reply to GameListRequest. Lists every game the lobby
 /// discovered at startup.
 struct GameListUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef GameListUpdateT NativeTableType;
   typedef GameListUpdateBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_GAMES = 4
@@ -6482,9 +4967,6 @@ struct GameListUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVectorOfTables(games()) &&
            verifier.EndTable();
   }
-  GameListUpdateT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(GameListUpdateT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<GameListUpdate> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameListUpdateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct GameListUpdateBuilder {
@@ -6522,20 +5004,7 @@ inline ::flatbuffers::Offset<GameListUpdate> CreateGameListUpdateDirect(
       games__);
 }
 
-::flatbuffers::Offset<GameListUpdate> CreateGameListUpdate(::flatbuffers::FlatBufferBuilder &_fbb, const GameListUpdateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct RoomPlayerJoinedT : public ::flatbuffers::NativeTable {
-  typedef RoomPlayerJoined TableType;
-  uint32_t room_id = 0;
-  std::unique_ptr<SpringWeb::RoomPlayerInfoT> player{};
-  RoomPlayerJoinedT() = default;
-  RoomPlayerJoinedT(const RoomPlayerJoinedT &o);
-  RoomPlayerJoinedT(RoomPlayerJoinedT&&) FLATBUFFERS_NOEXCEPT = default;
-  RoomPlayerJoinedT &operator=(RoomPlayerJoinedT o) FLATBUFFERS_NOEXCEPT;
-};
-
 struct RoomPlayerJoined FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef RoomPlayerJoinedT NativeTableType;
   typedef RoomPlayerJoinedBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_ROOM_ID = 4,
@@ -6554,9 +5023,6 @@ struct RoomPlayerJoined FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyTable(player()) &&
            verifier.EndTable();
   }
-  RoomPlayerJoinedT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(RoomPlayerJoinedT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<RoomPlayerJoined> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomPlayerJoinedT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct RoomPlayerJoinedBuilder {
@@ -6590,17 +5056,7 @@ inline ::flatbuffers::Offset<RoomPlayerJoined> CreateRoomPlayerJoined(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<RoomPlayerJoined> CreateRoomPlayerJoined(::flatbuffers::FlatBufferBuilder &_fbb, const RoomPlayerJoinedT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct RoomPlayerLeftT : public ::flatbuffers::NativeTable {
-  typedef RoomPlayerLeft TableType;
-  uint32_t room_id = 0;
-  uint32_t player_id = 0;
-  std::string reason{};
-};
-
 struct RoomPlayerLeft FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef RoomPlayerLeftT NativeTableType;
   typedef RoomPlayerLeftBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_ROOM_ID = 4,
@@ -6624,9 +5080,6 @@ struct RoomPlayerLeft FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(reason()) &&
            verifier.EndTable();
   }
-  RoomPlayerLeftT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(RoomPlayerLeftT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<RoomPlayerLeft> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomPlayerLeftT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct RoomPlayerLeftBuilder {
@@ -6678,29 +5131,9 @@ inline ::flatbuffers::Offset<RoomPlayerLeft> CreateRoomPlayerLeftDirect(
       reason__);
 }
 
-::flatbuffers::Offset<RoomPlayerLeft> CreateRoomPlayerLeft(::flatbuffers::FlatBufferBuilder &_fbb, const RoomPlayerLeftT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct GameWeaponDefT : public ::flatbuffers::NativeTable {
-  typedef GameWeaponDef TableType;
-  uint16_t def_id = 0;
-  std::string name{};
-  SpringWeb::ProjectileVisualType visual_type = SpringWeb::ProjectileVisualType_Cannon;
-  float projectile_speed = 0.0f;
-  float range = 0.0f;
-  float aoe = 0.0f;
-  float size = 0.0f;
-  float intensity = 0.0f;
-  float color_r = 0.0f;
-  float color_g = 0.0f;
-  float color_b = 0.0f;
-  float duration = 0.0f;
-  bool high_trajectory = false;
-};
-
 /// Definition of one weapon type. Sent once at game start so the
 /// client can render projectiles with appropriate visuals.
 struct GameWeaponDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef GameWeaponDefT NativeTableType;
   typedef GameWeaponDefBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_DEF_ID = 4,
@@ -6777,9 +5210,6 @@ struct GameWeaponDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint8_t>(verifier, VT_HIGH_TRAJECTORY, 1) &&
            verifier.EndTable();
   }
-  GameWeaponDefT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(GameWeaponDefT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<GameWeaponDef> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameWeaponDefT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct GameWeaponDefBuilder {
@@ -6901,22 +5331,10 @@ inline ::flatbuffers::Offset<GameWeaponDef> CreateGameWeaponDefDirect(
       high_trajectory);
 }
 
-::flatbuffers::Offset<GameWeaponDef> CreateGameWeaponDef(::flatbuffers::FlatBufferBuilder &_fbb, const GameWeaponDefT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct GameWeaponDefsT : public ::flatbuffers::NativeTable {
-  typedef GameWeaponDefs TableType;
-  std::vector<std::unique_ptr<SpringWeb::GameWeaponDefT>> defs{};
-  GameWeaponDefsT() = default;
-  GameWeaponDefsT(const GameWeaponDefsT &o);
-  GameWeaponDefsT(GameWeaponDefsT&&) FLATBUFFERS_NOEXCEPT = default;
-  GameWeaponDefsT &operator=(GameWeaponDefsT o) FLATBUFFERS_NOEXCEPT;
-};
-
 /// Sent by the game server after successful auth, alongside
 /// GameUnitDefs. Contains every weapon type the game defines so
 /// the client can render projectiles with correct visuals.
 struct GameWeaponDefs FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef GameWeaponDefsT NativeTableType;
   typedef GameWeaponDefsBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_DEFS = 4
@@ -6931,9 +5349,6 @@ struct GameWeaponDefs FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVectorOfTables(defs()) &&
            verifier.EndTable();
   }
-  GameWeaponDefsT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(GameWeaponDefsT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<GameWeaponDefs> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameWeaponDefsT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct GameWeaponDefsBuilder {
@@ -6971,16 +5386,6 @@ inline ::flatbuffers::Offset<GameWeaponDefs> CreateGameWeaponDefsDirect(
       defs__);
 }
 
-::flatbuffers::Offset<GameWeaponDefs> CreateGameWeaponDefs(::flatbuffers::FlatBufferBuilder &_fbb, const GameWeaponDefsT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct GameUnitDefT : public ::flatbuffers::NativeTable {
-  typedef GameUnitDef TableType;
-  uint16_t def_id = 0;
-  std::string name{};
-  std::string model_url{};
-  std::string texture_url{};
-};
-
 /// Definition of one unit type. Sent once at game start so the client
 /// knows what model/texture to load for each def_id it sees in entity
 /// state snapshots. Parallel to MapFeatureDef but for dynamic entities.
@@ -6991,7 +5396,6 @@ struct GameUnitDefT : public ::flatbuffers::NativeTable {
 /// has no model or preprocessing failed — the client falls back to a
 /// coloured procedural shape.
 struct GameUnitDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef GameUnitDefT NativeTableType;
   typedef GameUnitDefBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_DEF_ID = 4,
@@ -7022,9 +5426,6 @@ struct GameUnitDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(texture_url()) &&
            verifier.EndTable();
   }
-  GameUnitDefT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(GameUnitDefT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<GameUnitDef> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameUnitDefT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct GameUnitDefBuilder {
@@ -7085,23 +5486,10 @@ inline ::flatbuffers::Offset<GameUnitDef> CreateGameUnitDefDirect(
       texture_url__);
 }
 
-::flatbuffers::Offset<GameUnitDef> CreateGameUnitDef(::flatbuffers::FlatBufferBuilder &_fbb, const GameUnitDefT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct GameUnitDefsT : public ::flatbuffers::NativeTable {
-  typedef GameUnitDefs TableType;
-  std::vector<std::unique_ptr<SpringWeb::GameUnitDefT>> defs{};
-  std::string base_url{};
-  GameUnitDefsT() = default;
-  GameUnitDefsT(const GameUnitDefsT &o);
-  GameUnitDefsT(GameUnitDefsT&&) FLATBUFFERS_NOEXCEPT = default;
-  GameUnitDefsT &operator=(GameUnitDefsT o) FLATBUFFERS_NOEXCEPT;
-};
-
 /// Sent by the game server after successful auth, before entity state
 /// streaming begins. Contains every unit type the game defines so the
 /// client can preload models.
 struct GameUnitDefs FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef GameUnitDefsT NativeTableType;
   typedef GameUnitDefsBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_DEFS = 4,
@@ -7124,9 +5512,6 @@ struct GameUnitDefs FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(base_url()) &&
            verifier.EndTable();
   }
-  GameUnitDefsT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(GameUnitDefsT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<GameUnitDefs> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameUnitDefsT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct GameUnitDefsBuilder {
@@ -7172,35 +5557,8 @@ inline ::flatbuffers::Offset<GameUnitDefs> CreateGameUnitDefsDirect(
       base_url__);
 }
 
-::flatbuffers::Offset<GameUnitDefs> CreateGameUnitDefs(::flatbuffers::FlatBufferBuilder &_fbb, const GameUnitDefsT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct MapInfoT : public ::flatbuffers::NativeTable {
-  typedef MapInfo TableType;
-  std::string id{};
-  std::string name{};
-  std::string short_name{};
-  std::string description{};
-  std::string author{};
-  std::string version{};
-  uint16_t mapx = 0;
-  uint16_t mapy = 0;
-  uint32_t width_elmos = 0;
-  uint32_t height_elmos = 0;
-  float min_height = 0.0f;
-  float max_height = 0.0f;
-  uint8_t max_players = 0;
-  std::vector<SpringWeb::MapStartPos> start_positions{};
-  float gravity = 0.0f;
-  float tidal_strength = 0.0f;
-  float max_metal = 0.0f;
-  float extractor_radius = 0.0f;
-  std::string minimap_url{};
-  bool has_lua_gaia = false;
-};
-
 /// Sent by the lobby for map selection UI.
 struct MapInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef MapInfoT NativeTableType;
   typedef MapInfoBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_ID = 4,
@@ -7316,9 +5674,6 @@ struct MapInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint8_t>(verifier, VT_HAS_LUA_GAIA, 1) &&
            verifier.EndTable();
   }
-  MapInfoT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(MapInfoT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<MapInfo> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const MapInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct MapInfoBuilder {
@@ -7496,20 +5851,8 @@ inline ::flatbuffers::Offset<MapInfo> CreateMapInfoDirect(
       has_lua_gaia);
 }
 
-::flatbuffers::Offset<MapInfo> CreateMapInfo(::flatbuffers::FlatBufferBuilder &_fbb, const MapInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct MapListUpdateT : public ::flatbuffers::NativeTable {
-  typedef MapListUpdate TableType;
-  std::vector<std::unique_ptr<SpringWeb::MapInfoT>> maps{};
-  MapListUpdateT() = default;
-  MapListUpdateT(const MapListUpdateT &o);
-  MapListUpdateT(MapListUpdateT&&) FLATBUFFERS_NOEXCEPT = default;
-  MapListUpdateT &operator=(MapListUpdateT o) FLATBUFFERS_NOEXCEPT;
-};
-
 /// List of maps for the lobby browser.
 struct MapListUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef MapListUpdateT NativeTableType;
   typedef MapListUpdateBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_MAPS = 4
@@ -7524,9 +5867,6 @@ struct MapListUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVectorOfTables(maps()) &&
            verifier.EndTable();
   }
-  MapListUpdateT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(MapListUpdateT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<MapListUpdate> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const MapListUpdateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct MapListUpdateBuilder {
@@ -7564,21 +5904,8 @@ inline ::flatbuffers::Offset<MapListUpdate> CreateMapListUpdateDirect(
       maps__);
 }
 
-::flatbuffers::Offset<MapListUpdate> CreateMapListUpdate(::flatbuffers::FlatBufferBuilder &_fbb, const MapListUpdateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct MapFeatureT : public ::flatbuffers::NativeTable {
-  typedef MapFeature TableType;
-  uint16_t type_index = 0;
-  float x = 0.0f;
-  float y = 0.0f;
-  float z = 0.0f;
-  float rotation = 0.0f;
-  float relative_size = 0.0f;
-};
-
 /// Map feature placed on the terrain.
 struct MapFeature FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef MapFeatureT NativeTableType;
   typedef MapFeatureBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_TYPE_INDEX = 4,
@@ -7616,9 +5943,6 @@ struct MapFeature FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<float>(verifier, VT_RELATIVE_SIZE, 4) &&
            verifier.EndTable();
   }
-  MapFeatureT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(MapFeatureT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<MapFeature> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const MapFeatureT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct MapFeatureBuilder {
@@ -7672,24 +5996,6 @@ inline ::flatbuffers::Offset<MapFeature> CreateMapFeature(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<MapFeature> CreateMapFeature(::flatbuffers::FlatBufferBuilder &_fbb, const MapFeatureT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct MapFeatureDefT : public ::flatbuffers::NativeTable {
-  typedef MapFeatureDef TableType;
-  std::string name{};
-  std::string model_url{};
-  std::string texture_url{};
-  uint16_t footprint_x = 0;
-  uint16_t footprint_z = 0;
-  float height = 0.0f;
-  float radius = 0.0f;
-  bool blocking = false;
-  bool reclaimable = false;
-  int32_t metal = 0;
-  int32_t energy = 0;
-  int32_t damage = 0;
-};
-
 /// Definition of a feature type — corresponds 1:1 with an entry in
 /// `MapData.feature_types` (same indices). Tells the client how to render
 /// and interact with feature instances of this type. Parsed by the server
@@ -7704,7 +6010,6 @@ struct MapFeatureDefT : public ::flatbuffers::NativeTable {
 /// invisible decal feature) or its assets failed to convert; in that
 /// case the client falls back to a placeholder.
 struct MapFeatureDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef MapFeatureDefT NativeTableType;
   typedef MapFeatureDefBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_NAME = 4,
@@ -7775,9 +6080,6 @@ struct MapFeatureDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<int32_t>(verifier, VT_DAMAGE, 4) &&
            verifier.EndTable();
   }
-  MapFeatureDefT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(MapFeatureDefT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<MapFeatureDef> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const MapFeatureDefT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct MapFeatureDefBuilder {
@@ -7894,23 +6196,10 @@ inline ::flatbuffers::Offset<MapFeatureDef> CreateMapFeatureDefDirect(
       damage);
 }
 
-::flatbuffers::Offset<MapFeatureDef> CreateMapFeatureDef(::flatbuffers::FlatBufferBuilder &_fbb, const MapFeatureDefT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct MapWaterT : public ::flatbuffers::NativeTable {
-  typedef MapWater TableType;
-  std::vector<float> base_color{};
-  std::vector<float> surface_color{};
-  std::vector<float> min_color{};
-  float surface_alpha = 0.0f;
-  float damage = 0.0f;
-  bool void_water = false;
-};
-
 /// Water rendering properties. Spring's water system is also used for
 /// lava/acid/void-fill — the colour and damage distinguish them.
 /// Water plane is at world Y = 0; terrain below that is flooded.
 struct MapWater FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef MapWaterT NativeTableType;
   typedef MapWaterBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_BASE_COLOR = 4,
@@ -7951,9 +6240,6 @@ struct MapWater FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint8_t>(verifier, VT_VOID_WATER, 1) &&
            verifier.EndTable();
   }
-  MapWaterT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(MapWaterT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<MapWater> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const MapWaterT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct MapWaterBuilder {
@@ -8028,28 +6314,10 @@ inline ::flatbuffers::Offset<MapWater> CreateMapWaterDirect(
       void_water);
 }
 
-::flatbuffers::Offset<MapWater> CreateMapWater(::flatbuffers::FlatBufferBuilder &_fbb, const MapWaterT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct MapDecalsT : public ::flatbuffers::NativeTable {
-  typedef MapDecals TableType;
-  std::string detail_tex{};
-  std::string specular_tex{};
-  std::string splat_detail_tex{};
-  std::string splat_distr_tex{};
-  std::string splat_normal_0{};
-  std::string splat_normal_1{};
-  std::string splat_normal_2{};
-  std::string splat_normal_3{};
-  std::string detail_normal_tex{};
-  std::vector<float> splat_scales{};
-  std::vector<float> splat_mults{};
-};
-
 /// Splat/decal texture set — Spring's terrain detail texturing system.
 /// All URLs are HTTP paths to PNG files (relative to the lobby HTTP root).
 /// Empty string means the texture is not defined by the map.
 struct MapDecals FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef MapDecalsT NativeTableType;
   typedef MapDecalsBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_DETAIL_TEX = 4,
@@ -8123,9 +6391,6 @@ struct MapDecals FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVector(splat_mults()) &&
            verifier.EndTable();
   }
-  MapDecalsT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(MapDecalsT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<MapDecals> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const MapDecalsT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct MapDecalsBuilder {
@@ -8243,46 +6508,10 @@ inline ::flatbuffers::Offset<MapDecals> CreateMapDecalsDirect(
       splat_mults__);
 }
 
-::flatbuffers::Offset<MapDecals> CreateMapDecals(::flatbuffers::FlatBufferBuilder &_fbb, const MapDecalsT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct MapDataT : public ::flatbuffers::NativeTable {
-  typedef MapData TableType;
-  uint16_t mapx = 0;
-  uint16_t mapy = 0;
-  uint8_t square_size = 0;
-  float min_height = 0.0f;
-  float max_height = 0.0f;
-  uint16_t tiles_x = 0;
-  uint16_t tiles_z = 0;
-  uint32_t num_tiles = 0;
-  uint8_t tile_size = 0;
-  std::vector<SpringWeb::MapStartPos> start_positions{};
-  std::vector<std::string> feature_types{};
-  std::vector<std::unique_ptr<SpringWeb::MapFeatureT>> features{};
-  std::vector<std::unique_ptr<SpringWeb::MapFeatureDefT>> feature_defs{};
-  std::vector<uint16_t> heightmap{};
-  std::vector<int32_t> tileindex{};
-  std::vector<uint8_t> typemap{};
-  std::vector<uint8_t> metalmap{};
-  std::string minimap_url{};
-  std::string tiles_url{};
-  std::string map_data_url{};
-  std::string map_source_url{};
-  std::unique_ptr<SpringWeb::MapDecalsT> decals{};
-  std::unique_ptr<SpringWeb::MapWaterT> water{};
-  bool has_lua_gaia = false;
-  std::vector<std::string> widgets{};
-  MapDataT() = default;
-  MapDataT(const MapDataT &o);
-  MapDataT(MapDataT&&) FLATBUFFERS_NOEXCEPT = default;
-  MapDataT &operator=(MapDataT o) FLATBUFFERS_NOEXCEPT;
-};
-
 /// Full map data sent by the game server on connect.
 /// Binary data (heightmap, tileindex, typemap, metalmap) embedded directly.
 /// Tile texture data and splat textures served via HTTP separately.
 struct MapData FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef MapDataT NativeTableType;
   typedef MapDataBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_MAPX = 4,
@@ -8439,9 +6668,6 @@ struct MapData FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVectorOfStrings(widgets()) &&
            verifier.EndTable();
   }
-  MapDataT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(MapDataT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<MapData> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const MapDataT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 struct MapDataBuilder {
@@ -8659,15 +6885,7 @@ inline ::flatbuffers::Offset<MapData> CreateMapDataDirect(
       widgets__);
 }
 
-::flatbuffers::Offset<MapData> CreateMapData(::flatbuffers::FlatBufferBuilder &_fbb, const MapDataT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-struct ServerMessageT : public ::flatbuffers::NativeTable {
-  typedef ServerMessage TableType;
-  SpringWeb::ServerPayloadUnion payload{};
-};
-
 struct ServerMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef ServerMessageT NativeTableType;
   typedef ServerMessageBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_PAYLOAD_TYPE = 4,
@@ -8762,9 +6980,6 @@ struct ServerMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyServerPayload(verifier, payload(), payload_type()) &&
            verifier.EndTable();
   }
-  ServerMessageT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(ServerMessageT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<ServerMessage> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ServerMessageT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
 template<> inline const SpringWeb::AuthResponse *ServerMessage::payload_as<SpringWeb::AuthResponse>() const {
@@ -8898,2671 +7113,6 @@ inline ::flatbuffers::Offset<ServerMessage> CreateServerMessage(
   return builder_.Finish();
 }
 
-::flatbuffers::Offset<ServerMessage> CreateServerMessage(::flatbuffers::FlatBufferBuilder &_fbb, const ServerMessageT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
-
-inline HandshakeT *Handshake::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<HandshakeT>(new HandshakeT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void Handshake::UnPackTo(HandshakeT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = protocol_version(); _o->protocol_version = _e; }
-  { auto _e = client_version(); if (_e) _o->client_version = _e->str(); }
-}
-
-inline ::flatbuffers::Offset<Handshake> Handshake::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const HandshakeT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateHandshake(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<Handshake> CreateHandshake(::flatbuffers::FlatBufferBuilder &_fbb, const HandshakeT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const HandshakeT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _protocol_version = _o->protocol_version;
-  auto _client_version = _o->client_version.empty() ? 0 : _fbb.CreateString(_o->client_version);
-  return SpringWeb::CreateHandshake(
-      _fbb,
-      _protocol_version,
-      _client_version);
-}
-
-inline AuthRequestT *AuthRequest::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<AuthRequestT>(new AuthRequestT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void AuthRequest::UnPackTo(AuthRequestT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = username(); if (_e) _o->username = _e->str(); }
-  { auto _e = password_hash(); if (_e) _o->password_hash = _e->str(); }
-  { auto _e = token(); if (_e) _o->token = _e->str(); }
-}
-
-inline ::flatbuffers::Offset<AuthRequest> AuthRequest::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const AuthRequestT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateAuthRequest(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<AuthRequest> CreateAuthRequest(::flatbuffers::FlatBufferBuilder &_fbb, const AuthRequestT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const AuthRequestT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _username = _o->username.empty() ? 0 : _fbb.CreateString(_o->username);
-  auto _password_hash = _o->password_hash.empty() ? 0 : _fbb.CreateString(_o->password_hash);
-  auto _token = _o->token.empty() ? 0 : _fbb.CreateString(_o->token);
-  return SpringWeb::CreateAuthRequest(
-      _fbb,
-      _username,
-      _password_hash,
-      _token);
-}
-
-inline PlayerCommandT *PlayerCommand::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<PlayerCommandT>(new PlayerCommandT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void PlayerCommand::UnPackTo(PlayerCommandT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = sequence(); _o->sequence = _e; }
-  { auto _e = command_id(); _o->command_id = _e; }
-  { auto _e = squad_ids(); if (_e) { _o->squad_ids.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->squad_ids[_i] = _e->Get(_i); } } else { _o->squad_ids.resize(0); } }
-  { auto _e = params(); if (_e) { _o->params.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->params[_i] = _e->Get(_i); } } else { _o->params.resize(0); } }
-  { auto _e = options(); _o->options = _e; }
-  { auto _e = timeout_frames(); _o->timeout_frames = _e; }
-}
-
-inline ::flatbuffers::Offset<PlayerCommand> PlayerCommand::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerCommandT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreatePlayerCommand(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<PlayerCommand> CreatePlayerCommand(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerCommandT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const PlayerCommandT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _sequence = _o->sequence;
-  auto _command_id = _o->command_id;
-  auto _squad_ids = _o->squad_ids.size() ? _fbb.CreateVector(_o->squad_ids) : 0;
-  auto _params = _o->params.size() ? _fbb.CreateVector(_o->params) : 0;
-  auto _options = _o->options;
-  auto _timeout_frames = _o->timeout_frames;
-  return SpringWeb::CreatePlayerCommand(
-      _fbb,
-      _sequence,
-      _command_id,
-      _squad_ids,
-      _params,
-      _options,
-      _timeout_frames);
-}
-
-inline ViewportUpdateT *ViewportUpdate::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<ViewportUpdateT>(new ViewportUpdateT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void ViewportUpdate::UnPackTo(ViewportUpdateT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = viewport_id(); _o->viewport_id = _e; }
-  { auto _e = center_x(); _o->center_x = _e; }
-  { auto _e = center_z(); _o->center_z = _e; }
-  { auto _e = width(); _o->width = _e; }
-  { auto _e = height(); _o->height = _e; }
-  { auto _e = rotation(); _o->rotation = _e; }
-  { auto _e = zoom_level(); _o->zoom_level = _e; }
-}
-
-inline ::flatbuffers::Offset<ViewportUpdate> ViewportUpdate::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ViewportUpdateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateViewportUpdate(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<ViewportUpdate> CreateViewportUpdate(::flatbuffers::FlatBufferBuilder &_fbb, const ViewportUpdateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const ViewportUpdateT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _viewport_id = _o->viewport_id;
-  auto _center_x = _o->center_x;
-  auto _center_z = _o->center_z;
-  auto _width = _o->width;
-  auto _height = _o->height;
-  auto _rotation = _o->rotation;
-  auto _zoom_level = _o->zoom_level;
-  return SpringWeb::CreateViewportUpdate(
-      _fbb,
-      _viewport_id,
-      _center_x,
-      _center_z,
-      _width,
-      _height,
-      _rotation,
-      _zoom_level);
-}
-
-inline PingT *Ping::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<PingT>(new PingT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void Ping::UnPackTo(PingT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = client_time(); _o->client_time = _e; }
-}
-
-inline ::flatbuffers::Offset<Ping> Ping::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const PingT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreatePing(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<Ping> CreatePing(::flatbuffers::FlatBufferBuilder &_fbb, const PingT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const PingT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _client_time = _o->client_time;
-  return SpringWeb::CreatePing(
-      _fbb,
-      _client_time);
-}
-
-inline ChatSendT *ChatSend::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<ChatSendT>(new ChatSendT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void ChatSend::UnPackTo(ChatSendT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = text(); if (_e) _o->text = _e->str(); }
-  { auto _e = destination(); _o->destination = _e; }
-}
-
-inline ::flatbuffers::Offset<ChatSend> ChatSend::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ChatSendT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateChatSend(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<ChatSend> CreateChatSend(::flatbuffers::FlatBufferBuilder &_fbb, const ChatSendT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const ChatSendT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _text = _o->text.empty() ? 0 : _fbb.CreateString(_o->text);
-  auto _destination = _o->destination;
-  return SpringWeb::CreateChatSend(
-      _fbb,
-      _text,
-      _destination);
-}
-
-inline AckT *Ack::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<AckT>(new AckT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void Ack::UnPackTo(AckT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = last_received_seq(); _o->last_received_seq = _e; }
-}
-
-inline ::flatbuffers::Offset<Ack> Ack::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const AckT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateAck(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<Ack> CreateAck(::flatbuffers::FlatBufferBuilder &_fbb, const AckT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const AckT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _last_received_seq = _o->last_received_seq;
-  return SpringWeb::CreateAck(
-      _fbb,
-      _last_received_seq);
-}
-
-inline ReconnectRequestT *ReconnectRequest::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<ReconnectRequestT>(new ReconnectRequestT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void ReconnectRequest::UnPackTo(ReconnectRequestT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = token(); if (_e) _o->token = _e->str(); }
-  { auto _e = last_snapshot_seq(); _o->last_snapshot_seq = _e; }
-}
-
-inline ::flatbuffers::Offset<ReconnectRequest> ReconnectRequest::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ReconnectRequestT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateReconnectRequest(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<ReconnectRequest> CreateReconnectRequest(::flatbuffers::FlatBufferBuilder &_fbb, const ReconnectRequestT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const ReconnectRequestT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _token = _o->token.empty() ? 0 : _fbb.CreateString(_o->token);
-  auto _last_snapshot_seq = _o->last_snapshot_seq;
-  return SpringWeb::CreateReconnectRequest(
-      _fbb,
-      _token,
-      _last_snapshot_seq);
-}
-
-inline RoomCreateT *RoomCreate::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<RoomCreateT>(new RoomCreateT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void RoomCreate::UnPackTo(RoomCreateT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = name(); if (_e) _o->name = _e->str(); }
-  { auto _e = map_name(); if (_e) _o->map_name = _e->str(); }
-  { auto _e = game_name(); if (_e) _o->game_name = _e->str(); }
-  { auto _e = max_players(); _o->max_players = _e; }
-  { auto _e = password(); if (_e) _o->password = _e->str(); }
-}
-
-inline ::flatbuffers::Offset<RoomCreate> RoomCreate::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomCreateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateRoomCreate(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<RoomCreate> CreateRoomCreate(::flatbuffers::FlatBufferBuilder &_fbb, const RoomCreateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomCreateT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _name = _o->name.empty() ? 0 : _fbb.CreateString(_o->name);
-  auto _map_name = _o->map_name.empty() ? 0 : _fbb.CreateString(_o->map_name);
-  auto _game_name = _o->game_name.empty() ? 0 : _fbb.CreateString(_o->game_name);
-  auto _max_players = _o->max_players;
-  auto _password = _o->password.empty() ? 0 : _fbb.CreateString(_o->password);
-  return SpringWeb::CreateRoomCreate(
-      _fbb,
-      _name,
-      _map_name,
-      _game_name,
-      _max_players,
-      _password);
-}
-
-inline RoomJoinT *RoomJoin::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<RoomJoinT>(new RoomJoinT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void RoomJoin::UnPackTo(RoomJoinT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = room_id(); _o->room_id = _e; }
-  { auto _e = password(); if (_e) _o->password = _e->str(); }
-}
-
-inline ::flatbuffers::Offset<RoomJoin> RoomJoin::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomJoinT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateRoomJoin(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<RoomJoin> CreateRoomJoin(::flatbuffers::FlatBufferBuilder &_fbb, const RoomJoinT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomJoinT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _room_id = _o->room_id;
-  auto _password = _o->password.empty() ? 0 : _fbb.CreateString(_o->password);
-  return SpringWeb::CreateRoomJoin(
-      _fbb,
-      _room_id,
-      _password);
-}
-
-inline RoomLeaveT *RoomLeave::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<RoomLeaveT>(new RoomLeaveT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void RoomLeave::UnPackTo(RoomLeaveT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-}
-
-inline ::flatbuffers::Offset<RoomLeave> RoomLeave::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomLeaveT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateRoomLeave(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<RoomLeave> CreateRoomLeave(::flatbuffers::FlatBufferBuilder &_fbb, const RoomLeaveT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomLeaveT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  return SpringWeb::CreateRoomLeave(
-      _fbb);
-}
-
-inline RoomTeamSelectT *RoomTeamSelect::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<RoomTeamSelectT>(new RoomTeamSelectT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void RoomTeamSelect::UnPackTo(RoomTeamSelectT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = team(); _o->team = _e; }
-}
-
-inline ::flatbuffers::Offset<RoomTeamSelect> RoomTeamSelect::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomTeamSelectT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateRoomTeamSelect(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<RoomTeamSelect> CreateRoomTeamSelect(::flatbuffers::FlatBufferBuilder &_fbb, const RoomTeamSelectT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomTeamSelectT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _team = _o->team;
-  return SpringWeb::CreateRoomTeamSelect(
-      _fbb,
-      _team);
-}
-
-inline RoomReadyT *RoomReady::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<RoomReadyT>(new RoomReadyT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void RoomReady::UnPackTo(RoomReadyT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = ready(); _o->ready = _e; }
-}
-
-inline ::flatbuffers::Offset<RoomReady> RoomReady::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomReadyT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateRoomReady(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<RoomReady> CreateRoomReady(::flatbuffers::FlatBufferBuilder &_fbb, const RoomReadyT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomReadyT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _ready = _o->ready;
-  return SpringWeb::CreateRoomReady(
-      _fbb,
-      _ready);
-}
-
-inline RoomKickT *RoomKick::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<RoomKickT>(new RoomKickT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void RoomKick::UnPackTo(RoomKickT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = player_id(); _o->player_id = _e; }
-}
-
-inline ::flatbuffers::Offset<RoomKick> RoomKick::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomKickT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateRoomKick(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<RoomKick> CreateRoomKick(::flatbuffers::FlatBufferBuilder &_fbb, const RoomKickT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomKickT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _player_id = _o->player_id;
-  return SpringWeb::CreateRoomKick(
-      _fbb,
-      _player_id);
-}
-
-inline RoomStartGameT *RoomStartGame::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<RoomStartGameT>(new RoomStartGameT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void RoomStartGame::UnPackTo(RoomStartGameT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-}
-
-inline ::flatbuffers::Offset<RoomStartGame> RoomStartGame::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomStartGameT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateRoomStartGame(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<RoomStartGame> CreateRoomStartGame(::flatbuffers::FlatBufferBuilder &_fbb, const RoomStartGameT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomStartGameT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  return SpringWeb::CreateRoomStartGame(
-      _fbb);
-}
-
-inline RoomEndGameT *RoomEndGame::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<RoomEndGameT>(new RoomEndGameT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void RoomEndGame::UnPackTo(RoomEndGameT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-}
-
-inline ::flatbuffers::Offset<RoomEndGame> RoomEndGame::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomEndGameT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateRoomEndGame(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<RoomEndGame> CreateRoomEndGame(::flatbuffers::FlatBufferBuilder &_fbb, const RoomEndGameT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomEndGameT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  return SpringWeb::CreateRoomEndGame(
-      _fbb);
-}
-
-inline RoomCloseRoomT *RoomCloseRoom::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<RoomCloseRoomT>(new RoomCloseRoomT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void RoomCloseRoom::UnPackTo(RoomCloseRoomT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-}
-
-inline ::flatbuffers::Offset<RoomCloseRoom> RoomCloseRoom::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomCloseRoomT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateRoomCloseRoom(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<RoomCloseRoom> CreateRoomCloseRoom(::flatbuffers::FlatBufferBuilder &_fbb, const RoomCloseRoomT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomCloseRoomT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  return SpringWeb::CreateRoomCloseRoom(
-      _fbb);
-}
-
-inline RoomAddAIT *RoomAddAI::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<RoomAddAIT>(new RoomAddAIT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void RoomAddAI::UnPackTo(RoomAddAIT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = ai_id(); if (_e) _o->ai_id = _e->str(); }
-  { auto _e = team(); _o->team = _e; }
-}
-
-inline ::flatbuffers::Offset<RoomAddAI> RoomAddAI::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomAddAIT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateRoomAddAI(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<RoomAddAI> CreateRoomAddAI(::flatbuffers::FlatBufferBuilder &_fbb, const RoomAddAIT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomAddAIT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _ai_id = _o->ai_id.empty() ? 0 : _fbb.CreateString(_o->ai_id);
-  auto _team = _o->team;
-  return SpringWeb::CreateRoomAddAI(
-      _fbb,
-      _ai_id,
-      _team);
-}
-
-inline RoomRemoveAIT *RoomRemoveAI::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<RoomRemoveAIT>(new RoomRemoveAIT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void RoomRemoveAI::UnPackTo(RoomRemoveAIT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = slot_index(); _o->slot_index = _e; }
-}
-
-inline ::flatbuffers::Offset<RoomRemoveAI> RoomRemoveAI::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomRemoveAIT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateRoomRemoveAI(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<RoomRemoveAI> CreateRoomRemoveAI(::flatbuffers::FlatBufferBuilder &_fbb, const RoomRemoveAIT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomRemoveAIT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _slot_index = _o->slot_index;
-  return SpringWeb::CreateRoomRemoveAI(
-      _fbb,
-      _slot_index);
-}
-
-inline RoomSetAITeamT *RoomSetAITeam::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<RoomSetAITeamT>(new RoomSetAITeamT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void RoomSetAITeam::UnPackTo(RoomSetAITeamT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = slot_index(); _o->slot_index = _e; }
-  { auto _e = team(); _o->team = _e; }
-}
-
-inline ::flatbuffers::Offset<RoomSetAITeam> RoomSetAITeam::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomSetAITeamT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateRoomSetAITeam(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<RoomSetAITeam> CreateRoomSetAITeam(::flatbuffers::FlatBufferBuilder &_fbb, const RoomSetAITeamT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomSetAITeamT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _slot_index = _o->slot_index;
-  auto _team = _o->team;
-  return SpringWeb::CreateRoomSetAITeam(
-      _fbb,
-      _slot_index,
-      _team);
-}
-
-inline RoomSetStartPosT *RoomSetStartPos::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<RoomSetStartPosT>(new RoomSetStartPosT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void RoomSetStartPos::UnPackTo(RoomSetStartPosT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = target_player_id(); _o->target_player_id = _e; }
-  { auto _e = target_ai_slot(); _o->target_ai_slot = _e; }
-  { auto _e = pos_index(); _o->pos_index = _e; }
-}
-
-inline ::flatbuffers::Offset<RoomSetStartPos> RoomSetStartPos::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomSetStartPosT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateRoomSetStartPos(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<RoomSetStartPos> CreateRoomSetStartPos(::flatbuffers::FlatBufferBuilder &_fbb, const RoomSetStartPosT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomSetStartPosT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _target_player_id = _o->target_player_id;
-  auto _target_ai_slot = _o->target_ai_slot;
-  auto _pos_index = _o->pos_index;
-  return SpringWeb::CreateRoomSetStartPos(
-      _fbb,
-      _target_player_id,
-      _target_ai_slot,
-      _pos_index);
-}
-
-inline AIListRequestT *AIListRequest::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<AIListRequestT>(new AIListRequestT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void AIListRequest::UnPackTo(AIListRequestT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-}
-
-inline ::flatbuffers::Offset<AIListRequest> AIListRequest::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const AIListRequestT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateAIListRequest(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<AIListRequest> CreateAIListRequest(::flatbuffers::FlatBufferBuilder &_fbb, const AIListRequestT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const AIListRequestT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  return SpringWeb::CreateAIListRequest(
-      _fbb);
-}
-
-inline GameListRequestT *GameListRequest::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<GameListRequestT>(new GameListRequestT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void GameListRequest::UnPackTo(GameListRequestT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-}
-
-inline ::flatbuffers::Offset<GameListRequest> GameListRequest::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameListRequestT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateGameListRequest(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<GameListRequest> CreateGameListRequest(::flatbuffers::FlatBufferBuilder &_fbb, const GameListRequestT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const GameListRequestT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  return SpringWeb::CreateGameListRequest(
-      _fbb);
-}
-
-inline LogEntryMsgT *LogEntryMsg::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<LogEntryMsgT>(new LogEntryMsgT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void LogEntryMsg::UnPackTo(LogEntryMsgT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = id(); _o->id = _e; }
-  { auto _e = timestamp(); _o->timestamp = _e; }
-  { auto _e = level(); _o->level = _e; }
-  { auto _e = section(); if (_e) _o->section = _e->str(); }
-  { auto _e = scope(); if (_e) _o->scope = _e->str(); }
-  { auto _e = process(); if (_e) _o->process = _e->str(); }
-  { auto _e = message(); if (_e) _o->message = _e->str(); }
-  { auto _e = frame(); _o->frame = _e; }
-}
-
-inline ::flatbuffers::Offset<LogEntryMsg> LogEntryMsg::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const LogEntryMsgT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateLogEntryMsg(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<LogEntryMsg> CreateLogEntryMsg(::flatbuffers::FlatBufferBuilder &_fbb, const LogEntryMsgT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const LogEntryMsgT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _id = _o->id;
-  auto _timestamp = _o->timestamp;
-  auto _level = _o->level;
-  auto _section = _o->section.empty() ? 0 : _fbb.CreateString(_o->section);
-  auto _scope = _o->scope.empty() ? 0 : _fbb.CreateString(_o->scope);
-  auto _process = _o->process.empty() ? 0 : _fbb.CreateString(_o->process);
-  auto _message = _o->message.empty() ? 0 : _fbb.CreateString(_o->message);
-  auto _frame = _o->frame;
-  return SpringWeb::CreateLogEntryMsg(
-      _fbb,
-      _id,
-      _timestamp,
-      _level,
-      _section,
-      _scope,
-      _process,
-      _message,
-      _frame);
-}
-
-inline LogIngestT::LogIngestT(const LogIngestT &o) {
-  entries.reserve(o.entries.size());
-  for (const auto &entries_ : o.entries) { entries.emplace_back((entries_) ? new SpringWeb::LogEntryMsgT(*entries_) : nullptr); }
-}
-
-inline LogIngestT &LogIngestT::operator=(LogIngestT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(entries, o.entries);
-  return *this;
-}
-
-inline LogIngestT *LogIngest::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<LogIngestT>(new LogIngestT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void LogIngest::UnPackTo(LogIngestT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = entries(); if (_e) { _o->entries.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->entries[_i]) { _e->Get(_i)->UnPackTo(_o->entries[_i].get(), _resolver); } else { _o->entries[_i] = std::unique_ptr<SpringWeb::LogEntryMsgT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->entries.resize(0); } }
-}
-
-inline ::flatbuffers::Offset<LogIngest> LogIngest::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const LogIngestT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateLogIngest(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<LogIngest> CreateLogIngest(::flatbuffers::FlatBufferBuilder &_fbb, const LogIngestT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const LogIngestT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _entries = _o->entries.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::LogEntryMsg>> (_o->entries.size(), [](size_t i, _VectorArgs *__va) { return CreateLogEntryMsg(*__va->__fbb, __va->__o->entries[i].get(), __va->__rehasher); }, &_va ) : 0;
-  return SpringWeb::CreateLogIngest(
-      _fbb,
-      _entries);
-}
-
-inline LogSubscribeT *LogSubscribe::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<LogSubscribeT>(new LogSubscribeT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void LogSubscribe::UnPackTo(LogSubscribeT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = room_id(); _o->room_id = _e; }
-  { auto _e = min_level(); _o->min_level = _e; }
-  { auto _e = section_filter(); if (_e) _o->section_filter = _e->str(); }
-  { auto _e = scope_filter(); if (_e) _o->scope_filter = _e->str(); }
-}
-
-inline ::flatbuffers::Offset<LogSubscribe> LogSubscribe::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const LogSubscribeT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateLogSubscribe(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<LogSubscribe> CreateLogSubscribe(::flatbuffers::FlatBufferBuilder &_fbb, const LogSubscribeT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const LogSubscribeT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _room_id = _o->room_id;
-  auto _min_level = _o->min_level;
-  auto _section_filter = _o->section_filter.empty() ? 0 : _fbb.CreateString(_o->section_filter);
-  auto _scope_filter = _o->scope_filter.empty() ? 0 : _fbb.CreateString(_o->scope_filter);
-  return SpringWeb::CreateLogSubscribe(
-      _fbb,
-      _room_id,
-      _min_level,
-      _section_filter,
-      _scope_filter);
-}
-
-inline LogUnsubscribeT *LogUnsubscribe::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<LogUnsubscribeT>(new LogUnsubscribeT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void LogUnsubscribe::UnPackTo(LogUnsubscribeT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-}
-
-inline ::flatbuffers::Offset<LogUnsubscribe> LogUnsubscribe::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const LogUnsubscribeT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateLogUnsubscribe(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<LogUnsubscribe> CreateLogUnsubscribe(::flatbuffers::FlatBufferBuilder &_fbb, const LogUnsubscribeT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const LogUnsubscribeT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  return SpringWeb::CreateLogUnsubscribe(
-      _fbb);
-}
-
-inline LogBatchT::LogBatchT(const LogBatchT &o)
-      : room_id(o.room_id),
-        latest_id(o.latest_id) {
-  entries.reserve(o.entries.size());
-  for (const auto &entries_ : o.entries) { entries.emplace_back((entries_) ? new SpringWeb::LogEntryMsgT(*entries_) : nullptr); }
-}
-
-inline LogBatchT &LogBatchT::operator=(LogBatchT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(room_id, o.room_id);
-  std::swap(entries, o.entries);
-  std::swap(latest_id, o.latest_id);
-  return *this;
-}
-
-inline LogBatchT *LogBatch::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<LogBatchT>(new LogBatchT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void LogBatch::UnPackTo(LogBatchT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = room_id(); _o->room_id = _e; }
-  { auto _e = entries(); if (_e) { _o->entries.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->entries[_i]) { _e->Get(_i)->UnPackTo(_o->entries[_i].get(), _resolver); } else { _o->entries[_i] = std::unique_ptr<SpringWeb::LogEntryMsgT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->entries.resize(0); } }
-  { auto _e = latest_id(); _o->latest_id = _e; }
-}
-
-inline ::flatbuffers::Offset<LogBatch> LogBatch::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const LogBatchT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateLogBatch(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<LogBatch> CreateLogBatch(::flatbuffers::FlatBufferBuilder &_fbb, const LogBatchT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const LogBatchT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _room_id = _o->room_id;
-  auto _entries = _o->entries.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::LogEntryMsg>> (_o->entries.size(), [](size_t i, _VectorArgs *__va) { return CreateLogEntryMsg(*__va->__fbb, __va->__o->entries[i].get(), __va->__rehasher); }, &_va ) : 0;
-  auto _latest_id = _o->latest_id;
-  return SpringWeb::CreateLogBatch(
-      _fbb,
-      _room_id,
-      _entries,
-      _latest_id);
-}
-
-inline ConsoleCommandT *ConsoleCommand::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<ConsoleCommandT>(new ConsoleCommandT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void ConsoleCommand::UnPackTo(ConsoleCommandT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = scope(); if (_e) _o->scope = _e->str(); }
-  { auto _e = command(); if (_e) _o->command = _e->str(); }
-  { auto _e = request_id(); _o->request_id = _e; }
-}
-
-inline ::flatbuffers::Offset<ConsoleCommand> ConsoleCommand::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ConsoleCommandT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateConsoleCommand(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<ConsoleCommand> CreateConsoleCommand(::flatbuffers::FlatBufferBuilder &_fbb, const ConsoleCommandT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const ConsoleCommandT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _scope = _o->scope.empty() ? 0 : _fbb.CreateString(_o->scope);
-  auto _command = _o->command.empty() ? 0 : _fbb.CreateString(_o->command);
-  auto _request_id = _o->request_id;
-  return SpringWeb::CreateConsoleCommand(
-      _fbb,
-      _scope,
-      _command,
-      _request_id);
-}
-
-inline GameStartedT *GameStarted::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<GameStartedT>(new GameStartedT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void GameStarted::UnPackTo(GameStartedT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = frame(); _o->frame = _e; }
-}
-
-inline ::flatbuffers::Offset<GameStarted> GameStarted::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameStartedT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateGameStarted(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<GameStarted> CreateGameStarted(::flatbuffers::FlatBufferBuilder &_fbb, const GameStartedT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const GameStartedT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _frame = _o->frame;
-  return SpringWeb::CreateGameStarted(
-      _fbb,
-      _frame);
-}
-
-inline GameRestartingT *GameRestarting::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<GameRestartingT>(new GameRestartingT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void GameRestarting::UnPackTo(GameRestartingT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-}
-
-inline ::flatbuffers::Offset<GameRestarting> GameRestarting::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameRestartingT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateGameRestarting(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<GameRestarting> CreateGameRestarting(::flatbuffers::FlatBufferBuilder &_fbb, const GameRestartingT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const GameRestartingT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  return SpringWeb::CreateGameRestarting(
-      _fbb);
-}
-
-inline ConsoleResponseT *ConsoleResponse::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<ConsoleResponseT>(new ConsoleResponseT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void ConsoleResponse::UnPackTo(ConsoleResponseT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = request_id(); _o->request_id = _e; }
-  { auto _e = scope(); if (_e) _o->scope = _e->str(); }
-  { auto _e = success(); _o->success = _e; }
-  { auto _e = output(); if (_e) _o->output = _e->str(); }
-  { auto _e = level(); _o->level = _e; }
-}
-
-inline ::flatbuffers::Offset<ConsoleResponse> ConsoleResponse::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ConsoleResponseT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateConsoleResponse(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<ConsoleResponse> CreateConsoleResponse(::flatbuffers::FlatBufferBuilder &_fbb, const ConsoleResponseT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const ConsoleResponseT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _request_id = _o->request_id;
-  auto _scope = _o->scope.empty() ? 0 : _fbb.CreateString(_o->scope);
-  auto _success = _o->success;
-  auto _output = _o->output.empty() ? 0 : _fbb.CreateString(_o->output);
-  auto _level = _o->level;
-  return SpringWeb::CreateConsoleResponse(
-      _fbb,
-      _request_id,
-      _scope,
-      _success,
-      _output,
-      _level);
-}
-
-inline ClientMessageT *ClientMessage::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<ClientMessageT>(new ClientMessageT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void ClientMessage::UnPackTo(ClientMessageT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = payload_type(); _o->payload.type = _e; }
-  { auto _e = payload(); if (_e) _o->payload.value = SpringWeb::ClientPayloadUnion::UnPack(_e, payload_type(), _resolver); }
-}
-
-inline ::flatbuffers::Offset<ClientMessage> ClientMessage::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ClientMessageT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateClientMessage(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<ClientMessage> CreateClientMessage(::flatbuffers::FlatBufferBuilder &_fbb, const ClientMessageT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const ClientMessageT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _payload_type = _o->payload.type;
-  auto _payload = _o->payload.Pack(_fbb);
-  return SpringWeb::CreateClientMessage(
-      _fbb,
-      _payload_type,
-      _payload);
-}
-
-inline AuthResponseT *AuthResponse::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<AuthResponseT>(new AuthResponseT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void AuthResponse::UnPackTo(AuthResponseT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = status(); _o->status = _e; }
-  { auto _e = token(); if (_e) _o->token = _e->str(); }
-  { auto _e = player_id(); _o->player_id = _e; }
-  { auto _e = message(); if (_e) _o->message = _e->str(); }
-  { auto _e = team(); _o->team = _e; }
-}
-
-inline ::flatbuffers::Offset<AuthResponse> AuthResponse::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const AuthResponseT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateAuthResponse(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<AuthResponse> CreateAuthResponse(::flatbuffers::FlatBufferBuilder &_fbb, const AuthResponseT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const AuthResponseT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _status = _o->status;
-  auto _token = _o->token.empty() ? 0 : _fbb.CreateString(_o->token);
-  auto _player_id = _o->player_id;
-  auto _message = _o->message.empty() ? 0 : _fbb.CreateString(_o->message);
-  auto _team = _o->team;
-  return SpringWeb::CreateAuthResponse(
-      _fbb,
-      _status,
-      _token,
-      _player_id,
-      _message,
-      _team);
-}
-
-inline EntityCreateT::EntityCreateT(const EntityCreateT &o)
-      : entity_id(o.entity_id),
-        def_id(o.def_id),
-        owner_team(o.owner_team),
-        position((o.position) ? new SpringWeb::Vec3(*o.position) : nullptr),
-        heading(o.heading),
-        health(o.health) {
-}
-
-inline EntityCreateT &EntityCreateT::operator=(EntityCreateT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(entity_id, o.entity_id);
-  std::swap(def_id, o.def_id);
-  std::swap(owner_team, o.owner_team);
-  std::swap(position, o.position);
-  std::swap(heading, o.heading);
-  std::swap(health, o.health);
-  return *this;
-}
-
-inline EntityCreateT *EntityCreate::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<EntityCreateT>(new EntityCreateT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void EntityCreate::UnPackTo(EntityCreateT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = entity_id(); _o->entity_id = _e; }
-  { auto _e = def_id(); _o->def_id = _e; }
-  { auto _e = owner_team(); _o->owner_team = _e; }
-  { auto _e = position(); if (_e) _o->position = std::unique_ptr<SpringWeb::Vec3>(new SpringWeb::Vec3(*_e)); }
-  { auto _e = heading(); _o->heading = _e; }
-  { auto _e = health(); _o->health = _e; }
-}
-
-inline ::flatbuffers::Offset<EntityCreate> EntityCreate::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const EntityCreateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateEntityCreate(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<EntityCreate> CreateEntityCreate(::flatbuffers::FlatBufferBuilder &_fbb, const EntityCreateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const EntityCreateT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _entity_id = _o->entity_id;
-  auto _def_id = _o->def_id;
-  auto _owner_team = _o->owner_team;
-  auto _position = _o->position ? _o->position.get() : nullptr;
-  auto _heading = _o->heading;
-  auto _health = _o->health;
-  return SpringWeb::CreateEntityCreate(
-      _fbb,
-      _entity_id,
-      _def_id,
-      _owner_team,
-      _position,
-      _heading,
-      _health);
-}
-
-inline EntityDestroyT::EntityDestroyT(const EntityDestroyT &o)
-      : entity_id(o.entity_id),
-        destruction_type(o.destruction_type),
-        position((o.position) ? new SpringWeb::Vec3(*o.position) : nullptr) {
-}
-
-inline EntityDestroyT &EntityDestroyT::operator=(EntityDestroyT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(entity_id, o.entity_id);
-  std::swap(destruction_type, o.destruction_type);
-  std::swap(position, o.position);
-  return *this;
-}
-
-inline EntityDestroyT *EntityDestroy::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<EntityDestroyT>(new EntityDestroyT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void EntityDestroy::UnPackTo(EntityDestroyT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = entity_id(); _o->entity_id = _e; }
-  { auto _e = destruction_type(); _o->destruction_type = _e; }
-  { auto _e = position(); if (_e) _o->position = std::unique_ptr<SpringWeb::Vec3>(new SpringWeb::Vec3(*_e)); }
-}
-
-inline ::flatbuffers::Offset<EntityDestroy> EntityDestroy::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const EntityDestroyT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateEntityDestroy(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<EntityDestroy> CreateEntityDestroy(::flatbuffers::FlatBufferBuilder &_fbb, const EntityDestroyT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const EntityDestroyT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _entity_id = _o->entity_id;
-  auto _destruction_type = _o->destruction_type;
-  auto _position = _o->position ? _o->position.get() : nullptr;
-  return SpringWeb::CreateEntityDestroy(
-      _fbb,
-      _entity_id,
-      _destruction_type,
-      _position);
-}
-
-inline CombatEventT::CombatEventT(const CombatEventT &o)
-      : attacker_id(o.attacker_id),
-        target_id(o.target_id),
-        weapon_def_id(o.weapon_def_id),
-        result(o.result),
-        damage(o.damage),
-        position((o.position) ? new SpringWeb::Vec3(*o.position) : nullptr) {
-}
-
-inline CombatEventT &CombatEventT::operator=(CombatEventT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(attacker_id, o.attacker_id);
-  std::swap(target_id, o.target_id);
-  std::swap(weapon_def_id, o.weapon_def_id);
-  std::swap(result, o.result);
-  std::swap(damage, o.damage);
-  std::swap(position, o.position);
-  return *this;
-}
-
-inline CombatEventT *CombatEvent::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<CombatEventT>(new CombatEventT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void CombatEvent::UnPackTo(CombatEventT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = attacker_id(); _o->attacker_id = _e; }
-  { auto _e = target_id(); _o->target_id = _e; }
-  { auto _e = weapon_def_id(); _o->weapon_def_id = _e; }
-  { auto _e = result(); _o->result = _e; }
-  { auto _e = damage(); _o->damage = _e; }
-  { auto _e = position(); if (_e) _o->position = std::unique_ptr<SpringWeb::Vec3>(new SpringWeb::Vec3(*_e)); }
-}
-
-inline ::flatbuffers::Offset<CombatEvent> CombatEvent::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const CombatEventT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateCombatEvent(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<CombatEvent> CreateCombatEvent(::flatbuffers::FlatBufferBuilder &_fbb, const CombatEventT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const CombatEventT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _attacker_id = _o->attacker_id;
-  auto _target_id = _o->target_id;
-  auto _weapon_def_id = _o->weapon_def_id;
-  auto _result = _o->result;
-  auto _damage = _o->damage;
-  auto _position = _o->position ? _o->position.get() : nullptr;
-  return SpringWeb::CreateCombatEvent(
-      _fbb,
-      _attacker_id,
-      _target_id,
-      _weapon_def_id,
-      _result,
-      _damage,
-      _position);
-}
-
-inline GameEventT::GameEventT(const GameEventT &o)
-      : topic(o.topic),
-        frame(o.frame),
-        entity_id(o.entity_id),
-        position((o.position) ? new SpringWeb::Vec3(*o.position) : nullptr),
-        payload(o.payload) {
-}
-
-inline GameEventT &GameEventT::operator=(GameEventT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(topic, o.topic);
-  std::swap(frame, o.frame);
-  std::swap(entity_id, o.entity_id);
-  std::swap(position, o.position);
-  std::swap(payload, o.payload);
-  return *this;
-}
-
-inline GameEventT *GameEvent::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<GameEventT>(new GameEventT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void GameEvent::UnPackTo(GameEventT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = topic(); if (_e) _o->topic = _e->str(); }
-  { auto _e = frame(); _o->frame = _e; }
-  { auto _e = entity_id(); _o->entity_id = _e; }
-  { auto _e = position(); if (_e) _o->position = std::unique_ptr<SpringWeb::Vec3>(new SpringWeb::Vec3(*_e)); }
-  { auto _e = payload(); if (_e) { _o->payload.resize(_e->size()); std::copy(_e->begin(), _e->end(), _o->payload.begin()); } }
-}
-
-inline ::flatbuffers::Offset<GameEvent> GameEvent::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameEventT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateGameEvent(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<GameEvent> CreateGameEvent(::flatbuffers::FlatBufferBuilder &_fbb, const GameEventT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const GameEventT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _topic = _o->topic.empty() ? 0 : _fbb.CreateString(_o->topic);
-  auto _frame = _o->frame;
-  auto _entity_id = _o->entity_id;
-  auto _position = _o->position ? _o->position.get() : nullptr;
-  auto _payload = _o->payload.size() ? _fbb.CreateVector(_o->payload) : 0;
-  return SpringWeb::CreateGameEvent(
-      _fbb,
-      _topic,
-      _frame,
-      _entity_id,
-      _position,
-      _payload);
-}
-
-inline GameEventBatchT::GameEventBatchT(const GameEventBatchT &o)
-      : frame(o.frame) {
-  events.reserve(o.events.size());
-  for (const auto &events_ : o.events) { events.emplace_back((events_) ? new SpringWeb::GameEventT(*events_) : nullptr); }
-  combat_events.reserve(o.combat_events.size());
-  for (const auto &combat_events_ : o.combat_events) { combat_events.emplace_back((combat_events_) ? new SpringWeb::CombatEventT(*combat_events_) : nullptr); }
-}
-
-inline GameEventBatchT &GameEventBatchT::operator=(GameEventBatchT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(frame, o.frame);
-  std::swap(events, o.events);
-  std::swap(combat_events, o.combat_events);
-  return *this;
-}
-
-inline GameEventBatchT *GameEventBatch::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<GameEventBatchT>(new GameEventBatchT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void GameEventBatch::UnPackTo(GameEventBatchT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = frame(); _o->frame = _e; }
-  { auto _e = events(); if (_e) { _o->events.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->events[_i]) { _e->Get(_i)->UnPackTo(_o->events[_i].get(), _resolver); } else { _o->events[_i] = std::unique_ptr<SpringWeb::GameEventT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->events.resize(0); } }
-  { auto _e = combat_events(); if (_e) { _o->combat_events.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->combat_events[_i]) { _e->Get(_i)->UnPackTo(_o->combat_events[_i].get(), _resolver); } else { _o->combat_events[_i] = std::unique_ptr<SpringWeb::CombatEventT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->combat_events.resize(0); } }
-}
-
-inline ::flatbuffers::Offset<GameEventBatch> GameEventBatch::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameEventBatchT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateGameEventBatch(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatch(::flatbuffers::FlatBufferBuilder &_fbb, const GameEventBatchT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const GameEventBatchT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _frame = _o->frame;
-  auto _events = _o->events.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::GameEvent>> (_o->events.size(), [](size_t i, _VectorArgs *__va) { return CreateGameEvent(*__va->__fbb, __va->__o->events[i].get(), __va->__rehasher); }, &_va ) : 0;
-  auto _combat_events = _o->combat_events.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::CombatEvent>> (_o->combat_events.size(), [](size_t i, _VectorArgs *__va) { return CreateCombatEvent(*__va->__fbb, __va->__o->combat_events[i].get(), __va->__rehasher); }, &_va ) : 0;
-  return SpringWeb::CreateGameEventBatch(
-      _fbb,
-      _frame,
-      _events,
-      _combat_events);
-}
-
-inline ResourceUpdateT *ResourceUpdate::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<ResourceUpdateT>(new ResourceUpdateT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void ResourceUpdate::UnPackTo(ResourceUpdateT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = team(); _o->team = _e; }
-  { auto _e = metal(); _o->metal = _e; }
-  { auto _e = max_metal(); _o->max_metal = _e; }
-  { auto _e = energy(); _o->energy = _e; }
-  { auto _e = max_energy(); _o->max_energy = _e; }
-  { auto _e = metal_income(); _o->metal_income = _e; }
-  { auto _e = energy_income(); _o->energy_income = _e; }
-}
-
-inline ::flatbuffers::Offset<ResourceUpdate> ResourceUpdate::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ResourceUpdateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateResourceUpdate(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<ResourceUpdate> CreateResourceUpdate(::flatbuffers::FlatBufferBuilder &_fbb, const ResourceUpdateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const ResourceUpdateT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _team = _o->team;
-  auto _metal = _o->metal;
-  auto _max_metal = _o->max_metal;
-  auto _energy = _o->energy;
-  auto _max_energy = _o->max_energy;
-  auto _metal_income = _o->metal_income;
-  auto _energy_income = _o->energy_income;
-  return SpringWeb::CreateResourceUpdate(
-      _fbb,
-      _team,
-      _metal,
-      _max_metal,
-      _energy,
-      _max_energy,
-      _metal_income,
-      _energy_income);
-}
-
-inline PongT *Pong::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<PongT>(new PongT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void Pong::UnPackTo(PongT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = client_time(); _o->client_time = _e; }
-  { auto _e = server_time(); _o->server_time = _e; }
-}
-
-inline ::flatbuffers::Offset<Pong> Pong::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const PongT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreatePong(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<Pong> CreatePong(::flatbuffers::FlatBufferBuilder &_fbb, const PongT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const PongT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _client_time = _o->client_time;
-  auto _server_time = _o->server_time;
-  return SpringWeb::CreatePong(
-      _fbb,
-      _client_time,
-      _server_time);
-}
-
-inline ChatReceiveT *ChatReceive::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<ChatReceiveT>(new ChatReceiveT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void ChatReceive::UnPackTo(ChatReceiveT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = sender_id(); _o->sender_id = _e; }
-  { auto _e = sender_name(); if (_e) _o->sender_name = _e->str(); }
-  { auto _e = text(); if (_e) _o->text = _e->str(); }
-  { auto _e = destination(); _o->destination = _e; }
-}
-
-inline ::flatbuffers::Offset<ChatReceive> ChatReceive::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ChatReceiveT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateChatReceive(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<ChatReceive> CreateChatReceive(::flatbuffers::FlatBufferBuilder &_fbb, const ChatReceiveT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const ChatReceiveT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _sender_id = _o->sender_id;
-  auto _sender_name = _o->sender_name.empty() ? 0 : _fbb.CreateString(_o->sender_name);
-  auto _text = _o->text.empty() ? 0 : _fbb.CreateString(_o->text);
-  auto _destination = _o->destination;
-  return SpringWeb::CreateChatReceive(
-      _fbb,
-      _sender_id,
-      _sender_name,
-      _text,
-      _destination);
-}
-
-inline GameInfoT *GameInfo::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<GameInfoT>(new GameInfoT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void GameInfo::UnPackTo(GameInfoT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = map_name(); if (_e) _o->map_name = _e->str(); }
-  { auto _e = game_name(); if (_e) _o->game_name = _e->str(); }
-  { auto _e = game_speed(); _o->game_speed = _e; }
-  { auto _e = frame(); _o->frame = _e; }
-  { auto _e = paused(); _o->paused = _e; }
-}
-
-inline ::flatbuffers::Offset<GameInfo> GameInfo::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateGameInfo(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<GameInfo> CreateGameInfo(::flatbuffers::FlatBufferBuilder &_fbb, const GameInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const GameInfoT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _map_name = _o->map_name.empty() ? 0 : _fbb.CreateString(_o->map_name);
-  auto _game_name = _o->game_name.empty() ? 0 : _fbb.CreateString(_o->game_name);
-  auto _game_speed = _o->game_speed;
-  auto _frame = _o->frame;
-  auto _paused = _o->paused;
-  return SpringWeb::CreateGameInfo(
-      _fbb,
-      _map_name,
-      _game_name,
-      _game_speed,
-      _frame,
-      _paused);
-}
-
-inline ReconnectResponseT *ReconnectResponse::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<ReconnectResponseT>(new ReconnectResponseT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void ReconnectResponse::UnPackTo(ReconnectResponseT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = status(); _o->status = _e; }
-}
-
-inline ::flatbuffers::Offset<ReconnectResponse> ReconnectResponse::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ReconnectResponseT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateReconnectResponse(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<ReconnectResponse> CreateReconnectResponse(::flatbuffers::FlatBufferBuilder &_fbb, const ReconnectResponseT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const ReconnectResponseT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _status = _o->status;
-  return SpringWeb::CreateReconnectResponse(
-      _fbb,
-      _status);
-}
-
-inline ServerErrorT *ServerError::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<ServerErrorT>(new ServerErrorT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void ServerError::UnPackTo(ServerErrorT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = code(); _o->code = _e; }
-  { auto _e = message(); if (_e) _o->message = _e->str(); }
-}
-
-inline ::flatbuffers::Offset<ServerError> ServerError::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ServerErrorT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateServerError(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<ServerError> CreateServerError(::flatbuffers::FlatBufferBuilder &_fbb, const ServerErrorT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const ServerErrorT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _code = _o->code;
-  auto _message = _o->message.empty() ? 0 : _fbb.CreateString(_o->message);
-  return SpringWeb::CreateServerError(
-      _fbb,
-      _code,
-      _message);
-}
-
-inline PlayerLeftT *PlayerLeft::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<PlayerLeftT>(new PlayerLeftT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void PlayerLeft::UnPackTo(PlayerLeftT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = player_id(); _o->player_id = _e; }
-  { auto _e = username(); if (_e) _o->username = _e->str(); }
-  { auto _e = team(); _o->team = _e; }
-  { auto _e = reason(); _o->reason = _e; }
-}
-
-inline ::flatbuffers::Offset<PlayerLeft> PlayerLeft::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerLeftT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreatePlayerLeft(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<PlayerLeft> CreatePlayerLeft(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerLeftT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const PlayerLeftT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _player_id = _o->player_id;
-  auto _username = _o->username.empty() ? 0 : _fbb.CreateString(_o->username);
-  auto _team = _o->team;
-  auto _reason = _o->reason;
-  return SpringWeb::CreatePlayerLeft(
-      _fbb,
-      _player_id,
-      _username,
-      _team,
-      _reason);
-}
-
-inline RoomPlayerInfoT *RoomPlayerInfo::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<RoomPlayerInfoT>(new RoomPlayerInfoT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void RoomPlayerInfo::UnPackTo(RoomPlayerInfoT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = player_id(); _o->player_id = _e; }
-  { auto _e = username(); if (_e) _o->username = _e->str(); }
-  { auto _e = team(); _o->team = _e; }
-  { auto _e = ready(); _o->ready = _e; }
-  { auto _e = is_spectator(); _o->is_spectator = _e; }
-  { auto _e = is_host(); _o->is_host = _e; }
-  { auto _e = start_pos(); _o->start_pos = _e; }
-}
-
-inline ::flatbuffers::Offset<RoomPlayerInfo> RoomPlayerInfo::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomPlayerInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateRoomPlayerInfo(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<RoomPlayerInfo> CreateRoomPlayerInfo(::flatbuffers::FlatBufferBuilder &_fbb, const RoomPlayerInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomPlayerInfoT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _player_id = _o->player_id;
-  auto _username = _o->username.empty() ? 0 : _fbb.CreateString(_o->username);
-  auto _team = _o->team;
-  auto _ready = _o->ready;
-  auto _is_spectator = _o->is_spectator;
-  auto _is_host = _o->is_host;
-  auto _start_pos = _o->start_pos;
-  return SpringWeb::CreateRoomPlayerInfo(
-      _fbb,
-      _player_id,
-      _username,
-      _team,
-      _ready,
-      _is_spectator,
-      _is_host,
-      _start_pos);
-}
-
-inline RoomAISlotT *RoomAISlot::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<RoomAISlotT>(new RoomAISlotT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void RoomAISlot::UnPackTo(RoomAISlotT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = ai_id(); if (_e) _o->ai_id = _e->str(); }
-  { auto _e = display_name(); if (_e) _o->display_name = _e->str(); }
-  { auto _e = team(); _o->team = _e; }
-  { auto _e = start_pos(); _o->start_pos = _e; }
-}
-
-inline ::flatbuffers::Offset<RoomAISlot> RoomAISlot::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomAISlotT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateRoomAISlot(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<RoomAISlot> CreateRoomAISlot(::flatbuffers::FlatBufferBuilder &_fbb, const RoomAISlotT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomAISlotT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _ai_id = _o->ai_id.empty() ? 0 : _fbb.CreateString(_o->ai_id);
-  auto _display_name = _o->display_name.empty() ? 0 : _fbb.CreateString(_o->display_name);
-  auto _team = _o->team;
-  auto _start_pos = _o->start_pos;
-  return SpringWeb::CreateRoomAISlot(
-      _fbb,
-      _ai_id,
-      _display_name,
-      _team,
-      _start_pos);
-}
-
-inline RoomAIInfoT *RoomAIInfo::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<RoomAIInfoT>(new RoomAIInfoT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void RoomAIInfo::UnPackTo(RoomAIInfoT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = ai_id(); if (_e) _o->ai_id = _e->str(); }
-  { auto _e = display_name(); if (_e) _o->display_name = _e->str(); }
-  { auto _e = description(); if (_e) _o->description = _e->str(); }
-  { auto _e = is_engine_provided(); _o->is_engine_provided = _e; }
-}
-
-inline ::flatbuffers::Offset<RoomAIInfo> RoomAIInfo::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomAIInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateRoomAIInfo(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<RoomAIInfo> CreateRoomAIInfo(::flatbuffers::FlatBufferBuilder &_fbb, const RoomAIInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomAIInfoT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _ai_id = _o->ai_id.empty() ? 0 : _fbb.CreateString(_o->ai_id);
-  auto _display_name = _o->display_name.empty() ? 0 : _fbb.CreateString(_o->display_name);
-  auto _description = _o->description.empty() ? 0 : _fbb.CreateString(_o->description);
-  auto _is_engine_provided = _o->is_engine_provided;
-  return SpringWeb::CreateRoomAIInfo(
-      _fbb,
-      _ai_id,
-      _display_name,
-      _description,
-      _is_engine_provided);
-}
-
-inline RoomListEntryT *RoomListEntry::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<RoomListEntryT>(new RoomListEntryT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void RoomListEntry::UnPackTo(RoomListEntryT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = room_id(); _o->room_id = _e; }
-  { auto _e = name(); if (_e) _o->name = _e->str(); }
-  { auto _e = map_name(); if (_e) _o->map_name = _e->str(); }
-  { auto _e = game_name(); if (_e) _o->game_name = _e->str(); }
-  { auto _e = state(); _o->state = _e; }
-  { auto _e = player_count(); _o->player_count = _e; }
-  { auto _e = max_players(); _o->max_players = _e; }
-  { auto _e = has_password(); _o->has_password = _e; }
-  { auto _e = host_name(); if (_e) _o->host_name = _e->str(); }
-}
-
-inline ::flatbuffers::Offset<RoomListEntry> RoomListEntry::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomListEntryT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateRoomListEntry(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<RoomListEntry> CreateRoomListEntry(::flatbuffers::FlatBufferBuilder &_fbb, const RoomListEntryT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomListEntryT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _room_id = _o->room_id;
-  auto _name = _o->name.empty() ? 0 : _fbb.CreateString(_o->name);
-  auto _map_name = _o->map_name.empty() ? 0 : _fbb.CreateString(_o->map_name);
-  auto _game_name = _o->game_name.empty() ? 0 : _fbb.CreateString(_o->game_name);
-  auto _state = _o->state;
-  auto _player_count = _o->player_count;
-  auto _max_players = _o->max_players;
-  auto _has_password = _o->has_password;
-  auto _host_name = _o->host_name.empty() ? 0 : _fbb.CreateString(_o->host_name);
-  return SpringWeb::CreateRoomListEntry(
-      _fbb,
-      _room_id,
-      _name,
-      _map_name,
-      _game_name,
-      _state,
-      _player_count,
-      _max_players,
-      _has_password,
-      _host_name);
-}
-
-inline RoomListUpdateT::RoomListUpdateT(const RoomListUpdateT &o) {
-  rooms.reserve(o.rooms.size());
-  for (const auto &rooms_ : o.rooms) { rooms.emplace_back((rooms_) ? new SpringWeb::RoomListEntryT(*rooms_) : nullptr); }
-}
-
-inline RoomListUpdateT &RoomListUpdateT::operator=(RoomListUpdateT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(rooms, o.rooms);
-  return *this;
-}
-
-inline RoomListUpdateT *RoomListUpdate::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<RoomListUpdateT>(new RoomListUpdateT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void RoomListUpdate::UnPackTo(RoomListUpdateT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = rooms(); if (_e) { _o->rooms.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->rooms[_i]) { _e->Get(_i)->UnPackTo(_o->rooms[_i].get(), _resolver); } else { _o->rooms[_i] = std::unique_ptr<SpringWeb::RoomListEntryT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->rooms.resize(0); } }
-}
-
-inline ::flatbuffers::Offset<RoomListUpdate> RoomListUpdate::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomListUpdateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateRoomListUpdate(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<RoomListUpdate> CreateRoomListUpdate(::flatbuffers::FlatBufferBuilder &_fbb, const RoomListUpdateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomListUpdateT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _rooms = _o->rooms.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::RoomListEntry>> (_o->rooms.size(), [](size_t i, _VectorArgs *__va) { return CreateRoomListEntry(*__va->__fbb, __va->__o->rooms[i].get(), __va->__rehasher); }, &_va ) : 0;
-  return SpringWeb::CreateRoomListUpdate(
-      _fbb,
-      _rooms);
-}
-
-inline RoomStateUpdateT::RoomStateUpdateT(const RoomStateUpdateT &o)
-      : room_id(o.room_id),
-        state(o.state),
-        name(o.name),
-        map_name(o.map_name),
-        game_name(o.game_name),
-        countdown_seconds(o.countdown_seconds),
-        game_server_port(o.game_server_port) {
-  players.reserve(o.players.size());
-  for (const auto &players_ : o.players) { players.emplace_back((players_) ? new SpringWeb::RoomPlayerInfoT(*players_) : nullptr); }
-  ai_slots.reserve(o.ai_slots.size());
-  for (const auto &ai_slots_ : o.ai_slots) { ai_slots.emplace_back((ai_slots_) ? new SpringWeb::RoomAISlotT(*ai_slots_) : nullptr); }
-}
-
-inline RoomStateUpdateT &RoomStateUpdateT::operator=(RoomStateUpdateT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(room_id, o.room_id);
-  std::swap(state, o.state);
-  std::swap(name, o.name);
-  std::swap(map_name, o.map_name);
-  std::swap(game_name, o.game_name);
-  std::swap(players, o.players);
-  std::swap(countdown_seconds, o.countdown_seconds);
-  std::swap(game_server_port, o.game_server_port);
-  std::swap(ai_slots, o.ai_slots);
-  return *this;
-}
-
-inline RoomStateUpdateT *RoomStateUpdate::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<RoomStateUpdateT>(new RoomStateUpdateT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void RoomStateUpdate::UnPackTo(RoomStateUpdateT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = room_id(); _o->room_id = _e; }
-  { auto _e = state(); _o->state = _e; }
-  { auto _e = name(); if (_e) _o->name = _e->str(); }
-  { auto _e = map_name(); if (_e) _o->map_name = _e->str(); }
-  { auto _e = game_name(); if (_e) _o->game_name = _e->str(); }
-  { auto _e = players(); if (_e) { _o->players.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->players[_i]) { _e->Get(_i)->UnPackTo(_o->players[_i].get(), _resolver); } else { _o->players[_i] = std::unique_ptr<SpringWeb::RoomPlayerInfoT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->players.resize(0); } }
-  { auto _e = countdown_seconds(); _o->countdown_seconds = _e; }
-  { auto _e = game_server_port(); _o->game_server_port = _e; }
-  { auto _e = ai_slots(); if (_e) { _o->ai_slots.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->ai_slots[_i]) { _e->Get(_i)->UnPackTo(_o->ai_slots[_i].get(), _resolver); } else { _o->ai_slots[_i] = std::unique_ptr<SpringWeb::RoomAISlotT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->ai_slots.resize(0); } }
-}
-
-inline ::flatbuffers::Offset<RoomStateUpdate> RoomStateUpdate::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomStateUpdateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateRoomStateUpdate(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<RoomStateUpdate> CreateRoomStateUpdate(::flatbuffers::FlatBufferBuilder &_fbb, const RoomStateUpdateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomStateUpdateT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _room_id = _o->room_id;
-  auto _state = _o->state;
-  auto _name = _o->name.empty() ? 0 : _fbb.CreateString(_o->name);
-  auto _map_name = _o->map_name.empty() ? 0 : _fbb.CreateString(_o->map_name);
-  auto _game_name = _o->game_name.empty() ? 0 : _fbb.CreateString(_o->game_name);
-  auto _players = _o->players.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::RoomPlayerInfo>> (_o->players.size(), [](size_t i, _VectorArgs *__va) { return CreateRoomPlayerInfo(*__va->__fbb, __va->__o->players[i].get(), __va->__rehasher); }, &_va ) : 0;
-  auto _countdown_seconds = _o->countdown_seconds;
-  auto _game_server_port = _o->game_server_port;
-  auto _ai_slots = _o->ai_slots.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::RoomAISlot>> (_o->ai_slots.size(), [](size_t i, _VectorArgs *__va) { return CreateRoomAISlot(*__va->__fbb, __va->__o->ai_slots[i].get(), __va->__rehasher); }, &_va ) : 0;
-  return SpringWeb::CreateRoomStateUpdate(
-      _fbb,
-      _room_id,
-      _state,
-      _name,
-      _map_name,
-      _game_name,
-      _players,
-      _countdown_seconds,
-      _game_server_port,
-      _ai_slots);
-}
-
-inline AIListUpdateT::AIListUpdateT(const AIListUpdateT &o) {
-  ais.reserve(o.ais.size());
-  for (const auto &ais_ : o.ais) { ais.emplace_back((ais_) ? new SpringWeb::RoomAIInfoT(*ais_) : nullptr); }
-}
-
-inline AIListUpdateT &AIListUpdateT::operator=(AIListUpdateT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(ais, o.ais);
-  return *this;
-}
-
-inline AIListUpdateT *AIListUpdate::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<AIListUpdateT>(new AIListUpdateT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void AIListUpdate::UnPackTo(AIListUpdateT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = ais(); if (_e) { _o->ais.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->ais[_i]) { _e->Get(_i)->UnPackTo(_o->ais[_i].get(), _resolver); } else { _o->ais[_i] = std::unique_ptr<SpringWeb::RoomAIInfoT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->ais.resize(0); } }
-}
-
-inline ::flatbuffers::Offset<AIListUpdate> AIListUpdate::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const AIListUpdateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateAIListUpdate(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<AIListUpdate> CreateAIListUpdate(::flatbuffers::FlatBufferBuilder &_fbb, const AIListUpdateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const AIListUpdateT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _ais = _o->ais.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::RoomAIInfo>> (_o->ais.size(), [](size_t i, _VectorArgs *__va) { return CreateRoomAIInfo(*__va->__fbb, __va->__o->ais[i].get(), __va->__rehasher); }, &_va ) : 0;
-  return SpringWeb::CreateAIListUpdate(
-      _fbb,
-      _ais);
-}
-
-inline LobbyGameInfoT *LobbyGameInfo::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<LobbyGameInfoT>(new LobbyGameInfoT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void LobbyGameInfo::UnPackTo(LobbyGameInfoT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = id(); if (_e) _o->id = _e->str(); }
-  { auto _e = display_name(); if (_e) _o->display_name = _e->str(); }
-  { auto _e = description(); if (_e) _o->description = _e->str(); }
-  { auto _e = version(); if (_e) _o->version = _e->str(); }
-}
-
-inline ::flatbuffers::Offset<LobbyGameInfo> LobbyGameInfo::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const LobbyGameInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateLobbyGameInfo(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<LobbyGameInfo> CreateLobbyGameInfo(::flatbuffers::FlatBufferBuilder &_fbb, const LobbyGameInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const LobbyGameInfoT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _id = _o->id.empty() ? 0 : _fbb.CreateString(_o->id);
-  auto _display_name = _o->display_name.empty() ? 0 : _fbb.CreateString(_o->display_name);
-  auto _description = _o->description.empty() ? 0 : _fbb.CreateString(_o->description);
-  auto _version = _o->version.empty() ? 0 : _fbb.CreateString(_o->version);
-  return SpringWeb::CreateLobbyGameInfo(
-      _fbb,
-      _id,
-      _display_name,
-      _description,
-      _version);
-}
-
-inline GameListUpdateT::GameListUpdateT(const GameListUpdateT &o) {
-  games.reserve(o.games.size());
-  for (const auto &games_ : o.games) { games.emplace_back((games_) ? new SpringWeb::LobbyGameInfoT(*games_) : nullptr); }
-}
-
-inline GameListUpdateT &GameListUpdateT::operator=(GameListUpdateT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(games, o.games);
-  return *this;
-}
-
-inline GameListUpdateT *GameListUpdate::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<GameListUpdateT>(new GameListUpdateT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void GameListUpdate::UnPackTo(GameListUpdateT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = games(); if (_e) { _o->games.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->games[_i]) { _e->Get(_i)->UnPackTo(_o->games[_i].get(), _resolver); } else { _o->games[_i] = std::unique_ptr<SpringWeb::LobbyGameInfoT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->games.resize(0); } }
-}
-
-inline ::flatbuffers::Offset<GameListUpdate> GameListUpdate::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameListUpdateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateGameListUpdate(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<GameListUpdate> CreateGameListUpdate(::flatbuffers::FlatBufferBuilder &_fbb, const GameListUpdateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const GameListUpdateT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _games = _o->games.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::LobbyGameInfo>> (_o->games.size(), [](size_t i, _VectorArgs *__va) { return CreateLobbyGameInfo(*__va->__fbb, __va->__o->games[i].get(), __va->__rehasher); }, &_va ) : 0;
-  return SpringWeb::CreateGameListUpdate(
-      _fbb,
-      _games);
-}
-
-inline RoomPlayerJoinedT::RoomPlayerJoinedT(const RoomPlayerJoinedT &o)
-      : room_id(o.room_id),
-        player((o.player) ? new SpringWeb::RoomPlayerInfoT(*o.player) : nullptr) {
-}
-
-inline RoomPlayerJoinedT &RoomPlayerJoinedT::operator=(RoomPlayerJoinedT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(room_id, o.room_id);
-  std::swap(player, o.player);
-  return *this;
-}
-
-inline RoomPlayerJoinedT *RoomPlayerJoined::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<RoomPlayerJoinedT>(new RoomPlayerJoinedT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void RoomPlayerJoined::UnPackTo(RoomPlayerJoinedT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = room_id(); _o->room_id = _e; }
-  { auto _e = player(); if (_e) { if(_o->player) { _e->UnPackTo(_o->player.get(), _resolver); } else { _o->player = std::unique_ptr<SpringWeb::RoomPlayerInfoT>(_e->UnPack(_resolver)); } } else if (_o->player) { _o->player.reset(); } }
-}
-
-inline ::flatbuffers::Offset<RoomPlayerJoined> RoomPlayerJoined::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomPlayerJoinedT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateRoomPlayerJoined(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<RoomPlayerJoined> CreateRoomPlayerJoined(::flatbuffers::FlatBufferBuilder &_fbb, const RoomPlayerJoinedT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomPlayerJoinedT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _room_id = _o->room_id;
-  auto _player = _o->player ? CreateRoomPlayerInfo(_fbb, _o->player.get(), _rehasher) : 0;
-  return SpringWeb::CreateRoomPlayerJoined(
-      _fbb,
-      _room_id,
-      _player);
-}
-
-inline RoomPlayerLeftT *RoomPlayerLeft::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<RoomPlayerLeftT>(new RoomPlayerLeftT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void RoomPlayerLeft::UnPackTo(RoomPlayerLeftT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = room_id(); _o->room_id = _e; }
-  { auto _e = player_id(); _o->player_id = _e; }
-  { auto _e = reason(); if (_e) _o->reason = _e->str(); }
-}
-
-inline ::flatbuffers::Offset<RoomPlayerLeft> RoomPlayerLeft::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomPlayerLeftT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateRoomPlayerLeft(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<RoomPlayerLeft> CreateRoomPlayerLeft(::flatbuffers::FlatBufferBuilder &_fbb, const RoomPlayerLeftT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomPlayerLeftT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _room_id = _o->room_id;
-  auto _player_id = _o->player_id;
-  auto _reason = _o->reason.empty() ? 0 : _fbb.CreateString(_o->reason);
-  return SpringWeb::CreateRoomPlayerLeft(
-      _fbb,
-      _room_id,
-      _player_id,
-      _reason);
-}
-
-inline GameWeaponDefT *GameWeaponDef::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<GameWeaponDefT>(new GameWeaponDefT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void GameWeaponDef::UnPackTo(GameWeaponDefT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = def_id(); _o->def_id = _e; }
-  { auto _e = name(); if (_e) _o->name = _e->str(); }
-  { auto _e = visual_type(); _o->visual_type = _e; }
-  { auto _e = projectile_speed(); _o->projectile_speed = _e; }
-  { auto _e = range(); _o->range = _e; }
-  { auto _e = aoe(); _o->aoe = _e; }
-  { auto _e = size(); _o->size = _e; }
-  { auto _e = intensity(); _o->intensity = _e; }
-  { auto _e = color_r(); _o->color_r = _e; }
-  { auto _e = color_g(); _o->color_g = _e; }
-  { auto _e = color_b(); _o->color_b = _e; }
-  { auto _e = duration(); _o->duration = _e; }
-  { auto _e = high_trajectory(); _o->high_trajectory = _e; }
-}
-
-inline ::flatbuffers::Offset<GameWeaponDef> GameWeaponDef::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameWeaponDefT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateGameWeaponDef(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<GameWeaponDef> CreateGameWeaponDef(::flatbuffers::FlatBufferBuilder &_fbb, const GameWeaponDefT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const GameWeaponDefT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _def_id = _o->def_id;
-  auto _name = _o->name.empty() ? 0 : _fbb.CreateString(_o->name);
-  auto _visual_type = _o->visual_type;
-  auto _projectile_speed = _o->projectile_speed;
-  auto _range = _o->range;
-  auto _aoe = _o->aoe;
-  auto _size = _o->size;
-  auto _intensity = _o->intensity;
-  auto _color_r = _o->color_r;
-  auto _color_g = _o->color_g;
-  auto _color_b = _o->color_b;
-  auto _duration = _o->duration;
-  auto _high_trajectory = _o->high_trajectory;
-  return SpringWeb::CreateGameWeaponDef(
-      _fbb,
-      _def_id,
-      _name,
-      _visual_type,
-      _projectile_speed,
-      _range,
-      _aoe,
-      _size,
-      _intensity,
-      _color_r,
-      _color_g,
-      _color_b,
-      _duration,
-      _high_trajectory);
-}
-
-inline GameWeaponDefsT::GameWeaponDefsT(const GameWeaponDefsT &o) {
-  defs.reserve(o.defs.size());
-  for (const auto &defs_ : o.defs) { defs.emplace_back((defs_) ? new SpringWeb::GameWeaponDefT(*defs_) : nullptr); }
-}
-
-inline GameWeaponDefsT &GameWeaponDefsT::operator=(GameWeaponDefsT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(defs, o.defs);
-  return *this;
-}
-
-inline GameWeaponDefsT *GameWeaponDefs::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<GameWeaponDefsT>(new GameWeaponDefsT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void GameWeaponDefs::UnPackTo(GameWeaponDefsT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = defs(); if (_e) { _o->defs.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->defs[_i]) { _e->Get(_i)->UnPackTo(_o->defs[_i].get(), _resolver); } else { _o->defs[_i] = std::unique_ptr<SpringWeb::GameWeaponDefT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->defs.resize(0); } }
-}
-
-inline ::flatbuffers::Offset<GameWeaponDefs> GameWeaponDefs::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameWeaponDefsT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateGameWeaponDefs(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<GameWeaponDefs> CreateGameWeaponDefs(::flatbuffers::FlatBufferBuilder &_fbb, const GameWeaponDefsT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const GameWeaponDefsT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _defs = _o->defs.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::GameWeaponDef>> (_o->defs.size(), [](size_t i, _VectorArgs *__va) { return CreateGameWeaponDef(*__va->__fbb, __va->__o->defs[i].get(), __va->__rehasher); }, &_va ) : 0;
-  return SpringWeb::CreateGameWeaponDefs(
-      _fbb,
-      _defs);
-}
-
-inline GameUnitDefT *GameUnitDef::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<GameUnitDefT>(new GameUnitDefT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void GameUnitDef::UnPackTo(GameUnitDefT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = def_id(); _o->def_id = _e; }
-  { auto _e = name(); if (_e) _o->name = _e->str(); }
-  { auto _e = model_url(); if (_e) _o->model_url = _e->str(); }
-  { auto _e = texture_url(); if (_e) _o->texture_url = _e->str(); }
-}
-
-inline ::flatbuffers::Offset<GameUnitDef> GameUnitDef::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameUnitDefT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateGameUnitDef(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<GameUnitDef> CreateGameUnitDef(::flatbuffers::FlatBufferBuilder &_fbb, const GameUnitDefT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const GameUnitDefT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _def_id = _o->def_id;
-  auto _name = _o->name.empty() ? 0 : _fbb.CreateString(_o->name);
-  auto _model_url = _o->model_url.empty() ? 0 : _fbb.CreateString(_o->model_url);
-  auto _texture_url = _o->texture_url.empty() ? 0 : _fbb.CreateString(_o->texture_url);
-  return SpringWeb::CreateGameUnitDef(
-      _fbb,
-      _def_id,
-      _name,
-      _model_url,
-      _texture_url);
-}
-
-inline GameUnitDefsT::GameUnitDefsT(const GameUnitDefsT &o)
-      : base_url(o.base_url) {
-  defs.reserve(o.defs.size());
-  for (const auto &defs_ : o.defs) { defs.emplace_back((defs_) ? new SpringWeb::GameUnitDefT(*defs_) : nullptr); }
-}
-
-inline GameUnitDefsT &GameUnitDefsT::operator=(GameUnitDefsT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(defs, o.defs);
-  std::swap(base_url, o.base_url);
-  return *this;
-}
-
-inline GameUnitDefsT *GameUnitDefs::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<GameUnitDefsT>(new GameUnitDefsT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void GameUnitDefs::UnPackTo(GameUnitDefsT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = defs(); if (_e) { _o->defs.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->defs[_i]) { _e->Get(_i)->UnPackTo(_o->defs[_i].get(), _resolver); } else { _o->defs[_i] = std::unique_ptr<SpringWeb::GameUnitDefT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->defs.resize(0); } }
-  { auto _e = base_url(); if (_e) _o->base_url = _e->str(); }
-}
-
-inline ::flatbuffers::Offset<GameUnitDefs> GameUnitDefs::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameUnitDefsT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateGameUnitDefs(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<GameUnitDefs> CreateGameUnitDefs(::flatbuffers::FlatBufferBuilder &_fbb, const GameUnitDefsT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const GameUnitDefsT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _defs = _o->defs.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::GameUnitDef>> (_o->defs.size(), [](size_t i, _VectorArgs *__va) { return CreateGameUnitDef(*__va->__fbb, __va->__o->defs[i].get(), __va->__rehasher); }, &_va ) : 0;
-  auto _base_url = _o->base_url.empty() ? 0 : _fbb.CreateString(_o->base_url);
-  return SpringWeb::CreateGameUnitDefs(
-      _fbb,
-      _defs,
-      _base_url);
-}
-
-inline MapInfoT *MapInfo::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<MapInfoT>(new MapInfoT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void MapInfo::UnPackTo(MapInfoT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = id(); if (_e) _o->id = _e->str(); }
-  { auto _e = name(); if (_e) _o->name = _e->str(); }
-  { auto _e = short_name(); if (_e) _o->short_name = _e->str(); }
-  { auto _e = description(); if (_e) _o->description = _e->str(); }
-  { auto _e = author(); if (_e) _o->author = _e->str(); }
-  { auto _e = version(); if (_e) _o->version = _e->str(); }
-  { auto _e = mapx(); _o->mapx = _e; }
-  { auto _e = mapy(); _o->mapy = _e; }
-  { auto _e = width_elmos(); _o->width_elmos = _e; }
-  { auto _e = height_elmos(); _o->height_elmos = _e; }
-  { auto _e = min_height(); _o->min_height = _e; }
-  { auto _e = max_height(); _o->max_height = _e; }
-  { auto _e = max_players(); _o->max_players = _e; }
-  { auto _e = start_positions(); if (_e) { _o->start_positions.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->start_positions[_i] = *_e->Get(_i); } } else { _o->start_positions.resize(0); } }
-  { auto _e = gravity(); _o->gravity = _e; }
-  { auto _e = tidal_strength(); _o->tidal_strength = _e; }
-  { auto _e = max_metal(); _o->max_metal = _e; }
-  { auto _e = extractor_radius(); _o->extractor_radius = _e; }
-  { auto _e = minimap_url(); if (_e) _o->minimap_url = _e->str(); }
-  { auto _e = has_lua_gaia(); _o->has_lua_gaia = _e; }
-}
-
-inline ::flatbuffers::Offset<MapInfo> MapInfo::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const MapInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateMapInfo(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<MapInfo> CreateMapInfo(::flatbuffers::FlatBufferBuilder &_fbb, const MapInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const MapInfoT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _id = _o->id.empty() ? 0 : _fbb.CreateString(_o->id);
-  auto _name = _o->name.empty() ? 0 : _fbb.CreateString(_o->name);
-  auto _short_name = _o->short_name.empty() ? 0 : _fbb.CreateString(_o->short_name);
-  auto _description = _o->description.empty() ? 0 : _fbb.CreateString(_o->description);
-  auto _author = _o->author.empty() ? 0 : _fbb.CreateString(_o->author);
-  auto _version = _o->version.empty() ? 0 : _fbb.CreateString(_o->version);
-  auto _mapx = _o->mapx;
-  auto _mapy = _o->mapy;
-  auto _width_elmos = _o->width_elmos;
-  auto _height_elmos = _o->height_elmos;
-  auto _min_height = _o->min_height;
-  auto _max_height = _o->max_height;
-  auto _max_players = _o->max_players;
-  auto _start_positions = _o->start_positions.size() ? _fbb.CreateVectorOfStructs(_o->start_positions) : 0;
-  auto _gravity = _o->gravity;
-  auto _tidal_strength = _o->tidal_strength;
-  auto _max_metal = _o->max_metal;
-  auto _extractor_radius = _o->extractor_radius;
-  auto _minimap_url = _o->minimap_url.empty() ? 0 : _fbb.CreateString(_o->minimap_url);
-  auto _has_lua_gaia = _o->has_lua_gaia;
-  return SpringWeb::CreateMapInfo(
-      _fbb,
-      _id,
-      _name,
-      _short_name,
-      _description,
-      _author,
-      _version,
-      _mapx,
-      _mapy,
-      _width_elmos,
-      _height_elmos,
-      _min_height,
-      _max_height,
-      _max_players,
-      _start_positions,
-      _gravity,
-      _tidal_strength,
-      _max_metal,
-      _extractor_radius,
-      _minimap_url,
-      _has_lua_gaia);
-}
-
-inline MapListUpdateT::MapListUpdateT(const MapListUpdateT &o) {
-  maps.reserve(o.maps.size());
-  for (const auto &maps_ : o.maps) { maps.emplace_back((maps_) ? new SpringWeb::MapInfoT(*maps_) : nullptr); }
-}
-
-inline MapListUpdateT &MapListUpdateT::operator=(MapListUpdateT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(maps, o.maps);
-  return *this;
-}
-
-inline MapListUpdateT *MapListUpdate::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<MapListUpdateT>(new MapListUpdateT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void MapListUpdate::UnPackTo(MapListUpdateT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = maps(); if (_e) { _o->maps.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->maps[_i]) { _e->Get(_i)->UnPackTo(_o->maps[_i].get(), _resolver); } else { _o->maps[_i] = std::unique_ptr<SpringWeb::MapInfoT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->maps.resize(0); } }
-}
-
-inline ::flatbuffers::Offset<MapListUpdate> MapListUpdate::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const MapListUpdateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateMapListUpdate(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<MapListUpdate> CreateMapListUpdate(::flatbuffers::FlatBufferBuilder &_fbb, const MapListUpdateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const MapListUpdateT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _maps = _o->maps.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::MapInfo>> (_o->maps.size(), [](size_t i, _VectorArgs *__va) { return CreateMapInfo(*__va->__fbb, __va->__o->maps[i].get(), __va->__rehasher); }, &_va ) : 0;
-  return SpringWeb::CreateMapListUpdate(
-      _fbb,
-      _maps);
-}
-
-inline MapFeatureT *MapFeature::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<MapFeatureT>(new MapFeatureT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void MapFeature::UnPackTo(MapFeatureT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = type_index(); _o->type_index = _e; }
-  { auto _e = x(); _o->x = _e; }
-  { auto _e = y(); _o->y = _e; }
-  { auto _e = z(); _o->z = _e; }
-  { auto _e = rotation(); _o->rotation = _e; }
-  { auto _e = relative_size(); _o->relative_size = _e; }
-}
-
-inline ::flatbuffers::Offset<MapFeature> MapFeature::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const MapFeatureT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateMapFeature(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<MapFeature> CreateMapFeature(::flatbuffers::FlatBufferBuilder &_fbb, const MapFeatureT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const MapFeatureT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _type_index = _o->type_index;
-  auto _x = _o->x;
-  auto _y = _o->y;
-  auto _z = _o->z;
-  auto _rotation = _o->rotation;
-  auto _relative_size = _o->relative_size;
-  return SpringWeb::CreateMapFeature(
-      _fbb,
-      _type_index,
-      _x,
-      _y,
-      _z,
-      _rotation,
-      _relative_size);
-}
-
-inline MapFeatureDefT *MapFeatureDef::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<MapFeatureDefT>(new MapFeatureDefT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void MapFeatureDef::UnPackTo(MapFeatureDefT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = name(); if (_e) _o->name = _e->str(); }
-  { auto _e = model_url(); if (_e) _o->model_url = _e->str(); }
-  { auto _e = texture_url(); if (_e) _o->texture_url = _e->str(); }
-  { auto _e = footprint_x(); _o->footprint_x = _e; }
-  { auto _e = footprint_z(); _o->footprint_z = _e; }
-  { auto _e = height(); _o->height = _e; }
-  { auto _e = radius(); _o->radius = _e; }
-  { auto _e = blocking(); _o->blocking = _e; }
-  { auto _e = reclaimable(); _o->reclaimable = _e; }
-  { auto _e = metal(); _o->metal = _e; }
-  { auto _e = energy(); _o->energy = _e; }
-  { auto _e = damage(); _o->damage = _e; }
-}
-
-inline ::flatbuffers::Offset<MapFeatureDef> MapFeatureDef::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const MapFeatureDefT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateMapFeatureDef(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<MapFeatureDef> CreateMapFeatureDef(::flatbuffers::FlatBufferBuilder &_fbb, const MapFeatureDefT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const MapFeatureDefT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _name = _o->name.empty() ? 0 : _fbb.CreateString(_o->name);
-  auto _model_url = _o->model_url.empty() ? 0 : _fbb.CreateString(_o->model_url);
-  auto _texture_url = _o->texture_url.empty() ? 0 : _fbb.CreateString(_o->texture_url);
-  auto _footprint_x = _o->footprint_x;
-  auto _footprint_z = _o->footprint_z;
-  auto _height = _o->height;
-  auto _radius = _o->radius;
-  auto _blocking = _o->blocking;
-  auto _reclaimable = _o->reclaimable;
-  auto _metal = _o->metal;
-  auto _energy = _o->energy;
-  auto _damage = _o->damage;
-  return SpringWeb::CreateMapFeatureDef(
-      _fbb,
-      _name,
-      _model_url,
-      _texture_url,
-      _footprint_x,
-      _footprint_z,
-      _height,
-      _radius,
-      _blocking,
-      _reclaimable,
-      _metal,
-      _energy,
-      _damage);
-}
-
-inline MapWaterT *MapWater::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<MapWaterT>(new MapWaterT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void MapWater::UnPackTo(MapWaterT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = base_color(); if (_e) { _o->base_color.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->base_color[_i] = _e->Get(_i); } } else { _o->base_color.resize(0); } }
-  { auto _e = surface_color(); if (_e) { _o->surface_color.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->surface_color[_i] = _e->Get(_i); } } else { _o->surface_color.resize(0); } }
-  { auto _e = min_color(); if (_e) { _o->min_color.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->min_color[_i] = _e->Get(_i); } } else { _o->min_color.resize(0); } }
-  { auto _e = surface_alpha(); _o->surface_alpha = _e; }
-  { auto _e = damage(); _o->damage = _e; }
-  { auto _e = void_water(); _o->void_water = _e; }
-}
-
-inline ::flatbuffers::Offset<MapWater> MapWater::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const MapWaterT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateMapWater(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<MapWater> CreateMapWater(::flatbuffers::FlatBufferBuilder &_fbb, const MapWaterT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const MapWaterT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _base_color = _o->base_color.size() ? _fbb.CreateVector(_o->base_color) : 0;
-  auto _surface_color = _o->surface_color.size() ? _fbb.CreateVector(_o->surface_color) : 0;
-  auto _min_color = _o->min_color.size() ? _fbb.CreateVector(_o->min_color) : 0;
-  auto _surface_alpha = _o->surface_alpha;
-  auto _damage = _o->damage;
-  auto _void_water = _o->void_water;
-  return SpringWeb::CreateMapWater(
-      _fbb,
-      _base_color,
-      _surface_color,
-      _min_color,
-      _surface_alpha,
-      _damage,
-      _void_water);
-}
-
-inline MapDecalsT *MapDecals::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<MapDecalsT>(new MapDecalsT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void MapDecals::UnPackTo(MapDecalsT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = detail_tex(); if (_e) _o->detail_tex = _e->str(); }
-  { auto _e = specular_tex(); if (_e) _o->specular_tex = _e->str(); }
-  { auto _e = splat_detail_tex(); if (_e) _o->splat_detail_tex = _e->str(); }
-  { auto _e = splat_distr_tex(); if (_e) _o->splat_distr_tex = _e->str(); }
-  { auto _e = splat_normal_0(); if (_e) _o->splat_normal_0 = _e->str(); }
-  { auto _e = splat_normal_1(); if (_e) _o->splat_normal_1 = _e->str(); }
-  { auto _e = splat_normal_2(); if (_e) _o->splat_normal_2 = _e->str(); }
-  { auto _e = splat_normal_3(); if (_e) _o->splat_normal_3 = _e->str(); }
-  { auto _e = detail_normal_tex(); if (_e) _o->detail_normal_tex = _e->str(); }
-  { auto _e = splat_scales(); if (_e) { _o->splat_scales.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->splat_scales[_i] = _e->Get(_i); } } else { _o->splat_scales.resize(0); } }
-  { auto _e = splat_mults(); if (_e) { _o->splat_mults.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->splat_mults[_i] = _e->Get(_i); } } else { _o->splat_mults.resize(0); } }
-}
-
-inline ::flatbuffers::Offset<MapDecals> MapDecals::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const MapDecalsT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateMapDecals(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<MapDecals> CreateMapDecals(::flatbuffers::FlatBufferBuilder &_fbb, const MapDecalsT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const MapDecalsT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _detail_tex = _o->detail_tex.empty() ? 0 : _fbb.CreateString(_o->detail_tex);
-  auto _specular_tex = _o->specular_tex.empty() ? 0 : _fbb.CreateString(_o->specular_tex);
-  auto _splat_detail_tex = _o->splat_detail_tex.empty() ? 0 : _fbb.CreateString(_o->splat_detail_tex);
-  auto _splat_distr_tex = _o->splat_distr_tex.empty() ? 0 : _fbb.CreateString(_o->splat_distr_tex);
-  auto _splat_normal_0 = _o->splat_normal_0.empty() ? 0 : _fbb.CreateString(_o->splat_normal_0);
-  auto _splat_normal_1 = _o->splat_normal_1.empty() ? 0 : _fbb.CreateString(_o->splat_normal_1);
-  auto _splat_normal_2 = _o->splat_normal_2.empty() ? 0 : _fbb.CreateString(_o->splat_normal_2);
-  auto _splat_normal_3 = _o->splat_normal_3.empty() ? 0 : _fbb.CreateString(_o->splat_normal_3);
-  auto _detail_normal_tex = _o->detail_normal_tex.empty() ? 0 : _fbb.CreateString(_o->detail_normal_tex);
-  auto _splat_scales = _o->splat_scales.size() ? _fbb.CreateVector(_o->splat_scales) : 0;
-  auto _splat_mults = _o->splat_mults.size() ? _fbb.CreateVector(_o->splat_mults) : 0;
-  return SpringWeb::CreateMapDecals(
-      _fbb,
-      _detail_tex,
-      _specular_tex,
-      _splat_detail_tex,
-      _splat_distr_tex,
-      _splat_normal_0,
-      _splat_normal_1,
-      _splat_normal_2,
-      _splat_normal_3,
-      _detail_normal_tex,
-      _splat_scales,
-      _splat_mults);
-}
-
-inline MapDataT::MapDataT(const MapDataT &o)
-      : mapx(o.mapx),
-        mapy(o.mapy),
-        square_size(o.square_size),
-        min_height(o.min_height),
-        max_height(o.max_height),
-        tiles_x(o.tiles_x),
-        tiles_z(o.tiles_z),
-        num_tiles(o.num_tiles),
-        tile_size(o.tile_size),
-        start_positions(o.start_positions),
-        feature_types(o.feature_types),
-        heightmap(o.heightmap),
-        tileindex(o.tileindex),
-        typemap(o.typemap),
-        metalmap(o.metalmap),
-        minimap_url(o.minimap_url),
-        tiles_url(o.tiles_url),
-        map_data_url(o.map_data_url),
-        map_source_url(o.map_source_url),
-        decals((o.decals) ? new SpringWeb::MapDecalsT(*o.decals) : nullptr),
-        water((o.water) ? new SpringWeb::MapWaterT(*o.water) : nullptr),
-        has_lua_gaia(o.has_lua_gaia),
-        widgets(o.widgets) {
-  features.reserve(o.features.size());
-  for (const auto &features_ : o.features) { features.emplace_back((features_) ? new SpringWeb::MapFeatureT(*features_) : nullptr); }
-  feature_defs.reserve(o.feature_defs.size());
-  for (const auto &feature_defs_ : o.feature_defs) { feature_defs.emplace_back((feature_defs_) ? new SpringWeb::MapFeatureDefT(*feature_defs_) : nullptr); }
-}
-
-inline MapDataT &MapDataT::operator=(MapDataT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(mapx, o.mapx);
-  std::swap(mapy, o.mapy);
-  std::swap(square_size, o.square_size);
-  std::swap(min_height, o.min_height);
-  std::swap(max_height, o.max_height);
-  std::swap(tiles_x, o.tiles_x);
-  std::swap(tiles_z, o.tiles_z);
-  std::swap(num_tiles, o.num_tiles);
-  std::swap(tile_size, o.tile_size);
-  std::swap(start_positions, o.start_positions);
-  std::swap(feature_types, o.feature_types);
-  std::swap(features, o.features);
-  std::swap(feature_defs, o.feature_defs);
-  std::swap(heightmap, o.heightmap);
-  std::swap(tileindex, o.tileindex);
-  std::swap(typemap, o.typemap);
-  std::swap(metalmap, o.metalmap);
-  std::swap(minimap_url, o.minimap_url);
-  std::swap(tiles_url, o.tiles_url);
-  std::swap(map_data_url, o.map_data_url);
-  std::swap(map_source_url, o.map_source_url);
-  std::swap(decals, o.decals);
-  std::swap(water, o.water);
-  std::swap(has_lua_gaia, o.has_lua_gaia);
-  std::swap(widgets, o.widgets);
-  return *this;
-}
-
-inline MapDataT *MapData::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<MapDataT>(new MapDataT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void MapData::UnPackTo(MapDataT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = mapx(); _o->mapx = _e; }
-  { auto _e = mapy(); _o->mapy = _e; }
-  { auto _e = square_size(); _o->square_size = _e; }
-  { auto _e = min_height(); _o->min_height = _e; }
-  { auto _e = max_height(); _o->max_height = _e; }
-  { auto _e = tiles_x(); _o->tiles_x = _e; }
-  { auto _e = tiles_z(); _o->tiles_z = _e; }
-  { auto _e = num_tiles(); _o->num_tiles = _e; }
-  { auto _e = tile_size(); _o->tile_size = _e; }
-  { auto _e = start_positions(); if (_e) { _o->start_positions.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->start_positions[_i] = *_e->Get(_i); } } else { _o->start_positions.resize(0); } }
-  { auto _e = feature_types(); if (_e) { _o->feature_types.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->feature_types[_i] = _e->Get(_i)->str(); } } else { _o->feature_types.resize(0); } }
-  { auto _e = features(); if (_e) { _o->features.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->features[_i]) { _e->Get(_i)->UnPackTo(_o->features[_i].get(), _resolver); } else { _o->features[_i] = std::unique_ptr<SpringWeb::MapFeatureT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->features.resize(0); } }
-  { auto _e = feature_defs(); if (_e) { _o->feature_defs.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->feature_defs[_i]) { _e->Get(_i)->UnPackTo(_o->feature_defs[_i].get(), _resolver); } else { _o->feature_defs[_i] = std::unique_ptr<SpringWeb::MapFeatureDefT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->feature_defs.resize(0); } }
-  { auto _e = heightmap(); if (_e) { _o->heightmap.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->heightmap[_i] = _e->Get(_i); } } else { _o->heightmap.resize(0); } }
-  { auto _e = tileindex(); if (_e) { _o->tileindex.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->tileindex[_i] = _e->Get(_i); } } else { _o->tileindex.resize(0); } }
-  { auto _e = typemap(); if (_e) { _o->typemap.resize(_e->size()); std::copy(_e->begin(), _e->end(), _o->typemap.begin()); } }
-  { auto _e = metalmap(); if (_e) { _o->metalmap.resize(_e->size()); std::copy(_e->begin(), _e->end(), _o->metalmap.begin()); } }
-  { auto _e = minimap_url(); if (_e) _o->minimap_url = _e->str(); }
-  { auto _e = tiles_url(); if (_e) _o->tiles_url = _e->str(); }
-  { auto _e = map_data_url(); if (_e) _o->map_data_url = _e->str(); }
-  { auto _e = map_source_url(); if (_e) _o->map_source_url = _e->str(); }
-  { auto _e = decals(); if (_e) { if(_o->decals) { _e->UnPackTo(_o->decals.get(), _resolver); } else { _o->decals = std::unique_ptr<SpringWeb::MapDecalsT>(_e->UnPack(_resolver)); } } else if (_o->decals) { _o->decals.reset(); } }
-  { auto _e = water(); if (_e) { if(_o->water) { _e->UnPackTo(_o->water.get(), _resolver); } else { _o->water = std::unique_ptr<SpringWeb::MapWaterT>(_e->UnPack(_resolver)); } } else if (_o->water) { _o->water.reset(); } }
-  { auto _e = has_lua_gaia(); _o->has_lua_gaia = _e; }
-  { auto _e = widgets(); if (_e) { _o->widgets.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->widgets[_i] = _e->Get(_i)->str(); } } else { _o->widgets.resize(0); } }
-}
-
-inline ::flatbuffers::Offset<MapData> MapData::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const MapDataT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateMapData(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<MapData> CreateMapData(::flatbuffers::FlatBufferBuilder &_fbb, const MapDataT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const MapDataT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _mapx = _o->mapx;
-  auto _mapy = _o->mapy;
-  auto _square_size = _o->square_size;
-  auto _min_height = _o->min_height;
-  auto _max_height = _o->max_height;
-  auto _tiles_x = _o->tiles_x;
-  auto _tiles_z = _o->tiles_z;
-  auto _num_tiles = _o->num_tiles;
-  auto _tile_size = _o->tile_size;
-  auto _start_positions = _o->start_positions.size() ? _fbb.CreateVectorOfStructs(_o->start_positions) : 0;
-  auto _feature_types = _o->feature_types.size() ? _fbb.CreateVectorOfStrings(_o->feature_types) : 0;
-  auto _features = _o->features.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::MapFeature>> (_o->features.size(), [](size_t i, _VectorArgs *__va) { return CreateMapFeature(*__va->__fbb, __va->__o->features[i].get(), __va->__rehasher); }, &_va ) : 0;
-  auto _feature_defs = _o->feature_defs.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::MapFeatureDef>> (_o->feature_defs.size(), [](size_t i, _VectorArgs *__va) { return CreateMapFeatureDef(*__va->__fbb, __va->__o->feature_defs[i].get(), __va->__rehasher); }, &_va ) : 0;
-  auto _heightmap = _o->heightmap.size() ? _fbb.CreateVector(_o->heightmap) : 0;
-  auto _tileindex = _o->tileindex.size() ? _fbb.CreateVector(_o->tileindex) : 0;
-  auto _typemap = _o->typemap.size() ? _fbb.CreateVector(_o->typemap) : 0;
-  auto _metalmap = _o->metalmap.size() ? _fbb.CreateVector(_o->metalmap) : 0;
-  auto _minimap_url = _o->minimap_url.empty() ? 0 : _fbb.CreateString(_o->minimap_url);
-  auto _tiles_url = _o->tiles_url.empty() ? 0 : _fbb.CreateString(_o->tiles_url);
-  auto _map_data_url = _o->map_data_url.empty() ? 0 : _fbb.CreateString(_o->map_data_url);
-  auto _map_source_url = _o->map_source_url.empty() ? 0 : _fbb.CreateString(_o->map_source_url);
-  auto _decals = _o->decals ? CreateMapDecals(_fbb, _o->decals.get(), _rehasher) : 0;
-  auto _water = _o->water ? CreateMapWater(_fbb, _o->water.get(), _rehasher) : 0;
-  auto _has_lua_gaia = _o->has_lua_gaia;
-  auto _widgets = _o->widgets.size() ? _fbb.CreateVectorOfStrings(_o->widgets) : 0;
-  return SpringWeb::CreateMapData(
-      _fbb,
-      _mapx,
-      _mapy,
-      _square_size,
-      _min_height,
-      _max_height,
-      _tiles_x,
-      _tiles_z,
-      _num_tiles,
-      _tile_size,
-      _start_positions,
-      _feature_types,
-      _features,
-      _feature_defs,
-      _heightmap,
-      _tileindex,
-      _typemap,
-      _metalmap,
-      _minimap_url,
-      _tiles_url,
-      _map_data_url,
-      _map_source_url,
-      _decals,
-      _water,
-      _has_lua_gaia,
-      _widgets);
-}
-
-inline ServerMessageT *ServerMessage::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::unique_ptr<ServerMessageT>(new ServerMessageT());
-  UnPackTo(_o.get(), _resolver);
-  return _o.release();
-}
-
-inline void ServerMessage::UnPackTo(ServerMessageT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
-  (void)_o;
-  (void)_resolver;
-  { auto _e = payload_type(); _o->payload.type = _e; }
-  { auto _e = payload(); if (_e) _o->payload.value = SpringWeb::ServerPayloadUnion::UnPack(_e, payload_type(), _resolver); }
-}
-
-inline ::flatbuffers::Offset<ServerMessage> ServerMessage::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ServerMessageT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return CreateServerMessage(_fbb, _o, _rehasher);
-}
-
-inline ::flatbuffers::Offset<ServerMessage> CreateServerMessage(::flatbuffers::FlatBufferBuilder &_fbb, const ServerMessageT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  (void)_rehasher;
-  (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const ServerMessageT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _payload_type = _o->payload.type;
-  auto _payload = _o->payload.Pack(_fbb);
-  return SpringWeb::CreateServerMessage(
-      _fbb,
-      _payload_type,
-      _payload);
-}
-
 inline bool VerifyClientPayload(::flatbuffers::Verifier &verifier, const void *obj, ClientPayload type) {
   switch (type) {
     case ClientPayload_NONE: {
@@ -11692,494 +7242,6 @@ inline bool VerifyClientPayloadVector(::flatbuffers::Verifier &verifier, const :
   return true;
 }
 
-inline void *ClientPayloadUnion::UnPack(const void *obj, ClientPayload type, const ::flatbuffers::resolver_function_t *resolver) {
-  (void)resolver;
-  switch (type) {
-    case ClientPayload_Handshake: {
-      auto ptr = reinterpret_cast<const SpringWeb::Handshake *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_AuthRequest: {
-      auto ptr = reinterpret_cast<const SpringWeb::AuthRequest *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_PlayerCommand: {
-      auto ptr = reinterpret_cast<const SpringWeb::PlayerCommand *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_ViewportUpdate: {
-      auto ptr = reinterpret_cast<const SpringWeb::ViewportUpdate *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_Ping: {
-      auto ptr = reinterpret_cast<const SpringWeb::Ping *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_ChatSend: {
-      auto ptr = reinterpret_cast<const SpringWeb::ChatSend *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_Ack: {
-      auto ptr = reinterpret_cast<const SpringWeb::Ack *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_ReconnectRequest: {
-      auto ptr = reinterpret_cast<const SpringWeb::ReconnectRequest *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_RoomCreate: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomCreate *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_RoomJoin: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomJoin *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_RoomLeave: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomLeave *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_RoomTeamSelect: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomTeamSelect *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_RoomReady: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomReady *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_RoomKick: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomKick *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_RoomStartGame: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomStartGame *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_RoomEndGame: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomEndGame *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_RoomAddAI: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomAddAI *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_RoomRemoveAI: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomRemoveAI *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_AIListRequest: {
-      auto ptr = reinterpret_cast<const SpringWeb::AIListRequest *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_GameListRequest: {
-      auto ptr = reinterpret_cast<const SpringWeb::GameListRequest *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_RoomSetStartPos: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomSetStartPos *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_RoomCloseRoom: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomCloseRoom *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_RoomSetAITeam: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomSetAITeam *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_LogIngest: {
-      auto ptr = reinterpret_cast<const SpringWeb::LogIngest *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_LogSubscribe: {
-      auto ptr = reinterpret_cast<const SpringWeb::LogSubscribe *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_LogUnsubscribe: {
-      auto ptr = reinterpret_cast<const SpringWeb::LogUnsubscribe *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ClientPayload_ConsoleCommand: {
-      auto ptr = reinterpret_cast<const SpringWeb::ConsoleCommand *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    default: return nullptr;
-  }
-}
-
-inline ::flatbuffers::Offset<void> ClientPayloadUnion::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ::flatbuffers::rehasher_function_t *_rehasher) const {
-  (void)_rehasher;
-  switch (type) {
-    case ClientPayload_Handshake: {
-      auto ptr = reinterpret_cast<const SpringWeb::HandshakeT *>(value);
-      return CreateHandshake(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_AuthRequest: {
-      auto ptr = reinterpret_cast<const SpringWeb::AuthRequestT *>(value);
-      return CreateAuthRequest(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_PlayerCommand: {
-      auto ptr = reinterpret_cast<const SpringWeb::PlayerCommandT *>(value);
-      return CreatePlayerCommand(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_ViewportUpdate: {
-      auto ptr = reinterpret_cast<const SpringWeb::ViewportUpdateT *>(value);
-      return CreateViewportUpdate(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_Ping: {
-      auto ptr = reinterpret_cast<const SpringWeb::PingT *>(value);
-      return CreatePing(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_ChatSend: {
-      auto ptr = reinterpret_cast<const SpringWeb::ChatSendT *>(value);
-      return CreateChatSend(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_Ack: {
-      auto ptr = reinterpret_cast<const SpringWeb::AckT *>(value);
-      return CreateAck(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_ReconnectRequest: {
-      auto ptr = reinterpret_cast<const SpringWeb::ReconnectRequestT *>(value);
-      return CreateReconnectRequest(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_RoomCreate: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomCreateT *>(value);
-      return CreateRoomCreate(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_RoomJoin: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomJoinT *>(value);
-      return CreateRoomJoin(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_RoomLeave: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomLeaveT *>(value);
-      return CreateRoomLeave(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_RoomTeamSelect: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomTeamSelectT *>(value);
-      return CreateRoomTeamSelect(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_RoomReady: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomReadyT *>(value);
-      return CreateRoomReady(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_RoomKick: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomKickT *>(value);
-      return CreateRoomKick(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_RoomStartGame: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomStartGameT *>(value);
-      return CreateRoomStartGame(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_RoomEndGame: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomEndGameT *>(value);
-      return CreateRoomEndGame(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_RoomAddAI: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomAddAIT *>(value);
-      return CreateRoomAddAI(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_RoomRemoveAI: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomRemoveAIT *>(value);
-      return CreateRoomRemoveAI(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_AIListRequest: {
-      auto ptr = reinterpret_cast<const SpringWeb::AIListRequestT *>(value);
-      return CreateAIListRequest(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_GameListRequest: {
-      auto ptr = reinterpret_cast<const SpringWeb::GameListRequestT *>(value);
-      return CreateGameListRequest(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_RoomSetStartPos: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomSetStartPosT *>(value);
-      return CreateRoomSetStartPos(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_RoomCloseRoom: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomCloseRoomT *>(value);
-      return CreateRoomCloseRoom(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_RoomSetAITeam: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomSetAITeamT *>(value);
-      return CreateRoomSetAITeam(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_LogIngest: {
-      auto ptr = reinterpret_cast<const SpringWeb::LogIngestT *>(value);
-      return CreateLogIngest(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_LogSubscribe: {
-      auto ptr = reinterpret_cast<const SpringWeb::LogSubscribeT *>(value);
-      return CreateLogSubscribe(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_LogUnsubscribe: {
-      auto ptr = reinterpret_cast<const SpringWeb::LogUnsubscribeT *>(value);
-      return CreateLogUnsubscribe(_fbb, ptr, _rehasher).Union();
-    }
-    case ClientPayload_ConsoleCommand: {
-      auto ptr = reinterpret_cast<const SpringWeb::ConsoleCommandT *>(value);
-      return CreateConsoleCommand(_fbb, ptr, _rehasher).Union();
-    }
-    default: return 0;
-  }
-}
-
-inline ClientPayloadUnion::ClientPayloadUnion(const ClientPayloadUnion &u) : type(u.type), value(nullptr) {
-  switch (type) {
-    case ClientPayload_Handshake: {
-      value = new SpringWeb::HandshakeT(*reinterpret_cast<SpringWeb::HandshakeT *>(u.value));
-      break;
-    }
-    case ClientPayload_AuthRequest: {
-      value = new SpringWeb::AuthRequestT(*reinterpret_cast<SpringWeb::AuthRequestT *>(u.value));
-      break;
-    }
-    case ClientPayload_PlayerCommand: {
-      value = new SpringWeb::PlayerCommandT(*reinterpret_cast<SpringWeb::PlayerCommandT *>(u.value));
-      break;
-    }
-    case ClientPayload_ViewportUpdate: {
-      value = new SpringWeb::ViewportUpdateT(*reinterpret_cast<SpringWeb::ViewportUpdateT *>(u.value));
-      break;
-    }
-    case ClientPayload_Ping: {
-      value = new SpringWeb::PingT(*reinterpret_cast<SpringWeb::PingT *>(u.value));
-      break;
-    }
-    case ClientPayload_ChatSend: {
-      value = new SpringWeb::ChatSendT(*reinterpret_cast<SpringWeb::ChatSendT *>(u.value));
-      break;
-    }
-    case ClientPayload_Ack: {
-      value = new SpringWeb::AckT(*reinterpret_cast<SpringWeb::AckT *>(u.value));
-      break;
-    }
-    case ClientPayload_ReconnectRequest: {
-      value = new SpringWeb::ReconnectRequestT(*reinterpret_cast<SpringWeb::ReconnectRequestT *>(u.value));
-      break;
-    }
-    case ClientPayload_RoomCreate: {
-      value = new SpringWeb::RoomCreateT(*reinterpret_cast<SpringWeb::RoomCreateT *>(u.value));
-      break;
-    }
-    case ClientPayload_RoomJoin: {
-      value = new SpringWeb::RoomJoinT(*reinterpret_cast<SpringWeb::RoomJoinT *>(u.value));
-      break;
-    }
-    case ClientPayload_RoomLeave: {
-      value = new SpringWeb::RoomLeaveT(*reinterpret_cast<SpringWeb::RoomLeaveT *>(u.value));
-      break;
-    }
-    case ClientPayload_RoomTeamSelect: {
-      value = new SpringWeb::RoomTeamSelectT(*reinterpret_cast<SpringWeb::RoomTeamSelectT *>(u.value));
-      break;
-    }
-    case ClientPayload_RoomReady: {
-      value = new SpringWeb::RoomReadyT(*reinterpret_cast<SpringWeb::RoomReadyT *>(u.value));
-      break;
-    }
-    case ClientPayload_RoomKick: {
-      value = new SpringWeb::RoomKickT(*reinterpret_cast<SpringWeb::RoomKickT *>(u.value));
-      break;
-    }
-    case ClientPayload_RoomStartGame: {
-      value = new SpringWeb::RoomStartGameT(*reinterpret_cast<SpringWeb::RoomStartGameT *>(u.value));
-      break;
-    }
-    case ClientPayload_RoomEndGame: {
-      value = new SpringWeb::RoomEndGameT(*reinterpret_cast<SpringWeb::RoomEndGameT *>(u.value));
-      break;
-    }
-    case ClientPayload_RoomAddAI: {
-      value = new SpringWeb::RoomAddAIT(*reinterpret_cast<SpringWeb::RoomAddAIT *>(u.value));
-      break;
-    }
-    case ClientPayload_RoomRemoveAI: {
-      value = new SpringWeb::RoomRemoveAIT(*reinterpret_cast<SpringWeb::RoomRemoveAIT *>(u.value));
-      break;
-    }
-    case ClientPayload_AIListRequest: {
-      value = new SpringWeb::AIListRequestT(*reinterpret_cast<SpringWeb::AIListRequestT *>(u.value));
-      break;
-    }
-    case ClientPayload_GameListRequest: {
-      value = new SpringWeb::GameListRequestT(*reinterpret_cast<SpringWeb::GameListRequestT *>(u.value));
-      break;
-    }
-    case ClientPayload_RoomSetStartPos: {
-      value = new SpringWeb::RoomSetStartPosT(*reinterpret_cast<SpringWeb::RoomSetStartPosT *>(u.value));
-      break;
-    }
-    case ClientPayload_RoomCloseRoom: {
-      value = new SpringWeb::RoomCloseRoomT(*reinterpret_cast<SpringWeb::RoomCloseRoomT *>(u.value));
-      break;
-    }
-    case ClientPayload_RoomSetAITeam: {
-      value = new SpringWeb::RoomSetAITeamT(*reinterpret_cast<SpringWeb::RoomSetAITeamT *>(u.value));
-      break;
-    }
-    case ClientPayload_LogIngest: {
-      value = new SpringWeb::LogIngestT(*reinterpret_cast<SpringWeb::LogIngestT *>(u.value));
-      break;
-    }
-    case ClientPayload_LogSubscribe: {
-      value = new SpringWeb::LogSubscribeT(*reinterpret_cast<SpringWeb::LogSubscribeT *>(u.value));
-      break;
-    }
-    case ClientPayload_LogUnsubscribe: {
-      value = new SpringWeb::LogUnsubscribeT(*reinterpret_cast<SpringWeb::LogUnsubscribeT *>(u.value));
-      break;
-    }
-    case ClientPayload_ConsoleCommand: {
-      value = new SpringWeb::ConsoleCommandT(*reinterpret_cast<SpringWeb::ConsoleCommandT *>(u.value));
-      break;
-    }
-    default:
-      break;
-  }
-}
-
-inline void ClientPayloadUnion::Reset() {
-  switch (type) {
-    case ClientPayload_Handshake: {
-      auto ptr = reinterpret_cast<SpringWeb::HandshakeT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_AuthRequest: {
-      auto ptr = reinterpret_cast<SpringWeb::AuthRequestT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_PlayerCommand: {
-      auto ptr = reinterpret_cast<SpringWeb::PlayerCommandT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_ViewportUpdate: {
-      auto ptr = reinterpret_cast<SpringWeb::ViewportUpdateT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_Ping: {
-      auto ptr = reinterpret_cast<SpringWeb::PingT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_ChatSend: {
-      auto ptr = reinterpret_cast<SpringWeb::ChatSendT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_Ack: {
-      auto ptr = reinterpret_cast<SpringWeb::AckT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_ReconnectRequest: {
-      auto ptr = reinterpret_cast<SpringWeb::ReconnectRequestT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_RoomCreate: {
-      auto ptr = reinterpret_cast<SpringWeb::RoomCreateT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_RoomJoin: {
-      auto ptr = reinterpret_cast<SpringWeb::RoomJoinT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_RoomLeave: {
-      auto ptr = reinterpret_cast<SpringWeb::RoomLeaveT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_RoomTeamSelect: {
-      auto ptr = reinterpret_cast<SpringWeb::RoomTeamSelectT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_RoomReady: {
-      auto ptr = reinterpret_cast<SpringWeb::RoomReadyT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_RoomKick: {
-      auto ptr = reinterpret_cast<SpringWeb::RoomKickT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_RoomStartGame: {
-      auto ptr = reinterpret_cast<SpringWeb::RoomStartGameT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_RoomEndGame: {
-      auto ptr = reinterpret_cast<SpringWeb::RoomEndGameT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_RoomAddAI: {
-      auto ptr = reinterpret_cast<SpringWeb::RoomAddAIT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_RoomRemoveAI: {
-      auto ptr = reinterpret_cast<SpringWeb::RoomRemoveAIT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_AIListRequest: {
-      auto ptr = reinterpret_cast<SpringWeb::AIListRequestT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_GameListRequest: {
-      auto ptr = reinterpret_cast<SpringWeb::GameListRequestT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_RoomSetStartPos: {
-      auto ptr = reinterpret_cast<SpringWeb::RoomSetStartPosT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_RoomCloseRoom: {
-      auto ptr = reinterpret_cast<SpringWeb::RoomCloseRoomT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_RoomSetAITeam: {
-      auto ptr = reinterpret_cast<SpringWeb::RoomSetAITeamT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_LogIngest: {
-      auto ptr = reinterpret_cast<SpringWeb::LogIngestT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_LogSubscribe: {
-      auto ptr = reinterpret_cast<SpringWeb::LogSubscribeT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_LogUnsubscribe: {
-      auto ptr = reinterpret_cast<SpringWeb::LogUnsubscribeT *>(value);
-      delete ptr;
-      break;
-    }
-    case ClientPayload_ConsoleCommand: {
-      auto ptr = reinterpret_cast<SpringWeb::ConsoleCommandT *>(value);
-      delete ptr;
-      break;
-    }
-    default: break;
-  }
-  value = nullptr;
-  type = ClientPayload_NONE;
-}
-
 inline bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *obj, ServerPayload type) {
   switch (type) {
     case ServerPayload_NONE: {
@@ -12301,460 +7363,6 @@ inline bool VerifyServerPayloadVector(::flatbuffers::Verifier &verifier, const :
   return true;
 }
 
-inline void *ServerPayloadUnion::UnPack(const void *obj, ServerPayload type, const ::flatbuffers::resolver_function_t *resolver) {
-  (void)resolver;
-  switch (type) {
-    case ServerPayload_AuthResponse: {
-      auto ptr = reinterpret_cast<const SpringWeb::AuthResponse *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_EntityCreate: {
-      auto ptr = reinterpret_cast<const SpringWeb::EntityCreate *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_EntityDestroy: {
-      auto ptr = reinterpret_cast<const SpringWeb::EntityDestroy *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_GameEventBatch: {
-      auto ptr = reinterpret_cast<const SpringWeb::GameEventBatch *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_ResourceUpdate: {
-      auto ptr = reinterpret_cast<const SpringWeb::ResourceUpdate *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_Pong: {
-      auto ptr = reinterpret_cast<const SpringWeb::Pong *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_ChatReceive: {
-      auto ptr = reinterpret_cast<const SpringWeb::ChatReceive *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_GameInfo: {
-      auto ptr = reinterpret_cast<const SpringWeb::GameInfo *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_ReconnectResponse: {
-      auto ptr = reinterpret_cast<const SpringWeb::ReconnectResponse *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_ServerError: {
-      auto ptr = reinterpret_cast<const SpringWeb::ServerError *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_RoomListUpdate: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomListUpdate *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_RoomStateUpdate: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomStateUpdate *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_RoomPlayerJoined: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomPlayerJoined *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_RoomPlayerLeft: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomPlayerLeft *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_MapListUpdate: {
-      auto ptr = reinterpret_cast<const SpringWeb::MapListUpdate *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_MapData: {
-      auto ptr = reinterpret_cast<const SpringWeb::MapData *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_AIListUpdate: {
-      auto ptr = reinterpret_cast<const SpringWeb::AIListUpdate *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_GameListUpdate: {
-      auto ptr = reinterpret_cast<const SpringWeb::GameListUpdate *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_GameUnitDefs: {
-      auto ptr = reinterpret_cast<const SpringWeb::GameUnitDefs *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_PlayerLeft: {
-      auto ptr = reinterpret_cast<const SpringWeb::PlayerLeft *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_GameWeaponDefs: {
-      auto ptr = reinterpret_cast<const SpringWeb::GameWeaponDefs *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_LogBatch: {
-      auto ptr = reinterpret_cast<const SpringWeb::LogBatch *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_ConsoleResponse: {
-      auto ptr = reinterpret_cast<const SpringWeb::ConsoleResponse *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_GameStarted: {
-      auto ptr = reinterpret_cast<const SpringWeb::GameStarted *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    case ServerPayload_GameRestarting: {
-      auto ptr = reinterpret_cast<const SpringWeb::GameRestarting *>(obj);
-      return ptr->UnPack(resolver);
-    }
-    default: return nullptr;
-  }
-}
-
-inline ::flatbuffers::Offset<void> ServerPayloadUnion::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ::flatbuffers::rehasher_function_t *_rehasher) const {
-  (void)_rehasher;
-  switch (type) {
-    case ServerPayload_AuthResponse: {
-      auto ptr = reinterpret_cast<const SpringWeb::AuthResponseT *>(value);
-      return CreateAuthResponse(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_EntityCreate: {
-      auto ptr = reinterpret_cast<const SpringWeb::EntityCreateT *>(value);
-      return CreateEntityCreate(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_EntityDestroy: {
-      auto ptr = reinterpret_cast<const SpringWeb::EntityDestroyT *>(value);
-      return CreateEntityDestroy(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_GameEventBatch: {
-      auto ptr = reinterpret_cast<const SpringWeb::GameEventBatchT *>(value);
-      return CreateGameEventBatch(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_ResourceUpdate: {
-      auto ptr = reinterpret_cast<const SpringWeb::ResourceUpdateT *>(value);
-      return CreateResourceUpdate(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_Pong: {
-      auto ptr = reinterpret_cast<const SpringWeb::PongT *>(value);
-      return CreatePong(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_ChatReceive: {
-      auto ptr = reinterpret_cast<const SpringWeb::ChatReceiveT *>(value);
-      return CreateChatReceive(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_GameInfo: {
-      auto ptr = reinterpret_cast<const SpringWeb::GameInfoT *>(value);
-      return CreateGameInfo(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_ReconnectResponse: {
-      auto ptr = reinterpret_cast<const SpringWeb::ReconnectResponseT *>(value);
-      return CreateReconnectResponse(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_ServerError: {
-      auto ptr = reinterpret_cast<const SpringWeb::ServerErrorT *>(value);
-      return CreateServerError(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_RoomListUpdate: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomListUpdateT *>(value);
-      return CreateRoomListUpdate(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_RoomStateUpdate: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomStateUpdateT *>(value);
-      return CreateRoomStateUpdate(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_RoomPlayerJoined: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomPlayerJoinedT *>(value);
-      return CreateRoomPlayerJoined(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_RoomPlayerLeft: {
-      auto ptr = reinterpret_cast<const SpringWeb::RoomPlayerLeftT *>(value);
-      return CreateRoomPlayerLeft(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_MapListUpdate: {
-      auto ptr = reinterpret_cast<const SpringWeb::MapListUpdateT *>(value);
-      return CreateMapListUpdate(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_MapData: {
-      auto ptr = reinterpret_cast<const SpringWeb::MapDataT *>(value);
-      return CreateMapData(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_AIListUpdate: {
-      auto ptr = reinterpret_cast<const SpringWeb::AIListUpdateT *>(value);
-      return CreateAIListUpdate(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_GameListUpdate: {
-      auto ptr = reinterpret_cast<const SpringWeb::GameListUpdateT *>(value);
-      return CreateGameListUpdate(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_GameUnitDefs: {
-      auto ptr = reinterpret_cast<const SpringWeb::GameUnitDefsT *>(value);
-      return CreateGameUnitDefs(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_PlayerLeft: {
-      auto ptr = reinterpret_cast<const SpringWeb::PlayerLeftT *>(value);
-      return CreatePlayerLeft(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_GameWeaponDefs: {
-      auto ptr = reinterpret_cast<const SpringWeb::GameWeaponDefsT *>(value);
-      return CreateGameWeaponDefs(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_LogBatch: {
-      auto ptr = reinterpret_cast<const SpringWeb::LogBatchT *>(value);
-      return CreateLogBatch(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_ConsoleResponse: {
-      auto ptr = reinterpret_cast<const SpringWeb::ConsoleResponseT *>(value);
-      return CreateConsoleResponse(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_GameStarted: {
-      auto ptr = reinterpret_cast<const SpringWeb::GameStartedT *>(value);
-      return CreateGameStarted(_fbb, ptr, _rehasher).Union();
-    }
-    case ServerPayload_GameRestarting: {
-      auto ptr = reinterpret_cast<const SpringWeb::GameRestartingT *>(value);
-      return CreateGameRestarting(_fbb, ptr, _rehasher).Union();
-    }
-    default: return 0;
-  }
-}
-
-inline ServerPayloadUnion::ServerPayloadUnion(const ServerPayloadUnion &u) : type(u.type), value(nullptr) {
-  switch (type) {
-    case ServerPayload_AuthResponse: {
-      value = new SpringWeb::AuthResponseT(*reinterpret_cast<SpringWeb::AuthResponseT *>(u.value));
-      break;
-    }
-    case ServerPayload_EntityCreate: {
-      value = new SpringWeb::EntityCreateT(*reinterpret_cast<SpringWeb::EntityCreateT *>(u.value));
-      break;
-    }
-    case ServerPayload_EntityDestroy: {
-      value = new SpringWeb::EntityDestroyT(*reinterpret_cast<SpringWeb::EntityDestroyT *>(u.value));
-      break;
-    }
-    case ServerPayload_GameEventBatch: {
-      value = new SpringWeb::GameEventBatchT(*reinterpret_cast<SpringWeb::GameEventBatchT *>(u.value));
-      break;
-    }
-    case ServerPayload_ResourceUpdate: {
-      value = new SpringWeb::ResourceUpdateT(*reinterpret_cast<SpringWeb::ResourceUpdateT *>(u.value));
-      break;
-    }
-    case ServerPayload_Pong: {
-      value = new SpringWeb::PongT(*reinterpret_cast<SpringWeb::PongT *>(u.value));
-      break;
-    }
-    case ServerPayload_ChatReceive: {
-      value = new SpringWeb::ChatReceiveT(*reinterpret_cast<SpringWeb::ChatReceiveT *>(u.value));
-      break;
-    }
-    case ServerPayload_GameInfo: {
-      value = new SpringWeb::GameInfoT(*reinterpret_cast<SpringWeb::GameInfoT *>(u.value));
-      break;
-    }
-    case ServerPayload_ReconnectResponse: {
-      value = new SpringWeb::ReconnectResponseT(*reinterpret_cast<SpringWeb::ReconnectResponseT *>(u.value));
-      break;
-    }
-    case ServerPayload_ServerError: {
-      value = new SpringWeb::ServerErrorT(*reinterpret_cast<SpringWeb::ServerErrorT *>(u.value));
-      break;
-    }
-    case ServerPayload_RoomListUpdate: {
-      value = new SpringWeb::RoomListUpdateT(*reinterpret_cast<SpringWeb::RoomListUpdateT *>(u.value));
-      break;
-    }
-    case ServerPayload_RoomStateUpdate: {
-      value = new SpringWeb::RoomStateUpdateT(*reinterpret_cast<SpringWeb::RoomStateUpdateT *>(u.value));
-      break;
-    }
-    case ServerPayload_RoomPlayerJoined: {
-      value = new SpringWeb::RoomPlayerJoinedT(*reinterpret_cast<SpringWeb::RoomPlayerJoinedT *>(u.value));
-      break;
-    }
-    case ServerPayload_RoomPlayerLeft: {
-      value = new SpringWeb::RoomPlayerLeftT(*reinterpret_cast<SpringWeb::RoomPlayerLeftT *>(u.value));
-      break;
-    }
-    case ServerPayload_MapListUpdate: {
-      value = new SpringWeb::MapListUpdateT(*reinterpret_cast<SpringWeb::MapListUpdateT *>(u.value));
-      break;
-    }
-    case ServerPayload_MapData: {
-      value = new SpringWeb::MapDataT(*reinterpret_cast<SpringWeb::MapDataT *>(u.value));
-      break;
-    }
-    case ServerPayload_AIListUpdate: {
-      value = new SpringWeb::AIListUpdateT(*reinterpret_cast<SpringWeb::AIListUpdateT *>(u.value));
-      break;
-    }
-    case ServerPayload_GameListUpdate: {
-      value = new SpringWeb::GameListUpdateT(*reinterpret_cast<SpringWeb::GameListUpdateT *>(u.value));
-      break;
-    }
-    case ServerPayload_GameUnitDefs: {
-      value = new SpringWeb::GameUnitDefsT(*reinterpret_cast<SpringWeb::GameUnitDefsT *>(u.value));
-      break;
-    }
-    case ServerPayload_PlayerLeft: {
-      value = new SpringWeb::PlayerLeftT(*reinterpret_cast<SpringWeb::PlayerLeftT *>(u.value));
-      break;
-    }
-    case ServerPayload_GameWeaponDefs: {
-      value = new SpringWeb::GameWeaponDefsT(*reinterpret_cast<SpringWeb::GameWeaponDefsT *>(u.value));
-      break;
-    }
-    case ServerPayload_LogBatch: {
-      value = new SpringWeb::LogBatchT(*reinterpret_cast<SpringWeb::LogBatchT *>(u.value));
-      break;
-    }
-    case ServerPayload_ConsoleResponse: {
-      value = new SpringWeb::ConsoleResponseT(*reinterpret_cast<SpringWeb::ConsoleResponseT *>(u.value));
-      break;
-    }
-    case ServerPayload_GameStarted: {
-      value = new SpringWeb::GameStartedT(*reinterpret_cast<SpringWeb::GameStartedT *>(u.value));
-      break;
-    }
-    case ServerPayload_GameRestarting: {
-      value = new SpringWeb::GameRestartingT(*reinterpret_cast<SpringWeb::GameRestartingT *>(u.value));
-      break;
-    }
-    default:
-      break;
-  }
-}
-
-inline void ServerPayloadUnion::Reset() {
-  switch (type) {
-    case ServerPayload_AuthResponse: {
-      auto ptr = reinterpret_cast<SpringWeb::AuthResponseT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_EntityCreate: {
-      auto ptr = reinterpret_cast<SpringWeb::EntityCreateT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_EntityDestroy: {
-      auto ptr = reinterpret_cast<SpringWeb::EntityDestroyT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_GameEventBatch: {
-      auto ptr = reinterpret_cast<SpringWeb::GameEventBatchT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_ResourceUpdate: {
-      auto ptr = reinterpret_cast<SpringWeb::ResourceUpdateT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_Pong: {
-      auto ptr = reinterpret_cast<SpringWeb::PongT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_ChatReceive: {
-      auto ptr = reinterpret_cast<SpringWeb::ChatReceiveT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_GameInfo: {
-      auto ptr = reinterpret_cast<SpringWeb::GameInfoT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_ReconnectResponse: {
-      auto ptr = reinterpret_cast<SpringWeb::ReconnectResponseT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_ServerError: {
-      auto ptr = reinterpret_cast<SpringWeb::ServerErrorT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_RoomListUpdate: {
-      auto ptr = reinterpret_cast<SpringWeb::RoomListUpdateT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_RoomStateUpdate: {
-      auto ptr = reinterpret_cast<SpringWeb::RoomStateUpdateT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_RoomPlayerJoined: {
-      auto ptr = reinterpret_cast<SpringWeb::RoomPlayerJoinedT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_RoomPlayerLeft: {
-      auto ptr = reinterpret_cast<SpringWeb::RoomPlayerLeftT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_MapListUpdate: {
-      auto ptr = reinterpret_cast<SpringWeb::MapListUpdateT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_MapData: {
-      auto ptr = reinterpret_cast<SpringWeb::MapDataT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_AIListUpdate: {
-      auto ptr = reinterpret_cast<SpringWeb::AIListUpdateT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_GameListUpdate: {
-      auto ptr = reinterpret_cast<SpringWeb::GameListUpdateT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_GameUnitDefs: {
-      auto ptr = reinterpret_cast<SpringWeb::GameUnitDefsT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_PlayerLeft: {
-      auto ptr = reinterpret_cast<SpringWeb::PlayerLeftT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_GameWeaponDefs: {
-      auto ptr = reinterpret_cast<SpringWeb::GameWeaponDefsT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_LogBatch: {
-      auto ptr = reinterpret_cast<SpringWeb::LogBatchT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_ConsoleResponse: {
-      auto ptr = reinterpret_cast<SpringWeb::ConsoleResponseT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_GameStarted: {
-      auto ptr = reinterpret_cast<SpringWeb::GameStartedT *>(value);
-      delete ptr;
-      break;
-    }
-    case ServerPayload_GameRestarting: {
-      auto ptr = reinterpret_cast<SpringWeb::GameRestartingT *>(value);
-      delete ptr;
-      break;
-    }
-    default: break;
-  }
-  value = nullptr;
-  type = ServerPayload_NONE;
-}
-
 inline const SpringWeb::ClientMessage *GetClientMessage(const void *buf) {
   return ::flatbuffers::GetRoot<SpringWeb::ClientMessage>(buf);
 }
@@ -12783,18 +7391,6 @@ inline void FinishSizePrefixedClientMessageBuffer(
     ::flatbuffers::FlatBufferBuilder &fbb,
     ::flatbuffers::Offset<SpringWeb::ClientMessage> root) {
   fbb.FinishSizePrefixed(root);
-}
-
-inline std::unique_ptr<SpringWeb::ClientMessageT> UnPackClientMessage(
-    const void *buf,
-    const ::flatbuffers::resolver_function_t *res = nullptr) {
-  return std::unique_ptr<SpringWeb::ClientMessageT>(GetClientMessage(buf)->UnPack(res));
-}
-
-inline std::unique_ptr<SpringWeb::ClientMessageT> UnPackSizePrefixedClientMessage(
-    const void *buf,
-    const ::flatbuffers::resolver_function_t *res = nullptr) {
-  return std::unique_ptr<SpringWeb::ClientMessageT>(GetSizePrefixedClientMessage(buf)->UnPack(res));
 }
 
 }  // namespace SpringWeb

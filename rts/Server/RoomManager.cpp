@@ -10,7 +10,7 @@
 
 uint32_t RoomManager::CreateRoom(
     const std::string& name, const std::string& mapName,
-    const std::string& gameName, uint8_t maxPlayers,
+    const std::string& gameId, uint8_t maxPlayers,
     const std::string& password,
     uint32_t hostPlayerId, ClientID hostClientId,
     const std::string& hostUsername)
@@ -22,7 +22,7 @@ uint32_t RoomManager::CreateRoom(
     room.id = id;
     room.name = name;
     room.mapName = mapName;
-    room.gameName = gameName;
+    room.gameId = gameId;
     room.maxPlayers = maxPlayers;
     room.password = password;
     room.hostPlayerId = hostPlayerId;

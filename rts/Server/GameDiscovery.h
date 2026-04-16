@@ -1,4 +1,4 @@
-// GameDiscovery — enumerate game plugins under content/games.
+// GameDiscovery — enumerate game plugins under the games directory.
 //
 // A "game" is a folder that contains (at minimum) a `modinfo.lua`
 // file following Spring's standard shape:
@@ -48,13 +48,12 @@ struct GameInfo {
     /// May be empty.
     std::string version;
 
-    /// Absolute path to the game folder on disk (e.g. "content/games/papertanks").
-    /// This is what gets passed to spawnGameServer as --game and to
-    /// AIDiscovery as the game root.
+    /// Absolute path to the game folder on disk (e.g. "data/games/papertanks").
+    /// Used for content loading and AI discovery.
     std::string folderPath;
 };
 
-/// Scan `gamesDir` (default: content/games) for subdirectories
+/// Scan `gamesDir` (default: data/games) for subdirectories
 /// containing a `modinfo.lua`, parse each, and return a sorted
 /// vector of `GameInfo`. Missing `gamesDir` returns an empty
 /// vector — the lobby will still run, it just has no games to

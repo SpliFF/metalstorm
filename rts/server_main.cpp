@@ -118,7 +118,8 @@ int main(int argc, char* argv[])
     std::signal(SIGPIPE, SIG_IGN);
 
     int port = 9001;
-    std::string gamePath;
+    std::string gameId;
+    std::string gamesDir = "data/games";
     std::string mapPath;
     std::string dbPath = "data/spring-server.db";
 
@@ -187,7 +188,7 @@ int main(int argc, char* argv[])
         if (arg == "--port" && i + 1 < argc) {
             port = std::atoi(argv[++i]);
         } else if (arg == "--game" && i + 1 < argc) {
-            gamePath = argv[++i];
+            gameId = argv[++i];
         } else if (arg == "--map" && i + 1 < argc) {
             mapPath = argv[++i];
         } else if (arg == "--db" && i + 1 < argc) {
@@ -244,14 +245,25 @@ int main(int argc, char* argv[])
         }
     }
 
-    // Derive gameId from gamePath basename (e.g. "papertanks" from
-    // "content/games/papertanks"). Used for model URL construction.
-    std::string gameId;
-    if (!gamePath.empty()) {
-        namespace fs = std::filesystem;
-        gameId = fs::path(gamePath).filename().string();
-        if (gameId.empty() && fs::path(gamePath).has_parent_path())
-            gameId = fs::path(gamePath).parent_path().filename().string();
+    // Validate gameId — must be a plain identifier, no path traversal
+    if (!gameId.empty()) {
+        bool safe = std::all_of(gameId.begin(), gameId.end(), [](char c) {
+            return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' || c == '.';
+        });
+        if (!safe) {
+            SLOG(SPRING_LOG_ERROR, "invalid --game id '%s' (must be alphanumeric)", gameId.c_str());
+            return 1;
+        }
+    }
+
+    // Resolve game content path from id
+    std::string gamePath;
+    if (!gameId.empty()) {
+        gamePath = gamesDir + "/" + gameId;
+        if (!std::filesystem::is_directory(gamePath)) {
+            SLOG(SPRING_LOG_ERROR, "game '%s' not found at %s", gameId.c_str(), gamePath.c_str());
+            return 1;
+        }
     }
 
     // --- Apply logging CLI flags ---
@@ -297,12 +309,7 @@ int main(int argc, char* argv[])
         // root, so SolidObjectDef::LoadModel can find each unit's
         // `<modelName>.config.json` / `<modelName>.config.lua` via
         // the bare-name lookup.
-        // Layout convention (set by GameProcessor at lobby startup):
-        //     data/games/<gameId>/models/<stem>.config.json
         namespace fs = std::filesystem;
-        std::string gameId = fs::path(gamePath).filename().string();
-        if (gameId.empty() && fs::path(gamePath).has_parent_path())
-            gameId = fs::path(gamePath).parent_path().filename().string();
         const std::string processedModels = "data/games/" + gameId + "/models";
         if (fs::is_directory(processedModels)) {
             CFileHandler::AddContentRoot(processedModels, RootCategory::Mod);
@@ -1118,7 +1125,7 @@ int main(int argc, char* argv[])
                     uint32_t roomId = rooms.CreateRoom(
                         rc->name() ? rc->name()->str() : "Game",
                         rc->map_name() ? rc->map_name()->str() : "",
-                        rc->game_name() ? rc->game_name()->str() : "",
+                        rc->game_id() ? rc->game_id()->str() : "",
                         rc->max_players() > 0 ? rc->max_players() : 8,
                         rc->password() ? rc->password()->str() : "",
                         static_cast<uint32_t>(session->userId), msg.clientId, session->username);

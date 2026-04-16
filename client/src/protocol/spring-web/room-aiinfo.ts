@@ -8,7 +8,7 @@ import * as flatbuffers from 'flatbuffers';
 
 /**
  * One available AI plugin, enumerated from content/engine/ai + the
- * current game's content/games/<game>/ai directory. Sent as part
+ * current game's data/games/<game>/ai directory. Sent as part
  * of AIListUpdate when a client subscribes to a room's AI list.
  */
 export class RoomAIInfo implements flatbuffers.IUnpackableObject<RoomAIInfoT> {

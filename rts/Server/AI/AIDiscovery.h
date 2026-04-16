@@ -65,7 +65,7 @@ struct AIInfo {
 ///
 /// `enginePath` is typically `content/engine` (relative to the
 /// working directory) — the folder that contains `ai/<plugin>/`.
-/// `gamePath` is typically `content/games/<gameName>` — its `ai/`
+/// `gamePath` is typically `data/games/<gameId>` — its `ai/`
 /// subdirectory is scanned if it exists. Missing directories are
 /// silently skipped; a lobby that ships no game-specific AIs still
 /// gets the engine defaults.
