@@ -11,7 +11,7 @@
 #include "Server/NetworkServer.h"
 #include "Server/Database.h"
 #include "Server/RoomManager.h"
-#include "Server/MapProcessor.h"
+#include "Server/MapMetadata.h"
 
 #include "Server/AI/AIDiscovery.h"
 #include "Server/GameDiscovery.h"

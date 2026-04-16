@@ -4,7 +4,7 @@
 // query pre-processed map data without linking the full conversion
 // pipeline (Lua, ImageMagick, modelimporter, FeatureProcessor).
 
-#include "MapProcessor.h"
+#include "MapMetadata.h"
 #include "System/SpringLog/SpringLog.h"
 
 #include <sqlite3.h>

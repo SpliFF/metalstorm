@@ -10,7 +10,7 @@
 #include "protocol_generated.h"
 #include "CombatEventCollector.h"
 #include "RoomManager.h"
-#include "MapProcessor.h"
+#include "MapMetadata.h"
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectileTypes.h"
 #include <flatbuffers/flatbuffers.h>
 #include <cstdint>

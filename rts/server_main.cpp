@@ -20,7 +20,7 @@
 #include "Server/AI/AIDiscovery.h"
 #include "Server/PerfMetrics.h"
 #include "Server/RoomManager.h"
-#include "Server/MapProcessor.h"
+#include "Server/MapMetadata.h"
 #include "Server/LuaExecEngine.h"
 #include "Server/LuaDebugger.h"
 #include "Server/HttpAuth.h"
