@@ -165,11 +165,11 @@ inline std::vector<uint8_t> BuildPlayerLeft(
 
 /// Build a GameInfo message (map, game, speed, frame, paused).
 inline std::vector<uint8_t> BuildGameInfo(
-    const std::string& mapName, const std::string& gameId,
+    const std::string& mapId, const std::string& gameId,
     float speed, uint32_t frame, bool paused)
 {
     flatbuffers::FlatBufferBuilder fbb(256);
-    auto mapOff = fbb.CreateString(mapName);
+    auto mapOff = fbb.CreateString(mapId);
     auto gameOff = fbb.CreateString(gameId);
     auto info = SpringWeb::CreateGameInfo(fbb, mapOff, gameOff, speed, frame, paused);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameInfo, info.Union());
@@ -201,7 +201,7 @@ inline std::vector<uint8_t> BuildRoomStateUpdate(const GameRoom& room) {
     auto aiSlotsVec = fbb.CreateVector(aiSlotOffsets);
 
     auto nameOff = fbb.CreateString(room.name);
-    auto mapOff = fbb.CreateString(room.mapName);
+    auto mapOff = fbb.CreateString(room.mapId);
     auto gameOff = fbb.CreateString(room.gameId);
 
     auto update = SpringWeb::CreateRoomStateUpdate(
@@ -488,7 +488,7 @@ inline std::vector<uint8_t> BuildRoomListUpdate(const std::vector<GameRoom*>& ro
     std::vector<flatbuffers::Offset<SpringWeb::RoomListEntry>> entries;
     for (const auto* r : rooms) {
         auto nameOff = fbb.CreateString(r->name);
-        auto mapOff = fbb.CreateString(r->mapName);
+        auto mapOff = fbb.CreateString(r->mapId);
         auto gameOff = fbb.CreateString(r->gameId);
         // Find host name
         std::string hostName;

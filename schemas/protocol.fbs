@@ -91,7 +91,7 @@ table ReconnectRequest {
 
 table RoomCreate {
     name: string;
-    map_name: string;
+    map_id: string;
     game_id: string;
     max_players: uint8 = 8;
     password: string;           // empty = no password
@@ -377,7 +377,7 @@ table ChatReceive {
 }
 
 table GameInfo {
-    map_name: string;
+    map_id: string;
     game_id: string;
     game_speed: float;
     frame: uint32;
@@ -459,7 +459,7 @@ table RoomAIInfo {
 table RoomListEntry {
     room_id: uint32;
     name: string;
-    map_name: string;
+    map_id: string;
     game_id: string;
     state: RoomState;
     player_count: uint8;
@@ -476,7 +476,7 @@ table RoomStateUpdate {
     room_id: uint32;
     state: RoomState;
     name: string;
-    map_name: string;
+    map_id: string;
     game_id: string;
     players: [RoomPlayerInfo];
     countdown_seconds: uint8;   // 0 = no countdown

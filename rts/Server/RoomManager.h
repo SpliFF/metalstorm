@@ -67,7 +67,7 @@ enum class LeaveResult : uint8_t {
 struct GameRoom {
     uint32_t id = 0;
     std::string name;
-    std::string mapName;
+    std::string mapId;
     std::string gameId;
     ERoomState state = ERoomState::Configuring;
     uint8_t maxPlayers = 8;
@@ -139,7 +139,7 @@ struct GameRoom {
 class RoomManager {
 public:
     /// Create a new room. Returns room ID.
-    uint32_t CreateRoom(const std::string& name, const std::string& mapName,
+    uint32_t CreateRoom(const std::string& name, const std::string& mapId,
                         const std::string& gameId, uint8_t maxPlayers,
                         const std::string& password,
                         uint32_t hostPlayerId, ClientID hostClientId,

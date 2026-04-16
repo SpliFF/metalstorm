@@ -55,7 +55,7 @@ struct GameServerInstance {
     uint32_t roomId = 0;
     int port = 0;
     pid_t pid = 0;
-    std::string mapPath;
+    std::string mapId;
     std::string gameId;
     enum State { Starting, Running, Ended, Crashed } state = Starting;
 };
@@ -88,14 +88,14 @@ static int findFreePort(int base = 9100) {
 /// slot assignment per team.
 static GameServerInstance spawnGameServer(
     uint32_t roomId, const std::string& gameId,
-    const std::string& mapPath, const std::string& dbPath,
+    const std::string& mapId, const std::string& dbPath,
     const std::vector<RoomPlayer>& playerRoster,
     const std::vector<RoomAISlot>& aiSlots)
 {
     GameServerInstance inst;
     inst.roomId = roomId;
     inst.port = findFreePort();
-    inst.mapPath = mapPath;
+    inst.mapId = mapId;
     inst.gameId = gameId;
 
     // Build the command
@@ -162,7 +162,7 @@ static GameServerInstance spawnGameServer(
         argv.push_back(serverBin.c_str());
         argv.push_back("--port"); argv.push_back(portStr.c_str());
         argv.push_back("--game"); argv.push_back(gameId.c_str());
-        argv.push_back("--map");  argv.push_back(mapPath.c_str());
+        argv.push_back("--map");  argv.push_back(mapId.c_str());
         argv.push_back("--db");   argv.push_back(dbPath.c_str());
         for (const auto& spec : playerArgStorage) {
             argv.push_back("--player");
@@ -222,7 +222,7 @@ int main(int argc, char* argv[])
     int port = 8011;
     std::string dbPath = "data/spring-server.db";
     std::string gamesDir = "data/games";
-    std::string mapsDir = "content/maps";
+    std::string mapsDir = "data/maps";
     std::string logFile;
     int logLevel = SPRING_LOG_NOTICE;
     bool debugMode = false;
@@ -296,7 +296,7 @@ int main(int argc, char* argv[])
             "  room_id INTEGER PRIMARY KEY,"
             "  port INTEGER NOT NULL,"
             "  pid INTEGER NOT NULL,"
-            "  map_path TEXT,"
+            "  map_id TEXT,"
             "  game_id TEXT,"
             "  started_at INTEGER DEFAULT (strftime('%s','now')),"
             "  state TEXT DEFAULT 'starting'"
@@ -331,10 +331,10 @@ int main(int argc, char* argv[])
         }
         char sql[512];
         snprintf(sql, sizeof(sql),
-            "INSERT OR REPLACE INTO game_servers (room_id, port, pid, map_path, game_id, state) "
+            "INSERT OR REPLACE INTO game_servers (room_id, port, pid, map_id, game_id, state) "
             "VALUES (%u, %d, %d, '%s', '%s', '%s')",
             inst.roomId, inst.port, (int)inst.pid,
-            inst.mapPath.c_str(), inst.gameId.c_str(), stateStr);
+            inst.mapId.c_str(), inst.gameId.c_str(), stateStr);
         sqlite3_exec(mapDb, sql, nullptr, nullptr, nullptr);
     };
 
@@ -799,7 +799,7 @@ int main(int argc, char* argv[])
             snprintf(buf, sizeof(buf),
                 R"({"room_id":%u,"port":%d,"pid":%d,"state":"%s","map":"%s","game":"%s"})",
                 roomId, inst.port, (int)inst.pid, stateStr,
-                inst.mapPath.c_str(), inst.gameId.c_str());
+                inst.mapId.c_str(), inst.gameId.c_str());
             json += buf;
         }
         json += "]";
@@ -921,7 +921,7 @@ int main(int argc, char* argv[])
         if (!room) return "null";
         std::string json = "{\"id\":" + std::to_string(room->id)
             + ",\"name\":\"" + HttpAuth::JsonEscape(room->name) + "\""
-            + ",\"map\":\"" + HttpAuth::JsonEscape(room->mapName) + "\""
+            + ",\"map\":\"" + HttpAuth::JsonEscape(room->mapId) + "\""
             + ",\"game\":\"" + HttpAuth::JsonEscape(room->gameId) + "\""
             + ",\"state\":" + std::to_string(static_cast<int>(room->state))
             + ",\"players\":[";
@@ -982,7 +982,7 @@ int main(int argc, char* argv[])
         if (!user) return HttpAuth::JsonResponse(500, R"({"error":"user not found"})");
 
         std::string name = HttpAuth::JsonField(body, "name");
-        std::string mapName = HttpAuth::JsonField(body, "map");
+        std::string mapId = HttpAuth::JsonField(body, "map");
         std::string gameId = HttpAuth::JsonField(body, "game");
         if (name.empty()) name = "Game";
         if (gameId.empty() && !availableGames.empty()) gameId = availableGames[0].id;
@@ -990,7 +990,7 @@ int main(int argc, char* argv[])
         std::string persistStr = HttpAuth::JsonField(body, "persistent");
         bool persistent = (persistStr == "true" || persistStr == "1");
 
-        uint32_t roomId = rooms.CreateRoom(name, mapName, gameId, 8, "",
+        uint32_t roomId = rooms.CreateRoom(name, mapId, gameId, 8, "",
             static_cast<uint32_t>(userId), 0 /*no WS clientId*/, user->username);
         auto* room = rooms.GetRoom(roomId);
         if (room) room->persistent = persistent;
@@ -1217,19 +1217,11 @@ int main(int argc, char* argv[])
         if (!rooms.StartGame(room->id, static_cast<uint32_t>(userId)))
             return HttpAuth::JsonResponse(400, R"({"error":"cannot start game"})");
 
-        // Spawn game server (same logic as WS path)
-        std::string mapPath;
-        if (!room->mapName.empty()) {
-            namespace fs = std::filesystem;
-            fs::path candidate = fs::path(mapsDir) / room->mapName;
-            if (fs::is_directory(candidate)) mapPath = candidate.string();
-        }
-
         // Verify game exists before spawning
         auto it = gamePathsById.find(room->gameId);
 
         if (it != gamePathsById.end()) {
-            auto inst = spawnGameServer(room->id, room->gameId, mapPath, dbPath,
+            auto inst = spawnGameServer(room->id, room->gameId, room->mapId, dbPath,
                 room->players, room->aiSlots);
             gameServers[room->id] = inst;
             persistGameServer(inst);

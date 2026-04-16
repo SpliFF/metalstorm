@@ -9,7 +9,7 @@
 #include <cstdio>
 
 uint32_t RoomManager::CreateRoom(
-    const std::string& name, const std::string& mapName,
+    const std::string& name, const std::string& mapId,
     const std::string& gameId, uint8_t maxPlayers,
     const std::string& password,
     uint32_t hostPlayerId, ClientID hostClientId,
@@ -21,7 +21,7 @@ uint32_t RoomManager::CreateRoom(
     GameRoom& room = rooms[id];
     room.id = id;
     room.name = name;
-    room.mapName = mapName;
+    room.mapId = mapId;
     room.gameId = gameId;
     room.maxPlayers = maxPlayers;
     room.password = password;
@@ -37,7 +37,7 @@ uint32_t RoomManager::CreateRoom(
     room.players.push_back(host);
 
     SLOG(SPRING_LOG_INFO, "created room %u '%s' (host=%s, map=%s)",
-        id, name.c_str(), hostUsername.c_str(), mapName.c_str());
+        id, name.c_str(), hostUsername.c_str(), mapId.c_str());
     return id;
 }
 

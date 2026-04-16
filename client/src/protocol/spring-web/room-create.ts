@@ -31,9 +31,9 @@ name(optionalEncoding?:any):string|Uint8Array|null {
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
-mapName():string|null
-mapName(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
-mapName(optionalEncoding?:any):string|Uint8Array|null {
+mapId():string|null
+mapId(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+mapId(optionalEncoding?:any):string|Uint8Array|null {
   const offset = this.bb!.__offset(this.bb_pos, 6);
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
@@ -65,8 +65,8 @@ static addName(builder:flatbuffers.Builder, nameOffset:flatbuffers.Offset) {
   builder.addFieldOffset(0, nameOffset, 0);
 }
 
-static addMapName(builder:flatbuffers.Builder, mapNameOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(1, mapNameOffset, 0);
+static addMapId(builder:flatbuffers.Builder, mapIdOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(1, mapIdOffset, 0);
 }
 
 static addGameId(builder:flatbuffers.Builder, gameIdOffset:flatbuffers.Offset) {
@@ -86,10 +86,10 @@ static endRoomCreate(builder:flatbuffers.Builder):flatbuffers.Offset {
   return offset;
 }
 
-static createRoomCreate(builder:flatbuffers.Builder, nameOffset:flatbuffers.Offset, mapNameOffset:flatbuffers.Offset, gameIdOffset:flatbuffers.Offset, maxPlayers:number, passwordOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createRoomCreate(builder:flatbuffers.Builder, nameOffset:flatbuffers.Offset, mapIdOffset:flatbuffers.Offset, gameIdOffset:flatbuffers.Offset, maxPlayers:number, passwordOffset:flatbuffers.Offset):flatbuffers.Offset {
   RoomCreate.startRoomCreate(builder);
   RoomCreate.addName(builder, nameOffset);
-  RoomCreate.addMapName(builder, mapNameOffset);
+  RoomCreate.addMapId(builder, mapIdOffset);
   RoomCreate.addGameId(builder, gameIdOffset);
   RoomCreate.addMaxPlayers(builder, maxPlayers);
   RoomCreate.addPassword(builder, passwordOffset);
@@ -99,7 +99,7 @@ static createRoomCreate(builder:flatbuffers.Builder, nameOffset:flatbuffers.Offs
 unpack(): RoomCreateT {
   return new RoomCreateT(
     this.name(),
-    this.mapName(),
+    this.mapId(),
     this.gameId(),
     this.maxPlayers(),
     this.password()
@@ -109,7 +109,7 @@ unpack(): RoomCreateT {
 
 unpackTo(_o: RoomCreateT): void {
   _o.name = this.name();
-  _o.mapName = this.mapName();
+  _o.mapId = this.mapId();
   _o.gameId = this.gameId();
   _o.maxPlayers = this.maxPlayers();
   _o.password = this.password();
@@ -119,7 +119,7 @@ unpackTo(_o: RoomCreateT): void {
 export class RoomCreateT implements flatbuffers.IGeneratedObject {
 constructor(
   public name: string|Uint8Array|null = null,
-  public mapName: string|Uint8Array|null = null,
+  public mapId: string|Uint8Array|null = null,
   public gameId: string|Uint8Array|null = null,
   public maxPlayers: number = 8,
   public password: string|Uint8Array|null = null
@@ -128,13 +128,13 @@ constructor(
 
 pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const name = (this.name !== null ? builder.createString(this.name!) : 0);
-  const mapName = (this.mapName !== null ? builder.createString(this.mapName!) : 0);
+  const mapId = (this.mapId !== null ? builder.createString(this.mapId!) : 0);
   const gameId = (this.gameId !== null ? builder.createString(this.gameId!) : 0);
   const password = (this.password !== null ? builder.createString(this.password!) : 0);
 
   return RoomCreate.createRoomCreate(builder,
     name,
-    mapName,
+    mapId,
     gameId,
     this.maxPlayers,
     password

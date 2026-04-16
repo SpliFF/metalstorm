@@ -1441,7 +1441,7 @@ struct RoomCreate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef RoomCreateBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_NAME = 4,
-    VT_MAP_NAME = 6,
+    VT_MAP_ID = 6,
     VT_GAME_ID = 8,
     VT_MAX_PLAYERS = 10,
     VT_PASSWORD = 12
@@ -1449,8 +1449,8 @@ struct RoomCreate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::String *name() const {
     return GetPointer<const ::flatbuffers::String *>(VT_NAME);
   }
-  const ::flatbuffers::String *map_name() const {
-    return GetPointer<const ::flatbuffers::String *>(VT_MAP_NAME);
+  const ::flatbuffers::String *map_id() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_MAP_ID);
   }
   const ::flatbuffers::String *game_id() const {
     return GetPointer<const ::flatbuffers::String *>(VT_GAME_ID);
@@ -1465,8 +1465,8 @@ struct RoomCreate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_NAME) &&
            verifier.VerifyString(name()) &&
-           VerifyOffset(verifier, VT_MAP_NAME) &&
-           verifier.VerifyString(map_name()) &&
+           VerifyOffset(verifier, VT_MAP_ID) &&
+           verifier.VerifyString(map_id()) &&
            VerifyOffset(verifier, VT_GAME_ID) &&
            verifier.VerifyString(game_id()) &&
            VerifyField<uint8_t>(verifier, VT_MAX_PLAYERS, 1) &&
@@ -1483,8 +1483,8 @@ struct RoomCreateBuilder {
   void add_name(::flatbuffers::Offset<::flatbuffers::String> name) {
     fbb_.AddOffset(RoomCreate::VT_NAME, name);
   }
-  void add_map_name(::flatbuffers::Offset<::flatbuffers::String> map_name) {
-    fbb_.AddOffset(RoomCreate::VT_MAP_NAME, map_name);
+  void add_map_id(::flatbuffers::Offset<::flatbuffers::String> map_id) {
+    fbb_.AddOffset(RoomCreate::VT_MAP_ID, map_id);
   }
   void add_game_id(::flatbuffers::Offset<::flatbuffers::String> game_id) {
     fbb_.AddOffset(RoomCreate::VT_GAME_ID, game_id);
@@ -1509,14 +1509,14 @@ struct RoomCreateBuilder {
 inline ::flatbuffers::Offset<RoomCreate> CreateRoomCreate(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     ::flatbuffers::Offset<::flatbuffers::String> name = 0,
-    ::flatbuffers::Offset<::flatbuffers::String> map_name = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> map_id = 0,
     ::flatbuffers::Offset<::flatbuffers::String> game_id = 0,
     uint8_t max_players = 8,
     ::flatbuffers::Offset<::flatbuffers::String> password = 0) {
   RoomCreateBuilder builder_(_fbb);
   builder_.add_password(password);
   builder_.add_game_id(game_id);
-  builder_.add_map_name(map_name);
+  builder_.add_map_id(map_id);
   builder_.add_name(name);
   builder_.add_max_players(max_players);
   return builder_.Finish();
@@ -1525,18 +1525,18 @@ inline ::flatbuffers::Offset<RoomCreate> CreateRoomCreate(
 inline ::flatbuffers::Offset<RoomCreate> CreateRoomCreateDirect(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     const char *name = nullptr,
-    const char *map_name = nullptr,
+    const char *map_id = nullptr,
     const char *game_id = nullptr,
     uint8_t max_players = 8,
     const char *password = nullptr) {
   auto name__ = name ? _fbb.CreateString(name) : 0;
-  auto map_name__ = map_name ? _fbb.CreateString(map_name) : 0;
+  auto map_id__ = map_id ? _fbb.CreateString(map_id) : 0;
   auto game_id__ = game_id ? _fbb.CreateString(game_id) : 0;
   auto password__ = password ? _fbb.CreateString(password) : 0;
   return SpringWeb::CreateRoomCreate(
       _fbb,
       name__,
-      map_name__,
+      map_id__,
       game_id__,
       max_players,
       password__);
@@ -3823,14 +3823,14 @@ inline ::flatbuffers::Offset<ChatReceive> CreateChatReceiveDirect(
 struct GameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef GameInfoBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
-    VT_MAP_NAME = 4,
+    VT_MAP_ID = 4,
     VT_GAME_ID = 6,
     VT_GAME_SPEED = 8,
     VT_FRAME = 10,
     VT_PAUSED = 12
   };
-  const ::flatbuffers::String *map_name() const {
-    return GetPointer<const ::flatbuffers::String *>(VT_MAP_NAME);
+  const ::flatbuffers::String *map_id() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_MAP_ID);
   }
   const ::flatbuffers::String *game_id() const {
     return GetPointer<const ::flatbuffers::String *>(VT_GAME_ID);
@@ -3846,8 +3846,8 @@ struct GameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyOffset(verifier, VT_MAP_NAME) &&
-           verifier.VerifyString(map_name()) &&
+           VerifyOffset(verifier, VT_MAP_ID) &&
+           verifier.VerifyString(map_id()) &&
            VerifyOffset(verifier, VT_GAME_ID) &&
            verifier.VerifyString(game_id()) &&
            VerifyField<float>(verifier, VT_GAME_SPEED, 4) &&
@@ -3861,8 +3861,8 @@ struct GameInfoBuilder {
   typedef GameInfo Table;
   ::flatbuffers::FlatBufferBuilder &fbb_;
   ::flatbuffers::uoffset_t start_;
-  void add_map_name(::flatbuffers::Offset<::flatbuffers::String> map_name) {
-    fbb_.AddOffset(GameInfo::VT_MAP_NAME, map_name);
+  void add_map_id(::flatbuffers::Offset<::flatbuffers::String> map_id) {
+    fbb_.AddOffset(GameInfo::VT_MAP_ID, map_id);
   }
   void add_game_id(::flatbuffers::Offset<::flatbuffers::String> game_id) {
     fbb_.AddOffset(GameInfo::VT_GAME_ID, game_id);
@@ -3889,7 +3889,7 @@ struct GameInfoBuilder {
 
 inline ::flatbuffers::Offset<GameInfo> CreateGameInfo(
     ::flatbuffers::FlatBufferBuilder &_fbb,
-    ::flatbuffers::Offset<::flatbuffers::String> map_name = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> map_id = 0,
     ::flatbuffers::Offset<::flatbuffers::String> game_id = 0,
     float game_speed = 0.0f,
     uint32_t frame = 0,
@@ -3898,23 +3898,23 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfo(
   builder_.add_frame(frame);
   builder_.add_game_speed(game_speed);
   builder_.add_game_id(game_id);
-  builder_.add_map_name(map_name);
+  builder_.add_map_id(map_id);
   builder_.add_paused(paused);
   return builder_.Finish();
 }
 
 inline ::flatbuffers::Offset<GameInfo> CreateGameInfoDirect(
     ::flatbuffers::FlatBufferBuilder &_fbb,
-    const char *map_name = nullptr,
+    const char *map_id = nullptr,
     const char *game_id = nullptr,
     float game_speed = 0.0f,
     uint32_t frame = 0,
     bool paused = false) {
-  auto map_name__ = map_name ? _fbb.CreateString(map_name) : 0;
+  auto map_id__ = map_id ? _fbb.CreateString(map_id) : 0;
   auto game_id__ = game_id ? _fbb.CreateString(game_id) : 0;
   return SpringWeb::CreateGameInfo(
       _fbb,
-      map_name__,
+      map_id__,
       game_id__,
       game_speed,
       frame,
@@ -4439,7 +4439,7 @@ struct RoomListEntry FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_ROOM_ID = 4,
     VT_NAME = 6,
-    VT_MAP_NAME = 8,
+    VT_MAP_ID = 8,
     VT_GAME_ID = 10,
     VT_STATE = 12,
     VT_PLAYER_COUNT = 14,
@@ -4453,8 +4453,8 @@ struct RoomListEntry FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::String *name() const {
     return GetPointer<const ::flatbuffers::String *>(VT_NAME);
   }
-  const ::flatbuffers::String *map_name() const {
-    return GetPointer<const ::flatbuffers::String *>(VT_MAP_NAME);
+  const ::flatbuffers::String *map_id() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_MAP_ID);
   }
   const ::flatbuffers::String *game_id() const {
     return GetPointer<const ::flatbuffers::String *>(VT_GAME_ID);
@@ -4479,8 +4479,8 @@ struct RoomListEntry FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint32_t>(verifier, VT_ROOM_ID, 4) &&
            VerifyOffset(verifier, VT_NAME) &&
            verifier.VerifyString(name()) &&
-           VerifyOffset(verifier, VT_MAP_NAME) &&
-           verifier.VerifyString(map_name()) &&
+           VerifyOffset(verifier, VT_MAP_ID) &&
+           verifier.VerifyString(map_id()) &&
            VerifyOffset(verifier, VT_GAME_ID) &&
            verifier.VerifyString(game_id()) &&
            VerifyField<uint8_t>(verifier, VT_STATE, 1) &&
@@ -4503,8 +4503,8 @@ struct RoomListEntryBuilder {
   void add_name(::flatbuffers::Offset<::flatbuffers::String> name) {
     fbb_.AddOffset(RoomListEntry::VT_NAME, name);
   }
-  void add_map_name(::flatbuffers::Offset<::flatbuffers::String> map_name) {
-    fbb_.AddOffset(RoomListEntry::VT_MAP_NAME, map_name);
+  void add_map_id(::flatbuffers::Offset<::flatbuffers::String> map_id) {
+    fbb_.AddOffset(RoomListEntry::VT_MAP_ID, map_id);
   }
   void add_game_id(::flatbuffers::Offset<::flatbuffers::String> game_id) {
     fbb_.AddOffset(RoomListEntry::VT_GAME_ID, game_id);
@@ -4539,7 +4539,7 @@ inline ::flatbuffers::Offset<RoomListEntry> CreateRoomListEntry(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     uint32_t room_id = 0,
     ::flatbuffers::Offset<::flatbuffers::String> name = 0,
-    ::flatbuffers::Offset<::flatbuffers::String> map_name = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> map_id = 0,
     ::flatbuffers::Offset<::flatbuffers::String> game_id = 0,
     SpringWeb::RoomState state = SpringWeb::RoomState_Configuring,
     uint8_t player_count = 0,
@@ -4549,7 +4549,7 @@ inline ::flatbuffers::Offset<RoomListEntry> CreateRoomListEntry(
   RoomListEntryBuilder builder_(_fbb);
   builder_.add_host_name(host_name);
   builder_.add_game_id(game_id);
-  builder_.add_map_name(map_name);
+  builder_.add_map_id(map_id);
   builder_.add_name(name);
   builder_.add_room_id(room_id);
   builder_.add_has_password(has_password);
@@ -4563,7 +4563,7 @@ inline ::flatbuffers::Offset<RoomListEntry> CreateRoomListEntryDirect(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     uint32_t room_id = 0,
     const char *name = nullptr,
-    const char *map_name = nullptr,
+    const char *map_id = nullptr,
     const char *game_id = nullptr,
     SpringWeb::RoomState state = SpringWeb::RoomState_Configuring,
     uint8_t player_count = 0,
@@ -4571,14 +4571,14 @@ inline ::flatbuffers::Offset<RoomListEntry> CreateRoomListEntryDirect(
     bool has_password = false,
     const char *host_name = nullptr) {
   auto name__ = name ? _fbb.CreateString(name) : 0;
-  auto map_name__ = map_name ? _fbb.CreateString(map_name) : 0;
+  auto map_id__ = map_id ? _fbb.CreateString(map_id) : 0;
   auto game_id__ = game_id ? _fbb.CreateString(game_id) : 0;
   auto host_name__ = host_name ? _fbb.CreateString(host_name) : 0;
   return SpringWeb::CreateRoomListEntry(
       _fbb,
       room_id,
       name__,
-      map_name__,
+      map_id__,
       game_id__,
       state,
       player_count,
@@ -4645,7 +4645,7 @@ struct RoomStateUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_ROOM_ID = 4,
     VT_STATE = 6,
     VT_NAME = 8,
-    VT_MAP_NAME = 10,
+    VT_MAP_ID = 10,
     VT_GAME_ID = 12,
     VT_PLAYERS = 14,
     VT_COUNTDOWN_SECONDS = 16,
@@ -4661,8 +4661,8 @@ struct RoomStateUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::String *name() const {
     return GetPointer<const ::flatbuffers::String *>(VT_NAME);
   }
-  const ::flatbuffers::String *map_name() const {
-    return GetPointer<const ::flatbuffers::String *>(VT_MAP_NAME);
+  const ::flatbuffers::String *map_id() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_MAP_ID);
   }
   const ::flatbuffers::String *game_id() const {
     return GetPointer<const ::flatbuffers::String *>(VT_GAME_ID);
@@ -4685,8 +4685,8 @@ struct RoomStateUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint8_t>(verifier, VT_STATE, 1) &&
            VerifyOffset(verifier, VT_NAME) &&
            verifier.VerifyString(name()) &&
-           VerifyOffset(verifier, VT_MAP_NAME) &&
-           verifier.VerifyString(map_name()) &&
+           VerifyOffset(verifier, VT_MAP_ID) &&
+           verifier.VerifyString(map_id()) &&
            VerifyOffset(verifier, VT_GAME_ID) &&
            verifier.VerifyString(game_id()) &&
            VerifyOffset(verifier, VT_PLAYERS) &&
@@ -4714,8 +4714,8 @@ struct RoomStateUpdateBuilder {
   void add_name(::flatbuffers::Offset<::flatbuffers::String> name) {
     fbb_.AddOffset(RoomStateUpdate::VT_NAME, name);
   }
-  void add_map_name(::flatbuffers::Offset<::flatbuffers::String> map_name) {
-    fbb_.AddOffset(RoomStateUpdate::VT_MAP_NAME, map_name);
+  void add_map_id(::flatbuffers::Offset<::flatbuffers::String> map_id) {
+    fbb_.AddOffset(RoomStateUpdate::VT_MAP_ID, map_id);
   }
   void add_game_id(::flatbuffers::Offset<::flatbuffers::String> game_id) {
     fbb_.AddOffset(RoomStateUpdate::VT_GAME_ID, game_id);
@@ -4748,7 +4748,7 @@ inline ::flatbuffers::Offset<RoomStateUpdate> CreateRoomStateUpdate(
     uint32_t room_id = 0,
     SpringWeb::RoomState state = SpringWeb::RoomState_Configuring,
     ::flatbuffers::Offset<::flatbuffers::String> name = 0,
-    ::flatbuffers::Offset<::flatbuffers::String> map_name = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> map_id = 0,
     ::flatbuffers::Offset<::flatbuffers::String> game_id = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::RoomPlayerInfo>>> players = 0,
     uint8_t countdown_seconds = 0,
@@ -4758,7 +4758,7 @@ inline ::flatbuffers::Offset<RoomStateUpdate> CreateRoomStateUpdate(
   builder_.add_ai_slots(ai_slots);
   builder_.add_players(players);
   builder_.add_game_id(game_id);
-  builder_.add_map_name(map_name);
+  builder_.add_map_id(map_id);
   builder_.add_name(name);
   builder_.add_room_id(room_id);
   builder_.add_game_server_port(game_server_port);
@@ -4772,14 +4772,14 @@ inline ::flatbuffers::Offset<RoomStateUpdate> CreateRoomStateUpdateDirect(
     uint32_t room_id = 0,
     SpringWeb::RoomState state = SpringWeb::RoomState_Configuring,
     const char *name = nullptr,
-    const char *map_name = nullptr,
+    const char *map_id = nullptr,
     const char *game_id = nullptr,
     const std::vector<::flatbuffers::Offset<SpringWeb::RoomPlayerInfo>> *players = nullptr,
     uint8_t countdown_seconds = 0,
     uint16_t game_server_port = 0,
     const std::vector<::flatbuffers::Offset<SpringWeb::RoomAISlot>> *ai_slots = nullptr) {
   auto name__ = name ? _fbb.CreateString(name) : 0;
-  auto map_name__ = map_name ? _fbb.CreateString(map_name) : 0;
+  auto map_id__ = map_id ? _fbb.CreateString(map_id) : 0;
   auto game_id__ = game_id ? _fbb.CreateString(game_id) : 0;
   auto players__ = players ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::RoomPlayerInfo>>(*players) : 0;
   auto ai_slots__ = ai_slots ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::RoomAISlot>>(*ai_slots) : 0;
@@ -4788,7 +4788,7 @@ inline ::flatbuffers::Offset<RoomStateUpdate> CreateRoomStateUpdateDirect(
       room_id,
       state,
       name__,
-      map_name__,
+      map_id__,
       game_id__,
       players__,
       countdown_seconds,

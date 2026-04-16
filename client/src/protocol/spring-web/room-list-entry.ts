@@ -37,9 +37,9 @@ name(optionalEncoding?:any):string|Uint8Array|null {
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
-mapName():string|null
-mapName(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
-mapName(optionalEncoding?:any):string|Uint8Array|null {
+mapId():string|null
+mapId(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+mapId(optionalEncoding?:any):string|Uint8Array|null {
   const offset = this.bb!.__offset(this.bb_pos, 8);
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
@@ -90,8 +90,8 @@ static addName(builder:flatbuffers.Builder, nameOffset:flatbuffers.Offset) {
   builder.addFieldOffset(1, nameOffset, 0);
 }
 
-static addMapName(builder:flatbuffers.Builder, mapNameOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(2, mapNameOffset, 0);
+static addMapId(builder:flatbuffers.Builder, mapIdOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(2, mapIdOffset, 0);
 }
 
 static addGameId(builder:flatbuffers.Builder, gameIdOffset:flatbuffers.Offset) {
@@ -123,11 +123,11 @@ static endRoomListEntry(builder:flatbuffers.Builder):flatbuffers.Offset {
   return offset;
 }
 
-static createRoomListEntry(builder:flatbuffers.Builder, roomId:number, nameOffset:flatbuffers.Offset, mapNameOffset:flatbuffers.Offset, gameIdOffset:flatbuffers.Offset, state:RoomState, playerCount:number, maxPlayers:number, hasPassword:boolean, hostNameOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createRoomListEntry(builder:flatbuffers.Builder, roomId:number, nameOffset:flatbuffers.Offset, mapIdOffset:flatbuffers.Offset, gameIdOffset:flatbuffers.Offset, state:RoomState, playerCount:number, maxPlayers:number, hasPassword:boolean, hostNameOffset:flatbuffers.Offset):flatbuffers.Offset {
   RoomListEntry.startRoomListEntry(builder);
   RoomListEntry.addRoomId(builder, roomId);
   RoomListEntry.addName(builder, nameOffset);
-  RoomListEntry.addMapName(builder, mapNameOffset);
+  RoomListEntry.addMapId(builder, mapIdOffset);
   RoomListEntry.addGameId(builder, gameIdOffset);
   RoomListEntry.addState(builder, state);
   RoomListEntry.addPlayerCount(builder, playerCount);
@@ -141,7 +141,7 @@ unpack(): RoomListEntryT {
   return new RoomListEntryT(
     this.roomId(),
     this.name(),
-    this.mapName(),
+    this.mapId(),
     this.gameId(),
     this.state(),
     this.playerCount(),
@@ -155,7 +155,7 @@ unpack(): RoomListEntryT {
 unpackTo(_o: RoomListEntryT): void {
   _o.roomId = this.roomId();
   _o.name = this.name();
-  _o.mapName = this.mapName();
+  _o.mapId = this.mapId();
   _o.gameId = this.gameId();
   _o.state = this.state();
   _o.playerCount = this.playerCount();
@@ -169,7 +169,7 @@ export class RoomListEntryT implements flatbuffers.IGeneratedObject {
 constructor(
   public roomId: number = 0,
   public name: string|Uint8Array|null = null,
-  public mapName: string|Uint8Array|null = null,
+  public mapId: string|Uint8Array|null = null,
   public gameId: string|Uint8Array|null = null,
   public state: RoomState = RoomState.Configuring,
   public playerCount: number = 0,
@@ -181,14 +181,14 @@ constructor(
 
 pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const name = (this.name !== null ? builder.createString(this.name!) : 0);
-  const mapName = (this.mapName !== null ? builder.createString(this.mapName!) : 0);
+  const mapId = (this.mapId !== null ? builder.createString(this.mapId!) : 0);
   const gameId = (this.gameId !== null ? builder.createString(this.gameId!) : 0);
   const hostName = (this.hostName !== null ? builder.createString(this.hostName!) : 0);
 
   return RoomListEntry.createRoomListEntry(builder,
     this.roomId,
     name,
-    mapName,
+    mapId,
     gameId,
     this.state,
     this.playerCount,

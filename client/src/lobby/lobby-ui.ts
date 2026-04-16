@@ -1052,7 +1052,7 @@ export class LobbyUI {
             const r = update.rooms(i);
             if (!r) continue;
             this.rooms.push({
-                id: r.roomId(), name: r.name() ?? '', mapId: r.mapName() ?? '',
+                id: r.roomId(), name: r.name() ?? '', mapId: r.mapId() ?? '',
                 playerCount: r.playerCount(), maxPlayers: r.maxPlayers(),
                 state: r.state(), hasPassword: r.hasPassword(), hostName: r.hostName() ?? '',
             });
@@ -1163,7 +1163,7 @@ export class LobbyUI {
         }
         const newGameId = u.gameId() ?? '';
         this.currentRoom = {
-            id: u.roomId(), name: u.name() ?? '', mapId: u.mapName() ?? '',
+            id: u.roomId(), name: u.name() ?? '', mapId: u.mapId() ?? '',
             gameId: newGameId,
             state: u.state(), players, aiSlots,
             gameServerPort: u.gameServerPort(),

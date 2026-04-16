@@ -44,9 +44,9 @@ name(optionalEncoding?:any):string|Uint8Array|null {
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
-mapName():string|null
-mapName(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
-mapName(optionalEncoding?:any):string|Uint8Array|null {
+mapId():string|null
+mapId(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+mapId(optionalEncoding?:any):string|Uint8Array|null {
   const offset = this.bb!.__offset(this.bb_pos, 10);
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
@@ -104,8 +104,8 @@ static addName(builder:flatbuffers.Builder, nameOffset:flatbuffers.Offset) {
   builder.addFieldOffset(2, nameOffset, 0);
 }
 
-static addMapName(builder:flatbuffers.Builder, mapNameOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(3, mapNameOffset, 0);
+static addMapId(builder:flatbuffers.Builder, mapIdOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(3, mapIdOffset, 0);
 }
 
 static addGameId(builder:flatbuffers.Builder, gameIdOffset:flatbuffers.Offset) {
@@ -157,12 +157,12 @@ static endRoomStateUpdate(builder:flatbuffers.Builder):flatbuffers.Offset {
   return offset;
 }
 
-static createRoomStateUpdate(builder:flatbuffers.Builder, roomId:number, state:RoomState, nameOffset:flatbuffers.Offset, mapNameOffset:flatbuffers.Offset, gameIdOffset:flatbuffers.Offset, playersOffset:flatbuffers.Offset, countdownSeconds:number, gameServerPort:number, aiSlotsOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createRoomStateUpdate(builder:flatbuffers.Builder, roomId:number, state:RoomState, nameOffset:flatbuffers.Offset, mapIdOffset:flatbuffers.Offset, gameIdOffset:flatbuffers.Offset, playersOffset:flatbuffers.Offset, countdownSeconds:number, gameServerPort:number, aiSlotsOffset:flatbuffers.Offset):flatbuffers.Offset {
   RoomStateUpdate.startRoomStateUpdate(builder);
   RoomStateUpdate.addRoomId(builder, roomId);
   RoomStateUpdate.addState(builder, state);
   RoomStateUpdate.addName(builder, nameOffset);
-  RoomStateUpdate.addMapName(builder, mapNameOffset);
+  RoomStateUpdate.addMapId(builder, mapIdOffset);
   RoomStateUpdate.addGameId(builder, gameIdOffset);
   RoomStateUpdate.addPlayers(builder, playersOffset);
   RoomStateUpdate.addCountdownSeconds(builder, countdownSeconds);
@@ -176,7 +176,7 @@ unpack(): RoomStateUpdateT {
     this.roomId(),
     this.state(),
     this.name(),
-    this.mapName(),
+    this.mapId(),
     this.gameId(),
     this.bb!.createObjList<RoomPlayerInfo, RoomPlayerInfoT>(this.players.bind(this), this.playersLength()),
     this.countdownSeconds(),
@@ -190,7 +190,7 @@ unpackTo(_o: RoomStateUpdateT): void {
   _o.roomId = this.roomId();
   _o.state = this.state();
   _o.name = this.name();
-  _o.mapName = this.mapName();
+  _o.mapId = this.mapId();
   _o.gameId = this.gameId();
   _o.players = this.bb!.createObjList<RoomPlayerInfo, RoomPlayerInfoT>(this.players.bind(this), this.playersLength());
   _o.countdownSeconds = this.countdownSeconds();
@@ -204,7 +204,7 @@ constructor(
   public roomId: number = 0,
   public state: RoomState = RoomState.Configuring,
   public name: string|Uint8Array|null = null,
-  public mapName: string|Uint8Array|null = null,
+  public mapId: string|Uint8Array|null = null,
   public gameId: string|Uint8Array|null = null,
   public players: (RoomPlayerInfoT)[] = [],
   public countdownSeconds: number = 0,
@@ -215,7 +215,7 @@ constructor(
 
 pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const name = (this.name !== null ? builder.createString(this.name!) : 0);
-  const mapName = (this.mapName !== null ? builder.createString(this.mapName!) : 0);
+  const mapId = (this.mapId !== null ? builder.createString(this.mapId!) : 0);
   const gameId = (this.gameId !== null ? builder.createString(this.gameId!) : 0);
   const players = RoomStateUpdate.createPlayersVector(builder, builder.createObjectOffsetList(this.players));
   const aiSlots = RoomStateUpdate.createAiSlotsVector(builder, builder.createObjectOffsetList(this.aiSlots));
@@ -224,7 +224,7 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     this.roomId,
     this.state,
     name,
-    mapName,
+    mapId,
     gameId,
     players,
     this.countdownSeconds,

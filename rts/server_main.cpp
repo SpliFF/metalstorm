@@ -120,7 +120,8 @@ int main(int argc, char* argv[])
     int port = 9001;
     std::string gameId;
     std::string gamesDir = "data/games";
-    std::string mapPath;
+    std::string mapId;
+    std::string mapsDir = "data/maps";
     std::string dbPath = "data/spring-server.db";
 
     // Human player roster from the lobby. Each `--player <username>:<team>:<pos>`
@@ -190,7 +191,7 @@ int main(int argc, char* argv[])
         } else if (arg == "--game" && i + 1 < argc) {
             gameId = argv[++i];
         } else if (arg == "--map" && i + 1 < argc) {
-            mapPath = argv[++i];
+            mapId = argv[++i];
         } else if (arg == "--db" && i + 1 < argc) {
             dbPath = argv[++i];
         } else if (arg == "--log-file" && i + 1 < argc) {
@@ -245,23 +246,35 @@ int main(int argc, char* argv[])
         }
     }
 
-    // Validate gameId — must be a plain identifier, no path traversal
-    if (!gameId.empty()) {
-        bool safe = std::all_of(gameId.begin(), gameId.end(), [](char c) {
+    // Validate content ids — must be plain identifiers, no path traversal
+    auto isValidContentId = [](const std::string& id) {
+        return std::all_of(id.begin(), id.end(), [](char c) {
             return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' || c == '.';
         });
-        if (!safe) {
-            SLOG(SPRING_LOG_ERROR, "invalid --game id '%s' (must be alphanumeric)", gameId.c_str());
-            return 1;
-        }
+    };
+    if (!gameId.empty() && !isValidContentId(gameId)) {
+        SLOG(SPRING_LOG_ERROR, "invalid --game id '%s' (must be alphanumeric)", gameId.c_str());
+        return 1;
+    }
+    if (!mapId.empty() && !isValidContentId(mapId)) {
+        SLOG(SPRING_LOG_ERROR, "invalid --map id '%s' (must be alphanumeric)", mapId.c_str());
+        return 1;
     }
 
-    // Resolve game content path from id
+    // Resolve content paths from ids
     std::string gamePath;
     if (!gameId.empty()) {
         gamePath = gamesDir + "/" + gameId;
         if (!std::filesystem::is_directory(gamePath)) {
             SLOG(SPRING_LOG_ERROR, "game '%s' not found at %s", gameId.c_str(), gamePath.c_str());
+            return 1;
+        }
+    }
+    std::string mapPath;
+    if (!mapId.empty()) {
+        mapPath = mapsDir + "/" + mapId;
+        if (!std::filesystem::is_directory(mapPath)) {
+            SLOG(SPRING_LOG_ERROR, "map '%s' not found at %s", mapId.c_str(), mapPath.c_str());
             return 1;
         }
     }
@@ -426,12 +439,11 @@ int main(int argc, char* argv[])
         return {.contentType = "application/json", .body = std::move(body), .status = 200};
     });
 
-    // Available maps endpoint — scans content/maps/ for SMF files
-    net.AddHttpGet("/api/maps", [](const std::string&) -> HttpResponse {
+    // Available maps endpoint — scans mapsDir for SMF files
+    net.AddHttpGet("/api/maps", [&mapsDir](const std::string&) -> HttpResponse {
         namespace fs = std::filesystem;
         std::string json = "[";
         bool first = true;
-        fs::path mapsDir = "content/maps";
         if (!fs::is_directory(mapsDir))
             return {.contentType = "application/json", .body = {'[', ']'}, .status = 200};
 
@@ -497,10 +509,10 @@ int main(int argc, char* argv[])
     });
 
     // Serve map thumbnail images
-    net.AddHttpGet("/api/maps/thumb/*", [](const std::string& url) -> HttpResponse {
+    net.AddHttpGet("/api/maps/thumb/*", [&mapsDir](const std::string& url) -> HttpResponse {
         std::string mapId = url.substr(std::string("/api/maps/thumb/").size());
         namespace fs = std::filesystem;
-        fs::path mapDir = fs::path("content/maps") / mapId;
+        fs::path mapDir = fs::path(mapsDir) / mapId;
         if (!fs::is_directory(mapDir))
             return {.contentType = "text/plain", .body = {}, .status = 404};
 
@@ -1124,7 +1136,7 @@ int main(int argc, char* argv[])
                     auto* rc = clientMsg->payload_as_RoomCreate();
                     uint32_t roomId = rooms.CreateRoom(
                         rc->name() ? rc->name()->str() : "Game",
-                        rc->map_name() ? rc->map_name()->str() : "",
+                        rc->map_id() ? rc->map_id()->str() : "",
                         rc->game_id() ? rc->game_id()->str() : "",
                         rc->max_players() > 0 ? rc->max_players() : 8,
                         rc->password() ? rc->password()->str() : "",
