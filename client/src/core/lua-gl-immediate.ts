@@ -210,17 +210,25 @@ class MatrixStack {
 
 // ── Display list ────────────────────────────────────────────────────────
 
-interface DisplayList {
-    /** Recorded draw calls to replay */
-    calls: DisplayListCall[];
-}
-
-interface DisplayListCall {
+interface DisplayListDraw {
+    type: 'draw';
     mode: number;
     vertexData: Float32Array;
     vertexCount: number;
     textured: boolean;
     boundTexture: WebGLTexture | null;
+}
+
+interface DisplayListTexBind {
+    type: 'texBind';
+    unit: number;
+    texture: WebGLTexture | null;
+}
+
+type DisplayListEntry = DisplayListDraw | DisplayListTexBind;
+
+interface DisplayList {
+    entries: DisplayListEntry[];
 }
 
 // ── Main class ──────────────────────────────────────────────────────────
@@ -453,7 +461,8 @@ export class ImmediateModeRenderer {
         if (this.vertexCount > 0) {
             if (this.recordingList) {
                 // Record into display list instead of drawing
-                this.recordingList.calls.push({
+                this.recordingList.entries.push({
+                    type: 'draw',
                     mode: this.currentMode,
                     vertexData: new Float32Array(
                         this.vertices.buffer, 0,
@@ -483,7 +492,8 @@ export class ImmediateModeRenderer {
         this.vertex(x1, y2);
 
         if (this.recordingList) {
-            this.recordingList.calls.push({
+            this.recordingList.entries.push({
+                type: 'draw',
                 mode: GL_TRIANGLES,
                 vertexData: new Float32Array(
                     this.vertices.buffer, 0,
@@ -524,7 +534,8 @@ export class ImmediateModeRenderer {
         this.curT = savedT;
 
         if (this.recordingList) {
-            this.recordingList.calls.push({
+            this.recordingList.entries.push({
+                type: 'draw',
                 mode: GL_TRIANGLES,
                 vertexData: new Float32Array(
                     this.vertices.buffer, 0,
@@ -542,9 +553,25 @@ export class ImmediateModeRenderer {
 
     // ── Display lists ───────────────────────────────────────────────────
 
+    /** Whether a display list is currently being recorded. */
+    isRecording(): boolean {
+        return this.recordingList !== null;
+    }
+
+    /** Record a texture bind into the current display list (called by bridge). */
+    recordTextureBind(unit: number, texture: WebGLTexture | null): void {
+        if (!this.recordingList) return;
+        this.recordingList.entries.push({ type: 'texBind', unit, texture });
+    }
+
+    /** Expose current texture state so the bridge can sync after callList. */
+    getTexturedState(): { textured: boolean; texture: WebGLTexture | null } {
+        return { textured: this.isTextured, texture: this.currentBoundTexture };
+    }
+
     createList(fn: () => void): number {
         const id = this.nextListId++;
-        const list: DisplayList = { calls: [] };
+        const list: DisplayList = { entries: [] };
         this.recordingList = list;
         fn();
         this.recordingList = null;
@@ -552,18 +579,50 @@ export class ImmediateModeRenderer {
         return id;
     }
 
+    /** Start recording a display list (used by Lua-side gl.CreateList). */
+    startRecording(): void {
+        this.recordingList = { entries: [] };
+    }
+
+    /** Stop recording and store the display list. Returns the list ID. */
+    stopRecording(): number {
+        if (!this.recordingList) return 0;
+        const list = this.recordingList;
+        this.recordingList = null;
+        const id = this.nextListId++;
+        this.displayLists.set(id, list);
+        return id;
+    }
+
     callList(id: number): void {
         const list = this.displayLists.get(id);
         if (!list) return;
-        for (const call of list.calls) {
-            this.vertices.set(call.vertexData);
-            const savedTextured = this.isTextured;
-            const savedTex = this.currentBoundTexture;
-            this.isTextured = call.textured;
-            this.currentBoundTexture = call.boundTexture;
-            this.flush(call.mode, call.vertexCount);
-            this.isTextured = savedTextured;
-            this.currentBoundTexture = savedTex;
+        for (const entry of list.entries) {
+            if (entry.type === 'texBind') {
+                // Replay texture bind — persists after callList returns
+                const gl = this.gl;
+                gl.activeTexture(gl.TEXTURE0 + entry.unit);
+                if (entry.texture) {
+                    gl.bindTexture(gl.TEXTURE_2D, entry.texture);
+                } else {
+                    gl.bindTexture(gl.TEXTURE_2D, null);
+                }
+                if (entry.unit === 0) {
+                    this.isTextured = entry.texture !== null;
+                    this.currentBoundTexture = entry.texture;
+                }
+                gl.activeTexture(gl.TEXTURE0);
+            } else {
+                // Draw call — temporarily set texture state for this draw
+                this.vertices.set(entry.vertexData);
+                const savedTextured = this.isTextured;
+                const savedTex = this.currentBoundTexture;
+                this.isTextured = entry.textured;
+                this.currentBoundTexture = entry.boundTexture;
+                this.flush(entry.mode, entry.vertexCount);
+                this.isTextured = savedTextured;
+                this.currentBoundTexture = savedTex;
+            }
         }
     }
 

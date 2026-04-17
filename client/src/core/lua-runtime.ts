@@ -364,13 +364,13 @@ export class LuaRuntime {
                 // Opaque handle round-tripped from pushValue.
                 return lua.lua_touserdata(LS, idx) as LuaValue;
             case lua.LUA_TFUNCTION: {
-                if (lua.lua_iscfunction(LS, idx)) {
-                    // C functions — return null to avoid registry ref leaks.
-                    // gl.CreateList(gl.Texture, path) won't work with this
-                    // but it avoids corrupting the Lua state.
-                    return null;
-                }
-                // Lua function — store in registry and return callable wrapper.
+                // Both Lua functions and C functions (JS closures pushed via
+                // lua_pushjsfunction) get a registry ref + callable wrapper.
+                // This is required for gl.CreateList(gl.Texture, path) where
+                // gl.Texture is a C function that must survive stack cleanup
+                // and be callable from JS. Registry refs are small; the leak
+                // concern is bounded because table reads that encounter
+                // functions are infrequent (widget init, not per-frame).
                 lua.lua_pushvalue(LS, idx);
                 const ref = lauxlib.luaL_ref(LS, lua.LUA_REGISTRYINDEX);
                 return this.makeFunctionRef(ref) as unknown as LuaValue;

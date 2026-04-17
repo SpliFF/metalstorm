@@ -241,8 +241,21 @@ export class LuaGLBridge {
             this.imm.multiTexCoord(Number(unit), Number(s), Number(t));
 
         // ── Display lists ───────────────────────────────────────────
+        // JS-side CreateList — works for simple cases but loses metatables
+        // on table arguments. The Lua wrapper in the worker overrides this
+        // to preserve metatables (critical for Chili's gl.CreateList(self.DrawControl, self)).
         gl['CreateList'] = (fn: LuaValue, ...args: LuaValue[]) => this.createList(fn, ...args);
-        gl['CallList'] = (id: LuaValue) => this.imm.callList(Number(id));
+        // Recording API used by Lua-side gl.CreateList wrapper
+        gl['_startRecording'] = () => this.imm.startRecording();
+        gl['_stopRecording'] = () => this.imm.stopRecording();
+        gl['CallList'] = (id: LuaValue) => {
+            this.imm.callList(Number(id));
+            // Sync bridge texture tracking — display lists may have changed
+            // the bound texture (e.g. gl.CreateList(gl.Texture, path))
+            const st = this.imm.getTexturedState();
+            this.hasTextureUnit0 = st.textured;
+            this.boundTextureUnit0 = st.texture;
+        };
         gl['DeleteList'] = (id: LuaValue) => this.imm.deleteList(Number(id));
 
         // ── Font ─────────────────────────────────────────────────────
@@ -941,12 +954,18 @@ export class LuaGLBridge {
                 this.hasTextureUnit0 = false;
                 this.boundTextureUnit0 = null;
             }
+            if (this.imm.isRecording()) {
+                this.imm.recordTextureBind(unit, null);
+            }
             return;
         }
-        const trackUnit0 = (tex: WebGLTexture | null) => {
+        const trackAndRecord = (tex: WebGLTexture | null) => {
             if (unit === 0) {
                 this.hasTextureUnit0 = tex !== null;
                 this.boundTextureUnit0 = tex;
+            }
+            if (this.imm.isRecording()) {
+                this.imm.recordTextureBind(unit, tex);
             }
         };
 
@@ -958,7 +977,7 @@ export class LuaGLBridge {
                 else if (s === '$shadow') tex = this.engineTex.shadow ?? this.whiteTex;
                 else if (s === '$info') tex = this.engineTex.info ?? this.blackTex;
                 gl.bindTexture(gl.TEXTURE_2D, tex);
-                trackUnit0(tex);
+                trackAndRecord(tex);
                 return;
             }
             const normalised = this.normaliseTexturePath(s);
@@ -977,14 +996,14 @@ export class LuaGLBridge {
                 void this.loadImageInto(`${baseUrl}/${normalised}`, handle);
             }
             gl.bindTexture(gl.TEXTURE_2D, handle.tex);
-            trackUnit0(handle.tex);
+            trackAndRecord(handle.tex);
             return;
         }
         if (typeof handleOrPath === 'object' && handleOrPath !== null) {
             const h = handleOrPath as unknown as LuaTextureHandle;
             if (h.__type === 'texture') {
                 gl.bindTexture(gl.TEXTURE_2D, h.tex);
-                trackUnit0(h.tex);
+                trackAndRecord(h.tex);
             }
         }
     }

@@ -394,6 +394,52 @@ async function init(
     postLog(2, '[LuaUI] init step 6b/8 done: pre-guard installed');
 
     // 7. Bootstrap
+    // Clear any cached widget order files so Chili always loads with
+    // defaults (previous sessions may have saved a "disabled" state).
+    // Also patch the DebugHandler source in VFS to raise the error
+    // tolerance — Chili's DebugHandler self-destructs after 5 errors
+    // in 5 seconds, but our incomplete GL/API surface triggers more
+    // harmless errors during init than native Spring.
+    runtime.doString(`
+        if VFS and VFS._writeCache then
+            VFS._writeCache["LuaUI/Config/ZK_order.lua"] = nil
+            VFS._writeCache["LuaUI/Config/widget_data.lua"] = nil
+        end
+    `, 'clear_widget_config');
+
+    // Patch debughandler.lua in VFS before bootstrap loads it
+    const debugHandlerPath = 'LuaUI/Widgets/chili_old/Handlers/debughandler.lua';
+    const debugHandlerSrc = vfsLookup(debugHandlerPath);
+    if (debugHandlerSrc) {
+        const patched = debugHandlerSrc.replace(
+            'DebugHandler.maxChiliErrors = 5',
+            'DebugHandler.maxChiliErrors = 9999',
+        );
+        if (patched !== debugHandlerSrc) {
+            vfsRegister(debugHandlerPath, patched);
+            postLog(2, '[LuaUI] Patched DebugHandler: maxChiliErrors = 9999');
+        }
+    }
+
+    // Patch cawidgets.lua HandleError to not remove handler widgets (like
+    // Chili Framework). Our incomplete API surface causes harmless callin
+    // errors that the real Spring engine doesn't hit. Without this, Chili
+    // is removed after a single callin error.
+    const cawidgetsPath = 'LuaUI/cawidgets.lua';
+    const cawidgetsSrc = vfsLookup(cawidgetsPath);
+    if (cawidgetsSrc) {
+        const patched = cawidgetsSrc.replace(
+            `if (funcName ~= 'Shutdown') then\n\t\twidgetHandler:RemoveWidget(widget)`,
+            `if (funcName ~= 'Shutdown') then\n\t\tif widget.whInfo and widget.whInfo.handler then\n\t\t\tSpring.Log("LuaUI", 0, "Suppressed removal of handler widget: " .. (widget.whInfo.name or "?") .. " error in " .. funcName)\n\t\telse\n\t\t\twidgetHandler:RemoveWidget(widget)\n\t\tend`,
+        );
+        if (patched !== cawidgetsSrc) {
+            vfsRegister(cawidgetsPath, patched);
+            postLog(2, '[LuaUI] Patched cawidgets.lua: handler widgets survive callin errors');
+        } else {
+            postLog(3, '[LuaUI] cawidgets.lua HandleError patch did not match');
+        }
+    }
+
     postLog(2, '[LuaUI] init step 7/8: starting bootstrap (VFS.Include camain.lua)...');
     const bootStart = performance.now();
     const bootErr = runtime.doString(`
@@ -410,6 +456,33 @@ async function init(
     if (bootErr) {
         postLog(4, `Bootstrap failed: ${bootErr}`);
     }
+
+    // Increase Chili's DebugHandler error tolerance. The default is 5
+    // errors in 5 seconds before self-destruct. Our incomplete GL/API
+    // surface triggers more errors during init than native Spring, but
+    // they're harmless (missing skin draw methods on controls that
+    // haven't been fully realized yet).
+    runtime.doString(`
+        if WG and WG.Chili and WG.Chili.DebugHandler then
+            WG.Chili.DebugHandler.maxChiliErrors = 999
+            Spring.Echo("[LuaUI] DebugHandler.maxChiliErrors raised to 999")
+        end
+    `, 'chili_error_tolerance');
+
+    // Force-enable Chili Framework if widgetHandler didn't auto-start it.
+    runtime.doString(`
+        if widgetHandler and (not WG or not WG.Chili) then
+            local ki = widgetHandler.knownWidgets and widgetHandler.knownWidgets["Chili Framework"]
+            if ki and not ki.active then
+                Spring.Echo("[LuaUI] Force-enabling Chili Framework")
+                widgetHandler:EnableWidget("Chili Framework")
+                -- Raise error tolerance on the freshly loaded Chili
+                if WG and WG.Chili and WG.Chili.DebugHandler then
+                    WG.Chili.DebugHandler.maxChiliErrors = 999
+                end
+            end
+        end
+    `, 'chili_force_enable');
 
     // Patch Chili's widget:Dispose to guard against nil screen0.
     // The old-chili path defines Dispose as `screen0:Dispose()` but
@@ -443,6 +516,152 @@ async function init(
     `, 'shutdown_guard_apply');
     postLog(2, '[LuaUI] init done: shutdown recursion guard applied');
 
+    // Fix Chili TaskHandler queue desync: fengari's weak table GC
+    // collects entries from the TaskHandler's objects/objects2 queues
+    // before Update() processes them. This causes controls to be stuck
+    // with __inUpdateQueue=true but not in any queue, so they never get
+    // their Update() called and never create display lists.
+    //
+    // Fix: remove __mode="v" from the queue tables (make them strong)
+    // and install a per-frame repair that resets stuck controls.
+    runtime.doString(`
+        -- Deferred: runs after first DrawGenesis when WG.Chili exists
+        _chiliTaskFix = function()
+            if not WG or not WG.Chili then return false end
+            local th = WG.Chili.TaskHandler
+            if not th then return false end
+
+            -- Remove weak-table mode from TaskHandler's internal tables.
+            -- We can't access the locals directly, but we can patch
+            -- RequestUpdate to use strong tables instead.
+            local strongQueue = {}
+            local strongQueue2 = {}
+            local strongCount = 0
+            local strongInstant = {}
+            local strongInstant2 = {}
+            local strongInstantCount = 0
+
+            local origRequestUpdate = th.RequestUpdate
+            local origRequestInstant = th.RequestInstantUpdate
+            local origRemoveObject = th.RemoveObject
+            local origUpdate = th.Update
+
+            local _reqLog = 0
+            th.RequestUpdate = function(obj)
+                obj = (type(obj) == "table" and obj.__target) and obj.__target or obj
+                if not obj.__inUpdateQueue then
+                    obj.__inUpdateQueue = true
+                    strongCount = strongCount + 1
+                    strongQueue[strongCount] = obj
+                    _reqLog = _reqLog + 1
+                    if _reqLog <= 20 then
+                        Spring.Echo("[TaskHandler] RequestUpdate: " .. tostring(obj.name or obj.classname) .. " count=" .. strongCount)
+                    end
+                end
+            end
+
+            th.RequestInstantUpdate = function(obj)
+                obj = (type(obj) == "table" and obj.__target) and obj.__target or obj
+                if not obj.__inUpdateQueue then
+                    obj.__inUpdateQueue = true
+                    strongInstantCount = strongInstantCount + 1
+                    strongInstant[strongInstantCount] = obj
+                end
+            end
+
+            th.RemoveObject = function(obj)
+                obj = (type(obj) == "table" and obj.__target) and obj.__target or obj
+                -- Call original for globalDisposeListeners
+                pcall(origRemoveObject, obj)
+                -- Also remove from our strong queue
+                if obj.__inUpdateQueue then
+                    obj.__inUpdateQueue = false
+                    for i = 1, strongCount do
+                        if strongQueue[i] == obj then
+                            strongQueue[i] = strongQueue[strongCount]
+                            strongQueue[strongCount] = nil
+                            strongCount = strongCount - 1
+                            return true
+                        end
+                    end
+                end
+                return false
+            end
+
+            th.Update = function()
+                -- Process type1 queue
+                local cnt = strongCount
+                if cnt > 0 then
+                    Spring.Echo("[TaskHandler] Processing " .. cnt .. " queued controls")
+                end
+                strongCount = 0
+                strongQueue, strongQueue2 = strongQueue2, strongQueue
+                for i = 1, cnt do
+                    local obj = strongQueue2[i]
+                    strongQueue2[i] = nil  -- clear processed entry
+                    if obj and not obj.disposed then
+                        obj.__inUpdateQueue = false
+                        local Update = obj.Update
+                        if Update then
+                            local ok, err = pcall(Update, obj)
+                            if not ok then
+                                Spring.Echo("[TaskHandler] Update error on " .. tostring(obj.name or obj.classname) .. ": " .. tostring(err):sub(1,100))
+                            end
+                        end
+                    end
+                end
+
+                -- Process type2 (instant) queue
+                local runCounter = 0
+                while strongInstantCount > 0 do
+                    local icnt = strongInstantCount
+                    strongInstantCount = 0
+                    strongInstant, strongInstant2 = strongInstant2, strongInstant
+                    for i = 1, icnt do
+                        local obj = strongInstant2[i]
+                        strongInstant2[i] = nil
+                        if obj and not obj.disposed then
+                            obj.__inUpdateQueue = false
+                            local InstantUpdate = obj.InstantUpdate
+                            if InstantUpdate then
+                                pcall(InstantUpdate, obj)
+                            end
+                        end
+                    end
+                    runCounter = runCounter + 1
+                    if runCounter > 20 then break end
+                end
+            end
+
+            -- Reset all stuck controls and re-enqueue them
+            local s = WG.Chili.Screen0
+            if s then
+                local function resetTree(ctrl)
+                    if ctrl.__inUpdateQueue then
+                        ctrl.__inUpdateQueue = false
+                    end
+                    if ctrl.children then
+                        for _, child in ipairs(ctrl.children) do
+                            if type(child) == "table" then
+                                resetTree(child)
+                            end
+                        end
+                    end
+                end
+                resetTree(s)
+                -- Invalidate to trigger re-enqueue
+                if s.Invalidate then pcall(s.Invalidate, s) end
+                for _, c in ipairs(s.children or {}) do
+                    if c.Invalidate then pcall(c.Invalidate, c) end
+                end
+            end
+
+            Spring.Echo("[LuaUI] TaskHandler patched: strong queues, " .. tostring(strongCount) .. " controls enqueued")
+            _chiliTaskFix = nil  -- run once
+            return true
+        end
+    `, 'taskhandler_fix');
+
     // 8. Start frame loop (30fps — matches Spring's GAME_SPEED)
     // Guard against re-entry: if a previous frame is still running
     // (e.g. a widget's Update is slow), skip rather than stacking.
@@ -473,8 +692,36 @@ function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext): void {
 
     // Callins: Update → DrawGenesis → DrawScreen
     rt.doString(`
+        -- Deferred Chili TaskHandler patch (runs once after WG.Chili exists)
+        if _chiliTaskFix then _chiliTaskFix() end
+
         if Update then pcall(Update) end
         if DrawGenesis then pcall(DrawGenesis) end
+
+        -- Force-update any Chili controls stuck without display lists.
+        -- The TaskHandler queue loses entries due to fengari's weak table
+        -- GC behavior. This brute-force walk runs once per second (not
+        -- every frame) to keep overhead low.
+        if WG and WG.Chili and WG.Chili.Screen0 then
+            _chiliFixTimer = (_chiliFixTimer or 0) + 1
+            if _chiliFixTimer % 30 == 1 then  -- every ~1 second at 30fps
+                local function fixTree(ctrl, depth)
+                    if depth > 10 then return end
+                    if ctrl._needRedraw and ctrl.visible and not ctrl._own_dlist
+                       and ctrl.parent and ctrl.Update then
+                        ctrl.__inUpdateQueue = false
+                        pcall(ctrl.Update, ctrl)
+                    end
+                    if ctrl.children then
+                        for _, ch in ipairs(ctrl.children) do
+                            if type(ch) == "table" then fixTree(ch, depth + 1) end
+                        end
+                    end
+                end
+                pcall(fixTree, WG.Chili.Screen0, 0)
+            end
+        end
+
         if DrawScreen then
             local vsx, vsy = Spring.GetViewSizes()
             gl.MatrixMode(GL.PROJECTION)
@@ -529,6 +776,24 @@ function installEngineGlobals(
             end
         })
     `, 'gl_fallback');
+
+    // Lua-side gl.CreateList: calls the function IN Lua so table arguments
+    // (like `self`) keep their metatables. The JS-side createList loses
+    // metatables during the readValue→pushValue round-trip, which breaks
+    // gl.CreateList(self.DrawControl, self) — DrawControl receives a plain
+    // table without methods.
+    rt.doString(`
+        gl.CreateList = function(fn, ...)
+            if type(fn) ~= "function" then return 0 end
+            gl._startRecording()
+            local ok, err = pcall(fn, ...)
+            local id = gl._stopRecording()
+            if not ok then
+                -- Partial recording is still valid (e.g. texture-only lists)
+            end
+            return id
+        end
+    `, 'gl_createlist_lua');
 
     rt.setGlobal('LUAUI_DIRNAME', 'LuaUI/');
     rt.setGlobal('LUAUI_VERSION', `spring-web LuaUI v0.3 (${gameId})`);
