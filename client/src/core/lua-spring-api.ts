@@ -165,6 +165,13 @@ export function buildSpringGlobals(ctx: SpringAPIContext): Record<string, LuaVal
         mapY: Math.floor(ctx.mapSizeZ / squareSize),
         squareSize: squareSize,
         gameSpeed: 30,
+        // Map physics — from mapdefaults.lua; epicmenu reads these
+        gravity: 130 * 900,     // 130 elmo/s² × (30 frames/s)²
+        waterDamage: 0,
+        tidal: 0,
+        mapDescription: '',
+        extractorRadius: 0,
+        maxUnits: 5000,
         // Game metadata — engine provides these from the mod archive
         modName: 'Zero-K',
         modShortName: 'ZK',

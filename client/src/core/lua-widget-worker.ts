@@ -161,12 +161,22 @@ const logTimes: number[] = [];
 const LOG_RATE_LIMIT_PER_SEC = 500;
 let logDropCount = 0;
 
+// Track repeated messages to suppress spamming widgets.
+const recentMsgs = new Map<string, number>();
+
 function postLog(level: number, msg: string): void {
+    // Suppress exact-duplicate messages (e.g. Key Unbinder spam).
+    // Allow the first occurrence and then once every 100 repeats.
+    const count = (recentMsgs.get(msg) ?? 0) + 1;
+    recentMsgs.set(msg, count);
+    if (count > 2 && (count & 0xff) !== 0) return;
+    // Periodically clear to avoid unbounded map growth.
+    if (recentMsgs.size > 500) recentMsgs.clear();
+
     const now = performance.now();
     while (logTimes.length && logTimes[0] < now - 1000) logTimes.shift();
     if (logTimes.length >= LOG_RATE_LIMIT_PER_SEC) {
         logDropCount++;
-        // Periodically report drops so silence doesn't hide the flood.
         if ((logDropCount & 0x3ff) === 0) {
             const post = self.postMessage as (msg: unknown) => void;
             post({ type: 'log', level: 3, msg: `[LuaUI] log rate-limited: ${logDropCount} messages dropped` });
@@ -246,6 +256,7 @@ let runtime: LuaRuntime | null = null;
 let bridge: LuaGLBridge | null = null;
 let startTime = performance.now() / 1000;
 let frameInterval: ReturnType<typeof setInterval> | null = null;
+let initBaseUrl = '';  // saved from init() for re-fetch on enable
 
 // Mouse state updated by main thread messages
 let mouseX = 0, mouseY = 0;
@@ -258,6 +269,7 @@ async function init(
     mapData: MapDataTransfer,
 ): Promise<void> {
     const baseUrl = `${lobbyUrl}/api/games/data/${gameId}`;
+    initBaseUrl = baseUrl;
     startTime = performance.now() / 1000;
 
     postLog(2, `[LuaUI] init step 1/8: VFS prefetch starting from ${baseUrl}`);
@@ -748,21 +760,28 @@ function toggleWidget(name: string): void {
     `, 'toggleWidget');
 }
 
-/** Enable a widget by name. Clears VFS cache for its file so the
- *  next load fetches fresh source from the server. */
-function enableWidget(name: string): void {
+/** Enable a widget by name. Re-fetches its source from the server
+ *  first so enable after disable acts as a reload. */
+async function enableWidget(name: string): Promise<void> {
     if (!runtime) return;
-    runtime.doString(`
+    // Get the widget's filename from knownWidgets
+    const filename = String(runtime.evalString(`
+        local ki = widgetHandler and widgetHandler.knownWidgets and widgetHandler.knownWidgets["${escapeLuaStr(name)}"]
+        return ki and ki.filename or ""
+    `) ?? '');
+    // Re-fetch the file from server if we have a filename and a base URL
+    if (filename && initBaseUrl) {
+        try {
+            const res = await fetch(`${initBaseUrl}/${filename}`);
+            if (res.ok) {
+                const text = await res.text();
+                vfsRegister(filename, text);
+                postLog(2, `[LuaUI] re-fetched ${filename} (${text.length} bytes)`);
+            }
+        } catch { /* silent */ }
+    }
+    runtime?.doString(`
         if widgetHandler then
-            -- Clear VFS cache for this widget so EnableWidget reloads from server
-            local ki = widgetHandler.knownWidgets and widgetHandler.knownWidgets["${escapeLuaStr(name)}"]
-            if ki and ki.filename and VFS._writeCache then
-                VFS._writeCache[ki.filename] = nil
-            end
-            -- Also purge from the prefetched VFS map so VFS.LoadFile re-fetches
-            if ki and ki.filename then
-                _vfsPurge(ki.filename)
-            end
             widgetHandler:EnableWidget("${escapeLuaStr(name)}")
         end
     `, 'enableWidget');
@@ -909,7 +928,7 @@ self.onmessage = async (e: MessageEvent) => {
             break;
 
         case 'enableWidget':
-            enableWidget(String(msg.name ?? ''));
+            await enableWidget(String(msg.name ?? ''));
             postToMain({ type: 'widgetList', data: getWidgetList() });
             break;
 
