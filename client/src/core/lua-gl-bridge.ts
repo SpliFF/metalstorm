@@ -218,7 +218,7 @@ export class LuaGLBridge {
             this.imm.multiTexCoord(Number(unit), Number(s), Number(t));
 
         // ── Display lists ───────────────────────────────────────────
-        gl['CreateList'] = (fn: LuaValue) => this.createList(fn);
+        gl['CreateList'] = (fn: LuaValue, ...args: LuaValue[]) => this.createList(fn, ...args);
         gl['CallList'] = (id: LuaValue) => this.imm.callList(Number(id));
         gl['DeleteList'] = (id: LuaValue) => this.imm.deleteList(Number(id));
 
@@ -314,10 +314,10 @@ export class LuaGLBridge {
         }
     }
 
-    private createList(fn: LuaValue): number {
+    private createList(fn: LuaValue, ...args: LuaValue[]): number {
         if (typeof fn !== 'function') return 0;
         return this.imm.createList(() => {
-            (fn as () => void)();
+            (fn as (...a: LuaValue[]) => void)(...args);
         });
     }
 

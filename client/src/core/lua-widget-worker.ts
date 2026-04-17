@@ -58,16 +58,22 @@ function vfsRegister(path: string, content: string): void {
         const dir = path.substring(0, lastSlash + 1);
         const file = path.substring(lastSlash + 1);
 
-        if (!vfsDirCache.has(dir)) vfsDirCache.set(dir, []);
-        vfsDirCache.get(dir)!.push(file);
+        // Use lowercase keys for directory caches so case-insensitive
+        // lookups work (ZK code uses "skins/" but disk has "Skins/").
+        const dirKey = dir.toLowerCase();
+        if (!vfsDirCache.has(dirKey)) vfsDirCache.set(dirKey, []);
+        vfsDirCache.get(dirKey)!.push(file);
 
         const parts = path.split('/');
         for (let i = 1; i < parts.length - 1; i++) {
-            const parent = parts.slice(0, i).join('/') + '/';
+            const parent = parts.slice(0, i).join('/').toLowerCase() + '/';
             const child = parts[i];
             if (!vfsSubdirCache.has(parent)) vfsSubdirCache.set(parent, []);
             const subs = vfsSubdirCache.get(parent)!;
-            if (!subs.includes(child)) subs.push(child);
+            // Avoid duplicate subdirs with different case
+            if (!subs.some(s => s.toLowerCase() === child.toLowerCase())) {
+                subs.push(child);
+            }
         }
     }
 }
@@ -109,23 +115,39 @@ async function prefetchAllGameFiles(baseUrl: string): Promise<void> {
             if (!res.ok) continue;
             const entries = await res.json() as { name: string; type: string }[];
 
-            const fileFetches: Promise<void>[] = [];
+            // Batch file fetches in groups of 30 to avoid overwhelming
+            // the single-threaded lobby HTTP server with hundreds of
+            // concurrent connections. Failing files are retried once.
+            const toFetch: string[] = [];
             for (const e of entries) {
                 const fullPath = `${dir}/${e.name}`;
                 if (e.type === 'file' &&
                     (e.name.endsWith('.lua') || e.name.endsWith('.txt'))) {
                     if (vfsFiles.has(fullPath)) continue;
-                    fileFetches.push((async () => {
-                        try {
-                            const fRes = await fetch(`${baseUrl}/${fullPath}`);
-                            if (fRes.ok) vfsRegister(fullPath, await fRes.text());
-                        } catch { /* silent */ }
-                    })());
+                    toFetch.push(fullPath);
                 } else if (e.type === 'dir' || e.type === 'directory') {
                     queue.push(fullPath);
                 }
             }
-            await Promise.all(fileFetches);
+            const BATCH = 30;
+            const failed: string[] = [];
+            for (let i = 0; i < toFetch.length; i += BATCH) {
+                const batch = toFetch.slice(i, i + BATCH);
+                await Promise.all(batch.map(async (fp) => {
+                    try {
+                        const fRes = await fetch(`${baseUrl}/${fp}`);
+                        if (fRes.ok) vfsRegister(fp, await fRes.text());
+                        else failed.push(fp);
+                    } catch { failed.push(fp); }
+                }));
+            }
+            // Retry once for files that failed (transient network issues)
+            for (const fp of failed) {
+                try {
+                    const fRes = await fetch(`${baseUrl}/${fp}`);
+                    if (fRes.ok) vfsRegister(fp, await fRes.text());
+                } catch { /* silent */ }
+            }
         } catch { /* silent */ }
     }
 }
@@ -243,10 +265,6 @@ async function init(
     // 1. Prefetch VFS
     await prefetchAllGameFiles(baseUrl);
     postLog(2, `[LuaUI] init step 1/8 done: VFS ${vfsFiles.size} files prefetched`);
-    // Diagnostic: check if specific files are in VFS
-    const widgetDir = vfsDirCache.get('LuaUI/Widgets/');
-    const hasEpic = vfsFiles.has('LuaUI/Widgets/gui_epicmenu.lua');
-    postLog(2, `[LuaUI] VFS diag: Widgets/ has ${widgetDir?.length ?? 0} files, gui_epicmenu.lua=${hasEpic}`);
 
     // 2. Create GL context on OffscreenCanvas for 2D UI rendering
     const gl = canvas.getContext('webgl2', {
@@ -339,6 +357,15 @@ async function init(
             end
         end
     `, 'shutdown_guard_pre');
+    // Pre-install a nil-safe math.round. ZK's numberfunctions.lua
+    // defines one but it crashes on nil input, which happens during
+    // epicmenu's include chain. This version falls back to 0 for nil.
+    runtime.doString(`
+        function math.round(num, idp)
+            num = num or 0
+            return ("%." .. (((num==0) and 0) or idp or 0) .. "f"):format(num)
+        end
+    `, 'math_round_fix');
     postLog(2, '[LuaUI] init step 6b/8 done: pre-guard installed');
 
     // 7. Bootstrap
@@ -359,32 +386,28 @@ async function init(
         postLog(4, `Bootstrap failed: ${bootErr}`);
     }
 
-    // Diagnostic: try to compile gui_epicmenu.lua to see if fengari handles it
+    // Patch Chili's widget:Dispose to guard against nil screen0.
+    // The old-chili path defines Dispose as `screen0:Dispose()` but
+    // screen0 is an upvalue that stays nil if texturehandler fails
+    // during Initialize. Without this guard, every Chili Dispose call
+    // recurses through the DebugHandler error handler, producing
+    // hundreds of log messages that consume the rate limit budget.
     runtime.doString(`
-        local epicFile = "LuaUI/Widgets/gui_epicmenu.lua"
-        local text = VFS.LoadFile(epicFile, VFS.RAW_FIRST)
-        if not text then
-            Spring.Echo("[LuaUI] EPIC diag: file NOT in VFS")
-        else
-            Spring.Echo("[LuaUI] EPIC diag: file found, " .. #text .. " bytes")
-            local chunk, err = loadstring(text, epicFile)
-            if not chunk then
-                Spring.Echo("[LuaUI] EPIC diag: COMPILE FAILED: " .. tostring(err))
-            else
-                Spring.Echo("[LuaUI] EPIC diag: compiled OK")
-                -- Try running it in a sandboxed env
-                local testEnv = {}
-                setmetatable(testEnv, {__index = _G})
-                setfenv(chunk, testEnv)
-                local ok, err2 = pcall(chunk)
-                if ok then
-                    Spring.Echo("[LuaUI] EPIC diag: executed OK, err=" .. tostring(err2))
-                else
-                    Spring.Echo("[LuaUI] EPIC diag: EXEC FAILED: " .. tostring(err2))
+        if widgetHandler then
+            for _, w in ipairs(widgetHandler.widgets) do
+                if w.whInfo and w.whInfo.name == "Chili Framework" and w.Dispose then
+                    local origDispose = w.Dispose
+                    w.Dispose = function(self, ...)
+                        local ok, err = pcall(origDispose, self, ...)
+                        if not ok then
+                            -- Silently ignore nil screen0 errors
+                        end
+                    end
+                    break
                 end
             end
         end
-    `, 'epic_diag');
+    `, 'chili_dispose_guard');
 
     // Apply the pre-installed shutdown guard to widgetHandler now that
     // camain.lua has loaded it.
@@ -625,15 +648,13 @@ function installVFS(rt: LuaRuntime): void {
     });
 
     rt.setGlobal('_vfsDirList', (dir: LuaValue) => {
-        const d = String(dir);
-        const files = vfsDirCache.get(d) ?? vfsDirCache.get(d.toLowerCase());
-        return luaTable(...(files ?? []));
+        const d = String(dir).toLowerCase();
+        return luaTable(...(vfsDirCache.get(d) ?? []));
     });
 
     rt.setGlobal('_vfsSubDirs', (dir: LuaValue) => {
-        const d = String(dir);
-        const subs = vfsSubdirCache.get(d) ?? vfsSubdirCache.get(d.toLowerCase());
-        return luaTable(...(subs ?? []));
+        const d = String(dir).toLowerCase();
+        return luaTable(...(vfsSubdirCache.get(d) ?? []));
     });
 
     // Purge a file from the VFS cache so the next VFS.LoadFile re-fetches
@@ -892,13 +913,6 @@ self.onmessage = async (e: MessageEvent) => {
             postToMain({ type: 'widgetList', data: getWidgetList() });
             break;
 
-        case 'vfsDiag': {
-            const dir = String(msg.dir ?? 'LuaUI/Widgets/');
-            const files = vfsDirCache.get(dir) ?? [];
-            const has = vfsFiles.has(String(msg.file ?? ''));
-            postLog(2, `[VFS diag] dir="${dir}" files=${files.length} hasFile=${has} sample=${files.slice(0,5).join(',')}`);
-            break;
-        }
 
         case 'disableWidget':
             disableWidget(String(msg.name ?? ''));
@@ -986,9 +1000,35 @@ end
 
 if not getfenv then
     function getfenv(fn)
-        if type(fn) == "number" or fn == nil then
-            return _ENV or _G
+        if fn == nil or fn == 0 then
+            -- Return the caller's _ENV (stack level 2)
+            local info = debug.getinfo(2, "f")
+            if info and info.func then
+                local i = 1
+                while true do
+                    local name, val = debug.getupvalue(info.func, i)
+                    if name == "_ENV" then return val
+                    elseif not name then break end
+                    i = i + 1
+                end
+            end
+            return _G
         end
+        if type(fn) == "number" then
+            -- Stack level: 1=getfenv itself, 2=caller, fn+1=target
+            local info = debug.getinfo(fn + 1, "f")
+            if info and info.func then
+                local i = 1
+                while true do
+                    local name, val = debug.getupvalue(info.func, i)
+                    if name == "_ENV" then return val
+                    elseif not name then break end
+                    i = i + 1
+                end
+            end
+            return _G
+        end
+        -- fn is a function
         local i = 1
         while true do
             local name, val = debug.getupvalue(fn, i)
@@ -996,7 +1036,7 @@ if not getfenv then
             elseif not name then break end
             i = i + 1
         end
-        return _ENV or _G
+        return _G
     end
 end
 
