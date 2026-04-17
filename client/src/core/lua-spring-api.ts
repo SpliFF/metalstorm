@@ -282,7 +282,14 @@ export function buildSpringGlobals(ctx: SpringAPIContext): Record<string, LuaVal
             return [c?.width ?? 1920, c?.height ?? 1080];
         },
         GetWindowGeometry: () => {
-            return [window?.innerWidth ?? 1920, window?.innerHeight ?? 1080, 0, 0];
+            // Workers don't have `window`; use globalThis which works
+            // in both main thread and worker contexts.
+            const g = globalThis as Record<string, unknown>;
+            return [
+                (g.innerWidth as number | undefined) ?? 1920,
+                (g.innerHeight as number | undefined) ?? 1080,
+                0, 0,
+            ];
         },
         GetSpectatingState: () => [false, false, false],
         IsReplay: () => false,
@@ -403,6 +410,10 @@ export function buildSpringGlobals(ctx: SpringAPIContext): Record<string, LuaVal
 
         // --- GUI state ---
         IsGUIHidden: () => false,
+        GetModKeyState: () => [false, false, false, false], // alt, ctrl, meta, shift
+        ScaledGetMouseState: () => [0, 0, false, false, false, false], // x, y, lmb, mmb, rmb, outsideSpring
+        GetMouseCursor: () => ['', 1.0], // name, scale
+        SetMouseCursor: () => {},
 
         // --- Ground extremes ---
         GetGroundExtremes: () => [0, 100], // minHeight, maxHeight

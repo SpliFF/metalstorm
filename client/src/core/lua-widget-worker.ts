@@ -607,6 +607,7 @@ function installIOStubs(rt: LuaRuntime, gameId: string): void {
                         buf[#buf + 1] = tostring(s)
                     end
                 end
+                function f:flush() end
                 function f:close()
                     local content = table.concat(buf)
                     _saveToStorage(_storagePrefix .. path, content)
