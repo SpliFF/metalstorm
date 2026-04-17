@@ -88,8 +88,15 @@ function vfsLookup(path: string): string | undefined {
 // ── HTTP VFS prefetch ──────────────────────────────────────────────────
 
 async function prefetchAllGameFiles(baseUrl: string): Promise<void> {
-    const queue = ['LuaUI', 'LuaRules', 'LuaRules/Utilities',
-        'LuaRules/Configs', 'Configs'];
+    const queue = [
+        'LuaUI', 'LuaRules', 'LuaRules/Utilities',
+        'LuaRules/Configs', 'Configs',
+        // Chili UI framework has deep directory trees that may not
+        // be reached by BFS from LuaUI if the walker doesn't descend
+        // into all Widget subdirectories quickly enough.
+        'LuaUI/Widgets/chili', 'LuaUI/Widgets/chili_old',
+        'gamedata',
+    ];
     const visited = new Set<string>();
 
     while (queue.length > 0) {
@@ -125,8 +132,73 @@ async function prefetchAllGameFiles(baseUrl: string): Promise<void> {
 
 // ── Logging ────────────────────────────────────────────────────────────
 
+// Rate-limit log posting to prevent a runaway widget loop from
+// filling the main thread's postMessage queue and OOMing the tab.
+// We keep a sliding window of log timestamps over the last second.
+const logTimes: number[] = [];
+const LOG_RATE_LIMIT_PER_SEC = 500;
+let logDropCount = 0;
+
 function postLog(level: number, msg: string): void {
-    self.postMessage({ type: 'log', level, msg });
+    const now = performance.now();
+    while (logTimes.length && logTimes[0] < now - 1000) logTimes.shift();
+    if (logTimes.length >= LOG_RATE_LIMIT_PER_SEC) {
+        logDropCount++;
+        // Periodically report drops so silence doesn't hide the flood.
+        if ((logDropCount & 0x3ff) === 0) {
+            const post = self.postMessage as (msg: unknown) => void;
+            post({ type: 'log', level: 3, msg: `[LuaUI] log rate-limited: ${logDropCount} messages dropped` });
+        }
+        return;
+    }
+    logTimes.push(now);
+    postToMain({ type: 'log', level, msg });
+}
+
+/// Wrap every outgoing postMessage so we can diagnose the shutdown loop.
+/// Level-1 debug traffic so it's hidden from normal views but visible
+/// via the debug console filter. `log` messages are skipped to avoid
+/// recursive self-description of the log pipe.
+function postToMain(msg: Record<string, unknown>, transfer?: Transferable[]): void {
+    const post = self.postMessage as (msg: unknown, transfer?: Transferable[]) => void;
+    if (transfer && transfer.length) {
+        post(msg, transfer);
+    } else {
+        post(msg);
+    }
+}
+
+function describeMessage(msg: Record<string, unknown>): string {
+    const t = String(msg.type ?? '?');
+    // Short summary per message type; avoids dumping huge payloads.
+    switch (t) {
+        case 'ready':      return `ready (fileCount=${msg.fileCount}, callins=${(msg.callins as string[])?.join(',') || 'none'})`;
+        case 'error':      return `error: ${String(msg.msg ?? '')}`;
+        case 'storage:set':return `storage:set key=${msg.key}`;
+        case 'widgetList': return `widgetList (${String(msg.data ?? '').length} bytes)`;
+        case 'worldGLCommands': return `worldGLCommands (${(msg.commands as unknown[])?.length ?? '?'} cmds)`;
+        default:           return t;
+    }
+}
+
+function describeInboundMessage(msg: Record<string, unknown>): string {
+    const t = String(msg?.type ?? '?');
+    switch (t) {
+        case 'init':        return `init (gameId=${msg.gameId})`;
+        case 'shutdown':    return 'shutdown';
+        case 'resize':      return `resize ${msg.width}x${msg.height}`;
+        case 'keypress':    return `keypress keyCode=${msg.keyCode}`;
+        case 'keyrelease':  return `keyrelease keyCode=${msg.keyCode}`;
+        case 'mousepress':  return `mousepress @${msg.x},${msg.y} btn=${msg.button}`;
+        case 'mouserelease':return `mouserelease @${msg.x},${msg.y} btn=${msg.button}`;
+        case 'mousemove':   return `mousemove @${msg.x},${msg.y}`;
+        case 'mousewheel':  return `mousewheel up=${msg.up} value=${msg.value}`;
+        case 'getWidgetList': return 'getWidgetList';
+        case 'toggleWidget':  return `toggleWidget name=${msg.name}`;
+        case 'enableWidget':  return `enableWidget name=${msg.name}`;
+        case 'disableWidget': return `disableWidget name=${msg.name}`;
+        default:              return t;
+    }
 }
 
 // ── localStorage bridge ────────────────────────────────────────────────
@@ -143,7 +215,7 @@ function loadFromStorage(_key: string): string | null {
 function saveToStorage(_key: string, _value: string): void {
     // TODO: bridge to main thread localStorage
     // For now, post a message so main thread can save it
-    self.postMessage({ type: 'storage:set', key: _key, value: _value });
+    postToMain({ type: 'storage:set', key: _key, value: _value });
 }
 
 // ── Main init ──────────────────────────────────────────────────────────
@@ -166,9 +238,15 @@ async function init(
     const baseUrl = `${lobbyUrl}/api/games/data/${gameId}`;
     startTime = performance.now() / 1000;
 
+    postLog(2, `[LuaUI] init step 1/8: VFS prefetch starting from ${baseUrl}`);
+
     // 1. Prefetch VFS
     await prefetchAllGameFiles(baseUrl);
-    postLog(2, `VFS: ${vfsFiles.size} files prefetched`);
+    postLog(2, `[LuaUI] init step 1/8 done: VFS ${vfsFiles.size} files prefetched`);
+    // Diagnostic: check if specific files are in VFS
+    const widgetDir = vfsDirCache.get('LuaUI/Widgets/');
+    const hasEpic = vfsFiles.has('LuaUI/Widgets/gui_epicmenu.lua');
+    postLog(2, `[LuaUI] VFS diag: Widgets/ has ${widgetDir?.length ?? 0} files, gui_epicmenu.lua=${hasEpic}`);
 
     // 2. Create GL context on OffscreenCanvas for 2D UI rendering
     const gl = canvas.getContext('webgl2', {
@@ -180,13 +258,16 @@ async function init(
 
     if (!gl) {
         postLog(4, 'Failed to create WebGL2 context on OffscreenCanvas');
-        self.postMessage({ type: 'error', msg: 'No WebGL2 on OffscreenCanvas' });
+        postToMain({ type: 'error', msg: 'No WebGL2 on OffscreenCanvas' });
         return;
     }
+
+    postLog(2, '[LuaUI] init step 2/8 done: WebGL2 context ready');
 
     // 3. Create Lua runtime and GL bridge
     runtime = new LuaRuntime('LuaUI');
     bridge = new LuaGLBridge(gl, mapData.mapSourceUrl);
+    postLog(2, '[LuaUI] init step 3/8 done: Lua runtime + GL bridge created');
 
     const ctx: SpringAPIContext = {
         mapSizeX: mapData.widthElmos,
@@ -204,9 +285,11 @@ async function init(
 
     // 4. Install engine globals
     installEngineGlobals(runtime, bridge, ctx, gameId);
+    postLog(2, '[LuaUI] init step 4/8 done: engine globals installed');
 
     // 5. Install VFS callbacks
     installVFS(runtime);
+    postLog(2, '[LuaUI] init step 5/8 done: VFS callbacks installed');
 
     // 6. Install error tracking
     runtime.doString(`
@@ -228,9 +311,38 @@ async function init(
             return origLog(section, level, ...)
         end
     `, 'error_tracker');
+    postLog(2, '[LuaUI] init step 6/8 done: error tracker installed');
+
+    // 6b. Pre-install shutdown recursion guard as a delayed hook.
+    // cawidgets.lua defines widgetHandler.Shutdown. We wrap it the
+    // first time it's referenced (via metatable) so repeated calls
+    // become no-ops. This has to be set up BEFORE camain.lua runs,
+    // because widget load errors can cascade into widgetHandler
+    // methods.
+    runtime.doString(`
+        local _shuttingDown = false
+        _widgetHandler_shutdown_wrap = function(wh)
+            if not wh or type(wh.Shutdown) ~= 'function' then return end
+            if wh.__shutdownWrapped then return end
+            wh.__shutdownWrapped = true
+            local orig = wh.Shutdown
+            wh.Shutdown = function(self, ...)
+                if _shuttingDown then
+                    Spring.Echo("[LuaUI] widgetHandler:Shutdown re-entry blocked")
+                    return
+                end
+                _shuttingDown = true
+                local ok, err = pcall(orig, self, ...)
+                if not ok then
+                    Spring.Echo("[LuaUI] widgetHandler:Shutdown errored: " .. tostring(err))
+                end
+            end
+        end
+    `, 'shutdown_guard_pre');
+    postLog(2, '[LuaUI] init step 6b/8 done: pre-guard installed');
 
     // 7. Bootstrap
-    postLog(2, 'Starting bootstrap...');
+    postLog(2, '[LuaUI] init step 7/8: starting bootstrap (VFS.Include camain.lua)...');
     const bootStart = performance.now();
     const bootErr = runtime.doString(`
         local ok, err = pcall(function()
@@ -242,20 +354,64 @@ async function init(
         end
     `, 'bootstrap');
 
-    postLog(2, `Bootstrap completed in ${(performance.now() - bootStart).toFixed(0)}ms`);
+    postLog(2, `[LuaUI] init step 7/8 done: bootstrap completed in ${(performance.now() - bootStart).toFixed(0)}ms`);
     if (bootErr) {
         postLog(4, `Bootstrap failed: ${bootErr}`);
     }
 
+    // Diagnostic: try to compile gui_epicmenu.lua to see if fengari handles it
+    runtime.doString(`
+        local epicFile = "LuaUI/Widgets/gui_epicmenu.lua"
+        local text = VFS.LoadFile(epicFile, VFS.RAW_FIRST)
+        if not text then
+            Spring.Echo("[LuaUI] EPIC diag: file NOT in VFS")
+        else
+            Spring.Echo("[LuaUI] EPIC diag: file found, " .. #text .. " bytes")
+            local chunk, err = loadstring(text, epicFile)
+            if not chunk then
+                Spring.Echo("[LuaUI] EPIC diag: COMPILE FAILED: " .. tostring(err))
+            else
+                Spring.Echo("[LuaUI] EPIC diag: compiled OK")
+                -- Try running it in a sandboxed env
+                local testEnv = {}
+                setmetatable(testEnv, {__index = _G})
+                setfenv(chunk, testEnv)
+                local ok, err2 = pcall(chunk)
+                if ok then
+                    Spring.Echo("[LuaUI] EPIC diag: executed OK, err=" .. tostring(err2))
+                else
+                    Spring.Echo("[LuaUI] EPIC diag: EXEC FAILED: " .. tostring(err2))
+                end
+            end
+        end
+    `, 'epic_diag');
+
+    // Apply the pre-installed shutdown guard to widgetHandler now that
+    // camain.lua has loaded it.
+    runtime.doString(`
+        if _widgetHandler_shutdown_wrap and widgetHandler then
+            _widgetHandler_shutdown_wrap(widgetHandler)
+        end
+    `, 'shutdown_guard_apply');
+    postLog(2, '[LuaUI] init done: shutdown recursion guard applied');
+
     // 8. Start frame loop (30fps — matches Spring's GAME_SPEED)
+    // Guard against re-entry: if a previous frame is still running
+    // (e.g. a widget's Update is slow), skip rather than stacking.
+    let frameRunning = false;
     frameInterval = setInterval(() => {
-        if (!runtime) return;
-        runFrame(runtime, gl);
+        if (!runtime || shuttingDown || frameRunning) return;
+        frameRunning = true;
+        try {
+            runFrame(runtime, gl);
+        } finally {
+            frameRunning = false;
+        }
     }, 33);
 
     // Report which callins widgets registered so main thread only sends needed events
     const registeredCallins = getRegisteredCallins(runtime);
-    self.postMessage({ type: 'ready', fileCount: vfsFiles.size, callins: registeredCallins });
+    postToMain({ type: 'ready', fileCount: vfsFiles.size, callins: registeredCallins });
 }
 
 function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext): void {
@@ -480,6 +636,19 @@ function installVFS(rt: LuaRuntime): void {
         return luaTable(...(subs ?? []));
     });
 
+    // Purge a file from the VFS cache so the next VFS.LoadFile re-fetches
+    // it from the server. Used by enableWidget to force a reload.
+    rt.setGlobal('_vfsPurge', (path: LuaValue) => {
+        const p = String(path);
+        vfsFiles.delete(p);
+        const lower = p.toLowerCase();
+        const canonical = vfsPathMap.get(lower);
+        if (canonical) {
+            vfsFiles.delete(canonical);
+            vfsPathMap.delete(lower);
+        }
+    });
+
     rt.doString(VFS_IMPLEMENTATION_LUA, 'vfs_impl');
 }
 
@@ -514,27 +683,94 @@ function getRegisteredCallins(rt: LuaRuntime): string[] {
 
 function getWidgetList(): string {
     if (!runtime) return '';
+    // Returns one line per widget. Fields are pipe-delimited:
+    //   status|name|author|basename|error|desc|date|license|layer|enabled|handler
     return String(runtime.evalString(`
         local entries = {}
+        local esc = function(s) return (tostring(s or "")):gsub("|", "/") end
         if widgetHandler then
             for _, w in ipairs(widgetHandler.widgets or {}) do
                 local info = w.whInfo or {}
-                entries[#entries+1] = "active|" .. (info.name or "?") .. "|" .. (info.author or "") .. "|" .. (info.basename or "")
+                local gi = (w.GetInfo and type(w.GetInfo) == "function") and w:GetInfo() or {}
+                entries[#entries+1] = "active|" .. esc(info.name) .. "|" .. esc(info.author)
+                    .. "|" .. esc(info.basename) .. "||" .. esc(gi.desc or info.desc)
+                    .. "|" .. esc(gi.date) .. "|" .. esc(gi.license)
+                    .. "|" .. esc(gi.layer or info.layer) .. "|" .. esc(tostring(gi.enabled))
+                    .. "|" .. esc(tostring(gi.handler))
             end
             for name, info in pairs(widgetHandler.knownWidgets or {}) do
                 if not info.active then
-                    entries[#entries+1] = "disabled|" .. name .. "|" .. (info.author or "") .. "|" .. (info.basename or "")
+                    entries[#entries+1] = "disabled|" .. esc(name) .. "|" .. esc(info.author)
+                        .. "|" .. esc(info.basename) .. "||" .. esc(info.desc)
+                        .. "|||" .. esc(info.layer or "") .. "||"
                 end
             end
         end
         for _, errMsg in ipairs(_widgetErrors or {}) do
-            entries[#entries+1] = "failed|||| " .. errMsg
+            entries[#entries+1] = "failed||||| " .. esc(errMsg)
         end
         return table.concat(entries, "\\n")
     `) ?? '');
 }
 
+function escapeLuaStr(s: string): string {
+    return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+/** Toggle a widget by name. */
+function toggleWidget(name: string): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler then
+            widgetHandler:ToggleWidget("${escapeLuaStr(name)}")
+        end
+    `, 'toggleWidget');
+}
+
+/** Enable a widget by name. Clears VFS cache for its file so the
+ *  next load fetches fresh source from the server. */
+function enableWidget(name: string): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler then
+            -- Clear VFS cache for this widget so EnableWidget reloads from server
+            local ki = widgetHandler.knownWidgets and widgetHandler.knownWidgets["${escapeLuaStr(name)}"]
+            if ki and ki.filename and VFS._writeCache then
+                VFS._writeCache[ki.filename] = nil
+            end
+            -- Also purge from the prefetched VFS map so VFS.LoadFile re-fetches
+            if ki and ki.filename then
+                _vfsPurge(ki.filename)
+            end
+            widgetHandler:EnableWidget("${escapeLuaStr(name)}")
+        end
+    `, 'enableWidget');
+}
+
+/** Disable a widget by name. */
+function disableWidget(name: string): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler then
+            widgetHandler:DisableWidget("${escapeLuaStr(name)}")
+        end
+    `, 'disableWidget');
+}
+
+let shuttingDown = false;
+
 function shutdown(): void {
+    // Idempotent: multiple shutdown messages from the main thread (e.g.
+    // the startGame→dispose→new-manager path) shouldn't trigger multiple
+    // widgetHandler:Shutdown runs. Each run iterates all ZK widgets and
+    // can produce thousands of log entries — repeated runs compound into
+    // a browser-killing flood.
+    if (shuttingDown) {
+        postLog(2, '[LuaUI] shutdown() ignored (already shutting down)');
+        return;
+    }
+    shuttingDown = true;
+
     if (frameInterval) {
         clearInterval(frameInterval);
         frameInterval = null;
@@ -558,13 +794,18 @@ function shutdown(): void {
 
 self.onmessage = async (e: MessageEvent) => {
     const msg = e.data;
+    // Debug-level trace of inbound messages (skip high-frequency input
+    // events to avoid drowning real log entries).
+    if (msg.type !== 'mousemove') {
+        postLog(1, `[LuaUI:main→worker] ${describeInboundMessage(msg)}`);
+    }
     switch (msg.type) {
         case 'init':
             try {
                 await init(msg.canvas, msg.gameId, msg.lobbyUrl, msg.mapData);
             } catch (err) {
                 postLog(4, `Init failed: ${err}`);
-                self.postMessage({ type: 'error', msg: String(err) });
+                postToMain({ type: 'error', msg: String(err) });
             }
             break;
 
@@ -638,7 +879,30 @@ self.onmessage = async (e: MessageEvent) => {
             break;
 
         case 'getWidgetList':
-            self.postMessage({ type: 'widgetList', data: getWidgetList() });
+            postToMain({ type: 'widgetList', data: getWidgetList() });
+            break;
+
+        case 'toggleWidget':
+            toggleWidget(String(msg.name ?? ''));
+            postToMain({ type: 'widgetList', data: getWidgetList() });
+            break;
+
+        case 'enableWidget':
+            enableWidget(String(msg.name ?? ''));
+            postToMain({ type: 'widgetList', data: getWidgetList() });
+            break;
+
+        case 'vfsDiag': {
+            const dir = String(msg.dir ?? 'LuaUI/Widgets/');
+            const files = vfsDirCache.get(dir) ?? [];
+            const has = vfsFiles.has(String(msg.file ?? ''));
+            postLog(2, `[VFS diag] dir="${dir}" files=${files.length} hasFile=${has} sample=${files.slice(0,5).join(',')}`);
+            break;
+        }
+
+        case 'disableWidget':
+            disableWidget(String(msg.name ?? ''));
+            postToMain({ type: 'widgetList', data: getWidgetList() });
             break;
 
         case 'resize':
@@ -811,9 +1075,11 @@ VFS.Include = function(path, env, mode)
         end
         env = env or _G
     end
-    if env ~= _G and not getmetatable(env) then
-        setmetatable(env, { __index = _G })
-    end
+    -- Intentionally do NOT add a __index=_G metatable to env here.
+    -- Spring's real VFS.Include does NOT do that, and adding it turns
+    -- the widget's environment into a leaky proxy to _G — widgets then
+    -- accidentally invoke _G globals (like Shutdown, the widgetHandler
+    -- dispatcher), triggering widgetHandler:Shutdown recursion.
     local chunk, err = load(source, path, "t", env)
     if not chunk then
         _includeStack[path] = nil

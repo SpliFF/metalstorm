@@ -112,13 +112,16 @@ static std::string JsonEscape(const std::string& s) {
 }
 
 static std::string LogEntryToJson(const BufferedLogEntry& e) {
-    char buf[512];
-    snprintf(buf, sizeof(buf),
-        R"({"id":%llu,"timestamp":%llu,"level":%d,"section":"%s","scope":"%s","process":"%s","frame":%d,"message":"%s"})",
-        (unsigned long long)e.id, (unsigned long long)e.timestamp,
-        e.level, JsonEscape(e.section).c_str(), JsonEscape(e.scope).c_str(),
-        JsonEscape(e.process).c_str(), e.frame, JsonEscape(e.message).c_str());
-    return buf;
+    std::string json;
+    json += R"({"id":)" + std::to_string(e.id);
+    json += R"(,"timestamp":)" + std::to_string(e.timestamp);
+    json += R"(,"level":)" + std::to_string(e.level);
+    json += R"(,"section":")" + JsonEscape(e.section) + "\"";
+    json += R"(,"scope":")" + JsonEscape(e.scope) + "\"";
+    json += R"(,"process":")" + JsonEscape(e.process) + "\"";
+    json += R"(,"frame":)" + std::to_string(e.frame);
+    json += R"(,"message":")" + JsonEscape(e.message) + "\"}";
+    return json;
 }
 
 /// Extract a path segment after a prefix. E.g. "/api/logs/42" with
@@ -264,14 +267,16 @@ int main(int argc, char** argv) {
                     auto* pair = static_cast<std::pair<std::string*, bool*>*>(data);
                     if (!*pair->second) *pair->first += ",";
                     *pair->second = false;
-                    char buf[1024];
-                    snprintf(buf, sizeof(buf),
-                        R"({"id":%s,"timestamp":%s,"level":%s,"section":"%s","scope":"%s","process":"%s","frame":%s,"message":"%s"})",
-                        vals[0] ? vals[0] : "0", vals[1] ? vals[1] : "0",
-                        vals[2] ? vals[2] : "0", vals[3] ? vals[3] : "",
-                        vals[4] ? vals[4] : "", vals[5] ? vals[5] : "",
-                        vals[6] ? vals[6] : "0", vals[7] ? vals[7] : "");
-                    *pair->first += buf;
+                    std::string entry;
+                    entry += R"({"id":)" + std::string(vals[0] ? vals[0] : "0");
+                    entry += R"(,"timestamp":)" + std::string(vals[1] ? vals[1] : "0");
+                    entry += R"(,"level":)" + std::string(vals[2] ? vals[2] : "0");
+                    entry += R"(,"section":")" + JsonEscape(vals[3] ? vals[3] : "") + "\"";
+                    entry += R"(,"scope":")" + JsonEscape(vals[4] ? vals[4] : "") + "\"";
+                    entry += R"(,"process":")" + JsonEscape(vals[5] ? vals[5] : "") + "\"";
+                    entry += R"(,"frame":)" + std::string(vals[6] ? vals[6] : "0");
+                    entry += R"(,"message":")" + JsonEscape(vals[7] ? vals[7] : "") + "\"}";
+                    *pair->first += entry;
                     return 0;
                 };
                 auto pair = std::make_pair(&json, &first);
@@ -321,14 +326,16 @@ int main(int argc, char** argv) {
                     auto* pair = static_cast<std::pair<std::string*, bool*>*>(data);
                     if (!*pair->second) *pair->first += ",";
                     *pair->second = false;
-                    char buf[1024];
-                    snprintf(buf, sizeof(buf),
-                        R"({"id":%s,"timestamp":%s,"level":%s,"section":"%s","scope":"%s","process":"%s","frame":%s,"message":"%s"})",
-                        vals[0] ? vals[0] : "0", vals[1] ? vals[1] : "0",
-                        vals[2] ? vals[2] : "0", vals[3] ? vals[3] : "",
-                        vals[4] ? vals[4] : "", vals[5] ? vals[5] : "",
-                        vals[6] ? vals[6] : "0", vals[7] ? vals[7] : "");
-                    *pair->first += buf;
+                    std::string entry;
+                    entry += R"({"id":)" + std::string(vals[0] ? vals[0] : "0");
+                    entry += R"(,"timestamp":)" + std::string(vals[1] ? vals[1] : "0");
+                    entry += R"(,"level":)" + std::string(vals[2] ? vals[2] : "0");
+                    entry += R"(,"section":")" + JsonEscape(vals[3] ? vals[3] : "") + "\"";
+                    entry += R"(,"scope":")" + JsonEscape(vals[4] ? vals[4] : "") + "\"";
+                    entry += R"(,"process":")" + JsonEscape(vals[5] ? vals[5] : "") + "\"";
+                    entry += R"(,"frame":)" + std::string(vals[6] ? vals[6] : "0");
+                    entry += R"(,"message":")" + JsonEscape(vals[7] ? vals[7] : "") + "\"}";
+                    *pair->first += entry;
                     return 0;
                 };
                 auto pair = std::make_pair(&json, &first);

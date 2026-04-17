@@ -54,6 +54,11 @@ constexpr const char* kJsonSuffix = ".config.json";
 /// (errors are logged to stderr).
 std::unique_ptr<LuaParser> Load(const std::string& basePath);
 
+/// Load only the `.config.json` for the given base path, ignoring
+/// any `.config.lua`. Used when the Lua config lacks data (e.g.
+/// pieces) that the JSON config provides.
+std::unique_ptr<LuaParser> LoadJson(const std::string& basePath);
+
 } // namespace LuaConfig
 
 #endif // LUA_CONFIG_LOADER_H

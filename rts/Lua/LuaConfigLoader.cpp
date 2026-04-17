@@ -121,4 +121,12 @@ std::unique_ptr<LuaParser> Load(const std::string& basePath) {
     return nullptr;
 }
 
+std::unique_ptr<LuaParser> LoadJson(const std::string& basePath) {
+    const std::string jsonPath = basePath + kJsonSuffix;
+    if (fs::exists(jsonPath)) {
+        return LoadFromJsonFile(jsonPath);
+    }
+    return nullptr;
+}
+
 } // namespace LuaConfig

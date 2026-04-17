@@ -234,6 +234,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // startGame(). Without this, the old minimap canvas would
     // stay parented to #minimap-container and the new Minimap would
     // append a second canvas on top of it.
+    //
+    // Also dispose any leftover widget manager from a previous session.
+    // Without this, startGame leaks a widget worker each call, and
+    // orphaned workers keep running their 30Hz frame loops in the
+    // background — a likely contributor to the widget shutdown loop.
+    (window as any).__widgetManagerDispose?.();
+    delete (window as any).__widgetManagerDispose;
+
     if (minimap) {
         minimap.dispose();
         minimap = null;
@@ -440,7 +448,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         // Load LuaUI widgets via the widget manager. Discovers all
         // available widgets for the game, fetches sources, and loads
         // them in a single shared Lua state.
-        if (gameId) {
+        // URL param `?nowidgets` disables widget loading entirely —
+        // useful for isolating widget-induced browser crashes.
+        const widgetsDisabled = new URLSearchParams(location.search).has('nowidgets');
+        if (gameId && !widgetsDisabled) {
             const mgr = new LuaWidgetManager(scene, camera, {
                 ...map,
                 mapSourceUrl: lobbyHttpUrl + map.mapSourceUrl,

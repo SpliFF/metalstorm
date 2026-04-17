@@ -87,6 +87,30 @@ Set `lobby.selectedGameId` before calling `createRoom` if you want to override t
 // The createRoom() call sends whatever selectedGameId is set to.
 ```
 
+## `window.widgets` — Widget Manager
+
+Available when a game is running with LuaUI widgets loaded. Controls the ZK widget system from JavaScript.
+
+| Method / Property | Description |
+|-------------------|-------------|
+| `widgets.ready` | `true` after the LuaUI worker has bootstrapped |
+| `widgets.vfsFileCount` | Number of Lua files in the VFS cache |
+| `widgets.list()` | Toggle the F9 widget list overlay |
+| `widgets.enable(name)` | Enable a widget by name (reloads source from server) |
+| `widgets.disable(name)` | Disable a widget by name |
+| `widgets.toggle(name)` | Toggle a widget (enable forces reload) |
+| `widgets.refresh()` | Request a fresh widget list from the worker |
+
+```js
+// Examples:
+widgets.toggle('Chili Framework');
+widgets.disable('Map Edge Extension');
+widgets.enable('Chili Framework');  // re-fetches from server
+widgets.list();                     // open/close the F9 overlay
+```
+
+The widget list overlay (F9 or `widgets.list()`) shows checkboxes next to each widget for interactive enable/disable. Enabling a widget re-fetches its source from the lobby server, so toggling off→on serves as a reload action.
+
 ## `window.debugConsole` — Debug Console
 
 The in-game debug console (opened with backtick `` ` ``). Provides:

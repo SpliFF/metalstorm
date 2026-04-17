@@ -41,6 +41,7 @@ export class LuaWidgetManager {
     private keyHandler: ((e: KeyboardEvent) => void) | null = null;
     private keyUpHandler: ((e: KeyboardEvent) => void) | null = null;
     private widgetListOverlay: HTMLDivElement | null = null;
+    private disposed = false;
 
     /** Last widget list data received from worker */
     private lastWidgetData = '';
@@ -94,7 +95,7 @@ export class LuaWidgetManager {
             mapSourceUrl: this.map.mapSourceUrl,
         };
 
-        this.worker.postMessage({
+        this.postToWorker({
             type: 'init',
             canvas: offscreen,
             gameId: this.options.gameId,
@@ -142,17 +143,74 @@ export class LuaWidgetManager {
         const ro = new ResizeObserver(() => {
             const w = mainCanvas?.width ?? window.innerWidth;
             const h = mainCanvas?.height ?? window.innerHeight;
-            this.worker?.postMessage({ type: 'resize', width: w, height: h });
+            this.postToWorker({ type: 'resize', width: w, height: h });
         });
         if (mainCanvas) ro.observe(mainCanvas);
 
         return canvas;
     }
 
+    // ── postMessage wrappers with debug tracing ──────────────────────────
+    //
+    // Every message crossing the main↔worker boundary is logged at
+    // debug level so the shutdown-loop diagnosis can reconstruct the
+    // exact order of events. Payloads are summarised, not dumped.
+
+    private postToWorker(msg: Record<string, unknown>, transfer?: Transferable[]): void {
+        if (!this.worker) return;
+        this.logMessageTraffic('main→worker', msg);
+        if (transfer && transfer.length) {
+            this.worker.postMessage(msg, transfer);
+        } else {
+            this.worker.postMessage(msg);
+        }
+    }
+
+    private logMessageTraffic(dir: 'main→worker' | 'worker→main', msg: Record<string, unknown>): void {
+        // Skip high-frequency or meta channels to avoid drowning real logs.
+        if (msg.type === 'log' || msg.type === 'mousemove') return;
+        const t = String(msg.type ?? '?');
+        let summary = t;
+        switch (t) {
+            case 'init':           summary = `init (gameId=${msg.gameId})`; break;
+            case 'shutdown':       summary = 'shutdown'; break;
+            case 'resize':         summary = `resize ${msg.width}x${msg.height}`; break;
+            case 'keypress':       summary = `keypress keyCode=${msg.keyCode}`; break;
+            case 'keyrelease':     summary = `keyrelease keyCode=${msg.keyCode}`; break;
+            case 'mousepress':     summary = `mousepress @${msg.x},${msg.y} btn=${msg.button}`; break;
+            case 'mouserelease':   summary = `mouserelease @${msg.x},${msg.y} btn=${msg.button}`; break;
+            case 'mousemove':      summary = `mousemove @${msg.x},${msg.y}`; break;
+            case 'mousewheel':     summary = `mousewheel up=${msg.up} value=${msg.value}`; break;
+            case 'getWidgetList':  summary = 'getWidgetList'; break;
+            case 'toggleWidget':   summary = `toggleWidget name=${msg.name}`; break;
+            case 'enableWidget':   summary = `enableWidget name=${msg.name}`; break;
+            case 'disableWidget':  summary = `disableWidget name=${msg.name}`; break;
+            case 'ready':          summary = `ready (fileCount=${msg.fileCount}, callins=${(msg.callins as string[])?.join(',') || 'none'})`; break;
+            case 'error':          summary = `error: ${String(msg.msg ?? '')}`; break;
+            case 'storage:set':    summary = `storage:set key=${msg.key}`; break;
+            case 'widgetList':     summary = `widgetList (${String(msg.data ?? '').length} bytes)`; break;
+            case 'worldGLCommands':summary = `worldGLCommands (${(msg.commands as unknown[])?.length ?? '?'} cmds)`; break;
+        }
+        debugConsole.addEntry({
+            id: Date.now() + Math.random(),
+            timestamp: Date.now() / 1000,
+            level: 1, // debug
+            section: 'lua',
+            scope: 'LuaUI',
+            process: 'client',
+            message: `[LuaUI:${dir}] ${summary}`,
+            frame: 0,
+        });
+    }
+
     // ── Worker message handling ──────────────────────────────────────────
 
     private onWorkerMessage(e: MessageEvent): void {
         const msg = e.data;
+        // Trace worker→main traffic at debug level (skip 'log' itself
+        // — those messages carry the debug text and self-logging would
+        // double-size the debug console).
+        if (msg?.type !== 'log') this.logMessageTraffic('worker→main', msg);
         switch (msg.type) {
             case 'log':
                 console.log(`[LuaUI]`, msg.msg);
@@ -214,7 +272,7 @@ export class LuaWidgetManager {
             if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
             if (e.type === 'keydown') {
-                this.worker?.postMessage({
+                this.postToWorker({
                     type: 'keypress',
                     keyCode: springKeyCode(e),
                     alt: e.altKey,
@@ -245,7 +303,7 @@ export class LuaWidgetManager {
             this.keyUpHandler = (e: KeyboardEvent) => {
                 const tag = (e.target as HTMLElement)?.tagName;
                 if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-                this.worker?.postMessage({
+                this.postToWorker({
                     type: 'keyrelease',
                     keyCode: springKeyCode(e),
                     alt: e.altKey, ctrl: e.ctrlKey, meta: e.metaKey, shift: e.shiftKey,
@@ -260,7 +318,7 @@ export class LuaWidgetManager {
         // MousePress
         if (has('MousePress')) {
             const handler = (e: MouseEvent) => {
-                this.worker?.postMessage({
+                this.postToWorker({
                     type: 'mousepress',
                     x: e.offsetX, y: canvas.height - e.offsetY, // Spring Y is bottom-up
                     button: domButtonToSpring(e.button),
@@ -273,7 +331,7 @@ export class LuaWidgetManager {
         // MouseRelease
         if (has('MouseRelease')) {
             const handler = (e: MouseEvent) => {
-                this.worker?.postMessage({
+                this.postToWorker({
                     type: 'mouserelease',
                     x: e.offsetX, y: canvas.height - e.offsetY,
                     button: domButtonToSpring(e.button),
@@ -286,7 +344,7 @@ export class LuaWidgetManager {
         // MouseWheel
         if (has('MouseWheel')) {
             const handler = (e: WheelEvent) => {
-                this.worker?.postMessage({
+                this.postToWorker({
                     type: 'mousewheel',
                     up: e.deltaY < 0,
                     value: Math.abs(e.deltaY),
@@ -305,7 +363,7 @@ export class LuaWidgetManager {
                 const dy = y - this.lastMouseY;
                 this.lastMouseX = x;
                 this.lastMouseY = y;
-                this.worker?.postMessage({
+                this.postToWorker({
                     type: 'mousemove',
                     x, y, dx, dy,
                     button: e.buttons ? domButtonToSpring(e.button) : 0,
@@ -325,7 +383,7 @@ export class LuaWidgetManager {
             return;
         }
         // Request fresh data from worker
-        this.worker?.postMessage({ type: 'getWidgetList' });
+        this.postToWorker({ type: 'getWidgetList' });
         // If we have cached data, show immediately; it'll update when worker responds
         if (this.lastWidgetData) {
             this.renderWidgetList(this.lastWidgetData);
@@ -358,7 +416,14 @@ export class LuaWidgetManager {
                 const status = parts[0];
                 let name = parts[1] || '';
                 const author = parts[2] || '';
+                const basename = parts[3] || '';
                 const error = parts[4] || '';
+                const desc = parts[5] || '';
+                const date = parts[6] || '';
+                const license = parts[7] || '';
+                const layer = parts[8] || '';
+                const enabled = parts[9] || '';
+                const handler = parts[10] || '';
                 countTotal++;
 
                 if (!name && error) {
@@ -369,11 +434,21 @@ export class LuaWidgetManager {
                 const row = document.createElement('div');
                 row.className = `wl-entry wl-${status}`;
 
-                const dot = document.createElement('span');
-                dot.className = 'wl-dot';
-                dot.textContent = status === 'active' ? '\u25cf'
-                    : status === 'failed' ? '\u25cf' : '\u25cb';
-                row.appendChild(dot);
+                // Checkbox for enable/disable toggle
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.className = 'wl-cb';
+                cb.checked = status === 'active';
+                if (name) {
+                    const widgetName = name; // capture for closure
+                    cb.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        this.postToWorker({ type: 'toggleWidget', name: widgetName });
+                    });
+                } else {
+                    cb.disabled = true;
+                }
+                row.appendChild(cb);
 
                 const nameEl = document.createElement('span');
                 nameEl.className = 'wl-name';
@@ -387,13 +462,31 @@ export class LuaWidgetManager {
                     row.appendChild(authorEl);
                 }
 
-                if (error) {
-                    const errEl = document.createElement('div');
-                    errEl.className = 'wl-error';
-                    errEl.textContent = error.substring(0, 200);
-                    row.appendChild(errEl);
-                }
+                // Expandable detail panel (hidden by default)
+                const detailEl = document.createElement('div');
+                detailEl.className = 'wl-detail';
+                detailEl.style.display = 'none';
+                const infoLines: string[] = [];
+                if (desc) infoLines.push(`<b>Description:</b> ${this.esc(desc)}`);
+                if (basename) infoLines.push(`<b>File:</b> ${this.esc(basename)}`);
+                if (date) infoLines.push(`<b>Date:</b> ${this.esc(date)}`);
+                if (license) infoLines.push(`<b>License:</b> ${this.esc(license)}`);
+                if (layer) infoLines.push(`<b>Layer:</b> ${this.esc(layer)}`);
+                if (enabled) infoLines.push(`<b>Default enabled:</b> ${this.esc(enabled)}`);
+                if (handler && handler !== 'false' && handler !== 'nil')
+                    infoLines.push(`<b>Handler access:</b> yes`);
+                if (error) infoLines.push(`<b>Error:</b> <span class="wl-error-text">${this.esc(error.substring(0, 300))}</span>`);
+                detailEl.innerHTML = infoLines.join('<br>');
 
+                // Click name to expand/collapse detail
+                nameEl.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const showing = detailEl.style.display !== 'none';
+                    detailEl.style.display = showing ? 'none' : 'block';
+                    nameEl.classList.toggle('wl-expanded', !showing);
+                });
+
+                row.appendChild(detailEl);
                 listEl.appendChild(row);
 
                 if (status === 'active') countActive++;
@@ -417,15 +510,34 @@ export class LuaWidgetManager {
     private buildWindowAPI() {
         const mgr = this;
         return {
+            /** Toggle the F9 widget list overlay */
             list() { mgr.toggleWidgetList(); },
             get ready() { return mgr.ready; },
             get vfsFileCount() { return mgr.fileCount; },
+            /** Enable a widget by name. Forces a full reload from server. */
+            enable(name: string) { mgr.postToWorker({ type: 'enableWidget', name }); },
+            /** Disable a widget by name. */
+            disable(name: string) { mgr.postToWorker({ type: 'disableWidget', name }); },
+            /** Toggle a widget by name. Enabling forces reload. */
+            toggle(name: string) { mgr.postToWorker({ type: 'toggleWidget', name }); },
+            /** Request the current widget list data (returns via widgetList message). */
+            refresh() { mgr.postToWorker({ type: 'getWidgetList' }); },
         };
+    }
+
+    /** Escape HTML special chars for safe innerHTML injection. */
+    private esc(s: string): string {
+        return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
     // ── Cleanup ─────────────────────────────────────────────────────────
 
     dispose(): void {
+        // Idempotent: a stale __widgetManagerDispose callback left on
+        // window or duplicate quitToLobby paths shouldn't trigger
+        // repeated shutdown messages to the worker.
+        if (this.disposed) return;
+        this.disposed = true;
         if (this.keyHandler) {
             window.removeEventListener('keydown', this.keyHandler);
             this.keyHandler = null;
@@ -442,7 +554,7 @@ export class LuaWidgetManager {
             this.widgetListOverlay = null;
         }
         if (this.worker) {
-            this.worker.postMessage({ type: 'shutdown' });
+            this.postToWorker({ type: 'shutdown' });
             this.worker.terminate();
             this.worker = null;
         }
@@ -548,22 +660,38 @@ const WIDGET_LIST_HTML = `
     align-items: baseline;
     gap: 8px;
 }
+.wl-entry { cursor: pointer; }
 .wl-entry:hover { background: rgba(255,255,255,0.05); }
-.wl-dot { width: 12px; flex-shrink: 0; }
-.wl-active .wl-dot { color: #4caf50; }
-.wl-failed .wl-dot { color: #f44336; }
-.wl-disabled .wl-dot { color: #666; }
-.wl-name { color: #e0e0e0; font-weight: bold; }
+.wl-cb {
+    flex-shrink: 0;
+    width: 14px; height: 14px;
+    accent-color: #4caf50;
+    cursor: pointer;
+    pointer-events: auto;
+}
+.wl-failed .wl-cb { accent-color: #f44336; }
+.wl-name {
+    color: #e0e0e0; font-weight: bold;
+    cursor: pointer; text-decoration: underline dotted transparent;
+    transition: text-decoration-color 0.15s;
+}
+.wl-name:hover { text-decoration-color: #888; }
+.wl-name.wl-expanded { text-decoration-color: #4caf50; }
 .wl-active .wl-name { color: #81c784; }
 .wl-failed .wl-name { color: #ef9a9a; }
 .wl-author { color: #888; font-size: 11px; }
-.wl-error {
+.wl-detail {
     width: 100%;
-    color: #e57373;
-    font-size: 10px;
-    padding-left: 20px;
-    word-break: break-all;
+    padding: 6px 8px 6px 22px;
+    margin-top: 2px;
+    font-size: 11px;
+    color: #aaa;
+    background: rgba(0,0,0,0.25);
+    border-radius: 3px;
+    line-height: 1.6;
 }
+.wl-detail b { color: #ccc; }
+.wl-error-text { color: #e57373; }
 </style>
 <div class="wl-panel">
     <div class="wl-title-bar">
