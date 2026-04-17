@@ -105,6 +105,9 @@ export class LuaGLBridge {
 
     /** Base URL for game assets (e.g. http://localhost:8011/api/games/data/zk) */
     private gameBaseUrl = '';
+    /** Search paths for short texture names (no directory component).
+     *  Tried in order against gameBaseUrl. E.g. ["LuaUI/Widgets/chili_old/Skins/Evolved/"] */
+    private textureSearchPaths: string[] = [];
 
     constructor(gl: WebGL2RenderingContext, mapSourceUrl: string, engineTex: EngineTextures = {}) {
         this.gl = gl;
@@ -126,6 +129,15 @@ export class LuaGLBridge {
     /** Build the `gl` global for the Lua runtime. */
     /** Set the base URL for game assets (textures loaded by path). */
     setGameBaseUrl(url: string): void { this.gameBaseUrl = url; }
+
+    /** Add directories to search for short texture names (e.g. skin dirs). */
+    addTextureSearchPaths(...paths: string[]): void {
+        for (const p of paths) {
+            if (!this.textureSearchPaths.includes(p)) {
+                this.textureSearchPaths.push(p);
+            }
+        }
+    }
 
     /** Expose the WebGL context for external use. */
     getGL(): WebGL2RenderingContext { return this.gl; }
@@ -882,18 +894,50 @@ export class LuaGLBridge {
     }
 
     private normaliseTexturePath(path: string): string {
-        // Reuse the Spring path normaliser from lua-spring-api
-        // (duplicated locally to avoid a circular import).
         let p = path;
-        if (p.startsWith(':') && p.length >= 3 && p[2] === ':') p = p.substring(3);
+        // Strip Spring texture modifiers: :c:, :cl:, :n:, :a:, :l:, etc.
+        // Format is :<modifier>:<path> where modifier can be multi-char.
+        while (p.startsWith(':') && p.length >= 3) {
+            const nextColon = p.indexOf(':', 1);
+            if (nextColon > 0 && nextColon < 8) {
+                p = p.substring(nextColon + 1);
+            } else {
+                break;
+            }
+        }
         p = p.replace(/\\/g, '/');
         if (p.startsWith('/')) p = p.substring(1);
         return p;
     }
 
-    private async loadImageInto(url: string, handle: LuaTextureHandle): Promise<void> {
+    /** Resolve a texture URL, trying search paths for short names. */
+    private resolveTextureUrl(normalised: string): string {
+        // If the path has a directory component, use standard resolution
+        if (normalised.includes('/')) {
+            const baseUrl = (normalised.startsWith('LuaUI/') || normalised.startsWith('luaui/'))
+                ? this.gameBaseUrl
+                : this.mapSourceUrl;
+            return `${baseUrl}/${normalised}`;
+        }
+        // Short name (no directory) — try search paths against game URL
+        // This handles skin textures like "tech_overlaywindow.png"
+        if (this.textureSearchPaths.length > 0 && this.gameBaseUrl) {
+            // Use the first search path (usually the active skin directory)
+            return `${this.gameBaseUrl}/${this.textureSearchPaths[0]}${normalised}`;
+        }
+        // Fallback to game base URL
+        return `${this.gameBaseUrl}/${normalised}`;
+    }
+
+    private async loadImageInto(url: string, handle: LuaTextureHandle, fallbackUrls?: string[]): Promise<void> {
         try {
-            const res = await fetch(url);
+            let res = await fetch(url);
+            if (!res.ok && fallbackUrls) {
+                for (const fb of fallbackUrls) {
+                    res = await fetch(fb);
+                    if (res.ok) break;
+                }
+            }
             if (!res.ok) {
                 console.warn(`[gl.CreateTexture] ${url}: ${res.status}`);
                 return;
@@ -989,11 +1033,16 @@ export class LuaGLBridge {
                     width: 1, height: 1,
                 });
                 this.textureCache.set(normalised, handle);
-                // Resolve texture path: game assets use gameBaseUrl, map assets use mapSourceUrl
-                const baseUrl = (normalised.startsWith('LuaUI/') || normalised.startsWith('luaui/'))
-                    ? this.gameBaseUrl
-                    : this.mapSourceUrl;
-                void this.loadImageInto(`${baseUrl}/${normalised}`, handle);
+                const primaryUrl = this.resolveTextureUrl(normalised);
+                // Build fallback URLs from search paths for short names
+                const fallbacks: string[] = [];
+                if (!normalised.includes('/') && this.gameBaseUrl) {
+                    for (const sp of this.textureSearchPaths) {
+                        const fb = `${this.gameBaseUrl}/${sp}${normalised}`;
+                        if (fb !== primaryUrl) fallbacks.push(fb);
+                    }
+                }
+                void this.loadImageInto(primaryUrl, handle, fallbacks.length > 0 ? fallbacks : undefined);
             }
             gl.bindTexture(gl.TEXTURE_2D, handle.tex);
             trackAndRecord(handle.tex);

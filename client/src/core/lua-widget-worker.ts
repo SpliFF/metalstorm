@@ -328,6 +328,11 @@ async function init(
 
     // 4. Install engine globals
     installEngineGlobals(runtime, bridge, ctx, gameId);
+
+    // Expose texture search path configuration to Lua
+    runtime.setGlobal('_addTextureSearchPath', (path: LuaValue) => {
+        bridge!.addTextureSearchPaths(String(path));
+    });
     postLog(2, '[LuaUI] init step 4/8 done: engine globals installed');
 
     // 5. Install VFS callbacks
@@ -655,6 +660,21 @@ async function init(
                     if c.Invalidate then pcall(c.Invalidate, c) end
                 end
             end
+
+            -- Configure texture search paths from the active skin directory
+            -- so short texture names (e.g. "tech_overlaywindow.png") resolve
+            -- to the correct skin folder on the game server.
+            local sh = WG.Chili.SkinHandler
+            if sh and sh.knownSkins then
+                for _, skin in pairs(sh.knownSkins) do
+                    if type(skin) == "table" and skin.info and skin.info.dir then
+                        _addTextureSearchPath(skin.info.dir)
+                    end
+                end
+            end
+            -- Also add the default chili skins path
+            _addTextureSearchPath(WG.Chili.SKIN_DIRNAME or "LuaUI/Widgets/chili_old/skins/")
+            _addTextureSearchPath((WG.Chili.CHILI_DIRNAME or "LuaUI/Widgets/chili_old/") .. "skins/default/")
 
             Spring.Echo("[LuaUI] TaskHandler patched: strong queues, " .. tostring(strongCount) .. " controls enqueued")
             _chiliTaskFix = nil  -- run once
