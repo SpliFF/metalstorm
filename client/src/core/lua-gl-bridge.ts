@@ -103,6 +103,9 @@ export class LuaGLBridge {
     private rboHandles = new Map<number, WebGLRenderbuffer>();
     private nextRboId = 1;
 
+    /** Base URL for game assets (e.g. http://localhost:8011/api/games/data/zk) */
+    private gameBaseUrl = '';
+
     constructor(gl: WebGL2RenderingContext, mapSourceUrl: string, engineTex: EngineTextures = {}) {
         this.gl = gl;
         this.mapSourceUrl = mapSourceUrl;
@@ -121,6 +124,12 @@ export class LuaGLBridge {
     }
 
     /** Build the `gl` global for the Lua runtime. */
+    /** Set the base URL for game assets (textures loaded by path). */
+    setGameBaseUrl(url: string): void { this.gameBaseUrl = url; }
+
+    /** Expose the WebGL context for external use. */
+    getGL(): WebGL2RenderingContext { return this.gl; }
+
     buildGlGlobal(): Record<string, LuaValue> {
         const gl: Record<string, LuaValue> = {};
 
@@ -142,8 +151,10 @@ export class LuaGLBridge {
         gl['CreateTexture'] = (a: LuaValue, b: LuaValue, c: LuaValue) =>
             this.createTexture(a, b, c);
         gl['DeleteTexture'] = (h: LuaValue) => this.deleteTexture(h);
-        gl['Texture'] = (unit: LuaValue, handleOrPath: LuaValue) =>
+        gl['Texture'] = (unit: LuaValue, handleOrPath: LuaValue) => {
             this.bindTexture(unit, handleOrPath);
+            return true; // Spring returns true on bind attempt
+        };
         gl['TextureInfo'] = (handleOrPath: LuaValue) =>
             this.textureInfo(handleOrPath);
 
@@ -186,6 +197,18 @@ export class LuaGLBridge {
         gl['PushAttrib'] = (_bits: LuaValue) => { /* state snapshotted by host */ };
         gl['PopAttrib'] = () => { /* state restored by host */ };
         gl['Clear'] = (...args: LuaValue[]) => this.clear(args);
+        gl['ActiveTexture'] = (unit: LuaValue, fn: LuaValue, ...args: LuaValue[]) => {
+            // Spring signature: gl.ActiveTexture(unit, fn, arg1, arg2, ...)
+            // Sets active texture unit, calls fn(args), then restores unit 0.
+            const u = Number(unit);
+            if (Number.isFinite(u) && u >= 0 && u <= 7) {
+                this.gl.activeTexture(this.gl.TEXTURE0 + u);
+            }
+            if (typeof fn === 'function') {
+                (fn as (...a: LuaValue[]) => void)(...args);
+            }
+            this.gl.activeTexture(this.gl.TEXTURE0);
+        };
 
         // ── Matrix stack ────────────────────────────────────────────
         gl['MatrixMode'] = (m: LuaValue) => this.imm.matrixMode(Number(m));
@@ -315,10 +338,14 @@ export class LuaGLBridge {
     }
 
     private createList(fn: LuaValue, ...args: LuaValue[]): number {
-        if (typeof fn !== 'function') return 0;
-        return this.imm.createList(() => {
+        if (typeof fn !== 'function') {
+            console.warn(`[gl.CreateList] fn is not a function: type=${typeof fn} val=${fn}`);
+            return 0;
+        }
+        const id = this.imm.createList(() => {
             (fn as (...a: LuaValue[]) => void)(...args);
         });
+        return id;
     }
 
     private clear(args: LuaValue[]): void {
@@ -894,8 +921,19 @@ export class LuaGLBridge {
      */
     private bindTexture(unitV: LuaValue, handleOrPath: LuaValue): void {
         const gl = this.gl;
-        const unit = Number(unitV);
-        if (!Number.isFinite(unit) || unit < 0 || unit > 7) return;
+        // Spring's gl.Texture has two forms:
+        //   gl.Texture(path)         → bind to unit 0
+        //   gl.Texture(unit, path)   → bind to specified unit
+        //   gl.Texture(false)        → unbind unit 0
+        let unit: number;
+        if (handleOrPath === undefined || handleOrPath === null) {
+            // Single-arg form: unitV is actually the path/handle/false
+            handleOrPath = unitV;
+            unit = 0;
+        } else {
+            unit = Number(unitV);
+            if (!Number.isFinite(unit) || unit < 0 || unit > 7) return;
+        }
         gl.activeTexture(gl.TEXTURE0 + unit);
         if (handleOrPath === false || handleOrPath === null || handleOrPath === undefined) {
             gl.bindTexture(gl.TEXTURE_2D, null);
@@ -932,7 +970,11 @@ export class LuaGLBridge {
                     width: 1, height: 1,
                 });
                 this.textureCache.set(normalised, handle);
-                void this.loadImageInto(`${this.mapSourceUrl}/${normalised}`, handle);
+                // Resolve texture path: game assets use gameBaseUrl, map assets use mapSourceUrl
+                const baseUrl = (normalised.startsWith('LuaUI/') || normalised.startsWith('luaui/'))
+                    ? this.gameBaseUrl
+                    : this.mapSourceUrl;
+                void this.loadImageInto(`${baseUrl}/${normalised}`, handle);
             }
             gl.bindTexture(gl.TEXTURE_2D, handle.tex);
             trackUnit0(handle.tex);

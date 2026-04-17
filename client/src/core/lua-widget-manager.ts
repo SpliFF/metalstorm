@@ -15,6 +15,9 @@
 import type { Scene } from '@babylonjs/core/scene';
 import type { FreeCamera } from '@babylonjs/core/Cameras/freeCamera';
 import type { ParsedMapData } from './map-data.js';
+import type { RTSCamera } from './rts-camera.js';
+import type { Connection } from './connection.js';
+import type { EntityStateSnapshot } from './entity-state.js';
 import { debugConsole } from './debug-console.js';
 
 // Vite worker import — bundles the worker as a separate chunk
@@ -35,6 +38,8 @@ export class LuaWidgetManager {
     private camera: FreeCamera;
     private map: ParsedMapData;
     private options: WidgetManagerOptions;
+    private rtsCamera: RTSCamera | null = null;
+    private connection: Connection | null = null;
 
     private worker: Worker | null = null;
     private overlayCanvas: HTMLCanvasElement | null = null;
@@ -42,17 +47,24 @@ export class LuaWidgetManager {
     private keyUpHandler: ((e: KeyboardEvent) => void) | null = null;
     private widgetListOverlay: HTMLDivElement | null = null;
     private disposed = false;
+    private stateInterval: ReturnType<typeof setInterval> | null = null;
 
     /** Last widget list data received from worker */
     private lastWidgetData = '';
     private ready = false;
     private fileCount = 0;
+    private evalResolve: ((result: string) => void) | null = null;
 
     /** Input listeners registered based on worker-reported callins */
     private inputCleanups: (() => void)[] = [];
     /** Last known mouse position for delta calculation */
     private lastMouseX = 0;
     private lastMouseY = 0;
+
+    /** Current game frame counter (updated by forwardEntityState) */
+    private currentFrame = 0;
+    /** Currently selected unit IDs (set from main thread) */
+    private selectedUnitIds: number[] = [];
 
     constructor(
         scene: Scene,
@@ -64,6 +76,12 @@ export class LuaWidgetManager {
         this.camera = camera;
         this.map = map;
         this.options = options;
+    }
+
+    /** Set camera and connection references for state pushing. */
+    setLiveDataSources(rtsCamera: RTSCamera, connection: Connection): void {
+        this.rtsCamera = rtsCamera;
+        this.connection = connection;
     }
 
     // ── Main entry point ────────────────────────────────────────────────
@@ -106,8 +124,126 @@ export class LuaWidgetManager {
         // 5. Setup keyboard forwarding + F9 widget list
         this.setupKeyboard();
 
-        // 6. Expose debug API
+        // 6. Start pushing live state to worker at ~10 Hz
+        this.stateInterval = setInterval(() => this.pushStateToWorker(), 100);
+
+        // 7. Expose debug API
         (window as any).widgets = this.buildWindowAPI();
+    }
+
+    // ── State forwarding to worker ────────────────────────────────────
+
+    /** Push camera, viewport, identity, and game frame to the worker at ~10Hz. */
+    private pushStateToWorker(): void {
+        if (!this.worker || this.disposed) return;
+        const cam = this.rtsCamera;
+        const conn = this.connection;
+        const mainCanvas = this.scene.getEngine().getRenderingCanvas();
+
+        // Get view and projection matrices for WorldToScreenCoords
+        const viewMatrix = this.scene.activeCamera
+            ? new Float32Array(this.scene.getViewMatrix().toArray())
+            : undefined;
+        const projMatrix = this.scene.activeCamera
+            ? new Float32Array(this.scene.getProjectionMatrix().toArray())
+            : undefined;
+
+        this.postToWorker({
+            type: 'stateUpdate',
+            camera: cam ? {
+                px: cam.position.x, py: cam.position.y, pz: cam.position.z,
+                tx: cam.target.x, ty: cam.target.y, tz: cam.target.z,
+                fov: this.camera.fov,
+                near: this.camera.minZ, far: this.camera.maxZ,
+            } : undefined,
+            viewport: {
+                width: mainCanvas?.width ?? window.innerWidth,
+                height: mainCanvas?.height ?? window.innerHeight,
+            },
+            identity: conn ? {
+                myTeam: conn.myTeam,
+                myAllyTeam: conn.myTeam,
+                myPlayerId: 0,
+            } : undefined,
+            gameFrame: this.currentFrame,
+            selectedUnitIds: this.selectedUnitIds,
+            viewMatrix,
+            projMatrix,
+            modKeys: this.modKeys,
+        });
+    }
+
+    /** Track modifier key state */
+    private modKeys = { alt: false, ctrl: false, meta: false, shift: false };
+
+    /** Forward an entity state snapshot to the worker for unit queries. */
+    forwardEntityState(snapshot: EntityStateSnapshot, isDelta: boolean): void {
+        if (!this.worker || this.disposed) return;
+        this.currentFrame++;
+
+        // Copy typed arrays so they can be transferred without detaching the originals
+        const msg: Record<string, unknown> = {
+            type: 'entityState',
+            count: snapshot.count,
+            isDelta,
+            entityIds: snapshot.entityIds ? new Uint32Array(snapshot.entityIds) : null,
+            positionsX: snapshot.positionsX ? new Float32Array(snapshot.positionsX) : null,
+            positionsY: snapshot.positionsY ? new Float32Array(snapshot.positionsY) : null,
+            positionsZ: snapshot.positionsZ ? new Float32Array(snapshot.positionsZ) : null,
+            headings: snapshot.headings ? new Uint16Array(snapshot.headings) : null,
+            health: snapshot.health ? new Uint16Array(snapshot.health) : null,
+            defIds: snapshot.defIds ? new Uint16Array(snapshot.defIds) : null,
+            teams: snapshot.teams ? new Uint8Array(snapshot.teams) : null,
+        };
+
+        // Build transferable list from the copies
+        const transfer: Transferable[] = [];
+        for (const key of ['entityIds', 'positionsX', 'positionsY', 'positionsZ', 'headings', 'health', 'defIds', 'teams']) {
+            const arr = msg[key] as ArrayBufferView | null;
+            if (arr) transfer.push(arr.buffer);
+        }
+
+        this.postToWorker(msg, transfer);
+    }
+
+    /** Forward an entity destruction to the worker. */
+    forwardEntityDestroy(entityId: number): void {
+        if (!this.worker || this.disposed) return;
+        this.postToWorker({ type: 'entityDestroy', entityId });
+    }
+
+    /** Forward a resource update to the worker. */
+    forwardResourceUpdate(team: number, metal: number, maxMetal: number, energy: number, maxEnergy: number, metalIncome: number, energyIncome: number): void {
+        if (!this.worker || this.disposed) return;
+        this.postToWorker({ type: 'resourceUpdate', team, metal, maxMetal, energy, maxEnergy, metalIncome, energyIncome });
+    }
+
+    /** Forward game info (frame, speed, paused) to the worker. */
+    forwardGameInfo(frame: number, speed: number, paused: boolean, gameOver: boolean): void {
+        if (!this.worker || this.disposed) return;
+        this.postToWorker({ type: 'gameInfo', frame, speed, paused, gameOver });
+    }
+
+    /** Update the selection state from the main thread. */
+    setSelection(ids: readonly number[]): void {
+        this.selectedUnitIds = [...ids];
+    }
+
+    /** Forward map features to the worker for GetAllFeatures/GetFeaturePosition. */
+    forwardMapFeatures(features: Array<{ typeIndex: number; x: number; y: number; z: number }>): void {
+        if (!this.worker || this.disposed) return;
+        // Pack features into a flat message. Use typeIndex+10000 as a fake defId,
+        // and assign feature IDs starting from 1.
+        const packed = features.map((f, i) => ({
+            id: i + 1,
+            x: f.x,
+            y: f.y,
+            z: f.z,
+            defId: f.typeIndex,
+            team: -1,
+            healthRatio: 1,
+        }));
+        this.postToWorker({ type: 'mapFeatures', features: packed });
     }
 
     // ── Overlay canvas ──────────────────────────────────────────────────
@@ -168,7 +304,7 @@ export class LuaWidgetManager {
 
     private logMessageTraffic(dir: 'main→worker' | 'worker→main', msg: Record<string, unknown>): void {
         // Skip high-frequency or meta channels to avoid drowning real logs.
-        if (msg.type === 'log' || msg.type === 'mousemove') return;
+        if (msg.type === 'log' || msg.type === 'mousemove' || msg.type === 'stateUpdate' || msg.type === 'entityState') return;
         const t = String(msg.type ?? '?');
         let summary = t;
         switch (t) {
@@ -250,6 +386,14 @@ export class LuaWidgetManager {
                 console.error('[LuaUI] Worker error:', msg.msg);
                 break;
 
+            case 'evalResult':
+                console.log('[LuaUI:eval]', msg.result);
+                if (this.evalResolve) {
+                    this.evalResolve(msg.result as string);
+                    this.evalResolve = null;
+                }
+                break;
+
             case 'worldGLCommands':
                 // TODO: replay command buffer on Babylon GL context
                 break;
@@ -260,6 +404,9 @@ export class LuaWidgetManager {
 
     private setupKeyboard(): void {
         this.keyHandler = (e: KeyboardEvent) => {
+            // Track modifier keys for GetModKeyState
+            this.modKeys = { alt: e.altKey, ctrl: e.ctrlKey, meta: e.metaKey, shift: e.shiftKey };
+
             // F9 toggles widget list (F11 is macOS fullscreen)
             if (e.key === 'F9' && !e.ctrlKey && !e.altKey && !e.metaKey) {
                 e.preventDefault();
@@ -522,6 +669,18 @@ export class LuaWidgetManager {
             toggle(name: string) { mgr.postToWorker({ type: 'toggleWidget', name }); },
             /** Request the current widget list data (returns via widgetList message). */
             refresh() { mgr.postToWorker({ type: 'getWidgetList' }); },
+            /** Pause the frame loop. */
+            pause() { mgr.postToWorker({ type: 'pauseFrames' }); },
+            /** Resume the frame loop. */
+            resume() { mgr.postToWorker({ type: 'resumeFrames' }); },
+            /** Evaluate Lua code in the widget worker and return result. */
+            eval(code: string): Promise<string> {
+                return new Promise(resolve => {
+                    mgr.evalResolve = resolve;
+                    mgr.postToWorker({ type: 'evalLua', code });
+                    setTimeout(() => { if (mgr.evalResolve === resolve) { mgr.evalResolve = null; resolve('timeout'); } }, 5000);
+                });
+            },
         };
     }
 
@@ -538,6 +697,10 @@ export class LuaWidgetManager {
         // repeated shutdown messages to the worker.
         if (this.disposed) return;
         this.disposed = true;
+        if (this.stateInterval) {
+            clearInterval(this.stateInterval);
+            this.stateInterval = null;
+        }
         if (this.keyHandler) {
             window.removeEventListener('keydown', this.keyHandler);
             this.keyHandler = null;

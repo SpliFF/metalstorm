@@ -1319,6 +1319,34 @@ int main(int argc, char* argv[])
         }
         }
 
+        // Broadcast resource updates every 10 ticks (~0.33s)
+        {
+        int curFrame = sim.GetFrameNum();
+        if (curFrame >= 0 && (curFrame % 10) == 0 && rtcServer.GetClientCount() > 0) {
+            sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+                if (session.team < 0) return;
+                CTeam* team = teamHandler.Team(session.team);
+                if (!team) return;
+                auto msg = Protocol::BuildResourceUpdate(
+                    static_cast<uint8_t>(session.team),
+                    team->res.metal, team->resStorage.metal,
+                    team->res.energy, team->resStorage.energy,
+                    team->resPrevIncome.metal, team->resPrevIncome.energy);
+                rtcServer.SendReliable(clientId, msg.data(), msg.size());
+            });
+        }
+        }
+
+        // Broadcast periodic GameInfo every 30 ticks (~1s)
+        {
+        int curFrame = sim.GetFrameNum();
+        if (curFrame >= 0 && (curFrame % 30) == 0 && rtcServer.GetClientCount() > 0 && winningTeam < 0) {
+            auto msg = Protocol::BuildGameInfo(mapId, gameId, 1.0f,
+                static_cast<uint32_t>(curFrame), false);
+            rtcServer.BroadcastReliable(msg.data(), msg.size());
+        }
+        }
+
         // Send entity state to connected clients every 3 ticks (~10 Hz)
         // Full snapshot every 30 ticks (~1s), delta updates otherwise.
         // Envelope: 0x02 = full snapshot, 0x03 = delta update.

@@ -163,6 +163,18 @@ inline std::vector<uint8_t> BuildPlayerLeft(
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_PlayerLeft, pl.Union());
 }
 
+/// Build a ResourceUpdate message for a single team.
+inline std::vector<uint8_t> BuildResourceUpdate(
+    uint8_t team, float metal, float maxMetal,
+    float energy, float maxEnergy,
+    float metalIncome, float energyIncome)
+{
+    flatbuffers::FlatBufferBuilder fbb(128);
+    auto ru = SpringWeb::CreateResourceUpdate(
+        fbb, team, metal, maxMetal, energy, maxEnergy, metalIncome, energyIncome);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_ResourceUpdate, ru.Union());
+}
+
 /// Build a GameInfo message (map, game, speed, frame, paused).
 inline std::vector<uint8_t> BuildGameInfo(
     const std::string& mapId, const std::string& gameId,

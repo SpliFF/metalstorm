@@ -25,6 +25,7 @@ import { GameEventBatch } from '../protocol/spring-web/game-event-batch.js';
 import { CombatEvent } from '../protocol/spring-web/combat-event.js';
 import { EntityDestroy } from '../protocol/spring-web/entity-destroy.js';
 import { GameInfo } from '../protocol/spring-web/game-info.js';
+import { ResourceUpdate } from '../protocol/spring-web/resource-update.js';
 import { MapData } from '../protocol/spring-web/map-data.js';
 import { GameUnitDefs } from '../protocol/spring-web/game-unit-defs.js';
 import { GameUnitDef } from '../protocol/spring-web/game-unit-def.js';
@@ -93,6 +94,8 @@ export interface ConnectionEvents {
     onUnitDefs?: (defs: UnitDefInfo[]) => void;
     onWeaponDefs?: (defs: WeaponDefInfo[]) => void;
     onProjectileState?: (snapshot: ProjectileStateSnapshot) => void;
+    onResourceUpdate?: (team: number, metal: number, maxMetal: number, energy: number, maxEnergy: number, metalIncome: number, energyIncome: number) => void;
+    onGameInfo?: (frame: number, speed: number, paused: boolean) => void;
     onServerMessage?: (msg: ServerMessage) => void;
 }
 
@@ -489,9 +492,18 @@ export class Connection {
                 break;
             case ServerPayload.GameInfo: {
                 const info = msg.payload(new GameInfo()) as GameInfo;
+                this.events.onGameInfo?.(info.frame(), info.gameSpeed(), info.paused());
                 if (info.paused()) {
                     this.events.onGameOver?.(info.frame());
                 }
+                break;
+            }
+            case ServerPayload.ResourceUpdate: {
+                const ru = msg.payload(new ResourceUpdate()) as ResourceUpdate;
+                this.events.onResourceUpdate?.(
+                    ru.team(), ru.metal(), ru.maxMetal(),
+                    ru.energy(), ru.maxEnergy(),
+                    ru.metalIncome(), ru.energyIncome());
                 break;
             }
             case ServerPayload.MapData: {

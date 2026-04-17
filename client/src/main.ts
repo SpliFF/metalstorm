@@ -459,6 +459,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 gameId,
                 lobbyUrl: lobbyHttpUrl,
             });
+            mgr.setLiveDataSources(rtsCamera, conn);
+            mgr.forwardMapFeatures(map.features);
             void mgr.initialize().then(() => {
                 console.log(`[client] widget manager ready`);
             }).catch(e => {
@@ -514,6 +516,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         },
         onEntityState(snapshot, isDelta) {
             entityRenderer?.update(snapshot, isDelta);
+            currentWidgetManager?.forwardEntityState(snapshot, isDelta);
             currentFrame++;
         },
         onProjectileState(snapshot) {
@@ -524,13 +527,21 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         },
         onEntityDestroy(entityId, x, y, z) {
             entityRenderer?.removeEntity(entityId);
+            currentWidgetManager?.forwardEntityDestroy(entityId);
             combatFX?.onCombatEvents([{
                 attackerId: 0, targetId: entityId, weaponDefId: 0,
                 result: 3, damage: 500, x, y, z,
             }]);
         },
+        onResourceUpdate(team, metal, maxMetal, energy, maxEnergy, metalIncome, energyIncome) {
+            currentWidgetManager?.forwardResourceUpdate(team, metal, maxMetal, energy, maxEnergy, metalIncome, energyIncome);
+        },
+        onGameInfo(frame, speed, paused) {
+            currentWidgetManager?.forwardGameInfo(frame, speed, paused, false);
+        },
         onGameOver(frame) {
             showGameOver(frame);
+            currentWidgetManager?.forwardGameInfo(frame, 0, true, true);
         },
     });
     gameConn = conn;
@@ -591,11 +602,13 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         hudCounter++;
         if (hudCounter >= 6) {
             hudCounter = 0;
+            const sel = inputManager?.selection ?? [];
             updateHUD(
                 entityRenderer?.entityCount ?? 0,
                 currentFrame,
-                inputManager?.selection ?? [],
+                sel,
             );
+            currentWidgetManager?.setSelection(sel);
             minimap?.render();
         }
     });

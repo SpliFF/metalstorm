@@ -47,6 +47,53 @@ export interface SpringAPIContext {
     getGameSeconds(): number;
 }
 
+/** Per-unit entry in the worker's unit store. */
+export interface UnitEntry {
+    x: number; y: number; z: number;
+    heading: number;
+    healthRatio: number;
+    defId: number;
+    team: number;
+}
+
+/** Per-team resource entry. */
+export interface ResourceEntry {
+    metal: number; maxMetal: number;
+    energy: number; maxEnergy: number;
+    metalIncome: number; energyIncome: number;
+}
+
+/** Live game state pushed from the main thread to the worker. */
+export interface LiveState {
+    camera: { px: number; py: number; pz: number; tx: number; ty: number; tz: number; fov: number; near: number; far: number };
+    /** View and projection matrices (column-major Float32Array[16]) for WorldToScreenCoords */
+    viewMatrix: Float32Array | null;
+    projMatrix: Float32Array | null;
+    viewport: { width: number; height: number };
+    identity: { myTeam: number; myAllyTeam: number; myPlayerId: number };
+    gameFrame: number;
+    gameSpeed: number;
+    gamePaused: boolean;
+    gameOver: boolean;
+    units: Map<number, UnitEntry>;
+    resources: Map<number, ResourceEntry>;
+    selectedUnitIds: number[];
+    /** Modifier key state */
+    modKeys: { alt: boolean; ctrl: boolean; meta: boolean; shift: boolean };
+    /** Build facing direction (0-3, NESW) */
+    buildFacing: number;
+    /** Features on the map (static, set once from MapData) */
+    features: Map<number, FeatureEntry>;
+}
+
+/** Per-feature entry. */
+export interface FeatureEntry {
+    x: number; y: number; z: number;
+    defId: number;
+    team: number;
+    healthRatio: number;
+}
+
 /**
  * Convert Spring-style asset paths (":a:LuaUI\Images\foo.png") into
  * clean forward-slash paths ("LuaUI/Images/foo.png"). Also handles
@@ -65,8 +112,30 @@ export function normaliseSpringPath(path: string): string {
     return p;
 }
 
+/** Create a default LiveState with zeroed values. */
+export function createDefaultLiveState(): LiveState {
+    return {
+        camera: { px: 0, py: 500, pz: 0, tx: 0, ty: 0, tz: 0, fov: 0.8, near: 1, far: 50000 },
+        viewMatrix: null,
+        projMatrix: null,
+        viewport: { width: 1920, height: 1080 },
+        identity: { myTeam: 0, myAllyTeam: 0, myPlayerId: 0 },
+        gameFrame: 0,
+        gameSpeed: 1,
+        gamePaused: false,
+        gameOver: false,
+        units: new Map(),
+        resources: new Map(),
+        selectedUnitIds: [],
+        modKeys: { alt: false, ctrl: false, meta: false, shift: false },
+        buildFacing: 0,
+        features: new Map(),
+    };
+}
+
 /** Build the global-table set a Lua widget needs. */
-export function buildSpringGlobals(ctx: SpringAPIContext): Record<string, LuaValue> {
+export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState): Record<string, LuaValue> {
+    const ls = liveState ?? createDefaultLiveState();
     // --- GL constants table. Only the values lava_layer touches. ---
     const GL: Record<string, LuaValue> = {
         // Draw primitives
@@ -242,8 +311,8 @@ export function buildSpringGlobals(ctx: SpringAPIContext): Record<string, LuaVal
 
     // --- Spring table: per-call query functions. ---
     const Spring: Record<string, LuaValue> = {
-        GetGameSeconds: () => ctx.getGameSeconds(),
-        GetGameFrame: () => Math.floor(ctx.getGameSeconds() * 30),
+        GetGameSeconds: () => ls.gameFrame / 30,
+        GetGameFrame: () => ls.gameFrame,
         GetWind: () => {
             // Spring returns 7 values: wx, wy, wz, wStr, dx, dy, dz
             // We stub a gentle breeze — stationary for now.
@@ -269,32 +338,18 @@ export function buildSpringGlobals(ctx: SpringAPIContext): Record<string, LuaVal
         GetConfigString: (_key: LuaValue, def: LuaValue) => String(def ?? ''),
         GetModOptions: () => ({}),
         GetViewGeometry: () => {
-            // Return real canvas size if available, else reasonable fallback
-            const c = typeof document !== 'undefined'
-                ? document.querySelector('canvas')
-                : null;
-            return [c?.width ?? 1920, c?.height ?? 1080, 0, 0];
+            return [ls.viewport.width, ls.viewport.height, 0, 0];
         },
         GetViewSizes: () => {
-            const c = typeof document !== 'undefined'
-                ? document.querySelector('canvas')
-                : null;
-            return [c?.width ?? 1920, c?.height ?? 1080];
+            return [ls.viewport.width, ls.viewport.height];
         },
         GetWindowGeometry: () => {
-            // Workers don't have `window`; use globalThis which works
-            // in both main thread and worker contexts.
-            const g = globalThis as Record<string, unknown>;
-            return [
-                (g.innerWidth as number | undefined) ?? 1920,
-                (g.innerHeight as number | undefined) ?? 1080,
-                0, 0,
-            ];
+            return [ls.viewport.width, ls.viewport.height, 0, 0];
         },
         GetSpectatingState: () => [false, false, false],
         IsReplay: () => false,
-        GetLocalPlayerID: () => 0,
-        GetMyPlayerID: () => 0,
+        GetLocalPlayerID: () => ls.identity.myPlayerId,
+        GetMyPlayerID: () => ls.identity.myPlayerId,
         GetGaiaTeamID: () => 1,
         CreateDir: (_path: LuaValue) => true,
         // LOS view colours — arrays of 3 floats each. los_brightness_modifier
@@ -325,17 +380,13 @@ export function buildSpringGlobals(ctx: SpringAPIContext): Record<string, LuaVal
         // Plain JS arrays become multiple return values; luaTable() → single table.
         GetPlayerList: () => luaTable(0),
         GetPlayerInfo: (_playerId: LuaValue, _withKeys: LuaValue) => {
-            // Pre-104.0.536: name, active, spectator, teamID, allyTeamID, ping, cpuUsage, country, rank, customkeys
-            // Post-104.0.536 (what engine_compat expects): r1..r9, r10=customkeys(or desyncs), r11=customkeys(or desyncs)
-            // engine_compat swaps r10<->r11, so we need at least 11 returns.
-            // Returns: name, active, spectator, teamID, allyTeamID, ping, cpuUsage, country, rank, desyncs, customkeys, nbReadyMsgs
-            return ['Player', true, false, 0, 0, 0, 0, '', '', 0, {}, 0];
+            return ['Player', true, false, ls.identity.myTeam, ls.identity.myAllyTeam, 0, 0, '', '', 0, {}, 0];
         },
         GetAllyTeamList: () => luaTable(0, 1),
         GetTeamList: (_allyTeamId?: LuaValue) => luaTable(0, 1),
         GetTeamInfo: (_teamId: LuaValue) => {
-            // teamID, leader, isDead, isAI, side, allyTeam, customKeys
-            return [Number(_teamId ?? 0), 0, false, false, '', 0, {}];
+            const tid = Number(_teamId ?? 0);
+            return [tid, 0, false, false, '', tid, {}];
         },
         GetPlayerRulesParam: () => null,
         GetTeamColor: (_teamId: LuaValue) => {
@@ -346,9 +397,16 @@ export function buildSpringGlobals(ctx: SpringAPIContext): Record<string, LuaVal
             ];
             return colors[id % colors.length];
         },
-        GetMyTeamID: () => 0,
-        GetMyAllyTeamID: () => 0,
-        GetTeamUnitCount: () => 0,
+        GetMyTeamID: () => ls.identity.myTeam,
+        GetMyAllyTeamID: () => ls.identity.myAllyTeam,
+        GetTeamUnitCount: (_teamId: LuaValue) => {
+            const tid = Number(_teamId ?? ls.identity.myTeam);
+            let count = 0;
+            for (const u of ls.units.values()) {
+                if (u.team === tid) count++;
+            }
+            return count;
+        },
 
         // --- Map draw mode ---
         GetMapDrawMode: () => 'normal',
@@ -357,36 +415,208 @@ export function buildSpringGlobals(ctx: SpringAPIContext): Record<string, LuaVal
         SetShockFrontFactors: () => {},
 
         // --- Selection ---
-        GetSelectedUnits: () => luaTable(),
-        GetSelectedUnitsCount: () => 0,
-        GetSelectedUnitsSorted: () => ({}),
-        GetSelectedUnitsCounts: () => ({}),
+        GetSelectedUnits: () => luaTable(...ls.selectedUnitIds),
+        GetSelectedUnitsCount: () => ls.selectedUnitIds.length,
+        GetSelectedUnitsSorted: () => {
+            const sorted: Record<number, number[]> = {};
+            for (const id of ls.selectedUnitIds) {
+                const u = ls.units.get(id);
+                const defId = u?.defId ?? 0;
+                if (!sorted[defId]) sorted[defId] = [];
+                sorted[defId].push(id);
+            }
+            return sorted;
+        },
+        GetSelectedUnitsCounts: () => {
+            const counts: Record<number, number> = {};
+            for (const id of ls.selectedUnitIds) {
+                const u = ls.units.get(id);
+                const defId = u?.defId ?? 0;
+                counts[defId] = (counts[defId] ?? 0) + 1;
+            }
+            return counts;
+        },
 
-        // --- Unit queries (stubs) ---
-        GetUnitDefID: () => null,
-        GetUnitTeam: () => 0,
-        GetUnitPosition: () => [0, 0, 0],
-        GetUnitHealth: () => [100, 100, 0, 1, 0],
+        // --- Unit queries ---
+        GetUnitDefID: (id: LuaValue) => {
+            const u = ls.units.get(Number(id));
+            return u ? u.defId : null;
+        },
+        GetUnitTeam: (id: LuaValue) => {
+            const u = ls.units.get(Number(id));
+            return u ? u.team : null;
+        },
+        GetUnitPosition: (id: LuaValue) => {
+            const u = ls.units.get(Number(id));
+            return u ? [u.x, u.y, u.z] : null;
+        },
+        GetUnitHealth: (id: LuaValue) => {
+            const u = ls.units.get(Number(id));
+            if (!u) return null;
+            // healthRatio is 0-1; derive hp assuming max=1000 (best guess without def data)
+            const maxHp = 1000;
+            const hp = u.healthRatio * maxHp;
+            return [hp, maxHp, 0, u.healthRatio, 0];
+        },
         GetUnitStates: () => ({}),
         GetUnitRulesParam: () => null,
         GetUnitIsStunned: () => [false, false, false],
-        ValidUnitID: () => false,
-        GetUnitIsDead: () => true,
+        ValidUnitID: (id: LuaValue) => ls.units.has(Number(id)),
+        GetUnitIsDead: (id: LuaValue) => !ls.units.has(Number(id)),
 
-        // --- Feature queries (stubs) ---
-        GetFeatureDefID: () => null,
-        ValidFeatureID: () => false,
+        GetUnitAllyTeam: (id: LuaValue) => {
+            const u = ls.units.get(Number(id));
+            return u ? u.team : null; // allyTeam = team for now
+        },
+        IsUnitAllied: (id: LuaValue) => {
+            const u = ls.units.get(Number(id));
+            return u ? u.team === ls.identity.myTeam : false;
+        },
+        IsUnitSelected: (id: LuaValue) => {
+            return ls.selectedUnitIds.includes(Number(id));
+        },
+        IsUnitInView: (id: LuaValue) => {
+            // All units in the store are server-sent and thus in view
+            return ls.units.has(Number(id));
+        },
+        GetUnitVelocity: (id: LuaValue) => {
+            return ls.units.has(Number(id)) ? [0, 0, 0, 0] : null;
+        },
+        GetUnitShieldState: () => null,
+
+        GetUnitHeading: (id: LuaValue) => {
+            const u = ls.units.get(Number(id));
+            if (!u) return null;
+            // heading is u16 (0-65535) → Spring heading (-32768 to 32767)
+            return u.heading > 32767 ? u.heading - 65536 : u.heading;
+        },
+
+        // --- Team resources ---
+        GetTeamResources: (teamId: LuaValue, resType: LuaValue) => {
+            const tid = Number(teamId ?? ls.identity.myTeam);
+            const r = ls.resources.get(tid);
+            if (!r) return [0, 0, 0, 0, 0, 0, 0, 0];
+            const t = String(resType ?? 'metal');
+            if (t === 'metal') {
+                return [r.metal, r.maxMetal, 0, r.metalIncome, 0, 0, 0, 0];
+            } else {
+                return [r.energy, r.maxEnergy, 0, r.energyIncome, 0, 0, 0, 0];
+            }
+        },
+        GetTeamAllyTeamID: (teamId: LuaValue) => Number(teamId ?? 0),
+        AreTeamsAllied: (t1: LuaValue, t2: LuaValue) => Number(t1) === Number(t2),
+
+        // --- Feature queries ---
+        GetAllFeatures: () => luaTable(...ls.features.keys()),
+        GetFeaturesInRectangle: (x1: LuaValue, z1: LuaValue, x2: LuaValue, z2: LuaValue) => {
+            const rx1 = Number(x1), rz1 = Number(z1), rx2 = Number(x2), rz2 = Number(z2);
+            const ids: number[] = [];
+            for (const [id, f] of ls.features) {
+                if (f.x >= rx1 && f.x <= rx2 && f.z >= rz1 && f.z <= rz2) ids.push(id);
+            }
+            return luaTable(...ids);
+        },
+        GetFeatureDefID: (id: LuaValue) => {
+            const f = ls.features.get(Number(id));
+            return f ? f.defId : null;
+        },
+        GetFeaturePosition: (id: LuaValue) => {
+            const f = ls.features.get(Number(id));
+            return f ? [f.x, f.y, f.z] : null;
+        },
+        GetFeatureHealth: (id: LuaValue) => {
+            const f = ls.features.get(Number(id));
+            if (!f) return null;
+            const maxHp = 1000;
+            return [f.healthRatio * maxHp, maxHp, 0];
+        },
+        GetFeatureTeam: (id: LuaValue) => {
+            const f = ls.features.get(Number(id));
+            return f ? f.team : null;
+        },
+        GetFeatureResources: (id: LuaValue) => {
+            return ls.features.has(Number(id)) ? [0, 0] : null; // metal, energy reclaim value
+        },
+        ValidFeatureID: (id: LuaValue) => ls.features.has(Number(id)),
 
         // --- Misc ---
         GetTimer: () => performance.now() / 1000,
         DiffTimers: (t1: LuaValue, t2: LuaValue) => Number(t1 ?? 0) - Number(t2 ?? 0),
-        GetDrawFrame: () => 0,
+        GetDrawFrame: () => ls.gameFrame,
         GetFPS: () => 60,
-        WorldToScreenCoords: (_x: LuaValue, _y: LuaValue, _z: LuaValue) => [0, 0, 0],
-        GetCameraPosition: () => [0, 500, 0],
-        GetCameraDirection: () => [0, -1, 0],
-        GetCameraState: () => ({ px: 0, py: 500, pz: 0, rx: 0, ry: 0, rz: 0 }),
+        WorldToScreenCoords: (_x: LuaValue, _y: LuaValue, _z: LuaValue) => {
+            const wx = Number(_x), wy = Number(_y), wz = Number(_z);
+            if (ls.viewMatrix && ls.projMatrix) {
+                const sx = projectToScreen(wx, wy, wz, ls.viewMatrix, ls.projMatrix, ls.viewport.width, ls.viewport.height);
+                if (sx) return sx;
+            }
+            return [ls.viewport.width / 2, ls.viewport.height / 2, 0];
+        },
+        ScreenToWorldCoords: (_x: LuaValue, _y: LuaValue) => {
+            // Stub — proper inverse projection needs full matrix inverse
+            return [0, 0, 0];
+        },
+        TraceScreenRay: (_x: LuaValue, _y: LuaValue, _onlyCoords: LuaValue) => {
+            // Basic implementation: cast ray from camera through screen point to ground plane y=0
+            const cam = ls.camera;
+            // Direction from camera to target as the centre ray
+            const dx = cam.tx - cam.px, dy = cam.ty - cam.py, dz = cam.tz - cam.pz;
+            const len = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+            const dirX = dx / len, dirY = dy / len, dirZ = dz / len;
+            // Intersect with y=0 plane
+            if (Math.abs(dirY) < 0.001) return null;
+            const t = -cam.py / dirY;
+            if (t < 0) return null;
+            const gx = cam.px + dirX * t;
+            const gz = cam.pz + dirZ * t;
+            const gy = sampleHeight(ctx, gx, gz);
+            if (_onlyCoords) return [gx, gy, gz];
+            return ['ground', [gx, gy, gz]];
+        },
+        GetCameraPosition: () => [ls.camera.px, ls.camera.py, ls.camera.pz],
+        GetCameraDirection: () => {
+            // Derive direction from position → target
+            const dx = ls.camera.tx - ls.camera.px;
+            const dy = ls.camera.ty - ls.camera.py;
+            const dz = ls.camera.tz - ls.camera.pz;
+            const len = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+            return [dx / len, dy / len, dz / len];
+        },
+        GetCameraState: () => {
+            const dx = ls.camera.tx - ls.camera.px;
+            const dy = ls.camera.ty - ls.camera.py;
+            const dz = ls.camera.tz - ls.camera.pz;
+            const len = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+            return {
+                px: ls.camera.px, py: ls.camera.py, pz: ls.camera.pz,
+                rx: Math.asin(-dy / len),
+                ry: Math.atan2(dx, dz),
+                rz: 0,
+            };
+        },
         SetCameraState: () => {},
+        SetCameraTarget: () => {},
+        GetCameraFOV: () => ls.camera.fov * (180 / Math.PI),
+        GetCameraVectors: () => {
+            const dx = ls.camera.tx - ls.camera.px;
+            const dy = ls.camera.ty - ls.camera.py;
+            const dz = ls.camera.tz - ls.camera.pz;
+            const len = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+            const fx = dx / len, fy = dy / len, fz = dz / len;
+            // Right = forward × up (world up = 0,1,0)
+            const rx = fz, rz = -fx; // cross(forward, up) simplified
+            const rlen = Math.sqrt(rx * rx + rz * rz) || 1;
+            const rnx = rx / rlen, rnz = rz / rlen;
+            // Up = right × forward
+            const ux = rnz * fy - 0 * fz;
+            const uy = 0 * fx - rnx * fz; // simplified cross product with ry=0
+            const uz = rnx * fy - rnz * fx;
+            return {
+                forward: luaTable(fx, fy, fz),
+                up: luaTable(ux, uy, uz),
+                right: luaTable(rnx, 0, rnz),
+            };
+        },
         GetGroundInfo: (_x: LuaValue, _z: LuaValue) => [0, 0, 0, 0, 0, 0, '', 0],
         GetGroundNormal: () => [0, 1, 0],
         GetSmoothMeshHeight: (x: LuaValue, z: LuaValue) => {
@@ -394,29 +624,90 @@ export function buildSpringGlobals(ctx: SpringAPIContext): Record<string, LuaVal
         },
         IsPosInLos: () => true,
         IsPosInRadar: () => false,
-        GetUnitsInRectangle: () => luaTable(),
-        GetUnitsInCylinder: () => luaTable(),
-        GetVisibleUnits: () => luaTable(),
-        GetAllUnits: () => luaTable(),
-        GetTeamUnits: () => luaTable(),
-        GetTeamUnitsSorted: () => ({}),
-        GetTeamUnitDefCount: () => 0,
+        GetUnitsInRectangle: (x1: LuaValue, z1: LuaValue, x2: LuaValue, z2: LuaValue) => {
+            const rx1 = Number(x1), rz1 = Number(z1), rx2 = Number(x2), rz2 = Number(z2);
+            const ids: number[] = [];
+            for (const [id, u] of ls.units) {
+                if (u.x >= rx1 && u.x <= rx2 && u.z >= rz1 && u.z <= rz2) ids.push(id);
+            }
+            return luaTable(...ids);
+        },
+        GetUnitsInCylinder: (x: LuaValue, z: LuaValue, r: LuaValue) => {
+            const cx = Number(x), cz = Number(z), rad = Number(r);
+            const r2 = rad * rad;
+            const ids: number[] = [];
+            for (const [id, u] of ls.units) {
+                const dx = u.x - cx, dz = u.z - cz;
+                if (dx * dx + dz * dz <= r2) ids.push(id);
+            }
+            return luaTable(...ids);
+        },
+        GetUnitsInSphere: (x: LuaValue, y: LuaValue, z: LuaValue, r: LuaValue) => {
+            const cx = Number(x), cy = Number(y), cz = Number(z), rad = Number(r);
+            const r2 = rad * rad;
+            const ids: number[] = [];
+            for (const [id, u] of ls.units) {
+                const dx = u.x - cx, dy = u.y - cy, dz = u.z - cz;
+                if (dx * dx + dy * dy + dz * dz <= r2) ids.push(id);
+            }
+            return luaTable(...ids);
+        },
+        IsSphereInView: () => true, // conservative — server already LOS-filters
+        GetVisibleUnits: () => luaTable(...ls.units.keys()),
+        GetAllUnits: () => luaTable(...ls.units.keys()),
+        GetTeamUnits: (_teamId: LuaValue) => {
+            const tid = Number(_teamId ?? ls.identity.myTeam);
+            const ids: number[] = [];
+            for (const [id, u] of ls.units) {
+                if (u.team === tid) ids.push(id);
+            }
+            return luaTable(...ids);
+        },
+        GetTeamUnitsSorted: (_teamId: LuaValue) => {
+            const tid = Number(_teamId ?? ls.identity.myTeam);
+            const sorted: Record<number, number[]> = {};
+            for (const [id, u] of ls.units) {
+                if (u.team !== tid) continue;
+                if (!sorted[u.defId]) sorted[u.defId] = [];
+                sorted[u.defId].push(id);
+            }
+            return sorted;
+        },
+        GetTeamUnitDefCount: (_teamId: LuaValue, _defId: LuaValue) => {
+            const tid = Number(_teamId ?? ls.identity.myTeam);
+            const did = Number(_defId ?? 0);
+            let count = 0;
+            for (const u of ls.units.values()) {
+                if (u.team === tid && u.defId === did) count++;
+            }
+            return count;
+        },
 
         // --- Local team ---
-        GetLocalTeamID: () => 0,
+        GetLocalTeamID: () => ls.identity.myTeam,
+        GetLocalAllyTeamID: () => ls.identity.myAllyTeam,
 
         // --- Game speed ---
-        GetGameSpeed: () => [1, 1, false], // speed, wantedSpeed, paused
+        GetGameSpeed: () => [ls.gameSpeed, ls.gameSpeed, ls.gamePaused],
+        IsGameOver: () => ls.gameOver,
 
         // --- GUI state ---
         IsGUIHidden: () => false,
-        GetModKeyState: () => [false, false, false, false], // alt, ctrl, meta, shift
+        GetModKeyState: () => [ls.modKeys.alt, ls.modKeys.ctrl, ls.modKeys.meta, ls.modKeys.shift],
+        GetKeyState: (_keyCode: LuaValue) => false, // would need per-key tracking
         ScaledGetMouseState: () => [0, 0, false, false, false, false], // x, y, lmb, mmb, rmb, outsideSpring
         GetMouseCursor: () => ['', 1.0], // name, scale
         SetMouseCursor: () => {},
+        IsAboveMiniMap: () => false,
+        GetMiniMapGeometry: () => [0, 0, 200, 200], // x, y, w, h
+        GetBuildFacing: () => ls.buildFacing,
+        SetBuildFacing: (_facing: LuaValue) => {
+            ls.buildFacing = Number(_facing ?? 0) % 4;
+        },
+        GetInvertQueueKey: () => false,
 
         // --- Ground extremes ---
-        GetGroundExtremes: () => [0, 100], // minHeight, maxHeight
+        GetGroundExtremes: () => [ctx.minHeight, ctx.maxHeight],
 
         // --- Custom command draw data ---
         SetCustomCommandDrawData: () => {},
@@ -492,6 +783,11 @@ export function buildSpringGlobals(ctx: SpringAPIContext): Record<string, LuaVal
         GetClipboard: () => '',
         SetClipboard: () => {},
 
+        // --- SDL text input (no-op in browser) ---
+        SDLStartTextInput: () => {},
+        SDLStopTextInput: () => {},
+        SDLSetTextInputRect: () => {},
+
         // --- Mouse ---
         GetMouseState: () => [0, 0, false, false, false],
         WarpMouse: () => {},
@@ -506,6 +802,87 @@ export function buildSpringGlobals(ctx: SpringAPIContext): Record<string, LuaVal
         GetLastUpdateSeconds: () => 0.016,
         MakeFont: () => {},
         Yield: null as LuaValue,  // nil = no yielding
+
+        // --- Game info ---
+        IsCheatingEnabled: () => false,
+        FixedAllies: () => true,
+        GetMenuName: () => '',
+
+        // --- Minimap ---
+        GetMiniMapDualScreen: () => false,
+        GetMiniMapRotation: () => 0,
+        GetMouseMiniMapState: () => [false, false, false],
+
+        // --- Team color ---
+        SetTeamColor: () => {},
+        GetTeamOrigColor: (_teamId: LuaValue) => {
+            const id = Number(_teamId ?? 0);
+            const colors = [
+                [0, 0, 1, 1], [1, 0, 0, 1], [0, 1, 0, 1], [1, 1, 0, 1],
+            ];
+            return colors[id % colors.length];
+        },
+        ArePlayersAllied: (p1: LuaValue, p2: LuaValue) => Number(p1) === Number(p2),
+
+        // --- Debug / profiler ---
+        GetLuaMemUsage: () => [0, 0, 0, 0, 0, 0], // luaUI, luaRules, luaGaia mem usage
+        LoadCmdColorsConfig: () => {},
+
+        // --- Command descriptions ---
+        GetActiveCmdDescs: () => luaTable(),
+        GetActiveCmdDesc: () => null,
+        GetDefaultCommand: () => [0, 0, ''],
+        GetCmdDescIndex: () => null,
+        FindUnitCmdDesc: () => null,
+
+        // --- Selection commands ---
+        SelectUnit: () => {},
+        DeselectUnit: () => {},
+
+        // --- Unit queries that some widgets need ---
+        GetUnitIsBuilding: () => null,
+        GetUnitIsBeingBuilt: (_id: LuaValue) => {
+            const u = ls.units.get(Number(_id));
+            return u ? u.healthRatio < 1 : null;
+        },
+        GetUnitCmdDescs: () => luaTable(),
+        GetUnitCommandCount: () => 0,
+        GetUnitCurrentCommand: () => null,
+        GetUnitGroup: () => 0,
+        GetUnitDirection: (id: LuaValue) => {
+            const u = ls.units.get(Number(id));
+            if (!u) return null;
+            const h = u.heading / 65535 * Math.PI * 2;
+            return [Math.sin(h), 0, Math.cos(h)];
+        },
+        GetUnitResources: () => [0, 0, 0, 0, 0, 0], // metalMake, metalUse, energyMake, energyUse
+        IsUnitVisible: (id: LuaValue) => ls.units.has(Number(id)),
+        IsUnitIcon: () => false,
+        IsUnitInLos: () => true,
+
+        // --- Camera rotation ---
+        GetCameraRotation: () => {
+            const dx = ls.camera.tx - ls.camera.px;
+            const dy = ls.camera.ty - ls.camera.py;
+            const dz = ls.camera.tz - ls.camera.pz;
+            const len = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+            return [Math.asin(-dy / len), Math.atan2(dx, dz), 0];
+        },
+
+        // --- Pos to build grid ---
+        Pos2BuildPos: (_unitDefId: LuaValue, x: LuaValue, _y: LuaValue, z: LuaValue) => {
+            // Snap to grid (squareSize = 8 typically)
+            const sq = ctx.squareSize || 8;
+            return [Math.floor(Number(x) / sq) * sq + sq / 2, 0, Math.floor(Number(z) / sq) * sq + sq / 2];
+        },
+
+        // --- View range ---
+        GetViewRange: () => ls.camera.far,
+
+        // --- Audio (post to main thread via worker message) ---
+        PlaySoundFile: () => true, // accepted but no-op in worker
+        StopSoundStream: () => {},
+        SetSoundStreamVolume: () => {},
 
         // --- Lua message passing ---
         SendLuaUIMsg: () => {},
@@ -545,6 +922,34 @@ export function buildSpringGlobals(ctx: SpringAPIContext): Record<string, LuaVal
         LUAUI_DIRNAME,
         LUAUI_VERSION,
     };
+}
+
+/**
+ * Project a world-space point to screen coordinates using view+projection matrices.
+ * Returns [screenX, screenY, depth] or null if behind camera.
+ */
+function projectToScreen(
+    wx: number, wy: number, wz: number,
+    view: Float32Array, proj: Float32Array,
+    vpW: number, vpH: number,
+): [number, number, number] | null {
+    // view * worldPos (column-major 4x4)
+    const vx = view[0] * wx + view[4] * wy + view[8] * wz + view[12];
+    const vy = view[1] * wx + view[5] * wy + view[9] * wz + view[13];
+    const vz = view[2] * wx + view[6] * wy + view[10] * wz + view[14];
+    const vw = view[3] * wx + view[7] * wy + view[11] * wz + view[15];
+    // proj * viewPos
+    const cx = proj[0] * vx + proj[4] * vy + proj[8] * vz + proj[12] * vw;
+    const cy = proj[1] * vx + proj[5] * vy + proj[9] * vz + proj[13] * vw;
+    const cz = proj[2] * vx + proj[6] * vy + proj[10] * vz + proj[14] * vw;
+    const cw = proj[3] * vx + proj[7] * vy + proj[11] * vz + proj[15] * vw;
+    if (cw <= 0) return null; // behind camera
+    const ndcX = cx / cw;
+    const ndcY = cy / cw;
+    // NDC [-1,1] → screen coords. Spring Y is bottom-up.
+    const sx = (ndcX * 0.5 + 0.5) * vpW;
+    const sy = (1 - (ndcY * 0.5 + 0.5)) * vpH;
+    return [sx, sy, cz / cw];
 }
 
 /**

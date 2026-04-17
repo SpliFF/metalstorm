@@ -556,7 +556,6 @@ export class ImmediateModeRenderer {
         const list = this.displayLists.get(id);
         if (!list) return;
         for (const call of list.calls) {
-            // Restore vertex data and flush
             this.vertices.set(call.vertexData);
             const savedTextured = this.isTextured;
             const savedTex = this.currentBoundTexture;

@@ -364,16 +364,13 @@ export class LuaRuntime {
                 // Opaque handle round-tripped from pushValue.
                 return lua.lua_touserdata(LS, idx) as LuaValue;
             case lua.LUA_TFUNCTION: {
-                // C functions — these are pushed from JS via
-                // lua_pushjsfunction. Creating a registry ref for them
-                // would leak memory on every round-trip (e.g. walking a
-                // VAO table each frame). We can't usefully re-enter them
-                // from JS anyway, so return null.
-                if (lua.lua_iscfunction(LS, idx)) return null;
-                // Lua function — store it in the registry so it survives
-                // stack cleanup, and return a callable JS wrapper that
-                // re-enters the VM to invoke it. Used e.g. by
-                // gl.ActiveFBO(fbo, callback).
+                if (lua.lua_iscfunction(LS, idx)) {
+                    // C functions — return null to avoid registry ref leaks.
+                    // gl.CreateList(gl.Texture, path) won't work with this
+                    // but it avoids corrupting the Lua state.
+                    return null;
+                }
+                // Lua function — store in registry and return callable wrapper.
                 lua.lua_pushvalue(LS, idx);
                 const ref = lauxlib.luaL_ref(LS, lua.LUA_REGISTRYINDEX);
                 return this.makeFunctionRef(ref) as unknown as LuaValue;

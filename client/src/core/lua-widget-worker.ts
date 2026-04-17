@@ -25,7 +25,11 @@ import { LuaRuntime, type LuaValue, luaTable } from './lua-runtime.js';
 import { LuaGLBridge } from './lua-gl-bridge.js';
 import {
     buildSpringGlobals,
+    createDefaultLiveState,
     type SpringAPIContext,
+    type LiveState,
+    type UnitEntry,
+    type FeatureEntry,
 } from './lua-spring-api.js';
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -229,6 +233,11 @@ function describeInboundMessage(msg: Record<string, unknown>): string {
         case 'toggleWidget':  return `toggleWidget name=${msg.name}`;
         case 'enableWidget':  return `enableWidget name=${msg.name}`;
         case 'disableWidget': return `disableWidget name=${msg.name}`;
+        case 'stateUpdate':   return `stateUpdate frame=${msg.gameFrame}`;
+        case 'entityState':   return `entityState count=${msg.count} delta=${msg.isDelta}`;
+        case 'entityDestroy': return `entityDestroy id=${msg.entityId}`;
+        case 'resourceUpdate':return `resourceUpdate team=${msg.team}`;
+        case 'gameInfo':      return `gameInfo frame=${msg.frame}`;
         default:              return t;
     }
 }
@@ -262,6 +271,9 @@ let initBaseUrl = '';  // saved from init() for re-fetch on enable
 let mouseX = 0, mouseY = 0;
 let mouseButton1 = false, mouseButton2 = false, mouseButton3 = false;
 
+// Live game state updated by main thread messages, read by Spring API
+const liveState: LiveState = createDefaultLiveState();
+
 async function init(
     canvas: OffscreenCanvas,
     gameId: string,
@@ -281,9 +293,9 @@ async function init(
     // 2. Create GL context on OffscreenCanvas for 2D UI rendering
     const gl = canvas.getContext('webgl2', {
         alpha: true,
-        premultipliedAlpha: true,
+        premultipliedAlpha: false,
         antialias: false,
-        preserveDrawingBuffer: false,
+        preserveDrawingBuffer: true,
     }) as WebGL2RenderingContext;
 
     if (!gl) {
@@ -297,6 +309,7 @@ async function init(
     // 3. Create Lua runtime and GL bridge
     runtime = new LuaRuntime('LuaUI');
     bridge = new LuaGLBridge(gl, mapData.mapSourceUrl);
+    bridge.setGameBaseUrl(baseUrl);
     postLog(2, '[LuaUI] init step 3/8 done: Lua runtime + GL bridge created');
 
     const ctx: SpringAPIContext = {
@@ -450,26 +463,28 @@ async function init(
 }
 
 function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext): void {
-    // Clear the overlay canvas (transparent)
+    // Set up GL state for 2D overlay rendering
+    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.disable(gl.DEPTH_TEST);
 
-    // Update callin
+    // Callins: Update → DrawGenesis → DrawScreen
     rt.doString(`
-        if Update then
-            local ok, err = pcall(Update)
-            if not ok then Spring.Echo("[LuaUI] Update error: " .. tostring(err)) end
-        end
-    `, 'callin:Update');
-
-    // DrawScreen callin — renders 2D UI on the OffscreenCanvas
-    rt.doString(`
+        if Update then pcall(Update) end
+        if DrawGenesis then pcall(DrawGenesis) end
         if DrawScreen then
             local vsx, vsy = Spring.GetViewSizes()
-            local ok, err = pcall(DrawScreen, vsx, vsy)
-            if not ok then Spring.Echo("[LuaUI] DrawScreen error: " .. tostring(err)) end
+            gl.MatrixMode(GL.PROJECTION)
+            gl.LoadIdentity()
+            gl.Ortho(0, vsx, vsy, 0, -1, 1)
+            gl.MatrixMode(GL.MODELVIEW)
+            gl.LoadIdentity()
+            pcall(DrawScreen, vsx, vsy)
         end
-    `, 'callin:DrawScreen');
+    `, 'callin:frame');
 }
 
 // ── Engine globals ─────────────────────────────────────────────────────
@@ -480,7 +495,7 @@ function installEngineGlobals(
     ctx: SpringAPIContext,
     gameId: string,
 ): void {
-    const springGlobals = buildSpringGlobals(ctx);
+    const springGlobals = buildSpringGlobals(ctx, liveState);
     const glGlobal = glBridge.buildGlGlobal();
 
     // Override Spring.GetMouseState to use worker-tracked mouse state
@@ -519,16 +534,55 @@ function installEngineGlobals(
     rt.setGlobal('LUAUI_VERSION', `spring-web LuaUI v0.3 (${gameId})`);
 
     rt.setGlobal('Script', {
-        CreateScream: () => ({ func: null }),
+        CreateScream: () => ({ func: null, _scream: { func: null } }),
         GetSynced: () => false,
-        LuaUI: () => ({}),
+        GetName: () => 'LuaUI',
         IsEngineMinVersion: () => true,
         UpdateCallIn: () => {},
-        LuaGaia: () => ({}),
-        LuaRules: () => ({}),
     });
 
+    // Script.LuaUI / Script.LuaRules / Script.LuaGaia — callable tables
+    // with auto-stub methods. Widgets do Script.LuaUI.SomeCallin(...) to
+    // call across handler boundaries.
+    rt.doString(`
+        local function makeScriptProxy()
+            return setmetatable({}, {
+                __index = function(t, k)
+                    local stub = function(...) return false end
+                    rawset(t, k, stub)
+                    return stub
+                end,
+                __call = function() return {} end,
+            })
+        end
+        Script.LuaUI = makeScriptProxy()
+        Script.LuaRules = makeScriptProxy()
+        Script.LuaGaia = makeScriptProxy()
+    `, 'script_proxies');
+
     rt.setGlobal('LOG', { ERROR: 0, WARNING: 1, INFO: 2, DEBUG: 3 });
+
+    // Platform table — some GL4 widgets check this
+    rt.setGlobal('Platform', {
+        glVersionShort: 'WebGL 2.0',
+        glVersion: 'WebGL 2.0',
+        glslVersionShort: '300',
+        glslVersion: '300 es',
+        gpuVendor: 'WebGL',
+        gpuName: 'WebGL2',
+        glSupportClipSpaceControl: false,
+        glSupport24bitDepthBuffer: true,
+        glSupportRestartPrimitive: false,
+        glSupportFragDepthLayout: false,
+        numCompressedTexFormats: 0,
+    });
+
+    // Spring.Utilities — used by some ZK widgets for json, copyTable, etc.
+    (springGlobals.Spring as Record<string, LuaValue>).Utilities = {};
+
+    // Spring.Translate — i18n stub that returns the key
+    (springGlobals.Spring as Record<string, LuaValue>).Translate = (key: LuaValue) => String(key ?? '');
+    (springGlobals.Spring as Record<string, LuaValue>).GetHumanName = (defName: LuaValue) => String(defName ?? '');
 
     rt.setGlobal('UnitDefs', {});
     rt.setGlobal('UnitDefNames', {});
@@ -546,6 +600,31 @@ function installEngineGlobals(
     `, 'tracy_stub');
 
     rt.doString(LUA_COMPAT_SHIM, 'compat_shim');
+
+    // Spring.Utilities Lua-side: needs metatables for CopyTable, json, etc.
+    rt.doString(`
+        Spring.Utilities = Spring.Utilities or {}
+        Spring.Utilities.CopyTable = function(t, deep)
+            if type(t) ~= "table" then return t end
+            local copy = {}
+            for k, v in pairs(t) do
+                if deep and type(v) == "table" then
+                    copy[k] = Spring.Utilities.CopyTable(v, true)
+                else
+                    copy[k] = v
+                end
+            end
+            return copy
+        end
+        Spring.Utilities.MergeTable = function(dst, src)
+            for k, v in pairs(src) do
+                if dst[k] == nil then dst[k] = v end
+            end
+            return dst
+        end
+        Spring.Utilities.json = { encode = function() return "{}" end, decode = function() return {} end }
+        Spring.Utilities.TableToString = function(t) return tostring(t) end
+    `, 'spring_utilities');
 
     rt.setGlobal('os', {
         remove: () => [null, 'os.remove disabled in browser'],
@@ -944,6 +1023,129 @@ self.onmessage = async (e: MessageEvent) => {
                 bridge.resizeCanvas(msg.width, msg.height);
             }
             break;
+
+        case 'evalLua': {
+            if (!runtime) break;
+            const evalResult = runtime.evalString(String(msg.code ?? ''));
+            postToMain({ type: 'evalResult', result: String(evalResult ?? 'nil') });
+            break;
+        }
+
+        case 'pauseFrames':
+            if (frameInterval) { clearInterval(frameInterval); frameInterval = null; }
+            break;
+        case 'resumeFrames':
+            if (!frameInterval && runtime && bridge) {
+                const gl2 = bridge.getGL();
+                if (gl2) {
+                    let running = false;
+                    frameInterval = setInterval(() => {
+                        if (!runtime || shuttingDown || running) return;
+                        running = true;
+                        try { runFrame(runtime!, gl2); } finally { running = false; }
+                    }, 33);
+                }
+            }
+            break;
+
+        case 'stateUpdate':
+            // Camera, viewport, identity, gameFrame from main thread
+            if (msg.camera) liveState.camera = msg.camera;
+            if (msg.viewport) liveState.viewport = msg.viewport;
+            if (msg.identity) liveState.identity = msg.identity;
+            if (msg.gameFrame !== undefined) liveState.gameFrame = msg.gameFrame as number;
+            if (msg.selectedUnitIds) liveState.selectedUnitIds = msg.selectedUnitIds as number[];
+            if (msg.viewMatrix) liveState.viewMatrix = msg.viewMatrix as Float32Array;
+            if (msg.projMatrix) liveState.projMatrix = msg.projMatrix as Float32Array;
+            if (msg.modKeys) liveState.modKeys = msg.modKeys as { alt: boolean; ctrl: boolean; meta: boolean; shift: boolean };
+            break;
+
+        case 'entityState': {
+            // Rebuild/merge the units Map from typed arrays
+            const count = msg.count as number;
+            const isDelta = msg.isDelta as boolean;
+            const entityIds = msg.entityIds as Uint32Array | null;
+            const posX = msg.positionsX as Float32Array | null;
+            const posY = msg.positionsY as Float32Array | null;
+            const posZ = msg.positionsZ as Float32Array | null;
+            const headings = msg.headings as Uint16Array | null;
+            const health = msg.health as Uint16Array | null;
+            const defIds = msg.defIds as Uint16Array | null;
+            const teams = msg.teams as Uint8Array | null;
+
+            if (!isDelta) {
+                // Full snapshot — rebuild. Only keep IDs in this snapshot.
+                const newUnits = new Map<number, UnitEntry>();
+                if (entityIds) {
+                    for (let i = 0; i < count; i++) {
+                        const id = entityIds[i];
+                        newUnits.set(id, {
+                            x: posX ? posX[i] : 0,
+                            y: posY ? posY[i] : 0,
+                            z: posZ ? posZ[i] : 0,
+                            heading: headings ? headings[i] : 0,
+                            healthRatio: health ? health[i] / 65535 : 1,
+                            defId: defIds ? defIds[i] : 0,
+                            team: teams ? teams[i] : 0,
+                        });
+                    }
+                }
+                liveState.units = newUnits;
+            } else {
+                // Delta — merge changed units
+                if (entityIds) {
+                    for (let i = 0; i < count; i++) {
+                        const id = entityIds[i];
+                        const existing = liveState.units.get(id);
+                        const entry: UnitEntry = existing ?? { x: 0, y: 0, z: 0, heading: 0, healthRatio: 1, defId: 0, team: 0 };
+                        if (posX) entry.x = posX[i];
+                        if (posY) entry.y = posY[i];
+                        if (posZ) entry.z = posZ[i];
+                        if (headings) entry.heading = headings[i];
+                        if (health) entry.healthRatio = health[i] / 65535;
+                        if (defIds) entry.defId = defIds[i];
+                        if (teams) entry.team = teams[i];
+                        liveState.units.set(id, entry);
+                    }
+                }
+            }
+            break;
+        }
+
+        case 'entityDestroy':
+            liveState.units.delete(msg.entityId as number);
+            break;
+
+        case 'resourceUpdate':
+            liveState.resources.set(msg.team as number, {
+                metal: msg.metal as number,
+                maxMetal: msg.maxMetal as number,
+                energy: msg.energy as number,
+                maxEnergy: msg.maxEnergy as number,
+                metalIncome: msg.metalIncome as number,
+                energyIncome: msg.energyIncome as number,
+            });
+            break;
+
+        case 'gameInfo':
+            if (msg.frame !== undefined) liveState.gameFrame = msg.frame as number;
+            if (msg.speed !== undefined) liveState.gameSpeed = msg.speed as number;
+            if (msg.paused !== undefined) liveState.gamePaused = msg.paused as boolean;
+            if (msg.gameOver !== undefined) liveState.gameOver = msg.gameOver as boolean;
+            break;
+
+        case 'mapFeatures': {
+            // Populate features map from MapData
+            const feats = msg.features as Array<{ id: number; x: number; y: number; z: number; defId: number; team: number; healthRatio: number }>;
+            liveState.features.clear();
+            for (const f of feats) {
+                liveState.features.set(f.id, {
+                    x: f.x, y: f.y, z: f.z,
+                    defId: f.defId, team: f.team, healthRatio: f.healthRatio,
+                });
+            }
+            break;
+        }
 
         case 'shutdown':
             shutdown();
