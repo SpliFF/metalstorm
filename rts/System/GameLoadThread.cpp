@@ -1,5 +1,6 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
+#include "System/MainDefines.h"
 #include "System/SpringMathCompat.h"
 #include "System/GameLoadThread.h"
 
@@ -32,10 +33,7 @@ void CGameLoadThread::WrapFunc(std::function<void()> f)
 {
 	Threading::SetThreadName("gameload");
 
-	// init streflop
-	// not needed to maintain sync (precision flags are
-	// per-process) but fpu exceptions are per-thread
-	streflop::streflop_init<streflop::Simple>();
+	// streflop removed — standard IEEE FP (server-authoritative)
 
 	try {
 		f();

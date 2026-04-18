@@ -3,8 +3,6 @@
 #ifndef _OFFSCREENGLCONTEXT_H
 #define _OFFSCREENGLCONTEXT_H
 
-#include "Rendering/GL/myGL.h"
-
 #include <functional>
 #include "System/Threading/SpringThreading.h"
 

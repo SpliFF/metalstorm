@@ -43,6 +43,8 @@ endif()
 
 # Include paths — the rts/ directory is the root for Spring includes
 include_directories(${CMAKE_SOURCE_DIR}/rts)
+include_directories(${CMAKE_SOURCE_DIR}/rts/lib/nowide/include)
+include_directories(${CMAKE_SOURCE_DIR}/rts/lib/entt/src)
 
 # === nghttp2 (HTTP/2 library) ===
 include(FetchContent)
@@ -148,6 +150,11 @@ file(GLOB_RECURSE SYSTEM_SOURCES
 # Exclude bundled libraries and SpringLog (they have their own targets)
 list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "rts/lib/")
 list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "rts/System/SpringLog/")
+# Recoil files that need libraries we don't have (tracy, mimalloc)
+list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "MemoryOverride")
+list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Log/TracySink")
+list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Log/OutputDebugStringSink")
+list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "TraceMemory")
 
 # Platform filtering — only compile for the current OS
 if(NOT WIN32)

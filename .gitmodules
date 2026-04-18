@@ -1,1 +1,13 @@
-# Submodules removed — dependencies are managed via CMake FetchContent.
+# Only submodules needed for the headless server build.
+# Other Recoil submodules (RmlUi, lunasvg, fastgltf, tracy, etc.) are
+# rendering/profiling dependencies not used by the server.
+[submodule "rts/lib/sse2neon"]
+	path = rts/lib/sse2neon
+	url = https://github.com/DLTcollab/sse2neon.git
+[submodule "rts/lib/entt"]
+	path = rts/lib/entt
+	url = https://github.com/skypjack/entt
+[submodule "rts/lib/nowide"]
+	path = rts/lib/nowide
+	url = https://github.com/boostorg/nowide
+	branch = standalone

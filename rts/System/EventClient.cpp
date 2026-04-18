@@ -57,7 +57,6 @@ bool CEventClient::DefaultCommand(const CUnit* unit, const CFeature* feature, in
 
 void CEventClient::GameProgress(int gameFrame) {}
 
-void CEventClient::DrawLoadScreen() {}
 void CEventClient::LoadProgress(const std::string& msg, const bool replace_lastline) {}
 
 // from LuaUI
@@ -80,12 +79,6 @@ void CEventClient::DownloadProgress(int ID, long downloaded, long total) {}
 bool CEventClient::IsAbove(int x, int y) { return false; }
 std::string CEventClient::GetTooltip(int x, int y) { return ""; }
 
-void CEventClient::ActiveCommandChanged(const SCommandDescription* cmdDesc) {}
-void CEventClient::CameraRotationChanged(const float3& rot) {}
-void CEventClient::CameraPositionChanged(const float3& pos) {}
-void CEventClient::MiniMapRotationChanged(const float newRot, const float oldRot) {}
-void CEventClient::MiniMapStateChanged(const bool isMinimized, const bool isMaximized, const bool isSlaved) {}
-void CEventClient::MiniMapGeometryChanged(const int2 newPos, const int2 newDim, const int2 oldPos, const int2 oldDim) {}
 bool CEventClient::CommandNotify(const Command& cmd) { return false; }
 
 bool CEventClient::AddConsoleLine(const std::string& msg, const std::string& section, int level) { return false; }

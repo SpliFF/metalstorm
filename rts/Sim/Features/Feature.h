@@ -76,7 +76,7 @@ public:
 	void SetVelocity(const float3& v);
 	void ForcedMove(const float3& newPos) override;
 	void ForcedSpin(const float3& newDir) override;
-	void ForcedSpin(const float3& newFrontDir, const float3& newRightDir) override; 
+	void ForcedSpin(const float3& newFrontDir, const float3& newRightDir);
 
 	bool Update();
 	bool UpdatePosition();
