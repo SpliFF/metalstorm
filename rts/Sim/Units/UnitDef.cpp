@@ -12,15 +12,12 @@
 #include "Sim/MoveTypes/MoveDefHandler.h"
 #include "Sim/Weapons/WeaponDefHandler.h"
 #include "Sim/Units/CommandAI/Command.h"
-#include "Rendering/IconHandler.h"
 #include "System/EventHandler.h"
 #include "System/Exceptions.h"
 #include "System/Log/ILog.h"
 #include "System/SpringMath.h"
 #include "System/SafeUtil.h"
 #include "System/StringUtil.h"
-
-#include "System/Misc/TracyDefs.h"
 
 /******************************************************************************/
 
@@ -49,24 +46,6 @@ UnitDefWeapon::UnitDefWeapon(const WeaponDef* weaponDef, const LuaTable& weaponT
 
 	this->mainDir = weaponTable.GetFloat3("mainDir", FwdVector);
 	this->mainDir.SafeNormalize();
-
-	// multiplier weight applied to target selection based on how far the weapon has to turn to face the target.
-	weaponAimAdjustPriority = weaponTable.GetFloat("weaponAimAdjustPriority", weaponAimAdjustPriority);
-
-	// allow weapon to select a new target immediately after the current target is destroyed, without waiting for slow update.
-	fastAutoRetargeting = weaponTable.GetBool("fastAutoRetargeting", fastAutoRetargeting);
-
-	// allow weapon to swap muzzles every frame and accurately determine friendly fire, without waiting for slow update.
-	fastQueryPointUpdate = weaponTable.GetBool("fastQueryPointUpdate", fastQueryPointUpdate);
-
-	// Determines how to handle burst fire, when target is out of arc. 0 = no restrictions (default), 1 = don't fire, 2 = fire in current direction of weapon 
-	burstControlWhenOutOfArc = weaponTable.GetInt("burstControlWhenOutOfArc", burstControlWhenOutOfArc);
-
-	// Perform more math to accurately lead moving targets. 
-	// 0 = undershoot approaching or retreating targets (default)
-	// 1 = exact solution for non-parabolic shots and 1 accuracy iteration for parabolic shots
-	// 2+ = extra iterations for parabolic shots. Iterations terminate early once 1-frame accuracy is achieved. 
-	accurateLeading = weaponTable.GetInt("accurateLeading", accurateLeading);
 }
 
 
@@ -77,17 +56,20 @@ UnitDef::UnitDef()
 	: SolidObjectDef()
 	, cobID(-1)
 	, decoyDef(nullptr)
-	, upkeep(0.0f)
-	, resourceMake(0.0f)
-	, makesResources(0.0f)
+	, metalUpkeep(0.0f)
+	, energyUpkeep(0.0f)
+	, metalMake(0.0f)
+	, makesMetal(0.0f)
+	, energyMake(0.0f)
 	, buildTime(0.0f)
-	, buildeeBuildRadius(-1.f)
 	, extractsMetal(0.0f)
 	, extractRange(0.0f)
 	, windGenerator(0.0f)
 	, tidalGenerator(0.0f)
-	, storage(0.0f)
-	, harvestStorage(0.0f)
+	, metalStorage(0.0f)
+	, energyStorage(0.0f)
+	, harvestMetalStorage(0.0f)
+	, harvestEnergyStorage(0.0f)
 	, autoHeal(0.0f)
 	, idleAutoHeal(0.0f)
 	, idleTime(0)
@@ -112,7 +94,6 @@ UnitDef::UnitDef()
 	, seismicSignature(0.0f)
 	, stealth(false)
 	, sonarStealth(false)
-	, leavesGhost(false)
 	, buildRange3D(false)
 	, buildDistance(16.0f) // 16.0f is the minimum distance between two 1x1 units
 	, buildSpeed(0.0f)
@@ -131,15 +112,10 @@ UnitDef::UnitDef()
 	, stopToAttack(false)
 	, minCollisionSpeed(0.0f)
 	, slideTolerance(0.0f)
-	, rollingResistanceCoefficient(0.0f)
-	, groundFrictionCoefficient(0.0f)
-	, atmosphericDragCoefficient(0.0f)
 	, maxHeightDif(0.0f)
 	, waterline(0.0f)
 	, minWaterDepth(0.0f)
 	, maxWaterDepth(0.0f)
-	, upDirSmoothing(0.0f)
-	, separationDistance(0.0f)
 	, pathType(-1U)
 	, armoredMultiple(0.0f)
 	, armorType(0)
@@ -255,8 +231,10 @@ UnitDef::UnitDef()
 	, showNanoSpray(false)
 	, nanoColor(ZeroVector)
 	, maxThisUnit(0)
-	, realCost(0.0f)
-	, realUpkeep(0.0f)
+	, realMetalCost(0.0f)
+	, realEnergyCost(0.0f)
+	, realMetalUpkeep(0.0f)
+	, realEnergyUpkeep(0.0f)
 	, realBuildTime(0.0f)
 {
 	memset(&modelCEGTags[0], 0, sizeof(modelCEGTags));
@@ -272,84 +250,49 @@ UnitDef::UnitDef()
 
 UnitDef::UnitDef(const LuaTable& udTable, const std::string& unitName, int id)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// rely on default-ctor to initialize all members
 	*this = UnitDef();
 	this->id = id;
 
 	name = unitName;
-
-	/* Many entries read two keys. The backup key is usually what Total
-	 * Annihilation expected and is typically "robust" in that invalid
-	 * values get clamped. Sometimes these values are also in a different
-	 * unit (for example modern "speed" is in elmo/second but the legacy
-	 * "maxVelocity" is in elmo/frame). The new ones reject the whole def
-	 * if a value is invalid so as not to subtly hide errors, and the key
-	 * matches what is exposed in UnitDefs. */
-
-	humanName = udTable.GetString("humanName", udTable.GetString("name", "")); // note, `UnitDefs[x].name` is the _internal_ name
+	humanName = udTable.GetString("name", "");
 	tooltip = udTable.GetString("description", name);
 	wreckName = udTable.GetString("corpse", "");
 	buildPicName = udTable.GetString("buildPic", "");
 	decoyName = udTable.GetString("decoyFor", "");
 
-	storage =
-		{ udTable.GetFloat( "metalStorage", 0.0f)
-		, udTable.GetFloat("energyStorage", 0.0f)
-	};
-	harvestStorage =
-		{ udTable.GetFloat("harvestMetalStorage", udTable.GetFloat("harvestStorage", 0.0f))
-		, udTable.GetFloat("harvestEnergyStorage", 0.0f)
-	};
+	metalStorage  = udTable.GetFloat("metalStorage",  0.0f);
+	energyStorage = udTable.GetFloat("energyStorage", 0.0f);
+	harvestMetalStorage  = udTable.GetFloat("harvestMetalStorage", udTable.GetFloat("harvestStorage", 0.0f));
+	harvestEnergyStorage = udTable.GetFloat("harvestEnergyStorage", 0.0f);
 
 	extractsMetal  = udTable.GetFloat("extractsMetal",  0.0f);
+	windGenerator  = udTable.GetFloat("windGenerator",  0.0f);
+	tidalGenerator = udTable.GetFloat("tidalGenerator", 0.0f);
 
-	windGenerator =
-		{ 0.0f
-		, udTable.GetFloat("windGenerator", 0.0f)
-	};
-	tidalGenerator =
-		{ 0.0f
-		, udTable.GetFloat("tidalGenerator", 0.0f)
-	};
+	metalUpkeep  = udTable.GetFloat("metalUse",   0.0f);
+	energyUpkeep = udTable.GetFloat("energyUse",  0.0f);
+	metalMake    = udTable.GetFloat("metalMake",  0.0f);
+	makesMetal   = udTable.GetFloat("makesMetal", 0.0f);
+	energyMake   = udTable.GetFloat("energyMake", 0.0f);
 
-	upkeep =
-		{ udTable.GetFloat( "metalUpkeep", udTable.GetFloat( "metalUse", 0.0f))
-		, udTable.GetFloat("energyUpkeep", udTable.GetFloat("energyUse", 0.0f))
-	};
-	resourceMake =
-		{ udTable.GetFloat( "metalMake", 0.0f)
-		, udTable.GetFloat("energyMake", 0.0f)
-	};
-	makesResources =
-		{ udTable.GetFloat("makesMetal", 0.0f)
-		, 0.0f
-	};
+	/* maxDamage is the legacy Total Annihilation spelling,
+	 * and what most games use, so not really deprecatable */
+	health       = udTable.GetFloat("health", udTable.GetFloat("maxDamage", 0.0f));
+	health       = std::max(0.1f, health); // avoid some nasty divide by 0
 
-	autoHeal     = udTable.GetFloat("autoHeal",      0.0f) * (UNIT_SLOWUPDATE_RATE * INV_GAME_SPEED);
-	idleAutoHeal = udTable.GetFloat("idleAutoHeal", 10.0f) * (UNIT_SLOWUPDATE_RATE * INV_GAME_SPEED);
+	autoHeal     = udTable.GetFloat("autoHeal",      0.0f) * (UNIT_SLOWUPDATE_RATE / float(GAME_SPEED));
+	idleAutoHeal = udTable.GetFloat("idleAutoHeal", 10.0f) * (UNIT_SLOWUPDATE_RATE / float(GAME_SPEED));
 	idleTime     = udTable.GetInt("idleTime", 600);
 
-	health = udTable.GetFloat("health", udTable.GetFloat("maxDamage", 100.0f));
-	if (health <= 0.0f)
-		throw content_error (unitName + ".health <= 0");
-
-	cost.metal = udTable.GetFloat("metalCost", udTable.GetFloat("buildCostMetal", 0.0f));
-	if (cost.metal < 0.0f)
-		throw content_error (unitName + ".metalCost < 0");
-
-	cost.energy = udTable.GetFloat("energyCost", udTable.GetFloat("buildCostEnergy", 0.0f));
-	if (cost.energy < 0.0f)
-		throw content_error (unitName + ".energyCost < 0");
-
-	buildTime = udTable.GetFloat("buildTime", 100.0f);
-	if (buildTime <= 0.0f)
-		throw content_error (unitName + ".buildTime <= 0");
-
-	buildeeBuildRadius = udTable.GetFloat("buildeeBuildRadius", -1.f);
-
-	mass = std::clamp(udTable.GetFloat("mass", cost.metal), CSolidObject::MINIMUM_MASS, CSolidObject::MAXIMUM_MASS);
+	// iff a mass value is not defined, default to metalCost
+	// (do not allow it to be zero or negative in either case)
+	metal = std::max(1.0f, udTable.GetFloat("buildCostMetal", 0.0f));
+	mass = Clamp(udTable.GetFloat("mass", metal), CSolidObject::MINIMUM_MASS, CSolidObject::MAXIMUM_MASS);
 	crushResistance = udTable.GetFloat("crushResistance", mass);
+
+	energy = udTable.GetFloat("buildCostEnergy", 0.0f);
+	buildTime = std::max(0.1f, udTable.GetFloat("buildTime", 0.0f)); //avoid some nasty divide by 0
 
 	cobID = udTable.GetInt("cobID", -1);
 
@@ -369,9 +312,6 @@ UnitDef::UnitDef(const LuaTable& udTable, const std::string& unitName, int id)
 	resurrectSpeed = udTable.GetFloat("resurrectSpeed", buildSpeed);
 	captureSpeed   = udTable.GetFloat("captureSpeed",   buildSpeed);
 	terraformSpeed = udTable.GetFloat("terraformSpeed", buildSpeed);
-
-	upDirSmoothing = std::clamp(udTable.GetFloat("upDirSmoothing", 0.0f), 0.0f, 0.95f);
-	separationDistance = std::max(udTable.GetInt("separationDistance", 0), 0);
 
 	reclaimable  = udTable.GetBool("reclaimable",  true);
 	capturable   = udTable.GetBool("capturable",   true);
@@ -396,15 +336,6 @@ UnitDef::UnitDef(const LuaTable& udTable, const std::string& unitName, int id)
 	canReclaim   = udTable.GetBool("canReclaim",   builder) && (  reclaimSpeed > 0.0f);
 	canCapture   = udTable.GetBool("canCapture",     false) && (  captureSpeed > 0.0f);
 	canResurrect = udTable.GetBool("canResurrect",   false) && (resurrectSpeed > 0.0f);
-
-	/* Note that a mobile builder with canAssist = false will be able
-	 * to place a nanoframe and pour buildpower into it, but will not
-	 * be able to resume building if interrupted for any reason (with
-	 * the exception of the wait command). It will be unable to pour
-	 * buildpower into a nanoframe placed by another unit. It will be
-	 * unable to repair an incomplete nanoframe or place a nanoframe
-	 * on top of an existing nanoframe, even if it is the exact same
-	 * structure in the exact same location. */
 	canAssist    = udTable.GetBool("canAssist",    builder);
 
 	canBeAssisted = udTable.GetBool("canBeAssisted", true);
@@ -420,7 +351,7 @@ UnitDef::UnitDef(const LuaTable& udTable, const std::string& unitName, int id)
 	collidable = udTable.GetBool("blocking", true);
 	collide = udTable.GetBool("collide", true);
 
-	const float maxSlopeDeg = std::clamp(udTable.GetFloat("maxSlope", 0.0f), 0.0f, 89.0f);
+	const float maxSlopeDeg = Clamp(udTable.GetFloat("maxSlope", 0.0f), 0.0f, 89.0f);
 	const float maxSlopeRad = maxSlopeDeg * math::DEG_TO_RAD;
 
 	// FIXME: kill the magic constant
@@ -431,34 +362,13 @@ UnitDef::UnitDef(const LuaTable& udTable, const std::string& unitName, int id)
 	waterline = udTable.GetFloat("waterline", 0.0f);
 	minCollisionSpeed = udTable.GetFloat("minCollisionSpeed", 1.0f);
 	slideTolerance = udTable.GetFloat("slideTolerance", 0.0f); // disabled
-	rollingResistanceCoefficient = udTable.GetFloat("rollingResistanceCoefficient", 0.05f);
-	groundFrictionCoefficient = udTable.GetFloat("groundFrictionCoefficient", 0.01f);
-	atmosphericDragCoefficient = udTable.GetFloat("atmosphericDragCoefficient", 1.0f);
 	pushResistant = udTable.GetBool("pushResistant", false);
 	selfDCountdown = udTable.GetInt("selfDestructCountdown", 5);
 
-	/* Note that the legacy unit is elmo/frame
-	 * whereas the modern one is elmo/second */
-	const decltype(speed) speedLegacy = math::fabs(udTable.GetFloat("maxVelocity", 0.0f) * GAME_SPEED);
-	speed = udTable.GetFloat("speed", speedLegacy);
-	if (speed < 0.0f)
-		throw content_error(unitName + ".speed < 0");
-
-	const decltype(rSpeed) rSpeedLegacy = math::fabs(udTable.GetFloat("maxReverseVelocity", 0.0f) * GAME_SPEED);
-	rSpeed = udTable.GetFloat("rSpeed", rSpeedLegacy);
-	if (rSpeed < 0.0f)
-		throw content_error(unitName + ".rSpeed < 0");
-
-	/* The unit here is elmo/frame^2 for both spellings of the key.
-	 * At some point, 'acceleration' should change to elmo/second^2
-	 * and get exposed to UnitDefs. Let games migrate first though. */
-	maxAcc = udTable.GetFloat("maxAcc", udTable.GetFloat("acceleration", 0.5f));
-	if (maxAcc < 0.0f)
-		throw content_error(unitName + ".acceleration < 0");
-
-	maxDec = udTable.GetFloat("maxDec", udTable.GetFloat("brakeRate", maxAcc));
-	if (maxDec < 0.0f)
-		throw content_error(unitName + ".brakeRate < 0");
+	speed  = udTable.GetFloat("maxVelocity", 0.0f) * GAME_SPEED;
+	speed  = math::fabs(speed);
+	rSpeed = udTable.GetFloat("maxReverseVelocity", 0.0f) * GAME_SPEED;
+	rSpeed = math::fabs(rSpeed);
 
 	fireState = udTable.GetInt("fireState", canFireControl? FIRESTATE_NONE: FIRESTATE_FIREATWILL);
 	fireState = std::min(fireState, int(FIRESTATE_FIREATNEUTRAL));
@@ -466,15 +376,15 @@ UnitDef::UnitDef(const LuaTable& udTable, const std::string& unitName, int id)
 	moveState = std::min(moveState, int(MOVESTATE_ROAM));
 
 	flankingBonusMode = udTable.GetInt("flankingBonusMode", modInfo.flankingBonusModeDefault);
-	flankingBonusMax  = udTable.GetFloat("flankingBonusMax", modInfo.flankingBonusMaxDefault);
-	flankingBonusMin  = udTable.GetFloat("flankingBonusMin", modInfo.flankingBonusMinDefault);
+	flankingBonusMax  = udTable.GetFloat("flankingBonusMax", 1.9f);
+	flankingBonusMin  = udTable.GetFloat("flankingBonusMin", 0.9f);
 	flankingBonusDir  = udTable.GetFloat3("flankingBonusDir", FwdVector);
 	flankingBonusMobilityAdd = udTable.GetFloat("flankingBonusMobilityAdd", 0.01f);
 
 	armoredMultiple = udTable.GetFloat("damageModifier", 1.0f);
 	armorType = damageArrayHandler.GetTypeFromName(name);
 
-	losHeight = udTable.GetFloat("sightEmitHeight", udTable.GetFloat("losEmitHeight", 20.0f));
+	losHeight = udTable.GetFloat("losEmitHeight", 20.0f);
 	radarHeight = udTable.GetFloat("radarEmitHeight", losHeight);
 
 	losRadius = udTable.GetFloat("sightDistance", 0.0f);
@@ -517,10 +427,14 @@ UnitDef::UnitDef(const LuaTable& udTable, const std::string& unitName, int id)
 
 	airStrafe      = udTable.GetBool("airStrafe", true);
 	hoverAttack    = udTable.GetBool("hoverAttack", false);
-	wantedHeight   = udTable.GetFloat("cruiseAltitude", udTable.GetFloat("cruiseAlt", 0.0f));
+	wantedHeight   = udTable.GetFloat("cruiseAlt", 0.0f);
 	dlHoverFactor  = udTable.GetFloat("airHoverFactor", -1.0f);
 	bankingAllowed = udTable.GetBool("bankingAllowed", true);
 	useSmoothMesh  = udTable.GetBool("useSmoothMesh", true);
+
+
+	maxAcc = math::fabs(udTable.GetFloat("acceleration", 0.5f)); // no negative values
+	maxDec = math::fabs(udTable.GetFloat("brakeRate", maxAcc)); // no negative values
 
 	turnRate    = udTable.GetFloat("turnRate", 0.0f);
 	turnInPlace = udTable.GetBool("turnInPlace", true);
@@ -548,13 +462,13 @@ UnitDef::UnitDef(const LuaTable& udTable, const std::string& unitName, int id)
 	transportUnloadMethod = udTable.GetInt("transportUnloadMethod" , 0);
 
 	wingDrag     = udTable.GetFloat("wingDrag",     0.07f);  // drag caused by wings
-	wingDrag     = std::clamp(wingDrag, 0.0f, 1.0f);
+	wingDrag     = Clamp(wingDrag, 0.0f, 1.0f);
 	wingAngle    = udTable.GetFloat("wingAngle",    0.08f);  // angle between front and the wing plane
 	frontToSpeed = udTable.GetFloat("frontToSpeed", 0.1f);   // fudge factor for lining up speed and front of plane
 	speedToFront = udTable.GetFloat("speedToFront", 0.07f);  // fudge factor for lining up speed and front of plane
 	myGravity    = udTable.GetFloat("myGravity",    0.4f);   // planes are slower than real airplanes so lower gravity to compensate
 	crashDrag    = udTable.GetFloat("crashDrag",    0.005f); // drag used when crashing
-	crashDrag    = std::clamp(crashDrag, 0.0f, 1.0f);
+	crashDrag    = Clamp(crashDrag, 0.0f, 1.0f);
 
 	maxBank = udTable.GetFloat("maxBank", 0.8f);         // max roll
 	maxPitch = udTable.GetFloat("maxPitch", 0.45f);      // max pitch this plane tries to keep
@@ -565,15 +479,13 @@ UnitDef::UnitDef(const LuaTable& udTable, const std::string& unitName, int id)
 	maxElevator = udTable.GetFloat("maxElevator", 0.01f);  // turn speed around pitch axis
 	maxRudder   = udTable.GetFloat("maxRudder",   0.004f); // turn speed around yaw axis
 
-	maxThisUnit = udTable.GetInt("maxThisUnit", udTable.GetInt("unitRestricted", MAX_UNITS));
+	maxThisUnit = udTable.GetInt("unitRestricted", MAX_UNITS);
 	maxThisUnit = std::min(maxThisUnit, gameSetup->GetRestrictedUnitLimit(name, MAX_UNITS));
 
 	categoryString = udTable.GetString("category", "");
 
 	category = CCategoryHandler::Instance()->GetCategories(udTable.GetString("category", ""));
 	noChaseCategory = CCategoryHandler::Instance()->GetCategories(udTable.GetString("noChaseCategory", ""));
-
-	iconName = udTable.GetString("iconType", "default");
 
 	shieldWeaponDef    = nullptr;
 	stockpileWeaponDef = nullptr;
@@ -611,8 +523,8 @@ UnitDef::UnitDef(const LuaTable& udTable, const std::string& unitName, int id)
 			// we have no MoveDef, so pathType == -1 and IsAirUnit() MIGHT be true
 			cantBeTransported |= (!modInfo.transportAir && canfly);
 		} else {
-			//upright           |= (moveDef->speedModClass == MoveDef::Hover);
-			//upright           |= (moveDef->speedModClass == MoveDef::Ship );
+			upright           |= (moveDef->speedModClass == MoveDef::Hover);
+			upright           |= (moveDef->speedModClass == MoveDef::Ship );
 
 			// we have a MoveDef, so pathType != -1 and IsGroundUnit() MUST be true
 			cantBeTransported |= (!modInfo.transportGround && moveDef->speedModClass == MoveDef::Tank );
@@ -656,11 +568,11 @@ UnitDef::UnitDef(const LuaTable& udTable, const std::string& unitName, int id)
 		LOG_L(L_ERROR, "Couldn't find WeaponDef NOWEAPON and selfDestructAs for %s is missing!", unitName.c_str());
 	}
 
-	power = udTable.GetFloat("power", (cost.metal + (cost.energy / 60.0f)));
+	power = udTable.GetFloat("power", (metal + (energy / 60.0f)));
 
 	// Prevent a division by zero in experience calculations.
 	if (power < 1.0e-3f) {
-		LOG_L(L_WARNING, "Unit '%s' (%s) has really low power? %f", humanName.c_str(), unitName.c_str(), power);
+		LOG_L(L_WARNING, "Unit %s is really cheap? %f", humanName.c_str(), power);
 		LOG_L(L_WARNING, "This can cause a division by zero in experience calculations.");
 		power = 1.0e-3f;
 	}
@@ -674,8 +586,6 @@ UnitDef::UnitDef(const LuaTable& udTable, const std::string& unitName, int id)
 	buildingMask = (std::uint16_t)udTable.GetInt("buildingMask", 1); //1st bit set to 1 constitutes for "normal building"
 	if (IsImmobileUnit())
 		CreateYardMap(udTable.GetString("yardMap", ""));
-
-	leavesGhost   = udTable.GetBool("leavesGhost", IsBuildingUnit());
 
 	decalDef.Parse(udTable);
 
@@ -743,7 +653,6 @@ UnitDef::UnitDef(const LuaTable& udTable, const std::string& unitName, int id)
 
 void UnitDef::ParseWeaponsTable(const LuaTable& weaponsTable)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const WeaponDef* noWeaponDef = weaponDefHandler->GetWeaponDef("NOWEAPON");
 
 	for (int k = 0, w = 0; w < MAX_WEAPONS_PER_UNIT; w++) {
@@ -805,7 +714,6 @@ void UnitDef::ParseWeaponsTable(const LuaTable& weaponsTable)
 
 void UnitDef::CreateYardMap(std::string&& yardMapStr)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// if a unit is immobile but does *not* have a yardmap
 	// defined, assume it is not supposed to be a building
 	// (so do not assign a default per facing)
@@ -844,20 +752,16 @@ void UnitDef::CreateYardMap(std::string&& yardMapStr)
 			continue;
 
 		switch (c) {
-			case 'g': { defYardMap[ymCopyIdx - 1] = YARDMAP_GEO;          needGeo = true; } break;
-			case 'j': { defYardMap[ymCopyIdx - 1] = YARDMAP_GEOSTACKABLE; needGeo = true; } break;
-			case 'y': { defYardMap[ymCopyIdx - 1] = YARDMAP_OPEN;                         } break;
-			case 's': { defYardMap[ymCopyIdx - 1] = YARDMAP_STACKABLE;                    } break;
-			case 'c': { defYardMap[ymCopyIdx - 1] = YARDMAP_YARD;                         } break;
-			case 'i': { defYardMap[ymCopyIdx - 1] = YARDMAP_YARDINV;                      } break;
-			case 'b': { defYardMap[ymCopyIdx - 1] = YARDMAP_BUILDONLY;                    } break;
-			case 'u': { defYardMap[ymCopyIdx - 1] = YARDMAP_UNBUILDABLE;                  } break;
-			case 'e': { defYardMap[ymCopyIdx - 1] = YARDMAP_EXITONLY;                     } break;
+			case 'g': { defYardMap[ymCopyIdx - 1] = YARDMAP_GEO; needGeo = true; } break;
+			case 'y': { defYardMap[ymCopyIdx - 1] = YARDMAP_OPEN;                } break;
+			case 'c': { defYardMap[ymCopyIdx - 1] = YARDMAP_YARD;                } break;
+			case 'i': { defYardMap[ymCopyIdx - 1] = YARDMAP_YARDINV;             } break;
+		//	case 'w': { defYardMap[ymCopyIdx - 1] = YARDMAP_WALKABLE;            } break; // TODO?
 			case 'w':
 			case 'x':
 			case 'f':
-			case 'o': { defYardMap[ymCopyIdx - 1] = YARDMAP_BLOCKED;                      } break;
-			default : {                                                                   } break;
+			case 'o': { defYardMap[ymCopyIdx - 1] = YARDMAP_BLOCKED;             } break;
+			default : {                                                          } break;
 		}
 	}
 
@@ -885,25 +789,29 @@ void UnitDef::CreateYardMap(std::string&& yardMapStr)
 
 void UnitDef::SetNoCost(bool noCost)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (noCost) {
 		// initialized from UnitDefHandler::PushNewUnitDef
-		realCost         = cost;
-		realUpkeep       = upkeep;
+		realMetalCost    = metal;
+		realEnergyCost   = energy;
+		realMetalUpkeep  = metalUpkeep;
+		realEnergyUpkeep = energyUpkeep;
 		realBuildTime    = buildTime;
 
-		cost         =  1.0f;
+		metal        =  1.0f;
+		energy       =  1.0f;
 		buildTime    = 10.0f;
-		upkeep       =  0.0f;
+		metalUpkeep  =  0.0f;
+		energyUpkeep =  0.0f;
 	} else {
-		cost         = realCost;
+		metal        = realMetalCost;
+		energy       = realEnergyCost;
 		buildTime    = realBuildTime;
-		upkeep       = realUpkeep;
+		metalUpkeep  = realMetalUpkeep;
+		energyUpkeep = realEnergyUpkeep;
 	}
 }
 
 bool UnitDef::HasBomberWeapon(unsigned int idx) const {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// checked by Is*AirUnit
 	assert(HasWeapon(idx));
 	return (weapons[idx].def->IsAircraftWeapon());

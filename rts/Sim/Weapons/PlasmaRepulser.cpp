@@ -4,8 +4,6 @@
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/QuadField.h"
 #include "Sim/Misc/TeamHandler.h"
-#include "Rendering/Env/Particles/Classes/ShieldSegmentProjectile.h"
-#include "Rendering/Env/Particles/Classes/RepulseGfx.h"
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectile.h"
 #include "Sim/Projectiles/ProjectileMemPool.h"
 #include "Sim/Units/Scripts/UnitScript.h"
@@ -13,8 +11,6 @@
 #include "Sim/Weapons/WeaponDef.h"
 #include "System/EventHandler.h"
 #include "System/SpringMath.h"
-
-#include "System/Misc/TracyDefs.h"
 
 CR_BIND_DERIVED(CPlasmaRepulser, CWeapon, )
 CR_REG_METADATA(CPlasmaRepulser, (
@@ -41,72 +37,14 @@ CR_REG_METADATA(CPlasmaRepulser, (
 
 
 
-struct ShieldSegmentCollectionPool {
-	CR_DECLARE_STRUCT(ShieldSegmentCollectionPool)
-public:
-	void InsertCollection(CPlasmaRepulser* r) {
-		RECOIL_DETAILED_TRACY_ZONE;
-		if (sscs.empty())
-			sscs.reserve(32);
-
-		if (idcs.empty()) {
-			sscs.emplace_back();
-
-			sscs[r->scIndex = sscs.size() - 1].Init(r);
-		} else {
-			sscs[r->scIndex = idcs.back()].Init(r);
-
-			idcs.pop_back();
-		}
-	}
-
-	void RemoveCollection(const CPlasmaRepulser* r) {
-		RECOIL_DETAILED_TRACY_ZONE;
-		sscs[r->scIndex].Kill();
-		idcs.push_back(r->scIndex);
-	}
-
-	void UpdateCollection(const CPlasmaRepulser* r) {
-		RECOIL_DETAILED_TRACY_ZONE;
-		sscs[r->scIndex].UpdateColor();
-	}
-
-private:
-	// due to weapon pooling, ShieldSegmentCollection can not be
-	// inlined without adding ~50 bytes to *all* weapon instances
-	// (CPlasmaRepulser is the largest type)
-	std::vector<unsigned int> idcs;
-	std::vector<ShieldSegmentCollection> sscs;
-};
-
-
-CR_BIND(ShieldSegmentCollectionPool, )
-CR_REG_METADATA(ShieldSegmentCollectionPool, (
-	CR_MEMBER(idcs),
-	CR_MEMBER(sscs)
-))
-
-static ShieldSegmentCollectionPool sscPool;
-
-void CPlasmaRepulser::SerializeShieldSegmentCollectionPool(creg::ISerializer* s)
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-	s->SerializeObjectInstance(&sscPool, sscPool.GetClass());
-}
-
-
-
 CPlasmaRepulser::~CPlasmaRepulser()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	quadField.RemoveRepulser(this);
-	sscPool.RemoveCollection(this);
 }
 
 
 void CPlasmaRepulser::Init()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	sqRadius = Square(radius = weaponDef->shieldRadius);
 	curPower = mix(10.0f * 1000.0f * 1000.0f, weaponDef->shieldStartingPower, weaponDef->shieldPower != 0.0f);
 
@@ -114,33 +52,28 @@ void CPlasmaRepulser::Init()
 
 	CWeapon::Init();
 
-	sscPool.InsertCollection(this);
 	quadField.MovedRepulser(this);
 }
 
 
 bool CPlasmaRepulser::IsRepulsing(CWeaponProjectile* p) const
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	return (weaponDef->shieldRepulser && std::find(repulsedProjectiles.begin(), repulsedProjectiles.end(), p) != repulsedProjectiles.end());
 }
 
 bool CPlasmaRepulser::IgnoreInteriorHit(CWeaponProjectile* p) const
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	return (weaponDef->exteriorShield && !IsRepulsing(p));
 }
 
 
 bool CPlasmaRepulser::IsActive() const
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	return isEnabled && !owner->IsStunned() && !owner->beingBuilt;
 }
 
 bool CPlasmaRepulser::CanIntercept(unsigned interceptedType, int allyTeam) const
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if ((weaponDef->shieldInterceptType & interceptedType) == 0)
 		return false;
 
@@ -153,15 +86,14 @@ bool CPlasmaRepulser::CanIntercept(unsigned interceptedType, int allyTeam) const
 
 void CPlasmaRepulser::Update()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	rechargeDelay -= (rechargeDelay > 0);
 	hitFrameCount -= (hitFrameCount > 0);
 
 	if (IsActive() && (curPower < weaponDef->shieldPower) && rechargeDelay <= 0) {
-		const auto  regenCost  = weaponDef->shieldPowerRegenCost * INV_GAME_SPEED;
-		const float powerRegen = weaponDef->shieldPowerRegen     * INV_GAME_SPEED;
+		const float energyCost = weaponDef->shieldPowerRegenEnergy * (1.0f / GAME_SPEED);
+		const float powerRegen = weaponDef->shieldPowerRegen       * (1.0f / GAME_SPEED);
 
-		curPower += (powerRegen * owner->UseResources(regenCost));
+		curPower += (powerRegen * owner->UseEnergy(energyCost));
 	}
 
 	UpdateWeaponVectors();
@@ -172,26 +104,13 @@ void CPlasmaRepulser::Update()
 	deltaMuzzlePos = mix(weaponMuzzlePos - lastMuzzlePos, deltaMuzzlePos, lastMuzzlePos == ZeroVector);
 	lastMuzzlePos = weaponMuzzlePos;
 
-	#if 0
-	segmentCollections[this].UpdateColor();
-	#endif
-	sscPool.UpdateCollection(this);
-}
-
-void CPlasmaRepulser::SetRechargeDelay(int delay, bool overwrite)
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-	if (overwrite)
-		rechargeDelay = delay;
-	else
-		rechargeDelay = std::max(rechargeDelay, delay);
 }
 
 // Returns true if the projectile is destroyed.
 bool CPlasmaRepulser::IncomingProjectile(CWeaponProjectile* p, const float3& hitPos)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const int defHitFrames = weaponDef->visibleShieldHitFrames;
+	const int defRechargeDelay = weaponDef->shieldRechargeDelay;
 
 	// gadget handles the collision event, don't touch the projectile
 	// start-pos only makes sense for beams, pass current p->pos here
@@ -205,18 +124,18 @@ bool CPlasmaRepulser::IncomingProjectile(CWeaponProjectile* p, const float3& hit
 	if (curPower < shieldDamage)
 		return false;
 
-	// team does not have enough resources, don't touch the projectile
-	if (!teamHandler.Team(owner->team)->HaveResources(weaponDef->shieldResourceUse))
+		// team does not have enough energy, don't touch the projectile
+	if (teamHandler.Team(owner->team)->res.energy < weaponDef->shieldEnergyUse)
 		return false;
 
-	SetRechargeDelay(weaponDef->shieldRechargeDelay, false);
+	rechargeDelay = defRechargeDelay;
 
 	if (weaponDef->shieldRepulser) {
 		// bounce the projectile
 		switch (p->ShieldRepulse(weaponMuzzlePos, weaponDef->shieldForce, weaponDef->shieldMaxSpeed)) {
 			case 0: { return false; } break;
 			case 1: {
-				owner->UseResources(weaponDef->shieldResourceUse);
+				owner->UseEnergy(weaponDef->shieldEnergyUse);
 
 				curPower -= (shieldDamage * (weaponDef->shieldPower != 0.0f));
 			} break;
@@ -225,7 +144,7 @@ bool CPlasmaRepulser::IncomingProjectile(CWeaponProjectile* p, const float3& hit
 				//   all weapons except Lasers do only (1 / GAME_SPEED) damage
 				//   (Lasers are insta-bounced, others spend time "inside" the
 				//   shield dealing damage every frame)
-				owner->UseResources(weaponDef->shieldResourceUse / GAME_SPEED);
+				owner->UseEnergy(weaponDef->shieldEnergyUse / GAME_SPEED);
 
 				curPower -= ((shieldDamage / GAME_SPEED) * (weaponDef->shieldPower != 0.0f));
 			} break;
@@ -234,13 +153,6 @@ bool CPlasmaRepulser::IncomingProjectile(CWeaponProjectile* p, const float3& hit
 		if (spring::VectorInsertUnique(repulsedProjectiles, p, true)) {
 			// projectile was not repulsed before
 			AddDeathDependence(p, DEPENDENCE_REPULSED);
-
-			if (weaponDef->visibleShieldRepulse) {
-				const float relPower = curPower / std::max(1.0f, weaponDef->shieldPower);
-				const float lrpColor = std::min(1.0f, relPower);
-
-				projMemPool.alloc<CRepulseGfx>(owner, p, radius, mix(weaponDef->shieldBadColor, weaponDef->shieldGoodColor, lrpColor));
-			}
 		}
 
 		if (defHitFrames > 0)
@@ -250,13 +162,10 @@ bool CPlasmaRepulser::IncomingProjectile(CWeaponProjectile* p, const float3& hit
 	}
 
 	// kill the projectile
-	if (owner->UseResources(weaponDef->shieldResourceUse)) {
-		if (weaponDef->shieldPower != 0.0f) {
-			curPower -= shieldDamage;
-			curPower = std::min(weaponDef->shieldPower, curPower); // damage can be negative
-		}
+	if (owner->UseEnergy(weaponDef->shieldEnergyUse)) {
+		curPower -= (shieldDamage * (weaponDef->shieldPower != 0.0f));
 
-		p->Collision(this);
+		p->Collision();
 
 		if (defHitFrames > 0)
 			hitFrameCount = defHitFrames;
@@ -270,7 +179,6 @@ bool CPlasmaRepulser::IncomingProjectile(CWeaponProjectile* p, const float3& hit
 
 void CPlasmaRepulser::SlowUpdate()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	UpdateWeaponPieces();
 	UpdateWeaponVectors();
 	owner->script->AimShieldWeapon(this);
@@ -279,7 +187,6 @@ void CPlasmaRepulser::SlowUpdate()
 
 bool CPlasmaRepulser::IncomingBeam(const CWeapon* emitter, const float3& startPos, const float3& hitPos, float damageMultiplier)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// gadget handles the collision event, don't touch the projectile
 	// note that startPos only equals the beam's true origin (which is
 	// p->GetStartPos()) if it did not get reflected
@@ -292,8 +199,8 @@ bool CPlasmaRepulser::IncomingBeam(const CWeapon* emitter, const float3& startPo
 	if (curPower < shieldDamage)
 		return false;
 
-	// team does not have enough resources, don't touch the projectile
-	if (!teamHandler.Team(owner->team)->HaveResources(weaponDef->shieldResourceUse))
+	// team does not have enough energy, don't touch the projectile
+	if (teamHandler.Team(owner->team)->res.energy < weaponDef->shieldEnergyUse)
 		return false;
 
 	curPower -= (shieldDamage * damageMultiplier * (weaponDef->shieldPower > 0.0f));
@@ -303,7 +210,6 @@ bool CPlasmaRepulser::IncomingBeam(const CWeapon* emitter, const float3& startPo
 
 void CPlasmaRepulser::DependentDied(CObject* o)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	spring::VectorErase(repulsedProjectiles, static_cast<CWeaponProjectile*>(o));
 	CWeapon::DependentDied(o);
 }

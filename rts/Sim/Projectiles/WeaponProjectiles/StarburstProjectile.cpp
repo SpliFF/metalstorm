@@ -2,25 +2,21 @@
 
 
 #include "StarburstProjectile.h"
-#include "Game/Camera.h"
 #include "Game/GlobalUnsynced.h"
 #include "Map/Ground.h"
-#include "Rendering/GlobalRendering.h"
-#include "Rendering/Env/Particles/ProjectileDrawer.h"
-#include "Rendering/GL/RenderBuffers.h"
-#include "Rendering/Textures/TextureAtlas.h"
 #include "Sim/Projectiles/ExplosionGenerator.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Projectiles/ProjectileMemPool.h"
-#include "Rendering/Env/Particles/Classes/SmokeTrailProjectile.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Weapons/WeaponDef.h"
 #include "System/Color.h"
 #include "System/Matrix44f.h"
 #include "System/SpringMath.h"
 
-#include "System/Misc/TracyDefs.h"
 
+// the smokes life-time in frames
+static constexpr float SMOKE_LIFETIME = 70.0f;
+static constexpr float TRACER_PARTS_STEP = 2.0f;
 
 CR_BIND(CStarburstProjectile::TracerPart, )
 CR_REG_METADATA_SUB(CStarburstProjectile, TracerPart, (
@@ -68,19 +64,18 @@ CStarburstProjectile::CStarburstProjectile(const ProjectileParams& params): CWea
 
 	, uptime(params.upTime)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	projectileType = WEAPON_STARBURST_PROJECTILE;
 
 
 	if (weaponDef != nullptr) {
 		maxSpeed = weaponDef->projectilespeed;
-		ttl = params.ttl;
+		ttl = weaponDef->flighttime;
 
-		// Default uptime is -1. Positive values override the projectile params.
+		// Default uptime is -1. Positive values override the weapondef.
 		if (uptime < 0)
 			uptime = weaponDef->uptime * GAME_SPEED;
 
-		if (ttl == 0)
+		if (weaponDef->flighttime == 0)
 			ttl = std::min(3000.0f, uptime + myrange / maxSpeed + 100);
 	}
 
@@ -89,7 +84,6 @@ CStarburstProjectile::CStarburstProjectile(const ProjectileParams& params): CWea
 	maxGoodDif = math::cos(tracking * 0.6f);
 	drawRadius = maxSpeed * 8.0f;
 
-	castShadow = weaponDef ? weaponDef->visuals.castShadow : true;
 	leaveSmokeTrail = (weaponDef != nullptr && weaponDef->visuals.smokeTrail);
 
 	InitTracerParts();
@@ -98,44 +92,22 @@ CStarburstProjectile::CStarburstProjectile(const ProjectileParams& params): CWea
 
 void CStarburstProjectile::Collision()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
-	if (leaveSmokeTrail)
-		projMemPool.alloc<CSmokeTrailProjectile>(owner(), pos, oldSmoke, dir, oldSmokeDir, false, true, GetSmokeSize(), GetSmokeTime(), GetSmokePeriod(), GetSmokeColor(), weaponDef->visuals.texture2, weaponDef->visuals.smokeTrailCastShadow);
-
 	CWeaponProjectile::Collision();
-
-	oldSmokeDir = dir;
-	oldSmoke = pos;
 }
 
 void CStarburstProjectile::Collision(CUnit* unit)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
-	if (leaveSmokeTrail)
-		projMemPool.alloc<CSmokeTrailProjectile>(owner(), pos, oldSmoke, dir, oldSmokeDir, false, true, GetSmokeSize(), GetSmokeTime(), GetSmokePeriod(), GetSmokeColor(), weaponDef->visuals.texture2, weaponDef->visuals.smokeTrailCastShadow);
-
 	CWeaponProjectile::Collision(unit);
-
-	oldSmokeDir = dir;
-	oldSmoke = pos;
 }
 
 void CStarburstProjectile::Collision(CFeature* feature)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
-	if (leaveSmokeTrail)
-		projMemPool.alloc<CSmokeTrailProjectile>(owner(), pos, oldSmoke, dir, oldSmokeDir, false, true, GetSmokeSize(), GetSmokeTime(), GetSmokePeriod(), GetSmokeColor(), weaponDef->visuals.texture2, weaponDef->visuals.smokeTrailCastShadow);
-
 	CWeaponProjectile::Collision(feature);
-
-	oldSmokeDir = dir;
-	oldSmoke = pos;
 }
 
 
 void CStarburstProjectile::Update()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	ttl--;
 	uptime--;
 	missileAge++;
@@ -148,16 +120,7 @@ void CStarburstProjectile::Update()
 	}
 
 	if (ttl > 0)
-		explGenHandler.GenExplosion(
-			cegID,
-			pos,
-			dir,
-			ttl,
-			damages->damageAreaOfEffect,
-			0.0f,
-			owner(),
-			ExplosionHitObject()
-		);
+		explGenHandler.GenExplosion(cegID, pos, dir, ttl, damages->damageAreaOfEffect, 0.0f, nullptr, nullptr);
 
 	UpdateTracerPart();
 	UpdateSmokeTrail();
@@ -166,7 +129,6 @@ void CStarburstProjectile::Update()
 
 void CStarburstProjectile::UpdateTargeting()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (target == nullptr)
 		return;
 
@@ -192,7 +154,6 @@ void CStarburstProjectile::UpdateTargeting()
 
 void CStarburstProjectile::UpdateTrajectory()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (uptime > 0) {
 		// stage 1: going upwards
 		speed.w += weaponDef->weaponacceleration;
@@ -259,7 +220,6 @@ void CStarburstProjectile::UpdateTrajectory()
 
 void CStarburstProjectile::InitTracerParts()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const unsigned int maxAgeMods = MAX_NUM_AGEMODS;
 	const unsigned int numAgeMods = static_cast<unsigned int>((speed.w + 0.6f) / TRACER_PARTS_STEP);
 
@@ -280,7 +240,6 @@ void CStarburstProjectile::InitTracerParts()
 
 void CStarburstProjectile::UpdateTracerPart()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	TracerPart& tracerPart = tracerParts[curTracerPart = (curTracerPart + 1) % NUM_TRACER_PARTS];
 	tracerPart.pos = pos;
 	tracerPart.dir = dir;
@@ -297,127 +256,12 @@ void CStarburstProjectile::UpdateTracerPart()
 
 void CStarburstProjectile::UpdateSmokeTrail()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
-	if (!leaveSmokeTrail)
-		return;
-
-	if (smokeTrail != nullptr)
-		smokeTrail->UpdateEndPos(oldSmoke = pos, oldSmokeDir = dir);
-
 	trailAge++;
 	numParts++;
-
-	if ((trailAge % GetSmokePeriod()) != 0)
-		return;
-
-	smokeTrail = projMemPool.alloc<CSmokeTrailProjectile>(
-		owner(),
-		pos, oldSmoke,
-		dir, oldSmokeDir,
-		trailAge == GetSmokePeriod(),
-		false,
-		GetSmokeSize(),
-		GetSmokeTime(),
-		GetSmokePeriod(),
-		GetSmokeColor(),
-		weaponDef->visuals.texture2,
-		weaponDef->visuals.smokeTrailCastShadow
-	);
-
-	numParts = 0;
-	useAirLos = smokeTrail->useAirLos;
-}
-
-inline float CStarburstProjectile::GetSmokeSize() const
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-	return weaponDef->visuals.smokeSize;
-}
-
-inline float CStarburstProjectile::GetSmokeColor() const
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-	return weaponDef->visuals.smokeColor;
-}
-
-inline int CStarburstProjectile::GetSmokeTime() const
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-	return weaponDef->visuals.smokeTime;
-}
-
-inline int CStarburstProjectile::GetSmokePeriod() const
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-	return weaponDef->visuals.smokePeriod;
-}
-
-void CStarburstProjectile::Draw()
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-	if (!validTextures[0])
-		return;
-
-	UpdateAnimParams();
-
-	const auto wt3 = weaponDef->visuals.texture3;
-	const auto wt1 = weaponDef->visuals.texture1;
-
-	const SColor lightYellow(255, 200, 150, 1);
-	const SColor lightRed(255, 180, 180, 1);
-
-	unsigned int partNum = curTracerPart;
-
-	if (validTextures[3])
-	for (unsigned int a = 0; a < NUM_TRACER_PARTS; ++a) {
-		const TracerPart* tracerPart = &tracerParts[partNum];
-		const float3& opos = tracerPart->pos;
-		const float3& odir = tracerPart->dir;
-		const float ospeed = tracerPart->speedf;
-
-		float curStep = 0.0f;
-
-		for (int ageModIdx = 0, numAgeMods = tracerPart->numAgeMods; ageModIdx < numAgeMods; curStep += TRACER_PARTS_STEP, ++ageModIdx) {
-			const float ageMod = tracerPart->ageMods[ageModIdx];
-			const float age2 = (a + (curStep / (ospeed + 0.01f))) * 0.2f;
-			const float drawsize = 1.0f + age2 * 0.8f * ageMod * 7;
-			const float alpha = (missileAge >= 20)? ((1.0f - age2) * std::max(0.0f, 1.0f - age2)): Square(1.0f - age2);
-
-			const float3 interPos = opos - (odir * ((a * 0.5f) + curStep));
-
-			SColor col = lightYellow * std::clamp(alpha, 0.0f, 1.0f);
-			col.a = 1;
-
-			AddEffectsQuad<3>(
-				wt3->pageNum,
-				{ interPos - camera->GetRight() * drawsize - camera->GetUp() * drawsize, wt3->xstart, wt3->ystart, col },
-				{ interPos + camera->GetRight() * drawsize - camera->GetUp() * drawsize, wt3->xend,   wt3->ystart, col },
-				{ interPos + camera->GetRight() * drawsize + camera->GetUp() * drawsize, wt3->xend,   wt3->yend,   col },
-				{ interPos - camera->GetRight() * drawsize + camera->GetUp() * drawsize, wt3->xstart, wt3->yend,   col }
-			);
-		}
-
-		// unsigned, so LHS will wrap around to UINT_MAX
-		partNum = std::min(partNum - 1, NUM_TRACER_PARTS - 1);
-	}
-
-	// draw the engine flare
-	constexpr float fsize = 25.0f;
-
-	if (validTextures[1]) {
-		AddEffectsQuad<1>(
-			wt1->pageNum,
-			{ drawPos - camera->GetRight() * fsize - camera->GetUp() * fsize, wt1->xstart, wt1->ystart, lightRed },
-			{ drawPos + camera->GetRight() * fsize - camera->GetUp() * fsize, wt1->xend,   wt1->ystart, lightRed },
-			{ drawPos + camera->GetRight() * fsize + camera->GetUp() * fsize, wt1->xend,   wt1->yend,   lightRed },
-			{ drawPos - camera->GetRight() * fsize + camera->GetUp() * fsize, wt1->xstart, wt1->yend,   lightRed }
-		);
-	}
 }
 
 int CStarburstProjectile::ShieldRepulse(const float3& shieldPos, float shieldForce, float shieldMaxSpeed)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (ttl <= 0)
 		return 0;
 
@@ -437,10 +281,3 @@ int CStarburstProjectile::ShieldRepulse(const float3& shieldPos, float shieldFor
 	return 2;
 }
 
-int CStarburstProjectile::GetProjectilesCount() const
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-	return
-		numParts * validTextures[3] +
-		       1 * validTextures[1];
-}

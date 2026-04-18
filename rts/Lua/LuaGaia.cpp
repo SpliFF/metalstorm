@@ -7,8 +7,9 @@
 
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/TeamHandler.h"
-#include "System/FileSystem/FileHandler.h" // SPRING_VFS*
+#include "System/FileSystem/FileHandler.h"
 #include "System/FileSystem/VFSHandler.h"
+#include "System/FileSystem/VFSModes.h"
 #include "System/StringUtil.h"
 #include "System/Threading/SpringThreading.h"
 
@@ -31,12 +32,12 @@ DECL_FREE_HANDLER(CLuaGaia, luaGaia)
 /******************************************************************************/
 /******************************************************************************/
 
-CLuaGaia::CLuaGaia(bool dryRun): CSplitLuaHandle("LuaGaia", LUA_HANDLE_ORDER_GAIA)
+CLuaGaia::CLuaGaia(bool onlySynced): CSplitLuaHandle("LuaGaia", LUA_HANDLE_ORDER_GAIA)
 {
 	if (!IsValid())
 		return;
 
-	Init(dryRun);
+	Init(onlySynced);
 }
 
 CLuaGaia::~CLuaGaia()

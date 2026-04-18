@@ -1,13 +1,6 @@
-/* This file is part of the Spring System (GPL v2 or later), see LICENSE.html */
-
-#ifndef LUA_CONST_PLATFORM_H
-#define LUA_CONST_PLATFORM_H
-
+#pragma once
+// Server-build stub — platform constants not needed server-side.
 struct lua_State;
-
-class LuaConstPlatform {
-	public:
-		static bool PushEntries(lua_State* L);
-};
-
-#endif
+namespace LuaConstPlatform {
+	inline bool PushEntries(lua_State*) { return true; }
+}

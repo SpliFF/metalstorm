@@ -1,30 +1,22 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "System/Matrix44f.h"
-#include "System/Quaternion.h"
 #include "System/SpringMath.h"
-#ifndef UNIT_TEST
-	#include "Rendering/GlobalRendering.h"
-#endif
 
 #include <memory.h>
 #include <algorithm>
-#include <cstring>
-
-#include "System/simd_compat.h"
 
 CR_BIND(CMatrix44f, )
 
 CR_REG_METADATA(CMatrix44f, CR_MEMBER(m))
 
-static_assert(alignof(CMatrix44f) == 64);
 CMatrix44f::CMatrix44f(const CMatrix44f& mat)
 {
 	memcpy(&m[0], &mat.m[0], sizeof(CMatrix44f));
 }
 
 
-CMatrix44f::CMatrix44f(const float3& pos, const float3& x, const float3& y, const float3& z)
+CMatrix44f::CMatrix44f(const float3 pos, const float3 x, const float3 y, const float3 z)
 {
 	// column-major!
 	m[0] = x.x;   m[4] = y.x;   m[ 8] = z.x;   m[12] = pos.x;
@@ -33,13 +25,13 @@ CMatrix44f::CMatrix44f(const float3& pos, const float3& x, const float3& y, cons
 	m[3] = 0.0f;  m[7] = 0.0f;  m[11] = 0.0f;  m[15] = 1.0f;
 }
 
-CMatrix44f::CMatrix44f(float rotX, float rotY, float rotZ)
+CMatrix44f::CMatrix44f(const float rotX, const float rotY, const float rotZ)
 {
 	LoadIdentity();
 	RotateEulerXYZ(float3(rotX, rotY, rotZ));
 }
 
-CMatrix44f::CMatrix44f(const float3& p)
+CMatrix44f::CMatrix44f(const float3 p)
 {
 	LoadIdentity();
 	SetPos(p);
@@ -55,47 +47,21 @@ bool CMatrix44f::IsOrthoNormal() const
 	const float3 dots = {xdir.dot(ydir), ydir.dot(zdir), xdir.dot(zdir)};
 	const float3 lens = {xdir.SqLength(), ydir.SqLength(), zdir.SqLength()};
 
-	constexpr float3 epsd = {float3::cmp_eps() *  64.0f, float3::cmp_eps() *  64.0f, float3::cmp_eps() *  64.0f};
-	constexpr float3 epsl = {float3::cmp_eps() * 128.0f, float3::cmp_eps() * 128.0f, float3::cmp_eps() * 128.0f};
+	constexpr float3 epsd = {float3::cmp_eps() *  8.0f, float3::cmp_eps() *  8.0f, float3::cmp_eps() *  8.0f};
+	constexpr float3 epsl = {float3::cmp_eps() * 16.0f, float3::cmp_eps() * 16.0f, float3::cmp_eps() * 16.0f};
 
-	bool on  = dots.equals(ZeroVector, epsd);
-	     on &= lens.equals(OnesVector, epsl);
-
-	return on;
+	return (dots.equals(ZeroVector, epsd)) && (lens.equals(OnesVector, epsl));
 }
 
 bool CMatrix44f::IsIdentity() const
 {
-	static constexpr CMatrix44f IDENTITY = CMatrix44f();
-	return (*this) == IDENTITY;
+	constexpr float4 x = {1.0f, 0.0f, 0.0f, 0.0f};
+	constexpr float4 y = {0.0f, 1.0f, 0.0f, 0.0f};
+	constexpr float4 z = {0.0f, 0.0f, 1.0f, 0.0f};
+	constexpr float4 w = {0.0f, 0.0f, 0.0f, 1.0f};
+	return (col[0] == x && col[1] == y && col[2] == z && col[3] == w);
 }
 
-bool CMatrix44f::IsRotMatrix() const
-{
-	return IsOrthoNormal() && math::fabs(1.0f - Det4()) <= 64.0f * float3::cmp_eps();
-}
-
-bool CMatrix44f::IsRotOrRotTranMatrix() const
-{
-	return IsOrthoNormal() && math::fabs(1.0f - Det3()) <= 64.0f * float3::cmp_eps();
-}
-
-float CMatrix44f::Det3() const
-{
-	// triple product == D
-	return col[0].dot(col[1].cross(col[2]));
-}
-
-float CMatrix44f::Det4() const
-{
-	return
-		md[0][3] * md[1][2] * md[2][1] * md[3][0] - md[0][2] * md[1][3] * md[2][1] * md[3][0] - md[0][3] * md[1][1] * md[2][2] * md[3][0] + md[0][1] * md[1][3] * md[2][2] * md[3][0] +
-		md[0][2] * md[1][1] * md[2][3] * md[3][0] - md[0][1] * md[1][2] * md[2][3] * md[3][0] - md[0][3] * md[1][2] * md[2][0] * md[3][1] + md[0][2] * md[1][3] * md[2][0] * md[3][1] +
-		md[0][3] * md[1][0] * md[2][2] * md[3][1] - md[0][0] * md[1][3] * md[2][2] * md[3][1] - md[0][2] * md[1][0] * md[2][3] * md[3][1] + md[0][0] * md[1][2] * md[2][3] * md[3][1] +
-		md[0][3] * md[1][1] * md[2][0] * md[3][2] - md[0][1] * md[1][3] * md[2][0] * md[3][2] - md[0][3] * md[1][0] * md[2][1] * md[3][2] + md[0][0] * md[1][3] * md[2][1] * md[3][2] +
-		md[0][1] * md[1][0] * md[2][3] * md[3][2] - md[0][0] * md[1][1] * md[2][3] * md[3][2] - md[0][2] * md[1][1] * md[2][0] * md[3][3] + md[0][1] * md[1][2] * md[2][0] * md[3][3] +
-		md[0][2] * md[1][0] * md[2][1] * md[3][3] - md[0][0] * md[1][2] * md[2][1] * md[3][3] - md[0][1] * md[1][0] * md[2][2] * md[3][3] + md[0][0] * md[1][1] * md[2][2] * md[3][3];
-}
 
 CMatrix44f& CMatrix44f::RotateX(float angle)
 {
@@ -222,7 +188,7 @@ CMatrix44f& CMatrix44f::RotateZ(float angle)
 }
 
 
-CMatrix44f& CMatrix44f::Rotate(float angle, const float3& axis)
+CMatrix44f& CMatrix44f::Rotate(float angle, const float3 axis)
 {
 	const float sr = math::sin(angle);
 	const float cr = math::cos(angle);
@@ -252,7 +218,7 @@ CMatrix44f& CMatrix44f::Rotate(float angle, const float3& axis)
 }
 
 
-CMatrix44f& CMatrix44f::RotateEulerXYZ(const float3& angles)
+CMatrix44f& CMatrix44f::RotateEulerXYZ(const float3 angles)
 {
 	// rotate around X first, Y second, Z third (R=R(Z)*R(Y)*R(X))
 	if (angles[ANGLE_P] != 0.0f) { RotateX(angles[ANGLE_P]); }
@@ -261,7 +227,7 @@ CMatrix44f& CMatrix44f::RotateEulerXYZ(const float3& angles)
 	return *this;
 }
 
-CMatrix44f& CMatrix44f::RotateEulerYXZ(const float3& angles)
+CMatrix44f& CMatrix44f::RotateEulerYXZ(const float3 angles)
 {
 	// rotate around Y first, X second, Z third (R=R(Z)*R(X)*R(Y))
 	if (angles[ANGLE_Y] != 0.0f) { RotateY(angles[ANGLE_Y]); }
@@ -270,7 +236,7 @@ CMatrix44f& CMatrix44f::RotateEulerYXZ(const float3& angles)
 	return *this;
 }
 
-CMatrix44f& CMatrix44f::RotateEulerZXY(const float3& angles)
+CMatrix44f& CMatrix44f::RotateEulerZXY(const float3 angles)
 {
 	// rotate around Z first, X second, Y third (R=R(Y)*R(X)*R(Z))
 	if (angles[ANGLE_R] != 0.0f) { RotateZ(angles[ANGLE_R]); }
@@ -279,7 +245,7 @@ CMatrix44f& CMatrix44f::RotateEulerZXY(const float3& angles)
 	return *this;
 }
 
-CMatrix44f& CMatrix44f::RotateEulerZYX(const float3& angles)
+CMatrix44f& CMatrix44f::RotateEulerZYX(const float3 angles)
 {
 	// rotate around Z first, Y second, X third (R=R(X)*R(Y)*R(Z))
 	if (angles[ANGLE_R] != 0.0f) { RotateZ(angles[ANGLE_R]); }
@@ -298,7 +264,7 @@ CMatrix44f& CMatrix44f::RotateEulerZYX(const float3& angles)
 //  [ 0   0  sz   0]
 //  [ 0   0   0   1]
 //
-CMatrix44f& CMatrix44f::Scale(const float3& scales)
+CMatrix44f& CMatrix44f::Scale(const float3 scales)
 {
 	m[ 0] *= scales.x;
 	m[ 1] *= scales.x;
@@ -328,161 +294,54 @@ CMatrix44f& CMatrix44f::Translate(const float x, const float y, const float z)
 
 
 
-__FORCE_ALIGN_STACK__
-static inline void MatrixMatrixMultiplySSE(const CMatrix44f& m1, const CMatrix44f& m2, CMatrix44f* mout)
+static inline void MatrixMatrixMultiply(const CMatrix44f& m1, const CMatrix44f& m2, CMatrix44f* mout)
 {
-	//alignof guarantees 16 byte alignment required by SSE2
-	const __m128 m1c1 = _mm_load_ps(&m1.md[0][0]);
-	const __m128 m1c2 = _mm_load_ps(&m1.md[1][0]);
-	const __m128 m1c3 = _mm_load_ps(&m1.md[2][0]);
-	const __m128 m1c4 = _mm_load_ps(&m1.md[3][0]);
-
-	// an optimization we assume
-	assert(m2.m[3] == 0.0f);
-	assert(m2.m[7] == 0.0f);
-	// assert(m2.m[11] == 0.0f); in case of a gluPerspective it's -1
-
-	const __m128 m2i0 = _mm_load1_ps(&m2.m[0]);
-	const __m128 m2i1 = _mm_load1_ps(&m2.m[1]);
-	const __m128 m2i2 = _mm_load1_ps(&m2.m[2]);
-	//const __m128 m2i3 = _mm_load1_ps(&m2.m[3]);
-	const __m128 m2i4 = _mm_load1_ps(&m2.m[4]);
-	const __m128 m2i5 = _mm_load1_ps(&m2.m[5]);
-	const __m128 m2i6 = _mm_load1_ps(&m2.m[6]);
-	//const __m128 m2i7 = _mm_load1_ps(&m2.m[7]);
-	const __m128 m2i8 = _mm_load1_ps(&m2.m[8]);
-	const __m128 m2i9 = _mm_load1_ps(&m2.m[9]);
-	const __m128 m2i10 = _mm_load1_ps(&m2.m[10]);
-	const __m128 m2i11 = _mm_load1_ps(&m2.m[11]);
-	const __m128 m2i12 = _mm_load1_ps(&m2.m[12]);
-	const __m128 m2i13 = _mm_load1_ps(&m2.m[13]);
-	const __m128 m2i14 = _mm_load1_ps(&m2.m[14]);
-	const __m128 m2i15 = _mm_load1_ps(&m2.m[15]);
-
-	__m128 moutc1, moutc2, moutc3, moutc4;
-	moutc1 =                    _mm_mul_ps(m1c1, m2i0);
-	moutc2 =                    _mm_mul_ps(m1c1, m2i4);
-	moutc3 =                    _mm_mul_ps(m1c1, m2i8);
-	moutc4 =                    _mm_mul_ps(m1c1, m2i12);
-
-	moutc1 = _mm_add_ps(moutc1, _mm_mul_ps(m1c2, m2i1));
-	moutc2 = _mm_add_ps(moutc2, _mm_mul_ps(m1c2, m2i5));
-	moutc3 = _mm_add_ps(moutc3, _mm_mul_ps(m1c2, m2i9));
-	moutc4 = _mm_add_ps(moutc4, _mm_mul_ps(m1c2, m2i13));
-
-	moutc1 = _mm_add_ps(moutc1, _mm_mul_ps(m1c3, m2i2));
-	moutc2 = _mm_add_ps(moutc2, _mm_mul_ps(m1c3, m2i6));
-	moutc3 = _mm_add_ps(moutc3, _mm_mul_ps(m1c3, m2i10));
-	moutc4 = _mm_add_ps(moutc4, _mm_mul_ps(m1c3, m2i14));
-
-	//moutc1 = _mm_add_ps(moutc1, _mm_mul_ps(m1c4, _mm_load1_ps(&m2.m[3])));
-	//moutc2 = _mm_add_ps(moutc2, _mm_mul_ps(m1c4, _mm_load1_ps(&m2.m[7])));
-	moutc3 = _mm_add_ps(moutc3, _mm_mul_ps(m1c4, m2i11));
-	moutc4 = _mm_add_ps(moutc4, _mm_mul_ps(m1c4, m2i15));
-
-	_mm_store_ps(&mout->md[0][0], moutc1);
-	_mm_store_ps(&mout->md[1][0], moutc2);
-	_mm_store_ps(&mout->md[2][0], moutc3);
-	_mm_store_ps(&mout->md[3][0], moutc4);
-}
-
-bool CMatrix44f::equals(const CMatrix44f& rhs) const
-{
-	return
-		col[0].equals(rhs.col[0]) &&
-		col[1].equals(rhs.col[1]) &&
-		col[2].equals(rhs.col[2]) &&
-		col[3].equals(rhs.col[3]);
-}
-
-bool CMatrix44f::operator==(const CMatrix44f& rhs) const
-{
-	if (this == &rhs)
-		return true;
-
-	static constexpr int BINEQ = 0xF;
-
-	for (size_t i = 0; i < 4; ++i) {
-		const __m128 l = _mm_load_ps(&    md[i][0]);
-		const __m128 r = _mm_load_ps(&rhs.md[i][0]);
-		const __m128 c = _mm_cmpeq_ps(l, r);
-		const int cm = _mm_movemask_ps(c);
-		if (cm != BINEQ)
-			return false;
+	for (int i = 0; i < 4; ++i) {
+		for (int j = 0; j < 4; ++j) {
+			mout->md[i][j] =
+				m1.md[0][j] * m2.md[i][0] +
+				m1.md[1][j] * m2.md[i][1] +
+				m1.md[2][j] * m2.md[i][2] +
+				m1.md[3][j] * m2.md[i][3];
+		}
 	}
-	return true;
 }
+
 
 CMatrix44f CMatrix44f::operator* (const CMatrix44f& m2) const
 {
 	CMatrix44f mout;
-	MatrixMatrixMultiplySSE(*this, m2, &mout);
+	MatrixMatrixMultiply(*this, m2, &mout);
 	return mout;
 }
 
 
 CMatrix44f& CMatrix44f::operator>>= (const CMatrix44f& m2)
 {
-	MatrixMatrixMultiplySSE(m2, *this, this);
+	MatrixMatrixMultiply(m2, *this, this);
 	return (*this);
 }
 
 
 CMatrix44f& CMatrix44f::operator<<= (const CMatrix44f& m2)
 {
-	MatrixMatrixMultiplySSE(*this, m2, this);
+	MatrixMatrixMultiply(*this, m2, this);
 	return (*this);
-}
-
-CMatrix44f CMatrix44f::operator+(const CMatrix44f& mat) const
-{
-	CMatrix44f r;
-#if 0
-	for (size_t i = 0; i < 16; i += 4) {
-		r[i + 0] = m[i + 0] + mat[i + 0];
-		r[i + 1] = m[i + 1] + mat[i + 1];
-		r[i + 2] = m[i + 2] + mat[i + 2];
-		r[i + 3] = m[i + 3] + mat[i + 3];
-	}
-#else //brings spring's Matrix44 on par with Eigen in terms of performance
-	#define ADD_COLUMN(col) \
-		 _mm_store_ps(&r.md[col][0], _mm_add_ps(_mm_load_ps(&md[col][0]), _mm_load_ps(&mat.md[col][0])))
-
-	ADD_COLUMN(0);
-	ADD_COLUMN(1);
-	ADD_COLUMN(2);
-	ADD_COLUMN(3);
-
-	#undef ADD_COLUMN
-#endif
-
-	return r;
 }
 
 __FORCE_ALIGN_STACK__
 float4 CMatrix44f::operator* (const float4 v) const
 {
-	#if 0
 	float4 out;
 	out.x = m[0] * v.x + m[4] * v.y + m[8 ] * v.z + m[12] * v.w;
 	out.y = m[1] * v.x + m[5] * v.y + m[9 ] * v.z + m[13] * v.w;
 	out.z = m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14] * v.w;
 	out.w = m[3] * v.x + m[7] * v.y + m[11] * v.z + m[15] * v.w;
 	return out;
-	#else
-	__m128 out;
-	out =                 _mm_mul_ps(_mm_load_ps(&md[0][0]), _mm_set1_ps(v.x)) ; // or _mm_load1_ps(&v.x)
-	out = _mm_add_ps(out, _mm_mul_ps(_mm_load_ps(&md[1][0]), _mm_set1_ps(v.y))); // or _mm_load1_ps(&v.y)
-	out = _mm_add_ps(out, _mm_mul_ps(_mm_load_ps(&md[2][0]), _mm_set1_ps(v.z))); // or _mm_load1_ps(&v.z)
-	out = _mm_add_ps(out, _mm_mul_ps(_mm_load_ps(&md[3][0]), _mm_set1_ps(v.w))); // or _mm_load1_ps(&v.w)
-
-	const float* fout = reinterpret_cast<float*>(&out);
-	return {fout[0], fout[1], fout[2], fout[3]};
-	#endif
 }
 
 
-void CMatrix44f::SetUpVector(const float3& up)
+void CMatrix44f::SetUpVector(const float3 up)
 {
 	float3 zdir(m[8], m[9], m[10]);
 	float3 xdir(zdir.cross(up));
@@ -544,45 +403,6 @@ CMatrix44f CMatrix44f::InvertAffine() const
 	CMatrix44f mInv(*this);
 	mInv.InvertAffineInPlace();
 	return mInv;
-}
-
-/// <summary>
-/// Decompose a transformation matrix into translate, rotation (Quaternion), scale components
-/// </summary>
-std::tuple<float3, CQuaternion, float3> CMatrix44f::DecomposeIntoTRS() const
-{
-	CMatrix44f tmpMat = *this;
-	float4& t0 = tmpMat.col[0];
-	float4& t1 = tmpMat.col[1];
-	float4& t2 = tmpMat.col[2];
-
-	const float4& c0 = col[0];
-	const float4& c1 = col[1];
-	const float4& c2 = col[2];
-	const float4& c3 = col[3];
-
-	const float d = tmpMat.Det3();
-	const float s = Sign(d);
-
-	float3 scaling{ s * c0.Length(), c1.Length(), c2.Length() };
-
-	assert(
-		!epscmp(scaling[0], 0.0f, float3::cmp_eps()) &&
-		!epscmp(scaling[1], 0.0f, float3::cmp_eps()) &&
-		!epscmp(scaling[2], 0.0f, float3::cmp_eps())
-	);
-
-	t0 /= scaling[0];
-	t1 /= scaling[1];
-	t2 /= scaling[2];
-
-	assert(tmpMat.IsRotOrRotTranMatrix());
-
-	return std::make_tuple(
-		float3(c3.x, c3.y, c3.z),       //translate
-		CQuaternion::MakeFrom(tmpMat),  //rotate (quat)
-		scaling                         //scale
-	);
 }
 
 
@@ -833,42 +653,5 @@ CMatrix44f CMatrix44f::OrthoProj(float l, float r, float b, float t, float zn, f
 	proj[15] = 1.0f;
 
 	return proj;
-}
-
-CMatrix44f CMatrix44f::ClipOrthoProj01()
-{
-#ifndef UNIT_TEST
-	return ClipOrthoProj01(globalRendering->supportClipSpaceControl * 1.0f);
-#else
-	return ClipOrthoProj01(0.0f);
-#endif
-}
-
-CMatrix44f CMatrix44f::LookAtView(const float3& eye, const float3& center, const float3& up)
-{
-	CMatrix44f viewMatrix = {};
-
-	const float3 f = (center - eye).ANormalize();
-	const float3 s = f.cross(up);
-	const float3 u = s.cross(f);
-
-	viewMatrix[ 0] =  s.x;
-	viewMatrix[ 1] =  u.x;
-	viewMatrix[ 2] = -f.x;
-
-	viewMatrix[ 4] =  s.y;
-	viewMatrix[ 5] =  u.y;
-	viewMatrix[ 6] = -f.y;
-
-	viewMatrix[ 8] =  s.z;
-	viewMatrix[ 9] =  u.z;
-	viewMatrix[10] = -f.z;
-
-	// save a glTranslated(-eye.x, -eye.y, -eye.z) call
-	viewMatrix[12] = s.dot(-eye);
-	viewMatrix[13] = u.dot(-eye);
-	viewMatrix[14] = f.dot( eye);
-
-	return viewMatrix;
 }
 

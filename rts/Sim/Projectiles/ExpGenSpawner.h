@@ -14,11 +14,11 @@ class CExpGenSpawner : public CProjectile
 public:
 	CExpGenSpawner();
 	~CExpGenSpawner() {}
-	void Serialize(creg::ISerializer* s);
+	void Serialize(void* s);
 
-	void Update() override;
+	virtual void Update() override;
 
-	int GetProjectilesCount() const override { return 0; }
+	virtual int GetProjectilesCount() const override { return 0; }
 
 	static bool GetMemberInfo(SExpGenSpawnableMemberInfo& memberInfo);
 

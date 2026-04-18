@@ -1,87 +1,114 @@
-/* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
-
-#ifndef _FILE_HANDLER_H
-#define _FILE_HANDLER_H
-
-#include <vector>
-#include <string>
-#include <cinttypes>
-#include <nowide/fstream.hpp>
-
-#include "VFSModes.h"
-
 /**
- * This is for direct VFS file content access.
- * If you need data-dir related file and dir handling methods,
- * have a look at the FileSystem class.
- *
- * This class should be threadsafe (multiple threads can use multiple
- * CFileHandler pointing to the same file simultaneously) as long as there are
- * no new Archives added to the VFS (which should not happen after PreGame).
+ * Stub — CFileHandler reads files from plain directories instead of VFS.
+ * Provides the same interface for code that constructs CFileHandler objects.
+ * Will be fully implemented when content loading is built (PLAN-content.md).
  */
-class CFileHandler
-{
+#pragma once
+
+#include <string>
+#include <vector>
+#include <fstream>
+#include <cstring>
+
+class CFileHandler {
 public:
-	CFileHandler() { Close(); }
-	CFileHandler(const char* fileName, const char* modes = SPRING_VFS_RAW_FIRST);
-	CFileHandler(const std::string& fileName, const std::string& modes = SPRING_VFS_RAW_FIRST);
-	virtual ~CFileHandler() { Close(); }
+	CFileHandler(const std::string& filename, const std::string& modes = "")
+		: name(filename)
+	{
+		stream.open(filename, std::ios::binary);
+		valid = stream.good();
+	}
 
-	void Open(const std::string& fileName, const std::string& modes = SPRING_VFS_RAW_FIRST);
-	void Close();
+	void Open(const std::string& filename, const std::string& /*modes*/ = "") {
+		name = filename;
+		stream.close();
+		stream.open(filename, std::ios::binary);
+		valid = stream.good();
+	}
 
-	int Read(void* buf, int length);
-	int ReadString(void* buf, int length); //< stops after the first 0 char
-	void Seek(int pos, std::ios_base::seekdir where = std::ios_base::beg);
+	void Close() {
+		stream.close();
+		valid = false;
+		name.clear();
+	}
 
-	static bool FileExists(const std::string& filePath, const std::string& modes);
-	// true if any of TryReadFrom{RawFS,PWD,VFS} succeed
-	bool FileExists() const { return (fileSize >= 0); }
-	// true if (and only if) TryReadFromVFS succeeds
-	bool IsBuffered() const { return (!fileBuffer.empty()); }
+	bool FileExists() const { return valid; }
+	int FileSize() const {
+		if (!valid) return -1;
+		auto& s = const_cast<std::ifstream&>(stream);
+		auto pos = s.tellg();
+		s.seekg(0, std::ios::end);
+		int size = static_cast<int>(s.tellg());
+		s.seekg(pos);
+		return size;
+	}
 
-	bool Eof() const;
-	int GetPos();
-	int FileSize() const { return fileSize; }
-	int LoadCode() const { return loadCode; }
+	int Read(void* buf, int length) {
+		if (!valid) return 0;
+		stream.read(static_cast<char*>(buf), length);
+		return static_cast<int>(stream.gcount());
+	}
 
-	bool LoadStringData(std::string& data);
-	std::string GetFileExt() const;
-	static std::string GetFileAbsolutePath(const std::string& filePath, const std::string& modes);
-	static std::string GetArchiveContainingFile(const std::string& filePath, const std::string& modes);
+	int ReadString(void* buf, int length) {
+		return Read(buf, length);
+	}
 
-	std::vector<std::uint8_t>& GetBuffer() { return fileBuffer; }
+	void Seek(int pos, std::ios_base::seekdir dir = std::ios::beg) {
+		if (valid) stream.seekg(pos, dir);
+	}
 
-	static bool InReadDir(const std::string& path);
-	static bool InWriteDir(const std::string& path);
+	int GetPos() {
+		if (!valid) return -1;
+		return static_cast<int>(stream.tellg());
+	}
 
-	static std::vector<std::string> FindFiles(const std::string& path, const std::string& pattern);
-	static std::vector<std::string> DirList(const std::string& path, const std::string& pattern, const std::string& modes, bool recursive);
-	static std::vector<std::string> SubDirs(const std::string& path, const std::string& pattern, const std::string& modes, bool recursive);
+	bool Eof() const {
+		return !valid || const_cast<std::ifstream&>(stream).peek() == EOF;
+	}
 
-	static std::string AllowModes(const std::string& modes, const std::string& allowed);
-	static std::string ForbidModes(const std::string& modes, const std::string& forbidden);
+	const std::string& GetName() const { return name; }
 
+	static bool FileExists(const std::string& filename, const std::string& = "") {
+		std::ifstream f(filename);
+		return f.good();
+	}
+	static bool FileExists(const std::string& filename, const char* /*modes*/) {
+		std::ifstream f(filename);
+		return f.good();
+	}
 
-protected:
+	static std::vector<std::string> DirList(const std::string&, const std::string& = "", const std::string& = "") {
+		return {};
+	}
+	static std::vector<std::string> SubDirs(const std::string&, const std::string& = "", const std::string& = "") {
+		return {};
+	}
 
-	virtual bool TryReadFromPWD(const std::string& fileName);
-	virtual bool TryReadFromRawFS(const std::string& fileName);
-	virtual bool TryReadFromVFS(const std::string& fileName, int section);
+	bool IsBuffered() const { return false; }
+	std::vector<unsigned char> GetBuffer() { return {}; }
 
-	static bool InsertRawFiles(std::vector<std::string>& fileSet, const std::string& path, const std::string& pattern, bool recursive);
-	static bool InsertVFSFiles(std::vector<std::string>& fileSet, const std::string& path, const std::string& pattern, bool recursive, int section);
+	bool LoadStringData(std::string& data) {
+		if (!valid) return false;
+		const int sz = FileSize();
+		if (sz < 0) return false;
+		data.resize(sz);
+		Seek(0);
+		stream.read(&data[0], sz);
+		return stream.gcount() == sz;
+	}
 
-	static bool InsertRawDirs(std::vector<std::string>& dirSet, const std::string& path, const std::string& pattern, bool recursive);
-	static bool InsertVFSDirs(std::vector<std::string>& dirSet, const std::string& path, const std::string& pattern, bool recursive, int section);
+	// No-op mode filters — no real VFS, return first arg unchanged.
+	static std::string AllowModes(const std::string& modes, const std::string& /*allowed*/) { return modes; }
+	static std::string AllowModes(const char* modes, const char* /*allowed*/) { return modes ? modes : ""; }
+	static std::string ForbidModes(const char* modes, const char* /*forbidden*/) { return modes ? modes : ""; }
+	static std::string ForbidModes(const std::string& modes, const std::string& /*forbidden*/) { return modes; }
 
-	std::string fileName;
-	nowide::ifstream ifs;
-	std::vector<std::uint8_t> fileBuffer;
+	static std::string GetFileAbsolutePath(const std::string& f, const std::string& = "") { return f; }
+	static std::string GetArchiveContainingFile(const std::string&, const std::string& = "") { return ""; }
+	static std::string GetArchiveContainingFile(const std::string&, const char* /*modes*/) { return ""; }
 
-	int filePos = 0;
-	int fileSize = -1;
-	int loadCode = -3; // {-1,0,1} if loaded from VFS
+private:
+	std::string name;
+	std::ifstream stream;
+	bool valid = false;
 };
-
-#endif // _FILE_HANDLER_H

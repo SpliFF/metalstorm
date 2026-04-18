@@ -16,14 +16,14 @@
 #include <stdbool.h>
 #endif /* !defined __cplusplus && !defined bool */
 
-/* define if we have a X11 environment (:= linux/freebsd) */
+/* define if we have a X11 enviroment (:= linux/freebsd) */
 #if !defined(__APPLE__) && !defined(_WIN32)
 	//FIXME move this check to cmake, which has FindX11.cmake?
 	#define _X11
 #endif
 
 
-#if (defined(__alpha__) || defined(__arm__) || defined(__aarch64__) || defined(__mips__) || defined(__powerpc__) || defined(__sparc__) || defined(__m68k__) || defined(__ia64__))
+#if (defined(__alpha__) || defined(__arm__) || defined(__aarch64__) || defined(__mips__) || defined(__powerpc__) || defined(__sparc__) || defined(__m68k__) || defined(__ia64__) || defined(__e2k__))
 #define __is_x86_arch__ 0
 #elif (defined(__i386__) || defined(__x86_64__) || defined(__amd64__) || defined(_M_AMD64) || defined(_M_IX86) || defined(_M_X64))
 #define __is_x86_arch__ 1
@@ -33,7 +33,7 @@
 
 
 /* define a common indicator for 32bit or 64bit-ness */
-#if defined _WIN64 || defined __x86_64__ || defined __LP64__ || defined __ppc64__ || defined __ILP64__ || defined __SILP64__ || defined __LLP64__ || defined(__sparcv9)
+#if defined _WIN64 || defined __LP64__ || defined __ppc64__ || defined __ILP64__ || defined __SILP64__ || defined __LLP64__ || defined(__sparcv9) || defined(__e2k__)
 #define __arch64__
 #define __archBits__ 64
 #else
@@ -45,22 +45,21 @@
 /*
   define a cross-platform/-compiler compatible "%z" format replacement for
   printf() style functions.
-  "%z" being the proper way for size_t typed values,
+  "%z" being the propper way for size_t typed values,
   but support for it has not yet spread wide enough.
 */
 #if defined __arch64__
-    #if defined __MINGW64__ && (__GNUC__ < 11)
+	#if defined _WIN64
 		#define __SIZE_T_PRINTF_FORMAT__ "%I64u"
-    #elif defined __linux__
-		#define __SIZE_T_PRINTF_FORMAT__ "%lu"
 	#else
-		#define __SIZE_T_PRINTF_FORMAT__ "%llu"
-    #endif
+		#define __SIZE_T_PRINTF_FORMAT__ "%lu"
+	#endif
 #else
 	#define __SIZE_T_PRINTF_FORMAT__ "%u"
 #endif
 /* a shorter form */
 #define _STPF_ __SIZE_T_PRINTF_FORMAT__
+
 
 #if defined(_MSC_VER)
 	#define _threadlocal __declspec(thread)
@@ -148,7 +147,7 @@
 	#endif /* _WIN32 */
 #endif /* cPS */
 
-/* define a platform independent path delimiter C-string and char */
+/* define a platform independent path delimitter C-string and char */
 #ifndef sPD
 	#define sPD_WIN32 ";"
 	#define sPD_POSIX ":"
@@ -178,6 +177,19 @@
 #define __FORCE_ALIGN_STACK__ __attribute__ ((force_align_arg_pointer))
 #else
 #define __FORCE_ALIGN_STACK__
+#endif
+
+/* GCC function attributes — used throughout the codebase */
+#ifdef __GNUC__
+#define _const      __attribute__((const))
+#define _pure       __attribute__((pure))
+#define _noinline   __attribute__((noinline))
+#define _warn_unused_result __attribute__((warn_unused_result))
+#else
+#define _const
+#define _pure
+#define _noinline
+#define _warn_unused_result
 #endif
 
 #endif /* MAIN_DEFINES_H */

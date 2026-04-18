@@ -2,15 +2,9 @@
 
 
 #include "TorpedoProjectile.h"
-#include "Game/Camera.h"
 #include "Game/GameHelper.h"
 #include "Game/GlobalUnsynced.h"
 #include "Map/Ground.h"
-#include "Rendering/Env/Particles/ProjectileDrawer.h"
-#include "Rendering/GL/RenderBuffers.h"
-#include "Rendering/Env/Particles/Classes/BubbleProjectile.h"
-#include "Rendering/Env/Particles/Classes/SmokeTrailProjectile.h"
-#include "Rendering/Textures/TextureAtlas.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Projectiles/ExplosionGenerator.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
@@ -18,8 +12,6 @@
 #include "Sim/Units/Unit.h"
 #include "Sim/Weapons/WeaponDef.h"
 #include "System/SpringMath.h"
-
-#include "System/Misc/TracyDefs.h"
 
 CR_BIND_DERIVED(CTorpedoProjectile, CWeaponProjectile, )
 
@@ -53,15 +45,12 @@ CTorpedoProjectile::CTorpedoProjectile(const ProjectileParams& params): CWeaponP
 
 	drawRadius = maxSpeed * 8.0f;
 
-	texx = projectileDrawer->torpedotex->xstart - (projectileDrawer->torpedotex->xend - projectileDrawer->torpedotex->xstart) * 0.5f;
-	texy = projectileDrawer->torpedotex->ystart - (projectileDrawer->torpedotex->yend - projectileDrawer->torpedotex->ystart) * 0.5f;
 }
 
 
 
 float3 CTorpedoProjectile::UpdateTargetingPos()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	float3 targetVel;
 
 	if (target != nullptr) {
@@ -93,7 +82,6 @@ float3 CTorpedoProjectile::UpdateTargetingPos()
 
 float3 CTorpedoProjectile::UpdateTargetingDir(const float3& targetObjVel)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const float3 targetLeadVec = targetObjVel * (pos.distance(targetPos) / maxSpeed) * 0.7f;
 	const float3 targetLeadDir = (targetPos + targetLeadVec - pos).Normalize();
 
@@ -112,7 +100,6 @@ float3 CTorpedoProjectile::UpdateTargetingDir(const float3& targetObjVel)
 
 void CTorpedoProjectile::Update()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// tracking only works when we are underwater
 	if (!weaponDef->submissile && pos.y > 0.0f) {
 		if (!luaMoveCtrl) {
@@ -131,16 +118,7 @@ void CTorpedoProjectile::Update()
 				CWorldObject::SetVelocity(targetHitVel);
 			}
 
-			explGenHandler.GenExplosion(
-				cegID,
-				pos,
-				speed,
-				ttl,
-				damages->damageAreaOfEffect,
-				0.0f,
-				owner(),
-				ExplosionHitObject()
-			);
+			explGenHandler.GenExplosion(cegID, pos, speed, ttl, damages->damageAreaOfEffect, 0.0f, nullptr, nullptr);
 		} else {
 			if (!luaMoveCtrl) {
 				// must update dir and speed.w here
@@ -152,112 +130,10 @@ void CTorpedoProjectile::Update()
 	if (!luaMoveCtrl)
 		SetPosition(pos + speed);
 
-	if (pos.y < -2.0f) {
-		if ((--nextBubble) == 0) {
-			nextBubble = 1 + (int) (gsRNG.NextFloat() * 1.5f);
-
-			projMemPool.alloc<CBubbleProjectile>(
-				owner(),
-				pos + guRNG.NextVector(),
-				guRNG.NextVector() * 0.1f + UpVector * 0.2f,
-				guRNG.NextFloat() * GAME_SPEED + 40.0f,
-				guRNG.NextFloat() * 2.0f + 1.0f,
-				0.01f,
-				guRNG.NextFloat() * 0.3f + 0.3f
-			);
-		}
-	}
-
 	UpdateGroundBounce();
 	UpdateInterception();
 }
 
 
 
-void CTorpedoProjectile::Draw()
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-	// do not draw if a 3D model has been defined for us
-	if (model != nullptr)
-		return;
-
-	//UpdateAnimParams();
-
-	float3 r = dir.cross(UpVector);
-
-	if (r.SqLength() < 0.001f)
-		r = RgtVector;
-
-	r.Normalize();
-	const float3 u = dir.cross(r);
-	const float h = 12;
-	const float w = 2;
-	const SColor col(60, 60, 100, 255);
-
-	const auto& pageNum = projectileDrawer->torpedotex->pageNum;
-
-	AddEffectsQuad<0>(
-		pageNum,
-		{ drawPos + (r * w),             texx, texy, col },
-		{ drawPos + (u * w),             texx, texy, col },
-		{ drawPos + (u * w) + (dir * h), texx, texy, col },
-		{ drawPos + (r * w) + (dir * h), texx, texy, col }
-	);
-
-	AddEffectsQuad<0>(
-		pageNum,
-		{ drawPos + (u * w),             texx, texy, col },
-		{ drawPos - (r * w),             texx, texy, col },
-		{ drawPos - (r * w) + (dir * h), texx, texy, col },
-		{ drawPos + (u * w) + (dir * h), texx, texy, col }
-	);
-
-	AddEffectsQuad<0>(
-		pageNum,
-		{ drawPos - (r * w),             texx, texy, col },
-		{ drawPos - (u * w),             texx, texy, col },
-		{ drawPos - (u * w) + (dir * h), texx, texy, col },
-		{ drawPos - (r * w) + (dir * h), texx, texy, col }
-	);
-
-	AddEffectsQuad<0>(
-		pageNum,
-		{ drawPos - (u * w),             texx, texy, col },
-		{ drawPos + (r * w),             texx, texy, col },
-		{ drawPos + (r * w) + (dir * h), texx, texy, col },
-		{ drawPos - (u * w) + (dir * h), texx, texy, col }
-	);
-
-	AddEffectsQuad<0>(
-		pageNum,
-		{ drawPos + (r * w) + (dir * h), texx, texy, col },
-		{ drawPos + (u * w) + (dir * h), texx, texy, col },
-		{ drawPos + (dir * h * 1.2f),    texx, texy, col },
-		{ drawPos + (dir * h * 1.2f),    texx, texy, col }
-	);
-
-	AddEffectsQuad<0>(
-		pageNum,
-		{ drawPos + (u * w) + (dir * h), texx, texy, col },
-		{ drawPos - (r * w) + (dir * h), texx, texy, col },
-		{ drawPos + (dir * h * 1.2f),    texx, texy, col },
-		{ drawPos + (dir * h * 1.2f),    texx, texy, col }
-	);
-
-	AddEffectsQuad<0>(
-		pageNum,
-		{ drawPos - (r * w) + (dir * h), texx, texy, col },
-		{ drawPos - (u * w) + (dir * h), texx, texy, col },
-		{ drawPos + (dir * h * 1.2f),    texx, texy, col },
-		{ drawPos + (dir * h * 1.2f),    texx, texy, col }
-	);
-
-	AddEffectsQuad<0>(
-		pageNum,
-		{ drawPos - (u * w) + (dir * h), texx, texy, col },
-		{ drawPos + (r * w) + (dir * h), texx, texy, col },
-		{ drawPos + (dir * h * 1.2f),    texx, texy, col },
-		{ drawPos + (dir * h * 1.2f),    texx, texy, col }
-	);
-}
 

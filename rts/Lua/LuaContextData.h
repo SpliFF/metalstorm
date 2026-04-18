@@ -6,16 +6,6 @@
 #include "Lua/LuaAllocState.h"
 #include "Lua/LuaGarbageCollectCtrl.h"
 #include "LuaMemPool.h"
-#if (!defined(UNITSYNC) && !defined(DEDICATED))
-#include "LuaShaders.h"
-#include "LuaTextures.h"
-#include "LuaAtlasTextures.h"
-#include "LuaFBOs.h"
-#include "LuaRBOs.h"
-#include "LuaVBO.h"
-#include "LuaVAO.h"
-#include "LuaDisplayLists.h"
-#endif
 
 #include "System/EventClient.h"
 #include "System/Log/ILog.h"
@@ -34,6 +24,7 @@ public:
 	, parser(nullptr)
 
 	, synced(false)
+	, allowChanges(false)
 	, drawingEnabled(false)
 
 	, running(0)
@@ -66,13 +57,6 @@ public:
 
 
 	void Clear() {
-		#if (!defined(UNITSYNC) && !defined(DEDICATED))
-		shaders.Clear();
-		textures.Clear();
-		fbos.Clear();
-		rbos.Clear();
-		displayLists.Clear();
-		#endif
 	}
 
 public:
@@ -83,6 +67,7 @@ public:
 	LuaParser* parser;
 
 	bool synced;
+	bool allowChanges;
 	bool drawingEnabled;
 
 	// greater than 0 if currently running a callin; 0 if not
@@ -100,23 +85,6 @@ public:
 	SLuaAllocState allocState;
 	SLuaGarbageCollectCtrl gcCtrl;
 
-#if (!defined(UNITSYNC) && !defined(DEDICATED))
-	// NOTE:
-	//   engine and unitsync will not agree on sizeof(luaContextData)
-	//   compiler is not free to rearrange struct members, so declare
-	//   any members used by both *ABOVE* this block (to make casting
-	//   safe)
-	LuaShaders shaders;
-	LuaTextures textures;
-	LuaAtlasTextures atlasTextures;
-	LuaFBOs fbos;
-	LuaRBOs rbos;
-	LuaVBOs vbos;
-	LuaVAOs vaos;
-	CLuaDisplayLists displayLists;
-
-	GLMatrixStateTracker glMatrixTracker;
-#endif
 };
 
 

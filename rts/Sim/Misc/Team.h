@@ -11,7 +11,6 @@
 #include "TeamStatistics.h"
 #include "Sim/Misc/Resource.h"
 #include "System/Color.h"
-#include "ExternalAI/SkirmishAIKey.h"
 #include "Lua/LuaRulesParams.h"
 
 class CUnit;

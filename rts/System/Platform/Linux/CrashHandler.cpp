@@ -2,33 +2,28 @@
 
 #include "System/Platform/CrashHandler.h"
 
-#include <cinttypes> // uintptr_t
 #include <cstring> // strnlen
 #include <cstdlib>
-#include <cstdio> // utf8 safe on Linux
+#include <cstdio>
 #include <string>
+#include <filesystem>
 
-#include <array>
-#include <deque>
 #include <vector>
 #include <new>
 
 #include <csignal>
 #include <execinfo.h>
-#include <SDL_events.h>
 #include <sys/resource.h> // getrlimits
 #define UNW_LOCAL_ONLY
 #include <libunwind.h>
 #include <dlfcn.h>
 
 #include "Game/GameVersion.h"
-#include "System/FileSystem/FileSystem.h"
 #include "System/SpringExitCode.h"
 #include "System/Log/ILog.h"
 #include "System/Log/LogSinkHandler.h"
 #include "System/LogOutput.h"
 #include "System/StringUtil.h"
-#include "System/Misc/SpringTime.h"
 #include "System/Platform/Misc.h"
 #include "System/Platform/errorhandler.h"
 #include "System/Platform/Threading.h"
@@ -45,7 +40,7 @@
 #define ADDR2LINE "atos"
 #endif
 
-#if defined(__FreeBSD__) || defined(__OpenBSD__)
+#if (defined(__FreeBSD__))
 // show function names, demangle
 #define ADDR2LINE_ARGS " -f -C"
 #else
@@ -136,13 +131,13 @@ static std::string CreateAbsolutePath(const std::string& relativePath)
 
 	if (absolutePath.empty() || absolutePath[0] != '/') {
 		// remove initial "./"
-		if (absolutePath.starts_with("./"))
+		if (absolutePath.find("./") == 0)
 			absolutePath = absolutePath.substr(2);
 
-		absolutePath = FileSystem::EnsurePathSepAtEnd(GetBinaryLocation()) + absolutePath;
+		absolutePath = (std::filesystem::path(GetBinaryLocation()) / absolutePath).string();
 	}
 
-	if (!FileSystem::FileExists(absolutePath))
+	if (!std::filesystem::exists(absolutePath))
 		return relativePath;
 
 	return absolutePath;
@@ -181,14 +176,18 @@ static std::string LocateSymbolFile(const std::string& binaryFile)
 
 	static const std::string debugPath = "/usr/lib/debug";
 
-	const std::string binPath = FileSystem::GetDirectory(binaryFile);
-	const std::string binFile = FileSystem::GetFilename(binaryFile);
-	// const std::string binExt  = FileSystem::GetExtension(binaryFile);
+	const std::filesystem::path binPath(binaryFile);
+	const std::string binDir  = binPath.parent_path().string() + "/";
+	const std::string binFile = binPath.filename().string();
 
-	if (FileSystem::IsReadableFile(symbolFile = binPath + binFile + ".dbg"))
+	auto isReadable = [](const std::string& p) {
+		return std::filesystem::exists(p) && std::filesystem::is_regular_file(p);
+	};
+
+	if (isReadable(symbolFile = binDir + binFile + ".dbg"))
 		return symbolFile;
 
-	if (FileSystem::IsReadableFile(symbolFile = debugPath + binPath + binFile))
+	if (isReadable(symbolFile = debugPath + binDir + binFile))
 		return symbolFile;
 
 	return binaryFile;
@@ -265,7 +264,7 @@ static void ExtractSymbols(char** lines, StackTrace& stacktrace)
 		l++;
 	}
 
-	free(lines);  // backtrace_symbols allocates via system malloc; must match with system free
+	free(lines);
 }
 
 static int CommonStringLength(const std::string& str1, const std::string& str2)
@@ -709,7 +708,7 @@ namespace CrashHandler
 
 		unw_cursor_t cursor;
 
-#if (defined(__arm__) || defined(__aarch64__) || defined(__APPLE__))
+#if (defined(__arm__) || defined(__APPLE__))
 		// ucontext_t and unw_context_t are not aliases here
 		unw_context_t thisctx;
 		unw_getcontext(&thisctx);
@@ -742,7 +741,7 @@ namespace CrashHandler
 		}
 		*/
 
-#if (defined(__arm__) || defined(__aarch64__) || defined(__APPLE__))
+#if (defined(__arm__) || defined(__APPLE__))
 		const int err = unw_init_local(&cursor, &thisctx);
 #else
 		const int err = unw_init_local(&cursor, uc);
@@ -942,12 +941,7 @@ namespace CrashHandler
 				// ctrl+c = kill
 				LOG("[%s] caught SIGINT, aborting", __func__);
 
-				// first try a clean exit
-				SDL_Event event;
-				event.type = SDL_QUIT;
-				SDL_PushEvent(&event);
-
-				// force an exit if no such luck
+				// force an exit
 				ForcedExit(5);
 				return;
 			} break;

@@ -24,6 +24,8 @@ class CPieceProjectile: public CProjectile
 {
 	CR_DECLARE_DERIVED(CPieceProjectile)
 
+private:
+	CPieceProjectile() {}
 public:
 	CPieceProjectile(
 		CUnit* owner,
@@ -35,42 +37,34 @@ public:
 	);
 
 	void Update() override;
-	void Draw() override;
-	void DrawOnMinimap() const override;
 	void Collision() override;
 	void Collision(CUnit* unit) override;
 	void Collision(CFeature* f) override;
 
-	int GetProjectilesCount() const override;
+	int GetProjectilesCount() const override { return NUM_TRAIL_PARTS; }
 
 	float GetDrawAngle() const;
 
 private:
-	CPieceProjectile() = default;
-	float3 RandomVertexPos() const;
 	void Collision(CUnit* unit, CFeature* feature);
 
 public:
-	struct FireTrailPoint {
-		float3 pos;
-		float size;
-	};
-
 	int age;
 
 	unsigned int explFlags;
 
-	const S3DModelPiece* omp;
+	constexpr static unsigned int TRAIL_SMOKE_TIME = 40;
+	constexpr static unsigned int NUM_TRAIL_PARTS = 8;
 
-	static constexpr unsigned NUM_TRAIL_PARTS = 8;
-	std::array<FireTrailPoint, NUM_TRAIL_PARTS> fireTrailPoints;
+	float4 fireTrailPoints[NUM_TRAIL_PARTS];
 
-	float3 spinVec;
-	float spinSpeed;
-	float spinAngle;
+	float3 spinVector;
+	float2 spinParams; // .x := speed, .y := angle
 
 	float3 oldSmokePos;
 	float3 oldSmokeDir;
+
+	const S3DModelPiece* modelPiece;
 	CSmokeTrailProjectile* smokeTrail;
 };
 

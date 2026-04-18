@@ -3,29 +3,20 @@
 //#include "System/Platform/Win/win32.h"
 
 #include <cstring>
-#include <cctype>
 
 #include "LuaUtils.h"
 #include "LuaConfig.h"
 
 #include "Game/GameVersion.h"
-#include "Rendering/Models/3DModel.hpp"
-#include "Rendering/Models/IModelParser.h"
-#include "Sim/Projectiles/Projectile.h"
-#include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Objects/SolidObjectDef.h"
-#include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/CommandAI/CommandDescription.h"
-#include "Sim/Misc/LosHandler.h"
 #include "System/FileSystem/FileSystem.h"
 #include "System/Log/ILog.h"
 #include "System/UnorderedMap.hpp"
 #include "System/UnorderedSet.hpp"
 #include "System/StringUtil.h"
-#include <json/writer.h>
-#include <json/json.h>
 
 #if !defined UNITSYNC && !defined DEDICATED && !defined BUILDING_AI
 	#include "System/TimeProfiler.h"
@@ -33,11 +24,10 @@
 	#define SCOPED_TIMER(x)
 #endif
 
-#include <tracy/TracyLua.hpp>
 
 static const int maxDepth = 16;
+int LuaUtils::exportedDataSize = 0;
 
-Json::Value LuaUtils::LuaStackDumper::root  = {};
 
 /******************************************************************************/
 /******************************************************************************/
@@ -180,12 +170,6 @@ int LuaUtils::CopyData(lua_State* dst, lua_State* src, int count)
 /******************************************************************************/
 /******************************************************************************/
 
-// The functions below are not used anymore for anything in the engine.
-// There are left behind here disabled for archival purposes.
-#if 0
-
-int LuaUtils::exportedDataSize = 0;
-
 static bool BackupData(LuaUtils::DataDump& d, lua_State* src, int index, int depth);
 static bool RestoreData(const LuaUtils::DataDump& d, lua_State* dst, int depth);
 static bool BackupTable(LuaUtils::DataDump& d, lua_State* src, int index, int depth);
@@ -316,7 +300,6 @@ int LuaUtils::Restore(const std::vector<LuaUtils::DataDump>& backup, lua_State* 
 	return count;
 }
 
-#endif
 
 /******************************************************************************/
 /******************************************************************************/
@@ -398,7 +381,7 @@ static void LowerKeysReal(lua_State* L, spring::unsynced_set<const void*>& check
 		lua_pushvalue(L, -2); // the key
 		lua_pushnil(L);
 		lua_rawset(L, sourceTableIdx);
-		// does the lower case key already exist in the table?
+		// does the lower case key alread exist in the table?
 		lua_pushsstring(L, lowerKey);
 		lua_rawget(L, sourceTableIdx);
 
@@ -525,24 +508,53 @@ void* LuaUtils::GetUserData(lua_State* L, int index, const string& type)
 /******************************************************************************/
 /******************************************************************************/
 
-/***
- * @function Script.IsEngineMinVersion
- * @param minMajorVer integer
- * @param minMinorVer integer? (Default: `0`)
- * @param minCommits integer? (Default: `0`)
- * @return boolean satisfiesMin `true` if the engine version is greater or equal to the specified version, otherwise `false`.
- */
+void LuaUtils::PrintStack(lua_State* L)
+{
+	for (int i = 1, top = lua_gettop(L); i <= top; i++) {
+		LOG_L(L_ERROR, "  %i: type = %s (%p)", i, luaL_typename(L, i), lua_topointer(L, i));
+
+		switch (lua_type(L, i)) {
+			case LUA_TSTRING:
+				LOG_L(L_ERROR, "\t\t%s", lua_tostring(L, i));
+				break;
+			case LUA_TNUMBER:
+				LOG_L(L_ERROR, "\t\t%f", lua_tonumber(L, i));
+				break;
+			case LUA_TBOOLEAN:
+				LOG_L(L_ERROR, "\t\t%s", lua_toboolean(L, i) ? "true" : "false");
+				break;
+			default: {}
+		}
+	}
+}
+
+
 int LuaUtils::IsEngineMinVersion(lua_State* L)
 {
 	const int minMajorVer = luaL_checkint(L, 1);
 	const int minMinorVer = luaL_optint(L, 2, 0);
 	const int minCommits  = luaL_optint(L, 3, 0);
 
-	lua_pushboolean(L,
-		std::tuple(StringToInt(SpringVersion::GetMajor()), StringToInt(SpringVersion::GetMinor()), StringToInt(SpringVersion::GetCommits())) >=
-		std::tie(minMajorVer, minMinorVer, minCommits)
-	);
+	if (StringToInt(SpringVersion::GetMajor()) < minMajorVer) {
+		lua_pushboolean(L, false);
+		return 1;
+	}
+
+	if (StringToInt(SpringVersion::GetMajor()) == minMajorVer) {
+		if (StringToInt(SpringVersion::GetMinor()) < minMinorVer) {
+			lua_pushboolean(L, false);
+			return 1;
+		}
+
+		if (StringToInt(SpringVersion::GetCommits()) < minCommits) {
+			lua_pushboolean(L, false);
+			return 1;
+		}
+	}
+
+	lua_pushboolean(L, true);
 	return 1;
+
 }
 
 /******************************************************************************/
@@ -671,90 +683,21 @@ int LuaUtils::ParseStringVector(lua_State* L, int index, vector<string>& vec)
 	}
 }
 
-int LuaUtils::ParseFloat4Vector(lua_State* L, int index, vector<float4>& vec)
-{
-	if (!lua_istable(L, index) || lua_objlen(L,index) % 4 != 0)
-		return -1;
-
-	vec.clear();
-
-	for (int i = 0, absIdx = PosAbsLuaIndex(L, index); ; i += 4) {
-		lua_rawgeti(L, absIdx, (i + 4));
-		lua_rawgeti(L, absIdx, (i + 3));
-		lua_rawgeti(L, absIdx, (i + 2));
-		lua_rawgeti(L, absIdx, (i + 1));
-
-		if (lua_isnumber(L, -1) && lua_isnumber(L, -2) && lua_isnumber(L, -3) && lua_isnumber(L, -4)) {
-			vec.push_back(float4(lua_tofloat(L, -1), lua_tofloat(L, -2), lua_tofloat(L, -3), lua_tofloat(L, -4)));
-			lua_pop(L, 4);
-			continue;
-		}
-
-		lua_pop(L, 1);
-		return i;
-	}
-}
 
 #if !defined UNITSYNC && !defined DEDICATED && !defined BUILDING_AI
 
 
 int LuaUtils::PushModelHeight(lua_State* L, const SolidObjectDef* def, bool isUnitDef)
 {
-	const S3DModel* model = nullptr;
-	float height = 0.0f;
-
-	if (isUnitDef) {
-		model = def->LoadModel();
-	} else {
-		switch (static_cast<const FeatureDef*>(def)->drawType) {
-			case DRAWTYPE_NONE: {
-			} break;
-
-			case DRAWTYPE_MODEL: {
-				model = def->LoadModel();
-			} break;
-
-			default: {
-				// always >= DRAWTYPE_TREE here
-				height = TREE_RADIUS * 2.0f;
-			} break;
-		}
-	}
-
-	if (model != nullptr)
-		height = model->height;
-
-	lua_pushnumber(L, height);
+	// Model loading removed; height is not available server-side
+	lua_pushnumber(L, 0.0f);
 	return 1;
 }
 
 int LuaUtils::PushModelRadius(lua_State* L, const SolidObjectDef* def, bool isUnitDef)
 {
-	const S3DModel* model = nullptr;
-	float radius = 0.0f;
-
-	if (isUnitDef) {
-		model = def->LoadModel();
-	} else {
-		switch (static_cast<const FeatureDef*>(def)->drawType) {
-			case DRAWTYPE_NONE: {
-			} break;
-
-			case DRAWTYPE_MODEL: {
-				model = def->LoadModel();
-			} break;
-
-			default: {
-				// always >= DRAWTYPE_TREE here
-				radius = TREE_RADIUS;
-			} break;
-		}
-	}
-
-	if (model != nullptr)
-		radius = model->radius;
-
-	lua_pushnumber(L, radius);
+	// Model loading removed; radius is not available server-side
+	lua_pushnumber(L, 0.0f);
 	return 1;
 }
 
@@ -777,66 +720,36 @@ int LuaUtils::PushModelName(lua_State* L, const SolidObjectDef* def)
 
 int LuaUtils::PushModelType(lua_State* L, const SolidObjectDef* def)
 {
-	const std::string& modelPath = modelLoader.FindModelPath(def->modelName);
-	const std::string& modelType = StringToLower(FileSystem::GetExtension(modelPath));
-	lua_pushsstring(L, modelType);
+	// Model loading removed server-side; type not available
+	lua_pushsstring(L, std::string{});
 	return 1;
 }
 
 int LuaUtils::PushModelPath(lua_State* L, const SolidObjectDef* def)
 {
-	const std::string& modelPath = modelLoader.FindModelPath(def->modelName);
-	lua_pushsstring(L, modelPath);
+	// Model loading removed server-side; path not available
+	lua_pushsstring(L, def->modelName);
 	return 1;
 }
 
 
 int LuaUtils::PushModelTable(lua_State* L, const SolidObjectDef* def) {
+	// Model loading removed server-side; return zeroed table
+	lua_newtable(L);
 
-	/* Note, the line below loads the model if it isn't already
-	 * preloaded, which can be slow. This is also why this subtable
-	 * doesn't contain things like model type and path that are
-	 * known without loading it - otherwise devs would sometimes
-	 * access it in the slower way without realizing it */
-	const S3DModel* model = def->LoadModel();
+	HSTR_PUSH_NUMBER(L, "minx", 0.0f);
+	HSTR_PUSH_NUMBER(L, "miny", 0.0f);
+	HSTR_PUSH_NUMBER(L, "minz", 0.0f);
+	HSTR_PUSH_NUMBER(L, "maxx", 0.0f);
+	HSTR_PUSH_NUMBER(L, "maxy", 0.0f);
+	HSTR_PUSH_NUMBER(L, "maxz", 0.0f);
 
-	lua_createtable(L, 0, 10);
-
-	if (model != nullptr) {
-		// unit, or non-tree feature
-		HSTR_PUSH_NUMBER(L, "minx", model->mins.x);
-		HSTR_PUSH_NUMBER(L, "miny", model->mins.y);
-		HSTR_PUSH_NUMBER(L, "minz", model->mins.z);
-		HSTR_PUSH_NUMBER(L, "maxx", model->maxs.x);
-		HSTR_PUSH_NUMBER(L, "maxy", model->maxs.y);
-		HSTR_PUSH_NUMBER(L, "maxz", model->maxs.z);
-
-		HSTR_PUSH_NUMBER(L, "midx", model->relMidPos.x);
-		HSTR_PUSH_NUMBER(L, "midy", model->relMidPos.y);
-		HSTR_PUSH_NUMBER(L, "midz", model->relMidPos.z);
-	} else {
-		HSTR_PUSH_NUMBER(L, "minx", 0.0f);
-		HSTR_PUSH_NUMBER(L, "miny", 0.0f);
-		HSTR_PUSH_NUMBER(L, "minz", 0.0f);
-		HSTR_PUSH_NUMBER(L, "maxx", 0.0f);
-		HSTR_PUSH_NUMBER(L, "maxy", 0.0f);
-		HSTR_PUSH_NUMBER(L, "maxz", 0.0f);
-
-		HSTR_PUSH_NUMBER(L, "midx", 0.0f);
-		HSTR_PUSH_NUMBER(L, "midy", 0.0f);
-		HSTR_PUSH_NUMBER(L, "midz", 0.0f);
-	}
+	HSTR_PUSH_NUMBER(L, "midx", 0.0f);
+	HSTR_PUSH_NUMBER(L, "midy", 0.0f);
+	HSTR_PUSH_NUMBER(L, "midz", 0.0f);
 
 	HSTR_PUSH(L, "textures");
-	lua_createtable(L, 0, model != nullptr ? 2 : 0);
-
-	if (model != nullptr) {
-		LuaPushNamedString(L, "tex1", model->texs[0]);
-		LuaPushNamedString(L, "tex2", model->texs[1]);
-	} else {
-		// just leave these nil
-	}
-
+	lua_newtable(L);
 	// model["textures"] = {}
 	lua_rawset(L, -3);
 
@@ -846,7 +759,7 @@ int LuaUtils::PushModelTable(lua_State* L, const SolidObjectDef* def) {
 int LuaUtils::PushColVolTable(lua_State* L, const CollisionVolume* vol) {
 	assert(vol != nullptr);
 
-	lua_createtable(L, 0, 11);
+	lua_newtable(L);
 	switch (vol->GetVolumeType()) {
 		case CollisionVolume::COLVOL_TYPE_ELLIPSOID:
 			HSTR_PUSH_CSTRING(L, "type", "ellipsoid");
@@ -929,23 +842,6 @@ void LuaUtils::PushCommandParamsTable(lua_State* L, const Command& cmd, bool sub
 		lua_rawset(L, -3);
 }
 
-/***
- * Full command options object for reading from a `Command`.
- * 
- * Note that this has extra fields `internal` and `coded` that are not supported
- * when creating a command from Lua.
- * 
- * @class CommandOptions
- * @x_helper
- * @field coded CommandOptionBit|integer Bitmask of command options.
- * @field alt boolean Alt key pressed.
- * @field ctrl boolean Ctrl key pressed.
- * @field shift boolean Shift key pressed.
- * @field right boolean Right mouse key pressed.
- * @field meta boolean Meta key (space) pressed.
- * @field internal boolean
- */
-
 void LuaUtils::PushCommandOptionsTable(lua_State* L, const Command& cmd, bool subtable)
 {
 	if (subtable)
@@ -979,32 +875,6 @@ int LuaUtils::PushUnitAndCommand(lua_State* L, const CUnit* unit, const Command&
 	return 7;
 }
 
-/***
- * @alias CommandOptionBit
- * | 4 # Meta (windows/mac/mod4) key.
- * | 8 # Internal order.
- * | 16 # Right mouse key.
- * | 32 # Shift key.
- * | 64 # Control key.
- * | 128 # Alt key.
- */
-
-/***
- * @alias CommandOptionName
- * | "right" # Right mouse key.
- * | "alt" # Alt key.
- * | "ctrl" # Control key.
- * | "shift" # Shift key.
- * | "meta" # Meta key (space).
- */
-
-/***
- * @alias CreateCommandOptions
- * | CommandOptionName[] # An array of option names.
- * | table<CommandOptionName, boolean> # A map of command names to booleans, considered held when `true`.
- * | CommandOptionBit # A specific integer value for a command option.
- * | integer # A bit mask combination of `CommandOptionBit` values. Pass `0` for no options.
- */
 
 static bool ParseCommandOptions(
 	lua_State* L,
@@ -1014,10 +884,6 @@ static bool ParseCommandOptions(
 ) {
 	if (lua_isnumber(L, idx)) {
 		cmd.SetOpts(lua_tonumber(L, idx));
-		return true;
-	}
-
-	if (lua_isnoneornil(L, idx)) {
 		return true;
 	}
 
@@ -1097,21 +963,6 @@ static bool ParseCommandTimeOut(
 	return true;
 }
 
-/***
- * @alias CreateCommandParams
- * | number[] # An array of parameters.
- * | number # A single parameter.
- */
-
-/** - not documented.
- * 
- * Supports the following params, starting from `idx`.
- * 
- * @param cmdID CMD|integer The command ID.
- * @param params CreateCommandParams? Parameters for the given command.
- * @param options CreateCommandOptions?
- * @param timeout integer? Absolute frame number. The command will be discarded after this frame. Only respected by mobile units.
- */
 Command LuaUtils::ParseCommand(lua_State* L, const char* caller, int idIndex)
 {
 	// cmdID
@@ -1136,8 +987,8 @@ Command LuaUtils::ParseCommand(lua_State* L, const char* caller, int idIndex)
 
 				cmd.PushParam(lua_tofloat(L, -1));
 			}
-		} else if (!lua_isnoneornil(L, paramTableIdx)) {
-			luaL_error(L, "%s(): bad param (expected table, number or nil)", caller);
+		} else {
+			luaL_error(L, "%s(): bad param (expected table or number)", caller);
 		}
 	}
 
@@ -1150,16 +1001,6 @@ Command LuaUtils::ParseCommand(lua_State* L, const char* caller, int idIndex)
 	return cmd;
 }
 
-/***
- * Used when assigning multiple commands at once.
- * 
- * @class CreateCommand
- * @x_helper
- * @field [1] CMD|integer Command ID.
- * @field [2] CreateCommandParams? Parameters for the given command.
- * @field [3] CreateCommandOptions? Command options.
- * @field [4] integer? Timeout.
- */
 
 Command LuaUtils::ParseCommandTable(lua_State* L, const char* caller, int tableIdx)
 {
@@ -1190,8 +1031,8 @@ Command LuaUtils::ParseCommandTable(lua_State* L, const char* caller, int tableI
 
 				cmd.PushParam(lua_tofloat(L, -1));
 			}
-		} else if (!lua_isnil(L, -1)) {
-			luaL_error(L, "%s(): bad param (expected table, number or nil)", caller);
+		} else {
+			luaL_error(L, "%s(): bad param (expected table or number)", caller);
 		}
 
 		lua_pop(L, 1);
@@ -1232,25 +1073,6 @@ void LuaUtils::ParseCommandArray(
 	}
 }
 
-/***
- * Facing direction represented by a string or number.
- * 
- * @see FacingInteger
- * 
- * @alias Facing
- * | 0 # South
- * | 1 # East
- * | 2 # North
- * | 3 # West
- * | "s" # South
- * | "e" # East
- * | "n" # North
- * | "w" # West
- * | "south" # South
- * | "east" # East
- * | "north" # North
- * | "west" # West
- */
 
 int LuaUtils::ParseFacing(lua_State* L, const char* caller, int index)
 {
@@ -1261,10 +1083,11 @@ int LuaUtils::ParseFacing(lua_State* L, const char* caller, int index)
 		const char* dir = lua_tostring(L, index);
 
 		switch (dir[0]) {
-			case 'S': case 's': return FACING_SOUTH;
-			case 'E': case 'e': return FACING_EAST;
-			case 'N': case 'n': return FACING_NORTH;
-			case 'W': case 'w': return FACING_WEST;
+			case 'S': case 's': { return 0; } break;
+			case 'E': case 'e': { return 1; } break;
+			case 'N': case 'n': { return 2; } break;
+			case 'W': case 'w': { return 3; } break;
+			default           : {           } break;
 		}
 
 		luaL_error(L, "%s(): bad facing string \"%s\"", caller, dir);
@@ -1388,34 +1211,12 @@ static void LogMsg(lua_State* L, const char* logSection, int logLevel, int argIn
 }
 
 
-/***
- * Prints values in the spring chat console. Useful for debugging.
- * 
- * Hint: the default print() writes to STDOUT.
- *
- * @function Spring.Echo
- * @param arg any
- * @param ... any
- *
- * @return nil
- */
 int LuaUtils::Echo(lua_State* L)
 {
 	LogMsg(L, nullptr, -1, 1);
 	return 0;
 }
 
-/***
- * @enum LOG
- * @see Spring.Log
- * @field DEBUG 20
- * @field INFO 30
- * @field NOTICE 35 Engine default.
- * @field DEPRECATED 37
- * @field WARNING 40
- * @field ERROR 50
- * @field FATAL 60
- */
 
 bool LuaUtils::PushLogEntries(lua_State* L)
 {
@@ -1423,24 +1224,11 @@ bool LuaUtils::PushLogEntries(lua_State* L)
 	PUSH_LOG_LEVEL(DEBUG);
 	PUSH_LOG_LEVEL(INFO);
 	PUSH_LOG_LEVEL(NOTICE);
-	PUSH_LOG_LEVEL(DEPRECATED);
 	PUSH_LOG_LEVEL(WARNING);
 	PUSH_LOG_LEVEL(ERROR);
 	PUSH_LOG_LEVEL(FATAL);
 	return true;
 }
-
-/***
- * @alias LogLevel
- * | integer
- * | "debug"      # LOG.DEBUG
- * | "info"       # LOG.INFO
- * | "notice"     # LOG.NOTICE (engine default)
- * | "warning"    # LOG.WARNING
- * | "deprecated" # LOG.DEPRECATED
- * | "error"      # LOG.ERROR
- * | "fatal"      # LOG.FATAL
- */
 
 int LuaUtils::ParseLogLevel(lua_State* L, int index)
 {
@@ -1448,34 +1236,27 @@ int LuaUtils::ParseLogLevel(lua_State* L, int index)
 		return (lua_tonumber(L, index));
 
 	if (lua_israwstring(L, index)) {
-		const char* logLevel = lua_tostring(L, index);
-		switch (logLevel[0]) {
-			case 'D': case 'd': {
-				if (strlen(logLevel) > 2 && (logLevel[2] == 'P' || logLevel[2] == 'p'))
-					return LOG_LEVEL_DEPRECATED;
-				else
-					return LOG_LEVEL_DEBUG;
-			} break;
-			case 'I': case 'i': { return LOG_LEVEL_INFO        ; } break;
-			case 'N': case 'n': { return LOG_LEVEL_NOTICE      ; } break;
-			case 'W': case 'w': { return LOG_LEVEL_WARNING     ; } break;
-			case 'E': case 'e': { return LOG_LEVEL_ERROR       ; } break;
-			case 'F': case 'f': { return LOG_LEVEL_FATAL       ; } break;
-			default           : {                                } break;
+		switch (lua_tostring(L, index)[0]) {
+			case 'D': case 'd': { return LOG_LEVEL_DEBUG  ; } break;
+			case 'I': case 'i': { return LOG_LEVEL_INFO   ; } break;
+			case 'N': case 'n': { return LOG_LEVEL_NOTICE ; } break;
+			case 'W': case 'w': { return LOG_LEVEL_WARNING; } break;
+			case 'E': case 'e': { return LOG_LEVEL_ERROR  ; } break;
+			case 'F': case 'f': { return LOG_LEVEL_FATAL  ; } break;
+			default           : {                           } break;
 		}
 	}
 
 	return -1;
 }
 
-/***
- * Logs a message to the logfile/console.
- * 
- * @function Spring.Log
- * @param section string Sets an arbitrary section. Level filtering can be applied per-section
- * @param logLevel (LogLevel|LOG)? (Default: `"notice"`)
- * @param ... string messages
- */
+/*-
+	Logs a msg to the logfile / console
+	@param loglevel loglevel that will be used for the message
+	@param msg string to be logged
+	@fn Spring.Log(string logsection, int loglevel, ...)
+	@fn Spring.Log(string logsection, string loglevel, ...)
+*/
 int LuaUtils::Log(lua_State* L)
 {
 	const int args = lua_gettop(L); // number of arguments
@@ -1540,9 +1321,9 @@ int LuaUtils::PushDebugTraceback(lua_State* L)
 
 
 
-LuaUtils::ScopedDebugTraceBack::ScopedDebugTraceBack(lua_State* lst)
-	: L(lst)
-	, errFuncIdx(PushDebugTraceback(lst))
+LuaUtils::ScopedDebugTraceBack::ScopedDebugTraceBack(lua_State* _L)
+	: L(_L)
+	, errFuncIdx(PushDebugTraceback(_L))
 {
 	assert(errFuncIdx >= 0);
 }
@@ -1569,25 +1350,6 @@ void LuaUtils::PushStringVector(lua_State* L, const vector<string>& vec)
 
 /******************************************************************************/
 /******************************************************************************/
-
-/*** Contains data about a command.
- * 
- * @class CommandDescription
- * @x_helper
- * @field id (CMD|integer)?
- * @field type CMDTYPE?
- * @field name string?
- * @field action string?
- * @field tooltip string?
- * @field texture string?
- * @field cursor string?
- * @field queueing boolean?
- * @field hidden boolean?
- * @field disabled boolean?
- * @field showUnique boolean?
- * @field onlyTexture boolean?
- * @field params string[]?
- */
 
 void LuaUtils::PushCommandDesc(lua_State* L, const SCommandDescription& cd)
 {
@@ -1621,394 +1383,4 @@ void LuaUtils::PushCommandDesc(lua_State* L, const SCommandDescription& cd)
 
 	// CmdDesc["params"] = {[1] = "string1", [2] = "string2", ...}
 	lua_settable(L, -3);
-}
-
-void LuaUtils::LuaStackDumper::PrintStack(lua_State* L, int parseDepth)
-{
-	currPtr = &root;
-
-	int n = lua_gettop(L);
-
-	for (int i = 1; i <= n; ++i) {
-		const auto oldCurrPtr = currPtr;
-		currPtr = &(*currPtr)[fmt::sprintf("frame: %d", i)];
-		ParseLuaItem(L, i, false, parseDepth);  // false --> as_key
-		currPtr = oldCurrPtr;
-	}
-
-	PrintBuffer();
-
-	currPtr = nullptr;
-	root = {};
-}
-
-void LuaUtils::LuaStackDumper::ParseTable(lua_State* L, int i, int parseDepth)
-{
-	static const auto isSeq = [](lua_State* L, int i) {
-		// stack = [..]
-		lua_pushnil(L);
-		// stack = [.., nil]
-		int keynum = 1;
-		while (lua_next(L, i)) {
-			// stack = [.., key, value]
-			lua_rawgeti(L, i, keynum);
-			// stack = [.., key, value, t[keynum]]
-			if (lua_isnil(L, -1)) {
-				lua_pop(L, 3);
-				// stack = [..]
-				return false;
-			}
-			lua_pop(L, 2);
-			// stack = [.., key]
-			keynum++;
-		}
-		// stack = [..]
-		return true;
-	};
-
-	static const auto PrintSeq = [](lua_State* L, int i, int parseDepth) {
-		for (int k = 1; /*NOOP*/; ++k) {
-			// stack = [..]
-			lua_rawgeti(L, i, k);
-			// stack = [.., t[k]]
-			if (lua_isnil(L, -1))
-				break;
-
-			const auto oldCurrPtr = currPtr;
-			currPtr = &(*currPtr)[std::to_string(k)]; //emplace key
-			ParseLuaItem(L, -1, false, parseDepth);  // 0 --> as_key
-			currPtr = oldCurrPtr;
-
-			lua_pop(L, 1);
-			// stack = [..]
-		}
-		// stack = [.., nil]
-		lua_pop(L, 1);
-		// stack = [..]
-	};
-
-	if (parseDepth <= 0) {
-		assert(currPtr);
-		*currPtr = "<..table..>";
-		return;
-	}
-
-	// Ensure i is an absolute index as we'll be pushing/popping things after it.
-	if (i < 0)
-		i = lua_gettop(L) + i + 1;
-
-	if (isSeq(L, i)) {
-		PrintSeq(L, i, parseDepth);  // This case includes all empty tables.
-	}
-	else {
-		// stack = [..]
-		lua_pushnil(L);
-		// stack = [.., nil]
-		while (lua_next(L, i)) {
-			// stack = [.., key, value]
-			const auto oldCurrPtr = currPtr;
-			ParseLuaItem(L, -2, true , parseDepth);
-			ParseLuaItem(L, -1, false, parseDepth);
-			currPtr = oldCurrPtr;
-
-			lua_pop(L, 1);  // So the last-used key is on top.
-			// stack = [.., key]
-		}
-		// stack = [..]
-	}
-}
-
-void LuaUtils::LuaStackDumper::ParseLuaItem(lua_State* L, int i, bool asKey, int parseDepth)
-{
-	static const auto GetFnName = [](lua_State* L, int i) -> std::string {
-		std::string fnName;
-
-		// Ensure i is an absolute index as we'll be pushing/popping things after it.
-		if (i < 0) i = lua_gettop(L) + i + 1;
-
-		// Check to see if the function has a global name.
-			// stack = [..]
-		lua_getglobal(L, "_G");
-		// stack = [.., _G]
-		lua_pushnil(L);
-		// stack = [.., _G, nil]
-		while (lua_next(L, -2)) {
-			// stack = [.., _G, key, value]
-			if (lua_rawequal(L, i, -1)) {
-				fnName = fmt::sprintf("fn: %s", lua_tostring(L, -2));
-				lua_pop(L, 3);
-				// stack = [..]
-				return fnName;
-			}
-			// stack = [.., _G, key, value]
-			lua_pop(L, 1);
-			// stack = [.., _G, key]
-		}
-		// If we get here, the function didn't have a global name; print a pointer.
-			// stack = [.., _G]
-		lua_pop(L, 1);
-		// stack = [..]
-		fnName = fmt::sprintf("fn :%p", lua_topointer(L, i));
-		return fnName;
-	};
-
-	const int ltype = lua_type(L, i);
-
-	switch (ltype) {
-
-	case LUA_TNIL: {
-		*currPtr = "nil"; // This can't be a key, so we can ignore as_key here.
-	} return;
-
-	case LUA_TNUMBER: {
-		const auto str = fmt::sprintf("%g", lua_tonumber(L, i));
-		if (asKey)
-			currPtr = &(*currPtr)[str];
-		else
-			*currPtr = str;
-	} return;
-
-	case LUA_TBOOLEAN: {
-		const auto str = lua_toboolean(L, i) ? "true" : "false";
-		if (asKey)
-			currPtr = &(*currPtr)[str];
-		else
-			*currPtr = str;
-	} return;
-
-	case LUA_TSTRING: {
-		const std::string str = lua_tostring(L, i);
-		if (asKey)
-			currPtr = &(*currPtr)[str];
-		else
-			*currPtr = str;
-	} return;
-
-	case LUA_TTABLE: {
-		ParseTable(L, i, --parseDepth);
-	} return;
-
-	case LUA_TFUNCTION: {
-		const auto str = GetFnName(L, i);
-		if (asKey)
-			currPtr = &(*currPtr)[str];
-		else
-			*currPtr = str;
-	} return;
-
-	case LUA_TUSERDATA:
-	case LUA_TLIGHTUSERDATA: {
-		const auto str = fmt::sprintf("ud: %p", lua_topointer(L, i));
-		if (asKey)
-			currPtr = &(*currPtr)[str];
-		else
-			*currPtr = str;
-	} return;
-
-	case LUA_TTHREAD: {
-		const auto str = fmt::sprintf("thr: %p", lua_topointer(L, i));
-		if (asKey)
-			currPtr = &(*currPtr)[str];
-		else
-			*currPtr = str;
-	} return;
-
-	default: {
-		const auto str = fmt::sprintf("def: %p", lua_topointer(L, i));
-		if (asKey)
-			currPtr = &(*currPtr)[str];
-		else
-			*currPtr = str;
-	} return;
-
-	}
-}
-
-void LuaUtils::LuaStackDumper::PrintBuffer()
-{
-	Json::StyledWriter writer;
-	LOG("[%s()]\n%s", __FUNCTION__, writer.write(root).c_str());
-}
-
-
-#if !defined UNITSYNC && !defined DEDICATED && !defined BUILDING_AI
-int LuaUtils::ParseAllegiance(lua_State* L, const char* caller, int index)
-{
-	if (!lua_isnumber(L, index))
-		return AllUnits;
-
-	const int teamID = lua_toint(L, index);
-
-	// MyUnits, AllyUnits, and EnemyUnits do not apply to fullRead
-	if (CLuaHandle::GetHandleFullRead(L) && (teamID < 0))
-		return AllUnits;
-
-	if (teamID < EnemyUnits) {
-		luaL_error(L, "Bad teamID in %s (%d)", caller, teamID);
-	}
-	else if (teamID >= teamHandler.ActiveTeams()) {
-		luaL_error(L, "Bad teamID in %s (%d)", caller, teamID);
-	}
-
-	return teamID;
-}
-
-bool LuaUtils::IsAlliedTeam(lua_State* L, int team)
-{
-	if (CLuaHandle::GetHandleReadAllyTeam(L) < 0)
-		return CLuaHandle::GetHandleFullRead(L);
-
-	return (teamHandler.AllyTeam(team) == CLuaHandle::GetHandleReadAllyTeam(L));
-}
-
-bool LuaUtils::IsAlliedAllyTeam(lua_State* L, int allyTeam)
-{
-	if (CLuaHandle::GetHandleReadAllyTeam(L) < 0)
-		return CLuaHandle::GetHandleFullRead(L);
-
-	return (allyTeam == CLuaHandle::GetHandleReadAllyTeam(L));
-}
-
-bool LuaUtils::IsAllyUnit(lua_State* L, const CUnit* unit) { return (IsAlliedAllyTeam(L, unit->allyteam)); }
-bool LuaUtils::IsEnemyUnit(lua_State* L, const CUnit* unit) { return (!IsAllyUnit(L, unit)); }
-
-bool LuaUtils::IsUnitVisible(lua_State* L, const CUnit* unit)
-{
-	if (IsAllyUnit(L, unit))
-		return true;
-
-	return (unit->losStatus[CLuaHandle::GetHandleReadAllyTeam(L)] & (LOS_INLOS | LOS_INRADAR));
-}
-
-bool LuaUtils::IsUnitInLos(lua_State* L, const CUnit* unit)
-{
-	if (IsAllyUnit(L, unit))
-		return true;
-
-	return (unit->losStatus[CLuaHandle::GetHandleReadAllyTeam(L)] & LOS_INLOS);
-}
-
-bool LuaUtils::IsUnitTyped(lua_State* L, const CUnit* unit)
-{
-	if (IsAllyUnit(L, unit))
-		return true;
-
-	const unsigned short losStatus = unit->losStatus[CLuaHandle::GetHandleReadAllyTeam(L)];
-	const unsigned short prevMask = (LOS_PREVLOS | LOS_CONTRADAR);
-
-	// currently in LOS or not lost from radar since being visible means unit's type can be accessed
-	return ((losStatus & LOS_INLOS) || ((losStatus & prevMask) == prevMask));
-}
-
-const UnitDef* LuaUtils::EffectiveUnitDef(lua_State* L, const CUnit* unit)
-{
-	const UnitDef* ud = unit->unitDef;
-
-	if (IsAllyUnit(L, unit))
-		return ud;
-
-	if (ud->decoyDef)
-		return ud->decoyDef;
-
-	return ud;
-}
-
-bool LuaUtils::IsFeatureVisible(lua_State* L, const CFeature* feature)
-{
-	if (CLuaHandle::GetHandleFullRead(L))
-		return true;
-	if (CLuaHandle::GetHandleReadAllyTeam(L) < 0)
-		return false;
-
-	return feature->IsInLosForAllyTeam(CLuaHandle::GetHandleReadAllyTeam(L));
-}
-
-bool LuaUtils::IsProjectileVisible(lua_State* L, const CProjectile* pro)
-{
-	if (CLuaHandle::GetHandleReadAllyTeam(L) < 0)
-		return CLuaHandle::GetHandleFullRead(L);
-
-	return !((CLuaHandle::GetHandleReadAllyTeam(L) != pro->GetAllyteamID()) &&
-		(!losHandler->InLos(pro->pos, CLuaHandle::GetHandleReadAllyTeam(L))));
-}
-
-void LuaUtils::PushAttackerDef(lua_State* L, const CUnit* const attacker)
-{
-	if (attacker == nullptr) {
-		lua_pushnil(L);
-		return;
-	}
-
-	PushAttackerDef(L, *attacker);
-}
-
-void LuaUtils::PushAttackerDef(lua_State* L, const CUnit& attacker)
-{
-	if (LuaUtils::IsUnitTyped(L, &attacker)) {
-		lua_pushnumber(L, LuaUtils::EffectiveUnitDef(L, &attacker)->id);
-		return;
-	}
-
-	lua_pushnil(L);
-}
-
-void LuaUtils::PushAttackerInfo(lua_State* L, const CUnit* const attacker)
-{
-	if (attacker && IsUnitVisible(L, attacker)) {
-		lua_pushnumber(L, attacker->id);
-		PushAttackerDef(L, *attacker);
-		lua_pushnumber(L, attacker->team);
-		return;
-	}
-
-	lua_pushnil(L);
-	lua_pushnil(L);
-	lua_pushnil(L);
-}
-#endif
-
-
-void LuaUtils::TracyRemoveAlsoExtras(char* script)
-{
-	// tracy's built-in remover; does not handle our local TracyExtra functions
-	tracy::LuaRemove(script);
-
-#ifndef TRACY_ENABLE
-	// Our extras are handled manually below, the same way Tracy does.
-	// Code is on BSD-3 licence, (c) 2017 Bartosz Taudul aka wolfpld
-
-	const auto FindEnd = [] (char *ptr) {
-		unsigned int cnt = 1;
-		while (cnt) {
-			     if (*ptr == '(') ++ cnt;
-			else if (*ptr == ')') -- cnt;
-			++ ptr;
-		}
-		return ptr;
-	};
-
-	const auto Wipe = [&script, FindEnd] (size_t offset) {
-		const auto end = FindEnd(script + offset);
-		memset(script, ' ', end - script);
-		script = end;
-	};
-
-	while (*script) {
-		if (strncmp(script, "tracy.LuaTracyPlot", 18)) {
-			++ script;
-			continue;
-		}
-
-		/* The numbers are (sub)string lengths. Perhaps there could be
-		 * system to magically generate optimal searches from a set of
-		 * strings with long common prefixes, but for now it's manual.
-		 * Keep upstreamability in mind though (that's why strcmp). */
-		if (!strncmp(script + 18, "Config(", 7))
-			Wipe(18 + 7);
-		else if (!strncmp(script + 18, "(", 1))
-			Wipe(18 + 1);
-		else
-			script += 18;
-	}
-#endif
 }

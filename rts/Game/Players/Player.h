@@ -5,8 +5,6 @@
 
 #include "PlayerBase.h"
 #include "PlayerStatistics.h"
-#include "Game/FPSUnitController.h"
-#include "Lua/LuaRulesParams.h"
 #include "System/creg/creg_cond.h"
 #include "System/UnorderedSet.hpp"
 
@@ -22,7 +20,7 @@ class CUnit;
 class CPlayer : public PlayerBase
 {
 public:
-	CR_DECLARE(CPlayer)
+	CR_DECLARE_DERIVED(CPlayer)
 
 	enum {
 		PLAYER_RDYSTATE_UPDATED = 0,
@@ -56,15 +54,12 @@ public:
 
 	/**
 	 * Contains either the current ping of the player to the game host,
-	 * or the value of the pathing flag.
+	 * or the value of the pathign flag.
 	 * @see PATHING_FLAG
 	 */
 	int ping = 0;
 
 	PlayerStatistics currentStats;
-	FPSUnitController fpsController;
-
-	LuaRulesParams::Params modParams;
 
 private:
 	spring::unordered_set<int> controlledTeams;

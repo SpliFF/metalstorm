@@ -16,9 +16,7 @@
 #include "Sim/Units/CommandAI/CommandAI.h"
 #include "System/SpringMath.h"
 #include "System/Matrix44f.h"
-#include "System/SpringHash.h"
-
-#include "System/Misc/TracyDefs.h"
+#include "System/Sync/HsiehHash.h"
 
 CR_BIND_DERIVED(CHoverAirMoveType, AAirMoveType, (nullptr))
 
@@ -49,15 +47,13 @@ CR_REG_METADATA(CHoverAirMoveType, (
 	CR_MEMBER(forcedHeading),
 
 	CR_MEMBER(waitCounter),
-	CR_MEMBER(lastMoveRate),
-
-	CR_PREALLOC(GetPreallocContainer)
+	CR_MEMBER(lastMoveRate)
 ))
 
 
 
-#define MEMBER_CHARPTR_HASH(memberName) spring::LiteHash(memberName, strlen(memberName),     0)
-#define MEMBER_LITERAL_HASH(memberName) spring::LiteHash(memberName, sizeof(memberName) - 1, 0)
+#define MEMBER_CHARPTR_HASH(memberName) HsiehHash(memberName, strlen(memberName),     0)
+#define MEMBER_LITERAL_HASH(memberName) HsiehHash(memberName, sizeof(memberName) - 1, 0)
 
 static const unsigned int BOOL_MEMBER_HASHES[] = {
 	MEMBER_LITERAL_HASH(       "collide"),
@@ -84,7 +80,7 @@ static const unsigned int FLOAT_MEMBER_HASHES[] = {
 
 static bool UnitIsBusy(const CCommandAI* cai) {
 	// queued move-commands (or active build/repair/etc-commands) mean unit has to stay airborne
-	return (cai->inCommand != CMD_STOP || cai->HasMoreMoveCommands(false));
+	return (cai->inCommand || cai->HasMoreMoveCommands(false));
 }
 
 static bool UnitHasLoadCmd(const CCommandAI* cai) {
@@ -157,7 +153,6 @@ CHoverAirMoveType::CHoverAirMoveType(CUnit* owner) :
 
 void CHoverAirMoveType::SetGoal(const float3& pos, float distance)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	goalPos = pos;
 	oldGoalPos = pos;
 
@@ -171,7 +166,6 @@ void CHoverAirMoveType::SetGoal(const float3& pos, float distance)
 
 void CHoverAirMoveType::SetState(AircraftState newState)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// once in crashing, we should never change back into another state
 	if (aircraftState == AIRCRAFT_CRASHING && newState != AIRCRAFT_CRASHING)
 		return;
@@ -234,7 +228,6 @@ void CHoverAirMoveType::SetState(AircraftState newState)
 
 void CHoverAirMoveType::SetAllowLanding(bool allowLanding)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	dontLand = !allowLanding;
 
 	if (CanLand(false))
@@ -252,7 +245,6 @@ void CHoverAirMoveType::SetAllowLanding(bool allowLanding)
 
 void CHoverAirMoveType::StartMoving(float3 pos, float goalRadius)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	forceHeading = false;
 	wantToStop = false;
 	waitCounter = 0;
@@ -285,13 +277,11 @@ void CHoverAirMoveType::StartMoving(float3 pos, float goalRadius)
 
 void CHoverAirMoveType::StartMoving(float3 pos, float goalRadius, float speed)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	StartMoving(pos, goalRadius);
 }
 
 void CHoverAirMoveType::KeepPointingTo(float3 pos, float distance, bool aggressive)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	wantToStop = false;
 	forceHeading = false;
 	wantedHeight = orgWantedHeight;
@@ -324,7 +314,6 @@ void CHoverAirMoveType::KeepPointingTo(float3 pos, float distance, bool aggressi
 
 void CHoverAirMoveType::ExecuteStop()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	wantToStop = false;
 	wantedSpeed = ZeroVector;
 
@@ -368,7 +357,6 @@ void CHoverAirMoveType::ExecuteStop()
 
 void CHoverAirMoveType::StopMoving(bool callScript, bool hardStop, bool)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// transports switch to landed state (via SetState which calls
 	// us) during pickup but must *not* be allowed to change their
 	// heading while "landed" (see MobileCAI)
@@ -386,7 +374,6 @@ void CHoverAirMoveType::StopMoving(bool callScript, bool hardStop, bool)
 
 void CHoverAirMoveType::UpdateLanded()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	AAirMoveType::UpdateLanded();
 
 	if (progressState != AMoveType::Failed)
@@ -395,7 +382,6 @@ void CHoverAirMoveType::UpdateLanded()
 
 void CHoverAirMoveType::UpdateTakeoff()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const float3& pos = owner->pos;
 
 	wantedSpeed = ZeroVector;
@@ -439,7 +425,6 @@ void CHoverAirMoveType::UpdateHovering()
 
 void CHoverAirMoveType::UpdateFlying()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const float3& pos = owner->pos;
 	// const float4& spd = owner->speed;
 
@@ -600,7 +585,6 @@ void CHoverAirMoveType::UpdateFlying()
 
 void CHoverAirMoveType::UpdateLanding()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const float3 pos = owner->pos;
 
 	if (!HaveLandingPos()) {
@@ -659,7 +643,6 @@ void CHoverAirMoveType::UpdateLanding()
 
 void CHoverAirMoveType::UpdateHeading()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (aircraftState == AIRCRAFT_TAKEOFF && !owner->unitDef->factoryHeadingTakeoff)
 		return;
 	// UpdateDirVectors() resets our up-vector but we
@@ -671,15 +654,14 @@ void CHoverAirMoveType::UpdateHeading()
 	const short deltaHeading = refHeading - owner->heading;
 
 	if (deltaHeading > 0) {
-		owner->AddHeading(std::min(deltaHeading, short( turnRate)), owner->IsOnGround(), false, 0.0f);
+		owner->AddHeading(std::min(deltaHeading, short(turnRate)), owner->IsOnGround(), false);
 	} else {
-		owner->AddHeading(std::max(deltaHeading, short(-turnRate)), owner->IsOnGround(), false, 0.0f);
+		owner->AddHeading(std::max(deltaHeading, short(-turnRate)), owner->IsOnGround(), false);
 	}
 }
 
 void CHoverAirMoveType::UpdateBanking(bool noBanking)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// need to allow LANDING so (autoLand=true) aircraft reset their
 	// pitch naturally after attacking ground and being told to stop
 	if (aircraftState != AIRCRAFT_FLYING && aircraftState != AIRCRAFT_HOVERING && aircraftState != AIRCRAFT_LANDING)
@@ -703,11 +685,8 @@ void CHoverAirMoveType::UpdateBanking(bool noBanking)
 	rightDir2D = frontDir.cross(UpVector);
 
 
-	if (!owner->upright) {
-		// std::max() is here to guard around the case when circlingPos == owner->pos,
-		// which caused NaNs all over the place
-		wantedPitch = (circlingPos.y - owner->pos.y) / std::max(0.01f, circlingPos.distance(owner->pos));
-	}
+	if (!owner->upright)
+		wantedPitch = (circlingPos.y - owner->pos.y) / circlingPos.distance(owner->pos);
 
 	wantedPitch *= (aircraftState == AIRCRAFT_FLYING && flyState == FLY_ATTACKING && circlingPos.y != owner->pos.y);
 	currentPitch = mix(currentPitch, wantedPitch, 0.05f);
@@ -748,20 +727,19 @@ void CHoverAirMoveType::UpdateBanking(bool noBanking)
 
 void CHoverAirMoveType::UpdateVerticalSpeed(const float4& spd, float curRelHeight, float curVertSpeed) const
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	float wh = wantedHeight; // wanted RELATIVE height (altitude)
 	float ws = 0.0f;         // wanted vertical speed
 
 	// first restore original vertical speed
 	owner->SetVelocity((spd * XZVector) + (UpVector * curVertSpeed));
 
-	if (collisionState == COLLISION_DIRECT && aircraftState != AIRCRAFT_TAKEOFF) {
+	if (collisionState == COLLISION_DIRECT) {
 		const float3 dir = lastCollidee->midPos - owner->midPos;
 		const float3 sdir = lastCollidee->speed - spd;
 
 		if (spd.dot(dir + sdir * 20.0f) < 0.0f) {
-			wh -= (30.0f * (lastCollidee->midPos.y >  owner->midPos.y));
-			wh += (50.0f * (lastCollidee->midPos.y <= owner->midPos.y));
+			wh -= (30.0f * (lastCollidee->midPos.y >  owner->pos.y));
+			wh += (50.0f * (lastCollidee->midPos.y <= owner->pos.y));
 		}
 	}
 
@@ -773,9 +751,9 @@ void CHoverAirMoveType::UpdateVerticalSpeed(const float4& spd, float curRelHeigh
 		ws *= (1.0f - ((spd.y < -0.0001f) && (((wh - curRelHeight) / spd.y) * accRate * 0.7f) < -spd.y));
 	}
 
-	// note: don't want this in case unit is built on some raised platform?
 	ws *= (1 - owner->beingBuilt);
-	wh *= (1 - owner->IsStunned());
+	// note: don't want this in case unit is built on some raised platform?
+	wh *= (1 - owner->beingBuilt);
 
 	if (math::fabs(wh - curRelHeight) > 2.0f) {
 		if (spd.y > ws) {
@@ -793,9 +771,8 @@ void CHoverAirMoveType::UpdateVerticalSpeed(const float4& spd, float curRelHeigh
 }
 
 
-bool CHoverAirMoveType::UpdateAirPhysics()
+void CHoverAirMoveType::UpdateAirPhysics()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const float3& pos = owner->pos;
 	const float4& spd = owner->speed;
 
@@ -827,17 +804,13 @@ bool CHoverAirMoveType::UpdateAirPhysics()
 	// between model and ground)
 	// note: unlike StrafeAirMoveType, UpdateTakeoff and UpdateLanding call
 	// UpdateAirPhysics() so we ignore terrain while we are in those states
-	bool crashed = false;
 	if (modInfo.allowAircraftToHitGround) {
 		const bool cpGroundContact = (cpGroundHeight > ownerMinHeight);
 		const bool bpGroundContact = (bpGroundHeight > ownerMinHeight);
 		const bool   handleContact = (aircraftState != AIRCRAFT_LANDED && aircraftState != AIRCRAFT_TAKEOFF);
 
-		if (cpGroundContact && aircraftState == AIRCRAFT_CRASHING)
-			// avoid moving up since explosion would look a bit off
-			crashed = true;
-		else if (cpGroundContact && handleContact)
-			// hard avoidance in case soft constraint fails
+		// hard avoidance in case soft constraint fails
+		if (cpGroundContact && handleContact)
 			owner->Move(UpVector * (cpGroundHeight - ownerMinHeight + 0.01f), true);
 
 		// soft avoidance
@@ -876,34 +849,16 @@ bool CHoverAirMoveType::UpdateAirPhysics()
 
 	if (modInfo.allowAircraftToLeaveMap || (pos + spd).IsInBounds())
 		owner->Move(spd, true);
-
-	return crashed;
 }
 
 
 void CHoverAirMoveType::UpdateMoveRate()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	int curMoveRate = 1;
 
 	// currentspeed is not used correctly for vertical movement, so compensate with this hax
-	if (aircraftState != AIRCRAFT_LANDING && aircraftState != AIRCRAFT_TAKEOFF) {
-		const auto res = CalcScriptMoveRate(owner->speed.w, maxSpeed, 3.0f);
-		if likely(!math::isnan(res)) {
-			curMoveRate = res;
-		} else {
-			LOG_L(L_WARNING, "[%s] Unit(id=%d, def=%s). Incorrect inputs to %s(%f, %f, %f), sanitized to %d",
-				__func__,
-				owner->id,
-				owner->unitDef->name.c_str(),
-				"CalcScriptMoveRate",
-				owner->speed.w,
-				maxSpeed,
-				3.0f,
-				lastMoveRate
-			);
-		}
-	}
+	if (aircraftState != AIRCRAFT_LANDING && aircraftState != AIRCRAFT_TAKEOFF)
+		curMoveRate = CalcScriptMoveRate(owner->speed.w, 3.0f);
 
 	if (curMoveRate == lastMoveRate)
 		return;
@@ -914,7 +869,6 @@ void CHoverAirMoveType::UpdateMoveRate()
 
 bool CHoverAirMoveType::Update()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const float3 lastPos = owner->pos;
 	const float4 lastSpd = owner->speed;
 
@@ -932,34 +886,7 @@ bool CHoverAirMoveType::Update()
 		ExecuteStop();
 
 	if (aircraftState != AIRCRAFT_CRASHING) {
-		if (owner->UnderFirstPersonControl()) {
-			SetState(AIRCRAFT_FLYING);
-
-			const CPlayer* fpsPlayer = owner->fpsControlPlayer;
-			const FPSUnitController& fpsCon = fpsPlayer->fpsController;
-
-			const float3 forward = fpsCon.viewDir;
-			const float3 right = forward.cross(UpVector);
-			const float3 nextPos = lastPos + owner->speed;
-
-			float3 flatForward = forward;
-			flatForward.Normalize2D();
-
-			wantedSpeed  = ZeroVector;
-			wantedSpeed += (flatForward * fpsCon.forward);
-			wantedSpeed -= (flatForward * fpsCon.back   );
-			wantedSpeed += (      right * fpsCon.right  );
-			wantedSpeed -= (      right * fpsCon.left   );
-
-			wantedSpeed.Normalize();
-			wantedSpeed *= maxWantedSpeed;
-
-			if (!nextPos.IsInBounds())
-				owner->SetVelocityAndSpeed(ZeroVector);
-
-			UpdateAirPhysics();
-			wantedHeading = GetHeadingFromVector(flatForward.x, flatForward.z);
-		}
+		// FPS (first-person) unit control removed: client-side only feature
 	}
 
 	switch (aircraftState) {
@@ -979,9 +906,10 @@ bool CHoverAirMoveType::Update()
 			UpdateHovering();
 			break;
 		case AIRCRAFT_CRASHING: {
-			if (UpdateAirPhysics()
-					|| (CGround::GetHeightAboveWater(owner->pos.x, owner->pos.z) + 5.0f + owner->radius) > owner->pos.y){
-				owner->ForcedKillUnit(nullptr, true, false, -CSolidObject::DAMAGE_AIRCRAFT_CRASHED);
+			UpdateAirPhysics();
+
+			if ((CGround::GetHeightAboveWater(owner->pos.x, owner->pos.z) + 5.0f + owner->radius) > owner->pos.y) {
+				owner->ForcedKillUnit(nullptr, true, false);
 			} else {
 				#define SPIN_DIR(o) ((o->id & 1) * 2 - 1)
 				wantedHeading = GetHeadingFromVector(owner->rightdir.x * SPIN_DIR(owner), owner->rightdir.z * SPIN_DIR(owner));
@@ -1009,7 +937,6 @@ bool CHoverAirMoveType::Update()
 
 void CHoverAirMoveType::SlowUpdate()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	UpdateMoveRate();
 	// note: NOT AAirMoveType::SlowUpdate
 	AMoveType::SlowUpdate();
@@ -1018,7 +945,6 @@ void CHoverAirMoveType::SlowUpdate()
 /// Returns true if indicated position is a suitable landing spot
 bool CHoverAirMoveType::CanLandAt(const float3& pos) const
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (forceHeading)
 		return true;
 	if (!CanLand(false))
@@ -1026,7 +952,7 @@ bool CHoverAirMoveType::CanLandAt(const float3& pos) const
 	if (!pos.IsInBounds())
 		return false;
 
-	if ((CGround::GetApproximateHeight(pos) < CGround::GetWaterLevel(pos.x, pos.z)) && ((mapInfo->water.damage > 0.0f) || !(floatOnWater || canSubmerge)))
+	if ((CGround::GetApproximateHeight(pos) < 0.0f) && ((mapInfo->water.damage > 0.0f) || !(floatOnWater || canSubmerge)))
 		return false;
 
 	const int2 os = {owner->xsize, owner->zsize};
@@ -1044,14 +970,12 @@ bool CHoverAirMoveType::CanLandAt(const float3& pos) const
 
 void CHoverAirMoveType::ForceHeading(short h)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	forceHeading = true;
 	forcedHeading = h;
 }
 
 void CHoverAirMoveType::Takeoff()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (aircraftState == AAirMoveType::AIRCRAFT_LANDED) {
 		SetState(AAirMoveType::AIRCRAFT_TAKEOFF);
 	}
@@ -1062,7 +986,6 @@ void CHoverAirMoveType::Takeoff()
 
 void CHoverAirMoveType::Land()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (aircraftState == AAirMoveType::AIRCRAFT_HOVERING) {
 		SetState(AAirMoveType::AIRCRAFT_FLYING); // switch to flying, it performs necessary checks to prepare for landing
 	}
@@ -1070,7 +993,6 @@ void CHoverAirMoveType::Land()
 
 bool CHoverAirMoveType::HandleCollisions(bool checkCollisions)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const float3& pos = owner->pos;
 
 	if (pos != oldPos) {
@@ -1144,7 +1066,7 @@ bool CHoverAirMoveType::HandleCollisions(bool checkCollisions)
 		}
 
 		if (hitBuilding && owner->IsCrashing()) {
-			owner->ForcedKillUnit(nullptr, true, false, -CSolidObject::DAMAGE_AIRCRAFT_CRASHED);
+			owner->ForcedKillUnit(nullptr, true, false);
 			return true;
 		}
 
@@ -1169,7 +1091,6 @@ bool CHoverAirMoveType::HandleCollisions(bool checkCollisions)
 
 
 bool CHoverAirMoveType::SetMemberValue(unsigned int memberHash, void* memberValue) {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// try the generic members first
 	if (AMoveType::SetMemberValue(memberHash, memberValue))
 		return true;

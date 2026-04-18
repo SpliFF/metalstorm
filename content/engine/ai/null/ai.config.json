@@ -1,0 +1,7 @@
+{
+    "name": "Null AI",
+    "description": "Engine-provided AI that owns a team but never issues commands. Used as a safe default when a team slot needs an owner but you don't want any automated behaviour.",
+    "version": "1",
+    "author": "spring-web",
+    "entry": "main.lua"
+}

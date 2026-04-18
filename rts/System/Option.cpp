@@ -8,10 +8,7 @@
 #include "System/StringUtil.h"
 #include "System/Exceptions.h"
 #include "System/Log/ILog.h"
-#include "System/FileSystem/FileSystem.h"
-#include "System/FileSystem/ArchiveScanner.h"
 #include "Lua/LuaParser.h"
-#include "Map/MapParser.h"
 
 #include <cassert>
 
@@ -216,64 +213,5 @@ void option_parseOptionsLuaString(
 	option_parseOptionsInternal(options, luaParser, "<Lua-Text-Chunk>", optionsSet);
 }
 
-
-void option_parseMapOptions(
-		std::vector<Option>& options,
-		const std::string& fileName,
-		const std::string& mapName,
-		const std::string& fileModes,
-		const std::string& accessModes,
-		std::set<std::string>* optionsSet)
-{
-	LuaParser luaParser(fileName, fileModes, accessModes);
-
-	const string mapFile    = archiveScanner->MapNameToMapFile(mapName);
-	const string configName = MapParser::GetMapConfigName(mapFile);
-
-	if (mapName.empty())
-		throw "Missing map name!";
-
-	if (configName.empty())
-		throw "Could not determine config-file name from the map name '" + mapName + "'!";
-
-	luaParser.GetTable("Map");
-	luaParser.AddString("name",     mapName);
-	luaParser.AddString("fileName", FileSystem::GetFilename(mapFile));
-	luaParser.AddString("fullName", mapFile);
-	luaParser.AddString("configFile", configName);
-	luaParser.EndTable();
-
-	if (!luaParser.Execute()) {
-		throw content_error("luaParser.Execute() failed: "
-				+ luaParser.GetErrorLog());
-	}
-
-	const LuaTable root = luaParser.GetRoot();
-	if (!root.IsValid()) {
-		throw content_error("root table invalid");
-	}
-
-	std::set<std::string>* myOptionsSet = nullptr;
-	if (optionsSet == nullptr) {
-		myOptionsSet = new std::set<std::string>();
-	} else {
-		myOptionsSet = optionsSet;
-	}
-	for (int index = 1; root.KeyExists(index); index++) {
-		Option opt;
-		try {
-			option_parseOption(root, index, opt, *myOptionsSet);
-			options.push_back(opt);
-		} catch (const content_error& err) {
-			LOG_L(L_WARNING,
-					"Failed parsing map-option %d from %s for map %s: %s",
-					index, fileName.c_str(), mapName.c_str(), err.what());
-		}
-	}
-	if (optionsSet == nullptr) {
-		delete myOptionsSet;
-		myOptionsSet = nullptr;
-	}
-}
 
 #endif // _OPTION_CPP

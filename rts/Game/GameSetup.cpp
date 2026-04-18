@@ -8,10 +8,7 @@
 #include "System/Exceptions.h"
 #include "System/SpringFormat.h"
 #include "System/StringUtil.h"
-#include "System/Cpp11Compat.hpp"
-#include "System/FileSystem/ArchiveScanner.h"
-#include "System/FileSystem/RapidHandler.h"
-#include "System/SpringHash.h"
+#include "System/Sync/HsiehHash.h"
 #include "System/Log/ILog.h"
 
 #include <algorithm>
@@ -20,12 +17,8 @@
 #include <cstring>
 #include <fstream>
 
-#include "System/Misc/TracyDefs.h"
-
 CR_BIND(CGameSetup,)
 CR_REG_METADATA(CGameSetup, (
-	CR_IGNORED(initBlank),
-
 	CR_IGNORED(fixedAllies),
 	CR_IGNORED(useLuaGaia),
 	CR_IGNORED(luaDevMode),
@@ -40,7 +33,7 @@ CR_REG_METADATA(CGameSetup, (
 
 	CR_IGNORED(dsMapHash),
 	CR_IGNORED(dsModHash),
-	CR_IGNORED(fixedRNGSeed),
+	CR_IGNORED(mapSeed),
 
 	CR_IGNORED(gameStartDelay),
 
@@ -89,7 +82,6 @@ CGameSetup* gameSetup = &gLocalGameSetup;
 
 bool CGameSetup::LoadReceivedScript(const std::string& script, bool isHost)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	CGameSetup tempGameSetup;
 
 	if (!tempGameSetup.Init(script)) {
@@ -113,7 +105,6 @@ bool CGameSetup::LoadReceivedScript(const std::string& script, bool isHost)
 
 bool CGameSetup::LoadSavedScript(const std::string& file, const std::string& script)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (script.empty()) {
 		gameSetup = &gDummyGameSetup;
 		return false;
@@ -136,40 +127,34 @@ bool CGameSetup::LoadSavedScript(const std::string& file, const std::string& scr
 }
 
 bool CGameSetup::ScriptLoaded() {
-	RECOIL_DETAILED_TRACY_ZONE;
 	return (gameSetup != &gDummyGameSetup && !gameSetup->setupText.empty());
 }
 
 
 const spring::unordered_map<std::string, std::string>& CGameSetup::GetMapOptions()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// will always be empty if !ScriptLoaded
 	return (gameSetup->GetMapOptionsCont());
 }
 
 const spring::unordered_map<std::string, std::string>& CGameSetup::GetModOptions()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	return (gameSetup->GetModOptionsCont());
 }
 
 
 const std::vector<PlayerBase>& CGameSetup::GetPlayerStartingData()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	return gameSetup->GetPlayerStartingDataCont();
 }
 
 const std::vector<TeamBase>& CGameSetup::GetTeamStartingData()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	return gameSetup->GetTeamStartingDataCont();
 }
 
 const std::vector<AllyTeam>& CGameSetup::GetAllyStartingData()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	return gameSetup->GetAllyStartingDataCont();
 }
 
@@ -177,8 +162,6 @@ const std::vector<AllyTeam>& CGameSetup::GetAllyStartingData()
 
 void CGameSetup::ResetState()
 {
-	initBlank = false;
-
 	fixedAllies = true;
 	useLuaGaia = true;
 	luaDevMode = false;
@@ -193,7 +176,7 @@ void CGameSetup::ResetState()
 
 	std::memset(dsMapHash, 0, sizeof(dsMapHash));
 	std::memset(dsModHash, 0, sizeof(dsModHash));
-	fixedRNGSeed = 0;
+	mapSeed = 0;
 
 	gameStartDelay = 0;
 	numDemoPlayers = 0;
@@ -232,7 +215,6 @@ void CGameSetup::ResetState()
 
 void CGameSetup::LoadUnitRestrictions(const TdfParser& file)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	int numRestrictions;
 	file.GetDef(numRestrictions, "0", "GAME\\NumRestrictions");
 
@@ -249,7 +231,6 @@ void CGameSetup::LoadUnitRestrictions(const TdfParser& file)
 
 void CGameSetup::LoadStartPositionsFromMap(int numTeams, const std::function<bool(MapParser& mapParser, int teamNum)>& startPosPred)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	MapParser mapParser(MapFileName());
 
 	if (!mapParser.IsValid())
@@ -261,7 +242,6 @@ void CGameSetup::LoadStartPositionsFromMap(int numTeams, const std::function<boo
 
 void CGameSetup::LoadStartPositions(bool withoutMap)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (withoutMap && (startPosType == StartPos_Random || startPosType == StartPos_Fixed))
 		throw content_error("You need the map to use the map's start-positions");
 
@@ -272,8 +252,8 @@ void CGameSetup::LoadStartPositions(bool withoutMap)
 	if (startPosType == StartPos_Random) {
 		// Server syncs these later, so we can use unsynced rng
 		CGlobalUnsyncedRNG rng;
-		rng.Seed(spring::LiteHash(setupText.c_str(), setupText.length(), 1234567));
-		spring::random_shuffle(teamStartNums.begin(), teamStartNums.begin() + teamStartingData.size(), rng);
+		rng.Seed(HsiehHash(setupText.c_str(), setupText.length(), 1234567));
+		std::shuffle(teamStartNums.begin(), teamStartNums.begin() + teamStartingData.size(), rng);
 	}
 
 	for (size_t i = 0; i < teamStartingData.size(); ++i)
@@ -285,11 +265,10 @@ void CGameSetup::LoadStartPositions(bool withoutMap)
 	LoadStartPositionsFromMap(teamStartingData.size(), [&](MapParser& mapParser, int teamNum) {
 		float3 pos;
 
-		// try to parse start position for teamNum, emit a warning if none found but
-		// do not block on this, in case this is explicitly desired so as to let the
-		// game handle the missing startpos
+		// don't fail when playing with more players than
+		// start positions and we didn't use them anyway
 		if (!mapParser.GetStartPos(teamStartingData[teamNum].teamStartNum, pos)) {
-			LOG_L(L_WARNING, "%s", mapParser.GetErrorLog().c_str());
+			throw content_error(mapParser.GetErrorLog());
 			return false;
 		}
 
@@ -302,19 +281,16 @@ void CGameSetup::LoadStartPositions(bool withoutMap)
 
 void CGameSetup::LoadMutators(const TdfParser& file, std::vector<std::string>& mutatorsList)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
-	for (int a = 0; /*NO-OP*/; ++a) {
+	for (int a = 0; a < 10; ++a) {
 		const std::string s = file.SGetValueDef("", IntToString(a, "GAME\\MUTATOR%i"));
 		if (s.empty())
 			break;
-
 		mutatorsList.push_back(s);
 	}
 }
 
 void CGameSetup::LoadPlayers(const TdfParser& file, spring::unordered_set<std::string>& nameList)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	assert(numDemoPlayers == 0);
 
 	// i = player index in game (no gaps), a = player index in script
@@ -328,7 +304,7 @@ void CGameSetup::LoadPlayers(const TdfParser& file, spring::unordered_set<std::s
 
 		// expects lines of form team=x rather than team=TEAMx
 		// team field is relocated in RemapTeams
-		for (const auto& it: file.GetAllValues(section))
+		for (auto it: file.GetAllValues(section))
 			playerBase.SetValue(it.first, it.second);
 
 		// do checks for sanity
@@ -357,7 +333,6 @@ void CGameSetup::LoadPlayers(const TdfParser& file, spring::unordered_set<std::s
 
 void CGameSetup::LoadSkirmishAIs(const TdfParser& file, spring::unordered_set<std::string>& nameList)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// i = AI index in game (no gaps), a = AI index in script
 	for (int a = 0; a < MAX_PLAYERS; ++a) {
 		const std::string section = "GAME\\AI" + IntToString(a, "%i") + "\\";
@@ -409,7 +384,6 @@ void CGameSetup::LoadSkirmishAIs(const TdfParser& file, spring::unordered_set<st
 
 void CGameSetup::LoadTeams(const TdfParser& file)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// i = team index in game (no gaps), a = team index in script
 	for (int i = 0, a = 0; a < MAX_TEAMS; ++a) {
 		const std::string section = "GAME\\TEAM" + IntToString(a, "%i");
@@ -440,7 +414,6 @@ void CGameSetup::LoadTeams(const TdfParser& file)
 
 void CGameSetup::LoadAllyTeams(const TdfParser& file)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// i = allyteam index in game (no gaps), a = allyteam index in script
 	for (int i = 0, a = 0; a < MAX_TEAMS; ++a) {
 		const std::string section = "GAME\\ALLYTEAM" + IntToString(a, "%i");
@@ -491,7 +464,6 @@ void CGameSetup::LoadAllyTeams(const TdfParser& file)
 
 void CGameSetup::RemapPlayers()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// relocate Team.TeamLeader field
 	for (size_t a = 0; a < teamStartingData.size(); ++a) {
 		if (playerRemap.find(teamStartingData[a].GetLeader()) == playerRemap.end()) {
@@ -513,7 +485,6 @@ void CGameSetup::RemapPlayers()
 
 void CGameSetup::RemapTeams()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// relocate Player.team field
 	for (size_t a = 0; a < playerStartingData.size(); ++a) {
 		if (playerStartingData[a].spectator) {
@@ -538,7 +509,6 @@ void CGameSetup::RemapTeams()
 
 void CGameSetup::RemapAllyteams()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// relocate Team.Allyteam field
 	for (auto& startData: teamStartingData) {
 		if (allyteamRemap.find(startData.teamAllyteam) == allyteamRemap.end())
@@ -551,7 +521,6 @@ void CGameSetup::RemapAllyteams()
 // TODO: RemapSkirmishAIs()
 bool CGameSetup::Init(const std::string& buf)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (!setupText.empty()) {
 		throw content_error("initializing a non-empty GameSetup instance");
 		return false;
@@ -608,15 +577,8 @@ bool CGameSetup::Init(const std::string& buf)
 	}
 	#endif
 
-	/* Don't be afraid to reuse MapSeed for something sensible if you're
-	 * implementing a proper random map generator. It's just used here
-	 * since historically the "random" map generator produced blank maps. */
-	int legacyMapSeed;
-	file.GetTDef(legacyMapSeed, 0, "GAME\\MapSeed");
+	file.GetTDef(mapSeed, unsigned(0), "GAME\\MapSeed");
 
-	file.GetTDef(initBlank, bool (legacyMapSeed != 0), "GAME\\InitBlank");
-
-	file.GetTDef(fixedRNGSeed, unsigned(0), "GAME\\FixedRNGSeed"); // 0 means use random seed
 	gameID      = file.SGetValueDef("",  "GAME\\GameID");
 	modName     = file.SGetValueDef("",  "GAME\\Gametype");
 	mapName     = file.SGetValueDef("",  "GAME\\MapName");
@@ -634,7 +596,7 @@ bool CGameSetup::Init(const std::string& buf)
 	file.GetDef(ghostedBuildings,    "1", "GAME\\ModOptions\\GhostedBuildings");
 
 	file.GetDef(maxSpeed, "20.", "GAME\\ModOptions\\MaxSpeed");
-	file.GetDef(minSpeed, "0.1", "GAME\\ModOptions\\MinSpeed");
+	file.GetDef(minSpeed, "0.3", "GAME\\ModOptions\\MinSpeed");
 
 	file.GetDef(fixedAllies, "1", "GAME\\ModOptions\\FixedAllies");
 
@@ -664,18 +626,12 @@ bool CGameSetup::Init(const std::string& buf)
 	LoadMutators(file, mutatorsList);
 	LoadUnitRestrictions(file);
 
-	// Postprocessing
-	modName = GetRapidPackageFromTag(modName);
-	modName = archiveScanner->GameHumanNameFromArchive(modName);
-
-	file.GetDef(onlyLocal, (archiveScanner->GetArchiveData(modName).GetOnlyLocal() ? "1" : "0"), "GAME\\OnlyLocal");
-	onlyLocal |= forceOnlyLocal;
-
+	file.GetDef(onlyLocal, "0", "GAME\\OnlyLocal");
 	return true;
 }
 
 std::string CGameSetup::MapFileName() const
 {
-	return (archiveScanner->MapNameToMapFile(mapName));
+	return mapName;
 }
 

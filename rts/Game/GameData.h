@@ -5,21 +5,12 @@
 
 #include <string>
 #include <vector>
-#include <cinttypes>
-#include <memory>
-
-namespace netcode {
-	class RawPacket;
-}
 
 class GameData
 {
 public:
 	GameData();
 	GameData(const std::string& setup);
-	GameData(std::shared_ptr<const netcode::RawPacket> pckt);
-
-	const netcode::RawPacket* Pack() const;
 
 	void SetSetupText(const std::string& newSetup);
 	void SetMapChecksum(const uint8_t* checksum) { std::copy(checksum, checksum + sizeof(mapChecksum), mapChecksum); }

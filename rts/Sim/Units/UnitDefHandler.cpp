@@ -9,13 +9,10 @@
 #include "UnitDefHandler.h"
 #include "UnitDef.h"
 #include "Lua/LuaParser.h"
-#include "Sim/Features/FeatureDefHandler.h"
 #include "System/Exceptions.h"
 #include "System/Log/ILog.h"
 #include "System/StringUtil.h"
-#include "System/Sound/ISound.h"
 
-#include "System/Misc/TracyDefs.h"
 
 static CUnitDefHandler gUnitDefHandler;
 CUnitDefHandler* unitDefHandler = &gUnitDefHandler;
@@ -30,7 +27,6 @@ bool isblank(int c) {
 
 void CUnitDefHandler::Init(LuaParser* defsParser)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	noCost = false;
 
 	const LuaTable& rootTable = defsParser->GetRoot().SubTable("UnitDefs");
@@ -61,7 +57,6 @@ void CUnitDefHandler::Init(LuaParser* defsParser)
 
 int CUnitDefHandler::PushNewUnitDef(const std::string& unitName, const LuaTable& udTable)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (std::find_if(unitName.begin(), unitName.end(), isblank) != unitName.end())
 		LOG_L(L_WARNING, "[%s] UnitDef name \"%s\" contains white-spaces", __func__, unitName.c_str());
 
@@ -91,7 +86,6 @@ int CUnitDefHandler::PushNewUnitDef(const std::string& unitName, const LuaTable&
 
 void CUnitDefHandler::CleanBuildOptions()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	std::vector<int> eraseOpts;
 
 	// remove invalid build options
@@ -121,7 +115,6 @@ void CUnitDefHandler::CleanBuildOptions()
 
 void CUnitDefHandler::ProcessDecoys()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// assign the decoy pointers, and build the decoy map
 	for (const auto& p: decoyNameMap) {
 		const auto fakeIt = unitDefIDs.find(p.first);
@@ -153,7 +146,6 @@ void CUnitDefHandler::ProcessDecoys()
 
 void CUnitDefHandler::UnitDefLoadSounds(UnitDef* ud, const LuaTable& udTable)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	LuaTable soundsTable = udTable.SubTable("sounds");
 
 	LoadSounds(soundsTable, ud->sounds.ok,          "ok");      // eg. "ok1", "ok2", ...
@@ -169,7 +161,6 @@ void CUnitDefHandler::UnitDefLoadSounds(UnitDef* ud, const LuaTable& udTable)
 
 void CUnitDefHandler::LoadSounds(const LuaTable& soundsTable, GuiSoundSet& gsound, const string& soundName)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	string fileName = soundsTable.GetString(soundName, "");
 	if (!fileName.empty()) {
 		CommonDefHandler::AddSoundSetData(gsound, fileName, 1.0f);
@@ -205,7 +196,6 @@ void CUnitDefHandler::LoadSounds(const LuaTable& soundsTable, GuiSoundSet& gsoun
 
 const UnitDef* CUnitDefHandler::GetUnitDefByName(std::string name)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	StringToLowerInPlace(name);
 
 	const auto it = unitDefIDs.find(name);
@@ -219,7 +209,6 @@ const UnitDef* CUnitDefHandler::GetUnitDefByName(std::string name)
 
 void CUnitDefHandler::SetNoCost(bool value)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (noCost == value)
 		return;
 
@@ -230,20 +219,3 @@ void CUnitDefHandler::SetNoCost(bool value)
 	}
 }
 
-void CUnitDefHandler::SanitizeUnitDefs()
-{
-	for (auto &ud : unitDefsVector) {
-		// Factories cannot assist another builder
-		if (ud.IsFactoryUnit())
-			ud.canAssist = false;
-
-		// Make sure the wreck name refers to an existent feature
-		if (ud.wreckName != "") {
-			const auto* const wreckFeatureDef = featureDefHandler->GetFeatureDef(ud.wreckName);
-			if (wreckFeatureDef == nullptr) {
-				// warning message already produced by GetFeatureDef
-				ud.wreckName = "";
-			}
-		}
-	}
-}

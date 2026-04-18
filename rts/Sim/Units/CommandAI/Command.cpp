@@ -97,18 +97,4 @@ void Command::CopyParams(const Command& c) {
 	}
 }
 
-void Command::Serialize(creg::ISerializer* s) {
-	if (s->IsWriting()) {
-		for (unsigned int i = 0; i < numParams; i++) {
-			float p = GetParam(i);
-			s->Serialize(&p, sizeof(p));
-		}
-	} else {
-		const unsigned int tempNumParams = numParams;
-		for (numParams = 0; numParams < tempNumParams;) {
-			float p;
-			s->Serialize(&p, sizeof(p));
-			PushParam(p);
-		}
-	}
-}
+// creg Serialize removed — serialisation replaced by SQLite + snapshots

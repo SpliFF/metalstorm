@@ -2,24 +2,15 @@
 
 #include "GlobalSynced.h"
 
-#include <algorithm>
 #include <assert.h>
-#include <common/TracyColor.hpp>
 #include <cstring>
 
-#include "ExternalAI/SkirmishAIHandler.h"
 #include "Game/GameSetup.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/GlobalConstants.h"
 #include "System/SafeUtil.h"
 #include "System/Log/FramePrefixer.h"
 
-#ifdef SYNCCHECK
-	#include "System/Sync/SyncChecker.h"
-#endif
-
-const char* const tracingSpeedFactor = "SpeedFactor";
-const char* const tracingWantedSpeedFactor = "WantedSpeedFactor";
 
 /**
  * @brief global synced
@@ -38,7 +29,6 @@ CR_BIND(CGlobalSynced, )
 CR_REG_METADATA(CGlobalSynced, (
 	CR_MEMBER(frameNum),
 	CR_MEMBER(tempNum),
-	CR_MEMBER(mtTempNum),
 	CR_MEMBER(godMode),
 
 	CR_MEMBER(speedFactor),
@@ -63,19 +53,13 @@ void CGlobalSynced::ResetState() {
 	tempNum  =  1;
 	godMode  =  0;
 
-	std::fill(std::begin(mtTempNum), std::end(mtTempNum), 1);
-
 #ifdef SYNCCHECK
 	// reset checksum
 	CSyncChecker::NewFrame();
 #endif
-	TracyPlotConfig(tracingSpeedFactor, tracy::PlotFormatType::Number, true, false, tracy::Color::Aqua);
-	TracyPlotConfig(tracingWantedSpeedFactor, tracy::PlotFormatType::Number, true, false, tracy::Color::Aqua);
 
 	speedFactor       = 1.0f;
-	TracyPlot(tracingSpeedFactor, speedFactor);
 	wantedSpeedFactor = 1.0f;
-	TracyPlot(tracingWantedSpeedFactor, wantedSpeedFactor);
 
 	paused          = false;
 	cheatEnabled    = false;
@@ -94,7 +78,5 @@ void CGlobalSynced::LoadFromSetup(const CGameSetup* setup)
 
 	teamHandler.ResetState();
 	teamHandler.LoadFromSetup(setup);
-	skirmishAIHandler.ResetState();
-	skirmishAIHandler.LoadFromSetup(*setup);
 }
 

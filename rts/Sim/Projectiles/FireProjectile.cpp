@@ -2,12 +2,7 @@
 
 
 #include "FireProjectile.h"
-#include "Game/Camera.h"
 #include "Game/GlobalUnsynced.h"
-#include "Rendering/GlobalRendering.h"
-#include "Rendering/Env/Particles/ProjectileDrawer.h"
-#include "Rendering/GL/RenderBuffers.h"
-#include "Rendering/Textures/TextureAtlas.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/QuadField.h"
 #include "Sim/Features/Feature.h"
@@ -16,8 +11,6 @@
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Units/Unit.h"
 #include "System/creg/STL_Deque.h"
-
-#include "System/Misc/TracyDefs.h"
 
 CR_BIND_DERIVED(CFireProjectile, CProjectile, )
 CR_BIND(CFireProjectile::SubParticle, )
@@ -68,12 +61,10 @@ CFireProjectile::CFireProjectile(
 	SetPosition(pos + (UpVector * particleTime * speed.w * 0.5f));
 
 	alwaysVisible = true;
-	castShadow = true;
 }
 
 void CFireProjectile::Update()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if ((--ttl) > 0) {
 		const float partSat = (gs->frameNum & 1) ? 1.0f : 0.8f;
 		if (projectileHandler.GetParticleSaturation() < partSat) {
@@ -86,7 +77,7 @@ void CFireProjectile::Update()
 			sub.pos.y += sub.posDif.y;
 			sub.posDif.y = 0;
 			sub.rotSpeed = (guRNG.NextFloat() - 0.5f) * 4;
-			sub.smokeType = guRNG.NextInt(projectileDrawer->NumSmokeTextures());
+			sub.smokeType = 0;
 			subParticles.push_front(sub);
 
 			sub.maxSize = (0.7f + guRNG.NextFloat()*0.3f) * particleSize;
@@ -142,96 +133,4 @@ void CFireProjectile::Update()
 	deleteMe |= (ttl <= -particleTime);
 }
 
-void CFireProjectile::Draw()
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-	uint8_t col[4];
-	col[3] = 1;
-	uint8_t col2[4];
-
-	const auto* et = projectileDrawer->explotex;
-
-	for (const SubParticle& pi: subParticles2) {
-		const float  age = pi.age + ageSpeed * globalRendering->timeOffset;
-		const float size = pi.maxSize * age;
-		const float  rot = pi.rotSpeed * age;
-
-		const float sinRot = fastmath::sin(rot);
-		const float cosRot = fastmath::cos(rot);
-
-		float3 dir1 = (camera->GetRight()*cosRot + camera->GetUp()*sinRot) * size;
-		float3 dir2 = (camera->GetRight()*sinRot - camera->GetUp()*cosRot) * size;
-
-		float3 interPos = pi.pos;
-
-		col[0] = (uint8_t) ((1 - age) * 255);
-		col[1] = (uint8_t) ((1 - age) * 255);
-		col[2] = (uint8_t) ((1 - age) * 255);
-
-		AddEffectsQuad<0>(
-			et->pageNum,
-			{ interPos - dir1 - dir2, et->xstart, et->ystart, col },
-			{ interPos + dir1 - dir2, et->xend,   et->ystart, col },
-			{ interPos + dir1 + dir2, et->xend,   et->yend,   col },
-			{ interPos - dir1 + dir2, et->xstart, et->yend,   col }
-		);
-	}
-
-	for (const SubParticle& pi: subParticles) {
-		const auto* at = projectileDrawer->GetSmokeTexture(pi.smokeType);
-
-		const float  age = pi.age + ageSpeed * globalRendering->timeOffset;
-		const float size = pi.maxSize * fastmath::apxsqrt(age);
-		const float  rot = pi.rotSpeed * age;
-
-		const float sinRot = fastmath::sin(rot);
-		const float cosRot = fastmath::cos(rot);
-
-		float3 dir1 = (camera->GetRight() * cosRot + camera->GetUp() * sinRot) * size;
-		float3 dir2 = (camera->GetRight() * sinRot - camera->GetUp() * cosRot) * size;
-
-		float3 interPos = pi.pos;
-
-		if (age < 1/1.31f) {
-			col[0] = (uint8_t) ((1 - age * 1.3f) * 255);
-			col[1] = (uint8_t) ((1 - age * 1.3f) * 255);
-			col[2] = (uint8_t) ((1 - age * 1.3f) * 255);
-			col[3] = 1;
-
-			AddEffectsQuad<0>(
-				et->pageNum,
-				{ interPos - dir1 - dir2, et->xstart, et->ystart, col },
-				{ interPos + dir1 - dir2, et->xend,   et->ystart, col },
-				{ interPos + dir1 + dir2, et->xend,   et->yend,   col },
-				{ interPos - dir1 + dir2, et->xstart, et->yend,   col }
-			);
-		}
-
-		uint8_t c;
-		if (age < 0.5f) {
-			c = (uint8_t)        (age * 510);
-		} else {
-			c = (uint8_t) (510 - (age * 510));
-		}
-		col2[0] = (uint8_t) (c * 0.6f);
-		col2[1] = (uint8_t) (c * 0.6f);
-		col2[2] = (uint8_t) (c * 0.6f);
-		col2[3] = c;
-
-		AddEffectsQuad<0>(
-			at->pageNum,
-			{ interPos - dir1 - dir2, at->xstart, at->ystart, col2 },
-			{ interPos + dir1 - dir2, at->xend,   at->ystart, col2 },
-			{ interPos + dir1 + dir2, at->xend,   at->yend,   col2 },
-			{ interPos - dir1 + dir2, at->xstart, at->yend,   col2 }
-		);
-	}
-}
-
-
-int CFireProjectile::GetProjectilesCount() const
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-	return subParticles2.size() + subParticles.size() * 2;
-}
 

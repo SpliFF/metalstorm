@@ -1,54 +1,39 @@
-/* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+/**
+ * creg stub — serialisation system removed
+ *
+ * creg was Spring's custom serialisation system for save/load game state.
+ * In the server-authoritative model, state persistence uses SQLite and
+ * snapshot serialisation instead. These macros expand to nothing.
+ */
 
-#ifndef _CREG_COND_H_
-#define _CREG_COND_H_
+#ifndef CREG_COND_H
+#define CREG_COND_H
 
-// AIs which want to use creg have to specify this when compiling:
-// '-DUSING_CREG'
+// All creg macros expand to nothing (variadic to handle nested commas)
+#define CR_DECLARE(...)
+#define CR_DECLARE_DERIVED(...)
+#define CR_DECLARE_STRUCT(...)
+#define CR_DECLARE_SUB(...)
+#define CR_BIND(...)
+#define CR_BIND_DERIVED(...)
+#define CR_BIND_DERIVED_INTERFACE(...)
+#define CR_BIND_DERIVED_INTERFACE_POOL(...)
+#define CR_BIND_DERIVED_POOL(...)
+#define CR_BIND_DERIVED_SUB(...)
+#define CR_BIND_INTERFACE(...)
+#define CR_BIND_TEMPLATE(...)
+#define CR_REG_METADATA(...)
+#define CR_REG_METADATA_SUB(...)
+#define CR_REG_METADATA_TEMPLATE(...)
+#define CR_MEMBER(...)
+#define CR_MEMBER_BEGINFLAG(...)
+#define CR_MEMBER_ENDFLAG(...)
+#define CR_MEMBER_SETFLAG(...)
+#define CR_MEMBER_UN(...)
+#define CR_IGNORED(...)
+#define CR_SETFLAG(...)
+#define CR_POSTLOAD(...)
+#define CR_SERIALIZER(...)
+#define CR_ENUM_MEMBER(...)
 
-#if defined BUILDING_AI && !defined USING_CREG
-	#if !defined NOT_USING_CREG
-		#define NOT_USING_CREG
-	#endif
-#elif !defined NOT_USING_CREG // defined BUILDING_AI && !defined USING_CREG
-	#if !defined USING_CREG
-		#define USING_CREG
-	#endif // !defined USING_CREG
-	#include "creg.h"
-#endif // defined BUILDING_AI && !defined USING_CREG
-
-#ifdef NOT_USING_CREG
-#undef USING_CREG
-#include "ISerializer.h" // prevent some compiler errors
-// define all creg preprocessor macros from creg_cond.h to nothing
-#define CR_DECLARE(TCls)
-#define CR_DECLARE_DERIVED(TCls)
-#define CR_DECLARE_STRUCT(TStr)
-#define CR_DECLARE_SUB(cl)
-#define CR_BIND_DERIVED(TCls, TBase, ctor_args)
-#define CR_BIND(TCls, ctor_args)
-#define CR_BIND_DERIVED_INTERFACE(TCls, TBase)
-#define CR_BIND_DERIVED_INTERFACE_POOL(TCls, TBase, poolAlloc, poolFree)
-#define CR_BIND_DERIVED_POOL(TCls, TBase, ctor_args, poolAlloc, poolFree)
-#define CR_BIND_INTERFACE(TCls)
-#define CR_BIND_TEMPLATE(TCls, ctor_args)
-#define CR_BIND_TEMPLATE_1TYPED(TCls, TArg, ctor_args)
-#define CR_BIND_TEMPLATE_2TYPED(TCls, TArg1, TArg2, ctor_args)
-#define CR_REG_METADATA(TClass, Members)
-#define CR_REG_METADATA_SUB(TSuperClass, TSubClass, Members)
-#define CR_REG_METADATA_TEMPLATE(TCls, Members)
-#define CR_REG_METADATA_TEMPLATE_1TYPED(TCls, TArg, Members)
-#define CR_REG_METADATA_TEMPLATE_2TYPED(TCls, TArg1, TArg2, Members)
-#define CR_MEMBER(Member)
-#define CR_IGNORED(Member)
-#define CR_MEMBER_UN(Member)
-#define CR_SETFLAG(Flag)
-#define CR_MEMBER_SETFLAG(Member, Flag)
-#define CR_MEMBER_BEGINFLAG(Flag)
-#define CR_MEMBER_ENDFLAG(Flag)
-#define CR_SERIALIZER(SerializeFunc)
-#define CR_POSTLOAD(PostLoadFunc)
-#define CR_PREALLOC(GetContainerFunc)
-#endif // NOT_USING_CREG
-
-#endif // _CREG_COND_H_
+#endif // CREG_COND_H

@@ -10,8 +10,7 @@
 
 
 /**
- * Acts as a base class for everything that can control a team,
- * which is either a human player or a Skirmish AI.
+ * Acts as a base class for everything that can control a team.
  *
  * Note: This class should be seen as abstract,
  * even though it is not, C++ technically speaking.
@@ -36,7 +35,6 @@ public:
 
 	/**
 	 * The purely informative name of the controlling instance.
-	 * This is either the human players nick or the Skirmish AIs instance nick.
 	 */
 	std::string name;
 };
@@ -47,6 +45,8 @@ public:
  *
  * Note: This class should be seen as abstract,
  * even though it is not, C++ technically speaking.
+ *
+ * This should be the base class of PlayerStatistics.
  */
 struct TeamControllerStatistics {
 public:

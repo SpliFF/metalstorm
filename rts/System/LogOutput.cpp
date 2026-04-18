@@ -5,7 +5,6 @@
 #include "System/StringUtil.h"
 #include "Game/GameVersion.h"
 #include "System/Config/ConfigHandler.h"
-#include "System/FileSystem/FileSystem.h"
 #include "System/Log/DefaultFilter.h"
 #include "System/Log/FileSink.h"
 #include "System/Log/ILog.h"
@@ -18,8 +17,9 @@
 #include <string>
 #include <iostream>
 #include <sstream>
-#include <ranges>
-#include <nowide/cstdio.hpp>
+#include <filesystem>
+#include <chrono>
+#include <ctime>
 
 #include <cassert>
 #include <cstring>
@@ -34,7 +34,7 @@ CONFIG(bool, RotateLogFiles)
 
 CONFIG(std::string, LogSections)
 	.defaultValue("")
-	.description("Comma-separated list of enabled logsections, use this for log filtering by setting log level for each sections. See infolog.txt / console output for possible values.");
+	.description("Comma-separated list of enabled logsections, see infolog.txt / console output for possible values.");
 
 
 CONFIG(int, LogFlushLevel)
@@ -42,8 +42,8 @@ CONFIG(int, LogFlushLevel)
 	.description("Flush the logfile when a message's level exceeds this value. ERROR is flushed by default, WARNING is not.");
 
 CONFIG(int, LogRepeatLimit)
-	.defaultValue(0)
-	.description("Allow at most this many consecutive identical messages to be logged. Set to 0 to disable the limit.");
+	.defaultValue(10)
+	.description("Allow at most this many consecutive identical messages to be logged.");
 
 /******************************************************************************/
 /******************************************************************************/
@@ -51,7 +51,8 @@ CONFIG(int, LogRepeatLimit)
 static spring::unordered_map<std::string, int> GetEnabledSections() {
 	spring::unordered_map<std::string, int> sectionLevelMap;
 
-	std::string enabledSections = "";
+	std::string enabledSections = ",";
+	std::string envSections = ",";
 
 #if defined(UNITSYNC)
 	#if defined(DEBUG)
@@ -65,15 +66,16 @@ static spring::unordered_map<std::string, int> GetEnabledSections() {
 	#endif
 	#if !defined(DEBUG)
 	// Always show at least INFO level of these sections
-	enabledSections += "Sound:35,VFS:30,";
+	enabledSections += "Sound:35,VFS:30";
 	#endif
 	enabledSections += StringToLower(configHandler->GetString("LogSections"));
-	enabledSections += ",";
 #endif
 
-	if (auto envVar = getenv("SPRING_LOG_SECTIONS"); envVar != nullptr) {
+	if (getenv("SPRING_LOG_SECTIONS") != nullptr) {
 		// allow disabling all sections from the env var by setting it to "none"
-		std::string envSections = StringToLower(envVar);
+		envSections += getenv("SPRING_LOG_SECTIONS");
+		envSections = StringToLower(envSections);
+
 		if (envSections == "none") {
 			enabledSections = "";
 		} else {
@@ -84,28 +86,38 @@ static spring::unordered_map<std::string, int> GetEnabledSections() {
 	enabledSections = StringToLower(enabledSections);
 	enabledSections = StringStrip(enabledSections, " \t\n\r");
 
-	for (const auto& subView: enabledSections | std::views::split(',')) {
-		auto sub = std::string_view(subView.begin(), subView.end());
-		if (sub.empty())
-			continue;
+	// make the last "section:level" substring findable
+	if (!enabledSections.empty() && enabledSections.back() != ',')
+		enabledSections += ",";
 
-		std::string logSec, logLvl;
-		if (const size_t sepChr = sub.find(':'); sepChr != std::string_view::npos) {
-			logSec = sub.substr(0, sepChr);
-			logLvl = sub.substr(sepChr + 1, std::string_view::npos);
-		} else {
-			logSec = sub;
-			logLvl = "";
-		}
+	// n=1 because <enabledSections> always starts with a ',' (if non-empty)
+	for (size_t n = 1; n < enabledSections.size(); ) {
+		const size_t k = enabledSections.find(',', n);
 
-		if (!logLvl.empty()) {
-			sectionLevelMap[logSec] = StringToInt(logLvl);
+		if (k != std::string::npos) {
+			const std::string& sub = enabledSections.substr(n, k - n);
+
+			if (!sub.empty()) {
+				const size_t sepChr = sub.find(':');
+
+				const std::string& logSec = (sepChr != std::string::npos)? sub.substr(         0,            sepChr): sub;
+				const std::string& logLvl = (sepChr != std::string::npos)? sub.substr(sepChr + 1, std::string::npos):  "";
+
+				if (!logLvl.empty()) {
+					sectionLevelMap[logSec] = StringToInt(logLvl);
+				} else {
+					#if defined(DEBUG)
+					sectionLevelMap[logSec] = LOG_LEVEL_DEBUG;
+					#else
+					sectionLevelMap[logSec] = DEFAULT_LOG_LEVEL;
+					#endif
+
+				}
+			}
+
+			n = k + 1;
 		} else {
-			#if defined(DEBUG)
-			sectionLevelMap[logSec] = LOG_LEVEL_DEBUG;
-			#else
-			sectionLevelMap[logSec] = DEFAULT_LOG_LEVEL;
-			#endif
+			n = k;
 		}
 	}
 
@@ -134,26 +146,38 @@ void CLogOutput::SetFileName(std::string fname)
 
 std::string CLogOutput::CreateFilePath(const std::string& fileName)
 {
-	return (FileSystem::EnsurePathSepAtEnd(FileSystem::GetCwd()) + fileName);
+	namespace fs = std::filesystem;
+	std::string cwd = fs::current_path().string();
+	if (!cwd.empty() && cwd.back() != '/')
+		cwd += '/';
+	return cwd + fileName;
 }
 
 
 void CLogOutput::RotateLogFile() const
 {
-	if (!FileSystem::FileExists(filePath))
+	namespace fs = std::filesystem;
+	if (!fs::exists(filePath))
 		return;
 
-	const auto baseDir = FileSystem::GetDirectory(filePath);
 	// logArchiveDir: /absolute/writeable/data/dir/log/
-	const std::string logArchiveDir = FileSystem::Concatenate({ baseDir, "log/"});
-	const std::string archivedLogFile = logArchiveDir + FileSystem::GetFileModificationDate(filePath) + "_" + fileName;
+	const std::string logArchiveDir = filePath.substr(0, filePath.find_last_of("/\\") + 1) + "log/";
+
+	// get file modification time as a date string
+	auto ftime = fs::last_write_time(filePath);
+	auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+		ftime - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
+	std::time_t tt = std::chrono::system_clock::to_time_t(sctp);
+	char dateBuf[32];
+	std::strftime(dateBuf, sizeof(dateBuf), "%Y%m%d_%H%M%S", std::localtime(&tt));
+	const std::string archivedLogFile = logArchiveDir + dateBuf + "_" + fileName;
 
 	// create the log archive dir if it does not exist yet
-	if (!FileSystem::DirExists(logArchiveDir))
-		FileSystem::CreateDirectory(logArchiveDir);
+	if (!fs::exists(logArchiveDir))
+		fs::create_directories(logArchiveDir);
 
 	// move the old log to the archive dir
-	if (nowide::rename(filePath.c_str(), archivedLogFile.c_str()) != 0) {
+	if (rename(filePath.c_str(), archivedLogFile.c_str()) != 0) {
 		// no log here yet
 		std::cerr << "Failed rotating the log file" << std::endl;
 	}

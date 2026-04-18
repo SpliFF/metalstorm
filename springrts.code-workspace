@@ -1,0 +1,27 @@
+{
+    "folders": [
+        { "name": "Engine (C++)", "path": "." },
+        { "name": "Client (TypeScript)", "path": "client" },
+        { "name": "Scripts (Lua)", "path": "scripts" }
+    ],
+    "settings": {
+        "clangd.arguments": [
+            "--background-index",
+            "--clang-tidy",
+            "--completion-style=detailed"
+        ],
+        "cmake.sourceDirectory": "${workspaceFolder:Engine (C++)}",
+        "cmake.useCMakePresets": "always",
+        "Lua.runtime.version": "Lua 5.1",
+        "editor.formatOnSave": true,
+        "files.insertFinalNewline": true,
+        "files.exclude": {
+            "**/build": true,
+            "**/node_modules": true,
+            "**/.cache": true
+        },
+        "[typescript]": {
+            "editor.defaultFormatter": "esbenp.prettier-vscode"
+        }
+    }
+}

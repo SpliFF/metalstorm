@@ -5,9 +5,19 @@
 
 #include "GameVersion.h"
 
-#include "System/VersionGenerated.h"
-
+#include <ciso646> // _LIBCPP*
 #include <cstring>
+#include <cstdio>
+
+// Version placeholders — replaced by build system in production builds
+#define SPRING_VERSION_ENGINE_MAJOR      "100"
+#define SPRING_VERSION_ENGINE_PATCH_SET  "0"
+#define SPRING_VERSION_ENGINE_COMMITS    "0"
+#define SPRING_VERSION_ENGINE_HASH       "unknown"
+#define SPRING_VERSION_ENGINE_BRANCH     "springweb"
+#define SPRING_VERSION_ENGINE_ADDITIONAL ""
+#define SPRING_VERSION_ENGINE            "100.0"
+#define SPRING_VERSION_ENGINE_RELEASE    false
 
 /**
  * @brief Defines the current version string.
@@ -25,7 +35,7 @@ const std::string& GetMajor()
 
 const std::string& GetMinor()
 {
-	static const std::string minor = SPRING_VERSION_ENGINE_MINOR;
+	static const std::string minor = "0";
 	return minor;
 }
 
@@ -63,12 +73,6 @@ inline const std::string CreateAdditionalVersion()
 
 #if defined DEBUG
 	GV_ADD_SPACE "Debug"
-	#undef  GV_ADD_SPACE
-	#define GV_ADD_SPACE " "
-#endif
-
-#if defined PROFILE
-	GV_ADD_SPACE "Profile"
 	#undef  GV_ADD_SPACE
 	#define GV_ADD_SPACE " "
 #endif
@@ -201,15 +205,18 @@ bool IsUnitsync()
 const std::string& Get()
 {
 	static const std::string base = IsRelease()
-			? GetMajor() + "." + GetMinor() + "." + GetPatchSet()
-			: GetMajor() + "." + GetMinor() + "." + GetPatchSet() + "-" + GetCommits();
+			? GetMajor()
+			: (GetMajor() + "." + GetPatchSet() + ".1");
 
 	return base;
 }
 
 const std::string& GetSync()
 {
-	static const std::string sync = SPRING_VERSION_ENGINE;
+	static const std::string sync = IsRelease()
+			? GetMajor()
+			: SPRING_VERSION_ENGINE;
+
 	return sync;
 }
 

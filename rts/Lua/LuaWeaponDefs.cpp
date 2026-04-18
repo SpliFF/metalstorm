@@ -1,5 +1,6 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
+#include "Game/TraceRay.h"
 #include <string>
 #include <vector>
 #include <cctype>
@@ -11,14 +12,11 @@
 #include "LuaDefs.h"
 #include "LuaHandle.h"
 #include "LuaUtils.h"
-#include "Game/TraceRay.h"
-#include "Rendering/Models/IModelParser.h"
 #include "Sim/Misc/CategoryHandler.h"
 #include "Sim/Misc/DamageArrayHandler.h"
 #include "Sim/Projectiles/Projectile.h"
 #include "Sim/Weapons/Weapon.h"
 #include "Sim/Weapons/WeaponDefHandler.h"
-#include "System/FileSystem/SimpleParser.h"
 #include "System/Log/ILog.h"
 #include "System/StringUtil.h"
 #include "Sim/Misc/GlobalSynced.h"
@@ -265,35 +263,29 @@ static int DamagesArray(lua_State* L, const void* data)
 static int VisualsTable(lua_State* L, const void* data)
 {
 	const struct WeaponDef::Visuals& v = *static_cast<const struct WeaponDef::Visuals*>(data);
-	lua_createtable(L, 0, 28);
-	HSTR_PUSH_STRING(L, "modelName",            modelLoader.FindModelPath(v.modelName));
-	HSTR_PUSH_NUMBER(L, "colorR",               v.color.x);
-	HSTR_PUSH_NUMBER(L, "colorG",               v.color.y);
-	HSTR_PUSH_NUMBER(L, "colorB",               v.color.z);
-	HSTR_PUSH_NUMBER(L, "color2R",              v.color2.x);
-	HSTR_PUSH_NUMBER(L, "color2G",              v.color2.y);
-	HSTR_PUSH_NUMBER(L, "color2B",              v.color2.z);
-	HSTR_PUSH_BOOL  (L, "smokeTrail",           v.smokeTrail);
-	HSTR_PUSH_BOOL  (L, "smokeTrailCastShadow", v.smokeTrailCastShadow);
-	HSTR_PUSH_NUMBER(L, "smokePeriod",          v.smokePeriod);
-	HSTR_PUSH_NUMBER(L, "smokeTime",            v.smokeTime);
-	HSTR_PUSH_NUMBER(L, "smokeSize",            v.smokeSize);
-	HSTR_PUSH_NUMBER(L, "smokeColor",           v.smokeColor);
-	HSTR_PUSH_NUMBER(L, "tileLength",           v.tilelength);
-	HSTR_PUSH_NUMBER(L, "scrollSpeed",          v.scrollspeed);
-	HSTR_PUSH_NUMBER(L, "pulseSpeed",           v.pulseSpeed);
-	HSTR_PUSH_NUMBER(L, "laserFlareSize",       v.laserflaresize);
-	HSTR_PUSH_NUMBER(L, "thickness",            v.thickness);
-	HSTR_PUSH_NUMBER(L, "coreThickness",        v.corethickness);
-	HSTR_PUSH_NUMBER(L, "beamDecay",            v.beamdecay);
-	HSTR_PUSH_NUMBER(L, "stages",               v.stages);
-	HSTR_PUSH_NUMBER(L, "sizeDecay",            v.sizeDecay);
-	HSTR_PUSH_NUMBER(L, "alphaDecay",           v.alphaDecay);
-	HSTR_PUSH_NUMBER(L, "separation",           v.separation);
-	HSTR_PUSH_BOOL  (L, "castShadow",           v.castShadow);
-	HSTR_PUSH_BOOL  (L, "noGap",                v.noGap);
-	HSTR_PUSH_BOOL  (L, "alwaysVisible",        v.alwaysVisible);
-	HSTR_PUSH_BOOL  (L, "beamWeapon",           false); // DEPRECATED
+	lua_createtable(L, 0, 22);
+	HSTR_PUSH_STRING(L, "modelName",      v.modelName); // modelLoader removed; raw name returned
+	HSTR_PUSH_NUMBER(L, "colorR",         v.color.x);
+	HSTR_PUSH_NUMBER(L, "colorG",         v.color.y);
+	HSTR_PUSH_NUMBER(L, "colorB",         v.color.z);
+	HSTR_PUSH_NUMBER(L, "color2R",        v.color2.x);
+	HSTR_PUSH_NUMBER(L, "color2G",        v.color2.y);
+	HSTR_PUSH_NUMBER(L, "color2B",        v.color2.z);
+	HSTR_PUSH_BOOL  (L, "smokeTrail",     v.smokeTrail);
+	HSTR_PUSH_NUMBER(L, "tileLength",     v.tilelength);
+	HSTR_PUSH_NUMBER(L, "scrollSpeed",    v.scrollspeed);
+	HSTR_PUSH_NUMBER(L, "pulseSpeed",     v.pulseSpeed);
+	HSTR_PUSH_NUMBER(L, "laserFlareSize", v.laserflaresize);
+	HSTR_PUSH_NUMBER(L, "thickness",      v.thickness);
+	HSTR_PUSH_NUMBER(L, "coreThickness",  v.corethickness);
+	HSTR_PUSH_NUMBER(L, "beamDecay",      v.beamdecay);
+	HSTR_PUSH_NUMBER(L, "stages",         v.stages);
+	HSTR_PUSH_NUMBER(L, "sizeDecay",      v.sizeDecay);
+	HSTR_PUSH_NUMBER(L, "alphaDecay",     v.alphaDecay);
+	HSTR_PUSH_NUMBER(L, "separation",     v.separation);
+	HSTR_PUSH_BOOL  (L, "noGap",          v.noGap);
+	HSTR_PUSH_BOOL  (L, "alwaysVisible",  v.alwaysVisible);
+	HSTR_PUSH_BOOL  (L, "beamWeapon",     false); // DEPRECATED
 
 	return 1;
 }
@@ -343,12 +335,6 @@ static int NoGroundCollide(lua_State* L, const void* data)
 }
 
 
-static int FramesToSeconds(lua_State* L, const void* data)
-{
-	const auto frames = *reinterpret_cast <const int *> (data);
-	lua_pushnumber(L, frames * INV_GAME_SPEED);
-	return 1;
-}
 
 static inline int BuildCategorySet(lua_State* L, const vector<string>& cats)
 {
@@ -460,6 +446,8 @@ static bool InitParamMap()
 
 	ADD_INT("id", wd.id);
 
+	ADD_INT("tdfId", wd.tdfId);
+
 	ADD_STRING("name",        wd.name);
 	ADD_STRING("description", wd.description);
 
@@ -498,7 +486,6 @@ static bool InitParamMap()
 	ADD_INT("salvoSize",    wd.salvosize);
 	ADD_INT("projectiles",  wd.projectilespershot);
 	ADD_FLOAT("salvoDelay", wd.salvodelay);
-	ADD_FUNCTION("windup", wd.salvoWindup, FramesToSeconds);
 	ADD_FLOAT("reload",     wd.reload);
 	ADD_FLOAT("beamtime",   wd.beamtime);
 	ADD_BOOL("beamburst",   wd.beamburst);
@@ -513,8 +500,8 @@ static bool InitParamMap()
 
 	ADD_FLOAT("uptime", wd.uptime);
 
-	ADD_FLOAT( "metalCost", wd.cost.metal);
-	ADD_FLOAT("energyCost", wd.cost.energy);
+	ADD_FLOAT("metalCost",  wd.metalcost);
+	ADD_FLOAT("energyCost", wd.energycost);
 
 	ADD_BOOL("turret", wd.turret);
 	ADD_BOOL("onlyForward", wd.onlyForward);
@@ -565,13 +552,13 @@ static bool InitParamMap()
 	ADD_BOOL("visibleShield",           wd.visibleShield);
 	ADD_BOOL("visibleShieldRepulse",    wd.visibleShieldRepulse);
 	ADD_INT( "visibleShieldHitFrames",  wd.visibleShieldHitFrames);
-	ADD_FLOAT("shieldEnergyUse",        wd.shieldResourceUse.energy);
+	ADD_FLOAT("shieldEnergyUse",        wd.shieldEnergyUse);
 	ADD_FLOAT("shieldRadius",           wd.shieldRadius);
 	ADD_FLOAT("shieldForce",            wd.shieldForce);
 	ADD_FLOAT("shieldMaxSpeed",         wd.shieldMaxSpeed);
 	ADD_FLOAT("shieldPower",            wd.shieldPower);
 	ADD_FLOAT("shieldPowerRegen",       wd.shieldPowerRegen);
-	ADD_FLOAT("shieldPowerRegenEnergy", wd.shieldPowerRegenCost.energy);
+	ADD_FLOAT("shieldPowerRegenEnergy", wd.shieldPowerRegenEnergy);
 	ADD_INT(  "shieldRechargeDelay",    wd.shieldRechargeDelay);
 	ADD_FLOAT("shieldGoodColorR",       wd.shieldGoodColor.x);
 	ADD_FLOAT("shieldGoodColorG",       wd.shieldGoodColor.y);

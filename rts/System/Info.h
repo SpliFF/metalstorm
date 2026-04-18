@@ -80,14 +80,14 @@ const char* info_convertTypeToString(InfoValueType infoValueType);
 void info_parseInfo(
 		std::vector<InfoItem>& options,
 		const std::string& fileName,
-		const std::string& fileModes = SPRING_VFS_RAW,
-		const std::string& accessModes = SPRING_VFS_RAW,
+		const std::string& fileModes = "",
+		const std::string& accessModes = "",
 		std::set<std::string>* infoSet = NULL);
 
 std::vector<InfoItem> info_parseInfo(
 		const std::string& fileName,
-		const std::string& fileModes = SPRING_VFS_RAW,
-		const std::string& accessModes = SPRING_VFS_RAW,
+		const std::string& fileModes = "",
+		const std::string& accessModes = "",
 		std::set<std::string>* infoSet = NULL);
 
 #endif // _INFO_H

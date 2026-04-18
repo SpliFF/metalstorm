@@ -3,7 +3,6 @@
 #ifndef _FIRE_BALL_PROJECTILE_H
 #define _FIRE_BALL_PROJECTILE_H
 
-#include <algorithm>
 #include "WeaponProjectile.h"
 
 class CFireBallProjectile : public CWeaponProjectile
@@ -16,11 +15,12 @@ public:
 	CFireBallProjectile() { }
 	CFireBallProjectile(const ProjectileParams& params);
 
-	void Draw() override;
 	void Update() override;
 	void Collision() override;
 
-	int GetProjectilesCount() const override;
+	int GetProjectilesCount() const override {
+		return (numSparks + std::min(10u, numSparks));
+	}
 
 private:
 	void EmitSpark();

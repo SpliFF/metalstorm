@@ -1,0 +1,21 @@
+[CLASS0]
+{
+    name=TANK2;
+    footprintx=2;
+    footprintz=2;
+    maxwaterdepth=22;
+    maxslope=36;
+    crushstrength=50;
+    speedmodclass=0;
+}
+
+[CLASS1]
+{
+    name=TANK3;
+    footprintx=3;
+    footprintz=3;
+    maxwaterdepth=22;
+    maxslope=30;
+    crushstrength=100;
+    speedmodclass=0;
+}

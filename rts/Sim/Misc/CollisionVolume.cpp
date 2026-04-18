@@ -7,8 +7,6 @@
 #include "System/SpringMath.h"
 #include "System/StringUtil.h"
 
-#include "System/Misc/TracyDefs.h"
-
 CR_BIND(CollisionVolume, )
 CR_REG_METADATA(CollisionVolume, (
 	CR_MEMBER(fullAxisScales),
@@ -60,7 +58,6 @@ CollisionVolume::CollisionVolume(
 	const float3& cvScales,
 	const float3& cvOffsets
 ) {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// default-initialize
 	*this = CollisionVolume();
 
@@ -90,7 +87,6 @@ CollisionVolume::CollisionVolume(
 
 void CollisionVolume::PostLoad()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	SetAxisScales(fullAxisScales);
 	SetBoundingRadius();
 }
@@ -103,7 +99,6 @@ void CollisionVolume::InitShape(
 	const int tType,
 	const int pAxis
 ) {
-	RECOIL_DETAILED_TRACY_ZONE;
 	axisOffsets = offsets;
 
 	// make sure none of the scales are ever negative or zero
@@ -143,7 +138,6 @@ void CollisionVolume::InitShape(
 
 
 void CollisionVolume::SetBoundingRadius() {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// set the radius of the minimum bounding sphere
 	// that encompasses this custom collision volume
 	// (for early-out testing)
@@ -177,7 +171,6 @@ void CollisionVolume::SetBoundingRadius() {
 }
 
 void CollisionVolume::SetAxisScales(const float3& scales) {
-	RECOIL_DETAILED_TRACY_ZONE;
 	fullAxisScales = scales;
 	halfAxisScales = fullAxisScales * 0.5f;
 
@@ -186,7 +179,6 @@ void CollisionVolume::SetAxisScales(const float3& scales) {
 }
 
 void CollisionVolume::RescaleAxes(const float3& scales) {
-	RECOIL_DETAILED_TRACY_ZONE;
 	fullAxisScales *= scales;
 	halfAxisScales *= scales;
 
@@ -196,7 +188,6 @@ void CollisionVolume::RescaleAxes(const float3& scales) {
 }
 
 void CollisionVolume::FixTypeAndScale(float3& scales) {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// NOTE:
 	//   prevent Lua (which calls InitShape directly) from
 	//   creating non-uniform spheres to emulate ellipsoids
@@ -230,7 +221,6 @@ void CollisionVolume::FixTypeAndScale(float3& scales) {
 
 
 float3 CollisionVolume::GetWorldSpacePos(const CSolidObject* o, const float3& extOffsets) const {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// collision-volumes are always centered on midPos
 	return (o->midPos + o->GetObjectSpaceVec(axisOffsets + extOffsets));
 }
@@ -238,13 +228,11 @@ float3 CollisionVolume::GetWorldSpacePos(const CSolidObject* o, const float3& ex
 
 
 float CollisionVolume::GetPointSurfaceDistance(const CUnit* u, const LocalModelPiece* lmp, const float3& pos) const {
-	RECOIL_DETAILED_TRACY_ZONE;
-	return (GetPointSurfaceDistance(u, lmp, u->GetTransformMatrix(true), pos));
+	return (GetPointSurfaceDistance(u, nullptr, u->GetTransformMatrix(true), pos));
 }
 
 float CollisionVolume::GetPointSurfaceDistance(const CFeature* f, const LocalModelPiece* lmp, const float3& pos) const {
-	RECOIL_DETAILED_TRACY_ZONE;
-	return (GetPointSurfaceDistance(f, lmp, f->GetTransformMatrixRef(true), pos));
+	return (GetPointSurfaceDistance(f, nullptr, f->GetTransformMatrixRef(true), pos));
 }
 
 float CollisionVolume::GetPointSurfaceDistance(
@@ -253,20 +241,12 @@ float CollisionVolume::GetPointSurfaceDistance(
 	const CMatrix44f& mat,
 	const float3& pos
 ) const {
-	RECOIL_DETAILED_TRACY_ZONE;
 	CMatrix44f vm = mat;
 
-	if (lmp != nullptr && (obj->collisionVolume).DefaultToPieceTree()) {
-		// NOTE: if we get here, <this> is the piece-volume
-		assert(this == lmp->GetCollisionVolume());
-
-		// transform into piece-space relative to pos
-		vm <<= lmp->GetModelSpaceMatrix();
-	} else {
-		// SObj::GetTransformMatrix does not include this
-		// (its translation component is pos, not midPos)
-		vm.Translate(obj->relMidPos);
-	}
+	// Piece-tree collision removed server-side; always use base volume path
+	// SObj::GetTransformMatrix does not include this
+	// (its translation component is pos, not midPos)
+	vm.Translate(obj->relMidPos);
 
 	vm.Translate(GetOffsets());
 	vm.InvertAffineInPlace();
@@ -277,7 +257,6 @@ float CollisionVolume::GetPointSurfaceDistance(
 
 
 float CollisionVolume::GetPointSurfaceDistance(const CMatrix44f& mv, const float3& p) const {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// transform <p> from world- to volume-space
 	float3 pv = mv.Mul(p);
 
@@ -293,9 +272,9 @@ float CollisionVolume::GetPointSurfaceDistance(const CMatrix44f& mv, const float
 
 			// calculate the closest surface point
 			float3 pt;
-			pt.x = std::clamp(pv.x, -halfAxisScales.x, halfAxisScales.x);
-			pt.y = std::clamp(pv.y, -halfAxisScales.y, halfAxisScales.y);
-			pt.z = std::clamp(pv.z, -halfAxisScales.z, halfAxisScales.z);
+			pt.x = Clamp(pv.x, -halfAxisScales.x, halfAxisScales.x);
+			pt.y = Clamp(pv.y, -halfAxisScales.y, halfAxisScales.y);
+			pt.z = Clamp(pv.z, -halfAxisScales.z, halfAxisScales.z);
 
 			// float l = std::min(pv.x - pt.x, std::min(pv.y - pt.y, pv.z - pt.z));
 			d = pv.distance(pt);
@@ -335,7 +314,6 @@ float CollisionVolume::GetPointSurfaceDistance(const CMatrix44f& mv, const float
 
 float CollisionVolume::GetCylinderDistance(const float3& pv, size_t axisA, size_t axisB, size_t axisC) const
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const float pSq = (pv[axisB] * pv[axisB]) + (pv[axisC] * pv[axisC]);
 	const float rSq = (halfAxisScalesSqr[axisB] + halfAxisScalesSqr[axisC]) * 0.5f;
 
@@ -365,7 +343,6 @@ float CollisionVolume::GetCylinderDistance(const float3& pv, size_t axisA, size_
 //Newton's method according to http://wwwf.imperial.ac.uk/~rn/distance2ellipse.pdf
 float CollisionVolume::GetEllipsoidDistance(const float3& pv) const
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const float3& abc1 = halfAxisScales;    // {a, b, c}
 	const float3& abc2 = halfAxisScalesSqr; // {a2, b2, c2}
 
@@ -401,7 +378,7 @@ float CollisionVolume::GetEllipsoidDistance(const float3& pv) const
 			lastDist = currDist;
 			currDist = fxyz.Length();
 
-			if (math::fabsf(currDist - lastDist) < THRESHOLD * currDist)
+			if (math::fabs(currDist - lastDist) < THRESHOLD * currDist)
 				break;
 		}
 
@@ -423,9 +400,9 @@ float CollisionVolume::GetEllipsoidDistance(const float3& pv) const
 		const float invDet = 1.0f / (a11 * a22 - a21 * a12);
 
 		theta += (a12 * d2 - a22 * d1) * invDet;
-		theta = std::clamp(theta, 0.0f, math::HALFPI);
+		theta = Clamp(theta, 0.0f, math::HALFPI);
 		phi += (a21 * d1 - a11 * d2) * invDet;
-		phi = std::clamp(phi, 0.0f, math::HALFPI);
+		phi = Clamp(phi, 0.0f, math::HALFPI);
 	}
 
 	return currDist;

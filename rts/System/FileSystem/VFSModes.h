@@ -1,22 +1,22 @@
-/* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
-
+/* Stub — VFS removed. Provides mode constants for compatibility. */
 #ifndef VFS_MODES_H
 #define VFS_MODES_H
 
-#define SPRING_VFS_PWD  "p"
-#define SPRING_VFS_RAW  "r"
-#define SPRING_VFS_MOD  "M"
-#define SPRING_VFS_MAP  "m"
-#define SPRING_VFS_BASE "b"
-#define SPRING_VFS_MENU "e"
-#define SPRING_VFS_NONE " "
-#define SPRING_VFS_MOD_BASE   SPRING_VFS_MOD  SPRING_VFS_BASE
-#define SPRING_VFS_MAP_BASE   SPRING_VFS_MAP  SPRING_VFS_BASE
-#define SPRING_VFS_MENU_BASE  SPRING_VFS_MENU SPRING_VFS_BASE
-#define SPRING_VFS_ZIP        SPRING_VFS_MOD  SPRING_VFS_MAP  SPRING_VFS_MENU  SPRING_VFS_BASE
-#define SPRING_VFS_RAW_FIRST  SPRING_VFS_RAW  SPRING_VFS_ZIP
-#define SPRING_VFS_ZIP_FIRST  SPRING_VFS_ZIP  SPRING_VFS_RAW
-#define SPRING_VFS_ALL        SPRING_VFS_RAW_FIRST
-#define SPRING_VFS_PWD_ALL    SPRING_VFS_PWD SPRING_VFS_ALL
+// VFS access mode strings — kept for code that passes them to LuaParser
+// and CFileHandler. The server reads files from plain directories.
+// Defined as constexpr char arrays so HSTR_PUSH_CSTRING (which uses sizeof)
+// gets the correct string length, and the values implicitly convert to const char*.
+static constexpr char SPRING_VFS_RAW[]      = "r";
+static constexpr char SPRING_VFS_MOD[]      = "m";
+static constexpr char SPRING_VFS_MAP[]      = "a";
+static constexpr char SPRING_VFS_BASE[]     = "s";
+static constexpr char SPRING_VFS_MENU[]     = "e";
+static constexpr char SPRING_VFS_ZIP[]      = "z";
+
+static constexpr char SPRING_VFS_RAW_FIRST[] = "r";
+static constexpr char SPRING_VFS_ZIP_FIRST[] = "z";
+static constexpr char SPRING_VFS_MOD_BASE[]  = "ms";
+static constexpr char SPRING_VFS_MAP_BASE[]  = "as";
+static constexpr char SPRING_VFS_ALL[]       = "rmasez";
 
 #endif // VFS_MODES_H

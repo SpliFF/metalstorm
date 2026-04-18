@@ -15,16 +15,15 @@ public:
 	CFlameProjectile(const ProjectileParams& params);
 
 	void Update() override;
-	void Draw() override;
 	void Collision() override;
 
-	int GetProjectilesCount() const override;
+	int GetProjectilesCount() const override { return 1; }
 
 	int ShieldRepulse(const float3& shieldPos, float shieldForce, float shieldMaxSpeed) override;
 
 private:
 	float curTime;
-	/// percentage of lifetime when the projectile is active and can collide
+	/// precentage of lifetime when the projectile is active and can collide
 	float physLife;
 	float invttl;
 

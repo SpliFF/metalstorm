@@ -5,10 +5,10 @@
 #endif
 
 #include "System/SpringMath.h"
-#include "System/Exceptions.h"
-#include "System/Sync/FPUCheck.h"
-#include "System/Log/ILog.h"
-#include "Sim/Units/Scripts/CobInstance.h" // for TAANG2RAD (ugh)
+
+// TAANG2RAD was in CobInstance.h — defined locally to avoid pulling in Sim/ headers
+static constexpr float COBSCALE_HALF = 32768.0f;
+static constexpr float TAANG2RAD = math::PI / COBSCALE_HALF;
 
 #undef far
 #undef near
@@ -17,7 +17,7 @@ float2 SpringMath::headingToVectorTable[NUM_HEADINGS];
 
 void SpringMath::Init()
 {
-	good_fpu_init();
+	// good_fpu_init() — streflop FPU init removed (using standard IEEE FP)
 
 	for (int a = 0; a < NUM_HEADINGS; ++a) {
 		const float ang = (a - (NUM_HEADINGS / 2)) * math::TWOPI / NUM_HEADINGS;
@@ -75,7 +75,7 @@ float3 GetVectorFromHAndPExact(const short int heading, const short int pitch)
 float LinePointDist(const float3 l1, const float3 l2, const float3 p)
 {
 	const float3 dir = (l2 - l1).SafeNormalize();
-	const float3 vec = dir * std::clamp(dir.dot(p - l1), 0.0f, dir.dot(l2 - l1));
+	const float3 vec = dir * Clamp(dir.dot(p - l1), 0.0f, dir.dot(l2 - l1));
 	const float3  p2 = p - vec;
 	return (p2.distance(l1));
 }
@@ -95,107 +95,9 @@ float3 ClosestPointOnLine(const float3 l1, const float3 l2, const float3 p)
 		return l1;
 
 	const float pdist = ldir.dot(pdir) / length;
-	const float cdist = std::clamp(pdist, 0.0f, length);
+	const float cdist = Clamp(pdist, 0.0f, length);
 
 	return (l1 + ldir * (cdist / length));
-}
-
-
-bool ClosestPointOnRay(const float3 p0, const float3 ray, const float3 p, float3& px)
-{
-	const float3 pdir(p - p0);
-	const float pdist = ray.dot(pdir);
-	if (pdist < 0.0f)
-		return false;
-
-	px = p0 + ray * pdist;
-
-	return true;
-}
-
-
-// Credit:
-// - https://stackoverflow.com/a/38437831/7351594
-// - Practical Geometry Algorithms - Daniel Sunday
-// We use the 'Direct Linear Equation' method described in the book above
-float3 SolveIntersectingPoint(int zeroCoord, int coord1, int coord2, const float4& plane1, const float4& plane2)
-{
-	const float a1 = plane1[coord1];
-	const float b1 = plane1[coord2];
-	const float d1 = -plane1[3];
-
-	const float a2 = plane2[coord1];
-	const float b2 = plane2[coord2];
-	const float d2 = -plane2[3];
-
-	float3 point;
-
-	point[zeroCoord] = 0;
-	point[coord1] = (b2 * d1 - b1 * d2) / (a1 * b2 - a2 * b1);
-	point[coord2] = (a1 * d2 - a2 * d1) / (a1 * b2 - a2 * b1);
-
-	return point;
-}
-
-
-// This method helps finding a point on the intersection between two planes.
-// Depending on the orientation of the planes, the problem could solve for the
-// zero point on either the x, y or z axis
-bool IntersectPlanes(const float4& plane1, const float4& plane2, std::pair<float3, float3> &line)
-{
-	// the cross product gives us the direction of the line at the intersection
-	// of the two planes, and gives us an easy way to check if the two planes
-	// are parallel - the cross product will have zero magnitude
-	line.first = plane1.cross(plane2);
-
-	if (const float magnitude = line.first.Length(); magnitude > float3::nrm_eps()) {
-		line.first *= (1.0f / magnitude);
-	}
-	else {
-		return false;
-	}
-
-	// now find a point on the intersection. We choose which coordinate
-	// to set as zero by seeing which has the largest absolute value in the
-	// directional vector
-	const float x = fabs(line.first.x);
-	const float y = fabs(line.first.y);
-	const float z = fabs(line.first.z);
-
-	if (z >= x && z >= y) {
-		line.second = SolveIntersectingPoint(2, 0, 1, plane1, plane2); // 'z', 'x', 'y'
-	} else if (y >= z && y >= x) {
-		line.second = SolveIntersectingPoint(1, 2, 0, plane1, plane2); // 'y', 'z', 'x'
-	} else {
-		line.second = SolveIntersectingPoint(0, 1, 2, plane1, plane2); // 'x', 'y', 'z'
-	}
-
-	return true;
-}
-
-// https://math.stackexchange.com/questions/2213165/find-shortest-distance-between-lines-in-3d/2217845#2217845
-bool LinesIntersectionPoint(const std::pair<float3, float3>& l1, const std::pair<float3, float3>& l2, float3& px)
-{
-	const float3 n = l2.first.cross(l1.first);
-	const float n2 = n.dot(n);
-
-	if (n2 < float3::nrm_eps())
-		return false; // parallel
-
-	const float3 p21 = l2.second - l1.second;
-
-	if (const float d = n.dot(p21) / math::sqrt(n2); math::fabs(d) > float3::cmp_eps())
-		return false; // do not intersect
-
-	const float t1 = p21.dot(l2.first.cross(n)) / n2;
-	px = l1.second + t1 * l1.first;
-
-	/*
-	const float t2 = p21.dot(l1.first.cross(n)) / n2;
-	px = l2.second + t2 * l2.first;
-	*/
-
-	return true;
 }
 
 
@@ -241,33 +143,6 @@ float2 GetMapBoundaryIntersectionPoints(const float3 start, const float3 dir)
 	return {near, far};
 }
 
-bool RayHitsSphere(const float4 sphere, const float3 p0, const float3 ray)
-{
-	float3 px;
-	if (!ClosestPointOnRay(p0, ray, sphere.xyz, px))
-		return false;
-
-	return px.distance(sphere.xyz) <= sphere.w;
-}
-
-bool RayAndPlaneIntersection(const float3& p0, const float3& p1, const float4& plane, bool directional, float3& px)
-{
-	const float3 ray = p1 - p0;
-	const float denom = plane.dot(ray);
-
-	if (directional && denom > 0.0f)
-		return false;
-
-	if (std::fabs(denom) < 1e-4)
-		return false;
-
-	const float t = -(plane.dot(p0) + plane.w) / denom;
-	if (t < 0.0f || t > 1.0f)
-		return false;
-
-	px = p0 + ray * t;
-	return true;
-}
 
 bool ClampLineInMap(float3& start, float3& end)
 {
@@ -319,77 +194,20 @@ bool ClampRayInMap(const float3 start, float3& end)
 	return false;
 }
 
-void ClipRayByPlanes(const float3& p0, float3& p, const std::initializer_list<float4>& clipPlanes)
-{
-	float3 minPx = p;
-	float dMin = p.SqDistance(p0);
-	for (const auto& clipPlane : clipPlanes) {
-		float3 px;
-		if (RayAndPlaneIntersection(p0, p, clipPlane, true, px)) {
-			const float dx = px.SqDistance(p0);
-			if (dx < dMin) {
-				minPx = px;
-				dMin = dx;
-			}
-		}
-	}
-	p = minPx;
-}
-
-float3 GetTriangleBarycentric(const float3& p0, const float3& p1, const float3& p2, const float3& p)
-{
-	const float3 v0 = p2 - p0;
-	const float3 v1 = p1 - p0;
-	const float3 v2 = p - p0;
-
-	const float dot00 = v0.dot(v0);
-	const float dot01 = v0.dot(v1);
-	const float dot02 = v0.dot(v2);
-	const float dot11 = v1.dot(v1);
-	const float dot12 = v1.dot(v2);
-
-	const float invDenom = 1.0 / (dot00 * dot11 - dot01 * dot01);
-
-	const float s = (dot11 * dot02 - dot01 * dot12) * invDenom;
-	const float t = (dot00 * dot12 - dot01 * dot02) * invDenom;
-	const float q = 1.0 - s - t;
-	return float3(s, t, q);
-}
-
-bool PointInsideTriangle(const float3& v0, const float3& v1, const float3& v2, const float3& vx)
-{
-#if 0
-	float s1 = std::copysignf(1.0f, v2.dot(v0.cross(v1)) );
-	float s2 = std::copysignf(1.0f, v2.dot(vx.cross(v1)) );
-	float s3 = std::copysignf(1.0f, v2.dot(v0.cross(vx)) );
-	float s4 = std::copysignf(1.0f, vx.dot(v0.cross(v1)) );
-
-	return s2 == s1 && s3 == s1 && s4 == s1;
-#else
-	const float3 bary = GetTriangleBarycentric(v0, v1, v2, vx);
-	return bary.x >= 0.0f && bary.y >= 0.0f && bary.z >= 0.0f;
-#endif
-}
-
-bool PointInsideQuadrilateral(const float3& p0, const float3& p1, const float3& p2, const float3& p3, const float3& px)
-{
-	return PointInsideTriangle(p0, p1, p2, px) || PointInsideTriangle(p2, p3, p0, px);
-}
-
 
 float linearstep(const float edge0, const float edge1, const float value)
 {
-	const float v = std::clamp(value, edge0, edge1);
+	const float v = Clamp(value, edge0, edge1);
 	const float x = (v - edge0) / (edge1 - edge0);
-	const float t = std::clamp(x, 0.0f, 1.0f);
+	const float t = Clamp(x, 0.0f, 1.0f);
 	return t;
 }
 
 float smoothstep(const float edge0, const float edge1, const float value)
 {
-	const float v = std::clamp(value, edge0, edge1);
+	const float v = Clamp(value, edge0, edge1);
 	const float x = (v - edge0) / (edge1 - edge0);
-	const float t = std::clamp(x, 0.0f, 1.0f);
+	const float t = Clamp(x, 0.0f, 1.0f);
 	return (t * t * (3.0f - 2.0f * t));
 }
 
@@ -436,3 +254,4 @@ float3 hs2rgb(float h, float s)
 
 	return col;
 }
+

@@ -8,10 +8,6 @@
 #include "lib/streflop/streflop_cond.h"
 #include "System/float3.h"
 
-#if defined(SYNCCHECK) && defined(DEBUG)
-#include <cassert>
-#include "System/Sync/SyncChecker.h"
-#endif
 
 
 #if 0
@@ -49,6 +45,8 @@ struct PCG32 {
 public:
 	typedef uint32_t res_type;
 	typedef uint64_t val_type;
+
+	using result_type = res_type;
 
 	PCG32(const val_type _val = def_val, const val_type _seq = def_seq) { seed(_val, _seq); }
 	PCG32(const PCG32& rng) { *this = rng; }
@@ -97,44 +95,34 @@ private:
 	val_type seq;
 };
 
-template<typename RNG, bool synced, bool assuresynced = false> class CGlobalRNG {
+
+
+template<typename RNG, bool synced> class CGlobalRNG {
 public:
 	typedef typename RNG::val_type rng_val_type;
 	typedef typename RNG::res_type rng_res_type;
-
-	using FuncCB = void (*)(rng_res_type, rng_res_type);
+	// required by std::shuffle (UniformRandomBitGenerator concept)
+	typedef rng_res_type result_type;
 
 	static_assert(std::numeric_limits<float>::digits == 24, "sign plus mantissa bits should be 24");
 
-	#if defined(SYNCCHECK) && defined(DEBUG)
-	inline void AssureSyncedness() const {
-		if constexpr (assuresynced) {
-			assert(CSyncChecker::InSyncedCode() == synced);
-		}
-	}
-	#else
-	inline void AssureSyncedness() const {}
-	#endif
-
 	void Seed(rng_val_type seed) { SetSeed(seed); }
 	void SetSeed(rng_val_type seed, bool init = false) {
-		AssureSyncedness();
 		// use address of this object as sequence-id for unsynced RNG, modern systems have ASLR
 		if (init) {
 			gen.seed(initSeed = seed, static_cast<rng_val_type>(size_t(this)) * (1 - synced) + RNG::def_seq * synced);
-			lastSeed = seed;
 		} else {
 			gen.seed(lastSeed = seed, static_cast<rng_val_type>(size_t(this)) * (1 - synced) + RNG::def_seq * synced);
 		}
 	}
 
-	rng_val_type GetInitSeed() const { AssureSyncedness(); return initSeed; }
-	rng_val_type GetLastSeed() const { AssureSyncedness(); return lastSeed; }
-	rng_val_type GetGenState() const { AssureSyncedness(); return (gen.state()); }
+	rng_val_type GetInitSeed() const { return initSeed; }
+	rng_val_type GetLastSeed() const { return lastSeed; }
+	rng_val_type GetGenState() const { return (gen.state()); }
 
 	// needed for std::{random_}shuffle
-	rng_res_type operator()(              ) { AssureSyncedness(); return (this->*gnext )( ); }
-	rng_res_type operator()(rng_res_type N) { AssureSyncedness(); return (this->*gbnext)(N); }
+	rng_res_type operator()(              ) { return (gen. next( )); }
+	rng_res_type operator()(rng_res_type N) { return (gen.bnext(N)); }
 
 	static constexpr rng_res_type  min() { return RNG::min_res; }
 	static constexpr rng_res_type  max() { return RNG::max_res; }
@@ -144,8 +132,8 @@ public:
 	rng_res_type NextInt(rng_res_type N = max()) { return ((*this)(N)); }
 
 	float NextFloat() { return (NextFloat01(1 << ndig())); }
-	float NextFloat01(rng_res_type N) { return static_cast<float>(NextInt(N)) / N; } // [0,1) rounded to multiple of 1/N
-	float NextFloat24() { return math::ldexp(static_cast<float>(NextInt(1 << ndig())), -ndig()); } // [0,1) rounded to multiple of 1/(2^#digits)
+	float NextFloat01(rng_res_type N) { return ((NextInt(N) * 1.0f) / N); } // [0,1) rounded to multiple of 1/N
+	float NextFloat24() { return (math::ldexp(NextInt(1 << ndig()), -ndig())); } // [0,1) rounded to multiple of 1/(2^#digits)
 
 	float3 NextVector2D() { return (NextVector(0.0f)); }
 	float3 NextVector(float y = 1.0f) {
@@ -160,23 +148,8 @@ public:
 		return ret;
 	}
 
-	void SetDebug(FuncCB fcb = nullptr) {
-		this->fcb = fcb;
-		gnext  = (fcb == nullptr) ? &CGlobalRNG::gnext_r  : &CGlobalRNG::gnext_d;
-		gbnext = (fcb == nullptr) ? &CGlobalRNG::gbnext_r : &CGlobalRNG::gbnext_d;
-	}
 private:
 	RNG gen;
-
-	FuncCB fcb = nullptr;
-
-	inline rng_res_type gnext_r() { return gen.next(); }
-	inline rng_res_type gnext_d() { rng_res_type R = gen.next(); fcb(0, R); return R; }
-	inline rng_res_type gbnext_r(rng_res_type N) { return gen.bnext(N); }
-	inline rng_res_type gbnext_d(rng_res_type N) { rng_res_type R = gen.bnext(N); fcb(N, R); return R; }
-
-	decltype(&CGlobalRNG::gnext_r )  gnext = &CGlobalRNG::gnext_r;
-	decltype(&CGlobalRNG::gbnext_r) gbnext = &CGlobalRNG::gbnext_r;
 
 	// initial and last-set seed
 	rng_val_type initSeed = 0;
@@ -185,8 +158,8 @@ private:
 
 
 // synced and unsynced RNG's no longer need to be different types
-typedef CGlobalRNG<PCG32, true , true > CGlobalSyncedRNG;
-typedef CGlobalRNG<PCG32, false, false> CGlobalUnsyncedRNG;
+typedef CGlobalRNG<PCG32, true> CGlobalSyncedRNG;
+typedef CGlobalRNG<PCG32, false> CGlobalUnsyncedRNG;
 
 #endif
 

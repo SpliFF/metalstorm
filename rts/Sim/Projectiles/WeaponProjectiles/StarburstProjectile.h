@@ -23,9 +23,8 @@ public:
 	void Collision(CFeature* feature) override;
 	void Collision() override;
 	void Update() override;
-	void Draw() override;
 
-	int GetProjectilesCount() const override;
+	int GetProjectilesCount() const override { return (numParts + 1); }
 
 	int ShieldRepulse(const float3& shieldPos, float shieldForce, float shieldMaxSpeed) override;
 
@@ -61,15 +60,8 @@ private:
 
 	static constexpr unsigned int NUM_TRACER_PARTS = 3;
 	static constexpr unsigned int MAX_NUM_AGEMODS = 20;
+	static constexpr unsigned int SMOKE_INTERVAL = 8;
 
-	static constexpr float TRACER_PARTS_STEP = 2.0f;
-private:
-	inline float GetSmokeSize() const;
-	inline float GetSmokeColor() const;
-	inline int GetSmokeTime() const;
-	inline int GetSmokePeriod() const;
-
-private:
 	struct TracerPart {
 		CR_DECLARE_STRUCT(TracerPart)
 

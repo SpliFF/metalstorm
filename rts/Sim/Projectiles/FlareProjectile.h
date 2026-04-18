@@ -10,11 +10,13 @@ class CFlareProjectile : public CProjectile
 {
 	CR_DECLARE_DERIVED(CFlareProjectile)
 
+private:
+	CFlareProjectile() {}
+
 public:
 	CFlareProjectile(const float3& pos, const float3& speed, CUnit* owner, int activateFrame);
 
 	void Update() override;
-	void Draw() override;
 
 	int GetProjectilesCount() const override { return (subProjPos.size()); }
 
@@ -31,10 +33,6 @@ public:
 	std::array<float3, 16> subProjVel;
 
 	float alphaFalloff;
-
-private:
-	CFlareProjectile() { }
-
 };
 
 #endif // FLARE_PROJECTILE_H

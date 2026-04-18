@@ -1,11 +1,9 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+#include "System/Sync/SyncedPrimitiveBase.h"
 #include "SyncedGameCommands.h"
 
 #include "Action.h"
-#include "Game.h"
 #include "GlobalUnsynced.h"
-#include "InMapDraw.h"
-#include "SelectedUnitsHandler.h"
 #include "SyncedActionExecutor.h"
 #ifdef _WIN32
 #  include "winerror.h" // TODO someone on windows (MinGW? VS?) please check if this is required
@@ -15,8 +13,6 @@
 #include "Game/Players/PlayerHandler.h"
 #include "Lua/LuaGaia.h"
 #include "Lua/LuaRules.h"
-#include "Lua/LuaUI.h"
-#include "Net/GameServer.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/TeamHandler.h"
@@ -24,10 +20,8 @@
 #include "Sim/Projectiles/ExplosionGenerator.h"
 #include "Sim/Units/UnitDefHandler.h"
 #include "Sim/Units/UnitHandler.h"
-#include "Sim/Units/UnitLoader.h"
 #include "Sim/Units/Unit.h"
 #include "System/EventHandler.h"
-#include "System/FileSystem/SimpleParser.h"
 #include "System/Log/ILog.h"
 #include "System/SafeUtil.h"
 
@@ -47,7 +41,7 @@ public:
 	) {
 	}
 
-	bool Execute(const SyncedAction& action) const final {
+	bool Execute(const SyncedAction& action) const final override{
 		InverseOrSetBool(gs->cheatEnabled, action.GetArgs());
 		LogSystemStatus("Cheating", gs->cheatEnabled);
 		return true;
@@ -60,27 +54,13 @@ public:
 	NoHelpActionExecutor() : ISyncedActionExecutor("NoHelp", "Enables/Disables widgets (LuaUI control)") {
 	}
 
-	bool Execute(const SyncedAction& action) const final {
+	bool Execute(const SyncedAction& action) const final override {
 		InverseOrSetBool(gs->noHelperAIs, action.GetArgs());
-		selectedUnitsHandler.PossibleCommandChange(nullptr);
 		LogSystemStatus("LuaUI control", gs->noHelperAIs);
 		return true;
 	}
 };
 
-
-class NoSpecDrawActionExecutor : public ISyncedActionExecutor {
-public:
-	NoSpecDrawActionExecutor() : ISyncedActionExecutor("NoSpecDraw", "Allows/Disallows spectators to draw on the map") {
-	}
-
-	bool Execute(const SyncedAction& action) const final {
-		bool allowSpecMapDrawing = inMapDrawer->GetSpecMapDrawingAllowed();
-		InverseOrSetBool(allowSpecMapDrawing, action.GetArgs(), true);
-		inMapDrawer->SetSpecMapDrawingAllowed(allowSpecMapDrawing);
-		return true;
-	}
-};
 
 
 class GodModeActionExecutor : public ISyncedActionExecutor {
@@ -94,16 +74,15 @@ public:
 	) {
 	}
 
-	bool Execute(const SyncedAction& action) const final {
+	bool Execute(const SyncedAction& action) const final override {
 		const std::string& args = action.GetArgs();
 
 		if (args.empty()) {
 			gs->godMode = GODMODE_MAX_VAL - gs->godMode;
 		} else {
-			gs->godMode = std::clamp(atoi(args.c_str()), 0, int(GODMODE_MAX_VAL));
+			gs->godMode = Clamp(atoi(args.c_str()), 0, int(GODMODE_MAX_VAL));
 		}
 
-		CLuaUI::UpdateTeams();
 		CPlayer::UpdateControlledTeams();
 
 		switch (gs->godMode) {
@@ -128,7 +107,7 @@ public:
 	) {
 	}
 
-	bool Execute(const SyncedAction& action) const final {
+	bool Execute(const SyncedAction& action) const final override {
 		const std::string& args = action.GetArgs();
 
 		const unsigned int argAllyTeam = atoi(args.c_str());
@@ -136,14 +115,14 @@ public:
 
 		if (args.empty()) {
 			for (unsigned int n = 0; n < maxAllyTeam; n++) {
-				losHandler->FlipGlobalLOS(n);
+				losHandler->globalLOS[n] = !losHandler->globalLOS[n];
 			}
 
 			LOG("[GlobalLosActionExecutor] global LOS toggled for all allyteams");
 			return true;
 		}
 		if (argAllyTeam < maxAllyTeam) {
-			losHandler->FlipGlobalLOS(argAllyTeam);
+			losHandler->globalLOS[argAllyTeam] = !losHandler->globalLOS[argAllyTeam];
 
 			LOG("[GlobalLosActionExecutor] global LOS toggled for allyteam %u", argAllyTeam);
 			return true;
@@ -165,7 +144,7 @@ public:
 	) {
 	}
 
-	bool Execute(const SyncedAction& action) const final {
+	bool Execute(const SyncedAction& action) const final override {
 		bool isFree = unitDefHandler->GetNoCost();
 		InverseOrSetBool(isFree, action.GetArgs());
 		unitDefHandler->SetNoCost(isFree);
@@ -185,55 +164,44 @@ public:
 	) {
 	}
 
-	bool Execute(const SyncedAction& action) const final {
+	bool Execute(const SyncedAction& action) const final override {
 		// not for autohosts
 		if (!playerHandler.IsValidPlayer(action.GetPlayerID()))
 			return false;
-		unitLoader->ParseAndExecuteGiveUnitsCommand(CSimpleParser::Tokenize(action.GetArgs(), 0), playerHandler.Player(action.GetPlayerID())->team);
+		// TODO: re-implement tokenization (CSimpleParser was in deleted FileSystem)
+		LOG("[Give] not yet implemented — requires arg tokenization");
 		return true;
 	}
 };
 
 
-class BaseDestroyActionExecutor : public ISyncedActionExecutor {
+class DestroyActionExecutor : public ISyncedActionExecutor {
 public:
-	BaseDestroyActionExecutor(const std::string& command, const std::string& description, bool runDeathScript)
-		: ISyncedActionExecutor(command, description, true), runDeathScript(runDeathScript) {}
+	DestroyActionExecutor() : ISyncedActionExecutor("Destroy", "Destroys one or multiple units by unit-ID, instantly", true) {
+	}
 
-	bool Execute(const SyncedAction& action) const {
-		const std::vector<std::string>& args = CSimpleParser::Tokenize(action.GetArgs(), 0);
-		if (args.size() == 0) {
-			LOG_L(L_WARNING, "not enough arguments (\"/%s <unitID:int...>\")", this->GetCommand().c_str());
-			return false;
-		}
+	bool Execute(const SyncedAction& action) const final override {
+		std::stringstream argsStream(action.GetArgs());
+		LOG("Killing units: %s", action.GetArgs().c_str());
 
-		LOG("[%s] unitIDs: %s", this->GetCommand().c_str(), action.GetArgs().c_str());
-		for (const auto& it : args) {
-			int unitId = StringToInt<int>(it);
-			CUnit *unit = unitHandler.GetUnit(unitId);
+		unsigned int unitId;
+		do {
+			argsStream >> unitId;
+
+			if (!argsStream)
+				break;
+
+			CUnit* unit = unitHandler.GetUnit(unitId);
 
 			if (unit != nullptr) {
-				unit->KillUnit(nullptr, false, !this->runDeathScript, -CSolidObject::DAMAGE_KILLED_CHEAT);
+				unit->KillUnit(nullptr, false, false);
 			} else {
-				LOG("[%s] Wrong unitID: %i", this->GetCommand().c_str(), unitId);
+				LOG("Wrong unitID: %i", unitId);
 			}
-		}
+		} while (true);
 
 		return true;
 	}
-private:
-	bool runDeathScript;
-};
-
-class DestroyActionExecutor : public BaseDestroyActionExecutor {
-public:
-	DestroyActionExecutor() : BaseDestroyActionExecutor("Destroy", "Destroys one or multiple units by unitID immediately", true) {}
-};
-
-
-class RemoveActionExecutor : public BaseDestroyActionExecutor {
-public:
-	RemoveActionExecutor() : BaseDestroyActionExecutor("Remove", "Removes one or multiple units by unitID immediately, bypassing death sequence", false) {}
 };
 
 
@@ -242,9 +210,9 @@ public:
 	NoSpectatorChatActionExecutor() : ISyncedActionExecutor("NoSpectatorChat", "Enables/Disables spectators to use the chat") {
 	}
 
-	bool Execute(const SyncedAction& action) const final {
-		InverseOrSetBool(game->noSpectatorChat, action.GetArgs());
-		LogSystemStatus("Spectators chat", !game->noSpectatorChat);
+	bool Execute(const SyncedAction& action) const final override {
+		// TODO: re-implement via server config once chat system is in place
+		LOG("[NoSpectatorChat] not yet implemented in server-authoritative model");
 		return true;
 	}
 };
@@ -255,8 +223,9 @@ public:
 	ReloadCobActionExecutor() : ISyncedActionExecutor("ReloadCOB", "Reloads COB scripts", true) {
 	}
 
-	bool Execute(const SyncedAction& action) const final {
-		game->ReloadCOB(action.GetArgs(), action.GetPlayerID());
+	bool Execute(const SyncedAction& action) const final override {
+		// TODO: re-implement COB reload outside of CGame
+		LOG("[ReloadCOB] not yet implemented");
 		return true;
 	}
 };
@@ -267,7 +236,7 @@ public:
 	ReloadCegsActionExecutor() : ISyncedActionExecutor("ReloadCEGs", "Reloads CEG scripts", true) {
 	}
 
-	bool Execute(const SyncedAction& action) const final {
+	bool Execute(const SyncedAction& action) const final override {
 		explGenHandler.ReloadGenerators(action.GetArgs());
 		return true;
 	}
@@ -283,7 +252,7 @@ public:
 	) {
 	}
 
-	bool Execute(const SyncedAction& action) const final {
+	bool Execute(const SyncedAction& action) const final override {
 		bool devMode = CLuaHandle::GetDevMode();
 		InverseOrSetBool(devMode, action.GetArgs());
 		CLuaHandle::SetDevMode(devMode);
@@ -299,7 +268,7 @@ public:
 			"Allows/Disallows editing of unit-, feature- and weapon-defs"
 			" through Lua", true) {}
 
-	bool Execute(const SyncedAction& action) const final {
+	bool Execute(const SyncedAction& action) const final override {
 		InverseOrSetBool(gs->editDefsEnabled, action.GetArgs());
 		LogSystemStatus("Unit-, Feature- & Weapon-Def editing", gs->editDefsEnabled);
 		return true;
@@ -410,7 +379,7 @@ public:
 	) {
 	}
 
-	bool Execute(const SyncedAction& action) const final {
+	bool Execute(const SyncedAction& action) const final override {
 		// NOTE:
 		//   previously only the host player (ID == 0) was allowed to issue these actions
 		//   prior to some server changes they worked even in demos with that restriction,
@@ -432,7 +401,7 @@ public:
 	) {
 	}
 
-	bool Execute(const SyncedAction& action) const final {
+	bool Execute(const SyncedAction& action) const final override {
 		if (!gs->useLuaGaia)
 			return false;
 
@@ -442,6 +411,7 @@ public:
 };
 
 
+#ifdef DEBUG
 class DesyncActionExecutor : public ISyncedActionExecutor {
 public:
 	DesyncActionExecutor() : ISyncedActionExecutor(
@@ -458,16 +428,13 @@ public:
 		ASSERT_SYNCED((short)(gu->myPlayerNum * 123 + 123));
 		//ASSERT_SYNCED(float3(gu->myPlayerNum, gu->myPlayerNum, gu->myPlayerNum));
 
-		// Command coming from the server won't match any of the client IDs.
-		int actionPlayerID = (action.GetPlayerID()==SERVER_PLAYER) ? 0 : action.GetPlayerID();
-
 		for (int i = unitHandler.MaxUnits() - 1; i >= 0; --i) {
 			CUnit* u = unitHandler.GetUnit(i);
 
 			if (u == nullptr)
 				continue;
 
-			if (actionPlayerID == gu->myPlayerNum) {
+			if (action.GetPlayerID() == gu->myPlayerNum) {
 				++u->midPos.x; // and desync...
 				++u->midPos.x;
 			} else {
@@ -482,19 +449,22 @@ public:
 		return true;
 	}
 };
+#endif // defined DEBUG
 
 
 class AtmActionExecutor : public ISyncedActionExecutor {
 public:
-	AtmActionExecutor() : ISyncedActionExecutor("Atm", "Gives the specified amount (default 1000) of each resource to the issuing player's team", true) {
+	AtmActionExecutor() : ISyncedActionExecutor("Atm", "Gives 1000 metal and 1000 energy to the issuing player's team", true) {
 	}
 
-	bool Execute(const SyncedAction& action) const final {
+	bool Execute(const SyncedAction& action) const final override {
 		const std::string& args = action.GetArgs();
 
 		const int team = playerHandler.Player(action.GetPlayerID())->team;
-		const float amount = (args.empty())? 1000: std::max(0, std::atoi(args.c_str()));
-		teamHandler.Team(team)->AddResources(amount);
+		const int amount = (args.empty())? 1000: std::atoi(args.c_str());
+
+		teamHandler.Team(team)->AddMetal(std::max(0, amount));
+		teamHandler.Team(team)->AddEnergy(std::max(0, amount));
 		return true;
 	}
 };
@@ -509,13 +479,13 @@ public:
 	) {
 	}
 
-	bool Execute(const SyncedAction& action) const final {
+	bool Execute(const SyncedAction& action) const final override {
 		const CPlayer* actionPlayer = playerHandler.Player(action.GetPlayerID());
 
 		if (actionPlayer->spectator && !gs->cheatEnabled)
 			return false;
 
-		if (!game->playing)
+		if (gs->PreSimFrame())
 			return true;
 
 		for (int a = 0; a < teamHandler.ActiveTeams(); ++a) {
@@ -549,20 +519,9 @@ public:
 	SkipActionExecutor() : ISyncedActionExecutor("Skip", "Fast-forwards to a given frame, or stops fast-forwarding") {
 	}
 
-	bool Execute(const SyncedAction& action) const final {
-		if (action.GetArgs().find_first_of("start") == 0) {
-			std::istringstream buf(action.GetArgs().substr(6));
-			int targetFrame;
-			buf >> targetFrame;
-			game->StartSkip(targetFrame);
-			LOG("Skipping to frame %i", targetFrame);
-		}
-		else if (action.GetArgs() == "end") {
-			game->EndSkip();
-			LOG("Skip finished");
-		} else {
-			LOG_L(L_WARNING, "/%s: wrong syntax", GetCommand().c_str());
-		}
+	bool Execute(const SyncedAction& action) const final override {
+		// TODO: re-implement skip outside of CGame
+		LOG("[Skip] not yet implemented in server-authoritative model");
 		return true;
 	}
 };
@@ -579,13 +538,11 @@ void SyncedGameCommands::AddDefaultActionExecutors()
 
 	AddActionExecutor(AllocActionExecutor<CheatActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<NoHelpActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<NoSpecDrawActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<GodModeActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<GlobalLosActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<NoCostActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<GiveActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DestroyActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<RemoveActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<NoSpectatorChatActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<ReloadCobActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<ReloadCegsActionExecutor>());
@@ -593,7 +550,9 @@ void SyncedGameCommands::AddDefaultActionExecutors()
 	AddActionExecutor(AllocActionExecutor<EditDefsActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<LuaRulesActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<LuaGaiaActionExecutor>());
+#ifdef DEBUG
 	AddActionExecutor(AllocActionExecutor<DesyncActionExecutor>());
+#endif // defined DEBUG
 	AddActionExecutor(AllocActionExecutor<AtmActionExecutor>());
 	if (modInfo.allowTake)
 		AddActionExecutor(AllocActionExecutor<TakeActionExecutor>());
@@ -602,7 +561,7 @@ void SyncedGameCommands::AddDefaultActionExecutors()
 }
 
 
-alignas(SyncedGameCommands) static std::byte sgcSingletonMem[sizeof(SyncedGameCommands)];
+static uint8_t sgcSingletonMem[sizeof(SyncedGameCommands)];
 
 void SyncedGameCommands::CreateInstance() {
 	SyncedGameCommands*& singleton = GetInstance();

@@ -25,9 +25,8 @@ public:
 	void Collision() override;
 
 	void Update() override;
-	void Draw() override;
 
-	int GetProjectilesCount() const override;
+	int GetProjectilesCount() const override { return 1; }
 
 	int ShieldRepulse(const float3& shieldPos, float shieldForce, float shieldMaxSpeed) override;
 
@@ -62,11 +61,9 @@ private:
 	float3 oldSmoke;
 	float3 oldDir;
 	CSmokeTrailProjectile* smokeTrail;
-private:
-	inline float GetSmokeSize() const;
-	inline float GetSmokeColor() const;
-	inline int GetSmokeTime() const;
-	inline int GetSmokePeriod() const;
+
+	/// the smokes life-time in frames
+	static const float SMOKE_TIME;
 };
 
 

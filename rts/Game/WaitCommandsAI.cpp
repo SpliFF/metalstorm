@@ -2,11 +2,8 @@
 
 
 #include "WaitCommandsAI.h"
-#include "SelectedUnitsHandler.h"
 #include "GameHelper.h"
 #include "GlobalUnsynced.h"
-#include "UI/CommandColors.h"
-#include "Rendering/LineDrawer.h"
 #include "Sim/Misc/QuadField.h"
 #include "Sim/Misc/GlobalConstants.h"
 #include "Sim/Misc/GlobalSynced.h"
@@ -20,8 +17,7 @@
 #include "Sim/Units/UnitTypes/Factory.h"
 #include "System/Object.h"
 #include "System/StringUtil.h"
-#include "System/creg/STL_Map.h"
-#include "System/creg/STL_Set.h"
+#include "System/creg/creg_cond.h"
 
 #include <cassert>
 
@@ -136,28 +132,13 @@ void CWaitCommandsAI::Update()
 
 void CWaitCommandsAI::DrawCommands() const
 {
-	WaitMap::const_iterator it;
-	for (it = waitMap.begin(); it != waitMap.end(); ++it) {
-		it->second->Draw();
-	}
+	// rendering removed — drawing handled by client
 }
 
 
 void CWaitCommandsAI::AddTimeWait(const Command& cmd)
 {
-	// save the current selection
-	const auto tmpSet = selectedUnitsHandler.selectedUnits;
-
-	for (const int unitID: tmpSet) {
-		InsertWaitObject(TimeWait::New(cmd, unitHandler.GetUnit(unitID)));
-	}
-
-	// restore the selection
-	selectedUnitsHandler.ClearSelected();
-
-	for (const int unitID: tmpSet) {
-		selectedUnitsHandler.AddUnit(unitHandler.GetUnit(unitID));
-	}
+	// TODO: re-implement — previously operated on selectedUnitsHandler (client-side)
 }
 
 
@@ -303,36 +284,7 @@ void CWaitCommandsAI::RemoveWaitObject(Wait* wait)
 
 void CWaitCommandsAI::AddIcon(const Command& cmd, const float3& pos) const
 {
-	if (cmd.GetNumParams() != 2) {
-		lineDrawer.DrawIconAtLastPos(CMD_WAIT);
-		return;
-	}
-
-	const float code = cmd.GetParam(0);
-	const KeyType key = Wait::GetKeyFromFloat(cmd.GetParam(1));
-	WaitMap::const_iterator it = waitMap.find(key);
-
-	if (it == waitMap.end()) {
-		lineDrawer.DrawIconAtLastPos(CMD_WAIT);
-	}
-	else if (code == CMD_WAITCODE_TIMEWAIT) {
-		lineDrawer.DrawIconAtLastPos(CMD_TIMEWAIT);
-		cursorIcons.AddIconText(it->second->GetStateText(), pos);
-	}
-	else if (code == CMD_WAITCODE_SQUADWAIT) {
-		lineDrawer.DrawIconAtLastPos(CMD_SQUADWAIT);
-		cursorIcons.AddIconText(it->second->GetStateText(), pos);
-	}
-	else if (code == CMD_WAITCODE_DEATHWAIT) {
-		lineDrawer.DrawIconAtLastPos(CMD_DEATHWAIT);
-		it->second->AddUnitPosition(pos);
-	}
-	else if (code == CMD_WAITCODE_GATHERWAIT) {
-		lineDrawer.DrawIconAtLastPos(CMD_GATHERWAIT);
-	}
-	else {
-		lineDrawer.DrawIconAtLastPos(CMD_WAIT);
-	}
+	// rendering removed — icon drawing handled by client
 }
 
 
@@ -436,28 +388,12 @@ void CWaitCommandsAI::Wait::SendCommand(const Command& cmd, const CUnitSet& unit
 	if (unitSet.empty())
 		return;
 
-	const auto& selUnits = selectedUnitsHandler.selectedUnits;
-
-	if (unitSet == selUnits) {
-		selectedUnitsHandler.GiveCommand(cmd, false);
-		return;
-	}
-
-	// make a temporary copy
-	auto tmpSet = selUnits;
-
-	// create new selection for this command
-	selectedUnitsHandler.ClearSelected();
+	// TODO: re-implement command dispatch without selectedUnitsHandler
+	// Previously routed through the client-side selection system
 	for (const int unitID: unitSet) {
-		selectedUnitsHandler.AddUnit(unitHandler.GetUnit(unitID));
-	}
-
-	selectedUnitsHandler.GiveCommand(cmd, false);
-	selectedUnitsHandler.ClearSelected();
-
-	// restore previous selection
-	for (const int unitID: tmpSet) {
-		selectedUnitsHandler.AddUnit(unitHandler.GetUnit(unitID));
+		CUnit* unit = unitHandler.GetUnit(unitID);
+		if (unit != nullptr && unit->commandAI != nullptr)
+			unit->commandAI->GiveCommand(cmd);
 	}
 }
 
@@ -517,9 +453,8 @@ CWaitCommandsAI::TimeWait::TimeWait(const Command& cmd, CUnit* _unit)
 	Command waitCmd(CMD_WAIT, cmd.GetOpts(), code);
 	waitCmd.PushParam(GetFloatFromKey(key));
 
-	selectedUnitsHandler.ClearSelected();
-	selectedUnitsHandler.AddUnit(unit);
-	selectedUnitsHandler.GiveCommand(waitCmd);
+	if (unit->commandAI != nullptr)
+		unit->commandAI->GiveCommand(waitCmd);
 
 	AddDeathDependence(unit, DEPENDENCE_WAITCMD);
 }
@@ -646,55 +581,9 @@ CWaitCommandsAI::DeathWait*
 CWaitCommandsAI::DeathWait::DeathWait(const Command& cmd)
 : Wait(CMD_WAITCODE_DEATHWAIT)
 {
-	const auto& selUnits = selectedUnitsHandler.selectedUnits;
-
-	if (cmd.GetNumParams() == 1) {
-		const int unitID = (int)cmd.GetParam(0);
-
-		CUnit* unit = unitHandler.GetUnit(unitID);
-
-		if (unit == nullptr)
-			return;
-
-		if (selUnits.find(unitID) != selUnits.end())
-			return;
-
-		deathUnits.insert(unitID);
-	}
-	else if (cmd.GetNumParams() == 6) {
-		const float3& pos0 = cmd.GetPos(0);
-		const float3& pos1 = cmd.GetPos(3);
-
-		CUnitSet tmpSet;
-		SelectAreaUnits(pos0, pos1, tmpSet, false);
-
-		for (const int unitID: tmpSet) {
-			if (selUnits.find(unitID) == selUnits.end()) {
-				deathUnits.insert(unitID);
-			}
-		}
-
-		if (deathUnits.empty())
-			return;
-	} else {
-		return; // unknown param config
-	}
-
-	valid = true;
-	key = GetNewKey();
-
-	waitUnits = selUnits;
-
-	Command waitCmd(CMD_WAIT, cmd.GetOpts(), code);
-	waitCmd.PushParam(GetFloatFromKey(key));
-	selectedUnitsHandler.GiveCommand(waitCmd);
-
-	for (const int unitID: waitUnits) {
-		AddDeathDependence((CObject*) unitHandler.GetUnit(unitID), DEPENDENCE_WAITCMD);
-	}
-	for (const int unitID: deathUnits) {
-		AddDeathDependence((CObject*) unitHandler.GetUnit(unitID), DEPENDENCE_WAITCMD);
-	}
+	// TODO: re-implement without selectedUnitsHandler
+	// DeathWait previously depended on the client-side selection to determine
+	// which units wait and which units must die. Needs a server-side unit set.
 }
 
 
@@ -771,33 +660,7 @@ void CWaitCommandsAI::DeathWait::Update()
 
 void CWaitCommandsAI::DeathWait::Draw() const
 {
-	if (unitPos.empty())
-		return;
-
-	float3 midPos;
-	for (const auto& pos: unitPos) {
-		midPos += pos;
-	}
-	midPos /= (float)unitPos.size();
-
-	cursorIcons.AddIcon(CMD_DEATHWAIT, midPos);
-
-	for (const auto& pos: unitPos) {
-		lineDrawer.StartPath(pos, cmdColors.start);
-		lineDrawer.DrawLine(midPos, cmdColors.deathWait);
-		lineDrawer.FinishPath();
-	}
-
-	for (const int unitID: deathUnits) {
-		const CUnit* unit = unitHandler.GetUnit(unitID);
-
-		if (unit->losStatus[gu->myAllyTeam] & (LOS_INLOS | LOS_INRADAR)) {
-			cursorIcons.AddIcon(CMD_SELFD, unit->midPos);
-			lineDrawer.StartPath(midPos, cmdColors.start);
-			lineDrawer.DrawLine(unit->midPos, cmdColors.deathWait);
-			lineDrawer.FinishPath();
-		}
-	}
+	// rendering removed — drawing handled by client
 }
 
 
@@ -850,45 +713,9 @@ CWaitCommandsAI::SquadWait*
 CWaitCommandsAI::SquadWait::SquadWait(const Command& cmd)
 : Wait(CMD_WAITCODE_SQUADWAIT)
 {
-	if (cmd.GetNumParams() != 1)
-		return;
-
-	squadCount = (int)cmd.GetParam(0);
-	if (squadCount < 2)
-		return;
-
-	const auto& selUnits = selectedUnitsHandler.selectedUnits;
-
-	for (const int unitID: selUnits) {
-		const CUnit* unit = unitHandler.GetUnit(unitID);
-
-		if (dynamic_cast<const CFactory*>(unit) != nullptr) {
-			buildUnits.insert(unitID);
-		} else {
-			waitUnits.insert(unitID);
-		}
-	}
-
-	if (buildUnits.empty() && ((int)waitUnits.size() < squadCount))
-		return;
-
-	valid = true;
-	key = GetNewKey();
-
-	Command waitCmd(CMD_WAIT, cmd.GetOpts(), code);
-	waitCmd.PushParam(GetFloatFromKey(key));
-
-	SendCommand(waitCmd, buildUnits);
-	SendCommand(waitCmd, waitUnits);
-
-	for (const int unitID: buildUnits) {
-		AddDeathDependence((CObject*) unitHandler.GetUnit(unitID), DEPENDENCE_WAITCMD);
-	}
-	for (const int unitID: waitUnits) {
-		AddDeathDependence((CObject*) unitHandler.GetUnit(unitID), DEPENDENCE_WAITCMD);
-	}
-
-	UpdateText();
+	// TODO: re-implement without selectedUnitsHandler
+	// SquadWait previously depended on the client-side selection to determine
+	// which units form the squad. Needs a server-side unit set.
 }
 
 
@@ -1001,34 +828,9 @@ CWaitCommandsAI::GatherWait*
 CWaitCommandsAI::GatherWait::GatherWait(const Command& cmd)
 : Wait(CMD_WAITCODE_GATHERWAIT)
 {
-	if (cmd.GetNumParams() != 0)
-		return;
-
-	// only add valid units
-	const auto& selUnits = selectedUnitsHandler.selectedUnits;
-
-	for (const int unitID: selUnits) {
-		const CUnit* unit = unitHandler.GetUnit(unitID);
-		const UnitDef* ud = unit->unitDef;
-
-		if (ud->canmove && (dynamic_cast<const CFactory*>(unit) == nullptr)) {
-			waitUnits.insert(unitID);
-		}
-	}
-
-	if (waitUnits.size() < 2)
-		return; // one man does not a gathering make
-
-	valid = true;
-	key = GetNewKey();
-
-	Command waitCmd(CMD_WAIT, SHIFT_KEY, code);
-	waitCmd.PushParam(GetFloatFromKey(key));
-	selectedUnitsHandler.GiveCommand(waitCmd, true);
-
-	for (const int unitID: waitUnits) {
-		AddDeathDependence((CObject*) unitHandler.GetUnit(unitID), DEPENDENCE_WAITCMD);
-	}
+	// TODO: re-implement without selectedUnitsHandler
+	// GatherWait previously depended on the client-side selection to determine
+	// which units gather. Needs a server-side unit set.
 }
 
 

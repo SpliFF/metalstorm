@@ -4,7 +4,6 @@
 #include "MapInfo.h"
 
 #include "Sim/Misc/GlobalConstants.h"
-#include "Rendering/GlobalRendering.h"
 
 #include "Lua/LuaParser.h"
 #include "System/Log/ILog.h"
@@ -13,15 +12,9 @@
 #include "System/StringUtil.h"
 #include "System/FileSystem/FileHandler.h"
 
-#if !defined(HEADLESS) && !defined(NO_SOUND)
-#include "System/Sound/OpenAL/EFX.h"
-#include "System/Sound/OpenAL/EFXPresets.h"
-#endif
 
 #include <array>
 #include <cassert>
-
-#include "System/Misc/TracyDefs.h"
 
 
 // Before delete, the const is const_cast'ed away. There are
@@ -33,7 +26,6 @@ const CMapInfo* mapInfo = nullptr;
 
 static void FIND_MAP_TEXTURE(std::string* filePath, const std::string& defaultDir = "maps/")
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (filePath->empty())
 		return;
 	if (CFileHandler::FileExists(*filePath, SPRING_VFS_ZIP)) // no RawFS, cause it's also used for synced textures (typemap, metalmap, ...)
@@ -46,7 +38,6 @@ static void FIND_MAP_TEXTURE(std::string* filePath, const std::string& defaultDi
 
 CMapInfo::CMapInfo(const std::string& mapFileName, const string& mapHumanName): mapInfoParser(mapFileName)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	map.name = mapHumanName;
 
 	if (!mapInfoParser.IsValid())
@@ -78,17 +69,11 @@ CMapInfo::CMapInfo(const std::string& mapFileName, const string& mapHumanName): 
 
 CMapInfo::~CMapInfo()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
-#if !defined(HEADLESS) && !defined(NO_SOUND)
-	delete efxprops;
-	efxprops = nullptr;
-#endif
 }
 
 
 void CMapInfo::ReadGlobal()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const LuaTable& topTable = mapInfoParser.GetRoot();
 
 	map.description  = topTable.GetString("description", map.name);
@@ -118,7 +103,6 @@ void CMapInfo::ReadGlobal()
 
 void CMapInfo::ReadGui()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// GUI
 	gui.autoShowMetal = mapInfoParser.GetRoot().GetBool("autoShowMetal", true);
 }
@@ -126,7 +110,6 @@ void CMapInfo::ReadGui()
 
 void CMapInfo::ReadAtmosphere()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// MAP\ATMOSPHERE
 	const LuaTable& atmoTable = mapInfoParser.GetRoot().SubTable("atmosphere");
 	atmosphere_t& atmo = atmosphere;
@@ -140,25 +123,8 @@ void CMapInfo::ReadAtmosphere()
 
 	atmo.skyBox       = atmoTable.GetString("skyBox", "");
 	atmo.skyColor     = atmoTable.GetFloat3("skyColor", float3(0.1f, 0.15f, 0.7f));
-
-	if (atmoTable.KeyExists("skyDir")) {
-		LOG_L(L_DEPRECATED, "[CMapInfo::%s] atmosphere.skyDir in mapinfo.lua was never used and now deprecated, use atmosphere.skyAxisAngle instead", __func__);
-	}
-
-	{
-		atmo.skyAxisAngle = atmoTable.GetFloat4("skyAxisAngle", float4{ FwdVector, 0.0f });
-
-		auto axis = float3{ atmo.skyAxisAngle.x, atmo.skyAxisAngle.y, atmo.skyAxisAngle.z };
-
-		const float axisNorm = axis.Length();
-		if (axisNorm < float3::nrm_eps())
-			axis = FwdVector;
-		else
-			axis /= axisNorm;
-
-		atmo.skyAxisAngle = float4{ axis, ClampRad(atmo.skyAxisAngle.w) };
-	}
-
+	atmo.skyDir       = atmoTable.GetFloat3("skyDir", -FwdVector);
+	atmo.skyDir.ANormalize();
 	atmo.sunColor     = atmoTable.GetFloat3("sunColor", float3(1.0f, 1.0f, 1.0f));
 	atmo.cloudColor   = atmoTable.GetFloat3("cloudColor", float3(1.0f, 1.0f, 1.0f));
 	atmo.fluidDensity = atmoTable.GetFloat("fluidDensity", 1.2f * 0.25f);
@@ -174,7 +140,6 @@ void CMapInfo::ReadAtmosphere()
 
 void CMapInfo::ReadSplats()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const LuaTable& splatsTable = mapInfoParser.GetRoot().SubTable("splats");
 
 	splats.texScales = splatsTable.GetFloat4("texScales", float4(0.02f, 0.02f, 0.02f, 0.02f));
@@ -183,7 +148,6 @@ void CMapInfo::ReadSplats()
 
 void CMapInfo::ReadGrass()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const LuaTable& grassTable = mapInfoParser.GetRoot().SubTable("grass");
 	const LuaTable& mapResTable = mapInfoParser.GetRoot().SubTable("resources");
 
@@ -200,7 +164,6 @@ void CMapInfo::ReadGrass()
 
 void CMapInfo::ReadLight()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const LuaTable& lightTable = mapInfoParser.GetRoot().SubTable("lighting");
 
 	// read the float4 direction first; keep it if the float3 value does not exist
@@ -220,20 +183,19 @@ void CMapInfo::ReadLight()
 
 	light.specularExponent = lightTable.GetFloat("specularExponent", 100.0f);
 
-	light.groundShadowDensity = std::clamp(light.groundShadowDensity, 0.0f, 1.0f);
-	light.modelShadowDensity   = std::clamp(light.modelShadowDensity,   0.0f, 1.0f);
+	light.groundShadowDensity = Clamp(light.groundShadowDensity, 0.0f, 1.0f);
+	light.modelShadowDensity   = Clamp(light.modelShadowDensity,   0.0f, 1.0f);
 }
 
 
 void CMapInfo::ReadWater()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const LuaTable& wt = mapInfoParser.GetRoot().SubTable("water");
 
 	water.fluidDensity = wt.GetFloat("fluidDensity", 960.0f * 0.25f);
 	water.repeatX = wt.GetFloat("repeatX", 0.0f);
 	water.repeatY = wt.GetFloat("repeatY", 0.0f);
-	water.damage  = wt.GetFloat("damage",  0.0f) * (UNIT_SLOWUPDATE_RATE * INV_GAME_SPEED);
+	water.damage  = wt.GetFloat("damage",  0.0f) * ((float)UNIT_SLOWUPDATE_RATE / (float)GAME_SPEED);
 
 	water.absorb    = wt.GetFloat3("absorb",    float3(0.0f, 0.0f, 0.0f));
 	water.baseColor = wt.GetFloat3("baseColor", float3(0.0f, 0.0f, 0.0f));
@@ -266,13 +228,6 @@ void CMapInfo::ReadWater()
 	water.perlinAmplitude  = wt.GetFloat("perlinAmplitude",  0.9f);
 	water.windSpeed        = wt.GetFloat("windSpeed", 1.0f);
 
-	water.waveOffsetFactor   = wt.GetFloat("waveOffsetFactor", 0.0f);
-	water.waveLength         = wt.GetFloat("waveLength", 0.15f);
-	water.waveFoamDistortion = wt.GetFloat("waveFoamDistortion", 0.05f);
-	water.waveFoamIntensity  = wt.GetFloat("waveFoamIntensity", 0.5f);
-	water.causticsResolution = wt.GetFloat("causticsResolution", 75.0f);
-	water.causticsStrength   = wt.GetFloat("causticsStrength", 0.08f);
-
 	water.texture       = wt.GetString("texture",       "");
 	water.foamTexture   = wt.GetString("foamTexture",   "");
 	water.normalTexture = wt.GetString("normalTexture", "");
@@ -297,17 +252,17 @@ void CMapInfo::ReadWater()
 	}
 
 	FIND_MAP_TEXTURE(&water.normalTexture);
-	water.numTiles = std::clamp(wt.GetInt("numTiles", 4), 1, 16);
+	water.numTiles = Clamp(wt.GetInt("numTiles", 1), 1, 16);
 	if (water.normalTexture.empty()) {
-		water.normalTexture = resGfxMaps.GetString("waternormaltex", "waterbump_4tiles.dds");
+		water.normalTexture = resGfxMaps.GetString("waternormaltex", "waterbump.png");
 		FIND_MAP_TEXTURE(&water.normalTexture, "bitmaps/");
 
-		// default texture is a TileSet of 4x4
+		// default texture is a TileSet of 3x3
 		// user-defined textures are expected to be 1x1 (no DynWaves possible)
-		water.numTiles = 4;
+		water.numTiles = 3;
 
 		if (resGfxMaps.KeyExists("waternormaltex")) {
-			water.numTiles = std::clamp(resGfxMaps.GetInt("numTiles", 4), 1, 16);
+			water.numTiles = Clamp(resGfxMaps.GetInt("numTiles", 1), 1, 16);
 		}
 	}
 
@@ -339,7 +294,6 @@ void CMapInfo::ReadWater()
 template<typename T>
 static bool ParseSplatDetailNormalTexture(const LuaTable& table, const T key, std::vector<std::string>& texNames)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (!table.KeyExists(key))
 		return false;
 
@@ -352,7 +306,6 @@ static bool ParseSplatDetailNormalTexture(const LuaTable& table, const T key, st
 
 void CMapInfo::ReadSMF()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// SMF specific settings
 	const LuaTable& mapResTable = mapInfoParser.GetRoot().SubTable("resources");
 	const LuaTable& sdnTexTable = mapResTable.SubTable("splatDetailNormalTex");
@@ -430,7 +383,6 @@ void CMapInfo::ReadSMF()
 
 void CMapInfo::ReadTerrainTypes()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const LuaTable& terrTypeTable = mapInfoParser.GetRoot().SubTable("terrainTypes");
 
 	for (int tt = 0; tt < NUM_TERRAIN_TYPES; tt++) {
@@ -458,7 +410,6 @@ void CMapInfo::ReadTerrainTypes()
 
 void CMapInfo::ReadPFSConstants()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const LuaTable& pfsTable = (mapInfoParser.GetRoot()).SubTable("pfs");
 //	const LuaTable& legacyTable = pfsTable.SubTable("legacyConstants");
 	const LuaTable& qtpfsTable = pfsTable.SubTable("qtpfsConstants");
@@ -474,69 +425,8 @@ void CMapInfo::ReadPFSConstants()
 	qtpfsConsts.numSpeedModBins = qtpfsTable.GetInt("numSpeedModBins", 10);
 	qtpfsConsts.minSpeedModVal  = std::max(                      0.0f, qtpfsTable.GetFloat("minSpeedModVal", 0.0f));
 	qtpfsConsts.maxSpeedModVal  = std::max(qtpfsConsts.minSpeedModVal, qtpfsTable.GetFloat("maxSpeedModVal", 2.0f));
-	qtpfsConsts.maxNodesSearched = qtpfsTable.GetInt("maxNodesSearched", 0);
-	qtpfsConsts.maxRelativeNodesSearched = qtpfsTable.GetFloat("maxRelativeNodesSearched", 0.f);
 }
 
 void CMapInfo::ReadSound()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
-#if !defined(HEADLESS) && !defined(NO_SOUND)
-	const LuaTable& soundTable = mapInfoParser.GetRoot().SubTable("sound");
-
-	efxprops = new EAXSfxProps();
-
-	const auto presetIt = eaxPresets.find(soundTable.GetString("preset", "default"));
-
-	if (presetIt != eaxPresets.end())
-		*efxprops = presetIt->second;
-
-	const LuaTable& filterTable = soundTable.SubTable("passfilter");
-
-	for (const auto& item: nameToALFilterParam) {
-		const std::string& name = item.first;
-		const int luaType = filterTable.GetType(name);
-
-		if (luaType == LuaTable::NIL)
-			continue;
-
-		const ALuint param = item.second;
-		const unsigned type = alParamType[param];
-
-		switch (type) {
-			case EFXParamTypes::FLOAT:
-				if (luaType == LuaTable::NUMBER)
-					efxprops->filter_props_f[param] = filterTable.GetFloat(name, 0.0f);
-				break;
-		}
-	}
-
-	soundTable.SubTable("reverb");
-
-	for (const auto& item: nameToALFilterParam) {
-		const std::string& name = item.first;
-		const int luaType = filterTable.GetType(name);
-
-		if (luaType == LuaTable::NIL)
-			continue;
-
-		const ALuint param = item.second;
-		const unsigned type = alParamType[param];
-
-		switch (type) {
-			case EFXParamTypes::VECTOR:
-				if (luaType == LuaTable::TABLE)
-					efxprops->reverb_props_v[param] = filterTable.GetFloat3(name, ZeroVector);
-				break;
-			case EFXParamTypes::FLOAT:
-				if (luaType == LuaTable::NUMBER)
-					efxprops->reverb_props_f[param] = filterTable.GetFloat(name, 0.0f);
-				break;
-			case EFXParamTypes::BOOL:
-				if (luaType == LuaTable::BOOLEAN)
-					efxprops->reverb_props_i[param] = filterTable.GetBool(name, false);
-				break;
-		}
-	}
-#endif
 }

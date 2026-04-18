@@ -1,5 +1,6 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
+#include "Game/TraceRay.h"
 #include "WeaponLoader.h"
 #include "WeaponMemPool.h"
 #include "WeaponDef.h"
@@ -19,65 +20,48 @@
 #include "StarburstLauncher.h"
 #include "TorpedoLauncher.h"
 
-#include "Game/TraceRay.h" // Collision::*
+#include "Sim/Misc/CollisionHandler.h" // Collision::*
 #include "Sim/Misc/DamageArray.h"
 #include "Sim/Misc/GlobalConstants.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
-#include "Sim/Units/UnitDefHandler.h"
 #include "System/Log/ILog.h"
 
-#include "System/Misc/TracyDefs.h"
+#include <limits>
 
-static std::vector<uint8_t> udWeaponCounts;
+static std::array<uint8_t, 2048> udWeaponCounts;
 
 WeaponMemPool weaponMemPool;
 
 static_assert((sizeof(UnitDef::weapons) / sizeof(UnitDef::weapons[0])) == MAX_WEAPONS_PER_UNIT, "");
 static_assert(MAX_WEAPONS_PER_UNIT < std::numeric_limits<decltype(udWeaponCounts)::value_type>::max(), "");
 
-void CWeaponLoader::InitStatic(const CUnitDefHandler *udh) {
-	udWeaponCounts.clear();
-	udWeaponCounts.resize(udh->NumUnitDefs() + 1, MAX_WEAPONS_PER_UNIT + 1);
-	weaponMemPool.reserve(128);
-}
-void CWeaponLoader::KillStatic() {
-	udWeaponCounts.clear();
-	udWeaponCounts.shrink_to_fit();
-	weaponMemPool.clear();
-}
+void CWeaponLoader::InitStatic() { udWeaponCounts.fill(MAX_WEAPONS_PER_UNIT + 1); weaponMemPool.reserve(128); }
+void CWeaponLoader::KillStatic() { udWeaponCounts.fill(MAX_WEAPONS_PER_UNIT + 1); weaponMemPool.clear(); }
 
 
 
 void CWeaponLoader::LoadWeapons(CUnit* unit)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const UnitDef* unitDef = unit->unitDef;
+	const UnitDefWeapon* udWeapons = &unitDef->GetWeapon(0);
 
-	assert(unitDef->id < udWeaponCounts.size());
-	auto& wc = udWeaponCounts[unitDef->id];
+	unsigned int i = 0;
+	unsigned int n = 0;
 
-	// initialize only once per unitdef as this function deals with units and not their defs
-	if (wc > MAX_WEAPONS_PER_UNIT)
-		wc = unitDef->NumWeapons();
+	if ((n = udWeaponCounts.at(unitDef->id)) > MAX_WEAPONS_PER_UNIT)
+		n = (udWeaponCounts.at(unitDef->id) = unitDef->NumWeapons());
 
-	// unitDef->NumWeapons() is guaranteed to be <= MAX_WEAPONS_PER_UNIT
-	unit->weapons.reserve(wc);
-
-	for (size_t i = 0, cwc = 0; cwc < wc && i < MAX_WEAPONS_PER_UNIT; ++i) {
-		CWeapon* weapon = LoadWeapon(unit, unitDef->GetWeapon(i).def);
-		if (!weapon)
-			continue;
+	for (unit->weapons.reserve(n); i < n; i++) {
+		CWeapon* weapon = LoadWeapon(unit, udWeapons[i].def);
 
 		weapon->SetWeaponNum(unit->weapons.size());
 		unit->weapons.push_back(weapon);
-		++cwc;
 	}
 }
 
 void CWeaponLoader::InitWeapons(CUnit* unit)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const UnitDef* unitDef = unit->unitDef;
 
 	for (size_t n = 0; n < unit->weapons.size(); n++) {
@@ -87,7 +71,6 @@ void CWeaponLoader::InitWeapons(CUnit* unit)
 
 void CWeaponLoader::FreeWeapons(CUnit* unit)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	for (CWeapon*& w: unit->weapons) {
 		weaponMemPool.free(w);
 	}
@@ -99,7 +82,6 @@ void CWeaponLoader::FreeWeapons(CUnit* unit)
 
 CWeapon* CWeaponLoader::LoadWeapon(CUnit* owner, const WeaponDef* weaponDef)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (weaponDef->isNulled)
 		return (weaponMemPool.alloc<CNoWeapon>(owner, weaponDef));
 
@@ -158,7 +140,6 @@ CWeapon* CWeaponLoader::LoadWeapon(CUnit* owner, const WeaponDef* weaponDef)
 
 void CWeaponLoader::InitWeapon(CUnit* owner, CWeapon* weapon, const UnitDefWeapon* defWeapon)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const WeaponDef* weaponDef = defWeapon->def;
 
 	weapon->reloadTime = std::max(1, int(weaponDef->reload * GAME_SPEED));
@@ -169,7 +150,6 @@ void CWeaponLoader::InitWeapon(CUnit* owner, CWeapon* weapon, const UnitDefWeapo
 
 	weapon->salvoSize = weaponDef->salvosize;
 	weapon->salvoDelay = int(weaponDef->salvodelay * GAME_SPEED);
-	weapon->salvoWindup = weaponDef->salvoWindup;
 	weapon->projectilesPerShot = weaponDef->projectilespershot;
 
 	weapon->onlyForward = weaponDef->onlyForward;
@@ -200,12 +180,5 @@ void CWeaponLoader::InitWeapon(CUnit* owner, CWeapon* weapon, const UnitDefWeapo
 	weapon->UpdateRange(weaponDef->range);
 
 	owner->maxRange = std::max(weapon->range, owner->maxRange);
-
-	weapon->weaponAimAdjustPriority = defWeapon->weaponAimAdjustPriority;
-	weapon->fastAutoRetargeting = defWeapon->fastAutoRetargeting;
-	weapon->fastQueryPointUpdate = defWeapon->fastQueryPointUpdate;
-	weapon->accurateLeading = defWeapon->accurateLeading;
-	weapon->burstControlWhenOutOfArc = defWeapon->burstControlWhenOutOfArc;
-	weapon->ttl = weaponDef->flighttime;
 }
 

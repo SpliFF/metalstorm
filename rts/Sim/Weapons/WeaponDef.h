@@ -8,13 +8,15 @@
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectileTypes.h"
 #include "System/float4.h"
 #include "System/UnorderedMap.hpp"
-#include "Sim/Misc/GlobalConstants.h"
-#include "Sim/Misc/Resource.h"
 
-struct AtlasedTexture;
+// Stub — full texture atlas removed with rendering
+struct AtlasedTexture {
+	float xstart = 0.0f, xend = 1.0f;
+	float ystart = 0.0f, yend = 1.0f;
+};
 class CColorMap;
-struct S3DModel;
 class LuaTable;
+#include "Sim/Units/Scripts/LocalModelPieceStub.h"
 
 struct WeaponDef
 {
@@ -24,8 +26,6 @@ public:
 
 	S3DModel* LoadModel();
 	S3DModel* LoadModel() const;
-	void PreloadModel() const;
-	void PreloadModel();
 
 	bool IsAircraftWeapon() const {
 		switch (projectileType) {
@@ -82,7 +82,6 @@ public:
 
 	int salvosize;
 	float salvodelay;
-	int salvoWindup;
 	float reload;
 	float beamtime;
 	bool beamburst;
@@ -99,11 +98,13 @@ public:
 	float uptime;
 	int flighttime;
 
-	SResourcePack cost;
+	float metalcost;
+	float energycost;
 
 	int projectilespershot;
 
 	int id;
+	int tdfId;                  ///< the id= tag in the tdf
 
 	bool isNulled;
 	bool turret;
@@ -167,13 +168,13 @@ public:
 	bool visibleShield;              // if the shield should be graphically shown
 	bool visibleShieldRepulse;       // if a small graphic should be shown at each repulse
 	int  visibleShieldHitFrames;     // number of frames to draw the shield after it has been hit
-	SResourcePack shieldResourceUse; // resource use per shot or per second depending on projectile
+	float shieldEnergyUse;           // energy use per shot or per second depending on projectile
 	float shieldRadius;              // size of shielded area
 	float shieldForce;               // shield acceleration on plasma stuff
 	float shieldMaxSpeed;            // max speed shield can repulse plasma like weapons with
 	float shieldPower;               // how much damage the shield can reflect (0=infinite)
 	float shieldPowerRegen;          // how fast the power regenerates per second
-	SResourcePack shieldPowerRegenCost; // how much resources are needed to regenerate power per second
+	float shieldPowerRegenEnergy;    // how much energy is needed to regenerate power per second
 	float shieldStartingPower;       // how much power the shield has when first created
 	int   shieldRechargeDelay;       // number of frames to delay recharging by after each hit
 	float4 shieldGoodColor;          // color when shield at full power
@@ -193,7 +194,7 @@ public:
 	bool avoidCloaked;      // if true, try to avoid cloaked units while aiming
 
 	/**
-	 * If nonzero, targeting units will TryTarget at the edge of collision sphere
+	 * If nonzero, targetting units will TryTarget at the edge of collision sphere
 	 * (radius*tag value, [-1;1]) instead of its centre.
 	 */
 	float targetBorder;
@@ -229,7 +230,6 @@ public:
 
 		S3DModel* model = nullptr;
 		CColorMap* colorMap = nullptr;
-		CColorMap* scarGlowColorMap = nullptr;
 
 		AtlasedTexture* texture1 = nullptr;
 		AtlasedTexture* texture2 = nullptr;
@@ -239,18 +239,12 @@ public:
 		std::string modelName;
 		std::string texNames[4];
 		std::string colorMapStr;
-		std::string scarGlowColorMapStr;
 		std::string ptrailExpGenTag; ///< tag of CEG that projectiles fired by this weapon should use during flight
 		std::string impactExpGenTag; ///< tag of CEG that projectiles fired by this weapon should use on impact
 		std::string bounceExpGenTag; ///< tag of CEG that projectiles fired by this weapon should use when bouncing
 
 		int lodDistance = 0;
 		int stages = 0;
-
-		int smokePeriod = 8;
-		int smokeTime = 2 * GAME_SPEED;
-		float smokeSize = 7.0f;
-		float smokeColor = 0.65f;
 
 		float tilelength = 0.0f;
 		float scrollspeed = 0.0f;
@@ -263,24 +257,10 @@ public:
 		float sizeDecay = 0.0f;
 		float separation = 0.0f;
 
-		float scarDiameter = -1.0f;
-		float scarAlpha = 0.0f;
-		float scarGlow = 0.0f;
-		float scarTtl = 0.0f;
-		float scarGlowTtl = 0.0f;
-		float scarDotElimination = 0.0f;
-		float4 scarProjVector = float4{ 0.0f }; // use last float to indicate if the vector is non-zero
-		float4 scarColorTint = float4{ 0.5f, 0.5f, 0.5f, 0.5f };
-
-		std::vector<int> scarIdcs;
-
-		std::array<float3, 4> animParams;
-
+		/// TODO: make the scar-type configurable
 		bool explosionScar = true;
 		bool smokeTrail = false;
-		bool smokeTrailCastShadow = true;
 
-		bool castShadow = true;
 		bool noGap = true;
 		bool alwaysVisible = true;
 	};

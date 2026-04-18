@@ -2,47 +2,67 @@
 
 #include "CRC.h"
 
-#include <7zCrc.h>
+// Simple CRC32 implementation replacing the 7z dependency.
+// Uses the standard CRC-32 polynomial.
 
-CRC::CRC(): crc(CRC_INIT_VAL)
+static uint32_t crcTable[256];
+static bool tableInitialized = false;
+
+static void BuildCRCTable()
 {
-	InitTable();
+	if (tableInitialized) return;
+	for (uint32_t i = 0; i < 256; i++) {
+		uint32_t crc = i;
+		for (int j = 0; j < 8; j++) {
+			if (crc & 1)
+				crc = (crc >> 1) ^ 0xEDB88320;
+			else
+				crc >>= 1;
+		}
+		crcTable[i] = crc;
+	}
+	tableInitialized = true;
 }
 
 
-uint32_t CRC::InitTable()
+CRC::CRC(): crc(0xFFFFFFFF)
 {
-	static bool crcTableInitialized = false;
-
-	if (crcTableInitialized)
-		return 1;
-
-	CrcGenerateTable();
-
-	crcTableInitialized = true;
-	return 0;
+	BuildCRCTable();
 }
 
-uint32_t CRC::CalcDigest(const void* data, size_t size)
-{
-	return (InitTable(), CRC_GET_DIGEST(CrcUpdate(CRC_INIT_VAL, data, size)));
-}
 
 uint32_t CRC::GetDigest() const
 {
-	return CRC_GET_DIGEST(crc);
+	return crc ^ 0xFFFFFFFF;
 }
 
 
 CRC& CRC::Update(const void* data, size_t size)
 {
-	crc = CrcUpdate(crc, data, size);
+	const uint8_t* buf = static_cast<const uint8_t*>(data);
+	for (size_t i = 0; i < size; i++) {
+		crc = crcTable[(crc ^ buf[i]) & 0xFF] ^ (crc >> 8);
+	}
 	return *this;
 }
+
 
 CRC& CRC::Update(uint32_t data)
 {
-	crc = CrcUpdate(crc, &data, sizeof(data));
-	return *this;
+	return Update(&data, sizeof(data));
 }
 
+
+uint32_t CRC::InitTable()
+{
+	BuildCRCTable();
+	return 0;
+}
+
+
+uint32_t CRC::CalcDigest(const void* data, size_t size)
+{
+	CRC crc;
+	crc.Update(data, size);
+	return crc.GetDigest();
+}

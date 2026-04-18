@@ -6,11 +6,8 @@
 #include <array>
 #include <vector>
 
-#include "Rendering/Models/3DModelDefs.hpp"
-#include "Rendering/Env/Particles/Classes/FlyingPiece.h"
+#include "Sim/Projectiles/ProjectileFunctors.h"
 #include "System/float3.h"
-#include "System/FreeListMap.h"
-
 
 // bypass id and event handling for unsynced projectiles (faster)
 #define PH_UNSYNCED_PROJECTILE_EVENTS 0
@@ -19,11 +16,10 @@ class CProjectile;
 class CUnit;
 class CFeature;
 class CPlasmaRepulser;
-class CGroundFlash;
-struct UnitDef;
 
-typedef std::vector<CGroundFlash*> GroundFlashContainer;
-typedef std::vector<FlyingPiece> FlyingPieceContainer;
+
+typedef std::vector<CProjectile*> ProjectileContainer; // <unsorted>
+
 
 class CProjectileHandler
 {
@@ -36,18 +32,14 @@ public:
 	/// @see ConfigHandler::ConfigNotifyCallback
 	void ConfigNotify(const std::string& key, const std::string& value);
 
-	CProjectile* GetProjectileBySyncedID(int id)   { return GetProjectileByID<true >(id); }
-	CProjectile* GetProjectileByUnsyncedID(int id) { return GetProjectileByID<false>(id); }
-
-	const auto& GetActiveProjectiles(bool synced) const {
-		return projectiles[synced];
-	}
+	CProjectile* GetProjectileBySyncedID(int id);
+	CProjectile* GetProjectileByUnsyncedID(int id);
 
 	void CheckUnitCollisions(CProjectile*, std::vector<CUnit*>&, const float3, const float3);
 	void CheckFeatureCollisions(CProjectile*, std::vector<CFeature*>&, const float3, const float3);
 	void CheckShieldCollisions(CProjectile*, std::vector<CPlasmaRepulser*>&, const float3, const float3);
-	void CheckUnitFeatureCollisions(bool synced);
-	void CheckGroundCollisions(bool synced);
+	void CheckUnitFeatureCollisions(ProjectileContainer&);
+	void CheckGroundCollisions(ProjectileContainer&);
 	void CheckCollisions();
 
 	void SetMaxParticles(int value) { maxParticles = std::max(0, value); }
@@ -66,18 +58,6 @@ public:
 	int GetCurrentParticles() const;
 
 	void AddProjectile(CProjectile* p);
-	void AddGroundFlash(CGroundFlash* flash) { groundFlashes.push_back(flash); }
-	void AddFlyingPiece(
-		int modelType,
-		const S3DModelPiece* piece,
-		const CMatrix44f& m,
-		const float3 pos,
-		const float3 speed,
-		const float2 pieceParams,
-		const int2 renderParams
-	);
-	void AddNanoParticle(const float3, const float3, const UnitDef*, int team, bool highPriority);
-	void AddNanoParticle(const float3, const float3, const UnitDef*, int team, float radius, bool inverse, bool highPriority);
 
 public:
 	int maxParticles = 0;
@@ -85,52 +65,33 @@ public:
 	int currentNanoParticles = 0;
 
 	// these vars are used to precache parts of GetCurrentParticles() calculations
-	mutable int frameCurrentParticles = 0;
-	mutable int frameProjectileCounts[2] = {0, 0};
+	int lastCurrentParticles = 0;
+	int lastProjectileCounts[2] = {0, 0};
 
-	// flying pieces (unsynced) are sorted from time to time to reduce GL state changes
-	std::array<                bool, MODELTYPE_CNT> resortFlyingPieces{};
-	std::array<FlyingPieceContainer, MODELTYPE_CNT> flyingPieces{};
-
-	// unsynced
-	GroundFlashContainer groundFlashes;
+	// [0] contains only projectiles that can not change simulation state
+	// [1] contains only projectiles that can     change simulation state
+	ProjectileContainer projectileContainers[2];
 
 private:
 	// event-notifiers
 	void CreateProjectile(CProjectile*);
 	void DestroyProjectile(CProjectile*);
 
-	template<bool synced>
-	CProjectile* GetProjectileByID(int id);
-
-	template<bool synced>
-	void UpdateProjectilesImpl();
+	void UpdateProjectiles(bool);
 	void UpdateProjectiles() {
-		UpdateProjectilesImpl< true>();
-		UpdateProjectilesImpl<false>();
+		UpdateProjectiles( true);
+		UpdateProjectiles(false);
 	}
 
 private:
-	// [0] contains only projectiles that can not change simulation state
-	// [1] contains only projectiles that can     change simulation state
-	spring::FreeListMapCompact<CProjectile*, int> projectiles[2];
+	// [0] := available unsynced projectile ID's
+	// [1] := available synced (weapon, piece) projectile ID's
+	std::vector<int> freeProjectileIDs[2];
 
-	static uint32_t UnsyncedRandInt(uint32_t N);
-	static uint32_t   SyncedRandInt(uint32_t N);
-
-	static constexpr decltype(&UnsyncedRandInt) rngFuncs[] = { &UnsyncedRandInt, &SyncedRandInt };
+	// [0] := ID ==> projectile* map for living unsynced projectiles
+	// [1] := ID ==> projectile* map for living   synced projectiles
+	std::vector<CProjectile*> projectileMaps[2];
 };
-
-template<bool synced>
-inline CProjectile* CProjectileHandler::GetProjectileByID(int id)
-{
-	size_t pos = projectiles[synced].Find(id);
-	if (pos == size_t(-1))
-		return nullptr;
-
-	return projectiles[synced][pos];
-}
-
 
 
 extern CProjectileHandler projectileHandler;

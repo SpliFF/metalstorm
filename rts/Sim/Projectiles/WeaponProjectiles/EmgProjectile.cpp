@@ -2,15 +2,10 @@
 
 
 #include "EmgProjectile.h"
-#include "Game/Camera.h"
 #include "Map/Ground.h"
-#include "Rendering/GL/RenderBuffers.h"
-#include "Rendering/Textures/TextureAtlas.h"
 #include "Sim/Projectiles/ExplosionGenerator.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Weapons/WeaponDef.h"
-
-#include "System/Misc/TracyDefs.h"
 
 CR_BIND_DERIVED(CEmgProjectile, CWeaponProjectile, )
 
@@ -23,7 +18,6 @@ CR_REG_METADATA(CEmgProjectile,(
 
 CEmgProjectile::CEmgProjectile(const ProjectileParams& params): CWeaponProjectile(params)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	projectileType = WEAPON_EMG_PROJECTILE;
 
 	if (weaponDef != nullptr) {
@@ -32,8 +26,6 @@ CEmgProjectile::CEmgProjectile(const ProjectileParams& params): CWeaponProjectil
 
 		intensity = weaponDef->intensity;
 		color = weaponDef->visuals.color;
-
-		castShadow = weaponDef->visuals.castShadow;
 	} else {
 		intensity = 0.0f;
 	}
@@ -41,7 +33,6 @@ CEmgProjectile::CEmgProjectile(const ProjectileParams& params): CWeaponProjectil
 
 void CEmgProjectile::Update()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// disable collisions when ttl reaches 0 since the
 	// projectile will travel far past its range while
 	// fading out
@@ -55,16 +46,7 @@ void CEmgProjectile::Update()
 		intensity -= 0.1f;
 		intensity = std::max(intensity, 0.0f);
 	} else {
-		explGenHandler.GenExplosion(
-			cegID,
-			pos,
-			speed,
-			ttl,
-			intensity,
-			0.0f,
-			owner(),
-			ExplosionHitObject()
-		);
+		explGenHandler.GenExplosion(cegID, pos, speed, ttl, intensity, 0.0f, nullptr, nullptr);
 	}
 
 	UpdateGroundBounce();
@@ -73,35 +55,8 @@ void CEmgProjectile::Update()
 	--ttl;
 }
 
-void CEmgProjectile::Draw()
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-	if (!validTextures[0])
-		return;
-
-	UpdateAnimParams();
-
-	const uint8_t col[4] {
-		(uint8_t)(color.x * intensity * 255),
-		(uint8_t)(color.y * intensity * 255),
-		(uint8_t)(color.z * intensity * 255),
-		(uint8_t)(          intensity * 255)
-	};
-
-	const auto* tex = weaponDef->visuals.texture1;
-
-	AddEffectsQuad<1>(
-		tex->pageNum,
-		{ drawPos - camera->GetRight() * drawRadius - camera->GetUp() * drawRadius, tex->xstart, tex->ystart, col },
-		{ drawPos + camera->GetRight() * drawRadius - camera->GetUp() * drawRadius, tex->xend,   tex->ystart, col },
-		{ drawPos + camera->GetRight() * drawRadius + camera->GetUp() * drawRadius, tex->xend,   tex->yend,   col },
-		{ drawPos - camera->GetRight() * drawRadius + camera->GetUp() * drawRadius, tex->xstart, tex->yend,   col }
-	);
-}
-
 int CEmgProjectile::ShieldRepulse(const float3& shieldPos, float shieldForce, float shieldMaxSpeed)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (luaMoveCtrl)
 		return 0;
 
@@ -115,8 +70,3 @@ int CEmgProjectile::ShieldRepulse(const float3& shieldPos, float shieldForce, fl
 	return 0;
 }
 
-int CEmgProjectile::GetProjectilesCount() const
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-	return 1 * validTextures[0];
-}

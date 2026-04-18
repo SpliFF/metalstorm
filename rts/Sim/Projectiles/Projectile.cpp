@@ -2,10 +2,6 @@
 
 #include "Projectile.h"
 #include "Map/MapInfo.h"
-#include "Rendering/Colors.h"
-#include "Rendering/Textures/TextureAtlas.h"
-#include "Rendering/GL/RenderBuffers.h"
-#include "Rendering/Env/Particles/ProjectileDrawer.h"
 #include "Sim/Projectiles/ExpGenSpawnableMemberInfo.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Misc/QuadField.h"
@@ -13,8 +9,6 @@
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitHandler.h"
 #include "System/Matrix44f.h"
-
-#include "System/Misc/TracyDefs.h"
 
 CR_BIND_DERIVED_INTERFACE(CProjectile, CExpGenSpawnable)
 
@@ -25,7 +19,6 @@ CR_REG_METADATA(CProjectile,
 	CR_MEMBER(piece),
 	CR_MEMBER(hitscan),
 
-	CR_IGNORED(luaDraw),
 	CR_MEMBER(luaMoveCtrl),
 	CR_MEMBER(checkCol),
 	CR_MEMBER(ignoreWater),
@@ -33,23 +26,12 @@ CR_REG_METADATA(CProjectile,
 	CR_IGNORED(createMe),
 	CR_MEMBER(deleteMe),
 
-	CR_MEMBER(drawSorted),
-	CR_MEMBER(blockPreciseCol),
-
 	CR_MEMBER_BEGINFLAG(CM_Config),
-		CR_MEMBER(castShadow),
 		CR_MEMBER(dir),
-		CR_MEMBER(drawOrder),
 	CR_MEMBER_ENDFLAG(CM_Config),
-
-	CR_MEMBER(drawPos),
 
 	CR_MEMBER(myrange),
 	CR_MEMBER(mygravity),
-	CR_IGNORED(sortDist),
-	CR_MEMBER(sortDistOffset),
-
-	CR_MEMBER(validTextures),
 
 	CR_MEMBER(ownerID),
 	CR_MEMBER(teamID),
@@ -58,22 +40,11 @@ CR_REG_METADATA(CProjectile,
 
 	CR_MEMBER(projectileType),
 	CR_MEMBER(collisionFlags),
-	CR_IGNORED(renderIndex),
 
 	CR_MEMBER(quads)
 ))
 
-// Minimap render buffers moved to CProjectileDrawer for proper lifecycle management
 
-namespace Impl {
-	float3 GetNormalizedOrDefaultDir(const float3& dir) {
-		float sqLen = dir.SqLength();
-		if unlikely(sqLen < float3::cmp_eps())
-			return FwdVector;
-
-		return dir * math::isqrt(sqLen);
-	}
-}
 
 CProjectile::CProjectile()
 	: myrange(0.0f)
@@ -99,7 +70,6 @@ CProjectile::CProjectile(
 	, myrange(/*params.weaponDef->range*/0.0f)
 	, mygravity((mapInfo != nullptr)? mapInfo->map.gravity: 0.0f)
 {
-	preFrameTra = Transform{ CQuaternion::MakeFrom(Impl::GetNormalizedOrDefaultDir(dir)), pos };
 	SetRadiusAndHeight(1.7f, 0.0f);
 	Init(owner, ZeroVector);
 }
@@ -107,7 +77,6 @@ CProjectile::CProjectile(
 
 CProjectile::~CProjectile()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (!synced)
 		return;
 
@@ -116,7 +85,6 @@ CProjectile::~CProjectile()
 
 void CProjectile::Init(const CUnit* owner, const float3& offset)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (owner != nullptr) {
 		// must be set before the AddProjectile call
 		ownerID = owner->id;
@@ -128,8 +96,6 @@ void CProjectile::Init(const CUnit* owner, const float3& offset)
 		SetVelocityAndSpeed(speed);
 	}
 
-	CExpGenSpawnable::Init(owner, offset);
-
 	// NOTE:
 	//   new CWeapon- and CPieceProjectile*'s add themselves
 	//   to CProjectileHandler (other code needs to be able
@@ -140,15 +106,11 @@ void CProjectile::Init(const CUnit* owner, const float3& offset)
 
 	if (synced && !weapon)
 		quadField.AddProjectile(this);
-
-
-	preFrameTra = Transform{ CQuaternion::MakeFrom(Impl::GetNormalizedOrDefaultDir(dir)), pos };
 }
 
 
 void CProjectile::Update()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (luaMoveCtrl)
 		return;
 
@@ -159,45 +121,12 @@ void CProjectile::Update()
 
 void CProjectile::Delete()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	deleteMe = true;
 	checkCol = false;
 }
 
-void CProjectile::PreUpdate()
-{
-	preFrameTra = Transform{ CQuaternion::MakeFrom(Impl::GetNormalizedOrDefaultDir(dir)), pos };
-}
-
-
-void CProjectile::DrawOnMinimap() const
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-	AddMiniMapVertices({ pos        , color4::whiteA }, { pos + speed, color4::whiteA });
-}
-
-bool CProjectile::UpdateAnimParams()
-{
-	if (!validTextures[0])
-		return false;
-
-	if (validTextures[1])
-		UpdateAnimParamsImpl(animParams1, animProgress1);
-
-	if (validTextures[2])
-		UpdateAnimParamsImpl(animParams2, animProgress2);
-
-	if (validTextures[3])
-		UpdateAnimParamsImpl(animParams3, animProgress3);
-
-	if (validTextures[4])
-		UpdateAnimParamsImpl(animParams4, animProgress4);
-
-	return true;
-}
 
 CUnit* CProjectile::owner() const {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// NOTE:
 	//   this death dependency optimization using "ownerID" is logically flawed:
 	//   because ID's are reused it could return a unit that is not the original
@@ -206,59 +135,14 @@ CUnit* CProjectile::owner() const {
 }
 
 
-CMatrix44f CProjectile::GetTransformMatrix(bool offsetPos) const {
-	float3 xdir;
-	float3 ydir;
-
-	if (math::fabs(dir.y) < 0.95f) {
-		xdir = dir.cross(UpVector);
-		xdir.SafeANormalize();
-	} else {
-		xdir.x = 1.0f;
-	}
-
-	ydir = xdir.cross(dir);
-
-	return (CMatrix44f(drawPos + (dir * radius * 0.9f * offsetPos), -xdir, ydir, dir));
-}
 
 bool CProjectile::GetMemberInfo(SExpGenSpawnableMemberInfo& memberInfo)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (CExpGenSpawnable::GetMemberInfo(memberInfo))
 		return true;
 
-	CHECK_MEMBER_INFO_BOOL  (CProjectile, castShadow);
-	CHECK_MEMBER_INFO_FLOAT3(CProjectile, dir       );
-	CHECK_MEMBER_INFO_INT   (CProjectile, drawOrder );
+	CHECK_MEMBER_INFO_FLOAT3(CProjectile, dir)
 
 	return false;
 }
 
-bool CProjectile::IsValidTexture(const AtlasedTexture* tex)
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-	return tex && (*tex != AtlasedTexture::DefaultAtlasTexture);
-}
-
-void CProjectile::AddMiniMapVertices(VA_TYPE_C&& v1, VA_TYPE_C&& v2)
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-	if (v1.pos.equals(v2.pos)) {
-		CProjectileDrawer::GetMiniMapPointsRB().AddVertex(std::move(v1));
-	}
-	else {
-		CProjectileDrawer::GetMiniMapLinesRB().AddVertex(std::move(v1));
-		CProjectileDrawer::GetMiniMapLinesRB().AddVertex(std::move(v2));
-	}
-}
-
-TypedRenderBuffer<VA_TYPE_C>& CProjectile::GetMiniMapLinesRB()
-{
-	return CProjectileDrawer::GetMiniMapLinesRB();
-}
-
-TypedRenderBuffer<VA_TYPE_C>& CProjectile::GetMiniMapPointsRB()
-{
-	return CProjectileDrawer::GetMiniMapPointsRB();
-}

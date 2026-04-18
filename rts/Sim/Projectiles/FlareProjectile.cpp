@@ -1,17 +1,10 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "FlareProjectile.h"
-#include "Game/Camera.h"
-#include "Rendering/GlobalRendering.h"
-#include "Rendering/Env/Particles/ProjectileDrawer.h"
-#include "Rendering/GL/RenderBuffers.h"
-#include "Rendering/Textures/TextureAtlas.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Projectiles/WeaponProjectiles/MissileProjectile.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/Unit.h"
-
-#include "System/Misc/TracyDefs.h"
 
 CR_BIND_DERIVED(CFlareProjectile, CProjectile, )
 
@@ -53,7 +46,6 @@ CFlareProjectile::CFlareProjectile(const float3& pos, const float3& speed, CUnit
 
 void CFlareProjectile::Update()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const CUnit* owner = CProjectile::owner();
 	const UnitDef* ownerDef = (owner != nullptr)? owner->unitDef: nullptr;
 
@@ -109,33 +101,4 @@ void CFlareProjectile::Update()
 	deleteMe |= (gs->frameNum >= deathFrame);
 }
 
-void CFlareProjectile::Draw()
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-	if (gs->frameNum <= activateFrame)
-		return;
-
-	constexpr float rad = 6.0f;
-	const     float alpha = std::max(0.0f, 1.0f - (gs->frameNum - activateFrame) * alphaFalloff);
-
-	unsigned char col[4];
-	col[0] = (unsigned char) (alpha * 1.0f) * 255;
-	col[1] = (unsigned char) (alpha * 0.5f) * 255;
-	col[2] = (unsigned char) (alpha * 0.2f) * 255;
-	col[3] = 1;
-
-	//! CAUTION: loop count must match EnlargeArrays above
-	for (int a = 0; a < numSubProjs; ++a) {
-		const float3 interPos = subProjPos[a] + subProjVel[a] * globalRendering->timeOffset;
-
-		const auto* fpt = projectileDrawer->flareprojectiletex;
-		AddEffectsQuad<0>(
-			fpt->pageNum,
-			{ interPos - camera->GetRight() * rad - camera->GetUp() * rad, fpt->xstart, fpt->ystart, col },
-			{ interPos + camera->GetRight() * rad - camera->GetUp() * rad, fpt->xend,   fpt->ystart, col },
-			{ interPos + camera->GetRight() * rad + camera->GetUp() * rad, fpt->xend,   fpt->yend,   col },
-			{ interPos - camera->GetRight() * rad + camera->GetUp() * rad, fpt->xstart, fpt->yend,   col }
-		);
-	}
-}
 

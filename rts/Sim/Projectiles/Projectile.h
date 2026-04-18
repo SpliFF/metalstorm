@@ -4,7 +4,6 @@
 #define PROJECTILE_H
 
 #include <vector>
-#include <array>
 
 #ifdef _MSC_VER
 #pragma warning(disable:4291)
@@ -13,22 +12,16 @@
 #include "ExpGenSpawnable.h"
 #include "System/float3.h"
 #include "System/type2.h"
-#include "System/Threading/SpringThreading.h"
-#include "Rendering/GL/RenderBuffersFwd.h"
 
 class CUnit;
 class CFeature;
-class CWeapon;
 class CMatrix44f;
-struct AtlasedTexture;
-class CProjectileDrawer;
 
 class CProjectile: public CExpGenSpawnable
 {
 	CR_DECLARE_DERIVED(CProjectile)
 
 public:
-	friend class CGenericParticleProjectile;
 	CProjectile();
 	CProjectile(
 		const float3& pos,
@@ -44,17 +37,10 @@ public:
 	virtual void Collision() { Delete(); }
 	virtual void Collision(CUnit* unit) { Collision(); }
 	virtual void Collision(CFeature* feature) { Collision(); }
-	virtual void Collision(CWeapon* weapon) { Collision(); }
 	//Not inheritable - used for removing a projectile from Lua.
 	void Delete();
-	virtual void PreUpdate();
 	virtual void Update();
 	virtual void Init(const CUnit* owner, const float3& offset) override;
-
-	virtual void Draw() {}
-	virtual void DrawOnMinimap() const;
-
-	bool UpdateAnimParams() override;
 
 	virtual int GetProjectilesCount() const = 0;
 
@@ -84,29 +70,22 @@ public:
 
 	CUnit* owner() const;
 
-	uint32_t GetOwnerID() const { return ownerID; }
-	uint32_t GetTeamID() const { return teamID; }
+	unsigned int GetOwnerID() const { return ownerID; }
+	unsigned int GetTeamID() const { return teamID; }
 	int GetAllyteamID() const { return allyteamID; }
 
-	uint32_t GetProjectileType() const { return projectileType; }
-	uint32_t GetCollisionFlags() const { return collisionFlags; }
-	uint32_t GetRenderIndex() const { return renderIndex; }
+	unsigned int GetProjectileType() const { return projectileType; }
+	unsigned int GetCollisionFlags() const { return collisionFlags; }
 
-	void SetCustomExpGenID(uint32_t id) { cegID = id; }
-	void SetRenderIndex(uint32_t idx) { renderIndex = idx; }
+	void SetCustomExpGenID(unsigned int id) { cegID = id; }
 
-	// UNSYNCED ONLY
-	CMatrix44f GetTransformMatrix(bool offsetPos) const;
 
-	float GetSortDist(uint32_t camType) const { return sortDist[camType]; }
-	void SetSortDist(uint32_t camType, float d) { sortDist[camType] = d + sortDistOffset; }
 public:
 	bool synced = false;           // is this projectile part of the simulation?
 	bool weapon = false;           // is this a weapon projectile? (true implies synced true)
 	bool piece = false;            // is this a piece projectile? (true implies synced true)
 	bool hitscan = false;          // is this a hit-scan projectile?
 
-	bool luaDraw = false;          // whether the DrawProjectile callin is enabled for us
 	bool luaMoveCtrl = false;
 	bool checkCol = true;
 	bool ignoreWater = false;
@@ -114,43 +93,23 @@ public:
 	bool createMe =  true;
 	bool deleteMe = false;
 
-	bool castShadow = false;
-	bool drawSorted = true;
-
-	bool blockPreciseCol = false;
-
-	float3 dir = FwdVector;        // set via Init()
-	float3 drawPos;
+	float3 dir;                    // set via Init()
 
 	float myrange = 0.0f;          // used by WeaponProjectile::TraveledRange
 	float mygravity = 0.0f;
 
-	std::array<float, 3> sortDist = {}; // distance used for z-sorting when rendering
-	float sortDistOffset = 0.0f;        // an offset used for z-sorting
-
-	int drawOrder = 0;
-
-	inline static spring::mutex mut = {};
 protected:
-	std::array<bool, 5> validTextures = {false, false, false, false, false}; //overall state and 4 textures
-	uint32_t ownerID = -1u;
-	uint32_t teamID = -1u;
+	unsigned int ownerID = -1u;
+	unsigned int teamID = -1u;
 	int allyteamID = -1;
-	uint32_t cegID = -1u;
+	unsigned int cegID = -1u;
 
-	uint32_t projectileType = -1u;
-	uint32_t collisionFlags = 0;
-	uint32_t renderIndex = -1u;
+	unsigned int projectileType = -1u;
+	unsigned int collisionFlags = 0;
 
 	static bool GetMemberInfo(SExpGenSpawnableMemberInfo& memberInfo);
-	static bool IsValidTexture(const AtlasedTexture* tex);
+
 public:
-	static void AddMiniMapVertices(VA_TYPE_C&& v1, VA_TYPE_C&& v2);
-
-	static TypedRenderBuffer<VA_TYPE_C>& GetMiniMapLinesRB();
-	static TypedRenderBuffer<VA_TYPE_C>& GetMiniMapPointsRB();
-
-	//static TypedRenderBuffer<VA_TYPE_C >& GetAnimationRenderBuffer();
 	std::vector<int> quads;
 };
 

@@ -6,10 +6,9 @@
 #include <string>
 
 #include "Sim/Misc/CollisionVolume.h"
-#include "Sim/Misc/Resource.h"
-#include <System/creg/STL_Map.h>
+#include "Sim/Units/Scripts/LocalModelPieceStub.h"
+#include "System/UnorderedMap.hpp"
 
-struct S3DModel;
 class LuaTable;
 
 struct SolidObjectDecalDef {
@@ -29,7 +28,7 @@ public:
 	float groundDecalDecaySpeed;
 
 	bool leaveTrackDecals;
-	//int trackDecalType;
+	int trackDecalType;
 	float trackDecalWidth;
 	float trackDecalOffset;
 	float trackDecalStrength;
@@ -57,7 +56,8 @@ public:
 	int xsize;
 	int zsize;
 
-	SResourcePack cost;
+	float metal;
+	float energy;
 	float health;
 	float mass;
 	float crushResistance;

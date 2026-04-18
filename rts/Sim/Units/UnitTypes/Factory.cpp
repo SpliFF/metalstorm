@@ -7,40 +7,29 @@
 #include "Map/Ground.h"
 #include "Map/ReadMap.h"
 #include "Sim/Misc/GroundBlockingObjectMap.h"
-#include "Sim/Misc/ModInfo.h"
 #include "Sim/Misc/QuadField.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/MoveTypes/MoveType.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
-#include "Sim/MoveTypes/MoveMath/MoveMath.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Units/Scripts/UnitScript.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Units/CommandAI/FactoryCAI.h"
 #include "Sim/Units/CommandAI/MobileCAI.h"
+#include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/UnitLoader.h"
 #include "System/EventHandler.h"
 #include "System/Matrix44f.h"
 #include "System/SpringMath.h"
 #include "System/creg/DefTypes.h"
-#include "System/Sound/ISoundChannels.h"
 
 #include "Game/GlobalUnsynced.h"
 
-#include "System/Misc/TracyDefs.h"
 
 CR_BIND_DERIVED(CFactory, CBuilding, )
 CR_REG_METADATA(CFactory, (
 	CR_MEMBER(buildSpeed),
-
-	CR_MEMBER(boOffset),
-	CR_MEMBER(boRadius),
-	CR_MEMBER(boRelHeading),
-	CR_MEMBER(boSherical),
-	CR_MEMBER(boForced),
-	CR_MEMBER(boPerform),
-
 	CR_MEMBER(lastBuildUpdateFrame),
 	CR_MEMBER(curBuildDef),
 	CR_MEMBER(curBuild),
@@ -52,49 +41,37 @@ CR_REG_METADATA(CFactory, (
 // Construction/Destruction
 //////////////////////////////////////////////////////////////////////
 
-CFactory::CFactory()
-	: CBuilding()
-	, buildSpeed(100.0f)
-	, boOffset(0.0f) //can't set here
-	, boRadius(0.0f) //can't set here
-	, boRelHeading(0)
-	, boSherical(true)
-	, boForced(true)
-	, boPerform(true)
-	, curBuild(nullptr)
-	, curBuildDef(nullptr)
-	, lastBuildUpdateFrame(-1)
-{ }
-
-void CFactory::KillUnit(CUnit* attacker, bool selfDestruct, bool reclaimed, int weaponDefID)
+CFactory::CFactory():
+	CBuilding(),
+	buildSpeed(100.0f),
+	curBuild(nullptr),
+	curBuildDef(nullptr),
+	lastBuildUpdateFrame(-1)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
+}
+
+void CFactory::KillUnit(CUnit* attacker, bool selfDestruct, bool reclaimed, bool showDeathSequence)
+{
 	if (curBuild != nullptr) {
-		curBuild->KillUnit(nullptr, false, true, -CSolidObject::DAMAGE_FACTORY_KILLED);
+		curBuild->KillUnit(nullptr, false, true);
 		curBuild = nullptr;
 	}
 
-	CUnit::KillUnit(attacker, selfDestruct, reclaimed, weaponDefID);
+	CUnit::KillUnit(attacker, selfDestruct, reclaimed, showDeathSequence);
 }
 
 void CFactory::PreInit(const UnitLoadParams& params)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	unitDef = params.unitDef;
-	buildSpeed = unitDef->buildSpeed / GAME_SPEED;
+	buildSpeed = unitDef->buildSpeed / TEAM_SLOWUPDATE_RATE;
 
 	CBuilding::PreInit(params);
-
-	//radius is defined after CUnit::PreInit()
-	boOffset = radius * 0.5f;
-	boRadius = radius * 0.5f;
 }
 
 
 
 float3 CFactory::CalcBuildPos(int buildPiece)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const float3 relBuildPos = script->GetPiecePos((buildPiece < 0)? script->QueryBuildInfo() : buildPiece);
 	const float3 absBuildPos = this->GetObjectSpacePos(relBuildPos);
 	return absBuildPos;
@@ -104,7 +81,6 @@ float3 CFactory::CalcBuildPos(int buildPiece)
 
 void CFactory::Update()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	nanoPieceCache.Update();
 
 	if (beingBuilt) {
@@ -130,10 +106,8 @@ void CFactory::Update()
 		// never called
 		// the radius can not be too large or assisting (mobile)
 		// builders around the factory will be disturbed by this
-		if ((gs->frameNum & (UNIT_SLOWUPDATE_RATE >> 1)) == 0 && boPerform) {
-			float3 boDir = (boRelHeading == 0) ? static_cast<float3>(frontdir) : GetVectorFromHeading((heading + boRelHeading) % SPRING_MAX_HEADING);
-			CGameHelper::BuggerOff(pos + boDir * boOffset, boRadius, boSherical, boForced, team, this);
-		}
+		if ((gs->frameNum & (UNIT_SLOWUPDATE_RATE >> 1)) == 0)
+			CGameHelper::BuggerOff(pos + frontdir * radius * 0.5f, radius * 0.5f, true, true, team, this);
 
 		if (!yardOpen && !IsStunned()) {
 			if (groundBlockingObjectMap.CanOpenYard(this)) {
@@ -171,7 +145,6 @@ void CFactory::Update()
 
 
 void CFactory::StartBuild(const UnitDef* buildeeDef) {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (isDead)
 		return;
 
@@ -201,13 +174,9 @@ void CFactory::StartBuild(const UnitDef* buildeeDef) {
 	curBuild = buildee;
 	curBuildDef = nullptr;
 
-	if (losStatus[gu->myAllyTeam] & LOS_INLOS) {
-		Channels::General->PlayRandomSample(unitDef->sounds.build, buildPos);
-	}
 }
 
 void CFactory::UpdateBuild(CUnit* buildee) {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (IsStunned())
 		return;
 
@@ -219,14 +188,9 @@ void CFactory::UpdateBuild(CUnit* buildee) {
 	const int buildPiece = script->QueryBuildInfo();
 
 	const float3& buildPos = CalcBuildPos(buildPiece);
-	const auto& buildPieceMat = script->GetPieceMatrix(buildPiece);
+	const CMatrix44f& buildPieceMat = script->GetPieceMatrix(buildPiece);
 
-	// note the code here works correctly with dae only because of rounding error
-	// in buildPieceMat[8], buildPieceMat[10] vs script->GetPieceMatrix(buildPiece) vs
-	//  const auto& buildPieceTra = script->GetPieceTransform(buildPiece);
-	//  const float3 xzVec = buildPieceTra.r * FwdVector;
-	// TODO: figure out a proper way
-	const int buildPieceHeading = GetHeadingFromVector(buildPieceMat[8], buildPieceMat[10]);
+	const int buildPieceHeading = GetHeadingFromVector(buildPieceMat[2], buildPieceMat[10]); //! x.z, z.z
 	const int buildFaceHeading = GetHeadingFromFacing(buildFacing);
 
 	float3 buildeePos = buildPos;
@@ -237,7 +201,7 @@ void CFactory::UpdateBuild(CUnit* buildee) {
 
 	// rotate unit nanoframe with platform
 	buildee->Move(buildeePos, false);
-	buildee->SetHeading((-buildPieceHeading + buildFaceHeading) & (SPRING_CIRCLE_DIVS - 1), false, false, 0.0f);
+	buildee->SetHeading((-buildPieceHeading + buildFaceHeading) & (SPRING_CIRCLE_DIVS - 1), false, false);
 
 	const CCommandQueue& queue = commandAI->commandQue;
 
@@ -253,7 +217,6 @@ void CFactory::UpdateBuild(CUnit* buildee) {
 }
 
 void CFactory::FinishBuild(CUnit* buildee) {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (buildee->beingBuilt)
 		return;
 	if (unitDef->fullHealthFactory && buildee->health < buildee->maxHealth)
@@ -285,7 +248,6 @@ void CFactory::FinishBuild(CUnit* buildee) {
 
 unsigned int CFactory::QueueBuild(const UnitDef* buildeeDef, const Command& buildCmd)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	assert(!beingBuilt);
 	assert(buildeeDef != nullptr);
 
@@ -295,10 +257,8 @@ unsigned int CFactory::QueueBuild(const UnitDef* buildeeDef, const Command& buil
 		return FACTORY_SKIP_BUILD_ORDER;
 	if (teamHandler.Team(team)->AtUnitLimit())
 		return FACTORY_KEEP_BUILD_ORDER;
-
-	const auto [allow, drop] = eventHandler.AllowUnitCreation(buildeeDef, this, nullptr);
-	if (!allow)
-		return drop ? FACTORY_SKIP_BUILD_ORDER : FACTORY_KEEP_BUILD_ORDER;
+	if (!eventHandler.AllowUnitCreation(buildeeDef, this, nullptr))
+		return FACTORY_SKIP_BUILD_ORDER;
 
 	finishedBuildCommand = buildCmd;
 	curBuildDef = buildeeDef;
@@ -309,14 +269,13 @@ unsigned int CFactory::QueueBuild(const UnitDef* buildeeDef, const Command& buil
 
 void CFactory::StopBuild()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	// cancel a build-in-progress
 	script->StopBuilding();
 
 	if (curBuild) {
 		if (curBuild->beingBuilt) {
-			AddResources({curBuild->cost.metal * curBuild->buildProgress, 0.0f}, false);
-			curBuild->KillUnit(nullptr, false, true, -CSolidObject::DAMAGE_FACTORY_CANCEL);
+			AddMetal(curBuild->cost.metal * curBuild->buildProgress, false);
+			curBuild->KillUnit(nullptr, false, true);
 		}
 		DeleteDeathDependence(curBuild, DEPENDENCE_BUILD);
 	}
@@ -325,17 +284,8 @@ void CFactory::StopBuild()
 	curBuildDef = nullptr;
 }
 
-bool CFactory::IsCurrentBuildeeMatchingBuildQueueFront(const CCommandQueue& buildQueue) const
-{
-	if (curBuild == nullptr || buildQueue.empty())
-		return false;
-
-	return curBuild->unitDef->id == -buildQueue.front().GetID();
-}
-
 void CFactory::DependentDied(CObject* o)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (o == curBuild) {
 		curBuild = nullptr;
 		StopBuild();
@@ -348,7 +298,6 @@ void CFactory::DependentDied(CObject* o)
 
 void CFactory::SendToEmptySpot(CUnit* unit)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	constexpr int numSteps = 100;
 
 	const float searchRadius = radius * 4.0f + unit->radius * 4.0f;
@@ -358,7 +307,6 @@ void CFactory::SendToEmptySpot(CUnit* unit)
 	const float3 tempPos = pos + frontdir * searchRadius;
 
 	float3 foundPos = tempPos;
-	MoveTypes::CheckCollisionQuery colliderInfo(unit);
 
 	for (int i = 0; i < numSteps; ++i) {
 		const float a = searchRadius * math::cos(i * searchAngle);
@@ -378,11 +326,8 @@ void CFactory::SendToEmptySpot(CUnit* unit)
 
 		if (!quadField.NoSolidsExact(testPos, unit->radius * 1.5f, 0xFFFFFFFF, CSolidObject::CSTATE_BIT_SOLIDOBJECTS))
 			continue;
-		if (unit->moveDef != nullptr) {
-			colliderInfo.UpdateElevationForPos(testPos);
-			if (!unit->moveDef->TestMoveSquare(colliderInfo, testPos, ZeroVector, true, true))
-				continue;
-		}
+		if (unit->moveDef != nullptr && !unit->moveDef->TestMoveSquare(nullptr, testPos, ZeroVector, true, true))
+			continue;
 
 		foundPos = testPos;
 		break;
@@ -406,11 +351,8 @@ void CFactory::SendToEmptySpot(CUnit* unit)
 			if ((foundPos - pos).dot(frontdir) < 0.0f)
 				continue;
 
-			if (unit->moveDef != nullptr) {
-				colliderInfo.UpdateElevationForPos(foundPos);
-				if (!unit->moveDef->TestMoveSquare(colliderInfo, foundPos, ZeroVector, true, true))
-					continue;
-			}
+			if (unit->moveDef != nullptr && !unit->moveDef->TestMoveSquare(nullptr, foundPos, ZeroVector, true, true))
+				continue;
 
 			break;
 		}
@@ -441,7 +383,6 @@ void CFactory::SendToEmptySpot(CUnit* unit)
 }
 
 void CFactory::AssignBuildeeOrders(CUnit* unit) {
-	RECOIL_DETAILED_TRACY_ZONE;
 	CCommandAI* unitCAI = unit->commandAI;
 	CCommandQueue& unitCmdQue = unitCAI->commandQue;
 
@@ -455,9 +396,9 @@ void CFactory::AssignBuildeeOrders(CUnit* unit) {
 
 	Command c(CMD_MOVE);
 
-	if (!unit->unitDef->canfly && modInfo.insertBuiltUnitMoveCommand) {
+	if (!unit->unitDef->canfly) {
 		// HACK: when a factory has a rallypoint set far enough away
-		// to trigger the non-admissible path estimators, we want to
+		// to trigger the non-admissable path estimators, we want to
 		// avoid units getting stuck inside by issuing them an extra
 		// move-order. However, this order can *itself* cause the PF
 		// system to consider the path blocked if the extra waypoint
@@ -484,9 +425,7 @@ void CFactory::AssignBuildeeOrders(CUnit* unit) {
 	}
 
 	if (unitCmdQue.empty()) {
-		if (modInfo.insertBuiltUnitMoveCommand) {
-			unitCAI->GiveCommand(c);
-		}
+		unitCAI->GiveCommand(c);
 
 		// copy factory orders for new unit
 		for (auto ci = factoryCmdQue.begin(); ci != factoryCmdQue.end(); ++ci) {
@@ -508,7 +447,7 @@ void CFactory::AssignBuildeeOrders(CUnit* unit) {
 
 			unitCAI->GiveCommand(c);
 		}
-	} else if (modInfo.insertBuiltUnitMoveCommand) {
+	} else {
 		unitCmdQue.push_front(c);
 	}
 }
@@ -517,7 +456,6 @@ void CFactory::AssignBuildeeOrders(CUnit* unit) {
 
 bool CFactory::ChangeTeam(int newTeam, ChangeType type)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (!CBuilding::ChangeTeam(newTeam, type))
 		return false;
 
@@ -530,15 +468,5 @@ bool CFactory::ChangeTeam(int newTeam, ChangeType type)
 
 void CFactory::CreateNanoParticle(bool highPriority)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
-	const int modelNanoPiece = nanoPieceCache.GetNanoPiece(script);
-
-	if (!localModel.Initialized() || !localModel.HasPiece(modelNanoPiece))
-		return;
-
-	const float3 relNanoFirePos = localModel.GetRawPiecePos(modelNanoPiece);
-	const float3 nanoPos = this->GetObjectSpacePos(relNanoFirePos);
-
-	// unsynced
-	projectileHandler.AddNanoParticle(nanoPos, curBuild->midPos, unitDef, team, highPriority);
+	// nano particle rendering removed (client-side only)
 }

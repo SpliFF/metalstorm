@@ -1,9 +1,8 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
+#include "System/Sync/SyncedPrimitiveBase.h"
 #include "Game/GameHelper.h"
 #include "Map/Ground.h"
-#include "Rendering/Colors.h"
-#include "Rendering/GL/RenderBuffers.h"
 #include "Sim/Features/Feature.h"
 #include "Sim/Misc/DamageArray.h"
 #include "Sim/Misc/GlobalSynced.h"
@@ -21,8 +20,6 @@
 #include "System/Matrix44f.h"
 #include "System/SpringMath.h"
 #include "System/creg/DefTypes.h"
-
-#include "System/Misc/TracyDefs.h"
 
 
 CR_BIND_DERIVED_INTERFACE(CWeaponProjectile, CProjectile)
@@ -66,11 +63,6 @@ CWeaponProjectile::CWeaponProjectile(const ProjectileParams& params)
 
 	assert(weaponDef != nullptr);
 
-	animParams1 = weaponDef->visuals.animParams[0];
-	animParams2 = weaponDef->visuals.animParams[1];
-	animParams3 = weaponDef->visuals.animParams[2];
-	animParams4 = weaponDef->visuals.animParams[3];
-
 	if (weaponDef->IsHitScanWeapon()) {
 		hitscan = true;
 		// the else-case (default) is handled in CProjectile::Init
@@ -106,16 +98,6 @@ CWeaponProjectile::CWeaponProjectile(const ProjectileParams& params)
 
 		alwaysVisible = weaponDef->visuals.alwaysVisible;
 		ignoreWater = weaponDef->waterweapon;
-
-		validTextures = {
-			false,
-			IsValidTexture(weaponDef->visuals.texture1),
-			IsValidTexture(weaponDef->visuals.texture2),
-			IsValidTexture(weaponDef->visuals.texture3),
-			IsValidTexture(weaponDef->visuals.texture4)
-		};
-		//whether to skip the draw call
-		validTextures[0] = validTextures[1] || validTextures[2] || validTextures[3] || validTextures[4];
 	}
 
 	{
@@ -129,12 +111,6 @@ CWeaponProjectile::CWeaponProjectile(const ProjectileParams& params)
 			po->SetBeingIntercepted(po->IsBeingIntercepted() || weaponDef->interceptSolo);
 			AddDeathDependence(po, DEPENDENCE_INTERCEPTTARGET);
 		}
-	}
-
-	if (params.model != nullptr) {
-		model = params.model;
-	} else {
-		model = weaponDef->LoadModel();
 	}
 
 	if (params.owner == nullptr) {
@@ -182,7 +158,6 @@ CWeaponProjectile::CWeaponProjectile(const ProjectileParams& params)
 
 CWeaponProjectile::~CWeaponProjectile()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	DynDamageArray::DecRef(damages);
 }
 
@@ -190,28 +165,27 @@ CWeaponProjectile::~CWeaponProjectile()
 void CWeaponProjectile::Explode(
 	CUnit* hitUnit,
 	CFeature* hitFeature,
-	CWeapon* hitWeapon,
 	float3 impactPos,
 	float3 impactDir
 ) {
 	const DamageArray& damageArray = damages->GetDynamicDamages(startPos, impactPos);
 	const CExplosionParams params = {
-		.pos                  = impactPos,
-		.dir                  = impactDir.SafeNormalize(),
-		.damages              = damageArray,
-		.weaponDef            = weaponDef,
-		.owner                = owner(),
-		.hitObject            = ExplosionHitObject(hitUnit, hitFeature, hitWeapon),
-		.craterAreaOfEffect   = damages->craterAreaOfEffect,
-		.damageAreaOfEffect   = damages->damageAreaOfEffect,
-		.edgeEffectiveness    = damages->edgeEffectiveness,
-		.explosionSpeed       = damages->explosionSpeed,
-		.gfxMod               = weaponDef->noExplode ? 0.3f : 1.0f,
-		.maxGroundDeformation = 0.0f,
-		.impactOnly           = weaponDef->impactOnly,
-		.ignoreOwner          = weaponDef->noExplode || weaponDef->noSelfDamage,
-		.damageGround         = true,
-		.projectileID         = static_cast<uint32_t>(id)
+		impactPos,
+		impactDir.SafeNormalize(),
+		damageArray,
+		weaponDef,
+		owner(),
+		hitUnit,
+		hitFeature,
+		damages->craterAreaOfEffect,
+		damages->damageAreaOfEffect,
+		damages->edgeEffectiveness,
+		damages->explosionSpeed,
+		weaponDef->noExplode? 0.3f: 1.0f,                 // gfxMod
+		weaponDef->impactOnly,
+		weaponDef->noExplode || weaponDef->noSelfDamage,  // ignoreOwner
+		true,                                             // damgeGround
+		static_cast<unsigned int>(id)
 	};
 
 	helper->Explosion(params);
@@ -226,80 +200,60 @@ void CWeaponProjectile::Explode(
 
 void CWeaponProjectile::Collision()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
-
-	float3 impactPos = pos;
-	float3 impactDir = speed;
-	if (hitscan) {
-		impactPos = targetPos;
-		impactDir = targetPos - startPos;
-	};
-
-	Explode(nullptr, nullptr, nullptr, impactPos, impactDir);
+	Collision((CFeature*) nullptr);
 }
 
 void CWeaponProjectile::Collision(CFeature* feature)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
-
-	assert(feature);
 	float3 impactPos = pos;
 	float3 impactDir = speed;
 
-	if (hitscan) {
-		impactPos = feature->pos;
-		impactDir = targetPos - startPos;
+	if (feature != nullptr) {
+		if (hitscan) {
+			impactPos = feature->pos;
+			impactDir = targetPos - startPos;
+		}
+
+		if (gsRNG.NextFloat() < weaponDef->fireStarter)
+			feature->StartFire();
+
+	} else {
+		if (hitscan) {
+			impactPos = targetPos;
+			impactDir = targetPos - startPos;
+		}
 	}
 
-	if (gsRNG.NextFloat() < weaponDef->fireStarter)
-		feature->StartFire();
-
-	Explode(nullptr, feature, nullptr, impactPos, impactDir);
+	Explode(nullptr, feature, impactPos, impactDir);
 }
 
 void CWeaponProjectile::Collision(CUnit* unit)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
-
-	assert(unit);
 	float3 impactPos = pos;
 	float3 impactDir = speed;
 
-	if (hitscan) {
-		impactPos = unit->pos;
-		impactDir = targetPos - startPos;
+	if (unit != nullptr) {
+		if (hitscan) {
+			impactPos = unit->pos;
+			impactDir = targetPos - startPos;
+		}
+	} else {
+		assert(false);
 	}
 
-	Explode(unit, nullptr, nullptr, impactPos, impactDir);
-}
-
-void CWeaponProjectile::Collision(CWeapon* weapon)
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-
-	assert(weapon);
-	float3 impactPos = pos;
-	float3 impactDir = speed;
-
-	if (hitscan) {
-		impactPos = weapon->owner ? weapon->owner->pos : pos;
-		impactDir = targetPos - startPos;
-	}
-
-	Explode(nullptr, nullptr, weapon, impactPos, impactDir);
+	Explode(unit, nullptr, impactPos, impactDir);
 }
 
 void CWeaponProjectile::Update()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	CProjectile::Update();
 	UpdateGroundBounce();
 	UpdateInterception();
 }
 
+
 void CWeaponProjectile::UpdateInterception()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (target == nullptr)
 		return;
 
@@ -314,32 +268,15 @@ void CWeaponProjectile::UpdateInterception()
 	if (owner() == nullptr)
 		targetPos = po->pos + po->speed;
 
-	static auto GetWeapon = [](const CWeaponProjectile* po) -> CWeapon* {
-		const auto* poOwner = po->owner();
-		if (!poOwner)
-			return nullptr;
-
-		if (po->weaponNum < 0 || po->weaponNum >= poOwner->weapons.size())
-			return nullptr;
-
-		return poOwner->weapons[po->weaponNum];
-	};
-
 	if (hitscan) {
 		if (ClosestPointOnLine(startPos, targetPos, po->pos).SqDistance(po->pos) < Square(weaponDef->collisionSize)) {
-			if (auto* weapon = GetWeapon(po); weapon)
-				po->Collision(weapon);
-			else
-				po->Collision();
+			po->Collision();
 			Collision();
 		}
 	} else {
 		// FIXME: if (pos.SqDistance(po->pos) < Square(weaponDef->collisionSize)) {
 		if (pos.SqDistance(po->pos) < Square(damages->damageAreaOfEffect)) {
-			if (auto* weapon = GetWeapon(po); weapon)
-				po->Collision(weapon);
-			else
-				po->Collision();
+			po->Collision();
 			Collision();
 		}
 	}
@@ -348,25 +285,17 @@ void CWeaponProjectile::UpdateInterception()
 
 void CWeaponProjectile::UpdateGroundBounce()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	#if 1
 	// projectile is not allowed to bounce on either surface
 	if (!weaponDef->groundBounce && !weaponDef->waterBounce)
 		return;
-
 	// maximum number of bounce already reached?
-	if (weaponDef->numBounce != -1 // infinite
-	&&  bounces >= weaponDef->numBounce)
+	if ((bounces + 1) > weaponDef->numBounce)
 		return;
-
 	if (luaMoveCtrl)
 		return;
-	if (ttl <= 0) {
-		// //drop scheduled bounce, so HasScheduledBounce() check inside
-		// CProjectileHandler::CheckGroundCollisions(ProjectileContainer& pc) is false
-		bounced = false;
+	if (ttl <= 0)
 		return;
-	}
 	#endif
 
 	if (!bounced) {
@@ -375,7 +304,7 @@ void CWeaponProjectile::UpdateGroundBounce()
 		// actually happens after this frame and should schedule a bounce
 		// for the next
 		const float groundDist = (weaponDef->groundBounce)? CGround::LineGroundCol(pos, pos + speed): -1.0f;
-		const float  waterDist = (weaponDef->waterBounce)? CGround::LinePlaneCol(pos, dir, speed.w, CGround::GetWaterLevel(pos.x, pos.z)): -1.0f;
+		const float  waterDist = (weaponDef->waterBounce)? CGround::LinePlaneCol(pos, dir, speed.w, 0.0f): -1.0f;
 		const float bounceDist = std::min(mix(groundDist, speed.w * 10000.0f, groundDist < 0.0f), mix(waterDist, speed.w * 10000.0f, waterDist < 0.0f));
 
 		if ((bounced = (bounceDist >= 0.0f && bounceDist <= speed.w))) {
@@ -400,16 +329,7 @@ void CWeaponProjectile::UpdateGroundBounce()
 		// SetPosition(bounceHitPos + speed * (1.0f - bounceParams.z));
 		SetPosition(bounceHitPos + dir * moveDistance);
 
-		explGenHandler.GenExplosion(
-			weaponDef->bounceExplosionGeneratorID,
-			bounceHitPos,
-			bounceNormal,
-			speed.w,
-			1.0f,
-			1.0f,
-			owner(),
-			ExplosionHitObject()
-		);
+		explGenHandler.GenExplosion(weaponDef->bounceExplosionGeneratorID, bounceHitPos, bounceNormal, speed.w, 1.0f, 1.0f, owner(), nullptr);
 
 		bounced = false;
 	}
@@ -418,23 +338,14 @@ void CWeaponProjectile::UpdateGroundBounce()
 }
 
 
-void CWeaponProjectile::DrawOnMinimap() const
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-	AddMiniMapVertices({ pos        , color4::yellow }, { pos + speed, color4::yellow });
-}
-
-
 bool CWeaponProjectile::CanBeInterceptedBy(const WeaponDef* wd) const
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	return ((weaponDef->targetable & wd->interceptor) != 0);
 }
 
 
 void CWeaponProjectile::DependentDied(CObject* o)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (o != target)
 		return;
 
@@ -444,7 +355,5 @@ void CWeaponProjectile::DependentDied(CObject* o)
 
 void CWeaponProjectile::PostLoad()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	assert(weaponDef != nullptr);
-	model = weaponDef->LoadModel();
 }

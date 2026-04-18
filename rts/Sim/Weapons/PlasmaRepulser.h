@@ -18,14 +18,13 @@ public:
 
 	void Init() override final;
 	void DependentDied(CObject* o) override final;
-	bool HaveFreeLineOfFire(const float3& srcPos, const float3& tgtPos, const SWeaponTarget& trg) const override final { return true; }
+	bool HaveFreeLineOfFire(const float3 srcPos, const float3 tgtPos, const SWeaponTarget& trg) const override final { return true; }
 
 	void Update() override final;
 	void SlowUpdate() override final;
 
 
 	void SetEnabled(bool b) { isEnabled = b; }
-	void SetRechargeDelay(int delay, bool overwrite);
 	void SetCurPower(float p) { curPower = p; }
 
 	bool IsEnabled() const { return isEnabled; }
@@ -48,8 +47,6 @@ public:
 
 	void SetQuads(std::vector<int>&& q) { quads = std::move(q); }
 	void ClearQuads() { quads.clear(); }
-
-	static void SerializeShieldSegmentCollectionPool(creg::ISerializer* s);
 
 private:
 	void FireImpl(const bool scriptCall) override final {}

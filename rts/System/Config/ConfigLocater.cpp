@@ -14,16 +14,17 @@
 #include "ConfigLocater.h"
 #include "Game/GameVersion.h"
 #include "System/Exceptions.h"
-#include "System/FileSystem/DataDirLocater.h"
-#include "System/FileSystem/FileSystem.h"
 #include "System/Log/ILog.h"
 #include "System/Platform/Misc.h"
 #include "System/Platform/Win/win32.h"
 
+#include <filesystem>
+#include <fstream>
+
 static void AddCfgFile(std::vector<std::string>& locations, const std::string& filepath)
 {
 	for (const std::string& fp: locations) {
-		if (FileSystem::ComparePaths(fp, filepath))
+		if (fp == filepath)
 			return;
 	}
 
@@ -38,10 +39,11 @@ static void LoadCfgs(std::vector<std::string>& locations, const std::string& def
 		AddCfgFile(locations, defCfg);
 
 		// create file if it doesn't exist
-		FileSystem::TouchFile(defCfg);
+		if (!std::filesystem::exists(defCfg)) {
+			std::ofstream f(defCfg);
+		}
 
 		// warn user if the file is not both readable and writable
-		// (otherwise it can fail/segfault/end up in virtualstore/...)
 		if (access(defCfg.c_str(), R_OK | W_OK) == -1) {
 			#ifndef _WIN32
 			LOG_L(L_WARNING, "default config-file \"%s\" not both readable and writeable", defCfg.c_str());
@@ -82,12 +84,8 @@ static void LoadCfgsInFolder(std::vector<std::string>& locations, const std::str
  */
 void ConfigLocater::GetDefaultLocations(std::vector<std::string>& locations)
 {
-	// first, add writeable config file
-	LoadCfgsInFolder(locations, dataDirLocater.GetWriteDirPath(), false);
-
-	// add additional readonly config files
-	for (const std::string& path: dataDirLocater.GetDataDirPaths()) {
-		LoadCfgsInFolder(locations, path);
-	}
+	// Use the current working directory as the config location
+	std::string cwd = std::filesystem::current_path().string() + "/";
+	LoadCfgsInFolder(locations, cwd, false);
 }
 

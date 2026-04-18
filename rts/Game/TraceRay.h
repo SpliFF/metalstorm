@@ -19,8 +19,8 @@ namespace Collision {
 		NOFRIENDLIES = 1 << 1,
 		NOFEATURES   = 1 << 2,
 		NONEUTRALS   = 1 << 3,
-		NOFIREBASES  = 1 << 4, // ignored by raytraces; not added to avoidFlags
-		NONONTARGETS = 1 << 5, // ignored by raytraces; not added to avoidFlags
+		NOFIREBASES  = 1 << 4,
+		NONONTARGETS = 1 << 5,
 		NOGROUND     = 1 << 6,
 		NOCLOAKED    = 1 << 7,
 		NOUNITS      = NOENEMIES | NOFRIENDLIES | NONEUTRALS
@@ -63,22 +63,8 @@ namespace TraceRay {
 		std::vector<SShieldDist>& hitShields
 	);
 
-	float GuiTraceRay(
-		const float3& start,
-		const float3& dir,
-		const float length,
-		const CUnit* exclude,
-		const CUnit*& hitUnit,
-		const CFeature*& hitFeature,
-		bool useRadar,
-		bool groundOnly = false,
-		bool ignoreWater = true
-	);
+	// Server-side only: GuiTraceRay is a client concept, removed.
 
-	/**
-	 * @return true if there is an object (allied/neutral unit, feature)
-	 * within the firing cone of \<owner\> (that might be hit)
-	 */
 	bool TestCone(
 		const float3& from,
 		const float3& dir,
@@ -88,10 +74,6 @@ namespace TraceRay {
 		int traceFlags,
 		CUnit* owner);
 
-	/**
-	 * @return true if there is an object (allied/neutral unit, feature)
-	 *  within the firing trajectory of \<owner\> (that might be hit)
-	 */
 	bool TestTrajectoryCone(
 		const float3& from,
 		const float3& dir,

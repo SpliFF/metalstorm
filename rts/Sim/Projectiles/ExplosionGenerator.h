@@ -6,22 +6,15 @@
 #include <string>
 #include <vector>
 
-#include "Rendering/GroundFlashInfo.h"
 #include "System/UnorderedMap.hpp"
-#include "System/Threading/SpringThreading.h"
-#include "Game/GameHelper.h"
 
-static constexpr const char* CEG_PREFIX_STRING = "custom:";
+#define CEG_PREFIX_STRING "custom:"
 
 class LuaParser;
 class LuaTable;
 class float3;
 class CUnit;
-class CFeature;
-class CWeapon;
 class IExplosionGenerator;
-struct WeaponDef;
-struct CExplosionParams;
 
 struct SExpGenSpawnableMemberInfo;
 
@@ -63,8 +56,6 @@ public:
 	IExplosionGenerator* LoadGenerator(const char* tag, const char* pre = "");
 	IExplosionGenerator* GetGenerator(unsigned int expGenID);
 
-	bool PredictExplosionVisible(const WeaponDef* weaponDef, const CExplosionParams& params, int allyTeamID);
-
 	bool GenExplosion(
 		unsigned int expGenID,
 		const float3& pos,
@@ -73,8 +64,7 @@ public:
 		float radius,
 		float gfxMod,
 		CUnit* owner,
-		const ExplosionHitObject& hitObject,
-		bool withMutex = false
+		CUnit* hit
 	);
 
 	const LuaTable* GetExplosionTableRoot() const { return explTblRoot; }
@@ -112,8 +102,7 @@ public:
 		float radius,
 		float gfxMod,
 		CUnit* owner,
-		const ExplosionHitObject& hitObject,
-		bool withMutex = false
+		CUnit* hit
 	) { return false; }
 
 	unsigned int GetGeneratorID() const { return generatorID; }
@@ -139,8 +128,7 @@ public:
 		float radius,
 		float gfxMod,
 		CUnit* owner,
-		const ExplosionHitObject& hitObject,
-		bool withMutex
+		CUnit* hit
 	) override;
 };
 
@@ -164,8 +152,6 @@ protected:
 	struct ExpGenParams {
 		std::vector<ProjectileSpawnInfo> projectiles;
 
-		GroundFlashInfo groundFlash;
-
 		bool useDefaultExplosions;
 	};
 
@@ -176,35 +162,21 @@ public:
 	static unsigned int GetFlagsFromTable(const LuaTable& table);
 	static unsigned int GetFlagsFromHeight(float height, float groundHeight);
 
-	unsigned int CommonVisibleFlags(unsigned int visibilityFlags) const;
-
 	/// @throws content_error/runtime_error on errors
 	bool Load(CExplosionGeneratorHandler* handler, const char* tag) override;
 	bool Reload(CExplosionGeneratorHandler* handler, const char* tag) override;
-	bool Explosion(
-		const float3& pos,
-		const float3& dir,
-		float damage,
-		float radius,
-		float gfxMod,
-		CUnit* owner,
-		const ExplosionHitObject& hitObject,
-		bool withMutex
-	) override;
+	bool Explosion(const float3& pos, const float3& dir, float damage, float radius, float gfxMod, CUnit* owner, CUnit* hit) override;
 
 	// spawn-flags
 	enum {
-		CEG_SPWF_WATER       = 1 << 0,
-		CEG_SPWF_GROUND      = 1 << 1,
-		CEG_SPWF_VOIDWATER   = 1 << 2,
-		CEG_SPWF_VOIDGROUND  = 1 << 3,
-		CEG_SPWF_AIR         = 1 << 4,
-		CEG_SPWF_UNDERWATER  = 1 << 5,  // TODO: UNDERVOIDWATER?
-		CEG_SPWF_UNIT        = 1 << 6,  // only execute when the explosion hits a unit
-		CEG_SPWF_NO_UNIT     = 1 << 7,  // only execute when the explosion doesn't hit a unit (environment)
-		CEG_SPWF_SHIELD      = 1 << 8,  // execute when the explosion hits a shield
-		CEG_SPWF_INTERCEPTED = 1 << 9,  // the weapon projectile was intercepted
-		CEG_SPWF_ALWAYS_VISIBLE = 1 << 31,
+		CEG_SPWF_WATER      = 1 << 0,
+		CEG_SPWF_GROUND     = 1 << 1,
+		CEG_SPWF_VOIDWATER  = 1 << 2,
+		CEG_SPWF_VOIDGROUND = 1 << 3,
+		CEG_SPWF_AIR        = 1 << 4,
+		CEG_SPWF_UNDERWATER = 1 << 5,  // TODO: UNDERVOIDWATER?
+		CEG_SPWF_UNIT       = 1 << 6,  // only execute when the explosion hits a unit
+		CEG_SPWF_NO_UNIT    = 1 << 7,  // only execute when the explosion doesn't hit a unit (environment)
 	};
 
 	enum {

@@ -5,12 +5,13 @@
 
 #include "Sim/Projectiles/Projectile.h"
 #include "Sim/Projectiles/ProjectileParams.h" // easier to include this here
-#include "Sim/Weapons/WeaponDef.h"
 #include "WeaponProjectileTypes.h"
 
+struct WeaponDef;
 struct ProjectileParams;
-class CVertexArray;
 class DynDamageArray;
+
+
 
 /**
  * Base class for all projectiles originating from a weapon or having
@@ -21,27 +22,15 @@ class CWeaponProjectile : public CProjectile
 	CR_DECLARE_DERIVED(CWeaponProjectile)
 public:
 	CWeaponProjectile(const ProjectileParams& params);
-	~CWeaponProjectile() override;
+	virtual ~CWeaponProjectile();
 
-	virtual void Explode(CUnit* hitUnit, CFeature* hitFeature, CWeapon* hitWeapon, float3 impactPos, float3 impactDir);
-	void Collision() override;
-	void Collision(CFeature* feature) override;
-	void Collision(CUnit* unit) override;
-	void Collision(CWeapon* weapon) override;
-	void Update() override;
-
+	virtual void Explode(CUnit* hitUnit, CFeature* hitFeature, float3 impactPos, float3 impactDir);
+	virtual void Collision() override;
+	virtual void Collision(CFeature* feature) override;
+	virtual void Collision(CUnit* unit) override;
+	virtual void Update() override;
 	/// @return 0=unaffected, 1=instant repulse, 2=gradual repulse
 	virtual int ShieldRepulse(const float3& shieldPos, float shieldForce, float shieldMaxSpeed) { return 0; }
-
-	void DrawOnMinimap() const override;
-
-	// Why is this here? Here is why:
-	// ProjectileCreated(id) issues Spring.SpawnExplosion(), but the projectile(id) construction
-	// is not complete yet (only CWeaponProjectile constructor has managed to complete its task)
-	// "if (projectileHandler.GetParticleSaturation() < 1.0f)" is getting called as part of
-	// SpawnExplosion() flow and it cannot reach GetProjectilesCount() of derived classes, because
-	// their constructor is not done yet, thus this workaround
-	int GetProjectilesCount() const override { 	return 1; }
 
 	void DependentDied(CObject* o) override;
 	void PostLoad();
@@ -59,7 +48,6 @@ public:
 	const WeaponDef* GetWeaponDef() const { return weaponDef; }
 
 	int GetTimeToLive() const { return ttl; }
-	void SetTimeToLive(int newTTL) { ttl = newTTL; }
 
 	void SetStartPos(const float3& newStartPos) { startPos = newStartPos; }
 	void SetTargetPos(const float3& newTargetPos) { targetPos = newTargetPos; }

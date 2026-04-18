@@ -1,17 +1,15 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
+#include "Game/TraceRay.h"
 #include "LuaConstGame.h"
 
 #include "LuaInclude.h"
 #include "LuaHandle.h"
 #include "LuaUtils.h"
 #include "Game/GameSetup.h"
-#include "Game/TraceRay.h"
 #include "Map/MapDamage.h"
 #include "Map/MapInfo.h"
-#include "Map/MetalMap.h"
 #include "Map/ReadMap.h"
-#include "Rendering/Fonts/glFont.h"
 #include "Sim/Misc/ModInfo.h"
 #include "Sim/Misc/CategoryHandler.h"
 #include "Sim/Misc/DamageArrayHandler.h"
@@ -19,106 +17,8 @@
 #include "Sim/MoveTypes/MoveDefHandler.h"
 #include "Sim/MoveTypes/ScriptMoveType.h"
 #include "Sim/Units/UnitHandler.h"
-#include "System/FileSystem/ArchiveScanner.h"
-#include "System/FileSystem/FileSystem.h"
 #include "System/StringUtil.h"
-#include "Rendering/Fonts/FontHandler.h"
 
-/******************************************************************************
- * Game constants
- * @see rts/Lua/LuaConstGame.cpp
-******************************************************************************/
-
-/* TODO:
- * - Inline these declarations (place each above the specific line they are pushed into the constant.
- * - There are many missing (for example modInfo related ones)
- */
-/*** Game specific information
- *
- * @table Game
- * @field maxUnits number
- * @field maxTeams number
- * @field maxPlayers number
- * @field squareSize number Divide Game.mapSizeX or Game.mapSizeZ by this to get engine's "mapDims" coordinates. The resolution of height, yard and type maps.
- * @field metalMapSquareSize number The resolution of metalmap (for use in API such as Spring.GetMetalAmount etc.)
- * @field gameSpeed number Number of simulation gameframes per second
- * @field startPosType number
- * @field ghostedBuildings boolean
- * @field mapChecksum string
- * @field modChecksum string
- * @field mapDamage boolean
- * @field mapName string
- * @field mapDescription string = string Game.mapHumanName
- * @field mapHardness number
- * @field mapX number
- * @field mapY number
- * @field mapSizeX number in worldspace/opengl coords. Divide by Game.squareSize to get engine's "mapDims" coordinates
- * @field mapSizeZ number in worldspace/opengl coords. Divide by Game.squareSize to get engine's "mapDims" coordinates
- * @field gravity number
- * @field tidal number
- * @field windMin number
- * @field windMax number
- * @field extractorRadius number
- * @field waterDamage number
- * @field envDamageTypes table Containing {def}IDs of environmental-damage sources
- * @field gameName string
- * @field gameShortName string
- * @field gameVersion string
- * @field gameMutator string
- * @field gameDesc string
- * @field requireSonarUnderWater boolean
- * @field transportAir number
- * @field transportShip number
- * @field transportHover number
- * @field transportGround number
- * @field fireAtKilled number
- * @field fireAtCrashing number
- * @field constructionDecay boolean
- * @field reclaimAllowEnemies boolean
- * @field reclaimAllowAllies boolean
- * @field constructionDecayTime number
- * @field constructionDecaySpeed number
- * @field multiReclaim number
- * @field reclaimMethod number
- * @field reclaimUnitMethod number
- * @field reclaimUnitEnergyCostFactor number
- * @field reclaimUnitEfficiency number
- * @field reclaimFeatureEnergyCostFactor number
- * @field repairEnergyCostFactor number
- * @field resurrectEnergyCostFactor number
- * @field captureEnergyCostFactor number
- * @field springCategories table<string, integer>
- * ```lua
- *     example: {
- *       ["vtol"]         = 0,  ["special"]      = 1,  ["noweapon"]     = 2,
- *       ["notair"]       = 3,  ["notsub"]       = 4,  ["all"]          = 5,
- *       ["weapon"]       = 6,  ["notship"]      = 7,  ["notland"]      = 8,
- *       ["mobile"]       = 9,  ["kbot"]         = 10, ["antigator"]    = 11,
- *       ["tank"]         = 12, ["plant"]        = 13, ["ship"]         = 14,
- *       ["antiemg"]      = 15, ["antilaser"]    = 16, ["antiflame"]    = 17,
- *       ["underwater"]   = 18, ["hover"]        = 19, ["phib"]         = 20,
- *       ["constr"]       = 21, ["strategic"]    = 22, ["commander"]    = 23,
- *       ["paral"]        = 24, ["jam"]          = 25, ["mine"]         = 26,
- *       ["kamikaze"]     = 27, ["minelayer"]    = 28, ["notstructure"] = 29,
- *       ["air"]          = 30
- *     }
- * ```
- * @field armorTypes table<string|integer, integer|string> (bidirectional)
- * ```lua
- *     example: {
- *       [1]  = amphibious,   [2] = anniddm,     [3] = antibomber,
- *       [4]  = antifighter,  [5] = antiraider,  [6] = atl,
- *       [7]  = blackhydra,   [8] = bombers,     [9] = commanders,
- *       [10] = crawlingbombs, ...
- *
- *       ["amphibious"]   = 1, ["anniddm"]    = 2, ["antibomber"] = 3
- *       ["antifighter"]  = 4, ["antiraider"] = 5, ["atl"]        = 6
- *       ["blackhydra"]   = 7, ["bombers"]    = 8, ["commanders"] = 9
- *       ["crawlingbombs"]= 10, ...
- *     }
- * ```
- * @field textColorCodes TextColorCode Table containing keys that represent the color code operations during font rendering
- */
 
 bool LuaConstGame::PushEntries(lua_State* L)
 {
@@ -128,20 +28,12 @@ bool LuaConstGame::PushEntries(lua_State* L)
 		LuaPushNamedNumber(L, "maxPlayers", MAX_PLAYERS);
 		LuaPushNamedNumber(L, "gameSpeed" , GAME_SPEED );
 		LuaPushNamedNumber(L, "squareSize", SQUARE_SIZE);
-		LuaPushNamedNumber(L, "metalMapSquareSize", METAL_MAP_SQUARE_SIZE);
-		LuaPushNamedNumber(L, "buildSquareSize", BUILD_SQUARE_SIZE);
-		LuaPushNamedNumber(L, "buildGridResolution", BUILD_GRID_RESOLUTION);
-		LuaPushNamedNumber(L, "footprintScale", SPRING_FOOTPRINT_SCALE);
 	}
 
 	if (CGameSetup::ScriptLoaded()) {
 		// game-setup
 		LuaPushNamedNumber(L, "startPosType"    , gameSetup->startPosType);
 		LuaPushNamedBool(L,   "ghostedBuildings", gameSetup->ghostedBuildings);
-		if (gameSetup->hostDemo)
-			LuaPushNamedString(L, "demoPlayName", FileSystem::GetBasename(gameSetup->demoName));
-		else
-			LuaPushNamedNil(L, "demoPlayName");
 	}
 
 	if (unitHandler.MaxUnits() > 0) {
@@ -197,42 +89,31 @@ bool LuaConstGame::PushEntries(lua_State* L)
 		LuaPushNamedNumber(L, "multiReclaim"                  , modInfo.multiReclaim);
 		LuaPushNamedNumber(L, "reclaimMethod"                 , modInfo.reclaimMethod);
 		LuaPushNamedNumber(L, "reclaimUnitMethod"             , modInfo.reclaimUnitMethod);
-		LuaPushNamedNumber(L, "reclaimUnitEnergyCostFactor"   , modInfo.reclaimUnitCostFactor.energy);
-		LuaPushNamedNumber(L, "reclaimUnitEfficiency"         , modInfo.reclaimUnitEfficiency.metal);
-		LuaPushNamedNumber(L, "reclaimFeatureEnergyCostFactor", modInfo.reclaimFeatureCostFactor.energy);
-		LuaPushNamedBool  (L, "reclaimUnitDrainHealth"        , modInfo.reclaimUnitDrainHealth);
+		LuaPushNamedNumber(L, "reclaimUnitEnergyCostFactor"   , modInfo.reclaimUnitEnergyCostFactor);
+		LuaPushNamedNumber(L, "reclaimUnitEfficiency"         , modInfo.reclaimUnitEfficiency);
+		LuaPushNamedNumber(L, "reclaimFeatureEnergyCostFactor", modInfo.reclaimFeatureEnergyCostFactor);
 		LuaPushNamedBool  (L, "reclaimAllowEnemies"           , modInfo.reclaimAllowEnemies);
 		LuaPushNamedBool  (L, "reclaimAllowAllies"            , modInfo.reclaimAllowAllies);
-		LuaPushNamedNumber(L, "repairEnergyCostFactor"        , modInfo.repairCostFactor.energy);
-		LuaPushNamedNumber(L, "resurrectEnergyCostFactor"     , modInfo.resurrectCostFactor.energy);
-		LuaPushNamedNumber(L, "captureEnergyCostFactor"       , modInfo.captureCostFactor.energy);
+		LuaPushNamedNumber(L, "repairEnergyCostFactor"        , modInfo.repairEnergyCostFactor);
+		LuaPushNamedNumber(L, "resurrectEnergyCostFactor"     , modInfo.resurrectEnergyCostFactor);
+		LuaPushNamedNumber(L, "captureEnergyCostFactor"       , modInfo.captureEnergyCostFactor);
 
-		// Despite being bools, these are exposed to Lua as 0/1 for legacy reasons
 		LuaPushNamedNumber(L, "transportAir"   , modInfo.transportAir);
 		LuaPushNamedNumber(L, "transportShip"  , modInfo.transportShip);
 		LuaPushNamedNumber(L, "transportHover" , modInfo.transportHover);
 		LuaPushNamedNumber(L, "transportGround", modInfo.transportGround);
 		LuaPushNamedNumber(L, "fireAtKilled"   , modInfo.fireAtKilled);
 		LuaPushNamedNumber(L, "fireAtCrashing" , modInfo.fireAtCrashing);
+
 		LuaPushNamedNumber(L, "requireSonarUnderWater", modInfo.requireSonarUnderWater);
 
 		LuaPushNamedBool  (L, "paralyzeOnMaxHealth", modInfo.paralyzeOnMaxHealth);
 		LuaPushNamedNumber(L, "paralyzeDeclineRate", modInfo.paralyzeDeclineRate);
-
-		LuaPushNamedBool  (L, "allowEnginePlayerlist", modInfo.allowEnginePlayerlist);
-		/*** @field Game.nativeExcessSharing boolean whether the engine handles excess resources overflow */
-		LuaPushNamedBool  (L, "nativeExcessSharing", modInfo.nativeExcessSharing);
 	}
 
-	if (archiveScanner != nullptr && mapInfo != nullptr) {
-		// archive checksums
-		sha512::hex_digest mapHexDigest;
-		sha512::hex_digest modHexDigest;
-		sha512::dump_digest(archiveScanner->GetArchiveCompleteChecksumBytes(mapInfo->map.name), mapHexDigest);
-		sha512::dump_digest(archiveScanner->GetArchiveCompleteChecksumBytes(modInfo.filename), modHexDigest);
-
-		LuaPushNamedString(L, "mapChecksum", mapHexDigest.data());
-		LuaPushNamedString(L, "modChecksum", modHexDigest.data());
+	{
+		// deprecated nonsense
+		LuaPushNamedBool(L, "allowTeamColors", true);
 	}
 
 	{
@@ -271,28 +152,14 @@ bool LuaConstGame::PushEntries(lua_State* L)
 	{
 		// environmental damage types
 		lua_pushliteral(L, "envDamageTypes");
-		lua_createtable(L, 0, 21);
-			LuaPushNamedNumber(L, "Debris"           , -CSolidObject::DAMAGE_EXPLOSION_DEBRIS   );
-			LuaPushNamedNumber(L, "GroundCollision"  , -CSolidObject::DAMAGE_COLLISION_GROUND   );
-			LuaPushNamedNumber(L, "ObjectCollision"  , -CSolidObject::DAMAGE_COLLISION_OBJECT   );
-			LuaPushNamedNumber(L, "Fire"             , -CSolidObject::DAMAGE_EXTSOURCE_FIRE     );
-			LuaPushNamedNumber(L, "Water"            , -CSolidObject::DAMAGE_EXTSOURCE_WATER    );
-			LuaPushNamedNumber(L, "Killed"           , -CSolidObject::DAMAGE_EXTSOURCE_KILLED   );
-			LuaPushNamedNumber(L, "Crushed"          , -CSolidObject::DAMAGE_EXTSOURCE_CRUSHED  );
-			LuaPushNamedNumber(L, "AircraftCrashed"  , -CSolidObject::DAMAGE_AIRCRAFT_CRASHED   );
-			LuaPushNamedNumber(L, "Kamikaze"         , -CSolidObject::DAMAGE_KAMIKAZE_ACTIVATED );
-			LuaPushNamedNumber(L, "SelfD"            , -CSolidObject::DAMAGE_SELFD_EXPIRED      );
-			LuaPushNamedNumber(L, "ConstructionDecay", -CSolidObject::DAMAGE_CONSTRUCTION_DECAY );
-			LuaPushNamedNumber(L, "Reclaimed"        , -CSolidObject::DAMAGE_RECLAIMED          );
-			LuaPushNamedNumber(L, "TurnedIntoFeature", -CSolidObject::DAMAGE_TURNED_INTO_FEATURE);
-			LuaPushNamedNumber(L, "TransportKilled"  , -CSolidObject::DAMAGE_TRANSPORT_KILLED   );
-			LuaPushNamedNumber(L, "FactoryKilled"    , -CSolidObject::DAMAGE_FACTORY_KILLED     );
-			LuaPushNamedNumber(L, "FactoryCancel"    , -CSolidObject::DAMAGE_FACTORY_CANCEL     );
-			LuaPushNamedNumber(L, "UnitScript"       , -CSolidObject::DAMAGE_UNIT_SCRIPT        );
-			LuaPushNamedNumber(L, "SetNegativeHealth", -CSolidObject::DAMAGE_NEGATIVE_HEALTH    );
-			LuaPushNamedNumber(L, "OutOfBounds"      , -CSolidObject::DAMAGE_KILLED_OOB         );
-			LuaPushNamedNumber(L, "KilledByCheat"    , -CSolidObject::DAMAGE_KILLED_CHEAT       );
-			LuaPushNamedNumber(L, "KilledByLua"      , -CSolidObject::DAMAGE_KILLED_LUA         );
+		lua_createtable(L, 0, 7);
+			LuaPushNamedNumber(L, "Debris"         , -CSolidObject::DAMAGE_EXPLOSION_DEBRIS );
+			LuaPushNamedNumber(L, "GroundCollision", -CSolidObject::DAMAGE_COLLISION_GROUND );
+			LuaPushNamedNumber(L, "ObjectCollision", -CSolidObject::DAMAGE_COLLISION_OBJECT );
+			LuaPushNamedNumber(L, "Fire"           , -CSolidObject::DAMAGE_EXTSOURCE_FIRE   );
+			LuaPushNamedNumber(L, "Water"          , -CSolidObject::DAMAGE_EXTSOURCE_WATER  );
+			LuaPushNamedNumber(L, "Killed"         , -CSolidObject::DAMAGE_EXTSOURCE_KILLED );
+			LuaPushNamedNumber(L, "Crushed"        , -CSolidObject::DAMAGE_EXTSOURCE_CRUSHED);
 		lua_rawset(L, -3);
 	}
 	{
@@ -328,17 +195,6 @@ bool LuaConstGame::PushEntries(lua_State* L)
 			LuaPushNamedNumber(L, "HitNothing", CScriptMoveType::HitNothing);
 			LuaPushNamedNumber(L, "HitGround" , CScriptMoveType::HitGround );
 			LuaPushNamedNumber(L, "HitLimit"  , CScriptMoveType::HitLimit  );
-		lua_rawset(L, -3);
-	}
-	{
-		// inline color-codes for text fonts
-		bool newIndicators = fontHandler.disableOldColorIndicators;
-
-		lua_pushliteral(L, "textColorCodes");
-		lua_createtable(L, 0, 3);
-			LuaPushNamedChar(L, "Color"          , static_cast<char>(newIndicators ? CglFont::ColorCodeIndicator : CglFont::OldColorCodeIndicator)  );
-			LuaPushNamedChar(L, "ColorAndOutline", static_cast<char>(newIndicators ? CglFont::ColorCodeIndicatorEx : CglFont::OldColorCodeIndicatorEx));
-			LuaPushNamedChar(L, "Reset"          , static_cast<char>(CglFont::ColorResetIndicator) );
 		lua_rawset(L, -3);
 	}
 

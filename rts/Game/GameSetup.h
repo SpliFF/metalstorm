@@ -10,8 +10,19 @@
 #include "Players/PlayerBase.h"
 #include "Sim/Misc/TeamBase.h"
 #include "Sim/Misc/AllyTeam.h"
-#include "ExternalAI/SkirmishAIData.h"
 #include "System/UnorderedMap.hpp"
+
+// Minimal AI startup data — replaces the deleted ExternalAI/SkirmishAIData.h.
+// Kept because game setup scripts define AI players with these fields.
+struct SkirmishAIData {
+	std::string name;
+	std::string shortName;
+	std::string version;
+	int team = -1;
+	int hostPlayer = -1;
+	spring::unordered_map<std::string, std::string> options;
+	std::vector<std::string> optionKeys;
+};
 #include "System/UnorderedSet.hpp"
 #include "System/creg/creg_cond.h"
 
@@ -25,12 +36,10 @@ class CGameSetup
 public:
 	CGameSetup() { ResetState(); }
 	CGameSetup(const CGameSetup& gs) = delete;
-	CGameSetup(CGameSetup&& gs) noexcept { *this = std::move(gs); }
+	CGameSetup(CGameSetup&& gs) { *this = std::move(gs); }
 
 	CGameSetup& operator = (const CGameSetup& gs) = delete;
-	CGameSetup& operator = (CGameSetup&& gs) noexcept {
-		initBlank = gs.initBlank;
-
+	CGameSetup& operator = (CGameSetup&& gs) {
 		fixedAllies = gs.fixedAllies;
 		useLuaGaia = gs.useLuaGaia;
 		luaDevMode = gs.luaDevMode;
@@ -45,7 +54,7 @@ public:
 
 		std::copy(gs.dsMapHash, gs.dsMapHash + sizeof(dsMapHash), dsMapHash);
 		std::copy(gs.dsModHash, gs.dsModHash + sizeof(dsModHash), dsModHash);
-		fixedRNGSeed = gs.fixedRNGSeed;
+		mapSeed = gs.mapSeed;
 
 		gameStartDelay = gs.gameStartDelay;
 
@@ -176,9 +185,6 @@ public:
 		StartPos_Last             = 3  // last entry in enum (for user input check)
 	};
 
-	uint32_t fixedRNGSeed;
-
-	bool initBlank;
 
 	bool fixedAllies;
 	bool useLuaGaia;
@@ -195,6 +201,7 @@ public:
 
 	uint8_t dsMapHash[64];
 	uint8_t dsModHash[64];
+	uint32_t mapSeed;
 
 	/**
 	 * Number of seconds until the game starts, counting
@@ -219,7 +226,6 @@ public:
 	std::string reloadScript;
 	std::string demoName;
 
-	inline static bool forceOnlyLocal = false;
 private:
 	spring::unordered_map<int, int> playerRemap;
 	spring::unordered_map<int, int> teamRemap;
