@@ -1,15 +1,16 @@
 <div id="hud-top-bar" class="hud-panel">
-    <span id="hud-entities">Entities: 0</span>
-    <span id="hud-frame">Frame: 0</span>
+    <!-- Temporarily hidden: entity/frame counters, selection, minimap, help -->
+    <span id="hud-entities" style="display:none">Entities: 0</span>
+    <span id="hud-frame" style="display:none">Frame: 0</span>
     <button id="hud-quit-btn" title="Quit to lobby (ESC)">Quit</button>
 </div>
-<div id="hud-selection" class="hud-panel">
+<div id="hud-selection" class="hud-panel" style="display:none">
     <span id="hud-selected">No selection</span>
 </div>
-<div id="hud-minimap" class="hud-panel">
+<div id="hud-minimap" class="hud-panel" style="display:none">
     <div id="minimap-container"></div>
     <button id="detach-minimap-btn">Detach ↗</button>
 </div>
-<div id="hud-help" class="hud-panel">
+<div id="hud-help" class="hud-panel" style="display:none">
     Left click: select &nbsp; Right click: move/attack &nbsp; S: stop &nbsp; Shift: queue &nbsp; ESC: quit
 </div>
