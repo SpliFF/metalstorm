@@ -243,20 +243,19 @@ function describeInboundMessage(msg: Record<string, unknown>): string {
 }
 
 // ── localStorage bridge ────────────────────────────────────────────────
-// Workers can't access localStorage directly, so we use synchronous
-// messaging via a SharedArrayBuffer or just accept that config persistence
-// won't work until we add a proper bridge. For now, config reads return
-// null (widgets start with defaults) and writes are no-ops.
+// Workers can't access localStorage directly. Main thread sends all
+// luaui:* entries at init time; writes update the local cache AND post
+// back to main thread for persistence.
 
-function loadFromStorage(_key: string): string | null {
-    // TODO: bridge to main thread localStorage
-    return null;
+const storageCache: Record<string, string> = {};
+
+function loadFromStorage(key: string): string | null {
+    return storageCache[key] ?? null;
 }
 
-function saveToStorage(_key: string, _value: string): void {
-    // TODO: bridge to main thread localStorage
-    // For now, post a message so main thread can save it
-    postToMain({ type: 'storage:set', key: _key, value: _value });
+function saveToStorage(key: string, value: string): void {
+    storageCache[key] = value;
+    postToMain({ type: 'storage:set', key, value });
 }
 
 // ── Main init ──────────────────────────────────────────────────────────
@@ -1210,27 +1209,68 @@ function getWidgetList(): string {
     //   status|name|author|basename|error|desc|date|license|layer|enabled|handler
     return String(runtime.evalString(`
         local entries = {}
-        local esc = function(s) return (tostring(s or "")):gsub("|", "/") end
+        local function esc(s)
+            return (tostring(s or "")):gsub("|", "/"):gsub("\\n", " "):gsub("\\r", "")
+        end
+        local seen = {}
         if widgetHandler then
+            -- Active widgets
             for _, w in ipairs(widgetHandler.widgets or {}) do
                 local info = w.whInfo or {}
                 local gi = (w.GetInfo and type(w.GetInfo) == "function") and w:GetInfo() or {}
+                seen[info.name] = true
                 entries[#entries+1] = "active|" .. esc(info.name) .. "|" .. esc(info.author)
                     .. "|" .. esc(info.basename) .. "||" .. esc(gi.desc or info.desc)
                     .. "|" .. esc(gi.date) .. "|" .. esc(gi.license)
                     .. "|" .. esc(gi.layer or info.layer) .. "|" .. esc(tostring(gi.enabled))
                     .. "|" .. esc(tostring(gi.handler))
             end
+            -- Known but inactive widgets (disabled or failed after knownWidgets registration)
             for name, info in pairs(widgetHandler.knownWidgets or {}) do
                 if not info.active then
+                    seen[name] = true
                     entries[#entries+1] = "disabled|" .. esc(name) .. "|" .. esc(info.author)
                         .. "|" .. esc(info.basename) .. "||" .. esc(info.desc)
                         .. "|||" .. esc(info.layer or "") .. "||"
                 end
             end
-        end
-        for _, errMsg in ipairs(_widgetErrors or {}) do
-            entries[#entries+1] = "failed||||| " .. esc(errMsg)
+            -- Widgets that failed before reaching knownWidgets (parse errors, pcall failures)
+            for _, errMsg in ipairs(_widgetErrors or {}) do
+                local bname = errMsg:match("Failed to load:%s+(%S+)")
+                if bname and not seen[bname] then
+                    seen[bname] = true
+                    entries[#entries+1] = "failed|" .. esc(bname) .. "|||" .. esc(errMsg) .. "||||||"
+                end
+            end
+            -- Cross-check: find widget files VFS knows about that didn't appear anywhere.
+            -- Build a set of known basenames from active widgets and knownWidgets.
+            local seenBasenames = {}
+            for _, w in ipairs(widgetHandler.widgets or {}) do
+                if w.whInfo and w.whInfo.basename then
+                    seenBasenames[w.whInfo.basename] = true
+                end
+            end
+            for _, info in pairs(widgetHandler.knownWidgets or {}) do
+                if info.basename then
+                    seenBasenames[info.basename] = true
+                end
+            end
+            -- Also mark basenames from _widgetErrors
+            for _, errMsg in ipairs(_widgetErrors or {}) do
+                local bname = errMsg:match("Failed to load:%s+(%S+)")
+                if bname then seenBasenames[bname] = true end
+            end
+            local ok, files = pcall(function()
+                return VFS.DirList("LuaUI/Widgets/", "*.lua", VFS.RAW_FIRST)
+            end)
+            if ok and files then
+                for _, fpath in ipairs(files) do
+                    local bname = fpath:match("([^/\\\\]+)$")
+                    if bname and not seenBasenames[bname] then
+                        entries[#entries+1] = "failed|" .. esc(bname) .. "|||silent load failure||||||"
+                    end
+                end
+            end
         end
         return table.concat(entries, "\\n")
     `) ?? '');
@@ -1332,6 +1372,12 @@ self.onmessage = async (e: MessageEvent) => {
     switch (msg.type) {
         case 'init':
             try {
+                // Pre-load localStorage data into cache before init
+                if (msg.storageData) {
+                    for (const [k, v] of Object.entries(msg.storageData as Record<string, string>)) {
+                        storageCache[k] = v;
+                    }
+                }
                 await init(msg.canvas, msg.gameId, msg.lobbyUrl, msg.mapData);
             } catch (err) {
                 postLog(4, `Init failed: ${err}`);

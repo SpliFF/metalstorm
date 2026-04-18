@@ -113,12 +113,22 @@ export class LuaWidgetManager {
             mapSourceUrl: this.map.mapSourceUrl,
         };
 
+        // Collect all luaui:* localStorage entries so the worker can read config
+        const storageData: Record<string, string> = {};
+        for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k?.startsWith('luaui:')) {
+                storageData[k] = localStorage.getItem(k) ?? '';
+            }
+        }
+
         this.postToWorker({
             type: 'init',
             canvas: offscreen,
             gameId: this.options.gameId,
             lobbyUrl: this.options.lobbyUrl,
             mapData,
+            storageData,
         }, [offscreen, mapData.heightmap.buffer]);
 
         // 5. Setup keyboard forwarding + F9 widget list
