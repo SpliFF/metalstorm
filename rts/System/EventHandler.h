@@ -15,7 +15,6 @@ struct CExplosionParams;
 class CWeapon;
 struct Command;
 struct BuildInfo;
-class LuaMaterial;
 struct WeaponDef;
 
 class CEventHandler
@@ -72,17 +71,6 @@ class CEventHandler
 		void UnitDestroyed(const CUnit* unit, const CUnit* attacker, int weaponDefID);
 		void UnitTaken(const CUnit* unit, int oldTeam, int newTeam);
 		void UnitGiven(const CUnit* unit, int oldTeam, int newTeam);
-
-
-		//FIXME no events
-		void RenderUnitPreCreated(const CUnit* unit);
-		void RenderUnitCreated(const CUnit* unit, int cloaked);
-		void RenderUnitDestroyed(const CUnit* unit);
-		void RenderFeaturePreCreated(const CFeature* feature);
-		void RenderFeatureCreated(const CFeature* feature);
-		void RenderFeatureDestroyed(const CFeature* feature);
-		void RenderProjectileCreated(const CProjectile* proj);
-		void RenderProjectileDestroyed(const CProjectile* proj);
 
 		void UnitIdle(const CUnit* unit);
 		void UnitCommand(const CUnit* unit, const Command& command, int playerNum, bool fromSynced, bool fromLua);
@@ -236,12 +224,6 @@ class CEventHandler
 
 		void DefaultCommand(const CUnit* unit, const CFeature* feature, int& cmd);
 
-		void ActiveCommandChanged(const SCommandDescription *cmdDesc);
-		void CameraRotationChanged(const float3& rot);
-		void CameraPositionChanged(const float3& pos);
-		void MiniMapRotationChanged(const float newRot, const float oldRot);
-		void MiniMapStateChanged(const bool isMinimized, const bool isMaximized, const bool isSlaved);
-		void MiniMapGeometryChanged(const int2 newPos, const int2 newDim, const int2 oldPos, const int2 oldDim);
 		bool CommandNotify(const Command& cmd);
 
 		bool AddConsoleLine(const std::string& msg, const std::string& section, int level);
@@ -250,7 +232,6 @@ class CEventHandler
 
 		bool GroupChanged(int groupID);
 
-		void FontsChanged();
 		bool GameSetup(const std::string& state, bool& ready,
 		               const std::vector< std::pair<int, std::string> >& playerStates);
 		void DownloadQueued(int ID, const string& archiveName, const string& archiveType);
@@ -271,43 +252,6 @@ class CEventHandler
 		void SunChanged();
 
 		void ViewResize();
-
-		// see the DRAW_CALLIN macro for implementations
-		void DrawGenesis();
-		void DrawWorld();
-		void DrawWorldPreUnit();
-		void DrawPreDecals();
-		void DrawWorldPreParticles(bool drawAboveWater, bool drawBelowWater, bool drawReflection, bool drawRefraction);
-		void DrawWaterPost();
-		void DrawWorldShadow();
-		void DrawShadowPassTransparent();
-		void DrawWorldReflection();
-		void DrawWorldRefraction();
-		void DrawGroundPreForward();
-		void DrawGroundPostForward();
-		void DrawGroundPreDeferred();
-		void DrawGroundDeferred();
-		void DrawGroundPostDeferred();
-		void DrawUnitsPostDeferred();
-		void DrawFeaturesPostDeferred();
-		void DrawScreenPost();
-		void DrawScreenEffects();
-		void DrawScreen();
-		void DrawInMiniMap();
-		void DrawInMiniMapBackground();
-
-		bool DrawUnit(const CUnit* unit);
-		bool DrawFeature(const CFeature* feature);
-		bool DrawShield(const CUnit* unit, const CWeapon* weapon);
-		bool DrawProjectile(const CProjectile* projectile);
-		bool DrawMaterial(const LuaMaterial* material);
-
-		void DrawOpaqueUnitsLua(bool deferredPass, bool drawReflection, bool drawRefraction);
-		void DrawOpaqueFeaturesLua(bool deferredPass, bool drawReflection, bool drawRefraction);
-		void DrawAlphaUnitsLua(bool drawReflection, bool drawRefraction);
-		void DrawAlphaFeaturesLua(bool drawReflection, bool drawRefraction);
-		void DrawShadowUnitsLua();
-		void DrawShadowFeaturesLua();
 
 		/// @brief this UNSYNCED event is generated every GameServer::gameProgressFrameInterval
 		/// it skips network queuing and caching and can be used to calculate the current catchup
@@ -746,42 +690,6 @@ inline void CEventHandler::DefaultCommand(const CUnit* unit, const CFeature* fea
 
 		ec->DefaultCommand(unit, feature, cmd);
 	}
-}
-
-
-UNIT_CALLIN_NO_PARAM(RenderUnitPreCreated)
-
-inline void CEventHandler::RenderUnitCreated(const CUnit* unit, int cloaked)
-{
-	ITERATE_EVENTCLIENTLIST(RenderUnitCreated, unit, cloaked)
-}
-
-UNIT_CALLIN_NO_PARAM(RenderUnitDestroyed)
-
-inline void CEventHandler::RenderFeaturePreCreated(const CFeature* feature)
-{
-	ITERATE_EVENTCLIENTLIST(RenderFeaturePreCreated, feature)
-}
-
-inline void CEventHandler::RenderFeatureCreated(const CFeature* feature)
-{
-	ITERATE_EVENTCLIENTLIST(RenderFeatureCreated, feature)
-}
-
-inline void CEventHandler::RenderFeatureDestroyed(const CFeature* feature)
-{
-	ITERATE_EVENTCLIENTLIST(RenderFeatureDestroyed, feature)
-}
-
-
-inline void CEventHandler::RenderProjectileCreated(const CProjectile* proj)
-{
-	ITERATE_EVENTCLIENTLIST(RenderProjectileCreated, proj)
-}
-
-inline void CEventHandler::RenderProjectileDestroyed(const CProjectile* proj)
-{
-	ITERATE_EVENTCLIENTLIST(RenderProjectileDestroyed, proj)
 }
 
 

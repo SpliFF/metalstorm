@@ -239,7 +239,6 @@ bool CFeatureHandler::UpdateFeature(CFeature* feature)
 	if (feature->deleteMe) {
 		Sim::registry.destroy(feature->entityReference);
 
-		eventHandler.RenderFeatureDestroyed(feature);
 		eventHandler.FeatureDestroyed(feature);
 
 		deletedFeatureIDs.push_back(feature->id);

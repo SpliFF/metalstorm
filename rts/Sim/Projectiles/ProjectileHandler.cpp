@@ -211,15 +211,11 @@ void CProjectileHandler::CreateProjectile(CProjectile* p)
 
 	if (p->synced || PH_UNSYNCED_PROJECTILE_EVENTS == 1)
 		eventHandler.ProjectileCreated(p, p->GetAllyteamID());
-
-	eventHandler.RenderProjectileCreated(p);
 }
 
 void CProjectileHandler::DestroyProjectile(CProjectile* p)
 {
 	assert(!p->createMe);
-
-	eventHandler.RenderProjectileDestroyed(p);
 
 	if (p->synced) {
 		eventHandler.ProjectileDestroyed(p, p->GetAllyteamID());

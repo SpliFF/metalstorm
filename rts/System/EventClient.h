@@ -33,7 +33,6 @@ struct SRectangle;
 struct UnitDef;
 struct BuildInfo;
 struct FeatureDef;
-class LuaMaterial;
 struct WeaponDef;
 
 #ifndef zipFile
@@ -169,10 +168,6 @@ class CEventClient
 		virtual void UnitCloaked(const CUnit* unit) {}
 		virtual void UnitDecloaked(const CUnit* unit) {}
 
-		virtual void RenderUnitPreCreated(const CUnit* unit) {}
-		virtual void RenderUnitCreated(const CUnit* unit, int cloaked) {}
-		virtual void RenderUnitDestroyed(const CUnit* unit) {}
-
 		virtual bool UnitUnitCollision(const CUnit* collider, const CUnit* collidee) { return false; }
 		virtual bool UnitFeatureCollision(const CUnit* collider, const CFeature* collidee) { return false; }
 		virtual void UnitMoved(const CUnit* unit) {}
@@ -189,15 +184,8 @@ class CEventClient
 			int projectileID) {}
 		virtual void FeatureMoved(const CFeature* feature, const float3& oldpos) {}
 
-		virtual void RenderFeaturePreCreated(const CFeature* feature) {}
-		virtual void RenderFeatureCreated(const CFeature* feature) {}
-		virtual void RenderFeatureDestroyed(const CFeature* feature) {}
-
 		virtual void ProjectileCreated(const CProjectile* proj) {}
 		virtual void ProjectileDestroyed(const CProjectile* proj) {}
-
-		virtual void RenderProjectileCreated(const CProjectile* proj) {}
-		virtual void RenderProjectileDestroyed(const CProjectile* proj) {}
 
 		virtual void StockpileChanged(const CUnit* unit,
 		                              const CWeapon* weapon, int oldCount) {}
@@ -304,12 +292,6 @@ class CEventClient
 
 		virtual bool DefaultCommand(const CUnit* unit, const CFeature* feature, int& cmd);
 
-		virtual void ActiveCommandChanged(const SCommandDescription* cmdDesc);
-		virtual void CameraRotationChanged(const float3& rot);
-		virtual void CameraPositionChanged(const float3& pos);
-		virtual void MiniMapRotationChanged(const float newRot, const float oldRot);
-		virtual void MiniMapStateChanged(const bool isMinimized, const bool isMaximized, const bool isSlaved);
-		virtual void MiniMapGeometryChanged(const int2 newPos, const int2 newDim, const int2 oldPos, const int2 oldDim);
 		virtual bool CommandNotify(const Command& cmd);
 
 		virtual bool AddConsoleLine(const std::string& msg, const std::string& section, int level);
@@ -334,47 +316,10 @@ class CEventClient
 
 		virtual void ViewResize();
 
-		virtual void DrawGenesis() {}
-		virtual void DrawWorld() {}
-		virtual void DrawWorldPreUnit() {}
-		virtual void DrawPreDecals() {}
-		virtual void DrawWorldPreParticles(bool drawAboveWater, bool drawBelowWater, bool drawReflection, bool drawRefraction) {}
-		virtual void DrawWaterPost() {}
-		virtual void DrawWorldShadow() {}
-		virtual void DrawShadowPassTransparent() {}
-		virtual void DrawWorldReflection() {}
-		virtual void DrawWorldRefraction() {}
-		virtual void DrawGroundPreForward() {}
-		virtual void DrawGroundPostForward() {}
-		virtual void DrawGroundPreDeferred() {}
-		virtual void DrawGroundDeferred() {}
-		virtual void DrawGroundPostDeferred() {}
-		virtual void DrawUnitsPostDeferred() {}
-		virtual void DrawFeaturesPostDeferred() {}
-		virtual void DrawScreenEffects() {}
-		virtual void DrawScreenPost() {}
-		virtual void DrawScreen() {}
-		virtual void DrawInMiniMap() {}
-		virtual void DrawInMiniMapBackground() {}
-
-		virtual bool DrawUnit(const CUnit* unit) { return false; }
-		virtual bool DrawFeature(const CFeature* feature) { return false; }
-		virtual bool DrawShield(const CUnit* unit, const CWeapon* weapon) { return false; }
-		virtual bool DrawProjectile(const CProjectile* projectile) { return false; }
-		virtual bool DrawMaterial(const LuaMaterial* material) { return false; }
-
-		virtual void DrawOpaqueUnitsLua(bool deferredPass, bool drawReflection, bool drawRefraction) {}
-		virtual void DrawOpaqueFeaturesLua(bool deferredPass, bool drawReflection, bool drawRefraction) {}
-		virtual void DrawAlphaUnitsLua(bool drawReflection, bool drawRefraction) {}
-		virtual void DrawAlphaFeaturesLua(bool drawReflection, bool drawRefraction) {}
-		virtual void DrawShadowUnitsLua() {}
-		virtual void DrawShadowFeaturesLua() {}
-
-		virtual void FontsChanged() {}
+		// Draw/Render events migrated to JS client — see docs/client-events.md
 
 		virtual void GameProgress(int gameFrame);
 
-		virtual void DrawLoadScreen();
 		virtual void LoadProgress(const std::string& msg, const bool replace_lastline);
 
 		virtual void CollectGarbage(bool forced) {}

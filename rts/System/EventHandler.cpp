@@ -588,56 +588,6 @@ void CEventHandler::ViewResize()
 }
 
 
-// Draw callins removed — rendering is client-side; server is headless.
-#define DRAW_CALLIN(name) void CEventHandler:: Draw ## name () {}
-
-DRAW_CALLIN(Genesis)
-DRAW_CALLIN(Water)
-DRAW_CALLIN(Sky)
-DRAW_CALLIN(Sun)
-DRAW_CALLIN(Grass)
-DRAW_CALLIN(Trees)
-DRAW_CALLIN(World)
-DRAW_CALLIN(WorldPreUnit)
-DRAW_CALLIN(WorldPreParticles)
-DRAW_CALLIN(WorldShadow)
-DRAW_CALLIN(WorldReflection)
-DRAW_CALLIN(WorldRefraction)
-DRAW_CALLIN(GroundPreForward)
-DRAW_CALLIN(GroundPostForward)
-DRAW_CALLIN(GroundPreDeferred)
-DRAW_CALLIN(GroundPostDeferred)
-DRAW_CALLIN(UnitsPostDeferred)
-DRAW_CALLIN(FeaturesPostDeferred)
-DRAW_CALLIN(ScreenEffects)
-DRAW_CALLIN(ScreenPost)
-DRAW_CALLIN(Screen)
-DRAW_CALLIN(InMiniMap)
-DRAW_CALLIN(InMiniMapBackground)
-
-
-#define DRAW_ENTITY_CALLIN(name, args, args2)                                 \
-	bool CEventHandler:: Draw ## name args                                    \
-	{                                                                         \
-		bool skipEngineDrawing = false;                                       \
-                                                                              \
-		for (size_t i = 0; i < listDraw ## name.size(); ) {                   \
-			CEventClient* ec = listDraw ## name [i];                          \
-			skipEngineDrawing |= ec-> Draw ## name args2 ;                    \
-                                                                              \
-			i += (i < listDraw ## name.size() && ec == listDraw ## name [i]); \
-		}                                                                     \
-                                                                              \
-		return skipEngineDrawing;                                             \
-  }
-
-
-DRAW_ENTITY_CALLIN(Unit, (const CUnit* unit), (unit))
-DRAW_ENTITY_CALLIN(Feature, (const CFeature* feature), (feature))
-DRAW_ENTITY_CALLIN(Shield, (const CUnit* unit, const CWeapon* weapon), (unit, weapon))
-DRAW_ENTITY_CALLIN(Projectile, (const CProjectile* projectile), (projectile))
-DRAW_ENTITY_CALLIN(Material, (const LuaMaterial* material), (material))
-
 /******************************************************************************/
 /******************************************************************************/
 

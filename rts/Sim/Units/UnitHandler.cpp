@@ -264,8 +264,6 @@ void CUnitHandler::DeleteUnits()
 void CUnitHandler::DeleteUnit(CUnit* delUnit)
 {
 	assert(delUnit->isDead);
-	// we want to call RenderUnitDestroyed while the unit is still valid
-	eventHandler.RenderUnitDestroyed(delUnit);
 
 	const auto it = std::find(activeUnits.begin(), activeUnits.end(), delUnit);
 

@@ -92,7 +92,6 @@ CFeature::~CFeature()
 
 void CFeature::PostLoad()
 {
-	eventHandler.RenderFeatureCreated(this);
 }
 
 
@@ -231,7 +230,6 @@ void CFeature::Initialize(const FeatureLoadParams& params)
 	// allow Spring.SetFeatureBlocking to be called from gadget:FeatureCreated
 	// (callin sees the complete default state, but can change any part of it)
 	eventHandler.FeatureCreated(this);
-	eventHandler.RenderFeatureCreated(this);
 }
 
 

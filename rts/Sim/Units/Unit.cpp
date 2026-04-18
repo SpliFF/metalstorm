@@ -379,8 +379,6 @@ void CUnit::PostInit(const CUnit* builder)
 	// skip past the gradual build-progression
 	if (!preBeingBuilt && !beingBuilt)
 		FinishedBuilding(true);
-
-	eventHandler.RenderUnitCreated(this, isCloaked);
 }
 
 
@@ -388,8 +386,6 @@ void CUnit::PostLoad()
 {
 	if (unitDef->windGenerator > 0.0f)
 		envResHandler.AddGenerator(this);
-
-	eventHandler.RenderUnitCreated(this, isCloaked);
 }
 
 
