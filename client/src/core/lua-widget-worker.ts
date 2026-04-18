@@ -445,6 +445,31 @@ async function init(
         }
     }
 
+    // Patch control.lua: disable _all_dlist caching. Chili's Control:Draw
+    // checks _all_dlist first and short-circuits, skipping _own_dlist and
+    // DrawChildren. The _all_dlist is recorded during Update (before
+    // DrawScreen sets up projection/modelview), so the captured content
+    // renders in the wrong matrix context. Disabling it forces the
+    // individual _own_dlist + DrawChildren path which draws live each frame.
+    const controlPath = 'LuaUI/Widgets/chili_old/controls/control.lua';
+    const controlSrc = vfsLookup(controlPath);
+    if (controlSrc) {
+        // Disable _UpdateAllDList so _all_dlist is never created
+        let patched = controlSrc.replace(
+            'self:_UpdateAllDList()',
+            '-- self:_UpdateAllDList() -- disabled: web renderer draws live',
+        );
+        // Also disable _children_dlist creation
+        patched = patched.replace(
+            'self._children_dlist = gl.CreateList(self.DrawChildrenForList,self)',
+            '-- self._children_dlist = gl.CreateList(self.DrawChildrenForList,self) -- disabled',
+        );
+        if (patched !== controlSrc) {
+            vfsRegister(controlPath, patched);
+            postLog(2, '[LuaUI] Patched control.lua: disabled _all_dlist caching');
+        }
+    }
+
     postLog(2, '[LuaUI] init step 7/8: starting bootstrap (VFS.Include camain.lua)...');
     const bootStart = performance.now();
     const bootErr = runtime.doString(`
@@ -784,18 +809,24 @@ function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext): void {
             -- have had time to load (~3 seconds after init).
             if not _chiliTextureRebuildDone and _chiliFixTimer > 90 then
                 _chiliTextureRebuildDone = true
-                local function rebuildDlists(ctrl, depth)
+                -- Invalidate all controls so Chili fully rebuilds every
+                -- display list (_own_dlist, _all_dlist, _children_dlist).
+                -- Control:Draw short-circuits on _all_dlist, so just
+                -- rebuilding _own_dlist is not enough.
+                local function invalidateAll(ctrl, depth)
                     if depth > 10 then return end
-                    if ctrl._own_dlist and ctrl.DrawControl then
-                        gl.DeleteList(ctrl._own_dlist)
-                        ctrl._own_dlist = gl.CreateList(ctrl.DrawControl, ctrl)
-                    end
+                    -- Delete ALL cached display lists
+                    if ctrl._all_dlist then gl.DeleteList(ctrl._all_dlist); ctrl._all_dlist = nil end
+                    if ctrl._own_dlist then gl.DeleteList(ctrl._own_dlist); ctrl._own_dlist = nil end
+                    if ctrl._children_dlist then gl.DeleteList(ctrl._children_dlist); ctrl._children_dlist = nil end
+                    ctrl._needRedraw = true
+                    ctrl.__inUpdateQueue = false
                     for _, ch in ipairs(ctrl.children or {}) do
-                        if type(ch) == "table" then rebuildDlists(ch, depth + 1) end
+                        if type(ch) == "table" then invalidateAll(ch, depth + 1) end
                     end
                 end
-                pcall(rebuildDlists, s, 0)
-                Spring.Echo("[LuaUI] Rebuilt Chili display lists after texture load")
+                pcall(invalidateAll, s, 0)
+                Spring.Echo("[LuaUI] Invalidated all Chili display lists for texture rebuild")
             end
         end
 
