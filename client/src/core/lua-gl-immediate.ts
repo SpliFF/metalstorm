@@ -225,7 +225,22 @@ interface DisplayListTexBind {
     texture: WebGLTexture | null;
 }
 
-type DisplayListEntry = DisplayListDraw | DisplayListTexBind;
+interface DisplayListMatrixOp {
+    type: 'matrix';
+    op: 'push' | 'pop' | 'identity' | 'translate' | 'scale' | 'rotate' | 'load' | 'mult' | 'ortho' | 'billboard';
+    args?: number[];
+    matrix?: Float32Array;
+}
+
+interface DisplayListColorOp {
+    type: 'color';
+    r: number;
+    g: number;
+    b: number;
+    a: number;
+}
+
+type DisplayListEntry = DisplayListDraw | DisplayListTexBind | DisplayListMatrixOp | DisplayListColorOp;
 
 interface DisplayList {
     entries: DisplayListEntry[];
@@ -328,47 +343,74 @@ export class ImmediateModeRenderer {
 
     pushMatrix(): void {
         this.activeStack.push();
+        if (this.recordingList) {
+            this.recordingList.entries.push({ type: 'matrix', op: 'push' });
+        }
     }
 
     popMatrix(): void {
         this.activeStack.pop();
         this.mvpDirty = true;
+        if (this.recordingList) {
+            this.recordingList.entries.push({ type: 'matrix', op: 'pop' });
+        }
     }
 
     loadIdentity(): void {
         this.activeStack.loadIdentity();
         this.mvpDirty = true;
+        if (this.recordingList) {
+            this.recordingList.entries.push({ type: 'matrix', op: 'identity' });
+        }
     }
 
     loadMatrix(m: Float32Array): void {
         this.activeStack.loadMatrix(m);
         this.mvpDirty = true;
+        if (this.recordingList) {
+            this.recordingList.entries.push({ type: 'matrix', op: 'load', matrix: new Float32Array(m) });
+        }
     }
 
     translate(x: number, y: number, z: number): void {
         this.activeStack.translate(x, y, z);
         this.mvpDirty = true;
+        if (this.recordingList) {
+            this.recordingList.entries.push({ type: 'matrix', op: 'translate', args: [x, y, z] });
+        }
     }
 
     scale(x: number, y: number, z: number): void {
         this.activeStack.scale(x, y, z);
         this.mvpDirty = true;
+        if (this.recordingList) {
+            this.recordingList.entries.push({ type: 'matrix', op: 'scale', args: [x, y, z] });
+        }
     }
 
     rotate(angle: number, x: number, y: number, z: number): void {
         this.activeStack.rotate(angle, x, y, z);
         this.mvpDirty = true;
+        if (this.recordingList) {
+            this.recordingList.entries.push({ type: 'matrix', op: 'rotate', args: [angle, x, y, z] });
+        }
     }
 
     multMatrix(m: Float32Array): void {
         this.activeStack.multMatrix(m);
         this.mvpDirty = true;
+        if (this.recordingList) {
+            this.recordingList.entries.push({ type: 'matrix', op: 'mult', matrix: new Float32Array(m) });
+        }
     }
 
     ortho(left: number, right: number, bottom: number, top: number, near: number, far: number): void {
         const o = mat4Ortho(left, right, bottom, top, near, far);
         this.activeStack.multMatrix(o);
         this.mvpDirty = true;
+        if (this.recordingList) {
+            this.recordingList.entries.push({ type: 'matrix', op: 'ortho', args: [left, right, bottom, top, near, far] });
+        }
     }
 
     billboard(): void {
@@ -378,6 +420,9 @@ export class ImmediateModeRenderer {
         m[4] = 0; m[5] = 1; m[6] = 0;
         m[8] = 0; m[9] = 0; m[10] = 1;
         this.mvpDirty = true;
+        if (this.recordingList) {
+            this.recordingList.entries.push({ type: 'matrix', op: 'billboard' });
+        }
     }
 
     private computeMVP(): Float32Array {
@@ -399,6 +444,9 @@ export class ImmediateModeRenderer {
         this.curG = g;
         this.curB = b;
         this.curA = a;
+        if (this.recordingList) {
+            this.recordingList.entries.push({ type: 'color', r, g, b, a });
+        }
     }
 
     texCoord(s: number, t: number): void {
@@ -597,9 +645,35 @@ export class ImmediateModeRenderer {
     callList(id: number): void {
         const list = this.displayLists.get(id);
         if (!list) return;
+
+        // During recording: flatten the called list's entries into the parent list
+        if (this.recordingList) {
+            for (const entry of list.entries) {
+                this.recordingList.entries.push(entry);
+                // Also apply state changes so subsequent recording captures correct state
+                if (entry.type === 'matrix') {
+                    this.replayMatrixOp(entry);
+                } else if (entry.type === 'texBind') {
+                    if (entry.unit === 0) {
+                        this.isTextured = entry.texture !== null;
+                        this.currentBoundTexture = entry.texture;
+                    }
+                } else if (entry.type === 'color') {
+                    this.curR = entry.r;
+                    this.curG = entry.g;
+                    this.curB = entry.b;
+                    this.curA = entry.a;
+                } else if (entry.type === 'draw') {
+                    this.isTextured = entry.textured;
+                    this.currentBoundTexture = entry.boundTexture;
+                }
+            }
+            return;
+        }
+
+        // Normal replay: execute entries
         for (const entry of list.entries) {
             if (entry.type === 'texBind') {
-                // Replay texture bind — persists after callList returns
                 const gl = this.gl;
                 gl.activeTexture(gl.TEXTURE0 + entry.unit);
                 if (entry.texture) {
@@ -612,22 +686,66 @@ export class ImmediateModeRenderer {
                     this.currentBoundTexture = entry.texture;
                 }
                 gl.activeTexture(gl.TEXTURE0);
+            } else if (entry.type === 'matrix') {
+                this.replayMatrixOp(entry);
+            } else if (entry.type === 'color') {
+                this.curR = entry.r;
+                this.curG = entry.g;
+                this.curB = entry.b;
+                this.curA = entry.a;
             } else {
-                // Draw call — temporarily set texture state for this draw
+                // Draw call — set texture state for this draw
                 this.vertices.set(entry.vertexData);
-                const savedTextured = this.isTextured;
-                const savedTex = this.currentBoundTexture;
                 this.isTextured = entry.textured;
                 this.currentBoundTexture = entry.boundTexture;
                 this.flush(entry.mode, entry.vertexCount);
-                this.isTextured = savedTextured;
-                this.currentBoundTexture = savedTex;
+            }
+        }
+    }
+
+    /** Replay a matrix operation (shared between callList and recording). */
+    private replayMatrixOp(entry: DisplayListMatrixOp): void {
+        switch (entry.op) {
+            case 'push': this.activeStack.push(); break;
+            case 'pop': this.activeStack.pop(); this.mvpDirty = true; break;
+            case 'identity': this.activeStack.loadIdentity(); this.mvpDirty = true; break;
+            case 'translate': this.activeStack.translate(entry.args![0], entry.args![1], entry.args![2]); this.mvpDirty = true; break;
+            case 'scale': this.activeStack.scale(entry.args![0], entry.args![1], entry.args![2]); this.mvpDirty = true; break;
+            case 'rotate': this.activeStack.rotate(entry.args![0], entry.args![1], entry.args![2], entry.args![3]); this.mvpDirty = true; break;
+            case 'load': this.activeStack.loadMatrix(entry.matrix!); this.mvpDirty = true; break;
+            case 'mult': this.activeStack.multMatrix(entry.matrix!); this.mvpDirty = true; break;
+            case 'ortho': {
+                const a = entry.args!;
+                const o = mat4Ortho(a[0], a[1], a[2], a[3], a[4], a[5]);
+                this.activeStack.multMatrix(o);
+                this.mvpDirty = true;
+                break;
+            }
+            case 'billboard': {
+                const m = this.modelviewStack.current;
+                m[0] = 1; m[1] = 0; m[2] = 0;
+                m[4] = 0; m[5] = 1; m[6] = 0;
+                m[8] = 0; m[9] = 0; m[10] = 1;
+                this.mvpDirty = true;
+                break;
             }
         }
     }
 
     deleteList(id: number): void {
         this.displayLists.delete(id);
+    }
+
+    /** Debug: inspect display list contents. Returns entry type summary. */
+    inspectList(id: number): string {
+        const list = this.displayLists.get(id);
+        if (!list) return `list ${id} not found`;
+        const summary: Record<string, number> = {};
+        for (const entry of list.entries) {
+            const key = entry.type === 'matrix' ? `matrix:${entry.op}` : entry.type;
+            summary[key] = (summary[key] || 0) + 1;
+        }
+        return JSON.stringify(summary);
     }
 
     // ── Flush to WebGL ──────────────────────────────────────────────────
@@ -648,7 +766,12 @@ export class ImmediateModeRenderer {
         // Texture state
         gl.uniform1i(this.uTextured, this.isTextured ? 1 : 0);
         gl.uniform1i(this.uTex, 0); // texture unit 0
+        if (this.isTextured && this.currentBoundTexture) {
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, this.currentBoundTexture);
+        }
         gl.uniform1f(this.uAlphaThreshold, this.alphaThreshold);
+
 
         // Upload vertex data
         gl.bindVertexArray(this.vao);

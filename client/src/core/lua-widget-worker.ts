@@ -521,6 +521,28 @@ async function init(
     `, 'shutdown_guard_apply');
     postLog(2, '[LuaUI] init done: shutdown recursion guard applied');
 
+    // Post-bootstrap API patches: ZK's bootstrap replaces Spring.Utilities
+    // with its own table, so any pre-bootstrap additions are lost. Add
+    // missing stubs that ZK widgets expect but ZK's own utilities don't provide.
+    runtime.doString(`
+        if Spring.Utilities then
+            Spring.Utilities.GetHumanName = Spring.Utilities.GetHumanName or function(ud)
+                if type(ud) == "table" and ud.humanName then return ud.humanName end
+                if type(ud) == "table" and ud.name then return ud.name end
+                return tostring(ud or "")
+            end
+            Spring.Utilities.bit_inv = Spring.Utilities.bit_inv or function(x)
+                return bit32 and bit32.bnot(x) or (~x)
+            end
+        end
+        if not Spring.Translate then
+            Spring.Translate = function(key) return tostring(key or "") end
+        end
+        if not Spring.GetHumanName then
+            Spring.GetHumanName = function(defName) return tostring(defName or "") end
+        end
+    `, 'post_bootstrap_api_stubs');
+
     // Fix Chili TaskHandler queue desync: fengari's weak table GC
     // collects entries from the TaskHandler's objects/objects2 queues
     // before Update() processes them. This causes controls to be stuck
@@ -725,6 +747,19 @@ function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext): void {
         if WG and WG.Chili and WG.Chili.Screen0 then
             _chiliFixTimer = (_chiliFixTimer or 0) + 1
             if _chiliFixTimer % 30 == 1 then  -- every ~1 second at 30fps
+                local s = WG.Chili.Screen0
+
+                -- Fix orphaned controls: AddChild sometimes fails to set
+                -- parent (fengari table identity issue). Without parent,
+                -- IsInView() returns false and Update() skips dlist creation.
+                for _, c in ipairs(s.children or {}) do
+                    if type(c) == "table" and c.parent == nil then
+                        c.parent = s
+                        c._needRedraw = true
+                        c.__inUpdateQueue = false
+                    end
+                end
+
                 local function fixTree(ctrl, depth)
                     if depth > 10 then return end
                     if ctrl._needRedraw and ctrl.visible and not ctrl._own_dlist
@@ -738,15 +773,41 @@ function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext): void {
                         end
                     end
                 end
-                pcall(fixTree, WG.Chili.Screen0, 0)
+                pcall(fixTree, s, 0)
+            end
+
+            -- Rebuild display lists after async texture loads complete.
+            -- Skin textures load asynchronously but gl.TextureInfo returns
+            -- placeholder dimensions (1x1) at first recording. The 9-slice
+            -- UV math uses texWidth/texHeight, so stale dimensions produce
+            -- wildly wrong UVs. We do a one-time full rebuild after textures
+            -- have had time to load (~3 seconds after init).
+            if not _chiliTextureRebuildDone and _chiliFixTimer > 90 then
+                _chiliTextureRebuildDone = true
+                local function rebuildDlists(ctrl, depth)
+                    if depth > 10 then return end
+                    if ctrl._own_dlist and ctrl.DrawControl then
+                        gl.DeleteList(ctrl._own_dlist)
+                        ctrl._own_dlist = gl.CreateList(ctrl.DrawControl, ctrl)
+                    end
+                    for _, ch in ipairs(ctrl.children or {}) do
+                        if type(ch) == "table" then rebuildDlists(ch, depth + 1) end
+                    end
+                end
+                pcall(rebuildDlists, s, 0)
+                Spring.Echo("[LuaUI] Rebuilt Chili display lists after texture load")
             end
         end
 
         if DrawScreen then
             local vsx, vsy = Spring.GetViewSizes()
+            -- Spring's DrawScreen uses Y-up ortho (y=0 at bottom).
+            -- Chili internally does Translate(0,vsy,0)+Scale(1,-1,1) to
+            -- flip to its Y-down coordinate system. Using the wrong ortho
+            -- causes a double-flip that inverts textures and positions.
             gl.MatrixMode(GL.PROJECTION)
             gl.LoadIdentity()
-            gl.Ortho(0, vsx, vsy, 0, -1, 1)
+            gl.Ortho(0, vsx, 0, vsy, -1, 1)
             gl.MatrixMode(GL.MODELVIEW)
             gl.LoadIdentity()
             pcall(DrawScreen, vsx, vsy)
@@ -779,12 +840,32 @@ function installEngineGlobals(
             postLog(level, msg);
         };
 
+    // Spring.Translate — i18n stub that returns the key.
+    // Must be set BEFORE setGlobal — the Lua table is a snapshot of the JS
+    // object at push time; later JS mutations are not reflected.
+    (springGlobals.Spring as Record<string, LuaValue>).Translate = (key: LuaValue) => String(key ?? '');
+    (springGlobals.Spring as Record<string, LuaValue>).GetHumanName = (defName: LuaValue) => String(defName ?? '');
+
+    // Spring.Utilities — stub table; Lua-side code below adds CopyTable etc.
+    (springGlobals.Spring as Record<string, LuaValue>).Utilities = {};
+
     // Install all globals except VFS (set up separately in Lua)
     for (const [k, v] of Object.entries(springGlobals)) {
         if (k === 'VFS') continue;
         rt.setGlobal(k, v);
     }
     rt.setGlobal('gl', glGlobal);
+
+    // gl.Utilities — table of helper draw functions used by some ZK widgets
+    // (e.g. cmd_factory_plate_placer uses gl.Utilities.DrawCircle).
+    // Must be set before the fallback metatable, which would auto-stub it
+    // as a plain function.
+    rt.doString(`
+        gl.Utilities = {
+            DrawCircle = function() end,
+            DrawGroundCircle = function() end,
+        }
+    `, 'gl_utilities');
 
     // gl fallback metatable
     rt.doString(`
@@ -862,13 +943,6 @@ function installEngineGlobals(
         numCompressedTexFormats: 0,
     });
 
-    // Spring.Utilities — used by some ZK widgets for json, copyTable, etc.
-    (springGlobals.Spring as Record<string, LuaValue>).Utilities = {};
-
-    // Spring.Translate — i18n stub that returns the key
-    (springGlobals.Spring as Record<string, LuaValue>).Translate = (key: LuaValue) => String(key ?? '');
-    (springGlobals.Spring as Record<string, LuaValue>).GetHumanName = (defName: LuaValue) => String(defName ?? '');
-
     rt.setGlobal('UnitDefs', {});
     rt.setGlobal('UnitDefNames', {});
     rt.setGlobal('WeaponDefs', {});
@@ -909,6 +983,26 @@ function installEngineGlobals(
         end
         Spring.Utilities.json = { encode = function() return "{}" end, decode = function() return {} end }
         Spring.Utilities.TableToString = function(t) return tostring(t) end
+
+        -- Ensure Spring.Translate and GetHumanName are in the Lua table.
+        -- The JS-side assignment covers the initial push, but widgets that
+        -- snapshot Spring before this doString runs would miss them.
+        if not Spring.Translate then
+            Spring.Translate = function(key) return tostring(key or "") end
+        end
+        if not Spring.GetHumanName then
+            Spring.GetHumanName = function(defName) return tostring(defName or "") end
+        end
+        -- Spring.Utilities.GetHumanName — some ZK widgets call this path
+        Spring.Utilities.GetHumanName = Spring.Utilities.GetHumanName or function(ud)
+            if type(ud) == "table" and ud.humanName then return ud.humanName end
+            if type(ud) == "table" and ud.name then return ud.name end
+            return tostring(ud or "")
+        end
+        -- Bit operation helpers used by some ZK widgets
+        Spring.Utilities.bit_inv = Spring.Utilities.bit_inv or function(x)
+            return bit32 and bit32.bnot(x) or (~x)
+        end
     `, 'spring_utilities');
 
     rt.setGlobal('os', {

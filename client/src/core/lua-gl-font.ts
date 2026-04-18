@@ -499,6 +499,15 @@ function renderString(
     scale: number,
     color: number[],
 ): void {
+    // Chili applies Scale(1,-1,1) to the modelview, which flips glyph quads
+    // upside-down. We locally un-flip Y around the text baseline position:
+    // translate to (x,y), scale Y by -1 to undo the parent flip, then draw
+    // glyphs at local coords (0,0)+. This keeps the position correct while
+    // rendering text right-side-up.
+    imm.pushMatrix();
+    imm.translate(x, y, 0);
+    imm.scale(1, -1, 1);
+
     // Bind atlas texture
     const savedTex = gl.getParameter(gl.TEXTURE_BINDING_2D);
     gl.activeTexture(gl.TEXTURE0);
@@ -509,15 +518,17 @@ function renderString(
 
     const invW = 1 / ATLAS_SIZE;
     const invH = 1 / ATLAS_SIZE;
-    let cursorX = x;
+    // Use local coordinates (0-based) since we translated to (x,y) above
+    let cursorX = 0;
+    let localY = 0;
 
     for (let i = 0; i < text.length; i++) {
         const ch = text[i];
 
         // Handle newlines
         if (ch === '\n') {
-            cursorX = x;
-            y += atlas.lineheight * atlas.fontSize * scale;
+            cursorX = 0;
+            localY += atlas.lineheight * atlas.fontSize * scale;
             continue;
         }
 
@@ -533,9 +544,9 @@ function renderString(
 
         const glyph = atlas.getGlyph(ch);
         if (glyph.w > 0 && glyph.h > 0) {
-            // Quad corners in screen space
+            // Quad corners in local space (translate already applied)
             const qx = cursorX + glyph.bearingX * scale;
-            const qy = y + (atlas.lineheight * atlas.fontSize - glyph.bearingY) * scale
+            const qy = localY + (atlas.lineheight * atlas.fontSize - glyph.bearingY) * scale
                 - GLYPH_PAD * scale;
             const qw = glyph.w * scale;
             const qh = glyph.h * scale;
@@ -559,6 +570,9 @@ function renderString(
 
     // Restore previous texture binding
     gl.bindTexture(gl.TEXTURE_2D, savedTex);
+
+    // Restore modelview (undo the loadIdentity we did at the top)
+    imm.popMatrix();
 }
 
 // ── Font name mapping ───────────────────────────────────────────────────

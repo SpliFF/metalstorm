@@ -260,6 +260,8 @@ export class LuaGLBridge {
         // Recording API used by Lua-side gl.CreateList wrapper
         gl['_startRecording'] = () => this.imm.startRecording();
         gl['_stopRecording'] = () => this.imm.stopRecording();
+        gl['_isRecording'] = () => this.imm.isRecording();
+        gl['_inspectList'] = (id: LuaValue) => this.imm.inspectList(Number(id));
         gl['CallList'] = (id: LuaValue) => {
             this.imm.callList(Number(id));
             // Sync bridge texture tracking — display lists may have changed

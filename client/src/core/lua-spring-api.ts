@@ -250,6 +250,8 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         gameVersion: '1.0',
         mapName: '',
         mapHumanName: '',
+        // Armor types — indexed array; widgets use this to build damage tables
+        armorTypes: { 0: 'default' },
     };
 
     // --- VFS mode constants ---
