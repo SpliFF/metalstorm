@@ -256,7 +256,7 @@ private:
     /// Get the root paths that match the given mode string.
     /// If modes is empty, returns all roots (backwards compat).
     ///
-    /// Base roots (data/engine/) are always appended as a fallback,
+    /// Base roots (cont/base/springcontent/) are always appended as a fallback,
     /// mirroring original Spring where springcontent.sdz was an
     /// implicit dependency of every game.
     static std::vector<std::string> GetRootsForModes(const std::string& modes) {

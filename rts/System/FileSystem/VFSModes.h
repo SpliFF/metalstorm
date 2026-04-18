@@ -4,7 +4,7 @@
  * Each character in a mode string maps to a root category:
  *   'm' (MOD/GAME) → game content directory
  *   'a' (MAP)      → map content directory
- *   's' (BASE)     → engine base content (data/engine)
+ *   's' (BASE)     → engine base content (cont/base/springcontent)
  *   'r' (RAW)      → all content roots
  *   'z' (ZIP)      → same as MOD (archives are pre-extracted)
  *   'e' (MENU)     → same as MOD (no separate menu content)
@@ -38,7 +38,7 @@ static constexpr char SPRING_VFS_ALL[]       = "rmasez";
 enum class RootCategory {
     Mod,   // Game/mod content (game dir, processed models)
     Map,   // Map content (map dir, processed features)
-    Base,  // Engine base content (data/engine)
+    Base,  // Engine base content (cont/base/springcontent)
     Raw,   // Uncategorized / fallback (cwd, etc.)
 };
 
