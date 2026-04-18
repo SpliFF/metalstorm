@@ -5,7 +5,7 @@
 #include <cassert>
 #include <limits>
 
-#include "lib/streflop/streflop_cond.h"
+#include "System/SpringMathCompat.h"
 
 #include "Node.h"
 #include "NodeLayer.h"
