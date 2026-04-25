@@ -98,22 +98,39 @@ export class GlyphAtlas {
         const family = mapFontFamily(fontFamily);
         const cssSize = Math.max(8, Math.round(fontSize));
 
-        // Include outline width in the rendering size so outlines don't clip
-        const renderSize = cssSize + outlineWidth * 2;
+        // Rasterize at the requested size — outlines are drawn at render
+        // time via offset passes (see Print's drawOutline branch), not
+        // baked into the glyph bitmap. Inflating the atlas size by the
+        // outline width would oversize every glyph quad by ~30% (size 20
+        // outlineW 3 → glyphs occupy 32 px line cells instead of 22),
+        // breaking Chili layouts that assume the natural font lineheight.
+        const renderSize = cssSize;
         this.cssFont = `${renderSize}px ${family}`;
 
         // Create offscreen canvas for glyph rasterization
         this.canvas = new OffscreenCanvas(this.atlasWidth, this.atlasHeight);
         this.ctx = this.canvas.getContext('2d', { willReadFrequently: true })!;
 
-        // Measure font metrics
+        // Measure font metrics. Glyph quads in the atlas are sized to
+        // (ascent + descent + 2*GLYPH_PAD), and ascent/descent are measured
+        // at renderSize (which includes the outline expansion). So the
+        // *quad* height is bigger than `cssSize`. Lineheight has to include
+        // both the outline expansion (already in the measured ascent/descent)
+        // AND the atlas padding, otherwise wrapped lines stack with the
+        // glyph quads overlapping into the next line. Without the +2*PAD
+        // term, a size=20 outlineWidth=3 font has glyph quads ≈32px tall
+        // but lineheight only ≈28px — wrapped lines overlap by ~4px.
         this.ctx.font = this.cssFont;
         this.ctx.textBaseline = 'alphabetic';
         const metrics = this.ctx.measureText('Hg|ÅÖ');
         const ascent = metrics.actualBoundingBoxAscent ?? cssSize * 0.8;
         const descent = metrics.actualBoundingBoxDescent ?? cssSize * 0.2;
-        this.lineheight = (ascent + descent) / cssSize;
+        this.lineheight = (ascent + descent + GLYPH_PAD * 2) / cssSize;
         this.descender = -descent / cssSize;
+        console.log(`[font] ${family} cssSize=${cssSize} renderSize=${renderSize} `
+            + `outlineW=${outlineWidth} ascent=${ascent.toFixed(1)} `
+            + `descent=${descent.toFixed(1)} → lineheight=${this.lineheight.toFixed(3)} `
+            + `(spacing=${(this.lineheight * cssSize).toFixed(1)}px)`);
 
         // Create WebGL texture
         this.texture = gl.createTexture()!;
