@@ -591,6 +591,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         onGameInfo(frame, speed, paused, wind) {
             currentWidgetManager?.forwardGameInfo(frame, speed, paused, false, wind);
         },
+        onUnitCommandQueues(queues) {
+            currentWidgetManager?.forwardUnitCommandQueues(queues);
+        },
         onGameOver(frame) {
             showGameOver(frame);
             currentWidgetManager?.forwardGameInfo(frame, 0, true, true);

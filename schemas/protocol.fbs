@@ -748,6 +748,42 @@ table MapData {
     widgets: [string];
 }
 
+/// One queued order for a unit. Mirrors Spring's Command struct.
+/// `cmd_id` follows Spring conventions: positive values are CMD_*
+/// constants (CMD_MOVE=10, CMD_ATTACK=20, …), negative values are
+/// build orders where `-cmd_id` is the unit-def id to construct.
+table UnitOrder {
+    cmd_id: int32;
+    /// Variable-length param vector. Common shapes:
+    ///   move/attack:   [x, y, z]
+    ///   target unit:   [unitId]
+    ///   build:         [x, y, z, facing]
+    ///   patrol/area:   [x, y, z, radius]
+    params: [float];
+    /// Bitfield: shift / alt / ctrl / right-mouse / internal-order.
+    options: uint8;
+    /// Unique tag assigned by the queue; used to address specific
+    /// orders for editing / removal.
+    tag: uint32;
+    /// Frame this order auto-cancels at (INT_MAX = no timeout). The
+    /// server emits the absolute frame to keep the client wire-format
+    /// stateless across sim resyncs.
+    timeout: int32 = 2147483647;
+}
+
+table UnitCommandQueue {
+    unit_id: uint32;
+    orders: [UnitOrder];
+}
+
+/// Per-session broadcast: every own-team unit's current order queue.
+/// Sent at low cadence (~1 Hz) — queues change far slower than entity
+/// state, and most units have queue size 0..3. The client treats each
+/// snapshot as a complete replacement of its queue cache.
+table UnitCommandQueuesUpdate {
+    queues: [UnitCommandQueue];
+}
+
 // Union of all server→client message types
 union ServerPayload {
     AuthResponse,
@@ -775,6 +811,7 @@ union ServerPayload {
     ConsoleResponse,
     GameStarted,
     GameRestarting,
+    UnitCommandQueuesUpdate,
 }
 
 table ServerMessage {

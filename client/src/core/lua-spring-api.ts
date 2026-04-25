@@ -161,6 +161,18 @@ export interface LiveState {
     /** Current wind vector (elmos/sec) + magnitude + tidal multiplier.
      *  Refreshed every GameInfo broadcast (~1 Hz). */
     wind: { x: number; y: number; z: number; strength: number; tidal: number };
+    /** Per-unit order queue, keyed by unit id. Server broadcasts a full
+     *  snapshot at ~1 Hz; absence of a unit means an empty queue. */
+    unitCommands: Map<number, UnitOrder[]>;
+}
+
+/** One queued order — mirrors Spring's Command struct. */
+export interface UnitOrder {
+    cmdId: number;
+    params: number[];
+    options: number;
+    tag: number;
+    timeout: number;
 }
 
 /** Per-feature entry. */
@@ -187,6 +199,27 @@ export function normaliseSpringPath(path: string): string {
     // Strip any leading slash.
     if (p.startsWith('/')) p = p.substring(1);
     return p;
+}
+
+/** Convert a worker-side order queue into the array Spring widgets
+ *  expect: each entry is a keyed table with id/params/options/tag/timeout.
+ *  `count` optionally caps the number of orders returned (default: all). */
+function ordersToLuaArray(orders: UnitOrder[] | undefined, count?: LuaValue): LuaValue {
+    if (!orders) return luaTable();
+    const cap = count != null ? Number(count) : orders.length;
+    const limit = Math.max(0, Math.min(orders.length, cap));
+    const result: Array<Record<string, LuaValue>> = [];
+    for (let i = 0; i < limit; i++) {
+        const o = orders[i];
+        result.push({
+            id: o.cmdId,
+            params: [...o.params],
+            options: o.options,
+            tag: o.tag,
+            timeout: o.timeout,
+        });
+    }
+    return result;
 }
 
 /** Deterministic fallback palette when no per-team colour is known.
@@ -252,6 +285,7 @@ export function createDefaultLiveState(): LiveState {
         groups: new Map(),
         markers: [],
         wind: { x: 0, y: 0, z: 0, strength: 0, tidal: 0 },
+        unitCommands: new Map(),
     };
 }
 
@@ -1007,10 +1041,36 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         GiveOrderToUnit: () => {},
         GiveOrderToUnitArray: () => {},
         GiveOrder: () => {},
-        GetUnitCommands: () => luaTable(),
-        GetFactoryCommands: () => luaTable(),
-        GetCommandQueue: () => luaTable(),
-        GetFullBuildQueue: () => luaTable(),
+        // Order queue readers — all backed by ls.unitCommands. Spring
+        // returns an array of {id, params, options, tag} tables; we
+        // include `timeout` too (zero-cost extra info).
+        GetUnitCommands: (unitId: LuaValue, count: LuaValue) => {
+            return ordersToLuaArray(ls.unitCommands.get(Number(unitId)), count);
+        },
+        // Factory commands are stored in the same queue as regular
+        // orders for our wire format; the engine separates them
+        // internally but widgets read them through the same shape.
+        GetFactoryCommands: (unitId: LuaValue, count: LuaValue) => {
+            return ordersToLuaArray(ls.unitCommands.get(Number(unitId)), count);
+        },
+        GetCommandQueue: (unitId: LuaValue, count: LuaValue) => {
+            return ordersToLuaArray(ls.unitCommands.get(Number(unitId)), count);
+        },
+        GetFullBuildQueue: (unitId: LuaValue) => {
+            // Spring returns: { [defId] = count, ... } summarising the
+            // build orders queued on a factory.
+            const orders = ls.unitCommands.get(Number(unitId));
+            const out: Record<number, number> = {};
+            if (orders) {
+                for (const o of orders) {
+                    if (o.cmdId < 0) {
+                        const defId = -o.cmdId;
+                        out[defId] = (out[defId] ?? 0) + 1;
+                    }
+                }
+            }
+            return out;
+        },
         SelectUnitArray: () => {},
         SetUnitGroup: (unitId: LuaValue, groupId: LuaValue) => {
             const uid = Number(unitId);
@@ -1194,8 +1254,17 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             return u ? u.healthRatio < 1 : null;
         },
         GetUnitCmdDescs: () => luaTable(),
-        GetUnitCommandCount: () => 0,
-        GetUnitCurrentCommand: () => null,
+        GetUnitCommandCount: (unitId: LuaValue) => {
+            return ls.unitCommands.get(Number(unitId))?.length ?? 0;
+        },
+        GetUnitCurrentCommand: (unitId: LuaValue) => {
+            // Spring returns id, options, tag, params... as multiple values.
+            // The current command is the front of the queue.
+            const orders = ls.unitCommands.get(Number(unitId));
+            const o = orders?.[0];
+            if (!o) return null;
+            return [o.cmdId, o.options, o.tag, ...o.params];
+        },
         GetUnitGroup: (unitId: LuaValue) => {
             const uid = Number(unitId);
             for (const [gid, bucket] of ls.groups) {

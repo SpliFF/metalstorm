@@ -1775,7 +1775,26 @@ self.onmessage = async (e: MessageEvent) => {
         case 'entityDestroy':
             liveState.units.delete(msg.entityId as number);
             liveState.unitRulesParams.delete(msg.entityId as number);
+            liveState.unitCommands.delete(msg.entityId as number);
             break;
+
+        case 'unitCommandQueues': {
+            // Snapshot replacement: clear stale queues, install fresh ones.
+            // Units not present in the snapshot are treated as empty.
+            const queues = msg.queues as Array<{
+                unitId: number;
+                orders: Array<{ cmdId: number; params: number[]; options: number; tag: number; timeout: number }>;
+            }> | undefined;
+            if (!queues) break;
+            liveState.unitCommands.clear();
+            for (const q of queues) {
+                liveState.unitCommands.set(q.unitId, q.orders.map(o => ({
+                    cmdId: o.cmdId, params: [...o.params],
+                    options: o.options, tag: o.tag, timeout: o.timeout,
+                })));
+            }
+            break;
+        }
 
         case 'unitDefsUpdate': {
             const defs = msg.defs as MinimalUnitDefWire[] | undefined;

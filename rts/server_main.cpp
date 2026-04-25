@@ -1338,6 +1338,24 @@ int main(int argc, char* argv[])
         }
         }
 
+        // Broadcast per-team unit command queues every 30 ticks (~1s).
+        // Queues change far slower than entity state, so a low cadence
+        // is fine; widgets that read GetUnitCommands tolerate the
+        // occasional stale frame. Each session only receives queues
+        // for its own team.
+        {
+        int curFrame = sim.GetFrameNum();
+        if (curFrame >= 0 && (curFrame % 30) == 0 && rtcServer.GetClientCount() > 0) {
+            sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+                if (session.team < 0) return;
+                const auto& teamUnits = unitHandler.GetUnitsByTeam(session.team);
+                if (teamUnits.empty()) return;
+                auto msg = Protocol::BuildUnitCommandQueues(teamUnits);
+                rtcServer.SendReliable(clientId, msg.data(), msg.size());
+            });
+        }
+        }
+
         // Broadcast periodic GameInfo every 30 ticks (~1s)
         {
         int curFrame = sim.GetFrameNum();

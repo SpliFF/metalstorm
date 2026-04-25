@@ -32,6 +32,9 @@ import { GameUnitDef } from '../protocol/spring-web/game-unit-def.js';
 import { PlayerLeft } from '../protocol/spring-web/player-left.js';
 import { GameWeaponDefs } from '../protocol/spring-web/game-weapon-defs.js';
 import { GameWeaponDef } from '../protocol/spring-web/game-weapon-def.js';
+import { UnitCommandQueuesUpdate } from '../protocol/spring-web/unit-command-queues-update.js';
+import { UnitCommandQueue } from '../protocol/spring-web/unit-command-queue.js';
+import { UnitOrder } from '../protocol/spring-web/unit-order.js';
 import { AuthRequest } from '../protocol/spring-web/auth-request.js';
 import { AuthResponse } from '../protocol/spring-web/auth-response.js';
 import { AuthStatus } from '../protocol/spring-web/auth-status.js';
@@ -64,6 +67,19 @@ export interface UnitDefInfo {
     textureUrl: string;
 }
 
+export interface UnitOrderInfo {
+    cmdId: number;
+    params: number[];
+    options: number;
+    tag: number;
+    timeout: number;
+}
+
+export interface UnitCommandQueueInfo {
+    unitId: number;
+    orders: UnitOrderInfo[];
+}
+
 export interface WeaponDefInfo {
     defId: number;
     name: string;
@@ -93,6 +109,7 @@ export interface ConnectionEvents {
     onMapData?: (map: ParsedMapData) => void;
     onUnitDefs?: (defs: UnitDefInfo[]) => void;
     onWeaponDefs?: (defs: WeaponDefInfo[]) => void;
+    onUnitCommandQueues?: (queues: UnitCommandQueueInfo[]) => void;
     onProjectileState?: (snapshot: ProjectileStateSnapshot) => void;
     onResourceUpdate?: (team: number, metal: number, maxMetal: number, energy: number, maxEnergy: number, metalIncome: number, energyIncome: number) => void;
     onGameInfo?: (frame: number, speed: number, paused: boolean,
@@ -572,6 +589,31 @@ export class Connection {
                 }
                 console.log(`[connection] received ${defs.length} weapon def(s)`);
                 this.events.onWeaponDefs?.(defs);
+                break;
+            }
+            case ServerPayload.UnitCommandQueuesUpdate: {
+                const fbUpd = msg.payload(new UnitCommandQueuesUpdate()) as UnitCommandQueuesUpdate;
+                const queues: UnitCommandQueueInfo[] = [];
+                for (let qi = 0; qi < fbUpd.queuesLength(); qi++) {
+                    const q = fbUpd.queues(qi, new UnitCommandQueue());
+                    if (!q) continue;
+                    const orders: UnitOrderInfo[] = [];
+                    for (let oi = 0; oi < q.ordersLength(); oi++) {
+                        const o = q.orders(oi, new UnitOrder());
+                        if (!o) continue;
+                        const params: number[] = [];
+                        for (let pi = 0; pi < o.paramsLength(); pi++) params.push(o.params(pi) ?? 0);
+                        orders.push({
+                            cmdId: o.cmdId(),
+                            params,
+                            options: o.options(),
+                            tag: o.tag(),
+                            timeout: o.timeout(),
+                        });
+                    }
+                    queues.push({ unitId: q.unitId(), orders });
+                }
+                this.events.onUnitCommandQueues?.(queues);
                 break;
             }
             case ServerPayload.GameRestarting:

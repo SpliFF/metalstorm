@@ -12,6 +12,10 @@
 #include "RoomManager.h"
 #include "MapMetadata.h"
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectileTypes.h"
+#include "Sim/Units/Unit.h"
+#include "Sim/Units/CommandAI/CommandAI.h"
+#include "Sim/Units/CommandAI/Command.h"
+#include "Sim/Units/CommandAI/CommandQueue.h"
 #include <flatbuffers/flatbuffers.h>
 #include <cstdint>
 #include <filesystem>
@@ -173,6 +177,56 @@ inline std::vector<uint8_t> BuildResourceUpdate(
     auto ru = SpringWeb::CreateResourceUpdate(
         fbb, team, metal, maxMetal, energy, maxEnergy, metalIncome, energyIncome);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_ResourceUpdate, ru.Union());
+}
+
+/// Serialize the command queues of a set of units. The queues are
+/// emitted in the order the units appear in `units`; callers typically
+/// pass a single team's units.
+inline std::vector<uint8_t> BuildUnitCommandQueues(const std::vector<CUnit*>& units) {
+    flatbuffers::FlatBufferBuilder fbb(2048);
+
+    std::vector<flatbuffers::Offset<SpringWeb::UnitCommandQueue>> queueOffsets;
+    queueOffsets.reserve(units.size());
+
+    for (const CUnit* u : units) {
+        if (u == nullptr || u->commandAI == nullptr) continue;
+        const CCommandQueue& q = u->commandAI->commandQue;
+
+        std::vector<flatbuffers::Offset<SpringWeb::UnitOrder>> orderOffsets;
+        orderOffsets.reserve(q.size());
+        for (const Command& c : q) {
+            // Internal-order spam (auto-generated path & guard commands)
+            // would dominate the wire if we let them through; widgets
+            // generally expect only player-issued / queued orders.
+            if (c.IsInternalOrder()) continue;
+
+            const unsigned int n = c.GetNumParams();
+            std::vector<float> params(n);
+            for (unsigned int i = 0; i < n; ++i) params[i] = c.GetParams(i)[0];
+            auto paramsOff = fbb.CreateVector(params);
+
+            orderOffsets.push_back(SpringWeb::CreateUnitOrder(
+                fbb,
+                static_cast<int32_t>(c.GetID()),
+                paramsOff,
+                static_cast<uint8_t>(c.GetOpts()),
+                static_cast<uint32_t>(c.GetTag()),
+                static_cast<int32_t>(c.GetTimeOut())));
+        }
+
+        // Skip units with no externally-visible orders to keep the
+        // payload tight; the client treats absence as "empty queue".
+        if (orderOffsets.empty()) continue;
+
+        auto ordersVec = fbb.CreateVector(orderOffsets);
+        queueOffsets.push_back(SpringWeb::CreateUnitCommandQueue(
+            fbb, static_cast<uint32_t>(u->id), ordersVec));
+    }
+
+    auto queuesVec = fbb.CreateVector(queueOffsets);
+    auto upd = SpringWeb::CreateUnitCommandQueuesUpdate(fbb, queuesVec);
+    return BuildServerMessage(fbb,
+        SpringWeb::ServerPayload_UnitCommandQueuesUpdate, upd.Union());
 }
 
 /// Build a GameInfo message (map, game, speed, frame, paused, env state).

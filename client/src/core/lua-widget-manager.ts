@@ -313,6 +313,20 @@ export class LuaWidgetManager {
         })) });
     }
 
+    /** Push a per-team unit command-queue snapshot into the worker.
+     *  Replaces the cached queues for this snapshot's unit set; units
+     *  not present are treated as having empty queues by the readers. */
+    forwardUnitCommandQueues(queues: ReadonlyArray<{
+        unitId: number;
+        orders: ReadonlyArray<{ cmdId: number; params: number[]; options: number; tag: number; timeout: number }>;
+    }>): void {
+        if (!this.worker || this.disposed) return;
+        this.postToWorker({ type: 'unitCommandQueues', queues: queues.map(q => ({
+            unitId: q.unitId,
+            orders: q.orders.map(o => ({ ...o, params: [...o.params] })),
+        })) });
+    }
+
     /** Push a batch of weapon defs into the worker. */
     forwardWeaponDefs(defs: ReadonlyArray<{
         defId: number; name: string; visualType: number;

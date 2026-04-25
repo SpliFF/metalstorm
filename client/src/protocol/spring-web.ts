@@ -77,5 +77,8 @@ export { RoomTeamSelect, RoomTeamSelectT } from './spring-web/room-team-select.j
 export { ServerError, ServerErrorT } from './spring-web/server-error.js';
 export { ServerMessage, ServerMessageT } from './spring-web/server-message.js';
 export { ServerPayload } from './spring-web/server-payload.js';
+export { UnitCommandQueue, UnitCommandQueueT } from './spring-web/unit-command-queue.js';
+export { UnitCommandQueuesUpdate, UnitCommandQueuesUpdateT } from './spring-web/unit-command-queues-update.js';
+export { UnitOrder, UnitOrderT } from './spring-web/unit-order.js';
 export { Vec3, Vec3T } from './spring-web/vec3.js';
 export { ViewportUpdate, ViewportUpdateT } from './spring-web/viewport-update.js';
