@@ -127,10 +127,6 @@ export class GlyphAtlas {
         const descent = metrics.actualBoundingBoxDescent ?? cssSize * 0.2;
         this.lineheight = (ascent + descent + GLYPH_PAD * 2) / cssSize;
         this.descender = -descent / cssSize;
-        console.log(`[font] ${family} cssSize=${cssSize} renderSize=${renderSize} `
-            + `outlineW=${outlineWidth} ascent=${ascent.toFixed(1)} `
-            + `descent=${descent.toFixed(1)} → lineheight=${this.lineheight.toFixed(3)} `
-            + `(spacing=${(this.lineheight * cssSize).toFixed(1)}px)`);
 
         // Create WebGL texture
         this.texture = gl.createTexture()!;
