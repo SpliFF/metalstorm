@@ -344,46 +344,62 @@ export function createLuaFontObject(
             let px = Number(x ?? 0);
             let py = Number(y ?? 0);
             let drawSize = fontSize;
-            let flags = '';
 
             // Spring's font:Print has two call conventions:
-            // font:Print(text, x, y, size, "flags")  — from FontHandler
-            // font:Print(text, x, y, "halign", "valign") — from Chili Font:Draw
+            //   font:Print(text, x, y, size,    "flagsString")        — FontHandler
+            //   font:Print(text, x, y, "halign", "valign")            — Chili Font:Draw
+            // For Chili we get full words like "center" / "linecenter".
+            // For FontHandler we get a flag string of single chars like "cv" /
+            // "cs" / "rxs". The two namespaces overlap (e.g. "center" contains
+            // 'c', 'r', 't', etc.), so we can't just substring-match the whole
+            // thing — we need to recognise full words first.
+            let alignWord = '';
+            let valignWord = '';
+            let flagChars = '';
             if (typeof sizeOrAlign === 'number') {
                 drawSize = sizeOrAlign;
-                flags = String(extraOrValign ?? '');
+                flagChars = String(extraOrValign ?? '');
             } else if (typeof sizeOrAlign === 'string') {
-                // Chili-style: align params instead of size
-                flags = sizeOrAlign + String(extraOrValign ?? '');
+                alignWord = sizeOrAlign;
+                valignWord = String(extraOrValign ?? '');
             }
 
             // Measure text width for alignment
             const scale = drawSize / atlas.fontSize;
             const textW = measureText(atlas, str) * scale;
             const textH = atlas.lineheight * drawSize;
+            const lineH = atlas.lineheight * drawSize;
 
             // Horizontal alignment
-            if (flags.includes('c')) px -= textW / 2;
-            else if (flags.includes('r')) px -= textW;
+            const wantCenterX = alignWord === 'center' || flagChars.includes('c');
+            const wantRight   = alignWord === 'right'  || flagChars.includes('r');
+            if (wantCenterX) px -= textW / 2;
+            else if (wantRight) px -= textW;
 
             // Vertical alignment.
-            // No flag / 'a' / 't' = text top at y (renderString draws glyphs
-            // with their top at the local origin).
-            if (flags.includes('v')) {
-                // 'v' = whole-block vertical center on y
-                py -= textH / 2;
-            } else if (flags.includes('x')) {
-                // 'x' = linecenter — first line's vertical centre on y. For
-                // single-line text this is identical to 'v'; for multi-line,
-                // only the first line gets centred. Chili buttons / labels
-                // pass valign="linecenter" expecting the font to do this.
-                py -= (atlas.lineheight * drawSize) / 2;
-            } else if (flags.includes('b')) {
-                py -= textH;
+            // renderString translates to (x, py) then Scale(1,-1,1) so glyph
+            // quads emit with Y-down internally. With NO flag, glyphs emit
+            // with their top approximately at py — i.e. "no flag" = text top
+            // at y in the *outer* frame. To move text UP (toward the centre)
+            // we ADD to py, since the glyph quads' qy values then translate
+            // to a smaller world y.
+            const wantCenterY    = valignWord === 'center'     || flagChars.includes('v');
+            const wantLineCenter = valignWord === 'linecenter' || flagChars.includes('x');
+            const wantBottom     = valignWord === 'bottom'     || flagChars.includes('b');
+            if (wantCenterY) {
+                py += textH / 2;
+            } else if (wantLineCenter) {
+                // 'linecenter' centres the FIRST LINE on y (vs 'v' which
+                // centres the whole block). For single-line text this is
+                // identical to 'v'.
+                py += lineH / 2;
+            } else if (wantBottom) {
+                py += textH;
             }
+            // 'top' / 'ascender' / no flag = no adjustment (text top at y).
 
-            const drawOutline = flags.includes('o') && outlineWidth > 0;
-            const drawShadow = flags.includes('s');
+            const drawOutline = flagChars.includes('o') && outlineWidth > 0;
+            const drawShadow  = flagChars.includes('s');
 
             // Upload any pending glyphs
             atlas.uploadAtlas();

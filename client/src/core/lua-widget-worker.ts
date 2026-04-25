@@ -538,6 +538,25 @@ async function init(
         }
     }
 
+    // Patch font.lua: _GetExtra has no case for valign="linecenter" and
+    // falls through to 'a' (ascender), so chili Button / Label captions
+    // pass valign="linecenter" but never get vertical centering. Add a
+    // proper case mapping to the 'x' flag char so the font sees it.
+    const fontPath = 'LuaUI/Widgets/chili_old/controls/font.lua';
+    const fontSrc = vfsLookup(fontPath);
+    if (fontSrc) {
+        const patched = fontSrc.replace(
+            `  if valign == "center" then\n    extra = 'v'\n  elseif valign == "top" then\n    extra = 't'\n  elseif valign == "bottom" then\n    extra = 'b'\n  else\n    --// ascender\n    extra = 'a'\n  end`,
+            `  if valign == "center" then\n    extra = 'v'\n  elseif valign == "linecenter" then\n    extra = 'x'\n  elseif valign == "top" then\n    extra = 't'\n  elseif valign == "bottom" then\n    extra = 'b'\n  else\n    --// ascender\n    extra = 'a'\n  end`,
+        );
+        if (patched !== fontSrc) {
+            vfsRegister(fontPath, patched);
+            postLog(2, '[LuaUI] Patched font.lua: _GetExtra recognises "linecenter"');
+        } else {
+            postLog(3, '[LuaUI] font.lua _GetExtra patch — anchor not found');
+        }
+    }
+
     postLog(2, '[LuaUI] init step 7/8: starting bootstrap (VFS.Include camain.lua)...');
     const bootStart = performance.now();
     const bootErr = runtime.doString(`
