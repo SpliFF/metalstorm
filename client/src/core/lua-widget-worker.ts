@@ -41,6 +41,8 @@ import dbgRenderTestQuit from '../lua-test-widgets/quit.png?url';
 import dbgRenderTestTick from '../lua-test-widgets/tick.png?url';
 import dbgRenderTestPanel from '../lua-test-widgets/panel_0001.png?url';
 import dbgChiliTestSrc from '../lua-test-widgets/dbg_chili_test.lua?raw';
+import dbgFontBaselineSrc from '../lua-test-widgets/dbg_font_baseline.lua?raw';
+import dbgEndgameTriggerSrc from '../lua-test-widgets/dbg_endgame_trigger.lua?raw';
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -343,6 +345,14 @@ async function init(
     if (wants('dbg_chili_test')) {
         vfsRegister('LuaUI/Widgets/dbg_chili_test.lua', dbgChiliTestSrc);
         postLog(2, '[LuaUI] Injected engine-bundled dbg_chili_test widget');
+    }
+    if (wants('dbg_font_baseline')) {
+        vfsRegister('LuaUI/Widgets/dbg_font_baseline.lua', dbgFontBaselineSrc);
+        postLog(2, '[LuaUI] Injected engine-bundled dbg_font_baseline widget');
+    }
+    if (wants('dbg_endgame_trigger')) {
+        vfsRegister('LuaUI/Widgets/dbg_endgame_trigger.lua', dbgEndgameTriggerSrc);
+        postLog(2, '[LuaUI] Injected engine-bundled dbg_endgame_trigger widget');
     }
 
     const ctx: SpringAPIContext = {

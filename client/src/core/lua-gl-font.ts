@@ -81,6 +81,9 @@ export class GlyphAtlas {
     lineheight: number;
     /** Normalised descender (negative, multiply by size for pixels) */
     descender: number;
+    /** Font global ascent in pixels at the rasterised cssSize. Used by
+     *  renderString to position each glyph by its baseline. */
+    ascentPx: number;
 
     /** Kerning table: "AB" → pixel offset */
     private kernTable = new Map<string, number>();
@@ -122,11 +125,17 @@ export class GlyphAtlas {
         // but lineheight only ≈28px — wrapped lines overlap by ~4px.
         this.ctx.font = this.cssFont;
         this.ctx.textBaseline = 'alphabetic';
-        const metrics = this.ctx.measureText('Hg|ÅÖ');
+        // Probe with a string that contains the deepest descenders ('y', 'g',
+        // 'p', 'j', 'Q') AND the highest ascenders (caps + diacritics 'Å',
+        // 'Ö'). Missing 'y' and 'p' from the probe makes the descent value
+        // ~0.8px too small, which causes 'y' descenders to overlap into the
+        // next line.
+        const metrics = this.ctx.measureText('HgypjQ|ÅÖ');
         const ascent = metrics.actualBoundingBoxAscent ?? cssSize * 0.8;
         const descent = metrics.actualBoundingBoxDescent ?? cssSize * 0.2;
         this.lineheight = (ascent + descent + GLYPH_PAD * 2) / cssSize;
         this.descender = -descent / cssSize;
+        this.ascentPx = ascent;
 
         // Create WebGL texture
         this.texture = gl.createTexture()!;
@@ -577,14 +586,20 @@ function renderString(
         const glyph = atlas.getGlyph(ch);
         if (glyph.w > 0 && glyph.h > 0) {
             // Quad corners in local space (translate already applied).
-            // Glyph CELL top sits at qy=-PAD so the visible glyph (which
-            // begins PAD pixels inside the cell) starts at qy=0 — i.e. the
-            // line cell's visible top is at the local origin. This makes
-            // "no flag / 't' / 'a'" semantically "text top at y" without
-            // any extra offset, and Print's vertical alignment adjustments
-            // (py += textH/2 etc.) work cleanly off that anchor.
+            // We anchor the line so that the visible top of a glyph with the
+            // font's full ascent (e.g. 'H') sits at qy=0 — i.e. the local
+            // origin. The line baseline is therefore at qy = ascent.
+            // Each glyph's quad top is offset from the baseline by its own
+            // bearingY (the height of the glyph above the baseline), so
+            // qy = (ascent - bearingY) - PAD
+            // The -PAD term accounts for the atlas-internal padding above
+            // each glyph in its cell (visible top vs cell top).
+            // Result: glyphs of different ascent share a baseline (so 'g'
+            // descends below the same line as 'A' rests on), while line
+            // top is at the local origin for "no flag" / 'a' / 't' semantics.
             const qx = cursorX + glyph.bearingX * scale;
-            const qy = localY - GLYPH_PAD * scale;
+            const qy = localY + (atlas.ascentPx - glyph.bearingY) * scale
+                - GLYPH_PAD * scale;
             const qw = glyph.w * scale;
             const qh = glyph.h * scale;
 
