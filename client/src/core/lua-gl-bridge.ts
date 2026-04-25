@@ -297,6 +297,122 @@ export class LuaGLBridge {
             return [c.width, c.height];
         };
 
+        // gl.GetSun(param, [type]) — sun parameters used by shaders for
+        // map/unit lighting. Returns either RGB triple, XYZ direction,
+        // or a single scalar depending on param.
+        gl['GetSun'] = (param: LuaValue, _type?: LuaValue) => {
+            const p = String(param ?? '');
+            switch (p) {
+                case 'pos':            return [500, 1000, 500];
+                case 'dir':            return [0.5, -0.7, 0.5];
+                case 'specular':       return [1, 1, 1];
+                case 'diffuse':        return [1, 1, 1];
+                case 'ambient':        return [0.3, 0.3, 0.3];
+                case 'specularExp':    return 16;
+                case 'shadowDensity':  return 0.7;
+                default:               return [1, 1, 1];
+            }
+        };
+
+        // gl.GetWaterRendering(param) — water shader parameters. Real
+        // values come from the map's mapinfo.lua; for solo/test mode a
+        // bland default keeps widgets that read these from erroring.
+        gl['GetWaterRendering'] = (param: LuaValue) => {
+            const p = String(param ?? '');
+            const defaults: Record<string, number | string | number[]> = {
+                absorb:                  [0.0, 0.5, 1.0],
+                baseColor:               [0.0, 0.4, 0.7],
+                minColor:                [0.0, 0.2, 0.4],
+                surfaceColor:            [0.4, 0.6, 0.8],
+                surfaceAlpha:            0.55,
+                diffuseColor:            [1.0, 1.0, 1.0],
+                specularColor:           [1.0, 1.0, 1.0],
+                specularPower:           20,
+                specularFactor:          0.5,
+                ambientFactor:           0.5,
+                diffuseFactor:           1.0,
+                fresnelMin:              0.2,
+                fresnelMax:              0.8,
+                fresnelPower:            4.0,
+                reflectionDistortion:    1.0,
+                blurBase:                2.0,
+                blurExponent:            1.5,
+                perlinStartFreq:         8.0,
+                perlinLacunarity:        3.0,
+                perlinAmplitude:         0.9,
+                windSpeed:               1.0,
+                shoreWaves:              1,
+                forceRendering:          0,
+                hasWaterPlane:           0,
+                normalTexture:           '',
+                foamTexture:             '',
+                reflectionTexture:       '',
+            };
+            return defaults[p] ?? 0;
+        };
+
+        // gl.GetMapRendering(param) — per-map render flags. Mostly used
+        // by widgets to decide whether to draw their own water/ground.
+        gl['GetMapRendering'] = (param: LuaValue) => {
+            const p = String(param ?? '');
+            const defaults: Record<string, number | number[]> = {
+                voidWater:                       0,
+                voidGround:                      0,
+                splatTexScales:                  [0.02, 0.02, 0.02, 0.02],
+                splatTexMults:                   [1, 1, 1, 1],
+                splatDetailNormalDiffuseAlpha:   0,
+            };
+            return defaults[p] ?? 0;
+        };
+
+        // gl.GetMatrixData(matrixName | matrixMode, [slot]) — returns the
+        // 16 floats of the named matrix, or a single element at slot.
+        // We only return identity for named matrices — the modelview/proj
+        // stack values are managed internally by the immediate-mode helper
+        // and not yet round-trippable. This is safe for shader setup that
+        // multiplies by gl_ProjectionMatrix etc., as the engine binds the
+        // actual matrices outside Lua.
+        gl['GetMatrixData'] = (_arg: LuaValue, slot?: LuaValue) => {
+            const ident = [1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1];
+            if (slot != null) return ident[Number(slot) | 0] ?? 0;
+            return ident;
+        };
+
+        // gl.GetFontInfo(font) — returns metadata about a font handle.
+        // The font object already exposes .lineheight / .descender so the
+        // common cases are covered there; this is for widgets that prefer
+        // the freestanding gl.GetFontInfo call.
+        gl['GetFontInfo'] = (font: LuaValue) => {
+            const f = font as Record<string, LuaValue> | null;
+            if (!f) return { lineheight: 1.2, descender: -0.2, height: 1.0 };
+            return {
+                lineheight: Number(f.lineheight ?? 1.2),
+                descender:  Number(f.descender  ?? -0.2),
+                height:     Number(f.height     ?? 1.0),
+            };
+        };
+
+        // gl.GetVBO([target]) — returns a buffer-object wrapper. We don't
+        // have a real VBO implementation yet (parallel to GetVAO would be
+        // significant work), so hand back a stub whose methods are all
+        // no-ops. Widgets that test "if vbo then ..." still see truthy;
+        // those that try to render via it silently no-op rather than
+        // raising on a method-call-on-nil.
+        gl['GetVBO'] = (_target?: LuaValue) => {
+            const stub: Record<string, LuaValue> = {};
+            const noop = (..._a: LuaValue[]): LuaValue => null;
+            for (const name of ['Define', 'Upload', 'Update', 'Read',
+                                'BindBufferRange', 'UnbindBufferRange',
+                                'Delete', 'ModelsVBO', 'MatrixVBO',
+                                'InstanceDataFromUnitDefIDs',
+                                'InstanceDataFromFeatureDefIDs',
+                                'InstanceDataFromUnitIDs',
+                                'InstanceDataFromFeatureIDs']) {
+                stub[name] = noop;
+            }
+            return stub;
+        };
+
         return gl;
     }
 
