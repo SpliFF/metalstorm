@@ -457,6 +457,7 @@ export class LuaWidgetManager {
             case 'storage:set':    summary = `storage:set key=${msg.key}`; break;
             case 'widgetList':     summary = `widgetList (${String(msg.data ?? '').length} bytes)`; break;
             case 'worldGLCommands':summary = `worldGLCommands (${(msg.commands as unknown[])?.length ?? '?'} cmds)`; break;
+            case 'giveOrder':      summary = `giveOrder cmd=${msg.cmdId} units=${(msg.unitIds as unknown[])?.length ?? 0} params=${(msg.params as unknown[])?.length ?? 0}`; break;
         }
         debugConsole.addEntry({
             id: Date.now() + Math.random(),
@@ -528,6 +529,19 @@ export class LuaWidgetManager {
             case 'worldGLCommands':
                 // TODO: replay command buffer on Babylon GL context
                 break;
+
+            case 'giveOrder': {
+                const conn = this.connection;
+                if (!conn) break;
+                const unitIds = Array.isArray(msg.unitIds) ? (msg.unitIds as number[]) : [];
+                const params = Array.isArray(msg.params) ? (msg.params as number[]) : [];
+                const cmdId = Number(msg.cmdId | 0);
+                const options = Number(msg.options | 0);
+                const timeoutFrames = Number(msg.timeoutFrames | 0);
+                if (unitIds.length === 0) break;
+                conn.sendPlayerCommand(cmdId, unitIds, params, options, timeoutFrames);
+                break;
+            }
         }
     }
 

@@ -45,6 +45,14 @@ export interface SpringAPIContext {
     gameRulesParams?: Map<string, number>;
     /** getGameSeconds callback — usually `() => Date.now()/1000 - startTime`. */
     getGameSeconds(): number;
+    /**
+     * Submit a unit order for delivery to the server. Receives the raw
+     * Spring command id, the affected unit ids, the parameter list, and
+     * the bitfield options (SHIFT/ALT/CTRL/META). The host wires this to
+     * `Connection.sendPlayerCommand`. Optional — if absent, the
+     * `Spring.GiveOrder*` calls become no-ops (used by tests).
+     */
+    giveOrder?(cmdId: number, unitIds: number[], params: number[], options: number): void;
 }
 
 /** Per-unit entry in the worker's unit store. */
@@ -199,6 +207,75 @@ export function normaliseSpringPath(path: string): string {
     // Strip any leading slash.
     if (p.startsWith('/')) p = p.substring(1);
     return p;
+}
+
+/** Spring command-option bit flags. Widgets pass options either as a
+ *  number (raw bitfield) or as a table — sometimes a sequence of
+ *  strings (`{"shift", "alt"}`) and sometimes a map (`{shift=true}`).
+ *  We accept all three. */
+const ORDER_OPT_META  = 4;
+const ORDER_OPT_RIGHT = 16;
+const ORDER_OPT_SHIFT = 32;
+const ORDER_OPT_CTRL  = 64;
+const ORDER_OPT_ALT   = 128;
+
+function orderOptionsToBits(opts: LuaValue): number {
+    if (opts == null) return 0;
+    if (typeof opts === 'number') return opts | 0;
+    if (typeof opts !== 'object') return 0;
+    const apply = (key: string): number => {
+        switch (key.toLowerCase()) {
+            case 'shift': return ORDER_OPT_SHIFT;
+            case 'alt':   return ORDER_OPT_ALT;
+            case 'ctrl':  return ORDER_OPT_CTRL;
+            case 'meta':  return ORDER_OPT_META;
+            case 'right': return ORDER_OPT_RIGHT;
+            default:      return 0;
+        }
+    };
+    let bits = 0;
+    if (Array.isArray(opts)) {
+        for (const v of opts) {
+            if (typeof v === 'string') bits |= apply(v);
+        }
+    } else {
+        for (const [k, v] of Object.entries(opts as Record<string, LuaValue>)) {
+            if (v) bits |= apply(k);
+        }
+    }
+    return bits;
+}
+
+/** Coerce the params arg to a flat number[]. Spring widgets pass a
+ *  sequence (`{x, y, z}`) — we tolerate single numbers and missing
+ *  values too. */
+function orderParamsToArray(params: LuaValue): number[] {
+    if (params == null) return [];
+    if (typeof params === 'number') return [params];
+    if (Array.isArray(params)) {
+        const out: number[] = [];
+        for (const v of params) {
+            const n = Number(v);
+            if (Number.isFinite(n)) out.push(n);
+        }
+        return out;
+    }
+    return [];
+}
+
+/** Coerce a Lua array of unit ids to number[]. */
+function orderUnitIdsToArray(ids: LuaValue): number[] {
+    if (ids == null) return [];
+    if (typeof ids === 'number') return [ids | 0];
+    if (Array.isArray(ids)) {
+        const out: number[] = [];
+        for (const v of ids) {
+            const n = Number(v);
+            if (Number.isFinite(n) && n > 0) out.push(n | 0);
+        }
+        return out;
+    }
+    return [];
 }
 
 /** Convert a worker-side order queue into the array Spring widgets
@@ -1038,9 +1115,27 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             }
             return true;
         },
-        GiveOrderToUnit: () => {},
-        GiveOrderToUnitArray: () => {},
-        GiveOrder: () => {},
+        GiveOrderToUnit: (unitId: LuaValue, cmdId: LuaValue, params: LuaValue, options: LuaValue) => {
+            if (!ctx.giveOrder) return false;
+            const id = Number(unitId) | 0;
+            if (id <= 0) return false;
+            ctx.giveOrder(Number(cmdId) | 0, [id], orderParamsToArray(params), orderOptionsToBits(options));
+            return true;
+        },
+        GiveOrderToUnitArray: (unitIds: LuaValue, cmdId: LuaValue, params: LuaValue, options: LuaValue) => {
+            if (!ctx.giveOrder) return false;
+            const ids = orderUnitIdsToArray(unitIds);
+            if (ids.length === 0) return false;
+            ctx.giveOrder(Number(cmdId) | 0, ids, orderParamsToArray(params), orderOptionsToBits(options));
+            return true;
+        },
+        GiveOrder: (cmdId: LuaValue, params: LuaValue, options: LuaValue) => {
+            if (!ctx.giveOrder) return false;
+            const ids = ls.selectedUnitIds.slice();
+            if (ids.length === 0) return false;
+            ctx.giveOrder(Number(cmdId) | 0, ids, orderParamsToArray(params), orderOptionsToBits(options));
+            return true;
+        },
         // Order queue readers — all backed by ls.unitCommands. Spring
         // returns an array of {id, params, options, tag} tables; we
         // include `timeout` too (zero-cost extra info).

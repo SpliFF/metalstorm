@@ -36,6 +36,7 @@ import { UnitCommandQueuesUpdate } from '../protocol/spring-web/unit-command-que
 import { UnitCommandQueue } from '../protocol/spring-web/unit-command-queue.js';
 import { UnitOrder } from '../protocol/spring-web/unit-order.js';
 import { AuthRequest } from '../protocol/spring-web/auth-request.js';
+import { PlayerCommand } from '../protocol/spring-web/player-command.js';
 import { AuthResponse } from '../protocol/spring-web/auth-response.js';
 import { AuthStatus } from '../protocol/spring-web/auth-status.js';
 import { ServerClock } from './clock.js';
@@ -132,6 +133,7 @@ export class Connection {
     private pingInterval: ReturnType<typeof setInterval> | null = null;
     private httpBase = '';  // e.g. "http://localhost:9100"
     private rtcClientId = 0;
+    private commandSequence = 0;
 
     /** Expose the control data channel for debug console. */
     getControlChannel(): RTCDataChannel | null { return this.controlChannel; }
@@ -404,6 +406,31 @@ export class Connection {
         const vp = ViewportUpdate.createViewportUpdate(
             builder, viewportId, centerX, centerZ, width, height, rotation, zoomLevel);
         this.sendClientMessage(builder, ClientPayload.ViewportUpdate, vp);
+    }
+
+    /** Send a PlayerCommand (unit order) to the server. */
+    sendPlayerCommand(
+        commandId: number,
+        unitIds: number[],
+        params: number[],
+        options: number = 0,
+        timeoutFrames: number = 0,
+    ): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(128 + unitIds.length * 4 + params.length * 4);
+        const squadIdsOff = PlayerCommand.createSquadIdsVector(builder, unitIds);
+        const paramsOff = PlayerCommand.createParamsVector(builder, params);
+        this.commandSequence++;
+        const cmd = PlayerCommand.createPlayerCommand(
+            builder,
+            this.commandSequence,
+            commandId,
+            squadIdsOff,
+            paramsOff,
+            options,
+            timeoutFrames,
+        );
+        this.sendClientMessage(builder, ClientPayload.PlayerCommand, cmd);
     }
 
     sendClientMessage(builder: flatbuffers.Builder, payloadType: ClientPayload, payloadOffset: number): void {

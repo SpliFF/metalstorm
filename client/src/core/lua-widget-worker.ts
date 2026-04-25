@@ -456,6 +456,9 @@ async function init(
         vfsFiles,
         gameRulesParams: new Map(),
         getGameSeconds: () => (performance.now() / 1000) - startTime,
+        giveOrder: (cmdId, unitIds, params, options) => {
+            postToMain({ type: 'giveOrder', cmdId, unitIds, params, options });
+        },
     };
 
     // 4. Install engine globals
