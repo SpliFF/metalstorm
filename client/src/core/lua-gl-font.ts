@@ -576,10 +576,15 @@ function renderString(
 
         const glyph = atlas.getGlyph(ch);
         if (glyph.w > 0 && glyph.h > 0) {
-            // Quad corners in local space (translate already applied)
+            // Quad corners in local space (translate already applied).
+            // Glyph CELL top sits at qy=-PAD so the visible glyph (which
+            // begins PAD pixels inside the cell) starts at qy=0 — i.e. the
+            // line cell's visible top is at the local origin. This makes
+            // "no flag / 't' / 'a'" semantically "text top at y" without
+            // any extra offset, and Print's vertical alignment adjustments
+            // (py += textH/2 etc.) work cleanly off that anchor.
             const qx = cursorX + glyph.bearingX * scale;
-            const qy = localY + (atlas.lineheight * atlas.fontSize - glyph.bearingY) * scale
-                - GLYPH_PAD * scale;
+            const qy = localY - GLYPH_PAD * scale;
             const qw = glyph.w * scale;
             const qh = glyph.h * scale;
 
