@@ -41,15 +41,16 @@ in vec2 vTexCoord;
 uniform sampler2D uTex;
 uniform int uTextured;
 uniform float uAlphaThreshold;
+uniform vec4 uColor;
 
 out vec4 fragColor;
 
 void main() {
     vec4 c;
     if (uTextured != 0) {
-        c = texture(uTex, vTexCoord) * vColor;
+        c = texture(uTex, vTexCoord) * vColor * uColor;
     } else {
-        c = vColor;
+        c = vColor * uColor;
     }
     if (c.a < uAlphaThreshold) discard;
     fragColor = c;
@@ -217,6 +218,10 @@ interface DisplayListDraw {
     vertexCount: number;
     textured: boolean;
     boundTexture: WebGLTexture | null;
+    /** True if no explicit gl.Color was set in the list before this draw —
+     * the vertex colors were baked as (1,1,1,1) and the external current
+     * color should be applied as a uniform tint at replay time. */
+    useExternalColor: boolean;
 }
 
 interface DisplayListTexBind {
@@ -257,6 +262,7 @@ export class ImmediateModeRenderer {
     private uTextured: WebGLUniformLocation;
     private uTex: WebGLUniformLocation;
     private uAlphaThreshold: WebGLUniformLocation;
+    private uColor: WebGLUniformLocation;
 
     // Vertex accumulation buffer
     private vertices = new Float32Array(MAX_VERTICES * FLOATS_PER_VERTEX);
@@ -293,6 +299,10 @@ export class ImmediateModeRenderer {
     private displayLists = new Map<number, DisplayList>();
     private nextListId = 1;
     private recordingList: DisplayList | null = null;
+    /** Set true when an explicit gl.Color is recorded into the current list.
+     * Until then, vertices emitted into the list bake (1,1,1,1) so external
+     * gl.Color can tint the geometry at replay time via the uColor uniform. */
+    private explicitColorInList = false;
 
     constructor(gl: WebGL2RenderingContext) {
         this.gl = gl;
@@ -303,6 +313,7 @@ export class ImmediateModeRenderer {
         this.uTextured = gl.getUniformLocation(this.program, 'uTextured')!;
         this.uTex = gl.getUniformLocation(this.program, 'uTex')!;
         this.uAlphaThreshold = gl.getUniformLocation(this.program, 'uAlphaThreshold')!;
+        this.uColor = gl.getUniformLocation(this.program, 'uColor')!;
 
         // Create VAO + dynamic VBO
         this.vao = gl.createVertexArray()!;
@@ -446,6 +457,7 @@ export class ImmediateModeRenderer {
         this.curA = a;
         if (this.recordingList) {
             this.recordingList.entries.push({ type: 'color', r, g, b, a });
+            this.explicitColorInList = true;
         }
     }
 
@@ -473,10 +485,17 @@ export class ImmediateModeRenderer {
         const i = this.vertexCount * FLOATS_PER_VERTEX;
         this.vertices[i] = x;
         this.vertices[i + 1] = y;
-        this.vertices[i + 2] = this.curR;
-        this.vertices[i + 3] = this.curG;
-        this.vertices[i + 4] = this.curB;
-        this.vertices[i + 5] = this.curA;
+        if (this.recordingList && !this.explicitColorInList) {
+            this.vertices[i + 2] = 1;
+            this.vertices[i + 3] = 1;
+            this.vertices[i + 4] = 1;
+            this.vertices[i + 5] = 1;
+        } else {
+            this.vertices[i + 2] = this.curR;
+            this.vertices[i + 3] = this.curG;
+            this.vertices[i + 4] = this.curB;
+            this.vertices[i + 5] = this.curA;
+        }
         this.vertices[i + 6] = this.curS;
         this.vertices[i + 7] = this.curT;
         this.vertexCount++;
@@ -519,6 +538,7 @@ export class ImmediateModeRenderer {
                     vertexCount: this.vertexCount,
                     textured: this.isTextured,
                     boundTexture: this.currentBoundTexture,
+                    useExternalColor: !this.explicitColorInList,
                 });
             } else {
                 this.flush(this.currentMode, this.vertexCount);
@@ -550,6 +570,7 @@ export class ImmediateModeRenderer {
                 vertexCount: this.vertexCount,
                 textured: this.isTextured,
                 boundTexture: this.currentBoundTexture,
+                useExternalColor: !this.explicitColorInList,
             });
         } else {
             this.flush(GL_TRIANGLES, this.vertexCount);
@@ -592,6 +613,7 @@ export class ImmediateModeRenderer {
                 vertexCount: this.vertexCount,
                 textured: this.isTextured,
                 boundTexture: this.currentBoundTexture,
+                useExternalColor: !this.explicitColorInList,
             });
         } else {
             this.flush(GL_TRIANGLES, this.vertexCount);
@@ -621,8 +643,10 @@ export class ImmediateModeRenderer {
         const id = this.nextListId++;
         const list: DisplayList = { entries: [] };
         this.recordingList = list;
+        this.explicitColorInList = false;
         fn();
         this.recordingList = null;
+        this.explicitColorInList = false;
         this.displayLists.set(id, list);
         return id;
     }
@@ -630,6 +654,7 @@ export class ImmediateModeRenderer {
     /** Start recording a display list (used by Lua-side gl.CreateList). */
     startRecording(): void {
         this.recordingList = { entries: [] };
+        this.explicitColorInList = false;
     }
 
     /** Stop recording and store the display list. Returns the list ID. */
@@ -637,6 +662,7 @@ export class ImmediateModeRenderer {
         if (!this.recordingList) return 0;
         const list = this.recordingList;
         this.recordingList = null;
+        this.explicitColorInList = false;
         const id = this.nextListId++;
         this.displayLists.set(id, list);
         return id;
@@ -663,6 +689,7 @@ export class ImmediateModeRenderer {
                     this.curG = entry.g;
                     this.curB = entry.b;
                     this.curA = entry.a;
+                    this.explicitColorInList = true;
                 } else if (entry.type === 'draw') {
                     this.isTextured = entry.textured;
                     this.currentBoundTexture = entry.boundTexture;
@@ -698,7 +725,15 @@ export class ImmediateModeRenderer {
                 this.vertices.set(entry.vertexData);
                 this.isTextured = entry.textured;
                 this.currentBoundTexture = entry.boundTexture;
-                this.flush(entry.mode, entry.vertexCount);
+                // If the draw was recorded without an explicit gl.Color, its
+                // vertex colors are (1,1,1,1); apply the current external color
+                // as a uniform tint. Otherwise the recorded colors win and the
+                // uniform is identity.
+                const tint: [number, number, number, number] | null =
+                    entry.useExternalColor
+                        ? [this.curR, this.curG, this.curB, this.curA]
+                        : null;
+                this.flush(entry.mode, entry.vertexCount, tint);
             }
         }
     }
@@ -750,7 +785,11 @@ export class ImmediateModeRenderer {
 
     // ── Flush to WebGL ──────────────────────────────────────────────────
 
-    private flush(mode: number, count: number): void {
+    private flush(
+        mode: number,
+        count: number,
+        tint: [number, number, number, number] | null = null,
+    ): void {
         if (count === 0) return;
         const gl = this.gl;
 
@@ -771,6 +810,15 @@ export class ImmediateModeRenderer {
             gl.bindTexture(gl.TEXTURE_2D, this.currentBoundTexture);
         }
         gl.uniform1f(this.uAlphaThreshold, this.alphaThreshold);
+
+        // Color tint uniform: identity for live draws (vertex colors carry the
+        // value), external current color for replays of lists that had no
+        // explicit gl.Color recorded.
+        if (tint) {
+            gl.uniform4f(this.uColor, tint[0], tint[1], tint[2], tint[3]);
+        } else {
+            gl.uniform4f(this.uColor, 1, 1, 1, 1);
+        }
 
 
         // Upload vertex data
