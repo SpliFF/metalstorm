@@ -610,25 +610,26 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             return [ls.viewport.width / 2, ls.viewport.height / 2, 0];
         },
         ScreenToWorldCoords: (_x: LuaValue, _y: LuaValue) => {
-            // Stub — proper inverse projection needs full matrix inverse
-            return [0, 0, 0];
+            if (!ls.viewMatrix || !ls.projMatrix) return [0, 0, 0];
+            const hit = screenPointToGround(
+                Number(_x), Number(_y),
+                ls.viewMatrix, ls.projMatrix,
+                ls.viewport.width, ls.viewport.height,
+                ctx,
+            );
+            return hit ?? [0, 0, 0];
         },
         TraceScreenRay: (_x: LuaValue, _y: LuaValue, _onlyCoords: LuaValue) => {
-            // Basic implementation: cast ray from camera through screen point to ground plane y=0
-            const cam = ls.camera;
-            // Direction from camera to target as the centre ray
-            const dx = cam.tx - cam.px, dy = cam.ty - cam.py, dz = cam.tz - cam.pz;
-            const len = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
-            const dirX = dx / len, dirY = dy / len, dirZ = dz / len;
-            // Intersect with y=0 plane
-            if (Math.abs(dirY) < 0.001) return null;
-            const t = -cam.py / dirY;
-            if (t < 0) return null;
-            const gx = cam.px + dirX * t;
-            const gz = cam.pz + dirZ * t;
-            const gy = sampleHeight(ctx, gx, gz);
-            if (_onlyCoords) return [gx, gy, gz];
-            return ['ground', [gx, gy, gz]];
+            if (!ls.viewMatrix || !ls.projMatrix) return null;
+            const hit = screenPointToGround(
+                Number(_x), Number(_y),
+                ls.viewMatrix, ls.projMatrix,
+                ls.viewport.width, ls.viewport.height,
+                ctx,
+            );
+            if (!hit) return null;
+            if (_onlyCoords) return hit;
+            return ['ground', hit];
         },
         GetCameraPosition: () => [ls.camera.px, ls.camera.py, ls.camera.pz],
         GetCameraDirection: () => {
@@ -1034,6 +1035,110 @@ function projectToScreen(
     const sx = (ndcX * 0.5 + 0.5) * vpW;
     const sy = (1 - (ndcY * 0.5 + 0.5)) * vpH;
     return [sx, sy, cz / cw];
+}
+
+/**
+ * Invert a column-major 4×4 matrix in-place into `out`. Returns false (and
+ * leaves out untouched) when the matrix is singular. Adapted from the
+ * standard cofactor expansion used by gluInvertMatrix.
+ */
+function mat4Inverse(m: ArrayLike<number>, out: Float32Array): boolean {
+    const m00 = m[0],  m01 = m[1],  m02 = m[2],  m03 = m[3];
+    const m10 = m[4],  m11 = m[5],  m12 = m[6],  m13 = m[7];
+    const m20 = m[8],  m21 = m[9],  m22 = m[10], m23 = m[11];
+    const m30 = m[12], m31 = m[13], m32 = m[14], m33 = m[15];
+
+    const c00 =  m11 * (m22 * m33 - m23 * m32) - m12 * (m21 * m33 - m23 * m31) + m13 * (m21 * m32 - m22 * m31);
+    const c01 = -m10 * (m22 * m33 - m23 * m32) + m12 * (m20 * m33 - m23 * m30) - m13 * (m20 * m32 - m22 * m30);
+    const c02 =  m10 * (m21 * m33 - m23 * m31) - m11 * (m20 * m33 - m23 * m30) + m13 * (m20 * m31 - m21 * m30);
+    const c03 = -m10 * (m21 * m32 - m22 * m31) + m11 * (m20 * m32 - m22 * m30) - m12 * (m20 * m31 - m21 * m30);
+
+    const det = m00 * c00 + m01 * c01 + m02 * c02 + m03 * c03;
+    if (Math.abs(det) < 1e-12) return false;
+    const invDet = 1 / det;
+
+    const c10 = -m01 * (m22 * m33 - m23 * m32) + m02 * (m21 * m33 - m23 * m31) - m03 * (m21 * m32 - m22 * m31);
+    const c11 =  m00 * (m22 * m33 - m23 * m32) - m02 * (m20 * m33 - m23 * m30) + m03 * (m20 * m32 - m22 * m30);
+    const c12 = -m00 * (m21 * m33 - m23 * m31) + m01 * (m20 * m33 - m23 * m30) - m03 * (m20 * m31 - m21 * m30);
+    const c13 =  m00 * (m21 * m32 - m22 * m31) - m01 * (m20 * m32 - m22 * m30) + m02 * (m20 * m31 - m21 * m30);
+    const c20 =  m01 * (m12 * m33 - m13 * m32) - m02 * (m11 * m33 - m13 * m31) + m03 * (m11 * m32 - m12 * m31);
+    const c21 = -m00 * (m12 * m33 - m13 * m32) + m02 * (m10 * m33 - m13 * m30) - m03 * (m10 * m32 - m12 * m30);
+    const c22 =  m00 * (m11 * m33 - m13 * m31) - m01 * (m10 * m33 - m13 * m30) + m03 * (m10 * m31 - m11 * m30);
+    const c23 = -m00 * (m11 * m32 - m12 * m31) + m01 * (m10 * m32 - m12 * m30) - m02 * (m10 * m31 - m11 * m30);
+    const c30 = -m01 * (m12 * m23 - m13 * m22) + m02 * (m11 * m23 - m13 * m21) - m03 * (m11 * m22 - m12 * m21);
+    const c31 =  m00 * (m12 * m23 - m13 * m22) - m02 * (m10 * m23 - m13 * m20) + m03 * (m10 * m22 - m12 * m20);
+    const c32 = -m00 * (m11 * m23 - m13 * m21) + m01 * (m10 * m23 - m13 * m20) - m03 * (m10 * m21 - m11 * m20);
+    const c33 =  m00 * (m11 * m22 - m12 * m21) - m01 * (m10 * m22 - m12 * m20) + m02 * (m10 * m21 - m11 * m20);
+
+    // Adjugate / det, column-major: out[col*4 + row] = cof[row][col] * invDet
+    out[0]  = c00 * invDet; out[1]  = c10 * invDet; out[2]  = c20 * invDet; out[3]  = c30 * invDet;
+    out[4]  = c01 * invDet; out[5]  = c11 * invDet; out[6]  = c21 * invDet; out[7]  = c31 * invDet;
+    out[8]  = c02 * invDet; out[9]  = c12 * invDet; out[10] = c22 * invDet; out[11] = c32 * invDet;
+    out[12] = c03 * invDet; out[13] = c13 * invDet; out[14] = c23 * invDet; out[15] = c33 * invDet;
+    return true;
+}
+
+/** Multiply two column-major 4×4 matrices: out = a * b. */
+function mat4Mul(a: ArrayLike<number>, b: ArrayLike<number>, out: Float32Array): void {
+    for (let col = 0; col < 4; col++) {
+        const b0 = b[col * 4], b1 = b[col * 4 + 1], b2 = b[col * 4 + 2], b3 = b[col * 4 + 3];
+        out[col * 4]     = a[0] * b0 + a[4] * b1 + a[8]  * b2 + a[12] * b3;
+        out[col * 4 + 1] = a[1] * b0 + a[5] * b1 + a[9]  * b2 + a[13] * b3;
+        out[col * 4 + 2] = a[2] * b0 + a[6] * b1 + a[10] * b2 + a[14] * b3;
+        out[col * 4 + 3] = a[3] * b0 + a[7] * b1 + a[11] * b2 + a[15] * b3;
+    }
+}
+
+const _invVP = new Float32Array(16);
+const _mvp   = new Float32Array(16);
+
+/**
+ * Cast a ray from a screen pixel through the world and return where it
+ * meets the heightmap, or null if the screen point is invalid (no VP
+ * matrices yet, ray parallel to ground, hit behind camera).
+ *
+ * sx/sy are Spring screen coords: pixels with Y-up (y=0 at bottom).
+ */
+function screenPointToGround(
+    sx: number, sy: number,
+    view: Float32Array, proj: Float32Array,
+    vpW: number, vpH: number,
+    ctx: SpringAPIContext,
+): [number, number, number] | null {
+    mat4Mul(proj, view, _mvp);
+    if (!mat4Inverse(_mvp, _invVP)) return null;
+
+    const ndcX = (sx / vpW) * 2 - 1;
+    const ndcY = (sy / vpH) * 2 - 1;
+
+    // Unproject near (ndcZ=-1) and far (ndcZ=+1) NDC points.
+    const unproject = (nz: number): [number, number, number] | null => {
+        const x = _invVP[0] * ndcX + _invVP[4] * ndcY + _invVP[8]  * nz + _invVP[12];
+        const y = _invVP[1] * ndcX + _invVP[5] * ndcY + _invVP[9]  * nz + _invVP[13];
+        const z = _invVP[2] * ndcX + _invVP[6] * ndcY + _invVP[10] * nz + _invVP[14];
+        const w = _invVP[3] * ndcX + _invVP[7] * ndcY + _invVP[11] * nz + _invVP[15];
+        if (Math.abs(w) < 1e-9) return null;
+        return [x / w, y / w, z / w];
+    };
+    const near = unproject(-1);
+    const far  = unproject(+1);
+    if (!near || !far) return null;
+
+    const dx = far[0] - near[0];
+    const dy = far[1] - near[1];
+    const dz = far[2] - near[2];
+
+    // Intersect with horizontal plane y=0 first (cheap), then refine the
+    // y by sampling the heightmap. This is good enough for mostly-flat
+    // terrain; ray-marching the heightmap would be more accurate on cliffs
+    // but adds complexity we don't yet need.
+    if (Math.abs(dy) < 1e-6) return null;
+    const t = -near[1] / dy;
+    if (t < 0) return null;
+    const wx = near[0] + dx * t;
+    const wz = near[2] + dz * t;
+    const wy = sampleHeight(ctx, wx, wz);
+    return [wx, wy, wz];
 }
 
 /**
