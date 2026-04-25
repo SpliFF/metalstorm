@@ -520,9 +520,21 @@ async function init(
             'self._children_dlist = gl.CreateList(self.DrawChildrenForList,self)',
             '-- self._children_dlist = gl.CreateList(self.DrawChildrenForList,self) -- disabled',
         );
+        // Also disable _own_dlist caching. Skin draws (DrawWindow / DrawPanel
+        // etc.) call gl.TextureInfo to get TileImage dimensions for 9-slice
+        // UV math. The first invocation runs before the async-loaded skin
+        // texture has resolved, so TextureInfo returns the 1x1 placeholder
+        // dimensions and the recorded UVs are wrong (out of [0,1], producing
+        // a tiled-texture grid instead of a seamless 9-slice frame). Drawing
+        // live each frame avoids stale-UV recordings — the cost is one extra
+        // skin draw per frame per visible control.
+        patched = patched.replace(
+            'self._own_dlist = gl.CreateList(self.DrawControl, self)',
+            '-- self._own_dlist = gl.CreateList(self.DrawControl, self) -- disabled: live draw',
+        );
         if (patched !== controlSrc) {
             vfsRegister(controlPath, patched);
-            postLog(2, '[LuaUI] Patched control.lua: disabled _all_dlist caching');
+            postLog(2, '[LuaUI] Patched control.lua: disabled all dlist caching (live draws)');
         }
     }
 

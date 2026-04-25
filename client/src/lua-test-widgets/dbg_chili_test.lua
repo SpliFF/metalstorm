@@ -12,7 +12,7 @@ function widget:GetInfo()
 end
 
 local Chili
-local Window, Label, Button, Panel, TextBox, Image
+local Window, Label, Button, Panel, TextBox
 local screen0
 local mainWindow
 
@@ -31,7 +31,6 @@ local function SetupWindow()
 	Button  = Chili.Button
 	Panel   = Chili.Panel
 	TextBox = Chili.TextBox
-	Image   = Chili.Image
 	screen0 = Chili.Screen0
 
 	if not screen0 then
@@ -52,7 +51,6 @@ local function SetupWindow()
 		padding    = {6, 6, 6, 6},
 	}
 
-	-- Plain text label
 	Label:New{
 		parent  = mainWindow,
 		x       = 8,
@@ -63,7 +61,6 @@ local function SetupWindow()
 		font    = {size = 14, color = {1, 1, 1, 1}},
 	}
 
-	-- Coloured TextBox to verify font + colour wiring
 	TextBox:New{
 		parent  = mainWindow,
 		x       = 8,
@@ -74,7 +71,6 @@ local function SetupWindow()
 		font    = {size = 12, color = {0.7, 1.0, 0.7, 1}},
 	}
 
-	-- Coloured panel (no texture) — verifies background fills + child layout
 	local innerPanel = Panel:New{
 		parent          = mainWindow,
 		x               = 8,
@@ -93,7 +89,6 @@ local function SetupWindow()
 		font    = {size = 12, color = {1, 1, 0, 1}},
 	}
 
-	-- Button — verifies skin rendering + interactive controls
 	Button:New{
 		parent  = mainWindow,
 		x       = 8,
