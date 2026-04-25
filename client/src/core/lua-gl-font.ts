@@ -366,15 +366,18 @@ export function createLuaFontObject(
             if (flags.includes('c')) px -= textW / 2;
             else if (flags.includes('r')) px -= textW;
 
-            // Vertical alignment
+            // Vertical alignment.
+            // No flag / 'a' / 't' = text top at y (renderString draws glyphs
+            // with their top at the local origin).
             if (flags.includes('v')) {
+                // 'v' = whole-block vertical center on y
                 py -= textH / 2;
             } else if (flags.includes('x')) {
-                // linecenter — already adjusted by caller
-            } else if (flags.includes('a')) {
-                // ascender — draw from top
-            } else if (flags.includes('t')) {
-                // top
+                // 'x' = linecenter — first line's vertical centre on y. For
+                // single-line text this is identical to 'v'; for multi-line,
+                // only the first line gets centred. Chili buttons / labels
+                // pass valign="linecenter" expecting the font to do this.
+                py -= (atlas.lineheight * drawSize) / 2;
             } else if (flags.includes('b')) {
                 py -= textH;
             }
