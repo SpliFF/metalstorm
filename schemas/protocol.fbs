@@ -382,6 +382,17 @@ table GameInfo {
     game_speed: float;
     frame: uint32;
     paused: bool;
+    /// Current wind vector (elmos/sec). y is always near 0 in practice.
+    /// Updated server-side every 15 game-seconds; client is free to
+    /// interpolate between snapshots if visual smoothness matters.
+    wind_x: float = 0;
+    wind_y: float = 0;
+    wind_z: float = 0;
+    /// |wind_vec| — what Spring.GetWind / wind generators read.
+    wind_strength: float = 0;
+    /// Map's tidal energy multiplier; constant per map but cheaper to
+    /// piggyback here than to add a one-shot message.
+    tidal_strength: float = 0;
 }
 
 table ReconnectResponse {

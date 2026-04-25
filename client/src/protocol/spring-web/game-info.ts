@@ -53,8 +53,45 @@ paused():boolean {
   return offset ? !!this.bb!.readInt8(this.bb_pos + offset) : false;
 }
 
+/**
+ * Current wind vector (elmos/sec). y is always near 0 in practice.
+ * Updated server-side every 15 game-seconds; client is free to
+ * interpolate between snapshots if visual smoothness matters.
+ */
+windX():number {
+  const offset = this.bb!.__offset(this.bb_pos, 14);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+windY():number {
+  const offset = this.bb!.__offset(this.bb_pos, 16);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+windZ():number {
+  const offset = this.bb!.__offset(this.bb_pos, 18);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+/**
+ * |wind_vec| — what Spring.GetWind / wind generators read.
+ */
+windStrength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 20);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+/**
+ * Map's tidal energy multiplier; constant per map but cheaper to
+ * piggyback here than to add a one-shot message.
+ */
+tidalStrength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 22);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
 static startGameInfo(builder:flatbuffers.Builder) {
-  builder.startObject(5);
+  builder.startObject(10);
 }
 
 static addMapId(builder:flatbuffers.Builder, mapIdOffset:flatbuffers.Offset) {
@@ -77,18 +114,43 @@ static addPaused(builder:flatbuffers.Builder, paused:boolean) {
   builder.addFieldInt8(4, +paused, +false);
 }
 
+static addWindX(builder:flatbuffers.Builder, windX:number) {
+  builder.addFieldFloat32(5, windX, 0.0);
+}
+
+static addWindY(builder:flatbuffers.Builder, windY:number) {
+  builder.addFieldFloat32(6, windY, 0.0);
+}
+
+static addWindZ(builder:flatbuffers.Builder, windZ:number) {
+  builder.addFieldFloat32(7, windZ, 0.0);
+}
+
+static addWindStrength(builder:flatbuffers.Builder, windStrength:number) {
+  builder.addFieldFloat32(8, windStrength, 0.0);
+}
+
+static addTidalStrength(builder:flatbuffers.Builder, tidalStrength:number) {
+  builder.addFieldFloat32(9, tidalStrength, 0.0);
+}
+
 static endGameInfo(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createGameInfo(builder:flatbuffers.Builder, mapIdOffset:flatbuffers.Offset, gameIdOffset:flatbuffers.Offset, gameSpeed:number, frame:number, paused:boolean):flatbuffers.Offset {
+static createGameInfo(builder:flatbuffers.Builder, mapIdOffset:flatbuffers.Offset, gameIdOffset:flatbuffers.Offset, gameSpeed:number, frame:number, paused:boolean, windX:number, windY:number, windZ:number, windStrength:number, tidalStrength:number):flatbuffers.Offset {
   GameInfo.startGameInfo(builder);
   GameInfo.addMapId(builder, mapIdOffset);
   GameInfo.addGameId(builder, gameIdOffset);
   GameInfo.addGameSpeed(builder, gameSpeed);
   GameInfo.addFrame(builder, frame);
   GameInfo.addPaused(builder, paused);
+  GameInfo.addWindX(builder, windX);
+  GameInfo.addWindY(builder, windY);
+  GameInfo.addWindZ(builder, windZ);
+  GameInfo.addWindStrength(builder, windStrength);
+  GameInfo.addTidalStrength(builder, tidalStrength);
   return GameInfo.endGameInfo(builder);
 }
 
@@ -98,7 +160,12 @@ unpack(): GameInfoT {
     this.gameId(),
     this.gameSpeed(),
     this.frame(),
-    this.paused()
+    this.paused(),
+    this.windX(),
+    this.windY(),
+    this.windZ(),
+    this.windStrength(),
+    this.tidalStrength()
   );
 }
 
@@ -109,6 +176,11 @@ unpackTo(_o: GameInfoT): void {
   _o.gameSpeed = this.gameSpeed();
   _o.frame = this.frame();
   _o.paused = this.paused();
+  _o.windX = this.windX();
+  _o.windY = this.windY();
+  _o.windZ = this.windZ();
+  _o.windStrength = this.windStrength();
+  _o.tidalStrength = this.tidalStrength();
 }
 }
 
@@ -118,7 +190,12 @@ constructor(
   public gameId: string|Uint8Array|null = null,
   public gameSpeed: number = 0.0,
   public frame: number = 0,
-  public paused: boolean = false
+  public paused: boolean = false,
+  public windX: number = 0.0,
+  public windY: number = 0.0,
+  public windZ: number = 0.0,
+  public windStrength: number = 0.0,
+  public tidalStrength: number = 0.0
 ){}
 
 
@@ -131,7 +208,12 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     gameId,
     this.gameSpeed,
     this.frame,
-    this.paused
+    this.paused,
+    this.windX,
+    this.windY,
+    this.windZ,
+    this.windStrength,
+    this.tidalStrength
   );
 }
 }

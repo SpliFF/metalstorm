@@ -42,6 +42,7 @@
 #include "Sim/Units/CommandAI/Command.h"
 #include "Sim/Misc/GlobalConstants.h"
 #include "Sim/Misc/TeamHandler.h"
+#include "Sim/Misc/Wind.h"
 #include "Game/Players/PlayerHandler.h"
 #include "System/EventHandler.h"
 #include "Map/ReadMap.h"
@@ -1341,8 +1342,12 @@ int main(int argc, char* argv[])
         {
         int curFrame = sim.GetFrameNum();
         if (curFrame >= 0 && (curFrame % 30) == 0 && rtcServer.GetClientCount() > 0 && winningTeam < 0) {
+            const float3& wv = envResHandler.GetCurrentWindVec();
             auto msg = Protocol::BuildGameInfo(mapId, gameId, 1.0f,
-                static_cast<uint32_t>(curFrame), false);
+                static_cast<uint32_t>(curFrame), false,
+                wv.x, wv.y, wv.z,
+                envResHandler.GetCurrentWindStrength(),
+                envResHandler.GetCurrentTidalStrength());
             rtcServer.BroadcastReliable(msg.data(), msg.size());
         }
         }

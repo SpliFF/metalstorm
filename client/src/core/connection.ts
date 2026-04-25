@@ -95,7 +95,8 @@ export interface ConnectionEvents {
     onWeaponDefs?: (defs: WeaponDefInfo[]) => void;
     onProjectileState?: (snapshot: ProjectileStateSnapshot) => void;
     onResourceUpdate?: (team: number, metal: number, maxMetal: number, energy: number, maxEnergy: number, metalIncome: number, energyIncome: number) => void;
-    onGameInfo?: (frame: number, speed: number, paused: boolean) => void;
+    onGameInfo?: (frame: number, speed: number, paused: boolean,
+                  wind?: { x: number; y: number; z: number; strength: number; tidal: number }) => void;
     onServerMessage?: (msg: ServerMessage) => void;
 }
 
@@ -492,7 +493,11 @@ export class Connection {
                 break;
             case ServerPayload.GameInfo: {
                 const info = msg.payload(new GameInfo()) as GameInfo;
-                this.events.onGameInfo?.(info.frame(), info.gameSpeed(), info.paused());
+                this.events.onGameInfo?.(info.frame(), info.gameSpeed(), info.paused(), {
+                    x: info.windX(), y: info.windY(), z: info.windZ(),
+                    strength: info.windStrength(),
+                    tidal: info.tidalStrength(),
+                });
                 if (info.paused()) {
                     this.events.onGameOver?.(info.frame());
                 }

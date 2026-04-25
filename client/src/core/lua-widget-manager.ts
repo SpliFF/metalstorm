@@ -291,9 +291,10 @@ export class LuaWidgetManager {
     }
 
     /** Forward game info (frame, speed, paused) to the worker. */
-    forwardGameInfo(frame: number, speed: number, paused: boolean, gameOver: boolean): void {
+    forwardGameInfo(frame: number, speed: number, paused: boolean, gameOver: boolean,
+                    wind?: { x: number; y: number; z: number; strength: number; tidal: number }): void {
         if (!this.worker || this.disposed) return;
-        this.postToWorker({ type: 'gameInfo', frame, speed, paused, gameOver });
+        this.postToWorker({ type: 'gameInfo', frame, speed, paused, gameOver, wind });
     }
 
     /** Update the selection state from the main thread. */

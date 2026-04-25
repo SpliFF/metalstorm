@@ -588,8 +588,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         onResourceUpdate(team, metal, maxMetal, energy, maxEnergy, metalIncome, energyIncome) {
             currentWidgetManager?.forwardResourceUpdate(team, metal, maxMetal, energy, maxEnergy, metalIncome, energyIncome);
         },
-        onGameInfo(frame, speed, paused) {
-            currentWidgetManager?.forwardGameInfo(frame, speed, paused, false);
+        onGameInfo(frame, speed, paused, wind) {
+            currentWidgetManager?.forwardGameInfo(frame, speed, paused, false, wind);
         },
         onGameOver(frame) {
             showGameOver(frame);

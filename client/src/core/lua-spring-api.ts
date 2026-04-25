@@ -158,6 +158,9 @@ export interface LiveState {
      *  needs a server message we don't have yet. */
     markers: Array<{ kind: 'point' | 'line'; x: number; y: number; z: number;
         x2?: number; y2?: number; z2?: number; label: string; teamId: number }>;
+    /** Current wind vector (elmos/sec) + magnitude + tidal multiplier.
+     *  Refreshed every GameInfo broadcast (~1 Hz). */
+    wind: { x: number; y: number; z: number; strength: number; tidal: number };
 }
 
 /** Per-feature entry. */
@@ -248,6 +251,7 @@ export function createDefaultLiveState(): LiveState {
         modOptions: {},
         groups: new Map(),
         markers: [],
+        wind: { x: 0, y: 0, z: 0, strength: 0, tidal: 0 },
     };
 }
 
@@ -434,10 +438,14 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         GetGameSeconds: () => ls.gameFrame / 30,
         GetGameFrame: () => ls.gameFrame,
         GetWind: () => {
-            // Spring returns 7 values: wx, wy, wz, wStr, dx, dy, dz
-            // We stub a gentle breeze — stationary for now.
-            return [0, 0, 0, 0, 0, 0, 0];
+            // Spring returns 7 values: wx, wy, wz, wStrength, dx, dy, dz
+            // where (wx,wy,wz) is the wind vector and (dx,dy,dz) is its
+            // unit-length direction.
+            const w = ls.wind;
+            const inv = w.strength > 1e-6 ? 1 / w.strength : 0;
+            return [w.x, w.y, w.z, w.strength, w.x * inv, w.y * inv, w.z * inv];
         },
+        GetTidal: () => ls.wind.tidal,
         GetGroundHeight: (x: LuaValue, z: LuaValue) => {
             return sampleHeight(ctx, Number(x), Number(z));
         },

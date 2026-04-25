@@ -1908,6 +1908,7 @@ self.onmessage = async (e: MessageEvent) => {
             if (msg.speed !== undefined) liveState.gameSpeed = msg.speed as number;
             if (msg.paused !== undefined) liveState.gamePaused = msg.paused as boolean;
             if (msg.gameOver !== undefined) liveState.gameOver = msg.gameOver as boolean;
+            if (msg.wind) liveState.wind = msg.wind as typeof liveState.wind;
             break;
 
         case 'mapFeatures': {

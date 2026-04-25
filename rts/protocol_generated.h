@@ -3827,7 +3827,12 @@ struct GameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_GAME_ID = 6,
     VT_GAME_SPEED = 8,
     VT_FRAME = 10,
-    VT_PAUSED = 12
+    VT_PAUSED = 12,
+    VT_WIND_X = 14,
+    VT_WIND_Y = 16,
+    VT_WIND_Z = 18,
+    VT_WIND_STRENGTH = 20,
+    VT_TIDAL_STRENGTH = 22
   };
   const ::flatbuffers::String *map_id() const {
     return GetPointer<const ::flatbuffers::String *>(VT_MAP_ID);
@@ -3844,6 +3849,27 @@ struct GameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   bool paused() const {
     return GetField<uint8_t>(VT_PAUSED, 0) != 0;
   }
+  /// Current wind vector (elmos/sec). y is always near 0 in practice.
+  /// Updated server-side every 15 game-seconds; client is free to
+  /// interpolate between snapshots if visual smoothness matters.
+  float wind_x() const {
+    return GetField<float>(VT_WIND_X, 0.0f);
+  }
+  float wind_y() const {
+    return GetField<float>(VT_WIND_Y, 0.0f);
+  }
+  float wind_z() const {
+    return GetField<float>(VT_WIND_Z, 0.0f);
+  }
+  /// |wind_vec| — what Spring.GetWind / wind generators read.
+  float wind_strength() const {
+    return GetField<float>(VT_WIND_STRENGTH, 0.0f);
+  }
+  /// Map's tidal energy multiplier; constant per map but cheaper to
+  /// piggyback here than to add a one-shot message.
+  float tidal_strength() const {
+    return GetField<float>(VT_TIDAL_STRENGTH, 0.0f);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_MAP_ID) &&
@@ -3853,6 +3879,11 @@ struct GameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<float>(verifier, VT_GAME_SPEED, 4) &&
            VerifyField<uint32_t>(verifier, VT_FRAME, 4) &&
            VerifyField<uint8_t>(verifier, VT_PAUSED, 1) &&
+           VerifyField<float>(verifier, VT_WIND_X, 4) &&
+           VerifyField<float>(verifier, VT_WIND_Y, 4) &&
+           VerifyField<float>(verifier, VT_WIND_Z, 4) &&
+           VerifyField<float>(verifier, VT_WIND_STRENGTH, 4) &&
+           VerifyField<float>(verifier, VT_TIDAL_STRENGTH, 4) &&
            verifier.EndTable();
   }
 };
@@ -3876,6 +3907,21 @@ struct GameInfoBuilder {
   void add_paused(bool paused) {
     fbb_.AddElement<uint8_t>(GameInfo::VT_PAUSED, static_cast<uint8_t>(paused), 0);
   }
+  void add_wind_x(float wind_x) {
+    fbb_.AddElement<float>(GameInfo::VT_WIND_X, wind_x, 0.0f);
+  }
+  void add_wind_y(float wind_y) {
+    fbb_.AddElement<float>(GameInfo::VT_WIND_Y, wind_y, 0.0f);
+  }
+  void add_wind_z(float wind_z) {
+    fbb_.AddElement<float>(GameInfo::VT_WIND_Z, wind_z, 0.0f);
+  }
+  void add_wind_strength(float wind_strength) {
+    fbb_.AddElement<float>(GameInfo::VT_WIND_STRENGTH, wind_strength, 0.0f);
+  }
+  void add_tidal_strength(float tidal_strength) {
+    fbb_.AddElement<float>(GameInfo::VT_TIDAL_STRENGTH, tidal_strength, 0.0f);
+  }
   explicit GameInfoBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -3893,8 +3939,18 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfo(
     ::flatbuffers::Offset<::flatbuffers::String> game_id = 0,
     float game_speed = 0.0f,
     uint32_t frame = 0,
-    bool paused = false) {
+    bool paused = false,
+    float wind_x = 0.0f,
+    float wind_y = 0.0f,
+    float wind_z = 0.0f,
+    float wind_strength = 0.0f,
+    float tidal_strength = 0.0f) {
   GameInfoBuilder builder_(_fbb);
+  builder_.add_tidal_strength(tidal_strength);
+  builder_.add_wind_strength(wind_strength);
+  builder_.add_wind_z(wind_z);
+  builder_.add_wind_y(wind_y);
+  builder_.add_wind_x(wind_x);
   builder_.add_frame(frame);
   builder_.add_game_speed(game_speed);
   builder_.add_game_id(game_id);
@@ -3909,7 +3965,12 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfoDirect(
     const char *game_id = nullptr,
     float game_speed = 0.0f,
     uint32_t frame = 0,
-    bool paused = false) {
+    bool paused = false,
+    float wind_x = 0.0f,
+    float wind_y = 0.0f,
+    float wind_z = 0.0f,
+    float wind_strength = 0.0f,
+    float tidal_strength = 0.0f) {
   auto map_id__ = map_id ? _fbb.CreateString(map_id) : 0;
   auto game_id__ = game_id ? _fbb.CreateString(game_id) : 0;
   return SpringWeb::CreateGameInfo(
@@ -3918,7 +3979,12 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfoDirect(
       game_id__,
       game_speed,
       frame,
-      paused);
+      paused,
+      wind_x,
+      wind_y,
+      wind_z,
+      wind_strength,
+      tidal_strength);
 }
 
 struct ReconnectResponse FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
