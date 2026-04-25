@@ -67,6 +67,15 @@ export class LuaWidgetManager {
     private lastMouseX = 0;
     private lastMouseY = 0;
 
+    /** Persistent mouse state for Spring.GetMouseState polling-style queries.
+     *  Updated by always-on listeners (independent of MouseMove callin) and
+     *  shipped to the worker via stateUpdate. outsideSpring starts true so
+     *  widgets see "no pointer" before the cursor enters the canvas. */
+    private mouseState = { x: 0, y: 0, lmb: false, mmb: false, rmb: false, outsideSpring: true };
+
+    /** Listener cleanup for the always-on mouse tracker. */
+    private mouseTrackingCleanups: (() => void)[] = [];
+
     /** Current game frame counter (updated by forwardEntityState) */
     private currentFrame = 0;
     /** Currently selected unit IDs (set from main thread) */
@@ -144,7 +153,11 @@ export class LuaWidgetManager {
         // 6. Start pushing live state to worker at ~10 Hz
         this.stateInterval = setInterval(() => this.pushStateToWorker(), 100);
 
-        // 7. Expose debug API
+        // 7. Always-on mouse tracking for Spring.GetMouseState polling.
+        const engineCanvas = this.scene.getEngine().getRenderingCanvas();
+        if (engineCanvas) this.installMouseTracking(engineCanvas);
+
+        // 8. Expose debug API
         (window as any).widgets = this.buildWindowAPI();
     }
 
@@ -187,7 +200,48 @@ export class LuaWidgetManager {
             viewMatrix,
             projMatrix,
             modKeys: this.modKeys,
+            mouse: this.mouseState,
         });
+    }
+
+    /** Install always-on pointer listeners that keep mouseState fresh.
+     *  Independent of the MouseMove/MousePress callin gates — those gate
+     *  whether widget callbacks fire, while this gates whether
+     *  Spring.GetMouseState returns a stale [0,0] tuple. */
+    private installMouseTracking(canvas: HTMLCanvasElement): void {
+        const move = (e: MouseEvent) => {
+            this.mouseState.x = e.offsetX;
+            this.mouseState.y = canvas.height - e.offsetY;
+            this.mouseState.outsideSpring = false;
+        };
+        const enter = () => { this.mouseState.outsideSpring = false; };
+        const leave = () => {
+            this.mouseState.outsideSpring = true;
+            this.mouseState.lmb = this.mouseState.mmb = this.mouseState.rmb = false;
+        };
+        const down = (e: MouseEvent) => {
+            if (e.button === 0) this.mouseState.lmb = true;
+            else if (e.button === 1) this.mouseState.mmb = true;
+            else if (e.button === 2) this.mouseState.rmb = true;
+        };
+        const up = (e: MouseEvent) => {
+            if (e.button === 0) this.mouseState.lmb = false;
+            else if (e.button === 1) this.mouseState.mmb = false;
+            else if (e.button === 2) this.mouseState.rmb = false;
+        };
+        canvas.addEventListener('mousemove', move);
+        canvas.addEventListener('mouseenter', enter);
+        canvas.addEventListener('mouseleave', leave);
+        // Use window for up so a button released off-canvas still clears.
+        canvas.addEventListener('mousedown', down);
+        window.addEventListener('mouseup', up);
+        this.mouseTrackingCleanups.push(
+            () => canvas.removeEventListener('mousemove', move),
+            () => canvas.removeEventListener('mouseenter', enter),
+            () => canvas.removeEventListener('mouseleave', leave),
+            () => canvas.removeEventListener('mousedown', down),
+            () => window.removeEventListener('mouseup', up),
+        );
     }
 
     /** Track modifier key state */
@@ -728,6 +782,8 @@ export class LuaWidgetManager {
         }
         for (const cleanup of this.inputCleanups) cleanup();
         this.inputCleanups = [];
+        for (const cleanup of this.mouseTrackingCleanups) cleanup();
+        this.mouseTrackingCleanups = [];
 
         if (this.widgetListOverlay) {
             this.widgetListOverlay.remove();

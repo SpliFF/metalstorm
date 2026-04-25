@@ -278,10 +278,6 @@ let startTime = performance.now() / 1000;
 let frameInterval: ReturnType<typeof setInterval> | null = null;
 let initBaseUrl = '';  // saved from init() for re-fetch on enable
 
-// Mouse state updated by main thread messages
-let mouseX = 0, mouseY = 0;
-let mouseButton1 = false, mouseButton2 = false, mouseButton3 = false;
-
 // Live game state updated by main thread messages, read by Spring API
 const liveState: LiveState = createDefaultLiveState();
 
@@ -954,11 +950,6 @@ function installEngineGlobals(
     const springGlobals = buildSpringGlobals(ctx, liveState);
     const glGlobal = glBridge.buildGlGlobal();
 
-    // Override Spring.GetMouseState to use worker-tracked mouse state
-    (springGlobals.Spring as Record<string, LuaValue>).GetMouseState = () => {
-        return [mouseX, mouseY, mouseButton1, mouseButton2, mouseButton3];
-    };
-
     // Override Spring.Echo to route to main thread
     (springGlobals.Spring as Record<string, LuaValue>).Echo =
         (...args: LuaValue[]) => {
@@ -1504,10 +1495,8 @@ self.onmessage = async (e: MessageEvent) => {
             break;
 
         case 'mousepress':
-            mouseX = msg.x; mouseY = msg.y;
-            if (msg.button === 1) mouseButton1 = true;
-            if (msg.button === 2) mouseButton2 = true;
-            if (msg.button === 3) mouseButton3 = true;
+            // liveState.mouse is kept fresh by the main thread's always-on
+            // tracker; this case only fires the widget callin.
             if (runtime) {
                 runtime.doString(`
                     if MousePress then
@@ -1518,10 +1507,6 @@ self.onmessage = async (e: MessageEvent) => {
             break;
 
         case 'mouserelease':
-            mouseX = msg.x; mouseY = msg.y;
-            if (msg.button === 1) mouseButton1 = false;
-            if (msg.button === 2) mouseButton2 = false;
-            if (msg.button === 3) mouseButton3 = false;
             if (runtime) {
                 runtime.doString(`
                     if MouseRelease then
@@ -1542,7 +1527,6 @@ self.onmessage = async (e: MessageEvent) => {
             break;
 
         case 'mousemove':
-            mouseX = msg.x; mouseY = msg.y;
             if (runtime) {
                 runtime.doString(`
                     if MouseMove then
@@ -1612,6 +1596,7 @@ self.onmessage = async (e: MessageEvent) => {
             if (msg.viewMatrix) liveState.viewMatrix = msg.viewMatrix as Float32Array;
             if (msg.projMatrix) liveState.projMatrix = msg.projMatrix as Float32Array;
             if (msg.modKeys) liveState.modKeys = msg.modKeys as { alt: boolean; ctrl: boolean; meta: boolean; shift: boolean };
+            if (msg.mouse) liveState.mouse = msg.mouse as typeof liveState.mouse;
             break;
 
         case 'entityState': {

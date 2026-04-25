@@ -95,6 +95,13 @@ export interface LiveState {
     unitRulesParams: Map<number, Map<string, RulesParamValue>>;
     /** Per-player rules params (Spring.GetPlayerRulesParam). */
     playerRulesParams: Map<number, Map<string, RulesParamValue>>;
+    /** Mouse pointer state (canvas pixels, Y-up). outsideSpring is true
+     *  when the cursor is over a non-game UI element / off the canvas. */
+    mouse: { x: number; y: number; lmb: boolean; mmb: boolean; rmb: boolean; outsideSpring: boolean };
+    /** Currently armed command (e.g. cursor in build placement mode).
+     *  index is 1-based per Spring (-1 = none); cmdId is the int CMD_*
+     *  constant; cmdName is the human-readable name. */
+    activeCommand: { index: number; cmdId: number; cmdName: string };
 }
 
 /** Per-feature entry. */
@@ -160,6 +167,8 @@ export function createDefaultLiveState(): LiveState {
         teamRulesParams: new Map(),
         unitRulesParams: new Map(),
         playerRulesParams: new Map(),
+        mouse: { x: 0, y: 0, lmb: false, mmb: false, rmb: false, outsideSpring: true },
+        activeCommand: { index: -1, cmdId: 0, cmdName: '' },
     };
 }
 
@@ -743,7 +752,10 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         IsGUIHidden: () => false,
         GetModKeyState: () => [ls.modKeys.alt, ls.modKeys.ctrl, ls.modKeys.meta, ls.modKeys.shift],
         GetKeyState: (_keyCode: LuaValue) => false, // would need per-key tracking
-        ScaledGetMouseState: () => [0, 0, false, false, false, false], // x, y, lmb, mmb, rmb, outsideSpring
+        ScaledGetMouseState: () => {
+            const m = ls.mouse;
+            return [m.x, m.y, m.lmb, m.mmb, m.rmb, m.outsideSpring];
+        },
         GetMouseCursor: () => ['', 1.0], // name, scale
         SetMouseCursor: () => {},
         IsAboveMiniMap: () => false,
@@ -763,7 +775,19 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         // --- Misc missing ---
         MarkerAddPoint: () => {},
         MarkerErasePosition: () => {},
-        SetActiveCommand: () => {},
+        SetActiveCommand: (a: LuaValue, _b?: LuaValue, _c?: LuaValue, _d?: LuaValue,
+                          _e?: LuaValue, _f?: LuaValue, _g?: LuaValue, _h?: LuaValue) => {
+            // Spring overloads: SetActiveCommand(idx) | SetActiveCommand(cmdName, btn, lc, rc, alt, ctrl, meta, shift)
+            // We have no command-desc table, so just store whatever the caller gave us.
+            if (typeof a === 'number') {
+                ls.activeCommand = { index: a, cmdId: ls.activeCommand.cmdId, cmdName: ls.activeCommand.cmdName };
+            } else if (typeof a === 'string') {
+                ls.activeCommand = { index: -1, cmdId: 0, cmdName: a };
+            } else {
+                ls.activeCommand = { index: -1, cmdId: 0, cmdName: '' };
+            }
+            return true;
+        },
         GiveOrderToUnit: () => {},
         GiveOrderToUnitArray: () => {},
         GiveOrder: () => {},
@@ -782,7 +806,10 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         HasExtension: () => true,
 
         // --- Active command ---
-        GetActiveCommand: () => [0, 0, ''],
+        GetActiveCommand: () => {
+            const ac = ls.activeCommand;
+            return [ac.index, ac.cmdId, ac.cmdName];
+        },
 
         // --- Sun ---
         GetSun: (_param: LuaValue) => {
@@ -843,7 +870,10 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         SDLSetTextInputRect: () => {},
 
         // --- Mouse ---
-        GetMouseState: () => [0, 0, false, false, false],
+        GetMouseState: () => {
+            const m = ls.mouse;
+            return [m.x, m.y, m.lmb, m.mmb, m.rmb];
+        },
         WarpMouse: () => {},
 
         // --- Team AI ---
