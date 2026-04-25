@@ -1656,6 +1656,70 @@ self.onmessage = async (e: MessageEvent) => {
             liveState.unitRulesParams.delete(msg.entityId as number);
             break;
 
+        case 'rosterUpdate': {
+            // Replace the entire roster snapshot. Cheap (a few hundred
+            // entries at most) and avoids the bookkeeping overhead of
+            // diff-based updates for what is essentially session-static
+            // data. msg shape: { players?, teams?, teamColors?, modOptions? }
+            const players = msg.players as Array<{
+                id: number; name?: string; active?: boolean; spectator?: boolean;
+                team: number; allyTeam?: number; pingMs?: number; cpuUsage?: number;
+                country?: string; rank?: number; hasController?: boolean;
+                customKeys?: Record<string, string>;
+            }> | undefined;
+            const teams = msg.teams as Array<{
+                id: number; allyTeam?: number; leader?: number; isDead?: boolean;
+                isAi?: boolean; side?: string; customKeys?: Record<string, string>;
+            }> | undefined;
+            const teamColors = msg.teamColors as Array<{
+                team: number; r: number; g: number; b: number; a?: number;
+            }> | undefined;
+            const modOptions = msg.modOptions as Record<string, number | string> | undefined;
+
+            if (players) {
+                liveState.players.clear();
+                for (const p of players) {
+                    liveState.players.set(p.id, {
+                        name: p.name ?? `Player${p.id}`,
+                        active: p.active ?? true,
+                        spectator: p.spectator ?? false,
+                        team: p.team,
+                        allyTeam: p.allyTeam ?? p.team,
+                        pingMs: p.pingMs ?? 0,
+                        cpuUsage: p.cpuUsage ?? 0,
+                        country: p.country ?? '',
+                        rank: p.rank ?? 0,
+                        hasController: p.hasController ?? true,
+                        customKeys: p.customKeys ?? {},
+                    });
+                }
+            }
+            if (teams) {
+                liveState.teams.clear();
+                for (const t of teams) {
+                    liveState.teams.set(t.id, {
+                        teamId: t.id,
+                        leader: t.leader ?? -1,
+                        isDead: t.isDead ?? false,
+                        isAiTeam: t.isAi ?? false,
+                        side: t.side ?? '',
+                        allyTeam: t.allyTeam ?? t.id,
+                        customKeys: t.customKeys ?? {},
+                    });
+                }
+            }
+            if (teamColors) {
+                liveState.teamColors.clear();
+                for (const c of teamColors) {
+                    liveState.teamColors.set(c.team, [c.r, c.g, c.b, c.a ?? 1]);
+                }
+            }
+            if (modOptions) {
+                liveState.modOptions = { ...modOptions };
+            }
+            break;
+        }
+
         case 'rulesParamUpdate': {
             // Patch rules-params from the host. msg shape:
             //   scope: 'game' | 'team' | 'unit' | 'player'

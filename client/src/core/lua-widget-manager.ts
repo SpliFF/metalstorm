@@ -300,6 +300,28 @@ export class LuaWidgetManager {
         this.selectedUnitIds = [...ids];
     }
 
+    /** Replace the worker's roster snapshot. Called by the lobby bridge
+     *  immediately after the widget manager is constructed; safe to call
+     *  before the worker has finished bootstrapping (the message queues
+     *  via the underlying Worker). */
+    setRoster(roster: {
+        players?: Array<{
+            id: number; name?: string; active?: boolean; spectator?: boolean;
+            team: number; allyTeam?: number; pingMs?: number; cpuUsage?: number;
+            country?: string; rank?: number; hasController?: boolean;
+            customKeys?: Record<string, string>;
+        }>;
+        teams?: Array<{
+            id: number; allyTeam?: number; leader?: number; isDead?: boolean;
+            isAi?: boolean; side?: string; customKeys?: Record<string, string>;
+        }>;
+        teamColors?: Array<{ team: number; r: number; g: number; b: number; a?: number }>;
+        modOptions?: Record<string, number | string>;
+    }): void {
+        if (!this.worker || this.disposed) return;
+        this.postToWorker({ type: 'rosterUpdate', ...roster });
+    }
+
     /** Forward map features to the worker for GetAllFeatures/GetFeaturePosition. */
     forwardMapFeatures(features: Array<{ typeIndex: number; x: number; y: number; z: number }>): void {
         if (!this.worker || this.disposed) return;

@@ -66,6 +66,35 @@ export interface ResourceEntry {
 /** Spring rules-param values are numbers or strings. */
 export type RulesParamValue = number | string;
 
+/** Player roster entry. Matches the tuple Spring.GetPlayerInfo returns. */
+export interface PlayerInfo {
+    name: string;
+    active: boolean;
+    spectator: boolean;
+    team: number;
+    allyTeam: number;
+    pingMs: number;
+    cpuUsage: number;
+    country: string;
+    rank: number;
+    hasController: boolean;
+    customKeys: Record<string, string>;
+}
+
+/** Team roster entry. Matches Spring.GetTeamInfo. */
+export interface TeamInfo {
+    teamId: number;
+    leader: number;          // playerID of team leader, or -1 for AI/none
+    isDead: boolean;
+    isAiTeam: boolean;
+    side: string;
+    allyTeam: number;
+    customKeys: Record<string, string>;
+}
+
+/** RGBA in 0..1. */
+export type TeamColor = [number, number, number, number];
+
 /** Live game state pushed from the main thread to the worker. */
 export interface LiveState {
     camera: { px: number; py: number; pz: number; tx: number; ty: number; tz: number; fov: number; near: number; far: number };
@@ -102,6 +131,14 @@ export interface LiveState {
      *  index is 1-based per Spring (-1 = none); cmdId is the int CMD_*
      *  constant; cmdName is the human-readable name. */
     activeCommand: { index: number; cmdId: number; cmdName: string };
+    /** Roster: keyed by playerId. Includes spectators. */
+    players: Map<number, PlayerInfo>;
+    /** Roster: keyed by teamId. Gaia (id=1 by default) is included. */
+    teams: Map<number, TeamInfo>;
+    /** Per-team colour. Falls back to a deterministic palette when missing. */
+    teamColors: Map<number, TeamColor>;
+    /** Mod options dict, free-form key-value. */
+    modOptions: Record<string, RulesParamValue>;
 }
 
 /** Per-feature entry. */
@@ -128,6 +165,23 @@ export function normaliseSpringPath(path: string): string {
     // Strip any leading slash.
     if (p.startsWith('/')) p = p.substring(1);
     return p;
+}
+
+/** Deterministic fallback palette when no per-team colour is known.
+ *  Cycles through eight distinct hues so widgets don't render every
+ *  team blue when roster data hasn't arrived yet. */
+function defaultTeamColor(teamId: number): TeamColor {
+    const palette: TeamColor[] = [
+        [0.20, 0.40, 1.00, 1], // blue
+        [1.00, 0.30, 0.30, 1], // red
+        [0.30, 0.85, 0.30, 1], // green
+        [1.00, 0.85, 0.20, 1], // yellow
+        [0.85, 0.40, 0.95, 1], // purple
+        [0.20, 0.85, 0.85, 1], // cyan
+        [1.00, 0.55, 0.20, 1], // orange
+        [0.55, 0.55, 0.55, 1], // grey (gaia by convention)
+    ];
+    return palette[((teamId % palette.length) + palette.length) % palette.length];
 }
 
 /**
@@ -169,6 +223,10 @@ export function createDefaultLiveState(): LiveState {
         playerRulesParams: new Map(),
         mouse: { x: 0, y: 0, lmb: false, mmb: false, rmb: false, outsideSpring: true },
         activeCommand: { index: -1, cmdId: 0, cmdName: '' },
+        players: new Map(),
+        teams: new Map(),
+        teamColors: new Map(),
+        modOptions: {},
     };
 }
 
@@ -381,7 +439,7 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         GetConfigInt: (_key: LuaValue, def: LuaValue) => Number(def ?? 0),
         GetConfigFloat: (_key: LuaValue, def: LuaValue) => Number(def ?? 0),
         GetConfigString: (_key: LuaValue, def: LuaValue) => String(def ?? ''),
-        GetModOptions: () => ({}),
+        GetModOptions: () => ({ ...ls.modOptions }),
         GetViewGeometry: () => {
             return [ls.viewport.width, ls.viewport.height, 0, 0];
         },
@@ -391,7 +449,12 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         GetWindowGeometry: () => {
             return [ls.viewport.width, ls.viewport.height, 0, 0];
         },
-        GetSpectatingState: () => [false, false, false],
+        GetSpectatingState: () => {
+            // Spring returns: spec, fullView, fullSelect.
+            // We don't model fullView/fullSelect so always emit false for those.
+            const me = ls.players.get(ls.identity.myPlayerId);
+            return [me?.spectator ?? false, false, false];
+        },
         IsReplay: () => false,
         GetLocalPlayerID: () => ls.identity.myPlayerId,
         GetMyPlayerID: () => ls.identity.myPlayerId,
@@ -420,18 +483,54 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             console.log('[Spring.Log]', ...args.map(a => String(a ?? '')));
         },
 
-        // --- Player/Team API (stubs returning minimal valid data) ---
+        // --- Player/Team API ---
         // NOTE: Functions returning Lua tables use luaTable() wrapper.
         // Plain JS arrays become multiple return values; luaTable() → single table.
-        GetPlayerList: () => luaTable(0),
-        GetPlayerInfo: (_playerId: LuaValue, _withKeys: LuaValue) => {
-            return ['Player', true, false, ls.identity.myTeam, ls.identity.myAllyTeam, 0, 0, '', '', 0, {}, 0];
+        GetPlayerList: (teamId?: LuaValue, activeOnly?: LuaValue) => {
+            const ids: number[] = [];
+            const filterTeam = teamId == null ? null : Number(teamId);
+            const onlyActive = Boolean(activeOnly);
+            for (const [id, p] of ls.players) {
+                if (filterTeam !== null && p.team !== filterTeam) continue;
+                if (onlyActive && !p.active) continue;
+                ids.push(id);
+            }
+            return luaTable(...ids);
         },
-        GetAllyTeamList: () => luaTable(0, 1),
-        GetTeamList: (_allyTeamId?: LuaValue) => luaTable(0, 1),
+        GetPlayerInfo: (_playerId: LuaValue, _withKeys: LuaValue) => {
+            const id = Number(_playerId ?? -1);
+            const p = ls.players.get(id);
+            if (!p) {
+                // Spring returns nils for an unknown player; widgets typically
+                // test the first return ~= nil before unpacking.
+                return [null];
+            }
+            return [
+                p.name, p.active, p.spectator, p.team, p.allyTeam,
+                p.pingMs, p.cpuUsage, p.country, p.rank, p.hasController,
+                p.customKeys,
+            ];
+        },
+        GetAllyTeamList: () => {
+            const set = new Set<number>();
+            for (const t of ls.teams.values()) set.add(t.allyTeam);
+            return luaTable(...[...set].sort((a, b) => a - b));
+        },
+        GetTeamList: (_allyTeamId?: LuaValue) => {
+            const filter = _allyTeamId == null ? null : Number(_allyTeamId);
+            const ids: number[] = [];
+            for (const [id, t] of ls.teams) {
+                if (filter !== null && t.allyTeam !== filter) continue;
+                ids.push(id);
+            }
+            ids.sort((a, b) => a - b);
+            return luaTable(...ids);
+        },
         GetTeamInfo: (_teamId: LuaValue) => {
             const tid = Number(_teamId ?? 0);
-            return [tid, 0, false, false, '', tid, {}];
+            const t = ls.teams.get(tid);
+            if (!t) return [null];
+            return [t.teamId, t.leader, t.isDead, t.isAiTeam, t.side, t.allyTeam, t.customKeys];
         },
         GetPlayerRulesParam: (playerId: LuaValue, key: LuaValue) => {
             const params = ls.playerRulesParams.get(Number(playerId));
@@ -441,12 +540,8 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             return rulesParamsToTable(ls.playerRulesParams.get(Number(playerId)));
         },
         GetTeamColor: (_teamId: LuaValue) => {
-            // Return RGBA floats (multiple return values)
             const id = Number(_teamId ?? 0);
-            const colors = [
-                [0, 0, 1, 1], [1, 0, 0, 1], [0, 1, 0, 1], [1, 1, 0, 1],
-            ];
-            return colors[id % colors.length];
+            return ls.teamColors.get(id) ?? defaultTeamColor(id);
         },
         GetMyTeamID: () => ls.identity.myTeam,
         GetMyAllyTeamID: () => ls.identity.myAllyTeam,
@@ -523,11 +618,16 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
 
         GetUnitAllyTeam: (id: LuaValue) => {
             const u = ls.units.get(Number(id));
-            return u ? u.team : null; // allyTeam = team for now
+            if (!u) return null;
+            const t = ls.teams.get(u.team);
+            return t ? t.allyTeam : u.team;
         },
         IsUnitAllied: (id: LuaValue) => {
             const u = ls.units.get(Number(id));
-            return u ? u.team === ls.identity.myTeam : false;
+            if (!u) return false;
+            const t = ls.teams.get(u.team);
+            const ally = t ? t.allyTeam : u.team;
+            return ally === ls.identity.myAllyTeam;
         },
         IsUnitSelected: (id: LuaValue) => {
             return ls.selectedUnitIds.includes(Number(id));
@@ -560,8 +660,16 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
                 return [r.energy, r.maxEnergy, 0, r.energyIncome, 0, 0, 0, 0];
             }
         },
-        GetTeamAllyTeamID: (teamId: LuaValue) => Number(teamId ?? 0),
-        AreTeamsAllied: (t1: LuaValue, t2: LuaValue) => Number(t1) === Number(t2),
+        GetTeamAllyTeamID: (teamId: LuaValue) => {
+            const t = ls.teams.get(Number(teamId));
+            return t ? t.allyTeam : Number(teamId ?? 0);
+        },
+        AreTeamsAllied: (t1: LuaValue, t2: LuaValue) => {
+            const a = ls.teams.get(Number(t1));
+            const b = ls.teams.get(Number(t2));
+            if (a && b) return a.allyTeam === b.allyTeam;
+            return Number(t1) === Number(t2);
+        },
 
         // --- Feature queries ---
         GetAllFeatures: () => luaTable(...ls.features.keys()),
@@ -907,7 +1015,12 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             ];
             return colors[id % colors.length];
         },
-        ArePlayersAllied: (p1: LuaValue, p2: LuaValue) => Number(p1) === Number(p2),
+        ArePlayersAllied: (p1: LuaValue, p2: LuaValue) => {
+            const a = ls.players.get(Number(p1));
+            const b = ls.players.get(Number(p2));
+            if (a && b) return a.allyTeam === b.allyTeam;
+            return Number(p1) === Number(p2);
+        },
 
         // --- Debug / profiler ---
         GetLuaMemUsage: () => [0, 0, 0, 0, 0, 0], // luaUI, luaRules, luaGaia mem usage

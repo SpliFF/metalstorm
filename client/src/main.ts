@@ -470,6 +470,39 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             });
             mgr.setLiveDataSources(rtsCamera, conn);
             mgr.forwardMapFeatures(map.features);
+            // Push the lobby's room roster (humans + AI slots) into the
+            // worker so Spring.GetPlayerList/GetTeamList/etc. return real
+            // data. Without this widgets see only the local player. The
+            // lobby is the only source for these in single-host mode —
+            // the game server's auth response carries just myTeam.
+            const room = lobbyUI?.room;
+            if (room) {
+                const players = room.players.map((p) => ({
+                    id: p.playerId,
+                    name: p.username,
+                    spectator: p.isSpectator,
+                    team: p.team,
+                    allyTeam: p.team,
+                }));
+                const aiPlayers = room.aiSlots.map((ai, i) => ({
+                    id: 1000 + i,
+                    name: ai.displayName,
+                    spectator: false,
+                    team: ai.team,
+                    allyTeam: ai.team,
+                }));
+                const allTeams = new Set<number>();
+                for (const p of room.players) allTeams.add(p.team);
+                for (const a of room.aiSlots) allTeams.add(a.team);
+                allTeams.add(1); // gaia
+                const teams = [...allTeams].map((tid) => ({
+                    id: tid,
+                    allyTeam: tid,
+                    isAi: room.aiSlots.some((a) => a.team === tid),
+                    leader: room.players.find((p) => p.team === tid)?.playerId ?? -1,
+                }));
+                mgr.setRoster({ players: [...players, ...aiPlayers], teams });
+            }
             void mgr.initialize().then(() => {
                 console.log(`[client] widget manager ready`);
             }).catch(e => {
