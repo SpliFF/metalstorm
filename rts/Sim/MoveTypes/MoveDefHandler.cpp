@@ -36,30 +36,22 @@ CR_REG_METADATA(MoveDef, (
 
 	CR_MEMBER(depth),
 	CR_MEMBER(depthModParams),
-	CR_MEMBER(height),
 	CR_MEMBER(maxSlope),
 	CR_MEMBER(slopeMod),
 	CR_MEMBER(crushStrength),
-	CR_MEMBER(waterline),
-
 	CR_MEMBER(speedModMults),
 
 	CR_MEMBER(heatMod),
 	CR_MEMBER(flowMod),
-
 	CR_MEMBER(heatProduced),
 
 	CR_MEMBER(followGround),
 	CR_MEMBER(isSubmarine),
 	CR_MEMBER(isSubmersible),
 
-	CR_MEMBER(overrideUnitWaterline),
-
 	CR_MEMBER(avoidMobilesOnPath),
 	CR_MEMBER(allowTerrainCollisions),
-	CR_MEMBER(allowDirectionalPathing),
 	CR_MEMBER(allowRawMovement),
-	CR_MEMBER(preferShortestPath),
 
 	CR_MEMBER(heatMapping),
 	CR_MEMBER(flowMapping)
@@ -69,9 +61,7 @@ CR_REG_METADATA(MoveDefHandler, (
 	CR_MEMBER(moveDefs),
 	CR_MEMBER(nameMap),
 	CR_MEMBER(mdCounter),
-	CR_MEMBER(mdChecksum),
-	CR_MEMBER(largestSize),
-	CR_MEMBER(largestSizeH)
+	CR_MEMBER(mdChecksum)
 ))
 
 
@@ -723,7 +713,7 @@ bool MoveDef::IsInExitOnly(int xmid, int zmid) const {
 	const int xmin = std::max(xmid - xsizeh, 0);
 	const int zmin = std::max(zmid - zsizeh, 0);
 	const int xmax = std::min(xmid + xsizeh, mapDims.mapxm1);
-	const int zmax = std::min(zmid + zsizeh, mapDims.mapym1);
+	const int zmax = std::min(zmid + zsizeh, mapDims.mapxm1);
 
 	const ObjectCollisionMapHelper object;
 	return CMoveMath::RangeHasExitOnly(xmin, xmax, zmin, zmax, object);

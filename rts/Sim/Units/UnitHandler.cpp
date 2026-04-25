@@ -11,16 +11,32 @@
 #include "UnitTypes/Factory.h"
 
 #include "CommandAI/BuilderCAI.h"
+#include "Sim/Ecs/Registry.h"
 #include "Sim/Misc/GlobalSynced.h"
+#include "Sim/Misc/ModInfo.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/MoveTypes/MoveType.h"
+#include "Sim/MoveTypes/Systems/GeneralMoveSystem.h"
+#include "Sim/MoveTypes/Systems/GroundMoveSystem.h"
+#include "Sim/MoveTypes/Systems/UnitTrapCheckSystem.h"
+#include "Sim/Path/IPathManager.h"
 #include "Sim/Weapons/Weapon.h"
 #include "System/EventHandler.h"
 #include "System/Log/ILog.h"
 #include "System/SpringMath.h"
+#include "System/Threading/ThreadPool.h"
 #include "System/TimeProfiler.h"
 #include "System/creg/STL_Deque.h"
 #include "System/creg/STL_Set.h"
+#include "System/Threading/ThreadPool.h"
+#include "Sim/Path/HAPFS/PathGlobal.h"
+
+#include "System/Misc/TracyDefs.h"
+
+#include "System/Config/ConfigHandler.h"
+CONFIG(bool, UpdateWeaponVectorsMT).defaultValue(true).safemodeValue(false).minimumValue(false).description("Enable multithreaded update of weapon vectors");
+CONFIG(bool, UpdateBoundingVolumeMT).defaultValue(true).safemodeValue(false).minimumValue(false).description("Enable multithreaded update of unit bounding volumes");
+
 
 
 CR_BIND(CUnitHandler, )
@@ -52,6 +68,7 @@ CUnitHandler unitHandler;
 
 CUnit* CUnitHandler::NewUnit(const UnitDef* ud)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	// special static builder structures that can always be given
 	// move orders (which are passed on to all mobile buildees)
 	if (ud->IsFactoryUnit())
@@ -78,6 +95,11 @@ CUnit* CUnitHandler::NewUnit(const UnitDef* ud)
 
 
 void CUnitHandler::Init() {
+	RECOIL_DETAILED_TRACY_ZONE;
+	GroundMoveSystem::Init();
+	GeneralMoveSystem::Init();
+	UnitTrapCheckSystem::Init();
+
 	static_assert(sizeof(CBuilder) >= sizeof(CUnit             ), "");
 	static_assert(sizeof(CBuilder) >= sizeof(CBuilding         ), "");
 	static_assert(sizeof(CBuilder) >= sizeof(CExtractorBuilding), "");
@@ -118,6 +140,7 @@ void CUnitHandler::Init() {
 
 void CUnitHandler::Kill()
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	for (CUnit* u: activeUnits) {
 		// ~CUnit dereferences featureHandler which is destroyed already
 		u->KilledScriptFinished(-1);
@@ -153,6 +176,7 @@ void CUnitHandler::Kill()
 
 void CUnitHandler::DeleteScripts()
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	// predelete scripts since they sometimes reference (pieces
 	// of) models, which are already gone before KillSimulation
 	for (CUnit* u: activeUnits) {
@@ -163,6 +187,7 @@ void CUnitHandler::DeleteScripts()
 
 void CUnitHandler::InsertActiveUnit(CUnit* unit)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	idPool.AssignID(unit);
 
 	assert(unit->id < units.size());
@@ -197,6 +222,7 @@ void CUnitHandler::InsertActiveUnit(CUnit* unit)
 
 bool CUnitHandler::AddUnit(CUnit* unit)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	// LoadUnit should make sure this is true
 	assert(CanAddUnit(unit->id));
 
@@ -216,6 +242,7 @@ bool CUnitHandler::AddUnit(CUnit* unit)
 
 bool CUnitHandler::GarbageCollectUnit(unsigned int id)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	if (inUpdateCall)
 		return false;
 
@@ -233,6 +260,7 @@ bool CUnitHandler::GarbageCollectUnit(unsigned int id)
 
 void CUnitHandler::QueueDeleteUnits()
 {
+	ZoneScoped;
 	// gather up dead units
 	for (activeUpdateUnit = 0; activeUpdateUnit < activeUnits.size(); ++activeUpdateUnit) {
 		QueueDeleteUnit(activeUnits[activeUpdateUnit]);
@@ -241,13 +269,14 @@ void CUnitHandler::QueueDeleteUnits()
 
 bool CUnitHandler::QueueDeleteUnit(CUnit* unit)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	if (!unit->deathScriptFinished)
 		return false;
 
 	// there are many ways to fiddle with "deathScriptFinished", so a unit may
 	// arrive here not having been properly killed while isDead is still false
 	// make sure we always call Killed; no-op if isDead was already set to true
-	unit->ForcedKillUnit(nullptr, false, true, true);
+	unit->ForcedKillUnit(nullptr, false, true);
 	unitsToBeRemoved.push_back(unit);
 	return true;
 }
@@ -255,6 +284,7 @@ bool CUnitHandler::QueueDeleteUnit(CUnit* unit)
 
 void CUnitHandler::DeleteUnits()
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	while (!unitsToBeRemoved.empty()) {
 		DeleteUnit(unitsToBeRemoved.back());
 		unitsToBeRemoved.pop_back();
@@ -263,7 +293,10 @@ void CUnitHandler::DeleteUnits()
 
 void CUnitHandler::DeleteUnit(CUnit* delUnit)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	assert(delUnit->isDead);
+	// we want to call RenderUnitDestroyed while the unit is still valid
+	eventHandler.RenderUnitDestroyed(delUnit);
 
 	const auto it = std::find(activeUnits.begin(), activeUnits.end(), delUnit);
 
@@ -289,38 +322,28 @@ void CUnitHandler::DeleteUnit(CUnit* delUnit)
 
 	units[delUnit->id] = nullptr;
 
+	entt::entity delUnitEntity = delUnit->entityReference;
+
 	CSolidObject::SetDeletingRefID(delUnit->id);
 	unitMemPool.free(delUnit);
 	CSolidObject::SetDeletingRefID(-1);
-}
 
+	assert( Sim::registry.valid(delUnitEntity) );
+	Sim::registry.destroy(delUnitEntity);
+}
 
 void CUnitHandler::UpdateUnitMoveTypes()
 {
 	SCOPED_TIMER("Sim::Unit::MoveType");
 
-	for (activeUpdateUnit = 0; activeUpdateUnit < activeUnits.size(); ++activeUpdateUnit) {
-		CUnit* unit = activeUnits[activeUpdateUnit];
-		AMoveType* moveType = unit->moveType;
-
-		unit->SanityCheck();
-		unit->PreUpdate();
-
-		if (moveType->Update())
-			eventHandler.UnitMoved(unit);
-
-		// this unit is not coming back, kill it now without any death
-		// sequence (s.t. deathScriptFinished becomes true immediately)
-		if (!unit->pos.IsInBounds() && (unit->speed.w > MAX_UNIT_SPEED))
-			unit->ForcedKillUnit(nullptr, false, true, false);
-
-		unit->SanityCheck();
-		assert(activeUnits[activeUpdateUnit] == unit);
-	}
+	GroundMoveSystem::Update();
+	GeneralMoveSystem::Update();
+	UnitTrapCheckSystem::Update();
 }
 
 void CUnitHandler::UpdateUnitLosStates()
 {
+	ZoneScoped;
 	for (CUnit* unit: activeUnits) {
 		for (int at = 0; at < teamHandler.ActiveAllyTeams(); ++at) {
 			unit->UpdateLosStatus(at);
@@ -332,48 +355,81 @@ void CUnitHandler::UpdateUnitLosStates()
 void CUnitHandler::SlowUpdateUnits()
 {
 	SCOPED_TIMER("Sim::Unit::SlowUpdate");
+
 	assert(activeSlowUpdateUnit >= 0);
 
 	// reset the iterator every <UNIT_SLOWUPDATE_RATE> frames
 	if ((gs->frameNum % UNIT_SLOWUPDATE_RATE) == 0)
 		activeSlowUpdateUnit = 0;
 
+	const size_t idxBeg = activeSlowUpdateUnit;
+	const size_t maximumCnt = activeUnits.size() - idxBeg;
+	const size_t logicalCnt = (activeUnits.size() / UNIT_SLOWUPDATE_RATE) + 1;
+	const size_t indCnt = logicalCnt > maximumCnt ? maximumCnt : logicalCnt;
+	const size_t idxEnd = idxBeg + indCnt;
+
+	activeSlowUpdateUnit = idxEnd;
 	// stagger the SlowUpdate's
-	for (size_t n = (activeUnits.size() / UNIT_SLOWUPDATE_RATE) + 1; (activeSlowUpdateUnit < activeUnits.size() && n != 0); ++activeSlowUpdateUnit) {
-		CUnit* unit = activeUnits[activeSlowUpdateUnit];
 
-		unit->SanityCheck();
-		unit->SlowUpdate();
-		unit->SlowUpdateWeapons();
-		unit->SanityCheck();
+	static std::vector<CUnit*> updateBoundingVolumeList;
+	updateBoundingVolumeList.clear();
+	{
+		ZoneScopedN("Sim::Unit::SlowUpdateST");
+		for (size_t i = idxBeg; i < idxEnd; ++i) {
+			CUnit* unit = activeUnits[i];
 
-		n--;
+			unit->SanityCheck();
+			unit->SlowUpdate();
+			unit->SlowUpdateWeapons();
+			unit->SanityCheck();
+
+		}
 	}
+	// Bounding volume update removed — model geometry is client-side
 }
 
 void CUnitHandler::UpdateUnits()
 {
 	SCOPED_TIMER("Sim::Unit::Update");
 
-	for (activeUpdateUnit = 0; activeUpdateUnit < activeUnits.size(); ++activeUpdateUnit) {
-		CUnit* unit = activeUnits[activeUpdateUnit];
+	size_t activeUnitCount = activeUnits.size();
+	for (size_t i = 0; i < activeUnitCount; ++i) {
+		CUnit* unit = activeUnits[i];
 
 		unit->SanityCheck();
 		unit->Update();
+		unit->moveType->UpdateCollisionMap();
 		// unsynced; done on-demand when drawing unit
 		// unit->UpdateLocalModel();
 		unit->SanityCheck();
 
-		assert(activeUnits[activeUpdateUnit] == unit);
+		assert(activeUnits[i] == unit);
 	}
 }
 
 void CUnitHandler::UpdateUnitWeapons()
 {
-	SCOPED_TIMER("Sim::Unit::Weapon");
+	{
+		SCOPED_TIMER("Sim::Unit::UpdateWeaponVectors");
 
-	for (activeUpdateUnit = 0; activeUpdateUnit < activeUnits.size(); ++activeUpdateUnit) {
-		activeUnits[activeUpdateUnit]->UpdateWeapons();
+		if (configHandler->GetBool("UpdateWeaponVectorsMT")) {
+			for_mt_chunk(0, activeUnits.size(), [&](const int idx) {
+				auto unit = activeUnits[idx];
+				unit->UpdateWeaponVectors();
+			});
+		}
+		else {
+			for (size_t idx = 0; idx < activeUnits.size(); ++idx) {
+				auto unit = activeUnits[idx];
+				unit->UpdateWeaponVectors();
+			}
+		}
+	}
+	{
+		SCOPED_TIMER("Sim::Unit::Weapon");
+		for (activeUpdateUnit = 0; activeUpdateUnit < activeUnits.size(); ++activeUpdateUnit) {
+			activeUnits[activeUpdateUnit]->UpdateWeapons();
+		}
 	}
 }
 
@@ -397,12 +453,14 @@ void CUnitHandler::Update()
 
 void CUnitHandler::AddBuilderCAI(CBuilderCAI* b)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	// called from CBuilderCAI --> owner is already valid
 	builderCAIs[b->owner->id] = b;
 }
 
 void CUnitHandler::RemoveBuilderCAI(CBuilderCAI* b)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	// called from ~CUnit --> owner is still valid
 	assert(b->owner != nullptr);
 	builderCAIs.erase(b->owner->id);
@@ -411,6 +469,7 @@ void CUnitHandler::RemoveBuilderCAI(CBuilderCAI* b)
 
 void CUnitHandler::ChangeUnitTeam(CUnit* unit, int oldTeamNum, int newTeamNum)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	spring::VectorErase       (GetUnitsByTeamAndDef(oldTeamNum,                 0), unit       );
 	spring::VectorErase       (GetUnitsByTeamAndDef(oldTeamNum, unit->unitDef->id), unit       );
 	spring::VectorInsertUnique(GetUnitsByTeamAndDef(newTeamNum,                 0), unit, false);
@@ -420,6 +479,7 @@ void CUnitHandler::ChangeUnitTeam(CUnit* unit, int oldTeamNum, int newTeamNum)
 
 bool CUnitHandler::CanBuildUnit(const UnitDef* unitdef, int team) const
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	if (teamHandler.Team(team)->AtUnitLimit())
 		return false;
 
@@ -428,6 +488,7 @@ bool CUnitHandler::CanBuildUnit(const UnitDef* unitdef, int team) const
 
 unsigned int CUnitHandler::CalcMaxUnits() const
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	unsigned int n = 0;
 
 	for (unsigned int i = 0; i < teamHandler.ActiveTeams(); i++) {

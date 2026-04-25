@@ -12,13 +12,12 @@
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitHandler.h"
 #include "System/ContainerUtil.h"
-#include "System/HashSpec.h"
 #include "System/SafeUtil.h"
 #include "System/Config/ConfigHandler.h"
 
 #include "System/Misc/TracyDefs.h"
 
-CONFIG(bool, AnimationMT).deprecated(true);
+CONFIG(bool, AnimationMT).defaultValue(true).safemodeValue(false).minimumValue(false).description("Enable multithreaded execution of animation ticks");
 
 static CCobEngine gCobEngine;
 static CCobFileHandler gCobFileHandler;
@@ -130,9 +129,35 @@ void CUnitScriptEngine::Tick(int deltaTime)
 
 	cobEngine->Tick(deltaTime);
 
+	using ImplFunctionT = decltype(&CUnitScriptEngine::ImplTickST);
+	static constexpr ImplFunctionT ImplFunctions[] = { &CUnitScriptEngine::ImplTickST, &CUnitScriptEngine::ImplTickMT };
+	// TODO: remove the conditional once it's proven to be sync safe
+	(this->*ImplFunctions[configHandler->GetBool("AnimationMT")])(deltaTime);
+
+	currentScript = nullptr;
+}
+
+void CUnitScriptEngine::ImplTickST(int deltaTime)
+{
+	ZoneScopedN("CUnitScriptEngine::ImplTickST");
+	// tick all (COB or LUS) script instances that have registered themselves as animating
+	for (size_t i = 0; i < animating.size(); ) {
+		currentScript = animating[i];
+
+		if (!currentScript->Tick(deltaTime)) {
+			animating[i] = animating.back();
+			animating.pop_back();
+			continue;
+		}
+		i++;
+	}
+}
+void CUnitScriptEngine::ImplTickMT(int deltaTime)
+{
+	ZoneScopedN("CUnitScriptEngine::ImplTickMT");
 	// tick all (COB or LUS) script instances that have registered themselves as animating
 	{
-		ZoneScopedN("CUnitScriptEngine::Tick(MT)");
+		ZoneScopedN("CUnitScriptEngine::ImplTickMT(MT)");
 
 		// setting currentScript = animating[i]; is not required here, only in ST section below
 		for_mt(0, animating.size(), [&](const int i) {
@@ -140,25 +165,16 @@ void CUnitScriptEngine::Tick(int deltaTime)
 		});
 	}
 	{
-		ZoneScopedN("CUnitScriptEngine::Tick(ST)");
-
-		uint32_t cs = 0;
-		for (size_t i = 0; i < animating.size(); /*NO-OP*/) {
+		ZoneScopedN("CUnitScriptEngine::ImplTickMT(ST)");
+		for (size_t i = 0; i < animating.size(); ) {
 			currentScript = animating[i];
-			// deal with synced checksum here, before animating is possibly popped below
-			cs = spring::hash_combine(currentScript->GetAnimArrayChecksum(), cs);
 
-			if (!currentScript->TickAnimFinished()) {
+			if (!currentScript->TickAnimFinished(deltaTime)) {
 				animating[i] = animating.back();
 				animating.pop_back();
 				continue;
 			}
 			i++;
 		}
-
-		currentScript = nullptr;
-		Sync::Assert(cs, "animating");
 	}
-
-	cobEngine->RunDeferredCallins();
 }

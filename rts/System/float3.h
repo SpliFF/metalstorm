@@ -352,6 +352,7 @@ public:
 	 *
 	 */
 	bool binarySame(const float3& f) const;
+	bool bitExactEquals(const float3& f) const { return binarySame(f); }
 
 	/**
 	 * @brief dot product

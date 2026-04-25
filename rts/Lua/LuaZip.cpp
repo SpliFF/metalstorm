@@ -3,6 +3,7 @@
 
 /******************************************************************************
  * LuaZip
+ * @module LuaZip
  *
  * @see rts/Lua/LuaZip.cpp
 ******************************************************************************/
@@ -472,7 +473,7 @@ static zip_fileinfo* GenerateZipFileInfo(const std::string& path) {
 
 void RecurseZipFolder(const std::string& folderPath, zipFile& zip, const std::string& zipFolderPath, const std::string& modes) {
 	// recurse through all the subdirs
-	for (const std::string& childFolderPath : CFileHandler::SubDirs(folderPath, "*", modes, false)) {
+	for (const std::string& childFolderPath : CFileHandler::SubDirs(folderPath, "*", modes)) {
 		const std::string childFolderName = FileSystem::GetFilename(childFolderPath.substr(0, childFolderPath.length() - 1));
 		const std::string childZipFolderPath = zipFolderPath + childFolderName + "/";
 
@@ -488,7 +489,7 @@ void RecurseZipFolder(const std::string& folderPath, zipFile& zip, const std::st
 	}
 
 	// iterate through all the files and write them
-	for (const std::string& filePath : CFileHandler::DirList(folderPath, "*", modes, false)) {
+	for (const std::string& filePath : CFileHandler::DirList(folderPath, "*", modes)) {
 		const std::string& fileName = FileSystem::GetFilename(filePath);
 		const std::string zipFilePath = zipFolderPath + fileName;
 

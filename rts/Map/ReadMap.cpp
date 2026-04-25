@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring> // memcpy
 
+#include "xsimd/xsimd.hpp"
 #include "ReadMap.h"
 #include "MapDamage.h"
 #include "MapInfo.h"
@@ -18,16 +19,16 @@
 #include "System/FileSystem/FileHandler.h"
 #include "System/FileSystem/FileSystem.h"
 #include "System/Log/ILog.h"
-#include "System/Sync/HsiehHash.h"
+#include "System/SpringHash.h"
 #include "System/SafeUtil.h"
 #include "System/TimeProfiler.h"
-
-#ifdef USE_UNSYNCED_HEIGHTMAP
+#include "System/XSimdOps.hpp"
 #include "Game/GlobalUnsynced.h"
 #include "Sim/Misc/LosHandler.h"
-#endif
 
-#define MAX_UHM_RECTS_PER_FRAME static_cast<size_t>(128)
+#include "System/Misc/TracyDefs.h"
+
+static constexpr size_t MAX_UHM_RECTS_PER_FRAME = 128;
 
 //////////////////////////////////////////////////////////////////////
 // Construction/Destruction
@@ -55,13 +56,18 @@ CR_REG_METADATA(MapDimensions, (
 
 CR_BIND_INTERFACE(CReadMap)
 CR_REG_METADATA(CReadMap, (
+	CR_IGNORED(hmUpdated),
+	CR_IGNORED(processingHeightBounds),
 	CR_IGNORED(initHeightBounds),
+	CR_IGNORED(tempHeightBounds),
 	CR_IGNORED(currHeightBounds),
+	CR_IGNORED(unsyncedHeightInfo),
 	CR_IGNORED(boundingRadius),
 	CR_IGNORED(mapChecksum),
 
 	CR_IGNORED(heightMapSyncedPtr),
 	CR_IGNORED(heightMapUnsyncedPtr),
+	CR_IGNORED(originalHeightMapPtr),
 
 	/*
 	CR_IGNORED(originalHeightMap),
@@ -87,13 +93,10 @@ CR_REG_METADATA(CReadMap, (
 	CR_IGNORED(sharedSlopeMaps),
 
 	CR_IGNORED(unsyncedHeightMapUpdates),
-	CR_IGNORED(unsyncedHeightMapUpdatesTemp),
 
 	/*
-	#ifdef USE_UNSYNCED_HEIGHTMAP
 	CR_IGNORED(  syncedHeightMapDigests),
 	CR_IGNORED(unsyncedHeightMapDigests),
-	#endif
 	*/
 
 	CR_POSTLOAD(PostLoad),
@@ -107,8 +110,10 @@ CReadMap* readMap = nullptr;
 
 MapDimensions mapDims;
 
+std::vector<float> CReadMap::mapFileHeightMap;
 std::vector<float> CReadMap::originalHeightMap;
 std::vector<float> CReadMap::centerHeightMap;
+std::vector<float> CReadMap::maxHeightMap;
 std::array<std::vector<float>, CReadMap::numHeightMipMaps - 1> CReadMap::mipCenterHeightMaps;
 
 std::vector<float3> CReadMap::visVertexNormals;
@@ -121,17 +126,13 @@ std::vector<float> CReadMap::slopeMap;
 std::vector<uint8_t> CReadMap::typeMap;
 std::vector<float3> CReadMap::centerNormals2D;
 
-#ifdef USE_UNSYNCED_HEIGHTMAP
 std::vector<uint8_t> CReadMap::  syncedHeightMapDigests;
 std::vector<uint8_t> CReadMap::unsyncedHeightMapDigests;
-#endif
-
-
-
 
 
 CReadMap* CReadMap::LoadMap(const std::string& mapName)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	CReadMap* rm = nullptr;
 
 	if (FileSystem::GetExtension(mapName) == "sm3") {
@@ -174,57 +175,83 @@ CReadMap* CReadMap::LoadMap(const std::string& mapName)
 #ifdef USING_CREG
 void CReadMap::Serialize(creg::ISerializer* s)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
+	SerializeMapChangesBeforeMatch(s);
+	SerializeMapChangesDuringMatch(s);
+	SerializeTypeMap(s);
+}
+
+void CReadMap::SerializeMapChangesBeforeMatch(creg::ISerializer* s)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	SerializeMapChanges(s, GetMapFileHeightMapSynced(), const_cast<float*>(GetOriginalHeightMapSynced()));
+}
+
+void CReadMap::SerializeMapChangesDuringMatch(creg::ISerializer* s)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	SerializeMapChanges(s, GetOriginalHeightMapSynced(), const_cast<float*>(GetCornerHeightMapSynced()));
+}
+
+void CReadMap::SerializeMapChanges(creg::ISerializer* s, const float* refHeightMap, float* modifiedHeightMap) {
+	RECOIL_DETAILED_TRACY_ZONE;
 	// using integers so we can xor the original heightmap with the
 	// current one (affected by Lua, explosions, etc) - long runs of
 	// zeros for unchanged squares should compress significantly better.
-	      int32_t*  ichms = reinterpret_cast<      int32_t*>(const_cast<float*>(GetCornerHeightMapSynced()));
-	const int32_t* iochms = reinterpret_cast<const int32_t*>(GetOriginalHeightMapSynced());
-
-	// LuaSynced can also touch the typemap, serialize it (manually)
-	MapBitmapInfo tbi;
-
-	      uint8_t*  itm = typeMap.data();
-	const uint8_t* iotm = GetInfoMap("type", &tbi);
-
-	assert(!typeMap.empty());
-	assert(typeMap.size() == (tbi.width * tbi.height));
+	      int32_t*  ichms = reinterpret_cast<      int32_t*>(modifiedHeightMap);
+	const int32_t* iochms = reinterpret_cast<const int32_t*>(refHeightMap);
 
 	int32_t height;
-	uint8_t type;
 
 	if (s->IsWriting()) {
 		for (unsigned int i = 0; i < (mapDims.mapxp1 * mapDims.mapyp1); i++) {
 			height = ichms[i] ^ iochms[i];
 			s->Serialize(&height, sizeof(int32_t));
 		}
-
-		for (unsigned int i = 0; i < (mapDims.hmapx * mapDims.hmapy); i++) {
-			type = itm[i] ^ iotm[i];
-			s->Serialize(&type, sizeof(uint8_t));
-		}
 	} else {
 		for (unsigned int i = 0; i < (mapDims.mapxp1 * mapDims.mapyp1); i++) {
 			s->Serialize(&height, sizeof(int32_t));
 			ichms[i] = height ^ iochms[i];
 		}
+	}
+}
 
+void CReadMap::SerializeTypeMap(creg::ISerializer* s)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	// LuaSynced can also touch the typemap, serialize it (manually)
+	MapBitmapInfo tbi;
+
+	uint8_t*  itm = typeMap.data();
+	uint8_t* iotm = GetInfoMap("type", &tbi);
+
+	assert(!typeMap.empty());
+	assert(typeMap.size() == (tbi.width * tbi.height));
+
+	if (iotm == nullptr)
+		return;
+
+	uint8_t type;
+
+	if (s->IsWriting()) {
+		for (unsigned int i = 0; i < (mapDims.hmapx * mapDims.hmapy); i++) {
+			type = itm[i] ^ iotm[i];
+			s->Serialize(&type, sizeof(uint8_t));
+		}
+	} else {
 		for (unsigned int i = 0; i < (mapDims.hmapx * mapDims.hmapy); i++) {
 			s->Serialize(&type, sizeof(uint8_t));
 			itm[i] = type ^ iotm[i];
 		}
-
-		mapDamage->RecalcArea(2, mapDims.mapx - 3, 2, mapDims.mapy - 3);
 	}
 
+	FreeInfoMap("type", iotm);
 }
 
 
 void CReadMap::PostLoad()
 {
-	#ifndef USE_UNSYNCED_HEIGHTMAP
-	heightMapUnsyncedPtr = heightMapSyncedPtr;
-	#endif
-
+	RECOIL_DETAILED_TRACY_ZONE;
 	sharedCornerHeightMaps[0] = &(*heightMapUnsyncedPtr)[0];
 	sharedCornerHeightMaps[1] = &(*heightMapSyncedPtr)[0];
 
@@ -240,26 +267,33 @@ void CReadMap::PostLoad()
 	sharedSlopeMaps[0] = &slopeMap[0]; // NO UNSYNCED VARIANT
 	sharedSlopeMaps[1] = &slopeMap[0];
 
-	//FIXME reconstruct
-	/*
 	mipPointerHeightMaps.fill(nullptr);
 	mipPointerHeightMaps[0] = &centerHeightMap[0];
+
 	for (int i = 1; i < numHeightMipMaps; i++) {
+		mipCenterHeightMaps[i - 1].clear();
+		mipCenterHeightMaps[i - 1].resize((mapDims.mapx >> i) * (mapDims.mapy >> i));
+
 		mipPointerHeightMaps[i] = &mipCenterHeightMaps[i - 1][0];
 	}
-	*/
+
+	hmUpdated = true;
+
+	mapDamage->RecalcArea(0, mapDims.mapx, 0, mapDims.mapy);
 }
 #endif //USING_CREG
 
 
 CReadMap::~CReadMap()
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	metalMap.Kill();
 }
 
 
 void CReadMap::Initialize()
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	// set global map info
 	mapDims.Initialize();
 
@@ -271,6 +305,8 @@ void CReadMap::Initialize()
 	{
 	}
 
+	mapFileHeightMap.clear();
+	mapFileHeightMap.resize(mapDims.mapxp1 * mapDims.mapyp1);
 	originalHeightMap.clear();
 	originalHeightMap.resize(mapDims.mapxp1 * mapDims.mapyp1);
 	faceNormalsSynced.clear();
@@ -285,9 +321,13 @@ void CReadMap::Initialize()
 	centerNormals2D.resize(mapDims.mapx * mapDims.mapy);
 	centerHeightMap.clear();
 	centerHeightMap.resize(mapDims.mapx * mapDims.mapy);
+	maxHeightMap.clear();
+	maxHeightMap.resize(mapDims.mapx * mapDims.mapy);
 
 	mipPointerHeightMaps.fill(nullptr);
 	mipPointerHeightMaps[0] = &centerHeightMap[0];
+
+	originalHeightMapPtr = &originalHeightMap;
 
 	for (int i = 1; i < numHeightMipMaps; i++) {
 		mipCenterHeightMaps[i - 1].clear();
@@ -306,17 +346,11 @@ void CReadMap::Initialize()
 	visVertexNormals.clear();
 	visVertexNormals.resize(mapDims.mapxp1 * mapDims.mapyp1);
 
-	// note: if USE_UNSYNCED_HEIGHTMAP is false, then
-	// heightMapUnsyncedPtr points to an empty vector
-	// for SMF maps so indexing it is forbidden (!)
 	assert(heightMapSyncedPtr != nullptr);
 	assert(heightMapUnsyncedPtr != nullptr);
+	assert(originalHeightMapPtr != nullptr);
 
 	{
-		#ifndef USE_UNSYNCED_HEIGHTMAP
-		heightMapUnsyncedPtr = heightMapSyncedPtr;
-		#endif
-
 		sharedCornerHeightMaps[0] = &(*heightMapUnsyncedPtr)[0];
 		sharedCornerHeightMaps[1] = &(*heightMapSyncedPtr)[0];
 
@@ -333,26 +367,47 @@ void CReadMap::Initialize()
 		sharedSlopeMaps[1] = &slopeMap[0];
 	}
 
-	mapChecksum = CalcHeightmapChecksum();
+	InitHeightBounds();
 
 	syncedHeightMapDigests.clear();
 	unsyncedHeightMapDigests.clear();
 
 	// not callable here because losHandler is still uninitialized, deferred to Game::PostLoadSim
 	// InitHeightMapDigestVectors();
-	UpdateHeightMapSynced({0, 0, mapDims.mapx, mapDims.mapy}, true);
+	UpdateHeightMapSynced({0, 0, mapDims.mapx, mapDims.mapy});
 
+	unsyncedHeightInfo.resize(
+		(mapDims.mapx / PATCH_SIZE) * (mapDims.mapy / PATCH_SIZE),
+		float3{
+			initHeightBounds.x,
+			initHeightBounds.y,
+			(initHeightBounds.y + initHeightBounds.x) * 0.5f
+		}
+	);
 	// FIXME: sky & skyLight aren't created yet (crashes in SMFReadMap.cpp)
 	// UpdateDraw(true);
 }
 
-
-unsigned int CReadMap::CalcHeightmapChecksum()
+void CReadMap::InitHeightBounds()
 {
+	RECOIL_DETAILED_TRACY_ZONE;
+	const float* heightmap = GetCornerHeightMapSynced();
+	for (int i = 0; i < (mapDims.mapxp1 * mapDims.mapyp1); ++i) {
+		mapFileHeightMap[i] = heightmap[i];
+	}
+
+	LoadOriginalHeightMapAndChecksum();
+}
+
+void CReadMap::LoadOriginalHeightMapAndChecksum()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
 	const float* heightmap = GetCornerHeightMapSynced();
 
-	initHeightBounds.x =  std::numeric_limits<float>::max();
-	initHeightBounds.y = -std::numeric_limits<float>::max();
+	initHeightBounds.x = std::numeric_limits<float>::max();
+	initHeightBounds.y = std::numeric_limits<float>::lowest();
+
+	tempHeightBounds = initHeightBounds;
 
 	unsigned int checksum = 0;
 
@@ -362,38 +417,52 @@ unsigned int CReadMap::CalcHeightmapChecksum()
 		initHeightBounds.x = std::min(initHeightBounds.x, heightmap[i]);
 		initHeightBounds.y = std::max(initHeightBounds.y, heightmap[i]);
 
-		checksum = HsiehHash(&heightmap[i], sizeof(heightmap[i]), checksum);
+		checksum = spring::LiteHash(&heightmap[i], sizeof(heightmap[i]), checksum);
 	}
 
-	checksum = HsiehHash(mapInfo->map.name.c_str(), mapInfo->map.name.size(), checksum);
+	mapChecksum = spring::LiteHash(mapInfo->map.name.c_str(), mapInfo->map.name.size(), checksum);
 
 	currHeightBounds.x = initHeightBounds.x;
 	currHeightBounds.y = initHeightBounds.y;
+}
 
-	return checksum;
+
+
+
+
+unsigned int CReadMap::CalcHeightmapChecksum()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	const float* heightmap = GetCornerHeightMapSynced();
+
+	unsigned int checksum = 0;
+
+	for (int i = 0; i < (mapDims.mapxp1 * mapDims.mapyp1); ++i) {
+		checksum = spring::LiteHash(&heightmap[i], sizeof(heightmap[i]), checksum);
+	}
+
+	return spring::LiteHash(mapInfo->map.name.c_str(), mapInfo->map.name.size(), checksum);
 }
 
 
 unsigned int CReadMap::CalcTypemapChecksum()
 {
-	unsigned int checksum = HsiehHash(&typeMap[0], typeMap.size() * sizeof(typeMap[0]), 0);
+	RECOIL_DETAILED_TRACY_ZONE;
+	unsigned int checksum = spring::LiteHash(&typeMap[0], typeMap.size() * sizeof(typeMap[0]), 0);
 
 	for (const CMapInfo::TerrainType& tt : mapInfo->terrainTypes) {
-		checksum = HsiehHash(tt.name.c_str(), tt.name.size(), checksum);
-		checksum = HsiehHash(&tt.hardness, offsetof(CMapInfo::TerrainType, receiveTracks) - offsetof(CMapInfo::TerrainType, hardness), checksum);
+		checksum = spring::LiteHash(tt.name.c_str(), tt.name.size(), checksum);
+		checksum = spring::LiteHash(&tt.hardness, offsetof(CMapInfo::TerrainType, receiveTracks) - offsetof(CMapInfo::TerrainType, hardness), checksum);
 	}
 
 	return checksum;
 }
 
 
-
-
-void CReadMap::UpdateHeightMapSynced(const SRectangle& hgtMapRect, bool initialize)
+void CReadMap::UpdateHeightMapSynced(const SRectangle& hgtMapRect)
 {
-	// do not bother with zero-area updates
-	if (hgtMapRect.GetArea() <= 0)
-		return;
+	RECOIL_DETAILED_TRACY_ZONE;
+	const bool initialize = (hgtMapRect == SRectangle{ 0, 0, mapDims.mapx, mapDims.mapy });
 
 	const int2 mins = {hgtMapRect.x1 - 1, hgtMapRect.z1 - 1};
 	const int2 maxs = {hgtMapRect.x2 + 1, hgtMapRect.z2 + 1};
@@ -411,7 +480,6 @@ void CReadMap::UpdateHeightMapSynced(const SRectangle& hgtMapRect, bool initiali
 	UpdateFaceNormals(centerRect, initialize);
 	UpdateSlopemap(centerRect, initialize); // must happen after UpdateFaceNormals()!
 
-	#ifdef USE_UNSYNCED_HEIGHTMAP
 	// push the unsynced update; initial one without LOS check
 	if (initialize) {
 		unsyncedHeightMapUpdates.push_back(cornerRect);
@@ -435,36 +503,90 @@ void CReadMap::UpdateHeightMapSynced(const SRectangle& hgtMapRect, bool initiali
 
 		HeightMapUpdateLOSCheck(cornerRect);
 	}
-	#else
-	unsyncedHeightMapUpdates.push_back(cornerRect);
-	#endif
 }
 
 
-void CReadMap::UpdateCenterHeightmap(const SRectangle& rect, bool initialize)
+void CReadMap::UpdateHeightBounds(int syncFrame)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
+	constexpr int PACING_PERIOD = GAME_SPEED; //tune if needed
+	int dataChunk = syncFrame % PACING_PERIOD;
+
+	if (dataChunk == 0) {
+		if (processingHeightBounds)
+			currHeightBounds = tempHeightBounds;
+
+		processingHeightBounds = hmUpdated;
+		hmUpdated = false;
+	}
+
+	if (!processingHeightBounds)
+		return;
+
+	if (dataChunk == 0) {
+		tempHeightBounds.x = std::numeric_limits<float>::max();
+		tempHeightBounds.y = std::numeric_limits<float>::lowest();
+	}
+
+	const int idxBeg = (dataChunk + 0) * mapDims.mapxp1 * mapDims.mapyp1 / PACING_PERIOD;
+	const int idxEnd = (dataChunk + 1) * mapDims.mapxp1 * mapDims.mapyp1 / PACING_PERIOD;
+	UpdateTempHeightBoundsSIMD(idxBeg, idxEnd);
+}
+
+void CReadMap::UpdateTempHeightBoundsSIMD(size_t idxBeg, size_t idxEnd)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	tempHeightBounds.xy = xsimd::reduce(
+		heightMapSyncedPtr->begin() + idxBeg,
+		heightMapSyncedPtr->begin() + idxEnd,
+		tempHeightBounds.xy,
+		MinOp{}, MaxOp{}
+	);
+}
+
+void CReadMap::UpdateHeightBounds()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	tempHeightBounds.x = std::numeric_limits<float>::max();
+	tempHeightBounds.y = std::numeric_limits<float>::lowest();
+
+	UpdateTempHeightBoundsSIMD(0, mapDims.mapxp1 * mapDims.mapyp1);
+
+	currHeightBounds.x = tempHeightBounds.x;
+	currHeightBounds.y = tempHeightBounds.y;
+}
+
+void CReadMap::UpdateCenterHeightmap(const SRectangle& rect, bool initialize) const
+{
+	RECOIL_DETAILED_TRACY_ZONE;
 	const float* heightmapSynced = GetCornerHeightMapSynced();
 
-	for (int y = rect.z1; y <= rect.z2; y++) {
+	for_mt_chunk(rect.z1, rect.z2 + 1, [heightmapSynced, &rect](const int y) {
 		for (int x = rect.x1; x <= rect.x2; x++) {
-			const int idxTL = (y    ) * mapDims.mapxp1 + x;
-			const int idxTR = (y    ) * mapDims.mapxp1 + x + 1;
-			const int idxBL = (y + 1) * mapDims.mapxp1 + x;
+			const int idxTL = (y + 0) * mapDims.mapxp1 + x + 0;
+			const int idxTR = (y + 0) * mapDims.mapxp1 + x + 1;
+			const int idxBL = (y + 1) * mapDims.mapxp1 + x + 0;
 			const int idxBR = (y + 1) * mapDims.mapxp1 + x + 1;
 
+			const int index = y * mapDims.mapx + x;
 			const float height =
 				heightmapSynced[idxTL] +
 				heightmapSynced[idxTR] +
 				heightmapSynced[idxBL] +
 				heightmapSynced[idxBR];
-			centerHeightMap[y * mapDims.mapx + x] = height * 0.25f;
+			centerHeightMap[index] = height * 0.25f;
+			maxHeightMap[index] = std::max
+					( std::max(heightmapSynced[idxTL], heightmapSynced[idxTR])
+					, std::max(heightmapSynced[idxBL], heightmapSynced[idxBR])
+					);
 		}
-	}
+	}, 256);
 }
 
 
 void CReadMap::UpdateMipHeightmaps(const SRectangle& rect, bool initialize)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	for (int i = 0; i < numHeightMipMaps - 1; i++) {
 		const int hmapx = mapDims.mapx >> i;
 
@@ -492,6 +614,7 @@ void CReadMap::UpdateMipHeightmaps(const SRectangle& rect, bool initialize)
 
 void CReadMap::UpdateFaceNormals(const SRectangle& rect, bool initialize)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	const float* heightmapSynced = GetCornerHeightMapSynced();
 
 	const int z1 = std::max(             0, rect.z1 - 1);
@@ -499,7 +622,7 @@ void CReadMap::UpdateFaceNormals(const SRectangle& rect, bool initialize)
 	const int z2 = std::min(mapDims.mapym1, rect.z2 + 1);
 	const int x2 = std::min(mapDims.mapxm1, rect.x2 + 1);
 
-	for_mt(z1, z2+1, [&](const int y) {
+	for_mt_chunk(z1, z2 + 1, [&](const int y) {
 		float3 fnTL;
 		float3 fnBR;
 
@@ -548,26 +671,25 @@ void CReadMap::UpdateFaceNormals(const SRectangle& rect, bool initialize)
 			centerNormalsSynced[y * mapDims.mapx + x] = (fnTL + fnBR).Normalize();
 			centerNormals2D[y * mapDims.mapx + x] = (fnTL + fnBR).Normalize2D();
 
-			#ifdef USE_UNSYNCED_HEIGHTMAP
 			if (initialize) {
 				faceNormalsUnsynced[(y * mapDims.mapx + x) * 2    ] = faceNormalsSynced[(y * mapDims.mapx + x) * 2    ];
 				faceNormalsUnsynced[(y * mapDims.mapx + x) * 2 + 1] = faceNormalsSynced[(y * mapDims.mapx + x) * 2 + 1];
 				centerNormalsUnsynced[y * mapDims.mapx + x] = centerNormalsSynced[y * mapDims.mapx + x];
 			}
-			#endif
 		}
-	});
+	}, 64);
 }
 
 
 void CReadMap::UpdateSlopemap(const SRectangle& rect, bool initialize)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	const int sx = std::max(0,                 (rect.x1 / 2) - 1);
 	const int ex = std::min(mapDims.hmapx - 1, (rect.x2 / 2) + 1);
 	const int sy = std::max(0,                 (rect.z1 / 2) - 1);
 	const int ey = std::min(mapDims.hmapy - 1, (rect.z2 / 2) + 1);
 
-	for (int y = sy; y <= ey; y++) {
+	for_mt_chunk(sy, ey + 1, [sx, ex](const int y) {
 		for (int x = sx; x <= ex; x++) {
 			const int idx0 = (y*2    ) * (mapDims.mapx) + x*2;
 			const int idx1 = (y*2 + 1) * (mapDims.mapx) + x*2;
@@ -598,13 +720,14 @@ void CReadMap::UpdateSlopemap(const SRectangle& rect, bool initialize)
 
 			slopeMap[y * mapDims.hmapx + x] = 1.0f - slope;
 		}
-	}
+	}, 128);
 }
 
 
 /// split the update into multiple invididual (los-square) chunks
 void CReadMap::HeightMapUpdateLOSCheck(const SRectangle& hgtMapRect)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	// size of LOS square in heightmap coords; divisor is SQUARE_SIZE * 2^mipLevel
 	const        int losSqrSize = losHandler->los.mipDiv / SQUARE_SIZE;
 	const SRectangle losMapRect = hgtMapRect * (SQUARE_SIZE * losHandler->los.invDiv); // LOS space
@@ -632,7 +755,6 @@ void CReadMap::HeightMapUpdateLOSCheck(const SRectangle& hgtMapRect)
 		for (int lmx = losMapRect.x1; lmx <= losMapRect.x2; ++lmx) {
 			hmx = lmx * losSqrSize;
 
-			#ifdef USE_UNSYNCED_HEIGHTMAP
 			// NB:
 			//   LosHandler expects positions in center-heightmap bounds, but hgtMapRect is a corner-rectangle
 			//   as such hmx and hmz have to be clamped by CenterSqrToPos before the center-height is accessed
@@ -640,9 +762,8 @@ void CReadMap::HeightMapUpdateLOSCheck(const SRectangle& hgtMapRect)
 				PushRect(subRect, hmx, hmz);
 				continue;
 			}
-			#endif
 
-			if (!HasHeightMapChanged({lmx, lmz})) {
+			if (!HasHeightMapViewChanged({lmx, lmz})) {
 				PushRect(subRect, hmx, hmz);
 				continue;
 			}
@@ -658,7 +779,8 @@ void CReadMap::HeightMapUpdateLOSCheck(const SRectangle& hgtMapRect)
 
 void CReadMap::InitHeightMapDigestVectors(const int2 losMapSize)
 {
-#if (defined(USE_HEIGHTMAP_DIGESTS) && defined(USE_UNSYNCED_HEIGHTMAP))
+	RECOIL_DETAILED_TRACY_ZONE;
+#if defined(USE_HEIGHTMAP_DIGESTS)
 	assert(losHandler != nullptr);
 	assert(syncedHeightMapDigests.empty());
 
@@ -673,9 +795,10 @@ void CReadMap::InitHeightMapDigestVectors(const int2 losMapSize)
 }
 
 
-bool CReadMap::HasHeightMapChanged(const int2 losMapPos)
+bool CReadMap::HasHeightMapViewChanged(const int2 losMapPos)
 {
-#if (defined(USE_HEIGHTMAP_DIGESTS) && defined(USE_UNSYNCED_HEIGHTMAP))
+	RECOIL_DETAILED_TRACY_ZONE;
+#if defined(USE_HEIGHTMAP_DIGESTS)
 	const int2 losMapSize = losHandler->los.size;
 	const int losMapIdx = losMapPos.x + losMapPos.y * (losMapSize.x + 1);
 
@@ -692,10 +815,9 @@ bool CReadMap::HasHeightMapChanged(const int2 losMapPos)
 #endif
 }
 
-
-#ifdef USE_UNSYNCED_HEIGHTMAP
 void CReadMap::UpdateLOS(const SRectangle& hgtMapRect)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	if (gu->spectatingFullView)
 		return;
 
@@ -718,13 +840,25 @@ void CReadMap::UpdateLOS(const SRectangle& hgtMapRect)
 
 void CReadMap::BecomeSpectator()
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	HeightMapUpdateLOSCheck({0, 0, mapDims.mapx, mapDims.mapy});
 }
-#else
-void CReadMap::UpdateLOS(const SRectangle& hgtMapRect) {}
-void CReadMap::BecomeSpectator() {}
-#endif
 
+namespace {
+	template<typename T>
+	void CopySyncedToUnsyncedImpl(const std::vector<T>& src, std::vector<T>& dst) {
+		std::copy(src.begin(), src.end(), dst.begin());
+	};
+}
 
-bool CReadMap::HasVisibleWater() const { return (!mapInfo->map.voidWater && !IsAboveWater()); }
-bool CReadMap::HasOnlyVoidWater() const { return (mapInfo->map.voidWater && IsUnderWater()); }
+void CReadMap::CopySyncedToUnsynced()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	CopySyncedToUnsyncedImpl(*heightMapSyncedPtr, *heightMapUnsyncedPtr);
+	CopySyncedToUnsyncedImpl(faceNormalsSynced, faceNormalsUnsynced);
+	CopySyncedToUnsyncedImpl(centerNormalsSynced, centerNormalsUnsynced);
+	eventHandler.UnsyncedHeightMapUpdate(SRectangle{ 0, 0, mapDims.mapx, mapDims.mapy });
+}
+
+bool CReadMap::HasVisibleWater()  const { return (!mapInfo->map.voidWater && !IsAboveWater()); }
+bool CReadMap::HasOnlyVoidWater() const { return ( mapInfo->map.voidWater &&  IsUnderWater()); }

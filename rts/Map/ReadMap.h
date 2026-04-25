@@ -14,7 +14,6 @@
 #include "System/creg/creg_cond.h"
 #include "System/Misc/RectangleOverlapHandler.h"
 
-#define USE_UNSYNCED_HEIGHTMAP
 #define USE_HEIGHTMAP_DIGESTS
 
 class CUnit;
@@ -47,8 +46,8 @@ protected:
 	/// called by implementations of CReadMap
 	void Initialize();
 
-	virtual void UpdateHeightMapUnsynced(const SRectangle&) = 0;
-
+	virtual void UpdateHeightMapUnsynced(const SRectangle&) {}
+	virtual void UpdateHeightMapUnsyncedPost() {}
 public:
 	//OK since it's loaded with SerializeObjectInstance
 	CR_DECLARE_STRUCT(CReadMap)
@@ -66,13 +65,13 @@ public:
 	 * calculates derived heightmap information
 	 * such as normals, centerheightmap and slopemap
 	 */
-	void UpdateHeightMapSynced(const SRectangle& hgtMapRect, bool initialize = false);
+	void UpdateHeightMapSynced(const SRectangle& hgtMapRect);
 	void UpdateLOS(const SRectangle& hgtMapRect);
 	void BecomeSpectator();
 
 	virtual ~CReadMap();
 
-	virtual void Update() {}
+	virtual void Update() { UpdateHeightBounds(gs->frameNum); }
 
 	/// Feature creation
 	virtual int GetNumFeatures() = 0;
@@ -91,10 +90,11 @@ public:
 	virtual unsigned char* GetInfoMap(const char* name, MapBitmapInfo* bm) = 0;
 	virtual void FreeInfoMap(const char* name, unsigned char* data) = 0;
 
-
 	/// synced only
+	const float* GetMapFileHeightMapSynced() const { return &mapFileHeightMap[0]; }
 	const float* GetOriginalHeightMapSynced() const { return &originalHeightMap[0]; }
 	const float* GetCenterHeightMapSynced() const { return &centerHeightMap[0]; }
+	const float* GetMaxHeightMapSynced() const { return &maxHeightMap[0]; }
 	const float* GetMIPHeightMapSynced(unsigned int mip) const { return mipPointerHeightMaps[mip]; }
 	const float* GetSlopeMapSynced() const { return &slopeMap[0]; }
 	const uint8_t* GetTypeMapSynced() const { return &typeMap[0]; }
@@ -121,10 +121,16 @@ public:
 	const float3* GetSharedCenterNormals(bool synced) const { return sharedCenterNormals[synced]; }
 	const float* GetSharedSlopeMap(bool synced) const { return sharedSlopeMaps[synced]; }
 
+	// Misc
+	void CopySyncedToUnsynced();
+
 	/// if you modify the heightmap through these, call UpdateHeightMapSynced
 	float SetHeight(const int idx, const float h, const int add = 0);
 	float AddHeight(const int idx, const float a);
 
+	/// These will not modify the current heightmap, only the original
+	float SetOriginalHeight(const int idx, const float h, const int add = 0);
+	float AddOriginalHeight(const int idx, const float a);
 
 	float GetInitMinHeight() const { return initHeightBounds.x; }
 	float GetCurrMinHeight() const { return currHeightBounds.x; }
@@ -144,31 +150,47 @@ public:
 	unsigned int CalcHeightmapChecksum();
 	unsigned int CalcTypemapChecksum();
 
+	void UpdateHeightBounds();
+
+	bool GetHeightMapUpdated() const { return hmUpdated; }
+
+	virtual int2 GetPatch(int hmx, int hmz) const = 0;
+	virtual const float3& GetUnsyncedHeightInfo(int patchX, int patchZ) const = 0;
 private:
-	void UpdateCenterHeightmap(const SRectangle& rect, bool initialize);
+	void InitHeightBounds();
+	void LoadOriginalHeightMapAndChecksum();
+	void UpdateHeightBounds(int syncFrame);
+	void UpdateTempHeightBoundsSIMD(size_t begin, size_t end);
+
+	void UpdateCenterHeightmap(const SRectangle& rect, bool initialize) const;
 	void UpdateMipHeightmaps(const SRectangle& rect, bool initialize);
 	void UpdateFaceNormals(const SRectangle& rect, bool initialize);
 	void UpdateSlopemap(const SRectangle& rect, bool initialize);
 
 	inline void HeightMapUpdateLOSCheck(const SRectangle& hgtMapRect);
-	inline bool HasHeightMapChanged(const int2 losMapPos);
+	inline bool HasHeightMapViewChanged(const int2 losMapPos);
+
+	float SetHeightValue(float& heightRef, const int idx, const float h, const int add = 0);
 
 public:
 	/// number of heightmap mipmaps, including full resolution
 	static constexpr int numHeightMipMaps = 7;
-
+	static constexpr int32_t PATCH_SIZE = 128;
 protected:
 	// these point to the actual heightmap data
 	// which is allocated by subclass instances
 	std::vector<float>* heightMapSyncedPtr = nullptr;      //< size: (mapx+1)*(mapy+1) (per vertex) [SYNCED, updates on terrain deformation]
 	std::vector<float>* heightMapUnsyncedPtr = nullptr;    //< size: (mapx+1)*(mapy+1) (per vertex) [UNSYNCED]
 
+	std::vector<float>* originalHeightMapPtr = nullptr;
 
 	// note: intentionally declared static, s.t. repeated reloading to the same
 	// (or any smaller) map does not fragment the heap which invites bad_alloc's
+	static std::vector<float> mapFileHeightMap;			// raw heightMap unmodified from the map file
 	static std::vector<float> originalHeightMap;        //< size: (mapx+1)*(mapy+1) (per vertex) [SYNCED, does NOT update on terrain deformation]
 	static std::vector<float> centerHeightMap;          //< size: (mapx  )*(mapy  ) (per face) [SYNCED, updates on terrain deformation]
 	static std::array<std::vector<float>, numHeightMipMaps - 1> mipCenterHeightMaps;
+	static std::vector<float> maxHeightMap;			// map for sea/hover to catch coast lines with sharp vertical changes so they don't try to climb the cliff.
 
 	/**
 	 * array of pointers to heightmaps in different resolutions
@@ -189,8 +211,8 @@ protected:
 
 
 	CRectangleOverlapHandler unsyncedHeightMapUpdates;
-	CRectangleOverlapHandler unsyncedHeightMapUpdatesTemp;
 
+	std::vector<float3> unsyncedHeightInfo; // per 128x128 HM patch
 private:
 	// these combine the various synced and unsynced arrays
 	// for branch-less access: [0] = !synced, [1] = synced
@@ -200,18 +222,20 @@ private:
 	const float3* sharedCenterNormals[2];
 	const float* sharedSlopeMaps[2];
 
-#ifdef USE_UNSYNCED_HEIGHTMAP
 	/// these are not "digests", just simple rolling counters
 	/// for each LOS-map square the counter value indicates how many times
 	/// the synced heightmap block of squares corresponding to it has been
 	/// changed, s.t. UHM updates are only pushed when necessary
 	static std::vector<uint8_t>   syncedHeightMapDigests;
 	static std::vector<uint8_t> unsyncedHeightMapDigests;
-#endif
 
 	unsigned int mapChecksum = 0;
 
+	bool processingHeightBounds = false;
+	bool hmUpdated = false;
+
 	float2 initHeightBounds; //< initial minimum- and maximum-height (before any deformations)
+	float2 tempHeightBounds; //< temporary minimum- and maximum-height
 	float2 currHeightBounds; //< current minimum- and maximum-height
 
 	float boundingRadius = 0.0f;
@@ -221,29 +245,30 @@ private:
 extern CReadMap* readMap;
 extern MapDimensions mapDims;
 
-
 inline float CReadMap::AddHeight(const int idx, const float a) { return SetHeight(idx, a, 1); }
 inline float CReadMap::SetHeight(const int idx, const float h, const int add) {
-	float& x = (*heightMapSyncedPtr)[idx];
-
-	// add=0 <--> x = x*0 + h =   h
-	// add=1 <--> x = x*1 + h = x+h
-	x = x * add + h;
-
-	currHeightBounds.x = std::min(x, currHeightBounds.x);
-	currHeightBounds.y = std::max(x, currHeightBounds.y);
-
-	return x;
+	return SetHeightValue((*heightMapSyncedPtr)[idx], idx, h, add);
 }
 
+inline float CReadMap::AddOriginalHeight(const int idx, const float a) { return SetOriginalHeight(idx, a, 1); }
+inline float CReadMap::SetOriginalHeight(const int idx, const float h, const int add) {
+	return SetHeightValue((*originalHeightMapPtr)[idx], idx, h, add);
+}
 
+inline float CReadMap::SetHeightValue(float& heightRef, const int idx, const float h, const int add) {
+	// add=0 <--> x = x*0 + h =   h
+	// add=1 <--> x = x*1 + h = x+h
+	float newHeight = heightRef * add + h;
+	hmUpdated |= (newHeight != heightRef);
+	return (heightRef = newHeight);
+}
 
 
 static inline float3 CornerSqrToPosRaw(const float* hm, int sqx, int sqz) { return {sqx * SQUARE_SIZE * 1.0f, hm[(sqz * mapDims.mapxp1) + sqx], sqz * SQUARE_SIZE * 1.0f}; }
 static inline float3 CenterSqrToPosRaw(const float* hm, int sqx, int sqz) { return {sqx * SQUARE_SIZE * 1.0f, hm[(sqz * mapDims.mapx  ) + sqx], sqz * SQUARE_SIZE * 1.0f}; }
 
-static inline float3 CornerSqrToPos(const float* hm, int sqx, int sqz) { return (CornerSqrToPosRaw(hm, Clamp(sqx, 0, mapDims.mapx  ), Clamp(sqz, 0, mapDims.mapy  ))); }
-static inline float3 CenterSqrToPos(const float* hm, int sqx, int sqz) { return (CenterSqrToPosRaw(hm, Clamp(sqx, 0, mapDims.mapxm1), Clamp(sqz, 0, mapDims.mapym1))); }
+static inline float3 CornerSqrToPos(const float* hm, int sqx, int sqz) { return (CornerSqrToPosRaw(hm, std::clamp(sqx, 0, mapDims.mapx  ), std::clamp(sqz, 0, mapDims.mapy  ))); }
+static inline float3 CenterSqrToPos(const float* hm, int sqx, int sqz) { return (CenterSqrToPosRaw(hm, std::clamp(sqx, 0, mapDims.mapxm1), std::clamp(sqz, 0, mapDims.mapym1))); }
 
 
 static inline float3 CornerSquareToFloat3(int sqx, int sqz) { return (CornerSqrToPosRaw(readMap->GetCornerHeightMapSynced(), sqx, sqz)); }

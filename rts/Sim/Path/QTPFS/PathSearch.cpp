@@ -14,7 +14,6 @@
 #include "Sim/Misc/GlobalConstants.h"
 #include "Sim/Misc/ModInfo.h"
 #include "System/Log/ILog.h"
-#include "Game/SelectedUnitsHandler.h"
 #include "Sim/Objects/SolidObject.h"
 
 #include "Components/PathSpeedModInfo.h"

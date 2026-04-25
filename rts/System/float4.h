@@ -3,6 +3,7 @@
 #ifndef FLOAT4_H
 #define FLOAT4_H
 
+#include <format>
 #include "System/float3.h"
 #include "System/SpringHash.h"
 #include "System/creg/creg_cond.h"

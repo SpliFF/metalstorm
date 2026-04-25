@@ -5,6 +5,7 @@
 
 #include "PlayerBase.h"
 #include "PlayerStatistics.h"
+#include "Lua/LuaRulesParams.h"
 #include "System/creg/creg_cond.h"
 #include "System/UnorderedSet.hpp"
 
@@ -60,6 +61,8 @@ public:
 	int ping = 0;
 
 	PlayerStatistics currentStats;
+
+	LuaRulesParams::Params modParams;
 
 private:
 	spring::unordered_set<int> controlledTeams;

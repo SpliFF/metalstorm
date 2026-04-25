@@ -153,17 +153,8 @@ static bool DoTask(int tid, bool async)
 		auto& queue_background = taskQueuesSyncBackground[async][idx];
 
 		auto tryDequeue = [&](ITaskGroup*& tg){
-		#ifndef UNIT_TEST
-			if (CSyncChecker::InSyncedCode()) {
-				return ( queue.try_dequeue(tg) || queue_background.try_dequeue(tg) );
-			}
-			else {
-				// Synced tasks take priority over unsynced tasks.
-				return ( queue_background.try_dequeue(tg) || queue.try_dequeue(tg) );
-			}
-		#else
+			// Server-authoritative: all sim code is synced, main queue first
 			return ( queue.try_dequeue(tg) || queue_background.try_dequeue(tg) );
-		#endif
 		};
 
 		#ifdef USE_BOOST_LOCKFREE_QUEUE

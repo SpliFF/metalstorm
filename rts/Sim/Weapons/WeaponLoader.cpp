@@ -27,7 +27,7 @@
 #include "Sim/Units/UnitDef.h"
 #include "System/Log/ILog.h"
 
-#include <limits>
+#include "System/Misc/TracyDefs.h"
 
 static std::array<uint8_t, 2048> udWeaponCounts;
 
@@ -43,6 +43,7 @@ void CWeaponLoader::KillStatic() { udWeaponCounts.fill(MAX_WEAPONS_PER_UNIT + 1)
 
 void CWeaponLoader::LoadWeapons(CUnit* unit)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	const UnitDef* unitDef = unit->unitDef;
 	const UnitDefWeapon* udWeapons = &unitDef->GetWeapon(0);
 
@@ -62,6 +63,7 @@ void CWeaponLoader::LoadWeapons(CUnit* unit)
 
 void CWeaponLoader::InitWeapons(CUnit* unit)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	const UnitDef* unitDef = unit->unitDef;
 
 	for (size_t n = 0; n < unit->weapons.size(); n++) {
@@ -71,6 +73,7 @@ void CWeaponLoader::InitWeapons(CUnit* unit)
 
 void CWeaponLoader::FreeWeapons(CUnit* unit)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	for (CWeapon*& w: unit->weapons) {
 		weaponMemPool.free(w);
 	}
@@ -82,6 +85,7 @@ void CWeaponLoader::FreeWeapons(CUnit* unit)
 
 CWeapon* CWeaponLoader::LoadWeapon(CUnit* owner, const WeaponDef* weaponDef)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	if (weaponDef->isNulled)
 		return (weaponMemPool.alloc<CNoWeapon>(owner, weaponDef));
 
@@ -140,6 +144,7 @@ CWeapon* CWeaponLoader::LoadWeapon(CUnit* owner, const WeaponDef* weaponDef)
 
 void CWeaponLoader::InitWeapon(CUnit* owner, CWeapon* weapon, const UnitDefWeapon* defWeapon)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	const WeaponDef* weaponDef = defWeapon->def;
 
 	weapon->reloadTime = std::max(1, int(weaponDef->reload * GAME_SPEED));
@@ -180,5 +185,10 @@ void CWeaponLoader::InitWeapon(CUnit* owner, CWeapon* weapon, const UnitDefWeapo
 	weapon->UpdateRange(weaponDef->range);
 
 	owner->maxRange = std::max(weapon->range, owner->maxRange);
+
+	weapon->weaponAimAdjustPriority = defWeapon->weaponAimAdjustPriority;
+	weapon->fastAutoRetargeting = defWeapon->fastAutoRetargeting;
+	weapon->fastQueryPointUpdate = defWeapon->fastQueryPointUpdate;
+	weapon->burstControlWhenOutOfArc = defWeapon->burstControlWhenOutOfArc;
 }
 

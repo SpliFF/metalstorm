@@ -10,7 +10,9 @@
 #include "LuaHashString.h"
 #include "lib/lua/include/LuaInclude.h" //FIXME needed for GetLuaContextData
 
+#include <map>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #define LUA_HANDLE_ORDER_RULES            100
@@ -34,8 +36,11 @@ struct LuaHashString;
 struct lua_State;
 class LuaRBOs;
 class LuaFBOs;
+class LuaVBOs;
+class LuaVAOs;
 class LuaTextures;
 class LuaShaders;
+class CLuaDisplayLists;
 class CLuaRules;
 
 
@@ -81,6 +86,7 @@ class CLuaHandle : public CEventClient
 
 		// virtual bool PersistOnReload() const { return (GetName() == "LuaMenu"); }
 		virtual bool PersistOnReload() const { return false; }
+		virtual bool SecondaryGLContext() const { return false; }
 
 		// used by LuaSyncedTable and creg save
 		lua_State* GetLuaState() const { return L; }
@@ -93,8 +99,8 @@ class CLuaHandle : public CEventClient
 		LuaTextures& GetTextures(const lua_State* L = nullptr) { return GetLuaContextData(L)->textures; }
 		LuaFBOs& GetFBOs(const lua_State* L = nullptr) { return GetLuaContextData(L)->fbos; }
 		LuaRBOs& GetRBOs(const lua_State* L = nullptr) { return GetLuaContextData(L)->rbos; }
+		CLuaDisplayLists& GetDisplayLists(const lua_State* L = NULL) { return GetLuaContextData(L)->displayLists; }
 #endif
-
 	public: // call-ins
 		bool WantsEvent(const std::string& name) override { return HasCallIn(L, name); }
 		virtual bool HasCallIn(lua_State* L, const std::string& name) const;
@@ -107,6 +113,7 @@ class CLuaHandle : public CEventClient
 		void GameOver(const std::vector<unsigned char>& winningAllyTeams) override;
 		void GamePaused(int playerID, bool paused) override;
 		void GameFrame(int frameNum) override;
+		void GameFramePost(int frameNum) override;
 		void GameID(const unsigned char* gameID, unsigned int numBytes) override;
 
 		void TeamDied(int teamID) override;
@@ -145,8 +152,10 @@ class CLuaHandle : public CEventClient
 		void UnitLeftRadar(const CUnit* unit, int allyTeam) override;
 		void UnitLeftLos(const CUnit* unit, int allyTeam) override;
 
+		void UnitEnteredUnderwater(const CUnit* unit) override;
 		void UnitEnteredWater(const CUnit* unit) override;
 		void UnitEnteredAir(const CUnit* unit) override;
+		void UnitLeftUnderwater(const CUnit* unit) override;
 		void UnitLeftWater(const CUnit* unit) override;
 		void UnitLeftAir(const CUnit* unit) override;
 
@@ -159,6 +168,7 @@ class CLuaHandle : public CEventClient
 		bool UnitUnitCollision(const CUnit* collider, const CUnit* collidee) override;
 		bool UnitFeatureCollision(const CUnit* collider, const CFeature* collidee) override;
 		void UnitMoveFailed(const CUnit* unit) override;
+		void UnitArrivedAtGoal(const CUnit* unit) override;
 
 		void RenderUnitDestroyed(const CUnit* unit) override;
 
@@ -185,8 +195,9 @@ class CLuaHandle : public CEventClient
 		void UnsyncedHeightMapUpdate(const SRectangle& rect) override;
 		void Update() override;
 
-		bool KeyPress(int key, bool isRepeat) override;
-		bool KeyRelease(int key) override;
+		bool KeyMapChanged() override;
+		bool KeyPress(int keyCode, int scanCode, bool isRepeat) override;
+		bool KeyRelease(int keyCode, int scanCode) override;
 		bool TextInput(const std::string& utf8) override;
 		bool TextEditing(const std::string& utf8, unsigned int start, unsigned int length) override;
 		bool MouseMove(int x, int y, int dx, int dy, int button) override;
@@ -226,20 +237,19 @@ class CLuaHandle : public CEventClient
 		void SunChanged() override;
 
 		void DrawGenesis() override;
-		void DrawWater() override;
-		void DrawSky() override;
-		void DrawSun() override;
-		void DrawGrass() override;
-		void DrawTrees() override;
 		void DrawWorld() override;
 		void DrawWorldPreUnit() override;
+		void DrawPreDecals() override;
 		void DrawWorldPreParticles() override;
+		void DrawWaterPost() override;
 		void DrawWorldShadow() override;
+		void DrawShadowPassTransparent() override;
 		void DrawWorldReflection() override;
 		void DrawWorldRefraction() override;
 		void DrawGroundPreForward() override;
 		void DrawGroundPostForward() override;
 		void DrawGroundPreDeferred() override;
+		void DrawGroundDeferred() override;
 		void DrawGroundPostDeferred() override;
 		void DrawUnitsPostDeferred() override;
 		void DrawFeaturesPostDeferred() override;
@@ -249,6 +259,13 @@ class CLuaHandle : public CEventClient
 		void DrawScreen() override;
 		void DrawInMiniMap() override;
 		void DrawInMiniMapBackground() override;
+
+		void DrawOpaqueUnitsLua(bool deferredPass, bool drawReflection, bool drawRefraction) override;
+		void DrawOpaqueFeaturesLua(bool deferredPass, bool drawReflection, bool drawRefraction) override;
+		void DrawAlphaUnitsLua(bool drawReflection, bool drawRefraction) override;
+		void DrawAlphaFeaturesLua(bool drawReflection, bool drawRefraction) override;
+		void DrawShadowUnitsLua() override;
+		void DrawShadowFeaturesLua() override;
 
 		void GameProgress(int frameNum) override;
 		void Pong(uint8_t pingTag, const spring_time pktSendTime, const spring_time pktRecvTime) override;
@@ -281,7 +298,7 @@ class CLuaHandle : public CEventClient
 		static void PushTracebackFuncToRegistry(lua_State* L);
 
 		bool AddBasicCalls(lua_State* L);
-		bool LoadCode(lua_State* L, const std::string& code, const std::string& debug);
+		bool LoadCode(lua_State* L, std::string code, const std::string& debug);
 		static bool AddEntriesToTable(lua_State* L, const char* name, bool (*entriesFunc)(lua_State*));
 
 		/// returns error code and sets traceback on error
@@ -298,7 +315,10 @@ class CLuaHandle : public CEventClient
 
 		void RunDrawCallIn(const LuaHashString& hs);
 
+		void DrawObjectsLua(std::initializer_list<bool> bools, const char* func);
+		void InitializeRmlUi();
 	protected:
+		bool rmlui = false;
 		bool userMode = false;
 		bool killMe = false; // set for handles that fail to RunCallIn
 
@@ -309,6 +329,9 @@ class CLuaHandle : public CEventClient
 		luaContextData D;
 
 		std::string killMsg;
+
+		std::map <int, std::vector <std::pair <int, std::vector <int>>>> delayedCallsByFrame;
+		void RunDelayedFunctions(int frameNum);
 
 		std::vector<bool> watchUnitDefs;        // callin masks for Unit*Collision, UnitMoveFailed
 		std::vector<bool> watchFeatureDefs;     // callin masks for UnitFeatureCollision
@@ -331,13 +354,18 @@ class CLuaHandle : public CEventClient
 		static int CallOutGetCallInList(lua_State* L);
 		static int CallOutUpdateCallIn(lua_State* L);
 		static int CallOutIsEngineMinVersion(lua_State* L);
+		static int CallOutDelayByFrames(lua_State* L);
 
 	public: // static
 #if (!defined(UNITSYNC) && !defined(DEDICATED) && !defined(HEADLESS))
 		static inline LuaShaders& GetActiveShaders(lua_State* L) { return GetLuaContextData(L)->shaders; }
 		static inline LuaTextures& GetActiveTextures(lua_State* L) { return GetLuaContextData(L)->textures; }
+		static inline LuaAtlasTextures& GetActiveAtlasTextures(lua_State* L) { return GetLuaContextData(L)->atlasTextures; }
 		static inline LuaFBOs& GetActiveFBOs(lua_State* L) { return GetLuaContextData(L)->fbos; }
 		static inline LuaRBOs& GetActiveRBOs(lua_State* L) { return GetLuaContextData(L)->rbos; }
+		static inline LuaVBOs& GetActiveVBOs(lua_State* L) { return GetLuaContextData(L)->vbos; }
+		static inline LuaVAOs& GetActiveVAOs(lua_State* L) { return GetLuaContextData(L)->vaos; }
+		static inline CLuaDisplayLists& GetActiveDisplayLists(lua_State* L) { return GetLuaContextData(L)->displayLists; }
 #endif
 
 		static void SetDevMode(bool value) { devMode = value; }
@@ -353,6 +381,8 @@ class CLuaHandle : public CEventClient
 
 		// FIXME needs access to L & RunCallIn
 		friend class CLuaRules;
+
+		friend class CLuaStateCollector;
 };
 
 

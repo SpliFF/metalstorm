@@ -6,8 +6,6 @@
 #include "minizip/zip.h"
 
 #include "Game/GlobalUnsynced.h"
-#include "Game/LoadScreen.h"
-#include "Net/Protocol/NetProtocol.h"
 
 #include "Sim/Misc/ModInfo.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
@@ -29,10 +27,11 @@
 #include "System/Platform/Threading.h"
 #include "System/StringUtil.h"
 #include "System/Threading/ThreadPool.h" // for_mt
+#include "System/TimeProfiler.h"
 
 #include "System/Misc/TracyDefs.h"
 
-#define ENABLE_NETLOG_CHECKSUM 1
+#define ENABLE_NETLOG_CHECKSUM 0  // P2P sync checksums not needed on server-authoritative
 
 static constexpr int BLOCK_UPDATE_DELAY_FRAMES = GAME_SPEED / 2;
 
@@ -48,7 +47,7 @@ PCMemPool pcMemPool;
 
 static const std::string GetPathCacheDir() {
 	RECOIL_DETAILED_TRACY_ZONE;
-	return (FileSystem::GetCacheDir() + FileSystem::GetNativePathSeparator() + "paths" + FileSystem::GetNativePathSeparator());
+	return (FileSystem::GetCacheDir() + "/" + "paths" + "/");
 }
 
 static const std::string GetCacheFileName(const std::string& fileHashCode, const std::string& peFileName, const std::string& mapFileName) {
@@ -232,7 +231,7 @@ void PathingState::InitEstimator(const std::string& peFileName, const std::strin
 
 		{
 			sprintf(calcMsg, fmtStrs[numThreads==1], __func__, BLOCK_SIZE, numThreads);
-			loadscreen->SetLoadMessage(calcMsg);
+			LOG("%s", calcMsg);
 		}
 
 		// Mark block directions as dirty to ensure they get updated.
@@ -249,12 +248,12 @@ void PathingState::InitEstimator(const std::string& peFileName, const std::strin
 		std::for_each(nodeFlags.begin(), nodeFlags.end(), [](std::uint8_t& f){ f = 0; });
 
 		sprintf(calcMsg, fmtStrs[2], __func__, BLOCK_SIZE, peFileName.c_str(), fileHashCode);
-		loadscreen->SetLoadMessage(calcMsg, true);
+		LOG("%s", calcMsg, true);
 
 		WriteFile(peFileName, mapFileName);
 
 		sprintf(calcMsg, fmtStrs[3], __func__, BLOCK_SIZE, peFileName.c_str(), fileHashCode);
-		loadscreen->SetLoadMessage(calcMsg, true);
+		LOG("%s", calcMsg, true);
 	}
 
 	// calculate checksum over block-offsets and vertex-costs
@@ -306,7 +305,6 @@ void PathingState::CalculateBlockOffsets(unsigned int blockIdx, unsigned int thr
 
 	if (threadNum == 0 && blockIdx >= nextOffsetMessageIdx) {
 		nextOffsetMessageIdx = blockIdx + blockStates.GetSize() / 16;
-		clientNet->Send(CBaseNetProtocol::Get().SendCPUUsage(BLOCK_SIZE | (blockIdx << 8)));
 	}
 
 	for (unsigned int i = 0; i < moveDefHandler.GetNumMoveDefs(); i++) {
@@ -373,8 +371,7 @@ void PathingState::EstimatePathCosts(unsigned int blockIdx, unsigned int threadN
 		char calcMsg[128];
 		sprintf(calcMsg, "[%s] precached %d of %d blocks", __func__, blockIdx, blockStates.GetSize());
 
-		clientNet->Send(CBaseNetProtocol::Get().SendCPUUsage(0x1 | BLOCK_SIZE | (blockIdx << 8)));
-		loadscreen->SetLoadMessage(calcMsg, (blockIdx != 0));
+		LOG("%s", calcMsg);
 	}
 
 	for (unsigned int i = 0; i < moveDefHandler.GetNumMoveDefs(); i++) {
@@ -512,7 +509,7 @@ bool PathingState::ReadFile(const std::string& peFileName, const std::string& ma
 
 	char calcMsg[512];
 	sprintf(calcMsg, "Reading Estimate PathCosts [%d]", BLOCK_SIZE);
-	loadscreen->SetLoadMessage(calcMsg);
+	LOG("%s", calcMsg);
 
 	const unsigned fid = upfile->FindFile("pathinfo");
 	if (fid >= upfile->NumFiles()) {
@@ -871,6 +868,7 @@ std::uint32_t PathingState::CalcChecksum() const
 	}
 	#endif
 
+	#if (ENABLE_NETLOG_CHECKSUM == 1)
 	// make path-estimator checksum part of synced state s.t. when
 	// a client has a corrupted or stale cache it desyncs from the
 	// start, not minutes later
@@ -884,6 +882,7 @@ std::uint32_t PathingState::CalcChecksum() const
 		if (chksum == 0)
 			chksum = su;
 	}
+	#endif
 
 	return chksum;
 }

@@ -78,3 +78,6 @@ infolog.txt
 !.claude/
 .claude/*
 !.claude/skills/
+
+# Vite development server for frontend
+/client/.vite

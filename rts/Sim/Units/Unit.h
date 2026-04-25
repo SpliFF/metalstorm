@@ -11,6 +11,21 @@
 #include "System/Matrix44f.h"
 #include "System/type2.h"
 
+// Added only to calculate the size of unit memory buffers.
+// change as appropriate if the largest type changes.
+
+// for amtMemBuffer
+#include "Sim/MoveTypes/GroundMoveType.h"
+
+// for smtMemBuffer
+#include "Sim/MoveTypes/ScriptMoveType.h"
+
+// for caiMemBuffer
+#include "Sim/Units/CommandAI/BuilderCAI.h"
+
+// for usMemBuffer
+#include "Sim/Units/Scripts/LuaUnitScript.h"
+
 
 class CPlayer;
 class CCommandAI;
@@ -26,31 +41,34 @@ struct UnitDef;
 struct UnitLoadParams;
 struct SLosInstance;
 
+namespace icon {
+	class CIconData;
+}
 
 // LOS state bits
-#define LOS_INLOS      (1 << 0)  // the unit is currently in the los of the allyteam
-#define LOS_INRADAR    (1 << 1)  // the unit is currently in radar from the allyteam
-#define LOS_PREVLOS    (1 << 2)  // the unit has previously been in los from the allyteam
-#define LOS_CONTRADAR  (1 << 3)  // the unit has continuously been in radar since it was last inlos by the allyteam
+static constexpr uint8_t LOS_INLOS     = (1 << 0);  // the unit is currently in the los of the allyteam
+static constexpr uint8_t LOS_INRADAR   = (1 << 1);  // the unit is currently in radar from the allyteam
+static constexpr uint8_t LOS_PREVLOS   = (1 << 2);  // the unit has previously been in los from the allyteam
+static constexpr uint8_t LOS_CONTRADAR = (1 << 3);  // the unit has continuously been in radar since it was last inlos by the allyteam
 
-#define LOS_MASK_SHIFT 4
+static constexpr uint8_t LOS_MASK_SHIFT = 4;
 
 // LOS mask bits  (masked bits are not automatically updated)
-#define LOS_INLOS_MASK     (LOS_INLOS << LOS_MASK_SHIFT)   // do not update LOS_INLOS
-#define LOS_INRADAR_MASK   (LOS_INRADAR << LOS_MASK_SHIFT)   // do not update LOS_INRADAR
-#define LOS_PREVLOS_MASK   (LOS_PREVLOS << LOS_MASK_SHIFT)  // do not update LOS_PREVLOS
-#define LOS_CONTRADAR_MASK (LOS_CONTRADAR << LOS_MASK_SHIFT)  // do not update LOS_CONTRADAR
+static constexpr uint8_t LOS_INLOS_MASK     = (LOS_INLOS     << LOS_MASK_SHIFT);  // do not update LOS_INLOS
+static constexpr uint8_t LOS_INRADAR_MASK   = (LOS_INRADAR   << LOS_MASK_SHIFT);  // do not update LOS_INRADAR
+static constexpr uint8_t LOS_PREVLOS_MASK   = (LOS_PREVLOS   << LOS_MASK_SHIFT);  // do not update LOS_PREVLOS
+static constexpr uint8_t LOS_CONTRADAR_MASK = (LOS_CONTRADAR << LOS_MASK_SHIFT);  // do not update LOS_CONTRADAR
 
-#define LOS_ALL_BITS \
-	(LOS_INLOS      | LOS_INRADAR      | LOS_PREVLOS      | LOS_CONTRADAR)
-#define LOS_ALL_MASK_BITS \
-	(LOS_INLOS_MASK | LOS_INRADAR_MASK | LOS_PREVLOS_MASK | LOS_CONTRADAR_MASK)
+static constexpr uint8_t LOS_ALL_BITS = \
+	(LOS_INLOS      | LOS_INRADAR      | LOS_PREVLOS      | LOS_CONTRADAR);
+static constexpr uint8_t LOS_ALL_MASK_BITS = \
+	(LOS_INLOS_MASK | LOS_INRADAR_MASK | LOS_PREVLOS_MASK | LOS_CONTRADAR_MASK);
 
 
 class CUnit : public CSolidObject
 {
 public:
-	CR_DECLARE_DERIVED(CUnit)
+	CR_DECLARE(CUnit)
 
 	CUnit();
 	virtual ~CUnit();
@@ -66,42 +84,39 @@ public:
 	virtual void Update();
 	virtual void SlowUpdate();
 
-	const SolidObjectDef* GetDef() const override { return ((const SolidObjectDef*) unitDef); }
+	const SolidObjectDef* GetDef() const { return ((const SolidObjectDef*) unitDef); }
 
-	virtual void DoDamage(const DamageArray& damages, const float3& impulse, CUnit* attacker, int weaponDefID, int projectileID) override;
+	virtual void DoDamage(const DamageArray& damages, const float3& impulse, CUnit* attacker, int weaponDefID, int projectileID);
 	virtual void DoWaterDamage();
 	virtual void FinishedBuilding(bool postInit);
 
 	void ApplyDamage(CUnit* attacker, const DamageArray& damages, float& baseDamage, float& experienceMod);
-	void ApplyImpulse(const float3& impulse) override;
+	void ApplyImpulse(const float3& impulse);
 
 	bool AttackUnit(CUnit* unit, bool isUserTarget, bool wantManualFire, bool fpsMode = false);
 	bool AttackGround(const float3& pos, bool isUserTarget, bool wantManualFire, bool fpsMode = false);
 	void DropCurrentAttackTarget();
 
-	int GetBlockingMapID() const override { return id; }
+	int GetBlockingMapID() const { return id; }
 
 	void ChangeLos(int losRad, int airRad);
 	// negative amount=reclaim, return= true -> build power was successfully applied
-	bool AddBuildPower(CUnit* builder, float amount) override;
+	bool AddBuildPower(CUnit* builder, float amount);
 
-	void Activate();
-	void Deactivate();
+	virtual void Activate();
+	virtual void Deactivate();
 
-	void ForcedMove(const float3& newPos) override;
+	void ForcedMove(const float3& newPos);
 
 	void DeleteScript();
 	void EnableScriptMoveType();
 	void DisableScriptMoveType();
 
-	CMatrix44f GetTransformMatrix(bool synced = false, bool fullread = false) const final override;
+	CMatrix44f GetTransformMatrix(bool synced = false, bool fullread = false) const final;
 
-	void DependentDied(CObject* o) override;
+	void DependentDied(CObject* o);
 
 	bool AllowedReclaim(CUnit* builder) const;
-
-	void SetMetalStorage(float newStorage);
-	void SetEnergyStorage(float newStorage);
 
 	bool UseMetal(float metal);
 	void AddMetal(float metal, bool useIncomeMultiplier = true);
@@ -124,13 +139,13 @@ public:
 
 	void AddExperience(float exp);
 
-	void SetMass(float newMass) override;
+	void SetMass(float newMass);
 
 	void DoSeismicPing(float pingSize);
 
 	void CalculateTerrainType();
 	void UpdateTerrainType();
-	void UpdatePhysicalState(float eps) override;
+	void UpdatePhysicalState(float eps);
 
 	float3 GetErrorVector(int allyteam) const;
 	float3 GetErrorPos(int allyteam, bool aiming = false) const { return (aiming? aimPos: midPos) + GetErrorVector(allyteam); }
@@ -169,10 +184,11 @@ public:
 	bool IsInLosForAllyTeam(int allyTeam) const { return ((losStatus[allyTeam] & LOS_INLOS) != 0); }
 
 	void SetLosStatus(int allyTeam, unsigned short newStatus);
+	unsigned short CalcLosStatus(int allyTeam);
 	void UpdateLosStatus(int allyTeam);
-	unsigned short CalcLosStatus(int allyTeam) const;
 
 	void UpdateWeapons();
+	void UpdateWeaponVectors();
 
 	void SlowUpdateWeapons();
 	void SlowUpdateKamikaze(bool scanForTargets);
@@ -217,8 +233,8 @@ public:
 
 public:
 	void KilledScriptFinished(int wreckLevel) { deathScriptFinished = true; delayedWreckLevel = wreckLevel; }
-	void ForcedKillUnit(CUnit* attacker, bool selfDestruct, bool reclaimed, bool showDeathSequence = true);
-	virtual void KillUnit(CUnit* attacker, bool selfDestruct, bool reclaimed, bool showDeathSequence = true);
+	void ForcedKillUnit(CUnit* attacker, bool selfDestruct, bool reclaimed);
+	virtual void KillUnit(CUnit* attacker, bool selfDestruct, bool reclaimed);
 	virtual void IncomingMissile(CMissileProjectile* missile);
 
 	void TempHoldFire(int cmdID);
@@ -239,6 +255,13 @@ public: // unsynced methods
 	const CGroup* GetGroup() const;
 	      CGroup* GetGroup();
 
+	bool GetIsIcon() const { return HasDrawFlag(DrawFlags::SO_DRICON_FLAG); }
+	void SetIsIcon(bool b) {
+		if (b)
+			AddDrawFlag(DrawFlags::SO_DRICON_FLAG);
+		else
+			DelDrawFlag(DrawFlags::SO_DRICON_FLAG);
+	}
 public:
 	static void  SetEmpDeclineRate(float value) { empDeclineRate = value; }
 	static void  SetExpMultiplier(float value) { expMultiplier = value; }
@@ -254,9 +277,8 @@ public:
 	static float GetExpGrade() { return expGrade; }
 
 	static float ExperienceScale(const float limExperience, const float experienceWeight) {
-		// limExperience ranges from 0.0 to 0.9999..., experienceWeight
-		// should be in [0, 1] and have no effect on accuracy when zero
-		return (1.0f - (limExperience * experienceWeight));
+		// limExperience ranges from 0.0 to 0.9999...
+		return std::max(0.0f, 1.0f - (limExperience * experienceWeight));
 	}
 
 public:
@@ -289,15 +311,15 @@ public:
 
 
 	// sufficient for the largest UnitScript (CLuaUnitScript)
-	uint8_t usMemBuffer[400];
+	uint8_t usMemBuffer[sizeof(CLuaUnitScript)];
 	// sufficient for the largest AMoveType (CGroundMoveType)
 	// need two buffers since ScriptMoveType might be enabled
-	uint8_t amtMemBuffer[512];
-	uint8_t smtMemBuffer[384];
+	uint8_t amtMemBuffer[sizeof(CGroundMoveType)];
+	uint8_t smtMemBuffer[sizeof(CScriptMoveType)];
 	// sufficient for the largest CommandAI type (CBuilderCAI)
 	// knowing the exact CAI object size here is not required;
 	// static asserts will catch any overflow
-	uint8_t caiMemBuffer[700];
+	uint8_t caiMemBuffer[sizeof(CBuilderCAI)];
 
 
 	std::vector<CWeapon*> weapons;
@@ -307,9 +329,9 @@ public:
 
 	// indicates the los/radar status each allyteam has on this unit
 	// should technically be MAX_ALLYTEAMS, but #allyteams <= #teams
-	std::array<unsigned char, /*MAX_TEAMS*/ 255> losStatus{{0}};
+	std::array<uint8_t, /*MAX_TEAMS*/ 255> losStatus{{0}};
 	// bit-mask indicating which allyteams see this unit with positional error
-	std::array<unsigned  int, /*MAX_TEAMS/32*/ 8> posErrorMask{{1}};
+	std::array<uint32_t, /*MAX_TEAMS/32*/ 8> posErrorMask{{1}};
 
 	// quads the unit is part of
 	std::vector<int> quads;
@@ -366,6 +388,7 @@ public:
 	// id of transport that the unit is about to be {un}loaded by
 	int loadingTransportId = -1;
 	int unloadingTransportId = -1;
+	bool requestRemoveUnloadTransportId = false;
 
 	int transportCapacityUsed = 0;
 	float transportMassUsed = 0.0f;
@@ -430,7 +453,7 @@ public:
 	// the amount of storage the unit contributes to the team
 	SResourcePack storage;
 
-	// per unit metal storage (gets filled on reclaim and needs then to be unloaded at some storage building -> 2nd part is lua's job)
+	// per unit storage (gets filled on reclaim and needs then to be unloaded at some storage building -> 2nd part is lua's job)
 	SResourcePack harvestStorage;
 	SResourcePack harvested;
 
@@ -529,10 +552,12 @@ public:
 	bool leaveTracks = false;
 
 	bool isSelected = false;
-	bool isIcon = false;
 
 	float iconRadius = 0.0f;
 
+	icon::CIconData* myIcon = nullptr;
+
+	bool drawIcon = true;
 private:
 	// if we are stunned by a weapon or for other reason, access via IsStunned/SetStunned(bool)
 	bool stunned = false;

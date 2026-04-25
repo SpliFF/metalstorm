@@ -44,7 +44,6 @@ namespace QTPFS {
 		std::uint32_t GetPathCheckSum() const override { return pfsCheckSum; }
 
 		std::int64_t Finalize() override;
-		std::int64_t PostFinalizeRefresh() override;
 
 		bool PathUpdated(unsigned int pathID) override;
 		void ClearPathUpdated(unsigned int pathID) override;
@@ -63,8 +62,7 @@ namespace QTPFS {
 			float3 sourcePos,
 			float3 targetPos,
 			float radius,
-			bool synced,
-			bool immediateResult = false
+			bool synced
 		) override;
 
 		float3 NextWayPoint(
@@ -130,7 +128,6 @@ namespace QTPFS {
 		void RemovePathSearch(QTPFS::entity pathEntity);
 
 		void ReadyQueuedSearches();
-		void ProcessPathSearch(int i, bool shouldBeRaw);
 		void ExecuteQueuedSearches();
 		void QueueDeadPathSearches();
 
@@ -141,7 +138,6 @@ namespace QTPFS {
 			const float3& targetPoint,
 			const float radius,
 			const bool synced,
-			const bool externalRequest,
 			const bool allowRawSearch
 		);
 
@@ -157,11 +153,10 @@ namespace QTPFS {
 		bool ExecuteSearch(
 			PathSearch* search,
 			NodeLayer& nodeLayer,
-			unsigned int pathType,
-			bool immediateSearch
+			unsigned int pathType
 		);
 
-		unsigned int ExecuteImmediateSearch(unsigned int pathId);
+		unsigned int ExecuteUnsyncedSearch(unsigned int pathId);
 
 		bool IsFinalized() const { return isFinalized; }
 

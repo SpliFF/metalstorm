@@ -25,11 +25,13 @@ message(STATUS "Build stamp: ${SPRING_BUILD_STAMP}")
 # Headless server defines
 add_definitions(
     -DHEADLESS
+    -DDEDICATED
     -DNO_SOUND
     -DBITMAP_NO_OPENGL
     -DNOT_USING_CREG
     -DAUTHORITATIVE_SERVER
     -DDEDICATED_NOSSE
+    -DTHREADPOOL
     -DSPRING_BUILD_STAMP="${SPRING_BUILD_STAMP}"
 )
 
@@ -140,6 +142,11 @@ if(UNIX)
     target_link_libraries(lua m)
 endif()
 
+# === smmalloc (Recoil's small memory allocator) ===
+file(GLOB SMMALLOC_SOURCES rts/lib/smmalloc/*.cpp)
+add_library(smmalloc STATIC ${SMMALLOC_SOURCES})
+target_include_directories(smmalloc PUBLIC rts/lib/smmalloc)
+
 # === Collect all sim sources ===
 
 # System utilities (platform-independent core)
@@ -155,6 +162,21 @@ list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "MemoryOverride")
 list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Log/TracySink")
 list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Log/OutputDebugStringSink")
 list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "TraceMemory")
+list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Sync/DumpHistory")
+# Legacy P2P networking (replaced by WebRTC/HTTP)
+list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Net/UDPListener")
+list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Net/UDPConnection")
+list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Net/LocalConnection")
+list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Net/LoopbackConnection")
+list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Net/PackPacket")
+list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Net/RawPacket")
+list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Net/ProtocolDef")
+list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Net/Socket\\.cpp")
+# Linux-only on macOS
+list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Platform/Linux/CpuTopology")
+list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Platform/Linux/Hardware")
+list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Platform/ThreadAffinityGuard")
+list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Platform/CpuTopologyCommon")
 
 # Platform filtering — only compile for the current OS
 if(NOT WIN32)
@@ -176,15 +198,25 @@ endif()
 
 # Game sources
 file(GLOB_RECURSE GAME_SOURCES rts/Game/*.cpp)
+list(FILTER GAME_SOURCES EXCLUDE REGEX "Camera/DollyController")
+list(FILTER GAME_SOURCES EXCLUDE REGEX "GameInputReceiver")
+list(FILTER GAME_SOURCES EXCLUDE REGEX "IGameCommands")
+list(FILTER GAME_SOURCES EXCLUDE REGEX "UI/ScanCodes")
+list(FILTER GAME_SOURCES EXCLUDE REGEX "UI/IKeys")
 
 # Simulation sources
 file(GLOB_RECURSE SIM_SOURCES rts/Sim/*.cpp)
+# SaveLoadUtils needs cereal (header-only serialization library)
+# list(FILTER SIM_SOURCES EXCLUDE REGEX "Ecs/SaveLoadUtils")
 
 # Map sources
 file(GLOB_RECURSE MAP_SOURCES rts/Map/*.cpp)
+list(FILTER MAP_SOURCES EXCLUDE REGEX "Map/Generation/")
 
 # Lua binding sources
 file(GLOB_RECURSE LUA_BINDING_SOURCES rts/Lua/*.cpp)
+# Exclude rendering-only Lua bindings (GL buffers, VAO/VBO, Tracy extras)
+list(FILTER LUA_BINDING_SOURCES EXCLUDE REGEX "Lua(VBO|VAO|VBOImpl|VAOImpl|TracyExtra)\\.cpp$")
 
 # Server sources
 file(GLOB_RECURSE SERVER_SOURCES rts/Server/*.cpp)
@@ -206,10 +238,11 @@ target_include_directories(spring-server PRIVATE
     ${CMAKE_SOURCE_DIR}/rts/lib
     ${CMAKE_SOURCE_DIR}/rts/lib/lua/include
     ${CMAKE_SOURCE_DIR}/rts/lib/lua/src
+    ${CMAKE_SOURCE_DIR}/rts/lib/cereal/include
     ${GENERATED_DIR}
 )
 find_package(ZLIB REQUIRED)
-target_link_libraries(spring-server PRIVATE lua nghttp2_static flatbuffers ZLIB::ZLIB SQLite::SQLite3 springlog springlog-net springlog-sqlite LibDataChannel::LibDataChannelStatic)
+target_link_libraries(spring-server PRIVATE lua smmalloc nghttp2_static flatbuffers ZLIB::ZLIB SQLite::SQLite3 springlog springlog-net springlog-sqlite LibDataChannel::LibDataChannelStatic)
 
 # Link platform libraries
 if(UNIX AND NOT APPLE)
@@ -296,9 +329,10 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/lib
         ${CMAKE_SOURCE_DIR}/rts/lib/lua/include
         ${CMAKE_SOURCE_DIR}/rts/lib/lua/src
+        ${CMAKE_SOURCE_DIR}/rts/lib/cereal/include
         ${GENERATED_DIR}
     )
-    target_link_libraries(spring-tests PRIVATE lua ZLIB::ZLIB doctest::doctest springlog)
+    target_link_libraries(spring-tests PRIVATE lua smmalloc ZLIB::ZLIB doctest::doctest springlog)
     if(UNIX AND NOT APPLE)
         target_link_libraries(spring-tests PRIVATE pthread dl)
     elseif(APPLE)

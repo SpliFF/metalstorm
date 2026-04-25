@@ -40,9 +40,6 @@ class CUnsyncedLuaHandle : public CLuaHandle
 			return static_cast<CUnsyncedLuaHandle*>(CLuaHandle::GetHandle(L));
 		}
 
-		static int GetWatchExplosionDef(lua_State* L);
-		static int SetWatchExplosionDef(lua_State* L);
-
 	protected:
 		CSplitLuaHandle& base;
 };
@@ -127,8 +124,6 @@ class CSyncedLuaHandle : public CLuaHandle
 		virtual ~CSyncedLuaHandle();
 
 		bool Init(std::string code, const std::string& file);
-
-		void EnactDevMode() const override;
 
 		static CSyncedLuaHandle* GetSyncedHandle(lua_State* L) {
 			assert(dynamic_cast<CSyncedLuaHandle*>(CLuaHandle::GetHandle(L)));
@@ -265,6 +260,7 @@ class CSplitLuaHandle
 		virtual int GetInitSelectTeam() const = 0;
 
 		// call-outs
+		static int LoadStringData(lua_State* L);
 		static int CallAsTeam(lua_State* L);
 
 	public:

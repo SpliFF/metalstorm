@@ -8,6 +8,7 @@
 #include <limits>
 #include <vector>
 #include <deque>
+#include "System/Misc/TracyDefs.h"
 #include <cinttypes>
 
 #include "System/Rectangle.h"

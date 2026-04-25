@@ -128,6 +128,10 @@ public:
 	float GetGroundHeight(const float3&) const;
 
 	void SyncWaypoints() {
+		if (moveFailed){
+			Fail(false);
+			moveFailed = false;
+		}
 		// Synced vars trigger a checksum update on change, which is expensive so we should check
 		// that there has been a change before triggering an update to the checksum.
 		if (!currWayPoint.bitExactEquals(earlyCurrWayPoint))
@@ -292,6 +296,7 @@ private:
 	bool atGoal = true;
 	bool atEndOfPath = true;
 	bool wantRepath = false;
+	bool moveFailed = false;
 	bool lastWaypoint = false;
 
 	bool reversing = false;

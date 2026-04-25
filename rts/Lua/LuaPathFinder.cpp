@@ -235,7 +235,7 @@ int LuaPathFinder::RequestPath(lua_State* L)
 	const float radius = luaL_optfloat(L, 8, 8.0f);
 
 	const bool synced = CLuaHandle::GetHandleSynced(L);
-	const int pathID = pathManager->RequestPath(nullptr, moveDef, start, end, radius, synced, true);
+	const int pathID = pathManager->RequestPath(nullptr, moveDef, start, end, radius, synced);
 
 	if (pathID == 0)
 		return 0;

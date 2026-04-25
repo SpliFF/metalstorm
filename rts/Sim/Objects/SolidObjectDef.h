@@ -6,6 +6,7 @@
 #include <string>
 
 #include "Sim/Misc/CollisionVolume.h"
+#include "Sim/Misc/Resource.h"
 #include "Sim/Units/Scripts/LocalModelPieceStub.h"
 #include "System/UnorderedMap.hpp"
 
@@ -28,7 +29,7 @@ public:
 	float groundDecalDecaySpeed;
 
 	bool leaveTrackDecals;
-	int trackDecalType;
+	//int trackDecalType;
 	float trackDecalWidth;
 	float trackDecalOffset;
 	float trackDecalStrength;
@@ -56,8 +57,7 @@ public:
 	int xsize;
 	int zsize;
 
-	float metal;
-	float energy;
+	SResourcePack cost;
 	float health;
 	float mass;
 	float crushResistance;

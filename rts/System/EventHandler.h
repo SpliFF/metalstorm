@@ -11,11 +11,10 @@
 #include "Sim/Features/Feature.h"
 #include "Sim/Projectiles/Projectile.h"
 
-struct CExplosionParams;
 class CWeapon;
 struct Command;
 struct BuildInfo;
-struct WeaponDef;
+class LuaMaterial;
 
 class CEventHandler
 {
@@ -66,11 +65,21 @@ class CEventHandler
 		void UnitCreated(const CUnit* unit, const CUnit* builder);
 		void UnitFinished(const CUnit* unit);
 		void UnitReverseBuilt(const CUnit* unit);
-		void UnitConstructionDecayed(const CUnit* unit, float timeSinceLastBuild, float iterationPeriod, float part);
 		void UnitFromFactory(const CUnit* unit, const CUnit* factory, bool userOrders);
-		void UnitDestroyed(const CUnit* unit, const CUnit* attacker, int weaponDefID);
+		void UnitDestroyed(const CUnit* unit, const CUnit* attacker);
 		void UnitTaken(const CUnit* unit, int oldTeam, int newTeam);
 		void UnitGiven(const CUnit* unit, int oldTeam, int newTeam);
+
+
+		//FIXME no events
+		void RenderUnitPreCreated(const CUnit* unit);
+		void RenderUnitCreated(const CUnit* unit, int cloaked);
+		void RenderUnitDestroyed(const CUnit* unit);
+		void RenderFeaturePreCreated(const CFeature* feature);
+		void RenderFeatureCreated(const CFeature* feature);
+		void RenderFeatureDestroyed(const CFeature* feature);
+		void RenderProjectileCreated(const CProjectile* proj);
+		void RenderProjectileDestroyed(const CProjectile* proj);
 
 		void UnitIdle(const CUnit* unit);
 		void UnitCommand(const CUnit* unit, const Command& command, int playerNum, bool fromSynced, bool fromLua);
@@ -125,7 +134,7 @@ class CEventHandler
 		void ProjectileCreated(const CProjectile* proj, int allyTeam);
 		void ProjectileDestroyed(const CProjectile* proj, int allyTeam);
 
-		bool Explosion(int weaponDefID, const WeaponDef* weaponDef, const CExplosionParams& params);
+		bool Explosion(int weaponDefID, int projectileID, const float3& pos, const CUnit* owner);
 
 		void StockpileChanged(const CUnit* unit,
 		                      const CWeapon* weapon, int oldCount);
@@ -253,6 +262,43 @@ class CEventHandler
 
 		void ViewResize();
 
+		// see the DRAW_CALLIN macro for implementations
+		void DrawGenesis();
+		void DrawWorld();
+		void DrawWorldPreUnit();
+		void DrawPreDecals();
+		void DrawWorldPreParticles();
+		void DrawWaterPost();
+		void DrawWorldShadow();
+		void DrawShadowPassTransparent();
+		void DrawWorldReflection();
+		void DrawWorldRefraction();
+		void DrawGroundPreForward();
+		void DrawGroundPostForward();
+		void DrawGroundPreDeferred();
+		void DrawGroundDeferred();
+		void DrawGroundPostDeferred();
+		void DrawUnitsPostDeferred();
+		void DrawFeaturesPostDeferred();
+		void DrawScreenPost();
+		void DrawScreenEffects();
+		void DrawScreen();
+		void DrawInMiniMap();
+		void DrawInMiniMapBackground();
+
+		bool DrawUnit(const CUnit* unit);
+		bool DrawFeature(const CFeature* feature);
+		bool DrawShield(const CUnit* unit, const CWeapon* weapon);
+		bool DrawProjectile(const CProjectile* projectile);
+		bool DrawMaterial(const LuaMaterial* material);
+
+		void DrawOpaqueUnitsLua(bool deferredPass, bool drawReflection, bool drawRefraction);
+		void DrawOpaqueFeaturesLua(bool deferredPass, bool drawReflection, bool drawRefraction);
+		void DrawAlphaUnitsLua(bool drawReflection, bool drawRefraction);
+		void DrawAlphaFeaturesLua(bool drawReflection, bool drawRefraction);
+		void DrawShadowUnitsLua();
+		void DrawShadowFeaturesLua();
+
 		/// @brief this UNSYNCED event is generated every GameServer::gameProgressFrameInterval
 		/// it skips network queuing and caching and can be used to calculate the current catchup
 		/// percentage when reconnecting to a running game
@@ -363,9 +409,9 @@ inline void CEventHandler::UnitCreated(const CUnit* unit, const CUnit* builder)
 }
 
 
-inline void CEventHandler::UnitDestroyed(const CUnit* unit, const CUnit* attacker, int weaponDefID)
+inline void CEventHandler::UnitDestroyed(const CUnit* unit, const CUnit* attacker)
 {
-	ITERATE_UNIT_ALLYTEAM_EVENTCLIENTLIST(UnitDestroyed, unit, attacker, weaponDefID)
+	ITERATE_UNIT_ALLYTEAM_EVENTCLIENTLIST(UnitDestroyed, unit, attacker)
 }
 
 #define UNIT_CALLIN_NO_PARAM(name)                                 \
@@ -417,12 +463,6 @@ UNIT_CALLIN_LOS_PARAM(LeftRadar)
 UNIT_CALLIN_LOS_PARAM(LeftLos)
 
 
-inline void CEventHandler::UnitConstructionDecayed(const CUnit* unit,
-                                                   float timeSinceLastBuild, float iterationPeriod,
-                                                   float part)
-{
-	ITERATE_UNIT_ALLYTEAM_EVENTCLIENTLIST(UnitConstructionDecayed, unit, timeSinceLastBuild, iterationPeriod, part)
-}
 
 inline void CEventHandler::UnitFromFactory(const CUnit* unit,
                                                const CUnit* factory,
@@ -651,7 +691,7 @@ inline void CEventHandler::UnsyncedHeightMapUpdate(const SRectangle& rect)
 
 
 
-inline bool CEventHandler::Explosion(int weaponDefID, const WeaponDef* weaponDef, const CExplosionParams& params)
+inline bool CEventHandler::Explosion(int weaponDefID, int projectileID, const float3& pos, const CUnit* owner)
 {
 	auto& clients = listExplosion;
 
@@ -661,7 +701,7 @@ inline bool CEventHandler::Explosion(int weaponDefID, const WeaponDef* weaponDef
 		// discard return-value from clients lacking full-read access
 		// (redundant for synced gadgets; watchWeaponDefs is checked)
 		// NOTE: the call-in may remove itself from the client list
-		if (!ec->Explosion(weaponDefID, weaponDef, params) || !ec->GetFullRead()) {
+		if (!ec->Explosion(weaponDefID, projectileID, pos, owner) || !ec->GetFullRead()) {
 			i += (i < clients.size() && ec == clients[i]);
 			continue;
 		}
@@ -690,6 +730,42 @@ inline void CEventHandler::DefaultCommand(const CUnit* unit, const CFeature* fea
 
 		ec->DefaultCommand(unit, feature, cmd);
 	}
+}
+
+
+UNIT_CALLIN_NO_PARAM(RenderUnitPreCreated)
+
+inline void CEventHandler::RenderUnitCreated(const CUnit* unit, int cloaked)
+{
+	ITERATE_EVENTCLIENTLIST(RenderUnitCreated, unit, cloaked)
+}
+
+UNIT_CALLIN_NO_PARAM(RenderUnitDestroyed)
+
+inline void CEventHandler::RenderFeaturePreCreated(const CFeature* feature)
+{
+	ITERATE_EVENTCLIENTLIST(RenderFeaturePreCreated, feature)
+}
+
+inline void CEventHandler::RenderFeatureCreated(const CFeature* feature)
+{
+	ITERATE_EVENTCLIENTLIST(RenderFeatureCreated, feature)
+}
+
+inline void CEventHandler::RenderFeatureDestroyed(const CFeature* feature)
+{
+	ITERATE_EVENTCLIENTLIST(RenderFeatureDestroyed, feature)
+}
+
+
+inline void CEventHandler::RenderProjectileCreated(const CProjectile* proj)
+{
+	ITERATE_EVENTCLIENTLIST(RenderProjectileCreated, proj)
+}
+
+inline void CEventHandler::RenderProjectileDestroyed(const CProjectile* proj)
+{
+	ITERATE_EVENTCLIENTLIST(RenderProjectileDestroyed, proj)
 }
 
 

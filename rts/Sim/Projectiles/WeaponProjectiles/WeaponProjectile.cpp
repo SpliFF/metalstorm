@@ -182,6 +182,7 @@ void CWeaponProjectile::Explode(
 		damages->edgeEffectiveness,
 		damages->explosionSpeed,
 		weaponDef->noExplode? 0.3f: 1.0f,                 // gfxMod
+		0.0f,                                             // maxGroundDeformation
 		weaponDef->impactOnly,
 		weaponDef->noExplode || weaponDef->noSelfDamage,  // ignoreOwner
 		true,                                             // damgeGround

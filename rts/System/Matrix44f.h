@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <array>
+#include <format>
 #include <tuple>
 
 #include "System/float3.h"

@@ -4,7 +4,6 @@
 #define MOD_INFO_H
 
 #include <string>
-#include "Sim/Misc/Resource.h"
 #include "Sim/Path/PFSTypes.h"
 
 class CModInfo
@@ -63,20 +62,6 @@ public:
 	// a lower number will increase CPU load, but improve reaction time of collision avoidance
 	int groundUnitCollisionAvoidanceUpdateRate;
 
-	// Guard behaviour
-	/// The distance that a guardee must move before the guard goal is recalculated
-	float guardRecalculateThreshold;
-	/// The distance that a guardian will stop at nearing a stopped guardee
-	float guardStoppedProximityGoal;
-	/// The extra distance a guardian will keep from a stopped guardee
-	float guardStoppedExtraDistance;
-	/// The distance the guardian is considered to be in guarding range and will match the velocity
-	float guardMovingProximityGoal;
-	/// A multiplier for the moving goal while guarding, smaller values will result in higher detail movement but more performance cost
-	float guardMovingIntervalMultiplier;
-	/// Limit for the intercept when a guardian is not in guarding range
-	float guardInterceptionLimit;
-
 	// Build behaviour
 	/// Should constructions without builders decay?
 	bool constructionDecay;
@@ -84,8 +69,6 @@ public:
 	int constructionDecayTime;
 	/// How fast do they decay?
 	float constructionDecaySpeed;
-	/// When units are created, issue a move command off of the factory pad.
-	bool insertBuiltUnitMoveCommand;
 
 	// Damage behaviour
 	/// unit pieces flying off (usually on death)
@@ -102,12 +85,12 @@ public:
 	int reclaimMethod;
 	/// 0 = Revert to wireframe and gradual reclaim, 1 = Subtract HP and give full metal at end, default 1
 	int reclaimUnitMethod;
-	/// How much resources should reclaiming a unit cost
-	SResourcePack reclaimUnitCostFactor;
-	/// How much resources should unit reclaim return
-	SResourcePack reclaimUnitEfficiency;
-	/// How much resources should reclaiming a feature cost
-	SResourcePack reclaimFeatureCostFactor;
+	/// How much energy should reclaiming a unit cost, default 0.0
+	float reclaimUnitEnergyCostFactor;
+	/// How much metal should reclaim return, default 1.0
+	float reclaimUnitEfficiency;
+	/// How much should energy should reclaiming a feature cost, default 0.0
+	float reclaimFeatureEnergyCostFactor;
 	/// Does wireframe reclaim drain health? default true
 	bool reclaimUnitDrainHealth;
 	/// Allow reclaiming enemies? default true
@@ -116,23 +99,22 @@ public:
 	bool reclaimAllowAllies;
 
 	// Repair behaviour
-	/// How much resources should repair cost
-	SResourcePack repairCostFactor;
+	/// How much should energy should repair cost, default 0.0
+	float repairEnergyCostFactor;
 
 	// Resurrect behaviour
-	/// How much resources should resurrect cost
-	SResourcePack resurrectCostFactor;
+	/// How much should energy should resurrect cost, default 0.5
+	float resurrectEnergyCostFactor;
 
 	// Capture behaviour
-	/// How much resources should capture cost
-	SResourcePack captureCostFactor;
+	/// How much should energy should capture cost, default 0.0
+	float captureEnergyCostFactor;
 
 
 	float unitExpMultiplier;
 	float unitExpPowerScale;
 	float unitExpHealthScale;
 	float unitExpReloadScale;
-	float unitExpGrade;
 
 
 	// Paralyze behaviour
@@ -167,7 +149,7 @@ public:
 	// maximum damage bonus granted by flanking bonus. Can use a number less than 1 to reduce damage.
 	float flankingBonusMaxDefault;
 
-	// minimum damage bonus granted by flnaking bonus. Can use a number less than 1 to reduce damage.
+	// mininum damage bonus granted by flnaking bonus. Can use a number less than 1 to reduce damage.
 	float flankingBonusMinDefault;
 
 	// Sensor behaviour
@@ -224,10 +206,13 @@ public:
 
 	/// Minimum size, in elmos, an incomplete path has to be to allow the path to be refreshed.
 	/// Once the path is smaller than this distance then the system assumes the path cannot be
-	/// improved further. A larger number reduces CPU usage, but also increases the chance that
+	/// improved further. A larger number reduces CPU usage, but also increses the chance that
 	/// a unit will become trapped in a complex terrain/base setup even if there's a route that
 	/// would bring the unit nearer to the goal.
 	float qtRefreshPathMinDist;
+
+	/// Enable to reduce CPU usage, but also reduce quality of resultant paths.
+	bool qtLowerQualityPaths;
 
 	float pfRawDistMult;
 	float pfUpdateRateScale;
@@ -239,23 +224,17 @@ public:
 	int smoothMeshResDivider;
 
 	/// Radius in heightmap squares to use the smooth the mesh gradients. Increasing value
-	/// increases the area that a given point uses to find the local highest point, and the
+	/// increases the area that a given point uses to find the local heighest point, and the
 	/// distance of the slope. Default is 40.
 	int smoothMeshSmoothRadius;
 
 	int quadFieldQuadSizeInElmos;
 
-	bool nativeExcessSharing;
 	bool allowTake;
 	bool allowEnginePlayerlist;
-
-	// how often to report wind speed/direction to wind gens
-	int windChangeReportPeriod;
-
-	// If true, players can select their start position by clicking the map
-	bool useStartPositionSelecter;
 };
 
 extern CModInfo modInfo;
 
 #endif // MOD_INFO_H
+

@@ -6,16 +6,10 @@
 #include "Lua/LuaParser.h"
 #include "Lua/LuaConfigLoader.h"
 #include "Lua/LuaSyncedRead.h"
-#include "Lua/LuaAllocState.h"
-#include "Map/ReadMap.h"
 #include "System/Log/ILog.h"
 #include "System/FileSystem/FileHandler.h"
 #include "System/Exceptions.h"
 #include "System/SpringMath.h"
-
-#include <fmt/format.h>
-
-#include <bit>
 
 CModInfo modInfo;
 
@@ -38,61 +32,41 @@ void CModInfo::ResetState()
 		allowUnitCollisionOverlap  = true;
 		allowSepAxisCollisionTest  = false;
 		allowGroundUnitGravity     = false;
-		allowHoverUnitStrafing     = false;
+		allowHoverUnitStrafing     = true;
 
 		maxCollisionPushMultiplier = std::numeric_limits<float>::infinity();
 		unitQuadPositionUpdateRate = 3;
 		groundUnitCollisionAvoidanceUpdateRate = 3;
 	}
 	{
-		// Default values for guard behavior (replicates the original behavior)
-		guardRecalculateThreshold = 100.0f;  // Distance that a guardee must move before the guard goal is recalculated
-		guardStoppedProximityGoal = 50.0f;  // Distance that a guardian will stop at nearing a stopped guardee
-		guardStoppedExtraDistance = 100.0f;  // The extra distance a guardian will keep from a stopped guardee
-		guardMovingProximityGoal = 150.0f;   // Distance the guardian is considered to be in guarding range and will match the velocity
-		guardMovingIntervalMultiplier = 0.0f;  // A multiplier for the moving goal while guarding, smaller values will result in higher detail movement but more performance cost
-		guardInterceptionLimit = 0.0f;        // Limit for the intercept when a guardian is not in guarding range
-	}
-	// {
-	// 	Recommended values for guard behavior (units keep formation and do not lag behind, slightly intercept)
-	// 	guardRecalculateThreshold = 100.0f;  // Distance that a guardee must move before the guard goal is recalculated
-	// 	guardStoppedProximityGoal = 50.0f;  // Distance that a guardian will stop at nearing a stopped guardee
-	// 	guardStoppedExtraDistance = 100.0f;  // The extra distance a guardian will keep from a stopped guardee
-	// 	guardMovingProximityGoal = 100.0f;   // Distance the guardian is considered to be in guarding range and will match the velocity
-	// 	guardMovingIntervalMultiplier = 2.13f;  // A multiplier for the moving goal while guarding, smaller values will result in higher detail movement but more performance cost
-	// 	guardInterceptionLimit = 128.0f;        // Limit for the intercept when a guardian is not in guarding range
-	// }
-	{
 		constructionDecay      = true;
-		constructionDecayTime  = int(6.66 * GAME_SPEED);
-		constructionDecaySpeed = 0.03f;
-		insertBuiltUnitMoveCommand = true;
+		constructionDecayTime  = 1000;
+		constructionDecaySpeed = 1.0f;
 	}
 	{
 		debrisDamage = 50.0f;
 	}
 	{
-		multiReclaim                   = 0;
+		multiReclaim                   = 1;
 		reclaimMethod                  = 1;
 		reclaimUnitMethod              = 1;
-		reclaimUnitCostFactor          = 0.0f;
-		reclaimUnitEfficiency          = {1.0f, 0.0f};
-		reclaimFeatureCostFactor       = 0.0f;
+		reclaimUnitEnergyCostFactor    = 0.0f;
+		reclaimUnitEfficiency          = 1.0f;
+		reclaimFeatureEnergyCostFactor = 0.0f;
 		reclaimUnitDrainHealth         = true;
 		reclaimAllowEnemies            = true;
 		reclaimAllowAllies             = true;
 	}
 	{
-		repairCostFactor    = 0.0f;
-		resurrectCostFactor = {0.0f, 0.5f};
-		captureCostFactor   = 0.0f;
+		repairEnergyCostFactor    = 0.0f;
+		resurrectEnergyCostFactor = 0.5f;
+		captureEnergyCostFactor   = 0.0f;
 	}
 	{
-		unitExpMultiplier  = 1.0f;
-		unitExpPowerScale  = 1.0f;
-		unitExpHealthScale = 0.7f;
-		unitExpReloadScale = 0.4f;
-		unitExpGrade       = 0.0f;
+		unitExpMultiplier  = 0.0f;
+		unitExpPowerScale  = 0.0f;
+		unitExpHealthScale = 0.0f;
+		unitExpReloadScale = 0.0f;
 	}
 	{
 		paralyzeDeclineRate = 40.0f;
@@ -110,14 +84,14 @@ void CModInfo::ResetState()
 		fireAtCrashing = false;
 	}
 	{
-		flankingBonusModeDefault = 1;
+		flankingBonusModeDefault = 0;
 		flankingBonusMaxDefault = 1.9f;
 		flankingBonusMinDefault = 0.9f;
 	}
 	{
-		losMipLevel = 1;
-		airMipLevel = 1;
-		radarMipLevel = 2;
+		losMipLevel = 0;
+		airMipLevel = 0;
+		radarMipLevel = 0;
 
 		requireSonarUnderWater = true;
 		alwaysVisibleOverridesCloaked = false;
@@ -125,10 +99,10 @@ void CModInfo::ResetState()
 		separateJammers = true;
 	}
 	{
-		featureVisibility = FEATURELOS_ALL;
+		featureVisibility = FEATURELOS_NONE;
 	}
 	{
-		pathFinderSystem = HAPFS_TYPE;
+		pathFinderSystem = NOPFS_TYPE;
 		pfRawDistMult    = 1.25f;
 		pfUpdateRateScale = 1.f;
 		pfRepathDelayInFrames = 60;
@@ -137,6 +111,7 @@ void CModInfo::ResetState()
 		qtMaxNodesSearched = 8192;
 		qtRefreshPathMinDist = 512.f;
 		qtMaxNodesSearchedRelativeToMapOpenNodes = 0.25;
+		qtLowerQualityPaths = false;
 
 		enableSmoothMesh = true;
 		smoothMeshResDivider = 2;
@@ -145,19 +120,11 @@ void CModInfo::ResetState()
 
 		SLuaAllocLimit::MAX_ALLOC_BYTES = SLuaAllocLimit::MAX_ALLOC_BYTES_DEFAULT;
 
-		nativeExcessSharing = true;
 		allowTake = true;
 
 		allowEnginePlayerlist = true;
-
-		useStartPositionSelecter = true;
-	}
-	{
-		// make windChangeReportPeriod equal to EnvResourceHandler::WIND_UPDATE_RATE = 15 * GAME_SPEED;
-		windChangeReportPeriod = 15 * GAME_SPEED;
 	}
 }
-
 
 /// Try loading `rules.config.lua` / `rules.config.json` via the
 /// unified LuaConfig loader. Resolves through content roots so
@@ -166,8 +133,6 @@ static std::unique_ptr<LuaParser> TryLoadRulesConfig()
 {
 	const std::string baseName = "gamedata/rules";
 
-	// Use FileExists (which searches content roots) to probe,
-	// then GetFileAbsolutePath to get the resolved path for LuaConfig.
 	if (CFileHandler::FileExists(baseName + LuaConfig::kLuaSuffix)) {
 		std::string absBase = CFileHandler::GetFileAbsolutePath(baseName + LuaConfig::kLuaSuffix);
 		absBase.resize(absBase.size() - strlen(LuaConfig::kLuaSuffix));
@@ -182,9 +147,7 @@ static std::unique_ptr<LuaParser> TryLoadRulesConfig()
 }
 
 /// Fall back to the legacy `gamedata/modrules.lua` path used by
-/// existing Spring games (e.g. Zero-K). Uses a full LuaParser
-/// with `Spring.GetModOptions()` injected so the Lua can compute
-/// values from lobby settings.
+/// existing Spring games (e.g. Zero-K).
 static std::unique_ptr<LuaParser> TryLoadLegacyModRules()
 {
 	auto parser = std::make_unique<LuaParser>(
@@ -208,19 +171,12 @@ static std::unique_ptr<LuaParser> TryLoadLegacyModRules()
 
 void CModInfo::Init(const std::string& /*modFileName*/)
 {
-	// Game identity (name, version, etc.) is populated by the
-	// game.config.lua / game.config.json path in GameDiscovery
-	// and Simulation — not here. modinfo.lua compatibility is
-	// handled inside game.config.lua itself.
+	// Game identity is populated by GameDiscovery, not here.
 
-	// --- Game rules ---
-	// Try the new convention first (rules.config.lua / .json), fall
-	// back to the legacy modrules.lua for existing games like ZK.
 	std::unique_ptr<LuaParser> parser = TryLoadRulesConfig();
 	if (!parser)
 		parser = TryLoadLegacyModRules();
 
-	// If neither exists, all values stay at their ResetState defaults.
 	if (!parser) {
 		LOG_L(L_WARNING, "[ModInfo] no rules config found, using defaults");
 		return;
@@ -232,30 +188,28 @@ void CModInfo::Init(const std::string& /*modFileName*/)
 		// system
 		const LuaTable& system = root.SubTable("system");
 
-		pathFinderSystem = system.GetInt("pathFinderSystem", pathFinderSystem);
+		pathFinderSystem = std::clamp(system.GetInt("pathFinderSystem", HAPFS_TYPE), int(NOPFS_TYPE), int(PFS_TYPE_MAX));
 		pfRawDistMult = system.GetFloat("pathFinderRawDistMult", pfRawDistMult);
 		pfUpdateRateScale = system.GetFloat("pathFinderUpdateRateScale", pfUpdateRateScale);
-		pfRepathDelayInFrames = system.GetInt("pfRepathDelayInFrames", pfRepathDelayInFrames);
-		pfRepathMaxRateInFrames = system.GetInt("pfRepathMaxRateInFrames", pfRepathMaxRateInFrames);
-		pfRawMoveSpeedThreshold = system.GetFloat("pfRawMoveSpeedThreshold", pfRawMoveSpeedThreshold);
-		qtMaxNodesSearched = system.GetInt("qtMaxNodesSearched", qtMaxNodesSearched);
-		qtRefreshPathMinDist = system.GetFloat("qtRefreshPathMinDist", qtRefreshPathMinDist);
-		qtMaxNodesSearchedRelativeToMapOpenNodes = system.GetFloat("qtMaxNodesSearchedRelativeToMapOpenNodes", qtMaxNodesSearchedRelativeToMapOpenNodes);
+		pfRepathDelayInFrames = std::clamp(system.GetInt("pfRepathDelayInFrames", pfRepathDelayInFrames), 0, 300);
+		pfRepathMaxRateInFrames = std::clamp(system.GetInt("pfRepathMaxRateInFrames", pfRepathMaxRateInFrames), 0, 3600);
+		pfRawMoveSpeedThreshold = std::max(system.GetFloat("pfRawMoveSpeedThreshold", pfRawMoveSpeedThreshold), 0.f);
+		qtMaxNodesSearched = std::max(system.GetInt("qtMaxNodesSearched", qtMaxNodesSearched), 1024);
+		qtRefreshPathMinDist = std::max(system.GetFloat("qtRefreshPathMinDist", qtRefreshPathMinDist), 0.0f);
+		qtMaxNodesSearchedRelativeToMapOpenNodes = std::max(system.GetFloat("qtMaxNodesSearchedRelativeToMapOpenNodes", qtMaxNodesSearchedRelativeToMapOpenNodes), 0.0f);
+		qtLowerQualityPaths = system.GetBool("qtLowerQualityPaths", qtLowerQualityPaths);
 
 		enableSmoothMesh = system.GetBool("enableSmoothMesh", enableSmoothMesh);
-		smoothMeshResDivider = system.GetInt("smoothMeshResDivider", smoothMeshResDivider);
-		smoothMeshSmoothRadius = system.GetInt("smoothMeshSmoothRadius", smoothMeshSmoothRadius);
+		smoothMeshResDivider = std::max(system.GetInt("smoothMeshResDivider", smoothMeshResDivider), 1);
+		smoothMeshSmoothRadius = std::max(system.GetInt("smoothMeshSmoothRadius", smoothMeshSmoothRadius), 1);
 
-		quadFieldQuadSizeInElmos = system.GetInt("quadFieldQuadSizeInElmos", quadFieldQuadSizeInElmos);
+		quadFieldQuadSizeInElmos = std::clamp(system.GetInt("quadFieldQuadSizeInElmos", quadFieldQuadSizeInElmos), 8, 1024);
 
 		// Specify in megabytes: 1 << 20 = (1024 * 1024)
 		SLuaAllocLimit::MAX_ALLOC_BYTES = static_cast<decltype(SLuaAllocLimit::MAX_ALLOC_BYTES)>(system.GetInt("LuaAllocLimit", SLuaAllocLimit::MAX_ALLOC_BYTES >> 20u)) << 20u;
 
-		nativeExcessSharing = system.GetBool("nativeExcessSharing", nativeExcessSharing);
 		allowTake = system.GetBool("allowTake", allowTake);
 		allowEnginePlayerlist = system.GetBool("allowEnginePlayerlist", allowEnginePlayerlist);
-
-		useStartPositionSelecter = system.GetBool("useStartPositionSelecter", useStartPositionSelecter);
 	}
 
 	{
@@ -270,24 +224,11 @@ void CModInfo::Init(const std::string& /*modFileName*/)
 		allowUnitCollisionOverlap = movementTbl.GetBool("allowUnitCollisionOverlap", allowUnitCollisionOverlap);
 		allowSepAxisCollisionTest = movementTbl.GetBool("allowSepAxisCollisionTest", allowSepAxisCollisionTest);
 		allowGroundUnitGravity = movementTbl.GetBool("allowGroundUnitGravity", allowGroundUnitGravity);
-		allowHoverUnitStrafing = movementTbl.GetBool("allowHoverUnitStrafing", allowHoverUnitStrafing);
+		allowHoverUnitStrafing = movementTbl.GetBool("allowHoverUnitStrafing", (pathFinderSystem == QTPFS_TYPE));
 		maxCollisionPushMultiplier = movementTbl.GetFloat("maxCollisionPushMultiplier", maxCollisionPushMultiplier);
-		unitQuadPositionUpdateRate = movementTbl.GetInt("unitQuadPositionUpdateRate",  unitQuadPositionUpdateRate);
-		groundUnitCollisionAvoidanceUpdateRate = movementTbl.GetInt("groundUnitCollisionAvoidanceUpdateRate",  groundUnitCollisionAvoidanceUpdateRate);
+		unitQuadPositionUpdateRate = std::clamp(movementTbl.GetInt("unitQuadPositionUpdateRate",  unitQuadPositionUpdateRate), 1, 15);
+		groundUnitCollisionAvoidanceUpdateRate = std::clamp(movementTbl.GetInt("groundUnitCollisionAvoidanceUpdateRate",  groundUnitCollisionAvoidanceUpdateRate), 1, 15);
 
-	}
-
-	{
-		// Guard behaviour
-		const LuaTable& guardTbl = root.SubTable("guard");
-
-		guardRecalculateThreshold = Square(guardTbl.GetFloat("guardRecalculateThreshold", guardRecalculateThreshold));
-		guardStoppedProximityGoal = Square(guardTbl.GetFloat("guardStoppedProximityGoal", guardStoppedProximityGoal));
-		guardMovingProximityGoal = Square(guardTbl.GetFloat("guardMovingProximityGoal", guardMovingProximityGoal));
-
-		guardStoppedExtraDistance = guardTbl.GetFloat("guardStoppedExtraDistance", guardStoppedExtraDistance);
-		guardMovingIntervalMultiplier = guardTbl.GetFloat("guardMovingIntervalMultiplier", guardMovingIntervalMultiplier);
-		guardInterceptionLimit = guardTbl.GetFloat("guardInterceptionLimit", guardInterceptionLimit);
 	}
 
 	{
@@ -295,9 +236,8 @@ void CModInfo::Init(const std::string& /*modFileName*/)
 		const LuaTable& constructionTbl = root.SubTable("construction");
 
 		constructionDecay = constructionTbl.GetBool("constructionDecay", constructionDecay);
-		constructionDecayTime = (int)(constructionTbl.GetFloat("constructionDecayTime", (float)constructionDecayTime / GAME_SPEED) * GAME_SPEED);
-		constructionDecaySpeed = constructionTbl.GetFloat("constructionDecaySpeed", constructionDecaySpeed);
-		insertBuiltUnitMoveCommand = constructionTbl.GetBool("insertBuiltUnitMoveCommand", insertBuiltUnitMoveCommand);
+		constructionDecayTime = (int)(constructionTbl.GetFloat("constructionDecayTime", 6.66) * GAME_SPEED);
+		constructionDecaySpeed = std::max(constructionTbl.GetFloat("constructionDecaySpeed", 0.03), 0.01f);
 	}
 
 	{
@@ -309,21 +249,12 @@ void CModInfo::Init(const std::string& /*modFileName*/)
 		// reclaim
 		const LuaTable& reclaimTbl = root.SubTable("reclaim");
 
-		multiReclaim  = reclaimTbl.GetInt("multiReclaim",  multiReclaim);
+		multiReclaim  = reclaimTbl.GetInt("multiReclaim",  0);
 		reclaimMethod = reclaimTbl.GetInt("reclaimMethod", reclaimMethod);
 		reclaimUnitMethod = reclaimTbl.GetInt("unitMethod", reclaimUnitMethod);
-		reclaimUnitCostFactor =
-			{                                             reclaimUnitCostFactor.metal
-			, reclaimTbl.GetFloat("unitEnergyCostFactor", reclaimUnitCostFactor.energy)
-		};
-		reclaimUnitEfficiency =
-			{ reclaimTbl.GetFloat("unitEfficiency", reclaimUnitEfficiency.metal)
-			,                                       reclaimUnitEfficiency.energy
-		};
-		reclaimFeatureCostFactor =
-			{                                                reclaimFeatureCostFactor.metal
-			, reclaimTbl.GetFloat("featureEnergyCostFactor", reclaimFeatureCostFactor.energy)
-		};
+		reclaimUnitEnergyCostFactor = reclaimTbl.GetFloat("unitEnergyCostFactor", reclaimUnitEnergyCostFactor);
+		reclaimUnitEfficiency = reclaimTbl.GetFloat("unitEfficiency", reclaimUnitEfficiency);
+		reclaimFeatureEnergyCostFactor = reclaimTbl.GetFloat("featureEnergyCostFactor", reclaimFeatureEnergyCostFactor);
 		reclaimUnitDrainHealth = reclaimTbl.GetBool("unitDrainHealth", reclaimUnitDrainHealth);
 		reclaimAllowEnemies = reclaimTbl.GetBool("allowEnemies", reclaimAllowEnemies);
 		reclaimAllowAllies = reclaimTbl.GetBool("allowAllies", reclaimAllowAllies);
@@ -332,28 +263,19 @@ void CModInfo::Init(const std::string& /*modFileName*/)
 	{
 		// repair
 		const LuaTable& repairTbl = root.SubTable("repair");
-		repairCostFactor =
-			{                                        repairCostFactor.metal
-			, repairTbl.GetFloat("energyCostFactor", repairCostFactor.energy)
-		};
+		repairEnergyCostFactor = repairTbl.GetFloat("energyCostFactor", repairEnergyCostFactor);
 	}
 
 	{
 		// resurrect
 		const LuaTable& resurrectTbl = root.SubTable("resurrect");
-		resurrectCostFactor  =
-			{                                           resurrectCostFactor.metal
-			, resurrectTbl.GetFloat("energyCostFactor", resurrectCostFactor.energy)
-		};
+		resurrectEnergyCostFactor  = resurrectTbl.GetFloat("energyCostFactor", resurrectEnergyCostFactor);
 	}
 
 	{
 		// capture
 		const LuaTable& captureTbl = root.SubTable("capture");
-		captureCostFactor =
-			{                                         captureCostFactor.metal
-			, captureTbl.GetFloat("energyCostFactor", captureCostFactor.energy)
-		};
+		captureEnergyCostFactor = captureTbl.GetFloat("energyCostFactor", captureEnergyCostFactor);
 	}
 
 	{
@@ -387,26 +309,26 @@ void CModInfo::Init(const std::string& /*modFileName*/)
 		// experience
 		const LuaTable& experienceTbl = root.SubTable("experience");
 
-		unitExpMultiplier  = experienceTbl.GetFloat( "experienceMult", unitExpMultiplier);
-		unitExpPowerScale  = experienceTbl.GetFloat(     "powerScale", unitExpPowerScale);
-		unitExpHealthScale = experienceTbl.GetFloat(    "healthScale", unitExpHealthScale);
-		unitExpReloadScale = experienceTbl.GetFloat(    "reloadScale", unitExpReloadScale);
-		unitExpGrade       = experienceTbl.GetFloat("experienceGrade", unitExpGrade);
+		unitExpMultiplier  = experienceTbl.GetFloat("experienceMult", 1.0f);
+		unitExpPowerScale  = experienceTbl.GetFloat(    "powerScale", 1.0f);
+		unitExpHealthScale = experienceTbl.GetFloat(   "healthScale", 0.7f);
+		unitExpReloadScale = experienceTbl.GetFloat(   "reloadScale", 0.4f);
 	}
 
 	{
 		// flanking bonus
 		const LuaTable& flankingBonusTbl = root.SubTable("flankingBonus");
-		flankingBonusModeDefault = flankingBonusTbl.GetInt("defaultMode", flankingBonusModeDefault);
-		flankingBonusMaxDefault = flankingBonusTbl.GetFloat("defaultMax", flankingBonusMaxDefault);
-		flankingBonusMinDefault = flankingBonusTbl.GetFloat("defaultMin", flankingBonusMinDefault);
+		flankingBonusModeDefault = flankingBonusTbl.GetInt("defaultMode", 1);
+		flankingBonusMaxDefault = flankingBonusTbl.GetFloat("defaultMax", 1.9f);
+		flankingBonusMinDefault = flankingBonusTbl.GetFloat("defaultMin", 0.9f);
 	}
 
 	{
 		// feature visibility
 		const LuaTable& featureLOS = root.SubTable("featureLOS");
 
-		featureVisibility = featureLOS.GetInt("featureVisibility", featureVisibility);
+		featureVisibility = featureLOS.GetInt("featureVisibility", FEATURELOS_ALL);
+		featureVisibility = std::clamp(featureVisibility, int(FEATURELOS_NONE), int(FEATURELOS_ALL));
 	}
 
 	{
@@ -419,48 +341,22 @@ void CModInfo::Init(const std::string& /*modFileName*/)
 		decloakRequiresLineOfSight = sensors.GetBool("decloakRequiresLineOfSight", decloakRequiresLineOfSight);
 		separateJammers = sensors.GetBool("separateJammers", separateJammers);
 
-		losMipLevel = los.GetInt("losMipLevel", losMipLevel);
-		airMipLevel = los.GetInt("airMipLevel", airMipLevel);
-		radarMipLevel = los.GetInt("radarMipLevel", radarMipLevel);
+		// losMipLevel is used as index to readMap->mipHeightmaps,
+		// so the maximum value is CReadMap::numHeightMipMaps - 1
+		losMipLevel = los.GetInt("losMipLevel", 1);
+		// airLosMipLevel doesn't have such restrictions, it's just
+		// used in various bitshifts with signed integers
+		airMipLevel = los.GetInt("airMipLevel", 1);
+		radarMipLevel = los.GetInt("radarMipLevel", 2);
 
+		if ((losMipLevel < 0) || (losMipLevel > 6))
+			throw content_error("Sensors\\Los\\LosMipLevel out of bounds. The minimum value is 0. The maximum value is 6.");
+
+		if ((radarMipLevel < 0) || (radarMipLevel > 6))
+			throw content_error("Sensors\\Los\\RadarMipLevel out of bounds. The minimum value is 0. The maximum value is 6.");
+
+		if ((airMipLevel < 0) || (airMipLevel > 30))
+			throw content_error("Sensors\\Los\\AirLosMipLevel out of bounds. The minimum value is 0. The maximum value is 30.");
 	}
-	{
-		//misc
-		const LuaTable& misc = root.SubTable("misc");
-
-		windChangeReportPeriod = static_cast<int>(math::roundf(misc.GetFloat("windChangeReportPeriod", static_cast<float>(windChangeReportPeriod) / GAME_SPEED) * GAME_SPEED));
-	}
-
-	// Hard checks
-	static constexpr int MAX_HEIGHT_BASED_MIP_LEVEL = CReadMap::numHeightMipMaps - 1;
-	if ((losMipLevel < 0) || (losMipLevel > MAX_HEIGHT_BASED_MIP_LEVEL))
-		throw content_error(fmt::format("Sensors\\Los\\LosMipLevel out of bounds (integer 0-{})", MAX_HEIGHT_BASED_MIP_LEVEL));
-
-	if ((radarMipLevel < 0) || (radarMipLevel > MAX_HEIGHT_BASED_MIP_LEVEL))
-		throw content_error(fmt::format("Sensors\\Los\\RadarMipLevel out of bounds (integer 0-{})", MAX_HEIGHT_BASED_MIP_LEVEL));
-
-	static constexpr int MAX_AIR_MIP_LEVEL = 30; // no logical limit, but it's used in various bit-shifts
-	if ((airMipLevel < 0) || (airMipLevel > MAX_AIR_MIP_LEVEL))
-		throw content_error(fmt::format("Sensors\\Los\\AirLosMipLevel out of bounds (integer 0-{})", MAX_AIR_MIP_LEVEL));
-
-	if (!std::has_single_bit <unsigned> (quadFieldQuadSizeInElmos))
-		throw content_error("quadFieldQuadSizeInElmos modrule has to be a power of 2");
-
-	// Soft constraints that should really be hard ones
-	pathFinderSystem = std::clamp(pathFinderSystem, int(NOPFS_TYPE), int(PFS_TYPE_MAX));
-	featureVisibility = std::clamp(featureVisibility, int(FEATURELOS_NONE), int(FEATURELOS_ALL));
-
-	// Soft constraints                                                                               min     max
-	constructionDecaySpeed                   = std::max  (constructionDecaySpeed                  ,    0.01f      );
-	groundUnitCollisionAvoidanceUpdateRate   = std::clamp(groundUnitCollisionAvoidanceUpdateRate  ,    1    ,   15);
-	pfRawMoveSpeedThreshold                  = std::max  (pfRawMoveSpeedThreshold                 ,    0.0f       );
-	pfRepathDelayInFrames                    = std::clamp(pfRepathDelayInFrames                   ,    0    ,  300);
-	pfRepathMaxRateInFrames                  = std::clamp(pfRepathMaxRateInFrames                 ,    0    , 3600);
-	qtMaxNodesSearched                       = std::max  (qtMaxNodesSearched                      , 1024          );
-	qtMaxNodesSearchedRelativeToMapOpenNodes = std::max  (qtMaxNodesSearchedRelativeToMapOpenNodes,    0.0f       );
-	qtRefreshPathMinDist                     = std::max  (qtRefreshPathMinDist                    ,    0.0f       );
-	quadFieldQuadSizeInElmos                 = std::clamp(quadFieldQuadSizeInElmos                ,    8    , 1024);
-	smoothMeshResDivider                     = std::max  (smoothMeshResDivider                    ,    1          );
-	smoothMeshSmoothRadius                   = std::max  (smoothMeshSmoothRadius                  ,    1          );
-	unitQuadPositionUpdateRate               = std::clamp(unitQuadPositionUpdateRate              ,    1    ,   15);
 }
+

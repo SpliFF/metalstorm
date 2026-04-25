@@ -5,6 +5,7 @@
 #include "Game/GlobalUnsynced.h"
 #include "Map/Ground.h"
 #include "Sim/Misc/GlobalSynced.h"
+#include "Sim/Misc/ModInfo.h"
 #include "Sim/Projectiles/ExplosionGenerator.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Projectiles/ProjectileMemPool.h"
@@ -13,8 +14,11 @@
 #include "System/Matrix44f.h"
 #include "System/SpringMath.h"
 
+#include "System/Misc/TracyDefs.h"
 
-
+static constexpr int   SMOKE_TIME   = 40;
+static constexpr int   SMOKE_SIZE   = 14;
+static constexpr float SMOKE_COLOR  = 0.5f;
 
 CR_BIND_DERIVED(CPieceProjectile, CProjectile, )
 CR_REG_METADATA(CPieceProjectile,(
@@ -22,18 +26,19 @@ CR_REG_METADATA(CPieceProjectile,(
 
 	CR_MEMBER(age),
 	CR_MEMBER(explFlags),
-	CR_IGNORED(modelPiece),
+	CR_IGNORED(omp),
 	CR_IGNORED(smokeTrail),
 	CR_IGNORED(fireTrailPoints),
-	CR_MEMBER(spinVector),
-	CR_MEMBER(spinParams),
+	CR_MEMBER(spinVec),
+	CR_MEMBER(spinSpeed),
+	CR_MEMBER(spinAngle),
 	CR_MEMBER(oldSmokePos),
 	CR_MEMBER(oldSmokeDir)
 ))
 
 CPieceProjectile::CPieceProjectile(
-	CUnit* owner, // never null
-	LocalModelPiece* lmp, // never null
+	CUnit* owner,
+	LocalModelPiece* lmp,
 	const float3& pos,
 	const float3& speed,
 	int flags,
@@ -42,10 +47,11 @@ CPieceProjectile::CPieceProjectile(
 	CProjectile(pos, speed, owner, true, false, true),
 	age(0),
 	explFlags(flags),
-	modelPiece(lmp->original),
+	omp((lmp != nullptr) ? lmp->original : nullptr),
 	smokeTrail(nullptr)
 {
-	{
+	RECOIL_DETAILED_TRACY_ZONE;
+	if (owner != nullptr) {
 		const UnitDef* ud = owner->unitDef;
 
 		if ((explFlags & PF_NoCEGTrail) == 0 && ud->GetPieceExpGenCount() > 0) {
@@ -62,13 +68,14 @@ CPieceProjectile::CPieceProjectile(
 		// synced, but since instances of this class are themselves
 		// synced and have LuaSynced{Ctrl, Read} exposure we treat
 		// them that way for consistency
-		spinVector = gsRNG.NextVector();
-		spinParams = {gsRNG.NextFloat() * 20.0f, 0.0f};
+		spinVec = gsRNG.NextVector();
+		spinSpeed = gsRNG.NextFloat() * 20.0f;
+		spinAngle = 0.0f;
 
 		oldSmokePos = pos;
 		oldSmokeDir = speed;
 
-		spinVector.Normalize();
+		spinVec.Normalize();
 		oldSmokeDir.Normalize();
 	}
 
@@ -76,10 +83,10 @@ CPieceProjectile::CPieceProjectile(
 		ftp = {pos, 0.0f};
 	}
 
-	checkCol = false;
-	useAirLos = ((pos.y - CGround::GetApproximateHeight(pos.x, pos.z)) > 10.0f);
-
 	SetRadiusAndHeight(radius, 0.0f);
+
+	checkCol = false;
+	useAirLos = (pos.y - CGround::GetApproximateHeight(pos.x, pos.z) > 10.0f);
 
 	projectileHandler.AddProjectile(this);
 	assert(!detached);
@@ -88,6 +95,7 @@ CPieceProjectile::CPieceProjectile(
 
 void CPieceProjectile::Collision()
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	Collision(nullptr, nullptr);
 	if (gsRNG.NextFloat() < 0.666f) { // give it a small chance to `ground bounce`
 		CProjectile::Collision();
@@ -97,7 +105,6 @@ void CPieceProjectile::Collision()
 	// ground bounce
 	const float3& norm = CGround::GetNormal(pos.x, pos.z);
 	const float ns = speed.dot(norm);
-
 	SetVelocityAndSpeed(speed - (norm * ns * 1.6f));
 	SetPosition(pos + (norm * 0.1f));
 }
@@ -105,6 +112,7 @@ void CPieceProjectile::Collision()
 
 void CPieceProjectile::Collision(CFeature* f)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	Collision(nullptr, f);
 	CProjectile::Collision(f);
 }
@@ -112,6 +120,7 @@ void CPieceProjectile::Collision(CFeature* f)
 
 void CPieceProjectile::Collision(CUnit* unit)
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	Collision(unit, nullptr);
 	CProjectile::Collision(unit);
 }
@@ -119,28 +128,29 @@ void CPieceProjectile::Collision(CUnit* unit)
 
 void CPieceProjectile::Collision(CUnit* unit, CFeature* feature)
 {
-	if (unit != nullptr && (unit == owner()))
+	if (unit && (unit == owner()))
 		return;
 
-	if ((explFlags & PF_Explode) != 0 && (unit != nullptr || feature != nullptr )) {
-		const DamageArray damageArray(50.0f);
+	if ((explFlags & PF_Explode) && (unit || feature)) {
+		const DamageArray damageArray(modInfo.debrisDamage);
 		const CExplosionParams params = {
-			pos,
-			ZeroVector,
-			damageArray,
-			nullptr,           // weaponDef
-			owner(),
-			unit,              // hitUnit
-			feature,           // hitFeature
-			0.0f,              // craterAreaOfEffect
-			5.0f,              // damageAreaOfEffect
-			0.0f,              // edgeEffectiveness
-			10.0f,             // explosionSpeed
-			1.0f,              // gfxMod
-			true,              // impactOnly
-			false,             // ignoreOwner
-			false,             // damageGround
-			static_cast<unsigned int>(id)
+			.pos                  = pos,
+			.dir                  = ZeroVector,
+			.damages              = damageArray,
+			.weaponDef            = nullptr,
+			.owner                = owner(),
+			.hitUnit              = unit,
+			.hitFeature           = feature,
+			.craterAreaOfEffect   = modInfo.debrisDamage * 0.25f,
+			.damageAreaOfEffect   = modInfo.debrisDamage * 0.5f,
+			.edgeEffectiveness    = 0.0f,
+			.explosionSpeed       = 10.0f,
+			.gfxMod               = 1.0f,
+			.maxGroundDeformation = 0.0f,
+			.impactOnly           = true,
+			.ignoreOwner          = false,
+			.damageGround         = false,
+			.projectileID         = static_cast<uint32_t>(id)
 		};
 
 		helper->Explosion(params);
@@ -151,20 +161,33 @@ void CPieceProjectile::Collision(CUnit* unit, CFeature* feature)
 
 
 
+float3 CPieceProjectile::RandomVertexPos() const
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	if (omp == nullptr)
+		return ZeroVector;
+	#define rf guRNG.NextFloat()
+	return mix(omp->mins, omp->maxs, float3(rf,rf,rf));
+}
+
+
 float CPieceProjectile::GetDrawAngle() const
 {
-	return (spinParams.y);
+	RECOIL_DETAILED_TRACY_ZONE;
+	return spinAngle;
 }
 
 
 void CPieceProjectile::Update()
 {
+	RECOIL_DETAILED_TRACY_ZONE;
 	if (!luaMoveCtrl) {
-		SetVelocityAndSpeed((speed += (UpVector * mygravity)) * 0.997f);
+		speed.y += mygravity;
+		SetVelocityAndSpeed(speed * 0.997f);
 		SetPosition(pos + speed);
 	}
 
-	spinParams.y += spinParams.x;
+	spinAngle += spinSpeed;
 	age += 1;
 	checkCol |= (age > 10);
 
@@ -174,21 +197,29 @@ void CPieceProjectile::Update()
 		return;
 	}
 
-	if ((explFlags & PF_Fire) != 0) {
+	if (explFlags & PF_Fire) {
 		for (int a = NUM_TRAIL_PARTS - 2; a >= 0; --a) {
 			fireTrailPoints[a + 1] = fireTrailPoints[a];
 		}
 
 		CMatrix44f m(pos);
+		m.Rotate(spinAngle * math::DEG_TO_RAD, spinVec);
+		m.Translate(RandomVertexPos());
 
-		m.Rotate(spinParams.y * math::DEG_TO_RAD, spinVector);
-		m.Translate(modelPiece->offset);
-
-		fireTrailPoints[0] = {m.GetPos(), 1.0f + guRNG.NextFloat()};
+		fireTrailPoints[0].pos  = m.GetPos();
+		fireTrailPoints[0].size = 1 + guRNG.NextFloat();
 	}
 
-	// smoke trail spawning removed (headless server)
+	if (explFlags & PF_Smoke) {
+		oldSmokePos = pos;
+		oldSmokeDir = dir;
+
+	}
 }
 
 
-
+int CPieceProjectile::GetProjectilesCount() const
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	return NUM_TRAIL_PARTS;
+}

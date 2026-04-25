@@ -3,6 +3,7 @@
 //#include "System/Platform/Win/win32.h"
 
 #include <cstring>
+#include <cctype>
 
 #include "LuaUtils.h"
 #include "LuaConfig.h"
@@ -12,10 +13,14 @@
 #define LOG_SECTION "lua"
 
 #include "Game/GameVersion.h"
+#include "Sim/Projectiles/Projectile.h"
+#include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Objects/SolidObjectDef.h"
+#include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/CommandAI/CommandDescription.h"
+#include "Sim/Misc/LosHandler.h"
 #include "System/FileSystem/FileSystem.h"
 #include "System/Log/ILog.h"
 #include "System/UnorderedMap.hpp"
@@ -23,7 +28,7 @@
 #include "System/StringHash.h"
 #include "System/StringUtil.h"
 
-#if !defined UNITSYNC && !defined DEDICATED && !defined BUILDING_AI
+#if !defined UNITSYNC && !defined BUILDING_AI
 	#include "System/TimeProfiler.h"
 #else
 	#define SCOPED_TIMER(x)
@@ -31,8 +36,8 @@
 
 
 static const int maxDepth = 16;
-int LuaUtils::exportedDataSize = 0;
 
+// Json::Value LuaStackDumper removed — no jsoncpp on headless server
 
 /******************************************************************************/
 /******************************************************************************/
@@ -175,6 +180,12 @@ int LuaUtils::CopyData(lua_State* dst, lua_State* src, int count)
 /******************************************************************************/
 /******************************************************************************/
 
+// The functions below are not used anymore for anything in the engine.
+// There are left behind here disabled for archival purposes.
+#if 0
+
+int LuaUtils::exportedDataSize = 0;
+
 static bool BackupData(LuaUtils::DataDump& d, lua_State* src, int index, int depth);
 static bool RestoreData(const LuaUtils::DataDump& d, lua_State* dst, int depth);
 static bool BackupTable(LuaUtils::DataDump& d, lua_State* src, int index, int depth);
@@ -305,6 +316,7 @@ int LuaUtils::Restore(const std::vector<LuaUtils::DataDump>& backup, lua_State* 
 	return count;
 }
 
+#endif
 
 /******************************************************************************/
 /******************************************************************************/
@@ -533,27 +545,6 @@ void* LuaUtils::GetUserData(lua_State* L, int index, const string& type)
 /******************************************************************************/
 /******************************************************************************/
 
-void LuaUtils::PrintStack(lua_State* L)
-{
-	for (int i = 1, top = lua_gettop(L); i <= top; i++) {
-		LOG_L(L_ERROR, "  %i: type = %s (%p)", i, luaL_typename(L, i), lua_topointer(L, i));
-
-		switch (lua_type(L, i)) {
-			case LUA_TSTRING:
-				LOG_L(L_ERROR, "\t\t%s", lua_tostring(L, i));
-				break;
-			case LUA_TNUMBER:
-				LOG_L(L_ERROR, "\t\t%f", lua_tonumber(L, i));
-				break;
-			case LUA_TBOOLEAN:
-				LOG_L(L_ERROR, "\t\t%s", lua_toboolean(L, i) ? "true" : "false");
-				break;
-			default: {}
-		}
-	}
-}
-
-
 int LuaUtils::IsEngineMinVersion(lua_State* L)
 {
 	const int minMajorVer = luaL_checkint(L, 1);
@@ -709,7 +700,7 @@ int LuaUtils::ParseStringVector(lua_State* L, int index, vector<string>& vec)
 }
 
 
-#if !defined UNITSYNC && !defined DEDICATED && !defined BUILDING_AI
+#if !defined UNITSYNC && !defined BUILDING_AI
 
 
 int LuaUtils::PushModelHeight(lua_State* L, const SolidObjectDef* def, bool isUnitDef)
@@ -784,7 +775,7 @@ int LuaUtils::PushModelTable(lua_State* L, const SolidObjectDef* def) {
 int LuaUtils::PushColVolTable(lua_State* L, const CollisionVolume* vol) {
 	assert(vol != nullptr);
 
-	lua_newtable(L);
+	lua_createtable(L, 0, 11);
 	switch (vol->GetVolumeType()) {
 		case CollisionVolume::COLVOL_TYPE_ELLIPSOID:
 			HSTR_PUSH_CSTRING(L, "type", "ellipsoid");
@@ -848,7 +839,7 @@ int LuaUtils::ParseColVolData(lua_State* L, int idx, CollisionVolume* vol)
 }
 
 
-#endif //!defined UNITSYNC && !defined DEDICATED && !defined BUILDING_AI
+#endif //!defined UNITSYNC && !defined BUILDING_AI
 
 
 void LuaUtils::PushCommandParamsTable(lua_State* L, const Command& cmd, bool subtable)
@@ -1346,9 +1337,9 @@ int LuaUtils::PushDebugTraceback(lua_State* L)
 
 
 
-LuaUtils::ScopedDebugTraceBack::ScopedDebugTraceBack(lua_State* _L)
-	: L(_L)
-	, errFuncIdx(PushDebugTraceback(_L))
+LuaUtils::ScopedDebugTraceBack::ScopedDebugTraceBack(lua_State* lst)
+	: L(lst)
+	, errFuncIdx(PushDebugTraceback(lst))
 {
 	assert(errFuncIdx >= 0);
 }
@@ -1409,6 +1400,157 @@ void LuaUtils::PushCommandDesc(lua_State* L, const SCommandDescription& cd)
 	// CmdDesc["params"] = {[1] = "string1", [2] = "string2", ...}
 	lua_settable(L, -3);
 }
+
+void LuaUtils::LuaStackDumper::PrintStack(lua_State* L, int parseDepth)
+{
+	int n = lua_gettop(L);
+	LOG("[LuaStackDumper] stack has %d items", n);
+	for (int i = 1; i <= n; ++i) {
+		LOG("  [%d] type=%s", i, lua_typename(L, lua_type(L, i)));
+	}
+
+}
+
+void LuaUtils::LuaStackDumper::ParseTable(lua_State* L, int i, int parseDepth) {}
+void LuaUtils::LuaStackDumper::ParseLuaItem(lua_State* L, int i, bool asKey, int parseDepth) {}
+void LuaUtils::LuaStackDumper::PrintBuffer() {}
+
+
+#if !defined UNITSYNC && !defined BUILDING_AI
+int LuaUtils::ParseAllegiance(lua_State* L, const char* caller, int index)
+{
+	if (!lua_isnumber(L, index))
+		return AllUnits;
+
+	const int teamID = lua_toint(L, index);
+
+	// MyUnits, AllyUnits, and EnemyUnits do not apply to fullRead
+	if (CLuaHandle::GetHandleFullRead(L) && (teamID < 0))
+		return AllUnits;
+
+	if (teamID < EnemyUnits) {
+		luaL_error(L, "Bad teamID in %s (%d)", caller, teamID);
+	}
+	else if (teamID >= teamHandler.ActiveTeams()) {
+		luaL_error(L, "Bad teamID in %s (%d)", caller, teamID);
+	}
+
+	return teamID;
+}
+
+bool LuaUtils::IsAlliedTeam(lua_State* L, int team)
+{
+	if (CLuaHandle::GetHandleReadAllyTeam(L) < 0)
+		return CLuaHandle::GetHandleFullRead(L);
+
+	return (teamHandler.AllyTeam(team) == CLuaHandle::GetHandleReadAllyTeam(L));
+}
+
+bool LuaUtils::IsAlliedAllyTeam(lua_State* L, int allyTeam)
+{
+	if (CLuaHandle::GetHandleReadAllyTeam(L) < 0)
+		return CLuaHandle::GetHandleFullRead(L);
+
+	return (allyTeam == CLuaHandle::GetHandleReadAllyTeam(L));
+}
+
+bool LuaUtils::IsAllyUnit(lua_State* L, const CUnit* unit) { return (IsAlliedAllyTeam(L, unit->allyteam)); }
+bool LuaUtils::IsEnemyUnit(lua_State* L, const CUnit* unit) { return (!IsAllyUnit(L, unit)); }
+
+bool LuaUtils::IsUnitVisible(lua_State* L, const CUnit* unit)
+{
+	if (IsAllyUnit(L, unit))
+		return true;
+
+	return (unit->losStatus[CLuaHandle::GetHandleReadAllyTeam(L)] & (LOS_INLOS | LOS_INRADAR));
+}
+
+bool LuaUtils::IsUnitInLos(lua_State* L, const CUnit* unit)
+{
+	if (IsAllyUnit(L, unit))
+		return true;
+
+	return (unit->losStatus[CLuaHandle::GetHandleReadAllyTeam(L)] & LOS_INLOS);
+}
+
+bool LuaUtils::IsUnitTyped(lua_State* L, const CUnit* unit)
+{
+	if (IsAllyUnit(L, unit))
+		return true;
+
+	const unsigned short losStatus = unit->losStatus[CLuaHandle::GetHandleReadAllyTeam(L)];
+	const unsigned short prevMask = (LOS_PREVLOS | LOS_CONTRADAR);
+
+	// currently in LOS or not lost from radar since being visible means unit's type can be accessed
+	return ((losStatus & LOS_INLOS) || ((losStatus & prevMask) == prevMask));
+}
+
+const UnitDef* LuaUtils::EffectiveUnitDef(lua_State* L, const CUnit* unit)
+{
+	const UnitDef* ud = unit->unitDef;
+
+	if (IsAllyUnit(L, unit))
+		return ud;
+
+	if (ud->decoyDef)
+		return ud->decoyDef;
+
+	return ud;
+}
+
+bool LuaUtils::IsFeatureVisible(lua_State* L, const CFeature* feature)
+{
+	if (CLuaHandle::GetHandleFullRead(L))
+		return true;
+	if (CLuaHandle::GetHandleReadAllyTeam(L) < 0)
+		return false;
+
+	return feature->IsInLosForAllyTeam(CLuaHandle::GetHandleReadAllyTeam(L));
+}
+
+bool LuaUtils::IsProjectileVisible(lua_State* L, const CProjectile* pro)
+{
+	if (CLuaHandle::GetHandleReadAllyTeam(L) < 0)
+		return CLuaHandle::GetHandleFullRead(L);
+
+	return !((CLuaHandle::GetHandleReadAllyTeam(L) != pro->GetAllyteamID()) &&
+		(!losHandler->InLos(pro->pos, CLuaHandle::GetHandleReadAllyTeam(L))));
+}
+
+void LuaUtils::PushAttackerDef(lua_State* L, const CUnit* const attacker)
+{
+	if (attacker == nullptr) {
+		lua_pushnil(L);
+		return;
+	}
+
+	PushAttackerDef(L, *attacker);
+}
+
+void LuaUtils::PushAttackerDef(lua_State* L, const CUnit& attacker)
+{
+	if (LuaUtils::IsUnitTyped(L, &attacker)) {
+		lua_pushnumber(L, LuaUtils::EffectiveUnitDef(L, &attacker)->id);
+		return;
+	}
+
+	lua_pushnil(L);
+}
+
+void LuaUtils::PushAttackerInfo(lua_State* L, const CUnit* const attacker)
+{
+	if (attacker && IsUnitVisible(L, attacker)) {
+		lua_pushnumber(L, attacker->id);
+		PushAttackerDef(L, *attacker);
+		lua_pushnumber(L, attacker->team);
+		return;
+	}
+
+	lua_pushnil(L);
+	lua_pushnil(L);
+	lua_pushnil(L);
+}
+#endif
 
 
 /******************************************************************************/

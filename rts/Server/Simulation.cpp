@@ -226,7 +226,7 @@ void CSimulation::InitSubsystems(bool hasMap)
 
     // --- Map-dependent subsystems ---
     if (hasMap) {
-        smoothGround.Init(float3::maxxpos, float3::maxzpos, SQUARE_SIZE * 2, SQUARE_SIZE * 40);
+        smoothGround.Init(int2(float3::maxxpos, float3::maxzpos), SQUARE_SIZE * 2, SQUARE_SIZE * 40);
         quadField.Init(int2(mapDims.mapx, mapDims.mapy), CQuadField::BASE_QUAD_SIZE);
 
         // moveDefHandler already initialized above (before unitDefHandler)

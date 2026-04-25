@@ -71,8 +71,7 @@ public:
     // Control events
     bool AllowCommand(const CUnit* unit, const Command& cmd,
                       int playerNum, bool fromSynced, bool fromLua) override;
-    bool Explosion(int weaponID, int projectileID,
-                   const float3& pos, const CUnit* owner) override;
+    bool Explosion(int weaponID, int projectileID, const float3& pos, const CUnit* owner) override;
 
 private:
     /// Dispatch a notification event to all contexts.

@@ -741,3 +741,8 @@ namespace Platform
 		return hexAddr;
 	}
 } // namespace Platform
+
+// Stub for headless server
+namespace Platform {
+	bool IsRunningInDebugger() { return false; }
+}

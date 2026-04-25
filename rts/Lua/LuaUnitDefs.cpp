@@ -287,7 +287,7 @@ static int SafeIconType(lua_State* L, const void* data)
 static int CustomParamsTable(lua_State* L, const void* data)
 {
 	const spring::unordered_map<std::string, std::string>& params = *((const spring::unordered_map<std::string, std::string>*)data);
-	lua_newtable(L);
+	lua_createtable(L, 0, params.size());
 
 	for (const auto& param: params) {
 		lua_pushsstring(L, param.first);
@@ -303,7 +303,7 @@ static int BuildOptions(lua_State* L, const void* data)
 	const spring::unordered_map<int, std::string>& buildOptions = *((const spring::unordered_map<int, std::string>*)data);
 	const spring::unordered_map<std::string, int>& unitDefIDsMap = unitDefHandler->GetUnitDefIDs();
 
-	lua_newtable(L);
+	lua_createtable(L, buildOptions.size(), 0);
 	int count = 0;
 
 	for (const auto& buildOption: buildOptions) {
@@ -322,8 +322,8 @@ static int BuildOptions(lua_State* L, const void* data)
 
 static inline int BuildCategorySet(lua_State* L, const vector<string>& cats)
 {
-	lua_newtable(L);
 	const int count = (int)cats.size();
+	lua_createtable(L, 0, count);
 	for (int i = 0; i < count; i++) {
 		lua_pushsstring(L, cats[i]);
 		lua_pushboolean(L, true);
@@ -355,14 +355,19 @@ static int WeaponsTable(lua_State* L, const void* data)
 {
 	const auto& udWeapons = *reinterpret_cast<const decltype(UnitDef::weapons)*>(data);
 
-	lua_newtable(L);
+	// When LUA_WEAPON_BASE_INDEX is not 1, lua will resort to using the hash
+	// part to index table keys as we're no longer adding keys to the table
+	// following the sequence 1 to N for any N.
+	lua_createtable(L, 
+			LUA_WEAPON_BASE_INDEX == 1 ? udWeapons.size() : 0,
+			LUA_WEAPON_BASE_INDEX == 1 ? 0 : udWeapons.size());
 
 	for (size_t i = 0; i < udWeapons.size() && udWeapons[i].def != nullptr; i++) {
 		const UnitDefWeapon& udw = udWeapons[i];
 		const WeaponDef* wd = udw.def;
 
 		lua_pushnumber(L, i + LUA_WEAPON_BASE_INDEX);
-		lua_newtable(L); {
+		lua_createtable(L, 0, 10); {
 			HSTR_PUSH_NUMBER(L, "weaponDef",   wd->id);
 			HSTR_PUSH_NUMBER(L, "slavedTo",    udw.slavedTo - 1 + LUA_WEAPON_BASE_INDEX);
 			HSTR_PUSH_NUMBER(L, "maxAngleDif", udw.maxMainDirAngleDif);
@@ -395,7 +400,7 @@ static void PushGuiSoundSet(lua_State* L, const string& name,
 
 	for (int i = 0; i < soundCount; i++) {
 		lua_pushnumber(L, i + 1);
-		lua_newtable(L);
+		lua_createtable(L, 0, CLuaHandle::GetHandleSynced(L) ? 2 : 3);
 		const GuiSoundSetData& sound = soundSet.GetSoundData(i);
 		HSTR_PUSH_STRING(L, "name",   sound.name);
 		HSTR_PUSH_NUMBER(L, "volume", sound.volume);
@@ -411,7 +416,7 @@ static void PushGuiSoundSet(lua_State* L, const string& name,
 static int SoundsTable(lua_State* L, const void* data) {
 	const UnitDef::SoundStruct& sounds = *((const UnitDef::SoundStruct*) data);
 
-	lua_newtable(L);
+	lua_createtable(L, 0, 10);
 	PushGuiSoundSet(L, "select",      sounds.select);
 	PushGuiSoundSet(L, "ok",          sounds.ok);
 	PushGuiSoundSet(L, "arrived",     sounds.arrived);
@@ -577,8 +582,7 @@ ADD_BOOL("canAttackWater",  canAttackWater); // CUSTOM
 	ADD_DEPRECATED_FUNCTION("type", ud, ReturnEmptyString);
 	ADD_DEPRECATED_FUNCTION("maxSlope", ud, ReturnMinusOne);
 
-	///!!! ADD_DEPRECATED_LUADEF_KEY("totalEnergyOut");
-	ADD_FLOAT("totalEnergyOut", ud.energyMake);
+	ADD_FLOAT("totalEnergyOut", ud.resourceMake.energy);
 
 	ADD_FUNCTION("modCategories",      ud.categoryString,  CategorySetFromString);
 	ADD_FUNCTION("springCategories",   ud.category,        CategorySetFromBits);
@@ -618,62 +622,96 @@ ADD_BOOL("canAttackWater",  canAttackWater); // CUSTOM
 	ADD_FUNCTION("height", ud, ModelHeight);
 	ADD_FUNCTION("radius", ud, ModelRadius);
 
-	ADD_DEPRECATED_LUADEF_KEY("minx");
-	ADD_DEPRECATED_LUADEF_KEY("miny");
-	ADD_DEPRECATED_LUADEF_KEY("minz");
-	ADD_DEPRECATED_LUADEF_KEY("maxx");
-	ADD_DEPRECATED_LUADEF_KEY("maxy");
-	ADD_DEPRECATED_LUADEF_KEY("maxz");
-	ADD_DEPRECATED_LUADEF_KEY("midx");
-	ADD_DEPRECATED_LUADEF_KEY("midy");
-	ADD_DEPRECATED_LUADEF_KEY("midz");
-
-
 	ADD_INT("id", ud.id);
 	ADD_INT("cobID", ud.cobID);
 
+	/* Note: input 'name' is actually 'humanName' here,
+	 * which means the modern/legacy thing (see below)
+	 * is harder to do seamlessly here. Besides, the
+	 * internal name is too fundamental to mess with. */
 	ADD_STRING("name",      ud.name);
 	ADD_STRING("humanName", ud.humanName);
 
+	/* Entries in this block are the "legacy" ones,
+	 * they don't match what unit defs accept as input.
+	 * At some point it would probably be good to mark
+	 * them deprecated so that two wupget standards don't
+	 * proliferate in parallel, but we're in no hurry. */
 	ADD_STRING("tooltip", ud.tooltip);
-
 	ADD_STRING("wreckName", ud.wreckName);
+	ADD_STRING("buildpicname", ud.buildPicName);
+	ADD_BOOL("canSelfD", ud.canSelfD);
+	ADD_INT("selfDCountdown", ud.selfDCountdown);
+	ADD_FLOAT("losHeight", ud.losHeight);
+	// radarHeight was missing, enumerating it here alongside other sensors for completeness
+	ADD_FLOAT("losRadius", ud.losRadius);
+	ADD_FLOAT("airLosRadius", ud.airLosRadius);
+	ADD_INT("radarRadius", ud.radarRadius);
+	ADD_INT("sonarRadius", ud.sonarRadius);
+	ADD_INT("jammerRadius", ud.jammerRadius);
+	ADD_INT("sonarJamRadius", ud.sonarJamRadius);
+	ADD_INT("seismicRadius", ud.seismicRadius);
+	ADD_BOOL("targfac", ud.targfac);
+	ADD_FLOAT("kamikazeDist", ud.kamikazeDist);
+	ADD_FLOAT("wantedHeight", ud.wantedHeight);
+	ADD_FLOAT("maxAcc", ud.maxAcc);
+	ADD_FLOAT("maxDec", ud.maxDec);
+
+	/* Entries in this block are the "modern" ones, with
+	 * keys matching what's read from def input files.
+	 * Here they are listed in the same order as above
+	 * for easy comparison. */
+	ADD_STRING("description", ud.tooltip);
+	ADD_STRING("corpse", ud.wreckName);
+	ADD_STRING("buildPic", ud.buildPicName);
+	ADD_BOOL("canSelfDestruct", ud.canSelfD);
+	ADD_INT("selfDestructCountdown", ud.selfDCountdown);
+	ADD_FLOAT("sightEmitHeight", ud.losHeight);
+	ADD_FLOAT("radarEmitHeight", ud.radarHeight);
+	ADD_FLOAT("sightDistance", ud.losRadius);
+	ADD_FLOAT("airSightDistance", ud.airLosRadius);
+	ADD_INT("radarDistance", ud.radarRadius);
+	ADD_INT("sonarDistance", ud.sonarRadius);
+	ADD_INT("radarDistanceJam", ud.jammerRadius);
+	ADD_INT("sonarDistanceJam", ud.sonarJamRadius);
+	ADD_INT("seismicDistance", ud.seismicRadius);
+	ADD_BOOL("isTargetingUpgrade", ud.targfac);
+	ADD_FLOAT("kamikazeDistance", ud.kamikazeDist);
+	ADD_FLOAT("cruiseAltitude", ud.wantedHeight);
+	// acceleration missing on purpose: waiting for units of measurement change
+	// deceleration missing on purpose: waiting for units of measurement change
+
 
 	ADD_FUNCTION("deathExplosion", ud.deathExpWeaponDef, WeaponDefToName);
 	ADD_FUNCTION("selfDExplosion", ud.selfdExpWeaponDef, WeaponDefToName);
 
-	ADD_STRING("buildpicname", ud.buildPicName);
-
-	ADD_DEPRECATED_LUADEF_KEY("techLevel");
 	ADD_INT("maxThisUnit", ud.maxThisUnit);
 
-	ADD_FLOAT("metalUpkeep",    ud.metalUpkeep);
-	ADD_FLOAT("energyUpkeep",   ud.energyUpkeep);
-	ADD_FLOAT("metalMake",      ud.metalMake);
+	ADD_FLOAT("metalUpkeep",    ud.upkeep.metal);
+	ADD_FLOAT("energyUpkeep",   ud.upkeep.energy);
+	ADD_FLOAT("metalMake",      ud.resourceMake.metal);
+	ADD_FLOAT("energyMake",     ud.resourceMake.energy);
 	ADD_FLOAT("makesMetal",     ud.makesMetal);
-	ADD_FLOAT("energyMake",     ud.energyMake);
-	ADD_FLOAT("metalCost",      ud.metal);
-	ADD_FLOAT("energyCost",     ud.energy);
+	ADD_FLOAT("metalCost",      ud.cost.metal);
+	ADD_FLOAT("energyCost",     ud.cost.energy);
 	ADD_FLOAT("buildTime",      ud.buildTime);
+	ADD_FLOAT("buildeeBuildRadius", ud.buildeeBuildRadius);
 	ADD_FLOAT("extractsMetal",  ud.extractsMetal);
 	ADD_FLOAT("extractRange",   ud.extractRange);
 	ADD_FLOAT("windGenerator",  ud.windGenerator);
 	ADD_FLOAT("tidalGenerator", ud.tidalGenerator);
-	ADD_FLOAT("metalStorage",   ud.metalStorage);
-	ADD_FLOAT("energyStorage",  ud.energyStorage);
+	ADD_FLOAT("metalStorage",   ud.storage.metal);
+	ADD_FLOAT("energyStorage",  ud.storage.energy);
 
-	ADD_DEPRECATED_LUADEF_KEY("extractSquare");
+	ADD_FLOAT("harvestMetalStorage",  ud.harvestStorage.metal);
+	ADD_FLOAT("harvestEnergyStorage", ud.harvestStorage.energy);
 
 	ADD_FLOAT("power", ud.power);
 
 	ADD_FLOAT("health",       ud.health);
 	ADD_FLOAT("autoHeal",     ud.autoHeal);
 	ADD_FLOAT("idleAutoHeal", ud.idleAutoHeal);
-
 	ADD_INT("idleTime", ud.idleTime);
-
-	ADD_BOOL("canSelfD", ud.canSelfD);
-	ADD_INT("selfDCountdown", ud.selfDCountdown);
 
 	ADD_FLOAT("speed",    ud.speed);
 	ADD_FLOAT("rSpeed",    ud.rSpeed);
@@ -684,18 +722,7 @@ ADD_BOOL("canAttackWater",  canAttackWater); // CUSTOM
 	ADD_BOOL("upright", ud.upright);
 	ADD_BOOL("collide", ud.collide);
 
-	ADD_FLOAT("losHeight",     ud.losHeight);
-	ADD_FLOAT("losRadius",     ud.losRadius);
-	ADD_FLOAT("airLosRadius",  ud.airLosRadius);
-
-	ADD_INT("radarRadius",    ud.radarRadius);
-	ADD_INT("sonarRadius",    ud.sonarRadius);
-	ADD_INT("jammerRadius",   ud.jammerRadius);
-	ADD_INT("sonarJamRadius", ud.sonarJamRadius);
-	ADD_INT("seismicRadius",  ud.seismicRadius);
-
 	ADD_FLOAT("seismicSignature", ud.seismicSignature);
-
 	ADD_BOOL("stealth",      ud.stealth);
 	ADD_BOOL("sonarStealth", ud.sonarStealth);
 
@@ -719,6 +746,8 @@ ADD_BOOL("canAttackWater",  canAttackWater); // CUSTOM
 
 	ADD_FLOAT("minCollisionSpeed", ud.minCollisionSpeed);
 	ADD_FLOAT("slideTolerance",    ud.slideTolerance);
+	ADD_FLOAT("rollingResistanceCoefficient", ud.rollingResistanceCoefficient);
+	ADD_FLOAT("groundFrictionCoefficient", ud.groundFrictionCoefficient);
 
 	ADD_FLOAT("maxWeaponRange", ud.maxWeaponRange);
 	ADD_FLOAT("maxCoverage", ud.maxCoverage);
@@ -733,14 +762,14 @@ ADD_BOOL("canAttackWater",  canAttackWater); // CUSTOM
 	ADD_FLOAT("captureSpeed",   ud.captureSpeed);
 	ADD_FLOAT("terraformSpeed", ud.terraformSpeed);
 
+	ADD_FLOAT("upDirSmoothing", ud.upDirSmoothing);
+
 	ADD_BOOL("canSubmerge",       ud.canSubmerge);
 	ADD_BOOL("floatOnWater",      ud.floatOnWater);
 	ADD_BOOL("canFly",            ud.canfly);
 	ADD_BOOL("canMove",           ud.canmove);
 	ADD_BOOL("onOffable",         ud.onoffable);
 	ADD_BOOL("activateWhenBuilt", ud.activateWhenBuilt);
-
-	ADD_DEPRECATED_LUADEF_KEY("canHover");
 
 	ADD_BOOL("reclaimable", ud.reclaimable);
 	ADD_BOOL("capturable",  ud.capturable);
@@ -769,7 +798,6 @@ ADD_BOOL("canAttackWater",  canAttackWater); // CUSTOM
 	ADD_BOOL("factoryHeadingTakeoff", ud.factoryHeadingTakeoff);
 
 	//aircraft stuff
-	ADD_DEPRECATED_LUADEF_KEY("drag");
 	ADD_FLOAT("wingDrag",     ud.wingDrag);
 	ADD_FLOAT("wingAngle",    ud.wingAngle);
 	ADD_FLOAT("crashDrag",    ud.crashDrag);
@@ -781,7 +809,6 @@ ADD_BOOL("canAttackWater",  canAttackWater); // CUSTOM
 	ADD_FLOAT("maxBank",      ud.maxBank);
 	ADD_FLOAT("maxPitch",     ud.maxPitch);
 	ADD_FLOAT("turnRadius",   ud.turnRadius);
-	ADD_FLOAT("wantedHeight", ud.wantedHeight);
 	ADD_BOOL("hoverAttack",   ud.hoverAttack);
 	ADD_BOOL("airStrafe",     ud.airStrafe);
 	ADD_BOOL("bankingAllowed",ud.bankingAllowed);
@@ -793,8 +820,6 @@ ADD_BOOL("canAttackWater",  canAttackWater); // CUSTOM
 
 	//	bool DontLand (") { return dlHoverFactor >= 0.0f; }
 
-	ADD_FLOAT("maxAcc",      ud.maxAcc);
-	ADD_FLOAT("maxDec",      ud.maxDec);
 	ADD_FLOAT("maxAileron",  ud.maxAileron);
 	ADD_FLOAT("maxElevator", ud.maxElevator);
 	ADD_FLOAT("maxRudder",   ud.maxRudder);
@@ -811,8 +836,6 @@ ADD_BOOL("canAttackWater",  canAttackWater); // CUSTOM
 	ADD_FLOAT("transportMass",         ud.transportMass);
 	ADD_FLOAT("loadingRadius",         ud.loadingRadius);
 
-	ADD_DEPRECATED_LUADEF_KEY("isAirBase");
-
 	ADD_BOOL( "isFirePlatform",        ud.isFirePlatform);
 	ADD_BOOL( "holdSteady",            ud.holdSteady);
 	ADD_BOOL( "releaseHeld",           ud.releaseHeld);
@@ -828,13 +851,9 @@ ADD_BOOL("canAttackWater",  canAttackWater); // CUSTOM
 	ADD_FLOAT("decloakDistance",  ud.decloakDistance);
 	ADD_BOOL( "decloakSpherical", ud.decloakSpherical);
 	ADD_BOOL( "decloakOnFire",    ud.decloakOnFire);
-	ADD_DEPRECATED_LUADEF_KEY("cloakTimeout");
 
 	ADD_BOOL( "canKamikaze",    ud.canKamikaze);
-	ADD_FLOAT("kamikazeDist",   ud.kamikazeDist);
 	ADD_BOOL( "kamikazeUseLOS", ud.kamikazeUseLOS);
-
-	ADD_BOOL("targfac", ud.targfac);
 
 	ADD_BOOL("needGeo",   ud.needGeo);
 	ADD_BOOL("isFeature", ud.isFeature);
@@ -845,7 +864,7 @@ ADD_BOOL("canAttackWater",  canAttackWater); // CUSTOM
 	ADD_INT("highTrajectoryType", ud.highTrajectoryType);
 
 	ADD_BOOL( "leaveTracks",   ud.decalDef.leaveTrackDecals);
-	ADD_INT(  "trackType",     ud.decalDef.trackDecalType);
+	//ADD_INT(  "trackType",     ud.decalDef.trackDecalType);
 	ADD_FLOAT("trackWidth",    ud.decalDef.trackDecalWidth);
 	ADD_FLOAT("trackOffset",   ud.decalDef.trackDecalOffset);
 	ADD_FLOAT("trackStrength", ud.decalDef.trackDecalStrength);

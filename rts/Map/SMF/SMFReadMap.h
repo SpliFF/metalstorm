@@ -3,6 +3,8 @@
 #ifndef SMFREADMAP_H
 #define SMFREADMAP_H
 
+#include <array>
+
 #include "SMFMapFile.h"
 #include "Map/ReadMap.h"
 #include "System/EventClient.h"
@@ -26,6 +28,9 @@ public:
 	~CSMFReadMap() { mapFile.Close(); }
 
 	void UpdateHeightMapUnsynced(const SRectangle&) override;
+
+	int2 GetPatch(int hmx, int hmz) const override;
+	const float3& GetUnsyncedHeightInfo(int patchX, int patchZ) const override { return unsyncedHeightInfo[patchZ * numBigTexX + patchX]; }
 
 public:
 	int GetNumFeatureTypes() override;
@@ -70,6 +75,7 @@ private:
 	void CreateNormalTex();
 
 	void UpdateVertexNormalsUnsynced(const SRectangle& update);
+	void UpdateHeightBoundsUnsynced(const SRectangle& update);
 	void UpdateFaceNormalsUnsynced(const SRectangle& update);
 	void UpdateNormalTexture(const SRectangle& update);
 	void UpdateShadingTexture(const SRectangle& update);

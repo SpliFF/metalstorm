@@ -5,38 +5,17 @@
 #include "System/Threading/SpringThreading.h"
 #include "System/Threading/WrappedSync.h"
 #include "System/ScopedResource.h"
-#include "Rendering/GlobalRendering.h"
 
+// Headless server: GL context management removed, just use a plain mutex
 class CLoadLockMtx {
 public:
 	using native_handle_type = uint32_t;
 
-	void lock() {
-		mtx.lock();
-
-		// hack to protect from multiple context acquisions in case of recursive lock
-		auto& thisThreadLocksCount = locksCount[Threading::IsGameLoadThread()];
-		++thisThreadLocksCount;
-		if (thisThreadLocksCount == 1) {
-			globalRendering->MakeCurrentContext(false); //set
-			globalRendering->ToggleMultisampling();
-		}
-	}
-	void unlock() {
-
-		// hack to protect from multiple context clear in case of recursive lock
-		auto& thisThreadLocksCount = locksCount[Threading::IsGameLoadThread()];
-		--thisThreadLocksCount;
-
-		if (thisThreadLocksCount == 0)
-			globalRendering->MakeCurrentContext(true ); //clear
-
-		mtx.unlock();
-	}
-	bool try_lock() { assert(false); return true; } // placeholder
-	native_handle_type native_handle() { return native_handle_type{}; } // placeholder
+	void lock() { mtx.lock(); }
+	void unlock() { mtx.unlock(); }
+	bool try_lock() { return mtx.try_lock(); }
+	native_handle_type native_handle() { return native_handle_type{}; }
 private:
-	std::array<uint32_t, 2> locksCount = { 0 };
 	std::recursive_mutex mtx = {};
 };
 

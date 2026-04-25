@@ -35,7 +35,7 @@ public:
 	void UpdateAttack();
 	bool UpdateFlying(float wantedHeight, float wantedThrottle);
 	void UpdateLanding();
-	bool UpdateAirPhysics(const float4& controlInputs, const float3& thrustVector);
+	void UpdateAirPhysics(const float4& controlInputs, const float3& thrustVector);
 	void SetState(AircraftState state) override;
 	void UpdateTakeOff();
 

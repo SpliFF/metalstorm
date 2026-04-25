@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "Node.h"
+#include "System/Misc/TracyDefs.h"
 
 #include "Map/ReadMap.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"

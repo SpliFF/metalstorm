@@ -3,6 +3,7 @@
 #include "ScriptEventDispatcher.h"
 
 #include "Sim/Units/Unit.h"
+#include "Game/GameHelper.h"
 #include "Sim/Features/Feature.h"
 #include "Sim/Projectiles/Projectile.h"
 #include "Sim/Units/CommandAI/Command.h"
@@ -230,12 +231,11 @@ bool ScriptEventDispatcher::AllowCommand(
 }
 
 bool ScriptEventDispatcher::Explosion(
-    int weaponID, int projectileID,
-    const float3& pos, const CUnit* owner)
+    int weaponID, int projectileID, const float3& pos, const CUnit* owner)
 {
     ScriptEvent e;
     e.type = ScriptEventType::Explosion;
-    e.entityId = owner ? owner->id : 0;
+    e.entityId = 0;
     e.intData[0] = weaponID;
     e.intData[1] = projectileID;
     e.position = pos;

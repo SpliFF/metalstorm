@@ -20,20 +20,18 @@
 using std::string;
 using std::vector;
 
-struct CExplosionParams;
 class CSolidObject;
 class CUnit;
 class CWeapon;
 class CFeature;
 class CProjectile;
 struct Command;
-struct SCommandDescription;
 class IArchive;
 struct SRectangle;
 struct UnitDef;
 struct BuildInfo;
 struct FeatureDef;
-struct WeaponDef;
+class LuaMaterial;
 
 #ifndef zipFile
 	// might be defined through zip.h already
@@ -128,9 +126,8 @@ class CEventClient
 		virtual void UnitCreated(const CUnit* unit, const CUnit* builder) {}
 		virtual void UnitFinished(const CUnit* unit) {}
 		virtual void UnitReverseBuilt(const CUnit* unit) {}
-		virtual void UnitConstructionDecayed(const CUnit* unit, float timeSinceLastBuild, float iterationPeriod, float part) {}
 		virtual void UnitFromFactory(const CUnit* unit, const CUnit* factory, bool userOrders) {}
-		virtual void UnitDestroyed(const CUnit* unit, const CUnit* attacker, int weaponDefID) {}
+		virtual void UnitDestroyed(const CUnit* unit, const CUnit* attacker) {}
 		virtual void UnitTaken(const CUnit* unit, int oldTeam, int newTeam) {}
 		virtual void UnitGiven(const CUnit* unit, int oldTeam, int newTeam) {}
 
@@ -168,6 +165,10 @@ class CEventClient
 		virtual void UnitCloaked(const CUnit* unit) {}
 		virtual void UnitDecloaked(const CUnit* unit) {}
 
+		virtual void RenderUnitPreCreated(const CUnit* unit) {}
+		virtual void RenderUnitCreated(const CUnit* unit, int cloaked) {}
+		virtual void RenderUnitDestroyed(const CUnit* unit) {}
+
 		virtual bool UnitUnitCollision(const CUnit* collider, const CUnit* collidee) { return false; }
 		virtual bool UnitFeatureCollision(const CUnit* collider, const CFeature* collidee) { return false; }
 		virtual void UnitMoved(const CUnit* unit) {}
@@ -184,13 +185,20 @@ class CEventClient
 			int projectileID) {}
 		virtual void FeatureMoved(const CFeature* feature, const float3& oldpos) {}
 
+		virtual void RenderFeaturePreCreated(const CFeature* feature) {}
+		virtual void RenderFeatureCreated(const CFeature* feature) {}
+		virtual void RenderFeatureDestroyed(const CFeature* feature) {}
+
 		virtual void ProjectileCreated(const CProjectile* proj) {}
 		virtual void ProjectileDestroyed(const CProjectile* proj) {}
+
+		virtual void RenderProjectileCreated(const CProjectile* proj) {}
+		virtual void RenderProjectileDestroyed(const CProjectile* proj) {}
 
 		virtual void StockpileChanged(const CUnit* unit,
 		                              const CWeapon* weapon, int oldCount) {}
 
-		virtual bool Explosion(int weaponID, const WeaponDef* weaponDef, const CExplosionParams& params) { return false; }
+		virtual bool Explosion(int weaponID, int projectileID, const float3& pos, const CUnit* owner) { return false; }
 
 
 		virtual bool CommandFallback(const CUnit* unit, const Command& cmd) { return false; }
@@ -316,10 +324,45 @@ class CEventClient
 
 		virtual void ViewResize();
 
-		// Draw/Render events migrated to JS client — see docs/client-events.md
+		virtual void DrawGenesis() {}
+		virtual void DrawWorld() {}
+		virtual void DrawWorldPreUnit() {}
+		virtual void DrawPreDecals() {}
+		virtual void DrawWorldPreParticles() {}
+		virtual void DrawWaterPost() {}
+		virtual void DrawWorldShadow() {}
+		virtual void DrawShadowPassTransparent() {}
+		virtual void DrawWorldReflection() {}
+		virtual void DrawWorldRefraction() {}
+		virtual void DrawGroundPreForward() {}
+		virtual void DrawGroundPostForward() {}
+		virtual void DrawGroundPreDeferred() {}
+		virtual void DrawGroundDeferred() {}
+		virtual void DrawGroundPostDeferred() {}
+		virtual void DrawUnitsPostDeferred() {}
+		virtual void DrawFeaturesPostDeferred() {}
+		virtual void DrawScreenEffects() {}
+		virtual void DrawScreenPost() {}
+		virtual void DrawScreen() {}
+		virtual void DrawInMiniMap() {}
+		virtual void DrawInMiniMapBackground() {}
+
+		virtual bool DrawUnit(const CUnit* unit) { return false; }
+		virtual bool DrawFeature(const CFeature* feature) { return false; }
+		virtual bool DrawShield(const CUnit* unit, const CWeapon* weapon) { return false; }
+		virtual bool DrawProjectile(const CProjectile* projectile) { return false; }
+		virtual bool DrawMaterial(const LuaMaterial* material) { return false; }
+
+		virtual void DrawOpaqueUnitsLua(bool deferredPass, bool drawReflection, bool drawRefraction) {}
+		virtual void DrawOpaqueFeaturesLua(bool deferredPass, bool drawReflection, bool drawRefraction) {}
+		virtual void DrawAlphaUnitsLua(bool drawReflection, bool drawRefraction) {}
+		virtual void DrawAlphaFeaturesLua(bool drawReflection, bool drawRefraction) {}
+		virtual void DrawShadowUnitsLua() {}
+		virtual void DrawShadowFeaturesLua() {}
 
 		virtual void GameProgress(int gameFrame);
 
+		virtual void DrawLoadScreen() {}
 		virtual void LoadProgress(const std::string& msg, const bool replace_lastline);
 
 		virtual void CollectGarbage(bool forced) {}

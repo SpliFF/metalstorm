@@ -49,7 +49,54 @@ CR_REG_METADATA_SUB(CQuadField, Quad, (
 
 
 CQuadField quadField;
-//#define DEBUG_QUADFIELD
+
+
+#ifndef UNIT_TEST
+/*
+void CQuadField::Resize(int quad_size)
+{
+	CQuadField* oldQuadField = &quadField;
+	CQuadField newQuadField;
+
+	newQuadField.Init(int2(mapDims.mapx, mapDims.mapy), quad_size);
+
+	for (int zq = 0; zq < oldQuadField->GetNumQuadsZ(); zq++) {
+		for (int xq = 0; xq < oldQuadField->GetNumQuadsX(); xq++) {
+			const CQuadField::Quad& quad = oldQuadField->GetQuadAt(xq, zq);
+
+			// COPY the object lists because the Remove* functions modify them
+			// NOTE:
+			//   teamUnits is updated internally by RemoveUnit and MovedUnit
+			//
+			//   if a unit exists in multiple quads in the old field, it will
+			//   be removed from all of them and there is no danger of double
+			//   re-insertion (important if new grid has higher resolution)
+			const std::vector<CUnit*      > units       = quad.units;
+			const std::vector<CFeature*   > features    = quad.features;
+			const std::vector<CProjectile*> projectiles = quad.projectiles;
+
+			for (auto it = units.cbegin(); it != units.cend(); ++it) {
+				oldQuadField->RemoveUnit(*it);
+				newQuadField->MovedUnit(*it); // handles addition
+			}
+
+			for (auto it = features.cbegin(); it != features.cend(); ++it) {
+				oldQuadField->RemoveFeature(*it);
+				newQuadField->AddFeature(*it);
+			}
+
+			for (auto it = projectiles.cbegin(); it != projectiles.cend(); ++it) {
+				oldQuadField->RemoveProjectile(*it);
+				newQuadField->AddProjectile(*it);
+			}
+		}
+	}
+
+	quadField = std::move(newQuadField);
+}
+*/
+#endif
+
 
 void CQuadField::Quad::PostLoad()
 {
@@ -136,7 +183,7 @@ int CQuadField::WorldPosToQuadFieldIdx(const float3 p) const
 }
 
 
-#ifndef UNIT_TEST // ClampInBounds() is not linked
+#ifndef UNIT_TEST
 void CQuadField::GetQuads(QuadFieldQuery& qfq, float3 pos, float radius)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
@@ -281,97 +328,6 @@ void CQuadField::GetQuadsOnRay(QuadFieldQuery& qfq, const float3& start, const f
 	}
 }
 
-#ifndef UNIT_TEST // needs GetQuadsRectangle()
-// Test with wide ray that also extends width at the extremes.
-void CQuadField::GetQuadsOnWideRay(QuadFieldQuery& qfq, const float3& start, const float3& dir, float length, float width)
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-	dir.AssertNaNs();
-	start.AssertNaNs();
-
-	const float3 baseTo = start + (dir * length);
-
-	const bool noZdir = (math::floor(start.z * invQuadSize.y) == math::floor(baseTo.z * invQuadSize.y));
-
-	// special case, prevent div0.
-	if (noZdir) {
-		// Having noZdir will roughly result in a rectangle.
-		float startX = start.x;
-		float finalX = baseTo.x;
-		if (finalX < startX)
-			std::swap(startX, finalX);
-
-		float startZ = start.z;
-		float finalZ = baseTo.z;
-		if (finalZ < startZ)
-			std::swap(startZ, finalZ);
-
-		const float3 mins(startX - width, 0, startZ - width);
-		const float3 maxs(finalX + width, 0, finalZ + width);
-
-		return GetQuadsRectangle(qfq, mins, maxs);
-	}
-
-	auto& queryQuads = *(qfq.quads = tempQuads[qfq.threadOwner].ReserveVector());
-
-	// iterate z-range; compute which columns (x) are touched for each row (z)
-	const float3 normDirPlanar = float3(dir.x, 0.0, dir.z).UnsafeNormalize();  // we already checked for unsafe cases before
-	const float widthFactor = std::abs(normDirPlanar.z / dir.z) * width;
-
-	// Start and stop a bit further to account for width
-	const float3 to = baseTo + dir * widthFactor;
-	length = (to - start).Length();
-
-	// taking normDirPlanar.z since we want perpendicular proportion
-	const float mapMarginX = std::abs(width * normDirPlanar.z);
-
-	// From here on, basically a copy of the same section of GetQuadsOnRay, just here extending
-	// startX and finalX with mapMarginX before converting to quad indexes and pushing each row.
-
-	float startZuc = start.z * invQuadSize.y;
-	float finalZuc =    to.z * invQuadSize.y;
-
-	if (finalZuc < startZuc)
-		std::swap(startZuc, finalZuc);
-
-	const int startZ = std::clamp <int> (startZuc, 0, numQuadsZ - 1);
-	const int finalZ = std::clamp <int> (finalZuc, 0, numQuadsZ - 1);
-
-	assert(finalZ < quadSizeZ);
-
-	const float invDirZ = 1.0f / dir.z;
-
-	for (int z = startZ; z <= finalZ; z++) {
-		float t0 = ((z    ) * quadSizeZ - start.z) * invDirZ;
-		float t1 = ((z + 1) * quadSizeZ - start.z) * invDirZ;
-
-		if ((startZuc < 0 && z == 0) || (startZuc >= numQuadsZ && z == finalZ))
-			t0 = ((startZuc    ) * quadSizeZ - start.z) * invDirZ;
-
-		if ((finalZuc < 0 && z == 0) || (finalZuc >= numQuadsZ && z == finalZ))
-			t1 = ((finalZuc + 1) * quadSizeZ - start.z) * invDirZ;
-
-		t0 = std::clamp(t0, 0.0f, length);
-		t1 = std::clamp(t1, 0.0f, length);
-
-		float mapStartX = dir.x * t0 + start.x;
-		float mapFinalX = dir.x * t1 + start.x;
-
-		if (mapFinalX < mapStartX)
-			std::swap(mapStartX, mapFinalX);
-
-		const unsigned startX = std::clamp <int> ((mapStartX - mapMarginX) * invQuadSize.x, 0, numQuadsX - 1);
-		const unsigned finalX = std::clamp <int> ((mapFinalX + mapMarginX) * invQuadSize.x, 0, numQuadsX - 1);
-
-		const int row = std::clamp(z, 0, numQuadsZ - 1) * numQuadsX;
-
-		for (unsigned x = startX; x <= finalX; x++) {
-			queryQuads.push_back(row + x);
-			assert(static_cast<unsigned>(queryQuads.back()) < baseQuads.size());
-		}
-	}
-}
-#endif
 
 
 #ifndef UNIT_TEST

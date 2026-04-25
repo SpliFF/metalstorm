@@ -213,3 +213,11 @@ void CPlasmaRepulser::DependentDied(CObject* o)
 	spring::VectorErase(repulsedProjectiles, static_cast<CWeaponProjectile*>(o));
 	CWeapon::DependentDied(o);
 }
+
+void CPlasmaRepulser::SetRechargeDelay(int delay, bool overwrite)
+{
+	if (overwrite)
+		rechargeDelay = delay;
+	else
+		rechargeDelay = std::max(rechargeDelay, delay);
+}

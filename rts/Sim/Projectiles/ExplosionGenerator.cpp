@@ -26,7 +26,7 @@
 #include "System/SafeUtil.h"
 #include "System/StringHash.h"
 
-static DynMemPool<sizeof(CCustomExplosionGenerator)> egMemPool;
+static DynMemPool<sizeof(CCustomExplosionGenerator), alignof(CCustomExplosionGenerator)> egMemPool;
 
 static uint8_t exploParserMem[sizeof(LuaParser)];
 static uint8_t aliasParserMem[sizeof(LuaParser)];

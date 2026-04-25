@@ -13,6 +13,8 @@
 #include <algorithm> // std::{min,max}
 #include <limits>
 
+template<class T> constexpr T Clamp(const T v, const T vmin, const T vmax) { return std::min(vmax, std::max(vmin, v)); }
+
 static constexpr int SPRING_MAX_HEADING = 32768;
 static constexpr int SPRING_CIRCLE_DIVS = (SPRING_MAX_HEADING << 1);
 

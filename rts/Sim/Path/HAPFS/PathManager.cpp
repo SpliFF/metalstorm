@@ -434,15 +434,14 @@ unsigned int CPathManager::RequestPath(
 	float3 startPos,
 	float3 goalPos,
 	float goalRadius,
-	bool synced,
-	bool immediateResult
+	bool synced
 ) {
 	unsigned int pathId = 0;
 
 	if (!IsFinalized())
 		return 0;
 
-	if (synced && !immediateResult) {
+	if (synced) {
 		assert(!ThreadPool::IsInMultiThreadedSection());
 
 		PathSearch* existingSearch = nullptr;
@@ -672,7 +671,7 @@ float3 CPathManager::NextWayPoint(
 					break;
 				}
 				// direct to the nearest lower-res waypoint as a fallback until the path can be expanded.
-				// this creates the next step, so it will be checked very regularly until the path is
+				// this creates the next step, so it will be checked very regulary until the path is
 				// extended.
 				if (waypoint == noPathPoint) {
 					auto createTempWaypointFromLowerRes = [&createTempWaypoint, &callerPos, radius](IPath::Path& path) {

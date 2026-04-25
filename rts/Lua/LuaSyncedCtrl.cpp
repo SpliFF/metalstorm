@@ -73,20 +73,10 @@
 #include "System/Sync/SyncedPrimitiveBase.h"
 
 using std::max;
-using std::min;
 
 
 /******************************************************************************/
 /******************************************************************************/
-
-bool LuaSyncedCtrl::inCreateUnit = false;
-bool LuaSyncedCtrl::inDestroyUnit = false;
-bool LuaSyncedCtrl::inTransferUnit = false;
-bool LuaSyncedCtrl::inCreateFeature = false;
-bool LuaSyncedCtrl::inDestroyFeature = false;
-bool LuaSyncedCtrl::inGiveOrder = false;
-bool LuaSyncedCtrl::inHeightMap = false;
-bool LuaSyncedCtrl::inSmoothMesh = false;
 
 static int heightMapx1 = 0;
 static int heightMapx2 = 0;
@@ -94,7 +84,14 @@ static int heightMapz1 = 0;
 static int heightMapz2 = 0;
 
 static float heightMapAmountChanged = 0.0f;
+static float originalHeightMapAmountChanged = 0.0f;
 static float smoothMeshAmountChanged = 0.0f;
+
+/***
+Synced Lua API
+@module SyncedCtrl
+@see rts/Lua/LuaSyncedCtrl.cpp
+*/
 
 
 /******************************************************************************/
@@ -114,12 +111,12 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 {
 	{
 		// these need to be re-initialized here since we might have reloaded
-		inCreateUnit = false;
-		inDestroyUnit = false;
-		inTransferUnit = false;
-		inCreateFeature = false;
-		inDestroyFeature = false;
-		inGiveOrder = false;
+		inCreateUnit = 0;
+		inDestroyUnit = 0;
+		inCreateFeature = 0;
+		inDestroyFeature = 0;
+		inGiveOrder = 0;
+		inTransferUnit = 0;
 		inHeightMap = false;
 		inSmoothMesh = false;
 
@@ -129,11 +126,13 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 		heightMapz2 = 0;
 
 		heightMapAmountChanged = 0.0f;
+		originalHeightMapAmountChanged = 0.0f;
 		smoothMeshAmountChanged = 0.0f;
 	}
 
 
 	REGISTER_LUA_CFUNC(SetAlly);
+	REGISTER_LUA_CFUNC(SetAllyTeamStartBox);
 	REGISTER_LUA_CFUNC(KillTeam);
 	REGISTER_LUA_CFUNC(AssignPlayerToTeam);
 	REGISTER_LUA_CFUNC(GameOver);
@@ -147,6 +146,7 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 
 	REGISTER_LUA_CFUNC(SetGameRulesParam);
 	REGISTER_LUA_CFUNC(SetTeamRulesParam);
+	REGISTER_LUA_CFUNC(SetPlayerRulesParam);
 	REGISTER_LUA_CFUNC(SetUnitRulesParam);
 	REGISTER_LUA_CFUNC(SetFeatureRulesParam);
 
@@ -169,23 +169,29 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(SetUnitWeaponDamages);
 	REGISTER_LUA_CFUNC(SetUnitMaxRange);
 	REGISTER_LUA_CFUNC(SetUnitExperience);
+	REGISTER_LUA_CFUNC(AddUnitExperience);
 	REGISTER_LUA_CFUNC(SetUnitArmored);
 	REGISTER_LUA_CFUNC(SetUnitLosMask);
 	REGISTER_LUA_CFUNC(SetUnitLosState);
 	REGISTER_LUA_CFUNC(SetUnitCloak);
 	REGISTER_LUA_CFUNC(SetUnitStealth);
 	REGISTER_LUA_CFUNC(SetUnitSonarStealth);
+	REGISTER_LUA_CFUNC(SetUnitSeismicSignature);
 	REGISTER_LUA_CFUNC(SetUnitAlwaysVisible);
 	REGISTER_LUA_CFUNC(SetUnitUseAirLos);
 	REGISTER_LUA_CFUNC(SetUnitMetalExtraction);
 	REGISTER_LUA_CFUNC(SetUnitHarvestStorage);
 	REGISTER_LUA_CFUNC(SetUnitBuildSpeed);
+	REGISTER_LUA_CFUNC(SetUnitBuildParams);
 	REGISTER_LUA_CFUNC(SetUnitNanoPieces);
 
 	REGISTER_LUA_CFUNC(SetUnitBlocking);
 	REGISTER_LUA_CFUNC(SetUnitCrashing);
 	REGISTER_LUA_CFUNC(SetUnitShieldState);
+	REGISTER_LUA_CFUNC(SetUnitShieldRechargeDelay);
 	REGISTER_LUA_CFUNC(SetUnitFlanking);
+	REGISTER_LUA_CFUNC(GetUnitPhysicalState);
+	REGISTER_LUA_CFUNC(SetUnitPhysicalStateBit);
 	REGISTER_LUA_CFUNC(SetUnitTravel);
 	REGISTER_LUA_CFUNC(SetUnitFuel);
 	REGISTER_LUA_CFUNC(SetUnitMoveGoal);
@@ -195,6 +201,7 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(SetUnitTarget);
 	REGISTER_LUA_CFUNC(SetUnitMidAndAimPos);
 	REGISTER_LUA_CFUNC(SetUnitRadiusAndHeight);
+	REGISTER_LUA_CFUNC(SetUnitBuildeeRadius);
 
 	REGISTER_LUA_CFUNC(SetUnitCollisionVolumeData);
 	REGISTER_LUA_CFUNC(SetUnitPieceCollisionVolumeData);
@@ -209,6 +216,10 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(SetUnitVelocity);
 	REGISTER_LUA_CFUNC(SetUnitRotation);
 	REGISTER_LUA_CFUNC(SetUnitDirection);
+	REGISTER_LUA_CFUNC(SetUnitHeadingAndUpDir);
+
+	REGISTER_LUA_CFUNC(SetFactoryBuggerOff);
+	REGISTER_LUA_CFUNC(BuggerOff);
 
 	REGISTER_LUA_CFUNC(AddUnitDamage);
 	REGISTER_LUA_CFUNC(AddUnitImpulse);
@@ -237,6 +248,7 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(SetFeatureVelocity);
 	REGISTER_LUA_CFUNC(SetFeatureRotation);
 	REGISTER_LUA_CFUNC(SetFeatureDirection);
+	REGISTER_LUA_CFUNC(SetFeatureHeadingAndUpDir);
 
 	REGISTER_LUA_CFUNC(SetFeatureBlocking);
 	REGISTER_LUA_CFUNC(SetFeatureNoSelect);
@@ -276,6 +288,7 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(GiveOrderToUnit);
 	REGISTER_LUA_CFUNC(GiveOrderToUnitMap);
 	REGISTER_LUA_CFUNC(GiveOrderToUnitArray);
+	REGISTER_LUA_CFUNC(GiveOrderArrayToUnit);
 	REGISTER_LUA_CFUNC(GiveOrderArrayToUnitMap);
 	REGISTER_LUA_CFUNC(GiveOrderArrayToUnitArray);
 
@@ -286,6 +299,16 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(AddHeightMap);
 	REGISTER_LUA_CFUNC(SetHeightMap);
 	REGISTER_LUA_CFUNC(SetHeightMapFunc);
+
+	REGISTER_LUA_CFUNC(LevelOriginalHeightMap);
+	REGISTER_LUA_CFUNC(AdjustOriginalHeightMap);
+	REGISTER_LUA_CFUNC(RevertOriginalHeightMap);
+
+	REGISTER_LUA_CFUNC(AddOriginalHeightMap);
+	REGISTER_LUA_CFUNC(SetOriginalHeightMap);
+	REGISTER_LUA_CFUNC(SetOriginalHeightMapFunc);
+
+	REGISTER_LUA_CFUNC(RebuildSmoothMesh);
 
 	REGISTER_LUA_CFUNC(LevelSmoothMesh);
 	REGISTER_LUA_CFUNC(AdjustSmoothMesh);
@@ -453,7 +476,7 @@ static bool ParseProjectileParams(lua_State* L, ProjectileParams& params, const 
 			switch (hashString(key)) {
 				case hashString("model"): {
 					// modelLoader removed on headless server — model loading is client-side
-					params.model = nullptr;
+				params.model = nullptr;
 				} break;
 				case hashString("cegtag"): {
 					params.cegID = explGenHandler.LoadGeneratorID(lua_tostring(L, -1));
@@ -481,6 +504,64 @@ static CTeam* ParseTeam(lua_State* L, const char* caller, int index)
 
 
 	return (teamHandler.Team(teamID));
+}
+
+static void ParseUnitMap(lua_State* L, const char* caller,
+	int table, vector<CUnit*>& unitIDs)
+{
+	if (!lua_istable(L, table))
+		luaL_error(L, "%s(): error parsing unit map", caller);
+
+	for (lua_pushnil(L); lua_next(L, table) != 0; lua_pop(L, 1)) {
+		if (!lua_israwnumber(L, -2))
+			continue;
+
+		CUnit* unit = ParseUnit(L, __func__, -2);
+
+		if (unit == nullptr)
+			continue; // bad pointer
+
+		unitIDs.push_back(unit);
+	}
+}
+
+
+static void ParseUnitArray(lua_State* L, const char* caller,
+	int table, vector<CUnit*>& unitIDs)
+{
+	if (!lua_istable(L, table))
+		luaL_error(L, "%s(): error parsing unit array", caller);
+
+	for (lua_pushnil(L); lua_next(L, table) != 0; lua_pop(L, 1)) {
+		if (!lua_israwnumber(L, -2) || !lua_isnumber(L, -1)) // avoid 'n'
+			continue;
+
+		CUnit* unit = ParseUnit(L, __func__, -1);
+
+		if (unit == nullptr)
+			continue; // bad pointer
+
+		unitIDs.push_back(unit);
+	}
+}
+
+static void ParseUnitDefArray(lua_State* L, const char* caller,
+	int table, vector<const UnitDef*>& unitDefs)
+{
+	if (!lua_istable(L, table))
+		luaL_error(L, "%s(): error parsing unitdef array", caller);
+
+	for (lua_pushnil(L); lua_next(L, table) != 0; lua_pop(L, 1)) {
+		if (!lua_israwnumber(L, -2) || !lua_isnumber(L, -1)) // avoid 'n'
+			continue;
+
+		const UnitDef* ud = unitDefHandler->GetUnitDefByID(luaL_checkint(L, -1));
+
+		if (ud == nullptr)
+			continue; // bad pointer
+
+		unitDefs.push_back(ud);
+	}
 }
 
 static int SetSolidObjectCollisionVolumeData(lua_State* L, CSolidObject* o)
@@ -542,12 +623,39 @@ static int SetSolidObjectRotation(lua_State* L, CSolidObject* o, bool isFeature)
 	return 0;
 }
 
+static int SetSolidObjectHeadingAndUpDir(lua_State* L, CSolidObject* o, bool isFeature)
+{
+	if (o == nullptr)
+		return 0;
+
+	const auto heading = spring::SafeCast<short>(luaL_optint(L, 2, o->heading));
+	const float3 newUpDir = float3(luaL_checkfloat(L, 3), luaL_checkfloat(L, 4), luaL_checkfloat(L, 5)).SafeNormalize();
+	if (math::fabsf(newUpDir.SqLength() - 1.0f) > float3::cmp_eps())
+		luaL_error(L, "[%s] Invalid upward-direction (%f, %f, %f), id = %d, model = %s, teamID = %d", __func__, newUpDir.x, newUpDir.y, newUpDir.z, o->id, o->model ? o->model->name.c_str() : "nullptr", o->team);
+
+	o->heading = heading;
+	o->UpdateDirVectors(newUpDir);
+	o->SetFacingFromHeading();
+	o->UpdateMidAndAimPos();
+
+	if (isFeature)
+		static_cast<CFeature*>(o)->UpdateTransform(o->pos, true);
+
+	return 0;
+}
+
 static int SetSolidObjectDirection(lua_State* L, CSolidObject* o)
 {
 	if (o == nullptr)
 		return 0;
 
-	o->ForcedSpin((float3(luaL_checkfloat(L, 2), luaL_checkfloat(L, 3), luaL_checkfloat(L, 4))).SafeNormalize());
+	const float3 newDir = float3(luaL_checkfloat(L, 2), luaL_checkfloat(L, 3), luaL_checkfloat(L, 4)).SafeNormalize();
+
+	if (math::fabsf(newDir.SqLength() - 1.0f) > float3::cmp_eps()) {
+		luaL_error(L, "[%s] Invalid front-direction (%f, %f, %f), id = %d, model = %s, teamID = %d", __func__, newDir.x, newDir.y, newDir.z, o->id, o->model ? o->model->name.c_str() : "nullptr", o->team);
+	}
+
+	o->ForcedSpin(newDir);
 	return 0;
 }
 
@@ -557,9 +665,9 @@ static int SetWorldObjectVelocity(lua_State* L, CWorldObject* o)
 		return 0;
 
 	float3 speed;
-	speed.x = Clamp(luaL_checkfloat(L, 2), -MAX_UNIT_SPEED, MAX_UNIT_SPEED);
-	speed.y = Clamp(luaL_checkfloat(L, 3), -MAX_UNIT_SPEED, MAX_UNIT_SPEED);
-	speed.z = Clamp(luaL_checkfloat(L, 4), -MAX_UNIT_SPEED, MAX_UNIT_SPEED);
+	speed.x = std::clamp(luaL_checkfloat(L, 2), -MAX_UNIT_SPEED, MAX_UNIT_SPEED);
+	speed.y = std::clamp(luaL_checkfloat(L, 3), -MAX_UNIT_SPEED, MAX_UNIT_SPEED);
+	speed.z = std::clamp(luaL_checkfloat(L, 4), -MAX_UNIT_SPEED, MAX_UNIT_SPEED);
 
 	o->SetVelocityAndSpeed(speed);
 	return 0;
@@ -597,9 +705,9 @@ static int SetSolidObjectPhysicalState(lua_State* L, CSolidObject* o)
 	rot.y = luaL_checknumber(L, 9);
 	rot.z = luaL_checknumber(L, 10);
 
-	drag.x = Clamp(static_cast<float>(luaL_optnumber(L, 11, drag.x)), 0.0f, 1.0f);
-	drag.y = Clamp(static_cast<float>(luaL_optnumber(L, 12, drag.y)), 0.0f, 1.0f);
-	drag.z = Clamp(static_cast<float>(luaL_optnumber(L, 13, drag.z)), 0.0f, 1.0f);
+	drag.x = std::clamp(static_cast<float>(luaL_optnumber(L, 11, drag.x)), 0.0f, 1.0f);
+	drag.y = std::clamp(static_cast<float>(luaL_optnumber(L, 12, drag.y)), 0.0f, 1.0f);
+	drag.z = std::clamp(static_cast<float>(luaL_optnumber(L, 13, drag.z)), 0.0f, 1.0f);
 
 	o->Move(pos, false);
 	o->SetDirVectorsEuler(rot);
@@ -642,7 +750,7 @@ static int SetSolidObjectPieceVisible(lua_State* L, CSolidObject* obj)
 	if (lmp == nullptr)
 		luaL_argerror(L, 2, "invalid piece");
 
-	lmp->scriptSetVisible = luaL_checkboolean(L, 3);
+	lmp->SetScriptVisible(luaL_checkboolean(L, 3));
 	return 0;
 }
 
@@ -674,12 +782,20 @@ static inline bool IsPlayerSynced(const CPlayer* player)
 	return (!gameSetup->hostDemo || player->isFromDemo);
 }
 
-/******************************************************************************/
-/******************************************************************************/
-//
-// The call-outs
-//
 
+/******************************************************************************
+ * Teams
+ * @section teams
+******************************************************************************/
+
+/*** Changes the value of the (one-sided) alliance between: firstAllyTeamID -> secondAllyTeamID.
+ *
+ * @function Spring.SetAlly
+ * @number firstAllyTeamID
+ * @number secondAllyTeamID
+ * @bool ally
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetAlly(lua_State* L)
 {
 	const int firstAllyTeamID = luaL_checkint(L, 1);
@@ -694,27 +810,46 @@ int LuaSyncedCtrl::SetAlly(lua_State* L)
 	return 0;
 }
 
-int LuaSyncedCtrl::KillTeam(lua_State* L)
+
+/*** Changes the start box position of an allyTeam.
+ *
+ * @function Spring.SetAllyTeamStartBox
+ * @number allyTeamID
+ * @number xMin left start box boundary (elmos)
+ * @number zMin top start box boundary (elmos)
+ * @number xMax right start box boundary (elmos)
+ * @number zMax bottom start box boundary (elmos)
+ * @treturn nil
+ */
+int LuaSyncedCtrl::SetAllyTeamStartBox(lua_State* L)
 {
-	const int teamID = luaL_checkint(L, 1);
+	const unsigned int allyTeamID = luaL_checkint(L, 1);
+	const float xMin = luaL_checkfloat(L, 2);
+	const float zMin = luaL_checkfloat(L, 3);
+	const float xMax = luaL_checkfloat(L, 4);
+	const float zMax = luaL_checkfloat(L, 5);
 
-	if (!teamHandler.IsValidTeam(teamID))
+	if (!teamHandler.IsValidAllyTeam(allyTeamID)) {
 		return 0;
+	}
 
-	//FIXME either we disallow it here or it needs modifications in GameServer.cpp (it creates a `teams` vector w/o gaia)
-	//  possible fix would be to always create the Gaia team (currently it's conditional on gs->useLuaGaia)
-	if (teamID == teamHandler.GaiaTeamID())
-		return 0;
+	const float startRectLeft   = xMin / (mapDims.mapx * SQUARE_SIZE);
+	const float startRectTop    = zMin / (mapDims.mapy * SQUARE_SIZE);
+	const float startRectRight  = xMax / (mapDims.mapx * SQUARE_SIZE);
+	const float startRectBottom = zMax / (mapDims.mapy * SQUARE_SIZE);
 
-	CTeam* team = teamHandler.Team(teamID);
-
-	if (team == nullptr)
-		return 0;
-
-	team->Died();
+	teamHandler.SetAllyTeamStartBox(allyTeamID, startRectLeft, startRectTop, startRectRight, startRectBottom);
 	return 0;
 }
 
+
+/*** Assigns a player to a team.
+ *
+ * @function Spring.AssignPlayerToTeam
+ * @number playerID
+ * @number teamID
+ * @treturn nil
+ */
 int LuaSyncedCtrl::AssignPlayerToTeam(lua_State* L)
 {
 	const int playerID = luaL_checkint(L, 1);
@@ -736,6 +871,72 @@ int LuaSyncedCtrl::AssignPlayerToTeam(lua_State* L)
 }
 
 
+/*** Changes access to global line of sight for a team and its allies.
+ *
+ * @function Spring.SetGlobalLos
+ * @number allyTeamID
+ * @bool globallos
+ * @treturn nil
+ */
+int LuaSyncedCtrl::SetGlobalLos(lua_State* L)
+{
+	const int allyTeam = luaL_checkint(L, 1);
+
+	if (!teamHandler.IsValidAllyTeam(allyTeam))
+		luaL_error(L, "bad allyTeam");
+
+	losHandler->SetGlobalLOS(allyTeam, luaL_checkboolean(L, 2));
+	return 0;
+}
+
+
+/***
+ * Game End
+ * @section gameend
+ */
+
+/*** Will declare a team to be dead (no further orders can be assigned to such teams units).
+ *
+ * @function Spring.KillTeam
+ *
+ * Gaia team cannot be killed.
+ *
+ * @number teamID
+ * @treturn nil
+ */
+int LuaSyncedCtrl::KillTeam(lua_State* L)
+{
+	const int teamID = luaL_checkint(L, 1);
+
+	if (!teamHandler.IsValidTeam(teamID))
+		return 0;
+
+	//FIXME either we disallow it here or it needs modifications in GameServer.cpp (it creates a `teams` vector w/o gaia)
+	//  possible fix would be to always create the Gaia team (currently it's conditional on gs->useLuaGaia)
+	if (teamID == teamHandler.GaiaTeamID())
+		return 0;
+
+	CTeam* team = teamHandler.Team(teamID);
+
+	if (team == nullptr)
+		return 0;
+
+	team->Died();
+	return 0;
+}
+
+
+/*** Will declare game over.
+ *
+ * @function Spring.GameOver
+ *
+ * A list of winning allyteams can be passed, if undecided (like when dropped from the host) it should be empty (no winner), in the case of a draw with multiple winners, all should be listed.
+ *
+ * @number[opt] allyTeamID1
+ * @number[opt] allyTeamID2
+ * @number[opt] allyTeamIDn
+ * @treturn nil
+ */
 int LuaSyncedCtrl::GameOver(lua_State* L)
 {
 	if (!lua_istable(L, 1)) {
@@ -767,20 +968,46 @@ int LuaSyncedCtrl::GameOver(lua_State* L)
 }
 
 
-int LuaSyncedCtrl::SetGlobalLos(lua_State* L)
+/***
+ * Resources
+ * @section resources
+ */
+
+
+/*** Set tidal strength
+ *
+ * @function Spring.SetTidal
+ * @number strength
+ * @treturn nil
+ */
+int LuaSyncedCtrl::SetTidal(lua_State* L)
 {
-	const int allyTeam = luaL_checkint(L, 1);
-
-	if (!teamHandler.IsValidAllyTeam(allyTeam))
-		luaL_error(L, "bad allyTeam");
-
-	losHandler->globalLOS[allyTeam] = luaL_checkboolean(L, 2);
+	envResHandler.LoadTidal(luaL_optnumber(L, 1, envResHandler.GetCurrentTidalStrength()));
 	return 0;
 }
 
 
+/*** Set wind strength
+ *
+ * @function Spring.SetWind
+ * @number minStrength
+ * @number maxStrength
+ * @treturn nil
+ */
+int LuaSyncedCtrl::SetWind(lua_State* L)
+{
+	envResHandler.LoadWind(luaL_optnumber(L, 1, envResHandler.GetMinWindStrength()), luaL_optnumber(L, 2, envResHandler.GetMaxWindStrength()));
+	return 0;
+}
 
-
+/*** Adds metal or energy resources to the specified team.
+ *
+ * @function Spring.AddTeamResource
+ * @number teamID
+ * @string type "metal" | "energy"
+ * @number amount
+ * @treturn nil
+ */
 int LuaSyncedCtrl::AddTeamResource(lua_State* L)
 {
 	const int teamID = luaL_checkint(L, 1);
@@ -810,6 +1037,14 @@ int LuaSyncedCtrl::AddTeamResource(lua_State* L)
 }
 
 
+/*** Consumes metal and/or energy resources of the specified team.
+ *
+ * @function Spring.UseTeamResource
+ * @number teamID
+ * @string type "metal" | "energy"
+ * @tparam ?number|table amount `{ metal = number amount, energy = number amount }`
+ * @treturn ?nil|bool hadEnough
+ */
 int LuaSyncedCtrl::UseTeamResource(lua_State* L)
 {
 	const int teamID = luaL_checkint(L, 1);
@@ -887,6 +1122,13 @@ int LuaSyncedCtrl::UseTeamResource(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetTeamResource
+ * @number teamID
+ * @string res "m" = metal "e" = energy "ms" = metal storage "es" = energy storage
+ * @number amount
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetTeamResource(lua_State* L)
 {
 	const int teamID = luaL_checkint(L, 1);
@@ -930,6 +1172,14 @@ int LuaSyncedCtrl::SetTeamResource(lua_State* L)
 }
 
 
+/*** Changes the resource amount for a team beyond which resources aren't stored but transferred to other allied teams if possible.
+ *
+ * @function Spring.SetTeamShareLevel
+ * @number teamID
+ * @string type "metal" | "energy"
+ * @number amount
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetTeamShareLevel(lua_State* L)
 {
 	const int teamID = luaL_checkint(L, 1);
@@ -950,8 +1200,8 @@ int LuaSyncedCtrl::SetTeamShareLevel(lua_State* L)
 	const float value = luaL_checkfloat(L, 3);
 
 	switch (type[0]) {
-		case 'm': { team->resShare.metal  = Clamp(value, 0.0f, 1.0f); } break;
-		case 'e': { team->resShare.energy = Clamp(value, 0.0f, 1.0f); } break;
+		case 'm': { team->resShare.metal  = std::clamp(value, 0.0f, 1.0f); } break;
+		case 'e': { team->resShare.energy = std::clamp(value, 0.0f, 1.0f); } break;
 		default : {                                                   } break;
 	}
 
@@ -959,6 +1209,15 @@ int LuaSyncedCtrl::SetTeamShareLevel(lua_State* L)
 }
 
 
+/*** Transfers resources between two teams.
+ *
+ * @function Spring.ShareTeamResource
+ * @number teamID_src
+ * @number teamID_recv
+ * @string type "metal" | "energy"
+ * @number amount
+ * @treturn nil
+ */
 int LuaSyncedCtrl::ShareTeamResource(lua_State* L)
 {
 	const int teamID1 = luaL_checkint(L, 1);
@@ -1020,8 +1279,25 @@ int LuaSyncedCtrl::ShareTeamResource(lua_State* L)
 }
 
 
+/******************************************************************************
+ * Rules Params
+ * @section rulesparams
+******************************************************************************/
 
-/******************************************************************************/
+/*** Parameters for los access
+ *
+ * @table losAccess
+ * If one condition is fulfilled all beneath it are too (e.g. if an unit is in LOS it can read params with `inradar=true` even if the param has `inlos=false`)
+ * All GameRulesParam are public, TeamRulesParams can just be `private`,`allied` and/or `public`
+ * You can read RulesParams from any Lua enviroments! With those losAccess policies you can limit their access.
+ *
+ * @bool[opt] private only readable by the ally (default)
+ * @bool[opt] allied readable by ally + ingame allied
+ * @bool[opt] inlos readable if the unit is in LOS
+ * @bool[opt] inradar readable if the unit is in AirLOS
+ * @bool[opt] public readable by all
+ */
+
 
 void SetRulesParam(lua_State* L, const char* caller, int offset,
 				LuaRulesParams::Params& params)
@@ -1036,14 +1312,16 @@ void SetRulesParam(lua_State* L, const char* caller, int offset,
 
 	// set the value of the parameter
 	if (lua_israwnumber(L, valIndex)) {
-		param.valueInt = lua_tofloat(L, valIndex);
-		param.valueString.resize(0);
+		param.value.emplace <float> (lua_tofloat(L, valIndex));
+	} else if (lua_isboolean(L, valIndex)) {
+		param.value.emplace <bool> (lua_toboolean(L, valIndex));
 	} else if (lua_isstring(L, valIndex)) {
-		param.valueString = lua_tostring(L, valIndex);
+		param.value.emplace <std::string> (lua_tostring(L, valIndex));
 	} else if (lua_isnoneornil(L, valIndex)) {
 		params.erase(key);
 		return; //no need to set los if param was erased
 	} else {
+		params.erase(key);
 		luaL_error(L, "Incorrect arguments to %s()", caller);
 	}
 
@@ -1078,6 +1356,13 @@ void SetRulesParam(lua_State* L, const char* caller, int offset,
 }
 
 
+/***
+ * @function Spring.SetGameRulesParam
+ * @string paramName
+ * @tparam ?number|string paramValue numeric paramValues in quotes will be converted to number.
+ * @tparam[opt] losAccess losAccess
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetGameRulesParam(lua_State* L)
 {
 	SetRulesParam(L, __func__, 0, CSplitLuaHandle::gameParams);
@@ -1085,6 +1370,14 @@ int LuaSyncedCtrl::SetGameRulesParam(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetTeamRulesParam
+ * @number teamID
+ * @string paramName
+ * @tparam ?number|string paramValue numeric paramValues in quotes will be converted to number.
+ * @tparam[opt] losAccess losAccess
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetTeamRulesParam(lua_State* L)
 {
 	CTeam* team = ParseTeam(L, __func__, 1);
@@ -1095,7 +1388,38 @@ int LuaSyncedCtrl::SetTeamRulesParam(lua_State* L)
 	return 0;
 }
 
+/***
+ * @function Spring.SetPlayerRulesParam
+ * @number playerID
+ * @string paramName
+ * @tparam ?number|string paramValue numeric paramValues in quotes will be converted to number.
+ * @tparam[opt] losAccess losAccess
+ * @treturn nil
+ */
+int LuaSyncedCtrl::SetPlayerRulesParam(lua_State* L)
+{
+	const int playerID = luaL_checkint(L, 1);
+	if (!playerHandler.IsValidPlayer(playerID))
+		return 0;
 
+	const auto player = playerHandler.Player(playerID);
+	if (player == nullptr || !IsPlayerSynced(player))
+		return 0;
+
+	SetRulesParam(L, __func__, 1, player->modParams);
+	return 0;
+}
+
+
+/***
+ *
+ * @function Spring.SetUnitRulesParam
+ * @number unitID
+ * @string paramName
+ * @tparam ?number|string paramValue numeric paramValues in quotes will be converted to number.
+ * @tparam[opt] losAccess losAccess
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitRulesParam(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -1108,6 +1432,14 @@ int LuaSyncedCtrl::SetUnitRulesParam(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetFeatureRulesParam
+ * @number featureID
+ * @string paramName
+ * @tparam ?number|string paramValue numeric paramValues in quotes will be converted to number.
+ * @tparam[opt] losAccess losAccess
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetFeatureRulesParam(lua_State* L)
 {
 	CFeature* feature = ParseFeature(L, __func__, 1);
@@ -1118,8 +1450,12 @@ int LuaSyncedCtrl::SetFeatureRulesParam(lua_State* L)
 	return 0;
 }
 
-/******************************************************************************/
-/******************************************************************************/
+
+/******************************************************************************
+ * Lua to COB
+ * @section luatocob
+******************************************************************************/
+
 
 static inline void ParseCobArgs(
 	lua_State* L,
@@ -1160,6 +1496,19 @@ static inline void ParseCobArgs(
 }
 
 
+/***
+ * @function Spring.CallCOBScript
+ * @number unitID
+ * @tparam ?number|string funcName
+ * @number retArgs
+ * @param[opt] COBArg1
+ * @param[opt] COBArg2
+ * @param[opt] COBArgn
+ * @treturn ?nil|number returnValue
+ * @treturn ?nil|number returnArg1
+ * @treturn ?nil|number returnArg2
+ * @treturn ?nil|number returnArgn
+ */
 int LuaSyncedCtrl::CallCOBScript(lua_State* L)
 {
 //FIXME?	CheckAllowGameChanges(L);
@@ -1213,6 +1562,12 @@ int LuaSyncedCtrl::CallCOBScript(lua_State* L)
 }
 
 
+/***
+ * @function Spring.GetCOBScriptID
+ * @number unitID
+ * @string funcName
+ * @treturn ?nil|number funcID
+ */
 int LuaSyncedCtrl::GetCOBScriptID(lua_State* L)
 {
 	const int args = lua_gettop(L); // number of arguments
@@ -1241,15 +1596,35 @@ int LuaSyncedCtrl::GetCOBScriptID(lua_State* L)
 	return 0;
 }
 
-/******************************************************************************/
-/******************************************************************************/
+/******************************************************************************
+ * Unit Handling
+ * @section unithandling
+******************************************************************************/
 
+/***
+ * @function Spring.CreateUnit
+ * @see Spring.DestroyUnit
+ *
+ * Offmap positions are clamped! Use MoveCtrl to move to such positions.
+ *
+ * @tparam string|number unitDefName or unitDefID
+ * @number x
+ * @number y
+ * @number z
+ * @tparam string|number facing possible values for facing are: "south" | "s" | 0, "east" | "e" | 1, "north" | "n" | 2, "west" | "w" | 3
+ * @number teamID
+ * @bool[opt=false] build the unit is created in "being built" state with buildProgress = 0
+ * @bool[opt=true] flattenGround the unit flattens ground, if it normally does so
+ * @number[opt] unitID requests specific unitID
+ * @number[opt] builderID
+ * @treturn number|nil unitID meaning unit was created
+ */
 int LuaSyncedCtrl::CreateUnit(lua_State* L)
 {
 	CheckAllowGameChanges(L);
 
-	if (inCreateUnit) {
-		luaL_error(L, "[%s()]: recursion is not permitted", __func__);
+	if (inCreateUnit >= MAX_CMD_RECURSION_DEPTH) {
+		luaL_error(L, "[%s()]: recursion is not permitted, max depth: %d", __func__, MAX_CMD_RECURSION_DEPTH);
 		return 0;
 	}
 
@@ -1300,7 +1675,7 @@ int LuaSyncedCtrl::CreateUnit(lua_State* L)
 	ASSERT_SYNCED(pos);
 	ASSERT_SYNCED(facing);
 
-	inCreateUnit = true;
+	inCreateUnit++;
 
 	CUnit* builder = unitHandler.GetUnit(luaL_optint(L, 10, -1));
 
@@ -1316,7 +1691,7 @@ int LuaSyncedCtrl::CreateUnit(lua_State* L)
 	params.flattenGround = flattenGround;
 
 	CUnit* unit = unitLoader->LoadUnit(params);
-	inCreateUnit = false;
+	inCreateUnit--;
 
 	if (unit == nullptr)
 		return 0;
@@ -1328,6 +1703,16 @@ int LuaSyncedCtrl::CreateUnit(lua_State* L)
 }
 
 
+/***
+ * @function Spring.DestroyUnit
+ * @see Spring.CreateUnit
+ * @number unitID
+ * @bool[opt=false] selfd makes the unit act like it self-destructed.
+ * @bool[opt=false] reclaimed don't show any DeathSequences, don't leave a wreckage. This does not give back the resources to the team!
+ * @number[opt] attackerID
+ * @bool[opt=false] cleanupImmediately stronger version of reclaimed, removes the unit unconditionally and makes its ID available for immediate reuse (otherwise it takes a few frames)
+ * @treturn nil
+ */
 int LuaSyncedCtrl::DestroyUnit(lua_State* L)
 {
 	CheckAllowGameChanges(L); // FIXME -- recursion protection
@@ -1343,13 +1728,13 @@ int LuaSyncedCtrl::DestroyUnit(lua_State* L)
 	const bool recycleID = luaL_optboolean(L, 5, false);
 
 	CUnit* attacker = nullptr;
-	if (args >= 4)
+	if (!lua_isnoneornil(L, 4))
 		attacker = ParseUnit(L, __func__, 4);
 
-	if (inDestroyUnit)
-		luaL_error(L, "DestroyUnit() recursion is not permitted");
+	if (inDestroyUnit >= MAX_CMD_RECURSION_DEPTH)
+		luaL_error(L, "DestroyUnit() recursion is not permitted, max depth: %d", MAX_CMD_RECURSION_DEPTH);
 
-	inDestroyUnit = true;
+	inDestroyUnit++;
 
 	ASSERT_SYNCED(unit->id);
 	unit->ForcedKillUnit(attacker, selfDestr, reclaimed);
@@ -1357,12 +1742,19 @@ int LuaSyncedCtrl::DestroyUnit(lua_State* L)
 	if (recycleID)
 		unitHandler.GarbageCollectUnit(unit->id);
 
-	inDestroyUnit = false;
+	inDestroyUnit--;
 
 	return 0;
 }
 
 
+/***
+ * @function Spring.TransferUnit
+ * @number unitID
+ * @number newTeamID
+ * @bool[opt=true] given if false, the unit is captured.
+ * @treturn nil
+ */
 int LuaSyncedCtrl::TransferUnit(lua_State* L)
 {
 	CheckAllowGameChanges(L);
@@ -1383,21 +1775,30 @@ int LuaSyncedCtrl::TransferUnit(lua_State* L)
 	if (FullCtrl(L) && lua_isboolean(L, 3))
 		given = lua_toboolean(L, 3);
 
-	if (inTransferUnit)
-		luaL_error(L, "TransferUnit() recursion is not permitted");
+	if (inTransferUnit >= MAX_CMD_RECURSION_DEPTH)
+		luaL_error(L, "TransferUnit() recursion is not permitted, max depth: %d", MAX_CMD_RECURSION_DEPTH);
 
-	inTransferUnit = true;
+	++ inTransferUnit;
 	ASSERT_SYNCED(unit->id);
 	ASSERT_SYNCED((int)newTeam);
 	ASSERT_SYNCED(given);
 	unit->ChangeTeam(newTeam, given ? CUnit::ChangeGiven
 	                                : CUnit::ChangeCaptured);
-	inTransferUnit = false;
+	-- inTransferUnit;
 	return 0;
 }
 
-/******************************************************************************/
+/******************************************************************************
+ * Unit Control
+ * @section unitcontrol
+******************************************************************************/
 
+/***
+ * @function Spring.SetUnitCosts
+ * @number unitID
+ * @tparam {[number]=number,...} where keys and values are, respectively and in this order: buildTime=amount, metalCost=amount, energyCost=amount
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitCosts(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -1490,6 +1891,25 @@ static bool SetUnitResourceParam(CUnit* unit, const char* name, float value)
 }
 
 
+/***
+ * Unit Resourcing
+ * @section unitresourcing
+ */
+
+/***
+ * @function Spring.SetUnitResourcing
+ * @number unitID
+ * @string res
+ * @number amount
+ * @treturn nil
+ */
+
+/***
+ * @function Spring.SetUnitResourcing
+ * @number unitID
+ * @tparam {[string]=number,...} res keys are: "[u|c][u|m][m|e]" unconditional | conditional, use | make, metal | energy. Values are amounts
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitResourcing(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -1517,6 +1937,12 @@ int LuaSyncedCtrl::SetUnitResourcing(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetUnitTooltip
+ * @number unitID
+ * @string tooltip
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitTooltip(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -1535,6 +1961,12 @@ int LuaSyncedCtrl::SetUnitTooltip(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetUnitHealth
+ * @number unitID
+ * @tparam number|{[string]=number,...} health where keys can be one of health|capture|paralyze|build and values are amounts
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitHealth(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -1584,6 +2016,12 @@ int LuaSyncedCtrl::SetUnitHealth(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetUnitMaxHealth
+ * @number unitID
+ * @number maxHealth
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitMaxHealth(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -1597,6 +2035,13 @@ int LuaSyncedCtrl::SetUnitMaxHealth(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetUnitStockpile
+ * @number unitID
+ * @number[opt] stockpile
+ * @number[opt] buildPercent
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitStockpile(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -1615,7 +2060,7 @@ int LuaSyncedCtrl::SetUnitStockpile(lua_State* L)
 	}
 
 	if (lua_isnumber(L, 3))
-		unit->stockpileWeapon->buildPercent = Clamp(lua_tofloat(L, 3), 0.0f, 1.0f);
+		unit->stockpileWeapon->buildPercent = std::clamp(lua_tofloat(L, 3), 0.0f, 1.0f);
 
 	return 0;
 }
@@ -1698,6 +2143,14 @@ static bool SetSingleUnitWeaponState(lua_State* L, CWeapon* weapon, int index)
 }
 
 
+/***
+ *
+ * @function Spring.SetUnitUseWeapons
+ * @number unitID
+ * @number[opt] forceUseWeapons
+ * @number[opt] allowUseWeapons
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitUseWeapons(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -1710,6 +2163,40 @@ int LuaSyncedCtrl::SetUnitUseWeapons(lua_State* L)
 	return 0;
 }
 
+/*** Parameter for weapon states
+ *
+ * @table states
+ * @number reloadState
+ * @number reloadFrame synonym for reloadState!
+ * @number reloadTime
+ * @number accuracy
+ * @number sprayAngle
+ * @number range if you change the range of a weapon with dynamic damage make sure you use `SetUnitWeaponDamages` to change dynDamageRange as well.
+ * @number projectileSpeed
+ * @number burst
+ * @number burstRate
+ * @number projectiles
+ * @number salvoLeft
+ * @number nextSalvo
+ * @number aimReady (<>0.0f := true)
+ */
+
+/***
+ * @function Spring.SetUnitWeaponState
+ * @number unitID
+ * @number weaponNum
+ * @tparam states states
+ * @treturn nil
+ */
+
+/***
+ * @function Spring.SetUnitWeaponState
+ * @number unitID
+ * @number weaponNum
+ * @string key
+ * @number value
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitWeaponState(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -1750,7 +2237,7 @@ static int SetSingleDynDamagesKey(lua_State* L, DynDamageArray* damages, int ind
 		const unsigned armType = lua_toint(L, index);
 
 		if (armType < damages->GetNumTypes())
-			damages->Set(armType, std::max(value, 0.0001f));
+			damages->Set(armType, value);
 
 		return 0;
 	}
@@ -1797,7 +2284,7 @@ static int SetSingleDynDamagesKey(lua_State* L, DynDamageArray* damages, int ind
 		} break;
 
 		case hashString("edgeEffectiveness"): {
-			damages->edgeEffectiveness = std::min(value, 0.999f);
+			damages->edgeEffectiveness = std::min(value, 1.0f);
 		} break;
 		case hashString("explosionSpeed"): {
 			damages->explosionSpeed = value;
@@ -1811,6 +2298,40 @@ static int SetSingleDynDamagesKey(lua_State* L, DynDamageArray* damages, int ind
 }
 
 
+/*** Parameters for damage
+ *
+ * @table damages
+ * @number paralyzeDamageTime
+ * @number impulseFactor
+ * @number impulseBoost
+ * @number craterMult
+ * @number craterBoost
+ * @number dynDamageExp
+ * @number dynDamageMin
+ * @number dynDamageRange
+ * @number dynDamageInverted (<>0.0f := true)
+ * @number craterAreaOfEffect
+ * @number damageAreaOfEffect
+ * @number edgeEffectiveness
+ * @number explosionSpeed
+ * @number armorType
+ */
+
+/***
+ * @function Spring.SetUnitWeaponDamages
+ * @number unitID
+ * @tparam ?number|string weaponNum "selfDestruct" | "explode"
+ * @tparam damages damages
+ * @treturn nil
+ */
+/***
+ * @function Spring.SetUnitWeaponDamages
+ * @number unitID
+ * @tparam ?number|string weaponNum "selfDestruct" | "explode"
+ * @string key
+ * @number value
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitWeaponDamages(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -1856,6 +2377,12 @@ int LuaSyncedCtrl::SetUnitWeaponDamages(lua_State* L)
 }
 
 
+/*** @function Spring.SetUnitMaxRange
+ *
+ * @number unitID
+ * @number maxRange
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitMaxRange(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -1868,6 +2395,14 @@ int LuaSyncedCtrl::SetUnitMaxRange(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetUnitExperience
+ * @see Spring.AddUnitExperience
+ * @see Spring.GetUnitExperience
+ * @number unitID
+ * @number experience
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitExperience(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -1879,7 +2414,34 @@ int LuaSyncedCtrl::SetUnitExperience(lua_State* L)
 	return 0;
 }
 
+/***
+ * @function Spring.AddUnitExperience
+ * @see Spring.SetUnitExperience
+ * @see Spring.GetUnitExperience
+ * @number unitID
+ * @number deltaExperience Can be negative to subtract, but the unit will never have negative total afterwards
+ * @treturn nil
+ */
+int LuaSyncedCtrl::AddUnitExperience(lua_State* L)
+{
+	CUnit* unit = ParseUnit(L, __func__, 1);
 
+	if (unit == nullptr)
+		return 0;
+
+	// can subtract, but the result can't be negative
+	unit->AddExperience(std::max(-unit->experience, luaL_checkfloat(L, 2)));
+	return 0;
+}
+
+
+/***
+ * @function Spring.SetUnitArmored
+ * @number unitID
+ * @bool[opt] armored
+ * @number[opt] armorMultiple
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitArmored(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -1890,8 +2452,7 @@ int LuaSyncedCtrl::SetUnitArmored(lua_State* L)
 	if (lua_isboolean(L, 2))
 		unit->armoredState = lua_toboolean(L, 2);
 
-	// armored multiple of 0 will crash spring
-	unit->armoredMultiple = std::max(0.0001f, luaL_optfloat(L, 3, unit->armoredMultiple));
+	unit->armoredMultiple = luaL_optfloat(L, 3, unit->armoredMultiple);
 
 	if (lua_toboolean(L, 2)) {
 		unit->curArmorMultiple = unit->armoredMultiple;
@@ -1900,6 +2461,11 @@ int LuaSyncedCtrl::SetUnitArmored(lua_State* L)
 	}
 	return 0;
 }
+
+/******************************************************************************
+ * Unit LOS
+ * @section unitlos
+******************************************************************************/
 
 
 static unsigned char ParseLosBits(lua_State* L, int index, unsigned char bits)
@@ -1943,6 +2509,30 @@ static unsigned char ParseLosBits(lua_State* L, int index, unsigned char bits)
 }
 
 
+/***
+ * @function Spring.SetUnitLosMask
+ *
+ * The 3rd argument is either the bit-and combination of the following numbers:
+ *
+ *     LOS_INLOS = 1
+ *     LOS_INRADAR = 2
+ *     LOS_PREVLOS = 4
+ *     LOS_CONTRADAR = 8
+ *
+ * or a table of the following form:
+ *
+ *     losTypes = {
+ *     [los = boolean,]
+ *     [radar = boolean,]
+ *     [prevLos = boolean,]
+ *     [contRadar = boolean]
+ *     }
+ *
+ * @number unitID
+ * @number allyTeam
+ * @tparam number|table losTypes
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitLosMask(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -1967,6 +2557,13 @@ int LuaSyncedCtrl::SetUnitLosMask(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetUnitLosState
+ * @number unitID
+ * @number allyTeam
+ * @tparam number|table los
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitLosState(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -1988,6 +2585,25 @@ int LuaSyncedCtrl::SetUnitLosState(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetUnitCloak
+ *
+ * If the 2nd argument is a number, the value works like this:
+ * 1:=normal cloak
+ * 2:=for free cloak (cost no E)
+ * 3:=for free + no decloaking (except the unit is stunned)
+ * 4:=ultimative cloak (no ecost, no decloaking, no stunned decloak)
+ *
+ * The decloak distance is only changed:
+ * - if the 3th argument is a number or a boolean.
+ * - if the boolean is false it takes the default decloak distance for that unitdef,
+ * - if the boolean is true it takes the absolute value of it.
+ *
+ * @number unitID
+ * @tparam bool|number cloak
+ * @tparam bool|number cloakArg
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitCloak(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2018,6 +2634,12 @@ int LuaSyncedCtrl::SetUnitCloak(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetUnitStealth
+ * @number unitID
+ * @bool stealth
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitStealth(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2030,6 +2652,12 @@ int LuaSyncedCtrl::SetUnitStealth(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetUnitSonarStealth
+ * @number unitID
+ * @bool sonarStealth
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitSonarStealth(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2041,18 +2669,54 @@ int LuaSyncedCtrl::SetUnitSonarStealth(lua_State* L)
 	return 0;
 }
 
+/***
+ * @function Spring.SetUnitSeismicSignature
+ * @number unitID
+ * @number seismicSignature
+ * @treturn nil
+ */
+int LuaSyncedCtrl::SetUnitSeismicSignature(lua_State* L)
+{
+	CUnit* const unit = ParseUnit(L, __func__, 1);
+	if (unit == nullptr)
+		return 0;
 
+	unit->seismicSignature = luaL_checkfloat(L, 2);
+	return 0;
+}
+
+/***
+ * @function Spring.SetUnitAlwaysVisible
+ * @number unitID
+ * @bool alwaysVisible
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitAlwaysVisible(lua_State* L)
 {
 	return (SetWorldObjectAlwaysVisible(L, ParseUnit(L, __func__, 1), __func__));
 }
 
+
+/***
+ *
+ * @function Spring.SetUnitUseAirLos
+ * @number unitID
+ * @bool useAirLos
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitUseAirLos(lua_State* L)
 {
 	return (SetWorldObjectUseAirLos(L, ParseUnit(L, __func__, 1), __func__));
 }
 
 
+/***
+ * @function Spring.SetUnitMetalExtraction
+ * @number unitID
+ * @number depth corresponds to metal extraction rate
+ * @number[opt] range similar to "extractsMetal" in unitDefs.
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitMetalExtraction(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2073,6 +2737,13 @@ int LuaSyncedCtrl::SetUnitMetalExtraction(lua_State* L)
 }
 
 
+/*** See also harvestStorage UnitDef tag.
+ *
+ * @function Spring.SetUnitHarvestStorage
+ * @number unitID
+ * @number metal
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitHarvestStorage(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2087,6 +2758,50 @@ int LuaSyncedCtrl::SetUnitHarvestStorage(lua_State* L)
 	return 0;
 }
 
+/***
+ *
+ * @function Spring.SetUnitBuildParams
+ * @number unitID
+ * @string paramName one of `buildRange`|`buildDistance`|`buildRange3D`
+ * @number|bool value bool when `paramName` is `buildRange3D`, number otherwise
+ * @treturn nil
+ */
+int LuaSyncedCtrl::SetUnitBuildParams(lua_State* L)
+{
+	CUnit* unit = ParseUnit(L, __func__, 1);
+
+	if (unit == nullptr)
+		return 0;
+
+	CBuilder* builder = dynamic_cast<CBuilder*>(unit);
+
+	if (builder == nullptr)
+		return 0;
+
+	switch (hashString(luaL_checkstring(L, 2))) {
+		case hashString("buildRange"):
+		case hashString("buildDistance"): {
+			builder->buildDistance = luaL_optfloat(L, 3, builder->buildDistance);
+		} break;
+		case hashString("buildRange3D"): {
+			builder->range3D = luaL_optboolean(L, 3, builder->range3D);
+		} break;
+		default: {} break;
+	};
+
+	return 0;
+}
+
+/***
+ * @function Spring.SetUnitBuildSpeed
+ * @number builderID
+ * @number buildSpeed
+ * @number[opt] repairSpeed
+ * @number[opt] reclaimSpeed
+ * @number[opt] captureSpeed
+ * @number[opt] terraformSpeed
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitBuildSpeed(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2094,7 +2809,7 @@ int LuaSyncedCtrl::SetUnitBuildSpeed(lua_State* L)
 	if (unit == nullptr)
 		return 0;
 
-	const float buildScale = (1.0f / TEAM_SLOWUPDATE_RATE);
+	constexpr float buildScale = (1.0f / GAME_SPEED);
 	const float buildSpeed = buildScale * max(0.0f, luaL_checkfloat(L, 2));
 
 	CFactory* factory = dynamic_cast<CFactory*>(unit);
@@ -2129,6 +2844,17 @@ int LuaSyncedCtrl::SetUnitBuildSpeed(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetUnitNanoPieces
+ *
+ * This saves a lot of engine calls, by replacing: function script.QueryNanoPiece() return currentpiece end
+ * Use it!
+ *
+ * @number builderID
+ * @tparam table pieces
+ * @treturn nil
+ *
+ */
 int LuaSyncedCtrl::SetUnitNanoPieces(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2178,12 +2904,30 @@ int LuaSyncedCtrl::SetUnitNanoPieces(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetUnitBlocking
+ * @number unitID
+ * @bool isblocking
+ * @bool isSolidObjectCollidable
+ * @bool isProjectileCollidable
+ * @bool isRaySegmentCollidable
+ * @bool crushable
+ * @bool blockEnemyPushing
+ * @bool blockHeightChanges
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitBlocking(lua_State* L)
 {
 	return (SetSolidObjectBlocking(L, ParseUnit(L, __func__, 1)));
 }
 
 
+/***
+ * @function Spring.SetUnitCrashing
+ * @number unitID
+ * @bool crashing
+ * @treturn bool success
+ */
 int LuaSyncedCtrl::SetUnitCrashing(lua_State* L) {
 	CUnit* unit = ParseUnit(L, __func__, 1);
 
@@ -2213,6 +2957,14 @@ int LuaSyncedCtrl::SetUnitCrashing(lua_State* L) {
 }
 
 
+/***
+ * @function Spring.SetUnitShieldState
+ * @number unitID
+ * @number[opt=-1] weaponID
+ * @bool[opt] enabled
+ * @number[opt] power
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitShieldState(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2243,7 +2995,52 @@ int LuaSyncedCtrl::SetUnitShieldState(lua_State* L)
 	return 0;
 }
 
+/***
+ * @function Spring.SetUnitShieldRechargeDelay
+ * @number unitID
+ * @number[opt] weaponID (optional if the unit only has one shield)
+ * @number[opt] rechargeTime (in seconds; emulates a regular hit if nil)
+ * @treturn nil
+ */
+int LuaSyncedCtrl::SetUnitShieldRechargeDelay(lua_State* L)
+{
+	const auto unit = ParseUnit(L, __func__, 1);
+	if (unit == nullptr)
+		return 0;
 
+	auto shield = static_cast <CPlasmaRepulser*> (unit->shieldWeapon);
+	if (lua_isnumber(L, 2)) {
+		const size_t index = lua_tointeger(L, 2) - LUA_WEAPON_BASE_INDEX;
+		if (index < unit->weapons.size())
+			shield = dynamic_cast <CPlasmaRepulser*> (unit->weapons[index]);
+	}
+	if (shield == nullptr)
+		return 0;
+
+	if (lua_isnumber(L, 3)) {
+		const auto seconds = lua_tofloat(L, 3);
+		const auto frames = static_cast <int> (seconds * GAME_SPEED);
+		shield->SetRechargeDelay(frames, true);
+	} else {
+		/* Note, overwrite set to false on purpose. This is to emulate a regular
+		 * weapon hit. This lets a sophisticated shield handler gadget coexist
+		 * with a basic "emulate hits" gadget without the latter having to care.
+		 * You can put the weaponDef value explicitly if you want to overwrite. */
+		shield->SetRechargeDelay(shield->weaponDef->shieldRechargeDelay, false);
+	}
+
+	return 0;
+}
+
+/***
+ * @function Spring.SetUnitFlanking
+ * @number unitID
+ * @string type "dir"|"minDamage"|"maxDamage"|"moveFactor"|"mode"
+ * @number arg1 x|minDamage|maxDamage|moveFactor|mode
+ * @number[opt] y only when type is "dir"
+ * @number[opt] z only when type is "dir"
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitFlanking(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2282,11 +3079,56 @@ int LuaSyncedCtrl::SetUnitFlanking(lua_State* L)
 	return 0;
 }
 
+/***
+ * @function Spring.SetUnitPhysicalStateBit
+ * @number unitID
+ * @number[bit] Physical state bit
+ * @treturn nil
+ */
+int LuaSyncedCtrl::SetUnitPhysicalStateBit(lua_State* L)
+{
+	CUnit* unit = ParseUnit(L, __func__, 1);
 
-int LuaSyncedCtrl::SetUnitTravel(lua_State* L) { return 0; } // DEPRECATED
-int LuaSyncedCtrl::SetUnitFuel(lua_State* L) { return 0; } // DEPRECATED
+	if (unit == nullptr)
+		return 0;
+
+	int statebit = luaL_checkint(L, 2);
+
+	unit->SetPhysicalStateBit(statebit);
+	return 0;
+}
+
+/***
+ * @function Spring.GetUnitPhysicalState
+ * @number unitID
+ * @treturn number Unit's PhysicalState bitmask
+ */
+int LuaSyncedCtrl::GetUnitPhysicalState(lua_State* L)
+{
+	CUnit* unit = ParseUnit(L, __func__, 1);
+
+	if (unit == nullptr)
+		return 0;
+
+	lua_pushnumber(L, unit->physicalState);
+	return 1;
+}
 
 
+
+int LuaSyncedCtrl::SetUnitTravel(lua_State* L) { return 0; } // FIXME: DELETE ME
+int LuaSyncedCtrl::SetUnitFuel(lua_State* L) { return 0; } // FIXME: DELETE ME
+
+
+
+/***
+ *
+ * @function Spring.SetUnitNeutral
+ *
+ * @number unitID
+ * @bool neutral
+ * @treturn nil|bool setNeutral
+ */
 int LuaSyncedCtrl::SetUnitNeutral(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2299,6 +3141,28 @@ int LuaSyncedCtrl::SetUnitNeutral(lua_State* L)
 }
 
 
+/*** Defines a unit's target.
+ *
+ * @function Spring.SetUnitTarget
+ * @number unitID
+ * @number[opt] enemyUnitID when nil drops the units current target.
+ * @bool[opt=false] dgun
+ * @bool[opt=false] userTarget
+ * @number[opt=-1] weaponNum
+ * @treturn bool success
+ */
+
+/***
+ * @function Spring.SetUnitTarget
+ * @number unitID
+ * @number[opt] x when nil or not passed it will drop target and ignore other parameters
+ * @number[opt] y
+ * @number[opt] z
+ * @bool[opt=false] dgun
+ * @bool[opt=false] userTarget
+ * @number[opt=-1] weaponNum
+ * @treturn bool success
+ */
 int LuaSyncedCtrl::SetUnitTarget(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2357,6 +3221,18 @@ int LuaSyncedCtrl::SetUnitTarget(lua_State* L)
 
 
 
+/***
+ * @function Spring.SetUnitMidAndAimPos
+ * @number unitID
+ * @number mpX new middle positionX of unit
+ * @number mpY new middle positionY of unit
+ * @number mpZ new middle positionZ of unit
+ * @number apX new positionX that enemies aim at on this unit
+ * @number apY new positionY that enemies aim at on this unit
+ * @number apZ new positionZ that enemies aim at on this unit
+ * @bool[opt=false] relative are the new coordinates relative to world (false) or unit (true) coordinates? Also, note that apy is inverted!
+ * @treturn bool success
+ */
 int LuaSyncedCtrl::SetUnitMidAndAimPos(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2393,6 +3269,13 @@ int LuaSyncedCtrl::SetUnitMidAndAimPos(lua_State* L)
 	return 1;
 }
 
+/***
+ * @function Spring.SetUnitRadiusAndHeight
+ * @number unitID
+ * @number radius
+ * @number height
+ * @treturn bool success
+ */
 int LuaSyncedCtrl::SetUnitRadiusAndHeight(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2421,6 +3304,35 @@ int LuaSyncedCtrl::SetUnitRadiusAndHeight(lua_State* L)
 	return 1;
 }
 
+
+/***
+ * @function Spring.SetUnitBuildeeRadius
+ * Sets the unit's radius for when targeted by build, repair, reclaim-type commands.
+ * @number unitID
+ * @number build radius for when targeted by build, repair, reclaim-type commands.
+ * @treturn nil
+ */
+int LuaSyncedCtrl::SetUnitBuildeeRadius(lua_State* L)
+{
+	CUnit* unit = ParseUnit(L, __func__, 1);
+
+	if (unit == nullptr)
+		return 0;
+
+	unit->buildeeRadius = std::max(0.0f, luaL_checkfloat(L, 2));
+
+	return 0;
+}
+
+
+/*** Changes the pieces hierarchy of a unit by attaching a piece to a new parent.
+ *
+ * @function Spring.SetUnitPieceParent
+ * @number unitID
+ * @number AlteredPiece
+ * @number ParentPiece
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitPieceParent(lua_State* L)
 {
 	// Model piece hierarchy manipulation is a rendering concern.
@@ -2428,6 +3340,18 @@ int LuaSyncedCtrl::SetUnitPieceParent(lua_State* L)
 	return 0;
 }
 
+
+/*** Sets the local (i.e. parent-relative) matrix of the given piece.
+ *
+ * @function Spring.SetUnitPieceMatrix
+ *
+ * If any of the first three elements are non-zero, and also blocks all script animations from modifying it until {0, 0, 0} is passed.
+ *
+ * @number unitID
+ * @number pieceNum
+ * @tparam {number,...} matrix an array of 16 floats
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitPieceMatrix(lua_State* L)
 {
 	// Model piece matrix manipulation is a rendering concern.
@@ -2436,22 +3360,88 @@ int LuaSyncedCtrl::SetUnitPieceMatrix(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetUnitCollisionVolumeData
+ * @number unitID
+ * @number scaleX
+ * @number scaleY
+ * @number scaleZ
+ * @number offsetX
+ * @number offsetY
+ * @number offsetZ
+ * @number vType
+ * @number tType
+ * @number Axis
+ * @treturn nil
+ *
+ *  enum COLVOL_TYPES {
+ *      COLVOL_TYPE_DISABLED = -1,
+ *      COLVOL_TYPE_ELLIPSOID = 0,
+ *      COLVOL_TYPE_CYLINDER,
+ *      COLVOL_TYPE_BOX,
+ *      COLVOL_TYPE_SPHERE,
+ *      COLVOL_NUM_TYPES       // number of non-disabled collision volume types
+ *    };
+ *    enum COLVOL_TESTS {
+ *      COLVOL_TEST_DISC = 0,
+ *      COLVOL_TEST_CONT = 1,
+ *      COLVOL_NUM_TESTS = 2   // number of tests
+ *    };
+ *    enum COLVOL_AXES {
+ *      COLVOL_AXIS_X   = 0,
+ *      COLVOL_AXIS_Y   = 1,
+ *      COLVOL_AXIS_Z   = 2,
+ *      COLVOL_NUM_AXES = 3    // number of collision volume axes
+ *    };
+ */
 int LuaSyncedCtrl::SetUnitCollisionVolumeData(lua_State* L)
 {
 	return (SetSolidObjectCollisionVolumeData(L, ParseUnit(L, __func__, 1)));
 }
 
+
+/***
+ * @function Spring.SetUnitPieceCollisionVolumeData
+ * @number unitID
+ * @number pieceIndex
+ * @bool enable
+ * @number scaleX
+ * @number scaleY
+ * @number scaleZ
+ * @number offsetX
+ * @number offsetY
+ * @number offsetZ
+ * @number[opt] volumeType
+ * @number[opt] primaryAxis
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitPieceCollisionVolumeData(lua_State* L)
 {
 	return (SetSolidObjectPieceCollisionVolumeData(L, ParseUnit(L, __func__, 1)));
 }
 
+
+/***
+ *
+ * @function Spring.SetUnitPieceVisible
+ * @number unitID
+ * @number pieceIndex
+ * @bool visible
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitPieceVisible(lua_State* L)
 {
 	return (SetSolidObjectPieceVisible(L, ParseUnit(L, __func__, 1)));
 }
 
 
+/***
+ * @function Spring.SetUnitSensorRadius
+ * @number unitID
+ * @string type "los" | "airLos" | "radar" | "sonar" | "seismic" | "radarJammer" | "sonarJammer"
+ * @number radius
+ * @treturn ?nil|number newRadius
+ */
 int LuaSyncedCtrl::SetUnitSensorRadius(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2459,7 +3449,7 @@ int LuaSyncedCtrl::SetUnitSensorRadius(lua_State* L)
 	if (unit == nullptr)
 		return 0;
 
-	const int radius = Clamp(luaL_checkint(L, 3), 0, MAX_UNIT_SENSOR_RADIUS);
+	const int radius = std::clamp(luaL_checkint(L, 3), 0, MAX_UNIT_SENSOR_RADIUS);
 
 	switch (hashString(luaL_checkstring(L, 2))) {
 		case hashString("los"): {
@@ -2494,6 +3484,18 @@ int LuaSyncedCtrl::SetUnitSensorRadius(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetUnitPosErrorParams
+ * @number unitID
+ * @number posErrorVectorX
+ * @number posErrorVectorY
+ * @number posErrorVectorZ
+ * @number posErrorDeltaX
+ * @number posErrorDeltaY
+ * @number posErrorDeltaZ
+ * @number[opt] nextPosErrorUpdate
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitPosErrorParams(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2511,12 +3513,24 @@ int LuaSyncedCtrl::SetUnitPosErrorParams(lua_State* L)
 	unit->nextPosErrorUpdate = luaL_optint(L, 8, unit->nextPosErrorUpdate);
 
 	if (lua_isnumber(L, 9) && lua_isboolean(L, 10))
-		unit->SetPosErrorBit(Clamp(static_cast<int>(lua_tointeger(L, 9)), 0, teamHandler.ActiveAllyTeams()), lua_toboolean(L, 10));
+		unit->SetPosErrorBit(std::clamp(static_cast<int>(lua_tointeger(L, 9)), 0, teamHandler.ActiveAllyTeams()), lua_toboolean(L, 10));
 
 	return 0;
 }
 
 
+/*** Used by default commands to get in build-, attackrange etc.
+ *
+ * @function Spring.SetUnitMoveGoal
+ * @number unitID
+ * @number goalX
+ * @number goalY
+ * @number goalZ
+ * @number[opt] goalRadius
+ * @number[opt] moveSpeed
+ * @bool[opt] moveRaw
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitMoveGoal(lua_State* L)
 {
 	CheckAllowGameChanges(L);
@@ -2542,6 +3556,16 @@ int LuaSyncedCtrl::SetUnitMoveGoal(lua_State* L)
 }
 
 
+/*** Used in conjunction with Spring.UnitAttach et al. to re-implement old airbase & fuel system in Lua.
+ *
+ * @function Spring.SetUnitLandGoal
+ * @number unitID
+ * @number goalX
+ * @number goalY
+ * @number goalZ
+ * @number[opt] goalRadius
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitLandGoal(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2552,7 +3576,7 @@ int LuaSyncedCtrl::SetUnitLandGoal(lua_State* L)
 	AAirMoveType* amt = dynamic_cast<AAirMoveType*>(unit->moveType);
 
 	if (amt == nullptr)
-		luaL_error(L, "Not a flying unit");
+		luaL_error(L, "Not a flying unit (id = %d, dead = %d, name = %s)", unit->id, static_cast<int>(unit->isDead), unit->unitDef ? unit->unitDef->name.c_str() : "<null>");
 
 	const float3 landPos(luaL_checkfloat(L, 2), luaL_checkfloat(L, 3), luaL_checkfloat(L, 4));
 	const float radiusSq = lua_isnumber(L, 5)? Square(lua_tonumber(L, 5)): -1.0f;
@@ -2562,6 +3586,11 @@ int LuaSyncedCtrl::SetUnitLandGoal(lua_State* L)
 }
 
 
+/***
+ * @function Spring.ClearUnitGoal
+ * @number unitID
+ * @treturn nil
+ */
 int LuaSyncedCtrl::ClearUnitGoal(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2574,16 +3603,64 @@ int LuaSyncedCtrl::ClearUnitGoal(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetUnitPhysics
+ * @number unitID
+ * @number posX
+ * @number posY
+ * @number posZ
+ * @number velX
+ * @number velY
+ * @number velZ
+ * @number rotX
+ * @number rotY
+ * @number rotZ
+ * @number dragX
+ * @number dragY
+ * @number dragZ
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitPhysics(lua_State* L)
 {
 	return (SetSolidObjectPhysicalState(L, ParseUnit(L, __func__, 1)));
 }
 
+/***
+ * @function Spring.SetUnitMass
+ * @number unitID
+ * @number mass
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitMass(lua_State* L)
 {
 	return (SetSolidObjectMass(L, ParseUnit(L, __func__, 1)));
 }
 
+
+/*** Set unit position (2D)
+ * @function Spring.SetUnitPosition
+ *
+ * Sets a unit's position in 2D, at terrain height.
+ *
+ * @number unitID
+ * @number x
+ * @number z
+ * @bool[opt=false] floating If true, over water the position is on surface. If false, on seafloor.
+ * @treturn nil
+ */
+
+
+/*** Set unit position (3D)
+ * @function Spring.SetUnitPosition
+ *
+ * Sets a unit's position in 3D, at an arbitrary height.
+ *
+ * @number unitID
+ * @number x
+ * @number y
+ * @number z
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitPosition(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2615,22 +3692,151 @@ int LuaSyncedCtrl::SetUnitPosition(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetUnitRotation
+ * @number unitID
+ * @number yaw
+ * @number pitch
+ * @number roll
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitRotation(lua_State* L)
 {
 	return (SetSolidObjectRotation(L, ParseUnit(L, __func__, 1), false));
 }
 
+
+/***
+ * @function Spring.SetUnitDirection
+ * @number unitID
+ * @number x
+ * @number y
+ * @number z
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitDirection(lua_State* L)
 {
 	return (SetSolidObjectDirection(L, ParseUnit(L, __func__, 1)));
 }
 
+/***
+ * @function Spring.SetUnitHeadingAndUpDir
+ * Use this call to set up unit direction in a robust way. Heading (-32768 to 32767) represents a 2D (xz plane) unit orientation if unit was completely upright, new {upx,upy,upz} direction will be used as new "up" vector, the rotation set by "heading" will remain preserved.
+ * @number unitID
+ * @number heading
+ * @number upx
+ * @number upy
+ * @number upz
+ * @treturn nil
+ */
+int LuaSyncedCtrl::SetUnitHeadingAndUpDir(lua_State* L)
+{
+	return SetSolidObjectHeadingAndUpDir(L, ParseUnit(L, __func__, 1), false);
+}
+
+/***
+ * @function Spring.SetUnitVelocity
+ * @number unitID
+ * @number velX
+ * @number velY
+ * @number velZ
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitVelocity(lua_State* L)
 {
 	return (SetWorldObjectVelocity(L, ParseUnit(L, __func__, 1)));
 }
 
 
+/***
+ *
+ * @function Spring.SetFactoryBuggerOff
+ * @number unitID
+ * @bool[opt] buggerOff
+ * @number[opt] offset
+ * @number[opt] radius
+ * @number[opt] relHeading
+ * @bool[opt] spherical
+ * @bool[opt] forced
+ * @treturn nil|number buggerOff
+ */
+int LuaSyncedCtrl::SetFactoryBuggerOff(lua_State* L)
+{
+	CUnit* u = ParseUnit(L, __func__, 1);
+	if (u == nullptr)
+		return 0;
+
+	CFactory* f = dynamic_cast<CFactory*>(u);
+	if (f == nullptr)
+		return 0;
+
+	f->boPerform     = luaL_optboolean(L, 2, f->boPerform    );
+	f->boOffset      = luaL_optfloat(  L, 3, f->boOffset     );
+	f->boRadius      = luaL_optfloat(  L, 4, f->boRadius     );
+	f->boRelHeading  = luaL_optint(    L, 5, f->boRelHeading );
+	f->boSherical    = luaL_optboolean(L, 6, f->boSherical   );
+	f->boForced      = luaL_optboolean(L, 7, f->boForced     );
+
+	lua_pushboolean(L, f->boPerform);
+	return 1;
+}
+
+
+/***
+ *
+ * @function Spring.BuggerOff
+ * @number x
+ * @number y
+ * @number[opt] z uses ground height when unspecified
+ * @number radius
+ * @number teamID
+ * @bool[opt=true] spherical
+ * @bool[opt=true] forced
+ * @number[opt] excludeUnitID
+ * @tparam[opt] {[number],...} excludeUnitDefIDs
+ * @treturn nil
+ */
+int LuaSyncedCtrl::BuggerOff(lua_State* L)
+{
+	float3 pos;
+	pos.x = luaL_checkfloat(L, 1);
+	pos.z = luaL_checkfloat(L, 3);
+	pos.y = !lua_isnil(L, 2) ? luaL_checkfloat(L, 2) : CGround::GetHeightReal(pos.x, pos.z);
+
+	const float radius = luaL_checkfloat(L, 4);
+	const int teamID   = lua_toint(L      , 5);
+	if (!teamHandler.IsValidTeam(teamID))
+		luaL_error(L, "%s(): Bad teamID: %d", __func__, teamID);
+
+	const bool spherical  = luaL_optboolean(L, 6, true);
+	const bool forced     = luaL_optboolean(L, 7, true);
+	const CUnit* excudie  = ParseRawUnit(L, __func__, 8); //can be nullptr
+
+	if (lua_istable(L, 9)) {
+		std::vector<const UnitDef*> exclUDefs;
+		ParseUnitDefArray(L, __func__, 9, exclUDefs);
+		CGameHelper::BuggerOff(pos, radius, spherical, forced, teamID, excudie, exclUDefs);
+	}
+	else {
+		CGameHelper::BuggerOff(pos, radius, spherical, forced, teamID, excudie);
+	}
+
+	return 0;
+}
+
+/***
+ * @function Spring.AddUnitDamage
+ *
+ * @number unitID
+ * @number damage
+ * @number[opt=0] paralyze equals to the paralyzetime in the WeaponDef.
+ * @number[opt=-1] attackerID
+ * @number[opt=-1] weaponID
+ * @number[opt] impulseX
+ * @number[opt] impulseY
+ * @number[opt] impulseZ
+ * @treturn nil
+ */
 int LuaSyncedCtrl::AddUnitDamage(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2642,9 +3848,9 @@ int LuaSyncedCtrl::AddUnitDamage(lua_State* L)
 	const int paralyze    = luaL_optint(L, 3, 0);
 	const int attackerID  = luaL_optint(L, 4, -1);
 	const int weaponDefID = luaL_optint(L, 5, -1);
-	const float3 impulse  = float3(Clamp(luaL_optfloat(L, 6, 0.0f), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE),
-	                               Clamp(luaL_optfloat(L, 7, 0.0f), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE),
-	                               Clamp(luaL_optfloat(L, 8, 0.0f), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE));
+	const float3 impulse  = float3(std::clamp(luaL_optfloat(L, 6, 0.0f), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE),
+	                               std::clamp(luaL_optfloat(L, 7, 0.0f), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE),
+	                               std::clamp(luaL_optfloat(L, 8, 0.0f), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE));
 
 	CUnit* attacker = nullptr;
 
@@ -2670,6 +3876,15 @@ int LuaSyncedCtrl::AddUnitDamage(lua_State* L)
 }
 
 
+/***
+ * @function Spring.AddUnitImpulse
+ * @number unitID
+ * @number x
+ * @number y
+ * @number z
+ * @number[opt] decayRate
+ * @treturn nil
+ */
 int LuaSyncedCtrl::AddUnitImpulse(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2677,15 +3892,21 @@ int LuaSyncedCtrl::AddUnitImpulse(lua_State* L)
 	if (unit == nullptr)
 		return 0;
 
-	const float3 impulse(Clamp(luaL_checkfloat(L, 2), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE),
-	                     Clamp(luaL_checkfloat(L, 3), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE),
-	                     Clamp(luaL_checkfloat(L, 4), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE));
+	const float3 impulse(std::clamp(luaL_checkfloat(L, 2), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE),
+	                     std::clamp(luaL_checkfloat(L, 3), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE),
+	                     std::clamp(luaL_checkfloat(L, 4), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE));
 
 	unit->ApplyImpulse(impulse);
 	return 0;
 }
 
 
+/***
+ * @function Spring.AddUnitSeismicPing
+ * @number unitID
+ * @number pindSize
+ * @treturn nil
+ */
 int LuaSyncedCtrl::AddUnitSeismicPing(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2700,6 +3921,13 @@ int LuaSyncedCtrl::AddUnitSeismicPing(lua_State* L)
 
 /******************************************************************************/
 
+/***
+ * @function Spring.AddUnitResource
+ * @number unitID
+ * @string resource "m" | "e"
+ * @number amount
+ * @treturn nil
+ */
 int LuaSyncedCtrl::AddUnitResource(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2722,6 +3950,20 @@ int LuaSyncedCtrl::AddUnitResource(lua_State* L)
 }
 
 
+/***
+ * @function Spring.UseUnitResource
+ * @number unitID
+ * @string resource "m" | "e"
+ * @number amount
+ * @treturn ?nil|bool okay
+ */
+
+/***
+ * @function Spring.UseUnitResource
+ * @number unitID
+ * @tparam {[string]=number,...} resources where keys are one of "m"|"metal"|"e"|"energy" and values are amounts
+ * @treturn ?nil|bool okay
+ */
 int LuaSyncedCtrl::UseUnitResource(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2780,8 +4022,18 @@ int LuaSyncedCtrl::UseUnitResource(lua_State* L)
 }
 
 
-/******************************************************************************/
+/******************************************************************************
+ * Decals
+ * @section decals
+******************************************************************************/
 
+
+/***
+ *
+ * @function Spring.AddObjectDecal
+ * @number unitID
+ * @treturn nil
+ */
 int LuaSyncedCtrl::AddObjectDecal(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -2793,6 +4045,12 @@ int LuaSyncedCtrl::AddObjectDecal(lua_State* L)
 	return 0;
 }
 
+
+/***
+ * @function Spring.RemoveObjectDecal
+ * @number unitID
+ * @treturn nil
+ */
 int LuaSyncedCtrl::RemoveObjectDecal(lua_State* L)
 {
 	// groundDecals removed (rendering); no-op on headless server
@@ -2800,12 +4058,30 @@ int LuaSyncedCtrl::RemoveObjectDecal(lua_State* L)
 }
 
 
+/******************************************************************************
+ * Grass
+ * @section grass
+******************************************************************************/
+
+
+/***
+ * @function Spring.AddGrass
+ * @number x
+ * @number z
+ * @treturn nil
+ */
 int LuaSyncedCtrl::AddGrass(lua_State* L)
 {
 	// grassDrawer removed (rendering); no-op on headless server
 	return 0;
 }
 
+/***
+ * @function Spring.RemoveGrass
+ * @number x
+ * @number z
+ * @treturn nil
+ */
 int LuaSyncedCtrl::RemoveGrass(lua_State* L)
 {
 	// grassDrawer removed (rendering); no-op on headless server
@@ -2813,8 +4089,23 @@ int LuaSyncedCtrl::RemoveGrass(lua_State* L)
 }
 
 
-/******************************************************************************/
+/******************************************************************************
+ * Feature Handling
+ * @section featurehandling
+******************************************************************************/
 
+
+/***
+ * @function Spring.CreateFeature
+ * @tparam string|number featureDef name or id
+ * @number x
+ * @number y
+ * @number z
+ * @number[opt] heading
+ * @number[opt] AllyTeamID
+ * @number[opt] featureID
+ * @treturn number featureID
+ */
 int LuaSyncedCtrl::CreateFeature(lua_State* L)
 {
 	CheckAllowGameChanges(L);
@@ -2860,11 +4151,11 @@ int LuaSyncedCtrl::CreateFeature(lua_State* L)
 	if (!CanControlFeatureAllyTeam(L, allyTeam))
 		luaL_error(L, "CreateFeature() bad team permission %d", team);
 
-	if (inCreateFeature)
-		luaL_error(L, "CreateFeature() recursion is not permitted");
+	if (inCreateFeature >= MAX_CMD_RECURSION_DEPTH)
+		luaL_error(L, "CreateFeature() recursion is not permitted, max depth: %d", MAX_CMD_RECURSION_DEPTH);
 
 	// use SetFeatureResurrect() to fill in the missing bits
-	inCreateFeature =  true;
+	inCreateFeature++;
 
 	FeatureLoadParams  params;
 	params.parentObj   = nullptr;
@@ -2881,7 +4172,7 @@ int LuaSyncedCtrl::CreateFeature(lua_State* L)
 	params.smokeTime   = 0;
 
 	CFeature* feature = featureHandler.LoadFeature(params);
-	inCreateFeature = false;
+	inCreateFeature--;
 
 	if (feature != nullptr) {
 		lua_pushnumber(L, feature->id);
@@ -2892,6 +4183,11 @@ int LuaSyncedCtrl::CreateFeature(lua_State* L)
 }
 
 
+/***
+ * @function Spring.DestroyFeature
+ * @number featureDefID
+ * @treturn nil
+ */
 int LuaSyncedCtrl::DestroyFeature(lua_State* L)
 {
 	CheckAllowGameChanges(L);
@@ -2899,17 +4195,24 @@ int LuaSyncedCtrl::DestroyFeature(lua_State* L)
 	if (feature == nullptr)
 		return 0;
 
-	if (inDestroyFeature)
-		luaL_error(L, "DestroyFeature() recursion is not permitted");
+	if (inDestroyFeature >= MAX_CMD_RECURSION_DEPTH)
+		luaL_error(L, "DestroyFeature() recursion is not permitted, max depth: %d", MAX_CMD_RECURSION_DEPTH);
 
-	inDestroyFeature = true;
+	inDestroyFeature++;
 	featureHandler.DeleteFeature(feature);
-	inDestroyFeature = false;
+	inDestroyFeature--;
 
 	return 0;
 }
 
 
+/*** Feature Control
+ *
+ * @function Spring.TransferFeature
+ * @number featureDefID
+ * @number teamID
+ * @treturn nil
+ */
 int LuaSyncedCtrl::TransferFeature(lua_State* L)
 {
 	CheckAllowGameChanges(L);
@@ -2926,17 +4229,36 @@ int LuaSyncedCtrl::TransferFeature(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetFeatureAlwaysVisible
+ * @number featureID
+ * @bool enable
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetFeatureAlwaysVisible(lua_State* L)
 {
 	return (SetWorldObjectAlwaysVisible(L, ParseFeature(L, __func__, 1), __func__));
 }
 
+/***
+ *
+ * @function Spring.SetFeatureUseAirLos
+ * @number featureID
+ * @bool useAirLos
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetFeatureUseAirLos(lua_State* L)
 {
 	return (SetWorldObjectUseAirLos(L, ParseFeature(L, __func__, 1), __func__));
 }
 
 
+/***
+ * @function Spring.SetFeatureHealth
+ * @number featureID
+ * @number health
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetFeatureHealth(lua_State* L)
 {
 	CFeature* feature = ParseFeature(L, __func__, 1);
@@ -2949,6 +4271,13 @@ int LuaSyncedCtrl::SetFeatureHealth(lua_State* L)
 }
 
 
+/***
+ *
+ * @function Spring.SetFeatureMaxHealth
+ * @number featureID
+ * @number maxHealth minimum 0.1
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetFeatureMaxHealth(lua_State* L)
 {
 	CFeature* feature = ParseFeature(L, __func__, 1);
@@ -2962,6 +4291,12 @@ int LuaSyncedCtrl::SetFeatureMaxHealth(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetFeatureReclaim
+ * @number featureID
+ * @number reclaimLeft
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetFeatureReclaim(lua_State* L)
 {
 	CFeature* feature = ParseFeature(L, __func__, 1);
@@ -2973,6 +4308,17 @@ int LuaSyncedCtrl::SetFeatureReclaim(lua_State* L)
 	return 0;
 }
 
+/***
+ * @function Spring.SetFeatureResources
+ * @number featureID
+ * @number metal
+ * @number energy
+ * @number[opt] reclaimTime
+ * @number[opt] reclaimLeft
+ * @number[opt] featureDefMetal
+ * @number[opt] featureDefEnergy
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetFeatureResources(lua_State* L)
 {
 	CFeature* feature = ParseFeature(L, __func__, 1);
@@ -2983,14 +4329,31 @@ int LuaSyncedCtrl::SetFeatureResources(lua_State* L)
 	feature->defResources.metal  = std::max(0.0f, luaL_optfloat(L, 6, feature->defResources.metal));
 	feature->defResources.energy = std::max(0.0f, luaL_optfloat(L, 7, feature->defResources.energy));
 
-	feature->resources.metal  = Clamp(luaL_checkfloat(L, 2), 0.0f, feature->defResources.metal );
-	feature->resources.energy = Clamp(luaL_checkfloat(L, 3), 0.0f, feature->defResources.energy);
+	feature->resources.metal  = std::clamp(luaL_checkfloat(L, 2), 0.0f, feature->defResources.metal );
+	feature->resources.energy = std::clamp(luaL_checkfloat(L, 3), 0.0f, feature->defResources.energy);
 
-	feature->reclaimTime = Clamp(luaL_optfloat(L, 4, feature->reclaimTime), 1.0f, 1000000.0f);
-	feature->reclaimLeft = Clamp(luaL_optfloat(L, 5, feature->reclaimLeft), 0.0f,       1.0f);
+	feature->reclaimTime = std::clamp(luaL_optfloat(L, 4, feature->reclaimTime), 1.0f, 1000000.0f);
+	feature->reclaimLeft = std::clamp(luaL_optfloat(L, 5, feature->reclaimLeft), 0.0f,       1.0f);
 	return 0;
 }
 
+/***
+ * @function Spring.SetFeatureResurrect
+ *
+ * Second param can now be a number id instead of a string name, this also allows cancelling ressurection by passing -1.
+ * The level of progress can now be set via the additional 4th param.
+ * Possible values for facing are:
+ * "south" | "s" | 0
+ * "east" | "e" | 1
+ * "north" | "n" | 2
+ * "west" | "w" | 3
+ *
+ * @number featureID
+ * @tparam string|number unitDef id or name
+ * @tparam[opt] string|number facing
+ * @number[opt] progress
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetFeatureResurrect(lua_State* L)
 {
 	CFeature* feature = ParseFeature(L, __func__, 1);
@@ -3014,11 +4377,38 @@ int LuaSyncedCtrl::SetFeatureResurrect(lua_State* L)
 	if (!lua_isnoneornil(L, 3))
 		feature->buildFacing = LuaUtils::ParseFacing(L, __func__, 3);
 
-	feature->resurrectProgress = Clamp(luaL_optfloat(L, 4, feature->resurrectProgress), 0.0f, 1.0f);
+	feature->resurrectProgress = std::clamp(luaL_optfloat(L, 4, feature->resurrectProgress), 0.0f, 1.0f);
 	return 0;
 }
 
 
+/***
+ * @function Spring.SetFeatureMoveCtrl
+ *
+ * Use this callout to control feature movement. The arg* arguments are parsed as follows and all optional:
+ *
+ * If enable is true:
+ * [, velVector(x,y,z)  * initial velocity for feature
+ * [, accVector(x,y,z)  * acceleration added every frame]]
+ *
+ * If enable is false:
+ * [, velocityMask(x,y,z)  * dimensions in which velocity is allowed to build when not using MoveCtrl
+ * [, impulseMask(x,y,z)  * dimensions in which impulse is allowed to apply when not using MoveCtrl
+ * [, movementMask(x,y,z)  * dimensions in which feature is allowed to move when not using MoveCtrl]]]
+ *
+ * It is necessary to unlock feature movement on x,z axis before changing feature physics.
+ *
+ * For example use `Spring.SetFeatureMoveCtrl(featureID,false,1,1,1,1,1,1,1,1,1)` to unlock all movement prior to making `Spring.SetFeatureVelocity` calls.
+ *
+ * @number featureID
+ * @bool[opt] enable
+ * @number[opt] arg1
+ * @number[opt] arg2
+ * @number[opt] argn
+ *
+ * @treturn nil
+ *
+ */
 int LuaSyncedCtrl::SetFeatureMoveCtrl(lua_State* L)
 {
 	CFeature* feature = ParseFeature(L, __func__, 1);
@@ -3049,16 +4439,50 @@ int LuaSyncedCtrl::SetFeatureMoveCtrl(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetFeaturePhysics
+ * @number featureID
+ * @number posX
+ * @number posY
+ * @number posZ
+ * @number velX
+ * @number velY
+ * @number velZ
+ * @number rotX
+ * @number rotY
+ * @number rotZ
+ * @number dragX
+ * @number dragY
+ * @number dragZ
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetFeaturePhysics(lua_State* L)
 {
 	return (SetSolidObjectPhysicalState(L, ParseFeature(L, __func__, 1)));
 }
 
+
+/***
+ * @function Spring.SetFeatureMass
+ * @number featureID
+ * @number mass
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetFeatureMass(lua_State* L)
 {
 	return (SetSolidObjectMass(L, ParseFeature(L, __func__, 1)));
 }
 
+
+/***
+ * @function Spring.SetFeaturePosition
+ * @number featureID
+ * @number x
+ * @number y
+ * @number z
+ * @bool[opt] snapToGround
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetFeaturePosition(lua_State* L)
 {
 	CFeature* feature = ParseFeature(L, __func__, 1);
@@ -3075,27 +4499,87 @@ int LuaSyncedCtrl::SetFeaturePosition(lua_State* L)
 	return 0;
 }
 
+
+/***
+ * @function Spring.SetFeatureRotation
+ * @number featureID
+ * @number rotX
+ * @number rotY
+ * @number rotZ
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetFeatureRotation(lua_State* L)
 {
 	return (SetSolidObjectRotation(L, ParseFeature(L, __func__, 1), true));
 }
 
+
+/***
+ * @function Spring.SetFeatureDirection
+ * @number featureID
+ * @number dirX
+ * @number dirY
+ * @number dirZ
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetFeatureDirection(lua_State* L)
 {
 	return (SetSolidObjectDirection(L, ParseFeature(L, __func__, 1)));
 }
 
+/***
+ * @function Spring.SetFeatureHeadingAndUpDir
+ * Use this call to set up feature direction in a robust way. Heading (-32768 to 32767) represents a 2D (xz plane) feature orientation if feature was completely upright, new {upx,upy,upz} direction will be used as new "up" vector, the rotation set by "heading" will remain preserved.
+ * @number featureID
+ * @number heading
+ * @number upx
+ * @number upy
+ * @number upz
+ * @treturn nil
+ */
+int LuaSyncedCtrl::SetFeatureHeadingAndUpDir(lua_State* L)
+{
+	return SetSolidObjectHeadingAndUpDir(L, ParseFeature(L, __func__, 1), true);
+}
+
+/***
+ * @function Spring.SetFeatureVelocity
+ * @number featureID
+ * @number velX
+ * @number velY
+ * @number velZ
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetFeatureVelocity(lua_State* L)
 {
 	return (SetWorldObjectVelocity(L, ParseFeature(L, __func__, 1)));
 }
 
 
+/***
+ * @function Spring.SetFeatureBlocking
+ * @number featureID
+ * @bool isBlocking
+ * @bool isSolidObjectCollidable
+ * @bool isProjectileCollidable
+ * @bool isRaySegmentCollidable
+ * @bool crushable
+ * @bool blockEnemyPushing
+ * @bool blockHeightChanges
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetFeatureBlocking(lua_State* L)
 {
 	return (SetSolidObjectBlocking(L, ParseFeature(L, __func__, 1)));
 }
 
+
+/***
+ * @function Spring.SetFeatureNoSelect
+ * @number featureID
+ * @bool noSelect
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetFeatureNoSelect(lua_State* L)
 {
 	CFeature* feature = ParseFeature(L, __func__, 1);
@@ -3108,7 +4592,21 @@ int LuaSyncedCtrl::SetFeatureNoSelect(lua_State* L)
 }
 
 
-
+/***
+ * @function Spring.SetFeatureMidAndAimPos
+ *
+ * Check `Spring.SetUnitMidAndAimPos` for further explanation of the arguments.
+ *
+ * @number featureID
+ * @number mpX
+ * @number mpY
+ * @number mpZ
+ * @number apX
+ * @number apY
+ * @number apZ
+ * @bool[opt] relative
+ * @treturn bool success
+ */
 int LuaSyncedCtrl::SetFeatureMidAndAimPos(lua_State* L)
 {
 	CFeature* feature = ParseFeature(L, __func__, 1);
@@ -3144,6 +4642,14 @@ int LuaSyncedCtrl::SetFeatureMidAndAimPos(lua_State* L)
 	return 1;
 }
 
+
+/***
+ * @function Spring.SetFeatureRadiusAndHeight
+ * @number featureID
+ * @number radius
+ * @number height
+ * @treturn bool success
+ */
 int LuaSyncedCtrl::SetFeatureRadiusAndHeight(lua_State* L)
 {
 	CFeature* feature = ParseFeature(L, __func__, 1);
@@ -3172,35 +4678,134 @@ int LuaSyncedCtrl::SetFeatureRadiusAndHeight(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetFeatureCollisionVolumeData
+ *
+ * Check `Spring.SetUnitCollisionVolumeData` for further explanation of the arguments.
+ *
+ * @number featureID
+ * @number scaleX
+ * @number scaleY
+ * @number scaleZ
+ * @number offsetX
+ * @number offsetY
+ * @number offsetZ
+ * @number vType
+ * @number tType
+ * @number Axis
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetFeatureCollisionVolumeData(lua_State* L)
 {
 	return (SetSolidObjectCollisionVolumeData(L, ParseFeature(L, __func__, 1)));
 }
 
+
+/***
+ * @function Spring.SetFeaturePieceCollisionVolumeData
+ * @number featureID
+ * @number pieceIndex
+ * @bool enable
+ * @number scaleX
+ * @number scaleY
+ * @number scaleZ
+ * @number offsetX
+ * @number offsetY
+ * @number offsetZ
+ * @number Axis
+ * @number volumeType
+ * @number[opt] primaryAxis
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetFeaturePieceCollisionVolumeData(lua_State* L)
 {
 	return (SetSolidObjectPieceCollisionVolumeData(L, ParseFeature(L, __func__, 1)));
 }
 
+/***
+ *
+ * @function Spring.SetFeaturePieceVisible
+ * @number featureID
+ * @number pieceIndex
+ * @bool visible
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetFeaturePieceVisible(lua_State* L)
 {
 	return (SetSolidObjectPieceVisible(L, ParseFeature(L, __func__, 1)));
 }
 
-/******************************************************************************/
-/******************************************************************************/
+/******************************************************************************
+ * Projectiles
+ * @section projectiles
+******************************************************************************/
 
+/***
+ * @table projectileParams
+ * @tparam table pos
+ * @number pos.x
+ * @number pos.y
+ * @number pos.z
+ * @tparam table end
+ * @number end.x
+ * @number end.y
+ * @number end.z
+ * @tparam table speed
+ * @number speed.x
+ * @number speed.y
+ * @number speed.z
+ * @tparam table spread
+ * @number spread.x
+ * @number spread.y
+ * @number spread.z
+ * @tparam table error
+ * @number error.x
+ * @number error.y
+ * @number error.z
+ * @number owner
+ * @number team
+ * @number ttl
+ * @number gravity
+ * @number tracking
+ * @number maxRange
+ * @number startAlpha
+ * @number endAlpha
+ * @string model
+ * @string cegTag
+ */
+
+/***
+ * @function Spring.SetProjectileAlwaysVisible
+ * @number projectileID
+ * @bool alwaysVisible
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetProjectileAlwaysVisible(lua_State* L)
 {
 	return (SetWorldObjectAlwaysVisible(L, ParseProjectile(L, __func__, 1), __func__));
 }
 
+
+/***
+ *
+ * @function Spring.SetProjectileUseAirLos
+ * @number projectileID
+ * @bool useAirLos
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetProjectileUseAirLos(lua_State* L)
 {
 	return (SetWorldObjectUseAirLos(L, ParseProjectile(L, __func__, 1), __func__));
 }
 
 
+/***
+ * Disables engine movecontrol, so lua can fully control the physics.
+ * @function Spring.SetProjectileMoveControl
+ * @number projectileID
+ * @bool enable
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetProjectileMoveControl(lua_State* L)
 {
 	CProjectile* proj = ParseProjectile(L, __func__, 1);
@@ -3214,6 +4819,14 @@ int LuaSyncedCtrl::SetProjectileMoveControl(lua_State* L)
 	return 0;
 }
 
+/***
+ * @function Spring.SetProjectilePosition
+ * @number projectileID
+ * @number[opt=0] posX
+ * @number[opt=0] posY
+ * @number[opt=0] posZ
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetProjectilePosition(lua_State* L)
 {
 	CProjectile* proj = ParseProjectile(L, __func__, 1);
@@ -3228,11 +4841,25 @@ int LuaSyncedCtrl::SetProjectilePosition(lua_State* L)
 	return 0;
 }
 
+/***
+ * @function Spring.SetProjectileVelocity
+ * @number projectileID
+ * @number[opt=0] velX
+ * @number[opt=0] velY
+ * @number[opt=0] velZ
+ * @treturn nil
+ *
+ */
 int LuaSyncedCtrl::SetProjectileVelocity(lua_State* L)
 {
 	return (SetWorldObjectVelocity(L, ParseProjectile(L, __func__, 1)));
 }
 
+/***
+ * @function Spring.SetProjectileCollision
+ * @number projectileID
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetProjectileCollision(lua_State* L)
 {
 	CProjectile* proj = ParseProjectile(L, __func__, 1);
@@ -3244,6 +4871,25 @@ int LuaSyncedCtrl::SetProjectileCollision(lua_State* L)
 	return 0;
 }
 
+/***
+ * @function Spring.SetProjectileTarget
+ *
+ * targetTypeStr can be one of:
+ *     'u' - unit
+ *     'f' - feature
+ *     'p' - projectile
+ *  while targetTypeInt is one of:
+ *     string.byte('g') := GROUND
+ *     string.byte('u') := UNIT
+ *     string.byte('f') := FEATURE
+ *     string.byte('p') := PROJECTILE
+ *
+ * @number projectileID
+ * @number[opt=0] arg1 targetID or posX
+ * @number[opt=0] arg2 targetType or posY
+ * @number[opt=0] posZ
+ * @treturn ?nil|bool validTarget
+ */
 int LuaSyncedCtrl::SetProjectileTarget(lua_State* L)
 {
 	CProjectile* pro = ParseProjectile(L, __func__, 1);
@@ -3314,6 +4960,11 @@ int LuaSyncedCtrl::SetProjectileTarget(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetProjectileIsIntercepted
+ * @number projectileID
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetProjectileIsIntercepted(lua_State* L)
 {
 	CProjectile* proj = ParseProjectile(L, __func__, 1);
@@ -3328,6 +4979,15 @@ int LuaSyncedCtrl::SetProjectileIsIntercepted(lua_State* L)
 }
 
 
+
+/***
+ * @function Spring.SetProjectileDamages
+ * @number unitID
+ * @number weaponNum
+ * @string key
+ * @number value
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetProjectileDamages(lua_State* L)
 {
 	CProjectile* proj = ParseProjectile(L, __func__, 1);
@@ -3357,6 +5017,12 @@ int LuaSyncedCtrl::SetProjectileDamages(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetProjectileIgnoreTrackingError
+ * @number projectileID
+ * @bool ignore
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetProjectileIgnoreTrackingError(lua_State* L)
 {
 	CProjectile* proj = ParseProjectile(L, __func__, 1);
@@ -3381,6 +5047,12 @@ int LuaSyncedCtrl::SetProjectileIgnoreTrackingError(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetProjectileGravity
+ * @number projectileID
+ * @number[opt=0] grav
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetProjectileGravity(lua_State* L)
 {
 	CProjectile* proj = ParseProjectile(L, __func__, 1);
@@ -3392,10 +5064,23 @@ int LuaSyncedCtrl::SetProjectileGravity(lua_State* L)
 	return 0;
 }
 
-int LuaSyncedCtrl::SetProjectileSpinAngle(lua_State* L) { return 0; } // DEPRECATED
-int LuaSyncedCtrl::SetProjectileSpinSpeed(lua_State* L) { return 0; } // DEPRECATED
-int LuaSyncedCtrl::SetProjectileSpinVec(lua_State* L) { return 0; } // DEPRECATED
 
+int LuaSyncedCtrl::SetProjectileSpinAngle(lua_State* L) { return 0; } // FIXME: DELETE ME
+int LuaSyncedCtrl::SetProjectileSpinSpeed(lua_State* L) { return 0; } // FIXME: DELETE ME
+int LuaSyncedCtrl::SetProjectileSpinVec(lua_State* L) { return 0; } // FIXME: DELETE ME
+
+
+/***
+ * @function Spring.SetPieceProjectileParams
+ * @number projectileID
+ * @number[opt] explosionFlags
+ * @number[opt] spinAngle
+ * @number[opt] spinSpeed
+ * @number[opt] spinVectorX
+ * @number[opt] spinVectorY
+ * @number[opt] spinVectorZ
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetPieceProjectileParams(lua_State* L)
 {
 	CProjectile* proj = ParseProjectile(L, __func__, 1);
@@ -3406,17 +5091,23 @@ int LuaSyncedCtrl::SetPieceProjectileParams(lua_State* L)
 	CPieceProjectile* pproj = static_cast<CPieceProjectile*>(proj);
 
 	pproj->explFlags = luaL_optint(L, 2, pproj->explFlags);
-	pproj->spinParams.y = luaL_optfloat(L, 3, pproj->spinParams.y);
-	pproj->spinParams.x = luaL_optfloat(L, 4, pproj->spinParams.x);
-	pproj->spinVector.x = luaL_optfloat(L, 5, pproj->spinVector.x);
-	pproj->spinVector.y = luaL_optfloat(L, 6, pproj->spinVector.y);
-	pproj->spinVector.z = luaL_optfloat(L, 7, pproj->spinVector.z);
+	pproj->spinAngle = luaL_optfloat(L, 3, pproj->spinAngle);
+	pproj->spinSpeed = luaL_optfloat(L, 4, pproj->spinSpeed);
+	pproj->spinVec.x = luaL_optfloat(L, 5, pproj->spinVec.x);
+	pproj->spinVec.y = luaL_optfloat(L, 6, pproj->spinVec.y);
+	pproj->spinVec.z = luaL_optfloat(L, 7, pproj->spinVec.z);
 	return 0;
 }
 
 //
 // TODO: move this and SpawnCEG to LuaUnsyncedCtrl
 //
+/***
+ * @function Spring.SetProjectileCEG
+ * @number projectileID
+ * @string ceg_name
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetProjectileCEG(lua_State* L)
 {
 	CProjectile* proj = ParseProjectile(L, __func__, 1);
@@ -3428,7 +5119,7 @@ int LuaSyncedCtrl::SetProjectileCEG(lua_State* L)
 
 	unsigned int cegID = CExplosionGeneratorHandler::EXPGEN_ID_INVALID;
 
-	if (lua_isstring(L, 2)) {
+	if (lua_israwstring(L, 2)) {
 		cegID = explGenHandler.LoadCustomGeneratorID(lua_tostring(L, 2));
 	} else {
 		cegID = luaL_checknumber(L, 2);
@@ -3442,52 +5133,43 @@ int LuaSyncedCtrl::SetProjectileCEG(lua_State* L)
 	return 1;
 }
 
-
-/******************************************************************************/
-/******************************************************************************/
-
-static void ParseUnitMap(lua_State* L, const char* caller,
-                         int table, vector<CUnit*>& unitIDs)
-{
-	if (!lua_istable(L, table))
-		luaL_error(L, "%s(): error parsing unit map", caller);
-
-	for (lua_pushnil(L); lua_next(L, table) != 0; lua_pop(L, 1)) {
-		if (!lua_israwnumber(L, -2))
-			continue;
-
-		CUnit* unit = ParseUnit(L, __func__, -2);
-
-		if (unit == nullptr)
-			continue; // bad pointer
-
-		unitIDs.push_back(unit);
-	}
-}
+/***
+ * Give Order
+ * @section giveorder
+ * Options can also be a bitmask; e.g. 0 instead of an empty table (can avoid performance hit on table creation)
+ * See `Constants.CMD` for relevant constants.
+ */
 
 
-static void ParseUnitArray(lua_State* L, const char* caller,
-                           int table, vector<CUnit*>& unitIDs)
-{
-	if (!lua_istable(L, table))
-		luaL_error(L, "%s(): error parsing unit array", caller);
-
-	for (lua_pushnil(L); lua_next(L, table) != 0; lua_pop(L, 1)) {
-		if (!lua_israwnumber(L, -2) || !lua_isnumber(L, -1)) // avoid 'n'
-			continue;
-
-		CUnit* unit = ParseUnit(L, __func__, -1);
-
-		if (unit == nullptr)
-			continue; // bad pointer
-
-		unitIDs.push_back(unit);
-	}
-}
+/*** Command Options params
+ *
+ * @table cmdOpts
+ *
+ * @tparam bool right Right mouse key pressed
+ * @tparam bool alt Alt key pressed
+ * @tparam bool ctrl Ctrl key pressed
+ * @tparam bool shift Shift key pressed
+ */
 
 
-/******************************************************************************/
+/*** Command spec
+ *
+ * @table cmdSpec
+ *
+ * Used when assigning multiple commands at once
+ *
+ * @number cmdID
+ * @tparam {number,...} params
+ * @tparam cmdOpts options
+ */
 
+
+/***
+ *
+ * @function Spring.UnitFinishCommand
+ * @number unitID
+ * @treturn nil
+ */
 int LuaSyncedCtrl::UnitFinishCommand(lua_State* L)
 {
 	CheckAllowGameChanges(L);
@@ -3503,6 +5185,14 @@ int LuaSyncedCtrl::UnitFinishCommand(lua_State* L)
 	return 0;
 }
 
+/***
+ * @function Spring.GiveOrderToUnit
+ * @number unitID
+ * @number cmdID
+ * @tparam {number,...} params
+ * @tparam cmdOpts options
+ * @treturn bool unitOrdered
+ */
 int LuaSyncedCtrl::GiveOrderToUnit(lua_State* L)
 {
 	CheckAllowGameChanges(L);
@@ -3519,18 +5209,26 @@ int LuaSyncedCtrl::GiveOrderToUnit(lua_State* L)
 		return 1;
 	}
 
-	if (inGiveOrder)
-		luaL_error(L, "[%s] recursion not permitted", __func__);
+	if (inGiveOrder >= MAX_CMD_RECURSION_DEPTH)
+		luaL_error(L, "[%s] recursion not permitted, max depth: %d", __func__, MAX_CMD_RECURSION_DEPTH);
 
-	inGiveOrder = true;
+	inGiveOrder++;
 	unit->commandAI->GiveCommand(cmd, -1, true, true);
-	inGiveOrder = false;
+	inGiveOrder--;
 
 	lua_pushboolean(L, true);
 	return 1;
 }
 
 
+/***
+ * @function Spring.GiveOrderToUnitMap
+ * @tparam {[number]=table,...} unitMap table with unitIDs as keys
+ * @number cmdID
+ * @tparam {number,...} params
+ * @tparam cmdOpts options
+ * @treturn number unitsOrdered
+ */
 int LuaSyncedCtrl::GiveOrderToUnitMap(lua_State* L)
 {
 	CheckAllowGameChanges(L);
@@ -3547,10 +5245,10 @@ int LuaSyncedCtrl::GiveOrderToUnitMap(lua_State* L)
 
 	Command cmd = LuaUtils::ParseCommand(L, __func__, 2);
 
-	if (inGiveOrder)
-		luaL_error(L, "[%s] recursion not permitted", __func__);
+	if (inGiveOrder >= MAX_CMD_RECURSION_DEPTH)
+		luaL_error(L, "[%s] recursion not permitted, max depth: %d", __func__, MAX_CMD_RECURSION_DEPTH);
 
-	inGiveOrder = true;
+	inGiveOrder++;
 	int count = 0;
 	for (CUnit* unit: units) {
 		if (CanControlUnit(L, unit)) {
@@ -3558,13 +5256,22 @@ int LuaSyncedCtrl::GiveOrderToUnitMap(lua_State* L)
 			count++;
 		}
 	}
-	inGiveOrder = false;
+	inGiveOrder--;
 
 	lua_pushnumber(L, count);
 	return 1;
 }
 
 
+/***
+ *
+ * @function Spring.GiveOrderToUnitArray
+ * @tparam {number,...} unitIDs
+ * @number cmdID
+ * @tparam {number,...} params
+ * @tparam cmdOpts options
+ * @treturn number unitsOrdered
+ */
 int LuaSyncedCtrl::GiveOrderToUnitArray(lua_State* L)
 {
 	CheckAllowGameChanges(L);
@@ -3581,10 +5288,10 @@ int LuaSyncedCtrl::GiveOrderToUnitArray(lua_State* L)
 
 	Command cmd = LuaUtils::ParseCommand(L, __func__, 2);
 
-	if (inGiveOrder)
-		luaL_error(L, "[%s] recursion not permitted", __func__);
+	if (inGiveOrder >= MAX_CMD_RECURSION_DEPTH)
+		luaL_error(L, "[%s] recursion not permitted, max depth: %d", __func__, MAX_CMD_RECURSION_DEPTH);
 
-	inGiveOrder = true;
+	inGiveOrder++;
 
 	int count = 0;
 	for (CUnit* unit: units) {
@@ -3594,13 +5301,60 @@ int LuaSyncedCtrl::GiveOrderToUnitArray(lua_State* L)
 		}
 	}
 
-	inGiveOrder = false;
+	inGiveOrder--;
 
 	lua_pushnumber(L, count);
 	return 1;
 }
 
 
+/***
+ *
+ * @function Spring.GiveOrderArrayToUnit
+ * @number unitID
+ * @tparam {cmdSpec,...} cmdArray
+ * @treturn bool ordersGiven
+ */
+int LuaSyncedCtrl::GiveOrderArrayToUnit(lua_State* L)
+{
+	CheckAllowGameChanges(L);
+
+	CUnit* const unit = ParseUnit(L, __func__, 1);
+	if (unit == nullptr)
+		luaL_error(L, "[%s] invalid unitID", __func__);
+	if (!CanControlUnit(L, unit)) {
+		lua_pushboolean(L, false);
+		return 1;
+	}
+
+	std::vector<Command> commands;
+	LuaUtils::ParseCommandArray(L, __func__, 2, commands);
+	if (commands.empty()) {
+		lua_pushboolean(L, false);
+		return 1;
+	}
+
+	if (inGiveOrder >= MAX_CMD_RECURSION_DEPTH)
+		luaL_error(L, "[%s] recursion not permitted, max depth: %d", __func__, MAX_CMD_RECURSION_DEPTH);
+
+	inGiveOrder ++;
+
+	for (const Command& c: commands)
+		unit->commandAI->GiveCommand(c, -1, true, true);
+
+	inGiveOrder --;
+
+	lua_pushboolean(L, true);
+	return 1;
+}
+
+
+/***
+ * @function Spring.GiveOrderArrayToUnitMap
+ * @tparam {[number]=table} unitMap table with unitIDs as keys
+ * @tparam {cmdSpec,...} orderArray
+ * @treturn number unitsOrdered
+ */
 int LuaSyncedCtrl::GiveOrderArrayToUnitMap(lua_State* L)
 {
 	CheckAllowGameChanges(L);
@@ -3616,10 +5370,10 @@ int LuaSyncedCtrl::GiveOrderArrayToUnitMap(lua_State* L)
 		return 1;
 	}
 
-	if (inGiveOrder)
-		luaL_error(L, "[%s] recursion not permitted", __func__);
+	if (inGiveOrder >= MAX_CMD_RECURSION_DEPTH)
+		luaL_error(L, "[%s] recursion not permitted, max depth: %d", __func__, MAX_CMD_RECURSION_DEPTH);
 
-	inGiveOrder = true;
+	inGiveOrder++;
 
 	int count = 0;
 	for (CUnit* unit: units) {
@@ -3630,13 +5384,19 @@ int LuaSyncedCtrl::GiveOrderArrayToUnitMap(lua_State* L)
 			count++;
 		}
 	}
-	inGiveOrder = false;
+	inGiveOrder--;
 
 	lua_pushnumber(L, count);
 	return 1;
 }
 
 
+/***
+ * @function Spring.GiveOrderArrayToUnitArray
+ * @tparam {number,...} unitArray containing unitIDs
+ * @tparam {cmdSpec,...} orderArray
+ * @treturn nil
+ */
 int LuaSyncedCtrl::GiveOrderArrayToUnitArray(lua_State* L)
 {
 	CheckAllowGameChanges(L);
@@ -3653,10 +5413,10 @@ int LuaSyncedCtrl::GiveOrderArrayToUnitArray(lua_State* L)
 		return 1;
 	}
 
-	if (inGiveOrder)
-		luaL_error(L, "[%s] recursion not permitted", __func__);
+	if (inGiveOrder >= MAX_CMD_RECURSION_DEPTH)
+		luaL_error(L, "[%s] recursion not permitted, max depth: %d", __func__, MAX_CMD_RECURSION_DEPTH);
 
-	inGiveOrder = true;
+	inGiveOrder++;
 
 	int count = 0;
 
@@ -3679,7 +5439,7 @@ int LuaSyncedCtrl::GiveOrderArrayToUnitArray(lua_State* L)
 			}
 		}
 	}
-	inGiveOrder = false;
+	inGiveOrder--;
 
 	lua_pushnumber(L, count);
 	return 1;
@@ -3721,10 +5481,10 @@ static void ParseParams(lua_State* L, const char* caller, float& factor,
 	}
 
 	// quantize and clamp
-	x1 = Clamp((int)(fx1 / resolution), 0, maxX);
-	x2 = Clamp((int)(fx2 / resolution), 0, maxX);
-	z1 = Clamp((int)(fz1 / resolution), 0, maxZ);
-	z2 = Clamp((int)(fz2 / resolution), 0, maxZ);
+	x1 = std::clamp((int)(fx1 / resolution), 0, maxX);
+	x2 = std::clamp((int)(fx2 / resolution), 0, maxX);
+	z1 = std::clamp((int)(fz1 / resolution), 0, maxZ);
+	z2 = std::clamp((int)(fz2 / resolution), 0, maxZ);
 
 }
 
@@ -3734,7 +5494,22 @@ static inline void ParseMapParams(lua_State* L, const char* caller,
 	ParseParams(L, caller, factor, x1, z1, x2, z2, SQUARE_SIZE, mapDims.mapx, mapDims.mapy);
 }
 
+/******************************************************************************
+ * Heightmap
+ * @section heightmap
+ * Note that x & z coords are in worldspace (Game.mapSizeX/Z), still the heightmap resolution is Game.squareSize.
+******************************************************************************/
 
+/*** Set a certain height to a point or rectangle area on the world
+ *
+ * @function Spring.LevelHeightMap
+ * @number x1
+ * @number z1
+ * @number x2_height if y2 and height are nil then this parameter is the height
+ * @number[opt] z2
+ * @number[opt] height
+ * @treturn nil
+ */
 int LuaSyncedCtrl::LevelHeightMap(lua_State* L)
 {
 	if (mapDamage->Disabled()) {
@@ -3755,6 +5530,16 @@ int LuaSyncedCtrl::LevelHeightMap(lua_State* L)
 }
 
 
+/*** Add a certain height to a point or rectangle area on the world
+ *
+ * @function Spring.AdjustHeightMap
+ * @number x1
+ * @number y1
+ * @number x2_height if y2 and height are nil then this parameter is the height
+ * @number[opt] y2
+ * @number[opt] height
+ * @treturn nil
+ */
 int LuaSyncedCtrl::AdjustHeightMap(lua_State* L)
 {
 	if (mapDamage->Disabled()) {
@@ -3777,6 +5562,16 @@ int LuaSyncedCtrl::AdjustHeightMap(lua_State* L)
 }
 
 
+/*** Restore original map height to a point or rectangle area on the world
+ *
+ * @function Spring.RevertHeightMap
+ * @number x1
+ * @number y1
+ * @number x2_factor if y2 and factor are nil then this parameter is the factor
+ * @number[opt] y2
+ * @number[opt] factor
+ * @treturn nil
+ */
 int LuaSyncedCtrl::RevertHeightMap(lua_State* L)
 {
 	if (mapDamage->Disabled()) {
@@ -3814,9 +5609,15 @@ int LuaSyncedCtrl::RevertHeightMap(lua_State* L)
 	return 0;
 }
 
-/******************************************************************************/
-/******************************************************************************/
 
+/*** Can only be called in `Spring.SetHeightMapFunc`
+ *
+ * @function Spring.AddHeightMap
+ * @number x
+ * @number z
+ * @number height
+ * @treturn ?nil|number newHeight
+ */
 int LuaSyncedCtrl::AddHeightMap(lua_State* L)
 {
 	if (!inHeightMap) {
@@ -3854,6 +5655,19 @@ int LuaSyncedCtrl::AddHeightMap(lua_State* L)
 }
 
 
+/***
+ *
+ * @function Spring.SetHeightMap
+ *
+ * Can only be called in `Spring.SetHeightMapFunc`. The terraform argument is
+ *
+ * @number x
+ * @number z
+ * @number height
+ * @number[opt=1] terraform a scaling factor.
+ * @treturn ?nil|number absHeightDiff =0 nothing will be changed (the terraform starts) and if =1 the terraform will be finished.
+ *
+ */
 int LuaSyncedCtrl::SetHeightMap(lua_State* L)
 {
 	if (!inHeightMap) {
@@ -3900,6 +5714,25 @@ int LuaSyncedCtrl::SetHeightMap(lua_State* L)
 }
 
 
+/***
+ * @function Spring.SetHeightMapFunc
+ *
+ * Example code:
+ *
+ *     function Spring.SetHeightMapFunc(function()
+ *       for z=0,Game.mapSizeZ, Game.squareSize do
+ *         for x=0,Game.mapSizeX, Game.squareSize do
+ *           Spring.SetHeightMap( x, z, 200 + 20 * math.cos((x + z) / 90) )
+ *         end
+ *       end
+ *     end)
+ *
+ * @func lua_function
+ * @param[opt] arg1
+ * @param[opt] arg2
+ * @param[opt] argn
+ * @treturn ?nil|number absTotalHeightMapAmountChanged
+ */
 int LuaSyncedCtrl::SetHeightMapFunc(lua_State* L)
 {
 	if (mapDamage->Disabled()) {
@@ -3939,19 +5772,289 @@ int LuaSyncedCtrl::SetHeightMapFunc(lua_State* L)
 	return 1;
 }
 
-/******************************************************************************/
-/* smooth mesh manipulation                                                   */
-/******************************************************************************/
+
+/******************************************************************************
+ * Height Map/Smooth Mesh
+ * @section heightmap
+******************************************************************************/
+
+/*** Set a height to a point or rectangle area to the original map height cache
+ *
+ * @function Spring.LevelOriginalHeightMap
+ * @number x1
+ * @number y1
+ * @number x2_height if y2 and height are nil then this parameter is the height
+ * @number[opt] y2
+ * @number[opt] height
+ * @treturn nil
+ */
+int LuaSyncedCtrl::LevelOriginalHeightMap(lua_State* L)
+{
+	if (mapDamage->Disabled()) {
+		return 0;
+	}
+	float height;
+	int x1, x2, z1, z2;
+	ParseMapParams(L, __func__, height, x1, z1, x2, z2);
+
+	for (int z = z1; z <= z2; z++) {
+		for (int x = x1; x <= x2; x++) {
+			readMap->SetOriginalHeight((z * mapDims.mapxp1) + x, height);
+		}
+	}
+
+	return 0;
+}
+
+
+/*** Add height to a point or rectangle area to the original map height cache
+ *
+ * @function Spring.AdjustOriginalHeightMap
+ * @number x1
+ * @number y1
+ * @number x2_height if y2 and height are nil then this parameter is the height
+ * @number[opt] y2
+ * @number[opt] height
+ * @treturn nil
+ */
+int LuaSyncedCtrl::AdjustOriginalHeightMap(lua_State* L)
+{
+	if (mapDamage->Disabled()) {
+		return 0;
+	}
+
+	float height;
+	int x1, x2, z1, z2;
+
+	ParseMapParams(L, __func__, height, x1, z1, x2, z2);
+
+	for (int z = z1; z <= z2; z++) {
+		for (int x = x1; x <= x2; x++) {
+			readMap->AddOriginalHeight((z * mapDims.mapxp1) + x, height);
+		}
+	}
+
+	return 0;
+}
+
+
+/*** Restore original map height cache to a point or rectangle area on the world
+ *
+ * @function Spring.RevertOriginalHeightMap
+ * @number x1
+ * @number y1
+ * @number x2_factor if y2 and factor are nil then this parameter is the factor
+ * @number[opt] y2
+ * @number[opt] factor
+ * @treturn nil
+ */
+int LuaSyncedCtrl::RevertOriginalHeightMap(lua_State* L)
+{
+	if (mapDamage->Disabled()) {
+		return 0;
+	}
+	float origFactor;
+	int x1, x2, z1, z2;
+	ParseMapParams(L, __func__, origFactor, x1, z1, x2, z2);
+
+	const float* origMap = readMap->GetMapFileHeightMapSynced();
+	const float* currMap = readMap->GetOriginalHeightMapSynced();
+
+	if (origFactor == 1.0f) {
+		for (int z = z1; z <= z2; z++) {
+			for (int x = x1; x <= x2; x++) {
+				const int idx = (z * mapDims.mapxp1) + x;
+
+				readMap->SetOriginalHeight(idx, origMap[idx]);
+			}
+		}
+	}
+	else {
+		const float currFactor = (1.0f - origFactor);
+		for (int z = z1; z <= z2; z++) {
+			for (int x = x1; x <= x2; x++) {
+				const int index = (z * mapDims.mapxp1) + x;
+				const float ofh = origFactor * origMap[index];
+				const float cfh = currFactor * currMap[index];
+				readMap->SetOriginalHeight(index, ofh + cfh);
+			}
+		}
+	}
+
+	return 0;
+}
+
+
+/***
+ *
+ * @function Spring.AddOriginalHeightMap
+ *
+ * Can only be called in `Spring.SetOriginalHeightMapFunc`
+ *
+ * @number x
+ * @number y
+ * @number height
+ * @treturn nil
+ */
+int LuaSyncedCtrl::AddOriginalHeightMap(lua_State* L)
+{
+	if (!inOriginalHeightMap) {
+		luaL_error(L, "AddOriginalHeightMap() can only be called in SetOriginalHeightMapFunc()");
+	}
+
+	const float xl = luaL_checkfloat(L, 1);
+	const float zl = luaL_checkfloat(L, 2);
+	const float h  = luaL_checkfloat(L, 3);
+
+	// quantize
+	const int x = (int)(xl / SQUARE_SIZE);
+	const int z = (int)(zl / SQUARE_SIZE);
+
+	// discard invalid coordinates
+	if ((x < 0) || (x > mapDims.mapx) ||
+	    (z < 0) || (z > mapDims.mapy)) {
+		return 0;
+	}
+
+	const int index = (z * mapDims.mapxp1) + x;
+	const float oldHeight = readMap->GetOriginalHeightMapSynced()[index];
+	originalHeightMapAmountChanged += math::fabsf(h);
+
+	readMap->AddOriginalHeight(index, h);
+	// push the new height
+	lua_pushnumber(L, oldHeight + h);
+	return 1;
+}
+
+
+/***
+ *
+ * @function Spring.SetOriginalHeightMap
+ *
+ * Can only be called in `Spring.SetOriginalHeightMapFunc`
+ *
+ * @number x
+ * @number y
+ * @number height
+ * @number[opt] factor
+ * @treturn nil
+ */
+int LuaSyncedCtrl::SetOriginalHeightMap(lua_State* L)
+{
+	if (!inOriginalHeightMap) {
+		luaL_error(L, "SetOriginalHeightMap() can only be called in SetOriginalHeightMapFunc()");
+	}
+
+	const float xl = luaL_checkfloat(L, 1);
+	const float zl = luaL_checkfloat(L, 2);
+	const float h  = luaL_checkfloat(L, 3);
+
+	// quantize
+	const int x = (int)(xl / SQUARE_SIZE);
+	const int z = (int)(zl / SQUARE_SIZE);
+
+	// discard invalid coordinates
+	if ((x < 0) || (x > mapDims.mapx) ||
+	    (z < 0) || (z > mapDims.mapy)) {
+		return 0;
+	}
+
+	const int index = (z * mapDims.mapxp1) + x;
+	const float oldHeight = readMap->GetOriginalHeightMapSynced()[index];
+	float height = oldHeight;
+
+	if (lua_israwnumber(L, 4)) {
+		const float t = lua_tofloat(L, 4);
+		height += (h - oldHeight) * t;
+	} else{
+		height = h;
+	}
+
+	const float heightDiff = (height - oldHeight);
+	originalHeightMapAmountChanged += math::fabsf(heightDiff);
+
+	readMap->SetOriginalHeight(index, height);
+	lua_pushnumber(L, heightDiff);
+	return 1;
+}
+
+
+/***
+ *
+ * @function Spring.SetOriginalHeightMapFunc
+ *
+ * Cannot recurse on itself
+ *
+ * @func heightMapFunc
+ * @treturn nil
+ */
+int LuaSyncedCtrl::SetOriginalHeightMapFunc(lua_State* L)
+{
+	if (mapDamage->Disabled()) {
+		return 0;
+	}
+
+	const int args = lua_gettop(L); // number of arguments
+	if ((args < 1) || !lua_isfunction(L, 1)) {
+		luaL_error(L, "Incorrect arguments to Spring.SetOriginalHeightMapFunc(func, ...)");
+	}
+
+	if (inOriginalHeightMap) {
+		luaL_error(L, "SetOriginalHeightMapFunc() recursion is not permitted");
+	}
+
+	originalHeightMapAmountChanged = 0.0f;
+
+	inOriginalHeightMap = true;
+	const int error = lua_pcall(L, (args - 1), 0, 0);
+	inOriginalHeightMap = false;
+
+	if (error != 0) {
+		LOG_L(L_ERROR, "Spring.SetOriginalHeightMapFunc: error(%i) = %s",
+				error, lua_tostring(L, -1));
+		lua_error(L);
+	}
+
+	lua_pushnumber(L, originalHeightMapAmountChanged);
+	return 1;
+}
+
 
 static inline void ParseSmoothMeshParams(lua_State* L, const char* caller,
 		float& factor, int& x1, int& z1, int& x2, int& z2)
 {
 	ParseParams(L, caller, factor, x1, z1, x2, z2,
-			smoothGround.GetResolution(), smoothGround.GetMaxX(),
-			smoothGround.GetMaxY());
+			smoothGround.GetResolution(),
+			smoothGround.GetMaxX() - 1,
+			smoothGround.GetMaxY() - 1);
+
 }
 
 
+/***
+ * @function Spring.RebuildSmoothMesh
+ *
+ * Heightmap changes normally take up to 25s to propagate to the smooth mesh.
+ * Use to force a mapwide update immediately.
+ *
+ * @treturn nil
+ */
+int LuaSyncedCtrl::RebuildSmoothMesh(lua_State* L)
+{
+	smoothGround.MakeSmoothMesh();
+	return 0;
+}
+
+
+/***
+ * @function Spring.LevelSmoothMesh
+ * @number x1
+ * @number z1
+ * @number[opt] x2
+ * @number[opt] z2
+ * @number height
+ * @treturn nil
+ */
 int LuaSyncedCtrl::LevelSmoothMesh(lua_State* L)
 {
 	float height;
@@ -3964,9 +6067,20 @@ int LuaSyncedCtrl::LevelSmoothMesh(lua_State* L)
 			smoothGround.SetHeight(index, height);
 		}
 	}
+
 	return 0;
 }
 
+
+/***
+ * @function Spring.AdjustSmoothMesh
+ * @number x1
+ * @number z1
+ * @number[opt] x2
+ * @number[opt] z2
+ * @number height
+ * @treturn nil
+ */
 int LuaSyncedCtrl::AdjustSmoothMesh(lua_State* L)
 {
 	float height;
@@ -3983,6 +6097,16 @@ int LuaSyncedCtrl::AdjustSmoothMesh(lua_State* L)
 	return 0;
 }
 
+/***
+ *
+ * @function Spring.RevertSmoothMesh
+ * @number x1
+ * @number z1
+ * @number[opt] x2
+ * @number[opt] z2
+ * @number origFactor
+ * @treturn nil
+ */
 int LuaSyncedCtrl::RevertSmoothMesh(lua_State* L)
 {
 	float origFactor;
@@ -4016,6 +6140,14 @@ int LuaSyncedCtrl::RevertSmoothMesh(lua_State* L)
 }
 
 
+/*** Can only be called in `Spring.SetSmoothMeshFunc`.
+ *
+ * @function Spring.AddSmoothMesh
+ * @number x
+ * @number z
+ * @number height
+ * @treturn ?nil|number newHeight
+ */
 int LuaSyncedCtrl::AddSmoothMesh(lua_State* L)
 {
 	if (!inSmoothMesh) {
@@ -4031,8 +6163,8 @@ int LuaSyncedCtrl::AddSmoothMesh(lua_State* L)
 	const int z = (int)(zl / smoothGround.GetResolution());
 
 	// discard invalid coordinates
-	if ((x < 0) || (x > smoothGround.GetMaxX()) ||
-	    (z < 0) || (z > smoothGround.GetMaxY())) {
+	if ((x < 0) || (x > smoothGround.GetMaxX() - 1) ||
+	    (z < 0) || (z > smoothGround.GetMaxY() - 1)) {
 		return 0;
 	}
 
@@ -4046,6 +6178,15 @@ int LuaSyncedCtrl::AddSmoothMesh(lua_State* L)
 	return 1;
 }
 
+/*** Can only be called in `Spring.SetSmoothMeshFunc`.
+ *
+ * @function Spring.SetSmoothMesh
+ * @number x
+ * @number z
+ * @number height
+ * @number[opt=1] terraform
+ * @treturn ?nil|number absHeightDiff
+ */
 int LuaSyncedCtrl::SetSmoothMesh(lua_State* L)
 {
 	if (!inSmoothMesh) {
@@ -4061,8 +6202,8 @@ int LuaSyncedCtrl::SetSmoothMesh(lua_State* L)
 	const int z = (int)(zl / smoothGround.GetResolution());
 
 	// discard invalid coordinates
-	if ((x < 0) || (x > smoothGround.GetMaxX()) ||
-	    (z < 0) || (z > smoothGround.GetMaxY())) {
+	if ((x < 0) || (x > smoothGround.GetMaxX() - 1) ||
+	    (z < 0) || (z > smoothGround.GetMaxY() - 1)) {
 		return 0;
 	}
 
@@ -4085,6 +6226,14 @@ int LuaSyncedCtrl::SetSmoothMesh(lua_State* L)
 	return 1;
 }
 
+/***
+ * @function Spring.SetSmoothMeshFunc
+ * @func lua_function
+ * @param arg1[opt]
+ * @param arg2[opt]
+ * @param argn[opt]
+ * @treturn ?nil|number absTotalHeightMapAmountChanged
+ */
 int LuaSyncedCtrl::SetSmoothMeshFunc(lua_State* L)
 {
 	const int args = lua_gettop(L); // number of arguments
@@ -4096,7 +6245,7 @@ int LuaSyncedCtrl::SetSmoothMeshFunc(lua_State* L)
 		luaL_error(L, "SetHeightMapFunc() recursion is not permitted");
 	}
 
-	heightMapAmountChanged = 0.0f;
+	smoothMeshAmountChanged = 0.0f;
 
 	inSmoothMesh = true;
 	const int error = lua_pcall(L, (args - 1), 0, 0);
@@ -4112,9 +6261,20 @@ int LuaSyncedCtrl::SetSmoothMeshFunc(lua_State* L)
 	return 1;
 }
 
-/******************************************************************************/
-/******************************************************************************/
 
+/******************************************************************************
+ * TerrainTypes
+ * @section terraintypes
+******************************************************************************/
+
+
+/***
+ * @function Spring.SetMapSquareTerrainType
+ * @number x
+ * @number z
+ * @number newType
+ * @treturn ?nil|number oldType
+ */
 int LuaSyncedCtrl::SetMapSquareTerrainType(lua_State* L)
 {
 	const int hx = int(luaL_checkfloat(L, 1) / SQUARE_SIZE);
@@ -4138,6 +6298,15 @@ int LuaSyncedCtrl::SetMapSquareTerrainType(lua_State* L)
 	return 1;
 }
 
+/***
+ * @function Spring.SetTerrainTypeData
+ * @number typeIndex
+ * @number[opt=nil] speedTanks
+ * @number[opt=nil] speedKBOts
+ * @number[opt=nil] speedHovers
+ * @number[opt=nil] speedShips
+ * @treturn ?nil|bool true
+ */
 int LuaSyncedCtrl::SetTerrainTypeData(lua_State* L)
 {
 	const int args = lua_gettop(L);
@@ -4175,24 +6344,16 @@ int LuaSyncedCtrl::SetTerrainTypeData(lua_State* L)
 	return 1;
 }
 
-/******************************************************************************/
-/******************************************************************************/
 
-int LuaSyncedCtrl::SetTidal(lua_State* L)
-{
-	envResHandler.LoadTidal(luaL_optnumber(L, 1, envResHandler.GetCurrentTidalStrength()));
-	return 0;
-}
-
-int LuaSyncedCtrl::SetWind(lua_State* L)
-{
-	envResHandler.LoadWind(luaL_optnumber(L, 1, envResHandler.GetMinWindStrength()), luaL_optnumber(L, 2, envResHandler.GetMaxWindStrength()));
-	return 0;
-}
-
-/******************************************************************************/
-/******************************************************************************/
-
+/***
+ * @function Spring.SetSquareBuildingMask
+ * @number x
+ * @number z
+ * @number mask
+ * @treturn nil
+ *
+ * See also buildingMask unitdef tag.
+ */
 int LuaSyncedCtrl::SetSquareBuildingMask(lua_State* L)
 {
 	const int x = luaL_checkint(L, 1);
@@ -4215,6 +6376,13 @@ int LuaSyncedCtrl::SetSquareBuildingMask(lua_State* L)
 /******************************************************************************/
 /******************************************************************************/
 
+
+/***
+ * @function Spring.UnitWeaponFire
+ * @number unitID
+ * @number weaponID
+ * @treturn nil
+ */
 int LuaSyncedCtrl::UnitWeaponFire(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -4230,7 +6398,14 @@ int LuaSyncedCtrl::UnitWeaponFire(lua_State* L)
 	return 0;
 }
 
+
 // NB: not permanent
+/***
+ * @function Spring.UnitWeaponHoldFire
+ * @number unitID
+ * @number weaponID
+ * @treturn nil
+ */
 int LuaSyncedCtrl::UnitWeaponHoldFire(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -4246,6 +6421,15 @@ int LuaSyncedCtrl::UnitWeaponHoldFire(lua_State* L)
 	return 0;
 }
 
+
+/***
+ *
+ * @function Spring.UnitAttach
+ * @number transporterID
+ * @number passengerID
+ * @number pieceNum
+ * @treturn nil
+ */
 int LuaSyncedCtrl::UnitAttach(lua_State* L)
 {
 	CUnit* transporter = ParseUnit(L, __func__, 1);
@@ -4256,6 +6440,9 @@ int LuaSyncedCtrl::UnitAttach(lua_State* L)
 	CUnit* transportee = ParseUnit(L, __func__, 2);
 
 	if (transportee == nullptr)
+		return 0;
+
+	if (transporter == transportee)
 		return 0;
 
 	int piece = luaL_checkint(L, 3) - 1;
@@ -4273,6 +6460,12 @@ int LuaSyncedCtrl::UnitAttach(lua_State* L)
 	return 0;
 }
 
+
+/***
+ * @function Spring.UnitDetach
+ * @number passengerID
+ * @treturn nil
+ */
 int LuaSyncedCtrl::UnitDetach(lua_State* L)
 {
 	CUnit* transportee = ParseUnit(L, __func__, 1);
@@ -4290,6 +6483,11 @@ int LuaSyncedCtrl::UnitDetach(lua_State* L)
 }
 
 
+/***
+ * @function Spring.UnitDetachFromAir
+ * @number passengerID
+ * @treturn nil
+ */
 int LuaSyncedCtrl::UnitDetachFromAir(lua_State* L)
 {
 	CUnit* transportee = ParseUnit(L, __func__, 1);
@@ -4317,6 +6515,13 @@ int LuaSyncedCtrl::UnitDetachFromAir(lua_State* L)
 }
 
 
+/*** Disables collisions between the two units to allow colvol intersection during the approach.
+ *
+ * @function Spring.SetUnitLoadingTransport
+ * @number passengerID
+ * @number transportID
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetUnitLoadingTransport(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -4340,6 +6545,13 @@ int LuaSyncedCtrl::SetUnitLoadingTransport(lua_State* L)
 }
 
 
+/***
+ *
+ * @function Spring.SpawnProjectile
+ * @number weaponDefID
+ * @tparam projectileParams projectileParams
+ * @treturn ?nil|number projectileID
+ */
 int LuaSyncedCtrl::SpawnProjectile(lua_State* L)
 {
 	ProjectileParams params;
@@ -4355,6 +6567,12 @@ int LuaSyncedCtrl::SpawnProjectile(lua_State* L)
 }
 
 
+/*** Silently removes projectiles (no explosion).
+ *
+ * @function Spring.DeleteProjectile
+ * @number projectileID
+ * @treturn nil
+ */
 int LuaSyncedCtrl::DeleteProjectile(lua_State* L)
 {
 	CProjectile* proj = ParseProjectile(L, __func__, 1);
@@ -4374,7 +6592,7 @@ static int SetSingleDamagesKey(lua_State* L, DamageArray& damages, int index)
 	if (lua_isnumber(L, index)) {
 		const unsigned armType = lua_toint(L, index);
 		if (armType < damages.GetNumTypes())
-			damages.Set(armType, std::max(value, 0.0001f));
+			damages.Set(armType, value);
 		return 0;
 	}
 
@@ -4411,13 +6629,13 @@ static int SetExplosionParam(lua_State* L, CExplosionParams& params, DamageArray
 		case hashString("damages"): {
 			if (lua_istable(L, index + 1)) {
 				// {key1 = value1, ...}
-				for (lua_pushnil(L); lua_next(L, index + 1) != 0; lua_pop(L, 1)) {
+				for (lua_pushnil(L); lua_next(L, index) != 0; lua_pop(L, 1)) {
 					if ((lua_isnumber(L, -2) || lua_israwstring(L, -2)) && lua_isnumber(L, -1)) {
 						SetSingleDamagesKey(L, damages, -2);
 					}
 				}
 			} else {
-				damages.SetDefaultDamage(std::max(lua_tofloat(L, index + 1), 0.0001f));
+				damages.SetDefaultDamage(lua_tofloat(L, index + 1));
 			}
 		} break;
 		case hashString("weaponDef"): {
@@ -4442,7 +6660,7 @@ static int SetExplosionParam(lua_State* L, CExplosionParams& params, DamageArray
 		} break;
 
 		case hashString("edgeEffectiveness"): {
-			params.edgeEffectiveness = lua_tofloat(L, index + 1);
+			params.edgeEffectiveness = std::min(lua_tofloat(L, index + 1), 1.0f);
 		} break;
 		case hashString("explosionSpeed"): {
 			params.explosionSpeed = lua_tofloat(L, index + 1);
@@ -4474,7 +6692,37 @@ static int SetExplosionParam(lua_State* L, CExplosionParams& params, DamageArray
 	return 0;
 }
 
+/*** Parameters for explosion
+ *
+ * Please note the explosion defaults to 1 damage regardless of what it's defined in the weaponDef.
+ * The weapondefID is only used for visuals and for passing into callins like UnitDamaged.
+ *
+ * @table explosionParams
+ * @number weaponDef
+ * @number owner
+ * @number hitUnit
+ * @number hitFeature
+ * @number craterAreaOfEffect
+ * @number damageAreaOfEffect
+ * @number edgeEffectiveness
+ * @number explosionSpeed
+ * @number gfxMod
+ * @bool impactOnly
+ * @bool ignoreOwner
+ * @bool damageGround
+ */
 
+/***
+ * @function Spring.SpawnExplosion
+ * @number[opt=0] posX
+ * @number[opt=0] posY
+ * @number[opt=0] posZ
+ * @number[opt=0] dirX
+ * @number[opt=0] dirY
+ * @number[opt=0] dirZ
+ * @tparam explosionParams explosionParams
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SpawnExplosion(lua_State* L)
 {
 	const float3 pos = {luaL_checkfloat(L, 1      ), luaL_checkfloat(L, 2      ), luaL_checkfloat(L, 3      )};
@@ -4483,22 +6731,23 @@ int LuaSyncedCtrl::SpawnExplosion(lua_State* L)
 	if (lua_istable(L, 7)) {
 		DamageArray damages(1.0f);
 		CExplosionParams params = {
-			pos,
-			dir,
-			damages,
-			nullptr,           // weaponDef
-			nullptr,           // owner
-			nullptr,           // hitUnit
-			nullptr,           // hitFeature
-			0.0f,              // craterAreaOfEffect
-			0.0f,              // damageAreaOfEffect
-			0.0f,              // edgeEffectiveness
-			0.0f,              // explosionSpeed
-			0.0f,              // gfxMod (scale-mult for *S*EG's)
-			false,             // impactOnly
-			false,             // ignoreOwner
-			false,             // damageGround
-			static_cast<unsigned int>(-1)
+			.pos                  = pos,
+			.dir                  = dir,
+			.damages              = damages,
+			.weaponDef            = nullptr,
+			.owner                = nullptr,
+			.hitUnit              = nullptr,
+			.hitFeature           = nullptr,
+			.craterAreaOfEffect   = 0.0f,
+			.damageAreaOfEffect   = 0.0f,
+			.edgeEffectiveness    = 0.0f,
+			.explosionSpeed       = 0.0f,
+			.gfxMod               = 0.0f,
+			.maxGroundDeformation = 0.0f,
+			.impactOnly           = false,
+			.ignoreOwner          = false,
+			.damageGround         = false,
+			.projectileID         = static_cast<uint32_t>(-1)
 		};
 
 		for (lua_pushnil(L); lua_next(L, 7) != 0; lua_pop(L, 1)) {
@@ -4518,9 +6767,10 @@ int LuaSyncedCtrl::SpawnExplosion(lua_State* L)
 
 		params.craterAreaOfEffect = luaL_optfloat(L,  8, 0.0f);
 		params.damageAreaOfEffect = luaL_optfloat(L,  9, 0.0f);
-		params.edgeEffectiveness  = luaL_optfloat(L, 10, 0.0f);
+		params.edgeEffectiveness  = std::min(luaL_optfloat(L, 10, 0.0f), 1.0f);
 		params.explosionSpeed     = luaL_optfloat(L, 11, 0.0f);
 		params.gfxMod             = luaL_optfloat(L, 12, 0.0f);
+		params.maxGroundDeformation = 0.0f;
 
 		params.impactOnly   = luaL_optboolean(L, 13, false);
 		params.ignoreOwner  = luaL_optboolean(L, 14, false);
@@ -4534,6 +6784,20 @@ int LuaSyncedCtrl::SpawnExplosion(lua_State* L)
 	return 0;
 }
 
+/***
+ * @function Spring.SpawnCEG
+ * @string cegname
+ * @number[opt=0] posX
+ * @number[opt=0] posY
+ * @number[opt=0] posZ
+ * @number[opt=0] dirX
+ * @number[opt=0] dirY
+ * @number[opt=0] dirZ
+ * @number[opt=0] radius
+ * @number[opt=0] damage
+ * @treturn ?nil|bool success
+ * @treturn number cegID
+ */
 int LuaSyncedCtrl::SpawnCEG(lua_State* L)
 {
 	const float3 pos = {luaL_optfloat(L, 2, 0.0f), luaL_optfloat(L, 3, 0.0f), luaL_optfloat(L, 4, 0.0f)};
@@ -4552,6 +6816,22 @@ int LuaSyncedCtrl::SpawnCEG(lua_State* L)
 	return 2;
 }
 
+/*** Equal to the UnitScript versions of EmitSFX, but takes position and direction arguments (in either unit- or piece-space) instead of a piece index.
+ *
+ * @function Spring.SpawnSFX
+ * @number[opt=0] unitID
+ * @number[opt=0] sfxID
+ * @number[opt=0] posX
+ * @number[opt=0] posY
+ * @number[opt=0] posZ
+ * @number[opt=0] dirX
+ * @number[opt=0] dirY
+ * @number[opt=0] dirZ
+ * @number[opt=0] radius
+ * @number[opt=0] damage
+ * @bool[opt] absolute
+ * @treturn ?nil|bool success
+ */
 int LuaSyncedCtrl::SpawnSFX(lua_State* L)
 {
 	CUnit* unit = ParseUnit(L, __func__, 1);
@@ -4571,9 +6851,16 @@ int LuaSyncedCtrl::SpawnSFX(lua_State* L)
 	return 1;
 }
 
-/******************************************************************************/
-/******************************************************************************/
+/******************************************************************************
+ * Other
+ * @section other
+******************************************************************************/
 
+/***
+ * @function Spring.SetNoPause
+ * @bool noPause
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetNoPause(lua_State* L)
 {
 	if (!FullCtrl(L))
@@ -4586,6 +6873,15 @@ int LuaSyncedCtrl::SetNoPause(lua_State* L)
 }
 
 
+/*** Defines how often `Callins.UnitExperience` will be called.
+ *
+ * @function Spring.SetExperienceGrade
+ * @number expGrade
+ * @number[opt] ExpPowerScale
+ * @number[opt] ExpHealthScale
+ * @number[opt] ExpReloadScale
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetExperienceGrade(lua_State* L)
 {
 	if (!FullCtrl(L))
@@ -4609,6 +6905,15 @@ int LuaSyncedCtrl::SetExperienceGrade(lua_State* L)
 }
 
 
+/***
+ *
+ * @function Spring.SetRadarErrorParams
+ * @number allyTeamID
+ * @number allyteamErrorSize
+ * @number[opt] baseErrorSize
+ * @number[opt] baseErrorMult
+ * @treturn nil
+ */
 int LuaSyncedCtrl::SetRadarErrorParams(lua_State* L)
 {
 	const int allyTeamID = lua_tonumber(L, 1);
@@ -4689,7 +6994,11 @@ static int ParseStringVector(lua_State* L, int index, vector<string>& strvec)
 }
 
 
-/******************************************************************************/
+/******************************************************************************
+ * Command Descriptions
+ * @section commanddescriptions
+ * Doesn't work in unsynced code!
+******************************************************************************/
 
 static bool ParseCommandDescription(lua_State* L, int table,
                                     SCommandDescription& cd)
@@ -4732,6 +7041,28 @@ static bool ParseCommandDescription(lua_State* L, int table,
 }
 
 
+/***
+ * @function Spring.EditUnitCmdDesc
+ * @number unitID
+ * @number cmdDescID
+ * @tparam table cmdArray structure of cmdArray:
+ *     {
+ *       [ id          = int ],
+ *       [ type        = int ],
+ *       [ name        = string ],
+ *       [ action      = string ],
+ *       [ tooltip     = string ],
+ *       [ texture     = string ],
+ *       [ cursor      = string ],
+ *       [ queueing    = boolean ],
+ *       [ hidden      = boolean ],
+ *       [ disabled    = boolean ],
+ *       [ showUnique  = boolean ],
+ *       [ onlyTexture = boolean ],
+ *       [ params      = { string = string, ... } ]
+ *     }
+ * @treturn nil
+ */
 int LuaSyncedCtrl::EditUnitCmdDesc(lua_State* L)
 {
 	if (!FullCtrl(L))
@@ -4758,6 +7089,13 @@ int LuaSyncedCtrl::EditUnitCmdDesc(lua_State* L)
 }
 
 
+/***
+ * @function Spring.InsertUnitCmdDesc
+ * @number unitID
+ * @number[opt] cmdDescID
+ * @tparam table cmdArray
+ * @treturn nil
+ */
 int LuaSyncedCtrl::InsertUnitCmdDesc(lua_State* L)
 {
 	if (!FullCtrl(L))
@@ -4791,6 +7129,13 @@ int LuaSyncedCtrl::InsertUnitCmdDesc(lua_State* L)
 	return 0;
 }
 
+
+/***
+ * @function Spring.RemoveUnitCmdDesc
+ * @number unitID
+ * @number[opt] cmdDescID
+ * @treturn nil
+ */
 int LuaSyncedCtrl::RemoveUnitCmdDesc(lua_State* L)
 {
 	if (!FullCtrl(L))
@@ -4940,6 +7285,7 @@ int LuaSyncedCtrl::Breakpoint(lua_State* L)
 	// TODO(Tier 9): actual breakpoint pause support
 	return 0;
 }
+
 
 /******************************************************************************/
 /******************************************************************************/

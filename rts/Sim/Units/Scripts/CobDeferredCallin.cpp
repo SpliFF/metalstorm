@@ -47,8 +47,5 @@ CCobDeferredCallin& CCobDeferredCallin::operator = (const CCobDeferredCallin& t)
 
 void CCobDeferredCallin::Call()
 {
-	// unused since batching it atm
-	luaRules->unsyncedLuaHandle.Cob2Lua(LuaHashString(funcName.c_str()), unit, argCount, luaArgs);
-	if (luaUI)
-		luaUI->Cob2Lua(LuaHashString(funcName.c_str()), unit, argCount, luaArgs);
+	// Cob2Lua dispatches to unsynced (rendering) Lua — headless server has no unsynced handle
 }

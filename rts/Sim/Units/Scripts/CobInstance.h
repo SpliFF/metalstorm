@@ -118,12 +118,6 @@ public:
 			destination = -destination;
 		CUnitScript::Turn(piece, axis, speed * TAANG2RAD, destination * TAANG2RAD);
 	}
-	void TurnNow(int piece, int axis, int destination) {
-		// COBWTF
-		if (axis == 2)
-			destination = -destination;
-		CUnitScript::TurnNow(piece, axis, destination * TAANG2RAD);
-	}
 	void Move(int piece, int axis, int speed, int destination) {
 		// COBWTF
 		if (axis == 0)
@@ -136,11 +130,11 @@ public:
 			destination = -destination;
 		CUnitScript::MoveNow(piece, axis, destination * COBSCALE_INV);
 	}
-	void Scale(int piece, int speed, int destination) {
-		CUnitScript::Scale(piece, speed * COBSCALE_INV, destination * COBSCALE_INV);
-	}
-	void ScaleNow(int piece, int destination) {
-		CUnitScript::ScaleNow(piece, destination * COBSCALE_INV);
+	void TurnNow(int piece, int axis, int destination) {
+		// COBWTF
+		if (axis == 2)
+			destination = -destination;
+		CUnitScript::TurnNow(piece, axis, destination * TAANG2RAD);
 	}
 
 	// callins, called throughout sim

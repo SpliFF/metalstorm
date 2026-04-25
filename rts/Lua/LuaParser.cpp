@@ -565,6 +565,7 @@ int LuaParser::Random(lua_State* L)
 int LuaParser::DummyRandomSeed(lua_State* L) { return 0; }
 int LuaParser::DummyRandom(lua_State* L) { return 0; }
 
+
 int LuaParser::DontMessWithMyCase(lua_State* L)
 {
 	LuaParser* currentParser = GetLuaParser(L);
@@ -1229,7 +1230,7 @@ static bool ParseTableFloat(lua_State* L,
 	lua_pushnumber(L, index);
 	lua_gettable(L, tableIndex);
 	value = lua_tonumber(L, -1);
-	if (unlikely(value == 0) && !lua_isnumber(L, -1) && !lua_isstring(L, -1)) {
+	if unlikely(value == 0 && !lua_isnumber(L, -1) && !lua_isstring(L, -1)) {
 		lua_pop(L, 1);
 		return false;
 	}
@@ -1314,7 +1315,7 @@ int LuaTable::Get(const std::string& key, int def) const
 		return def;
 
 	const int value = lua_toint(L, -1);
-	if (unlikely(value == 0) && !lua_isnumber(L, -1) && !lua_isstring(L, -1)) {
+	if unlikely(value == 0 && !lua_isnumber(L, -1) && !lua_isstring(L, -1)) {
 		lua_pop(L, 1);
 		return def;
 	}
@@ -1344,7 +1345,7 @@ float LuaTable::Get(const std::string& key, float def) const
 		return def;
 
 	const float value = lua_tonumber(L, -1);
-	if (unlikely(value == 0.f) && !lua_isnumber(L, -1) && !lua_isstring(L, -1)) {
+	if unlikely(value == 0.0f && !lua_isnumber(L, -1) && !lua_isstring(L, -1)) {
 		lua_pop(L, 1);
 		return def;
 	}
@@ -1411,7 +1412,7 @@ int LuaTable::Get(int key, int def) const
 		return def;
 
 	const int value = lua_toint(L, -1);
-	if (unlikely(value == 0) && !lua_isnumber(L, -1) && !lua_isstring(L, -1)) {
+	if unlikely(value == 0 && !lua_isnumber(L, -1) && !lua_isstring(L, -1)) {
 		lua_pop(L, 1);
 		return def;
 	}
@@ -1441,7 +1442,7 @@ float LuaTable::Get(int key, float def) const
 		return def;
 
 	const float value = lua_tonumber(L, -1);
-	if (unlikely(value == 0) && !lua_isnumber(L, -1) && !lua_isstring(L, -1)) {
+	if unlikely(value == 0 && !lua_isnumber(L, -1) && !lua_isstring(L, -1)) {
 		lua_pop(L, 1);
 		return def;
 	}

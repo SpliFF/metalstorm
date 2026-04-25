@@ -1,7 +1,13 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include <string>
-#include <nowide/cstdio.hpp>
+#include <cstdio>
+#include <filesystem>
+
+using std::fopen;
+using std::fread;
+using std::fwrite;
+using std::fclose;
 
 #include "ResourceMapAnalyzer.h"
 
@@ -49,8 +55,11 @@ CResourceMapAnalyzer::CResourceMapAnalyzer(int resourceId)
 	, xtractorRadius(0)
 	, doubleRadius(0)
 {
-	if (CACHE_BASE.empty())
-		CACHE_BASE = dataDirsAccess.LocateDir(FileSystem::GetCacheDir() + FileSystem::GetNativePathSeparator() + "analyzedResourceMaps" + FileSystem::GetNativePathSeparator(), FileQueryFlags::WRITE | FileQueryFlags::CREATE_DIRS);
+	if (CACHE_BASE.empty()) {
+		auto cachePath = std::filesystem::path(FileSystem::GetCacheDir()) / "analyzedResourceMaps";
+		std::filesystem::create_directories(cachePath);
+		CACHE_BASE = cachePath.string() + "/";
+	}
 }
 
 
@@ -504,7 +513,7 @@ template<typename T>
 static inline void writeToFile(const T& value, FILE* file) {
 	RECOIL_DETAILED_TRACY_ZONE;
 
-	if (std::fwrite(&value, sizeof(T), 1, file) != 1) {
+	if (fwrite(&value, sizeof(T), 1, file) != 1) {
 		throw std::runtime_error("failed to write value to file");
 	}
 }
@@ -513,7 +522,7 @@ void CResourceMapAnalyzer::SaveResourceMap() {
 	RECOIL_DETAILED_TRACY_ZONE;
 
 	const std::string cacheFileName = GetCacheFileName();
-	FILE* saveFile = nowide::fopen(cacheFileName.c_str(), "wb");
+	FILE* saveFile = fopen(cacheFileName.c_str(), "wb");
 
 	try {
 		if (saveFile == nullptr)
@@ -529,13 +538,13 @@ void CResourceMapAnalyzer::SaveResourceMap() {
 		LOG_L(L_WARNING, "Failed to save the analyzed resource-map to file %s, reason: %s", cacheFileName.c_str(), err.what());
 	}
 
-	std::fclose(saveFile);
+	fclose(saveFile);
 }
 
 static void fileReadChecked(void* buf, size_t size, size_t count, FILE* fstream) {
 	RECOIL_DETAILED_TRACY_ZONE;
 
-	if (std::fread(buf, size, count, fstream) != count) {
+	if (fread(buf, size, count, fstream) != count) {
 		throw std::runtime_error("Failed to read the required number of items");
 	}
 }
@@ -547,7 +556,7 @@ bool CResourceMapAnalyzer::LoadResourceMap() {
 
 	const std::string cacheFileName = GetCacheFileName();
 
-	FILE* cacheFile = nowide::fopen(cacheFileName.c_str(), "rb");
+	FILE* cacheFile = fopen(cacheFileName.c_str(), "rb");
 
 	if (cacheFile != nullptr) {
 		try {

@@ -56,7 +56,7 @@ float CMoveMath::yLevel(const MoveDef& moveDef, int xSqr, int zSqr)
 		case MoveDef::Tank: // fall-through
 		case MoveDef::KBot:  { return (CGround::GetHeightReal      (xSqr * SQUARE_SIZE, zSqr * SQUARE_SIZE) + 10.0f); } break;
 		case MoveDef::Hover: { return (CGround::GetHeightAboveWater(xSqr * SQUARE_SIZE, zSqr * SQUARE_SIZE) + 10.0f); } break;
-		case MoveDef::Ship:  { return (CGround::GetWaterLevel(xSqr * SQUARE_SIZE, zSqr * SQUARE_SIZE)); } break;
+		case MoveDef::Ship:  { return (                                                                        0.0f); } break;
 	}
 
 	return 0.0f;
@@ -69,7 +69,7 @@ float CMoveMath::yLevel(const MoveDef& moveDef, const float3& pos)
 		case MoveDef::Tank: // fall-through
 		case MoveDef::KBot:  { return (CGround::GetHeightReal      (pos.x, pos.z) + 10.0f); } break;
 		case MoveDef::Hover: { return (CGround::GetHeightAboveWater(pos.x, pos.z) + 10.0f); } break;
-		case MoveDef::Ship:  { return (CGround::GetWaterLevel(pos.x, pos.z)); } break;
+		case MoveDef::Ship:  { return (                                              0.0f); } break;
 	}
 
 	return 0.0f;
@@ -141,7 +141,7 @@ float CMoveMath::GetPosSpeedMod(const MoveDef& moveDef, unsigned xSquare, unsign
 	return 0.0f;
 }
 
-/* Check if a given square-position is accessible by the MoveDef footprint. */
+/* Check if a given square-position is accessable by the MoveDef footprint. */
 CMoveMath::BlockType CMoveMath::IsBlockedNoSpeedModCheck(const MoveDef& moveDef, int xSquare, int zSquare, const CSolidObject* collider, int thread)
 {
 	MoveTypes::CheckCollisionQuery collisionQuery = (collider != nullptr)
@@ -345,8 +345,16 @@ CMoveMath::BlockType CMoveMath::RangeIsBlocked(int xmin, int xmax, int zmin, int
 	xmax = std::min(xmax, mapDims.mapx - 1);
 	zmax = std::min(zmax, mapDims.mapy - 1);
 
-	const int tempNum = gs->GetMtTempNum(thread);
-	return CMoveMath::RangeIsBlockedMt(xmin, xmax, zmin, zmax, collider, tempNum, thread);
+	BlockType ret = BLOCK_NONE;
+	if (ThreadPool::IsInMultiThreadedSection()) {
+		const int tempNum = gs->GetMtTempNum(thread);
+		ret = CMoveMath::RangeIsBlockedMt(xmin, xmax, zmin, zmax, collider, thread, tempNum);
+	} else {
+		const int tempNum = gs->GetTempNum();
+		ret = CMoveMath::RangeIsBlockedSt(xmin, xmax, zmin, zmax, collider, tempNum);
+	}
+
+	return ret;
 }
 
 CMoveMath::BlockType CMoveMath::RangeIsBlockedTempNum(int xmin, int xmax, int zmin, int zmax, const MoveTypes::CheckCollisionQuery* collider, int tempNum, int thread)
@@ -357,11 +365,51 @@ CMoveMath::BlockType CMoveMath::RangeIsBlockedTempNum(int xmin, int xmax, int zm
 	xmax = std::min(xmax, mapDims.mapx - 1);
 	zmax = std::min(zmax, mapDims.mapy - 1);
 
-	return CMoveMath::RangeIsBlockedHashedMt(xmin, xmax, zmin, zmax, collider, tempNum, thread);
+	BlockType ret = BLOCK_NONE;
+	if (ThreadPool::IsInMultiThreadedSection()) {
+		const int tempNum = gs->GetMtTempNum(thread);
+		ret = CMoveMath::RangeIsBlockedHashedMt(xmin, xmax, zmin, zmax, collider, tempNum, thread);
+	} else {
+		const int tempNum = gs->GetTempNum();
+		ret = CMoveMath::RangeIsBlockedHashedSt(xmin, xmax, zmin, zmax, collider, tempNum);
+	}
+
+	return ret;
+}
+
+CMoveMath::BlockType CMoveMath::RangeIsBlockedSt(int xmin, int xmax, int zmin, int zmax, const MoveTypes::CheckCollisionQuery* collider, int tempNum)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	BlockType ret = BLOCK_NONE;
+
+	// footprints are point-symmetric around <xSquare, zSquare>
+	for (int z = zmin; z <= zmax; z += FOOTPRINT_ZSTEP) {
+		const int zOffset = z * mapDims.mapx;
+
+		for (int x = xmin; x <= xmax; x += FOOTPRINT_XSTEP) {
+			const CGroundBlockingObjectMap::BlockingMapCell& cell = groundBlockingObjectMap.GetCellUnsafeConst(zOffset + x);
+
+			for (size_t i = 0, n = cell.size(); i < n; i++) {
+				CSolidObject* collidee = cell[i];
+
+				if (collidee->tempNum == tempNum)
+					continue;
+
+				collidee->tempNum = tempNum;
+
+				if (((ret |= ObjectBlockType(collidee, collider)) & BLOCK_STRUCTURE) == 0)
+					continue;
+
+				return ret;
+			}
+		}
+	}
+
+	return ret;
 }
 
 
-CMoveMath::BlockType CMoveMath::RangeIsBlockedMt(int xmin, int xmax, int zmin, int zmax, const MoveTypes::CheckCollisionQuery* collider, int tempNum, int thread)
+CMoveMath::BlockType CMoveMath::RangeIsBlockedMt(int xmin, int xmax, int zmin, int zmax, const MoveTypes::CheckCollisionQuery* collider, int thread, int tempNum)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	BlockType ret = BLOCK_NONE;
@@ -392,6 +440,46 @@ CMoveMath::BlockType CMoveMath::RangeIsBlockedMt(int xmin, int xmax, int zmin, i
 	return ret;
 }
 
+CMoveMath::BlockType CMoveMath::RangeIsBlockedHashedSt(int xmin, int xmax, int zmin, int zmax, const MoveTypes::CheckCollisionQuery* collider, int tempNum)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	BlockType ret = BLOCK_NONE;
+
+	static spring::unordered_map<CSolidObject*, CMoveMath::BlockType> blockMap(10);
+	static int lastTempNum = -1;
+
+	if (lastTempNum != tempNum){
+		blockMap.clear();
+		lastTempNum = tempNum;
+	}
+
+	// footprints are point-symmetric around <xSquare, zSquare>
+	for (int z = zmin; z <= zmax; z += FOOTPRINT_ZSTEP) {
+		const int zOffset = z * mapDims.mapx;
+
+		for (int x = xmin; x <= xmax; x += FOOTPRINT_XSTEP) {
+			const CGroundBlockingObjectMap::BlockingMapCell& cell = groundBlockingObjectMap.GetCellUnsafeConst(zOffset + x);
+
+			for (size_t i = 0, n = cell.size(); i < n; i++) {
+				CSolidObject* collidee = cell[i];
+
+				auto blockMapResult = blockMap.find(collidee);
+				if (blockMapResult == blockMap.end()) {
+					blockMapResult = blockMap.emplace(collidee, ObjectBlockType(collidee, collider)).first;
+				}
+
+				ret |= blockMapResult->second;
+
+				if ((ret & BLOCK_STRUCTURE) == 0)
+					continue;
+
+				return ret;
+			}
+		}
+	}
+
+	return ret;
+}
 
 static std::array<spring::unordered_map<CSolidObject*, CMoveMath::BlockType>, ThreadPool::MAX_THREADS> blockMaps;
 static std::array<int, ThreadPool::MAX_THREADS> lastTempNums;

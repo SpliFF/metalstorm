@@ -4,15 +4,12 @@
 #define I_GAME_COMMANDS_H
 
 #include "System/StringUtil.h"
+#include <cassert>
 #include "System/UnorderedMap.hpp"
-#include "Game/UnsyncedActionExecutor.h"
-#include "Game/SyncedActionExecutor.h"
 
 #include <array>
 #include <string>
-#include <cassert>
-#include <json/writer.h>
-#include <json/json.h>
+
 
 template<class TActionExecutor>
 class IGameCommands
@@ -77,32 +74,6 @@ public:
 		return sortedExecutors;
 	}
 
-	std::string JsonOutput() {
-		Json::Value root;
-
-		const auto actions = GetActionExecutors();
-
-		for (const auto& [name, actionExecutor]: actions) {
-			Json::Value node;
-
-			node["command"] = actionExecutor->GetCommand();
-			node["description"] = actionExecutor->GetDescription();
-			node["cheatRequired"] = Json::Value(actionExecutor->IsCheatRequired());
-
-			Json::Value args = Json::objectValue;
-			for (const auto& [argName, argDesc]: actionExecutor->GetArguments()) {
-				args[argName] = argDesc;
-			}
-
-			node["arguments"] = args;
-
-			root[name] = node;
-		}
-
-		Json::StyledWriter writer;
-		return writer.write(root).c_str();
-	}
-
 private:
 	/**
 	 * Deregisters all currently registered action-executor for chat commands.
@@ -134,7 +105,7 @@ protected:
 	spring::unsynced_map<std::string, TActionExecutor*> actionExecutors;
 	std::vector< std::pair<std::string, TActionExecutor*> > sortedExecutors;
 
-	std::array<uint8_t, 1 << 16> actionExecutorMem;
+	std::array<uint8_t, 17400> actionExecutorMem;
 
 	size_t actionExecMemIndex = 0;
 	// size_t numActionExecutors = 0;

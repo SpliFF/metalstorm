@@ -4,14 +4,11 @@
 #define LUA_ATLAS_TEXTURES_H
 
 #include <string>
-//#include <unordered_map>
+#include <vector>
+#include <unordered_map>
 
-#include "Rendering/GL/myGL.h"
-#include "Rendering/Textures/TextureAtlas.h"
-#include "System/UnorderedMap.hpp"
-#include "System/SafeUtil.h"
-
-struct AtlasedTexture;
+// Headless server: texture atlas is rendering-only, stub the interface
+class CTextureAtlas;
 
 class LuaAtlasTextures {
 public:
@@ -19,9 +16,7 @@ public:
 	static constexpr size_t invalidIndex = size_t(-1);
 
 	~LuaAtlasTextures() { Clear(); }
-	LuaAtlasTextures() {
-		textureAtlasMap.reserve(32);
-	}
+	LuaAtlasTextures() {}
 
 	void Clear();
 
@@ -31,8 +26,8 @@ public:
 	CTextureAtlas* GetAtlasByIndex(const size_t index) const;
 	size_t GetAtlasIndexById(const std::string& idStr) const;
 private:
-	using TextureAtlasMap = spring::unsynced_map<std::string, std::size_t>;
-	using TextureAtlasVec = std::vector<CTextureAtlas>;
+	using TextureAtlasMap = std::unordered_map<std::string, std::size_t>;
+	using TextureAtlasVec = std::vector<CTextureAtlas*>;
 private:
 	TextureAtlasMap textureAtlasMap;
 	TextureAtlasVec textureAtlasVec;

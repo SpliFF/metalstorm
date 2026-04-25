@@ -10,7 +10,6 @@
 #include <chrono>
 #include <array>
 
-#include <fmt/printf.h>
 
 std::string CTimeUtil::GetCurrentTimeStr(bool utc)
 {
@@ -28,15 +27,16 @@ std::string CTimeUtil::GetCurrentTimeStr(bool utc)
 	static decltype(std::gmtime)* ConvertFunc[] = { &std::localtime, &std::gmtime };
 	std::tm lt = *ConvertFunc[utc](&timer);
 
-	return fmt::sprintf("%04i-%02i-%02i_%02i-%02i-%02i-%03i",
+	char buf[32];
+	snprintf(buf, sizeof(buf), "%04i-%02i-%02i_%02i-%02i-%02i-%03i",
 		lt.tm_year + 1900,
 		lt.tm_mon + 1,
 		lt.tm_mday,
 		lt.tm_hour,
 		lt.tm_min,
 		lt.tm_sec,
-		static_cast<int>(ms)
-	);
+		static_cast<int>(ms));
+	return std::string(buf);
 }
 
 __time64_t CTimeUtil::NTFSTimeToTime64(uint32_t lDataTimePart, uint32_t hDataTimePart)

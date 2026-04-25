@@ -38,7 +38,6 @@ public:
 	spring::unordered_map<int, int> buildOptions;
 
 private:
-	void BuildeeChangeCheck();
 	void UpdateIconName(int id, const int& numQueued);
 };
 

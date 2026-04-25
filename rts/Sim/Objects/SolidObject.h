@@ -5,16 +5,18 @@
 
 #include "WorldObject.h"
 #include "Lua/LuaRulesParams.h"
-#include "Sim/Misc/CollisionVolume.h"
 #include "Sim/Units/Scripts/LocalModelPieceStub.h"
+#include "Sim/Misc/CollisionVolume.h"
 #include "System/bitops.h"
 #include "System/Matrix44f.h"
 #include "System/type2.h"
+#include "System/Ecs/EcsMain.h"
 #include "System/Misc/BitwiseEnum.h"
 #include "System/Sync/SyncedFloat3.h"
 #include "System/Sync/SyncedPrimitive.h"
 
 struct MoveDef;
+struct LocalModelPiece;
 struct SolidObjectDef;
 
 class DamageArray;
@@ -30,16 +32,20 @@ enum TerrainChangeTypes {
 };
 
 enum YardmapStates {
-	YARDMAP_OPEN        = 0,    // always free      (    walkable      buildable)
-//	YARDMAP_WALKABLE    = 4,    // open for walk    (    walkable, not buildable)
-	YARDMAP_YARD        = 1,    // walkable when yard is open
-	YARDMAP_YARDINV     = 2,    // walkable when yard is closed
-	YARDMAP_BLOCKED     = 0xFF & ~YARDMAP_YARDINV, // always block     (not walkable, not buildable)
+	YARDMAP_OPEN         = 0,    // always free      (    walkable      buildable)
+	YARDMAP_STACKABLE    = 1,    // can be built on top of YARDMAP_BLOCKED
+	YARDMAP_GEOSTACKABLE = 2,    // can be built on top of YARDMAP_BLOCKED and needs GEO
+	YARDMAP_YARD         = 4,    // walkable when yard is open
+	YARDMAP_YARDINV      = 8,    // walkable when yard is closed
+	YARDMAP_UNBUILDABLE  = 16,   // open for walk    (    walkable, not buildable)
+	YARDMAP_BUILDONLY	 = 32,	 // open for build   (not walkable,     buildable)	
+	YARDMAP_EXITONLY     = 64,   // closed for walk into, closed for build
+	YARDMAP_BLOCKED      = 0xFF & ~(YARDMAP_YARDINV|YARDMAP_EXITONLY|YARDMAP_UNBUILDABLE), // always block     (not walkable, not buildable)
 
 	// helpers
-	YARDMAP_YARDBLOCKED = YARDMAP_YARD,
-	YARDMAP_YARDFREE    = ~YARDMAP_YARD,
-	YARDMAP_GEO         = YARDMAP_BLOCKED,
+	YARDMAP_YARDBLOCKED  = (YARDMAP_YARD|YARDMAP_EXITONLY|YARDMAP_UNBUILDABLE),
+	YARDMAP_YARDFREE     = ~(YARDMAP_YARD|YARDMAP_EXITONLY|YARDMAP_UNBUILDABLE),
+	YARDMAP_GEO          = YARDMAP_BLOCKED,
 };
 typedef Bitwise::BitwiseEnum<YardmapStates> YardMapStatus;
 
@@ -50,7 +56,7 @@ public:
 	CR_DECLARE_DERIVED(CSolidObject)
 
 
-	virtual const SolidObjectDef* GetDef() const = 0;
+	virtual const SolidObjectDef* GetDef() const { return nullptr; };
 
 	enum PhysicalState {
 		// NOTE:
@@ -101,7 +107,7 @@ public:
 	virtual bool AddBuildPower(CUnit* builder, float amount) { return false; }
 	virtual void DoDamage(const DamageArray& damages, const float3& impulse, CUnit* attacker, int weaponDefID, int projectileID) {}
 
-	virtual void ApplyImpulse(const float3& impulse) { SetVelocity(speed + impulse); }
+	virtual void ApplyImpulse(const float3& impulse) { SetVelocityAndSpeed(speed + impulse); }
 
 	virtual void Kill(CUnit* killer, const float3& impulse, bool crushed);
 	virtual int GetBlockingMapID() const { return -1; }
@@ -141,11 +147,11 @@ public:
 		rightdir.z = -matrix[2]; updir.z = matrix[6]; frontdir.z = matrix[10];
 	}
 
-	void AddHeading(short deltaHeading, bool useGroundNormal, bool useObjectNormal) { SetHeading(heading + deltaHeading, useGroundNormal, useObjectNormal); }
-	void SetHeading(short worldHeading, bool useGroundNormal, bool useObjectNormal) {
+	void AddHeading(short deltaHeading, bool useGroundNormal, bool useObjectNormal, float dirSmoothing) { SetHeading(heading + deltaHeading, useGroundNormal, useObjectNormal, dirSmoothing); }
+	void SetHeading(short worldHeading, bool useGroundNormal, bool useObjectNormal, float dirSmoothing) {
 		heading = worldHeading;
 
-		UpdateDirVectors(useGroundNormal, useObjectNormal);
+		UpdateDirVectors(useGroundNormal, useObjectNormal, dirSmoothing);
 		UpdateMidAndAimPos();
 	}
 
@@ -157,10 +163,14 @@ public:
 	// update object's local coor-sys from current <heading>
 	// (unlike ForcedSpin which updates from given <updir>)
 	// NOTE: movetypes call this directly
-	void UpdateDirVectors(bool useGroundNormal, bool useObjectNormal);
+	void UpdateDirVectors(bool useGroundNormal, bool useObjectNormal, float dirSmoothing);
+	void UpdateDirVectors(const float3& uDir);
 
 	CMatrix44f ComposeMatrix(const float3& p) const { return (CMatrix44f(p, -rightdir, updir, frontdir)); }
-	virtual CMatrix44f GetTransformMatrix(bool synced = false, bool fullread = false) const = 0;
+	virtual CMatrix44f GetTransformMatrix(bool synced = false, bool fullread = false) const { return CMatrix44f(); };
+
+
+
 
 	/**
 	 * adds this object to the GroundBlockingMap if and only
@@ -185,13 +195,15 @@ public:
 	float3 GetObjectSpacePos(const float3& p) const { return (pos + (frontdir * p.z) + (rightdir * p.x) + (updir * p.y)); }
 
 
+
 	int2 GetMapPos() const { return (GetMapPos(pos)); }
-	int2 GetMapPos(const float3& position) const;
+	int2 GetMapPos(const float3& position) const { return GetMapPosStatic(pos, xsize, zsize); }
+	static int2 GetMapPosStatic(const float3& position, int xsize, int zsize);
 
 	float2 GetFootPrint(float scale) const { return {xsize * scale, zsize * scale}; }
 
-	float3 GetDragAccelerationVec(const float4& params) const;
-	float3 GetWantedUpDir(bool useGroundNormal, bool useObjectNormal) const;
+	float3 GetDragAccelerationVec(float atmosphericDensity, float waterDensity, float dragCoeff, float frictionCoeff) const;
+	float3 GetWantedUpDir(bool useGroundNormal, bool useObjectNormal, float dirSmoothing) const;
 
 	float CalcFootPrintMinExteriorRadius(float scale = 1.0f) const;
 	float CalcFootPrintMaxInteriorRadius(float scale = 1.0f) const;
@@ -273,6 +285,8 @@ public:
 	float health = 0.0f;
 	float maxHealth = 1.0f;
 
+	entt::entity entityReference = entt::null;
+
 	///< the physical mass of this object (can be changed by SetMass)
 	float mass = DEFAULT_MASS;
 	///< how much MoveDef::crushStrength is required to crush this object (run-time constant)
@@ -295,6 +309,11 @@ public:
 	bool luaDraw = false;
 	///< if true, unit/feature can not be selected/mouse-picked by a player (UNSYNCED)
 	bool noSelect = false;
+	///< if true, unsynced matrices (transformation + pieceSpaceMat/modelSpaceMat) will be updated unconditionally
+	bool alwaysUpdateMat = false;
+
+	///< specifies which draw passes will be drawn by the engine
+	uint8_t engineDrawMask = uint8_t(-1);
 
 	///< x-size of this object, according to its footprint (note: rotated depending on buildFacing)
 	int xsize = 1;
@@ -324,9 +343,14 @@ public:
 	///< allyteam that this->team is part of
 	int allyteam = 0;
 
+
 	///< mobility information about this object (if NULL, object is either static or aircraft)
 	MoveDef* moveDef = nullptr;
 
+	///< pointer to the shared model definition (not owned by this object)
+	S3DModel* model = nullptr;
+	///< per-instance local model piece transforms for COB/Lua script animation
+	LocalModel localModel;
 	CollisionVolume collisionVolume;
 	CollisionVolume selectionVolume;
 
@@ -350,10 +374,8 @@ public:
 
 	float3 dragScales = OnesVector;
 
-	///< pointer to the shared model definition (not owned by this object)
-	S3DModel* model = nullptr;
-	///< per-instance local model piece transforms for COB/Lua script animation
-	LocalModel localModel;
+	///< pos + speed * timeOffset (unsynced)
+	bool objectUsable = true;
 
 	/**
 	 * @brief mod controlled parameters

@@ -387,3 +387,11 @@ void CSMFReadMap::FreeInfoMap(const char* name, unsigned char* data)
 	delete[] data;
 }
 
+
+int2 CSMFReadMap::GetPatch(int hmx, int hmz) const
+{
+	return int2{
+		std::clamp(hmx, 0, numBigTexX - 1),
+		std::clamp(hmz, 0, numBigTexY - 1)
+	};
+}

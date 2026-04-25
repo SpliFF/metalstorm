@@ -74,6 +74,9 @@ struct S3DModel {
 	/// for reloading at dev time if the file changes. Empty if
 	/// the model was default-initialised without a config file.
 	std::string metaPath;
+
+	/// Model name (e.g. "arm_flash")
+	std::string name;
 };
 
 struct LocalModelPiece {
@@ -97,6 +100,7 @@ struct LocalModelPiece {
 
 	bool visible         = true;
 	bool dirty           = false;
+	void SetScriptVisible(bool b) { scriptSetVisible = b; }
 	bool scriptSetVisible = true;
 
 	int lmodelPieceIndex = -1;
