@@ -1668,7 +1668,43 @@ self.onmessage = async (e: MessageEvent) => {
 
         case 'entityDestroy':
             liveState.units.delete(msg.entityId as number);
+            liveState.unitRulesParams.delete(msg.entityId as number);
             break;
+
+        case 'rulesParamUpdate': {
+            // Patch rules-params from the host. msg shape:
+            //   scope: 'game' | 'team' | 'unit' | 'player'
+            //   id?:   number              (required for non-game scopes)
+            //   params: Record<string, number | string | null>
+            //                              (null = delete that key)
+            //   replace?: boolean          (true = clear before applying)
+            const scope = msg.scope as 'game' | 'team' | 'unit' | 'player';
+            const id = msg.id as number | undefined;
+            const params = (msg.params as Record<string, number | string | null> | undefined) ?? {};
+            const replace = msg.replace as boolean | undefined;
+
+            const targetMap: Map<string, number | string> | undefined = (() => {
+                if (scope === 'game') return liveState.gameRulesParams;
+                if (id === undefined) return undefined;
+                const bucket =
+                    scope === 'team'   ? liveState.teamRulesParams   :
+                    scope === 'unit'   ? liveState.unitRulesParams   :
+                    scope === 'player' ? liveState.playerRulesParams :
+                    undefined;
+                if (!bucket) return undefined;
+                let m = bucket.get(id);
+                if (!m) { m = new Map(); bucket.set(id, m); }
+                return m;
+            })();
+
+            if (!targetMap) break;
+            if (replace) targetMap.clear();
+            for (const [k, v] of Object.entries(params)) {
+                if (v === null) targetMap.delete(k);
+                else targetMap.set(k, v);
+            }
+            break;
+        }
 
         case 'resourceUpdate':
             liveState.resources.set(msg.team as number, {

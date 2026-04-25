@@ -63,6 +63,9 @@ export interface ResourceEntry {
     metalIncome: number; energyIncome: number;
 }
 
+/** Spring rules-param values are numbers or strings. */
+export type RulesParamValue = number | string;
+
 /** Live game state pushed from the main thread to the worker. */
 export interface LiveState {
     camera: { px: number; py: number; pz: number; tx: number; ty: number; tz: number; fov: number; near: number; far: number };
@@ -84,6 +87,14 @@ export interface LiveState {
     buildFacing: number;
     /** Features on the map (static, set once from MapData) */
     features: Map<number, FeatureEntry>;
+    /** Game-scoped rules params (Spring.GetGameRulesParam). */
+    gameRulesParams: Map<string, RulesParamValue>;
+    /** Per-team rules params (Spring.GetTeamRulesParam). */
+    teamRulesParams: Map<number, Map<string, RulesParamValue>>;
+    /** Per-unit rules params (Spring.GetUnitRulesParam). */
+    unitRulesParams: Map<number, Map<string, RulesParamValue>>;
+    /** Per-player rules params (Spring.GetPlayerRulesParam). */
+    playerRulesParams: Map<number, Map<string, RulesParamValue>>;
 }
 
 /** Per-feature entry. */
@@ -112,6 +123,21 @@ export function normaliseSpringPath(path: string): string {
     return p;
 }
 
+/**
+ * Convert a rules-params Map into a Lua table. Spring's plural getters
+ * (GetGameRulesParams, GetUnitRulesParams, …) return a single table
+ * keyed by param name. An undefined input (e.g. unit/team has no entry)
+ * still returns an empty table — widgets iterate the result with pairs()
+ * and would throw if it were nil.
+ */
+function rulesParamsToTable(params: Map<string, RulesParamValue> | undefined): Record<string, RulesParamValue> {
+    const out: Record<string, RulesParamValue> = {};
+    if (params) {
+        for (const [k, v] of params) out[k] = v;
+    }
+    return out;
+}
+
 /** Create a default LiveState with zeroed values. */
 export function createDefaultLiveState(): LiveState {
     return {
@@ -130,6 +156,10 @@ export function createDefaultLiveState(): LiveState {
         modKeys: { alt: false, ctrl: false, meta: false, shift: false },
         buildFacing: 0,
         features: new Map(),
+        gameRulesParams: new Map(),
+        teamRulesParams: new Map(),
+        unitRulesParams: new Map(),
+        playerRulesParams: new Map(),
     };
 }
 
@@ -327,8 +357,12 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             return sampleHeight(ctx, Number(x), Number(z));
         },
         GetGameRulesParam: (key: LuaValue) => {
-            return ctx.gameRulesParams?.get(String(key)) ?? 0;
+            const k = String(key);
+            const v = ls.gameRulesParams.get(k);
+            if (v !== undefined) return v;
+            return ctx.gameRulesParams?.get(k) ?? null;
         },
+        GetGameRulesParams: () => rulesParamsToTable(ls.gameRulesParams),
         Echo: (...args: LuaValue[]) => {
             console.log('[Spring.Echo]', ...args.map(a => String(a)));
         },
@@ -390,7 +424,13 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             const tid = Number(_teamId ?? 0);
             return [tid, 0, false, false, '', tid, {}];
         },
-        GetPlayerRulesParam: () => null,
+        GetPlayerRulesParam: (playerId: LuaValue, key: LuaValue) => {
+            const params = ls.playerRulesParams.get(Number(playerId));
+            return params?.get(String(key)) ?? null;
+        },
+        GetPlayerRulesParams: (playerId: LuaValue) => {
+            return rulesParamsToTable(ls.playerRulesParams.get(Number(playerId)));
+        },
         GetTeamColor: (_teamId: LuaValue) => {
             // Return RGBA floats (multiple return values)
             const id = Number(_teamId ?? 0);
@@ -461,7 +501,13 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             return [hp, maxHp, 0, u.healthRatio, 0];
         },
         GetUnitStates: () => ({}),
-        GetUnitRulesParam: () => null,
+        GetUnitRulesParam: (id: LuaValue, key: LuaValue) => {
+            const params = ls.unitRulesParams.get(Number(id));
+            return params?.get(String(key)) ?? null;
+        },
+        GetUnitRulesParams: (id: LuaValue) => {
+            return rulesParamsToTable(ls.unitRulesParams.get(Number(id)));
+        },
         GetUnitIsStunned: () => [false, false, false],
         ValidUnitID: (id: LuaValue) => ls.units.has(Number(id)),
         GetUnitIsDead: (id: LuaValue) => !ls.units.has(Number(id)),
@@ -750,7 +796,13 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         },
 
         // --- Team rules params ---
-        GetTeamRulesParam: () => null,
+        GetTeamRulesParam: (teamId: LuaValue, key: LuaValue) => {
+            const params = ls.teamRulesParams.get(Number(teamId));
+            return params?.get(String(key)) ?? null;
+        },
+        GetTeamRulesParams: (teamId: LuaValue) => {
+            return rulesParamsToTable(ls.teamRulesParams.get(Number(teamId)));
+        },
 
         // --- Keyboard ---
         GetKeyCode: (keyName: LuaValue) => {
