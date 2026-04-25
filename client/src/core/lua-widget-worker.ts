@@ -32,14 +32,15 @@ import {
     type FeatureEntry,
 } from './lua-spring-api.js';
 
-// Engine-bundled test widget. Loaded only when `?widgetTest` is active.
+// Engine-bundled test widgets. Loaded only when `?widgetTest` is active.
 // Bundled here (not in any game's content) so the gl-bridge / Chili
-// pipeline can be exercised against a known-good widget regardless of
+// pipeline can be exercised against known-good widgets regardless of
 // which game is loaded.
 import dbgRenderTestSrc from '../lua-test-widgets/dbg_render_test.lua?raw';
 import dbgRenderTestQuit from '../lua-test-widgets/quit.png?url';
 import dbgRenderTestTick from '../lua-test-widgets/tick.png?url';
 import dbgRenderTestPanel from '../lua-test-widgets/panel_0001.png?url';
+import dbgChiliTestSrc from '../lua-test-widgets/dbg_chili_test.lua?raw';
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -321,11 +322,15 @@ async function init(
     bridge.setGameBaseUrl(baseUrl);
     postLog(2, '[LuaUI] init step 3/8 done: Lua runtime + GL bridge created');
 
-    // 3b. Inject engine-bundled test widget when solo mode is active.
+    // 3b. Inject engine-bundled test widgets when solo mode is active.
     // Source + textures live under client/src/lua-test-widgets/ and ship
     // with the client bundle, so they're available regardless of which
-    // game is loaded.
-    if (soloWidget === 'dbg_render_test') {
+    // game is loaded. soloWidget may be a comma-separated list of needles
+    // (e.g. "api_chili.lua,dbg_chili_test"); we inject any test widget
+    // whose stem appears in the list.
+    const soloNeedles = (soloWidget ?? '').split(',').map(s => s.trim());
+    const wants = (stem: string) => soloNeedles.some(n => n.includes(stem));
+    if (wants('dbg_render_test')) {
         vfsRegister('LuaUI/Widgets/dbg_render_test.lua', dbgRenderTestSrc);
         bridge.addAssetOverride('LuaUI/Images/quit.png', dbgRenderTestQuit);
         bridge.addAssetOverride('LuaUI/Images/tick.png', dbgRenderTestTick);
@@ -334,6 +339,10 @@ async function init(
             dbgRenderTestPanel,
         );
         postLog(2, '[LuaUI] Injected engine-bundled dbg_render_test widget + textures');
+    }
+    if (wants('dbg_chili_test')) {
+        vfsRegister('LuaUI/Widgets/dbg_chili_test.lua', dbgChiliTestSrc);
+        postLog(2, '[LuaUI] Injected engine-bundled dbg_chili_test widget');
     }
 
     const ctx: SpringAPIContext = {
@@ -468,15 +477,20 @@ async function init(
         }
 
         // Solo-widget mode: filter widgetFiles down to just the matching
-        // widget so we can isolate gl-bridge / Chili pipeline issues.
+        // widgets so we can isolate gl-bridge / Chili pipeline issues.
+        // Accepts comma-separated needles ("api_chili.lua,dbg_chili_test").
         if (soloWidget) {
-            const needle = soloWidget.replace(/[\\'"`]/g, '');
+            const needles = soloWidget
+                .split(',')
+                .map(s => s.replace(/[\\'"`]/g, '').trim())
+                .filter(s => s.length > 0);
+            const luaList = needles.map(n => `"${n}"`).join(', ');
             const marker = `local widgetFiles = VFS.DirList(WIDGET_DIRNAME, "*.lua", VFSMODE)`;
-            const filterBlock = `${marker}\n\tdo\n\t\tlocal _solo = "${needle}"\n\t\tlocal _filtered = {}\n\t\tfor _, _f in ipairs(widgetFiles) do\n\t\t\tif tostring(_f):find(_solo, 1, true) then\n\t\t\t\t_filtered[#_filtered+1] = _f\n\t\t\tend\n\t\tend\n\t\twidgetFiles = _filtered\n\t\tSpring.Echo("[LuaUI] Solo widget mode: filtered to " .. #widgetFiles .. " widget(s) matching '" .. _solo .. "'")\n\tend`;
+            const filterBlock = `${marker}\n\tdo\n\t\tlocal _needles = { ${luaList} }\n\t\tlocal _filtered = {}\n\t\tfor _, _f in ipairs(widgetFiles) do\n\t\t\tlocal _s = tostring(_f)\n\t\t\tfor _, _n in ipairs(_needles) do\n\t\t\t\tif _s:find(_n, 1, true) then\n\t\t\t\t\t_filtered[#_filtered+1] = _f\n\t\t\t\t\tbreak\n\t\t\t\tend\n\t\t\tend\n\t\tend\n\t\twidgetFiles = _filtered\n\t\tSpring.Echo("[LuaUI] Solo widget mode: filtered to " .. #widgetFiles .. " widget(s)")\n\tend`;
             const beforeFilter = patched;
             patched = patched.replace(marker, filterBlock);
             if (patched !== beforeFilter) {
-                postLog(2, `[LuaUI] Patched cawidgets.lua: solo widget filter '${needle}'`);
+                postLog(2, `[LuaUI] Patched cawidgets.lua: solo widget filter [${needles.join(', ')}]`);
             } else {
                 postLog(3, '[LuaUI] cawidgets.lua solo widget filter — anchor not found');
             }
