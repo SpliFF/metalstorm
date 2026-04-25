@@ -305,11 +305,27 @@ export class LuaGLBridge {
     // ============================================================
 
     private color(args: LuaValue[]): void {
-        const r = clamp01(Number(args[0] ?? 1));
-        const g = clamp01(Number(args[1] ?? 1));
-        const b = clamp01(Number(args[2] ?? 1));
-        const a = clamp01(Number(args[3] ?? 1));
-        this.imm.color(r, g, b, a);
+        // gl.Color supports two call forms:
+        //   gl.Color(r, g, b, a)   — 4 numbers
+        //   gl.Color({r, g, b, a}) — single table (used widely in Chili)
+        // Without the table-form unpacking, Number({...}) yields NaN and
+        // colors silently become garbage — most visibly, a fully-transparent
+        // {0,0,0,0} renders as opaque or a stale colour.
+        let r: number, g: number, b: number, a: number;
+        if (args.length === 1 && typeof args[0] === 'object' && args[0] !== null) {
+            const t = args[0] as Record<string | number, LuaValue>;
+            // Fengari tables are 1-indexed for sequence access
+            r = Number(t[1] ?? t[0] ?? 1);
+            g = Number(t[2] ?? t[1] ?? 1);
+            b = Number(t[3] ?? t[2] ?? 1);
+            a = Number(t[4] ?? t[3] ?? 1);
+        } else {
+            r = Number(args[0] ?? 1);
+            g = Number(args[1] ?? 1);
+            b = Number(args[2] ?? 1);
+            a = Number(args[3] ?? 1);
+        }
+        this.imm.color(clamp01(r), clamp01(g), clamp01(b), clamp01(a));
     }
 
     private rect(args: LuaValue[]): void {
