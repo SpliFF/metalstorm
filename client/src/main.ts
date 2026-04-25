@@ -346,8 +346,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // DefCache accumulates defs as the server streams them incrementally.
     // Listeners forward new defs to the renderers that need them.
     const defCache = new DefCache();
-    defCache.onUnitDefs((newDefs) => entityRenderer?.setUnitDefs(newDefs));
-    defCache.onWeaponDefs((newDefs) => projectileRenderer?.setWeaponDefs(newDefs));
+    defCache.onUnitDefs((newDefs) => {
+        entityRenderer?.setUnitDefs(newDefs);
+        currentWidgetManager?.forwardUnitDefs(newDefs);
+    });
+    defCache.onWeaponDefs((newDefs) => {
+        projectileRenderer?.setWeaponDefs(newDefs);
+        currentWidgetManager?.forwardWeaponDefs(newDefs);
+    });
 
     canvas.addEventListener('click', () => audioManager?.resume(), { once: true });
 
@@ -470,6 +476,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             });
             mgr.setLiveDataSources(rtsCamera, conn);
             mgr.forwardMapFeatures(map.features);
+            // Seed the worker with any defs that arrived before the
+            // manager existed (def stream can race MapData arrival).
+            mgr.forwardUnitDefs(defCache.getAllUnitDefs());
+            mgr.forwardWeaponDefs(defCache.getAllWeaponDefs());
             // Push the lobby's room roster (humans + AI slots) into the
             // worker so Spring.GetPlayerList/GetTeamList/etc. return real
             // data. Without this widgets see only the local player. The

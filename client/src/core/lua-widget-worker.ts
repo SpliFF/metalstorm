@@ -281,6 +281,99 @@ let initBaseUrl = '';  // saved from init() for re-fetch on enable
 // Live game state updated by main thread messages, read by Spring API
 const liveState: LiveState = createDefaultLiveState();
 
+// Per-game unit/weapon def caches, populated incrementally by
+// unitDefsUpdate / weaponDefsUpdate. The wire-format defs from the
+// server are minimal (id, name, model URL, texture URL) — we merge in
+// safe defaults for the fields ZK widgets routinely access (health,
+// metalCost, customParams, isFactory, …) so reads don't crash. Real
+// def values will need a richer protocol later.
+interface MinimalUnitDefWire { defId: number; name: string; modelUrl: string; textureUrl: string }
+interface MinimalWeaponDefWire {
+    defId: number; name: string; visualType: number;
+    projectileSpeed: number; range: number; aoe: number; size: number;
+    intensity: number; colorR: number; colorG: number; colorB: number;
+    duration: number; highTrajectory: boolean;
+}
+const unitDefMap = new Map<number, MinimalUnitDefWire>();
+const weaponDefMap = new Map<number, MinimalWeaponDefWire>();
+
+/** Build the rich Lua-shaped UnitDef table from the wire form + defaults.
+ *  These defaults match what ZK widgets typically branch on; widgets
+ *  that need real values get them once the protocol carries them. */
+function buildLuaUnitDef(d: MinimalUnitDefWire): Record<string, LuaValue> {
+    return {
+        id: d.defId, name: d.name, humanName: d.name, tooltip: d.name,
+        wreckName: '', deathExplosion: '', selfDExplosion: '',
+        modelUrl: d.modelUrl, textureUrl: d.textureUrl,
+        // Stats — placeholder values keyed off "average unit" expectations.
+        health: 1000, mass: 100, metalCost: 100, energyCost: 100, buildTime: 100,
+        radius: 30, height: 30, speed: 50, maxAcc: 0.1, maxDec: 0.1,
+        turnRate: 1000, brakeRate: 0.1, autoHeal: 0,
+        sightDistance: 500, airSightDistance: 500, radarDistance: 0,
+        sonarDistance: 0, sonarJamDistance: 0, jammerDistance: 0,
+        seismicDistance: 0, stealth: false, sonarStealth: false,
+        // Categorical flags — all false so widgets that test them skip
+        // their special-case logic safely.
+        isFactory: false, isBuilder: false, isAirUnit: false,
+        isImmobile: false, isBuilding: false, isExtractor: false,
+        canMove: true, canFly: false, canSubmerge: false, canHover: false,
+        canFight: true, canPatrol: true, canStop: true, canGuard: true,
+        canAttack: true, canRepair: false, canReclaim: false, canCapture: false,
+        canResurrect: false, canCloak: false, canKamikaze: false,
+        canManualFire: false, canSelfD: true,
+        // Cost / build options
+        buildOptions: {} as Record<string, LuaValue>,
+        weapons: {} as Record<string, LuaValue>,
+        customParams: {} as Record<string, LuaValue>,
+        // Tag tables ZK reads
+        modCategories: {} as Record<string, LuaValue>,
+        moveDef: {} as Record<string, LuaValue>,
+    };
+}
+
+function buildLuaWeaponDef(d: MinimalWeaponDefWire): Record<string, LuaValue> {
+    return {
+        id: d.defId, name: d.name, type: '', description: d.name,
+        visualType: d.visualType,
+        projectilespeed: d.projectileSpeed, range: d.range,
+        damageAreaOfEffect: d.aoe, size: d.size, intensity: d.intensity,
+        rgbColor: [d.colorR, d.colorG, d.colorB], duration: d.duration,
+        highTrajectory: d.highTrajectory ? 1 : 0,
+        // Common fields with safe defaults
+        damages: { 0: 100 } as Record<string | number, LuaValue>,
+        reloadTime: 1, accuracy: 0, sprayAngle: 0, edgeEffectiveness: 1,
+        targetMoveError: 0, leadLimit: 0, fixedLauncher: false,
+        impulseFactor: 1, impulseBoost: 0,
+        avoidFriendly: true, avoidFeature: true, avoidGround: true,
+        canAttackGround: true, customParams: {} as Record<string, LuaValue>,
+    };
+}
+
+/** Republish the UnitDefs / UnitDefNames / WeaponDefs / WeaponDefNames
+ *  globals from the current cache. Called from init and after every
+ *  defs-update message. */
+function republishDefGlobals(rt: LuaRuntime): void {
+    const unitDefs: Record<number, LuaValue> = {};
+    const unitDefNames: Record<string, LuaValue> = {};
+    for (const d of unitDefMap.values()) {
+        const lua = buildLuaUnitDef(d);
+        unitDefs[d.defId] = lua;
+        if (d.name) unitDefNames[d.name] = lua;
+    }
+    rt.setGlobal('UnitDefs', unitDefs);
+    rt.setGlobal('UnitDefNames', unitDefNames);
+
+    const weaponDefs: Record<number, LuaValue> = {};
+    const weaponDefNames: Record<string, LuaValue> = {};
+    for (const d of weaponDefMap.values()) {
+        const lua = buildLuaWeaponDef(d);
+        weaponDefs[d.defId] = lua;
+        if (d.name) weaponDefNames[d.name] = lua;
+    }
+    rt.setGlobal('WeaponDefs', weaponDefs);
+    rt.setGlobal('WeaponDefNames', weaponDefNames);
+}
+
 async function init(
     canvas: OffscreenCanvas,
     gameId: string,
@@ -1062,10 +1155,9 @@ function installEngineGlobals(
         numCompressedTexFormats: 0,
     });
 
-    rt.setGlobal('UnitDefs', {});
-    rt.setGlobal('UnitDefNames', {});
-    rt.setGlobal('WeaponDefs', {});
-    rt.setGlobal('WeaponDefNames', {});
+    // Publish whatever defs have already arrived (the def stream may
+    // race the worker bootstrap; pending entries replay here).
+    republishDefGlobals(rt);
     rt.setGlobal('FeatureDefs', {});
     rt.setGlobal('FeatureDefNames', {});
 
@@ -1655,6 +1747,22 @@ self.onmessage = async (e: MessageEvent) => {
             liveState.units.delete(msg.entityId as number);
             liveState.unitRulesParams.delete(msg.entityId as number);
             break;
+
+        case 'unitDefsUpdate': {
+            const defs = msg.defs as MinimalUnitDefWire[] | undefined;
+            if (!defs) break;
+            for (const d of defs) unitDefMap.set(d.defId, d);
+            if (runtime) republishDefGlobals(runtime);
+            break;
+        }
+
+        case 'weaponDefsUpdate': {
+            const defs = msg.defs as MinimalWeaponDefWire[] | undefined;
+            if (!defs) break;
+            for (const d of defs) weaponDefMap.set(d.defId, d);
+            if (runtime) republishDefGlobals(runtime);
+            break;
+        }
 
         case 'rosterUpdate': {
             // Replace the entire roster snapshot. Cheap (a few hundred

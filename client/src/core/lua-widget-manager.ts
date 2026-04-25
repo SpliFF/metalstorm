@@ -300,6 +300,28 @@ export class LuaWidgetManager {
         this.selectedUnitIds = [...ids];
     }
 
+    /** Push a batch of unit defs into the worker. Defs accumulate over
+     *  the session — the server streams them on demand as the player
+     *  encounters new entity types. */
+    forwardUnitDefs(defs: ReadonlyArray<{ defId: number; name: string; modelUrl?: string; textureUrl?: string }>): void {
+        if (!this.worker || this.disposed || defs.length === 0) return;
+        this.postToWorker({ type: 'unitDefsUpdate', defs: defs.map(d => ({
+            defId: d.defId, name: d.name,
+            modelUrl: d.modelUrl ?? '', textureUrl: d.textureUrl ?? '',
+        })) });
+    }
+
+    /** Push a batch of weapon defs into the worker. */
+    forwardWeaponDefs(defs: ReadonlyArray<{
+        defId: number; name: string; visualType: number;
+        projectileSpeed: number; range: number; aoe: number; size: number;
+        intensity: number; colorR: number; colorG: number; colorB: number;
+        duration: number; highTrajectory: boolean;
+    }>): void {
+        if (!this.worker || this.disposed || defs.length === 0) return;
+        this.postToWorker({ type: 'weaponDefsUpdate', defs: defs.map(d => ({ ...d })) });
+    }
+
     /** Replace the worker's roster snapshot. Called by the lobby bridge
      *  immediately after the widget manager is constructed; safe to call
      *  before the worker has finished bootstrapping (the message queues
