@@ -265,11 +265,12 @@ export class LuaWidgetManager {
             health: snapshot.health ? new Uint16Array(snapshot.health) : null,
             defIds: snapshot.defIds ? new Uint16Array(snapshot.defIds) : null,
             teams: snapshot.teams ? new Uint8Array(snapshot.teams) : null,
+            stateBits: snapshot.stateBits ? new Uint8Array(snapshot.stateBits) : null,
         };
 
         // Build transferable list from the copies
         const transfer: Transferable[] = [];
-        for (const key of ['entityIds', 'positionsX', 'positionsY', 'positionsZ', 'headings', 'health', 'defIds', 'teams']) {
+        for (const key of ['entityIds', 'positionsX', 'positionsY', 'positionsZ', 'headings', 'health', 'defIds', 'teams', 'stateBits']) {
             const arr = msg[key] as ArrayBufferView | null;
             if (arr) transfer.push(arr.buffer);
         }

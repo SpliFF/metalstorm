@@ -17,6 +17,15 @@
  *     Bit 5: health        → u16[count]    (0-65535 → 0%-100%)
  *     Bit 6: def_id        → u16[count]
  *     Bit 7: team          → u8[count]
+ *     Bit 8: state_bits    → u8[count]     (packed unit-state flags)
+ *
+ *   state_bits layout (per unit):
+ *     bits 0-1: fireState  (0=hold, 1=return, 2=at-will)
+ *     bits 2-3: moveState  (0=hold, 1=maneuver, 2=roam)
+ *     bit  4:   repeatOrders
+ *     bit  5:   isCloaked
+ *     bit  6:   isStunned
+ *     bit  7:   reserved (shield_active in a future revision)
  *
  * The envelope byte 0x02 is prepended by the caller.
  */
@@ -38,9 +47,10 @@ constexpr uint16_t FIELD_HEADING     = 1 << 4;
 constexpr uint16_t FIELD_HEALTH      = 1 << 5;
 constexpr uint16_t FIELD_DEF_ID      = 1 << 6;
 constexpr uint16_t FIELD_TEAM        = 1 << 7;
+constexpr uint16_t FIELD_STATE_BITS  = 1 << 8;
 
 // All fields — used for full state snapshots
-constexpr uint16_t FIELD_ALL = 0x00FF;
+constexpr uint16_t FIELD_ALL = 0x01FF;
 
 /// Serialize all active units into the Tier 2 binary format.
 /// Returns a buffer ready to be sent (without envelope byte).

@@ -1703,6 +1703,7 @@ self.onmessage = async (e: MessageEvent) => {
             const health = msg.health as Uint16Array | null;
             const defIds = msg.defIds as Uint16Array | null;
             const teams = msg.teams as Uint8Array | null;
+            const stateBits = msg.stateBits as Uint8Array | null;
 
             // Velocity is computed from frame-to-frame position deltas.
             // The sim ticks at 30 Hz so each entity-state batch nominally
@@ -1729,6 +1730,7 @@ self.onmessage = async (e: MessageEvent) => {
                             vx: prev ? (nx - prev.x) * tickRate : 0,
                             vy: prev ? (ny - prev.y) * tickRate : 0,
                             vz: prev ? (nz - prev.z) * tickRate : 0,
+                            stateBits: stateBits ? stateBits[i] : 0,
                         });
                     }
                 }
@@ -1741,7 +1743,7 @@ self.onmessage = async (e: MessageEvent) => {
                         const existing = liveState.units.get(id);
                         const entry: UnitEntry = existing ?? {
                             x: 0, y: 0, z: 0, heading: 0, healthRatio: 1,
-                            defId: 0, team: 0, vx: 0, vy: 0, vz: 0,
+                            defId: 0, team: 0, vx: 0, vy: 0, vz: 0, stateBits: 0,
                         };
                         if (posX) {
                             const nx = posX[i];
@@ -1762,6 +1764,7 @@ self.onmessage = async (e: MessageEvent) => {
                         if (health) entry.healthRatio = health[i] / 65535;
                         if (defIds) entry.defId = defIds[i];
                         if (teams) entry.team = teams[i];
+                        if (stateBits) entry.stateBits = stateBits[i];
                         liveState.units.set(id, entry);
                     }
                 }

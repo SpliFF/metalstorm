@@ -57,6 +57,14 @@ export interface UnitEntry {
     /** World-space velocity in elmos/second. Updated by the entityState
      *  handler from frame-to-frame position deltas. Zero on first frame. */
     vx: number; vy: number; vz: number;
+    /** Packed state bits from the server (FIELD_STATE_BITS).
+     *    bits 0-1: fireState (0=hold, 1=return, 2=at-will)
+     *    bits 2-3: moveState (0=hold, 1=maneuver, 2=roam)
+     *    bit  4:   repeatOrders
+     *    bit  5:   isCloaked
+     *    bit  6:   isStunned
+     *    bit  7:   reserved */
+    stateBits: number;
 }
 
 /** Per-team resource entry. */
@@ -617,7 +625,30 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             const hp = u.healthRatio * maxHp;
             return [hp, maxHp, 0, u.healthRatio, 0];
         },
-        GetUnitStates: () => ({}),
+        GetUnitStates: (id: LuaValue) => {
+            const u = ls.units.get(Number(id));
+            if (!u) return null;
+            const bits = u.stateBits;
+            const fireState = bits & 0x03;
+            const moveState = (bits >> 2) & 0x03;
+            const repeat    = (bits & (1 << 4)) !== 0;
+            const cloak     = (bits & (1 << 5)) !== 0;
+            // Spring's GetUnitStates returns a keyed table. We provide
+            // the subset the wire format carries; engine-only fields
+            // (autoLand, trajectory, autoRepairLevel) default to safe
+            // values rather than nil so widget reads don't crash.
+            return {
+                firestate:        fireState,
+                movestate:        moveState,
+                repeat:           repeat,
+                cloak:            cloak,
+                active:           true,
+                trajectory:       false,
+                autoLand:         false,
+                autoRepairLevel:  0,
+                loopbackAttack:   false,
+            };
+        },
         GetUnitRulesParam: (id: LuaValue, key: LuaValue) => {
             const params = ls.unitRulesParams.get(Number(id));
             return params?.get(String(key)) ?? null;
@@ -625,7 +656,21 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         GetUnitRulesParams: (id: LuaValue) => {
             return rulesParamsToTable(ls.unitRulesParams.get(Number(id)));
         },
-        GetUnitIsStunned: () => [false, false, false],
+        GetUnitIsStunned: (id: LuaValue) => {
+            // Spring returns 3 booleans: stunnedOrInBuild, stunned, beingBuilt.
+            // We only model "stunned" via the wire bits — beingBuilt derives
+            // from health < 1. Combined first return is stunned || beingBuilt.
+            const u = ls.units.get(Number(id));
+            if (!u) return [false, false, false];
+            const stunned    = (u.stateBits & (1 << 6)) !== 0;
+            const beingBuilt = u.healthRatio < 1;
+            return [stunned || beingBuilt, stunned, beingBuilt];
+        },
+        GetUnitIsCloaked: (id: LuaValue) => {
+            const u = ls.units.get(Number(id));
+            if (!u) return null;
+            return (u.stateBits & (1 << 5)) !== 0;
+        },
         ValidUnitID: (id: LuaValue) => ls.units.has(Number(id)),
         GetUnitIsDead: (id: LuaValue) => !ls.units.has(Number(id)),
 

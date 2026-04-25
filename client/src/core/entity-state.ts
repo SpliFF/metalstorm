@@ -16,6 +16,13 @@
  *     Bit 5: health        → u16[count]    (0–65535 → 0%–100%)
  *     Bit 6: def_id        → u16[count]
  *     Bit 7: team          → u8[count]
+ *     Bit 8: state_bits    → u8[count]     packed unit-state flags:
+ *                                            bits 0-1: fireState (0..2)
+ *                                            bits 2-3: moveState (0..2)
+ *                                            bit 4:    repeatOrders
+ *                                            bit 5:    isCloaked
+ *                                            bit 6:    isStunned
+ *                                            bit 7:    reserved
  */
 
 export const FIELD_ENTITY_IDS = 1 << 0;
@@ -26,6 +33,7 @@ export const FIELD_HEADING    = 1 << 4;
 export const FIELD_HEALTH     = 1 << 5;
 export const FIELD_DEF_ID     = 1 << 6;
 export const FIELD_TEAM       = 1 << 7;
+export const FIELD_STATE_BITS = 1 << 8;
 
 /** Parsed entity state snapshot — typed arrays are zero-copy views into the buffer. */
 export interface EntityStateSnapshot {
@@ -39,6 +47,7 @@ export interface EntityStateSnapshot {
     health:     Uint16Array  | null;
     defIds:     Uint16Array  | null;
     teams:      Uint8Array   | null;
+    stateBits:  Uint8Array   | null;
 }
 
 /**
@@ -68,6 +77,7 @@ export function parseEntityState(input: Uint8Array): EntityStateSnapshot | null 
         health: null,
         defIds: null,
         teams: null,
+        stateBits: null,
     };
 
     if (fieldMask & FIELD_ENTITY_IDS) {
@@ -100,6 +110,10 @@ export function parseEntityState(input: Uint8Array): EntityStateSnapshot | null 
     }
     if (fieldMask & FIELD_TEAM) {
         result.teams = new Uint8Array(data.buffer, offset, count);
+        offset += count;
+    }
+    if (fieldMask & FIELD_STATE_BITS) {
+        result.stateBits = new Uint8Array(data.buffer, offset, count);
         offset += count;
     }
 

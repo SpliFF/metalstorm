@@ -8,6 +8,7 @@
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/UnitDef.h"
+#include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Misc/QuadField.h"
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/TeamHandler.h"
@@ -56,6 +57,7 @@ std::vector<uint8_t> SerializeUnits(
     if (fieldMask & FIELD_HEALTH)      size += count * sizeof(uint16_t);
     if (fieldMask & FIELD_DEF_ID)      size += count * sizeof(uint16_t);
     if (fieldMask & FIELD_TEAM)        size += count * sizeof(uint8_t);
+    if (fieldMask & FIELD_STATE_BITS)  size += count * sizeof(uint8_t);
 
     std::vector<uint8_t> buf(size);
     size_t offset = 0;
@@ -115,6 +117,26 @@ std::vector<uint8_t> SerializeUnits(
     if (fieldMask & FIELD_TEAM) {
         for (const CUnit* u : units)
             Write(buf, offset, static_cast<uint8_t>(u->team));
+    }
+
+    // State bits (u8) — packed flags. Layout documented in the header.
+    if (fieldMask & FIELD_STATE_BITS) {
+        for (const CUnit* u : units) {
+            // fireState/moveState are clamped to 0..3 to fit two bits
+            // each; values outside that range come from custom Lua and
+            // would silently overflow into adjacent bits otherwise.
+            const uint8_t fire = std::clamp(u->fireState, 0, 3) & 0x03;
+            const uint8_t move = std::clamp(u->moveState, 0, 3) & 0x03;
+            const bool repeat  = u->commandAI != nullptr && u->commandAI->repeatOrders;
+            uint8_t bits = 0;
+            bits |= fire;
+            bits |= (move << 2);
+            if (repeat)            bits |= (1 << 4);
+            if (u->IsCloaked())    bits |= (1 << 5);
+            if (u->IsStunned())    bits |= (1 << 6);
+            // bit 7 reserved
+            Write(buf, offset, bits);
+        }
     }
 
     return buf;
