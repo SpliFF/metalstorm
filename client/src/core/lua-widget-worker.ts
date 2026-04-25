@@ -1704,20 +1704,31 @@ self.onmessage = async (e: MessageEvent) => {
             const defIds = msg.defIds as Uint16Array | null;
             const teams = msg.teams as Uint8Array | null;
 
+            // Velocity is computed from frame-to-frame position deltas.
+            // The sim ticks at 30 Hz so each entity-state batch nominally
+            // covers 1/30 s; multiplying the delta by the inverse gives
+            // elmos/second. (We don't have a precise per-message timestamp
+            // — adequate for HUD readouts and lead-shot calculations.)
+            const tickRate = 30;
             if (!isDelta) {
                 // Full snapshot — rebuild. Only keep IDs in this snapshot.
                 const newUnits = new Map<number, UnitEntry>();
                 if (entityIds) {
                     for (let i = 0; i < count; i++) {
                         const id = entityIds[i];
+                        const prev = liveState.units.get(id);
+                        const nx = posX ? posX[i] : 0;
+                        const ny = posY ? posY[i] : 0;
+                        const nz = posZ ? posZ[i] : 0;
                         newUnits.set(id, {
-                            x: posX ? posX[i] : 0,
-                            y: posY ? posY[i] : 0,
-                            z: posZ ? posZ[i] : 0,
+                            x: nx, y: ny, z: nz,
                             heading: headings ? headings[i] : 0,
                             healthRatio: health ? health[i] / 65535 : 1,
                             defId: defIds ? defIds[i] : 0,
                             team: teams ? teams[i] : 0,
+                            vx: prev ? (nx - prev.x) * tickRate : 0,
+                            vy: prev ? (ny - prev.y) * tickRate : 0,
+                            vz: prev ? (nz - prev.z) * tickRate : 0,
                         });
                     }
                 }
@@ -1728,10 +1739,25 @@ self.onmessage = async (e: MessageEvent) => {
                     for (let i = 0; i < count; i++) {
                         const id = entityIds[i];
                         const existing = liveState.units.get(id);
-                        const entry: UnitEntry = existing ?? { x: 0, y: 0, z: 0, heading: 0, healthRatio: 1, defId: 0, team: 0 };
-                        if (posX) entry.x = posX[i];
-                        if (posY) entry.y = posY[i];
-                        if (posZ) entry.z = posZ[i];
+                        const entry: UnitEntry = existing ?? {
+                            x: 0, y: 0, z: 0, heading: 0, healthRatio: 1,
+                            defId: 0, team: 0, vx: 0, vy: 0, vz: 0,
+                        };
+                        if (posX) {
+                            const nx = posX[i];
+                            entry.vx = existing ? (nx - entry.x) * tickRate : 0;
+                            entry.x = nx;
+                        }
+                        if (posY) {
+                            const ny = posY[i];
+                            entry.vy = existing ? (ny - entry.y) * tickRate : 0;
+                            entry.y = ny;
+                        }
+                        if (posZ) {
+                            const nz = posZ[i];
+                            entry.vz = existing ? (nz - entry.z) * tickRate : 0;
+                            entry.z = nz;
+                        }
                         if (headings) entry.heading = headings[i];
                         if (health) entry.healthRatio = health[i] / 65535;
                         if (defIds) entry.defId = defIds[i];

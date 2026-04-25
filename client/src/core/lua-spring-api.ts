@@ -54,6 +54,9 @@ export interface UnitEntry {
     healthRatio: number;
     defId: number;
     team: number;
+    /** World-space velocity in elmos/second. Updated by the entityState
+     *  handler from frame-to-frame position deltas. Zero on first frame. */
+    vx: number; vy: number; vz: number;
 }
 
 /** Per-team resource entry. */
@@ -139,6 +142,14 @@ export interface LiveState {
     teamColors: Map<number, TeamColor>;
     /** Mod options dict, free-form key-value. */
     modOptions: Record<string, RulesParamValue>;
+    /** Selection groups: Spring numbers them 0..9. Each entry is the
+     *  set of unit IDs assigned to that group. Purely client-side state
+     *  managed by widgets and the local user. */
+    groups: Map<number, Set<number>>;
+    /** Map markers (point + line). Local-only for now; broadcasting
+     *  needs a server message we don't have yet. */
+    markers: Array<{ kind: 'point' | 'line'; x: number; y: number; z: number;
+        x2?: number; y2?: number; z2?: number; label: string; teamId: number }>;
 }
 
 /** Per-feature entry. */
@@ -227,6 +238,8 @@ export function createDefaultLiveState(): LiveState {
         teams: new Map(),
         teamColors: new Map(),
         modOptions: {},
+        groups: new Map(),
+        markers: [],
     };
 }
 
@@ -637,7 +650,10 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             return ls.units.has(Number(id));
         },
         GetUnitVelocity: (id: LuaValue) => {
-            return ls.units.has(Number(id)) ? [0, 0, 0, 0] : null;
+            const u = ls.units.get(Number(id));
+            if (!u) return null;
+            const speed = Math.sqrt(u.vx * u.vx + u.vy * u.vy + u.vz * u.vz);
+            return [u.vx, u.vy, u.vz, speed];
         },
         GetUnitShieldState: () => null,
 
@@ -783,8 +799,20 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
                 right: luaTable(rnx, 0, rnz),
             };
         },
-        GetGroundInfo: (_x: LuaValue, _z: LuaValue) => [0, 0, 0, 0, 0, 0, '', 0],
-        GetGroundNormal: () => [0, 1, 0],
+        GetGroundInfo: (x: LuaValue, z: LuaValue) => {
+            // Real Spring returns: ix, iz, type, hardness, tankSpeed, kbotSpeed,
+            // hovSpeed, shipSpeed, ground-name, depth. Without per-tile ground
+            // metadata we fill the spatial coords + plausible defaults.
+            const wx = Number(x), wz = Number(z);
+            const sq = ctx.squareSize || 8;
+            const ix = Math.floor(wx / sq);
+            const iz = Math.floor(wz / sq);
+            const elev = sampleHeight(ctx, wx, wz);
+            return [ix, iz, 0, 1.0, 1.0, 1.0, 1.0, 1.0, 'default', Math.max(0, -elev)];
+        },
+        GetGroundNormal: (x: LuaValue, z: LuaValue) => {
+            return computeGroundNormal(ctx, Number(x), Number(z));
+        },
         GetSmoothMeshHeight: (x: LuaValue, z: LuaValue) => {
             return sampleHeight(ctx, Number(x), Number(z));
         },
@@ -881,9 +909,35 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         // --- Custom command draw data ---
         SetCustomCommandDrawData: () => {},
 
-        // --- Misc missing ---
-        MarkerAddPoint: () => {},
-        MarkerErasePosition: () => {},
+        // --- Map markers ---
+        // Local-only for now: appended to ls.markers but not broadcast.
+        // Real Spring drops/erases markers within Spring.SQUARE_SIZE * 2.
+        MarkerAddPoint: (x: LuaValue, y: LuaValue, z: LuaValue, label: LuaValue, _localOnly?: LuaValue) => {
+            ls.markers.push({
+                kind: 'point',
+                x: Number(x), y: Number(y), z: Number(z),
+                label: String(label ?? ''),
+                teamId: ls.identity.myTeam,
+            });
+        },
+        MarkerAddLine: (x1: LuaValue, y1: LuaValue, z1: LuaValue,
+                        x2: LuaValue, y2: LuaValue, z2: LuaValue, _localOnly?: LuaValue) => {
+            ls.markers.push({
+                kind: 'line',
+                x: Number(x1), y: Number(y1), z: Number(z1),
+                x2: Number(x2), y2: Number(y2), z2: Number(z2),
+                label: '',
+                teamId: ls.identity.myTeam,
+            });
+        },
+        MarkerErasePosition: (x: LuaValue, _y: LuaValue, z: LuaValue) => {
+            const radius = (ctx.squareSize || 8) * 2;
+            const cx = Number(x), cz = Number(z);
+            ls.markers = ls.markers.filter(m => {
+                const dx = m.x - cx, dz = m.z - cz;
+                return Math.sqrt(dx * dx + dz * dz) > radius;
+            });
+        },
         SetActiveCommand: (a: LuaValue, _b?: LuaValue, _c?: LuaValue, _d?: LuaValue,
                           _e?: LuaValue, _f?: LuaValue, _g?: LuaValue, _h?: LuaValue) => {
             // Spring overloads: SetActiveCommand(idx) | SetActiveCommand(cmdName, btn, lc, rc, alt, ctrl, meta, shift)
@@ -905,11 +959,54 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         GetCommandQueue: () => luaTable(),
         GetFullBuildQueue: () => luaTable(),
         SelectUnitArray: () => {},
-        SetUnitGroup: () => {},
-        GetGroupList: () => ({}),
-        GetGroupUnits: () => luaTable(),
-        GetGroupUnitsSorted: () => ({}),
-        GetGroupUnitsCounts: () => ({}),
+        SetUnitGroup: (unitId: LuaValue, groupId: LuaValue) => {
+            const uid = Number(unitId);
+            const gid = Number(groupId);
+            // Drop the unit from any group it was already in.
+            for (const g of ls.groups.values()) g.delete(uid);
+            // Group -1 / nil clears assignment.
+            if (gid < 0 || !Number.isFinite(gid)) return true;
+            let bucket = ls.groups.get(gid);
+            if (!bucket) { bucket = new Set(); ls.groups.set(gid, bucket); }
+            bucket.add(uid);
+            return true;
+        },
+        GetGroupList: () => {
+            // Spring returns a table of {[groupId] = unitCount}.
+            const out: Record<number, number> = {};
+            for (const [gid, units] of ls.groups) {
+                if (units.size > 0) out[gid] = units.size;
+            }
+            return out;
+        },
+        GetGroupUnits: (groupId: LuaValue) => {
+            const bucket = ls.groups.get(Number(groupId));
+            return bucket ? luaTable(...bucket) : luaTable();
+        },
+        GetGroupUnitsSorted: (groupId: LuaValue) => {
+            const bucket = ls.groups.get(Number(groupId));
+            const out: Record<number, number[]> = {};
+            if (bucket) {
+                for (const uid of bucket) {
+                    const u = ls.units.get(uid);
+                    const did = u?.defId ?? 0;
+                    (out[did] ??= []).push(uid);
+                }
+            }
+            return out;
+        },
+        GetGroupUnitsCounts: (groupId: LuaValue) => {
+            const bucket = ls.groups.get(Number(groupId));
+            const out: Record<number, number> = {};
+            if (bucket) {
+                for (const uid of bucket) {
+                    const u = ls.units.get(uid);
+                    const did = u?.defId ?? 0;
+                    out[did] = (out[did] ?? 0) + 1;
+                }
+            }
+            return out;
+        },
 
         // --- Extension queries ---
         HasExtension: () => true,
@@ -1046,7 +1143,13 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         GetUnitCmdDescs: () => luaTable(),
         GetUnitCommandCount: () => 0,
         GetUnitCurrentCommand: () => null,
-        GetUnitGroup: () => 0,
+        GetUnitGroup: (unitId: LuaValue) => {
+            const uid = Number(unitId);
+            for (const [gid, bucket] of ls.groups) {
+                if (bucket.has(uid)) return gid;
+            }
+            return -1;
+        },
         GetUnitDirection: (id: LuaValue) => {
             const u = ls.units.get(Number(id));
             if (!u) return null;
@@ -1252,6 +1355,29 @@ function screenPointToGround(
     const wz = near[2] + dz * t;
     const wy = sampleHeight(ctx, wx, wz);
     return [wx, wy, wz];
+}
+
+/**
+ * Approximate the ground normal at world position (x, z) from the
+ * heightmap gradient. Cross product of the local east/south vectors
+ * including their height differences produces an outward-facing
+ * normal; we normalise it before returning. Mirrors Spring's
+ * Spring.GetGroundNormal output shape (returns x, y, z, slope).
+ */
+function computeGroundNormal(ctx: SpringAPIContext, x: number, z: number): [number, number, number, number] {
+    const sq = ctx.squareSize || 8;
+    const hL = sampleHeight(ctx, x - sq, z);
+    const hR = sampleHeight(ctx, x + sq, z);
+    const hD = sampleHeight(ctx, x, z - sq);
+    const hU = sampleHeight(ctx, x, z + sq);
+    // dx/dz are local tangents; cross(dz, dx) yields a +Y normal.
+    const nx = (hL - hR);
+    const nz = (hD - hU);
+    const ny = 2 * sq;
+    const len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+    const ix = nx / len, iy = ny / len, iz = nz / len;
+    // Slope = 1 - dot(normal, up) — a flat surface returns 0.
+    return [ix, iy, iz, 1 - iy];
 }
 
 /**
