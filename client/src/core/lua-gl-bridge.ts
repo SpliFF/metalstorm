@@ -108,6 +108,10 @@ export class LuaGLBridge {
     /** Search paths for short texture names (no directory component).
      *  Tried in order against gameBaseUrl. E.g. ["LuaUI/Widgets/chili_old/Skins/Evolved/"] */
     private textureSearchPaths: string[] = [];
+    /** Asset URL overrides keyed by normalised path. Lets the host resolve
+     *  texture paths like "LuaUI/Images/quit.png" to a bundled asset URL
+     *  instead of an HTTP fetch off the game base URL. Used by `?widgetTest`. */
+    private assetOverrides = new Map<string, string>();
 
     constructor(gl: WebGL2RenderingContext, mapSourceUrl: string, engineTex: EngineTextures = {}) {
         this.gl = gl;
@@ -863,7 +867,7 @@ export class LuaGLBridge {
                 width: 1, height: 1,
             });
             const normalised = this.normaliseTexturePath(path);
-            const url = `${this.mapSourceUrl}/${normalised}`;
+            const url = this.resolveTextureUrl(normalised);
             // Fire off async load; replace data when ready.
             void this.loadImageInto(url, handle);
             this.textureCache.set(normalised, handle);
@@ -912,8 +916,17 @@ export class LuaGLBridge {
         return p;
     }
 
+    /** Register an asset URL override. The key is the normalised texture path
+     *  (lowercase, forward-slash). Used by the worker in `?widgetTest` mode
+     *  to map paths like "LuaUI/Images/quit.png" to bundled-asset URLs. */
+    addAssetOverride(path: string, url: string): void {
+        this.assetOverrides.set(this.normaliseTexturePath(path).toLowerCase(), url);
+    }
+
     /** Resolve a texture URL, trying search paths for short names. */
     private resolveTextureUrl(normalised: string): string {
+        const override = this.assetOverrides.get(normalised.toLowerCase());
+        if (override) return override;
         // If the path has a directory component, use standard resolution
         if (normalised.includes('/')) {
             const baseUrl = (normalised.startsWith('LuaUI/') || normalised.startsWith('luaui/'))

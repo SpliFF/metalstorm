@@ -32,6 +32,15 @@ import {
     type FeatureEntry,
 } from './lua-spring-api.js';
 
+// Engine-bundled test widget. Loaded only when `?widgetTest` is active.
+// Bundled here (not in any game's content) so the gl-bridge / Chili
+// pipeline can be exercised against a known-good widget regardless of
+// which game is loaded.
+import dbgRenderTestSrc from '../lua-test-widgets/dbg_render_test.lua?raw';
+import dbgRenderTestQuit from '../lua-test-widgets/quit.png?url';
+import dbgRenderTestTick from '../lua-test-widgets/tick.png?url';
+import dbgRenderTestPanel from '../lua-test-widgets/panel_0001.png?url';
+
 // ── Types ──────────────────────────────────────────────────────────────
 
 interface MapDataTransfer {
@@ -278,6 +287,7 @@ async function init(
     gameId: string,
     lobbyUrl: string,
     mapData: MapDataTransfer,
+    soloWidget?: string,
 ): Promise<void> {
     const baseUrl = `${lobbyUrl}/api/games/data/${gameId}`;
     initBaseUrl = baseUrl;
@@ -310,6 +320,21 @@ async function init(
     bridge = new LuaGLBridge(gl, mapData.mapSourceUrl);
     bridge.setGameBaseUrl(baseUrl);
     postLog(2, '[LuaUI] init step 3/8 done: Lua runtime + GL bridge created');
+
+    // 3b. Inject engine-bundled test widget when solo mode is active.
+    // Source + textures live under client/src/lua-test-widgets/ and ship
+    // with the client bundle, so they're available regardless of which
+    // game is loaded.
+    if (soloWidget === 'dbg_render_test') {
+        vfsRegister('LuaUI/Widgets/dbg_render_test.lua', dbgRenderTestSrc);
+        bridge.addAssetOverride('LuaUI/Images/quit.png', dbgRenderTestQuit);
+        bridge.addAssetOverride('LuaUI/Images/tick.png', dbgRenderTestTick);
+        bridge.addAssetOverride(
+            'LuaUI/Widgets/chili/skins/Carbon/panel_0001.png',
+            dbgRenderTestPanel,
+        );
+        postLog(2, '[LuaUI] Injected engine-bundled dbg_render_test widget + textures');
+    }
 
     const ctx: SpringAPIContext = {
         mapSizeX: mapData.widthElmos,
@@ -432,15 +457,33 @@ async function init(
     const cawidgetsPath = 'LuaUI/cawidgets.lua';
     const cawidgetsSrc = vfsLookup(cawidgetsPath);
     if (cawidgetsSrc) {
-        const patched = cawidgetsSrc.replace(
+        let patched = cawidgetsSrc.replace(
             `if (funcName ~= 'Shutdown') then\n\t\twidgetHandler:RemoveWidget(widget)`,
             `if (funcName ~= 'Shutdown') then\n\t\tif widget.whInfo and widget.whInfo.handler then\n\t\t\tSpring.Log("LuaUI", 0, "Suppressed removal of handler widget: " .. (widget.whInfo.name or "?") .. " error in " .. funcName)\n\t\telse\n\t\t\twidgetHandler:RemoveWidget(widget)\n\t\tend`,
         );
         if (patched !== cawidgetsSrc) {
-            vfsRegister(cawidgetsPath, patched);
             postLog(2, '[LuaUI] Patched cawidgets.lua: handler widgets survive callin errors');
         } else {
             postLog(3, '[LuaUI] cawidgets.lua HandleError patch did not match');
+        }
+
+        // Solo-widget mode: filter widgetFiles down to just the matching
+        // widget so we can isolate gl-bridge / Chili pipeline issues.
+        if (soloWidget) {
+            const needle = soloWidget.replace(/[\\'"`]/g, '');
+            const marker = `local widgetFiles = VFS.DirList(WIDGET_DIRNAME, "*.lua", VFSMODE)`;
+            const filterBlock = `${marker}\n\tdo\n\t\tlocal _solo = "${needle}"\n\t\tlocal _filtered = {}\n\t\tfor _, _f in ipairs(widgetFiles) do\n\t\t\tif tostring(_f):find(_solo, 1, true) then\n\t\t\t\t_filtered[#_filtered+1] = _f\n\t\t\tend\n\t\tend\n\t\twidgetFiles = _filtered\n\t\tSpring.Echo("[LuaUI] Solo widget mode: filtered to " .. #widgetFiles .. " widget(s) matching '" .. _solo .. "'")\n\tend`;
+            const beforeFilter = patched;
+            patched = patched.replace(marker, filterBlock);
+            if (patched !== beforeFilter) {
+                postLog(2, `[LuaUI] Patched cawidgets.lua: solo widget filter '${needle}'`);
+            } else {
+                postLog(3, '[LuaUI] cawidgets.lua solo widget filter — anchor not found');
+            }
+        }
+
+        if (patched !== cawidgetsSrc) {
+            vfsRegister(cawidgetsPath, patched);
         }
     }
 
@@ -1378,7 +1421,7 @@ self.onmessage = async (e: MessageEvent) => {
                         storageCache[k] = v;
                     }
                 }
-                await init(msg.canvas, msg.gameId, msg.lobbyUrl, msg.mapData);
+                await init(msg.canvas, msg.gameId, msg.lobbyUrl, msg.mapData, msg.soloWidget);
             } catch (err) {
                 postLog(4, `Init failed: ${err}`);
                 postToMain({ type: 'error', msg: String(err) });

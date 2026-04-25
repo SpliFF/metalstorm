@@ -29,6 +29,12 @@ export interface WidgetManagerOptions {
     gameId: string;
     /** Base URL for game data (e.g. http://localhost:8011) */
     lobbyUrl: string;
+    /**
+     * If set, the worker patches cawidgets.lua to load only widgets whose
+     * filename contains this string. Used by `?widgetTest` to isolate the
+     * gl bridge / Chili pipeline by running a single test widget.
+     */
+    soloWidget?: string;
 }
 
 // ── Main class ──────────────────────────────────────────────────────────
@@ -129,6 +135,7 @@ export class LuaWidgetManager {
             lobbyUrl: this.options.lobbyUrl,
             mapData,
             storageData,
+            soloWidget: this.options.soloWidget,
         }, [offscreen, mapData.heightmap.buffer]);
 
         // 5. Setup keyboard forwarding + F9 widget list

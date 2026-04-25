@@ -450,7 +450,15 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         // them in a single shared Lua state.
         // URL param `?nowidgets` disables widget loading entirely —
         // useful for isolating widget-induced browser crashes.
-        const widgetsDisabled = new URLSearchParams(location.search).has('nowidgets');
+        // URL param `?widgetTest` (or `=name`) loads only the named
+        // widget (default: dbg_render_test) — for isolating gl bridge
+        // and Chili rendering issues without 100+ widgets in the way.
+        const urlParams = new URLSearchParams(location.search);
+        const widgetsDisabled = urlParams.has('nowidgets');
+        const widgetTestParam = urlParams.get('widgetTest');
+        const soloWidget = widgetTestParam === '' || widgetTestParam === '1' || widgetTestParam === 'true'
+            ? 'dbg_render_test'
+            : widgetTestParam;
         if (gameId && !widgetsDisabled) {
             const mgr = new LuaWidgetManager(scene, camera, {
                 ...map,
@@ -458,6 +466,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             }, {
                 gameId,
                 lobbyUrl: lobbyHttpUrl,
+                soloWidget: soloWidget ?? undefined,
             });
             mgr.setLiveDataSources(rtsCamera, conn);
             mgr.forwardMapFeatures(map.features);
