@@ -66,6 +66,40 @@ export interface UnitDefInfo {
     name: string;
     modelUrl: string;
     textureUrl: string;
+    humanName: string;
+    tooltip: string;
+    wreckName: string;
+    metalCost: number;
+    energyCost: number;
+    buildTime: number;
+    metalMake: number;
+    energyMake: number;
+    metalUpkeep: number;
+    energyUpkeep: number;
+    metalStorage: number;
+    energyStorage: number;
+    extractsMetal: number;
+    health: number;
+    mass: number;
+    radius: number;
+    xsize: number;
+    zsize: number;
+    speed: number;
+    turnRate: number;
+    maxAcc: number;
+    maxDec: number;
+    losRadius: number;
+    airLosRadius: number;
+    radarRadius: number;
+    sonarRadius: number;
+    jammerRadius: number;
+    seismicRadius: number;
+    /** Behaviour bitfield. See `GameUnitDef.flags` in protocol.fbs. */
+    flags: number;
+    buildDistance: number;
+    buildSpeed: number;
+    buildOptions: number[];
+    weaponDefIds: number[];
 }
 
 export interface UnitOrderInfo {
@@ -575,11 +609,52 @@ export class Connection {
                 for (let i = 0; i < fbDefs.defsLength(); i++) {
                     const d = fbDefs.defs(i, new GameUnitDef());
                     if (!d) continue;
+                    const buildOptions: number[] = [];
+                    for (let bi = 0; bi < d.buildOptionsLength(); bi++) {
+                        buildOptions.push(d.buildOptions(bi) ?? 0);
+                    }
+                    const weaponDefIds: number[] = [];
+                    for (let wi = 0; wi < d.weaponDefIdsLength(); wi++) {
+                        weaponDefIds.push(d.weaponDefIds(wi) ?? 0);
+                    }
                     defs.push({
                         defId: d.defId(),
                         name: d.name() ?? '',
                         modelUrl: d.modelUrl() ?? '',
                         textureUrl: d.textureUrl() ?? '',
+                        humanName: d.humanName() ?? '',
+                        tooltip: d.tooltip() ?? '',
+                        wreckName: d.wreckName() ?? '',
+                        metalCost: d.metalCost(),
+                        energyCost: d.energyCost(),
+                        buildTime: d.buildTime(),
+                        metalMake: d.metalMake(),
+                        energyMake: d.energyMake(),
+                        metalUpkeep: d.metalUpkeep(),
+                        energyUpkeep: d.energyUpkeep(),
+                        metalStorage: d.metalStorage(),
+                        energyStorage: d.energyStorage(),
+                        extractsMetal: d.extractsMetal(),
+                        health: d.health(),
+                        mass: d.mass(),
+                        radius: d.radius(),
+                        xsize: d.xsize(),
+                        zsize: d.zsize(),
+                        speed: d.speed(),
+                        turnRate: d.turnRate(),
+                        maxAcc: d.maxAcc(),
+                        maxDec: d.maxDec(),
+                        losRadius: d.losRadius(),
+                        airLosRadius: d.airLosRadius(),
+                        radarRadius: d.radarRadius(),
+                        sonarRadius: d.sonarRadius(),
+                        jammerRadius: d.jammerRadius(),
+                        seismicRadius: d.seismicRadius(),
+                        flags: d.flags(),
+                        buildDistance: d.buildDistance(),
+                        buildSpeed: d.buildSpeed(),
+                        buildOptions,
+                        weaponDefIds,
                     });
                 }
                 console.log(`[connection] received ${defs.length} unit def(s)`);

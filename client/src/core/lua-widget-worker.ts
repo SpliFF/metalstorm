@@ -287,7 +287,25 @@ const liveState: LiveState = createDefaultLiveState();
 // safe defaults for the fields ZK widgets routinely access (health,
 // metalCost, customParams, isFactory, …) so reads don't crash. Real
 // def values will need a richer protocol later.
-interface MinimalUnitDefWire { defId: number; name: string; modelUrl: string; textureUrl: string }
+interface MinimalUnitDefWire {
+    defId: number; name: string; modelUrl: string; textureUrl: string;
+    humanName?: string; tooltip?: string; wreckName?: string;
+    metalCost?: number; energyCost?: number; buildTime?: number;
+    metalMake?: number; energyMake?: number;
+    metalUpkeep?: number; energyUpkeep?: number;
+    metalStorage?: number; energyStorage?: number;
+    extractsMetal?: number;
+    health?: number; mass?: number; radius?: number;
+    xsize?: number; zsize?: number;
+    speed?: number; turnRate?: number; maxAcc?: number; maxDec?: number;
+    losRadius?: number; airLosRadius?: number;
+    radarRadius?: number; sonarRadius?: number;
+    jammerRadius?: number; seismicRadius?: number;
+    /** Behaviour bitfield (bit assignments mirror schemas/protocol.fbs). */
+    flags?: number;
+    buildDistance?: number; buildSpeed?: number;
+    buildOptions?: number[]; weaponDefIds?: number[];
+}
 interface MinimalWeaponDefWire {
     defId: number; name: string; visualType: number;
     projectileSpeed: number; range: number; aoe: number; size: number;
@@ -297,35 +315,110 @@ interface MinimalWeaponDefWire {
 const unitDefMap = new Map<number, MinimalUnitDefWire>();
 const weaponDefMap = new Map<number, MinimalWeaponDefWire>();
 
-/** Build the rich Lua-shaped UnitDef table from the wire form + defaults.
- *  These defaults match what ZK widgets typically branch on; widgets
- *  that need real values get them once the protocol carries them. */
+/** Build the rich Lua-shaped UnitDef table from the wire form. The
+ *  Tier 3 wire protocol carries real values for cost, health, sensor
+ *  ranges, footprint, speed, and behaviour flags; we surface them here
+ *  using the field names ZK widgets consume. Anything still unknown to
+ *  the wire (yardmap, customParams, moveDef details) keeps a safe
+ *  default so widgets don't crash on first read. */
 function buildLuaUnitDef(d: MinimalUnitDefWire): Record<string, LuaValue> {
+    const flags = d.flags ?? 0;
+    const has = (bit: number) => (flags & (1 << bit)) !== 0;
+    const isBuilder    = has(0);
+    const canMove      = has(1);
+    const canFly       = has(2);
+    const canSubmerge  = has(3);
+    const floatOnWater = has(4);
+    const canCloak     = has(5);
+    const canKamikaze  = has(6);
+    const canManualFire= has(7);
+    const stealth      = has(8);
+    const sonarStealth = has(9);
+    const reclaimable  = has(10);
+    const isFactory    = has(11);
+    const isBuilding   = has(12);
+    const isAirUnit    = has(13);
+    const isExtractor  = has(14);
+    const hasWeapons   = has(15);
+
+    // Spring's UnitDefs.buildOptions is a 1-indexed sequence keyed by
+    // slot. Widgets like the build menu iterate `for i, defID in ipairs`.
+    const buildOptionsSeq: number[] = d.buildOptions ?? [];
+
+    // weapons table — Spring shape is { [1] = { weaponDef = id, ... }, ... }.
+    // We only carry the ID for now; widgets that read weapons[i].weaponDef
+    // will work, others fall through harmlessly.
+    const weapons: Record<number, LuaValue> = {};
+    const weaponDefIds = d.weaponDefIds ?? [];
+    for (let i = 0; i < weaponDefIds.length; i++) {
+        weapons[i + 1] = { weaponDef: weaponDefIds[i] };
+    }
+
     return {
-        id: d.defId, name: d.name, humanName: d.name, tooltip: d.name,
-        wreckName: '', deathExplosion: '', selfDExplosion: '',
+        id: d.defId, name: d.name,
+        humanName: d.humanName || d.name,
+        tooltip: d.tooltip || d.name,
+        wreckName: d.wreckName ?? '',
+        deathExplosion: '', selfDExplosion: '',
         modelUrl: d.modelUrl, textureUrl: d.textureUrl,
-        // Stats — placeholder values keyed off "average unit" expectations.
-        health: 1000, mass: 100, metalCost: 100, energyCost: 100, buildTime: 100,
-        radius: 30, height: 30, speed: 50, maxAcc: 0.1, maxDec: 0.1,
-        turnRate: 1000, brakeRate: 0.1, autoHeal: 0,
-        sightDistance: 500, airSightDistance: 500, radarDistance: 0,
-        sonarDistance: 0, sonarJamDistance: 0, jammerDistance: 0,
-        seismicDistance: 0, stealth: false, sonarStealth: false,
-        // Categorical flags — all false so widgets that test them skip
-        // their special-case logic safely.
-        isFactory: false, isBuilder: false, isAirUnit: false,
-        isImmobile: false, isBuilding: false, isExtractor: false,
-        canMove: true, canFly: false, canSubmerge: false, canHover: false,
-        canFight: true, canPatrol: true, canStop: true, canGuard: true,
-        canAttack: true, canRepair: false, canReclaim: false, canCapture: false,
-        canResurrect: false, canCloak: false, canKamikaze: false,
-        canManualFire: false, canSelfD: true,
-        // Cost / build options
-        buildOptions: {} as Record<string, LuaValue>,
-        weapons: {} as Record<string, LuaValue>,
+
+        // Stats from the wire.
+        health: d.health ?? 0,
+        mass: d.mass ?? 0,
+        metalCost: d.metalCost ?? 0,
+        energyCost: d.energyCost ?? 0,
+        buildTime: d.buildTime ?? 0,
+        radius: d.radius ?? 0,
+        height: d.radius ?? 0,
+        speed: d.speed ?? 0,
+        maxAcc: d.maxAcc ?? 0,
+        maxDec: d.maxDec ?? 0,
+        turnRate: d.turnRate ?? 0,
+        brakeRate: d.maxDec ?? 0,
+        autoHeal: 0,
+
+        // Footprint.
+        xsize: d.xsize ?? 0,
+        zsize: d.zsize ?? 0,
+
+        // Economy.
+        metalMake: d.metalMake ?? 0,
+        energyMake: d.energyMake ?? 0,
+        metalUpkeep: d.metalUpkeep ?? 0,
+        energyUpkeep: d.energyUpkeep ?? 0,
+        metalStorage: d.metalStorage ?? 0,
+        energyStorage: d.energyStorage ?? 0,
+        extractsMetal: d.extractsMetal ?? 0,
+        extractRange: 0,
+
+        // Sensor ranges.
+        sightDistance: d.losRadius ?? 0,
+        airSightDistance: d.airLosRadius ?? 0,
+        radarDistance: d.radarRadius ?? 0,
+        sonarDistance: d.sonarRadius ?? 0,
+        sonarJamDistance: 0,
+        jammerDistance: d.jammerRadius ?? 0,
+        seismicDistance: d.seismicRadius ?? 0,
+        stealth, sonarStealth,
+
+        // Categorical flags.
+        isFactory, isBuilder, isAirUnit, isImmobile: !canMove,
+        isBuilding, isExtractor, reclaimable,
+        canMove, canFly, canSubmerge, canHover: false,
+        canFight: hasWeapons, canPatrol: canMove, canStop: true, canGuard: true,
+        canAttack: hasWeapons, canRepair: isBuilder, canReclaim: isBuilder,
+        canCapture: false, canResurrect: false,
+        canCloak, canKamikaze, canManualFire, canSelfD: true,
+        floatOnWater,
+
+        // Builder specifics.
+        buildDistance: d.buildDistance ?? 0,
+        buildSpeed: d.buildSpeed ?? 0,
+        buildOptions: buildOptionsSeq,
+        weapons,
+
+        // Tables ZK reads but doesn't always require populated.
         customParams: {} as Record<string, LuaValue>,
-        // Tag tables ZK reads
         modCategories: {} as Record<string, LuaValue>,
         moveDef: {} as Record<string, LuaValue>,
     };

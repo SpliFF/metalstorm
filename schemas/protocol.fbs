@@ -595,6 +595,72 @@ table GameUnitDef {
     name: string;
     model_url: string;
     texture_url: string;
+
+    // ── Tier 3: human-readable + economy ───────────────────────────
+    human_name: string;            // SolidObjectDef.humanName
+    tooltip: string;
+    wreck_name: string;
+    metal_cost: float = 0;
+    energy_cost: float = 0;
+    build_time: float = 0;
+    metal_make: float = 0;          // resourceMake.metal
+    energy_make: float = 0;         // resourceMake.energy
+    metal_upkeep: float = 0;
+    energy_upkeep: float = 0;
+    metal_storage: float = 0;
+    energy_storage: float = 0;
+    extracts_metal: float = 0;
+    health: float = 0;              // SolidObjectDef.health (max HP)
+    mass: float = 0;
+    radius: float = 0;              // model radius
+
+    // ── Footprint + sizing ─────────────────────────────────────────
+    xsize: int32 = 0;
+    zsize: int32 = 0;
+
+    // ── Movement ───────────────────────────────────────────────────
+    speed: float = 0;
+    turn_rate: float = 0;
+    max_acc: float = 0;
+    max_dec: float = 0;
+
+    // ── Sensor ranges ──────────────────────────────────────────────
+    los_radius: float = 0;
+    air_los_radius: float = 0;
+    radar_radius: int32 = 0;
+    sonar_radius: int32 = 0;
+    jammer_radius: int32 = 0;
+    seismic_radius: int32 = 0;
+
+    // ── Behaviour flags (packed into a bitfield to save bytes) ─────
+    // bit 0: builder
+    // bit 1: canMove
+    // bit 2: canFly
+    // bit 3: canSubmerge
+    // bit 4: floatOnWater
+    // bit 5: canCloak
+    // bit 6: canKamikaze
+    // bit 7: canManualFire
+    // bit 8: stealth
+    // bit 9: sonarStealth
+    // bit10: reclaimable (from SolidObjectDef)
+    // bit11: isFactory   (derived: IsFactoryUnit)
+    // bit12: isBuilding  (derived: IsBuildingUnit)
+    // bit13: isAirUnit   (derived)
+    // bit14: isExtractor (derived: IsExtractorUnit)
+    // bit15: hasWeapons  (derived)
+    flags: uint32 = 0;
+
+    // ── Builder-specific ───────────────────────────────────────────
+    build_distance: float = 0;
+    build_speed: float = 0;
+    /// def_ids of every unit this builder can construct.
+    build_options: [uint16];
+
+    /// def_ids of weapons this unit carries (in MAX_WEAPONS slots,
+    /// 0 for unused). Indexes into the weapondef table the client
+    /// already has via GameWeaponDef streaming.
+    weapon_def_ids: [uint16];
 }
 
 /// Sent by the game server after successful auth, before entity state

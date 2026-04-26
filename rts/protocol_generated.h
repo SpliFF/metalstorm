@@ -5483,7 +5483,40 @@ struct GameUnitDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_DEF_ID = 4,
     VT_NAME = 6,
     VT_MODEL_URL = 8,
-    VT_TEXTURE_URL = 10
+    VT_TEXTURE_URL = 10,
+    VT_HUMAN_NAME = 12,
+    VT_TOOLTIP = 14,
+    VT_WRECK_NAME = 16,
+    VT_METAL_COST = 18,
+    VT_ENERGY_COST = 20,
+    VT_BUILD_TIME = 22,
+    VT_METAL_MAKE = 24,
+    VT_ENERGY_MAKE = 26,
+    VT_METAL_UPKEEP = 28,
+    VT_ENERGY_UPKEEP = 30,
+    VT_METAL_STORAGE = 32,
+    VT_ENERGY_STORAGE = 34,
+    VT_EXTRACTS_METAL = 36,
+    VT_HEALTH = 38,
+    VT_MASS = 40,
+    VT_RADIUS = 42,
+    VT_XSIZE = 44,
+    VT_ZSIZE = 46,
+    VT_SPEED = 48,
+    VT_TURN_RATE = 50,
+    VT_MAX_ACC = 52,
+    VT_MAX_DEC = 54,
+    VT_LOS_RADIUS = 56,
+    VT_AIR_LOS_RADIUS = 58,
+    VT_RADAR_RADIUS = 60,
+    VT_SONAR_RADIUS = 62,
+    VT_JAMMER_RADIUS = 64,
+    VT_SEISMIC_RADIUS = 66,
+    VT_FLAGS = 68,
+    VT_BUILD_DISTANCE = 70,
+    VT_BUILD_SPEED = 72,
+    VT_BUILD_OPTIONS = 74,
+    VT_WEAPON_DEF_IDS = 76
   };
   uint16_t def_id() const {
     return GetField<uint16_t>(VT_DEF_ID, 0);
@@ -5497,6 +5530,109 @@ struct GameUnitDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::String *texture_url() const {
     return GetPointer<const ::flatbuffers::String *>(VT_TEXTURE_URL);
   }
+  const ::flatbuffers::String *human_name() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_HUMAN_NAME);
+  }
+  const ::flatbuffers::String *tooltip() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_TOOLTIP);
+  }
+  const ::flatbuffers::String *wreck_name() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_WRECK_NAME);
+  }
+  float metal_cost() const {
+    return GetField<float>(VT_METAL_COST, 0.0f);
+  }
+  float energy_cost() const {
+    return GetField<float>(VT_ENERGY_COST, 0.0f);
+  }
+  float build_time() const {
+    return GetField<float>(VT_BUILD_TIME, 0.0f);
+  }
+  float metal_make() const {
+    return GetField<float>(VT_METAL_MAKE, 0.0f);
+  }
+  float energy_make() const {
+    return GetField<float>(VT_ENERGY_MAKE, 0.0f);
+  }
+  float metal_upkeep() const {
+    return GetField<float>(VT_METAL_UPKEEP, 0.0f);
+  }
+  float energy_upkeep() const {
+    return GetField<float>(VT_ENERGY_UPKEEP, 0.0f);
+  }
+  float metal_storage() const {
+    return GetField<float>(VT_METAL_STORAGE, 0.0f);
+  }
+  float energy_storage() const {
+    return GetField<float>(VT_ENERGY_STORAGE, 0.0f);
+  }
+  float extracts_metal() const {
+    return GetField<float>(VT_EXTRACTS_METAL, 0.0f);
+  }
+  float health() const {
+    return GetField<float>(VT_HEALTH, 0.0f);
+  }
+  float mass() const {
+    return GetField<float>(VT_MASS, 0.0f);
+  }
+  float radius() const {
+    return GetField<float>(VT_RADIUS, 0.0f);
+  }
+  int32_t xsize() const {
+    return GetField<int32_t>(VT_XSIZE, 0);
+  }
+  int32_t zsize() const {
+    return GetField<int32_t>(VT_ZSIZE, 0);
+  }
+  float speed() const {
+    return GetField<float>(VT_SPEED, 0.0f);
+  }
+  float turn_rate() const {
+    return GetField<float>(VT_TURN_RATE, 0.0f);
+  }
+  float max_acc() const {
+    return GetField<float>(VT_MAX_ACC, 0.0f);
+  }
+  float max_dec() const {
+    return GetField<float>(VT_MAX_DEC, 0.0f);
+  }
+  float los_radius() const {
+    return GetField<float>(VT_LOS_RADIUS, 0.0f);
+  }
+  float air_los_radius() const {
+    return GetField<float>(VT_AIR_LOS_RADIUS, 0.0f);
+  }
+  int32_t radar_radius() const {
+    return GetField<int32_t>(VT_RADAR_RADIUS, 0);
+  }
+  int32_t sonar_radius() const {
+    return GetField<int32_t>(VT_SONAR_RADIUS, 0);
+  }
+  int32_t jammer_radius() const {
+    return GetField<int32_t>(VT_JAMMER_RADIUS, 0);
+  }
+  int32_t seismic_radius() const {
+    return GetField<int32_t>(VT_SEISMIC_RADIUS, 0);
+  }
+  uint32_t flags() const {
+    return GetField<uint32_t>(VT_FLAGS, 0);
+  }
+  float build_distance() const {
+    return GetField<float>(VT_BUILD_DISTANCE, 0.0f);
+  }
+  float build_speed() const {
+    return GetField<float>(VT_BUILD_SPEED, 0.0f);
+  }
+  /// def_ids of every unit this builder can construct.
+  const ::flatbuffers::Vector<uint16_t> *build_options() const {
+    return GetPointer<const ::flatbuffers::Vector<uint16_t> *>(VT_BUILD_OPTIONS);
+  }
+  /// def_ids of weapons this unit carries (in MAX_WEAPONS slots,
+  /// 0 for unused). Indexes into the weapondef table the client
+  /// already has via GameWeaponDef streaming.
+  const ::flatbuffers::Vector<uint16_t> *weapon_def_ids() const {
+    return GetPointer<const ::flatbuffers::Vector<uint16_t> *>(VT_WEAPON_DEF_IDS);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint16_t>(verifier, VT_DEF_ID, 2) &&
@@ -5506,6 +5642,44 @@ struct GameUnitDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(model_url()) &&
            VerifyOffset(verifier, VT_TEXTURE_URL) &&
            verifier.VerifyString(texture_url()) &&
+           VerifyOffset(verifier, VT_HUMAN_NAME) &&
+           verifier.VerifyString(human_name()) &&
+           VerifyOffset(verifier, VT_TOOLTIP) &&
+           verifier.VerifyString(tooltip()) &&
+           VerifyOffset(verifier, VT_WRECK_NAME) &&
+           verifier.VerifyString(wreck_name()) &&
+           VerifyField<float>(verifier, VT_METAL_COST, 4) &&
+           VerifyField<float>(verifier, VT_ENERGY_COST, 4) &&
+           VerifyField<float>(verifier, VT_BUILD_TIME, 4) &&
+           VerifyField<float>(verifier, VT_METAL_MAKE, 4) &&
+           VerifyField<float>(verifier, VT_ENERGY_MAKE, 4) &&
+           VerifyField<float>(verifier, VT_METAL_UPKEEP, 4) &&
+           VerifyField<float>(verifier, VT_ENERGY_UPKEEP, 4) &&
+           VerifyField<float>(verifier, VT_METAL_STORAGE, 4) &&
+           VerifyField<float>(verifier, VT_ENERGY_STORAGE, 4) &&
+           VerifyField<float>(verifier, VT_EXTRACTS_METAL, 4) &&
+           VerifyField<float>(verifier, VT_HEALTH, 4) &&
+           VerifyField<float>(verifier, VT_MASS, 4) &&
+           VerifyField<float>(verifier, VT_RADIUS, 4) &&
+           VerifyField<int32_t>(verifier, VT_XSIZE, 4) &&
+           VerifyField<int32_t>(verifier, VT_ZSIZE, 4) &&
+           VerifyField<float>(verifier, VT_SPEED, 4) &&
+           VerifyField<float>(verifier, VT_TURN_RATE, 4) &&
+           VerifyField<float>(verifier, VT_MAX_ACC, 4) &&
+           VerifyField<float>(verifier, VT_MAX_DEC, 4) &&
+           VerifyField<float>(verifier, VT_LOS_RADIUS, 4) &&
+           VerifyField<float>(verifier, VT_AIR_LOS_RADIUS, 4) &&
+           VerifyField<int32_t>(verifier, VT_RADAR_RADIUS, 4) &&
+           VerifyField<int32_t>(verifier, VT_SONAR_RADIUS, 4) &&
+           VerifyField<int32_t>(verifier, VT_JAMMER_RADIUS, 4) &&
+           VerifyField<int32_t>(verifier, VT_SEISMIC_RADIUS, 4) &&
+           VerifyField<uint32_t>(verifier, VT_FLAGS, 4) &&
+           VerifyField<float>(verifier, VT_BUILD_DISTANCE, 4) &&
+           VerifyField<float>(verifier, VT_BUILD_SPEED, 4) &&
+           VerifyOffset(verifier, VT_BUILD_OPTIONS) &&
+           verifier.VerifyVector(build_options()) &&
+           VerifyOffset(verifier, VT_WEAPON_DEF_IDS) &&
+           verifier.VerifyVector(weapon_def_ids()) &&
            verifier.EndTable();
   }
 };
@@ -5526,6 +5700,105 @@ struct GameUnitDefBuilder {
   void add_texture_url(::flatbuffers::Offset<::flatbuffers::String> texture_url) {
     fbb_.AddOffset(GameUnitDef::VT_TEXTURE_URL, texture_url);
   }
+  void add_human_name(::flatbuffers::Offset<::flatbuffers::String> human_name) {
+    fbb_.AddOffset(GameUnitDef::VT_HUMAN_NAME, human_name);
+  }
+  void add_tooltip(::flatbuffers::Offset<::flatbuffers::String> tooltip) {
+    fbb_.AddOffset(GameUnitDef::VT_TOOLTIP, tooltip);
+  }
+  void add_wreck_name(::flatbuffers::Offset<::flatbuffers::String> wreck_name) {
+    fbb_.AddOffset(GameUnitDef::VT_WRECK_NAME, wreck_name);
+  }
+  void add_metal_cost(float metal_cost) {
+    fbb_.AddElement<float>(GameUnitDef::VT_METAL_COST, metal_cost, 0.0f);
+  }
+  void add_energy_cost(float energy_cost) {
+    fbb_.AddElement<float>(GameUnitDef::VT_ENERGY_COST, energy_cost, 0.0f);
+  }
+  void add_build_time(float build_time) {
+    fbb_.AddElement<float>(GameUnitDef::VT_BUILD_TIME, build_time, 0.0f);
+  }
+  void add_metal_make(float metal_make) {
+    fbb_.AddElement<float>(GameUnitDef::VT_METAL_MAKE, metal_make, 0.0f);
+  }
+  void add_energy_make(float energy_make) {
+    fbb_.AddElement<float>(GameUnitDef::VT_ENERGY_MAKE, energy_make, 0.0f);
+  }
+  void add_metal_upkeep(float metal_upkeep) {
+    fbb_.AddElement<float>(GameUnitDef::VT_METAL_UPKEEP, metal_upkeep, 0.0f);
+  }
+  void add_energy_upkeep(float energy_upkeep) {
+    fbb_.AddElement<float>(GameUnitDef::VT_ENERGY_UPKEEP, energy_upkeep, 0.0f);
+  }
+  void add_metal_storage(float metal_storage) {
+    fbb_.AddElement<float>(GameUnitDef::VT_METAL_STORAGE, metal_storage, 0.0f);
+  }
+  void add_energy_storage(float energy_storage) {
+    fbb_.AddElement<float>(GameUnitDef::VT_ENERGY_STORAGE, energy_storage, 0.0f);
+  }
+  void add_extracts_metal(float extracts_metal) {
+    fbb_.AddElement<float>(GameUnitDef::VT_EXTRACTS_METAL, extracts_metal, 0.0f);
+  }
+  void add_health(float health) {
+    fbb_.AddElement<float>(GameUnitDef::VT_HEALTH, health, 0.0f);
+  }
+  void add_mass(float mass) {
+    fbb_.AddElement<float>(GameUnitDef::VT_MASS, mass, 0.0f);
+  }
+  void add_radius(float radius) {
+    fbb_.AddElement<float>(GameUnitDef::VT_RADIUS, radius, 0.0f);
+  }
+  void add_xsize(int32_t xsize) {
+    fbb_.AddElement<int32_t>(GameUnitDef::VT_XSIZE, xsize, 0);
+  }
+  void add_zsize(int32_t zsize) {
+    fbb_.AddElement<int32_t>(GameUnitDef::VT_ZSIZE, zsize, 0);
+  }
+  void add_speed(float speed) {
+    fbb_.AddElement<float>(GameUnitDef::VT_SPEED, speed, 0.0f);
+  }
+  void add_turn_rate(float turn_rate) {
+    fbb_.AddElement<float>(GameUnitDef::VT_TURN_RATE, turn_rate, 0.0f);
+  }
+  void add_max_acc(float max_acc) {
+    fbb_.AddElement<float>(GameUnitDef::VT_MAX_ACC, max_acc, 0.0f);
+  }
+  void add_max_dec(float max_dec) {
+    fbb_.AddElement<float>(GameUnitDef::VT_MAX_DEC, max_dec, 0.0f);
+  }
+  void add_los_radius(float los_radius) {
+    fbb_.AddElement<float>(GameUnitDef::VT_LOS_RADIUS, los_radius, 0.0f);
+  }
+  void add_air_los_radius(float air_los_radius) {
+    fbb_.AddElement<float>(GameUnitDef::VT_AIR_LOS_RADIUS, air_los_radius, 0.0f);
+  }
+  void add_radar_radius(int32_t radar_radius) {
+    fbb_.AddElement<int32_t>(GameUnitDef::VT_RADAR_RADIUS, radar_radius, 0);
+  }
+  void add_sonar_radius(int32_t sonar_radius) {
+    fbb_.AddElement<int32_t>(GameUnitDef::VT_SONAR_RADIUS, sonar_radius, 0);
+  }
+  void add_jammer_radius(int32_t jammer_radius) {
+    fbb_.AddElement<int32_t>(GameUnitDef::VT_JAMMER_RADIUS, jammer_radius, 0);
+  }
+  void add_seismic_radius(int32_t seismic_radius) {
+    fbb_.AddElement<int32_t>(GameUnitDef::VT_SEISMIC_RADIUS, seismic_radius, 0);
+  }
+  void add_flags(uint32_t flags) {
+    fbb_.AddElement<uint32_t>(GameUnitDef::VT_FLAGS, flags, 0);
+  }
+  void add_build_distance(float build_distance) {
+    fbb_.AddElement<float>(GameUnitDef::VT_BUILD_DISTANCE, build_distance, 0.0f);
+  }
+  void add_build_speed(float build_speed) {
+    fbb_.AddElement<float>(GameUnitDef::VT_BUILD_SPEED, build_speed, 0.0f);
+  }
+  void add_build_options(::flatbuffers::Offset<::flatbuffers::Vector<uint16_t>> build_options) {
+    fbb_.AddOffset(GameUnitDef::VT_BUILD_OPTIONS, build_options);
+  }
+  void add_weapon_def_ids(::flatbuffers::Offset<::flatbuffers::Vector<uint16_t>> weapon_def_ids) {
+    fbb_.AddOffset(GameUnitDef::VT_WEAPON_DEF_IDS, weapon_def_ids);
+  }
   explicit GameUnitDefBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -5542,8 +5815,74 @@ inline ::flatbuffers::Offset<GameUnitDef> CreateGameUnitDef(
     uint16_t def_id = 0,
     ::flatbuffers::Offset<::flatbuffers::String> name = 0,
     ::flatbuffers::Offset<::flatbuffers::String> model_url = 0,
-    ::flatbuffers::Offset<::flatbuffers::String> texture_url = 0) {
+    ::flatbuffers::Offset<::flatbuffers::String> texture_url = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> human_name = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> tooltip = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> wreck_name = 0,
+    float metal_cost = 0.0f,
+    float energy_cost = 0.0f,
+    float build_time = 0.0f,
+    float metal_make = 0.0f,
+    float energy_make = 0.0f,
+    float metal_upkeep = 0.0f,
+    float energy_upkeep = 0.0f,
+    float metal_storage = 0.0f,
+    float energy_storage = 0.0f,
+    float extracts_metal = 0.0f,
+    float health = 0.0f,
+    float mass = 0.0f,
+    float radius = 0.0f,
+    int32_t xsize = 0,
+    int32_t zsize = 0,
+    float speed = 0.0f,
+    float turn_rate = 0.0f,
+    float max_acc = 0.0f,
+    float max_dec = 0.0f,
+    float los_radius = 0.0f,
+    float air_los_radius = 0.0f,
+    int32_t radar_radius = 0,
+    int32_t sonar_radius = 0,
+    int32_t jammer_radius = 0,
+    int32_t seismic_radius = 0,
+    uint32_t flags = 0,
+    float build_distance = 0.0f,
+    float build_speed = 0.0f,
+    ::flatbuffers::Offset<::flatbuffers::Vector<uint16_t>> build_options = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<uint16_t>> weapon_def_ids = 0) {
   GameUnitDefBuilder builder_(_fbb);
+  builder_.add_weapon_def_ids(weapon_def_ids);
+  builder_.add_build_options(build_options);
+  builder_.add_build_speed(build_speed);
+  builder_.add_build_distance(build_distance);
+  builder_.add_flags(flags);
+  builder_.add_seismic_radius(seismic_radius);
+  builder_.add_jammer_radius(jammer_radius);
+  builder_.add_sonar_radius(sonar_radius);
+  builder_.add_radar_radius(radar_radius);
+  builder_.add_air_los_radius(air_los_radius);
+  builder_.add_los_radius(los_radius);
+  builder_.add_max_dec(max_dec);
+  builder_.add_max_acc(max_acc);
+  builder_.add_turn_rate(turn_rate);
+  builder_.add_speed(speed);
+  builder_.add_zsize(zsize);
+  builder_.add_xsize(xsize);
+  builder_.add_radius(radius);
+  builder_.add_mass(mass);
+  builder_.add_health(health);
+  builder_.add_extracts_metal(extracts_metal);
+  builder_.add_energy_storage(energy_storage);
+  builder_.add_metal_storage(metal_storage);
+  builder_.add_energy_upkeep(energy_upkeep);
+  builder_.add_metal_upkeep(metal_upkeep);
+  builder_.add_energy_make(energy_make);
+  builder_.add_metal_make(metal_make);
+  builder_.add_build_time(build_time);
+  builder_.add_energy_cost(energy_cost);
+  builder_.add_metal_cost(metal_cost);
+  builder_.add_wreck_name(wreck_name);
+  builder_.add_tooltip(tooltip);
+  builder_.add_human_name(human_name);
   builder_.add_texture_url(texture_url);
   builder_.add_model_url(model_url);
   builder_.add_name(name);
@@ -5556,16 +5895,87 @@ inline ::flatbuffers::Offset<GameUnitDef> CreateGameUnitDefDirect(
     uint16_t def_id = 0,
     const char *name = nullptr,
     const char *model_url = nullptr,
-    const char *texture_url = nullptr) {
+    const char *texture_url = nullptr,
+    const char *human_name = nullptr,
+    const char *tooltip = nullptr,
+    const char *wreck_name = nullptr,
+    float metal_cost = 0.0f,
+    float energy_cost = 0.0f,
+    float build_time = 0.0f,
+    float metal_make = 0.0f,
+    float energy_make = 0.0f,
+    float metal_upkeep = 0.0f,
+    float energy_upkeep = 0.0f,
+    float metal_storage = 0.0f,
+    float energy_storage = 0.0f,
+    float extracts_metal = 0.0f,
+    float health = 0.0f,
+    float mass = 0.0f,
+    float radius = 0.0f,
+    int32_t xsize = 0,
+    int32_t zsize = 0,
+    float speed = 0.0f,
+    float turn_rate = 0.0f,
+    float max_acc = 0.0f,
+    float max_dec = 0.0f,
+    float los_radius = 0.0f,
+    float air_los_radius = 0.0f,
+    int32_t radar_radius = 0,
+    int32_t sonar_radius = 0,
+    int32_t jammer_radius = 0,
+    int32_t seismic_radius = 0,
+    uint32_t flags = 0,
+    float build_distance = 0.0f,
+    float build_speed = 0.0f,
+    const std::vector<uint16_t> *build_options = nullptr,
+    const std::vector<uint16_t> *weapon_def_ids = nullptr) {
   auto name__ = name ? _fbb.CreateString(name) : 0;
   auto model_url__ = model_url ? _fbb.CreateString(model_url) : 0;
   auto texture_url__ = texture_url ? _fbb.CreateString(texture_url) : 0;
+  auto human_name__ = human_name ? _fbb.CreateString(human_name) : 0;
+  auto tooltip__ = tooltip ? _fbb.CreateString(tooltip) : 0;
+  auto wreck_name__ = wreck_name ? _fbb.CreateString(wreck_name) : 0;
+  auto build_options__ = build_options ? _fbb.CreateVector<uint16_t>(*build_options) : 0;
+  auto weapon_def_ids__ = weapon_def_ids ? _fbb.CreateVector<uint16_t>(*weapon_def_ids) : 0;
   return SpringWeb::CreateGameUnitDef(
       _fbb,
       def_id,
       name__,
       model_url__,
-      texture_url__);
+      texture_url__,
+      human_name__,
+      tooltip__,
+      wreck_name__,
+      metal_cost,
+      energy_cost,
+      build_time,
+      metal_make,
+      energy_make,
+      metal_upkeep,
+      energy_upkeep,
+      metal_storage,
+      energy_storage,
+      extracts_metal,
+      health,
+      mass,
+      radius,
+      xsize,
+      zsize,
+      speed,
+      turn_rate,
+      max_acc,
+      max_dec,
+      los_radius,
+      air_los_radius,
+      radar_radius,
+      sonar_radius,
+      jammer_radius,
+      seismic_radius,
+      flags,
+      build_distance,
+      build_speed,
+      build_options__,
+      weapon_def_ids__);
 }
 
 /// Sent by the game server after successful auth, before entity state

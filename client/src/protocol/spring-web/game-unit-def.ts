@@ -61,8 +61,207 @@ textureUrl(optionalEncoding?:any):string|Uint8Array|null {
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
+humanName():string|null
+humanName(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+humanName(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 12);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
+tooltip():string|null
+tooltip(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+tooltip(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 14);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
+wreckName():string|null
+wreckName(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+wreckName(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 16);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
+metalCost():number {
+  const offset = this.bb!.__offset(this.bb_pos, 18);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+energyCost():number {
+  const offset = this.bb!.__offset(this.bb_pos, 20);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+buildTime():number {
+  const offset = this.bb!.__offset(this.bb_pos, 22);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+metalMake():number {
+  const offset = this.bb!.__offset(this.bb_pos, 24);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+energyMake():number {
+  const offset = this.bb!.__offset(this.bb_pos, 26);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+metalUpkeep():number {
+  const offset = this.bb!.__offset(this.bb_pos, 28);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+energyUpkeep():number {
+  const offset = this.bb!.__offset(this.bb_pos, 30);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+metalStorage():number {
+  const offset = this.bb!.__offset(this.bb_pos, 32);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+energyStorage():number {
+  const offset = this.bb!.__offset(this.bb_pos, 34);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+extractsMetal():number {
+  const offset = this.bb!.__offset(this.bb_pos, 36);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+health():number {
+  const offset = this.bb!.__offset(this.bb_pos, 38);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+mass():number {
+  const offset = this.bb!.__offset(this.bb_pos, 40);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+radius():number {
+  const offset = this.bb!.__offset(this.bb_pos, 42);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+xsize():number {
+  const offset = this.bb!.__offset(this.bb_pos, 44);
+  return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
+}
+
+zsize():number {
+  const offset = this.bb!.__offset(this.bb_pos, 46);
+  return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
+}
+
+speed():number {
+  const offset = this.bb!.__offset(this.bb_pos, 48);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+turnRate():number {
+  const offset = this.bb!.__offset(this.bb_pos, 50);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+maxAcc():number {
+  const offset = this.bb!.__offset(this.bb_pos, 52);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+maxDec():number {
+  const offset = this.bb!.__offset(this.bb_pos, 54);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+losRadius():number {
+  const offset = this.bb!.__offset(this.bb_pos, 56);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+airLosRadius():number {
+  const offset = this.bb!.__offset(this.bb_pos, 58);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+radarRadius():number {
+  const offset = this.bb!.__offset(this.bb_pos, 60);
+  return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
+}
+
+sonarRadius():number {
+  const offset = this.bb!.__offset(this.bb_pos, 62);
+  return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
+}
+
+jammerRadius():number {
+  const offset = this.bb!.__offset(this.bb_pos, 64);
+  return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
+}
+
+seismicRadius():number {
+  const offset = this.bb!.__offset(this.bb_pos, 66);
+  return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
+}
+
+flags():number {
+  const offset = this.bb!.__offset(this.bb_pos, 68);
+  return offset ? this.bb!.readUint32(this.bb_pos + offset) : 0;
+}
+
+buildDistance():number {
+  const offset = this.bb!.__offset(this.bb_pos, 70);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+buildSpeed():number {
+  const offset = this.bb!.__offset(this.bb_pos, 72);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+/**
+ * def_ids of every unit this builder can construct.
+ */
+buildOptions(index: number):number|null {
+  const offset = this.bb!.__offset(this.bb_pos, 74);
+  return offset ? this.bb!.readUint16(this.bb!.__vector(this.bb_pos + offset) + index * 2) : 0;
+}
+
+buildOptionsLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 74);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
+buildOptionsArray():Uint16Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 74);
+  return offset ? new Uint16Array(this.bb!.bytes().buffer, this.bb!.bytes().byteOffset + this.bb!.__vector(this.bb_pos + offset), this.bb!.__vector_len(this.bb_pos + offset)) : null;
+}
+
+/**
+ * def_ids of weapons this unit carries (in MAX_WEAPONS slots,
+ * 0 for unused). Indexes into the weapondef table the client
+ * already has via GameWeaponDef streaming.
+ */
+weaponDefIds(index: number):number|null {
+  const offset = this.bb!.__offset(this.bb_pos, 76);
+  return offset ? this.bb!.readUint16(this.bb!.__vector(this.bb_pos + offset) + index * 2) : 0;
+}
+
+weaponDefIdsLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 76);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
+weaponDefIdsArray():Uint16Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 76);
+  return offset ? new Uint16Array(this.bb!.bytes().buffer, this.bb!.bytes().byteOffset + this.bb!.__vector(this.bb_pos + offset), this.bb!.__vector_len(this.bb_pos + offset)) : null;
+}
+
 static startGameUnitDef(builder:flatbuffers.Builder) {
-  builder.startObject(4);
+  builder.startObject(37);
 }
 
 static addDefId(builder:flatbuffers.Builder, defId:number) {
@@ -81,17 +280,216 @@ static addTextureUrl(builder:flatbuffers.Builder, textureUrlOffset:flatbuffers.O
   builder.addFieldOffset(3, textureUrlOffset, 0);
 }
 
+static addHumanName(builder:flatbuffers.Builder, humanNameOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(4, humanNameOffset, 0);
+}
+
+static addTooltip(builder:flatbuffers.Builder, tooltipOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(5, tooltipOffset, 0);
+}
+
+static addWreckName(builder:flatbuffers.Builder, wreckNameOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(6, wreckNameOffset, 0);
+}
+
+static addMetalCost(builder:flatbuffers.Builder, metalCost:number) {
+  builder.addFieldFloat32(7, metalCost, 0.0);
+}
+
+static addEnergyCost(builder:flatbuffers.Builder, energyCost:number) {
+  builder.addFieldFloat32(8, energyCost, 0.0);
+}
+
+static addBuildTime(builder:flatbuffers.Builder, buildTime:number) {
+  builder.addFieldFloat32(9, buildTime, 0.0);
+}
+
+static addMetalMake(builder:flatbuffers.Builder, metalMake:number) {
+  builder.addFieldFloat32(10, metalMake, 0.0);
+}
+
+static addEnergyMake(builder:flatbuffers.Builder, energyMake:number) {
+  builder.addFieldFloat32(11, energyMake, 0.0);
+}
+
+static addMetalUpkeep(builder:flatbuffers.Builder, metalUpkeep:number) {
+  builder.addFieldFloat32(12, metalUpkeep, 0.0);
+}
+
+static addEnergyUpkeep(builder:flatbuffers.Builder, energyUpkeep:number) {
+  builder.addFieldFloat32(13, energyUpkeep, 0.0);
+}
+
+static addMetalStorage(builder:flatbuffers.Builder, metalStorage:number) {
+  builder.addFieldFloat32(14, metalStorage, 0.0);
+}
+
+static addEnergyStorage(builder:flatbuffers.Builder, energyStorage:number) {
+  builder.addFieldFloat32(15, energyStorage, 0.0);
+}
+
+static addExtractsMetal(builder:flatbuffers.Builder, extractsMetal:number) {
+  builder.addFieldFloat32(16, extractsMetal, 0.0);
+}
+
+static addHealth(builder:flatbuffers.Builder, health:number) {
+  builder.addFieldFloat32(17, health, 0.0);
+}
+
+static addMass(builder:flatbuffers.Builder, mass:number) {
+  builder.addFieldFloat32(18, mass, 0.0);
+}
+
+static addRadius(builder:flatbuffers.Builder, radius:number) {
+  builder.addFieldFloat32(19, radius, 0.0);
+}
+
+static addXsize(builder:flatbuffers.Builder, xsize:number) {
+  builder.addFieldInt32(20, xsize, 0);
+}
+
+static addZsize(builder:flatbuffers.Builder, zsize:number) {
+  builder.addFieldInt32(21, zsize, 0);
+}
+
+static addSpeed(builder:flatbuffers.Builder, speed:number) {
+  builder.addFieldFloat32(22, speed, 0.0);
+}
+
+static addTurnRate(builder:flatbuffers.Builder, turnRate:number) {
+  builder.addFieldFloat32(23, turnRate, 0.0);
+}
+
+static addMaxAcc(builder:flatbuffers.Builder, maxAcc:number) {
+  builder.addFieldFloat32(24, maxAcc, 0.0);
+}
+
+static addMaxDec(builder:flatbuffers.Builder, maxDec:number) {
+  builder.addFieldFloat32(25, maxDec, 0.0);
+}
+
+static addLosRadius(builder:flatbuffers.Builder, losRadius:number) {
+  builder.addFieldFloat32(26, losRadius, 0.0);
+}
+
+static addAirLosRadius(builder:flatbuffers.Builder, airLosRadius:number) {
+  builder.addFieldFloat32(27, airLosRadius, 0.0);
+}
+
+static addRadarRadius(builder:flatbuffers.Builder, radarRadius:number) {
+  builder.addFieldInt32(28, radarRadius, 0);
+}
+
+static addSonarRadius(builder:flatbuffers.Builder, sonarRadius:number) {
+  builder.addFieldInt32(29, sonarRadius, 0);
+}
+
+static addJammerRadius(builder:flatbuffers.Builder, jammerRadius:number) {
+  builder.addFieldInt32(30, jammerRadius, 0);
+}
+
+static addSeismicRadius(builder:flatbuffers.Builder, seismicRadius:number) {
+  builder.addFieldInt32(31, seismicRadius, 0);
+}
+
+static addFlags(builder:flatbuffers.Builder, flags:number) {
+  builder.addFieldInt32(32, flags, 0);
+}
+
+static addBuildDistance(builder:flatbuffers.Builder, buildDistance:number) {
+  builder.addFieldFloat32(33, buildDistance, 0.0);
+}
+
+static addBuildSpeed(builder:flatbuffers.Builder, buildSpeed:number) {
+  builder.addFieldFloat32(34, buildSpeed, 0.0);
+}
+
+static addBuildOptions(builder:flatbuffers.Builder, buildOptionsOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(35, buildOptionsOffset, 0);
+}
+
+static createBuildOptionsVector(builder:flatbuffers.Builder, data:number[]|Uint16Array):flatbuffers.Offset;
+/**
+ * @deprecated This Uint8Array overload will be removed in the future.
+ */
+static createBuildOptionsVector(builder:flatbuffers.Builder, data:number[]|Uint8Array):flatbuffers.Offset;
+static createBuildOptionsVector(builder:flatbuffers.Builder, data:number[]|Uint16Array|Uint8Array):flatbuffers.Offset {
+  builder.startVector(2, data.length, 2);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addInt16(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startBuildOptionsVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(2, numElems, 2);
+}
+
+static addWeaponDefIds(builder:flatbuffers.Builder, weaponDefIdsOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(36, weaponDefIdsOffset, 0);
+}
+
+static createWeaponDefIdsVector(builder:flatbuffers.Builder, data:number[]|Uint16Array):flatbuffers.Offset;
+/**
+ * @deprecated This Uint8Array overload will be removed in the future.
+ */
+static createWeaponDefIdsVector(builder:flatbuffers.Builder, data:number[]|Uint8Array):flatbuffers.Offset;
+static createWeaponDefIdsVector(builder:flatbuffers.Builder, data:number[]|Uint16Array|Uint8Array):flatbuffers.Offset {
+  builder.startVector(2, data.length, 2);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addInt16(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startWeaponDefIdsVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(2, numElems, 2);
+}
+
 static endGameUnitDef(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createGameUnitDef(builder:flatbuffers.Builder, defId:number, nameOffset:flatbuffers.Offset, modelUrlOffset:flatbuffers.Offset, textureUrlOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createGameUnitDef(builder:flatbuffers.Builder, defId:number, nameOffset:flatbuffers.Offset, modelUrlOffset:flatbuffers.Offset, textureUrlOffset:flatbuffers.Offset, humanNameOffset:flatbuffers.Offset, tooltipOffset:flatbuffers.Offset, wreckNameOffset:flatbuffers.Offset, metalCost:number, energyCost:number, buildTime:number, metalMake:number, energyMake:number, metalUpkeep:number, energyUpkeep:number, metalStorage:number, energyStorage:number, extractsMetal:number, health:number, mass:number, radius:number, xsize:number, zsize:number, speed:number, turnRate:number, maxAcc:number, maxDec:number, losRadius:number, airLosRadius:number, radarRadius:number, sonarRadius:number, jammerRadius:number, seismicRadius:number, flags:number, buildDistance:number, buildSpeed:number, buildOptionsOffset:flatbuffers.Offset, weaponDefIdsOffset:flatbuffers.Offset):flatbuffers.Offset {
   GameUnitDef.startGameUnitDef(builder);
   GameUnitDef.addDefId(builder, defId);
   GameUnitDef.addName(builder, nameOffset);
   GameUnitDef.addModelUrl(builder, modelUrlOffset);
   GameUnitDef.addTextureUrl(builder, textureUrlOffset);
+  GameUnitDef.addHumanName(builder, humanNameOffset);
+  GameUnitDef.addTooltip(builder, tooltipOffset);
+  GameUnitDef.addWreckName(builder, wreckNameOffset);
+  GameUnitDef.addMetalCost(builder, metalCost);
+  GameUnitDef.addEnergyCost(builder, energyCost);
+  GameUnitDef.addBuildTime(builder, buildTime);
+  GameUnitDef.addMetalMake(builder, metalMake);
+  GameUnitDef.addEnergyMake(builder, energyMake);
+  GameUnitDef.addMetalUpkeep(builder, metalUpkeep);
+  GameUnitDef.addEnergyUpkeep(builder, energyUpkeep);
+  GameUnitDef.addMetalStorage(builder, metalStorage);
+  GameUnitDef.addEnergyStorage(builder, energyStorage);
+  GameUnitDef.addExtractsMetal(builder, extractsMetal);
+  GameUnitDef.addHealth(builder, health);
+  GameUnitDef.addMass(builder, mass);
+  GameUnitDef.addRadius(builder, radius);
+  GameUnitDef.addXsize(builder, xsize);
+  GameUnitDef.addZsize(builder, zsize);
+  GameUnitDef.addSpeed(builder, speed);
+  GameUnitDef.addTurnRate(builder, turnRate);
+  GameUnitDef.addMaxAcc(builder, maxAcc);
+  GameUnitDef.addMaxDec(builder, maxDec);
+  GameUnitDef.addLosRadius(builder, losRadius);
+  GameUnitDef.addAirLosRadius(builder, airLosRadius);
+  GameUnitDef.addRadarRadius(builder, radarRadius);
+  GameUnitDef.addSonarRadius(builder, sonarRadius);
+  GameUnitDef.addJammerRadius(builder, jammerRadius);
+  GameUnitDef.addSeismicRadius(builder, seismicRadius);
+  GameUnitDef.addFlags(builder, flags);
+  GameUnitDef.addBuildDistance(builder, buildDistance);
+  GameUnitDef.addBuildSpeed(builder, buildSpeed);
+  GameUnitDef.addBuildOptions(builder, buildOptionsOffset);
+  GameUnitDef.addWeaponDefIds(builder, weaponDefIdsOffset);
   return GameUnitDef.endGameUnitDef(builder);
 }
 
@@ -100,7 +498,40 @@ unpack(): GameUnitDefT {
     this.defId(),
     this.name(),
     this.modelUrl(),
-    this.textureUrl()
+    this.textureUrl(),
+    this.humanName(),
+    this.tooltip(),
+    this.wreckName(),
+    this.metalCost(),
+    this.energyCost(),
+    this.buildTime(),
+    this.metalMake(),
+    this.energyMake(),
+    this.metalUpkeep(),
+    this.energyUpkeep(),
+    this.metalStorage(),
+    this.energyStorage(),
+    this.extractsMetal(),
+    this.health(),
+    this.mass(),
+    this.radius(),
+    this.xsize(),
+    this.zsize(),
+    this.speed(),
+    this.turnRate(),
+    this.maxAcc(),
+    this.maxDec(),
+    this.losRadius(),
+    this.airLosRadius(),
+    this.radarRadius(),
+    this.sonarRadius(),
+    this.jammerRadius(),
+    this.seismicRadius(),
+    this.flags(),
+    this.buildDistance(),
+    this.buildSpeed(),
+    this.bb!.createScalarList<number>(this.buildOptions.bind(this), this.buildOptionsLength()),
+    this.bb!.createScalarList<number>(this.weaponDefIds.bind(this), this.weaponDefIdsLength())
   );
 }
 
@@ -110,6 +541,39 @@ unpackTo(_o: GameUnitDefT): void {
   _o.name = this.name();
   _o.modelUrl = this.modelUrl();
   _o.textureUrl = this.textureUrl();
+  _o.humanName = this.humanName();
+  _o.tooltip = this.tooltip();
+  _o.wreckName = this.wreckName();
+  _o.metalCost = this.metalCost();
+  _o.energyCost = this.energyCost();
+  _o.buildTime = this.buildTime();
+  _o.metalMake = this.metalMake();
+  _o.energyMake = this.energyMake();
+  _o.metalUpkeep = this.metalUpkeep();
+  _o.energyUpkeep = this.energyUpkeep();
+  _o.metalStorage = this.metalStorage();
+  _o.energyStorage = this.energyStorage();
+  _o.extractsMetal = this.extractsMetal();
+  _o.health = this.health();
+  _o.mass = this.mass();
+  _o.radius = this.radius();
+  _o.xsize = this.xsize();
+  _o.zsize = this.zsize();
+  _o.speed = this.speed();
+  _o.turnRate = this.turnRate();
+  _o.maxAcc = this.maxAcc();
+  _o.maxDec = this.maxDec();
+  _o.losRadius = this.losRadius();
+  _o.airLosRadius = this.airLosRadius();
+  _o.radarRadius = this.radarRadius();
+  _o.sonarRadius = this.sonarRadius();
+  _o.jammerRadius = this.jammerRadius();
+  _o.seismicRadius = this.seismicRadius();
+  _o.flags = this.flags();
+  _o.buildDistance = this.buildDistance();
+  _o.buildSpeed = this.buildSpeed();
+  _o.buildOptions = this.bb!.createScalarList<number>(this.buildOptions.bind(this), this.buildOptionsLength());
+  _o.weaponDefIds = this.bb!.createScalarList<number>(this.weaponDefIds.bind(this), this.weaponDefIdsLength());
 }
 }
 
@@ -118,7 +582,40 @@ constructor(
   public defId: number = 0,
   public name: string|Uint8Array|null = null,
   public modelUrl: string|Uint8Array|null = null,
-  public textureUrl: string|Uint8Array|null = null
+  public textureUrl: string|Uint8Array|null = null,
+  public humanName: string|Uint8Array|null = null,
+  public tooltip: string|Uint8Array|null = null,
+  public wreckName: string|Uint8Array|null = null,
+  public metalCost: number = 0.0,
+  public energyCost: number = 0.0,
+  public buildTime: number = 0.0,
+  public metalMake: number = 0.0,
+  public energyMake: number = 0.0,
+  public metalUpkeep: number = 0.0,
+  public energyUpkeep: number = 0.0,
+  public metalStorage: number = 0.0,
+  public energyStorage: number = 0.0,
+  public extractsMetal: number = 0.0,
+  public health: number = 0.0,
+  public mass: number = 0.0,
+  public radius: number = 0.0,
+  public xsize: number = 0,
+  public zsize: number = 0,
+  public speed: number = 0.0,
+  public turnRate: number = 0.0,
+  public maxAcc: number = 0.0,
+  public maxDec: number = 0.0,
+  public losRadius: number = 0.0,
+  public airLosRadius: number = 0.0,
+  public radarRadius: number = 0,
+  public sonarRadius: number = 0,
+  public jammerRadius: number = 0,
+  public seismicRadius: number = 0,
+  public flags: number = 0,
+  public buildDistance: number = 0.0,
+  public buildSpeed: number = 0.0,
+  public buildOptions: (number)[] = [],
+  public weaponDefIds: (number)[] = []
 ){}
 
 
@@ -126,12 +623,50 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const name = (this.name !== null ? builder.createString(this.name!) : 0);
   const modelUrl = (this.modelUrl !== null ? builder.createString(this.modelUrl!) : 0);
   const textureUrl = (this.textureUrl !== null ? builder.createString(this.textureUrl!) : 0);
+  const humanName = (this.humanName !== null ? builder.createString(this.humanName!) : 0);
+  const tooltip = (this.tooltip !== null ? builder.createString(this.tooltip!) : 0);
+  const wreckName = (this.wreckName !== null ? builder.createString(this.wreckName!) : 0);
+  const buildOptions = GameUnitDef.createBuildOptionsVector(builder, this.buildOptions);
+  const weaponDefIds = GameUnitDef.createWeaponDefIdsVector(builder, this.weaponDefIds);
 
   return GameUnitDef.createGameUnitDef(builder,
     this.defId,
     name,
     modelUrl,
-    textureUrl
+    textureUrl,
+    humanName,
+    tooltip,
+    wreckName,
+    this.metalCost,
+    this.energyCost,
+    this.buildTime,
+    this.metalMake,
+    this.energyMake,
+    this.metalUpkeep,
+    this.energyUpkeep,
+    this.metalStorage,
+    this.energyStorage,
+    this.extractsMetal,
+    this.health,
+    this.mass,
+    this.radius,
+    this.xsize,
+    this.zsize,
+    this.speed,
+    this.turnRate,
+    this.maxAcc,
+    this.maxDec,
+    this.losRadius,
+    this.airLosRadius,
+    this.radarRadius,
+    this.sonarRadius,
+    this.jammerRadius,
+    this.seismicRadius,
+    this.flags,
+    this.buildDistance,
+    this.buildSpeed,
+    buildOptions,
+    weaponDefIds
   );
 }
 }

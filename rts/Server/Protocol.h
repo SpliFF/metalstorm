@@ -13,13 +13,17 @@
 #include "MapMetadata.h"
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectileTypes.h"
 #include "Sim/Units/Unit.h"
+#include "Sim/Units/UnitDef.h"
+#include "Sim/Weapons/WeaponDef.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Units/CommandAI/Command.h"
 #include "Sim/Units/CommandAI/CommandQueue.h"
 #include <flatbuffers/flatbuffers.h>
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <unordered_map>
 #include <vector>
 
 namespace Protocol {
@@ -582,12 +586,16 @@ inline std::vector<uint8_t> BuildRoomListUpdate(const std::vector<GameRoom*>& ro
 
 /// Build one GameUnitDef FlatBuffer entry for a single unit def.
 /// Factored out so both the bulk and incremental senders can reuse it.
+/// `nameToDefId` is consulted to translate buildOptions entries (which
+/// the engine stores as unit-name strings) into numeric def IDs the
+/// client can index. Pass an empty map to skip buildOptions resolution.
 template<typename UnitDefT>
 inline flatbuffers::Offset<SpringWeb::GameUnitDef> BuildSingleUnitDef(
     flatbuffers::FlatBufferBuilder& fbb,
     const UnitDefT& ud,
     const std::filesystem::path& modelsDir,
-    const std::string& gameId)
+    const std::string& gameId,
+    const std::unordered_map<std::string, int>& nameToDefId = {})
 {
     namespace fs = std::filesystem;
     auto nameOff = fbb.CreateString(ud.name);
@@ -600,11 +608,116 @@ inline flatbuffers::Offset<SpringWeb::GameUnitDef> BuildSingleUnitDef(
             modelUrl = "/api/games/data/" + gameId + "/models/" + stem + ".glb";
         }
     }
-    auto modelOff = fbb.CreateString(modelUrl);
-    auto texOff = fbb.CreateString("");
+    auto modelOff   = fbb.CreateString(modelUrl);
+    auto texOff     = fbb.CreateString("");
+    auto humanOff   = fbb.CreateString(ud.humanName);
+    auto tooltipOff = fbb.CreateString(ud.tooltip);
+    auto wreckOff   = fbb.CreateString(ud.wreckName);
 
-    return SpringWeb::CreateGameUnitDef(
-        fbb, static_cast<uint16_t>(ud.id), nameOff, modelOff, texOff);
+    // Pack behaviour flags. The bit assignments are documented in
+    // schemas/protocol.fbs alongside the `flags` field.
+    uint32_t flags = 0;
+    if (ud.builder)         flags |= (1u << 0);
+    if (ud.canmove)         flags |= (1u << 1);
+    if (ud.canfly)          flags |= (1u << 2);
+    if (ud.canSubmerge)     flags |= (1u << 3);
+    if (ud.floatOnWater)    flags |= (1u << 4);
+    if (ud.canCloak)        flags |= (1u << 5);
+    if (ud.canKamikaze)     flags |= (1u << 6);
+    if (ud.canManualFire)   flags |= (1u << 7);
+    if (ud.stealth)         flags |= (1u << 8);
+    if (ud.sonarStealth)    flags |= (1u << 9);
+    if (ud.reclaimable)     flags |= (1u << 10);
+    if (ud.IsFactoryUnit()) flags |= (1u << 11);
+    if (ud.IsBuildingUnit())flags |= (1u << 12);
+    if (ud.IsAirUnit())     flags |= (1u << 13);
+    if (ud.IsExtractorUnit())flags|= (1u << 14);
+    if (ud.HasWeapons())    flags |= (1u << 15);
+
+    // Build options — resolved to numeric def IDs. The engine stores
+    // them as a map<slot,name>; we sort by slot so the wire order is
+    // deterministic and matches what build menu widgets expect.
+    std::vector<uint16_t> buildOptions;
+    if (!ud.buildOptions.empty() && !nameToDefId.empty()) {
+        std::vector<std::pair<int, const std::string*>> slots;
+        slots.reserve(ud.buildOptions.size());
+        for (const auto& kv : ud.buildOptions) {
+            slots.emplace_back(kv.first, &kv.second);
+        }
+        std::sort(slots.begin(), slots.end(),
+            [](const auto& a, const auto& b){ return a.first < b.first; });
+        buildOptions.reserve(slots.size());
+        for (const auto& s : slots) {
+            auto it = nameToDefId.find(*s.second);
+            if (it != nameToDefId.end() && it->second > 0) {
+                buildOptions.push_back(static_cast<uint16_t>(it->second));
+            }
+        }
+    }
+
+    // Weapon def IDs in slot order. Unused slots are zero so the array
+    // length always matches the engine's weapon slot count.
+    std::vector<uint16_t> weaponDefIds;
+    weaponDefIds.reserve(ud.weapons.size());
+    for (const auto& w : ud.weapons) {
+        weaponDefIds.push_back(w.def != nullptr ? static_cast<uint16_t>(w.def->id) : 0u);
+    }
+    while (!weaponDefIds.empty() && weaponDefIds.back() == 0) weaponDefIds.pop_back();
+
+    auto buildOptsOff = fbb.CreateVector(buildOptions);
+    auto weaponIdsOff = fbb.CreateVector(weaponDefIds);
+
+    SpringWeb::GameUnitDefBuilder b(fbb);
+    b.add_def_id(static_cast<uint16_t>(ud.id));
+    b.add_name(nameOff);
+    b.add_model_url(modelOff);
+    b.add_texture_url(texOff);
+    b.add_human_name(humanOff);
+    b.add_tooltip(tooltipOff);
+    b.add_wreck_name(wreckOff);
+    b.add_metal_cost(ud.cost.metal);
+    b.add_energy_cost(ud.cost.energy);
+    b.add_build_time(ud.buildTime);
+    b.add_metal_make(ud.resourceMake.metal);
+    b.add_energy_make(ud.resourceMake.energy);
+    b.add_metal_upkeep(ud.upkeep.metal);
+    b.add_energy_upkeep(ud.upkeep.energy);
+    b.add_metal_storage(ud.storage.metal);
+    b.add_energy_storage(ud.storage.energy);
+    b.add_extracts_metal(ud.extractsMetal);
+    b.add_health(ud.health);
+    b.add_mass(ud.mass);
+    b.add_radius(ud.GetModelRadius());
+    b.add_xsize(ud.xsize);
+    b.add_zsize(ud.zsize);
+    b.add_speed(ud.speed);
+    b.add_turn_rate(ud.turnRate);
+    b.add_max_acc(ud.maxAcc);
+    b.add_max_dec(ud.maxDec);
+    b.add_los_radius(ud.losRadius);
+    b.add_air_los_radius(ud.airLosRadius);
+    b.add_radar_radius(ud.radarRadius);
+    b.add_sonar_radius(ud.sonarRadius);
+    b.add_jammer_radius(ud.jammerRadius);
+    b.add_seismic_radius(ud.seismicRadius);
+    b.add_flags(flags);
+    b.add_build_distance(ud.buildDistance);
+    b.add_build_speed(ud.buildSpeed);
+    b.add_build_options(buildOptsOff);
+    b.add_weapon_def_ids(weaponIdsOff);
+    return b.Finish();
+}
+
+/// Build a name→def-id index from the engine's unit def vector. Used by
+/// BuildSingleUnitDef to translate buildOptions name strings into IDs.
+template<typename UnitDefVec>
+inline std::unordered_map<std::string, int> BuildNameToDefIdMap(const UnitDefVec& defs) {
+    std::unordered_map<std::string, int> out;
+    out.reserve(defs.size());
+    for (size_t i = 1; i < defs.size(); i++) {
+        out.emplace(defs[i].name, defs[i].id);
+    }
+    return out;
 }
 
 /// Build a GameUnitDefs message listing every unit type and its model URL.
@@ -616,10 +729,11 @@ inline std::vector<uint8_t> BuildGameUnitDefs(
     namespace fs = std::filesystem;
     const fs::path modelsDir = fs::path("data/games") / gameId / "models";
     flatbuffers::FlatBufferBuilder fbb(1024);
+    auto nameToId = BuildNameToDefIdMap(defs);
 
     std::vector<flatbuffers::Offset<SpringWeb::GameUnitDef>> offsets;
     for (size_t i = 1; i < defs.size(); i++) {
-        offsets.push_back(BuildSingleUnitDef(fbb, defs[i], modelsDir, gameId));
+        offsets.push_back(BuildSingleUnitDef(fbb, defs[i], modelsDir, gameId, nameToId));
     }
 
     auto defsVec = fbb.CreateVector(offsets);
@@ -639,11 +753,12 @@ inline std::vector<uint8_t> BuildGameUnitDefsSubset(
     namespace fs = std::filesystem;
     const fs::path modelsDir = fs::path("data/games") / gameId / "models";
     flatbuffers::FlatBufferBuilder fbb(512);
+    auto nameToId = BuildNameToDefIdMap(allDefs);
 
     std::vector<flatbuffers::Offset<SpringWeb::GameUnitDef>> offsets;
     for (uint16_t id : defIds) {
         if (id > 0 && static_cast<size_t>(id) < allDefs.size()) {
-            offsets.push_back(BuildSingleUnitDef(fbb, allDefs[id], modelsDir, gameId));
+            offsets.push_back(BuildSingleUnitDef(fbb, allDefs[id], modelsDir, gameId, nameToId));
         }
     }
 
