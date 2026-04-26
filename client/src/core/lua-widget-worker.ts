@@ -311,6 +311,19 @@ interface MinimalWeaponDefWire {
     projectileSpeed: number; range: number; aoe: number; size: number;
     intensity: number; colorR: number; colorG: number; colorB: number;
     duration: number; highTrajectory: boolean;
+    typeName?: string; description?: string;
+    defaultDamage?: number; damages?: number[];
+    reloadTime?: number; salvoSize?: number; salvoDelay?: number;
+    accuracy?: number; sprayAngle?: number; movingAccuracy?: number;
+    targetMoveError?: number; leadLimit?: number;
+    edgeEffectiveness?: number;
+    impulseFactor?: number; impulseBoost?: number;
+    craterMult?: number; craterBoost?: number; craterAoe?: number;
+    fireStarter?: number; flightTime?: number;
+    weaponAcceleration?: number; turnRate?: number;
+    uptime?: number; coverageRange?: number; stockpileTime?: number;
+    metalCost?: number; energyCost?: number;
+    flags?: number;
 }
 const unitDefMap = new Map<number, MinimalUnitDefWire>();
 const weaponDefMap = new Map<number, MinimalWeaponDefWire>();
@@ -425,20 +438,95 @@ function buildLuaUnitDef(d: MinimalUnitDefWire): Record<string, LuaValue> {
 }
 
 function buildLuaWeaponDef(d: MinimalWeaponDefWire): Record<string, LuaValue> {
+    const flags = d.flags ?? 0;
+    const has = (bit: number) => (flags & (1 << bit)) !== 0;
+    const tracks         = has(0);
+    const paralyzer      = has(1);
+    const noSelfDamage   = has(2);
+    const manualfire     = has(3);
+    const noAutoTarget   = has(4);
+    const stockpile      = has(5);
+    const waterweapon    = has(6);
+    const fireSubmersed  = has(7);
+    const submissile     = has(8);
+    const turret         = has(9);
+    const onlyForward    = has(10);
+    const fixedLauncher  = has(11);
+    const canAttackGround= has(12);
+    const avoidFriendly  = has(13);
+    const avoidFeature   = has(14);
+    const avoidNeutral   = has(15);
+    const gravityAffected= has(16);
+    const noExplode      = has(17);
+    const largeBeamLaser = has(18);
+    const laserHardStop  = has(19);
+    const isShield       = has(20);
+    const smartShield    = has(21);
+    const exteriorShield = has(22);
+    const visibleShield  = has(23);
+
+    // damages — Spring widgets read this as a 1-indexed table keyed by
+    // armor class. We surface the per-class array if the wire carried
+    // it; otherwise fill `[1] = defaultDamage` so common code paths
+    // work either way.
+    const damages: Record<number, LuaValue> = {};
+    const defaultDamage = d.defaultDamage ?? 0;
+    if (d.damages && d.damages.length > 0) {
+        for (let i = 0; i < d.damages.length; i++) damages[i + 1] = d.damages[i];
+    } else {
+        damages[1] = defaultDamage;
+    }
+
     return {
-        id: d.defId, name: d.name, type: '', description: d.name,
+        id: d.defId, name: d.name,
+        type: d.typeName ?? '',
+        description: d.description || d.name,
         visualType: d.visualType,
-        projectilespeed: d.projectileSpeed, range: d.range,
-        damageAreaOfEffect: d.aoe, size: d.size, intensity: d.intensity,
-        rgbColor: [d.colorR, d.colorG, d.colorB], duration: d.duration,
+        projectilespeed: d.projectileSpeed,
+        range: d.range,
+        damageAreaOfEffect: d.aoe,
+        size: d.size,
+        intensity: d.intensity,
+        rgbColor: [d.colorR, d.colorG, d.colorB],
+        duration: d.duration,
         highTrajectory: d.highTrajectory ? 1 : 0,
-        // Common fields with safe defaults
-        damages: { 0: 100 } as Record<string | number, LuaValue>,
-        reloadTime: 1, accuracy: 0, sprayAngle: 0, edgeEffectiveness: 1,
-        targetMoveError: 0, leadLimit: 0, fixedLauncher: false,
-        impulseFactor: 1, impulseBoost: 0,
-        avoidFriendly: true, avoidFeature: true, avoidGround: true,
-        canAttackGround: true, customParams: {} as Record<string, LuaValue>,
+
+        damages,
+        defaultDamage,
+        reloadTime: d.reloadTime ?? 0,
+        salvoSize: d.salvoSize ?? 0,
+        salvoDelay: d.salvoDelay ?? 0,
+        accuracy: d.accuracy ?? 0,
+        sprayAngle: d.sprayAngle ?? 0,
+        movingAccuracy: d.movingAccuracy ?? 0,
+        targetMoveError: d.targetMoveError ?? 0,
+        leadLimit: d.leadLimit ?? -1,
+        edgeEffectiveness: d.edgeEffectiveness ?? 0,
+        impulseFactor: d.impulseFactor ?? 1,
+        impulseBoost: d.impulseBoost ?? 0,
+        craterMult: d.craterMult ?? 1,
+        craterBoost: d.craterBoost ?? 0,
+        craterAreaOfEffect: d.craterAoe ?? 0,
+        fireStarter: d.fireStarter ?? 0,
+        flighttime: d.flightTime ?? 0,
+        weaponAcceleration: d.weaponAcceleration ?? 0,
+        turnRate: d.turnRate ?? 0,
+        uptime: d.uptime ?? 0,
+        coverageRange: d.coverageRange ?? 0,
+        stockpileTime: d.stockpileTime ?? 0,
+        metalCost: d.metalCost ?? 0,
+        energyCost: d.energyCost ?? 0,
+
+        // Behaviour flags.
+        tracks, paralyzer, noSelfDamage, manualfire, noAutoTarget,
+        stockpile, waterweapon, fireSubmersed, submissile,
+        turret, onlyForward, fixedLauncher, canAttackGround,
+        avoidFriendly, avoidFeature, avoidNeutral, avoidGround: true,
+        gravityAffected, noExplode,
+        largeBeamLaser, laserHardStop,
+        isShield, smartShield, exteriorShield, visibleShield,
+
+        customParams: {} as Record<string, LuaValue>,
     };
 }
 

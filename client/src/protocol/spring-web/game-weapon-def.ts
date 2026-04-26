@@ -101,8 +101,187 @@ highTrajectory():boolean {
   return offset ? !!this.bb!.readInt8(this.bb_pos + offset) : false;
 }
 
+/**
+ * Spring's `weapondef.type` string ("Cannon", "BeamLaser", "MissileLauncher", …).
+ */
+typeName():string|null
+typeName(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+typeName(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 30);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
+description():string|null
+description(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+description(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 32);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
+/**
+ * Default damage (damages[0]) — most widgets just read this.
+ */
+defaultDamage():number {
+  const offset = this.bb!.__offset(this.bb_pos, 34);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+/**
+ * Per-armor-class damage table. Index = armor type id, value = damage.
+ * Empty if all classes share the default damage.
+ */
+damages(index: number):number|null {
+  const offset = this.bb!.__offset(this.bb_pos, 36);
+  return offset ? this.bb!.readFloat32(this.bb!.__vector(this.bb_pos + offset) + index * 4) : 0;
+}
+
+damagesLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 36);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
+damagesArray():Float32Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 36);
+  return offset ? new Float32Array(this.bb!.bytes().buffer, this.bb!.bytes().byteOffset + this.bb!.__vector(this.bb_pos + offset), this.bb!.__vector_len(this.bb_pos + offset)) : null;
+}
+
+reloadTime():number {
+  const offset = this.bb!.__offset(this.bb_pos, 38);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+salvoSize():number {
+  const offset = this.bb!.__offset(this.bb_pos, 40);
+  return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
+}
+
+salvoDelay():number {
+  const offset = this.bb!.__offset(this.bb_pos, 42);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+accuracy():number {
+  const offset = this.bb!.__offset(this.bb_pos, 44);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+sprayAngle():number {
+  const offset = this.bb!.__offset(this.bb_pos, 46);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+movingAccuracy():number {
+  const offset = this.bb!.__offset(this.bb_pos, 48);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+targetMoveError():number {
+  const offset = this.bb!.__offset(this.bb_pos, 50);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+leadLimit():number {
+  const offset = this.bb!.__offset(this.bb_pos, 52);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : -1.0;
+}
+
+edgeEffectiveness():number {
+  const offset = this.bb!.__offset(this.bb_pos, 54);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+impulseFactor():number {
+  const offset = this.bb!.__offset(this.bb_pos, 56);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+impulseBoost():number {
+  const offset = this.bb!.__offset(this.bb_pos, 58);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+craterMult():number {
+  const offset = this.bb!.__offset(this.bb_pos, 60);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+craterBoost():number {
+  const offset = this.bb!.__offset(this.bb_pos, 62);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+craterAoe():number {
+  const offset = this.bb!.__offset(this.bb_pos, 64);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+fireStarter():number {
+  const offset = this.bb!.__offset(this.bb_pos, 66);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+flightTime():number {
+  const offset = this.bb!.__offset(this.bb_pos, 68);
+  return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
+}
+
+weaponAcceleration():number {
+  const offset = this.bb!.__offset(this.bb_pos, 70);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+turnRate():number {
+  const offset = this.bb!.__offset(this.bb_pos, 72);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+uptime():number {
+  const offset = this.bb!.__offset(this.bb_pos, 74);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+coverageRange():number {
+  const offset = this.bb!.__offset(this.bb_pos, 76);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+stockpileTime():number {
+  const offset = this.bb!.__offset(this.bb_pos, 78);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+metalCost():number {
+  const offset = this.bb!.__offset(this.bb_pos, 80);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+energyCost():number {
+  const offset = this.bb!.__offset(this.bb_pos, 82);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+/**
+ * Behaviour flags. Bit assignments:
+ * bit 0: tracks                 bit 1: paralyzer
+ * bit 2: noSelfDamage           bit 3: manualFire
+ * bit 4: noAutoTarget           bit 5: stockpile
+ * bit 6: waterWeapon            bit 7: fireSubmersed
+ * bit 8: submissile             bit 9: turret
+ * bit10: onlyForward            bit11: fixedLauncher
+ * bit12: canAttackGround        bit13: avoidFriendly
+ * bit14: avoidFeature           bit15: avoidNeutral
+ * bit16: gravityAffected        bit17: noExplode
+ * bit18: largeBeamLaser         bit19: laserHardStop
+ * bit20: isShield               bit21: smartShield
+ * bit22: exteriorShield         bit23: visibleShield
+ */
+flags():number {
+  const offset = this.bb!.__offset(this.bb_pos, 84);
+  return offset ? this.bb!.readUint32(this.bb_pos + offset) : 0;
+}
+
 static startGameWeaponDef(builder:flatbuffers.Builder) {
-  builder.startObject(13);
+  builder.startObject(41);
 }
 
 static addDefId(builder:flatbuffers.Builder, defId:number) {
@@ -157,12 +336,141 @@ static addHighTrajectory(builder:flatbuffers.Builder, highTrajectory:boolean) {
   builder.addFieldInt8(12, +highTrajectory, +false);
 }
 
+static addTypeName(builder:flatbuffers.Builder, typeNameOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(13, typeNameOffset, 0);
+}
+
+static addDescription(builder:flatbuffers.Builder, descriptionOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(14, descriptionOffset, 0);
+}
+
+static addDefaultDamage(builder:flatbuffers.Builder, defaultDamage:number) {
+  builder.addFieldFloat32(15, defaultDamage, 0.0);
+}
+
+static addDamages(builder:flatbuffers.Builder, damagesOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(16, damagesOffset, 0);
+}
+
+static createDamagesVector(builder:flatbuffers.Builder, data:number[]|Float32Array):flatbuffers.Offset;
+/**
+ * @deprecated This Uint8Array overload will be removed in the future.
+ */
+static createDamagesVector(builder:flatbuffers.Builder, data:number[]|Uint8Array):flatbuffers.Offset;
+static createDamagesVector(builder:flatbuffers.Builder, data:number[]|Float32Array|Uint8Array):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addFloat32(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startDamagesVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
+static addReloadTime(builder:flatbuffers.Builder, reloadTime:number) {
+  builder.addFieldFloat32(17, reloadTime, 0.0);
+}
+
+static addSalvoSize(builder:flatbuffers.Builder, salvoSize:number) {
+  builder.addFieldInt32(18, salvoSize, 0);
+}
+
+static addSalvoDelay(builder:flatbuffers.Builder, salvoDelay:number) {
+  builder.addFieldFloat32(19, salvoDelay, 0.0);
+}
+
+static addAccuracy(builder:flatbuffers.Builder, accuracy:number) {
+  builder.addFieldFloat32(20, accuracy, 0.0);
+}
+
+static addSprayAngle(builder:flatbuffers.Builder, sprayAngle:number) {
+  builder.addFieldFloat32(21, sprayAngle, 0.0);
+}
+
+static addMovingAccuracy(builder:flatbuffers.Builder, movingAccuracy:number) {
+  builder.addFieldFloat32(22, movingAccuracy, 0.0);
+}
+
+static addTargetMoveError(builder:flatbuffers.Builder, targetMoveError:number) {
+  builder.addFieldFloat32(23, targetMoveError, 0.0);
+}
+
+static addLeadLimit(builder:flatbuffers.Builder, leadLimit:number) {
+  builder.addFieldFloat32(24, leadLimit, -1.0);
+}
+
+static addEdgeEffectiveness(builder:flatbuffers.Builder, edgeEffectiveness:number) {
+  builder.addFieldFloat32(25, edgeEffectiveness, 0.0);
+}
+
+static addImpulseFactor(builder:flatbuffers.Builder, impulseFactor:number) {
+  builder.addFieldFloat32(26, impulseFactor, 0.0);
+}
+
+static addImpulseBoost(builder:flatbuffers.Builder, impulseBoost:number) {
+  builder.addFieldFloat32(27, impulseBoost, 0.0);
+}
+
+static addCraterMult(builder:flatbuffers.Builder, craterMult:number) {
+  builder.addFieldFloat32(28, craterMult, 0.0);
+}
+
+static addCraterBoost(builder:flatbuffers.Builder, craterBoost:number) {
+  builder.addFieldFloat32(29, craterBoost, 0.0);
+}
+
+static addCraterAoe(builder:flatbuffers.Builder, craterAoe:number) {
+  builder.addFieldFloat32(30, craterAoe, 0.0);
+}
+
+static addFireStarter(builder:flatbuffers.Builder, fireStarter:number) {
+  builder.addFieldFloat32(31, fireStarter, 0.0);
+}
+
+static addFlightTime(builder:flatbuffers.Builder, flightTime:number) {
+  builder.addFieldInt32(32, flightTime, 0);
+}
+
+static addWeaponAcceleration(builder:flatbuffers.Builder, weaponAcceleration:number) {
+  builder.addFieldFloat32(33, weaponAcceleration, 0.0);
+}
+
+static addTurnRate(builder:flatbuffers.Builder, turnRate:number) {
+  builder.addFieldFloat32(34, turnRate, 0.0);
+}
+
+static addUptime(builder:flatbuffers.Builder, uptime:number) {
+  builder.addFieldFloat32(35, uptime, 0.0);
+}
+
+static addCoverageRange(builder:flatbuffers.Builder, coverageRange:number) {
+  builder.addFieldFloat32(36, coverageRange, 0.0);
+}
+
+static addStockpileTime(builder:flatbuffers.Builder, stockpileTime:number) {
+  builder.addFieldFloat32(37, stockpileTime, 0.0);
+}
+
+static addMetalCost(builder:flatbuffers.Builder, metalCost:number) {
+  builder.addFieldFloat32(38, metalCost, 0.0);
+}
+
+static addEnergyCost(builder:flatbuffers.Builder, energyCost:number) {
+  builder.addFieldFloat32(39, energyCost, 0.0);
+}
+
+static addFlags(builder:flatbuffers.Builder, flags:number) {
+  builder.addFieldInt32(40, flags, 0);
+}
+
 static endGameWeaponDef(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createGameWeaponDef(builder:flatbuffers.Builder, defId:number, nameOffset:flatbuffers.Offset, visualType:ProjectileVisualType, projectileSpeed:number, range:number, aoe:number, size:number, intensity:number, colorR:number, colorG:number, colorB:number, duration:number, highTrajectory:boolean):flatbuffers.Offset {
+static createGameWeaponDef(builder:flatbuffers.Builder, defId:number, nameOffset:flatbuffers.Offset, visualType:ProjectileVisualType, projectileSpeed:number, range:number, aoe:number, size:number, intensity:number, colorR:number, colorG:number, colorB:number, duration:number, highTrajectory:boolean, typeNameOffset:flatbuffers.Offset, descriptionOffset:flatbuffers.Offset, defaultDamage:number, damagesOffset:flatbuffers.Offset, reloadTime:number, salvoSize:number, salvoDelay:number, accuracy:number, sprayAngle:number, movingAccuracy:number, targetMoveError:number, leadLimit:number, edgeEffectiveness:number, impulseFactor:number, impulseBoost:number, craterMult:number, craterBoost:number, craterAoe:number, fireStarter:number, flightTime:number, weaponAcceleration:number, turnRate:number, uptime:number, coverageRange:number, stockpileTime:number, metalCost:number, energyCost:number, flags:number):flatbuffers.Offset {
   GameWeaponDef.startGameWeaponDef(builder);
   GameWeaponDef.addDefId(builder, defId);
   GameWeaponDef.addName(builder, nameOffset);
@@ -177,6 +485,34 @@ static createGameWeaponDef(builder:flatbuffers.Builder, defId:number, nameOffset
   GameWeaponDef.addColorB(builder, colorB);
   GameWeaponDef.addDuration(builder, duration);
   GameWeaponDef.addHighTrajectory(builder, highTrajectory);
+  GameWeaponDef.addTypeName(builder, typeNameOffset);
+  GameWeaponDef.addDescription(builder, descriptionOffset);
+  GameWeaponDef.addDefaultDamage(builder, defaultDamage);
+  GameWeaponDef.addDamages(builder, damagesOffset);
+  GameWeaponDef.addReloadTime(builder, reloadTime);
+  GameWeaponDef.addSalvoSize(builder, salvoSize);
+  GameWeaponDef.addSalvoDelay(builder, salvoDelay);
+  GameWeaponDef.addAccuracy(builder, accuracy);
+  GameWeaponDef.addSprayAngle(builder, sprayAngle);
+  GameWeaponDef.addMovingAccuracy(builder, movingAccuracy);
+  GameWeaponDef.addTargetMoveError(builder, targetMoveError);
+  GameWeaponDef.addLeadLimit(builder, leadLimit);
+  GameWeaponDef.addEdgeEffectiveness(builder, edgeEffectiveness);
+  GameWeaponDef.addImpulseFactor(builder, impulseFactor);
+  GameWeaponDef.addImpulseBoost(builder, impulseBoost);
+  GameWeaponDef.addCraterMult(builder, craterMult);
+  GameWeaponDef.addCraterBoost(builder, craterBoost);
+  GameWeaponDef.addCraterAoe(builder, craterAoe);
+  GameWeaponDef.addFireStarter(builder, fireStarter);
+  GameWeaponDef.addFlightTime(builder, flightTime);
+  GameWeaponDef.addWeaponAcceleration(builder, weaponAcceleration);
+  GameWeaponDef.addTurnRate(builder, turnRate);
+  GameWeaponDef.addUptime(builder, uptime);
+  GameWeaponDef.addCoverageRange(builder, coverageRange);
+  GameWeaponDef.addStockpileTime(builder, stockpileTime);
+  GameWeaponDef.addMetalCost(builder, metalCost);
+  GameWeaponDef.addEnergyCost(builder, energyCost);
+  GameWeaponDef.addFlags(builder, flags);
   return GameWeaponDef.endGameWeaponDef(builder);
 }
 
@@ -194,7 +530,35 @@ unpack(): GameWeaponDefT {
     this.colorG(),
     this.colorB(),
     this.duration(),
-    this.highTrajectory()
+    this.highTrajectory(),
+    this.typeName(),
+    this.description(),
+    this.defaultDamage(),
+    this.bb!.createScalarList<number>(this.damages.bind(this), this.damagesLength()),
+    this.reloadTime(),
+    this.salvoSize(),
+    this.salvoDelay(),
+    this.accuracy(),
+    this.sprayAngle(),
+    this.movingAccuracy(),
+    this.targetMoveError(),
+    this.leadLimit(),
+    this.edgeEffectiveness(),
+    this.impulseFactor(),
+    this.impulseBoost(),
+    this.craterMult(),
+    this.craterBoost(),
+    this.craterAoe(),
+    this.fireStarter(),
+    this.flightTime(),
+    this.weaponAcceleration(),
+    this.turnRate(),
+    this.uptime(),
+    this.coverageRange(),
+    this.stockpileTime(),
+    this.metalCost(),
+    this.energyCost(),
+    this.flags()
   );
 }
 
@@ -213,6 +577,34 @@ unpackTo(_o: GameWeaponDefT): void {
   _o.colorB = this.colorB();
   _o.duration = this.duration();
   _o.highTrajectory = this.highTrajectory();
+  _o.typeName = this.typeName();
+  _o.description = this.description();
+  _o.defaultDamage = this.defaultDamage();
+  _o.damages = this.bb!.createScalarList<number>(this.damages.bind(this), this.damagesLength());
+  _o.reloadTime = this.reloadTime();
+  _o.salvoSize = this.salvoSize();
+  _o.salvoDelay = this.salvoDelay();
+  _o.accuracy = this.accuracy();
+  _o.sprayAngle = this.sprayAngle();
+  _o.movingAccuracy = this.movingAccuracy();
+  _o.targetMoveError = this.targetMoveError();
+  _o.leadLimit = this.leadLimit();
+  _o.edgeEffectiveness = this.edgeEffectiveness();
+  _o.impulseFactor = this.impulseFactor();
+  _o.impulseBoost = this.impulseBoost();
+  _o.craterMult = this.craterMult();
+  _o.craterBoost = this.craterBoost();
+  _o.craterAoe = this.craterAoe();
+  _o.fireStarter = this.fireStarter();
+  _o.flightTime = this.flightTime();
+  _o.weaponAcceleration = this.weaponAcceleration();
+  _o.turnRate = this.turnRate();
+  _o.uptime = this.uptime();
+  _o.coverageRange = this.coverageRange();
+  _o.stockpileTime = this.stockpileTime();
+  _o.metalCost = this.metalCost();
+  _o.energyCost = this.energyCost();
+  _o.flags = this.flags();
 }
 }
 
@@ -230,12 +622,43 @@ constructor(
   public colorG: number = 0.0,
   public colorB: number = 0.0,
   public duration: number = 0.0,
-  public highTrajectory: boolean = false
+  public highTrajectory: boolean = false,
+  public typeName: string|Uint8Array|null = null,
+  public description: string|Uint8Array|null = null,
+  public defaultDamage: number = 0.0,
+  public damages: (number)[] = [],
+  public reloadTime: number = 0.0,
+  public salvoSize: number = 0,
+  public salvoDelay: number = 0.0,
+  public accuracy: number = 0.0,
+  public sprayAngle: number = 0.0,
+  public movingAccuracy: number = 0.0,
+  public targetMoveError: number = 0.0,
+  public leadLimit: number = -1.0,
+  public edgeEffectiveness: number = 0.0,
+  public impulseFactor: number = 0.0,
+  public impulseBoost: number = 0.0,
+  public craterMult: number = 0.0,
+  public craterBoost: number = 0.0,
+  public craterAoe: number = 0.0,
+  public fireStarter: number = 0.0,
+  public flightTime: number = 0,
+  public weaponAcceleration: number = 0.0,
+  public turnRate: number = 0.0,
+  public uptime: number = 0.0,
+  public coverageRange: number = 0.0,
+  public stockpileTime: number = 0.0,
+  public metalCost: number = 0.0,
+  public energyCost: number = 0.0,
+  public flags: number = 0
 ){}
 
 
 pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const name = (this.name !== null ? builder.createString(this.name!) : 0);
+  const typeName = (this.typeName !== null ? builder.createString(this.typeName!) : 0);
+  const description = (this.description !== null ? builder.createString(this.description!) : 0);
+  const damages = GameWeaponDef.createDamagesVector(builder, this.damages);
 
   return GameWeaponDef.createGameWeaponDef(builder,
     this.defId,
@@ -250,7 +673,35 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     this.colorG,
     this.colorB,
     this.duration,
-    this.highTrajectory
+    this.highTrajectory,
+    typeName,
+    description,
+    this.defaultDamage,
+    damages,
+    this.reloadTime,
+    this.salvoSize,
+    this.salvoDelay,
+    this.accuracy,
+    this.sprayAngle,
+    this.movingAccuracy,
+    this.targetMoveError,
+    this.leadLimit,
+    this.edgeEffectiveness,
+    this.impulseFactor,
+    this.impulseBoost,
+    this.craterMult,
+    this.craterBoost,
+    this.craterAoe,
+    this.fireStarter,
+    this.flightTime,
+    this.weaponAcceleration,
+    this.turnRate,
+    this.uptime,
+    this.coverageRange,
+    this.stockpileTime,
+    this.metalCost,
+    this.energyCost,
+    this.flags
   );
 }
 }

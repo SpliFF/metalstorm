@@ -790,7 +790,52 @@ inline flatbuffers::Offset<SpringWeb::GameWeaponDef> BuildSingleWeaponDef(
     const WeaponDefT& wd)
 {
     auto nameOff = fbb.CreateString(wd.name);
+    auto typeOff = fbb.CreateString(wd.type);
+    auto descOff = fbb.CreateString(wd.description);
     auto visualType = MapProjectileVisualType(wd.projectileType);
+
+    // Per-armor-class damage table. Element 0 is the default; we ship
+    // the whole vector so widgets can compute "damage vs class N" the
+    // way ZK's tooltip widget does. Empty if every entry equals
+    // damages[0] (saves bandwidth on simple weapons).
+    std::vector<float> damageTable;
+    bool varies = false;
+    const float def = wd.damages.GetDefault();
+    const int numTypes = wd.damages.GetNumTypes();
+    damageTable.reserve(numTypes);
+    for (int ai = 0; ai < numTypes; ai++) {
+        const float d = wd.damages.Get(ai);
+        damageTable.push_back(d);
+        if (d != def) varies = true;
+    }
+    if (!varies) damageTable.clear();
+    auto damagesOff = fbb.CreateVector(damageTable);
+
+    uint32_t flags = 0;
+    if (wd.tracks)               flags |= (1u << 0);
+    if (wd.paralyzer)            flags |= (1u << 1);
+    if (wd.noSelfDamage)         flags |= (1u << 2);
+    if (wd.manualfire)           flags |= (1u << 3);
+    if (wd.noAutoTarget)         flags |= (1u << 4);
+    if (wd.stockpile)            flags |= (1u << 5);
+    if (wd.waterweapon)          flags |= (1u << 6);
+    if (wd.fireSubmersed)        flags |= (1u << 7);
+    if (wd.submissile)           flags |= (1u << 8);
+    if (wd.turret)               flags |= (1u << 9);
+    if (wd.onlyForward)          flags |= (1u << 10);
+    if (wd.fixedLauncher)        flags |= (1u << 11);
+    if (wd.canAttackGround)      flags |= (1u << 12);
+    if (wd.avoidFriendly)        flags |= (1u << 13);
+    if (wd.avoidFeature)         flags |= (1u << 14);
+    if (wd.avoidNeutral)         flags |= (1u << 15);
+    if (wd.gravityAffected)      flags |= (1u << 16);
+    if (wd.noExplode)            flags |= (1u << 17);
+    if (wd.largeBeamLaser)       flags |= (1u << 18);
+    if (wd.laserHardStop)        flags |= (1u << 19);
+    if (wd.isShield)             flags |= (1u << 20);
+    if (wd.smartShield)          flags |= (1u << 21);
+    if (wd.exteriorShield)       flags |= (1u << 22);
+    if (wd.visibleShield)        flags |= (1u << 23);
 
     SpringWeb::GameWeaponDefBuilder wdb(fbb);
     wdb.add_def_id(static_cast<uint16_t>(wd.id));
@@ -806,6 +851,35 @@ inline flatbuffers::Offset<SpringWeb::GameWeaponDef> BuildSingleWeaponDef(
     wdb.add_color_b(wd.visuals.color.z);
     wdb.add_duration(wd.duration);
     wdb.add_high_trajectory(wd.highTrajectory == 1);
+
+    wdb.add_type_name(typeOff);
+    wdb.add_description(descOff);
+    wdb.add_default_damage(def);
+    wdb.add_damages(damagesOff);
+    wdb.add_reload_time(wd.reload);
+    wdb.add_salvo_size(wd.salvosize);
+    wdb.add_salvo_delay(wd.salvodelay);
+    wdb.add_accuracy(wd.accuracy);
+    wdb.add_spray_angle(wd.sprayAngle);
+    wdb.add_moving_accuracy(wd.movingAccuracy);
+    wdb.add_target_move_error(wd.targetMoveError);
+    wdb.add_lead_limit(wd.leadLimit);
+    wdb.add_edge_effectiveness(wd.damages.edgeEffectiveness);
+    wdb.add_impulse_factor(wd.damages.impulseFactor);
+    wdb.add_impulse_boost(wd.damages.impulseBoost);
+    wdb.add_crater_mult(wd.damages.craterMult);
+    wdb.add_crater_boost(wd.damages.craterBoost);
+    wdb.add_crater_aoe(wd.damages.craterAreaOfEffect);
+    wdb.add_fire_starter(wd.fireStarter);
+    wdb.add_flight_time(wd.flighttime);
+    wdb.add_weapon_acceleration(wd.weaponacceleration);
+    wdb.add_turn_rate(wd.turnrate);
+    wdb.add_uptime(wd.uptime);
+    wdb.add_coverage_range(wd.coverageRange);
+    wdb.add_stockpile_time(wd.stockpileTime);
+    wdb.add_metal_cost(wd.cost.metal);
+    wdb.add_energy_cost(wd.cost.energy);
+    wdb.add_flags(flags);
     return wdb.Finish();
 }
 

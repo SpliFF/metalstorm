@@ -129,6 +129,36 @@ export interface WeaponDefInfo {
     colorB: number;
     duration: number;
     highTrajectory: boolean;
+    typeName: string;
+    description: string;
+    defaultDamage: number;
+    /** Per-armor-class damage table. Empty = uniform `defaultDamage`. */
+    damages: number[];
+    reloadTime: number;
+    salvoSize: number;
+    salvoDelay: number;
+    accuracy: number;
+    sprayAngle: number;
+    movingAccuracy: number;
+    targetMoveError: number;
+    leadLimit: number;
+    edgeEffectiveness: number;
+    impulseFactor: number;
+    impulseBoost: number;
+    craterMult: number;
+    craterBoost: number;
+    craterAoe: number;
+    fireStarter: number;
+    flightTime: number;
+    weaponAcceleration: number;
+    turnRate: number;
+    uptime: number;
+    coverageRange: number;
+    stockpileTime: number;
+    metalCost: number;
+    energyCost: number;
+    /** Behaviour bitfield. See `GameWeaponDef.flags` in protocol.fbs. */
+    flags: number;
 }
 
 export interface ConnectionEvents {
@@ -673,6 +703,10 @@ export class Connection {
                 for (let i = 0; i < fbDefs.defsLength(); i++) {
                     const d = fbDefs.defs(i, new GameWeaponDef());
                     if (!d) continue;
+                    const damages: number[] = [];
+                    for (let di = 0; di < d.damagesLength(); di++) {
+                        damages.push(d.damages(di) ?? 0);
+                    }
                     defs.push({
                         defId: d.defId(),
                         name: d.name() ?? '',
@@ -687,6 +721,34 @@ export class Connection {
                         colorB: d.colorB(),
                         duration: d.duration(),
                         highTrajectory: d.highTrajectory(),
+                        typeName: d.typeName() ?? '',
+                        description: d.description() ?? '',
+                        defaultDamage: d.defaultDamage(),
+                        damages,
+                        reloadTime: d.reloadTime(),
+                        salvoSize: d.salvoSize(),
+                        salvoDelay: d.salvoDelay(),
+                        accuracy: d.accuracy(),
+                        sprayAngle: d.sprayAngle(),
+                        movingAccuracy: d.movingAccuracy(),
+                        targetMoveError: d.targetMoveError(),
+                        leadLimit: d.leadLimit(),
+                        edgeEffectiveness: d.edgeEffectiveness(),
+                        impulseFactor: d.impulseFactor(),
+                        impulseBoost: d.impulseBoost(),
+                        craterMult: d.craterMult(),
+                        craterBoost: d.craterBoost(),
+                        craterAoe: d.craterAoe(),
+                        fireStarter: d.fireStarter(),
+                        flightTime: d.flightTime(),
+                        weaponAcceleration: d.weaponAcceleration(),
+                        turnRate: d.turnRate(),
+                        uptime: d.uptime(),
+                        coverageRange: d.coverageRange(),
+                        stockpileTime: d.stockpileTime(),
+                        metalCost: d.metalCost(),
+                        energyCost: d.energyCost(),
+                        flags: d.flags(),
                     });
                 }
                 console.log(`[connection] received ${defs.length} weapon def(s)`);

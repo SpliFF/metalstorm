@@ -568,6 +568,53 @@ table GameWeaponDef {
     color_b: float;
     duration: float;            // beam duration (beam weapons only)
     high_trajectory: bool;      // arcs high (artillery)
+
+    // ── Tier 3: stats ZK widgets read ──────────────────────────────
+    /// Spring's `weapondef.type` string ("Cannon", "BeamLaser", "MissileLauncher", …).
+    type_name: string;
+    description: string;
+    /// Default damage (damages[0]) — most widgets just read this.
+    default_damage: float = 0;
+    /// Per-armor-class damage table. Index = armor type id, value = damage.
+    /// Empty if all classes share the default damage.
+    damages: [float];
+    reload_time: float = 0;     // seconds between salvos
+    salvo_size: int32 = 0;
+    salvo_delay: float = 0;
+    accuracy: float = 0;        // INaccuracy of whole burst
+    spray_angle: float = 0;
+    moving_accuracy: float = 0;
+    target_move_error: float = 0;
+    lead_limit: float = -1;
+    edge_effectiveness: float = 0;
+    impulse_factor: float = 0;
+    impulse_boost: float = 0;
+    crater_mult: float = 0;
+    crater_boost: float = 0;
+    crater_aoe: float = 0;
+    fire_starter: float = 0;
+    flight_time: int32 = 0;
+    weapon_acceleration: float = 0;
+    turn_rate: float = 0;
+    uptime: float = 0;
+    coverage_range: float = 0;
+    stockpile_time: float = 0;
+    metal_cost: float = 0;
+    energy_cost: float = 0;
+    /// Behaviour flags. Bit assignments:
+    /// bit 0: tracks                 bit 1: paralyzer
+    /// bit 2: noSelfDamage           bit 3: manualFire
+    /// bit 4: noAutoTarget           bit 5: stockpile
+    /// bit 6: waterWeapon            bit 7: fireSubmersed
+    /// bit 8: submissile             bit 9: turret
+    /// bit10: onlyForward            bit11: fixedLauncher
+    /// bit12: canAttackGround        bit13: avoidFriendly
+    /// bit14: avoidFeature           bit15: avoidNeutral
+    /// bit16: gravityAffected        bit17: noExplode
+    /// bit18: largeBeamLaser         bit19: laserHardStop
+    /// bit20: isShield               bit21: smartShield
+    /// bit22: exteriorShield         bit23: visibleShield
+    flags: uint32 = 0;
 }
 
 /// Sent by the game server after successful auth, alongside

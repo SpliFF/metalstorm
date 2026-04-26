@@ -5230,7 +5230,35 @@ struct GameWeaponDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_COLOR_G = 22,
     VT_COLOR_B = 24,
     VT_DURATION = 26,
-    VT_HIGH_TRAJECTORY = 28
+    VT_HIGH_TRAJECTORY = 28,
+    VT_TYPE_NAME = 30,
+    VT_DESCRIPTION = 32,
+    VT_DEFAULT_DAMAGE = 34,
+    VT_DAMAGES = 36,
+    VT_RELOAD_TIME = 38,
+    VT_SALVO_SIZE = 40,
+    VT_SALVO_DELAY = 42,
+    VT_ACCURACY = 44,
+    VT_SPRAY_ANGLE = 46,
+    VT_MOVING_ACCURACY = 48,
+    VT_TARGET_MOVE_ERROR = 50,
+    VT_LEAD_LIMIT = 52,
+    VT_EDGE_EFFECTIVENESS = 54,
+    VT_IMPULSE_FACTOR = 56,
+    VT_IMPULSE_BOOST = 58,
+    VT_CRATER_MULT = 60,
+    VT_CRATER_BOOST = 62,
+    VT_CRATER_AOE = 64,
+    VT_FIRE_STARTER = 66,
+    VT_FLIGHT_TIME = 68,
+    VT_WEAPON_ACCELERATION = 70,
+    VT_TURN_RATE = 72,
+    VT_UPTIME = 74,
+    VT_COVERAGE_RANGE = 76,
+    VT_STOCKPILE_TIME = 78,
+    VT_METAL_COST = 80,
+    VT_ENERGY_COST = 82,
+    VT_FLAGS = 84
   };
   uint16_t def_id() const {
     return GetField<uint16_t>(VT_DEF_ID, 0);
@@ -5274,6 +5302,107 @@ struct GameWeaponDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   bool high_trajectory() const {
     return GetField<uint8_t>(VT_HIGH_TRAJECTORY, 0) != 0;
   }
+  /// Spring's `weapondef.type` string ("Cannon", "BeamLaser", "MissileLauncher", …).
+  const ::flatbuffers::String *type_name() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_TYPE_NAME);
+  }
+  const ::flatbuffers::String *description() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_DESCRIPTION);
+  }
+  /// Default damage (damages[0]) — most widgets just read this.
+  float default_damage() const {
+    return GetField<float>(VT_DEFAULT_DAMAGE, 0.0f);
+  }
+  /// Per-armor-class damage table. Index = armor type id, value = damage.
+  /// Empty if all classes share the default damage.
+  const ::flatbuffers::Vector<float> *damages() const {
+    return GetPointer<const ::flatbuffers::Vector<float> *>(VT_DAMAGES);
+  }
+  float reload_time() const {
+    return GetField<float>(VT_RELOAD_TIME, 0.0f);
+  }
+  int32_t salvo_size() const {
+    return GetField<int32_t>(VT_SALVO_SIZE, 0);
+  }
+  float salvo_delay() const {
+    return GetField<float>(VT_SALVO_DELAY, 0.0f);
+  }
+  float accuracy() const {
+    return GetField<float>(VT_ACCURACY, 0.0f);
+  }
+  float spray_angle() const {
+    return GetField<float>(VT_SPRAY_ANGLE, 0.0f);
+  }
+  float moving_accuracy() const {
+    return GetField<float>(VT_MOVING_ACCURACY, 0.0f);
+  }
+  float target_move_error() const {
+    return GetField<float>(VT_TARGET_MOVE_ERROR, 0.0f);
+  }
+  float lead_limit() const {
+    return GetField<float>(VT_LEAD_LIMIT, -1.0f);
+  }
+  float edge_effectiveness() const {
+    return GetField<float>(VT_EDGE_EFFECTIVENESS, 0.0f);
+  }
+  float impulse_factor() const {
+    return GetField<float>(VT_IMPULSE_FACTOR, 0.0f);
+  }
+  float impulse_boost() const {
+    return GetField<float>(VT_IMPULSE_BOOST, 0.0f);
+  }
+  float crater_mult() const {
+    return GetField<float>(VT_CRATER_MULT, 0.0f);
+  }
+  float crater_boost() const {
+    return GetField<float>(VT_CRATER_BOOST, 0.0f);
+  }
+  float crater_aoe() const {
+    return GetField<float>(VT_CRATER_AOE, 0.0f);
+  }
+  float fire_starter() const {
+    return GetField<float>(VT_FIRE_STARTER, 0.0f);
+  }
+  int32_t flight_time() const {
+    return GetField<int32_t>(VT_FLIGHT_TIME, 0);
+  }
+  float weapon_acceleration() const {
+    return GetField<float>(VT_WEAPON_ACCELERATION, 0.0f);
+  }
+  float turn_rate() const {
+    return GetField<float>(VT_TURN_RATE, 0.0f);
+  }
+  float uptime() const {
+    return GetField<float>(VT_UPTIME, 0.0f);
+  }
+  float coverage_range() const {
+    return GetField<float>(VT_COVERAGE_RANGE, 0.0f);
+  }
+  float stockpile_time() const {
+    return GetField<float>(VT_STOCKPILE_TIME, 0.0f);
+  }
+  float metal_cost() const {
+    return GetField<float>(VT_METAL_COST, 0.0f);
+  }
+  float energy_cost() const {
+    return GetField<float>(VT_ENERGY_COST, 0.0f);
+  }
+  /// Behaviour flags. Bit assignments:
+  /// bit 0: tracks                 bit 1: paralyzer
+  /// bit 2: noSelfDamage           bit 3: manualFire
+  /// bit 4: noAutoTarget           bit 5: stockpile
+  /// bit 6: waterWeapon            bit 7: fireSubmersed
+  /// bit 8: submissile             bit 9: turret
+  /// bit10: onlyForward            bit11: fixedLauncher
+  /// bit12: canAttackGround        bit13: avoidFriendly
+  /// bit14: avoidFeature           bit15: avoidNeutral
+  /// bit16: gravityAffected        bit17: noExplode
+  /// bit18: largeBeamLaser         bit19: laserHardStop
+  /// bit20: isShield               bit21: smartShield
+  /// bit22: exteriorShield         bit23: visibleShield
+  uint32_t flags() const {
+    return GetField<uint32_t>(VT_FLAGS, 0);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint16_t>(verifier, VT_DEF_ID, 2) &&
@@ -5290,6 +5419,37 @@ struct GameWeaponDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<float>(verifier, VT_COLOR_B, 4) &&
            VerifyField<float>(verifier, VT_DURATION, 4) &&
            VerifyField<uint8_t>(verifier, VT_HIGH_TRAJECTORY, 1) &&
+           VerifyOffset(verifier, VT_TYPE_NAME) &&
+           verifier.VerifyString(type_name()) &&
+           VerifyOffset(verifier, VT_DESCRIPTION) &&
+           verifier.VerifyString(description()) &&
+           VerifyField<float>(verifier, VT_DEFAULT_DAMAGE, 4) &&
+           VerifyOffset(verifier, VT_DAMAGES) &&
+           verifier.VerifyVector(damages()) &&
+           VerifyField<float>(verifier, VT_RELOAD_TIME, 4) &&
+           VerifyField<int32_t>(verifier, VT_SALVO_SIZE, 4) &&
+           VerifyField<float>(verifier, VT_SALVO_DELAY, 4) &&
+           VerifyField<float>(verifier, VT_ACCURACY, 4) &&
+           VerifyField<float>(verifier, VT_SPRAY_ANGLE, 4) &&
+           VerifyField<float>(verifier, VT_MOVING_ACCURACY, 4) &&
+           VerifyField<float>(verifier, VT_TARGET_MOVE_ERROR, 4) &&
+           VerifyField<float>(verifier, VT_LEAD_LIMIT, 4) &&
+           VerifyField<float>(verifier, VT_EDGE_EFFECTIVENESS, 4) &&
+           VerifyField<float>(verifier, VT_IMPULSE_FACTOR, 4) &&
+           VerifyField<float>(verifier, VT_IMPULSE_BOOST, 4) &&
+           VerifyField<float>(verifier, VT_CRATER_MULT, 4) &&
+           VerifyField<float>(verifier, VT_CRATER_BOOST, 4) &&
+           VerifyField<float>(verifier, VT_CRATER_AOE, 4) &&
+           VerifyField<float>(verifier, VT_FIRE_STARTER, 4) &&
+           VerifyField<int32_t>(verifier, VT_FLIGHT_TIME, 4) &&
+           VerifyField<float>(verifier, VT_WEAPON_ACCELERATION, 4) &&
+           VerifyField<float>(verifier, VT_TURN_RATE, 4) &&
+           VerifyField<float>(verifier, VT_UPTIME, 4) &&
+           VerifyField<float>(verifier, VT_COVERAGE_RANGE, 4) &&
+           VerifyField<float>(verifier, VT_STOCKPILE_TIME, 4) &&
+           VerifyField<float>(verifier, VT_METAL_COST, 4) &&
+           VerifyField<float>(verifier, VT_ENERGY_COST, 4) &&
+           VerifyField<uint32_t>(verifier, VT_FLAGS, 4) &&
            verifier.EndTable();
   }
 };
@@ -5337,6 +5497,90 @@ struct GameWeaponDefBuilder {
   void add_high_trajectory(bool high_trajectory) {
     fbb_.AddElement<uint8_t>(GameWeaponDef::VT_HIGH_TRAJECTORY, static_cast<uint8_t>(high_trajectory), 0);
   }
+  void add_type_name(::flatbuffers::Offset<::flatbuffers::String> type_name) {
+    fbb_.AddOffset(GameWeaponDef::VT_TYPE_NAME, type_name);
+  }
+  void add_description(::flatbuffers::Offset<::flatbuffers::String> description) {
+    fbb_.AddOffset(GameWeaponDef::VT_DESCRIPTION, description);
+  }
+  void add_default_damage(float default_damage) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_DEFAULT_DAMAGE, default_damage, 0.0f);
+  }
+  void add_damages(::flatbuffers::Offset<::flatbuffers::Vector<float>> damages) {
+    fbb_.AddOffset(GameWeaponDef::VT_DAMAGES, damages);
+  }
+  void add_reload_time(float reload_time) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_RELOAD_TIME, reload_time, 0.0f);
+  }
+  void add_salvo_size(int32_t salvo_size) {
+    fbb_.AddElement<int32_t>(GameWeaponDef::VT_SALVO_SIZE, salvo_size, 0);
+  }
+  void add_salvo_delay(float salvo_delay) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_SALVO_DELAY, salvo_delay, 0.0f);
+  }
+  void add_accuracy(float accuracy) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_ACCURACY, accuracy, 0.0f);
+  }
+  void add_spray_angle(float spray_angle) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_SPRAY_ANGLE, spray_angle, 0.0f);
+  }
+  void add_moving_accuracy(float moving_accuracy) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_MOVING_ACCURACY, moving_accuracy, 0.0f);
+  }
+  void add_target_move_error(float target_move_error) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_TARGET_MOVE_ERROR, target_move_error, 0.0f);
+  }
+  void add_lead_limit(float lead_limit) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_LEAD_LIMIT, lead_limit, -1.0f);
+  }
+  void add_edge_effectiveness(float edge_effectiveness) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_EDGE_EFFECTIVENESS, edge_effectiveness, 0.0f);
+  }
+  void add_impulse_factor(float impulse_factor) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_IMPULSE_FACTOR, impulse_factor, 0.0f);
+  }
+  void add_impulse_boost(float impulse_boost) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_IMPULSE_BOOST, impulse_boost, 0.0f);
+  }
+  void add_crater_mult(float crater_mult) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_CRATER_MULT, crater_mult, 0.0f);
+  }
+  void add_crater_boost(float crater_boost) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_CRATER_BOOST, crater_boost, 0.0f);
+  }
+  void add_crater_aoe(float crater_aoe) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_CRATER_AOE, crater_aoe, 0.0f);
+  }
+  void add_fire_starter(float fire_starter) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_FIRE_STARTER, fire_starter, 0.0f);
+  }
+  void add_flight_time(int32_t flight_time) {
+    fbb_.AddElement<int32_t>(GameWeaponDef::VT_FLIGHT_TIME, flight_time, 0);
+  }
+  void add_weapon_acceleration(float weapon_acceleration) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_WEAPON_ACCELERATION, weapon_acceleration, 0.0f);
+  }
+  void add_turn_rate(float turn_rate) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_TURN_RATE, turn_rate, 0.0f);
+  }
+  void add_uptime(float uptime) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_UPTIME, uptime, 0.0f);
+  }
+  void add_coverage_range(float coverage_range) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_COVERAGE_RANGE, coverage_range, 0.0f);
+  }
+  void add_stockpile_time(float stockpile_time) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_STOCKPILE_TIME, stockpile_time, 0.0f);
+  }
+  void add_metal_cost(float metal_cost) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_METAL_COST, metal_cost, 0.0f);
+  }
+  void add_energy_cost(float energy_cost) {
+    fbb_.AddElement<float>(GameWeaponDef::VT_ENERGY_COST, energy_cost, 0.0f);
+  }
+  void add_flags(uint32_t flags) {
+    fbb_.AddElement<uint32_t>(GameWeaponDef::VT_FLAGS, flags, 0);
+  }
   explicit GameWeaponDefBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -5362,8 +5606,64 @@ inline ::flatbuffers::Offset<GameWeaponDef> CreateGameWeaponDef(
     float color_g = 0.0f,
     float color_b = 0.0f,
     float duration = 0.0f,
-    bool high_trajectory = false) {
+    bool high_trajectory = false,
+    ::flatbuffers::Offset<::flatbuffers::String> type_name = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> description = 0,
+    float default_damage = 0.0f,
+    ::flatbuffers::Offset<::flatbuffers::Vector<float>> damages = 0,
+    float reload_time = 0.0f,
+    int32_t salvo_size = 0,
+    float salvo_delay = 0.0f,
+    float accuracy = 0.0f,
+    float spray_angle = 0.0f,
+    float moving_accuracy = 0.0f,
+    float target_move_error = 0.0f,
+    float lead_limit = -1.0f,
+    float edge_effectiveness = 0.0f,
+    float impulse_factor = 0.0f,
+    float impulse_boost = 0.0f,
+    float crater_mult = 0.0f,
+    float crater_boost = 0.0f,
+    float crater_aoe = 0.0f,
+    float fire_starter = 0.0f,
+    int32_t flight_time = 0,
+    float weapon_acceleration = 0.0f,
+    float turn_rate = 0.0f,
+    float uptime = 0.0f,
+    float coverage_range = 0.0f,
+    float stockpile_time = 0.0f,
+    float metal_cost = 0.0f,
+    float energy_cost = 0.0f,
+    uint32_t flags = 0) {
   GameWeaponDefBuilder builder_(_fbb);
+  builder_.add_flags(flags);
+  builder_.add_energy_cost(energy_cost);
+  builder_.add_metal_cost(metal_cost);
+  builder_.add_stockpile_time(stockpile_time);
+  builder_.add_coverage_range(coverage_range);
+  builder_.add_uptime(uptime);
+  builder_.add_turn_rate(turn_rate);
+  builder_.add_weapon_acceleration(weapon_acceleration);
+  builder_.add_flight_time(flight_time);
+  builder_.add_fire_starter(fire_starter);
+  builder_.add_crater_aoe(crater_aoe);
+  builder_.add_crater_boost(crater_boost);
+  builder_.add_crater_mult(crater_mult);
+  builder_.add_impulse_boost(impulse_boost);
+  builder_.add_impulse_factor(impulse_factor);
+  builder_.add_edge_effectiveness(edge_effectiveness);
+  builder_.add_lead_limit(lead_limit);
+  builder_.add_target_move_error(target_move_error);
+  builder_.add_moving_accuracy(moving_accuracy);
+  builder_.add_spray_angle(spray_angle);
+  builder_.add_accuracy(accuracy);
+  builder_.add_salvo_delay(salvo_delay);
+  builder_.add_salvo_size(salvo_size);
+  builder_.add_reload_time(reload_time);
+  builder_.add_damages(damages);
+  builder_.add_default_damage(default_damage);
+  builder_.add_description(description);
+  builder_.add_type_name(type_name);
   builder_.add_duration(duration);
   builder_.add_color_b(color_b);
   builder_.add_color_g(color_g);
@@ -5394,8 +5694,39 @@ inline ::flatbuffers::Offset<GameWeaponDef> CreateGameWeaponDefDirect(
     float color_g = 0.0f,
     float color_b = 0.0f,
     float duration = 0.0f,
-    bool high_trajectory = false) {
+    bool high_trajectory = false,
+    const char *type_name = nullptr,
+    const char *description = nullptr,
+    float default_damage = 0.0f,
+    const std::vector<float> *damages = nullptr,
+    float reload_time = 0.0f,
+    int32_t salvo_size = 0,
+    float salvo_delay = 0.0f,
+    float accuracy = 0.0f,
+    float spray_angle = 0.0f,
+    float moving_accuracy = 0.0f,
+    float target_move_error = 0.0f,
+    float lead_limit = -1.0f,
+    float edge_effectiveness = 0.0f,
+    float impulse_factor = 0.0f,
+    float impulse_boost = 0.0f,
+    float crater_mult = 0.0f,
+    float crater_boost = 0.0f,
+    float crater_aoe = 0.0f,
+    float fire_starter = 0.0f,
+    int32_t flight_time = 0,
+    float weapon_acceleration = 0.0f,
+    float turn_rate = 0.0f,
+    float uptime = 0.0f,
+    float coverage_range = 0.0f,
+    float stockpile_time = 0.0f,
+    float metal_cost = 0.0f,
+    float energy_cost = 0.0f,
+    uint32_t flags = 0) {
   auto name__ = name ? _fbb.CreateString(name) : 0;
+  auto type_name__ = type_name ? _fbb.CreateString(type_name) : 0;
+  auto description__ = description ? _fbb.CreateString(description) : 0;
+  auto damages__ = damages ? _fbb.CreateVector<float>(*damages) : 0;
   return SpringWeb::CreateGameWeaponDef(
       _fbb,
       def_id,
@@ -5410,7 +5741,35 @@ inline ::flatbuffers::Offset<GameWeaponDef> CreateGameWeaponDefDirect(
       color_g,
       color_b,
       duration,
-      high_trajectory);
+      high_trajectory,
+      type_name__,
+      description__,
+      default_damage,
+      damages__,
+      reload_time,
+      salvo_size,
+      salvo_delay,
+      accuracy,
+      spray_angle,
+      moving_accuracy,
+      target_move_error,
+      lead_limit,
+      edge_effectiveness,
+      impulse_factor,
+      impulse_boost,
+      crater_mult,
+      crater_boost,
+      crater_aoe,
+      fire_starter,
+      flight_time,
+      weapon_acceleration,
+      turn_rate,
+      uptime,
+      coverage_range,
+      stockpile_time,
+      metal_cost,
+      energy_cost,
+      flags);
 }
 
 /// Sent by the game server after successful auth, alongside
