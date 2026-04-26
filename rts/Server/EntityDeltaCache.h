@@ -22,6 +22,10 @@ struct CachedEntityState {
     uint16_t health = 0;
     uint16_t defId = 0;
     uint8_t team = 0;
+    /// Spring losStatus byte for the viewer's ally team. Cached so a
+    /// transition between radar-only and full LOS triggers a delta send
+    /// even if position/health didn't move.
+    uint8_t losState = 0;
 };
 
 class EntityDeltaCache {
@@ -31,10 +35,12 @@ public:
     static constexpr float POS_THRESHOLD = 0.5f;
 
     /// Check if a unit's state has changed since last send.
-    bool HasChanged(const CUnit* unit) const;
+    /// `viewerAllyTeam` is consulted for the LOS-state comparison; pass
+    /// -1 to skip that check (legacy permissive sessions / spectators).
+    bool HasChanged(const CUnit* unit, int viewerAllyTeam = -1) const;
 
     /// Update the cache with the unit's current state.
-    void Update(const CUnit* unit);
+    void Update(const CUnit* unit, int viewerAllyTeam = -1);
 
     /// Remove an entity from the cache (on death/removal).
     void Remove(uint32_t entityId) { cache.erase(entityId); }

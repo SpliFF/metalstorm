@@ -23,6 +23,12 @@
  *                                            bit 5:    isCloaked
  *                                            bit 6:    isStunned
  *                                            bit 7:    reserved
+ *     Bit 9: los_state     → u8[count]     Spring losStatus low nibble:
+ *                                            bit 0: LOS_INLOS
+ *                                            bit 1: LOS_INRADAR
+ *                                            bit 2: LOS_PREVLOS (ghost)
+ *                                            bit 3: LOS_CONTRADAR
+ *                                            bits 4-7: reserved
  */
 
 export const FIELD_ENTITY_IDS = 1 << 0;
@@ -34,6 +40,7 @@ export const FIELD_HEALTH     = 1 << 5;
 export const FIELD_DEF_ID     = 1 << 6;
 export const FIELD_TEAM       = 1 << 7;
 export const FIELD_STATE_BITS = 1 << 8;
+export const FIELD_LOS_STATE  = 1 << 9;
 
 /** Parsed entity state snapshot — typed arrays are zero-copy views into the buffer. */
 export interface EntityStateSnapshot {
@@ -48,6 +55,7 @@ export interface EntityStateSnapshot {
     defIds:     Uint16Array  | null;
     teams:      Uint8Array   | null;
     stateBits:  Uint8Array   | null;
+    losStates:  Uint8Array   | null;
 }
 
 /**
@@ -78,6 +86,7 @@ export function parseEntityState(input: Uint8Array): EntityStateSnapshot | null 
         defIds: null,
         teams: null,
         stateBits: null,
+        losStates: null,
     };
 
     if (fieldMask & FIELD_ENTITY_IDS) {
@@ -114,6 +123,10 @@ export function parseEntityState(input: Uint8Array): EntityStateSnapshot | null 
     }
     if (fieldMask & FIELD_STATE_BITS) {
         result.stateBits = new Uint8Array(data.buffer, offset, count);
+        offset += count;
+    }
+    if (fieldMask & FIELD_LOS_STATE) {
+        result.losStates = new Uint8Array(data.buffer, offset, count);
         offset += count;
     }
 

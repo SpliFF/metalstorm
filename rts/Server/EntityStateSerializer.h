@@ -18,6 +18,14 @@
  *     Bit 6: def_id        → u16[count]
  *     Bit 7: team          → u8[count]
  *     Bit 8: state_bits    → u8[count]     (packed unit-state flags)
+ *     Bit 9: los_state     → u8[count]     (Spring losStatus, low 4 bits)
+ *
+ *   los_state layout (per unit, for the receiving session's ally team):
+ *     bit 0: LOS_INLOS      — fully in line of sight
+ *     bit 1: LOS_INRADAR    — in radar coverage
+ *     bit 2: LOS_PREVLOS    — previously seen ("ghost")
+ *     bit 3: LOS_CONTRADAR  — continuously on radar since last sighting
+ *     bits 4-7 reserved
  *
  *   state_bits layout (per unit):
  *     bits 0-1: fireState  (0=hold, 1=return, 2=at-will)
@@ -48,18 +56,23 @@ constexpr uint16_t FIELD_HEALTH      = 1 << 5;
 constexpr uint16_t FIELD_DEF_ID      = 1 << 6;
 constexpr uint16_t FIELD_TEAM        = 1 << 7;
 constexpr uint16_t FIELD_STATE_BITS  = 1 << 8;
+constexpr uint16_t FIELD_LOS_STATE   = 1 << 9;
 
 // All fields — used for full state snapshots
-constexpr uint16_t FIELD_ALL = 0x01FF;
+constexpr uint16_t FIELD_ALL = 0x03FF;
 
 /// Serialize all active units into the Tier 2 binary format.
 /// Returns a buffer ready to be sent (without envelope byte).
 std::vector<uint8_t> SerializeAllUnits(uint16_t fieldMask = FIELD_ALL);
 
 /// Serialize a specific set of units.
+/// `viewerAllyTeam` determines what gets written into the per-unit
+/// FIELD_LOS_STATE byte (Spring's losStatus[allyTeam]). Pass -1 for
+/// permissive sessions (everything reads as fully visible).
 std::vector<uint8_t> SerializeUnits(
     const std::vector<CUnit*>& units,
-    uint16_t fieldMask = FIELD_ALL);
+    uint16_t fieldMask = FIELD_ALL,
+    int viewerAllyTeam = -1);
 
 /// Serialize units visible within a set of viewports.
 /// Uses QuadField spatial queries. Requires a loaded map.

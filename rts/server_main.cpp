@@ -1422,21 +1422,23 @@ int main(int argc, char* argv[])
 
                 if (isFullSnapshot) {
                     envelope = 0x02;
-                    stateData = EntityState::SerializeUnits(candidates);
+                    stateData = EntityState::SerializeUnits(
+                        candidates, EntityState::FIELD_ALL, viewerAllyTeam);
                     session.deltaCache.Clear();
                     for (CUnit* u : candidates)
-                        session.deltaCache.Update(u);
+                        session.deltaCache.Update(u, viewerAllyTeam);
                 } else {
                     std::vector<CUnit*> changed;
                     for (CUnit* u : candidates) {
-                        if (session.deltaCache.HasChanged(u))
+                        if (session.deltaCache.HasChanged(u, viewerAllyTeam))
                             changed.push_back(u);
                     }
                     for (CUnit* u : changed)
-                        session.deltaCache.Update(u);
+                        session.deltaCache.Update(u, viewerAllyTeam);
 
                     envelope = 0x03;
-                    stateData = EntityState::SerializeUnits(changed);
+                    stateData = EntityState::SerializeUnits(
+                        changed, EntityState::FIELD_ALL, viewerAllyTeam);
                 }
 
                 std::vector<uint8_t> frame;

@@ -73,6 +73,11 @@ export interface UnitEntry {
      *    bit  6:   isStunned
      *    bit  7:   reserved */
     stateBits: number;
+    /** Spring losStatus low nibble for the local ally team:
+     *    bit 0: LOS_INLOS  bit 1: LOS_INRADAR
+     *    bit 2: LOS_PREVLOS  bit 3: LOS_CONTRADAR
+     *  Own-allyteam units always read 0x0F. */
+    losState: number;
 }
 
 /** Per-team resource entry. */
@@ -809,6 +814,49 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         IsUnitSelected: (id: LuaValue) => {
             return ls.selectedUnitIds.includes(Number(id));
         },
+        // ── LOS / radar visibility ─────────────────────────────────
+        // The server stamps every entity with its losStatus byte for
+        // the receiving session's ally team. Own-allyteam units are
+        // always 0x0F (fully visible). Spring widgets read these via
+        // GetUnitLosState / IsUnitInLos / IsUnitInRadar / IsUnitInJammer.
+        GetUnitLosState: (id: LuaValue, _allyTeam?: LuaValue, raw?: LuaValue) => {
+            const u = ls.units.get(Number(id));
+            if (!u) return null;
+            const bits = u.losState & 0x0F;
+            // Spring's optional 3rd arg returns the raw bitfield.
+            // Otherwise: a keyed table of booleans { los=, radar=, typed= }.
+            if (raw) return bits;
+            return {
+                los:    (bits & 0x01) !== 0,
+                radar:  (bits & 0x02) !== 0,
+                typed:  (bits & 0x04) !== 0,  // PREVLOS — "ghost" / type known
+            };
+        },
+        IsUnitInLos: (id: LuaValue) => {
+            const u = ls.units.get(Number(id));
+            if (!u) return false;
+            return (u.losState & 0x01) !== 0;
+        },
+        IsUnitInAirLos: (id: LuaValue) => {
+            // We don't track air-LOS separately yet; widgets fall back
+            // on regular LOS (same behaviour as games without air-only
+            // sensors). Air-only contacts can be wired in once the
+            // server-side losStatus exposes the air bit.
+            const u = ls.units.get(Number(id));
+            if (!u) return false;
+            return (u.losState & 0x01) !== 0;
+        },
+        IsUnitInRadar: (id: LuaValue) => {
+            const u = ls.units.get(Number(id));
+            if (!u) return false;
+            return (u.losState & 0x02) !== 0;
+        },
+        IsUnitInJammer: () => {
+            // Jamming state isn't streamed yet — placeholder so widgets
+            // that call this don't crash.
+            return false;
+        },
+
         IsUnitInView: (id: LuaValue) => {
             // All units in the store are server-sent and thus in view
             return ls.units.has(Number(id));
@@ -1376,7 +1424,6 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         GetUnitResources: () => [0, 0, 0, 0, 0, 0], // metalMake, metalUse, energyMake, energyUse
         IsUnitVisible: (id: LuaValue) => ls.units.has(Number(id)),
         IsUnitIcon: () => false,
-        IsUnitInLos: () => true,
 
         // --- Camera rotation ---
         GetCameraRotation: () => {

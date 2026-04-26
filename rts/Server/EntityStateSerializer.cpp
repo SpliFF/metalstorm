@@ -37,13 +37,14 @@ std::vector<uint8_t> SerializeAllUnits(uint16_t fieldMask) {
             units.push_back(u);
     }
 
-    return SerializeUnits(units, fieldMask);
+    return SerializeUnits(units, fieldMask, /*viewerAllyTeam*/ -1);
 }
 
 
 std::vector<uint8_t> SerializeUnits(
     const std::vector<CUnit*>& units,
-    uint16_t fieldMask)
+    uint16_t fieldMask,
+    int viewerAllyTeam)
 {
     const uint16_t count = static_cast<uint16_t>(units.size());
 
@@ -58,6 +59,7 @@ std::vector<uint8_t> SerializeUnits(
     if (fieldMask & FIELD_DEF_ID)      size += count * sizeof(uint16_t);
     if (fieldMask & FIELD_TEAM)        size += count * sizeof(uint8_t);
     if (fieldMask & FIELD_STATE_BITS)  size += count * sizeof(uint8_t);
+    if (fieldMask & FIELD_LOS_STATE)   size += count * sizeof(uint8_t);
 
     std::vector<uint8_t> buf(size);
     size_t offset = 0;
@@ -139,25 +141,47 @@ std::vector<uint8_t> SerializeUnits(
         }
     }
 
+    // LOS state (u8) — Spring's losStatus[viewerAllyTeam] low nibble.
+    // Permissive sessions get 0x0F (looks fully visible to widgets).
+    // Own-allyteam units always read as fully-in-LOS regardless of the
+    // engine's tracking state, mirroring Spring's "you can always see
+    // your own units" behaviour.
+    if (fieldMask & FIELD_LOS_STATE) {
+        for (const CUnit* u : units) {
+            uint8_t losByte;
+            if (viewerAllyTeam < 0) {
+                losByte = 0x0F;
+            } else {
+                const int unitAllyTeam = teamHandler.AllyTeam(u->team);
+                if (unitAllyTeam == viewerAllyTeam) {
+                    losByte = 0x0F;
+                } else {
+                    losByte = u->losStatus[viewerAllyTeam] & 0x0F;
+                }
+            }
+            Write(buf, offset, losByte);
+        }
+    }
+
     return buf;
 }
 
 /// Per-ally-team visibility check. Own-allyteam units are always
-/// visible; enemy units require LOS from `viewerAllyTeam`. `viewerAllyTeam
-/// < 0` disables the filter — the legacy permissive path used by
-/// dev-smoketest sessions (no roster handoff) and spectators who are
-/// expected to see the whole map.
+/// visible; enemy units are visible if Spring's losStatus shows them
+/// in LOS, in radar, or previously seen (PREVLOS — "ghost"). The
+/// per-unit FIELD_LOS_STATE byte tells the client which kind of
+/// contact each entry represents so widgets can render fog-of-war,
+/// radar blips, and ghosts differently.
+///
+/// `viewerAllyTeam < 0` disables the filter — the legacy permissive
+/// path used by dev-smoketest sessions (no roster handoff) and
+/// spectators who are expected to see the whole map.
 static bool IsUnitVisibleTo(const CUnit* u, int viewerAllyTeam) {
     if (viewerAllyTeam < 0) return true;
     const int unitAllyTeam = teamHandler.AllyTeam(u->team);
     if (unitAllyTeam == viewerAllyTeam) return true;
-    // LosHandler::InLos takes the *viewer* ally team. Units outside
-    // any LOS tile are hidden from the wire entirely; this is fog
-    // of war in its simplest form. Radar-only visibility (ghost
-    // markers, reduced-fidelity updates) is a future pass — for
-    // now, either the viewer can see you or you don't exist to
-    // them.
-    return losHandler->InLos(u, viewerAllyTeam);
+    constexpr uint8_t VISIBLE_MASK = LOS_INLOS | LOS_INRADAR | LOS_PREVLOS | LOS_CONTRADAR;
+    return (u->losStatus[viewerAllyTeam] & VISIBLE_MASK) != 0;
 }
 
 std::vector<CUnit*> CollectAllUnits(int viewerAllyTeam) {
@@ -213,7 +237,7 @@ std::vector<uint8_t> SerializeViewportUnits(
 {
     return SerializeUnits(
         CollectViewportUnits(viewports, numViewports, /*viewerAllyTeam*/ -1),
-        fieldMask);
+        fieldMask, /*viewerAllyTeam*/ -1);
 }
 
 } // namespace EntityState

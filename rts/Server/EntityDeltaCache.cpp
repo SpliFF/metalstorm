@@ -18,7 +18,7 @@ static uint16_t UnitHealthU16(const CUnit* u) {
     return static_cast<uint16_t>(ratio * 65535.0f);
 }
 
-bool EntityDeltaCache::HasChanged(const CUnit* unit) const {
+bool EntityDeltaCache::HasChanged(const CUnit* unit, int viewerAllyTeam) const {
     auto it = cache.find(static_cast<uint32_t>(unit->id));
     if (it == cache.end())
         return true; // New entity, always send
@@ -40,10 +40,19 @@ bool EntityDeltaCache::HasChanged(const CUnit* unit) const {
     if (UnitHealthU16(unit) != c.health)
         return true;
 
+    // LOS-state transition (radar↔los or first-sighting). Without this
+    // the client could be stuck rendering a unit as a radar contact
+    // long after the player has gained LOS on it.
+    if (viewerAllyTeam >= 0) {
+        const uint8_t losState = unit->losStatus[viewerAllyTeam] & 0x0F;
+        if (losState != c.losState)
+            return true;
+    }
+
     return false;
 }
 
-void EntityDeltaCache::Update(const CUnit* unit) {
+void EntityDeltaCache::Update(const CUnit* unit, int viewerAllyTeam) {
     auto& c = cache[static_cast<uint32_t>(unit->id)];
     c.posX = unit->pos.x;
     c.posY = unit->pos.y;
@@ -52,6 +61,9 @@ void EntityDeltaCache::Update(const CUnit* unit) {
     c.health = UnitHealthU16(unit);
     c.defId = static_cast<uint16_t>(unit->unitDef->id);
     c.team = static_cast<uint8_t>(unit->team);
+    c.losState = (viewerAllyTeam >= 0)
+        ? (unit->losStatus[viewerAllyTeam] & 0x0F)
+        : 0x0F; // permissive sessions get "fully seen"
 }
 
 void EntityDeltaCache::FindRemoved(
