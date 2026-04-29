@@ -3,7 +3,7 @@
 #ifndef FASTMATH_H
 #define FASTMATH_H
 
-#if !defined(DEDICATED_NOSSE) && (defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86))
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
 #include <xmmintrin.h>
 #define SPRING_HAS_SSE 1
 #else
@@ -52,7 +52,7 @@ namespace fastmath {
 	__FORCE_ALIGN_STACK__
 	inline float isqrt_sse(float x)
 	{
-#ifndef DEDICATED_NOSSE
+#if SPRING_HAS_SSE
 		__m128 vec = _mm_set_ss(x);
 		vec = _mm_rsqrt_ss(vec);
 		return _mm_cvtss_f32(vec);
@@ -69,7 +69,7 @@ namespace fastmath {
 	__FORCE_ALIGN_STACK__
 	inline float sqrt_sse(float x)
 	{
-#ifndef DEDICATED_NOSSE
+#if SPRING_HAS_SSE
 		__m128 vec = _mm_set_ss(x);
 		vec = _mm_sqrt_ss(vec);
 		return _mm_cvtss_f32(vec);

@@ -3,9 +3,7 @@
 #include "MapParser.h"
 
 #include "Lua/LuaParser.h"
-#if !defined UNITSYNC && !defined DEDICATED && !defined BUILDING_AI
 #include "Lua/LuaSyncedRead.h"
-#endif
 #include "System/float3.h"
 #include "System/StringUtil.h"
 #include "System/FileSystem/FileHandler.h"
@@ -40,14 +38,9 @@ MapParser::MapParser(const std::string& mapFileName): parser(mapInfos[CFileHandl
 	parser.AddString("configFile", GetMapConfigName(mapFileName));
 	parser.EndTable();
 
-#if !defined UNITSYNC && !defined DEDICATED && !defined BUILDING_AI
-	// this should not be included with unitsync:
-	// 1. avoids linkage with LuaSyncedRead
-	// 2. MapOptions are not valid during unitsync map parsing
 	parser.GetTable("Spring");
 	parser.AddFunc("GetMapOptions", LuaSyncedRead::GetMapOptions);
 	parser.EndTable();
-#endif
 
 	if (parser.Execute())
 		return;

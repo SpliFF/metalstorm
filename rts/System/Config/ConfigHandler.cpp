@@ -86,15 +86,11 @@ ConfigHandlerImpl::ConfigHandlerImpl(const std::vector<std::string>& locations, 
 	overlay = new OverlayConfigSource();
 	writableSource = new FileConfigSource(locations.front());
 
-	size_t sources_num = 3;
+	// +2 for the always-on Dedicated + Headless config sources (this fork
+	// is exclusively a headless server build, so both apply unconditionally).
+	size_t sources_num = 3 + 2;
 	sources_num += (safemode) ? 1 : 0;
 	sources_num += locations.size() - 1;
-#ifdef DEDICATED
-	sources_num++;
-#endif
-#ifdef HEADLESS
-	sources_num++;
-#endif
 	sources.reserve(sources_num);
 
 	sources.push_back(overlay);
@@ -109,12 +105,9 @@ ConfigHandlerImpl::ConfigHandlerImpl(const std::vector<std::string>& locations, 
 	for (auto loc = ++(locations.cbegin()); loc != locations.cend(); ++loc) {
 		sources.push_back(new FileConfigSource(*loc));
 	}
-#ifdef DEDICATED
+	// Always-on overrides for the headless server profile.
 	sources.push_back(new DedicatedConfigSource());
-#endif
-#ifdef HEADLESS
 	sources.push_back(new HeadlessConfigSource());
-#endif
 	sources.push_back(new DefaultConfigSource());
 
 	assert(sources.size() <= sources_num);

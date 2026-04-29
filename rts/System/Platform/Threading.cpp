@@ -9,9 +9,8 @@
 	#include "System/Config/ConfigHandler.h"
 #endif
 
-#ifndef DEDICATED
-	#include "System/Sync/FPUCheck.h"
-#endif
+// FPUCheck.h was deleted alongside the rest of the legacy P2P/sync
+// machinery; nothing in this file references it any more.
 
 #include <functional>
 #include <memory>

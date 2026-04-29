@@ -28,9 +28,7 @@
 #include "System/Platform/errorhandler.h"
 #include "System/Platform/Threading.h"
 
-#ifndef DEDICATED
 #include "System/Platform/Watchdog.h"
-#endif
 
 
 #if !defined(__APPLE__)
@@ -776,7 +774,7 @@ namespace CrashHandler
 
 	static void Stacktrace(pthread_t* hThread = nullptr, const char* threadName = nullptr, const int logLevel = LOG_LEVEL_ERROR)
 	{
-#if !(DEDICATED || UNIT_TEST)
+#if !UNIT_TEST
 		Watchdog::ClearTimer();
 #endif
 
@@ -838,7 +836,7 @@ namespace CrashHandler
      */
     void SuspendedStacktrace(Threading::ThreadControls* ctls, const char* threadName)
     {
-#if !(DEDICATED || UNIT_TEST)
+#if !UNIT_TEST
 		Watchdog::ClearTimer();
 #endif
 		assert(ctls != nullptr);
@@ -946,9 +944,7 @@ namespace CrashHandler
 				return;
 			} break;
 			case SIGCONT: {
-				#ifndef DEDICATED
 				Watchdog::ClearTimers(false, false);
-				#endif
 				LOG("[%s] caught SIGCONT, resuming", __func__);
 				return;
 			} break;

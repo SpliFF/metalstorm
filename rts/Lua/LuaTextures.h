@@ -7,8 +7,9 @@
 #include <vector>
 #include <unordered_map>
 
-// Headless server: stub GL types for data structure compatibility
-#if defined(HEADLESS)
+// Server build: GL is gone, stub the types so this header still compiles
+// for any caller that incidentally includes it. The class itself is dead
+// (no rendering layer to hand textures back to).
 #include <cstdint>
 using GLuint = uint32_t;
 using GLenum = uint32_t;
@@ -20,9 +21,6 @@ using GLfloat = float;
 #define GL_LINEAR 0x2601
 #define GL_REPEAT 0x2901
 #define GL_NONE 0
-#else
-#include "Rendering/GL/myGL.h"
-#endif
 
 
 class LuaTextures {

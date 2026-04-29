@@ -22,15 +22,19 @@ string(TIMESTAMP BUILD_TIME "%Y%m%d%H%M%S")
 set(SPRING_BUILD_STAMP "${GIT_SHORT_HASH}-${BUILD_TIME}")
 message(STATUS "Build stamp: ${SPRING_BUILD_STAMP}")
 
-# Headless server defines
+# Server build defines.
+# We previously inherited -DHEADLESS, -DDEDICATED, -DDEDICATED_NOSSE from
+# upstream Spring's headless/dedicated build profiles. Both have been
+# removed: this fork is exclusively a server build, so the distinction
+# between "normal" and "headless/dedicated" code paths is meaningless.
+# Removing them unblocks Spring.TimeCheck (and other Lua APIs that
+# upstream stubbed out for the dedicated relay), and lets us re-enable
+# SSE math on x86 hosts.
 add_definitions(
-    -DHEADLESS
-    -DDEDICATED
     -DNO_SOUND
     -DBITMAP_NO_OPENGL
     -DNOT_USING_CREG
     -DAUTHORITATIVE_SERVER
-    -DDEDICATED_NOSSE
     -DTHREADPOOL
     -DSPRING_BUILD_STAMP="${SPRING_BUILD_STAMP}"
 )

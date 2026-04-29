@@ -13,9 +13,7 @@
 
 #include "LuaIO.h"
 
-#if !defined UNITSYNC && !defined DEDICATED && !defined BUILDING_AI
 #include "LuaHandle.h"
-#endif // !defined UNITSYNC && !defined DEDICATED && !defined BUILDING_AI
 #include "LuaInclude.h"
 #include "System/FileSystem/DataDirsAccess.h"
 #include "System/FileSystem/FileSystem.h"

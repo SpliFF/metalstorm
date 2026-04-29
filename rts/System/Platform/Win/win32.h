@@ -15,10 +15,9 @@
 	// do not include <cmath> or <math.h> before this, it'll cause ambiguous call er
 	#include "System/SpringMathCompat.h"
 
-	#ifdef HEADLESS
-		// workaround for mingw64 bug which leads to undefined reference to _imp__gl*
-		#define _GDI32_
-	#endif
+	// mingw64 GL workaround (#define _GDI32_) — applied unconditionally
+	// since this fork has no GL linkage at all.
+	#define _GDI32_
 
 	#include <windows.h>
 

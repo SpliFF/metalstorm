@@ -178,7 +178,6 @@ void LuaParser::SetupEnv(bool isSyncedCtxt, bool isDefsParser)
 	AddFunc("IsEngineMinVersion", LuaUtils::IsEngineMinVersion);
 	EndTable();
 
-	#if (!defined(UNITSYNC) && !defined(DEDICATED))
 	if (isDefsParser) {
 		// irrelevant for most LuaParsers except defsParser
 		// adding it to others can cause infinite recursion
@@ -187,7 +186,6 @@ void LuaParser::SetupEnv(bool isSyncedCtxt, bool isDefsParser)
 		LuaConstGame::PushEntries(L);
 		EndTable();
 	}
-	#endif
 
 	GetTable("Engine");
 	LuaConstEngine::PushEntries(L);
@@ -523,7 +521,6 @@ void LuaParser::AddString(int key, const std::string& value)
 
 int LuaParser::TimeCheck(lua_State* L)
 {
-	#if (!defined(UNITSYNC) && !defined(DEDICATED))
 	if (!lua_isstring(L, 1) || !lua_isfunction(L, 2))
 		luaL_error(L, "Invalid arguments to TimeCheck('string', func, ...)");
 
@@ -541,9 +538,6 @@ int LuaParser::TimeCheck(lua_State* L)
 	}
 
 	return lua_gettop(L);
-	#else
-	return 0;
-	#endif
 }
 
 
@@ -553,13 +547,8 @@ int LuaParser::TimeCheck(lua_State* L)
 int LuaParser::RandomSeed(lua_State* L) { return (DummyRandomSeed(L)); }
 int LuaParser::Random(lua_State* L)
 {
-	// both US and DS depend on LuaParser via MapParser, etc
-	#if (!defined(UNITSYNC) && !defined(DEDICATED))
 	lua_pushnumber(L, gsRNG.NextFloat());
 	return 1;
-	#else
-	return (DummyRandom(L));
-	#endif
 }
 
 int LuaParser::DummyRandomSeed(lua_State* L) { return 0; }

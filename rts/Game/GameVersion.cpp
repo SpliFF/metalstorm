@@ -102,17 +102,12 @@ inline const std::string CreateAdditionalVersion()
 	#define GV_ADD_SPACE " "
 #endif
 
-#if defined HEADLESS && !defined DEDICATED
-	GV_ADD_SPACE "Headless"
+	// This fork is exclusively a headless server build, so the version
+	// string is always tagged "Server" — no separate Headless/Dedicated
+	// suffix variants the way upstream Spring used.
+	GV_ADD_SPACE "Server"
 	#undef  GV_ADD_SPACE
 	#define GV_ADD_SPACE " "
-#endif
-
-#if defined DEDICATED
-	GV_ADD_SPACE "Dedicated"
-	#undef GV_ADD_SPACE
-	#define GV_ADD_SPACE " "
-#endif
 
 #if defined UNITSYNC
 	GV_ADD_SPACE "Unitsync"
@@ -187,11 +182,8 @@ bool IsRelease()
 
 bool IsHeadless()
 {
-#ifdef HEADLESS
+	// Always true: this fork only builds as a headless server.
 	return true;
-#else
-	return false;
-#endif
 }
 
 bool IsUnitsync()

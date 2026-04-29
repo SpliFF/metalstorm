@@ -94,13 +94,9 @@ class CLuaHandle : public CEventClient
 		// used by creg load
 		void SetLuaStates(lua_State* L_, lua_State* L_GC_) { L = L_; L_GC = L_GC_; }
 
-#if (!defined(UNITSYNC) && !defined(DEDICATED) && !defined(HEADLESS))
-		LuaShaders& GetShaders(const lua_State* L = nullptr) { return GetLuaContextData(L)->shaders; }
-		LuaTextures& GetTextures(const lua_State* L = nullptr) { return GetLuaContextData(L)->textures; }
-		LuaFBOs& GetFBOs(const lua_State* L = nullptr) { return GetLuaContextData(L)->fbos; }
-		LuaRBOs& GetRBOs(const lua_State* L = nullptr) { return GetLuaContextData(L)->rbos; }
-		CLuaDisplayLists& GetDisplayLists(const lua_State* L = NULL) { return GetLuaContextData(L)->displayLists; }
-#endif
+		// GL handle accessors (LuaShaders / LuaTextures / LuaFBOs / LuaRBOs /
+		// CLuaDisplayLists) were stripped with the rest of the rendering layer.
+		// The synced server has no GL state to hand back to Lua scripts.
 	public: // call-ins
 		bool WantsEvent(const std::string& name) override { return HasCallIn(L, name); }
 		virtual bool HasCallIn(lua_State* L, const std::string& name) const;
@@ -357,16 +353,9 @@ class CLuaHandle : public CEventClient
 		static int CallOutDelayByFrames(lua_State* L);
 
 	public: // static
-#if (!defined(UNITSYNC) && !defined(DEDICATED) && !defined(HEADLESS))
-		static inline LuaShaders& GetActiveShaders(lua_State* L) { return GetLuaContextData(L)->shaders; }
-		static inline LuaTextures& GetActiveTextures(lua_State* L) { return GetLuaContextData(L)->textures; }
-		static inline LuaAtlasTextures& GetActiveAtlasTextures(lua_State* L) { return GetLuaContextData(L)->atlasTextures; }
-		static inline LuaFBOs& GetActiveFBOs(lua_State* L) { return GetLuaContextData(L)->fbos; }
-		static inline LuaRBOs& GetActiveRBOs(lua_State* L) { return GetLuaContextData(L)->rbos; }
-		static inline LuaVBOs& GetActiveVBOs(lua_State* L) { return GetLuaContextData(L)->vbos; }
-		static inline LuaVAOs& GetActiveVAOs(lua_State* L) { return GetLuaContextData(L)->vaos; }
-		static inline CLuaDisplayLists& GetActiveDisplayLists(lua_State* L) { return GetLuaContextData(L)->displayLists; }
-#endif
+		// Static GL accessors (GetActiveShaders / Textures / AtlasTextures /
+		// FBOs / RBOs / VBOs / VAOs / DisplayLists) removed alongside the
+		// rendering layer — see comment on the instance accessors above.
 
 		static void SetDevMode(bool value) { devMode = value; }
 		static bool GetDevMode() { return devMode; }

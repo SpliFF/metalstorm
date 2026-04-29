@@ -12,7 +12,7 @@
 
 class LuaTable;
 class MapParser;
-#if !defined(HEADLESS) && !defined(NO_SOUND)
+#if !defined(NO_SOUND)
 	struct EAXSfxProps;
 #endif
 
@@ -242,7 +242,7 @@ public:
 	/**
 	 * Sound EFX param structure
 	 */
-#if !defined(HEADLESS) && !defined(NO_SOUND)
+#if !defined(NO_SOUND)
 	EAXSfxProps* efxprops;
 #endif
 
