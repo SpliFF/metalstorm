@@ -4,6 +4,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 
+import { CustomParam, CustomParamT } from '../spring-web/custom-param.js';
 import { ProjectileVisualType } from '../spring-web/projectile-visual-type.js';
 
 
@@ -280,8 +281,22 @@ flags():number {
   return offset ? this.bb!.readUint32(this.bb_pos + offset) : 0;
 }
 
+/**
+ * Game-specific key/value extensions. Empty unless the weapondef
+ * has any customParams entries.
+ */
+customParams(index: number, obj?:CustomParam):CustomParam|null {
+  const offset = this.bb!.__offset(this.bb_pos, 86);
+  return offset ? (obj || new CustomParam()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
+}
+
+customParamsLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 86);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
 static startGameWeaponDef(builder:flatbuffers.Builder) {
-  builder.startObject(41);
+  builder.startObject(42);
 }
 
 static addDefId(builder:flatbuffers.Builder, defId:number) {
@@ -465,12 +480,28 @@ static addFlags(builder:flatbuffers.Builder, flags:number) {
   builder.addFieldInt32(40, flags, 0);
 }
 
+static addCustomParams(builder:flatbuffers.Builder, customParamsOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(41, customParamsOffset, 0);
+}
+
+static createCustomParamsVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startCustomParamsVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
 static endGameWeaponDef(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createGameWeaponDef(builder:flatbuffers.Builder, defId:number, nameOffset:flatbuffers.Offset, visualType:ProjectileVisualType, projectileSpeed:number, range:number, aoe:number, size:number, intensity:number, colorR:number, colorG:number, colorB:number, duration:number, highTrajectory:boolean, typeNameOffset:flatbuffers.Offset, descriptionOffset:flatbuffers.Offset, defaultDamage:number, damagesOffset:flatbuffers.Offset, reloadTime:number, salvoSize:number, salvoDelay:number, accuracy:number, sprayAngle:number, movingAccuracy:number, targetMoveError:number, leadLimit:number, edgeEffectiveness:number, impulseFactor:number, impulseBoost:number, craterMult:number, craterBoost:number, craterAoe:number, fireStarter:number, flightTime:number, weaponAcceleration:number, turnRate:number, uptime:number, coverageRange:number, stockpileTime:number, metalCost:number, energyCost:number, flags:number):flatbuffers.Offset {
+static createGameWeaponDef(builder:flatbuffers.Builder, defId:number, nameOffset:flatbuffers.Offset, visualType:ProjectileVisualType, projectileSpeed:number, range:number, aoe:number, size:number, intensity:number, colorR:number, colorG:number, colorB:number, duration:number, highTrajectory:boolean, typeNameOffset:flatbuffers.Offset, descriptionOffset:flatbuffers.Offset, defaultDamage:number, damagesOffset:flatbuffers.Offset, reloadTime:number, salvoSize:number, salvoDelay:number, accuracy:number, sprayAngle:number, movingAccuracy:number, targetMoveError:number, leadLimit:number, edgeEffectiveness:number, impulseFactor:number, impulseBoost:number, craterMult:number, craterBoost:number, craterAoe:number, fireStarter:number, flightTime:number, weaponAcceleration:number, turnRate:number, uptime:number, coverageRange:number, stockpileTime:number, metalCost:number, energyCost:number, flags:number, customParamsOffset:flatbuffers.Offset):flatbuffers.Offset {
   GameWeaponDef.startGameWeaponDef(builder);
   GameWeaponDef.addDefId(builder, defId);
   GameWeaponDef.addName(builder, nameOffset);
@@ -513,6 +544,7 @@ static createGameWeaponDef(builder:flatbuffers.Builder, defId:number, nameOffset
   GameWeaponDef.addMetalCost(builder, metalCost);
   GameWeaponDef.addEnergyCost(builder, energyCost);
   GameWeaponDef.addFlags(builder, flags);
+  GameWeaponDef.addCustomParams(builder, customParamsOffset);
   return GameWeaponDef.endGameWeaponDef(builder);
 }
 
@@ -558,7 +590,8 @@ unpack(): GameWeaponDefT {
     this.stockpileTime(),
     this.metalCost(),
     this.energyCost(),
-    this.flags()
+    this.flags(),
+    this.bb!.createObjList<CustomParam, CustomParamT>(this.customParams.bind(this), this.customParamsLength())
   );
 }
 
@@ -605,6 +638,7 @@ unpackTo(_o: GameWeaponDefT): void {
   _o.metalCost = this.metalCost();
   _o.energyCost = this.energyCost();
   _o.flags = this.flags();
+  _o.customParams = this.bb!.createObjList<CustomParam, CustomParamT>(this.customParams.bind(this), this.customParamsLength());
 }
 }
 
@@ -650,7 +684,8 @@ constructor(
   public stockpileTime: number = 0.0,
   public metalCost: number = 0.0,
   public energyCost: number = 0.0,
-  public flags: number = 0
+  public flags: number = 0,
+  public customParams: (CustomParamT)[] = []
 ){}
 
 
@@ -659,6 +694,7 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const typeName = (this.typeName !== null ? builder.createString(this.typeName!) : 0);
   const description = (this.description !== null ? builder.createString(this.description!) : 0);
   const damages = GameWeaponDef.createDamagesVector(builder, this.damages);
+  const customParams = GameWeaponDef.createCustomParamsVector(builder, builder.createObjectOffsetList(this.customParams));
 
   return GameWeaponDef.createGameWeaponDef(builder,
     this.defId,
@@ -701,7 +737,8 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     this.stockpileTime,
     this.metalCost,
     this.energyCost,
-    this.flags
+    this.flags,
+    customParams
   );
 }
 }

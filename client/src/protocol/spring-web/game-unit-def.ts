@@ -4,6 +4,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 
+import { CustomParam, CustomParamT } from '../spring-web/custom-param.js';
 
 
 /**
@@ -260,8 +261,143 @@ weaponDefIdsArray():Uint16Array|null {
   return offset ? new Uint16Array(this.bb!.bytes().buffer, this.bb!.bytes().byteOffset + this.bb!.__vector(this.bb_pos + offset), this.bb!.__vector_len(this.bb_pos + offset)) : null;
 }
 
+/**
+ * Game-specific key/value extensions. ZK widgets read commtype,
+ * level, dynamic_comm, planetwars_structure, child_of_factory,
+ * thrower_gather, nuke_coverage, hide, helptext, and many more.
+ * Empty unless the unitdef has any customParams entries.
+ */
+customParams(index: number, obj?:CustomParam):CustomParam|null {
+  const offset = this.bb!.__offset(this.bb_pos, 78);
+  return offset ? (obj || new CustomParam()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
+}
+
+customParamsLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 78);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
+/**
+ * Rare fields ZK widgets occasionally read. Default 0 / empty.
+ */
+repairSpeed():number {
+  const offset = this.bb!.__offset(this.bb_pos, 80);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+transportSize():number {
+  const offset = this.bb!.__offset(this.bb_pos, 82);
+  return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
+}
+
+transportMass():number {
+  const offset = this.bb!.__offset(this.bb_pos, 84);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+transportCapacity():number {
+  const offset = this.bb!.__offset(this.bb_pos, 86);
+  return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
+}
+
+/**
+ * Yardmap string (factory placement footprint), e.g. "yyy yyy yyy".
+ */
+yardmap():string|null
+yardmap(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+yardmap(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 88);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
+/**
+ * SolidObjectDef.script — animation script filename (e.g.
+ * "scripts/armcom1.cob" or "scripts/armcom1.lua").
+ */
+script():string|null
+script(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+script(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 90);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
+/**
+ * Pre-rendered icon path for build menu (relative to game base).
+ */
+buildPic():string|null
+buildPic(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+buildPic(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 92);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
+/**
+ * Maximum velocity (different from speed for some unit types).
+ */
+maxVelocity():number {
+  const offset = this.bb!.__offset(this.bb_pos, 94);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+/**
+ * Build cost float (combined). Some widgets read this directly.
+ */
+cost():number {
+  const offset = this.bb!.__offset(this.bb_pos, 96);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+/**
+ * Maximum range (max of all weapon ranges, derived).
+ */
+maxWeaponRange():number {
+  const offset = this.bb!.__offset(this.bb_pos, 98);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+/**
+ * Maximum copies of this unit allowed per team. 0 = unlimited.
+ */
+maxThisUnit():number {
+  const offset = this.bb!.__offset(this.bb_pos, 100);
+  return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
+}
+
+/**
+ * Number of build power required to construct this unit.
+ */
+canBeAssisted():boolean {
+  const offset = this.bb!.__offset(this.bb_pos, 102);
+  return offset ? !!this.bb!.readInt8(this.bb_pos + offset) : true;
+}
+
+/**
+ * Whether this unit can self-destruct (separate from canKamikaze).
+ */
+canSelfDestruct():boolean {
+  const offset = this.bb!.__offset(this.bb_pos, 104);
+  return offset ? !!this.bb!.readInt8(this.bb_pos + offset) : true;
+}
+
+/**
+ * Self-destruct countdown in seconds.
+ */
+selfDCountdown():number {
+  const offset = this.bb!.__offset(this.bb_pos, 106);
+  return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
+}
+
+/**
+ * Build pic / unit category for build menus.
+ * Spring's category bitfield (terrain/movement/factory).
+ */
+categoryBits():number {
+  const offset = this.bb!.__offset(this.bb_pos, 108);
+  return offset ? this.bb!.readUint32(this.bb_pos + offset) : 0;
+}
+
 static startGameUnitDef(builder:flatbuffers.Builder) {
-  builder.startObject(37);
+  builder.startObject(53);
 }
 
 static addDefId(builder:flatbuffers.Builder, defId:number) {
@@ -446,12 +582,88 @@ static startWeaponDefIdsVector(builder:flatbuffers.Builder, numElems:number) {
   builder.startVector(2, numElems, 2);
 }
 
+static addCustomParams(builder:flatbuffers.Builder, customParamsOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(37, customParamsOffset, 0);
+}
+
+static createCustomParamsVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startCustomParamsVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
+static addRepairSpeed(builder:flatbuffers.Builder, repairSpeed:number) {
+  builder.addFieldFloat32(38, repairSpeed, 0.0);
+}
+
+static addTransportSize(builder:flatbuffers.Builder, transportSize:number) {
+  builder.addFieldInt32(39, transportSize, 0);
+}
+
+static addTransportMass(builder:flatbuffers.Builder, transportMass:number) {
+  builder.addFieldFloat32(40, transportMass, 0.0);
+}
+
+static addTransportCapacity(builder:flatbuffers.Builder, transportCapacity:number) {
+  builder.addFieldInt32(41, transportCapacity, 0);
+}
+
+static addYardmap(builder:flatbuffers.Builder, yardmapOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(42, yardmapOffset, 0);
+}
+
+static addScript(builder:flatbuffers.Builder, scriptOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(43, scriptOffset, 0);
+}
+
+static addBuildPic(builder:flatbuffers.Builder, buildPicOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(44, buildPicOffset, 0);
+}
+
+static addMaxVelocity(builder:flatbuffers.Builder, maxVelocity:number) {
+  builder.addFieldFloat32(45, maxVelocity, 0.0);
+}
+
+static addCost(builder:flatbuffers.Builder, cost:number) {
+  builder.addFieldFloat32(46, cost, 0.0);
+}
+
+static addMaxWeaponRange(builder:flatbuffers.Builder, maxWeaponRange:number) {
+  builder.addFieldFloat32(47, maxWeaponRange, 0.0);
+}
+
+static addMaxThisUnit(builder:flatbuffers.Builder, maxThisUnit:number) {
+  builder.addFieldInt32(48, maxThisUnit, 0);
+}
+
+static addCanBeAssisted(builder:flatbuffers.Builder, canBeAssisted:boolean) {
+  builder.addFieldInt8(49, +canBeAssisted, +true);
+}
+
+static addCanSelfDestruct(builder:flatbuffers.Builder, canSelfDestruct:boolean) {
+  builder.addFieldInt8(50, +canSelfDestruct, +true);
+}
+
+static addSelfDCountdown(builder:flatbuffers.Builder, selfDCountdown:number) {
+  builder.addFieldInt32(51, selfDCountdown, 0);
+}
+
+static addCategoryBits(builder:flatbuffers.Builder, categoryBits:number) {
+  builder.addFieldInt32(52, categoryBits, 0);
+}
+
 static endGameUnitDef(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createGameUnitDef(builder:flatbuffers.Builder, defId:number, nameOffset:flatbuffers.Offset, modelUrlOffset:flatbuffers.Offset, textureUrlOffset:flatbuffers.Offset, humanNameOffset:flatbuffers.Offset, tooltipOffset:flatbuffers.Offset, wreckNameOffset:flatbuffers.Offset, metalCost:number, energyCost:number, buildTime:number, metalMake:number, energyMake:number, metalUpkeep:number, energyUpkeep:number, metalStorage:number, energyStorage:number, extractsMetal:number, health:number, mass:number, radius:number, xsize:number, zsize:number, speed:number, turnRate:number, maxAcc:number, maxDec:number, losRadius:number, airLosRadius:number, radarRadius:number, sonarRadius:number, jammerRadius:number, seismicRadius:number, flags:number, buildDistance:number, buildSpeed:number, buildOptionsOffset:flatbuffers.Offset, weaponDefIdsOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createGameUnitDef(builder:flatbuffers.Builder, defId:number, nameOffset:flatbuffers.Offset, modelUrlOffset:flatbuffers.Offset, textureUrlOffset:flatbuffers.Offset, humanNameOffset:flatbuffers.Offset, tooltipOffset:flatbuffers.Offset, wreckNameOffset:flatbuffers.Offset, metalCost:number, energyCost:number, buildTime:number, metalMake:number, energyMake:number, metalUpkeep:number, energyUpkeep:number, metalStorage:number, energyStorage:number, extractsMetal:number, health:number, mass:number, radius:number, xsize:number, zsize:number, speed:number, turnRate:number, maxAcc:number, maxDec:number, losRadius:number, airLosRadius:number, radarRadius:number, sonarRadius:number, jammerRadius:number, seismicRadius:number, flags:number, buildDistance:number, buildSpeed:number, buildOptionsOffset:flatbuffers.Offset, weaponDefIdsOffset:flatbuffers.Offset, customParamsOffset:flatbuffers.Offset, repairSpeed:number, transportSize:number, transportMass:number, transportCapacity:number, yardmapOffset:flatbuffers.Offset, scriptOffset:flatbuffers.Offset, buildPicOffset:flatbuffers.Offset, maxVelocity:number, cost:number, maxWeaponRange:number, maxThisUnit:number, canBeAssisted:boolean, canSelfDestruct:boolean, selfDCountdown:number, categoryBits:number):flatbuffers.Offset {
   GameUnitDef.startGameUnitDef(builder);
   GameUnitDef.addDefId(builder, defId);
   GameUnitDef.addName(builder, nameOffset);
@@ -490,6 +702,22 @@ static createGameUnitDef(builder:flatbuffers.Builder, defId:number, nameOffset:f
   GameUnitDef.addBuildSpeed(builder, buildSpeed);
   GameUnitDef.addBuildOptions(builder, buildOptionsOffset);
   GameUnitDef.addWeaponDefIds(builder, weaponDefIdsOffset);
+  GameUnitDef.addCustomParams(builder, customParamsOffset);
+  GameUnitDef.addRepairSpeed(builder, repairSpeed);
+  GameUnitDef.addTransportSize(builder, transportSize);
+  GameUnitDef.addTransportMass(builder, transportMass);
+  GameUnitDef.addTransportCapacity(builder, transportCapacity);
+  GameUnitDef.addYardmap(builder, yardmapOffset);
+  GameUnitDef.addScript(builder, scriptOffset);
+  GameUnitDef.addBuildPic(builder, buildPicOffset);
+  GameUnitDef.addMaxVelocity(builder, maxVelocity);
+  GameUnitDef.addCost(builder, cost);
+  GameUnitDef.addMaxWeaponRange(builder, maxWeaponRange);
+  GameUnitDef.addMaxThisUnit(builder, maxThisUnit);
+  GameUnitDef.addCanBeAssisted(builder, canBeAssisted);
+  GameUnitDef.addCanSelfDestruct(builder, canSelfDestruct);
+  GameUnitDef.addSelfDCountdown(builder, selfDCountdown);
+  GameUnitDef.addCategoryBits(builder, categoryBits);
   return GameUnitDef.endGameUnitDef(builder);
 }
 
@@ -531,7 +759,23 @@ unpack(): GameUnitDefT {
     this.buildDistance(),
     this.buildSpeed(),
     this.bb!.createScalarList<number>(this.buildOptions.bind(this), this.buildOptionsLength()),
-    this.bb!.createScalarList<number>(this.weaponDefIds.bind(this), this.weaponDefIdsLength())
+    this.bb!.createScalarList<number>(this.weaponDefIds.bind(this), this.weaponDefIdsLength()),
+    this.bb!.createObjList<CustomParam, CustomParamT>(this.customParams.bind(this), this.customParamsLength()),
+    this.repairSpeed(),
+    this.transportSize(),
+    this.transportMass(),
+    this.transportCapacity(),
+    this.yardmap(),
+    this.script(),
+    this.buildPic(),
+    this.maxVelocity(),
+    this.cost(),
+    this.maxWeaponRange(),
+    this.maxThisUnit(),
+    this.canBeAssisted(),
+    this.canSelfDestruct(),
+    this.selfDCountdown(),
+    this.categoryBits()
   );
 }
 
@@ -574,6 +818,22 @@ unpackTo(_o: GameUnitDefT): void {
   _o.buildSpeed = this.buildSpeed();
   _o.buildOptions = this.bb!.createScalarList<number>(this.buildOptions.bind(this), this.buildOptionsLength());
   _o.weaponDefIds = this.bb!.createScalarList<number>(this.weaponDefIds.bind(this), this.weaponDefIdsLength());
+  _o.customParams = this.bb!.createObjList<CustomParam, CustomParamT>(this.customParams.bind(this), this.customParamsLength());
+  _o.repairSpeed = this.repairSpeed();
+  _o.transportSize = this.transportSize();
+  _o.transportMass = this.transportMass();
+  _o.transportCapacity = this.transportCapacity();
+  _o.yardmap = this.yardmap();
+  _o.script = this.script();
+  _o.buildPic = this.buildPic();
+  _o.maxVelocity = this.maxVelocity();
+  _o.cost = this.cost();
+  _o.maxWeaponRange = this.maxWeaponRange();
+  _o.maxThisUnit = this.maxThisUnit();
+  _o.canBeAssisted = this.canBeAssisted();
+  _o.canSelfDestruct = this.canSelfDestruct();
+  _o.selfDCountdown = this.selfDCountdown();
+  _o.categoryBits = this.categoryBits();
 }
 }
 
@@ -615,7 +875,23 @@ constructor(
   public buildDistance: number = 0.0,
   public buildSpeed: number = 0.0,
   public buildOptions: (number)[] = [],
-  public weaponDefIds: (number)[] = []
+  public weaponDefIds: (number)[] = [],
+  public customParams: (CustomParamT)[] = [],
+  public repairSpeed: number = 0.0,
+  public transportSize: number = 0,
+  public transportMass: number = 0.0,
+  public transportCapacity: number = 0,
+  public yardmap: string|Uint8Array|null = null,
+  public script: string|Uint8Array|null = null,
+  public buildPic: string|Uint8Array|null = null,
+  public maxVelocity: number = 0.0,
+  public cost: number = 0.0,
+  public maxWeaponRange: number = 0.0,
+  public maxThisUnit: number = 0,
+  public canBeAssisted: boolean = true,
+  public canSelfDestruct: boolean = true,
+  public selfDCountdown: number = 0,
+  public categoryBits: number = 0
 ){}
 
 
@@ -628,6 +904,10 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const wreckName = (this.wreckName !== null ? builder.createString(this.wreckName!) : 0);
   const buildOptions = GameUnitDef.createBuildOptionsVector(builder, this.buildOptions);
   const weaponDefIds = GameUnitDef.createWeaponDefIdsVector(builder, this.weaponDefIds);
+  const customParams = GameUnitDef.createCustomParamsVector(builder, builder.createObjectOffsetList(this.customParams));
+  const yardmap = (this.yardmap !== null ? builder.createString(this.yardmap!) : 0);
+  const script = (this.script !== null ? builder.createString(this.script!) : 0);
+  const buildPic = (this.buildPic !== null ? builder.createString(this.buildPic!) : 0);
 
   return GameUnitDef.createGameUnitDef(builder,
     this.defId,
@@ -666,7 +946,23 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     this.buildDistance,
     this.buildSpeed,
     buildOptions,
-    weaponDefIds
+    weaponDefIds,
+    customParams,
+    this.repairSpeed,
+    this.transportSize,
+    this.transportMass,
+    this.transportCapacity,
+    yardmap,
+    script,
+    buildPic,
+    this.maxVelocity,
+    this.cost,
+    this.maxWeaponRange,
+    this.maxThisUnit,
+    this.canBeAssisted,
+    this.canSelfDestruct,
+    this.selfDCountdown,
+    this.categoryBits
   );
 }
 }

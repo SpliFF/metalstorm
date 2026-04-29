@@ -16,6 +16,7 @@ export { CombatEvent, CombatEventT } from './spring-web/combat-event.js';
 export { CombatResult } from './spring-web/combat-result.js';
 export { ConsoleCommand, ConsoleCommandT } from './spring-web/console-command.js';
 export { ConsoleResponse, ConsoleResponseT } from './spring-web/console-response.js';
+export { CustomParam, CustomParamT } from './spring-web/custom-param.js';
 export { EntityCreate, EntityCreateT } from './spring-web/entity-create.js';
 export { EntityDestroy, EntityDestroyT } from './spring-web/entity-destroy.js';
 export { GameEvent, GameEventT } from './spring-web/game-event.js';

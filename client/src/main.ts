@@ -17,6 +17,7 @@ import { Minimap } from './core/minimap.js';
 import { Connection } from './core/connection.js';
 import { CONFIG, fetchBuildStamp, stampUrl } from './config.js';
 import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
+import { fetchAndIngestDefs } from './core/defs-fetch.js';
 import { renderMapFeatures } from './core/feature-renderer.js';
 import { RTSCamera } from './core/rts-camera.js';
 import { LuaWidgetManager } from './core/lua-widget-manager.js';
@@ -346,6 +347,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // DefCache accumulates defs as the server streams them incrementally.
     // Listeners forward new defs to the renderers that need them.
     const defCache = new DefCache();
+    (window as unknown as { __defCache: unknown }).__defCache = defCache;
     defCache.onUnitDefs((newDefs) => {
         entityRenderer?.setUnitDefs(newDefs);
         currentWidgetManager?.forwardUnitDefs(newDefs);
@@ -530,8 +532,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // TypeScript can't narrow the module-level binding across the
     // async callbacks below, so we hand them `conn` instead.
     const conn: Connection = new Connection({
-        onAuthenticated(_playerId, token, team) {
-            console.log(`[game] connected to game server on port ${gameServerPort} (team=${team})`);
+        onAuthenticated(_playerId, token, team, defsCacheKey) {
+            console.log(`[game] connected to game server on port ${gameServerPort} (team=${team}, defsKey=${defsCacheKey || '(none)'})`);
             if (token) localStorage.setItem('springrts-token', token);
             // Wire debug console to game server for command execution
             const channel = conn.getControlChannel();
@@ -539,16 +541,21 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 debugConsole.setGameChannel(channel);
             }
 
-            // Fetch map data via HTTP from the lobby server. The map
-            // name doubles as the map id for the /api/maps/data/{id}/
-            // endpoints. This replaces the old MapData FlatBuffer that
-            // the game server used to send over WebRTC (which exceeded
-            // the 256KB SCTP message size limit for large maps).
-            fetchMapDataHttp(lobbyHttpUrl, mapId).then(mapData => {
-                onMapData(mapData);
-            }).catch(err => {
-                console.error('[client] failed to fetch map data via HTTP:', err);
-            });
+            // Fetch map data + def cache in parallel. Both must complete
+            // before widget manager bootstrap so cawidgets sees populated
+            // UnitDefs/WeaponDefs tables. Defs come from a content-addressed
+            // path the server baked at startup; URL is browser-cacheable
+            // forever for this (gameId, version, modOptions) combination.
+            const mapPromise = fetchMapDataHttp(lobbyHttpUrl, mapId);
+            const defsPromise = defsCacheKey
+                ? fetchAndIngestDefs(lobbyHttpUrl, gameId ?? '', defsCacheKey, conn)
+                : Promise.resolve();
+
+            Promise.all([mapPromise, defsPromise])
+                .then(([mapData]) => onMapData(mapData))
+                .catch(err => {
+                    console.error('[client] failed during game-start fetch:', err);
+                });
         },
         onAuthFailed(msg: string) {
             console.error(`[game] auth failed: ${msg}`);

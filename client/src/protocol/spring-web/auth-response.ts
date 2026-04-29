@@ -60,8 +60,25 @@ team():number {
   return offset ? this.bb!.readInt8(this.bb_pos + offset) : -1;
 }
 
+/**
+ * Cache key for this game's UnitDefs/WeaponDefs FlatBuffer
+ * payloads. Hash of (gameId, version, modOptions). Client uses
+ * it to construct the fetch URL:
+ *   /api/games/data/{gameId}/cache/defs/{key}/unitdefs.bin
+ *   /api/games/data/{gameId}/cache/defs/{key}/weapondefs.bin
+ * The path is content-addressed so the browser can cache the
+ * response with `immutable` for the game's full lifetime.
+ * Empty if the server has no defs (lobby auth, or pre-Init).
+ */
+defsCacheKey():string|null
+defsCacheKey(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+defsCacheKey(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 14);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
 static startAuthResponse(builder:flatbuffers.Builder) {
-  builder.startObject(5);
+  builder.startObject(6);
 }
 
 static addStatus(builder:flatbuffers.Builder, status:AuthStatus) {
@@ -84,18 +101,23 @@ static addTeam(builder:flatbuffers.Builder, team:number) {
   builder.addFieldInt8(4, team, -1);
 }
 
+static addDefsCacheKey(builder:flatbuffers.Builder, defsCacheKeyOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(5, defsCacheKeyOffset, 0);
+}
+
 static endAuthResponse(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createAuthResponse(builder:flatbuffers.Builder, status:AuthStatus, tokenOffset:flatbuffers.Offset, playerId:number, messageOffset:flatbuffers.Offset, team:number):flatbuffers.Offset {
+static createAuthResponse(builder:flatbuffers.Builder, status:AuthStatus, tokenOffset:flatbuffers.Offset, playerId:number, messageOffset:flatbuffers.Offset, team:number, defsCacheKeyOffset:flatbuffers.Offset):flatbuffers.Offset {
   AuthResponse.startAuthResponse(builder);
   AuthResponse.addStatus(builder, status);
   AuthResponse.addToken(builder, tokenOffset);
   AuthResponse.addPlayerId(builder, playerId);
   AuthResponse.addMessage(builder, messageOffset);
   AuthResponse.addTeam(builder, team);
+  AuthResponse.addDefsCacheKey(builder, defsCacheKeyOffset);
   return AuthResponse.endAuthResponse(builder);
 }
 
@@ -105,7 +127,8 @@ unpack(): AuthResponseT {
     this.token(),
     this.playerId(),
     this.message(),
-    this.team()
+    this.team(),
+    this.defsCacheKey()
   );
 }
 
@@ -116,6 +139,7 @@ unpackTo(_o: AuthResponseT): void {
   _o.playerId = this.playerId();
   _o.message = this.message();
   _o.team = this.team();
+  _o.defsCacheKey = this.defsCacheKey();
 }
 }
 
@@ -125,20 +149,23 @@ constructor(
   public token: string|Uint8Array|null = null,
   public playerId: number = 0,
   public message: string|Uint8Array|null = null,
-  public team: number = -1
+  public team: number = -1,
+  public defsCacheKey: string|Uint8Array|null = null
 ){}
 
 
 pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const token = (this.token !== null ? builder.createString(this.token!) : 0);
   const message = (this.message !== null ? builder.createString(this.message!) : 0);
+  const defsCacheKey = (this.defsCacheKey !== null ? builder.createString(this.defsCacheKey!) : 0);
 
   return AuthResponse.createAuthResponse(builder,
     this.status,
     token,
     this.playerId,
     message,
-    this.team
+    this.team,
+    defsCacheKey
   );
 }
 }

@@ -32,6 +32,7 @@ import { GameUnitDef } from '../protocol/spring-web/game-unit-def.js';
 import { PlayerLeft } from '../protocol/spring-web/player-left.js';
 import { GameWeaponDefs } from '../protocol/spring-web/game-weapon-defs.js';
 import { GameWeaponDef } from '../protocol/spring-web/game-weapon-def.js';
+import { CustomParam } from '../protocol/spring-web/custom-param.js';
 import { UnitCommandQueuesUpdate } from '../protocol/spring-web/unit-command-queues-update.js';
 import { UnitCommandQueue } from '../protocol/spring-web/unit-command-queue.js';
 import { UnitOrder } from '../protocol/spring-web/unit-order.js';
@@ -100,6 +101,23 @@ export interface UnitDefInfo {
     buildSpeed: number;
     buildOptions: number[];
     weaponDefIds: number[];
+    /** Game-specific extension data, e.g. ZK's level/commtype/dynamic_comm. */
+    customParams: Record<string, string>;
+    repairSpeed: number;
+    transportSize: number;
+    transportMass: number;
+    transportCapacity: number;
+    yardmap: string;
+    script: string;
+    buildPic: string;
+    maxVelocity: number;
+    cost: number;
+    maxWeaponRange: number;
+    maxThisUnit: number;
+    canBeAssisted: boolean;
+    canSelfDestruct: boolean;
+    selfDCountdown: number;
+    categoryBits: number;
 }
 
 export interface UnitOrderInfo {
@@ -159,11 +177,18 @@ export interface WeaponDefInfo {
     energyCost: number;
     /** Behaviour bitfield. See `GameWeaponDef.flags` in protocol.fbs. */
     flags: number;
+    customParams: Record<string, string>;
 }
 
 export interface ConnectionEvents {
     onStateChange?: (state: ConnectionState) => void;
-    onAuthenticated?: (playerId: number, token: string, team: number) => void;
+    /** Fires when the server accepts auth. `defsCacheKey` is the
+     *  content-addressed key for fetching the game's UnitDefs/WeaponDefs
+     *  via HTTP — empty if the lobby (no defs) or a server that didn't
+     *  bake them. Construct URLs as
+     *    /api/games/data/{gameId}/cache/defs/{key}/unitdefs.bin
+     *    /api/games/data/{gameId}/cache/defs/{key}/weapondefs.bin */
+    onAuthenticated?: (playerId: number, token: string, team: number, defsCacheKey: string) => void;
     onAuthFailed?: (message: string) => void;
     onServerError?: (code: number, message: string) => void;
     onEntityState?: (snapshot: EntityStateSnapshot, isDelta: boolean) => void;
@@ -191,7 +216,7 @@ export class Connection {
     private _state: ConnectionState = 'disconnected';
     private events: ConnectionEvents;
     private sessionToken: string | null = null;
-    private playerId: number = 0;
+    public playerId: number = 0;
     public myTeam: number = -1;
     private clock = new ServerClock();
     private pingInterval: ReturnType<typeof setInterval> | null = null;
@@ -546,6 +571,14 @@ export class Connection {
 
     // ─── Message handling (transport-agnostic) ───
 
+    /** Feed a framed binary message (envelope byte + FlatBuffer payload)
+     *  into the same dispatch path used for WebRTC frames. Used by the
+     *  HTTP def-fetch path, which downloads the same bytes the server
+     *  would otherwise stream and pumps them through here. */
+    public ingestFramedMessage(data: Uint8Array): void {
+        this.handleBinaryMessage(data);
+    }
+
     private handleBinaryMessage(data: Uint8Array): void {
         if (data.length < 2) return;
 
@@ -576,9 +609,10 @@ export class Connection {
                     this.playerId = ar.playerId();
                     this.myTeam = ar.team();
                     if (ar.token()) this.sessionToken = ar.token();
-                    console.log(`[connection] AuthResponse OK: playerId=${this.playerId}, team=${this.myTeam}`);
+                    const defsCacheKey = ar.defsCacheKey() ?? '';
+                    console.log(`[connection] AuthResponse OK: playerId=${this.playerId}, team=${this.myTeam}, defsKey=${defsCacheKey || '(none)'}`);
                     this.setState('connected');
-                    this.events.onAuthenticated?.(this.playerId, this.sessionToken ?? '', this.myTeam);
+                    this.events.onAuthenticated?.(this.playerId, this.sessionToken ?? '', this.myTeam, defsCacheKey);
                 } else {
                     const errMsg = ar.message() ?? 'auth failed';
                     console.error(`[connection] AuthResponse rejected: ${errMsg}`);
@@ -647,6 +681,18 @@ export class Connection {
                     for (let wi = 0; wi < d.weaponDefIdsLength(); wi++) {
                         weaponDefIds.push(d.weaponDefIds(wi) ?? 0);
                     }
+                    const customParams: Record<string, string> = {};
+                    const cpLen = d.customParamsLength();
+                    for (let ci = 0; ci < cpLen; ci++) {
+                        const cp = d.customParams(ci, new CustomParam());
+                        if (!cp) continue;
+                        const key = cp.key();
+                        if (key) customParams[key] = cp.value() ?? '';
+                    }
+                    if (i < 3) {
+                        console.log(`[connection] DEBUG def[${i}] name=${d.name()} cpLen=${cpLen} cp=`, customParams,
+                            'transportSize=', d.transportSize(), 'repairSpeed=', d.repairSpeed());
+                    }
                     defs.push({
                         defId: d.defId(),
                         name: d.name() ?? '',
@@ -685,6 +731,22 @@ export class Connection {
                         buildSpeed: d.buildSpeed(),
                         buildOptions,
                         weaponDefIds,
+                        customParams,
+                        repairSpeed: d.repairSpeed(),
+                        transportSize: d.transportSize(),
+                        transportMass: d.transportMass(),
+                        transportCapacity: d.transportCapacity(),
+                        yardmap: d.yardmap() ?? '',
+                        script: d.script() ?? '',
+                        buildPic: d.buildPic() ?? '',
+                        maxVelocity: d.maxVelocity(),
+                        cost: d.cost(),
+                        maxWeaponRange: d.maxWeaponRange(),
+                        maxThisUnit: d.maxThisUnit(),
+                        canBeAssisted: d.canBeAssisted(),
+                        canSelfDestruct: d.canSelfDestruct(),
+                        selfDCountdown: d.selfDCountdown(),
+                        categoryBits: d.categoryBits(),
                     });
                 }
                 console.log(`[connection] received ${defs.length} unit def(s)`);
@@ -706,6 +768,13 @@ export class Connection {
                     const damages: number[] = [];
                     for (let di = 0; di < d.damagesLength(); di++) {
                         damages.push(d.damages(di) ?? 0);
+                    }
+                    const wdCustomParams: Record<string, string> = {};
+                    for (let ci = 0; ci < d.customParamsLength(); ci++) {
+                        const cp = d.customParams(ci, new CustomParam());
+                        if (!cp) continue;
+                        const key = cp.key();
+                        if (key) wdCustomParams[key] = cp.value() ?? '';
                     }
                     defs.push({
                         defId: d.defId(),
@@ -749,6 +818,7 @@ export class Connection {
                         metalCost: d.metalCost(),
                         energyCost: d.energyCost(),
                         flags: d.flags(),
+                        customParams: wdCustomParams,
                     });
                 }
                 console.log(`[connection] received ${defs.length} weapon def(s)`);
