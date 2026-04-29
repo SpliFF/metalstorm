@@ -729,6 +729,28 @@ export class LuaGLBridge {
      * against scorched_crossing's lava_layer shader).
      */
     private translateGLSL(src: string, stage: 'vertex' | 'fragment'): string {
+        // Detect legacy GLSL 1.10/1.20 (gui_xrayhaloselect,
+        // map_edge_extension, etc.). They use `varying`, `attribute`,
+        // `gl_FragColor`, `texture2D` — all removed in GLSL ES 3.0. We
+        // rewrite them before the int→float pass below sees them.
+        //
+        // We deliberately do NOT translate `gl_Vertex` here. Spring's
+        // legacy shaders that reference it expect the vertex stream to
+        // be supplied by the caller's pipeline — but our immediate-mode
+        // bridge always uses its OWN program for draw calls (flush()
+        // unconditionally calls useProgram(this.program)). A user
+        // shader that compiles successfully would never actually run,
+        // and chili widgets like the minimap fadeShader use the
+        // non-nil compile result as a signal to enable an offscreen
+        // postprocess path that we don't support — see the
+        // CleanUpFBO/elseif branches in gui_chili_minimap.lua. Keep
+        // those shaders failing-compile so the simple path stays
+        // selected.
+        const isLegacy = /\bvarying\b|\battribute\b|\bgl_FragColor\b|\btexture2D\b/.test(src);
+        if (/\bgl_Vertex\b/.test(src)) {
+            this.lastShaderLog = 'CreateShader: legacy gl_Vertex not supported in immediate-mode bridge';
+            return '#error legacy_gl_Vertex_unsupported';
+        }
         // Strip Spring's version directive entirely.
         let s = src.replace(/#version\s+\d+\s*(compatibility|core)?\s*/g, '');
         // Inject ES 300 header with precision qualifiers. Fragment needs
@@ -741,6 +763,36 @@ export class LuaGLBridge {
         // specific texture format — map it to a normal sampler2D; we
         // stub the shadow texture anyway.
         s = s.replace(/sampler2DShadow/g, 'sampler2D');
+
+        // ---- Legacy GLSL 1.10 → ES 300 rewrites ----
+        // Run before the int→float pass so the legacy keywords
+        // (`varying`, `gl_FragColor`, `texture2D`) are gone by the time
+        // the numeric promotion regexes run.
+        if (isLegacy) {
+            if (stage === 'vertex') {
+                // `attribute` → `in`, `varying` → `out` (vertex emits).
+                s = s.replace(/\battribute\b/g, 'in');
+                s = s.replace(/\bvarying\b/g, 'out');
+            } else {
+                // Fragment: `varying` → `in`. Add an explicit out
+                // variable to replace `gl_FragColor`. texture2D maps
+                // to the new unified texture() function.
+                s = s.replace(/\bvarying\b/g, 'in');
+                s = s.replace(/\btexture2D\b/g, 'texture');
+                if (/\bgl_FragColor\b/.test(s)) {
+                    s = s.replace(/\bgl_FragColor\b/g, 'outFragColor');
+                    // Anchor after `precision highp int;` so the float
+                    // precision is in scope by the time we declare the
+                    // vec4 out (otherwise GLSL ES errors on missing
+                    // precision). Don't anchor on sampler2DShadow — it
+                    // gets renamed to sampler2D by the regex above.
+                    s = s.replace(
+                        /(precision\s+highp\s+int;\n)/,
+                        '$1out vec4 outFragColor;\n',
+                    );
+                }
+            }
+        }
 
         // ---- Int → float promotions ----
         //
