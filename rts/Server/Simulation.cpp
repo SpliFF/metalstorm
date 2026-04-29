@@ -53,6 +53,7 @@ const std::unordered_map<int, std::string>* gAITeams = nullptr;
 #include "Sim/Misc/SmoothHeightMesh.h"
 #include "Sim/Misc/GroundBlockingObjectMap.h"
 #include "Sim/Misc/BuildingMaskMap.h"
+#include "Sim/Misc/YardmapStatusEffectsMap.h"
 #include "Sim/Misc/AllyTeam.h"
 #include "Sim/Misc/Team.h"
 #include "Sim/Units/UnitLoader.h"
@@ -236,6 +237,9 @@ void CSimulation::InitSubsystems(bool hasMap)
 
         groundBlockingObjectMap.Init(mapDims.mapSquares);
         buildingMaskMap.Init(mapDims.hmapx * mapDims.hmapy);
+        // Path estimator queries this map for exit-only / block-building
+        // squares — must be sized before pathManager->Finalize() below.
+        yardmapStatusEffectsMap.InitNewYardmapStatusEffectsMap();
 
         featureDefHandler->LoadFeatureDefsFromMap();
         featureHandler.LoadFeaturesFromMap();
