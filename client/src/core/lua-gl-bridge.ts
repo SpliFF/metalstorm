@@ -1098,16 +1098,21 @@ export class LuaGLBridge {
     private createTexture(a: LuaValue, b: LuaValue, c: LuaValue): LuaTextureHandle | null {
         const gl = this.gl;
         if (typeof a === 'string') {
-            // Path form — load via image fetch. Return an empty handle now,
-            // populate when the image arrives.
+            // Path form — load via image fetch. Reuse the cached handle
+            // when present so repeated CreateTexture calls share the
+            // same underlying GPU texture (and so TextureInfo sees the
+            // dimensions the loader filled in). Without this, every
+            // call would mint a fresh magenta 1×1 stub.
             const path = a;
+            const normalised = this.normaliseTexturePath(path);
+            const cached = this.textureCache.get(normalised);
+            if (cached) return cached;
             const tex = this.createSolidTexture(255, 0, 255, 255); // magenta placeholder
             const handle: LuaTextureHandle = markOpaque({
                 __type: 'texture',
                 tex,
                 width: 1, height: 1,
             });
-            const normalised = this.normaliseTexturePath(path);
             const url = this.resolveTextureUrl(normalised);
             // Fire off async load; replace data when ready.
             void this.loadImageInto(url, handle);
@@ -1198,6 +1203,15 @@ export class LuaGLBridge {
                 console.warn(`[gl.CreateTexture] ${url}: ${res.status}`);
                 return;
             }
+            // .dds → upload compressed blocks directly via S3TC, no
+            // browser-side decode (createImageBitmap rejects DDS).
+            if (/\.dds(\?|$)/i.test(url)) {
+                const buf = await res.arrayBuffer();
+                if (this.uploadDDS(buf, handle)) {
+                    console.log(`[gl.CreateTexture] loaded DDS ${url} (${handle.width}x${handle.height})`);
+                }
+                return;
+            }
             const blob = await res.blob();
             const bitmap = await createImageBitmap(blob);
             const gl = this.gl;
@@ -1215,6 +1229,92 @@ export class LuaGLBridge {
         } catch (e) {
             console.warn(`[gl.CreateTexture] ${url}: ${e}`);
         }
+    }
+
+    /**
+     * Parse a DDS header and upload the compressed mip chain directly
+     * via WEBGL_compressed_texture_s3tc. Supports DXT1/DXT3/DXT5 — the
+     * formats Spring's own gameplay assets ship as. Returns true on
+     * success.
+     *
+     * The header layout is the standard 124-byte DDS_HEADER following
+     * the 4-byte 'DDS ' magic, with the 32-byte DDS_PIXELFORMAT block
+     * starting at offset 76. We only look at width/height/mipmapCount
+     * and the FourCC to pick the WebGL format constant.
+     */
+    private uploadDDS(buffer: ArrayBuffer, handle: LuaTextureHandle): boolean {
+        const view = new DataView(buffer);
+        if (buffer.byteLength < 128 || view.getUint32(0, true) !== 0x20534444 /* 'DDS ' */) {
+            console.warn('[gl.CreateTexture] DDS: bad magic');
+            return false;
+        }
+        const height = view.getUint32(12, true);
+        const width  = view.getUint32(16, true);
+        // dwMipMapCount is only valid when DDSD_MIPMAPCOUNT bit is set
+        // in dwFlags; for non-mipmapped textures it can be 0 or 1.
+        const mipCount = Math.max(1, view.getUint32(28, true));
+        const fourCC   = view.getUint32(84, true);
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const ext = this.gl.getExtension('WEBGL_compressed_texture_s3tc') as any;
+        if (!ext) {
+            console.warn('[gl.CreateTexture] WEBGL_compressed_texture_s3tc not available');
+            return false;
+        }
+        let format: number;
+        let blockBytes: number;
+        if (fourCC === 0x31545844 /* 'DXT1' */) {
+            format = ext.COMPRESSED_RGB_S3TC_DXT1_EXT;
+            blockBytes = 8;
+        } else if (fourCC === 0x33545844 /* 'DXT3' */) {
+            format = ext.COMPRESSED_RGBA_S3TC_DXT3_EXT;
+            blockBytes = 16;
+        } else if (fourCC === 0x35545844 /* 'DXT5' */) {
+            format = ext.COMPRESSED_RGBA_S3TC_DXT5_EXT;
+            blockBytes = 16;
+        } else {
+            const tag = String.fromCharCode(fourCC & 0xff, (fourCC >> 8) & 0xff, (fourCC >> 16) & 0xff, (fourCC >> 24) & 0xff);
+            console.warn(`[gl.CreateTexture] DDS: unsupported FourCC '${tag}' (${fourCC.toString(16)})`);
+            return false;
+        }
+
+        const gl = this.gl;
+        gl.bindTexture(gl.TEXTURE_2D, handle.tex);
+        let offset = 128;
+        let w = width, h = height;
+        let uploadedLevels = 0;
+        for (let level = 0; level < mipCount; level++) {
+            // Compressed block layout: blocks of 4×4 texels. Always at
+            // least one block per dimension even when w/h drops below 4.
+            const blocksW = Math.max(1, Math.ceil(w / 4));
+            const blocksH = Math.max(1, Math.ceil(h / 4));
+            const size = blocksW * blocksH * blockBytes;
+            if (offset + size > buffer.byteLength) break;
+            gl.compressedTexImage2D(gl.TEXTURE_2D, level, format, w, h, 0,
+                new Uint8Array(buffer, offset, size));
+            offset += size;
+            uploadedLevels++;
+            w = Math.max(1, w >> 1);
+            h = Math.max(1, h >> 1);
+        }
+
+        // Min-filter must match the mip count we actually uploaded.
+        const minFilter = uploadedLevels > 1 ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR;
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, minFilter);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        // If the file shipped only base level, telling WebGL the chain
+        // ends at level 0 keeps sampling valid without forcing us to
+        // synthesize mips for compressed data (which gl.generateMipmap
+        // can't do for S3TC).
+        if (uploadedLevels === 1) {
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, 0);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, 0);
+        }
+        handle.width = width;
+        handle.height = height;
+        return true;
     }
 
     private deleteTexture(handle: LuaValue): void {
