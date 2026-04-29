@@ -646,8 +646,6 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             const id = Number(_playerId ?? -1);
             const p = ls.players.get(id);
             if (!p) {
-                // Spring returns nils for an unknown player; widgets typically
-                // test the first return ~= nil before unpacking.
                 return [null];
             }
             return [
@@ -964,8 +962,11 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
                 ctx,
             );
             if (!hit) return null;
-            if (_onlyCoords) return hit;
-            return ['ground', hit];
+            // Spring's contract returns (description, params). With
+            // onlyCoords=true, params is the {x,y,z} position table.
+            // ZK widgets pattern is `local _, pos = TraceScreenRay(...)`
+            // — pos must be the table (2nd return), not a coord scalar.
+            return ['ground', luaTable(hit[0], hit[1], hit[2])];
         },
         GetCameraPosition: () => [ls.camera.px, ls.camera.py, ls.camera.pz],
         GetCameraDirection: () => {
@@ -986,6 +987,12 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
                 rx: Math.asin(-dy / len),
                 ry: Math.atan2(dx, dz),
                 rz: 0,
+                // ZK's COFC camera tools (TraceCursorToGround,
+                // api_preselection) read cs.fov directly. Provide a
+                // sensible default in degrees.
+                fov: ls.camera.fov ? ls.camera.fov * (180 / Math.PI) : 45,
+                name: 'free',
+                mode: 0,
             };
         },
         SetCameraState: () => {},
@@ -1381,7 +1388,11 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
 
         // --- Command descriptions ---
         GetActiveCmdDescs: () => luaTable(),
-        GetActiveCmdDesc: () => null,
+        // Return an empty table (NOT null) so widgets that index the
+        // result without nil-checking — e.g. gui_easyFacing.lua reads
+        // `cmdDesc["type"]` directly — get nil for missing fields
+        // instead of erroring on nil-indexing.
+        GetActiveCmdDesc: () => luaTable(),
         GetDefaultCommand: () => [0, 0, ''],
         GetCmdDescIndex: () => null,
         FindUnitCmdDesc: () => null,

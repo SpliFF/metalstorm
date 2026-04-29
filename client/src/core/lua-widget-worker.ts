@@ -110,6 +110,16 @@ function vfsLookup(path: string): string | undefined {
 // ── HTTP VFS prefetch ──────────────────────────────────────────────────
 
 async function prefetchAllGameFiles(baseUrl: string): Promise<void> {
+    // Top-level game files that some widgets VFS.Include directly
+    // (e.g. ModOptions.lua, modinfo.lua). The BFS below starts from
+    // subdirectories so root files would otherwise never be fetched.
+    const ROOT_FILES = ['ModOptions.lua', 'modoptions.lua', 'modinfo.lua'];
+    await Promise.all(ROOT_FILES.map(async (fp) => {
+        try {
+            const fRes = await fetch(`${baseUrl}/${fp}`);
+            if (fRes.ok) vfsRegister(fp, await fRes.text());
+        } catch { /* silent */ }
+    }));
     const queue = [
         'LuaUI', 'LuaRules', 'LuaRules/Utilities',
         'LuaRules/Configs', 'Configs',
@@ -118,6 +128,11 @@ async function prefetchAllGameFiles(baseUrl: string): Promise<void> {
         // into all Widget subdirectories quickly enough.
         'LuaUI/Widgets/chili', 'LuaUI/Widgets/chili_old',
         'gamedata',
+        // ZK keeps shared library code in top-level dirs that root-BFS
+        // would otherwise skip. modularCommAPI/ is referenced by
+        // api_modularcomms.lua → drives WG.ModularCommAPI → drives
+        // commander selector and several context-menu widgets.
+        'modularCommAPI',
     ];
     const visited = new Set<string>();
 
@@ -788,23 +803,38 @@ async function init(
     installVFS(runtime);
     postLog(2, '[LuaUI] init step 5/8 done: VFS callbacks installed');
 
-    // 6. Install error tracking
+    // 6. Install error tracking — convert each arg to string before concat
+    // so widgets that pass tables/numbers/userdata to Echo or Log don't
+    // crash inside our wrapper. Without tostring(), a single table.concat
+    // failure here propagates back up the widget's call stack and kills
+    // its Initialize, leaving partial UI state behind.
     runtime.doString(`
         _widgetErrors = {}
-        local origEcho = Spring.Echo
-        Spring.Echo = function(...)
-            local msg = table.concat({...}, "\\t")
-            if msg:find("Failed to load") then
+        local function _safeJoin(...)
+            local n = select("#", ...)
+            local parts = {}
+            for i = 1, n do
+                parts[i] = tostring((select(i, ...)))
+            end
+            return table.concat(parts, "\\t")
+        end
+        local function _capture(msg)
+            if msg:find("Failed to load")
+                or msg:find("Error in Initialize")
+                or msg:find("Removed widget")
+                or msg:find("Error in Update")
+                or msg:find("Error in Draw") then
                 _widgetErrors[#_widgetErrors+1] = msg
             end
+        end
+        local origEcho = Spring.Echo
+        Spring.Echo = function(...)
+            _capture(_safeJoin(...))
             return origEcho(...)
         end
         local origLog = Spring.Log
         Spring.Log = function(section, level, ...)
-            local msg = table.concat({...}, "\\t")
-            if msg:find("Failed to load") then
-                _widgetErrors[#_widgetErrors+1] = msg
-            end
+            _capture(_safeJoin(...))
             return origLog(section, level, ...)
         end
     `, 'error_tracker');
@@ -839,10 +869,18 @@ async function init(
     // Pre-install a nil-safe math.round. ZK's numberfunctions.lua
     // defines one but it crashes on nil input, which happens during
     // epicmenu's include chain. This version falls back to 0 for nil.
+    // Also install math.bit_inv — Spring engine adds it as part of its
+    // bitops surface; ZK widgets call it at file scope.
     runtime.doString(`
         function math.round(num, idp)
             num = num or 0
             return ("%." .. (((num==0) and 0) or idp or 0) .. "f"):format(num)
+        end
+        if not math.bit_inv then
+            math.bit_inv = function(x)
+                if bit32 and bit32.bnot then return bit32.bnot(x or 0) end
+                return -1 - (x or 0)
+            end
         end
     `, 'math_round_fix');
     postLog(2, '[LuaUI] init step 6b/8 done: pre-guard installed');
@@ -892,6 +930,68 @@ async function init(
             postLog(3, '[LuaUI] cawidgets.lua HandleError patch did not match');
         }
 
+        // Pre-populate WG.Translate as a passthrough fallback right after
+        // `WG = {}` is set in cawidgets.lua, AND restore Spring.Utilities
+        // helpers right after `Spring.Utilities = {}` clears the table.
+        // ZK's api_i18n.lua / unitDefReplacements.lua replace these with
+        // real implementations once they load, but many widgets call them
+        // at file scope (top-level locals like
+        //   local labels = { ..., WG.Translate("foo","bar") }
+        //   local human = Spring.Utilities.GetHumanName(ud)
+        // ) which runs *before* the providing widget loads. Without a
+        // fallback those widgets crash at load and never register.
+        const wgInitMarker = `WG = {}\nSpring.Utilities = {}`;
+        const wgInitInjection = `WG = {}
+WG.Translate = function(_ns, key, ...) return tostring(key or "") end
+WG.initializeTranslation = function(_, _) return function(key) return tostring(key or "") end end
+WG.langChanged = function() end
+WG.GetLang = function() return "en" end
+WG.SetLang = function() end
+Spring.Utilities = {}
+Spring.Utilities.GetHumanName = function(ud, _unitID)
+    if type(ud) == "table" then return ud.humanName or ud.name or "" end
+    return ""
+end
+Spring.Utilities.GetUnitCost = function(_, ud)
+    if type(ud) == "table" then return (ud.metalCost or 0) end
+    return 0
+end
+Spring.Utilities.bit_inv = function(x)
+    return bit32 and bit32.bnot(x) or 0
+end
+Spring.Utilities.json = { encode = function() return "{}" end, decode = function() return {} end }
+Spring.Utilities.TableToString = function(t) return tostring(t) end`;
+        if (patched.indexOf(wgInitMarker) !== -1) {
+            patched = patched.replace(wgInitMarker, wgInitInjection);
+            postLog(2, '[LuaUI] Patched cawidgets.lua: WG.Translate + Spring.Utilities fallbacks installed');
+        } else {
+            postLog(3, '[LuaUI] cawidgets.lua WG/Spring.Utilities anchor not found');
+        }
+
+        // Wrap widget:SetConfigData() in pcall. cawidgets calls it inline
+        // during LoadWidget without any error guard; if the widget's
+        // SetConfigData throws (e.g. gui_epicmenu's references langByFlag,
+        // which is nil when its top-level VFS.Include for languages.lua
+        // failed under our incomplete API surface) the exception
+        // propagates up and aborts the ENTIRE widget scan loop. That kills
+        // every widget that would have been scanned after the bad one —
+        // including api_chili.lua — leaving the Framework unloaded.
+        const setConfigMarker = `if (widget.SetConfigData and config) then
+\t\twidget:SetConfigData(config)
+\tend`;
+        const setConfigGuard = `if (widget.SetConfigData and config) then
+\t\tlocal _scOk, _scErr = pcall(widget.SetConfigData, widget, config)
+\t\tif not _scOk then
+\t\t\tSpring.Log(HANDLER_BASENAME, LOG.ERROR, "Failed to SetConfigData for " .. tostring(name) .. ": " .. tostring(_scErr))
+\t\tend
+\tend`;
+        if (patched.indexOf(setConfigMarker) !== -1) {
+            patched = patched.replace(setConfigMarker, setConfigGuard);
+            postLog(2, '[LuaUI] Patched cawidgets.lua: SetConfigData wrapped in pcall');
+        } else {
+            postLog(3, '[LuaUI] cawidgets.lua SetConfigData anchor not found');
+        }
+
         // Solo-widget mode: filter widgetFiles down to just the matching
         // widgets so we can isolate gl-bridge / Chili pipeline issues.
         // Accepts comma-separated needles ("api_chili.lua,dbg_chili_test").
@@ -912,8 +1012,38 @@ async function init(
             }
         }
 
+        // Guard against Spring.GetPlayerInfo returning fewer than 10 values
+        // during bootstrap (live state hasn't arrived yet for the local
+        // player). Without this guard `customkeys["ignored"]` errors and
+        // aborts the entire widget scan, so no widgets activate at all.
+        const customkeysAnchor = 'local customkeys = select(10, Spring.GetPlayerInfo(Spring.GetMyPlayerID(), true))';
+        const customkeysReplacement = customkeysAnchor + '\n\tcustomkeys = customkeys or {}';
+        if (patched.includes(customkeysAnchor) && !patched.includes(customkeysReplacement)) {
+            patched = patched.replace(customkeysAnchor, customkeysReplacement);
+            postLog(2, '[LuaUI] Patched cawidgets.lua: nil-safe customkeys guard');
+        }
+
         if (patched !== cawidgetsSrc) {
             vfsRegister(cawidgetsPath, patched);
+        }
+    }
+
+    // Patch api_i18n.lua: when ZK's translator can't find a key, fall
+    // back to returning the key itself instead of nil. Many widgets call
+    // \`WG.Translate("foo", "bar") .. ":"\` at file scope and crash on
+    // \`attempt to concatenate a nil value\` if the locale lookup misses.
+    // Without locale data files (we don't ship them), basically every
+    // call misses. Returning the key keeps file-scope concatenation safe.
+    const i18nPath = 'LuaUI/Widgets/api_i18n.lua';
+    const i18nSrc = vfsLookup(i18nPath);
+    if (i18nSrc) {
+        const oldTranslate = `local function Translate (db, text, data, opts)\n\treturn translations[db].i18n(text, data, opts)\nend`;
+        const newTranslate = `local function Translate (db, text, data, opts)\n\tlocal t = translations[db]\n\tif type(t) ~= "table" or type(t.i18n) ~= "function" then return tostring(text or "") end\n\tlocal ok, result = pcall(t.i18n, text, data, opts)\n\tif not ok or result == nil then return tostring(text or "") end\n\treturn result\nend`;
+        if (i18nSrc.indexOf(oldTranslate) !== -1) {
+            vfsRegister(i18nPath, i18nSrc.replace(oldTranslate, newTranslate));
+            postLog(2, '[LuaUI] Patched api_i18n.lua: Translate falls back to key on miss');
+        } else {
+            postLog(3, '[LuaUI] api_i18n.lua Translate anchor not found');
         }
     }
 
@@ -954,11 +1084,232 @@ async function init(
         }
     }
 
+    // Patch object.lua: wrap Object:CallChildrenInverse with pcall so a
+    // single buggy child Draw doesn't break iteration over its siblings.
+    // Chili's original code calls `child[eventname](child, ...)` raw — if
+    // one child errors mid-frame, every sibling that comes after it in
+    // the inverse iteration is silently skipped. In ZK that means one
+    // broken Label inside EconomyPanelDefaultTwo hides ProChat, Player
+    // List, and nubtron entirely. The pcall wrap preserves the early-
+    // return-on-truthy semantics (used by mouse / hit-test events) while
+    // making errors non-fatal.
+    const objectPath = 'LuaUI/Widgets/chili_old/Controls/object.lua';
+    const objectSrc = vfsLookup(objectPath);
+    if (objectSrc) {
+        const oldCCI =
+            'function Object:CallChildrenInverse(eventname, ...)\n' +
+            '  local children = self.children\n' +
+            '  for i=#children,1,-1 do\n' +
+            '    local child = children[i]\n' +
+            '    if (child) then\n' +
+            '      local obj = child[eventname](child, ...)\n' +
+            '      if (obj) then\n' +
+            '        return obj\n' +
+            '      end\n' +
+            '    end\n' +
+            '  end\n' +
+            'end';
+        const newCCI =
+            'function Object:CallChildrenInverse(eventname, ...)\n' +
+            '  local children = self.children\n' +
+            '  for i=#children,1,-1 do\n' +
+            '    local child = children[i]\n' +
+            '    if (child) then\n' +
+            '      local mst = (eventname == "Draw" and gl._saveMatrixState) and gl._saveMatrixState() or nil\n' +
+            '      local ok, obj = pcall(child[eventname], child, ...)\n' +
+            '      if mst and gl._restoreMatrixState then\n' +
+            '        gl._restoreMatrixState(mst)\n' +
+            '      end\n' +
+            '      if ok and obj then\n' +
+            '        return obj\n' +
+            '      end\n' +
+            '    end\n' +
+            '  end\n' +
+            'end';
+        const oldCC =
+            'function Object:CallChildren(eventname, ...)\n' +
+            '  local children = self.children\n' +
+            '  for i=1,#children do\n' +
+            '    local child = children[i]\n' +
+            '    if (child) then\n' +
+            '      local obj = child[eventname](child, ...)\n' +
+            '      if (obj) then\n' +
+            '        return obj\n' +
+            '      end\n' +
+            '    end\n' +
+            '  end\n' +
+            'end';
+        const newCC =
+            'function Object:CallChildren(eventname, ...)\n' +
+            '  local children = self.children\n' +
+            '  for i=1,#children do\n' +
+            '    local child = children[i]\n' +
+            '    if (child) then\n' +
+            '      local mst = (eventname == "Draw" and gl._saveMatrixState) and gl._saveMatrixState() or nil\n' +
+            '      local ok, obj = pcall(child[eventname], child, ...)\n' +
+            '      if mst and gl._restoreMatrixState then\n' +
+            '        gl._restoreMatrixState(mst)\n' +
+            '      end\n' +
+            '      if ok and obj then\n' +
+            '        return obj\n' +
+            '      end\n' +
+            '    end\n' +
+            '  end\n' +
+            'end';
+        let patched = objectSrc;
+        if (patched.includes(oldCCI)) patched = patched.replace(oldCCI, newCCI);
+        if (patched.includes(oldCC)) patched = patched.replace(oldCC, newCC);
+        if (patched !== objectSrc) {
+            vfsRegister(objectPath, patched);
+            postLog(2, '[LuaUI] Patched object.lua: CallChildren(Inverse) pcall children');
+        } else {
+            postLog(3, '[LuaUI] object.lua CallChildren patch — anchors not found');
+        }
+    }
+
+    // Patch api_chili.lua: a previous widget's DrawScreen can leave the
+    // scissor test enabled at an arbitrary box. When chili's screen0:Draw
+    // then renders, every window whose geometry falls outside that box is
+    // silently clipped out — only windows positioned at chili-y=0 happen
+    // to overlap a typical leftover box at the canvas top. Resetting
+    // scissor at the entry point of chili's draw chain ensures windows are
+    // clipped only by chili's own PushScissor stack.
+    const apiChiliPath = 'LuaUI/Widgets/api_chili.lua';
+    const apiChiliSrc = vfsLookup(apiChiliPath);
+    if (apiChiliSrc) {
+        const drawAnchor =
+            'function widget:DrawScreen()\n' +
+            '\tif (not screen0:IsEmpty()) then\n' +
+            '\t\tgl.PushMatrix()\n';
+        const drawReplacement =
+            'function widget:DrawScreen()\n' +
+            '\tif (not screen0:IsEmpty()) then\n' +
+            '\t\tgl.Scissor(false)\n' +
+            '\t\tgl.PushMatrix()\n';
+        const tweakAnchor =
+            'function widget:TweakDrawScreen()\n' +
+            '\tif (not screen0:IsEmpty()) then\n' +
+            '\t\tgl.PushMatrix()\n';
+        const tweakReplacement =
+            'function widget:TweakDrawScreen()\n' +
+            '\tif (not screen0:IsEmpty()) then\n' +
+            '\t\tgl.Scissor(false)\n' +
+            '\t\tgl.PushMatrix()\n';
+        let patched = apiChiliSrc;
+        if (patched.includes(drawAnchor)) patched = patched.replace(drawAnchor, drawReplacement);
+        if (patched.includes(tweakAnchor)) patched = patched.replace(tweakAnchor, tweakReplacement);
+        if (patched !== apiChiliSrc) {
+            vfsRegister(apiChiliPath, patched);
+            postLog(2, '[LuaUI] Patched api_chili.lua: reset scissor before screen0:Draw');
+        } else {
+            postLog(3, '[LuaUI] api_chili.lua scissor reset patch — anchors not found');
+        }
+    }
+
+    // Patch LuaRules/Configs/dynamic_comm_defs.lua: nil-guard the
+    // wreck/heap feature lookups in the chassisDefs loop. Without
+    // FeatureDefNames populated (we don't stream feature defs to the
+    // widget worker yet), `wreckData = FeatureDefNames[...]` is nil
+    // and the file aborts at file scope, returning nil — which then
+    // breaks every Lua module that does
+    // `local moduleDefs, ... = VFS.Include("dynamic_comm_defs.lua")`,
+    // chiefly `LuaUI/Configs/startup_info_selector.lua` (drives the
+    // commander-selector widget) and several others.
+    const dynCommDefsPath = 'LuaRules/Configs/dynamic_comm_defs.lua';
+    const dynCommDefsSrc = vfsLookup(dynCommDefsPath);
+    if (dynCommDefsSrc) {
+        const oldBlock = `\t\tlocal wreckData = FeatureDefNames[UnitDefs[data.baseUnitDef].corpse]\n\n\t\tdata.baseWreckID = wreckData.id\n\t\tdata.baseHeapID = wreckData.deathFeatureID`;
+        const newBlock = `\t\tlocal baseUd = UnitDefs[data.baseUnitDef]\n\t\tlocal wreckData = baseUd and baseUd.corpse and FeatureDefNames[baseUd.corpse] or nil\n\n\t\tdata.baseWreckID = wreckData and wreckData.id or 0\n\t\tdata.baseHeapID = wreckData and wreckData.deathFeatureID or 0`;
+        if (dynCommDefsSrc.includes(oldBlock)) {
+            const patched = dynCommDefsSrc.replace(oldBlock, newBlock);
+            vfsRegister(dynCommDefsPath, patched);
+            postLog(2, '[LuaUI] Patched dynamic_comm_defs.lua: nil-safe wreck lookup');
+        } else {
+            postLog(3, '[LuaUI] dynamic_comm_defs wreck patch — anchor not found');
+        }
+    }
+
+    // Patch modularCommAPI/api_modularcomms.lua: nil-guard the
+    // commander-base unit lookup. Some predefined comm profiles
+    // reference UnitDefNames["<profileID>_base"] entries that aren't
+    // streamed to the client (we ship a subset of the chassis defs);
+    // without the guard the entire library aborts at file scope and
+    // WG.ModularCommAPI never gets defined, breaking the commander
+    // selector and several context-menu / startpoint widgets.
+    const commsApiPath = 'modularCommAPI/api_modularcomms.lua';
+    const commsApiSrc = vfsLookup(commsApiPath);
+    if (commsApiSrc) {
+        const oldBlock = `\tfor profileID, profile in pairs(newCommProfilesByProfileID) do\n\t\t-- MAKE SURE THIS MATCHES WHAT UNITDEFGEN SETS\n\t\tprofile.baseUnitDefID = UnitDefNames[profileID .. \"_base\"].id\n\t\tprofile.baseWreckID = FeatureDefNames[profileID .. \"_base_dead\"].id\n\t\tprofile.baseHeapID = FeatureDefNames[profileID .. \"_base_heap\"].id\n\t\tnewProfileIDByBaseDefID[profile.baseUnitDefID] = profileID\n\tend`;
+        const newBlock = `\tfor profileID, profile in pairs(newCommProfilesByProfileID) do\n\t\t-- MAKE SURE THIS MATCHES WHAT UNITDEFGEN SETS\n\t\tlocal baseUd = UnitDefNames[profileID .. \"_base\"]\n\t\tlocal wreckFd = FeatureDefNames and FeatureDefNames[profileID .. \"_base_dead\"]\n\t\tlocal heapFd = FeatureDefNames and FeatureDefNames[profileID .. \"_base_heap\"]\n\t\tprofile.baseUnitDefID = baseUd and baseUd.id or 0\n\t\tprofile.baseWreckID = wreckFd and wreckFd.id or 0\n\t\tprofile.baseHeapID = heapFd and heapFd.id or 0\n\t\tif profile.baseUnitDefID ~= 0 then\n\t\t\tnewProfileIDByBaseDefID[profile.baseUnitDefID] = profileID\n\t\tend\n\tend`;
+        if (commsApiSrc.includes(oldBlock)) {
+            const patched = commsApiSrc.replace(oldBlock, newBlock);
+            vfsRegister(commsApiPath, patched);
+            postLog(2, '[LuaUI] Patched modularCommAPI: nil-safe base def lookup');
+        } else {
+            postLog(3, '[LuaUI] modularCommAPI base-def patch — anchor not found');
+        }
+    }
+
+    // Patch LuaUI/modfonts.lua: when the legacy font atlas can't load
+    // (we don't ship Spring.MakeFont so the .lua/.png pair is missing),
+    // activeFont stays nil and every text draw call crashes the calling
+    // widget — flooding the log with hundreds of errors per frame from
+    // AdvPlayersList and similar non-chili widgets that still use this
+    // path. Replace activeFont with a stub object that has the fields
+    // modfonts touches; Draw/Print methods become no-ops.
+    const modfontsPath = 'LuaUI/modfonts.lua';
+    const modfontsSrc = vfsLookup(modfontsPath);
+    if (modfontsSrc) {
+        const stub = `
+local STUB_FONT = {
+    name = "<stub>",
+    base = "<stub>",
+    opts = "",
+    specs = { glyphs = setmetatable({}, { __index = function() return { adv = 0 } end }), height = 12, yStep = 14 },
+    lists = setmetatable({}, { __index = function() return 0 end }),
+    cache = setmetatable({}, { __index = function() return nil end, __newindex = function() end }),
+    image = "",
+}
+if not activeFont then activeFont = STUB_FONT end
+defaultFont = activeFont
+`;
+        const patched = modfontsSrc.replace(
+            'UseFont(DefaultFontName)\ndefaultFont = activeFont',
+            'UseFont(DefaultFontName)' + stub,
+        );
+        if (patched !== modfontsSrc) {
+            vfsRegister(modfontsPath, patched);
+            postLog(2, '[LuaUI] Patched modfonts.lua: stub font fallback');
+        } else {
+            postLog(3, '[LuaUI] modfonts.lua patch — anchor not found');
+        }
+    }
+
+    // Patch chili_old/Headers/util.lua: color2incolor passes floats
+    // (r*255 etc.) into string.char, which fengari's Lua 5.3 rejects
+    // with "number has no integer representation". Wrap with math.floor
+    // so chili widgets that build inline color escapes (Chili Chat,
+    // EndGame, Pro Console) load.
+    const chiliUtilPath = 'LuaUI/Widgets/chili_old/Headers/util.lua';
+    const chiliUtilSrc = vfsLookup(chiliUtilPath);
+    if (chiliUtilSrc) {
+        const patched = chiliUtilSrc.replace(
+            'return string.char(255, r*255, g*255, b*255)',
+            'return string.char(255, math.floor((r or 1)*255), math.floor((g or 1)*255), math.floor((b or 1)*255))',
+        );
+        if (patched !== chiliUtilSrc) {
+            vfsRegister(chiliUtilPath, patched);
+            postLog(2, '[LuaUI] Patched chili util.lua: color2incolor floor');
+        } else {
+            postLog(3, '[LuaUI] chili util.lua color2incolor patch — anchor not found');
+        }
+    }
+
     // Patch font.lua: _GetExtra has no case for valign="linecenter" and
     // falls through to 'a' (ascender), so chili Button / Label captions
     // pass valign="linecenter" but never get vertical centering. Add a
     // proper case mapping to the 'x' flag char so the font sees it.
-    const fontPath = 'LuaUI/Widgets/chili_old/controls/font.lua';
+    const fontPath = 'LuaUI/Widgets/chili_old/Controls/font.lua';
     const fontSrc = vfsLookup(fontPath);
     if (fontSrc) {
         const patched = fontSrc.replace(
@@ -1003,19 +1354,58 @@ async function init(
     `, 'chili_error_tolerance');
 
     // Force-enable Chili Framework if widgetHandler didn't auto-start it.
+    // The api_chili.lua widget can fail to register during cawidgets' bulk
+    // scan in ways we haven't fully traced (silent pcall failure during
+    // bootstrap; the same LoadWidget call works fine post-bootstrap). If
+    // it isn't in knownWidgets at all, load it directly here so the rest
+    // of the Chili widgets have a Framework to attach to.
     runtime.doString(`
         if widgetHandler and (not WG or not WG.Chili) then
             local ki = widgetHandler.knownWidgets and widgetHandler.knownWidgets["Chili Framework"]
-            if ki and not ki.active then
+            if not ki then
+                Spring.Echo("[LuaUI] Chili Framework missing from knownWidgets; loading directly")
+                local w = widgetHandler:LoadWidget("LuaUI/Widgets/api_chili.lua")
+                if w then
+                    widgetHandler:InsertWidget(w)
+                    widgetHandler:SaveOrderList()
+                    Spring.Echo("[LuaUI] Chili Framework loaded and inserted")
+                else
+                    Spring.Echo("[LuaUI] Direct LoadWidget for api_chili.lua failed")
+                end
+            elseif not ki.active then
                 Spring.Echo("[LuaUI] Force-enabling Chili Framework")
                 widgetHandler:EnableWidget("Chili Framework")
-                -- Raise error tolerance on the freshly loaded Chili
-                if WG and WG.Chili and WG.Chili.DebugHandler then
-                    WG.Chili.DebugHandler.maxChiliErrors = 999
-                end
+            end
+            -- Raise error tolerance on the freshly loaded Chili
+            if WG and WG.Chili and WG.Chili.DebugHandler then
+                WG.Chili.DebugHandler.maxChiliErrors = 999
             end
         end
     `, 'chili_force_enable');
+
+    // Auto-enable a curated set of Chili widgets that ZK ships with
+    // `enabled = false` by default but which provide important UI we
+    // want active in our environment. Each is gated on
+    // `not kw.active` so we don't fight a user choice that's already
+    // been applied.
+    runtime.doString(`
+        if widgetHandler then
+            local autoEnable = {
+                "Chili Chat 2.2",        -- chat console (replaces Pro Console)
+                "Chili FactoryBar",      -- factory build menu
+                "Chili FactoryPanel",    -- factory unit panel
+            }
+            for _, name in ipairs(autoEnable) do
+                local kw = widgetHandler.knownWidgets and widgetHandler.knownWidgets[name]
+                if kw and not kw.active then
+                    local ok = pcall(widgetHandler.EnableWidget, widgetHandler, name)
+                    if ok then
+                        Spring.Echo("[LuaUI] Auto-enabled " .. name)
+                    end
+                end
+            end
+        end
+    `, 'chili_auto_enable');
 
     // Patch Chili's widget:Dispose to guard against nil screen0.
     // The old-chili path defines Dispose as `screen0:Dispose()` but
@@ -1344,6 +1734,15 @@ function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext): void {
             gl.Ortho(0, vsx, 0, vsy, -1, 1)
             gl.MatrixMode(GL.MODELVIEW)
             gl.LoadIdentity()
+            -- Reset sticky GL state from previous frame. Chili widgets bind
+            -- skin textures, set scissor regions, etc. and frequently leave
+            -- them set when they return. The next frame's first widget then
+            -- sees the leftovers — gl.Rect samples the wrong texture, draws
+            -- get scissored away, and the result is "invisible" output.
+            gl.Texture(false)
+            gl.Scissor(false)
+            gl.DepthTest(false)
+            gl.Color(1, 1, 1, 1)
             pcall(DrawScreen, vsx, vsy)
         end
     `, 'callin:frame');
@@ -1374,6 +1773,33 @@ function installEngineGlobals(
     // object at push time; later JS mutations are not reflected.
     (springGlobals.Spring as Record<string, LuaValue>).Translate = (key: LuaValue) => String(key ?? '');
     (springGlobals.Spring as Record<string, LuaValue>).GetHumanName = (defName: LuaValue) => String(defName ?? '');
+    // Stubs for Spring APIs ZK widgets call at Initialize-time.
+    // Returning nothing is fine — these widgets gate on the result.
+    (springGlobals.Spring as Record<string, LuaValue>).GetAIInfo = (_team: LuaValue) => [-1, '', '', '', '', {}];
+    (springGlobals.Spring as Record<string, LuaValue>).GetSkirmishAIInfo = (_team: LuaValue) => [-1, '', '', '', '', {}];
+    (springGlobals.Spring as Record<string, LuaValue>).AssignMouseCursor = (_name: LuaValue, _file: LuaValue, _hotX: LuaValue, _hotY: LuaValue) => true;
+    (springGlobals.Spring as Record<string, LuaValue>).ReplaceMouseCursor = (_name: LuaValue, _file: LuaValue, _hotX: LuaValue, _hotY: LuaValue) => true;
+    (springGlobals.Spring as Record<string, LuaValue>).SetDrawSelectionInfo = (_show: LuaValue) => undefined;
+    (springGlobals.Spring as Record<string, LuaValue>).SetDrawGroundDeprecated = (_show: LuaValue) => undefined;
+    (springGlobals.Spring as Record<string, LuaValue>).GetFrameTimeOffset = () => 0;
+    (springGlobals.Spring as Record<string, LuaValue>).IsGodModeEnabled = () => false;
+    (springGlobals.Spring as Record<string, LuaValue>).SetSunLighting = (_params: LuaValue) => undefined;
+    (springGlobals.Spring as Record<string, LuaValue>).SetAtmosphere = (_params: LuaValue) => undefined;
+    (springGlobals.Spring as Record<string, LuaValue>).SetCameraOffset = (_x: LuaValue, _y: LuaValue, _z: LuaValue, _tx: LuaValue, _ty: LuaValue, _tz: LuaValue) => undefined;
+    (springGlobals.Spring as Record<string, LuaValue>).GetTeamStartPosition = (_team: LuaValue) => [0, 0, 0];
+    (springGlobals.Spring as Record<string, LuaValue>).GetCurrentTooltip = () => '';
+    (springGlobals.Spring as Record<string, LuaValue>).GetVisibleFeatures = (
+        _allyTeamID: LuaValue,
+        _radius: LuaValue,
+        _icons: LuaValue,
+        _geos: LuaValue,
+    ) => luaTable();
+    (springGlobals.Spring as Record<string, LuaValue>).GetConsoleBuffer = (_count: LuaValue) => luaTable();
+    (springGlobals.Spring as Record<string, LuaValue>).GetTeamStatsHistory = (
+        _teamID: LuaValue,
+        startIndex: LuaValue,
+        _endIndex: LuaValue,
+    ) => (startIndex === undefined || startIndex === null ? 0 : luaTable());
 
     // Spring.Utilities — stub table; Lua-side code below adds CopyTable etc.
     (springGlobals.Spring as Record<string, LuaValue>).Utilities = {};
@@ -2120,6 +2546,14 @@ self.onmessage = async (e: MessageEvent) => {
         case 'unitDefsUpdate': {
             const defs = msg.defs as MinimalUnitDefWire[] | undefined;
             if (!defs) break;
+            // DEBUG: log first def's keys + customParams to confirm wire shape
+            if (defs.length > 0) {
+                const first = defs[0] as unknown as Record<string, unknown>;
+                const keys = Object.keys(first).slice(0, 50).join(',');
+                const cp = first.customParams as Record<string, string> | undefined;
+                const cpStr = cp ? Object.keys(cp).slice(0, 5).join(',') : 'undef';
+                postLog(2, `[debug] unitDefsUpdate first def keys=[${keys}] cp=[${cpStr}]`);
+            }
             for (const d of defs) unitDefMap.set(d.defId, d);
             if (runtime) republishDefGlobals(runtime);
             break;
@@ -2277,6 +2711,16 @@ if not loadstring then loadstring = load end
 if not unpack then unpack = table.unpack end
 if not table.getn then table.getn = function(t) return #t end end
 if not math.mod then math.mod = math.fmod end
+if not math.atan2 then math.atan2 = math.atan end
+if not table.maxn then
+    table.maxn = function(t)
+        local n = 0
+        for k, _ in pairs(t) do
+            if type(k) == "number" and k > n then n = k end
+        end
+        return n
+    end
+end
 
 if not newproxy then
     function newproxy(hasMeta)
@@ -2465,13 +2909,21 @@ VFS.Include = function(path, env, mode)
         Spring.Echo("[VFS.Include] compile error in " .. path .. ": " .. (err or ""))
         return nil
     end
-    local ok, result = pcall(chunk)
+    -- Capture ALL return values from the included chunk. Spring's real
+    -- VFS.Include returns multi-values; chunks like languages.lua use
+    -- "return a, b, c" and callers destructure with three locals. If we
+    -- only return the first, downstream upvalues like flagByLang are nil
+    -- and widgets that depend on it (gui_epicmenu cascade to
+    -- ChiliGlobalCommands, ChiliMinimap, SimpleSettings) silently die.
+    local results = { pcall(chunk) }
     _includeStack[path] = nil
-    if not ok then
-        Spring.Echo("[VFS.Include] runtime error in " .. path .. ": " .. tostring(result))
+    if not results[1] then
+        Spring.Echo("[VFS.Include] runtime error in " .. path .. ": " .. tostring(results[2]))
         return nil
     end
-    return result
+    -- results[1] is the pcall ok flag; results[2..n] are the chunk's
+    -- return values. unpack(results, 2, #results) returns idx 2 to N.
+    return unpack(results, 2, #results)
 end
 
 VFS.FileExists = function(path, mode)
@@ -2510,6 +2962,33 @@ VFS.DirList = function(path, pattern, mode)
         result[#result + 1] = path .. files[i]
     end
     return result
+end
+
+-- Pack/Unpack helpers used by ZK widgets (AllyCursors stores 16-bit
+-- coords in shared messages). Provide string-based stubs so the call
+-- site doesn't crash; the round-trip is opaque to widgets that don't
+-- transmit these across the network.
+VFS.PackU8 = VFS.PackU8 or function(n) return string.char(math.floor(n) % 256) end
+VFS.PackU16 = VFS.PackU16 or function(n)
+    n = math.floor(n)
+    return string.char(n % 256) .. string.char(math.floor(n / 256) % 256)
+end
+VFS.PackU32 = VFS.PackU32 or function(n)
+    n = math.floor(n)
+    return string.char(n % 256)
+        .. string.char(math.floor(n / 256) % 256)
+        .. string.char(math.floor(n / 65536) % 256)
+        .. string.char(math.floor(n / 16777216) % 256)
+end
+VFS.UnpackU8 = VFS.UnpackU8 or function(s, i) return s:byte(i or 1) or 0 end
+VFS.UnpackU16 = VFS.UnpackU16 or function(s, i)
+    i = i or 1
+    return (s:byte(i) or 0) + (s:byte(i+1) or 0) * 256
+end
+VFS.UnpackU32 = VFS.UnpackU32 or function(s, i)
+    i = i or 1
+    return (s:byte(i) or 0) + (s:byte(i+1) or 0) * 256
+        + (s:byte(i+2) or 0) * 65536 + (s:byte(i+3) or 0) * 16777216
 end
 
 VFS.SubDirs = function(path, pattern, mode)
