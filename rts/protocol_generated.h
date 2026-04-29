@@ -188,6 +188,9 @@ struct RoomPlayerJoinedBuilder;
 struct RoomPlayerLeft;
 struct RoomPlayerLeftBuilder;
 
+struct CustomParam;
+struct CustomParamBuilder;
+
 struct GameWeaponDef;
 struct GameWeaponDefBuilder;
 
@@ -3074,7 +3077,8 @@ struct AuthResponse FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_TOKEN = 6,
     VT_PLAYER_ID = 8,
     VT_MESSAGE = 10,
-    VT_TEAM = 12
+    VT_TEAM = 12,
+    VT_DEFS_CACHE_KEY = 14
   };
   SpringWeb::AuthStatus status() const {
     return static_cast<SpringWeb::AuthStatus>(GetField<uint8_t>(VT_STATUS, 0));
@@ -3095,6 +3099,17 @@ struct AuthResponse FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   int8_t team() const {
     return GetField<int8_t>(VT_TEAM, -1);
   }
+  /// Cache key for this game's UnitDefs/WeaponDefs FlatBuffer
+  /// payloads. Hash of (gameId, version, modOptions). Client uses
+  /// it to construct the fetch URL:
+  ///   /api/games/data/{gameId}/cache/defs/{key}/unitdefs.bin
+  ///   /api/games/data/{gameId}/cache/defs/{key}/weapondefs.bin
+  /// The path is content-addressed so the browser can cache the
+  /// response with `immutable` for the game's full lifetime.
+  /// Empty if the server has no defs (lobby auth, or pre-Init).
+  const ::flatbuffers::String *defs_cache_key() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_DEFS_CACHE_KEY);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_STATUS, 1) &&
@@ -3104,6 +3119,8 @@ struct AuthResponse FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyOffset(verifier, VT_MESSAGE) &&
            verifier.VerifyString(message()) &&
            VerifyField<int8_t>(verifier, VT_TEAM, 1) &&
+           VerifyOffset(verifier, VT_DEFS_CACHE_KEY) &&
+           verifier.VerifyString(defs_cache_key()) &&
            verifier.EndTable();
   }
 };
@@ -3127,6 +3144,9 @@ struct AuthResponseBuilder {
   void add_team(int8_t team) {
     fbb_.AddElement<int8_t>(AuthResponse::VT_TEAM, team, -1);
   }
+  void add_defs_cache_key(::flatbuffers::Offset<::flatbuffers::String> defs_cache_key) {
+    fbb_.AddOffset(AuthResponse::VT_DEFS_CACHE_KEY, defs_cache_key);
+  }
   explicit AuthResponseBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -3144,8 +3164,10 @@ inline ::flatbuffers::Offset<AuthResponse> CreateAuthResponse(
     ::flatbuffers::Offset<::flatbuffers::String> token = 0,
     uint32_t player_id = 0,
     ::flatbuffers::Offset<::flatbuffers::String> message = 0,
-    int8_t team = -1) {
+    int8_t team = -1,
+    ::flatbuffers::Offset<::flatbuffers::String> defs_cache_key = 0) {
   AuthResponseBuilder builder_(_fbb);
+  builder_.add_defs_cache_key(defs_cache_key);
   builder_.add_message(message);
   builder_.add_player_id(player_id);
   builder_.add_token(token);
@@ -3160,16 +3182,19 @@ inline ::flatbuffers::Offset<AuthResponse> CreateAuthResponseDirect(
     const char *token = nullptr,
     uint32_t player_id = 0,
     const char *message = nullptr,
-    int8_t team = -1) {
+    int8_t team = -1,
+    const char *defs_cache_key = nullptr) {
   auto token__ = token ? _fbb.CreateString(token) : 0;
   auto message__ = message ? _fbb.CreateString(message) : 0;
+  auto defs_cache_key__ = defs_cache_key ? _fbb.CreateString(defs_cache_key) : 0;
   return SpringWeb::CreateAuthResponse(
       _fbb,
       status,
       token__,
       player_id,
       message__,
-      team);
+      team,
+      defs_cache_key__);
 }
 
 struct EntityCreate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -5213,6 +5238,78 @@ inline ::flatbuffers::Offset<RoomPlayerLeft> CreateRoomPlayerLeftDirect(
       reason__);
 }
 
+/// One key/value pair from a UnitDef's or WeaponDef's customParams.
+/// Spring games use customParams as the extension point for game-
+/// specific data: ZK reads dozens of keys (level, commtype, dynamic_
+/// comm, child_of_factory, planetwars_structure, thrower_gather,
+/// nuke_coverage, etc.) at widget file-scope. Streaming them as a
+/// list of pairs keeps the message format simple and lets the client
+/// reconstruct a Lua-shaped customParams table directly.
+struct CustomParam FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef CustomParamBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_KEY = 4,
+    VT_VALUE = 6
+  };
+  const ::flatbuffers::String *key() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_KEY);
+  }
+  const ::flatbuffers::String *value() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_VALUE);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_KEY) &&
+           verifier.VerifyString(key()) &&
+           VerifyOffset(verifier, VT_VALUE) &&
+           verifier.VerifyString(value()) &&
+           verifier.EndTable();
+  }
+};
+
+struct CustomParamBuilder {
+  typedef CustomParam Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_key(::flatbuffers::Offset<::flatbuffers::String> key) {
+    fbb_.AddOffset(CustomParam::VT_KEY, key);
+  }
+  void add_value(::flatbuffers::Offset<::flatbuffers::String> value) {
+    fbb_.AddOffset(CustomParam::VT_VALUE, value);
+  }
+  explicit CustomParamBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<CustomParam> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<CustomParam>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<CustomParam> CreateCustomParam(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::String> key = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> value = 0) {
+  CustomParamBuilder builder_(_fbb);
+  builder_.add_value(value);
+  builder_.add_key(key);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<CustomParam> CreateCustomParamDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const char *key = nullptr,
+    const char *value = nullptr) {
+  auto key__ = key ? _fbb.CreateString(key) : 0;
+  auto value__ = value ? _fbb.CreateString(value) : 0;
+  return SpringWeb::CreateCustomParam(
+      _fbb,
+      key__,
+      value__);
+}
+
 /// Definition of one weapon type. Sent once at game start so the
 /// client can render projectiles with appropriate visuals.
 struct GameWeaponDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -5258,7 +5355,8 @@ struct GameWeaponDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_STOCKPILE_TIME = 78,
     VT_METAL_COST = 80,
     VT_ENERGY_COST = 82,
-    VT_FLAGS = 84
+    VT_FLAGS = 84,
+    VT_CUSTOM_PARAMS = 86
   };
   uint16_t def_id() const {
     return GetField<uint16_t>(VT_DEF_ID, 0);
@@ -5403,6 +5501,11 @@ struct GameWeaponDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   uint32_t flags() const {
     return GetField<uint32_t>(VT_FLAGS, 0);
   }
+  /// Game-specific key/value extensions. Empty unless the weapondef
+  /// has any customParams entries.
+  const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::CustomParam>> *custom_params() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::CustomParam>> *>(VT_CUSTOM_PARAMS);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint16_t>(verifier, VT_DEF_ID, 2) &&
@@ -5450,6 +5553,9 @@ struct GameWeaponDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<float>(verifier, VT_METAL_COST, 4) &&
            VerifyField<float>(verifier, VT_ENERGY_COST, 4) &&
            VerifyField<uint32_t>(verifier, VT_FLAGS, 4) &&
+           VerifyOffset(verifier, VT_CUSTOM_PARAMS) &&
+           verifier.VerifyVector(custom_params()) &&
+           verifier.VerifyVectorOfTables(custom_params()) &&
            verifier.EndTable();
   }
 };
@@ -5581,6 +5687,9 @@ struct GameWeaponDefBuilder {
   void add_flags(uint32_t flags) {
     fbb_.AddElement<uint32_t>(GameWeaponDef::VT_FLAGS, flags, 0);
   }
+  void add_custom_params(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::CustomParam>>> custom_params) {
+    fbb_.AddOffset(GameWeaponDef::VT_CUSTOM_PARAMS, custom_params);
+  }
   explicit GameWeaponDefBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -5634,8 +5743,10 @@ inline ::flatbuffers::Offset<GameWeaponDef> CreateGameWeaponDef(
     float stockpile_time = 0.0f,
     float metal_cost = 0.0f,
     float energy_cost = 0.0f,
-    uint32_t flags = 0) {
+    uint32_t flags = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::CustomParam>>> custom_params = 0) {
   GameWeaponDefBuilder builder_(_fbb);
+  builder_.add_custom_params(custom_params);
   builder_.add_flags(flags);
   builder_.add_energy_cost(energy_cost);
   builder_.add_metal_cost(metal_cost);
@@ -5722,11 +5833,13 @@ inline ::flatbuffers::Offset<GameWeaponDef> CreateGameWeaponDefDirect(
     float stockpile_time = 0.0f,
     float metal_cost = 0.0f,
     float energy_cost = 0.0f,
-    uint32_t flags = 0) {
+    uint32_t flags = 0,
+    const std::vector<::flatbuffers::Offset<SpringWeb::CustomParam>> *custom_params = nullptr) {
   auto name__ = name ? _fbb.CreateString(name) : 0;
   auto type_name__ = type_name ? _fbb.CreateString(type_name) : 0;
   auto description__ = description ? _fbb.CreateString(description) : 0;
   auto damages__ = damages ? _fbb.CreateVector<float>(*damages) : 0;
+  auto custom_params__ = custom_params ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::CustomParam>>(*custom_params) : 0;
   return SpringWeb::CreateGameWeaponDef(
       _fbb,
       def_id,
@@ -5769,7 +5882,8 @@ inline ::flatbuffers::Offset<GameWeaponDef> CreateGameWeaponDefDirect(
       stockpile_time,
       metal_cost,
       energy_cost,
-      flags);
+      flags,
+      custom_params__);
 }
 
 /// Sent by the game server after successful auth, alongside
@@ -5875,7 +5989,23 @@ struct GameUnitDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_BUILD_DISTANCE = 70,
     VT_BUILD_SPEED = 72,
     VT_BUILD_OPTIONS = 74,
-    VT_WEAPON_DEF_IDS = 76
+    VT_WEAPON_DEF_IDS = 76,
+    VT_CUSTOM_PARAMS = 78,
+    VT_REPAIR_SPEED = 80,
+    VT_TRANSPORT_SIZE = 82,
+    VT_TRANSPORT_MASS = 84,
+    VT_TRANSPORT_CAPACITY = 86,
+    VT_YARDMAP = 88,
+    VT_SCRIPT = 90,
+    VT_BUILD_PIC = 92,
+    VT_MAX_VELOCITY = 94,
+    VT_COST = 96,
+    VT_MAX_WEAPON_RANGE = 98,
+    VT_MAX_THIS_UNIT = 100,
+    VT_CAN_BE_ASSISTED = 102,
+    VT_CAN_SELF_DESTRUCT = 104,
+    VT_SELF_D_COUNTDOWN = 106,
+    VT_CATEGORY_BITS = 108
   };
   uint16_t def_id() const {
     return GetField<uint16_t>(VT_DEF_ID, 0);
@@ -5992,6 +6122,72 @@ struct GameUnitDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::Vector<uint16_t> *weapon_def_ids() const {
     return GetPointer<const ::flatbuffers::Vector<uint16_t> *>(VT_WEAPON_DEF_IDS);
   }
+  /// Game-specific key/value extensions. ZK widgets read commtype,
+  /// level, dynamic_comm, planetwars_structure, child_of_factory,
+  /// thrower_gather, nuke_coverage, hide, helptext, and many more.
+  /// Empty unless the unitdef has any customParams entries.
+  const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::CustomParam>> *custom_params() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::CustomParam>> *>(VT_CUSTOM_PARAMS);
+  }
+  /// Rare fields ZK widgets occasionally read. Default 0 / empty.
+  float repair_speed() const {
+    return GetField<float>(VT_REPAIR_SPEED, 0.0f);
+  }
+  int32_t transport_size() const {
+    return GetField<int32_t>(VT_TRANSPORT_SIZE, 0);
+  }
+  float transport_mass() const {
+    return GetField<float>(VT_TRANSPORT_MASS, 0.0f);
+  }
+  int32_t transport_capacity() const {
+    return GetField<int32_t>(VT_TRANSPORT_CAPACITY, 0);
+  }
+  /// Yardmap string (factory placement footprint), e.g. "yyy yyy yyy".
+  const ::flatbuffers::String *yardmap() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_YARDMAP);
+  }
+  /// SolidObjectDef.script — animation script filename (e.g.
+  /// "scripts/armcom1.cob" or "scripts/armcom1.lua").
+  const ::flatbuffers::String *script() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_SCRIPT);
+  }
+  /// Pre-rendered icon path for build menu (relative to game base).
+  const ::flatbuffers::String *build_pic() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_BUILD_PIC);
+  }
+  /// Maximum velocity (different from speed for some unit types).
+  float max_velocity() const {
+    return GetField<float>(VT_MAX_VELOCITY, 0.0f);
+  }
+  /// Build cost float (combined). Some widgets read this directly.
+  float cost() const {
+    return GetField<float>(VT_COST, 0.0f);
+  }
+  /// Maximum range (max of all weapon ranges, derived).
+  float max_weapon_range() const {
+    return GetField<float>(VT_MAX_WEAPON_RANGE, 0.0f);
+  }
+  /// Maximum copies of this unit allowed per team. 0 = unlimited.
+  int32_t max_this_unit() const {
+    return GetField<int32_t>(VT_MAX_THIS_UNIT, 0);
+  }
+  /// Number of build power required to construct this unit.
+  bool can_be_assisted() const {
+    return GetField<uint8_t>(VT_CAN_BE_ASSISTED, 1) != 0;
+  }
+  /// Whether this unit can self-destruct (separate from canKamikaze).
+  bool can_self_destruct() const {
+    return GetField<uint8_t>(VT_CAN_SELF_DESTRUCT, 1) != 0;
+  }
+  /// Self-destruct countdown in seconds.
+  int32_t self_d_countdown() const {
+    return GetField<int32_t>(VT_SELF_D_COUNTDOWN, 0);
+  }
+  /// Build pic / unit category for build menus.
+  /// Spring's category bitfield (terrain/movement/factory).
+  uint32_t category_bits() const {
+    return GetField<uint32_t>(VT_CATEGORY_BITS, 0);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint16_t>(verifier, VT_DEF_ID, 2) &&
@@ -6039,6 +6235,27 @@ struct GameUnitDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVector(build_options()) &&
            VerifyOffset(verifier, VT_WEAPON_DEF_IDS) &&
            verifier.VerifyVector(weapon_def_ids()) &&
+           VerifyOffset(verifier, VT_CUSTOM_PARAMS) &&
+           verifier.VerifyVector(custom_params()) &&
+           verifier.VerifyVectorOfTables(custom_params()) &&
+           VerifyField<float>(verifier, VT_REPAIR_SPEED, 4) &&
+           VerifyField<int32_t>(verifier, VT_TRANSPORT_SIZE, 4) &&
+           VerifyField<float>(verifier, VT_TRANSPORT_MASS, 4) &&
+           VerifyField<int32_t>(verifier, VT_TRANSPORT_CAPACITY, 4) &&
+           VerifyOffset(verifier, VT_YARDMAP) &&
+           verifier.VerifyString(yardmap()) &&
+           VerifyOffset(verifier, VT_SCRIPT) &&
+           verifier.VerifyString(script()) &&
+           VerifyOffset(verifier, VT_BUILD_PIC) &&
+           verifier.VerifyString(build_pic()) &&
+           VerifyField<float>(verifier, VT_MAX_VELOCITY, 4) &&
+           VerifyField<float>(verifier, VT_COST, 4) &&
+           VerifyField<float>(verifier, VT_MAX_WEAPON_RANGE, 4) &&
+           VerifyField<int32_t>(verifier, VT_MAX_THIS_UNIT, 4) &&
+           VerifyField<uint8_t>(verifier, VT_CAN_BE_ASSISTED, 1) &&
+           VerifyField<uint8_t>(verifier, VT_CAN_SELF_DESTRUCT, 1) &&
+           VerifyField<int32_t>(verifier, VT_SELF_D_COUNTDOWN, 4) &&
+           VerifyField<uint32_t>(verifier, VT_CATEGORY_BITS, 4) &&
            verifier.EndTable();
   }
 };
@@ -6158,6 +6375,54 @@ struct GameUnitDefBuilder {
   void add_weapon_def_ids(::flatbuffers::Offset<::flatbuffers::Vector<uint16_t>> weapon_def_ids) {
     fbb_.AddOffset(GameUnitDef::VT_WEAPON_DEF_IDS, weapon_def_ids);
   }
+  void add_custom_params(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::CustomParam>>> custom_params) {
+    fbb_.AddOffset(GameUnitDef::VT_CUSTOM_PARAMS, custom_params);
+  }
+  void add_repair_speed(float repair_speed) {
+    fbb_.AddElement<float>(GameUnitDef::VT_REPAIR_SPEED, repair_speed, 0.0f);
+  }
+  void add_transport_size(int32_t transport_size) {
+    fbb_.AddElement<int32_t>(GameUnitDef::VT_TRANSPORT_SIZE, transport_size, 0);
+  }
+  void add_transport_mass(float transport_mass) {
+    fbb_.AddElement<float>(GameUnitDef::VT_TRANSPORT_MASS, transport_mass, 0.0f);
+  }
+  void add_transport_capacity(int32_t transport_capacity) {
+    fbb_.AddElement<int32_t>(GameUnitDef::VT_TRANSPORT_CAPACITY, transport_capacity, 0);
+  }
+  void add_yardmap(::flatbuffers::Offset<::flatbuffers::String> yardmap) {
+    fbb_.AddOffset(GameUnitDef::VT_YARDMAP, yardmap);
+  }
+  void add_script(::flatbuffers::Offset<::flatbuffers::String> script) {
+    fbb_.AddOffset(GameUnitDef::VT_SCRIPT, script);
+  }
+  void add_build_pic(::flatbuffers::Offset<::flatbuffers::String> build_pic) {
+    fbb_.AddOffset(GameUnitDef::VT_BUILD_PIC, build_pic);
+  }
+  void add_max_velocity(float max_velocity) {
+    fbb_.AddElement<float>(GameUnitDef::VT_MAX_VELOCITY, max_velocity, 0.0f);
+  }
+  void add_cost(float cost) {
+    fbb_.AddElement<float>(GameUnitDef::VT_COST, cost, 0.0f);
+  }
+  void add_max_weapon_range(float max_weapon_range) {
+    fbb_.AddElement<float>(GameUnitDef::VT_MAX_WEAPON_RANGE, max_weapon_range, 0.0f);
+  }
+  void add_max_this_unit(int32_t max_this_unit) {
+    fbb_.AddElement<int32_t>(GameUnitDef::VT_MAX_THIS_UNIT, max_this_unit, 0);
+  }
+  void add_can_be_assisted(bool can_be_assisted) {
+    fbb_.AddElement<uint8_t>(GameUnitDef::VT_CAN_BE_ASSISTED, static_cast<uint8_t>(can_be_assisted), 1);
+  }
+  void add_can_self_destruct(bool can_self_destruct) {
+    fbb_.AddElement<uint8_t>(GameUnitDef::VT_CAN_SELF_DESTRUCT, static_cast<uint8_t>(can_self_destruct), 1);
+  }
+  void add_self_d_countdown(int32_t self_d_countdown) {
+    fbb_.AddElement<int32_t>(GameUnitDef::VT_SELF_D_COUNTDOWN, self_d_countdown, 0);
+  }
+  void add_category_bits(uint32_t category_bits) {
+    fbb_.AddElement<uint32_t>(GameUnitDef::VT_CATEGORY_BITS, category_bits, 0);
+  }
   explicit GameUnitDefBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -6207,8 +6472,38 @@ inline ::flatbuffers::Offset<GameUnitDef> CreateGameUnitDef(
     float build_distance = 0.0f,
     float build_speed = 0.0f,
     ::flatbuffers::Offset<::flatbuffers::Vector<uint16_t>> build_options = 0,
-    ::flatbuffers::Offset<::flatbuffers::Vector<uint16_t>> weapon_def_ids = 0) {
+    ::flatbuffers::Offset<::flatbuffers::Vector<uint16_t>> weapon_def_ids = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::CustomParam>>> custom_params = 0,
+    float repair_speed = 0.0f,
+    int32_t transport_size = 0,
+    float transport_mass = 0.0f,
+    int32_t transport_capacity = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> yardmap = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> script = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> build_pic = 0,
+    float max_velocity = 0.0f,
+    float cost = 0.0f,
+    float max_weapon_range = 0.0f,
+    int32_t max_this_unit = 0,
+    bool can_be_assisted = true,
+    bool can_self_destruct = true,
+    int32_t self_d_countdown = 0,
+    uint32_t category_bits = 0) {
   GameUnitDefBuilder builder_(_fbb);
+  builder_.add_category_bits(category_bits);
+  builder_.add_self_d_countdown(self_d_countdown);
+  builder_.add_max_this_unit(max_this_unit);
+  builder_.add_max_weapon_range(max_weapon_range);
+  builder_.add_cost(cost);
+  builder_.add_max_velocity(max_velocity);
+  builder_.add_build_pic(build_pic);
+  builder_.add_script(script);
+  builder_.add_yardmap(yardmap);
+  builder_.add_transport_capacity(transport_capacity);
+  builder_.add_transport_mass(transport_mass);
+  builder_.add_transport_size(transport_size);
+  builder_.add_repair_speed(repair_speed);
+  builder_.add_custom_params(custom_params);
   builder_.add_weapon_def_ids(weapon_def_ids);
   builder_.add_build_options(build_options);
   builder_.add_build_speed(build_speed);
@@ -6246,6 +6541,8 @@ inline ::flatbuffers::Offset<GameUnitDef> CreateGameUnitDef(
   builder_.add_model_url(model_url);
   builder_.add_name(name);
   builder_.add_def_id(def_id);
+  builder_.add_can_self_destruct(can_self_destruct);
+  builder_.add_can_be_assisted(can_be_assisted);
   return builder_.Finish();
 }
 
@@ -6287,7 +6584,23 @@ inline ::flatbuffers::Offset<GameUnitDef> CreateGameUnitDefDirect(
     float build_distance = 0.0f,
     float build_speed = 0.0f,
     const std::vector<uint16_t> *build_options = nullptr,
-    const std::vector<uint16_t> *weapon_def_ids = nullptr) {
+    const std::vector<uint16_t> *weapon_def_ids = nullptr,
+    const std::vector<::flatbuffers::Offset<SpringWeb::CustomParam>> *custom_params = nullptr,
+    float repair_speed = 0.0f,
+    int32_t transport_size = 0,
+    float transport_mass = 0.0f,
+    int32_t transport_capacity = 0,
+    const char *yardmap = nullptr,
+    const char *script = nullptr,
+    const char *build_pic = nullptr,
+    float max_velocity = 0.0f,
+    float cost = 0.0f,
+    float max_weapon_range = 0.0f,
+    int32_t max_this_unit = 0,
+    bool can_be_assisted = true,
+    bool can_self_destruct = true,
+    int32_t self_d_countdown = 0,
+    uint32_t category_bits = 0) {
   auto name__ = name ? _fbb.CreateString(name) : 0;
   auto model_url__ = model_url ? _fbb.CreateString(model_url) : 0;
   auto texture_url__ = texture_url ? _fbb.CreateString(texture_url) : 0;
@@ -6296,6 +6609,10 @@ inline ::flatbuffers::Offset<GameUnitDef> CreateGameUnitDefDirect(
   auto wreck_name__ = wreck_name ? _fbb.CreateString(wreck_name) : 0;
   auto build_options__ = build_options ? _fbb.CreateVector<uint16_t>(*build_options) : 0;
   auto weapon_def_ids__ = weapon_def_ids ? _fbb.CreateVector<uint16_t>(*weapon_def_ids) : 0;
+  auto custom_params__ = custom_params ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::CustomParam>>(*custom_params) : 0;
+  auto yardmap__ = yardmap ? _fbb.CreateString(yardmap) : 0;
+  auto script__ = script ? _fbb.CreateString(script) : 0;
+  auto build_pic__ = build_pic ? _fbb.CreateString(build_pic) : 0;
   return SpringWeb::CreateGameUnitDef(
       _fbb,
       def_id,
@@ -6334,7 +6651,23 @@ inline ::flatbuffers::Offset<GameUnitDef> CreateGameUnitDefDirect(
       build_distance,
       build_speed,
       build_options__,
-      weapon_def_ids__);
+      weapon_def_ids__,
+      custom_params__,
+      repair_speed,
+      transport_size,
+      transport_mass,
+      transport_capacity,
+      yardmap__,
+      script__,
+      build_pic__,
+      max_velocity,
+      cost,
+      max_weapon_range,
+      max_this_unit,
+      can_be_assisted,
+      can_self_destruct,
+      self_d_countdown,
+      category_bits);
 }
 
 /// Sent by the game server after successful auth, before entity state

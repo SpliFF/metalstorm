@@ -88,6 +88,7 @@ static int findFreePort(int base = 9100) {
 /// slot assignment per team.
 static GameServerInstance spawnGameServer(
     uint32_t roomId, const std::string& gameId,
+    const std::string& gameVersion,
     const std::string& mapId, const std::string& dbPath,
     const std::vector<RoomPlayer>& playerRoster,
     const std::vector<RoomAISlot>& aiSlots)
@@ -162,6 +163,10 @@ static GameServerInstance spawnGameServer(
         argv.push_back(serverBin.c_str());
         argv.push_back("--port"); argv.push_back(portStr.c_str());
         argv.push_back("--game"); argv.push_back(gameId.c_str());
+        if (!gameVersion.empty()) {
+            argv.push_back("--game-version");
+            argv.push_back(gameVersion.c_str());
+        }
         argv.push_back("--map");  argv.push_back(mapId.c_str());
         argv.push_back("--db");   argv.push_back(dbPath.c_str());
         for (const auto& spec : playerArgStorage) {
@@ -363,9 +368,11 @@ int main(int argc, char* argv[])
     // Game model conversion is handled offline by tools/gameconverter.
     // The lobby just discovers games and their AI plugins.
     std::unordered_map<std::string, std::string> gamePathsById;
+    std::unordered_map<std::string, std::string> gameVersionsById;
     std::unordered_map<std::string, std::vector<AIDiscovery::AIInfo>> aisByGame;
     for (const auto& g : availableGames) {
         gamePathsById[g.id] = g.folderPath;
+        gameVersionsById[g.id] = g.version;
         aisByGame[g.id] = AIDiscovery::Discover(enginePath, g.folderPath);
     }
 
@@ -1221,7 +1228,10 @@ int main(int argc, char* argv[])
         auto it = gamePathsById.find(room->gameId);
 
         if (it != gamePathsById.end()) {
-            auto inst = spawnGameServer(room->id, room->gameId, room->mapId, dbPath,
+            const auto vit = gameVersionsById.find(room->gameId);
+            const std::string& gameVer = (vit != gameVersionsById.end()) ? vit->second : std::string();
+            auto inst = spawnGameServer(room->id, room->gameId, gameVer,
+                room->mapId, dbPath,
                 room->players, room->aiSlots);
             gameServers[room->id] = inst;
             persistGameServer(inst);

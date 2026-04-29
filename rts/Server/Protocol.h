@@ -73,19 +73,26 @@ inline std::vector<uint8_t> BuildPong(uint64_t clientTime, uint64_t serverTime) 
 }
 
 /// Build an AuthResponse.
+///
+/// `defsCacheKey` is the content-addressed key the client uses to fetch
+/// the game's UnitDefs/WeaponDefs FlatBuffer payloads via HTTP. Empty
+/// for the lobby (no defs) or when the bake step failed (client falls
+/// back to whatever streaming path is wired).
 inline std::vector<uint8_t> BuildAuthResponse(
     SpringWeb::AuthStatus status,
     const std::string& token,
     uint32_t playerId,
     const std::string& message = "",
-    int8_t team = -1)
+    int8_t team = -1,
+    const std::string& defsCacheKey = "")
 {
     flatbuffers::FlatBufferBuilder fbb(256);
     auto resp = SpringWeb::CreateAuthResponseDirect(fbb, status,
         token.empty() ? nullptr : token.c_str(),
         playerId,
         message.empty() ? nullptr : message.c_str(),
-        team);
+        team,
+        defsCacheKey.empty() ? nullptr : defsCacheKey.c_str());
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_AuthResponse, resp.Union());
 }
 
@@ -667,6 +674,41 @@ inline flatbuffers::Offset<SpringWeb::GameUnitDef> BuildSingleUnitDef(
     auto buildOptsOff = fbb.CreateVector(buildOptions);
     auto weaponIdsOff = fbb.CreateVector(weaponDefIds);
 
+    // customParams — game-specific key/value extension. ZK widgets read
+    // dozens of these (level, commtype, dynamic_comm, child_of_factory,
+    // planetwars_structure, thrower_gather, nuke_coverage, etc.).
+    std::vector<flatbuffers::Offset<SpringWeb::CustomParam>> customParamsOffsets;
+    customParamsOffsets.reserve(ud.customParams.size());
+    for (const auto& kv : ud.customParams) {
+        auto kOff = fbb.CreateString(kv.first);
+        auto vOff = fbb.CreateString(kv.second);
+        SpringWeb::CustomParamBuilder pb(fbb);
+        pb.add_key(kOff);
+        pb.add_value(vOff);
+        customParamsOffsets.push_back(pb.Finish());
+    }
+    auto customParamsOff = fbb.CreateVector(customParamsOffsets);
+    if (ud.name == "amphaa" || ud.name == "staticmex" || ud.name == "gunshiptrans") {
+        std::fprintf(stderr, "[Protocol.h] %s: ud.customParams.size=%zu transportSize=%d repairSpeed=%f\n",
+            ud.name.c_str(), ud.customParams.size(), ud.transportSize, ud.repairSpeed);
+        int dbgCount = 0;
+        for (const auto& kv : ud.customParams) {
+            std::fprintf(stderr, "  cp: %s=%s\n", kv.first.c_str(), kv.second.c_str());
+            if (++dbgCount >= 5) break;
+        }
+    }
+
+    // Yardmap — serialise to a string of digits (one per cell). ZK
+    // widgets use the length to derive footprint shape.
+    std::string yardmapStr;
+    yardmapStr.reserve(ud.yardmap.size());
+    for (auto status : ud.yardmap) {
+        yardmapStr.push_back(static_cast<char>('0' + static_cast<int>(status)));
+    }
+    auto yardmapOff = fbb.CreateString(yardmapStr);
+    auto scriptOff  = fbb.CreateString(ud.scriptName);
+    auto buildPicOff = fbb.CreateString(ud.buildPicName);
+
     SpringWeb::GameUnitDefBuilder b(fbb);
     b.add_def_id(static_cast<uint16_t>(ud.id));
     b.add_name(nameOff);
@@ -705,6 +747,24 @@ inline flatbuffers::Offset<SpringWeb::GameUnitDef> BuildSingleUnitDef(
     b.add_build_speed(ud.buildSpeed);
     b.add_build_options(buildOptsOff);
     b.add_weapon_def_ids(weaponIdsOff);
+
+    // Tier 4 fields.
+    b.add_custom_params(customParamsOff);
+    b.add_repair_speed(ud.repairSpeed);
+    b.add_transport_size(ud.transportSize);
+    b.add_transport_mass(ud.transportMass);
+    b.add_transport_capacity(ud.transportCapacity);
+    b.add_yardmap(yardmapOff);
+    b.add_script(scriptOff);
+    b.add_build_pic(buildPicOff);
+    b.add_max_velocity(ud.speed);
+    b.add_cost(ud.cost.metal + ud.cost.energy);
+    b.add_max_weapon_range(ud.maxWeaponRange);
+    b.add_max_this_unit(ud.maxThisUnit);
+    b.add_can_be_assisted(ud.canBeAssisted);
+    b.add_can_self_destruct(ud.canSelfD);
+    b.add_self_d_countdown(ud.selfDCountdown);
+    b.add_category_bits(ud.category);
     return b.Finish();
 }
 
@@ -837,6 +897,20 @@ inline flatbuffers::Offset<SpringWeb::GameWeaponDef> BuildSingleWeaponDef(
     if (wd.exteriorShield)       flags |= (1u << 22);
     if (wd.visibleShield)        flags |= (1u << 23);
 
+    // customParams for the weapon. ZK widgets use these for things like
+    // tooltips, AOE overrides, special-effect markers, etc.
+    std::vector<flatbuffers::Offset<SpringWeb::CustomParam>> customParamsOffsets;
+    customParamsOffsets.reserve(wd.customParams.size());
+    for (const auto& kv : wd.customParams) {
+        auto kOff = fbb.CreateString(kv.first);
+        auto vOff = fbb.CreateString(kv.second);
+        SpringWeb::CustomParamBuilder pb(fbb);
+        pb.add_key(kOff);
+        pb.add_value(vOff);
+        customParamsOffsets.push_back(pb.Finish());
+    }
+    auto wdCustomParamsOff = fbb.CreateVector(customParamsOffsets);
+
     SpringWeb::GameWeaponDefBuilder wdb(fbb);
     wdb.add_def_id(static_cast<uint16_t>(wd.id));
     wdb.add_name(nameOff);
@@ -880,6 +954,7 @@ inline flatbuffers::Offset<SpringWeb::GameWeaponDef> BuildSingleWeaponDef(
     wdb.add_metal_cost(wd.cost.metal);
     wdb.add_energy_cost(wd.cost.energy);
     wdb.add_flags(flags);
+    wdb.add_custom_params(wdCustomParamsOff);
     return wdb.Finish();
 }
 

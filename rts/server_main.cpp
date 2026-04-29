@@ -15,6 +15,7 @@
 #include "Server/ProjectileStateSerializer.h"
 #include "Server/ContentServer.h"
 #include "Server/CombatEventCollector.h"
+#include "Server/DefsCache.h"
 #include "Server/StandingOrders.h"
 #include "Server/AI/AIRuntimePool.h"
 #include "Server/AI/AIDiscovery.h"
@@ -37,6 +38,7 @@
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/UnitDefHandler.h"
 #include "Sim/Weapons/WeaponDefHandler.h"
+#include "Game/GameSetup.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Units/CommandAI/Command.h"
@@ -76,6 +78,20 @@ static void signalHandler(int) {
 static void restartHandler(int) {
     restartRequested.store(true);
     keepRunning.store(false);
+}
+
+#include <execinfo.h>
+#include <unistd.h>
+static void crashHandler(int sig, siginfo_t* info, void*) {
+    void* frames[64];
+    int n = backtrace(frames, 64);
+    char hdr[128];
+    int len = snprintf(hdr, sizeof(hdr),
+        "\n*** SIGSEGV at addr=%p (signal %d) — backtrace:\n",
+        info ? info->si_addr : nullptr, sig);
+    write(STDERR_FILENO, hdr, len);
+    backtrace_symbols_fd(frames, n, STDERR_FILENO);
+    _exit(128 + sig);
 }
 
 /// Generate a random hex session token.
@@ -118,8 +134,19 @@ int main(int argc, char* argv[])
     // as EPIPE errors instead of terminating the process.
     std::signal(SIGPIPE, SIG_IGN);
 
+    {
+        struct sigaction sa{};
+        sa.sa_sigaction = crashHandler;
+        sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGSEGV, &sa, nullptr);
+        sigaction(SIGBUS,  &sa, nullptr);
+        sigaction(SIGABRT, &sa, nullptr);
+    }
+
     int port = 9001;
     std::string gameId;
+    std::string gameVersion;   // From modinfo.lua via lobby --game-version arg
     std::string gamesDir = "data/games";
     std::string mapId;
     std::string mapsDir = "data/maps";
@@ -191,6 +218,8 @@ int main(int argc, char* argv[])
             port = std::atoi(argv[++i]);
         } else if (arg == "--game" && i + 1 < argc) {
             gameId = argv[++i];
+        } else if (arg == "--game-version" && i + 1 < argc) {
+            gameVersion = argv[++i];
         } else if (arg == "--map" && i + 1 < argc) {
             mapId = argv[++i];
         } else if (arg == "--db" && i + 1 < argc) {
@@ -663,6 +692,56 @@ int main(int argc, char* argv[])
 
     sim.Init(smfPath);
 
+    // --- Bake def cache for HTTP delivery ---
+    //
+    // After sim.Init the engine has parsed gamedata/defs.lua (with the
+    // room's modOptions in scope) and populated unitDefHandler /
+    // weaponDefHandler. Serialize the full def set to a content-addressed
+    // path under data/games/{gameId}/cache/defs/{key}/ so the lobby's
+    // static handler can serve it as immutable HTTP. Clients fetch via
+    // HTTP and have the full def set populated before LuaUI bootstrap
+    // — replaces per-tick on-demand def streaming.
+    //
+    // The cache key includes modOptions so different rooms with
+    // different post-processing don't collide. Same modOptions across
+    // rooms ⇒ same key ⇒ file already on disk ⇒ no rewrite, no
+    // re-serialize, browser cache hit.
+    std::string defsCacheKey;
+    if (unitDefHandler && weaponDefHandler && !gameId.empty()) {
+        defsCacheKey = DefsCache::ComputeCacheKey(
+            gameId, gameVersion, CGameSetup::GetModOptions());
+
+        // Skip re-baking if the cache files already exist for this key.
+        // This is the warm path: same modOptions in repeat sessions.
+        namespace fs = std::filesystem;
+        const fs::path dir = DefsCache::CacheDir(gameId, defsCacheKey);
+        const bool warm = fs::exists(dir / "unitdefs.bin")
+                       && fs::exists(dir / "weapondefs.bin");
+
+        if (warm) {
+            SLOG(SPRING_LOG_NOTICE, "defs cache warm: gameId=%s key=%s",
+                 gameId.c_str(), defsCacheKey.c_str());
+        } else {
+            auto udBytes = Protocol::BuildGameUnitDefs(
+                unitDefHandler->GetUnitDefsVec(), gameId);
+            auto wdBytes = Protocol::BuildGameWeaponDefs(
+                weaponDefHandler->GetWeaponDefsVec());
+            if (DefsCache::WriteIfMissing(gameId, defsCacheKey, udBytes, wdBytes)) {
+                SLOG(SPRING_LOG_NOTICE,
+                     "defs cache baked: gameId=%s key=%s "
+                     "(unitdefs=%zu B, weapondefs=%zu B)",
+                     gameId.c_str(), defsCacheKey.c_str(),
+                     udBytes.size(), wdBytes.size());
+            } else {
+                SLOG(SPRING_LOG_ERROR,
+                     "defs cache write failed: gameId=%s key=%s "
+                     "(falling back to per-session WebRTC streaming)",
+                     gameId.c_str(), defsCacheKey.c_str());
+                defsCacheKey.clear();
+            }
+        }
+    }
+
     // --- Player roster lookup ---
     //
     // Build a `username -> team` map from the --player args so the
@@ -868,7 +947,7 @@ int main(int argc, char* argv[])
                             auto resp = Protocol::BuildAuthResponse(
                                 SpringWeb::AuthStatus_OK, auth->token()->str(),
                                 static_cast<uint32_t>(userId), "",
-                                static_cast<int8_t>(team));
+                                static_cast<int8_t>(team), defsCacheKey);
                             rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                             // Register the session — previously the
                             // token path skipped this, which meant a
@@ -978,7 +1057,7 @@ int main(int argc, char* argv[])
                     auto resp = Protocol::BuildAuthResponse(
                         SpringWeb::AuthStatus_OK, token,
                         static_cast<uint32_t>(user->id), "",
-                        static_cast<int8_t>(team));
+                        static_cast<int8_t>(team), defsCacheKey);
                     rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                     sessions.AddSession(msg.clientId, user->id, user->username, user->role);
                     if (auto* s = sessions.GetSession(msg.clientId))
@@ -1397,25 +1476,9 @@ int main(int argc, char* argv[])
                     candidates = EntityState::CollectAllUnits(viewerAllyTeam);
                 }
 
-                // Incremental def streaming: send defs for any unit
-                // types this client hasn't seen yet. Defs arrive
-                // before the entity state that references them so
-                // the client always has the def when it needs to
-                // render the entity.
-                if (unitDefHandler && !gameId.empty()) {
-                    std::vector<uint16_t> newDefIds;
-                    for (const CUnit* u : candidates) {
-                        uint16_t defId = static_cast<uint16_t>(u->unitDef->id);
-                        if (session.knownUnitDefs.insert(defId).second) {
-                            newDefIds.push_back(defId);
-                        }
-                    }
-                    if (!newDefIds.empty()) {
-                        auto defMsg = Protocol::BuildGameUnitDefsSubset(
-                            unitDefHandler->GetUnitDefsVec(), newDefIds, gameId);
-                        rtcServer.SendReliable(clientId, defMsg.data(), defMsg.size());
-                    }
-                }
+                // (Def streaming removed — clients fetch the full def
+                // set via HTTP at game start using AuthResponse's
+                // defs_cache_key. See DefsCache::WriteIfMissing.)
 
                 uint8_t envelope;
                 std::vector<uint8_t> stateData;
@@ -1451,8 +1514,8 @@ int main(int argc, char* argv[])
         }
 
         // Send projectile state to all clients every 3 ticks (~10 Hz).
-        // Per-client: send weapon defs for any new weapon types first,
-        // then the full projectile snapshot.
+        // Weapon defs are delivered eagerly via HTTP at game start
+        // (see DefsCache::WriteIfMissing); no per-batch streaming.
         {
         int curFrame = sim.GetFrameNum();
         if (curFrame >= 0 && (curFrame % 3) == 0 && rtcServer.GetClientCount() > 0) {
@@ -1463,37 +1526,7 @@ int main(int argc, char* argv[])
                 projFrame.push_back(Protocol::ENVELOPE_PROJECTILE_STATE);
                 projFrame.insert(projFrame.end(), projData.begin(), projData.end());
 
-                sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
-                    // Stream weapon defs for any new weapon types
-                    // referenced in this batch of projectiles.
-                    if (weaponDefHandler) {
-                        // Parse the weapon_def_id array out of projData.
-                        // Header: u16 count, u16 fieldMask. If bit 1 set,
-                        // weapon_def_ids follow the projectile_ids array.
-                        const uint16_t projCount = *reinterpret_cast<const uint16_t*>(projData.data());
-                        const uint16_t fieldMask = *reinterpret_cast<const uint16_t*>(projData.data() + 2);
-                        const bool hasIds = (fieldMask & 0x01) != 0;
-                        const bool hasWdIds = (fieldMask & 0x02) != 0;
-
-                        if (hasWdIds && projCount > 0) {
-                            size_t wdOffset = 4;
-                            if (hasIds) wdOffset += projCount * sizeof(uint32_t);
-                            const uint16_t* wdIds = reinterpret_cast<const uint16_t*>(projData.data() + wdOffset);
-
-                            std::vector<uint16_t> newWdIds;
-                            for (uint16_t i = 0; i < projCount; i++) {
-                                if (session.knownWeaponDefs.insert(wdIds[i]).second) {
-                                    newWdIds.push_back(wdIds[i]);
-                                }
-                            }
-                            if (!newWdIds.empty()) {
-                                auto wdMsg = Protocol::BuildGameWeaponDefsSubset(
-                                    weaponDefHandler->GetWeaponDefsVec(), newWdIds);
-                                rtcServer.SendReliable(clientId, wdMsg.data(), wdMsg.size());
-                            }
-                        }
-                    }
-
+                sessions.ForEachSession([&](ClientID clientId, ClientSession&) {
                     rtcServer.SendUnreliable(clientId, projFrame.data(), projFrame.size());
                 });
             }
