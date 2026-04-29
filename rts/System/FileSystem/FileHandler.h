@@ -8,13 +8,16 @@
  *   's'     → Base roots only
  *   'r'     → All roots
  * Mode strings are iterated char-by-char; first match wins.
+ *
+ * Lookups are case-insensitive against an index built at AddContentRoot()
+ * time for Mod/Map/Base roots — see FileHandler.cpp for the rationale.
+ * Raw roots (cwd) are not indexed.
  */
 #pragma once
 
-#include <algorithm>
-#include <filesystem>
 #include <fstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "VFSModes.h"
@@ -26,23 +29,21 @@ public:
     struct ContentRoot {
         std::string path;      // Absolute path with trailing separator
         RootCategory category;
+        // Lowercased relative path → actual relative path as it exists on
+        // disk. Empty for Raw roots (which are not indexed).
+        std::unordered_map<std::string, std::string> nameIndex;
     };
 
-    /// Add a directory to search when opening files.
-    /// Roots are searched in the order they were added, filtered by mode.
-    static void AddContentRoot(const std::string& path, RootCategory cat = RootCategory::Raw) {
-        auto abs = std::filesystem::absolute(path).string();
-        if (!abs.empty() && abs.back() != '/')
-            abs += '/';
-        categorizedRoots.push_back({abs, cat});
-    }
+    /// Add a directory to search when opening files. Mod/Map/Base roots
+    /// are recursively scanned to build a case-insensitive name index;
+    /// Raw roots are not indexed.
+    static void AddContentRoot(const std::string& path,
+                               RootCategory cat = RootCategory::Raw);
 
     /// Clear all content roots.
-    static void ClearContentRoots() {
-        categorizedRoots.clear();
-    }
+    static void ClearContentRoots();
 
-    /// Get the current content roots (for compatibility).
+    /// Get the current content roots (paths only, for compatibility).
     static std::vector<std::string> GetContentRoots() {
         std::vector<std::string> result;
         result.reserve(categorizedRoots.size());
@@ -143,73 +144,15 @@ public:
         return !ResolvePath(filename, modes ? modes : "").empty();
     }
 
-    /// List files in a directory matching a glob pattern.
+    /// List files in a directory matching a glob pattern (case-insensitive).
     static std::vector<std::string> DirList(
         const std::string& dir, const std::string& pattern = "*",
-        const std::string& modes = "")
-    {
-        std::vector<std::string> result;
-        namespace fs = std::filesystem;
+        const std::string& modes = "");
 
-        auto roots = GetRootsForModes(modes);
-        for (const auto& root : roots) {
-            fs::path dirPath = fs::path(root) / dir;
-            if (!fs::is_directory(dirPath))
-                continue;
-
-            for (const auto& entry : fs::directory_iterator(dirPath)) {
-                if (!entry.is_regular_file())
-                    continue;
-
-                std::string fname = entry.path().filename().string();
-                if (MatchGlob(fname, pattern)) {
-                    std::string relPath = dir;
-                    if (!relPath.empty() && relPath.back() != '/')
-                        relPath += '/';
-                    relPath += fname;
-                    result.push_back(relPath);
-                }
-            }
-        }
-
-        std::sort(result.begin(), result.end());
-        result.erase(std::unique(result.begin(), result.end()), result.end());
-        return result;
-    }
-
-    /// List subdirectories matching a glob pattern.
+    /// List subdirectories matching a glob pattern (case-insensitive).
     static std::vector<std::string> SubDirs(
         const std::string& dir, const std::string& pattern = "*",
-        const std::string& modes = "")
-    {
-        std::vector<std::string> result;
-        namespace fs = std::filesystem;
-
-        auto roots = GetRootsForModes(modes);
-        for (const auto& root : roots) {
-            fs::path dirPath = fs::path(root) / dir;
-            if (!fs::is_directory(dirPath))
-                continue;
-
-            for (const auto& entry : fs::directory_iterator(dirPath)) {
-                if (!entry.is_directory())
-                    continue;
-
-                std::string dname = entry.path().filename().string();
-                if (MatchGlob(dname, pattern)) {
-                    std::string relPath = dir;
-                    if (!relPath.empty() && relPath.back() != '/')
-                        relPath += '/';
-                    relPath += dname + '/';
-                    result.push_back(relPath);
-                }
-            }
-        }
-
-        std::sort(result.begin(), result.end());
-        result.erase(std::unique(result.begin(), result.end()), result.end());
-        return result;
-    }
+        const std::string& modes = "");
 
     // --- Mode filters ---
     static std::string AllowModes(const std::string& modes, const std::string& allowed) {
@@ -253,112 +196,20 @@ private:
         }
     }
 
-    /// Get the root paths that match the given mode string.
-    /// If modes is empty, returns all roots (backwards compat).
-    ///
-    /// Base roots (cont/base/springcontent/) are always appended as a fallback,
-    /// mirroring original Spring where springcontent.sdz was an
-    /// implicit dependency of every game.
-    static std::vector<std::string> GetRootsForModes(const std::string& modes) {
-        std::vector<std::string> result;
+    /// Get the root paths that match the given mode string. Always
+    /// includes Base roots as a fallback (mirrors springcontent.sdz
+    /// being an implicit dep on every game in original Spring).
+    static std::vector<std::string> GetRootsForModes(const std::string& modes);
 
-        if (modes.empty()) {
-            // No modes specified — search all roots
-            for (const auto& r : categorizedRoots)
-                result.push_back(r.path);
-            return result;
-        }
+    /// Resolve a relative path against indexed content roots
+    /// (case-insensitive) followed by direct fs::exists for Raw/PWD
+    /// roots. Returns the empty string if nothing matches.
+    static std::string ResolvePath(const std::string& filename,
+                                   const std::string& modes = "");
 
-        bool hasAllRoots = false;
-        bool hasBase = false;
-
-        // Iterate mode chars, collect matching roots in order
-        for (char c : modes) {
-            int cat = GetRootCategoryForMode(c);
-            if (cat == -2) {
-                // RAW — add all roots
-                hasAllRoots = true;
-                for (const auto& r : categorizedRoots)
-                    result.push_back(r.path);
-            } else if (cat == -3) {
-                // PWD — add cwd
-                result.push_back(std::filesystem::current_path().string() + "/");
-            } else if (cat >= 0) {
-                auto rc = static_cast<RootCategory>(cat);
-                if (rc == RootCategory::Base)
-                    hasBase = true;
-                for (const auto& r : categorizedRoots) {
-                    if (r.category == rc)
-                        result.push_back(r.path);
-                }
-            }
-            // cat == -1: unknown mode char, skip
-        }
-
-        // Always include Base roots — engine base content (LuaGadgets/,
-        // gamedata/, etc.) must be available regardless of mode, just as
-        // springcontent.sdz was an implicit dep in original Spring.
-        if (!hasAllRoots && !hasBase) {
-            for (const auto& r : categorizedRoots) {
-                if (r.category == RootCategory::Base)
-                    result.push_back(r.path);
-            }
-        }
-
-        return result;
-    }
-
-    /// Try to find a file by searching content roots filtered by mode.
-    static std::string ResolvePath(const std::string& filename, const std::string& modes = "") {
-        namespace fs = std::filesystem;
-
-        // If the path is already absolute and exists, use it directly
-        if (fs::path(filename).is_absolute()) {
-            if (fs::exists(filename))
-                return filename;
-            return "";
-        }
-
-        // Get roots matching the requested modes
-        auto roots = GetRootsForModes(modes);
-
-        // Search roots in order
-        for (const auto& root : roots) {
-            std::string candidate = root + filename;
-            if (fs::exists(candidate))
-                return candidate;
-        }
-
-        // Fall back to cwd if no modes specified
-        if (modes.empty() && fs::exists(filename))
-            return fs::absolute(filename).string();
-
-        return "";
-    }
-
-    /// Simple glob matching (supports * and ? only).
-    static bool MatchGlob(const std::string& str, const std::string& pattern) {
-        if (pattern == "*") return true;
-
-        size_t si = 0, pi = 0;
-        size_t starIdx = std::string::npos, matchIdx = 0;
-
-        while (si < str.size()) {
-            if (pi < pattern.size() && (pattern[pi] == '?' || pattern[pi] == str[si])) {
-                si++; pi++;
-            } else if (pi < pattern.size() && pattern[pi] == '*') {
-                starIdx = pi++;
-                matchIdx = si;
-            } else if (starIdx != std::string::npos) {
-                pi = starIdx + 1;
-                si = ++matchIdx;
-            } else {
-                return false;
-            }
-        }
-        while (pi < pattern.size() && pattern[pi] == '*') pi++;
-        return pi == pattern.size();
-    }
+    /// Recursively scan `root.path` and populate `root.nameIndex`.
+    /// Called from AddContentRoot for Mod/Map/Base roots.
+    static void BuildNameIndex(ContentRoot& root);
 
     std::string name;
     std::string openModes;
@@ -366,5 +217,5 @@ private:
     std::ifstream stream;
     bool valid = false;
 
-    static inline std::vector<ContentRoot> categorizedRoots;
+    static std::vector<ContentRoot> categorizedRoots;
 };

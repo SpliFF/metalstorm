@@ -17,6 +17,7 @@ add_executable(mapconverter
     ${CMAKE_SOURCE_DIR}/rts/Server/MapMetadataDb.cpp
     ${CMAKE_SOURCE_DIR}/rts/Server/FeatureProcessor.cpp
     ${CMAKE_SOURCE_DIR}/rts/System/FileSystem/LuaVFSSimple.cpp
+    ${CMAKE_SOURCE_DIR}/rts/System/FileSystem/FileHandler.cpp
     ${CMAKE_SOURCE_DIR}/rts/System/SafeCStrings.c
 )
 add_dependencies(mapconverter modelimporter textureconverter)
