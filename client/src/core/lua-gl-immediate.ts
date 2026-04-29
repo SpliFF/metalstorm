@@ -182,6 +182,17 @@ class MatrixStack {
         if (top) this.current = top;
     }
 
+    depth(): number {
+        return this.stack.length;
+    }
+
+    truncateTo(depth: number): void {
+        while (this.stack.length > depth) {
+            const top = this.stack.pop();
+            if (top) this.current = top;
+        }
+    }
+
     loadIdentity(): void {
         this.current = mat4Identity();
     }
@@ -295,6 +306,16 @@ export class ImmediateModeRenderer {
     // Alpha test threshold (0 = disabled)
     private alphaThreshold = 0;
 
+    // Debug instrumentation — when non-null the next flushes will be logged
+    // (one line per flush, includes label, vertex count, MVP, first xform'd
+    // vertex, scissor, blend, viewport). Cleared after `flushDebugBudget`
+    // emits so it doesn't flood the console.
+    private flushDebugLabel: string | null = null;
+    private flushDebugBudget = 0;
+    /** Ring buffer of debug lines emitted by flush(); accessible from the
+     *  bridge so Lua can pull them out and forward to the main thread. */
+    private flushDebugLog: string[] = [];
+
     // Display lists
     private displayLists = new Map<number, DisplayList>();
     private nextListId = 1;
@@ -357,6 +378,48 @@ export class ImmediateModeRenderer {
         if (this.recordingList) {
             this.recordingList.entries.push({ type: 'matrix', op: 'push' });
         }
+    }
+
+    /** Capture per-stack depth so we can recover from an unbalanced
+     *  gl.PushMatrix sequence (Lua handler errored mid-draw). The current
+     *  matrix value is also snapshotted internally and stored on the stacks
+     *  via the depth pointer. We keep both stacks in mind even though the
+     *  Chili use case only touches modelview, since some widgets switch
+     *  modes during draw. */
+    saveStackDepth(): { mv: number; pj: number; mvCur: Float32Array; pjCur: Float32Array } {
+        return {
+            mv: this.modelviewStack.depth(),
+            pj: this.projectionStack.depth(),
+            mvCur: mat4Copy(this.modelviewStack.current),
+            pjCur: mat4Copy(this.projectionStack.current),
+        };
+    }
+
+    /** Truncate both matrix stacks down to the previously-captured depths
+     *  and reload the snapshotted current matrices. Idempotent if already
+     *  at the right depth. */
+    restoreStackDepth(state: { mv: number; pj: number; mvCur: Float32Array; pjCur: Float32Array }): void {
+        this.modelviewStack.truncateTo(state.mv);
+        this.modelviewStack.current.set(state.mvCur);
+        this.projectionStack.truncateTo(state.pj);
+        this.projectionStack.current.set(state.pjCur);
+        this.mvpDirty = true;
+    }
+
+    /** Enable per-flush instrumentation. The next `budget` flush() calls will
+     *  log a single line with label, vertex info (object + clip space), and
+     *  WebGL state (scissor, blend, viewport). After budget hits zero the
+     *  label is cleared automatically. Pass label=null to stop early. */
+    setFlushDebug(label: string | null, budget: number = 8): void {
+        this.flushDebugLabel = label;
+        this.flushDebugBudget = label ? budget : 0;
+    }
+
+    /** Drain accumulated flush debug lines and clear the buffer. */
+    drainFlushDebugLog(): string[] {
+        const out = this.flushDebugLog;
+        this.flushDebugLog = [];
+        return out;
     }
 
     popMatrix(): void {
@@ -800,7 +863,62 @@ export class ImmediateModeRenderer {
         gl.useProgram(this.program);
 
         // Upload MVP
-        gl.uniformMatrix4fv(this.uMVP, false, this.computeMVP());
+        const mvp = this.computeMVP();
+        gl.uniformMatrix4fv(this.uMVP, false, mvp);
+
+        // Debug instrumentation
+        if (this.flushDebugLabel && this.flushDebugBudget > 0) {
+            const label = this.flushDebugLabel;
+            const v0x = this.vertices[0];
+            const v0y = this.vertices[1];
+            const v0r = this.vertices[2];
+            const v0g = this.vertices[3];
+            const v0b = this.vertices[4];
+            const v0a = this.vertices[5];
+            // Multiply MVP * (v0x, v0y, 0, 1) — column-major
+            const cx = mvp[0] * v0x + mvp[4] * v0y + mvp[12];
+            const cy = mvp[1] * v0x + mvp[5] * v0y + mvp[13];
+            const cz = mvp[2] * v0x + mvp[6] * v0y + mvp[14];
+            const cw = mvp[3] * v0x + mvp[7] * v0y + mvp[15];
+            // Normalized device coords (after perspective divide)
+            const ndcX = cw !== 0 ? cx / cw : cx;
+            const ndcY = cw !== 0 ? cy / cw : cy;
+            // Last vertex too — to characterize span
+            const lastIdx = (count - 1) * FLOATS_PER_VERTEX;
+            const vNx = this.vertices[lastIdx];
+            const vNy = this.vertices[lastIdx + 1];
+            const cNx = mvp[0] * vNx + mvp[4] * vNy + mvp[12];
+            const cNy = mvp[1] * vNx + mvp[5] * vNy + mvp[13];
+            const cNw = mvp[3] * vNx + mvp[7] * vNy + mvp[15];
+            const ndcNX = cNw !== 0 ? cNx / cNw : cNx;
+            const ndcNY = cNw !== 0 ? cNy / cNw : cNy;
+            const sBox = gl.getParameter(gl.SCISSOR_BOX) as Int32Array;
+            const sEnabled = gl.getParameter(gl.SCISSOR_TEST) as boolean;
+            const blendOn = gl.getParameter(gl.BLEND) as boolean;
+            const blendSrc = gl.getParameter(gl.BLEND_SRC_RGB) as number;
+            const blendDst = gl.getParameter(gl.BLEND_DST_RGB) as number;
+            const vp = gl.getParameter(gl.VIEWPORT) as Int32Array;
+            const fb = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+            const colMask = gl.getParameter(gl.COLOR_WRITEMASK) as boolean[];
+            const line =
+                `[FLUSH:${label}] mode=${mode} n=${count} ` +
+                `v0=(${v0x.toFixed(1)},${v0y.toFixed(1)}) ` +
+                `vN=(${vNx.toFixed(1)},${vNy.toFixed(1)}) ` +
+                `clip0=(${cx.toFixed(2)},${cy.toFixed(2)},${cz.toFixed(2)},${cw.toFixed(2)}) ` +
+                `ndc=[${ndcX.toFixed(3)},${ndcY.toFixed(3)}]→[${ndcNX.toFixed(3)},${ndcNY.toFixed(3)}] ` +
+                `col=(${v0r.toFixed(2)},${v0g.toFixed(2)},${v0b.toFixed(2)},${v0a.toFixed(2)}) ` +
+                `tex=${this.isTextured ? '1' : '0'}/${this.currentBoundTexture ? 'B' : '-'} ` +
+                `aT=${this.alphaThreshold.toFixed(2)} ` +
+                `sci=${sEnabled ? '1' : '0'}[${sBox[0]},${sBox[1]},${sBox[2]},${sBox[3]}] ` +
+                `bl=${blendOn ? '1' : '0'}[${blendSrc.toString(16)},${blendDst.toString(16)}] ` +
+                `vp=[${vp[0]},${vp[1]},${vp[2]},${vp[3]}] ` +
+                `fb=${fb ? 'B' : 'def'} ` +
+                `cmask=[${colMask[0] ? '1' : '0'}${colMask[1] ? '1' : '0'}${colMask[2] ? '1' : '0'}${colMask[3] ? '1' : '0'}]`;
+            this.flushDebugLog.push(line);
+            if (this.flushDebugLog.length > 500) this.flushDebugLog.shift();
+            this.flushDebugBudget -= 1;
+            if (this.flushDebugBudget <= 0) this.flushDebugLabel = null;
+        }
 
         // Texture state
         gl.uniform1i(this.uTextured, this.isTextured ? 1 : 0);

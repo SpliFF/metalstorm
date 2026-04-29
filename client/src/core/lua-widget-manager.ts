@@ -48,6 +48,11 @@ export class LuaWidgetManager {
     private connection: Connection | null = null;
 
     private worker: Worker | null = null;
+    /** Buffer for messages sent before initialize() creates the worker.
+     *  setRoster/forwardMapFeatures/etc. are commonly called immediately after
+     *  the manager is constructed; without this queue those messages would be
+     *  silently dropped and widgets see an empty roster. Flushed in initialize(). */
+    private pendingMessages: Array<{ msg: Record<string, unknown>; transfer?: Transferable[] }> = [];
     private overlayCanvas: HTMLCanvasElement | null = null;
     private keyHandler: ((e: KeyboardEvent) => void) | null = null;
     private keyUpHandler: ((e: KeyboardEvent) => void) | null = null;
@@ -147,6 +152,17 @@ export class LuaWidgetManager {
             soloWidget: this.options.soloWidget,
         }, [offscreen, mapData.heightmap.buffer]);
 
+        // Flush any messages queued before the worker existed (setRoster,
+        // forwardMapFeatures, forwardUnitDefs, forwardWeaponDefs etc.).
+        // These must arrive before the worker runs cawidgets:Initialize, which
+        // happens during VFS prefetch await; the worker processes pending
+        // messages in queue order so this works as long as we send them now.
+        const buffered = this.pendingMessages;
+        this.pendingMessages = [];
+        for (const { msg, transfer } of buffered) {
+            this.postToWorker(msg, transfer);
+        }
+
         // 5. Setup keyboard forwarding + F9 widget list
         this.setupKeyboard();
 
@@ -193,7 +209,7 @@ export class LuaWidgetManager {
             identity: conn ? {
                 myTeam: conn.myTeam,
                 myAllyTeam: conn.myTeam,
-                myPlayerId: 0,
+                myPlayerId: conn.playerId,
             } : undefined,
             gameFrame: this.currentFrame,
             selectedUnitIds: this.selectedUnitIds,
@@ -249,7 +265,7 @@ export class LuaWidgetManager {
 
     /** Forward an entity state snapshot to the worker for unit queries. */
     forwardEntityState(snapshot: EntityStateSnapshot, isDelta: boolean): void {
-        if (!this.worker || this.disposed) return;
+        if (this.disposed) return;
         this.currentFrame++;
 
         // Copy typed arrays so they can be transferred without detaching the originals
@@ -281,20 +297,20 @@ export class LuaWidgetManager {
 
     /** Forward an entity destruction to the worker. */
     forwardEntityDestroy(entityId: number): void {
-        if (!this.worker || this.disposed) return;
+        if (this.disposed) return;
         this.postToWorker({ type: 'entityDestroy', entityId });
     }
 
     /** Forward a resource update to the worker. */
     forwardResourceUpdate(team: number, metal: number, maxMetal: number, energy: number, maxEnergy: number, metalIncome: number, energyIncome: number): void {
-        if (!this.worker || this.disposed) return;
+        if (this.disposed) return;
         this.postToWorker({ type: 'resourceUpdate', team, metal, maxMetal, energy, maxEnergy, metalIncome, energyIncome });
     }
 
     /** Forward game info (frame, speed, paused) to the worker. */
     forwardGameInfo(frame: number, speed: number, paused: boolean, gameOver: boolean,
                     wind?: { x: number; y: number; z: number; strength: number; tidal: number }): void {
-        if (!this.worker || this.disposed) return;
+        if (this.disposed) return;
         this.postToWorker({ type: 'gameInfo', frame, speed, paused, gameOver, wind });
     }
 
@@ -305,13 +321,13 @@ export class LuaWidgetManager {
 
     /** Push a batch of unit defs into the worker. Defs accumulate over
      *  the session — the server streams them on demand as the player
-     *  encounters new entity types. */
-    forwardUnitDefs(defs: ReadonlyArray<{ defId: number; name: string; modelUrl?: string; textureUrl?: string }>): void {
-        if (!this.worker || this.disposed || defs.length === 0) return;
-        this.postToWorker({ type: 'unitDefsUpdate', defs: defs.map(d => ({
-            defId: d.defId, name: d.name,
-            modelUrl: d.modelUrl ?? '', textureUrl: d.textureUrl ?? '',
-        })) });
+     *  encounters new entity types.
+     *  Pass-through: every field on the wire is forwarded so the
+     *  worker's buildLuaUnitDef can populate UnitDefs.<id>.customParams,
+     *  transportSize, repairSpeed, yardmap, … directly. */
+    forwardUnitDefs(defs: ReadonlyArray<Record<string, unknown>>): void {
+        if (this.disposed || defs.length === 0) return;
+        this.postToWorker({ type: 'unitDefsUpdate', defs: defs.map(d => ({ ...d })) });
     }
 
     /** Push a per-team unit command-queue snapshot into the worker.
@@ -321,7 +337,7 @@ export class LuaWidgetManager {
         unitId: number;
         orders: ReadonlyArray<{ cmdId: number; params: number[]; options: number; tag: number; timeout: number }>;
     }>): void {
-        if (!this.worker || this.disposed) return;
+        if (this.disposed) return;
         this.postToWorker({ type: 'unitCommandQueues', queues: queues.map(q => ({
             unitId: q.unitId,
             orders: q.orders.map(o => ({ ...o, params: [...o.params] })),
@@ -335,7 +351,7 @@ export class LuaWidgetManager {
         intensity: number; colorR: number; colorG: number; colorB: number;
         duration: number; highTrajectory: boolean;
     }>): void {
-        if (!this.worker || this.disposed || defs.length === 0) return;
+        if (this.disposed || defs.length === 0) return;
         this.postToWorker({ type: 'weaponDefsUpdate', defs: defs.map(d => ({ ...d })) });
     }
 
@@ -357,7 +373,7 @@ export class LuaWidgetManager {
         teamColors?: Array<{ team: number; r: number; g: number; b: number; a?: number }>;
         modOptions?: Record<string, number | string>;
     }): void {
-        if (!this.worker || this.disposed) return;
+        if (this.disposed) return;
         this.postToWorker({ type: 'rosterUpdate', ...roster });
     }
 
@@ -425,7 +441,13 @@ export class LuaWidgetManager {
     // exact order of events. Payloads are summarised, not dumped.
 
     private postToWorker(msg: Record<string, unknown>, transfer?: Transferable[]): void {
-        if (!this.worker) return;
+        if (!this.worker) {
+            // Worker not yet created (initialize() hasn't run). Buffer the
+            // message; it will be flushed in initialize() before init's first
+            // await point so the worker sees it before bootstrap completes.
+            if (!this.disposed) this.pendingMessages.push({ msg, transfer });
+            return;
+        }
         this.logMessageTraffic('main→worker', msg);
         if (transfer && transfer.length) {
             this.worker.postMessage(msg, transfer);

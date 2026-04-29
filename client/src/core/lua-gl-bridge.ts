@@ -167,6 +167,13 @@ export class LuaGLBridge {
         gl['CreateTexture'] = (a: LuaValue, b: LuaValue, c: LuaValue) =>
             this.createTexture(a, b, c);
         gl['DeleteTexture'] = (h: LuaValue) => this.deleteTexture(h);
+        // gl.DeleteTextureFBO — Spring API to delete a texture associated
+        // with an FBO. We don't track that association explicitly, so just
+        // route to plain DeleteTexture (Chili Minimap calls this with 0
+        // when initialising; it must be a no-op in that case).
+        gl['DeleteTextureFBO'] = (h: LuaValue) => {
+            if (h && typeof h === 'object') this.deleteTexture(h);
+        };
         gl['Texture'] = (unit: LuaValue, handleOrPath: LuaValue) => {
             this.bindTexture(unit, handleOrPath);
             return true; // Spring returns true on bind attempt
@@ -230,6 +237,56 @@ export class LuaGLBridge {
         gl['MatrixMode'] = (m: LuaValue) => this.imm.matrixMode(Number(m));
         gl['PushMatrix'] = () => this.imm.pushMatrix();
         gl['PopMatrix'] = () => this.imm.popMatrix();
+        // Snapshot/restore for the Chili CallChildren pcall wrapper. A
+        // child Draw that errors mid-frame can leave unbalanced PushMatrix
+        // or PushScissor calls; saving before and restoring after keeps
+        // both the matrix stack AND scissor state consistent across
+        // siblings. Returns/accepts an opaque JS object — fengari passes
+        // it through Lua as userdata without conversion.
+        gl['_saveMatrixState'] = () => {
+            const glRaw = this.gl;
+            const sciEnabled = glRaw.getParameter(glRaw.SCISSOR_TEST) as boolean;
+            const sciBox = glRaw.getParameter(glRaw.SCISSOR_BOX) as Int32Array;
+            return {
+                stack: this.imm.saveStackDepth(),
+                sciEnabled,
+                sciBox: new Int32Array(sciBox),
+            } as unknown as LuaValue;
+        };
+        gl['_restoreMatrixState'] = (state: LuaValue) => {
+            if (state && typeof state === 'object') {
+                const s = state as unknown as {
+                    stack: { mv: number; pj: number; mvCur: Float32Array; pjCur: Float32Array };
+                    sciEnabled: boolean;
+                    sciBox: Int32Array;
+                };
+                if (s.stack) this.imm.restoreStackDepth(s.stack);
+                const glRaw = this.gl;
+                if (s.sciEnabled) {
+                    glRaw.enable(glRaw.SCISSOR_TEST);
+                    if (s.sciBox) {
+                        glRaw.scissor(s.sciBox[0], s.sciBox[1], s.sciBox[2], s.sciBox[3]);
+                    }
+                } else {
+                    glRaw.disable(glRaw.SCISSOR_TEST);
+                }
+            }
+        };
+        // Toggle per-flush instrumentation. From Lua: `gl._setFlushDebug("nubtron", 8)`
+        // — the next 8 flushes will emit a single line into the debug log
+        // (drainable via `_drainFlushDebug()`). Pass nil/null to stop early.
+        gl['_setFlushDebug'] = (label: LuaValue, budget: LuaValue) => {
+            const lbl = label === null || label === undefined ? null : String(label);
+            const bud = budget !== null && budget !== undefined ? Number(budget) : 8;
+            this.imm.setFlushDebug(lbl, bud);
+        };
+        // Drain the accumulated flush-debug lines as a single newline-joined
+        // string so it round-trips cleanly through fengari (JS arrays are
+        // converted to nil/userdata depending on bridge — strings are safe).
+        gl['_drainFlushDebug'] = () => {
+            const lines = this.imm.drainFlushDebugLog();
+            return lines.join('\n') as unknown as LuaValue;
+        };
         gl['LoadIdentity'] = () => this.imm.loadIdentity();
         gl['LoadMatrix'] = (...args: LuaValue[]) => this.loadMatrix(args);
         gl['MultMatrix'] = (...args: LuaValue[]) => this.multMatrixGL(args);
@@ -1208,8 +1265,17 @@ export class LuaGLBridge {
     // FBOs
     // ============================================================
 
-    private createFBO(opts: LuaValue): LuaFBOHandle | null {
-        if (!opts || typeof opts !== 'object' || Array.isArray(opts)) return null;
+    private createFBO(opts: LuaValue): LuaFBOHandle | Record<string, LuaValue> | null {
+        // Spring's gl.CreateFBO accepts an optional opts table. If called
+        // with no args, it returns an empty FBO that the caller mutates by
+        // setting .color0, .depth, etc. Return a plain Lua-mutable table
+        // (NOT markOpaque'd — userdata can't have fields assigned) so
+        // widgets like Chili Minimap (which does `fbo = gl.CreateFBO();
+        // fbo.color0 = ...`) work. The table has __type='fbo_deferred'
+        // so activeFBO can detect it and bind attachments dynamically.
+        if (!opts || typeof opts !== 'object' || Array.isArray(opts)) {
+            return { __type: 'fbo_deferred', _native: null };
+        }
         const rec = opts as Record<string, LuaValue>;
         const gl = this.gl;
         const fbo = gl.createFramebuffer()!;
@@ -1263,9 +1329,23 @@ export class LuaGLBridge {
      */
     private activeFBO(fboV: LuaValue, callbackV: LuaValue): void {
         if (!fboV || typeof fboV !== 'object' || Array.isArray(fboV)) return;
+        if (typeof callbackV !== 'function') return;
+        const fboRec = fboV as Record<string, LuaValue>;
+        // Deferred FBOs (created with no args via no-arg gl.CreateFBO) act
+        // as a no-op binding: just run the callback with the default
+        // framebuffer current. Chili Minimap uses one for offscreen
+        // postprocessing — without our offscreen buffer the minimap
+        // simply draws to the main canvas, which is fine for now.
+        if (fboRec['__type'] === 'fbo_deferred') {
+            try {
+                (callbackV as (...a: LuaValue[]) => LuaValue | undefined)();
+            } catch (e) {
+                console.warn('[gl.ActiveFBO deferred] callback threw:', e);
+            }
+            return;
+        }
         const fbo = fboV as unknown as LuaFBOHandle;
         if (fbo.__type !== 'fbo' || fbo.colorAttachments.length === 0) return;
-        if (typeof callbackV !== 'function') return;
 
         const gl = this.gl;
         const savedFBO = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
