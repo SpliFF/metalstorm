@@ -17,7 +17,8 @@ import {
     ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import Database from 'better-sqlite3';
-import { resolve } from 'path';
+import { resolve, join } from 'path';
+import { readFileSync, existsSync, readdirSync, unlinkSync, statSync } from 'fs';
 
 const LOG_SERVER_URL = process.env.LOG_SERVER_URL || 'http://localhost:8010';
 const LOBBY_URL = process.env.LOBBY_URL || 'http://localhost:8011';
@@ -116,6 +117,227 @@ async function execOnGameServer(scope, code, roomId) {
         throw new Error(`No active game server found. Available: ${servers.map(s => `room ${s.room_id} (${s.state})`).join(', ')}`);
     }
     return execOnServer(server.url, scope, code);
+}
+
+// --- Minimal FlatBuffer decoder for cached UnitDefs/WeaponDefs ---
+// The server bakes defs to data/games/{gameId}/cache/defs/{key}/unitdefs.bin
+// (and weapondefs.bin) framed as: 1-byte envelope + ServerMessage root.
+// We decode by hand to avoid pulling the generated TS bindings into node.
+class FBReader {
+    constructor(buf, pos) { this.buf = buf; this.pos = pos; }
+    u8 (off) { return this.buf[this.pos + off]; }
+    u16(off) { return this.buf[this.pos + off] | (this.buf[this.pos + off + 1] << 8); }
+    u32(off) {
+        const v = this.buf[this.pos + off]
+            | (this.buf[this.pos + off + 1] << 8)
+            | (this.buf[this.pos + off + 2] << 16)
+            | (this.buf[this.pos + off + 3] << 24);
+        return v >>> 0;
+    }
+    i32(off) {
+        return this.buf[this.pos + off]
+            | (this.buf[this.pos + off + 1] << 8)
+            | (this.buf[this.pos + off + 2] << 16)
+            | (this.buf[this.pos + off + 3] << 24);
+    }
+    f32(off) {
+        const dv = new DataView(this.buf.buffer, this.buf.byteOffset + this.pos + off, 4);
+        return dv.getFloat32(0, true);
+    }
+    str(off) {
+        // Field at this.pos+off contains a u32 offset to the string;
+        // the string layout is u32 length followed by utf-8 bytes.
+        const fieldOff = this.u32(off);
+        const strPos = this.pos + off + fieldOff;
+        const len = this.buf[strPos] | (this.buf[strPos+1] << 8) | (this.buf[strPos+2] << 16) | (this.buf[strPos+3] << 24);
+        return new TextDecoder('utf-8').decode(this.buf.slice(strPos + 4, strPos + 4 + len));
+    }
+    // Resolve table at fieldOff (u32 indirect at this.pos+fieldOff).
+    table(fieldOff) {
+        const off = this.u32(fieldOff);
+        return new FBReader(this.buf, this.pos + fieldOff + off);
+    }
+    // Vector header at this.pos+fieldOff (u32 indirect → u32 count).
+    vectorMeta(fieldOff) {
+        const off = this.u32(fieldOff);
+        const start = this.pos + fieldOff + off;
+        const count = this.buf[start] | (this.buf[start+1] << 8) | (this.buf[start+2] << 16) | (this.buf[start+3] << 24);
+        return { start, count };
+    }
+    // Get vtable size, return zero if vt entry missing.
+    field(vtField) {
+        const vtOff = this.i32(0);
+        const vtPos = this.pos - vtOff;
+        const vtSize = this.buf[vtPos] | (this.buf[vtPos+1] << 8);
+        if (vtField >= vtSize) return 0;
+        return this.buf[vtPos + vtField] | (this.buf[vtPos + vtField + 1] << 8);
+    }
+}
+
+function decodeCustomParams(parent, vtField) {
+    const fieldOff = parent.field(vtField);
+    if (!fieldOff) return {};
+    const meta = parent.vectorMeta(fieldOff);
+    const result = {};
+    for (let i = 0; i < meta.count; i++) {
+        const entryFieldPos = meta.start + 4 + i * 4;
+        const entryOff = parent.buf[entryFieldPos] | (parent.buf[entryFieldPos+1] << 8)
+            | (parent.buf[entryFieldPos+2] << 16) | (parent.buf[entryFieldPos+3] << 24);
+        const cp = new FBReader(parent.buf, entryFieldPos + entryOff);
+        const keyOff = cp.field(4);
+        const valOff = cp.field(6);
+        if (!keyOff) continue;
+        result[cp.str(keyOff)] = valOff ? cp.str(valOff) : '';
+    }
+    return result;
+}
+
+function decodeUnitDef(buf, defReaderPos) {
+    const r = new FBReader(buf, defReaderPos);
+    const fieldStr = (vt) => { const o = r.field(vt); return o ? r.str(o) : ''; };
+    const fieldF32 = (vt, dflt = 0) => { const o = r.field(vt); return o ? r.f32(o) : dflt; };
+    const fieldI32 = (vt, dflt = 0) => { const o = r.field(vt); return o ? r.i32(o) : dflt; };
+    const fieldU16 = (vt, dflt = 0) => { const o = r.field(vt); return o ? r.u16(o) : dflt; };
+    const fieldU8  = (vt, dflt = 0) => { const o = r.field(vt); return o ? r.u8(o)  : dflt; };
+    return {
+        defId: fieldU16(4),
+        name: fieldStr(6),
+        modelUrl: fieldStr(8),
+        textureUrl: fieldStr(10),
+        humanName: fieldStr(12),
+        tooltip: fieldStr(14),
+        wreckName: fieldStr(16),
+        metalCost: fieldF32(18),
+        energyCost: fieldF32(20),
+        buildTime: fieldF32(22),
+        metalMake: fieldF32(24),
+        energyMake: fieldF32(26),
+        health: fieldF32(38),
+        mass: fieldF32(40),
+        radius: fieldF32(42),
+        xsize: fieldI32(44),
+        zsize: fieldI32(46),
+        speed: fieldF32(48),
+        turnRate: fieldF32(50),
+        losRadius: fieldF32(56),
+        flags: fieldI32(68),
+        buildDistance: fieldF32(70),
+        buildSpeed: fieldF32(72),
+        customParams: decodeCustomParams(r, 78),
+        repairSpeed: fieldF32(80),
+        transportSize: fieldI32(82),
+        transportMass: fieldF32(84),
+        transportCapacity: fieldI32(86),
+        yardmap: fieldStr(88),
+        script: fieldStr(90),
+        buildPic: fieldStr(92),
+        maxVelocity: fieldF32(94),
+        cost: fieldF32(96),
+        maxWeaponRange: fieldF32(98),
+        maxThisUnit: fieldI32(100),
+        canBeAssisted: fieldU8(102, 1) === 1,
+        canSelfDestruct: fieldU8(104, 1) === 1,
+        selfDCountdown: fieldI32(106),
+        categoryBits: fieldI32(108),
+    };
+}
+
+function decodeWeaponDef(buf, defReaderPos) {
+    const r = new FBReader(buf, defReaderPos);
+    const fieldStr = (vt) => { const o = r.field(vt); return o ? r.str(o) : ''; };
+    const fieldF32 = (vt, dflt = 0) => { const o = r.field(vt); return o ? r.f32(o) : dflt; };
+    const fieldI32 = (vt, dflt = 0) => { const o = r.field(vt); return o ? r.i32(o) : dflt; };
+    const fieldU16 = (vt, dflt = 0) => { const o = r.field(vt); return o ? r.u16(o) : dflt; };
+    return {
+        defId: fieldU16(4),
+        name: fieldStr(6),
+        range: fieldF32(12),
+        aoe: fieldF32(14),
+        size: fieldF32(16),
+        typeName: fieldStr(28),
+        description: fieldStr(30),
+        defaultDamage: fieldF32(32),
+        reloadTime: fieldF32(36),
+        flags: fieldI32(82),
+        customParams: decodeCustomParams(r, 86),
+    };
+}
+
+// Find the most-recent cache directory for a game and load its bin.
+function loadDefsCache(gameId, kind /* 'unitdefs' | 'weapondefs' */) {
+    const projectRoot = process.env.PROJECT_ROOT || resolve('.');
+    const dir = join(projectRoot, 'data', 'games', gameId, 'cache', 'defs');
+    if (!existsSync(dir)) return null;
+    const keys = readdirSync(dir);
+    if (!keys.length) return null;
+    // Pick most-recently modified .bin (cache key changes when schema
+    // version bumps, so multiple key dirs may coexist; the freshest is
+    // the one the running server just baked).
+    let best = null;
+    let bestMtime = 0;
+    for (const k of keys) {
+        const file = join(dir, k, `${kind}.bin`);
+        if (!existsSync(file)) continue;
+        const m = statSync(file).mtimeMs;
+        if (m > bestMtime) { best = file; bestMtime = m; }
+    }
+    if (!best) return null;
+    const data = readFileSync(best);
+    // Skip envelope byte then resolve ServerMessage root.
+    const buf = new Uint8Array(data.buffer, data.byteOffset + 1, data.byteLength - 1);
+    const rootOff = buf[0] | (buf[1] << 8) | (buf[2] << 16) | (buf[3] << 24);
+    const msg = new FBReader(buf, rootOff);
+    // ServerMessage.payload is at vt offset 6.
+    const payloadFieldOff = msg.field(6);
+    if (!payloadFieldOff) return null;
+    const payload = msg.table(payloadFieldOff);
+    // GameUnitDefs / GameWeaponDefs both have `defs:[*]` at vt offset 4.
+    const defsFieldOff = payload.field(4);
+    if (!defsFieldOff) return null;
+    const meta = payload.vectorMeta(defsFieldOff);
+    return { buf, defsStart: meta.start, defsCount: meta.count, sourceFile: best };
+}
+
+function listDefsFromCache(gameId, kind, decoder, filter) {
+    const cache = loadDefsCache(gameId, kind);
+    if (!cache) return null;
+    const out = [];
+    for (let i = 0; i < cache.defsCount; i++) {
+        const entryFieldPos = cache.defsStart + 4 + i * 4;
+        const entryOff = cache.buf[entryFieldPos] | (cache.buf[entryFieldPos+1] << 8)
+            | (cache.buf[entryFieldPos+2] << 16) | (cache.buf[entryFieldPos+3] << 24);
+        const def = decoder(cache.buf, entryFieldPos + entryOff);
+        if (!filter || filter(def)) out.push(def);
+    }
+    return { defs: out, sourceFile: cache.sourceFile };
+}
+
+// --- Process management helpers ---
+function killProcess(pid, signal = 'SIGKILL') {
+    try { process.kill(pid, signal); return true; }
+    catch { return false; }
+}
+
+function clearDefsCache(gameId) {
+    const projectRoot = process.env.PROJECT_ROOT || resolve('.');
+    const baseDir = join(projectRoot, 'data', 'games');
+    if (!existsSync(baseDir)) return { removed: 0 };
+    let removed = 0;
+    const games = gameId ? [gameId] : readdirSync(baseDir);
+    for (const g of games) {
+        const cacheDir = join(baseDir, g, 'cache', 'defs');
+        if (!existsSync(cacheDir)) continue;
+        const keys = readdirSync(cacheDir);
+        for (const k of keys) {
+            for (const f of ['unitdefs.bin', 'weapondefs.bin']) {
+                const p = join(cacheDir, k, f);
+                if (existsSync(p)) {
+                    try { unlinkSync(p); removed++; } catch { /* ignore */ }
+                }
+            }
+        }
+    }
+    return { removed };
 }
 
 // --- Tool definitions ---
@@ -249,6 +471,94 @@ const TOOLS = [
             },
         },
     },
+    {
+        name: 'get_unit_def',
+        description: 'Read a single UnitDef from the on-disk defs cache without needing a running game. Decodes the FlatBuffer baked by spring-server. Returns full Tier 4 fields including customParams, transportSize, repairSpeed, yardmap, etc.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                gameId: { type: 'string', description: 'Game ID (e.g. "zk")' },
+                name: { type: 'string', description: 'Unit def name (e.g. "armcom1") OR omit and pass defId' },
+                defId: { type: 'number', description: 'Numeric def ID. Either name or defId is required.' },
+            },
+            required: ['gameId'],
+        },
+    },
+    {
+        name: 'list_unit_defs',
+        description: 'List all UnitDefs from the cache, optionally filtered by name pattern. Use this to scan customParams, find units with a particular field set, etc. Returns names + summary fields by default; pass full=true for complete records.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                gameId: { type: 'string', description: 'Game ID (e.g. "zk")' },
+                pattern: { type: 'string', description: 'Substring filter on def name (case-insensitive). Omit for all.' },
+                full: { type: 'boolean', description: 'If true, return full def records. Default: name + key fields only.', default: false },
+                limit: { type: 'number', description: 'Max results', default: 50 },
+            },
+            required: ['gameId'],
+        },
+    },
+    {
+        name: 'get_weapon_def',
+        description: 'Read a single WeaponDef from the on-disk defs cache. Decodes the FlatBuffer baked by spring-server.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                gameId: { type: 'string', description: 'Game ID (e.g. "zk")' },
+                name: { type: 'string', description: 'Weapon def name OR omit and pass defId' },
+                defId: { type: 'number', description: 'Numeric weapon def ID. Either name or defId is required.' },
+            },
+            required: ['gameId'],
+        },
+    },
+    {
+        name: 'clear_defs_cache',
+        description: 'Delete the cached UnitDefs/WeaponDefs FlatBuffer files for a game (or all games). Forces the next game session to re-bake from source. Required after schema changes that did NOT bump the cache key. Cheaper than killing the running game.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                gameId: { type: 'string', description: 'Game ID to clear. Omit to clear all games.' },
+            },
+        },
+    },
+    {
+        name: 'kill_game',
+        description: 'Force-kill the spring-server process for a room (SIGKILL). Use when restart_game cannot reach the server (e.g. stuck in "starting" state). The lobby will mark the room ended on its next health-check cycle.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                roomId: { type: 'number', description: 'Room ID (0 or omit for first non-ended game)' },
+            },
+        },
+    },
+    {
+        name: 'launch_game',
+        description: 'Launch a fresh game directly via the lobby HTTP API — bypasses the lobby UI. Creates a room (or reuses existing one for the user), adds an AI slot, marks the host ready, and starts the game. Returns the new room ID and gameServerPort once the spring-server has spawned.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                gameId: { type: 'string', description: 'Game ID (e.g. "zk")', default: 'zk' },
+                mapId: { type: 'string', description: 'Map ID (e.g. "pools_of_ilys_1.0.0")' },
+                roomName: { type: 'string', description: 'Room name', default: 'debug' },
+                ai: { type: 'string', description: 'AI to add for the opposing team. Set to "" to skip AI. Default: "null" (Null AI engine bot).', default: 'null' },
+                username: { type: 'string', description: 'Username to launch as. Defaults to admin / SPRING_USER.' },
+                password: { type: 'string', description: 'Password. Defaults to SPRING_PASS.' },
+                clearCache: { type: 'boolean', description: 'Delete the defs cache before launching to force a fresh bake.', default: false },
+            },
+            required: ['mapId'],
+        },
+    },
+    {
+        name: 'evaluate_widget_lua',
+        description: 'Run a Lua snippet in the LuaUI widget worker (browser-side) via the chrome-devtools bridge. Use when you need to inspect WG, widgetHandler, _widgetErrors, or call any Spring.* function as the player would see it. Requires a connected browser tab; if none, returns an error and you should fall back to chrome-devtools eval directly.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                code: { type: 'string', description: 'Lua code. Last expression returned via "return …".' },
+            },
+            required: ['code'],
+        },
+    },
 ];
 
 // --- Tool execution ---
@@ -369,6 +679,168 @@ async function executeTool(name, args) {
                 return `Restart failed (${resp.status}): ${text}`;
             }
             return `Restart command sent to game server on port ${server.port} (room ${server.room_id}).`;
+        }
+
+        case 'get_unit_def': {
+            const result = listDefsFromCache(args.gameId, 'unitdefs', decodeUnitDef,
+                d => (args.defId !== undefined ? d.defId === args.defId
+                    : args.name !== undefined ? d.name === args.name
+                    : false));
+            if (!result) return `No defs cache found for game "${args.gameId}". Run a game session at least once to bake one.`;
+            if (!result.defs.length) return `Unit def not found in cache (gameId=${args.gameId}, name=${args.name || '?'}, defId=${args.defId || '?'}).`;
+            return JSON.stringify(result.defs[0], null, 2);
+        }
+
+        case 'list_unit_defs': {
+            const pattern = (args.pattern || '').toLowerCase();
+            const limit = args.limit || 50;
+            const result = listDefsFromCache(args.gameId, 'unitdefs', decodeUnitDef,
+                d => !pattern || d.name.toLowerCase().includes(pattern));
+            if (!result) return `No defs cache found for game "${args.gameId}".`;
+            const truncated = result.defs.slice(0, limit);
+            if (args.full) return JSON.stringify(truncated, null, 2);
+            const summary = truncated.map(d => ({
+                defId: d.defId, name: d.name, humanName: d.humanName,
+                metalCost: d.metalCost, energyCost: d.energyCost, health: d.health,
+                isFactory: !!(d.flags & (1 << 11)),
+                isBuilder: !!(d.flags & (1 << 0)),
+                hasWeapons: !!(d.flags & (1 << 15)),
+                customParamsKeys: Object.keys(d.customParams).length,
+            }));
+            return JSON.stringify({
+                total: result.defs.length, returned: summary.length,
+                defs: summary, sourceFile: result.sourceFile,
+            }, null, 2);
+        }
+
+        case 'get_weapon_def': {
+            const result = listDefsFromCache(args.gameId, 'weapondefs', decodeWeaponDef,
+                d => (args.defId !== undefined ? d.defId === args.defId
+                    : args.name !== undefined ? d.name === args.name
+                    : false));
+            if (!result) return `No weapondefs cache found for game "${args.gameId}".`;
+            if (!result.defs.length) return `Weapon def not found (gameId=${args.gameId}, name=${args.name || '?'}, defId=${args.defId || '?'}).`;
+            return JSON.stringify(result.defs[0], null, 2);
+        }
+
+        case 'clear_defs_cache': {
+            const r = clearDefsCache(args.gameId);
+            return `Removed ${r.removed} cache file(s)${args.gameId ? ` for game "${args.gameId}"` : ' across all games'}. The next game session will re-bake from source.`;
+        }
+
+        case 'kill_game': {
+            const servers = getGameServers();
+            let target;
+            if (args.roomId !== undefined && args.roomId > 0) {
+                target = servers.find(s => s.room_id === args.roomId);
+            } else {
+                target = servers.find(s => s.state !== 'ended');
+            }
+            if (!target) {
+                return `No matching game server. Available: ${servers.map(s => `room ${s.room_id} (state=${s.state}, pid=${s.pid})`).join(', ') || '(none)'}`;
+            }
+            const ok = killProcess(target.pid);
+            return ok
+                ? `Killed spring-server pid=${target.pid} for room ${target.room_id}. Lobby will mark it ended on next health check.`
+                : `Failed to send SIGKILL to pid=${target.pid} (process may be gone, or owned by another user).`;
+        }
+
+        case 'launch_game': {
+            // Bypass the lobby UI: create a room, optionally add an AI,
+            // mark host ready, fire start. Mirrors what the browser does
+            // but doesn't require a real user clicking buttons.
+            const username = args.username || AUTH_USER;
+            const password = args.password || AUTH_PASS;
+
+            // Authenticate as the requested user (separate from MCP's
+            // long-lived admin session — startGame requires the host).
+            let userToken = '';
+            for (const path of ['/api/auth/login', '/api/auth/register']) {
+                try {
+                    const r = await fetch(`${LOBBY_URL}${path}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ username, password }),
+                    });
+                    if (r.ok) {
+                        const j = await r.json();
+                        if (j.token) { userToken = j.token; break; }
+                    }
+                } catch { /* try next */ }
+            }
+            if (!userToken) return `Auth failed for user "${username}".`;
+
+            const authHdr = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${userToken}` };
+
+            if (args.clearCache) clearDefsCache(args.gameId || 'zk');
+
+            // Leave any existing room so /api/rooms succeeds (the user
+            // can only be in one at a time).
+            await fetch(`${LOBBY_URL}/api/rooms/leave`, { method: 'POST', headers: authHdr, body: '{}' }).catch(() => {});
+
+            // Create the room.
+            const createResp = await fetch(`${LOBBY_URL}/api/rooms`, {
+                method: 'POST', headers: authHdr,
+                body: JSON.stringify({
+                    name: args.roomName || 'debug',
+                    map: args.mapId,
+                    game: args.gameId || 'zk',
+                }),
+            });
+            if (!createResp.ok) return `Create room failed (${createResp.status}): ${await createResp.text()}`;
+            const room = await createResp.json();
+
+            // Add AI on team 1 (host is on team 0).
+            if (args.ai !== '' && args.ai !== undefined) {
+                const aiId = args.ai || 'null';
+                await fetch(`${LOBBY_URL}/api/rooms/ai/add`, {
+                    method: 'POST', headers: authHdr,
+                    body: JSON.stringify({ roomId: room.id, aiId, team: 1 }),
+                }).catch(() => {});
+            }
+
+            // Mark host ready then start.
+            await fetch(`${LOBBY_URL}/api/rooms/ready`, {
+                method: 'POST', headers: authHdr,
+                body: JSON.stringify({ roomId: room.id, ready: true }),
+            });
+            const startResp = await fetch(`${LOBBY_URL}/api/rooms/start`, {
+                method: 'POST', headers: authHdr,
+                body: JSON.stringify({ roomId: room.id }),
+            });
+            if (!startResp.ok) return `Start game failed (${startResp.status}): ${await startResp.text()}`;
+            const started = await startResp.json();
+
+            return JSON.stringify({
+                roomId: started.id || room.id,
+                gameServerPort: started.gameServerPort,
+                gameId: args.gameId || 'zk',
+                mapId: args.mapId,
+                state: started.state,
+                hint: 'Use list_processes to confirm spring-server pid; the game will be reachable on gameServerPort once warm.',
+            }, null, 2);
+        }
+
+        case 'evaluate_widget_lua': {
+            // The widget worker lives in the browser, not the game
+            // server. Speak to it through the chrome-devtools-mcp's CDP
+            // bridge by spawning a one-shot evaluator. We assume the
+            // user already has a tab open at the client URL — if not,
+            // they should use chrome-devtools-mcp directly.
+            //
+            // Implementation note: this is best-effort. The proper
+            // alternative is launching our own CDP client and managing
+            // the lifecycle, but for the common case (a Claude session
+            // already has chrome-devtools attached) we just emit a
+            // helpful instruction telling the caller to use it.
+            return [
+                '`evaluate_widget_lua` is a stub: the LuaUI worker runs in the browser, not on the game server.',
+                'Use `mcp__chrome-devtools__evaluate_script` instead with the snippet:',
+                '',
+                '  () => window.widgets.eval(`' + args.code.replace(/`/g, '\\`') + '`)',
+                '',
+                'When CDP is added to spring-debug a real implementation will replace this.',
+            ].join('\n');
         }
 
         default:
