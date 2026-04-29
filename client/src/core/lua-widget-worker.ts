@@ -153,7 +153,8 @@ async function prefetchAllGameFiles(baseUrl: string): Promise<void> {
             for (const e of entries) {
                 const fullPath = `${dir}/${e.name}`;
                 if (e.type === 'file' &&
-                    (e.name.endsWith('.lua') || e.name.endsWith('.txt'))) {
+                    (e.name.endsWith('.lua') || e.name.endsWith('.txt') ||
+                     e.name.endsWith('.json'))) {
                     if (vfsFiles.has(fullPath)) continue;
                     toFetch.push(fullPath);
                 } else if (e.type === 'dir' || e.type === 'directory') {
@@ -1038,7 +1039,9 @@ Spring.Utilities.TableToString = function(t) return tostring(t) end`;
     const i18nSrc = vfsLookup(i18nPath);
     if (i18nSrc) {
         const oldTranslate = `local function Translate (db, text, data, opts)\n\treturn translations[db].i18n(text, data, opts)\nend`;
-        const newTranslate = `local function Translate (db, text, data, opts)\n\tlocal t = translations[db]\n\tif type(t) ~= "table" or type(t.i18n) ~= "function" then return tostring(text or "") end\n\tlocal ok, result = pcall(t.i18n, text, data, opts)\n\tif not ok or result == nil then return tostring(text or "") end\n\treturn result\nend`;
+        // i18nlib's i18n is a TABLE with __call metamethod, not a plain function.
+        // Accept both via pcall — the type check would reject the callable table.
+        const newTranslate = `local function Translate (db, text, data, opts)\n\tlocal t = translations[db]\n\tif type(t) ~= "table" or t.i18n == nil then return tostring(text or "") end\n\tlocal ok, result = pcall(t.i18n, text, data, opts)\n\tif not ok or result == nil then return tostring(text or "") end\n\treturn result\nend`;
         if (i18nSrc.indexOf(oldTranslate) !== -1) {
             vfsRegister(i18nPath, i18nSrc.replace(oldTranslate, newTranslate));
             postLog(2, '[LuaUI] Patched api_i18n.lua: Translate falls back to key on miss');
