@@ -1175,9 +1175,18 @@ export class LuaGLBridge {
         if (override) return override;
         // If the path has a directory component, use standard resolution
         if (normalised.includes('/')) {
-            const baseUrl = (normalised.startsWith('LuaUI/') || normalised.startsWith('luaui/'))
-                ? this.gameBaseUrl
-                : this.mapSourceUrl;
+            const lower = normalised.toLowerCase();
+            const isGameAsset =
+                lower.startsWith('luaui/') ||
+                lower.startsWith('luarules/') ||
+                lower.startsWith('luagaia/') ||
+                lower.startsWith('anims/') ||
+                lower.startsWith('bitmaps/') ||
+                lower.startsWith('models/') ||
+                lower.startsWith('objects3d/') ||
+                lower.startsWith('sounds/') ||
+                lower.startsWith('unittextures/');
+            const baseUrl = isGameAsset ? this.gameBaseUrl : this.mapSourceUrl;
             return `${baseUrl}/${normalised}`;
         }
         // Short name (no directory) — try search paths against game URL
