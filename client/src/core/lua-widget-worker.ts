@@ -305,6 +305,23 @@ interface MinimalUnitDefWire {
     flags?: number;
     buildDistance?: number; buildSpeed?: number;
     buildOptions?: number[]; weaponDefIds?: number[];
+    /** Tier 4: customParams + rare fields. */
+    customParams?: Record<string, string>;
+    repairSpeed?: number;
+    transportSize?: number;
+    transportMass?: number;
+    transportCapacity?: number;
+    yardmap?: string;
+    script?: string;
+    buildPic?: string;
+    maxVelocity?: number;
+    cost?: number;
+    maxWeaponRange?: number;
+    maxThisUnit?: number;
+    canBeAssisted?: boolean;
+    canSelfDestruct?: boolean;
+    selfDCountdown?: number;
+    categoryBits?: number;
 }
 interface MinimalWeaponDefWire {
     defId: number; name: string; visualType: number;
@@ -324,6 +341,7 @@ interface MinimalWeaponDefWire {
     uptime?: number; coverageRange?: number; stockpileTime?: number;
     metalCost?: number; energyCost?: number;
     flags?: number;
+    customParams?: Record<string, string>;
 }
 const unitDefMap = new Map<number, MinimalUnitDefWire>();
 const weaponDefMap = new Map<number, MinimalWeaponDefWire>();
@@ -421,7 +439,9 @@ function buildLuaUnitDef(d: MinimalUnitDefWire): Record<string, LuaValue> {
         canFight: hasWeapons, canPatrol: canMove, canStop: true, canGuard: true,
         canAttack: hasWeapons, canRepair: isBuilder, canReclaim: isBuilder,
         canCapture: false, canResurrect: false,
-        canCloak, canKamikaze, canManualFire, canSelfD: true,
+        canCloak, canKamikaze, canManualFire,
+        canSelfD: d.canSelfDestruct ?? true,
+        canBeAssisted: d.canBeAssisted ?? true,
         floatOnWater,
 
         // Builder specifics.
@@ -430,8 +450,23 @@ function buildLuaUnitDef(d: MinimalUnitDefWire): Record<string, LuaValue> {
         buildOptions: buildOptionsSeq,
         weapons,
 
-        // Tables ZK reads but doesn't always require populated.
-        customParams: {} as Record<string, LuaValue>,
+        // Tier 4 fields (custom params + rare attributes).
+        customParams: (d.customParams ?? {}) as Record<string, LuaValue>,
+        repairSpeed: d.repairSpeed ?? 0,
+        transportSize: d.transportSize ?? 0,
+        transportMass: d.transportMass ?? 0,
+        transportCapacity: d.transportCapacity ?? 0,
+        isTransport: (d.transportCapacity ?? 0) > 0 && (d.transportMass ?? 0) > 0,
+        yardMap: d.yardmap ?? '',
+        script: d.script ?? '',
+        buildPic: d.buildPic ?? '',
+        maxVelocity: d.maxVelocity ?? d.speed ?? 0,
+        cost: d.cost ?? ((d.metalCost ?? 0) + (d.energyCost ?? 0)),
+        maxWeaponRange: d.maxWeaponRange ?? 0,
+        maxThisUnit: d.maxThisUnit ?? 0,
+        selfDCountdown: d.selfDCountdown ?? 0,
+        category: d.categoryBits ?? 0,
+
         modCategories: {} as Record<string, LuaValue>,
         moveDef: {} as Record<string, LuaValue>,
     };
@@ -526,7 +561,7 @@ function buildLuaWeaponDef(d: MinimalWeaponDefWire): Record<string, LuaValue> {
         largeBeamLaser, laserHardStop,
         isShield, smartShield, exteriorShield, visibleShield,
 
-        customParams: {} as Record<string, LuaValue>,
+        customParams: (d.customParams ?? {}) as Record<string, LuaValue>,
     };
 }
 
@@ -553,6 +588,104 @@ function republishDefGlobals(rt: LuaRuntime): void {
     }
     rt.setGlobal('WeaponDefs', weaponDefs);
     rt.setGlobal('WeaponDefNames', weaponDefNames);
+
+    // 1) Convert string-numeric keys to number keys. The JS-side
+    //    Record<number, T> serialises as a JS object with string keys
+    //    (\`{"1": ud, "2": ud, …}\`); fengari preserves those as Lua
+    //    string keys, which breaks ZK code that does \`UnitDefs[1]\` or
+    //    \`for i = 1, #UnitDefs do\`. Re-key the table so numeric access
+    //    and the # length operator work.
+    // 2) Attach a fallback metatable so missing fields return 0 instead
+    //    of nil. ZK widgets read many obscure fields at file scope (e.g.
+    //    \`gunshiptrans.transportSize * 2\`) and a nil there crashes the
+    //    widget at load. Returning 0 is harmless for arithmetic; tables
+    //    that must always be tables (customParams, etc.) get explicit
+    //    empty-table defaults via the inner table.
+    rt.doString(`
+        local function _renumberKeys(t)
+            if type(t) ~= "table" then return t end
+            local fixed = {}
+            for k, v in pairs(t) do
+                local nk = tonumber(k)
+                if nk and math.floor(nk) == nk then
+                    fixed[nk] = v
+                else
+                    fixed[k] = v
+                end
+            end
+            return fixed
+        end
+        UnitDefs = _renumberKeys(UnitDefs)
+        WeaponDefs = _renumberKeys(WeaponDefs)
+        -- UnitDefNames / WeaponDefNames are keyed by string already; leave them.
+
+        -- Default weapon entry — chains like \`ud.weapons[1].weaponDef\`
+        -- are common at file scope. If weapons[i] is nil for a unit
+        -- with no weapons we'd crash. Rather than a metatable on
+        -- weapons (which would make ipairs(ud.weapons) never
+        -- terminate, hanging the worker), seed weapons[1] with a stub
+        -- entry on units whose weapons table is empty. ipairs/# stay
+        -- consistent and the chain resolves to WeaponDefs[0] (also a
+        -- stub).
+        local _emptyWeapon = { weaponDef = 0, slavedTo = 0, mainDir = {0,0,1},
+            maxAngleDif = 0, fuelUsage = 0, badTargetCat = 0, onlyTargetCat = 0 }
+
+        local _udFieldDefaults = setmetatable({
+            customParams = {},
+            modCategories = {},
+            springCategories = {},  -- ZK widgets gate on .fixedwing/.land etc
+            buildOptions = {},
+            weapons = { [1] = _emptyWeapon },  -- only used when ud.weapons missing
+            wDefs = {},
+            moveDef = {},
+            yardMap = {},
+            sfxTypes = {},
+            -- Sub-tables widgets occasionally index. Empty tables with
+            -- a 0-fallback metatable so things like ud.model.height /
+            -- ud.model.midy return 0 instead of nil. Indexing a number
+            -- errors, so 0 fallback only applies via __index here.
+            model = setmetatable({}, { __index = function() return 0 end }),
+            cobScript = setmetatable({}, { __index = function() return 0 end }),
+            collisionVolume = setmetatable({}, { __index = function() return 0 end }),
+            unitNames = {},
+            iconType = "",
+        }, { __index = function(_, _) return 0 end })
+        local _udMeta = { __index = _udFieldDefaults }
+        for _, ud in pairs(UnitDefs or {}) do
+            if type(ud) == "table" and not getmetatable(ud) then
+                setmetatable(ud, _udMeta)
+                -- For empty weapons tables, seed slot 1 with the stub
+                -- so widgets reading ud.weapons[1].weaponDef get 0
+                -- instead of nil-indexing. Don't add a metatable —
+                -- that would break ipairs.
+                if type(ud.weapons) == "table" and ud.weapons[1] == nil then
+                    ud.weapons[1] = _emptyWeapon
+                end
+            end
+        end
+        local _wdFieldDefaults = setmetatable({
+            customParams = {},
+            damages = setmetatable({}, { __index = function() return 0 end }),
+        }, { __index = function(_, _) return 0 end })
+        local _wdMeta = { __index = _wdFieldDefaults }
+        local _emptyWeaponDef = setmetatable({
+            id = 0, name = "", type = "", description = "",
+            customParams = {},
+            damages = setmetatable({}, { __index = function() return 0 end }),
+        }, _wdMeta)
+        for _, wd in pairs(WeaponDefs or {}) do
+            if type(wd) == "table" and not getmetatable(wd) then
+                setmetatable(wd, _wdMeta)
+            end
+        end
+        -- Make WeaponDefs[0] resolve to a stub def. ZK's stub-weapon
+        -- entries (from our weapons-metatable) carry weaponDef = 0, and
+        -- a chain like \`WeaponDefs[ud.weapons[1].weaponDef].range\` then
+        -- ends at WeaponDefs[0]. Use a direct entry rather than a root
+        -- __index metatable — that would make ipairs(WeaponDefs) never
+        -- terminate, since every numeric key would resolve to non-nil.
+        if WeaponDefs[0] == nil then WeaponDefs[0] = _emptyWeaponDef end
+    `, 'def_fallback_metatables');
 }
 
 async function init(
