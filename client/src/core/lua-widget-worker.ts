@@ -1308,24 +1308,17 @@ defaultFont = activeFont
         }
     }
 
-    // Patch font.lua: _GetExtra has no case for valign="linecenter" and
-    // falls through to 'a' (ascender), so chili Button / Label captions
-    // pass valign="linecenter" but never get vertical centering. Add a
-    // proper case mapping to the 'x' flag char so the font sees it.
-    const fontPath = 'LuaUI/Widgets/chili_old/Controls/font.lua';
-    const fontSrc = vfsLookup(fontPath);
-    if (fontSrc) {
-        const patched = fontSrc.replace(
-            `  if valign == "center" then\n    extra = 'v'\n  elseif valign == "top" then\n    extra = 't'\n  elseif valign == "bottom" then\n    extra = 'b'\n  else\n    --// ascender\n    extra = 'a'\n  end`,
-            `  if valign == "center" then\n    extra = 'v'\n  elseif valign == "linecenter" then\n    extra = 'x'\n  elseif valign == "top" then\n    extra = 't'\n  elseif valign == "bottom" then\n    extra = 'b'\n  else\n    --// ascender\n    extra = 'a'\n  end`,
-        );
-        if (patched !== fontSrc) {
-            vfsRegister(fontPath, patched);
-            postLog(2, '[LuaUI] Patched font.lua: _GetExtra recognises "linecenter"');
-        } else {
-            postLog(3, '[LuaUI] font.lua _GetExtra patch — anchor not found');
-        }
-    }
+    // Note: chili font.lua's `_GetExtra` falls through to 'a' (ascender)
+    // for valign="linecenter". This is INTENTIONAL — the chili Carbon
+    // skin's DrawButton (skinutils.lua) pre-adjusts y by `-size*0.35`
+    // expecting the 'a' flag to position line TOP at that y, which puts
+    // the visible cap text near the button's vertical centre. Patching
+    // `_GetExtra` to map "linecenter" → 'x' breaks that — skin buttons
+    // would then use 'x' (baseline-at-y semantics) with a y meant for
+    // 'a', shifting captions far above the visible button shape.
+    // chili Label uses Font:DrawInBox which calls AdjustPosToAlignment
+    // — that path produces 'x' directly with a y pre-adjusted for
+    // baseline-at-y, so labels still work without this patch.
 
     postLog(2, '[LuaUI] init step 7/8: starting bootstrap (VFS.Include camain.lua)...');
     const bootStart = performance.now();

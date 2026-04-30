@@ -431,16 +431,13 @@ export function createLuaFontObject(
                 // Centre the visible glyph bounds, not the line cell.
                 py += visualH / 2;
             } else if (wantLineCenter) {
-                // 'x' (linecenter): in Spring's font handler this means
-                // "line baseline so that line CENTER is at y". Chili's
-                // skin DrawButton/Font:DrawInBox both pre-adjust y to
-                // compensate for the cap-vs-line-centre offset (e.g.
-                // skinutils.DrawButton: y = button_y + h/2 - size*0.35),
-                // so by the time we receive 'x', y is already at the
-                // correct *baseline-relative* anchor — adding visualH/2
-                // here would double-adjust and shift text UP by ~visualH/2.
-                // No additional offset; the caller's pre-adjustment is
-                // what positions the text.
+                // 'x' = baseline at y. Chili's Label:DrawInBox →
+                // AdjustPosToAlignment pre-adjusts y by `+h/2 +
+                // (1+descender)*size/2` so that with baseline at y, the
+                // visible cap text appears centred in the box. Position
+                // the line so its baseline lands at y_input: line top is
+                // at y_input - ascent, i.e. py += ascent.
+                py += atlas.ascentPx * scale;
             } else if (wantBottom) {
                 py += visualH;
             }
