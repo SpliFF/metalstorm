@@ -299,11 +299,11 @@ export class LuaRuntime {
             lua.lua_pushjsfunction(L, (LS: unknown) => {
                 const nargs = lua.lua_gettop(LS);
                 const jsArgs: LuaValue[] = [];
-                for (let i = 1; i <= nargs; i++) {
-                    jsArgs.push(this.readValueFrom(LS, i));
-                }
                 let ret: LuaValue | LuaValue[] | void;
                 try {
+                    for (let i = 1; i <= nargs; i++) {
+                        jsArgs.push(this.readValueFrom(LS, i));
+                    }
                     ret = fn(...jsArgs);
                 } catch (e) {
                     const msg = (e instanceof Error ? e.message : String(e));
@@ -358,7 +358,15 @@ export class LuaRuntime {
                 return lua.lua_tonumber(LS, idx);
             case lua.LUA_TSTRING: {
                 const s = lua.lua_tostring(LS, idx);
-                return s === null ? '' : to_jsstring(s);
+                if (s === null) return '';
+                // Lua strings are byte sequences. Spring code embeds non-UTF-8
+                // bytes (e.g. color codes \xFF\r\g\b in font captions). Decode
+                // those bytes 1:1 into the JS string instead of letting
+                // fengari's strict UTF-8 decoder throw — JS-side consumers
+                // (font renderer, etc.) recognise the codes via charCodeAt.
+                let out = '';
+                for (let i = 0; i < s.length; i++) out += String.fromCharCode(s[i]);
+                return out;
             }
             case lua.LUA_TLIGHTUSERDATA:
                 // Opaque handle round-tripped from pushValue.
