@@ -65,6 +65,10 @@ function createHUD(): void {
     hud.innerHTML = gameTemplates.hudHtml;
     document.body.appendChild(hud);
 
+    // Quit is reachable via ESC (toggle quit-confirm) and the in-game
+    // chili menu (F10 → widget list / game menu). The HUD's static Quit
+    // button was removed because it sat under the chili HUD bar; if a
+    // future template re-adds #hud-quit-btn this guard simply skips.
     document.getElementById('hud-quit-btn')?.addEventListener('click', () => {
         showQuitConfirm();
     });
@@ -623,6 +627,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // Input
     inputManager = new InputManager(scene, camera, entityRenderer, conn,
         (ids) => minimap?.setSelection(ids));
+    // Route ground-click suppression through the widget manager. The
+    // widget manager is created later (when MapData arrives) so we read
+    // it lazily — by the time the user clicks anything, the manager has
+    // long since reported its first uiHover.
+    inputManager.setUIHitTest(() => currentWidgetManager?.isCursorOverUI() ?? false);
 
     // Minimap (initial size — rebound on MapData arrival)
     {

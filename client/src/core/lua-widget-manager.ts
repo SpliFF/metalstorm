@@ -78,6 +78,12 @@ export class LuaWidgetManager {
      *  widgets see "no pointer" before the cursor enters the canvas. */
     private mouseState = { x: 0, y: 0, lmb: false, mmb: false, rmb: false, outsideSpring: true };
 
+    /** Whether the cursor is currently over a chili control (any widget claiming
+     *  the point via widgetHandler:IsAbove). Updated by mousemove dispatches in
+     *  the worker. InputManager reads this via isCursorOverUI() to skip ground
+     *  selection / order placement when the click belongs to LuaUI. */
+    private cursorOverUI = false;
+
     /** Listener cleanup for the always-on mouse tracker. */
     private mouseTrackingCleanups: (() => void)[] = [];
 
@@ -481,6 +487,8 @@ export class LuaWidgetManager {
             case 'widgetList':     summary = `widgetList (${String(msg.data ?? '').length} bytes)`; break;
             case 'worldGLCommands':summary = `worldGLCommands (${(msg.commands as unknown[])?.length ?? '?'} cmds)`; break;
             case 'giveOrder':      summary = `giveOrder cmd=${msg.cmdId} units=${(msg.unitIds as unknown[])?.length ?? 0} params=${(msg.params as unknown[])?.length ?? 0}`; break;
+            case 'uiHover':        summary = `uiHover above=${msg.above}`; break;
+            case 'inputConsumed':  summary = `inputConsumed kind=${msg.kind} consumed=${msg.consumed}`; break;
         }
         debugConsole.addEntry({
             id: Date.now() + Math.random(),
@@ -565,7 +573,30 @@ export class LuaWidgetManager {
                 conn.sendPlayerCommand(cmdId, unitIds, params, options, timeoutFrames);
                 break;
             }
+
+            case 'uiHover':
+                // Fire-and-forget hover state pushed by the worker after each
+                // mousemove. InputManager reads this via isCursorOverUI() to
+                // gate ground selection / orders on the next mousedown.
+                this.cursorOverUI = !!msg.above;
+                break;
+
+            case 'inputConsumed':
+                // The worker reports whether the just-dispatched event was
+                // claimed by a widget. We don't act on it directly today —
+                // the cursorOverUI flag (kept up-to-date via uiHover) already
+                // suppresses ground actions before the click fires. Logged
+                // here so the debug console shows widget-vs-world routing.
+                break;
         }
+    }
+
+    /** True when the cursor is hovering a chili control. Updated by mousemove
+     *  → widgetHandler:IsAbove() in the worker, so the value lags the cursor by
+     *  one frame. InputManager checks this at mousedown to suppress ground
+     *  selection when the click belongs to LuaUI. */
+    isCursorOverUI(): boolean {
+        return this.cursorOverUI;
     }
 
     // ── Keyboard ────────────────────────────────────────────────────────
@@ -575,11 +606,19 @@ export class LuaWidgetManager {
             // Track modifier keys for GetModKeyState
             this.modKeys = { alt: e.altKey, ctrl: e.ctrlKey, meta: e.metaKey, shift: e.shiftKey };
 
-            // F9 toggles widget list (F11 is macOS fullscreen)
-            if (e.key === 'F9' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+            // F9 / F10 toggle the widget list. F10 is the conventional
+            // Spring "menu" key — Lua games (ZK epicmenu) bind it via the
+            // action handler, and any widget that claims F10 still gets
+            // it because we forward the keypress to the worker below
+            // before the early return. F11 is reserved by macOS for
+            // full-screen so we don't use it here.
+            if ((e.key === 'F9' || e.key === 'F10') && !e.ctrlKey && !e.altKey && !e.metaKey) {
                 e.preventDefault();
                 this.toggleWidgetList();
-                return;
+                // Don't return — let F10 also propagate to the worker so
+                // a chili menu binding can react. F9 is engine-only and
+                // returning early for it would be safe, but unifying the
+                // two paths keeps the handler simple.
             }
 
             // Forward keyboard events to worker

@@ -1,8 +1,9 @@
-<div id="hud-top-bar" class="hud-panel">
-    <!-- Temporarily hidden: entity/frame counters, selection, minimap, help -->
-    <span id="hud-entities" style="display:none">Entities: 0</span>
-    <span id="hud-frame" style="display:none">Frame: 0</span>
-    <button id="hud-quit-btn" title="Quit to lobby (ESC)">Quit</button>
+<div id="hud-top-bar" class="hud-panel" style="display:none">
+    <!-- Quit moved to ESC; entity/frame counters/minimap kept for hot-swap of -->
+    <!-- HUD overlays in the future. Whole top bar is hidden by default since -->
+    <!-- chili widgets render their own HUD on the LuaUI overlay above. -->
+    <span id="hud-entities">Entities: 0</span>
+    <span id="hud-frame">Frame: 0</span>
 </div>
 <div id="hud-selection" class="hud-panel" style="display:none">
     <span id="hud-selected">No selection</span>

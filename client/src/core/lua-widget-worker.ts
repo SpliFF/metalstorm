@@ -2306,20 +2306,29 @@ self.onmessage = async (e: MessageEvent) => {
             break;
 
         case 'keypress':
+            // Route through widgetHandler so its KeyPressList and the
+            // actionHandler (for keybindings like F10/F11) both run. The
+            // dispatcher then forwards to each widget's :KeyPress callin.
+            // Calling a global `KeyPress` would miss every widget — none
+            // of them install themselves into the global namespace; they
+            // register via widgetHandler.
             if (runtime) {
-                runtime.doString(`
-                    if KeyPress then
-                        pcall(KeyPress, ${msg.keyCode}, { alt=${msg.alt}, ctrl=${msg.ctrl}, meta=${msg.meta}, shift=${msg.shift} }, false)
+                const consumed = runtime.evalString(`
+                    if widgetHandler and widgetHandler.KeyPress then
+                        local ok, ret = pcall(widgetHandler.KeyPress, widgetHandler, ${msg.keyCode}, { alt=${msg.alt}, ctrl=${msg.ctrl}, meta=${msg.meta}, shift=${msg.shift} }, false)
+                        return ok and ret and "1" or "0"
                     end
-                `, 'callin:KeyPress');
+                    return "0"
+                `);
+                postToMain({ type: 'inputConsumed', kind: 'keypress', consumed: consumed === '1' });
             }
             break;
 
         case 'keyrelease':
             if (runtime) {
                 runtime.doString(`
-                    if KeyRelease then
-                        pcall(KeyRelease, ${msg.keyCode}, { alt=${msg.alt}, ctrl=${msg.ctrl}, meta=${msg.meta}, shift=${msg.shift} })
+                    if widgetHandler and widgetHandler.KeyRelease then
+                        pcall(widgetHandler.KeyRelease, widgetHandler, ${msg.keyCode}, { alt=${msg.alt}, ctrl=${msg.ctrl}, meta=${msg.meta}, shift=${msg.shift} })
                     end
                 `, 'callin:KeyRelease');
             }
@@ -2329,19 +2338,22 @@ self.onmessage = async (e: MessageEvent) => {
             // liveState.mouse is kept fresh by the main thread's always-on
             // tracker; this case only fires the widget callin.
             if (runtime) {
-                runtime.doString(`
-                    if MousePress then
-                        pcall(MousePress, ${msg.x}, ${msg.y}, ${msg.button})
+                const consumed = runtime.evalString(`
+                    if widgetHandler and widgetHandler.MousePress then
+                        local ok, ret = pcall(widgetHandler.MousePress, widgetHandler, ${msg.x}, ${msg.y}, ${msg.button})
+                        return ok and ret and "1" or "0"
                     end
-                `, 'callin:MousePress');
+                    return "0"
+                `);
+                postToMain({ type: 'inputConsumed', kind: 'mousepress', consumed: consumed === '1' });
             }
             break;
 
         case 'mouserelease':
             if (runtime) {
                 runtime.doString(`
-                    if MouseRelease then
-                        pcall(MouseRelease, ${msg.x}, ${msg.y}, ${msg.button})
+                    if widgetHandler and widgetHandler.MouseRelease then
+                        pcall(widgetHandler.MouseRelease, widgetHandler, ${msg.x}, ${msg.y}, ${msg.button})
                     end
                 `, 'callin:MouseRelease');
             }
@@ -2350,8 +2362,8 @@ self.onmessage = async (e: MessageEvent) => {
         case 'mousewheel':
             if (runtime) {
                 runtime.doString(`
-                    if MouseWheel then
-                        pcall(MouseWheel, ${msg.up}, ${msg.value})
+                    if widgetHandler and widgetHandler.MouseWheel then
+                        pcall(widgetHandler.MouseWheel, widgetHandler, ${msg.up}, ${msg.value})
                     end
                 `, 'callin:MouseWheel');
             }
@@ -2359,11 +2371,23 @@ self.onmessage = async (e: MessageEvent) => {
 
         case 'mousemove':
             if (runtime) {
-                runtime.doString(`
-                    if MouseMove then
-                        pcall(MouseMove, ${msg.x}, ${msg.y}, ${msg.dx}, ${msg.dy}, ${msg.button})
+                // Dispatch the move and ask widgetHandler:IsAbove() in the
+                // same Lua call — IsAbove drives chili's hover state and
+                // also tells the main thread whether the cursor is over UI
+                // (so InputManager can suppress ground selection).
+                const above = runtime.evalString(`
+                    if widgetHandler then
+                        if widgetHandler.MouseMove then
+                            pcall(widgetHandler.MouseMove, widgetHandler, ${msg.x}, ${msg.y}, ${msg.dx}, ${msg.dy}, ${msg.button})
+                        end
+                        if widgetHandler.IsAbove then
+                            local ok, ret = pcall(widgetHandler.IsAbove, widgetHandler, ${msg.x}, ${msg.y})
+                            return ok and ret and "1" or "0"
+                        end
                     end
-                `, 'callin:MouseMove');
+                    return "0"
+                `);
+                postToMain({ type: 'uiHover', above: above === '1' });
             }
             break;
 

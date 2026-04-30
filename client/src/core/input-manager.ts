@@ -46,6 +46,10 @@ export class InputManager {
     private commandBuffer: CommandBuffer;
     private selectedIds: number[] = [];
     private onSelectionChange?: (ids: number[]) => void;
+    /// When set, returning true suppresses ground selection / orders for the
+    /// current pointer event. Wired up to LuaWidgetManager.isCursorOverUI()
+    /// so a click on a chili button doesn't also trigger a deselect-all.
+    private isOverUI: () => boolean = () => false;
 
     // Drag-select state
     private dragActive = false;
@@ -72,6 +76,10 @@ export class InputManager {
         this.createDragOverlay();
         this.setupPointerHandler();
         this.setupKeyboardHandler();
+    }
+
+    setUIHitTest(probe: () => boolean): void {
+        this.isOverUI = probe;
     }
 
     get selection(): readonly number[] {
@@ -146,6 +154,11 @@ export class InputManager {
     private onLeftDown(evt: PointerEvent): void {
         // Ignore clicks that started over a UI element.
         if ((evt.target as HTMLElement)?.id?.includes('hud')) return;
+        // Ignore clicks landing on a chili control. The flag is updated
+        // one mousemove behind the cursor — a click without a prior hover
+        // (e.g. tab-induced focus + Enter to fake a click) won't be caught,
+        // but that's an edge case worth deferring.
+        if (this.isOverUI()) return;
         this.dragActive = true;
         this.dragStartX = evt.clientX;
         this.dragStartY = evt.clientY;
@@ -257,6 +270,9 @@ export class InputManager {
 
     private onRightClick(evt: PointerEvent): void {
         if (this.selectedIds.length === 0) return;
+        // Right-click on UI cancels chili interaction (handled by widgetHandler);
+        // don't also issue an order to whatever ground happens to be behind it.
+        if (this.isOverUI()) return;
         const groundPos = this.pickGroundAt(evt.clientX, evt.clientY);
         if (!groundPos) return;
 
