@@ -1087,6 +1087,70 @@ Spring.Utilities.TableToString = function(t) return tostring(t) end`;
         }
     }
 
+    // Patch chili_old/Headers/links.lua: teach UnlinkSafe / CheckWeakLink
+    // about our table-based newproxy polyfill. fengari does not implement
+    // newproxy natively; the worker installs a polyfill that returns a
+    // plain table with a `{ __isProxy = true }` metatable. chili then
+    // overlays its own `_islink`/`_obj`/`__call` on that metatable, but
+    // chili's UnlinkSafe loops `while type(link) == "userdata"` — which
+    // is false for our table proxy, so the loop never unwraps. The visible
+    // symptom is that screen.activeControl never compares equal to the
+    // raw control returned by Object.IsAbove during MouseUp's
+    // `CompareLinks(hovered, active)` check, so MouseClick (which fires
+    // OnClick) silently never runs. That's the actual root cause of
+    // PLAN-chili-menu-visibility Bug A.
+    //
+    // Fix: extend the loop to also unwrap a *table* whose metatable
+    // carries the `_islink` flag chili sets on weak/hard links. We don't
+    // unwrap arbitrary tables — only the chili-tagged ones — so this is
+    // safe even if a widget passes a real Lua table to the chili
+    // mouse-event chain.
+    const linksPath = 'LuaUI/Widgets/chili_old/Headers/links.lua';
+    const linksSrc = vfsLookup(linksPath);
+    if (linksSrc) {
+        const oldUnlink =
+            'function UnlinkSafe(link)\n' +
+            '\tlocal link = link\n' +
+            '\twhile (type(link) == "userdata") do\n' +
+            '\t\tlink = link()\n' +
+            '\tend\n' +
+            '\treturn link\n' +
+            'end';
+        const newUnlink =
+            'function UnlinkSafe(link)\n' +
+            '\tlocal link = link\n' +
+            '\twhile type(link) == "userdata"\n' +
+            '\t\tor (type(link) == "table"\n' +
+            '\t\t\tand getmetatable(link)\n' +
+            '\t\t\tand getmetatable(link)._islink) do\n' +
+            '\t\tlink = link()\n' +
+            '\tend\n' +
+            '\treturn link\n' +
+            'end';
+        const oldCheck =
+            'function CheckWeakLink(link)\n' +
+            '  return (type(link) == "userdata") and link()\n' +
+            'end';
+        const newCheck =
+            'function CheckWeakLink(link)\n' +
+            '  if type(link) == "userdata" then return link() end\n' +
+            '  if type(link) == "table" then\n' +
+            '    local mt = getmetatable(link)\n' +
+            '    if mt and mt._islink then return link() end\n' +
+            '  end\n' +
+            '  return false\n' +
+            'end';
+        let patched = linksSrc;
+        if (patched.includes(oldUnlink)) patched = patched.replace(oldUnlink, newUnlink);
+        if (patched.includes(oldCheck)) patched = patched.replace(oldCheck, newCheck);
+        if (patched !== linksSrc) {
+            vfsRegister(linksPath, patched);
+            postLog(2, '[LuaUI] Patched links.lua: UnlinkSafe accepts table proxies');
+        } else {
+            postLog(3, '[LuaUI] links.lua patch — anchors not found');
+        }
+    }
+
     // Patch object.lua: wrap Object:CallChildrenInverse with pcall so a
     // single buggy child Draw doesn't break iteration over its siblings.
     // Chili's original code calls `child[eventname](child, ...)` raw — if
@@ -1559,14 +1623,29 @@ defaultFont = activeFont
             local trimmed = line:match("^%s*(.-)%s*$")
             if trimmed == "" then return end
 
-            -- "luaui foo bar" → actionHandler.TextAction("foo bar")
+            -- "luaui foo bar" — real Spring routes these through
+            -- widgetHandler:ConfigureLayout which handles built-in commands
+            -- (togglewidget, enablewidget, selector, reconf, tweakgui)
+            -- before falling through to actionHandler:TextAction. Mirror
+            -- that order: ConfigureLayout claims the recognised built-ins,
+            -- TextAction handles widget-registered actions, and a final
+            -- pass through TextCommandList lets widgets that defined
+            -- :TextCommand intercept anything else (gui_epicmenu uses this
+            -- for "search:" prefixes).
             local rest = trimmed:match("^luaui%s+(.+)")
-            if rest and widgetHandler and widgetHandler.actionHandler
-                    and widgetHandler.actionHandler.TextAction then
-                local ok, err = pcall(widgetHandler.actionHandler.TextAction,
-                    widgetHandler.actionHandler, rest)
-                if not ok then
-                    Spring.Echo("[SendCommands] TextAction error: " .. tostring(err))
+            if rest and widgetHandler then
+                if widgetHandler.ConfigureLayout then
+                    local ok, ret = pcall(widgetHandler.ConfigureLayout,
+                        widgetHandler, rest)
+                    if ok and ret then return end
+                end
+                if widgetHandler.actionHandler
+                        and widgetHandler.actionHandler.TextAction then
+                    local ok, err = pcall(widgetHandler.actionHandler.TextAction,
+                        widgetHandler.actionHandler, rest)
+                    if not ok then
+                        Spring.Echo("[SendCommands] TextAction error: " .. tostring(err))
+                    end
                 end
                 return
             end
@@ -1807,6 +1886,60 @@ defaultFont = activeFont
             Spring.GetHumanName = function(defName) return tostring(defName or "") end
         end
     `, 'post_bootstrap_api_stubs');
+
+    // Bridge bound-key → text-action. ZK widgets register most actions as
+    // text-only ("AddAction(name, fn, nil, 't')") because real Spring's
+    // engine dispatches bound keys *as text commands* — bind f10
+    // crudesubmenu causes pressing F10 to run the same code path as
+    // typing `/crudesubmenu`. actions.lua's KeyAction only consults the
+    // keyPressActions / keyRepeatActions / keyReleaseActions tables, so
+    // when our keybind table maps f10 → crudesubmenu but crudesubmenu is
+    // text-only, KeyAction returns false and the key does nothing. Wrap
+    // KeyAction to fall through to TextAction on miss. We do this here
+    // (post-bootstrap) so the actionHandler is the populated one.
+    runtime.doString(`
+        if widgetHandler and widgetHandler.actionHandler then
+            local ah = widgetHandler.actionHandler
+            local origKeyAction = ah.KeyAction
+            ah.KeyAction = function(self, press, key, mods, isRepeat, scanCode, actions)
+                local handled = origKeyAction(self, press, key, mods, isRepeat, scanCode, actions)
+                if handled then return true end
+                -- Only press events trigger text fall-through; releases are
+                -- mostly used for state-tracking actions that don't have a
+                -- text equivalent.
+                if not press then return false end
+                if not actions then
+                    -- KeyAction would have computed actions via GetKeyBindings.
+                    -- Repeat that here so we can probe.
+                    local _, defSym = (Spring.GetKeySymbol or function() return "", "" end)(key)
+                    local keyset = ""
+                    if mods and mods.alt   then keyset = keyset .. "A+" end
+                    if mods and mods.ctrl  then keyset = keyset .. "C+" end
+                    if mods and mods.meta  then keyset = keyset .. "M+" end
+                    if mods and mods.shift then keyset = keyset .. "S+" end
+                    keyset = keyset .. (defSym or "")
+                    actions = Spring.GetKeyBindings(keyset)
+                end
+                if not (actions and #actions > 0) then return false end
+                -- Claim consumption as soon as we *dispatch* a bound action,
+                -- regardless of its return value. ZK widgets routinely omit
+                -- "return true" from their action handlers (gui_epicmenu's
+                -- ActionSubmenu just toggles the menu and falls through),
+                -- but the user clearly meant for the keypress to do that —
+                -- not to fall through to the engine widget-list overlay.
+                local dispatched = false
+                for i = 1, #actions do
+                    local cmd, opts = next(actions[i])
+                    if cmd then
+                        local line = (opts and opts ~= "") and (cmd .. " " .. opts) or cmd
+                        local ok = pcall(ah.TextAction, self, line)
+                        if ok then dispatched = true end
+                    end
+                end
+                return dispatched
+            end
+        end
+    `, 'keyaction_textaction_bridge');
 
     // EPIC menu submenu watchdog. The user-visible bug is that clicking
     // any epicmenu top-bar button (Main Menu, Game, Help, ...) runs the
