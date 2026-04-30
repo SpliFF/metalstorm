@@ -84,6 +84,12 @@ export class LuaWidgetManager {
      *  selection / order placement when the click belongs to LuaUI. */
     private cursorOverUI = false;
 
+    /** Set when F10 has been forwarded to the worker; if the worker reports
+     *  the keypress wasn't consumed by any widget, the widget list opens as a
+     *  fallback. Reset on the inputConsumed reply so a second F10 between
+     *  dispatch and reply doesn't queue a stale toggle. */
+    private lastF10Pending = false;
+
     /** Listener cleanup for the always-on mouse tracker. */
     private mouseTrackingCleanups: (() => void)[] = [];
 
@@ -464,7 +470,11 @@ export class LuaWidgetManager {
 
     private logMessageTraffic(dir: 'main→worker' | 'worker→main', msg: Record<string, unknown>): void {
         // Skip high-frequency or meta channels to avoid drowning real logs.
-        if (msg.type === 'log' || msg.type === 'mousemove' || msg.type === 'stateUpdate' || msg.type === 'entityState') return;
+        if (msg.type === 'log'
+            || msg.type === 'mousemove'
+            || msg.type === 'stateUpdate'
+            || msg.type === 'gameInfo'
+            || msg.type === 'entityState') return;
         const t = String(msg.type ?? '?');
         let summary = t;
         switch (t) {
@@ -583,10 +593,16 @@ export class LuaWidgetManager {
 
             case 'inputConsumed':
                 // The worker reports whether the just-dispatched event was
-                // claimed by a widget. We don't act on it directly today —
-                // the cursorOverUI flag (kept up-to-date via uiHover) already
-                // suppresses ground actions before the click fires. Logged
-                // here so the debug console shows widget-vs-world routing.
+                // claimed by a widget. cursorOverUI (from uiHover) handles
+                // mouse-click suppression on the InputManager side, so we
+                // only react to keypress here: F10 falls back to the widget
+                // list if no chili menu (epicmenu, etc.) claimed it.
+                if (msg.kind === 'keypress' && this.lastF10Pending) {
+                    this.lastF10Pending = false;
+                    if (!msg.consumed) {
+                        this.toggleWidgetList();
+                    }
+                }
                 break;
         }
     }
@@ -606,19 +622,25 @@ export class LuaWidgetManager {
             // Track modifier keys for GetModKeyState
             this.modKeys = { alt: e.altKey, ctrl: e.ctrlKey, meta: e.metaKey, shift: e.shiftKey };
 
-            // F9 / F10 toggle the widget list. F10 is the conventional
-            // Spring "menu" key — Lua games (ZK epicmenu) bind it via the
-            // action handler, and any widget that claims F10 still gets
-            // it because we forward the keypress to the worker below
-            // before the early return. F11 is reserved by macOS for
-            // full-screen so we don't use it here.
-            if ((e.key === 'F9' || e.key === 'F10') && !e.ctrlKey && !e.altKey && !e.metaKey) {
+            // F9 always opens the engine widget list immediately — it's
+            // the developer escape hatch and never goes through Lua. F11
+            // is reserved by macOS for full-screen, so we don't use it.
+            if (e.key === 'F9' && !e.ctrlKey && !e.altKey && !e.metaKey) {
                 e.preventDefault();
                 this.toggleWidgetList();
-                // Don't return — let F10 also propagate to the worker so
-                // a chili menu binding can react. F9 is engine-only and
-                // returning early for it would be safe, but unifying the
-                // two paths keeps the handler simple.
+                return;
+            }
+
+            // F10 is the conventional Spring "menu" key. Forward it to
+            // the worker so a chili-bound action (e.g. ZK's crudesubmenu
+            // → epicmenu) can claim it. If no widget consumes it, the
+            // worker replies with inputConsumed{consumed:false} and we
+            // fall back to the widget list. The fallback path lives in
+            // onWorkerMessage('inputConsumed').
+            if (e.key === 'F10' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+                e.preventDefault();
+                this.lastF10Pending = true;
+                // Fall through so the keypress is forwarded to the worker.
             }
 
             // Forward keyboard events to worker
@@ -639,11 +661,18 @@ export class LuaWidgetManager {
         window.addEventListener('keydown', this.keyHandler);
     }
 
-    // ── Dynamic input listeners ────────────────────────────────────────
+    // ── Input listeners ────────────────────────────────────────────────
     //
-    // Only registered when the worker reports widgets using those callins.
-    // This avoids sending high-frequency events (MouseMove) across the
-    // bridge when no widget cares about them.
+    // Press / release / wheel / keyup are registered unconditionally.
+    // They're low-frequency, and the worker safely no-ops if no widget
+    // claims them. Gating them on a one-shot callin probe at "ready" time
+    // races widget initialization: chili and other handler widgets often
+    // declare MousePress / MouseRelease but only finish populating
+    // widgetHandler.MousePressList during their first Update tick — by
+    // which point we'd already missed their callin in the registration.
+    //
+    // MouseMove stays gated because it fires per pointer pixel; no point
+    // serializing 200 events/sec across the bridge if nothing reads them.
 
     private registerInputListeners(callins: string[]): void {
         const canvas = this.scene.getEngine().getRenderingCanvas();
@@ -652,79 +681,122 @@ export class LuaWidgetManager {
         const has = (name: string) => callins.includes(name);
         console.log(`[LuaUI] Registering input for callins: ${callins.join(', ')}`);
 
-        // KeyRelease
-        if (has('KeyRelease')) {
-            this.keyUpHandler = (e: KeyboardEvent) => {
-                const tag = (e.target as HTMLElement)?.tagName;
-                if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-                this.postToWorker({
-                    type: 'keyrelease',
-                    keyCode: springKeyCode(e),
-                    alt: e.altKey, ctrl: e.ctrlKey, meta: e.metaKey, shift: e.shiftKey,
-                });
-            };
-            window.addEventListener('keyup', this.keyUpHandler);
-            this.inputCleanups.push(() => {
-                if (this.keyUpHandler) window.removeEventListener('keyup', this.keyUpHandler);
+        // KeyRelease — unconditional; the worker dispatches via
+        // widgetHandler:KeyRelease which no-ops cleanly when KeyReleaseList
+        // is empty.
+        this.keyUpHandler = (e: KeyboardEvent) => {
+            const tag = (e.target as HTMLElement)?.tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+            this.postToWorker({
+                type: 'keyrelease',
+                keyCode: springKeyCode(e),
+                alt: e.altKey, ctrl: e.ctrlKey, meta: e.metaKey, shift: e.shiftKey,
             });
-        }
+        };
+        window.addEventListener('keyup', this.keyUpHandler);
+        this.inputCleanups.push(() => {
+            if (this.keyUpHandler) window.removeEventListener('keyup', this.keyUpHandler);
+        });
 
-        // MousePress
-        if (has('MousePress')) {
-            const handler = (e: MouseEvent) => {
-                this.postToWorker({
-                    type: 'mousepress',
-                    x: e.offsetX, y: canvas.height - e.offsetY, // Spring Y is bottom-up
-                    button: domButtonToSpring(e.button),
-                });
-            };
-            canvas.addEventListener('mousedown', handler);
-            this.inputCleanups.push(() => canvas.removeEventListener('mousedown', handler));
-        }
+        // MousePress / MouseRelease / MouseWheel — listen on `window` in
+        // the capture phase. The Babylon scene attaches its own pointer
+        // handling to the canvas (scene.onPointerObservable), and on the
+        // first pointerdown it calls setPointerCapture. Bubble-phase
+        // listeners we registered on the canvas were never reached after
+        // that — the pointer event went straight to Babylon and never
+        // bubbled. Capture phase on window runs before any element-level
+        // capture, so we always see the event before Babylon does.
+        //
+        // Filter by hit-testing the click against the canvas bounding box
+        // rather than e.target. Walking ancestors of the target works most
+        // of the time, but stacking surprises (a stray overlay element,
+        // a HUD panel that briefly shows, the lobby UI peeking through
+        // during teardown) can pin e.target to something else even when
+        // the cursor is visually over the canvas. The bounding-box check
+        // is the same hit test the user sees.
+        //
+        // Coordinates: clientX/Y minus the canvas rect gives canvas-local
+        // CSS pixels. We then scale to backing-buffer pixels so coords
+        // match what chili's hit test expects.
+        const localCoords = (e: MouseEvent): { x: number; y: number } | null => {
+            const r = canvas.getBoundingClientRect();
+            if (e.clientX < r.left || e.clientX > r.right) return null;
+            if (e.clientY < r.top || e.clientY > r.bottom) return null;
+            const sx = canvas.width / r.width;
+            const sy = canvas.height / r.height;
+            const x = (e.clientX - r.left) * sx;
+            const y = (e.clientY - r.top) * sy;
+            return { x, y: canvas.height - y };
+        };
 
-        // MouseRelease
-        if (has('MouseRelease')) {
-            const handler = (e: MouseEvent) => {
-                this.postToWorker({
-                    type: 'mouserelease',
-                    x: e.offsetX, y: canvas.height - e.offsetY,
-                    button: domButtonToSpring(e.button),
-                });
-            };
-            canvas.addEventListener('mouseup', handler);
-            this.inputCleanups.push(() => canvas.removeEventListener('mouseup', handler));
-        }
+        // Use POINTER events, not MOUSE events. Babylon attaches its own
+        // pointerdown handler to the canvas that calls preventDefault();
+        // when preventDefault is called on a pointerdown, the browser
+        // does not synthesize the matching mousedown — so a window-level
+        // mousedown listener (capture or bubble) will never see clicks
+        // on the Babylon canvas. mouseup still fires because Babylon
+        // doesn't cancel pointerup, but a press without a release is
+        // never enough for chili to fire OnClick.
+        //
+        // Pointer events bypass that compat-event suppression and fire
+        // for both mouse and touch input. Capture phase + window scope
+        // means we run before Babylon's listener regardless of how it's
+        // attached.
+        const downHandler = (e: PointerEvent) => {
+            const c = localCoords(e);
+            if (!c) return;
+            this.postToWorker({
+                type: 'mousepress',
+                x: c.x, y: c.y,
+                button: domButtonToSpring(e.button),
+            });
+        };
+        window.addEventListener('pointerdown', downHandler, true);
+        this.inputCleanups.push(() => window.removeEventListener('pointerdown', downHandler, true));
 
-        // MouseWheel
-        if (has('MouseWheel')) {
-            const handler = (e: WheelEvent) => {
-                this.postToWorker({
-                    type: 'mousewheel',
-                    up: e.deltaY < 0,
-                    value: Math.abs(e.deltaY),
-                });
-            };
-            canvas.addEventListener('wheel', handler);
-            this.inputCleanups.push(() => canvas.removeEventListener('wheel', handler));
-        }
+        const upHandler = (e: PointerEvent) => {
+            const c = localCoords(e);
+            if (!c) return;
+            this.postToWorker({
+                type: 'mouserelease',
+                x: c.x, y: c.y,
+                button: domButtonToSpring(e.button),
+            });
+        };
+        window.addEventListener('pointerup', upHandler, true);
+        this.inputCleanups.push(() => window.removeEventListener('pointerup', upHandler, true));
 
-        // MouseMove — only if widgets actually use it (high frequency)
+        const wheelHandler = (e: WheelEvent) => {
+            if (e.target !== canvas) return;
+            this.postToWorker({
+                type: 'mousewheel',
+                up: e.deltaY < 0,
+                value: Math.abs(e.deltaY),
+            });
+        };
+        window.addEventListener('wheel', wheelHandler, true);
+        this.inputCleanups.push(() => window.removeEventListener('wheel', wheelHandler, true));
+
+        // MouseMove → pointermove (same compat-suppression reasoning as
+        // the click handlers). Gated on MouseMove/IsAbove callins because
+        // it's high-frequency and we don't want to serialize per-pixel
+        // events when no widget cares.
         if (has('MouseMove') || has('IsAbove')) {
-            const handler = (e: MouseEvent) => {
-                const x = e.offsetX;
-                const y = canvas.height - e.offsetY;
-                const dx = x - this.lastMouseX;
-                const dy = y - this.lastMouseY;
-                this.lastMouseX = x;
-                this.lastMouseY = y;
+            const handler = (e: PointerEvent) => {
+                const c = localCoords(e);
+                if (!c) return;
+                const dx = c.x - this.lastMouseX;
+                const dy = c.y - this.lastMouseY;
+                this.lastMouseX = c.x;
+                this.lastMouseY = c.y;
                 this.postToWorker({
                     type: 'mousemove',
-                    x, y, dx, dy,
+                    x: c.x, y: c.y, dx, dy,
                     button: e.buttons ? domButtonToSpring(e.button) : 0,
                 });
             };
-            canvas.addEventListener('mousemove', handler);
-            this.inputCleanups.push(() => canvas.removeEventListener('mousemove', handler));
+            window.addEventListener('pointermove', handler, true);
+            this.inputCleanups.push(() => window.removeEventListener('pointermove', handler, true));
         }
     }
 

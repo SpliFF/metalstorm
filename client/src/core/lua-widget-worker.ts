@@ -1457,6 +1457,57 @@ defaultFont = activeFont
         end
     `, 'post_bootstrap_api_stubs');
 
+    // Wire Spring.SendCommands into the widget actionHandler so chili
+    // OnClick handlers that dispatch via "luaui foo" actually run their
+    // bound action. The original engine routes SendCommands like:
+    //   "luaui foo bar" → widgetHandler.actionHandler:TextAction("foo bar")
+    //   "bind/unbind/set/pause/..." → the engine's own command parser
+    //
+    // We have no engine-side command parser yet, so non-luaui commands
+    // are dropped (silently, since most are key bindings whose effect is
+    // recreated by widgets registering actions). The `luaui` route is
+    // the critical path — without it, every chili button that calls
+    // SendCommands fails to do anything visible.
+    //
+    // Argument shapes accepted by Spring.SendCommands:
+    //   SendCommands("foo")              — single string
+    //   SendCommands("foo", "bar", ...)  — varargs
+    //   SendCommands{"foo", "bar", ...}  — single table arg
+    runtime.doString(`
+        if Spring then
+            Spring.SendCommands = function(...)
+                local args = {...}
+                local lines
+                if #args == 1 and type(args[1]) == "table" then
+                    lines = args[1]
+                else
+                    lines = args
+                end
+                for i = 1, #lines do
+                    local line = lines[i]
+                    if type(line) == "string" then
+                        local rest = line:match("^luaui%s+(.+)")
+                        if rest and widgetHandler and widgetHandler.actionHandler
+                                and widgetHandler.actionHandler.TextAction then
+                            local ok, err = pcall(widgetHandler.actionHandler.TextAction,
+                                widgetHandler.actionHandler, rest)
+                            if not ok then
+                                Spring.Echo("[SendCommands] TextAction error: " .. tostring(err))
+                            end
+                        else
+                            -- Other engine commands (bind, unbind, set,
+                            -- pause, etc.) — no engine-side handler in
+                            -- the browser. Log at debug so we can see
+                            -- which commands widgets expect us to honor.
+                            Spring.Log("LuaUI", 1, "[SendCommands] unhandled: " .. line)
+                        end
+                    end
+                end
+            end
+            Spring.Echo("[LuaUI] Spring.SendCommands wired to actionHandler.TextAction")
+        end
+    `, 'send_commands_dispatch');
+
     // Fix Chili TaskHandler queue desync: fengari's weak table GC
     // collects entries from the TaskHandler's objects/objects2 queues
     // before Update() processes them. This causes controls to be stuck
@@ -2284,9 +2335,15 @@ function shutdown(): void {
 
 self.onmessage = async (e: MessageEvent) => {
     const msg = e.data;
-    // Debug-level trace of inbound messages (skip high-frequency input
-    // events to avoid drowning real log entries).
-    if (msg.type !== 'mousemove') {
+    // Debug-level trace of inbound messages (skip high-frequency
+    // channels to avoid drowning real log entries: pointer movement,
+    // per-frame stateUpdate from the main thread's mouseState/camera
+    // tracker, gameInfo (frame/speed/wind ticking every frame), and
+    // the entityState snapshot stream).
+    if (msg.type !== 'mousemove'
+        && msg.type !== 'stateUpdate'
+        && msg.type !== 'gameInfo'
+        && msg.type !== 'entityState') {
         postLog(1, `[LuaUI:main→worker] ${describeInboundMessage(msg)}`);
     }
     switch (msg.type) {
@@ -2335,17 +2392,15 @@ self.onmessage = async (e: MessageEvent) => {
             break;
 
         case 'mousepress':
-            // liveState.mouse is kept fresh by the main thread's always-on
-            // tracker; this case only fires the widget callin.
             if (runtime) {
-                const consumed = runtime.evalString(`
+                const consumedStr = runtime.evalString(`
                     if widgetHandler and widgetHandler.MousePress then
                         local ok, ret = pcall(widgetHandler.MousePress, widgetHandler, ${msg.x}, ${msg.y}, ${msg.button})
                         return ok and ret and "1" or "0"
                     end
                     return "0"
                 `);
-                postToMain({ type: 'inputConsumed', kind: 'mousepress', consumed: consumed === '1' });
+                postToMain({ type: 'inputConsumed', kind: 'mousepress', consumed: consumedStr === '1' });
             }
             break;
 
