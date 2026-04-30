@@ -84,6 +84,13 @@ export class GlyphAtlas {
     /** Font global ascent in pixels at the rasterised cssSize. Used by
      *  renderString to position each glyph by its baseline. */
     ascentPx: number;
+    /** Cap-height ascent in pixels (no diacritic marks). Used for visual
+     *  centring on buttons/labels — `ascentPx` includes the topmost
+     *  diacritic dot of Å/Ö which sits well above cap height, biasing
+     *  centred text upward by 3-5 px on common sans-serif fonts. */
+    centerAscentPx: number;
+    /** Descent in pixels at the rasterised cssSize (positive value). */
+    descentPx: number;
 
     /** Kerning table: "AB" → pixel offset */
     private kernTable = new Map<string, number>();
@@ -136,6 +143,13 @@ export class GlyphAtlas {
         this.lineheight = (ascent + descent + GLYPH_PAD * 2) / cssSize;
         this.descender = -descent / cssSize;
         this.ascentPx = ascent;
+        this.descentPx = descent;
+        // Cap-height-only ascent: probe a string with the *visual top* at
+        // cap height (no diacriticals). Used for visual centring so caps
+        // like "CLOSE" don't sit 3-5 px above the button's geometric centre
+        // because of unused space reserved for accent marks.
+        const capMetrics = this.ctx.measureText('Hg');
+        this.centerAscentPx = capMetrics.actualBoundingBoxAscent ?? cssSize * 0.7;
 
         // Create WebGL texture
         this.texture = gl.createTexture()!;
@@ -389,12 +403,12 @@ export function createLuaFontObject(
             // Measure text width for alignment
             const scale = drawSize / atlas.fontSize;
             const textW = measureText(atlas, str) * scale;
-            // Visual text height (ascent + descent) excludes atlas padding,
-            // unlike `lineheight` which adds 2*PAD for line stacking. For
-            // visual centring we want the *visible* glyph bounds, not the
-            // line cell — using lineheight here shifts text up by ~PAD px.
-            const descentPx = -atlas.descender * atlas.fontSize;
-            const visualH = (atlas.ascentPx + descentPx) * scale;
+            // Visual text height for centring: use cap-height ascent (no
+            // diacritic offset) + descent. `atlas.ascentPx` includes the
+            // topmost extent of Å/Ö dots which is 3-5 px above cap height
+            // — using it for valign='v' biases caps like "CLOSE" upward
+            // by that amount. centerAscentPx is the cap-only ascent.
+            const visualH = (atlas.centerAscentPx + atlas.descentPx) * scale;
             const lineH = atlas.lineheight * drawSize;
 
             // Horizontal alignment
@@ -417,8 +431,16 @@ export function createLuaFontObject(
                 // Centre the visible glyph bounds, not the line cell.
                 py += visualH / 2;
             } else if (wantLineCenter) {
-                // 'linecenter' centres the FIRST LINE's visual bounds on y.
-                py += visualH / 2;
+                // 'x' (linecenter): in Spring's font handler this means
+                // "line baseline so that line CENTER is at y". Chili's
+                // skin DrawButton/Font:DrawInBox both pre-adjust y to
+                // compensate for the cap-vs-line-centre offset (e.g.
+                // skinutils.DrawButton: y = button_y + h/2 - size*0.35),
+                // so by the time we receive 'x', y is already at the
+                // correct *baseline-relative* anchor — adding visualH/2
+                // here would double-adjust and shift text UP by ~visualH/2.
+                // No additional offset; the caller's pre-adjustment is
+                // what positions the text.
             } else if (wantBottom) {
                 py += visualH;
             }
