@@ -517,10 +517,37 @@ export class LuaGLBridge {
         const y1 = Number(args[1]);
         const x2 = Number(args[2]);
         const y2 = Number(args[3]);
-        const s1 = Number(args[4] ?? 0);
-        const t1 = Number(args[5] ?? 0);
-        const s2 = Number(args[6] ?? 1);
-        const t2 = Number(args[7] ?? 1);
+        // Spring's gl.TexRect supports three signatures:
+        //   gl.TexRect(x1, y1, x2, y2)                           -> UVs 0..1
+        //   gl.TexRect(x1, y1, x2, y2, flipX, flipY)             -> boolean flip flags
+        //   gl.TexRect(x1, y1, x2, y2, s1, t1, s2, t2)           -> explicit UVs
+        // Chili's Image control and skinutils._DrawTextureAspect use the
+        // boolean form heavily. Detecting on typeof avoids treating booleans
+        // as Number(false)=0 / Number(true)=1, which would collapse the UV
+        // box to a 1px stripe and hide every Image-rendered chili button.
+        //
+        // Note on flipY semantics: Chili widgets default to flipY=true to
+        // compensate for `gl.Scale(1,-1,1)` against Spring's DevIL texture
+        // upload (DevIL puts row 0 at the visual bottom of the source).
+        // WebGL's `createImageBitmap` uploads row 0 = visual top, the opposite
+        // convention — so the chili-intended "flip" is already implicit in
+        // our texture data. We invert flipY here so chili's flipY=true (the
+        // common case) maps to a natural sampling, rendering the image
+        // upright instead of upside-down. flipX has no equivalent mismatch.
+        let s1: number, t1: number, s2: number, t2: number;
+        if (typeof args[4] === 'boolean' || typeof args[5] === 'boolean') {
+            const flipX = !!args[4];
+            const flipY = !!args[5];
+            s1 = flipX ? 1 : 0;
+            s2 = flipX ? 0 : 1;
+            t1 = flipY ? 0 : 1;
+            t2 = flipY ? 1 : 0;
+        } else {
+            s1 = Number(args[4] ?? 0);
+            t1 = Number(args[5] ?? 0);
+            s2 = Number(args[6] ?? 1);
+            t2 = Number(args[7] ?? 1);
+        }
         this.imm.setTextured(this.hasTextureUnit0, this.boundTextureUnit0);
         this.imm.texRect(x1, y1, x2, y2, s1, t1, s2, t2);
     }
