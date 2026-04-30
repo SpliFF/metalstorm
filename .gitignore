@@ -80,3 +80,7 @@ infolog.txt
 
 # Vite development server for frontend
 /client/.vite
+
+# MCP tool
+tools/debug-mcp/node_modules/
+
