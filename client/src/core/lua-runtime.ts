@@ -272,7 +272,24 @@ export class LuaRuntime {
         } else if (typeof v === 'number') {
             lua.lua_pushnumber(L, v);
         } else if (typeof v === 'string') {
-            lua.lua_pushstring(L, to_luastring(v));
+            // Push as byte-1:1 to mirror the LUA_TSTRING decode path. Using
+            // fengari's to_luastring (UTF-8 encoder) here would re-encode
+            // codepoint 0xff (carried byte-1:1 from a Lua color code) into
+            // two bytes (c3 bf), which then appear as garbled accented
+            // glyphs when chili re-renders a round-tripped string (e.g.
+            // Label:_caption from font:WrapText). Codepoints >255 still
+            // need UTF-8 encoding; only fall back for those.
+            let allLatin1 = true;
+            for (let i = 0; i < v.length; i++) {
+                if (v.charCodeAt(i) > 0xff) { allLatin1 = false; break; }
+            }
+            if (allLatin1) {
+                const bytes = new Uint8Array(v.length);
+                for (let i = 0; i < v.length; i++) bytes[i] = v.charCodeAt(i);
+                lua.lua_pushstring(L, bytes);
+            } else {
+                lua.lua_pushstring(L, to_luastring(v));
+            }
         } else if (isOpaque(v)) {
             // Opaque handle (gl.*) — round-trip via lightuserdata so the
             // JS object reference stays intact.

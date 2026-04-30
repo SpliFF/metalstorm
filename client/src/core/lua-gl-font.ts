@@ -389,7 +389,12 @@ export function createLuaFontObject(
             // Measure text width for alignment
             const scale = drawSize / atlas.fontSize;
             const textW = measureText(atlas, str) * scale;
-            const textH = atlas.lineheight * drawSize;
+            // Visual text height (ascent + descent) excludes atlas padding,
+            // unlike `lineheight` which adds 2*PAD for line stacking. For
+            // visual centring we want the *visible* glyph bounds, not the
+            // line cell — using lineheight here shifts text up by ~PAD px.
+            const descentPx = -atlas.descender * atlas.fontSize;
+            const visualH = (atlas.ascentPx + descentPx) * scale;
             const lineH = atlas.lineheight * drawSize;
 
             // Horizontal alignment
@@ -409,14 +414,13 @@ export function createLuaFontObject(
             const wantLineCenter = valignWord === 'linecenter' || flagChars.includes('x');
             const wantBottom     = valignWord === 'bottom'     || flagChars.includes('b');
             if (wantCenterY) {
-                py += textH / 2;
+                // Centre the visible glyph bounds, not the line cell.
+                py += visualH / 2;
             } else if (wantLineCenter) {
-                // 'linecenter' centres the FIRST LINE on y (vs 'v' which
-                // centres the whole block). For single-line text this is
-                // identical to 'v'.
-                py += lineH / 2;
+                // 'linecenter' centres the FIRST LINE's visual bounds on y.
+                py += visualH / 2;
             } else if (wantBottom) {
-                py += textH;
+                py += visualH;
             }
             // 'top' / 'ascender' / no flag = no adjustment (text top at y).
 
@@ -433,17 +437,27 @@ export function createLuaFontObject(
                     scale, [0, 0, 0, textColor[3] * 0.6]);
             }
 
-            // Draw outline pass (4 offset copies)
+            // Draw outline pass.
+            // Spring's native renderer pre-bakes a Gaussian-blurred outline
+            // into the atlas. We approximate with 4 offset copies at the
+            // outline width — fewer samples than the previous 8-position
+            // pattern (which over-saturated edges into a "bold" look). Per-
+            // pass alpha is reduced so the cumulative coverage matches an
+            // anti-aliased outline rather than stacking to full opacity.
             if (drawOutline) {
                 const ow = outlineWidth * scale;
+                // outlineWeight (0..4 typically, default 3) scales alpha so
+                // higher weights produce a more saturated outline. Each pass
+                // contributes ~1/4 of the alpha; clamp to 1.
+                const weightAlpha = Math.min(1, (outlineWeight || 1) / 4);
+                const passAlpha = (outlineColor[3] ?? 1) * weightAlpha;
+                const oc = [outlineColor[0], outlineColor[1], outlineColor[2], passAlpha];
                 const offsets = [
                     [-ow, 0], [ow, 0], [0, -ow], [0, ow],
-                    [-ow * 0.7, -ow * 0.7], [ow * 0.7, -ow * 0.7],
-                    [-ow * 0.7, ow * 0.7], [ow * 0.7, ow * 0.7],
                 ];
                 for (const [ox, oy] of offsets) {
                     renderString(atlas, imm, gl, str, px + ox, py + oy,
-                        scale, outlineColor);
+                        scale, oc);
                 }
             }
 
@@ -509,21 +523,33 @@ export function createLuaFontObject(
 /** Measure text width in atlas-native pixels (before scaling). */
 function measureText(atlas: GlyphAtlas, text: string): number {
     let width = 0;
+    let lineWidth = 0;
     for (let i = 0; i < text.length; i++) {
         const ch = text[i];
-        if (ch === '\n') continue;
+        if (ch === '\n') {
+            // Track widest line for multi-line strings.
+            if (lineWidth > width) width = lineWidth;
+            lineWidth = 0;
+            continue;
+        }
         // Strip Spring color codes: \255\r\g\b (4 bytes)
         if (ch === '\xff' && i + 3 < text.length) {
             i += 3;
             continue;
         }
+        // Skip Spring "pop colour" (\b) and other low-control bytes — these
+        // are formatting markers, not glyphs. Without this, Canvas2D draws
+        // the codepoint's tofu/replacement glyph (a small accented box).
+        const code = ch.charCodeAt(0);
+        if (code < 0x20 && code !== 0x09) continue;
         const glyph = atlas.getGlyph(ch);
-        width += glyph.advance;
+        lineWidth += glyph.advance;
         // Kerning with next character
         if (i + 1 < text.length) {
-            width += atlas.getKerning(ch, text[i + 1]);
+            lineWidth += atlas.getKerning(ch, text[i + 1]);
         }
     }
+    if (lineWidth > width) width = lineWidth;
     return width;
 }
 
@@ -582,6 +608,16 @@ function renderString(
             i += 3;
             continue;
         }
+
+        // Spring "pop colour" marker (\b) restores the base colour. Other
+        // low-control bytes (apart from \t) have no glyph — skip them so
+        // Canvas2D doesn't render a tofu box.
+        const code = ch.charCodeAt(0);
+        if (code === 0x08) {
+            imm.color(color[0], color[1], color[2], color[3] ?? 1);
+            continue;
+        }
+        if (code < 0x20 && code !== 0x09) continue;
 
         const glyph = atlas.getGlyph(ch);
         if (glyph.w > 0 && glyph.h > 0) {
