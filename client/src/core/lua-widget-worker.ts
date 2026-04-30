@@ -1288,6 +1288,70 @@ defaultFont = activeFont
         }
     }
 
+    // Patch chili_old/Controls/combobox.lua: harden _CloseWindow against
+    // exceptions from OnSelect / OnClose listeners.
+    //
+    // The original close path is:
+    //   _dropDownWindow:Dispose()
+    //   _dropDownWindow = nil
+    //
+    // and the popup's OnMouseUp listener is
+    //   function() self:Select(i); self:_CloseWindow() end
+    //
+    // If `Select` or any `OnSelect` listener errors (a real risk when
+    // ZK widgets read partial UnitDefs / config state), `_CloseWindow`
+    // never runs. The popup window keeps its `_dropDownWindow` ref, so
+    // the next click on the combobox button takes the `else` branch
+    // (`_CloseWindow()` again, which now succeeds since the window is
+    // already disposed) instead of opening a fresh popup. The user has
+    // to click somewhere else (which triggers FocusUpdate → does run
+    // _CloseWindow) and then click the combobox to get a new dropdown.
+    //
+    // Fix: invert the order — null `_dropDownWindow` *before* Dispose,
+    // and pcall-wrap the Dispose itself. Even if listeners further down
+    // the chain throw, the next click sees a clean state. Also clear
+    // `self.labels` and `self.state.pressed` regardless so the visual
+    // pressed state never sticks.
+    const comboboxPath = 'LuaUI/Widgets/chili_old/Controls/combobox.lua';
+    const comboboxSrc = vfsLookup(comboboxPath);
+    if (comboboxSrc) {
+        const oldClose =
+            'function ComboBox:_CloseWindow()\n' +
+            '  self.labels = nil\n' +
+            '  if self._dropDownWindow then\n' +
+            '    self:CallListeners(self.OnClose)\n' +
+            '    self._dropDownWindow:Dispose()\n' +
+            '    self._dropDownWindow = nil\n' +
+            '  end\n' +
+            '  if (self.state.pressed) then\n' +
+            '    self.state.pressed = false\n' +
+            '    self:Invalidate()\n' +
+            '    return self\n' +
+            '  end\n' +
+            'end';
+        const newClose =
+            'function ComboBox:_CloseWindow()\n' +
+            '  self.labels = nil\n' +
+            '  local win = self._dropDownWindow\n' +
+            '  self._dropDownWindow = nil\n' +
+            '  if win then\n' +
+            '    pcall(self.CallListeners, self, self.OnClose)\n' +
+            '    pcall(win.Dispose, win)\n' +
+            '  end\n' +
+            '  if (self.state.pressed) then\n' +
+            '    self.state.pressed = false\n' +
+            '    self:Invalidate()\n' +
+            '    return self\n' +
+            '  end\n' +
+            'end';
+        if (comboboxSrc.includes(oldClose)) {
+            vfsRegister(comboboxPath, comboboxSrc.replace(oldClose, newClose));
+            postLog(2, '[LuaUI] Patched combobox.lua: _CloseWindow null-before-dispose');
+        } else {
+            postLog(3, '[LuaUI] combobox.lua _CloseWindow patch — anchor not found');
+        }
+    }
+
     // Patch chili_old/Headers/util.lua: color2incolor passes floats
     // (r*255 etc.) into string.char, which fengari's Lua 5.3 rejects
     // with "number has no integer representation". Wrap with math.floor
@@ -1319,6 +1383,293 @@ defaultFont = activeFont
     // chili Label uses Font:DrawInBox which calls AdjustPosToAlignment
     // — that path produces 'x' directly with a y pre-adjusted for
     // baseline-at-y, so labels still work without this patch.
+
+    // Install Spring.SendCommands wrap BEFORE bootstrap so any
+    // bind/unbind/etc. issued during widget Initialize is captured into
+    // our _keyBindings table. epicmenu in particular runs `unbindall`
+    // followed by `bind <key> <action>` for the entire default keymap
+    // during its Initialize → LoadKeybinds → ReApplyKeybinds chain. If
+    // we install the wrap post-bootstrap, those binds hit the no-op
+    // pre-wrap and our table stays empty.
+    //
+    // The wrap looks up widgetHandler at call time (not at install
+    // time), so it's fine that widgetHandler doesn't exist yet — by the
+    // time SendCommands is called for a `luaui ...` line, cawidgets
+    // has loaded.
+    runtime.doString(`
+        if not Spring then return end
+
+        -- Keybind state. _keyBindings maps a normalised keyset string to
+        -- an array of { [cmd] = args } tables (the format KeyAction in
+        -- actions.lua expects from Spring.GetKeyBindings). _hotkeysFor
+        -- maps an action name to an array of keyset strings.
+        _keyBindings = _keyBindings or {}
+        _hotkeysFor  = _hotkeysFor  or {}
+
+        -- Normalise modifier order: alphabetical by token, lowercase key
+        -- name. "Shift+Ctrl+f10" → "C+S+f10". KeyAction in actions.lua
+        -- builds keysets via "A+C+M+S+<key>" so that's the canonical form.
+        local function normaliseKeyset(ks)
+            ks = tostring(ks or ""):lower()
+            local mods = { a = false, c = false, m = false, s = false }
+            local rest = ks
+            local changed = true
+            while changed do
+                changed = false
+                local _, _, m, tail = rest:find("^(%a)(%+)(.*)")
+                if m and (m == "a" or m == "c" or m == "m" or m == "s") then
+                    mods[m] = true
+                    rest = tail or ""
+                    changed = true
+                else
+                    -- also support "alt+", "ctrl+", "meta+", "shift+" prefixes
+                    local pre, after = rest:match("^(%a+)%+(.*)")
+                    if pre == "alt" then mods.a = true; rest = after; changed = true
+                    elseif pre == "ctrl" then mods.c = true; rest = after; changed = true
+                    elseif pre == "meta" then mods.m = true; rest = after; changed = true
+                    elseif pre == "shift" then mods.s = true; rest = after; changed = true
+                    end
+                end
+            end
+            local out = ""
+            if mods.a then out = out .. "A+" end
+            if mods.c then out = out .. "C+" end
+            if mods.m then out = out .. "M+" end
+            if mods.s then out = out .. "S+" end
+            return out .. rest
+        end
+
+        local function bindAction(keyset, cmd, args)
+            keyset = normaliseKeyset(keyset)
+            cmd = tostring(cmd or "")
+            args = tostring(args or "")
+            if cmd == "" then return end
+            local list = _keyBindings[keyset]
+            if not list then list = {}; _keyBindings[keyset] = list end
+            -- Duplicate-bind guard: if the same keyset/cmd pair is already
+            -- there, refresh its args rather than appending.
+            for i = 1, #list do
+                local existing = list[i]
+                local k = next(existing)
+                if k == cmd then
+                    list[i] = { [cmd] = args }
+                    return
+                end
+            end
+            list[#list+1] = { [cmd] = args }
+            local hotkeys = _hotkeysFor[cmd]
+            if not hotkeys then hotkeys = {}; _hotkeysFor[cmd] = hotkeys end
+            for i = 1, #hotkeys do
+                if hotkeys[i] == keyset then return end
+            end
+            hotkeys[#hotkeys+1] = keyset
+        end
+
+        local function unbindAction(keyset, cmd)
+            keyset = normaliseKeyset(keyset)
+            cmd = tostring(cmd or "")
+            local list = _keyBindings[keyset]
+            if list then
+                for i = #list, 1, -1 do
+                    local k = next(list[i])
+                    if cmd == "" or k == cmd then
+                        table.remove(list, i)
+                    end
+                end
+                if #list == 0 then _keyBindings[keyset] = nil end
+            end
+            if cmd ~= "" then
+                local hotkeys = _hotkeysFor[cmd]
+                if hotkeys then
+                    for i = #hotkeys, 1, -1 do
+                        if hotkeys[i] == keyset then table.remove(hotkeys, i) end
+                    end
+                    if #hotkeys == 0 then _hotkeysFor[cmd] = nil end
+                end
+            end
+        end
+
+        local function unbindKeyset(keyset)
+            keyset = normaliseKeyset(keyset)
+            local list = _keyBindings[keyset]
+            if not list then return end
+            for i = 1, #list do
+                local k = next(list[i])
+                local hotkeys = _hotkeysFor[k]
+                if hotkeys then
+                    for j = #hotkeys, 1, -1 do
+                        if hotkeys[j] == keyset then table.remove(hotkeys, j) end
+                    end
+                    if #hotkeys == 0 then _hotkeysFor[k] = nil end
+                end
+            end
+            _keyBindings[keyset] = nil
+        end
+
+        local function unbindActionEverywhere(cmd)
+            cmd = tostring(cmd or "")
+            local hotkeys = _hotkeysFor[cmd]
+            if hotkeys then
+                for i = 1, #hotkeys do
+                    local list = _keyBindings[hotkeys[i]]
+                    if list then
+                        for j = #list, 1, -1 do
+                            if next(list[j]) == cmd then table.remove(list, j) end
+                        end
+                        if #list == 0 then _keyBindings[hotkeys[i]] = nil end
+                    end
+                end
+                _hotkeysFor[cmd] = nil
+            end
+        end
+
+        local function unbindAll()
+            _keyBindings = {}
+            _hotkeysFor  = {}
+        end
+
+        -- Engine commands we accept silently (no-op until something on the
+        -- C++ side can actually honor them). Anything outside this set
+        -- still logs at info level so missing handlers stay visible.
+        local engineNoOps = {
+            ["set"] = true, ["set2"] = true, ["unset"] = true,
+            ["pause"] = true,
+            ["console"] = true, ["inputtextgeo"] = true,
+            ["screenshot"] = true, ["quit"] = true, ["reload"] = true,
+            ["fps"] = true, ["clock"] = true, ["info"] = true,
+            ["chat"] = true, ["chatall"] = true, ["chatally"] = true,
+            ["chatspec"] = true, ["chatswitchally"] = true,
+            ["chatswitchspec"] = true, ["chatswitchall"] = true,
+            ["say"] = true, ["wbynum"] = true, ["w"] = true,
+            ["specfullview"] = true, ["specteam"] = true,
+            ["forcestart"] = true, ["resign"] = true, ["team"] = true,
+            ["spectator"] = true, ["spec"] = true, ["singlestep"] = true,
+            ["nopause"] = true, ["nohelp"] = true, ["nocost"] = true,
+            ["godmode"] = true, ["cheat"] = true, ["nospectatorchat"] = true,
+            ["mapinfo"] = true, ["minimap"] = true,
+            ["mute"] = true, ["mutebyid"] = true,
+            ["disticon"] = true, ["distdraw"] = true,
+            ["luaui"] = true, ["luarules"] = true, ["luagaia"] = true,
+        }
+
+        local seenUnhandled = {}
+
+        local function dispatchOne(line)
+            if type(line) ~= "string" then return end
+            local trimmed = line:match("^%s*(.-)%s*$")
+            if trimmed == "" then return end
+
+            -- "luaui foo bar" → actionHandler.TextAction("foo bar")
+            local rest = trimmed:match("^luaui%s+(.+)")
+            if rest and widgetHandler and widgetHandler.actionHandler
+                    and widgetHandler.actionHandler.TextAction then
+                local ok, err = pcall(widgetHandler.actionHandler.TextAction,
+                    widgetHandler.actionHandler, rest)
+                if not ok then
+                    Spring.Echo("[SendCommands] TextAction error: " .. tostring(err))
+                end
+                return
+            end
+
+            -- bind <keyset> <cmd> [args...]
+            local bks, bcmd, bargs = trimmed:match("^bind%s+(%S+)%s+(%S+)%s*(.*)$")
+            if bks then bindAction(bks, bcmd, bargs); return end
+
+            -- bindaction is a synonym used by some configs
+            local baks, bacmd, baargs = trimmed:match("^bindaction%s+(%S+)%s+(%S+)%s*(.*)$")
+            if baks then bindAction(baks, bacmd, baargs); return end
+
+            -- unbind <keyset> <cmd>  /  unbind <keyset>
+            local uks, ucmd = trimmed:match("^unbind%s+(%S+)%s+(%S+)$")
+            if uks then unbindAction(uks, ucmd); return end
+            local uks2 = trimmed:match("^unbind%s+(%S+)$")
+            if uks2 then unbindAction(uks2, ""); return end
+
+            -- unbindkeyset <keyset>
+            local kks = trimmed:match("^unbindkeyset%s+(%S+)$")
+            if kks then unbindKeyset(kks); return end
+
+            -- unbindaction <cmd>
+            local uac = trimmed:match("^unbindaction%s+(%S+)$")
+            if uac then unbindActionEverywhere(uac); return end
+
+            if trimmed == "unbindall" or trimmed:match("^unbindall%s") then
+                unbindAll(); return
+            end
+
+            local head = trimmed:match("^(%S+)")
+            if head and engineNoOps[head:lower()] then return end
+
+            if head and not seenUnhandled[head] then
+                seenUnhandled[head] = true
+                Spring.Log("LuaUI", 2, "[SendCommands] unhandled: " .. trimmed)
+            end
+        end
+
+        Spring.SendCommands = function(...)
+            local args = {...}
+            local lines
+            if #args == 1 and type(args[1]) == "table" then
+                lines = args[1]
+            else
+                lines = args
+            end
+            for i = 1, #lines do
+                dispatchOne(lines[i])
+            end
+        end
+
+        -- Drive Spring.GetKeyBindings off our keybind table. KeyAction in
+        -- actions.lua passes a single keyset string and expects a list of
+        -- {cmd=args} tables. The second arg (scanset) is treated the same.
+        Spring.GetKeyBindings = function(keyset, scanset)
+            if not keyset and not scanset then return {} end
+            local primary = _keyBindings[normaliseKeyset(keyset or scanset)]
+            if primary and #primary > 0 then return primary end
+            if keyset and scanset then
+                local secondary = _keyBindings[normaliseKeyset(scanset)]
+                if secondary then return secondary end
+            end
+            return {}
+        end
+
+        Spring.GetActionHotKeys = function(action)
+            local list = _hotkeysFor[tostring(action or "")]
+            if not list then return {} end
+            local copy = {}
+            for i = 1, #list do copy[i] = list[i] end
+            return copy
+        end
+
+        -- Friendly Spring.GetKeySymbol so MakeKeySetString in actions.lua
+        -- can produce e.g. "f10" instead of "". The mapping mirrors the
+        -- keycode table the manager forwards via 'keypress' messages.
+        local _keySymbols = {
+            [8]   = "backspace",
+            [9]   = "tab",
+            [13]  = "enter", [27] = "escape", [32] = "space",
+            [127] = "delete",
+            [273] = "up", [274] = "down", [275] = "right", [276] = "left",
+            [277] = "insert", [278] = "home", [279] = "end",
+            [280] = "pageup", [281] = "pagedown",
+            [282] = "f1", [283] = "f2", [284] = "f3", [285] = "f4",
+            [286] = "f5", [287] = "f6", [288] = "f7", [289] = "f8",
+            [290] = "f9", [291] = "f10", [292] = "f11", [293] = "f12",
+        }
+        Spring.GetKeySymbol = function(keyCode)
+            local n = tonumber(keyCode) or 0
+            local s = _keySymbols[n]
+            if s then return s, s end
+            if n >= 32 and n < 127 then
+                local c = string.char(n)
+                return c, c
+            end
+            return "", ""
+        end
+        Spring.GetScanSymbol = Spring.GetScanSymbol or Spring.GetKeySymbol
+
+        Spring.Echo("[LuaUI] Spring.SendCommands wired (luaui + keybind table)")
+    `, 'send_commands_dispatch');
 
     postLog(2, '[LuaUI] init step 7/8: starting bootstrap (VFS.Include camain.lua)...');
     const bootStart = performance.now();
@@ -1457,56 +1808,160 @@ defaultFont = activeFont
         end
     `, 'post_bootstrap_api_stubs');
 
-    // Wire Spring.SendCommands into the widget actionHandler so chili
-    // OnClick handlers that dispatch via "luaui foo" actually run their
-    // bound action. The original engine routes SendCommands like:
-    //   "luaui foo bar" → widgetHandler.actionHandler:TextAction("foo bar")
-    //   "bind/unbind/set/pause/..." → the engine's own command parser
+    // EPIC menu submenu watchdog. The user-visible bug is that clicking
+    // any epicmenu top-bar button (Main Menu, Game, Help, ...) runs the
+    // OnClick listener (we can see ActionSubmenu in the trace) but no
+    // submenu Window appears.
     //
-    // We have no engine-side command parser yet, so non-luaui commands
-    // are dropped (silently, since most are key bindings whose effect is
-    // recreated by widgets registering actions). The `luaui` route is
-    // the critical path — without it, every chili button that calls
-    // SendCommands fails to do anything visible.
+    // We can't trace MakeSubWindow easily because it's a *file-local* in
+    // gui_epicmenu (forward-declared, then assigned). But every chili
+    // OnClick listener resolves `ActionSubmenu` against the widget's
+    // _ENV (the widget table, since cawidgets calls
+    // setfenv(chunk, widget)). So replacing `widget.ActionSubmenu` on
+    // the EPIC Menu widget table redirects every menubar click to our
+    // wrapper. The wrapper logs a one-line probe and force-attaches the
+    // freshly created `widget.window_sub_cur` to screen0 if Window:New's
+    // parent kwarg didn't add it. Defensive belt-and-suspenders for the
+    // case where the wrapped/unwrapped screen0 reference resolves to a
+    // different hardlink than the renderer iterates.
     //
-    // Argument shapes accepted by Spring.SendCommands:
-    //   SendCommands("foo")              — single string
-    //   SendCommands("foo", "bar", ...)  — varargs
-    //   SendCommands{"foo", "bar", ...}  — single table arg
+    // Logging is rate-limited to the first three submenu events so a
+    // chat-driven open/close cycle doesn't spam the console.
     runtime.doString(`
-        if Spring then
-            Spring.SendCommands = function(...)
-                local args = {...}
-                local lines
-                if #args == 1 and type(args[1]) == "table" then
-                    lines = args[1]
-                else
-                    lines = args
-                end
-                for i = 1, #lines do
-                    local line = lines[i]
-                    if type(line) == "string" then
-                        local rest = line:match("^luaui%s+(.+)")
-                        if rest and widgetHandler and widgetHandler.actionHandler
-                                and widgetHandler.actionHandler.TextAction then
-                            local ok, err = pcall(widgetHandler.actionHandler.TextAction,
-                                widgetHandler.actionHandler, rest)
-                            if not ok then
-                                Spring.Echo("[SendCommands] TextAction error: " .. tostring(err))
-                            end
-                        else
-                            -- Other engine commands (bind, unbind, set,
-                            -- pause, etc.) — no engine-side handler in
-                            -- the browser. Log at debug so we can see
-                            -- which commands widgets expect us to honor.
-                            Spring.Log("LuaUI", 1, "[SendCommands] unhandled: " .. line)
-                        end
+        WG = WG or {}
+        WG._submenuWatchdog = WG._submenuWatchdog or {
+            installed = false,
+            logged = 0,
+            maxLog = 3,
+        }
+
+        local function probeWindow(label, win)
+            if not win then return end
+            local screen = WG.Chili and WG.Chili.Screen0 or nil
+            local found = false
+            local nKids = 0
+            if screen and screen.children then
+                local kids = screen.children
+                nKids = #kids
+                for i = 1, nKids do
+                    local k = kids[i]
+                    if k == win then
+                        found = true
+                        break
                     end
                 end
             end
-            Spring.Echo("[LuaUI] Spring.SendCommands wired to actionHandler.TextAction")
+            local wd = WG._submenuWatchdog
+            if wd.logged < wd.maxLog then
+                wd.logged = wd.logged + 1
+                local msg = string.format(
+                    "[epicmenu] %s name=%s class=%s xy=%s,%s wh=%sx%s visible=%s hidden=%s screenKids=%d inScreen=%s",
+                    tostring(label),
+                    tostring(win.name), tostring(win.classname),
+                    tostring(win.x), tostring(win.y),
+                    tostring(win.width), tostring(win.height),
+                    tostring(win.visible), tostring(win.hidden),
+                    nKids, tostring(found))
+                Spring.Log("LuaUI", 2, msg)
+            end
+
+            -- Defensive: if the new window isn't in screen0.children
+            -- despite passing parent = screen0 to Window:New, force-add.
+            -- This only triggers when the symptom is reproducing, so it
+            -- doesn't fight a healthy code path.
+            if screen and not found and screen.AddChild then
+                pcall(screen.AddChild, screen, win)
+                if win.BringToFront then pcall(win.BringToFront, win) end
+                if wd.logged <= wd.maxLog then
+                    Spring.Log("LuaUI", 2, "[epicmenu] re-attached " ..
+                        tostring(win.name) .. " to screen0")
+                end
+            end
+            if win.hidden and win.Show then pcall(win.Show, win) end
         end
-    `, 'send_commands_dispatch');
+
+        local function findEpicMenu()
+            if not widgetHandler or not widgetHandler.widgets then return nil end
+            for _, w in ipairs(widgetHandler.widgets) do
+                if w and w.whInfo and w.whInfo.name == "EPIC Menu" then
+                    return w
+                end
+            end
+            return nil
+        end
+
+        local function ensureWatchdog()
+            if WG._submenuWatchdog.installed then return end
+            local w = findEpicMenu()
+            if not w then return end
+            -- file-local in epicmenu, not a widget-table key. We can't
+            -- reach MakeSubWindow directly. But ActionSubmenu IS exposed
+            -- on the widget _ENV (top-level "function ActionSubmenu(...)"
+            -- with setfenv → widget). Wrap it; every menubar OnClick
+            -- closure resolves the name through _ENV at call time.
+            if type(w.ActionSubmenu) ~= "function" then return end
+
+            local orig = w.ActionSubmenu
+            w.ActionSubmenu = function(_, submenu)
+                local ok, err = pcall(orig, _, submenu)
+                if not ok then
+                    Spring.Log("LuaUI", 2, "[epicmenu] ActionSubmenu error: " ..
+                        tostring(err))
+                end
+                if w.window_sub_cur then
+                    probeWindow("ActionSubmenu submenu=" .. tostring(submenu),
+                        w.window_sub_cur)
+                else
+                    local wd = WG._submenuWatchdog
+                    if wd.logged < wd.maxLog then
+                        wd.logged = wd.logged + 1
+                        Spring.Log("LuaUI", 2,
+                            "[epicmenu] ActionSubmenu returned with no window (submenu=" ..
+                            tostring(submenu) .. ")")
+                    end
+                end
+            end
+            -- Same shape for ActionExitWindow / ActionMenu, both feed
+            -- through MakeSubWindow.
+            for _, fname in ipairs({ "ActionExitWindow", "ActionMenu" }) do
+                local origFn = rawget(w, fname)
+                if type(origFn) == "function" then
+                    rawset(w, fname, function(...)
+                        local ok, err = pcall(origFn, ...)
+                        if not ok then
+                            Spring.Log("LuaUI", 2,
+                                "[epicmenu] " .. fname .. " error: " .. tostring(err))
+                        end
+                        if w.window_sub_cur then
+                            probeWindow(fname, w.window_sub_cur)
+                        end
+                    end)
+                end
+            end
+            WG._submenuWatchdog.installed = true
+            Spring.Echo("[LuaUI] epicmenu submenu watchdog installed")
+        end
+        WG._submenuWatchdog.ensure = ensureWatchdog
+
+        -- Try right now (epicmenu's Initialize runs during cawidgets bulk
+        -- load, which has finished by the time post-bootstrap doStrings
+        -- run). If the widget hasn't loaded yet — e.g. the user toggled
+        -- it off and re-enabled it — wrap actionHandler.AddAction so we
+        -- catch the next "crudesubmenu" registration.
+        if widgetHandler and widgetHandler.actionHandler
+                and widgetHandler.actionHandler.AddAction then
+            local ah = widgetHandler.actionHandler
+            local origAdd = ah.AddAction
+            ah.AddAction = function(self, addon, cmd, func, data, types)
+                local ret = origAdd(self, addon, cmd, func, data, types)
+                if cmd == "crudesubmenu" then
+                    pcall(ensureWatchdog)
+                end
+                return ret
+            end
+        end
+        pcall(ensureWatchdog)
+    `, 'epicmenu_submenu_watchdog');
 
     // Fix Chili TaskHandler queue desync: fengari's weak table GC
     // collects entries from the TaskHandler's objects/objects2 queues
@@ -1648,20 +2103,38 @@ defaultFont = activeFont
                 end
             end
 
-            -- Configure texture search paths from the active skin directory
-            -- so short texture names (e.g. "tech_overlaywindow.png") resolve
-            -- to the correct skin folder on the game server.
+            -- Configure texture search paths so short texture names (like
+            -- ":cl:panel_0011_small.png") resolve to the right skin folder.
+            -- The bridge tries paths in order and uses the FIRST one that
+            -- yields a valid texture, so list the active skin first; then
+            -- the default skin (a fallback for textures the active skin
+            -- doesn't override); then every other skin in case of cross-
+            -- skin references. Without active-skin priority, Carbon (the
+            -- first iterator entry) overrides Evolved's same-named files,
+            -- and the Evolved skin's tile coordinates (e.g. 175,1,102,10
+            -- for a 440×32 texture) end up slicing Carbon's 32×32 file —
+            -- which is what made the menubar / commands / eco panel
+            -- backgrounds render as garbled stripes instead of a slab.
             local sh = WG.Chili.SkinHandler
+            local activeName = WG.Chili.theme and WG.Chili.theme.skin
+                and WG.Chili.theme.skin.general
+                and WG.Chili.theme.skin.general.skinName
+            local activeDir = nil
+            if sh and sh.knownSkins and activeName then
+                local s = sh.knownSkins[activeName] or sh.knownSkins[tostring(activeName):lower()]
+                if s and s.info and s.info.dir then activeDir = s.info.dir end
+            end
+            if activeDir then _addTextureSearchPath(activeDir) end
+            _addTextureSearchPath((WG.Chili.CHILI_DIRNAME or "LuaUI/Widgets/chili_old/") .. "skins/default/")
+            _addTextureSearchPath(WG.Chili.SKIN_DIRNAME or "LuaUI/Widgets/chili_old/skins/")
             if sh and sh.knownSkins then
                 for _, skin in pairs(sh.knownSkins) do
-                    if type(skin) == "table" and skin.info and skin.info.dir then
+                    if type(skin) == "table" and skin.info and skin.info.dir
+                            and skin.info.dir ~= activeDir then
                         _addTextureSearchPath(skin.info.dir)
                     end
                 end
             end
-            -- Also add the default chili skins path
-            _addTextureSearchPath(WG.Chili.SKIN_DIRNAME or "LuaUI/Widgets/chili_old/skins/")
-            _addTextureSearchPath((WG.Chili.CHILI_DIRNAME or "LuaUI/Widgets/chili_old/") .. "skins/default/")
 
             Spring.Echo("[LuaUI] TaskHandler patched: strong queues, " .. tostring(strongCount) .. " controls enqueued")
             _chiliTaskFix = nil  -- run once

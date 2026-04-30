@@ -364,7 +364,7 @@ export class LuaRuntime {
         return this.readValueFrom(this.L, idx);
     }
 
-    private readValueFrom(LS: unknown, idx: number): LuaValue {
+    private readValueFrom(LS: unknown, idx: number, nested = false): LuaValue {
         const t = lua.lua_type(LS, idx);
         switch (t) {
             case lua.LUA_TNIL:
@@ -389,13 +389,18 @@ export class LuaRuntime {
                 // Opaque handle round-tripped from pushValue.
                 return lua.lua_touserdata(LS, idx) as LuaValue;
             case lua.LUA_TFUNCTION: {
-                // Both Lua functions and C functions (JS closures pushed via
-                // lua_pushjsfunction) get a registry ref + callable wrapper.
-                // This is required for gl.CreateList(gl.Texture, path) where
-                // gl.Texture is a C function that must survive stack cleanup
-                // and be callable from JS. Registry refs are small; the leak
-                // concern is bounded because table reads that encounter
-                // functions are infrequent (widget init, not per-frame).
+                // Top-level function args (passed to JS callbacks via colon
+                // calls) are wrapped via a registry ref so JS code can call
+                // them. Function values *inside* a table arg are never called
+                // from JS in practice (the chili font object, widgetHandler,
+                // etc. all keep their methods in tables that are passed as
+                // `self` and forwarded right back into Lua). Creating a
+                // registry ref per nested function leaks ~N refs per call —
+                // the registry table is a fengari `new Map()` capped at 2^24
+                // entries, which a label re-layout 60Hz hits in a few hours
+                // and surfaces as `Map maximum size exceeded` deep in
+                // chili font.lua. Skip the ref entirely for nested reads.
+                if (nested) return null;
                 lua.lua_pushvalue(LS, idx);
                 const ref = lauxlib.luaL_ref(LS, lua.LUA_REGISTRYINDEX);
                 return this.makeFunctionRef(ref) as unknown as LuaValue;
@@ -410,7 +415,7 @@ export class LuaRuntime {
                     const absIdx = idx < 0 ? lua.lua_gettop(LS) + idx + 1 : idx;
                     for (let i = 1; i <= len; i++) {
                         lua.lua_rawgeti(LS, absIdx, i);
-                        arr.push(this.readValueFrom(LS, -1));
+                        arr.push(this.readValueFrom(LS, -1, true));
                         lua.lua_pop(LS, 1);
                     }
                     return arr;
@@ -430,7 +435,7 @@ export class LuaRuntime {
                     } else {
                         key = `<k:${kt}>`;
                     }
-                    out[key] = this.readValueFrom(LS, -1);
+                    out[key] = this.readValueFrom(LS, -1, true);
                     lua.lua_pop(LS, 1);
                 }
                 return out;
