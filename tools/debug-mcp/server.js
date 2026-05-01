@@ -57,8 +57,24 @@ async function ensureAuth() {
     return '';
 }
 
-// --- SQLite game server discovery ---
-function getGameServers() {
+// --- Game server discovery ---
+//
+// The lobby keeps the live process list in memory and exposes it at
+// /api/processes; the game_servers SQLite table only holds entries when
+// a lobby restart has staged hand-off info. Query the lobby first and
+// fall back to SQLite for offline/post-mortem use.
+async function getGameServers() {
+    try {
+        const resp = await fetch(`${LOBBY_URL}/api/processes`);
+        if (resp.ok) {
+            const rows = await resp.json();
+            // Normalise to the SQLite shape so callers don't care.
+            return rows.map(r => ({
+                room_id: r.room_id, port: r.port, pid: r.pid,
+                map_id: r.map, game_id: r.game, state: r.state,
+            }));
+        }
+    } catch { /* fall through */ }
     try {
         const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
         const rows = db.prepare('SELECT room_id, port, pid, map_id, game_id, state FROM game_servers').all();
@@ -69,14 +85,16 @@ function getGameServers() {
     }
 }
 
-function getGameServerUrl(roomId) {
-    const servers = getGameServers();
+async function getGameServerUrl(roomId) {
+    const servers = await getGameServers();
     let server;
     if (roomId !== undefined && roomId > 0) {
         server = servers.find(s => s.room_id === roomId);
     } else {
-        // Pick the first active (starting/running) server
-        server = servers.find(s => s.state === 'starting' || s.state === 'running');
+        // Prefer running, fall back to starting, fall back to anything not ended.
+        server = servers.find(s => s.state === 'running')
+            || servers.find(s => s.state === 'starting')
+            || servers.find(s => s.state !== 'ended');
     }
     if (!server) return null;
     return { url: `http://127.0.0.1:${server.port}`, ...server };
@@ -108,11 +126,11 @@ async function execOnServer(serverUrl, scope, code) {
 }
 
 async function execOnGameServer(scope, code, roomId) {
-    const server = getGameServerUrl(roomId);
+    const server = await getGameServerUrl(roomId);
     if (!server) {
-        const servers = getGameServers();
+        const servers = await getGameServers();
         if (servers.length === 0) {
-            throw new Error('No game servers found in database. Is a game running?');
+            throw new Error('No game servers found. Is the lobby running and is a game in progress?');
         }
         throw new Error(`No active game server found. Available: ${servers.map(s => `room ${s.room_id} (${s.state})`).join(', ')}`);
     }
@@ -549,6 +567,30 @@ const TOOLS = [
         },
     },
     {
+        name: 'api_request',
+        description: 'Make an authenticated HTTP request to the lobby, log server, or a specific game server. Tokens are obtained automatically (admin/admin by default — override via SPRING_USER/SPRING_PASS env). Prefer this over running curl + setting Authorization headers manually.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                target: {
+                    type: 'string',
+                    description: 'Which server to hit. "lobby" → :8011, "log" → :8010, "game" → dynamic game server (uses roomId or first running), "url" → use the absolute `url` arg verbatim.',
+                    enum: ['lobby', 'log', 'game', 'url'],
+                    default: 'lobby',
+                },
+                path: { type: 'string', description: 'Path beginning with "/", e.g. "/api/rooms". Ignored when target="url".' },
+                url: { type: 'string', description: 'Absolute URL (only when target="url").' },
+                method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'], default: 'GET' },
+                body: { description: 'Request body. Plain object/array → JSON, string → sent verbatim.' },
+                headers: { type: 'object', description: 'Extra request headers as a {name: value} map.' },
+                roomId: { type: 'number', description: 'Game server room ID (when target="game"). Omit to pick the first active game.' },
+                auth: { type: 'boolean', default: true, description: 'Attach Bearer auth header. Set false for unauthenticated probes.' },
+                expectJson: { type: 'boolean', default: true, description: 'Parse the response as JSON when true; otherwise return raw text.' },
+            },
+            required: ['path'],
+        },
+    },
+    {
         name: 'evaluate_widget_lua',
         description: 'Run a Lua snippet in the LuaUI widget worker (browser-side) via the chrome-devtools bridge. Use when you need to inspect WG, widgetHandler, _widgetErrors, or call any Spring.* function as the player would see it. Requires a connected browser tab; if none, returns an error and you should fall back to chrome-devtools eval directly.',
         inputSchema: {
@@ -605,8 +647,8 @@ async function executeTool(name, args) {
         }
 
         case 'list_processes': {
-            const servers = getGameServers();
-            if (!servers.length) return 'No game server processes found in database.';
+            const servers = await getGameServers();
+            if (!servers.length) return 'No game server processes found.';
             return servers.map(s =>
                 `Room ${s.room_id}: port=${s.port}, pid=${s.pid}, state=${s.state}, game=${s.game_id || '?'}, map=${s.map_id || '?'}`
             ).join('\n');
@@ -659,11 +701,11 @@ async function executeTool(name, args) {
         }
 
         case 'restart_game': {
-            const server = getGameServerUrl(args.roomId);
+            const server = await getGameServerUrl(args.roomId);
             if (!server) {
-                const servers = getGameServers();
+                const servers = await getGameServers();
                 if (servers.length === 0)
-                    return 'No game servers found in database. Is a game running?';
+                    return 'No game servers found. Is the lobby running and is a game in progress?';
                 return `No active game server found. Available: ${servers.map(s => `room ${s.room_id} (${s.state})`).join(', ')}`;
             }
             const token = await ensureAuth();
@@ -729,7 +771,7 @@ async function executeTool(name, args) {
         }
 
         case 'kill_game': {
-            const servers = getGameServers();
+            const servers = await getGameServers();
             let target;
             if (args.roomId !== undefined && args.roomId > 0) {
                 target = servers.find(s => s.room_id === args.roomId);
@@ -818,6 +860,61 @@ async function executeTool(name, args) {
                 mapId: args.mapId,
                 state: started.state,
                 hint: 'Use list_processes to confirm spring-server pid; the game will be reachable on gameServerPort once warm.',
+            }, null, 2);
+        }
+
+        case 'api_request': {
+            const target = args.target || 'lobby';
+            let url;
+            if (target === 'url') {
+                if (!args.url) return 'Error: target="url" requires `url`.';
+                url = args.url;
+            } else if (target === 'lobby') {
+                url = `${LOBBY_URL}${args.path}`;
+            } else if (target === 'log') {
+                url = `${LOG_SERVER_URL}${args.path}`;
+            } else if (target === 'game') {
+                const server = await getGameServerUrl(args.roomId);
+                if (!server) {
+                    const servers = await getGameServers();
+                    if (!servers.length) return 'Error: no game servers found. Is a game running?';
+                    return `Error: no active game server. Available: ${servers.map(s => `room ${s.room_id} (${s.state})`).join(', ')}`;
+                }
+                url = `${server.url}${args.path}`;
+            } else {
+                return `Error: unknown target "${target}".`;
+            }
+
+            const method = (args.method || 'GET').toUpperCase();
+            const headers = { ...(args.headers || {}) };
+            const wantAuth = args.auth !== false;
+            if (wantAuth) {
+                const token = await ensureAuth();
+                if (token) headers['Authorization'] = `Bearer ${token}`;
+            }
+
+            let body;
+            if (args.body !== undefined && method !== 'GET' && method !== 'DELETE') {
+                if (typeof args.body === 'string') {
+                    body = args.body;
+                } else {
+                    body = JSON.stringify(args.body);
+                    if (!headers['Content-Type']) headers['Content-Type'] = 'application/json';
+                }
+            }
+
+            const resp = await fetch(url, { method, headers, body });
+            const text = await resp.text();
+            const expectJson = args.expectJson !== false;
+            let parsed = text;
+            if (expectJson && text) {
+                try { parsed = JSON.parse(text); } catch { /* keep as text */ }
+            }
+            return JSON.stringify({
+                status: resp.status,
+                ok: resp.ok,
+                url,
+                body: parsed,
             }, null, 2);
         }
 

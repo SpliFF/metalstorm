@@ -2234,22 +2234,32 @@ bool CSplitLuaHandle::InitSynced(bool dryRun)
 bool CSplitLuaHandle::InitUnsynced()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if (!IsValid()) {
-		KillLua();
+	// IsValid() now checks only the synced handle (see LuaHandleSynced.h),
+	// so we probe synced specifically here. The "headless server" case
+	// where unsynced is purposely skipped is handled by the caller; this
+	// path is the genuine "synced is dead" case where we have nothing left.
+	if (!syncedLuaHandle.IsValid()) {
+		syncedLuaHandle.KillLua();
+		unsyncedLuaHandle.KillLua();
 		return false;
 	}
 
 	std::string unsyncedCode = LoadFile(GetUnsyncedFileName(), GetInitFileModes());
 	if (unsyncedCode.empty()) {
-		KillLua();
+		// No draw.lua to load — perfectly normal on a headless server,
+		// or for a game that ships no unsynced state. Tear down the
+		// unsynced handle but leave the synced handle alone.
+		unsyncedLuaHandle.KillLua();
 		return false;
 	}
 
 	auto lock = CLoadLock::GetUniqueLock();
 	const bool haveUnsynced = unsyncedLuaHandle.Init(std::move(unsyncedCode), GetUnsyncedFileName());
 
-	if (!IsValid() || !haveUnsynced) {
-		KillLua();
+	if (!syncedLuaHandle.IsValid() || !haveUnsynced) {
+		// draw.lua errored. Kill the half-initialised unsynced handle but
+		// keep the synced state — gadgets on the server side stay alive.
+		unsyncedLuaHandle.KillLua();
 		return false;
 	}
 
@@ -2268,7 +2278,23 @@ bool CSplitLuaHandle::Init(bool dryRun)
 	SetReadAllyTeam(CEventClient::AllAccessTeam);
 	SetSelectTeam(GetInitSelectTeam());
 
-	return InitSynced(dryRun) && (dryRun || InitUnsynced());
+	if (!InitSynced(dryRun))
+		return false;
+	if (dryRun)
+		return true;
+
+	// Unsynced (draw.lua) is best-effort on the headless server. ZK's
+	// draw.lua reaches into Spring.UnitRendering.FeatureRendering during
+	// load and errors out without GL, but the synced gadget state is
+	// what we actually need for the simulation. Log the failure and
+	// continue rather than tearing down the entire LuaRules handle.
+	if (!InitUnsynced()) {
+		LOG_L(L_WARNING,
+			"%s: unsynced state did not initialise (see lua: errors above) "
+			"— continuing with synced-only state",
+			syncedLuaHandle.GetName().c_str());
+	}
+	return true;
 }
 
 

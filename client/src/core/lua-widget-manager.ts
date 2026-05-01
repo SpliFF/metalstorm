@@ -497,6 +497,7 @@ export class LuaWidgetManager {
             case 'widgetList':     summary = `widgetList (${String(msg.data ?? '').length} bytes)`; break;
             case 'worldGLCommands':summary = `worldGLCommands (${(msg.commands as unknown[])?.length ?? '?'} cmds)`; break;
             case 'giveOrder':      summary = `giveOrder cmd=${msg.cmdId} units=${(msg.unitIds as unknown[])?.length ?? 0} params=${(msg.params as unknown[])?.length ?? 0}`; break;
+            case 'sendLuaRulesMsg': summary = `sendLuaRulesMsg (${(msg.data as string)?.length ?? 0} bytes)`; break;
             case 'uiHover':        summary = `uiHover above=${msg.above}`; break;
             case 'inputConsumed':  summary = `inputConsumed kind=${msg.kind} consumed=${msg.consumed}`; break;
         }
@@ -581,6 +582,15 @@ export class LuaWidgetManager {
                 const timeoutFrames = Number(msg.timeoutFrames | 0);
                 if (unitIds.length === 0) break;
                 conn.sendPlayerCommand(cmdId, unitIds, params, options, timeoutFrames);
+                break;
+            }
+
+            case 'sendLuaRulesMsg': {
+                const conn = this.connection;
+                if (!conn) break;
+                const data = typeof msg.data === 'string' ? msg.data : '';
+                if (!data) break;
+                conn.sendLuaRulesMsg(data);
                 break;
             }
 

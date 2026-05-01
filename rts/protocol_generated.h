@@ -35,6 +35,9 @@ struct PingBuilder;
 struct ChatSend;
 struct ChatSendBuilder;
 
+struct LuaRulesMsg;
+struct LuaRulesMsgBuilder;
+
 struct Ack;
 struct AckBuilder;
 
@@ -306,11 +309,12 @@ enum ClientPayload : uint8_t {
   ClientPayload_LogSubscribe = 25,
   ClientPayload_LogUnsubscribe = 26,
   ClientPayload_ConsoleCommand = 27,
+  ClientPayload_LuaRulesMsg = 28,
   ClientPayload_MIN = ClientPayload_NONE,
-  ClientPayload_MAX = ClientPayload_ConsoleCommand
+  ClientPayload_MAX = ClientPayload_LuaRulesMsg
 };
 
-inline const ClientPayload (&EnumValuesClientPayload())[28] {
+inline const ClientPayload (&EnumValuesClientPayload())[29] {
   static const ClientPayload values[] = {
     ClientPayload_NONE,
     ClientPayload_Handshake,
@@ -339,13 +343,14 @@ inline const ClientPayload (&EnumValuesClientPayload())[28] {
     ClientPayload_LogIngest,
     ClientPayload_LogSubscribe,
     ClientPayload_LogUnsubscribe,
-    ClientPayload_ConsoleCommand
+    ClientPayload_ConsoleCommand,
+    ClientPayload_LuaRulesMsg
   };
   return values;
 }
 
 inline const char * const *EnumNamesClientPayload() {
-  static const char * const names[29] = {
+  static const char * const names[30] = {
     "NONE",
     "Handshake",
     "AuthRequest",
@@ -374,13 +379,14 @@ inline const char * const *EnumNamesClientPayload() {
     "LogSubscribe",
     "LogUnsubscribe",
     "ConsoleCommand",
+    "LuaRulesMsg",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameClientPayload(ClientPayload e) {
-  if (::flatbuffers::IsOutRange(e, ClientPayload_NONE, ClientPayload_ConsoleCommand)) return "";
+  if (::flatbuffers::IsOutRange(e, ClientPayload_NONE, ClientPayload_LuaRulesMsg)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesClientPayload()[index];
 }
@@ -495,6 +501,10 @@ template<> struct ClientPayloadTraits<SpringWeb::LogUnsubscribe> {
 
 template<> struct ClientPayloadTraits<SpringWeb::ConsoleCommand> {
   static const ClientPayload enum_value = ClientPayload_ConsoleCommand;
+};
+
+template<> struct ClientPayloadTraits<SpringWeb::LuaRulesMsg> {
+  static const ClientPayload enum_value = ClientPayload_LuaRulesMsg;
 };
 
 bool VerifyClientPayload(::flatbuffers::Verifier &verifier, const void *obj, ClientPayload type);
@@ -1350,6 +1360,63 @@ inline ::flatbuffers::Offset<ChatSend> CreateChatSendDirect(
       _fbb,
       text__,
       destination);
+}
+
+/// Forwarded `Spring.SendLuaRulesMsg` call from a client widget to the
+/// server's synced LuaRules state. The data payload is delivered verbatim
+/// to `gadget:RecvLuaMsg(msg, playerID)`. Bytes (not string) so embedded
+/// nulls — which ZK widgets occasionally use as a separator — survive the
+/// round-trip. PlayerID is resolved server-side from the authenticated
+/// session, not trusted from the client.
+struct LuaRulesMsg FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef LuaRulesMsgBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_DATA = 4
+  };
+  const ::flatbuffers::Vector<uint8_t> *data() const {
+    return GetPointer<const ::flatbuffers::Vector<uint8_t> *>(VT_DATA);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_DATA) &&
+           verifier.VerifyVector(data()) &&
+           verifier.EndTable();
+  }
+};
+
+struct LuaRulesMsgBuilder {
+  typedef LuaRulesMsg Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_data(::flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> data) {
+    fbb_.AddOffset(LuaRulesMsg::VT_DATA, data);
+  }
+  explicit LuaRulesMsgBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<LuaRulesMsg> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<LuaRulesMsg>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<LuaRulesMsg> CreateLuaRulesMsg(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> data = 0) {
+  LuaRulesMsgBuilder builder_(_fbb);
+  builder_.add_data(data);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<LuaRulesMsg> CreateLuaRulesMsgDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const std::vector<uint8_t> *data = nullptr) {
+  auto data__ = data ? _fbb.CreateVector<uint8_t>(*data) : 0;
+  return SpringWeb::CreateLuaRulesMsg(
+      _fbb,
+      data__);
 }
 
 struct Ack FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -2922,6 +2989,9 @@ struct ClientMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const SpringWeb::ConsoleCommand *payload_as_ConsoleCommand() const {
     return payload_type() == SpringWeb::ClientPayload_ConsoleCommand ? static_cast<const SpringWeb::ConsoleCommand *>(payload()) : nullptr;
   }
+  const SpringWeb::LuaRulesMsg *payload_as_LuaRulesMsg() const {
+    return payload_type() == SpringWeb::ClientPayload_LuaRulesMsg ? static_cast<const SpringWeb::LuaRulesMsg *>(payload()) : nullptr;
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_PAYLOAD_TYPE, 1) &&
@@ -3037,6 +3107,10 @@ template<> inline const SpringWeb::LogUnsubscribe *ClientMessage::payload_as<Spr
 
 template<> inline const SpringWeb::ConsoleCommand *ClientMessage::payload_as<SpringWeb::ConsoleCommand>() const {
   return payload_as_ConsoleCommand();
+}
+
+template<> inline const SpringWeb::LuaRulesMsg *ClientMessage::payload_as<SpringWeb::LuaRulesMsg>() const {
+  return payload_as_LuaRulesMsg();
 }
 
 struct ClientMessageBuilder {
@@ -8649,6 +8723,10 @@ inline bool VerifyClientPayload(::flatbuffers::Verifier &verifier, const void *o
     }
     case ClientPayload_ConsoleCommand: {
       auto ptr = reinterpret_cast<const SpringWeb::ConsoleCommand *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case ClientPayload_LuaRulesMsg: {
+      auto ptr = reinterpret_cast<const SpringWeb::LuaRulesMsg *>(obj);
       return verifier.VerifyTable(ptr);
     }
     default: return true;

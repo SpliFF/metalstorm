@@ -25,6 +25,7 @@ The `spring-debug` MCP server (declared in `.mcp.json`) connects to the running 
 | `get_lua_source` | Read a Lua file via the lobby's VFS HTTP endpoint | Reading gadget source when debugging errors |
 | `restart_lobby` | Restart the lobby server in-place (re-exec, preserves game servers) | After rebuilding spring-lobby binary |
 | `restart_game` | Restart a game server in-place (re-exec with same args, same PID) | After rebuilding spring-server binary |
+| `api_request` | Authenticated HTTP request to lobby/log/game server (auto-manages token) | Hitting endpoints without curl + manual token plumbing |
 
 ## Server URLs
 
@@ -44,7 +45,24 @@ The MCP server's `GAME_SERVER_URL` env var sets a default for single-server deve
 
 ## Auth
 
-The MCP server auto-authenticates via `SPRING_TOKEN` env var, or falls back to `SPRING_USER`/`SPRING_PASS` (defaults to admin/admin). Set `SPRING_TOKEN` in `.mcp.json` env if needed.
+The MCP server auto-authenticates via `SPRING_TOKEN` env var, or falls back to `SPRING_USER`/`SPRING_PASS` (defaults to admin/admin). Set `SPRING_TOKEN` in `.mcp.json` env if needed. All tools that hit the lobby or game server reuse the cached token — you do not need to log in or pass a token from the tool side.
+
+## Generic HTTP via `api_request`
+
+Use `api_request` when the dedicated tools above don't cover the endpoint you need (e.g. `/api/rooms`, `/api/processes`, custom debug endpoints). It:
+- attaches a Bearer token automatically (override with `auth: false` for unauthenticated probes),
+- routes by `target`: `"lobby"` → `:8011`, `"log"` → `:8010`, `"game"` → dynamic game-server port (uses `roomId` or first active game), `"url"` → an absolute `url`,
+- JSON-encodes object bodies and parses JSON responses (set `expectJson: false` for raw text).
+
+Examples:
+```
+api_request({ target: "lobby", path: "/api/processes" })
+api_request({ target: "game", path: "/api/exec", method: "POST",
+              body: { scope: "LuaRules", code: "return #Spring.GetAllUnits()" } })
+api_request({ target: "lobby", path: "/api/rooms/leave", method: "POST", body: {} })
+```
+
+Prefer `exec_lua` for Lua snippets and `query_db` for SQL — `api_request` is the escape hatch.
 
 ## When to prefer these tools over alternatives
 

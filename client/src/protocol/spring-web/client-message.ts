@@ -15,6 +15,7 @@ import { Handshake, HandshakeT } from '../spring-web/handshake.js';
 import { LogIngest, LogIngestT } from '../spring-web/log-ingest.js';
 import { LogSubscribe, LogSubscribeT } from '../spring-web/log-subscribe.js';
 import { LogUnsubscribe, LogUnsubscribeT } from '../spring-web/log-unsubscribe.js';
+import { LuaRulesMsg, LuaRulesMsgT } from '../spring-web/lua-rules-msg.js';
 import { Ping, PingT } from '../spring-web/ping.js';
 import { PlayerCommand, PlayerCommandT } from '../spring-web/player-command.js';
 import { ReconnectRequest, ReconnectRequestT } from '../spring-web/reconnect-request.js';
@@ -119,7 +120,7 @@ unpackTo(_o: ClientMessageT): void {
 export class ClientMessageT implements flatbuffers.IGeneratedObject {
 constructor(
   public payloadType: ClientPayload = ClientPayload.NONE,
-  public payload: AIListRequestT|AckT|AuthRequestT|ChatSendT|ConsoleCommandT|GameListRequestT|HandshakeT|LogIngestT|LogSubscribeT|LogUnsubscribeT|PingT|PlayerCommandT|ReconnectRequestT|RoomAddAIT|RoomCloseRoomT|RoomCreateT|RoomEndGameT|RoomJoinT|RoomKickT|RoomLeaveT|RoomReadyT|RoomRemoveAIT|RoomSetAITeamT|RoomSetStartPosT|RoomStartGameT|RoomTeamSelectT|ViewportUpdateT|null = null
+  public payload: AIListRequestT|AckT|AuthRequestT|ChatSendT|ConsoleCommandT|GameListRequestT|HandshakeT|LogIngestT|LogSubscribeT|LogUnsubscribeT|LuaRulesMsgT|PingT|PlayerCommandT|ReconnectRequestT|RoomAddAIT|RoomCloseRoomT|RoomCreateT|RoomEndGameT|RoomJoinT|RoomKickT|RoomLeaveT|RoomReadyT|RoomRemoveAIT|RoomSetAITeamT|RoomSetStartPosT|RoomStartGameT|RoomTeamSelectT|ViewportUpdateT|null = null
 ){}
 
 

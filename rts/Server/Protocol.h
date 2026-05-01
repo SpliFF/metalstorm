@@ -31,6 +31,7 @@ namespace Protocol {
 constexpr uint8_t ENVELOPE_FLATBUFFERS = 0x01;
 constexpr uint8_t ENVELOPE_ENTITY_STATE = 0x02;
 constexpr uint8_t ENVELOPE_PROJECTILE_STATE = 0x04;
+constexpr uint8_t ENVELOPE_PIECE_STATE = 0x05;
 
 /// Build a framed ServerMessage (envelope byte + FlatBuffers payload).
 inline std::vector<uint8_t> BuildServerMessage(

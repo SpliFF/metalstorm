@@ -348,6 +348,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     audioManager = new AudioManager();
     combatFX = new CombatFX(scene, audioManager);
 
+    // Debug hooks — exposed for chrome-devtools introspection.
+    (window as unknown as { __scene: unknown }).__scene = scene;
+    (window as unknown as { __entityRenderer: unknown }).__entityRenderer = entityRenderer;
+
     // DefCache accumulates defs as the server streams them incrementally.
     // Listeners forward new defs to the renderers that need them.
     const defCache = new DefCache();
@@ -584,6 +588,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         },
         onProjectileState(snapshot) {
             projectileRenderer?.updateFromState(snapshot);
+        },
+        onPieceState(snapshot) {
+            entityRenderer?.applyPieceState(snapshot);
         },
         onCombatEvents(events) {
             combatFX?.onCombatEvents(events);

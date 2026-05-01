@@ -185,12 +185,20 @@ class CSplitLuaHandle
 
 	public:
 		void CheckStack() {
-			syncedLuaHandle.CheckStack();
-			unsyncedLuaHandle.CheckStack();
+			if (syncedLuaHandle.IsValid())
+				syncedLuaHandle.CheckStack();
+			if (unsyncedLuaHandle.IsValid())
+				unsyncedLuaHandle.CheckStack();
 		}
 		void CollectGarbage(bool forced) {
-			syncedLuaHandle.CollectGarbage(forced);
-			unsyncedLuaHandle.CollectGarbage(forced);
+			// Skip dead handles. The unsynced state is killed (without
+			// touching the synced state) when its load fails on the
+			// headless server — see CSplitLuaHandle::InitUnsynced. GC'ing
+			// a null lua_State segfaults inside lua_lock.
+			if (syncedLuaHandle.IsValid())
+				syncedLuaHandle.CollectGarbage(forced);
+			if (unsyncedLuaHandle.IsValid())
+				unsyncedLuaHandle.CollectGarbage(forced);
 		}
 
 		static CUnsyncedLuaHandle* GetUnsyncedHandle(lua_State* L) {
@@ -224,7 +232,12 @@ class CSplitLuaHandle
 		bool LoadUnsynced();
 
 		bool IsValid() const {
-			return (syncedLuaHandle.IsValid() && unsyncedLuaHandle.IsValid());
+			// Headless server only requires the synced state. The unsynced
+			// (draw.lua) handle is best-effort: ZK's draw.lua reaches into
+			// renderer-only APIs that we don't expose, but its failure
+			// must not bring the synced gadgets down with it. See
+			// CSplitLuaHandle::Init / InitUnsynced for the matching change.
+			return syncedLuaHandle.IsValid();
 		}
 		void KillLua(bool inFreeHandler = false) {
 			syncedLuaHandle.KillLua(inFreeHandler);

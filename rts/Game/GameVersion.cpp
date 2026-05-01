@@ -9,11 +9,17 @@
 #include <cstring>
 #include <cstdio>
 
-// Version: based on Spring 104+ codebase. Set to 105 so game compat
-// layers (e.g. ZK's engine_compat.lua) apply the correct API wrappers.
+// Version: based on Spring 104+ codebase. Major=105 picks up ZK's modern
+// engine_compat.lua branch; commits is set high enough to skip every
+// "if not Script.IsEngineMinVersion(...)" shim in that file (highest
+// extant check is 105.0.2346). The shims fill in functions/fields the
+// older engine lacked — our engine has them all natively (e.g.
+// SetUnitBuildeeRadius, GetGameSecondsInterpolated, GetFacingFromHeading)
+// and a few of those shims have side-effects that fail against our
+// read-only UnitDefs table (line 774 writes buildeeBuildRadius).
 #define SPRING_VERSION_ENGINE_MAJOR      "105"
 #define SPRING_VERSION_ENGINE_PATCH_SET  "0"
-#define SPRING_VERSION_ENGINE_COMMITS    "2000"
+#define SPRING_VERSION_ENGINE_COMMITS    "9999"
 #define SPRING_VERSION_ENGINE_HASH       "unknown"
 #define SPRING_VERSION_ENGINE_BRANCH     "springweb"
 #define SPRING_VERSION_ENGINE_ADDITIONAL ""

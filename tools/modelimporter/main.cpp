@@ -18,6 +18,10 @@
 #include "SpringLog.h"
 #include "SpringLogNet.h"
 
+#include <fstream>
+#include <iterator>
+#include <cctype>
+
 #define LOG_SECTION "model-import"
 
 #include <assimp/Importer.hpp>
@@ -242,23 +246,6 @@ int main(int argc, char** argv) {
         return 3;
     }
 
-    if (!textureExt.empty()) {
-        // The Importer owns the scene as a non-const aiScene under the hood;
-        // for our use case (post-import rewrite before export) the const_cast
-        // is safe and idiomatic in Assimp tooling.
-        RewriteTextureExtensions(const_cast<aiScene*>(scene), textureExt);
-    }
-
-    Assimp::Exporter exporter;
-    const aiReturn rc = exporter.Export(scene, exporterId, outPath);
-    if (rc != aiReturn_SUCCESS) {
-        SLOG(SPRING_LOG_ERROR, "glTF export failed: %s",
-             exporter.GetErrorString());
-        Assimp::DefaultLogger::kill();
-        springlog_shutdown();
-        return 4;
-    }
-
     // Handle the sibling <output>.config.json. The file follows the
     // project-wide .config.lua / .config.json ownership rules, in
     // priority order:
@@ -268,8 +255,16 @@ int main(int argc, char** argv) {
     //      never mix engine output into hand-edited files.
     //   2. Else if <output>.config.json does not exist → write a fresh
     //      extraction.
-    //   3. Else if --update-meta was passed → overwrite.
-    //   4. Else → leave the existing .config.json untouched.
+    //   3. Else if its configVersion is older than kCurrentConfigVersion
+    //      → overwrite (auto-upgrade stale schemas).
+    //   4. Else if --update-meta was passed → overwrite.
+    //   5. Else → leave the existing .config.json untouched.
+    //
+    // The JSON write happens BEFORE RewriteTextureExtensions so the
+    // tex1/tex2 fields keep their original filenames (e.g.
+    // `commrecon.dds`) — the client resolves those through
+    // `unittextures/`, while the GLB itself references the rewritten
+    // `.png` URI for self-contained scene loading.
     //
     // --no-meta opts out of everything in this block.
     if (emitMeta) {
@@ -283,6 +278,41 @@ int main(int argc, char** argv) {
         const bool hasLua  = fs::exists(luaConfigPath);
         const bool hasJson = fs::exists(jsonConfigPath);
 
+        // Detect stale configs (v1 written before tex1/tex2 extraction,
+        // or pre-rename files using `metaVersion`). Cheap text scan —
+        // we only need to find the integer; full JSON parsing would be
+        // overkill for a single field.
+        bool staleVersion = false;
+        if (hasJson) {
+            std::ifstream in(jsonConfigPath, std::ios::binary);
+            if (in) {
+                const std::string contents{
+                    std::istreambuf_iterator<char>(in),
+                    std::istreambuf_iterator<char>(),
+                };
+                auto findVersion = [&](const char* key) -> int {
+                    const std::string needle = std::string("\"") + key + "\"";
+                    auto p = contents.find(needle);
+                    if (p == std::string::npos) return -1;
+                    p = contents.find(':', p);
+                    if (p == std::string::npos) return -1;
+                    ++p;
+                    while (p < contents.size() && std::isspace(static_cast<unsigned char>(contents[p]))) ++p;
+                    int v = 0;
+                    bool any = false;
+                    while (p < contents.size() && std::isdigit(static_cast<unsigned char>(contents[p]))) {
+                        v = v * 10 + (contents[p] - '0');
+                        ++p;
+                        any = true;
+                    }
+                    return any ? v : -1;
+                };
+                int v = findVersion("configVersion");
+                if (v < 0) v = findVersion("metaVersion");
+                if (v < JsonWriter::kCurrentConfigVersion) staleVersion = true;
+            }
+        }
+
         const char* metaStatus = nullptr;
         if (hasLua) {
             metaStatus = " [author-owned .config.lua, skipped]";
@@ -295,6 +325,15 @@ int main(int argc, char** argv) {
                 return 5;
             }
             metaStatus = " [fresh]";
+        } else if (staleVersion) {
+            if (!JsonWriter::Write(scene, jsonConfigPath.string())) {
+                SLOG(SPRING_LOG_ERROR, "failed to write %s",
+                    jsonConfigPath.string().c_str());
+                Assimp::DefaultLogger::kill();
+                springlog_shutdown();
+                return 5;
+            }
+            metaStatus = " [upgraded]";
         } else if (updateMeta) {
             if (!JsonWriter::Write(scene, jsonConfigPath.string())) {
                 SLOG(SPRING_LOG_ERROR, "failed to write %s",
@@ -318,6 +357,27 @@ int main(int argc, char** argv) {
         SLOG(SPRING_LOG_NOTICE, "%s -> %s (%u meshes, %u materials)",
             inPath.c_str(), outPath.c_str(),
             scene->mNumMeshes, scene->mNumMaterials);
+    }
+
+    // Rewrite texture URIs (e.g. `.dds` → `.png`) AFTER the JSON config
+    // is written, so the JSON keeps the original filenames the client
+    // resolves via `unittextures/` while the GLB references the
+    // rewritten extension that gameconverter will produce alongside it.
+    if (!textureExt.empty()) {
+        // The Importer owns the scene as a non-const aiScene under the hood;
+        // for our use case (post-import rewrite before export) the const_cast
+        // is safe and idiomatic in Assimp tooling.
+        RewriteTextureExtensions(const_cast<aiScene*>(scene), textureExt);
+    }
+
+    Assimp::Exporter exporter;
+    const aiReturn rc = exporter.Export(scene, exporterId, outPath);
+    if (rc != aiReturn_SUCCESS) {
+        SLOG(SPRING_LOG_ERROR, "glTF export failed: %s",
+             exporter.GetErrorString());
+        Assimp::DefaultLogger::kill();
+        springlog_shutdown();
+        return 4;
     }
 
     Assimp::DefaultLogger::kill();

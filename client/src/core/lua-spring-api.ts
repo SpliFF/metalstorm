@@ -53,6 +53,12 @@ export interface SpringAPIContext {
      * `Spring.GiveOrder*` calls become no-ops (used by tests).
      */
     giveOrder?(cmdId: number, unitIds: number[], params: number[], options: number): void;
+    /**
+     * Forward a `Spring.SendLuaRulesMsg(msg)` call to the server. The
+     * host wires this to `Connection.sendLuaRulesMsg`. Optional — if
+     * absent, the call becomes a no-op.
+     */
+    sendLuaRulesMsg?(data: string): void;
 }
 
 /** Per-unit entry in the worker's unit store. */
@@ -1461,8 +1467,18 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         SetSoundStreamVolume: () => {},
 
         // --- Lua message passing ---
+        // SendLuaRulesMsg forwards a binary-safe payload to the server's
+        // synced LuaRules state, where it surfaces as
+        // `gadget:RecvLuaMsg(msg, playerID)`. ZK widgets (e.g.
+        // gui_contextmenu) call this to reach commands gated to the
+        // authoritative side. SendLuaUIMsg/SendLuaGaiaMsg are still
+        // unwired — the former needs server-mediated broadcast to peer
+        // clients, the latter needs LuaGaia to be loaded.
         SendLuaUIMsg: () => {},
-        SendLuaRulesMsg: () => {},
+        SendLuaRulesMsg: (msg: LuaValue) => {
+            if (msg == null) return;
+            ctx.sendLuaRulesMsg?.(String(msg));
+        },
         SendLuaGaiaMsg: () => {},
     };
 

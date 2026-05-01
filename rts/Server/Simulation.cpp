@@ -292,7 +292,16 @@ void CSimulation::InitScripting()
     // underlying InitSynced() logs the precise reason (file missing,
     // empty, Lua syntax error, etc.) so we don't second-guess it here
     // with a misleading "no main.lua" message.
-    if (CLuaRules::LoadHandler(true)) {
+    //
+    // The bool param is `dryRun` (per DECL_LOAD_SPLIT_HANDLER in LuaDefs.h):
+    // false = actually load main.lua + draw.lua. Passing true here was a
+    // misread of the declared `onlySynced` name in the header — it left the
+    // synced state initialised but with main.lua never executed, so the
+    // gadget handler never registered and RecvLuaMsg / GameStart / etc.
+    // dispatched into an empty _G. (Symptom: ZK commander selection
+    // bounced off a no-op luaRules->RecvLuaMsg and no commander spawned
+    // even though the message reached the server.)
+    if (CLuaRules::LoadHandler(false)) {
         auto* ctx = new LuaScriptContext(&luaRules->syncedLuaHandle);
         scriptDispatcher->AddContext(ctx);
         scriptingLoaded = true;
@@ -301,7 +310,7 @@ void CSimulation::InitScripting()
         SLOG(SPRING_LOG_NOTICE, "LuaRules not loaded (see lua:LuaRules above for reason)");
     }
 
-    if (CLuaGaia::LoadHandler(true)) {
+    if (CLuaGaia::LoadHandler(false)) {
         auto* ctx = new LuaScriptContext(&luaGaia->syncedLuaHandle);
         scriptDispatcher->AddContext(ctx);
         scriptingLoaded = true;

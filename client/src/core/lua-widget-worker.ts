@@ -789,6 +789,9 @@ async function init(
         giveOrder: (cmdId, unitIds, params, options) => {
             postToMain({ type: 'giveOrder', cmdId, unitIds, params, options });
         },
+        sendLuaRulesMsg: (data) => {
+            postToMain({ type: 'sendLuaRulesMsg', data });
+        },
     };
 
     // 4. Install engine globals
@@ -1614,6 +1617,12 @@ defaultFont = activeFont
             ["mute"] = true, ["mutebyid"] = true,
             ["disticon"] = true, ["distdraw"] = true,
             ["luaui"] = true, ["luarules"] = true, ["luagaia"] = true,
+            -- Engine prints / config-load commands that ZK widgets emit during
+            -- bootstrap. echo just prints to the engine console; ctrlpanel
+            -- loads a legacy command-bar layout file. Neither has a client-
+            -- side equivalent — silent no-op matches the engine on a server
+            -- that lacks the feature.
+            ["echo"] = true, ["ctrlpanel"] = true,
         }
 
         local seenUnhandled = {}

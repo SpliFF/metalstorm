@@ -10,15 +10,17 @@
 // so the sim code reading the fields stays in the existing
 // `LuaTable` world.
 //
-// Schema (as of kCurrentConfigVersion = 1):
+// Schema (as of kCurrentConfigVersion = 2):
 //
 //     {
-//       "configVersion": 1,
+//       "configVersion": 2,
 //       "radius": 50.131,
 //       "height": 56.492,
 //       "midpos": [mx, my, mz],
 //       "mins":   [x1, y1, z1],
 //       "maxs":   [x2, y2, z2],
+//       "tex1": "commrecon.dds",       // optional, present when the
+//       "tex2": "commrecon2.dds",      // source file referenced one
 //       "pieces": [
 //         { "name": "base",   "parent": -1, "offset": [...], "mins": [...], "maxs": [...] },
 //         { "name": "turret", "parent":  0, "offset": [...], "mins": [...], "maxs": [...] },
@@ -29,6 +31,12 @@
 //         ...
 //       ]
 //     }
+//
+// Schema versions:
+//   1 — initial form, geometry + pieces + attachments.
+//   2 — added tex1 / tex2 from the source material's diffuse/specular
+//       texture slots. modelimporter automatically overwrites a v1
+//       file on its next run so existing trees self-upgrade.
 //
 // Once a `.config.json` file exists on disk it belongs to the
 // author: the importer never rewrites it unless `--update-meta` is
@@ -49,7 +57,10 @@ namespace JsonWriter {
 /// wouldn't handle correctly. The engine-side reader in
 /// ModelConfigLoader has its own copy of this constant and warns
 /// when the file's `configVersion` is missing or older than its own.
-constexpr int kCurrentConfigVersion = 1;
+/// modelimporter treats a configVersion strictly older than this
+/// as "needs regeneration" and overwrites the file on its next run,
+/// so trees of stale configs self-upgrade without --update-meta.
+constexpr int kCurrentConfigVersion = 2;
 
 /// Extract metadata from `scene` and write `outPath`, overwriting
 /// any existing file at that location. Callers are responsible for

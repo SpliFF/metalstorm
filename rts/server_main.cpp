@@ -13,6 +13,7 @@
 #include "Server/ClientSession.h"
 #include "Server/EntityStateSerializer.h"
 #include "Server/ProjectileStateSerializer.h"
+#include "Server/PieceStateSerializer.h"
 #include "Server/ContentServer.h"
 #include "Server/CombatEventCollector.h"
 #include "Server/DefsCache.h"
@@ -24,6 +25,7 @@
 #include "Server/MapMetadata.h"
 #include "Server/LuaExecEngine.h"
 #include "Server/LuaDebugger.h"
+#include "Lua/LuaRules.h"
 #include "Server/HttpAuth.h"
 #include "Server/CacheControl.h"
 #include "Server/WebRTCServer.h"
@@ -1293,6 +1295,47 @@ int main(int argc, char* argv[])
                     }
                     break;
                 }
+                case SpringWeb::ClientPayload_LuaRulesMsg: {
+                    auto* session = sessions.GetSession(msg.clientId);
+                    if (!session) {
+                        SLOG(SPRING_LOG_NOTICE,
+                             "[server] LuaRulesMsg drop: no session for client %u",
+                             msg.clientId);
+                        auto err = Protocol::BuildServerError(401, "Not authenticated");
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                        break;
+                    }
+                    if (luaRules == nullptr) {
+                        SLOG(SPRING_LOG_NOTICE,
+                             "[server] LuaRulesMsg drop: luaRules not loaded");
+                        break;
+                    }
+
+                    auto pIt = clientPlayerNum.find(msg.clientId);
+                    if (pIt == clientPlayerNum.end()) {
+                        SLOG(SPRING_LOG_NOTICE,
+                             "[server] LuaRulesMsg drop: no playerNum for client %u",
+                             msg.clientId);
+                        break;
+                    }
+
+                    auto* lrm = clientMsg->payload_as_LuaRulesMsg();
+                    auto* dataVec = lrm ? lrm->data() : nullptr;
+                    if (dataVec == nullptr) {
+                        SLOG(SPRING_LOG_NOTICE,
+                             "[server] LuaRulesMsg drop: empty data vector");
+                        break;
+                    }
+
+                    std::string payload(reinterpret_cast<const char*>(dataVec->data()),
+                                        dataVec->size());
+                    SLOG(SPRING_LOG_NOTICE,
+                         "[server] LuaRulesMsg dispatch: client=%u player=%d bytes=%zu head='%s'",
+                         msg.clientId, pIt->second, payload.size(),
+                         payload.substr(0, std::min<size_t>(payload.size(), 64)).c_str());
+                    luaRules->RecvLuaMsg(payload, pIt->second);
+                    break;
+                }
                 case SpringWeb::ClientPayload_ConsoleCommand: {
                     auto* cc = clientMsg->payload_as_ConsoleCommand();
                     if (!cc) break;
@@ -1530,6 +1573,44 @@ int main(int argc, char* argv[])
                     rtcServer.SendUnreliable(clientId, projFrame.data(), projFrame.size());
                 });
             }
+        }
+        }
+
+        // Send animated piece transforms (envelope 0x05) at the same
+        // ~10 Hz cadence as projectiles. Piece animation is purely
+        // cosmetic so the lower rate is fine — the client interpolates.
+        // Visibility filtering reuses the per-session candidate list
+        // logic below by rebuilding it here; piece-transform fanout is
+        // small (only animated units appear in the payload), so the
+        // overhead is acceptable.
+        {
+        int curFrame = sim.GetFrameNum();
+        if (curFrame >= 0 && (curFrame % 3) == 0 && rtcServer.GetClientCount() > 0) {
+            sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+                int viewerAllyTeam = -1;
+                if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
+                    viewerAllyTeam = teamHandler.AllyTeam(session.team);
+
+                std::vector<CUnit*> candidates;
+                if (session.HasViewport() && sim.HasMap()) {
+                    candidates = EntityState::CollectViewportUnits(
+                        session.viewports.data(),
+                        static_cast<int>(session.viewports.size()),
+                        viewerAllyTeam);
+                } else {
+                    candidates = EntityState::CollectAllUnits(viewerAllyTeam);
+                }
+
+                auto pieceData = PieceState::SerializeUnits(
+                    candidates, static_cast<uint32_t>(curFrame));
+                if (pieceData.empty()) return;
+
+                std::vector<uint8_t> pieceFrame;
+                pieceFrame.reserve(1 + pieceData.size());
+                pieceFrame.push_back(Protocol::ENVELOPE_PIECE_STATE);
+                pieceFrame.insert(pieceFrame.end(), pieceData.begin(), pieceData.end());
+                rtcServer.SendUnreliable(clientId, pieceFrame.data(), pieceFrame.size());
+            });
         }
         }
 

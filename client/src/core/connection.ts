@@ -38,17 +38,20 @@ import { UnitCommandQueue } from '../protocol/spring-web/unit-command-queue.js';
 import { UnitOrder } from '../protocol/spring-web/unit-order.js';
 import { AuthRequest } from '../protocol/spring-web/auth-request.js';
 import { PlayerCommand } from '../protocol/spring-web/player-command.js';
+import { LuaRulesMsg } from '../protocol/spring-web/lua-rules-msg.js';
 import { AuthResponse } from '../protocol/spring-web/auth-response.js';
 import { AuthStatus } from '../protocol/spring-web/auth-status.js';
 import { ServerClock } from './clock.js';
 import { parseEntityState, type EntityStateSnapshot } from './entity-state.js';
 import { parseProjectileState, type ProjectileStateSnapshot } from './projectile-state.js';
+import { parsePieceState, type PieceStateSnapshot } from './piece-state.js';
 import { parseMapData, type ParsedMapData } from './map-data.js';
 
 const ENVELOPE_FLATBUFFERS = 0x01;
 const ENVELOPE_ENTITY_STATE_FULL = 0x02;
 const ENVELOPE_ENTITY_STATE_DELTA = 0x03;
 const ENVELOPE_PROJECTILE_STATE = 0x04;
+const ENVELOPE_PIECE_STATE = 0x05;
 export type ConnectionState = 'disconnected' | 'connecting' | 'handshake' | 'authenticating' | 'connected';
 
 export interface CombatEventInfo {
@@ -201,6 +204,7 @@ export interface ConnectionEvents {
     onWeaponDefs?: (defs: WeaponDefInfo[]) => void;
     onUnitCommandQueues?: (queues: UnitCommandQueueInfo[]) => void;
     onProjectileState?: (snapshot: ProjectileStateSnapshot) => void;
+    onPieceState?: (snapshot: PieceStateSnapshot) => void;
     onResourceUpdate?: (team: number, metal: number, maxMetal: number, energy: number, maxEnergy: number, metalIncome: number, energyIncome: number) => void;
     onGameInfo?: (frame: number, speed: number, paused: boolean,
                   wind?: { x: number; y: number; z: number; strength: number; tidal: number }) => void;
@@ -497,6 +501,23 @@ export class Connection {
         this.sendClientMessage(builder, ClientPayload.ViewportUpdate, vp);
     }
 
+    /** Forward a `Spring.SendLuaRulesMsg(msg)` from a client widget to
+     *  the server's synced LuaRules state. The bytes arrive at
+     *  `gadget:RecvLuaMsg(msg, playerID)` verbatim — embedded NULs are
+     *  preserved (ZK widgets like gui_contextmenu sometimes pack
+     *  binary fields). PlayerID is resolved server-side from the
+     *  authenticated session. */
+    sendLuaRulesMsg(data: Uint8Array | string): void {
+        if (!this.authenticated) return;
+        const bytes = typeof data === 'string'
+            ? new TextEncoder().encode(data)
+            : data;
+        const builder = new flatbuffers.Builder(64 + bytes.length);
+        const dataOff = LuaRulesMsg.createDataVector(builder, bytes);
+        const msg = LuaRulesMsg.createLuaRulesMsg(builder, dataOff);
+        this.sendClientMessage(builder, ClientPayload.LuaRulesMsg, msg);
+    }
+
     /** Send a PlayerCommand (unit order) to the server. */
     sendPlayerCommand(
         commandId: number,
@@ -594,6 +615,13 @@ export class Connection {
             const snapshot = parseProjectileState(data.subarray(1));
             if (snapshot) {
                 this.events.onProjectileState?.(snapshot);
+            }
+            return;
+        }
+        if (envelope === ENVELOPE_PIECE_STATE) {
+            const snapshot = parsePieceState(data.subarray(1));
+            if (snapshot) {
+                this.events.onPieceState?.(snapshot);
             }
             return;
         }

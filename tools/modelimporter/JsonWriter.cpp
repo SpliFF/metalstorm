@@ -3,6 +3,7 @@
 #include "JsonWriter.h"
 
 #include <assimp/scene.h>
+#include <assimp/material.h>
 
 #include <algorithm>
 #include <cmath>
@@ -278,6 +279,29 @@ bool JsonWriter::Write(const aiScene* scene, const std::string& outPath)
         }
     }
 
+    // ---- Extract texture references from the first material ----
+    //
+    // S3OImporter populates a single material per scene with the original
+    // texture filenames Spring expects to find under `unittextures/`:
+    //   AI_MATKEY_TEXTURE_DIFFUSE(0)  → tex1 (diffuse)
+    //   AI_MATKEY_TEXTURE_SPECULAR(0) → tex2 (team-colour mask)
+    // For non-S3O formats the slot mapping is whatever Assimp's importer
+    // for that format chose; we read the same slots and accept whatever
+    // we find there. Hand-authored .config.lua files always win when
+    // present (modelimporter skips emitting JSON in that case), so this
+    // only affects machine-converted models.
+    std::string tex1, tex2;
+    if (scene->mNumMaterials > 0 && scene->mMaterials != nullptr) {
+        const aiMaterial* mat = scene->mMaterials[0];
+        aiString s;
+        if (mat->GetTexture(aiTextureType_DIFFUSE, 0, &s) == AI_SUCCESS) {
+            tex1.assign(s.C_Str(), s.length);
+        }
+        if (mat->GetTexture(aiTextureType_SPECULAR, 0, &s) == AI_SUCCESS) {
+            tex2.assign(s.C_Str(), s.length);
+        }
+    }
+
     // ---- Write the JSON file ----
     std::ofstream out(outPath, std::ios::binary);
     if (!out) {
@@ -301,6 +325,13 @@ bool JsonWriter::Write(const aiScene* scene, const std::string& outPath)
     out << "  \"midpos\": " << Vec3(midX, midY, midZ) << ",\n";
     out << "  \"mins\":   " << Vec3(bounds.minX, bounds.minY, bounds.minZ) << ",\n";
     out << "  \"maxs\":   " << Vec3(bounds.maxX, bounds.maxY, bounds.maxZ) << ",\n";
+
+    // Texture references — only emitted when present in the source.
+    // These are bare filenames as recorded in the original model file
+    // (e.g. `commrecon.dds`); the client resolves them via the game's
+    // `unittextures/` directory.
+    if (!tex1.empty()) out << "\n  \"tex1\": " << JsonString(tex1) << ",\n";
+    if (!tex2.empty()) out << "  \"tex2\": " << JsonString(tex2) << ",\n";
 
     // Pieces — flat list ordered by pre-order walk.
     out << "\n  \"pieces\": [\n";

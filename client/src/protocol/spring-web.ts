@@ -37,6 +37,7 @@ export { LogEntryMsg, LogEntryMsgT } from './spring-web/log-entry-msg.js';
 export { LogIngest, LogIngestT } from './spring-web/log-ingest.js';
 export { LogSubscribe, LogSubscribeT } from './spring-web/log-subscribe.js';
 export { LogUnsubscribe, LogUnsubscribeT } from './spring-web/log-unsubscribe.js';
+export { LuaRulesMsg, LuaRulesMsgT } from './spring-web/lua-rules-msg.js';
 export { MapData, MapDataT } from './spring-web/map-data.js';
 export { MapDecals, MapDecalsT } from './spring-web/map-decals.js';
 export { MapFeature, MapFeatureT } from './spring-web/map-feature.js';

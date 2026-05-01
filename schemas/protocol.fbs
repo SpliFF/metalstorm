@@ -76,6 +76,16 @@ table ChatSend {
     destination: uint8;         // 0=all, 1=allies, 2=spectators
 }
 
+/// Forwarded `Spring.SendLuaRulesMsg` call from a client widget to the
+/// server's synced LuaRules state. The data payload is delivered verbatim
+/// to `gadget:RecvLuaMsg(msg, playerID)`. Bytes (not string) so embedded
+/// nulls — which ZK widgets occasionally use as a separator — survive the
+/// round-trip. PlayerID is resolved server-side from the authenticated
+/// session, not trusted from the client.
+table LuaRulesMsg {
+    data: [uint8];
+}
+
 table Ack {
     last_received_seq: uint32;
 }
@@ -286,6 +296,7 @@ union ClientPayload {
     LogSubscribe,
     LogUnsubscribe,
     ConsoleCommand,
+    LuaRulesMsg,
 }
 
 table ClientMessage {
