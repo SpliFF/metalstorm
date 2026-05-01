@@ -238,6 +238,15 @@ struct UnitCommandQueueBuilder;
 struct UnitCommandQueuesUpdate;
 struct UnitCommandQueuesUpdateBuilder;
 
+struct UnitCmdDesc;
+struct UnitCmdDescBuilder;
+
+struct UnitCmdDescs;
+struct UnitCmdDescsBuilder;
+
+struct UnitCmdDescsUpdate;
+struct UnitCmdDescsUpdateBuilder;
+
 struct ServerMessage;
 struct ServerMessageBuilder;
 
@@ -662,11 +671,12 @@ enum ServerPayload : uint8_t {
   ServerPayload_GameStarted = 24,
   ServerPayload_GameRestarting = 25,
   ServerPayload_UnitCommandQueuesUpdate = 26,
+  ServerPayload_UnitCmdDescsUpdate = 27,
   ServerPayload_MIN = ServerPayload_NONE,
-  ServerPayload_MAX = ServerPayload_UnitCommandQueuesUpdate
+  ServerPayload_MAX = ServerPayload_UnitCmdDescsUpdate
 };
 
-inline const ServerPayload (&EnumValuesServerPayload())[27] {
+inline const ServerPayload (&EnumValuesServerPayload())[28] {
   static const ServerPayload values[] = {
     ServerPayload_NONE,
     ServerPayload_AuthResponse,
@@ -694,13 +704,14 @@ inline const ServerPayload (&EnumValuesServerPayload())[27] {
     ServerPayload_ConsoleResponse,
     ServerPayload_GameStarted,
     ServerPayload_GameRestarting,
-    ServerPayload_UnitCommandQueuesUpdate
+    ServerPayload_UnitCommandQueuesUpdate,
+    ServerPayload_UnitCmdDescsUpdate
   };
   return values;
 }
 
 inline const char * const *EnumNamesServerPayload() {
-  static const char * const names[28] = {
+  static const char * const names[29] = {
     "NONE",
     "AuthResponse",
     "EntityCreate",
@@ -728,13 +739,14 @@ inline const char * const *EnumNamesServerPayload() {
     "GameStarted",
     "GameRestarting",
     "UnitCommandQueuesUpdate",
+    "UnitCmdDescsUpdate",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameServerPayload(ServerPayload e) {
-  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_UnitCommandQueuesUpdate)) return "";
+  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_UnitCmdDescsUpdate)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesServerPayload()[index];
 }
@@ -845,6 +857,10 @@ template<> struct ServerPayloadTraits<SpringWeb::GameRestarting> {
 
 template<> struct ServerPayloadTraits<SpringWeb::UnitCommandQueuesUpdate> {
   static const ServerPayload enum_value = ServerPayload_UnitCommandQueuesUpdate;
+};
+
+template<> struct ServerPayloadTraits<SpringWeb::UnitCmdDescsUpdate> {
+  static const ServerPayload enum_value = ServerPayload_UnitCmdDescsUpdate;
 };
 
 bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *obj, ServerPayload type);
@@ -8377,6 +8393,185 @@ inline ::flatbuffers::Offset<UnitCommandQueuesUpdate> CreateUnitCommandQueuesUpd
       queues__);
 }
 
+/// One available command/button on a unit's command panel. ZK-style
+/// games attach build options dynamically per unit (via Spring.InsertUnitCmdDesc),
+/// so the static UnitDef.build_options list is not authoritative — the client
+/// needs the live cmd-desc list to know what each selected unit can build.
+/// Currently only build commands (cmd_id < 0) are streamed; standing-order
+/// toggles (FIRE_STATE, MOVE_STATE, etc.) come later.
+struct UnitCmdDesc FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef UnitCmdDescBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_CMD_ID = 4,
+    VT_DISABLED = 6
+  };
+  /// Spring command id. Negative IDs are build commands where
+  /// -cmd_id is the unit-def id to construct.
+  int32_t cmd_id() const {
+    return GetField<int32_t>(VT_CMD_ID, 0);
+  }
+  /// True if greyed-out (not currently buildable due to tech, resources, etc.).
+  bool disabled() const {
+    return GetField<uint8_t>(VT_DISABLED, 0) != 0;
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<int32_t>(verifier, VT_CMD_ID, 4) &&
+           VerifyField<uint8_t>(verifier, VT_DISABLED, 1) &&
+           verifier.EndTable();
+  }
+};
+
+struct UnitCmdDescBuilder {
+  typedef UnitCmdDesc Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_cmd_id(int32_t cmd_id) {
+    fbb_.AddElement<int32_t>(UnitCmdDesc::VT_CMD_ID, cmd_id, 0);
+  }
+  void add_disabled(bool disabled) {
+    fbb_.AddElement<uint8_t>(UnitCmdDesc::VT_DISABLED, static_cast<uint8_t>(disabled), 0);
+  }
+  explicit UnitCmdDescBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<UnitCmdDesc> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<UnitCmdDesc>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<UnitCmdDesc> CreateUnitCmdDesc(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    int32_t cmd_id = 0,
+    bool disabled = false) {
+  UnitCmdDescBuilder builder_(_fbb);
+  builder_.add_cmd_id(cmd_id);
+  builder_.add_disabled(disabled);
+  return builder_.Finish();
+}
+
+struct UnitCmdDescs FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef UnitCmdDescsBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_UNIT_ID = 4,
+    VT_CMDS = 6
+  };
+  uint32_t unit_id() const {
+    return GetField<uint32_t>(VT_UNIT_ID, 0);
+  }
+  const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::UnitCmdDesc>> *cmds() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::UnitCmdDesc>> *>(VT_CMDS);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_UNIT_ID, 4) &&
+           VerifyOffset(verifier, VT_CMDS) &&
+           verifier.VerifyVector(cmds()) &&
+           verifier.VerifyVectorOfTables(cmds()) &&
+           verifier.EndTable();
+  }
+};
+
+struct UnitCmdDescsBuilder {
+  typedef UnitCmdDescs Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_unit_id(uint32_t unit_id) {
+    fbb_.AddElement<uint32_t>(UnitCmdDescs::VT_UNIT_ID, unit_id, 0);
+  }
+  void add_cmds(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::UnitCmdDesc>>> cmds) {
+    fbb_.AddOffset(UnitCmdDescs::VT_CMDS, cmds);
+  }
+  explicit UnitCmdDescsBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<UnitCmdDescs> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<UnitCmdDescs>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<UnitCmdDescs> CreateUnitCmdDescs(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t unit_id = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::UnitCmdDesc>>> cmds = 0) {
+  UnitCmdDescsBuilder builder_(_fbb);
+  builder_.add_cmds(cmds);
+  builder_.add_unit_id(unit_id);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<UnitCmdDescs> CreateUnitCmdDescsDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t unit_id = 0,
+    const std::vector<::flatbuffers::Offset<SpringWeb::UnitCmdDesc>> *cmds = nullptr) {
+  auto cmds__ = cmds ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::UnitCmdDesc>>(*cmds) : 0;
+  return SpringWeb::CreateUnitCmdDescs(
+      _fbb,
+      unit_id,
+      cmds__);
+}
+
+/// Per-session broadcast: every own-team unit's available command list,
+/// filtered to build commands. Sent at low cadence (~1 Hz). Client treats
+/// each snapshot as a complete replacement of its cmd-desc cache.
+struct UnitCmdDescsUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef UnitCmdDescsUpdateBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_UNITS = 4
+  };
+  const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::UnitCmdDescs>> *units() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::UnitCmdDescs>> *>(VT_UNITS);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_UNITS) &&
+           verifier.VerifyVector(units()) &&
+           verifier.VerifyVectorOfTables(units()) &&
+           verifier.EndTable();
+  }
+};
+
+struct UnitCmdDescsUpdateBuilder {
+  typedef UnitCmdDescsUpdate Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_units(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::UnitCmdDescs>>> units) {
+    fbb_.AddOffset(UnitCmdDescsUpdate::VT_UNITS, units);
+  }
+  explicit UnitCmdDescsUpdateBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<UnitCmdDescsUpdate> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<UnitCmdDescsUpdate>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<UnitCmdDescsUpdate> CreateUnitCmdDescsUpdate(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::UnitCmdDescs>>> units = 0) {
+  UnitCmdDescsUpdateBuilder builder_(_fbb);
+  builder_.add_units(units);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<UnitCmdDescsUpdate> CreateUnitCmdDescsUpdateDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const std::vector<::flatbuffers::Offset<SpringWeb::UnitCmdDescs>> *units = nullptr) {
+  auto units__ = units ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::UnitCmdDescs>>(*units) : 0;
+  return SpringWeb::CreateUnitCmdDescsUpdate(
+      _fbb,
+      units__);
+}
+
 struct ServerMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef ServerMessageBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
@@ -8467,6 +8662,9 @@ struct ServerMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   }
   const SpringWeb::UnitCommandQueuesUpdate *payload_as_UnitCommandQueuesUpdate() const {
     return payload_type() == SpringWeb::ServerPayload_UnitCommandQueuesUpdate ? static_cast<const SpringWeb::UnitCommandQueuesUpdate *>(payload()) : nullptr;
+  }
+  const SpringWeb::UnitCmdDescsUpdate *payload_as_UnitCmdDescsUpdate() const {
+    return payload_type() == SpringWeb::ServerPayload_UnitCmdDescsUpdate ? static_cast<const SpringWeb::UnitCmdDescsUpdate *>(payload()) : nullptr;
   }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -8579,6 +8777,10 @@ template<> inline const SpringWeb::GameRestarting *ServerMessage::payload_as<Spr
 
 template<> inline const SpringWeb::UnitCommandQueuesUpdate *ServerMessage::payload_as<SpringWeb::UnitCommandQueuesUpdate>() const {
   return payload_as_UnitCommandQueuesUpdate();
+}
+
+template<> inline const SpringWeb::UnitCmdDescsUpdate *ServerMessage::payload_as<SpringWeb::UnitCmdDescsUpdate>() const {
+  return payload_as_UnitCmdDescsUpdate();
 }
 
 struct ServerMessageBuilder {
@@ -8852,6 +9054,10 @@ inline bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *o
     }
     case ServerPayload_UnitCommandQueuesUpdate: {
       auto ptr = reinterpret_cast<const SpringWeb::UnitCommandQueuesUpdate *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case ServerPayload_UnitCmdDescsUpdate: {
+      auto ptr = reinterpret_cast<const SpringWeb::UnitCmdDescsUpdate *>(obj);
       return verifier.VerifyTable(ptr);
     }
     default: return true;

@@ -27,6 +27,7 @@ import { RoomPlayerJoined, RoomPlayerJoinedT } from '../spring-web/room-player-j
 import { RoomPlayerLeft, RoomPlayerLeftT } from '../spring-web/room-player-left.js';
 import { RoomStateUpdate, RoomStateUpdateT } from '../spring-web/room-state-update.js';
 import { ServerError, ServerErrorT } from '../spring-web/server-error.js';
+import { UnitCmdDescsUpdate, UnitCmdDescsUpdateT } from '../spring-web/unit-cmd-descs-update.js';
 import { UnitCommandQueuesUpdate, UnitCommandQueuesUpdateT } from '../spring-web/unit-command-queues-update.js';
 
 
@@ -57,13 +58,14 @@ export enum ServerPayload {
   ConsoleResponse = 23,
   GameStarted = 24,
   GameRestarting = 25,
-  UnitCommandQueuesUpdate = 26
+  UnitCommandQueuesUpdate = 26,
+  UnitCmdDescsUpdate = 27
 }
 
 export function unionToServerPayload(
   type: ServerPayload,
-  accessor: (obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCommandQueuesUpdate) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCommandQueuesUpdate|null
-): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCommandQueuesUpdate|null {
+  accessor: (obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCmdDescsUpdate|UnitCommandQueuesUpdate) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|null
+): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|null {
   switch(ServerPayload[type]) {
     case 'NONE': return null; 
     case 'AuthResponse': return accessor(new AuthResponse())! as AuthResponse;
@@ -92,15 +94,16 @@ export function unionToServerPayload(
     case 'GameStarted': return accessor(new GameStarted())! as GameStarted;
     case 'GameRestarting': return accessor(new GameRestarting())! as GameRestarting;
     case 'UnitCommandQueuesUpdate': return accessor(new UnitCommandQueuesUpdate())! as UnitCommandQueuesUpdate;
+    case 'UnitCmdDescsUpdate': return accessor(new UnitCmdDescsUpdate())! as UnitCmdDescsUpdate;
     default: return null;
   }
 }
 
 export function unionListToServerPayload(
   type: ServerPayload, 
-  accessor: (index: number, obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCommandQueuesUpdate) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCommandQueuesUpdate|null, 
+  accessor: (index: number, obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCmdDescsUpdate|UnitCommandQueuesUpdate) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|null, 
   index: number
-): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCommandQueuesUpdate|null {
+): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|null {
   switch(ServerPayload[type]) {
     case 'NONE': return null; 
     case 'AuthResponse': return accessor(index, new AuthResponse())! as AuthResponse;
@@ -129,6 +132,7 @@ export function unionListToServerPayload(
     case 'GameStarted': return accessor(index, new GameStarted())! as GameStarted;
     case 'GameRestarting': return accessor(index, new GameRestarting())! as GameRestarting;
     case 'UnitCommandQueuesUpdate': return accessor(index, new UnitCommandQueuesUpdate())! as UnitCommandQueuesUpdate;
+    case 'UnitCmdDescsUpdate': return accessor(index, new UnitCmdDescsUpdate())! as UnitCmdDescsUpdate;
     default: return null;
   }
 }

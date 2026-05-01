@@ -17,6 +17,7 @@
 #include "Sim/Weapons/WeaponDef.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Units/CommandAI/Command.h"
+#include "Sim/Units/CommandAI/CommandDescription.h"
 #include "Sim/Units/CommandAI/CommandQueue.h"
 #include <flatbuffers/flatbuffers.h>
 #include <algorithm>
@@ -239,6 +240,48 @@ inline std::vector<uint8_t> BuildUnitCommandQueues(const std::vector<CUnit*>& un
     auto upd = SpringWeb::CreateUnitCommandQueuesUpdate(fbb, queuesVec);
     return BuildServerMessage(fbb,
         SpringWeb::ServerPayload_UnitCommandQueuesUpdate, upd.Union());
+}
+
+/// Serialize each unit's available build-command descriptors. Builds and
+/// factories often have build options assigned dynamically (Spring.InsertUnitCmdDesc
+/// from gadgets) so the static UnitDef.build_options list is not authoritative.
+/// We stream only the negative-id (build) entries — positional/standing-order
+/// command buttons are handled client-side from the CMD_* enum.
+inline std::vector<uint8_t> BuildUnitCmdDescs(const std::vector<CUnit*>& units) {
+    flatbuffers::FlatBufferBuilder fbb(2048);
+
+    std::vector<flatbuffers::Offset<SpringWeb::UnitCmdDescs>> unitOffsets;
+    unitOffsets.reserve(units.size());
+
+    for (const CUnit* u : units) {
+        if (u == nullptr || u->commandAI == nullptr) continue;
+        const auto& descs = u->commandAI->GetPossibleCommands();
+
+        std::vector<flatbuffers::Offset<SpringWeb::UnitCmdDesc>> cmdOffsets;
+        cmdOffsets.reserve(descs.size());
+        for (const SCommandDescription* d : descs) {
+            if (d == nullptr || d->hidden) continue;
+            // First pass: build commands only. Standing-order toggles
+            // come later when the client UI grows beyond build placement.
+            if (d->id >= 0) continue;
+            cmdOffsets.push_back(SpringWeb::CreateUnitCmdDesc(
+                fbb,
+                static_cast<int32_t>(d->id),
+                d->disabled));
+        }
+
+        // Skip units with no build-command descs to keep the payload tight.
+        if (cmdOffsets.empty()) continue;
+
+        auto cmdsVec = fbb.CreateVector(cmdOffsets);
+        unitOffsets.push_back(SpringWeb::CreateUnitCmdDescs(
+            fbb, static_cast<uint32_t>(u->id), cmdsVec));
+    }
+
+    auto unitsVec = fbb.CreateVector(unitOffsets);
+    auto upd = SpringWeb::CreateUnitCmdDescsUpdate(fbb, unitsVec);
+    return BuildServerMessage(fbb,
+        SpringWeb::ServerPayload_UnitCmdDescsUpdate, upd.Union());
 }
 
 /// Build a GameInfo message (map, game, speed, frame, paused, env state).

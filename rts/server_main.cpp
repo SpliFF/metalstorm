@@ -1474,6 +1474,8 @@ int main(int argc, char* argv[])
                 if (teamUnits.empty()) return;
                 auto msg = Protocol::BuildUnitCommandQueues(teamUnits);
                 rtcServer.SendReliable(clientId, msg.data(), msg.size());
+                auto descs = Protocol::BuildUnitCmdDescs(teamUnits);
+                rtcServer.SendReliable(clientId, descs.data(), descs.size());
             });
         }
         }

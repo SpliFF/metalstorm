@@ -34,6 +34,9 @@ import { GameWeaponDefs } from '../protocol/spring-web/game-weapon-defs.js';
 import { GameWeaponDef } from '../protocol/spring-web/game-weapon-def.js';
 import { CustomParam } from '../protocol/spring-web/custom-param.js';
 import { UnitCommandQueuesUpdate } from '../protocol/spring-web/unit-command-queues-update.js';
+import { UnitCmdDescsUpdate } from '../protocol/spring-web/unit-cmd-descs-update.js';
+import { UnitCmdDescs } from '../protocol/spring-web/unit-cmd-descs.js';
+import { UnitCmdDesc } from '../protocol/spring-web/unit-cmd-desc.js';
 import { UnitCommandQueue } from '../protocol/spring-web/unit-command-queue.js';
 import { UnitOrder } from '../protocol/spring-web/unit-order.js';
 import { AuthRequest } from '../protocol/spring-web/auth-request.js';
@@ -136,6 +139,18 @@ export interface UnitCommandQueueInfo {
     orders: UnitOrderInfo[];
 }
 
+/** A single available command on a unit's command panel. */
+export interface UnitCmdDescInfo {
+    /** Spring command id. Negative = build (-cmdId is the unit-def id). */
+    cmdId: number;
+    disabled: boolean;
+}
+
+export interface UnitCmdDescsInfo {
+    unitId: number;
+    cmds: UnitCmdDescInfo[];
+}
+
 export interface WeaponDefInfo {
     defId: number;
     name: string;
@@ -203,6 +218,7 @@ export interface ConnectionEvents {
     onUnitDefs?: (defs: UnitDefInfo[]) => void;
     onWeaponDefs?: (defs: WeaponDefInfo[]) => void;
     onUnitCommandQueues?: (queues: UnitCommandQueueInfo[]) => void;
+    onUnitCmdDescs?: (units: UnitCmdDescsInfo[]) => void;
     onProjectileState?: (snapshot: ProjectileStateSnapshot) => void;
     onPieceState?: (snapshot: PieceStateSnapshot) => void;
     onResourceUpdate?: (team: number, metal: number, maxMetal: number, energy: number, maxEnergy: number, metalIncome: number, energyIncome: number) => void;
@@ -876,6 +892,23 @@ export class Connection {
                     queues.push({ unitId: q.unitId(), orders });
                 }
                 this.events.onUnitCommandQueues?.(queues);
+                break;
+            }
+            case ServerPayload.UnitCmdDescsUpdate: {
+                const fbUpd = msg.payload(new UnitCmdDescsUpdate()) as UnitCmdDescsUpdate;
+                const units: UnitCmdDescsInfo[] = [];
+                for (let ui = 0; ui < fbUpd.unitsLength(); ui++) {
+                    const u = fbUpd.units(ui, new UnitCmdDescs());
+                    if (!u) continue;
+                    const cmds: UnitCmdDescInfo[] = [];
+                    for (let ci = 0; ci < u.cmdsLength(); ci++) {
+                        const c = u.cmds(ci, new UnitCmdDesc());
+                        if (!c) continue;
+                        cmds.push({ cmdId: c.cmdId(), disabled: !!c.disabled() });
+                    }
+                    units.push({ unitId: u.unitId(), cmds });
+                }
+                this.events.onUnitCmdDescs?.(units);
                 break;
             }
             case ServerPayload.GameRestarting:

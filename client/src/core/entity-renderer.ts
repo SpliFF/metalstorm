@@ -1093,6 +1093,10 @@ export class EntityRenderer {
         return this.entityMeta.entries();
     }
 
+    getEntityMeta(id: number): EntityMeta | undefined {
+        return this.entityMeta.get(id);
+    }
+
     getEntityPosition(id: number): { x: number; y: number; z: number } | null {
         return this.interpolator.getInterpolated(id);
     }

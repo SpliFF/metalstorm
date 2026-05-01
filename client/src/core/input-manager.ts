@@ -23,12 +23,17 @@ import {
     FreeCamera,
     Vector3,
     Matrix,
+    Mesh,
+    MeshBuilder,
+    StandardMaterial,
+    Color3,
     PointerEventTypes,
     type PointerInfo,
 } from '@babylonjs/core';
 import { EntityRenderer } from './entity-renderer.js';
 import { CommandBuffer, CMD } from './command-buffer.js';
 import type { Connection } from './connection.js';
+import type { DefCache } from './def-cache.js';
 
 /// How close (in world elmos) a click has to be to a unit's XZ to
 /// count as selecting that unit. Accounts for pickWithRay landing
@@ -50,6 +55,10 @@ export class InputManager {
     /// current pointer event. Wired up to LuaWidgetManager.isCursorOverUI()
     /// so a click on a chili button doesn't also trigger a deselect-all.
     private isOverUI: () => boolean = () => false;
+    /// Optional def lookup so build placement can size the ghost from the
+    /// chosen def's footprint. Wired in via setDefCache after construction
+    /// to keep the existing main.ts call site unchanged.
+    private defCache: DefCache | null = null;
 
     // Drag-select state
     private dragActive = false;
@@ -59,6 +68,18 @@ export class InputManager {
     private dragCurY = 0;
     private dragShift = false;
     private dragOverlay: HTMLDivElement | null = null;
+
+    // Build placement state — non-null while the player has clicked a build
+    // button and is choosing a ground location. Cancelled by ESC, right-click,
+    // selection change, or a successful left-click placement (unless shift is
+    // held, in which case placement mode persists for queue building).
+    private buildPlacement: {
+        defId: number;
+        ghost: Mesh;
+        footprintX: number;
+        footprintZ: number;
+    } | null = null;
+    private moveListener: ((evt: MouseEvent) => void) | null = null;
 
     constructor(
         scene: Scene,
@@ -78,6 +99,11 @@ export class InputManager {
         this.setupKeyboardHandler();
     }
 
+    /** Wire the def cache after construction so build placement can size the ghost. */
+    setDefCache(cache: DefCache): void {
+        this.defCache = cache;
+    }
+
     setUIHitTest(probe: () => boolean): void {
         this.isOverUI = probe;
     }
@@ -92,6 +118,103 @@ export class InputManager {
         this.selectedIds = ids;
         this.entityRenderer.setSelection(ids);
         this.onSelectionChange?.(ids);
+        // A new selection invalidates any in-progress build placement —
+        // the chosen def may not be buildable by the new selection.
+        this.cancelBuildPlacement();
+    }
+
+    // ---- Build placement ----
+
+    /**
+     * Enter ghost-placement mode for a build command. Called by the BuildMenu
+     * after the player clicks a build button. The next left-click on the
+     * ground issues the build order (cmdId = -defId, params = [x,y,z,facing]).
+     * Right-click or ESC cancels.
+     */
+    startBuildPlacement(defId: number): void {
+        // Replace any existing placement (rapid button switch).
+        this.cancelBuildPlacement();
+
+        const def = this.defCache?.getUnitDef(defId);
+        // Spring footprints are in heightmap squares (8 elmos each). Default
+        // to 2x2 if the def hasn't streamed yet — the ghost is just a hint,
+        // not a constraint, so a guess is fine.
+        // Spring's xsize/zsize are already in elmos (footprint * 2 each).
+        const fpX = (def?.xsize ?? 4) * 8;
+        const fpZ = (def?.zsize ?? 4) * 8;
+        const sizeY = 24;
+
+        const ghost = MeshBuilder.CreateBox('build-ghost', {
+            width: fpX, depth: fpZ, height: sizeY,
+        }, this.scene);
+        const mat = new StandardMaterial('build-ghost-mat', this.scene);
+        mat.diffuseColor = new Color3(0.4, 1.0, 0.5);
+        mat.emissiveColor = new Color3(0.15, 0.4, 0.2);
+        mat.alpha = 0.45;
+        mat.backFaceCulling = false;
+        ghost.material = mat;
+        ghost.isPickable = false;
+        ghost.renderingGroupId = 2;
+        // Park off-screen until the first mouse move places it.
+        ghost.position.set(-1e6, 0, 0);
+
+        this.buildPlacement = { defId, ghost, footprintX: fpX, footprintZ: fpZ };
+
+        // Track the cursor so the ghost follows it.
+        const canvas = this.scene.getEngine().getRenderingCanvas();
+        if (canvas) {
+            this.moveListener = (evt: MouseEvent) => this.updateBuildGhost(evt.clientX, evt.clientY);
+            canvas.addEventListener('mousemove', this.moveListener);
+        }
+    }
+
+    cancelBuildPlacement(): void {
+        if (this.moveListener) {
+            const canvas = this.scene.getEngine().getRenderingCanvas();
+            canvas?.removeEventListener('mousemove', this.moveListener);
+            this.moveListener = null;
+        }
+        if (this.buildPlacement) {
+            this.buildPlacement.ghost.dispose();
+            this.buildPlacement = null;
+        }
+    }
+
+    get isPlacingBuild(): boolean { return this.buildPlacement !== null; }
+
+    private updateBuildGhost(clientX: number, clientY: number): void {
+        if (!this.buildPlacement) return;
+        const groundPos = this.pickGroundAt(clientX, clientY);
+        if (!groundPos) return;
+        // Snap to the 16-elmo grid Spring uses internally for builds.
+        const gx = Math.round(groundPos.x / 16) * 16;
+        const gz = Math.round(groundPos.z / 16) * 16;
+        this.buildPlacement.ghost.position.set(gx, groundPos.y + 0.5, gz);
+    }
+
+    private issueBuildAt(groundPos: Vector3, queue: boolean): void {
+        if (!this.buildPlacement) return;
+        const defId = this.buildPlacement.defId;
+        // Spring quantises build positions to its 16-elmo grid; the server
+        // would re-snap regardless but matching client-side keeps the ghost
+        // visually consistent with the placed unit.
+        const x = Math.round(groundPos.x / 16) * 16;
+        const z = Math.round(groundPos.z / 16) * 16;
+        const y = groundPos.y;
+        // Default facing south (0). A future enhancement: hold-and-drag to set
+        // facing from the drag direction (Spring's standard build placement).
+        const facing = 0;
+        // Negative cmdId = build command, -cmdId is the unit-def id.
+        // Shift in options bitfield = queue order behind existing commands.
+        const SHIFT_OPT = 32;
+        this.commandBuffer.issueImmediate(
+            -defId, this.selectedIds.slice(),
+            [x, y, z, facing],
+            queue ? SHIFT_OPT : 0);
+
+        // Stay in placement mode while shift is held (chain-build sites);
+        // otherwise drop out so the next left-click selects normally.
+        if (!queue) this.cancelBuildPlacement();
     }
 
     // ---- Drag overlay ----
@@ -159,6 +282,13 @@ export class InputManager {
         // (e.g. tab-induced focus + Enter to fake a click) won't be caught,
         // but that's an edge case worth deferring.
         if (this.isOverUI()) return;
+        // Build placement: a left-click during placement issues the build
+        // order at the ground point, not a unit selection.
+        if (this.buildPlacement) {
+            const groundPos = this.pickGroundAt(evt.clientX, evt.clientY);
+            if (groundPos) this.issueBuildAt(groundPos, evt.shiftKey);
+            return;
+        }
         this.dragActive = true;
         this.dragStartX = evt.clientX;
         this.dragStartY = evt.clientY;
@@ -269,6 +399,11 @@ export class InputManager {
     // ---- Right click orders ----
 
     private onRightClick(evt: PointerEvent): void {
+        // Right-click during build placement just cancels the placement.
+        if (this.buildPlacement) {
+            this.cancelBuildPlacement();
+            return;
+        }
         if (this.selectedIds.length === 0) return;
         // Right-click on UI cancels chili interaction (handled by widgetHandler);
         // don't also issue an order to whatever ground happens to be behind it.
@@ -314,6 +449,15 @@ export class InputManager {
             // Ignore if an input element has focus.
             const tag = (e.target as HTMLElement)?.tagName;
             if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+            // ESC cancels build placement (must run regardless of selection).
+            // The main.ts ESC handler shows the quit dialog after we early-out.
+            if (e.key === 'Escape' && this.buildPlacement) {
+                this.cancelBuildPlacement();
+                e.stopPropagation();
+                return;
+            }
+
             if (this.selectedIds.length === 0) return;
 
             switch (e.key.toLowerCase()) {
@@ -360,6 +504,7 @@ export class InputManager {
     }
 
     dispose(): void {
+        this.cancelBuildPlacement();
         this.commandBuffer.dispose();
         if (this.dragOverlay) {
             this.dragOverlay.remove();

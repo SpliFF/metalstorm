@@ -11,6 +11,7 @@ import { DefCache } from './core/def-cache.js';
 import { CombatFX } from './core/combat-fx.js';
 import { AudioManager } from './core/audio.js';
 import { InputManager } from './core/input-manager.js';
+import { BuildMenu } from './core/build-menu.js';
 import { buildTerrainMesh, loadTerrainTextures, type MapDimensions } from './core/terrain.js';
 import { LobbyUI } from './lobby/lobby-ui.js';
 import { Minimap } from './core/minimap.js';
@@ -44,6 +45,7 @@ let projectileRenderer: ProjectileRenderer | null = null;
 let combatFX: CombatFX | null = null;
 let audioManager: AudioManager | null = null;
 let inputManager: InputManager | null = null;
+let buildMenu: BuildMenu | null = null;
 let lobbyUI: LobbyUI | null = null;
 let minimap: Minimap | null = null;
 /// Game server connection. Non-null while a game is active. Hoisted out
@@ -165,6 +167,8 @@ function quitToLobby(): void {
 
     minimap?.dispose();
     minimap = null;
+    buildMenu?.dispose();
+    buildMenu = null;
     inputManager?.dispose();
     inputManager = null;
     engine?.stopRenderLoop();
@@ -264,6 +268,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     combatFX = null;
     audioManager = null;
     inputManager = null;
+    buildMenu?.dispose();
+    buildMenu = null;
 
     showHUD();
 
@@ -549,6 +555,16 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 debugConsole.setGameChannel(channel);
             }
 
+            // Now that we know our team, spin up the build menu. It listens
+            // to selection + cmd-desc updates to render the build button grid
+            // for selected own-team builders, and hands clicks off to
+            // InputManager.startBuildPlacement for the ghost+place flow.
+            if (entityRenderer && inputManager) {
+                buildMenu = new BuildMenu(defCache, entityRenderer, team, {
+                    onPick: (defId) => inputManager?.startBuildPlacement(defId),
+                });
+            }
+
             // Fetch map data + def cache in parallel. Both must complete
             // before widget manager bootstrap so cawidgets sees populated
             // UnitDefs/WeaponDefs tables. Defs come from a content-addressed
@@ -612,6 +628,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         onUnitCommandQueues(queues) {
             currentWidgetManager?.forwardUnitCommandQueues(queues);
         },
+        onUnitCmdDescs(units) {
+            buildMenu?.setCmdDescs(units);
+        },
         onGameOver(frame) {
             showGameOver(frame);
             currentWidgetManager?.forwardGameInfo(frame, 0, true, true);
@@ -633,7 +652,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
 
     // Input
     inputManager = new InputManager(scene, camera, entityRenderer, conn,
-        (ids) => minimap?.setSelection(ids));
+        (ids) => {
+            minimap?.setSelection(ids);
+            buildMenu?.setSelection(ids);
+        });
+    inputManager.setDefCache(defCache);
     // Route ground-click suppression through the widget manager. The
     // widget manager is created later (when MapData arrives) so we read
     // it lazily — by the time the user clicks anything, the manager has

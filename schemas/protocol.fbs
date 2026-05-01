@@ -970,6 +970,32 @@ table UnitCommandQueuesUpdate {
     queues: [UnitCommandQueue];
 }
 
+/// One available command/button on a unit's command panel. ZK-style
+/// games attach build options dynamically per unit (via Spring.InsertUnitCmdDesc),
+/// so the static UnitDef.build_options list is not authoritative — the client
+/// needs the live cmd-desc list to know what each selected unit can build.
+/// Currently only build commands (cmd_id < 0) are streamed; standing-order
+/// toggles (FIRE_STATE, MOVE_STATE, etc.) come later.
+table UnitCmdDesc {
+    /// Spring command id. Negative IDs are build commands where
+    /// -cmd_id is the unit-def id to construct.
+    cmd_id: int32;
+    /// True if greyed-out (not currently buildable due to tech, resources, etc.).
+    disabled: bool = false;
+}
+
+table UnitCmdDescs {
+    unit_id: uint32;
+    cmds: [UnitCmdDesc];
+}
+
+/// Per-session broadcast: every own-team unit's available command list,
+/// filtered to build commands. Sent at low cadence (~1 Hz). Client treats
+/// each snapshot as a complete replacement of its cmd-desc cache.
+table UnitCmdDescsUpdate {
+    units: [UnitCmdDescs];
+}
+
 // Union of all server→client message types
 union ServerPayload {
     AuthResponse,
@@ -998,6 +1024,7 @@ union ServerPayload {
     GameStarted,
     GameRestarting,
     UnitCommandQueuesUpdate,
+    UnitCmdDescsUpdate,
 }
 
 table ServerMessage {
