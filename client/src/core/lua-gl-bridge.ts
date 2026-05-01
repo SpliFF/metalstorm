@@ -742,6 +742,15 @@ export class LuaGLBridge {
     /** Expose the last shader error for gl.GetShaderLog(). */
     private lastShaderLog = '';
 
+    /**
+     * Set by translateGLSL when the rejection is by design (e.g. a
+     * shader uses gl_Vertex and we want the widget to fall through to
+     * its software path). createShader downgrades the console message
+     * for these so the network/console isn't littered with red warnings
+     * on every game start.
+     */
+    private expectedShaderReject = false;
+
     // ============================================================
     // Shader management
     // ============================================================
@@ -776,6 +785,12 @@ export class LuaGLBridge {
         const isLegacy = /\bvarying\b|\battribute\b|\bgl_FragColor\b|\btexture2D\b/.test(src);
         if (/\bgl_Vertex\b/.test(src)) {
             this.lastShaderLog = 'CreateShader: legacy gl_Vertex not supported in immediate-mode bridge';
+            // Mark the rejection as expected so createShader's log
+            // formatter can downgrade the message — gui_chili_minimap's
+            // fadeShader (and a handful of other ZK widgets) hit this
+            // path on every game start, and they correctly fall back to
+            // the simple draw path when CreateShader returns nil.
+            this.expectedShaderReject = true;
             return '#error legacy_gl_Vertex_unsupported';
         }
         // Strip Spring's version directive entirely.
@@ -933,13 +948,24 @@ export class LuaGLBridge {
             return null;
         }
         const gl = this.gl;
+        // Reset the by-design rejection flag for this compile pass —
+        // translateGLSL sets it when it returns an `#error` sentinel
+        // for legacy attributes we deliberately don't translate.
+        this.expectedShaderReject = false;
+        const reportShaderFailure = (msg: string) => {
+            if (this.expectedShaderReject) {
+                console.debug('[gl.CreateShader]', msg);
+            } else {
+                console.warn('[gl.CreateShader]', msg);
+            }
+        };
         const vs = gl.createShader(gl.VERTEX_SHADER)!;
         gl.shaderSource(vs, this.translateGLSL(vsSrc, 'vertex'));
         gl.compileShader(vs);
         if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
             this.lastShaderLog = 'VS: ' + (gl.getShaderInfoLog(vs) ?? '');
             gl.deleteShader(vs);
-            console.warn('[gl.CreateShader]', this.lastShaderLog);
+            reportShaderFailure(this.lastShaderLog);
             return null;
         }
         const fs = gl.createShader(gl.FRAGMENT_SHADER)!;
@@ -949,7 +975,7 @@ export class LuaGLBridge {
             this.lastShaderLog = 'FS: ' + (gl.getShaderInfoLog(fs) ?? '');
             gl.deleteShader(vs);
             gl.deleteShader(fs);
-            console.warn('[gl.CreateShader]', this.lastShaderLog);
+            reportShaderFailure(this.lastShaderLog);
             return null;
         }
         const program = gl.createProgram()!;
@@ -961,7 +987,7 @@ export class LuaGLBridge {
             gl.deleteProgram(program);
             gl.deleteShader(vs);
             gl.deleteShader(fs);
-            console.warn('[gl.CreateShader]', this.lastShaderLog);
+            reportShaderFailure(this.lastShaderLog);
             return null;
         }
         gl.deleteShader(vs);

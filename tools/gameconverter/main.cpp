@@ -300,29 +300,6 @@ bool ConvertLobbyConfig(const fs::path& gameDir, bool force) {
 // Step 3: model + texture conversion
 // ---------------------------------------------------------------
 
-/// Read the diffuse texture basename out of an S3O header.
-std::string ReadS3OTexture1(const std::string& s3oPath) {
-    FILE* f = std::fopen(s3oPath.c_str(), "rb");
-    if (!f) return {};
-    char header[52];
-    if (std::fread(header, 1, sizeof(header), f) != sizeof(header)) {
-        std::fclose(f);
-        return {};
-    }
-    if (std::memcmp(header, "Spring unit", 11) != 0) {
-        std::fclose(f);
-        return {};
-    }
-    uint32_t tex1Off;
-    std::memcpy(&tex1Off, header + 44, 4);
-    if (tex1Off == 0) { std::fclose(f); return {}; }
-    if (std::fseek(f, tex1Off, SEEK_SET) != 0) { std::fclose(f); return {}; }
-    char buf[256] = {0};
-    std::fread(buf, 1, sizeof(buf) - 1, f);
-    std::fclose(f);
-    return std::string(buf);
-}
-
 /// Case-insensitive texture lookup in a directory.
 std::string ResolveTexturePath(const fs::path& dir, const std::string& basename) {
     if (basename.empty() || !fs::is_directory(dir)) return {};
@@ -335,6 +312,178 @@ std::string ResolveTexturePath(const fs::path& dir, const std::string& basename)
             return entry.path().string();
     }
     return {};
+}
+
+/// Locate a texture by its stem, scanning every web-unfriendly source
+/// extension a Spring archive might use. Order matters: DDS is by far
+/// the most common in modern games, the TGA path is the historical
+/// 3DO/S3O fallback, and the rest cover hand-authored variants we've
+/// seen in zk/. We also tolerate a sibling .png/.jpg/.webp because
+/// some authors pre-bake textures and just commit the converted files.
+///
+/// As a final fallback we strip Assimp's `.NNN` disambiguation
+/// suffix (the importer appends `.001`, `.002` to duplicate texture
+/// names within a single material). The glb URI ends up with the
+/// suffix but the actual file in unittextures/ does not.
+std::string ResolveTextureByStem(const fs::path& dir, const std::string& stem) {
+    static const char* const kExts[] = {
+        ".dds", ".tga", ".bmp", ".png", ".jpg", ".jpeg", ".webp",
+    };
+    for (const char* ext : kExts) {
+        std::string p = ResolveTexturePath(dir, stem + ext);
+        if (!p.empty()) return p;
+    }
+
+    // Strip a trailing `.NNN` (1–3 digits) and retry — covers
+    // `blastwing_tex.001` → `blastwing_tex.dds` and the trickier
+    // `cremfactory1.dds.001` → existing-file `cremfactory1.dds`,
+    // where the source filename already includes a `.dds` segment
+    // before Assimp's de-duplication suffix.
+    if (stem.size() >= 5) {
+        const size_t dot = stem.rfind('.');
+        if (dot != std::string::npos && dot > 0 && dot < stem.size() - 1) {
+            const std::string tail = stem.substr(dot + 1);
+            bool allDigits = !tail.empty() && tail.size() <= 3;
+            for (char c : tail) {
+                if (c < '0' || c > '9') { allDigits = false; break; }
+            }
+            if (allDigits) {
+                const std::string base = stem.substr(0, dot);
+                // First try `<base>` directly — handles the case
+                // where Spring's texture name itself ended in `.dds`
+                // and the stripped string is the literal filename.
+                std::string p = ResolveTexturePath(dir, base);
+                if (!p.empty()) return p;
+                for (const char* ext : kExts) {
+                    p = ResolveTexturePath(dir, base + ext);
+                    if (!p.empty()) return p;
+                }
+            }
+        }
+    }
+    return {};
+}
+
+/// Detect DDS by reading the 4-byte magic. textureconverter has its
+/// own copy of this check internally but copies DDS *as-is* — for our
+/// browser-delivery use case we need to convert the file to PNG, so
+/// we have to detect DDS up front and route to a different tool.
+bool IsDdsFile(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) return false;
+    char magic[4];
+    f.read(magic, 4);
+    return f.gcount() == 4 && std::memcmp(magic, "DDS ", 4) == 0;
+}
+
+/// Convert a single texture to a web-deliverable PNG sibling of the
+/// glb. textureconverter handles TGA/BMP/JPG/PNG via stb_image, but
+/// it deliberately copies DDS as-is (Spring archives ship DXT-
+/// compressed textures the engine renderer used to consume directly).
+/// Browsers can't fetch a `.dds` URI from a glTF `images[].uri`, so
+/// for DDS sources we shell out to ImageMagick which decodes the
+/// DXT data and re-encodes as PNG. Both branches log on failure;
+/// caller is expected to drop the file from the model's texture set.
+bool ConvertTextureToPng(const std::string& srcPath,
+                         const std::string& dstPath,
+                         const fs::path& textureConverter) {
+    std::vector<std::string> argv;
+    if (IsDdsFile(srcPath)) {
+        argv = { "magick", srcPath, dstPath };
+    } else {
+        argv = { textureConverter.string(), srcPath, dstPath };
+    }
+    std::string out;
+    if (!RunCommand(argv, out)) {
+        SLOG(SPRING_LOG_WARNING,
+            "texture conversion failed: %s -> %s\n%s",
+            srcPath.c_str(), dstPath.c_str(), out.c_str());
+        return false;
+    }
+    return true;
+}
+
+/// Pull `images[].uri` strings out of a .glb file's JSON chunk
+/// without depending on a JSON parser. The glTF binary container is
+/// a 12-byte header followed by length-prefixed chunks; the first
+/// chunk is always JSON. We only need the image URIs so a small
+/// scan over the JSON text is sufficient — and it avoids dragging
+/// nlohmann/json into this otherwise dependency-light tool.
+std::vector<std::string> ExtractGlbImageUris(const fs::path& glbPath) {
+    std::ifstream f(glbPath, std::ios::binary);
+    if (!f) return {};
+
+    char header[12];
+    if (!f.read(header, 12)) return {};
+    if (std::memcmp(header, "glTF", 4) != 0) return {};
+
+    char chunkHdr[8];
+    if (!f.read(chunkHdr, 8)) return {};
+    uint32_t chunkLen = 0;
+    std::memcpy(&chunkLen, chunkHdr, 4);
+    if (std::memcmp(chunkHdr + 4, "JSON", 4) != 0) return {};
+
+    std::string json(chunkLen, '\0');
+    if (!f.read(json.data(), chunkLen)) return {};
+
+    auto imgKey = json.find("\"images\"");
+    if (imgKey == std::string::npos) return {};
+    auto arrStart = json.find('[', imgKey);
+    if (arrStart == std::string::npos) return {};
+    auto arrEnd = json.find(']', arrStart);
+    if (arrEnd == std::string::npos) return {};
+
+    std::vector<std::string> uris;
+    size_t p = arrStart;
+    while (p < arrEnd) {
+        auto k = json.find("\"uri\"", p);
+        if (k == std::string::npos || k >= arrEnd) break;
+        auto colon = json.find(':', k);
+        if (colon == std::string::npos || colon >= arrEnd) break;
+        auto q1 = json.find('"', colon + 1);
+        if (q1 == std::string::npos || q1 >= arrEnd) break;
+        auto q2 = json.find('"', q1 + 1);
+        if (q2 == std::string::npos || q2 >= arrEnd) break;
+        uris.emplace_back(json, q1 + 1, q2 - q1 - 1);
+        p = q2 + 1;
+    }
+    return uris;
+}
+
+/// Make sure every texture URI referenced by a freshly-written glb
+/// has a sibling .png in `outRoot`. modelimporter is invoked with
+/// `--texture-ext png` so the URIs already point at .png files;
+/// this step locates the actual source bitmap (DDS/TGA/...) in the
+/// game's unittextures/ directory and converts it. Cheap on re-runs
+/// because the per-URI early exit on existing files is a single
+/// stat() call.
+void EnsureGlbTexturesAvailable(const fs::path& glbPath,
+                                const fs::path& unittexturesDir,
+                                const fs::path& outRoot,
+                                const fs::path& textureConverter) {
+    if (unittexturesDir.empty()) return;
+    const auto uris = ExtractGlbImageUris(glbPath);
+    for (const std::string& uri : uris) {
+        // Skip data URIs (textures already embedded as base64 by
+        // some formats) and any URI that isn't a bare filename.
+        if (uri.empty() || uri.find(':') != std::string::npos) continue;
+        if (uri.find('/') != std::string::npos ||
+            uri.find('\\') != std::string::npos) continue;
+
+        const fs::path target = outRoot / uri;
+        if (fs::exists(target)) continue;
+
+        const std::string stem = fs::path(uri).stem().string();
+        const std::string srcTex = ResolveTextureByStem(unittexturesDir, stem);
+        if (srcTex.empty()) {
+            SLOG(SPRING_LOG_WARNING,
+                "texture '%s' (referenced by %s) not found in %s",
+                uri.c_str(), glbPath.filename().string().c_str(),
+                unittexturesDir.string().c_str());
+            continue;
+        }
+        ConvertTextureToPng(srcTex, target.string(), textureConverter);
+    }
 }
 
 /// File extensions we hand to modelimporter. Matches the broad
@@ -351,10 +500,12 @@ bool IsModelFile(const fs::path& p) {
     return false;
 }
 
-/// Walk every configured model root under `gameDir` and run
-/// modelimporter on every model file we find, writing the output
-/// under `<gameDir>/models/<stem>.glb`. For S3O files, also
-/// converts the referenced texture via textureconverter.
+/// Walk every model file under `<gameDir>/objects3d/` and run
+/// modelimporter on it, writing the output under `<gameDir>/models/`.
+/// modelimporter is invoked with `--texture-ext png` so every glb
+/// references textures by `.png` URI; we then walk those URIs and
+/// convert each source bitmap (DDS/TGA/BMP/...) from unittextures/
+/// to a sibling .png next to the glb.
 int ConvertModels(const fs::path& gameDir, const std::string& gameId,
                   const fs::path& modelImporterBin, bool force) {
     const fs::path source = ResolveSubDir(gameDir, "objects3d");
@@ -366,6 +517,7 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
 
     const fs::path unittexturesDir = ResolveSubDir(gameDir, "unittextures");
     const fs::path outRoot = gameDir / "models";
+    const fs::path textureConverter = TEXTURECONVERTER_BINARY_PATH;
     std::error_code ec;
     fs::create_directories(outRoot, ec);
 
@@ -378,61 +530,42 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
         const fs::path outPath = outRoot / (stem + ".glb");
 
         // mtime check: skip if the output is newer than the source
+        bool needsRebuild = true;
         if (!force && fs::exists(outPath)) {
             const auto srcTime = fs::last_write_time(entry.path(), ec);
             const auto dstTime = fs::last_write_time(outPath, ec);
             if (!ec && dstTime >= srcTime) {
-                skipped++;
+                needsRebuild = false;
+            }
+        }
+
+        if (needsRebuild) {
+            // `--texture-ext png` rewrites every texture URI in the
+            // resulting glb to `.png` regardless of the source format.
+            // The matching .png files are produced by
+            // EnsureGlbTexturesAvailable below.
+            std::vector<std::string> argv = {
+                modelImporterBin.string(),
+                "--texture-ext", "png",
+                entry.path().string(),
+                outPath.string(),
+            };
+            std::string output;
+            if (!RunCommand(argv, output)) {
+                failed++;
+                SLOG(SPRING_LOG_ERROR, "modelimporter failed on %s\n%s",
+                    entry.path().string().c_str(), output.c_str());
                 continue;
             }
-        }
-
-        // Texture conversion for S3O files: read the tex1 basename,
-        // resolve it in unittextures/, convert via textureconverter.
-        bool hasTexture = false;
-        if (ToLower(entry.path().extension().string()) == ".s3o") {
-            const std::string texBasename = ReadS3OTexture1(entry.path().string());
-            if (!texBasename.empty() && !unittexturesDir.empty()) {
-                const std::string srcTex = ResolveTexturePath(unittexturesDir, texBasename);
-                if (!srcTex.empty()) {
-                    const std::string texStem = fs::path(texBasename).stem().string();
-                    const fs::path dstTex = outRoot / (texStem + ".png");
-                    if (!fs::exists(dstTex) ||
-                        fs::last_write_time(srcTex) > fs::last_write_time(dstTex)) {
-                        std::vector<std::string> texArgv = {
-                            TEXTURECONVERTER_BINARY_PATH,
-                            srcTex,
-                            dstTex.string(),
-                        };
-                        std::string texOut;
-                        if (!RunCommand(texArgv, texOut)) {
-                            SLOG(SPRING_LOG_WARNING, "texture conversion failed for %s",
-                                texBasename.c_str());
-                        }
-                    }
-                    hasTexture = true;
-                }
-            }
-        }
-
-        std::vector<std::string> argv = {
-            modelImporterBin.string(),
-        };
-        if (hasTexture) {
-            argv.push_back("--texture-ext");
-            argv.push_back("png");
-        }
-        argv.push_back(entry.path().string());
-        argv.push_back(outPath.string());
-
-        std::string output;
-        if (RunCommand(argv, output)) {
             converted++;
         } else {
-            failed++;
-            SLOG(SPRING_LOG_ERROR, "modelimporter failed on %s\n%s",
-                entry.path().string().c_str(), output.c_str());
+            skipped++;
         }
+
+        // Convert every texture the glb references. Cheap on re-runs
+        // (per-URI early skip when the .png already exists).
+        EnsureGlbTexturesAvailable(outPath, unittexturesDir, outRoot,
+                                   textureConverter);
     }
 
     SLOG(SPRING_LOG_NOTICE, "%s: models %d converted, %d up-to-date, %d failed",

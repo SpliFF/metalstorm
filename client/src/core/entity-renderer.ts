@@ -40,7 +40,7 @@ import { EntityInterpolator } from './entity-interpolator.js';
 import type { UnitDefInfo } from './connection.js';
 import { stampUrl } from '../config.js';
 
-/** Parsed model config from a .config.lua sidecar. */
+/** Parsed model config from a .config.json or .config.lua sidecar. */
 interface ModelConfig {
     tex1?: string;
     tex2?: string;
@@ -55,14 +55,38 @@ interface UnitTextures {
 }
 
 /**
- * Fetch and parse a model's .config.lua sidecar file. The file is a
- * simple Lua `return { key = value, ... }` table — we extract texture
- * references with regexes rather than running a full Lua parser.
+ * Fetch and parse a model's metadata sidecar. The gameconverter
+ * pipeline writes a `<stem>.config.json` next to every glb; legacy
+ * author-owned `<stem>.config.lua` files are preserved verbatim and
+ * take precedence (modelimporter skips JSON when a Lua file exists).
+ *
+ * We try the JSON form first — it's the expected case for
+ * machine-converted models — and fall back to Lua only if JSON 404s.
+ * This keeps the network log clean for the bulk of the unit roster
+ * while still picking up tex1/tex2/invertteamcolor overrides from
+ * the rare hand-authored sidecar.
  */
 async function fetchModelConfig(modelUrl: string): Promise<ModelConfig | null> {
-    const configUrl = modelUrl.replace(/\.glb$/, '.config.lua');
+    const jsonUrl = modelUrl.replace(/\.glb$/, '.config.json');
     try {
-        const resp = await fetch(configUrl);
+        const resp = await fetch(jsonUrl);
+        if (resp.ok) {
+            const data = await resp.json();
+            return {
+                tex1: typeof data.tex1 === 'string' ? data.tex1 : undefined,
+                tex2: typeof data.tex2 === 'string' ? data.tex2 : undefined,
+                invertteamcolor: typeof data.invertteamcolor === 'boolean'
+                    ? data.invertteamcolor
+                    : undefined,
+            };
+        }
+    } catch {
+        // fall through to Lua fallback
+    }
+
+    const luaUrl = modelUrl.replace(/\.glb$/, '.config.lua');
+    try {
+        const resp = await fetch(luaUrl);
         if (!resp.ok) return null;
         const lua = await resp.text();
 

@@ -85,6 +85,34 @@ void SetTcpNoDelay(int fd) {
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 }
 
+/// Percent-decode a URL path. Decodes `%XX` triplets and `+` is left as-is
+/// (we only decode paths, not form-encoded query bodies). Malformed escapes
+/// are passed through verbatim. The `..` traversal check still runs after
+/// decoding so `%2E%2E` cannot bypass it.
+std::string UrlDecode(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size()) {
+            int hi = hex(s[i + 1]);
+            int lo = hex(s[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back(static_cast<char>((hi << 4) | lo));
+                i += 2;
+                continue;
+            }
+        }
+        out.push_back(s[i]);
+    }
+    return out;
+}
+
 /// Extract query parameter value from a URL.
 std::string QueryParam(const std::string& url, const std::string& key) {
     auto qpos = url.find('?');
@@ -189,17 +217,19 @@ struct NetworkServer::Impl {
     // ── Route dispatch ──
 
     HttpResponse DispatchGet(const std::string& url) {
-        // Strip query string — handlers receive the clean path only.
-        // Use QueryParam() if you need access to query parameters.
+        // Strip query string and percent-decode — handlers receive the
+        // clean, decoded path only. Use QueryParam() if you need access
+        // to query parameters.
         auto qpos = url.find('?');
-        const std::string path = (qpos != std::string::npos) ? url.substr(0, qpos) : url;
+        const std::string rawPath = (qpos != std::string::npos) ? url.substr(0, qpos) : url;
+        const std::string path = UrlDecode(rawPath);
         // Try exact matches first, then wildcards
         for (auto& [pattern, handler] : *getHandlers) {
-            if (pattern.find('*') == std::string::npos && RouteMatch(pattern, url))
+            if (pattern.find('*') == std::string::npos && RouteMatch(pattern, path))
                 return handler(path);
         }
         for (auto& [pattern, handler] : *getHandlers) {
-            if (pattern.find('*') != std::string::npos && RouteMatch(pattern, url))
+            if (pattern.find('*') != std::string::npos && RouteMatch(pattern, path))
                 return handler(path);
         }
         return {.contentType = "text/plain", .body = {'4','0','4'}, .status = 404};
@@ -207,13 +237,16 @@ struct NetworkServer::Impl {
 
     HttpResponse DispatchPost(const std::string& url, const std::string& body,
                               const HttpRequestHeaders& hdrs) {
+        auto qpos = url.find('?');
+        const std::string rawPath = (qpos != std::string::npos) ? url.substr(0, qpos) : url;
+        const std::string path = UrlDecode(rawPath);
         for (auto& [pattern, handler] : *postHandlers) {
-            if (pattern.find('*') == std::string::npos && RouteMatch(pattern, url))
-                return handler(url, body, hdrs);
+            if (pattern.find('*') == std::string::npos && RouteMatch(pattern, path))
+                return handler(path, body, hdrs);
         }
         for (auto& [pattern, handler] : *postHandlers) {
-            if (pattern.find('*') != std::string::npos && RouteMatch(pattern, url))
-                return handler(url, body, hdrs);
+            if (pattern.find('*') != std::string::npos && RouteMatch(pattern, path))
+                return handler(path, body, hdrs);
         }
         return {.contentType = "text/plain", .body = {'4','0','4'}, .status = 404};
     }
