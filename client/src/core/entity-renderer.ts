@@ -46,6 +46,17 @@ interface ModelConfig {
     tex1?: string;
     tex2?: string;
     invertteamcolor?: boolean;
+    /** Piece names in canonical (server) order. Used to align the
+     *  client's per-piece indexing with the server's piece-state
+     *  envelope, which references pieces by their JSON-config index.
+     *  Sourced from the JSON sidecar — Lua-only configs typically
+     *  don't carry a piece array, in which case this is undefined and
+     *  the client falls back to GLB-traversal order (which won't line
+     *  up for animation but is still valid for rest-pose rendering). */
+    pieceNames?: string[];
+    /** parent[i] = parent index of piece i in canonical order (-1 for
+     *  the model root). Walks the same JSON tree as `pieceNames`. */
+    pieceParents?: number[];
 }
 
 /** Loaded texture set for a unit def. */
@@ -71,36 +82,58 @@ interface UnitTextures {
  * exactly the bug we hit on ZK's strikecom.
  */
 async function fetchModelConfig(modelUrl: string): Promise<ModelConfig | null> {
-    const luaUrl = modelUrl.replace(/\.glb$/, '.config.lua');
+    // Always try the JSON form too, even when a Lua sibling exists —
+    // hand-authored Lua configs typically only carry override fields
+    // (tex1/tex2/invertteamcolor) and lean on the JSON for the piece
+    // tree we need for animation indexing. ModelConfigLoader on the
+    // server takes the same belt-and-braces approach.
+    const luaUrl  = modelUrl.replace(/\.glb$/, '.config.lua');
+    const jsonUrl = modelUrl.replace(/\.glb$/, '.config.json');
+
+    let luaText: string | null = null;
+    let jsonData: any = null;
+
     try {
-        const resp = await fetch(luaUrl);
-        if (resp.ok) {
-            const lua = await resp.text();
-            const tex1 = lua.match(/tex1\s*=\s*"([^"]+)"/)?.[1];
-            const tex2 = lua.match(/tex2\s*=\s*"([^"]+)"/)?.[1];
-            const invertMatch = lua.match(/invertteamcolor\s*=\s*(true|false)/);
-            const invertteamcolor = invertMatch ? invertMatch[1] === 'true' : undefined;
-            return { tex1, tex2, invertteamcolor };
-        }
-    } catch {
-        // fall through
+        const r = await fetch(luaUrl);
+        if (r.ok) luaText = await r.text();
+    } catch { /* missing is fine */ }
+
+    try {
+        const r = await fetch(jsonUrl);
+        if (r.ok) jsonData = await r.json();
+    } catch { /* missing is fine */ }
+
+    if (luaText === null && jsonData === null) return null;
+
+    let tex1: string | undefined;
+    let tex2: string | undefined;
+    let invertteamcolor: boolean | undefined;
+
+    // Lua wins on the texture/team-color fields per the modelimporter rule.
+    if (luaText !== null) {
+        tex1 = luaText.match(/tex1\s*=\s*"([^"]+)"/)?.[1];
+        tex2 = luaText.match(/tex2\s*=\s*"([^"]+)"/)?.[1];
+        const invertMatch = luaText.match(/invertteamcolor\s*=\s*(true|false)/);
+        invertteamcolor = invertMatch ? invertMatch[1] === 'true' : undefined;
+    }
+    if (jsonData !== null) {
+        if (tex1 === undefined && typeof jsonData.tex1 === 'string') tex1 = jsonData.tex1;
+        if (tex2 === undefined && typeof jsonData.tex2 === 'string') tex2 = jsonData.tex2;
+        if (invertteamcolor === undefined && typeof jsonData.invertteamcolor === 'boolean')
+            invertteamcolor = jsonData.invertteamcolor;
     }
 
-    const jsonUrl = modelUrl.replace(/\.glb$/, '.config.json');
-    try {
-        const resp = await fetch(jsonUrl);
-        if (!resp.ok) return null;
-        const data = await resp.json();
-        return {
-            tex1: typeof data.tex1 === 'string' ? data.tex1 : undefined,
-            tex2: typeof data.tex2 === 'string' ? data.tex2 : undefined,
-            invertteamcolor: typeof data.invertteamcolor === 'boolean'
-                ? data.invertteamcolor
-                : undefined,
-        };
-    } catch {
-        return null;
+    // Pieces — always from JSON (the canonical machine-generated form).
+    let pieceNames: string[] | undefined;
+    let pieceParents: number[] | undefined;
+    if (jsonData !== null && Array.isArray(jsonData.pieces)) {
+        pieceNames = jsonData.pieces.map((p: { name?: string }) =>
+            typeof p?.name === 'string' ? p.name : '');
+        pieceParents = jsonData.pieces.map((p: { parent?: number }) =>
+            typeof p?.parent === 'number' ? p.parent : -1);
     }
+
+    return { tex1, tex2, invertteamcolor, pieceNames, pieceParents };
 }
 
 /**
@@ -431,12 +464,53 @@ export class EntityRenderer {
             const pieces: PieceInfo[] = [];
             const nodeTopiece = new Map<TransformNode, number>();
 
+            // Babylon's GLB loader splits multi-primitive meshes into a
+            // parent TransformNode and child Mesh nodes named
+            // `<parent>_primitive<n>`. The parent has the JSON-config
+            // name; the children carry the geometry. Pre-pass: claim each
+            // such primitive for its parent so the main loop emits one
+            // piece (the parent name + densest primitive's geometry).
+            const primitiveByParent = new Map<TransformNode, Mesh>();
+            const absorbedPrimitives = new Set<Mesh>();
+            for (const child of allNodes) {
+                if (!(child instanceof Mesh)) continue;
+                const parent = child.parent;
+                if (!parent) continue;
+                const re = new RegExp(`^${parent.name}_primitive\\d+$`);
+                if (!re.test(child.name)) continue;
+                const verts = child.getTotalVertices();
+                const existing = primitiveByParent.get(parent as TransformNode);
+                if (!existing || existing.getTotalVertices() < verts) {
+                    primitiveByParent.set(parent as TransformNode, child);
+                }
+            }
+            // Mark all primitives belonging to a parent as absorbed (we
+            // only render the densest one; the rest are dropped).
+            for (const child of allNodes) {
+                if (!(child instanceof Mesh)) continue;
+                const parent = child.parent;
+                if (!parent) continue;
+                const re = new RegExp(`^${parent.name}_primitive\\d+$`);
+                if (re.test(child.name)) absorbedPrimitives.add(child);
+            }
+
             for (let i = 0; i < allNodes.length; i++) {
                 const node = allNodes[i];
-                const isMesh = node instanceof Mesh && node.getTotalVertices() > 0;
+                let isMesh = node instanceof Mesh && node.getTotalVertices() > 0;
 
                 // Skip the __root__ container Babylon creates
                 if (node.name === '__root__') continue;
+                // Skip a primitive child whose geometry was rolled up
+                // into its parent piece.
+                if (node instanceof Mesh && absorbedPrimitives.has(node)) continue;
+
+                // If this is a TransformNode with absorbed primitive
+                // children, surface the chosen primitive as our geometry.
+                let primitiveMesh: Mesh | null = null;
+                if (!isMesh) {
+                    primitiveMesh = primitiveByParent.get(node) ?? null;
+                    if (primitiveMesh) isMesh = true;
+                }
 
                 // Find parent piece index
                 let parentIndex = -1;
@@ -464,7 +538,7 @@ export class EntityRenderer {
                 nodeTopiece.set(node, pieceIdx);
 
                 if (isMesh) {
-                    const mesh = node as Mesh;
+                    const mesh = (primitiveMesh ?? node) as Mesh;
                     // Detach from hierarchy, keep vertices in piece-local space
                     mesh.parent = null;
                     mesh.position.set(0, 0, 0);
@@ -502,8 +576,69 @@ export class EntityRenderer {
                 }
             }
 
+            // Fetch model config — provides tex1/tex2 plus the canonical
+            // (server-side) piece array. We need to align our piece
+            // indices with the server's, since the piece-state envelope
+            // identifies pieces by their JSON-config index.
+            const config = await fetchModelConfig(def.modelUrl);
+
+            // Reorder our GLB-traversal pieces array to match the
+            // canonical config order. Pieces present in the JSON tree
+            // but missing from the GLB (rare; structural-only nodes
+            // sometimes get optimised out) get null-mesh placeholders
+            // so descendants can still chain their parents correctly.
+            let orderedPieces = pieces;
+            if (config?.pieceNames && config.pieceParents) {
+                const byName = new Map<string, PieceInfo>();
+                for (const p of pieces) byName.set(p.name, p);
+
+                const ordered: PieceInfo[] = [];
+                for (let i = 0; i < config.pieceNames.length; i++) {
+                    const name = config.pieceNames[i];
+                    const parentIdx = config.pieceParents[i];
+                    const found = byName.get(name);
+                    if (found) {
+                        ordered.push({
+                            mesh: found.mesh,
+                            name,
+                            parentIndex: parentIdx,
+                            localMatrix: found.localMatrix,
+                            restWorldMatrix: found.restWorldMatrix,
+                        });
+                    } else {
+                        ordered.push({
+                            mesh: null!,
+                            name,
+                            parentIndex: parentIdx,
+                            localMatrix: Matrix.Identity(),
+                            restWorldMatrix: Matrix.Identity(),
+                        });
+                    }
+                }
+
+                // The GLB hierarchy may not match the JSON config (Assimp
+                // can flatten or re-parent during import), so the imported
+                // localMatrix isn't reliably local-to-(named-parent).
+                // restWorldMatrix *is* reliable though — it's the GLB's
+                // node.getWorldMatrix() captured at import. Use that as
+                // ground truth and rebuild localMatrix relative to the
+                // JSON-config parent: local = world × parent_world⁻¹.
+                for (let i = 0; i < ordered.length; i++) {
+                    const p = ordered[i];
+                    if (p.parentIndex >= 0 && p.parentIndex < ordered.length) {
+                        const parentRest = ordered[p.parentIndex].restWorldMatrix;
+                        const parentInv = Matrix.Invert(parentRest);
+                        ordered[i].localMatrix = p.restWorldMatrix.multiply(parentInv);
+                    } else {
+                        ordered[i].localMatrix = p.restWorldMatrix.clone();
+                    }
+                }
+
+                orderedPieces = ordered;
+            }
+
             // Filter to only pieces with geometry for rendering
-            const geometryPieces = pieces.filter(p => p.mesh != null);
+            const geometryPieces = orderedPieces.filter(p => p.mesh != null);
 
             if (geometryPieces.length === 0) {
                 console.warn(`[entity-renderer] ${def.name}: glb has no geometry`);
@@ -529,21 +664,20 @@ export class EntityRenderer {
             }
             const yOffset = -minY;
 
-            // Fetch model config (tex1/tex2) and load textures.
-            // Textures are shared across all teams; team color is applied
-            // per-team via the shader uniform.
-            const config = await fetchModelConfig(def.modelUrl);
+            // Load textures (sharing across all teams; team color is
+            // applied per-team via the shader uniform).
             const textures = config ? loadUnitTextures(config, def.modelUrl, this.scene) : null;
 
             console.log(
                 `[entity-renderer] ${def.name}: model loaded, ` +
                 `${geometryPieces.length} piece(s) with geometry, ` +
-                `${pieces.length} total nodes, yOffset=${yOffset.toFixed(1)}` +
+                `${orderedPieces.length} total nodes, yOffset=${yOffset.toFixed(1)}` +
                 (config?.tex1 ? `, tex1=${config.tex1}` : '') +
-                (config?.tex2 ? `, tex2=${config.tex2}` : ''),
+                (config?.tex2 ? `, tex2=${config.tex2}` : '') +
+                (config?.pieceNames ? `, aligned to config (${config.pieceNames.length} pieces)` : ''),
             );
 
-            return { pieces, yOffset, textures };
+            return { pieces: orderedPieces, yOffset, textures };
         } catch (err) {
             console.warn(
                 `[entity-renderer] ${def.name}: failed to load ${def.modelUrl}`,
@@ -727,10 +861,16 @@ export class EntityRenderer {
      * pieces array is in topological order (parent before child) — see
      * loadModel — so a single forward pass suffices.
      *
-     * Spring's piece transform convention is `T(pos) * R_y * R_x * R_z`
-     * (Move runs against pos, Turn against the per-axis rot). We mirror
-     * that here so the wire pose lines up with what COB / LuaUnitScript
-     * authored on the server.
+     * The GLB encodes the Spring→Babylon basis change as a rotation
+     * baked into the *root* piece's world matrix — every parent-relative
+     * `localMatrix` along the chain stays in Spring-aligned axes, with
+     * pure Spring offsets in m[12..14] and rotations about Spring's
+     * own X/Y/Z. The chain `local.multiply(parent)` then carries the
+     * basis rotation outward and lands the leaf in Babylon coordinates.
+     *
+     * So overrides convert *directly*: translation = Spring (px,py,pz)
+     * unchanged, and rotation = Spring's `T(pos) * RY * RX * RZ`
+     * (RZ first, RY last) about the literal axes (1,0,0)/(0,1,0)/(0,0,1).
      */
     private computePieceWorldMatrices(
         tmpl: ModelTemplate,
@@ -741,17 +881,35 @@ export class EntityRenderer {
             const piece = tmpl.pieces[i];
             const ov = overrides.get(i);
             const local = ov
-                ? Matrix.Compose(
-                    new Vector3(1, 1, 1),
-                    Quaternion.RotationYawPitchRoll(ov.ry, ov.rx, ov.rz),
-                    new Vector3(ov.px, ov.py, ov.pz),
-                )
+                ? this.springToBabylonLocal(ov)
                 : piece.localMatrix;
             out[i] = piece.parentIndex >= 0
                 ? local.multiply(out[piece.parentIndex])
                 : local.clone();
         }
         return out;
+    }
+
+    /** Build a parent-relative local matrix from a server piece pose.
+     *  Stays in Spring-aligned axes — the basis change is applied by the
+     *  ancestor chain (see comment on computePieceWorldMatrices). */
+    private springToBabylonLocal(ov: {
+        px: number; py: number; pz: number;
+        rx: number; ry: number; rz: number;
+    }): Matrix {
+        // Spring's per-piece transform: T(pos) * RY * RX * RZ.
+        // Babylon q1.multiply(q2) = q1*q2 applies q2 first then q1, so
+        // qY * qX * qZ applies in order qZ → qX → qY (Spring's order).
+        const qZ = Quaternion.RotationAxis(new Vector3(0, 0, 1), ov.rz);
+        const qX = Quaternion.RotationAxis(new Vector3(1, 0, 0), ov.rx);
+        const qY = Quaternion.RotationAxis(new Vector3(0, 1, 0), ov.ry);
+        const rot = qY.multiply(qX).multiply(qZ);
+
+        return Matrix.Compose(
+            new Vector3(1, 1, 1),
+            rot,
+            new Vector3(ov.px, ov.py, ov.pz),
+        );
     }
 
     /**

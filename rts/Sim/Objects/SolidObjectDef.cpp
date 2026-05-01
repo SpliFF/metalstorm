@@ -106,10 +106,10 @@ S3DModel* SolidObjectDef::LoadModel() const
 	const std::string luaName  = stem + LuaConfig::kLuaSuffix;
 	const std::string jsonName = stem + LuaConfig::kJsonSuffix;
 	std::string resolved;
-	if (CFileHandler::FileExists(luaName, "M"))
-		resolved = CFileHandler::GetFileAbsolutePath(luaName, "M");
-	else if (CFileHandler::FileExists(jsonName, "M"))
-		resolved = CFileHandler::GetFileAbsolutePath(jsonName, "M");
+	if (CFileHandler::FileExists(luaName, SPRING_VFS_MOD))
+		resolved = CFileHandler::GetFileAbsolutePath(luaName, SPRING_VFS_MOD);
+	else if (CFileHandler::FileExists(jsonName, SPRING_VFS_MOD))
+		resolved = CFileHandler::GetFileAbsolutePath(jsonName, SPRING_VFS_MOD);
 	if (!resolved.empty()) {
 		// Strip the suffix to get the base path the loader expects.
 		const fs::path p(resolved);
