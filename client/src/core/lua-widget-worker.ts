@@ -2312,12 +2312,31 @@ function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext): void {
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.disable(gl.DEPTH_TEST);
 
-    // Callins: Update → DrawGenesis → DrawScreen
+    // Callins: Update → GameFrame (per-tick) → DrawGenesis → DrawScreen
     rt.doString(`
         -- Deferred Chili TaskHandler patch (runs once after WG.Chili exists)
         if _chiliTaskFix then _chiliTaskFix() end
 
         if Update then pcall(Update) end
+
+        -- GameFrame dispatch. Server entity-state messages bump
+        -- liveState.gameFrame; we forward the latest frame through to
+        -- widgetHandler:GameFrame so widgets that gate on the modulo
+        -- (chili Economy Panel reads n%TEAM_SLOWUPDATE_RATE, ZK Core
+        -- Selector reads n%UNIT_SLOWUPDATE_RATE, etc.) actually get
+        -- ticked. We only fire when the frame advances, so the worker
+        -- doesn't spam GameFrame on rAF when the sim is paused.
+        do
+            local f = (Spring.GetGameFrame and Spring.GetGameFrame()) or 0
+            local last = _lastDispatchedGameFrame or -1
+            if f > last then
+                _lastDispatchedGameFrame = f
+                if widgetHandler and widgetHandler.GameFrame then
+                    pcall(widgetHandler.GameFrame, widgetHandler, f)
+                end
+            end
+        end
+
         if DrawGenesis then pcall(DrawGenesis) end
 
         -- Force-update any Chili controls stuck without display lists.
