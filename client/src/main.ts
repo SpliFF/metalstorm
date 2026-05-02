@@ -573,10 +573,12 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                     });
             }
 
-            // EconomyBar — top-of-screen metal+energy panel. Hidden until
-            // the first ResourceUpdate for the local team arrives (~10
-            // ticks into the game).
-            economyBar = new EconomyBar({ myTeam: team });
+            // EconomyBar — native top-of-screen metal+energy panel.
+            // Disabled while ZK's gui_chili_economy_panel2.lua is the
+            // primary HUD; both used to render at top-center and stack.
+            // Re-enable here as a fallback once chili rendering is
+            // verified to fail (e.g. a soloWidget mode without WG.Chili).
+            // economyBar = new EconomyBar({ myTeam: team });
 
             // Fetch map data + def cache in parallel. Both must complete
             // before widget manager bootstrap so cawidgets sees populated
