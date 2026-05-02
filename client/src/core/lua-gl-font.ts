@@ -459,16 +459,19 @@ export function createLuaFontObject(
             // Draw outline pass.
             // Spring's native renderer pre-bakes a Gaussian-blurred outline
             // into the atlas. We approximate with 4 offset copies at the
-            // outline width — fewer samples than the previous 8-position
-            // pattern (which over-saturated edges into a "bold" look). Per-
-            // pass alpha is reduced so the cumulative coverage matches an
-            // anti-aliased outline rather than stacking to full opacity.
+            // outline width. The four offsets all alpha-blend to the same
+            // texel at the glyph center, so per-pass alpha must be sized
+            // for the 4-way overlap, not a single pass — otherwise the
+            // four passes accumulate to ~opaque black and the outline
+            // looks like a thick halo around every character. Solving
+            //   1 - (1 - α)^4 = target_cumulative
+            // for target ≈ 0.75 gives α ≈ 0.30. We treat outlineWeight as
+            // a multiplier on that 0.30 baseline (default weight=3 → full
+            // strength; weight=1 gives ~0.10, a faint outline).
             if (drawOutline) {
                 const ow = outlineWidth * scale;
-                // outlineWeight (0..4 typically, default 3) scales alpha so
-                // higher weights produce a more saturated outline. Each pass
-                // contributes ~1/4 of the alpha; clamp to 1.
-                const weightAlpha = Math.min(1, (outlineWeight || 1) / 4);
+                const baseAlpha = 0.30;
+                const weightAlpha = Math.min(1, (outlineWeight || 1) / 3) * baseAlpha;
                 const passAlpha = (outlineColor[3] ?? 1) * weightAlpha;
                 const oc = [outlineColor[0], outlineColor[1], outlineColor[2], passAlpha];
                 const offsets = [
