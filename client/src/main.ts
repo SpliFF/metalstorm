@@ -560,9 +560,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             // for selected own-team builders, and hands clicks off to
             // InputManager.startBuildPlacement for the ghost+place flow.
             if (entityRenderer && inputManager) {
-                buildMenu = new BuildMenu(defCache, entityRenderer, team, {
-                    onPick: (defId) => inputManager?.startBuildPlacement(defId),
-                });
+                buildMenu = new BuildMenu(defCache, entityRenderer, team,
+                    { lobbyHttpUrl, gameId: gameId ?? '' },
+                    {
+                        onPick: (defId) => inputManager?.startBuildPlacement(defId),
+                    });
             }
 
             // Fetch map data + def cache in parallel. Both must complete

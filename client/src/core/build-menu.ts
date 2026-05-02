@@ -1,6 +1,11 @@
 /**
- * BuildMenu — bottom-of-screen panel listing the buildable units for the
- * currently-selected builder/factory units.
+ * BuildMenu — Chili-styled bottom-screen panel listing the buildable units
+ * for the currently-selected builder/factory units.
+ *
+ * Each entry renders the unit's `buildPic` thumbnail (served from
+ * `/api/games/data/<gameId>/unitpics/<buildPic>`) with a small cost overlay,
+ * matching the visual feel of ZK's chili Integral Menu — dark slotted frame,
+ * pixel-icon thumbs, hover highlight, M/E cost ribbon.
  *
  * Data sources:
  *   - selection      → list of unit IDs (from InputManager)
@@ -10,7 +15,7 @@
  *   - def cache      → unit-def metadata for labels, costs, build pics
  *
  * The available list is the union of buildoptions across all selected own-team
- * builders. Clicking a button hands off to BuildPlacementController to enter
+ * builders. Clicking an icon hands off to BuildPlacementController to enter
  * ghost-placement mode; the actual command emission lives there.
  */
 import type { UnitCmdDescsInfo } from './connection.js';
@@ -22,6 +27,13 @@ export interface BuildMenuCallbacks {
     onPick: (defId: number) => void;
 }
 
+export interface BuildMenuOptions {
+    /** Lobby HTTP base, e.g. `http://localhost:8011`. */
+    lobbyHttpUrl: string;
+    /** Game id, e.g. `zk` — used to resolve buildPic asset URLs. */
+    gameId: string;
+}
+
 export class BuildMenu {
     private root: HTMLDivElement;
     private grid: HTMLDivElement;
@@ -29,6 +41,7 @@ export class BuildMenu {
     private entityRenderer: EntityRenderer;
     private callbacks: BuildMenuCallbacks;
     private myTeam: number;
+    private buildPicBase: string;
 
     /// unitId → list of cmds (negative ids are build commands).
     private cmdDescs = new Map<number, UnitCmdDescsInfo>();
@@ -47,12 +60,16 @@ export class BuildMenu {
         defCache: DefCache,
         entityRenderer: EntityRenderer,
         myTeam: number,
+        opts: BuildMenuOptions,
         callbacks: BuildMenuCallbacks,
     ) {
         this.defCache = defCache;
         this.entityRenderer = entityRenderer;
         this.myTeam = myTeam;
         this.callbacks = callbacks;
+        this.buildPicBase = opts.gameId
+            ? `${opts.lobbyHttpUrl}/api/games/data/${encodeURIComponent(opts.gameId)}/unitpics`
+            : '';
 
         this.root = document.createElement('div');
         this.root.id = 'build-menu';
@@ -123,26 +140,85 @@ export class BuildMenu {
             return;
         }
 
-        // Render a button per def, sorted by def id for stable ordering.
-        const sorted = [...buildable].sort((a, b) => a - b);
-        const buttons: HTMLButtonElement[] = [];
+        // Sort by metal cost for a usable browsing order — light units first,
+        // T2/heavies later. Falls back to def id when costs aren't loaded yet.
+        const sorted = [...buildable].sort((a, b) => {
+            const da = this.defCache.getUnitDef(a);
+            const db = this.defCache.getUnitDef(b);
+            const ca = da?.metalCost ?? Number.MAX_SAFE_INTEGER;
+            const cb = db?.metalCost ?? Number.MAX_SAFE_INTEGER;
+            if (ca !== cb) return ca - cb;
+            return a - b;
+        });
+
+        const tiles: HTMLButtonElement[] = [];
         for (const defId of sorted) {
             const def = this.defCache.getUnitDef(defId);
-            const label = def?.name ?? `def ${defId}`;
-            const btn = document.createElement('button');
-            btn.className = 'build-menu-btn';
-            btn.textContent = label;
-            btn.title = def
-                ? `${def.name}\nMetal ${Math.round(def.cost ?? 0)}`
+            const tile = document.createElement('button');
+            tile.className = 'build-menu-tile';
+            tile.dataset.defId = String(defId);
+
+            // Build pic. ZK ships file names with mixed case (some
+            // ALL_CAPS, some lowercase); the server preserves whatever
+            // the unitdef's `buildPic` field said, and the http-static
+            // route is case-sensitive. Try the original case first, fall
+            // back to lowercased on 404 — covers oddball units like
+            // AMPHBOMB.png whose def says lowercase.
+            const img = document.createElement('img');
+            img.className = 'build-menu-pic';
+            img.draggable = false;
+            img.alt = def?.humanName ?? def?.name ?? `def ${defId}`;
+            const pic = def?.buildPic;
+            if (pic && this.buildPicBase) {
+                img.src = `${this.buildPicBase}/${pic}`;
+                let triedLower = false;
+                img.addEventListener('error', () => {
+                    if (!triedLower && pic !== pic.toLowerCase()) {
+                        triedLower = true;
+                        img.src = `${this.buildPicBase}/${pic.toLowerCase()}`;
+                    } else {
+                        img.classList.add('build-menu-pic-missing');
+                    }
+                });
+            } else {
+                img.classList.add('build-menu-pic-missing');
+            }
+            tile.appendChild(img);
+
+            // Cost ribbon. Only show metal cost — energy is rarely the
+            // limiting factor at unit-pick time, and showing both makes
+            // the tile noisy. Hover tooltip carries the full breakdown.
+            if (def && def.metalCost > 0) {
+                const cost = document.createElement('span');
+                cost.className = 'build-menu-cost';
+                cost.textContent = formatCost(def.metalCost);
+                tile.appendChild(cost);
+            }
+
+            // Caption — short name strip across the bottom. Falls back to
+            // the internal name (e.g. "armcom") if the human name hasn't
+            // arrived yet, so the player at least sees something.
+            const cap = document.createElement('span');
+            cap.className = 'build-menu-caption';
+            cap.textContent = def?.humanName || def?.name || `def ${defId}`;
+            tile.appendChild(cap);
+
+            tile.title = def
+                ? `${def.humanName || def.name}\nM ${Math.round(def.metalCost)}  E ${Math.round(def.energyCost)}  T ${Math.round(def.buildTime)}${def.tooltip ? '\n\n' + def.tooltip : ''}`
                 : `def ${defId}`;
-            btn.dataset.defId = String(defId);
-            btn.addEventListener('click', (e) => {
+            tile.addEventListener('click', (e) => {
                 e.stopPropagation();
                 this.callbacks.onPick(defId);
             });
-            buttons.push(btn);
+            tile.addEventListener('contextmenu', (e) => {
+                // Right-click swallows so the world doesn't see it. Future
+                // hook for queue-build / repeat shortcuts.
+                e.preventDefault();
+                e.stopPropagation();
+            });
+            tiles.push(tile);
         }
-        this.grid.replaceChildren(...buttons);
+        this.grid.replaceChildren(...tiles);
         this.root.style.display = 'block';
     }
 
@@ -155,41 +231,98 @@ export class BuildMenu {
     left: 50%;
     transform: translateX(-50%);
     z-index: 20;
-    background: rgba(0, 0, 0, 0.78);
-    border: 1px solid #444;
+    background: linear-gradient(180deg, #1a1d22 0%, #0f1114 100%);
+    border: 1px solid #2a2f38;
+    border-top-color: #3a4150;
     border-radius: 4px;
     padding: 6px;
     pointer-events: auto;
-    max-width: 80vw;
-    max-height: 28vh;
+    box-shadow: 0 0 0 1px #000, 0 4px 14px rgba(0, 0, 0, 0.6);
+    max-width: 88vw;
+    max-height: 32vh;
     overflow-y: auto;
 }
 .build-menu-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
-    gap: 4px;
+    grid-template-columns: repeat(auto-fill, 72px);
+    gap: 3px;
     min-width: 320px;
+    justify-content: start;
 }
-.build-menu-btn {
-    background: #2a2f3a;
-    color: #e0e0e0;
-    border: 1px solid #555;
-    border-radius: 3px;
-    padding: 6px 4px;
-    font: 11px/1.2 system-ui, sans-serif;
+.build-menu-tile {
+    position: relative;
+    width: 72px;
+    height: 72px;
+    padding: 0;
+    background: #161a20;
+    border: 1px solid #000;
+    border-top-color: #2c323d;
+    border-left-color: #232831;
+    border-radius: 2px;
     cursor: pointer;
+    overflow: hidden;
+    color: #e0e0e0;
+    font: 10px/1.1 system-ui, sans-serif;
+    transition: border-color 80ms linear, transform 60ms linear;
+}
+.build-menu-tile:hover {
+    border-color: #6aa9ff;
+    border-top-color: #9bc4ff;
+    z-index: 1;
+}
+.build-menu-tile:active {
+    transform: translateY(1px);
+}
+.build-menu-pic {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    image-rendering: -webkit-optimize-contrast;
+    background: #0a0c10;
+    pointer-events: none;
+    user-select: none;
+}
+.build-menu-pic-missing {
+    background: repeating-linear-gradient(
+        45deg,
+        #1a1d22 0 6px,
+        #14161a 6px 12px
+    );
+}
+.build-menu-cost {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    padding: 1px 4px;
+    background: rgba(0, 0, 0, 0.72);
+    border-radius: 2px;
+    color: #d8d4b0;
+    font: 10px/1.1 ui-monospace, Menlo, monospace;
+    pointer-events: none;
+    text-shadow: 0 1px 0 #000;
+}
+.build-menu-caption {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding: 1px 3px 2px;
+    background: linear-gradient(180deg, rgba(0,0,0,0) 0%, rgba(0,0,0,0.78) 50%);
+    color: #f0f0f0;
+    font: 10px/1.1 system-ui, sans-serif;
     text-align: center;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    pointer-events: none;
+    text-shadow: 0 1px 0 #000;
 }
-.build-menu-btn:hover {
-    background: #3a4150;
-    border-color: #888;
-}
-.build-menu-btn:active {
-    background: #1a1f2a;
-}
+#build-menu::-webkit-scrollbar { width: 6px; }
+#build-menu::-webkit-scrollbar-track { background: transparent; }
+#build-menu::-webkit-scrollbar-thumb { background: #2a2f38; border-radius: 3px; }
+#build-menu::-webkit-scrollbar-thumb:hover { background: #3a4150; }
 `;
         const style = document.createElement('style');
         style.id = 'build-menu-style';
@@ -202,4 +335,11 @@ export class BuildMenu {
         document.getElementById('build-menu-style')?.remove();
         this.cmdDescs.clear();
     }
+}
+
+/** Compact cost like 1.2k / 250. Keeps the ribbon to ~3 chars. */
+function formatCost(metal: number): string {
+    if (metal >= 10000) return `${Math.round(metal / 1000)}k`;
+    if (metal >= 1000) return `${(metal / 1000).toFixed(1)}k`;
+    return String(Math.round(metal));
 }
