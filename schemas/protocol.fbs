@@ -382,6 +382,23 @@ table ResourceUpdate {
     max_energy: float;
     metal_income: float;
     energy_income: float;
+    // Per-second pull (committed expense by builders/weapons), expense
+    // (actually drawn last frame), share slack (storage headroom before
+    // share-threshold spillage), and excess (resources wasted last
+    // frame because storage was full). All are per-second rates derived
+    // from the previous-second accumulators (CTeam::resPrev*).
+    metal_pull: float = 0.0;
+    energy_pull: float = 0.0;
+    metal_expense: float = 0.0;
+    energy_expense: float = 0.0;
+    metal_share: float = 0.0;
+    energy_share: float = 0.0;
+    metal_sent: float = 0.0;
+    energy_sent: float = 0.0;
+    metal_received: float = 0.0;
+    energy_received: float = 0.0;
+    metal_excess: float = 0.0;
+    energy_excess: float = 0.0;
 }
 
 table Pong {

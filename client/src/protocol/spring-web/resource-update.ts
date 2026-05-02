@@ -59,8 +59,68 @@ energyIncome():number {
   return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
 }
 
+metalPull():number {
+  const offset = this.bb!.__offset(this.bb_pos, 18);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+energyPull():number {
+  const offset = this.bb!.__offset(this.bb_pos, 20);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+metalExpense():number {
+  const offset = this.bb!.__offset(this.bb_pos, 22);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+energyExpense():number {
+  const offset = this.bb!.__offset(this.bb_pos, 24);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+metalShare():number {
+  const offset = this.bb!.__offset(this.bb_pos, 26);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+energyShare():number {
+  const offset = this.bb!.__offset(this.bb_pos, 28);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+metalSent():number {
+  const offset = this.bb!.__offset(this.bb_pos, 30);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+energySent():number {
+  const offset = this.bb!.__offset(this.bb_pos, 32);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+metalReceived():number {
+  const offset = this.bb!.__offset(this.bb_pos, 34);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+energyReceived():number {
+  const offset = this.bb!.__offset(this.bb_pos, 36);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+metalExcess():number {
+  const offset = this.bb!.__offset(this.bb_pos, 38);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
+energyExcess():number {
+  const offset = this.bb!.__offset(this.bb_pos, 40);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+}
+
 static startResourceUpdate(builder:flatbuffers.Builder) {
-  builder.startObject(7);
+  builder.startObject(19);
 }
 
 static addTeam(builder:flatbuffers.Builder, team:number) {
@@ -91,12 +151,60 @@ static addEnergyIncome(builder:flatbuffers.Builder, energyIncome:number) {
   builder.addFieldFloat32(6, energyIncome, 0.0);
 }
 
+static addMetalPull(builder:flatbuffers.Builder, metalPull:number) {
+  builder.addFieldFloat32(7, metalPull, 0.0);
+}
+
+static addEnergyPull(builder:flatbuffers.Builder, energyPull:number) {
+  builder.addFieldFloat32(8, energyPull, 0.0);
+}
+
+static addMetalExpense(builder:flatbuffers.Builder, metalExpense:number) {
+  builder.addFieldFloat32(9, metalExpense, 0.0);
+}
+
+static addEnergyExpense(builder:flatbuffers.Builder, energyExpense:number) {
+  builder.addFieldFloat32(10, energyExpense, 0.0);
+}
+
+static addMetalShare(builder:flatbuffers.Builder, metalShare:number) {
+  builder.addFieldFloat32(11, metalShare, 0.0);
+}
+
+static addEnergyShare(builder:flatbuffers.Builder, energyShare:number) {
+  builder.addFieldFloat32(12, energyShare, 0.0);
+}
+
+static addMetalSent(builder:flatbuffers.Builder, metalSent:number) {
+  builder.addFieldFloat32(13, metalSent, 0.0);
+}
+
+static addEnergySent(builder:flatbuffers.Builder, energySent:number) {
+  builder.addFieldFloat32(14, energySent, 0.0);
+}
+
+static addMetalReceived(builder:flatbuffers.Builder, metalReceived:number) {
+  builder.addFieldFloat32(15, metalReceived, 0.0);
+}
+
+static addEnergyReceived(builder:flatbuffers.Builder, energyReceived:number) {
+  builder.addFieldFloat32(16, energyReceived, 0.0);
+}
+
+static addMetalExcess(builder:flatbuffers.Builder, metalExcess:number) {
+  builder.addFieldFloat32(17, metalExcess, 0.0);
+}
+
+static addEnergyExcess(builder:flatbuffers.Builder, energyExcess:number) {
+  builder.addFieldFloat32(18, energyExcess, 0.0);
+}
+
 static endResourceUpdate(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createResourceUpdate(builder:flatbuffers.Builder, team:number, metal:number, maxMetal:number, energy:number, maxEnergy:number, metalIncome:number, energyIncome:number):flatbuffers.Offset {
+static createResourceUpdate(builder:flatbuffers.Builder, team:number, metal:number, maxMetal:number, energy:number, maxEnergy:number, metalIncome:number, energyIncome:number, metalPull:number, energyPull:number, metalExpense:number, energyExpense:number, metalShare:number, energyShare:number, metalSent:number, energySent:number, metalReceived:number, energyReceived:number, metalExcess:number, energyExcess:number):flatbuffers.Offset {
   ResourceUpdate.startResourceUpdate(builder);
   ResourceUpdate.addTeam(builder, team);
   ResourceUpdate.addMetal(builder, metal);
@@ -105,6 +213,18 @@ static createResourceUpdate(builder:flatbuffers.Builder, team:number, metal:numb
   ResourceUpdate.addMaxEnergy(builder, maxEnergy);
   ResourceUpdate.addMetalIncome(builder, metalIncome);
   ResourceUpdate.addEnergyIncome(builder, energyIncome);
+  ResourceUpdate.addMetalPull(builder, metalPull);
+  ResourceUpdate.addEnergyPull(builder, energyPull);
+  ResourceUpdate.addMetalExpense(builder, metalExpense);
+  ResourceUpdate.addEnergyExpense(builder, energyExpense);
+  ResourceUpdate.addMetalShare(builder, metalShare);
+  ResourceUpdate.addEnergyShare(builder, energyShare);
+  ResourceUpdate.addMetalSent(builder, metalSent);
+  ResourceUpdate.addEnergySent(builder, energySent);
+  ResourceUpdate.addMetalReceived(builder, metalReceived);
+  ResourceUpdate.addEnergyReceived(builder, energyReceived);
+  ResourceUpdate.addMetalExcess(builder, metalExcess);
+  ResourceUpdate.addEnergyExcess(builder, energyExcess);
   return ResourceUpdate.endResourceUpdate(builder);
 }
 
@@ -116,7 +236,19 @@ unpack(): ResourceUpdateT {
     this.energy(),
     this.maxEnergy(),
     this.metalIncome(),
-    this.energyIncome()
+    this.energyIncome(),
+    this.metalPull(),
+    this.energyPull(),
+    this.metalExpense(),
+    this.energyExpense(),
+    this.metalShare(),
+    this.energyShare(),
+    this.metalSent(),
+    this.energySent(),
+    this.metalReceived(),
+    this.energyReceived(),
+    this.metalExcess(),
+    this.energyExcess()
   );
 }
 
@@ -129,6 +261,18 @@ unpackTo(_o: ResourceUpdateT): void {
   _o.maxEnergy = this.maxEnergy();
   _o.metalIncome = this.metalIncome();
   _o.energyIncome = this.energyIncome();
+  _o.metalPull = this.metalPull();
+  _o.energyPull = this.energyPull();
+  _o.metalExpense = this.metalExpense();
+  _o.energyExpense = this.energyExpense();
+  _o.metalShare = this.metalShare();
+  _o.energyShare = this.energyShare();
+  _o.metalSent = this.metalSent();
+  _o.energySent = this.energySent();
+  _o.metalReceived = this.metalReceived();
+  _o.energyReceived = this.energyReceived();
+  _o.metalExcess = this.metalExcess();
+  _o.energyExcess = this.energyExcess();
 }
 }
 
@@ -140,7 +284,19 @@ constructor(
   public energy: number = 0.0,
   public maxEnergy: number = 0.0,
   public metalIncome: number = 0.0,
-  public energyIncome: number = 0.0
+  public energyIncome: number = 0.0,
+  public metalPull: number = 0.0,
+  public energyPull: number = 0.0,
+  public metalExpense: number = 0.0,
+  public energyExpense: number = 0.0,
+  public metalShare: number = 0.0,
+  public energyShare: number = 0.0,
+  public metalSent: number = 0.0,
+  public energySent: number = 0.0,
+  public metalReceived: number = 0.0,
+  public energyReceived: number = 0.0,
+  public metalExcess: number = 0.0,
+  public energyExcess: number = 0.0
 ){}
 
 
@@ -152,7 +308,19 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     this.energy,
     this.maxEnergy,
     this.metalIncome,
-    this.energyIncome
+    this.energyIncome,
+    this.metalPull,
+    this.energyPull,
+    this.metalExpense,
+    this.energyExpense,
+    this.metalShare,
+    this.energyShare,
+    this.metalSent,
+    this.energySent,
+    this.metalReceived,
+    this.energyReceived,
+    this.metalExcess,
+    this.energyExcess
   );
 }
 }

@@ -86,11 +86,20 @@ export interface UnitEntry {
     losState: number;
 }
 
-/** Per-team resource entry. */
+/** Per-team resource entry. All `*Pull/Expense/Share/Sent/Received/Excess`
+ *  fields are per-second rates derived from the previous-second
+ *  accumulators on the server. They default to 0 when the server hasn't
+ *  populated them yet (older servers / first tick). */
 export interface ResourceEntry {
     metal: number; maxMetal: number;
     energy: number; maxEnergy: number;
     metalIncome: number; energyIncome: number;
+    metalPull: number; energyPull: number;
+    metalExpense: number; energyExpense: number;
+    metalShare: number; energyShare: number;
+    metalSent: number; energySent: number;
+    metalReceived: number; energyReceived: number;
+    metalExcess: number; energyExcess: number;
 }
 
 /** Spring rules-param values are numbers or strings. */
@@ -881,15 +890,21 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         },
 
         // --- Team resources ---
+        // Spring returns: current, storage, pull, income, expense, share,
+        // sent, received. The Spring engine also pads with `excess` and
+        // `received` in some forks, but the canonical 8-tuple is widely
+        // assumed by Spring widgets — keep it.
         GetTeamResources: (teamId: LuaValue, resType: LuaValue) => {
             const tid = Number(teamId ?? ls.identity.myTeam);
             const r = ls.resources.get(tid);
             if (!r) return [0, 0, 0, 0, 0, 0, 0, 0];
             const t = String(resType ?? 'metal');
             if (t === 'metal') {
-                return [r.metal, r.maxMetal, 0, r.metalIncome, 0, 0, 0, 0];
+                return [r.metal, r.maxMetal, r.metalPull, r.metalIncome,
+                        r.metalExpense, r.metalShare, r.metalSent, r.metalReceived];
             } else {
-                return [r.energy, r.maxEnergy, 0, r.energyIncome, 0, 0, 0, 0];
+                return [r.energy, r.maxEnergy, r.energyPull, r.energyIncome,
+                        r.energyExpense, r.energyShare, r.energySent, r.energyReceived];
             }
         },
         GetTeamAllyTeamID: (teamId: LuaValue) => {

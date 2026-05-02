@@ -198,6 +198,36 @@ export interface WeaponDefInfo {
     customParams: Record<string, string>;
 }
 
+export interface ResourceUpdateInfo {
+    team: number;
+    metal: number;
+    maxMetal: number;
+    energy: number;
+    maxEnergy: number;
+    /** Per-second income (extraction + reclaim + share-received). */
+    metalIncome: number;
+    energyIncome: number;
+    /** Per-second pull — what builders/weapons want to spend, including
+     *  unmet demand. Pull > income means the team is stalling. */
+    metalPull: number;
+    energyPull: number;
+    /** Per-second expense actually drawn from storage. expense ≤ pull. */
+    metalExpense: number;
+    energyExpense: number;
+    /** Storage headroom before share-threshold spillage kicks in. */
+    metalShare: number;
+    energyShare: number;
+    /** Per-second resource transfer to allies. */
+    metalSent: number;
+    energySent: number;
+    /** Per-second resource transfer from allies. */
+    metalReceived: number;
+    energyReceived: number;
+    /** Per-second resources lost because storage was full. */
+    metalExcess: number;
+    energyExcess: number;
+}
+
 export interface ConnectionEvents {
     onStateChange?: (state: ConnectionState) => void;
     /** Fires when the server accepts auth. `defsCacheKey` is the
@@ -221,7 +251,7 @@ export interface ConnectionEvents {
     onUnitCmdDescs?: (units: UnitCmdDescsInfo[]) => void;
     onProjectileState?: (snapshot: ProjectileStateSnapshot) => void;
     onPieceState?: (snapshot: PieceStateSnapshot) => void;
-    onResourceUpdate?: (team: number, metal: number, maxMetal: number, energy: number, maxEnergy: number, metalIncome: number, energyIncome: number) => void;
+    onResourceUpdate?: (info: ResourceUpdateInfo) => void;
     onGameInfo?: (frame: number, speed: number, paused: boolean,
                   wind?: { x: number; y: number; z: number; strength: number; tidal: number }) => void;
     onServerMessage?: (msg: ServerMessage) => void;
@@ -691,10 +721,18 @@ export class Connection {
             }
             case ServerPayload.ResourceUpdate: {
                 const ru = msg.payload(new ResourceUpdate()) as ResourceUpdate;
-                this.events.onResourceUpdate?.(
-                    ru.team(), ru.metal(), ru.maxMetal(),
-                    ru.energy(), ru.maxEnergy(),
-                    ru.metalIncome(), ru.energyIncome());
+                this.events.onResourceUpdate?.({
+                    team: ru.team(),
+                    metal: ru.metal(),         maxMetal: ru.maxMetal(),
+                    energy: ru.energy(),       maxEnergy: ru.maxEnergy(),
+                    metalIncome: ru.metalIncome(),     energyIncome: ru.energyIncome(),
+                    metalPull: ru.metalPull(),         energyPull: ru.energyPull(),
+                    metalExpense: ru.metalExpense(),   energyExpense: ru.energyExpense(),
+                    metalShare: ru.metalShare(),       energyShare: ru.energyShare(),
+                    metalSent: ru.metalSent(),         energySent: ru.energySent(),
+                    metalReceived: ru.metalReceived(), energyReceived: ru.energyReceived(),
+                    metalExcess: ru.metalExcess(),     energyExcess: ru.energyExcess(),
+                });
                 break;
             }
             case ServerPayload.MapData: {

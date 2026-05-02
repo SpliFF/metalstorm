@@ -180,15 +180,32 @@ inline std::vector<uint8_t> BuildPlayerLeft(
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_PlayerLeft, pl.Union());
 }
 
-/// Build a ResourceUpdate message for a single team.
+/// Build a ResourceUpdate message for a single team. All rate fields
+/// (income/pull/expense/share/sent/received/excess) are per-second values
+/// derived from CTeam::resPrev* — Spring resets those accumulators every
+/// `gs->GetResourceMapSize()` frames (currently 32, ~1.07s), so they're
+/// already a per-second rate by construction.
 inline std::vector<uint8_t> BuildResourceUpdate(
     uint8_t team, float metal, float maxMetal,
     float energy, float maxEnergy,
-    float metalIncome, float energyIncome)
+    float metalIncome, float energyIncome,
+    float metalPull = 0.0f, float energyPull = 0.0f,
+    float metalExpense = 0.0f, float energyExpense = 0.0f,
+    float metalShare = 0.0f, float energyShare = 0.0f,
+    float metalSent = 0.0f, float energySent = 0.0f,
+    float metalReceived = 0.0f, float energyReceived = 0.0f,
+    float metalExcess = 0.0f, float energyExcess = 0.0f)
 {
-    flatbuffers::FlatBufferBuilder fbb(128);
+    flatbuffers::FlatBufferBuilder fbb(192);
     auto ru = SpringWeb::CreateResourceUpdate(
-        fbb, team, metal, maxMetal, energy, maxEnergy, metalIncome, energyIncome);
+        fbb, team, metal, maxMetal, energy, maxEnergy,
+        metalIncome, energyIncome,
+        metalPull, energyPull,
+        metalExpense, energyExpense,
+        metalShare, energyShare,
+        metalSent, energySent,
+        metalReceived, energyReceived,
+        metalExcess, energyExcess);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_ResourceUpdate, ru.Union());
 }
 

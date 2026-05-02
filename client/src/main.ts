@@ -12,6 +12,7 @@ import { CombatFX } from './core/combat-fx.js';
 import { AudioManager } from './core/audio.js';
 import { InputManager } from './core/input-manager.js';
 import { BuildMenu } from './core/build-menu.js';
+import { EconomyBar } from './core/economy-bar.js';
 import { buildTerrainMesh, loadTerrainTextures, type MapDimensions } from './core/terrain.js';
 import { LobbyUI } from './lobby/lobby-ui.js';
 import { Minimap } from './core/minimap.js';
@@ -46,6 +47,7 @@ let combatFX: CombatFX | null = null;
 let audioManager: AudioManager | null = null;
 let inputManager: InputManager | null = null;
 let buildMenu: BuildMenu | null = null;
+let economyBar: EconomyBar | null = null;
 let lobbyUI: LobbyUI | null = null;
 let minimap: Minimap | null = null;
 /// Game server connection. Non-null while a game is active. Hoisted out
@@ -169,6 +171,8 @@ function quitToLobby(): void {
     minimap = null;
     buildMenu?.dispose();
     buildMenu = null;
+    economyBar?.dispose();
+    economyBar = null;
     inputManager?.dispose();
     inputManager = null;
     engine?.stopRenderLoop();
@@ -270,6 +274,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     inputManager = null;
     buildMenu?.dispose();
     buildMenu = null;
+    economyBar?.dispose();
+    economyBar = null;
 
     showHUD();
 
@@ -567,6 +573,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                     });
             }
 
+            // EconomyBar — top-of-screen metal+energy panel. Hidden until
+            // the first ResourceUpdate for the local team arrives (~10
+            // ticks into the game).
+            economyBar = new EconomyBar({ myTeam: team });
+
             // Fetch map data + def cache in parallel. Both must complete
             // before widget manager bootstrap so cawidgets sees populated
             // UnitDefs/WeaponDefs tables. Defs come from a content-addressed
@@ -621,8 +632,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 result: 3, damage: 500, x, y, z,
             }]);
         },
-        onResourceUpdate(team, metal, maxMetal, energy, maxEnergy, metalIncome, energyIncome) {
-            currentWidgetManager?.forwardResourceUpdate(team, metal, maxMetal, energy, maxEnergy, metalIncome, energyIncome);
+        onResourceUpdate(info) {
+            currentWidgetManager?.forwardResourceUpdate(info);
+            economyBar?.update(info);
         },
         onGameInfo(frame, speed, paused, wind) {
             currentWidgetManager?.forwardGameInfo(frame, speed, paused, false, wind);

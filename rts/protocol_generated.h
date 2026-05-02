@@ -3719,7 +3719,19 @@ struct ResourceUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_ENERGY = 10,
     VT_MAX_ENERGY = 12,
     VT_METAL_INCOME = 14,
-    VT_ENERGY_INCOME = 16
+    VT_ENERGY_INCOME = 16,
+    VT_METAL_PULL = 18,
+    VT_ENERGY_PULL = 20,
+    VT_METAL_EXPENSE = 22,
+    VT_ENERGY_EXPENSE = 24,
+    VT_METAL_SHARE = 26,
+    VT_ENERGY_SHARE = 28,
+    VT_METAL_SENT = 30,
+    VT_ENERGY_SENT = 32,
+    VT_METAL_RECEIVED = 34,
+    VT_ENERGY_RECEIVED = 36,
+    VT_METAL_EXCESS = 38,
+    VT_ENERGY_EXCESS = 40
   };
   uint8_t team() const {
     return GetField<uint8_t>(VT_TEAM, 0);
@@ -3742,6 +3754,42 @@ struct ResourceUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   float energy_income() const {
     return GetField<float>(VT_ENERGY_INCOME, 0.0f);
   }
+  float metal_pull() const {
+    return GetField<float>(VT_METAL_PULL, 0.0f);
+  }
+  float energy_pull() const {
+    return GetField<float>(VT_ENERGY_PULL, 0.0f);
+  }
+  float metal_expense() const {
+    return GetField<float>(VT_METAL_EXPENSE, 0.0f);
+  }
+  float energy_expense() const {
+    return GetField<float>(VT_ENERGY_EXPENSE, 0.0f);
+  }
+  float metal_share() const {
+    return GetField<float>(VT_METAL_SHARE, 0.0f);
+  }
+  float energy_share() const {
+    return GetField<float>(VT_ENERGY_SHARE, 0.0f);
+  }
+  float metal_sent() const {
+    return GetField<float>(VT_METAL_SENT, 0.0f);
+  }
+  float energy_sent() const {
+    return GetField<float>(VT_ENERGY_SENT, 0.0f);
+  }
+  float metal_received() const {
+    return GetField<float>(VT_METAL_RECEIVED, 0.0f);
+  }
+  float energy_received() const {
+    return GetField<float>(VT_ENERGY_RECEIVED, 0.0f);
+  }
+  float metal_excess() const {
+    return GetField<float>(VT_METAL_EXCESS, 0.0f);
+  }
+  float energy_excess() const {
+    return GetField<float>(VT_ENERGY_EXCESS, 0.0f);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_TEAM, 1) &&
@@ -3751,6 +3799,18 @@ struct ResourceUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<float>(verifier, VT_MAX_ENERGY, 4) &&
            VerifyField<float>(verifier, VT_METAL_INCOME, 4) &&
            VerifyField<float>(verifier, VT_ENERGY_INCOME, 4) &&
+           VerifyField<float>(verifier, VT_METAL_PULL, 4) &&
+           VerifyField<float>(verifier, VT_ENERGY_PULL, 4) &&
+           VerifyField<float>(verifier, VT_METAL_EXPENSE, 4) &&
+           VerifyField<float>(verifier, VT_ENERGY_EXPENSE, 4) &&
+           VerifyField<float>(verifier, VT_METAL_SHARE, 4) &&
+           VerifyField<float>(verifier, VT_ENERGY_SHARE, 4) &&
+           VerifyField<float>(verifier, VT_METAL_SENT, 4) &&
+           VerifyField<float>(verifier, VT_ENERGY_SENT, 4) &&
+           VerifyField<float>(verifier, VT_METAL_RECEIVED, 4) &&
+           VerifyField<float>(verifier, VT_ENERGY_RECEIVED, 4) &&
+           VerifyField<float>(verifier, VT_METAL_EXCESS, 4) &&
+           VerifyField<float>(verifier, VT_ENERGY_EXCESS, 4) &&
            verifier.EndTable();
   }
 };
@@ -3780,6 +3840,42 @@ struct ResourceUpdateBuilder {
   void add_energy_income(float energy_income) {
     fbb_.AddElement<float>(ResourceUpdate::VT_ENERGY_INCOME, energy_income, 0.0f);
   }
+  void add_metal_pull(float metal_pull) {
+    fbb_.AddElement<float>(ResourceUpdate::VT_METAL_PULL, metal_pull, 0.0f);
+  }
+  void add_energy_pull(float energy_pull) {
+    fbb_.AddElement<float>(ResourceUpdate::VT_ENERGY_PULL, energy_pull, 0.0f);
+  }
+  void add_metal_expense(float metal_expense) {
+    fbb_.AddElement<float>(ResourceUpdate::VT_METAL_EXPENSE, metal_expense, 0.0f);
+  }
+  void add_energy_expense(float energy_expense) {
+    fbb_.AddElement<float>(ResourceUpdate::VT_ENERGY_EXPENSE, energy_expense, 0.0f);
+  }
+  void add_metal_share(float metal_share) {
+    fbb_.AddElement<float>(ResourceUpdate::VT_METAL_SHARE, metal_share, 0.0f);
+  }
+  void add_energy_share(float energy_share) {
+    fbb_.AddElement<float>(ResourceUpdate::VT_ENERGY_SHARE, energy_share, 0.0f);
+  }
+  void add_metal_sent(float metal_sent) {
+    fbb_.AddElement<float>(ResourceUpdate::VT_METAL_SENT, metal_sent, 0.0f);
+  }
+  void add_energy_sent(float energy_sent) {
+    fbb_.AddElement<float>(ResourceUpdate::VT_ENERGY_SENT, energy_sent, 0.0f);
+  }
+  void add_metal_received(float metal_received) {
+    fbb_.AddElement<float>(ResourceUpdate::VT_METAL_RECEIVED, metal_received, 0.0f);
+  }
+  void add_energy_received(float energy_received) {
+    fbb_.AddElement<float>(ResourceUpdate::VT_ENERGY_RECEIVED, energy_received, 0.0f);
+  }
+  void add_metal_excess(float metal_excess) {
+    fbb_.AddElement<float>(ResourceUpdate::VT_METAL_EXCESS, metal_excess, 0.0f);
+  }
+  void add_energy_excess(float energy_excess) {
+    fbb_.AddElement<float>(ResourceUpdate::VT_ENERGY_EXCESS, energy_excess, 0.0f);
+  }
   explicit ResourceUpdateBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -3799,8 +3895,32 @@ inline ::flatbuffers::Offset<ResourceUpdate> CreateResourceUpdate(
     float energy = 0.0f,
     float max_energy = 0.0f,
     float metal_income = 0.0f,
-    float energy_income = 0.0f) {
+    float energy_income = 0.0f,
+    float metal_pull = 0.0f,
+    float energy_pull = 0.0f,
+    float metal_expense = 0.0f,
+    float energy_expense = 0.0f,
+    float metal_share = 0.0f,
+    float energy_share = 0.0f,
+    float metal_sent = 0.0f,
+    float energy_sent = 0.0f,
+    float metal_received = 0.0f,
+    float energy_received = 0.0f,
+    float metal_excess = 0.0f,
+    float energy_excess = 0.0f) {
   ResourceUpdateBuilder builder_(_fbb);
+  builder_.add_energy_excess(energy_excess);
+  builder_.add_metal_excess(metal_excess);
+  builder_.add_energy_received(energy_received);
+  builder_.add_metal_received(metal_received);
+  builder_.add_energy_sent(energy_sent);
+  builder_.add_metal_sent(metal_sent);
+  builder_.add_energy_share(energy_share);
+  builder_.add_metal_share(metal_share);
+  builder_.add_energy_expense(energy_expense);
+  builder_.add_metal_expense(metal_expense);
+  builder_.add_energy_pull(energy_pull);
+  builder_.add_metal_pull(metal_pull);
   builder_.add_energy_income(energy_income);
   builder_.add_metal_income(metal_income);
   builder_.add_max_energy(max_energy);

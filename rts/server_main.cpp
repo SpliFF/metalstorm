@@ -1452,9 +1452,15 @@ int main(int argc, char* argv[])
                 if (!team) return;
                 auto msg = Protocol::BuildResourceUpdate(
                     static_cast<uint8_t>(session.team),
-                    team->res.metal, team->resStorage.metal,
-                    team->res.energy, team->resStorage.energy,
-                    team->resPrevIncome.metal, team->resPrevIncome.energy);
+                    team->res.metal,        team->resStorage.metal,
+                    team->res.energy,       team->resStorage.energy,
+                    team->resPrevIncome.metal,   team->resPrevIncome.energy,
+                    team->resPrevPull.metal,     team->resPrevPull.energy,
+                    team->resPrevExpense.metal,  team->resPrevExpense.energy,
+                    team->resShare.metal,        team->resShare.energy,
+                    team->resPrevSent.metal,     team->resPrevSent.energy,
+                    team->resPrevReceived.metal, team->resPrevReceived.energy,
+                    team->resPrevExcess.metal,   team->resPrevExcess.energy);
                 rtcServer.SendReliable(clientId, msg.data(), msg.size());
             });
         }

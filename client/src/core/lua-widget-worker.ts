@@ -2516,6 +2516,73 @@ function installEngineGlobals(
     rt.setGlobal('LUAUI_DIRNAME', 'LuaUI/');
     rt.setGlobal('LUAUI_VERSION', `spring-web LuaUI v0.3 (${gameId})`);
 
+    // Spring engine constants exposed as Lua globals. Spring's LuaUI host
+    // sets these via RegisterGlobals; widgets reference them in inner-loop
+    // checks like `if n % TEAM_SLOWUPDATE_RATE ~= 0 then return end` (chili
+    // Economy Panel) or `n % UNIT_SLOWUPDATE_RATE` (selector widgets).
+    // Without them widget GameFrame callins error out silently and the UI
+    // appears to "work" but the numbers never refresh.
+    //   Values match upstream Spring (Sim/Misc/GlobalConstants.h):
+    //     GAME_SPEED 30, TEAM_SLOWUPDATE_RATE 15, UNIT_SLOWUPDATE_RATE 15.
+    //   LOS_PRECISION is 31 in mainline; we don't simulate fractional LOS,
+    //   so the value mostly drives integer-modulo branching and 31 is fine.
+    rt.setGlobal('GAME_SPEED', 30);
+    rt.setGlobal('TEAM_SLOWUPDATE_RATE', 15);
+    rt.setGlobal('UNIT_SLOWUPDATE_RATE', 15);
+    rt.setGlobal('LOS_PRECISION', 31);
+    rt.setGlobal('MAX_TEAMS', 255);
+    rt.setGlobal('MAX_PLAYERS', 251);
+
+    // Spring's host runs Lua 5.1 where numeric coercion in string.char
+    // and string.format("%d"/"%i", ...) silently truncates floats;
+    // fengari is Lua 5.3 and rejects them with "number has no integer
+    // representation". ZK widgets routinely build inline color escapes
+    // via `string.char(255, r*255, g*255, b*255)` (chili util's
+    // color2incolor, Economy Panel's odEffStr at line 967, many overdrive
+    // formatters) and call `("%i / %i"):format(stored, capacity)` with
+    // float aggregates (Economy Panel line 1042). We patch the relevant
+    // call sites in chili util.lua individually, but widget-authors
+    // writing the same pattern keep hitting it. Wrap both globally to
+    // floor the offending args — matches Spring's behaviour exactly and
+    // unblocks any widget that ports the same pattern.
+    rt.doString(`
+        local _unpack = table.unpack or unpack
+
+        local origChar = string.char
+        string.char = function(...)
+            local n = select('#', ...)
+            local args = {...}
+            for i = 1, n do
+                local v = args[i]
+                if type(v) == 'number' and v ~= math.floor(v) then
+                    args[i] = math.floor(v)
+                end
+            end
+            return origChar(_unpack(args, 1, n))
+        end
+
+        -- string.format integer specs: scan the format string for
+        -- %d / %i / %x / %X / %o / %u / %c (width/flags allowed) and
+        -- floor the matching positional args. Spring's Lua 5.1 always
+        -- coerced; fengari's strict 5.3 errors on fractions.
+        local origFormat = string.format
+        string.format = function(fmt, ...)
+            if type(fmt) ~= 'string' then return origFormat(fmt, ...) end
+            local n = select('#', ...)
+            local args = {...}
+            local idx = 0
+            for _ in fmt:gmatch('%%[%-%+%# 0]*[%d%.]*[diouxXc]') do
+                idx = idx + 1
+                if idx > n then break end
+                local v = args[idx]
+                if type(v) == 'number' and v ~= math.floor(v) then
+                    args[idx] = math.floor(v)
+                end
+            end
+            return origFormat(fmt, _unpack(args, 1, n))
+        end
+    `, 'string_lib_lua51_compat');
+
     rt.setGlobal('Script', {
         CreateScream: () => ({ func: null, _scream: { func: null } }),
         GetSynced: () => false,
@@ -3364,6 +3431,18 @@ self.onmessage = async (e: MessageEvent) => {
                 maxEnergy: msg.maxEnergy as number,
                 metalIncome: msg.metalIncome as number,
                 energyIncome: msg.energyIncome as number,
+                metalPull: (msg.metalPull as number) ?? 0,
+                energyPull: (msg.energyPull as number) ?? 0,
+                metalExpense: (msg.metalExpense as number) ?? 0,
+                energyExpense: (msg.energyExpense as number) ?? 0,
+                metalShare: (msg.metalShare as number) ?? 0,
+                energyShare: (msg.energyShare as number) ?? 0,
+                metalSent: (msg.metalSent as number) ?? 0,
+                energySent: (msg.energySent as number) ?? 0,
+                metalReceived: (msg.metalReceived as number) ?? 0,
+                energyReceived: (msg.energyReceived as number) ?? 0,
+                metalExcess: (msg.metalExcess as number) ?? 0,
+                energyExcess: (msg.energyExcess as number) ?? 0,
             });
             break;
 

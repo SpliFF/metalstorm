@@ -16,7 +16,7 @@ import type { Scene } from '@babylonjs/core/scene';
 import type { FreeCamera } from '@babylonjs/core/Cameras/freeCamera';
 import type { ParsedMapData } from './map-data.js';
 import type { RTSCamera } from './rts-camera.js';
-import type { Connection } from './connection.js';
+import type { Connection, ResourceUpdateInfo } from './connection.js';
 import type { EntityStateSnapshot } from './entity-state.js';
 import { debugConsole } from './debug-console.js';
 
@@ -314,9 +314,9 @@ export class LuaWidgetManager {
     }
 
     /** Forward a resource update to the worker. */
-    forwardResourceUpdate(team: number, metal: number, maxMetal: number, energy: number, maxEnergy: number, metalIncome: number, energyIncome: number): void {
+    forwardResourceUpdate(info: ResourceUpdateInfo): void {
         if (this.disposed) return;
-        this.postToWorker({ type: 'resourceUpdate', team, metal, maxMetal, energy, maxEnergy, metalIncome, energyIncome });
+        this.postToWorker({ type: 'resourceUpdate', ...info });
     }
 
     /** Forward game info (frame, speed, paused) to the worker. */
