@@ -19,6 +19,7 @@ import type { RTSCamera } from './rts-camera.js';
 import type { Connection, ResourceUpdateInfo } from './connection.js';
 import type { EntityStateSnapshot } from './entity-state.js';
 import { debugConsole } from './debug-console.js';
+import { logIngest } from './log-ingest.js';
 
 // Vite worker import — bundles the worker as a separate chunk
 import WidgetWorker from './lua-widget-worker.ts?worker';
@@ -522,19 +523,34 @@ export class LuaWidgetManager {
         // double-size the debug console).
         if (msg?.type !== 'log') this.logMessageTraffic('worker→main', msg);
         switch (msg.type) {
-            case 'log':
+            case 'log': {
+                const level = (msg.level ?? 2) as number;
                 console.log(`[LuaUI]`, msg.msg);
                 debugConsole.addEntry({
                     id: Date.now(),
                     timestamp: Date.now() / 1000,
-                    level: msg.level ?? 2,
+                    level,
                     section: 'lua',
                     scope: 'LuaUI',
                     process: 'client',
                     message: msg.msg,
                     frame: 0,
                 });
+                // Forward warnings and errors to the log server so every
+                // widget error is discoverable via spring-debug. Below
+                // warning we suppress to keep traffic light — devs can
+                // still see info-level chatter in the browser console
+                // and the in-game console.
+                if (level >= 3) {
+                    logIngest.push({
+                        level: level as 3 | 4 | 5,
+                        section: 'lua',
+                        scope: 'LuaUI',
+                        message: String(msg.msg ?? ''),
+                    });
+                }
                 break;
+            }
 
             case 'ready':
                 this.ready = true;
