@@ -741,6 +741,15 @@ async function init(
     runtime = new LuaRuntime('LuaUI');
     bridge = new LuaGLBridge(gl, mapData.mapSourceUrl);
     bridge.setGameBaseUrl(baseUrl);
+    // Resolve Spring's `'#' .. unitDefID` build-pic syntax to the unit's
+    // buildPic filename — chili Image controls in the Core Selector and
+    // FactoryBar pass `'#' .. id` as the texture file. Without this, every
+    // such image falls back to a magenta 1×1 placeholder (the "pink boxes"
+    // a player sees on the commander/engineer panel and factory tiles).
+    bridge.setBuildPicResolver((defId) => {
+        const d = unitDefMap.get(defId);
+        return d?.buildPic ? d.buildPic : null;
+    });
     postLog(2, '[LuaUI] init step 3/8 done: Lua runtime + GL bridge created');
 
     // 3b. Inject engine-bundled test widgets when solo mode is active.

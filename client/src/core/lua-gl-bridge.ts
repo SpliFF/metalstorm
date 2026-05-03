@@ -112,6 +112,12 @@ export class LuaGLBridge {
      *  texture paths like "LuaUI/Images/quit.png" to a bundled asset URL
      *  instead of an HTTP fetch off the game base URL. Used by `?widgetTest`. */
     private assetOverrides = new Map<string, string>();
+    /** Resolves a Spring `'#' .. unitDefID` texture reference to the
+     *  unit's `buildPic` filename (without directory). Returns null if the
+     *  defId is unknown. The bridge then loads it from
+     *  `${gameBaseUrl}/unitpics/<buildPic>`. Set by the host (worker holds
+     *  the unit-def map; bridge does not). */
+    private buildPicResolver: ((defId: number) => string | null) | null = null;
 
     constructor(gl: WebGL2RenderingContext, mapSourceUrl: string, engineTex: EngineTextures = {}) {
         this.gl = gl;
@@ -141,6 +147,12 @@ export class LuaGLBridge {
                 this.textureSearchPaths.push(p);
             }
         }
+    }
+
+    /** Register a resolver for Spring's `'#' .. unitDefID` build-pic syntax.
+     *  The fn returns the def's `buildPic` filename (or null on miss). */
+    setBuildPicResolver(fn: (defId: number) => string | null): void {
+        this.buildPicResolver = fn;
     }
 
     /** Expose the WebGL context for external use. */
@@ -1167,8 +1179,9 @@ export class LuaGLBridge {
                 width: 1, height: 1,
             });
             const url = this.resolveTextureUrl(normalised);
+            const fallbacks = this.buildFallbackUrls(normalised, url);
             // Fire off async load; replace data when ready.
-            void this.loadImageInto(url, handle);
+            void this.loadImageInto(url, handle, fallbacks.length > 0 ? fallbacks : undefined);
             this.textureCache.set(normalised, handle);
             return handle;
         }
@@ -1222,10 +1235,51 @@ export class LuaGLBridge {
         this.assetOverrides.set(this.normaliseTexturePath(path).toLowerCase(), url);
     }
 
+    /** Compute fallback URLs to try if the primary URL 404s. Covers two
+     *  cases: (a) build-pic case mismatch (`UnitDefs[].buildPic` is whatever
+     *  the unitdef said; static-file routing is case-sensitive) and (b)
+     *  short names that may live under one of the registered skin search
+     *  paths instead of the game root. */
+    private buildFallbackUrls(normalised: string, primaryUrl: string): string[] {
+        const fallbacks: string[] = [];
+        if (!this.gameBaseUrl) return fallbacks;
+        if (normalised.startsWith('#')) {
+            const id = parseInt(normalised.substring(1), 10);
+            if (Number.isFinite(id) && this.buildPicResolver) {
+                const pic = this.buildPicResolver(id);
+                if (pic && pic !== pic.toLowerCase()) {
+                    const lc = `${this.gameBaseUrl}/unitpics/${pic.toLowerCase()}`;
+                    if (lc !== primaryUrl) fallbacks.push(lc);
+                }
+            }
+            return fallbacks;
+        }
+        if (!normalised.includes('/')) {
+            for (const sp of this.textureSearchPaths) {
+                const fb = `${this.gameBaseUrl}/${sp}${normalised}`;
+                if (fb !== primaryUrl) fallbacks.push(fb);
+            }
+        }
+        return fallbacks;
+    }
+
     /** Resolve a texture URL, trying search paths for short names. */
     private resolveTextureUrl(normalised: string): string {
         const override = this.assetOverrides.get(normalised.toLowerCase());
         if (override) return override;
+        // Spring's `'#' .. unitDefID` build-pic syntax. UnitDefs[id].buildPic
+        // is the bare filename (e.g. "commrecon.png"); the asset lives under
+        // /api/games/data/<game>/unitpics/. If the resolver doesn't know the
+        // defId or buildPic is empty, fall back to a guess via the def's
+        // name — but that needs DefCache, which lives in the worker, so for
+        // now we emit a likely-404 URL and let the magenta placeholder show.
+        if (normalised.startsWith('#') && this.buildPicResolver && this.gameBaseUrl) {
+            const id = parseInt(normalised.substring(1), 10);
+            if (Number.isFinite(id)) {
+                const pic = this.buildPicResolver(id);
+                if (pic) return `${this.gameBaseUrl}/unitpics/${pic}`;
+            }
+        }
         // If the path has a directory component, use standard resolution
         if (normalised.includes('/')) {
             const lower = normalised.toLowerCase();
@@ -1452,14 +1506,7 @@ export class LuaGLBridge {
                 });
                 this.textureCache.set(normalised, handle);
                 const primaryUrl = this.resolveTextureUrl(normalised);
-                // Build fallback URLs from search paths for short names
-                const fallbacks: string[] = [];
-                if (!normalised.includes('/') && this.gameBaseUrl) {
-                    for (const sp of this.textureSearchPaths) {
-                        const fb = `${this.gameBaseUrl}/${sp}${normalised}`;
-                        if (fb !== primaryUrl) fallbacks.push(fb);
-                    }
-                }
+                const fallbacks = this.buildFallbackUrls(normalised, primaryUrl);
                 void this.loadImageInto(primaryUrl, handle, fallbacks.length > 0 ? fallbacks : undefined);
             }
             gl.bindTexture(gl.TEXTURE_2D, handle.tex);
