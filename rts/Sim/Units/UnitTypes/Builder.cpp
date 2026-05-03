@@ -18,6 +18,7 @@
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
 #include "Sim/MoveTypes/MoveType.h"
+#include "Sim/MoveTypes/GroundMoveType.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Units/Scripts/CobInstance.h"
 #include "Sim/Units/CommandAI/BuilderCAI.h"
@@ -550,6 +551,7 @@ void CBuilder::Update()
 		updated = updated || UpdateReclaim(fCommand);
 		updated = updated || UpdateResurrect(fCommand);
 		updated = updated || UpdateCapture(fCommand);
+		FaceCurrentBuildTarget();
 	}
 
 	CUnit::Update();
@@ -931,6 +933,41 @@ bool CBuilder::ScriptStartBuilding(float3 pos, bool silent)
 	}
 
 	return inBuildStance;
+}
+
+// Smoothly orient a builder's body toward its current work site. Spring's
+// stock behaviour relies on the unit script rotating only the turret piece,
+// which reads as "frozen in place" for humanoid commanders whose body and
+// torso are the visible silhouette. Driving wantedHeading through
+// CGroundMoveType::ChangeHeading respects the unit's turnRate so the rotation
+// is smooth rather than snapped.
+void CBuilder::FaceCurrentBuildTarget()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	if (!inBuildStance) return;
+
+	const CSolidObject* target = nullptr;
+	if      (curBuild     != nullptr) target = curBuild;
+	else if (curReclaim   != nullptr) target = curReclaim;
+	else if (curResurrect != nullptr) target = curResurrect;
+	else if (curCapture   != nullptr) target = curCapture;
+	else if (terraforming)            target = nullptr; // use terraformCenter below
+
+	float3 targetPos;
+	if (target != nullptr) {
+		targetPos = target->midPos;
+	} else if (terraforming) {
+		targetPos = terraformCenter;
+	} else {
+		return;
+	}
+
+	auto* gmt = dynamic_cast<CGroundMoveType*>(moveType);
+	if (gmt == nullptr) return;
+
+	const float3 dir = (targetPos - pos);
+	if (dir.SqLength2D() < 1.0f) return;
+	gmt->ChangeHeading(GetHeadingFromVector(dir.x, dir.z));
 }
 
 

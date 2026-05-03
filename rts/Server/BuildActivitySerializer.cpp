@@ -173,8 +173,12 @@ std::vector<uint8_t> SerializeAll(uint32_t frame, int viewerAllyTeam) {
         ++count;
     }
 
-    if (count == 0) return {};
-
+    // Always emit at least the header — even with count==0 — so the
+    // client gets a definitive "nobody is building right now" signal and
+    // its active beams can age out. Skipping the send when the last
+    // builder finished or was cancelled would leave its beam pinned at
+    // full intensity forever (the renderer only decays beams that didn't
+    // appear in *some* snapshot, not beams whose last snapshot dropped).
     std::memcpy(&buf[0], &frame, sizeof(uint32_t));
     std::memcpy(&buf[4], &count, sizeof(uint16_t));
     return buf;

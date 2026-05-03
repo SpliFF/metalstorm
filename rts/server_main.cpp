@@ -1627,8 +1627,11 @@ int main(int argc, char* argv[])
         // ~10 Hz cadence. Per-session because enemy build activity
         // respects LOS — the client treats the absence of an entry as
         // "fade out the beam" so brief drops between snapshots don't
-        // pop. Builders idle most of the time, so the typical payload
-        // is empty and we skip the send.
+        // pop. We send the snapshot even when no builders are active so
+        // the client can age out beams that completed or were cancelled
+        // since the last snapshot; SerializeAll returns a 6-byte header
+        // for the empty case, so the per-session bandwidth cost is ~7
+        // bytes every 3rd frame.
         {
         int curFrame = sim.GetFrameNum();
         if (curFrame >= 0 && (curFrame % 3) == 0 && rtcServer.GetClientCount() > 0) {

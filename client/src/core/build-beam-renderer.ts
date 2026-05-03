@@ -379,7 +379,12 @@ export class BuildBeamRenderer {
         });
         mat.setColor3('baseColor', new Color3(color[0], color[1], color[2]));
         mat.setFloat('time', 0);
-        mat.setFloat('intensityMul', 2.2);
+        // Additive blending stacks brightness for every overlapping pixel,
+        // and a multi-piece commander draws several beams from the same
+        // emitter base — 2.2x bleached the model behind into solid white.
+        // 0.55 keeps the streak visible against the team-coloured hull
+        // without saturating once two or three beams overlap.
+        mat.setFloat('intensityMul', 0.55);
         if (this.ensureTexture()) mat.setTexture('beamTex', this.beamTexture!);
         // Additive blending so overlapping beams brighten naturally.
         mat.alphaMode = 1; // BABYLON.Engine.ALPHA_ADD = 1
