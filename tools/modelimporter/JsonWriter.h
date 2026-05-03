@@ -37,6 +37,11 @@
 //   2 — added tex1 / tex2 from the source material's diffuse/specular
 //       texture slots. modelimporter automatically overwrites a v1
 //       file on its next run so existing trees self-upgrade.
+//   3 — also reads tex1 / tex2 from a sibling Spring author-config
+//       file (`<sourceModel>.<ext>.lua`). Required for Collada and
+//       similar formats whose Assimp importer doesn't carry Spring-
+//       style texture bindings. Bumping the version forces a one-shot
+//       regeneration of every v2 file so the new fallback is applied.
 //
 // Once a `.config.json` file exists on disk it belongs to the
 // author: the importer never rewrites it unless `--update-meta` is
@@ -60,11 +65,21 @@ namespace JsonWriter {
 /// modelimporter treats a configVersion strictly older than this
 /// as "needs regeneration" and overwrites the file on its next run,
 /// so trees of stale configs self-upgrade without --update-meta.
-constexpr int kCurrentConfigVersion = 2;
+constexpr int kCurrentConfigVersion = 3;
 
 /// Extract metadata from `scene` and write `outPath`, overwriting
 /// any existing file at that location. Callers are responsible for
 /// checking existence and the `--update-meta` flag before invoking.
-bool Write(const aiScene* scene, const std::string& outPath);
+///
+/// `sourceModelPath` is the file Assimp imported. When a sibling
+/// Spring author-config exists at `<sourceModelPath>.lua` (the
+/// legacy `<modelname>.<ext>.lua` convention used by Collada / FBX
+/// archives that don't carry texture bindings in the model file
+/// itself), tex1/tex2/invertteamcolor are pulled from there as a
+/// fallback when Assimp didn't fill in AI_MATKEY_TEXTURE_*. Pass an
+/// empty string to skip the .lua lookup.
+bool Write(const aiScene* scene,
+           const std::string& outPath,
+           const std::string& sourceModelPath = {});
 
 } // namespace JsonWriter

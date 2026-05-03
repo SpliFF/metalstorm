@@ -433,53 +433,174 @@ std::vector<std::string> ExtractGlbImageUris(const fs::path& glbPath) {
     return uris;
 }
 
-/// Make sure every texture URI referenced by a freshly-written glb
-/// has a sibling `.ktx2` in `unittexturesOut`. modelimporter rewrites
-/// every glb image URI to `<stem>.ktx2`, but the URIs sit alongside
-/// the .glb in models/ (e.g. `../unittextures/foo.ktx2`); we follow
-/// each URI relative to the glb's directory and produce the file at
-/// the resolved path. Cheap on re-runs — the per-URI early exit is a
-/// single stat() call.
+/// Extract `tex1` / `tex2` filenames from a model's config sidecar.
+/// Three sources are consulted in priority order:
+///
+///   1. `<glbStem>.config.lua`   — hand-authored override at the
+///                                  output level (rare, but wins).
+///   2. `<sourceModel>.lua`      — Spring's author-config convention
+///                                  alongside the source model file
+///                                  (e.g. `strikecom_1.dae.lua`).
+///                                  Standard for Collada/legacy assets
+///                                  where the on-disk format has no
+///                                  native tex1/tex2 channel.
+///   3. `<glbStem>.config.json`  — what modelimporter writes; only
+///                                  carries tex1/tex2 when Assimp's
+///                                  importer for the source format
+///                                  populated them (true for S3O, not
+///                                  for `.dae`).
+///
+/// `sourceModelPath` may be empty if no source path is known — in
+/// that case we just skip step 2.
+void ExtractConfigTextureRefs(const fs::path& glbPath,
+                              const fs::path& sourceModelPath,
+                              std::string& outTex1, std::string& outTex2) {
+    outTex1.clear();
+    outTex2.clear();
+    const fs::path stem = glbPath.parent_path() / glbPath.stem();
+    const fs::path luaPath  = stem.string() + ".config.lua";
+    const fs::path jsonPath = stem.string() + ".config.json";
+
+    auto readField = [](const std::string& contents,
+                        const std::string& key,
+                        bool isLua) -> std::string {
+        // Lua source: `tex1 = "name.ktx2"`
+        // JSON:       `"tex1": "name.ktx2"`
+        // Both forms reduce to "find the key, then read the next
+        // double-quoted string after it".
+        const std::string needle = isLua ? key : ("\"" + key + "\"");
+        size_t k = contents.find(needle);
+        if (k == std::string::npos) return {};
+        size_t after = k + needle.size();
+        // Skip past the separator (`:` for JSON, `=` for Lua) and any
+        // whitespace, landing on the value's opening quote.
+        size_t q1 = contents.find('"', after);
+        if (q1 == std::string::npos) return {};
+        size_t q2 = contents.find('"', q1 + 1);
+        if (q2 == std::string::npos) return {};
+        return contents.substr(q1 + 1, q2 - q1 - 1);
+    };
+
+    auto loadText = [](const fs::path& p) -> std::string {
+        std::ifstream in(p, std::ios::binary);
+        if (!in) return {};
+        return std::string{std::istreambuf_iterator<char>(in),
+                           std::istreambuf_iterator<char>()};
+    };
+
+    auto rewriteToKtx2 = [](std::string& name) {
+        if (name.empty()) return;
+        const auto dot = name.find_last_of('.');
+        const auto slash = name.find_last_of("/\\");
+        if (dot == std::string::npos ||
+            (slash != std::string::npos && dot < slash)) {
+            name += ".ktx2";
+        } else {
+            name = name.substr(0, dot) + ".ktx2";
+        }
+    };
+
+    // Step 1: hand-authored output-level .config.lua override.
+    if (fs::exists(luaPath)) {
+        const std::string txt = loadText(luaPath);
+        outTex1 = readField(txt, "tex1", true);
+        outTex2 = readField(txt, "tex2", true);
+    }
+
+    // Step 2: Spring author-config alongside the source model
+    // (`<modelname>.<ext>.lua`, e.g. `strikecom_1.dae.lua`). Only
+    // checked if the higher-priority sources didn't already populate
+    // both fields. The on-disk filenames in these files are typically
+    // `.dds`/`.tga` — rewrite to `.ktx2` to match the runtime convention.
+    if ((outTex1.empty() || outTex2.empty()) && !sourceModelPath.empty()) {
+        const fs::path springLua = sourceModelPath.string() + ".lua";
+        if (fs::exists(springLua)) {
+            const std::string txt = loadText(springLua);
+            std::string t1 = readField(txt, "tex1", true);
+            std::string t2 = readField(txt, "tex2", true);
+            rewriteToKtx2(t1);
+            rewriteToKtx2(t2);
+            if (outTex1.empty()) outTex1 = t1;
+            if (outTex2.empty()) outTex2 = t2;
+        }
+    }
+
+    // Step 3: machine-generated .config.json (only carries tex1/tex2
+    // for source formats Assimp's importer fills in, e.g. S3O).
+    if (fs::exists(jsonPath)) {
+        const std::string txt = loadText(jsonPath);
+        if (outTex1.empty()) outTex1 = readField(txt, "tex1", false);
+        if (outTex2.empty()) outTex2 = readField(txt, "tex2", false);
+    }
+}
+
+/// Convert a single referenced texture by filename (e.g.
+/// `3do2s3o_atlas_2.ktx2`) into the model's directory if missing.
+/// Resolves the source file by stem in `unittexturesSrc`. No-op on
+/// data URIs, missing extensions, or already-present targets.
+void EnsureSiblingTexture(const fs::path& glbPath,
+                          const std::string& filename,
+                          const fs::path& unittexturesSrc,
+                          const fs::path& textureConverter) {
+    if (filename.empty() || filename.find(':') != std::string::npos) return;
+    const fs::path target = (glbPath.parent_path() / filename).lexically_normal();
+    if (fs::exists(target)) return;
+    if (target.extension() != ".ktx2") {
+        SLOG(SPRING_LOG_WARNING,
+            "non-ktx2 texture ref '%s' in %s — skipping",
+            filename.c_str(), glbPath.filename().string().c_str());
+        return;
+    }
+    const std::string stem = target.stem().string();
+    const std::string srcTex = ResolveTextureByStem(unittexturesSrc, stem);
+    if (srcTex.empty()) {
+        SLOG(SPRING_LOG_WARNING,
+            "texture '%s' (referenced by %s) not found in %s",
+            filename.c_str(), glbPath.filename().string().c_str(),
+            unittexturesSrc.string().c_str());
+        return;
+    }
+    std::error_code ec;
+    fs::create_directories(target.parent_path(), ec);
+    ConvertTextureToKtx2(srcTex, target.string(), textureConverter);
+}
+
+/// Make sure every texture referenced by a freshly-written glb has a
+/// sibling `.ktx2` in `unittexturesOut`. Three reference sources:
+///
+///   1. The glb's own `images[].uri` array — covers the diffuse (tex1)
+///      for source formats whose Assimp importer records textures
+///      (S3O, glTF, OBJ-with-MTL).
+///   2. The Spring author-config (`<sourceModel>.<ext>.lua`) — the
+///      canonical place for tex1 / tex2 in legacy archives whose model
+///      format has no native texture-binding (e.g. .dae / Collada).
+///   3. The sibling `.config.json` (or `.config.lua`) `tex1` / `tex2`
+///      fields — covers the team-colour mask (tex2) for S3O models.
+///      Source 2 supersedes this when present.
+///
+/// `sourceModelPath` is the original input file passed to modelimporter;
+/// pass an empty path to skip source-side .lua lookup. Cheap on re-runs
+/// — the per-texture early exit is a single stat() call.
 void EnsureGlbTexturesAvailable(const fs::path& glbPath,
+                                const fs::path& sourceModelPath,
                                 const fs::path& unittexturesSrc,
                                 const fs::path& unittexturesOut,
                                 const fs::path& textureConverter) {
     if (unittexturesSrc.empty()) return;
-    const auto uris = ExtractGlbImageUris(glbPath);
     std::error_code ec;
     fs::create_directories(unittexturesOut, ec);
-    for (const std::string& uri : uris) {
-        // Skip data URIs (textures already embedded as base64 by
-        // some formats).
-        if (uri.empty() || uri.find(':') != std::string::npos) continue;
 
-        // Resolve URI relative to the glb's directory. modelimporter
-        // emits `../unittextures/<stem>.ktx2` for the conventional
-        // game layout; we use the resolved path verbatim so no second
-        // location ever has to track this convention.
-        const fs::path target = (glbPath.parent_path() / uri).lexically_normal();
-        if (fs::exists(target)) continue;
-        if (target.extension() != ".ktx2") {
-            // Sanity check — modelimporter should have rewritten every
-            // URI to .ktx2. Anything else here is a bug we want to see.
-            SLOG(SPRING_LOG_WARNING,
-                "non-ktx2 URI '%s' in %s — skipping",
-                uri.c_str(), glbPath.filename().string().c_str());
-            continue;
-        }
-
-        const std::string stem = target.stem().string();
-        const std::string srcTex = ResolveTextureByStem(unittexturesSrc, stem);
-        if (srcTex.empty()) {
-            SLOG(SPRING_LOG_WARNING,
-                "texture '%s' (referenced by %s) not found in %s",
-                uri.c_str(), glbPath.filename().string().c_str(),
-                unittexturesSrc.string().c_str());
-            continue;
-        }
-        fs::create_directories(target.parent_path(), ec);
-        ConvertTextureToKtx2(srcTex, target.string(), textureConverter);
+    // 1. glb image URIs (diffuse).
+    for (const std::string& uri : ExtractGlbImageUris(glbPath)) {
+        EnsureSiblingTexture(glbPath, uri, unittexturesSrc, textureConverter);
     }
+
+    // 2 + 3. tex1 / tex2 declared in the source `.lua` author-config or
+    // the model's output config sidecar (team mask).
+    std::string tex1, tex2;
+    ExtractConfigTextureRefs(glbPath, sourceModelPath, tex1, tex2);
+    EnsureSiblingTexture(glbPath, tex1, unittexturesSrc, textureConverter);
+    EnsureSiblingTexture(glbPath, tex2, unittexturesSrc, textureConverter);
 }
 
 /// File extensions we hand to modelimporter. Matches the broad
@@ -524,14 +645,52 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
 
         const std::string stem = entry.path().stem().string();
         const fs::path outPath = modelsOut / (stem + ".glb");
+        const fs::path jsonConfigPath = modelsOut / (stem + ".config.json");
 
-        // mtime check: skip if the output is newer than the source
+        // mtime check: skip if the output is newer than the source.
+        // Also force a rebuild if the sibling .config.json is stale —
+        // schema bumps inside modelimporter (e.g. when a new field is
+        // extracted from sources we used to ignore) need a regeneration
+        // even when the .glb itself is current. modelimporter exposes
+        // its current schema version via the constant baked into every
+        // emitted file as `configVersion`.
+        constexpr int kMinAcceptableConfigVersion = 3;
         bool needsRebuild = true;
         if (!force && fs::exists(outPath)) {
             const auto srcTime = fs::last_write_time(entry.path(), ec);
             const auto dstTime = fs::last_write_time(outPath, ec);
             if (!ec && dstTime >= srcTime) {
                 needsRebuild = false;
+            }
+        }
+        if (!needsRebuild && fs::exists(jsonConfigPath)) {
+            std::ifstream in(jsonConfigPath, std::ios::binary);
+            if (in) {
+                const std::string contents{
+                    std::istreambuf_iterator<char>(in),
+                    std::istreambuf_iterator<char>()};
+                int version = -1;
+                size_t k = contents.find("\"configVersion\"");
+                if (k != std::string::npos) {
+                    size_t colon = contents.find(':', k);
+                    if (colon != std::string::npos) {
+                        size_t p = colon + 1;
+                        while (p < contents.size() && std::isspace(
+                                static_cast<unsigned char>(contents[p]))) ++p;
+                        version = 0;
+                        bool any = false;
+                        while (p < contents.size() && std::isdigit(
+                                static_cast<unsigned char>(contents[p]))) {
+                            version = version * 10 + (contents[p] - '0');
+                            ++p;
+                            any = true;
+                        }
+                        if (!any) version = -1;
+                    }
+                }
+                if (version < kMinAcceptableConfigVersion) {
+                    needsRebuild = true;
+                }
             }
         }
 
@@ -564,8 +723,12 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
         // (per-URI early skip when the .ktx2 already exists). Output
         // dir is models/ (sibling of the glb) — Babylon's glTF loader
         // rejects URIs containing `..`, so glb URIs stay as bare
-        // filenames and resolve against models/.
-        EnsureGlbTexturesAvailable(outPath, unittexturesSrc, modelsOut,
+        // filenames and resolve against models/. The source path lets
+        // the texture extractor consult the `<modelname>.<ext>.lua`
+        // Spring author-config for tex1/tex2 on formats Assimp can't
+        // read those out of (notably .dae).
+        EnsureGlbTexturesAvailable(outPath, entry.path(),
+                                   unittexturesSrc, modelsOut,
                                    textureConverter);
     }
 

@@ -352,7 +352,7 @@ int main(int argc, char** argv) {
         if (hasLua) {
             metaStatus = " [author-owned .config.lua, skipped]";
         } else if (!hasJson) {
-            if (!JsonWriter::Write(scene, jsonConfigPath.string())) {
+            if (!JsonWriter::Write(scene, jsonConfigPath.string(), inPath)) {
                 SLOG(SPRING_LOG_ERROR, "failed to write %s",
                     jsonConfigPath.string().c_str());
                 Assimp::DefaultLogger::kill();
@@ -361,7 +361,7 @@ int main(int argc, char** argv) {
             }
             metaStatus = " [fresh]";
         } else if (staleVersion) {
-            if (!JsonWriter::Write(scene, jsonConfigPath.string())) {
+            if (!JsonWriter::Write(scene, jsonConfigPath.string(), inPath)) {
                 SLOG(SPRING_LOG_ERROR, "failed to write %s",
                     jsonConfigPath.string().c_str());
                 Assimp::DefaultLogger::kill();
@@ -370,7 +370,7 @@ int main(int argc, char** argv) {
             }
             metaStatus = " [upgraded]";
         } else if (updateMeta) {
-            if (!JsonWriter::Write(scene, jsonConfigPath.string())) {
+            if (!JsonWriter::Write(scene, jsonConfigPath.string(), inPath)) {
                 SLOG(SPRING_LOG_ERROR, "failed to write %s",
                     jsonConfigPath.string().c_str());
                 Assimp::DefaultLogger::kill();

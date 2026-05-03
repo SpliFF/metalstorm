@@ -223,7 +223,9 @@ std::string Vec3(float x, float y, float z) {
 
 // =====================================================================
 
-bool JsonWriter::Write(const aiScene* scene, const std::string& outPath)
+bool JsonWriter::Write(const aiScene* scene,
+                       const std::string& outPath,
+                       const std::string& sourceModelPath)
 {
     // ---- Extract bounding box and bounding sphere ----
     Aabb bounds;
@@ -318,6 +320,40 @@ bool JsonWriter::Write(const aiScene* scene, const std::string& outPath)
         if (mat->GetTexture(aiTextureType_SPECULAR, 0, &s) == AI_SUCCESS) {
             tex2.assign(s.C_Str(), s.length);
             rewriteToKtx2(tex2);
+        }
+    }
+
+    // Spring author-config fallback: legacy `.dae` / `.fbx` archives
+    // store tex1 / tex2 in a sibling `<modelname>.<ext>.lua` file
+    // because the on-disk model format has no native Spring-style
+    // texture binding. Assimp can't see those — we parse them out by
+    // simple string matching (the file is small and the keys are
+    // unambiguous). Only consulted when Assimp didn't already pick
+    // up a texture for that slot, so S3O imports keep their existing
+    // behaviour.
+    if ((tex1.empty() || tex2.empty()) && !sourceModelPath.empty()) {
+        const std::string springLua = sourceModelPath + ".lua";
+        std::ifstream lua(springLua, std::ios::binary);
+        if (lua) {
+            const std::string txt{std::istreambuf_iterator<char>(lua),
+                                  std::istreambuf_iterator<char>()};
+            auto readLuaField = [&](const std::string& key) -> std::string {
+                size_t k = txt.find(key);
+                if (k == std::string::npos) return {};
+                size_t q1 = txt.find('"', k + key.size());
+                if (q1 == std::string::npos) return {};
+                size_t q2 = txt.find('"', q1 + 1);
+                if (q2 == std::string::npos) return {};
+                return txt.substr(q1 + 1, q2 - q1 - 1);
+            };
+            if (tex1.empty()) {
+                tex1 = readLuaField("tex1");
+                rewriteToKtx2(tex1);
+            }
+            if (tex2.empty()) {
+                tex2 = readLuaField("tex2");
+                rewriteToKtx2(tex2);
+            }
         }
     }
 
