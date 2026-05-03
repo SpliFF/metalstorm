@@ -1276,6 +1276,27 @@ Spring.Utilities.TableToString = function(t) return tostring(t) end`;
         }
     }
 
+    // Patch gui_chili_facbar.lua / gui_chili_facpanel.lua: hide the empty
+    // 600×200 "Factories" floating window when the player has no factories
+    // and isn't in tweak mode. Without this the widget mounts a giant
+    // dark-teal Evolved skin tile pattern over the screen at startup.
+    // Tweak-mode visibility is preserved so the user can still position it.
+    for (const facWidgetPath of [
+        'LuaUI/Widgets/gui_chili_facbar.lua',
+        'LuaUI/Widgets/gui_chili_facpanel.lua',
+    ]) {
+        const src = vfsLookup(facWidgetPath);
+        if (!src) continue;
+        const anchor = 'RecreateFacbar = function()\n\tenteredTweak = false\n\tif inTweak then return end';
+        const replacement = 'RecreateFacbar = function()\n\tenteredTweak = false\n\tif window_facbar and window_facbar.SetVisibility then\n\t\twindow_facbar:SetVisibility(#facs > 0 or inTweak)\n\tend\n\tif inTweak then return end';
+        if (src.includes(anchor)) {
+            vfsRegister(facWidgetPath, src.replace(anchor, replacement));
+            postLog(2, `[LuaUI] Patched ${facWidgetPath}: hide empty Factories window`);
+        } else {
+            postLog(3, `[LuaUI] ${facWidgetPath} hide-empty patch — anchor not found`);
+        }
+    }
+
     // Patch LuaRules/Configs/dynamic_comm_defs.lua: nil-guard the
     // wreck/heap feature lookups in the chassisDefs loop. Without
     // FeatureDefNames populated (we don't stream feature defs to the
@@ -1827,8 +1848,11 @@ defaultFont = activeFont
         if widgetHandler then
             local autoEnable = {
                 "Chili Chat 2.2",        -- chat console (replaces Pro Console)
-                "Chili FactoryBar",      -- factory build menu
-                "Chili FactoryPanel",    -- factory unit panel
+                -- FactoryBar/FactoryPanel are user-toggled. They mount empty
+                -- floating windows at startup before any factory exists,
+                -- which looks broken; the Integral Menu already covers
+                -- factory build queues. Re-enable from EPIC Menu when
+                -- desired.
             }
             for _, name in ipairs(autoEnable) do
                 local kw = widgetHandler.knownWidgets and widgetHandler.knownWidgets[name]
