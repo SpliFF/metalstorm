@@ -200,7 +200,7 @@ springlog_log(level, LOG_SECTION, "", springlog_get_frame(), fmt, ...)
 
 ### Optional Sinks
 
-**Network sink** (`springlog-net`) -- buffers log entries for transmission to the log server via WebSocket + FlatBuffers. Currently collects entries in memory; the WS client connection is not yet wired.
+**Network sink** (`springlog-net`) -- streams log entries to the log server. Each entry is wrapped in a `LogIngest` FlatBuffer message and pushed over a persistent WebSocket. The MCP server and HTTP query API (`/api/logs`, `/api/logs/search`) read from the same backing store, so logs from any connected source are queryable in one place.
 
 ```cpp
 #include "System/SpringLog/SpringLogNet.h"

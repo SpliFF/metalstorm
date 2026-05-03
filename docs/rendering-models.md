@@ -6,6 +6,7 @@ How 3D models go from game content to pixels in the browser.
 
 ```
 Source model (.dae/.s3o/.obj/...)    Game content: objects3d/
+Source textures (.dds/.png/...)      Game content: unittextures/
         |
         v
   ModelImporter (Assimp)             tools/modelimporter/
@@ -16,13 +17,15 @@ Source model (.dae/.s3o/.obj/...)    Game content: objects3d/
   GameProcessor                      rts/Server/GameProcessor.cpp
         |
         +---> copies <stem>.<ext>.lua --> <stem>.config.lua
-        +---> serves via /api/games/data/<gameId>/models/
+        +---> rewrites tex1/tex2 .dds refs to .ktx2 in config.lua
+        +---> transcodes textures: DDS -> RGBA -> KTX2 (UASTC + Zstd)
+        +---> serves via /api/games/data/<gameId>/models/ + .../unittextures/
         |
   Browser client
         |
         +---> SceneLoader.ImportMeshAsync()     loads glb
-        +---> fetch(<stem>.config.lua)          texture refs, metadata
-        +---> Texture(<url>)                    loads DDS textures
+        +---> fetch(<stem>.config.lua)          texture refs (.ktx2), metadata
+        +---> Texture(<url>)                    loads KTX2 via Babylon's KTX2 loader
         +---> thin-instance render per piece    team-colored shader
 ```
 
@@ -70,12 +73,12 @@ Each model has a sibling metadata file used by the engine sim and the client ren
 
 ### Legacy Sidecar Files
 
-Spring games use `<model>.<ext>.lua` (e.g. `strikecom.dae.lua`) for per-model metadata. `GameProcessor` copies these to `<stem>.config.lua` in the output directory during conversion. These files contain:
+Spring games use `<model>.<ext>.lua` (e.g. `strikecom.dae.lua`) for per-model metadata. `GameProcessor` copies these to `<stem>.config.lua` in the output directory during conversion **and rewrites `tex1` / `tex2` `.dds` filenames to `.ktx2`** so the client only sees the post-migration filename. These files contain:
 
 ```lua
 return {
-    tex1 = "strikecom.dds",         -- diffuse texture filename
-    tex2 = "strikecom_2.dds",       -- team color mask / detail texture
+    tex1 = "strikecom.ktx2",        -- diffuse texture filename (rewritten from .dds)
+    tex2 = "strikecom_2.ktx2",      -- team color mask / detail texture (rewritten from .dds)
     invertteamcolor = false,        -- invert the team color mask
     midpos = {0, 30, 0},            -- model origin offset
     radius = 30,                    -- bounding sphere radius
@@ -85,6 +88,8 @@ return {
     }
 }
 ```
+
+The original `.dds` filenames in the source `.dae.lua` file are preserved on disk; rewriting only happens in the output `<stem>.config.lua` consumed by the client.
 
 ### Generated Config Format
 
@@ -121,13 +126,22 @@ return {
 
 ## Textures
 
+### Format: KTX2 + Basis Universal
+
+Every GPU texture (units, features, terrain, minimap) ships as **KTX2 with Basis Universal UASTC encoding and Zstd supercompression**. The client transcodes UASTC → BC7 / ASTC / ETC2 / RGBA at load time depending on the GPU's preferred compressed format. See [PLAN-textures.md](../PLAN-textures.md) for migration details.
+
+`GameProcessor` (server) and `MapProcessor` (`tools/mapconverter`) handle conversion at preprocessing time:
+- Source `.dds` → decoded to RGBA → re-encoded as KTX2 (UASTC + Zstd) via the bundled Basis Universal encoder
+- Source `.png` / `.tga` / etc. → encoded directly as KTX2
+- Output filename is `<stem>.ktx2` regardless of the input extension
+
+The client registers Babylon's KTX2 loader and pins all transcoder URLs in `client/src/main.ts` lines 8–35 to avoid intermittent CDN fallback bugs.
+
 ### Serving
 
-Textures are served as-is from the game content directory. No format conversion -- browsers can handle DDS via Babylon's built-in DDS texture loader.
-
-- Model textures: `/api/games/data/<gameId>/unittextures/<filename>.dds`
-- Feature textures: `/api/maps/data/<mapId>/features/<filename>.png`
-- Content type: `.dds` = `image/vnd-ms.dds`
+- Model textures: `/api/games/data/<gameId>/unittextures/<filename>.ktx2`
+- Feature textures: `/api/maps/data/<mapId>/features/<filename>.png` (small features kept as PNG; large textures KTX2)
+- Content type: `.ktx2` = `image/ktx2`
 
 ### Spring S3O Texture Convention
 
@@ -184,7 +198,7 @@ Units use **per-piece thin instancing** -- each body part (chassis, turret, arm,
    - `restWorldMatrix`: accumulated world transform (includes axis conversion)
 5. Meshes detached from hierarchy, reset to origin
 6. `.config.lua` fetched for texture metadata
-7. DDS textures loaded and team color material created
+7. KTX2 textures loaded (Babylon transcodes UASTC → GPU's preferred format) and team color material created
 
 ### Per-Frame Rendering
 
@@ -238,7 +252,7 @@ The glTF Scene root node carries a rotation matrix for axis conversion (e.g. Z-u
 | `/api/games/data/<gameId>/models/<stem>.glb` | Model geometry |
 | `/api/games/data/<gameId>/models/<stem>.config.lua` | Model metadata (textures, bounds, pieces) |
 | `/api/games/data/<gameId>/models/<stem>.config.json` | Auto-generated metadata (fallback) |
-| `/api/games/data/<gameId>/unittextures/<name>.dds` | Unit textures |
+| `/api/games/data/<gameId>/unittextures/<name>.ktx2` | Unit textures (KTX2 / UASTC + Zstd) |
 | `/api/maps/data/<mapId>/features/<name>.glb` | Map feature models |
 | `/api/maps/data/<mapId>/features/<name>.png` | Map feature textures |
 

@@ -39,8 +39,12 @@ Game servers are spawned by the lobby with dynamically assigned ports. To discov
 ```
 # Example (ports are assigned dynamically — do not hardcode):
 ./spring-server --port <dynamic> --game content/games/papertanks --map content/maps/wanderlust2.1 \
-  --player "alice:0:0" --player "bob:1:1" --ai "basic_ai:2:-1" --event-fd 5
+  --db data/spring-server.db --log-server ws://localhost:8010 --log-level info \
+  --player "alice:0:0" --player "bob:1:1" --ai "basic_ai:2:-1"
 ```
+
+Full CLI flag list (from `rts/server_main.cpp`):
+`--port`, `--game`, `--game-version`, `--map`, `--db`, `--log-file`, `--log-level`, `--log-server`, `--log-sqlite`, `--debug`, `--no-cache`, `--log-messages`, `--player username:team:pos` (repeatable), `--ai id:team:pos` (repeatable). The IPC pipe and `--event-fd` are gone — game→lobby state changes go over the WebSocket backchannel (see PLAN-lobby-game-connection.md).
 
 ## Directory Map
 
@@ -90,22 +94,43 @@ Game servers are spawned by the lobby with dynamically assigned ports. To discov
 |------|---------|
 | `main.ts` | App entry. Lobby init, `startGame()`, render loop, HUD wiring. |
 | `config.ts` | Server URL, API base paths. |
-| `core/connection.ts` | WebSocket to server. FlatBuffers dispatch. Events: `onMapData`, `onUnitDefs`, `onEntityState`, `onCombatEvents`, etc. |
-| `core/entity-renderer.ts` | Renders units. Preloads .glb models via `setUnitDefs()`, thin-instances by (defId, team). Fallback: procedural shapes. |
+| `core/connection.ts` | WebSocket + WebRTC connection to server. FlatBuffers dispatch. Events: `onMapData`, `onUnitDefs`, `onEntityState`, `onCombatEvents`, etc. |
+| `core/transport.ts` | Transport abstraction over WebSocket and WebRTC data channels (PLAN-webrtc.md). |
+| `core/entity-renderer.ts` | Per-piece thin-instanced unit renderer. Loads `.glb` via `setUnitDefs()`, groups by (defId, team, pieceIdx). Fallback: procedural shapes. |
+| `core/feature-renderer.ts` | Single-mesh thin-instanced map feature renderer. Pattern reference for entity-renderer. |
+| `core/projectile-renderer.ts` | Renders in-flight projectiles (thin instances, per-weapon-type shapes). |
+| `core/build-beam-renderer.ts` | Translucent build-beam shader (procedural cross-section) for nano-spray VFX. |
+| `core/build-activity.ts` | Per-tick build progress wiring; nanoframe state. |
+| `core/build-menu.ts` | In-game build menu UI (unit selection panel). |
+| `core/economy-bar.ts` | Resource bar HUD (metal/energy income/storage). |
+| `core/combat-fx.ts` | Explosion/impact VFX on combat events. |
+| `core/perf-overlay.ts` | Frame-rate / draw-call overlay (toggleable). |
 | `core/def-cache.ts` | Accumulates incrementally streamed unit + weapon defs; notifies renderers. |
+| `core/defs-fetch.ts` | HTTP fallback fetch of game/map defs (used during early load and recovery). |
 | `core/entity-state.ts` | Parses Tier 2 binary snapshots (struct-of-arrays with field mask). |
 | `core/entity-interpolator.ts` | Smooths entity positions between server ticks. |
-| `core/feature-renderer.ts` | Loads map feature .glb models, thin-instances by type. Pattern reference for entity-renderer. |
+| `core/projectile-state.ts` | Parses envelope `0x04` binary projectile snapshots. |
+| `core/piece-state.ts` | Parses streamed piece transforms (turret rotation, walk cycles, etc.). |
+| `core/clock.ts` | Sim-tick clock + interpolation timing. (`clock.test.ts` covers it.) |
 | `core/terrain.ts` | Builds terrain mesh from heightmap uint16 array. |
+| `core/terrain-texture.ts` | Streams the KTX2 terrain texture(s) and binds them onto the terrain mesh. |
 | `core/rts-camera.ts` | Orbital pan/zoom/rotate camera with viewport updates. |
 | `core/input-manager.ts` | Click-to-select (ray cast), right-click-to-command, drag-box select, keyboard shortcuts. |
 | `core/minimap.ts` | Minimap canvas with entity dots, click-to-pan, detachable popup window. |
-| `core/projectile-state.ts` | Parses envelope 0x04 binary projectile snapshots. |
-| `core/projectile-renderer.ts` | Renders in-flight projectiles (thin instances, per-weapon-type shapes). |
-| `core/combat-fx.ts` | Explosion/impact VFX on combat events. |
-| `core/audio.ts` | Web Audio: synth sounds for combat, background music. |
+| `core/audio.ts` + `core/synth-sounds.ts` | Web Audio: procedurally synthesised sounds for combat (no voice pool yet — see PLAN-audio.md). |
 | `core/map-data.ts` | Parses MapData FlatBuffer into `ParsedMapData` (heightmap, features, tiles, URLs). |
-| `core/lua-widget-host.ts` | Fengari Lua runtime for map widgets (lava, water shaders). |
+| `core/lua-runtime.ts` + `core/fengari.d.ts` | Shared Fengari Lua 5.1 runtime. Type definitions. |
+| `core/lua-spring-api.ts` | Client-side `Spring.*` API surface (read-only sim queries, draw helpers). |
+| `core/lua-gl-bridge.ts` + `lua-gl-immediate.ts` + `lua-gl-font.ts` | Lua `gl.*` bridge: command buffer, immediate-mode primitives, font/text rendering. |
+| `core/lua-widget.ts` | Lua widget definition + lifecycle wrapper. |
+| `core/lua-widget-host.ts` | Fengari host for map-side widgets (lava, water shaders). |
+| `core/lua-widget-worker.ts` | LuaUI Web Worker entry: Fengari + OffscreenCanvas, runs widgets off the main thread (PLAN-widgets.md). |
+| `core/lua-widget-manager.ts` | Main-thread owner of the worker: lifecycle, message routing, input forwarding, VFS proxy. |
+| `core/widget-manager.ts` | Higher-level widget orchestration (load order, enable/disable, debug toggles). |
+| `core/command-buffer.ts` | Serialised `gl.*` command buffer transferred from worker to main-thread renderer. |
+| `core/script-api.ts` | JavaScript scripting API surface (alongside Lua). |
+| `core/log-ingest.ts` | Forwards client logs to the log server. |
+| `core/renderer-backend.ts` | Backend abstraction (currently WebGL via Babylon.js; placeholder for future WebGPU). |
 | `core/debug-console.ts` | Debug console: log viewer, scope-aware command input, log server WS, Babylon.js inspector toggle. |
 | `core/net-inspector.ts` | Network message inspector: decodes WS envelope + FlatBuffer types for debug console. |
 | `lobby/lobby-ui.ts` | Full lobby UI: login, room browser, room setup, AI slots, start positions. |
@@ -388,23 +413,27 @@ Defs are streamed on-demand: the server tracks `knownUnitDefs` and `knownWeaponD
 per ClientSession and sends each def exactly once per game session, just before the
 first entity/projectile state update that references it.
 
-## Current Status (2026-04-13)
+## Current Status (2026-05-04)
 
-Playable end-to-end: lobby → create room → start game → fight → game-over → return to lobby.
-Player disconnect handling: server detects WebSocket close, fires `PlayerRemoved` Lua callin, broadcasts `PlayerLeft` to remaining clients, cleans up session. Default engine gadget ends game when no humans remain.
+**Stable end-to-end loop:** lobby → create room → start game → fight → game-over → return to lobby. Player disconnect handling: server detects WebSocket close, fires `PlayerRemoved` Lua callin, broadcasts `PlayerLeft` to remaining clients, cleans up session. Default engine gadget ends the game when no humans remain.
 
-All tasks from PLAN-next-steps.md are complete. Current work: Zero-K game support (PLAN-convert-zk.md).
-HTTP/2 migration complete: all servers use nghttp2 for h2c + HTTP/1.1, replacing uWebSockets HTTP handling.
+**Transport:** HTTP/2 (h2c via nghttp2) + HTTP/1.1 on the same port; WebRTC data channels for game-state streaming (PLAN-webrtc.md). The IPC pipe and `--event-fd` are gone — game→lobby state changes go over a WebSocket backchannel using FlatBuffers (PLAN-lobby-game-connection.md).
 
-**ZK Phase A complete:** 197/236 gadgets boot, sim ticks at 30Hz. GameStart deferred until all roster players connect.
+**Active work areas (April–May 2026):**
+- **KTX2 / Basis Universal texture pipeline** (PLAN-textures.md): every GPU texture (units, features, terrain, minimap) is now `.ktx2` (UASTC + Zstd). KTX2 transcoder URLs are pinned in `client/src/main.ts` lines 8–35 against intermittent CDN fallbacks.
+- **Build animation** (PLAN-build-anim.md): translucent build beams via `core/build-beam-renderer.ts` + per-tick build progress in `core/build-activity.ts`. Most subsystems landed; nano-spray polish ongoing.
+- **LuaUI Web Worker** (PLAN-widgets.md): `core/lua-widget-worker.ts` hosts Fengari Lua + OffscreenCanvas; `core/lua-widget-manager.ts` owns lifecycle on the main thread; `core/command-buffer.ts` transfers `gl.*` calls back to the renderer.
+- **Chili UI integration** (memory: `project_chili_rendering.md`): ortho/font/dlist fixes done, render test widget (`?widgetTest`) confirms gl bridge primitives. Post-DrawScreen still draws invisible — under investigation.
+- **Zero-K conversion** (PLAN-convert-zk.md): Phase A done — 197/236 gadgets boot, sim ticks at 30 Hz, commanders spawn from `start_unit_setup.lua`. Open: model multi-mesh polish, minimap orientation, full LuaUI parity.
 
-**Debugging infrastructure complete (PLAN-debugging-implementation.md, all 12 tiers):**
-- Unified logging (libspringlog) with console/file/network/SQLite sinks
-- Dedicated log server (spring-logserver) with ring buffer + SQLite + HTTP query API
+**Debugging infrastructure (complete; surface documented in [docs/debugging.md](docs/debugging.md)):**
+- Unified logging (`libspringlog`) with console/file/network/SQLite sinks
+- Dedicated `spring-logserver` (ring buffer + SQLite + HTTP query API + SSE live stream)
 - Browser debug console with log streaming, scope-aware command input, network inspector
 - Lua execution engine (LuaRules/LuaGaia/server scopes via ConsoleCommand)
 - Lua debugger with breakpoints, stack/locals inspection, step/continue
-- Spring.Debug/Warn/Assert/DumpTable/Inspect Lua API
+- `Spring.Debug` / `Warn` / `Assert` / `DumpTable` / `Inspect` Lua API
 - SQL query proxy, process management API, game session tracking
-- MCP server for Claude integration (tools/debug-mcp)
-- Pipe-based LobbyIpc removed, replaced by WebSocket + FlatBuffers
+- MCP server for Claude integration (`tools/debug-mcp`)
+
+**Not yet wired:** Web Audio voice pool (currently only synthesised sounds via `core/synth-sounds.ts`), server-side AI plugin runtime (skeleton in `Server/AI/` exists but plugins don't boot reliably), spectator mode, Glicko-2 ratings, persistent world layer.
