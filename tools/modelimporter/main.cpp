@@ -98,10 +98,14 @@ std::string ReplaceExtension(const std::string& path, const std::string& newExt)
     return path.substr(0, dot + 1) + newExt;
 }
 
-/// Walk every material in `scene` and replace each texture URI's extension
-/// with `newExt`. The aiMaterial property table stores texture filenames
-/// for each `aiTextureType_*` slot — we visit them all.
-void RewriteTextureExtensions(aiScene* scene, const std::string& newExt) {
+/// Walk every material in `scene` and rewrite each texture URI's
+/// extension to `newExt`, optionally prepending `prefix` so the URI
+/// resolves to a sibling directory rather than the model's own
+/// directory. Used by gameconverter to point game-unit GLB URIs at
+/// `../unittextures/<stem>.ktx2` while leaving feature-model URIs
+/// (which sit alongside their textures) as bare filenames.
+void RewriteTextureExtensions(aiScene* scene, const std::string& newExt,
+                              const std::string& prefix) {
     for (unsigned int m = 0; m < scene->mNumMaterials; ++m) {
         aiMaterial* mat = scene->mMaterials[m];
         for (unsigned int p = 0; p < mat->mNumProperties; ++p) {
@@ -116,7 +120,18 @@ void RewriteTextureExtensions(aiScene* scene, const std::string& newExt) {
             if (len + sizeof(uint32_t) + 1 > prop->mDataLength) continue;
             std::string current(prop->mData + sizeof(uint32_t), len);
 
-            const std::string updated = ReplaceExtension(current, newExt);
+            std::string updated = ReplaceExtension(current, newExt);
+            if (!prefix.empty()) {
+                // Strip any directory component the source filename
+                // already carried (S3O references are typically bare
+                // names but a few authored model files include a
+                // path) before prepending the desired prefix.
+                const auto slash = updated.find_last_of("/\\");
+                if (slash != std::string::npos) {
+                    updated = updated.substr(slash + 1);
+                }
+                updated = prefix + updated;
+            }
             if (updated == current) continue;
 
             // Re-encode and replace the in-place buffer (grow if needed).
@@ -152,7 +167,18 @@ const char* PickExporter(const std::string& outPath) {
 int main(int argc, char** argv) {
     springlog_init("modelimporter", SPRING_LOG_OUTPUT_CONSOLE);
 
-    std::string inPath, outPath, textureExt;
+    std::string inPath, outPath;
+    // KTX2 is the only texture format the runtime accepts; rewrite all
+    // glb-embedded URIs to point at sibling .ktx2 files unconditionally.
+    // The flag is kept so callers can be explicit, but it's a single
+    // legal value (passing anything else is rejected at parse time).
+    std::string textureExt = "ktx2";
+    // Optional path prefix prepended to every rewritten texture URI.
+    // gameconverter passes "../unittextures/" so unit-model GLBs
+    // resolve their textures from the canonical unittextures/ folder.
+    // FeatureProcessor passes nothing — feature GLBs and their
+    // textures sit in the same directory.
+    std::string texturePrefix;
     std::string logServerUrl;
     bool emitMeta = true;
     bool updateMeta = false;
@@ -166,6 +192,15 @@ int main(int argc, char** argv) {
             if (!textureExt.empty() && textureExt[0] == '.') {
                 textureExt.erase(0, 1);
             }
+            if (textureExt != "ktx2") {
+                SLOG(SPRING_LOG_ERROR,
+                    "--texture-ext only accepts 'ktx2' (got '%s')",
+                    textureExt.c_str());
+                springlog_shutdown();
+                return 2;
+            }
+        } else if (a == "--texture-prefix" && i + 1 < argc) {
+            texturePrefix = argv[++i];
         } else if (a == "--no-meta") {
             emitMeta = false;
         } else if (a == "--update-meta") {
@@ -367,7 +402,8 @@ int main(int argc, char** argv) {
         // The Importer owns the scene as a non-const aiScene under the hood;
         // for our use case (post-import rewrite before export) the const_cast
         // is safe and idiomatic in Assimp tooling.
-        RewriteTextureExtensions(const_cast<aiScene*>(scene), textureExt);
+        RewriteTextureExtensions(const_cast<aiScene*>(scene), textureExt,
+                                 texturePrefix);
     }
 
     Assimp::Exporter exporter;

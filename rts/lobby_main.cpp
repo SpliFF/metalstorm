@@ -425,7 +425,7 @@ int main(int argc, char* argv[])
                 "\"tilesX\":%d,\"tilesZ\":%d,\"numTiles\":%d,"
                 "\"maxPlayers\":%zu,\"startPositions\":%s,"
                 "\"hasLuaGaia\":%s,"
-                "\"minimapUrl\":\"/api/maps/data/%s/minimap.dxt1\"}",
+                "\"minimapUrl\":\"/api/maps/data/%s/minimap.ktx2\"}",
                 m.id.c_str(), m.name.c_str(), m.shortName.c_str(),
                 desc.c_str(), m.author.c_str(), m.version.c_str(),
                 m.mapx, m.mapy, m.widthElmos, m.heightElmos,
@@ -598,8 +598,8 @@ int main(int argc, char* argv[])
                 json += "]";
 
                 // URLs for binary data and source assets
-                json += ",\"minimapUrl\":\"/api/maps/data/" + m.id + "/minimap.dxt1\"";
-                json += ",\"tilesUrl\":\"/api/maps/data/" + m.id + "/tiles.dxt1\"";
+                json += ",\"minimapUrl\":\"/api/maps/data/" + m.id + "/minimap.ktx2\"";
+                json += ",\"tilesUrl\":\"/api/maps/data/" + m.id + "/tiles.ktx2\"";
                 json += ",\"mapDataUrl\":\"/api/maps/data/" + m.id + "\"";
                 json += ",\"mapSourceUrl\":\"/api/maps/data/" + m.id + "\"";
 
@@ -701,6 +701,8 @@ int main(int argc, char* argv[])
         else if (ext == ".json") ct = "application/json";
         else if (ext == ".png") ct = "image/png";
         else if (ext == ".jpg" || ext == ".jpeg") ct = "image/jpeg";
+        else if (ext == ".webp") ct = "image/webp";
+        else if (ext == ".ktx2") ct = "image/ktx2";
         else if (ext == ".dds") ct = "image/vnd-ms.dds";
         else if (ext == ".glb") ct = "model/gltf-binary";
         else if (ext == ".gltf") ct = "model/gltf+json";

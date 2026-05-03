@@ -413,7 +413,11 @@ bool MapProcessor::ExtractBinaryData(const MapMetadata& meta) {
         ok &= out.good();
     }
 
-    // Tile mip0 data from SMT
+    // Tile mip0 data from SMT — concatenated DXT1 blocks, then
+    // wrapped as a single KTX2 (BC1_RGB, no transcode) via the
+    // textureconverter --raw-dxt1 path. Each Spring tile is 32x32
+    // texels = 64 DXT1 blocks = 512 bytes; concatenated they form
+    // a (32 * smtNumTiles)x32 strip the client unpacks at load time.
     if (!meta.smtPath.empty()) {
         std::ifstream smt(meta.smtPath, std::ios::binary);
         smt.seekg(16); // skip magic
@@ -422,7 +426,8 @@ bool MapProcessor::ExtractBinaryData(const MapMetadata& meta) {
         smt.read(reinterpret_cast<char*>(&smtNumTiles), 4);
         smt.seekg(32); // tile data starts after 32-byte header
 
-        std::ofstream out(meta.processedDir + "/tiles.dxt1", std::ios::binary);
+        const std::string rawPath = meta.processedDir + "/tiles.raw";
+        std::ofstream out(rawPath, std::ios::binary);
         std::vector<char> tileBuf(TILE_MIP0_SIZE);
         for (int i = 0; i < smtNumTiles; i++) {
             smt.read(tileBuf.data(), TILE_MIP0_SIZE);
@@ -430,8 +435,48 @@ bool MapProcessor::ExtractBinaryData(const MapMetadata& meta) {
             smt.seekg(SMALL_TILE_SIZE - TILE_MIP0_SIZE, std::ios::cur);
         }
         ok &= out.good();
-        SLOG(SPRING_LOG_INFO, "extracted %d tile mip0s (%d bytes each)",
-            smtNumTiles, TILE_MIP0_SIZE);
+        out.close();
+
+        // The KTX2 holds one logical 32-row-tall image; width is
+        // `32 * smtNumTiles`. Both dims are multiples of 4 by
+        // construction so no padding is needed.
+        const int ktxW = 32 * smtNumTiles;
+        const int ktxH = 32;
+        const std::string ktxPath = meta.processedDir + "/tiles.ktx2";
+        char dimsBuf[32];
+        snprintf(dimsBuf, sizeof(dimsBuf), "%dx%d", ktxW, ktxH);
+        // --no-zstd keeps level 0 as a flat DXT1 block stream so the
+        // client can pull the raw blocks out of the KTX2 with a tiny
+        // header parser (no Zstd dep in the browser). Atlas
+        // compositing still happens client-side via compressedTexSubImage2D.
+        const std::string cmd =
+            std::string("\"") + TEXTURECONVERTER_BINARY_PATH + "\""
+            " --raw-dxt1 " + dimsBuf
+            + " --no-zstd"
+            + " \"" + rawPath + "\""
+            + " \"" + ktxPath + "\" 2>&1";
+        FILE* p = popen(cmd.c_str(), "r");
+        if (!p) {
+            SLOG(SPRING_LOG_ERROR, "tiles: popen(textureconverter) failed");
+            ok = false;
+        } else {
+            char readBuf[256];
+            std::string out2;
+            while (fgets(readBuf, sizeof(readBuf), p)) out2 += readBuf;
+            const int rc = pclose(p);
+            if (rc != 0) {
+                SLOG(SPRING_LOG_ERROR,
+                    "tiles: textureconverter --raw-dxt1 failed (rc=%d): %s",
+                    rc, out2.c_str());
+                ok = false;
+            }
+        }
+        // Drop the temporary raw block stream — the KTX2 supersedes it.
+        std::error_code rmEc;
+        std::filesystem::remove(rawPath, rmEc);
+
+        SLOG(SPRING_LOG_INFO, "extracted %d tile mip0s as %s",
+            smtNumTiles, ktxPath.c_str());
     }
 
     return ok;
@@ -442,10 +487,14 @@ bool MapProcessor::ExtractBinaryData(const MapMetadata& meta) {
 // ============================================================
 
 bool MapProcessor::ExtractMinimapWebP(const MapMetadata& meta) {
-    // textureconverter --smf-minimap extracts raw DXT1 data for the
-    // minimap (client loads via compressed texture) and a small PNG
-    // thumbnail for the lobby preview card.
-    const std::string fullPath = meta.processedDir + "/minimap.dxt1";
+    // textureconverter --smf-minimap pulls the 1024x1024 DXT1 minimap
+    // out of the SMF and wraps it as a KTX2 (BC1_RGB, no transcode).
+    // The lobby UI preview thumbnail is no longer produced here —
+    // browsers can't render KTX2 in <img>, so the lobby falls back to
+    // the engine's existing *minimap.png/jpg the map author shipped,
+    // or to no thumbnail at all. (Adding libwebp for a 30% smaller
+    // thumbnail is left as a follow-up.)
+    const std::string fullPath = meta.processedDir + "/minimap.ktx2";
     const std::string cmd =
         std::string("\"") + TEXTURECONVERTER_BINARY_PATH + "\""
         " --smf-minimap"
@@ -465,7 +514,7 @@ bool MapProcessor::ExtractMinimapWebP(const MapMetadata& meta) {
             rc, out.c_str());
         return false;
     }
-    SLOG(SPRING_LOG_INFO, "extracted minimap + thumbnail via textureconverter");
+    SLOG(SPRING_LOG_INFO, "extracted minimap as KTX2: %s", fullPath.c_str());
     return true;
 }
 
@@ -512,10 +561,10 @@ static std::string resolveTexturePath(const std::string& mapDir, const std::stri
 }
 
 bool MapProcessor::ExtractDecalTextures(MapMetadata& meta) {
-    // For each decal texture: resolve the source, then run through
-    // textureconverter with a stable output name. DDS files are
-    // copied as-is (GPU loads them directly), TGA/BMP are converted
-    // to PNG.
+    // For each decal texture: resolve the source, then run textureconverter
+    // to produce a `.ktx2` with a stable output name. textureconverter
+    // auto-routes DDS-as-blocks vs RGBA-encode internally; we just hand it
+    // the source path and the desired output.
     auto convertField = [&](std::string& field, const char* baseName) {
         if (field.empty()) return;
         std::string src = resolveTexturePath(meta.sourcePath, field);
@@ -525,14 +574,11 @@ bool MapProcessor::ExtractDecalTextures(MapMetadata& meta) {
             return;
         }
 
-        // Keep the source extension for the stable output name — DDS
-        // stays .dds, TGA becomes .png, etc.
-        std::string srcExt = fs::path(src).extension().string();
-        std::string dstExt = (srcExt == ".dds") ? ".dds" : ".png";
-        std::string dstName = std::string(baseName) + dstExt;
+        std::string dstName = std::string(baseName) + ".ktx2";
         std::string dstPath = meta.processedDir + "/" + dstName;
 
         std::string cmd = std::string("\"") + TEXTURECONVERTER_BINARY_PATH + "\""
+            " --encoding uastc"
             " \"" + src + "\" \"" + dstPath + "\" 2>&1";
         FILE* p = popen(cmd.c_str(), "r");
         if (!p) { field.clear(); return; }

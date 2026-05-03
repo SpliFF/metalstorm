@@ -126,6 +126,59 @@ export function buildTerrainMesh(
 }
 
 /**
+ * Pull the raw DXT1 block stream out of a `tiles.ktx2` file.
+ *
+ * `tiles.ktx2` is produced by mapconverter via `textureconverter
+ * --raw-dxt1 ... --no-zstd`, so it's a KTX2 wrapper around a single
+ * uncompressed BC1_RGB level. We only need the level-0 byte range.
+ *
+ * KTX2 layout we walk:
+ *   bytes  0..11   identifier
+ *   bytes 12..15   vkFormat
+ *   bytes 16..19   typeSize
+ *   bytes 20..23   pixelWidth
+ *   bytes 24..27   pixelHeight
+ *   bytes 28..31   pixelDepth
+ *   bytes 32..35   layerCount
+ *   bytes 36..39   faceCount
+ *   bytes 40..43   levelCount
+ *   bytes 44..47   supercompressionScheme
+ *   bytes 48..71   index entries (DFD/KVD/SGD offsets+lengths)
+ *   bytes 72..     levelIndex[levelCount]: each is 24 bytes
+ *                  (uint64 byteOffset, uint64 byteLength,
+ *                   uint64 uncompressedByteLength)
+ */
+function extractKtx2Level0(buf: ArrayBuffer): Uint8Array {
+    const dv = new DataView(buf);
+    // Magic bytes: «KTX 20»\r\n\x1a\n
+    const magic = [0xab, 0x4b, 0x54, 0x58, 0x20, 0x32, 0x30, 0xbb,
+                   0x0d, 0x0a, 0x1a, 0x0a];
+    for (let i = 0; i < magic.length; i++) {
+        if (dv.getUint8(i) !== magic[i]) {
+            throw new Error('not a KTX2 file');
+        }
+    }
+    const supercompression = dv.getUint32(44, true);
+    if (supercompression !== 0) {
+        throw new Error(
+            `tiles.ktx2 has supercompression=${supercompression}; ` +
+            `mapconverter must emit it with --no-zstd`,
+        );
+    }
+    // levelIndex starts at byte 80 (after the 12-byte identifier + 64-byte
+    // header + 4-byte alignment? — actually 0..71 + 72 starts at the
+    // level index). KTX2 is precise: the 4 trailing index pointers occupy
+    // bytes 48..79 (4 x { uint32 + uint32 } = 32 bytes for DFD/KVD, plus
+    // uint64 + uint64 for SGD = 16 bytes; sum 48). Pull that as variable.
+    // For our specific file (no DFD/KVD/SGD blocks of interest), the level
+    // index always starts at offset 80.
+    const lvlIdxBase = 80;
+    const byteOffset = Number(dv.getBigUint64(lvlIdxBase + 0, true));
+    const byteLength = Number(dv.getBigUint64(lvlIdxBase + 8, true));
+    return new Uint8Array(buf, byteOffset, byteLength);
+}
+
+/**
  * Cached tile data so multiple consumers (terrain, minimap) don't
  * refetch the same bytes.
  */
@@ -143,13 +196,13 @@ async function fetchTileData(mapBaseUrl: string): Promise<{
         entry = (async () => {
             const [tileIndexResp, tilesResp] = await Promise.all([
                 fetch(`${mapBaseUrl}/tileindex.bin`),
-                fetch(`${mapBaseUrl}/tiles.dxt1`),
+                fetch(`${mapBaseUrl}/tiles.ktx2`),
             ]);
             if (!tileIndexResp.ok || !tilesResp.ok) {
                 throw new Error('failed to fetch tile data');
             }
             const tileIndex = new Int32Array(await tileIndexResp.arrayBuffer());
-            const tilesData = new Uint8Array(await tilesResp.arrayBuffer());
+            const tilesData = extractKtx2Level0(await tilesResp.arrayBuffer());
             console.log(`[terrain] tile index: ${tileIndex.length} entries, ` +
                 `tiles: ${tilesData.length} bytes (${tilesData.length / TILE_DXT1_SIZE} tiles)`);
             return { tileIndex, tilesData };

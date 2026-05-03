@@ -22,10 +22,11 @@ import {
     Matrix,
     Quaternion,
 } from '@babylonjs/core';
+import { Texture } from '@babylonjs/core';
 import { EntityRenderer, type EntityMeta } from './entity-renderer.js';
 import { CommandBuffer, CMD } from './command-buffer.js';
 import type { Connection } from './connection.js';
-import { buildMapAtlasTexture, applyWebGLTexture, type MapDimensions } from './terrain.js';
+import type { MapDimensions } from './terrain.js';
 
 const TEAM_COLORS: [number, number, number][] = [
     [0.2, 0.53, 1.0],   // blue
@@ -148,11 +149,12 @@ export class Minimap {
     }
 
     /**
-     * Load the terrain atlas from the lobby and build the textured quad.
-     * The URL points to the lobby's /api/maps/data/{mapId} base so we can
-     * reuse the same DXT1 upload path as the main terrain.
+     * Load the minimap backdrop texture and build the textured quad.
+     * Uses the preprocessed `minimap.ktx2` (UASTC-encoded SMF minimap)
+     * — no per-tile atlas compositing needed for the minimap, since
+     * the standalone 1024x1024 image already covers the whole map.
      */
-    async loadBackground(mapBaseUrl: string, dims: MapDimensions): Promise<void> {
+    async loadBackground(mapBaseUrl: string, _dims: MapDimensions): Promise<void> {
         // mapBaseUrl looks like "http://host:port/api/maps/data/<mapId>".
         // We just need the last path component for the detached viewport
         // backdrop fetch.
@@ -161,32 +163,23 @@ export class Minimap {
         if (lastSlash >= 0) this.mapId = trimmed.substring(lastSlash + 1);
 
         try {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const gl = (this.engine as any)._gl as WebGL2RenderingContext;
-            if (!gl) throw new Error('no WebGL context');
-
-            const atlas = await buildMapAtlasTexture(gl, mapBaseUrl, dims);
-            if (!atlas) throw new Error('atlas build failed');
-
-            // Dispose any previous quad
             this.terrainQuad?.dispose();
 
-            // Create a quad covering the whole map in world space.
-            // Babylon's CreateGround gives us correct XZ orientation + UVs.
             const quad = MeshBuilder.CreateGround('minimapGround', {
                 width: this.mapWidth, height: this.mapHeight,
             }, this.scene);
             quad.position.x = this.mapWidth / 2;
             quad.position.z = this.mapHeight / 2;
-            applyWebGLTexture(this.scene, quad, atlas.webglTex, atlas.width, atlas.height);
-            // Force emissive so the unlit minimap still shows the texture.
-            const mat = quad.material as StandardMaterial;
-            if (mat) {
-                mat.emissiveTexture = mat.diffuseTexture;
-                mat.disableLighting = true;
-            }
+
+            const tex = new Texture(`${mapBaseUrl}/minimap.ktx2`, this.scene);
+            const mat = new StandardMaterial('minimapMat', this.scene);
+            mat.diffuseTexture = tex;
+            mat.emissiveTexture = tex;
+            mat.disableLighting = true;
+            quad.material = mat;
+
             this.terrainQuad = quad;
-            console.log('[minimap] terrain quad built');
+            console.log('[minimap] backdrop loaded from minimap.ktx2');
         } catch (e) {
             console.warn('[minimap] failed to load background:', e);
         }

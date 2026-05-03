@@ -17,6 +17,8 @@ import {
     Scene,
     MeshBuilder,
     StandardMaterial,
+    PBRMaterial,
+    Material,
     Color3,
     Mesh,
     Matrix,
@@ -84,23 +86,33 @@ function pickPrimaryMesh(meshes: import('@babylonjs/core').AbstractMesh[]): Mesh
     return null;
 }
 
-/// Apply the per-feature texture (already a `.png` from the server pipeline)
-/// to the loaded mesh's material. Loaded glb materials reference the same
-/// texture by relative URI but Babylon resolves it relative to the glb URL —
-/// since both are served from `/api/maps/data/{id}/features/`, this
-/// generally Just Works without an explicit override. We still attach an
-/// explicit Texture so we can guarantee correct sampling settings.
+/// Apply the per-feature texture (a `.ktx2` from the server pipeline)
+/// to the loaded mesh's material. Backface culling is disabled so
+/// single-quad foliage remains visible from both sides, matching
+/// Spring's renderer behaviour.
+///
+/// KTX2 alpha is well-defined — the encoder packs RGBA correctly and
+/// the transcoder hands it to the GPU intact, so the OPAQUE-mode PNG-
+/// cutout workaround the legacy pipeline needed is gone.
 function applyTexture(mesh: Mesh, def: MapFeatureDefInfo, scene: Scene) {
     if (!def.textureUrl) return;
     const mat = mesh.material;
-    if (!mat || !(mat instanceof StandardMaterial)) {
-        // glTF materials are PBRMaterial by default; the loader handles
-        // the baseColorTexture binding for us. Nothing to do here.
+    if (!mat) return;
+
+    const tex = new Texture(def.textureUrl, scene);
+
+    if (mat instanceof StandardMaterial) {
+        mat.diffuseTexture?.dispose();
+        mat.diffuseTexture = tex;
+    } else if (mat instanceof PBRMaterial) {
+        mat.albedoTexture?.dispose();
+        mat.albedoTexture = tex;
+    } else {
+        tex.dispose();
         return;
     }
-    const tex = new Texture(def.textureUrl, scene);
-    tex.hasAlpha = false;
-    mat.diffuseTexture = tex;
+
+    mat.backFaceCulling = false;
 }
 
 /// Build a placeholder box mesh + thin instances for a feature type

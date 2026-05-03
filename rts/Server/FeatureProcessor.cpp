@@ -486,14 +486,15 @@ void ConvertAssetsForDef(MapMetadata& meta, MapFeatureDef& def) {
     if (!texBasename.empty()) {
         const std::string srcTex = ResolveTexturePath(meta.sourcePath, texBasename);
         if (!srcTex.empty()) {
-            // Output filename: same stem, .png extension.
+            // Output filename: same stem, `.ktx2` extension.
             const std::string stem = fs::path(texBasename).stem().string();
-            convertedTextureName = stem + ".png";
+            convertedTextureName = stem + ".ktx2";
             const fs::path dstTex = featuresDir / convertedTextureName;
             // Skip if up-to-date.
             if (!fs::exists(dstTex) ||
                 fs::last_write_time(srcTex) > fs::last_write_time(dstTex)) {
                 std::string cmd = std::string("\"") + TEXTURECONVERTER_BINARY_PATH + "\""
+                                  " --encoding uastc"
                                   " \"" + srcTex + "\" \"" +
                                   dstTex.string() + "\" 2>&1";
                 if (RunCommand(cmd) != 0) {
@@ -507,16 +508,15 @@ void ConvertAssetsForDef(MapMetadata& meta, MapFeatureDef& def) {
     }
     def.textureFile = convertedTextureName;
 
-    // ---- Model: modelimporter src.s3o features/Name.glb [--texture-ext png] ----
+    // ---- Model: modelimporter src.s3o features/Name.glb ----
+    // modelimporter's --texture-ext defaults to ktx2 — every glb URI
+    // is rewritten unconditionally.
     const std::string stem = fs::path(srcModel).stem().string();
     const std::string dstName = stem + ".glb";
     const fs::path dst = featuresDir / dstName;
     if (!fs::exists(dst) ||
         fs::last_write_time(srcModel) > fs::last_write_time(dst)) {
         std::string cmd = std::string("\"") + MODELIMPORTER_BINARY_PATH + "\"";
-        if (!convertedTextureName.empty()) {
-            cmd += " --texture-ext png";
-        }
         cmd += " \"" + srcModel + "\" \"" + dst.string() + "\" 2>&1";
         if (RunCommand(cmd) != 0) {
             SLOG(SPRING_LOG_ERROR, "%s: modelimporter failed, no model",

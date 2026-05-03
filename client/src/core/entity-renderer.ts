@@ -33,8 +33,8 @@ import {
     Texture,
 } from '@babylonjs/core';
 import '@babylonjs/loaders/glTF/index.js';
-// Register DDS texture loader so Babylon can handle .dds files directly.
-import '@babylonjs/core/Materials/Textures/Loaders/ddsTextureLoader.js';
+// KTX2 loader is registered in main.ts (the app entry). All unit
+// textures resolve to `.ktx2` URIs after the texture pipeline migration.
 import type { EntityStateSnapshot } from './entity-state.js';
 import { EntityInterpolator } from './entity-interpolator.js';
 import type { UnitDefInfo } from './connection.js';
@@ -57,6 +57,20 @@ interface ModelConfig {
     /** parent[i] = parent index of piece i in canonical order (-1 for
      *  the model root). Walks the same JSON tree as `pieceNames`. */
     pieceParents?: number[];
+    /** Model-local axis-aligned bounding box minimum (Y is up). Used to
+     *  decide how much to shift the model so its visible base sits on
+     *  the ground. Sourced from the JSON sidecar; absent for Lua-only
+     *  configs. */
+    minY?: number;
+    /** Model-local axis-aligned bounding box maximum Y. */
+    maxY?: number;
+    /** Model-local "midpos" Y (Spring's authored visual centre). When
+     *  this sits well above origin the model was authored with origin
+     *  at its physical base (common for tall structures whose
+     *  foundations extend below origin and are meant to be hidden by
+     *  terrain). When it sits at/below origin the model uses centre-
+     *  origin and we should lift its base up to ground level. */
+    midY?: number;
 }
 
 /** Loaded texture set for a unit def. */
@@ -133,12 +147,23 @@ async function fetchModelConfig(modelUrl: string): Promise<ModelConfig | null> {
             typeof p?.parent === 'number' ? p.parent : -1);
     }
 
-    return { tex1, tex2, invertteamcolor, pieceNames, pieceParents };
+    // Bounding-box / midpos extents (only the Y component is used).
+    let minY: number | undefined;
+    let maxY: number | undefined;
+    let midY: number | undefined;
+    if (jsonData !== null) {
+        if (Array.isArray(jsonData.mins) && typeof jsonData.mins[1] === 'number') minY = jsonData.mins[1];
+        if (Array.isArray(jsonData.maxs) && typeof jsonData.maxs[1] === 'number') maxY = jsonData.maxs[1];
+        if (Array.isArray(jsonData.midpos) && typeof jsonData.midpos[1] === 'number') midY = jsonData.midpos[1];
+    }
+
+    return { tex1, tex2, invertteamcolor, pieceNames, pieceParents, minY, maxY, midY };
 }
 
 /**
- * Resolve a texture filename from a config (e.g. "strikecom.dds") to
+ * Resolve a texture filename from a config (e.g. "strikecom.ktx2") to
  * a full URL. Textures live in `unittextures/` alongside `models/`.
+ * Both directories are populated by gameconverter.
  */
 function resolveTextureUrl(modelUrl: string, textureName: string): string {
     const gameBase = modelUrl.substring(0, modelUrl.lastIndexOf('/models/'));
@@ -207,6 +232,11 @@ const TEAMCOLOR_FRAGMENT = `
     varying float vAboveGround;
 
     void main() {
+        // KTX2/Basis-encoded mip chains are clean — the LOD-bias and
+        // MAX_LEVEL hacks the previous DDS pipeline needed to dodge
+        // corrupt 1x1/2x2 mip levels in ZK's source DXT5 textures
+        // are gone. The transcoder rebuilds a fresh, well-formed
+        // chain at upload time.
         vec4 base = texture2D(diffuseTex, vUV);
         vec3 color = base.rgb;
 
@@ -222,24 +252,44 @@ const TEAMCOLOR_FRAGMENT = `
             color = mix(base.rgb, teamColor * base.rgb, mask);
         }
 
-        // Simple directional + ambient lighting
-        float NdotL = max(dot(vNormal, lightDir), 0.0);
-        vec3 lit = color * (0.4 + 0.6 * NdotL);
+        // Half-Lambert + hemispheric ambient. Plain N·L Lambert (with a
+        // flat ambient floor) leaves the side faces of tall, thin units
+        // — radar masts, the Lotus turret spire — sitting at the
+        // minimum 40% term whenever the camera is far enough away that
+        // their bright top face has shrunk to a few pixels. Half-Lambert
+        // shifts the diffuse range from [0..1] to [0.5..1] so dark
+        // sides keep some shape, and a small upward sky-tint lifts the
+        // floor for upward-facing surfaces without crushing downward
+        // ones. The combined output ranges roughly 0.55–1.05 so well-
+        // lit faces stay visibly brighter than poorly-lit ones.
+        float halfLambert = dot(vNormal, lightDir) * 0.5 + 0.5;
+        float skyTint     = vNormal.y * 0.5 + 0.5;
+        vec3  lit         = color * (0.45 + 0.55 * halfLambert + 0.05 * skyTint);
 
         // Nanoframe pass — only active during construction. Below the
-        // rising plane the model renders fully lit; above, it ghosts to
-        // a low-alpha wireframe-style silhouette. A bright scan band
-        // sits at the plane to sell the "construction in progress" look.
-        float alpha = 1.0;
+        // rising plane the model is fully lit; above it we cut a
+        // checkerboard stipple so the unfinished portion reads as
+        // "ghosted" without using alpha blending (which would force
+        // the whole material into Babylon's transparent pass and break
+        // depth ordering between pieces). A bright scan band sits at
+        // the plane to sell the "construction in progress" look.
         if (vBuildProgress < 1.0) {
             float planeY = vBuildProgress * max(modelHeight, 1.0);
-            float belowPlane = step(vAboveGround, planeY);
-            alpha = mix(0.15, 1.0, belowPlane);
+            if (vAboveGround > planeY) {
+                // Checkerboard discard — 50% coverage keeps the unit's
+                // silhouette readable from a distance while still
+                // looking visibly under-construction up close.
+                vec2 px = floor(gl_FragCoord.xy);
+                if (mod(px.x + px.y, 2.0) < 1.0) discard;
+                // Tint the surviving pixels toward the team color so
+                // the ghosted region looks like an active build site.
+                lit = mix(lit, teamColor * 0.7, 0.6);
+            }
             // 3-elmo-wide gaussian glow centred at the plane.
             float bandIntensity = exp(-pow((vAboveGround - planeY) / 2.0, 2.0)) * 1.5;
             lit += teamColor * bandIntensity;
         }
-        gl_FragColor = vec4(lit, alpha);
+        gl_FragColor = vec4(lit, 1.0);
     }
 `;
 
@@ -281,10 +331,15 @@ function createTeamColorMaterial(
         mat.setFloat('invertMask', 0.0);
     }
 
-    // Nanoframe ghost is alpha < 1; needs a transparent material so the
-    // wireframe silhouette doesn't punch the depth buffer or block
-    // anything behind it.
-    mat.alpha = 0.999;
+    // Keep the material fully opaque. The build-progress effect uses
+    // discard-based stipple in the fragment shader instead of alpha
+    // blending — alpha < 1 would push the material into Babylon's
+    // transparent pass, sort pieces back-to-front per camera, and
+    // skip depth writes, which produces the per-orbit "texture shift"
+    // artefacts we hit when this was set to 0.999.
+    mat.alpha = 1.0;
+    mat.needAlphaBlending = () => false;
+    mat.needAlphaTesting  = () => true;
 
     // Disable backface culling: modelimporter (Assimp + S3O) emits
     // glTF with CCW winding but Babylon's default is CW, so culling
@@ -297,7 +352,9 @@ function createTeamColorMaterial(
 
 /**
  * Load textures referenced by a model config. Returns the loaded
- * texture set, or null if no tex1 is configured.
+ * texture set, or null if no tex1 is configured. tex1/tex2 in the
+ * config are `.ktx2` filenames; Babylon's KTX2 loader transcodes
+ * Basis Universal payloads to a GPU-native format at upload time.
  */
 function loadUnitTextures(
     config: ModelConfig,
@@ -309,12 +366,14 @@ function loadUnitTextures(
     const tex1Url = resolveTextureUrl(modelUrl, config.tex1);
     const diffuse = new Texture(tex1Url, scene);
     diffuse.hasAlpha = false;
+    diffuse.anisotropicFilteringLevel = 8;
 
     let teamMask: Texture | null = null;
     if (config.tex2) {
         const tex2Url = resolveTextureUrl(modelUrl, config.tex2);
         teamMask = new Texture(tex2Url, scene);
         teamMask.hasAlpha = true;
+        teamMask.anisotropicFilteringLevel = 8;
     }
 
     return {
@@ -692,27 +751,52 @@ export class EntityRenderer {
                 return null;
             }
 
-            // Compute yOffset from rest-pose bounding boxes so the
-            // model's base sits at Y=0.
-            let minY = Infinity;
-            let maxY = -Infinity;
+            // Compute the model's vertical extent from the rest-pose
+            // bounding boxes. Used both to pick yOffset and to size the
+            // build-progress scan plane in the shader.
+            let bbMinY = Infinity;
+            let bbMaxY = -Infinity;
             for (const p of geometryPieces) {
-                // Transform the piece-local bounding box by its rest
-                // world matrix to get the actual Y extent.
                 p.mesh.refreshBoundingInfo();
                 const bb = p.mesh.getBoundingInfo().boundingBox;
-                // Transform min/max corners by the rest world matrix
                 const corners = [
                     Vector3.TransformCoordinates(bb.minimum, p.restWorldMatrix),
                     Vector3.TransformCoordinates(bb.maximum, p.restWorldMatrix),
                 ];
                 for (const c of corners) {
-                    if (c.y < minY) minY = c.y;
-                    if (c.y > maxY) maxY = c.y;
+                    if (c.y < bbMinY) bbMinY = c.y;
+                    if (c.y > bbMaxY) bbMaxY = c.y;
                 }
             }
-            const yOffset = -minY;
-            const modelHeight = Math.max(1, maxY - minY);
+            const modelHeight = Math.max(1, bbMaxY - bbMinY);
+
+            // Pick yOffset based on Spring's authored model conventions.
+            //
+            // Authors use one of two origin styles:
+            //   A. Origin at physical base (typical for tall structures —
+            //      windmills, radars, factories). Often these have parts
+            //      that extend BELOW origin (foundations) which the
+            //      original engine relies on terrain to occlude. midpos.y
+            //      sits well above origin (in the body of the structure).
+            //      → render with no shift; trust terrain to clip the
+            //         foundation.
+            //   B. Origin near the visual centre / waist (typical for
+            //      humanoid mechs and walking units). midpos.y sits
+            //      near zero or below. The model's "feet" live well
+            //      below origin and would sink into the ground if drawn
+            //      unshifted.
+            //      → shift up by -minY so the feet land at ground level.
+            //
+            // The midpos.y signal cleanly separates the two: structures
+            // have midpos high up in their body, mechs have it near the
+            // unit's centre-of-mass which is close to origin.
+            const minY = config?.minY ?? bbMinY;
+            const midY = config?.midY;
+            // 0.1 * modelHeight cleanly classifies the ZK examples
+            // (commander midpos≈-3 vs windmill midpos≈+17 vs radar
+            // midpos≈+21) and stays robust across model sizes.
+            const baseAtOrigin = midY !== undefined && midY > modelHeight * 0.1;
+            const yOffset = baseAtOrigin ? 0 : Math.max(0, -minY);
 
             // Load textures (sharing across all teams; team color is
             // applied per-team via the shader uniform).
@@ -864,7 +948,11 @@ export class EntityRenderer {
             new Vector3(-1e6, -1e6, -1e6),
             new Vector3(1e6, 1e6, 1e6),
         ));
-        mesh.renderingGroupId = 3;
+        // Ring sits in the same rendering group as units so depth
+        // testing hides the half that's behind the unit's geometry.
+        // Previously this was group 3 (drawn after units regardless of
+        // depth), which made the ring appear floating above the model.
+        mesh.renderingGroupId = 2;
         mesh.isVisible = false;
         this.selectionMesh = mesh;
         return mesh;

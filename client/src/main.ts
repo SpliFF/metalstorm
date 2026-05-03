@@ -5,6 +5,11 @@
  */
 
 import { Engine, Scene, FreeCamera, Mesh, MeshBuilder, StandardMaterial, Vector3, HemisphericLight, DirectionalLight, Color3, Color4 } from '@babylonjs/core';
+// Register the KTX2 / Basis Universal texture loader. After the
+// migration to KTX2 every GPU texture (unit + feature + terrain +
+// minimap) is `.ktx2`; the loader transcodes UASTC/ETC1S to whichever
+// compressed format the GPU prefers (BC7/ASTC/ETC2/BC3).
+import '@babylonjs/core/Materials/Textures/Loaders/ktxTextureLoader.js';
 import { EntityRenderer } from './core/entity-renderer.js';
 import { ProjectileRenderer } from './core/projectile-renderer.js';
 import { BuildBeamRenderer } from './core/build-beam-renderer.js';

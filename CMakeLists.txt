@@ -109,6 +109,35 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(flatbuffers)
 
+# === libktx (KTX2 + Basis Universal encoder/transcoder) ===
+# Reference implementation from KhronosGroup. Linked into the texture
+# preprocessing tools (textureconverter, mapconverter, gameconverter).
+# We disable KTX1, the CLI tools, tests, docs, and the GL/Vulkan upload
+# helpers — we only need the encoder + Basis Universal libraries.
+set(KTX_FEATURE_TOOLS    OFF CACHE BOOL "" FORCE)
+set(KTX_FEATURE_TESTS    OFF CACHE BOOL "" FORCE)
+set(KTX_FEATURE_DOC      OFF CACHE BOOL "" FORCE)
+# Keep KTX1 enabled — disabling it strips the
+# `ktxTexture1_constructFromStreamAndHeader` symbol that the shared
+# `texture.c` dispatcher still calls into. The encoder/decoder happily
+# round-trips KTX2 either way.
+set(KTX_FEATURE_KTX1     ON  CACHE BOOL "" FORCE)
+set(KTX_FEATURE_KTX2     ON  CACHE BOOL "" FORCE)
+set(KTX_FEATURE_VK_UPLOAD OFF CACHE BOOL "" FORCE)
+set(KTX_FEATURE_GL_UPLOAD OFF CACHE BOOL "" FORCE)
+set(KTX_FEATURE_STATIC_LIBRARY ON CACHE BOOL "" FORCE)
+set(KTX_FEATURE_LOADTEST_APPS "OFF" CACHE STRING "" FORCE)
+# Fetched as a tarball, not a git clone — KTX-Software's repo uses
+# git-lfs for the test fixtures, and a clone fails on machines without
+# the lfs filter installed. The tarball release excludes the LFS blobs
+# and gives us everything the encoder needs.
+FetchContent_Declare(
+    ktx
+    URL https://github.com/KhronosGroup/KTX-Software/archive/refs/tags/v4.3.2.tar.gz
+    URL_HASH SHA256=74a114f465442832152e955a2094274b446c7b2427c77b1964c85c173a52ea1f
+)
+FetchContent_MakeAvailable(ktx)
+
 # Generate C++ headers from .fbs schemas
 set(SCHEMA_DIR ${CMAKE_SOURCE_DIR}/schemas)
 set(GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)

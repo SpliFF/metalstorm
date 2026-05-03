@@ -421,7 +421,7 @@ inline std::vector<uint8_t> BuildMapListUpdate(const std::vector<MapMetadata>& m
         auto descOff = fbb.CreateString(m.description);
         auto authOff = fbb.CreateString(m.author);
         auto verOff  = fbb.CreateString(m.version);
-        std::string minimapUrl = "/api/maps/data/" + m.id + "/minimap.dxt1";
+        std::string minimapUrl = "/api/maps/data/" + m.id + "/minimap.ktx2";
         auto miniOff = fbb.CreateString(minimapUrl);
 
         std::vector<SpringWeb::MapStartPos> sps;
@@ -582,8 +582,8 @@ inline std::vector<uint8_t> BuildMapData(const MapMetadata& m) {
     auto waterOff = wb.Finish();
 
     // --- Texture URLs (lobby HTTP) ---
-    auto miniUrl = fbb.CreateString("/api/maps/data/" + m.id + "/minimap.dxt1");
-    auto tilesUrl = fbb.CreateString("/api/maps/data/" + m.id + "/tiles.dxt1");
+    auto miniUrl = fbb.CreateString("/api/maps/data/" + m.id + "/minimap.ktx2");
+    auto tilesUrl = fbb.CreateString("/api/maps/data/" + m.id + "/tiles.ktx2");
     auto baseUrl = fbb.CreateString("/api/maps/data/" + m.id);
     auto sourceUrl = fbb.CreateString("/api/maps/data/" + m.id);
 

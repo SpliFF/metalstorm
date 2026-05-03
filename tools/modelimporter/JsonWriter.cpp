@@ -290,15 +290,34 @@ bool JsonWriter::Write(const aiScene* scene, const std::string& outPath)
     // we find there. Hand-authored .config.lua files always win when
     // present (modelimporter skips emitting JSON in that case), so this
     // only affects machine-converted models.
+    //
+    // Filenames are rewritten to `.ktx2` here so the runtime always
+    // resolves a single canonical extension regardless of what the
+    // source archive happened to ship. The texture preprocessing
+    // pipeline (gameconverter -> textureconverter) produces `.ktx2`
+    // siblings for every referenced texture.
+    auto rewriteToKtx2 = [](std::string& name) {
+        if (name.empty()) return;
+        const auto dot = name.find_last_of('.');
+        const auto slash = name.find_last_of("/\\");
+        if (dot == std::string::npos ||
+            (slash != std::string::npos && dot < slash)) {
+            name += ".ktx2";
+        } else {
+            name = name.substr(0, dot) + ".ktx2";
+        }
+    };
     std::string tex1, tex2;
     if (scene->mNumMaterials > 0 && scene->mMaterials != nullptr) {
         const aiMaterial* mat = scene->mMaterials[0];
         aiString s;
         if (mat->GetTexture(aiTextureType_DIFFUSE, 0, &s) == AI_SUCCESS) {
             tex1.assign(s.C_Str(), s.length);
+            rewriteToKtx2(tex1);
         }
         if (mat->GetTexture(aiTextureType_SPECULAR, 0, &s) == AI_SUCCESS) {
             tex2.assign(s.C_Str(), s.length);
+            rewriteToKtx2(tex2);
         }
     }
 

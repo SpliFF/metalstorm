@@ -314,12 +314,12 @@ std::string ResolveTexturePath(const fs::path& dir, const std::string& basename)
     return {};
 }
 
-/// Locate a texture by its stem, scanning every web-unfriendly source
-/// extension a Spring archive might use. Order matters: DDS is by far
-/// the most common in modern games, the TGA path is the historical
-/// 3DO/S3O fallback, and the rest cover hand-authored variants we've
-/// seen in zk/. We also tolerate a sibling .png/.jpg/.webp because
-/// some authors pre-bake textures and just commit the converted files.
+/// Locate a texture by its stem, scanning every source extension a
+/// Spring archive might use. Order matters: DDS is by far the most
+/// common in modern games, TGA is the historical 3DO/S3O fallback,
+/// and the rest cover hand-authored variants. textureconverter
+/// accepts every one of these and produces a single canonical
+/// `.ktx2` output.
 ///
 /// As a final fallback we strip Assimp's `.NNN` disambiguation
 /// suffix (the importer appends `.001`, `.002` to duplicate texture
@@ -364,35 +364,18 @@ std::string ResolveTextureByStem(const fs::path& dir, const std::string& stem) {
     return {};
 }
 
-/// Detect DDS by reading the 4-byte magic. textureconverter has its
-/// own copy of this check internally but copies DDS *as-is* — for our
-/// browser-delivery use case we need to convert the file to PNG, so
-/// we have to detect DDS up front and route to a different tool.
-bool IsDdsFile(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f.is_open()) return false;
-    char magic[4];
-    f.read(magic, 4);
-    return f.gcount() == 4 && std::memcmp(magic, "DDS ", 4) == 0;
-}
-
-/// Convert a single texture to a web-deliverable PNG sibling of the
-/// glb. textureconverter handles TGA/BMP/JPG/PNG via stb_image, but
-/// it deliberately copies DDS as-is (Spring archives ship DXT-
-/// compressed textures the engine renderer used to consume directly).
-/// Browsers can't fetch a `.dds` URI from a glTF `images[].uri`, so
-/// for DDS sources we shell out to ImageMagick which decodes the
-/// DXT data and re-encodes as PNG. Both branches log on failure;
-/// caller is expected to drop the file from the model's texture set.
-bool ConvertTextureToPng(const std::string& srcPath,
-                         const std::string& dstPath,
-                         const fs::path& textureConverter) {
-    std::vector<std::string> argv;
-    if (IsDdsFile(srcPath)) {
-        argv = { "magick", srcPath, dstPath };
-    } else {
-        argv = { textureConverter.string(), srcPath, dstPath };
-    }
+/// Convert a single texture to a `.ktx2` sibling. textureconverter
+/// auto-detects the source format (DDS-as-blocks for BC1/BC3/BC4/BC5,
+/// stb_image -> UASTC for everything else) and writes a single
+/// canonical KTX2 output regardless of input format.
+bool ConvertTextureToKtx2(const std::string& srcPath,
+                          const std::string& dstPath,
+                          const fs::path& textureConverter) {
+    std::vector<std::string> argv = {
+        textureConverter.string(),
+        "--encoding", "uastc",
+        srcPath, dstPath,
+    };
     std::string out;
     if (!RunCommand(argv, out)) {
         SLOG(SPRING_LOG_WARNING,
@@ -451,38 +434,51 @@ std::vector<std::string> ExtractGlbImageUris(const fs::path& glbPath) {
 }
 
 /// Make sure every texture URI referenced by a freshly-written glb
-/// has a sibling .png in `outRoot`. modelimporter is invoked with
-/// `--texture-ext png` so the URIs already point at .png files;
-/// this step locates the actual source bitmap (DDS/TGA/...) in the
-/// game's unittextures/ directory and converts it. Cheap on re-runs
-/// because the per-URI early exit on existing files is a single
-/// stat() call.
+/// has a sibling `.ktx2` in `unittexturesOut`. modelimporter rewrites
+/// every glb image URI to `<stem>.ktx2`, but the URIs sit alongside
+/// the .glb in models/ (e.g. `../unittextures/foo.ktx2`); we follow
+/// each URI relative to the glb's directory and produce the file at
+/// the resolved path. Cheap on re-runs — the per-URI early exit is a
+/// single stat() call.
 void EnsureGlbTexturesAvailable(const fs::path& glbPath,
-                                const fs::path& unittexturesDir,
-                                const fs::path& outRoot,
+                                const fs::path& unittexturesSrc,
+                                const fs::path& unittexturesOut,
                                 const fs::path& textureConverter) {
-    if (unittexturesDir.empty()) return;
+    if (unittexturesSrc.empty()) return;
     const auto uris = ExtractGlbImageUris(glbPath);
+    std::error_code ec;
+    fs::create_directories(unittexturesOut, ec);
     for (const std::string& uri : uris) {
         // Skip data URIs (textures already embedded as base64 by
-        // some formats) and any URI that isn't a bare filename.
+        // some formats).
         if (uri.empty() || uri.find(':') != std::string::npos) continue;
-        if (uri.find('/') != std::string::npos ||
-            uri.find('\\') != std::string::npos) continue;
 
-        const fs::path target = outRoot / uri;
+        // Resolve URI relative to the glb's directory. modelimporter
+        // emits `../unittextures/<stem>.ktx2` for the conventional
+        // game layout; we use the resolved path verbatim so no second
+        // location ever has to track this convention.
+        const fs::path target = (glbPath.parent_path() / uri).lexically_normal();
         if (fs::exists(target)) continue;
+        if (target.extension() != ".ktx2") {
+            // Sanity check — modelimporter should have rewritten every
+            // URI to .ktx2. Anything else here is a bug we want to see.
+            SLOG(SPRING_LOG_WARNING,
+                "non-ktx2 URI '%s' in %s — skipping",
+                uri.c_str(), glbPath.filename().string().c_str());
+            continue;
+        }
 
-        const std::string stem = fs::path(uri).stem().string();
-        const std::string srcTex = ResolveTextureByStem(unittexturesDir, stem);
+        const std::string stem = target.stem().string();
+        const std::string srcTex = ResolveTextureByStem(unittexturesSrc, stem);
         if (srcTex.empty()) {
             SLOG(SPRING_LOG_WARNING,
                 "texture '%s' (referenced by %s) not found in %s",
                 uri.c_str(), glbPath.filename().string().c_str(),
-                unittexturesDir.string().c_str());
+                unittexturesSrc.string().c_str());
             continue;
         }
-        ConvertTextureToPng(srcTex, target.string(), textureConverter);
+        fs::create_directories(target.parent_path(), ec);
+        ConvertTextureToKtx2(srcTex, target.string(), textureConverter);
     }
 }
 
@@ -502,10 +498,10 @@ bool IsModelFile(const fs::path& p) {
 
 /// Walk every model file under `<gameDir>/objects3d/` and run
 /// modelimporter on it, writing the output under `<gameDir>/models/`.
-/// modelimporter is invoked with `--texture-ext png` so every glb
-/// references textures by `.png` URI; we then walk those URIs and
-/// convert each source bitmap (DDS/TGA/BMP/...) from unittextures/
-/// to a sibling .png next to the glb.
+/// modelimporter rewrites every texture URI in the emitted glb to
+/// `.ktx2` (the only legal value for `--texture-ext`); we then walk
+/// those URIs and produce a `.ktx2` sibling under `<gameDir>/unittextures/`
+/// for each one.
 int ConvertModels(const fs::path& gameDir, const std::string& gameId,
                   const fs::path& modelImporterBin, bool force) {
     const fs::path source = ResolveSubDir(gameDir, "objects3d");
@@ -515,11 +511,13 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
         return 0;
     }
 
-    const fs::path unittexturesDir = ResolveSubDir(gameDir, "unittextures");
-    const fs::path outRoot = gameDir / "models";
+    const fs::path unittexturesSrc = ResolveSubDir(gameDir, "unittextures");
+    const fs::path unittexturesOut = gameDir / "unittextures";
+    const fs::path modelsOut = gameDir / "models";
     const fs::path textureConverter = TEXTURECONVERTER_BINARY_PATH;
     std::error_code ec;
-    fs::create_directories(outRoot, ec);
+    fs::create_directories(modelsOut, ec);
+    fs::create_directories(unittexturesOut, ec);
 
     int converted = 0, skipped = 0, failed = 0;
     for (const auto& entry : fs::recursive_directory_iterator(source)) {
@@ -527,7 +525,7 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
         if (!IsModelFile(entry.path())) continue;
 
         const std::string stem = entry.path().stem().string();
-        const fs::path outPath = outRoot / (stem + ".glb");
+        const fs::path outPath = modelsOut / (stem + ".glb");
 
         // mtime check: skip if the output is newer than the source
         bool needsRebuild = true;
@@ -540,13 +538,18 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
         }
 
         if (needsRebuild) {
-            // `--texture-ext png` rewrites every texture URI in the
-            // resulting glb to `.png` regardless of the source format.
-            // The matching .png files are produced by
-            // EnsureGlbTexturesAvailable below.
+            // modelimporter defaults --texture-ext to `ktx2`; pass it
+            // explicitly anyway so a future change to the default is
+            // caught here rather than producing a glb with stale URIs.
+            // --texture-prefix points the URIs at ../unittextures/ so
+            // the same KTX2 file serves both the glb's glTF loader
+            // (which resolves URIs relative to the .glb) and the
+            // entity-renderer's tex1/tex2 loader (which always looks
+            // in unittextures/ for the canonical file).
             std::vector<std::string> argv = {
                 modelImporterBin.string(),
-                "--texture-ext", "png",
+                "--texture-ext", "ktx2",
+                "--texture-prefix", "../unittextures/",
                 entry.path().string(),
                 outPath.string(),
             };
@@ -563,8 +566,8 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
         }
 
         // Convert every texture the glb references. Cheap on re-runs
-        // (per-URI early skip when the .png already exists).
-        EnsureGlbTexturesAvailable(outPath, unittexturesDir, outRoot,
+        // (per-URI early skip when the .ktx2 already exists).
+        EnsureGlbTexturesAvailable(outPath, unittexturesSrc, unittexturesOut,
                                    textureConverter);
     }
 

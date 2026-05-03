@@ -1,19 +1,22 @@
-# textureconverter — convert textures for spring-web.
+# textureconverter — KTX2 producer for spring-web.
 #
-# Standalone CLI with no external dependencies beyond stb (header-only,
-# bundled). Replaces the ImageMagick `magick` dependency that was
-# previously shelled out to by mapconverter and gameconverter.
+# Reads DDS, TGA, PNG, JPG, BMP, or raw DXT1 block streams; writes
+# KTX2 (UASTC or ETC1S, optionally Zstd-supercompressed). Linked
+# against libktx (KhronosGroup/KTX-Software) for the encoder and
+# Basis Universal pipeline.
 #
-# Supports reading TGA, PNG, BMP, JPG (via stb_image) and DDS/DXT1
-# (custom decoder). Writes PNG via stb_image_write. Special
-# --smf-minimap mode for Spring map minimap extraction.
+# Source readers stay header-only (stb_image), so we do not pull
+# any image libraries beyond libktx itself. The previous role of
+# this tool — producing PNG copies of game textures and decoding
+# the SMF minimap to PNG — is gone; everything funnels through
+# KTX2 now.
 
 cmake_minimum_required(VERSION 3.25)
 
 add_executable(textureconverter
     main.cpp
 )
-target_link_libraries(textureconverter PRIVATE springlog)
+target_link_libraries(textureconverter PRIVATE springlog ktx)
 target_include_directories(textureconverter PRIVATE
     ${CMAKE_SOURCE_DIR}/rts
     ${CMAKE_CURRENT_SOURCE_DIR}
