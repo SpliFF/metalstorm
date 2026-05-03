@@ -126,9 +126,120 @@ enum : uint32_t {
     VK_FORMAT_R8G8B8A8_UNORM        = 37,
 };
 
-/// Wrap a DDS file as KTX2 by copying its block data into a fresh
-/// container. Mipmaps from the DDS, if any, come along for free.
-/// Returns true on success.
+// ---- DXT block decoders ----
+// We *decode* DDS to RGBA8 and then encode as UASTC instead of wrapping
+// the BC blocks directly. Babylon's KTX2 transcoder routes everything
+// through the BasisLZ ETC1S path on load, even for files with a
+// non-zero vkFormat — so a `WrapDdsAsKtx2` that produced a clean
+// vkFormat=137 (BC3) KTX2 still failed at runtime with
+// "Cannot convert 'undefined' to unsigned int" inside
+// BasisLzEtc1sImageTranscoder.decodePalettes. Re-encoding to UASTC
+// gives the transcoder a payload it actually knows how to handle.
+
+/// Decode one DXT1 block (8 bytes) → 4×4 RGBA pixels at `dst[stride*y+x*4]`.
+static void DecodeDxt1Block(const uint8_t* src, uint8_t* dst,
+                            int stride, bool dxt1Alpha) {
+    const uint16_t c0 = (uint16_t)(src[0] | (src[1] << 8));
+    const uint16_t c1 = (uint16_t)(src[2] | (src[3] << 8));
+    uint8_t pal[4][4];
+    auto unpack565 = [](uint16_t c, uint8_t* out) {
+        out[0] = (uint8_t)(((c >> 11) & 0x1f) * 255 / 31);
+        out[1] = (uint8_t)(((c >>  5) & 0x3f) * 255 / 63);
+        out[2] = (uint8_t)(( c        & 0x1f) * 255 / 31);
+        out[3] = 255;
+    };
+    unpack565(c0, pal[0]);
+    unpack565(c1, pal[1]);
+    if (c0 > c1 || !dxt1Alpha) {
+        for (int i = 0; i < 3; ++i) {
+            pal[2][i] = (uint8_t)((2 * pal[0][i] + pal[1][i]) / 3);
+            pal[3][i] = (uint8_t)((pal[0][i] + 2 * pal[1][i]) / 3);
+        }
+        pal[2][3] = pal[3][3] = 255;
+    } else {
+        for (int i = 0; i < 3; ++i)
+            pal[2][i] = (uint8_t)((pal[0][i] + pal[1][i]) / 2);
+        pal[2][3] = 255;
+        pal[3][0] = pal[3][1] = pal[3][2] = pal[3][3] = 0;
+    }
+    const uint32_t bits = (uint32_t)(src[4] | (src[5] << 8) |
+                                     (src[6] << 16) | (src[7] << 24));
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            const int idx = (bits >> (2 * (y * 4 + x))) & 3;
+            uint8_t* p = dst + y * stride + x * 4;
+            p[0] = pal[idx][0]; p[1] = pal[idx][1];
+            p[2] = pal[idx][2]; p[3] = pal[idx][3];
+        }
+    }
+}
+
+/// Decode one DXT5 alpha block (8 bytes) → alpha values into `dst[..+3]`.
+static void DecodeDxt5AlphaBlock(const uint8_t* src, uint8_t* dst, int stride) {
+    const uint8_t a0 = src[0], a1 = src[1];
+    uint8_t pal[8] = {a0, a1};
+    if (a0 > a1) {
+        for (int i = 1; i < 7; ++i)
+            pal[1 + i] = (uint8_t)(((7 - i) * a0 + i * a1) / 7);
+    } else {
+        for (int i = 1; i < 5; ++i)
+            pal[1 + i] = (uint8_t)(((5 - i) * a0 + i * a1) / 5);
+        pal[6] = 0;
+        pal[7] = 255;
+    }
+    uint64_t bits = 0;
+    for (int i = 0; i < 6; ++i) bits |= (uint64_t)src[2 + i] << (8 * i);
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            const int idx = (bits >> (3 * (y * 4 + x))) & 7;
+            dst[y * stride + x * 4 + 3] = pal[idx];
+        }
+    }
+}
+
+/// Decode an entire DXT1/3/5 block stream of dimensions w×h to RGBA8.
+static bool DecodeDxtToRgba(const uint8_t* src, size_t srcLen,
+                            int w, int h, int blockBytes, bool dxt1Alpha,
+                            bool isDxt5, std::vector<uint8_t>& outRgba) {
+    if (w <= 0 || h <= 0) return false;
+    const int blockRow = (w + 3) / 4;
+    const int blockCol = (h + 3) / 4;
+    const size_t expect = (size_t)blockRow * blockCol * blockBytes;
+    if (srcLen < expect) return false;
+    outRgba.assign((size_t)w * h * 4, 0);
+    const int stride = w * 4;
+    for (int by = 0; by < blockCol; ++by) {
+        for (int bx = 0; bx < blockRow; ++bx) {
+            const uint8_t* blk = src + (by * blockRow + bx) * blockBytes;
+            uint8_t* dstBase = outRgba.data() + by * 4 * stride + bx * 4 * 4;
+            if (blockBytes == 8) {
+                DecodeDxt1Block(blk, dstBase, stride, dxt1Alpha);
+            } else {
+                // 16-byte block: alpha first (8 bytes) then color (8).
+                if (isDxt5) {
+                    DecodeDxt5AlphaBlock(blk, dstBase, stride);
+                } else {
+                    // DXT3 alpha: 4-bit per pixel explicit alpha
+                    for (int y = 0; y < 4; ++y) {
+                        const uint16_t row = (uint16_t)(blk[y * 2] | (blk[y * 2 + 1] << 8));
+                        for (int x = 0; x < 4; ++x) {
+                            const int a4 = (row >> (4 * x)) & 0xf;
+                            dstBase[y * stride + x * 4 + 3] = (uint8_t)(a4 * 255 / 15);
+                        }
+                    }
+                }
+                DecodeDxt1Block(blk + 8, dstBase, stride, /*dxt1Alpha*/ false);
+            }
+        }
+    }
+    return true;
+}
+
+/// Convert a DDS file to KTX2 by decoding to RGBA8 and re-encoding via
+/// the Basis Universal UASTC encoder. The wrap-as-VkFormat path was
+/// removed because Babylon's KTX2 transcoder rejects non-Basis files
+/// (it always routes through BasisLzEtc1sImageTranscoder.decodePalettes
+/// which throws on unexpected payload metadata).
 static bool WrapDdsAsKtx2(const std::string& srcPath,
                           const std::string& dstPath,
                           bool zstd) {
@@ -144,43 +255,45 @@ static bool WrapDdsAsKtx2(const std::string& srcPath,
         return false;
     }
 
-    uint32_t vkFormat = 0;
-    int blockBytes = 0;
+    const uint8_t* body = dds.data() + sizeof(DdsHeader);
+    const size_t bodyLen = dds.size() - sizeof(DdsHeader);
+    std::vector<uint8_t> rgba;
+
     if (h.pixelFormat.fourCC == Fourcc("DXT1")) {
-        vkFormat = VK_FORMAT_BC1_RGB_UNORM_BLOCK; blockBytes = 8;
+        if (!DecodeDxtToRgba(body, bodyLen, h.width, h.height, 8,
+                             /*dxt1Alpha*/ true, false, rgba)) {
+            SLOG(SPRING_LOG_ERROR, "DXT1 decode failed: %s", srcPath.c_str());
+            return false;
+        }
     } else if (h.pixelFormat.fourCC == Fourcc("DXT3")) {
-        vkFormat = VK_FORMAT_BC2_UNORM_BLOCK;     blockBytes = 16;
+        if (!DecodeDxtToRgba(body, bodyLen, h.width, h.height, 16,
+                             false, /*isDxt5*/ false, rgba)) {
+            SLOG(SPRING_LOG_ERROR, "DXT3 decode failed: %s", srcPath.c_str());
+            return false;
+        }
     } else if (h.pixelFormat.fourCC == Fourcc("DXT5")) {
-        vkFormat = VK_FORMAT_BC3_UNORM_BLOCK;     blockBytes = 16;
-    } else if (h.pixelFormat.fourCC == Fourcc("BC4U") ||
-               h.pixelFormat.fourCC == Fourcc("ATI1")) {
-        vkFormat = VK_FORMAT_BC4_UNORM_BLOCK;     blockBytes = 8;
-    } else if (h.pixelFormat.fourCC == Fourcc("BC5U") ||
-               h.pixelFormat.fourCC == Fourcc("ATI2")) {
-        vkFormat = VK_FORMAT_BC5_UNORM_BLOCK;     blockBytes = 16;
+        if (!DecodeDxtToRgba(body, bodyLen, h.width, h.height, 16,
+                             false, /*isDxt5*/ true, rgba)) {
+            SLOG(SPRING_LOG_ERROR, "DXT5 decode failed: %s", srcPath.c_str());
+            return false;
+        }
     } else if (h.pixelFormat.fourCC == 0 && h.pixelFormat.rgbBitCount == 32) {
-        // Uncompressed 32-bit DDS — about 10% of ZK textures ship this
-        // way (Photoshop's "no compression" save mode). Decode the
-        // pixel payload according to the channel masks, then route
-        // through the encoder path so it lands as KTX2 UASTC like
-        // any other RGBA source. Early return — no ktxTexture has
-        // been created yet on this code path.
-        const uint8_t* pixels = dds.data() + sizeof(DdsHeader);
+        // Uncompressed 32-bit DDS (Photoshop "no compression" mode).
         const size_t expect = (size_t)h.width * h.height * 4;
-        if (pixels + expect > dds.data() + dds.size()) {
+        if (bodyLen < expect) {
             SLOG(SPRING_LOG_ERROR,
                 "DDS short read on RGBA payload: %s (%zu bytes wanted)",
                 srcPath.c_str(), expect);
             return false;
         }
-        std::vector<uint8_t> rgba(expect);
+        rgba.assign(expect, 0);
         const uint32_t rMask = h.pixelFormat.rMask;
         const uint32_t gMask = h.pixelFormat.gMask;
         const uint32_t bMask = h.pixelFormat.bMask;
         const uint32_t aMask = h.pixelFormat.aMask;
         auto shiftFor = [](uint32_t mask) {
-            int s = 0;
             if (mask == 0) return -1;
+            int s = 0;
             while (((mask >> s) & 1) == 0) s++;
             return s;
         };
@@ -190,90 +303,22 @@ static bool WrapDdsAsKtx2(const std::string& srcPath,
         const int aShift = shiftFor(aMask);
         for (size_t i = 0; i < (size_t)h.width * h.height; ++i) {
             uint32_t px;
-            std::memcpy(&px, pixels + i * 4, 4);
+            std::memcpy(&px, body + i * 4, 4);
             rgba[i * 4 + 0] = rShift >= 0 ? (uint8_t)((px & rMask) >> rShift) : 0;
             rgba[i * 4 + 1] = gShift >= 0 ? (uint8_t)((px & gMask) >> gShift) : 0;
             rgba[i * 4 + 2] = bShift >= 0 ? (uint8_t)((px & bMask) >> bShift) : 0;
             rgba[i * 4 + 3] = aShift >= 0 ? (uint8_t)((px & aMask) >> aShift) : 255;
         }
-        return EncodeRgba8AsKtx2(rgba.data(), (int)h.width, (int)h.height,
-                                 dstPath, Encoding::Uastc, /*genMips*/ false, zstd);
     } else {
         SLOG(SPRING_LOG_ERROR, "unsupported DDS fourCC for %s (0x%08x)",
             srcPath.c_str(), h.pixelFormat.fourCC);
         return false;
     }
 
-    const uint32_t mipCount = (h.mipMapCount > 0) ? h.mipMapCount : 1;
-
-    ktxTexture2* tex = nullptr;
-    ktxTextureCreateInfo ci{};
-    ci.vkFormat = vkFormat;
-    ci.baseWidth = h.width;
-    ci.baseHeight = h.height;
-    ci.baseDepth = 1;
-    ci.numDimensions = 2;
-    ci.numLevels = mipCount;
-    ci.numLayers = 1;
-    ci.numFaces = 1;
-    ci.isArray = KTX_FALSE;
-    ci.generateMipmaps = KTX_FALSE;
-
-    KTX_error_code rc = ktxTexture2_Create(
-        &ci, KTX_TEXTURE_CREATE_ALLOC_STORAGE, &tex);
-    if (rc != KTX_SUCCESS) {
-        SLOG(SPRING_LOG_ERROR, "ktxTexture2_Create failed: %s",
-            ktxErrorString(rc));
-        return false;
-    }
-
-    // Copy each mip level out of the DDS body into the KTX2 container.
-    const uint8_t* src = dds.data() + sizeof(DdsHeader);
-    const uint8_t* end = dds.data() + dds.size();
-    uint32_t w = h.width, hgt = h.height;
-    for (uint32_t lvl = 0; lvl < mipCount; ++lvl) {
-        const uint32_t bw = (w + 3) / 4;
-        const uint32_t bh = (hgt + 3) / 4;
-        const size_t bytes = static_cast<size_t>(bw) * bh * blockBytes;
-        if (src + bytes > end) {
-            SLOG(SPRING_LOG_ERROR,
-                "DDS short read on mip %u of %s (%zu bytes wanted)",
-                lvl, srcPath.c_str(), bytes);
-            ktxTexture_Destroy(ktxTexture(tex));
-            return false;
-        }
-        rc = ktxTexture_SetImageFromMemory(
-            ktxTexture(tex), lvl, 0, 0, src, bytes);
-        if (rc != KTX_SUCCESS) {
-            SLOG(SPRING_LOG_ERROR, "SetImageFromMemory failed: %s",
-                ktxErrorString(rc));
-            ktxTexture_Destroy(ktxTexture(tex));
-            return false;
-        }
-        src += bytes;
-        w = std::max(1u, w / 2);
-        hgt = std::max(1u, hgt / 2);
-    }
-
-    if (zstd) {
-        rc = ktxTexture2_DeflateZstd(tex, 18);
-        if (rc != KTX_SUCCESS) {
-            SLOG(SPRING_LOG_WARNING, "Zstd deflate failed: %s",
-                ktxErrorString(rc));
-        }
-    }
-
-    rc = ktxTexture_WriteToNamedFile(ktxTexture(tex), dstPath.c_str());
-    ktxTexture_Destroy(ktxTexture(tex));
-    if (rc != KTX_SUCCESS) {
-        SLOG(SPRING_LOG_ERROR, "ktxTexture_WriteToNamedFile failed: %s",
-            ktxErrorString(rc));
-        return false;
-    }
-    SLOG(SPRING_LOG_INFO, "DDS wrap: %s (%ux%u, %u mip%s) -> %s",
-        srcPath.c_str(), h.width, h.height, mipCount,
-        mipCount == 1 ? "" : "s", dstPath.c_str());
-    return true;
+    SLOG(SPRING_LOG_INFO, "DDS decode: %s (%ux%u) -> UASTC %s",
+        srcPath.c_str(), h.width, h.height, dstPath.c_str());
+    return EncodeRgba8AsKtx2(rgba.data(), (int)h.width, (int)h.height,
+                             dstPath, Encoding::Uastc, /*genMips*/ true, zstd);
 }
 
 // ============================================================
@@ -342,9 +387,20 @@ static bool WrapRawDxt1AsKtx2(const std::vector<uint8_t>& srcBytes,
 // RGBA-fallback branch in WrapDdsAsKtx2 can route through here.)
 
 /// Encode RGBA8 pixel data as a KTX2 with Basis Universal compression.
+/// Babylon's KTX2 transcoder only recognises two source formats — UASTC
+/// (colorModel=166) and ETC1S (colorModel=163, with SGD codebooks). Any
+/// other colorModel (RGBSDA, BC*) gets routed to the ETC1S path where
+/// it throws on the missing codebooks. So we MUST go through Basis.
+/// UASTC is high-quality and the encoder default.
 static bool EncodeRgba8AsKtx2(const uint8_t* rgba, int w, int h,
                               const std::string& dstPath,
                               Encoding enc, bool genMips, bool zstd) {
+    uint32_t levels = 1;
+    if (genMips) {
+        uint32_t dim = std::max(w, h);
+        while (dim > 1) { dim >>= 1; ++levels; }
+    }
+
     ktxTexture2* tex = nullptr;
     ktxTextureCreateInfo ci{};
     ci.vkFormat = VK_FORMAT_R8G8B8A8_UNORM;
@@ -352,27 +408,11 @@ static bool EncodeRgba8AsKtx2(const uint8_t* rgba, int w, int h,
     ci.baseHeight = (uint32_t)h;
     ci.baseDepth = 1;
     ci.numDimensions = 2;
-    // libktx generates mips during the SetImageFromMemory call when
-    // generateMipmaps is set; we still have to declare numLevels=1
-    // and let it grow. ktxTexture2_CompressBasisEx then walks every
-    // declared level.
-    ci.numLevels = 1;
+    ci.numLevels = levels;
     ci.numLayers = 1;
     ci.numFaces = 1;
     ci.isArray = KTX_FALSE;
-    ci.generateMipmaps = genMips ? KTX_TRUE : KTX_FALSE;
-
-    if (genMips) {
-        // Compute the mip count manually so SetImageFromMemory can fill
-        // mip 0 and we can let CompressBasisEx generate the rest. Mip
-        // generation in libktx requires the Vulkan upload subsystem
-        // (which we disabled), so we declare the level count up front
-        // and downsample ourselves on the encoder pass.
-        uint32_t levels = 1;
-        uint32_t dim = std::max(w, h);
-        while (dim > 1) { dim >>= 1; ++levels; }
-        ci.numLevels = levels;
-    }
+    ci.generateMipmaps = KTX_FALSE;
 
     KTX_error_code rc = ktxTexture2_Create(
         &ci, KTX_TEXTURE_CREATE_ALLOC_STORAGE, &tex);
@@ -385,25 +425,22 @@ static bool EncodeRgba8AsKtx2(const uint8_t* rgba, int w, int h,
     rc = ktxTexture_SetImageFromMemory(
         ktxTexture(tex), 0, 0, 0, rgba, (size_t)w * h * 4);
     if (rc != KTX_SUCCESS) {
-        SLOG(SPRING_LOG_ERROR, "SetImageFromMemory failed: %s",
+        SLOG(SPRING_LOG_ERROR, "SetImageFromMemory mip0 failed: %s",
             ktxErrorString(rc));
         ktxTexture_Destroy(ktxTexture(tex));
         return false;
     }
 
-    // Generate the mip chain ourselves with a simple 2x2 box filter.
-    // libktx 4.3 needs the levels populated before CompressBasisEx.
-    if (genMips && ci.numLevels > 1) {
+    if (levels > 1) {
         std::vector<uint8_t> prev(rgba, rgba + (size_t)w * h * 4);
         int cw = w, chgt = h;
-        for (uint32_t lvl = 1; lvl < ci.numLevels; ++lvl) {
+        for (uint32_t lvl = 1; lvl < levels; ++lvl) {
             const int nw = std::max(1, cw / 2);
             const int nh = std::max(1, chgt / 2);
             std::vector<uint8_t> next((size_t)nw * nh * 4);
             for (int y = 0; y < nh; ++y) {
                 for (int x = 0; x < nw; ++x) {
-                    const int x0 = x * 2;
-                    const int y0 = y * 2;
+                    const int x0 = x * 2, y0 = y * 2;
                     const int x1 = std::min(x0 + 1, cw - 1);
                     const int y1 = std::min(y0 + 1, chgt - 1);
                     for (int c = 0; c < 4; ++c) {
@@ -452,8 +489,8 @@ static bool EncodeRgba8AsKtx2(const uint8_t* rgba, int w, int h,
             ktxErrorString(rc));
         return false;
     }
-    SLOG(SPRING_LOG_INFO, "%s encode: %dx%d -> %s",
-        enc == Encoding::Uastc ? "UASTC" : "ETC1S", w, h, dstPath.c_str());
+    SLOG(SPRING_LOG_INFO, "%s encode: %dx%d (%u mips) -> %s",
+        enc == Encoding::Uastc ? "UASTC" : "ETC1S", w, h, levels, dstPath.c_str());
     return true;
 }
 
@@ -557,6 +594,11 @@ int main(int argc, char* argv[]) {
     std::string inputPath, outputPath;
     Encoding enc = Encoding::Uastc;
     bool genMips = false;
+    // Zstd supercompression is on by default — combined with UASTC it
+    // gives ~3× shrink versus uncompressed UASTC. The browser-side
+    // decoder needs an explicit URL for `zstddec.wasm`; we set that
+    // up via KhronosTextureContainer2.URLConfig in main.ts so the
+    // module loads reliably from the Babylon CDN.
     bool zstd = true;
     bool rawDxt1 = false;
     bool smfMinimap = false;
@@ -573,6 +615,8 @@ int main(int argc, char* argv[]) {
             genMips = true;
         } else if (a == "--no-zstd") {
             zstd = false;
+        } else if (a == "--zstd") {
+            zstd = true;
         } else if (a == "--raw-dxt1" && i + 1 < argc) {
             rawDxt1 = true;
             if (!ParseDims(argv[++i], rawW, rawH)) {

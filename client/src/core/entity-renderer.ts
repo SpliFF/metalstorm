@@ -162,12 +162,15 @@ async function fetchModelConfig(modelUrl: string): Promise<ModelConfig | null> {
 
 /**
  * Resolve a texture filename from a config (e.g. "strikecom.ktx2") to
- * a full URL. Textures live in `unittextures/` alongside `models/`.
- * Both directories are populated by gameconverter.
+ * a full URL. Textures live in `models/` alongside the .glb files —
+ * gameconverter writes them there so the glb's image URIs (which the
+ * glTF loader resolves relative to the .glb) point at sibling files.
+ * Babylon's glTF loader rejects URIs containing `..` per the glTF
+ * spec, which forced this layout.
  */
 function resolveTextureUrl(modelUrl: string, textureName: string): string {
-    const gameBase = modelUrl.substring(0, modelUrl.lastIndexOf('/models/'));
-    return `${gameBase}/unittextures/${textureName}`;
+    const lastSlash = modelUrl.lastIndexOf('/');
+    return `${modelUrl.substring(0, lastSlash + 1)}${textureName}`;
 }
 
 // ─── Team color shader ───

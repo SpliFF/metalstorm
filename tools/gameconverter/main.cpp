@@ -512,12 +512,10 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
     }
 
     const fs::path unittexturesSrc = ResolveSubDir(gameDir, "unittextures");
-    const fs::path unittexturesOut = gameDir / "unittextures";
     const fs::path modelsOut = gameDir / "models";
     const fs::path textureConverter = TEXTURECONVERTER_BINARY_PATH;
     std::error_code ec;
     fs::create_directories(modelsOut, ec);
-    fs::create_directories(unittexturesOut, ec);
 
     int converted = 0, skipped = 0, failed = 0;
     for (const auto& entry : fs::recursive_directory_iterator(source)) {
@@ -541,15 +539,12 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
             // modelimporter defaults --texture-ext to `ktx2`; pass it
             // explicitly anyway so a future change to the default is
             // caught here rather than producing a glb with stale URIs.
-            // --texture-prefix points the URIs at ../unittextures/ so
-            // the same KTX2 file serves both the glb's glTF loader
-            // (which resolves URIs relative to the .glb) and the
-            // entity-renderer's tex1/tex2 loader (which always looks
-            // in unittextures/ for the canonical file).
+            // No --texture-prefix: glb URIs stay as bare filenames so
+            // they resolve to siblings in models/. Babylon's glTF
+            // loader rejects URIs containing `..` per the glTF spec.
             std::vector<std::string> argv = {
                 modelImporterBin.string(),
                 "--texture-ext", "ktx2",
-                "--texture-prefix", "../unittextures/",
                 entry.path().string(),
                 outPath.string(),
             };
@@ -566,8 +561,11 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
         }
 
         // Convert every texture the glb references. Cheap on re-runs
-        // (per-URI early skip when the .ktx2 already exists).
-        EnsureGlbTexturesAvailable(outPath, unittexturesSrc, unittexturesOut,
+        // (per-URI early skip when the .ktx2 already exists). Output
+        // dir is models/ (sibling of the glb) — Babylon's glTF loader
+        // rejects URIs containing `..`, so glb URIs stay as bare
+        // filenames and resolve against models/.
+        EnsureGlbTexturesAvailable(outPath, unittexturesSrc, modelsOut,
                                    textureConverter);
     }
 
