@@ -948,6 +948,14 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         },
         GetUnitShieldState: () => null,
 
+        // Experience isn't streamed yet — return zeros so widgets like
+        // unit_rank_icons render the lowest rank instead of crashing on a
+        // nil-method call.
+        GetUnitExperience: (id: LuaValue) => {
+            if (!ls.units.has(Number(id))) return null;
+            return [0, 0];
+        },
+
         GetUnitHeading: (id: LuaValue) => {
             const u = ls.units.get(Number(id));
             if (!u) return null;

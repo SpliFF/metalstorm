@@ -659,7 +659,12 @@ bool CCustomExplosionGenerator::Load(CExplosionGeneratorHandler* handler, const 
 		const string& className = handler->GetProjectileClasses().ResolveAlias(spawnTable.GetString("class", spawnName));
 
 		if ((psi.spawnableID = CExpGenSpawnable::GetSpawnableID(className)) == -1u) {
-			LOG_L(L_WARNING, "[CCEG::%s] %s: unknown class \"%s\"", __func__, tag, className.c_str());
+			// Visual-only classes (CSimpleParticleSystem, CExploSpikeProjectile,
+			// CSpherePartSpawner, …) are unimplemented on the headless server
+			// — every game's CEGs reference them, so demote to debug to avoid
+			// spamming the log with expected misses. Real misconfiguration will
+			// still show up via the unknown-field warnings.
+			LOG_L(L_DEBUG, "[CCEG::%s] %s: unknown class \"%s\"", __func__, tag, className.c_str());
 			continue;
 		}
 
@@ -677,7 +682,10 @@ bool CCustomExplosionGenerator::Load(CExplosionGeneratorHandler* handler, const 
 			if (CExpGenSpawnable::GetSpawnableMemberInfo(className, memberInfo)) {
 				ParseExplosionCode(&psi, propIt.second, memberInfo, code);
 			} else {
-				LOG_L(L_WARNING, "[CCEG::%s] unknown field %s::%s in spawn-table \"%s\" for CEG \"%s\"", __func__, tag, propIt.first.c_str(), spawnName.c_str(), className.c_str());
+				// Same rationale as the unknown-class branch — most missing
+				// fields belong to visual-only classes the headless server
+				// doesn't ship. Demote so production logs stay readable.
+				LOG_L(L_DEBUG, "[CCEG::%s] unknown field %s::%s in spawn-table \"%s\" for CEG \"%s\"", __func__, tag, propIt.first.c_str(), spawnName.c_str(), className.c_str());
 			}
 		}
 

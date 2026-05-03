@@ -1169,6 +1169,43 @@ Spring.Utilities.TableToString = function(t) return tostring(t) end`;
         }
     }
 
+    // Patch LuaShader.lua: silence ShowError on Delete/Finalize when the
+    // shader never compiled. GL4 widgets like CAS routinely fail to compile
+    // on our WebGL2 bridge, then the widget cleanup calls casShader:Finalize()
+    // and LuaShader logs "Attempt to use invalid shader object in [Finalize]".
+    // The cleanup is a no-op when shaderObj is nil, so the warning is just
+    // noise. Patching the include preserves the strict behaviour of Activate /
+    // SetUniform (which still warn) so genuinely-buggy widgets are still
+    // surfaced.
+    const luaShaderPaths = [
+        'LuaUI/Widgets/Include/LuaShader.lua',
+        'LuaRules/Gadgets/Include/LuaShader.lua',
+    ];
+    for (const luaShaderPath of luaShaderPaths) {
+        const luaShaderSrc = vfsLookup(luaShaderPath);
+        if (!luaShaderSrc) continue;
+        const oldDelete =
+            'function LuaShader:Delete()\n' +
+            '\tif self.shaderObj ~= nil then\n' +
+            '\t\tgl.DeleteShader(self.shaderObj)\n' +
+            '\telse\n' +
+            '\t\tlocal funcName = (debug and debug.getinfo(1).name) or "UnknownFunction"\n' +
+            '\t\tself:ShowError(string.format("Attempt to use invalid shader object in [%s](). Did you call :Compile() or :Initialize()", funcName))\n' +
+            '\tend\n' +
+            'end';
+        const newDelete =
+            'function LuaShader:Delete()\n' +
+            '\tif self.shaderObj ~= nil then\n' +
+            '\t\tgl.DeleteShader(self.shaderObj)\n' +
+            '\t\tself.shaderObj = nil\n' +
+            '\tend\n' +
+            'end';
+        if (luaShaderSrc.includes(oldDelete)) {
+            vfsRegister(luaShaderPath, luaShaderSrc.replace(oldDelete, newDelete));
+            postLog(2, `[LuaUI] Patched ${luaShaderPath}: Delete is a no-op when never compiled`);
+        }
+    }
+
     // Patch object.lua: wrap Object:CallChildrenInverse with pcall so a
     // single buggy child Draw doesn't break iteration over its siblings.
     // Chili's original code calls `child[eventname](child, ...)` raw — if

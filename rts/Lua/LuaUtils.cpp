@@ -1593,7 +1593,7 @@ void DeprecationWarn(lua_State* L,
 		where = buf;
 	}
 
-	SLOG(SPRING_LOG_WARNING,
+	SLOG(SPRING_LOG_DEBUG,
 		"deprecated Lua 5.1 builtin `%s` used at %s: %s "
 		"(further uses will be silently shimmed)",
 		name, where.c_str(), advice);

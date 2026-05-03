@@ -63,6 +63,13 @@ export interface LuaVAOHandle {
         instanceCount: LuaValue,
     ): void;
     Delete(_self: LuaValue): void;
+    /** GL4 stubs — no-op for now. ZK's instancevbotable.lua attaches
+     *  vertex/instance/index buffers on every VAO it creates. */
+    DrawElements(..._args: LuaValue[]): LuaValue;
+    AttachVertexBuffer(..._args: LuaValue[]): LuaValue;
+    AttachInstanceBuffer(..._args: LuaValue[]): LuaValue;
+    AttachIndexBuffer(..._args: LuaValue[]): LuaValue;
+    ClearAttachedBuffers(..._args: LuaValue[]): LuaValue;
 }
 
 /** Textures bound by name — Spring's engine texture slots like "$heightmap". */
@@ -1665,6 +1672,12 @@ export class LuaGLBridge {
         gl.bindVertexArray(null);
         gl.bindBuffer(gl.ARRAY_BUFFER, null);
 
+        // GL4 attach methods (AttachVertexBuffer / AttachInstanceBuffer /
+        // AttachIndexBuffer) are no-ops here — we don't model real VBO
+        // bindings, but ZK's instancevbotable.lua wires these on every VAO it
+        // creates. Without the stubs the widget set fails to load with
+        // "attempt to call a nil value (method 'AttachVertexBuffer')".
+        const noopAttach = (..._args: LuaValue[]): LuaValue => null;
         return {
             __type: 'vao' as const,
             DrawArrays: (_self, mode, count, first, instanceCount) => {
@@ -1676,6 +1689,11 @@ export class LuaGLBridge {
                 gl.drawArraysInstanced(m, f, c, ic);
                 gl.bindVertexArray(null);
             },
+            DrawElements: noopAttach,
+            AttachVertexBuffer: noopAttach,
+            AttachInstanceBuffer: noopAttach,
+            AttachIndexBuffer: noopAttach,
+            ClearAttachedBuffers: noopAttach,
             Delete: (_self) => {
                 gl.deleteVertexArray(vao);
                 gl.deleteBuffer(dummy);

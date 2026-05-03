@@ -232,6 +232,11 @@ export async function renderMapFeatures(scene: Scene, map: ParsedMapData): Promi
                 results.push(primary);
                 modelTypes++;
             } catch (err) {
+                // Babylon raises "Scene has been disposed" when ImportMeshAsync
+                // is in-flight while the scene tears down (game exit / lobby
+                // restart). That isn't a content failure — swallow silently
+                // since the disposed scene won't show anything anyway.
+                if (scene.isDisposed) return;
                 console.warn(`[features] ${typeName}: failed to load ${def.modelUrl}, falling back to placeholder`, err);
                 results.push(renderPlaceholder(scene, typeName, instances));
                 placeholderTypes++;

@@ -729,6 +729,10 @@ export class EntityRenderer {
 
             return { pieces: orderedPieces, yOffset, modelHeight, textures };
         } catch (err) {
+            // Babylon raises "Scene has been disposed" when ImportMeshAsync
+            // is in-flight while the scene tears down (game exit / lobby
+            // restart). Not a content failure — drop silently.
+            if (this.scene.isDisposed) return null;
             console.warn(
                 `[entity-renderer] ${def.name}: failed to load ${def.modelUrl}`,
                 err,
