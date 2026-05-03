@@ -59,6 +59,23 @@ export interface SpringAPIContext {
      * absent, the call becomes a no-op.
      */
     sendLuaRulesMsg?(data: string): void;
+    /**
+     * Replace the player's current unit selection. Called by
+     * `Spring.SelectUnit` / `SelectUnitArray` / `SelectUnitMap` /
+     * `DeselectUnit`. The host wires this to InputManager so the
+     * highlight, minimap, and build menu all update. Optional — if
+     * absent, those Lua calls update only the worker-local
+     * `selectedUnitIds` and have no visible effect.
+     */
+    setSelection?(unitIds: number[]): void;
+    /**
+     * Move the player's camera to look at a world point. Called by
+     * `Spring.SetCameraTarget` and the position-only path of
+     * `Spring.SetCameraState`. `smoothness` is Spring's seconds-ish
+     * pacing hint; 0 (or undefined) means teleport. Y is ignored — the
+     * RTS camera maintains its own height. Optional.
+     */
+    setCameraTarget?(x: number, z: number, smoothness?: number): void;
 }
 
 /** Per-unit entry in the worker's unit store. */
@@ -296,6 +313,55 @@ function orderUnitIdsToArray(ids: LuaValue): number[] {
         return out;
     }
     return [];
+}
+
+/** Extract numeric unit ids from the keys of a Spring unit map (the
+ *  `{[unitID] = anything}` shape used by Spring.SelectUnitMap and
+ *  similar). Drops keys that aren't positive integers. */
+function mapKeysToUnitIds(unitMap: LuaValue): number[] {
+    if (unitMap == null || typeof unitMap !== 'object') return [];
+    const out: number[] = [];
+    // Lua sequences round-trip to JS arrays; treat their indexes as
+    // unit ids the same as orderUnitIdsToArray would.
+    if (Array.isArray(unitMap)) {
+        for (let i = 0; i < unitMap.length; i++) {
+            // Only include slots whose value is truthy — Spring's
+            // unitMap convention is `{[unitID] = true}`. A nil value
+            // means "not selected".
+            if (unitMap[i]) {
+                const id = i + 1; // sequence is 1-based in Lua
+                if (id > 0) out.push(id | 0);
+            }
+        }
+        return out;
+    }
+    for (const k of Object.keys(unitMap)) {
+        const v = (unitMap as Record<string, LuaValue>)[k];
+        if (!v) continue;
+        const n = Number(k);
+        if (Number.isFinite(n) && n > 0) out.push(n | 0);
+    }
+    return out;
+}
+
+/** Compute the new selection list for a Spring.Select* call and push it
+ *  to both the local LiveState mirror and the host (InputManager).
+ *  When `append` is true, ids are merged into the existing selection;
+ *  otherwise they replace it. Duplicates are stripped while preserving
+ *  insertion order (Spring's selection is order-stable). */
+function applySelection(ls: LiveState, ctx: SpringAPIContext, ids: number[], append: boolean): void {
+    const seen = new Set<number>();
+    const next: number[] = [];
+    if (append) {
+        for (const id of ls.selectedUnitIds) {
+            if (id > 0 && !seen.has(id)) { seen.add(id); next.push(id); }
+        }
+    }
+    for (const id of ids) {
+        if (id > 0 && !seen.has(id)) { seen.add(id); next.push(id); }
+    }
+    ls.selectedUnitIds = next;
+    ctx.setSelection?.(next.slice());
 }
 
 /** Convert a worker-side order queue into the array Spring widgets
@@ -1016,8 +1082,30 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
                 mode: 0,
             };
         },
-        SetCameraState: () => {},
-        SetCameraTarget: () => {},
+        // Spring.SetCameraState(state, smoothness) — partial implementation:
+        // we only handle the "move to (px,_,pz)" case, which is what ZK's
+        // SetCameraTargetBox / WG.COFC_SetCameraTarget fall back to. Other
+        // fields (rx, ry, height, mode, name) are no-ops; the RTS camera
+        // owns its own height and rotation.
+        SetCameraState: (state: LuaValue, smoothness: LuaValue) => {
+            if (state == null || typeof state !== 'object' || Array.isArray(state)) return;
+            const s = state as Record<string, LuaValue>;
+            const px = Number(s.px);
+            const pz = Number(s.pz);
+            if (!Number.isFinite(px) || !Number.isFinite(pz)) return;
+            ctx.setCameraTarget?.(px, pz, Number(smoothness) || 0);
+        },
+        // Spring.SetCameraTarget(x, y, z, smoothness) — focus the RTS
+        // camera on the (x,z) ground point. Y is ignored (the camera
+        // keeps its current height). smoothness <= 0 teleports; otherwise
+        // it's interpreted as a duration-seconds hint. ZK's core selector
+        // calls this with no smoothness for instant snap-to-commander.
+        SetCameraTarget: (x: LuaValue, _y: LuaValue, z: LuaValue, smoothness: LuaValue) => {
+            const cx = Number(x);
+            const cz = Number(z);
+            if (!Number.isFinite(cx) || !Number.isFinite(cz)) return;
+            ctx.setCameraTarget?.(cx, cz, Number(smoothness) || 0);
+        },
         GetCameraFOV: () => ls.camera.fov * (180 / Math.PI),
         GetCameraVectors: () => {
             const dx = ls.camera.tx - ls.camera.px;
@@ -1242,7 +1330,22 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             }
             return out;
         },
-        SelectUnitArray: () => {},
+        // Spring.SelectUnitArray(unitArray[, append]) — replace the player's
+        // selection with `unitArray`, or merge into it when append=true.
+        // An empty array clears the selection. Updates the worker-local
+        // mirror immediately so widgets observing GetSelectedUnits within
+        // the same call see the new state.
+        SelectUnitArray: (unitArray: LuaValue, append: LuaValue) => {
+            const ids = orderUnitIdsToArray(unitArray);
+            applySelection(ls, ctx, ids, !!append);
+        },
+        // Spring.SelectUnitMap(unitMap[, append]) — selects every unit whose
+        // id is a key in `unitMap`. ZK's gui_selection_hierarchy.lua calls
+        // this on every Core-Selector button click. The map values are
+        // ignored — keys carry the unit ids.
+        SelectUnitMap: (unitMap: LuaValue, append: LuaValue) => {
+            applySelection(ls, ctx, mapKeysToUnitIds(unitMap), !!append);
+        },
         SetUnitGroup: (unitId: LuaValue, groupId: LuaValue) => {
             const uid = Number(unitId);
             const gid = Number(groupId);
@@ -1419,8 +1522,23 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         FindUnitCmdDesc: () => null,
 
         // --- Selection commands ---
-        SelectUnit: () => {},
-        DeselectUnit: () => {},
+        // Spring.SelectUnit(unitID[, append]) — replace the selection with
+        // a single unit, or add it to the current selection. A nil/zero
+        // unitID clears the selection.
+        SelectUnit: (unitId: LuaValue, append: LuaValue) => {
+            const id = Number(unitId) | 0;
+            const ids = id > 0 ? [id] : [];
+            applySelection(ls, ctx, ids, !!append);
+        },
+        // Spring.DeselectUnit(unitID) — remove a single unit from the
+        // selection. No-op if it wasn't selected.
+        DeselectUnit: (unitId: LuaValue) => {
+            const id = Number(unitId) | 0;
+            if (id <= 0 || !ls.selectedUnitIds.includes(id)) return;
+            const next = ls.selectedUnitIds.filter(u => u !== id);
+            ls.selectedUnitIds = next;
+            ctx.setSelection?.(next.slice());
+        },
 
         // --- Unit queries that some widgets need ---
         GetUnitIsBuilding: () => null,

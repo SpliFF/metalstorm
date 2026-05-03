@@ -544,6 +544,18 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 }));
                 mgr.setRoster({ players: [...players, ...aiPlayers], teams });
             }
+            // Route widget-driven selection (Spring.SelectUnit and friends)
+            // through the InputManager so the highlight, minimap, and build
+            // menu update the same as a click-driven selection.
+            mgr.onSelectionRequest = (ids) => inputManager?.setSelectionFromWidget(ids);
+            // Route widget-driven camera moves (Spring.SetCameraTarget) to
+            // the RTS camera. Spring's smoothness is seconds-ish; cap at 2s
+            // and treat 0 as a teleport. Y is ignored — the RTS camera owns
+            // its own height.
+            mgr.onCameraTargetRequest = (x, z, smoothness) => {
+                const durationMs = smoothness > 0 ? Math.min(2000, smoothness * 1000) : 0;
+                rtsCamera.focusOn(x, z, durationMs);
+            };
             void mgr.initialize().then(() => {
                 console.log(`[client] widget manager ready`);
             }).catch(e => {
@@ -690,6 +702,13 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // it lazily — by the time the user clicks anything, the manager has
     // long since reported its first uiHover.
     inputManager.setUIHitTest(() => currentWidgetManager?.isCursorOverUI() ?? false);
+    rtsCamera.setUIHitTest(() => currentWidgetManager?.isCursorOverUI() ?? false);
+    // Right-click → ground-pivoted orbit lives in RTSCamera. A click
+    // without drag falls through here so we issue an order at the
+    // recorded mousedown screen point.
+    rtsCamera.onRightClickCommit = (x, y, mods) => {
+        inputManager?.issueOrderAtScreen(x, y, mods.shift);
+    };
 
     // Minimap (initial size — rebound on MapData arrival)
     {

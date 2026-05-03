@@ -123,6 +123,21 @@ export class InputManager {
         this.cancelBuildPlacement();
     }
 
+    /** Programmatic selection update — used by widgets calling
+     *  `Spring.SelectUnit*` through the LuaWidgetManager. Goes through
+     *  the same pipeline as a click: highlight, minimap, build menu, and
+     *  cancel-pending-build all run. Pass an empty array to clear. */
+    setSelectionFromWidget(ids: readonly number[]): void {
+        // Strip duplicates while preserving order — Spring's selection
+        // is order-stable and widgets sometimes pass the same id twice.
+        const seen = new Set<number>();
+        const next: number[] = [];
+        for (const id of ids) {
+            if (id > 0 && !seen.has(id)) { seen.add(id); next.push(id); }
+        }
+        this.setSelection(next);
+    }
+
     // ---- Build placement ----
 
     /**
@@ -254,10 +269,14 @@ export class InputManager {
     private setupPointerHandler(): void {
         this.scene.onPointerObservable.add((pointerInfo: PointerInfo) => {
             const evt = pointerInfo.event as PointerEvent;
+            // Right-mouse handling lives in RTSCamera (drag → orbit, click
+            // without drag → fires onRightClickCommit which the host wires
+            // to issueOrderAtScreen). RTSCamera's pointerdown listener
+            // runs in the capture phase and stopPropagations the right
+            // button, so the observable here never sees button 2.
             switch (pointerInfo.type) {
                 case PointerEventTypes.POINTERDOWN:
                     if (evt.button === 0) this.onLeftDown(evt);
-                    else if (evt.button === 2) this.onRightClick(evt);
                     break;
                 case PointerEventTypes.POINTERMOVE:
                     if (this.dragActive) this.onDragMove(evt);
@@ -269,7 +288,8 @@ export class InputManager {
         });
 
         // Suppress the browser context menu on the canvas so right-
-        // click can be used as an order.
+        // click can be used as an order or rotate-drag without the OS
+        // menu appearing on top of the game.
         const canvas = this.scene.getEngine().getRenderingCanvas();
         canvas?.addEventListener('contextmenu', (e) => e.preventDefault());
     }
@@ -398,7 +418,12 @@ export class InputManager {
 
     // ---- Right click orders ----
 
-    private onRightClick(evt: PointerEvent): void {
+    /** Issue a right-click order at the given screen pixel. Called by
+     *  RTSCamera's onRightClickCommit when a right-click ended without
+     *  crossing the rotate-drag threshold. The shift bit is forwarded
+     *  to the command queue so chained orders work the same as before
+     *  (when the order was issued directly on mousedown). */
+    issueOrderAtScreen(clientX: number, clientY: number, shift: boolean): void {
         // Right-click during build placement just cancels the placement.
         if (this.buildPlacement) {
             this.cancelBuildPlacement();
@@ -408,7 +433,7 @@ export class InputManager {
         // Right-click on UI cancels chili interaction (handled by widgetHandler);
         // don't also issue an order to whatever ground happens to be behind it.
         if (this.isOverUI()) return;
-        const groundPos = this.pickGroundAt(evt.clientX, evt.clientY);
+        const groundPos = this.pickGroundAt(clientX, clientY);
         if (!groundPos) return;
 
         // Any unit not in the current selection is a legitimate attack
@@ -430,15 +455,11 @@ export class InputManager {
             }
         }
 
+        const opts = shift ? 32 : 0;
         if (targetId >= 0) {
-            this.commandBuffer.issueImmediate(
-                CMD.ATTACK, this.selectedIds, [targetId],
-                evt.shiftKey ? 32 : 0);
+            this.commandBuffer.issueImmediate(CMD.ATTACK, this.selectedIds, [targetId], opts);
         } else {
-            this.commandBuffer.issueImmediate(
-                CMD.MOVE, this.selectedIds,
-                [groundPos.x, groundPos.y, groundPos.z],
-                evt.shiftKey ? 32 : 0);
+            this.commandBuffer.issueImmediate(CMD.MOVE, this.selectedIds, [groundPos.x, groundPos.y, groundPos.z], opts);
         }
     }
 

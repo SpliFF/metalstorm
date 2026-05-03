@@ -801,6 +801,12 @@ async function init(
         sendLuaRulesMsg: (data) => {
             postToMain({ type: 'sendLuaRulesMsg', data });
         },
+        setSelection: (unitIds) => {
+            postToMain({ type: 'setSelection', unitIds });
+        },
+        setCameraTarget: (x, z, smoothness) => {
+            postToMain({ type: 'setCameraTarget', x, z, smoothness });
+        },
     };
 
     // 4. Install engine globals

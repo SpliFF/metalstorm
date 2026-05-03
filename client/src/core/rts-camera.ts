@@ -7,6 +7,10 @@
  *   - Edge-scrolling          → pan when the mouse nears a screen edge
  *   - Middle-mouse + drag     → orbit the camera around its look-at point
  *                               (horizontal drag yaws, vertical drag tilts)
+ *   - Right-mouse + drag      → orbit around the *ground point under the
+ *                               cursor at drag start*. A right-click without
+ *                               drag falls through to onRightClickCommit so
+ *                               InputManager can issue an order.
  *
  * The camera keeps a fixed look-at target on the Y=0 plane. Pan moves both
  * the camera and look-at together; yaw/tilt rotate the camera around the
@@ -66,6 +70,30 @@ export class RTSCamera {
     private orbitDragging = false;
     private orbitLastX = 0;
     private orbitLastY = 0;
+
+    // Right-mouse orbit state. Pivot is the ground point under the cursor
+    // at mousedown — it stays fixed in world space for the entire drag.
+    // The drag is a click until we cross rightDragThresholdPx; that lets
+    // a right-tap fall through as an order via onRightClickCommit.
+    private rightDragging = false;
+    private rightLastX = 0;
+    private rightLastY = 0;
+    private rightStartX = 0;
+    private rightStartY = 0;
+    private rightStartShift = false;
+    private rightStartCtrl = false;
+    private rightStartAlt = false;
+    private rightCrossedThreshold = false;
+    private rightPivot = new Vector3();
+    private capturedRightPointerId = -1;
+    private readonly rightDragThresholdPx = 4;
+    /// Optional UI hover probe — when set and returning true at right-down
+    /// time, the right-click is left to the UI and no drag/order fires.
+    private isOverUI: () => boolean = () => false;
+    /// Fired on right-click WITHOUT drag, after pointer up. The host (main.ts)
+    /// wires this to InputManager so an order is issued at the click point.
+    onRightClickCommit?: (clientX: number, clientY: number,
+        mods: { shift: boolean; ctrl: boolean; alt: boolean }) => void;
     // Pitch is clamped so the camera never flattens past horizontal
     // (looking sideways is useless for an RTS) or tips right over the
     // top (which flips the view upside-down).
@@ -201,6 +229,100 @@ export class RTSCamera {
         window.removeEventListener('pointerup', this.onPointerUp);
     };
 
+    // Right-click drag: ground-pivoted orbit. We claim the event in the
+    // capture phase so InputManager's pointer observer never sees it; if
+    // the drag never crosses the click-vs-drag threshold, onPointerUp
+    // fires onRightClickCommit so the host can issue an order. If the
+    // cursor is over a chili UI element we leave the event alone so the
+    // widget can react (e.g. close a context menu).
+    private onRightDown = (e: PointerEvent): void => {
+        if (e.button !== 2) return;
+        if (this.isOverUI()) return;
+        e.preventDefault();
+        e.stopPropagation();
+
+        this.rightDragging = true;
+        this.rightCrossedThreshold = false;
+        this.rightStartX = e.clientX;
+        this.rightStartY = e.clientY;
+        this.rightLastX = e.clientX;
+        this.rightLastY = e.clientY;
+        this.rightStartShift = e.shiftKey;
+        this.rightStartCtrl = e.ctrlKey;
+        this.rightStartAlt = e.altKey;
+
+        // Pick the ground point under the cursor as the orbit pivot.
+        // Falls back to the current lookAt if the cursor is over the
+        // skybox (e.g. dragged off-map) so the rotation still works.
+        const ground = this.pickGroundAt(e.clientX, e.clientY);
+        this.rightPivot.copyFrom(ground ?? this.lookAt);
+
+        try {
+            this.canvas.setPointerCapture(e.pointerId);
+            this.capturedRightPointerId = e.pointerId;
+        } catch {
+            window.addEventListener('pointermove', this.onRightMove);
+            window.addEventListener('pointerup', this.onRightUp);
+            return;
+        }
+        this.canvas.addEventListener('pointermove', this.onRightMove);
+        this.canvas.addEventListener('pointerup', this.onRightUp);
+    };
+
+    private onRightMove = (e: PointerEvent): void => {
+        if (!this.rightDragging) return;
+        if (!this.rightCrossedThreshold) {
+            const tx = e.clientX - this.rightStartX;
+            const ty = e.clientY - this.rightStartY;
+            if (Math.hypot(tx, ty) < this.rightDragThresholdPx) return;
+            // Crossed the click-vs-drag threshold — commit to rotation.
+            this.rightCrossedThreshold = true;
+            // User is interacting; stop any animated transition.
+            this.transition = null;
+        }
+        const dx = e.clientX - this.rightLastX;
+        const dy = e.clientY - this.rightLastY;
+        this.rightLastX = e.clientX;
+        this.rightLastY = e.clientY;
+        if (dx !== 0 || dy !== 0) {
+            this.orbitAroundPivot(this.rightPivot, dx, dy);
+        }
+    };
+
+    private onRightUp = (e: PointerEvent): void => {
+        if (e.button !== 2) return;
+        const wasClick = this.rightDragging && !this.rightCrossedThreshold;
+        this.rightDragging = false;
+        if (this.capturedRightPointerId >= 0) {
+            try { this.canvas.releasePointerCapture(this.capturedRightPointerId); } catch { /* already released */ }
+            this.capturedRightPointerId = -1;
+        }
+        this.canvas.removeEventListener('pointermove', this.onRightMove);
+        this.canvas.removeEventListener('pointerup', this.onRightUp);
+        window.removeEventListener('pointermove', this.onRightMove);
+        window.removeEventListener('pointerup', this.onRightUp);
+
+        if (wasClick) {
+            this.onRightClickCommit?.(this.rightStartX, this.rightStartY, {
+                shift: this.rightStartShift,
+                ctrl: this.rightStartCtrl,
+                alt: this.rightStartAlt,
+            });
+        }
+    };
+
+    /// Ray-pick the visible terrain mesh under a screen pixel. Mirrors
+    /// InputManager.pickGroundAt — we duplicate it rather than reach into
+    /// InputManager so RTSCamera stays self-contained.
+    private pickGroundAt(clientX: number, clientY: number): Vector3 | null {
+        const rect = this.canvas.getBoundingClientRect();
+        const ox = clientX - rect.left;
+        const oy = clientY - rect.top;
+        const scene = this.camera.getScene();
+        const pick = scene.pick(ox, oy, (m) => m.name === 'terrain', false, this.camera);
+        return (pick?.hit && pick.pickedPoint) ? pick.pickedPoint : null;
+    }
+
     constructor(camera: FreeCamera, canvas: HTMLCanvasElement, config: RTSCameraConfig = {}) {
         this.camera = camera;
         this.canvas = canvas;
@@ -231,12 +353,22 @@ export class RTSCamera {
         // Pointerdown runs in the capture phase so it fires before any
         // other canvas-attached pointer listener (e.g. Babylon's scene
         // observable). That lets us stopPropagation on middle-button
-        // events without missing them ourselves.
+        // events without missing them ourselves. Same trick for the
+        // right-button drag handler — InputManager would otherwise see
+        // the down and dispatch an order on the spot.
         canvas.addEventListener('pointerdown', this.onPointerDown, { capture: true });
+        canvas.addEventListener('pointerdown', this.onRightDown, { capture: true });
         // Some browsers open an autoscroll marker on middle-click.
         // auxclick is the cleanest way to suppress it without also
         // breaking left/right click handling in InputManager.
         canvas.addEventListener('auxclick', this.onAuxClick);
+    }
+
+    /** Set the UI hover probe — used by right-click handling so a click
+     *  on a chili control falls through to the widget instead of starting
+     *  a camera rotation. Mirrors InputManager.setUIHitTest. */
+    setUIHitTest(probe: () => boolean): void {
+        this.isOverUI = probe;
     }
 
     // Swallow middle-button auxclicks on the canvas so the browser
@@ -493,6 +625,94 @@ export class RTSCamera {
     }
 
     /**
+     * Orbit the camera AND look-at together around an arbitrary world
+     * point. Used for right-mouse drag, where the pivot is the ground
+     * point under the cursor at drag-start so that point stays anchored
+     * in world space while the view swings around it.
+     *
+     * Same drag-direction conventions as orbitBy:
+     *   horizontal drag (dx) → yaw around world Y through pivot
+     *   vertical drag (dy)   → pitch around the horizontal axis (through
+     *                          pivot) perpendicular to the post-yaw view
+     *                          direction
+     *
+     * Pitch is clamped to [minPitch, maxPitch] in the lookAt frame, so
+     * the view never tips over the top or flattens past horizontal even
+     * when the pivot is far from screen centre.
+     */
+    private orbitAroundPivot(pivot: Vector3, dx: number, dy: number): void {
+        const yawAngle = -dx * this.orbitSpeed;
+
+        // ── Yaw: rigid rotation around world Y axis through pivot ──
+        const yawQ = Quaternion.RotationAxis(RTSCamera.UP, yawAngle);
+        const camTmp = new Vector3();
+        const lookTmp = new Vector3();
+        this.camera.position.rotateByQuaternionAroundPointToRef(yawQ, pivot, camTmp);
+        this.lookAt.rotateByQuaternionAroundPointToRef(yawQ, pivot, lookTmp);
+
+        // ── Pitch: clamp delta against the lookAt-frame pitch ──
+        const viewX = lookTmp.x - camTmp.x;
+        const viewY = lookTmp.y - camTmp.y;
+        const viewZ = lookTmp.z - camTmp.z;
+        const viewHoriz = Math.sqrt(viewX * viewX + viewZ * viewZ);
+
+        let camFinal = camTmp;
+        let lookFinal = lookTmp;
+
+        if (viewHoriz > 0.0001 && Math.abs(dy) > 0.0001) {
+            // pitch = angle of camera above lookAt, same convention as orbitBy
+            const camRelY = camTmp.y - lookTmp.y;
+            const currentPitch = Math.atan2(camRelY, viewHoriz);
+            let newPitch = currentPitch + dy * this.orbitSpeed;
+            if (newPitch < this.minPitchRad) newPitch = this.minPitchRad;
+            if (newPitch > this.maxPitchRad) newPitch = this.maxPitchRad;
+            const pitchDelta = newPitch - currentPitch;
+
+            if (Math.abs(pitchDelta) > 1e-6) {
+                // Pitch axis: horizontal vector perpendicular to view's
+                // horizontal projection, rotated 90° CCW from above. A
+                // positive rotation around this axis tilts the +Y end
+                // *toward* the view direction — i.e. lowers the camera
+                // toward the horizontal — so we negate to match the
+                // "drag down → more overhead" convention.
+                const ax = -viewZ / viewHoriz;
+                const az = viewX / viewHoriz;
+                const pitchAxis = new Vector3(ax, 0, az);
+                const pitchQ = Quaternion.RotationAxis(pitchAxis, -pitchDelta);
+                const camTmp2 = new Vector3();
+                const lookTmp2 = new Vector3();
+                camTmp.rotateByQuaternionAroundPointToRef(pitchQ, pivot, camTmp2);
+                lookTmp.rotateByQuaternionAroundPointToRef(pitchQ, pivot, lookTmp2);
+                camFinal = camTmp2;
+                lookFinal = lookTmp2;
+            }
+        }
+
+        // Defensive height clamp — pitch clamping handles the usual case,
+        // but if the pivot is elevated (or in the future, when lookAt
+        // isn't on Y=0), the camera could still pop out of bounds.
+        let cy = camFinal.y;
+        if (cy < this.minHeight) cy = this.minHeight;
+        else if (cy > this.maxHeight) cy = this.maxHeight;
+
+        this.camera.position.set(camFinal.x, cy, camFinal.z);
+        this.lookAt.copyFrom(lookFinal);
+        this.camera.setTarget(this.lookAt);
+        this.updateAxes();
+
+        // Keep targetDistance in sync so a follow-up wheel zoom doesn't
+        // snap to a stale value.
+        if (this.targetDistance >= 0) {
+            const dx2 = this.camera.position.x - this.lookAt.x;
+            const dy2 = this.camera.position.y - this.lookAt.y;
+            const dz2 = this.camera.position.z - this.lookAt.z;
+            this.targetDistance = Math.sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2);
+        }
+    }
+
+    private static readonly UP = new Vector3(0, 1, 0);
+
+    /**
      * Called when the camera is repositioned externally (e.g. when MapData
      * arrives and we centre on the map). Re-seeds the explicit look-at
      * point from the camera's current rotation and recomputes axes.
@@ -737,6 +957,7 @@ export class RTSCamera {
         this.canvas.removeEventListener('mousemove', this.onMouseMove);
         this.canvas.removeEventListener('mouseleave', this.onMouseLeave);
         this.canvas.removeEventListener('pointerdown', this.onPointerDown, { capture: true } as EventListenerOptions);
+        this.canvas.removeEventListener('pointerdown', this.onRightDown, { capture: true } as EventListenerOptions);
         this.canvas.removeEventListener('auxclick', this.onAuxClick);
         // Defensively detach any drag-time listeners in case the
         // camera is disposed mid-drag. These are registered on
@@ -752,6 +973,17 @@ export class RTSCamera {
                 this.capturedPointerId = -1;
             }
             this.orbitDragging = false;
+        }
+        if (this.rightDragging) {
+            this.canvas.removeEventListener('pointermove', this.onRightMove);
+            this.canvas.removeEventListener('pointerup', this.onRightUp);
+            window.removeEventListener('pointermove', this.onRightMove);
+            window.removeEventListener('pointerup', this.onRightUp);
+            if (this.capturedRightPointerId >= 0) {
+                try { this.canvas.releasePointerCapture(this.capturedRightPointerId); } catch { /* already released */ }
+                this.capturedRightPointerId = -1;
+            }
+            this.rightDragging = false;
         }
     }
 }

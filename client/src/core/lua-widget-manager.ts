@@ -99,6 +99,18 @@ export class LuaWidgetManager {
     /** Currently selected unit IDs (set from main thread) */
     private selectedUnitIds: number[] = [];
 
+    /** Fired when a widget called Spring.SelectUnit / SelectUnitArray /
+     *  SelectUnitMap / DeselectUnit. Main.ts wires this to InputManager so
+     *  the highlight, minimap, and build menu update. The full new
+     *  selection list is provided — appends are already resolved by the
+     *  worker against its mirror. */
+    onSelectionRequest?: (unitIds: number[]) => void;
+
+    /** Fired when a widget called Spring.SetCameraTarget (or the position
+     *  variant of SetCameraState). Main.ts wires this to RTSCamera.focusOn.
+     *  `smoothness` is Spring's seconds-ish pacing hint; 0 = teleport. */
+    onCameraTargetRequest?: (x: number, z: number, smoothness: number) => void;
+
     constructor(
         scene: Scene,
         camera: FreeCamera,
@@ -499,6 +511,8 @@ export class LuaWidgetManager {
             case 'worldGLCommands':summary = `worldGLCommands (${(msg.commands as unknown[])?.length ?? '?'} cmds)`; break;
             case 'giveOrder':      summary = `giveOrder cmd=${msg.cmdId} units=${(msg.unitIds as unknown[])?.length ?? 0} params=${(msg.params as unknown[])?.length ?? 0}`; break;
             case 'sendLuaRulesMsg': summary = `sendLuaRulesMsg (${(msg.data as string)?.length ?? 0} bytes)`; break;
+            case 'setSelection':   summary = `setSelection units=${(msg.unitIds as unknown[])?.length ?? 0}`; break;
+            case 'setCameraTarget': summary = `setCameraTarget x=${msg.x} z=${msg.z} smooth=${msg.smoothness}`; break;
             case 'uiHover':        summary = `uiHover above=${msg.above}`; break;
             case 'inputConsumed':  summary = `inputConsumed kind=${msg.kind} consumed=${msg.consumed}`; break;
         }
@@ -607,6 +621,30 @@ export class LuaWidgetManager {
                 const data = typeof msg.data === 'string' ? msg.data : '';
                 if (!data) break;
                 conn.sendLuaRulesMsg(data);
+                break;
+            }
+
+            case 'setSelection': {
+                // A widget called Spring.SelectUnit / SelectUnitArray / etc.
+                // The worker already updated its local mirror; route the new
+                // list to the host so InputManager and downstream UI sync up.
+                const ids = Array.isArray(msg.unitIds)
+                    ? (msg.unitIds as unknown[]).map(v => Number(v) | 0).filter(n => n > 0)
+                    : [];
+                // Mirror locally too so a stateUpdate that races in before
+                // main.ts pushes back the canonical list is consistent.
+                this.selectedUnitIds = ids;
+                this.onSelectionRequest?.(ids);
+                break;
+            }
+
+            case 'setCameraTarget': {
+                const x = Number(msg.x);
+                const z = Number(msg.z);
+                const smoothness = Number(msg.smoothness) || 0;
+                if (Number.isFinite(x) && Number.isFinite(z)) {
+                    this.onCameraTargetRequest?.(x, z, smoothness);
+                }
                 break;
             }
 
