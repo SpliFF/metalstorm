@@ -26,6 +26,7 @@ import { RTSCamera } from './core/rts-camera.js';
 import { LuaWidgetManager } from './core/lua-widget-manager.js';
 import { injectStyle, renderTemplate } from './ui/ui.js';
 import { debugConsole } from './core/debug-console.js';
+import { logIngest } from './core/log-ingest.js';
 import {
     getDefaultLobbyTemplates,
     loadGameLobbyTemplates,
@@ -772,6 +773,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     await fetchBuildStamp();
     createHUD();
     debugConsole.init();
+    // Capture window.onerror, unhandledrejection, console.error/warn and
+    // batch-POST them to the log server so every browser-side error is
+    // discoverable via spring-debug + the in-game console SSE stream.
+    logIngest.install();
 
     // Hide canvas until game starts
     const canvas = document.getElementById('game-canvas') as HTMLCanvasElement;

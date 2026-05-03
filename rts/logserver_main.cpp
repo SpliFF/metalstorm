@@ -19,6 +19,7 @@
 #include <deque>
 #include <unordered_map>
 #include <mutex>
+#include <chrono>
 
 #define LOG_SECTION "logserver"
 
@@ -151,20 +152,115 @@ static std::string QueryParam(const std::string& url, const std::string& key) {
     return "";
 }
 
-// --- Custom log sink that pushes to SSE subscribers ---
+// --- Custom log sink that pushes to LogBuffer + SSE subscribers ---
+//
+// Registered with springlog so every record routed through SpringLog (from
+// any process or via the /api/logs/ingest endpoint) lands in the in-memory
+// ring buffer for fast HTTP-GET queries AND streams via SSE for real-time
+// log delivery to the browser debug console.
 
-static void logSinkCallback(const char* section, int level,
-                              const char* fmt, va_list args) {
-    if (!g_server) return;
+static void logSinkCallback(const SpringLogRecord* rec, void* /*userdata*/) {
+    if (!g_server || !rec) return;
 
-    char msg[1024];
-    vsnprintf(msg, sizeof(msg), fmt, args);
+    BufferedLogEntry entry{};
+    entry.timestamp = rec->timestamp;
+    entry.level = rec->level;
+    entry.section = rec->section ? rec->section : "";
+    entry.scope = rec->scope ? rec->scope : "";
+    entry.process = rec->process ? rec->process : "";
+    entry.message = rec->message ? rec->message : "";
+    entry.frame = rec->frame;
+    g_logBuffer.Append(0, entry);
 
-    // Push to SSE subscribers as JSON
-    std::string json = "{\"level\":" + std::to_string(level)
-        + ",\"section\":\"" + JsonEscape(section ? section : "")
-        + "\",\"message\":\"" + JsonEscape(msg) + "\"}";
+    std::string json = "{\"level\":" + std::to_string(entry.level)
+        + ",\"section\":\"" + JsonEscape(entry.section)
+        + "\",\"scope\":\"" + JsonEscape(entry.scope)
+        + "\",\"process\":\"" + JsonEscape(entry.process)
+        + "\",\"frame\":" + std::to_string(entry.frame)
+        + ",\"message\":\"" + JsonEscape(entry.message) + "\"}";
     g_server->SendSSE(g_logStreamChannel, json, "log");
+}
+
+// --- JSON parsing (minimal — we only handle the ingest body shape) ---
+//
+// Returns the unescaped string value of a top-level "key" field, or the
+// empty string if not found. Stops at the first matching key. Escapes
+// recognised: \", \\, \n, \r, \t, \uXXXX (BMP only).
+static std::string JsonGetString(const std::string& body, const std::string& key) {
+    std::string needle = "\"" + key + "\"";
+    auto kpos = body.find(needle);
+    if (kpos == std::string::npos) return "";
+    auto cpos = body.find(':', kpos + needle.size());
+    if (cpos == std::string::npos) return "";
+    auto vstart = body.find('"', cpos + 1);
+    if (vstart == std::string::npos) return "";
+    vstart++;
+    std::string out;
+    for (size_t i = vstart; i < body.size(); i++) {
+        char c = body[i];
+        if (c == '\\' && i + 1 < body.size()) {
+            char esc = body[i + 1];
+            switch (esc) {
+                case '"':  out += '"';  i++; break;
+                case '\\': out += '\\'; i++; break;
+                case '/':  out += '/';  i++; break;
+                case 'n':  out += '\n'; i++; break;
+                case 'r':  out += '\r'; i++; break;
+                case 't':  out += '\t'; i++; break;
+                case 'b':  out += '\b'; i++; break;
+                case 'f':  out += '\f'; i++; break;
+                case 'u': {
+                    if (i + 5 < body.size()) {
+                        unsigned cp = 0;
+                        for (int k = 0; k < 4; k++) {
+                            char h = body[i + 2 + k];
+                            cp <<= 4;
+                            if (h >= '0' && h <= '9') cp |= h - '0';
+                            else if (h >= 'a' && h <= 'f') cp |= h - 'a' + 10;
+                            else if (h >= 'A' && h <= 'F') cp |= h - 'A' + 10;
+                        }
+                        if (cp < 0x80) out += (char)cp;
+                        else if (cp < 0x800) {
+                            out += (char)(0xC0 | (cp >> 6));
+                            out += (char)(0x80 | (cp & 0x3F));
+                        } else {
+                            out += (char)(0xE0 | (cp >> 12));
+                            out += (char)(0x80 | ((cp >> 6) & 0x3F));
+                            out += (char)(0x80 | (cp & 0x3F));
+                        }
+                        i += 5;
+                    }
+                    break;
+                }
+                default: out += esc; i++; break;
+            }
+        } else if (c == '"') {
+            return out;
+        } else {
+            out += c;
+        }
+    }
+    return out;
+}
+
+static int JsonGetInt(const std::string& body, const std::string& key, int def) {
+    std::string needle = "\"" + key + "\"";
+    auto kpos = body.find(needle);
+    if (kpos == std::string::npos) return def;
+    auto cpos = body.find(':', kpos + needle.size());
+    if (cpos == std::string::npos) return def;
+    size_t i = cpos + 1;
+    while (i < body.size() && (body[i] == ' ' || body[i] == '\t')) i++;
+    if (i >= body.size()) return def;
+    bool neg = false;
+    if (body[i] == '-') { neg = true; i++; }
+    if (i >= body.size() || body[i] < '0' || body[i] > '9') return def;
+    int v = 0;
+    while (i < body.size() && body[i] >= '0' && body[i] <= '9') {
+        v = v * 10 + (body[i] - '0');
+        i++;
+    }
+    return neg ? -v : v;
 }
 
 // --- Main ---
@@ -187,8 +283,14 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Init SQLite sink
+    // Init SQLite sink (writes log records to debug.db on a flush thread)
     springlog_sqlite_init(g_dbPath.c_str());
+
+    // Register the in-process ring-buffer + SSE fanout sink. Every record
+    // routed through SpringLog (including those POSTed to /api/logs/ingest)
+    // lands in g_logBuffer for fast HTTP queries and on the SSE stream so
+    // the in-game debug console sees it in real time.
+    springlog_add_sink(logSinkCallback, nullptr);
 
     // Create game_sessions table for post-mortem tracking
     {
@@ -385,6 +487,87 @@ int main(int argc, char** argv) {
         }
         return {.contentType = "application/json",
                 .body = {json.begin(), json.end()}, .status = 200};
+    });
+
+    // POST endpoint for client-side log ingestion. Browser code (the LuaUI
+    // worker, the chrome-devtools console wrapper, etc.) POSTs JSON entries
+    // here so they land in the same SQLite + ring buffer + SSE stream as
+    // server-side logs. The body is either a single entry object or
+    // {"entries":[...]}; each entry has level/section/scope/process/message.
+    //
+    // We parse with our own minimal JSON helper to avoid pulling in a full
+    // library — the schema is narrow and stable, and we already use a
+    // similar approach for test-event.
+    net.AddHttpPost("/api/logs/ingest", [](const std::string&, const std::string& body,
+                                            const HttpRequestHeaders&) -> HttpResponse {
+        // Locate either a top-level entry (no "entries" key) or each
+        // element in the entries array. We slice the array string and walk
+        // brace-balanced object substrings — the entries are flat, so a
+        // depth counter is sufficient.
+        auto ingestOne = [](const std::string& obj) {
+            int level = JsonGetInt(obj, "level", SPRING_LOG_NOTICE);
+            int frame = JsonGetInt(obj, "frame", 0);
+            std::string section = JsonGetString(obj, "section");
+            std::string scope = JsonGetString(obj, "scope");
+            std::string process = JsonGetString(obj, "process");
+            std::string message = JsonGetString(obj, "message");
+            if (section.empty()) section = "client";
+            if (process.empty()) process = "browser";
+
+            SpringLogRecord rec{};
+            rec.timestamp = (uint64_t)
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+            rec.level = level;
+            rec.section = section.c_str();
+            rec.scope = scope.c_str();
+            rec.process = process.c_str();
+            rec.frame = frame;
+            rec.message = message.c_str();
+            // springlog_emit preserves the caller-provided process tag and
+            // dispatches to every registered sink (console + SQLite + our
+            // ring-buffer/SSE sink) so the entry is discoverable via
+            // spring-debug, the SSE log stream, and the persisted DB.
+            springlog_emit(&rec);
+        };
+
+        size_t epos = body.find("\"entries\"");
+        if (epos != std::string::npos) {
+            auto arrStart = body.find('[', epos);
+            if (arrStart == std::string::npos) {
+                std::string err = "{\"ok\":false,\"error\":\"entries not array\"}";
+                return {.contentType = "application/json",
+                        .body = {err.begin(), err.end()}, .status = 400};
+            }
+            int depth = 0;
+            size_t objStart = std::string::npos;
+            int count = 0;
+            for (size_t i = arrStart + 1; i < body.size(); i++) {
+                char c = body[i];
+                if (c == '{') {
+                    if (depth == 0) objStart = i;
+                    depth++;
+                } else if (c == '}') {
+                    depth--;
+                    if (depth == 0 && objStart != std::string::npos) {
+                        ingestOne(body.substr(objStart, i - objStart + 1));
+                        objStart = std::string::npos;
+                        count++;
+                    }
+                } else if (c == ']' && depth == 0) {
+                    break;
+                }
+            }
+            std::string resp = "{\"ok\":true,\"count\":" + std::to_string(count) + "}";
+            return {.contentType = "application/json",
+                    .body = {resp.begin(), resp.end()}, .status = 200};
+        }
+
+        // Single-entry form
+        ingestOne(body);
+        std::string resp = "{\"ok\":true,\"count\":1}";
+        return {.contentType = "application/json",
+                .body = {resp.begin(), resp.end()}, .status = 200};
     });
 
     // POST endpoint for SSE testing — generates a synthetic log event

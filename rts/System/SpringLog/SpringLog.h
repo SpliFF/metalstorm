@@ -70,6 +70,12 @@ void springlog_log(int level, const char* section, const char* scope,
 void springlog_logv(int level, const char* section, const char* scope,
                     int frame, const char* fmt, va_list args);
 
+/// Dispatch a fully-formed record to every registered sink (and console/file
+/// outputs) without overriding `process`. Used when forwarding entries that
+/// originated elsewhere — e.g. browser logs ingested over HTTP — so the
+/// original process tag is preserved end-to-end.
+void springlog_emit(const SpringLogRecord* record);
+
 // --- Shutdown ---
 void springlog_shutdown(void);
 

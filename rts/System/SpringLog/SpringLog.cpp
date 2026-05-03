@@ -159,6 +159,44 @@ void springlog_logv(int level, const char* section, const char* scope,
     }
 }
 
+void springlog_emit(const SpringLogRecord* record) {
+    if (!record) return;
+    if (record->level < g_minLevel) return;
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    const char* section = record->section ? record->section : "";
+    const char* scope   = record->scope ? record->scope : "";
+    const char* process = record->process ? record->process : g_processName;
+    const char* message = record->message ? record->message : "";
+
+    if (g_outputs & SPRING_LOG_OUTPUT_CONSOLE) {
+        FILE* out = (record->level >= SPRING_LOG_ERROR) ? stderr : stdout;
+        if (scope[0]) {
+            fprintf(out, "[%s:%s:%s] %s\n", process, section, scope, message);
+        } else {
+            fprintf(out, "[%s:%s] %s\n", process, section, message);
+        }
+        fflush(out);
+    }
+
+    if ((g_outputs & SPRING_LOG_OUTPUT_FILE) && g_logFile) {
+        fprintf(g_logFile, "@L|%s|%s|%s|%d|%s\n",
+                LevelStr(record->level), section, scope, record->frame, message);
+        fflush(g_logFile);
+    }
+
+    SpringLogRecord rec = *record;
+    rec.section = section;
+    rec.scope = scope;
+    rec.process = process;
+    rec.message = message;
+
+    for (auto& s : g_sinks) {
+        if (s.active) s.fn(&rec, s.userdata);
+    }
+}
+
 void springlog_log(int level, const char* section, const char* scope,
                    int frame, const char* fmt, ...) {
     va_list args;
