@@ -832,13 +832,20 @@ async function executeTool(name, args) {
             if (!createResp.ok) return `Create room failed (${createResp.status}): ${await createResp.text()}`;
             const room = await createResp.json();
 
-            // Add AI on team 1 (host is on team 0).
+            // Add AI on team 1 (host is on team 0). The lobby reads
+            // `ai_id` (snake_case) — sending `aiId` was a silent no-op
+            // and the host ended up alone, which trips ZK's "no opposing
+            // ally" check inside the first 1.5s of game time.
             if (args.ai !== '' && args.ai !== undefined) {
                 const aiId = args.ai || 'null';
-                await fetch(`${LOBBY_URL}/api/rooms/ai/add`, {
+                const r = await fetch(`${LOBBY_URL}/api/rooms/ai/add`, {
                     method: 'POST', headers: authHdr,
-                    body: JSON.stringify({ roomId: room.id, aiId, team: 1 }),
-                }).catch(() => {});
+                    body: JSON.stringify({ ai_id: aiId, team: 1, name: aiId }),
+                });
+                if (!r.ok) {
+                    const txt = await r.text().catch(() => '');
+                    return `AI add failed (${r.status}): ${txt}`;
+                }
             }
 
             // Mark host ready then start.

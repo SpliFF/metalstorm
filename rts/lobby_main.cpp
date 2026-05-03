@@ -20,6 +20,7 @@
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogSqlite.h"
 #include <cctype>
+#include <set>
 
 #include <sqlite3.h>
 
@@ -1221,6 +1222,39 @@ int main(int argc, char* argv[])
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
+
+        // Auto-add a Null AI if every participant ends up on the same
+        // team. Without an opposing ally, ZK's game_over.lua trips its
+        // "no opposing team" check ~1.5s in (gadget runs every 45
+        // frames) and the host gets a Game Over before they can build.
+        // The Null AI is engine-provided (content/engine/ai/null) and
+        // owns its team without issuing orders, so this is invisible to
+        // anyone who *did* set up an opponent and only kicks in for a
+        // genuinely-solo room.
+        {
+            std::set<uint8_t> teams;
+            for (const auto& p : room->players) {
+                if (!p.isSpectator) teams.insert(p.team);
+            }
+            for (const auto& a : room->aiSlots) teams.insert(a.team);
+            if (teams.size() <= 1) {
+                uint8_t hostTeam = 0;
+                for (const auto& p : room->players) {
+                    if (p.playerId == room->hostPlayerId) { hostTeam = p.team; break; }
+                }
+                const uint8_t aiTeam = (hostTeam == 0) ? 1 : 0;
+                if (rooms.AddAISlot(room->id, static_cast<uint32_t>(userId),
+                                    "null", "Null AI", aiTeam)) {
+                    SLOG(SPRING_LOG_NOTICE,
+                        "room %u: solo start detected — auto-added Null AI on team %u",
+                        room->id, static_cast<unsigned>(aiTeam));
+                } else {
+                    SLOG(SPRING_LOG_WARNING,
+                        "room %u: solo start but auto-AddAISlot failed", room->id);
+                }
+            }
+        }
+
         if (!rooms.StartGame(room->id, static_cast<uint32_t>(userId)))
             return HttpAuth::JsonResponse(400, R"({"error":"cannot start game"})");
 
