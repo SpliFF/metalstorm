@@ -48,6 +48,7 @@ import { ServerClock } from './clock.js';
 import { parseEntityState, type EntityStateSnapshot } from './entity-state.js';
 import { parseProjectileState, type ProjectileStateSnapshot } from './projectile-state.js';
 import { parsePieceState, type PieceStateSnapshot } from './piece-state.js';
+import { parseBuildActivity, type BuildActivitySnapshot } from './build-activity.js';
 import { parseMapData, type ParsedMapData } from './map-data.js';
 
 const ENVELOPE_FLATBUFFERS = 0x01;
@@ -55,6 +56,7 @@ const ENVELOPE_ENTITY_STATE_FULL = 0x02;
 const ENVELOPE_ENTITY_STATE_DELTA = 0x03;
 const ENVELOPE_PROJECTILE_STATE = 0x04;
 const ENVELOPE_PIECE_STATE = 0x05;
+const ENVELOPE_BUILD_ACTIVITY = 0x06;
 export type ConnectionState = 'disconnected' | 'connecting' | 'handshake' | 'authenticating' | 'connected';
 
 export interface CombatEventInfo {
@@ -251,6 +253,7 @@ export interface ConnectionEvents {
     onUnitCmdDescs?: (units: UnitCmdDescsInfo[]) => void;
     onProjectileState?: (snapshot: ProjectileStateSnapshot) => void;
     onPieceState?: (snapshot: PieceStateSnapshot) => void;
+    onBuildActivity?: (snapshot: BuildActivitySnapshot) => void;
     onResourceUpdate?: (info: ResourceUpdateInfo) => void;
     onGameInfo?: (frame: number, speed: number, paused: boolean,
                   wind?: { x: number; y: number; z: number; strength: number; tidal: number }) => void;
@@ -668,6 +671,13 @@ export class Connection {
             const snapshot = parsePieceState(data.subarray(1));
             if (snapshot) {
                 this.events.onPieceState?.(snapshot);
+            }
+            return;
+        }
+        if (envelope === ENVELOPE_BUILD_ACTIVITY) {
+            const snapshot = parseBuildActivity(data.subarray(1));
+            if (snapshot) {
+                this.events.onBuildActivity?.(snapshot);
             }
             return;
         }

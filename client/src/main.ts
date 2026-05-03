@@ -7,6 +7,7 @@
 import { Engine, Scene, FreeCamera, Mesh, MeshBuilder, StandardMaterial, Vector3, HemisphericLight, DirectionalLight, Color3, Color4 } from '@babylonjs/core';
 import { EntityRenderer } from './core/entity-renderer.js';
 import { ProjectileRenderer } from './core/projectile-renderer.js';
+import { BuildBeamRenderer } from './core/build-beam-renderer.js';
 import { DefCache } from './core/def-cache.js';
 import { CombatFX } from './core/combat-fx.js';
 import { AudioManager } from './core/audio.js';
@@ -43,6 +44,7 @@ let gameTemplates: GameTemplates = getDefaultGameTemplates();
 let engine: Engine | null = null;
 let entityRenderer: EntityRenderer | null = null;
 let projectileRenderer: ProjectileRenderer | null = null;
+let buildBeamRenderer: BuildBeamRenderer | null = null;
 let combatFX: CombatFX | null = null;
 let audioManager: AudioManager | null = null;
 let inputManager: InputManager | null = null;
@@ -181,6 +183,8 @@ function quitToLobby(): void {
     delete (window as any).camera;
     entityRenderer = null;
     projectileRenderer = null;
+    buildBeamRenderer?.dispose();
+    buildBeamRenderer = null;
     combatFX = null;
     audioManager = null;
 
@@ -357,12 +361,16 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
 
     entityRenderer = new EntityRenderer(scene);
     projectileRenderer = new ProjectileRenderer(scene);
+    buildBeamRenderer = new BuildBeamRenderer(scene);
+    buildBeamRenderer.setEntityRenderer(entityRenderer);
+    if (gameId) buildBeamRenderer.setGameAssetsBaseUrl(gameId);
     audioManager = new AudioManager();
     combatFX = new CombatFX(scene, audioManager);
 
     // Debug hooks — exposed for chrome-devtools introspection.
     (window as unknown as { __scene: unknown }).__scene = scene;
     (window as unknown as { __entityRenderer: unknown }).__entityRenderer = entityRenderer;
+    (window as unknown as { __buildBeamRenderer: unknown }).__buildBeamRenderer = buildBeamRenderer;
 
     // DefCache accumulates defs as the server streams them incrementally.
     // Listeners forward new defs to the renderers that need them.
@@ -623,6 +631,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         onPieceState(snapshot) {
             entityRenderer?.applyPieceState(snapshot);
         },
+        onBuildActivity(snapshot) {
+            buildBeamRenderer?.onSnapshot(snapshot);
+        },
         onCombatEvents(events) {
             combatFX?.onCombatEvents(events);
         },
@@ -708,6 +719,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
 
         rtsCamera.tick();
         entityRenderer?.tick();
+        buildBeamRenderer?.tick();
         combatFX?.tick(dt);
         scene.render();
 

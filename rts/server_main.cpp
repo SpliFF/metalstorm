@@ -14,6 +14,7 @@
 #include "Server/EntityStateSerializer.h"
 #include "Server/ProjectileStateSerializer.h"
 #include "Server/PieceStateSerializer.h"
+#include "Server/BuildActivitySerializer.h"
 #include "Server/ContentServer.h"
 #include "Server/CombatEventCollector.h"
 #include "Server/DefsCache.h"
@@ -1618,6 +1619,33 @@ int main(int argc, char* argv[])
                 pieceFrame.push_back(Protocol::ENVELOPE_PIECE_STATE);
                 pieceFrame.insert(pieceFrame.end(), pieceData.begin(), pieceData.end());
                 rtcServer.SendUnreliable(clientId, pieceFrame.data(), pieceFrame.size());
+            });
+        }
+        }
+
+        // Send build-activity snapshot (envelope 0x06) at the same
+        // ~10 Hz cadence. Per-session because enemy build activity
+        // respects LOS — the client treats the absence of an entry as
+        // "fade out the beam" so brief drops between snapshots don't
+        // pop. Builders idle most of the time, so the typical payload
+        // is empty and we skip the send.
+        {
+        int curFrame = sim.GetFrameNum();
+        if (curFrame >= 0 && (curFrame % 3) == 0 && rtcServer.GetClientCount() > 0) {
+            sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+                int viewerAllyTeam = -1;
+                if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
+                    viewerAllyTeam = teamHandler.AllyTeam(session.team);
+
+                auto baData = BuildActivity::SerializeAll(
+                    static_cast<uint32_t>(curFrame), viewerAllyTeam);
+                if (baData.empty()) return;
+
+                std::vector<uint8_t> baFrame;
+                baFrame.reserve(1 + baData.size());
+                baFrame.push_back(Protocol::ENVELOPE_BUILD_ACTIVITY);
+                baFrame.insert(baFrame.end(), baData.begin(), baData.end());
+                rtcServer.SendUnreliable(clientId, baFrame.data(), baFrame.size());
             });
         }
         }
