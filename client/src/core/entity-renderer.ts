@@ -136,6 +136,19 @@ async function fetchModelConfig(modelUrl: string): Promise<ModelConfig | null> {
         if (invertteamcolor === undefined && typeof jsonData.invertteamcolor === 'boolean')
             invertteamcolor = jsonData.invertteamcolor;
     }
+    // Hand-authored .config.lua files reference legacy `.dds` (or .tga,
+    // .png) filenames; the runtime only ships `.ktx2`, so rewrite the
+    // extension. modelimporter does the same for tex1/tex2 it auto-
+    // detects, but Lua-supplied overrides bypass that pass.
+    const toKtx2 = (name: string | undefined): string | undefined => {
+        if (!name) return name;
+        const dot = name.lastIndexOf('.');
+        const slash = name.lastIndexOf('/');
+        if (dot === -1 || dot < slash) return name + '.ktx2';
+        return name.substring(0, dot) + '.ktx2';
+    };
+    tex1 = toKtx2(tex1);
+    tex2 = toKtx2(tex2);
 
     // Pieces — always from JSON (the canonical machine-generated form).
     let pieceNames: string[] | undefined;
