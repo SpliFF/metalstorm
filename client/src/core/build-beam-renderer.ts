@@ -127,12 +127,16 @@ const BEAM_VERTEX = `
     }
 `;
 
-// Fragment samples a tileable nano-falloff texture (the same one ZK's
-// Lups NanoLasers uses — a stretched cloud pattern that looks like
-// flowing particle stream when scrolled). UV.x runs across the beam,
-// UV.y along it. Scrolling vUV.y reads as material flowing toward the
-// target (or away, for reclaim). Cross-section softness comes from
-// the texture itself — its alpha already tapers at the top/bottom.
+// Fragment samples a tileable nano-falloff texture as a scrolling
+// brightness pattern. UV.x runs across the beam, UV.y along it.
+// Scrolling vUV.y reads as material flowing toward the target (or away,
+// for reclaim).
+//
+// The shipped largelaserfalloff.png is RGB only (no alpha channel) so
+// tex.a is locked at 1.0 — relying on it produces a solid-looking bar
+// across the full beam width. Derive the cross-section taper procedurally
+// from vUV.x, and use the texture's red channel only for the longitudinal
+// scrolling pattern.
 const BEAM_FRAGMENT = `
     precision highp float;
 
@@ -146,18 +150,25 @@ const BEAM_FRAGMENT = `
 
     void main() {
         vec2 uv = vec2(vUV.x, vUV.y - time * 1.6 * vDirection);
-        vec4 tex = texture2D(beamTex, uv);
-        // Falloff alpha is the dominant signal; modulate the colour by
-        // the texture's red channel for some streak detail.
-        float a = tex.a;
-        vec3 streak = baseColor * (0.5 + 0.5 * tex.r);
-        // Soft head/tail along the beam so it doesn't read as a solid
-        // bar abutting the builder/target — the builder end is opaque,
-        // the target end fades.
+        float pattern = texture2D(beamTex, uv).r;
+
+        // Cross-section falloff: 1.0 at the centre, 0 at the edges.
+        // The hard edge would alias on a thin beam — use smoothstep so
+        // the shoulders are anti-aliased.
+        float dx = abs(vUV.x - 0.5) * 2.0; // 0 at centre, 1 at edges
+        float across = 1.0 - smoothstep(0.4, 1.0, dx);
+
+        // Soft head/tail along the beam so it doesn't abut the builder
+        // or the build site as a hard edge.
         float along = (vDirection > 0.0) ? vUV.y : (1.0 - vUV.y);
-        float env = smoothstep(0.0, 0.1, along) *
-                    (1.0 - smoothstep(0.85, 1.0, along));
-        gl_FragColor = vec4(streak * a * env * intensityMul, 1.0);
+        float env = smoothstep(0.0, 0.15, along) *
+                    (1.0 - smoothstep(0.8, 1.0, along));
+
+        float a = pattern * across * env * intensityMul;
+        // Premultiplied alpha so the colour pre-darkens at the edges
+        // instead of compositing the full baseColor over a low-alpha
+        // pixel and looking washed-out.
+        gl_FragColor = vec4(baseColor * a, a);
     }
 `;
 
@@ -379,15 +390,17 @@ export class BuildBeamRenderer {
         });
         mat.setColor3('baseColor', new Color3(color[0], color[1], color[2]));
         mat.setFloat('time', 0);
-        // Additive blending stacks brightness for every overlapping pixel,
-        // and a multi-piece commander draws several beams from the same
-        // emitter base — 2.2x bleached the model behind into solid white.
-        // 0.55 keeps the streak visible against the team-coloured hull
-        // without saturating once two or three beams overlap.
-        mat.setFloat('intensityMul', 0.55);
+        // Translucent overlay rather than additive glow — additive bleached
+        // the model behind into white whenever a multi-piece commander
+        // emitted several beams from one base. Cap peak alpha at ~0.45 so
+        // the streak is clearly see-through even at the brightest texel.
+        mat.setFloat('intensityMul', 0.45);
         if (this.ensureTexture()) mat.setTexture('beamTex', this.beamTexture!);
-        // Additive blending so overlapping beams brighten naturally.
-        mat.alphaMode = 1; // BABYLON.Engine.ALPHA_ADD = 1
+        // ALPHA_PREMULTIPLIED = 7: result = src + dst * (1 - srcA), with the
+        // fragment emitting baseColor * a as the premultiplied colour.
+        // Avoids the colour shift you get when low-alpha fragments bleed
+        // unmodulated baseColor into the destination.
+        mat.alphaMode = 7;
         mat.backFaceCulling = false;
         mat.disableDepthWrite = true;
 
