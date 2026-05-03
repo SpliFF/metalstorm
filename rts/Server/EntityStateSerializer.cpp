@@ -60,6 +60,7 @@ std::vector<uint8_t> SerializeUnits(
     if (fieldMask & FIELD_TEAM)        size += count * sizeof(uint8_t);
     if (fieldMask & FIELD_STATE_BITS)  size += count * sizeof(uint8_t);
     if (fieldMask & FIELD_LOS_STATE)   size += count * sizeof(uint8_t);
+    if (fieldMask & FIELD_BUILD_PROGRESS) size += count * sizeof(uint8_t);
 
     std::vector<uint8_t> buf(size);
     size_t offset = 0;
@@ -160,6 +161,16 @@ std::vector<uint8_t> SerializeUnits(
                 }
             }
             Write(buf, offset, losByte);
+        }
+    }
+
+    // Build progress (u8, 0-255 mapping to 0%-100%). Finished units
+    // pin to 255 so the client can treat the byte as "fully built"
+    // without comparing against a magic float epsilon.
+    if (fieldMask & FIELD_BUILD_PROGRESS) {
+        for (const CUnit* u : units) {
+            float bp = std::clamp(u->buildProgress, 0.0f, 1.0f);
+            Write(buf, offset, static_cast<uint8_t>(bp * 255.0f));
         }
     }
 

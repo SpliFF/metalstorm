@@ -154,6 +154,13 @@ function resolveTextureUrl(modelUrl: string, textureName: string): string {
 // where mask = tex2.a (or 1 - tex2.a when invertteamcolor is set).
 // Uses Babylon's instancesDeclaration/instancesVertex includes for thin-instance support.
 
+// Nanoframe is encoded inline in the team-color shader so we don't
+// duplicate the per-piece pipeline. Two per-instance values ride along
+// in the 4x4 thin-instance matrix's normally-zero W row:
+//   m33 (column 3, row 3) = buildProgress (0..1, 1=finished)
+//   m31 (column 1, row 3) = groundY        (entity foot world Y)
+// Affine transforms always have m30=m31=m32=0 / m33=1, so packing
+// values there only corrupts wp.w — which we discard before projection.
 const TEAMCOLOR_VERTEX = `
     precision highp float;
     attribute vec3 position;
@@ -166,14 +173,21 @@ const TEAMCOLOR_VERTEX = `
 
     varying vec2 vUV;
     varying vec3 vNormal;
+    varying float vBuildProgress;
+    varying float vAboveGround;
 
     void main() {
         #include<instancesVertex>
 
+        vBuildProgress = finalWorld[3][3];
+        float groundY  = finalWorld[1][3];
+
         vec4 wp = finalWorld * vec4(position, 1.0);
+        vAboveGround = wp.y - groundY;
         vNormal = normalize(mat3(finalWorld) * normal);
         vUV = uv;
-        gl_Position = viewProjection * wp;
+        // wp.w is corrupted by our packed values — rebuild as homogeneous 1.
+        gl_Position = viewProjection * vec4(wp.xyz, 1.0);
     }
 `;
 
@@ -185,9 +199,12 @@ const TEAMCOLOR_FRAGMENT = `
     uniform float hasTeamMask;
     uniform float invertMask;
     uniform vec3 lightDir;
+    uniform float modelHeight;
 
     varying vec2 vUV;
     varying vec3 vNormal;
+    varying float vBuildProgress;
+    varying float vAboveGround;
 
     void main() {
         vec4 base = texture2D(diffuseTex, vUV);
@@ -208,7 +225,21 @@ const TEAMCOLOR_FRAGMENT = `
         // Simple directional + ambient lighting
         float NdotL = max(dot(vNormal, lightDir), 0.0);
         vec3 lit = color * (0.4 + 0.6 * NdotL);
-        gl_FragColor = vec4(lit, 1.0);
+
+        // Nanoframe pass — only active during construction. Below the
+        // rising plane the model renders fully lit; above, it ghosts to
+        // a low-alpha wireframe-style silhouette. A bright scan band
+        // sits at the plane to sell the "construction in progress" look.
+        float alpha = 1.0;
+        if (vBuildProgress < 1.0) {
+            float planeY = vBuildProgress * max(modelHeight, 1.0);
+            float belowPlane = step(vAboveGround, planeY);
+            alpha = mix(0.15, 1.0, belowPlane);
+            // 3-elmo-wide gaussian glow centred at the plane.
+            float bandIntensity = exp(-pow((vAboveGround - planeY) / 2.0, 2.0)) * 1.5;
+            lit += teamColor * bandIntensity;
+        }
+        gl_FragColor = vec4(lit, alpha);
     }
 `;
 
@@ -225,12 +256,13 @@ function createTeamColorMaterial(
     name: string,
     textures: UnitTextures,
     teamColor: Color3,
+    modelHeight: number,
     scene: Scene,
 ): ShaderMaterial {
     const mat = new ShaderMaterial(name, scene, 'teamColor', {
         attributes: ['position', 'normal', 'uv'],
         uniforms: ['world', 'viewProjection', 'teamColor', 'hasTeamMask',
-                   'invertMask', 'lightDir'],
+                   'invertMask', 'lightDir', 'modelHeight'],
         samplers: ['diffuseTex', 'teamMaskTex'],
         defines: ['#define INSTANCES', '#define THIN_INSTANCES'],
     });
@@ -238,6 +270,7 @@ function createTeamColorMaterial(
     mat.setTexture('diffuseTex', textures.diffuse);
     mat.setColor3('teamColor', teamColor);
     mat.setVector3('lightDir', new Vector3(-0.5, 1.0, 0.3).normalize());
+    mat.setFloat('modelHeight', modelHeight);
 
     if (textures.teamMask) {
         mat.setTexture('teamMaskTex', textures.teamMask);
@@ -247,6 +280,11 @@ function createTeamColorMaterial(
         mat.setFloat('hasTeamMask', 0.0);
         mat.setFloat('invertMask', 0.0);
     }
+
+    // Nanoframe ghost is alpha < 1; needs a transparent material so the
+    // wireframe silhouette doesn't punch the depth buffer or block
+    // anything behind it.
+    mat.alpha = 0.999;
 
     // Disable backface culling: modelimporter (Assimp + S3O) emits
     // glTF with CCW winding but Babylon's default is CW, so culling
@@ -312,6 +350,11 @@ export interface EntityMeta {
     defId: number;
     team: number;
     healthScale: number;
+    /** 0..1 build completion. Drives the nanoframe shader: below 1 the
+     *  unit renders as a wireframe with a rising scan band; at 1 it is
+     *  shaded normally. The server emits 255 once construction finishes
+     *  so the byte → float mapping pins finished units to exactly 1.0. */
+    buildProgress: number;
 }
 
 /** Per-piece pose override for one unit, indexed by piece index.
@@ -340,6 +383,10 @@ interface ModelTemplate {
     pieces: PieceInfo[];
     /** Vertical offset so the model's base sits at Y=0. */
     yOffset: number;
+    /** Y-extent of the model from foot to top, in elmos. Used by the
+     *  nanoframe shader as the rising-plane scale: planeY ramps from
+     *  0 (no progress) to modelHeight (fully built). */
+    modelHeight: number;
     /** Loaded textures (diffuse + team mask). Null if no textures. */
     textures: UnitTextures | null;
 }
@@ -648,6 +695,7 @@ export class EntityRenderer {
             // Compute yOffset from rest-pose bounding boxes so the
             // model's base sits at Y=0.
             let minY = Infinity;
+            let maxY = -Infinity;
             for (const p of geometryPieces) {
                 // Transform the piece-local bounding box by its rest
                 // world matrix to get the actual Y extent.
@@ -660,9 +708,11 @@ export class EntityRenderer {
                 ];
                 for (const c of corners) {
                     if (c.y < minY) minY = c.y;
+                    if (c.y > maxY) maxY = c.y;
                 }
             }
             const yOffset = -minY;
+            const modelHeight = Math.max(1, maxY - minY);
 
             // Load textures (sharing across all teams; team color is
             // applied per-team via the shader uniform).
@@ -677,7 +727,7 @@ export class EntityRenderer {
                 (config?.pieceNames ? `, aligned to config (${config.pieceNames.length} pieces)` : ''),
             );
 
-            return { pieces: orderedPieces, yOffset, textures };
+            return { pieces: orderedPieces, yOffset, modelHeight, textures };
         } catch (err) {
             console.warn(
                 `[entity-renderer] ${def.name}: failed to load ${def.modelUrl}`,
@@ -749,7 +799,7 @@ export class EntityRenderer {
                 // Use team color shader with diffuse + mask textures
                 const matName = `unit_${defId}_t${team}_p${pieceIdx}_mat`;
                 mesh.material = createTeamColorMaterial(
-                    matName, tmpl.textures, teamColor, this.scene);
+                    matName, tmpl.textures, teamColor, tmpl.modelHeight, this.scene);
             } else if (!mesh.material) {
                 // No textures — flat team color fallback
                 const mat = new StandardMaterial(`unit_${defId}_t${team}_p${pieceIdx}_mat`, this.scene);
@@ -945,7 +995,7 @@ export class EntityRenderer {
     }
 
     update(snapshot: EntityStateSnapshot, isDelta: boolean = false): void {
-        const { count, entityIds, positionsX, positionsY, positionsZ, headings, health, defIds, teams } = snapshot;
+        const { count, entityIds, positionsX, positionsY, positionsZ, headings, health, defIds, teams, buildProgress } = snapshot;
         if (!entityIds) return;
 
         const now = performance.now();
@@ -964,12 +1014,13 @@ export class EntityRenderer {
 
             let meta = this.entityMeta.get(id);
             if (!meta) {
-                meta = { defId: 0, team: 0, healthScale: 1.0 };
+                meta = { defId: 0, team: 0, healthScale: 1.0, buildProgress: 1.0 };
                 this.entityMeta.set(id, meta);
             }
             if (defIds) meta.defId = defIds[i];
             if (teams) meta.team = teams[i];
             if (health) meta.healthScale = 0.3 + (health[i] / 65535) * 0.7;
+            if (buildProgress) meta.buildProgress = buildProgress[i] / 255;
         }
 
         if (!isDelta) {
@@ -1036,6 +1087,12 @@ export class EntityRenderer {
                     const instanceMatrix = modelWorld.multiply(entityMatrix);
                     const arr = new Float32Array(16);
                     instanceMatrix.copyToArray(arr, 0);
+                    // Pack nanoframe inputs into the matrix's normally-zero
+                    // row 3 entries — see TEAMCOLOR_VERTEX comment. These
+                    // corrupt wp.w but the shader rebuilds the projection
+                    // input from wp.xyz so xyz transforms stay correct.
+                    arr[7] = lerped.y;            // m31 → groundY (entity foot Y)
+                    arr[15] = meta.buildProgress; // m33 → buildProgress
                     for (let j = 0; j < 16; j++) group.matrices.push(arr[j]);
                     group.count++;
                 }
@@ -1099,6 +1156,46 @@ export class EntityRenderer {
 
     getEntityPosition(id: number): { x: number; y: number; z: number } | null {
         return this.interpolator.getInterpolated(id);
+    }
+
+    /**
+     * Resolve the live world-space position of one piece on a unit.
+     * Honours both the entity's interpolated position/heading and any
+     * server-streamed piece-pose override; pieces missing from the
+     * override map use their rest-pose transform. Returns null if the
+     * unit has no model template, no interpolated position, or the
+     * piece index is out of range.
+     *
+     * BuildBeamRenderer uses this to anchor nano-spray beams at the
+     * builder's actual emitter pieces (NanoPieceCache) instead of the
+     * unit's centre — so a hovercraft's two side nozzles emit two
+     * beams from the right place rather than one beam from the middle.
+     */
+    getPieceWorldPosition(
+        id: number,
+        pieceIdx: number,
+    ): { x: number; y: number; z: number } | null {
+        const meta = this.entityMeta.get(id);
+        if (!meta) return null;
+        const tmpl = this.modelTemplates.get(meta.defId);
+        if (!tmpl || pieceIdx < 0 || pieceIdx >= tmpl.pieces.length) return null;
+        const lerped = this.interpolator.getInterpolated(id);
+        if (!lerped) return null;
+
+        const overrides = this.pieceOverrides.get(id);
+        const modelWorld = overrides
+            ? this.computePieceWorldMatrices(tmpl, overrides)[pieceIdx]
+            : tmpl.pieces[pieceIdx].restWorldMatrix;
+
+        const rotation = (lerped.heading / 65535) * Math.PI * 2;
+        const entityMatrix = Matrix.Compose(
+            new Vector3(1, 1, 1),
+            Quaternion.RotationYawPitchRoll(rotation, 0, 0),
+            new Vector3(lerped.x, lerped.y + tmpl.yOffset, lerped.z),
+        );
+        const piece = modelWorld.multiply(entityMatrix);
+        // Translation lives in row 3 of a row-major Babylon Matrix.
+        return { x: piece.m[12], y: piece.m[13], z: piece.m[14] };
     }
 
     removeEntity(id: number): void {

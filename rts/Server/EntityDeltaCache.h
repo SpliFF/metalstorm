@@ -26,6 +26,10 @@ struct CachedEntityState {
     /// transition between radar-only and full LOS triggers a delta send
     /// even if position/health didn't move.
     uint8_t losState = 0;
+    /// Build progress as serialised (0-255). Drives the client's
+    /// nanoframe shader; ticks slowly during construction so the delta
+    /// path only fires every ~1% of progress for typical structures.
+    uint8_t buildProgress = 0;
 };
 
 class EntityDeltaCache {

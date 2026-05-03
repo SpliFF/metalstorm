@@ -18,6 +18,11 @@ static uint16_t UnitHealthU16(const CUnit* u) {
     return static_cast<uint16_t>(ratio * 65535.0f);
 }
 
+static uint8_t UnitBuildProgressU8(const CUnit* u) {
+    float bp = std::clamp(u->buildProgress, 0.0f, 1.0f);
+    return static_cast<uint8_t>(bp * 255.0f);
+}
+
 bool EntityDeltaCache::HasChanged(const CUnit* unit, int viewerAllyTeam) const {
     auto it = cache.find(static_cast<uint32_t>(unit->id));
     if (it == cache.end())
@@ -40,6 +45,12 @@ bool EntityDeltaCache::HasChanged(const CUnit* unit, int viewerAllyTeam) const {
     if (UnitHealthU16(unit) != c.health)
         return true;
 
+    // Build progress (drives nanoframe shader; tick rate is ~1% per
+    // build-power second, so the delta path fires once per visible
+    // change rather than every frame).
+    if (UnitBuildProgressU8(unit) != c.buildProgress)
+        return true;
+
     // LOS-state transition (radar↔los or first-sighting). Without this
     // the client could be stuck rendering a unit as a radar contact
     // long after the player has gained LOS on it.
@@ -59,6 +70,7 @@ void EntityDeltaCache::Update(const CUnit* unit, int viewerAllyTeam) {
     c.posZ = unit->pos.z;
     c.heading = static_cast<uint16_t>(unit->heading);
     c.health = UnitHealthU16(unit);
+    c.buildProgress = UnitBuildProgressU8(unit);
     c.defId = static_cast<uint16_t>(unit->unitDef->id);
     c.team = static_cast<uint8_t>(unit->team);
     c.losState = (viewerAllyTeam >= 0)
