@@ -2283,17 +2283,12 @@ bool CSplitLuaHandle::Init(bool dryRun)
 	if (dryRun)
 		return true;
 
-	// Unsynced (draw.lua) is best-effort on the headless server. ZK's
-	// draw.lua reaches into Spring.UnitRendering.FeatureRendering during
-	// load and errors out without GL, but the synced gadget state is
-	// what we actually need for the simulation. Log the failure and
-	// continue rather than tearing down the entire LuaRules handle.
-	if (!InitUnsynced()) {
-		LOG_L(L_WARNING,
-			"%s: unsynced state did not initialise (see lua: errors above) "
-			"— continuing with synced-only state",
-			syncedLuaHandle.GetName().c_str());
-	}
+	// Headless server: unsynced state (draw.lua and friends) is purely
+	// client-side rendering hooks. Trying to load it walks ZK's chain of
+	// gl.* / Spring.{UnitRendering,FeatureRendering} / shaders / display
+	// lists, each of which errors loudly under LUA_ERRRUN. Skip the load
+	// entirely — the synced gadget state is what we actually need.
+	unsyncedLuaHandle.KillLua();
 	return true;
 }
 

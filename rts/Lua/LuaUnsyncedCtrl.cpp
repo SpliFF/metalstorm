@@ -314,13 +314,26 @@ bool LuaUnsyncedCtrl::PushEntries(lua_State* L)
     LuaPushNamedCFunc(L, "GetTimer", NoopGetTimer);
     LuaPushNamedCFunc(L, "DiffTimers", NoopDiffTimers);
 
-    // UnitRendering table (client-side visual overrides)
-    lua_createtable(L, 0, 4);
+    // UnitRendering table (client-side visual overrides). ZK's
+    // LuaRules/Utilities/UnitRendering.lua reads SetLODCount and
+    // SetMaterialLastLOD at top-level even on a headless server, so
+    // they need to exist as no-ops or `draw.lua` errors out before
+    // any gadget loads.
+    lua_createtable(L, 0, 6);
     LuaPushNamedCFunc(L, "SetUnitLuaDraw", SilentNoop);
     LuaPushNamedCFunc(L, "SetFeatureLuaDraw", SilentNoop);
     LuaPushNamedCFunc(L, "SetUnitNoDraw", SilentNoop);
     LuaPushNamedCFunc(L, "SetFeatureNoDraw", SilentNoop);
+    LuaPushNamedCFunc(L, "SetLODCount", SilentNoop);
+    LuaPushNamedCFunc(L, "SetMaterialLastLOD", SilentNoop);
     lua_setfield(L, -2, "UnitRendering");
+
+    // FeatureRendering — same shape, parallel API. Also touched by
+    // ZK's UnitRendering.lua at module load time.
+    lua_createtable(L, 0, 2);
+    LuaPushNamedCFunc(L, "SetLODCount", SilentNoop);
+    LuaPushNamedCFunc(L, "SetMaterialLastLOD", SilentNoop);
+    lua_setfield(L, -2, "FeatureRendering");
 
     #undef REGISTER_NOOP_STUB
 
