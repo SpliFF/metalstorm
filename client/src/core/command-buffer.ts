@@ -11,11 +11,7 @@
  *   - Maximum delay before forced flush: 200ms
  */
 
-import * as flatbuffers from 'flatbuffers';
 import { Connection } from './connection.js';
-import { ClientMessage } from '../protocol/spring-web/client-message.js';
-import { ClientPayload } from '../protocol/spring-web/client-payload.js';
-import { PlayerCommand } from '../protocol/spring-web/player-command.js';
 
 const DEBOUNCE_POSITIONAL = 100; // ms
 const DEBOUNCE_STANDING = 200;   // ms
@@ -59,7 +55,6 @@ function isPositionalCommand(cmdId: number): boolean {
 export class CommandBuffer {
     private connection: Connection;
     private pending: PendingCommand | null = null;
-    private sequence = 0;
     private flushTimer: ReturnType<typeof setTimeout> | null = null;
 
     constructor(connection: Connection) {
@@ -150,24 +145,16 @@ export class CommandBuffer {
         options: number,
         timeoutFrames: number,
     ): void {
-        if (!this.connection.authenticated) return;
-
-        this.sequence++;
-        const builder = new flatbuffers.Builder(256);
-
-        const squadVec = PlayerCommand.createSquadIdsVector(builder, squadIds);
-        const paramVec = PlayerCommand.createParamsVector(builder, params);
-
-        PlayerCommand.startPlayerCommand(builder);
-        PlayerCommand.addSequence(builder, this.sequence);
-        PlayerCommand.addCommandId(builder, commandId);
-        PlayerCommand.addSquadIds(builder, squadVec);
-        PlayerCommand.addParams(builder, paramVec);
-        PlayerCommand.addOptions(builder, options);
-        PlayerCommand.addTimeoutFrames(builder, timeoutFrames);
-        const cmd = PlayerCommand.endPlayerCommand(builder);
-
-        this.connection.sendClientMessage(builder, ClientPayload.PlayerCommand, cmd);
+        // Delegate to Connection.sendPlayerCommand so all client-issued
+        // commands share a single monotonic sequence counter
+        // (`Connection.commandSequence`). Without this, widget-issued
+        // commands (lua-widget-manager → connection.sendPlayerCommand)
+        // and InputManager-issued commands had independent counters; once
+        // the widget counter outran ours, the server rejected our
+        // commands as "stale sequence" and silently dropped them. That's
+        // the symptom that made factory build clicks do nothing.
+        this.connection.sendPlayerCommand(
+            commandId, squadIds, params, options, timeoutFrames);
     }
 
     dispose(): void {

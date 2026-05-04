@@ -23,8 +23,11 @@ import type { DefCache } from './def-cache.js';
 import type { EntityRenderer } from './entity-renderer.js';
 
 export interface BuildMenuCallbacks {
-    /** Fired when the player picks a build button. defId is the unit-def id. */
-    onPick: (defId: number) => void;
+    /** Fired when the player picks a build button. `shift` is true if the
+     *  player held shift during the click — for factories this becomes
+     *  Spring's 5x build-count multiplier; for builders it queues the build
+     *  behind existing commands and keeps placement mode open. */
+    onPick: (defId: number, shift: boolean) => void;
 }
 
 export interface BuildMenuOptions {
@@ -208,7 +211,7 @@ export class BuildMenu {
                 : `def ${defId}`;
             tile.addEventListener('click', (e) => {
                 e.stopPropagation();
-                this.callbacks.onPick(defId);
+                this.callbacks.onPick(defId, e.shiftKey);
             });
             tile.addEventListener('contextmenu', (e) => {
                 // Right-click swallows so the world doesn't see it. Future

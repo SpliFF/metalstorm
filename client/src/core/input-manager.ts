@@ -34,6 +34,8 @@ import { EntityRenderer } from './entity-renderer.js';
 import { CommandBuffer, CMD } from './command-buffer.js';
 import type { Connection } from './connection.js';
 import type { DefCache } from './def-cache.js';
+import type { ParsedMapData } from './map-data.js';
+import { findMetalSpots, nearestMetalSpot, type MetalSpot } from './metal-spots.js';
 
 /// How close (in world elmos) a click has to be to a unit's XZ to
 /// count as selecting that unit. Accounts for pickWithRay landing
@@ -43,6 +45,15 @@ const SELECT_RADIUS = 32;
 /// Pixel threshold for single-click vs drag. Below this, mousedown +
 /// mouseup is treated as a click; above, it's a drag-box select.
 const DRAG_THRESHOLD_PX = 6;
+
+/// Spring command-option bits. Match `Command.h`:
+///   META_KEY=4, INTERNAL=8, RIGHT_MOUSE=16, SHIFT=32, CTRL=64, ALT=128
+const OPT_SHIFT = 1 << 5;
+const OPT_CTRL  = 1 << 6;
+const OPT_ALT   = 1 << 7;
+
+/// Bit 11 of UnitDef.flags marks a factory (see protocol.fbs).
+const UNITDEF_FLAG_IS_FACTORY = 1 << 11;
 
 export class InputManager {
     private scene: Scene;
@@ -59,6 +70,18 @@ export class InputManager {
     /// chosen def's footprint. Wired in via setDefCache after construction
     /// to keep the existing main.ts call site unchanged.
     private defCache: DefCache | null = null;
+    /// Player's team id, set after auth completes. -1 means unknown — in that
+    /// case right-click target classification falls back to "any non-selected
+    /// unit is a hostile" (the pre-team-aware behaviour).
+    private myTeam = -1;
+
+    /// Cached metal spots (centroids of connected non-zero metalmap cells in
+    /// world elmos). Computed once when the map data arrives and used during
+    /// extractor placement to snap the build ghost to a real spot.
+    private metalSpots: MetalSpot[] = [];
+    /// World-space half-distance covered by one metalmap cell. Pulled from
+    /// MapData so the spot search radius scales with the map's resolution.
+    private metalCellSize = 16;
 
     // Drag-select state
     private dragActive = false;
@@ -78,8 +101,28 @@ export class InputManager {
         ghost: Mesh;
         footprintX: number;
         footprintZ: number;
+        /// Set when the def has `extractsMetal > 0`. Forces the ghost to
+        /// snap to the nearest metal spot and prevents placement when the
+        /// cursor isn't within range of one.
+        isMex: boolean;
+        /// Search radius in elmos used by the mex snap. Falls back to ~96
+        /// elmos when the def's extract range is missing or zero — that
+        /// covers ZK's standard mex influence circle.
+        mexSnapRadius: number;
+        /// Last evaluated metal spot under the cursor (null = no spot in
+        /// range). Used by issueBuildAt to commit the snapped position.
+        snappedSpot: MetalSpot | null;
+        /// Default ghost emissive colour for un-tinting after the
+        /// red-out used to flag invalid mex placements.
+        defaultEmissive: Color3;
     } | null = null;
     private moveListener: ((evt: MouseEvent) => void) | null = null;
+
+    /// Pending "modal" command set by a hotkey (A=fight, P=patrol). When
+    /// non-null, the next right-click on terrain issues this command at the
+    /// click point instead of the default attack/move classification. Cleared
+    /// after the next click or by pressing ESC.
+    private pendingCmd: number | null = null;
 
     constructor(
         scene: Scene,
@@ -102,6 +145,25 @@ export class InputManager {
     /** Wire the def cache after construction so build placement can size the ghost. */
     setDefCache(cache: DefCache): void {
         this.defCache = cache;
+    }
+
+    /** Set the player's team id after auth completes. Used by right-click
+     *  target classification to distinguish friendly (Guard) from enemy
+     *  (Attack) targets. */
+    setMyTeam(team: number): void {
+        this.myTeam = team;
+    }
+
+    /** Wire map data after MapData arrives. Used to pre-compute metal spot
+     *  centroids so the build ghost can snap to them when the player is
+     *  placing a metal extractor (`UnitDef.extractsMetal > 0`). */
+    setMapData(map: ParsedMapData): void {
+        // Spring's metalmap is half the heightmap resolution: each cell
+        // covers 2 heightmap squares = 16 elmos.
+        const mmW = (map.mapx / 2) | 0;
+        const mmH = (map.mapy / 2) | 0;
+        this.metalCellSize = (map.squareSize ?? 8) * 2;
+        this.metalSpots = findMetalSpots(map.metalmap, mmW, mmH, this.metalCellSize);
     }
 
     setUIHitTest(probe: () => boolean): void {
@@ -141,14 +203,36 @@ export class InputManager {
     // ---- Build placement ----
 
     /**
-     * Enter ghost-placement mode for a build command. Called by the BuildMenu
-     * after the player clicks a build button. The next left-click on the
-     * ground issues the build order (cmdId = -defId, params = [x,y,z,facing]).
-     * Right-click or ESC cancels.
+     * Handle a build-button pick from the BuildMenu. Behaviour depends on the
+     * current selection:
+     *   - all factories            → queue the build immediately, no ghost
+     *   - any mobile/static builder → enter ghost-placement mode; the next
+     *                                left-click on the ground emits the
+     *                                build order
+     * Mixed selections fall through to ghost mode — factories will receive
+     * the same `-defId` order and ignore the position params (FactoryCAI
+     * looks the cmdID up in its buildOptions table).
+     *
+     * The shift modifier is forwarded:
+     *   - factories: SHIFT triggers Spring's 5x build-count multiplier
+     *     (FactoryCAI::GetCountMultiplierFromOptions).
+     *   - builders: SHIFT queues the build behind existing commands and
+     *     keeps placement mode open for chain-building.
      */
-    startBuildPlacement(defId: number): void {
+    startBuildPlacement(defId: number, shift: boolean = false): void {
         // Replace any existing placement (rapid button switch).
         this.cancelBuildPlacement();
+
+        if (this.selectedIds.length === 0) return;
+
+        // Pure factory selection: queue immediately, skip ground placement.
+        if (this.allSelectedAreFactories()) {
+            this.commandBuffer.issueImmediate(
+                -defId, this.selectedIds.slice(),
+                [],
+                shift ? OPT_SHIFT : 0);
+            return;
+        }
 
         const def = this.defCache?.getUnitDef(defId);
         // Spring footprints are in heightmap squares (8 elmos each). Default
@@ -163,8 +247,9 @@ export class InputManager {
             width: fpX, depth: fpZ, height: sizeY,
         }, this.scene);
         const mat = new StandardMaterial('build-ghost-mat', this.scene);
+        const baseEmissive = new Color3(0.15, 0.4, 0.2);
         mat.diffuseColor = new Color3(0.4, 1.0, 0.5);
-        mat.emissiveColor = new Color3(0.15, 0.4, 0.2);
+        mat.emissiveColor = baseEmissive;
         mat.alpha = 0.45;
         mat.backFaceCulling = false;
         ghost.material = mat;
@@ -173,7 +258,21 @@ export class InputManager {
         // Park off-screen until the first mouse move places it.
         ghost.position.set(-1e6, 0, 0);
 
-        this.buildPlacement = { defId, ghost, footprintX: fpX, footprintZ: fpZ };
+        // Metal extractors snap to metal spots. Two conventions are
+        // detected:
+        //   - vanilla Spring: `UnitDef.extractsMetal > 0` (engine field)
+        //   - ZK:             `customParams.ismex == "1"` (game-defined,
+        //                     because ZK does its own extraction in Lua)
+        // Either marker enables snap-to-spot placement.
+        const isMex = (def?.extractsMetal ?? 0) > 0
+            || def?.customParams?.ismex === '1';
+        const mexSnapRadius = Math.max(96, this.metalCellSize * 4);
+
+        this.buildPlacement = {
+            defId, ghost, footprintX: fpX, footprintZ: fpZ,
+            isMex, mexSnapRadius, snappedSpot: null,
+            defaultEmissive: baseEmissive,
+        };
 
         // Track the cursor so the ghost follows it.
         const canvas = this.scene.getEngine().getRenderingCanvas();
@@ -201,35 +300,88 @@ export class InputManager {
         if (!this.buildPlacement) return;
         const groundPos = this.pickGroundAt(clientX, clientY);
         if (!groundPos) return;
-        // Snap to the 16-elmo grid Spring uses internally for builds.
+
+        const bp = this.buildPlacement;
+        const mat = bp.ghost.material as StandardMaterial;
+
+        if (bp.isMex) {
+            // Mex placement snaps to the nearest metal spot. A spot out of
+            // range means the placement won't actually extract anything —
+            // tint the ghost red so the player can see the click is bad.
+            const spot = nearestMetalSpot(this.metalSpots, groundPos.x, groundPos.z, bp.mexSnapRadius);
+            bp.snappedSpot = spot;
+            if (spot) {
+                bp.ghost.position.set(spot.x, groundPos.y + 0.5, spot.z);
+                mat.emissiveColor = bp.defaultEmissive;
+            } else {
+                // No spot in range — follow cursor, tint red.
+                bp.ghost.position.set(groundPos.x, groundPos.y + 0.5, groundPos.z);
+                mat.emissiveColor = new Color3(0.5, 0.05, 0.05);
+            }
+            return;
+        }
+
+        // Standard build: snap to Spring's 16-elmo build grid.
         const gx = Math.round(groundPos.x / 16) * 16;
         const gz = Math.round(groundPos.z / 16) * 16;
-        this.buildPlacement.ghost.position.set(gx, groundPos.y + 0.5, gz);
+        bp.ghost.position.set(gx, groundPos.y + 0.5, gz);
     }
 
     private issueBuildAt(groundPos: Vector3, queue: boolean): void {
         if (!this.buildPlacement) return;
-        const defId = this.buildPlacement.defId;
-        // Spring quantises build positions to its 16-elmo grid; the server
-        // would re-snap regardless but matching client-side keeps the ghost
-        // visually consistent with the placed unit.
-        const x = Math.round(groundPos.x / 16) * 16;
-        const z = Math.round(groundPos.z / 16) * 16;
-        const y = groundPos.y;
+        const bp = this.buildPlacement;
+        const defId = bp.defId;
         // Default facing south (0). A future enhancement: hold-and-drag to set
         // facing from the drag direction (Spring's standard build placement).
         const facing = 0;
+
+        let x: number, y: number, z: number;
+        if (bp.isMex) {
+            // Mex placement requires snapping to a metal spot. If the player
+            // clicks while no spot is in range (ghost was red), drop the
+            // command — issuing it anyway just builds a useless mex on dead
+            // ground. Stay in placement mode so the player can adjust.
+            if (!bp.snappedSpot) {
+                return;
+            }
+            x = bp.snappedSpot.x;
+            z = bp.snappedSpot.z;
+            y = groundPos.y;
+        } else {
+            // Spring quantises build positions to its 16-elmo grid; the server
+            // would re-snap regardless but matching client-side keeps the
+            // ghost visually consistent with the placed unit.
+            x = Math.round(groundPos.x / 16) * 16;
+            z = Math.round(groundPos.z / 16) * 16;
+            y = groundPos.y;
+        }
+
         // Negative cmdId = build command, -cmdId is the unit-def id.
         // Shift in options bitfield = queue order behind existing commands.
-        const SHIFT_OPT = 32;
         this.commandBuffer.issueImmediate(
             -defId, this.selectedIds.slice(),
             [x, y, z, facing],
-            queue ? SHIFT_OPT : 0);
+            queue ? OPT_SHIFT : 0);
 
         // Stay in placement mode while shift is held (chain-build sites);
         // otherwise drop out so the next left-click selects normally.
         if (!queue) this.cancelBuildPlacement();
+    }
+
+    /** True if every currently-selected unit is a factory (UnitDef bit 11).
+     *  Returns false if any selected unit's def or meta hasn't streamed yet
+     *  — that case falls back to ghost placement, which is the safe default
+     *  since factories will ignore the position params. */
+    private allSelectedAreFactories(): boolean {
+        if (this.selectedIds.length === 0 || !this.defCache) return false;
+        for (const id of this.selectedIds) {
+            const meta = this.entityRenderer.getEntityMeta(id);
+            if (!meta) return false;
+            const def = this.defCache.getUnitDef(meta.defId);
+            if (!def) return false;
+            if (!(def.flags & UNITDEF_FLAG_IS_FACTORY)) return false;
+        }
+        return true;
     }
 
     // ---- Drag overlay ----
@@ -436,13 +588,26 @@ export class InputManager {
         const groundPos = this.pickGroundAt(clientX, clientY);
         if (!groundPos) return;
 
-        // Any unit not in the current selection is a legitimate attack
-        // target. We don't have player team info yet, so an attack
-        // against a friendly will just get rejected server-side once
-        // the TODO at server_main.cpp:580 lands.
+        // Modal hotkey command (A=fight, P=patrol). The next right-click is
+        // consumed by the modal and resolves it: fight/patrol at the ground
+        // point, ignoring whatever unit happens to be near the click.
+        if (this.pendingCmd !== null) {
+            const opts = shift ? OPT_SHIFT : 0;
+            this.commandBuffer.issueImmediate(
+                this.pendingCmd, this.selectedIds,
+                [groundPos.x, groundPos.y, groundPos.z], opts);
+            this.pendingCmd = null;
+            this.updateCursorMode();
+            return;
+        }
+
+        // Find the nearest non-selected unit to the click point. We classify
+        // it as friendly or hostile from its team, falling back to "hostile"
+        // when myTeam is unknown (pre-auth) or the entity meta hasn't streamed.
         let targetId = -1;
+        let targetTeam = -1;
         let targetDist = SELECT_RADIUS * SELECT_RADIUS;
-        for (const [id] of this.entityRenderer.getEntities()) {
+        for (const [id, meta] of this.entityRenderer.getEntities()) {
             if (this.selectedIds.includes(id)) continue;
             const pos = this.entityRenderer.getEntityPosition(id);
             if (!pos) continue;
@@ -452,12 +617,16 @@ export class InputManager {
             if (distSq < targetDist) {
                 targetDist = distSq;
                 targetId = id;
+                targetTeam = meta.team;
             }
         }
 
-        const opts = shift ? 32 : 0;
+        const opts = shift ? OPT_SHIFT : 0;
         if (targetId >= 0) {
-            this.commandBuffer.issueImmediate(CMD.ATTACK, this.selectedIds, [targetId], opts);
+            const isFriendly = this.myTeam >= 0 && targetTeam === this.myTeam;
+            // Friendly → Guard (assist/escort). Enemy → Attack.
+            const cmd = isFriendly ? CMD.GUARD : CMD.ATTACK;
+            this.commandBuffer.issueImmediate(cmd, this.selectedIds, [targetId], opts);
         } else {
             this.commandBuffer.issueImmediate(CMD.MOVE, this.selectedIds, [groundPos.x, groundPos.y, groundPos.z], opts);
         }
@@ -471,12 +640,23 @@ export class InputManager {
             const tag = (e.target as HTMLElement)?.tagName;
             if (tag === 'INPUT' || tag === 'TEXTAREA') return;
 
-            // ESC cancels build placement (must run regardless of selection).
-            // The main.ts ESC handler shows the quit dialog after we early-out.
-            if (e.key === 'Escape' && this.buildPlacement) {
-                this.cancelBuildPlacement();
-                e.stopPropagation();
-                return;
+            // ESC cancels build placement and any pending modal command. The
+            // main.ts ESC handler shows the quit dialog after we early-out.
+            if (e.key === 'Escape') {
+                let consumed = false;
+                if (this.buildPlacement) {
+                    this.cancelBuildPlacement();
+                    consumed = true;
+                }
+                if (this.pendingCmd !== null) {
+                    this.pendingCmd = null;
+                    this.updateCursorMode();
+                    consumed = true;
+                }
+                if (consumed) {
+                    e.stopPropagation();
+                    return;
+                }
             }
 
             if (this.selectedIds.length === 0) return;
@@ -488,8 +668,40 @@ export class InputManager {
                 case 'h':
                     this.commandBuffer.issueImmediate(CMD.MOVE_STATE, this.selectedIds, [0]);
                     break;
+                case 'a':
+                    // Attack-move: arms a modal command. Next right-click on
+                    // ground issues a FIGHT order at the click point.
+                    this.pendingCmd = CMD.FIGHT;
+                    this.updateCursorMode();
+                    break;
+                case 'p':
+                    // Patrol: arms a modal command. Next right-click on ground
+                    // becomes a PATROL waypoint.
+                    this.pendingCmd = CMD.PATROL;
+                    this.updateCursorMode();
+                    break;
+                case 'f':
+                    // Fight (alias of attack-move; matches Spring's keybinding).
+                    this.pendingCmd = CMD.FIGHT;
+                    this.updateCursorMode();
+                    break;
             }
         });
+    }
+
+    /** Reflect pendingCmd in the canvas cursor so the player can see they're
+     *  in attack-move/patrol mode. Falls back to the default cursor when no
+     *  modal command is pending. */
+    private updateCursorMode(): void {
+        const canvas = this.scene.getEngine().getRenderingCanvas();
+        if (!canvas) return;
+        if (this.pendingCmd === CMD.FIGHT) {
+            canvas.style.cursor = 'crosshair';
+        } else if (this.pendingCmd === CMD.PATROL) {
+            canvas.style.cursor = 'cell';
+        } else {
+            canvas.style.cursor = '';
+        }
     }
 
     // ---- Terrain pick ----

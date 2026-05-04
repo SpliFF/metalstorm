@@ -430,6 +430,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         console.log(`[client] MapData received: ${map.mapx}x${map.mapy}, ` +
             `${map.features.length} features, ${map.startPositions.length} start positions`);
 
+        // Hand the map to the input manager so metal extractor placement
+        // can snap to spots derived from the metalmap.
+        inputManager?.setMapData(map);
+
         // Absolute URL for HTTP resources (lobby-served)
         const mapBaseUrl = lobbyHttpUrl + map.mapDataUrl;
 
@@ -614,11 +618,12 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             // to selection + cmd-desc updates to render the build button grid
             // for selected own-team builders, and hands clicks off to
             // InputManager.startBuildPlacement for the ghost+place flow.
+            inputManager?.setMyTeam(team);
             if (entityRenderer && inputManager) {
                 buildMenu = new BuildMenu(defCache, entityRenderer, team,
                     { lobbyHttpUrl, gameId: gameId ?? '' },
                     {
-                        onPick: (defId) => inputManager?.startBuildPlacement(defId),
+                        onPick: (defId, shift) => inputManager?.startBuildPlacement(defId, shift),
                     });
             }
 
@@ -725,6 +730,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             buildMenu?.setSelection(ids);
         });
     inputManager.setDefCache(defCache);
+    // Debug hook: expose inputManager + connection so chrome-devtools
+    // automation can drive orders without touching the canvas.
+    (window as unknown as { __inputManager: unknown }).__inputManager = inputManager;
+    (window as unknown as { __connection: unknown }).__connection = conn;
     // Route ground-click suppression through the widget manager. The
     // widget manager is created later (when MapData arrives) so we read
     // it lazily — by the time the user clicks anything, the manager has
