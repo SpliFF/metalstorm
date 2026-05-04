@@ -603,6 +603,68 @@ void EnsureGlbTexturesAvailable(const fs::path& glbPath,
     EnsureSiblingTexture(glbPath, tex2, unittexturesSrc, textureConverter);
 }
 
+/// Write a flat directory-listing manifest the client can use as a
+/// poor man's VFS DirList. Avoids the alternative — speculatively
+/// fetching every potentially-existent sidecar (e.g. `<stem>.config.lua`)
+/// and getting hundreds of 404s per game start.
+///
+/// The format is deliberately minimal so the same writer can serve any
+/// directory whose contents the client wants to enumerate (models/,
+/// future weapons/, sounds/, etc.):
+///
+///   { "version": 1, "files": ["a.glb", "a.config.json", ...] }
+///
+/// Files are sorted for stable diffs and predictable cache hits. Only
+/// regular files in the directory itself are listed (no recursion);
+/// nested directories will get their own manifest if/when the client
+/// learns to enumerate them.
+void WriteDirManifest(const fs::path& dir) {
+    std::error_code ec;
+    if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) return;
+
+    std::vector<std::string> names;
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec)) continue;
+        const std::string name = entry.path().filename().string();
+        // Exclude the manifest itself so re-running the converter
+        // doesn't accumulate a recursive reference.
+        if (name == "manifest.json") continue;
+        names.push_back(name);
+    }
+    std::sort(names.begin(), names.end());
+
+    std::string out = "{\n  \"version\": 1,\n  \"files\": [";
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (i > 0) out += ',';
+        out += "\n    \"";
+        // JSON-escape: backslash, quote, control chars. Filenames
+        // realistically contain none of these but the encoder needs
+        // to be honest about its output.
+        for (char c : names[i]) {
+            if (c == '"' || c == '\\') { out += '\\'; out += c; }
+            else if (static_cast<unsigned char>(c) < 0x20) {
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                out += buf;
+            } else {
+                out += c;
+            }
+        }
+        out += '"';
+    }
+    out += "\n  ]\n}\n";
+
+    const fs::path manifestPath = dir / "manifest.json";
+    std::ofstream f(manifestPath, std::ios::binary | std::ios::trunc);
+    if (!f) {
+        SLOG(SPRING_LOG_WARNING, "failed to open manifest %s for writing",
+            manifestPath.string().c_str());
+        return;
+    }
+    f << out;
+}
+
 /// File extensions we hand to modelimporter. Matches the broad
 /// set Assimp supports — the tool itself enforces format validity.
 bool IsModelFile(const fs::path& p) {
@@ -731,6 +793,13 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
                                    unittexturesSrc, modelsOut,
                                    textureConverter);
     }
+
+    // Refresh the directory manifest after every run — even on a
+    // re-run that converts zero files, an author may have dropped a
+    // hand-authored `<stem>.config.lua` next to the existing outputs
+    // and the client needs to learn it exists without speculative
+    // 404-prone fetches.
+    WriteDirManifest(modelsOut);
 
     SLOG(SPRING_LOG_NOTICE, "%s: models %d converted, %d up-to-date, %d failed",
         gameDir.string().c_str(), converted, skipped, failed);

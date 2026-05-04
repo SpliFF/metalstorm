@@ -42,6 +42,7 @@ import { EntityInterpolator } from './entity-interpolator.js';
 import type { UnitDefInfo } from './connection.js';
 import type { PieceStateSnapshot } from './piece-state.js';
 import { stampUrl } from '../config.js';
+import { loadDirManifest, dirOfUrl } from './dir-manifest.js';
 
 /** Parsed model config from a .config.json or .config.lua sidecar. */
 interface ModelConfig {
@@ -106,18 +107,34 @@ async function fetchModelConfig(modelUrl: string): Promise<ModelConfig | null> {
     const luaUrl  = modelUrl.replace(/\.glb$/, '.config.lua');
     const jsonUrl = modelUrl.replace(/\.glb$/, '.config.json');
 
+    // Consult the directory manifest before fetching: only ~3/659 ZK
+    // models lack a `.config.json`, and 0/659 ship a `.config.lua`, so
+    // blind fetching produces hundreds of guaranteed 404s per game
+    // start. The manifest is fetched once per directory and cached.
+    // If the manifest itself is missing (older content drop), `has()`
+    // returns false for every name — we fall back to skipping every
+    // optional fetch. That's the same outcome speculative fetches
+    // would have, minus the noise.
+    const manifest = await loadDirManifest(dirOfUrl(modelUrl));
+    const luaName  = luaUrl.substring(luaUrl.lastIndexOf('/') + 1);
+    const jsonName = jsonUrl.substring(jsonUrl.lastIndexOf('/') + 1);
+
     let luaText: string | null = null;
     let jsonData: any = null;
 
-    try {
-        const r = await fetch(luaUrl);
-        if (r.ok) luaText = await r.text();
-    } catch { /* missing is fine */ }
+    if (manifest.has(luaName)) {
+        try {
+            const r = await fetch(luaUrl);
+            if (r.ok) luaText = await r.text();
+        } catch { /* missing is fine */ }
+    }
 
-    try {
-        const r = await fetch(jsonUrl);
-        if (r.ok) jsonData = await r.json();
-    } catch { /* missing is fine */ }
+    if (manifest.has(jsonName)) {
+        try {
+            const r = await fetch(jsonUrl);
+            if (r.ok) jsonData = await r.json();
+        } catch { /* missing is fine */ }
+    }
 
     if (luaText === null && jsonData === null) return null;
 
