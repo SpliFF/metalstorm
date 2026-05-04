@@ -31,6 +31,8 @@ import {
     BoundingInfo,
     SceneLoader,
     Texture,
+    RawTexture,
+    Engine,
 } from '@babylonjs/core';
 import '@babylonjs/loaders/glTF/index.js';
 // KTX2 loader is registered in main.ts (the app entry). All unit
@@ -312,6 +314,27 @@ const TEAMCOLOR_FRAGMENT = `
 // Register the shader once
 Effect.ShadersStore['teamColorVertexShader'] = TEAMCOLOR_VERTEX;
 Effect.ShadersStore['teamColorFragmentShader'] = TEAMCOLOR_FRAGMENT;
+
+/// 1×1 white textures used as a fallback diffuse + teamMask when a model
+/// has no texture sidecar. They're cached per-scene so every textureless
+/// piece shares the same GPU resource. Rendered as pure team-coloured
+/// surfaces (white × teamMask = teamColor in the shader).
+const WHITE_TEX_CACHE = new WeakMap<Scene, { diffuse: RawTexture; mask: RawTexture }>();
+
+function getWhiteFallbackTextures(scene: Scene): { diffuse: RawTexture; mask: RawTexture } {
+    let pair = WHITE_TEX_CACHE.get(scene);
+    if (pair) return pair;
+    const px = new Uint8Array([255, 255, 255, 255]);
+    const diffuse = new RawTexture(px, 1, 1, Engine.TEXTUREFORMAT_RGBA, scene,
+        false, false, Texture.NEAREST_SAMPLINGMODE);
+    diffuse.name = 'unit-fallback-diffuse';
+    const mask = new RawTexture(px.slice(), 1, 1, Engine.TEXTUREFORMAT_RGBA, scene,
+        false, false, Texture.NEAREST_SAMPLINGMODE);
+    mask.name = 'unit-fallback-teammask';
+    pair = { diffuse, mask };
+    WHITE_TEX_CACHE.set(scene, pair);
+    return pair;
+}
 
 /**
  * Create a team-color material for a unit piece. Uses the teamColor
@@ -898,18 +921,33 @@ export class EntityRenderer {
 
             const tmpl = this.modelTemplates.get(defId);
             const teamColor = TEAM_COLORS[team % TEAM_COLORS.length];
+            const matName = `unit_${defId}_t${team}_p${pieceIdx}_mat`;
 
+            // Always use the team-color shader. The thin-instance world
+            // matrix packs groundY into m31 and buildProgress into m33
+            // (see TEAMCOLOR_VERTEX comment). Babylon's default GPU
+            // pipeline divides by the corrupted wp.w during projection
+            // and renders the geometry as long streaks; only the
+            // teamColor shader knows to reconstruct gl_Position from
+            // wp.xyz alone. Skipping the replacement (the previous
+            // `else if (!mesh.material)` branch) left units without a
+            // texture sidecar — e.g. ZK's `factoryveh` — keeping the
+            // PBR material from the glTF import and rendering broken.
             if (tmpl?.textures) {
-                // Use team color shader with diffuse + mask textures
-                const matName = `unit_${defId}_t${team}_p${pieceIdx}_mat`;
                 mesh.material = createTeamColorMaterial(
                     matName, tmpl.textures, teamColor, tmpl.modelHeight, this.scene);
-            } else if (!mesh.material) {
-                // No textures — flat team color fallback
-                const mat = new StandardMaterial(`unit_${defId}_t${team}_p${pieceIdx}_mat`, this.scene);
-                mat.diffuseColor = teamColor;
-                mat.specularColor = new Color3(0.3, 0.3, 0.3);
-                mesh.material = mat;
+            } else {
+                // No texture sidecar — synthesise white diffuse + full
+                // mask so the unit renders as a flat team-coloured shape
+                // through the same shader as textured units.
+                const fallback = getWhiteFallbackTextures(this.scene);
+                mesh.material = createTeamColorMaterial(
+                    matName,
+                    { diffuse: fallback.diffuse, teamMask: fallback.mask, invertTeamColor: false },
+                    teamColor,
+                    tmpl?.modelHeight ?? 1,
+                    this.scene,
+                );
             }
 
             mesh.isPickable = false;
