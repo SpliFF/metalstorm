@@ -24,6 +24,7 @@ import {
     Vector3,
     Matrix,
     Mesh,
+    TransformNode,
     MeshBuilder,
     StandardMaterial,
     Color3,
@@ -98,7 +99,12 @@ export class InputManager {
     // held, in which case placement mode persists for queue building).
     private buildPlacement: {
         defId: number;
-        ghost: Mesh;
+        ghost: TransformNode;
+        /// True when ghost is the procedural box fallback (no model loaded
+        /// yet). Box ghosts get a solid-fill emissive tint; unit-mesh
+        /// ghosts use per-piece materials we own and re-tint via the
+        /// shared StandardMaterial set up in EntityRenderer.createGhostMesh.
+        ghostIsBox: boolean;
         footprintX: number;
         footprintZ: number;
         /// Set when the def has `extractsMetal > 0`. Forces the ghost to
@@ -241,20 +247,29 @@ export class InputManager {
         // Spring's xsize/zsize are already in elmos (footprint * 2 each).
         const fpX = (def?.xsize ?? 4) * 8;
         const fpZ = (def?.zsize ?? 4) * 8;
-        const sizeY = 24;
 
-        const ghost = MeshBuilder.CreateBox('build-ghost', {
-            width: fpX, depth: fpZ, height: sizeY,
-        }, this.scene);
-        const mat = new StandardMaterial('build-ghost-mat', this.scene);
+        // Build the ghost mesh. Try the unit's actual model first so
+        // the player sees the building they're placing; fall back to a
+        // box-shaped placeholder if the model isn't loaded yet or the
+        // mesh build fails. The fallback is wrapped in try/catch so a
+        // bug in createGhostMesh can never block placement state setup
+        // — building must work even if the ghost doesn't render.
         const baseEmissive = new Color3(0.15, 0.4, 0.2);
-        mat.diffuseColor = new Color3(0.4, 1.0, 0.5);
-        mat.emissiveColor = baseEmissive;
-        mat.alpha = 0.45;
-        mat.backFaceCulling = false;
-        ghost.material = mat;
-        ghost.isPickable = false;
-        ghost.renderingGroupId = 2;
+        let ghost: TransformNode;
+        let ghostIsBox = false;
+        try {
+            const meshGhost = this.entityRenderer.createGhostMesh(defId, `build-ghost-${defId}`);
+            if (meshGhost) {
+                ghost = meshGhost;
+            } else {
+                ghost = makeBoxGhost(this.scene, fpX, fpZ, baseEmissive);
+                ghostIsBox = true;
+            }
+        } catch (err) {
+            console.warn('[input] unit-mesh ghost failed, using box', err);
+            ghost = makeBoxGhost(this.scene, fpX, fpZ, baseEmissive);
+            ghostIsBox = true;
+        }
         // Park off-screen until the first mouse move places it.
         ghost.position.set(-1e6, 0, 0);
 
@@ -269,7 +284,7 @@ export class InputManager {
         const mexSnapRadius = Math.max(96, this.metalCellSize * 4);
 
         this.buildPlacement = {
-            defId, ghost, footprintX: fpX, footprintZ: fpZ,
+            defId, ghost, ghostIsBox, footprintX: fpX, footprintZ: fpZ,
             isMex, mexSnapRadius, snappedSpot: null,
             defaultEmissive: baseEmissive,
         };
@@ -294,6 +309,28 @@ export class InputManager {
         }
     }
 
+    /** Pending-build ghosts. Each entry is the ghost mesh issued by a
+     *  previous left-click during build placement, plus the matching
+     *  defId, builder ids, and grid-snapped (x,z). Lives until either
+     *  the construction starts (any owner's command queue no longer
+     *  references this build at this position) or the player explicitly
+     *  cancels via the per-ghost ESC handler / a new selection (we do
+     *  NOT auto-clear on selection change, only on explicit cancel —
+     *  pending sites are expected to outlive the originating selection
+     *  on a typical "queue then move on" flow).
+     *
+     *  Quantised position (16-elmo grid for normal builds, exact spot
+     *  for mex placements) is what we match against incoming command
+     *  queue updates. Server snaps build coords to the same grid so the
+     *  match is exact. */
+    private pendingBuilds: Array<{
+        ghost: TransformNode;
+        defId: number;
+        gx: number;
+        gz: number;
+        owners: Set<number>;
+    }> = [];
+
     get isPlacingBuild(): boolean { return this.buildPlacement !== null; }
 
     private updateBuildGhost(clientX: number, clientY: number): void {
@@ -302,7 +339,6 @@ export class InputManager {
         if (!groundPos) return;
 
         const bp = this.buildPlacement;
-        const mat = bp.ghost.material as StandardMaterial;
 
         if (bp.isMex) {
             // Mex placement snaps to the nearest metal spot. A spot out of
@@ -312,11 +348,11 @@ export class InputManager {
             bp.snappedSpot = spot;
             if (spot) {
                 bp.ghost.position.set(spot.x, groundPos.y + 0.5, spot.z);
-                mat.emissiveColor = bp.defaultEmissive;
+                this.tintGhost(bp.ghost, bp.ghostIsBox, bp.defaultEmissive);
             } else {
                 // No spot in range — follow cursor, tint red.
                 bp.ghost.position.set(groundPos.x, groundPos.y + 0.5, groundPos.z);
-                mat.emissiveColor = new Color3(0.5, 0.05, 0.05);
+                this.tintGhost(bp.ghost, bp.ghostIsBox, new Color3(0.5, 0.05, 0.05));
             }
             return;
         }
@@ -325,6 +361,25 @@ export class InputManager {
         const gx = Math.round(groundPos.x / 16) * 16;
         const gz = Math.round(groundPos.z / 16) * 16;
         bp.ghost.position.set(gx, groundPos.y + 0.5, gz);
+    }
+
+    /** Re-tint the ghost emissive. Box ghosts carry their material directly;
+     *  mesh ghosts share a single StandardMaterial across all piece clones
+     *  (created by EntityRenderer.createGhostMesh), so updating the first
+     *  child's material is enough to repaint the whole ghost. */
+    private tintGhost(ghost: TransformNode, isBox: boolean, color: Color3): void {
+        if (isBox) {
+            const mat = (ghost as Mesh).material as StandardMaterial;
+            mat.emissiveColor = color;
+            return;
+        }
+        for (const c of ghost.getChildMeshes()) {
+            const mat = c.material as StandardMaterial | null;
+            if (mat) {
+                mat.emissiveColor = color;
+                break;
+            }
+        }
     }
 
     private issueBuildAt(groundPos: Vector3, queue: boolean): void {
@@ -358,14 +413,128 @@ export class InputManager {
 
         // Negative cmdId = build command, -cmdId is the unit-def id.
         // Shift in options bitfield = queue order behind existing commands.
+        const builders = this.selectedIds.slice();
         this.commandBuffer.issueImmediate(
-            -defId, this.selectedIds.slice(),
+            -defId, builders,
             [x, y, z, facing],
             queue ? OPT_SHIFT : 0);
 
+        // Promote the placement ghost into a "pending" marker that lingers
+        // at the build site until construction starts (the unit will
+        // appear there) or the player explicitly cancels. We snapshot the
+        // ghost so the next placement (in queue mode) gets a fresh one.
+        this.promoteGhostToPending(defId, x, z, builders);
+
         // Stay in placement mode while shift is held (chain-build sites);
         // otherwise drop out so the next left-click selects normally.
-        if (!queue) this.cancelBuildPlacement();
+        if (!queue) {
+            this.buildPlacement = null;
+            if (this.moveListener) {
+                const canvas = this.scene.getEngine().getRenderingCanvas();
+                canvas?.removeEventListener('mousemove', this.moveListener);
+                this.moveListener = null;
+            }
+            // Don't dispose the ghost — it now lives in pendingBuilds.
+        } else {
+            // Queue mode: spawn a fresh hover ghost so the next click
+            // gets its own marker. Same try-mesh-then-fall-back-to-box
+            // path as startBuildPlacement.
+            let fresh: TransformNode;
+            let freshIsBox = false;
+            try {
+                const meshGhost = this.entityRenderer.createGhostMesh(defId, `build-ghost-${defId}`);
+                if (meshGhost) {
+                    fresh = meshGhost;
+                } else {
+                    fresh = makeBoxGhost(this.scene,
+                        this.buildPlacement.footprintX,
+                        this.buildPlacement.footprintZ,
+                        this.buildPlacement.defaultEmissive);
+                    freshIsBox = true;
+                }
+            } catch (err) {
+                console.warn('[input] queue ghost failed, using box', err);
+                fresh = makeBoxGhost(this.scene,
+                    this.buildPlacement.footprintX,
+                    this.buildPlacement.footprintZ,
+                    this.buildPlacement.defaultEmissive);
+                freshIsBox = true;
+            }
+            fresh.position.set(-1e6, 0, 0);
+            this.buildPlacement.ghost = fresh;
+            this.buildPlacement.ghostIsBox = freshIsBox;
+        }
+    }
+
+    /** Hand off the active hover ghost to the pending list. The ghost is
+     *  re-tinted to a paler "queued" colour so it reads differently from
+     *  the live placement preview. */
+    private promoteGhostToPending(defId: number, x: number, z: number, owners: number[]): void {
+        if (!this.buildPlacement) return;
+        const bp = this.buildPlacement;
+        // Soften the colour so queued sites don't compete visually with
+        // the live placement ghost.
+        this.tintGhost(bp.ghost, bp.ghostIsBox, new Color3(0.05, 0.2, 0.1));
+        if (bp.ghostIsBox) {
+            const mat = (bp.ghost as Mesh).material as StandardMaterial;
+            mat.alpha = 0.25;
+        } else {
+            for (const c of bp.ghost.getChildMeshes()) {
+                const m = c.material as StandardMaterial | null;
+                if (m) { m.alpha = 0.25; break; }
+            }
+        }
+        this.pendingBuilds.push({
+            ghost: bp.ghost,
+            defId,
+            gx: Math.round(x),
+            gz: Math.round(z),
+            owners: new Set(owners),
+        });
+    }
+
+    /** Called from the host when fresh command queue snapshots arrive.
+     *  Drops any pending ghost whose corresponding build order is no
+     *  longer in *any* of its owning units' command queues — that's our
+     *  signal that construction has started (the order pops off the head
+     *  when the builder reaches the site) or the player cancelled it. */
+    onCommandQueuesUpdated(queues: ReadonlyArray<{ unitId: number; orders: ReadonlyArray<{ cmdId: number; params: number[] }> }>): void {
+        if (this.pendingBuilds.length === 0) return;
+        // Build a quick lookup: unitId → set of "build@x,z@defId" keys.
+        const unitToBuilds = new Map<number, Set<string>>();
+        for (const q of queues) {
+            const set = new Set<string>();
+            for (const o of q.orders) {
+                if (o.cmdId < 0 && o.params.length >= 3) {
+                    const defId = -o.cmdId;
+                    const x = Math.round(o.params[0]);
+                    const z = Math.round(o.params[2]);
+                    set.add(`${defId}@${x},${z}`);
+                }
+            }
+            unitToBuilds.set(q.unitId, set);
+        }
+        const stillPending: typeof this.pendingBuilds = [];
+        for (const p of this.pendingBuilds) {
+            const key = `${p.defId}@${p.gx},${p.gz}`;
+            let stillQueued = false;
+            for (const owner of p.owners) {
+                const set = unitToBuilds.get(owner);
+                if (set && set.has(key)) { stillQueued = true; break; }
+            }
+            if (stillQueued) {
+                stillPending.push(p);
+            } else {
+                p.ghost.dispose();
+            }
+        }
+        this.pendingBuilds = stillPending;
+    }
+
+    /** Drop every pending ghost (e.g. on quit-to-lobby teardown). */
+    clearPendingBuilds(): void {
+        for (const p of this.pendingBuilds) p.ghost.dispose();
+        this.pendingBuilds = [];
     }
 
     /** True if every currently-selected unit is a factory (UnitDef bit 11).
@@ -744,4 +913,22 @@ export class InputManager {
             this.dragOverlay = null;
         }
     }
+}
+
+/** Build a translucent green box of the given footprint as a fallback
+ *  ghost when the unit's actual model isn't loaded or createGhostMesh
+ *  fails. Caller positions and disposes it. */
+function makeBoxGhost(scene: Scene, fpX: number, fpZ: number, emissive: Color3): Mesh {
+    const box = MeshBuilder.CreateBox('build-ghost', {
+        width: fpX, depth: fpZ, height: 24,
+    }, scene);
+    const mat = new StandardMaterial('build-ghost-mat', scene);
+    mat.diffuseColor = new Color3(0.4, 1.0, 0.5);
+    mat.emissiveColor = emissive;
+    mat.alpha = 0.45;
+    mat.backFaceCulling = false;
+    box.material = mat;
+    box.isPickable = false;
+    box.renderingGroupId = 2;
+    return box;
 }

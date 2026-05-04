@@ -1467,22 +1467,45 @@ int main(int argc, char* argv[])
         }
         }
 
-        // Broadcast per-team unit command queues every 30 ticks (~1s).
-        // Queues change far slower than entity state, so a low cadence
-        // is fine; widgets that read GetUnitCommands tolerate the
-        // occasional stale frame. Each session only receives queues
-        // for its own team.
+        // Broadcast unit command queues every 30 ticks (~1s). Queues
+        // change far slower than entity state, so a low cadence is
+        // fine; widgets that read GetUnitCommands tolerate the
+        // occasional stale frame.
+        //
+        // Visibility: queues are sent for any team allied with the
+        // session's team (own team + teammates). Build-command descs
+        // stay own-team only — they're meaningless for allied units
+        // the player can't actually issue build orders to.
         {
         int curFrame = sim.GetFrameNum();
         if (curFrame >= 0 && (curFrame % 30) == 0 && rtcServer.GetClientCount() > 0) {
             sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
                 if (session.team < 0) return;
-                const auto& teamUnits = unitHandler.GetUnitsByTeam(session.team);
-                if (teamUnits.empty()) return;
-                auto msg = Protocol::BuildUnitCommandQueues(teamUnits);
-                rtcServer.SendReliable(clientId, msg.data(), msg.size());
-                auto descs = Protocol::BuildUnitCmdDescs(teamUnits);
-                rtcServer.SendReliable(clientId, descs.data(), descs.size());
+
+                // Gather units across every team in the session's
+                // alliance. AlliedTeams handles asymmetric alliance
+                // declarations correctly. teamHandler.AllyTeam(self)
+                // is always self-allied so own units are included.
+                std::vector<CUnit*> visibleUnits;
+                const int activeTeams = teamHandler.ActiveTeams();
+                for (int t = 0; t < activeTeams; ++t) {
+                    if (!teamHandler.AlliedTeams(session.team, t)) continue;
+                    const auto& tu = unitHandler.GetUnitsByTeam(t);
+                    visibleUnits.insert(visibleUnits.end(), tu.begin(), tu.end());
+                }
+                if (!visibleUnits.empty()) {
+                    auto msg = Protocol::BuildUnitCommandQueues(visibleUnits);
+                    rtcServer.SendReliable(clientId, msg.data(), msg.size());
+                }
+
+                // Cmd descs stay own-team — players can't issue build
+                // orders to allied units, so streaming their build
+                // options is wasted bandwidth.
+                const auto& ownUnits = unitHandler.GetUnitsByTeam(session.team);
+                if (!ownUnits.empty()) {
+                    auto descs = Protocol::BuildUnitCmdDescs(ownUnits);
+                    rtcServer.SendReliable(clientId, descs.data(), descs.size());
+                }
             });
         }
         }

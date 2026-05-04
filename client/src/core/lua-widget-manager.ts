@@ -167,15 +167,22 @@ export class LuaWidgetManager {
             }
         }
 
+        // Send the worker its own copy of the heightmap so transferring
+        // the buffer doesn't detach the main-thread Uint16Array. The
+        // main thread keeps the heightmap for terrain sampling
+        // (CommandPathRenderer, DebugTerrainGrid, anything that calls
+        // sampleHeight); the worker takes ownership of the clone.
+        const heightmapCopy = new Uint16Array(mapData.heightmap);
+        const workerMapData = { ...mapData, heightmap: heightmapCopy };
         this.postToWorker({
             type: 'init',
             canvas: offscreen,
             gameId: this.options.gameId,
             lobbyUrl: this.options.lobbyUrl,
-            mapData,
+            mapData: workerMapData,
             storageData,
             soloWidget: this.options.soloWidget,
-        }, [offscreen, mapData.heightmap.buffer]);
+        }, [offscreen, heightmapCopy.buffer]);
 
         // Flush any messages queued before the worker existed (setRoster,
         // forwardMapFeatures, forwardUnitDefs, forwardWeaponDefs etc.).
@@ -711,6 +718,12 @@ export class LuaWidgetManager {
             const tag = (e.target as HTMLElement)?.tagName;
             if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
+            // Don't forward bare modifier presses — they aren't meaningful
+            // as standalone keys and ZK widgets that try to early-out on
+            // KEYSYMS.LSHIFT etc. miss the guard when our keycode is 0,
+            // falling through to action paths that open the main menu.
+            if (isModifierOnly(e)) return;
+
             if (e.type === 'keydown') {
                 this.postToWorker({
                     type: 'keypress',
@@ -751,6 +764,7 @@ export class LuaWidgetManager {
         this.keyUpHandler = (e: KeyboardEvent) => {
             const tag = (e.target as HTMLElement)?.tagName;
             if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+            if (isModifierOnly(e)) return;
             this.postToWorker({
                 type: 'keyrelease',
                 keyCode: springKeyCode(e),
@@ -1097,8 +1111,28 @@ function springKeyCode(e: KeyboardEvent): number {
         'F11': 292, 'F12': 293,
     };
     if (map[e.key]) return map[e.key];
+    // Modifier-only keypresses: emit the SDL keycode so widgets that
+    // early-out on `if k == KEYSYMS.LSHIFT then return end` recognise
+    // them and do nothing instead of falling through with k=0 (which
+    // some widgets misinterpret as "default action").
+    if (e.key === 'Shift')   return e.location === 2 ? 303 : 304;
+    if (e.key === 'Control') return e.location === 2 ? 305 : 306;
+    if (e.key === 'Alt')     return e.location === 2 ? 307 : 308;
+    if (e.key === 'Meta')    return e.location === 2 ? 309 : 310;
     if (e.key.length === 1) return e.key.toLowerCase().charCodeAt(0);
     return 0;
+}
+
+/** True for keys that are pure modifiers (Shift / Control / Alt / Meta).
+ *  We skip forwarding KeyPress for these to widgets — Spring widgets
+ *  generally don't want the modifier itself as a press event, only as
+ *  a flag in `mods` on real key events. Forwarding them with keyCode=0
+ *  caused ZK widgets that check `key == KEYSYMS.LSHIFT` to miss the
+ *  guard and fall through to default-action paths (e.g. opening the
+ *  main menu when shift was just held to queue an order). */
+function isModifierOnly(e: KeyboardEvent): boolean {
+    const k = e.key;
+    return k === 'Shift' || k === 'Control' || k === 'Alt' || k === 'Meta';
 }
 
 // ── Widget list overlay HTML/CSS ───────────────────────────────────────

@@ -487,6 +487,18 @@ interface ModelTemplate {
     modelHeight: number;
     /** Loaded textures (diffuse + team mask). Null if no textures. */
     textures: UnitTextures | null;
+    /** Ghost-prototype meshes for build-placement preview. Each entry
+     *  is a hidden source mesh with the ghost material assigned;
+     *  createGhostMesh creates one InstancedMesh per ghost prototype
+     *  so multiple ghosts share geometry without re-loading the glb.
+     *  Indexed parallel to `pieces` (null for structural-only nodes). */
+    ghostPrototypes: (Mesh | null)[];
+    /** Pre-decomposed local transforms for each ghost prototype, used
+     *  to position instances at rest pose. Same length as ghostPrototypes. */
+    ghostLocalTransforms: { trans: Vector3; rot: Quaternion; scale: Vector3 }[];
+    /** Single shared ghost material referenced by every prototype.
+     *  Disposed alongside the template. */
+    ghostMaterial: StandardMaterial | null;
 }
 
 /** Per-piece thin-instance render mesh, keyed by (defId, team, pieceIdx). */
@@ -850,7 +862,14 @@ export class EntityRenderer {
                 (config?.pieceNames ? `, aligned to config (${config.pieceNames.length} pieces)` : ''),
             );
 
-            return { pieces: orderedPieces, yOffset, modelHeight, textures };
+            return {
+                pieces: orderedPieces, yOffset, modelHeight, textures,
+                // Ghost prototypes are built lazily on first request to
+                // keep model load lean for defs the player never builds.
+                ghostPrototypes: [],
+                ghostLocalTransforms: [],
+                ghostMaterial: null,
+            };
         } catch (err) {
             // Babylon raises "Scene has been disposed" when ImportMeshAsync
             // is in-flight while the scene tears down (game exit / lobby
@@ -1350,6 +1369,129 @@ export class EntityRenderer {
         this.pieceOverrides.delete(id);
     }
 
+    /**
+     * Build a translucent ghost of a unit's model rooted at a TransformNode.
+     * Returns null when the model template isn't loaded yet, when no
+     * ghost prototypes were built for this def, or when an exception
+     * occurs during instance creation. Caller should fall back to a box
+     * ghost on null.
+     *
+     * Implementation: lazy-initialised ghost prototype set per def. The
+     * first ghost request for a def builds a single hidden Mesh per
+     * piece — geometry-shared with the regular thin-instance prototype
+     * but with its own translucent green material. Subsequent ghost
+     * requests just create InstancedMeshes off those prototypes, which
+     * is cheap (one draw call per piece across all queued ghosts).
+     *
+     * Used by InputManager for build-placement hover and as a "pending
+     * build" marker at queued construction sites until the unit actually
+     * starts going up.
+     */
+    createGhostMesh(defId: number, name: string): TransformNode | null {
+        const tmpl = this.modelTemplates.get(defId);
+        if (!tmpl || tmpl.pieces.length === 0) return null;
+
+        try {
+            this.ensureGhostPrototypes(tmpl, defId);
+        } catch (err) {
+            console.warn(`[entity-renderer] ghost prototype build failed for def ${defId}`, err);
+            return null;
+        }
+
+        const protos = tmpl.ghostPrototypes;
+        const xforms = tmpl.ghostLocalTransforms;
+        if (!protos || protos.length === 0) return null;
+
+        const root = new TransformNode(name, this.scene);
+        root.position.y = tmpl.yOffset;
+
+        let createdAny = false;
+        for (let i = 0; i < protos.length; i++) {
+            const proto = protos[i];
+            if (!proto) continue;
+            try {
+                const inst = proto.createInstance(`${name}_p${i}`);
+                inst.parent = root;
+                inst.isPickable = false;
+                inst.isVisible = true;
+                inst.renderingGroupId = 2;
+                const x = xforms[i];
+                inst.position.copyFrom(x.trans);
+                inst.rotationQuaternion = x.rot.clone();
+                inst.scaling.copyFrom(x.scale);
+                inst.alwaysSelectAsActiveMesh = true;
+                createdAny = true;
+            } catch (err) {
+                console.warn(`[entity-renderer] ghost piece ${i} failed`, err);
+            }
+        }
+
+        if (!createdAny) {
+            root.dispose();
+            return null;
+        }
+        return root;
+    }
+
+    /** Lazily build the per-def ghost prototype set. Called on first
+     *  createGhostMesh for a def; results are cached on the template
+     *  for the lifetime of the EntityRenderer (i.e. until quit-to-lobby
+     *  triggers a full dispose).
+     *
+     *  Each prototype is a hidden Mesh that shares geometry with the
+     *  regular thin-instance prototype but carries its own translucent
+     *  ghost material. Sharing geometry keeps memory flat — the only
+     *  per-def cost is one extra Mesh + one Material. */
+    private ensureGhostPrototypes(tmpl: ModelTemplate, defId: number): void {
+        if (tmpl.ghostPrototypes && tmpl.ghostPrototypes.length > 0) return;
+
+        const ghostMat = new StandardMaterial(`ghost_${defId}_mat`, this.scene);
+        ghostMat.diffuseColor = new Color3(0.4, 1.0, 0.5);
+        ghostMat.emissiveColor = new Color3(0.15, 0.4, 0.2);
+        ghostMat.specularColor = new Color3(0, 0, 0);
+        ghostMat.alpha = 0.45;
+        ghostMat.backFaceCulling = false;
+        ghostMat.disableLighting = false;
+
+        const protos: (Mesh | null)[] = [];
+        const xforms: { trans: Vector3; rot: Quaternion; scale: Vector3 }[] = [];
+
+        for (let i = 0; i < tmpl.pieces.length; i++) {
+            const piece = tmpl.pieces[i];
+            if (!piece.mesh || !piece.mesh.getTotalVertices()) {
+                protos.push(null);
+                xforms.push({ trans: new Vector3(), rot: new Quaternion(), scale: new Vector3(1, 1, 1) });
+                continue;
+            }
+
+            const proto = new Mesh(`ghost_${defId}_p${i}`, this.scene);
+            // Share geometry with the regular prototype. Babylon binds
+            // the geometry attributes lazily during the first render, so
+            // sharing has no upfront cost. Thin-instance buffers live on
+            // the source mesh, not the geometry — so even though both
+            // meshes touch the same vertex buffer, only the original
+            // does instanced rendering with thin-instance attributes.
+            piece.mesh.geometry?.applyToMesh(proto);
+            proto.material = ghostMat;
+            proto.isVisible = false;             // source-only, never drawn directly
+            proto.isPickable = false;
+            proto.alwaysSelectAsActiveMesh = true;
+            proto.renderingGroupId = 2;
+            proto.parent = null;
+            protos.push(proto);
+
+            const scale = new Vector3();
+            const rot = new Quaternion();
+            const trans = new Vector3();
+            piece.restWorldMatrix.decompose(scale, rot, trans);
+            xforms.push({ trans, rot, scale });
+        }
+
+        tmpl.ghostPrototypes = protos;
+        tmpl.ghostLocalTransforms = xforms;
+        tmpl.ghostMaterial = ghostMat;
+    }
+
     dispose(): void {
         for (const mesh of this.renderMeshes.values()) mesh.dispose();
         this.renderMeshes.clear();
@@ -1362,6 +1504,10 @@ export class EntityRenderer {
                     tmpl.textures.diffuse.dispose();
                     tmpl.textures.teamMask?.dispose();
                 }
+                for (const proto of tmpl.ghostPrototypes) {
+                    if (proto) proto.dispose();
+                }
+                tmpl.ghostMaterial?.dispose();
             }
         }
         this.modelTemplates.clear();

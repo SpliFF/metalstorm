@@ -45,6 +45,8 @@ import { EconomyBar } from './core/economy-bar.js';
 import { buildTerrainMesh, loadTerrainTextures, type MapDimensions } from './core/terrain.js';
 import { LobbyUI } from './lobby/lobby-ui.js';
 import { Minimap } from './core/minimap.js';
+import { CommandPathRenderer } from './core/command-path-renderer.js';
+import { DebugTerrainGrid } from './core/debug-terrain-grid.js';
 import { Connection } from './core/connection.js';
 import { CONFIG, fetchBuildStamp, stampUrl } from './config.js';
 import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
@@ -81,6 +83,14 @@ let buildMenu: BuildMenu | null = null;
 let economyBar: EconomyBar | null = null;
 let lobbyUI: LobbyUI | null = null;
 let minimap: Minimap | null = null;
+let commandPathRenderer: CommandPathRenderer | null = null;
+let debugTerrainGrid: DebugTerrainGrid | null = null;
+/// Cached most-recent command-queue snapshot. Lets a selection change
+/// repaint the path overlay without waiting for the next server tick.
+let lastCommandQueues: ReadonlyArray<{
+    unitId: number;
+    orders: ReadonlyArray<{ cmdId: number; params: number[] }>;
+}> = [];
 /// Game server connection. Non-null while a game is active. Hoisted out
 /// of startGame() so the quit-to-lobby handler can close it cleanly.
 let gameConn: Connection | null = null;
@@ -204,6 +214,11 @@ function quitToLobby(): void {
     buildMenu = null;
     economyBar?.dispose();
     economyBar = null;
+    commandPathRenderer?.dispose();
+    commandPathRenderer = null;
+    debugTerrainGrid?.dispose();
+    debugTerrainGrid = null;
+    lastCommandQueues = [];
     inputManager?.dispose();
     inputManager = null;
     engine?.stopRenderLoop();
@@ -433,6 +448,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         // Hand the map to the input manager so metal extractor placement
         // can snap to spots derived from the metalmap.
         inputManager?.setMapData(map);
+        commandPathRenderer?.setMapData(map);
+        debugTerrainGrid?.setMapData(map);
 
         // Absolute URL for HTTP resources (lobby-served)
         const mapBaseUrl = lobbyHttpUrl + map.mapDataUrl;
@@ -453,6 +470,16 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         };
         terrainMesh = buildTerrainMesh(scene, mapDims, map.heightmap);
         console.log('[client] terrain mesh built from MapData heightmap');
+
+        // Debug helper: window.__toggleTerrain() flips terrain visibility.
+        // Useful for spotting overlay geometry (command paths, ghosts) that
+        // might be hidden under the surface.
+        (window as unknown as { __toggleTerrain: () => void }).__toggleTerrain = () => {
+            if (terrainMesh) {
+                terrainMesh.isVisible = !terrainMesh.isVisible;
+                console.log(`[debug] terrain visible=${terrainMesh.isVisible}`);
+            }
+        };
 
         // Load DXT1 tile textures via HTTP
         if (map.tilesX > 0 && map.tilesZ > 0) {
@@ -699,7 +726,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             currentWidgetManager?.forwardGameInfo(frame, speed, paused, false, wind);
         },
         onUnitCommandQueues(queues) {
+            lastCommandQueues = queues;
             currentWidgetManager?.forwardUnitCommandQueues(queues);
+            inputManager?.onCommandQueuesUpdated(queues);
+            commandPathRenderer?.update(queues, inputManager?.selection ?? []);
         },
         onUnitCmdDescs(units) {
             buildMenu?.setCmdDescs(units);
@@ -723,11 +753,43 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     const savedToken = localStorage.getItem('springrts-token') ?? '';
     conn.connect(gameHttpUrl, savedUser, '', savedToken);
 
+    // Command path overlay — drawn while the player holds shift, for
+    // the current selection. Refreshes whenever an
+    // UnitCommandQueuesUpdate arrives or the selection changes; the
+    // shift gate matches Spring/Recoil's "show queued orders" gesture.
+    commandPathRenderer = new CommandPathRenderer(scene, entityRenderer);
+    (window as unknown as { __cmdPath: unknown }).__cmdPath = commandPathRenderer;
+
+    // Debug overlay: terrain-following grid using the same tube +
+    // X-ray material setup as CommandPathRenderer. Toggle from devtools:
+    //   window.__terrainGrid.show()      // 256-elmo cells
+    //   window.__terrainGrid.show(512)   // wider cells
+    //   window.__terrainGrid.hide()
+    debugTerrainGrid = new DebugTerrainGrid(scene);
+    if (currentMapData) debugTerrainGrid.setMapData(currentMapData);
+    (window as unknown as { __terrainGrid: unknown }).__terrainGrid = debugTerrainGrid;
+    const cmdPathShiftDown = (e: KeyboardEvent) => {
+        if (e.key === 'Shift') commandPathRenderer?.setShiftHeld(true);
+    };
+    const cmdPathShiftUp = (e: KeyboardEvent) => {
+        if (e.key === 'Shift') commandPathRenderer?.setShiftHeld(false);
+    };
+    // Window-level so we catch the gesture regardless of which DOM
+    // element has focus. The blur handler clears state if the window
+    // loses focus mid-press, otherwise the overlay stays stuck on.
+    window.addEventListener('keydown', cmdPathShiftDown);
+    window.addEventListener('keyup', cmdPathShiftUp);
+    window.addEventListener('blur', () => commandPathRenderer?.setShiftHeld(false));
+
     // Input
     inputManager = new InputManager(scene, camera, entityRenderer, conn,
         (ids) => {
             minimap?.setSelection(ids);
             buildMenu?.setSelection(ids);
+            // Re-render paths from the cached queue snapshot so the lines
+            // appear immediately on a selection change instead of waiting
+            // for the next 1-second UnitCommandQueuesUpdate broadcast.
+            commandPathRenderer?.update(lastCommandQueues, ids);
         });
     inputManager.setDefCache(defCache);
     // Debug hook: expose inputManager + connection so chrome-devtools
