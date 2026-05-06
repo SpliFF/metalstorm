@@ -106,7 +106,7 @@ bool ContainsCaseInsensitive(const std::string& haystack, const std::string& nee
     return it != haystack.end();
 }
 
-/// Scan `<gamePath>/luaai.lua` for the game's classic Spring "LuaAI"
+/// Scan `<gamePath>/LuaAI.lua` for the game's classic Spring "LuaAI"
 /// registry. Each entry is a `{name=..., desc=...}` table; the AI
 /// itself is not a standalone plugin — it's implemented inside the
 /// game's synced LuaRules gadgets, which discover it via
@@ -115,15 +115,36 @@ bool ContainsCaseInsensitive(const std::string& haystack, const std::string& nee
 /// the AddAI call for `isLuaAI = true` entries (the team roster
 /// already drives `GetTeamLuaAI`).
 ///
-/// `id` preserves the original case from luaai.lua because that's the
+/// `id` preserves the original case from LuaAI.lua because that's the
 /// exact string the game's gadgets compare against (e.g. ZK's CAI
 /// gadget keys `aiConfigByName["CAI"]`). Lowercasing it the way the
 /// regular plugin path does would silently break dispatch.
+///
+/// Filename probe is case-insensitive: real Spring games are
+/// inconsistent (`LuaAI.lua` in ZK, `luaai.lua` in some derivatives),
+/// and we don't get to demand a canonical case from upstream.
 void ScanGameLuaAIFile(const std::string& gamePath,
                        std::vector<AIDiscovery::AIInfo>& out)
 {
-    const fs::path luaAIPath = fs::path(gamePath) / "luaai.lua";
-    if (!fs::exists(luaAIPath)) return;
+    fs::path luaAIPath;
+    {
+        std::error_code ec;
+        const fs::path dir(gamePath);
+        if (!fs::is_directory(dir, ec)) return;
+        for (const auto& e : fs::directory_iterator(dir, ec)) {
+            if (!e.is_regular_file(ec)) continue;
+            const std::string fname = e.path().filename().string();
+            if (fname.size() != 9) continue; // "luaai.lua" length
+            std::string lower = fname;
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (lower == "luaai.lua") {
+                luaAIPath = e.path();
+                break;
+            }
+        }
+    }
+    if (luaAIPath.empty()) return;
 
     lua_State* L = luaL_newstate();
     if (!L) {
