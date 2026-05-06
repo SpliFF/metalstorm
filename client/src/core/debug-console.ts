@@ -340,14 +340,14 @@ export class DebugConsole {
                 <div class="debug-pane debug-pane-console" style="width:40%">
                     <div class="debug-pane-toolbar">
                         <span class="pane-title">Console</span>
-                        <button class="pane-clear-btn" title="Clear">Clear</button>
-                        <button class="pane-undock-btn" title="Pop out console" data-pane="console">&#x2197;</button>
+                        <button type="button" class="pane-clear-btn" title="Clear">Clear</button>
+                        <button type="button" class="pane-undock-btn" title="Pop out console" data-pane="console">&#x2197;</button>
                     </div>
                     <div class="debug-console-output"></div>
                     <div class="debug-panel-input">
-                        <select class="panel-scope-select" title="Execution scope">${scopeOpts}</select>
+                        <select class="panel-scope-select" name="debug-scope" title="Execution scope">${scopeOpts}</select>
                         <span class="debug-prompt">LuaRules&gt;</span>
-                        <textarea rows="1" placeholder="Enter command... (Shift+Enter for newline)" spellcheck="false"></textarea>
+                        <textarea name="debug-input" rows="1" placeholder="Enter command... (Shift+Enter for newline)" spellcheck="false"></textarea>
                         <span class="debug-input-hint">Enter | Shift+Enter: newline</span>
                     </div>
                 </div>
@@ -355,7 +355,7 @@ export class DebugConsole {
                 <div class="debug-pane debug-pane-logs" style="width:60%">
                     <div class="debug-pane-toolbar">
                         <span class="pane-title">Logs</span>
-                        <select class="panel-level-filter" title="Min log level">
+                        <select class="panel-level-filter" name="debug-level-filter" title="Min log level">
                             <option value="0">ALL</option>
                             <option value="1">INFO+</option>
                             <option value="2" selected>NOTICE+</option>
@@ -364,9 +364,9 @@ export class DebugConsole {
                             <option value="5">FATAL</option>
                         </select>
                         <span class="log-source-toggles"></span>
-                        <input class="panel-search-filter" type="text" placeholder="search..." />
-                        <button class="pane-clear-btn log-clear-btn" title="Clear">Clear</button>
-                        <button class="pane-undock-btn" title="Pop out logs" data-pane="logs">&#x2197;</button>
+                        <input class="panel-search-filter" name="debug-search-filter" type="text" placeholder="search..." />
+                        <button type="button" class="pane-clear-btn log-clear-btn" title="Clear">Clear</button>
+                        <button type="button" class="pane-undock-btn" title="Pop out logs" data-pane="logs">&#x2197;</button>
                     </div>
                     <div class="debug-log-output"></div>
                 </div>

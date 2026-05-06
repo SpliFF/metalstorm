@@ -498,9 +498,12 @@ static bool EncodeRgba8AsKtx2(const uint8_t* rgba, int w, int h,
 // SMF minimap extraction
 // ============================================================
 
-/// Pull the 1024x1024 DXT1 minimap out of a Spring SMF file and
-/// wrap it as a UASTC-quality KTX2 (the data is already block-
-/// compressed; we just hand the bytes to libktx).
+/// Pull the 1024x1024 DXT1 minimap out of a Spring SMF file, decode
+/// it to RGBA8, and re-encode as a Basis Universal UASTC KTX2 so
+/// Babylon's KTX2 loader can transcode it (the wrap-as-BC1 path
+/// produces a vkFormat=131 KTX2 which Babylon's transcoder routes
+/// to BasisLzEtc1sImageTranscoder.decodePalettes and throws on the
+/// missing codebooks).
 static bool ExtractSmfMinimapToKtx2(const std::string& smfPath,
                                     const std::string& outputPath,
                                     bool zstd) {
@@ -527,7 +530,15 @@ static bool ExtractSmfMinimapToKtx2(const std::string& smfPath,
         return false;
     }
     smf.close();
-    return WrapRawDxt1AsKtx2(dxt, W, H, outputPath, zstd);
+
+    std::vector<uint8_t> rgba;
+    if (!DecodeDxtToRgba(dxt.data(), dxt.size(), W, H, 8,
+                         /*dxt1Alpha*/ true, false, rgba)) {
+        SLOG(SPRING_LOG_ERROR, "DXT1 decode failed for SMF minimap");
+        return false;
+    }
+    return EncodeRgba8AsKtx2(rgba.data(), W, H, outputPath,
+                             Encoding::Uastc, /*genMips*/ true, zstd);
 }
 
 // ============================================================

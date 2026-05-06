@@ -781,10 +781,6 @@ export class Connection {
                         const key = cp.key();
                         if (key) customParams[key] = cp.value() ?? '';
                     }
-                    if (i < 3) {
-                        console.log(`[connection] DEBUG def[${i}] name=${d.name()} cpLen=${cpLen} cp=`, customParams,
-                            'transportSize=', d.transportSize(), 'repairSpeed=', d.repairSpeed());
-                    }
                     defs.push({
                         defId: d.defId(),
                         name: d.name() ?? '',

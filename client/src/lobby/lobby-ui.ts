@@ -719,7 +719,7 @@ export class LobbyUI {
                 options.push(
                     `<option value="${i}"${selectedAttr}${optDisabled}>${label}</option>`);
             }
-            return `<select class="startpos-select" data-owner="${this.esc(ownerKey)}"${disabledAttr}>`
+            return `<select class="startpos-select" name="startpos-${this.esc(ownerKey)}" data-owner="${this.esc(ownerKey)}"${disabledAttr}>`
                 + options.join('')
                 + `</select>`;
         };
@@ -766,7 +766,7 @@ export class LobbyUI {
             // game is running.
             const teamDisabled = canEdit ? '' : ' disabled';
             const teamSel =
-                `<select class="ai-team-select" data-slot="${idx}"${teamDisabled}>`
+                `<select class="ai-team-select" name="ai-team-${idx}" data-slot="${idx}"${teamDisabled}>`
                 + `<option value="0"${slot.team === 0 ? ' selected' : ''}>Team 1</option>`
                 + `<option value="1"${slot.team === 1 ? ' selected' : ''}>Team 2</option>`
                 + `</select>`;
