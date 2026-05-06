@@ -56,6 +56,23 @@ const OPT_ALT   = 1 << 7;
 /// Bit 11 of UnitDef.flags marks a factory (see protocol.fbs).
 const UNITDEF_FLAG_IS_FACTORY = 1 << 11;
 
+/// Mirror of `CGameHelper::Pos2BuildPos` — snap a world position to Spring's
+/// 16-elmo build grid with a parity offset based on bit 1 of the unit's
+/// footprint (engine checks `xsize & 2`, NOT `xsize & 1`): xsize ∈ {2, 3, 6,
+/// 7, ...} centres on 16k+8, the rest line up on 16k. ZK's
+/// `mex_spot_finder.AdjustCoordinates` produces the same grid, so reusing it
+/// here keeps the build position aligned with `metalSpotsByPos[x][z]` lookups
+/// in `mex_placement.AllowCommand` (otherwise mex builds get silently dropped).
+function snapToBuildGrid(x: number, z: number, xsize: number, zsize: number): [number, number] {
+    const sx = (xsize & 2)
+        ? Math.floor(x / 16) * 16 + 8
+        : Math.floor((x + 8) / 16) * 16;
+    const sz = (zsize & 2)
+        ? Math.floor(z / 16) * 16 + 8
+        : Math.floor((z + 8) / 16) * 16;
+    return [sx, sz];
+}
+
 export class InputManager {
     private scene: Scene;
     private camera: FreeCamera;
@@ -339,17 +356,29 @@ export class InputManager {
         if (!groundPos) return;
 
         const bp = this.buildPlacement;
+        const def = this.defCache?.getUnitDef(bp.defId);
+        // Spring's xsize/zsize are footprint*2 in heightmap squares (8 elmos
+        // each). The engine's Pos2BuildPos snaps to a 16-elmo grid with a
+        // parity offset based on xsize/zsize (odd → +8, even → 0). ZK's
+        // metal-spot table is keyed by the same grid (mex_spot_finder's
+        // AdjustCoordinates), so we have to apply this exact snap before
+        // sending — otherwise mex_placement.lua's AllowCommand silently
+        // rejects the build because metalSpotsByPos[x][z] doesn't exist.
+        const xsize = def?.xsize ?? 4;
+        const zsize = def?.zsize ?? 4;
 
         if (bp.isMex) {
             // Mex placement snaps to the nearest metal spot. A spot out of
             // range means the placement won't actually extract anything —
             // tint the ghost red so the player can see the click is bad.
             const spot = nearestMetalSpot(this.metalSpots, groundPos.x, groundPos.z, bp.mexSnapRadius);
-            bp.snappedSpot = spot;
             if (spot) {
-                bp.ghost.position.set(spot.x, groundPos.y + 0.5, spot.z);
+                const [sx, sz] = snapToBuildGrid(spot.x, spot.z, xsize, zsize);
+                bp.snappedSpot = { ...spot, x: sx, z: sz };
+                bp.ghost.position.set(sx, groundPos.y + 0.5, sz);
                 this.tintGhost(bp.ghost, bp.ghostIsBox, bp.defaultEmissive);
             } else {
+                bp.snappedSpot = null;
                 // No spot in range — follow cursor, tint red.
                 bp.ghost.position.set(groundPos.x, groundPos.y + 0.5, groundPos.z);
                 this.tintGhost(bp.ghost, bp.ghostIsBox, new Color3(0.5, 0.05, 0.05));
@@ -357,9 +386,8 @@ export class InputManager {
             return;
         }
 
-        // Standard build: snap to Spring's 16-elmo build grid.
-        const gx = Math.round(groundPos.x / 16) * 16;
-        const gz = Math.round(groundPos.z / 16) * 16;
+        // Standard build: snap to Spring's 16-elmo grid using footprint parity.
+        const [gx, gz] = snapToBuildGrid(groundPos.x, groundPos.z, xsize, zsize);
         bp.ghost.position.set(gx, groundPos.y + 0.5, gz);
     }
 
@@ -390,12 +418,17 @@ export class InputManager {
         // facing from the drag direction (Spring's standard build placement).
         const facing = 0;
 
+        const def = this.defCache?.getUnitDef(defId);
+        const xsize = def?.xsize ?? 4;
+        const zsize = def?.zsize ?? 4;
         let x: number, y: number, z: number;
         if (bp.isMex) {
             // Mex placement requires snapping to a metal spot. If the player
             // clicks while no spot is in range (ghost was red), drop the
             // command — issuing it anyway just builds a useless mex on dead
-            // ground. Stay in placement mode so the player can adjust.
+            // ground. Stay in placement mode so the player can adjust. The
+            // spot's (x, z) was already snapped to the build grid in
+            // updateBuildGhost so it matches ZK's metalSpotsByPos keys.
             if (!bp.snappedSpot) {
                 return;
             }
@@ -403,11 +436,10 @@ export class InputManager {
             z = bp.snappedSpot.z;
             y = groundPos.y;
         } else {
-            // Spring quantises build positions to its 16-elmo grid; the server
-            // would re-snap regardless but matching client-side keeps the
-            // ghost visually consistent with the placed unit.
-            x = Math.round(groundPos.x / 16) * 16;
-            z = Math.round(groundPos.z / 16) * 16;
+            // Apply the same Pos2BuildPos snap the server would. Matching
+            // the server-side grid client-side keeps the ghost position
+            // identical to where the building will actually land.
+            [x, z] = snapToBuildGrid(groundPos.x, groundPos.z, xsize, zsize);
             y = groundPos.y;
         }
 
