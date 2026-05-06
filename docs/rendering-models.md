@@ -147,24 +147,36 @@ The client registers Babylon's KTX2 loader and pins all transcoder URLs in `clie
 
 Spring models use two textures bound by name convention (not embedded in the model file):
 
-**tex1** -- Diffuse / albedo texture. Standard color map.
-
-**tex2** -- Multi-channel detail texture:
+**tex1** -- Diffuse / albedo texture (RGB) plus team-color mask in alpha:
 
 | Channel | Purpose | Value Range |
 |---------|---------|-------------|
-| R | Team color mask | 0.0 = no team color, 1.0 = full team tint |
-| G | Reflectivity / specular | Higher = more reflective |
-| B | Self-illumination / emissive | Higher = glows without lighting |
-| A | Reserved (typically 1.0) | Not used as a mask |
+| R, G, B | Diffuse colour | standard sRGB |
+| A | Team color mask | 0.0 = no team color, 1.0 = full team tint |
 
-The `invertteamcolor` flag in the model config flips the mask: `mask = 1.0 - tex2.r`.
+**tex2** -- Multi-channel shading map (canonical Spring layout, see
+`cont/base/springcontent/shaders/GLSL/ModelFragProg.glsl`):
+
+| Channel | Purpose |
+|---------|---------|
+| R | Self-illumination / emissive (added to reflect colour) |
+| G | Specular intensity / reflectivity mix |
+| B | (unused by upstream shader) |
+| A | One-bit transparency mask (multiplied with `teamColor.a`) |
+
+This client doesn't currently implement specular/glow, so tex2 is loaded
+but not sampled. Don't be tempted to read the team mask from it — that
+was a historical bug that tinted units fully red when the source tex2
+happened to have a bright R channel.
+
+The `invertteamcolor` flag in the model config flips the mask: `mask = 1.0 - tex1.a`.
 
 ### Team Color Blending
 
 ```glsl
-// In the fragment shader:
-float mask = tex2.r;
+// In the fragment shader (mirrors upstream ModelFragProg.glsl):
+vec4 base = texture2D(diffuseTex, vUV);
+float mask = base.a;
 if (invertMask > 0.5) mask = 1.0 - mask;
 vec3 color = mix(base.rgb, teamColor * base.rgb, mask);
 ```

@@ -76,7 +76,11 @@ interface ModelConfig {
     midY?: number;
 }
 
-/** Loaded texture set for a unit def. */
+/** Loaded texture set for a unit def. tex2 (shading map) is currently
+ *  unused — the team-color mask is in `diffuse.a` per Spring's S3O
+ *  convention. `teamMask` is retained so call sites that preload the
+ *  texture set still type-check; future work that needs glow/specular
+ *  can wire it back into the shader. */
 interface UnitTextures {
     diffuse: Texture;
     teamMask: Texture | null;
@@ -206,12 +210,14 @@ function resolveTextureUrl(modelUrl: string, textureName: string): string {
 }
 
 // ─── Team color shader ───
-// Spring's legacy team color: finalColor = tex1 * (1 - mask) + teamColor * mask
-// where mask = tex2.a (or 1 - tex2.a when invertteamcolor is set).
-
-// ─── Team color shader ───
-// Spring's legacy team color: finalColor = tex1 * (1 - mask) + teamColor * tex1 * mask
-// where mask = tex2.a (or 1 - tex2.a when invertteamcolor is set).
+// Canonical Spring S3O team color (see upstream
+// cont/base/springcontent/shaders/GLSL/ModelFragProg.glsl):
+//   fragColor.rgb = mix(diffuse.rgb, teamColor.rgb, diffuse.a);
+// The team-color mask lives in tex1's *alpha* channel — NOT in tex2 — and
+// tex2 is the shading map (R=glow, G=specular, A=transparency) that we
+// don't currently use. We had this wrong for a while: the shader sampled
+// `tex2.r` and tinted the whole unit red whenever the source texture
+// happened to have a bright red channel. ZK ships plenty of those.
 // Uses Babylon's instancesDeclaration/instancesVertex includes for thin-instance support.
 
 // Nanoframe is encoded inline in the team-color shader so we don't
@@ -254,9 +260,7 @@ const TEAMCOLOR_VERTEX = `
 const TEAMCOLOR_FRAGMENT = `
     precision highp float;
     uniform sampler2D diffuseTex;
-    uniform sampler2D teamMaskTex;
     uniform vec3 teamColor;
-    uniform float hasTeamMask;
     uniform float invertMask;
     uniform vec3 lightDir;
     uniform float modelHeight;
@@ -273,19 +277,13 @@ const TEAMCOLOR_FRAGMENT = `
         // are gone. The transcoder rebuilds a fresh, well-formed
         // chain at upload time.
         vec4 base = texture2D(diffuseTex, vUV);
-        vec3 color = base.rgb;
 
-        if (hasTeamMask > 0.5) {
-            vec4 t2 = texture2D(teamMaskTex, vUV);
-            // Spring S3O tex2 convention:
-            //   R = team color mask (where to tint)
-            //   G = reflectivity / specular
-            //   B = self-illumination
-            //   A = typically 1.0 (not used as mask)
-            float mask = t2.r;
-            if (invertMask > 0.5) mask = 1.0 - mask;
-            color = mix(base.rgb, teamColor * base.rgb, mask);
-        }
+        // Spring S3O convention: team mask is tex1's alpha channel.
+        // base.a == 1 → fully team-tinted; base.a == 0 → diffuse only.
+        // Multiplicative blend keeps the diffuse's shading detail.
+        float mask = base.a;
+        if (invertMask > 0.5) mask = 1.0 - mask;
+        vec3 color = mix(base.rgb, teamColor * base.rgb, mask);
 
         // Half-Lambert + hemispheric ambient. Plain N·L Lambert (with a
         // flat ambient floor) leaves the side faces of tall, thin units
@@ -332,30 +330,26 @@ const TEAMCOLOR_FRAGMENT = `
 Effect.ShadersStore['teamColorVertexShader'] = TEAMCOLOR_VERTEX;
 Effect.ShadersStore['teamColorFragmentShader'] = TEAMCOLOR_FRAGMENT;
 
-/// 1×1 white textures used as a fallback diffuse + teamMask when a model
-/// has no texture sidecar. They're cached per-scene so every textureless
-/// piece shares the same GPU resource. Rendered as pure team-coloured
-/// surfaces (white × teamMask = teamColor in the shader).
-const WHITE_TEX_CACHE = new WeakMap<Scene, { diffuse: RawTexture; mask: RawTexture }>();
+/// 1×1 RGBA(255,255,255,255) fallback diffuse for models without a
+/// texture sidecar. Cached per-scene so every textureless piece shares
+/// the same GPU resource. Alpha=255 → fully team-coloured in the shader,
+/// matching the previous "flat team-coloured shape" fallback behaviour.
+const WHITE_TEX_CACHE = new WeakMap<Scene, RawTexture>();
 
-function getWhiteFallbackTextures(scene: Scene): { diffuse: RawTexture; mask: RawTexture } {
-    let pair = WHITE_TEX_CACHE.get(scene);
-    if (pair) return pair;
+function getWhiteFallbackDiffuse(scene: Scene): RawTexture {
+    let tex = WHITE_TEX_CACHE.get(scene);
+    if (tex) return tex;
     const px = new Uint8Array([255, 255, 255, 255]);
-    const diffuse = new RawTexture(px, 1, 1, Engine.TEXTUREFORMAT_RGBA, scene,
+    tex = new RawTexture(px, 1, 1, Engine.TEXTUREFORMAT_RGBA, scene,
         false, false, Texture.NEAREST_SAMPLINGMODE);
-    diffuse.name = 'unit-fallback-diffuse';
-    const mask = new RawTexture(px.slice(), 1, 1, Engine.TEXTUREFORMAT_RGBA, scene,
-        false, false, Texture.NEAREST_SAMPLINGMODE);
-    mask.name = 'unit-fallback-teammask';
-    pair = { diffuse, mask };
-    WHITE_TEX_CACHE.set(scene, pair);
-    return pair;
+    tex.name = 'unit-fallback-diffuse';
+    WHITE_TEX_CACHE.set(scene, tex);
+    return tex;
 }
 
 /**
- * Create a team-color material for a unit piece. Uses the teamColor
- * shader with diffuse + team mask textures. Supports thin instances
+ * Create a team-color material for a unit piece. Samples team mask from
+ * tex1's alpha channel (Spring S3O convention). Supports thin instances
  * via Babylon's instancesDeclaration/instancesVertex includes.
  */
 function createTeamColorMaterial(
@@ -367,9 +361,9 @@ function createTeamColorMaterial(
 ): ShaderMaterial {
     const mat = new ShaderMaterial(name, scene, 'teamColor', {
         attributes: ['position', 'normal', 'uv'],
-        uniforms: ['world', 'viewProjection', 'teamColor', 'hasTeamMask',
+        uniforms: ['world', 'viewProjection', 'teamColor',
                    'invertMask', 'lightDir', 'modelHeight'],
-        samplers: ['diffuseTex', 'teamMaskTex'],
+        samplers: ['diffuseTex'],
         defines: ['#define INSTANCES', '#define THIN_INSTANCES'],
     });
 
@@ -377,15 +371,7 @@ function createTeamColorMaterial(
     mat.setColor3('teamColor', teamColor);
     mat.setVector3('lightDir', new Vector3(-0.5, 1.0, 0.3).normalize());
     mat.setFloat('modelHeight', modelHeight);
-
-    if (textures.teamMask) {
-        mat.setTexture('teamMaskTex', textures.teamMask);
-        mat.setFloat('hasTeamMask', 1.0);
-        mat.setFloat('invertMask', textures.invertTeamColor ? 1.0 : 0.0);
-    } else {
-        mat.setFloat('hasTeamMask', 0.0);
-        mat.setFloat('invertMask', 0.0);
-    }
+    mat.setFloat('invertMask', textures.invertTeamColor ? 1.0 : 0.0);
 
     // Keep the material fully opaque. The build-progress effect uses
     // discard-based stipple in the fragment shader instead of alpha
@@ -421,20 +407,17 @@ function loadUnitTextures(
 
     const tex1Url = resolveTextureUrl(modelUrl, config.tex1);
     const diffuse = new Texture(tex1Url, scene);
+    // Spring's tex1 carries the team-color mask in its alpha channel; we
+    // sample it directly in the shader, but the surface itself is opaque
+    // (we don't want Babylon flipping the material into the transparent
+    // pass and losing depth writes). hasAlpha=false is safe — it controls
+    // the auto-blend hint, not whether the sampler returns alpha.
     diffuse.hasAlpha = false;
     diffuse.anisotropicFilteringLevel = 8;
 
-    let teamMask: Texture | null = null;
-    if (config.tex2) {
-        const tex2Url = resolveTextureUrl(modelUrl, config.tex2);
-        teamMask = new Texture(tex2Url, scene);
-        teamMask.hasAlpha = true;
-        teamMask.anisotropicFilteringLevel = 8;
-    }
-
     return {
         diffuse,
-        teamMask,
+        teamMask: null,
         invertTeamColor: config.invertteamcolor ?? false,
     };
 }
@@ -973,13 +956,13 @@ export class EntityRenderer {
                 mesh.material = createTeamColorMaterial(
                     matName, tmpl.textures, teamColor, tmpl.modelHeight, this.scene);
             } else {
-                // No texture sidecar — synthesise white diffuse + full
-                // mask so the unit renders as a flat team-coloured shape
-                // through the same shader as textured units.
-                const fallback = getWhiteFallbackTextures(this.scene);
+                // No texture sidecar — synthesise a white diffuse with
+                // alpha=1 so the unit renders as a flat team-coloured
+                // shape through the same shader as textured units.
+                const fallbackDiffuse = getWhiteFallbackDiffuse(this.scene);
                 mesh.material = createTeamColorMaterial(
                     matName,
-                    { diffuse: fallback.diffuse, teamMask: fallback.mask, invertTeamColor: false },
+                    { diffuse: fallbackDiffuse, teamMask: null, invertTeamColor: false },
                     teamColor,
                     tmpl?.modelHeight ?? 1,
                     this.scene,
