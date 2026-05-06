@@ -813,6 +813,19 @@ int main(int argc, char* argv[])
                 continue;
             }
 
+            // Classic Spring "LuaAI" entries (e.g. ZK's CAI / CAI2)
+            // have no standalone runtime — the AI logic lives inside
+            // the game's synced LuaRules gadgets, which dispatch on
+            // `Spring.GetTeamLuaAI(teamId)`. The roster entry pushed
+            // earlier already populates that map, so there's nothing
+            // for AIRuntimePool to do.
+            if (match->isLuaAI) {
+                SLOG(SPRING_LOG_NOTICE,
+                    "registered LuaAI '%s' on team %d (handled by game gadgets)",
+                    match->displayName.c_str(), rq.team);
+                continue;
+            }
+
             std::ifstream mainFile(match->entryPath);
             if (!mainFile.is_open()) {
                 SLOG(SPRING_LOG_ERROR,

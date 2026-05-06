@@ -59,6 +59,15 @@ struct AIInfo {
     /// game root (false). Useful for UIs that want to visually
     /// distinguish built-ins from game-authored AIs.
     bool isEngineProvided = false;
+
+    /// True for entries discovered by parsing the game's `luaai.lua`
+    /// (Spring's classic "Lua AI" registry). These have no entry
+    /// script — the AI logic lives inside the game's synced LuaRules
+    /// gadgets, which dispatch on `Spring.GetTeamLuaAI(teamId)`. The
+    /// game server still records them in the roster so the call
+    /// returns the right name, but it must NOT try to load them as
+    /// standalone runtimes (`entryPath` is empty for LuaAIs).
+    bool isLuaAI = false;
 };
 
 /// Discover all AIs in the engine root and the given game root.

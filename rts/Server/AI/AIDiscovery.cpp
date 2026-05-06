@@ -12,6 +12,12 @@
 #include "../ConfigReader.h"
 #include "System/SpringLog/SpringLog.h"
 
+// Bundled Lua is compiled as C++ (CMake glob over rts/lib/lua/src/*.cpp)
+// so the headers are included without extern "C" — see ConfigReader.cpp.
+#include "lua.h"
+#include "lauxlib.h"
+#include "lualib.h"
+
 #define LOG_SECTION "ai"
 
 #include <algorithm>
@@ -85,6 +91,117 @@ bool LoadOne(const fs::path& folder, bool isEngine, AIDiscovery::AIInfo& out) {
     return true;
 }
 
+/// Case-insensitive substring match. Used to filter Chicken-mode
+/// LuaAI entries — they're not selectable in the lobby because
+/// chicken is a separate game mode toggled by modoptions, not by
+/// player AI choice.
+bool ContainsCaseInsensitive(const std::string& haystack, const std::string& needle) {
+    if (needle.empty()) return true;
+    auto it = std::search(
+        haystack.begin(), haystack.end(),
+        needle.begin(),   needle.end(),
+        [](unsigned char a, unsigned char b) {
+            return std::tolower(a) == std::tolower(b);
+        });
+    return it != haystack.end();
+}
+
+/// Scan `<gamePath>/luaai.lua` for the game's classic Spring "LuaAI"
+/// registry. Each entry is a `{name=..., desc=...}` table; the AI
+/// itself is not a standalone plugin — it's implemented inside the
+/// game's synced LuaRules gadgets, which discover it via
+/// `Spring.GetTeamLuaAI(teamId)`. We surface non-Chicken entries as
+/// AIInfo so the lobby can list them; the game server short-circuits
+/// the AddAI call for `isLuaAI = true` entries (the team roster
+/// already drives `GetTeamLuaAI`).
+///
+/// `id` preserves the original case from luaai.lua because that's the
+/// exact string the game's gadgets compare against (e.g. ZK's CAI
+/// gadget keys `aiConfigByName["CAI"]`). Lowercasing it the way the
+/// regular plugin path does would silently break dispatch.
+void ScanGameLuaAIFile(const std::string& gamePath,
+                       std::vector<AIDiscovery::AIInfo>& out)
+{
+    const fs::path luaAIPath = fs::path(gamePath) / "luaai.lua";
+    if (!fs::exists(luaAIPath)) return;
+
+    lua_State* L = luaL_newstate();
+    if (!L) {
+        SLOG(SPRING_LOG_WARNING, "luaai.lua: lua_newstate failed");
+        return;
+    }
+    luaL_openlibs(L);
+
+    if (luaL_loadfile(L, luaAIPath.string().c_str()) != LUA_OK ||
+        lua_pcall(L, 0, 1, 0) != LUA_OK) {
+        const char* err = lua_tostring(L, -1);
+        SLOG(SPRING_LOG_WARNING, "luaai.lua: %s",
+            err ? err : "evaluation failed");
+        lua_close(L);
+        return;
+    }
+
+    if (!lua_istable(L, -1)) {
+        SLOG(SPRING_LOG_WARNING, "luaai.lua: did not return a table");
+        lua_close(L);
+        return;
+    }
+
+    int kept = 0, skipped = 0;
+    const int len = static_cast<int>(lua_rawlen(L, -1));
+    for (int i = 1; i <= len; ++i) {
+        lua_rawgeti(L, -1, i);
+        if (!lua_istable(L, -1)) { lua_pop(L, 1); continue; }
+
+        lua_getfield(L, -1, "name");
+        const std::string name = lua_isstring(L, -1) ? lua_tostring(L, -1) : "";
+        lua_pop(L, 1);
+
+        lua_getfield(L, -1, "desc");
+        const std::string desc = lua_isstring(L, -1) ? lua_tostring(L, -1) : "";
+        lua_pop(L, 1);
+
+        lua_pop(L, 1); // entry table
+
+        if (name.empty()) { skipped++; continue; }
+
+        // Chicken is a special PvE game mode — its "AI" is selected
+        // by the chicken_control gadget when modoptions enable it,
+        // not by adding a player slot. Don't expose it in the lobby.
+        if (ContainsCaseInsensitive(name, "chicken")) {
+            skipped++;
+            continue;
+        }
+
+        // The engine ships a Null AI (content/engine/ai/null/); games
+        // that re-declare it in luaai.lua would just produce a
+        // duplicate row in the lobby dropdown. Drop the LuaAI copy
+        // and let the engine entry stand — it does the same thing
+        // (own a team, issue no commands) and the LuaAI variant has
+        // no game gadget on the receiving end anyway.
+        if (ContainsCaseInsensitive(name, "null ai") ||
+            ContainsCaseInsensitive(name, "null_ai")) {
+            skipped++;
+            continue;
+        }
+
+        AIDiscovery::AIInfo info;
+        info.id = name;                 // case preserved — see comment above
+        info.displayName = name;
+        info.description = desc;
+        info.folderPath = gamePath;
+        info.entryPath = "";            // no standalone entry script
+        info.isEngineProvided = false;
+        info.isLuaAI = true;
+        out.push_back(std::move(info));
+        kept++;
+    }
+
+    lua_close(L);
+    SLOG(SPRING_LOG_INFO, "luaai.lua: %d kept, %d skipped (chicken/empty)",
+        kept, skipped);
+}
+
 /// Scan `<root>/ai/` for plugin folders and emit matching AIInfo
 /// entries into `out`. Missing roots are silent — both the engine
 /// root and the game root are optional.
@@ -130,6 +247,9 @@ std::vector<AIInfo> Discover(
     // after). We de-duplicate by id below.
     ScanRoot(enginePath, /*isEngine*/ true,  all);
     ScanRoot(gamePath,   /*isEngine*/ false, all);
+    // Classic Spring "LuaAI" registry — game-author table that names
+    // AIs implemented inside the game's synced gadgets (e.g. ZK's CAI).
+    ScanGameLuaAIFile(gamePath, all);
 
     // Dedupe: if a game AI has the same id as an engine AI, the
     // game one wins. We walk the list in reverse so the last entry
