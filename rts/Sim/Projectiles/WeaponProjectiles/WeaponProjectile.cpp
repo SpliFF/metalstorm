@@ -154,14 +154,32 @@ CWeaponProjectile::CWeaponProjectile(const ProjectileParams& params)
 	// and simulate motion until the matching Impact/Trajectory event.
 	{
 		const CSolidObject* tgtObj = dynamic_cast<const CSolidObject*>(target);
+		float3 evPos = pos;
+		float3 evTargetPos = targetPos;
+
+		// On the headless server, unit_script.lua animations don't always
+		// run (gadgets that touch piece transforms can fail), which leaves
+		// the firing unit's muzzle piece at the unit centre. The
+		// BeamLaser TraceRay then immediately hits the firing unit's own
+		// collision sphere and returns beamLength=0, producing a
+		// zero-length beam (pos == end). Fall back to (owner, target)
+		// world positions so the client renders something sensible.
+		if (hitscan && (evTargetPos - evPos).SqLength() < 1.0f) {
+			const CUnit* ownerUnit = (ownerID != -1u) ? unitHandler.GetUnit(ownerID) : nullptr;
+			if (ownerUnit != nullptr)
+				evPos = ownerUnit->pos + UpVector * (ownerUnit->radius * 0.5f);
+			if (tgtObj != nullptr)
+				evTargetPos = tgtObj->pos;
+		}
+
 		ProjectileFiredEventData ev;
 		ev.projId       = static_cast<uint32_t>(id);
 		ev.weaponDefId  = static_cast<uint16_t>(weaponDef->id);
 		ev.ownerId      = (ownerID != -1u) ? static_cast<uint32_t>(ownerID) : 0u;
 		ev.team         = static_cast<uint8_t>(teamID);
-		ev.pos          = pos;
+		ev.pos          = evPos;
 		ev.vel          = float3(speed.x, speed.y, speed.z);
-		ev.targetPos    = targetPos;
+		ev.targetPos    = evTargetPos;
 		ev.targetId     = (tgtObj != nullptr) ? static_cast<uint32_t>(tgtObj->id) : 0u;
 		ev.ttl          = static_cast<int16_t>(ttl);
 		// `mygravity` is the resolved per-frame gravity for this projectile —
