@@ -807,6 +807,7 @@ async function init(
         setCameraTarget: (x, z, smoothness) => {
             postToMain({ type: 'setCameraTarget', x, z, smoothness });
         },
+        getUnitDefName: (defId) => unitDefMap.get(defId)?.name,
     };
 
     // 4. Install engine globals
@@ -1987,6 +1988,16 @@ defaultFont = activeFont
             local ah = widgetHandler.actionHandler
             local origKeyAction = ah.KeyAction
             ah.KeyAction = function(self, press, key, mods, isRepeat, scanCode, actions)
+                -- Bare modifier-press never dispatches actions. SDL maps
+                -- LSHIFT=304 RSHIFT=303 LCTRL=306 RCTRL=305 LALT=308 RALT=307
+                -- LMETA=310 RMETA=309. ZK's GetKeyBindings("") matches a
+                -- naked Any+anything binding when the key has no symbol;
+                -- without this guard, a bare Shift press has triggered
+                -- actions like crudesubmenu/menu in the past.
+                if key and (key == 303 or key == 304 or key == 305 or key == 306
+                        or key == 307 or key == 308 or key == 309 or key == 310) then
+                    return false
+                end
                 local handled = origKeyAction(self, press, key, mods, isRepeat, scanCode, actions)
                 if handled then return true end
                 -- Only press events trigger text fall-through; releases are
@@ -3028,6 +3039,42 @@ function escapeLuaStr(s: string): string {
     return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
+/** Order-insensitive equality for the worker's selection-id snapshots —
+ *  Spring's engine emits SelectionChanged when the *set* changes, not on
+ *  reorders. */
+function sameIdSet(a: ReadonlyArray<number>, b: ReadonlyArray<number>): boolean {
+    if (a === b) return true;
+    if (a.length !== b.length) return false;
+    if (a.length === 0) return true;
+    const s = new Set(a);
+    for (const id of b) if (!s.has(id)) return false;
+    return true;
+}
+
+/** Rebuild `widgetHandler.commands` from the first selected unit's
+ *  cmd-descs and fire the CommandsChanged callin so chili widgets
+ *  (integral menu, command buttons, factory bar) refresh their button
+ *  grid. Spring's engine does this implicitly via the LayoutCommands
+ *  callback every frame the command set changes; we trigger it
+ *  explicitly when a streamed UnitCmdDescsUpdate or selection change
+ *  invalidates the previous layout. Safe to call before the runtime is
+ *  bootstrapped (no-op if widgetHandler isn't installed yet). */
+function dispatchCommandsChanged(): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler then
+            local sel = Spring.GetSelectedUnits()
+            if sel and sel[1] then
+                widgetHandler.commands = Spring.GetUnitCmdDescs(sel[1]) or {}
+            else
+                widgetHandler.commands = {}
+            end
+            widgetHandler.commands.n = #widgetHandler.commands
+            widgetHandler:CommandsChanged()
+        end
+    `, 'dispatchCommandsChanged');
+}
+
 /** Toggle a widget by name. */
 function toggleWidget(name: string): void {
     if (!runtime) return;
@@ -3273,7 +3320,8 @@ self.onmessage = async (e: MessageEvent) => {
             }
             break;
 
-        case 'stateUpdate':
+        case 'stateUpdate': {
+            const prevSel = liveState.selectedUnitIds;
             // Camera, viewport, identity, gameFrame from main thread
             if (msg.camera) liveState.camera = msg.camera;
             if (msg.viewport) liveState.viewport = msg.viewport;
@@ -3284,7 +3332,15 @@ self.onmessage = async (e: MessageEvent) => {
             if (msg.projMatrix) liveState.projMatrix = msg.projMatrix as Float32Array;
             if (msg.modKeys) liveState.modKeys = msg.modKeys as { alt: boolean; ctrl: boolean; meta: boolean; shift: boolean };
             if (msg.mouse) liveState.mouse = msg.mouse as typeof liveState.mouse;
+            // Selection delta → re-run the layout callback so the
+            // integral menu rebuilds its build/orders palette. Without
+            // this, switching the selected unit would leave widgetHandler.
+            // commands stale and the menu fixed on the previous unit.
+            if (msg.selectedUnitIds && !sameIdSet(prevSel, liveState.selectedUnitIds)) {
+                dispatchCommandsChanged();
+            }
             break;
+        }
 
         case 'entityState': {
             // Rebuild/merge the units Map from typed arrays
@@ -3375,6 +3431,7 @@ self.onmessage = async (e: MessageEvent) => {
             liveState.units.delete(msg.entityId as number);
             liveState.unitRulesParams.delete(msg.entityId as number);
             liveState.unitCommands.delete(msg.entityId as number);
+            liveState.unitCmdDescs.delete(msg.entityId as number);
             break;
 
         case 'unitCommandQueues': {
@@ -3392,6 +3449,29 @@ self.onmessage = async (e: MessageEvent) => {
                     options: o.options, tag: o.tag, timeout: o.timeout,
                 })));
             }
+            break;
+        }
+
+        case 'unitCmdDescs': {
+            // Snapshot replacement, mirroring unitCommandQueues. Server
+            // currently streams only build entries (cmdId<0); a unit
+            // missing from the snapshot has no streamed cmd-descs.
+            const updates = msg.units as Array<{
+                unitId: number;
+                cmds: Array<{ cmdId: number; disabled: boolean }>;
+            }> | undefined;
+            if (!updates) break;
+            liveState.unitCmdDescs.clear();
+            for (const u of updates) {
+                liveState.unitCmdDescs.set(u.unitId, u.cmds.map(c => ({
+                    cmdId: c.cmdId, disabled: c.disabled,
+                })));
+            }
+            // Refresh the integral menu's command panel — Spring's
+            // engine drives this from a layout callback every frame the
+            // command set changes; we mirror that here so chili's
+            // CommandsChanged callin actually fires.
+            dispatchCommandsChanged();
             break;
         }
 

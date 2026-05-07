@@ -76,6 +76,14 @@ export interface SpringAPIContext {
      * RTS camera maintains its own height. Optional.
      */
     setCameraTarget?(x: number, z: number, smoothness?: number): void;
+    /**
+     * Resolve a unit-def id to its internal name (e.g. 549 →
+     * "staticmex"). Used by GetUnitCmdDescs to fill in cmd.name and
+     * cmd.action so chili widgets can look up the def via
+     * UnitDefNames[name] the same way they would against a real Spring
+     * client. Optional — falls back to the numeric id as a string.
+     */
+    getUnitDefName?(defId: number): string | undefined;
 }
 
 /** Per-unit entry in the worker's unit store. */
@@ -209,6 +217,20 @@ export interface LiveState {
     /** Per-unit order queue, keyed by unit id. Server broadcasts a full
      *  snapshot at ~1 Hz; absence of a unit means an empty queue. */
     unitCommands: Map<number, UnitOrder[]>;
+    /** Per-unit available command descriptors, keyed by unit id.
+     *  Server streams the build (cmdId<0) entries at ~1 Hz; standing-
+     *  order toggles are derived client-side from the CMD_* enum and
+     *  added by Spring.GetUnitCmdDescs at read time. Absence of a
+     *  unit means empty / unknown. */
+    unitCmdDescs: Map<number, UnitCmdDescStored[]>;
+}
+
+/** One entry from a unit's command panel as streamed by the server. */
+export interface UnitCmdDescStored {
+    /** Spring command id. Negative = build command (-cmdId is the unit-def id). */
+    cmdId: number;
+    /** Greyed-out flag (insufficient resources, tech, etc.). */
+    disabled: boolean;
 }
 
 /** One queued order — mirrors Spring's Command struct. */
@@ -449,6 +471,7 @@ export function createDefaultLiveState(): LiveState {
         markers: [],
         wind: { x: 0, y: 0, z: 0, strength: 0, tidal: 0 },
         unitCommands: new Map(),
+        unitCmdDescs: new Map(),
     };
 }
 
@@ -1554,7 +1577,45 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             const u = ls.units.get(Number(_id));
             return u ? u.healthRatio < 1 : null;
         },
-        GetUnitCmdDescs: () => luaTable(),
+        // Spring.GetUnitCmdDescs(unitID) — return the unit's command
+        // descriptors as a 1-indexed Lua array. Server streams the build
+        // entries (cmdId<0) at ~1 Hz; we publish the minimum surface
+        // chili / ZK widgets read on the cmd-descs side: id, name,
+        // action, type, params, disabled. The widget then looks up the
+        // human name and tooltip from UnitDefs[-cmd.id] itself, exactly
+        // as it would against a real Spring client. Standing-order
+        // toggles (move/stop/attack/patrol/...) are not streamed —
+        // chili's command panel reads them off the CMD_* enum on its
+        // own, so an empty list for textureless units is fine.
+        GetUnitCmdDescs: (unitId: LuaValue) => {
+            const uid = Number(unitId);
+            const stored = ls.unitCmdDescs.get(uid);
+            if (!stored || stored.length === 0) return luaTable();
+            const arr: LuaValue[] = stored.map(d => {
+                if (d.cmdId < 0) {
+                    const defId = -d.cmdId;
+                    const name  = ctx.getUnitDefName?.(defId) ?? String(defId);
+                    return {
+                        id:       d.cmdId,
+                        disabled: d.disabled,
+                        name,
+                        action:   `buildunit_${name.toLowerCase()}`,
+                        type:     20, // CMDTYPE_ICON_BUILDING
+                        queueing: true,
+                        params:   luaTable(),
+                    };
+                }
+                return {
+                    id:       d.cmdId,
+                    disabled: d.disabled,
+                    name:     `cmd_${d.cmdId}`,
+                    action:   '',
+                    type:     0, // CMDTYPE_ICON
+                    params:   luaTable(),
+                };
+            });
+            return luaTable(...arr);
+        },
         GetUnitCommandCount: (unitId: LuaValue) => {
             return ls.unitCommands.get(Number(unitId))?.length ?? 0;
         },

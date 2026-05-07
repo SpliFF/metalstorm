@@ -23,11 +23,14 @@ import type { DefCache } from './def-cache.js';
 import type { EntityRenderer } from './entity-renderer.js';
 
 export interface BuildMenuCallbacks {
-    /** Fired when the player picks a build button. `shift` is true if the
-     *  player held shift during the click — for factories this becomes
-     *  Spring's 5x build-count multiplier; for builders it queues the build
-     *  behind existing commands and keeps placement mode open. */
-    onPick: (defId: number, shift: boolean) => void;
+    /** Fired when the player picks a build button. The modifier flags carry
+     *  through to the Command options bitmask. For factories these select
+     *  Spring/Recoil's batch-build multiplier from the FactoryCAI table:
+     *  shift=×5, ctrl=×20, shift+ctrl=×100 (see FactoryCAI.cpp
+     *  GetCountMultiplierFromOptions — origin is OTA). For builders, shift
+     *  queues the build behind existing commands and keeps placement mode
+     *  open for chain-building. */
+    onPick: (defId: number, mods: { shift: boolean; ctrl: boolean }) => void;
 }
 
 export interface BuildMenuOptions {
@@ -211,7 +214,7 @@ export class BuildMenu {
                 : `def ${defId}`;
             tile.addEventListener('click', (e) => {
                 e.stopPropagation();
-                this.callbacks.onPick(defId, e.shiftKey);
+                this.callbacks.onPick(defId, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey });
             });
             tile.addEventListener('contextmenu', (e) => {
                 // Right-click swallows so the world doesn't see it. Future

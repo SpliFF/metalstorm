@@ -41,6 +41,7 @@ import { CombatFX } from './core/combat-fx.js';
 import { AudioManager } from './core/audio.js';
 import { InputManager } from './core/input-manager.js';
 import { BuildMenu } from './core/build-menu.js';
+import { OrderPanel } from './core/order-panel.js';
 import { EconomyBar } from './core/economy-bar.js';
 import { buildTerrainMesh, loadTerrainTextures, type MapDimensions } from './core/terrain.js';
 import { LobbyUI } from './lobby/lobby-ui.js';
@@ -80,6 +81,7 @@ let combatFX: CombatFX | null = null;
 let audioManager: AudioManager | null = null;
 let inputManager: InputManager | null = null;
 let buildMenu: BuildMenu | null = null;
+let orderPanel: OrderPanel | null = null;
 let economyBar: EconomyBar | null = null;
 let lobbyUI: LobbyUI | null = null;
 let minimap: Minimap | null = null;
@@ -212,6 +214,8 @@ function quitToLobby(): void {
     minimap = null;
     buildMenu?.dispose();
     buildMenu = null;
+    orderPanel?.dispose();
+    orderPanel = null;
     economyBar?.dispose();
     economyBar = null;
     commandPathRenderer?.dispose();
@@ -322,6 +326,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     inputManager = null;
     buildMenu?.dispose();
     buildMenu = null;
+    orderPanel?.dispose();
+    orderPanel = null;
     economyBar?.dispose();
     economyBar = null;
 
@@ -641,24 +647,25 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 debugConsole.setGameChannel(channel);
             }
 
-            // Now that we know our team, spin up the build menu. It listens
-            // to selection + cmd-desc updates to render the build button grid
-            // for selected own-team builders, and hands clicks off to
-            // InputManager.startBuildPlacement for the ghost+place flow.
             inputManager?.setMyTeam(team);
-            if (entityRenderer && inputManager) {
-                buildMenu = new BuildMenu(defCache, entityRenderer, team,
-                    { lobbyHttpUrl, gameId: gameId ?? '' },
-                    {
-                        onPick: (defId, shift) => inputManager?.startBuildPlacement(defId, shift),
-                    });
-            }
 
-            // EconomyBar — native top-of-screen metal+energy panel.
-            // Disabled while ZK's gui_chili_economy_panel2.lua is the
-            // primary HUD; both used to render at top-center and stack.
-            // Re-enable here as a fallback once chili rendering is
-            // verified to fail (e.g. a soloWidget mode without WG.Chili).
+            // Native HUD panels — BuildMenu, OrderPanel, EconomyBar — are
+            // disabled while ZK's chili widgets (gui_integral_menu.lua,
+            // gui_chili_command_buttons.lua, gui_chili_economy_panel2.lua)
+            // are the primary UI. The JS panels were placeholders that
+            // doubled up with chili once it started rendering. Re-enable
+            // any of them as a fallback if the matching chili widget is
+            // confirmed to be failing (e.g. a soloWidget mode without
+            // WG.Chili). The downstream null-checks on `buildMenu?.` /
+            // `orderPanel?.` / `economyBar?.` keep this safe.
+            //
+            // if (entityRenderer && inputManager) {
+            //     buildMenu = new BuildMenu(defCache, entityRenderer, team,
+            //         { lobbyHttpUrl, gameId: gameId ?? '' },
+            //         { onPick: (defId, mods) =>
+            //             inputManager?.startBuildPlacement(defId, mods) });
+            //     orderPanel = new OrderPanel(entityRenderer, inputManager, team);
+            // }
             // economyBar = new EconomyBar({ myTeam: team });
 
             // Fetch map data + def cache in parallel. Both must complete
@@ -698,8 +705,20 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             currentWidgetManager?.forwardEntityState(snapshot, isDelta);
             currentFrame++;
         },
-        onProjectileState(snapshot) {
-            projectileRenderer?.updateFromState(snapshot);
+        // The legacy 0x04 per-tick projectile state envelope is no longer
+        // emitted by the server; ProjectileRenderer now drives off Fired /
+        // Impact / Trajectory events and integrates motion locally.
+        onProjectileFired(events) {
+            if (!projectileRenderer) return;
+            for (const e of events) projectileRenderer.onFired(e);
+        },
+        onProjectileImpacts(events) {
+            if (!projectileRenderer) return;
+            for (const e of events) projectileRenderer.onImpact(e);
+        },
+        onProjectileTrajectories(events) {
+            if (!projectileRenderer) return;
+            for (const e of events) projectileRenderer.onTrajectory(e);
         },
         onPieceState(snapshot) {
             entityRenderer?.applyPieceState(snapshot);
@@ -732,7 +751,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             commandPathRenderer?.update(queues, inputManager?.selection ?? []);
         },
         onUnitCmdDescs(units) {
+            // Forward to chili widgets via Spring.GetUnitCmdDescs(uid).
+            // Without this the integral menu's build palette stays empty
+            // even though the server is streaming the build options at
+            // ~1 Hz, because the JS BuildMenu (now disabled) was the only
+            // listener.
+            currentWidgetManager?.forwardUnitCmdDescs(units);
             buildMenu?.setCmdDescs(units);
+            orderPanel?.setCmdDescs(units);
         },
         onGameOver(frame) {
             showGameOver(frame);
@@ -786,6 +812,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         (ids) => {
             minimap?.setSelection(ids);
             buildMenu?.setSelection(ids);
+            orderPanel?.setSelection(ids);
             // Re-render paths from the cached queue snapshot so the lines
             // appear immediately on a selection change instead of waiting
             // for the next 1-second UnitCommandQueuesUpdate broadcast.
@@ -839,6 +866,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         rtsCamera.tick();
         entityRenderer?.tick();
         buildBeamRenderer?.tick();
+        projectileRenderer?.tick();
         combatFX?.tick(dt);
         scene.render();
 

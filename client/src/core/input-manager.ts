@@ -141,11 +141,19 @@ export class InputManager {
     } | null = null;
     private moveListener: ((evt: MouseEvent) => void) | null = null;
 
-    /// Pending "modal" command set by a hotkey (A=fight, P=patrol). When
-    /// non-null, the next right-click on terrain issues this command at the
-    /// click point instead of the default attack/move classification. Cleared
+    /// Pending "modal" command set by a hotkey (A=fight, P=patrol, R=repair,
+    /// E=reclaim, G=guard, etc.). When non-null, the next right-click consumes
+    /// the modal and resolves it according to `pendingCmdTarget`. Cleared
     /// after the next click or by pressing ESC.
     private pendingCmd: number | null = null;
+    /// How to resolve the next click for `pendingCmd`:
+    ///   - 'ground'  → params = [x, y, z]            (move, fight, patrol)
+    ///   - 'unit'    → params = [unitId]             (guard, attack, repair, reclaim, capture, dgun, load, resurrect)
+    ///   - 'either'  → unit if one is under cursor, else ground point
+    /// Reclaim/repair/resurrect can target features as well as units; the
+    /// server-side resolver tolerates a feature id offset by FEATURE_BIT
+    /// (handled in MobileCAI / BuilderCAI).
+    private pendingCmdTarget: 'ground' | 'unit' | 'either' = 'ground';
 
     constructor(
         scene: Scene,
@@ -236,13 +244,20 @@ export class InputManager {
      * the same `-defId` order and ignore the position params (FactoryCAI
      * looks the cmdID up in its buildOptions table).
      *
-     * The shift modifier is forwarded:
-     *   - factories: SHIFT triggers Spring's 5x build-count multiplier
-     *     (FactoryCAI::GetCountMultiplierFromOptions).
-     *   - builders: SHIFT queues the build behind existing commands and
+     * Modifiers are forwarded to the Command options bitmask:
+     *   - factories: shift=×5, ctrl=×20, shift+ctrl=×100 batch counts
+     *     (FactoryCAI::GetCountMultiplierFromOptions; OTA convention).
+     *   - builders: shift queues the build behind existing commands and
      *     keeps placement mode open for chain-building.
      */
-    startBuildPlacement(defId: number, shift: boolean = false): void {
+    startBuildPlacement(
+        defId: number,
+        mods: boolean | { shift?: boolean; ctrl?: boolean } = false,
+    ): void {
+        // Accept the legacy boolean shape from older callers.
+        const shift = typeof mods === 'boolean' ? mods : !!mods.shift;
+        const ctrl  = typeof mods === 'boolean' ? false : !!mods.ctrl;
+
         // Replace any existing placement (rapid button switch).
         this.cancelBuildPlacement();
 
@@ -250,10 +265,11 @@ export class InputManager {
 
         // Pure factory selection: queue immediately, skip ground placement.
         if (this.allSelectedAreFactories()) {
+            const options = (shift ? OPT_SHIFT : 0) | (ctrl ? OPT_CTRL : 0);
             this.commandBuffer.issueImmediate(
                 -defId, this.selectedIds.slice(),
                 [],
-                shift ? OPT_SHIFT : 0);
+                options);
             return;
         }
 
@@ -789,48 +805,94 @@ export class InputManager {
         const groundPos = this.pickGroundAt(clientX, clientY);
         if (!groundPos) return;
 
-        // Modal hotkey command (A=fight, P=patrol). The next right-click is
-        // consumed by the modal and resolves it: fight/patrol at the ground
-        // point, ignoring whatever unit happens to be near the click.
+        const opts = shift ? OPT_SHIFT : 0;
+
+        // Find the nearest non-selected unit to the click point — used both
+        // by modal-cmd resolution and the default right-click behaviour.
+        const nearest = this.pickNearestEntityAt(groundPos);
+
+        // Modal hotkey command (A=fight, P=patrol, R=repair, etc.). The
+        // pendingCmdTarget governs how the click resolves.
         if (this.pendingCmd !== null) {
-            const opts = shift ? OPT_SHIFT : 0;
-            this.commandBuffer.issueImmediate(
-                this.pendingCmd, this.selectedIds,
-                [groundPos.x, groundPos.y, groundPos.z], opts);
+            const cmd = this.pendingCmd;
             this.pendingCmd = null;
             this.updateCursorMode();
+
+            if (this.pendingCmdTarget === 'ground') {
+                this.commandBuffer.issueImmediate(
+                    cmd, this.selectedIds,
+                    [groundPos.x, groundPos.y, groundPos.z], opts);
+                return;
+            }
+            // unit-required: needs a target under the cursor; abort if none.
+            if (this.pendingCmdTarget === 'unit') {
+                if (nearest.id < 0) return;
+                this.commandBuffer.issueImmediate(cmd, this.selectedIds, [nearest.id], opts);
+                return;
+            }
+            // either: prefer unit if there is one nearby, else ground point.
+            if (nearest.id >= 0) {
+                this.commandBuffer.issueImmediate(cmd, this.selectedIds, [nearest.id], opts);
+            } else {
+                this.commandBuffer.issueImmediate(
+                    cmd, this.selectedIds,
+                    [groundPos.x, groundPos.y, groundPos.z], opts);
+            }
             return;
         }
 
-        // Find the nearest non-selected unit to the click point. We classify
-        // it as friendly or hostile from its team, falling back to "hostile"
-        // when myTeam is unknown (pre-auth) or the entity meta hasn't streamed.
-        let targetId = -1;
-        let targetTeam = -1;
-        let targetDist = SELECT_RADIUS * SELECT_RADIUS;
-        for (const [id, meta] of this.entityRenderer.getEntities()) {
-            if (this.selectedIds.includes(id)) continue;
-            const pos = this.entityRenderer.getEntityPosition(id);
+        if (nearest.id >= 0) {
+            const isFriendly = this.myTeam >= 0 && nearest.team === this.myTeam;
+            // Friendly → Guard (assist/escort). Enemy → Attack.
+            const cmd = isFriendly ? CMD.GUARD : CMD.ATTACK;
+            this.commandBuffer.issueImmediate(cmd, this.selectedIds, [nearest.id], opts);
+        } else {
+            this.commandBuffer.issueImmediate(CMD.MOVE, this.selectedIds, [groundPos.x, groundPos.y, groundPos.z], opts);
+        }
+    }
+
+    /** Pick the nearest non-selected entity within SELECT_RADIUS of a ground
+     *  point. Returns id<0 when nothing matches. Used for right-click target
+     *  classification and modal-command resolution. */
+    private pickNearestEntityAt(groundPos: Vector3): { id: number; team: number } {
+        let id = -1;
+        let team = -1;
+        let bestSq = SELECT_RADIUS * SELECT_RADIUS;
+        for (const [eid, meta] of this.entityRenderer.getEntities()) {
+            if (this.selectedIds.includes(eid)) continue;
+            const pos = this.entityRenderer.getEntityPosition(eid);
             if (!pos) continue;
             const dx = pos.x - groundPos.x;
             const dz = pos.z - groundPos.z;
             const distSq = dx * dx + dz * dz;
-            if (distSq < targetDist) {
-                targetDist = distSq;
-                targetId = id;
-                targetTeam = meta.team;
+            if (distSq < bestSq) {
+                bestSq = distSq;
+                id = eid;
+                team = meta.team;
             }
         }
+        return { id, team };
+    }
 
-        const opts = shift ? OPT_SHIFT : 0;
-        if (targetId >= 0) {
-            const isFriendly = this.myTeam >= 0 && targetTeam === this.myTeam;
-            // Friendly → Guard (assist/escort). Enemy → Attack.
-            const cmd = isFriendly ? CMD.GUARD : CMD.ATTACK;
-            this.commandBuffer.issueImmediate(cmd, this.selectedIds, [targetId], opts);
-        } else {
-            this.commandBuffer.issueImmediate(CMD.MOVE, this.selectedIds, [groundPos.x, groundPos.y, groundPos.z], opts);
-        }
+    /** Arm a modal command — the next right-click resolves it. Used both by
+     *  the keyboard handler and the order-panel UI. `target` controls how the
+     *  click is interpreted (ground point, unit id, or either). */
+    armPendingCommand(cmd: number, target: 'ground' | 'unit' | 'either'): void {
+        this.pendingCmd = cmd;
+        this.pendingCmdTarget = target;
+        this.updateCursorMode();
+    }
+
+    /** True if a modal command is currently armed. */
+    hasPendingCommand(): boolean {
+        return this.pendingCmd !== null;
+    }
+
+    /** Issue a command immediately — used by the order panel for instant
+     *  toggles (stop, fire-state, move-state, on/off, repeat, trajectory). */
+    issueImmediateCommand(cmd: number, params: number[], options: number = 0): void {
+        if (this.selectedIds.length === 0) return;
+        this.commandBuffer.issueImmediate(cmd, this.selectedIds, params, options);
     }
 
     // ---- Keyboard ----
@@ -862,46 +924,130 @@ export class InputManager {
 
             if (this.selectedIds.length === 0) return;
 
+            // Don't fire hotkeys while modifiers are held (Ctrl-A is browser
+            // select-all, Cmd-W closes the tab, etc.). Shift is treated as
+            // queue-mode and is handled per-command below where it makes sense.
+            if (e.ctrlKey || e.altKey || e.metaKey) return;
+
+            const queue = e.shiftKey ? OPT_SHIFT : 0;
+
             switch (e.key.toLowerCase()) {
+                // ---- Instant orders ----
                 case 's':
                     this.commandBuffer.issueImmediate(CMD.STOP, this.selectedIds, []);
                     break;
+                case 'w':
+                    // Wait — Spring's "pause this unit's queue" toggle.
+                    this.commandBuffer.issueImmediate(CMD.WAIT, this.selectedIds, [], queue);
+                    break;
                 case 'h':
+                    // Hold position — sets MOVE_STATE to 0.
                     this.commandBuffer.issueImmediate(CMD.MOVE_STATE, this.selectedIds, [0]);
                     break;
+                case 'q':
+                    // Cycle fire-state (hold-fire → return-fire → fire-at-will).
+                    // Without per-unit state on the client we just bump it; the
+                    // server clamps modulo the unit's allowed range.
+                    this.cycleFireState();
+                    break;
+                case 'i':
+                    // Toggle idle mode (factories: rally vs roam newly built units).
+                    this.commandBuffer.issueImmediate(CMD.IDLEMODE, this.selectedIds, [-1]);
+                    break;
+
+                // ---- Modal target-then-click commands ----
+                case 'm':
+                    // Move — explicit modal so right-click can be reserved
+                    // for default behaviour. Next click resolves to ground.
+                    this.armPendingCommand(CMD.MOVE, 'ground');
+                    break;
                 case 'a':
-                    // Attack-move: arms a modal command. Next right-click on
-                    // ground issues a FIGHT order at the click point.
-                    this.pendingCmd = CMD.FIGHT;
-                    this.updateCursorMode();
+                case 'f':
+                    // Attack-move / Fight: ground target.
+                    this.armPendingCommand(CMD.FIGHT, 'ground');
                     break;
                 case 'p':
-                    // Patrol: arms a modal command. Next right-click on ground
-                    // becomes a PATROL waypoint.
-                    this.pendingCmd = CMD.PATROL;
-                    this.updateCursorMode();
+                    // Patrol: ground waypoint.
+                    this.armPendingCommand(CMD.PATROL, 'ground');
                     break;
-                case 'f':
-                    // Fight (alias of attack-move; matches Spring's keybinding).
-                    this.pendingCmd = CMD.FIGHT;
-                    this.updateCursorMode();
+                case 'g':
+                    // Guard: friendly unit.
+                    this.armPendingCommand(CMD.GUARD, 'unit');
+                    break;
+                case 'r':
+                    // Repair: friendly unit (or feature for builders).
+                    this.armPendingCommand(CMD.REPAIR, 'unit');
+                    break;
+                case 'e':
+                    // rEclaim: feature / unit / wreck.
+                    this.armPendingCommand(CMD.RECLAIM, 'either');
+                    break;
+                case 'c':
+                    // Capture: enemy unit.
+                    this.armPendingCommand(CMD.CAPTURE, 'unit');
+                    break;
+                case 'x':
+                    // Resurrect: feature (corpse).
+                    this.armPendingCommand(CMD.RESURRECT, 'either');
+                    break;
+                case 'd':
+                    // D-gun / manual fire: enemy unit (or ground for AoE D-guns).
+                    this.armPendingCommand(CMD.MANUALFIRE, 'either');
+                    break;
+                case 'l':
+                    // Load units into transport: friendly unit.
+                    this.armPendingCommand(CMD.LOAD_UNITS, 'unit');
+                    break;
+                case 'u':
+                    // Unload units from transport at ground point.
+                    this.armPendingCommand(CMD.UNLOAD_UNITS, 'ground');
                     break;
             }
         });
     }
 
+    /** Bump fire state by one (hold → return-fire → fire-at-will → hold).
+     *  Without per-unit state cached client-side we always send the next
+     *  step; the server clamps it. */
+    private cycleFireState(): void {
+        // Spring's fire-state values: 0 = hold, 1 = return, 2 = fire at will.
+        // We send a synthetic "advance" via param=-1 if the server supports
+        // it; otherwise step through 0/1/2 from a local cycle counter.
+        const next = (this.fireStateCycle + 1) % 3;
+        this.fireStateCycle = next;
+        this.commandBuffer.issueImmediate(CMD.FIRE_STATE, this.selectedIds, [next]);
+    }
+    private fireStateCycle = 2;
+
     /** Reflect pendingCmd in the canvas cursor so the player can see they're
-     *  in attack-move/patrol mode. Falls back to the default cursor when no
+     *  in a modal-command mode. Falls back to the default cursor when no
      *  modal command is pending. */
     private updateCursorMode(): void {
         const canvas = this.scene.getEngine().getRenderingCanvas();
         if (!canvas) return;
-        if (this.pendingCmd === CMD.FIGHT) {
-            canvas.style.cursor = 'crosshair';
-        } else if (this.pendingCmd === CMD.PATROL) {
-            canvas.style.cursor = 'cell';
-        } else {
-            canvas.style.cursor = '';
+        switch (this.pendingCmd) {
+            case CMD.FIGHT:
+            case CMD.ATTACK:
+            case CMD.MANUALFIRE:
+                canvas.style.cursor = 'crosshair';
+                break;
+            case CMD.PATROL:
+                canvas.style.cursor = 'cell';
+                break;
+            case CMD.MOVE:
+            case CMD.UNLOAD_UNITS:
+                canvas.style.cursor = 'move';
+                break;
+            case CMD.GUARD:
+            case CMD.REPAIR:
+            case CMD.RECLAIM:
+            case CMD.CAPTURE:
+            case CMD.RESURRECT:
+            case CMD.LOAD_UNITS:
+                canvas.style.cursor = 'pointer';
+                break;
+            default:
+                canvas.style.cursor = '';
         }
     }
 

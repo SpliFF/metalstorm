@@ -376,6 +376,20 @@ export class LuaWidgetManager {
         })) });
     }
 
+    /** Push a per-unit command-descriptor snapshot into the worker.
+     *  Server streams build (cmdId<0) entries at ~1 Hz; widgets read
+     *  these via Spring.GetUnitCmdDescs to populate their build menus. */
+    forwardUnitCmdDescs(units: ReadonlyArray<{
+        unitId: number;
+        cmds: ReadonlyArray<{ cmdId: number; disabled: boolean }>;
+    }>): void {
+        if (this.disposed) return;
+        this.postToWorker({ type: 'unitCmdDescs', units: units.map(u => ({
+            unitId: u.unitId,
+            cmds: u.cmds.map(c => ({ cmdId: c.cmdId, disabled: c.disabled })),
+        })) });
+    }
+
     /** Push a batch of weapon defs into the worker. */
     forwardWeaponDefs(defs: ReadonlyArray<{
         defId: number; name: string; visualType: number;
