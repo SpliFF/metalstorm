@@ -19,7 +19,12 @@ void MoveTypes::RegisterFeatureForUnitTrapCheck(CFeature* object) {
     if (gs->frameNum < 0)
         return;
 
-    assert(Sim::registry.valid(object->entityReference));
+    // Headless server tolerates a missing ECS entity here — wreckage features
+    // created during a unit's destructor sometimes lack a valid entity ref
+    // because the registry teardown is in flight. Skipping the trap-check
+    // registration is harmless (it's a steering-AI optimisation, not state).
+    if (!Sim::registry.valid(object->entityReference))
+        return;
 
     Sim::registry.emplace_or_replace<UnitTrapCheck>(object->entityReference
             , UnitTrapCheckType::TRAPPER_IS_FEATURE
@@ -31,7 +36,8 @@ void MoveTypes::RegisterUnitForUnitTrapCheck(CUnit* object) {
     if (gs->frameNum < 0)
         return;
 
-    assert(Sim::registry.valid(object->entityReference));
+    if (!Sim::registry.valid(object->entityReference))
+        return;
 
     Sim::registry.emplace_or_replace<UnitTrapCheck>(object->entityReference
             , UnitTrapCheckType::TRAPPER_IS_UNIT

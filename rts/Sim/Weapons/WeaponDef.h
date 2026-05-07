@@ -11,10 +11,19 @@
 #include "Sim/Misc/GlobalConstants.h"
 #include "Sim/Misc/Resource.h"
 
-// Stub — full texture atlas removed with rendering
+// Stub — full texture atlas removed with rendering. The headless server
+// never populates these (no GL atlas loader runs) but laser/beam/missile
+// projectile constructors still read xstart/xend off `visuals.texture2`
+// to compute texture mid-coords. Returning a singleton fallback keeps
+// the math defined and avoids a null-deref crash when units fire.
 struct AtlasedTexture {
 	float xstart = 0.0f, xend = 1.0f;
 	float ystart = 0.0f, yend = 1.0f;
+
+	static AtlasedTexture* GetFallback() {
+		static AtlasedTexture instance;
+		return &instance;
+	}
 };
 class CColorMap;
 #include "Sim/Units/Scripts/LocalModelPieceStub.h"
@@ -235,10 +244,10 @@ public:
 		CColorMap* colorMap = nullptr;
 		CColorMap* scarGlowColorMap = nullptr;
 
-		AtlasedTexture* texture1 = nullptr;
-		AtlasedTexture* texture2 = nullptr;
-		AtlasedTexture* texture3 = nullptr;
-		AtlasedTexture* texture4 = nullptr;
+		AtlasedTexture* texture1 = AtlasedTexture::GetFallback();
+		AtlasedTexture* texture2 = AtlasedTexture::GetFallback();
+		AtlasedTexture* texture3 = AtlasedTexture::GetFallback();
+		AtlasedTexture* texture4 = AtlasedTexture::GetFallback();
 
 		std::string modelName;
 		std::string texNames[4];
