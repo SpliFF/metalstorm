@@ -2,11 +2,14 @@
  * RTSCamera — top-down tactical camera controls.
  *
  * Handles:
- *   - WASD / arrow keys       → pan on the XZ plane
+ *   - Arrow keys              → pan on the XZ plane (Spring/ZK default;
+ *                                WASD is reserved for unit orders, not
+ *                                camera pan, to match `uikeys.txt`)
  *   - Mouse wheel             → zoom (changes camera height and target distance)
  *   - Edge-scrolling          → pan when the mouse nears a screen edge
- *   - Middle-mouse + drag     → orbit the camera around its look-at point
- *                               (horizontal drag yaws, vertical drag tilts)
+ *   - Middle-mouse + drag     → pan the camera on the XZ plane (matches
+ *                                Recoil's Spring/TA camera default — drag
+ *                                world stays glued to the cursor)
  *   - Right-mouse + drag      → orbit around the *ground point under the
  *                               cursor at drag start*. A right-click without
  *                               drag falls through to onRightClickCommit so
@@ -42,7 +45,7 @@ export interface RTSCameraConfig {
     zoomStep?: number;
     /** Edge-scroll threshold in pixels. 0 to disable. */
     edgeScrollPixels?: number;
-    /** Radians of yaw / tilt per pixel of middle-mouse drag. */
+    /** Radians of yaw / tilt per pixel of right-mouse drag. */
     orbitSpeed?: number;
 }
 
@@ -63,13 +66,16 @@ export class RTSCamera {
     private lastTickTime = performance.now();
     private disposed = false;
 
-    // Middle-mouse orbit state. Last drag position is in client-space
+    // Middle-mouse pan state. Last drag position is in client-space
     // (window pixels, not canvas-relative) because we attach the move/up
-    // listeners to `window` for the duration of the drag so the orbit
-    // keeps tracking even if the cursor leaves the canvas.
-    private orbitDragging = false;
-    private orbitLastX = 0;
-    private orbitLastY = 0;
+    // listeners to `window` for the duration of the drag so the pan
+    // keeps tracking even if the cursor leaves the canvas. The camera
+    // pans at a rate scaled by current height so the world point under
+    // the cursor stays roughly glued to it as you drag — Recoil's
+    // Spring/TA camera default behaviour.
+    private middleDragging = false;
+    private middleLastX = 0;
+    private middleLastY = 0;
 
     // Right-mouse orbit state. Pivot is the ground point under the cursor
     // at mousedown — it stays fixed in world space for the entire drag.
@@ -169,7 +175,7 @@ export class RTSCamera {
         this.mouseInCanvas = false;
     };
 
-    // Middle-mouse press on the canvas starts an orbit drag. We use
+    // Middle-mouse press on the canvas starts a pan drag. We use
     // pointer events (not mouse events) because Babylon hooks pointer
     // events via scene.onPointerObservable, and modern browsers don't
     // always generate compatibility `mousedown` events for middle
@@ -186,9 +192,9 @@ export class RTSCamera {
         // click can never be mistaken for a selection/command.
         e.preventDefault();
         e.stopPropagation();
-        this.orbitDragging = true;
-        this.orbitLastX = e.clientX;
-        this.orbitLastY = e.clientY;
+        this.middleDragging = true;
+        this.middleLastX = e.clientX;
+        this.middleLastY = e.clientY;
         try {
             this.canvas.setPointerCapture(e.pointerId);
             this.capturedPointerId = e.pointerId;
@@ -206,19 +212,19 @@ export class RTSCamera {
     };
 
     private onPointerMove = (e: PointerEvent): void => {
-        if (!this.orbitDragging) return;
-        const dx = e.clientX - this.orbitLastX;
-        const dy = e.clientY - this.orbitLastY;
-        this.orbitLastX = e.clientX;
-        this.orbitLastY = e.clientY;
+        if (!this.middleDragging) return;
+        const dx = e.clientX - this.middleLastX;
+        const dy = e.clientY - this.middleLastY;
+        this.middleLastX = e.clientX;
+        this.middleLastY = e.clientY;
         if (dx !== 0 || dy !== 0) {
-            this.orbitBy(dx, dy);
+            this.middleDragPanBy(dx, dy);
         }
     };
 
     private onPointerUp = (e: PointerEvent): void => {
         if (e.button !== 1) return;
-        this.orbitDragging = false;
+        this.middleDragging = false;
         if (this.capturedPointerId >= 0) {
             try { this.canvas.releasePointerCapture(this.capturedPointerId); } catch { /* already released */ }
             this.capturedPointerId = -1;
@@ -228,6 +234,31 @@ export class RTSCamera {
         window.removeEventListener('pointermove', this.onPointerMove);
         window.removeEventListener('pointerup', this.onPointerUp);
     };
+
+    /** Translate the camera so the world point under the cursor follows
+     *  the cursor 1:1 — i.e. dragging the mouse right scrolls the world
+     *  right, dragging down scrolls the world down. The conversion from
+     *  screen pixels to world elmos uses the camera's vertical FOV and
+     *  current height so the gluing is roughly correct at any zoom. */
+    private middleDragPanBy(dxPx: number, dyPx: number): void {
+        const h = this.canvas.clientHeight || 1;
+        // World-elmos per screen pixel at the look-at depth.
+        // 2 * height * tan(fov/2) covers the visible vertical span at
+        // ground level for a near-vertical overhead camera; spreading
+        // that across `h` pixels gives elmos-per-pixel.
+        const fov = this.camera.fov; // radians
+        const verticalSpan = 2.0 * Math.max(50, this.camera.position.y) * Math.tan(fov * 0.5);
+        const elmoPerPx = verticalSpan / h;
+
+        // Negate so the world drags with the cursor (camera moves the
+        // opposite direction of the cursor delta).
+        const sx = -dxPx * elmoPerPx;
+        const sy = -dyPx * elmoPerPx;
+
+        const dx = this.right.x * sx + this.forward.x * sy;
+        const dz = this.right.z * sx + this.forward.z * sy;
+        this.panBy(dx, dz);
+    }
 
     // Right-click drag: ground-pivoted orbit. We claim the event in the
     // capture phase so InputManager's pointer observer never sees it; if
@@ -400,10 +431,11 @@ export class RTSCamera {
         const distance = this.panSpeed * heightFactor * dt;
 
         let moveX = 0, moveZ = 0;
-        if (this.keys.has('w') || this.keys.has('arrowup'))    moveZ += 1;
-        if (this.keys.has('s') || this.keys.has('arrowdown'))  moveZ -= 1;
-        if (this.keys.has('a') || this.keys.has('arrowleft'))  moveX -= 1;
-        if (this.keys.has('d') || this.keys.has('arrowright')) moveX += 1;
+        // Arrow keys only — Spring/ZK reserve WASD for unit orders.
+        if (this.keys.has('arrowup'))    moveZ += 1;
+        if (this.keys.has('arrowdown'))  moveZ -= 1;
+        if (this.keys.has('arrowleft'))  moveX -= 1;
+        if (this.keys.has('arrowright')) moveX += 1;
 
         // Edge scrolling
         if (this.edgeScrollPixels > 0 && this.mouseInCanvas) {
@@ -928,8 +960,8 @@ export class RTSCamera {
         const t = this.transition!;
         t.elapsed += dt * 1000;
 
-        // Any user input (keys, orbit drag, wheel) cancels the animation
-        if (this.keys.size > 0 || this.orbitDragging) {
+        // Any user input (keys, middle/right drag, wheel) cancels the animation
+        if (this.keys.size > 0 || this.middleDragging || this.rightDragging) {
             this.transition = null;
             return;
         }
@@ -963,7 +995,7 @@ export class RTSCamera {
         // camera is disposed mid-drag. These are registered on
         // either the canvas (normal path) or window (setPointerCapture
         // fallback path) so we have to try both.
-        if (this.orbitDragging) {
+        if (this.middleDragging) {
             this.canvas.removeEventListener('pointermove', this.onPointerMove);
             this.canvas.removeEventListener('pointerup', this.onPointerUp);
             window.removeEventListener('pointermove', this.onPointerMove);
@@ -972,7 +1004,7 @@ export class RTSCamera {
                 try { this.canvas.releasePointerCapture(this.capturedPointerId); } catch { /* already released */ }
                 this.capturedPointerId = -1;
             }
-            this.orbitDragging = false;
+            this.middleDragging = false;
         }
         if (this.rightDragging) {
             this.canvas.removeEventListener('pointermove', this.onRightMove);

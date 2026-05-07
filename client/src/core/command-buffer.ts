@@ -27,22 +27,52 @@ interface PendingCommand {
     timestamp: number;
 }
 
-/** Standard Spring command IDs. */
+/** Standard Spring command IDs. Mirrors rts/Sim/Units/CommandAI/Command.h. */
 export const CMD = {
     STOP: 0,
+    WAIT: 5,
     MOVE: 10,
     PATROL: 15,
     FIGHT: 16,
     ATTACK: 20,
     AREA_ATTACK: 21,
     GUARD: 25,
+    GROUPSELECT: 35,
+    GROUPADD: 36,
+    GROUPCLEAR: 37,
     REPAIR: 40,
     FIRE_STATE: 45,
     MOVE_STATE: 50,
+    SETBASE: 55,
+    INTERNAL: 60,
+    SELFD: 65,
     LOAD_UNITS: 75,
+    LOAD_ONTO: 76,
     UNLOAD_UNITS: 80,
+    UNLOAD_UNIT: 81,
+    ONOFF: 85,
     RECLAIM: 90,
     CLOAK: 95,
+    STOCKPILE: 100,
+    MANUALFIRE: 105,
+    RESTORE: 110,
+    REPEAT: 115,
+    TRAJECTORY: 120,
+    RESURRECT: 125,
+    CAPTURE: 130,
+    AUTOREPAIRLEVEL: 135,
+    LOOPBACKATTACK: 140,
+    IDLEMODE: 145,
+} as const;
+
+/** Spring command-option bitfield (matches rts/Sim/Units/CommandAI/Command.h). */
+export const OPT = {
+    META: 4,
+    INTERNAL: 8,
+    RIGHT: 16,
+    SHIFT: 32,
+    CONTROL: 64,
+    ALT: 128,
 } as const;
 
 /** Returns true if a command is positional (benefits from debouncing). */
