@@ -215,7 +215,15 @@ static bool DecodeDxtToRgba(const uint8_t* src, size_t srcLen,
             if (blockBytes == 8) {
                 DecodeDxt1Block(blk, dstBase, stride, dxt1Alpha);
             } else {
-                // 16-byte block: alpha first (8 bytes) then color (8).
+                // 16-byte block: alpha (8 bytes) followed by color (8).
+                // Decode color first so the placeholder alpha=255 it writes
+                // is then overwritten by the real alpha block. Reversing the
+                // two calls — as we previously did — clobbered the decoded
+                // alpha and produced an all-opaque RGBA8 buffer, which in
+                // turn caused basisu to drop the alpha slice entirely. With
+                // tex1.alpha as the team-colour mask, that meant every unit
+                // sampled mask=1 and rendered fully team-coloured.
+                DecodeDxt1Block(blk + 8, dstBase, stride, /*dxt1Alpha*/ false);
                 if (isDxt5) {
                     DecodeDxt5AlphaBlock(blk, dstBase, stride);
                 } else {
@@ -228,7 +236,6 @@ static bool DecodeDxtToRgba(const uint8_t* src, size_t srcLen,
                         }
                     }
                 }
-                DecodeDxt1Block(blk + 8, dstBase, stride, /*dxt1Alpha*/ false);
             }
         }
     }
