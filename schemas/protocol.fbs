@@ -368,10 +368,81 @@ table GameEvent {
     payload: [uint8];           // Opaque event payload
 }
 
+/// Why a projectile died — drives the impact VFX the client plays.
+enum ProjectileImpactKind : uint8 {
+    Terrain = 0,        // ground / water hit
+    Unit = 1,           // hit a unit (target_id is the unit)
+    Feature = 2,        // hit a feature (target_id is the feature)
+    Shield = 3,         // absorbed by a shield (target_id is the shield-host)
+    SelfDetonate = 4,   // ttl expired / self-explode
+    Intercepted = 5,    // killed by an interceptor weapon
+    Other = 6,          // catch-all (out of bounds, lua-killed, etc.)
+}
+
+/// Why a trajectory event was emitted. Lets the client pick a fitting visual
+/// (sparks for a bounce, a re-aim puff for steering, etc.).
+enum ProjectileTrajectoryReason : uint8 {
+    Bounce = 0,
+    Steered = 1,
+    InterceptRetarget = 2,
+}
+
+/// Projectile creation event. Sent once per projectile, when the server
+/// instantiates it. The client uses this to spawn a local visual that
+/// runs the same ballistic / hit-scan motion the simulation runs — no
+/// per-frame position stream is needed for short-lived projectiles.
+table ProjectileFiredEvent {
+    proj_id: uint32;
+    weapon_def_id: uint16;
+    owner_id: uint32;          // firing unit (0 if unknown)
+    team: uint8;
+    pos: Vec3;                 // launch position (muzzle)
+    vel: Vec3;                 // initial velocity (elmos / sim frame)
+    target_pos: Vec3;          // intended impact / aim point (for hit-scan endpoints, ttl computation)
+    target_id: uint32;         // tracked unit id, 0 if ground/feature
+    ttl: int16;                // sim frames until self-detonate (0 = unbounded)
+    gravity: float;            // per-frame gravity (0 for direct/laser/missile-with-tracker)
+    /// Hit-scan flag — when true the client renders a beam from pos→target_pos
+    /// for one tick (or the weapon's beam duration) and discards.
+    hitscan: bool = false;
+}
+
+/// Projectile death event. Sent exactly once per projectile, when it
+/// collides, expires, or is intercepted. Triggers explosion VFX +
+/// removes the local projectile entry.
+table ProjectileImpactEvent {
+    proj_id: uint32;
+    pos: Vec3;
+    impact_kind: ProjectileImpactKind;
+    target_id: uint32;         // hit unit/feature/shield-host (0 for terrain)
+    /// Owner-team id — used by the per-session LOS filter so a client
+    /// always sees impacts from its own/allied projectiles, even if the
+    /// impact happens in fog of war.
+    team: uint8 = 0;
+}
+
+/// Trajectory change event. Sent only when the projectile bounces,
+/// is steered onto a new target, or has its motion overridden. The
+/// client rewrites its local projectile's pos+vel at the given frame.
+table ProjectileTrajectoryEvent {
+    proj_id: uint32;
+    pos: Vec3;
+    vel: Vec3;
+    reason: ProjectileTrajectoryReason;
+    /// Owner-team id — see ProjectileImpactEvent.team. Lets the per-session
+    /// filter keep ally trajectory updates flowing through fog of war.
+    team: uint8 = 0;
+}
+
 table GameEventBatch {
     frame: uint32;
     events: [GameEvent];
     combat_events: [CombatEvent];
+    /// Projectile lifecycle events. Sent each tick they occur; the
+    /// per-projectile state stream (envelope 0x04) is no longer used.
+    projectile_fired: [ProjectileFiredEvent];
+    projectile_impacts: [ProjectileImpactEvent];
+    projectile_trajectories: [ProjectileTrajectoryEvent];
 }
 
 table ResourceUpdate {

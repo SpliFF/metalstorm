@@ -6,6 +6,9 @@ import * as flatbuffers from 'flatbuffers';
 
 import { CombatEvent, CombatEventT } from '../spring-web/combat-event.js';
 import { GameEvent, GameEventT } from '../spring-web/game-event.js';
+import { ProjectileFiredEvent, ProjectileFiredEventT } from '../spring-web/projectile-fired-event.js';
+import { ProjectileImpactEvent, ProjectileImpactEventT } from '../spring-web/projectile-impact-event.js';
+import { ProjectileTrajectoryEvent, ProjectileTrajectoryEventT } from '../spring-web/projectile-trajectory-event.js';
 
 
 export class GameEventBatch implements flatbuffers.IUnpackableObject<GameEventBatchT> {
@@ -51,8 +54,42 @@ combatEventsLength():number {
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
+/**
+ * Projectile lifecycle events. Sent each tick they occur; the
+ * per-projectile state stream (envelope 0x04) is no longer used.
+ */
+projectileFired(index: number, obj?:ProjectileFiredEvent):ProjectileFiredEvent|null {
+  const offset = this.bb!.__offset(this.bb_pos, 10);
+  return offset ? (obj || new ProjectileFiredEvent()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
+}
+
+projectileFiredLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 10);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
+projectileImpacts(index: number, obj?:ProjectileImpactEvent):ProjectileImpactEvent|null {
+  const offset = this.bb!.__offset(this.bb_pos, 12);
+  return offset ? (obj || new ProjectileImpactEvent()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
+}
+
+projectileImpactsLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 12);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
+projectileTrajectories(index: number, obj?:ProjectileTrajectoryEvent):ProjectileTrajectoryEvent|null {
+  const offset = this.bb!.__offset(this.bb_pos, 14);
+  return offset ? (obj || new ProjectileTrajectoryEvent()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
+}
+
+projectileTrajectoriesLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 14);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
 static startGameEventBatch(builder:flatbuffers.Builder) {
-  builder.startObject(3);
+  builder.startObject(6);
 }
 
 static addFrame(builder:flatbuffers.Builder, frame:number) {
@@ -91,16 +128,67 @@ static startCombatEventsVector(builder:flatbuffers.Builder, numElems:number) {
   builder.startVector(4, numElems, 4);
 }
 
+static addProjectileFired(builder:flatbuffers.Builder, projectileFiredOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(3, projectileFiredOffset, 0);
+}
+
+static createProjectileFiredVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startProjectileFiredVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
+static addProjectileImpacts(builder:flatbuffers.Builder, projectileImpactsOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(4, projectileImpactsOffset, 0);
+}
+
+static createProjectileImpactsVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startProjectileImpactsVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
+static addProjectileTrajectories(builder:flatbuffers.Builder, projectileTrajectoriesOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(5, projectileTrajectoriesOffset, 0);
+}
+
+static createProjectileTrajectoriesVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startProjectileTrajectoriesVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
 static endGameEventBatch(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOffset:flatbuffers.Offset, combatEventsOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOffset:flatbuffers.Offset, combatEventsOffset:flatbuffers.Offset, projectileFiredOffset:flatbuffers.Offset, projectileImpactsOffset:flatbuffers.Offset, projectileTrajectoriesOffset:flatbuffers.Offset):flatbuffers.Offset {
   GameEventBatch.startGameEventBatch(builder);
   GameEventBatch.addFrame(builder, frame);
   GameEventBatch.addEvents(builder, eventsOffset);
   GameEventBatch.addCombatEvents(builder, combatEventsOffset);
+  GameEventBatch.addProjectileFired(builder, projectileFiredOffset);
+  GameEventBatch.addProjectileImpacts(builder, projectileImpactsOffset);
+  GameEventBatch.addProjectileTrajectories(builder, projectileTrajectoriesOffset);
   return GameEventBatch.endGameEventBatch(builder);
 }
 
@@ -108,7 +196,10 @@ unpack(): GameEventBatchT {
   return new GameEventBatchT(
     this.frame(),
     this.bb!.createObjList<GameEvent, GameEventT>(this.events.bind(this), this.eventsLength()),
-    this.bb!.createObjList<CombatEvent, CombatEventT>(this.combatEvents.bind(this), this.combatEventsLength())
+    this.bb!.createObjList<CombatEvent, CombatEventT>(this.combatEvents.bind(this), this.combatEventsLength()),
+    this.bb!.createObjList<ProjectileFiredEvent, ProjectileFiredEventT>(this.projectileFired.bind(this), this.projectileFiredLength()),
+    this.bb!.createObjList<ProjectileImpactEvent, ProjectileImpactEventT>(this.projectileImpacts.bind(this), this.projectileImpactsLength()),
+    this.bb!.createObjList<ProjectileTrajectoryEvent, ProjectileTrajectoryEventT>(this.projectileTrajectories.bind(this), this.projectileTrajectoriesLength())
   );
 }
 
@@ -117,6 +208,9 @@ unpackTo(_o: GameEventBatchT): void {
   _o.frame = this.frame();
   _o.events = this.bb!.createObjList<GameEvent, GameEventT>(this.events.bind(this), this.eventsLength());
   _o.combatEvents = this.bb!.createObjList<CombatEvent, CombatEventT>(this.combatEvents.bind(this), this.combatEventsLength());
+  _o.projectileFired = this.bb!.createObjList<ProjectileFiredEvent, ProjectileFiredEventT>(this.projectileFired.bind(this), this.projectileFiredLength());
+  _o.projectileImpacts = this.bb!.createObjList<ProjectileImpactEvent, ProjectileImpactEventT>(this.projectileImpacts.bind(this), this.projectileImpactsLength());
+  _o.projectileTrajectories = this.bb!.createObjList<ProjectileTrajectoryEvent, ProjectileTrajectoryEventT>(this.projectileTrajectories.bind(this), this.projectileTrajectoriesLength());
 }
 }
 
@@ -124,18 +218,27 @@ export class GameEventBatchT implements flatbuffers.IGeneratedObject {
 constructor(
   public frame: number = 0,
   public events: (GameEventT)[] = [],
-  public combatEvents: (CombatEventT)[] = []
+  public combatEvents: (CombatEventT)[] = [],
+  public projectileFired: (ProjectileFiredEventT)[] = [],
+  public projectileImpacts: (ProjectileImpactEventT)[] = [],
+  public projectileTrajectories: (ProjectileTrajectoryEventT)[] = []
 ){}
 
 
 pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const events = GameEventBatch.createEventsVector(builder, builder.createObjectOffsetList(this.events));
   const combatEvents = GameEventBatch.createCombatEventsVector(builder, builder.createObjectOffsetList(this.combatEvents));
+  const projectileFired = GameEventBatch.createProjectileFiredVector(builder, builder.createObjectOffsetList(this.projectileFired));
+  const projectileImpacts = GameEventBatch.createProjectileImpactsVector(builder, builder.createObjectOffsetList(this.projectileImpacts));
+  const projectileTrajectories = GameEventBatch.createProjectileTrajectoriesVector(builder, builder.createObjectOffsetList(this.projectileTrajectories));
 
   return GameEventBatch.createGameEventBatch(builder,
     this.frame,
     events,
-    combatEvents
+    combatEvents,
+    projectileFired,
+    projectileImpacts,
+    projectileTrajectories
   );
 }
 }

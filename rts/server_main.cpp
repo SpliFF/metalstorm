@@ -17,6 +17,9 @@
 #include "Server/BuildActivitySerializer.h"
 #include "Server/ContentServer.h"
 #include "Server/CombatEventCollector.h"
+#include "Server/ProjectileEventCollector.h"
+#include "Sim/Misc/LosHandler.h"
+#include "Sim/Misc/TeamHandler.h"
 #include "Server/DefsCache.h"
 #include "Server/StandingOrders.h"
 #include "Server/AI/AIRuntimePool.h"
@@ -1601,25 +1604,14 @@ int main(int argc, char* argv[])
         }
         }
 
-        // Send projectile state to all clients every 3 ticks (~10 Hz).
-        // Weapon defs are delivered eagerly via HTTP at game start
-        // (see DefsCache::WriteIfMissing); no per-batch streaming.
-        {
-        int curFrame = sim.GetFrameNum();
-        if (curFrame >= 0 && (curFrame % 3) == 0 && rtcServer.GetClientCount() > 0) {
-            auto projData = ProjectileState::SerializeAllProjectiles();
-            if (!projData.empty()) {
-                std::vector<uint8_t> projFrame;
-                projFrame.reserve(1 + projData.size());
-                projFrame.push_back(Protocol::ENVELOPE_PROJECTILE_STATE);
-                projFrame.insert(projFrame.end(), projData.begin(), projData.end());
-
-                sessions.ForEachSession([&](ClientID clientId, ClientSession&) {
-                    rtcServer.SendUnreliable(clientId, projFrame.data(), projFrame.size());
-                });
-            }
-        }
-        }
+        // Projectile state used to stream every 3 ticks under envelope 0x04
+        // as a struct-of-arrays snapshot of every live projectile. That
+        // model has been replaced by event-based streaming: ProjectileFired
+        // / ProjectileImpact / ProjectileTrajectory events ride alongside
+        // combat events in the GameEventBatch broadcast below. The client
+        // simulates motion locally between events. The serializer is kept
+        // around (still useful for diagnostics / replays) but is no longer
+        // wired into the broadcast path.
 
         // Send animated piece transforms (envelope 0x05) at the same
         // ~10 Hz cadence as projectiles. Piece animation is purely
@@ -1710,13 +1702,92 @@ int main(int argc, char* argv[])
             }
         }
 
-        // Broadcast combat events to all connected clients
+        // Broadcast combat events + projectile lifecycle events. Projectiles
+        // moved from per-tick state streaming (envelope 0x04) to event-based:
+        // Fired/Impact/Trajectory events let the client run its own ballistic
+        // simulation between sparse server updates. See PLAN-network.md.
+        //
+        // Per-session LOS / intel filter: each session only receives events
+        // whose position is in its ally-team's line-of-sight, OR whose owner
+        // team is allied to the viewer (so a player always sees their own
+        // and allied projectiles even if the impact lands in fog of war).
+        // Spectators and pre-auth sessions get the unfiltered stream.
         {
         auto events = combatEvents.Drain();
-        if (!events.empty() && rtcServer.GetClientCount() > 0) {
-            auto batch = Protocol::BuildCombatEventBatch(
-                static_cast<uint32_t>(sim.GetFrameNum()), events);
-            rtcServer.BroadcastReliable(batch.data(), batch.size());
+        auto projDrain = projectileEvents.Drain();
+        const bool hasAny = !events.empty()
+            || !projDrain.fired.empty()
+            || !projDrain.impacts.empty()
+            || !projDrain.trajectories.empty();
+        if (hasAny && rtcServer.GetClientCount() > 0) {
+            const uint32_t frameNo = static_cast<uint32_t>(sim.GetFrameNum());
+
+            sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+                int viewerAllyTeam = -1;
+                if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
+                    viewerAllyTeam = teamHandler.AllyTeam(session.team);
+
+                // Predicate: is event-position visible to the viewer?
+                // Spectator (viewerAllyTeam < 0) sees everything.
+                auto posVisible = [&](const float3& p) -> bool {
+                    if (viewerAllyTeam < 0) return true;
+                    if (losHandler == nullptr) return true;
+                    return losHandler->InLos(p, viewerAllyTeam)
+                        || losHandler->InAirLos(p, viewerAllyTeam)
+                        || losHandler->InRadar(p, viewerAllyTeam);
+                };
+
+                // Predicate: is the owner team friendly to the viewer?
+                // (Always show own/ally projectiles regardless of LOS.)
+                auto teamFriendly = [&](uint8_t projTeam) -> bool {
+                    if (viewerAllyTeam < 0) return true;
+                    if (!teamHandler.IsValidTeam(projTeam)) return false;
+                    return teamHandler.AllyTeam(projTeam) == viewerAllyTeam;
+                };
+
+                std::vector<ProjectileFiredEventData> fired;
+                fired.reserve(projDrain.fired.size());
+                for (const auto& e : projDrain.fired) {
+                    // Fired: owner-friendly, OR launch in LOS, OR target in LOS
+                    // (so a player sees an incoming missile at the moment its
+                    // trajectory grazes their LOS bubble).
+                    if (teamFriendly(e.team)
+                        || posVisible(e.pos)
+                        || posVisible(e.targetPos))
+                        fired.push_back(e);
+                }
+
+                std::vector<ProjectileImpactEventData> impacts;
+                impacts.reserve(projDrain.impacts.size());
+                for (const auto& e : projDrain.impacts) {
+                    if (teamFriendly(e.team) || posVisible(e.pos))
+                        impacts.push_back(e);
+                }
+
+                std::vector<ProjectileTrajectoryEventData> trajectories;
+                trajectories.reserve(projDrain.trajectories.size());
+                for (const auto& e : projDrain.trajectories) {
+                    if (teamFriendly(e.team) || posVisible(e.pos))
+                        trajectories.push_back(e);
+                }
+
+                // Combat events also benefit from the same filter — the
+                // current broadcast leaks fire+miss outcomes from fog.
+                std::vector<CombatEventData> visibleCombat;
+                visibleCombat.reserve(events.size());
+                for (const auto& e : events) {
+                    if (viewerAllyTeam < 0 || posVisible(e.position))
+                        visibleCombat.push_back(e);
+                }
+
+                if (visibleCombat.empty() && fired.empty()
+                    && impacts.empty() && trajectories.empty())
+                    return;
+
+                auto batch = Protocol::BuildCombatEventBatch(
+                    frameNo, visibleCombat, fired, impacts, trajectories);
+                rtcServer.SendReliable(clientId, batch.data(), batch.size());
+            });
         }
         }
 

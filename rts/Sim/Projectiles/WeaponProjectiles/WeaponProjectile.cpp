@@ -17,6 +17,7 @@
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Weapons/Weapon.h"
 #include "Sim/Weapons/WeaponDefHandler.h"
+#include "Server/ProjectileEventCollector.h"
 #include "System/Matrix44f.h"
 #include "System/SpringMath.h"
 #include "System/creg/DefTypes.h"
@@ -149,6 +150,30 @@ CWeaponProjectile::CWeaponProjectile(const ProjectileParams& params)
 
 	ASSERT_SYNCED(id);
 
+	// Emit a Fired event so the web client can spawn a local projectile
+	// and simulate motion until the matching Impact/Trajectory event.
+	{
+		const CSolidObject* tgtObj = dynamic_cast<const CSolidObject*>(target);
+		ProjectileFiredEventData ev;
+		ev.projId       = static_cast<uint32_t>(id);
+		ev.weaponDefId  = static_cast<uint16_t>(weaponDef->id);
+		ev.ownerId      = (ownerID != -1u) ? static_cast<uint32_t>(ownerID) : 0u;
+		ev.team         = static_cast<uint8_t>(teamID);
+		ev.pos          = pos;
+		ev.vel          = float3(speed.x, speed.y, speed.z);
+		ev.targetPos    = targetPos;
+		ev.targetId     = (tgtObj != nullptr) ? static_cast<uint32_t>(tgtObj->id) : 0u;
+		ev.ttl          = static_cast<int16_t>(ttl);
+		// `mygravity` is the resolved per-frame gravity for this projectile —
+		// `params.gravity` is the override default and is usually 0 (meaning
+		// "use mapInfo->map.gravity" which the base CProjectile constructor
+		// already wrote into `mygravity`). Send the real value so the client
+		// can run the same ballistic integration.
+		ev.gravity      = mygravity;
+		ev.hitscan      = hitscan;
+		projectileEvents.PushFired(ev);
+	}
+
 	if (!weaponDef->targetable)
 		return;
 
@@ -225,6 +250,18 @@ void CWeaponProjectile::Collision(CFeature* feature)
 		}
 	}
 
+	// Emit Impact event before Explode (which schedules the projectile for
+	// deletion) so the web client kills its local instance once.
+	{
+		ProjectileImpactEventData ev;
+		ev.projId     = static_cast<uint32_t>(id);
+		ev.pos        = impactPos;
+		ev.impactKind = (feature != nullptr) ? 2u /* Feature */ : 0u /* Terrain */;
+		ev.targetId   = (feature != nullptr) ? static_cast<uint32_t>(feature->id) : 0u;
+		ev.team       = static_cast<uint8_t>(teamID);
+		projectileEvents.PushImpact(ev);
+	}
+
 	Explode(nullptr, feature, impactPos, impactDir);
 }
 
@@ -240,6 +277,16 @@ void CWeaponProjectile::Collision(CUnit* unit)
 		}
 	} else {
 		assert(false);
+	}
+
+	{
+		ProjectileImpactEventData ev;
+		ev.projId     = static_cast<uint32_t>(id);
+		ev.pos        = impactPos;
+		ev.impactKind = 1u; /* Unit */
+		ev.targetId   = (unit != nullptr) ? static_cast<uint32_t>(unit->id) : 0u;
+		ev.team       = static_cast<uint8_t>(teamID);
+		projectileEvents.PushImpact(ev);
 	}
 
 	Explode(unit, nullptr, impactPos, impactDir);
@@ -331,6 +378,18 @@ void CWeaponProjectile::UpdateGroundBounce()
 		SetPosition(bounceHitPos + dir * moveDistance);
 
 		explGenHandler.GenExplosion(weaponDef->bounceExplosionGeneratorID, bounceHitPos, bounceNormal, speed.w, 1.0f, 1.0f, owner(), nullptr);
+
+		// Notify the web client that this projectile's trajectory just changed
+		// so it can update its local pos/vel without per-tick state streaming.
+		{
+			ProjectileTrajectoryEventData ev;
+			ev.projId = static_cast<uint32_t>(id);
+			ev.pos    = pos;
+			ev.vel    = float3(speed.x, speed.y, speed.z);
+			ev.reason = 0u; /* Bounce */
+			ev.team   = static_cast<uint8_t>(teamID);
+			projectileEvents.PushTrajectory(ev);
+		}
 
 		bounced = false;
 	}

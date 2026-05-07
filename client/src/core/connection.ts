@@ -23,6 +23,9 @@ import { Pong } from '../protocol/spring-web/pong.js';
 import { ServerError } from '../protocol/spring-web/server-error.js';
 import { GameEventBatch } from '../protocol/spring-web/game-event-batch.js';
 import { CombatEvent } from '../protocol/spring-web/combat-event.js';
+import { ProjectileFiredEvent } from '../protocol/spring-web/projectile-fired-event.js';
+import { ProjectileImpactEvent } from '../protocol/spring-web/projectile-impact-event.js';
+import { ProjectileTrajectoryEvent } from '../protocol/spring-web/projectile-trajectory-event.js';
 import { EntityDestroy } from '../protocol/spring-web/entity-destroy.js';
 import { GameInfo } from '../protocol/spring-web/game-info.js';
 import { ResourceUpdate } from '../protocol/spring-web/resource-update.js';
@@ -68,6 +71,38 @@ export interface CombatEventInfo {
     x: number;
     y: number;
     z: number;
+}
+
+/// Projectile lifecycle event info — decoded from the FlatBuffer batch and
+/// passed to ProjectileRenderer. Velocity values come straight from the
+/// server in elmos / sim-frame; the renderer converts to elmos / second
+/// for its render-tick integration.
+export interface ProjectileFiredInfo {
+    projId: number;
+    weaponDefId: number;
+    ownerId: number;
+    team: number;
+    pos: { x: number; y: number; z: number };
+    vel: { x: number; y: number; z: number };
+    targetPos: { x: number; y: number; z: number };
+    targetId: number;
+    ttl: number;
+    gravity: number;
+    hitscan: boolean;
+}
+
+export interface ProjectileImpactInfo {
+    projId: number;
+    pos: { x: number; y: number; z: number };
+    impactKind: number;
+    targetId: number;
+}
+
+export interface ProjectileTrajectoryInfo {
+    projId: number;
+    pos: { x: number; y: number; z: number };
+    vel: { x: number; y: number; z: number };
+    reason: number;
 }
 
 export interface UnitDefInfo {
@@ -243,6 +278,9 @@ export interface ConnectionEvents {
     onServerError?: (code: number, message: string) => void;
     onEntityState?: (snapshot: EntityStateSnapshot, isDelta: boolean) => void;
     onCombatEvents?: (events: CombatEventInfo[], frame: number) => void;
+    onProjectileFired?: (events: ProjectileFiredInfo[], frame: number) => void;
+    onProjectileImpacts?: (events: ProjectileImpactInfo[], frame: number) => void;
+    onProjectileTrajectories?: (events: ProjectileTrajectoryInfo[], frame: number) => void;
     onEntityDestroy?: (entityId: number, x: number, y: number, z: number) => void;
     onGameOver?: (frame: number) => void;
     onPlayerLeft?: (playerId: number, username: string, team: number, reason: number) => void;
@@ -1003,6 +1041,70 @@ export class Connection {
                 });
             }
             this.events.onCombatEvents(events, frame);
+        }
+
+        // Projectile lifecycle events. The renderer integrates motion
+        // locally between server updates, so each batch typically carries
+        // only Fired/Impact/Trajectory transitions — not per-tick state.
+        const firedCount = batch.projectileFiredLength();
+        if (firedCount > 0 && this.events.onProjectileFired) {
+            const out: ProjectileFiredInfo[] = [];
+            for (let i = 0; i < firedCount; i++) {
+                const e = batch.projectileFired(i, new ProjectileFiredEvent());
+                if (!e) continue;
+                const p = e.pos();
+                const v = e.vel();
+                const t = e.targetPos();
+                out.push({
+                    projId: e.projId(),
+                    weaponDefId: e.weaponDefId(),
+                    ownerId: e.ownerId(),
+                    team: e.team(),
+                    pos: { x: p?.x() ?? 0, y: p?.y() ?? 0, z: p?.z() ?? 0 },
+                    vel: { x: v?.x() ?? 0, y: v?.y() ?? 0, z: v?.z() ?? 0 },
+                    targetPos: { x: t?.x() ?? 0, y: t?.y() ?? 0, z: t?.z() ?? 0 },
+                    targetId: e.targetId(),
+                    ttl: e.ttl(),
+                    gravity: e.gravity(),
+                    hitscan: e.hitscan(),
+                });
+            }
+            this.events.onProjectileFired(out, frame);
+        }
+
+        const impactCount = batch.projectileImpactsLength();
+        if (impactCount > 0 && this.events.onProjectileImpacts) {
+            const out: ProjectileImpactInfo[] = [];
+            for (let i = 0; i < impactCount; i++) {
+                const e = batch.projectileImpacts(i, new ProjectileImpactEvent());
+                if (!e) continue;
+                const p = e.pos();
+                out.push({
+                    projId: e.projId(),
+                    pos: { x: p?.x() ?? 0, y: p?.y() ?? 0, z: p?.z() ?? 0 },
+                    impactKind: e.impactKind(),
+                    targetId: e.targetId(),
+                });
+            }
+            this.events.onProjectileImpacts(out, frame);
+        }
+
+        const trajCount = batch.projectileTrajectoriesLength();
+        if (trajCount > 0 && this.events.onProjectileTrajectories) {
+            const out: ProjectileTrajectoryInfo[] = [];
+            for (let i = 0; i < trajCount; i++) {
+                const e = batch.projectileTrajectories(i, new ProjectileTrajectoryEvent());
+                if (!e) continue;
+                const p = e.pos();
+                const v = e.vel();
+                out.push({
+                    projId: e.projId(),
+                    pos: { x: p?.x() ?? 0, y: p?.y() ?? 0, z: p?.z() ?? 0 },
+                    vel: { x: v?.x() ?? 0, y: v?.y() ?? 0, z: v?.z() ?? 0 },
+                    reason: e.reason(),
+                });
+            }
+            this.events.onProjectileTrajectories(out, frame);
         }
     }
 

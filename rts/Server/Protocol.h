@@ -9,6 +9,7 @@
 
 #include "protocol_generated.h"
 #include "CombatEventCollector.h"
+#include "ProjectileEventCollector.h"
 #include "RoomManager.h"
 #include "MapMetadata.h"
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectileTypes.h"
@@ -135,12 +136,20 @@ inline std::vector<uint8_t> BuildGameRestarting() {
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameRestarting, gr.Union());
 }
 
-/// Build a GameEventBatch containing combat events.
+/// Build a GameEventBatch containing combat events and projectile lifecycle
+/// events (fired / impacts / trajectory changes). Any vector may be empty.
 inline std::vector<uint8_t> BuildCombatEventBatch(
     uint32_t frame,
-    const std::vector<CombatEventData>& events)
+    const std::vector<CombatEventData>& events,
+    const std::vector<ProjectileFiredEventData>& projFired = {},
+    const std::vector<ProjectileImpactEventData>& projImpacts = {},
+    const std::vector<ProjectileTrajectoryEventData>& projTrajectories = {})
 {
-    flatbuffers::FlatBufferBuilder fbb(256 + events.size() * 32);
+    flatbuffers::FlatBufferBuilder fbb(
+        256 + events.size() * 32
+            + projFired.size() * 64
+            + projImpacts.size() * 32
+            + projTrajectories.size() * 40);
 
     std::vector<flatbuffers::Offset<SpringWeb::CombatEvent>> combatOffsets;
     combatOffsets.reserve(events.size());
@@ -157,8 +166,60 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
             &pos));
     }
 
+    std::vector<flatbuffers::Offset<SpringWeb::ProjectileFiredEvent>> firedOffsets;
+    firedOffsets.reserve(projFired.size());
+    for (const auto& e : projFired) {
+        auto pos = SpringWeb::Vec3(e.pos.x, e.pos.y, e.pos.z);
+        auto vel = SpringWeb::Vec3(e.vel.x, e.vel.y, e.vel.z);
+        auto tgt = SpringWeb::Vec3(e.targetPos.x, e.targetPos.y, e.targetPos.z);
+        firedOffsets.push_back(SpringWeb::CreateProjectileFiredEvent(
+            fbb,
+            e.projId,
+            e.weaponDefId,
+            e.ownerId,
+            e.team,
+            &pos,
+            &vel,
+            &tgt,
+            e.targetId,
+            e.ttl,
+            e.gravity,
+            e.hitscan));
+    }
+
+    std::vector<flatbuffers::Offset<SpringWeb::ProjectileImpactEvent>> impactOffsets;
+    impactOffsets.reserve(projImpacts.size());
+    for (const auto& e : projImpacts) {
+        auto pos = SpringWeb::Vec3(e.pos.x, e.pos.y, e.pos.z);
+        impactOffsets.push_back(SpringWeb::CreateProjectileImpactEvent(
+            fbb,
+            e.projId,
+            &pos,
+            static_cast<SpringWeb::ProjectileImpactKind>(e.impactKind),
+            e.targetId,
+            e.team));
+    }
+
+    std::vector<flatbuffers::Offset<SpringWeb::ProjectileTrajectoryEvent>> trajOffsets;
+    trajOffsets.reserve(projTrajectories.size());
+    for (const auto& e : projTrajectories) {
+        auto pos = SpringWeb::Vec3(e.pos.x, e.pos.y, e.pos.z);
+        auto vel = SpringWeb::Vec3(e.vel.x, e.vel.y, e.vel.z);
+        trajOffsets.push_back(SpringWeb::CreateProjectileTrajectoryEvent(
+            fbb,
+            e.projId,
+            &pos,
+            &vel,
+            static_cast<SpringWeb::ProjectileTrajectoryReason>(e.reason),
+            e.team));
+    }
+
     auto combatVec = fbb.CreateVector(combatOffsets);
-    auto batch = SpringWeb::CreateGameEventBatch(fbb, frame, 0, combatVec);
+    auto firedVec  = fbb.CreateVector(firedOffsets);
+    auto impactVec = fbb.CreateVector(impactOffsets);
+    auto trajVec   = fbb.CreateVector(trajOffsets);
+    auto batch = SpringWeb::CreateGameEventBatch(
+        fbb, frame, /*events=*/0, combatVec, firedVec, impactVec, trajVec);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameEventBatch, batch.Union());
 }
 
