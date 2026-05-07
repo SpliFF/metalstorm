@@ -67,9 +67,21 @@ export function loadDirManifest(baseUrl: string): Promise<DirManifest> {
                 console.warn(`[dir-manifest] malformed manifest at ${baseUrl}`);
                 return makeEmptyManifest();
             }
-            const set = new Set(data.files);
+            // Case-insensitive lookup. The lobby's HTTP server resolves
+            // paths case-insensitively (the engine + ZK author tooling
+            // routinely reference "Hermit.s3o" / "HERMIT.s3o" / "hermit.s3o"
+            // for the same on-disk file), but Spring's unitdef objectName
+            // strings preserve whatever case the author typed —
+            // "AMETALEXTRACTORLVL1.S3O" or "hermit.s3o". The corresponding
+            // .glb on disk uses canonical Pascal case ("Hermit.glb",
+            // "AMetalExtractorLvl1.glb"). A case-sensitive Set.has() check
+            // here returns false for those queries, the .config.json fetch
+            // gets skipped, tex1/tex2 are never read, and the unit
+            // renders with the all-white textureless fallback (which is
+            // alpha=1 → fully team-coloured by the team-color shader).
+            const set = new Set(data.files.map(f => f.toLowerCase()));
             return {
-                has: (name) => set.has(name),
+                has: (name) => set.has(name.toLowerCase()),
                 list: () => data.files,
             };
         } catch (e) {

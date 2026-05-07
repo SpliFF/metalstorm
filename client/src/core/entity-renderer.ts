@@ -842,11 +842,25 @@ export class EntityRenderer {
             // have midpos high up in their body, mechs have it near the
             // unit's centre-of-mass which is close to origin.
             const minY = config?.minY ?? bbMinY;
+            const maxY = config?.maxY ?? bbMaxY;
             const midY = config?.midY;
-            // 0.1 * modelHeight cleanly classifies the ZK examples
-            // (commander midpos≈-3 vs windmill midpos≈+17 vs radar
-            // midpos≈+21) and stays robust across model sizes.
-            const baseAtOrigin = midY !== undefined && midY > modelHeight * 0.1;
+            // Two structure flavours sit at origin and must NOT be shifted
+            // up by -minY (terrain occludes whatever sticks below):
+            //   1. Tall structures with body above origin and a small
+            //      foundation below. midpos.y sits high in the body.
+            //      e.g. radar: midY=+21, height=143, only -50 below.
+            //   2. Drill-style structures with a tiny cap above origin
+            //      and a long shaft buried below. midpos.y is way below
+            //      origin — the original heuristic mis-classified these
+            //      as mechs and rocketed the foundation skyward.
+            //      e.g. Mex: midY=-113, maxY=+8, minY=-234, height=243
+            //      (the "posts" foundation 234 elmos below was rendered
+            //      as four giant red columns towering over the surface).
+            // baseAtOrigin catches both: midY high in the model OR maxY
+            // is a small fraction of modelHeight (drill cap).
+            const baseAtOrigin =
+                (midY !== undefined && midY > modelHeight * 0.1) ||
+                maxY < modelHeight * 0.15;
             const yOffset = baseAtOrigin ? 0 : Math.max(0, -minY);
 
             // Load textures (sharing across all teams; team color is
