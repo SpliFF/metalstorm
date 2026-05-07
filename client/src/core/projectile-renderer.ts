@@ -1,11 +1,25 @@
 /**
- * ProjectileRenderer — renders in-flight projectiles from server state.
+ * ProjectileRenderer — event-driven projectile visualisation.
  *
- * Receives weapon definitions (visual type, color, size) and per-tick
- * projectile snapshots (position, direction, weapon def id). Groups
- * projectiles by weapon def and renders each group as thin instances
- * of a type-appropriate mesh (sphere for cannon, cylinder for laser,
- * cone for missile, etc.).
+ * The server no longer streams projectile positions every tick. Instead it
+ * emits three lifecycle events:
+ *   - Fired:      proj_id, weapon_def_id, pos, vel, target_pos, gravity, ttl, hitscan
+ *   - Impact:     proj_id, pos, impact_kind, target_id
+ *   - Trajectory: proj_id, pos, vel  (bounce / steered)
+ *
+ * The client tracks each live projectile in a `Map<projId, LiveProjectile>`
+ * and integrates pos += vel*dt; vel.y -= gravity*dt every render tick. On
+ * impact the entry is removed (the explosion VFX is fired by combat-fx /
+ * combat events). On trajectory it overwrites pos+vel.
+ *
+ * Hit-scan weapons (lasers, lightning) live for one tick only — we draw a
+ * line from launch pos → target_pos and discard on the next frame. Beam
+ * weapons follow the same path but with a longer tail.
+ *
+ * Rendering uses thin instances per weapon-def so a hundred bullets in
+ * flight cost one draw call per weapon type. Each Live entry contributes
+ * one instance matrix; per render tick we rebuild the per-def matrix
+ * arrays and push to thinInstanceSetBuffer.
  */
 
 import {
@@ -14,11 +28,14 @@ import {
     Mesh,
     StandardMaterial,
     Color3,
+    Color4,
     Matrix,
+    Vector3,
+    Quaternion,
+    LinesMesh,
 } from '@babylonjs/core';
 
 import type { WeaponDefInfo } from './connection.js';
-import type { ProjectileStateSnapshot } from './projectile-state.js';
 
 /** Visual type enum — matches ProjectileVisualType in protocol.fbs */
 const enum VisualType {
@@ -32,41 +49,79 @@ const enum VisualType {
 
 /** Default colors per visual type when weapon def doesn't specify one. */
 const DEFAULT_COLORS: Record<number, [number, number, number]> = {
-    [VisualType.Cannon]:    [1.0, 0.8, 0.2],   // yellow-orange
-    [VisualType.Laser]:     [1.0, 0.2, 0.2],   // red
-    [VisualType.BeamLaser]: [0.2, 1.0, 0.2],   // green
-    [VisualType.Missile]:   [0.8, 0.8, 0.8],   // grey-white
-    [VisualType.Lightning]: [0.5, 0.5, 1.0],   // blue-white
-    [VisualType.Flame]:     [1.0, 0.4, 0.0],   // orange
+    [VisualType.Cannon]:    [1.0, 0.8, 0.2],
+    [VisualType.Laser]:     [1.0, 0.2, 0.2],
+    [VisualType.BeamLaser]: [0.2, 1.0, 0.2],
+    [VisualType.Missile]:   [0.8, 0.8, 0.8],
+    [VisualType.Lightning]: [0.5, 0.5, 1.0],
+    [VisualType.Flame]:     [1.0, 0.4, 0.0],
 };
 
-/** Per-weapon-def rendering template. */
+/** Per-weapon-def rendering template + cached size. */
 interface WeaponVisual {
     defId: number;
     mesh: Mesh;
     material: StandardMaterial;
     visualType: number;
+    /// Average projectile size — used to scale the thin instance mesh in y.
+    size: number;
 }
+
+/** Lifetime state for one live projectile. */
+interface LiveProjectile {
+    id: number;
+    weaponDefId: number;
+    pos: Vector3;
+    vel: Vector3;
+    /// Per-frame gravity in elmos/frame². 0 for direct/laser/missile-with-tracker.
+    gravity: number;
+    /// Remaining sim frames before self-detonate. -1 for no limit.
+    ttl: number;
+    /// Hit-scan beams die after rendering once.
+    hitscan: boolean;
+    targetPos: Vector3;
+    /// Frame at which the Fired event landed — used to evict stale orphans.
+    spawnedAtMs: number;
+}
+
+/** Active hit-scan beam: a line from launch pos to impact pos with a
+ *  short fade-out. Disposed when its lifetime hits zero. */
+interface BeamFx {
+    line: LinesMesh;
+    /// Lifetime remaining in seconds.
+    lifeS: number;
+    /// Initial lifetime — used to compute the fade-out alpha.
+    initialLifeS: number;
+}
+
+/// Spring sim ticks per game-second.
+const SIM_TICKS_PER_SEC = 30;
+
+/// How long an orphaned projectile (no impact event ever arrived) lives
+/// before we drop it client-side. Defends against packet loss.
+const MAX_ORPHAN_LIFE_MS = 15_000;
+
+/// Default beam visible duration for hit-scan weapons. Server-side beam
+/// projectiles carry a TTL via the Fired event; if it's 0 (typical for
+/// instant-hit weapons) we fall back to this so the player at least
+/// sees the bolt / laser flash.
+const DEFAULT_BEAM_LIFE_S = 0.12;
 
 export class ProjectileRenderer {
     private scene: Scene;
     private weaponVisuals = new Map<number, WeaponVisual>();
-    private activeCount = 0;
-
-    /** Fallback for projectiles with unknown weapon def. */
     private fallbackVisual: WeaponVisual;
+    private live = new Map<number, LiveProjectile>();
+    private beams: BeamFx[] = [];
+    private lastTickMs = performance.now();
 
     constructor(scene: Scene) {
         this.scene = scene;
         this.fallbackVisual = this.createVisual(0, VisualType.Cannon, 1.0, [1, 0.8, 0.2], 0.8);
     }
 
-    /**
-     * Register weapon definitions from the server.
-     * Creates a mesh template + material per weapon def.
-     */
+    /** Replace the per-weapon-def visual templates. */
     setWeaponDefs(defs: WeaponDefInfo[]): void {
-        // Dispose old visuals
         for (const v of this.weaponVisuals.values()) {
             v.mesh.dispose();
             v.material.dispose();
@@ -85,83 +140,204 @@ export class ProjectileRenderer {
             const visual = this.createVisual(def.defId, def.visualType, size, color, intensity);
             this.weaponVisuals.set(def.defId, visual);
         }
-
-        console.log(`[projectile-renderer] registered ${defs.length} weapon visual(s)`);
     }
 
-    /**
-     * Update projectile visuals from a server state snapshot.
-     * Groups projectiles by weapon def, builds thin instance matrices per group.
-     */
-    updateFromState(snapshot: ProjectileStateSnapshot): void {
-        if (snapshot.count === 0) {
-            // Hide all visuals
-            for (const v of this.weaponVisuals.values()) {
-                v.mesh.isVisible = false;
-                v.mesh.thinInstanceCount = 0;
-            }
-            this.fallbackVisual.mesh.isVisible = false;
-            this.fallbackVisual.mesh.thinInstanceCount = 0;
-            this.activeCount = 0;
+    // ── Event hooks (called from connection.ts) ─────────────────────────────
+
+    /** Server announced a new projectile. Spawn a local entry. */
+    onFired(ev: {
+        projId: number;
+        weaponDefId: number;
+        pos: { x: number; y: number; z: number };
+        vel: { x: number; y: number; z: number };
+        targetPos: { x: number; y: number; z: number };
+        ttl: number;
+        gravity: number;
+        hitscan: boolean;
+    }): void {
+        // Hit-scan weapons (beam laser, lightning) don't move — render
+        // the bolt as a one-shot line from launch pos to impact pos and
+        // skip the live-projectile tracking entirely.
+        if (ev.hitscan) {
+            this.spawnBeam(ev.weaponDefId, ev.pos, ev.targetPos,
+                ev.ttl > 0 ? ev.ttl / SIM_TICKS_PER_SEC : DEFAULT_BEAM_LIFE_S);
             return;
         }
 
-        // Group projectile indices by weapon def id
-        const groups = new Map<number, number[]>();
-        for (let i = 0; i < snapshot.count; i++) {
-            const wdId = snapshot.weaponDefIds ? snapshot.weaponDefIds[i] : 0;
-            let group = groups.get(wdId);
-            if (!group) {
-                group = [];
-                groups.set(wdId, group);
+        // Velocity from the server is in elmos / sim-frame. Convert to
+        // elmos / second so our render-tick integration uses real time
+        // (the sim ticks at 30 Hz, so multiply by SIM_TICKS_PER_SEC).
+        const vps = SIM_TICKS_PER_SEC;
+        this.live.set(ev.projId, {
+            id: ev.projId,
+            weaponDefId: ev.weaponDefId,
+            pos: new Vector3(ev.pos.x, ev.pos.y, ev.pos.z),
+            vel: new Vector3(ev.vel.x * vps, ev.vel.y * vps, ev.vel.z * vps),
+            gravity: ev.gravity * vps * vps,
+            ttl: ev.ttl > 0 ? ev.ttl / SIM_TICKS_PER_SEC : -1,
+            hitscan: false,
+            targetPos: new Vector3(ev.targetPos.x, ev.targetPos.y, ev.targetPos.z),
+            spawnedAtMs: performance.now(),
+        });
+    }
+
+    /** Spawn a one-shot beam mesh between two world points. The beam
+     *  fades out over `lifeS` seconds and is then disposed. */
+    private spawnBeam(weaponDefId: number, from: { x: number; y: number; z: number },
+                      to: { x: number; y: number; z: number }, lifeS: number): void {
+        const visual = this.weaponVisuals.get(weaponDefId) ?? this.fallbackVisual;
+        const colDiffuse = visual.material.diffuseColor;
+        // Brighten colour a touch — laser bolts read better as near-white cores.
+        const r = Math.min(1, colDiffuse.r + 0.3);
+        const g = Math.min(1, colDiffuse.g + 0.3);
+        const b = Math.min(1, colDiffuse.b + 0.3);
+
+        const line = MeshBuilder.CreateLines(`beam_${weaponDefId}`, {
+            points: [
+                new Vector3(from.x, from.y, from.z),
+                new Vector3(to.x, to.y, to.z),
+            ],
+            colors: [
+                new Color4(r, g, b, 1),
+                new Color4(r, g, b, 1),
+            ],
+            updatable: false,
+        }, this.scene);
+        line.alphaIndex = 1000;
+        line.isPickable = false;
+        line.color = new Color3(r, g, b);
+        // LinesMesh has no material that respects alpha out of the box —
+        // fade by scaling alpha on the underlying material if present, or
+        // re-render every tick by interpolating colour. Using `alpha` on
+        // the mesh works because Babylon multiplies the per-vertex colour
+        // by `mesh.color * mesh.alpha`.
+
+        this.beams.push({ line, lifeS, initialLifeS: lifeS });
+    }
+
+    /** Server reported an impact. Remove the local entry; combat-fx
+     *  spawns the impact VFX from the same event batch. */
+    onImpact(ev: { projId: number; pos: { x: number; y: number; z: number } }): void {
+        if (!this.live.delete(ev.projId)) return;
+        // The position snapshot in the event drives the VFX (see combat-fx);
+        // we don't need to keep the local entry alive for one more tick
+        // because the impact VFX renders at the event position directly.
+    }
+
+    /** Server reported a trajectory change (bounce / steered). Override
+     *  pos+vel in place. */
+    onTrajectory(ev: {
+        projId: number;
+        pos: { x: number; y: number; z: number };
+        vel: { x: number; y: number; z: number };
+    }): void {
+        const p = this.live.get(ev.projId);
+        if (!p) return;
+        const vps = SIM_TICKS_PER_SEC;
+        p.pos.copyFromFloats(ev.pos.x, ev.pos.y, ev.pos.z);
+        p.vel.copyFromFloats(ev.vel.x * vps, ev.vel.y * vps, ev.vel.z * vps);
+    }
+
+    // ── Per-render-frame integration + draw ─────────────────────────────────
+
+    /** Advance every live projectile by `dtMs` milliseconds, then push
+     *  thin-instance buffers per weapon def. Call from the render loop. */
+    tick(): void {
+        const nowMs = performance.now();
+        const dt = Math.min((nowMs - this.lastTickMs) / 1000, 0.1);
+        this.lastTickMs = nowMs;
+
+        // 0. Tick beams (hit-scan one-shot lines). Fade out over their
+        //    lifetime and dispose when expired.
+        for (let i = this.beams.length - 1; i >= 0; i--) {
+            const b = this.beams[i];
+            b.lifeS -= dt;
+            if (b.lifeS <= 0) {
+                b.line.dispose();
+                this.beams.splice(i, 1);
+                continue;
             }
-            group.push(i);
+            const t = Math.max(0, Math.min(1, b.lifeS / b.initialLifeS));
+            b.line.alpha = t;
         }
 
-        // Track which visuals got updated (to hide the rest)
-        const updatedDefs = new Set<number>();
-        let totalCount = 0;
-
-        for (const [wdId, indices] of groups) {
-            const visual = this.weaponVisuals.get(wdId) ?? this.fallbackVisual;
-            const defKey = this.weaponVisuals.has(wdId) ? wdId : -1;
-            updatedDefs.add(defKey);
-
-            const matrices = new Float32Array(indices.length * 16);
-
-            for (let j = 0; j < indices.length; j++) {
-                const i = indices[j];
-                const x = snapshot.positionsX ? snapshot.positionsX[i] : 0;
-                const y = snapshot.positionsY ? snapshot.positionsY[i] : 0;
-                const z = snapshot.positionsZ ? snapshot.positionsZ[i] : 0;
-
-                const matrix = Matrix.Translation(x, y, z);
-                matrix.copyToArray(matrices, j * 16);
+        // 1. Integrate motion + cull expired/orphan entries.
+        const dead: number[] = [];
+        for (const p of this.live.values()) {
+            if (p.hitscan) {
+                // Should never happen — hit-scan goes through spawnBeam.
+                dead.push(p.id);
+                continue;
             }
+            // pos += vel * dt
+            p.pos.x += p.vel.x * dt;
+            p.pos.y += p.vel.y * dt;
+            p.pos.z += p.vel.z * dt;
+            // vel.y -= g * dt   (g positive pulls down)
+            p.vel.y -= p.gravity * dt;
 
+            if (p.ttl > 0) {
+                p.ttl -= dt;
+                if (p.ttl <= 0) dead.push(p.id);
+            }
+            if (nowMs - p.spawnedAtMs > MAX_ORPHAN_LIFE_MS) dead.push(p.id);
+        }
+        for (const id of dead) this.live.delete(id);
+
+        // 2. Group by weapon def and push thin-instance buffers.
+        const groups = new Map<number, LiveProjectile[]>();
+        for (const p of this.live.values()) {
+            const key = this.weaponVisuals.has(p.weaponDefId) ? p.weaponDefId : -1;
+            let g = groups.get(key);
+            if (!g) { g = []; groups.set(key, g); }
+            g.push(p);
+        }
+
+        const updated = new Set<number>();
+        const tmpQ = new Quaternion();
+        const tmpScale = new Vector3(1, 1, 1);
+        for (const [key, projs] of groups) {
+            const visual = key === -1 ? this.fallbackVisual : this.weaponVisuals.get(key)!;
+            const matrices = new Float32Array(projs.length * 16);
+            for (let i = 0; i < projs.length; i++) {
+                const p = projs[i];
+                // Orient the mesh along its velocity vector for missile/laser shapes.
+                const len = Math.hypot(p.vel.x, p.vel.y, p.vel.z);
+                if (len > 1e-3) {
+                    const dirX = p.vel.x / len, dirY = p.vel.y / len, dirZ = p.vel.z / len;
+                    const upDot = dirY;
+                    const axisX = -dirZ, axisZ = dirX;
+                    const angle = Math.acos(Math.max(-1, Math.min(1, upDot)));
+                    Quaternion.RotationAxisToRef(new Vector3(axisX, 0, axisZ), angle, tmpQ);
+                } else {
+                    tmpQ.set(0, 0, 0, 1);
+                }
+                Matrix.ComposeToRef(tmpScale, tmpQ, p.pos, Matrix.Identity());
+                const m = Matrix.Compose(tmpScale, tmpQ, p.pos);
+                m.copyToArray(matrices, i * 16);
+            }
             visual.mesh.isVisible = true;
             visual.mesh.thinInstanceSetBuffer('matrix', matrices, 16, false);
-            visual.mesh.thinInstanceCount = indices.length;
-            totalCount += indices.length;
+            visual.mesh.thinInstanceCount = projs.length;
+            updated.add(key);
         }
 
-        // Hide visuals that have no projectiles this frame
+        // 3. Hide visuals with no live projectiles this frame.
         for (const [defId, visual] of this.weaponVisuals) {
-            if (!updatedDefs.has(defId)) {
+            if (!updated.has(defId)) {
                 visual.mesh.isVisible = false;
                 visual.mesh.thinInstanceCount = 0;
             }
         }
-        if (!updatedDefs.has(-1)) {
+        if (!updated.has(-1)) {
             this.fallbackVisual.mesh.isVisible = false;
             this.fallbackVisual.mesh.thinInstanceCount = 0;
         }
-
-        this.activeCount = totalCount;
     }
 
+    /** Number of live projectiles tracked client-side. */
     get count(): number {
-        return this.activeCount;
+        return this.live.size;
     }
 
     dispose(): void {
@@ -172,6 +348,9 @@ export class ProjectileRenderer {
         this.weaponVisuals.clear();
         this.fallbackVisual.mesh.dispose();
         this.fallbackVisual.material.dispose();
+        this.live.clear();
+        for (const b of this.beams) b.line.dispose();
+        this.beams = [];
     }
 
     private createVisual(
@@ -195,29 +374,24 @@ export class ProjectileRenderer {
 
         switch (visualType) {
             case VisualType.Laser:
-                // Elongated cylinder for laser bolts
                 mesh = MeshBuilder.CreateCylinder(
                     `proj_${defId}`, { diameter: baseDiameter * 0.4, height: baseDiameter * 3, tessellation: 6 }, this.scene);
                 break;
             case VisualType.BeamLaser:
-                // Thin long cylinder for beam lasers
                 mesh = MeshBuilder.CreateCylinder(
                     `proj_${defId}`, { diameter: baseDiameter * 0.2, height: baseDiameter * 6, tessellation: 6 }, this.scene);
                 break;
             case VisualType.Missile:
-                // Cone shape for missiles
                 mesh = MeshBuilder.CreateCylinder(
                     `proj_${defId}`, { diameterTop: 0, diameterBottom: baseDiameter * 0.8, height: baseDiameter * 2, tessellation: 6 }, this.scene);
                 break;
             case VisualType.Lightning:
             case VisualType.Flame:
-                // Small sphere for lightning/flame particles
                 mesh = MeshBuilder.CreateSphere(
                     `proj_${defId}`, { diameter: baseDiameter * 0.6, segments: 4 }, this.scene);
                 break;
             case VisualType.Cannon:
             default:
-                // Sphere for cannon shells
                 mesh = MeshBuilder.CreateSphere(
                     `proj_${defId}`, { diameter: baseDiameter, segments: 4 }, this.scene);
                 break;
@@ -227,6 +401,6 @@ export class ProjectileRenderer {
         mesh.isVisible = false;
         mesh.thinInstanceEnablePicking = false;
 
-        return { defId, mesh, material: mat, visualType };
+        return { defId, mesh, material: mat, visualType, size };
     }
 }

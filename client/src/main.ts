@@ -713,8 +713,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             for (const e of events) projectileRenderer.onFired(e);
         },
         onProjectileImpacts(events) {
-            if (!projectileRenderer) return;
-            for (const e of events) projectileRenderer.onImpact(e);
+            for (const e of events) projectileRenderer?.onImpact(e);
+            combatFX?.onProjectileImpacts(events);
         },
         onProjectileTrajectories(events) {
             if (!projectileRenderer) return;

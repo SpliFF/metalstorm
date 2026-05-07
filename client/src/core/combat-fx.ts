@@ -17,9 +17,20 @@ import {
     Color3,
     Vector3,
 } from '@babylonjs/core';
-import type { CombatEventInfo } from './connection.js';
+import type { CombatEventInfo, ProjectileImpactInfo } from './connection.js';
 import { AudioManager } from './audio.js';
 import { createSynthSounds } from './synth-sounds.js';
+
+/// Mirrors SpringWeb::ProjectileImpactKind in protocol.fbs.
+const enum ImpactKind {
+    Terrain = 0,
+    Unit = 1,
+    Feature = 2,
+    Shield = 3,
+    SelfDetonate = 4,
+    Intercepted = 5,
+    Other = 6,
+}
 
 /** An active visual effect with a remaining lifetime. */
 interface ActiveEffect {
@@ -37,6 +48,8 @@ export class CombatFX {
     private impactMat: StandardMaterial;
     private tracerMat: StandardMaterial;
     private killMat: StandardMaterial;
+    private shieldMat: StandardMaterial;
+    private dirtMat: StandardMaterial;
 
     private synthSounds: Map<string, AudioBuffer> | null = null;
 
@@ -62,6 +75,80 @@ export class CombatFX {
         this.killMat = new StandardMaterial('killFxMat', scene);
         this.killMat.diffuseColor = new Color3(1.0, 0.2, 0.0);
         this.killMat.emissiveColor = new Color3(1.0, 0.3, 0.0);
+
+        this.shieldMat = new StandardMaterial('shieldFxMat', scene);
+        this.shieldMat.diffuseColor = new Color3(0.4, 0.6, 1.0);
+        this.shieldMat.emissiveColor = new Color3(0.4, 0.7, 1.0);
+        this.shieldMat.alpha = 0.6;
+
+        this.dirtMat = new StandardMaterial('dirtFxMat', scene);
+        this.dirtMat.diffuseColor = new Color3(0.45, 0.35, 0.25);
+        this.dirtMat.emissiveColor = new Color3(0.0, 0.0, 0.0);
+    }
+
+    /// React to a projectile lifecycle Impact event. Combat-fx already
+    /// fires explosions for hits/kills via CombatEvent (which carries
+    /// damage info), so this only fires VFX for impacts the combat path
+    /// doesn't cover: terrain hits, feature hits, shield blocks, self-
+    /// detonations. Unit hits are skipped here — the matching CombatEvent
+    /// arrives in the same batch and drives a more informative explosion.
+    onProjectileImpacts(events: ProjectileImpactInfo[]): void {
+        for (const e of events) {
+            const { x, y, z } = e.pos;
+            switch (e.impactKind as ImpactKind) {
+                case ImpactKind.Terrain:
+                    this.spawnTerrainImpact(x, y, z);
+                    break;
+                case ImpactKind.Feature:
+                    this.spawnTerrainImpact(x, y, z);
+                    break;
+                case ImpactKind.Shield:
+                    this.spawnShieldRipple(x, y, z);
+                    break;
+                case ImpactKind.SelfDetonate:
+                case ImpactKind.Other:
+                    this.spawnAirburst(x, y, z);
+                    break;
+                case ImpactKind.Intercepted:
+                    this.spawnAirburst(x, y, z);
+                    break;
+                case ImpactKind.Unit:
+                    // CombatEvent will spawn the explosion with damage info.
+                    break;
+            }
+        }
+    }
+
+    private spawnTerrainImpact(x: number, y: number, z: number): void {
+        const mesh = MeshBuilder.CreateSphere(
+            'dirt', { diameter: 8, segments: 4 }, this.scene);
+        mesh.position.set(x, y + 1, z);
+        mesh.material = this.dirtMat;
+        this.effects.push({ mesh, lifetime: 0.25 });
+        const buf = this.synthSounds?.get('impact');
+        if (buf && this.audio) {
+            this.audio.play({ buffer: buf, x, y, z, priority: 1, volume: 0.2 });
+        }
+    }
+
+    private spawnShieldRipple(x: number, y: number, z: number): void {
+        const mesh = MeshBuilder.CreateSphere(
+            'shieldHit', { diameter: 16, segments: 8 }, this.scene);
+        mesh.position.set(x, y, z);
+        mesh.material = this.shieldMat;
+        this.effects.push({ mesh, lifetime: 0.4 });
+    }
+
+    private spawnAirburst(x: number, y: number, z: number): void {
+        const mesh = MeshBuilder.CreateSphere(
+            'airburst', { diameter: 12, segments: 6 }, this.scene);
+        mesh.position.set(x, y, z);
+        mesh.material = this.impactMat;
+        this.effects.push({ mesh, lifetime: 0.3 });
+        const buf = this.synthSounds?.get('explosion');
+        if (buf && this.audio) {
+            this.audio.play({ buffer: buf, x, y, z, priority: 3, volume: 0.4 });
+        }
     }
 
     /**
@@ -154,5 +241,7 @@ export class CombatFX {
         this.impactMat.dispose();
         this.tracerMat.dispose();
         this.killMat.dispose();
+        this.shieldMat.dispose();
+        this.dirtMat.dispose();
     }
 }
