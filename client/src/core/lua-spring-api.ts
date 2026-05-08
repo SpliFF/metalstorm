@@ -1507,6 +1507,25 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             }
             return out;
         },
+        // Spring.GetRealBuildQueue returns the build queue as an array
+        // of consecutive-same-def runs: [ {defA=3}, {defB=1}, {defA=2} ].
+        // ZK's chili integral menu uses it to render the queue strip
+        // under the build buttons. We emit a single grouped entry
+        // covering the whole queue — the menu sums across entries
+        // anyway, so the visual order is preserved well enough for now.
+        // A full fidelity port would walk consecutive runs.
+        GetRealBuildQueue: (unitId: LuaValue) => {
+            const orders = ls.unitCommands.get(Number(unitId));
+            if (!orders || orders.length === 0) return [];
+            const out: Record<number, number> = {};
+            for (const o of orders) {
+                if (o.cmdId < 0) {
+                    const defId = -o.cmdId;
+                    out[defId] = (out[defId] ?? 0) + 1;
+                }
+            }
+            return [out];
+        },
         // Spring.SelectUnitArray(unitArray[, append]) — replace the player's
         // selection with `unitArray`, or merge into it when append=true.
         // An empty array clears the selection. Updates the worker-local

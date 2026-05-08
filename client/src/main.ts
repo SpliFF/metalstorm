@@ -97,6 +97,15 @@ let lastCommandQueues: ReadonlyArray<{
 /// of startGame() so the quit-to-lobby handler can close it cleanly.
 let gameConn: Connection | null = null;
 
+/// Monotonic session counter. Each startGame() captures the current
+/// value; quitToLobby() and subsequent startGame() bumps it. Async
+/// callbacks (mapPromise, defsPromise, onMapData) compare against
+/// the snapshot before doing work — anything from a stale session
+/// bails out, preventing the "quit during loading" leak where a
+/// late-resolving fetch builds a LuaWidgetManager (and its overlay
+/// canvas) for a game that no longer exists.
+let activeSession = 0;
+
 // --- HUD ---
 
 function createHUD(): void {
@@ -188,6 +197,11 @@ let currentFrame = 0;
 /// call from any in-game context: "Quit" button, ESC-confirm, Game Over
 /// overlay, or an error handler. No-op if no game is active.
 function quitToLobby(): void {
+    // Bump session: any in-flight async work from this session (map
+    // fetch, defs fetch, queued onMapData) will see a stale token and
+    // bail before creating widget managers / canvases.
+    activeSession++;
+
     // Close the game connection cleanly before disposing the renderer —
     // that way any "player left" hint reaches the game server before
     // our send queue gets torn down.
@@ -292,6 +306,14 @@ function showGameOver(frame: number): void {
 }
 
 async function startGame(gameServerPort: number, mapId: string, gameId: string = ''): Promise<void> {
+    // Capture this call's session id. Late-arriving promise callbacks
+    // (mapPromise, defsPromise, onMapData) compare against this and
+    // bail when activeSession has moved on — covers the case where a
+    // user quits mid-load and the queued mapData fetch resolves into
+    // an orphaned LuaWidgetManager / overlay canvas after teardown.
+    activeSession++;
+    const session = activeSession;
+
     // Defensive teardown of any leftover session state. `quitToLobby`
     // normally runs this on explicit quit, but a player can re-enter
     // a game through paths that don't go via quitToLobby — for
@@ -443,6 +465,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     let currentWidgetManager: LuaWidgetManager | null = null;
 
     const onMapData = (map: ParsedMapData): void => {
+        // Stale callback from a session the user has already quit. Bail
+        // before constructing renderers / widget managers — the parent
+        // scope's engine has been disposed by quitToLobby and creating
+        // a LuaWidgetManager here leaks an orphan overlay canvas.
+        if (session !== activeSession) {
+            console.log('[client] ignoring stale MapData (session moved on)');
+            return;
+        }
         if (currentMapData) {
             console.log('[client] ignoring duplicate MapData');
             return;
