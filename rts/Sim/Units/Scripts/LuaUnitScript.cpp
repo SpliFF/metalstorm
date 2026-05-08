@@ -888,8 +888,30 @@ bool CLuaUnitScript::RawRunCallIn(int functionId, int inArgs, int outArgs)
 	activeUnit = unit;
 	activeScript = this;
 
+	// Stack on entry: ..., function, arg1, ..., argN  (top = argN)
+	// Insert a debug.traceback errfunc below the function so that any
+	// error raised inside a unit-script callin reaches us with a full
+	// Lua-level stack trace instead of the bare "[Internal Lua error:
+	// Call failure] [No traceback returned]" we used to log.
+	const int absFuncIdx = lua_gettop(L) - inArgs;
+	const int prePushTop = lua_gettop(L);
+	(void) LuaUtils::PushDebugTraceback(L);
+
+	int errFuncIdx = 0;
+	if (lua_gettop(L) > prePushTop && lua_isfunction(L, -1)) {
+		// Move traceback below the function & args.
+		lua_insert(L, absFuncIdx);
+		errFuncIdx = absFuncIdx;
+	} else if (lua_gettop(L) > prePushTop) {
+		// PushDebugTraceback left a non-function placeholder; drop it.
+		lua_pop(L, 1);
+	}
+
 	std::string err;
-	const int error = handle->RunCallInLUS(L, &err, inArgs, outArgs);
+	const int error = handle->RunCallInLUS(L, &err, inArgs, outArgs, errFuncIdx);
+
+	if (errFuncIdx != 0)
+		lua_remove(L, errFuncIdx);
 
 	activeUnit = oldActiveUnit;
 	activeScript = oldActiveScript;
@@ -900,7 +922,8 @@ bool CLuaUnitScript::RawRunCallIn(int functionId, int inArgs, int outArgs)
 	const std::string& hname = handle->GetName();
 	const std::string& fname = GetScriptName(functionId);
 
-	LOG_L(L_ERROR, "[LuaUnitScript::%s][%s::%s] error=%i trace=%s", __func__, hname.c_str(), fname.c_str(), error, err.c_str());
+	LOG_L(L_ERROR, "[LuaUnitScript::%s][%s::%s] error=%i trace=%s",
+		__func__, hname.c_str(), fname.c_str(), error, err.c_str());
 	RemoveCallIn(fname);
 
 	return false;

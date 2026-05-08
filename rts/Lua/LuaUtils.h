@@ -141,6 +141,10 @@ class LuaUtils {
 
 		static int Compat_math_max(lua_State* L);
 		static int Compat_math_min(lua_State* L);
+		static int Compat_math_pow(lua_State* L);
+		static int Compat_math_atan2(lua_State* L);
+		static int Compat_math_log10(lua_State* L);
+		static int Compat_math_mod(lua_State* L);
 
 		static void* GetUserData(lua_State* L, int index, const string& type);
 

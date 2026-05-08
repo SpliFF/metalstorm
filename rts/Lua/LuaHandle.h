@@ -301,8 +301,10 @@ class CLuaHandle : public CEventClient
 		int  RunCallInTraceback(lua_State* L, const LuaHashString* hs, std::string* ts, int inArgs, int outArgs, int errFuncIndex, bool popErrFunc);
 		/// returns false and prints message to log on error
 		bool RunCallInTraceback(lua_State* L, const LuaHashString& hs, int inArgs, int outArgs, int errFuncIndex, bool popErrFunc = true);
-		/// returns false and and sets errormessage on error
-		bool RunCallInLUS(lua_State* L, std::string* ts, int inArgs, int outArgs);
+		/// returns false and and sets errormessage on error.
+		/// errFuncIdx is the absolute stack index of a debug.traceback handler
+		/// already inserted below the function being called; pass 0 if none.
+		bool RunCallInLUS(lua_State* L, std::string* ts, int inArgs, int outArgs, int errFuncIdx = 0);
 		/// returns false and prints message to log on error
 		bool RunCallIn(lua_State* L, const LuaHashString& hs, int inArgs, int outArgs);
 
@@ -380,9 +382,9 @@ inline bool CLuaHandle::RunCallIn(lua_State* L, const LuaHashString& hs, int inA
 	return RunCallInTraceback(L, hs, inArgs, outArgs, 0, false);
 }
 
-inline bool CLuaHandle::RunCallInLUS(lua_State* L, std::string* ts, int inArgs, int outArgs)
+inline bool CLuaHandle::RunCallInLUS(lua_State* L, std::string* ts, int inArgs, int outArgs, int errFuncIdx)
 {
-	return RunCallInTraceback(L, nullptr, ts, inArgs, outArgs, 0, false);
+	return RunCallInTraceback(L, nullptr, ts, inArgs, outArgs, errFuncIdx, false);
 }
 
 

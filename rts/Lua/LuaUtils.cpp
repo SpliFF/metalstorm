@@ -2,6 +2,7 @@
 
 //#include "System/Platform/Win/win32.h"
 
+#include <cmath>
 #include <cstring>
 #include <cctype>
 
@@ -1741,6 +1742,44 @@ int LuaUtils::Compat_math_min(lua_State* L)
 }
 
 
+// math.pow(x, y) was removed in Lua 5.3 in favour of the `^` operator.
+// Many Spring 5.1 games still call math.pow directly.
+int LuaUtils::Compat_math_pow(lua_State* L)
+{
+	const lua_Number x = luaL_checknumber(L, 1);
+	const lua_Number y = luaL_checknumber(L, 2);
+	lua_pushnumber(L, std::pow(x, y));
+	return 1;
+}
+
+// math.atan2(y, x) was merged into math.atan(y[, x]) in Lua 5.3.
+int LuaUtils::Compat_math_atan2(lua_State* L)
+{
+	const lua_Number y = luaL_checknumber(L, 1);
+	const lua_Number x = luaL_checknumber(L, 2);
+	lua_pushnumber(L, std::atan2(y, x));
+	return 1;
+}
+
+// math.log10(x) was removed in Lua 5.2; equivalent is math.log(x, 10).
+int LuaUtils::Compat_math_log10(lua_State* L)
+{
+	const lua_Number x = luaL_checknumber(L, 1);
+	lua_pushnumber(L, std::log10(x));
+	return 1;
+}
+
+// math.mod was renamed to math.fmod in 5.1; some legacy code still calls
+// the old name. (Spring's existing 5.1 distribution kept it as an alias.)
+int LuaUtils::Compat_math_mod(lua_State* L)
+{
+	const lua_Number x = luaL_checknumber(L, 1);
+	const lua_Number y = luaL_checknumber(L, 2);
+	lua_pushnumber(L, std::fmod(x, y));
+	return 1;
+}
+
+
 void LuaUtils::Register51CompatShims(lua_State* L)
 {
 	PushCompatCFunc(L, Compat_setfenv);
@@ -1752,11 +1791,20 @@ void LuaUtils::Register51CompatShims(lua_State* L)
 	PushCompatCFunc(L, Compat_unpack);
 	lua_setglobal(L, "unpack");
 
-	// Override math.max/min with coercing versions
+	// Override math.max/min with coercing versions, and add the
+	// 5.1 math builtins that 5.2/5.3 removed (pow, atan2, log10, mod).
 	lua_getglobal(L, "math");
 	lua_pushcfunction(L, Compat_math_max);
 	lua_setfield(L, -2, "max");
 	lua_pushcfunction(L, Compat_math_min);
 	lua_setfield(L, -2, "min");
+	lua_pushcfunction(L, Compat_math_pow);
+	lua_setfield(L, -2, "pow");
+	lua_pushcfunction(L, Compat_math_atan2);
+	lua_setfield(L, -2, "atan2");
+	lua_pushcfunction(L, Compat_math_log10);
+	lua_setfield(L, -2, "log10");
+	lua_pushcfunction(L, Compat_math_mod);
+	lua_setfield(L, -2, "mod");
 	lua_pop(L, 1); // pop math table
 }

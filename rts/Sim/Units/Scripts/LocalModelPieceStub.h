@@ -87,7 +87,13 @@ struct LocalModelPiece {
 
 	float3 GetAbsolutePos() const { return pos; }
 	CMatrix44f GetModelSpaceMatrix() const { return CMatrix44f(); }
-	bool GetEmitDirPos(float3& outPos, float3& outDir) const { outPos = pos; outDir = float3(0.0f, 1.0f, 0.0f); return false; }
+	// Headless stub: there's no model geometry, so the "emit dir/pos"
+	// is just the piece's local-space position with a default up-vector.
+	// Returning true (success) keeps EmitSfx and weapon muzzle queries
+	// from spamming "[US::EmitSFX] invalid model piece index" errors —
+	// SFX has no server-side meaning, and the weapon hit code falls
+	// back gracefully when the muzzle ends up at the unit centre.
+	bool GetEmitDirPos(float3& outPos, float3& outDir) const { outPos = pos; outDir = float3(0.0f, 1.0f, 0.0f); return true; }
 
 	const CollisionVolume* GetCollisionVolume() const { return &colvol; }
 	      CollisionVolume* GetCollisionVolume()       { return &colvol; }
