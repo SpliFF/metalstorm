@@ -111,6 +111,14 @@ export class LuaWidgetManager {
      *  `smoothness` is Spring's seconds-ish pacing hint; 0 = teleport. */
     onCameraTargetRequest?: (x: number, z: number, smoothness: number) => void;
 
+    /** Fired when a widget called Spring.SetActiveCommand and the API
+     *  resolved it to a real cmdId (build cmdIds are negative). Main.ts
+     *  wires this to InputManager — build commands enter ground placement
+     *  (or queue directly on a pure-factory selection). Non-build cmdIds
+     *  pass through but currently no widget hits that path through here:
+     *  move/stop/attack are all routed via Spring.GiveOrderToUnit. */
+    onSetActiveCommandRequest?: (cmdId: number, mods: { left: boolean; right: boolean; alt: boolean; ctrl: boolean; meta: boolean; shift: boolean }) => void;
+
     constructor(
         scene: Scene,
         camera: FreeCamera,
@@ -633,6 +641,14 @@ export class LuaWidgetManager {
                 const timeoutFrames = Number(msg.timeoutFrames | 0);
                 if (unitIds.length === 0) break;
                 conn.sendPlayerCommand(cmdId, unitIds, params, options, timeoutFrames);
+                break;
+            }
+
+            case 'setActiveCommand': {
+                const cmdId = Number(msg.cmdId | 0);
+                const mods = msg.mods as { left: boolean; right: boolean; alt: boolean; ctrl: boolean; meta: boolean; shift: boolean } | undefined;
+                if (!mods || cmdId === 0) break;
+                this.onSetActiveCommandRequest?.(cmdId, mods);
                 break;
             }
 

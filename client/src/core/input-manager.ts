@@ -40,8 +40,18 @@ import { findMetalSpots, nearestMetalSpot, type MetalSpot } from './metal-spots.
 
 /// How close (in world elmos) a click has to be to a unit's XZ to
 /// count as selecting that unit. Accounts for pickWithRay landing
-/// slightly off the unit base on a tilted view.
+/// slightly off the unit base on a tilted view. Used by right-click
+/// target classification (pickNearestEntityAt); single-click selection
+/// uses a screen-space pixel radius instead — see SELECT_PIXEL_RADIUS.
 const SELECT_RADIUS = 32;
+
+/// Single-click select tolerance, in screen pixels. World-space radii
+/// don't work for tall structures: clicking the top of a factory
+/// projects a ray that exits the back of the model and lands on terrain
+/// 100+ elmos behind the footprint, which then fails any ground-based
+/// proximity test. Comparing the click pixel to each unit's projected
+/// centre handles all unit shapes uniformly.
+const SELECT_PIXEL_RADIUS = 32;
 
 /// Pixel threshold for single-click vs drag. Below this, mousedown +
 /// mouseup is treated as a click; above, it's a drag-box select.
@@ -715,19 +725,40 @@ export class InputManager {
     // ---- Single click ----
 
     private handleSingleClick(evt: PointerEvent): void {
-        const groundPos = this.pickGroundAt(evt.clientX, evt.clientY);
-        if (!groundPos) return;
+        // Project each entity's world position to screen space and pick
+        // the one whose projected centre is closest to the click pixel.
+        // World-space proximity to the ground-pick fails for tall units
+        // (factories, towers) — the click ray hits terrain well behind
+        // the footprint and the entity ends up outside SELECT_RADIUS.
+        const canvas = this.scene.getEngine().getRenderingCanvas();
+        if (!canvas) return;
+        const rect = canvas.getBoundingClientRect();
+        const cx = evt.clientX - rect.left;
+        const cy = evt.clientY - rect.top;
+
+        const engine = this.scene.getEngine();
+        const viewport = this.camera.viewport.toGlobal(
+            engine.getRenderWidth(),
+            engine.getRenderHeight(),
+        );
+        const worldMat = this.scene.getTransformMatrix();
+        const identity = Matrix.Identity();
 
         let nearestId = -1;
-        let nearestDist = SELECT_RADIUS * SELECT_RADIUS;
+        let nearestDistSq = SELECT_PIXEL_RADIUS * SELECT_PIXEL_RADIUS;
         for (const [id] of this.entityRenderer.getEntities()) {
             const pos = this.entityRenderer.getEntityPosition(id);
             if (!pos) continue;
-            const dx = pos.x - groundPos.x;
-            const dz = pos.z - groundPos.z;
-            const distSq = dx * dx + dz * dz;
-            if (distSq < nearestDist) {
-                nearestDist = distSq;
+            const projected = Vector3.Project(
+                new Vector3(pos.x, pos.y, pos.z),
+                identity, worldMat, viewport);
+            // Skip entities behind the camera or beyond the far plane.
+            if (projected.z < 0 || projected.z > 1) continue;
+            const dx = projected.x - cx;
+            const dy = projected.y - cy;
+            const distSq = dx * dx + dy * dy;
+            if (distSq < nearestDistSq) {
+                nearestDistSq = distSq;
                 nearestId = id;
             }
         }

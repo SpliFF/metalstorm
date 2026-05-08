@@ -13,6 +13,7 @@
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/UnitTypes/Builder.h"
+#include "Sim/Units/UnitTypes/Factory.h"
 
 #include <algorithm>
 #include <cstring>
@@ -45,6 +46,24 @@ struct BuildAction {
     float strength;
     const std::vector<int>* pieces;  // borrowed from NanoPieceCache
 };
+
+/// Factories share the unitDef::IsBuilderUnit() predicate with constructors
+/// (and nano-towers), but at runtime they are CFactory : CBuilding — *not*
+/// CBuilder. Static-casting one to the other reads `curBuild`/`curReclaim`
+/// etc. at the wrong offsets and crashes the moment the factory queues a
+/// unit. The two paths therefore have to be split: factories only ever
+/// build (no reclaim/resurrect/capture/terraform), and CFactory exposes its
+/// own `curBuild` and `nanoPieceCache` directly.
+bool DescribeFactoryTask(const CFactory* f, BuildAction& out) {
+    if (f->curBuild == nullptr) return false;
+    out.kind = (f->curBuild->buildProgress >= 1.0f) ? KIND_REPAIR : KIND_BUILD;
+    out.targetId = static_cast<uint32_t>(f->curBuild->id);
+    out.targetX = f->curBuild->midPos.x;
+    out.targetY = f->curBuild->midPos.y;
+    out.targetZ = f->curBuild->midPos.z;
+    out.targetRadius = f->curBuild->radius * 0.5f;
+    return true;
+}
 
 /// Inspect a builder's `cur*` task pointers and fill in a BuildAction.
 /// Returns false when the builder is idle (no nano spray to draw).
@@ -125,8 +144,6 @@ std::vector<uint8_t> SerializeAll(uint32_t frame, int viewerAllyTeam) {
         if (u->unitDef == nullptr || !u->unitDef->IsBuilderUnit()) continue;
         if (!IsUnitVisibleTo(u, viewerAllyTeam)) continue;
 
-        CBuilder* b = static_cast<CBuilder*>(u);
-
         // `inBuildStance` is the engine's live "I'm currently emitting
         // nano spray" flag — flipped on by the builder's script when
         // the build animation reaches the spraying frame, and flipped
@@ -138,18 +155,31 @@ std::vector<uint8_t> SerializeAll(uint32_t frame, int viewerAllyTeam) {
         // has finished. Spectator-style "no allyteam" sessions still
         // see beams on enemy builders because IsUnitVisibleTo gates
         // the visibility separately.
-        if (!b->inBuildStance) continue;
+        if (!u->inBuildStance) continue;
 
         BuildAction a{};
-        a.builderId = static_cast<uint32_t>(b->id);
-        a.pieces = &b->GetNanoPieceCache().GetNanoPieces();
-        // GetBuildPower() returns 0..1 over the recent half-second
-        // window; idle builders read 0. Combined with the inBuildStance
-        // check above this stays a useful "is the spray strong right
-        // now" signal but no longer doubles as the on/off gate.
-        a.strength = b->GetNanoPieceCache().GetBuildPower();
+        a.builderId = static_cast<uint32_t>(u->id);
 
-        if (!DescribeBuilderTask(b, a)) continue;
+        // Factory and constructor share the IsBuilderUnit predicate but
+        // are different runtime classes (CFactory vs CBuilder), so the
+        // pointer-typed access has to branch. NanoPieceCache lives on
+        // both and exposes the same interface.
+        if (u->unitDef->IsFactoryUnit()) {
+            CFactory* f = static_cast<CFactory*>(u);
+            a.pieces = &f->GetNanoPieceCache().GetNanoPieces();
+            a.strength = f->GetNanoPieceCache().GetBuildPower();
+            if (!DescribeFactoryTask(f, a)) continue;
+        } else {
+            CBuilder* b = static_cast<CBuilder*>(u);
+            a.pieces = &b->GetNanoPieceCache().GetNanoPieces();
+            // GetBuildPower() returns 0..1 over the recent half-second
+            // window; idle builders read 0. Combined with the
+            // inBuildStance check above this stays a useful "is the
+            // spray strong right now" signal but no longer doubles as
+            // the on/off gate.
+            a.strength = b->GetNanoPieceCache().GetBuildPower();
+            if (!DescribeBuilderTask(b, a)) continue;
+        }
 
         const uint8_t pieceCount = a.pieces == nullptr ? 0
             : static_cast<uint8_t>(std::min<size_t>(a.pieces->size(), 255));

@@ -84,6 +84,16 @@ export interface SpringAPIContext {
      * client. Optional — falls back to the numeric id as a string.
      */
     getUnitDefName?(defId: number): string | undefined;
+    /**
+     * Activate a command from the chili integral menu (or any widget
+     * calling `Spring.SetActiveCommand`). Build commands (cmdId<0) tell
+     * InputManager to enter ground placement for the unit-def `-cmdId`,
+     * or — if every selected unit is a factory — to push the build order
+     * directly with the queue / count multiplier modifiers. Other cmdIds
+     * are currently a no-op; widgets that need them call GiveOrderToUnit
+     * directly. Optional.
+     */
+    setActiveCommand?(cmdId: number, mods: { left: boolean; right: boolean; alt: boolean; ctrl: boolean; meta: boolean; shift: boolean }): void;
 }
 
 /** Per-unit entry in the worker's unit store. */
@@ -223,6 +233,15 @@ export interface LiveState {
      *  added by Spring.GetUnitCmdDescs at read time. Absence of a
      *  unit means empty / unknown. */
     unitCmdDescs: Map<number, UnitCmdDescStored[]>;
+    /** Action bindings keyed by canonical keyset string ("any+x",
+     *  "c+s+f1", "x"). Populated by Spring.SendCommands("bind ...")
+     *  calls — ZK's epic-menu loads zk_keys.lua at startup and pushes
+     *  every default through that path. Spring.GetKeyBindings reads
+     *  this table during action dispatch (cawidgets actionHandler
+     *  falls back to it when the engine doesn't ship an `actions`
+     *  list with the keypress). Each entry is an array because a
+     *  keyset can fire multiple actions in registration order. */
+    keyBinds: Map<string, Array<{ cmd: string; extra: string }>>;
 }
 
 /** One entry from a unit's command panel as streamed by the server. */
@@ -407,6 +426,57 @@ function ordersToLuaArray(orders: UnitOrder[] | undefined, count?: LuaValue): Lu
     return result;
 }
 
+/** Canonicalise a Spring keyset string for storage / lookup. Accepts
+ *  "any+x", "Any+X", "ctrl+shift+f1", "C+S+f1", "S+x" and produces a
+ *  lowercase form with single-letter modifiers in `acms` order, or
+ *  `any+<key>` for the special "any modifier" form ZK uses heavily.
+ *  An empty / nameless input returns `""`. */
+function canonicalKeySet(input: string): string {
+    const parts = input.toLowerCase().split('+').map(s => s.trim()).filter(Boolean);
+    if (parts.length === 0) return '';
+    const key = parts.pop() as string;
+    const mods = new Set<string>();
+    for (const p of parts) {
+        if (p === 'a' || p === 'alt') mods.add('a');
+        else if (p === 'c' || p === 'ctrl' || p === 'control') mods.add('c');
+        else if (p === 'm' || p === 'meta') mods.add('m');
+        else if (p === 's' || p === 'shift') mods.add('s');
+        else if (p === 'any') mods.add('any');
+    }
+    if (mods.has('any')) return `any+${key}`;
+    let prefix = '';
+    if (mods.has('a')) prefix += 'a+';
+    if (mods.has('c')) prefix += 'c+';
+    if (mods.has('m')) prefix += 'm+';
+    if (mods.has('s')) prefix += 's+';
+    return prefix + key;
+}
+
+/** Map a Spring/SDL keycode (as produced by `springKeyCode` in
+ *  lua-widget-manager) back to its canonical lowercase symbol name —
+ *  the inverse of GetKeyCode. Letters fall through `String.fromCharCode`
+ *  since springKeyCode emits `e.key.toLowerCase().charCodeAt(0)` for
+ *  printable ASCII, so the round-trip is symmetric. */
+function keyCodeToSymbol(code: number): string {
+    const named: Record<number, string> = {
+        8: 'backspace', 9: 'tab', 13: 'enter', 27: 'escape', 32: 'space',
+        127: 'delete',
+        273: 'up', 274: 'down', 275: 'right', 276: 'left',
+        277: 'insert', 278: 'home', 279: 'end',
+        280: 'pageup', 281: 'pagedown',
+        282: 'f1', 283: 'f2', 284: 'f3', 285: 'f4', 286: 'f5',
+        287: 'f6', 288: 'f7', 289: 'f8', 290: 'f9', 291: 'f10',
+        292: 'f11', 293: 'f12',
+        303: 'right_shift', 304: 'shift',
+        305: 'right_ctrl',  306: 'ctrl',
+        307: 'right_alt',   308: 'alt',
+        309: 'right_meta',  310: 'meta',
+    };
+    if (named[code]) return named[code];
+    if (code >= 32 && code <= 126) return String.fromCharCode(code);
+    return '';
+}
+
 /** Deterministic fallback palette when no per-team colour is known.
  *  Cycles through eight distinct hues so widgets don't render every
  *  team blue when roster data hasn't arrived yet. */
@@ -472,6 +542,7 @@ export function createDefaultLiveState(): LiveState {
         wind: { x: 0, y: 0, z: 0, strength: 0, tidal: 0 },
         unitCommands: new Map(),
         unitCmdDescs: new Map(),
+        keyBinds: new Map(),
     };
 }
 
@@ -682,8 +753,59 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         Echo: (...args: LuaValue[]) => {
             console.log('[Spring.Echo]', ...args.map(a => String(a)));
         },
-        SendCommands: (_cmd: LuaValue) => {
-            // Console commands — ignored in browser client.
+        // Spring.SendCommands(line[, line, ...]) — Spring's batch console
+        // entrypoint. The only forms we currently care about are the
+        // bind / unbind / unbindaction triplet; ZK's epic-menu pushes
+        // every default keybind through here at startup. Other console
+        // verbs (e.g. "togglecammode") are dropped — they have no
+        // browser-side equivalent.
+        SendCommands: (...args: LuaValue[]) => {
+            const apply = (raw: string) => {
+                const line = raw.trim();
+                if (!line) return;
+                const space = line.indexOf(' ');
+                if (space < 0) return;
+                const verb = line.slice(0, space).toLowerCase();
+                const rest = line.slice(space + 1).trim();
+                if (verb === 'bind') {
+                    const sp = rest.indexOf(' ');
+                    if (sp < 0) return;
+                    const keyset = canonicalKeySet(rest.slice(0, sp));
+                    if (!keyset) return;
+                    const tail = rest.slice(sp + 1).trim();
+                    const sp2 = tail.indexOf(' ');
+                    const cmd = (sp2 < 0 ? tail : tail.slice(0, sp2)).toLowerCase();
+                    const extra = sp2 < 0 ? '' : tail.slice(sp2 + 1).trim();
+                    if (!cmd) return;
+                    const arr = ls.keyBinds.get(keyset) ?? [];
+                    if (!arr.some(b => b.cmd === cmd && b.extra === extra)) {
+                        arr.push({ cmd, extra });
+                        ls.keyBinds.set(keyset, arr);
+                    }
+                } else if (verb === 'unbind') {
+                    const sp = rest.indexOf(' ');
+                    if (sp < 0) return;
+                    const keyset = canonicalKeySet(rest.slice(0, sp));
+                    if (!keyset) return;
+                    const cmd = rest.slice(sp + 1).trim().toLowerCase();
+                    const arr = ls.keyBinds.get(keyset);
+                    if (!arr) return;
+                    const next = arr.filter(b => b.cmd !== cmd);
+                    if (next.length === 0) ls.keyBinds.delete(keyset);
+                    else ls.keyBinds.set(keyset, next);
+                } else if (verb === 'unbindaction') {
+                    const cmd = rest.trim().toLowerCase();
+                    if (!cmd) return;
+                    for (const [k, arr] of ls.keyBinds) {
+                        const next = arr.filter(b => b.cmd !== cmd);
+                        if (next.length === 0) ls.keyBinds.delete(k);
+                        else ls.keyBinds.set(k, next);
+                    }
+                }
+            };
+            for (const a of args) {
+                if (typeof a === 'string') apply(a);
+            }
         },
         GetConfigInt: (_key: LuaValue, def: LuaValue) => Number(def ?? 0),
         GetConfigFloat: (_key: LuaValue, def: LuaValue) => Number(def ?? 0),
@@ -1297,12 +1419,36 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
                 return Math.sqrt(dx * dx + dz * dz) > radius;
             });
         },
-        SetActiveCommand: (a: LuaValue, _b?: LuaValue, _c?: LuaValue, _d?: LuaValue,
-                          _e?: LuaValue, _f?: LuaValue, _g?: LuaValue, _h?: LuaValue) => {
-            // Spring overloads: SetActiveCommand(idx) | SetActiveCommand(cmdName, btn, lc, rc, alt, ctrl, meta, shift)
-            // We have no command-desc table, so just store whatever the caller gave us.
+        // Spring overloads: SetActiveCommand(idx [, btn, lc, rc, alt, ctrl, meta, shift])
+        //                 | SetActiveCommand(cmdName)
+        //
+        // The chili integral menu calls the index form after looking up
+        // a build cmdId via GetCmdDescIndex. We resolve the index back to
+        // a cmdId against the first selected unit's stored cmd-descs and,
+        // for build commands (cmdId<0), forward to the host so it can
+        // enter ground placement (or queue the build on a pure factory
+        // selection). Without this hop the click is silently dropped —
+        // chili's own state update runs but no order ever reaches the
+        // server.
+        SetActiveCommand: (a: LuaValue, _btn?: LuaValue, leftArg?: LuaValue, rightArg?: LuaValue,
+                          altArg?: LuaValue, ctrlArg?: LuaValue, metaArg?: LuaValue, shiftArg?: LuaValue) => {
             if (typeof a === 'number') {
-                ls.activeCommand = { index: a, cmdId: ls.activeCommand.cmdId, cmdName: ls.activeCommand.cmdName };
+                const idx = a | 0;
+                const sel = ls.selectedUnitIds[0];
+                const stored = sel ? ls.unitCmdDescs.get(sel) : undefined;
+                const desc = stored?.[idx - 1]; // chili passes 1-based indices
+                const cmdId = desc?.cmdId ?? 0;
+                ls.activeCommand = { index: idx, cmdId, cmdName: '' };
+                if (cmdId !== 0 && ctx.setActiveCommand) {
+                    ctx.setActiveCommand(cmdId, {
+                        left:  !!leftArg,
+                        right: !!rightArg,
+                        alt:   !!altArg,
+                        ctrl:  !!ctrlArg,
+                        meta:  !!metaArg,
+                        shift: !!shiftArg,
+                    });
+                }
             } else if (typeof a === 'string') {
                 ls.activeCommand = { index: -1, cmdId: 0, cmdName: a };
             } else {
@@ -1478,10 +1624,35 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             };
             return map[name] ?? 0;
         },
-        GetKeySymbol: (_keyCode: LuaValue) => {
-            return ['', ''];
+        // Spring.GetKeySymbol(keyCode) → (name, defaultName). cawidgets
+        // builds a keyset string from this when actionHandler.KeyAction
+        // has to look up bindings itself (we never ship an `actions`
+        // payload with KeyPress).
+        GetKeySymbol: (keyCode: LuaValue) => {
+            const sym = keyCodeToSymbol(Number(keyCode) | 0);
+            return [sym, sym];
         },
-        GetKeyBindings: () => ({}),
+        // Spring.GetKeyBindings(keyset) — array of {[cmd]=opts} entries
+        // bound to `keyset`. Matching is two-step: exact (e.g. "s+x")
+        // and the special `any+<key>` form ZK relies on for hotkeys
+        // that should fire regardless of modifier state. Without this,
+        // chili integral menu's tab hotkeys (any+x/c/v/b/n) would never
+        // resolve and the actionHandler would fall through to the
+        // widget's own KeyPress (which only handles the build grid).
+        GetKeyBindings: (keyset: LuaValue) => {
+            const ks = canonicalKeySet(String(keyset ?? ''));
+            if (!ks) return luaTable();
+            const baseKey = ks.includes('+') ? ks.slice(ks.lastIndexOf('+') + 1) : ks;
+            const matches: Array<Record<string, string>> = [];
+            const pushAll = (entries: Array<{ cmd: string; extra: string }> | undefined) => {
+                if (!entries) return;
+                for (const b of entries) matches.push({ [b.cmd]: b.extra });
+            };
+            pushAll(ls.keyBinds.get(ks));
+            const anyKey = `any+${baseKey}`;
+            if (anyKey !== ks) pushAll(ls.keyBinds.get(anyKey));
+            return luaTable(...matches);
+        },
         GetActionHotKeys: () => luaTable(),
 
         // --- Clipboard ---
@@ -1549,8 +1720,32 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         // instead of erroring on nil-indexing.
         GetActiveCmdDesc: () => luaTable(),
         GetDefaultCommand: () => [0, 0, ''],
-        GetCmdDescIndex: () => null,
-        FindUnitCmdDesc: () => null,
+        // Spring.GetCmdDescIndex(cmdID) — return the 1-based position of
+        // a cmd in the active selection's command desc list. The chili
+        // integral menu uses the result to drive SetActiveCommand, so a
+        // null/0 return short-circuits the build click entirely. We look
+        // up against the first selected unit, mirroring what
+        // dispatchCommandsChanged hands to widgetHandler.commands.
+        GetCmdDescIndex: (cmdId: LuaValue) => {
+            const id = Number(cmdId) | 0;
+            const sel = ls.selectedUnitIds[0];
+            if (!sel) return null;
+            const stored = ls.unitCmdDescs.get(sel);
+            if (!stored) return null;
+            const idx = stored.findIndex(d => d.cmdId === id);
+            return idx >= 0 ? idx + 1 : null;
+        },
+        // Spring.FindUnitCmdDesc(unitID, cmdID) — same idea, but scoped
+        // to a specific unit. Used by the integral menu to look up build
+        // entries on a clicked factory regardless of current selection.
+        FindUnitCmdDesc: (unitId: LuaValue, cmdId: LuaValue) => {
+            const uid = Number(unitId) | 0;
+            const id = Number(cmdId) | 0;
+            const stored = ls.unitCmdDescs.get(uid);
+            if (!stored) return null;
+            const idx = stored.findIndex(d => d.cmdId === id);
+            return idx >= 0 ? idx + 1 : null;
+        },
 
         // --- Selection commands ---
         // Spring.SelectUnit(unitID[, append]) — replace the selection with

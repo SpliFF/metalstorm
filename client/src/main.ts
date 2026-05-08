@@ -621,6 +621,27 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 const durationMs = smoothness > 0 ? Math.min(2000, smoothness * 1000) : 0;
                 rtsCamera.focusOn(x, z, durationMs);
             };
+            // The chili integral menu's build-button click resolves to
+            // Spring.SetActiveCommand(idx, ...) for whatever build sits
+            // at `idx` in the selected unit's cmd-descs. Route negative
+            // cmdIds (build commands) into InputManager so the click
+            // actually starts a build — without this, the chili API
+            // round-trips happily inside the worker but no order ever
+            // reaches the server. Non-build cmdIds are a no-op for now;
+            // widgets that want move/stop/attack/etc. call
+            // Spring.GiveOrderToUnit directly.
+            //
+            // Right-click on a build icon cancels the active placement,
+            // matching Spring's "RMB clears the active command" idiom.
+            mgr.onSetActiveCommandRequest = (cmdId, mods) => {
+                if (cmdId < 0 && inputManager) {
+                    if (mods.right) {
+                        inputManager.cancelBuildPlacement();
+                    } else {
+                        inputManager.startBuildPlacement(-cmdId, { shift: mods.shift, ctrl: mods.ctrl });
+                    }
+                }
+            };
             void mgr.initialize().then(() => {
                 console.log(`[client] widget manager ready`);
             }).catch(e => {
@@ -931,9 +952,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Global ESC handler: toggle the quit-to-lobby confirmation. Only
     // active while a game is running (detected by a non-null `engine`),
     // so ESC stays free for lobby UI dialogs.
+    //
+    // InputManager has its own ESC handler that cancels build placement
+    // and pending modal commands. Both listeners are on `window`, and
+    // stopPropagation doesn't suppress sibling listeners on the same
+    // node, so we have to check InputManager's state up front and bail —
+    // otherwise pressing ESC mid-placement clears the ghost AND opens
+    // the quit dialog at the same time.
     window.addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;
         if (!engine) return;
+        if (inputManager?.isPlacingBuild || inputManager?.hasPendingCommand()) return;
         e.preventDefault();
         showQuitConfirm();
     });

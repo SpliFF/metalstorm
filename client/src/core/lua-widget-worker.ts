@@ -808,6 +808,9 @@ async function init(
             postToMain({ type: 'setCameraTarget', x, z, smoothness });
         },
         getUnitDefName: (defId) => unitDefMap.get(defId)?.name,
+        setActiveCommand: (cmdId, mods) => {
+            postToMain({ type: 'setActiveCommand', cmdId, mods });
+        },
     };
 
     // 4. Install engine globals
@@ -2651,6 +2654,15 @@ function installEngineGlobals(
     // writing the same pattern keep hitting it. Wrap both globally to
     // floor the offending args — matches Spring's behaviour exactly and
     // unblocks any widget that ports the same pattern.
+    //
+    // Lua 5.1 also represents all numbers as the same "number" type and
+    // uses `%.14g` for tostring — so `tostring(100.0)` is "100", not
+    // "100.0". Lua 5.3 split number into integer/float subtypes; floats
+    // always serialise with at least one decimal digit, which surfaces
+    // as ugly "100.0" cost ribbons across every chili widget that
+    // assigns numbers directly to `caption` or feeds them through `..`.
+    // Restore Lua 5.1's `%.14g` formatting in the global tostring so
+    // game widgets don't have to be patched per-author.
     rt.doString(`
         local _unpack = table.unpack or unpack
 
@@ -2686,6 +2698,23 @@ function installEngineGlobals(
                 end
             end
             return origFormat(fmt, _unpack(args, 1, n))
+        end
+
+        -- tostring: Lua 5.1 used "%.14g" for numbers, which prints
+        -- whole-valued floats as integers ("100", not "100.0"). Lua
+        -- 5.3 prints floats with at least one fractional digit. The
+        -- string-concat operator also dispatches through this path in
+        -- fengari, so overriding tostring fixes both tostring(n) and
+        -- n .. "" chains used by chili's Label:DrawInBox.
+        local origTostring = tostring
+        tostring = function(v)
+            if type(v) == 'number' then
+                if v ~= v then return 'nan' end
+                if v == math.huge then return 'inf' end
+                if v == -math.huge then return '-inf' end
+                return origFormat('%.14g', v)
+            end
+            return origTostring(v)
         end
     `, 'string_lib_lua51_compat');
 
@@ -3061,15 +3090,32 @@ function sameIdSet(a: ReadonlyArray<number>, b: ReadonlyArray<number>): boolean 
  *  bootstrapped (no-op if widgetHandler isn't installed yet). */
 function dispatchCommandsChanged(): void {
     if (!runtime) return;
+    // Spring exposes the union of every selected unit's cmd-descs as
+    // widgetHandler.commands — a builder selected alongside a factory
+    // shows both their build options. Picking only sel[1] used to hide
+    // half the options in mixed-builder selections; dedupe by cmd id so
+    // a build available on two units doesn't double up.
     runtime.doString(`
         if widgetHandler then
             local sel = Spring.GetSelectedUnits()
-            if sel and sel[1] then
-                widgetHandler.commands = Spring.GetUnitCmdDescs(sel[1]) or {}
-            else
-                widgetHandler.commands = {}
+            local merged, seen = {}, {}
+            if sel then
+                for i = 1, #sel do
+                    local descs = Spring.GetUnitCmdDescs(sel[i])
+                    if descs then
+                        for j = 1, #descs do
+                            local d = descs[j]
+                            local id = d and d.id
+                            if id and not seen[id] then
+                                seen[id] = true
+                                merged[#merged + 1] = d
+                            end
+                        end
+                    end
+                end
             end
-            widgetHandler.commands.n = #widgetHandler.commands
+            widgetHandler.commands = merged
+            widgetHandler.commands.n = #merged
             widgetHandler:CommandsChanged()
         end
     `, 'dispatchCommandsChanged');
