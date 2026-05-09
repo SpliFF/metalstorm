@@ -731,7 +731,7 @@ int main(int argc, char* argv[])
             auto udBytes = Protocol::BuildGameUnitDefs(
                 unitDefHandler->GetUnitDefsVec(), gameId);
             auto wdBytes = Protocol::BuildGameWeaponDefs(
-                weaponDefHandler->GetWeaponDefsVec());
+                weaponDefHandler->GetWeaponDefsVec(), gameId);
             if (DefsCache::WriteIfMissing(gameId, defsCacheKey, udBytes, wdBytes)) {
                 SLOG(SPRING_LOG_NOTICE,
                      "defs cache baked: gameId=%s key=%s "

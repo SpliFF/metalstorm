@@ -33,9 +33,12 @@ import {
     Vector3,
     Quaternion,
     LinesMesh,
+    SceneLoader,
 } from '@babylonjs/core';
+import '@babylonjs/loaders/glTF/index.js';
 
 import type { WeaponDefInfo } from './connection.js';
+import { stampUrl } from '../config.js';
 
 /** Visual type enum — matches ProjectileVisualType in protocol.fbs */
 const enum VisualType {
@@ -57,7 +60,9 @@ const DEFAULT_COLORS: Record<number, [number, number, number]> = {
     [VisualType.Flame]:     [1.0, 0.4, 0.0],
 };
 
-/** Per-weapon-def rendering template + cached size. */
+/** Per-weapon-def rendering template + cached size. The mesh and material
+ *  are mutable because async model loads (see `swapInModel`) replace the
+ *  procedural placeholder once the `.glb` finishes loading. */
 interface WeaponVisual {
     defId: number;
     mesh: Mesh;
@@ -120,7 +125,11 @@ export class ProjectileRenderer {
         this.fallbackVisual = this.createVisual(0, VisualType.Cannon, 1.0, [1, 0.8, 0.2], 0.8);
     }
 
-    /** Replace the per-weapon-def visual templates. */
+    /** Replace the per-weapon-def visual templates. Defs that reference
+     *  a real `.glb` model URL (e.g. ZK missiles, plasma cannons) get
+     *  their procedural placeholder swapped out asynchronously once the
+     *  model finishes loading; the rest stick with per-visual-type
+     *  procedural shapes. */
     setWeaponDefs(defs: WeaponDefInfo[]): void {
         for (const v of this.weaponVisuals.values()) {
             v.mesh.dispose();
@@ -139,7 +148,104 @@ export class ProjectileRenderer {
 
             const visual = this.createVisual(def.defId, def.visualType, size, color, intensity);
             this.weaponVisuals.set(def.defId, visual);
+
+            // If the server announced a model URL, kick off a background
+            // load and swap the procedural mesh once it completes. The
+            // procedural shape stays in place during the load so the
+            // first few frames of fire still render something.
+            if (def.modelUrl) {
+                this.swapInModel(def.defId, def.modelUrl, size).catch((e) => {
+                    console.warn(`[projectile] model load failed for def ${def.defId} (${def.modelUrl}):`, e);
+                });
+            }
         }
+    }
+
+    /** Async path: load a `.glb`, merge its meshes, and replace the
+     *  per-def WeaponVisual's procedural mesh in-place so the next
+     *  `tick()` renders thin-instances against the loaded geometry. */
+    private async swapInModel(defId: number, modelUrl: string, size: number): Promise<void> {
+        const lastSlash = modelUrl.lastIndexOf('/');
+        const baseUrl = modelUrl.substring(0, lastSlash + 1);
+        const fileName = modelUrl.substring(lastSlash + 1);
+
+        const result = await SceneLoader.ImportMeshAsync(
+            '', baseUrl, stampUrl(fileName), this.scene,
+        );
+
+        // The current visual may have been replaced or disposed (e.g.
+        // setWeaponDefs called again with new data) while we were
+        // awaiting the load. Bail in that case to avoid leaking the
+        // imported meshes — caller's catch-all handler logs the
+        // failure but treats this as a non-error.
+        const visual = this.weaponVisuals.get(defId);
+        if (!visual) {
+            for (const m of result.meshes) m.dispose();
+            return;
+        }
+
+        // Glb-loaded scenes typically arrive as a list of __root__ +
+        // children; we want a single thin-instance source mesh. Merge
+        // every concrete sub-mesh into one. MergeMeshes preserves
+        // material/UVs and disposes the originals when `disposeSource`.
+        const concrete: Mesh[] = [];
+        for (const m of result.meshes) {
+            if (m instanceof Mesh && m.getTotalVertices() > 0) concrete.push(m);
+        }
+        if (concrete.length === 0) {
+            for (const m of result.meshes) m.dispose();
+            return;
+        }
+        const merged = concrete.length === 1
+            ? concrete[0]
+            : Mesh.MergeMeshes(concrete, true, true, undefined, false, true);
+        if (!merged) return;
+
+        // Dispose the orphaned root and any transform nodes the loader
+        // created — leaving them around inflates the scene-graph node
+        // count without contributing geometry.
+        for (const m of result.meshes) {
+            if (m !== merged && !m.isDisposed()) m.dispose();
+        }
+
+        // Inherit colour from the procedural visual's emissive so the
+        // loaded model still picks up the weapondef-specified tint.
+        // The model's own material wins on diffuse; we just boost
+        // emissive to match the original brightness.
+        merged.name = `proj_model_${defId}`;
+        merged.isVisible = false;
+        merged.thinInstanceEnablePicking = false;
+        // Normalize size — the .glb is authored at full unit-elmo scale
+        // but our procedural shapes were `4*size` elmos across. Scale
+        // the model down so the loaded geometry sits in the same size
+        // bracket as the procedural fallback would have.
+        const targetExtent = 4 * size;
+        const bb = merged.getBoundingInfo().boundingBox;
+        const longest = Math.max(
+            bb.maximum.x - bb.minimum.x,
+            bb.maximum.y - bb.minimum.y,
+            bb.maximum.z - bb.minimum.z,
+        );
+        if (longest > 1e-3) {
+            const s = targetExtent / longest;
+            merged.scaling.set(s, s, s);
+            merged.bakeCurrentTransformIntoVertices();
+        }
+
+        // Replace the procedural mesh on the visual and dispose it.
+        // Material reuse: the loaded model's material is fine, but if
+        // it has no emissive component the projectile won't glow — copy
+        // the procedural visual's emissive across.
+        const oldMesh = visual.mesh;
+        const oldMat = visual.material;
+        visual.mesh = merged;
+        if (merged.material instanceof StandardMaterial) {
+            const stdMat = merged.material;
+            stdMat.emissiveColor = oldMat.emissiveColor.clone();
+            visual.material = stdMat;
+        }
+        oldMesh.dispose();
+        if (visual.material !== oldMat) oldMat.dispose();
     }
 
     // ── Event hooks (called from connection.ts) ─────────────────────────────
