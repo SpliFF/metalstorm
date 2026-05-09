@@ -811,6 +811,17 @@ async function init(
         setActiveCommand: (cmdId, mods) => {
             postToMain({ type: 'setActiveCommand', cmdId, mods });
         },
+        playSound: (path, volume, pos) => {
+            postToMain({
+                type: 'playSound',
+                path,
+                volume,
+                spatial: !!pos,
+                x: pos?.x ?? 0,
+                y: pos?.y ?? 0,
+                z: pos?.z ?? 0,
+            });
+        },
     };
 
     // 4. Install engine globals
@@ -1553,9 +1564,12 @@ defaultFont = activeFont
         -- Normalise modifier order: alphabetical by token, lowercase key
         -- name. "Shift+Ctrl+f10" → "C+S+f10". KeyAction in actions.lua
         -- builds keysets via "A+C+M+S+<key>" so that's the canonical form.
+        -- The "Any+" prefix is Spring's wildcard — bindings stored under
+        -- "Any+<key>" should match presses with any modifier combination.
         local function normaliseKeyset(ks)
             ks = tostring(ks or ""):lower()
             local mods = { a = false, c = false, m = false, s = false }
+            local anyMod = false
             local rest = ks
             local changed = true
             while changed do
@@ -1566,21 +1580,47 @@ defaultFont = activeFont
                     rest = tail or ""
                     changed = true
                 else
-                    -- also support "alt+", "ctrl+", "meta+", "shift+" prefixes
+                    -- also support "alt+", "ctrl+", "meta+", "shift+", "any+" long forms
                     local pre, after = rest:match("^(%a+)%+(.*)")
                     if pre == "alt" then mods.a = true; rest = after; changed = true
                     elseif pre == "ctrl" then mods.c = true; rest = after; changed = true
                     elseif pre == "meta" then mods.m = true; rest = after; changed = true
                     elseif pre == "shift" then mods.s = true; rest = after; changed = true
+                    elseif pre == "any" then anyMod = true; rest = after; changed = true
                     end
                 end
             end
             local out = ""
+            if anyMod then
+                -- Wildcard form lives in its own keyspace so GetKeyBindings
+                -- can do an explicit fallback lookup against it.
+                return "Any+" .. rest
+            end
             if mods.a then out = out .. "A+" end
             if mods.c then out = out .. "C+" end
             if mods.m then out = out .. "M+" end
             if mods.s then out = out .. "S+" end
             return out .. rest
+        end
+
+        -- Strip modifier prefixes for the wildcard fallback lookup.
+        local function bareKey(ks)
+            local rest = tostring(ks or ""):lower()
+            local changed = true
+            while changed do
+                changed = false
+                local _, _, m, tail = rest:find("^(%a)(%+)(.*)")
+                if m and (m == "a" or m == "c" or m == "m" or m == "s") then
+                    rest = tail or ""; changed = true
+                else
+                    local pre, after = rest:match("^(%a+)%+(.*)")
+                    if pre == "alt" or pre == "ctrl" or pre == "meta"
+                            or pre == "shift" or pre == "any" then
+                        rest = after; changed = true
+                    end
+                end
+            end
+            return rest
         end
 
         local function bindAction(keyset, cmd, args)
@@ -1791,9 +1831,16 @@ defaultFont = activeFont
             if not keyset and not scanset then return {} end
             local primary = _keyBindings[normaliseKeyset(keyset or scanset)]
             if primary and #primary > 0 then return primary end
+            -- Fall back to the "Any+<key>" wildcard form so a binding
+            -- like "bind Any+x foo" matches a press of x with any
+            -- modifier combination (or none).
+            local wild = _keyBindings["Any+" .. bareKey(keyset or scanset)]
+            if wild and #wild > 0 then return wild end
             if keyset and scanset then
                 local secondary = _keyBindings[normaliseKeyset(scanset)]
-                if secondary then return secondary end
+                if secondary and #secondary > 0 then return secondary end
+                local secondaryWild = _keyBindings["Any+" .. bareKey(scanset)]
+                if secondaryWild and #secondaryWild > 0 then return secondaryWild end
             end
             return {}
         end
@@ -3495,6 +3542,10 @@ self.onmessage = async (e: MessageEvent) => {
                     options: o.options, tag: o.tag, timeout: o.timeout,
                 })));
             }
+            // Build queue counts on the chili integral menu read from
+            // GetRealBuildQueue inside CommandsChanged; without dispatch
+            // here, the badges would only refresh when cmd-descs change.
+            dispatchCommandsChanged();
             break;
         }
 

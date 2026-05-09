@@ -19,6 +19,7 @@
 #include "Server/CacheControl.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogSqlite.h"
+#include <algorithm>
 #include <cctype>
 #include <set>
 
@@ -663,8 +664,52 @@ int main(int argc, char* argv[])
 
         std::string filePath = "data/games/" + rest;
         namespace fs = std::filesystem;
-        if (!fs::exists(filePath))
-            return {.contentType = "text/plain", .body = {}, .status = 404};
+        if (!fs::exists(filePath)) {
+            // Case-insensitive fallback: ZK references like
+            // "sounds/weapon/lightningbolt.wav" don't match the on-disk
+            // "LightningBolt.wav" on case-sensitive filesystems. Walk the
+            // path components from the closest existing parent and try
+            // to resolve each segment by lowercased comparison.
+            std::error_code ec;
+            fs::path resolved;
+            const fs::path requested(filePath);
+            for (auto it = requested.begin(); it != requested.end(); ++it) {
+                fs::path candidate = resolved.empty() ? fs::path(*it) : resolved / *it;
+                if (fs::exists(candidate, ec)) {
+                    resolved = std::move(candidate);
+                    continue;
+                }
+                if (resolved.empty() || !fs::is_directory(resolved, ec)) {
+                    resolved.clear();
+                    break;
+                }
+                bool matched = false;
+                std::string want = it->string();
+                std::string wantLower = want;
+                std::transform(wantLower.begin(), wantLower.end(), wantLower.begin(),
+                    [](unsigned char c){ return std::tolower(c); });
+                for (const auto& entry : fs::directory_iterator(resolved, ec)) {
+                    std::string have = entry.path().filename().string();
+                    std::string haveLower = have;
+                    std::transform(haveLower.begin(), haveLower.end(), haveLower.begin(),
+                        [](unsigned char c){ return std::tolower(c); });
+                    if (haveLower == wantLower) {
+                        resolved = entry.path();
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched) {
+                    resolved.clear();
+                    break;
+                }
+            }
+            if (!resolved.empty() && fs::exists(resolved, ec)) {
+                filePath = resolved.string();
+            } else {
+                return {.contentType = "text/plain", .body = {}, .status = 404};
+            }
+        }
 
         // Directory listing: return JSON array of entries
         if (fs::is_directory(filePath)) {
@@ -709,6 +754,11 @@ int main(int argc, char* argv[])
         else if (ext == ".html") ct = "text/html; charset=utf-8";
         else if (ext == ".css") ct = "text/css; charset=utf-8";
         else if (ext == ".js") ct = "application/javascript; charset=utf-8";
+        else if (ext == ".wav") ct = "audio/wav";
+        else if (ext == ".ogg") ct = "audio/ogg";
+        else if (ext == ".opus") ct = "audio/ogg; codecs=opus";
+        else if (ext == ".webm") ct = "audio/webm";
+        else if (ext == ".mp3") ct = "audio/mpeg";
 
         return {
             .contentType = ct,

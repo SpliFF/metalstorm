@@ -486,6 +486,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         inputManager?.setMapData(map);
         commandPathRenderer?.setMapData(map);
         debugTerrainGrid?.setMapData(map);
+        entityRenderer?.setMapHeightmap(
+            map.heightmap, map.mapx, map.mapy,
+            map.minHeight, map.maxHeight, map.squareSize,
+        );
 
         // Absolute URL for HTTP resources (lobby-served)
         const mapBaseUrl = lobbyHttpUrl + map.mapDataUrl;
@@ -600,7 +604,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 lobbyUrl: lobbyHttpUrl,
                 soloWidget: soloWidget ?? undefined,
             });
-            mgr.setLiveDataSources(rtsCamera, conn);
+            mgr.setLiveDataSources(rtsCamera, conn, audioManager ?? undefined);
             mgr.forwardMapFeatures(map.features);
             // Seed the worker with any defs that arrived before the
             // manager existed (def stream can race MapData arrival).

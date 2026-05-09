@@ -18,6 +18,7 @@ import type { ParsedMapData } from './map-data.js';
 import type { RTSCamera } from './rts-camera.js';
 import type { Connection, ResourceUpdateInfo } from './connection.js';
 import type { EntityStateSnapshot } from './entity-state.js';
+import type { AudioManager } from './audio.js';
 import { debugConsole } from './debug-console.js';
 import { logIngest } from './log-ingest.js';
 
@@ -47,6 +48,7 @@ export class LuaWidgetManager {
     private options: WidgetManagerOptions;
     private rtsCamera: RTSCamera | null = null;
     private connection: Connection | null = null;
+    private audioManager: AudioManager | null = null;
 
     private worker: Worker | null = null;
     /** Buffer for messages sent before initialize() creates the worker.
@@ -132,9 +134,10 @@ export class LuaWidgetManager {
     }
 
     /** Set camera and connection references for state pushing. */
-    setLiveDataSources(rtsCamera: RTSCamera, connection: Connection): void {
+    setLiveDataSources(rtsCamera: RTSCamera, connection: Connection, audioManager?: AudioManager): void {
         this.rtsCamera = rtsCamera;
         this.connection = connection;
+        if (audioManager) this.audioManager = audioManager;
     }
 
     // ── Main entry point ────────────────────────────────────────────────
@@ -682,6 +685,33 @@ export class LuaWidgetManager {
                 if (Number.isFinite(x) && Number.isFinite(z)) {
                     this.onCameraTargetRequest?.(x, z, smoothness);
                 }
+                break;
+            }
+
+            case 'playSound': {
+                // Worker-side Spring.PlaySoundFile forwards here. Resolve
+                // the path against the game's data root, decode lazily,
+                // and play through the AudioManager's voice pool.
+                const am = this.audioManager;
+                if (!am) break;
+                const path = typeof msg.path === 'string' ? msg.path : '';
+                if (!path) break;
+                const volume = typeof msg.volume === 'number' ? msg.volume : 1;
+                const x = typeof msg.x === 'number' ? msg.x : 0;
+                const y = typeof msg.y === 'number' ? msg.y : 0;
+                const z = typeof msg.z === 'number' ? msg.z : 0;
+                const spatial = !!msg.spatial;
+                const url = `${this.options.lobbyUrl}/api/games/data/${this.options.gameId}/${path.replace(/^\/+/, '')}`;
+                am.loadSound(path, url).then((buf) => {
+                    if (!buf) return;
+                    am.play({
+                        buffer: buf,
+                        x: spatial ? x : 0,
+                        y: spatial ? y : 0,
+                        z: spatial ? z : 0,
+                        volume,
+                    });
+                });
                 break;
             }
 

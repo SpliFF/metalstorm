@@ -94,6 +94,14 @@ export interface SpringAPIContext {
      * directly. Optional.
      */
     setActiveCommand?(cmdId: number, mods: { left: boolean; right: boolean; alt: boolean; ctrl: boolean; meta: boolean; shift: boolean }): void;
+    /**
+     * Play a sound effect. `path` is a VFS-relative game path (e.g.
+     * "sounds/weapon/laser/pulse_laser_start.wav"). `pos` is optional —
+     * if provided, the sound plays positional through the AudioManager's
+     * panner; otherwise it plays as a 2D UI sound. The host resolves the
+     * URL against the game's data root.
+     */
+    playSound?(path: string, volume: number, pos?: { x: number; y: number; z: number }): void;
 }
 
 /** Per-unit entry in the worker's unit store. */
@@ -1492,39 +1500,56 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         GetCommandQueue: (unitId: LuaValue, count: LuaValue) => {
             return ordersToLuaArray(ls.unitCommands.get(Number(unitId)), count);
         },
+        // Spring.GetFullBuildQueue returns a 1-indexed sequence of
+        // single-pair tables: { [1]={[defA]=count}, [2]={[defB]=count}, ... }
+        // ZK widgets iterate via `for _,buildPair in ipairs(queue) do
+        // local udef,count = next(buildPair,nil) end` so the shape must
+        // be a sequence — a flat map breaks ipairs(). We collapse same
+        // defs since unit_commands is already a per-tick snapshot.
         GetFullBuildQueue: (unitId: LuaValue) => {
-            // Spring returns: { [defId] = count, ... } summarising the
-            // build orders queued on a factory.
             const orders = ls.unitCommands.get(Number(unitId));
-            const out: Record<number, number> = {};
-            if (orders) {
-                for (const o of orders) {
-                    if (o.cmdId < 0) {
-                        const defId = -o.cmdId;
-                        out[defId] = (out[defId] ?? 0) + 1;
-                    }
-                }
-            }
-            return out;
-        },
-        // Spring.GetRealBuildQueue returns the build queue as an array
-        // of consecutive-same-def runs: [ {defA=3}, {defB=1}, {defA=2} ].
-        // ZK's chili integral menu uses it to render the queue strip
-        // under the build buttons. We emit a single grouped entry
-        // covering the whole queue — the menu sums across entries
-        // anyway, so the visual order is preserved well enough for now.
-        // A full fidelity port would walk consecutive runs.
-        GetRealBuildQueue: (unitId: LuaValue) => {
-            const orders = ls.unitCommands.get(Number(unitId));
-            if (!orders || orders.length === 0) return [];
-            const out: Record<number, number> = {};
+            if (!orders || orders.length === 0) return luaTable();
+            const counts = new Map<number, number>();
             for (const o of orders) {
                 if (o.cmdId < 0) {
                     const defId = -o.cmdId;
-                    out[defId] = (out[defId] ?? 0) + 1;
+                    counts.set(defId, (counts.get(defId) ?? 0) + 1);
                 }
             }
-            return [out];
+            const items: LuaValue[] = [];
+            for (const [defId, count] of counts) {
+                items.push({ [defId]: count } as Record<string, LuaValue>);
+            }
+            return luaTable(...items);
+        },
+        // Spring.GetRealBuildQueue: same shape as GetFullBuildQueue but
+        // preserves consecutive-same-def runs (e.g. queueing 3 of A then
+        // 1 of B then 2 of A → 3 entries). The chili integral menu uses
+        // this to render the queue strip; #buildQueue must be > 0 and
+        // each buildQueue[i] must be a single-pair table.
+        GetRealBuildQueue: (unitId: LuaValue) => {
+            const orders = ls.unitCommands.get(Number(unitId));
+            if (!orders || orders.length === 0) return luaTable();
+            const items: LuaValue[] = [];
+            let runDef = 0;
+            let runCount = 0;
+            for (const o of orders) {
+                if (o.cmdId >= 0) continue;
+                const defId = -o.cmdId;
+                if (defId === runDef) {
+                    runCount++;
+                } else {
+                    if (runDef !== 0) {
+                        items.push({ [runDef]: runCount } as Record<string, LuaValue>);
+                    }
+                    runDef = defId;
+                    runCount = 1;
+                }
+            }
+            if (runDef !== 0) {
+                items.push({ [runDef]: runCount } as Record<string, LuaValue>);
+            }
+            return luaTable(...items);
         },
         // Spring.SelectUnitArray(unitArray[, append]) — replace the player's
         // selection with `unitArray`, or merge into it when append=true.
@@ -1878,7 +1903,23 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         GetViewRange: () => ls.camera.far,
 
         // --- Audio (post to main thread via worker message) ---
-        PlaySoundFile: () => true, // accepted but no-op in worker
+        // Spring.PlaySoundFile(soundFile, volume, posX, posY, posZ, channel, ...)
+        // We forward the path + volume + optional position to the host;
+        // the AudioManager loads the asset (cached) and plays via the
+        // 96-voice pool. Channel/argspec beyond pos is ignored for now.
+        PlaySoundFile: (soundFile: LuaValue, volume: LuaValue,
+                        posX: LuaValue, posY: LuaValue, posZ: LuaValue) => {
+            const path = typeof soundFile === 'string' ? soundFile : '';
+            if (!path) return false;
+            const vol = typeof volume === 'number' ? volume : 1;
+            const x = typeof posX === 'number' ? posX : null;
+            const y = typeof posY === 'number' ? posY : 0;
+            const z = typeof posZ === 'number' ? posZ : null;
+            const pos = (x !== null && z !== null)
+                ? { x, y, z } : undefined;
+            ctx.playSound?.(path, vol, pos);
+            return true;
+        },
         StopSoundStream: () => {},
         SetSoundStreamVolume: () => {},
 
