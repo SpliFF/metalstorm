@@ -53,6 +53,12 @@ export class ProjectileTextureResolver {
     private gameManifest: DirManifest | null = null;
     private engineManifest: DirManifest | null = null;
     private ready = false;
+    /// Resolved when the most recent init() finishes (resources.json
+    /// + manifests fetched). Consumers that want the *real* URL —
+    /// not procedural fallback — for a name should `await whenReady()`
+    /// before resolving, or call resolve() now and re-resolve after
+    /// the promise settles. Replaced on every init().
+    private readyPromise: Promise<void> = Promise.resolve();
     /// One-time warning per (name, reason) so a missing texture
     /// surfaces in the console without spamming on every weapon
     /// def or every fired projectile.
@@ -69,7 +75,18 @@ export class ProjectileTextureResolver {
         this.gameManifest = null;
         this.engineManifest = null;
         this.warned.clear();
+        this.readyPromise = this.doInit(gameId, lobbyHttpUrl);
+        return this.readyPromise;
+    }
 
+    /// Returns a promise that settles when the current init() finishes.
+    /// Cheap to call repeatedly; the same promise is returned across
+    /// callers until the next init() replaces it.
+    whenReady(): Promise<void> {
+        return this.readyPromise;
+    }
+
+    private async doInit(gameId: string, lobbyHttpUrl: string): Promise<void> {
         if (!gameId) return;
 
         const base = lobbyHttpUrl || '';

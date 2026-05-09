@@ -34,6 +34,7 @@ import {
     Quaternion,
     LinesMesh,
     SceneLoader,
+    Texture,
 } from '@babylonjs/core';
 import '@babylonjs/loaders/glTF/index.js';
 
@@ -61,6 +62,13 @@ const DEFAULT_COLORS: Record<number, [number, number, number]> = {
     [VisualType.Flame]:     [1.0, 0.4, 0.0],
 };
 
+/** How `tick()` builds the per-instance world matrix.
+ *  - `velocity`: align local +Y to the projectile's velocity vector.
+ *    Used by missile cones and the placeholder cylinders for laser/beam.
+ *  - `billboard`: rotate each instance so the quad's local +Z faces the
+ *    active camera. Used by sprite billboards (4.1). */
+type ProjectileOrientation = 'velocity' | 'billboard';
+
 /** Per-weapon-def rendering template + cached size. The mesh and material
  *  are mutable because async model loads (see `swapInModel`) replace the
  *  procedural placeholder once the `.glb` finishes loading. */
@@ -71,7 +79,19 @@ interface WeaponVisual {
     visualType: number;
     /// Average projectile size — used to scale the thin instance mesh in y.
     size: number;
+    /// How tick() should orient each thin instance. Defaults to 'velocity'
+    /// (legacy procedural shapes); billboard sprites set it to 'billboard'.
+    orientation: ProjectileOrientation;
 }
+
+/** Visual-type → builder dispatch. Builders return a synchronous
+ *  `WeaponVisual` ready to receive thin instances; any async upgrades
+ *  (model load, late texture bind) attach later. */
+type VisualBuilder = (
+    def: WeaponDefInfo,
+    scene: Scene,
+    resolver: ProjectileTextureResolver | null,
+) => WeaponVisual;
 
 /** Lifetime state for one live projectile. */
 interface LiveProjectile {
@@ -128,9 +148,20 @@ export class ProjectileRenderer {
     /// owned here so widget-loaded weapons get the same resolution.
     private textureResolver: ProjectileTextureResolver | null = null;
 
+    /// Most recent def list passed to setWeaponDefs. Retained so we
+    /// can rebuild visuals after the resolver finishes loading
+    /// resources.json + manifests — see the async-init race section
+    /// of PLAN-projectiles.md issue 4.0.
+    private lastDefs: WeaponDefInfo[] = [];
+    /// Set true when a re-run after resolver.whenReady() has already
+    /// been scheduled, so a flurry of setWeaponDefs calls during
+    /// def streaming doesn't queue duplicate rebuilds.
+    private rebuildScheduled = false;
+
     constructor(scene: Scene) {
         this.scene = scene;
-        this.fallbackVisual = this.createVisual(0, VisualType.Cannon, 1.0, [1, 0.8, 0.2], 0.8);
+        this.fallbackVisual = createFallbackVisual(0, VisualType.Cannon, 1.0,
+            [1, 0.8, 0.2], 0.8, scene);
     }
 
     /// Inject the resolver after init(). Called once per game session
@@ -139,6 +170,10 @@ export class ProjectileRenderer {
     /// game-bootstrap sequence.
     setTextureResolver(r: ProjectileTextureResolver): void {
         this.textureResolver = r;
+        // If defs already arrived before the resolver was wired in,
+        // schedule a rebuild once it's ready so sprite builders can
+        // upgrade flat-color placeholders to textured billboards.
+        this.scheduleResolverRebuild();
     }
 
     /** Replace the per-weapon-def visual templates. Defs that reference
@@ -147,6 +182,8 @@ export class ProjectileRenderer {
      *  model finishes loading; the rest stick with per-visual-type
      *  procedural shapes. */
     setWeaponDefs(defs: WeaponDefInfo[]): void {
+        this.lastDefs = defs;
+
         for (const v of this.weaponVisuals.values()) {
             v.mesh.dispose();
             v.material.dispose();
@@ -154,15 +191,7 @@ export class ProjectileRenderer {
         this.weaponVisuals.clear();
 
         for (const def of defs) {
-            const hasColor = def.colorR > 0 || def.colorG > 0 || def.colorB > 0;
-            const color: [number, number, number] = hasColor
-                ? [def.colorR, def.colorG, def.colorB]
-                : (DEFAULT_COLORS[def.visualType] ?? DEFAULT_COLORS[VisualType.Cannon]);
-
-            const size = Math.max(0.5, def.size > 0 ? def.size : 1.0);
-            const intensity = def.intensity > 0 ? def.intensity : 0.8;
-
-            const visual = this.createVisual(def.defId, def.visualType, size, color, intensity);
+            const visual = this.createVisual(def);
             this.weaponVisuals.set(def.defId, visual);
 
             // If the server announced a model URL, kick off a background
@@ -170,11 +199,48 @@ export class ProjectileRenderer {
             // procedural shape stays in place during the load so the
             // first few frames of fire still render something.
             if (def.modelUrl) {
+                const size = Math.max(0.5, def.size > 0 ? def.size : 1.0);
                 this.swapInModel(def.defId, def.modelUrl, size).catch((e) => {
                     console.warn(`[projectile] model load failed for def ${def.defId} (${def.modelUrl}):`, e);
                 });
             }
         }
+
+        this.scheduleResolverRebuild();
+    }
+
+    /// Visual builders that consult the texture resolver (4.1 sprite
+    /// billboards, 4.2 beams, 4.4 missile trails) return procedural /
+    /// flat-color placeholders when the resolver hasn't loaded yet.
+    /// Once `whenReady()` settles we re-run setWeaponDefs against the
+    /// stored def list so those placeholders pick up real KTX2 URLs.
+    private scheduleResolverRebuild(): void {
+        if (this.rebuildScheduled) return;
+        const r = this.textureResolver;
+        if (!r || this.lastDefs.length === 0) return;
+        this.rebuildScheduled = true;
+        r.whenReady().then(() => {
+            this.rebuildScheduled = false;
+            // The def list may have been replaced (or cleared) while we
+            // were awaiting the resolver. Use whatever's current.
+            if (this.lastDefs.length === 0) return;
+            const defs = this.lastDefs;
+            this.lastDefs = [];          // setWeaponDefs re-stamps it
+            this.setWeaponDefs(defs);
+        }).catch((e) => {
+            this.rebuildScheduled = false;
+            console.warn('[projectile] resolver whenReady() rejected:', e);
+        });
+    }
+
+    /// Dispatch by visual type (or modelUrl for 3D-model weapons).
+    /// Each branch is a top-level builder; this method just picks the
+    /// right one and delegates. The async `.glb` swap-in stays separate
+    /// (see swapInModel) — model-bearing weapons start as a procedural
+    /// placeholder so the first frames of fire still render.
+    private createVisual(def: WeaponDefInfo): WeaponVisual {
+        const builder = visualBuilders[def.visualType as VisualType] ?? buildBillboardVisual;
+        return builder(def, this.scene, this.textureResolver);
     }
 
     /** Async path: load a `.glb`, merge its meshes, and replace the
@@ -418,23 +484,60 @@ export class ProjectileRenderer {
         const updated = new Set<number>();
         const tmpQ = new Quaternion();
         const tmpScale = new Vector3(1, 1, 1);
+        const tmpRight = new Vector3();
+        const tmpUp = new Vector3();
+        const tmpFwd = new Vector3();
+        // Cache the camera position once per tick — billboard rotation
+        // is keyed off it. Falls back to origin if no active camera yet.
+        const cam = this.scene.activeCamera;
+        const camX = cam ? cam.position.x : 0;
+        const camY = cam ? cam.position.y : 0;
+        const camZ = cam ? cam.position.z : 0;
         for (const [key, projs] of groups) {
             const visual = key === -1 ? this.fallbackVisual : this.weaponVisuals.get(key)!;
             const matrices = new Float32Array(projs.length * 16);
+            const billboard = visual.orientation === 'billboard';
             for (let i = 0; i < projs.length; i++) {
                 const p = projs[i];
-                // Orient the mesh along its velocity vector for missile/laser shapes.
-                const len = Math.hypot(p.vel.x, p.vel.y, p.vel.z);
-                if (len > 1e-3) {
-                    const dirX = p.vel.x / len, dirY = p.vel.y / len, dirZ = p.vel.z / len;
-                    const upDot = dirY;
-                    const axisX = -dirZ, axisZ = dirX;
-                    const angle = Math.acos(Math.max(-1, Math.min(1, upDot)));
-                    Quaternion.RotationAxisToRef(new Vector3(axisX, 0, axisZ), angle, tmpQ);
+                if (billboard) {
+                    // Camera-facing rotation: build orthonormal basis
+                    // {right, up, forward} where forward points from
+                    // the projectile to the camera. The quad's local
+                    // +Z (CreatePlane front face) ends up pointing at
+                    // the camera, so the textured face is visible.
+                    let fx = camX - p.pos.x, fy = camY - p.pos.y, fz = camZ - p.pos.z;
+                    let flen = Math.hypot(fx, fy, fz);
+                    if (flen < 1e-3) { fx = 0; fy = 0; fz = 1; flen = 1; }
+                    fx /= flen; fy /= flen; fz /= flen;
+                    // right = cross(worldUp, forward), worldUp = (0,1,0)
+                    let rx = fz, ry = 0, rz = -fx;
+                    let rlen = Math.hypot(rx, ry, rz);
+                    if (rlen < 1e-3) {
+                        // Forward parallel to world up — use world +X
+                        // as right and recompute up.
+                        rx = 1; ry = 0; rz = 0; rlen = 1;
+                    }
+                    rx /= rlen; rz /= rlen;
+                    // up = cross(forward, right)
+                    const ux = fy * rz - fz * ry;
+                    const uy = fz * rx - fx * rz;
+                    const uz = fx * ry - fy * rx;
+                    tmpRight.set(rx, ry, rz);
+                    tmpUp.set(ux, uy, uz);
+                    tmpFwd.set(fx, fy, fz);
+                    Quaternion.RotationQuaternionFromAxisToRef(tmpRight, tmpUp, tmpFwd, tmpQ);
                 } else {
-                    tmpQ.set(0, 0, 0, 1);
+                    // Velocity-aligned: rotate local +Y onto velocity.
+                    const len = Math.hypot(p.vel.x, p.vel.y, p.vel.z);
+                    if (len > 1e-3) {
+                        const dirY = p.vel.y / len;
+                        const axisX = -p.vel.z / len, axisZ = p.vel.x / len;
+                        const angle = Math.acos(Math.max(-1, Math.min(1, dirY)));
+                        Quaternion.RotationAxisToRef(new Vector3(axisX, 0, axisZ), angle, tmpQ);
+                    } else {
+                        tmpQ.set(0, 0, 0, 1);
+                    }
                 }
-                Matrix.ComposeToRef(tmpScale, tmpQ, p.pos, Matrix.Identity());
                 const m = Matrix.Compose(tmpScale, tmpQ, p.pos);
                 m.copyToArray(matrices, i * 16);
             }
@@ -475,54 +578,202 @@ export class ProjectileRenderer {
         this.beams = [];
     }
 
-    private createVisual(
-        defId: number,
-        visualType: number,
-        size: number,
-        color: [number, number, number],
-        intensity: number,
-    ): WeaponVisual {
-        const mat = new StandardMaterial(`projMat_${defId}`, this.scene);
-        mat.diffuseColor = new Color3(color[0], color[1], color[2]);
-        mat.emissiveColor = new Color3(
-            color[0] * intensity,
-            color[1] * intensity,
-            color[2] * intensity,
-        );
-        mat.specularColor = new Color3(0, 0, 0);
+}
 
-        let mesh: Mesh;
-        const baseDiameter = 4 * size;
+// ── Top-level visual builders ──────────────────────────────────────────────
+//
+// Each builder returns a WeaponVisual ready to receive thin instances.
+// The renderer's tick() handles per-instance matrix composition based on
+// `visual.orientation` ('velocity' for legacy procedural shapes, 'billboard'
+// for camera-facing sprites). Builders that consult the resolver fall back
+// to flat-color placeholders when it isn't ready yet — setWeaponDefs
+// re-runs once whenReady() settles, swapping in textured visuals.
 
-        switch (visualType) {
-            case VisualType.Laser:
-                mesh = MeshBuilder.CreateCylinder(
-                    `proj_${defId}`, { diameter: baseDiameter * 0.4, height: baseDiameter * 3, tessellation: 6 }, this.scene);
-                break;
-            case VisualType.BeamLaser:
-                mesh = MeshBuilder.CreateCylinder(
-                    `proj_${defId}`, { diameter: baseDiameter * 0.2, height: baseDiameter * 6, tessellation: 6 }, this.scene);
-                break;
-            case VisualType.Missile:
-                mesh = MeshBuilder.CreateCylinder(
-                    `proj_${defId}`, { diameterTop: 0, diameterBottom: baseDiameter * 0.8, height: baseDiameter * 2, tessellation: 6 }, this.scene);
-                break;
-            case VisualType.Lightning:
-            case VisualType.Flame:
-                mesh = MeshBuilder.CreateSphere(
-                    `proj_${defId}`, { diameter: baseDiameter * 0.6, segments: 4 }, this.scene);
-                break;
-            case VisualType.Cannon:
-            default:
-                mesh = MeshBuilder.CreateSphere(
-                    `proj_${defId}`, { diameter: baseDiameter, segments: 4 }, this.scene);
-                break;
-        }
+function resolveColor(def: WeaponDefInfo): [number, number, number] {
+    const hasColor = def.colorR > 0 || def.colorG > 0 || def.colorB > 0;
+    if (hasColor) return [def.colorR, def.colorG, def.colorB];
+    return DEFAULT_COLORS[def.visualType] ?? DEFAULT_COLORS[VisualType.Cannon];
+}
 
-        mesh.material = mat;
-        mesh.isVisible = false;
-        mesh.thinInstanceEnablePicking = false;
+function resolveSize(def: WeaponDefInfo): number {
+    return Math.max(0.5, def.size > 0 ? def.size : 1.0);
+}
 
-        return { defId, mesh, material: mat, visualType, size };
+function resolveIntensity(def: WeaponDefInfo): number {
+    return def.intensity > 0 ? def.intensity : 0.8;
+}
+
+function makeMaterial(
+    name: string,
+    scene: Scene,
+    color: [number, number, number],
+    intensity: number,
+): StandardMaterial {
+    const mat = new StandardMaterial(name, scene);
+    mat.diffuseColor = new Color3(color[0], color[1], color[2]);
+    mat.emissiveColor = new Color3(
+        color[0] * intensity,
+        color[1] * intensity,
+        color[2] * intensity,
+    );
+    mat.specularColor = new Color3(0, 0, 0);
+    return mat;
+}
+
+/// 4.1 — Billboard sprite for cannons, plasma, EMG, flame. A unit quad
+/// per weapon def, rotated by tick() each frame to face the camera.
+/// Texture comes from `def.texture1` via the resolver; missing/null
+/// texture → flat-color quad (still distinguishable from beam/missile
+/// types because tick() billboards it).
+function buildBillboardVisual(
+    def: WeaponDefInfo,
+    scene: Scene,
+    resolver: ProjectileTextureResolver | null,
+): WeaponVisual {
+    const color = resolveColor(def);
+    const size = resolveSize(def);
+    const intensity = resolveIntensity(def);
+    const mat = makeMaterial(`projMat_${def.defId}`, scene, color, intensity);
+    mat.disableLighting = true;
+    // Additive blend (alphaMode = 1) — projectile sprites stack on top
+    // of each other and the background without ever obscuring it.
+    mat.alphaMode = 1;
+    mat.backFaceCulling = false;
+    mat.disableDepthWrite = true;
+
+    const url = resolver?.resolve(def.texture1) ?? null;
+    if (url) {
+        // KTX2 loader is pinned globally in main.ts; passing the URL
+        // straight to Texture() picks it up.
+        const tex = new Texture(stampUrl(url), scene, /*noMipmap*/ false,
+            /*invertY*/ true, Texture.TRILINEAR_SAMPLINGMODE);
+        tex.hasAlpha = true;
+        mat.diffuseTexture = tex;
+        mat.useAlphaFromDiffuseTexture = true;
+        // White diffuse so the texture's own colour shows through —
+        // weapondef colour is applied via emissive only.
+        mat.diffuseColor = new Color3(1, 1, 1);
     }
+
+    const baseDiameter = 4 * size;
+    const mesh = MeshBuilder.CreatePlane(
+        `proj_${def.defId}`,
+        { size: baseDiameter, sideOrientation: Mesh.DOUBLESIDE },
+        scene,
+    );
+    mesh.material = mat;
+    mesh.isVisible = false;
+    mesh.thinInstanceEnablePicking = false;
+    mesh.alphaIndex = 1000;
+
+    return { defId: def.defId, mesh, material: mat, visualType: def.visualType, size, orientation: 'billboard' };
+}
+
+/// 4.2 placeholder — laser / beam-laser cylinder. Replaced by a textured
+/// stretched-quad with UV scroll once 4.2 lands.
+function buildBeamPlaceholderVisual(
+    def: WeaponDefInfo,
+    scene: Scene,
+    _resolver: ProjectileTextureResolver | null,
+): WeaponVisual {
+    const color = resolveColor(def);
+    const size = resolveSize(def);
+    const intensity = resolveIntensity(def);
+    const mat = makeMaterial(`projMat_${def.defId}`, scene, color, intensity);
+
+    const baseDiameter = 4 * size;
+    const isBeam = def.visualType === VisualType.BeamLaser;
+    const mesh = MeshBuilder.CreateCylinder(`proj_${def.defId}`, {
+        diameter: baseDiameter * (isBeam ? 0.2 : 0.4),
+        height: baseDiameter * (isBeam ? 6 : 3),
+        tessellation: 6,
+    }, scene);
+    mesh.material = mat;
+    mesh.isVisible = false;
+    mesh.thinInstanceEnablePicking = false;
+
+    return { defId: def.defId, mesh, material: mat, visualType: def.visualType, size, orientation: 'velocity' };
+}
+
+/// 4.3 placeholder — lightning sphere. Replaced by the procedural zigzag
+/// polyline once 4.3 lands.
+function buildLightningPlaceholderVisual(
+    def: WeaponDefInfo,
+    scene: Scene,
+    _resolver: ProjectileTextureResolver | null,
+): WeaponVisual {
+    const color = resolveColor(def);
+    const size = resolveSize(def);
+    const intensity = resolveIntensity(def);
+    const mat = makeMaterial(`projMat_${def.defId}`, scene, color, intensity);
+
+    const mesh = MeshBuilder.CreateSphere(`proj_${def.defId}`,
+        { diameter: 4 * size * 0.6, segments: 4 }, scene);
+    mesh.material = mat;
+    mesh.isVisible = false;
+    mesh.thinInstanceEnablePicking = false;
+
+    return { defId: def.defId, mesh, material: mat, visualType: def.visualType, size, orientation: 'velocity' };
+}
+
+/// 4.4 placeholder — missile cone. Existing `.glb` swap-in remains; the
+/// smoke-trail ring buffer lands with 4.4.
+function buildMissileVisual(
+    def: WeaponDefInfo,
+    scene: Scene,
+    _resolver: ProjectileTextureResolver | null,
+): WeaponVisual {
+    const color = resolveColor(def);
+    const size = resolveSize(def);
+    const intensity = resolveIntensity(def);
+    const mat = makeMaterial(`projMat_${def.defId}`, scene, color, intensity);
+
+    const baseDiameter = 4 * size;
+    const mesh = MeshBuilder.CreateCylinder(`proj_${def.defId}`, {
+        diameterTop: 0,
+        diameterBottom: baseDiameter * 0.8,
+        height: baseDiameter * 2,
+        tessellation: 6,
+    }, scene);
+    mesh.material = mat;
+    mesh.isVisible = false;
+    mesh.thinInstanceEnablePicking = false;
+
+    return { defId: def.defId, mesh, material: mat, visualType: def.visualType, size, orientation: 'velocity' };
+}
+
+/// Module-level dispatch table keyed by visual type. The renderer's
+/// createVisual method consults this and falls back to the billboard
+/// builder for unknown types (their look as a flat coloured quad is
+/// at least distinguishable from beams/missiles).
+const visualBuilders: Partial<Record<VisualType, VisualBuilder>> = {
+    [VisualType.Cannon]:    buildBillboardVisual,
+    [VisualType.Flame]:     buildBillboardVisual,
+    [VisualType.Laser]:     buildBeamPlaceholderVisual,
+    [VisualType.BeamLaser]: buildBeamPlaceholderVisual,
+    [VisualType.Lightning]: buildLightningPlaceholderVisual,
+    [VisualType.Missile]:   buildMissileVisual,
+};
+
+/// Constructor-time fallback: a synthetic minimal def passed through
+/// the billboard builder. Sized at 1.0 with the cannon default colour;
+/// no texture lookup since the resolver isn't wired in yet at this
+/// point. The fallback's `orientation` is therefore 'billboard' — fine,
+/// since tick() will face it at the camera and the lack of texture
+/// just gives us a tinted quad.
+function createFallbackVisual(
+    defId: number,
+    visualType: number,
+    size: number,
+    color: [number, number, number],
+    intensity: number,
+    scene: Scene,
+): WeaponVisual {
+    const mat = makeMaterial(`projMat_${defId}`, scene, color, intensity);
+    const mesh = MeshBuilder.CreateSphere(`proj_${defId}`,
+        { diameter: 4 * size, segments: 4 }, scene);
+    mesh.material = mat;
+    mesh.isVisible = false;
+    mesh.thinInstanceEnablePicking = false;
+    return { defId, mesh, material: mat, visualType, size, orientation: 'velocity' };
 }
