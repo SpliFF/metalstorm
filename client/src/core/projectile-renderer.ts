@@ -43,6 +43,16 @@ import type { WeaponDefInfo } from './connection.js';
 import { stampUrl } from '../config.js';
 import type { ProjectileTextureResolver } from './projectile-texture-resolver.js';
 import { registerProjectileBeamShader } from './shaders/projectile-beam.js';
+import {
+    type MissileTrailState,
+    type MissileTrailVisual,
+    buildMissileTrailVisual,
+    createMissileTrailState,
+    disposeMissileTrailVisual,
+    flushMissileTrailVisual,
+    isTrailFullyFaded,
+    recordTrailPuff,
+} from './projectile-trails.js';
 
 /** Visual type enum — matches ProjectileVisualType in protocol.fbs */
 const enum VisualType {
@@ -173,6 +183,11 @@ interface LiveProjectile {
     targetPos: Vector3;
     /// Frame at which the Fired event landed — used to evict stale orphans.
     spawnedAtMs: number;
+    /// Smoke trail ring buffer. Non-null only when the projectile's
+    /// weapon def has a trail visual configured (Missile-typed defs
+    /// whose `texture2` resolved to a real URL). On Impact the state
+    /// is moved to `orphanedTrails` so the puffs keep fading.
+    trail: MissileTrailState | null;
 }
 
 /** Active beam: from-point, to-point and birth time. Each tick the
@@ -223,6 +238,15 @@ export class ProjectileRenderer {
     private live = new Map<number, LiveProjectile>();
     private liveBeams: LiveBeam[] = [];
     private lastTickMs = performance.now();
+    /// Per-def smoke trail visuals (PLAN §4.4). Entries are created in
+    /// setWeaponDefs only for missile-typed defs whose `texture2`
+    /// resolves to a URL; missiles of unconfigured defs render as a
+    /// .glb model + cone with no trail.
+    private trailVisuals = new Map<number, MissileTrailVisual>();
+    /// Trail states whose missile died but whose puffs are still
+    /// fading. Drained when `isTrailFullyFaded` reports the buffer
+    /// is empty so the per-tick flush loop stays bounded.
+    private orphanedTrails: { defId: number; state: MissileTrailState }[] = [];
     /// Resolver for `def.texture1/2/3` → KTX2 URL. Wired in by main.ts
     /// at game start; null until then. Future visual builders (sprite
     /// billboards, animated beams) consult `resolve(name)` to fetch
@@ -271,6 +295,18 @@ export class ProjectileRenderer {
             disposeVisual(v);
         }
         this.weaponVisuals.clear();
+        // Trail visuals share the def id keyspace with weaponVisuals
+        // and the def-list rebuild is wholesale, so dispose every
+        // trail visual too. Orphaned trail states reference puff
+        // positions only — they're harmless to drop, since a fresh
+        // def list usually means a new game session.
+        for (const tv of this.trailVisuals.values()) disposeMissileTrailVisual(tv);
+        this.trailVisuals.clear();
+        this.orphanedTrails = [];
+        // Live projectiles' `trail` references now point at disposed
+        // visuals — clear the field so a stale state doesn't leak
+        // into the next flush. Bodies stay live; trails just stop.
+        for (const p of this.live.values()) p.trail = null;
 
         for (const def of defs) {
             const visual = this.createVisual(def);
@@ -285,6 +321,16 @@ export class ProjectileRenderer {
                 this.swapInModel(def.defId, def.modelUrl, size).catch((e) => {
                     console.warn(`[projectile] model load failed for def ${def.defId} (${def.modelUrl}):`, e);
                 });
+            }
+
+            // Trail visual is only built for missile-typed defs and
+            // only when the resolver hands back a real URL for the
+            // smoketrail slot. Other visual types either have no
+            // trail concept (cannon, beam) or already render their
+            // own (lightning is hit-scan and doesn't trail).
+            if (def.visualType === VisualType.Missile) {
+                const tv = buildMissileTrailVisual(def, this.scene, this.textureResolver);
+                if (tv) this.trailVisuals.set(def.defId, tv);
             }
         }
 
@@ -442,6 +488,12 @@ export class ProjectileRenderer {
         // elmos / second so our render-tick integration uses real time
         // (the sim ticks at 30 Hz, so multiply by SIM_TICKS_PER_SEC).
         const vps = SIM_TICKS_PER_SEC;
+        // Trail state is allocated up-front so the very first tick
+        // can record a puff at the muzzle position; the per-tick code
+        // path only checks `p.trail !== null` rather than re-querying
+        // the trailVisuals map.
+        const trail = this.trailVisuals.has(ev.weaponDefId)
+            ? createMissileTrailState() : null;
         this.live.set(ev.projId, {
             id: ev.projId,
             weaponDefId: ev.weaponDefId,
@@ -452,6 +504,7 @@ export class ProjectileRenderer {
             hitscan: false,
             targetPos: new Vector3(ev.targetPos.x, ev.targetPos.y, ev.targetPos.z),
             spawnedAtMs: performance.now(),
+            trail,
         });
     }
 
@@ -477,10 +530,20 @@ export class ProjectileRenderer {
     /** Server reported an impact. Remove the local entry; combat-fx
      *  spawns the impact VFX from the same event batch. */
     onImpact(ev: { projId: number; pos: { x: number; y: number; z: number } }): void {
-        if (!this.live.delete(ev.projId)) return;
-        // The position snapshot in the event drives the VFX (see combat-fx);
-        // we don't need to keep the local entry alive for one more tick
-        // because the impact VFX renders at the event position directly.
+        const p = this.live.get(ev.projId);
+        if (!p) return;
+        this.live.delete(ev.projId);
+        // Retain the trail past impact so puffs keep fading rather
+        // than vanishing the moment the missile dies. The per-tick
+        // flush sees orphaned trails alongside live ones; once every
+        // puff is past TRAIL_LIFETIME_S the entry is evicted.
+        if (p.trail) {
+            this.orphanedTrails.push({ defId: p.weaponDefId, state: p.trail });
+        }
+        // The position snapshot in the event drives the impact VFX
+        // (see combat-fx) — we don't need to keep the projectile entry
+        // alive for one more tick because the explosion renders at
+        // the event position directly.
     }
 
     /** Server reported a trajectory change (bounce / steered). Override
@@ -517,7 +580,11 @@ export class ProjectileRenderer {
             }
         }
 
-        // 1. Integrate motion + cull expired/orphan entries.
+        // 1. Integrate motion + cull expired/orphan entries. Trail
+        //    states on TTL/orphan-culled projectiles get retired to
+        //    `orphanedTrails` rather than dropped — same rationale as
+        //    onImpact, just for the case where no impact event arrived.
+        const nowSec = nowMs / 1000;
         const dead: number[] = [];
         for (const p of this.live.values()) {
             if (p.hitscan) {
@@ -532,13 +599,26 @@ export class ProjectileRenderer {
             // vel.y -= g * dt   (g positive pulls down)
             p.vel.y -= p.gravity * dt;
 
+            // Record a puff at the missile's post-integration position.
+            // recordTrailPuff throttles internally — this call is cheap
+            // enough that we don't need to gate it further.
+            if (p.trail) {
+                recordTrailPuff(p.trail, p.pos.x, p.pos.y, p.pos.z, nowSec);
+            }
+
             if (p.ttl > 0) {
                 p.ttl -= dt;
                 if (p.ttl <= 0) dead.push(p.id);
             }
             if (nowMs - p.spawnedAtMs > MAX_ORPHAN_LIFE_MS) dead.push(p.id);
         }
-        for (const id of dead) this.live.delete(id);
+        for (const id of dead) {
+            const p = this.live.get(id);
+            if (p?.trail) {
+                this.orphanedTrails.push({ defId: p.weaponDefId, state: p.trail });
+            }
+            this.live.delete(id);
+        }
 
         // 2. Group by weapon def and push thin-instance buffers.
         //    Live projectiles whose weapon-def maps to a beam visual
@@ -645,7 +725,6 @@ export class ProjectileRenderer {
         //    expects (axis vector, midpoint, halfWidth, birthSec
         //    packed into the matrix' free slots), and update the
         //    per-def `time` uniform.
-        const nowSec = nowMs / 1000;
         const beamGroups = new Map<number, LiveBeam[]>();
         for (const b of this.liveBeams) {
             const v = this.weaponVisuals.get(b.weaponDefId);
@@ -782,6 +861,40 @@ export class ProjectileRenderer {
                 visual.lastBoltCount = 0;
             }
         }
+
+        // 7. Missile trail pass — group every live + orphaned puff
+        //    by weapon def and flush into the per-def trail visual.
+        //    Live missiles' trails were already advanced (puff
+        //    recording) in step 1; this pass just turns the ring
+        //    buffers into thin instances + per-instance alpha.
+        const trailStatesByDef = new Map<number, MissileTrailState[]>();
+        for (const p of this.live.values()) {
+            if (!p.trail) continue;
+            let g = trailStatesByDef.get(p.weaponDefId);
+            if (!g) { g = []; trailStatesByDef.set(p.weaponDefId, g); }
+            g.push(p.trail);
+        }
+        for (const ot of this.orphanedTrails) {
+            let g = trailStatesByDef.get(ot.defId);
+            if (!g) { g = []; trailStatesByDef.set(ot.defId, g); }
+            g.push(ot.state);
+        }
+
+        for (const [defId, visual] of this.trailVisuals) {
+            const states = trailStatesByDef.get(defId) ?? [];
+            flushMissileTrailVisual(visual, states, nowSec,
+                camX, camY, camZ,
+                tmpRight, tmpUp, tmpFwd, tmpQ, tmpScale);
+        }
+
+        // Evict orphaned trails whose every puff has aged past the
+        // lifetime — keeping them in the list would just inflate the
+        // per-tick group iteration with no visible effect.
+        for (let i = this.orphanedTrails.length - 1; i >= 0; i--) {
+            if (isTrailFullyFaded(this.orphanedTrails[i].state, nowSec)) {
+                this.orphanedTrails.splice(i, 1);
+            }
+        }
     }
 
     /** Number of live projectiles tracked client-side. */
@@ -795,6 +908,11 @@ export class ProjectileRenderer {
         }
         this.weaponVisuals.clear();
         disposeVisual(this.fallbackVisual);
+        for (const tv of this.trailVisuals.values()) {
+            disposeMissileTrailVisual(tv);
+        }
+        this.trailVisuals.clear();
+        this.orphanedTrails = [];
         this.live.clear();
         this.liveBeams = [];
     }
