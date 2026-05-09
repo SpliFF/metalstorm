@@ -20,6 +20,10 @@
  *     Bit 8: state_bits    → u8[count]     (packed unit-state flags)
  *     Bit 9: los_state     → u8[count]     (Spring losStatus, low 4 bits)
  *     Bit 10: build_progress → u8[count]   (0-255 → 0%-100%, 255 = finished)
+ *     Bit 11: pitch        → i8[count]     (asin(frontdir.y) × 127 / (π/2),
+ *                                            clamped to [-127, 127])
+ *     Bit 12: roll         → i8[count]     (signed angle of rightdir wrt
+ *                                            world horizontal × 127 / (π/2))
  *
  *   los_state layout (per unit, for the receiving session's ally team):
  *     bit 0: LOS_INLOS      — fully in line of sight
@@ -59,9 +63,11 @@ constexpr uint16_t FIELD_TEAM        = 1 << 7;
 constexpr uint16_t FIELD_STATE_BITS  = 1 << 8;
 constexpr uint16_t FIELD_LOS_STATE   = 1 << 9;
 constexpr uint16_t FIELD_BUILD_PROGRESS = 1 << 10;
+constexpr uint16_t FIELD_PITCH       = 1 << 11;
+constexpr uint16_t FIELD_ROLL        = 1 << 12;
 
 // All fields — used for full state snapshots
-constexpr uint16_t FIELD_ALL = 0x07FF;
+constexpr uint16_t FIELD_ALL = 0x1FFF;
 
 /// Serialize all active units into the Tier 2 binary format.
 /// Returns a buffer ready to be sent (without envelope byte).

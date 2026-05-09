@@ -18,12 +18,18 @@ interface EntityLerpState {
     prevY: number;
     prevZ: number;
     prevHeading: number;
+    /** Pitch in radians; default 0 if server didn't send the field. */
+    prevPitch: number;
+    /** Roll in radians; default 0. */
+    prevRoll: number;
 
     // Current snapshot values (target)
     currX: number;
     currY: number;
     currZ: number;
     currHeading: number;
+    currPitch: number;
+    currRoll: number;
 
     // Timestamp when current snapshot was received
     snapshotTime: number;
@@ -43,14 +49,18 @@ export class EntityInterpolator {
         entityId: number,
         x: number, y: number, z: number,
         heading: number,
-        now: number = performance.now()
+        now: number = performance.now(),
+        pitch: number = 0,
+        roll: number = 0,
     ): void {
         let state = this.entities.get(entityId);
         if (!state) {
             // First time seeing this entity — no interpolation possible yet
             state = {
                 prevX: x, prevY: y, prevZ: z, prevHeading: heading,
+                prevPitch: pitch, prevRoll: roll,
                 currX: x, currY: y, currZ: z, currHeading: heading,
+                currPitch: pitch, currRoll: roll,
                 snapshotTime: now,
             };
             this.entities.set(entityId, state);
@@ -62,12 +72,16 @@ export class EntityInterpolator {
         state.prevY = state.currY;
         state.prevZ = state.currZ;
         state.prevHeading = state.currHeading;
+        state.prevPitch = state.currPitch;
+        state.prevRoll = state.currRoll;
 
         // Set new target
         state.currX = x;
         state.currY = y;
         state.currZ = z;
         state.currHeading = heading;
+        state.currPitch = pitch;
+        state.currRoll = roll;
 
         // Update snapshot interval estimate
         const dt = now - state.snapshotTime;
@@ -85,19 +99,22 @@ export class EntityInterpolator {
     getInterpolated(
         entityId: number,
         now: number = performance.now()
-    ): { x: number; y: number; z: number; heading: number } | null {
+    ): { x: number; y: number; z: number; heading: number; pitch: number; roll: number } | null {
         const state = this.entities.get(entityId);
         if (!state) return null;
 
         // t = how far we are between prev and curr (0..1, can overshoot slightly)
         const elapsed = now - state.snapshotTime;
         const t = Math.min(Math.max(elapsed / this.snapshotInterval, 0), 1.2);
+        const tc = Math.min(t, 1);
 
         return {
             x: state.prevX + (state.currX - state.prevX) * t,
             y: state.prevY + (state.currY - state.prevY) * t,
             z: state.prevZ + (state.currZ - state.prevZ) * t,
-            heading: lerpAngle(state.prevHeading, state.currHeading, Math.min(t, 1)),
+            heading: lerpAngle(state.prevHeading, state.currHeading, tc),
+            pitch: state.prevPitch + (state.currPitch - state.prevPitch) * tc,
+            roll:  state.prevRoll  + (state.currRoll  - state.prevRoll)  * tc,
         };
     }
 

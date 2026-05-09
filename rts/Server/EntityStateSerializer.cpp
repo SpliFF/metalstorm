@@ -61,6 +61,8 @@ std::vector<uint8_t> SerializeUnits(
     if (fieldMask & FIELD_STATE_BITS)  size += count * sizeof(uint8_t);
     if (fieldMask & FIELD_LOS_STATE)   size += count * sizeof(uint8_t);
     if (fieldMask & FIELD_BUILD_PROGRESS) size += count * sizeof(uint8_t);
+    if (fieldMask & FIELD_PITCH)       size += count * sizeof(int8_t);
+    if (fieldMask & FIELD_ROLL)        size += count * sizeof(int8_t);
 
     std::vector<uint8_t> buf(size);
     size_t offset = 0;
@@ -171,6 +173,36 @@ std::vector<uint8_t> SerializeUnits(
         for (const CUnit* u : units) {
             float bp = std::clamp(u->buildProgress, 0.0f, 1.0f);
             Write(buf, offset, static_cast<uint8_t>(bp * 255.0f));
+        }
+    }
+
+    // Pitch (i8) — frontdir.y inverse-sined, normalized to [-π/2, π/2]
+    // and quantized to 127 buckets. Clamping protects against precision
+    // drift around ±1. Heading already encodes yaw, so pitch+roll fully
+    // describe the orientation when combined with FIELD_HEADING.
+    if (fieldMask & FIELD_PITCH) {
+        constexpr float scale = 127.0f / 1.5707963267948966f; // 127 / (π/2)
+        for (const CUnit* u : units) {
+            const float fy = std::clamp(u->frontdir.y, -1.0f, 1.0f);
+            const float p = std::asin(fy);
+            int v = static_cast<int>(p * scale);
+            if (v < -127) v = -127;
+            if (v >  127) v =  127;
+            Write(buf, offset, static_cast<int8_t>(v));
+        }
+    }
+
+    // Roll (i8) — angle the unit's rightdir makes with world horizontal,
+    // signed by which side dips. Same quantization as pitch.
+    if (fieldMask & FIELD_ROLL) {
+        constexpr float scale = 127.0f / 1.5707963267948966f;
+        for (const CUnit* u : units) {
+            const float ry = std::clamp(u->rightdir.y, -1.0f, 1.0f);
+            const float r = std::asin(ry);
+            int v = static_cast<int>(r * scale);
+            if (v < -127) v = -127;
+            if (v >  127) v =  127;
+            Write(buf, offset, static_cast<int8_t>(v));
         }
     }
 

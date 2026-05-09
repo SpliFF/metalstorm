@@ -44,6 +44,8 @@ export const FIELD_TEAM       = 1 << 7;
 export const FIELD_STATE_BITS = 1 << 8;
 export const FIELD_LOS_STATE  = 1 << 9;
 export const FIELD_BUILD_PROGRESS = 1 << 10;
+export const FIELD_PITCH      = 1 << 11;
+export const FIELD_ROLL       = 1 << 12;
 
 /** Parsed entity state snapshot — typed arrays are zero-copy views into the buffer. */
 export interface EntityStateSnapshot {
@@ -60,6 +62,12 @@ export interface EntityStateSnapshot {
     stateBits:  Uint8Array   | null;
     losStates:  Uint8Array   | null;
     buildProgress: Uint8Array | null;
+    /** Signed pitch quanta — null if the server didn't send them.
+     *  Decode: angle (rad) = pitch[i] * (π/2) / 127. */
+    pitch:       Int8Array   | null;
+    /** Signed roll quanta — null if the server didn't send them.
+     *  Decode: angle (rad) = roll[i] * (π/2) / 127. */
+    roll:        Int8Array   | null;
 }
 
 /**
@@ -92,6 +100,8 @@ export function parseEntityState(input: Uint8Array): EntityStateSnapshot | null 
         stateBits: null,
         losStates: null,
         buildProgress: null,
+        pitch: null,
+        roll: null,
     };
 
     if (fieldMask & FIELD_ENTITY_IDS) {
@@ -136,6 +146,14 @@ export function parseEntityState(input: Uint8Array): EntityStateSnapshot | null 
     }
     if (fieldMask & FIELD_BUILD_PROGRESS) {
         result.buildProgress = new Uint8Array(data.buffer, offset, count);
+        offset += count;
+    }
+    if (fieldMask & FIELD_PITCH) {
+        result.pitch = new Int8Array(data.buffer, offset, count);
+        offset += count;
+    }
+    if (fieldMask & FIELD_ROLL) {
+        result.roll = new Int8Array(data.buffer, offset, count);
         offset += count;
     }
 

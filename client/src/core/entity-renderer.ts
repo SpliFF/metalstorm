@@ -173,6 +173,22 @@ async function fetchModelConfig(modelUrl: string): Promise<ModelConfig | null> {
     tex1 = toKtx2(tex1);
     tex2 = toKtx2(tex2);
 
+    // Spring's texture-pair convention. Author-supplied DAE/FBX/etc.
+    // models that don't embed texture references (the .glb materials
+    // come back as bare PBR with no diffuse texture) are paired by
+    // name with `<stem>1.<ext>` (diffuse + team mask in alpha) and
+    // `<stem>2.<ext>` (gloss / detail). Spring's loader handles this
+    // implicitly; our headless converter doesn't, and the resulting
+    // unit renders as solid team colour. Fall back to manifest probing
+    // for the converted .ktx2 siblings before giving up.
+    if (!tex1 || !tex2) {
+        const stem = modelUrl
+            .substring(modelUrl.lastIndexOf('/') + 1)
+            .replace(/\.glb$/, '');
+        if (!tex1 && manifest.has(`${stem}1.ktx2`)) tex1 = `${stem}1.ktx2`;
+        if (!tex2 && manifest.has(`${stem}2.ktx2`)) tex2 = `${stem}2.ktx2`;
+    }
+
     // Pieces — always from JSON (the canonical machine-generated form).
     let pieceNames: string[] | undefined;
     let pieceParents: number[] | undefined;
@@ -512,6 +528,17 @@ export class EntityRenderer {
     private interpolator = new EntityInterpolator();
     private entityMeta = new Map<number, EntityMeta>();
     private teamMaterials: StandardMaterial[] = [];
+    /** Map heightmap data for terrain re-projection of ground units.
+     *  Entity Y comes from the server snapped to terrain on each sim
+     *  frame, but state streams at ~10 Hz and we lerp between frames —
+     *  the lerped Y can drift above or below the terrain when paths
+     *  cross hills/valleys. We re-project ground entities each tick. */
+    private mapHeightmap: Uint16Array | null = null;
+    private mapHmW = 0;
+    private mapHmH = 0;
+    private mapMinH = 0;
+    private mapMaxH = 0;
+    private mapSquareSize = 8;
 
     // --- Model loading ---
     private modelTemplates = new Map<number, ModelTemplate | null>();
@@ -544,6 +571,42 @@ export class EntityRenderer {
             mat.specularColor = new Color3(0.3, 0.3, 0.3);
             this.teamMaterials.push(mat);
         }
+    }
+
+    /** Hand the entity renderer the heightmap so it can re-project
+     *  ground units onto the terrain between server snapshots. */
+    setMapHeightmap(heightmap: Uint16Array, mapx: number, mapy: number,
+                    minHeight: number, maxHeight: number, squareSize: number): void {
+        this.mapHeightmap = heightmap;
+        this.mapHmW = mapx + 1;
+        this.mapHmH = mapy + 1;
+        this.mapMinH = minHeight;
+        this.mapMaxH = maxHeight;
+        this.mapSquareSize = squareSize;
+    }
+
+    /** Bilinear height sample at world (x, z) from the cached heightmap.
+     *  Returns NaN when the heightmap hasn't been registered yet — caller
+     *  must check and skip re-projection in that case. */
+    private sampleHeight(x: number, z: number): number {
+        const hm = this.mapHeightmap;
+        if (!hm) return NaN;
+        const fx = x / this.mapSquareSize;
+        const fz = z / this.mapSquareSize;
+        const x0 = Math.max(0, Math.min(this.mapHmW - 1, Math.floor(fx)));
+        const z0 = Math.max(0, Math.min(this.mapHmH - 1, Math.floor(fz)));
+        const x1 = Math.min(this.mapHmW - 1, x0 + 1);
+        const z1 = Math.min(this.mapHmH - 1, z0 + 1);
+        const tx = Math.max(0, Math.min(1, fx - x0));
+        const tz = Math.max(0, Math.min(1, fz - z0));
+        const h00 = hm[z0 * this.mapHmW + x0];
+        const h10 = hm[z0 * this.mapHmW + x1];
+        const h01 = hm[z1 * this.mapHmW + x0];
+        const h11 = hm[z1 * this.mapHmW + x1];
+        const h0 = h00 * (1 - tx) + h10 * tx;
+        const h1 = h01 * (1 - tx) + h11 * tx;
+        const raw = h0 * (1 - tz) + h1 * tz;
+        return this.mapMinH + (raw / 65535) * (this.mapMaxH - this.mapMinH);
     }
 
     /**
@@ -1174,10 +1237,13 @@ export class EntityRenderer {
     }
 
     update(snapshot: EntityStateSnapshot, isDelta: boolean = false): void {
-        const { count, entityIds, positionsX, positionsY, positionsZ, headings, health, defIds, teams, buildProgress } = snapshot;
+        const { count, entityIds, positionsX, positionsY, positionsZ, headings, health, defIds, teams, buildProgress, pitch, roll } = snapshot;
         if (!entityIds) return;
 
         const now = performance.now();
+        // Quanta → radians: server packs angles as i8 with 127 buckets
+        // covering [-π/2, π/2]. Pre-compute the inverse scale once.
+        const angleScale = 1.5707963267948966 / 127;
 
         for (let i = 0; i < count; i++) {
             const id = entityIds[i];
@@ -1189,6 +1255,8 @@ export class EntityRenderer {
                 positionsZ ? positionsZ[i] : 0,
                 headings ? headings[i] : 0,
                 now,
+                pitch ? pitch[i] * angleScale : 0,
+                roll  ? roll[i]  * angleScale : 0,
             );
 
             let meta = this.entityMeta.get(id);
@@ -1229,12 +1297,33 @@ export class EntityRenderer {
             const tmpl = this.modelTemplates.get(meta.defId);
 
             if (tmpl) {
-                // Entity world transform
+                // Entity world transform.
+                // Re-project Y onto the terrain when the lerped Y is at
+                // or below ground level: between 10Hz state snapshots,
+                // a unit traversing varied terrain has Y linearly lerped
+                // and can drift above (over a valley) or below (over a
+                // peak) the actual ground. Clamping to terrain Y for
+                // ground-bound units gives a stable contact pose. We
+                // leave aircraft alone via the explicit-flying check
+                // (lerped Y significantly above terrain).
+                const groundY = this.sampleHeight(lerped.x, lerped.z);
+                let renderY = lerped.y;
+                if (!Number.isNaN(groundY)) {
+                    const aboveGround = lerped.y - groundY;
+                    // Treat units within ±8 elmos of ground as "on the
+                    // surface" — this covers genuine ground vehicles
+                    // including those clipping slightly into terrain
+                    // due to interpolation, while leaving aircraft
+                    // (which fly tens of elmos up) on their streamed Y.
+                    if (aboveGround < 8) {
+                        renderY = groundY;
+                    }
+                }
                 const rotation = (lerped.heading / 65535) * Math.PI * 2;
                 const entityMatrix = Matrix.Compose(
                     new Vector3(1, 1, 1),
-                    Quaternion.RotationYawPitchRoll(rotation, 0, 0),
-                    new Vector3(lerped.x, lerped.y + tmpl.yOffset, lerped.z),
+                    Quaternion.RotationYawPitchRoll(rotation, lerped.pitch, lerped.roll),
+                    new Vector3(lerped.x, renderY + tmpl.yOffset, lerped.z),
                 );
 
                 // Compute per-piece world-in-model matrices. Animated
@@ -1270,7 +1359,7 @@ export class EntityRenderer {
                     // row 3 entries — see TEAMCOLOR_VERTEX comment. These
                     // corrupt wp.w but the shader rebuilds the projection
                     // input from wp.xyz so xyz transforms stay correct.
-                    arr[7] = lerped.y;            // m31 → groundY (entity foot Y)
+                    arr[7] = renderY;             // m31 → groundY (entity foot Y)
                     arr[15] = meta.buildProgress; // m33 → buildProgress
                     for (let j = 0; j < 16; j++) group.matrices.push(arr[j]);
                     group.count++;
@@ -1287,11 +1376,18 @@ export class EntityRenderer {
                     groups.set(key, group);
                 }
 
+                // Same terrain re-projection as the modelled path so
+                // procedural-fallback shapes don't float / sink either.
+                const groundYf = this.sampleHeight(lerped.x, lerped.z);
+                let renderYf = lerped.y;
+                if (!Number.isNaN(groundYf) && lerped.y - groundYf < 8) {
+                    renderYf = groundYf;
+                }
                 const rotation = (lerped.heading / 65535) * Math.PI * 2;
                 const matrix = Matrix.Compose(
                     new Vector3(1, meta.healthScale, 1),
-                    Quaternion.RotationYawPitchRoll(rotation, 0, 0),
-                    new Vector3(lerped.x, lerped.y, lerped.z),
+                    Quaternion.RotationYawPitchRoll(rotation, lerped.pitch, lerped.roll),
+                    new Vector3(lerped.x, renderYf, lerped.z),
                 );
                 const arr = new Float32Array(16);
                 matrix.copyToArray(arr, 0);
@@ -1369,7 +1465,7 @@ export class EntityRenderer {
         const rotation = (lerped.heading / 65535) * Math.PI * 2;
         const entityMatrix = Matrix.Compose(
             new Vector3(1, 1, 1),
-            Quaternion.RotationYawPitchRoll(rotation, 0, 0),
+            Quaternion.RotationYawPitchRoll(rotation, lerped.pitch, lerped.roll),
             new Vector3(lerped.x, lerped.y + tmpl.yOffset, lerped.z),
         );
         const piece = modelWorld.multiply(entityMatrix);
