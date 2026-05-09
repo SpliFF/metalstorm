@@ -57,7 +57,12 @@ inline std::string ComputeCacheKey(
     // browser HTTP cache entries keyed on the URL) become unreachable
     // after a schema change. Without this, a stale cache from a prior
     // schema would silently shadow the newly-bakable bytes.
-    canonical += "schemaV4-protocol";
+    //
+    // 2026-05-09: bumped past v5 after texture2 + texture3 were added
+    // to GameWeaponDef. Keep this string in sync with the .cpp side
+    // and any other ComputeCacheKey copy — the lobby and the server
+    // both inline the function body, so a single-site bump misses one.
+    canonical += "schemaV6-protocol";
     canonical += '\n';
     canonical += gameId;
     canonical += '\n';

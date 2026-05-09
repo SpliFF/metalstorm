@@ -51,8 +51,18 @@ targetId():number {
   return offset ? this.bb!.readUint32(this.bb_pos + offset) : 0;
 }
 
+/**
+ * Owner-team id — used by the per-session LOS filter so a client
+ * always sees impacts from its own/allied projectiles, even if the
+ * impact happens in fog of war.
+ */
+team():number {
+  const offset = this.bb!.__offset(this.bb_pos, 12);
+  return offset ? this.bb!.readUint8(this.bb_pos + offset) : 0;
+}
+
 static startProjectileImpactEvent(builder:flatbuffers.Builder) {
-  builder.startObject(4);
+  builder.startObject(5);
 }
 
 static addProjId(builder:flatbuffers.Builder, projId:number) {
@@ -71,6 +81,10 @@ static addTargetId(builder:flatbuffers.Builder, targetId:number) {
   builder.addFieldInt32(3, targetId, 0);
 }
 
+static addTeam(builder:flatbuffers.Builder, team:number) {
+  builder.addFieldInt8(4, team, 0);
+}
+
 static endProjectileImpactEvent(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
@@ -82,7 +96,8 @@ unpack(): ProjectileImpactEventT {
     this.projId(),
     (this.pos() !== null ? this.pos()!.unpack() : null),
     this.impactKind(),
-    this.targetId()
+    this.targetId(),
+    this.team()
   );
 }
 
@@ -92,6 +107,7 @@ unpackTo(_o: ProjectileImpactEventT): void {
   _o.pos = (this.pos() !== null ? this.pos()!.unpack() : null);
   _o.impactKind = this.impactKind();
   _o.targetId = this.targetId();
+  _o.team = this.team();
 }
 }
 
@@ -100,7 +116,8 @@ constructor(
   public projId: number = 0,
   public pos: Vec3T|null = null,
   public impactKind: ProjectileImpactKind = ProjectileImpactKind.Terrain,
-  public targetId: number = 0
+  public targetId: number = 0,
+  public team: number = 0
 ){}
 
 
@@ -110,6 +127,7 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   ProjectileImpactEvent.addPos(builder, (this.pos !== null ? this.pos!.pack(builder) : 0));
   ProjectileImpactEvent.addImpactKind(builder, this.impactKind);
   ProjectileImpactEvent.addTargetId(builder, this.targetId);
+  ProjectileImpactEvent.addTeam(builder, this.team);
 
   return ProjectileImpactEvent.endProjectileImpactEvent(builder);
 }

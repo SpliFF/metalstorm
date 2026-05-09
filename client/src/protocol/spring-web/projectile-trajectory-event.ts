@@ -51,8 +51,17 @@ reason():ProjectileTrajectoryReason {
   return offset ? this.bb!.readUint8(this.bb_pos + offset) : ProjectileTrajectoryReason.Bounce;
 }
 
+/**
+ * Owner-team id — see ProjectileImpactEvent.team. Lets the per-session
+ * filter keep ally trajectory updates flowing through fog of war.
+ */
+team():number {
+  const offset = this.bb!.__offset(this.bb_pos, 12);
+  return offset ? this.bb!.readUint8(this.bb_pos + offset) : 0;
+}
+
 static startProjectileTrajectoryEvent(builder:flatbuffers.Builder) {
-  builder.startObject(4);
+  builder.startObject(5);
 }
 
 static addProjId(builder:flatbuffers.Builder, projId:number) {
@@ -71,6 +80,10 @@ static addReason(builder:flatbuffers.Builder, reason:ProjectileTrajectoryReason)
   builder.addFieldInt8(3, reason, ProjectileTrajectoryReason.Bounce);
 }
 
+static addTeam(builder:flatbuffers.Builder, team:number) {
+  builder.addFieldInt8(4, team, 0);
+}
+
 static endProjectileTrajectoryEvent(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
@@ -82,7 +95,8 @@ unpack(): ProjectileTrajectoryEventT {
     this.projId(),
     (this.pos() !== null ? this.pos()!.unpack() : null),
     (this.vel() !== null ? this.vel()!.unpack() : null),
-    this.reason()
+    this.reason(),
+    this.team()
   );
 }
 
@@ -92,6 +106,7 @@ unpackTo(_o: ProjectileTrajectoryEventT): void {
   _o.pos = (this.pos() !== null ? this.pos()!.unpack() : null);
   _o.vel = (this.vel() !== null ? this.vel()!.unpack() : null);
   _o.reason = this.reason();
+  _o.team = this.team();
 }
 }
 
@@ -100,7 +115,8 @@ constructor(
   public projId: number = 0,
   public pos: Vec3T|null = null,
   public vel: Vec3T|null = null,
-  public reason: ProjectileTrajectoryReason = ProjectileTrajectoryReason.Bounce
+  public reason: ProjectileTrajectoryReason = ProjectileTrajectoryReason.Bounce,
+  public team: number = 0
 ){}
 
 
@@ -110,6 +126,7 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   ProjectileTrajectoryEvent.addPos(builder, (this.pos !== null ? this.pos!.pack(builder) : 0));
   ProjectileTrajectoryEvent.addVel(builder, (this.vel !== null ? this.vel!.pack(builder) : 0));
   ProjectileTrajectoryEvent.addReason(builder, this.reason);
+  ProjectileTrajectoryEvent.addTeam(builder, this.team);
 
   return ProjectileTrajectoryEvent.endProjectileTrajectoryEvent(builder);
 }

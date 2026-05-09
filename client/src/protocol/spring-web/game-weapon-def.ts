@@ -295,8 +295,59 @@ customParamsLength():number {
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
+/**
+ * Lobby-served URL for the projectile's 3D model (`.glb`). Empty
+ * when the weapon def doesn't reference a model — the client falls
+ * back to per-visual-type procedural shapes (sphere/cylinder/cone).
+ * Format mirrors GameUnitDef.model_url: "/api/games/data/{gameId}/models/{stem}.glb".
+ */
+modelUrl():string|null
+modelUrl(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+modelUrl(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 88);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
+/**
+ * Base diffuse texture for the projectile, when one is referenced
+ * by the weapondef's `texture1` field (Spring convention). Empty
+ * when not set. Resolved against the game's textures/projectiles
+ * directory and rewritten to `.ktx2` by the converter.
+ */
+texture1():string|null
+texture1(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+texture1(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 90);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
+/**
+ * Beam-end / smoketrail / flare texture (Spring's `texNames[1]`,
+ * authored as weapondef `texture2`). Used as the end-cap for
+ * LaserCannon/BeamLaser and the smoketrail for Missile/Starburst.
+ * Empty when not set.
+ */
+texture2():string|null
+texture2(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+texture2(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 92);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
+/**
+ * Flare / muzzle-exhaust / flame-exhaust texture (Spring's
+ * `texNames[2]`, authored as weapondef `texture3`). Empty when
+ * not set.
+ */
+texture3():string|null
+texture3(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+texture3(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 94);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
 static startGameWeaponDef(builder:flatbuffers.Builder) {
-  builder.startObject(42);
+  builder.startObject(46);
 }
 
 static addDefId(builder:flatbuffers.Builder, defId:number) {
@@ -496,12 +547,28 @@ static startCustomParamsVector(builder:flatbuffers.Builder, numElems:number) {
   builder.startVector(4, numElems, 4);
 }
 
+static addModelUrl(builder:flatbuffers.Builder, modelUrlOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(42, modelUrlOffset, 0);
+}
+
+static addTexture1(builder:flatbuffers.Builder, texture1Offset:flatbuffers.Offset) {
+  builder.addFieldOffset(43, texture1Offset, 0);
+}
+
+static addTexture2(builder:flatbuffers.Builder, texture2Offset:flatbuffers.Offset) {
+  builder.addFieldOffset(44, texture2Offset, 0);
+}
+
+static addTexture3(builder:flatbuffers.Builder, texture3Offset:flatbuffers.Offset) {
+  builder.addFieldOffset(45, texture3Offset, 0);
+}
+
 static endGameWeaponDef(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createGameWeaponDef(builder:flatbuffers.Builder, defId:number, nameOffset:flatbuffers.Offset, visualType:ProjectileVisualType, projectileSpeed:number, range:number, aoe:number, size:number, intensity:number, colorR:number, colorG:number, colorB:number, duration:number, highTrajectory:boolean, typeNameOffset:flatbuffers.Offset, descriptionOffset:flatbuffers.Offset, defaultDamage:number, damagesOffset:flatbuffers.Offset, reloadTime:number, salvoSize:number, salvoDelay:number, accuracy:number, sprayAngle:number, movingAccuracy:number, targetMoveError:number, leadLimit:number, edgeEffectiveness:number, impulseFactor:number, impulseBoost:number, craterMult:number, craterBoost:number, craterAoe:number, fireStarter:number, flightTime:number, weaponAcceleration:number, turnRate:number, uptime:number, coverageRange:number, stockpileTime:number, metalCost:number, energyCost:number, flags:number, customParamsOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createGameWeaponDef(builder:flatbuffers.Builder, defId:number, nameOffset:flatbuffers.Offset, visualType:ProjectileVisualType, projectileSpeed:number, range:number, aoe:number, size:number, intensity:number, colorR:number, colorG:number, colorB:number, duration:number, highTrajectory:boolean, typeNameOffset:flatbuffers.Offset, descriptionOffset:flatbuffers.Offset, defaultDamage:number, damagesOffset:flatbuffers.Offset, reloadTime:number, salvoSize:number, salvoDelay:number, accuracy:number, sprayAngle:number, movingAccuracy:number, targetMoveError:number, leadLimit:number, edgeEffectiveness:number, impulseFactor:number, impulseBoost:number, craterMult:number, craterBoost:number, craterAoe:number, fireStarter:number, flightTime:number, weaponAcceleration:number, turnRate:number, uptime:number, coverageRange:number, stockpileTime:number, metalCost:number, energyCost:number, flags:number, customParamsOffset:flatbuffers.Offset, modelUrlOffset:flatbuffers.Offset, texture1Offset:flatbuffers.Offset, texture2Offset:flatbuffers.Offset, texture3Offset:flatbuffers.Offset):flatbuffers.Offset {
   GameWeaponDef.startGameWeaponDef(builder);
   GameWeaponDef.addDefId(builder, defId);
   GameWeaponDef.addName(builder, nameOffset);
@@ -545,6 +612,10 @@ static createGameWeaponDef(builder:flatbuffers.Builder, defId:number, nameOffset
   GameWeaponDef.addEnergyCost(builder, energyCost);
   GameWeaponDef.addFlags(builder, flags);
   GameWeaponDef.addCustomParams(builder, customParamsOffset);
+  GameWeaponDef.addModelUrl(builder, modelUrlOffset);
+  GameWeaponDef.addTexture1(builder, texture1Offset);
+  GameWeaponDef.addTexture2(builder, texture2Offset);
+  GameWeaponDef.addTexture3(builder, texture3Offset);
   return GameWeaponDef.endGameWeaponDef(builder);
 }
 
@@ -591,7 +662,11 @@ unpack(): GameWeaponDefT {
     this.metalCost(),
     this.energyCost(),
     this.flags(),
-    this.bb!.createObjList<CustomParam, CustomParamT>(this.customParams.bind(this), this.customParamsLength())
+    this.bb!.createObjList<CustomParam, CustomParamT>(this.customParams.bind(this), this.customParamsLength()),
+    this.modelUrl(),
+    this.texture1(),
+    this.texture2(),
+    this.texture3()
   );
 }
 
@@ -639,6 +714,10 @@ unpackTo(_o: GameWeaponDefT): void {
   _o.energyCost = this.energyCost();
   _o.flags = this.flags();
   _o.customParams = this.bb!.createObjList<CustomParam, CustomParamT>(this.customParams.bind(this), this.customParamsLength());
+  _o.modelUrl = this.modelUrl();
+  _o.texture1 = this.texture1();
+  _o.texture2 = this.texture2();
+  _o.texture3 = this.texture3();
 }
 }
 
@@ -685,7 +764,11 @@ constructor(
   public metalCost: number = 0.0,
   public energyCost: number = 0.0,
   public flags: number = 0,
-  public customParams: (CustomParamT)[] = []
+  public customParams: (CustomParamT)[] = [],
+  public modelUrl: string|Uint8Array|null = null,
+  public texture1: string|Uint8Array|null = null,
+  public texture2: string|Uint8Array|null = null,
+  public texture3: string|Uint8Array|null = null
 ){}
 
 
@@ -695,6 +778,10 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const description = (this.description !== null ? builder.createString(this.description!) : 0);
   const damages = GameWeaponDef.createDamagesVector(builder, this.damages);
   const customParams = GameWeaponDef.createCustomParamsVector(builder, builder.createObjectOffsetList(this.customParams));
+  const modelUrl = (this.modelUrl !== null ? builder.createString(this.modelUrl!) : 0);
+  const texture1 = (this.texture1 !== null ? builder.createString(this.texture1!) : 0);
+  const texture2 = (this.texture2 !== null ? builder.createString(this.texture2!) : 0);
+  const texture3 = (this.texture3 !== null ? builder.createString(this.texture3!) : 0);
 
   return GameWeaponDef.createGameWeaponDef(builder,
     this.defId,
@@ -738,7 +825,11 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     this.metalCost,
     this.energyCost,
     this.flags,
-    customParams
+    customParams,
+    modelUrl,
+    texture1,
+    texture2,
+    texture3
   );
 }
 }

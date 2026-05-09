@@ -967,15 +967,49 @@ inline SpringWeb::ProjectileVisualType MapProjectileVisualType(unsigned int proj
 }
 
 /// Build one GameWeaponDef FlatBuffer entry for a single weapon def.
+/// `modelsDir` and `gameId` allow us to resolve the projectile's `.glb`
+/// asset URL when the weapon def references a model — same convention
+/// as BuildSingleUnitDef. Both default to empty so call sites that
+/// don't have a game context yet still compile.
 template<typename WeaponDefT>
 inline flatbuffers::Offset<SpringWeb::GameWeaponDef> BuildSingleWeaponDef(
     flatbuffers::FlatBufferBuilder& fbb,
-    const WeaponDefT& wd)
+    const WeaponDefT& wd,
+    const std::filesystem::path& modelsDir = {},
+    const std::string& gameId = {})
 {
+    namespace fs = std::filesystem;
     auto nameOff = fbb.CreateString(wd.name);
     auto typeOff = fbb.CreateString(wd.type);
     auto descOff = fbb.CreateString(wd.description);
     auto visualType = MapProjectileVisualType(wd.projectileType);
+
+    // Projectile model URL — populated only when the weapondef points
+    // at a real `.glb` we've actually converted. ZK's missile/cannon/
+    // flame weapons reference s3o/dae models in `Objects3d/` which the
+    // game-converter ships as `models/<stem>.glb`. If the file is
+    // missing on disk we leave the URL empty and the client falls back
+    // to per-visual-type procedural shapes.
+    std::string modelUrl;
+    if (!wd.visuals.modelName.empty() && !gameId.empty()) {
+        const std::string stem = fs::path(wd.visuals.modelName).stem().string();
+        const fs::path glbPath = modelsDir / (stem + ".glb");
+        if (fs::exists(glbPath)) {
+            modelUrl = "/api/games/data/" + gameId + "/models/" + stem + ".glb";
+        }
+    }
+    auto modelUrlOff = fbb.CreateString(modelUrl);
+
+    // texture1/2/3 — Spring's three projectile texture slots
+    // (`texNames[0..2]`). texture1 is the main diffuse / beam middle;
+    // texture2 is the beam end-cap or smoketrail; texture3 is the
+    // muzzle/flare exhaust. We send the raw basename so existing
+    // on-disk texture atlases continue to work as the converter
+    // rewrites them. (texNames[3] — large-beam flare — is unused by
+    // the current renderer; not streamed.)
+    auto texture1Off = fbb.CreateString(wd.visuals.texNames[0]);
+    auto texture2Off = fbb.CreateString(wd.visuals.texNames[1]);
+    auto texture3Off = fbb.CreateString(wd.visuals.texNames[2]);
 
     // Per-armor-class damage table. Element 0 is the default; we ship
     // the whole vector so widgets can compute "damage vs class N" the
@@ -1078,17 +1112,26 @@ inline flatbuffers::Offset<SpringWeb::GameWeaponDef> BuildSingleWeaponDef(
     wdb.add_energy_cost(wd.cost.energy);
     wdb.add_flags(flags);
     wdb.add_custom_params(wdCustomParamsOff);
+    wdb.add_model_url(modelUrlOff);
+    wdb.add_texture1(texture1Off);
+    wdb.add_texture2(texture2Off);
+    wdb.add_texture3(texture3Off);
     return wdb.Finish();
 }
 
 /// Build a GameWeaponDefs message listing every weapon type and its visual params.
 template<typename WeaponDefVec>
-inline std::vector<uint8_t> BuildGameWeaponDefs(const WeaponDefVec& defs) {
+inline std::vector<uint8_t> BuildGameWeaponDefs(const WeaponDefVec& defs,
+                                                const std::string& gameId = {}) {
+    namespace fs = std::filesystem;
     flatbuffers::FlatBufferBuilder fbb(1024);
+
+    const fs::path modelsDir = gameId.empty() ? fs::path{}
+        : fs::path("data/games") / gameId / "models";
 
     std::vector<flatbuffers::Offset<SpringWeb::GameWeaponDef>> offsets;
     for (size_t i = 1; i < defs.size(); i++) {
-        offsets.push_back(BuildSingleWeaponDef(fbb, defs[i]));
+        offsets.push_back(BuildSingleWeaponDef(fbb, defs[i], modelsDir, gameId));
     }
 
     auto defsVec = fbb.CreateVector(offsets);
@@ -1100,14 +1143,19 @@ inline std::vector<uint8_t> BuildGameWeaponDefs(const WeaponDefVec& defs) {
 template<typename WeaponDefVec>
 inline std::vector<uint8_t> BuildGameWeaponDefsSubset(
     const WeaponDefVec& allDefs,
-    const std::vector<uint16_t>& defIds)
+    const std::vector<uint16_t>& defIds,
+    const std::string& gameId = {})
 {
+    namespace fs = std::filesystem;
     flatbuffers::FlatBufferBuilder fbb(512);
+
+    const fs::path modelsDir = gameId.empty() ? fs::path{}
+        : fs::path("data/games") / gameId / "models";
 
     std::vector<flatbuffers::Offset<SpringWeb::GameWeaponDef>> offsets;
     for (uint16_t id : defIds) {
         if (id > 0 && static_cast<size_t>(id) < allDefs.size()) {
-            offsets.push_back(BuildSingleWeaponDef(fbb, allDefs[id]));
+            offsets.push_back(BuildSingleWeaponDef(fbb, allDefs[id], modelsDir, gameId));
         }
     }
 

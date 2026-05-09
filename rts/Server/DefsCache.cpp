@@ -15,7 +15,7 @@ namespace DefsCache {
 // entries keyed on the URL) become unreachable after a schema change.
 // Without this, a stale cache from a prior schema would silently
 // shadow the newly-bakable bytes.
-static constexpr const char* DEFS_SCHEMA_VERSION = "v4";
+static constexpr const char* DEFS_SCHEMA_VERSION = "v6";
 
 std::string ComputeCacheKey(
     const std::string& gameId,
@@ -32,7 +32,11 @@ std::string ComputeCacheKey(
 
     std::string canonical;
     canonical.reserve(64 + modOptions.size() * 32);
-    canonical += "schemaV4-protocol";
+    // Schema string. Must stay byte-for-byte identical with the
+    // ComputeCacheKey copy in DefsCache.h — the two were drifting
+    // apart and a single-site bump produced different cache keys
+    // depending on which translation unit linked first.
+    canonical += "schemaV6-protocol";
     canonical += '\n';
     canonical += gameId;
     canonical += '\n';

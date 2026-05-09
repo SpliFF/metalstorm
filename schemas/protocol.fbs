@@ -740,6 +740,27 @@ table GameWeaponDef {
     /// Game-specific key/value extensions. Empty unless the weapondef
     /// has any customParams entries.
     custom_params: [CustomParam];
+
+    // ── Tier 5: visual assets ───────────────────────────────────────
+    /// Lobby-served URL for the projectile's 3D model (`.glb`). Empty
+    /// when the weapon def doesn't reference a model — the client falls
+    /// back to per-visual-type procedural shapes (sphere/cylinder/cone).
+    /// Format mirrors GameUnitDef.model_url: "/api/games/data/{gameId}/models/{stem}.glb".
+    model_url: string;
+    /// Base diffuse texture for the projectile, when one is referenced
+    /// by the weapondef's `texture1` field (Spring convention). Empty
+    /// when not set. Resolved against the game's textures/projectiles
+    /// directory and rewritten to `.ktx2` by the converter.
+    texture1: string;
+    /// Beam-end / smoketrail / flare texture (Spring's `texNames[1]`,
+    /// authored as weapondef `texture2`). Used as the end-cap for
+    /// LaserCannon/BeamLaser and the smoketrail for Missile/Starburst.
+    /// Empty when not set.
+    texture2: string;
+    /// Flare / muzzle-exhaust / flame-exhaust texture (Spring's
+    /// `texNames[2]`, authored as weapondef `texture3`). Empty when
+    /// not set.
+    texture3: string;
 }
 
 /// Sent by the game server after successful auth, alongside

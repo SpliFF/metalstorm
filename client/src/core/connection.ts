@@ -233,6 +233,18 @@ export interface WeaponDefInfo {
     /** Behaviour bitfield. See `GameWeaponDef.flags` in protocol.fbs. */
     flags: number;
     customParams: Record<string, string>;
+    /** Lobby URL of the projectile's `.glb`, or empty when the def
+     *  doesn't reference a model — the renderer uses procedural shapes
+     *  in that case. */
+    modelUrl: string;
+    /** texture1 basename (Spring's `texNames[0]`), empty when unset. */
+    texture1: string;
+    /** texture2 basename (Spring's `texNames[1]`) — beam end-cap /
+     *  smoketrail. Empty when unset. */
+    texture2: string;
+    /** texture3 basename (Spring's `texNames[2]`) — flare / muzzle
+     *  exhaust. Empty when unset. */
+    texture3: string;
 }
 
 export interface ResourceUpdateInfo {
@@ -945,6 +957,10 @@ export class Connection {
                         energyCost: d.energyCost(),
                         flags: d.flags(),
                         customParams: wdCustomParams,
+                        modelUrl: d.modelUrl() ?? '',
+                        texture1: d.texture1() ?? '',
+                        texture2: d.texture2() ?? '',
+                        texture3: d.texture3() ?? '',
                     });
                 }
                 console.log(`[connection] received ${defs.length} weapon def(s)`);
