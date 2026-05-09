@@ -332,18 +332,26 @@ void WriteDirManifest(const fs::path& dir);
 // the game dir, and the resolver's per-game-first lookup gives game
 // overrides priority overall.
 
-/// Bitmap source extensions textureconverter accepts. Order matters
-/// only for tie-breaking when two files share a stem (e.g. `flame.tga`
-/// + `flame.png`); we prefer the higher-quality / more authoritative
-/// source first.
-bool IsBitmapFile(const fs::path& p) {
+/// Bitmap source extensions textureconverter accepts, ordered by
+/// preference. When two files share a logical stem (e.g. engine ships
+/// both `flare.bmp` and `flare.tga`) the lowest-index extension wins.
+/// `.tga` ranks above `.bmp` because TGA preserves alpha; `.dds` ranks
+/// first because BC-encoded DDS sources are passed through to KTX2
+/// without re-encoding (cheaper, and lossless w.r.t. the prior pass).
+/// Returns the priority index (lower = higher priority), or -1 if the
+/// extension is not a bitmap.
+int BitmapExtPriority(const fs::path& p) {
     static const char* const kExts[] = {
         ".dds", ".tga", ".png", ".bmp", ".jpg", ".jpeg", ".webp",
     };
     const std::string ext = ToLower(p.extension().string());
-    for (const char* e : kExts)
-        if (ext == e) return true;
-    return false;
+    for (size_t i = 0; i < sizeof(kExts)/sizeof(kExts[0]); ++i)
+        if (ext == kExts[i]) return (int)i;
+    return -1;
+}
+
+bool IsBitmapFile(const fs::path& p) {
+    return BitmapExtPriority(p) >= 0;
 }
 
 /// Walk every bitmap under `srcRoot` (recursive) and emit a flat
@@ -359,31 +367,46 @@ int ConvertProjectileTextureRoot(const fs::path& srcRoot,
     std::error_code ec;
     fs::create_directories(dstDir, ec);
 
-    // First-walk-wins: a single logical name (`flame`) may be
-    // satisfied by multiple files (`flame.tga`, `Flame.png`). We keep
-    // the first match so re-runs are deterministic and the extension
-    // priority in IsBitmapFile sets a sensible default.
-    std::vector<std::string> taken;
+    // Two-pass: first collect all candidates grouped by lowercase stem,
+    // then per stem pick the entry with the highest extension priority.
+    // Filesystem walk order is alphabetical, so a naive first-walk-wins
+    // picked `.bmp` over `.tga` for engine bitmaps that ship both —
+    // silently dropping the alpha channel that lives in the TGA
+    // (`flare.tga` is the canonical case; `flare.bmp` is RGB-only).
+    struct Candidate {
+        fs::path path;
+        int priority;
+    };
+    std::unordered_map<std::string, Candidate> winners;
 
     for (const auto& entry : fs::recursive_directory_iterator(srcRoot, ec)) {
         if (ec) break;
         if (!entry.is_regular_file()) continue;
-        if (!IsBitmapFile(entry.path())) continue;
+        const int prio = BitmapExtPriority(entry.path());
+        if (prio < 0) continue;
 
         const std::string stemLower = ToLower(entry.path().stem().string());
-        const fs::path dstPath = dstDir / (stemLower + ".ktx2");
-        bool already = false;
-        for (const auto& t : taken) {
-            if (t == stemLower) { already = true; break; }
+        auto it = winners.find(stemLower);
+        if (it == winners.end()) {
+            winners.emplace(stemLower, Candidate{entry.path(), prio});
+        } else if (prio < it->second.priority) {
+            // Strictly higher-priority extension wins. Equal priority
+            // (two files of the same extension at different paths) is
+            // a tie broken by walk order — the existing entry stays.
+            it->second = Candidate{entry.path(), prio};
         }
-        if (already) continue;
-        taken.push_back(stemLower);
+    }
+
+    for (const auto& kv : winners) {
+        const std::string& stemLower = kv.first;
+        const fs::path& srcPath = kv.second.path;
+        const fs::path dstPath = dstDir / (stemLower + ".ktx2");
 
         // mtime check: a `.ktx2` newer than its source is up-to-date.
         // Re-walking the same source dir is the common case (every
         // gameconverter run), so this short-circuit dominates runtime.
         if (!force && fs::exists(dstPath)) {
-            const auto srcTime = fs::last_write_time(entry.path(), ec);
+            const auto srcTime = fs::last_write_time(srcPath, ec);
             const auto dstTime = fs::last_write_time(dstPath, ec);
             if (!ec && dstTime >= srcTime) {
                 uptodate++;
@@ -391,7 +414,7 @@ int ConvertProjectileTextureRoot(const fs::path& srcRoot,
             }
         }
 
-        if (ConvertTextureToKtx2(entry.path().string(), dstPath.string(),
+        if (ConvertTextureToKtx2(srcPath.string(), dstPath.string(),
                                  textureConverter)) {
             converted++;
         } else {
