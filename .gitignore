@@ -60,6 +60,7 @@ infolog.txt
 /data/games/*
 /data/maps/*
 /data/logs/*
+/data/engine/*
 /data/*.db*
 
 # Game content (maps, games — large external files, not committed)

@@ -296,8 +296,177 @@ bool ConvertLobbyConfig(const fs::path& gameDir, bool force) {
     return true;
 }
 
+// Forward declarations for helpers that live further down (model
+// conversion section). The projectile-texture pass uses them but
+// keeping their definitions next to the model pipeline keeps that
+// chunk self-contained.
+bool ConvertTextureToKtx2(const std::string& srcPath,
+                          const std::string& dstPath,
+                          const fs::path& textureConverter);
+void WriteDirManifest(const fs::path& dir);
+
 // ---------------------------------------------------------------
-// Step 3: model + texture conversion
+// Step 3: projectile-texture conversion
+// ---------------------------------------------------------------
+//
+// Spring weapon defs reference projectile sprites (`flarescale01`,
+// `largelaserfalloff`, `darksmoketrail`, …) by bare name. The engine
+// historically searched `bitmaps/` and `bitmaps/projectiletextures/`
+// in archive order; everything resolved to a single texture handle
+// regardless of source format. We mirror that by taking the union of
+// the engine-base and game-specific bitmap roots, transcoding each
+// referenced sprite to UASTC+Zstd KTX2, and dropping it into a flat
+// `projectiletextures/` output directory.
+//
+// Layout:
+//   data/engine/projectiletextures/<lowername>.ktx2  — engine sprites
+//   data/games/<id>/projectiletextures/<lowername>.ktx2 — game overrides
+//
+// The Issue 3 URL resolver (Protocol.h) checks the per-game directory
+// first, then falls back to engine. Filenames are lowercased and
+// extension-stripped because Spring's lookup is case- and
+// extension-insensitive (`Flame.tga` and `flame.png` both resolve to
+// the same logical name `flame`). When two source files map to the
+// same logical name we keep the first one walked — engine roots run
+// first so engine bitmaps win their own dir, game-specific bitmaps win
+// the game dir, and the resolver's per-game-first lookup gives game
+// overrides priority overall.
+
+/// Bitmap source extensions textureconverter accepts. Order matters
+/// only for tie-breaking when two files share a stem (e.g. `flame.tga`
+/// + `flame.png`); we prefer the higher-quality / more authoritative
+/// source first.
+bool IsBitmapFile(const fs::path& p) {
+    static const char* const kExts[] = {
+        ".dds", ".tga", ".png", ".bmp", ".jpg", ".jpeg", ".webp",
+    };
+    const std::string ext = ToLower(p.extension().string());
+    for (const char* e : kExts)
+        if (ext == e) return true;
+    return false;
+}
+
+/// Walk every bitmap under `srcRoot` (recursive) and emit a flat
+/// `<dstDir>/<lowername>.ktx2` per file. Idempotent: skips conversion
+/// when the destination is newer than the source. Returns the number
+/// of conversion failures (zero on full success).
+int ConvertProjectileTextureRoot(const fs::path& srcRoot,
+                                 const fs::path& dstDir,
+                                 const fs::path& textureConverter,
+                                 bool force,
+                                 int& converted, int& uptodate, int& failed) {
+    if (!fs::exists(srcRoot) || !fs::is_directory(srcRoot)) return 0;
+    std::error_code ec;
+    fs::create_directories(dstDir, ec);
+
+    // First-walk-wins: a single logical name (`flame`) may be
+    // satisfied by multiple files (`flame.tga`, `Flame.png`). We keep
+    // the first match so re-runs are deterministic and the extension
+    // priority in IsBitmapFile sets a sensible default.
+    std::vector<std::string> taken;
+
+    for (const auto& entry : fs::recursive_directory_iterator(srcRoot, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file()) continue;
+        if (!IsBitmapFile(entry.path())) continue;
+
+        const std::string stemLower = ToLower(entry.path().stem().string());
+        const fs::path dstPath = dstDir / (stemLower + ".ktx2");
+        bool already = false;
+        for (const auto& t : taken) {
+            if (t == stemLower) { already = true; break; }
+        }
+        if (already) continue;
+        taken.push_back(stemLower);
+
+        // mtime check: a `.ktx2` newer than its source is up-to-date.
+        // Re-walking the same source dir is the common case (every
+        // gameconverter run), so this short-circuit dominates runtime.
+        if (!force && fs::exists(dstPath)) {
+            const auto srcTime = fs::last_write_time(entry.path(), ec);
+            const auto dstTime = fs::last_write_time(dstPath, ec);
+            if (!ec && dstTime >= srcTime) {
+                uptodate++;
+                continue;
+            }
+        }
+
+        if (ConvertTextureToKtx2(entry.path().string(), dstPath.string(),
+                                 textureConverter)) {
+            converted++;
+        } else {
+            failed++;
+        }
+    }
+    return failed;
+}
+
+/// Top-level pass for Issue 2. Two roots, two outputs:
+///
+///   - Engine: `cont/base/bitmaps/bitmaps/` → `data/engine/projectiletextures/`
+///     One canonical copy of the universal Spring sprites used by every
+///     game. The resolver in Protocol.h falls back here when a game
+///     doesn't ship its own version of a name.
+///
+///   - Game: `<gameDir>/bitmaps/` → `<gameDir>/projectiletextures/`
+///     Per-game overrides + extras. ZK ships hundreds of these
+///     (`flarescale01`, `darksmoketrail`, etc.). After CopySourceTree,
+///     the source bitmaps already live under the data-side gameDir so
+///     we walk that copy.
+///
+/// Both passes are idempotent. The engine pass is unconditional but a
+/// no-op on re-runs; that's cheap (~30 stat() calls) and keeps the
+/// engine output in sync if a developer drops a new bitmap into
+/// cont/base/.
+int ConvertProjectileTextures(const fs::path& gameDir,
+                              const fs::path& dataDir,
+                              bool force) {
+    const fs::path textureConverter = TEXTURECONVERTER_BINARY_PATH;
+    int totalFailed = 0;
+    int eC = 0, eU = 0, eF = 0, gC = 0, gU = 0, gF = 0;
+
+    // Engine roots — `cont/base/bitmaps/bitmaps/` is the canonical
+    // path Spring's archive scanner exposes. We run from the project
+    // root so this relative path resolves correctly when invoked via
+    // `make convert-zk` or similar; absolute paths via --engine-base
+    // would be a future polish.
+    const fs::path engineSrc = "cont/base/bitmaps/bitmaps";
+    const fs::path engineOut = dataDir / "engine" / "projectiletextures";
+    totalFailed += ConvertProjectileTextureRoot(engineSrc, engineOut,
+                                                textureConverter, force,
+                                                eC, eU, eF);
+    if (eC + eU + eF > 0) {
+        WriteDirManifest(engineOut);
+        SLOG(SPRING_LOG_NOTICE,
+            "engine projectile textures: %d converted, %d up-to-date, %d failed",
+            eC, eU, eF);
+    }
+
+    // Game root — gameDir is the data-side copy populated by
+    // CopySourceTree, so its `bitmaps/` is the right (and only)
+    // source we should consume.
+    const fs::path gameSrc = ResolveSubDir(gameDir, "bitmaps");
+    if (!gameSrc.empty()) {
+        const fs::path gameOut = gameDir / "projectiletextures";
+        totalFailed += ConvertProjectileTextureRoot(gameSrc, gameOut,
+                                                    textureConverter, force,
+                                                    gC, gU, gF);
+        if (gC + gU + gF > 0) {
+            WriteDirManifest(gameOut);
+            SLOG(SPRING_LOG_NOTICE,
+                "%s projectile textures: %d converted, %d up-to-date, %d failed",
+                gameDir.filename().string().c_str(), gC, gU, gF);
+        }
+    } else {
+        SLOG(SPRING_LOG_INFO,
+            "%s: no bitmaps/ directory, skipping game projectile-texture pass",
+            gameDir.string().c_str());
+    }
+    return totalFailed;
+}
+
+// ---------------------------------------------------------------
+// Step 4: model + texture conversion
 // ---------------------------------------------------------------
 
 /// Case-insensitive texture lookup in a directory.
@@ -975,6 +1144,10 @@ void PrintUsage(const char* argv0) {
         "                      wrapper and the AI layout.\n"
         "  --skip-ai           Do not touch ai/ — leave the legacy layout\n"
         "                      in place.\n"
+        "  --skip-projectile-textures\n"
+        "                      Do not transcode bitmaps under bitmaps/ to\n"
+        "                      KTX2 in projectiletextures/. Useful when\n"
+        "                      the textures are already cached.\n"
         "  --log-server <url>  Send logs to a springlog server.\n"
         "  --log-level <level> Set minimum log level (debug/info/\n"
         "                      notice/warning/error).\n"
@@ -997,12 +1170,14 @@ int main(int argc, char* argv[]) {
     bool force = false;
     bool skipModels = false;
     bool skipAI = false;
+    bool skipProjectileTextures = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--force") force = true;
         else if (arg == "--skip-models") skipModels = true;
         else if (arg == "--skip-ai") skipAI = true;
+        else if (arg == "--skip-projectile-textures") skipProjectileTextures = true;
         else if (arg == "--data-dir" && i + 1 < argc) dataDir = argv[++i];
         else if (arg == "--modelimporter" && i + 1 < argc) modelImporterArg = argv[++i];
         else if (arg == "--log-server" && i + 1 < argc) logServerUrl = argv[++i];
@@ -1076,6 +1251,10 @@ int main(int argc, char* argv[]) {
 
     if (!skipModels) {
         failed += ConvertModels(gameDir, gameId, modelImporterBin, force);
+    }
+
+    if (!skipProjectileTextures) {
+        failed += ConvertProjectileTextures(gameDir, fs::path(dataDir), force);
     }
 
     if (!skipAI) {
