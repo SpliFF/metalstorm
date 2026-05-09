@@ -966,67 +966,6 @@ inline SpringWeb::ProjectileVisualType MapProjectileVisualType(unsigned int proj
     return SpringWeb::ProjectileVisualType_Cannon;
 }
 
-/// Resolve a Spring projectile-texture name (e.g. `largelaser`) to an
-/// HTTP URL the client can fetch. Spring's runtime scans
-/// `bitmaps/`, `bitmaps/projectiletextures/` and the
-/// `graphics.projectiletextures` map in `gamedata/resources.lua` to
-/// turn a bare name into a file handle. We mirror the first part of
-/// that lookup against the on-disk output of gameconverter:
-///
-///   1. `data/games/<gameId>/projectiletextures/<lower(name)>.ktx2`
-///   2. `data/engine/projectiletextures/<lower(name)>.ktx2`  (fallback)
-///
-/// Names are case-folded and extension-stripped — gameconverter writes
-/// them that way, and Spring's lookup is case- and extension-insensitive.
-/// Returns an empty string if neither location has the file (the
-/// client falls back to procedural rendering for that texture slot).
-/// `gameId` may be empty for callers without a game context — in that
-/// case only the engine fallback is consulted.
-inline std::string ResolveProjectileTextureUrl(
-    const std::string& name,
-    const std::string& gameId)
-{
-    namespace fs = std::filesystem;
-    if (name.empty()) return {};
-
-    // Strip any explicit extension and lowercase the stem to match
-    // gameconverter's output convention.
-    std::string stem = fs::path(name).stem().string();
-    std::transform(stem.begin(), stem.end(), stem.begin(),
-        [](unsigned char c){ return std::tolower(c); });
-    if (stem.empty()) return {};
-
-    if (!gameId.empty()) {
-        const fs::path gamePath = fs::path("data/games") / gameId
-            / "projectiletextures" / (stem + ".ktx2");
-        if (fs::exists(gamePath))
-            return "/api/games/data/" + gameId + "/projectiletextures/" + stem + ".ktx2";
-    }
-
-    const fs::path enginePath = fs::path("data/engine/projectiletextures")
-        / (stem + ".ktx2");
-    if (fs::exists(enginePath))
-        return "/api/engine/data/projectiletextures/" + stem + ".ktx2";
-
-    // Unresolved — log once per (gameId,name) pair so we surface
-    // missing-texture problems without spamming the log every weapon
-    // build pass. Static map is fine: BuildSingleWeaponDef is called
-    // from the lobby and game-server threads but each weapon def is
-    // built once per process lifetime.
-    static std::unordered_map<std::string, bool> warned;
-    const std::string key = gameId + "|" + stem;
-    if (warned.find(key) == warned.end()) {
-        warned[key] = true;
-        // Intentionally use stderr-style logging via fprintf to avoid
-        // pulling spdlog into a header that's included from many TUs.
-        fprintf(stderr,
-            "[Protocol] projectile texture '%s' not found in "
-            "data/games/%s/projectiletextures or data/engine/projectiletextures\n",
-            stem.c_str(), gameId.empty() ? "<none>" : gameId.c_str());
-    }
-    return {};
-}
-
 /// Build one GameWeaponDef FlatBuffer entry for a single weapon def.
 /// `modelsDir` and `gameId` allow us to resolve the projectile's `.glb`
 /// asset URL when the weapon def references a model — same convention
@@ -1064,19 +1003,16 @@ inline flatbuffers::Offset<SpringWeb::GameWeaponDef> BuildSingleWeaponDef(
     // texture1/2/3 — Spring's three projectile texture slots
     // (`texNames[0..2]`). texture1 is the main diffuse / beam middle;
     // texture2 is the beam end-cap or smoketrail; texture3 is the
-    // muzzle/flare exhaust. The resolver turns the bare logical name
-    // ZK weapondefs use (e.g. `largelaser`) into a fully-qualified
-    // HTTP URL (`/api/games/data/zk/projectiletextures/...ktx2` or the
-    // engine fallback). When a name fails to resolve the wire string
-    // is empty and the client falls back to procedural rendering for
-    // that slot. (texNames[3] — large-beam flare — is unused by the
-    // current renderer; not streamed.)
-    auto texture1Off = fbb.CreateString(
-        ResolveProjectileTextureUrl(wd.visuals.texNames[0], gameId));
-    auto texture2Off = fbb.CreateString(
-        ResolveProjectileTextureUrl(wd.visuals.texNames[1], gameId));
-    auto texture3Off = fbb.CreateString(
-        ResolveProjectileTextureUrl(wd.visuals.texNames[2], gameId));
+    // muzzle/flare exhaust. We send the bare logical name verbatim;
+    // the client looks it up in /api/games/<id>/resources.json
+    // (the parsed `graphics.projectiletextures` map) and resolves
+    // the file path to a `.ktx2` URL via the recursive bitmaps
+    // manifest. Selection/fallback rules live entirely on the client.
+    // (texNames[3] — large-beam flare — is unused by the current
+    // renderer; not streamed.)
+    auto texture1Off = fbb.CreateString(wd.visuals.texNames[0]);
+    auto texture2Off = fbb.CreateString(wd.visuals.texNames[1]);
+    auto texture3Off = fbb.CreateString(wd.visuals.texNames[2]);
 
     // Per-armor-class damage table. Element 0 is the default; we ship
     // the whole vector so widgets can compute "damage vs class N" the

@@ -15,6 +15,7 @@
 
 #include "Server/AI/AIDiscovery.h"
 #include "Server/GameDiscovery.h"
+#include "Server/ResourcesParser.h"
 #include "Server/HttpAuth.h"
 #include "Server/CacheControl.h"
 #include "System/SpringLog/SpringLog.h"
@@ -1146,6 +1147,79 @@ int main(int argc, char* argv[])
         }
         json += "]";
         return HttpAuth::JsonResponse(200, json);
+    });
+
+    // GET /api/games/<id>/resources.json — Spring's gamedata/resources.lua
+    // parsed and serialised as JSON. The client uses the
+    // `graphics.projectiletextures` map (and friends) to turn weapon
+    // texture names like `largelaser` into the actual file path
+    // (`gpl/largelaserfalloff.png`), then looks up the matching
+    // `.ktx2` URL via the recursive bitmaps manifest. Selection is
+    // entirely client-side; the lobby does only the Lua-eval step
+    // because resources.lua needs a real Lua VM with a VFS shim.
+    //
+    // Parsed JSON is cached per game on first request — the lobby
+    // is single-threaded for HTTP work so a plain unordered_map
+    // protected by a mutex is enough. Cache invalidation is implicit
+    // (lobby restart re-parses).
+    static std::mutex resourcesCacheMutex;
+    static std::unordered_map<std::string, std::string> resourcesCache;
+    net.AddHttpGet("/api/games/*", [&gamesDir](const std::string& url) -> HttpResponse {
+        // Match /api/games/<id>/resources.json. /api/games/data/*
+        // and /api/games (no trailing path) are handled by their
+        // own routes registered earlier — the wildcard here only
+        // sees URLs that those didn't match.
+        const std::string prefix = "/api/games/";
+        if (url.size() <= prefix.size())
+            return {.contentType = "text/plain", .body = {}, .status = 404};
+        const std::string rest = url.substr(prefix.size());
+        const std::string suffix = "/resources.json";
+        if (rest.size() <= suffix.size() ||
+            rest.compare(rest.size() - suffix.size(), suffix.size(), suffix) != 0)
+            return {.contentType = "text/plain", .body = {}, .status = 404};
+        const std::string gameId = rest.substr(0, rest.size() - suffix.size());
+        if (gameId.empty() || gameId.find('/') != std::string::npos ||
+            gameId.find("..") != std::string::npos)
+            return {.contentType = "text/plain", .body = {}, .status = 400};
+
+        // Cache hit?
+        {
+            std::lock_guard<std::mutex> lock(resourcesCacheMutex);
+            auto it = resourcesCache.find(gameId);
+            if (it != resourcesCache.end()) {
+                std::vector<uint8_t> body(it->second.begin(), it->second.end());
+                return {
+                    .contentType = "application/json",
+                    .body = std::move(body),
+                    .status = 200,
+                    .cacheControl = CacheControl::StaticAssetHeader(),
+                };
+            }
+        }
+
+        const std::string gameDir = gamesDir + "/" + gameId;
+        const std::string engineBaseDir = "cont/base/springcontent";
+        const std::string json = ResourcesParser::ParseGameResources(
+            gameId, gameDir, engineBaseDir);
+        if (json.empty()) {
+            const std::string err = R"({"error":"parse failed"})";
+            return {
+                .contentType = "application/json",
+                .body = std::vector<uint8_t>(err.begin(), err.end()),
+                .status = 500,
+            };
+        }
+        {
+            std::lock_guard<std::mutex> lock(resourcesCacheMutex);
+            resourcesCache.emplace(gameId, json);
+        }
+        std::vector<uint8_t> body(json.begin(), json.end());
+        return {
+            .contentType = "application/json",
+            .body = std::move(body),
+            .status = 200,
+            .cacheControl = CacheControl::StaticAssetHeader(),
+        };
     });
 
     // NOTE: /api/rooms/end and /api/rooms/close are removed.

@@ -303,34 +303,45 @@ bool ConvertLobbyConfig(const fs::path& gameDir, bool force) {
 bool ConvertTextureToKtx2(const std::string& srcPath,
                           const std::string& dstPath,
                           const fs::path& textureConverter);
-void WriteDirManifest(const fs::path& dir);
+void WriteDirManifest(const fs::path& dir, bool recursive = false);
 
 // ---------------------------------------------------------------
-// Step 3: projectile-texture conversion
+// Step 3: bitmap → KTX2 conversion (in-place)
 // ---------------------------------------------------------------
 //
-// Spring weapon defs reference projectile sprites (`flarescale01`,
-// `largelaserfalloff`, `darksmoketrail`, …) by bare name. The engine
-// historically searched `bitmaps/` and `bitmaps/projectiletextures/`
-// in archive order; everything resolved to a single texture handle
-// regardless of source format. We mirror that by taking the union of
-// the engine-base and game-specific bitmap roots, transcoding each
-// referenced sprite to UASTC+Zstd KTX2, and dropping it into a flat
-// `projectiletextures/` output directory.
+// Spring weapon defs reference textures by bare logical name
+// (`largelaser`, `flarescale01`). The runtime resolves the name
+// through `gamedata/resources.lua`'s `graphics.projectiletextures`
+// table to a relative path under `bitmaps/` — `largelaser` →
+// `gpl/largelaserfalloff.png` for ZK, for example.
 //
-// Layout:
-//   data/engine/projectiletextures/<lowername>.ktx2  — engine sprites
-//   data/games/<id>/projectiletextures/<lowername>.ktx2 — game overrides
+// Earlier iterations of this pass tried to flatten the bitmap tree
+// into a single `projectiletextures/` directory keyed by source-file
+// stem. That conflated unrelated files that happened to share a stem
+// (`scars/scar2.tga` vs `Unknown/scars_new/scar2.png`) and silently
+// broke any logical name that didn't match its source filename
+// (`largelaser` got written as `largelaserfalloff.ktx2` and 404'd at
+// fetch time).
 //
-// The Issue 3 URL resolver (Protocol.h) checks the per-game directory
-// first, then falls back to engine. Filenames are lowercased and
-// extension-stripped because Spring's lookup is case- and
-// extension-insensitive (`Flame.tga` and `flame.png` both resolve to
-// the same logical name `flame`). When two source files map to the
-// same logical name we keep the first one walked — engine roots run
-// first so engine bitmaps win their own dir, game-specific bitmaps win
-// the game dir, and the resolver's per-game-first lookup gives game
-// overrides priority overall.
+// The new design is simpler and architecturally correct:
+//
+//   1. Walk `bitmaps/` recursively. For every supported format
+//      (.tga / .png / .bmp / .jpg / .jpeg / .webp / .dds), write a
+//      KTX2 sibling next to the source preserving the original
+//      directory structure.
+//   2. Generate a recursive `bitmaps/manifest.json` listing every
+//      file in the tree.
+//   3. The lobby ships `gamedata/resources.lua` parsed as JSON via
+//      `/api/games/<id>/resources.json`; the client looks the
+//      logical name up there, gets the source path, swaps the
+//      extension to `.ktx2`, and probes the manifest. All resolution
+//      lives client-side.
+//
+// Two roots are processed:
+//   - Engine: `cont/base/bitmaps/bitmaps/` → `data/engine/bitmaps/`
+//     (mirrored once, then converted in place)
+//   - Game:   `<gameDir>/bitmaps/` (already mirrored by CopySourceTree
+//             into the data-side path, converted in place there)
 
 /// Bitmap source extensions textureconverter accepts, ordered by
 /// preference. When two files share a logical stem (e.g. engine ships
@@ -354,67 +365,109 @@ bool IsBitmapFile(const fs::path& p) {
     return BitmapExtPriority(p) >= 0;
 }
 
-/// Walk every bitmap under `srcRoot` (recursive) and emit a flat
-/// `<dstDir>/<lowername>.ktx2` per file. Idempotent: skips conversion
-/// when the destination is newer than the source. Returns the number
-/// of conversion failures (zero on full success).
-int ConvertProjectileTextureRoot(const fs::path& srcRoot,
-                                 const fs::path& dstDir,
-                                 const fs::path& textureConverter,
-                                 bool force,
-                                 int& converted, int& uptodate, int& failed) {
-    if (!fs::exists(srcRoot) || !fs::is_directory(srcRoot)) return 0;
+/// Mirror the source bitmap tree at `srcRoot` into `dstRoot`, then
+/// for every bitmap file write a `.ktx2` sibling preserving the
+/// directory structure. Re-runs are idempotent: source files are
+/// copied only when missing or newer, and KTX2 outputs are skipped
+/// when newer than the source. Returns the number of conversion
+/// failures.
+///
+/// "In-place" here means "next to the source file in the destination
+/// tree" — we never write into the read-only source location. The
+/// caller picks dstRoot (`data/engine/bitmaps/` for engine,
+/// `data/games/<id>/bitmaps/` for game; the latter is already where
+/// CopySourceTree put the source).
+int ConvertBitmapsInPlace(const fs::path& srcRoot,
+                          const fs::path& dstRoot,
+                          const fs::path& textureConverter,
+                          bool force,
+                          bool mirrorSources,
+                          int& copied, int& converted, int& uptodate, int& failed) {
     std::error_code ec;
-    fs::create_directories(dstDir, ec);
+    if (!fs::exists(srcRoot, ec) || !fs::is_directory(srcRoot, ec)) return 0;
+    fs::create_directories(dstRoot, ec);
 
-    // Two-pass: first collect all candidates grouped by lowercase stem,
-    // then per stem pick the entry with the highest extension priority.
-    // Filesystem walk order is alphabetical, so a naive first-walk-wins
-    // picked `.bmp` over `.tga` for engine bitmaps that ship both —
-    // silently dropping the alpha channel that lives in the TGA
-    // (`flare.tga` is the canonical case; `flare.bmp` is RGB-only).
+    // First pass: walk all bitmaps. Mirror them all if needed (we
+    // preserve every source on disk for direct VFS access), but for
+    // KTX2 conversion group by `<dir>/<stem>` and pick the highest-
+    // priority extension so when both `flare.bmp` and `flare.tga`
+    // exist in the same directory, the alpha-bearing TGA wins as the
+    // single `flare.ktx2`. Without this, the alphabetical walk had
+    // `.bmp` win when `.tga` was also present, silently dropping the
+    // alpha channel that resources.lua-driven lookups depend on.
     struct Candidate {
-        fs::path path;
-        int priority;
+        fs::path path;       // source file, post-mirror if applicable
+        int priority;        // BitmapExtPriority (lower = preferred)
     };
     std::unordered_map<std::string, Candidate> winners;
 
     for (const auto& entry : fs::recursive_directory_iterator(srcRoot, ec)) {
         if (ec) break;
-        if (!entry.is_regular_file()) continue;
-        const int prio = BitmapExtPriority(entry.path());
-        if (prio < 0) continue;
+        if (!entry.is_regular_file(ec)) continue;
+        if (!IsBitmapFile(entry.path())) continue;
 
-        const std::string stemLower = ToLower(entry.path().stem().string());
-        auto it = winners.find(stemLower);
+        const fs::path rel = fs::relative(entry.path(), srcRoot, ec);
+        if (ec) { ec.clear(); continue; }
+        const fs::path mirroredSrc = mirrorSources
+            ? (dstRoot / rel)
+            : entry.path();
+
+        // Mirror every source unconditionally (when needed). The
+        // original case is preserved so direct lookups still work;
+        // the dedup below only affects which one becomes `.ktx2`.
+        if (mirrorSources) {
+            fs::create_directories(mirroredSrc.parent_path(), ec);
+            bool needCopy = !fs::exists(mirroredSrc, ec);
+            if (!needCopy) {
+                const auto srcT = fs::last_write_time(entry.path(), ec);
+                const auto dstT = fs::last_write_time(mirroredSrc, ec);
+                if (!ec && dstT < srcT) needCopy = true;
+                else ec.clear();
+            }
+            if (needCopy) {
+                fs::copy_file(entry.path(), mirroredSrc,
+                    fs::copy_options::overwrite_existing, ec);
+                if (ec) { failed++; ec.clear(); continue; }
+                copied++;
+            }
+        }
+
+        // Group key: `<parent_dir>/<stem>` (case-folded). Two files
+        // in different directories never collide, so adjacent .bmp
+        // and .tga files in different folders get separate .ktx2.
+        std::string key = mirroredSrc.parent_path().string();
+        std::string stemLower = mirroredSrc.stem().string();
+        for (auto& c : stemLower)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        key += '/';
+        key += stemLower;
+
+        const int prio = BitmapExtPriority(entry.path());
+        auto it = winners.find(key);
         if (it == winners.end()) {
-            winners.emplace(stemLower, Candidate{entry.path(), prio});
+            winners.emplace(key, Candidate{mirroredSrc, prio});
         } else if (prio < it->second.priority) {
-            // Strictly higher-priority extension wins. Equal priority
-            // (two files of the same extension at different paths) is
-            // a tie broken by walk order — the existing entry stays.
-            it->second = Candidate{entry.path(), prio};
+            it->second = Candidate{mirroredSrc, prio};
         }
     }
 
+    // Second pass: emit one KTX2 per (dir, stem) winner.
     for (const auto& kv : winners) {
-        const std::string& stemLower = kv.first;
-        const fs::path& srcPath = kv.second.path;
-        const fs::path dstPath = dstDir / (stemLower + ".ktx2");
+        const fs::path& src = kv.second.path;
+        fs::path dstPath = src;
+        dstPath.replace_extension(".ktx2");
 
-        // mtime check: a `.ktx2` newer than its source is up-to-date.
-        // Re-walking the same source dir is the common case (every
-        // gameconverter run), so this short-circuit dominates runtime.
-        if (!force && fs::exists(dstPath)) {
-            const auto srcTime = fs::last_write_time(srcPath, ec);
+        if (!force && fs::exists(dstPath, ec)) {
+            const auto srcTime = fs::last_write_time(src, ec);
             const auto dstTime = fs::last_write_time(dstPath, ec);
             if (!ec && dstTime >= srcTime) {
                 uptodate++;
                 continue;
             }
+            ec.clear();
         }
 
-        if (ConvertTextureToKtx2(srcPath.string(), dstPath.string(),
+        if (ConvertTextureToKtx2(src.string(), dstPath.string(),
                                  textureConverter)) {
             converted++;
         } else {
@@ -424,65 +477,51 @@ int ConvertProjectileTextureRoot(const fs::path& srcRoot,
     return failed;
 }
 
-/// Top-level pass for Issue 2. Two roots, two outputs:
-///
-///   - Engine: `cont/base/bitmaps/bitmaps/` → `data/engine/projectiletextures/`
-///     One canonical copy of the universal Spring sprites used by every
-///     game. The resolver in Protocol.h falls back here when a game
-///     doesn't ship its own version of a name.
-///
-///   - Game: `<gameDir>/bitmaps/` → `<gameDir>/projectiletextures/`
-///     Per-game overrides + extras. ZK ships hundreds of these
-///     (`flarescale01`, `darksmoketrail`, etc.). After CopySourceTree,
-///     the source bitmaps already live under the data-side gameDir so
-///     we walk that copy.
-///
-/// Both passes are idempotent. The engine pass is unconditional but a
-/// no-op on re-runs; that's cheap (~30 stat() calls) and keeps the
-/// engine output in sync if a developer drops a new bitmap into
-/// cont/base/.
+/// Convert engine and game bitmap trees in place. Both roots emit a
+/// recursive `manifest.json` next to the converted files so the
+/// client can probe `<resources.lua-path>.ktx2` lookups without
+/// flooding 404s.
 int ConvertProjectileTextures(const fs::path& gameDir,
                               const fs::path& dataDir,
                               bool force) {
     const fs::path textureConverter = TEXTURECONVERTER_BINARY_PATH;
     int totalFailed = 0;
-    int eC = 0, eU = 0, eF = 0, gC = 0, gU = 0, gF = 0;
+    int eP = 0, eC = 0, eU = 0, eF = 0, gP = 0, gC = 0, gU = 0, gF = 0;
 
-    // Engine roots — `cont/base/bitmaps/bitmaps/` is the canonical
-    // path Spring's archive scanner exposes. We run from the project
-    // root so this relative path resolves correctly when invoked via
-    // `make convert-zk` or similar; absolute paths via --engine-base
-    // would be a future polish.
+    // Engine: source lives at cont/base/bitmaps/bitmaps/ (read-only
+    // from the gameconverter's perspective). Mirror into
+    // data/engine/bitmaps/, convert in place there.
     const fs::path engineSrc = "cont/base/bitmaps/bitmaps";
-    const fs::path engineOut = dataDir / "engine" / "projectiletextures";
-    totalFailed += ConvertProjectileTextureRoot(engineSrc, engineOut,
-                                                textureConverter, force,
-                                                eC, eU, eF);
-    if (eC + eU + eF > 0) {
-        WriteDirManifest(engineOut);
+    const fs::path engineOut = dataDir / "engine" / "bitmaps";
+    totalFailed += ConvertBitmapsInPlace(engineSrc, engineOut,
+                                         textureConverter, force,
+                                         /*mirrorSources*/ true,
+                                         eP, eC, eU, eF);
+    if (eP + eC + eU + eF > 0) {
+        WriteDirManifest(engineOut, /*recursive*/ true);
         SLOG(SPRING_LOG_NOTICE,
-            "engine projectile textures: %d converted, %d up-to-date, %d failed",
-            eC, eU, eF);
+            "engine bitmaps: %d copied, %d converted, %d up-to-date, %d failed",
+            eP, eC, eU, eF);
     }
 
-    // Game root — gameDir is the data-side copy populated by
-    // CopySourceTree, so its `bitmaps/` is the right (and only)
-    // source we should consume.
-    const fs::path gameSrc = ResolveSubDir(gameDir, "bitmaps");
-    if (!gameSrc.empty()) {
-        const fs::path gameOut = gameDir / "projectiletextures";
-        totalFailed += ConvertProjectileTextureRoot(gameSrc, gameOut,
-                                                    textureConverter, force,
-                                                    gC, gU, gF);
-        if (gC + gU + gF > 0) {
-            WriteDirManifest(gameOut);
+    // Game: gameDir is the data-side copy already populated by
+    // CopySourceTree, so the source `bitmaps/` is at gameDir/bitmaps
+    // and conversion happens in place there.
+    const fs::path gameBitmaps = ResolveSubDir(gameDir, "bitmaps");
+    if (!gameBitmaps.empty()) {
+        totalFailed += ConvertBitmapsInPlace(gameBitmaps, gameBitmaps,
+                                             textureConverter, force,
+                                             /*mirrorSources*/ false,
+                                             gP, gC, gU, gF);
+        if (gP + gC + gU + gF > 0) {
+            WriteDirManifest(gameBitmaps, /*recursive*/ true);
             SLOG(SPRING_LOG_NOTICE,
-                "%s projectile textures: %d converted, %d up-to-date, %d failed",
+                "%s bitmaps: %d converted, %d up-to-date, %d failed",
                 gameDir.filename().string().c_str(), gC, gU, gF);
         }
     } else {
         SLOG(SPRING_LOG_INFO,
-            "%s: no bitmaps/ directory, skipping game projectile-texture pass",
+            "%s: no bitmaps/ directory, skipping game bitmap pass",
             gameDir.string().c_str());
     }
     return totalFailed;
@@ -810,21 +849,46 @@ void EnsureGlbTexturesAvailable(const fs::path& glbPath,
 /// regular files in the directory itself are listed (no recursion);
 /// nested directories will get their own manifest if/when the client
 /// learns to enumerate them.
-void WriteDirManifest(const fs::path& dir) {
+// Walk `dir` (recursive when `recursive` is true; otherwise just direct
+// children) and return every regular filename, sorted, with paths
+// relative to `dir`. Used by the manifest writer.
+std::vector<std::string> ListFiles(const fs::path& dir, bool recursive) {
+    std::vector<std::string> out;
+    std::error_code ec;
+    if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) return out;
+
+    auto handle = [&](const fs::directory_entry& entry) {
+        if (!entry.is_regular_file(ec)) return;
+        const std::string rel = fs::relative(entry.path(), dir, ec).string();
+        if (rel.empty()) return;
+        if (rel == "manifest.json") return;
+        // Use forward slashes regardless of host OS so manifest
+        // entries match the relative paths the client will probe.
+        std::string norm = rel;
+        for (auto& c : norm) if (c == '\\') c = '/';
+        out.push_back(std::move(norm));
+    };
+
+    if (recursive) {
+        for (const auto& entry : fs::recursive_directory_iterator(dir, ec)) {
+            if (ec) break;
+            handle(entry);
+        }
+    } else {
+        for (const auto& entry : fs::directory_iterator(dir, ec)) {
+            if (ec) break;
+            handle(entry);
+        }
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+void WriteDirManifest(const fs::path& dir, bool recursive) {
     std::error_code ec;
     if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) return;
 
-    std::vector<std::string> names;
-    for (const auto& entry : fs::directory_iterator(dir, ec)) {
-        if (ec) break;
-        if (!entry.is_regular_file(ec)) continue;
-        const std::string name = entry.path().filename().string();
-        // Exclude the manifest itself so re-running the converter
-        // doesn't accumulate a recursive reference.
-        if (name == "manifest.json") continue;
-        names.push_back(name);
-    }
-    std::sort(names.begin(), names.end());
+    std::vector<std::string> names = ListFiles(dir, recursive);
 
     std::string out = "{\n  \"version\": 1,\n  \"files\": [";
     for (size_t i = 0; i < names.size(); ++i) {

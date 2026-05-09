@@ -35,6 +35,7 @@ KhronosTextureContainer2.URLConfig = {
 };
 import { EntityRenderer } from './core/entity-renderer.js';
 import { ProjectileRenderer } from './core/projectile-renderer.js';
+import { ProjectileTextureResolver } from './core/projectile-texture-resolver.js';
 import { BuildBeamRenderer } from './core/build-beam-renderer.js';
 import { DefCache } from './core/def-cache.js';
 import { CombatFX } from './core/combat-fx.js';
@@ -436,6 +437,18 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     buildBeamRenderer = new BuildBeamRenderer(scene);
     buildBeamRenderer.setEntityRenderer(entityRenderer);
     if (gameId) buildBeamRenderer.setGameAssetsBaseUrl(gameId);
+
+    // Resolve weapon-def texture names → KTX2 URLs. Async load of
+    // resources.json + the bitmaps manifests; the renderer can be
+    // built before init() resolves and consults the resolver lazily
+    // when it sees the first weapon def with a texture name.
+    if (gameId) {
+        const resolver = new ProjectileTextureResolver();
+        projectileRenderer.setTextureResolver(resolver);
+        resolver.init(gameId, lobbyHttpUrl).catch((e) => {
+            console.warn('[main] projectile texture resolver init failed:', e);
+        });
+    }
     audioManager = new AudioManager();
     combatFX = new CombatFX(scene, audioManager);
 

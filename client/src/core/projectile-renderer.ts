@@ -39,6 +39,7 @@ import '@babylonjs/loaders/glTF/index.js';
 
 import type { WeaponDefInfo } from './connection.js';
 import { stampUrl } from '../config.js';
+import type { ProjectileTextureResolver } from './projectile-texture-resolver.js';
 
 /** Visual type enum — matches ProjectileVisualType in protocol.fbs */
 const enum VisualType {
@@ -119,10 +120,25 @@ export class ProjectileRenderer {
     private live = new Map<number, LiveProjectile>();
     private beams: BeamFx[] = [];
     private lastTickMs = performance.now();
+    /// Resolver for `def.texture1/2/3` → KTX2 URL. Wired in by main.ts
+    /// at game start; null until then. Future visual builders (sprite
+    /// billboards, animated beams) consult `resolve(name)` to fetch
+    /// the right texture URL — for now only the model-URL path is
+    /// consumed by createVisual / swapInModel, but the resolver is
+    /// owned here so widget-loaded weapons get the same resolution.
+    private textureResolver: ProjectileTextureResolver | null = null;
 
     constructor(scene: Scene) {
         this.scene = scene;
         this.fallbackVisual = this.createVisual(0, VisualType.Cannon, 1.0, [1, 0.8, 0.2], 0.8);
+    }
+
+    /// Inject the resolver after init(). Called once per game session
+    /// from main.ts. Not constructor-injected because the resolver's
+    /// init is async and the renderer is created earlier in the
+    /// game-bootstrap sequence.
+    setTextureResolver(r: ProjectileTextureResolver): void {
+        this.textureResolver = r;
     }
 
     /** Replace the per-weapon-def visual templates. Defs that reference

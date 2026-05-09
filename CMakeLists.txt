@@ -299,6 +299,7 @@ set(LOBBY_SERVER_SOURCES
     rts/Server/AI/AIDiscovery.cpp
     rts/Server/GameDiscovery.cpp
     rts/Server/ConfigReader.cpp
+    rts/Server/ResourcesParser.cpp
 )
 set(LOBBY_LOG_SOURCES
     rts/System/Log/Backend.cpp
