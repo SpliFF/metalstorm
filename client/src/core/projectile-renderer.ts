@@ -26,9 +26,11 @@ import {
     Scene,
     MeshBuilder,
     Mesh,
+    LinesMesh,
     StandardMaterial,
     ShaderMaterial,
     Color3,
+    Color4,
     Matrix,
     Vector3,
     Quaternion,
@@ -118,7 +120,34 @@ interface BeamWeaponVisual extends BaseWeaponVisual {
     endCapMaterial: StandardMaterial | null;
 }
 
-type WeaponVisual = InstancedWeaponVisual | BeamWeaponVisual;
+/** Lightning visual: a single LinesMesh per weapon def holding every
+ *  active bolt's zigzag polyline. Replaced wholesale on rebuild because
+ *  Babylon's `CreateLineSystem` `instance` update path can't change
+ *  topology and the bolt count drifts as bolts spawn / expire.
+ *  Animation is throttled by `lastRebuildMs` so the polyline shape
+ *  shimmers at ~10 Hz rather than every render frame. */
+interface LightningWeaponVisual extends BaseWeaponVisual {
+    kind: 'lightning';
+    /// Currently rendered polylines, or null when no bolts are active.
+    linesMesh: LinesMesh | null;
+    /// Per-vertex tint baked into the line vertex colors. RGB pre-
+    /// multiplied by intensity; alpha is varied along the polyline for
+    /// the centre-bright glow falloff.
+    color: Color3;
+    /// Last rebuild timestamp in ms. Combined with lastBoltCount to
+    /// throttle regeneration to LIGHTNING_REBUILD_INTERVAL_MS.
+    lastRebuildMs: number;
+    /// Bolt count at the previous rebuild. When the count differs from
+    /// the current frame's count, we rebuild immediately regardless of
+    /// the throttle so new/expired bolts pop in/out without delay.
+    lastBoltCount: number;
+    /// Per-segment perpendicular jitter as a fraction of segment length.
+    /// 0.25 matches the plan's `randomNormal() * (segLen * 0.25)`
+    /// recommendation; bigger values produce more chaotic bolts.
+    jitter: number;
+}
+
+type WeaponVisual = InstancedWeaponVisual | BeamWeaponVisual | LightningWeaponVisual;
 
 /** Visual-type → builder dispatch. Builders return a synchronous
  *  `WeaponVisual` ready to receive thin instances; any async upgrades
@@ -190,7 +219,7 @@ const FLAG_LARGE_BEAM_LASER = 1 << 18;
 export class ProjectileRenderer {
     private scene: Scene;
     private weaponVisuals = new Map<number, WeaponVisual>();
-    private fallbackVisual: WeaponVisual;
+    private fallbackVisual: InstancedWeaponVisual;
     private live = new Map<number, LiveProjectile>();
     private liveBeams: LiveBeam[] = [];
     private lastTickMs = performance.now();
@@ -239,8 +268,7 @@ export class ProjectileRenderer {
         this.lastDefs = defs;
 
         for (const v of this.weaponVisuals.values()) {
-            v.mesh.dispose();
-            v.material.dispose();
+            disposeVisual(v);
         }
         this.weaponVisuals.clear();
 
@@ -720,6 +748,40 @@ export class ProjectileRenderer {
                 visual.endCapMesh.thinInstanceCount = 0;
             }
         }
+
+        // 6. Lightning pass — group live beams by lightning-typed
+        //    weapon def, regenerate the per-def LinesMesh from the
+        //    bolts' from→to endpoints. Topology changes whenever a
+        //    bolt spawns or expires, so we can't share a fixed-size
+        //    mesh across frames; rebuild is throttled when the bolt
+        //    count is stable to keep the shimmer on a 10 Hz cadence.
+        const lightningGroups = new Map<number, LiveBeam[]>();
+        for (const b of this.liveBeams) {
+            const v = this.weaponVisuals.get(b.weaponDefId);
+            if (!v || v.kind !== 'lightning') continue;
+            let g = lightningGroups.get(b.weaponDefId);
+            if (!g) { g = []; lightningGroups.set(b.weaponDefId, g); }
+            g.push(b);
+        }
+        const lightningUpdated = new Set<number>();
+        for (const [defId, bolts] of lightningGroups) {
+            const visual = this.weaponVisuals.get(defId) as LightningWeaponVisual;
+            rebuildLightningMesh(visual, bolts, this.scene, nowMs);
+            lightningUpdated.add(defId);
+        }
+        // Clear lightning meshes for defs with no live bolts. We
+        // dispose the LinesMesh outright (rather than just hiding it)
+        // because the next bolt for this def will rebuild from scratch
+        // anyway and an idle LinesMesh keeps a vertex buffer pinned.
+        for (const [defId, visual] of this.weaponVisuals) {
+            if (visual.kind !== 'lightning') continue;
+            if (lightningUpdated.has(defId)) continue;
+            if (visual.linesMesh) {
+                visual.linesMesh.dispose();
+                visual.linesMesh = null;
+                visual.lastBoltCount = 0;
+            }
+        }
     }
 
     /** Number of live projectiles tracked client-side. */
@@ -763,9 +825,15 @@ function resolveIntensity(def: WeaponDefInfo): number {
 }
 
 /// Dispose every Babylon resource owned by a visual. Beam visuals
-/// drag along optional cap meshes/materials; the conditional disposes
-/// keep dispose() in the renderer compact.
+/// drag along optional cap meshes/materials; lightning visuals own
+/// only an optional LinesMesh (no separate material — the LinesMesh
+/// uses Babylon's built-in colour shader). The conditionals keep
+/// dispose() in the renderer compact.
 function disposeVisual(v: WeaponVisual): void {
+    if (v.kind === 'lightning') {
+        v.linesMesh?.dispose();
+        return;
+    }
     v.mesh.dispose();
     v.material.dispose();
     if (v.kind === 'beam') {
@@ -1011,29 +1079,154 @@ function buildBeamCap(
     return { mesh, material: mat };
 }
 
-/// 4.3 placeholder — lightning sphere. Replaced by the procedural zigzag
-/// polyline once 4.3 lands.
-function buildLightningPlaceholderVisual(
+/// 4.3 — Lightning bolt. Returns a LightningWeaponVisual whose
+/// LinesMesh is built lazily on the first tick that has live bolts.
+/// `texture1` is intentionally ignored per the plan: the polyline
+/// itself conveys the look, and skipping the texture sample saves
+/// one draw call's worth of state changes per def.
+function buildLightningVisual(
     def: WeaponDefInfo,
-    scene: Scene,
+    _scene: Scene,
     _resolver: ProjectileTextureResolver | null,
 ): WeaponVisual {
-    const color = resolveColor(def);
-    const size = resolveSize(def);
+    const [r, g, b] = resolveColor(def);
     const intensity = resolveIntensity(def);
-    const mat = makeMaterial(`projMat_${def.defId}`, scene, color, intensity);
-
-    const mesh = MeshBuilder.CreateSphere(`proj_${def.defId}`,
-        { diameter: 4 * size * 0.6, segments: 4 }, scene);
-    mesh.material = mat;
-    mesh.isVisible = false;
-    mesh.thinInstanceEnablePicking = false;
-
     return {
-        kind: 'instanced',
-        defId: def.defId, mesh, material: mat,
-        visualType: def.visualType, size, orientation: 'velocity',
+        kind: 'lightning',
+        defId: def.defId,
+        visualType: def.visualType,
+        size: resolveSize(def),
+        linesMesh: null,
+        // Pre-multiply the tint by intensity so the per-vertex Color4
+        // alpha can encode the centre-bright glow falloff cleanly.
+        color: new Color3(r * intensity, g * intensity, b * intensity),
+        lastRebuildMs: 0,
+        lastBoltCount: 0,
+        jitter: 0.25,
     };
+}
+
+/// Number of segments per bolt polyline. 12 is the plan's recommended
+/// number — enough to read as a zigzag, cheap enough for hundreds
+/// of simultaneous bolts.
+const LIGHTNING_SEGMENTS = 12;
+
+/// Throttle window for lightning shimmer. When the bolt count is
+/// unchanged we skip rebuilds shorter than this, animating the
+/// polyline shape at ~10 Hz. New / expiring bolts always trigger an
+/// immediate rebuild, so visual latency on bolt spawn is bounded by
+/// the render frame interval, not this throttle.
+const LIGHTNING_REBUILD_INTERVAL_MS = 100;
+
+/// Generate a zigzag polyline between two points. The endpoints are
+/// anchored (no jitter) so the bolt visually starts at the muzzle and
+/// ends at the impact; intermediate vertices are perturbed perpen-
+/// dicular to the bolt axis. Two perpendicular axes are computed once
+/// per bolt and shared across all interior vertices — cheaper than
+/// rebuilding a basis per segment.
+function generateBoltPoints(
+    fromX: number, fromY: number, fromZ: number,
+    toX: number, toY: number, toZ: number,
+    segments: number,
+    jitter: number,
+): Vector3[] {
+    const dx = toX - fromX, dy = toY - fromY, dz = toZ - fromZ;
+    const len = Math.hypot(dx, dy, dz);
+    if (len < 1e-3) {
+        return [new Vector3(fromX, fromY, fromZ),
+                new Vector3(toX, toY, toZ)];
+    }
+    const fxN = dx / len, fyN = dy / len, fzN = dz / len;
+    // Pick world up unless the bolt itself is near-vertical, in which
+    // case fall back to world +X so cross(forward, up) doesn't degenerate.
+    const upX = Math.abs(fyN) > 0.99 ? 1 : 0;
+    const upY = Math.abs(fyN) > 0.99 ? 0 : 1;
+    const upZ = 0;
+    let p1x = fyN * upZ - fzN * upY;
+    let p1y = fzN * upX - fxN * upZ;
+    let p1z = fxN * upY - fyN * upX;
+    const p1Len = Math.hypot(p1x, p1y, p1z) || 1;
+    p1x /= p1Len; p1y /= p1Len; p1z /= p1Len;
+    const p2x = fyN * p1z - fzN * p1y;
+    const p2y = fzN * p1x - fxN * p1z;
+    const p2z = fxN * p1y - fyN * p1x;
+
+    const segLen = len / segments;
+    const amp = segLen * jitter;
+    const points: Vector3[] = new Array(segments + 1);
+    for (let i = 0; i <= segments; i++) {
+        const t = i / segments;
+        let px = fromX + dx * t;
+        let py = fromY + dy * t;
+        let pz = fromZ + dz * t;
+        // Endpoints stay at from/to — bolt anchored to muzzle + impact.
+        if (i > 0 && i < segments) {
+            const j1 = (Math.random() - 0.5) * 2 * amp;
+            const j2 = (Math.random() - 0.5) * 2 * amp;
+            px += p1x * j1 + p2x * j2;
+            py += p1y * j1 + p2y * j2;
+            pz += p1z * j1 + p2z * j2;
+        }
+        points[i] = new Vector3(px, py, pz);
+    }
+    return points;
+}
+
+/// Per-vertex colour buffer matching `generateBoltPoints` output.
+/// Alpha follows a quadratic falloff peaking at the polyline midpoint;
+/// the resulting bolt reads as a bright core that fades into both
+/// endpoints — the "glow falloff" the plan calls out.
+function generateBoltColors(color: Color3, segments: number): Color4[] {
+    const colors: Color4[] = new Array(segments + 1);
+    const centre = segments / 2;
+    for (let i = 0; i <= segments; i++) {
+        const d = Math.abs(i - centre) / centre;
+        const alpha = Math.max(0, 1 - d * d);
+        colors[i] = new Color4(color.r, color.g, color.b, alpha);
+    }
+    return colors;
+}
+
+/// Rebuild the LinesMesh for one lightning weapon def. Called once
+/// per tick that has live bolts; throttled internally so a steady
+/// bolt count animates at ~10 Hz instead of every render frame.
+function rebuildLightningMesh(
+    visual: LightningWeaponVisual,
+    bolts: LiveBeam[],
+    scene: Scene,
+    nowMs: number,
+): void {
+    const sameTopology = visual.linesMesh != null
+        && visual.lastBoltCount === bolts.length;
+    if (sameTopology
+        && nowMs - visual.lastRebuildMs < LIGHTNING_REBUILD_INTERVAL_MS) {
+        return;
+    }
+
+    const lines: Vector3[][] = new Array(bolts.length);
+    const colors: Color4[][] = new Array(bolts.length);
+    for (let i = 0; i < bolts.length; i++) {
+        const b = bolts[i];
+        lines[i] = generateBoltPoints(
+            b.fromX, b.fromY, b.fromZ, b.toX, b.toY, b.toZ,
+            LIGHTNING_SEGMENTS, visual.jitter);
+        colors[i] = generateBoltColors(visual.color, LIGHTNING_SEGMENTS);
+    }
+
+    // CreateLineSystem's `instance` update path can't change the
+    // vertex count, and our bolt count drifts as bolts spawn/expire,
+    // so we dispose+recreate. The mesh is small (~13 verts × few-
+    // dozen bolts) and the alloc cost is dwarfed by the throttle.
+    visual.linesMesh?.dispose();
+    visual.linesMesh = MeshBuilder.CreateLineSystem(
+        `projLightning_${visual.defId}`,
+        { lines, colors, useVertexAlpha: true },
+        scene,
+    );
+    visual.linesMesh.isPickable = false;
+    visual.linesMesh.alphaIndex = 1000;
+    visual.lastBoltCount = bolts.length;
+    visual.lastRebuildMs = nowMs;
 }
 
 /// 4.4 placeholder — missile cone. Existing `.glb` swap-in remains; the
@@ -1075,7 +1268,7 @@ const visualBuilders: Partial<Record<VisualType, VisualBuilder>> = {
     [VisualType.Flame]:     buildBillboardVisual,
     [VisualType.Laser]:     buildBeamVisual,
     [VisualType.BeamLaser]: buildBeamVisual,
-    [VisualType.Lightning]: buildLightningPlaceholderVisual,
+    [VisualType.Lightning]: buildLightningVisual,
     [VisualType.Missile]:   buildMissileVisual,
 };
 
@@ -1092,7 +1285,7 @@ function createFallbackVisual(
     color: [number, number, number],
     intensity: number,
     scene: Scene,
-): WeaponVisual {
+): InstancedWeaponVisual {
     const mat = makeMaterial(`projMat_${defId}`, scene, color, intensity);
     const mesh = MeshBuilder.CreateSphere(`proj_${defId}`,
         { diameter: 4 * size, segments: 4 }, scene);
