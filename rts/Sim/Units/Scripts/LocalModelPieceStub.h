@@ -85,20 +85,65 @@ struct LocalModelPiece {
 	void   SetPosition(const float3& p) { pos = p; dirty = true; }
 	void   SetRotation(const float3& r) { rot = r; dirty = true; }
 
-	float3 GetAbsolutePos() const { return pos; }
-	CMatrix44f GetModelSpaceMatrix() const { return CMatrix44f(); }
-	// Headless stub: there's no model geometry, so the "emit dir/pos"
-	// is just the piece's local-space position with a default up-vector.
-	// Returning true (success) keeps EmitSfx and weapon muzzle queries
-	// from spamming "[US::EmitSFX] invalid model piece index" errors —
-	// SFX has no server-side meaning, and the weapon hit code falls
-	// back gracefully when the muzzle ends up at the unit centre.
-	bool GetEmitDirPos(float3& outPos, float3& outDir) const { outPos = pos; outDir = float3(0.0f, 1.0f, 0.0f); return true; }
+	/// Position of this piece in the model's coordinate frame, with
+	/// every ancestor's translation+rotation applied. Used by
+	/// `Spring.GetUnitPiecePos*` and by `CWeapon::UpdateWeaponVectors`
+	/// to compute the muzzle origin in unit-object space (which then
+	/// becomes the projectile spawn point in world space).
+	///
+	/// Without parent-chain traversal the headless server reports
+	/// every piece at its parent-local offset, which puts weapons at
+	/// the unit centre instead of the barrel tip and results in
+	/// projectiles spawning inside the firing unit's collision sphere.
+	float3 GetAbsolutePos() const { return GetModelSpaceMatrix().GetPos(); }
+
+	/// Compose this piece's transform matrix walking up the parent
+	/// chain. Each level is `T(pos) * R(rot)` applied in YXZ Euler
+	/// order (Spring's `RotateEulerYXZ` convention), so the script's
+	/// Turn() / Move() ops on individual pieces compose into a final
+	/// world-relative pose just like the rendering side computes for
+	/// the visible model.
+	CMatrix44f GetModelSpaceMatrix() const {
+		CMatrix44f local;
+		local.Translate(pos);
+		// Skip the no-op work when the piece hasn't been rotated.
+		// Almost every static decorative piece on a unit stays at
+		// rest, so this saves three trig calls per piece per frame.
+		if (rot.x != 0.0f || rot.y != 0.0f || rot.z != 0.0f)
+			local.RotateEulerYXZ(rot);
+		if (parent != nullptr)
+			return parent->GetModelSpaceMatrix() * local;
+		return local;
+	}
+
+	/// `outPos` is the piece origin in model space; `outDir` is the
+	/// piece's local +Z (Spring's emit-axis convention) rotated by
+	/// the piece's accumulated transform — i.e. where a weapon's
+	/// muzzle is pointing in world-relative terms. Without this,
+	/// every weapon defaults to firing straight up because the
+	/// previous stub returned the local-Y axis verbatim.
+	bool GetEmitDirPos(float3& outPos, float3& outDir) const {
+		const CMatrix44f mat = GetModelSpaceMatrix();
+		outPos = mat.GetPos();
+		// Multiply the local +Z basis vector through the rotation
+		// (treating it as a vector, not a point — subtract the
+		// translation back out). `mat * float3` is a point transform
+		// with implicit w=1.
+		outDir = (mat * float3(0.0f, 0.0f, 1.0f)) - outPos;
+		return true;
+	}
 
 	const CollisionVolume* GetCollisionVolume() const { return &colvol; }
 	      CollisionVolume* GetCollisionVolume()       { return &colvol; }
 
-	float3 GetDirection() const { return float3(0.0f, 0.0f, 1.0f); }
+	/// Forward direction (local +Z) of the piece in model space.
+	/// Used by a handful of unit-script utility callouts; matches
+	/// the dir component of GetEmitDirPos.
+	float3 GetDirection() const {
+		const CMatrix44f mat = GetModelSpaceMatrix();
+		const float3 origin = mat.GetPos();
+		return ((mat * float3(0.0f, 0.0f, 1.0f)) - origin).SafeNormalize();
+	}
 
 	int  GetLModelPieceIndex() const { return lmodelPieceIndex; }
 	int  GetScriptPieceIndex() const { return scriptPieceIndex; }
@@ -113,6 +158,9 @@ struct LocalModelPiece {
 	int scriptPieceIndex = -1;
 
 	const S3DModelPiece* original = nullptr;
+	/// Pointer to the parent piece in the LocalModel array. Wired up
+	/// in `LocalModel::SetModel`. Null for the root piece.
+	LocalModelPiece* parent = nullptr;
 
 private:
 	float3 pos;
@@ -142,6 +190,23 @@ struct LocalModel {
 			pieces[i].lmodelPieceIndex = static_cast<int>(i);
 			pieces[i].original         = &mdl->pieces[i];
 			pieces[i].SetPosition(mdl->pieces[i].offset);
+			pieces[i].parent           = nullptr;
+		}
+		// Second pass: link each piece's parent. The S3DModelPiece
+		// template carries a `parent` pointer that points into the
+		// model's own piece array; we map that to our LocalModelPiece
+		// instance by matching the `original` back-pointer. Done as
+		// a separate pass because the template parents may not have
+		// been constructed yet during the first pass on some compilers.
+		for (size_t i = 0; i < pieces.size(); ++i) {
+			const S3DModelPiece* tplParent = mdl->pieces[i].parent;
+			if (tplParent == nullptr) continue;
+			for (size_t j = 0; j < pieces.size(); ++j) {
+				if (pieces[j].original == tplParent) {
+					pieces[i].parent = &pieces[j];
+					break;
+				}
+			}
 		}
 	}
 

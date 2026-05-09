@@ -127,7 +127,12 @@ CWeapon::CWeapon(CUnit* owner, const WeaponDef* def):
 	aimFromPiece(-1),
 	muzzlePiece(-1),
 
-	reaimTime(GAME_SPEED >> 1),
+	// 500ms re-aim throttle (GAME_SPEED >> 1) was visibly laggy on slow
+	// turrets tracking slow targets — directional change stays under the
+	// 20° early-trigger threshold so AimWeapon was being called only
+	// twice per second. ~233ms (GAME_SPEED >> 2) keeps the cost low while
+	// halving worst-case aim lag.
+	reaimTime(GAME_SPEED >> 2),
 	reloadTime(1),
 	reloadStatus(0),
 
@@ -280,9 +285,35 @@ void CWeapon::UpdateWeaponVectors()
 	weaponMuzzlePos = owner->GetObjectSpacePos(relWeaponMuzzlePos);
 	weaponDir = owner->GetObjectSpaceVec(weaponDir).SafeNormalize();
 
-	// hope that we are underground because we are a popup weapon and will come above ground later
-	if (aimFromPos.y < CGround::GetHeightReal(aimFromPos.x, aimFromPos.z)) {
-		aimFromPos = owner->pos + UpVector * 10;
+	// Pop the aim/muzzle origins clear of the ground in two cases:
+	//   (a) underground popup weapons, where the script has not yet
+	//       extruded the muzzle piece — the original Spring behaviour
+	//   (b) headless / unscripted units whose AimFromWeapon and
+	//       QueryWeapon callins haven't run (or returned -1), leaving
+	//       relAimFromPos = ZeroVector. aimFromPos then equals the
+	//       unit's foot position — at exactly ground level. A strict
+	//       `<` check misses this; the subsequent HaveFreeLineOfFire
+	//       ray traces along the terrain surface and is rejected by
+	//       any adjacent terrain quad at or above the same height,
+	//       so the weapon never sees a valid target.
+	// The 0.5-elmo epsilon picks up the at-ground case while staying
+	// well below any sane piece-authored aim offset.
+	const float aimGround = CGround::GetHeightReal(aimFromPos.x, aimFromPos.z);
+	const float liftHeight = std::max(10.0f, owner->radius * 0.5f);
+	if (aimFromPos.y < aimGround + 0.5f) {
+		aimFromPos = owner->pos + UpVector * liftHeight;
+	}
+	// Same hazard for the muzzle: BeamLaser::FireInternal ray-traces
+	// from weaponMuzzlePos. If the script never set up the muzzle
+	// piece, weaponMuzzlePos == owner->pos and the beam immediately
+	// collides with the firing unit's own footprint, returning a
+	// zero-length result that the WeaponProjectile workaround
+	// (see WeaponProjectile.cpp:167) substitutes with an UpVector
+	// offset for the client-visible event but doesn't fix at the
+	// sim level.
+	const float muzGround = CGround::GetHeightReal(weaponMuzzlePos.x, weaponMuzzlePos.z);
+	if (weaponMuzzlePos.y < muzGround + 0.5f) {
+		weaponMuzzlePos = owner->pos + UpVector * liftHeight;
 	}
 }
 
