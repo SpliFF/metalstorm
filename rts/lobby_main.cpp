@@ -768,6 +768,41 @@ int main(int argc, char* argv[])
         };
     });
 
+    // Serve shared engine-base assets out of data/engine/. Today this is
+    // just the universal projectile-texture sprites converted from
+    // cont/base/bitmaps/ by gameconverter, which the Issue 3 resolver
+    // (rts/Server/Protocol.h ResolveProjectileTextureUrl) falls back to
+    // when a game does not ship its own copy of a texture name.
+    net.AddHttpGet("/api/engine/data/*", [](const std::string& url) -> HttpResponse {
+        std::string rest = url.substr(std::string("/api/engine/data/").size());
+        if (rest.find("..") != std::string::npos)
+            return {.contentType = "text/plain", .body = {}, .status = 403};
+
+        namespace fs = std::filesystem;
+        const std::string filePath = "data/engine/" + rest;
+        if (!fs::is_regular_file(filePath))
+            return {.contentType = "text/plain", .body = {}, .status = 404};
+
+        std::ifstream f(filePath, std::ios::binary);
+        std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
+                                   std::istreambuf_iterator<char>());
+
+        std::string ext = fs::path(filePath).extension().string();
+        std::string ct = "application/octet-stream";
+        if (ext == ".ktx2") ct = "image/ktx2";
+        else if (ext == ".png") ct = "image/png";
+        else if (ext == ".webp") ct = "image/webp";
+        else if (ext == ".dds") ct = "image/vnd-ms.dds";
+        else if (ext == ".json") ct = "application/json";
+
+        return {
+            .contentType = ct,
+            .body = std::move(data),
+            .status = 200,
+            .cacheControl = CacheControl::StaticAssetHeader(),
+        };
+    });
+
     // Map thumbnail endpoint. Serves the preprocessed small PNG
     // (aspect-correct, max 256px on the longer axis) that
     // mapconverter wrote to data/maps/<id>/thumbnail.png at preprocess

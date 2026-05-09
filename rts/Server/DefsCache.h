@@ -58,11 +58,12 @@ inline std::string ComputeCacheKey(
     // after a schema change. Without this, a stale cache from a prior
     // schema would silently shadow the newly-bakable bytes.
     //
-    // 2026-05-09: bumped past v5 after texture2 + texture3 were added
-    // to GameWeaponDef. Keep this string in sync with the .cpp side
-    // and any other ComputeCacheKey copy — the lobby and the server
-    // both inline the function body, so a single-site bump misses one.
-    canonical += "schemaV6-protocol";
+    // 2026-05-09: bumped past v6 after texture1/2/3 in GameWeaponDef
+    // changed from bare logical names to fully-qualified URLs (Issue 3
+    // resolver). Keep this string in sync with the .cpp side and any
+    // other ComputeCacheKey copy — the lobby and the server both
+    // inline the function body, so a single-site bump misses one.
+    canonical += "schemaV7-protocol";
     canonical += '\n';
     canonical += gameId;
     canonical += '\n';
