@@ -736,6 +736,13 @@ table GameWeaponDef {
     /// bit22: exteriorShield         bit23: visibleShield
     flags: uint32 = 0;
 
+    /// 'Large' BeamLaser only — speed in elmo/s at which the tiled
+    /// beam texture shifts along the beam axis. The renderer treats
+    /// non-largeBeamLaser weapons as scroll_speed = 0 regardless of
+    /// this value (per Recoil semantics; only LargeBeamLaserProjectile
+    /// applies the scroll). Default 5.0 matches Spring's tag default.
+    scroll_speed: float = 5.0;
+
     // ── Tier 4: custom params + extras ──────────────────────────────
     /// Game-specific key/value extensions. Empty unless the weapondef
     /// has any customParams entries.

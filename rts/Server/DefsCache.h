@@ -58,14 +58,13 @@ inline std::string ComputeCacheKey(
     // after a schema change. Without this, a stale cache from a prior
     // schema would silently shadow the newly-bakable bytes.
     //
-    // 2026-05-09: v8 — texture1/2/3 reverted to bare logical names
-    // (the URL-resolver experiment was reversed). Wire format is
-    // unchanged shape but value content differs, so old v7 cache
-    // entries must be unreachable. Keep this string in sync with the
-    // .cpp side and any other ComputeCacheKey copy — the lobby and
-    // the server both inline the function body, so a single-site bump
-    // misses one.
-    canonical += "schemaV8-protocol";
+    // 2026-05-09: v9 — GameWeaponDef gained scroll_speed (float).
+    // Drives UV-scroll on largeBeamLaser visuals; defaulted to Spring's
+    // 5.0 for non-Large beams (and ignored at render time per Recoil
+    // semantics). Keep this string in sync with the .cpp side and any
+    // other ComputeCacheKey copy — the lobby and the server both
+    // inline the function body, so a single-site bump misses one.
+    canonical += "schemaV9-protocol";
     canonical += '\n';
     canonical += gameId;
     canonical += '\n';

@@ -27,12 +27,11 @@ import {
     MeshBuilder,
     Mesh,
     StandardMaterial,
+    ShaderMaterial,
     Color3,
-    Color4,
     Matrix,
     Vector3,
     Quaternion,
-    LinesMesh,
     SceneLoader,
     Texture,
 } from '@babylonjs/core';
@@ -41,6 +40,7 @@ import '@babylonjs/loaders/glTF/index.js';
 import type { WeaponDefInfo } from './connection.js';
 import { stampUrl } from '../config.js';
 import type { ProjectileTextureResolver } from './projectile-texture-resolver.js';
+import { registerProjectileBeamShader } from './shaders/projectile-beam.js';
 
 /** Visual type enum — matches ProjectileVisualType in protocol.fbs */
 const enum VisualType {
@@ -66,23 +66,59 @@ const DEFAULT_COLORS: Record<number, [number, number, number]> = {
  *  - `velocity`: align local +Y to the projectile's velocity vector.
  *    Used by missile cones and the placeholder cylinders for laser/beam.
  *  - `billboard`: rotate each instance so the quad's local +Z faces the
- *    active camera. Used by sprite billboards (4.1). */
+ *    active camera. Used by sprite billboards (4.1) and beam end-caps. */
 type ProjectileOrientation = 'velocity' | 'billboard';
 
-/** Per-weapon-def rendering template + cached size. The mesh and material
- *  are mutable because async model loads (see `swapInModel`) replace the
- *  procedural placeholder once the `.glb` finishes loading. */
-interface WeaponVisual {
+/** Common fields across every weapon-def visual. */
+interface BaseWeaponVisual {
     defId: number;
-    mesh: Mesh;
-    material: StandardMaterial;
     visualType: number;
     /// Average projectile size — used to scale the thin instance mesh in y.
     size: number;
-    /// How tick() should orient each thin instance. Defaults to 'velocity'
-    /// (legacy procedural shapes); billboard sprites set it to 'billboard'.
+}
+
+/** Standard thin-instanced visual: per-frame matrix is composed via
+ *  Matrix.Compose with either velocity-aligned or billboard rotation.
+ *  Used by cannon/flame sprites, missile cones, and the procedural
+ *  placeholders for lightning. The mesh and material are mutable because
+ *  async model loads (see `swapInModel`) replace them in-place. */
+interface InstancedWeaponVisual extends BaseWeaponVisual {
+    kind: 'instanced';
+    mesh: Mesh;
+    material: StandardMaterial;
     orientation: ProjectileOrientation;
 }
+
+/** Beam visual (Laser / BeamLaser). The middle mesh is a unit quad
+ *  thin-instanced once per live beam, with the per-instance matrix
+ *  encoding axis vector, midpoint, halfWidth and birth time (see
+ *  shaders/projectile-beam.ts for the layout). Optional start/end
+ *  cap meshes are billboarded sprite quads at the beam endpoints. */
+interface BeamWeaponVisual extends BaseWeaponVisual {
+    kind: 'beam';
+    /// Middle stretched-quad mesh + ShaderMaterial.
+    mesh: Mesh;
+    material: ShaderMaterial;
+    /// Lifetime in seconds — clamped to MAX_BEAM_DURATION_S to bound
+    /// overdraw on long-duration beams.
+    duration: number;
+    /// Across-axis half-thickness in elmos.
+    halfWidth: number;
+    /// Texture footprint along the length axis. Tuning param for the
+    /// fragment shader's tile count.
+    tileLength: number;
+    /// Pixels per second the beam texture scrolls. Zero unless the
+    /// largeBeamLaser flag is set on the weapon (Recoil parity).
+    scrollRate: number;
+    /// Optional start cap (sprite billboard at the muzzle).
+    startCapMesh: Mesh | null;
+    startCapMaterial: StandardMaterial | null;
+    /// Optional end cap (sprite billboard at the impact point).
+    endCapMesh: Mesh | null;
+    endCapMaterial: StandardMaterial | null;
+}
+
+type WeaponVisual = InstancedWeaponVisual | BeamWeaponVisual;
 
 /** Visual-type → builder dispatch. Builders return a synchronous
  *  `WeaponVisual` ready to receive thin instances; any async upgrades
@@ -110,14 +146,16 @@ interface LiveProjectile {
     spawnedAtMs: number;
 }
 
-/** Active hit-scan beam: a line from launch pos to impact pos with a
- *  short fade-out. Disposed when its lifetime hits zero. */
-interface BeamFx {
-    line: LinesMesh;
-    /// Lifetime remaining in seconds.
+/** Active beam: from-point, to-point and birth time. Each tick the
+ *  renderer rebuilds matrices for the beam visual it belongs to and
+ *  pushes them as thin instances. The instance's per-frame alpha is
+ *  derived in the fragment shader from `(now - bornAtMs) / lifeS`. */
+interface LiveBeam {
+    weaponDefId: number;
+    fromX: number; fromY: number; fromZ: number;
+    toX: number; toY: number; toZ: number;
+    bornAtMs: number;
     lifeS: number;
-    /// Initial lifetime — used to compute the fade-out alpha.
-    initialLifeS: number;
 }
 
 /// Spring sim ticks per game-second.
@@ -133,12 +171,28 @@ const MAX_ORPHAN_LIFE_MS = 15_000;
 /// sees the bolt / laser flash.
 const DEFAULT_BEAM_LIFE_S = 0.12;
 
+/// Hard upper bound on beam visual duration. Caps overdraw on very
+/// long-lived BeamLasers without affecting sim damage timing (the
+/// renderer fades the visual; the server controls hit/damage windows).
+const MAX_BEAM_DURATION_S = 2.0;
+
+/// Default tile length for beam textures (elmos per UV cycle along the
+/// beam axis). Spring's `tilelength` weapondef field carries this
+/// per-weapon; we don't yet plumb it through so each beam falls back
+/// to this constant. Bumping the schema for a per-def override is
+/// trivial follow-up if needed.
+const DEFAULT_BEAM_TILE_LENGTH = 200;
+
+/// Bit 18 of GameWeaponDef.flags — Spring's largeBeamLaser. Only weapons
+/// with this set get UV-scrolling per Recoil semantics.
+const FLAG_LARGE_BEAM_LASER = 1 << 18;
+
 export class ProjectileRenderer {
     private scene: Scene;
     private weaponVisuals = new Map<number, WeaponVisual>();
     private fallbackVisual: WeaponVisual;
     private live = new Map<number, LiveProjectile>();
-    private beams: BeamFx[] = [];
+    private liveBeams: LiveBeam[] = [];
     private lastTickMs = performance.now();
     /// Resolver for `def.texture1/2/3` → KTX2 URL. Wired in by main.ts
     /// at game start; null until then. Future visual builders (sprite
@@ -261,7 +315,11 @@ export class ProjectileRenderer {
         // imported meshes — caller's catch-all handler logs the
         // failure but treats this as a non-error.
         const visual = this.weaponVisuals.get(defId);
-        if (!visual) {
+        // Beam visuals don't go through the model-swap path (no .glb
+        // expected for laser/beam weapons). If the def somehow ended
+        // up classified as a beam, leave the procedural beam mesh in
+        // place rather than corrupting the BeamWeaponVisual shape.
+        if (!visual || visual.kind !== 'instanced') {
             for (const m of result.meshes) m.dispose();
             return;
         }
@@ -369,38 +427,23 @@ export class ProjectileRenderer {
         });
     }
 
-    /** Spawn a one-shot beam mesh between two world points. The beam
-     *  fades out over `lifeS` seconds and is then disposed. */
+    /** Push a beam onto the live list. The beam pass in `tick()` rebuilds
+     *  per-instance matrices and uniforms from these entries every render
+     *  frame; expired beams are dropped when `now - bornAtMs > lifeS`.
+     *  Beams whose weapon def doesn't have a beam visual still get
+     *  recorded but are skipped at render time — the data is harmless. */
     private spawnBeam(weaponDefId: number, from: { x: number; y: number; z: number },
                       to: { x: number; y: number; z: number }, lifeS: number): void {
-        const visual = this.weaponVisuals.get(weaponDefId) ?? this.fallbackVisual;
-        const colDiffuse = visual.material.diffuseColor;
-        // Brighten colour a touch — laser bolts read better as near-white cores.
-        const r = Math.min(1, colDiffuse.r + 0.3);
-        const g = Math.min(1, colDiffuse.g + 0.3);
-        const b = Math.min(1, colDiffuse.b + 0.3);
-
-        const line = MeshBuilder.CreateLines(`beam_${weaponDefId}`, {
-            points: [
-                new Vector3(from.x, from.y, from.z),
-                new Vector3(to.x, to.y, to.z),
-            ],
-            colors: [
-                new Color4(r, g, b, 1),
-                new Color4(r, g, b, 1),
-            ],
-            updatable: false,
-        }, this.scene);
-        line.alphaIndex = 1000;
-        line.isPickable = false;
-        line.color = new Color3(r, g, b);
-        // LinesMesh has no material that respects alpha out of the box —
-        // fade by scaling alpha on the underlying material if present, or
-        // re-render every tick by interpolating colour. Using `alpha` on
-        // the mesh works because Babylon multiplies the per-vertex colour
-        // by `mesh.color * mesh.alpha`.
-
-        this.beams.push({ line, lifeS, initialLifeS: lifeS });
+        // Cap visual duration; long-lived beams just overdraw without
+        // adding information once the texture has scrolled fully.
+        const clamped = Math.min(lifeS, MAX_BEAM_DURATION_S);
+        this.liveBeams.push({
+            weaponDefId,
+            fromX: from.x, fromY: from.y, fromZ: from.z,
+            toX: to.x,     toY: to.y,     toZ: to.z,
+            bornAtMs: performance.now(),
+            lifeS: clamped,
+        });
     }
 
     /** Server reported an impact. Remove the local entry; combat-fx
@@ -435,18 +478,15 @@ export class ProjectileRenderer {
         const dt = Math.min((nowMs - this.lastTickMs) / 1000, 0.1);
         this.lastTickMs = nowMs;
 
-        // 0. Tick beams (hit-scan one-shot lines). Fade out over their
-        //    lifetime and dispose when expired.
-        for (let i = this.beams.length - 1; i >= 0; i--) {
-            const b = this.beams[i];
-            b.lifeS -= dt;
-            if (b.lifeS <= 0) {
-                b.line.dispose();
-                this.beams.splice(i, 1);
-                continue;
+        // 0. Cull expired beams. Fade is computed in the fragment
+        //    shader from (now - bornAtMs) / lifeS; we just drop entries
+        //    that have aged past their lifetime so the per-tick matrix
+        //    rebuild stays bounded.
+        for (let i = this.liveBeams.length - 1; i >= 0; i--) {
+            const b = this.liveBeams[i];
+            if ((nowMs - b.bornAtMs) / 1000 > b.lifeS) {
+                this.liveBeams.splice(i, 1);
             }
-            const t = Math.max(0, Math.min(1, b.lifeS / b.initialLifeS));
-            b.line.alpha = t;
         }
 
         // 1. Integrate motion + cull expired/orphan entries.
@@ -473,9 +513,15 @@ export class ProjectileRenderer {
         for (const id of dead) this.live.delete(id);
 
         // 2. Group by weapon def and push thin-instance buffers.
+        //    Live projectiles whose weapon-def maps to a beam visual
+        //    fall back to the fallback mesh — a non-hitscan beam-typed
+        //    projectile is unusual and the procedural sphere is at
+        //    least drawable. Hitscan beams take the dedicated beam
+        //    pass below.
         const groups = new Map<number, LiveProjectile[]>();
         for (const p of this.live.values()) {
-            const key = this.weaponVisuals.has(p.weaponDefId) ? p.weaponDefId : -1;
+            const v = this.weaponVisuals.get(p.weaponDefId);
+            const key = v && v.kind === 'instanced' ? p.weaponDefId : -1;
             let g = groups.get(key);
             if (!g) { g = []; groups.set(key, g); }
             g.push(p);
@@ -494,7 +540,11 @@ export class ProjectileRenderer {
         const camY = cam ? cam.position.y : 0;
         const camZ = cam ? cam.position.z : 0;
         for (const [key, projs] of groups) {
-            const visual = key === -1 ? this.fallbackVisual : this.weaponVisuals.get(key)!;
+            const lookup = key === -1 ? this.fallbackVisual : this.weaponVisuals.get(key)!;
+            // Group already filtered to instanced-kind visuals — the
+            // narrowing is exhaustive in practice but TS can't see
+            // that, so cast for the inner loop.
+            const visual = lookup as InstancedWeaponVisual;
             const matrices = new Float32Array(projs.length * 16);
             const billboard = visual.orientation === 'billboard';
             for (let i = 0; i < projs.length; i++) {
@@ -547,8 +597,11 @@ export class ProjectileRenderer {
             updated.add(key);
         }
 
-        // 3. Hide visuals with no live projectiles this frame.
+        // 3. Hide instanced visuals with no live projectiles this
+        //    frame. Beam visuals are managed by the dedicated beam
+        //    pass below — skip them here.
         for (const [defId, visual] of this.weaponVisuals) {
+            if (visual.kind !== 'instanced') continue;
             if (!updated.has(defId)) {
                 visual.mesh.isVisible = false;
                 visual.mesh.thinInstanceCount = 0;
@@ -557,6 +610,115 @@ export class ProjectileRenderer {
         if (!updated.has(-1)) {
             this.fallbackVisual.mesh.isVisible = false;
             this.fallbackVisual.mesh.thinInstanceCount = 0;
+        }
+
+        // 4. Beam pass — group live beams by weapon def, build the
+        //    custom matrix layout that the projectile-beam shader
+        //    expects (axis vector, midpoint, halfWidth, birthSec
+        //    packed into the matrix' free slots), and update the
+        //    per-def `time` uniform.
+        const nowSec = nowMs / 1000;
+        const beamGroups = new Map<number, LiveBeam[]>();
+        for (const b of this.liveBeams) {
+            const v = this.weaponVisuals.get(b.weaponDefId);
+            if (!v || v.kind !== 'beam') continue;
+            let g = beamGroups.get(b.weaponDefId);
+            if (!g) { g = []; beamGroups.set(b.weaponDefId, g); }
+            g.push(b);
+        }
+
+        const beamUpdated = new Set<number>();
+        for (const [defId, beams] of beamGroups) {
+            const visual = this.weaponVisuals.get(defId) as BeamWeaponVisual;
+            const n = beams.length;
+            const matrices = new Float32Array(n * 16);
+            for (let i = 0; i < n; i++) {
+                const b = beams[i];
+                const ax = b.toX - b.fromX;
+                const ay = b.toY - b.fromY;
+                const az = b.toZ - b.fromZ;
+                const midX = (b.fromX + b.toX) * 0.5;
+                const midY = (b.fromY + b.toY) * 0.5;
+                const midZ = (b.fromZ + b.toZ) * 0.5;
+                const birthSec = b.bornAtMs / 1000;
+                const off = i * 16;
+                // Column 0: m[3] = halfWidth (vertex shader reads this
+                // as world0.w).
+                matrices[off + 0] = 0;
+                matrices[off + 1] = 0;
+                matrices[off + 2] = 0;
+                matrices[off + 3] = visual.halfWidth;
+                // Column 1: alongVec.xyz, m[7] = birthSec.
+                matrices[off + 4] = ax;
+                matrices[off + 5] = ay;
+                matrices[off + 6] = az;
+                matrices[off + 7] = birthSec;
+                // Column 2: unused; leave zero.
+                matrices[off + 8] = 0;
+                matrices[off + 9] = 0;
+                matrices[off + 10] = 0;
+                matrices[off + 11] = 0;
+                // Column 3: midpoint translation, m[15] = 1.
+                matrices[off + 12] = midX;
+                matrices[off + 13] = midY;
+                matrices[off + 14] = midZ;
+                matrices[off + 15] = 1;
+            }
+            visual.mesh.isVisible = true;
+            visual.mesh.thinInstanceSetBuffer('matrix', matrices, 16, false);
+            visual.mesh.thinInstanceCount = n;
+            visual.material.setFloat('time', nowSec);
+            beamUpdated.add(defId);
+
+            // End-cap matrices (start cap at fromX/Y/Z, end cap at
+            // toX/Y/Z) — billboarded standard quads. Only build the
+            // arrays for caps the def actually has.
+            if (visual.startCapMesh) {
+                const capMatrices = new Float32Array(n * 16);
+                for (let i = 0; i < n; i++) {
+                    const b = beams[i];
+                    composeBillboardMatrix(
+                        capMatrices, i * 16,
+                        b.fromX, b.fromY, b.fromZ,
+                        camX, camY, camZ,
+                        tmpRight, tmpUp, tmpFwd, tmpQ, tmpScale,
+                    );
+                }
+                visual.startCapMesh.isVisible = true;
+                visual.startCapMesh.thinInstanceSetBuffer('matrix', capMatrices, 16, false);
+                visual.startCapMesh.thinInstanceCount = n;
+            }
+            if (visual.endCapMesh) {
+                const capMatrices = new Float32Array(n * 16);
+                for (let i = 0; i < n; i++) {
+                    const b = beams[i];
+                    composeBillboardMatrix(
+                        capMatrices, i * 16,
+                        b.toX, b.toY, b.toZ,
+                        camX, camY, camZ,
+                        tmpRight, tmpUp, tmpFwd, tmpQ, tmpScale,
+                    );
+                }
+                visual.endCapMesh.isVisible = true;
+                visual.endCapMesh.thinInstanceSetBuffer('matrix', capMatrices, 16, false);
+                visual.endCapMesh.thinInstanceCount = n;
+            }
+        }
+
+        // 5. Hide beam visuals with no live beams this frame.
+        for (const [defId, visual] of this.weaponVisuals) {
+            if (visual.kind !== 'beam') continue;
+            if (beamUpdated.has(defId)) continue;
+            visual.mesh.isVisible = false;
+            visual.mesh.thinInstanceCount = 0;
+            if (visual.startCapMesh) {
+                visual.startCapMesh.isVisible = false;
+                visual.startCapMesh.thinInstanceCount = 0;
+            }
+            if (visual.endCapMesh) {
+                visual.endCapMesh.isVisible = false;
+                visual.endCapMesh.thinInstanceCount = 0;
+            }
         }
     }
 
@@ -567,15 +729,12 @@ export class ProjectileRenderer {
 
     dispose(): void {
         for (const v of this.weaponVisuals.values()) {
-            v.mesh.dispose();
-            v.material.dispose();
+            disposeVisual(v);
         }
         this.weaponVisuals.clear();
-        this.fallbackVisual.mesh.dispose();
-        this.fallbackVisual.material.dispose();
+        disposeVisual(this.fallbackVisual);
         this.live.clear();
-        for (const b of this.beams) b.line.dispose();
-        this.beams = [];
+        this.liveBeams = [];
     }
 
 }
@@ -601,6 +760,51 @@ function resolveSize(def: WeaponDefInfo): number {
 
 function resolveIntensity(def: WeaponDefInfo): number {
     return def.intensity > 0 ? def.intensity : 0.8;
+}
+
+/// Dispose every Babylon resource owned by a visual. Beam visuals
+/// drag along optional cap meshes/materials; the conditional disposes
+/// keep dispose() in the renderer compact.
+function disposeVisual(v: WeaponVisual): void {
+    v.mesh.dispose();
+    v.material.dispose();
+    if (v.kind === 'beam') {
+        if (v.startCapMesh) v.startCapMesh.dispose();
+        if (v.startCapMaterial) v.startCapMaterial.dispose();
+        if (v.endCapMesh) v.endCapMesh.dispose();
+        if (v.endCapMaterial) v.endCapMaterial.dispose();
+    }
+}
+
+/// Build a camera-facing matrix at world position (px, py, pz) into
+/// `out[off..off+16]`. Same orthonormal-basis trick the projectile
+/// pass uses inline, lifted here so the beam end-caps share the same
+/// billboard logic. The temporaries are passed in so callers can reuse
+/// allocations across the per-tick rebuild.
+function composeBillboardMatrix(
+    out: Float32Array, off: number,
+    px: number, py: number, pz: number,
+    camX: number, camY: number, camZ: number,
+    tmpRight: Vector3, tmpUp: Vector3, tmpFwd: Vector3,
+    tmpQ: Quaternion, tmpScale: Vector3,
+): void {
+    let fx = camX - px, fy = camY - py, fz = camZ - pz;
+    let flen = Math.hypot(fx, fy, fz);
+    if (flen < 1e-3) { fx = 0; fy = 0; fz = 1; flen = 1; }
+    fx /= flen; fy /= flen; fz /= flen;
+    let rx = fz, ry = 0, rz = -fx;
+    let rlen = Math.hypot(rx, ry, rz);
+    if (rlen < 1e-3) { rx = 1; ry = 0; rz = 0; rlen = 1; }
+    rx /= rlen; rz /= rlen;
+    const ux = fy * rz - fz * ry;
+    const uy = fz * rx - fx * rz;
+    const uz = fx * ry - fy * rx;
+    tmpRight.set(rx, ry, rz);
+    tmpUp.set(ux, uy, uz);
+    tmpFwd.set(fx, fy, fz);
+    Quaternion.RotationQuaternionFromAxisToRef(tmpRight, tmpUp, tmpFwd, tmpQ);
+    const m = Matrix.Compose(tmpScale, tmpQ, new Vector3(px, py, pz));
+    m.copyToArray(out, off);
 }
 
 function makeMaterial(
@@ -666,33 +870,145 @@ function buildBillboardVisual(
     mesh.thinInstanceEnablePicking = false;
     mesh.alphaIndex = 1000;
 
-    return { defId: def.defId, mesh, material: mat, visualType: def.visualType, size, orientation: 'billboard' };
+    return {
+        kind: 'instanced',
+        defId: def.defId, mesh, material: mat,
+        visualType: def.visualType, size, orientation: 'billboard',
+    };
 }
 
-/// 4.2 placeholder — laser / beam-laser cylinder. Replaced by a textured
-/// stretched-quad with UV scroll once 4.2 lands.
-function buildBeamPlaceholderVisual(
+/// 4.2 — Laser / BeamLaser textured stretched-quad. Returns a
+/// BeamWeaponVisual whose middle mesh is a unit quad thin-instanced
+/// once per live beam (matrix layout described in
+/// shaders/projectile-beam.ts). `texture1` drives the middle, `texture2`
+/// the start cap, `texture3` the end cap; missing textures degrade
+/// gracefully (cap → null mesh, missing middle → flat-color
+/// untextured quad).
+function buildBeamVisual(
     def: WeaponDefInfo,
     scene: Scene,
-    _resolver: ProjectileTextureResolver | null,
+    resolver: ProjectileTextureResolver | null,
 ): WeaponVisual {
+    registerProjectileBeamShader();
+
     const color = resolveColor(def);
     const size = resolveSize(def);
-    const intensity = resolveIntensity(def);
-    const mat = makeMaterial(`projMat_${def.defId}`, scene, color, intensity);
+    // Across-axis half-thickness. Spring's `thickness` weapondef field
+    // isn't on our wire yet; size*2 produces visually similar beams for
+    // ZK weapons until a per-def override is added.
+    const halfWidth = Math.max(0.5, size * 2);
+    // Visible duration: prefer the weapon's beam duration, else the
+    // hit-scan default; cap at MAX_BEAM_DURATION_S to bound overdraw.
+    const duration = Math.min(
+        MAX_BEAM_DURATION_S,
+        def.duration > 0 ? def.duration : DEFAULT_BEAM_LIFE_S,
+    );
+    const isLargeBeam = (def.flags & FLAG_LARGE_BEAM_LASER) !== 0;
+    // Recoil semantics: only the Large variant scrolls. scrollSpeed
+    // defaults to Spring's 5.0 on every weapon — the gate below is what
+    // makes plain BeamLaser render as a static stripe.
+    const scrollRate = isLargeBeam ? def.scrollSpeed : 0;
 
-    const baseDiameter = 4 * size;
-    const isBeam = def.visualType === VisualType.BeamLaser;
-    const mesh = MeshBuilder.CreateCylinder(`proj_${def.defId}`, {
-        diameter: baseDiameter * (isBeam ? 0.2 : 0.4),
-        height: baseDiameter * (isBeam ? 6 : 3),
-        tessellation: 6,
-    }, scene);
+    const middleUrl = resolver?.resolve(def.texture1) ?? null;
+    const startCapUrl = resolver?.resolve(def.texture2) ?? null;
+    const endCapUrl = resolver?.resolve(def.texture3) ?? null;
+
+    const mat = new ShaderMaterial(`projBeamMat_${def.defId}`, scene, 'projectileBeam', {
+        attributes: ['position', 'uv'],
+        uniforms: ['world', 'viewProjection', 'cameraPosition',
+                   'baseColor', 'time', 'scrollRate', 'tileLength', 'duration'],
+        samplers: ['beamTex'],
+        defines: ['#define INSTANCES', '#define THIN_INSTANCES'],
+    });
+    mat.setColor3('baseColor', new Color3(color[0], color[1], color[2]));
+    mat.setFloat('time', 0);
+    mat.setFloat('scrollRate', scrollRate);
+    mat.setFloat('tileLength', DEFAULT_BEAM_TILE_LENGTH);
+    mat.setFloat('duration', duration);
+    // Premultiplied-alpha additive — same convention as the build-beam
+    // shader. Pairs with the fragment shader's `vec4(rgb*a, a)` output.
+    mat.alphaMode = 7;
+    mat.backFaceCulling = false;
+    mat.disableDepthWrite = true;
+
+    if (middleUrl) {
+        const tex = new Texture(stampUrl(middleUrl), scene, /*noMipmap*/ false,
+            /*invertY*/ true, Texture.TRILINEAR_SAMPLINGMODE);
+        tex.hasAlpha = true;
+        // The middle texture tiles along the length axis; tell the
+        // sampler to wrap there. UV.x stays in [0,1] across the
+        // thickness so clamp doesn't hurt either, but wrap on both
+        // axes is fine and simpler.
+        tex.wrapU = Texture.WRAP_ADDRESSMODE;
+        tex.wrapV = Texture.WRAP_ADDRESSMODE;
+        mat.setTexture('beamTex', tex);
+    }
+
+    // Unit quad in XY centred on origin. Vertex shader rebuilds the
+    // camera-facing across-axis per frame.
+    const mesh = MeshBuilder.CreatePlane(
+        `projBeam_${def.defId}`,
+        { width: 1, height: 1, sideOrientation: Mesh.DOUBLESIDE },
+        scene,
+    );
     mesh.material = mat;
+    mesh.isPickable = false;
     mesh.isVisible = false;
     mesh.thinInstanceEnablePicking = false;
+    mesh.alwaysSelectAsActiveMesh = true;
+    mesh.alphaIndex = 1000;
 
-    return { defId: def.defId, mesh, material: mat, visualType: def.visualType, size, orientation: 'velocity' };
+    // Start / end cap meshes. Each is a billboarded quad sharing the
+    // beam's tint, with the tex2/tex3 texture if it resolves. We build
+    // them as standard sprite-billboard meshes — tick() composes the
+    // per-instance matrix with billboard rotation at the from/to
+    // endpoint, identical to the cannon builder's billboard logic.
+    const { mesh: startCapMesh, material: startCapMat } = buildBeamCap(
+        `projBeamStart_${def.defId}`, startCapUrl, color, size, scene);
+    const { mesh: endCapMesh, material: endCapMat } = buildBeamCap(
+        `projBeamEnd_${def.defId}`, endCapUrl, color, size, scene);
+
+    return {
+        kind: 'beam',
+        defId: def.defId, mesh, material: mat,
+        visualType: def.visualType, size,
+        duration, halfWidth, tileLength: DEFAULT_BEAM_TILE_LENGTH, scrollRate,
+        startCapMesh, startCapMaterial: startCapMat,
+        endCapMesh, endCapMaterial: endCapMat,
+    };
+}
+
+/// Build a beam end-cap sprite. Returns null mesh+material when no
+/// texture URL is supplied — caller treats this as "skip the cap".
+function buildBeamCap(
+    name: string,
+    url: string | null,
+    color: [number, number, number],
+    size: number,
+    scene: Scene,
+): { mesh: Mesh | null; material: StandardMaterial | null } {
+    if (!url) return { mesh: null, material: null };
+    const mat = makeMaterial(`${name}_mat`, scene, color, 1.0);
+    mat.disableLighting = true;
+    mat.alphaMode = 1;
+    mat.backFaceCulling = false;
+    mat.disableDepthWrite = true;
+    const tex = new Texture(stampUrl(url), scene, /*noMipmap*/ false,
+        /*invertY*/ true, Texture.TRILINEAR_SAMPLINGMODE);
+    tex.hasAlpha = true;
+    mat.diffuseTexture = tex;
+    mat.useAlphaFromDiffuseTexture = true;
+    mat.diffuseColor = new Color3(1, 1, 1);
+
+    const mesh = MeshBuilder.CreatePlane(name,
+        { size: Math.max(2, size * 4), sideOrientation: Mesh.DOUBLESIDE },
+        scene);
+    mesh.material = mat;
+    mesh.isVisible = false;
+    mesh.isPickable = false;
+    mesh.thinInstanceEnablePicking = false;
+    mesh.alphaIndex = 1001;
+    return { mesh, material: mat };
 }
 
 /// 4.3 placeholder — lightning sphere. Replaced by the procedural zigzag
@@ -713,7 +1029,11 @@ function buildLightningPlaceholderVisual(
     mesh.isVisible = false;
     mesh.thinInstanceEnablePicking = false;
 
-    return { defId: def.defId, mesh, material: mat, visualType: def.visualType, size, orientation: 'velocity' };
+    return {
+        kind: 'instanced',
+        defId: def.defId, mesh, material: mat,
+        visualType: def.visualType, size, orientation: 'velocity',
+    };
 }
 
 /// 4.4 placeholder — missile cone. Existing `.glb` swap-in remains; the
@@ -739,7 +1059,11 @@ function buildMissileVisual(
     mesh.isVisible = false;
     mesh.thinInstanceEnablePicking = false;
 
-    return { defId: def.defId, mesh, material: mat, visualType: def.visualType, size, orientation: 'velocity' };
+    return {
+        kind: 'instanced',
+        defId: def.defId, mesh, material: mat,
+        visualType: def.visualType, size, orientation: 'velocity',
+    };
 }
 
 /// Module-level dispatch table keyed by visual type. The renderer's
@@ -749,8 +1073,8 @@ function buildMissileVisual(
 const visualBuilders: Partial<Record<VisualType, VisualBuilder>> = {
     [VisualType.Cannon]:    buildBillboardVisual,
     [VisualType.Flame]:     buildBillboardVisual,
-    [VisualType.Laser]:     buildBeamPlaceholderVisual,
-    [VisualType.BeamLaser]: buildBeamPlaceholderVisual,
+    [VisualType.Laser]:     buildBeamVisual,
+    [VisualType.BeamLaser]: buildBeamVisual,
     [VisualType.Lightning]: buildLightningPlaceholderVisual,
     [VisualType.Missile]:   buildMissileVisual,
 };
@@ -775,5 +1099,9 @@ function createFallbackVisual(
     mesh.material = mat;
     mesh.isVisible = false;
     mesh.thinInstanceEnablePicking = false;
-    return { defId, mesh, material: mat, visualType, size, orientation: 'velocity' };
+    return {
+        kind: 'instanced',
+        defId, mesh, material: mat,
+        visualType, size, orientation: 'velocity',
+    };
 }

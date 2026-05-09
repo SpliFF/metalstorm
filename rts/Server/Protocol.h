@@ -1119,6 +1119,7 @@ inline flatbuffers::Offset<SpringWeb::GameWeaponDef> BuildSingleWeaponDef(
     wdb.add_texture1(texture1Off);
     wdb.add_texture2(texture2Off);
     wdb.add_texture3(texture3Off);
+    wdb.add_scroll_speed(wd.visuals.scrollspeed);
     return wdb.Finish();
 }
 

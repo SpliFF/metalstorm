@@ -282,16 +282,28 @@ flags():number {
 }
 
 /**
+ * 'Large' BeamLaser only — speed in elmo/s at which the tiled
+ * beam texture shifts along the beam axis. The renderer treats
+ * non-largeBeamLaser weapons as scroll_speed = 0 regardless of
+ * this value (per Recoil semantics; only LargeBeamLaserProjectile
+ * applies the scroll). Default 5.0 matches Spring's tag default.
+ */
+scrollSpeed():number {
+  const offset = this.bb!.__offset(this.bb_pos, 86);
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 5.0;
+}
+
+/**
  * Game-specific key/value extensions. Empty unless the weapondef
  * has any customParams entries.
  */
 customParams(index: number, obj?:CustomParam):CustomParam|null {
-  const offset = this.bb!.__offset(this.bb_pos, 86);
+  const offset = this.bb!.__offset(this.bb_pos, 88);
   return offset ? (obj || new CustomParam()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
 }
 
 customParamsLength():number {
-  const offset = this.bb!.__offset(this.bb_pos, 86);
+  const offset = this.bb!.__offset(this.bb_pos, 88);
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
@@ -304,7 +316,7 @@ customParamsLength():number {
 modelUrl():string|null
 modelUrl(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
 modelUrl(optionalEncoding?:any):string|Uint8Array|null {
-  const offset = this.bb!.__offset(this.bb_pos, 88);
+  const offset = this.bb!.__offset(this.bb_pos, 90);
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
@@ -317,7 +329,7 @@ modelUrl(optionalEncoding?:any):string|Uint8Array|null {
 texture1():string|null
 texture1(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
 texture1(optionalEncoding?:any):string|Uint8Array|null {
-  const offset = this.bb!.__offset(this.bb_pos, 90);
+  const offset = this.bb!.__offset(this.bb_pos, 92);
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
@@ -330,7 +342,7 @@ texture1(optionalEncoding?:any):string|Uint8Array|null {
 texture2():string|null
 texture2(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
 texture2(optionalEncoding?:any):string|Uint8Array|null {
-  const offset = this.bb!.__offset(this.bb_pos, 92);
+  const offset = this.bb!.__offset(this.bb_pos, 94);
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
@@ -342,12 +354,12 @@ texture2(optionalEncoding?:any):string|Uint8Array|null {
 texture3():string|null
 texture3(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
 texture3(optionalEncoding?:any):string|Uint8Array|null {
-  const offset = this.bb!.__offset(this.bb_pos, 94);
+  const offset = this.bb!.__offset(this.bb_pos, 96);
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
 static startGameWeaponDef(builder:flatbuffers.Builder) {
-  builder.startObject(46);
+  builder.startObject(47);
 }
 
 static addDefId(builder:flatbuffers.Builder, defId:number) {
@@ -531,8 +543,12 @@ static addFlags(builder:flatbuffers.Builder, flags:number) {
   builder.addFieldInt32(40, flags, 0);
 }
 
+static addScrollSpeed(builder:flatbuffers.Builder, scrollSpeed:number) {
+  builder.addFieldFloat32(41, scrollSpeed, 5.0);
+}
+
 static addCustomParams(builder:flatbuffers.Builder, customParamsOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(41, customParamsOffset, 0);
+  builder.addFieldOffset(42, customParamsOffset, 0);
 }
 
 static createCustomParamsVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
@@ -548,19 +564,19 @@ static startCustomParamsVector(builder:flatbuffers.Builder, numElems:number) {
 }
 
 static addModelUrl(builder:flatbuffers.Builder, modelUrlOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(42, modelUrlOffset, 0);
+  builder.addFieldOffset(43, modelUrlOffset, 0);
 }
 
 static addTexture1(builder:flatbuffers.Builder, texture1Offset:flatbuffers.Offset) {
-  builder.addFieldOffset(43, texture1Offset, 0);
+  builder.addFieldOffset(44, texture1Offset, 0);
 }
 
 static addTexture2(builder:flatbuffers.Builder, texture2Offset:flatbuffers.Offset) {
-  builder.addFieldOffset(44, texture2Offset, 0);
+  builder.addFieldOffset(45, texture2Offset, 0);
 }
 
 static addTexture3(builder:flatbuffers.Builder, texture3Offset:flatbuffers.Offset) {
-  builder.addFieldOffset(45, texture3Offset, 0);
+  builder.addFieldOffset(46, texture3Offset, 0);
 }
 
 static endGameWeaponDef(builder:flatbuffers.Builder):flatbuffers.Offset {
@@ -568,7 +584,7 @@ static endGameWeaponDef(builder:flatbuffers.Builder):flatbuffers.Offset {
   return offset;
 }
 
-static createGameWeaponDef(builder:flatbuffers.Builder, defId:number, nameOffset:flatbuffers.Offset, visualType:ProjectileVisualType, projectileSpeed:number, range:number, aoe:number, size:number, intensity:number, colorR:number, colorG:number, colorB:number, duration:number, highTrajectory:boolean, typeNameOffset:flatbuffers.Offset, descriptionOffset:flatbuffers.Offset, defaultDamage:number, damagesOffset:flatbuffers.Offset, reloadTime:number, salvoSize:number, salvoDelay:number, accuracy:number, sprayAngle:number, movingAccuracy:number, targetMoveError:number, leadLimit:number, edgeEffectiveness:number, impulseFactor:number, impulseBoost:number, craterMult:number, craterBoost:number, craterAoe:number, fireStarter:number, flightTime:number, weaponAcceleration:number, turnRate:number, uptime:number, coverageRange:number, stockpileTime:number, metalCost:number, energyCost:number, flags:number, customParamsOffset:flatbuffers.Offset, modelUrlOffset:flatbuffers.Offset, texture1Offset:flatbuffers.Offset, texture2Offset:flatbuffers.Offset, texture3Offset:flatbuffers.Offset):flatbuffers.Offset {
+static createGameWeaponDef(builder:flatbuffers.Builder, defId:number, nameOffset:flatbuffers.Offset, visualType:ProjectileVisualType, projectileSpeed:number, range:number, aoe:number, size:number, intensity:number, colorR:number, colorG:number, colorB:number, duration:number, highTrajectory:boolean, typeNameOffset:flatbuffers.Offset, descriptionOffset:flatbuffers.Offset, defaultDamage:number, damagesOffset:flatbuffers.Offset, reloadTime:number, salvoSize:number, salvoDelay:number, accuracy:number, sprayAngle:number, movingAccuracy:number, targetMoveError:number, leadLimit:number, edgeEffectiveness:number, impulseFactor:number, impulseBoost:number, craterMult:number, craterBoost:number, craterAoe:number, fireStarter:number, flightTime:number, weaponAcceleration:number, turnRate:number, uptime:number, coverageRange:number, stockpileTime:number, metalCost:number, energyCost:number, flags:number, scrollSpeed:number, customParamsOffset:flatbuffers.Offset, modelUrlOffset:flatbuffers.Offset, texture1Offset:flatbuffers.Offset, texture2Offset:flatbuffers.Offset, texture3Offset:flatbuffers.Offset):flatbuffers.Offset {
   GameWeaponDef.startGameWeaponDef(builder);
   GameWeaponDef.addDefId(builder, defId);
   GameWeaponDef.addName(builder, nameOffset);
@@ -611,6 +627,7 @@ static createGameWeaponDef(builder:flatbuffers.Builder, defId:number, nameOffset
   GameWeaponDef.addMetalCost(builder, metalCost);
   GameWeaponDef.addEnergyCost(builder, energyCost);
   GameWeaponDef.addFlags(builder, flags);
+  GameWeaponDef.addScrollSpeed(builder, scrollSpeed);
   GameWeaponDef.addCustomParams(builder, customParamsOffset);
   GameWeaponDef.addModelUrl(builder, modelUrlOffset);
   GameWeaponDef.addTexture1(builder, texture1Offset);
@@ -662,6 +679,7 @@ unpack(): GameWeaponDefT {
     this.metalCost(),
     this.energyCost(),
     this.flags(),
+    this.scrollSpeed(),
     this.bb!.createObjList<CustomParam, CustomParamT>(this.customParams.bind(this), this.customParamsLength()),
     this.modelUrl(),
     this.texture1(),
@@ -713,6 +731,7 @@ unpackTo(_o: GameWeaponDefT): void {
   _o.metalCost = this.metalCost();
   _o.energyCost = this.energyCost();
   _o.flags = this.flags();
+  _o.scrollSpeed = this.scrollSpeed();
   _o.customParams = this.bb!.createObjList<CustomParam, CustomParamT>(this.customParams.bind(this), this.customParamsLength());
   _o.modelUrl = this.modelUrl();
   _o.texture1 = this.texture1();
@@ -764,6 +783,7 @@ constructor(
   public metalCost: number = 0.0,
   public energyCost: number = 0.0,
   public flags: number = 0,
+  public scrollSpeed: number = 5.0,
   public customParams: (CustomParamT)[] = [],
   public modelUrl: string|Uint8Array|null = null,
   public texture1: string|Uint8Array|null = null,
@@ -825,6 +845,7 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     this.metalCost,
     this.energyCost,
     this.flags,
+    this.scrollSpeed,
     customParams,
     modelUrl,
     texture1,

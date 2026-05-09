@@ -15,7 +15,11 @@ namespace DefsCache {
 // entries keyed on the URL) become unreachable after a schema change.
 // Without this, a stale cache from a prior schema would silently
 // shadow the newly-bakable bytes.
-static constexpr const char* DEFS_SCHEMA_VERSION = "v8";
+// 2026-05-09: v9 — GameWeaponDef gained scroll_speed (float). Old v8
+// .bin caches lack the field and would deserialise it as the default,
+// which is wrong for any weapon whose author tuned scrollSpeed away
+// from 5. Bumping invalidates them so the lobby reconverts.
+static constexpr const char* DEFS_SCHEMA_VERSION = "v9";
 
 std::string ComputeCacheKey(
     const std::string& gameId,

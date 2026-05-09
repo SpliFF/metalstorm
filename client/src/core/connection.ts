@@ -245,6 +245,10 @@ export interface WeaponDefInfo {
     /** texture3 basename (Spring's `texNames[2]`) — flare / muzzle
      *  exhaust. Empty when unset. */
     texture3: string;
+    /** elmos/sec at which the tiled middle beam texture shifts along
+     *  the beam axis. Renderer treats non-largeBeamLaser weapons as 0
+     *  per Recoil semantics. Defaults to Spring's 5.0. */
+    scrollSpeed: number;
 }
 
 export interface ResourceUpdateInfo {
@@ -961,6 +965,7 @@ export class Connection {
                         texture1: d.texture1() ?? '',
                         texture2: d.texture2() ?? '',
                         texture3: d.texture3() ?? '',
+                        scrollSpeed: d.scrollSpeed(),
                     });
                 }
                 console.log(`[connection] received ${defs.length} weapon def(s)`);
