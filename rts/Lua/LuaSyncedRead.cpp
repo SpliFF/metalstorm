@@ -7914,7 +7914,14 @@ int LuaSyncedRead::IsUnitInJammer(lua_State* L)
 		return 0;
 	}
 
-	lua_pushboolean(L, losHandler->InJammer(unit, allyTeamID)); //FIXME
+	// CLosHandler::InJammer(unit, allyTeam) returns false when allyTeam
+	// is the unit's own ally, otherwise tests the jammer field keyed by
+	// the unit's allyteam (or the global field 0 when modInfo.separateJammers
+	// is false). Classic Spring/Recoil semantics: only the unit's allies
+	// hide it from foreign sensors — third-party jammers covering the
+	// position do not count. The legacy FIXME on this line predated that
+	// clarification.
+	lua_pushboolean(L, losHandler->InJammer(unit, allyTeamID));
 	return 1;
 }
 

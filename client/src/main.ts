@@ -46,7 +46,7 @@ import { InputManager } from './core/input-manager.js';
 import { BuildMenu } from './core/build-menu.js';
 import { OrderPanel } from './core/order-panel.js';
 import { EconomyBar } from './core/economy-bar.js';
-import { buildTerrainMesh, loadTerrainTextures, type MapDimensions } from './core/terrain.js';
+import { buildTerrainMesh, loadTerrainTextures, TerrainFog, type MapDimensions } from './core/terrain.js';
 import { LobbyUI } from './lobby/lobby-ui.js';
 import { Minimap } from './core/minimap.js';
 import { LosBitmapStore } from './core/los-bitmap.js';
@@ -505,6 +505,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
 
     // Terrain state — populated when MapData arrives
     let terrainMesh: Mesh | null = null;
+    let terrainFog: TerrainFog | null = null;
     let currentMapData: ParsedMapData | null = null;
     let currentWidgetManager: LuaWidgetManager | null = null;
     const losBitmapStore = new LosBitmapStore();
@@ -556,6 +557,18 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         terrainMesh = buildTerrainMesh(scene, mapDims, map.heightmap);
         console.log('[client] terrain mesh built from MapData heightmap');
 
+        // Fog-of-war overlay — heightmap-following translucent black
+        // mesh that the per-allyteam LOS bitmap (envelope 0x07) paints
+        // each second. Sits a few elmos above terrain in
+        // renderingGroupId=1 so opaque water + terrain composite first
+        // and units (group 2) draw on top.
+        terrainFog = new TerrainFog();
+        terrainFog.build(scene, mapDims, map.heightmap);
+        // Re-apply any bitmap that arrived before the mesh existed so
+        // the fog paints on first frame rather than waiting for the
+        // next per-second tick.
+        losBitmapStore.forEach(bitmap => terrainFog?.apply(bitmap));
+
         // Debug helper: window.__toggleTerrain() flips terrain visibility.
         // Useful for spotting overlay geometry (command paths, ghosts) that
         // might be hidden under the surface.
@@ -564,6 +577,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 terrainMesh.isVisible = !terrainMesh.isVisible;
                 console.log(`[debug] terrain visible=${terrainMesh.isVisible}`);
             }
+        };
+        // Debug helper: window.__toggleFog() flips the fog overlay.
+        let fogVisible = true;
+        (window as unknown as { __toggleFog: () => void }).__toggleFog = () => {
+            if (!terrainFog) return;
+            fogVisible = !fogVisible;
+            terrainFog.setVisible(fogVisible);
+            console.log(`[debug] terrain fog visible=${fogVisible}`);
         };
 
         // Load DXT1 tile textures via HTTP
@@ -860,6 +881,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             losBitmapStore.set(bitmap);
             currentWidgetManager?.forwardLosBitmap(bitmap);
             minimap?.applyLosBitmap(bitmap);
+            terrainFog?.apply(bitmap);
         },
         onEntityDestroy(entityId, x, y, z) {
             entityRenderer?.removeEntity(entityId);

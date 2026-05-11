@@ -21,6 +21,8 @@ import {
     Vector3,
     VertexBuffer,
 } from '@babylonjs/core';
+import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture';
+import type { LosBitmap } from './los-bitmap.js';
 
 const SQUARE_SIZE = 8;
 const TILE_PIXELS = 32;
@@ -382,5 +384,200 @@ export async function fetchHeightmap(url: string): Promise<{
         return { width: 0, height: 0, data: uint16, minH: 0, maxH: 0 };
     } catch {
         return null;
+    }
+}
+
+/**
+ * Fog-of-war overlay for the main 3D view.
+ *
+ * Re-uses the terrain's heightmap to build a mesh that hugs the surface
+ * a few elmos above it, then paints it with a tiny RGBA dynamic texture
+ * (≤64×64) sampled from the per-allyteam LOS bitmap stream (envelope
+ * 0x07, ~1 Hz). The same three-plane fog tint used on the minimap
+ * (PLAN-intel.md Phase 5) carries over to the main view:
+ *
+ *   inLos                → no overlay
+ *   inRadar && !inLos    → 35% black
+ *   explored & !inRadar  → 60% black
+ *   !explored            → 100% black
+ *
+ * The overlay renders in renderingGroupId 1 with a high alphaIndex so
+ * it composites after the opaque terrain and before unit meshes (which
+ * live in renderingGroupId 2). Unit thin-instances rendered at higher
+ * Y than the terrain fail depth-test against the fog where they sit,
+ * so units in LOS aren't tinted by the radar overlay layer. The
+ * heightmap-following geometry keeps the overlay anchored to the
+ * surface so the tint follows cliffs and craters correctly — a flat
+ * quad at Y=0 would only darken the lowest parts of the map.
+ */
+export class TerrainFog {
+    private mesh: Mesh | null = null;
+    private texture: DynamicTexture | null = null;
+    private bitmapSize: { w: number; h: number } = { w: 0, h: 0 };
+    private mat: StandardMaterial | null = null;
+
+    /** Build the overlay mesh + material. Idempotent — calling again
+     *  disposes the previous mesh first so the caller can rebuild when
+     *  MapData changes (e.g. game restart). */
+    build(scene: Scene, dims: MapDimensions, heightData: Uint16Array): void {
+        this.dispose();
+
+        const hmW = dims.mapx + 1;
+        const hmH = dims.mapy + 1;
+
+        // Subsample identically to `buildTerrainMesh` so fog vertices
+        // line up with terrain vertices (no z-fighting at edges).
+        const MAX_VERTS = 512;
+        const stepX = Math.max(1, Math.floor(hmW / MAX_VERTS));
+        const stepZ = Math.max(1, Math.floor(hmH / MAX_VERTS));
+        const gridW = Math.floor((hmW - 1) / stepX) + 1;
+        const gridH = Math.floor((hmH - 1) / stepZ) + 1;
+
+        const numVerts = gridW * gridH;
+        const positions = new Float32Array(numVerts * 3);
+        const uvs = new Float32Array(numVerts * 2);
+
+        const hRange = dims.maxHeight - dims.minHeight;
+        const FOG_Y_OFFSET = 3;
+
+        for (let gz = 0; gz < gridH; gz++) {
+            const srcZ = Math.min(gz * stepZ, hmH - 1);
+            for (let gx = 0; gx < gridW; gx++) {
+                const srcX = Math.min(gx * stepX, hmW - 1);
+                const idx = gz * gridW + gx;
+                const raw = heightData[srcZ * hmW + srcX];
+                const worldY = dims.minHeight + (raw / 65535) * hRange;
+
+                positions[idx * 3 + 0] = srcX * SQUARE_SIZE;
+                positions[idx * 3 + 1] = worldY + FOG_Y_OFFSET;
+                positions[idx * 3 + 2] = srcZ * SQUARE_SIZE;
+
+                uvs[idx * 2 + 0] = gx / (gridW - 1);
+                uvs[idx * 2 + 1] = gz / (gridH - 1);
+            }
+        }
+
+        const numQuads = (gridW - 1) * (gridH - 1);
+        const indices = new Uint32Array(numQuads * 6);
+        let ti = 0;
+        for (let gz = 0; gz < gridH - 1; gz++) {
+            for (let gx = 0; gx < gridW - 1; gx++) {
+                const tl = gz * gridW + gx;
+                const tr = tl + 1;
+                const bl = (gz + 1) * gridW + gx;
+                const br = bl + 1;
+                indices[ti++] = tl; indices[ti++] = tr; indices[ti++] = bl;
+                indices[ti++] = tr; indices[ti++] = br; indices[ti++] = bl;
+            }
+        }
+
+        const mesh = new Mesh('terrainFog', scene);
+        const vd = new VertexData();
+        vd.positions = positions;
+        vd.indices = indices;
+        vd.uvs = uvs;
+        vd.applyToMesh(mesh);
+
+        mesh.isPickable = false;
+        // After water (group 1, alphaIndex 0) and before unit meshes
+        // (renderingGroupId 2). The high alphaIndex pushes us to the
+        // tail of the transparent queue within the group so opaque
+        // terrain/water are already in the framebuffer.
+        mesh.renderingGroupId = 1;
+        mesh.alphaIndex = 100;
+
+        const mat = new StandardMaterial('terrainFogMat', scene);
+        mat.disableLighting = true;
+        // We never sample the diffuse path; the overlay is pure
+        // alpha-blended black driven by `opacityTexture`. Setting
+        // emissive to black keeps the colour channel at zero.
+        mat.diffuseColor = new Color3(0, 0, 0);
+        mat.emissiveColor = new Color3(0, 0, 0);
+        mat.specularColor = new Color3(0, 0, 0);
+        mat.backFaceCulling = false;
+        mat.alpha = 1;
+        // Don't write to depth — units behind fog still need to read
+        // the terrain's depth value, not the fog's slightly-raised one.
+        mat.disableDepthWrite = true;
+
+        mesh.material = mat;
+        this.mesh = mesh;
+        this.mat = mat;
+    }
+
+    /** Paint a new LOS snapshot into the fog texture. Called from the
+     *  connection event handler whenever an `ENVELOPE_LOS_BITMAP` frame
+     *  arrives (~1 Hz, server-paced). Spectators may see multiple
+     *  ally teams round-robin — we just take the latest, matching the
+     *  minimap's behaviour. */
+    apply(bitmap: LosBitmap): void {
+        if (!this.mesh || !this.mat) return;
+        const { width, height, inLos, inRadar, explored } = bitmap;
+        if (width === 0 || height === 0) return;
+
+        if (!this.texture
+            || this.bitmapSize.w !== width
+            || this.bitmapSize.h !== height)
+        {
+            this.texture?.dispose();
+            const scene = this.mesh.getScene();
+            this.texture = new DynamicTexture(
+                'terrainFogTex',
+                { width, height },
+                scene,
+                false,
+            );
+            this.texture.hasAlpha = true;
+            this.texture.wrapU = Texture.CLAMP_ADDRESSMODE;
+            this.texture.wrapV = Texture.CLAMP_ADDRESSMODE;
+            // Bilinear sampling smooths the 64×64 source across the
+            // ~7000-elmo-wide terrain mesh — chunky pixel edges would
+            // be very obvious at that scale.
+            this.texture.updateSamplingMode(Texture.BILINEAR_SAMPLINGMODE);
+            this.bitmapSize = { w: width, h: height };
+            this.mat.opacityTexture = this.texture;
+        }
+
+        const ctx = this.texture.getContext() as CanvasRenderingContext2D;
+        const img = ctx.createImageData(width, height);
+        const data = img.data;
+        for (let row = 0; row < height; ++row) {
+            for (let col = 0; col < width; ++col) {
+                const idx = row * width + col;
+                const byte = idx >> 3;
+                const bit = 7 - (idx & 7);
+                const mask = 1 << bit;
+                const losBit   = (inLos[byte]    & mask) !== 0;
+                const radarBit = (inRadar[byte]  & mask) !== 0;
+                const expBit   = (explored[byte] & mask) !== 0;
+                let alpha255 = 255;
+                if (losBit)        alpha255 = 0;
+                else if (radarBit) alpha255 = Math.round(0.35 * 255);
+                else if (expBit)   alpha255 = Math.round(0.60 * 255);
+                const o = idx * 4;
+                data[o    ] = 0;
+                data[o + 1] = 0;
+                data[o + 2] = 0;
+                data[o + 3] = alpha255;
+            }
+        }
+        ctx.putImageData(img, 0, 0);
+        this.texture.update(false);
+    }
+
+    /** Toggle visibility — `window.__toggleTerrain` reaches in via the
+     *  global handle exposed in main.ts for debug. */
+    setVisible(v: boolean): void {
+        if (this.mesh) this.mesh.isVisible = v;
+    }
+
+    dispose(): void {
+        this.texture?.dispose();
+        this.mat?.dispose();
+        this.mesh?.dispose();
+        this.texture = null;
+        this.mat = null;
+        this.mesh = null;
+        this.bitmapSize = { w: 0, h: 0 };
     }
 }
