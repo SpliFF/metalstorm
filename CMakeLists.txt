@@ -275,7 +275,7 @@ target_include_directories(spring-server PRIVATE
     ${GENERATED_DIR}
 )
 find_package(ZLIB REQUIRED)
-target_link_libraries(spring-server PRIVATE lua smmalloc nghttp2_static flatbuffers ZLIB::ZLIB SQLite::SQLite3 springlog springlog-net springlog-sqlite LibDataChannel::LibDataChannelStatic)
+target_link_libraries(spring-server PRIVATE lua smmalloc nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite LibDataChannel::LibDataChannelStatic)
 
 # Link platform libraries
 if(UNIX AND NOT APPLE)
@@ -326,7 +326,7 @@ target_include_directories(spring-lobby PRIVATE
     ${CMAKE_SOURCE_DIR}/rts/lib/lua/src
     ${GENERATED_DIR}
 )
-target_link_libraries(spring-lobby PRIVATE lua nghttp2_static flatbuffers ZLIB::ZLIB SQLite::SQLite3 springlog springlog-net springlog-sqlite)
+target_link_libraries(spring-lobby PRIVATE lua nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite)
 if(UNIX)
     target_link_libraries(spring-lobby PRIVATE pthread dl)
 endif()
@@ -444,7 +444,7 @@ target_include_directories(spring-logserver PRIVATE
     ${CMAKE_SOURCE_DIR}/rts
     ${GENERATED_DIR}
 )
-target_link_libraries(spring-logserver PRIVATE springlog springlog-sqlite nghttp2_static flatbuffers SQLite::SQLite3 ZLIB::ZLIB)
+target_link_libraries(spring-logserver PRIVATE springlog springlog-sqlite nghttp2_static flatbuffers SQLite3::SQLite3 ZLIB::ZLIB)
 if(UNIX)
     target_link_libraries(spring-logserver PRIVATE pthread dl)
 endif()

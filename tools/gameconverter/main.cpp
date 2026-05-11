@@ -63,6 +63,10 @@
 #define TEXTURECONVERTER_BINARY_PATH "textureconverter"
 #endif
 
+#ifndef AUDIOCONVERTER_BINARY_PATH
+#define AUDIOCONVERTER_BINARY_PATH "audioconverter"
+#endif
+
 #define LOG_SECTION "game-convert"
 
 #include <cctype>
@@ -525,6 +529,160 @@ int ConvertProjectileTextures(const fs::path& gameDir,
             gameDir.string().c_str());
     }
     return totalFailed;
+}
+
+// ---------------------------------------------------------------
+// Step 3b: audio conversion
+// ---------------------------------------------------------------
+//
+// Walk every .wav/.ogg/.mp3/.flac/.m4a/.aac file under the game's
+// data-side tree and re-encode it to a sibling `.webm` (Opus). The
+// extension match is case-insensitive — legacy Spring archives
+// commonly mix `.wav` and `.WAV`. After successful conversion, the
+// source file is deleted from the data tree so the runtime never
+// sees a non-`.webm` audio asset.
+//
+// `gamedata/sounds.lua` and other Lua files are untouched. Entries
+// that hand-author `.wav` paths are rewritten to `.webm` at runtime
+// by the server's `NormalizeSoundPath` and the client's
+// `normalizeSoundPath`. Entries that probe `VFS.DirList` for files
+// see only `.webm` because that's all that's left on disk.
+
+static bool IsAudioSource(const fs::path& p) {
+    static const char* const kExts[] = {
+        ".wav", ".ogg", ".mp3", ".flac", ".m4a", ".aac",
+    };
+    const std::string ext = ToLower(p.extension().string());
+    for (const char* e : kExts) {
+        if (ext == e) return true;
+    }
+    return false;
+}
+
+/// Map a source audio path to one of audioconverter's three encoder
+/// categories. The category drives only the Opus bitrate hint
+/// (sfx=64k, ui=48k, music=96k stereo); it does NOT correspond to
+/// Recoil's runtime channels (which are caller-determined when a
+/// SoundEvent is emitted or a widget calls Spring.PlaySoundFile).
+static std::string DeriveAudioCategory(const fs::path& relPath) {
+    const std::string lower = ToLower(relPath.string());
+    // Both forward and back slashes appear depending on host OS;
+    // normalise the lookup string to forward slashes so substring
+    // matching is portable.
+    std::string norm = lower;
+    for (auto& c : norm) if (c == '\\') c = '/';
+
+    if (norm.find("luaui/sounds/") != std::string::npos ||
+        norm.find("/ui/")          != std::string::npos) {
+        return "ui";
+    }
+    if (norm.find("sounds/music/") != std::string::npos ||
+        norm.find("/music/")       != std::string::npos) {
+        return "music";
+    }
+    return "sfx";
+}
+
+static bool ConvertAudioFile(const fs::path& srcPath,
+                             const fs::path& dstPath,
+                             const std::string& category,
+                             const fs::path& audioConverter,
+                             bool force) {
+    std::vector<std::string> argv = {
+        audioConverter.string(),
+        "--category", category,
+    };
+    if (force) argv.push_back("--force");
+    argv.push_back(srcPath.string());
+    argv.push_back(dstPath.string());
+
+    std::string out;
+    if (!RunCommand(argv, out)) {
+        SLOG(SPRING_LOG_WARNING,
+            "audio conversion failed: %s -> %s\n%s",
+            srcPath.string().c_str(), dstPath.string().c_str(),
+            out.c_str());
+        return false;
+    }
+    return true;
+}
+
+/// Walk `gameDir/sounds/**` and `gameDir/LuaUI/Sounds/**` (any case),
+/// re-encoding every audio source to a sibling `.webm` and removing
+/// the original. Returns the number of failures. Audio is
+/// non-critical to gameplay, so failures are warnings rather than
+/// hard errors.
+int ConvertAudio(const fs::path& gameDir, bool force) {
+    const fs::path audioConverter = AUDIOCONVERTER_BINARY_PATH;
+    int converted = 0, uptodate = 0, failed = 0, removed = 0;
+
+    if (!fs::exists(audioConverter)) {
+        SLOG(SPRING_LOG_WARNING,
+            "audioconverter not found at %s — skipping audio conversion. "
+            "Install ffmpeg and rebuild to enable the audio pipeline.",
+            audioConverter.string().c_str());
+        return 0;
+    }
+
+    std::error_code ec;
+    for (const auto& entry : fs::recursive_directory_iterator(gameDir, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec)) continue;
+        if (!IsAudioSource(entry.path())) continue;
+
+        const fs::path srcPath = entry.path();
+        fs::path dstPath = srcPath;
+        dstPath.replace_extension(".webm");
+
+        // Skip-by-mtime: don't re-encode if dst is already newer.
+        bool needConvert = true;
+        if (!force && fs::exists(dstPath, ec)) {
+            const auto srcT = fs::last_write_time(srcPath, ec);
+            const auto dstT = fs::last_write_time(dstPath, ec);
+            if (!ec && dstT >= srcT) {
+                needConvert = false;
+                uptodate++;
+            }
+            ec.clear();
+        }
+
+        if (needConvert) {
+            const fs::path rel = fs::relative(srcPath, gameDir, ec);
+            const std::string category = DeriveAudioCategory(
+                ec ? srcPath : rel);
+            ec.clear();
+
+            if (ConvertAudioFile(srcPath, dstPath, category,
+                                  audioConverter, force)) {
+                converted++;
+            } else {
+                failed++;
+                // Don't delete the source if conversion failed —
+                // leave it for the next run to retry.
+                continue;
+            }
+        }
+
+        // Source pruning: delete the original .wav/.ogg/.mp3/etc.
+        // so the runtime only ever sees `.webm` files. Done even
+        // when up-to-date (the dst could have been hand-encoded).
+        if (fs::exists(srcPath, ec)) {
+            fs::remove(srcPath, ec);
+            if (!ec) removed++;
+            ec.clear();
+        }
+    }
+
+    if (converted + uptodate + failed + removed > 0) {
+        SLOG(SPRING_LOG_NOTICE,
+            "%s audio: %d converted, %d up-to-date, %d sources pruned, %d failed",
+            gameDir.filename().string().c_str(),
+            converted, uptodate, removed, failed);
+    } else {
+        SLOG(SPRING_LOG_INFO, "%s: no audio sources found",
+            gameDir.string().c_str());
+    }
+    return failed;
 }
 
 // ---------------------------------------------------------------
@@ -1235,6 +1393,10 @@ void PrintUsage(const char* argv0) {
         "                      Do not transcode bitmaps under bitmaps/ to\n"
         "                      KTX2 in projectiletextures/. Useful when\n"
         "                      the textures are already cached.\n"
+        "  --skip-audio        Do not re-encode source audio to Opus-in-\n"
+        "                      WebM. Useful when audioconverter is\n"
+        "                      unavailable (ffmpeg not installed) or\n"
+        "                      the audio outputs are already cached.\n"
         "  --log-server <url>  Send logs to a springlog server.\n"
         "  --log-level <level> Set minimum log level (debug/info/\n"
         "                      notice/warning/error).\n"
@@ -1258,6 +1420,7 @@ int main(int argc, char* argv[]) {
     bool skipModels = false;
     bool skipAI = false;
     bool skipProjectileTextures = false;
+    bool skipAudio = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -1265,6 +1428,7 @@ int main(int argc, char* argv[]) {
         else if (arg == "--skip-models") skipModels = true;
         else if (arg == "--skip-ai") skipAI = true;
         else if (arg == "--skip-projectile-textures") skipProjectileTextures = true;
+        else if (arg == "--skip-audio") skipAudio = true;
         else if (arg == "--data-dir" && i + 1 < argc) dataDir = argv[++i];
         else if (arg == "--modelimporter" && i + 1 < argc) modelImporterArg = argv[++i];
         else if (arg == "--log-server" && i + 1 < argc) logServerUrl = argv[++i];
@@ -1342,6 +1506,10 @@ int main(int argc, char* argv[]) {
 
     if (!skipProjectileTextures) {
         failed += ConvertProjectileTextures(gameDir, fs::path(dataDir), force);
+    }
+
+    if (!skipAudio) {
+        failed += ConvertAudio(gameDir, force);
     }
 
     if (!skipAI) {

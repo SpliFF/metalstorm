@@ -24,4 +24,4 @@ add_library(springlog-sqlite STATIC
     SpringLogSqlite.cpp
 )
 target_include_directories(springlog-sqlite PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(springlog-sqlite PUBLIC springlog SQLite::SQLite3)
+target_link_libraries(springlog-sqlite PUBLIC springlog SQLite3::SQLite3)
