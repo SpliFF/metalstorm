@@ -4,6 +4,7 @@
 
 #include "EntityDeltaCache.h"
 
+#include "EntityStateSerializer.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
 #include "System/float3.h"
@@ -30,10 +31,13 @@ bool EntityDeltaCache::HasChanged(const CUnit* unit, int viewerAllyTeam) const {
 
     const auto& c = it->second;
 
-    // Position
-    float dx = unit->pos.x - c.posX;
-    float dy = unit->pos.y - c.posY;
-    float dz = unit->pos.z - c.posZ;
+    // Position — compare against the *viewed* position so radar
+    // deception drift (posErrorVector wandering every slow-update)
+    // doesn't trigger a delta on every snapshot.
+    const float3 viewed = EntityState::GetViewedPos(unit, viewerAllyTeam);
+    float dx = viewed.x - c.posX;
+    float dy = viewed.y - c.posY;
+    float dz = viewed.z - c.posZ;
     if (dx * dx + dy * dy + dz * dz > POS_THRESHOLD * POS_THRESHOLD)
         return true;
 
@@ -65,9 +69,10 @@ bool EntityDeltaCache::HasChanged(const CUnit* unit, int viewerAllyTeam) const {
 
 void EntityDeltaCache::Update(const CUnit* unit, int viewerAllyTeam) {
     auto& c = cache[static_cast<uint32_t>(unit->id)];
-    c.posX = unit->pos.x;
-    c.posY = unit->pos.y;
-    c.posZ = unit->pos.z;
+    const float3 viewed = EntityState::GetViewedPos(unit, viewerAllyTeam);
+    c.posX = viewed.x;
+    c.posY = viewed.y;
+    c.posZ = viewed.z;
     c.heading = static_cast<uint16_t>(unit->heading);
     c.health = UnitHealthU16(unit);
     c.buildProgress = UnitBuildProgressU8(unit);

@@ -67,13 +67,35 @@ export class EntityInterpolator {
             return;
         }
 
-        // Shift current → previous
-        state.prevX = state.currX;
-        state.prevY = state.currY;
-        state.prevZ = state.currZ;
-        state.prevHeading = state.currHeading;
-        state.prevPitch = state.currPitch;
-        state.prevRoll = state.currRoll;
+        // Teleport guard. When a unit transitions from radar-only (or
+        // any LOS-loss gap) back into LOS, the deceived/stale prev
+        // position can be hundreds of elmos from the fresh LOS truth.
+        // Lerping across that gap draws a comet streak through terrain.
+        // If the jump is bigger than what the unit could physically
+        // cover in a snapshot interval (~100ms) at any sane unit speed,
+        // collapse prev→curr so the lerp pins to the true position.
+        const dx = x - state.currX;
+        const dy = y - state.currY;
+        const dz = z - state.currZ;
+        const distSq = dx * dx + dy * dy + dz * dz;
+        const TELEPORT_THRESHOLD_SQ = 200 * 200;
+
+        if (distSq > TELEPORT_THRESHOLD_SQ) {
+            state.prevX = x;
+            state.prevY = y;
+            state.prevZ = z;
+            state.prevHeading = heading;
+            state.prevPitch = pitch;
+            state.prevRoll = roll;
+        } else {
+            // Shift current → previous
+            state.prevX = state.currX;
+            state.prevY = state.currY;
+            state.prevZ = state.currZ;
+            state.prevHeading = state.currHeading;
+            state.prevPitch = state.currPitch;
+            state.prevRoll = state.currRoll;
+        }
 
         // Set new target
         state.currX = x;

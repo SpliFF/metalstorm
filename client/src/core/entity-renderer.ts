@@ -469,6 +469,36 @@ export interface EntityMeta {
      *  shaded normally. The server emits 255 once construction finishes
      *  so the byte → float mapping pins finished units to exactly 1.0. */
     buildProgress: number;
+    /** Per-unit Spring losStatus low nibble for the receiving session's
+     *  ally team. See FIELD_LOS_STATE in entity-state.ts.
+     *    bit 0 LOS_INLOS, bit 1 LOS_INRADAR, bit 2 LOS_PREVLOS, bit 3 LOS_CONTRADAR.
+     *  Own-team units and permissive sessions read 0x0F. */
+    losState: number;
+}
+
+/** Bit values for EntityMeta.losState — mirror Spring's losStatus bits
+ *  on the server (Sim/Units/Unit.h). */
+const LOS_INLOS = 1 << 0;
+const LOS_INRADAR = 1 << 1;
+const LOS_PREVLOS = 1 << 2;
+
+/** isBuilding bit in UnitDefInfo.flags — protocol.fbs GameUnitDef.flags
+ *  bit 12 (derived from CSolidObject::IsBuildingUnit). */
+const UDF_FLAG_IS_BUILDING = 1 << 12;
+
+/** Frozen-pose snapshot for buildings that are PREVLOS but no longer
+ *  in LOS — the client keeps drawing them at the last-seen pose until
+ *  the server reports either fresh LOS or destruction. */
+interface GhostPose {
+    x: number;
+    y: number;
+    z: number;
+    heading: number;
+    pitch: number;
+    roll: number;
+    defId: number;
+    team: number;
+    buildProgress: number;
 }
 
 /** Per-piece pose override for one unit, indexed by piece index.
@@ -544,6 +574,11 @@ export class EntityRenderer {
     private modelTemplates = new Map<number, ModelTemplate | null>();
     private modelsReady: Promise<void> = Promise.resolve();
     private defModelUrls = new Map<number, string>();
+    /** Per-defId building flag from UnitDefInfo.flags bit 12. Drives the
+     *  ghost-building behaviour: only buildings get PREVLOS frozen-pose
+     *  rendering; mobile units in PREVLOS just disappear once they leave
+     *  radar (mirrors Recoil). */
+    private defIsBuilding = new Set<number>();
 
     // --- Render meshes ---
     // Per-piece thin-instance meshes, keyed by "model:{defId}:{team}:{pieceIdx}"
@@ -554,6 +589,16 @@ export class EntityRenderer {
     // Populated by applyPieceState() from server-streamed piece transforms.
     // Pieces missing from a unit's override map render at rest pose.
     private pieceOverrides = new Map<number, PieceOverrides>();
+
+    // --- Ghost pose freeze for PREVLOS-only buildings ---
+    // The server stops sending updates for buildings that have left LOS
+    // but have PREVLOS set. We freeze the last known pose so they keep
+    // rendering at that location until either fresh LOS resumes streaming
+    // or the entity drops out of the snapshot entirely (destruction).
+    private ghostPoses = new Map<number, GhostPose>();
+
+    // --- Radar-blip shared mesh, keyed by team ---
+    private radarBlipMeshes = new Map<number, Mesh>();
 
     // --- Fallback shape meshes ---
     private shapeMeshes = new Map<number, Mesh>();
@@ -625,6 +670,9 @@ export class EntityRenderer {
             }
 
             this.defModelUrls.set(def.defId, def.modelUrl);
+            if ((def.flags & UDF_FLAG_IS_BUILDING) !== 0) {
+                this.defIsBuilding.add(def.defId);
+            }
 
             if (!def.modelUrl) {
                 this.modelTemplates.set(def.defId, null);
@@ -1005,6 +1053,43 @@ export class EntityRenderer {
     }
 
     /**
+     * Build (lazily) the per-team radar-blip thin-instance mesh — a
+     * small inverted cone (point downwards) sized to read at minimap
+     * scale. One mesh per team, shared across every radar contact of
+     * that team. Uses the existing team material so the colour matches
+     * the player's faction without dragging the team-colour shader in.
+     */
+    private getOrCreateRadarBlipMesh(team: number): Mesh {
+        let mesh = this.radarBlipMeshes.get(team);
+        if (mesh) return mesh;
+        const teamIdx = team % this.teamMaterials.length;
+        const name = `radar_blip_t${team}`;
+        mesh = MeshBuilder.CreateCylinder(
+            name,
+            { height: 18, diameterTop: 0, diameterBottom: 14, tessellation: 6 },
+            this.scene,
+        );
+        // Cone points down (apex at the contact). Lift so the base sits
+        // ~18 elmos above the ground for a clear "blip" silhouette.
+        mesh.position.y = 18;
+        mesh.rotation.x = Math.PI;
+        mesh.bakeCurrentTransformIntoVertices();
+        mesh.material = this.teamMaterials[teamIdx];
+        mesh.thinInstanceEnablePicking = false;
+        mesh.alwaysSelectAsActiveMesh = true;
+        mesh.setBoundingInfo(new BoundingInfo(
+            new Vector3(-1e6, -1e6, -1e6),
+            new Vector3(1e6, 1e6, 1e6),
+        ));
+        mesh.renderingGroupId = 2;
+        this.radarBlipMeshes.set(team, mesh);
+        // Track in renderMeshes so the per-tick activeKeys hide-pass
+        // takes care of it when no blips are active that frame.
+        this.renderMeshes.set(`radar:${team}`, mesh);
+        return mesh;
+    }
+
+    /**
      * Get or create the thin-instance render mesh for a specific piece
      * of a specific (defId, team). Clones the template piece mesh.
      */
@@ -1237,7 +1322,7 @@ export class EntityRenderer {
     }
 
     update(snapshot: EntityStateSnapshot, isDelta: boolean = false): void {
-        const { count, entityIds, positionsX, positionsY, positionsZ, headings, health, defIds, teams, buildProgress, pitch, roll } = snapshot;
+        const { count, entityIds, positionsX, positionsY, positionsZ, headings, health, defIds, teams, buildProgress, pitch, roll, losStates } = snapshot;
         if (!entityIds) return;
 
         const now = performance.now();
@@ -1248,26 +1333,53 @@ export class EntityRenderer {
         for (let i = 0; i < count; i++) {
             const id = entityIds[i];
 
-            this.interpolator.pushState(
-                id,
-                positionsX ? positionsX[i] : 0,
-                positionsY ? positionsY[i] : 0,
-                positionsZ ? positionsZ[i] : 0,
-                headings ? headings[i] : 0,
-                now,
-                pitch ? pitch[i] * angleScale : 0,
-                roll  ? roll[i]  * angleScale : 0,
-            );
+            const newLos = losStates ? losStates[i] : 0x0F;
+            const inLos = (newLos & LOS_INLOS) !== 0;
+
+            // Only push fresh interpolator state when the contact is
+            // genuinely in LOS. Radar-only contacts have their position
+            // deceived by the server (posErrorVector) and that drift
+            // would otherwise feed the interpolator and make the dot
+            // wobble. PREVLOS-only buildings get their pose frozen
+            // below — we don't want lerping to keep tracking the live
+            // server-side position once we've lost LOS on them.
+            if (inLos) {
+                this.interpolator.pushState(
+                    id,
+                    positionsX ? positionsX[i] : 0,
+                    positionsY ? positionsY[i] : 0,
+                    positionsZ ? positionsZ[i] : 0,
+                    headings ? headings[i] : 0,
+                    now,
+                    pitch ? pitch[i] * angleScale : 0,
+                    roll  ? roll[i]  * angleScale : 0,
+                );
+            }
 
             let meta = this.entityMeta.get(id);
+            const isNew = !meta;
             if (!meta) {
-                meta = { defId: 0, team: 0, healthScale: 1.0, buildProgress: 1.0 };
+                meta = { defId: 0, team: 0, healthScale: 1.0, buildProgress: 1.0, losState: 0x0F };
                 this.entityMeta.set(id, meta);
             }
             if (defIds) meta.defId = defIds[i];
             if (teams) meta.team = teams[i];
             if (health) meta.healthScale = 0.3 + (health[i] / 65535) * 0.7;
             if (buildProgress) meta.buildProgress = buildProgress[i] / 255;
+
+            const prevLos = isNew ? newLos : meta.losState;
+            meta.losState = newLos;
+
+            // Building ghost handling: when a building's LOS flips off
+            // and PREVLOS is set, freeze its pose so subsequent ticks
+            // keep drawing it where we last saw it (Recoil semantics).
+            // When the building re-enters LOS, drop the ghost.
+            const wasInLos = (prevLos & LOS_INLOS) !== 0;
+            if (wasInLos && !inLos && (newLos & LOS_PREVLOS) !== 0) {
+                this.captureGhostPose(id, meta, snapshot, i, angleScale);
+            } else if (inLos && this.ghostPoses.has(id)) {
+                this.ghostPoses.delete(id);
+            }
         }
 
         if (!isDelta) {
@@ -1278,9 +1390,38 @@ export class EntityRenderer {
                     this.entityMeta.delete(id);
                     this.interpolator.remove(id);
                     this.pieceOverrides.delete(id);
+                    // A building destroyed while out of LOS will simply
+                    // stop appearing in the snapshot. Drop the ghost too
+                    // so we don't leave a phantom forever.
+                    this.ghostPoses.delete(id);
                 }
             }
         }
+    }
+
+    /** Snapshot the unit's current pose for ghost rendering. Called
+     *  on the LOS→!LOS transition for PREVLOS buildings. We pull from
+     *  the live snapshot rather than the interpolator so we get the
+     *  exact server-authoritative last-seen pose, not whatever was
+     *  being lerped towards. */
+    private captureGhostPose(
+        id: number,
+        meta: EntityMeta,
+        snap: EntityStateSnapshot,
+        i: number,
+        angleScale: number,
+    ): void {
+        this.ghostPoses.set(id, {
+            x: snap.positionsX ? snap.positionsX[i] : 0,
+            y: snap.positionsY ? snap.positionsY[i] : 0,
+            z: snap.positionsZ ? snap.positionsZ[i] : 0,
+            heading: snap.headings ? snap.headings[i] : 0,
+            pitch: snap.pitch ? snap.pitch[i] * angleScale : 0,
+            roll: snap.roll ? snap.roll[i] * angleScale : 0,
+            defId: meta.defId,
+            team: meta.team,
+            buildProgress: meta.buildProgress,
+        });
     }
 
     tick(): void {
@@ -1291,7 +1432,58 @@ export class EntityRenderer {
         const groups = new Map<string, { mesh: Mesh; matrices: number[]; count: number }>();
 
         for (const [id, meta] of this.entityMeta) {
-            const lerped = this.interpolator.getInterpolated(id, now);
+            // LOS bucket: own units & permissive sessions read 0x0F (all
+            // bits set) so the INLOS check passes naturally. Enemy units
+            // bucket into in-LOS / radar-blip / ghost / hidden.
+            const los = meta.losState;
+            const inLos = (los & LOS_INLOS) !== 0;
+            const inRadar = (los & LOS_INRADAR) !== 0;
+            const prevLos = (los & LOS_PREVLOS) !== 0;
+            const isBuilding = this.defIsBuilding.has(meta.defId);
+
+            // Frozen ghost pose for buildings out of LOS but PREVLOS.
+            // Render the unit's normal model at the captured pose so
+            // players still see what's there. (Polish item: tinted
+            // ghost material — see Phase 6 in PLAN-intel.md.)
+            const ghost = !inLos && prevLos && isBuilding ? this.ghostPoses.get(id) : undefined;
+
+            // Hide entities with no visibility bits at all (e.g. mobile
+            // units that left LOS without entering radar). For permissive
+            // sessions losState is 0x0F and this never fires.
+            if (los === 0 && !ghost) continue;
+
+            // Radar-only contact: render a small team-coloured blip
+            // instead of the full unit. Skip the model path entirely.
+            if (!inLos && !ghost && inRadar) {
+                const lerpedR = this.interpolator.getInterpolated(id, now);
+                if (!lerpedR) continue;
+                const groundYR = this.sampleHeight(lerpedR.x, lerpedR.z);
+                const blipY = Number.isNaN(groundYR) ? lerpedR.y : groundYR;
+                const blipKey = `radar:${meta.team}`;
+                let blipGroup = groups.get(blipKey);
+                if (!blipGroup) {
+                    const mesh = this.getOrCreateRadarBlipMesh(meta.team);
+                    blipGroup = { mesh, matrices: [], count: 0 };
+                    groups.set(blipKey, blipGroup);
+                }
+                const matrix = Matrix.Compose(
+                    new Vector3(1, 1, 1),
+                    Quaternion.Identity(),
+                    new Vector3(lerpedR.x, blipY, lerpedR.z),
+                );
+                const arrR = new Float32Array(16);
+                matrix.copyToArray(arrR, 0);
+                for (let j = 0; j < 16; j++) blipGroup.matrices.push(arrR[j]);
+                blipGroup.count++;
+                continue;
+            }
+
+            // Normal / ghost render path: pick the source pose. Ghosts
+            // use the captured snapshot; live units use the interpolator.
+            const lerped = ghost
+                ? { x: ghost.x, y: ghost.y, z: ghost.z, heading: ghost.heading,
+                    pitch: ghost.pitch, roll: ghost.roll }
+                : this.interpolator.getInterpolated(id, now);
             if (!lerped) continue;
 
             const tmpl = this.modelTemplates.get(meta.defId);
@@ -1627,6 +1819,9 @@ export class EntityRenderer {
         }
         this.selectedIds = [];
         this.entityMeta.clear();
+        this.ghostPoses.clear();
+        this.radarBlipMeshes.clear();
+        this.defIsBuilding.clear();
         this.interpolator.clear();
         for (const mat of this.teamMaterials) mat.dispose();
     }

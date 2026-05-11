@@ -47,6 +47,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "System/float3.h"
+
 class CUnit;
 struct Viewport;
 
@@ -82,11 +84,19 @@ std::vector<uint8_t> SerializeUnits(
     uint16_t fieldMask = FIELD_ALL,
     int viewerAllyTeam = -1);
 
-/// Serialize units visible within a set of viewports.
-/// Uses QuadField spatial queries. Requires a loaded map.
-std::vector<uint8_t> SerializeViewportUnits(
-    const Viewport* viewports, int numViewports,
-    uint16_t fieldMask = FIELD_ALL);
+/// Per-ally-team visibility check shared with EntityDeltaCache so the
+/// cache filters changes against the same predicate the serializer uses.
+/// Returns true for own-allyteam units; for enemy units, returns true
+/// when in LOS, radar, or PREVLOS, and the unit is not cloaked (or is
+/// `alwaysVisible`). Pass `viewerAllyTeam < 0` for permissive sessions.
+bool IsUnitVisibleTo(const CUnit* u, int viewerAllyTeam);
+
+/// Per-ally-team "viewed" position. For radar-only enemy contacts
+/// returns `pos + GetErrorVector(viewerAllyTeam)` (XZ only — terrain
+/// height stays public). For LOS / ghost / own-allyteam returns the
+/// true position. Used by both serializer and delta cache so the
+/// cache's HasChanged predicate sees the same value the wire does.
+float3 GetViewedPos(const CUnit* u, int viewerAllyTeam);
 
 /// Collect units visible within a set of viewports (without serializing).
 /// Used when the caller needs to apply delta filtering before serialization.

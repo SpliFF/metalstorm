@@ -40,6 +40,20 @@ std::vector<uint8_t> SerializeAllUnits(uint16_t fieldMask) {
     return SerializeUnits(units, fieldMask, /*viewerAllyTeam*/ -1);
 }
 
+float3 GetViewedPos(const CUnit* u, int viewerAllyTeam) {
+    if (viewerAllyTeam < 0) return u->pos;
+    const int unitAllyTeam = teamHandler.AllyTeam(u->team);
+    if (unitAllyTeam == viewerAllyTeam) return u->pos;
+    const uint8_t los = u->losStatus[viewerAllyTeam];
+    // Only deceive when contact is radar-only. INLOS and PREVLOS
+    // (ghost building) report the true position per Recoil semantics.
+    if (los & LOS_INLOS) return u->pos;
+    if ((los & LOS_PREVLOS) && u->unitDef != nullptr && u->unitDef->IsBuildingUnit()) return u->pos;
+    if (!(los & LOS_INRADAR)) return u->pos;
+    const float3 err = u->GetErrorVector(viewerAllyTeam);
+    return float3(u->pos.x + err.x, u->pos.y, u->pos.z + err.z);
+}
+
 
 std::vector<uint8_t> SerializeUnits(
     const std::vector<CUnit*>& units,
@@ -47,6 +61,15 @@ std::vector<uint8_t> SerializeUnits(
     int viewerAllyTeam)
 {
     const uint16_t count = static_cast<uint16_t>(units.size());
+
+    // Precompute per-unit "viewed" positions so X/Y/Z and the delta
+    // cache see the same number. Radar-only enemy contacts get the
+    // GetErrorVector deception; LOS / ghost / own-allyteam see the
+    // truth. Y is preserved in either case (terrain height is public).
+    std::vector<float3> viewedPos(count);
+    for (uint16_t i = 0; i < count; ++i) {
+        viewedPos[i] = GetViewedPos(units[i], viewerAllyTeam);
+    }
 
     // Calculate buffer size
     size_t size = 4; // header
@@ -77,22 +100,23 @@ std::vector<uint8_t> SerializeUnits(
             Write(buf, offset, static_cast<uint32_t>(u->id));
     }
 
-    // Position X (f32)
+    // Position X (f32) — uses viewedPos so radar-only enemy contacts
+    // get GetErrorVector deception applied. See GetViewedPos above.
     if (fieldMask & FIELD_POSITION_X) {
-        for (const CUnit* u : units)
-            Write(buf, offset, u->pos.x);
+        for (uint16_t i = 0; i < count; ++i)
+            Write(buf, offset, viewedPos[i].x);
     }
 
-    // Position Y (f32)
+    // Position Y (f32) — terrain height is public, viewedPos preserves it.
     if (fieldMask & FIELD_POSITION_Y) {
-        for (const CUnit* u : units)
-            Write(buf, offset, u->pos.y);
+        for (uint16_t i = 0; i < count; ++i)
+            Write(buf, offset, viewedPos[i].y);
     }
 
-    // Position Z (f32)
+    // Position Z (f32) — see Position X.
     if (fieldMask & FIELD_POSITION_Z) {
-        for (const CUnit* u : units)
-            Write(buf, offset, u->pos.z);
+        for (uint16_t i = 0; i < count; ++i)
+            Write(buf, offset, viewedPos[i].z);
     }
 
     // Heading (u16, 0-65535 mapping to 0°-360°)
@@ -216,13 +240,19 @@ std::vector<uint8_t> SerializeUnits(
 /// contact each entry represents so widgets can render fog-of-war,
 /// radar blips, and ghosts differently.
 ///
+/// Cloaked enemies are dropped entirely unless they are `alwaysVisible`
+/// — Recoil's contract is that cloak suppresses the LOS contact at the
+/// engine level. We do the same on the wire so a hacked client cannot
+/// reveal them by reading raw entity state.
+///
 /// `viewerAllyTeam < 0` disables the filter — the legacy permissive
 /// path used by dev-smoketest sessions (no roster handoff) and
 /// spectators who are expected to see the whole map.
-static bool IsUnitVisibleTo(const CUnit* u, int viewerAllyTeam) {
+bool IsUnitVisibleTo(const CUnit* u, int viewerAllyTeam) {
     if (viewerAllyTeam < 0) return true;
     const int unitAllyTeam = teamHandler.AllyTeam(u->team);
     if (unitAllyTeam == viewerAllyTeam) return true;
+    if (u->IsCloaked() && !u->alwaysVisible) return false;
     constexpr uint8_t VISIBLE_MASK = LOS_INLOS | LOS_INRADAR | LOS_PREVLOS | LOS_CONTRADAR;
     return (u->losStatus[viewerAllyTeam] & VISIBLE_MASK) != 0;
 }
@@ -272,15 +302,6 @@ std::vector<CUnit*> CollectViewportUnits(
     }
 
     return units;
-}
-
-std::vector<uint8_t> SerializeViewportUnits(
-    const Viewport* viewports, int numViewports,
-    uint16_t fieldMask)
-{
-    return SerializeUnits(
-        CollectViewportUnits(viewports, numViewports, /*viewerAllyTeam*/ -1),
-        fieldMask, /*viewerAllyTeam*/ -1);
 }
 
 } // namespace EntityState

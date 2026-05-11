@@ -61,6 +61,9 @@ export class Minimap {
     private terrainQuad: Mesh | null = null;
     // One thin-instance mesh per team (colour baked into material).
     private teamMeshes: Mesh[] = [];
+    // Per-team dimmed-blip mesh for radar-only enemy contacts. Smaller
+    // and translucent so the player can tell radar from LOS at a glance.
+    private radarMeshes: Mesh[] = [];
     // Selection ring mesh (thin-instanced white ring).
     private selectionMesh: Mesh | null = null;
     // Map id parsed out of the loadBackground URL. Used by detach() so
@@ -227,28 +230,61 @@ export class Minimap {
         return dot;
     }
 
+    /** Dimmer half-scale variant of the team dot for radar-only and
+     *  ghost contacts — so the player can tell at a glance which dots
+     *  are confirmed sightings vs sensor blips. */
+    private ensureRadarMesh(team: number): Mesh {
+        if (this.radarMeshes[team]) return this.radarMeshes[team];
+        const dot = MeshBuilder.CreatePlane(`minimapRadar_${team}`, { size: 36 }, this.scene);
+        dot.rotation.x = Math.PI / 2;
+        dot.position.y = 8;
+        dot.isPickable = false;
+        const mat = new StandardMaterial(`minimapRadarMat_${team}`, this.scene);
+        const [r, g, b] = TEAM_COLORS[team % TEAM_COLORS.length];
+        // ~45% brightness so the dim variant reads as "uncertain" without
+        // being invisible against the dark backdrop.
+        mat.emissiveColor = new Color3(r * 0.45, g * 0.45, b * 0.45);
+        mat.disableLighting = true;
+        mat.alpha = 0.7;
+        dot.material = mat;
+        this.radarMeshes[team] = dot;
+        return dot;
+    }
+
     /**
      * Rebuild thin-instance buffers for entity dots + selection rings.
      * Called every render tick (~10 Hz) — cheap enough for reasonable
      * entity counts.
      */
     private updateEntityInstances(): void {
-        // Bucket entities by team
-        const perTeam = new Map<number, { x: number; z: number; selected: boolean }[]>();
+        // Bucket entities by team and by visibility tier:
+        //   - perTeam       : full-LOS dot (or own units / permissive sessions)
+        //   - perTeamRadar  : dim half-size dot for radar-only / ghost contacts
+        // Hidden contacts (los === 0) are skipped entirely so the minimap
+        // doesn't leak ground-truth positions of fog-of-war enemies.
+        const perTeam = new Map<number, { x: number; z: number }[]>();
+        const perTeamRadar = new Map<number, { x: number; z: number }[]>();
         const selected: { x: number; z: number }[] = [];
 
         for (const [id, meta] of this.entityRenderer.getEntities() as IterableIterator<[number, EntityMeta]>) {
             const pos = this.entityRenderer.getEntityPosition(id);
             if (!pos) continue;
+            const los = meta.losState;
+            if (los === 0) continue; // fog of war
             const team = meta.team;
-            let b = perTeam.get(team);
-            if (!b) { b = []; perTeam.set(team, b); }
-            const isSel = this.selectedIds.has(id);
-            b.push({ x: pos.x, z: pos.z, selected: isSel });
-            if (isSel) selected.push({ x: pos.x, z: pos.z });
+            const inLos = (los & 0x01) !== 0;
+            const bucket = inLos ? perTeam : perTeamRadar;
+            let b = bucket.get(team);
+            if (!b) { b = []; bucket.set(team, b); }
+            b.push({ x: pos.x, z: pos.z });
+            // Selection rings only for confirmed-LOS contacts (the only
+            // ones the player can actually click & order anyway).
+            if (inLos && this.selectedIds.has(id)) {
+                selected.push({ x: pos.x, z: pos.z });
+            }
         }
 
-        // Update each team mesh's thin instances
+        // Update each team mesh's thin instances (full-LOS bucket)
         for (const [team, ents] of perTeam) {
             const mesh = this.ensureTeamMesh(team);
             if (ents.length === 0) {
@@ -269,6 +305,26 @@ export class Minimap {
         for (let t = 0; t < this.teamMeshes.length; t++) {
             const mesh = this.teamMeshes[t];
             if (mesh && !perTeam.has(t)) {
+                mesh.thinInstanceCount = 0;
+            }
+        }
+
+        // Radar-only / ghost bucket — same per-team breakdown, dim mesh.
+        for (const [team, ents] of perTeamRadar) {
+            const mesh = this.ensureRadarMesh(team);
+            const matrices = new Float32Array(ents.length * 16);
+            const rot = Quaternion.Identity();
+            const scale = Vector3.One();
+            for (let i = 0; i < ents.length; i++) {
+                const e = ents[i];
+                const m = Matrix.Compose(scale, rot, new Vector3(e.x, 8, e.z));
+                m.copyToArray(matrices, i * 16);
+            }
+            mesh.thinInstanceSetBuffer('matrix', matrices, 16, true);
+        }
+        for (let t = 0; t < this.radarMeshes.length; t++) {
+            const mesh = this.radarMeshes[t];
+            if (mesh && !perTeamRadar.has(t)) {
                 mesh.thinInstanceCount = 0;
             }
         }
