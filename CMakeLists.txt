@@ -418,6 +418,22 @@ add_subdirectory(tools/mapconverter)
 # out to.
 add_subdirectory(tools/textureconverter)
 
+# === audioconverter — Opus-in-WebM audio conversion tool ===
+#
+# Standalone CLI that shells out to ffmpeg to re-encode every game
+# audio asset to a single canonical `.webm` (Opus) format. The
+# runtime never sees `.wav`/`.ogg`/`.mp3`/`.flac`/`.m4a` again.
+# gameconverter invokes this binary for each audio file under a
+# game's source tree. ffmpeg is located at configure time; a
+# missing ffmpeg is a hard configure-time error unless the entire
+# target is opted out via -DSPRING_SKIP_AUDIOCONVERTER=ON.
+option(SPRING_SKIP_AUDIOCONVERTER "Skip the audioconverter target (no ffmpeg required)" OFF)
+if(NOT SPRING_SKIP_AUDIOCONVERTER)
+    add_subdirectory(tools/audioconverter)
+else()
+    message(STATUS "audioconverter: SKIPPED (SPRING_SKIP_AUDIOCONVERTER=ON)")
+endif()
+
 # === spring-logserver (dedicated log collection + streaming server) ===
 add_executable(spring-logserver
     rts/logserver_main.cpp
