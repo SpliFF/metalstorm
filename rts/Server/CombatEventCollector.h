@@ -75,3 +75,38 @@ private:
 };
 
 extern UnitDeathCollector unitDeaths;
+
+/// Per-unit runtime sensor-radius change. Emitted by
+/// `Spring.SetUnitSensorRadius` (LuaSyncedCtrl) and drained per tick
+/// by server_main.cpp into `EntitySensorUpdate` messages so widgets
+/// like `unit_stealth.lua` see range-circle changes immediately
+/// instead of waiting for a snapshot that doesn't carry the field.
+/// sensorType values match `SpringWeb::SensorType` in protocol.fbs:
+///   0=los  1=airLos  2=radar  3=sonar
+///   4=seismic  5=radarJammer  6=sonarJammer
+struct SensorUpdateEvent {
+    uint32_t entityId;
+    uint8_t  sensorType;
+    float    radius;
+};
+
+class SensorUpdateCollector {
+public:
+    void Push(uint32_t entityId, uint8_t sensorType, float radius) {
+        std::lock_guard<std::mutex> lock(mutex);
+        events.push_back({entityId, sensorType, radius});
+    }
+
+    std::vector<SensorUpdateEvent> Drain() {
+        std::lock_guard<std::mutex> lock(mutex);
+        std::vector<SensorUpdateEvent> drained;
+        drained.swap(events);
+        return drained;
+    }
+
+private:
+    std::mutex mutex;
+    std::vector<SensorUpdateEvent> events;
+};
+
+extern SensorUpdateCollector sensorUpdates;

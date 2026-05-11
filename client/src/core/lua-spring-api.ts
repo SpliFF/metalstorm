@@ -144,7 +144,7 @@ export interface UnitEntry {
      *    bit  4:   repeatOrders
      *    bit  5:   isCloaked
      *    bit  6:   isStunned
-     *    bit  7:   reserved */
+     *    bit  7:   alwaysVisible (force-render even with losState=0) */
     stateBits: number;
     /** Spring losStatus low nibble for the local ally team:
      *    bit 0: LOS_INLOS  bit 1: LOS_INRADAR
@@ -289,6 +289,15 @@ export interface LiveState {
      *  has claimed the minimap yet (the native fixed-corner default
      *  applies). */
     minimapGeometry: { x: number; y: number; width: number; height: number; visible: boolean } | undefined;
+    /** Per-unit sensor radius override. Populated when an
+     *  `EntitySensorUpdate` envelope arrives from the server (emitted by
+     *  `Spring.SetUnitSensorRadius` server-side). Outer key is unitID,
+     *  inner key is the sensor type string ("los"/"airLos"/"radar"/
+     *  "sonar"/"seismic"/"radarJammer"/"sonarJammer"). When present,
+     *  `Spring.GetUnitSensorRadius` returns this value in preference to
+     *  the UnitDef baseline so widgets such as `unit_stealth.lua` see
+     *  the change immediately. */
+    sensorOverrides: Map<number, Map<string, number>>;
 }
 
 /** Stored LOS bitmap snapshot inside `LiveState`. Mirrors `LosBitmap`
@@ -604,6 +613,7 @@ export function createDefaultLiveState(): LiveState {
         keyBinds: new Map(),
         losBitmaps: new Map(),
         minimapGeometry: undefined,
+        sensorOverrides: new Map(),
     };
 }
 
@@ -1142,16 +1152,20 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             return false;
         },
         // Per-unit sensor range, read from the cached UnitDef. The wire
-        // protocol carries los/airLos/radar/sonar/jammer/seismic radii;
-        // we don't yet stream the live mutable value Spring lets
-        // SetUnitSensorRadius change, so this reflects the def baseline.
-        // Widgets that toggle stealth by zeroing a unit's losRadius
-        // (`unit_stealth.lua`) won't see their override until the
-        // EntitySensorUpdate envelope lands in Phase 6.
+        // Per-unit sensor radius. Server emits `EntitySensorUpdate`
+        // (envelope `ServerPayload.EntitySensorUpdate`) whenever
+        // `Spring.SetUnitSensorRadius` mutates a sensor at runtime —
+        // those overrides land in `ls.sensorOverrides` and take
+        // priority over the UnitDef baseline so widgets like
+        // `unit_stealth.lua` see the change without waiting on a
+        // snapshot.
         GetUnitSensorRadius: (id: LuaValue, type: LuaValue) => {
             const u = ls.units.get(Number(id));
             if (!u) return null;
-            const r = ctx.getUnitDefSensorRadius?.(u.defId, String(type ?? 'los'));
+            const sensor = String(type ?? 'los');
+            const override = ls.sensorOverrides.get(Number(id))?.get(sensor);
+            if (override !== undefined) return override;
+            const r = ctx.getUnitDefSensorRadius?.(u.defId, sensor);
             return r ?? 0;
         },
         // Per-unit position-error parameters (the wandering vector that

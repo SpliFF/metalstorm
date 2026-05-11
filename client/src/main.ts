@@ -891,6 +891,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 result: 3, damage: 500, x, y, z,
             }]);
         },
+        onEntitySensorUpdate(entityId, sensorType, radius) {
+            currentWidgetManager?.forwardEntitySensorUpdate(entityId, sensorType, radius);
+        },
         onResourceUpdate(info) {
             currentWidgetManager?.forwardResourceUpdate(info);
             economyBar?.update(info);

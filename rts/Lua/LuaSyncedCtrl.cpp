@@ -48,6 +48,7 @@
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectile.h"
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectileFactory.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
+#include "Server/CombatEventCollector.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitHandler.h"
@@ -3451,33 +3452,56 @@ int LuaSyncedCtrl::SetUnitSensorRadius(lua_State* L)
 
 	const int radius = std::clamp(luaL_checkint(L, 3), 0, MAX_UNIT_SENSOR_RADIUS);
 
+	// Captured for the EntitySensorUpdate broadcast below. 0xff means
+	// "unknown" — set per arm so the default case doesn't emit.
+	uint8_t sensorType = 0xff;
+
 	switch (hashString(luaL_checkstring(L, 2))) {
 		case hashString("los"): {
 			unit->ChangeLos(unit->realLosRadius = radius, unit->realAirLosRadius);
 			lua_pushnumber(L, unit->losRadius);
+			sensorType = 0; // SensorType::Los
 		} break;
 		case hashString("airLos"): {
 			unit->ChangeLos(unit->realLosRadius, unit->realAirLosRadius = radius);
 			lua_pushnumber(L, unit->airLosRadius);
+			sensorType = 1; // SensorType::AirLos
 		} break;
 		case hashString("radar"): {
 			lua_pushnumber(L, unit->radarRadius = radius);
+			sensorType = 2; // SensorType::Radar
 		} break;
 		case hashString("sonar"): {
 			lua_pushnumber(L, unit->sonarRadius = radius);
+			sensorType = 3; // SensorType::Sonar
 		} break;
 		case hashString("seismic"): {
 			lua_pushnumber(L, unit->seismicRadius = radius);
+			sensorType = 4; // SensorType::Seismic
 		} break;
 		case hashString("radarJammer"): {
 			lua_pushnumber(L, unit->jammerRadius = radius);
+			sensorType = 5; // SensorType::RadarJammer
 		} break;
 		case hashString("sonarJammer"): {
 			lua_pushnumber(L, unit->sonarJamRadius = radius);
+			sensorType = 6; // SensorType::SonarJammer
 		} break;
 		default: {
 			luaL_error(L, "Unknown sensor type to SetUnitSensorRadius()");
 		} break;
+	}
+
+	if (sensorType != 0xff) {
+		// Push to the collector — server_main.cpp drains and broadcasts
+		// these as EntitySensorUpdate envelopes per tick. The collector
+		// queues from any thread (LuaRules runs on the sim thread; the
+		// queue is mutex-protected anyway). Range mirrors what we just
+		// returned to Lua so the client view is consistent.
+		sensorUpdates.Push(
+			static_cast<uint32_t>(unit->id),
+			sensorType,
+			static_cast<float>(radius));
 	}
 
 	return 1;

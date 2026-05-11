@@ -27,6 +27,7 @@ import { ProjectileFiredEvent } from '../protocol/spring-web/projectile-fired-ev
 import { ProjectileImpactEvent } from '../protocol/spring-web/projectile-impact-event.js';
 import { ProjectileTrajectoryEvent } from '../protocol/spring-web/projectile-trajectory-event.js';
 import { EntityDestroy } from '../protocol/spring-web/entity-destroy.js';
+import { EntitySensorUpdate } from '../protocol/spring-web/entity-sensor-update.js';
 import { GameInfo } from '../protocol/spring-web/game-info.js';
 import { ResourceUpdate } from '../protocol/spring-web/resource-update.js';
 import { MapData } from '../protocol/spring-web/map-data.js';
@@ -402,6 +403,12 @@ export interface ConnectionEvents {
     onProjectileImpacts?: (events: ProjectileImpactInfo[], frame: number) => void;
     onProjectileTrajectories?: (events: ProjectileTrajectoryInfo[], frame: number) => void;
     onEntityDestroy?: (entityId: number, x: number, y: number, z: number) => void;
+    /** Per-unit sensor radius override. Emitted by
+     *  Spring.SetUnitSensorRadius on the server. `sensorType` matches
+     *  the SpringWeb::SensorType enum (0=los, 1=airLos, 2=radar,
+     *  3=sonar, 4=seismic, 5=radarJammer, 6=sonarJammer). `radius`
+     *  is in elmos; 0 means the sensor was disabled. */
+    onEntitySensorUpdate?: (entityId: number, sensorType: number, radius: number) => void;
     onGameOver?: (frame: number) => void;
     onPlayerLeft?: (playerId: number, username: string, team: number, reason: number) => void;
     onMapData?: (map: ParsedMapData) => void;
@@ -889,6 +896,9 @@ export class Connection {
             case ServerPayload.EntityDestroy:
                 this.handleEntityDestroy(msg);
                 break;
+            case ServerPayload.EntitySensorUpdate:
+                this.handleEntitySensorUpdate(msg);
+                break;
             case ServerPayload.GameInfo: {
                 const info = msg.payload(new GameInfo()) as GameInfo;
                 this.events.onGameInfo?.(info.frame(), info.gameSpeed(), info.paused(), {
@@ -1372,6 +1382,15 @@ export class Connection {
             pos ? pos.x() : 0,
             pos ? pos.y() : 0,
             pos ? pos.z() : 0,
+        );
+    }
+
+    private handleEntitySensorUpdate(msg: ServerMessage): void {
+        const upd = msg.payload(new EntitySensorUpdate()) as EntitySensorUpdate;
+        this.events.onEntitySensorUpdate?.(
+            upd.entityId(),
+            upd.sensorType(),
+            upd.radius(),
         );
     }
 }

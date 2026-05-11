@@ -163,7 +163,7 @@ std::vector<uint8_t> SerializeUnits(
             if (repeat)            bits |= (1 << 4);
             if (u->IsCloaked())    bits |= (1 << 5);
             if (u->IsStunned())    bits |= (1 << 6);
-            // bit 7 reserved
+            if (u->alwaysVisible)  bits |= (1 << 7);
             Write(buf, offset, bits);
         }
     }

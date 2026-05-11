@@ -3,3 +3,4 @@
 
 CombatEventCollector combatEvents;
 UnitDeathCollector unitDeaths;
+SensorUpdateCollector sensorUpdates;

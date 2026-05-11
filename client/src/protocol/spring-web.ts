@@ -20,6 +20,7 @@ export { ConsoleResponse, ConsoleResponseT } from './spring-web/console-response
 export { CustomParam, CustomParamT } from './spring-web/custom-param.js';
 export { EntityCreate, EntityCreateT } from './spring-web/entity-create.js';
 export { EntityDestroy, EntityDestroyT } from './spring-web/entity-destroy.js';
+export { EntitySensorUpdate, EntitySensorUpdateT } from './spring-web/entity-sensor-update.js';
 export { GameCegDef, GameCegDefT } from './spring-web/game-ceg-def.js';
 export { GameCegDefs, GameCegDefsT } from './spring-web/game-ceg-defs.js';
 export { GameCegSpawn, GameCegSpawnT } from './spring-web/game-ceg-spawn.js';
@@ -86,6 +87,7 @@ export { RoomState } from './spring-web/room-state.js';
 export { RoomStateUpdate, RoomStateUpdateT } from './spring-web/room-state-update.js';
 export { RoomTeamSelect, RoomTeamSelectT } from './spring-web/room-team-select.js';
 export { SeismicPing, SeismicPingT } from './spring-web/seismic-ping.js';
+export { SensorType } from './spring-web/sensor-type.js';
 export { ServerError, ServerErrorT } from './spring-web/server-error.js';
 export { ServerMessage, ServerMessageT } from './spring-web/server-message.js';
 export { ServerPayload } from './spring-web/server-payload.js';

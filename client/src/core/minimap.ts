@@ -281,6 +281,27 @@ export class Minimap {
             `;
             this.defaultParent.appendChild(this.canvas);
         }
+        this.broadcastState();
+    }
+
+    /** Publish the current geometry + ownership on the
+     *  `springrts-game` BroadcastChannel. Detached viewports listen
+     *  for `minimapState` to mirror the in-page minimap layout or
+     *  gate their own render on whether a chili widget has hidden
+     *  the in-page copy. Sent on every setGeometry / setVisible /
+     *  setOwnership change so the popup can stay in sync without
+     *  polling. The schema is intentionally flat so consumers can
+     *  pick fields à la carte. */
+    private broadcastState(): void {
+        this.channel?.postMessage({
+            type: 'minimapState',
+            ownership: this.ownership,
+            x: this.geometry.x,
+            y: this.geometry.y,
+            w: this.geometry.w,
+            h: this.geometry.h,
+            visible: this.geometry.visible,
+        });
     }
 
     /**
@@ -301,6 +322,7 @@ export class Minimap {
         this.canvas.style.top = `${y}px`;
         this.canvas.style.width = `${w}px`;
         this.canvas.style.height = `${h}px`;
+        this.broadcastState();
         if (changedSize) {
             // Coalesce engine.resize() across rapid drags. The chili
             // widget can fire ConfigMiniMap on every mousemove tick;
@@ -329,6 +351,7 @@ export class Minimap {
     setVisible(visible: boolean): void {
         this.geometry.visible = visible;
         this.canvas.style.display = visible ? 'block' : 'none';
+        this.broadcastState();
     }
 
     /** Current rect in DOM-space pixels. Used by InputManager to ignore

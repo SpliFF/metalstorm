@@ -474,6 +474,11 @@ export interface EntityMeta {
      *    bit 0 LOS_INLOS, bit 1 LOS_INRADAR, bit 2 LOS_PREVLOS, bit 3 LOS_CONTRADAR.
      *  Own-team units and permissive sessions read 0x0F. */
     losState: number;
+    /** True when the server's state_bits bit 7 (`alwaysVisible`) is set.
+     *  These units render at their last-known pose even when `losState`
+     *  resolves to 0 — engine-tagged map landmarks plus units explicitly
+     *  flipped via `Spring.SetUnitAlwaysVisible`. */
+    alwaysVisible: boolean;
 }
 
 /** Bit values for EntityMeta.losState — mirror Spring's losStatus bits
@@ -481,6 +486,9 @@ export interface EntityMeta {
 const LOS_INLOS = 1 << 0;
 const LOS_INRADAR = 1 << 1;
 const LOS_PREVLOS = 1 << 2;
+
+/** state_bits bit 7 — `alwaysVisible` per `EntityStateSerializer.h`. */
+const STATE_BIT_ALWAYS_VISIBLE = 1 << 7;
 
 /** isBuilding bit in UnitDefInfo.flags — protocol.fbs GameUnitDef.flags
  *  bit 12 (derived from CSolidObject::IsBuildingUnit). */
@@ -1322,7 +1330,7 @@ export class EntityRenderer {
     }
 
     update(snapshot: EntityStateSnapshot, isDelta: boolean = false): void {
-        const { count, entityIds, positionsX, positionsY, positionsZ, headings, health, defIds, teams, buildProgress, pitch, roll, losStates } = snapshot;
+        const { count, entityIds, positionsX, positionsY, positionsZ, headings, health, defIds, teams, buildProgress, pitch, roll, losStates, stateBits } = snapshot;
         if (!entityIds) return;
 
         const now = performance.now();
@@ -1335,6 +1343,9 @@ export class EntityRenderer {
 
             const newLos = losStates ? losStates[i] : 0x0F;
             const inLos = (newLos & LOS_INLOS) !== 0;
+            const alwaysVisibleThisFrame = stateBits
+                ? (stateBits[i] & STATE_BIT_ALWAYS_VISIBLE) !== 0
+                : false;
 
             // Only push fresh interpolator state when the contact is
             // genuinely in LOS. Radar-only contacts have their position
@@ -1343,7 +1354,10 @@ export class EntityRenderer {
             // wobble. PREVLOS-only buildings get their pose frozen
             // below — we don't want lerping to keep tracking the live
             // server-side position once we've lost LOS on them.
-            if (inLos) {
+            // alwaysVisible units are streamed at their *true* position
+            // by the server (the engine bypasses posErrorVector for
+            // them) so the interpolator can consume them safely.
+            if (inLos || alwaysVisibleThisFrame) {
                 this.interpolator.pushState(
                     id,
                     positionsX ? positionsX[i] : 0,
@@ -1359,11 +1373,12 @@ export class EntityRenderer {
             let meta = this.entityMeta.get(id);
             const isNew = !meta;
             if (!meta) {
-                meta = { defId: 0, team: 0, healthScale: 1.0, buildProgress: 1.0, losState: 0x0F };
+                meta = { defId: 0, team: 0, healthScale: 1.0, buildProgress: 1.0, losState: 0x0F, alwaysVisible: false };
                 this.entityMeta.set(id, meta);
             }
             if (defIds) meta.defId = defIds[i];
             if (teams) meta.team = teams[i];
+            if (stateBits) meta.alwaysVisible = (stateBits[i] & STATE_BIT_ALWAYS_VISIBLE) !== 0;
             if (health) meta.healthScale = 0.3 + (health[i] / 65535) * 0.7;
             if (buildProgress) meta.buildProgress = buildProgress[i] / 255;
 
@@ -1450,7 +1465,11 @@ export class EntityRenderer {
             // Hide entities with no visibility bits at all (e.g. mobile
             // units that left LOS without entering radar). For permissive
             // sessions losState is 0x0F and this never fires.
-            if (los === 0 && !ghost) continue;
+            // `alwaysVisible` (state_bits bit 7 — engine landmarks plus
+            // Spring.SetUnitAlwaysVisible targets) overrides the hide so
+            // the unit stays drawn at the server-streamed pose even when
+            // none of the LOS bits are set.
+            if (los === 0 && !ghost && !meta.alwaysVisible) continue;
 
             // Radar-only contact: render a small team-coloured blip
             // instead of the full unit. Skip the model path entirely.

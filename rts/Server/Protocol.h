@@ -276,6 +276,18 @@ inline std::vector<uint8_t> BuildEntityDestroy(uint32_t entityId, uint8_t destru
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_EntityDestroy, destroy.Union());
 }
 
+/// Build an EntitySensorUpdate message — broadcast when
+/// `Spring.SetUnitSensorRadius` mutates a sensor at runtime. The client
+/// stores the override and serves it from `Spring.GetUnitSensorRadius`
+/// in the widget worker so range-circle widgets refresh immediately.
+inline std::vector<uint8_t> BuildEntitySensorUpdate(
+    uint32_t entityId, SpringWeb::SensorType sensorType, float radius)
+{
+    flatbuffers::FlatBufferBuilder fbb(64);
+    auto upd = SpringWeb::CreateEntitySensorUpdate(fbb, entityId, sensorType, radius);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_EntitySensorUpdate, upd.Union());
+}
+
 /// Build a PlayerLeft message (broadcast to remaining clients on disconnect).
 inline std::vector<uint8_t> BuildPlayerLeft(
     uint32_t playerId, const std::string& username, int8_t team, uint8_t reason)

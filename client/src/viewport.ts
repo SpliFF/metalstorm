@@ -49,6 +49,13 @@ let selectedIds = new Set<number>();
 
 // Cross-window communication
 let channel: BroadcastChannel | null = null;
+/** Whether the main window's in-page minimap is currently visible. When
+ *  a chili widget claims and then collapses the minimap, the main
+ *  window broadcasts `visible=false` and we surface a banner so the
+ *  player knows the detached popup is their primary minimap view.
+ *  `undefined` means we haven't received any minimap state yet — the
+ *  banner stays hidden in that case too. */
+let mainMinimapHidden = false;
 try {
     channel = new BroadcastChannel('springrts-game');
     channel.onmessage = (e) => {
@@ -61,6 +68,20 @@ try {
             // was opened by the main window, so window.close() is
             // allowed here without requiring a user gesture.
             try { window.close(); } catch { /* noop */ }
+        } else if (e.data.type === 'minimapState') {
+            // Mirror of the main window's minimap state. When the
+            // chili minimap widget hides the in-page canvas, surface
+            // that fact so the player knows this popup is now the
+            // primary minimap view. The popup itself keeps its full
+            // window-sized layout regardless — that's the whole point
+            // of detaching.
+            const widgetHidden = e.data.ownership === 'widget' && !e.data.visible;
+            if (widgetHidden !== mainMinimapHidden) {
+                mainMinimapHidden = widgetHidden;
+                statusEl.textContent = widgetHidden
+                    ? 'Primary minimap (main window: hidden by widget)'
+                    : 'Connected';
+            }
         }
     };
 } catch { /* ok */ }

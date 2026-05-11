@@ -264,6 +264,7 @@ function describeInboundMessage(msg: Record<string, unknown>): string {
         case 'stateUpdate':   return `stateUpdate frame=${msg.gameFrame}`;
         case 'entityState':   return `entityState count=${msg.count} delta=${msg.isDelta}`;
         case 'entityDestroy': return `entityDestroy id=${msg.entityId}`;
+        case 'entitySensorUpdate': return `entitySensorUpdate id=${msg.entityId} type=${msg.sensorType} r=${msg.radius}`;
         case 'intelTransitions': return `intelTransitions (${(msg.events as unknown[])?.length ?? 0} events)`;
         case 'seismicPings':  return `seismicPings (${(msg.pings as unknown[])?.length ?? 0} pings)`;
         case 'losBitmap':     return `losBitmap allyTeam=${msg.allyTeam} ${msg.width}x${msg.height} frame=${msg.frame}`;
@@ -3578,7 +3579,31 @@ self.onmessage = async (e: MessageEvent) => {
             liveState.unitRulesParams.delete(msg.entityId as number);
             liveState.unitCommands.delete(msg.entityId as number);
             liveState.unitCmdDescs.delete(msg.entityId as number);
+            liveState.sensorOverrides.delete(msg.entityId as number);
             break;
+
+        case 'entitySensorUpdate': {
+            // Per-unit sensor radius override emitted by
+            // Spring.SetUnitSensorRadius on the server. We store it
+            // in liveState.sensorOverrides so Spring.GetUnitSensorRadius
+            // returns the runtime value rather than the UnitDef baseline.
+            // The string key matches the argument widgets pass to
+            // GetUnitSensorRadius (matches SpringWeb::SensorType ordering).
+            const id = msg.entityId as number;
+            const sensorType = msg.sensorType as number;
+            const radius = msg.radius as number;
+            const SENSOR_NAMES = ['los', 'airLos', 'radar', 'sonar',
+                                  'seismic', 'radarJammer', 'sonarJammer'];
+            const name = SENSOR_NAMES[sensorType];
+            if (!name) break;
+            let m = liveState.sensorOverrides.get(id);
+            if (!m) {
+                m = new Map();
+                liveState.sensorOverrides.set(id, m);
+            }
+            m.set(name, radius);
+            break;
+        }
 
         case 'intelTransitions': {
             // Synthesised LOS / radar / cloak transitions (see

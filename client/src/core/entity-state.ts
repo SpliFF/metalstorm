@@ -22,7 +22,8 @@
  *                                            bit 4:    repeatOrders
  *                                            bit 5:    isCloaked
  *                                            bit 6:    isStunned
- *                                            bit 7:    reserved
+ *                                            bit 7:    alwaysVisible
+ *                                                      (force-render override)
  *     Bit 9: los_state     → u8[count]     Spring losStatus low nibble:
  *                                            bit 0: LOS_INLOS
  *                                            bit 1: LOS_INRADAR

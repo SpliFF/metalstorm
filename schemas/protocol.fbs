@@ -343,6 +343,32 @@ table EntityDestroy {
     position: Vec3;
 }
 
+/// Sensor type ordering matches `Spring.GetUnitSensorRadius`'s `type`
+/// argument and Recoil's internal CLosHandler subsystems. Used by
+/// EntitySensorUpdate so the client knows which radius changed.
+enum SensorType : uint8 {
+    Los = 0,
+    AirLos,
+    Radar,
+    Sonar,
+    Seismic,
+    RadarJammer,
+    SonarJammer,
+}
+
+/// Per-unit sensor radius override. Emitted whenever
+/// `Spring.SetUnitSensorRadius` mutates a sensor on the server so the
+/// client widget worker can refresh range-circle widgets immediately
+/// instead of waiting for an entity-state snapshot (snapshots don't
+/// re-stream the unit def — they have no field for the override).
+/// `radius` is in elmos, matching `Spring.GetUnitSensorRadius`'s
+/// return value. A radius of 0 means the sensor was disabled.
+table EntitySensorUpdate {
+    entity_id: uint32;
+    sensor_type: SensorType;
+    radius: float;
+}
+
 // Combat event result
 enum CombatResult : uint8 {
     Hit = 0,
@@ -1311,6 +1337,7 @@ union ServerPayload {
     GameRestarting,
     UnitCommandQueuesUpdate,
     UnitCmdDescsUpdate,
+    EntitySensorUpdate,
 }
 
 table ServerMessage {

@@ -1842,6 +1842,25 @@ int main(int argc, char* argv[])
         }
         }
 
+        // Per-unit runtime sensor-radius changes — emitted by
+        // Spring.SetUnitSensorRadius. Broadcast reliably to every
+        // session so range-circle widgets (unit_stealth.lua etc.)
+        // refresh immediately. Spectators see all updates;
+        // visibility filtering is intentionally skipped because the
+        // override is also a visual-only hint and gives the same
+        // result the snapshot would carry once the underlying sim
+        // state propagates.
+        {
+        auto sensorChanges = sensorUpdates.Drain();
+        for (const auto& upd : sensorChanges) {
+            auto msg = Protocol::BuildEntitySensorUpdate(
+                upd.entityId,
+                static_cast<SpringWeb::SensorType>(upd.sensorType),
+                upd.radius);
+            rtcServer.BroadcastReliable(msg.data(), msg.size());
+        }
+        }
+
         // Per-allyteam LOS bitmap stream (envelope 0x07). Sent 1 Hz
         // per session; each player gets their own ally team's bitmap.
         // Spectators receive every ally team's bitmap, round-robin

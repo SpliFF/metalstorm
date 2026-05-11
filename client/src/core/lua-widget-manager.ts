@@ -393,6 +393,18 @@ export class LuaWidgetManager {
         this.postToWorker({ type: 'entityDestroy', entityId });
     }
 
+    /** Forward a per-unit sensor radius override to the worker.
+     *  Emitted on the server side by `Spring.SetUnitSensorRadius`; the
+     *  worker stores it in `liveState.sensorOverrides` so
+     *  `Spring.GetUnitSensorRadius` returns the runtime value rather
+     *  than the def baseline. `sensorType` matches SpringWeb's enum
+     *  (0=los, 1=airLos, 2=radar, 3=sonar, 4=seismic, 5=radarJammer,
+     *  6=sonarJammer). */
+    forwardEntitySensorUpdate(entityId: number, sensorType: number, radius: number): void {
+        if (this.disposed) return;
+        this.postToWorker({ type: 'entitySensorUpdate', entityId, sensorType, radius });
+    }
+
     /** Forward per-tick seismic ping events. Each ping is the deceived
      *  position the listener "hears" — never the unit's true position.
      *  The ally team is already filtered server-side; we just dispatch. */

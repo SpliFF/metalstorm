@@ -38,7 +38,12 @@
  *     bit  4:   repeatOrders
  *     bit  5:   isCloaked
  *     bit  6:   isStunned
- *     bit  7:   reserved (shield_active in a future revision)
+ *     bit  7:   alwaysVisible — mirrors WorldObject::alwaysVisible.
+ *               Set by `Spring.SetUnitAlwaysVisible(unitID, true)` and
+ *               for engine-tagged map landmarks. The client renderer
+ *               keeps these units drawn at the last-known pose even
+ *               when their los_state byte resolves to 0, matching
+ *               Recoil's "force render" contract.
  *
  * The envelope byte 0x02 is prepended by the caller.
  */
