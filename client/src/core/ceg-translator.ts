@@ -65,8 +65,12 @@ export function translateCegDef(def: CegDefInfo): EffectDef | null {
         if (s.flags) ps.flags = s.flags;
         spawns.push(ps);
     }
-    if (spawns.length === 0) return null;
-    return { name: def.tag, spawns };
+    if (spawns.length === 0 && !def.useDefaultExplosions) return null;
+    return {
+        name: def.tag,
+        spawns,
+        useDefaultExplosions: def.useDefaultExplosions,
+    };
 }
 
 function translateSpawn(s: CegSpawnInfo): ParticleSpawn | SubCegSpawn | null {

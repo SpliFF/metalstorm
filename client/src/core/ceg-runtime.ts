@@ -83,6 +83,16 @@ const DEFAULT_GRAVITY = 0;
 /// constant just to compute a delay).
 const SIM_HZ_RUNTIME = 30;
 
+/// Name of the built-in fallback effect that fires when a CEG has
+/// `useDefaultExplosions = true`. Mirrors Spring's
+/// CStdExplosionGenerator chain — a ground flash + heat cloud is
+/// enough to read as "there was an explosion here" even when the
+/// authored CEG is minimal (or contains only quiet sub-effects). The
+/// effect is registered as a built-in in BUILTIN_EFFECTS below; game
+/// authors can override by registering their own EffectDef under this
+/// name via ingestCegDefs (it'll replace the built-in).
+const DEFAULT_EXPLOSION_NAME = '__default_explosion';
+
 /// Shorthand colour 4-tuple. Components in [0,1]; alpha is the
 /// initial particle alpha at age 0 and fades linearly to 0 at
 /// `lifetime`. RGB stays constant for the particle's lifetime
@@ -234,6 +244,13 @@ export interface SubCegSpawn {
 export interface EffectDef {
     name: string;
     spawns: Array<ParticleSpawn | SubCegSpawn>;
+    /// Mirror of the streamed `useDefaultExplosions` flag. When true,
+    /// the runtime appends a built-in fallback set (ground flash +
+    /// heat cloud) after the CEG's own spawns. Spring's behaviour
+    /// chains `CStdExplosionGenerator::Explosion` here; on a headless
+    /// authoritative server that path is a no-op, so the client has
+    /// to synthesise the visuals.
+    useDefaultExplosions?: boolean;
 }
 
 /// Per-class GPU + CPU state. Capacity is fixed at construction so
@@ -502,6 +519,22 @@ export class CegRuntime {
 
         const nowMs = performance.now();
         const ctx: ExprContext = { damage };
+
+        // Phase 7: append the default-explosion visuals when the CEG
+        // opted in. We dispatch the built-in effect first so the
+        // authored CEG's spawns layer on top (matching Spring's
+        // chain-order: standard generator runs *before* the custom
+        // particles in execution order, but Spring draws back-to-
+        // front so the custom ends up on top — same net effect).
+        // The DEFAULT_EXPLOSION_NAME guard breaks the recursion: the
+        // built-in default itself never opts into more defaults, but
+        // an author-supplied override might forget to clear the flag.
+        if (def.useDefaultExplosions && name !== DEFAULT_EXPLOSION_NAME) {
+            this.spawnInternal(DEFAULT_EXPLOSION_NAME,
+                x, y, z, dx, dy, dz,
+                damage, contextFlags, depth + 1);
+        }
+
         for (const sp of def.spawns) {
             // Visibility gate. flags === 0 means "always emit"
             // (CEG author left every visibility bool false, which the
@@ -1091,6 +1124,37 @@ const BUILTIN_EFFECTS: EffectDef[] = [
                 sizeStart: 1.0, sizeEnd: 0.2,
                 colorStart: [0.7, 0.55, 0.4, 1.0],
                 rotationSpeedMax: 0,
+            },
+        ],
+    },
+    // Phase 7: standard fallback explosion. Fired by spawnInternal
+    // whenever a CEG has `useDefaultExplosions = true`. Spring's
+    // CStdExplosionGenerator equivalent — a ground flash + a heat
+    // cloud puff. Sized for a generic mid-damage impact; CEG authors
+    // who want quieter or louder defaults override by registering a
+    // same-named EffectDef via the streamed CEG ingest path.
+    {
+        name: DEFAULT_EXPLOSION_NAME,
+        spawns: [
+            {
+                class: 'flare', count: 1,
+                lifetimeMin: 0.4, lifetimeMax: 0.6,
+                velocityBase: [0, 0, 0], velocitySpread: 0, velocityScale: 0,
+                gravity: 0,
+                sizeStart: 10, sizeEnd: 22,
+                colorStart: [1.0, 0.7, 0.3, 0.9],
+                colorEnd:   [0.5, 0.2, 0.05, 0.0],
+                rotationSpeedMax: 0,
+            },
+            {
+                class: 'smoke', count: 2,
+                lifetimeMin: 0.8, lifetimeMax: 1.4,
+                velocityBase: [0, 5, 0], velocitySpread: 3, velocityScale: 0,
+                gravity: -3,
+                sizeStart: 6, sizeEnd: 18,
+                colorStart: [0.45, 0.4, 0.35, 0.55],
+                colorEnd:   [0.25, 0.2, 0.18, 0.0],
+                rotationSpeedMax: 0.8,
             },
         ],
     },
