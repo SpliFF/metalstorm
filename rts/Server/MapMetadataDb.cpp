@@ -27,7 +27,7 @@ void MapMetadataDb::EnsureTable(sqlite3* db) {
     {
         sqlite3_stmt* stmt = nullptr;
         int rc = sqlite3_prepare_v2(db,
-            "SELECT feature_defs FROM maps LIMIT 1", -1, &stmt, nullptr);
+            "SELECT sound_preset FROM maps LIMIT 1", -1, &stmt, nullptr);
         sqlite3_finalize(stmt);
         if (rc != SQLITE_OK) {
             sqlite3_exec(db, "DROP TABLE IF EXISTS maps", nullptr, nullptr, nullptr);
@@ -66,7 +66,11 @@ void MapMetadataDb::EnsureTable(sqlite3* db) {
             water_base_color TEXT, water_surface_color TEXT, water_min_color TEXT,
             water_surface_alpha REAL, water_damage REAL, void_water INTEGER,
             -- Client-side Lua widgets shipped by the map (pipe-delimited paths)
-            widgets TEXT
+            widgets TEXT,
+            -- Map-wide reverb preset (mapinfo.lua → sound.preset). Empty
+            -- or "default" means no reverb. Client maps the name to a
+            -- ConvolverNode IR fetched from sounds/efx/<preset>.webm.
+            sound_preset TEXT
         );
     )", nullptr, nullptr, nullptr);
 }
@@ -154,11 +158,11 @@ void MapMetadataDb::StoreMetadata(sqlite3* db, const MapMetadata& m) {
          feature_types,features_blob,feature_defs,
          water_base_color,water_surface_color,water_min_color,
          water_surface_alpha,water_damage,void_water,
-         widgets)
+         widgets,sound_preset)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?,?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?,
-                ?)
+                ?,?)
     )", -1, &stmt, nullptr);
 
     int i = 1;
@@ -209,6 +213,7 @@ void MapMetadataDb::StoreMetadata(sqlite3* db, const MapMetadata& m) {
     sqlite3_bind_double(stmt, i++, m.water.damage);
     sqlite3_bind_int(stmt, i++, m.water.voidWater ? 1 : 0);
     sqlite3_bind_text(stmt, i++, widgetsStr.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, i++, m.soundPreset.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 }
@@ -241,7 +246,7 @@ std::vector<MapMetadata> MapMetadataDb::GetAllMaps(sqlite3* db) {
         "detail_normal_tex,splat_scales,splat_mults,"
         "feature_types,features_blob,feature_defs,"
         "water_base_color,water_surface_color,water_min_color,"
-        "water_surface_alpha,water_damage,void_water,widgets FROM maps", -1, &stmt, nullptr);
+        "water_surface_alpha,water_damage,void_water,widgets,sound_preset FROM maps", -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
         SLOG(SPRING_LOG_ERROR, "GetAllMaps: SQL prepare failed: %s",
             sqlite3_errmsg(db));
@@ -389,6 +394,9 @@ std::vector<MapMetadata> MapMetadataDb::GetAllMaps(sqlite3* db) {
             while (std::getline(ss, w, '|'))
                 if (!w.empty()) m.widgets.push_back(w);
         }
+
+        // Map sound preset (mapinfo.lua → sound.preset).
+        m.soundPreset = maybeStr(i++);
 
         result.push_back(std::move(m));
     }

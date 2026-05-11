@@ -591,6 +591,11 @@ int main(int argc, char* argv[])
                 // hasLuaGaia
                 json += std::string(",\"hasLuaGaia\":") + (m.hasLuaGaia ? "true" : "false");
 
+                // Map sound preset (from mapinfo.lua's `sound = { preset = ... }`).
+                // Client maps this to AudioManager.setReverbPreset; missing
+                // / empty / "default" means no reverb.
+                json += ",\"soundPreset\":\"" + HttpAuth::JsonEscape(m.soundPreset) + "\"";
+
                 // Widgets
                 json += ",\"widgets\":[";
                 for (size_t i = 0; i < m.widgets.size(); i++) {

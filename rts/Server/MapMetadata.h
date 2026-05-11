@@ -117,6 +117,11 @@ struct MapMetadata {
     std::vector<MapFeatureDef> featureDefs;
     MapDecalData decals;
     MapWaterData water;
+    /// `mapinfo.lua → sound.preset` — names an OpenAL EFX preset that
+    /// Recoil binds to the map-wide reverb chain. Client side, we map
+    /// this to a ConvolverNode impulse-response fetched from
+    /// `sounds/efx/<preset>.webm`. Empty / `"default"` = no reverb.
+    std::string soundPreset;
     /// Relative paths (from the map source dir) to any .lua widgets the
     /// map ships under LuaUI/Widgets/. Client fetches each one from
     /// /api/maps/data/{id}/{path}.

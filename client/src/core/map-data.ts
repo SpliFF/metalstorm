@@ -101,6 +101,9 @@ export interface ParsedMapData {
     decals: MapDecalsInfo;
     water: MapWaterInfo;
     hasLuaGaia: boolean;
+    /// `mapinfo.lua → sound.preset` — map-wide reverb preset name.
+    /// Empty / `"default"` = no reverb.
+    soundPreset: string;
     /// Relative paths of LuaUI widgets the map ships (e.g. "LuaUI/Widgets/lava_layer.lua").
     widgets: string[];
     // Convenience: world-space dimensions in elmos
@@ -249,6 +252,7 @@ export async function fetchMapDataHttp(lobbyBaseUrl: string, mapId: string): Pro
         decals,
         water,
         hasLuaGaia: meta.hasLuaGaia ?? false,
+        soundPreset: meta.soundPreset ?? '',
         widgets,
         widthElmos: mapx * squareSize,
         heightElmos: mapy * squareSize,
@@ -390,6 +394,11 @@ export function parseMapData(fb: FbMapData): ParsedMapData {
         decals,
         water,
         hasLuaGaia: fb.hasLuaGaia(),
+        // The FlatBuffer transport doesn't carry soundPreset yet; only
+        // the HTTP metadata.json path does. Callers using parseMapData
+        // (sim-side authoritative flow) won't get reverb. That's fine —
+        // every modern code path goes through fetchMapDataHttp.
+        soundPreset: '',
         widgets,
         widthElmos: mapx * squareSize,
         heightElmos: mapy * squareSize,

@@ -266,6 +266,21 @@ bool MapProcessor::ReadMapInfo(const std::string& mapDir, MapMetadata& meta) {
                 }
                 lua_pop(L, 1); // pop smf
 
+                // sound = { preset = "...", passfilter = {...}, reverb = {...} }
+                // Only the preset name flows to the client today — the
+                // detailed reverb / passfilter knobs are OpenAL EFX
+                // specific and we don't have a 1:1 Web Audio mapping.
+                // The plumbing for `Spring.SetSoundEffectParams(table)`
+                // is in place on the client; map authors who need fine
+                // control can call that from a gadget instead.
+                lua_getfield(L, -1, "sound");
+                if (lua_istable(L, -1)) {
+                    std::string preset = luaGetString(L, "preset");
+                    if (preset.empty()) preset = luaGetString(L, "Preset");
+                    meta.soundPreset = preset;
+                }
+                lua_pop(L, 1); // pop sound
+
                 // Read start positions: teams = { [0] = {startPos = {x=..., z=...}}, ... }
                 lua_getfield(L, -1, "teams");
                 if (lua_istable(L, -1)) {

@@ -532,6 +532,18 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         inputManager?.setMapData(map);
         commandPathRenderer?.setMapData(map);
         debugTerrainGrid?.setMapData(map);
+
+        // Apply map-wide reverb (mapinfo.lua → sound.preset). The
+        // AudioManager fetches sounds/efx/<preset>.webm from the map's
+        // content root; missing IRs stay in passthrough so a map that
+        // names a preset without shipping the IR works as if no preset
+        // were set. "default" / empty is a no-op.
+        if (audioManager && map.soundPreset) {
+            const mapBaseUrl = map.mapSourceUrl.startsWith('http')
+                ? map.mapSourceUrl
+                : `${lobbyHttpUrl}${map.mapSourceUrl}`;
+            void audioManager.setReverbPreset(map.soundPreset, mapBaseUrl);
+        }
         entityRenderer?.setMapHeightmap(
             map.heightmap, map.mapx, map.mapy,
             map.minHeight, map.maxHeight, map.squareSize,
