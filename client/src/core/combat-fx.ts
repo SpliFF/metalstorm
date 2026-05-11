@@ -19,7 +19,6 @@ import {
 } from '@babylonjs/core';
 import type { CombatEventInfo, ProjectileImpactInfo } from './connection.js';
 import { AudioManager } from './audio.js';
-import { createSynthSounds } from './synth-sounds.js';
 
 /// Mirrors SpringWeb::ProjectileImpactKind in protocol.fbs.
 const enum ImpactKind {
@@ -51,18 +50,13 @@ export class CombatFX {
     private shieldMat: StandardMaterial;
     private dirtMat: StandardMaterial;
 
-    private synthSounds: Map<string, AudioBuffer> | null = null;
+    /// Once-per-kind warning gate so we don't spam the console every
+    /// frame for unwired sound categories.
+    private warnedKinds = new Set<string>();
 
     constructor(scene: Scene, audio?: AudioManager) {
         this.scene = scene;
         this.audio = audio ?? null;
-
-        // Generate procedural sounds
-        if (this.audio) {
-            try {
-                this.synthSounds = createSynthSounds(this.audio.context);
-            } catch { /* AudioContext not ready yet */ }
-        }
 
         this.impactMat = new StandardMaterial('impactFxMat', scene);
         this.impactMat.diffuseColor = new Color3(1.0, 0.6, 0.1);
@@ -125,10 +119,9 @@ export class CombatFX {
         mesh.position.set(x, y + 1, z);
         mesh.material = this.dirtMat;
         this.effects.push({ mesh, lifetime: 0.25 });
-        const buf = this.synthSounds?.get('impact');
-        if (buf && this.audio) {
-            this.audio.play({ buffer: buf, x, y, z, priority: 1, volume: 0.2 });
-        }
+        // Audio for terrain/feature impacts is emitted server-side as
+        // the weapon's soundHitDry/soundHitWet SoundEvent
+        // (WeaponProjectile::Explode). No client-side sound needed.
     }
 
     private spawnShieldRipple(x: number, y: number, z: number): void {
@@ -137,6 +130,7 @@ export class CombatFX {
         mesh.position.set(x, y, z);
         mesh.material = this.shieldMat;
         this.effects.push({ mesh, lifetime: 0.4 });
+        this.reportMissingSound('shield-hit');
     }
 
     private spawnAirburst(x: number, y: number, z: number): void {
@@ -145,10 +139,7 @@ export class CombatFX {
         mesh.position.set(x, y, z);
         mesh.material = this.impactMat;
         this.effects.push({ mesh, lifetime: 0.3 });
-        const buf = this.synthSounds?.get('explosion');
-        if (buf && this.audio) {
-            this.audio.play({ buffer: buf, x, y, z, priority: 3, volume: 0.4 });
-        }
+        this.reportMissingSound('airburst');
     }
 
     /**
@@ -178,12 +169,8 @@ export class CombatFX {
         mesh.material = this.impactMat;
 
         this.effects.push({ mesh, lifetime: 0.15 });
-
-        // Play impact sound
-        const buf = this.synthSounds?.get('impact');
-        if (buf && this.audio) {
-            this.audio.play({ buffer: buf, x, y, z, priority: 1, volume: 0.3 });
-        }
+        // Hit audio is the weapon's soundHitDry/soundHitWet SoundEvent
+        // emitted by Unit::DoDamage. Nothing to play here.
     }
 
     /** Spawn an explosion effect (for kills). */
@@ -194,12 +181,22 @@ export class CombatFX {
         mesh.material = this.killMat;
 
         this.effects.push({ mesh, lifetime: 0.5 });
+        // Kill audio is the same weapon soundHit SoundEvent that the
+        // hit case uses, emitted by Unit::DoDamage with priority 192
+        // (vs 128 for non-fatal hits). Nothing to play here.
+    }
 
-        // Play explosion sound
-        const buf = this.synthSounds?.get('explosion');
-        if (buf && this.audio) {
-            this.audio.play({ buffer: buf, x, y, z, priority: 5, volume: 0.6 });
-        }
+    /// Log once per impact kind that has no server SoundEvent wired.
+    /// Used for Shield / SelfDetonate / Intercepted / Other — the
+    /// server's projectile-impact path doesn't currently emit a sound
+    /// for these. Hit / Kill / Terrain / Feature impacts already get
+    /// the weapon's soundHit through the regular SoundEvent stream.
+    private reportMissingSound(kind: string): void {
+        if (this.warnedKinds.has(kind)) return;
+        this.warnedKinds.add(kind);
+        console.error(
+            `[combat-fx] no server SoundEvent for '${kind}'; ` +
+            'wire the emission server-side (Sim/Projectiles impact path).');
     }
 
     /**
