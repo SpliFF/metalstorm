@@ -65,8 +65,7 @@ const vfsPathMap = new Map<string, string>();
 const vfsDirCache = new Map<string, string[]>();
 const vfsSubdirCache = new Map<string, string[]>();
 
-function vfsRegister(path: string, content: string): void {
-    vfsFiles.set(path, content);
+function vfsIndexPath(path: string): void {
     vfsPathMap.set(path.toLowerCase(), path);
 
     const lastSlash = path.lastIndexOf('/');
@@ -78,7 +77,8 @@ function vfsRegister(path: string, content: string): void {
         // lookups work (ZK code uses "skins/" but disk has "Skins/").
         const dirKey = dir.toLowerCase();
         if (!vfsDirCache.has(dirKey)) vfsDirCache.set(dirKey, []);
-        vfsDirCache.get(dirKey)!.push(file);
+        const dirArr = vfsDirCache.get(dirKey)!;
+        if (!dirArr.includes(file)) dirArr.push(file);
 
         const parts = path.split('/');
         for (let i = 1; i < parts.length - 1; i++) {
@@ -92,6 +92,44 @@ function vfsRegister(path: string, content: string): void {
             }
         }
     }
+}
+
+function vfsRegister(path: string, content: string): void {
+    vfsFiles.set(path, content);
+    vfsIndexPath(path);
+}
+
+/// Register a path that exists on disk but whose bytes aren't stored
+/// in the worker. Used for binary assets (audio, images) so widgets
+/// can probe via VFS.FileExists / VFS.DirList without us prefetching
+/// megabytes of content the Lua side can't consume anyway. AudioManager
+/// fetches the actual bytes directly when a SoundEvent fires.
+function vfsRegisterPath(path: string): void {
+    if (vfsPathMap.has(path.toLowerCase())) return;
+    vfsIndexPath(path);
+}
+
+/// Audio extensions mirror ContentServer.cpp's whitelist. Kept in
+/// sync so a file servable over HTTP is discoverable via VFS.
+const AUDIO_EXTS = ['.wav', '.ogg', '.webm', '.m4a', '.mp3'];
+function isAudioFile(nameLower: string): boolean {
+    for (const ext of AUDIO_EXTS) {
+        if (nameLower.endsWith(ext)) return true;
+    }
+    return false;
+}
+
+/// Existence check that succeeds for both content-bearing and
+/// path-only registrations. vfsLookup intentionally returns undefined
+/// for path-only entries so VFS.LoadFile yields nil on binary assets,
+/// so we can't piggyback on it for existence semantics.
+function vfsExists(path: string): boolean {
+    if (vfsFiles.has(path)) return true;
+    if (vfsFiles.has('LuaUI/' + path)) return true;
+    const lower = path.toLowerCase();
+    if (vfsPathMap.has(lower)) return true;
+    if (vfsPathMap.has(('LuaUI/' + path).toLowerCase())) return true;
+    return false;
 }
 
 function vfsLookup(path: string): string | undefined {
@@ -133,6 +171,11 @@ async function prefetchAllGameFiles(baseUrl: string): Promise<void> {
         // api_modularcomms.lua → drives WG.ModularCommAPI → drives
         // commander selector and several context-menu widgets.
         'modularCommAPI',
+        // Game-root audio. ZK's snd_noises and friends probe
+        // `Sounds/reply/<unit>.WAV` via VFS.FileExists; without this
+        // descent the audio paths aren't indexed and every probe
+        // returns false even though the bytes are on disk.
+        'sounds',
     ];
     const visited = new Set<string>();
 
@@ -152,11 +195,17 @@ async function prefetchAllGameFiles(baseUrl: string): Promise<void> {
             const toFetch: string[] = [];
             for (const e of entries) {
                 const fullPath = `${dir}/${e.name}`;
-                if (e.type === 'file' &&
-                    (e.name.endsWith('.lua') || e.name.endsWith('.txt') ||
-                     e.name.endsWith('.json'))) {
-                    if (vfsFiles.has(fullPath)) continue;
-                    toFetch.push(fullPath);
+                if (e.type === 'file') {
+                    const lower = e.name.toLowerCase();
+                    if (lower.endsWith('.lua') || lower.endsWith('.txt') ||
+                        lower.endsWith('.json')) {
+                        if (vfsFiles.has(fullPath)) continue;
+                        toFetch.push(fullPath);
+                    } else if (isAudioFile(lower)) {
+                        // Path-only index — AudioManager fetches the bytes
+                        // on demand when a SoundEvent fires.
+                        vfsRegisterPath(fullPath);
+                    }
                 } else if (e.type === 'dir' || e.type === 'directory') {
                     queue.push(fullPath);
                 }
@@ -3044,6 +3093,14 @@ function installVFS(rt: LuaRuntime): void {
         return vfsLookup(String(path)) ?? null;
     });
 
+    /// Existence check that succeeds for path-only entries (audio,
+    /// other binary assets). VFS.FileExists must short-circuit via
+    /// this rather than relying on _vfsLookup, which intentionally
+    /// returns nil for entries that have no Lua-loadable content.
+    rt.setGlobal('_vfsExists', (path: LuaValue) => {
+        return vfsExists(String(path));
+    });
+
     rt.setGlobal('_vfsDirList', (dir: LuaValue) => {
         const d = String(dir).toLowerCase();
         return luaTable(...(vfsDirCache.get(d) ?? []));
@@ -4144,7 +4201,8 @@ end
 VFS.FileExists = function(path, mode)
     if not path then return false end
     path = normalizePath(path)
-    return vfsLookup(path) ~= nil
+    if VFS._writeCache[path] ~= nil then return true end
+    return _vfsExists(path)
 end
 
 VFS.LoadFile = function(path, mode)

@@ -1048,7 +1048,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         // on camera-change events and lagged behind pans/zooms.
         // The zoom factor uses camera Y (RtsCamera keeps the camera in
         // [minHeight,maxHeight]) so further-out cameras quiet the SFX
-        // bus and raise the priority floor (PLAN-sound.md Phase 3).
+        // bus and raise the priority floor (PLAN-audio.md).
         if (audioManager) {
             const cp = camera.position;
             const fwd = camera.getTarget().subtract(cp).normalize();

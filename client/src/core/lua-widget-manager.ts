@@ -28,6 +28,30 @@ import type { Minimap } from './minimap.js';
 // Vite worker import — bundles the worker as a separate chunk
 import WidgetWorker from './lua-widget-worker.ts?worker';
 
+/// Heuristic resolver for `Spring.PlaySoundFile(name, …)` from widget
+/// Lua. Recoil itself resolves `name` through the `soundItemDefsMap`
+/// built from `gamedata/sounds.lua` first (see CSound::GetSoundId),
+/// only falling back to a literal-VFS open if no item matches — the
+/// SoundItem's `file` field is what supplies the fully-qualified
+/// "sounds/foo.wav". We don't ship that map to the client yet, so
+/// this approximates it: prepend `sounds/`, append `.wav` when no
+/// extension is present. Works for ZK because every `sounds/reply/*`
+/// asset is `.wav`; will break for any game shipping `.ogg`/`.mp3`
+/// SFX. Proper fix is to honour the SoundItem map — see PLAN-audio.md
+/// "Open issues" and "Content-prep audio conversion" (re-encoding
+/// every asset to a single canonical `.webm` extension lets us drop
+/// this heuristic entirely).
+function normalizeSoundPath(name: string): string {
+    if (!name) return '';
+    let out = name.replace(/^\/+/, '');
+    if (out.toLowerCase().startsWith('sounds/')) out = out.substring(7);
+    const lastSlash = out.lastIndexOf('/');
+    const lastDot = out.lastIndexOf('.');
+    const hasExt = lastDot >= 0 && lastDot > lastSlash;
+    if (!hasExt) out += '.wav';
+    return 'sounds/' + out;
+}
+
 // ── Types ───────────────────────────────────────────────────────────────
 
 export interface WidgetManagerOptions {
@@ -795,8 +819,16 @@ export class LuaWidgetManager {
                 const y = typeof msg.y === 'number' ? msg.y : 0;
                 const z = typeof msg.z === 'number' ? msg.z : 0;
                 const spatial = !!msg.spatial;
-                const url = `${this.options.lobbyUrl}/api/games/data/${this.options.gameId}/${path.replace(/^\/+/, '')}`;
-                am.loadSound(path, url).then((buf) => {
+                // Widgets pass Spring-convention paths like "reply/bot_select"
+                // or "weapon/laser1" — Spring's engine prepends `sounds/` and
+                // appends `.wav` at lookup time. Mirror that here so the URL
+                // lands on the file on disk. Server-emitted SoundEvents go
+                // through SoundEventPlayer with paths already normalised by
+                // NormalizeSoundPath in Protocol.h; this path is the
+                // PlaySoundFile-from-Lua side that bypasses that.
+                const resolved = normalizeSoundPath(path);
+                const url = `${this.options.lobbyUrl}/api/games/data/${this.options.gameId}/${resolved}`;
+                am.loadSound(resolved, url).then((buf) => {
                     if (!buf) return;
                     am.play({
                         buffer: buf,

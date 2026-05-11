@@ -100,6 +100,11 @@ interface InstancedWeaponVisual extends BaseWeaponVisual {
     mesh: Mesh;
     material: StandardMaterial;
     orientation: ProjectileOrientation;
+    /// Uniform scale applied at thin-instance compose time. Set by
+    /// swapInModel to fit the loaded .glb into the procedural shape's
+    /// size envelope. Procedural meshes are already authored at the
+    /// right size (4*size elmos) so this stays 1.
+    modelScale?: number;
 }
 
 /** Beam visual (Laser / BeamLaser). The middle mesh is a unit quad
@@ -471,9 +476,13 @@ export class ProjectileRenderer {
         merged.isVisible = false;
         merged.thinInstanceEnablePicking = false;
         // Normalize size — the .glb is authored at full unit-elmo scale
-        // but our procedural shapes were `4*size` elmos across. Scale
-        // the model down so the loaded geometry sits in the same size
-        // bracket as the procedural fallback would have.
+        // but our procedural shapes were `4*size` elmos across. We can't
+        // bake the scale into vertices because Babylon's glTF loader
+        // discards CPU position/normal data after GPU upload, and
+        // bakeCurrentTransformIntoVertices then null-derefs. Instead,
+        // stash the scale on the visual and let the per-instance matrix
+        // pick it up at compose time (thin instances ignore mesh.scaling
+        // because the per-instance matrix replaces the world matrix).
         const targetExtent = 4 * size;
         const bb = merged.getBoundingInfo().boundingBox;
         const longest = Math.max(
@@ -481,11 +490,7 @@ export class ProjectileRenderer {
             bb.maximum.y - bb.minimum.y,
             bb.maximum.z - bb.minimum.z,
         );
-        if (longest > 1e-3) {
-            const s = targetExtent / longest;
-            merged.scaling.set(s, s, s);
-            merged.bakeCurrentTransformIntoVertices();
-        }
+        const modelScale = longest > 1e-3 ? targetExtent / longest : 1;
 
         // Replace the procedural mesh on the visual and dispose it.
         // Material reuse: the loaded model's material is fine, but if
@@ -494,6 +499,7 @@ export class ProjectileRenderer {
         const oldMesh = visual.mesh;
         const oldMat = visual.material;
         visual.mesh = merged;
+        visual.modelScale = modelScale;
         if (merged.material instanceof StandardMaterial) {
             const stdMat = merged.material;
             stdMat.emissiveColor = oldMat.emissiveColor.clone();
@@ -734,6 +740,14 @@ export class ProjectileRenderer {
             const visual = lookup as InstancedWeaponVisual;
             const matrices = new Float32Array(projs.length * 16);
             const billboard = visual.orientation === 'billboard';
+            // Loaded .glb projectiles fit themselves into the procedural
+            // shape's size via visual.modelScale (set in swapInModel).
+            // Procedural meshes are already authored at the right size
+            // and leave it undefined → scale of 1. Apply this in the
+            // per-instance matrix because thin instances replace the
+            // mesh's world matrix wholesale.
+            const groupScale = visual.modelScale ?? 1;
+            tmpScale.set(groupScale, groupScale, groupScale);
             for (let i = 0; i < projs.length; i++) {
                 const p = projs[i];
                 if (billboard) {
@@ -783,6 +797,11 @@ export class ProjectileRenderer {
             visual.mesh.thinInstanceCount = projs.length;
             updated.add(key);
         }
+
+        // tmpScale may have been left at the last group's modelScale —
+        // beam end-caps and missile trail composers share this temporary
+        // and expect unit scale, so reset before those passes run.
+        tmpScale.set(1, 1, 1);
 
         // 3. Hide instanced visuals with no live projectiles this
         //    frame. Beam visuals are managed by the dedicated beam

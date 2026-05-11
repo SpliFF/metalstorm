@@ -32,7 +32,7 @@ export interface SoundRequest {
     /// any component is non-zero, AudioManager schedules a linear
     /// position ramp on the PannerNode for the duration of the
     /// buffer so the source slides past the listener naturally
-    /// (PLAN-sound.md §Phase 3 item 14). Stationary sources omit
+    /// (PLAN-audio.md — moving-emitter ramps). Stationary sources omit
     /// this and the panner is set once at request time as before.
     vx?: number;
     vy?: number;
@@ -367,7 +367,7 @@ export class AudioManager {
 
         // Evict by priority; break ties by distance to the listener so
         // a distant low-priority voice drops before a nearby one of the
-        // same priority (PLAN-sound.md §Phase 2 item 10).
+        // same priority (PLAN-audio.md — voice eviction tie-break).
         let victimIdx = 0;
         let victimPriority = this.voices[0].priority;
         let victimDist = this.distanceFromListener(this.voices[0]);

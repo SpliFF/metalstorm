@@ -117,7 +117,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `core/rts-camera.ts` | Orbital pan/zoom/rotate camera with viewport updates. |
 | `core/input-manager.ts` | Click-to-select (ray cast), right-click-to-command, drag-box select, keyboard shortcuts. |
 | `core/minimap.ts` | Minimap canvas with entity dots, click-to-pan, detachable popup window. |
-| `core/audio.ts` + `core/synth-sounds.ts` | Web Audio: procedurally synthesised sounds for combat (no voice pool yet — see PLAN-audio.md). |
+| `core/audio.ts` + `core/sound-events.ts` + `core/synth-sounds.ts` | Web Audio: 96-voice HRTF pool, SFX bus with zoom-aware attenuation, master limiter. Server SoundEvents resolve through `sound-events.ts`; `synth-sounds.ts` is the procedural fallback for combat-fx. See PLAN-audio.md. |
 | `core/map-data.ts` | Parses MapData FlatBuffer into `ParsedMapData` (heightmap, features, tiles, URLs). |
 | `core/lua-runtime.ts` + `core/fengari.d.ts` | Shared Fengari Lua 5.1 runtime. Type definitions. |
 | `core/lua-spring-api.ts` | Client-side `Spring.*` API surface (read-only sim queries, draw helpers). |
@@ -436,4 +436,4 @@ first entity/projectile state update that references it.
 - SQL query proxy, process management API, game session tracking
 - MCP server for Claude integration (`tools/debug-mcp`)
 
-**Not yet wired:** Web Audio voice pool (currently only synthesised sounds via `core/synth-sounds.ts`), server-side AI plugin runtime (skeleton in `Server/AI/` exists but plugins don't boot reliably), spectator mode, Glicko-2 ratings, persistent world layer.
+**Not yet wired:** server-side AI plugin runtime (skeleton in `Server/AI/` exists but plugins don't boot reliably), spectator mode, Glicko-2 ratings, persistent world layer, server-driven music triggers (`playMusic()` wired but no sim-side state machine yet).
