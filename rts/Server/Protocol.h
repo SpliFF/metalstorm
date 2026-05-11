@@ -242,6 +242,7 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
         seb.add_pitch(s.pitch);
         seb.add_priority(s.priority);
         seb.add_team(s.team);
+        seb.add_channel(static_cast<SpringWeb::SoundChannel>(s.channel));
         soundOffsets.push_back(seb.Finish());
     }
 
@@ -770,13 +771,18 @@ inline std::vector<uint8_t> BuildRoomListUpdate(const std::vector<GameRoom*>& ro
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_RoomListUpdate, update.Union());
 }
 
-/// Translate a (possibly stem-only) sound name into the form the
-/// content server actually publishes. Spring conventionally stores
-/// sound names like `weapon/laser1` and the runtime prepends
-/// `sounds/` and appends `.wav` when looking them up — we replicate
-/// that here so the path the client receives can be fetched directly
-/// from `/api/games/data/<gameId>/<path>`. Already-fully-qualified
-/// paths (`sounds/foo.wav`, `weapon/laser1.ogg`) are passed through.
+/// Translate a (possibly stem-only) sound name into the canonical
+/// `sounds/<rel>.webm` form the content server publishes. Every
+/// audio asset on disk is `.webm` (Opus) post-audioconverter; the
+/// client never sees a `.wav`/`.ogg`/`.mp3` URL.
+///
+/// Three input shapes are normalised:
+///   - `weapon/laser1`           -> `sounds/weapon/laser1.webm`
+///   - `sounds/weapon/laser1.wav`-> `sounds/weapon/laser1.webm`
+///   - `weapon/laser1.ogg`       -> `sounds/weapon/laser1.webm`
+///
+/// The raw unresolved string still flows separately as `SoundRef.name`
+/// so the client can look up SoundItem metadata in `gamedata/sounds.lua`.
 inline std::string NormalizeSoundPath(const std::string& name) {
     if (name.empty()) return {};
     std::string out = name;
@@ -786,12 +792,17 @@ inline std::string NormalizeSoundPath(const std::string& name) {
         return out.size() >= n && std::strncmp(out.c_str(), p, n) == 0;
     };
     if (hasPrefix("sounds/")) out.erase(0, 7);
-    // Ensure a file extension. Engine convention is `.wav`.
+    // Replace any existing extension with `.webm`, or append `.webm`
+    // if there's no extension. Engine convention historically was
+    // `.wav` but post-audioconverter every asset is `.webm`.
     const auto dot = out.find_last_of('.');
     const auto slash = out.find_last_of('/');
     const bool hasExt = (dot != std::string::npos) &&
                         (slash == std::string::npos || dot > slash);
-    if (!hasExt) out += ".wav";
+    if (hasExt) {
+        out.erase(dot);
+    }
+    out += ".webm";
     return std::string("sounds/") + out;
 }
 
@@ -813,9 +824,16 @@ inline uint16_t AppendSoundRefs(
         if (d.name.empty()) continue;
         const std::string path = NormalizeSoundPath(d.name);
         auto pathOff = fbb.CreateString(path);
+        // The raw unresolved logical name (e.g. `"weapon/laser1"` or
+        // `"bot_select"`). The client uses this to look up SoundItem
+        // metadata in `gamedata/sounds.lua` for per-item gain/pitch/
+        // priority/maxconcurrent/etc. defaults that the server can't
+        // know about.
+        auto nameOff = fbb.CreateString(d.name);
         SpringWeb::SoundRefBuilder b(fbb);
         b.add_id(nextId++);
         b.add_path(pathOff);
+        b.add_name(nameOff);
         b.add_category(category);
         // Spring volumes >1 are common; clamp the *default* into 0..1
         // so the client can multiply unbounded SoundEvent.volume against
@@ -1248,9 +1266,11 @@ inline flatbuffers::Offset<SpringWeb::GameWeaponDef> BuildSingleWeaponDef(
                 ? SpringWeb::SoundCategory_HitDry
                 : SpringWeb::SoundCategory_HitWet;
             auto pathOff = fbb.CreateString(NormalizeSoundPath(d.name));
+            auto nameOff = fbb.CreateString(d.name);
             SpringWeb::SoundRefBuilder sb(fbb);
             sb.add_id(nextSoundId++);
             sb.add_path(pathOff);
+            sb.add_name(nameOff);
             sb.add_category(cat);
             const float vol = (d.volume > 0.0f) ? std::min(d.volume, 4.0f) : 1.0f;
             sb.add_volume(vol);

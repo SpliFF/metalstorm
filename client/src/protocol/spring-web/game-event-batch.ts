@@ -6,6 +6,7 @@ import * as flatbuffers from 'flatbuffers';
 
 import { CombatEvent, CombatEventT } from '../spring-web/combat-event.js';
 import { GameEvent, GameEventT } from '../spring-web/game-event.js';
+import { MusicEvent, MusicEventT } from '../spring-web/music-event.js';
 import { ProjectileFiredEvent, ProjectileFiredEventT } from '../spring-web/projectile-fired-event.js';
 import { ProjectileImpactEvent, ProjectileImpactEventT } from '../spring-web/projectile-impact-event.js';
 import { ProjectileTrajectoryEvent, ProjectileTrajectoryEventT } from '../spring-web/projectile-trajectory-event.js';
@@ -118,8 +119,24 @@ seismicPingsLength():number {
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
+/**
+ * Music-state transitions emitted by the server's intensity
+ * tracker. Broadcast to every client (no per-viewport filtering)
+ * so spectators stay in sync. Usually empty; only populated on
+ * the tick when a state change fires.
+ */
+musicEvents(index: number, obj?:MusicEvent):MusicEvent|null {
+  const offset = this.bb!.__offset(this.bb_pos, 20);
+  return offset ? (obj || new MusicEvent()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
+}
+
+musicEventsLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 20);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
 static startGameEventBatch(builder:flatbuffers.Builder) {
-  builder.startObject(8);
+  builder.startObject(9);
 }
 
 static addFrame(builder:flatbuffers.Builder, frame:number) {
@@ -238,12 +255,28 @@ static startSeismicPingsVector(builder:flatbuffers.Builder, numElems:number) {
   builder.startVector(4, numElems, 4);
 }
 
+static addMusicEvents(builder:flatbuffers.Builder, musicEventsOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(8, musicEventsOffset, 0);
+}
+
+static createMusicEventsVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startMusicEventsVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
 static endGameEventBatch(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOffset:flatbuffers.Offset, combatEventsOffset:flatbuffers.Offset, projectileFiredOffset:flatbuffers.Offset, projectileImpactsOffset:flatbuffers.Offset, projectileTrajectoriesOffset:flatbuffers.Offset, soundsOffset:flatbuffers.Offset, seismicPingsOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOffset:flatbuffers.Offset, combatEventsOffset:flatbuffers.Offset, projectileFiredOffset:flatbuffers.Offset, projectileImpactsOffset:flatbuffers.Offset, projectileTrajectoriesOffset:flatbuffers.Offset, soundsOffset:flatbuffers.Offset, seismicPingsOffset:flatbuffers.Offset, musicEventsOffset:flatbuffers.Offset):flatbuffers.Offset {
   GameEventBatch.startGameEventBatch(builder);
   GameEventBatch.addFrame(builder, frame);
   GameEventBatch.addEvents(builder, eventsOffset);
@@ -253,6 +286,7 @@ static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOff
   GameEventBatch.addProjectileTrajectories(builder, projectileTrajectoriesOffset);
   GameEventBatch.addSounds(builder, soundsOffset);
   GameEventBatch.addSeismicPings(builder, seismicPingsOffset);
+  GameEventBatch.addMusicEvents(builder, musicEventsOffset);
   return GameEventBatch.endGameEventBatch(builder);
 }
 
@@ -265,7 +299,8 @@ unpack(): GameEventBatchT {
     this.bb!.createObjList<ProjectileImpactEvent, ProjectileImpactEventT>(this.projectileImpacts.bind(this), this.projectileImpactsLength()),
     this.bb!.createObjList<ProjectileTrajectoryEvent, ProjectileTrajectoryEventT>(this.projectileTrajectories.bind(this), this.projectileTrajectoriesLength()),
     this.bb!.createObjList<SoundEvent, SoundEventT>(this.sounds.bind(this), this.soundsLength()),
-    this.bb!.createObjList<SeismicPing, SeismicPingT>(this.seismicPings.bind(this), this.seismicPingsLength())
+    this.bb!.createObjList<SeismicPing, SeismicPingT>(this.seismicPings.bind(this), this.seismicPingsLength()),
+    this.bb!.createObjList<MusicEvent, MusicEventT>(this.musicEvents.bind(this), this.musicEventsLength())
   );
 }
 
@@ -279,6 +314,7 @@ unpackTo(_o: GameEventBatchT): void {
   _o.projectileTrajectories = this.bb!.createObjList<ProjectileTrajectoryEvent, ProjectileTrajectoryEventT>(this.projectileTrajectories.bind(this), this.projectileTrajectoriesLength());
   _o.sounds = this.bb!.createObjList<SoundEvent, SoundEventT>(this.sounds.bind(this), this.soundsLength());
   _o.seismicPings = this.bb!.createObjList<SeismicPing, SeismicPingT>(this.seismicPings.bind(this), this.seismicPingsLength());
+  _o.musicEvents = this.bb!.createObjList<MusicEvent, MusicEventT>(this.musicEvents.bind(this), this.musicEventsLength());
 }
 }
 
@@ -291,7 +327,8 @@ constructor(
   public projectileImpacts: (ProjectileImpactEventT)[] = [],
   public projectileTrajectories: (ProjectileTrajectoryEventT)[] = [],
   public sounds: (SoundEventT)[] = [],
-  public seismicPings: (SeismicPingT)[] = []
+  public seismicPings: (SeismicPingT)[] = [],
+  public musicEvents: (MusicEventT)[] = []
 ){}
 
 
@@ -303,6 +340,7 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const projectileTrajectories = GameEventBatch.createProjectileTrajectoriesVector(builder, builder.createObjectOffsetList(this.projectileTrajectories));
   const sounds = GameEventBatch.createSoundsVector(builder, builder.createObjectOffsetList(this.sounds));
   const seismicPings = GameEventBatch.createSeismicPingsVector(builder, builder.createObjectOffsetList(this.seismicPings));
+  const musicEvents = GameEventBatch.createMusicEventsVector(builder, builder.createObjectOffsetList(this.musicEvents));
 
   return GameEventBatch.createGameEventBatch(builder,
     this.frame,
@@ -312,7 +350,8 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     projectileImpacts,
     projectileTrajectories,
     sounds,
-    seismicPings
+    seismicPings,
+    musicEvents
   );
 }
 }

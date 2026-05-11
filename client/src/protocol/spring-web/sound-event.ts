@@ -4,6 +4,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 
+import { SoundChannel } from '../spring-web/sound-channel.js';
 import { SoundSourceKind } from '../spring-web/sound-source-kind.js';
 import { Vec3, Vec3T } from '../spring-web/vec3.js';
 
@@ -65,6 +66,10 @@ pitch():number {
 
 /**
  * Eviction priority when the 96-voice pool is full. Higher wins.
+ * Set by the server when no SoundItem entry is available; if the
+ * client resolves a SoundItem with its own `priority`, that
+ * overrides this value (per the SoundItem-resolution rules in
+ * PLAN-audio.md).
  */
 priority():number {
   const offset = this.bb!.__offset(this.bb_pos, 16);
@@ -80,8 +85,19 @@ team():number {
   return offset ? this.bb!.readUint8(this.bb_pos + offset) : 255;
 }
 
+/**
+ * Mix channel. Server-side emitters pick this based on context:
+ * CWeapon::Fire and projectile impacts -> Battle; selection /
+ * order-ack paths -> UnitReply; UI -> UserInterface; the music
+ * state machine -> BGMusic; everything else (default) -> General.
+ */
+channel():SoundChannel {
+  const offset = this.bb!.__offset(this.bb_pos, 20);
+  return offset ? this.bb!.readUint8(this.bb_pos + offset) : SoundChannel.General;
+}
+
 static startSoundEvent(builder:flatbuffers.Builder) {
-  builder.startObject(8);
+  builder.startObject(9);
 }
 
 static addSoundId(builder:flatbuffers.Builder, soundId:number) {
@@ -116,6 +132,10 @@ static addTeam(builder:flatbuffers.Builder, team:number) {
   builder.addFieldInt8(7, team, 255);
 }
 
+static addChannel(builder:flatbuffers.Builder, channel:SoundChannel) {
+  builder.addFieldInt8(8, channel, SoundChannel.General);
+}
+
 static endSoundEvent(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
@@ -131,7 +151,8 @@ unpack(): SoundEventT {
     this.volume(),
     this.pitch(),
     this.priority(),
-    this.team()
+    this.team(),
+    this.channel()
   );
 }
 
@@ -145,6 +166,7 @@ unpackTo(_o: SoundEventT): void {
   _o.pitch = this.pitch();
   _o.priority = this.priority();
   _o.team = this.team();
+  _o.channel = this.channel();
 }
 }
 
@@ -157,7 +179,8 @@ constructor(
   public volume: number = 1.0,
   public pitch: number = 1.0,
   public priority: number = 128,
-  public team: number = 255
+  public team: number = 255,
+  public channel: SoundChannel = SoundChannel.General
 ){}
 
 
@@ -171,6 +194,7 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   SoundEvent.addPitch(builder, this.pitch);
   SoundEvent.addPriority(builder, this.priority);
   SoundEvent.addTeam(builder, this.team);
+  SoundEvent.addChannel(builder, this.channel);
 
   return SoundEvent.endSoundEvent(builder);
 }

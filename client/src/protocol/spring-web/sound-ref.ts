@@ -39,7 +39,10 @@ id():number {
 }
 
 /**
- * Relative path under the content root (e.g. `sounds/weapon/laser1.wav`).
+ * Relative path under the content root (e.g. `sounds/weapon/laser1.webm`).
+ * Server's `NormalizeSoundPath` rewrites any source extension to
+ * `.webm` before serialisation, so the wire-format path is always
+ * the canonical Opus-in-WebM file.
  */
 path():string|null
 path(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
@@ -69,8 +72,25 @@ pitch():number {
   return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 1.0;
 }
 
+/**
+ * Unresolved logical name of this sound (e.g. `"weapon/laser1"`,
+ * `"bot_select"`) — the raw GuiSoundSetData.name value from the
+ * unit / weapon def. The client uses this to look up the matching
+ * entry in `gamedata/sounds.lua`'s `SoundItems` table; the
+ * resolved item supplies `gain` / `pitch` / `priority` /
+ * `maxconcurrent` / `maxdist` / `rolloff` / `in3d` defaults that
+ * the server doesn't know about. Empty string means "no logical
+ * name, just use `path`".
+ */
+name():string|null
+name(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+name(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 14);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
 static startSoundRef(builder:flatbuffers.Builder) {
-  builder.startObject(5);
+  builder.startObject(6);
 }
 
 static addId(builder:flatbuffers.Builder, id:number) {
@@ -93,18 +113,23 @@ static addPitch(builder:flatbuffers.Builder, pitch:number) {
   builder.addFieldFloat32(4, pitch, 1.0);
 }
 
+static addName(builder:flatbuffers.Builder, nameOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(5, nameOffset, 0);
+}
+
 static endSoundRef(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createSoundRef(builder:flatbuffers.Builder, id:number, pathOffset:flatbuffers.Offset, category:SoundCategory, volume:number, pitch:number):flatbuffers.Offset {
+static createSoundRef(builder:flatbuffers.Builder, id:number, pathOffset:flatbuffers.Offset, category:SoundCategory, volume:number, pitch:number, nameOffset:flatbuffers.Offset):flatbuffers.Offset {
   SoundRef.startSoundRef(builder);
   SoundRef.addId(builder, id);
   SoundRef.addPath(builder, pathOffset);
   SoundRef.addCategory(builder, category);
   SoundRef.addVolume(builder, volume);
   SoundRef.addPitch(builder, pitch);
+  SoundRef.addName(builder, nameOffset);
   return SoundRef.endSoundRef(builder);
 }
 
@@ -114,7 +139,8 @@ unpack(): SoundRefT {
     this.path(),
     this.category(),
     this.volume(),
-    this.pitch()
+    this.pitch(),
+    this.name()
   );
 }
 
@@ -125,6 +151,7 @@ unpackTo(_o: SoundRefT): void {
   _o.category = this.category();
   _o.volume = this.volume();
   _o.pitch = this.pitch();
+  _o.name = this.name();
 }
 }
 
@@ -134,19 +161,22 @@ constructor(
   public path: string|Uint8Array|null = null,
   public category: SoundCategory = SoundCategory.Fire,
   public volume: number = 1.0,
-  public pitch: number = 1.0
+  public pitch: number = 1.0,
+  public name: string|Uint8Array|null = null
 ){}
 
 
 pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const path = (this.path !== null ? builder.createString(this.path!) : 0);
+  const name = (this.name !== null ? builder.createString(this.name!) : 0);
 
   return SoundRef.createSoundRef(builder,
     this.id,
     path,
     this.category,
     this.volume,
-    this.pitch
+    this.pitch,
+    name
   );
 }
 }

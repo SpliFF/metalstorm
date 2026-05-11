@@ -490,19 +490,45 @@ enum SoundSourceKind : uint8 {
     Global = 3,
 }
 
+/// Mix channel for a sound emission. Matches Recoil's five named
+/// channels (`rts/System/Sound/ISoundChannels.h`). Each channel has
+/// an independent volume + enable state on the client. The emitter
+/// (server combat code, widget Spring.PlaySoundFile, etc.) picks the
+/// channel — the SoundItem itself does NOT carry a channel field, to
+/// preserve Recoil parity. Defaults to `General` when unspecified.
+enum SoundChannel : uint8 {
+    General = 0,
+    Battle = 1,
+    UnitReply = 2,
+    UserInterface = 3,
+    BGMusic = 4,
+}
+
 /// A sound asset reference attached to a def. The client uses
 /// `source_def_id + sound_id` from a SoundEvent to look up the matching
 /// SoundRef and resolve `path` to an HTTP URL against the content server.
 table SoundRef {
     /// Index into the def's `sounds` array. Matches SoundEvent.sound_id.
     id: uint16;
-    /// Relative path under the content root (e.g. `sounds/weapon/laser1.wav`).
+    /// Relative path under the content root (e.g. `sounds/weapon/laser1.webm`).
+    /// Server's `NormalizeSoundPath` rewrites any source extension to
+    /// `.webm` before serialisation, so the wire-format path is always
+    /// the canonical Opus-in-WebM file.
     path: string;
     category: SoundCategory;
     /// Per-asset default gain (0–1). Final mix volume is volume * SoundEvent.volume.
     volume: float = 1.0;
     /// Per-asset default pitch / playback rate. Final rate is pitch * SoundEvent.pitch.
     pitch: float = 1.0;
+    /// Unresolved logical name of this sound (e.g. `"weapon/laser1"`,
+    /// `"bot_select"`) — the raw GuiSoundSetData.name value from the
+    /// unit / weapon def. The client uses this to look up the matching
+    /// entry in `gamedata/sounds.lua`'s `SoundItems` table; the
+    /// resolved item supplies `gain` / `pitch` / `priority` /
+    /// `maxconcurrent` / `maxdist` / `rolloff` / `in3d` defaults that
+    /// the server doesn't know about. Empty string means "no logical
+    /// name, just use `path`".
+    name: string;
 }
 
 /// A single sound emission. The server pushes one of these whenever a
@@ -518,10 +544,43 @@ table SoundEvent {
     volume: float = 1.0;     // 0–1, pre-attenuation, multiplied with SoundRef.volume
     pitch: float = 1.0;      // playback rate, multiplied with SoundRef.pitch
     /// Eviction priority when the 96-voice pool is full. Higher wins.
+    /// Set by the server when no SoundItem entry is available; if the
+    /// client resolves a SoundItem with its own `priority`, that
+    /// overrides this value (per the SoundItem-resolution rules in
+    /// PLAN-audio.md).
     priority: uint8 = 128;
     /// Owner team — used by the per-session LOS filter so ally sounds
     /// remain audible through fog of war. 255 = no team / global sound.
     team: uint8 = 255;
+    /// Mix channel. Server-side emitters pick this based on context:
+    /// CWeapon::Fire and projectile impacts -> Battle; selection /
+    /// order-ack paths -> UnitReply; UI -> UserInterface; the music
+    /// state machine -> BGMusic; everything else (default) -> General.
+    channel: SoundChannel = General;
+}
+
+/// Combat-intensity state used by the server's music state machine.
+/// Transitions are sampled from a sliding window of CombatEvent
+/// activity and broadcast to every client (so spectators stay in
+/// sync with the players). Client-side playlists per state are
+/// authored in `gamedata/sounds.lua` (entries named `music_<state>_N`)
+/// or an optional `gamedata/music.lua` Music table.
+enum MusicState : uint8 {
+    Peace = 0,
+    Tension = 1,
+    Battle = 2,
+    Victory = 3,
+    Defeat = 4,
+}
+
+/// Music-state transition event. Broadcast to all clients (not per-
+/// viewport) in the same GameEventBatch as combat / sound events.
+/// `fade_ms` is the crossfade duration the client should use when
+/// switching to a track in the new state's playlist; defaults to 2 s
+/// for in-game transitions, 500 ms for victory / defeat stings.
+table MusicEvent {
+    state: MusicState;
+    fade_ms: uint16 = 2000;
 }
 
 /// Seismic ping — emitted server-side when a moving unit's seismic
@@ -553,6 +612,11 @@ table GameEventBatch {
     /// Per-tick seismic pings. Visibility-filtered server-side: each
     /// session only receives pings whose `ally_team` matches its own.
     seismic_pings: [SeismicPing];
+    /// Music-state transitions emitted by the server's intensity
+    /// tracker. Broadcast to every client (no per-viewport filtering)
+    /// so spectators stay in sync. Usually empty; only populated on
+    /// the tick when a state change fires.
+    music_events: [MusicEvent];
 }
 
 table ResourceUpdate {

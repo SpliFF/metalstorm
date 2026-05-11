@@ -11,6 +11,22 @@
 #include <mutex>
 #include <vector>
 
+/// Mix channel for a SoundEvent. Mirrors Recoil's
+/// `rts/System/Sound/ISoundChannels.h`. Each channel has independent
+/// volume + enable state on the client. Emitter picks the channel
+/// based on context: combat code -> Battle, selection / order-ack
+/// paths -> UnitReply, UI -> UserInterface, music state machine ->
+/// BGMusic, everything else (default) -> General. Values match the
+/// FlatBuffer `SoundChannel` enum exactly so the dispatcher can
+/// cast through without translation.
+enum class SoundEventChannel : uint8_t {
+    General = 0,
+    Battle = 1,
+    UnitReply = 2,
+    UserInterface = 3,
+    BGMusic = 4,
+};
+
 struct SoundEventData {
     /// Index into the def's `sounds` array.
     uint16_t soundId;
@@ -23,10 +39,16 @@ struct SoundEventData {
     float volume = 1.0f;
     /// Playback rate (multiplied with SoundRef.pitch).
     float pitch = 1.0f;
-    /// Eviction priority for the 96-voice pool. Higher wins.
+    /// Eviction priority for the 96-voice pool. Higher wins. Note:
+    /// when the client resolves a SoundItem with its own `priority`
+    /// from `gamedata/sounds.lua`, that value overrides this one
+    /// (per the SoundItem-resolution rules in PLAN-audio.md).
     uint8_t priority = 128;
     /// Owner team. 255 = no team / global / unaffiliated.
     uint8_t team = 255;
+    /// Mix channel. Defaults to General; combat emitters set Battle,
+    /// selection / order-ack paths set UnitReply, etc.
+    SoundEventChannel channel = SoundEventChannel::General;
 };
 
 class SoundEventCollector {

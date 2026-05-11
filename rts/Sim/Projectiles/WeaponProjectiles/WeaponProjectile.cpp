@@ -301,6 +301,7 @@ void CWeaponProjectile::Collision(CFeature* feature)
 			se.position = impactPos;
 			se.priority = 128;
 			se.team = static_cast<uint8_t>(std::min(255, team));
+			se.channel = SoundEventChannel::Battle;
 			soundEvents.Push(se);
 		}
 	}
