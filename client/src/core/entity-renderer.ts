@@ -41,6 +41,7 @@ import type { EntityStateSnapshot } from './entity-state.js';
 import { EntityInterpolator } from './entity-interpolator.js';
 import type { UnitDefInfo } from './connection.js';
 import type { PieceStateSnapshot } from './piece-state.js';
+import type { LosBitmap } from './los-bitmap.js';
 import { stampUrl } from '../config.js';
 import { loadDirManifest, dirOfUrl } from './dir-manifest.js';
 
@@ -1688,6 +1689,64 @@ export class EntityRenderer {
         this.entityMeta.delete(id);
         this.interpolator.remove(id);
         this.pieceOverrides.delete(id);
+    }
+
+    /**
+     * Clear PREVLOS ghosts whose tile has come back into LOS.
+     *
+     * Recoil's ghost-preservation contract: the server only sends an
+     * `EntityDestroy` to clients that currently see the unit, so a
+     * building killed out of LOS leaves a stale ghost. When the player
+     * later scans the spot and finds nothing there, the ghost should
+     * auto-clear. This is the "regained LOS" sweep — called whenever a
+     * fresh LOS bitmap arrives (~1 Hz). For each ghost we sample the
+     * in-LOS plane at its world position; if set, the player has eyes
+     * on that tile right now and the server has not re-streamed the
+     * building (because it's dead), so the ghost is stale and we drop
+     * it.
+     *
+     * Mapping: bitmap squares cover `mapWidthElmos / bitmap.width`
+     * elmos per column. The same column/row indexing used by the
+     * widget-worker `Spring.IsPosInLos` and the minimap fog overlay.
+     */
+    clearGhostsInLos(bitmap: LosBitmap, mapWidthElmos: number, mapHeightElmos: number): void {
+        if (this.ghostPoses.size === 0) return;
+        const { width, height, inLos } = bitmap;
+        if (width === 0 || height === 0) return;
+        const toRemove: number[] = [];
+        for (const [id, pose] of this.ghostPoses) {
+            let col = Math.floor((pose.x / mapWidthElmos) * width);
+            let row = Math.floor((pose.z / mapHeightElmos) * height);
+            if (col < 0) col = 0; else if (col >= width) col = width - 1;
+            if (row < 0) row = 0; else if (row >= height) row = height - 1;
+            const idx = row * width + col;
+            const byte = idx >> 3;
+            const bit = 7 - (idx & 7);
+            const inLosNow = (inLos[byte] & (1 << bit)) !== 0;
+            if (inLosNow) toRemove.push(id);
+        }
+        for (const id of toRemove) {
+            this.ghostPoses.delete(id);
+            // If the meta survived snapshot eviction (server kept
+            // streaming it as PREVLOS until the player re-LOSed the
+            // spot — but it's actually dead), clear that too so the
+            // renderer doesn't try to draw a unit with no template.
+            this.entityMeta.delete(id);
+            this.interpolator.remove(id);
+            this.pieceOverrides.delete(id);
+        }
+    }
+
+    /** Map dimensions in elmos — derived from the heightmap. Used by
+     *  `clearGhostsInLos` to scale ghost positions into bitmap
+     *  coordinates. Returns null until `setMapHeightmap` has been
+     *  called with the MapData arrival. */
+    getMapSizeElmos(): { width: number; height: number } | null {
+        if (this.mapHmW === 0 || this.mapHmH === 0) return null;
+        return {
+            width:  (this.mapHmW - 1) * this.mapSquareSize,
+            height: (this.mapHmH - 1) * this.mapSquareSize,
+        };
     }
 
     /**

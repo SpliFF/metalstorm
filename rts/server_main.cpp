@@ -1833,12 +1833,42 @@ int main(int argc, char* argv[])
         }
         }
 
-        // Broadcast unit deaths as EntityDestroy messages
+        // Broadcast unit deaths as EntityDestroy messages, filtered
+        // per-session by the LOS_INLOS mask captured at the moment of
+        // death (PLAN-intel.md Phase 7 ghost preservation). Sessions
+        // whose ally team had LOS see the destroy and clear the entity;
+        // sessions that only had PREVLOS/ghost or no contact at all
+        // never learn the unit died — their ghost persists until they
+        // LOS-scan the spot again (handled client-side). Spectators
+        // (allyTeam < 0) always receive the broadcast.
         {
         auto deaths = unitDeaths.Drain();
         for (const auto& death : deaths) {
             auto msg = Protocol::BuildEntityDestroy(death.unitId, 1, death.x, death.y, death.z);
-            rtcServer.BroadcastReliable(msg.data(), msg.size());
+            // Bit 31 of losMask is the "ally team >= 32 — broadcast to
+            // everyone" escape hatch (see UnitDeathEvent docs).
+            const bool broadcastAll = (death.losMask & (1u << 31)) != 0;
+            sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+                int viewerAllyTeam = -1;
+                if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
+                    viewerAllyTeam = teamHandler.AllyTeam(session.team);
+                if (viewerAllyTeam < 0) {
+                    // Spectator — always notify.
+                    rtcServer.SendReliable(clientId, msg.data(), msg.size());
+                    return;
+                }
+                if (broadcastAll) {
+                    rtcServer.SendReliable(clientId, msg.data(), msg.size());
+                    return;
+                }
+                if (viewerAllyTeam < 32 && (death.losMask & (1u << viewerAllyTeam))) {
+                    rtcServer.SendReliable(clientId, msg.data(), msg.size());
+                }
+                // else: ally team had no LOS on the unit at death; skip
+                // so the client's ghost (if any) persists. Snapshot
+                // eviction handles cleanup for radar-only contacts since
+                // the unit no longer appears in subsequent snapshots.
+            });
         }
         }
 

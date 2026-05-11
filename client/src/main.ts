@@ -882,6 +882,17 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             currentWidgetManager?.forwardLosBitmap(bitmap);
             minimap?.applyLosBitmap(bitmap);
             terrainFog?.apply(bitmap);
+            // Ghost preservation: a building killed out of LOS leaves a
+            // stale ghost on the client (server filters the destroy
+            // broadcast by per-allyteam LOS-at-death). When the player
+            // later re-LOSes the spot, drop ghosts whose tile is now
+            // in-LOS — if the building were alive, the server would be
+            // re-streaming it; absence means it died while we couldn't
+            // see it.
+            const size = entityRenderer?.getMapSizeElmos();
+            if (size) {
+                entityRenderer?.clearGhostsInLos(bitmap, size.width, size.height);
+            }
         },
         onEntityDestroy(entityId, x, y, z) {
             entityRenderer?.removeEntity(entityId);

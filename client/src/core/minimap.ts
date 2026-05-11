@@ -48,14 +48,35 @@ export interface MinimapConfig {
     size?: number;
 }
 
-/** Transient marker on the minimap events layer. Today only seismic pings
- *  are pushed in (Phase 4 wire format); the same buffer is intended to
- *  cover radar/attack/player-marker blips later. */
+/** Transient marker on the minimap events layer. Multiple `kind`s
+ *  share the same buffer (and TTL), differing only in tint/scale so
+ *  the rebuild loop can build them with one thin-instance pass.
+ *
+ *  - `seismic`: server-broadcast seismic ping (yellow). Position is
+ *    already deceived by the server's radar-error vector.
+ *  - `marker`:  player-issued `Spring.MarkerAddPoint`/`MarkerAddLine`
+ *    pin (cyan). Local-only today — no other client receives the
+ *    drop because the engine doesn't yet broadcast Lua marker calls,
+ *    so this is a "your map notes" indicator for the local viewer.
+ *  - `attack`:  reserved for future widget-driven attack alerts
+ *    (red). No producer wired yet — the channel exists so the rebuild
+ *    palette doesn't need re-extending when one lands. */
+type MinimapPingKind = 'seismic' | 'marker' | 'attack';
+
 interface MinimapPing {
     x: number;
     z: number;
     bornAt: number;
+    kind: MinimapPingKind;
 }
+
+/** RGB per ping kind. Alpha is animated by the rebuild loop (fade-out
+ *  over `PING_LIFETIME_MS`). */
+const PING_COLORS: Record<MinimapPingKind, [number, number, number]> = {
+    seismic: [1.0, 0.85, 0.20],
+    marker:  [0.25, 0.85, 1.0],
+    attack:  [1.0, 0.30, 0.30],
+};
 
 const PING_LIFETIME_MS = 4000;
 const PING_SCALE_BASE = 80;
@@ -93,10 +114,14 @@ export class Minimap {
     private pendingResize: { w: number; h: number } | null = null;
     private resizeRafHandle = 0;
 
-    /** Seismic-ping ring buffer. Each entry fades over PING_LIFETIME_MS. */
+    /** Ping ring buffer. Each entry fades over PING_LIFETIME_MS.
+     *  Mixed kinds (seismic/marker/attack) share the buffer; the
+     *  rebuild loop buckets them per kind for rendering. */
     private pings: MinimapPing[] = [];
-    /** Mesh that renders the ping rings (one thin-instance per live ping). */
-    private pingMesh: Mesh | null = null;
+    /** Per-kind ping meshes — each kind gets its own colour material
+     *  (see `PING_COLORS`). Allocated lazily as pushes happen so the
+     *  scene stays empty until a producer fires. */
+    private pingMeshes = new Map<MinimapPingKind, Mesh>();
     /** True when a chili widget called gl.DrawMiniMapEvents recently. In
      *  ownership=widget mode the events layer is suppressed unless this
      *  was set within `eventsRequestTtlMs`; in default mode it's always
@@ -386,7 +411,27 @@ export class Minimap {
      *  off the ConnectionEvents.onSeismicPings callback in parallel
      *  with the widget-worker forward. Coords are world-space elmos. */
     pushSeismicPing(p: { x: number; z: number }): void {
-        this.pings.push({ x: p.x, z: p.z, bornAt: performance.now() });
+        this.pushPing(p.x, p.z, 'seismic');
+    }
+
+    /** Push a player-marker ping into the events layer. Fired when the
+     *  widget worker invokes `Spring.MarkerAddPoint`/`MarkerAddLine`;
+     *  the worker posts a message back to the main thread (via
+     *  `lua-widget-manager`) which calls this. Line markers push one
+     *  ping per endpoint so the cyan dots bracket the line. */
+    pushMarkerPing(p: { x: number; z: number }): void {
+        this.pushPing(p.x, p.z, 'marker');
+    }
+
+    /** Push an attack-alert ping. Reserved channel — no producer wired
+     *  yet. The signature matches the other push methods so a future
+     *  widget bridge can emit alerts without re-plumbing. */
+    pushAttackPing(p: { x: number; z: number }): void {
+        this.pushPing(p.x, p.z, 'attack');
+    }
+
+    private pushPing(x: number, z: number, kind: MinimapPingKind): void {
+        this.pings.push({ x, z, bornAt: performance.now(), kind });
         // Cap the buffer — a stuck cloaked-unit cluster can produce
         // pings every tick; the layer only ever renders the most
         // recent.
@@ -490,29 +535,34 @@ export class Minimap {
         this.scene.render();
     }
 
-    private ensurePingMesh(): Mesh {
-        if (this.pingMesh) return this.pingMesh;
-        const ring = MeshBuilder.CreatePlane('minimapPing', { size: 1 }, this.scene);
+    private ensurePingMesh(kind: MinimapPingKind): Mesh {
+        const cached = this.pingMeshes.get(kind);
+        if (cached) return cached;
+        const ring = MeshBuilder.CreatePlane(`minimapPing-${kind}`, { size: 1 }, this.scene);
         ring.rotation.x = Math.PI / 2;
         ring.position.y = 12;
         ring.isPickable = false;
-        const mat = new StandardMaterial('minimapPingMat', this.scene);
-        // Bright yellow, additive — easy to spot against the dark fog
-        // overlay without team-colouring (pings are anonymous).
-        mat.emissiveColor = new Color3(1, 0.9, 0.2);
+        const mat = new StandardMaterial(`minimapPingMat-${kind}`, this.scene);
+        // Per-kind emissive (seismic yellow / marker cyan / attack red).
+        // Additive blending against the fog overlay — pings are anonymous,
+        // not team-coloured.
+        const [r, g, b] = PING_COLORS[kind];
+        mat.emissiveColor = new Color3(r, g, b);
         mat.disableLighting = true;
         mat.alpha = 0.85;
         ring.material = mat;
-        this.pingMesh = ring;
+        this.pingMeshes.set(kind, ring);
         return ring;
     }
 
     /**
      * Per-tick rebuild of the events layer. Drops pings older than
      * PING_LIFETIME_MS, then sizes the rest with a growing-radius animation
-     * keyed on age. In widget-owned mode the layer is skipped entirely
-     * unless `gl.DrawMiniMapEvents` was called recently — matches Spring's
-     * model where the events overlay is opt-in per widget frame.
+     * keyed on age. Pings group by kind so each colour gets its own
+     * thin-instance buffer. In widget-owned mode the layer is skipped
+     * entirely unless `gl.DrawMiniMapEvents` was called recently —
+     * matches Spring's model where the events overlay is opt-in per
+     * widget frame.
      */
     private updateEventsLayer(): void {
         // Prune expired pings up front; this also keeps the mesh clear
@@ -535,26 +585,46 @@ export class Minimap {
         const eventsAllowed = !widgetOwned
             || (now - this.eventsRequestedAt) <= this.eventsRequestTtlMs;
         if (!eventsAllowed || this.pings.length === 0) {
-            if (this.pingMesh) this.pingMesh.thinInstanceCount = 0;
+            for (const mesh of this.pingMeshes.values()) mesh.thinInstanceCount = 0;
             return;
         }
 
-        const mesh = this.ensurePingMesh();
-        const matrices = new Float32Array(this.pings.length * 16);
-        const rot = Quaternion.Identity();
-        for (let i = 0; i < this.pings.length; i++) {
-            const p = this.pings[i];
-            const age = now - p.bornAt;
-            const t = Math.min(1, age / PING_LIFETIME_MS);
-            // Ring expands as it fades — same animation Spring uses on
-            // its native minimap events. Size in elmos so it scales
-            // correctly against the orthographic camera.
-            const size = PING_SCALE_BASE + PING_SCALE_GROWTH * t;
-            const scale = new Vector3(size, size, size);
-            const m = Matrix.Compose(scale, rot, new Vector3(p.x, 12, p.z));
-            m.copyToArray(matrices, i * 16);
+        // Bucket pings by kind so each kind renders with its own colour
+        // material. Most frames have ≤ a handful of kinds active, so the
+        // per-kind allocation overhead is negligible.
+        const byKind = new Map<MinimapPingKind, MinimapPing[]>();
+        for (const p of this.pings) {
+            let bucket = byKind.get(p.kind);
+            if (!bucket) {
+                bucket = [];
+                byKind.set(p.kind, bucket);
+            }
+            bucket.push(p);
         }
-        mesh.thinInstanceSetBuffer('matrix', matrices, 16, true);
+
+        // Clear any kind-mesh whose bucket is empty this frame.
+        for (const [kind, mesh] of this.pingMeshes) {
+            if (!byKind.has(kind)) mesh.thinInstanceCount = 0;
+        }
+
+        const rot = Quaternion.Identity();
+        for (const [kind, bucket] of byKind) {
+            const mesh = this.ensurePingMesh(kind);
+            const matrices = new Float32Array(bucket.length * 16);
+            for (let i = 0; i < bucket.length; i++) {
+                const p = bucket[i];
+                const age = now - p.bornAt;
+                const t = Math.min(1, age / PING_LIFETIME_MS);
+                // Ring expands as it fades — same animation Spring uses
+                // on its native minimap events. Size in elmos so it
+                // scales correctly against the orthographic camera.
+                const size = PING_SCALE_BASE + PING_SCALE_GROWTH * t;
+                const scale = new Vector3(size, size, size);
+                const m = Matrix.Compose(scale, rot, new Vector3(p.x, 12, p.z));
+                m.copyToArray(matrices, i * 16);
+            }
+            mesh.thinInstanceSetBuffer('matrix', matrices, 16, true);
+        }
     }
 
     private initSelectionMesh(): void {
@@ -790,8 +860,8 @@ export class Minimap {
             cancelAnimationFrame(this.resizeRafHandle);
             this.resizeRafHandle = 0;
         }
-        this.pingMesh?.dispose();
-        this.pingMesh = null;
+        for (const mesh of this.pingMeshes.values()) mesh.dispose();
+        this.pingMeshes.clear();
         this.pings.length = 0;
         this.fogTexture?.dispose();
         this.fogTexture = null;

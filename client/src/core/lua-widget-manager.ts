@@ -640,6 +640,7 @@ export class LuaWidgetManager {
             case 'inputConsumed':  summary = `inputConsumed kind=${msg.kind} consumed=${msg.consumed}`; break;
             case 'minimapGeometry': summary = `minimapGeometry @${msg.x},${msg.y} ${msg.w}x${msg.h} visible=${msg.visible}`; break;
             case 'minimapEvents':  summary = 'minimapEvents'; break;
+            case 'minimapMarker':  summary = `minimapMarker @${msg.x},${msg.z}`; break;
         }
         debugConsole.addEntry({
             id: Date.now() + Math.random(),
@@ -833,6 +834,20 @@ export class LuaWidgetManager {
                 // gl.DrawMiniMapEvents — widget asked for the events
                 // overlay this frame. The minimap suppresses it in
                 // widget-owned mode unless this signal arrives recently.
+                this.minimap?.markEventsRequested();
+                break;
+
+            case 'minimapMarker':
+                // Spring.MarkerAddPoint / MarkerAddLine — push a cyan
+                // ring pulse onto the minimap event layer. Local-only
+                // (the engine doesn't currently broadcast Lua marker
+                // calls to other clients).
+                this.minimap?.pushMarkerPing({
+                    x: msg.x as number,
+                    z: msg.z as number,
+                });
+                // Also unlock the events overlay so widget-owned mode
+                // doesn't hide the marker the user just dropped.
                 this.minimap?.markEventsRequested();
                 break;
 

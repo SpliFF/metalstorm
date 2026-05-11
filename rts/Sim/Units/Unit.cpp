@@ -1401,8 +1401,21 @@ void CUnit::DoDamage(
 	if (health > 0.0f)
 		return;
 
-	// Record death for EntityDestroy broadcast before kill
-	unitDeaths.Push(static_cast<uint32_t>(id), pos.x, pos.y, pos.z);
+	// Record death for EntityDestroy broadcast before kill. Snapshot
+	// which ally teams currently have LOS_INLOS so the server can
+	// filter the destroy envelope per-session — Recoil's contract is
+	// that an out-of-LOS death is not revealed, the player learns the
+	// building is gone the next time their LOS sweeps the spot. Ally
+	// teams >= 32 don't fit in the u32 mask, so we set bit 31 as an
+	// "also broadcast to everyone" escape hatch (preserves the legacy
+	// all-clients behaviour for pathological setups).
+	uint32_t losMask = 0;
+	const int activeAt = teamHandler.ActiveAllyTeams();
+	for (int at = 0; at < activeAt; ++at) {
+		if (at >= 32) { losMask |= (1u << 31); break; }
+		if (losStatus[at] & LOS_INLOS) losMask |= (1u << at);
+	}
+	unitDeaths.Push(static_cast<uint32_t>(id), pos.x, pos.y, pos.z, losMask);
 
 	KillUnit(attacker, false, false);
 

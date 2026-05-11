@@ -853,6 +853,13 @@ async function init(
                 visible: w > 0 && h > 0,
             });
         },
+        addMinimapMarker: (x, z) => {
+            // Spring.MarkerAddPoint / MarkerAddLine path. The host
+            // (lua-widget-manager) translates these into
+            // minimap.pushMarkerPing so the cyan event-layer ring pulses
+            // at the drop site. Coordinates are world-space elmos.
+            postToMain({ type: 'minimapMarker', x, z });
+        },
     };
 
     // gl.ConfigMiniMap / gl.DrawMiniMapEvents → main thread. The Lua-side

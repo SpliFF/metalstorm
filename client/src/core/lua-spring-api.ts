@@ -126,6 +126,14 @@ export interface SpringAPIContext {
      * only and produces no visible effect.
      */
     setMinimapGeometry?(x: number, y: number, w: number, h: number): void;
+    /**
+     * Forward a `Spring.MarkerAddPoint` / `Spring.MarkerAddLine`
+     * placement to the host so the minimap events layer can pulse a
+     * cyan ring at the drop location. The host (lua-widget-manager on
+     * the main thread) translates this into `minimap.pushMarkerPing`.
+     * Lines emit two pings — one per endpoint — so the bracket dots
+     * frame the line on the minimap. Coords are world-space elmos. */
+    addMinimapMarker?(x: number, z: number): void;
 }
 
 /** Per-unit entry in the worker's unit store. */
@@ -1540,25 +1548,37 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         SetCustomCommandDrawData: () => {},
 
         // --- Map markers ---
-        // Local-only for now: appended to ls.markers but not broadcast.
-        // Real Spring drops/erases markers within Spring.SQUARE_SIZE * 2.
+        // Local-only: appended to ls.markers (no server broadcast — the
+        // engine doesn't yet forward Lua marker calls to other clients).
+        // We also push a minimap event-layer ping so the player sees a
+        // cyan ring pulse where they dropped the marker. Real Spring
+        // drops/erases markers within Spring.SQUARE_SIZE * 2.
         MarkerAddPoint: (x: LuaValue, y: LuaValue, z: LuaValue, label: LuaValue, _localOnly?: LuaValue) => {
+            const px = Number(x), pz = Number(z);
             ls.markers.push({
                 kind: 'point',
-                x: Number(x), y: Number(y), z: Number(z),
+                x: px, y: Number(y), z: pz,
                 label: String(label ?? ''),
                 teamId: ls.identity.myTeam,
             });
+            ctx.addMinimapMarker?.(px, pz);
         },
         MarkerAddLine: (x1: LuaValue, y1: LuaValue, z1: LuaValue,
                         x2: LuaValue, y2: LuaValue, z2: LuaValue, _localOnly?: LuaValue) => {
+            const ax = Number(x1), az = Number(z1);
+            const bx = Number(x2), bz = Number(z2);
             ls.markers.push({
                 kind: 'line',
-                x: Number(x1), y: Number(y1), z: Number(z1),
-                x2: Number(x2), y2: Number(y2), z2: Number(z2),
+                x: ax, y: Number(y1), z: az,
+                x2: bx, y2: Number(y2), z2: bz,
                 label: '',
                 teamId: ls.identity.myTeam,
             });
+            // Bracket the line with one ping per endpoint so the
+            // minimap shows where the line was drawn even though the
+            // line geometry itself isn't rendered on the minimap.
+            ctx.addMinimapMarker?.(ax, az);
+            ctx.addMinimapMarker?.(bx, bz);
         },
         MarkerErasePosition: (x: LuaValue, _y: LuaValue, z: LuaValue) => {
             const radius = (ctx.squareSize || 8) * 2;

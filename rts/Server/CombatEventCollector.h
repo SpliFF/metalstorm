@@ -50,16 +50,30 @@ private:
 extern CombatEventCollector combatEvents;
 
 /// Tracks unit deaths for EntityDestroy broadcast.
+///
+/// `losMask` is a bitmask of ally teams that had `LOS_INLOS` on the
+/// dying unit at the moment of death. server_main.cpp uses it to filter
+/// the broadcast: only sessions whose ally team has the bit set receive
+/// the destroy envelope. Players holding only PREVLOS (ghost) keep
+/// their ghost — Recoil's behaviour is that out-of-LOS destruction is
+/// not revealed; the player learns the building is gone the next time
+/// they LOS-scan the spot (client-side regained-LOS clearing).
+///
+/// Bit `i` of `losMask` corresponds to ally team `i`. Ally teams >= 32
+/// fall back to "broadcast to all" to preserve legacy behaviour in the
+/// unlikely event of >32-ally-team setups (Spring supports up to 255
+/// teams but realistic matches stay well below the cap).
 struct UnitDeathEvent {
     uint32_t unitId;
     float x, y, z;
+    uint32_t losMask;
 };
 
 class UnitDeathCollector {
 public:
-    void Push(uint32_t unitId, float x, float y, float z) {
+    void Push(uint32_t unitId, float x, float y, float z, uint32_t losMask) {
         std::lock_guard<std::mutex> lock(mutex);
-        events.push_back({unitId, x, y, z});
+        events.push_back({unitId, x, y, z, losMask});
     }
 
     std::vector<UnitDeathEvent> Drain() {
