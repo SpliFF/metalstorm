@@ -32,7 +32,7 @@
  */
 
 import type { CegDefInfo, CegSpawnInfo, CegPropertyInfo } from './connection.js';
-import type { EffectDef, ParticleSpawn } from './ceg-runtime.js';
+import type { EffectDef, ParticleSpawn, SubCegSpawn } from './ceg-runtime.js';
 
 /// Spring's sim runs at 30 Hz; CEG `particlelife` and `ttl` are
 /// in sim frames, `particlespeed` is elmos/frame. Convert at
@@ -55,7 +55,7 @@ const MAX_LIFETIME_S = 4.0;
 /// null if the CEG has no spawns the runtime can render — caller can
 /// fall through to BUILTIN_EFFECTS in that case.
 export function translateCegDef(def: CegDefInfo): EffectDef | null {
-    const spawns: ParticleSpawn[] = [];
+    const spawns: Array<ParticleSpawn | SubCegSpawn> = [];
     for (const s of def.spawns) {
         const ps = translateSpawn(s);
         if (ps) spawns.push(ps);
@@ -64,7 +64,7 @@ export function translateCegDef(def: CegDefInfo): EffectDef | null {
     return { name: def.tag, spawns };
 }
 
-function translateSpawn(s: CegSpawnInfo): ParticleSpawn | null {
+function translateSpawn(s: CegSpawnInfo): ParticleSpawn | SubCegSpawn | null {
     const props = new PropMap(s.properties);
     const cls = s.className;
 
@@ -86,13 +86,21 @@ function translateSpawn(s: CegSpawnInfo): ParticleSpawn | null {
         case 'CBitmapMuzzleFlame':
             return translateMuzzleFlame(s, props);
 
-        // Sub-CEG dispatcher. We don't resolve transitively yet — a
-        // proper implementation would look up the sub-tag at spawn
-        // time and emit it. For now, drop it: the parent CEG usually
-        // has enough direct spawns to read visually.
+        // Sub-CEG dispatcher — `delayspawner` alias. Fires the named
+        // child CEG after a (possibly random, possibly damage-scaled)
+        // frame delay. This is the canonical multi-level CEG idiom
+        // (nuke → mushroom → smokejets); without it any CEG that
+        // delegates its visuals through one renders nothing.
         case 'CExpGenSpawner':
+            return translateExpGenSpawner(s, props);
+
+        // Sphere-distributed sub-CEG. Differs from the particle
+        // CSpherePartSpawner (which emits CSpherePartProjectile
+        // directly with no `explosiongenerator` — see Phase 4) by the
+        // presence of a child tag. When that tag is absent the entry
+        // is left for Phase 4's specialised sphere-particle pool.
         case 'CSpherePartSpawner':
-            return null;
+            return translateSpherePartSpawner(s, props);
 
         // explspike, CSmokeTrailProjectile, CFireProjectile, debris,
         // CTracerProjectile — visually distinct enough that pooling
@@ -275,6 +283,90 @@ function translateMuzzleFlame(_s: CegSpawnInfo, props: PropMap): ParticleSpawn |
         colorStart: [c[0], c[1], c[2], 1.0],
         rotationSpeedMax: 0,
     };
+}
+
+// ── CExpGenSpawner / CSpherePartSpawner ────────────────────────────────────
+//
+// Sub-CEG dispatchers. Both wrap a named child CEG (`explosiongenerator`
+// property, with the engine's `custom:` prefix already stripped server
+// side). The translator builds a SubCegSpawn record; the runtime
+// enqueues N PendingSpawn entries on every parent spawn() and fires
+// them through spawn() again when their delay elapses.
+//
+// Phase 1 parses properties as bare numeric constants (and the existing
+// `r`-prefixed random magnitude — already handled by parseLuaNumber).
+// Compound expressions like `delay = "0 i1"` or damage-scaled forms
+// silently collapse to their leading constant; Phase 2's expression
+// evaluator picks up the residue without changing this code path.
+
+function translateExpGenSpawner(s: CegSpawnInfo, props: PropMap): SubCegSpawn | null {
+    const targetTag = stripCustomPrefix(props.getString('explosiongenerator', '')).toLowerCase();
+    if (!targetTag) return null;
+    return buildSubCegSpawn(s, props, targetTag, 'point');
+}
+
+function translateSpherePartSpawner(s: CegSpawnInfo, props: PropMap): SubCegSpawn | null {
+    const targetTag = stripCustomPrefix(props.getString('explosiongenerator', '')).toLowerCase();
+    // When there's no child tag, this is a self-contained particle
+    // sphere (CSpherePartProjectile) — Phase 4 territory. Drop it
+    // for now rather than mistranslating as a no-op sub-CEG.
+    if (!targetTag) return null;
+    return buildSubCegSpawn(s, props, targetTag, 'sphere');
+}
+
+function buildSubCegSpawn(
+    s: CegSpawnInfo, props: PropMap, targetTag: string,
+    distribution: 'point' | 'sphere',
+): SubCegSpawn {
+    // Spring authors `delay` in sim frames. The string may be a bare
+    // number, an `r<n>` random range (0..n), or `n1 r n2` style
+    // compound that Phase 2 will fully evaluate. We approximate with
+    // a [0, parsed-as-max] window when the string starts with `r`,
+    // and a [n, n] window otherwise — gives staggered fans for random
+    // delays without needing the full expression evaluator.
+    const delayRaw = props.getString('delay', '0');
+    const delayFrames = parseLuaNumber(delayRaw, 0);
+    const isRandom = delayRaw.trim().startsWith('r')
+                   || delayRaw.trim().startsWith('R')
+                   || delayRaw.trim().startsWith('~');
+    const delayMinFrames = isRandom ? 0 : delayFrames;
+    const delayMaxFrames = delayFrames;
+    const delayMinS = clamp(delayMinFrames / SIM_HZ, 0, 6);
+    const delayMaxS = clamp(delayMaxFrames / SIM_HZ, delayMinS, 6);
+
+    const posOffset = props.getVec3('pos', [0, 0, 0]);
+
+    // `dir = "dir"` (Spring's keyword for "inherit parent direction")
+    // is the dominant author pattern. Numeric triples are rare and
+    // typically `(0,1,0)` — we treat the absence of the keyword as
+    // "use world up" so impacts radiate outward sanely.
+    const dirRaw = props.getString('dir', '').trim().toLowerCase();
+    const dirInherit = dirRaw === 'dir' || dirRaw === '';
+
+    const radius = clamp(props.getFloat('radius', 0), 0, 200);
+
+    return {
+        kind: 'subceg',
+        // `count` on the outer spawn multiplies by what each Pending
+        // dispatch's own child does. Cap at 32 per parent spawn so a
+        // misauthored `count = 1000` can't blow through the queue cap
+        // in a single impact.
+        count: clamp(s.count, 1, 32),
+        targetTag,
+        delayMinS,
+        delayMaxS,
+        posOffset,
+        dirInherit,
+        distribution,
+        radius,
+    };
+}
+
+function stripCustomPrefix(s: string): string {
+    if (!s) return s;
+    if (s.startsWith('custom:')) return s.slice('custom:'.length);
+    if (s.startsWith('CUSTOM:')) return s.slice('CUSTOM:'.length);
+    return s;
 }
 
 // ── Texture → pool mapping ─────────────────────────────────────────────────

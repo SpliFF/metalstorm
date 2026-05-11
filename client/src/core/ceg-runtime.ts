@@ -86,6 +86,11 @@ type RGBA = [number, number, number, number];
 /// One spawn group inside an EffectDef. A single effect typically
 /// emits multiple groups (e.g. impact = flash + sparks + smoke).
 export interface ParticleSpawn {
+    /// Discriminator for `EffectDef.spawns` union. Optional and
+    /// defaults to 'particle' so existing BUILTIN_EFFECTS entries
+    /// (which predate the SubCegSpawn variant) don't have to be
+    /// updated. SubCegSpawn carries an explicit `kind: 'subceg'`.
+    kind?: 'particle';
     /// Name of the ParticleClass to allocate from. Must be a class
     /// the runtime knows about — unknown classes are silently
     /// skipped so adding new effects can't break the render loop.
@@ -116,10 +121,55 @@ export interface ParticleSpawn {
     rotationSpeedMax: number;
 }
 
+/// Sub-CEG spawn — a deferred dispatch back into `spawn()` against a
+/// named child CEG. Translates Spring's `CExpGenSpawner` ("delayspawner"
+/// — fires a sub-effect after a frame delay) and is also how
+/// `CSpherePartSpawner` would chain a sphere-distributed child if it
+/// carried an `explosiongenerator` property (rare but valid).
+///
+/// The runtime enqueues `count` `PendingSpawn` entries on each parent
+/// spawn() call, then fires them through `spawn()` again when their
+/// delay elapses. Properties that legitimately vary per particle
+/// (delay, posOffset) are stored as min/max numeric ranges in Phase 1
+/// — Phase 2 will replace them with `Expr` evaluators that handle the
+/// full mini-language (`i1`, `r10`, `d5`, compounds).
+export interface SubCegSpawn {
+    kind: 'subceg';
+    /// How many child spawns the parent emits per call. Multiplied by
+    /// the streamed `CegSpawnInfo.count` at translate time so the
+    /// runtime sees one final count.
+    count: number;
+    /// Tag of the child CEG. Server-side `CegLoader` strips the
+    /// `custom:` prefix; translator lowercases for case-stable lookup.
+    targetTag: string;
+    /// Delay range in wall-clock seconds — uniform random per
+    /// dispatch. Both zero = fire immediately on the same tick.
+    delayMinS: number;
+    delayMaxS: number;
+    /// Position offset (in elmos) relative to the parent spawn point.
+    /// Applied after the optional sphere distribution. Most CEGs use
+    /// `(0, h, 0)` to lift the sub-effect above ground.
+    posOffset: [number, number, number];
+    /// When true, the child inherits the parent's spawn direction
+    /// (Spring's `dir = "dir"` keyword). When false, child fires with
+    /// world up `(0, 1, 0)` — matching the behaviour of impact CEGs
+    /// where direction is meaningless.
+    dirInherit: boolean;
+    /// Spawn distribution mode:
+    ///   - 'point': all dispatches share `posOffset`.
+    ///   - 'sphere': dispatches are placed on a sphere of `radius`
+    ///     around `posOffset`, each with a random unit direction.
+    /// CSpherePartSpawner with an `explosiongenerator` becomes
+    /// 'sphere'; CExpGenSpawner becomes 'point'.
+    distribution: 'point' | 'sphere';
+    /// Sphere radius in elmos. Ignored for 'point' distribution.
+    radius: number;
+}
+
 /// One named effect — what gets fired by `spawn(name, ...)`.
 export interface EffectDef {
     name: string;
-    spawns: ParticleSpawn[];
+    spawns: Array<ParticleSpawn | SubCegSpawn>;
 }
 
 /// Per-class GPU + CPU state. Capacity is fixed at construction so
@@ -180,6 +230,50 @@ const CLASS_CAPACITIES: Record<string, number> = {
     smoke: 8192,
 };
 
+/// Hard cap on sub-CEG recursion depth (Phase 1). A correctly-authored
+/// CEG tree is at most 3–4 levels deep (nuke → mushroom → smokejets →
+/// puffs). Eight covers any reasonable author intent and prevents a
+/// pathological A→B→A cycle from saturating the pending queue before
+/// the per-pending cap kicks in.
+const MAX_SUBCEG_DEPTH = 8;
+
+/// Hard cap on the pending-spawn queue. A 30-particle CExpGenSpawner
+/// with a 60-frame random delay could legitimately enqueue 30 entries
+/// per parent fire; a nuke + a few simultaneous unit deaths comfortably
+/// stays under this. The cap exists for buggy CEGs (count = 10000) and
+/// the cycle-detection backstop — beyond this the runtime drops new
+/// entries silently and warns once.
+const MAX_PENDING_SPAWNS = 4096;
+
+/// One deferred sub-CEG dispatch. Pushed onto CegRuntime.pending when
+/// a parent spawn() walks a SubCegSpawn entry; drained in tick() when
+/// `now >= fireAtMs`. Kept as a plain object rather than an SoA pool
+/// because the queue is small (≤ MAX_PENDING_SPAWNS, typically <100)
+/// and array-of-structs reads more naturally for the drain loop.
+interface PendingSpawn {
+    effectName: string;
+    /// World-space spawn position, already includes the SubCegSpawn's
+    /// `posOffset` and (for sphere distribution) the radial component.
+    /// Stored as numbers rather than Vector3 to avoid per-spawn
+    /// allocation churn when nuke-class effects fire dozens at once.
+    px: number;
+    py: number;
+    pz: number;
+    dx: number;
+    dy: number;
+    dz: number;
+    fireAtMs: number;
+    /// Damage inherited from the original parent call. Spring's CEG
+    /// chains propagate damage downward so that "i1" / "d5" tokens at
+    /// leaf level still scale off the original explosion's strength.
+    /// Phase 2 will consume this; Phase 1 plumbs it but doesn't use it
+    /// at evaluation time yet.
+    damage: number;
+    /// Sub-CEG recursion depth — increments by 1 per chained spawn().
+    /// Compared against MAX_SUBCEG_DEPTH at dispatch time.
+    depth: number;
+}
+
 /// Engine-bitmap textureName per class. These are bare logical names
 /// that `ProjectileTextureResolver` looks up against the engine's
 /// `gamedata/resources.lua` `graphics.projectiletextures` table; the
@@ -196,6 +290,15 @@ export class CegRuntime {
     private resolver: ProjectileTextureResolver | null = null;
     private classes = new Map<string, ParticleClass>();
     private effects = new Map<string, EffectDef>();
+    /// Sub-CEG dispatch queue (Phase 1). FIFO; entries fire in the
+    /// first tick() where `nowMs >= fireAtMs`. The drain replaces the
+    /// queue with the entries that are still pending (one allocation
+    /// per tick at worst) rather than shifting in-place.
+    private pending: PendingSpawn[] = [];
+    /// One-shot warning state for the cycle / overflow paths so a
+    /// pathological CEG doesn't flood the console once per impact.
+    private warnedOverflow = false;
+    private warnedDepth = new Set<string>();
     /// Reusable scratch — composed into per-particle billboard matrices
     /// in buildBuffers. Allocated once per runtime to avoid GC churn
     /// on per-tick rebuilds.
@@ -284,21 +387,122 @@ export class CegRuntime {
     /// normal or upward (0,1,0) for ground impacts). Unknown effect
     /// names are silently dropped so a missing entry can't crash the
     /// renderer — gameplay-side adoption can outrun the effect library.
+    ///
+    /// `damage` is the parent explosion's damage in HP. Currently
+    /// plumbed through PendingSpawn for Phase 2's expression evaluator
+    /// (`i1`, `d5` tokens scale from it). External callers can omit
+    /// it (defaults to 0) for muzzle and trail effects which don't
+    /// reference damage.
     spawn(
         name: string,
         x: number, y: number, z: number,
         dx: number, dy: number, dz: number,
+        damage: number = 0,
+    ): void {
+        this.spawnInternal(name, x, y, z, dx, dy, dz, damage, /*depth*/ 0);
+    }
+
+    /// Internal recursive form. `depth` increments on every chained
+    /// dispatch from a PendingSpawn drain so MAX_SUBCEG_DEPTH can
+    /// abort A→B→A cycles without scanning the whole pending queue.
+    /// Public spawn() always enters at depth 0.
+    private spawnInternal(
+        name: string,
+        x: number, y: number, z: number,
+        dx: number, dy: number, dz: number,
+        damage: number, depth: number,
     ): void {
         const def = this.effects.get(name);
         if (!def) return;
 
+        if (depth >= MAX_SUBCEG_DEPTH) {
+            if (!this.warnedDepth.has(name)) {
+                this.warnedDepth.add(name);
+                console.warn(`[ceg] sub-CEG recursion limit hit at "${name}" `
+                    + `(depth ${depth}); chain aborted`);
+            }
+            return;
+        }
+
+        const nowMs = performance.now();
         for (const sp of def.spawns) {
+            if (sp.kind === 'subceg') {
+                this.queueSubCeg(sp, x, y, z, dx, dy, dz, damage, depth, nowMs);
+                continue;
+            }
             const cls = this.classes.get(sp.class);
             if (!cls) continue;
             for (let i = 0; i < sp.count; i++) {
                 const slot = allocateSlot(cls);
                 writeParticle(cls, slot, sp, x, y, z, dx, dy, dz);
             }
+        }
+    }
+
+    /// Translate one SubCegSpawn into N PendingSpawn entries. Drops
+    /// silently when the queue would overflow (warns once). Sphere
+    /// distribution picks a random unit vector per dispatch so the
+    /// children fan out evenly — matching Spring's CSpherePartSpawner
+    /// behaviour without a separate sphere-sampling primitive.
+    private queueSubCeg(
+        sp: SubCegSpawn,
+        px: number, py: number, pz: number,
+        dx: number, dy: number, dz: number,
+        damage: number, parentDepth: number, nowMs: number,
+    ): void {
+        const childDepth = parentDepth + 1;
+        if (childDepth >= MAX_SUBCEG_DEPTH) {
+            // The dispatch itself would be capped; skip the enqueue
+            // cost rather than enqueueing dead entries.
+            return;
+        }
+        for (let i = 0; i < sp.count; i++) {
+            if (this.pending.length >= MAX_PENDING_SPAWNS) {
+                if (!this.warnedOverflow) {
+                    this.warnedOverflow = true;
+                    console.warn(`[ceg] sub-CEG pending queue full `
+                        + `(${MAX_PENDING_SPAWNS} entries); dropping new spawns`);
+                }
+                return;
+            }
+            // Compute the world position. For sphere distribution,
+            // pick a random unit vector then push the spawn out along
+            // it by `radius` elmos. Math.random() pairs sampled in
+            // (x,y,z) with rejection would be exact, but a normalised
+            // gaussian-like sample is fast and visually equivalent
+            // for the small counts (≤ 30) sub-spawners typically use.
+            let ox = sp.posOffset[0];
+            let oy = sp.posOffset[1];
+            let oz = sp.posOffset[2];
+            let sdx = dx, sdy = dy, sdz = dz;
+            if (sp.distribution === 'sphere' && sp.radius > 0) {
+                const ux = Math.random() * 2 - 1;
+                const uy = Math.random() * 2 - 1;
+                const uz = Math.random() * 2 - 1;
+                const ulen = Math.hypot(ux, uy, uz);
+                if (ulen > 1e-3) {
+                    const inv = sp.radius / ulen;
+                    ox += ux * inv;
+                    oy += uy * inv;
+                    oz += uz * inv;
+                    sdx = ux / ulen;
+                    sdy = uy / ulen;
+                    sdz = uz / ulen;
+                }
+            } else if (!sp.dirInherit) {
+                sdx = 0; sdy = 1; sdz = 0;
+            }
+            const delayS = sp.delayMaxS > sp.delayMinS
+                ? sp.delayMinS + Math.random() * (sp.delayMaxS - sp.delayMinS)
+                : sp.delayMinS;
+            this.pending.push({
+                effectName: sp.targetTag,
+                px: px + ox, py: py + oy, pz: pz + oz,
+                dx: sdx, dy: sdy, dz: sdz,
+                fireAtMs: nowMs + delayS * 1000,
+                damage,
+                depth: childDepth,
+            });
         }
     }
 
@@ -309,6 +513,8 @@ export class CegRuntime {
     /// position, no separate sweep.
     tick(dt: number): void {
         if (dt <= 0) return;
+
+        this.drainPending();
 
         const cam = this.scene.activeCamera;
         const camX = cam ? cam.position.x : 0;
@@ -347,6 +553,35 @@ export class CegRuntime {
         }
         this.classes.clear();
         this.effects.clear();
+        this.pending.length = 0;
+        this.warnedDepth.clear();
+        this.warnedOverflow = false;
+    }
+
+    /// Fire every PendingSpawn whose `fireAtMs` has elapsed. Entries
+    /// that are still future-dated are kept in-place via two-pointer
+    /// compaction — common case (most entries due) avoids reallocating
+    /// the queue. Sub-CEG recursion uses spawnInternal() so depth
+    /// tracking carries through the chain.
+    private drainPending(): void {
+        if (this.pending.length === 0) return;
+        const nowMs = performance.now();
+        let writeIdx = 0;
+        const pending = this.pending;
+        for (let i = 0; i < pending.length; i++) {
+            const p = pending[i];
+            if (nowMs >= p.fireAtMs) {
+                this.spawnInternal(
+                    p.effectName,
+                    p.px, p.py, p.pz,
+                    p.dx, p.dy, p.dz,
+                    p.damage, p.depth);
+            } else {
+                if (writeIdx !== i) pending[writeIdx] = p;
+                writeIdx++;
+            }
+        }
+        pending.length = writeIdx;
     }
 
     private ensureClass(name: string): ParticleClass {

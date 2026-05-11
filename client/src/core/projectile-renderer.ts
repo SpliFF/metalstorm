@@ -617,9 +617,14 @@ export class ProjectileRenderer {
             if (fxName) {
                 // Impact "direction" is upward — sparks/smoke fly off
                 // the surface rather than along the projectile axis.
+                // `defaultDamage` propagates through sub-CEG chains so
+                // Phase 2's `i1`/`d5` damage-scaled spawns size off the
+                // weapon's authored damage rather than a hard-coded
+                // assumption.
+                const damage = def?.defaultDamage ?? 0;
                 this.cegRuntime.spawn(fxName,
                     ev.pos.x, ev.pos.y, ev.pos.z,
-                    0, 1, 0);
+                    0, 1, 0, damage);
             }
         }
         if (!p) return;
