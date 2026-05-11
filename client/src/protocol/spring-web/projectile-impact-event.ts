@@ -61,8 +61,20 @@ team():number {
   return offset ? this.bb!.readUint8(this.bb_pos + offset) : 0;
 }
 
+/**
+ * Weapon def driving the explosion. Populated for both projectile
+ * impacts (matches `proj_id`'s weapon) and free-floating
+ * explosions like unit death / self-destruct (where no live
+ * projectile exists for the client to look up). 0 = "unknown,
+ * look up via proj_id or fall back to generic VFX".
+ */
+weaponDefId():number {
+  const offset = this.bb!.__offset(this.bb_pos, 14);
+  return offset ? this.bb!.readUint16(this.bb_pos + offset) : 0;
+}
+
 static startProjectileImpactEvent(builder:flatbuffers.Builder) {
-  builder.startObject(5);
+  builder.startObject(6);
 }
 
 static addProjId(builder:flatbuffers.Builder, projId:number) {
@@ -85,6 +97,10 @@ static addTeam(builder:flatbuffers.Builder, team:number) {
   builder.addFieldInt8(4, team, 0);
 }
 
+static addWeaponDefId(builder:flatbuffers.Builder, weaponDefId:number) {
+  builder.addFieldInt16(5, weaponDefId, 0);
+}
+
 static endProjectileImpactEvent(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
@@ -97,7 +113,8 @@ unpack(): ProjectileImpactEventT {
     (this.pos() !== null ? this.pos()!.unpack() : null),
     this.impactKind(),
     this.targetId(),
-    this.team()
+    this.team(),
+    this.weaponDefId()
   );
 }
 
@@ -108,6 +125,7 @@ unpackTo(_o: ProjectileImpactEventT): void {
   _o.impactKind = this.impactKind();
   _o.targetId = this.targetId();
   _o.team = this.team();
+  _o.weaponDefId = this.weaponDefId();
 }
 }
 
@@ -117,7 +135,8 @@ constructor(
   public pos: Vec3T|null = null,
   public impactKind: ProjectileImpactKind = ProjectileImpactKind.Terrain,
   public targetId: number = 0,
-  public team: number = 0
+  public team: number = 0,
+  public weaponDefId: number = 0
 ){}
 
 
@@ -128,6 +147,7 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   ProjectileImpactEvent.addImpactKind(builder, this.impactKind);
   ProjectileImpactEvent.addTargetId(builder, this.targetId);
   ProjectileImpactEvent.addTeam(builder, this.team);
+  ProjectileImpactEvent.addWeaponDefId(builder, this.weaponDefId);
 
   return ProjectileImpactEvent.endProjectileImpactEvent(builder);
 }

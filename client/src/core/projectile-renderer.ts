@@ -599,14 +599,20 @@ export class ProjectileRenderer {
         projId: number;
         pos: { x: number; y: number; z: number };
         impactKind?: number;
+        weaponDefId?: number;
     }): void {
         const p = this.live.get(ev.projId);
         // Fire the impact CEG even when the local projectile entry
         // has already been pruned (orphan eviction or hit-scan beams
         // never enter this.live in the first place). Falls back to the
         // generic explosion effect when we can't pin down the def.
+        // `weaponDefId` on the event is the authoritative def for
+        // free-floating explosions (unit death / self-destruct, where
+        // there's no live projectile entry to look up).
         if (this.cegRuntime) {
-            const def = p ? this.weaponDefs.get(p.weaponDefId) : undefined;
+            const def = ev.weaponDefId
+                ? this.weaponDefs.get(ev.weaponDefId)
+                : (p ? this.weaponDefs.get(p.weaponDefId) : undefined);
             const fxName = effectForImpact(ev.impactKind ?? 0, def);
             if (fxName) {
                 // Impact "direction" is upward — sparks/smoke fly off

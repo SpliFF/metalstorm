@@ -26,6 +26,8 @@
 #include "Sim/Projectiles/ExplosionGenerator.h"
 #include "Sim/Projectiles/ExplosionListener.h"
 #include "Sim/Projectiles/Projectile.h"
+#include "Server/ProjectileEventCollector.h"
+#include "Server/SoundEventCollector.h"
 #include "Sim/Units/CommandAI/MobileCAI.h"
 #include "Sim/Units/UnitTypes/Factory.h"
 #include "Sim/Units/BuildInfo.h"
@@ -318,6 +320,61 @@ void CGameHelper::Explosion(const CExplosionParams& params) {
 			params.owner,
 			params.hitUnit
 		);
+	}
+
+	// Free-floating explosion stream — for explosions not driven by a
+	// live projectile (death/self-destruct, Lua-spawned, etc.) we have
+	// to emit the impact+sound events ourselves. The projectile path
+	// already emits them in WeaponProjectile::Collision before reaching
+	// here, so we gate on the sentinel projectileID (-1u = no
+	// projectile) to avoid duplicates.
+	constexpr uint32_t kNoProjectile = static_cast<uint32_t>(-1);
+	if (!noGfx && params.projectileID == kNoProjectile && weaponDef != nullptr) {
+		// Pick impact kind from the target. Death/self-d at a unit's
+		// own position → SelfDetonate so client routes it to the
+		// airburst CEG path (effectForImpact in projectile-renderer.ts)
+		// rather than treating it as an incoming hit on someone.
+		uint8_t kind = 4u; // SelfDetonate
+		uint32_t targetId = 0u;
+		if (params.hitUnit != nullptr) {
+			kind = 1u; // Unit
+			targetId = static_cast<uint32_t>(params.hitUnit->id);
+		} else if (params.hitFeature != nullptr) {
+			kind = 2u; // Feature
+			targetId = static_cast<uint32_t>(params.hitFeature->id);
+		}
+		const int team = (params.owner != nullptr) ? params.owner->team : -1;
+
+		ProjectileImpactEventData iev;
+		iev.projId = 0u; // no live projectile for the client to clean up
+		iev.pos = params.pos;
+		iev.impactKind = kind;
+		iev.targetId = targetId;
+		iev.team = (team >= 0) ? static_cast<uint8_t>(std::min(team, 255)) : 255u;
+		iev.weaponDefId = static_cast<uint16_t>(weaponDef->id);
+		projectileEvents.PushImpact(iev);
+
+		// Hit sound. dry/wet picked the same way as in
+		// WeaponProjectile::Collision: fireSound entries first, then
+		// soundHitDry (index NumFire), then soundHitWet (NumFire + 1).
+		if (weaponDef->hitSound.NumSounds() > 0 &&
+		    eventHandler.AllowSound(weaponDef->id, /*kind=Weapon*/ 1,
+		                            /*soundId=*/ 0, team, params.pos)) {
+			const bool wet = params.pos.y < 0.0f;
+			const size_t fireCount = weaponDef->fireSound.NumSounds();
+			const size_t hitCount  = weaponDef->hitSound.NumSounds();
+			const size_t pick = (wet && hitCount > 1) ? 1u : 0u;
+
+			SoundEventData se;
+			se.soundId = static_cast<uint16_t>(fireCount + pick);
+			se.sourceDefId = static_cast<uint16_t>(weaponDef->id);
+			se.sourceKind = 1; // SoundSourceKind_Weapon
+			se.position = params.pos;
+			se.priority = 160; // between live-fire (128) and kill (192)
+			se.team = (team >= 0) ? static_cast<uint8_t>(std::min(team, 255)) : 255u;
+			se.channel = SoundEventChannel::Battle;
+			soundEvents.Push(se);
+		}
 	}
 
 	CExplosionCreator::FireExplosionEvent(params);

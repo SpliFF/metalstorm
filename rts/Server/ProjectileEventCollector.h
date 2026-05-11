@@ -39,6 +39,11 @@ struct ProjectileImpactEventData {
     uint8_t  impactKind;        // matches schemas ProjectileImpactKind
     uint32_t targetId;          // hit unit/feature/shield-host (0 for terrain)
     uint8_t  team;              // owner-team — used by per-session LOS filter
+    /// Weapon def for the explosion. Populated for both projectile
+    /// impacts and free-floating death/self-destruct explosions where
+    /// there is no live projectile entry the client could look up.
+    /// 0 means "not set — fall back to projId-keyed lookup."
+    uint16_t weaponDefId = 0;
 };
 
 struct ProjectileTrajectoryEventData {

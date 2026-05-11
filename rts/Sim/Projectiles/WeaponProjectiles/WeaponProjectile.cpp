@@ -279,6 +279,7 @@ void CWeaponProjectile::Collision(CFeature* feature)
 		ev.impactKind = (feature != nullptr) ? 2u /* Feature */ : 0u /* Terrain */;
 		ev.targetId   = (feature != nullptr) ? static_cast<uint32_t>(feature->id) : 0u;
 		ev.team       = static_cast<uint8_t>(teamID);
+		ev.weaponDefId = (weaponDef != nullptr) ? static_cast<uint16_t>(weaponDef->id) : 0u;
 		projectileEvents.PushImpact(ev);
 	}
 
@@ -330,6 +331,7 @@ void CWeaponProjectile::Collision(CUnit* unit)
 		ev.impactKind = 1u; /* Unit */
 		ev.targetId   = (unit != nullptr) ? static_cast<uint32_t>(unit->id) : 0u;
 		ev.team       = static_cast<uint8_t>(teamID);
+		ev.weaponDefId = (weaponDef != nullptr) ? static_cast<uint16_t>(weaponDef->id) : 0u;
 		projectileEvents.PushImpact(ev);
 	}
 

@@ -445,6 +445,12 @@ table ProjectileImpactEvent {
     /// always sees impacts from its own/allied projectiles, even if the
     /// impact happens in fog of war.
     team: uint8 = 0;
+    /// Weapon def driving the explosion. Populated for both projectile
+    /// impacts (matches `proj_id`'s weapon) and free-floating
+    /// explosions like unit death / self-destruct (where no live
+    /// projectile exists for the client to look up). 0 = "unknown,
+    /// look up via proj_id or fall back to generic VFX".
+    weapon_def_id: uint16 = 0;
 }
 
 /// Trajectory change event. Sent only when the projectile bounces,

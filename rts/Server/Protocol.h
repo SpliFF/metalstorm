@@ -213,7 +213,8 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
             &pos,
             static_cast<SpringWeb::ProjectileImpactKind>(e.impactKind),
             e.targetId,
-            e.team));
+            e.team,
+            e.weaponDefId));
     }
 
     std::vector<flatbuffers::Offset<SpringWeb::ProjectileTrajectoryEvent>> trajOffsets;

@@ -145,6 +145,10 @@ export interface ProjectileImpactInfo {
     pos: { x: number; y: number; z: number };
     impactKind: number;
     targetId: number;
+    /// Weapon def id for the explosion. Populated for both projectile
+    /// impacts (matches the projId's weapon) and free-floating death /
+    /// self-destruct explosions. 0 means "not set — look up via projId."
+    weaponDefId: number;
 }
 
 export interface ProjectileTrajectoryInfo {
@@ -1326,6 +1330,7 @@ export class Connection {
                     pos: { x: p?.x() ?? 0, y: p?.y() ?? 0, z: p?.z() ?? 0 },
                     impactKind: e.impactKind(),
                     targetId: e.targetId(),
+                    weaponDefId: e.weaponDefId(),
                 });
             }
             this.events.onProjectileImpacts(out, frame);
