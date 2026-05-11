@@ -101,6 +101,9 @@ export interface SoundEventInfo {
     priority: number;
     /// Owner team. 255 = no team / global.
     team: number;
+    /// Mix channel: 0=General, 1=Battle, 2=UnitReply, 3=UserInterface,
+    /// 4=BGMusic. Matches the SoundChannel enum in protocol.fbs.
+    channel: number;
 }
 
 /// Per-tick seismic ping decoded from a `GameEventBatch.seismic_pings`
@@ -161,6 +164,12 @@ export interface SoundRefInfo {
     volume: number;
     /// Default playback rate. Multiplied with SoundEvent.pitch.
     pitch: number;
+    /// Unresolved logical name (e.g. `"weapon/laser1"`, `"bot_select"`).
+    /// Used to look up SoundItem metadata in gamedata/sounds.lua —
+    /// per-item gain / pitch / priority / maxconcurrent etc. defaults
+    /// the server doesn't know about. Empty string when no logical
+    /// name is available.
+    name: string;
 }
 
 export interface UnitDefInfo {
@@ -973,6 +982,7 @@ export class Connection {
                             category: s.category(),
                             volume: s.volume(),
                             pitch: s.pitch(),
+                            name: s.name() ?? '',
                         });
                     }
                     defs.push({
@@ -1069,6 +1079,7 @@ export class Connection {
                             category: s.category(),
                             volume: s.volume(),
                             pitch: s.pitch(),
+                            name: s.name() ?? '',
                         });
                     }
                     defs.push({
@@ -1350,6 +1361,7 @@ export class Connection {
                     pitch: e.pitch(),
                     priority: e.priority(),
                     team: e.team(),
+                    channel: e.channel(),
                 });
             }
             this.events.onSoundEvents(out, frame);
