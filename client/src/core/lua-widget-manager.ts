@@ -223,6 +223,16 @@ export class LuaWidgetManager {
         if (audioManager) this.audioManager = audioManager;
     }
 
+    /** Hook the MusicDirector so the SoundItem ingest also feeds
+     *  per-state playlists. The worker reads gamedata/sounds.lua
+     *  once and posts the full map; we hand it to both
+     *  AudioManager (for SoundItem lookups) and MusicDirector
+     *  (for music_<state>_<n> entries) in one go. */
+    setMusicDirector(director: import('./music-director.js').MusicDirector): void {
+        this.musicDirector = director;
+    }
+    private musicDirector: import('./music-director.js').MusicDirector | null = null;
+
     // ── Main entry point ────────────────────────────────────────────────
 
     async initialize(): Promise<void> {
@@ -798,17 +808,20 @@ export class LuaWidgetManager {
                 // server-emitted SoundEvents (resolved via SoundRef.name)
                 // and widget Spring.PlaySoundFile calls share the same
                 // per-item gain / pitch / priority / maxconcurrent /
-                // maxdist / rolloff / in3d defaults.
+                // maxdist / rolloff / in3d defaults. Also feed the
+                // MusicDirector so music_<state>_<n> entries become
+                // per-state playlists.
+                const items = msg.items as Record<string, import('./audio.js').SoundItem>;
+                const map = new Map<string, import('./audio.js').SoundItem>();
+                for (const [k, v] of Object.entries(items ?? {})) {
+                    map.set(k, v);
+                }
                 if (this.audioManager) {
-                    const items = msg.items as Record<string, import('./audio.js').SoundItem>;
-                    const map = new Map<string, import('./audio.js').SoundItem>();
-                    for (const [k, v] of Object.entries(items ?? {})) {
-                        map.set(k, v);
-                    }
                     const contentBase =
                         `${this.options.lobbyUrl}/api/games/data/${this.options.gameId}`;
                     this.audioManager.ingestSoundItems(map, contentBase);
                 }
+                this.musicDirector?.ingestPlaylistsFromSoundItems(map);
                 break;
             }
 

@@ -38,6 +38,7 @@ import { GameWeaponDefs } from '../protocol/spring-web/game-weapon-defs.js';
 import { GameWeaponDef } from '../protocol/spring-web/game-weapon-def.js';
 import { SoundEvent } from '../protocol/spring-web/sound-event.js';
 import { SeismicPing } from '../protocol/spring-web/seismic-ping.js';
+import { MusicEvent } from '../protocol/spring-web/music-event.js';
 import { SoundRef } from '../protocol/spring-web/sound-ref.js';
 import { GameCegDefs } from '../protocol/spring-web/game-ceg-defs.js';
 import { GameCegDef } from '../protocol/spring-web/game-ceg-def.js';
@@ -408,6 +409,11 @@ export interface ConnectionEvents {
     onCombatEvents?: (events: CombatEventInfo[], frame: number) => void;
     onSoundEvents?: (events: SoundEventInfo[], frame: number) => void;
     onSeismicPings?: (events: SeismicPingInfo[], frame: number) => void;
+    /** Music-state transition broadcast — fires once per state change.
+     *  The client looks up a track from its per-state playlist (built
+     *  from gamedata/sounds.lua music_* entries by the worker) and
+     *  hands it to AudioManager.playMusic for crossfade. */
+    onMusicEvent?: (state: number, fadeMs: number, frame: number) => void;
     onProjectileFired?: (events: ProjectileFiredInfo[], frame: number) => void;
     onProjectileImpacts?: (events: ProjectileImpactInfo[], frame: number) => void;
     onProjectileTrajectories?: (events: ProjectileTrajectoryInfo[], frame: number) => void;
@@ -1383,6 +1389,18 @@ export class Connection {
                 });
             }
             this.events.onSeismicPings(out, frame);
+        }
+
+        const musicCount = batch.musicEventsLength();
+        if (musicCount > 0 && this.events.onMusicEvent) {
+            // Music state machine emits at most one transition per
+            // batch — take the last one in case the server ever sends
+            // multiple (e.g. peace→tension→battle within a single tick).
+            for (let i = 0; i < musicCount; i++) {
+                const e = batch.musicEvents(i, new MusicEvent());
+                if (!e) continue;
+                this.events.onMusicEvent(e.state(), e.fadeMs(), frame);
+            }
         }
     }
 

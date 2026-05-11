@@ -9,6 +9,7 @@
 
 #include "protocol_generated.h"
 #include "CombatEventCollector.h"
+#include "MusicStateTracker.h"
 #include "ProjectileEventCollector.h"
 #include "SoundEventCollector.h"
 #include "IntelEventCollector.h"
@@ -257,14 +258,31 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
         seismicOffsets.push_back(spb.Finish());
     }
 
+    // Music-state transitions. Tick the tracker against the combat
+    // count for this batch first; then drain at most one pending
+    // transition. Most batches will produce zero events here.
+    musicState.Tick(static_cast<uint32_t>(events.size()));
+    std::vector<flatbuffers::Offset<SpringWeb::MusicEvent>> musicOffsets;
+    {
+        MusicStateValue st;
+        uint16_t fadeMs;
+        if (musicState.DrainTransition(st, fadeMs)) {
+            SpringWeb::MusicEventBuilder meb(fbb);
+            meb.add_state(static_cast<SpringWeb::MusicState>(st));
+            meb.add_fade_ms(fadeMs);
+            musicOffsets.push_back(meb.Finish());
+        }
+    }
+
     auto combatVec  = fbb.CreateVector(combatOffsets);
     auto firedVec   = fbb.CreateVector(firedOffsets);
     auto impactVec  = fbb.CreateVector(impactOffsets);
     auto trajVec    = fbb.CreateVector(trajOffsets);
     auto soundVec   = fbb.CreateVector(soundOffsets);
     auto seismicVec = fbb.CreateVector(seismicOffsets);
+    auto musicVec   = fbb.CreateVector(musicOffsets);
     auto batch = SpringWeb::CreateGameEventBatch(
-        fbb, frame, /*events=*/0, combatVec, firedVec, impactVec, trajVec, soundVec, seismicVec);
+        fbb, frame, /*events=*/0, combatVec, firedVec, impactVec, trajVec, soundVec, seismicVec, musicVec);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameEventBatch, batch.Union());
 }
 

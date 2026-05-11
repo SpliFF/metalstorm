@@ -42,6 +42,7 @@ import { DefCache } from './core/def-cache.js';
 import { CombatFX } from './core/combat-fx.js';
 import { AudioManager } from './core/audio.js';
 import { SoundEventPlayer } from './core/sound-events.js';
+import { MusicDirector } from './core/music-director.js';
 import { InputManager } from './core/input-manager.js';
 import { BuildMenu } from './core/build-menu.js';
 import { OrderPanel } from './core/order-panel.js';
@@ -501,6 +502,13 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
 
     const soundEventPlayer = new SoundEventPlayer(audioManager, defCache, soundContentBaseUrl);
 
+    // MusicDirector subscribes to server MusicEvents and crossfades
+    // a random track from the per-state playlist (built from
+    // gamedata/sounds.lua `music_<state>_<n>` SoundItems). The
+    // worker hands the playlist over via lua-widget-manager after
+    // the SoundItem load completes.
+    const musicDirector = new MusicDirector(audioManager, soundContentBaseUrl);
+
     canvas.addEventListener('click', () => audioManager?.resume(), { once: true });
 
     // Terrain state — populated when MapData arrives
@@ -568,6 +576,13 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         };
         terrainMesh = buildTerrainMesh(scene, mapDims, map.heightmap);
         console.log('[client] terrain mesh built from MapData heightmap');
+
+        // Open the music gate. Per PLAN-audio.md the gate covers
+        // terrain + first entity batch + preload SoundItems; we use
+        // terrain build as the proxy since it's the latest of the
+        // three for any non-trivial game. Any MusicEvent that fired
+        // before this point applies its latest state here.
+        musicDirector.arm();
 
         // Fog-of-war overlay — heightmap-following translucent black
         // mesh that the per-allyteam LOS bitmap (envelope 0x07) paints
@@ -683,6 +698,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 soloWidget: soloWidget ?? undefined,
             });
             mgr.setLiveDataSources(rtsCamera, conn, audioManager ?? undefined);
+            mgr.setMusicDirector(musicDirector);
             mgr.forwardMapFeatures(map.features);
             // Seed the worker with any defs that arrived before the
             // manager existed (def stream can race MapData arrival).
@@ -874,6 +890,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         },
         onSoundEvents(events) {
             soundEventPlayer.handleBatch(events);
+        },
+        onMusicEvent(state, fadeMs) {
+            musicDirector.handleMusicEvent(state, fadeMs);
         },
         onSeismicPings(events) {
             currentWidgetManager?.forwardSeismicPings(events);
