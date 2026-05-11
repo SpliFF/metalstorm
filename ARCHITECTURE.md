@@ -67,6 +67,8 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `Server/MapMetadataDb.cpp` | Read-only SQLite access for map metadata. Used by lobby and game server. |
 | `Server/GameProcessor.h/.cpp` | Scans `objects3d/`, converts S3O→glb via modelimporter, converts textures. |
 | `Server/CombatEventCollector.h/.cpp` | Hooks DoDamage, collects hit/miss/kill events for broadcast. |
+| `Server/SoundEventCollector.h/.cpp` | Per-tick collector for `SoundEventData` (sound id, source def + kind, position, channel, priority). Drained into `GameEventBatch.sounds`. |
+| `Server/MusicStateTracker.h/.cpp` | Combat-intensity state machine (peace / tension / battle / victory / defeat). Sampled per tick by `BuildCombatEventBatch`; emits a `MusicEvent` on each state transition. |
 | `Server/ClientSession.h` | Per-client auth state, team, viewport. |
 | `Server/LuaExecEngine.h/.cpp` | Thread-safe console command queue + Lua/server scope execution. |
 | `Server/LuaDebugger.h/.cpp` | Lua breakpoints, stack inspection, step/continue, sim pause. |
@@ -117,7 +119,10 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `core/rts-camera.ts` | Orbital pan/zoom/rotate camera with viewport updates. |
 | `core/input-manager.ts` | Click-to-select (ray cast), right-click-to-command, drag-box select, keyboard shortcuts. |
 | `core/minimap.ts` | Minimap canvas with entity dots, click-to-pan, detachable popup window. |
-| `core/audio.ts` + `core/sound-events.ts` + `core/synth-sounds.ts` | Web Audio: 96-voice HRTF pool, SFX bus with zoom-aware attenuation, master limiter. Server SoundEvents resolve through `sound-events.ts`; `synth-sounds.ts` is the procedural fallback for combat-fx. See PLAN-audio.md. |
+| `core/audio.ts` | `AudioManager`: 96-voice HRTF pool, five Recoil-parity channel buses (General / Battle / UnitReply / UserInterface / BGMusic) with strict-greater-priority per-channel eviction, master `ConvolverNode` for map reverb, dual-HTMLAudioElement music crossfader, SoundItem ingest + resolution, persisted channel/master volume. |
+| `core/sound-events.ts` | `SoundEventPlayer`: resolves server `SoundEvent` → `SoundRef.name` → SoundItem → URL chain, applies per-play gain/pitch random offsets, routes to AudioManager on the channel the server tagged. |
+| `core/music-director.ts` | Subscribes to `MusicEvent`s, picks a random track from the per-state playlist (built from `music_<state>_<n>` SoundItems), crossfades via AudioManager. Gates start on a single `arm()` call from main.ts. |
+| `core/synth-sounds.ts` | Procedural fallback for combat-fx when no real asset is reachable. |
 | `core/map-data.ts` | Parses MapData FlatBuffer into `ParsedMapData` (heightmap, features, tiles, URLs). |
 | `core/lua-runtime.ts` + `core/fengari.d.ts` | Shared Fengari Lua 5.1 runtime. Type definitions. |
 | `core/lua-spring-api.ts` | Client-side `Spring.*` API surface (read-only sim queries, draw helpers). |
@@ -149,7 +154,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 - `0x03` = Entity state delta (custom binary)
 - `0x04` = Projectile state snapshot (custom binary)
 
-**Key server→client messages:** AuthResponse, MapData, GameUnitDefs, GameWeaponDefs, EntityCreate, EntityDestroy, GameEventBatch (contains CombatEvents), GameInfo, RoomStateUpdate, RoomListUpdate, LogBatch, ConsoleResponse, GameStarted.
+**Key server→client messages:** AuthResponse, MapData, GameUnitDefs, GameWeaponDefs, EntityCreate, EntityDestroy, GameEventBatch (CombatEvents, projectile fired/impacts/trajectories, SoundEvents, SeismicPings, MusicEvents), GameInfo, RoomStateUpdate, RoomListUpdate, LogBatch, ConsoleResponse, GameStarted.
 
 **Key client→server messages:** AuthRequest, PlayerCommand, ViewportUpdate, RoomCreate/Join/Leave/Ready/StartGame/EndGame, RoomAddAI/RemoveAI, LogIngest, LogSubscribe, LogUnsubscribe, ConsoleCommand.
 
@@ -317,6 +322,97 @@ end
 
 Engine base gadgets live in `cont/base/springcontent/LuaRules/`. Game-specific gadgets live in `content/games/<game>/LuaRules/`. The engine base gadgets load first, providing default behaviors that games can override.
 
+### Audio System
+
+End-to-end pipeline from server sim emissions to browser playback. Single source of truth: [PLAN-audio.md](PLAN-audio.md).
+
+```
+Server (sim thread)                              Client (main thread)
+─────────────────────────────────                ───────────────────────────────
+CWeapon::Fire / CWeaponProjectile::Collision /   ConnectionManager.onSoundEvents
+CUnit::DoDamage  ─► AllowSound (Lua veto)        SoundEventPlayer.handleBatch
+        │                                                │
+        ▼                                                │  resolve SoundRef.name → SoundItem
+SoundEventCollector.Push(SoundEventData)                 │  resolve SoundItem.file → URL (.webm)
+        │   { soundId, sourceDefId, sourceKind,          │
+        │     position, volume, pitch, priority,         ▼
+        │     team, channel }                       AudioManager.loadSound (fetch+decode once)
+        ▼  per-tick drain                                │
+Protocol::BuildCombatEventBatch ─► SoundEvent[]          ▼
+        + MusicStateTracker.Tick(combat count)      AudioManager.play({
+        + drain pending transition → MusicEvent       buffer, x,y,z, volume, pitch, priority,
+        in GameEventBatch                             channel, spatial, rolloff, maxDist })
+                                                         │
+GameUnitDef / GameWeaponDef carry SoundRef[]             ▼
+sounds (path, name, category, vol, pitch)           96-voice pool → PannerNode →
+                                                    channel bus (1 of 5) → master gain →
+                                                    ConvolverNode (map reverb, passthrough
+                                                    unless mapinfo sets a preset) →
+                                                    DynamicsCompressor → destination
+
+                                                    Music path (BGMusic channel):
+ConnectionManager.onMusicEvent ───────────────► MusicDirector.handleMusicEvent
+                                                    pick track from per-state playlist
+                                                    AudioManager.playMusic(url, vol, fadeMs)
+                                                    └─ HTMLAudioElement + MediaElementSource
+                                                       crossfade A/B slots over `fade_ms`
+```
+
+#### Channels (Recoil parity)
+
+Five named buses, each with independent volume + enable state persisted to `localStorage` under `audio.channel.<name>`. The mix channel is **caller-determined**, not a SoundItem field:
+
+| Channel | Typical callers |
+|---------|-----------------|
+| `General` | `Spring.PlaySoundFile` with no channel arg, ambient SFX |
+| `Battle` | `CWeapon::Fire`, projectile impacts, `CUnit::DoDamage` |
+| `UnitReply` | Selection / order-ack barks |
+| `UserInterface` | Widget UI clicks, build menu feedback |
+| `BGMusic` | Music streaming (state-machine and `Spring.PlaySoundStream`) |
+
+Voice acquisition applies Recoil's per-channel cap with strict-greater-priority eviction (`AudioChannel.cpp:100-126` parity).
+
+#### Content prep (`tools/audioconverter`)
+
+Standalone ffmpeg-driven CLI. `gameconverter` walks a game's `sounds/**` and `LuaUI/Sounds/**`, re-encodes every `.wav/.ogg/.mp3/.flac/.m4a` to a sibling `.webm` (Opus) at category-specific bitrates (sfx 64 kbps mono, ui 48 kbps mono, music 96 kbps stereo), then prunes the source. The runtime never sees a non-`.webm` audio file. ffmpeg is located at CMake configure time; `-DSPRING_SKIP_AUDIOCONVERTER=ON` opts the target out for hosts that don't run content prep.
+
+#### SoundItem resolution (`gamedata/sounds.lua`)
+
+The widget worker runs `VFS.Include("gamedata/sounds.lua")` immediately after VFS prefetch and posts the resulting `SoundItems` map to the main thread. AudioManager.ingestSoundItems holds a `Map<name, SoundItem>` keyed by lower-cased logical name; resolution order is:
+
+1. `SoundItems[name]` (authoritative for `gain` / `pitch` / `priority` / `maxconcurrent` / `maxdist` / `rolloff` / `in3d`).
+2. Server's `SoundRef.path` (already `.webm` after `NormalizeSoundPath`).
+3. `normalizeSoundPath(name)` heuristic (last resort).
+
+The same map drives both server-emitted SoundEvents (resolved via `SoundRef.name`) and widget `Spring.PlaySoundFile` calls.
+
+#### Lua audio API
+
+Eight functions on the worker's Spring table, matching Recoil's `LuaUnsyncedCtrl.cpp` signatures verbatim so upstream games port without source patches:
+
+`Spring.PlaySoundFile(file, vol, x,y,z, sx,sy,sz, channel)`, `PlaySoundStream(file, vol, enqueue)`, `StopSoundStream()`, `PauseSoundStream()`, `SetSoundStreamVolume(v)`, `GetSoundStreamTime()`, `SetSoundEffectParams(preset | table)`, `LoadSoundDef(file)`, `PreloadSoundItem(name)`.
+
+`Spring.GetConfigInt`/`SetConfigInt` + a `SendCommands{"set <key> <value>"}` verb persist to `springConfig.<key>` in localStorage and apply audio-key side-effects (`snd_volmaster` → master volume, `snd_volgeneral`/`battle`/`unitreply`/`ui`/`music` → channel volume), so chili epicmenu trackbars work end-to-end without source patches.
+
+#### Map reverb
+
+`mapinfo.lua → sound = { preset = "..." }` is extracted by `MapProcessor`, persisted in the maps table as a `sound_preset` column, and surfaced in metadata.json. `main.ts:onMapData` calls `AudioManager.setReverbPreset(preset, mapBaseUrl)`; the manager fetches `sounds/efx/<preset>.webm` and ramps the master ConvolverNode's wet/dry to 50/50. Missing IRs stay in passthrough — map authors can name a preset without shipping the IR and the effect matches `"default"`.
+
+#### Music state machine
+
+`MusicStateTracker` samples per-tick combat-event counts into a 30-second ring buffer and derives state from sliding windows:
+
+| State | Entry condition |
+|-------|-----------------|
+| `peace` | Zero combat events in the last 30 s |
+| `tension` | ≥ 1 event in the last 5 s, below battle threshold |
+| `battle` | > 15 events in the last 3 s (~ > 5/sec sustained) |
+| `victory` / `defeat` | Externally forced via `ForceState(..., sticky=true)` (GameOver hook — not yet wired) |
+
+`BuildCombatEventBatch` ticks the tracker and drains at most one transition per batch into a `MusicEvent`. The client's `MusicDirector` picks a random track from the matching playlist (`music_<state>_<n>` SoundItems from `gamedata/sounds.lua`) and crossfades over the event's `fade_ms` (default 2 s, 500 ms for victory/defeat stings).
+
+Music start is gated on terrain-mesh build via `MusicDirector.arm()` — `MusicEvent`s before the gate stash their target state and apply the latest once opened, without replaying intermediate transitions.
+
 ### Content & Data
 
 ```
@@ -329,6 +425,7 @@ data/
   spring-server.db          SQLite (accounts, sessions, maps table)
   maps/<mapId>/             Preprocessed: heightmap.bin, minimap.dxt1, tiles.dxt1, features/*.glb
   games/<gameId>/models/    Preprocessed: <unit>.glb, <unit>.config.json, <texture>.png
+  games/<gameId>/sounds/    Preprocessed: *.webm (Opus, audioconverter output)
 ```
 
 ## HTTP Routes
@@ -436,4 +533,4 @@ first entity/projectile state update that references it.
 - SQL query proxy, process management API, game session tracking
 - MCP server for Claude integration (`tools/debug-mcp`)
 
-**Not yet wired:** server-side AI plugin runtime (skeleton in `Server/AI/` exists but plugins don't boot reliably), spectator mode, Glicko-2 ratings, persistent world layer, server-driven music triggers (`playMusic()` wired but no sim-side state machine yet).
+**Not yet wired:** server-side AI plugin runtime (skeleton in `Server/AI/` exists but plugins don't boot reliably), spectator mode, Glicko-2 ratings, persistent world layer. GameOver → `MusicStateTracker::ForceState(victory|defeat)` hook is the only audio gap — the rest of the pipeline (state machine, MusicEvent broadcast, client crossfader) is live.
