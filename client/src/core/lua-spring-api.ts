@@ -85,6 +85,22 @@ export interface SpringAPIContext {
      */
     getUnitDefName?(defId: number): string | undefined;
     /**
+     * Look up a sensor-range field on a cached UnitDef. `type` matches
+     * the Spring API: "los" | "airLos" | "radar" | "sonar" | "radarJammer"
+     * | "sonarJammer" | "seismic". Returns `undefined` if the def is
+     * unknown to the worker yet (it streams in on demand). Optional —
+     * if absent, `Spring.GetUnitSensorRadius` returns `nil`.
+     */
+    getUnitDefSensorRadius?(defId: number, type: string): number | undefined;
+    /**
+     * Per-allyteam radar position-error magnitude (in elmos). Matches
+     * `Spring.GetAllyTeamRadarErrorSize`. Server-side this is the
+     * baseline `radarErrorSize` multiplied by per-team modifiers; we
+     * don't stream the live value yet, so the host returns a constant
+     * approximation. Optional — defaults to a hard-coded baseline.
+     */
+    getAllyTeamRadarErrorSize?(allyTeam: number): number;
+    /**
      * Activate a command from the chili integral menu (or any widget
      * calling `Spring.SetActiveCommand`). Build commands (cmdId<0) tell
      * InputManager to enter ground placement for the unit-def `-cmdId`,
@@ -1088,6 +1104,32 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             // that call this don't crash.
             return false;
         },
+        // Per-unit sensor range, read from the cached UnitDef. The wire
+        // protocol carries los/airLos/radar/sonar/jammer/seismic radii;
+        // we don't yet stream the live mutable value Spring lets
+        // SetUnitSensorRadius change, so this reflects the def baseline.
+        // Widgets that toggle stealth by zeroing a unit's losRadius
+        // (`unit_stealth.lua`) won't see their override until the
+        // EntitySensorUpdate envelope lands in Phase 6.
+        GetUnitSensorRadius: (id: LuaValue, type: LuaValue) => {
+            const u = ls.units.get(Number(id));
+            if (!u) return null;
+            const r = ctx.getUnitDefSensorRadius?.(u.defId, String(type ?? 'los'));
+            return r ?? 0;
+        },
+        // Per-unit position-error parameters (the wandering vector that
+        // produces radar drift). Server-only state today — the client
+        // never sees the raw vector, only the deceived position. Return
+        // nil so sniper-style widgets that try to undo the deception
+        // fail closed instead of silently succeeding.
+        GetUnitPosErrorParams: () => null,
+        // Per-allyteam radar position-error magnitude. We don't stream
+        // the live value yet (TODO: extend GameInfo with radar_error_size
+        // — Phase 5/6); host falls back to Spring's compiled-in baseline.
+        GetAllyTeamRadarErrorSize: (allyTeam: LuaValue) => {
+            const at = allyTeam !== undefined ? Number(allyTeam) : ls.identity.myAllyTeam;
+            return ctx.getAllyTeamRadarErrorSize?.(at) ?? 96;
+        },
 
         IsUnitInView: (id: LuaValue) => {
             // All units in the store are server-sent and thus in view
@@ -1305,7 +1347,13 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         GetSmoothMeshHeight: (x: LuaValue, z: LuaValue) => {
             return sampleHeight(ctx, Number(x), Number(z));
         },
-        IsPosInLos: () => true,
+        // Point-LOS queries need the per-allyteam LOS bitmap, which the
+        // server doesn't stream yet (Phase 5). Return false everywhere
+        // — approximate-pessimistic. Widgets like unit_bomber_fog_chase
+        // (which guides bombers onto fog targets) will treat all
+        // off-screen positions as fogged until the bitmap lands.
+        IsPosInLos: () => false,
+        IsPosInAirLos: () => false,
         IsPosInRadar: () => false,
         GetUnitsInRectangle: (x1: LuaValue, z1: LuaValue, x2: LuaValue, z2: LuaValue) => {
             const rx1 = Number(x1), rz1 = Number(z1), rx2 = Number(x2), rz2 = Number(z2);

@@ -808,6 +808,22 @@ async function init(
             postToMain({ type: 'setCameraTarget', x, z, smoothness });
         },
         getUnitDefName: (defId) => unitDefMap.get(defId)?.name,
+        getUnitDefSensorRadius: (defId, type) => {
+            const d = unitDefMap.get(defId);
+            if (!d) return undefined;
+            switch (type) {
+                case 'los':         return d.losRadius;
+                case 'airLos':      return d.airLosRadius;
+                case 'radar':       return d.radarRadius;
+                case 'sonar':       return d.sonarRadius;
+                case 'radarJammer': return d.jammerRadius;
+                // Sonar-jam radius isn't on the wire yet; report 0 so
+                // widgets that probe it don't crash.
+                case 'sonarJammer': return 0;
+                case 'seismic':     return d.seismicRadius;
+                default:            return undefined;
+            }
+        },
         setActiveCommand: (cmdId, mods) => {
             postToMain({ type: 'setActiveCommand', cmdId, mods });
         },
