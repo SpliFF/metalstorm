@@ -266,6 +266,7 @@ function describeInboundMessage(msg: Record<string, unknown>): string {
         case 'entityDestroy': return `entityDestroy id=${msg.entityId}`;
         case 'intelTransitions': return `intelTransitions (${(msg.events as unknown[])?.length ?? 0} events)`;
         case 'seismicPings':  return `seismicPings (${(msg.pings as unknown[])?.length ?? 0} pings)`;
+        case 'losBitmap':     return `losBitmap allyTeam=${msg.allyTeam} ${msg.width}x${msg.height} frame=${msg.frame}`;
         case 'resourceUpdate':return `resourceUpdate team=${msg.team}`;
         case 'gameInfo':      return `gameInfo frame=${msg.frame}`;
         default:              return t;
@@ -3613,6 +3614,24 @@ self.onmessage = async (e: MessageEvent) => {
                 lines.push(`if widgetHandler and widgetHandler.UnitSeismicPing then pcall(widgetHandler.UnitSeismicPing, widgetHandler, ${p.x}, ${p.y}, ${p.z}, ${p.strength}, ${p.allyTeam}, 0, 0) end`);
             }
             runtime.doString(lines.join('\n'), 'callin:seismicPings');
+            break;
+        }
+
+        case 'losBitmap': {
+            // Per-allyteam fog-of-war bitmap snapshot (~1 Hz). Stored
+            // on `liveState.losBitmaps` so `Spring.IsPosInLos / InRadar
+            // / InAirLos` can sample it inside widget callbacks.
+            const allyTeam = msg.allyTeam as number;
+            const width    = msg.width    as number;
+            const height   = msg.height   as number;
+            const frame    = msg.frame    as number;
+            const inLos    = msg.inLos    as Uint8Array;
+            const inRadar  = msg.inRadar  as Uint8Array;
+            const explored = msg.explored as Uint8Array;
+            if (!inLos || !inRadar || !explored) break;
+            liveState.losBitmaps.set(allyTeam, {
+                width, height, frame, inLos, inRadar, explored,
+            });
             break;
         }
 

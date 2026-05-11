@@ -23,7 +23,9 @@ import {
     Quaternion,
 } from '@babylonjs/core';
 import { Texture } from '@babylonjs/core';
+import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture';
 import { EntityRenderer, type EntityMeta } from './entity-renderer.js';
+import type { LosBitmap } from './los-bitmap.js';
 import { CommandBuffer, CMD } from './command-buffer.js';
 import type { Connection } from './connection.js';
 import type { MapDimensions } from './terrain.js';
@@ -59,6 +61,16 @@ export class Minimap {
     private selectedIds: Set<number> = new Set();
 
     private terrainQuad: Mesh | null = null;
+    // Fog-of-war overlay: a textured plane above the terrain, populated
+    // from the per-allyteam LOS bitmap stream (envelope 0x07). The
+    // texture is a tiny RGBA canvas the size of the bitmap (<=64×64)
+    // that gets rewritten when a new snapshot arrives — Babylon then
+    // samples it with bilinear filtering across the minimap quad, so
+    // the edge of the fog looks smooth rather than chunky despite the
+    // low-resolution source. Allocated lazily on the first bitmap.
+    private fogQuad: Mesh | null = null;
+    private fogTexture: DynamicTexture | null = null;
+    private fogBitmapSize: { w: number; h: number } = { w: 0, h: 0 };
     // One thin-instance mesh per team (colour baked into material).
     private teamMeshes: Mesh[] = [];
     // Per-team dimmed-blip mesh for radar-only enemy contacts. Smaller
@@ -193,6 +205,96 @@ export class Minimap {
         this.selectedIds = new Set(ids);
         // Broadcast to other windows
         this.channel?.postMessage({ type: 'selection', unitIds: ids });
+    }
+
+    /** Apply a per-allyteam fog-of-war snapshot. Called from main.ts
+     *  whenever the connection delivers an `ENVELOPE_LOS_BITMAP` frame
+     *  (~1 Hz) for the local viewer's ally team. Spectators receive
+     *  multiple ally teams round-robin — we use the *most recent* one
+     *  for the overlay so the spec sees one team's vision at a time.
+     *
+     *  Tint scheme (alpha on a black overlay):
+     *    inLos                → no overlay
+     *    inRadar && !inLos    → 35% black
+     *    explored & !inRadar  → 60% black
+     *    !explored            → 100% black
+     */
+    applyLosBitmap(bitmap: LosBitmap): void {
+        const { width, height, inLos, inRadar, explored } = bitmap;
+        if (width === 0 || height === 0) return;
+
+        // (Re)allocate the texture if dimensions changed.
+        if (!this.fogTexture
+            || this.fogBitmapSize.w !== width
+            || this.fogBitmapSize.h !== height)
+        {
+            this.fogTexture?.dispose();
+            this.fogTexture = new DynamicTexture(
+                'minimapFog',
+                { width, height },
+                this.scene,
+                false,
+            );
+            this.fogTexture.hasAlpha = true;
+            this.fogTexture.wrapU = Texture.CLAMP_ADDRESSMODE;
+            this.fogTexture.wrapV = Texture.CLAMP_ADDRESSMODE;
+            this.fogBitmapSize = { w: width, h: height };
+
+            if (!this.fogQuad) {
+                const quad = MeshBuilder.CreateGround('minimapFog', {
+                    width: this.mapWidth, height: this.mapHeight,
+                }, this.scene);
+                quad.position.x = this.mapWidth / 2;
+                quad.position.z = this.mapHeight / 2;
+                // Just above the terrain quad and below the entity dots
+                // (terrain at y=0, dots at y=8..20). Avoids z-fighting
+                // and keeps the dots crisp on top of the fog.
+                quad.position.y = 2;
+                quad.isPickable = false;
+                const mat = new StandardMaterial('minimapFogMat', this.scene);
+                mat.emissiveTexture = this.fogTexture;
+                mat.diffuseColor = new Color3(0, 0, 0);
+                mat.emissiveColor = new Color3(1, 1, 1);
+                mat.disableLighting = true;
+                mat.useAlphaFromDiffuseTexture = false;
+                mat.opacityTexture = this.fogTexture;
+                mat.backFaceCulling = false;
+                quad.material = mat;
+                this.fogQuad = quad;
+            } else {
+                const mat = this.fogQuad.material as StandardMaterial;
+                mat.emissiveTexture = this.fogTexture;
+                mat.opacityTexture = this.fogTexture;
+            }
+        }
+
+        // Repaint the texture from the three planes.
+        const ctx = this.fogTexture.getContext() as CanvasRenderingContext2D;
+        const img = ctx.createImageData(width, height);
+        const data = img.data;
+        for (let row = 0; row < height; ++row) {
+            for (let col = 0; col < width; ++col) {
+                const idx = row * width + col;
+                const byte = idx >> 3;
+                const bit = 7 - (idx & 7);
+                const mask = 1 << bit;
+                const losBit   = (inLos[byte]    & mask) !== 0;
+                const radarBit = (inRadar[byte]  & mask) !== 0;
+                const expBit   = (explored[byte] & mask) !== 0;
+                let alpha255 = 255;
+                if (losBit)              alpha255 = 0;
+                else if (radarBit)       alpha255 = Math.round(0.35 * 255);
+                else if (expBit)         alpha255 = Math.round(0.60 * 255);
+                // alpha255 stays 255 for unexplored squares.
+                const o = idx * 4;
+                data[o    ] = 0;     // R — black overlay
+                data[o + 1] = 0;     // G
+                data[o + 2] = 0;     // B
+                data[o + 3] = alpha255;
+            }
+        }
+        ctx.putImageData(img, 0, 0);
+        this.fogTexture.update(false);
     }
 
     /** Render the minimap. Call at ~10Hz. */
@@ -430,6 +532,10 @@ export class Minimap {
         }
         this.detachedWindow = null;
 
+        this.fogTexture?.dispose();
+        this.fogTexture = null;
+        this.fogQuad?.dispose();
+        this.fogQuad = null;
         this.scene.dispose();
         this.engine.dispose();
         this.canvas.remove();

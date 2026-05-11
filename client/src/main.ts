@@ -49,6 +49,7 @@ import { EconomyBar } from './core/economy-bar.js';
 import { buildTerrainMesh, loadTerrainTextures, type MapDimensions } from './core/terrain.js';
 import { LobbyUI } from './lobby/lobby-ui.js';
 import { Minimap } from './core/minimap.js';
+import { LosBitmapStore } from './core/los-bitmap.js';
 import { CommandPathRenderer } from './core/command-path-renderer.js';
 import { DebugTerrainGrid } from './core/debug-terrain-grid.js';
 import { Connection } from './core/connection.js';
@@ -506,6 +507,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     let terrainMesh: Mesh | null = null;
     let currentMapData: ParsedMapData | null = null;
     let currentWidgetManager: LuaWidgetManager | null = null;
+    const losBitmapStore = new LosBitmapStore();
 
     const onMapData = (map: ParsedMapData): void => {
         // Stale callback from a session the user has already quit. Bail
@@ -835,6 +837,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         },
         onSeismicPings(events) {
             currentWidgetManager?.forwardSeismicPings(events);
+        },
+        onLosBitmap(bitmap) {
+            losBitmapStore.set(bitmap);
+            currentWidgetManager?.forwardLosBitmap(bitmap);
+            minimap?.applyLosBitmap(bitmap);
         },
         onEntityDestroy(entityId, x, y, z) {
             entityRenderer?.removeEntity(entityId);

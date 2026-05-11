@@ -60,6 +60,7 @@ import { parseProjectileState, type ProjectileStateSnapshot } from './projectile
 import { parsePieceState, type PieceStateSnapshot } from './piece-state.js';
 import { parseBuildActivity, type BuildActivitySnapshot } from './build-activity.js';
 import { parseMapData, type ParsedMapData } from './map-data.js';
+import { parseLosBitmap, type LosBitmap } from './los-bitmap.js';
 
 const ENVELOPE_FLATBUFFERS = 0x01;
 const ENVELOPE_ENTITY_STATE_FULL = 0x02;
@@ -67,6 +68,7 @@ const ENVELOPE_ENTITY_STATE_DELTA = 0x03;
 const ENVELOPE_PROJECTILE_STATE = 0x04;
 const ENVELOPE_PIECE_STATE = 0x05;
 const ENVELOPE_BUILD_ACTIVITY = 0x06;
+const ENVELOPE_LOS_BITMAP = 0x07;
 export type ConnectionState = 'disconnected' | 'connecting' | 'handshake' | 'authenticating' | 'connected';
 
 export interface CombatEventInfo {
@@ -411,6 +413,12 @@ export interface ConnectionEvents {
     onProjectileState?: (snapshot: ProjectileStateSnapshot) => void;
     onPieceState?: (snapshot: PieceStateSnapshot) => void;
     onBuildActivity?: (snapshot: BuildActivitySnapshot) => void;
+    /** Per-allyteam fog-of-war snapshot. Arrives ~1 Hz; one envelope
+     *  per ally team. Each player session normally receives only their
+     *  own ally team; spectators get round-robin coverage of all
+     *  teams. Consumed by `LosBitmapStore`, the minimap fog overlay,
+     *  and `Spring.IsPosInLos / IsPosInRadar / IsPosInAirLos`. */
+    onLosBitmap?: (bitmap: LosBitmap) => void;
     onResourceUpdate?: (info: ResourceUpdateInfo) => void;
     onGameInfo?: (frame: number, speed: number, paused: boolean,
                   wind?: { x: number; y: number; z: number; strength: number; tidal: number }) => void;
@@ -835,6 +843,13 @@ export class Connection {
             const snapshot = parseBuildActivity(data.subarray(1));
             if (snapshot) {
                 this.events.onBuildActivity?.(snapshot);
+            }
+            return;
+        }
+        if (envelope === ENVELOPE_LOS_BITMAP) {
+            const bitmap = parseLosBitmap(data.subarray(1));
+            if (bitmap) {
+                this.events.onLosBitmap?.(bitmap);
             }
             return;
         }

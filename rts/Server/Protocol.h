@@ -39,6 +39,13 @@ constexpr uint8_t ENVELOPE_ENTITY_STATE = 0x02;
 constexpr uint8_t ENVELOPE_PROJECTILE_STATE = 0x04;
 constexpr uint8_t ENVELOPE_PIECE_STATE = 0x05;
 constexpr uint8_t ENVELOPE_BUILD_ACTIVITY = 0x06;
+/// LOS bitmap snapshot (Phase 5). Hand-packed binary, three planes
+/// (in-LOS / in-radar / explored) at <= 64x64 squares. Sent 1 Hz per
+/// session, filtered to the viewer's own ally team (round-robin for
+/// spectators). Header is u8 envelope + u8 allyTeam + u8 width +
+/// u8 height + u32 frame (LE) followed by three bit-packed planes
+/// of (width*height + 7) / 8 bytes each, MSB-first per byte.
+constexpr uint8_t ENVELOPE_LOS_BITMAP = 0x07;
 
 /// Build a framed ServerMessage (envelope byte + FlatBuffers payload).
 inline std::vector<uint8_t> BuildServerMessage(

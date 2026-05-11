@@ -266,6 +266,24 @@ export interface LiveState {
      *  list with the keypress). Each entry is an array because a
      *  keyset can fire multiple actions in registration order. */
     keyBinds: Map<string, Array<{ cmd: string; extra: string }>>;
+    /** Per-allyteam fog-of-war bitmap. Three bit-packed planes
+     *  (in-LOS / in-radar+air / explored), arriving ~1 Hz from the
+     *  server. `Spring.IsPosInLos / IsPosInRadar / IsPosInAirLos`
+     *  sample this; the renderer / minimap use it for fog overlay.
+     *  Indexed by ally team id. */
+    losBitmaps: Map<number, LosBitmapState>;
+}
+
+/** Stored LOS bitmap snapshot inside `LiveState`. Mirrors `LosBitmap`
+ *  on the main thread but lives in worker memory. Bit-packed planes,
+ *  MSB-first per byte. */
+export interface LosBitmapState {
+    width: number;
+    height: number;
+    frame: number;
+    inLos: Uint8Array;
+    inRadar: Uint8Array;
+    explored: Uint8Array;
 }
 
 /** One entry from a unit's command panel as streamed by the server. */
@@ -567,6 +585,7 @@ export function createDefaultLiveState(): LiveState {
         unitCommands: new Map(),
         unitCmdDescs: new Map(),
         keyBinds: new Map(),
+        losBitmaps: new Map(),
     };
 }
 
@@ -1347,14 +1366,29 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         GetSmoothMeshHeight: (x: LuaValue, z: LuaValue) => {
             return sampleHeight(ctx, Number(x), Number(z));
         },
-        // Point-LOS queries need the per-allyteam LOS bitmap, which the
-        // server doesn't stream yet (Phase 5). Return false everywhere
-        // — approximate-pessimistic. Widgets like unit_bomber_fog_chase
-        // (which guides bombers onto fog targets) will treat all
-        // off-screen positions as fogged until the bitmap lands.
-        IsPosInLos: () => false,
-        IsPosInAirLos: () => false,
-        IsPosInRadar: () => false,
+        // Point-LOS queries sample the per-allyteam fog-of-war bitmap
+        // streamed by the server (envelope 0x07, ~1 Hz). Coordinates
+        // are world-space elmos; the bitmap is downsampled to
+        // <= 64×64 squares. `allyTeam` defaults to the viewer's own.
+        // Returns false when the bitmap hasn't arrived yet (first
+        // second of the game) or when the caller asks about an ally
+        // team we don't have a bitmap for (non-spectator querying
+        // someone else's vision). IsPosInAirLos folds into the
+        // in-radar plane on the wire — air-spotted squares are
+        // server-marked as visible — Phase 7 will split them out.
+        IsPosInLos: (x: LuaValue, _y: LuaValue, z: LuaValue, allyTeam?: LuaValue) => {
+            return sampleLosPlane(ctx, ls, 'los', Number(x), Number(z),
+                allyTeam !== undefined ? Number(allyTeam) : undefined);
+        },
+        IsPosInAirLos: (x: LuaValue, _y: LuaValue, z: LuaValue, allyTeam?: LuaValue) => {
+            // Air-LOS is folded into the in-radar plane on the wire.
+            return sampleLosPlane(ctx, ls, 'radar', Number(x), Number(z),
+                allyTeam !== undefined ? Number(allyTeam) : undefined);
+        },
+        IsPosInRadar: (x: LuaValue, _y: LuaValue, z: LuaValue, allyTeam?: LuaValue) => {
+            return sampleLosPlane(ctx, ls, 'radar', Number(x), Number(z),
+                allyTeam !== undefined ? Number(allyTeam) : undefined);
+        },
         GetUnitsInRectangle: (x1: LuaValue, z1: LuaValue, x2: LuaValue, z2: LuaValue) => {
             const rx1 = Number(x1), rz1 = Number(z1), rx2 = Number(x2), rz2 = Number(z2);
             const ids: number[] = [];
@@ -2151,6 +2185,35 @@ function screenPointToGround(
     const wz = near[2] + dz * t;
     const wy = sampleHeight(ctx, wx, wz);
     return [wx, wy, wz];
+}
+
+/**
+ * Sample the per-allyteam LOS bitmap at world (x, z). Backs
+ * `Spring.IsPosInLos / IsPosInRadar / IsPosInAirLos`. Returns false
+ * when:
+ *   - the bitmap hasn't streamed yet (first second of the game);
+ *   - the caller asks about an ally team we have no bitmap for
+ *     (non-spectator querying a foreign ally team's vision).
+ * Air-LOS folds into the `radar` plane on the wire (see
+ * `IntelEventCollector::BuildLosBitmap`); Phase 7 will split it out.
+ */
+function sampleLosPlane(ctx: SpringAPIContext, ls: LiveState,
+                        plane: 'los' | 'radar',
+                        x: number, z: number,
+                        allyTeam?: number): boolean {
+    const at = allyTeam ?? ls.identity.myAllyTeam;
+    const bitmap = ls.losBitmaps.get(at);
+    if (!bitmap) return false;
+    const mapW = ctx.mapSizeX || 1;
+    const mapH = ctx.mapSizeZ || 1;
+    const col = Math.floor((x / mapW) * bitmap.width);
+    const row = Math.floor((z / mapH) * bitmap.height);
+    if (col < 0 || col >= bitmap.width || row < 0 || row >= bitmap.height) return false;
+    const idx = row * bitmap.width + col;
+    const byte = idx >> 3;
+    const bit = 7 - (idx & 7);
+    const arr = plane === 'los' ? bitmap.inLos : bitmap.inRadar;
+    return (arr[byte] & (1 << bit)) !== 0;
 }
 
 /**

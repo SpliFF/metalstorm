@@ -1842,6 +1842,53 @@ int main(int argc, char* argv[])
         }
         }
 
+        // Per-allyteam LOS bitmap stream (envelope 0x07). Sent 1 Hz
+        // per session; each player gets their own ally team's bitmap.
+        // Spectators receive every ally team's bitmap, round-robin
+        // capped at 4 per second to avoid bursts in 16-team FFA.
+        // The fog texture refresh is intentionally slower than entity
+        // updates — Recoil's minimap fog doesn't tick faster than 1 Hz
+        // either.
+        {
+        int curFrame = sim.GetFrameNum();
+        if (curFrame > 0 && (curFrame % GAME_SPEED) == 0
+            && intelEvents != nullptr
+            && losHandler != nullptr
+            && rtcServer.GetClientCount() > 0)
+        {
+            const uint32_t frameNo = static_cast<uint32_t>(curFrame);
+            const int activeAllyTeams = teamHandler.ActiveAllyTeams();
+            // Per-spectator round-robin offset (in seconds). 4 ally
+            // teams per second × 16 ally teams = full cycle in 4 s.
+            const int specStride = 4;
+            const int specSecond = curFrame / GAME_SPEED;
+
+            sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+                int viewerAllyTeam = -1;
+                if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
+                    viewerAllyTeam = teamHandler.AllyTeam(session.team);
+
+                if (viewerAllyTeam >= 0) {
+                    auto bitmap = intelEvents->BuildLosBitmap(viewerAllyTeam, frameNo);
+                    if (!bitmap.empty())
+                        rtcServer.SendReliable(clientId, bitmap.data(), bitmap.size());
+                    return;
+                }
+
+                // Spectator: stream up to `specStride` ally teams per
+                // second, round-robin so all teams cycle every
+                // (activeAllyTeams / specStride) seconds.
+                if (activeAllyTeams <= 0) return;
+                for (int slot = 0; slot < specStride; ++slot) {
+                    const int at = ((specSecond * specStride) + slot) % activeAllyTeams;
+                    auto bitmap = intelEvents->BuildLosBitmap(at, frameNo);
+                    if (!bitmap.empty())
+                        rtcServer.SendReliable(clientId, bitmap.data(), bitmap.size());
+                }
+            });
+        }
+        }
+
         perfMetrics.SetFrame(sim.GetFrameNum());
         perfMetrics.SetClientCount(rtcServer.GetClientCount());
         perfMetrics.SetAICount(static_cast<int>(aiPool.GetAICount()));

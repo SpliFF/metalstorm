@@ -22,6 +22,7 @@ import type { AudioManager } from './audio.js';
 import { debugConsole } from './debug-console.js';
 import { logIngest } from './log-ingest.js';
 import { IntelTransitionTracker } from './intel-transitions.js';
+import type { LosBitmap } from './los-bitmap.js';
 
 // Vite worker import — bundles the worker as a separate chunk
 import WidgetWorker from './lua-widget-worker.ts?worker';
@@ -370,6 +371,26 @@ export class LuaWidgetManager {
     forwardSeismicPings(pings: ReadonlyArray<{ x: number; y: number; z: number; strength: number; allyTeam: number }>): void {
         if (this.disposed || pings.length === 0) return;
         this.postToWorker({ type: 'seismicPings', pings: pings.map(p => ({ ...p })) });
+    }
+
+    /** Forward a per-allyteam LOS bitmap snapshot to the worker. The
+     *  worker keeps the most recent bitmap per ally team in
+     *  `liveState.losBitmaps`; `Spring.IsPosInLos / IsPosInRadar /
+     *  IsPosInAirLos` read it on demand. Arrives ~1 Hz. The bit-packed
+     *  planes are transferred as `Uint8Array` (cheap, no copy beyond
+     *  what the worker postMessage clone does). */
+    forwardLosBitmap(bitmap: LosBitmap): void {
+        if (this.disposed) return;
+        this.postToWorker({
+            type: 'losBitmap',
+            allyTeam: bitmap.allyTeam,
+            width: bitmap.width,
+            height: bitmap.height,
+            frame: bitmap.frame,
+            inLos: bitmap.inLos,
+            inRadar: bitmap.inRadar,
+            explored: bitmap.explored,
+        });
     }
 
     /** Forward a resource update to the worker. */
