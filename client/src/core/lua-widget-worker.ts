@@ -4123,6 +4123,7 @@ if not unpack then unpack = table.unpack end
 if not table.getn then table.getn = function(t) return #t end end
 if not math.mod then math.mod = math.fmod end
 if not math.atan2 then math.atan2 = math.atan end
+if not math.pow then math.pow = function(x, y) return x ^ y end end
 if not table.maxn then
     table.maxn = function(t)
         local n = 0

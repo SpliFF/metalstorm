@@ -121,13 +121,17 @@ export class ProjectileTextureResolver {
     /// `name` is the bare logical name from a weapon def
     /// (`def.texture1`, etc.); the resolver does the resources.lua
     /// lookup and manifest probing. Empty `name` → null without
-    /// logging.
+    /// logging. Spring weapondefs use the literal string `"none"`
+    /// (case-insensitive) as a sentinel meaning "this texture slot is
+    /// explicitly disabled" — treat it the same as empty.
     resolve(name: string): string | null {
         if (!name) return null;
         if (!this.ready) return null;
 
-        const map = this.resources.graphics?.projectiletextures ?? {};
         const lower = name.toLowerCase();
+        if (lower === 'none') return null;
+
+        const map = this.resources.graphics?.projectiletextures ?? {};
 
         // resources.lua keys are case-sensitive in the file but
         // Spring's runtime is case-insensitive for projectile texture
