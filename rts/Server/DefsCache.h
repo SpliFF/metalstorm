@@ -58,13 +58,15 @@ inline std::string ComputeCacheKey(
     // after a schema change. Without this, a stale cache from a prior
     // schema would silently shadow the newly-bakable bytes.
     //
-    // 2026-05-09: v9 — GameWeaponDef gained scroll_speed (float).
-    // Drives UV-scroll on largeBeamLaser visuals; defaulted to Spring's
-    // 5.0 for non-Large beams (and ignored at render time per Recoil
-    // semantics). Keep this string in sync with the .cpp side and any
-    // other ComputeCacheKey copy — the lobby and the server both
-    // inline the function body, so a single-site bump misses one.
-    canonical += "schemaV9-protocol";
+    // 2026-05-10: v10 — GameWeaponDef gained ceg_tag /
+    // explosion_generator / bounce_explosion_generator (strings); a new
+    // GameCegDefs message was added carrying the parsed CEG defs as
+    // cegdefs.bin alongside unitdefs.bin / weapondefs.bin. Bumping the
+    // schema invalidates older two-file cache directories so the lobby
+    // re-bakes with the third file. Keep this string in sync with the
+    // .cpp side — the lobby and the server both inline the function
+    // body, so a single-site bump misses one.
+    canonical += "schemaV10-protocol";
     canonical += '\n';
     canonical += gameId;
     canonical += '\n';
@@ -87,19 +89,24 @@ inline std::string ComputeCacheKey(
 /// Absolute (relative-to-cwd) path to the directory holding the bin files.
 std::string CacheDir(const std::string& gameId, const std::string& cacheKey);
 
-/// Bake the UnitDefs/WeaponDefs FlatBuffer payloads to disk if not
-/// already present for this cacheKey. Skips writing if files already
+/// Bake the UnitDefs/WeaponDefs/CegDefs FlatBuffer payloads to disk if
+/// not already present for this cacheKey. Skips writing if files already
 /// exist (cheap stat) — the second room with the same modOptions is a
 /// no-op. Returns true on success (or if the cache was already warm).
 ///
-/// `unitDefBytes` / `weaponDefBytes` are the wire payloads as produced
-/// by Protocol::BuildGameUnitDefs / BuildGameWeaponDefs (server-message
+/// `unitDefBytes` / `weaponDefBytes` / `cegDefBytes` are the wire
+/// payloads as produced by Protocol::BuildGameUnitDefs /
+/// BuildGameWeaponDefs / CegLoader::BuildGameCegDefs (server-message
 /// envelope wrapper included; client deserialization is shared between
-/// HTTP fetch and any future stream channel).
+/// HTTP fetch and any future stream channel). `cegDefBytes` may be
+/// empty — older games / boot states that haven't parsed any CEGs
+/// yet are written as a tiny empty payload so the client's eager fetch
+/// doesn't 404 and can fall through to BUILTIN_EFFECTS.
 bool WriteIfMissing(
     const std::string& gameId,
     const std::string& cacheKey,
     const std::vector<uint8_t>& unitDefBytes,
-    const std::vector<uint8_t>& weaponDefBytes);
+    const std::vector<uint8_t>& weaponDefBytes,
+    const std::vector<uint8_t>& cegDefBytes);
 
 } // namespace DefsCache

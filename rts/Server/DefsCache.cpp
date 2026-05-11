@@ -15,11 +15,13 @@ namespace DefsCache {
 // entries keyed on the URL) become unreachable after a schema change.
 // Without this, a stale cache from a prior schema would silently
 // shadow the newly-bakable bytes.
-// 2026-05-09: v9 — GameWeaponDef gained scroll_speed (float). Old v8
-// .bin caches lack the field and would deserialise it as the default,
-// which is wrong for any weapon whose author tuned scrollSpeed away
-// from 5. Bumping invalidates them so the lobby reconverts.
-static constexpr const char* DEFS_SCHEMA_VERSION = "v9";
+// 2026-05-10: v10 — GameWeaponDef gained ceg_tag, explosion_generator,
+// bounce_explosion_generator (strings); a new GameCegDefs message
+// was added carrying parsed CEG defs. The bake now writes a third
+// `cegdefs.bin` next to unitdefs.bin / weapondefs.bin. Bumping
+// invalidates older two-file caches so the lobby re-bakes with the
+// third file.
+static constexpr const char* DEFS_SCHEMA_VERSION = "v10";
 
 std::string ComputeCacheKey(
     const std::string& gameId,
@@ -40,7 +42,7 @@ std::string ComputeCacheKey(
     // ComputeCacheKey copy in DefsCache.h — the two were drifting
     // apart and a single-site bump produced different cache keys
     // depending on which translation unit linked first.
-    canonical += "schemaV8-protocol";
+    canonical += "schemaV10-protocol";
     canonical += '\n';
     canonical += gameId;
     canonical += '\n';
@@ -96,16 +98,19 @@ bool WriteIfMissing(
     const std::string& gameId,
     const std::string& cacheKey,
     const std::vector<uint8_t>& unitDefBytes,
-    const std::vector<uint8_t>& weaponDefBytes)
+    const std::vector<uint8_t>& weaponDefBytes,
+    const std::vector<uint8_t>& cegDefBytes)
 {
     namespace fs = std::filesystem;
     const fs::path dir = CacheDir(gameId, cacheKey);
     const fs::path udPath = dir / "unitdefs.bin";
     const fs::path wdPath = dir / "weapondefs.bin";
+    const fs::path cdPath = dir / "cegdefs.bin";
 
     const bool udExists = fs::exists(udPath);
     const bool wdExists = fs::exists(wdPath);
-    if (udExists && wdExists) return true;
+    const bool cdExists = fs::exists(cdPath);
+    if (udExists && wdExists && cdExists) return true;
 
     std::error_code ec;
     fs::create_directories(dir, ec);
@@ -113,6 +118,10 @@ bool WriteIfMissing(
 
     if (!udExists && !WriteFile(udPath, unitDefBytes)) return false;
     if (!wdExists && !WriteFile(wdPath, weaponDefBytes)) return false;
+    // CEG payload is optional in semantics but always written so the
+    // browser fetch path doesn't see a 404; an empty GameCegDefs frame
+    // is still ~16 bytes after envelope+headers, which is harmless.
+    if (!cdExists && !WriteFile(cdPath, cegDefBytes)) return false;
     return true;
 }
 

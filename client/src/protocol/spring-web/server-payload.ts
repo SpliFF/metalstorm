@@ -8,6 +8,7 @@ import { ChatReceive, ChatReceiveT } from '../spring-web/chat-receive.js';
 import { ConsoleResponse, ConsoleResponseT } from '../spring-web/console-response.js';
 import { EntityCreate, EntityCreateT } from '../spring-web/entity-create.js';
 import { EntityDestroy, EntityDestroyT } from '../spring-web/entity-destroy.js';
+import { GameCegDefs, GameCegDefsT } from '../spring-web/game-ceg-defs.js';
 import { GameEventBatch, GameEventBatchT } from '../spring-web/game-event-batch.js';
 import { GameInfo, GameInfoT } from '../spring-web/game-info.js';
 import { GameListUpdate, GameListUpdateT } from '../spring-web/game-list-update.js';
@@ -54,18 +55,19 @@ export enum ServerPayload {
   GameUnitDefs = 19,
   PlayerLeft = 20,
   GameWeaponDefs = 21,
-  LogBatch = 22,
-  ConsoleResponse = 23,
-  GameStarted = 24,
-  GameRestarting = 25,
-  UnitCommandQueuesUpdate = 26,
-  UnitCmdDescsUpdate = 27
+  GameCegDefs = 22,
+  LogBatch = 23,
+  ConsoleResponse = 24,
+  GameStarted = 25,
+  GameRestarting = 26,
+  UnitCommandQueuesUpdate = 27,
+  UnitCmdDescsUpdate = 28
 }
 
 export function unionToServerPayload(
   type: ServerPayload,
-  accessor: (obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCmdDescsUpdate|UnitCommandQueuesUpdate) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|null
-): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|null {
+  accessor: (obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameCegDefs|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCmdDescsUpdate|UnitCommandQueuesUpdate) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameCegDefs|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|null
+): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameCegDefs|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|null {
   switch(ServerPayload[type]) {
     case 'NONE': return null; 
     case 'AuthResponse': return accessor(new AuthResponse())! as AuthResponse;
@@ -89,6 +91,7 @@ export function unionToServerPayload(
     case 'GameUnitDefs': return accessor(new GameUnitDefs())! as GameUnitDefs;
     case 'PlayerLeft': return accessor(new PlayerLeft())! as PlayerLeft;
     case 'GameWeaponDefs': return accessor(new GameWeaponDefs())! as GameWeaponDefs;
+    case 'GameCegDefs': return accessor(new GameCegDefs())! as GameCegDefs;
     case 'LogBatch': return accessor(new LogBatch())! as LogBatch;
     case 'ConsoleResponse': return accessor(new ConsoleResponse())! as ConsoleResponse;
     case 'GameStarted': return accessor(new GameStarted())! as GameStarted;
@@ -101,9 +104,9 @@ export function unionToServerPayload(
 
 export function unionListToServerPayload(
   type: ServerPayload, 
-  accessor: (index: number, obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCmdDescsUpdate|UnitCommandQueuesUpdate) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|null, 
+  accessor: (index: number, obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameCegDefs|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCmdDescsUpdate|UnitCommandQueuesUpdate) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameCegDefs|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|null, 
   index: number
-): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|null {
+): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|GameCegDefs|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|null {
   switch(ServerPayload[type]) {
     case 'NONE': return null; 
     case 'AuthResponse': return accessor(index, new AuthResponse())! as AuthResponse;
@@ -127,6 +130,7 @@ export function unionListToServerPayload(
     case 'GameUnitDefs': return accessor(index, new GameUnitDefs())! as GameUnitDefs;
     case 'PlayerLeft': return accessor(index, new PlayerLeft())! as PlayerLeft;
     case 'GameWeaponDefs': return accessor(index, new GameWeaponDefs())! as GameWeaponDefs;
+    case 'GameCegDefs': return accessor(index, new GameCegDefs())! as GameCegDefs;
     case 'LogBatch': return accessor(index, new LogBatch())! as LogBatch;
     case 'ConsoleResponse': return accessor(index, new ConsoleResponse())! as ConsoleResponse;
     case 'GameStarted': return accessor(index, new GameStarted())! as GameStarted;

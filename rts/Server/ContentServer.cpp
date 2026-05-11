@@ -72,6 +72,7 @@ void ContentServer::ScanDirectory(const std::string& root) {
     static const std::vector<std::string> SERVABLE_EXTS = {
         ".s3o", ".3do", ".obj", ".gltf", ".glb",   // models
         ".png", ".jpg", ".jpeg", ".dds", ".ktx2",   // textures
+        ".wav", ".ogg", ".webm", ".m4a", ".mp3",   // audio
         ".lua",                                       // scripts
         ".json",                                      // metadata
     };
@@ -131,5 +132,10 @@ std::string ContentServer::MimeType(const std::string& ext) {
     if (ext == ".ktx2") return "image/ktx2";
     if (ext == ".lua") return "text/x-lua";
     if (ext == ".json") return "application/json";
+    if (ext == ".wav") return "audio/wav";
+    if (ext == ".ogg") return "audio/ogg";
+    if (ext == ".webm") return "audio/webm";
+    if (ext == ".m4a") return "audio/mp4";
+    if (ext == ".mp3") return "audio/mpeg";
     return "application/octet-stream";
 }

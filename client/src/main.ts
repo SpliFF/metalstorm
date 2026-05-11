@@ -36,10 +36,12 @@ KhronosTextureContainer2.URLConfig = {
 import { EntityRenderer } from './core/entity-renderer.js';
 import { ProjectileRenderer } from './core/projectile-renderer.js';
 import { ProjectileTextureResolver } from './core/projectile-texture-resolver.js';
+import { CegRuntime } from './core/ceg-runtime.js';
 import { BuildBeamRenderer } from './core/build-beam-renderer.js';
 import { DefCache } from './core/def-cache.js';
 import { CombatFX } from './core/combat-fx.js';
 import { AudioManager } from './core/audio.js';
+import { SoundEventPlayer } from './core/sound-events.js';
 import { InputManager } from './core/input-manager.js';
 import { BuildMenu } from './core/build-menu.js';
 import { OrderPanel } from './core/order-panel.js';
@@ -78,6 +80,7 @@ let engine: Engine | null = null;
 let entityRenderer: EntityRenderer | null = null;
 let projectileRenderer: ProjectileRenderer | null = null;
 let buildBeamRenderer: BuildBeamRenderer | null = null;
+let cegRuntime: CegRuntime | null = null;
 let combatFX: CombatFX | null = null;
 let audioManager: AudioManager | null = null;
 let inputManager: InputManager | null = null;
@@ -248,6 +251,8 @@ function quitToLobby(): void {
     projectileRenderer = null;
     buildBeamRenderer?.dispose();
     buildBeamRenderer = null;
+    cegRuntime?.dispose();
+    cegRuntime = null;
     combatFX = null;
     audioManager = null;
 
@@ -344,6 +349,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         gameConn = null;
     }
     entityRenderer = null;
+    cegRuntime?.dispose();
+    cegRuntime = null;
     combatFX = null;
     audioManager = null;
     inputManager = null;
@@ -438,6 +445,12 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     buildBeamRenderer.setEntityRenderer(entityRenderer);
     if (gameId) buildBeamRenderer.setGameAssetsBaseUrl(gameId);
 
+    // CEG particle runtime — muzzle flashes, impact bursts, debris.
+    // Lives parallel to the projectile renderer; spawn calls happen
+    // from inside the renderer's onFired/onImpact hooks once injected.
+    cegRuntime = new CegRuntime(scene);
+    projectileRenderer.setCegRuntime(cegRuntime);
+
     // Resolve weapon-def texture names → KTX2 URLs. Async load of
     // resources.json + the bitmaps manifests; the renderer can be
     // built before init() resolves and consults the resolver lazily
@@ -445,12 +458,20 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     if (gameId) {
         const resolver = new ProjectileTextureResolver();
         projectileRenderer.setTextureResolver(resolver);
+        cegRuntime.setTextureResolver(resolver);
         resolver.init(gameId, lobbyHttpUrl).catch((e) => {
             console.warn('[main] projectile texture resolver init failed:', e);
         });
     }
     audioManager = new AudioManager();
     combatFX = new CombatFX(scene, audioManager);
+
+    // SoundEventPlayer routes server SoundEvents → AudioManager. Built
+    // here so it shares the same DefCache the renderers consume; the
+    // content base URL points at the game's `data/games/<id>/` root.
+    const soundContentBaseUrl = gameId
+        ? `${lobbyHttpUrl}/api/games/data/${gameId}/`
+        : `${lobbyHttpUrl}/`;
 
     // Debug hooks — exposed for chrome-devtools introspection.
     (window as unknown as { __scene: unknown }).__scene = scene;
@@ -469,6 +490,15 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         projectileRenderer?.setWeaponDefs(newDefs);
         currentWidgetManager?.forwardWeaponDefs(newDefs);
     });
+    // Streamed CEG defs land in the runtime as authored EffectDefs,
+    // overriding the BUILTIN_EFFECTS hand-ports for any tag the game
+    // actually defines. Tags missing from the stream still resolve
+    // through the built-in archetype dispatch (see projectile-renderer).
+    defCache.onCegDefs((newDefs) => {
+        cegRuntime?.ingestCegDefs(newDefs);
+    });
+
+    const soundEventPlayer = new SoundEventPlayer(audioManager, defCache, soundContentBaseUrl);
 
     canvas.addEventListener('click', () => audioManager?.resume(), { once: true });
 
@@ -768,6 +798,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         onWeaponDefs(defs) {
             defCache.addWeaponDefs(defs);
         },
+        onCegDefs(defs) {
+            defCache.addCegDefs(defs);
+        },
         onEntityState(snapshot, isDelta) {
             entityRenderer?.update(snapshot, isDelta);
             currentWidgetManager?.forwardEntityState(snapshot, isDelta);
@@ -796,6 +829,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         },
         onCombatEvents(events) {
             combatFX?.onCombatEvents(events);
+        },
+        onSoundEvents(events) {
+            soundEventPlayer.handleBatch(events);
         },
         onEntityDestroy(entityId, x, y, z) {
             entityRenderer?.removeEntity(entityId);
@@ -935,7 +971,18 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         entityRenderer?.tick();
         buildBeamRenderer?.tick();
         projectileRenderer?.tick();
+        cegRuntime?.tick(dt);
         combatFX?.tick(dt);
+
+        // Listener follows the camera every frame so HRTF stays in
+        // sync with smooth camera motion. Previously this only fired
+        // on camera-change events and lagged behind pans/zooms.
+        if (audioManager) {
+            const cp = camera.position;
+            const fwd = camera.getTarget().subtract(cp).normalize();
+            audioManager.setListenerPosition(cp.x, cp.y, cp.z, fwd.x, fwd.y, fwd.z);
+        }
+
         scene.render();
 
         if (now - lastViewportSend > 100) {

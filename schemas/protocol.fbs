@@ -434,6 +434,70 @@ table ProjectileTrajectoryEvent {
     team: uint8 = 0;
 }
 
+/// Classifies a SoundRef so the client/synced rules can pick the right
+/// sound from a unit/weapon's `sounds` array without string matching.
+enum SoundCategory : uint8 {
+    Fire = 0,
+    HitDry = 1,
+    HitWet = 2,
+    Idle = 3,
+    Death = 4,
+    Select = 5,
+    OrderAck = 6,
+    BuildStart = 7,
+    BuildDone = 8,
+    Move = 9,
+    Activate = 10,
+    Deactivate = 11,
+    Working = 12,
+    Cancel = 13,
+    Underwater = 14,
+}
+
+/// What produced a sound. Lets the client resolve `source_def_id` against
+/// the right def cache (unit defs vs weapon defs vs features) and lets
+/// synced filters target rules per-source-type.
+enum SoundSourceKind : uint8 {
+    Unit = 0,
+    Weapon = 1,
+    Feature = 2,
+    Global = 3,
+}
+
+/// A sound asset reference attached to a def. The client uses
+/// `source_def_id + sound_id` from a SoundEvent to look up the matching
+/// SoundRef and resolve `path` to an HTTP URL against the content server.
+table SoundRef {
+    /// Index into the def's `sounds` array. Matches SoundEvent.sound_id.
+    id: uint16;
+    /// Relative path under the content root (e.g. `sounds/weapon/laser1.wav`).
+    path: string;
+    category: SoundCategory;
+    /// Per-asset default gain (0–1). Final mix volume is volume * SoundEvent.volume.
+    volume: float = 1.0;
+    /// Per-asset default pitch / playback rate. Final rate is pitch * SoundEvent.pitch.
+    pitch: float = 1.0;
+}
+
+/// A single sound emission. The server pushes one of these whenever a
+/// weapon fires, a projectile impacts, a unit dies, etc. The client
+/// resolves `(source_kind, source_def_id, sound_id)` against the matching
+/// def's `sounds` array, decodes the audio buffer (cached), and plays
+/// through the 96-voice pool with HRTF panning at `position`.
+table SoundEvent {
+    sound_id: uint16;        // index into the def's sounds array
+    source_def_id: uint16;   // unit def id, weapon def id, or feature def id
+    source_kind: SoundSourceKind;
+    position: Vec3;
+    volume: float = 1.0;     // 0–1, pre-attenuation, multiplied with SoundRef.volume
+    pitch: float = 1.0;      // playback rate, multiplied with SoundRef.pitch
+    /// Eviction priority when the 96-voice pool is full. Higher wins.
+    priority: uint8 = 128;
+    /// Owner team — used by the per-session LOS filter so ally sounds
+    /// remain audible through fog of war. 255 = no team / global sound.
+    team: uint8 = 255;
+}
+
 table GameEventBatch {
     frame: uint32;
     events: [GameEvent];
@@ -443,6 +507,9 @@ table GameEventBatch {
     projectile_fired: [ProjectileFiredEvent];
     projectile_impacts: [ProjectileImpactEvent];
     projectile_trajectories: [ProjectileTrajectoryEvent];
+    /// Per-tick sound emissions. Already visibility-filtered for this
+    /// session (see SoundEventCollector / per-client snapshot filter).
+    sounds: [SoundEvent];
 }
 
 table ResourceUpdate {
@@ -768,6 +835,25 @@ table GameWeaponDef {
     /// `texNames[2]`, authored as weapondef `texture3`). Empty when
     /// not set.
     texture3: string;
+
+    /// CEG tag emitted by the projectile every frame in flight (Spring's
+    /// `cegTag` / `visuals.ptrailExpGenTag`). Empty when not set.
+    /// Looked up against the `GameCegDefs` table on the client.
+    ceg_tag: string;
+    /// CEG tag emitted on impact (Spring's `explosionGenerator` /
+    /// `visuals.impactExpGenTag`). May contain a "custom:" prefix in
+    /// the source which the server strips before serializing — the
+    /// value sent here is the bare tag name. Empty when not set.
+    explosion_generator: string;
+    /// CEG tag emitted on bounce (Spring's `bounceExplosionGenerator` /
+    /// `visuals.bounceExpGenTag`). Empty when not set.
+    bounce_explosion_generator: string;
+
+    /// Sound assets referenced by this weapon. Populated from the
+    /// weapondef's `soundStart` / `soundHitDry` / `soundHitWet` fields.
+    /// SoundEvent.sound_id indexes into this array; empty when the
+    /// weapon has no sounds.
+    sounds: [SoundRef];
 }
 
 /// Sent by the game server after successful auth, alongside
@@ -775,6 +861,67 @@ table GameWeaponDef {
 /// the client can render projectiles with correct visuals.
 table GameWeaponDefs {
     defs: [GameWeaponDef];
+}
+
+// ============================================================
+// Game CEG (Custom Explosion Generator) definition messages
+// ============================================================
+
+/// One key/value pair inside a CEG spawn's `properties` table.
+/// Keys are the lowercased Lua field names (e.g. `colormap`, `gravity`,
+/// `numparticles`, `texture`). Values are the raw Lua-source strings
+/// (numbers stringified, lists serialised as comma-separated). The
+/// client parser interprets each property based on the spawn class.
+table CegProperty {
+    key: string;
+    value: string;
+}
+
+/// One entry in a CEG def — Spring's CEGs are tables mapping a
+/// sub-emitter name to a class + count + flags + properties block.
+/// `class_name` is the Spring runtime class (`CSimpleParticleSystem`,
+/// `CSimpleGroundFlash`, `CHeatCloudProjectile`, `CSmokeTrailProjectile`,
+/// `CExpGenSpawner`, `explspike`, etc.). The client maps known classes
+/// to its particle pools and skips unknown ones.
+///
+/// `flags` packs the Lua "ground/air/water/unit/underwater" booleans
+/// that gate when this spawn fires:
+///   bit 0: ground   bit 1: air     bit 2: water
+///   bit 3: unit     bit 4: underwater
+/// All zeros means "always emit" (legacy CEGs that omit the flags).
+table GameCegSpawn {
+    spawn_name: string;
+    class_name: string;
+    count: int32;
+    flags: uint8;
+    properties: [CegProperty];
+}
+
+/// Definition of one CEG (Custom Explosion Generator) — referenced by
+/// `cegTag` / `explosionGenerator` strings on weapon defs. Authored as
+/// Lua tables under `gamedata/explosions.lua` (which itself loads
+/// `effects/*.lua` in ZK / `gamedata/particles/*.lua` in classic Spring).
+/// The server parses all CEGs reachable from any weapon def (transitively
+/// via `CExpGenSpawner.expgen` references) and ships them as a single
+/// table at game start.
+table GameCegDef {
+    /// Bare tag (no `custom:` prefix). Lookup is case-insensitive on
+    /// the client; the server lowercases on serialisation.
+    tag: string;
+    /// Sub-emitters. Each fires `count` particles at the spawn point
+    /// when its visibility flags match the impact context.
+    spawns: [GameCegSpawn];
+    /// True if the original CEG had `useDefaultExplosions = true`
+    /// (Spring fires its built-in standard explosion in addition).
+    use_default_explosions: bool = false;
+}
+
+/// Sent by the game server alongside GameUnitDefs / GameWeaponDefs.
+/// Contains every CEG referenced by the game's weapon defs so the
+/// client can spawn the right particle effects on Fired / Impact
+/// events without further round-trips.
+table GameCegDefs {
+    defs: [GameCegDef];
 }
 
 // ============================================================
@@ -897,6 +1044,11 @@ table GameUnitDef {
     /// Build pic / unit category for build menus.
     /// Spring's category bitfield (terrain/movement/factory).
     category_bits: uint32 = 0;
+
+    /// Sound assets referenced by this unit (select/order/build/death/etc.).
+    /// Populated from the unitdef's `sounds` Lua table. SoundEvent.sound_id
+    /// indexes into this array; empty when the unit has no sounds.
+    sounds: [SoundRef];
 }
 
 /// Sent by the game server after successful auth, before entity state
@@ -1135,6 +1287,7 @@ union ServerPayload {
     GameUnitDefs,
     PlayerLeft,
     GameWeaponDefs,
+    GameCegDefs,
     LogBatch,
     ConsoleResponse,
     GameStarted,

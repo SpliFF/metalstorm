@@ -35,6 +35,12 @@ import { GameUnitDef } from '../protocol/spring-web/game-unit-def.js';
 import { PlayerLeft } from '../protocol/spring-web/player-left.js';
 import { GameWeaponDefs } from '../protocol/spring-web/game-weapon-defs.js';
 import { GameWeaponDef } from '../protocol/spring-web/game-weapon-def.js';
+import { SoundEvent } from '../protocol/spring-web/sound-event.js';
+import { SoundRef } from '../protocol/spring-web/sound-ref.js';
+import { GameCegDefs } from '../protocol/spring-web/game-ceg-defs.js';
+import { GameCegDef } from '../protocol/spring-web/game-ceg-def.js';
+import { GameCegSpawn } from '../protocol/spring-web/game-ceg-spawn.js';
+import { CegProperty } from '../protocol/spring-web/ceg-property.js';
 import { CustomParam } from '../protocol/spring-web/custom-param.js';
 import { UnitCommandQueuesUpdate } from '../protocol/spring-web/unit-command-queues-update.js';
 import { UnitCmdDescsUpdate } from '../protocol/spring-web/unit-cmd-descs-update.js';
@@ -73,6 +79,26 @@ export interface CombatEventInfo {
     z: number;
 }
 
+/// Per-tick sound emission decoded from a `GameEventBatch.sounds` entry.
+/// The renderer's audio layer resolves `(sourceKind, sourceDefId, soundId)`
+/// against `DefCache` to get a SoundRef, decodes the buffer once, then
+/// plays through the 96-voice pool with HRTF panning at `(x,y,z)`.
+export interface SoundEventInfo {
+    soundId: number;
+    sourceDefId: number;
+    /// 0 = Unit, 1 = Weapon, 2 = Feature, 3 = Global. Matches
+    /// SoundSourceKind in protocol.fbs.
+    sourceKind: number;
+    x: number;
+    y: number;
+    z: number;
+    volume: number;
+    pitch: number;
+    priority: number;
+    /// Owner team. 255 = no team / global.
+    team: number;
+}
+
 /// Projectile lifecycle event info — decoded from the FlatBuffer batch and
 /// passed to ProjectileRenderer. Velocity values come straight from the
 /// server in elmos / sim-frame; the renderer converts to elmos / second
@@ -103,6 +129,19 @@ export interface ProjectileTrajectoryInfo {
     pos: { x: number; y: number; z: number };
     vel: { x: number; y: number; z: number };
     reason: number;
+}
+
+/// One sound asset attached to a unit or weapon def. The `id` field
+/// is what a SoundEvent's `sound_id` selects.
+export interface SoundRefInfo {
+    id: number;
+    path: string;
+    /// SoundCategory enum value — see protocol.fbs.
+    category: number;
+    /// Default gain (0–4). Multiplied with SoundEvent.volume.
+    volume: number;
+    /// Default playback rate. Multiplied with SoundEvent.pitch.
+    pitch: number;
 }
 
 export interface UnitDefInfo {
@@ -161,6 +200,9 @@ export interface UnitDefInfo {
     canSelfDestruct: boolean;
     selfDCountdown: number;
     categoryBits: number;
+    /// Per-unit sounds (select/order_ack/build/working/...). Empty when
+    /// the unit's def has no sound assets.
+    sounds: SoundRefInfo[];
 }
 
 export interface UnitOrderInfo {
@@ -249,6 +291,48 @@ export interface WeaponDefInfo {
      *  the beam axis. Renderer treats non-largeBeamLaser weapons as 0
      *  per Recoil semantics. Defaults to Spring's 5.0. */
     scrollSpeed: number;
+    /** CEG tag emitted every frame in flight (Spring's `cegTag`).
+     *  Empty when not set. Looked up against the streamed CEG table. */
+    cegTag: string;
+    /** CEG tag emitted on impact (Spring's `explosionGenerator`).
+     *  Bare tag — server strips any `custom:` prefix. */
+    explosionGenerator: string;
+    /** CEG tag emitted on bounce (Spring's `bounceExplosionGenerator`). */
+    bounceExplosionGenerator: string;
+    /// Per-weapon sounds — typically `[fire, hitDry, hitWet]`. The
+    /// SoundEvent for this weapon's fire is sound_id 0; the hitDry/
+    /// hitWet emissions follow contiguously when defined.
+    sounds: SoundRefInfo[];
+}
+
+/// One key/value pair inside a CEG spawn's `properties` block.
+/// Both values arrive as raw Lua-source strings (numbers stringified,
+/// list-vector tables comma-joined). The CegRuntime parses them
+/// per-spawn-class.
+export interface CegPropertyInfo {
+    key: string;
+    value: string;
+}
+
+/// One sub-emitter of a CEG. `flags` packs the visibility-context
+/// booleans (ground/air/water/unit/underwater) — see GameCegSpawn in
+/// protocol.fbs. `flags === 0` means "always emit".
+export interface CegSpawnInfo {
+    spawnName: string;
+    className: string;
+    count: number;
+    flags: number;
+    properties: CegPropertyInfo[];
+}
+
+/// One streamed CEG def. `tag` is the lookup key on weapon defs
+/// (`cegTag`, `explosionGenerator`, `bounceExplosionGenerator`).
+/// All names are lowercased on the server before serialisation so
+/// matching is case-stable.
+export interface CegDefInfo {
+    tag: string;
+    spawns: CegSpawnInfo[];
+    useDefaultExplosions: boolean;
 }
 
 export interface ResourceUpdateInfo {
@@ -294,6 +378,7 @@ export interface ConnectionEvents {
     onServerError?: (code: number, message: string) => void;
     onEntityState?: (snapshot: EntityStateSnapshot, isDelta: boolean) => void;
     onCombatEvents?: (events: CombatEventInfo[], frame: number) => void;
+    onSoundEvents?: (events: SoundEventInfo[], frame: number) => void;
     onProjectileFired?: (events: ProjectileFiredInfo[], frame: number) => void;
     onProjectileImpacts?: (events: ProjectileImpactInfo[], frame: number) => void;
     onProjectileTrajectories?: (events: ProjectileTrajectoryInfo[], frame: number) => void;
@@ -303,6 +388,7 @@ export interface ConnectionEvents {
     onMapData?: (map: ParsedMapData) => void;
     onUnitDefs?: (defs: UnitDefInfo[]) => void;
     onWeaponDefs?: (defs: WeaponDefInfo[]) => void;
+    onCegDefs?: (defs: CegDefInfo[]) => void;
     onUnitCommandQueues?: (queues: UnitCommandQueueInfo[]) => void;
     onUnitCmdDescs?: (units: UnitCmdDescsInfo[]) => void;
     onProjectileState?: (snapshot: ProjectileStateSnapshot) => void;
@@ -835,6 +921,18 @@ export class Connection {
                         const key = cp.key();
                         if (key) customParams[key] = cp.value() ?? '';
                     }
+                    const unitSounds: SoundRefInfo[] = [];
+                    for (let si = 0; si < d.soundsLength(); si++) {
+                        const s = d.sounds(si, new SoundRef());
+                        if (!s) continue;
+                        unitSounds.push({
+                            id: s.id(),
+                            path: s.path() ?? '',
+                            category: s.category(),
+                            volume: s.volume(),
+                            pitch: s.pitch(),
+                        });
+                    }
                     defs.push({
                         defId: d.defId(),
                         name: d.name() ?? '',
@@ -889,6 +987,7 @@ export class Connection {
                         canSelfDestruct: d.canSelfDestruct(),
                         selfDCountdown: d.selfDCountdown(),
                         categoryBits: d.categoryBits(),
+                        sounds: unitSounds,
                     });
                 }
                 console.log(`[connection] received ${defs.length} unit def(s)`);
@@ -917,6 +1016,18 @@ export class Connection {
                         if (!cp) continue;
                         const key = cp.key();
                         if (key) wdCustomParams[key] = cp.value() ?? '';
+                    }
+                    const weaponSounds: SoundRefInfo[] = [];
+                    for (let si = 0; si < d.soundsLength(); si++) {
+                        const s = d.sounds(si, new SoundRef());
+                        if (!s) continue;
+                        weaponSounds.push({
+                            id: s.id(),
+                            path: s.path() ?? '',
+                            category: s.category(),
+                            volume: s.volume(),
+                            pitch: s.pitch(),
+                        });
                     }
                     defs.push({
                         defId: d.defId(),
@@ -966,10 +1077,61 @@ export class Connection {
                         texture2: d.texture2() ?? '',
                         texture3: d.texture3() ?? '',
                         scrollSpeed: d.scrollSpeed(),
+                        cegTag: d.cegTag() ?? '',
+                        explosionGenerator: d.explosionGenerator() ?? '',
+                        bounceExplosionGenerator: d.bounceExplosionGenerator() ?? '',
+                        sounds: weaponSounds,
                     });
                 }
                 console.log(`[connection] received ${defs.length} weapon def(s)`);
                 this.events.onWeaponDefs?.(defs);
+                break;
+            }
+            case ServerPayload.GameCegDefs: {
+                // Wrap the whole parse in try/catch — CEGs are
+                // best-effort visual data; a malformed entry must
+                // never abort the dispatch loop, which would propagate
+                // up through ingestFramedMessage → defs-fetch's
+                // Promise.all chain → game-start (no MapData → black
+                // screen). The renderer's archetype dispatch keeps
+                // covering visuals if this whole branch no-ops.
+                try {
+                    const fbDefs = msg.payload(new GameCegDefs()) as GameCegDefs;
+                    const defs: CegDefInfo[] = [];
+                    for (let i = 0; i < fbDefs.defsLength(); i++) {
+                        const d = fbDefs.defs(i, new GameCegDef());
+                        if (!d) continue;
+                        const spawns: CegSpawnInfo[] = [];
+                        for (let si = 0; si < d.spawnsLength(); si++) {
+                            const sp = d.spawns(si, new GameCegSpawn());
+                            if (!sp) continue;
+                            const props: CegPropertyInfo[] = [];
+                            for (let pi = 0; pi < sp.propertiesLength(); pi++) {
+                                const p = sp.properties(pi, new CegProperty());
+                                if (!p) continue;
+                                const key = p.key();
+                                if (!key) continue;
+                                props.push({ key, value: p.value() ?? '' });
+                            }
+                            spawns.push({
+                                spawnName: sp.spawnName() ?? '',
+                                className: sp.className() ?? '',
+                                count: sp.count(),
+                                flags: sp.flags(),
+                                properties: props,
+                            });
+                        }
+                        defs.push({
+                            tag: d.tag() ?? '',
+                            spawns,
+                            useDefaultExplosions: d.useDefaultExplosions(),
+                        });
+                    }
+                    console.log(`[connection] received ${defs.length} CEG def(s)`);
+                    this.events.onCegDefs?.(defs);
+                } catch (e) {
+                    console.warn('[connection] GameCegDefs parse failed (continuing):', e);
+                }
                 break;
             }
             case ServerPayload.UnitCommandQueuesUpdate: {
@@ -1126,6 +1288,29 @@ export class Connection {
                 });
             }
             this.events.onProjectileTrajectories(out, frame);
+        }
+
+        const soundCount = batch.soundsLength();
+        if (soundCount > 0 && this.events.onSoundEvents) {
+            const out: SoundEventInfo[] = [];
+            for (let i = 0; i < soundCount; i++) {
+                const e = batch.sounds(i, new SoundEvent());
+                if (!e) continue;
+                const p = e.position();
+                out.push({
+                    soundId: e.soundId(),
+                    sourceDefId: e.sourceDefId(),
+                    sourceKind: e.sourceKind(),
+                    x: p?.x() ?? 0,
+                    y: p?.y() ?? 0,
+                    z: p?.z() ?? 0,
+                    volume: e.volume(),
+                    pitch: e.pitch(),
+                    priority: e.priority(),
+                    team: e.team(),
+                });
+            }
+            this.events.onSoundEvents(out, frame);
         }
     }
 

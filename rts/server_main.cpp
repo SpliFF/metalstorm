@@ -17,10 +17,12 @@
 #include "Server/BuildActivitySerializer.h"
 #include "Server/ContentServer.h"
 #include "Server/CombatEventCollector.h"
+#include "Server/SoundEventCollector.h"
 #include "Server/ProjectileEventCollector.h"
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Server/DefsCache.h"
+#include "Server/CegLoader.h"
 #include "Server/StandingOrders.h"
 #include "Server/AI/AIRuntimePool.h"
 #include "Server/AI/AIDiscovery.h"
@@ -732,12 +734,24 @@ int main(int argc, char* argv[])
                 unitDefHandler->GetUnitDefsVec(), gameId);
             auto wdBytes = Protocol::BuildGameWeaponDefs(
                 weaponDefHandler->GetWeaponDefsVec(), gameId);
-            if (DefsCache::WriteIfMissing(gameId, defsCacheKey, udBytes, wdBytes)) {
+            // CEGs (Custom Explosion Generators). The engine's
+            // explGenHandler has already parsed gamedata/explosions.lua;
+            // CegLoader walks the resulting LuaTable into a flat list
+            // and BuildGameCegDefs frames it as a ServerMessage so the
+            // client can ingest via the same path as unit/weapon defs.
+            // Empty when no CEGs were authored or the parse failed —
+            // the file is still written so the eager HTTP fetch
+            // doesn't 404.
+            auto cegDefs = CegLoader::LoadAllCegDefs();
+            auto cdBytes = CegLoader::BuildGameCegDefs(cegDefs);
+            if (DefsCache::WriteIfMissing(gameId, defsCacheKey,
+                                          udBytes, wdBytes, cdBytes)) {
                 SLOG(SPRING_LOG_NOTICE,
                      "defs cache baked: gameId=%s key=%s "
-                     "(unitdefs=%zu B, weapondefs=%zu B)",
+                     "(unitdefs=%zu B, weapondefs=%zu B, cegdefs=%zu B/%zu defs)",
                      gameId.c_str(), defsCacheKey.c_str(),
-                     udBytes.size(), wdBytes.size());
+                     udBytes.size(), wdBytes.size(),
+                     cdBytes.size(), cegDefs.size());
             } else {
                 SLOG(SPRING_LOG_ERROR,
                      "defs cache write failed: gameId=%s key=%s "
@@ -1715,10 +1729,12 @@ int main(int argc, char* argv[])
         {
         auto events = combatEvents.Drain();
         auto projDrain = projectileEvents.Drain();
+        auto soundDrain = soundEvents.Drain();
         const bool hasAny = !events.empty()
             || !projDrain.fired.empty()
             || !projDrain.impacts.empty()
-            || !projDrain.trajectories.empty();
+            || !projDrain.trajectories.empty()
+            || !soundDrain.empty();
         if (hasAny && rtcServer.GetClientCount() > 0) {
             const uint32_t frameNo = static_cast<uint32_t>(sim.GetFrameNum());
 
@@ -1780,12 +1796,24 @@ int main(int argc, char* argv[])
                         visibleCombat.push_back(e);
                 }
 
+                // Sounds: same rule — owner team friendly OR position in LOS.
+                // Drops the emission entirely for fog-of-war neutrals so
+                // players can't audibly probe enemy positions.
+                std::vector<SoundEventData> visibleSounds;
+                visibleSounds.reserve(soundDrain.size());
+                for (const auto& s : soundDrain) {
+                    if (teamFriendly(s.team) || posVisible(s.position))
+                        visibleSounds.push_back(s);
+                }
+
                 if (visibleCombat.empty() && fired.empty()
-                    && impacts.empty() && trajectories.empty())
+                    && impacts.empty() && trajectories.empty()
+                    && visibleSounds.empty())
                     return;
 
                 auto batch = Protocol::BuildCombatEventBatch(
-                    frameNo, visibleCombat, fired, impacts, trajectories);
+                    frameNo, visibleCombat, fired, impacts, trajectories,
+                    visibleSounds);
                 rtcServer.SendReliable(clientId, batch.data(), batch.size());
             });
         }

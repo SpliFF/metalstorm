@@ -42,6 +42,7 @@ import '@babylonjs/loaders/glTF/index.js';
 import type { WeaponDefInfo } from './connection.js';
 import { stampUrl } from '../config.js';
 import type { ProjectileTextureResolver } from './projectile-texture-resolver.js';
+import type { CegRuntime } from './ceg-runtime.js';
 import { registerProjectileBeamShader } from './shaders/projectile-beam.js';
 import {
     type MissileTrailState,
@@ -234,6 +235,12 @@ const FLAG_LARGE_BEAM_LASER = 1 << 18;
 export class ProjectileRenderer {
     private scene: Scene;
     private weaponVisuals = new Map<number, WeaponVisual>();
+    /// Original per-def metadata kept for runtime queries that need
+    /// fields the visual doesn't carry (typeName, name, texture1, aoe,
+    /// flags). The CEG dispatch in onFired/onImpact reads from this
+    /// to pick per-archetype effect names; lookups are bounded by
+    /// def-id keyspace so a Map keeps the hot path O(1).
+    private weaponDefs = new Map<number, WeaponDefInfo>();
     private fallbackVisual: InstancedWeaponVisual;
     private live = new Map<number, LiveProjectile>();
     private liveBeams: LiveBeam[] = [];
@@ -254,6 +261,11 @@ export class ProjectileRenderer {
     /// consumed by createVisual / swapInModel, but the resolver is
     /// owned here so widget-loaded weapons get the same resolution.
     private textureResolver: ProjectileTextureResolver | null = null;
+    /// CEG particle runtime. Wired in by main.ts at game start.
+    /// onFired/onImpact dispatch named effects through this for muzzle
+    /// flashes, impact bursts and debris (PLAN-projectiles.md §5).
+    /// Null until injected; spawn calls are guarded.
+    private cegRuntime: CegRuntime | null = null;
 
     /// Most recent def list passed to setWeaponDefs. Retained so we
     /// can rebuild visuals after the resolver finishes loading
@@ -264,11 +276,27 @@ export class ProjectileRenderer {
     /// been scheduled, so a flurry of setWeaponDefs calls during
     /// def streaming doesn't queue duplicate rebuilds.
     private rebuildScheduled = false;
+    /// Latches true once the resolver has settled (resolved or rejected)
+    /// and we've done the one-shot rebuild. Subsequent setWeaponDefs
+    /// calls then skip scheduleResolverRebuild entirely — the rebuild
+    /// is only there to upgrade pre-resolver placeholders, and re-running
+    /// it triggers an infinite recursion through the microtask queue
+    /// (see scheduleResolverRebuild's comment).
+    private resolverSettled = false;
 
     constructor(scene: Scene) {
         this.scene = scene;
         this.fallbackVisual = createFallbackVisual(0, VisualType.Cannon, 1.0,
             [1, 0.8, 0.2], 0.8, scene);
+    }
+
+    /// Inject the CEG runtime after init(). Same lifecycle as
+    /// setTextureResolver — main.ts wires it once per session before
+    /// any projectile events arrive. Effects are spawned from
+    /// onFired/onImpact based on weapon visual type and impact kind;
+    /// see effectForFire / effectForImpact at the bottom of this file.
+    setCegRuntime(r: CegRuntime): void {
+        this.cegRuntime = r;
     }
 
     /// Inject the resolver after init(). Called once per game session
@@ -295,6 +323,7 @@ export class ProjectileRenderer {
             disposeVisual(v);
         }
         this.weaponVisuals.clear();
+        this.weaponDefs.clear();
         // Trail visuals share the def id keyspace with weaponVisuals
         // and the def-list rebuild is wholesale, so dispose every
         // trail visual too. Orphaned trail states reference puff
@@ -311,6 +340,7 @@ export class ProjectileRenderer {
         for (const def of defs) {
             const visual = this.createVisual(def);
             this.weaponVisuals.set(def.defId, visual);
+            this.weaponDefs.set(def.defId, def);
 
             // If the server announced a model URL, kick off a background
             // load and swap the procedural mesh once it completes. The
@@ -342,13 +372,23 @@ export class ProjectileRenderer {
     /// flat-color placeholders when the resolver hasn't loaded yet.
     /// Once `whenReady()` settles we re-run setWeaponDefs against the
     /// stored def list so those placeholders pick up real KTX2 URLs.
+    ///
+    /// Critical: once the resolver has resolved, this is a no-op. The
+    /// rebuild kicked off inside the `.then()` calls `setWeaponDefs`,
+    /// which itself calls `scheduleResolverRebuild` again — without
+    /// the `resolverSettled` short-circuit, that produces an infinite
+    /// microtask loop (resolved promise → .then → setWeaponDefs →
+    /// scheduleResolverRebuild → resolved promise → ...) that floods
+    /// the browser with thousands of model fetches and pegs the main
+    /// thread, manifesting as a black screen on game start.
     private scheduleResolverRebuild(): void {
-        if (this.rebuildScheduled) return;
+        if (this.rebuildScheduled || this.resolverSettled) return;
         const r = this.textureResolver;
         if (!r || this.lastDefs.length === 0) return;
         this.rebuildScheduled = true;
         r.whenReady().then(() => {
             this.rebuildScheduled = false;
+            this.resolverSettled = true;
             // The def list may have been replaced (or cleared) while we
             // were awaiting the resolver. Use whatever's current.
             if (this.lastDefs.length === 0) return;
@@ -357,6 +397,7 @@ export class ProjectileRenderer {
             this.setWeaponDefs(defs);
         }).catch((e) => {
             this.rebuildScheduled = false;
+            this.resolverSettled = true;  // don't retry forever
             console.warn('[projectile] resolver whenReady() rejected:', e);
         });
     }
@@ -475,6 +516,25 @@ export class ProjectileRenderer {
         gravity: number;
         hitscan: boolean;
     }): void {
+        // Muzzle CEG. Direction is the firing axis derived from the
+        // initial velocity; fall back to "toward target" when the
+        // server reports zero velocity (e.g. shields/projectors).
+        if (this.cegRuntime) {
+            const dir = unitDirection(
+                ev.vel.x, ev.vel.y, ev.vel.z,
+                ev.targetPos.x - ev.pos.x,
+                ev.targetPos.y - ev.pos.y,
+                ev.targetPos.z - ev.pos.z,
+            );
+            const def = this.weaponDefs.get(ev.weaponDefId);
+            const fxName = effectForFire(def);
+            if (fxName) {
+                this.cegRuntime.spawn(fxName,
+                    ev.pos.x, ev.pos.y, ev.pos.z,
+                    dir.x, dir.y, dir.z);
+            }
+        }
+
         // Hit-scan weapons (beam laser, lightning) don't move — render
         // the bolt as a one-shot line from launch pos to impact pos and
         // skip the live-projectile tracking entirely.
@@ -529,8 +589,27 @@ export class ProjectileRenderer {
 
     /** Server reported an impact. Remove the local entry; combat-fx
      *  spawns the impact VFX from the same event batch. */
-    onImpact(ev: { projId: number; pos: { x: number; y: number; z: number } }): void {
+    onImpact(ev: {
+        projId: number;
+        pos: { x: number; y: number; z: number };
+        impactKind?: number;
+    }): void {
         const p = this.live.get(ev.projId);
+        // Fire the impact CEG even when the local projectile entry
+        // has already been pruned (orphan eviction or hit-scan beams
+        // never enter this.live in the first place). Falls back to the
+        // generic explosion effect when we can't pin down the def.
+        if (this.cegRuntime) {
+            const def = p ? this.weaponDefs.get(p.weaponDefId) : undefined;
+            const fxName = effectForImpact(ev.impactKind ?? 0, def);
+            if (fxName) {
+                // Impact "direction" is upward — sparks/smoke fly off
+                // the surface rather than along the projectile axis.
+                this.cegRuntime.spawn(fxName,
+                    ev.pos.x, ev.pos.y, ev.pos.z,
+                    0, 1, 0);
+            }
+        }
         if (!p) return;
         this.live.delete(ev.projId);
         // Retain the trail past impact so puffs keep fading rather
@@ -1415,4 +1494,165 @@ function createFallbackVisual(
         defId, mesh, material: mat,
         visualType, size, orientation: 'velocity',
     };
+}
+
+// ── CEG effect dispatch ────────────────────────────────────────────────────
+//
+// Maps weapon visual types and impact kinds to named effects in the
+// CEG runtime's built-in library. Phase 5b will replace this with
+// per-weapon-def `cegtag` / `explosionGenerator` lookups streamed from
+// the server; for now the visual type is a coarse-but-useful proxy.
+
+/// Mirror of `SpringWeb::ProjectileImpactKind` in protocol.fbs (also
+/// duplicated in combat-fx.ts). Kept local to the file rather than
+/// shared because the impact kind is the only enum the renderer reads
+/// from the impact event and the protocol is stable.
+const enum ImpactKind {
+    Terrain = 0,
+    Unit = 1,
+    Feature = 2,
+    Shield = 3,
+    SelfDetonate = 4,
+    Intercepted = 5,
+    Other = 6,
+}
+
+/// Coarse archetype tag for a weapon def. Phase 5b dispatches the
+/// CEG library by archetype rather than raw visualType so a few
+/// hand-ported ZK CEG ports (`disintegrator` etc.) can override the
+/// generic muzzle/impact effects. The classifier is heuristic — ZK's
+/// real CEG dispatch goes through `cegtag` strings on the weapon def
+/// which we don't carry over the wire yet (lands with Phase 5c). For
+/// now we look at typeName, weapon name, and a couple of texture/
+/// size hints. Returns 'default' when nothing matches; callers fall
+/// back to visualType-keyed generic effects in that case.
+type WeaponArchetype =
+    | 'disintegrator'
+    | 'flame'
+    | 'lightninggun'
+    | 'largelaser'
+    | 'lightcannon'
+    | 'default';
+
+function classifyWeaponArchetype(def: WeaponDefInfo | undefined): WeaponArchetype {
+    if (!def) return 'default';
+    const name = (def.name || '').toLowerCase();
+    const tex1 = (def.texture1 || '').toLowerCase();
+    const typeName = (def.typeName || '').toLowerCase();
+    if (typeName === 'dgun' || name.includes('disintegrat')) return 'disintegrator';
+    if (typeName === 'flame' || def.visualType === VisualType.Flame) return 'flame';
+    if (typeName === 'lightningcannon' || def.visualType === VisualType.Lightning
+        || name.includes('lightning')) return 'lightninggun';
+    if (tex1.includes('largelaser')
+        || (def.visualType === VisualType.BeamLaser && def.size > 4)) {
+        return 'largelaser';
+    }
+    if (def.visualType === VisualType.Cannon && def.size <= 4) return 'lightcannon';
+    return 'default';
+}
+
+/// Per-archetype muzzle flash. Returning null skips the muzzle CEG
+/// entirely — used for beam/lightning weapons where the bolt itself
+/// is the muzzle visual and a separate flash would just add overdraw.
+const FIRE_EFFECT_BY_ARCHETYPE: Record<WeaponArchetype, string | null> = {
+    disintegrator: 'muzzleflash_disintegrator',
+    flame:         'muzzleflash_flame',
+    lightninggun:  'muzzleflash_lightninggun',
+    largelaser:    null,
+    lightcannon:   'muzzleflash_default',
+    default:       null,
+};
+
+/// Per-archetype impact effect. Each entry covers the most common
+/// terrain/feature/self-detonate impact case; shield deflections
+/// always render `impact_shield` regardless of archetype, and Unit
+/// impacts are ceded to combat-fx (see effectForImpact below).
+const IMPACT_EFFECT_BY_ARCHETYPE: Record<WeaponArchetype, string | null> = {
+    disintegrator: 'impact_disintegrator',
+    flame:         'impact_flame',
+    lightninggun:  'impact_lightninggun',
+    largelaser:    'impact_largelaser',
+    lightcannon:   'impact_lightcannon',
+    default:       null,
+};
+
+/// Pick the muzzle CEG name for a weapon. The streamed `cegTag`
+/// (Spring's per-frame trail CEG) is checked first — that's what
+/// game authors actually want fired in-flight; archetype/visualType
+/// fallbacks only run when no tag is set. Returning null skips the
+/// muzzle entirely (beam/lightning weapons where the bolt is the
+/// visual).
+function effectForFire(def: WeaponDefInfo | undefined): string | null {
+    if (def?.cegTag) return def.cegTag;
+
+    const arch = classifyWeaponArchetype(def);
+    const archEffect = FIRE_EFFECT_BY_ARCHETYPE[arch];
+    if (archEffect !== null || arch !== 'default') return archEffect;
+    switch (def?.visualType) {
+        case VisualType.Laser:
+        case VisualType.BeamLaser:
+        case VisualType.Lightning:
+            return null;
+        case VisualType.Missile:
+            return 'muzzleflash_missile';
+        case VisualType.Cannon:
+        case VisualType.Flame:
+        default:
+            return 'muzzleflash_default';
+    }
+}
+
+/// Pick the impact CEG name from impact kind + weapon archetype.
+/// Impact kind is checked first: shield deflections always render
+/// `impact_shield`; Unit impacts return null because combat-fx
+/// already spawns a kill explosion from the matching CombatEvent
+/// (doubling reads as a flash). Otherwise the archetype dispatch
+/// runs, with a final visualType-keyed fallback.
+function effectForImpact(
+    impactKind: number,
+    def: WeaponDefInfo | undefined,
+): string | null {
+    const kind = impactKind as ImpactKind;
+    if (kind === ImpactKind.Shield) return 'impact_shield';
+    if (kind === ImpactKind.Unit) return null;
+
+    // Streamed `explosionGenerator` wins over heuristic dispatch — it's
+    // the authored impact CEG the game's weapon def explicitly names.
+    // Falls through to archetype fallback when unset.
+    if (def?.explosionGenerator) return def.explosionGenerator;
+
+    const arch = classifyWeaponArchetype(def);
+    const archEffect = IMPACT_EFFECT_BY_ARCHETYPE[arch];
+    if (archEffect !== null) return archEffect;
+
+    switch (kind) {
+        case ImpactKind.Terrain:
+        case ImpactKind.Feature:
+            return 'impact_dirt';
+        case ImpactKind.SelfDetonate:
+        case ImpactKind.Intercepted:
+        case ImpactKind.Other:
+        default:
+            return 'impact_explosion';
+    }
+}
+
+/// Build a unit-length direction. Prefers `vel` when non-zero; falls
+/// back to the launch→target offset; yields (0,1,0) when both are
+/// degenerate. Returned object is a fresh literal so callers can
+/// store it without aliasing concerns; the call rate is bounded by
+/// the projectile spawn rate, so allocation pressure is minimal.
+function unitDirection(
+    vx: number, vy: number, vz: number,
+    fx: number, fy: number, fz: number,
+): { x: number; y: number; z: number } {
+    let len = Math.hypot(vx, vy, vz);
+    if (len > 1e-3) {
+        return { x: vx / len, y: vy / len, z: vz / len };
+    }
+    len = Math.hypot(fx, fy, fz);
+    if (len > 1e-3) {
+        return { x: fx / len, y: fy / len, z: fz / len };
+    }
+    return { x: 0, y: 1, z: 0 };
 }

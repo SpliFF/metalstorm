@@ -25,6 +25,7 @@
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Weapons/Cannon.h"
 #include "Sim/Weapons/NoWeapon.h"
+#include "Server/SoundEventCollector.h"
 #include "System/EventHandler.h"
 #include "System/SpringMath.h"
 #include "System/creg/DefTypes.h"
@@ -1210,6 +1211,22 @@ void CWeapon::Fire(bool scriptCall)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	owner->lastFireWeapon = gs->frameNum;
+
+	// Emit a fire sound event. Skipped silently when the weaponDef has
+	// no soundStart entries — the def's SoundRef array is empty in that
+	// case and the client wouldn't have anything to play anyway.
+	if (weaponDef->fireSound.NumSounds() > 0 && weaponDef->id > 0) {
+		SoundEventData se;
+		se.soundId = 0; // fireSound is the first SoundRef block on the weapon def
+		se.sourceDefId = static_cast<uint16_t>(weaponDef->id);
+		se.sourceKind = 1; // SoundSourceKind_Weapon
+		se.position = weaponMuzzlePos;
+		se.volume = 1.0f;
+		se.pitch = 1.0f;
+		se.priority = 128;
+		se.team = static_cast<uint8_t>(std::min(255, owner->team));
+		soundEvents.Push(se);
+	}
 
 	// target-leading can nudge currentTargetPos into an adjacent quadfield cell
 	// such that tracing a ray to it does not touch the cell in which our target

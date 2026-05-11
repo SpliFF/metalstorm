@@ -10,12 +10,14 @@
 #include "protocol_generated.h"
 #include "CombatEventCollector.h"
 #include "ProjectileEventCollector.h"
+#include "SoundEventCollector.h"
 #include "RoomManager.h"
 #include "MapMetadata.h"
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectileTypes.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Weapons/WeaponDef.h"
+#include "Sim/Misc/GuiSoundSet.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Units/CommandAI/Command.h"
 #include "Sim/Units/CommandAI/CommandDescription.h"
@@ -23,6 +25,7 @@
 #include <flatbuffers/flatbuffers.h>
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <unordered_map>
@@ -143,13 +146,15 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
     const std::vector<CombatEventData>& events,
     const std::vector<ProjectileFiredEventData>& projFired = {},
     const std::vector<ProjectileImpactEventData>& projImpacts = {},
-    const std::vector<ProjectileTrajectoryEventData>& projTrajectories = {})
+    const std::vector<ProjectileTrajectoryEventData>& projTrajectories = {},
+    const std::vector<SoundEventData>& sounds = {})
 {
     flatbuffers::FlatBufferBuilder fbb(
         256 + events.size() * 32
             + projFired.size() * 64
             + projImpacts.size() * 32
-            + projTrajectories.size() * 40);
+            + projTrajectories.size() * 40
+            + sounds.size() * 32);
 
     std::vector<flatbuffers::Offset<SpringWeb::CombatEvent>> combatOffsets;
     combatOffsets.reserve(events.size());
@@ -214,12 +219,29 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
             e.team));
     }
 
+    std::vector<flatbuffers::Offset<SpringWeb::SoundEvent>> soundOffsets;
+    soundOffsets.reserve(sounds.size());
+    for (const auto& s : sounds) {
+        auto pos = SpringWeb::Vec3(s.position.x, s.position.y, s.position.z);
+        SpringWeb::SoundEventBuilder seb(fbb);
+        seb.add_sound_id(s.soundId);
+        seb.add_source_def_id(s.sourceDefId);
+        seb.add_source_kind(static_cast<SpringWeb::SoundSourceKind>(s.sourceKind));
+        seb.add_position(&pos);
+        seb.add_volume(s.volume);
+        seb.add_pitch(s.pitch);
+        seb.add_priority(s.priority);
+        seb.add_team(s.team);
+        soundOffsets.push_back(seb.Finish());
+    }
+
     auto combatVec = fbb.CreateVector(combatOffsets);
     auto firedVec  = fbb.CreateVector(firedOffsets);
     auto impactVec = fbb.CreateVector(impactOffsets);
     auto trajVec   = fbb.CreateVector(trajOffsets);
+    auto soundVec  = fbb.CreateVector(soundOffsets);
     auto batch = SpringWeb::CreateGameEventBatch(
-        fbb, frame, /*events=*/0, combatVec, firedVec, impactVec, trajVec);
+        fbb, frame, /*events=*/0, combatVec, firedVec, impactVec, trajVec, soundVec);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameEventBatch, batch.Union());
 }
 
@@ -714,6 +736,65 @@ inline std::vector<uint8_t> BuildRoomListUpdate(const std::vector<GameRoom*>& ro
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_RoomListUpdate, update.Union());
 }
 
+/// Translate a (possibly stem-only) sound name into the form the
+/// content server actually publishes. Spring conventionally stores
+/// sound names like `weapon/laser1` and the runtime prepends
+/// `sounds/` and appends `.wav` when looking them up — we replicate
+/// that here so the path the client receives can be fetched directly
+/// from `/api/games/data/<gameId>/<path>`. Already-fully-qualified
+/// paths (`sounds/foo.wav`, `weapon/laser1.ogg`) are passed through.
+inline std::string NormalizeSoundPath(const std::string& name) {
+    if (name.empty()) return {};
+    std::string out = name;
+    // Strip a leading `sounds/` once if present; we add it back below.
+    auto hasPrefix = [&](const char* p) {
+        const size_t n = std::strlen(p);
+        return out.size() >= n && std::strncmp(out.c_str(), p, n) == 0;
+    };
+    if (hasPrefix("sounds/")) out.erase(0, 7);
+    // Ensure a file extension. Engine convention is `.wav`.
+    const auto dot = out.find_last_of('.');
+    const auto slash = out.find_last_of('/');
+    const bool hasExt = (dot != std::string::npos) &&
+                        (slash == std::string::npos || dot > slash);
+    if (!hasExt) out += ".wav";
+    return std::string("sounds/") + out;
+}
+
+/// Serialize a GuiSoundSet into one or more SoundRefs sharing a category.
+/// Returns the number of refs appended. Each GuiSoundSet may carry several
+/// alternates (e.g. a weapon with two firing samples) which we expose as
+/// successive SoundRef IDs sharing the same `category`.
+inline uint16_t AppendSoundRefs(
+    std::vector<flatbuffers::Offset<SpringWeb::SoundRef>>& out,
+    flatbuffers::FlatBufferBuilder& fbb,
+    const GuiSoundSet& set,
+    SpringWeb::SoundCategory category,
+    uint16_t& nextId)
+{
+    const int n = static_cast<int>(set.NumSounds());
+    uint16_t appended = 0;
+    for (int i = 0; i < n; i++) {
+        const GuiSoundSetData& d = set.GetSoundData(i);
+        if (d.name.empty()) continue;
+        const std::string path = NormalizeSoundPath(d.name);
+        auto pathOff = fbb.CreateString(path);
+        SpringWeb::SoundRefBuilder b(fbb);
+        b.add_id(nextId++);
+        b.add_path(pathOff);
+        b.add_category(category);
+        // Spring volumes >1 are common; clamp the *default* into 0..1
+        // so the client can multiply unbounded SoundEvent.volume against
+        // it without re-clamping. Pitch is always 1.0 from the def.
+        const float vol = (d.volume > 0.0f) ? std::min(d.volume, 4.0f) : 1.0f;
+        b.add_volume(vol);
+        b.add_pitch(1.0f);
+        out.push_back(b.Finish());
+        appended++;
+    }
+    return appended;
+}
+
 /// Build one GameUnitDef FlatBuffer entry for a single unit def.
 /// Factored out so both the bulk and incremental senders can reuse it.
 /// `nameToDefId` is consulted to translate buildOptions entries (which
@@ -832,6 +913,27 @@ inline flatbuffers::Offset<SpringWeb::GameUnitDef> BuildSingleUnitDef(
     auto scriptOff  = fbb.CreateString(ud.scriptName);
     auto buildPicOff = fbb.CreateString(ud.buildPicName);
 
+    // Unit sound assets. SoundEvent.sound_id indexes into this array;
+    // the categories tell the client which logical sound to play
+    // (select / OK / build_start / build_done / ...). The order here
+    // also defines the ID assignment — we use a running counter so a
+    // single category can contribute multiple alternates.
+    std::vector<flatbuffers::Offset<SpringWeb::SoundRef>> soundOffsets;
+    {
+        uint16_t nextSoundId = 0;
+        AppendSoundRefs(soundOffsets, fbb, ud.sounds.select,      SpringWeb::SoundCategory_Select,     nextSoundId);
+        AppendSoundRefs(soundOffsets, fbb, ud.sounds.ok,          SpringWeb::SoundCategory_OrderAck,   nextSoundId);
+        AppendSoundRefs(soundOffsets, fbb, ud.sounds.arrived,     SpringWeb::SoundCategory_Move,       nextSoundId);
+        AppendSoundRefs(soundOffsets, fbb, ud.sounds.build,       SpringWeb::SoundCategory_BuildStart, nextSoundId);
+        AppendSoundRefs(soundOffsets, fbb, ud.sounds.repair,      SpringWeb::SoundCategory_Working,    nextSoundId);
+        AppendSoundRefs(soundOffsets, fbb, ud.sounds.working,     SpringWeb::SoundCategory_Working,    nextSoundId);
+        AppendSoundRefs(soundOffsets, fbb, ud.sounds.underattack, SpringWeb::SoundCategory_Idle,       nextSoundId);
+        AppendSoundRefs(soundOffsets, fbb, ud.sounds.cant,        SpringWeb::SoundCategory_Cancel,     nextSoundId);
+        AppendSoundRefs(soundOffsets, fbb, ud.sounds.activate,    SpringWeb::SoundCategory_Activate,   nextSoundId);
+        AppendSoundRefs(soundOffsets, fbb, ud.sounds.deactivate,  SpringWeb::SoundCategory_Deactivate, nextSoundId);
+    }
+    auto soundsOff = fbb.CreateVector(soundOffsets);
+
     SpringWeb::GameUnitDefBuilder b(fbb);
     b.add_def_id(static_cast<uint16_t>(ud.id));
     b.add_name(nameOff);
@@ -888,6 +990,7 @@ inline flatbuffers::Offset<SpringWeb::GameUnitDef> BuildSingleUnitDef(
     b.add_can_self_destruct(ud.canSelfD);
     b.add_self_d_countdown(ud.selfDCountdown);
     b.add_category_bits(ud.category);
+    b.add_sounds(soundsOff);
     return b.Finish();
 }
 
@@ -1014,6 +1117,27 @@ inline flatbuffers::Offset<SpringWeb::GameWeaponDef> BuildSingleWeaponDef(
     auto texture2Off = fbb.CreateString(wd.visuals.texNames[1]);
     auto texture3Off = fbb.CreateString(wd.visuals.texNames[2]);
 
+    // CEG tags. Spring's `cegTag` (every-frame trail) lives at
+    // `visuals.ptrailExpGenTag`; `explosionGenerator` (impact) at
+    // `visuals.impactExpGenTag`; `bounceExplosionGenerator` at
+    // `visuals.bounceExpGenTag`. The server parses every CEG these
+    // tags reference and ships them as a `GameCegDefs` table; the
+    // client looks up by name to spawn particles on Fired / Impact.
+    // Strip any `custom:` prefix the source tags carry — `LoadGenerator`
+    // adds it internally but the bare tag is what indexes into the
+    // explosion table.
+    auto stripCustom = [](const std::string& tag) -> std::string {
+        constexpr const char* kPrefix = "custom:";
+        constexpr size_t kPrefixLen = 7;
+        if (tag.size() >= kPrefixLen
+            && std::strncmp(tag.c_str(), kPrefix, kPrefixLen) == 0)
+            return tag.substr(kPrefixLen);
+        return tag;
+    };
+    auto cegTagOff = fbb.CreateString(stripCustom(wd.visuals.ptrailExpGenTag));
+    auto expGenOff = fbb.CreateString(stripCustom(wd.visuals.impactExpGenTag));
+    auto bounceOff = fbb.CreateString(stripCustom(wd.visuals.bounceExpGenTag));
+
     // Per-armor-class damage table. Element 0 is the default; we ship
     // the whole vector so widgets can compute "damage vs class N" the
     // way ZK's tooltip widget does. Empty if every entry equals
@@ -1071,6 +1195,37 @@ inline flatbuffers::Offset<SpringWeb::GameWeaponDef> BuildSingleWeaponDef(
     }
     auto wdCustomParamsOff = fbb.CreateVector(customParamsOffsets);
 
+    // Weapon sound assets. `fireSound` holds the firing samples
+    // (Spring's `soundStart`). `hitSound` holds two entries in the order
+    // [dry, wet] since WeaponDef::ParseWeaponSounds always loads both
+    // (soundHitDry then soundHitWet) before any other call site appends
+    // alternates — see WeaponDef::ParseWeaponSounds.
+    std::vector<flatbuffers::Offset<SpringWeb::SoundRef>> wdSoundOffsets;
+    {
+        uint16_t nextSoundId = 0;
+        AppendSoundRefs(wdSoundOffsets, fbb, wd.fireSound, SpringWeb::SoundCategory_Fire, nextSoundId);
+        // hitSound carries [dry, wet]. NumSounds() == 2 in the common case;
+        // pull them out individually so we can tag each correctly.
+        const int numHit = static_cast<int>(wd.hitSound.NumSounds());
+        for (int i = 0; i < numHit; i++) {
+            const GuiSoundSetData& d = wd.hitSound.GetSoundData(i);
+            if (d.name.empty()) continue;
+            const SpringWeb::SoundCategory cat = (i == 0)
+                ? SpringWeb::SoundCategory_HitDry
+                : SpringWeb::SoundCategory_HitWet;
+            auto pathOff = fbb.CreateString(NormalizeSoundPath(d.name));
+            SpringWeb::SoundRefBuilder sb(fbb);
+            sb.add_id(nextSoundId++);
+            sb.add_path(pathOff);
+            sb.add_category(cat);
+            const float vol = (d.volume > 0.0f) ? std::min(d.volume, 4.0f) : 1.0f;
+            sb.add_volume(vol);
+            sb.add_pitch(1.0f);
+            wdSoundOffsets.push_back(sb.Finish());
+        }
+    }
+    auto wdSoundsOff = fbb.CreateVector(wdSoundOffsets);
+
     SpringWeb::GameWeaponDefBuilder wdb(fbb);
     wdb.add_def_id(static_cast<uint16_t>(wd.id));
     wdb.add_name(nameOff);
@@ -1119,7 +1274,11 @@ inline flatbuffers::Offset<SpringWeb::GameWeaponDef> BuildSingleWeaponDef(
     wdb.add_texture1(texture1Off);
     wdb.add_texture2(texture2Off);
     wdb.add_texture3(texture3Off);
+    wdb.add_ceg_tag(cegTagOff);
+    wdb.add_explosion_generator(expGenOff);
+    wdb.add_bounce_explosion_generator(bounceOff);
     wdb.add_scroll_speed(wd.visuals.scrollspeed);
+    wdb.add_sounds(wdSoundsOff);
     return wdb.Finish();
 }
 

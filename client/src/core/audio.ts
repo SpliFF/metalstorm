@@ -49,7 +49,19 @@ export class AudioManager {
     constructor() {
         this.ctx = new AudioContext();
         this.masterGain = this.ctx.createGain();
-        this.masterGain.connect(this.ctx.destination);
+
+        // Master limiter — dozens of overlapping HRTF voices in a heavy
+        // combat tick sum well past 1.0 and clip hard at `destination`.
+        // A soft-knee compressor with a low threshold catches the spikes
+        // while leaving the average mix untouched.
+        const limiter = this.ctx.createDynamicsCompressor();
+        limiter.threshold.value = -6;   // dB
+        limiter.knee.value = 0;
+        limiter.ratio.value = 12;
+        limiter.attack.value = 0.003;   // 3 ms
+        limiter.release.value = 0.25;   // 250 ms
+        this.masterGain.connect(limiter);
+        limiter.connect(this.ctx.destination);
 
         this.musicGain = this.ctx.createGain();
         this.musicGain.gain.value = 0.3;

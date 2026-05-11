@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "Server/CombatEventCollector.h"
+#include "Server/SoundEventCollector.h"
 #include "System/Sync/SyncedPrimitiveBase.h"
 #include "UnitDef.h"
 #include "Unit.h"
@@ -1350,6 +1351,27 @@ void CUnit::DoDamage(
 			evt.position = pos;
 			evt.result = (health <= 0.0f) ? 3 : 0; // 3=kill, 0=hit
 			combatEvents.Push(evt);
+
+			// Emit a hit sound (dry vs wet picked by impact y-coordinate).
+			// fireSound is sound_id 0; hitSound entries follow contiguously,
+			// so hitDry = NumSounds(fire) + 0, hitWet = NumSounds(fire) + 1.
+			const WeaponDef* wd = weaponDefHandler->GetWeaponDefByID(weaponDefID);
+			if (wd != nullptr && wd->hitSound.NumSounds() > 0) {
+				const bool wet = pos.y < 0.0f;
+				const size_t fireCount = wd->fireSound.NumSounds();
+				const size_t hitCount  = wd->hitSound.NumSounds();
+				const size_t pick = (wet && hitCount > 1) ? 1u : 0u;
+				SoundEventData se;
+				se.soundId = static_cast<uint16_t>(fireCount + pick);
+				se.sourceDefId = static_cast<uint16_t>(wd->id);
+				se.sourceKind = 1; // SoundSourceKind_Weapon
+				se.position = pos;
+				se.volume = 1.0f;
+				se.pitch = 1.0f;
+				se.priority = (health <= 0.0f) ? 192 : 128;
+				se.team = static_cast<uint8_t>(std::min(255, attacker->team));
+				soundEvents.Push(se);
+			}
 		}
 
 		// unit might have been killed via Lua from within UnitDamaged (e.g.

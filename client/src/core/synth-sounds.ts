@@ -6,6 +6,13 @@
  * files needed.
  */
 
+/// 5 ms attack ramps in from zero so the wavetable doesn't start at a
+/// non-zero sample (the audible "click" before this fix). 30 ms release
+/// tail fades the final samples to zero so the buffer doesn't end on a
+/// hard step.
+const ATTACK_SECS = 0.005;
+const RELEASE_SECS = 0.030;
+
 /** Generate a short AudioBuffer from parameters. */
 function generateBuffer(
     ctx: AudioContext,
@@ -17,9 +24,21 @@ function generateBuffer(
     const buffer = ctx.createBuffer(1, length, sampleRate);
     const data = buffer.getChannelData(0);
 
+    const attack = Math.min(ATTACK_SECS, duration * 0.5);
+    const release = Math.min(RELEASE_SECS, duration * 0.5);
+    const releaseStart = duration - release;
+
     for (let i = 0; i < length; i++) {
         const t = i / sampleRate;
-        data[i] = generator(t, sampleRate) * Math.max(0, 1 - t / duration);
+        let env: number;
+        if (t < attack) {
+            env = t / attack;
+        } else if (t > releaseStart) {
+            env = Math.max(0, (duration - t) / release);
+        } else {
+            env = 1;
+        }
+        data[i] = generator(t, sampleRate) * env;
     }
 
     return buffer;

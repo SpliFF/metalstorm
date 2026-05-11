@@ -18,6 +18,7 @@
 #include "Sim/Weapons/Weapon.h"
 #include "Sim/Weapons/WeaponDefHandler.h"
 #include "Server/ProjectileEventCollector.h"
+#include "Server/SoundEventCollector.h"
 #include "System/Matrix44f.h"
 #include "System/SpringMath.h"
 #include "System/creg/DefTypes.h"
@@ -278,6 +279,23 @@ void CWeaponProjectile::Collision(CFeature* feature)
 		ev.targetId   = (feature != nullptr) ? static_cast<uint32_t>(feature->id) : 0u;
 		ev.team       = static_cast<uint8_t>(teamID);
 		projectileEvents.PushImpact(ev);
+	}
+
+	// Hit sound for terrain/feature impacts. Unit hits go through
+	// Unit::DoDamage which emits the same sound at the damage site.
+	if (weaponDef != nullptr && weaponDef->hitSound.NumSounds() > 0) {
+		const bool wet = impactPos.y < 0.0f;
+		const size_t fireCount = weaponDef->fireSound.NumSounds();
+		const size_t hitCount  = weaponDef->hitSound.NumSounds();
+		const size_t pick = (wet && hitCount > 1) ? 1u : 0u;
+		SoundEventData se;
+		se.soundId = static_cast<uint16_t>(fireCount + pick);
+		se.sourceDefId = static_cast<uint16_t>(weaponDef->id);
+		se.sourceKind = 1; // SoundSourceKind_Weapon
+		se.position = impactPos;
+		se.priority = 128;
+		se.team = static_cast<uint8_t>(std::min(255, static_cast<int>(teamID)));
+		soundEvents.Push(se);
 	}
 
 	Explode(nullptr, feature, impactPos, impactDir);

@@ -6,6 +6,7 @@ import * as flatbuffers from 'flatbuffers';
 
 import { CustomParam, CustomParamT } from '../spring-web/custom-param.js';
 import { ProjectileVisualType } from '../spring-web/projectile-visual-type.js';
+import { SoundRef, SoundRefT } from '../spring-web/sound-ref.js';
 
 
 /**
@@ -358,8 +359,60 @@ texture3(optionalEncoding?:any):string|Uint8Array|null {
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
+/**
+ * CEG tag emitted by the projectile every frame in flight (Spring's
+ * `cegTag` / `visuals.ptrailExpGenTag`). Empty when not set.
+ * Looked up against the `GameCegDefs` table on the client.
+ */
+cegTag():string|null
+cegTag(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+cegTag(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 98);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
+/**
+ * CEG tag emitted on impact (Spring's `explosionGenerator` /
+ * `visuals.impactExpGenTag`). May contain a "custom:" prefix in
+ * the source which the server strips before serializing — the
+ * value sent here is the bare tag name. Empty when not set.
+ */
+explosionGenerator():string|null
+explosionGenerator(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+explosionGenerator(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 100);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
+/**
+ * CEG tag emitted on bounce (Spring's `bounceExplosionGenerator` /
+ * `visuals.bounceExpGenTag`). Empty when not set.
+ */
+bounceExplosionGenerator():string|null
+bounceExplosionGenerator(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+bounceExplosionGenerator(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 102);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
+/**
+ * Sound assets referenced by this weapon. Populated from the
+ * weapondef's `soundStart` / `soundHitDry` / `soundHitWet` fields.
+ * SoundEvent.sound_id indexes into this array; empty when the
+ * weapon has no sounds.
+ */
+sounds(index: number, obj?:SoundRef):SoundRef|null {
+  const offset = this.bb!.__offset(this.bb_pos, 104);
+  return offset ? (obj || new SoundRef()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
+}
+
+soundsLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 104);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
 static startGameWeaponDef(builder:flatbuffers.Builder) {
-  builder.startObject(47);
+  builder.startObject(51);
 }
 
 static addDefId(builder:flatbuffers.Builder, defId:number) {
@@ -579,12 +632,40 @@ static addTexture3(builder:flatbuffers.Builder, texture3Offset:flatbuffers.Offse
   builder.addFieldOffset(46, texture3Offset, 0);
 }
 
+static addCegTag(builder:flatbuffers.Builder, cegTagOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(47, cegTagOffset, 0);
+}
+
+static addExplosionGenerator(builder:flatbuffers.Builder, explosionGeneratorOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(48, explosionGeneratorOffset, 0);
+}
+
+static addBounceExplosionGenerator(builder:flatbuffers.Builder, bounceExplosionGeneratorOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(49, bounceExplosionGeneratorOffset, 0);
+}
+
+static addSounds(builder:flatbuffers.Builder, soundsOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(50, soundsOffset, 0);
+}
+
+static createSoundsVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startSoundsVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
 static endGameWeaponDef(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createGameWeaponDef(builder:flatbuffers.Builder, defId:number, nameOffset:flatbuffers.Offset, visualType:ProjectileVisualType, projectileSpeed:number, range:number, aoe:number, size:number, intensity:number, colorR:number, colorG:number, colorB:number, duration:number, highTrajectory:boolean, typeNameOffset:flatbuffers.Offset, descriptionOffset:flatbuffers.Offset, defaultDamage:number, damagesOffset:flatbuffers.Offset, reloadTime:number, salvoSize:number, salvoDelay:number, accuracy:number, sprayAngle:number, movingAccuracy:number, targetMoveError:number, leadLimit:number, edgeEffectiveness:number, impulseFactor:number, impulseBoost:number, craterMult:number, craterBoost:number, craterAoe:number, fireStarter:number, flightTime:number, weaponAcceleration:number, turnRate:number, uptime:number, coverageRange:number, stockpileTime:number, metalCost:number, energyCost:number, flags:number, scrollSpeed:number, customParamsOffset:flatbuffers.Offset, modelUrlOffset:flatbuffers.Offset, texture1Offset:flatbuffers.Offset, texture2Offset:flatbuffers.Offset, texture3Offset:flatbuffers.Offset):flatbuffers.Offset {
+static createGameWeaponDef(builder:flatbuffers.Builder, defId:number, nameOffset:flatbuffers.Offset, visualType:ProjectileVisualType, projectileSpeed:number, range:number, aoe:number, size:number, intensity:number, colorR:number, colorG:number, colorB:number, duration:number, highTrajectory:boolean, typeNameOffset:flatbuffers.Offset, descriptionOffset:flatbuffers.Offset, defaultDamage:number, damagesOffset:flatbuffers.Offset, reloadTime:number, salvoSize:number, salvoDelay:number, accuracy:number, sprayAngle:number, movingAccuracy:number, targetMoveError:number, leadLimit:number, edgeEffectiveness:number, impulseFactor:number, impulseBoost:number, craterMult:number, craterBoost:number, craterAoe:number, fireStarter:number, flightTime:number, weaponAcceleration:number, turnRate:number, uptime:number, coverageRange:number, stockpileTime:number, metalCost:number, energyCost:number, flags:number, scrollSpeed:number, customParamsOffset:flatbuffers.Offset, modelUrlOffset:flatbuffers.Offset, texture1Offset:flatbuffers.Offset, texture2Offset:flatbuffers.Offset, texture3Offset:flatbuffers.Offset, cegTagOffset:flatbuffers.Offset, explosionGeneratorOffset:flatbuffers.Offset, bounceExplosionGeneratorOffset:flatbuffers.Offset, soundsOffset:flatbuffers.Offset):flatbuffers.Offset {
   GameWeaponDef.startGameWeaponDef(builder);
   GameWeaponDef.addDefId(builder, defId);
   GameWeaponDef.addName(builder, nameOffset);
@@ -633,6 +714,10 @@ static createGameWeaponDef(builder:flatbuffers.Builder, defId:number, nameOffset
   GameWeaponDef.addTexture1(builder, texture1Offset);
   GameWeaponDef.addTexture2(builder, texture2Offset);
   GameWeaponDef.addTexture3(builder, texture3Offset);
+  GameWeaponDef.addCegTag(builder, cegTagOffset);
+  GameWeaponDef.addExplosionGenerator(builder, explosionGeneratorOffset);
+  GameWeaponDef.addBounceExplosionGenerator(builder, bounceExplosionGeneratorOffset);
+  GameWeaponDef.addSounds(builder, soundsOffset);
   return GameWeaponDef.endGameWeaponDef(builder);
 }
 
@@ -684,7 +769,11 @@ unpack(): GameWeaponDefT {
     this.modelUrl(),
     this.texture1(),
     this.texture2(),
-    this.texture3()
+    this.texture3(),
+    this.cegTag(),
+    this.explosionGenerator(),
+    this.bounceExplosionGenerator(),
+    this.bb!.createObjList<SoundRef, SoundRefT>(this.sounds.bind(this), this.soundsLength())
   );
 }
 
@@ -737,6 +826,10 @@ unpackTo(_o: GameWeaponDefT): void {
   _o.texture1 = this.texture1();
   _o.texture2 = this.texture2();
   _o.texture3 = this.texture3();
+  _o.cegTag = this.cegTag();
+  _o.explosionGenerator = this.explosionGenerator();
+  _o.bounceExplosionGenerator = this.bounceExplosionGenerator();
+  _o.sounds = this.bb!.createObjList<SoundRef, SoundRefT>(this.sounds.bind(this), this.soundsLength());
 }
 }
 
@@ -788,7 +881,11 @@ constructor(
   public modelUrl: string|Uint8Array|null = null,
   public texture1: string|Uint8Array|null = null,
   public texture2: string|Uint8Array|null = null,
-  public texture3: string|Uint8Array|null = null
+  public texture3: string|Uint8Array|null = null,
+  public cegTag: string|Uint8Array|null = null,
+  public explosionGenerator: string|Uint8Array|null = null,
+  public bounceExplosionGenerator: string|Uint8Array|null = null,
+  public sounds: (SoundRefT)[] = []
 ){}
 
 
@@ -802,6 +899,10 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const texture1 = (this.texture1 !== null ? builder.createString(this.texture1!) : 0);
   const texture2 = (this.texture2 !== null ? builder.createString(this.texture2!) : 0);
   const texture3 = (this.texture3 !== null ? builder.createString(this.texture3!) : 0);
+  const cegTag = (this.cegTag !== null ? builder.createString(this.cegTag!) : 0);
+  const explosionGenerator = (this.explosionGenerator !== null ? builder.createString(this.explosionGenerator!) : 0);
+  const bounceExplosionGenerator = (this.bounceExplosionGenerator !== null ? builder.createString(this.bounceExplosionGenerator!) : 0);
+  const sounds = GameWeaponDef.createSoundsVector(builder, builder.createObjectOffsetList(this.sounds));
 
   return GameWeaponDef.createGameWeaponDef(builder,
     this.defId,
@@ -850,7 +951,11 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     modelUrl,
     texture1,
     texture2,
-    texture3
+    texture3,
+    cegTag,
+    explosionGenerator,
+    bounceExplosionGenerator,
+    sounds
   );
 }
 }

@@ -38,6 +38,8 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <system_error>
+#include <vector>
 
 namespace {
 
@@ -160,6 +162,195 @@ const char* PickExporter(const std::string& outPath) {
     if (EndsWith(outPath, ".glb"))  return "glb2";
     if (EndsWith(outPath, ".gltf")) return "gltf2";
     return nullptr;
+}
+
+/// Read 4 little-endian bytes at `data + off` into a uint32_t.
+uint32_t ReadU32LE(const uint8_t* data, size_t off) {
+    uint32_t v = 0;
+    std::memcpy(&v, data + off, sizeof(v));
+    return v;
+}
+
+/// Write a uint32_t as 4 little-endian bytes into `out` at `off`.
+void WriteU32LE(std::vector<uint8_t>& out, size_t off, uint32_t v) {
+    std::memcpy(out.data() + off, &v, sizeof(v));
+}
+
+/// Walk the JSON chunk of a freshly-written .glb and rewrite every
+/// texture entry whose source image has a `.ktx2` URI so the source
+/// reference moves into `extensions.KHR_texture_basisu.source`.
+///
+/// Why we need this: Assimp's glb2 exporter emits texture entries as
+/// `{"source": N, "sampler": N}` and *also* lists `KHR_texture_basisu`
+/// in `extensionsRequired`. Per glTF spec these can't coexist —
+/// when the extension is required the top-level `source` must move
+/// into the extension. Babylon's strict glTF loader trips on the
+/// inconsistency and throws a `null.length` exception while resolving
+/// the texture, which silently demotes the projectile to a procedural
+/// cone visual. Walking the JSON chunk and patching it in place is
+/// cheaper than rewiring the Assimp exporter and keeps the BIN chunk
+/// (vertex/index buffers) untouched.
+///
+/// Hand-rolled JSON edits — no external dependency. The replacements
+/// are textual ("source":N → into extension shape), kept simple by
+/// the well-known structure Assimp produces. If a future Assimp version
+/// emits already-spec-compliant texture entries, the routine becomes a
+/// no-op (the `"source":` substring won't appear inside `"textures":`).
+bool FixGlbBasisuTextures(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)),
+                               std::istreambuf_iterator<char>());
+    in.close();
+
+    if (data.size() < 20) return false;
+    if (std::memcmp(data.data(), "glTF", 4) != 0) return false;
+    if (ReadU32LE(data.data(), 4) != 2) return false;
+
+    const uint32_t jsonLen = ReadU32LE(data.data(), 12);
+    if (std::memcmp(data.data() + 16, "JSON", 4) != 0) return false;
+    if (20u + jsonLen > data.size()) return false;
+
+    // Extract JSON as a string, strip trailing space-padding (the spec
+    // requires 4-byte chunk alignment via 0x20 padding).
+    std::string js(reinterpret_cast<const char*>(data.data() + 20), jsonLen);
+    while (!js.empty() && js.back() == ' ') js.pop_back();
+
+    // Find the textures array and decide whether anything needs patching.
+    // The well-known shape of Assimp output:
+    //   "textures":[{"source":N,"sampler":N},…]
+    // We only patch when the JSON also references a .ktx2 image, which
+    // is the trigger Assimp uses to add KHR_texture_basisu in
+    // `extensionsRequired`. (Without .ktx2 sources the patched
+    // structure would actually be wrong — leave plain PNG/JPG textures
+    // alone.)
+    if (js.find(".ktx2") == std::string::npos) return false;
+    if (js.find("\"textures\":") == std::string::npos) return false;
+
+    // Replace each `{"source":N,"sampler":M}` (or `{"sampler":M,"source":N}`)
+    // with `{"sampler":M,"extensions":{"KHR_texture_basisu":{"source":N}}}`.
+    // We walk character-by-character looking for the texture-entry pattern
+    // so we don't accidentally rewrite occurrences in image URIs etc.
+    std::string out;
+    out.reserve(js.size() + 256);
+    size_t i = 0;
+    bool changed = false;
+    const std::string texturesKey = "\"textures\":";
+    const size_t texturesStart = js.find(texturesKey);
+
+    if (texturesStart == std::string::npos) return false;
+
+    out.append(js, 0, texturesStart);
+    i = texturesStart;
+
+    // Walk through `"textures":[ … ]` and patch each `{ … }` entry.
+    out.append(texturesKey);
+    i += texturesKey.size();
+    if (i >= js.size() || js[i] != '[') {
+        // Unexpected structure — bail without modifying.
+        return false;
+    }
+    out.push_back('[');
+    i++;
+    int depth = 1;
+    std::string entry;
+    while (i < js.size() && depth > 0) {
+        const char c = js[i];
+        if (c == '{') {
+            if (entry.empty() && depth == 1) {
+                // Start of one texture entry.
+                entry.push_back(c);
+                i++;
+                int eDepth = 1;
+                while (i < js.size() && eDepth > 0) {
+                    const char ec = js[i];
+                    entry.push_back(ec);
+                    if (ec == '{') eDepth++;
+                    else if (ec == '}') eDepth--;
+                    i++;
+                }
+                // entry now holds the full `{…}` of this texture.
+                std::string patched = entry;
+                // Look for `"source":<digits>` inside the entry.
+                const size_t sPos = patched.find("\"source\":");
+                if (sPos != std::string::npos) {
+                    size_t numStart = sPos + 9;
+                    size_t numEnd = numStart;
+                    while (numEnd < patched.size()
+                           && std::isdigit(static_cast<unsigned char>(patched[numEnd])))
+                        numEnd++;
+                    if (numEnd > numStart) {
+                        const std::string src(patched, numStart, numEnd - numStart);
+                        // Erase `"source":N` plus an adjacent comma if any.
+                        size_t eraseStart = sPos;
+                        size_t eraseEnd = numEnd;
+                        if (eraseEnd < patched.size() && patched[eraseEnd] == ',') {
+                            eraseEnd++;
+                        } else if (eraseStart > 0 && patched[eraseStart - 1] == ',') {
+                            eraseStart--;
+                        }
+                        patched.erase(eraseStart, eraseEnd - eraseStart);
+                        // Insert the extensions block before the closing `}`.
+                        const size_t closeBrace = patched.find_last_of('}');
+                        const std::string insertion =
+                            std::string(patched.size() > 1 && patched[closeBrace - 1] != '{'
+                                        ? "," : "")
+                            + "\"extensions\":{\"KHR_texture_basisu\":{\"source\":"
+                            + src + "}}";
+                        patched.insert(closeBrace, insertion);
+                        if (patched != entry) changed = true;
+                    }
+                }
+                out.append(patched);
+                entry.clear();
+                continue;
+            }
+        } else if (c == '[') {
+            depth++;
+        } else if (c == ']') {
+            depth--;
+        }
+        out.push_back(c);
+        i++;
+    }
+    // Append the rest of the JSON verbatim.
+    out.append(js, i, std::string::npos);
+
+    if (!changed) return true; // nothing to do — file already compliant
+
+    // Re-pad to 4-byte alignment.
+    std::vector<uint8_t> jsonBytes(out.begin(), out.end());
+    while (jsonBytes.size() % 4 != 0) jsonBytes.push_back(' ');
+
+    // Preserve the BIN chunk (and any subsequent chunks) verbatim.
+    std::vector<uint8_t> rest(data.begin() + 20 + jsonLen, data.end());
+
+    const uint32_t newTotal = 12 + 8 + static_cast<uint32_t>(jsonBytes.size())
+                            + static_cast<uint32_t>(rest.size());
+    std::vector<uint8_t> outFile;
+    outFile.reserve(newTotal);
+    // Header.
+    outFile.insert(outFile.end(), {'g','l','T','F'});
+    outFile.resize(outFile.size() + 4); WriteU32LE(outFile, 4, 2);
+    outFile.resize(outFile.size() + 4); WriteU32LE(outFile, 8, newTotal);
+    // JSON chunk header.
+    outFile.resize(outFile.size() + 4);
+    WriteU32LE(outFile, 12, static_cast<uint32_t>(jsonBytes.size()));
+    outFile.insert(outFile.end(), {'J','S','O','N'});
+    outFile.insert(outFile.end(), jsonBytes.begin(), jsonBytes.end());
+    // BIN chunk + tail.
+    outFile.insert(outFile.end(), rest.begin(), rest.end());
+
+    const std::string tmp = path + ".tmp";
+    std::ofstream of(tmp, std::ios::binary | std::ios::trunc);
+    if (!of) return false;
+    of.write(reinterpret_cast<const char*>(outFile.data()),
+             static_cast<std::streamsize>(outFile.size()));
+    if (!of) return false;
+    of.close();
+    std::error_code ec;
+    std::filesystem::rename(tmp, path, ec);
+    return !ec;
 }
 
 } // namespace
@@ -414,6 +605,25 @@ int main(int argc, char** argv) {
         Assimp::DefaultLogger::kill();
         springlog_shutdown();
         return 4;
+    }
+
+    // Post-fix: Assimp's glb2 exporter writes texture entries as
+    // `{"source": N, "sampler": N}` even for .ktx2 images, while
+    // simultaneously listing `KHR_texture_basisu` in `extensionsRequired`.
+    // Per the glTF spec that combination is invalid — when the extension
+    // is required, `source` must move INSIDE `extensions.KHR_texture_basisu`
+    // on the texture entry. Babylon's strict glTF loader trips on the
+    // mismatch and throws `null.length` while resolving the texture,
+    // which silently falls back to a procedural cone for every projectile.
+    // Walk the freshly-written .glb's JSON chunk and rewrite the texture
+    // entries in place. Idempotent — running it again is a no-op.
+    if (textureExt == "ktx2" && EndsWith(outPath, ".glb")) {
+        if (!FixGlbBasisuTextures(outPath)) {
+            SLOG(SPRING_LOG_WARNING,
+                 "post-fix of KHR_texture_basisu textures in %s failed; "
+                 "client may render projectile as procedural cone",
+                 outPath.c_str());
+        }
     }
 
     Assimp::DefaultLogger::kill();

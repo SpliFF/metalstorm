@@ -5,6 +5,7 @@
 import * as flatbuffers from 'flatbuffers';
 
 import { CustomParam, CustomParamT } from '../spring-web/custom-param.js';
+import { SoundRef, SoundRefT } from '../spring-web/sound-ref.js';
 
 
 /**
@@ -396,8 +397,23 @@ categoryBits():number {
   return offset ? this.bb!.readUint32(this.bb_pos + offset) : 0;
 }
 
+/**
+ * Sound assets referenced by this unit (select/order/build/death/etc.).
+ * Populated from the unitdef's `sounds` Lua table. SoundEvent.sound_id
+ * indexes into this array; empty when the unit has no sounds.
+ */
+sounds(index: number, obj?:SoundRef):SoundRef|null {
+  const offset = this.bb!.__offset(this.bb_pos, 110);
+  return offset ? (obj || new SoundRef()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
+}
+
+soundsLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 110);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
 static startGameUnitDef(builder:flatbuffers.Builder) {
-  builder.startObject(53);
+  builder.startObject(54);
 }
 
 static addDefId(builder:flatbuffers.Builder, defId:number) {
@@ -658,12 +674,28 @@ static addCategoryBits(builder:flatbuffers.Builder, categoryBits:number) {
   builder.addFieldInt32(52, categoryBits, 0);
 }
 
+static addSounds(builder:flatbuffers.Builder, soundsOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(53, soundsOffset, 0);
+}
+
+static createSoundsVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startSoundsVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
 static endGameUnitDef(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createGameUnitDef(builder:flatbuffers.Builder, defId:number, nameOffset:flatbuffers.Offset, modelUrlOffset:flatbuffers.Offset, textureUrlOffset:flatbuffers.Offset, humanNameOffset:flatbuffers.Offset, tooltipOffset:flatbuffers.Offset, wreckNameOffset:flatbuffers.Offset, metalCost:number, energyCost:number, buildTime:number, metalMake:number, energyMake:number, metalUpkeep:number, energyUpkeep:number, metalStorage:number, energyStorage:number, extractsMetal:number, health:number, mass:number, radius:number, xsize:number, zsize:number, speed:number, turnRate:number, maxAcc:number, maxDec:number, losRadius:number, airLosRadius:number, radarRadius:number, sonarRadius:number, jammerRadius:number, seismicRadius:number, flags:number, buildDistance:number, buildSpeed:number, buildOptionsOffset:flatbuffers.Offset, weaponDefIdsOffset:flatbuffers.Offset, customParamsOffset:flatbuffers.Offset, repairSpeed:number, transportSize:number, transportMass:number, transportCapacity:number, yardmapOffset:flatbuffers.Offset, scriptOffset:flatbuffers.Offset, buildPicOffset:flatbuffers.Offset, maxVelocity:number, cost:number, maxWeaponRange:number, maxThisUnit:number, canBeAssisted:boolean, canSelfDestruct:boolean, selfDCountdown:number, categoryBits:number):flatbuffers.Offset {
+static createGameUnitDef(builder:flatbuffers.Builder, defId:number, nameOffset:flatbuffers.Offset, modelUrlOffset:flatbuffers.Offset, textureUrlOffset:flatbuffers.Offset, humanNameOffset:flatbuffers.Offset, tooltipOffset:flatbuffers.Offset, wreckNameOffset:flatbuffers.Offset, metalCost:number, energyCost:number, buildTime:number, metalMake:number, energyMake:number, metalUpkeep:number, energyUpkeep:number, metalStorage:number, energyStorage:number, extractsMetal:number, health:number, mass:number, radius:number, xsize:number, zsize:number, speed:number, turnRate:number, maxAcc:number, maxDec:number, losRadius:number, airLosRadius:number, radarRadius:number, sonarRadius:number, jammerRadius:number, seismicRadius:number, flags:number, buildDistance:number, buildSpeed:number, buildOptionsOffset:flatbuffers.Offset, weaponDefIdsOffset:flatbuffers.Offset, customParamsOffset:flatbuffers.Offset, repairSpeed:number, transportSize:number, transportMass:number, transportCapacity:number, yardmapOffset:flatbuffers.Offset, scriptOffset:flatbuffers.Offset, buildPicOffset:flatbuffers.Offset, maxVelocity:number, cost:number, maxWeaponRange:number, maxThisUnit:number, canBeAssisted:boolean, canSelfDestruct:boolean, selfDCountdown:number, categoryBits:number, soundsOffset:flatbuffers.Offset):flatbuffers.Offset {
   GameUnitDef.startGameUnitDef(builder);
   GameUnitDef.addDefId(builder, defId);
   GameUnitDef.addName(builder, nameOffset);
@@ -718,6 +750,7 @@ static createGameUnitDef(builder:flatbuffers.Builder, defId:number, nameOffset:f
   GameUnitDef.addCanSelfDestruct(builder, canSelfDestruct);
   GameUnitDef.addSelfDCountdown(builder, selfDCountdown);
   GameUnitDef.addCategoryBits(builder, categoryBits);
+  GameUnitDef.addSounds(builder, soundsOffset);
   return GameUnitDef.endGameUnitDef(builder);
 }
 
@@ -775,7 +808,8 @@ unpack(): GameUnitDefT {
     this.canBeAssisted(),
     this.canSelfDestruct(),
     this.selfDCountdown(),
-    this.categoryBits()
+    this.categoryBits(),
+    this.bb!.createObjList<SoundRef, SoundRefT>(this.sounds.bind(this), this.soundsLength())
   );
 }
 
@@ -834,6 +868,7 @@ unpackTo(_o: GameUnitDefT): void {
   _o.canSelfDestruct = this.canSelfDestruct();
   _o.selfDCountdown = this.selfDCountdown();
   _o.categoryBits = this.categoryBits();
+  _o.sounds = this.bb!.createObjList<SoundRef, SoundRefT>(this.sounds.bind(this), this.soundsLength());
 }
 }
 
@@ -891,7 +926,8 @@ constructor(
   public canBeAssisted: boolean = true,
   public canSelfDestruct: boolean = true,
   public selfDCountdown: number = 0,
-  public categoryBits: number = 0
+  public categoryBits: number = 0,
+  public sounds: (SoundRefT)[] = []
 ){}
 
 
@@ -908,6 +944,7 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const yardmap = (this.yardmap !== null ? builder.createString(this.yardmap!) : 0);
   const script = (this.script !== null ? builder.createString(this.script!) : 0);
   const buildPic = (this.buildPic !== null ? builder.createString(this.buildPic!) : 0);
+  const sounds = GameUnitDef.createSoundsVector(builder, builder.createObjectOffsetList(this.sounds));
 
   return GameUnitDef.createGameUnitDef(builder,
     this.defId,
@@ -962,7 +999,8 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     this.canBeAssisted,
     this.canSelfDestruct,
     this.selfDCountdown,
-    this.categoryBits
+    this.categoryBits,
+    sounds
   );
 }
 }
