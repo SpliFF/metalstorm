@@ -390,25 +390,6 @@ endif()
 # this binary via popen() — see rts/Server/FeatureProcessor.cpp.
 add_subdirectory(tools/modelimporter)
 
-# === gameconverter — content preprocessing tool ===
-#
-# Standalone CLI that prepares a legacy Spring-archive game for use
-# with spring-web. Writes `game.config.lua` (wrapper around
-# modinfo.lua) and `lobby.config.lua` (wrapper around modoptions.lua),
-# runs modelimporter over every model under objects3d/, and migrates
-# legacy AI layouts to the `ai/<name>/main.lua + ai.config.lua`
-# convention. See tools/gameconverter/README.md for details.
-add_subdirectory(tools/gameconverter)
-
-# === mapconverter — map preprocessing tool ===
-#
-# Standalone CLI that copies a Spring map's source tree into data/maps/
-# and runs all conversion steps (SMF extraction, minimap WebP, feature
-# model conversion, decal textures, widget enumeration). Writes metadata
-# to SQLite. After this tool has run, the lobby just reads pre-populated
-# data/ — no conversion code needed at runtime.
-add_subdirectory(tools/mapconverter)
-
 # === textureconverter — image format conversion tool ===
 #
 # Standalone CLI using stb_image (header-only, bundled). Converts
@@ -427,12 +408,35 @@ add_subdirectory(tools/textureconverter)
 # game's source tree. ffmpeg is located at configure time; a
 # missing ffmpeg is a hard configure-time error unless the entire
 # target is opted out via -DSPRING_SKIP_AUDIOCONVERTER=ON.
+#
+# Declared BEFORE gameconverter so the latter's `if(TARGET
+# audioconverter)` check can pick up the target and bake
+# AUDIOCONVERTER_BINARY_PATH into the compile definitions.
 option(SPRING_SKIP_AUDIOCONVERTER "Skip the audioconverter target (no ffmpeg required)" OFF)
 if(NOT SPRING_SKIP_AUDIOCONVERTER)
     add_subdirectory(tools/audioconverter)
 else()
     message(STATUS "audioconverter: SKIPPED (SPRING_SKIP_AUDIOCONVERTER=ON)")
 endif()
+
+# === gameconverter — content preprocessing tool ===
+#
+# Standalone CLI that prepares a legacy Spring-archive game for use
+# with spring-web. Writes `game.config.lua` (wrapper around
+# modinfo.lua) and `lobby.config.lua` (wrapper around modoptions.lua),
+# runs modelimporter over every model under objects3d/, and migrates
+# legacy AI layouts to the `ai/<name>/main.lua + ai.config.lua`
+# convention. See tools/gameconverter/README.md for details.
+add_subdirectory(tools/gameconverter)
+
+# === mapconverter — map preprocessing tool ===
+#
+# Standalone CLI that copies a Spring map's source tree into data/maps/
+# and runs all conversion steps (SMF extraction, minimap WebP, feature
+# model conversion, decal textures, widget enumeration). Writes metadata
+# to SQLite. After this tool has run, the lobby just reads pre-populated
+# data/ — no conversion code needed at runtime.
+add_subdirectory(tools/mapconverter)
 
 # === spring-logserver (dedicated log collection + streaming server) ===
 add_executable(spring-logserver
