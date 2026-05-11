@@ -129,8 +129,19 @@ export interface ParticleSpawn {
     /// Quad side length in elmos at age=0 / age=lifetime. Linear lerp.
     sizeStart: number;
     sizeEnd: number;
-    /// RGBA tint at age=0. Alpha fades to 0 at age=lifetime.
+    /// RGBA tint at age=0. Phase 3 colour ramp: lerped to `colorEnd`
+    /// across the particle's lifetime. Alpha is *also* multiplied by
+    /// the lifetime fade so even authored "stay opaque" ramps fade
+    /// out at end-of-life (matches Spring's tail behaviour without
+    /// requiring a third keyframe).
     colorStart: RGBA;
+    /// Optional RGBA tint at age=lifetime. When omitted the particle
+    /// holds `colorStart` and only fades through the alpha curve.
+    /// Translator populates this from the second keyframe of Spring's
+    /// `colormap = "R G B A  R G B A ..."` property; intermediates
+    /// are dropped (Phase 3 ships 2 stops; 4-keyframe extension can
+    /// land later if ZK content needs the resolution).
+    colorEnd?: RGBA;
     /// Max rotation rate in rad/sec; per-particle is uniform random
     /// in [-this, +this] so a smoke cloud has visually distinct puffs.
     rotationSpeedMax: number;
@@ -222,6 +233,11 @@ interface ParticleClass {
     sizeStart: Float32Array;      // capacity
     sizeEnd: Float32Array;        // capacity
     color: Float32Array;          // capacity * 4 (initial RGBA)
+    /// Per-particle end-of-life RGBA tint for the colour ramp. When
+    /// the spawn carries no `colorEnd` we copy `color` verbatim into
+    /// this slot so the per-frame lerp produces identity (and we
+    /// avoid branching in the hot per-particle buffer rebuild).
+    colorEnd: Float32Array;       // capacity * 4
     gravity: Float32Array;        // capacity
     rotation: Float32Array;       // capacity (rad)
     rotationSpeed: Float32Array;  // capacity (rad/sec)
@@ -675,6 +691,7 @@ export class CegRuntime {
             sizeStart: new Float32Array(capacity),
             sizeEnd: new Float32Array(capacity),
             color: new Float32Array(capacity * 4),
+            colorEnd: new Float32Array(capacity * 4),
             gravity: new Float32Array(capacity),
             rotation: new Float32Array(capacity),
             rotationSpeed: new Float32Array(capacity),
@@ -744,6 +761,14 @@ function writeParticle(
     cls.color[c4 + 1] = sp.colorStart[1];
     cls.color[c4 + 2] = sp.colorStart[2];
     cls.color[c4 + 3] = sp.colorStart[3];
+    // Spawn carries an end-of-life RGBA when the source CEG had a
+    // multi-keyframe colormap; otherwise the per-frame lerp degrades
+    // to identity by copying start into end.
+    const ce = sp.colorEnd ?? sp.colorStart;
+    cls.colorEnd[c4 + 0] = ce[0];
+    cls.colorEnd[c4 + 1] = ce[1];
+    cls.colorEnd[c4 + 2] = ce[2];
+    cls.colorEnd[c4 + 3] = ce[3];
 
     cls.gravity[slot] = sp.gravity;
     cls.rotation[slot] = Math.random() * Math.PI * 2;
@@ -812,6 +837,7 @@ function buildClassBuffers(
     const age = cls.age;
     const sizeStart = cls.sizeStart, sizeEnd = cls.sizeEnd;
     const color = cls.color;
+    const colorEnd = cls.colorEnd;
     const rot = cls.rotation;
 
     let dst = 0;
@@ -828,12 +854,21 @@ function buildClassBuffers(
             camX, camY, camZ, size, rot[i],
             tmpRight, tmpUp, tmpFwd, tmpQ, tmpScale);
 
+        // Per-frame colour-ramp lerp (Phase 3). Spawns without a
+        // colorEnd see the SoA slot pre-filled with colorStart, so
+        // this lerp degrades to identity at zero branch cost. Alpha
+        // is multiplied by the lifetime fade so authored "constant
+        // alpha" ramps still tail off cleanly.
         const c4 = i * 4;
         const ds = dst * 4;
-        tints[ds + 0] = color[c4 + 0];
-        tints[ds + 1] = color[c4 + 1];
-        tints[ds + 2] = color[c4 + 2];
-        tints[ds + 3] = color[c4 + 3] * fade;
+        const r0 = color[c4 + 0], r1 = colorEnd[c4 + 0];
+        const g0 = color[c4 + 1], g1 = colorEnd[c4 + 1];
+        const b0 = color[c4 + 2], b1 = colorEnd[c4 + 2];
+        const a0 = color[c4 + 3], a1 = colorEnd[c4 + 3];
+        tints[ds + 0] = r0 + (r1 - r0) * t;
+        tints[ds + 1] = g0 + (g1 - g0) * t;
+        tints[ds + 2] = b0 + (b1 - b0) * t;
+        tints[ds + 3] = (a0 + (a1 - a0) * t) * fade;
         dst++;
     }
 

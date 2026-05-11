@@ -169,7 +169,7 @@ function translateParticleSystem(s: CegSpawnInfo, props: PropMap): ParticleSpawn
     const baseScale = directional ? velocityScale : 0;
     const baseSpread = directional ? velocitySpread : Math.max(velocitySpread, velocityScale * 0.5);
 
-    const color = parseColormap(props.getString('colormap', ''));
+    const ramp = parseColormap(props.getString('colormap', ''));
 
     return {
         class: poolClass,
@@ -182,7 +182,8 @@ function translateParticleSystem(s: CegSpawnInfo, props: PropMap): ParticleSpawn
         gravity: clamp(runtimeGravity, -50, 200),
         sizeStart: clamp(sizeStart, 0.5, 80),
         sizeEnd:   clamp(sizeEnd,   0.1, 200),
-        colorStart: color,
+        colorStart: ramp.start,
+        colorEnd: ramp.end,
         rotationSpeedMax: 1.0,
     };
 }
@@ -204,7 +205,7 @@ function translateGroundFlash(_s: CegSpawnInfo, props: PropMap): ParticleSpawn |
     const sizeEnd = Math.max(0.5,
         sizeStart + sizeGrowthPerFrame * SIM_HZ * ttlS);
 
-    const color = parseColormap(props.getString('colormap', ''));
+    const ramp = parseColormap(props.getString('colormap', ''));
 
     return {
         class: 'flare',
@@ -217,7 +218,8 @@ function translateGroundFlash(_s: CegSpawnInfo, props: PropMap): ParticleSpawn |
         gravity: 0,
         sizeStart,
         sizeEnd,
-        colorStart: color,
+        colorStart: ramp.start,
+        colorEnd: ramp.end,
         rotationSpeedMax: 0,
     };
 }
@@ -599,15 +601,33 @@ function parseNumberList(s: string): number[] {
 }
 
 /// Spring colormaps are `"R G B A R G B A …"` — a sequence of RGBA
-/// keyframes the engine lerps over particle lifetime. The runtime
-/// only carries the start RGBA today (lifetime fade is built-in),
-/// so we take the first 4 values. Falls back to a neutral white
-/// when the string is empty or malformed.
-function parseColormap(s: string): [number, number, number, number] {
+/// keyframes the engine lerps over particle lifetime. Phase 3 keeps
+/// two stops (start + end); intermediate keyframes get dropped at
+/// translate time. Verified against ZK content — 2-stop ramps cover
+/// the dominant authored cases (smoke fades to dark, fire fades to
+/// orange-then-black approximated as orange-to-black, etc.).
+///
+/// Returns the start RGBA plus an optional end RGBA. When the input
+/// only carries one keyframe (rare but legal), end is omitted so the
+/// runtime degrades to a constant-colour-with-alpha-fade rendering.
+function parseColormap(s: string): {
+    start: [number, number, number, number];
+    end?: [number, number, number, number];
+} {
     const nums = parseNumberList(s);
-    if (nums.length >= 4) return [nums[0], nums[1], nums[2], nums[3]];
-    if (nums.length === 3) return [nums[0], nums[1], nums[2], 1];
-    return [1, 1, 1, 1];
+    if (nums.length >= 8) {
+        // Two or more keyframes — take first + last (the last
+        // keyframe is what the particle interpolates toward).
+        const lastBase = (Math.floor(nums.length / 4) - 1) * 4;
+        return {
+            start: [nums[0], nums[1], nums[2], nums[3]],
+            end:   [nums[lastBase], nums[lastBase + 1],
+                    nums[lastBase + 2], nums[lastBase + 3]],
+        };
+    }
+    if (nums.length >= 4) return { start: [nums[0], nums[1], nums[2], nums[3]] };
+    if (nums.length === 3) return { start: [nums[0], nums[1], nums[2], 1] };
+    return { start: [1, 1, 1, 1] };
 }
 
 function clamp(v: number, lo: number, hi: number): number {
