@@ -246,8 +246,21 @@ export class LuaWidgetManager {
         this.worker = new WidgetWorker();
         this.worker.onmessage = (e) => this.onWorkerMessage(e);
         this.worker.onerror = (e) => {
-            console.error('[LuaUI] Worker error:', e.message);
+            // `ErrorEvent.message` is often empty for worker errors that
+            // fire before module init completes or get masked by the
+            // cross-origin sanitiser. Surface every diagnostic field —
+            // `error` carries the actual Error (with stack) when present.
+            const parts: string[] = [];
+            if (e.message) parts.push(e.message);
+            if (e.filename) parts.push(`${e.filename}:${e.lineno}:${e.colno}`);
+            if (e.error) {
+                parts.push(e.error.stack ?? String(e.error));
+            }
+            console.error('[LuaUI] Worker error:', parts.length ? parts.join(' | ') : '(no detail; check Network tab for worker script load failure)', e);
         };
+        this.worker.addEventListener('messageerror', (e) => {
+            console.error('[LuaUI] Worker messageerror (deserialisation failed):', e);
+        });
 
         // 4. Send init message with canvas and map data
         const mapData = {
