@@ -281,6 +281,86 @@ function postToMain(msg: Record<string, unknown>, transfer?: Transferable[]): vo
     }
 }
 
+// ── SoundItem ingestion ───────────────────────────────────────────────
+//
+// gamedata/sounds.lua returns a `Sounds` table whose `SoundItems` map
+// is the canonical metadata source for sound playback (per-item
+// gain / pitch / priority / maxconcurrent / maxdist / rolloff / in3d /
+// preload / looptime). ZK and other Spring games build this table
+// dynamically — for example, ZK's local `AutoAdd` helper does
+// `VFS.DirList("sounds/<sub>")` and emplaces every discovered file
+// under a key like `<sub>/<stem>`.
+//
+// Because the table is built by arbitrary Lua we can't reproduce it
+// from a TS parser. Loading the file here, in the worker's Fengari
+// runtime with a working VFS.DirList, is the only sound way to get
+// the right table on any game.
+//
+// We post the resulting JS-side map to the main thread, where
+// AudioManager.ingestSoundItems holds it as the SoundItem lookup
+// table used by SoundEventPlayer (server-emitted SoundEvents) and by
+// the widget-side Spring.PlaySoundFile path.
+
+function loadAndPostSoundItems(rt: LuaRuntime): void {
+    // Skip silently when the file isn't in the VFS — some games (like
+    // Paper Tanks) don't ship a sounds.lua. The audio path falls back
+    // to literal SoundRef.path lookups in that case.
+    const exists = rt.evalString(`return VFS.FileExists("gamedata/sounds.lua") or VFS.FileExists("gamedata/sounds.lua", VFS.GAME) and 1 or 0`,
+        'sound_items_exists');
+    if (exists !== 1 && exists !== true) {
+        postLog(2, '[LuaUI] no gamedata/sounds.lua — SoundItem map empty');
+        return;
+    }
+
+    const items = rt.evalString(`
+        -- Run gamedata/sounds.lua and pull out the SoundItems map.
+        -- Wrapped in pcall because real-world sounds.lua files use
+        -- arbitrary Lua and may legitimately error on missing assets;
+        -- a hard failure here would break audio for the whole game.
+        local ok, sounds = pcall(VFS.Include, "gamedata/sounds.lua")
+        if not ok or type(sounds) ~= "table" then
+            Spring.Echo("[LuaUI] gamedata/sounds.lua did not return a table: " .. tostring(sounds))
+            return {}
+        end
+        local items = sounds.SoundItems or sounds
+        if type(items) ~= "table" then return {} end
+
+        -- Project out only the fields we honour on the JS side. The
+        -- raw table can contain functions (e.g. ZK's onPlay hooks)
+        -- that postMessage can't clone.
+        local out = {}
+        for k, v in pairs(items) do
+            if type(k) == "string" and type(v) == "table" then
+                out[k] = {
+                    file          = type(v.file)          == "string" and v.file          or nil,
+                    gain          = type(v.gain)          == "number" and v.gain          or nil,
+                    pitch         = type(v.pitch)         == "number" and v.pitch         or nil,
+                    gainmod       = type(v.gainmod)       == "number" and v.gainmod       or nil,
+                    pitchmod      = type(v.pitchmod)      == "number" and v.pitchmod      or nil,
+                    priority      = type(v.priority)      == "number" and v.priority      or nil,
+                    maxconcurrent = type(v.maxconcurrent) == "number" and v.maxconcurrent or nil,
+                    maxdist       = type(v.maxdist)       == "number" and v.maxdist       or nil,
+                    rolloff       = type(v.rolloff)       == "number" and v.rolloff       or nil,
+                    in3d          = (v.in3d ~= nil) and (v.in3d == true or v.in3d == 1) or nil,
+                    dopplerscale  = type(v.dopplerscale)  == "number" and v.dopplerscale  or nil,
+                    preload       = (v.preload == true) or nil,
+                    looptime      = type(v.looptime)      == "number" and v.looptime      or nil,
+                }
+            end
+        end
+        return out
+    `, 'sound_items_load');
+
+    if (!items || typeof items !== 'object') {
+        postLog(2, '[LuaUI] gamedata/sounds.lua produced no SoundItems');
+        return;
+    }
+    const itemRecord = items as Record<string, unknown>;
+    const count = Object.keys(itemRecord).length;
+    postLog(2, `[LuaUI] gamedata/sounds.lua produced ${count} SoundItem(s)`);
+    postToMain({ type: 'soundItems', items: itemRecord });
+}
+
 function describeMessage(msg: Record<string, unknown>): string {
     const t = String(msg.type ?? '?');
     // Short summary per message type; avoids dumping huge payloads.
@@ -346,6 +426,14 @@ let bridge: LuaGLBridge | null = null;
 let startTime = performance.now() / 1000;
 let frameInterval: ReturnType<typeof setInterval> | null = null;
 let initBaseUrl = '';  // saved from init() for re-fetch on enable
+
+// Last [played, duration] in seconds for the BGMusic stream. The
+// worker can't read the HTMLAudioElement directly across threads, so
+// the main thread pushes a snapshot whenever music state changes;
+// Spring.GetSoundStreamTime returns the cached pair. Defaults to
+// (0, 0) until the first track starts.
+let musicStreamPlayed = 0;
+let musicStreamDuration = 0;
 
 // Live game state updated by main thread messages, read by Spring API
 const liveState: LiveState = createDefaultLiveState();
@@ -880,7 +968,7 @@ async function init(
         setActiveCommand: (cmdId, mods) => {
             postToMain({ type: 'setActiveCommand', cmdId, mods });
         },
-        playSound: (path, volume, pos) => {
+        playSound: (path, volume, pos, channel) => {
             postToMain({
                 type: 'playSound',
                 path,
@@ -889,7 +977,36 @@ async function init(
                 x: pos?.x ?? 0,
                 y: pos?.y ?? 0,
                 z: pos?.z ?? 0,
+                channel,
             });
+        },
+        playMusicStream: (file, volume, enqueue) => {
+            postToMain({ type: 'playMusicStream', file, volume, enqueue });
+        },
+        stopMusicStream: (fadeMs) => {
+            postToMain({ type: 'stopMusicStream', fadeMs });
+        },
+        pauseMusicStream: () => {
+            postToMain({ type: 'pauseMusicStream' });
+        },
+        setMusicStreamVolume: (v) => {
+            postToMain({ type: 'setMusicStreamVolume', volume: v });
+        },
+        getMusicStreamTime: () => {
+            // The worker can't synchronously read state from the main
+            // thread, so this is a best-effort using a cached value
+            // pushed from main on every music play / pause. Default to
+            // zeroes when no track has played yet.
+            return [musicStreamPlayed, musicStreamDuration];
+        },
+        setSoundEffectParams: (presetOrTable) => {
+            postToMain({ type: 'setSoundEffectParams', value: presetOrTable });
+        },
+        setChannelVolume: (channel, volume) => {
+            postToMain({ type: 'setChannelVolume', channel, volume });
+        },
+        setMasterVolume: (volume) => {
+            postToMain({ type: 'setMasterVolume', volume });
         },
         setMinimapGeometry: (x, y, w, h) => {
             // Spring.SetMiniMapGeometry path (action handlers / direct
@@ -1992,6 +2109,19 @@ defaultFont = activeFont
 
         Spring.Echo("[LuaUI] Spring.SendCommands wired (luaui + keybind table)")
     `, 'send_commands_dispatch');
+
+    // Load gamedata/sounds.lua and extract the SoundItems table.
+    // We do this before the widget bootstrap because:
+    //   1. The file's `AutoAdd` helper does VFS.DirList to enumerate
+    //      assets — we already have those paths indexed from the VFS
+    //      prefetch above, so the dynamic table built here is correct.
+    //   2. The bootstrap may immediately fire `Spring.PlaySoundFile`
+    //      from a widget's `Initialize()`, so the SoundItem map needs
+    //      to be available on the main thread by then.
+    // The map is serialised as a plain object and posted to the main
+    // thread, which threads it through to AudioManager.ingestSoundItems.
+    postLog(2, '[LuaUI] init step 6.5/8: loading gamedata/sounds.lua...');
+    loadAndPostSoundItems(runtime);
 
     postLog(2, '[LuaUI] init step 7/8: starting bootstrap (VFS.Include camain.lua)...');
     const bootStart = performance.now();
@@ -3513,6 +3643,15 @@ self.onmessage = async (e: MessageEvent) => {
             postToMain({ type: 'evalResult', result: String(evalResult ?? 'nil') });
             break;
         }
+
+        case 'musicStreamTime':
+            // Main thread pushes a snapshot of the BGMusic
+            // HTMLAudioElement's currentTime / duration whenever
+            // playback state changes. Spring.GetSoundStreamTime
+            // reads these cached values.
+            musicStreamPlayed = Number(msg.played ?? 0);
+            musicStreamDuration = Number(msg.duration ?? 0);
+            break;
 
         case 'pauseFrames':
             if (frameInterval) { clearInterval(frameInterval); frameInterval = null; }

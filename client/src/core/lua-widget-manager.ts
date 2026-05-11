@@ -19,6 +19,7 @@ import type { RTSCamera } from './rts-camera.js';
 import type { Connection, ResourceUpdateInfo } from './connection.js';
 import type { EntityStateSnapshot } from './entity-state.js';
 import type { AudioManager } from './audio.js';
+import { AudioChannel, rewriteAudioExtensionToWebm } from './audio.js';
 import { debugConsole } from './debug-console.js';
 import { logIngest } from './log-ingest.js';
 import { IntelTransitionTracker } from './intel-transitions.js';
@@ -50,6 +51,42 @@ function normalizeSoundPath(name: string): string {
     const hasExt = lastDot >= 0 && lastDot > lastSlash;
     if (!hasExt) out += '.wav';
     return 'sounds/' + out;
+}
+
+/// Map a Spring.PlaySoundFile channel arg to the AudioChannel enum.
+/// Recoil accepts both string aliases (`"battle"`/`"sfx"` etc.) and
+/// numeric channel IDs (1..3). Anything unrecognised defaults to
+/// General — matches Recoil's CLuaUnsyncedCtrl::PlaySoundFile fallback.
+function mapChannelName(value: unknown): AudioChannel {
+    if (typeof value === 'number') {
+        // Recoil's numeric: 1 = Battle, 2 = UnitReply, 3 = UserInterface.
+        switch (value) {
+            case 1: return AudioChannel.Battle;
+            case 2: return AudioChannel.UnitReply;
+            case 3: return AudioChannel.UserInterface;
+            default: return AudioChannel.General;
+        }
+    }
+    if (typeof value !== 'string') return AudioChannel.General;
+    return mapChannelByName(value) ?? AudioChannel.General;
+}
+
+/// String channel name → AudioChannel, or null when unrecognised.
+/// Used by the volume-config bridge so the worker can target a
+/// specific channel by its canonical name.
+function mapChannelByName(name: string): AudioChannel | null {
+    switch (name.toLowerCase()) {
+        case 'general':       return AudioChannel.General;
+        case 'sfx':           return AudioChannel.Battle;  // Recoil alias
+        case 'battle':        return AudioChannel.Battle;
+        case 'voice':         return AudioChannel.UnitReply;  // Recoil alias
+        case 'unitreply':     return AudioChannel.UnitReply;
+        case 'ui':            return AudioChannel.UserInterface;
+        case 'userinterface': return AudioChannel.UserInterface;
+        case 'music':         return AudioChannel.BGMusic;
+        case 'bgmusic':       return AudioChannel.BGMusic;
+        default:              return null;
+    }
 }
 
 // ── Types ───────────────────────────────────────────────────────────────
@@ -610,6 +647,17 @@ export class LuaWidgetManager {
     // debug level so the shutdown-loop diagnosis can reconstruct the
     // exact order of events. Payloads are summarised, not dumped.
 
+    /// Push a snapshot of the active BGMusic element's currentTime /
+    /// duration to the worker so Spring.GetSoundStreamTime resolves
+    /// to a recent value. Called whenever music playback state
+    /// changes (play, stop, pause); the worker caches the pair and
+    /// returns it synchronously from Lua.
+    private pushMusicTimeToWorker(): void {
+        if (!this.audioManager) return;
+        const [played, duration] = this.audioManager.getMusicTime();
+        this.postToWorker({ type: 'musicStreamTime', played, duration });
+    }
+
     private postToWorker(msg: Record<string, unknown>, transfer?: Transferable[]): void {
         if (!this.worker) {
             // Worker not yet created (initialize() hasn't run). Buffer the
@@ -654,6 +702,14 @@ export class LuaWidgetManager {
             case 'ready':          summary = `ready (fileCount=${msg.fileCount}, callins=${(msg.callins as string[])?.join(',') || 'none'})`; break;
             case 'error':          summary = `error: ${String(msg.msg ?? '')}`; break;
             case 'storage:set':    summary = `storage:set key=${msg.key}`; break;
+            case 'soundItems':     summary = `soundItems (${Object.keys((msg.items as Record<string, unknown>) ?? {}).length} items)`; break;
+            case 'playMusicStream':    summary = `playMusicStream ${msg.file}`; break;
+            case 'stopMusicStream':    summary = 'stopMusicStream'; break;
+            case 'pauseMusicStream':   summary = 'pauseMusicStream'; break;
+            case 'setMusicStreamVolume': summary = `setMusicStreamVolume ${msg.volume}`; break;
+            case 'setSoundEffectParams': summary = `setSoundEffectParams ${typeof msg.value === 'string' ? msg.value : '(table)'}`; break;
+            case 'setChannelVolume':   summary = `setChannelVolume ${msg.channel}=${msg.volume}`; break;
+            case 'setMasterVolume':    summary = `setMasterVolume ${msg.volume}`; break;
             case 'widgetList':     summary = `widgetList (${String(msg.data ?? '').length} bytes)`; break;
             case 'worldGLCommands':summary = `worldGLCommands (${(msg.commands as unknown[])?.length ?? '?'} cmds)`; break;
             case 'giveOrder':      summary = `giveOrder cmd=${msg.cmdId} units=${(msg.unitIds as unknown[])?.length ?? 0} params=${(msg.params as unknown[])?.length ?? 0}`; break;
@@ -736,6 +792,26 @@ export class LuaWidgetManager {
                 } catch { /* silent */ }
                 break;
 
+            case 'soundItems': {
+                // Worker has parsed gamedata/sounds.lua and posted the
+                // resulting SoundItems map. Hand it to AudioManager so
+                // server-emitted SoundEvents (resolved via SoundRef.name)
+                // and widget Spring.PlaySoundFile calls share the same
+                // per-item gain / pitch / priority / maxconcurrent /
+                // maxdist / rolloff / in3d defaults.
+                if (this.audioManager) {
+                    const items = msg.items as Record<string, import('./audio.js').SoundItem>;
+                    const map = new Map<string, import('./audio.js').SoundItem>();
+                    for (const [k, v] of Object.entries(items ?? {})) {
+                        map.set(k, v);
+                    }
+                    const contentBase =
+                        `${this.options.lobbyUrl}/api/games/data/${this.options.gameId}`;
+                    this.audioManager.ingestSoundItems(map, contentBase);
+                }
+                break;
+            }
+
             case 'error':
                 console.error('[LuaUI] Worker error:', msg.msg);
                 break;
@@ -808,8 +884,10 @@ export class LuaWidgetManager {
 
             case 'playSound': {
                 // Worker-side Spring.PlaySoundFile forwards here. Resolve
-                // the path against the game's data root, decode lazily,
-                // and play through the AudioManager's voice pool.
+                // the path against the game's data root, look up
+                // SoundItem metadata in the AudioManager's map, decode
+                // lazily, and play through the voice pool on the
+                // requested channel.
                 const am = this.audioManager;
                 if (!am) break;
                 const path = typeof msg.path === 'string' ? msg.path : '';
@@ -819,25 +897,130 @@ export class LuaWidgetManager {
                 const y = typeof msg.y === 'number' ? msg.y : 0;
                 const z = typeof msg.z === 'number' ? msg.z : 0;
                 const spatial = !!msg.spatial;
-                // Widgets pass Spring-convention paths like "reply/bot_select"
-                // or "weapon/laser1" — Spring's engine prepends `sounds/` and
-                // appends `.wav` at lookup time. Mirror that here so the URL
-                // lands on the file on disk. Server-emitted SoundEvents go
-                // through SoundEventPlayer with paths already normalised by
-                // NormalizeSoundPath in Protocol.h; this path is the
-                // PlaySoundFile-from-Lua side that bypasses that.
-                const resolved = normalizeSoundPath(path);
-                const url = `${this.options.lobbyUrl}/api/games/data/${this.options.gameId}/${resolved}`;
-                am.loadSound(resolved, url).then((buf) => {
+
+                // Map the caller-supplied channel arg (Recoil bind form)
+                // to our AudioChannel enum. Defaults to General.
+                const channel = mapChannelName(msg.channel);
+
+                // SoundItem lookup — when the widget asked for a logical
+                // name (`"reply/bot_select"`, `"weapon/laser1"`) and the
+                // game's gamedata/sounds.lua has a matching entry, use
+                // its gain / pitch / priority / etc. defaults instead
+                // of the engine defaults.
+                const item = am.resolveSoundItem(path);
+                let url: string;
+                if (item && item.file) {
+                    const rel = rewriteAudioExtensionToWebm(
+                        item.file.startsWith('sounds/')
+                            ? item.file
+                            : 'sounds/' + item.file);
+                    url = `${this.options.lobbyUrl}/api/games/data/${this.options.gameId}/${rel}`;
+                } else {
+                    // Widgets pass Spring-convention paths like
+                    // "reply/bot_select" — engine convention prepends
+                    // `sounds/` and the audioconverter pass made the
+                    // file `.webm`.
+                    const resolved = rewriteAudioExtensionToWebm(
+                        normalizeSoundPath(path));
+                    url = `${this.options.lobbyUrl}/api/games/data/${this.options.gameId}/${resolved}`;
+                }
+
+                const itemGain  = item?.gain  ?? 1;
+                const itemPitch = item?.pitch ?? 1;
+                const gainMod   = item?.gainmod  ?? 0;
+                const pitchMod  = item?.pitchmod ?? 0;
+                const r01 = (Math.random() * 2 - 1);
+                const r02 = (Math.random() * 2 - 1);
+                const finalVolume = itemGain * (1 + r01 * gainMod) * volume;
+                const finalPitch  = itemPitch * (1 + r02 * pitchMod);
+                const finalPriority = item?.priority ?? 0;
+                const finalSpatial = spatial && (item?.in3d !== false);
+                const rolloff = item?.rolloff;
+                const maxDist = item?.maxdist;
+
+                am.loadSound(url, url).then((buf) => {
                     if (!buf) return;
                     am.play({
                         buffer: buf,
-                        x: spatial ? x : 0,
-                        y: spatial ? y : 0,
-                        z: spatial ? z : 0,
-                        volume,
+                        x: finalSpatial ? x : 0,
+                        y: finalSpatial ? y : 0,
+                        z: finalSpatial ? z : 0,
+                        volume: finalVolume,
+                        pitch: finalPitch,
+                        priority: finalPriority,
+                        channel,
+                        spatial: finalSpatial,
+                        rolloff, maxDist,
                     });
                 });
+                break;
+            }
+
+            case 'playMusicStream': {
+                const am = this.audioManager;
+                if (!am) break;
+                const file = typeof msg.file === 'string' ? msg.file : '';
+                if (!file) break;
+                const v = typeof msg.volume === 'number' ? msg.volume : 1;
+                const rel = rewriteAudioExtensionToWebm(
+                    file.startsWith('sounds/') ? file : 'sounds/' + file);
+                const url = `${this.options.lobbyUrl}/api/games/data/${this.options.gameId}/${rel}`;
+                // No fade for widget-driven music — the music-state
+                // machine path uses crossfades on broadcast MusicEvents.
+                am.playMusic(url, v, 0);
+                this.pushMusicTimeToWorker();
+                break;
+            }
+            case 'stopMusicStream': {
+                const fadeMs = typeof msg.fadeMs === 'number' ? msg.fadeMs : 250;
+                this.audioManager?.stopMusic(fadeMs);
+                this.pushMusicTimeToWorker();
+                break;
+            }
+            case 'pauseMusicStream':
+                this.audioManager?.pauseMusic();
+                this.pushMusicTimeToWorker();
+                break;
+            case 'setMusicStreamVolume': {
+                const v = typeof msg.volume === 'number' ? msg.volume : 1;
+                this.audioManager?.setChannelVolume(
+                    4 /* BGMusic */, Math.max(0, Math.min(1, v)));
+                break;
+            }
+            case 'setSoundEffectParams': {
+                const v = msg.value;
+                const am = this.audioManager;
+                if (!am) break;
+                if (typeof v === 'string') {
+                    const contentBase = `${this.options.lobbyUrl}/api/games/data/${this.options.gameId}`;
+                    void am.setReverbPreset(v, contentBase);
+                } else if (v && typeof v === 'object') {
+                    const obj = v as Record<string, unknown>;
+                    if (typeof obj.preset === 'string') {
+                        const contentBase = `${this.options.lobbyUrl}/api/games/data/${this.options.gameId}`;
+                        void am.setReverbPreset(obj.preset, contentBase);
+                    }
+                    const wet = typeof obj.wet === 'number' ? obj.wet : undefined;
+                    const dry = typeof obj.dry === 'number' ? obj.dry : undefined;
+                    if (wet !== undefined || dry !== undefined) {
+                        am.setReverbMix(wet ?? 0.5, dry ?? 0.5);
+                    }
+                }
+                break;
+            }
+            case 'setChannelVolume': {
+                const v = typeof msg.volume === 'number' ? msg.volume : 1;
+                const chName = typeof msg.channel === 'string' ? msg.channel : '';
+                const ch = mapChannelByName(chName);
+                if (ch !== null) {
+                    this.audioManager?.setChannelVolume(
+                        ch, Math.max(0, Math.min(1, v)));
+                }
+                break;
+            }
+            case 'setMasterVolume': {
+                const v = typeof msg.volume === 'number' ? msg.volume : 1;
+                this.audioManager?.setMasterVolume(Math.max(0, Math.min(1, v)));
                 break;
             }
 

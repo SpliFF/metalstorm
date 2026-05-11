@@ -116,8 +116,31 @@ export interface SpringAPIContext {
      * if provided, the sound plays positional through the AudioManager's
      * panner; otherwise it plays as a 2D UI sound. The host resolves the
      * URL against the game's data root.
+     *
+     * `channel` matches Recoil's `Spring.PlaySoundFile` last-arg
+     * convention: `"battle"` / `"sfx"`, `"unitreply"` / `"voice"`,
+     * `"userinterface"` / `"ui"`, `"general"` (default), or numeric 1/2/3.
+     * Path is also looked up in the SoundItem map for per-item gain /
+     * pitch / priority / etc. defaults.
      */
-    playSound?(path: string, volume: number, pos?: { x: number; y: number; z: number }): void;
+    playSound?(path: string, volume: number,
+               pos?: { x: number; y: number; z: number },
+               channel?: string | number): void;
+    /** Music streaming controls — back PlaySoundStream / StopSoundStream
+     *  / PauseSoundStream / SetSoundStreamVolume / GetSoundStreamTime. */
+    playMusicStream?(file: string, volume: number, enqueue: boolean): void;
+    stopMusicStream?(fadeMs?: number): void;
+    pauseMusicStream?(): void;
+    setMusicStreamVolume?(v: number): void;
+    /** Returns [played, total] in seconds for the BGMusic element. */
+    getMusicStreamTime?(): [number, number];
+    /** Map reverb — `Spring.SetSoundEffectParams(preset | table)`. */
+    setSoundEffectParams?(preset: string | Record<string, unknown>): void;
+    /** Per-channel volume bridge — chili epicmenu writes
+     *  `snd_volgeneral` etc. via Spring.SendCommands("set ..."). */
+    setChannelVolume?(channel: string, volume: number): void;
+    /** Master volume bridge — same plumbing for `snd_volmaster`. */
+    setMasterVolume?(volume: number): void;
     /**
      * Forward a `Spring.SetMiniMapGeometry(x, y, w, h)` call to the host.
      * Coords are in Spring screen-space (Y-up, origin bottom-left, pixels).
@@ -350,6 +373,48 @@ export interface FeatureEntry {
  * clean forward-slash paths ("LuaUI/Images/foo.png"). Also handles
  * plain backslash paths.
  */
+// ────────────────────────────────────────────────────────────────────
+// Config store + audio-key side-effects
+// ────────────────────────────────────────────────────────────────────
+//
+// Spring.GetConfigInt / SetConfigInt persist across sessions in
+// localStorage under `springConfig.<key>`. The `snd_vol*` family also
+// fires a side-effect that pushes the value into AudioManager via
+// the host context, so chili's epicmenu trackbars work end-to-end
+// without source patches.
+
+function readConfigStore(key: string): string | null {
+    try { return localStorage.getItem('springConfig.' + key); }
+    catch { return null; }
+}
+
+function writeConfigStore(key: string, value: string): void {
+    try { localStorage.setItem('springConfig.' + key, value); }
+    catch { /* silent */ }
+}
+
+const VOLUME_CONFIG_KEYS: Record<string, string> = {
+    'snd_volmaster':     'master',
+    'snd_volgeneral':    'General',
+    'snd_volbattle':     'Battle',
+    'snd_volunitreply':  'UnitReply',
+    'snd_volui':         'UserInterface',
+    'snd_volmusic':      'BGMusic',
+};
+
+function applyConfigSideEffect(ctx: SpringAPIContext,
+                                key: string, value: number): void {
+    const target = VOLUME_CONFIG_KEYS[key.toLowerCase()];
+    if (!target) return;
+    // Range: chili stores integers 0..100; AudioManager takes 0..1.
+    const normalised = Math.max(0, Math.min(1, value / 100));
+    if (target === 'master') {
+        ctx.setMasterVolume?.(normalised);
+    } else {
+        ctx.setChannelVolume?.(target, normalised);
+    }
+}
+
 export function normaliseSpringPath(path: string): string {
     let p = path;
     // Strip VFS mode prefix: `:a:`, `:r:`, `:s:` etc.
@@ -880,15 +945,49 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
                         if (next.length === 0) ls.keyBinds.delete(k);
                         else ls.keyBinds.set(k, next);
                     }
+                } else if (verb === 'set') {
+                    // `set <key> <value>` — chili's epicmenu trackbar
+                    // OnChange handler emits this for every volume
+                    // slider. We funnel it through the same config
+                    // store + side-effect path as SetConfigInt.
+                    const sp = rest.indexOf(' ');
+                    if (sp < 0) return;
+                    const k = rest.slice(0, sp).trim();
+                    const v = rest.slice(sp + 1).trim();
+                    if (!k) return;
+                    writeConfigStore(k, v);
+                    const n = parseFloat(v);
+                    if (Number.isFinite(n)) {
+                        applyConfigSideEffect(ctx, k, n);
+                    }
                 }
             };
             for (const a of args) {
                 if (typeof a === 'string') apply(a);
             }
         },
-        GetConfigInt: (_key: LuaValue, def: LuaValue) => Number(def ?? 0),
-        GetConfigFloat: (_key: LuaValue, def: LuaValue) => Number(def ?? 0),
-        GetConfigString: (_key: LuaValue, def: LuaValue) => String(def ?? ''),
+        GetConfigInt: (key: LuaValue, def: LuaValue) => {
+            const k = typeof key === 'string' ? key : '';
+            if (!k) return Number(def ?? 0);
+            const raw = readConfigStore(k);
+            if (raw == null) return Number(def ?? 0);
+            const n = parseInt(raw, 10);
+            return Number.isFinite(n) ? n : Number(def ?? 0);
+        },
+        GetConfigFloat: (key: LuaValue, def: LuaValue) => {
+            const k = typeof key === 'string' ? key : '';
+            if (!k) return Number(def ?? 0);
+            const raw = readConfigStore(k);
+            if (raw == null) return Number(def ?? 0);
+            const n = parseFloat(raw);
+            return Number.isFinite(n) ? n : Number(def ?? 0);
+        },
+        GetConfigString: (key: LuaValue, def: LuaValue) => {
+            const k = typeof key === 'string' ? key : '';
+            if (!k) return String(def ?? '');
+            const raw = readConfigStore(k);
+            return raw ?? String(def ?? '');
+        },
         GetModOptions: () => ({ ...ls.modOptions }),
         GetViewGeometry: () => {
             return [ls.viewport.width, ls.viewport.height, 0, 0];
@@ -923,10 +1022,30 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             // No-op: the client renders its own LOS overlay out-of-band.
         },
 
-        // --- Config set (no-op in browser) ---
-        SetConfigInt: (_key: LuaValue, _val: LuaValue) => {},
-        SetConfigFloat: (_key: LuaValue, _val: LuaValue) => {},
-        SetConfigString: (_key: LuaValue, _val: LuaValue) => {},
+        // --- Config set ---
+        // Backed by a localStorage-persisted Map<string,string> on the
+        // worker side. Writes also trigger per-key side-effects: the
+        // `snd_vol*` keys push their values into the AudioManager
+        // (channel / master volume) on the main thread.
+        SetConfigInt: (key: LuaValue, val: LuaValue) => {
+            const k = typeof key === 'string' ? key : '';
+            if (!k) return;
+            const n = Number(val ?? 0) | 0;
+            writeConfigStore(k, String(n));
+            applyConfigSideEffect(ctx, k, n);
+        },
+        SetConfigFloat: (key: LuaValue, val: LuaValue) => {
+            const k = typeof key === 'string' ? key : '';
+            if (!k) return;
+            const n = Number(val ?? 0);
+            writeConfigStore(k, String(n));
+            applyConfigSideEffect(ctx, k, n);
+        },
+        SetConfigString: (key: LuaValue, val: LuaValue) => {
+            const k = typeof key === 'string' ? key : '';
+            if (!k) return;
+            writeConfigStore(k, String(val ?? ''));
+        },
 
         // --- Logging ---
         Log: (_section: LuaValue, _level: LuaValue, ...args: LuaValue[]) => {
@@ -2077,12 +2196,20 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         GetViewRange: () => ls.camera.far,
 
         // --- Audio (post to main thread via worker message) ---
-        // Spring.PlaySoundFile(soundFile, volume, posX, posY, posZ, channel, ...)
-        // We forward the path + volume + optional position to the host;
-        // the AudioManager loads the asset (cached) and plays via the
-        // 96-voice pool. Channel/argspec beyond pos is ignored for now.
-        PlaySoundFile: (soundFile: LuaValue, volume: LuaValue,
-                        posX: LuaValue, posY: LuaValue, posZ: LuaValue) => {
+        // Spring.PlaySoundFile(soundFile, volume, posX, posY, posZ,
+        //                      speedX, speedY, speedZ, channel)
+        // Mirrors Recoil's bind (LuaUnsyncedCtrl.cpp:804-863). The
+        // last arg is the mix channel — `"battle"` / `"sfx"`,
+        // `"unitreply"` / `"voice"`, `"userinterface"` / `"ui"`,
+        // `"general"`, or numeric 1/2/3. speedX/Y/Z are ignored
+        // (Web Audio has no Doppler).
+        PlaySoundFile: (...args: LuaValue[]) => {
+            const soundFile = args[0];
+            const volume = args[1];
+            const posX = args[2];
+            const posY = args[3];
+            const posZ = args[4];
+            const channelArg = args[8];  // skip speed{X,Y,Z}
             const path = typeof soundFile === 'string' ? soundFile : '';
             if (!path) return false;
             const vol = typeof volume === 'number' ? volume : 1;
@@ -2091,11 +2218,58 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             const z = typeof posZ === 'number' ? posZ : null;
             const pos = (x !== null && z !== null)
                 ? { x, y, z } : undefined;
-            ctx.playSound?.(path, vol, pos);
+            const ch = (typeof channelArg === 'string' ||
+                        typeof channelArg === 'number')
+                ? channelArg : undefined;
+            ctx.playSound?.(path, vol, pos, ch);
             return true;
         },
-        StopSoundStream: () => {},
-        SetSoundStreamVolume: () => {},
+        PlaySoundStream: (file: LuaValue, volume: LuaValue,
+                          _enqueue: LuaValue) => {
+            const f = typeof file === 'string' ? file : '';
+            if (!f) return;
+            const v = typeof volume === 'number' ? volume : 1;
+            // The enqueue=true semantic (wait for the current track to
+            // end before swapping) isn't honoured yet — we always
+            // interrupt with a short crossfade. Recoil callers
+            // typically use enqueue for playlist chaining, which the
+            // music state machine handles separately.
+            ctx.playMusicStream?.(f, v, _enqueue === true);
+        },
+        StopSoundStream: () => {
+            ctx.stopMusicStream?.(250);  // short fade to avoid click
+        },
+        PauseSoundStream: () => {
+            ctx.pauseMusicStream?.();
+        },
+        SetSoundStreamVolume: (v: LuaValue) => {
+            const vol = typeof v === 'number' ? v : 1;
+            ctx.setMusicStreamVolume?.(Math.max(0, Math.min(1, vol)));
+        },
+        GetSoundStreamTime: () => {
+            const t = ctx.getMusicStreamTime?.();
+            return t ? [t[0], t[1]] : [0, 0];
+        },
+        SetSoundEffectParams: (...args: LuaValue[]) => {
+            const first = args[0];
+            if (typeof first === 'string') {
+                ctx.setSoundEffectParams?.(first);
+            } else if (first && typeof first === 'object') {
+                ctx.setSoundEffectParams?.(first as Record<string, unknown>);
+            }
+        },
+        LoadSoundDef: (_file: LuaValue) => {
+            // Runtime sound-def merge isn't supported yet — the
+            // SoundItem map is loaded once from gamedata/sounds.lua
+            // post-VFS-prefetch. Games that ship additional
+            // sound-def libraries will need this filled in.
+            return false;
+        },
+        PreloadSoundItem: (_name: LuaValue) => {
+            // No-op: AudioManager.loadSound caches on first play and
+            // SoundItem.preload=true items are pre-decoded at ingest.
+            return false;
+        },
 
         // --- Lua message passing ---
         // SendLuaRulesMsg forwards a binary-safe payload to the server's
