@@ -163,6 +163,14 @@ class CEventHandler
 		bool TerraformComplete(const CUnit* unit, const CUnit* build);
 		bool MoveCtrlNotify(const CUnit* unit, int data);
 
+		bool AllowSound(
+			int sourceDefId,
+			int sourceKind,
+			int soundId,
+			int sourceTeam,
+			const float3& position
+		);
+
 		int AllowWeaponTargetCheck(unsigned int attackerID, unsigned int attackerWeaponNum, unsigned int attackerWeaponDefID);
 		bool AllowWeaponTarget(
 			unsigned int attackerID,

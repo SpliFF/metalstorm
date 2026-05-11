@@ -195,6 +195,7 @@
 	SETUP_EVENT(TerraformComplete,        MANAGED_BIT | CONTROL_BIT)
 	SETUP_EVENT(MoveCtrlNotify,           MANAGED_BIT | CONTROL_BIT)
 
+	SETUP_EVENT(AllowSound,                 MANAGED_BIT | CONTROL_BIT)
 	SETUP_EVENT(AllowWeaponTargetCheck,     MANAGED_BIT | CONTROL_BIT)
 	SETUP_EVENT(AllowWeaponTarget,          MANAGED_BIT | CONTROL_BIT)
 	SETUP_EVENT(AllowWeaponInterceptTarget, MANAGED_BIT | CONTROL_BIT)

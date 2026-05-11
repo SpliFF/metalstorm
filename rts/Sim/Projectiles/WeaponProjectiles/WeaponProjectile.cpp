@@ -19,6 +19,7 @@
 #include "Sim/Weapons/WeaponDefHandler.h"
 #include "Server/ProjectileEventCollector.h"
 #include "Server/SoundEventCollector.h"
+#include "System/EventHandler.h"
 #include "System/Matrix44f.h"
 #include "System/SpringMath.h"
 #include "System/creg/DefTypes.h"
@@ -283,19 +284,25 @@ void CWeaponProjectile::Collision(CFeature* feature)
 
 	// Hit sound for terrain/feature impacts. Unit hits go through
 	// Unit::DoDamage which emits the same sound at the damage site.
+	// Synced rules get a veto via eventHandler.AllowSound.
 	if (weaponDef != nullptr && weaponDef->hitSound.NumSounds() > 0) {
 		const bool wet = impactPos.y < 0.0f;
 		const size_t fireCount = weaponDef->fireSound.NumSounds();
 		const size_t hitCount  = weaponDef->hitSound.NumSounds();
 		const size_t pick = (wet && hitCount > 1) ? 1u : 0u;
-		SoundEventData se;
-		se.soundId = static_cast<uint16_t>(fireCount + pick);
-		se.sourceDefId = static_cast<uint16_t>(weaponDef->id);
-		se.sourceKind = 1; // SoundSourceKind_Weapon
-		se.position = impactPos;
-		se.priority = 128;
-		se.team = static_cast<uint8_t>(std::min(255, static_cast<int>(teamID)));
-		soundEvents.Push(se);
+		const int soundId = static_cast<int>(fireCount + pick);
+		const int team = static_cast<int>(teamID);
+		if (eventHandler.AllowSound(weaponDef->id, /*kind=Weapon*/ 1,
+		                            soundId, team, impactPos)) {
+			SoundEventData se;
+			se.soundId = static_cast<uint16_t>(soundId);
+			se.sourceDefId = static_cast<uint16_t>(weaponDef->id);
+			se.sourceKind = 1; // SoundSourceKind_Weapon
+			se.position = impactPos;
+			se.priority = 128;
+			se.team = static_cast<uint8_t>(std::min(255, team));
+			soundEvents.Push(se);
+		}
 	}
 
 	Explode(nullptr, feature, impactPos, impactDir);

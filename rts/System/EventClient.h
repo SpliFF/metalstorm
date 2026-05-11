@@ -225,6 +225,19 @@ class CEventClient
 		virtual bool TerraformComplete(const CUnit* unit, const CUnit* build) { return false; }
 		virtual bool MoveCtrlNotify(const CUnit* unit, int data) { return false; }
 
+		/// Synced gating for sound emissions. Returning false suppresses
+		/// the sound for every client (stealth, jamming). Default true
+		/// keeps Spring's pre-hook behaviour. sourceKind matches
+		/// SoundSourceKind in protocol.fbs: 0=Unit, 1=Weapon, 2=Feature,
+		/// 3=Global.
+		virtual bool AllowSound(
+			int sourceDefId,
+			int sourceKind,
+			int soundId,
+			int sourceTeam,
+			const float3& position
+		) { return true; }
+
 		virtual int AllowWeaponTargetCheck(unsigned int attackerID, unsigned int attackerWeaponNum, unsigned int attackerWeaponDefID) { return -1; }
 		virtual bool AllowWeaponTarget(
 			unsigned int attackerID,

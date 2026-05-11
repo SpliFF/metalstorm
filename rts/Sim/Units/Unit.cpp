@@ -1355,22 +1355,28 @@ void CUnit::DoDamage(
 			// Emit a hit sound (dry vs wet picked by impact y-coordinate).
 			// fireSound is sound_id 0; hitSound entries follow contiguously,
 			// so hitDry = NumSounds(fire) + 0, hitWet = NumSounds(fire) + 1.
+			// Synced rules get a veto via eventHandler.AllowSound.
 			const WeaponDef* wd = weaponDefHandler->GetWeaponDefByID(weaponDefID);
 			if (wd != nullptr && wd->hitSound.NumSounds() > 0) {
 				const bool wet = pos.y < 0.0f;
 				const size_t fireCount = wd->fireSound.NumSounds();
 				const size_t hitCount  = wd->hitSound.NumSounds();
 				const size_t pick = (wet && hitCount > 1) ? 1u : 0u;
-				SoundEventData se;
-				se.soundId = static_cast<uint16_t>(fireCount + pick);
-				se.sourceDefId = static_cast<uint16_t>(wd->id);
-				se.sourceKind = 1; // SoundSourceKind_Weapon
-				se.position = pos;
-				se.volume = 1.0f;
-				se.pitch = 1.0f;
-				se.priority = (health <= 0.0f) ? 192 : 128;
-				se.team = static_cast<uint8_t>(std::min(255, attacker->team));
-				soundEvents.Push(se);
+				const int soundId = static_cast<int>(fireCount + pick);
+				const int team = attacker->team;
+				if (eventHandler.AllowSound(wd->id, /*kind=Weapon*/ 1,
+				                            soundId, team, pos)) {
+					SoundEventData se;
+					se.soundId = static_cast<uint16_t>(soundId);
+					se.sourceDefId = static_cast<uint16_t>(wd->id);
+					se.sourceKind = 1; // SoundSourceKind_Weapon
+					se.position = pos;
+					se.volume = 1.0f;
+					se.pitch = 1.0f;
+					se.priority = (health <= 0.0f) ? 192 : 128;
+					se.team = static_cast<uint8_t>(std::min(255, team));
+					soundEvents.Push(se);
+				}
 			}
 		}
 

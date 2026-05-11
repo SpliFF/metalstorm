@@ -75,6 +75,14 @@ class CSyncedLuaHandle : public CLuaHandle
 		bool TerraformComplete(const CUnit* unit, const CUnit* build) override;
 		bool MoveCtrlNotify(const CUnit* unit, int data) override;
 
+		bool AllowSound(
+			int sourceDefId,
+			int sourceKind,
+			int soundId,
+			int sourceTeam,
+			const float3& position
+		) override;
+
 		int AllowWeaponTargetCheck(unsigned int attackerID, unsigned int attackerWeaponNum, unsigned int attackerWeaponDefID) override;
 		bool AllowWeaponTarget(
 			unsigned int attackerID,

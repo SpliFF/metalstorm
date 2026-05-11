@@ -40,6 +40,17 @@ export interface SoundRequest {
 }
 
 const POOL_SIZE = 96;
+/// When more than this many voices are active we start placing new
+/// low-priority requests on `equalpower` panners instead of `HRTF` to
+/// cut DSP cost. HRTF is ~10× more expensive than equalpower per voice
+/// on a typical desktop; below this threshold the difference is
+/// inaudible against the limiter, above it the budget matters.
+const HRTF_HOT_THRESHOLD = 50;
+/// Priority below which a hot-pool voice falls back to equalpower
+/// panning. Fire/impact events sit at 128+, deaths at 192 — both stay
+/// HRTF even when the pool is full. Select/order chatter at 0 takes
+/// the cheap path.
+const HRTF_FALLBACK_PRIORITY = 100;
 
 /// Camera-height → zoom-factor mapping. The camera lives in the
 /// y∈[minHeight,maxHeight] band defined by RtsCamera (defaults 100
@@ -91,6 +102,13 @@ export class AudioManager {
     /// Driven by setZoomFactor() so zoom-out culls low-importance
     /// chatter (select/order acks) before it even hits the pool.
     private priorityFloor = 0;
+    /// Last listener position pushed via setListenerPosition. Used by
+    /// eviction to break priority ties — at saturation, drop the
+    /// furthest voice first so nearby sounds aren't sacrificed to
+    /// distant ones of the same importance.
+    private listenerX = 0;
+    private listenerY = 0;
+    private listenerZ = 0;
 
     // Music
     private musicElement: HTMLAudioElement | null = null;
@@ -182,6 +200,9 @@ export class AudioManager {
     /** Update the listener position (call each frame with camera position). */
     setListenerPosition(x: number, y: number, z: number,
                         forwardX: number, forwardY: number, forwardZ: number): void {
+        this.listenerX = x;
+        this.listenerY = y;
+        this.listenerZ = z;
         const listener = this.ctx.listener;
         if (listener.positionX) {
             listener.positionX.value = x;
@@ -243,6 +264,16 @@ export class AudioManager {
         source.buffer = req.buffer;
         source.playbackRate.value = req.pitch ?? 1;
         source.connect(voice.panner);
+
+        // Panning-model tier: HRTF gives elevation cues but is ~10×
+        // costlier than equalpower per voice. When the pool is hot and
+        // this request isn't a high-priority hit/death, fall back to
+        // equalpower so the DSP budget stays flat. Switching is free —
+        // PannerNode lets you re-assign the model between play() calls.
+        const activeCount = this.countActiveVoices();
+        const hot = activeCount > HRTF_HOT_THRESHOLD;
+        const wantsHrtf = !hot || priority >= HRTF_FALLBACK_PRIORITY;
+        voice.panner.panningModel = wantsHrtf ? 'HRTF' : 'equalpower';
 
         const now = this.ctx.currentTime;
         const vx = req.vx ?? 0;
@@ -322,31 +353,52 @@ export class AudioManager {
         this.masterGain.gain.value = Math.max(0, Math.min(1, volume));
     }
 
+    private countActiveVoices(): number {
+        let n = 0;
+        for (const v of this.voices) if (v.active) n++;
+        return n;
+    }
+
     private acquireVoice(priority: number): Voice | null {
         // Find an inactive voice
         for (const voice of this.voices) {
             if (!voice.active) return voice;
         }
 
-        // Evict the lowest-priority voice
-        let lowestIdx = 0;
-        let lowestPriority = this.voices[0].priority;
+        // Evict by priority; break ties by distance to the listener so
+        // a distant low-priority voice drops before a nearby one of the
+        // same priority (PLAN-sound.md §Phase 2 item 10).
+        let victimIdx = 0;
+        let victimPriority = this.voices[0].priority;
+        let victimDist = this.distanceFromListener(this.voices[0]);
         for (let i = 1; i < this.voices.length; i++) {
-            if (this.voices[i].priority < lowestPriority) {
-                lowestPriority = this.voices[i].priority;
-                lowestIdx = i;
+            const v = this.voices[i];
+            const better =
+                v.priority < victimPriority ||
+                (v.priority === victimPriority && this.distanceFromListener(v) > victimDist);
+            if (better) {
+                victimPriority = v.priority;
+                victimDist = this.distanceFromListener(v);
+                victimIdx = i;
             }
         }
 
         // Only evict if our priority is higher
-        if (priority < lowestPriority) return null;
+        if (priority < victimPriority) return null;
 
-        const voice = this.voices[lowestIdx];
+        const voice = this.voices[victimIdx];
         if (voice.source) {
             try { voice.source.stop(); } catch { /* ok */ }
         }
         voice.active = false;
         return voice;
+    }
+
+    private distanceFromListener(voice: Voice): number {
+        const dx = voice.panner.positionX.value - this.listenerX;
+        const dy = voice.panner.positionY.value - this.listenerY;
+        const dz = voice.panner.positionZ.value - this.listenerZ;
+        return dx * dx + dy * dy + dz * dz; // squared — ordering is identical
     }
 
     dispose(): void {

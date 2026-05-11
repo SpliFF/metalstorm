@@ -412,6 +412,19 @@ int CEventHandler::AllowWeaponTargetCheck(unsigned int attackerID, unsigned int 
 }
 
 
+bool CEventHandler::AllowSound(
+	int sourceDefId,
+	int sourceKind,
+	int soundId,
+	int sourceTeam,
+	const float3& position
+) {
+	ZoneScoped;
+	return ControlIterateDefTrue(listAllowSound, &CEventClient::AllowSound,
+		sourceDefId, sourceKind, soundId, sourceTeam, position);
+}
+
+
 bool CEventHandler::AllowWeaponTarget(
 	unsigned int attackerID,
 	unsigned int targetID,

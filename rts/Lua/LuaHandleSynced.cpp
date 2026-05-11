@@ -1743,6 +1743,55 @@ int CSyncedLuaHandle::AllowWeaponTargetCheck(unsigned int attackerID, unsigned i
 }
 
 
+/*** Synced gating for sound emissions.
+ *
+ * Returning false suppresses the sound for every client (stealth,
+ * jamming, etc.). Default behaviour with no Lua handler is "true"
+ * so sounds continue to fall through the engine's viewport/LOS
+ * filter unchanged.
+ *
+ * @function AllowSound
+ * @number sourceDefId    unit, weapon, or feature def id
+ * @number sourceKind     0=Unit, 1=Weapon, 2=Feature, 3=Global
+ * @number soundId        index into the source def's `sounds` array
+ * @number sourceTeam     emitter team (255 = unaffiliated / global)
+ * @number x
+ * @number y
+ * @number z
+ * @treturn bool allowed
+ */
+bool CSyncedLuaHandle::AllowSound(
+	int sourceDefId,
+	int sourceKind,
+	int soundId,
+	int sourceTeam,
+	const float3& position
+) {
+	RECOIL_DETAILED_TRACY_ZONE;
+	LUA_CALL_IN_CHECK(L, true);
+	luaL_checkstack(L, 8 + 2, __func__);
+
+	static const LuaHashString cmdStr(__func__);
+	if (!cmdStr.GetGlobalFunc(L))
+		return true; // not defined → default allow
+
+	lua_pushnumber(L, sourceDefId);
+	lua_pushnumber(L, sourceKind);
+	lua_pushnumber(L, soundId);
+	lua_pushnumber(L, sourceTeam);
+	lua_pushnumber(L, position.x);
+	lua_pushnumber(L, position.y);
+	lua_pushnumber(L, position.z);
+
+	if (!RunCallIn(L, cmdStr, 7, 1))
+		return true;
+
+	const bool allow = luaL_optboolean(L, -1, true);
+	lua_pop(L, 1);
+	return allow;
+}
+
+
 /*** Controls blocking of a specific target from being considered during a weapon's periodic auto-targeting sweep.
  *
  * @function AllowWeaponTarget
