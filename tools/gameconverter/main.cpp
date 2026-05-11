@@ -70,13 +70,16 @@
 #define LOG_SECTION "game-convert"
 
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -686,6 +689,306 @@ int ConvertAudio(const fs::path& gameDir, bool force) {
 }
 
 // ---------------------------------------------------------------
+// Step 3b: TDF → Lua conversion
+// ---------------------------------------------------------------
+//
+// Legacy Total-Annihilation-style `[NAME] { key=value; }` weapon
+// defs (zk/weapons/*.tdf) used to be parsed at engine start via
+// springcontent's parse_tdf.lua + weapondefs.lua loader. We don't
+// ship that springcontent layer, so the .tdf files were silently
+// ignored. This pass converts each .tdf to a sibling .lua that
+// returns a single-key table — the same shape parse_tdf.lua would
+// have produced in memory — so a thin engine-side weapondefs loader
+// can `VFS.Include` the .lua files directly. Source .tdf files are
+// left in place for round-trip auditing.
+
+namespace tdf {
+
+struct Section {
+    std::string name;  // lowercased
+    // Insertion-ordered key/value pairs. Keys are lowercased; values
+    // are kept as raw strings (the engine-side weapondef loader
+    // coerces to int/float/bool as needed).
+    std::vector<std::pair<std::string, std::string>> values;
+    std::vector<Section> subs;
+};
+
+/// Strip leading/trailing ASCII whitespace.
+static std::string Trim(const std::string& s) {
+    size_t a = 0, b = s.size();
+    while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+    return s.substr(a, b - a);
+}
+
+/// Skip whitespace and `// ...` / `/* ... */` comments at `pos`.
+static void SkipWhitespaceAndComments(const std::string& src, size_t& pos) {
+    while (pos < src.size()) {
+        char c = src[pos];
+        if (std::isspace(static_cast<unsigned char>(c))) { ++pos; continue; }
+        if (c == '/' && pos + 1 < src.size()) {
+            if (src[pos + 1] == '/') {
+                pos += 2;
+                while (pos < src.size() && src[pos] != '\n') ++pos;
+                continue;
+            }
+            if (src[pos + 1] == '*') {
+                pos += 2;
+                while (pos + 1 < src.size() &&
+                       !(src[pos] == '*' && src[pos + 1] == '/')) ++pos;
+                if (pos + 1 < src.size()) pos += 2;
+                continue;
+            }
+        }
+        break;
+    }
+}
+
+/// Parse a single section assuming `[` has not yet been consumed.
+/// On error, sets `err` and returns false.
+static bool ParseSection(const std::string& src, size_t& pos,
+                         Section& out, std::string& err) {
+    SkipWhitespaceAndComments(src, pos);
+    if (pos >= src.size() || src[pos] != '[') {
+        err = "expected '['";
+        return false;
+    }
+    ++pos; // consume [
+    size_t nameStart = pos;
+    while (pos < src.size() && src[pos] != ']') ++pos;
+    if (pos >= src.size()) { err = "unterminated section header"; return false; }
+    std::string name = Trim(src.substr(nameStart, pos - nameStart));
+    ++pos; // consume ]
+    out.name = ToLower(name);
+
+    SkipWhitespaceAndComments(src, pos);
+    if (pos >= src.size() || src[pos] != '{') {
+        err = "expected '{' after section '" + out.name + "'";
+        return false;
+    }
+    ++pos; // consume {
+
+    while (true) {
+        SkipWhitespaceAndComments(src, pos);
+        if (pos >= src.size()) {
+            err = "unterminated section '" + out.name + "'";
+            return false;
+        }
+        if (src[pos] == '}') { ++pos; return true; }
+        if (src[pos] == '[') {
+            Section sub;
+            if (!ParseSection(src, pos, sub, err)) return false;
+            out.subs.push_back(std::move(sub));
+            continue;
+        }
+        // key=value; — key is anything up to '='. value is anything up to ';'.
+        size_t keyStart = pos;
+        while (pos < src.size() && src[pos] != '=' &&
+               src[pos] != ';' && src[pos] != '}' && src[pos] != '\n') ++pos;
+        if (pos >= src.size() || src[pos] != '=') {
+            err = "expected '=' in section '" + out.name + "'";
+            return false;
+        }
+        std::string key = ToLower(Trim(src.substr(keyStart, pos - keyStart)));
+        ++pos; // consume =
+        size_t valStart = pos;
+        while (pos < src.size() && src[pos] != ';' && src[pos] != '\n') ++pos;
+        std::string value = Trim(src.substr(valStart, pos - valStart));
+        if (pos < src.size() && src[pos] == ';') ++pos;
+        if (!key.empty()) {
+            out.values.emplace_back(std::move(key), std::move(value));
+        }
+    }
+}
+
+/// Heuristic: does `s` parse as a finite Lua-compatible number whose
+/// canonical form round-trips? Used to decide whether to emit `42` or
+/// `"42"` in the .lua output. Strings that look numeric-ish but
+/// contain trailing garbage (e.g. `"480x"`) fall back to string.
+static bool LooksLikeNumber(const std::string& s) {
+    if (s.empty()) return false;
+    char* end = nullptr;
+    errno = 0;
+    (void) std::strtod(s.c_str(), &end);
+    if (errno != 0) return false;
+    if (end != s.c_str() + s.size()) return false;
+    return true;
+}
+
+/// Lua string escape for double-quoted literals. Covers the cases
+/// that show up in real TDFs: backslashes, double quotes, control
+/// characters.
+static std::string EscapeLuaString(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 2);
+    for (char c : s) {
+        switch (c) {
+            case '\\': out += "\\\\"; break;
+            case '"':  out += "\\\""; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\%d",
+                                  static_cast<unsigned char>(c));
+                    out += buf;
+                } else {
+                    out += c;
+                }
+        }
+    }
+    return out;
+}
+
+/// Is `key` a valid Lua identifier? Determines whether to emit `key =`
+/// vs `["key"] =`.
+static bool IsIdentifier(const std::string& s) {
+    if (s.empty()) return false;
+    char c0 = s[0];
+    if (!(std::isalpha(static_cast<unsigned char>(c0)) || c0 == '_')) return false;
+    for (char c : s) {
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) return false;
+    }
+    return true;
+}
+
+/// Emit a Section's body (the part between `{` and `}` in Lua).
+static void EmitBody(const Section& s, std::string& out, int indent) {
+    const std::string pad(indent, ' ');
+    for (const auto& [k, v] : s.values) {
+        out += pad;
+        if (IsIdentifier(k)) {
+            out += k;
+        } else {
+            out += "[\"" + EscapeLuaString(k) + "\"]";
+        }
+        out += " = ";
+        if (LooksLikeNumber(v)) {
+            out += v;
+        } else {
+            out += "\"" + EscapeLuaString(v) + "\"";
+        }
+        out += ",\n";
+    }
+    for (const auto& sub : s.subs) {
+        out += pad;
+        if (IsIdentifier(sub.name)) {
+            out += sub.name;
+        } else {
+            out += "[\"" + EscapeLuaString(sub.name) + "\"]";
+        }
+        out += " = {\n";
+        EmitBody(sub, out, indent + 2);
+        out += pad + "},\n";
+    }
+}
+
+/// Render a parsed root section to a complete .lua file body.
+static std::string EmitLua(const Section& root) {
+    std::string out;
+    out += "-- generated by gameconverter from the sibling .tdf file. do not edit.\n";
+    out += "return {\n";
+    out += "  " + (IsIdentifier(root.name)
+                    ? root.name
+                    : "[\"" + EscapeLuaString(root.name) + "\"]")
+        + " = {\n";
+    EmitBody(root, out, 4);
+    out += "  },\n";
+    out += "}\n";
+    return out;
+}
+
+} // namespace tdf
+
+/// Convert one .tdf file to a sibling .lua. Returns true on success
+/// (including up-to-date skip). Source .tdf is left in place.
+static bool ConvertTdfFile(const fs::path& srcPath, bool force,
+                           bool& wasUpToDate) {
+    fs::path dstPath = srcPath;
+    dstPath.replace_extension(".lua");
+
+    std::error_code ec;
+    if (!force && fs::exists(dstPath, ec)) {
+        const auto srcT = fs::last_write_time(srcPath, ec);
+        const auto dstT = fs::last_write_time(dstPath, ec);
+        if (!ec && dstT >= srcT) {
+            wasUpToDate = true;
+            return true;
+        }
+        ec.clear();
+    }
+
+    std::ifstream f(srcPath, std::ios::binary);
+    if (!f) {
+        SLOG(SPRING_LOG_WARNING, "tdf: cannot read %s",
+             srcPath.string().c_str());
+        return false;
+    }
+    std::stringstream buf;
+    buf << f.rdbuf();
+    const std::string src = buf.str();
+
+    size_t pos = 0;
+    tdf::Section root;
+    std::string err;
+    tdf::SkipWhitespaceAndComments(src, pos);
+    if (pos >= src.size()) {
+        SLOG(SPRING_LOG_WARNING, "tdf: empty file %s",
+             srcPath.string().c_str());
+        return false;
+    }
+    if (!tdf::ParseSection(src, pos, root, err)) {
+        SLOG(SPRING_LOG_WARNING, "tdf: parse failed in %s: %s",
+             srcPath.string().c_str(), err.c_str());
+        return false;
+    }
+
+    const std::string body = tdf::EmitLua(root);
+    if (!WriteFileText(dstPath, body)) {
+        SLOG(SPRING_LOG_WARNING, "tdf: cannot write %s",
+             dstPath.string().c_str());
+        return false;
+    }
+    return true;
+}
+
+/// Walk `<gameDir>/weapons/**/*.tdf` and emit `*.lua` next to each.
+/// Source .tdf files are preserved (caller-visible audit trail). Any
+/// other location with TDFs (e.g. `features/`, `units/` in old TA
+/// archives) is intentionally not scanned — those formats predate
+/// what ZK ships and aren't worth supporting until a game needs them.
+int ConvertTdfs(const fs::path& gameDir, bool force) {
+    const fs::path weaponsDir = gameDir / "weapons";
+    std::error_code ec;
+    if (!fs::is_directory(weaponsDir, ec)) return 0;
+
+    int converted = 0, uptodate = 0, failed = 0;
+    for (const auto& entry : fs::recursive_directory_iterator(weaponsDir, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec)) continue;
+        const std::string ext = ToLower(entry.path().extension().string());
+        if (ext != ".tdf") continue;
+
+        bool wasUpToDate = false;
+        if (ConvertTdfFile(entry.path(), force, wasUpToDate)) {
+            if (wasUpToDate) uptodate++; else converted++;
+        } else {
+            failed++;
+        }
+    }
+
+    if (converted + uptodate + failed > 0) {
+        SLOG(SPRING_LOG_NOTICE,
+             "%s tdf: %d converted, %d up-to-date, %d failed",
+             gameDir.filename().string().c_str(),
+             converted, uptodate, failed);
+    }
+    return failed;
+}
+
+// ---------------------------------------------------------------
 // Step 4: model + texture conversion
 // ---------------------------------------------------------------
 
@@ -1139,6 +1442,13 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
                 needsRebuild = false;
             }
         }
+        // A missing .config.json (e.g. user deleted it, or an interrupted
+        // earlier run) is reason enough to rebuild even when the .glb
+        // mtime check says we're current — the client manifest entry will
+        // otherwise point at a phantom file and produce a 404.
+        if (!needsRebuild && !fs::exists(jsonConfigPath)) {
+            needsRebuild = true;
+        }
         if (!needsRebuild && fs::exists(jsonConfigPath)) {
             std::ifstream in(jsonConfigPath, std::ios::binary);
             if (in) {
@@ -1397,6 +1707,8 @@ void PrintUsage(const char* argv0) {
         "                      WebM. Useful when audioconverter is\n"
         "                      unavailable (ffmpeg not installed) or\n"
         "                      the audio outputs are already cached.\n"
+        "  --skip-tdf          Do not convert legacy weapons/*.tdf to\n"
+        "                      sibling .lua files.\n"
         "  --log-server <url>  Send logs to a springlog server.\n"
         "  --log-level <level> Set minimum log level (debug/info/\n"
         "                      notice/warning/error).\n"
@@ -1421,6 +1733,7 @@ int main(int argc, char* argv[]) {
     bool skipAI = false;
     bool skipProjectileTextures = false;
     bool skipAudio = false;
+    bool skipTdf = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -1429,6 +1742,7 @@ int main(int argc, char* argv[]) {
         else if (arg == "--skip-ai") skipAI = true;
         else if (arg == "--skip-projectile-textures") skipProjectileTextures = true;
         else if (arg == "--skip-audio") skipAudio = true;
+        else if (arg == "--skip-tdf") skipTdf = true;
         else if (arg == "--data-dir" && i + 1 < argc) dataDir = argv[++i];
         else if (arg == "--modelimporter" && i + 1 < argc) modelImporterArg = argv[++i];
         else if (arg == "--log-server" && i + 1 < argc) logServerUrl = argv[++i];
@@ -1499,6 +1813,10 @@ int main(int argc, char* argv[]) {
     int failed = 0;
     ConvertGameConfig(gameDir, force);
     ConvertLobbyConfig(gameDir, force);
+
+    if (!skipTdf) {
+        failed += ConvertTdfs(gameDir, force);
+    }
 
     if (!skipModels) {
         failed += ConvertModels(gameDir, gameId, modelImporterBin, force);
