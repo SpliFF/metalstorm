@@ -1591,7 +1591,7 @@ const FIRE_EFFECT_BY_ARCHETYPE: Record<WeaponArchetype, string | null> = {
     flame:         'muzzleflash_flame',
     lightninggun:  'muzzleflash_lightninggun',
     largelaser:    null,
-    lightcannon:   'muzzleflash_default',
+    lightcannon:   null,
     default:       null,
 };
 
@@ -1642,22 +1642,14 @@ function impactContextFlags(impactKind: number, posY: number): number {
 /// visual).
 function effectForFire(def: WeaponDefInfo | undefined): string | null {
     if (def?.cegTag) return def.cegTag;
-
+    // Archetype fallback covers the five hand-ported ZK signatures.
+    // Weapons that match no archetype (`arch === 'default'`) and
+    // have no streamed cegTag render no muzzle visual — the CEG
+    // pipeline doesn't synthesise placeholders any more (Phase 8
+    // cleanup of PLAN-ceg.md). In practice every ZK weapon ships a
+    // cegTag; only unauthored test weapons would hit this null path.
     const arch = classifyWeaponArchetype(def);
-    const archEffect = FIRE_EFFECT_BY_ARCHETYPE[arch];
-    if (archEffect !== null || arch !== 'default') return archEffect;
-    switch (def?.visualType) {
-        case VisualType.Laser:
-        case VisualType.BeamLaser:
-        case VisualType.Lightning:
-            return null;
-        case VisualType.Missile:
-            return 'muzzleflash_missile';
-        case VisualType.Cannon:
-        case VisualType.Flame:
-        default:
-            return 'muzzleflash_default';
-    }
+    return FIRE_EFFECT_BY_ARCHETYPE[arch];
 }
 
 /// Pick the impact CEG name from impact kind + weapon archetype.
@@ -1679,20 +1671,14 @@ function effectForImpact(
     // Falls through to archetype fallback when unset.
     if (def?.explosionGenerator) return def.explosionGenerator;
 
+    // Archetype fallback covers the five hand-ported ZK impact
+    // signatures. Weapons that match no archetype and have no
+    // streamed explosionGenerator render no impact visual — the CEG
+    // pipeline no longer synthesises placeholder impacts (Phase 8
+    // cleanup of PLAN-ceg.md). The ImpactKind switch the old code
+    // used to seed impact_dirt / impact_explosion is gone with it.
     const arch = classifyWeaponArchetype(def);
-    const archEffect = IMPACT_EFFECT_BY_ARCHETYPE[arch];
-    if (archEffect !== null) return archEffect;
-
-    switch (kind) {
-        case ImpactKind.Terrain:
-        case ImpactKind.Feature:
-            return 'impact_dirt';
-        case ImpactKind.SelfDetonate:
-        case ImpactKind.Intercepted:
-        case ImpactKind.Other:
-        default:
-            return 'impact_explosion';
-    }
+    return IMPACT_EFFECT_BY_ARCHETYPE[arch];
 }
 
 /// Build a unit-length direction. Prefers `vel` when non-zero; falls

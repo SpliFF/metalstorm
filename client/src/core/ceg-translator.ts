@@ -97,27 +97,26 @@ function translateSpawn(s: CegSpawnInfo): ParticleSpawn | SubCegSpawn | null {
 
         // Sub-CEG dispatcher — `delayspawner` alias. Fires the named
         // child CEG after a (possibly random, possibly damage-scaled)
-        // frame delay. This is the canonical multi-level CEG idiom
-        // (nuke → mushroom → smokejets); without it any CEG that
-        // delegates its visuals through one renders nothing.
+        // frame delay. The canonical multi-level CEG idiom (nuke →
+        // mushroom → smokejets) routes through here.
         case 'CExpGenSpawner':
             return translateExpGenSpawner(s, props);
 
-        // Sphere-distributed sub-CEG. Differs from the particle
-        // CSpherePartSpawner (which emits CSpherePartProjectile
-        // directly with no `explosiongenerator` — see Phase 4) by the
-        // presence of a child tag. When that tag is absent the entry
-        // is left for Phase 4's specialised sphere-particle pool.
+        // Sphere-distributed sub-CEG. Translator handles the case
+        // where an `explosiongenerator` property is present (sub-CEG
+        // chained over a sphere). The variant without one — a self-
+        // contained `CSpherePartProjectile` cluster — falls through
+        // to the projectile-class translator below.
         case 'CSpherePartSpawner':
             return translateSpherePartSpawner(s, props);
 
-        // ── Phase 4 workhorse projectile spawners ─────────────────
-        // These render as billboards in the existing flare/spark/
-        // smoke pools (no new shader pipelines yet — plan defers
-        // dedicated tracer/wake/bubble shaders until a real CEG
-        // demands them). Each class maps its native property set
-        // onto ParticleSpawn fields so the visual signature still
-        // reads even without a bespoke pool.
+        // ── Workhorse projectile spawners ─────────────────────────
+        // Each class translates onto the existing flare/spark/smoke
+        // pools with parameters mapped from its native properties.
+        // Dedicated shader pipelines (stretched tracer beams,
+        // ground-aligned wake decals) can replace these per-class
+        // billboards if a future visual audit demands the extra
+        // fidelity.
 
         case 'CFireProjectile':
             return translateFireProjectile(s, props);
