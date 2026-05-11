@@ -77,6 +77,12 @@ import { translateCegDef } from './ceg-translator.js';
 /// importing the actual sim constant — visual-only.
 const DEFAULT_GRAVITY = 0;
 
+/// Spring sim tick rate, used to convert SubCegSpawn `delayFrames`
+/// → wall-clock seconds. Mirrored from `SIM_HZ` in ceg-translator.ts
+/// (kept here so the runtime doesn't have to import a translator
+/// constant just to compute a delay).
+const SIM_HZ_RUNTIME = 30;
+
 /// Shorthand colour 4-tuple. Components in [0,1]; alpha is the
 /// initial particle alpha at age 0 and fades linearly to 0 at
 /// `lifetime`. RGB stays constant for the particle's lifetime
@@ -95,8 +101,17 @@ export interface ParticleSpawn {
     /// the runtime knows about — unknown classes are silently
     /// skipped so adding new effects can't break the render loop.
     class: string;
-    /// Number of particles to allocate per spawn() call.
+    /// Number of particles to allocate per spawn() call. Static; the
+    /// translator clamps to MAX_PARTICLES_PER_SPAWN. For damage-scaled
+    /// counts (`numparticles = "i1"`) set `countExpr` instead — the
+    /// runtime evaluates it per spawn() and ignores `count`.
     count: number;
+    /// Optional override: per-spawn-call particle count. When present
+    /// the runtime uses `floor(countExpr(ctx))` instead of `count`.
+    /// Translator sets this for properties carrying `i<n>` / `d<n>` /
+    /// `r<n>` tokens; otherwise it stays unset and the static count
+    /// path runs (one less allocation per spawn).
+    countExpr?: Expr;
     /// Lifetime range in seconds; per-particle is uniform random.
     lifetimeMin: number;
     lifetimeMax: number;
@@ -121,35 +136,45 @@ export interface ParticleSpawn {
     rotationSpeedMax: number;
 }
 
+/// Scalar evaluator for a Spring CEG property (Phase 2). The closure
+/// captures any random-magnitude or damage-scaled terms from the
+/// source string; the call site supplies the parent explosion's
+/// damage. RNG is `Math.random` baked in. Constants collapse to a
+/// trivially-cheap `() => N` closure so call sites don't have to
+/// special-case them. See `parseExpr` in ceg-translator.ts.
+export type Expr = (ctx: ExprContext) => number;
+export interface ExprContext {
+    /// Parent explosion damage in HP. Plumbed through the SubCegSpawn
+    /// chain so `i1`/`d5` tokens at leaf CEGs scale from the original
+    /// weapon's damage rather than the immediate parent's.
+    damage: number;
+}
+
 /// Sub-CEG spawn — a deferred dispatch back into `spawn()` against a
 /// named child CEG. Translates Spring's `CExpGenSpawner` ("delayspawner"
 /// — fires a sub-effect after a frame delay) and is also how
 /// `CSpherePartSpawner` would chain a sphere-distributed child if it
 /// carried an `explosiongenerator` property (rare but valid).
 ///
-/// The runtime enqueues `count` `PendingSpawn` entries on each parent
-/// spawn() call, then fires them through `spawn()` again when their
-/// delay elapses. Properties that legitimately vary per particle
-/// (delay, posOffset) are stored as min/max numeric ranges in Phase 1
-/// — Phase 2 will replace them with `Expr` evaluators that handle the
-/// full mini-language (`i1`, `r10`, `d5`, compounds).
+/// The runtime evaluates each Expr field once per dispatch so random
+/// terms produce staggered fans naturally (e.g. `delay = "r60"` →
+/// each pending entry samples a fresh delay).
 export interface SubCegSpawn {
     kind: 'subceg';
-    /// How many child spawns the parent emits per call. Multiplied by
-    /// the streamed `CegSpawnInfo.count` at translate time so the
-    /// runtime sees one final count.
-    count: number;
+    /// How many child spawns the parent emits per call. Evaluated
+    /// once per parent fire — supports `count = "i1"` damage scaling
+    /// and `r3` random magnitudes from the mini-language.
+    countExpr: Expr;
     /// Tag of the child CEG. Server-side `CegLoader` strips the
     /// `custom:` prefix; translator lowercases for case-stable lookup.
     targetTag: string;
-    /// Delay range in wall-clock seconds — uniform random per
-    /// dispatch. Both zero = fire immediately on the same tick.
-    delayMinS: number;
-    delayMaxS: number;
+    /// Delay in sim frames. Evaluated once per pending dispatch;
+    /// converted to wall-clock seconds at queue time.
+    delayFramesExpr: Expr;
     /// Position offset (in elmos) relative to the parent spawn point.
-    /// Applied after the optional sphere distribution. Most CEGs use
-    /// `(0, h, 0)` to lift the sub-effect above ground.
-    posOffset: [number, number, number];
+    /// Each component is its own Expr so `pos = "0, 24 i8, 0"` works
+    /// out of the box. Evaluated once per pending dispatch.
+    posOffsetExpr: [Expr, Expr, Expr];
     /// When true, the child inherits the parent's spawn direction
     /// (Spring's `dir = "dir"` keyword). When false, child fires with
     /// world up `(0, 1, 0)` — matching the behaviour of impact CEGs
@@ -425,6 +450,7 @@ export class CegRuntime {
         }
 
         const nowMs = performance.now();
+        const ctx: ExprContext = { damage };
         for (const sp of def.spawns) {
             if (sp.kind === 'subceg') {
                 this.queueSubCeg(sp, x, y, z, dx, dy, dz, damage, depth, nowMs);
@@ -432,7 +458,17 @@ export class CegRuntime {
             }
             const cls = this.classes.get(sp.class);
             if (!cls) continue;
-            for (let i = 0; i < sp.count; i++) {
+            // Particle count is normally a static field; only resolve
+            // through the Expr path when the translator opted in.
+            let n = sp.count;
+            if (sp.countExpr) {
+                n = Math.max(0, Math.floor(sp.countExpr(ctx)));
+                // Clamp against the same per-spawn ceiling the
+                // translator uses for static counts so a damage-
+                // scaled spawn can't dwarf the pool either.
+                if (n > sp.count * 4) n = sp.count * 4;
+            }
+            for (let i = 0; i < n; i++) {
                 const slot = allocateSlot(cls);
                 writeParticle(cls, slot, sp, x, y, z, dx, dy, dz);
             }
@@ -456,7 +492,14 @@ export class CegRuntime {
             // cost rather than enqueueing dead entries.
             return;
         }
-        for (let i = 0; i < sp.count; i++) {
+        // Evaluate countExpr once per parent fire — its result is
+        // shared across this dispatch's children. Clamp negative
+        // results to 0 and absurd ones to 64 (sane upper bound; the
+        // queue cap is the real backstop).
+        const ctx: ExprContext = { damage };
+        const rawCount = sp.countExpr(ctx);
+        const count = Math.max(0, Math.min(64, Math.floor(rawCount)));
+        for (let i = 0; i < count; i++) {
             if (this.pending.length >= MAX_PENDING_SPAWNS) {
                 if (!this.warnedOverflow) {
                     this.warnedOverflow = true;
@@ -465,17 +508,20 @@ export class CegRuntime {
                 }
                 return;
             }
-            // Compute the world position. For sphere distribution,
-            // pick a random unit vector then push the spawn out along
-            // it by `radius` elmos. Math.random() pairs sampled in
-            // (x,y,z) with rejection would be exact, but a normalised
-            // gaussian-like sample is fast and visually equivalent
-            // for the small counts (≤ 30) sub-spawners typically use.
-            let ox = sp.posOffset[0];
-            let oy = sp.posOffset[1];
-            let oz = sp.posOffset[2];
+            // Evaluate position offset Exprs per pending dispatch so
+            // random-magnitude terms (`pos = "~3, 0, ~3"`) produce a
+            // spatially-spread fan rather than a tight cluster.
+            let ox = sp.posOffsetExpr[0](ctx);
+            let oy = sp.posOffsetExpr[1](ctx);
+            let oz = sp.posOffsetExpr[2](ctx);
             let sdx = dx, sdy = dy, sdz = dz;
             if (sp.distribution === 'sphere' && sp.radius > 0) {
+                // Pick a random unit vector then push the spawn out
+                // along it by `radius` elmos. Math.random() pairs
+                // sampled in (x,y,z) with rejection would be exact,
+                // but a normalised gaussian-like sample is fast and
+                // visually equivalent at the small counts (≤ 30)
+                // sub-spawners typically use.
                 const ux = Math.random() * 2 - 1;
                 const uy = Math.random() * 2 - 1;
                 const uz = Math.random() * 2 - 1;
@@ -492,9 +538,11 @@ export class CegRuntime {
             } else if (!sp.dirInherit) {
                 sdx = 0; sdy = 1; sdz = 0;
             }
-            const delayS = sp.delayMaxS > sp.delayMinS
-                ? sp.delayMinS + Math.random() * (sp.delayMaxS - sp.delayMinS)
-                : sp.delayMinS;
+            // Delay is authored in sim frames. Clamp to [0, 6s] so a
+            // malformed expression can't queue spawns hours in the
+            // future (the queue would still fire them eventually).
+            const delayFrames = Math.max(0, sp.delayFramesExpr(ctx));
+            const delayS = Math.min(delayFrames / SIM_HZ_RUNTIME, 6);
             this.pending.push({
                 effectName: sp.targetTag,
                 px: px + ox, py: py + oy, pz: pz + oz,

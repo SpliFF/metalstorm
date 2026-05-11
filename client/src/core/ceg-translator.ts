@@ -32,7 +32,7 @@
  */
 
 import type { CegDefInfo, CegSpawnInfo, CegPropertyInfo } from './connection.js';
-import type { EffectDef, ParticleSpawn, SubCegSpawn } from './ceg-runtime.js';
+import type { EffectDef, ParticleSpawn, SubCegSpawn, Expr } from './ceg-runtime.js';
 
 /// Spring's sim runs at 30 Hz; CEG `particlelife` and `ttl` are
 /// in sim frames, `particlespeed` is elmos/frame. Convert at
@@ -318,23 +318,8 @@ function buildSubCegSpawn(
     s: CegSpawnInfo, props: PropMap, targetTag: string,
     distribution: 'point' | 'sphere',
 ): SubCegSpawn {
-    // Spring authors `delay` in sim frames. The string may be a bare
-    // number, an `r<n>` random range (0..n), or `n1 r n2` style
-    // compound that Phase 2 will fully evaluate. We approximate with
-    // a [0, parsed-as-max] window when the string starts with `r`,
-    // and a [n, n] window otherwise — gives staggered fans for random
-    // delays without needing the full expression evaluator.
-    const delayRaw = props.getString('delay', '0');
-    const delayFrames = parseLuaNumber(delayRaw, 0);
-    const isRandom = delayRaw.trim().startsWith('r')
-                   || delayRaw.trim().startsWith('R')
-                   || delayRaw.trim().startsWith('~');
-    const delayMinFrames = isRandom ? 0 : delayFrames;
-    const delayMaxFrames = delayFrames;
-    const delayMinS = clamp(delayMinFrames / SIM_HZ, 0, 6);
-    const delayMaxS = clamp(delayMaxFrames / SIM_HZ, delayMinS, 6);
-
-    const posOffset = props.getVec3('pos', [0, 0, 0]);
+    const delayFramesExpr = props.getExpr('delay', constExpr(0));
+    const posOffsetExpr = props.getVec3Expr('pos', 0, 0, 0);
 
     // `dir = "dir"` (Spring's keyword for "inherit parent direction")
     // is the dominant author pattern. Numeric triples are rare and
@@ -345,17 +330,19 @@ function buildSubCegSpawn(
 
     const radius = clamp(props.getFloat('radius', 0), 0, 200);
 
+    // Outer count multiplies the SubCegSpawn's own dispatch count.
+    // The streamed CegSpawnInfo.count is the "how many copies of this
+    // spawn entry" multiplier; CEG authors compose it with the inner
+    // expression by writing `count = N` at the spawn level. Wrap as
+    // a const Expr so the runtime always evaluates through one path.
+    const countExpr = constExpr(clamp(s.count, 1, 32));
+
     return {
         kind: 'subceg',
-        // `count` on the outer spawn multiplies by what each Pending
-        // dispatch's own child does. Cap at 32 per parent spawn so a
-        // misauthored `count = 1000` can't blow through the queue cap
-        // in a single impact.
-        count: clamp(s.count, 1, 32),
+        countExpr,
         targetTag,
-        delayMinS,
-        delayMaxS,
-        posOffset,
+        delayFramesExpr,
+        posOffsetExpr,
         dirInherit,
         distribution,
         radius,
@@ -428,6 +415,158 @@ class PropMap {
         if (nums.length < 3) return def;
         return [nums[0], nums[1], nums[2]];
     }
+    /// Parse the property as a Spring CEG mini-language scalar
+    /// expression (Phase 2). Returns the `def` Expr when the key is
+    /// missing. Bare numbers, `i<n>` (damage-scaled), `r<n>` (random
+    /// 0..n), `~<n>` (signed-random ±n), `d<n>` (damage-linear), and
+    /// compound forms ("0 i1", "24 r4 i2") all parse here.
+    getExpr(key: string, def: Expr): Expr {
+        const v = this.map.get(key);
+        if (v === undefined) return def;
+        return parseExpr(v) ?? def;
+    }
+    /// Parse three scalar expressions from a vec3 property. Each
+    /// component is independently expression-typed so `pos = "0, 24 i8, 0"`
+    /// works component-wise. The `[[…]]` Lua long-string wrapper, if
+    /// present, is stripped before splitting.
+    getVec3Expr(key: string, dx: number, dy: number, dz: number): [Expr, Expr, Expr] {
+        const v = this.map.get(key);
+        if (v === undefined) {
+            return [constExpr(dx), constExpr(dy), constExpr(dz)];
+        }
+        return parseVec3Expr(v, dx, dy, dz);
+    }
+}
+
+// ── Expression mini-language ────────────────────────────────────────────────
+//
+// Spring CEG properties use a tiny arithmetic mini-language layered
+// on top of plain numbers: bare numbers (`42`), damage-scaled ints
+// (`i1` → floor(damage * 1 / 1024)), random magnitudes (`r10` →
+// random[0,10]), signed random (`~3` → random[-3,3]), damage-linear
+// (`d0.5` → damage * 0.5), and compound sums (`"0 i1"`,
+// `"24 r4 i2"`). Tokens are space-separated; their values are summed
+// to produce the final scalar.
+//
+// `parseExpr` returns a closure `(ctx: ExprContext) => number` so the
+// runtime can evaluate per-particle (random terms vary) and per-fire
+// (damage-scaled terms vary). Constants collapse to a `() => N`
+// closure for uniform call-site dispatch. Returns null for unparsable
+// input — caller falls back to the supplied default.
+
+export function constExpr(value: number): Expr {
+    return () => value;
+}
+
+export function parseExpr(src: string): Expr | null {
+    let s = src.trim();
+    if (!s) return null;
+    if (s.startsWith('[[') && s.endsWith(']]')) {
+        s = s.slice(2, -2).trim();
+    }
+    if (!s) return null;
+
+    // Tokenise on whitespace. Commas separate vec3 components so
+    // they must already have been split by the caller; receiving a
+    // comma here is treated as a soft error → return null.
+    if (s.includes(',')) return null;
+    const tokens = s.split(/\s+/).filter(t => t.length > 0);
+    if (tokens.length === 0) return null;
+
+    const terms: Array<(damage: number) => number> = [];
+    for (const tok of tokens) {
+        const fn = parseExprToken(tok);
+        if (fn) terms.push(fn);
+    }
+    if (terms.length === 0) return null;
+    if (terms.length === 1) {
+        const t = terms[0];
+        return (ctx) => t(ctx.damage);
+    }
+    return (ctx) => {
+        let sum = 0;
+        for (let i = 0; i < terms.length; i++) sum += terms[i](ctx.damage);
+        return sum;
+    };
+}
+
+/// Parse one mini-language token. Returns a `(damage) => number`
+/// closure or null for unrecognised input. Leading `+`/`-` apply to
+/// the whole magnitude. The `dir` keyword is treated as 0 in scalar
+/// context — vec3 handling for `dir` is the caller's responsibility
+/// since it only makes sense as a direction inheritor, not a number.
+function parseExprToken(tok: string): ((damage: number) => number) | null {
+    if (!tok) return null;
+    // Lone keyword — no scalar value.
+    if (tok === 'dir' || tok === '-dir') return () => 0;
+
+    let sign = 1;
+    let t = tok;
+    while (t.startsWith('+') || t.startsWith('-')) {
+        if (t.startsWith('-')) sign = -sign;
+        t = t.slice(1);
+    }
+    if (!t) return null;
+
+    // Prefix dispatch — magnitudes are floats; reject NaN.
+    const c = t[0];
+    if (c === 'i' || c === 'I') {
+        const n = parseFloat(t.slice(1));
+        if (!Number.isFinite(n)) return null;
+        return (damage) => sign * Math.floor((damage * n) / 1024);
+    }
+    if (c === 'd' || c === 'D') {
+        const n = parseFloat(t.slice(1));
+        if (!Number.isFinite(n)) return null;
+        return (damage) => sign * damage * n;
+    }
+    if (c === 'r' || c === 'R') {
+        const n = parseFloat(t.slice(1));
+        if (!Number.isFinite(n)) return null;
+        return () => sign * Math.random() * n;
+    }
+    if (c === '~') {
+        const n = parseFloat(t.slice(1));
+        if (!Number.isFinite(n)) return null;
+        return () => sign * (Math.random() * 2 - 1) * n;
+    }
+    // Bare numeric.
+    const n = parseFloat(t);
+    if (!Number.isFinite(n)) return null;
+    return () => sign * n;
+}
+
+/// Parse a vec3 property as three independent expressions. CEG
+/// authors mix comma-separated (`"0, 2, 0"`) and space-separated
+/// (`"0 1 0"`) forms; compound expressions per component (`"0, 24 i8, 0"`)
+/// require commas to mark component boundaries. Falls back to
+/// component-wise defaults for unparsable parts.
+export function parseVec3Expr(
+    src: string, dx: number, dy: number, dz: number,
+): [Expr, Expr, Expr] {
+    let s = src.trim();
+    if (s.startsWith('[[') && s.endsWith(']]')) {
+        s = s.slice(2, -2).trim();
+    }
+    if (!s) return [constExpr(dx), constExpr(dy), constExpr(dz)];
+
+    if (s.includes(',')) {
+        const parts = s.split(',').map(p => p.trim());
+        return [
+            parseExpr(parts[0] ?? '') ?? constExpr(dx),
+            parseExpr(parts[1] ?? '') ?? constExpr(dy),
+            parseExpr(parts[2] ?? '') ?? constExpr(dz),
+        ];
+    }
+    // Space-only form: three top-level whitespace-separated tokens,
+    // one per component. Compound per-component is not expressible
+    // without commas; that's a CEG authoring rule, not ours.
+    const tokens = s.split(/\s+/).filter(t => t.length > 0);
+    return [
+        parseExpr(tokens[0] ?? '') ?? constExpr(dx),
+        parseExpr(tokens[1] ?? '') ?? constExpr(dy),
+        parseExpr(tokens[2] ?? '') ?? constExpr(dz),
+    ];
 }
 
 /// Parse a Spring numeric expression, including the `r<bound>` random
