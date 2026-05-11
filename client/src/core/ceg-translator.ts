@@ -58,7 +58,12 @@ export function translateCegDef(def: CegDefInfo): EffectDef | null {
     const spawns: Array<ParticleSpawn | SubCegSpawn> = [];
     for (const s of def.spawns) {
         const ps = translateSpawn(s);
-        if (ps) spawns.push(ps);
+        if (!ps) continue;
+        // Propagate the streamed `flags` byte for Phase 6 visibility
+        // gating. Set only when non-zero to keep the common
+        // "unrestricted" case branchless at dispatch time.
+        if (s.flags) ps.flags = s.flags;
+        spawns.push(ps);
     }
     if (spawns.length === 0) return null;
     return { name: def.tag, spawns };

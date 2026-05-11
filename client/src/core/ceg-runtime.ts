@@ -145,6 +145,11 @@ export interface ParticleSpawn {
     /// Max rotation rate in rad/sec; per-particle is uniform random
     /// in [-this, +this] so a smoke cloud has visually distinct puffs.
     rotationSpeedMax: number;
+    /// Visibility flags from the streamed `CegSpawnInfo.flags`.
+    /// 0 = always emit; otherwise the spawn fires only when the
+    /// caller's SpawnContext.flags has at least one common bit set.
+    /// Translator copies the raw byte; the runtime gates dispatch.
+    flags?: number;
 }
 
 /// Scalar evaluator for a Spring CEG property (Phase 2). The closure
@@ -159,6 +164,27 @@ export interface ExprContext {
     /// chain so `i1`/`d5` tokens at leaf CEGs scale from the original
     /// weapon's damage rather than the immediate parent's.
     damage: number;
+}
+
+/// Visibility flag bits — mirror of `CEG_FLAG_*` in `rts/Server/CegLoader.h`.
+/// Each `CegSpawnInfo` carries these as a packed byte; the runtime
+/// matches against the impact context to skip spawns the author has
+/// gated out (e.g. an "underwater bubble burst" entry only fires
+/// when the impact happened below the water surface).
+export const CEG_FLAG_GROUND     = 1 << 0;
+export const CEG_FLAG_AIR        = 1 << 1;
+export const CEG_FLAG_WATER      = 1 << 2;
+export const CEG_FLAG_UNIT       = 1 << 3;
+export const CEG_FLAG_UNDERWATER = 1 << 4;
+
+/// Spawn context bits supplied by the caller — what kind of surface
+/// the effect is firing on. `unit` is set when the impact was on a
+/// unit body; the others are derived from position vs. water level
+/// vs. terrain height. Callers that don't know (muzzle flash, in-
+/// flight trail) pass `0`, which the runtime treats as "match all"
+/// so unrestricted spawns still fire.
+export interface SpawnContext {
+    flags: number;
 }
 
 /// Sub-CEG spawn — a deferred dispatch back into `spawn()` against a
@@ -200,6 +226,8 @@ export interface SubCegSpawn {
     distribution: 'point' | 'sphere';
     /// Sphere radius in elmos. Ignored for 'point' distribution.
     radius: number;
+    /// Visibility flags — same semantics as ParticleSpawn.flags.
+    flags?: number;
 }
 
 /// One named effect — what gets fired by `spawn(name, ...)`.
@@ -313,6 +341,11 @@ interface PendingSpawn {
     /// Sub-CEG recursion depth — increments by 1 per chained spawn().
     /// Compared against MAX_SUBCEG_DEPTH at dispatch time.
     depth: number;
+    /// Visibility-context flags inherited from the original parent
+    /// spawn(). Sub-CEGs see the same surface context so an
+    /// "underwater" gate at the leaf level still respects whether the
+    /// chain started above or below the water surface.
+    contextFlags: number;
 }
 
 /// Engine-bitmap textureName per class. These are bare logical names
@@ -439,8 +472,10 @@ export class CegRuntime {
         x: number, y: number, z: number,
         dx: number, dy: number, dz: number,
         damage: number = 0,
+        contextFlags: number = 0,
     ): void {
-        this.spawnInternal(name, x, y, z, dx, dy, dz, damage, /*depth*/ 0);
+        this.spawnInternal(name, x, y, z, dx, dy, dz,
+            damage, contextFlags, /*depth*/ 0);
     }
 
     /// Internal recursive form. `depth` increments on every chained
@@ -451,7 +486,7 @@ export class CegRuntime {
         name: string,
         x: number, y: number, z: number,
         dx: number, dy: number, dz: number,
-        damage: number, depth: number,
+        damage: number, contextFlags: number, depth: number,
     ): void {
         const def = this.effects.get(name);
         if (!def) return;
@@ -468,8 +503,17 @@ export class CegRuntime {
         const nowMs = performance.now();
         const ctx: ExprContext = { damage };
         for (const sp of def.spawns) {
+            // Visibility gate. flags === 0 means "always emit"
+            // (CEG author left every visibility bool false, which the
+            // server packed as zero). When set, at least one bit must
+            // match the caller's context — e.g. an underwater-only
+            // bubble spawn drops on a dry ground impact.
+            if (sp.flags && contextFlags && (sp.flags & contextFlags) === 0) {
+                continue;
+            }
             if (sp.kind === 'subceg') {
-                this.queueSubCeg(sp, x, y, z, dx, dy, dz, damage, depth, nowMs);
+                this.queueSubCeg(sp, x, y, z, dx, dy, dz,
+                    damage, contextFlags, depth, nowMs);
                 continue;
             }
             const cls = this.classes.get(sp.class);
@@ -500,7 +544,8 @@ export class CegRuntime {
         sp: SubCegSpawn,
         px: number, py: number, pz: number,
         dx: number, dy: number, dz: number,
-        damage: number, parentDepth: number, nowMs: number,
+        damage: number, contextFlags: number,
+        parentDepth: number, nowMs: number,
     ): void {
         const childDepth = parentDepth + 1;
         if (childDepth >= MAX_SUBCEG_DEPTH) {
@@ -566,6 +611,7 @@ export class CegRuntime {
                 fireAtMs: nowMs + delayS * 1000,
                 damage,
                 depth: childDepth,
+                contextFlags,
             });
         }
     }
@@ -639,7 +685,7 @@ export class CegRuntime {
                     p.effectName,
                     p.px, p.py, p.pz,
                     p.dx, p.dy, p.dz,
-                    p.damage, p.depth);
+                    p.damage, p.contextFlags, p.depth);
             } else {
                 if (writeIdx !== i) pending[writeIdx] = p;
                 writeIdx++;

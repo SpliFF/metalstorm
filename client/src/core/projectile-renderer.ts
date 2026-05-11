@@ -622,9 +622,11 @@ export class ProjectileRenderer {
                 // weapon's authored damage rather than a hard-coded
                 // assumption.
                 const damage = def?.defaultDamage ?? 0;
+                const ctxFlags = impactContextFlags(
+                    ev.impactKind ?? 0, ev.pos.y);
                 this.cegRuntime.spawn(fxName,
                     ev.pos.x, ev.pos.y, ev.pos.z,
-                    0, 1, 0, damage);
+                    0, 1, 0, damage, ctxFlags);
             }
         }
         if (!p) return;
@@ -1605,6 +1607,32 @@ const IMPACT_EFFECT_BY_ARCHETYPE: Record<WeaponArchetype, string | null> = {
     lightcannon:   'impact_lightcannon',
     default:       null,
 };
+
+/// Map an impact event onto the CEG visibility-context bits — same
+/// bit layout as `CEG_FLAG_*` in ceg-runtime.ts (kept duplicated here
+/// to avoid a runtime-direction import cycle). Spring's water level
+/// is fixed at y = 0, so anything below is underwater / in-water,
+/// anything above is ground or air depending on impact kind. Unit
+/// impacts always carry the `unit` bit, which has no positional
+/// correlate.
+function impactContextFlags(impactKind: number, posY: number): number {
+    let flags = 0;
+    const inWater = posY < 0;
+    if (inWater) {
+        flags |= 1 << 2;             // CEG_FLAG_WATER
+        if (posY < -8) flags |= 1 << 4;   // CEG_FLAG_UNDERWATER
+    }
+    if (impactKind === 1 /* Unit */) {
+        flags |= 1 << 3;             // CEG_FLAG_UNIT
+    } else if (!inWater) {
+        // Treat non-unit non-water impacts as ground impacts. Air
+        // impacts are rare (interception, self-destruct in flight)
+        // and indistinguishable from ground without a terrain query
+        // we don't have here.
+        flags |= 1 << 0;             // CEG_FLAG_GROUND
+    }
+    return flags;
+}
 
 /// Pick the muzzle CEG name for a weapon. The streamed `cegTag`
 /// (Spring's per-frame trail CEG) is checked first — that's what
