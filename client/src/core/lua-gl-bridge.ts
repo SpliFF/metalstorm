@@ -865,8 +865,26 @@ export class LuaGLBridge {
             this.expectedShaderReject = true;
             return '#error legacy_gl_Vertex_unsupported';
         }
+        // GL4 shaders (#version 400+) use SSBOs, `layout(binding=...)`,
+        // and other features that only exist in GLSL ES 3.1+. WebGL2 is
+        // ES 3.0, so we can't translate them — reject early as expected
+        // so widgets (api_chili_draw_gl4, gfx_outline_shader_gl4, etc.)
+        // fall back to their non-gl4 path without warning spam.
+        const versionMatch = src.match(/#version\s+(\d+)/);
+        if (versionMatch && parseInt(versionMatch[1], 10) >= 400) {
+            this.lastShaderLog = 'CreateShader: GL4 shader (#version ' + versionMatch[1] + ') not supported on WebGL2/ES 3.0';
+            this.expectedShaderReject = true;
+            return '#error gl4_shader_unsupported';
+        }
         // Strip Spring's version directive entirely.
         let s = src.replace(/#version\s+\d+\s*(compatibility|core)?\s*/g, '');
+        // Strip `#extension` directives. They reference desktop-GL
+        // extensions (GL_ARB_*) that either don't exist in ES or are
+        // already core in ES 3.0. Leaving them in place also breaks the
+        // ordering rule — `#extension` must follow `#version` but
+        // precede any non-preprocessor token, and our injected
+        // precision qualifiers would push them out of order.
+        s = s.replace(/^[ \t]*#extension\s+[^\n]*\n?/gm, '');
         // Inject ES 300 header with precision qualifiers. Fragment needs
         // high precision for the lava math.
         const header = stage === 'vertex'
@@ -1254,8 +1272,13 @@ export class LuaGLBridge {
             const format = Number(opts['format'] ?? gl.RGBA);
             const minFilter = Number(opts['min_filter'] ?? gl.LINEAR);
             const magFilter = Number(opts['mag_filter'] ?? gl.LINEAR);
-            const wrapS = Number(opts['wrap_s'] ?? gl.CLAMP_TO_EDGE);
-            const wrapT = Number(opts['wrap_t'] ?? gl.CLAMP_TO_EDGE);
+            // Spring/ZK widgets (e.g. gui_chili_minimap) pass desktop GL's
+            // GL.CLAMP (0x2900) which WebGL rejects with INVALID_ENUM.
+            // Map it to CLAMP_TO_EDGE — the closest WebGL equivalent.
+            const sanitiseWrap = (v: number): number =>
+                v === 0x2900 ? gl.CLAMP_TO_EDGE : v;
+            const wrapS = sanitiseWrap(Number(opts['wrap_s'] ?? gl.CLAMP_TO_EDGE));
+            const wrapT = sanitiseWrap(Number(opts['wrap_t'] ?? gl.CLAMP_TO_EDGE));
             const tex = gl.createTexture()!;
             gl.bindTexture(gl.TEXTURE_2D, tex);
             // Use a web-safe internal format. Spring passes GL.RGBA (0x1908).
