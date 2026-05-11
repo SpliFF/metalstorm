@@ -841,7 +841,41 @@ async function init(
                 z: pos?.z ?? 0,
             });
         },
+        setMinimapGeometry: (x, y, w, h) => {
+            // Spring.SetMiniMapGeometry path (action handlers / direct
+            // widget calls). gl.ConfigMiniMap reaches the host via the
+            // bridge emitter below; both routes converge on the same
+            // 'minimapGeometry' message so the main thread has a single
+            // application point.
+            postToMain({
+                type: 'minimapGeometry', x, y, w, h,
+                visible: w > 0 && h > 0,
+            });
+        },
     };
+
+    // gl.ConfigMiniMap / gl.DrawMiniMapEvents → main thread. The Lua-side
+    // API stores the rect in liveState.minimapGeometry; we mirror that
+    // here so direct bridge calls (no Spring.* wrapper) keep the API
+    // consistent.
+    bridge.setMinimapEmitter((cmd) => {
+        if (cmd.kind === 'geometry') {
+            const visible = cmd.w > 0 && cmd.h > 0;
+            liveState.minimapGeometry = {
+                x: cmd.x, y: cmd.y, width: cmd.w, height: cmd.h, visible,
+            };
+            postToMain({
+                type: 'minimapGeometry',
+                x: cmd.x, y: cmd.y, w: cmd.w, h: cmd.h,
+                visible,
+            });
+        } else if (cmd.kind === 'events') {
+            postToMain({ type: 'minimapEvents' });
+        }
+        // 'draw' has no payload — the native minimap renders continuously
+        // and doesn't need a per-frame draw signal. Logged here for the
+        // record but no message goes out.
+    });
 
     // 4. Install engine globals
     installEngineGlobals(runtime, bridge, ctx, gameId);

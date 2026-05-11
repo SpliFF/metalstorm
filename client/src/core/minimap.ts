@@ -48,6 +48,19 @@ export interface MinimapConfig {
     size?: number;
 }
 
+/** Transient marker on the minimap events layer. Today only seismic pings
+ *  are pushed in (Phase 4 wire format); the same buffer is intended to
+ *  cover radar/attack/player-marker blips later. */
+interface MinimapPing {
+    x: number;
+    z: number;
+    bornAt: number;
+}
+
+const PING_LIFETIME_MS = 4000;
+const PING_SCALE_BASE = 80;
+const PING_SCALE_GROWTH = 240;
+
 export class Minimap {
     private canvas: HTMLCanvasElement;
     private engine: Engine;
@@ -59,6 +72,37 @@ export class Minimap {
     private mapHeight: number;
     private canvasSize: number;
     private selectedIds: Set<number> = new Set();
+
+    /** 'default' = fixed-corner sidebar (constructor-supplied parent).
+     *  'widget'  = position/size controlled by a LuaUI widget via
+     *              setGeometry / setVisible. Once set to 'widget' it
+     *              stays there for the rest of the session unless the
+     *              widget vanishes (we don't currently detect that). */
+    private ownership: 'default' | 'widget' = 'default';
+    /** Original parent supplied to the constructor. Kept so we can
+     *  reparent the canvas back if ownership ever returns to default. */
+    private defaultParent: HTMLElement;
+    /** Latest geometry in DOM space (top-left origin, pixels). Mirrors
+     *  what the chili minimap widget requested via gl.ConfigMiniMap. */
+    private geometry: { x: number; y: number; w: number; h: number; visible: boolean } = {
+        x: 0, y: 0, w: 0, h: 0, visible: true,
+    };
+    /** Suppresses redundant engine.resize() during a chili drag — Babylon
+     *  recreates the default framebuffer on every resize, which adds up
+     *  fast when the widget is fed window-mousemove events. */
+    private pendingResize: { w: number; h: number } | null = null;
+    private resizeRafHandle = 0;
+
+    /** Seismic-ping ring buffer. Each entry fades over PING_LIFETIME_MS. */
+    private pings: MinimapPing[] = [];
+    /** Mesh that renders the ping rings (one thin-instance per live ping). */
+    private pingMesh: Mesh | null = null;
+    /** True when a chili widget called gl.DrawMiniMapEvents recently. In
+     *  ownership=widget mode the events layer is suppressed unless this
+     *  was set within `eventsRequestTtlMs`; in default mode it's always
+     *  rendered (no widget to drive the toggle). */
+    private eventsRequestedAt = 0;
+    private readonly eventsRequestTtlMs = 250;
 
     private terrainQuad: Mesh | null = null;
     // Fog-of-war overlay: a textured plane above the terrain, populated
@@ -98,6 +142,7 @@ export class Minimap {
         this.mapWidth = config.mapWidth;
         this.mapHeight = config.mapHeight;
         this.canvasSize = config.size ?? 256;
+        this.defaultParent = config.parentElement;
 
         if (connection) {
             this.commandBuffer = new CommandBuffer(connection);
@@ -207,6 +252,124 @@ export class Minimap {
         this.channel?.postMessage({ type: 'selection', unitIds: ids });
     }
 
+    /**
+     * Hand control of the minimap's on-screen geometry to a LuaUI widget.
+     * Reparents the canvas onto `document.body` with absolute positioning
+     * and a z-index that sits above the main 3D canvas but below the
+     * LuaUI overlay canvas (z-index 100) so chili widgets can frame it.
+     * Once set, geometry comes from setGeometry / setVisible until the
+     * minimap is disposed.
+     */
+    setOwnership(mode: 'default' | 'widget'): void {
+        if (this.ownership === mode) return;
+        this.ownership = mode;
+        if (mode === 'widget') {
+            // Strip the sidebar styling (border, rounded corners, block
+            // layout) — the chili frame supplies its own chrome.
+            this.canvas.style.cssText = `
+                position: absolute;
+                left: 0; top: 0;
+                cursor: crosshair;
+                pointer-events: auto;
+                z-index: 50;
+            `;
+            document.body.appendChild(this.canvas);
+        } else {
+            this.canvas.style.cssText = `
+                border: 1px solid #334; border-radius: 4px;
+                cursor: crosshair; display: block;
+            `;
+            this.defaultParent.appendChild(this.canvas);
+        }
+    }
+
+    /**
+     * Set the on-screen rect for the minimap canvas in DOM-space pixels
+     * (top-left origin). Called by lua-widget-manager after translating
+     * the widget's Spring-space ConfigMiniMap call into DOM-space.
+     * Triggers a Babylon engine resize (debounced via rAF) only when the
+     * pixel dimensions actually change — repositioning alone is free.
+     */
+    setGeometry(x: number, y: number, w: number, h: number): void {
+        if (this.ownership !== 'widget') this.setOwnership('widget');
+        const changedSize = w !== this.geometry.w || h !== this.geometry.h;
+        this.geometry.x = x;
+        this.geometry.y = y;
+        this.geometry.w = w;
+        this.geometry.h = h;
+        this.canvas.style.left = `${x}px`;
+        this.canvas.style.top = `${y}px`;
+        this.canvas.style.width = `${w}px`;
+        this.canvas.style.height = `${h}px`;
+        if (changedSize) {
+            // Coalesce engine.resize() across rapid drags. The chili
+            // widget can fire ConfigMiniMap on every mousemove tick;
+            // calling engine.resize() each one recreates the default
+            // framebuffer and triggers a noticeable hitch.
+            this.pendingResize = { w: Math.max(1, w | 0), h: Math.max(1, h | 0) };
+            if (this.resizeRafHandle === 0) {
+                this.resizeRafHandle = requestAnimationFrame(() => {
+                    this.resizeRafHandle = 0;
+                    if (!this.pendingResize) return;
+                    const { w: pw, h: ph } = this.pendingResize;
+                    this.pendingResize = null;
+                    this.canvas.width = pw;
+                    this.canvas.height = ph;
+                    this.engine.resize();
+                });
+            }
+        }
+    }
+
+    /**
+     * Toggle whether the canvas is visible. Used by chili widgets to
+     * hide the minimap when the chili frame is collapsed (or while
+     * `options.disableMinimap` is set) without losing the GL state.
+     */
+    setVisible(visible: boolean): void {
+        this.geometry.visible = visible;
+        this.canvas.style.display = visible ? 'block' : 'none';
+    }
+
+    /** Current rect in DOM-space pixels. Used by InputManager to ignore
+     *  ground clicks that should be claimed by the minimap. */
+    getGeometry(): { x: number; y: number; width: number; height: number; visible: boolean } {
+        return {
+            x: this.geometry.x,
+            y: this.geometry.y,
+            width: this.geometry.w,
+            height: this.geometry.h,
+            visible: this.geometry.visible,
+        };
+    }
+
+    /** True iff the DOM point lies inside the visible minimap rect. */
+    hitTest(clientX: number, clientY: number): boolean {
+        const g = this.geometry;
+        if (!g.visible || g.w <= 0 || g.h <= 0) return false;
+        return clientX >= g.x && clientX < g.x + g.w
+            && clientY >= g.y && clientY < g.y + g.h;
+    }
+
+    /** Called by lua-widget-manager whenever a widget invokes
+     *  `gl.DrawMiniMapEvents`. The events layer is suppressed in
+     *  widget-owned mode unless this was set within `eventsRequestTtlMs`
+     *  — letting a widget mute pings without owning the data itself. */
+    markEventsRequested(): void {
+        this.eventsRequestedAt = performance.now();
+    }
+
+    /** Push a seismic ping into the events layer. Called from main.ts
+     *  off the ConnectionEvents.onSeismicPings callback in parallel
+     *  with the widget-worker forward. Coords are world-space elmos. */
+    pushSeismicPing(p: { x: number; z: number }): void {
+        this.pings.push({ x: p.x, z: p.z, bornAt: performance.now() });
+        // Cap the buffer — a stuck cloaked-unit cluster can produce
+        // pings every tick; the layer only ever renders the most
+        // recent.
+        if (this.pings.length > 64) this.pings.splice(0, this.pings.length - 64);
+    }
+
     /** Apply a per-allyteam fog-of-war snapshot. Called from main.ts
      *  whenever the connection delivers an `ENVELOPE_LOS_BITMAP` frame
      *  (~1 Hz) for the local viewer's ally team. Spectators receive
@@ -300,7 +463,75 @@ export class Minimap {
     /** Render the minimap. Call at ~10Hz. */
     render(): void {
         this.updateEntityInstances();
+        this.updateEventsLayer();
         this.scene.render();
+    }
+
+    private ensurePingMesh(): Mesh {
+        if (this.pingMesh) return this.pingMesh;
+        const ring = MeshBuilder.CreatePlane('minimapPing', { size: 1 }, this.scene);
+        ring.rotation.x = Math.PI / 2;
+        ring.position.y = 12;
+        ring.isPickable = false;
+        const mat = new StandardMaterial('minimapPingMat', this.scene);
+        // Bright yellow, additive — easy to spot against the dark fog
+        // overlay without team-colouring (pings are anonymous).
+        mat.emissiveColor = new Color3(1, 0.9, 0.2);
+        mat.disableLighting = true;
+        mat.alpha = 0.85;
+        ring.material = mat;
+        this.pingMesh = ring;
+        return ring;
+    }
+
+    /**
+     * Per-tick rebuild of the events layer. Drops pings older than
+     * PING_LIFETIME_MS, then sizes the rest with a growing-radius animation
+     * keyed on age. In widget-owned mode the layer is skipped entirely
+     * unless `gl.DrawMiniMapEvents` was called recently — matches Spring's
+     * model where the events overlay is opt-in per widget frame.
+     */
+    private updateEventsLayer(): void {
+        // Prune expired pings up front; this also keeps the mesh clear
+        // when no events have fired in a while.
+        const now = performance.now();
+        if (this.pings.length > 0) {
+            const cutoff = now - PING_LIFETIME_MS;
+            let write = 0;
+            for (let read = 0; read < this.pings.length; read++) {
+                if (this.pings[read].bornAt >= cutoff) {
+                    this.pings[write++] = this.pings[read];
+                }
+            }
+            this.pings.length = write;
+        }
+
+        // Suppress the layer in widget-owned mode unless a widget asked
+        // for events this frame. In default mode the layer is always on.
+        const widgetOwned = this.ownership === 'widget';
+        const eventsAllowed = !widgetOwned
+            || (now - this.eventsRequestedAt) <= this.eventsRequestTtlMs;
+        if (!eventsAllowed || this.pings.length === 0) {
+            if (this.pingMesh) this.pingMesh.thinInstanceCount = 0;
+            return;
+        }
+
+        const mesh = this.ensurePingMesh();
+        const matrices = new Float32Array(this.pings.length * 16);
+        const rot = Quaternion.Identity();
+        for (let i = 0; i < this.pings.length; i++) {
+            const p = this.pings[i];
+            const age = now - p.bornAt;
+            const t = Math.min(1, age / PING_LIFETIME_MS);
+            // Ring expands as it fades — same animation Spring uses on
+            // its native minimap events. Size in elmos so it scales
+            // correctly against the orthographic camera.
+            const size = PING_SCALE_BASE + PING_SCALE_GROWTH * t;
+            const scale = new Vector3(size, size, size);
+            const m = Matrix.Compose(scale, rot, new Vector3(p.x, 12, p.z));
+            m.copyToArray(matrices, i * 16);
+        }
+        mesh.thinInstanceSetBuffer('matrix', matrices, 16, true);
     }
 
     private initSelectionMesh(): void {
@@ -532,6 +763,13 @@ export class Minimap {
         }
         this.detachedWindow = null;
 
+        if (this.resizeRafHandle !== 0) {
+            cancelAnimationFrame(this.resizeRafHandle);
+            this.resizeRafHandle = 0;
+        }
+        this.pingMesh?.dispose();
+        this.pingMesh = null;
+        this.pings.length = 0;
         this.fogTexture?.dispose();
         this.fogTexture = null;
         this.fogQuad?.dispose();

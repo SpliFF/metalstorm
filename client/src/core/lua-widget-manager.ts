@@ -23,6 +23,7 @@ import { debugConsole } from './debug-console.js';
 import { logIngest } from './log-ingest.js';
 import { IntelTransitionTracker } from './intel-transitions.js';
 import type { LosBitmap } from './los-bitmap.js';
+import type { Minimap } from './minimap.js';
 
 // Vite worker import — bundles the worker as a separate chunk
 import WidgetWorker from './lua-widget-worker.ts?worker';
@@ -97,6 +98,19 @@ export class LuaWidgetManager {
 
     /** Listener cleanup for the always-on mouse tracker. */
     private mouseTrackingCleanups: (() => void)[] = [];
+    /** Latest DOM-space pointer position (window.clientX / clientY). Tracked
+     *  separately from `mouseState` because the minimap hit-test runs in
+     *  DOM space while the worker mouse state runs in canvas backing-buffer
+     *  space with Y flipped to match Spring's screen coords. */
+    private lastClientX = 0;
+    private lastClientY = 0;
+
+    /** Native minimap instance, registered via setMinimap() once main.ts
+     *  has constructed both this manager and the Minimap. When a widget
+     *  calls `gl.ConfigMiniMap` / `gl.DrawMiniMapEvents` the manager
+     *  forwards the intent here. Null when no minimap exists for this
+     *  game (lobby preview, headless tests). */
+    private minimap: Minimap | null = null;
 
     /** Current game frame counter (updated by forwardEntityState) */
     private currentFrame = 0;
@@ -280,6 +294,8 @@ export class LuaWidgetManager {
             this.mouseState.x = e.offsetX;
             this.mouseState.y = canvas.height - e.offsetY;
             this.mouseState.outsideSpring = false;
+            this.lastClientX = e.clientX;
+            this.lastClientY = e.clientY;
         };
         const enter = () => { this.mouseState.outsideSpring = false; };
         const leave = () => {
@@ -302,12 +318,24 @@ export class LuaWidgetManager {
         // Use window for up so a button released off-canvas still clears.
         canvas.addEventListener('mousedown', down);
         window.addEventListener('mouseup', up);
+        // Window-level pointer tracker for lastClientX / lastClientY.
+        // Needed because the chili-controlled minimap canvas sits on top
+        // of the main canvas — when the cursor is over the minimap, the
+        // `move` listener above doesn't fire (pointer events don't
+        // bubble out of the minimap), so isCursorOverUI() would read a
+        // stale position.
+        const winMove = (e: MouseEvent) => {
+            this.lastClientX = e.clientX;
+            this.lastClientY = e.clientY;
+        };
+        window.addEventListener('mousemove', winMove);
         this.mouseTrackingCleanups.push(
             () => canvas.removeEventListener('mousemove', move),
             () => canvas.removeEventListener('mouseenter', enter),
             () => canvas.removeEventListener('mouseleave', leave),
             () => canvas.removeEventListener('mousedown', down),
             () => window.removeEventListener('mouseup', up),
+            () => window.removeEventListener('mousemove', winMove),
         );
     }
 
@@ -598,6 +626,8 @@ export class LuaWidgetManager {
             case 'setCameraTarget': summary = `setCameraTarget x=${msg.x} z=${msg.z} smooth=${msg.smoothness}`; break;
             case 'uiHover':        summary = `uiHover above=${msg.above}`; break;
             case 'inputConsumed':  summary = `inputConsumed kind=${msg.kind} consumed=${msg.consumed}`; break;
+            case 'minimapGeometry': summary = `minimapGeometry @${msg.x},${msg.y} ${msg.w}x${msg.h} visible=${msg.visible}`; break;
+            case 'minimapEvents':  summary = 'minimapEvents'; break;
         }
         debugConsole.addEntry({
             id: Date.now() + Math.random(),
@@ -773,6 +803,27 @@ export class LuaWidgetManager {
                 this.cursorOverUI = !!msg.above;
                 break;
 
+            case 'minimapGeometry': {
+                // gl.ConfigMiniMap / Spring.SetMiniMapGeometry from a widget
+                // (typically gui_chili_minimap.lua). Coords are Spring
+                // screen-space (Y-up from bottom-left); applyMinimapGeometry
+                // converts to DOM-space and applies to the native canvas.
+                const x = Number(msg.x ?? 0);
+                const y = Number(msg.y ?? 0);
+                const w = Number(msg.w ?? 0);
+                const h = Number(msg.h ?? 0);
+                const visible = msg.visible !== false;
+                this.applyMinimapGeometry(x, y, w, h, visible);
+                break;
+            }
+
+            case 'minimapEvents':
+                // gl.DrawMiniMapEvents — widget asked for the events
+                // overlay this frame. The minimap suppresses it in
+                // widget-owned mode unless this signal arrives recently.
+                this.minimap?.markEventsRequested();
+                break;
+
             case 'inputConsumed':
                 // The worker reports whether the just-dispatched event was
                 // claimed by a widget. cursorOverUI (from uiHover) handles
@@ -792,9 +843,56 @@ export class LuaWidgetManager {
     /** True when the cursor is hovering a chili control. Updated by mousemove
      *  → widgetHandler:IsAbove() in the worker, so the value lags the cursor by
      *  one frame. InputManager checks this at mousedown to suppress ground
-     *  selection when the click belongs to LuaUI. */
+     *  selection when the click belongs to LuaUI. Also returns true when the
+     *  cursor is over the widget-claimed minimap rect, so InputManager treats
+     *  clicks there as belonging to the minimap (handled by the canvas's own
+     *  mousedown listener) rather than the ground. */
     isCursorOverUI(): boolean {
-        return this.cursorOverUI;
+        if (this.cursorOverUI) return true;
+        // Also claim clicks on the widget-controlled minimap rect — the
+        // canvas owns its own mousedown handler (camera move / order
+        // placement), so InputManager must not also process the same
+        // click as a ground action. Hit-test in DOM client coords
+        // against the tracked rect.
+        const m = this.minimap;
+        if (!m) return false;
+        return m.hitTest(this.lastClientX, this.lastClientY);
+    }
+
+    /** Register the native Minimap. Once set, widget calls to
+     *  `gl.ConfigMiniMap` / `gl.DrawMiniMapEvents` and
+     *  `Spring.SetMiniMapGeometry` reach the minimap through here. */
+    setMinimap(minimap: Minimap | null): void {
+        this.minimap = minimap;
+    }
+
+    /** Forward a seismic ping to the native minimap's events layer.
+     *  Mirrors `forwardSeismicPings` (which goes to the widget worker);
+     *  the minimap subscriber is separate so neither path has to wait
+     *  on the other or read out of the worker. */
+    pushMinimapSeismicPings(pings: ReadonlyArray<{ x: number; z: number }>): void {
+        const m = this.minimap;
+        if (!m) return;
+        for (const p of pings) m.pushSeismicPing(p);
+    }
+
+    /** Apply a Spring-screen-space geometry message to the native
+     *  minimap. Spring's API delivers coords with Y-up from the bottom;
+     *  the canvas needs DOM-space (Y-down from the top), so we flip Y
+     *  here. The chili widget passes a (0,0,0,0) config to suppress the
+     *  minimap when its frame is collapsed — we treat zero-area as
+     *  "hidden" rather than relocating to the corner. */
+    private applyMinimapGeometry(x: number, y: number, w: number, h: number, visible: boolean): void {
+        const m = this.minimap;
+        if (!m) return;
+        if (!visible || w <= 0 || h <= 0) {
+            m.setVisible(false);
+            return;
+        }
+        const vh = window.innerHeight;
+        const domY = vh - y - h;
+        m.setGeometry(x, domY, w, h);
+        m.setVisible(true);
     }
 
     // ── Keyboard ────────────────────────────────────────────────────────

@@ -118,6 +118,14 @@ export interface SpringAPIContext {
      * URL against the game's data root.
      */
     playSound?(path: string, volume: number, pos?: { x: number; y: number; z: number }): void;
+    /**
+     * Forward a `Spring.SetMiniMapGeometry(x, y, w, h)` call to the host.
+     * Coords are in Spring screen-space (Y-up, origin bottom-left, pixels).
+     * The host converts to DOM-space and applies it to the native Minimap
+     * canvas. Optional — if absent, the API call updates `liveState`
+     * only and produces no visible effect.
+     */
+    setMinimapGeometry?(x: number, y: number, w: number, h: number): void;
 }
 
 /** Per-unit entry in the worker's unit store. */
@@ -272,6 +280,15 @@ export interface LiveState {
      *  sample this; the renderer / minimap use it for fog overlay.
      *  Indexed by ally team id. */
     losBitmaps: Map<number, LosBitmapState>;
+    /** Minimap rect in **Spring screen-space** (Y-up, origin at the
+     *  bottom-left of the viewport, pixels). Set by widget calls to
+     *  `gl.ConfigMiniMap` / `Spring.SetMiniMapGeometry`. `visible`
+     *  tracks whether the widget left the canvas drawable this frame
+     *  — a chili minimap collapsing the frame issues a `(0,0,0,0)`
+     *  config to suppress hit-testing. `undefined` means no widget
+     *  has claimed the minimap yet (the native fixed-corner default
+     *  applies). */
+    minimapGeometry: { x: number; y: number; width: number; height: number; visible: boolean } | undefined;
 }
 
 /** Stored LOS bitmap snapshot inside `LiveState`. Mirrors `LosBitmap`
@@ -586,6 +603,7 @@ export function createDefaultLiveState(): LiveState {
         unitCmdDescs: new Map(),
         keyBinds: new Map(),
         losBitmaps: new Map(),
+        minimapGeometry: undefined,
     };
 }
 
@@ -1466,8 +1484,35 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         },
         GetMouseCursor: () => ['', 1.0], // name, scale
         SetMouseCursor: () => {},
-        IsAboveMiniMap: () => false,
-        GetMiniMapGeometry: () => [0, 0, 200, 200], // x, y, w, h
+        IsAboveMiniMap: (x?: LuaValue, y?: LuaValue) => {
+            // Spring's API takes optional screen coords; if omitted, the
+            // engine substitutes the current mouse position. Coords are
+            // in Spring screen-space (Y-up). Without a widget-claimed
+            // minimap we have no rect to hit-test against — return
+            // false, matching Spring's behaviour when no minimap exists.
+            const g = ls.minimapGeometry;
+            if (!g || !g.visible || g.width <= 0 || g.height <= 0) return false;
+            const sx = Number(x ?? ls.mouse.x);
+            const sy = Number(y ?? ls.mouse.y);
+            return sx >= g.x && sx < g.x + g.width
+                && sy >= g.y && sy < g.y + g.height;
+        },
+        GetMiniMapGeometry: () => {
+            const g = ls.minimapGeometry;
+            if (!g) return [0, 0, 200, 200];
+            return [g.x, g.y, g.width, g.height];
+        },
+        SetMiniMapGeometry: (x: LuaValue, y: LuaValue, w: LuaValue, h: LuaValue) => {
+            const gx = Number(x ?? 0);
+            const gy = Number(y ?? 0);
+            const gw = Number(w ?? 0);
+            const gh = Number(h ?? 0);
+            ls.minimapGeometry = {
+                x: gx, y: gy, width: gw, height: gh,
+                visible: gw > 0 && gh > 0,
+            };
+            ctx.setMinimapGeometry?.(gx, gy, gw, gh);
+        },
         GetBuildFacing: () => ls.buildFacing,
         SetBuildFacing: (_facing: LuaValue) => {
             ls.buildFacing = Number(_facing ?? 0) % 4;
@@ -1816,7 +1861,20 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         // --- Minimap ---
         GetMiniMapDualScreen: () => false,
         GetMiniMapRotation: () => 0,
-        GetMouseMiniMapState: () => [false, false, false],
+        GetMouseMiniMapState: () => {
+            // Returns [lmb, mmb, rmb] but only when the mouse is over the
+            // minimap rect. Outside it everything reads false even if a
+            // button is held — matches Spring's engine-side filter.
+            const g = ls.minimapGeometry;
+            const m = ls.mouse;
+            if (!g || !g.visible || g.width <= 0 || g.height <= 0) {
+                return [false, false, false];
+            }
+            const inside = m.x >= g.x && m.x < g.x + g.width
+                && m.y >= g.y && m.y < g.y + g.height;
+            if (!inside) return [false, false, false];
+            return [m.lmb, m.mmb, m.rmb];
+        },
 
         // --- Team color ---
         SetTeamColor: () => {},

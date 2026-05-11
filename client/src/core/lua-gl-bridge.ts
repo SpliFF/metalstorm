@@ -72,6 +72,17 @@ export interface LuaVAOHandle {
     ClearAttachedBuffers(..._args: LuaValue[]): LuaValue;
 }
 
+/**
+ * Commands the bridge hands off when a widget calls one of the engine
+ * `gl.*MiniMap*` entry points. The bridge can't render the minimap
+ * itself — it lives on the main thread — so the worker translates these
+ * into postMessage envelopes for the host.
+ */
+export type MinimapBridgeCommand =
+    | { kind: 'geometry'; x: number; y: number; w: number; h: number }
+    | { kind: 'events' }
+    | { kind: 'draw' };
+
 /** Textures bound by name — Spring's engine texture slots like "$heightmap". */
 export interface EngineTextures {
     /** Heightmap sampler in [0,1] normalised form. */
@@ -125,6 +136,13 @@ export class LuaGLBridge {
      *  `${gameBaseUrl}/unitpics/<buildPic>`. Set by the host (worker holds
      *  the unit-def map; bridge does not). */
     private buildPicResolver: ((defId: number) => string | null) | null = null;
+    /** Sink for `gl.ConfigMiniMap` / `gl.DrawMiniMap` / `gl.DrawMiniMapEvents`
+     *  calls. The bridge has no minimap of its own — the native Minimap
+     *  lives on the main thread — so the worker installs an emitter that
+     *  posts `minimapGeometry` / `minimapEvents` messages back. Null in
+     *  contexts that don't run a minimap (tests, lobby preview, etc.);
+     *  the bridge silently no-ops in that case. */
+    private minimapEmitter: ((cmd: MinimapBridgeCommand) => void) | null = null;
 
     constructor(gl: WebGL2RenderingContext, mapSourceUrl: string, engineTex: EngineTextures = {}) {
         this.gl = gl;
@@ -133,6 +151,14 @@ export class LuaGLBridge {
         this.whiteTex = this.createSolidTexture(255, 255, 255, 255);
         this.blackTex = this.createSolidTexture(0, 0, 0, 255);
         this.imm = new ImmediateModeRenderer(gl);
+    }
+
+    /** Wire the minimap-command sink. Called by the worker host once it
+     *  has built its postMessage bridge. Without an emitter `gl.DrawMiniMap`
+     *  and friends are silent no-ops, which is the right behaviour in
+     *  tests / lobby preview where no native minimap exists. */
+    setMinimapEmitter(emitter: ((cmd: MinimapBridgeCommand) => void) | null): void {
+        this.minimapEmitter = emitter;
     }
 
     /** Resize the OffscreenCanvas owned by this bridge's GL context. */
@@ -331,6 +357,33 @@ export class LuaGLBridge {
         gl['TexCoord'] = (...args: LuaValue[]) => this.texCoordGL(args);
         gl['MultiTexCoord'] = (unit: LuaValue, s: LuaValue, t: LuaValue) =>
             this.imm.multiTexCoord(Number(unit), Number(s), Number(t));
+
+        // ── Minimap bridge ─────────────────────────────────────────
+        // The native Minimap lives on the main thread. These entry points
+        // hand off the widget's positioning intent via an emitter that
+        // the worker host wires to postMessage. ZK's chili minimap calls
+        // ConfigMiniMap on every layout change and DrawMiniMap once per
+        // DrawScreen pass; we ignore the latter because the native
+        // renderer draws continuously, but the call still signals that
+        // the chili widget has claimed the minimap (so the host can
+        // switch ownership='widget' on first sight).
+        gl['ConfigMiniMap'] = (x: LuaValue, y: LuaValue, w: LuaValue, h: LuaValue) => {
+            const gx = Number(x ?? 0);
+            const gy = Number(y ?? 0);
+            const gw = Number(w ?? 0);
+            const gh = Number(h ?? 0);
+            this.minimapEmitter?.({ kind: 'geometry', x: gx, y: gy, w: gw, h: gh });
+        };
+        gl['DrawMiniMap'] = () => {
+            this.minimapEmitter?.({ kind: 'draw' });
+        };
+        gl['DrawMiniMapEvents'] = () => {
+            this.minimapEmitter?.({ kind: 'events' });
+        };
+        // Spring's `gl.SlaveMiniMap` enabled the old dual-screen minimap
+        // mode. Our renderer is always single-screen — stub so widgets
+        // don't fall through the gl-fallback metatable and lose calls.
+        gl['SlaveMiniMap'] = (_enable: LuaValue) => undefined;
 
         // ── Display lists ───────────────────────────────────────────
         // JS-side CreateList — works for simple cases but loses metatables

@@ -727,6 +727,13 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 console.warn('[client] widget manager failed:', e);
             });
             currentWidgetManager = mgr;
+            // Hand the minimap (if it's been constructed by now — the
+            // minimap-init block in this same function may run before
+            // or after MapData lands depending on connection ordering)
+            // to the manager so chili widgets' gl.ConfigMiniMap /
+            // gl.DrawMiniMapEvents calls reach the native renderer.
+            // PLAN-intel.md Phase 6.
+            if (minimap) mgr.setMinimap(minimap);
             (window as any).__widgetManagerDispose = () => { mgr.dispose(); };
         }
     };
@@ -837,6 +844,17 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         },
         onSeismicPings(events) {
             currentWidgetManager?.forwardSeismicPings(events);
+            // Native minimap events layer reads pings directly off this
+            // callback in parallel with the widget worker — keeps the
+            // renderer independent of the worker pace and means a game
+            // without LuaUI still gets blip rendering. See PLAN-intel.md
+            // Phase 6.
+            if (minimap && events.length > 0) {
+                currentWidgetManager?.pushMinimapSeismicPings(events);
+                if (!currentWidgetManager) {
+                    for (const e of events) minimap.pushSeismicPing(e);
+                }
+            }
         },
         onLosBitmap(bitmap) {
             losBitmapStore.set(bitmap);
@@ -964,6 +982,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             document.getElementById('detach-minimap-btn')?.addEventListener('click', () => {
                 minimap?.detach();
             });
+            // If the widget manager already exists, hand it the minimap
+            // now. Otherwise the onMapData callback that constructs the
+            // manager registers the link itself.
+            const existingManager = currentWidgetManager as LuaWidgetManager | null;
+            existingManager?.setMinimap(minimap);
         }
     }
 
