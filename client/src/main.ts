@@ -977,10 +977,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         // Listener follows the camera every frame so HRTF stays in
         // sync with smooth camera motion. Previously this only fired
         // on camera-change events and lagged behind pans/zooms.
+        // The zoom factor uses camera Y (RtsCamera keeps the camera in
+        // [minHeight,maxHeight]) so further-out cameras quiet the SFX
+        // bus and raise the priority floor (PLAN-sound.md Phase 3).
         if (audioManager) {
             const cp = camera.position;
             const fwd = camera.getTarget().subtract(cp).normalize();
             audioManager.setListenerPosition(cp.x, cp.y, cp.z, fwd.x, fwd.y, fwd.z);
+            audioManager.setZoomFactor(cp.y);
         }
 
         scene.render();

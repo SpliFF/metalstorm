@@ -28,18 +28,69 @@ export interface SoundRequest {
     volume?: number;      // 0-1, default 1
     priority?: number;    // higher = more important, default 0
     pitch?: number;       // playback rate, default 1
+    /// Optional emitter velocity in world units per second. When
+    /// any component is non-zero, AudioManager schedules a linear
+    /// position ramp on the PannerNode for the duration of the
+    /// buffer so the source slides past the listener naturally
+    /// (PLAN-sound.md §Phase 3 item 14). Stationary sources omit
+    /// this and the panner is set once at request time as before.
+    vx?: number;
+    vy?: number;
+    vz?: number;
 }
 
 const POOL_SIZE = 96;
+
+/// Camera-height → zoom-factor mapping. The camera lives in the
+/// y∈[minHeight,maxHeight] band defined by RtsCamera (defaults 100
+/// and 5000). We treat anything ≤ 400 elmos as "close" (factor 0)
+/// and anything ≥ 3500 as "far" (factor 1). The cutoffs are picked
+/// empirically to match the camera bands the player actually uses:
+/// scrolling around at ~600–1500 stays in the gentle-falloff range.
+const ZOOM_CLOSE_HEIGHT = 400;
+const ZOOM_FAR_HEIGHT = 3500;
+
+/// Attenuation envelope from PLAN-audio.md §"Zoom-aware attenuation"
+/// re-parameterised against a 0..1 zoom factor:
+///   factor ≤ 0.15 → full volume
+///   factor ≥ 0.85 → 0.2× volume
+///   between → linear falloff
+/// The plateau at low zoom prevents the bus from breathing while the
+/// player nudges the camera near the close stop; the floor at high
+/// zoom keeps distant explosions audible rather than silent.
+function zoomAttenuation(factor: number): number {
+    if (factor <= 0.15) return 1.0;
+    if (factor >= 0.85) return 0.2;
+    return 1.0 - (factor - 0.15) * (0.8 / 0.7);
+}
+
+/// Priority floor as a function of zoom factor. When zoomed in,
+/// every sound plays (floor 0). When zoomed far out, only sounds
+/// flagged with priority ≥ 100 — fire/impact events on big weapons,
+/// unit deaths — make it into the pool; ambient/select/order chatter
+/// is suppressed so the mix doesn't turn to mush at strategic zoom.
+function zoomPriorityFloor(factor: number): number {
+    if (factor <= 0.2) return 0;
+    if (factor >= 0.9) return 100;
+    return Math.floor((factor - 0.2) * (100 / 0.7));
+}
 
 export class AudioManager {
     private ctx: AudioContext;
     /** Expose AudioContext for procedural sound generation. */
     get context(): AudioContext { return this.ctx; }
     private masterGain: GainNode;
+    /// SFX bus — sits between the voice pool and the master gain so
+    /// zoom-based attenuation can ride the spatial mix without
+    /// pulling music down with it.
+    private sfxBus: GainNode;
     private voices: Voice[] = [];
     private bufferCache = new Map<string, AudioBuffer>();
     private resumed = false;
+    /// Priority floor: play() rejects requests below this priority.
+    /// Driven by setZoomFactor() so zoom-out culls low-importance
+    /// chatter (select/order acks) before it even hits the pool.
+    private priorityFloor = 0;
 
     // Music
     private musicElement: HTMLAudioElement | null = null;
@@ -63,6 +114,9 @@ export class AudioManager {
         this.masterGain.connect(limiter);
         limiter.connect(this.ctx.destination);
 
+        this.sfxBus = this.ctx.createGain();
+        this.sfxBus.connect(this.masterGain);
+
         this.musicGain = this.ctx.createGain();
         this.musicGain.gain.value = 0.3;
         this.musicGain.connect(this.masterGain);
@@ -78,7 +132,7 @@ export class AudioManager {
 
             const gain = this.ctx.createGain();
             panner.connect(gain);
-            gain.connect(this.masterGain);
+            gain.connect(this.sfxBus);
 
             this.voices.push({
                 source: null,
@@ -99,6 +153,30 @@ export class AudioManager {
         if (this.resumed) return;
         await this.ctx.resume();
         this.resumed = true;
+    }
+
+    /**
+     * Update zoom-based attenuation. `cameraHeight` is the camera's
+     * world Y coordinate; the manager normalises against the close/far
+     * cutoffs and drives both the SFX bus gain and the priority floor.
+     *
+     * Called every frame from the render loop alongside
+     * `setListenerPosition`. The bus gain rides a smooth `setTargetAtTime`
+     * ramp so rapid wheel-zoom motion doesn't audibly pump the mix; the
+     * priority floor updates instantly because it's only consulted on
+     * the next play() call.
+     */
+    setZoomFactor(cameraHeight: number): void {
+        const span = ZOOM_FAR_HEIGHT - ZOOM_CLOSE_HEIGHT;
+        const raw = (cameraHeight - ZOOM_CLOSE_HEIGHT) / span;
+        const factor = Math.max(0, Math.min(1, raw));
+        const gain = zoomAttenuation(factor);
+        // setTargetAtTime with a ~200 ms time-constant gives a soft
+        // exponential approach — fast enough to react to wheel zoom,
+        // slow enough that an active sound doesn't notch when the
+        // factor jumps a small step between frames.
+        this.sfxBus.gain.setTargetAtTime(gain, this.ctx.currentTime, 0.2);
+        this.priorityFloor = zoomPriorityFloor(factor);
     }
 
     /** Update the listener position (call each frame with camera position). */
@@ -147,7 +225,13 @@ export class AudioManager {
     play(req: SoundRequest): void {
         if (!this.resumed) return;
 
-        const voice = this.acquireVoice(req.priority ?? 0);
+        const priority = req.priority ?? 0;
+        // Zoom-driven cull: drop low-priority requests outright when the
+        // floor exceeds them. Cheaper than acquiring then evicting and
+        // matches the spec's "raise priority threshold" hint.
+        if (priority < this.priorityFloor) return;
+
+        const voice = this.acquireVoice(priority);
         if (!voice) return;
 
         // Stop any existing sound on this voice
@@ -160,14 +244,44 @@ export class AudioManager {
         source.playbackRate.value = req.pitch ?? 1;
         source.connect(voice.panner);
 
-        voice.panner.positionX.value = req.x;
-        voice.panner.positionY.value = req.y;
-        voice.panner.positionZ.value = req.z;
+        const now = this.ctx.currentTime;
+        const vx = req.vx ?? 0;
+        const vy = req.vy ?? 0;
+        const vz = req.vz ?? 0;
+        const moving = (vx !== 0 || vy !== 0 || vz !== 0);
+
+        // Cancel any ramps left over from the previous voice owner —
+        // panners aren't disposable so we must reset the timeline
+        // before scheduling new automation. Without this a fast-moving
+        // sound followed by a stationary one inherits the prior ramp.
+        voice.panner.positionX.cancelScheduledValues(now);
+        voice.panner.positionY.cancelScheduledValues(now);
+        voice.panner.positionZ.cancelScheduledValues(now);
+
+        if (moving) {
+            // Account for pitch — a buffer at 2× pitch plays for half
+            // its natural duration. Pass-through when pitch is missing.
+            const pitch = req.pitch ?? 1;
+            const dur = (req.buffer.duration / Math.max(pitch, 0.01));
+            const endX = req.x + vx * dur;
+            const endY = req.y + vy * dur;
+            const endZ = req.z + vz * dur;
+            voice.panner.positionX.setValueAtTime(req.x, now);
+            voice.panner.positionY.setValueAtTime(req.y, now);
+            voice.panner.positionZ.setValueAtTime(req.z, now);
+            voice.panner.positionX.linearRampToValueAtTime(endX, now + dur);
+            voice.panner.positionY.linearRampToValueAtTime(endY, now + dur);
+            voice.panner.positionZ.linearRampToValueAtTime(endZ, now + dur);
+        } else {
+            voice.panner.positionX.setValueAtTime(req.x, now);
+            voice.panner.positionY.setValueAtTime(req.y, now);
+            voice.panner.positionZ.setValueAtTime(req.z, now);
+        }
 
         voice.gain.gain.value = req.volume ?? 1;
         voice.source = source;
-        voice.priority = req.priority ?? 0;
-        voice.startTime = this.ctx.currentTime;
+        voice.priority = priority;
+        voice.startTime = now;
         voice.active = true;
 
         source.onended = () => {
