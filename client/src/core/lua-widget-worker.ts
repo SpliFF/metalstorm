@@ -264,6 +264,8 @@ function describeInboundMessage(msg: Record<string, unknown>): string {
         case 'stateUpdate':   return `stateUpdate frame=${msg.gameFrame}`;
         case 'entityState':   return `entityState count=${msg.count} delta=${msg.isDelta}`;
         case 'entityDestroy': return `entityDestroy id=${msg.entityId}`;
+        case 'intelTransitions': return `intelTransitions (${(msg.events as unknown[])?.length ?? 0} events)`;
+        case 'seismicPings':  return `seismicPings (${(msg.pings as unknown[])?.length ?? 0} pings)`;
         case 'resourceUpdate':return `resourceUpdate team=${msg.team}`;
         case 'gameInfo':      return `gameInfo frame=${msg.frame}`;
         default:              return t;
@@ -3542,6 +3544,77 @@ self.onmessage = async (e: MessageEvent) => {
             liveState.unitCommands.delete(msg.entityId as number);
             liveState.unitCmdDescs.delete(msg.entityId as number);
             break;
+
+        case 'intelTransitions': {
+            // Synthesised LOS / radar / cloak transitions (see
+            // intel-transitions.ts on the main thread). Each entry
+            // dispatches the matching widgetHandler:Unit* callin so
+            // ZK widgets like gui_spotter, unit_attack_warning, and
+            // gfx_deferred_rendering_gl4 fire their handlers. The
+            // viewer's own ally team is read from liveState.identity
+            // so the (unitID, unitTeam, allyTeam, unitDefID) signature
+            // matches Recoil's widgetHandler dispatch.
+            if (!runtime) break;
+            const events = msg.events as Array<{
+                kind: 'enteredLos' | 'leftLos' | 'enteredRadar' | 'leftRadar' | 'cloaked' | 'decloaked';
+                unitId: number; unitTeam: number; unitDefId: number;
+            }> | undefined;
+            if (!events || events.length === 0) break;
+            const myAllyTeam = liveState.identity?.myAllyTeam ?? 0;
+
+            // Build one Lua chunk per batch — cheaper than a doString
+            // per event when ~tens of transitions can fire at once
+            // (e.g. a scout reveals a base).
+            const lines: string[] = [];
+            for (const ev of events) {
+                const u = ev.unitId, t = ev.unitTeam, d = ev.unitDefId;
+                switch (ev.kind) {
+                    case 'enteredLos':
+                        lines.push(`if widgetHandler and widgetHandler.UnitEnteredLos then pcall(widgetHandler.UnitEnteredLos, widgetHandler, ${u}, ${t}, ${myAllyTeam}, ${d}) end`);
+                        break;
+                    case 'leftLos':
+                        lines.push(`if widgetHandler and widgetHandler.UnitLeftLos then pcall(widgetHandler.UnitLeftLos, widgetHandler, ${u}, ${t}, ${myAllyTeam}, ${d}) end`);
+                        break;
+                    case 'enteredRadar':
+                        lines.push(`if widgetHandler and widgetHandler.UnitEnteredRadar then pcall(widgetHandler.UnitEnteredRadar, widgetHandler, ${u}, ${t}, ${myAllyTeam}, ${d}) end`);
+                        break;
+                    case 'leftRadar':
+                        lines.push(`if widgetHandler and widgetHandler.UnitLeftRadar then pcall(widgetHandler.UnitLeftRadar, widgetHandler, ${u}, ${t}, ${myAllyTeam}, ${d}) end`);
+                        break;
+                    case 'cloaked':
+                        // widgetHandler:UnitCloaked(unitID, unitDefID, unitTeam) — note arg order.
+                        lines.push(`if widgetHandler and widgetHandler.UnitCloaked then pcall(widgetHandler.UnitCloaked, widgetHandler, ${u}, ${d}, ${t}) end`);
+                        break;
+                    case 'decloaked':
+                        lines.push(`if widgetHandler and widgetHandler.UnitDecloaked then pcall(widgetHandler.UnitDecloaked, widgetHandler, ${u}, ${d}, ${t}) end`);
+                        break;
+                }
+            }
+            if (lines.length > 0) {
+                runtime.doString(lines.join('\n'), 'callin:intelTransitions');
+            }
+            break;
+        }
+
+        case 'seismicPings': {
+            // widgetHandler:UnitSeismicPing(x, y, z, strength, allyTeamID, unitID, unitDefID)
+            // The server already filtered by ally team; we don't have unit
+            // ids for the source (that's the whole point of seismic pings
+            // — anonymous "something is moving"), so we pass 0/0 for the
+            // last two args. ZK's minimap_events / unit_attack_warning
+            // widgets only read x/y/z/strength.
+            if (!runtime) break;
+            const pings = msg.pings as Array<{
+                x: number; y: number; z: number; strength: number; allyTeam: number;
+            }> | undefined;
+            if (!pings || pings.length === 0) break;
+            const lines: string[] = [];
+            for (const p of pings) {
+                lines.push(`if widgetHandler and widgetHandler.UnitSeismicPing then pcall(widgetHandler.UnitSeismicPing, widgetHandler, ${p.x}, ${p.y}, ${p.z}, ${p.strength}, ${p.allyTeam}, 0, 0) end`);
+            }
+            runtime.doString(lines.join('\n'), 'callin:seismicPings');
+            break;
+        }
 
         case 'unitCommandQueues': {
             // Snapshot replacement: clear stale queues, install fresh ones.

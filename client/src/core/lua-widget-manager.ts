@@ -21,6 +21,7 @@ import type { EntityStateSnapshot } from './entity-state.js';
 import type { AudioManager } from './audio.js';
 import { debugConsole } from './debug-console.js';
 import { logIngest } from './log-ingest.js';
+import { IntelTransitionTracker } from './intel-transitions.js';
 
 // Vite worker import — bundles the worker as a separate chunk
 import WidgetWorker from './lua-widget-worker.ts?worker';
@@ -98,6 +99,12 @@ export class LuaWidgetManager {
 
     /** Current game frame counter (updated by forwardEntityState) */
     private currentFrame = 0;
+
+    /** Synthesises UnitEnteredLos / LeftLos / EnteredRadar / LeftRadar /
+     *  Cloaked / Decloaked widget callins by diffing snapshot losStates and
+     *  stateBits. The server doesn't send transition events directly — see
+     *  intel-transitions.ts and PLAN-intel.md Phase 4. */
+    private intelTracker = new IntelTransitionTracker();
     /** Currently selected unit IDs (set from main thread) */
     private selectedUnitIds: number[] = [];
 
@@ -311,6 +318,12 @@ export class LuaWidgetManager {
         if (this.disposed) return;
         this.currentFrame++;
 
+        // Synthesise widget callins from snapshot diffs *before* posting the
+        // snapshot itself, so the worker never sees a unit's losState change
+        // without an accompanying Entered/Left callin. Cheap (one Map lookup
+        // per entity per tick).
+        const transitions = this.intelTracker.diffSnapshot(snapshot, isDelta);
+
         // Copy typed arrays so they can be transferred without detaching the originals
         const msg: Record<string, unknown> = {
             type: 'entityState',
@@ -336,12 +349,27 @@ export class LuaWidgetManager {
         }
 
         this.postToWorker(msg, transfer);
+
+        if (transitions.length > 0) {
+            this.postToWorker({ type: 'intelTransitions', events: transitions });
+        }
     }
 
     /** Forward an entity destruction to the worker. */
     forwardEntityDestroy(entityId: number): void {
         if (this.disposed) return;
+        // Drop the entity from the intel tracker so the next full snapshot
+        // doesn't fire spurious Left* callins for a unit that just died.
+        this.intelTracker.forget(entityId);
         this.postToWorker({ type: 'entityDestroy', entityId });
+    }
+
+    /** Forward per-tick seismic ping events. Each ping is the deceived
+     *  position the listener "hears" — never the unit's true position.
+     *  The ally team is already filtered server-side; we just dispatch. */
+    forwardSeismicPings(pings: ReadonlyArray<{ x: number; y: number; z: number; strength: number; allyTeam: number }>): void {
+        if (this.disposed || pings.length === 0) return;
+        this.postToWorker({ type: 'seismicPings', pings: pings.map(p => ({ ...p })) });
     }
 
     /** Forward a resource update to the worker. */
@@ -368,7 +396,7 @@ export class LuaWidgetManager {
      *  Pass-through: every field on the wire is forwarded so the
      *  worker's buildLuaUnitDef can populate UnitDefs.<id>.customParams,
      *  transportSize, repairSpeed, yardmap, … directly. */
-    forwardUnitDefs(defs: ReadonlyArray<Record<string, unknown>>): void {
+    forwardUnitDefs(defs: ReadonlyArray<object>): void {
         if (this.disposed || defs.length === 0) return;
         this.postToWorker({ type: 'unitDefsUpdate', defs: defs.map(d => ({ ...d })) });
     }
@@ -519,7 +547,9 @@ export class LuaWidgetManager {
             || msg.type === 'mousemove'
             || msg.type === 'stateUpdate'
             || msg.type === 'gameInfo'
-            || msg.type === 'entityState') return;
+            || msg.type === 'entityState'
+            || msg.type === 'intelTransitions'
+            || msg.type === 'seismicPings') return;
         const t = String(msg.type ?? '?');
         let summary = t;
         switch (t) {
@@ -1114,6 +1144,7 @@ export class LuaWidgetManager {
         // repeated shutdown messages to the worker.
         if (this.disposed) return;
         this.disposed = true;
+        this.intelTracker.reset();
         if (this.stateInterval) {
             clearInterval(this.stateInterval);
             this.stateInterval = null;

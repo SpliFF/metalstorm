@@ -179,6 +179,56 @@ void ScriptEventDispatcher::UnitMoveFailed(const CUnit* unit) {
     DispatchEvent(ScriptEvent::UnitEvent(ScriptEventType::UnitMoveFailed, unit->id));
 }
 
+// === Intel transitions ===
+//
+// LOS / radar transitions carry the listener ally team in intData[0].
+// Cloak transitions are unit-only (no allyteam param — engine fires
+// these once per cloak state change for the unit's owning team).
+// Seismic ping carries position + strength + listener ally team.
+
+static ScriptEvent MakeLosEvent(uint16_t type, const CUnit* unit, int allyTeam) {
+    auto e = ScriptEvent::UnitEvent(type, unit->id);
+    e.intData[0] = allyTeam;
+    return e;
+}
+
+void ScriptEventDispatcher::UnitEnteredLos(const CUnit* unit, int allyTeam) {
+    DispatchEvent(MakeLosEvent(ScriptEventType::UnitEnteredLos, unit, allyTeam));
+}
+
+void ScriptEventDispatcher::UnitLeftLos(const CUnit* unit, int allyTeam) {
+    DispatchEvent(MakeLosEvent(ScriptEventType::UnitLeftLos, unit, allyTeam));
+}
+
+void ScriptEventDispatcher::UnitEnteredRadar(const CUnit* unit, int allyTeam) {
+    DispatchEvent(MakeLosEvent(ScriptEventType::UnitEnteredRadar, unit, allyTeam));
+}
+
+void ScriptEventDispatcher::UnitLeftRadar(const CUnit* unit, int allyTeam) {
+    DispatchEvent(MakeLosEvent(ScriptEventType::UnitLeftRadar, unit, allyTeam));
+}
+
+void ScriptEventDispatcher::UnitCloaked(const CUnit* unit) {
+    DispatchEvent(ScriptEvent::UnitEvent(ScriptEventType::UnitCloaked, unit->id));
+}
+
+void ScriptEventDispatcher::UnitDecloaked(const CUnit* unit) {
+    DispatchEvent(ScriptEvent::UnitEvent(ScriptEventType::UnitDecloaked, unit->id));
+}
+
+void ScriptEventDispatcher::UnitSeismicPing(
+    const CUnit* unit, int allyTeam,
+    const float3& pos, float strength)
+{
+    ScriptEvent e;
+    e.type = ScriptEventType::UnitSeismicPing;
+    e.entityId = unit ? unit->id : 0;
+    e.intData[0] = allyTeam;
+    e.floatData[0] = strength;
+    e.position = pos;
+    DispatchEvent(e);
+}
+
 // === Feature events ===
 
 void ScriptEventDispatcher::FeatureCreated(const CFeature* feature) {

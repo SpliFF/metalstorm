@@ -9,6 +9,7 @@ import { GameEvent, GameEventT } from '../spring-web/game-event.js';
 import { ProjectileFiredEvent, ProjectileFiredEventT } from '../spring-web/projectile-fired-event.js';
 import { ProjectileImpactEvent, ProjectileImpactEventT } from '../spring-web/projectile-impact-event.js';
 import { ProjectileTrajectoryEvent, ProjectileTrajectoryEventT } from '../spring-web/projectile-trajectory-event.js';
+import { SeismicPing, SeismicPingT } from '../spring-web/seismic-ping.js';
 import { SoundEvent, SoundEventT } from '../spring-web/sound-event.js';
 
 
@@ -103,8 +104,22 @@ soundsLength():number {
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
+/**
+ * Per-tick seismic pings. Visibility-filtered server-side: each
+ * session only receives pings whose `ally_team` matches its own.
+ */
+seismicPings(index: number, obj?:SeismicPing):SeismicPing|null {
+  const offset = this.bb!.__offset(this.bb_pos, 18);
+  return offset ? (obj || new SeismicPing()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
+}
+
+seismicPingsLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 18);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
 static startGameEventBatch(builder:flatbuffers.Builder) {
-  builder.startObject(7);
+  builder.startObject(8);
 }
 
 static addFrame(builder:flatbuffers.Builder, frame:number) {
@@ -207,12 +222,28 @@ static startSoundsVector(builder:flatbuffers.Builder, numElems:number) {
   builder.startVector(4, numElems, 4);
 }
 
+static addSeismicPings(builder:flatbuffers.Builder, seismicPingsOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(7, seismicPingsOffset, 0);
+}
+
+static createSeismicPingsVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startSeismicPingsVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
 static endGameEventBatch(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOffset:flatbuffers.Offset, combatEventsOffset:flatbuffers.Offset, projectileFiredOffset:flatbuffers.Offset, projectileImpactsOffset:flatbuffers.Offset, projectileTrajectoriesOffset:flatbuffers.Offset, soundsOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOffset:flatbuffers.Offset, combatEventsOffset:flatbuffers.Offset, projectileFiredOffset:flatbuffers.Offset, projectileImpactsOffset:flatbuffers.Offset, projectileTrajectoriesOffset:flatbuffers.Offset, soundsOffset:flatbuffers.Offset, seismicPingsOffset:flatbuffers.Offset):flatbuffers.Offset {
   GameEventBatch.startGameEventBatch(builder);
   GameEventBatch.addFrame(builder, frame);
   GameEventBatch.addEvents(builder, eventsOffset);
@@ -221,6 +252,7 @@ static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOff
   GameEventBatch.addProjectileImpacts(builder, projectileImpactsOffset);
   GameEventBatch.addProjectileTrajectories(builder, projectileTrajectoriesOffset);
   GameEventBatch.addSounds(builder, soundsOffset);
+  GameEventBatch.addSeismicPings(builder, seismicPingsOffset);
   return GameEventBatch.endGameEventBatch(builder);
 }
 
@@ -232,7 +264,8 @@ unpack(): GameEventBatchT {
     this.bb!.createObjList<ProjectileFiredEvent, ProjectileFiredEventT>(this.projectileFired.bind(this), this.projectileFiredLength()),
     this.bb!.createObjList<ProjectileImpactEvent, ProjectileImpactEventT>(this.projectileImpacts.bind(this), this.projectileImpactsLength()),
     this.bb!.createObjList<ProjectileTrajectoryEvent, ProjectileTrajectoryEventT>(this.projectileTrajectories.bind(this), this.projectileTrajectoriesLength()),
-    this.bb!.createObjList<SoundEvent, SoundEventT>(this.sounds.bind(this), this.soundsLength())
+    this.bb!.createObjList<SoundEvent, SoundEventT>(this.sounds.bind(this), this.soundsLength()),
+    this.bb!.createObjList<SeismicPing, SeismicPingT>(this.seismicPings.bind(this), this.seismicPingsLength())
   );
 }
 
@@ -245,6 +278,7 @@ unpackTo(_o: GameEventBatchT): void {
   _o.projectileImpacts = this.bb!.createObjList<ProjectileImpactEvent, ProjectileImpactEventT>(this.projectileImpacts.bind(this), this.projectileImpactsLength());
   _o.projectileTrajectories = this.bb!.createObjList<ProjectileTrajectoryEvent, ProjectileTrajectoryEventT>(this.projectileTrajectories.bind(this), this.projectileTrajectoriesLength());
   _o.sounds = this.bb!.createObjList<SoundEvent, SoundEventT>(this.sounds.bind(this), this.soundsLength());
+  _o.seismicPings = this.bb!.createObjList<SeismicPing, SeismicPingT>(this.seismicPings.bind(this), this.seismicPingsLength());
 }
 }
 
@@ -256,7 +290,8 @@ constructor(
   public projectileFired: (ProjectileFiredEventT)[] = [],
   public projectileImpacts: (ProjectileImpactEventT)[] = [],
   public projectileTrajectories: (ProjectileTrajectoryEventT)[] = [],
-  public sounds: (SoundEventT)[] = []
+  public sounds: (SoundEventT)[] = [],
+  public seismicPings: (SeismicPingT)[] = []
 ){}
 
 
@@ -267,6 +302,7 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const projectileImpacts = GameEventBatch.createProjectileImpactsVector(builder, builder.createObjectOffsetList(this.projectileImpacts));
   const projectileTrajectories = GameEventBatch.createProjectileTrajectoriesVector(builder, builder.createObjectOffsetList(this.projectileTrajectories));
   const sounds = GameEventBatch.createSoundsVector(builder, builder.createObjectOffsetList(this.sounds));
+  const seismicPings = GameEventBatch.createSeismicPingsVector(builder, builder.createObjectOffsetList(this.seismicPings));
 
   return GameEventBatch.createGameEventBatch(builder,
     this.frame,
@@ -275,7 +311,8 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     projectileFired,
     projectileImpacts,
     projectileTrajectories,
-    sounds
+    sounds,
+    seismicPings
   );
 }
 }

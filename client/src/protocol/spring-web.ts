@@ -85,6 +85,7 @@ export { RoomStartGame, RoomStartGameT } from './spring-web/room-start-game.js';
 export { RoomState } from './spring-web/room-state.js';
 export { RoomStateUpdate, RoomStateUpdateT } from './spring-web/room-state-update.js';
 export { RoomTeamSelect, RoomTeamSelectT } from './spring-web/room-team-select.js';
+export { SeismicPing, SeismicPingT } from './spring-web/seismic-ping.js';
 export { ServerError, ServerErrorT } from './spring-web/server-error.js';
 export { ServerMessage, ServerMessageT } from './spring-web/server-message.js';
 export { ServerPayload } from './spring-web/server-payload.js';

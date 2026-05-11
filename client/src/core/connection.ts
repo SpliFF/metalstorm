@@ -36,6 +36,7 @@ import { PlayerLeft } from '../protocol/spring-web/player-left.js';
 import { GameWeaponDefs } from '../protocol/spring-web/game-weapon-defs.js';
 import { GameWeaponDef } from '../protocol/spring-web/game-weapon-def.js';
 import { SoundEvent } from '../protocol/spring-web/sound-event.js';
+import { SeismicPing } from '../protocol/spring-web/seismic-ping.js';
 import { SoundRef } from '../protocol/spring-web/sound-ref.js';
 import { GameCegDefs } from '../protocol/spring-web/game-ceg-defs.js';
 import { GameCegDef } from '../protocol/spring-web/game-ceg-def.js';
@@ -97,6 +98,21 @@ export interface SoundEventInfo {
     priority: number;
     /// Owner team. 255 = no team / global.
     team: number;
+}
+
+/// Per-tick seismic ping decoded from a `GameEventBatch.seismic_pings`
+/// entry. The position is already deceived by the server's radar-error
+/// vector — clients never see the source unit's true position. ZK's
+/// minimap_events / unit_attack_warning widgets fire on these to flash
+/// a blip and play the warning siren.
+export interface SeismicPingInfo {
+    x: number;
+    y: number;
+    z: number;
+    strength: number;
+    /// Listener ally team. Server filters per-session so this always
+    /// matches the local viewer's ally team (or any team for spectators).
+    allyTeam: number;
 }
 
 /// Projectile lifecycle event info — decoded from the FlatBuffer batch and
@@ -379,6 +395,7 @@ export interface ConnectionEvents {
     onEntityState?: (snapshot: EntityStateSnapshot, isDelta: boolean) => void;
     onCombatEvents?: (events: CombatEventInfo[], frame: number) => void;
     onSoundEvents?: (events: SoundEventInfo[], frame: number) => void;
+    onSeismicPings?: (events: SeismicPingInfo[], frame: number) => void;
     onProjectileFired?: (events: ProjectileFiredInfo[], frame: number) => void;
     onProjectileImpacts?: (events: ProjectileImpactInfo[], frame: number) => void;
     onProjectileTrajectories?: (events: ProjectileTrajectoryInfo[], frame: number) => void;
@@ -1311,6 +1328,24 @@ export class Connection {
                 });
             }
             this.events.onSoundEvents(out, frame);
+        }
+
+        const pingCount = batch.seismicPingsLength();
+        if (pingCount > 0 && this.events.onSeismicPings) {
+            const out: SeismicPingInfo[] = [];
+            for (let i = 0; i < pingCount; i++) {
+                const e = batch.seismicPings(i, new SeismicPing());
+                if (!e) continue;
+                const p = e.pos();
+                out.push({
+                    x: p?.x() ?? 0,
+                    y: p?.y() ?? 0,
+                    z: p?.z() ?? 0,
+                    strength: e.strength(),
+                    allyTeam: e.allyTeam(),
+                });
+            }
+            this.events.onSeismicPings(out, frame);
         }
     }
 

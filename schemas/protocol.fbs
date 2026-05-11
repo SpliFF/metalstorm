@@ -498,6 +498,20 @@ table SoundEvent {
     team: uint8 = 255;
 }
 
+/// Seismic ping — emitted server-side when a moving unit's seismic
+/// signature exceeds the local seismic-listener radius for an ally
+/// team. Carries the (already deceived) world position the listener
+/// "hears", not the unit's true position. The unit id and unit-team
+/// are NOT included on the wire: seismic pings are intentionally
+/// anonymous (the whole point is "something is moving over there").
+/// `ally_team` is the listener team — server filters per-session so a
+/// client only ever receives pings for its own ally team.
+table SeismicPing {
+    pos: Vec3;
+    strength: float;
+    ally_team: int16;
+}
+
 table GameEventBatch {
     frame: uint32;
     events: [GameEvent];
@@ -510,6 +524,9 @@ table GameEventBatch {
     /// Per-tick sound emissions. Already visibility-filtered for this
     /// session (see SoundEventCollector / per-client snapshot filter).
     sounds: [SoundEvent];
+    /// Per-tick seismic pings. Visibility-filtered server-side: each
+    /// session only receives pings whose `ally_team` matches its own.
+    seismic_pings: [SeismicPing];
 }
 
 table ResourceUpdate {

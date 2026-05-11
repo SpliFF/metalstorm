@@ -833,6 +833,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         onSoundEvents(events) {
             soundEventPlayer.handleBatch(events);
         },
+        onSeismicPings(events) {
+            currentWidgetManager?.forwardSeismicPings(events);
+        },
         onEntityDestroy(entityId, x, y, z) {
             entityRenderer?.removeEntity(entityId);
             currentWidgetManager?.forwardEntityDestroy(entityId);

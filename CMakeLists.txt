@@ -357,6 +357,8 @@ if(TEST_SOURCES)
         ${MAP_SOURCES}
         ${LUA_BINDING_SOURCES}
         ${CMAKE_SOURCE_DIR}/rts/Server/CombatEventCollector.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/ProjectileEventCollector.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/SoundEventCollector.cpp
     )
     target_include_directories(spring-tests PRIVATE
         ${CMAKE_SOURCE_DIR}/rts

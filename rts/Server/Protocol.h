@@ -11,6 +11,7 @@
 #include "CombatEventCollector.h"
 #include "ProjectileEventCollector.h"
 #include "SoundEventCollector.h"
+#include "IntelEventCollector.h"
 #include "RoomManager.h"
 #include "MapMetadata.h"
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectileTypes.h"
@@ -147,14 +148,16 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
     const std::vector<ProjectileFiredEventData>& projFired = {},
     const std::vector<ProjectileImpactEventData>& projImpacts = {},
     const std::vector<ProjectileTrajectoryEventData>& projTrajectories = {},
-    const std::vector<SoundEventData>& sounds = {})
+    const std::vector<SoundEventData>& sounds = {},
+    const std::vector<SeismicPingData>& seismicPings = {})
 {
     flatbuffers::FlatBufferBuilder fbb(
         256 + events.size() * 32
             + projFired.size() * 64
             + projImpacts.size() * 32
             + projTrajectories.size() * 40
-            + sounds.size() * 32);
+            + sounds.size() * 32
+            + seismicPings.size() * 24);
 
     std::vector<flatbuffers::Offset<SpringWeb::CombatEvent>> combatOffsets;
     combatOffsets.reserve(events.size());
@@ -235,13 +238,25 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
         soundOffsets.push_back(seb.Finish());
     }
 
-    auto combatVec = fbb.CreateVector(combatOffsets);
-    auto firedVec  = fbb.CreateVector(firedOffsets);
-    auto impactVec = fbb.CreateVector(impactOffsets);
-    auto trajVec   = fbb.CreateVector(trajOffsets);
-    auto soundVec  = fbb.CreateVector(soundOffsets);
+    std::vector<flatbuffers::Offset<SpringWeb::SeismicPing>> seismicOffsets;
+    seismicOffsets.reserve(seismicPings.size());
+    for (const auto& p : seismicPings) {
+        auto pos = SpringWeb::Vec3(p.pos.x, p.pos.y, p.pos.z);
+        SpringWeb::SeismicPingBuilder spb(fbb);
+        spb.add_pos(&pos);
+        spb.add_strength(p.strength);
+        spb.add_ally_team(p.allyTeam);
+        seismicOffsets.push_back(spb.Finish());
+    }
+
+    auto combatVec  = fbb.CreateVector(combatOffsets);
+    auto firedVec   = fbb.CreateVector(firedOffsets);
+    auto impactVec  = fbb.CreateVector(impactOffsets);
+    auto trajVec    = fbb.CreateVector(trajOffsets);
+    auto soundVec   = fbb.CreateVector(soundOffsets);
+    auto seismicVec = fbb.CreateVector(seismicOffsets);
     auto batch = SpringWeb::CreateGameEventBatch(
-        fbb, frame, /*events=*/0, combatVec, firedVec, impactVec, trajVec, soundVec);
+        fbb, frame, /*events=*/0, combatVec, firedVec, impactVec, trajVec, soundVec, seismicVec);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameEventBatch, batch.Union());
 }
 

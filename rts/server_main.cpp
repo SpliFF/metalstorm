@@ -1730,11 +1730,15 @@ int main(int argc, char* argv[])
         auto events = combatEvents.Drain();
         auto projDrain = projectileEvents.Drain();
         auto soundDrain = soundEvents.Drain();
+        auto seismicDrain = intelEvents != nullptr
+            ? intelEvents->DrainSeismicPings()
+            : std::vector<SeismicPingData>{};
         const bool hasAny = !events.empty()
             || !projDrain.fired.empty()
             || !projDrain.impacts.empty()
             || !projDrain.trajectories.empty()
-            || !soundDrain.empty();
+            || !soundDrain.empty()
+            || !seismicDrain.empty();
         if (hasAny && rtcServer.GetClientCount() > 0) {
             const uint32_t frameNo = static_cast<uint32_t>(sim.GetFrameNum());
 
@@ -1806,14 +1810,24 @@ int main(int argc, char* argv[])
                         visibleSounds.push_back(s);
                 }
 
+                // Seismic pings: emitted once per ally team that has a
+                // seismic listener in range. Only forward pings whose
+                // ally_team matches the viewer; spectators see all.
+                std::vector<SeismicPingData> visiblePings;
+                visiblePings.reserve(seismicDrain.size());
+                for (const auto& p : seismicDrain) {
+                    if (viewerAllyTeam < 0 || p.allyTeam == viewerAllyTeam)
+                        visiblePings.push_back(p);
+                }
+
                 if (visibleCombat.empty() && fired.empty()
                     && impacts.empty() && trajectories.empty()
-                    && visibleSounds.empty())
+                    && visibleSounds.empty() && visiblePings.empty())
                     return;
 
                 auto batch = Protocol::BuildCombatEventBatch(
                     frameNo, visibleCombat, fired, impacts, trajectories,
-                    visibleSounds);
+                    visibleSounds, visiblePings);
                 rtcServer.SendReliable(clientId, batch.data(), batch.size());
             });
         }

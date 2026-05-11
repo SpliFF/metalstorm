@@ -68,6 +68,7 @@ const std::unordered_map<int, std::string>* gAITeams = nullptr;
 #include "System/FileSystem/FileSystem.h"
 
 #include "System/Scripting/ScriptEventDispatcher.h"
+#include "Server/IntelEventCollector.h"
 #include "Lua/LuaScriptContext.h"
 #include "Lua/LuaRules.h"
 #include "Lua/LuaGaia.h"
@@ -286,6 +287,14 @@ void CSimulation::InitScripting()
     // Create the script event dispatcher
     scriptDispatcher = new ScriptEventDispatcher();
     scriptDispatcher->Register();
+
+    // Intel event collector — captures UnitSeismicPing into a per-tick
+    // queue that server_main.cpp drains and broadcasts (per-allyteam
+    // filtered) inside GameEventBatch.
+    if (intelEvents == nullptr) {
+        intelEvents = new IntelEventCollector();
+        intelEvents->Register();
+    }
 
     // Try to load LuaRules (game-wide synced gadgets) and LuaGaia
     // (map/environment synced gadgets). Either can be absent — the

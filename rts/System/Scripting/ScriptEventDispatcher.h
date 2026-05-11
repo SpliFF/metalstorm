@@ -60,6 +60,19 @@ public:
     void UnitMoved(const CUnit* unit) override;
     void UnitMoveFailed(const CUnit* unit) override;
 
+    // Intel transitions — per-allyteam (LOS / radar / cloak / seismic).
+    // Forwarded so non-Lua IScriptContext instances (server-side JS,
+    // AI thread pool) observe visibility changes; LuaRules / LuaGaia
+    // already get them through CLuaHandle's direct EventHandler hook.
+    void UnitEnteredLos(const CUnit* unit, int allyTeam) override;
+    void UnitLeftLos(const CUnit* unit, int allyTeam) override;
+    void UnitEnteredRadar(const CUnit* unit, int allyTeam) override;
+    void UnitLeftRadar(const CUnit* unit, int allyTeam) override;
+    void UnitCloaked(const CUnit* unit) override;
+    void UnitDecloaked(const CUnit* unit) override;
+    void UnitSeismicPing(const CUnit* unit, int allyTeam,
+                         const float3& pos, float strength) override;
+
     void FeatureCreated(const CFeature* feature) override;
     void FeatureDestroyed(const CFeature* feature) override;
     void FeatureDamaged(const CFeature* feature, const CUnit* attacker,
