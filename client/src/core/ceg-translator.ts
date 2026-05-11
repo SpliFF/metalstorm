@@ -102,10 +102,55 @@ function translateSpawn(s: CegSpawnInfo): ParticleSpawn | SubCegSpawn | null {
         case 'CSpherePartSpawner':
             return translateSpherePartSpawner(s, props);
 
-        // explspike, CSmokeTrailProjectile, CFireProjectile, debris,
-        // CTracerProjectile — visually distinct enough that pooling
-        // them as flares would mislead. Skip until specialised
-        // pools land in 5d.
+        // ── Phase 4 workhorse projectile spawners ─────────────────
+        // These render as billboards in the existing flare/spark/
+        // smoke pools (no new shader pipelines yet — plan defers
+        // dedicated tracer/wake/bubble shaders until a real CEG
+        // demands them). Each class maps its native property set
+        // onto ParticleSpawn fields so the visual signature still
+        // reads even without a bespoke pool.
+
+        case 'CFireProjectile':
+            return translateFireProjectile(s, props);
+
+        case 'CSmokeProjectile':
+        case 'CSmokeProjectile2':
+            return translateSmokeProjectile(s, props);
+
+        case 'CDirtProjectile':
+            return translateDirtProjectile(s, props);
+
+        case 'CSpherePartProjectile':
+            return translateSpherePartProjectile(s, props);
+
+        case 'CMuzzleFlame':
+            // Legacy non-bitmap muzzle flame; rare in ZK but appears
+            // in older content. Treat as CBitmapMuzzleFlame — visual
+            // difference is small enough at typical zoom that the
+            // shared translator is adequate.
+            return translateMuzzleFlame(s, props);
+
+        case 'CGfxProjectile':
+            return translateGfxProjectile(s, props);
+
+        case 'CGeoSquareProjectile':
+            return translateGeoSquareProjectile(s, props);
+
+        case 'CTracerProjectile':
+            return translateTracerProjectile(s, props);
+
+        case 'CExploSpikeProjectile':
+            return translateExploSpikeProjectile(s, props);
+
+        case 'CSmokeTrailProjectile':
+            return translateSmokeTrailProjectile(s, props);
+
+        case 'CBubbleProjectile':
+            return translateBubbleProjectile(s, props);
+
+        case 'CWakeProjectile':
+            return translateWakeProjectile(s, props);
+
         default:
             return null;
     }
@@ -284,6 +329,322 @@ function translateMuzzleFlame(_s: CegSpawnInfo, props: PropMap): ParticleSpawn |
         sizeEnd,
         colorStart: [c[0], c[1], c[2], 1.0],
         rotationSpeedMax: 0,
+    };
+}
+
+// ── Phase 4 workhorse projectile spawners ──────────────────────────────────
+//
+// These classes are individual projectile types in Spring — each was
+// historically rendered with its own draw path. We collapse them onto
+// the existing flare/spark/smoke pools so authored CEGs that reference
+// them produce *something* visible at the right scale and colour
+// signature. Dedicated shader pipelines (stretched tracer beams,
+// ground-aligned wake decals, animated bubble sprites) can replace
+// these per-class billboards later when ZK content actually demands
+// the extra fidelity.
+
+// ── CFireProjectile ───────────────────────────────────────────────────────
+// Long-lived flame chunk. Spring authors use it as the visual debris
+// from burning structures and as fireball impact petals. Properties
+// of note: `ttl` (frames), `size`, `agespeed` (size decay rate), and
+// optional `emitVector` (initial drift bias). We render as a flame-
+// coloured flare cluster with small upward drift.
+
+function translateFireProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSpawn | null {
+    const ttlFrames = props.getFloat('ttl', 60);
+    if (ttlFrames <= 0) return null;
+    const ttlS = clamp(ttlFrames / SIM_HZ, 0.2, MAX_LIFETIME_S);
+    const sizeStart = clamp(props.getFloat('size', 10), 2, 60);
+    const sizeEnd = clamp(sizeStart * 0.4, 0.5, sizeStart);
+    return {
+        class: 'flare',
+        count: 1,
+        lifetimeMin: ttlS, lifetimeMax: ttlS,
+        velocityBase: [0, 4, 0],
+        velocitySpread: 3,
+        velocityScale: 0,
+        gravity: -4,
+        sizeStart, sizeEnd,
+        colorStart: [1.0, 0.7, 0.2, 1.0],
+        colorEnd:   [0.6, 0.2, 0.05, 0.0],
+        rotationSpeedMax: 1.0,
+    };
+}
+
+// ── CSmokeProjectile / CSmokeProjectile2 ──────────────────────────────────
+// Spring's dedicated smoke puff classes. Differ from CSimpleParticle-
+// System-with-smoke-texture by their authored alpha/size curves and
+// the use of `startsize` + `sizeexpansion` rather than `particlesize`
+// + `sizegrowth`. Author intent: a single big puff per spawn, not a
+// fan of small ones. We honour `color` (luminosity 0..1), `startsize`,
+// `sizeexpansion` (per-frame size growth), and `ttl`.
+
+function translateSmokeProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSpawn | null {
+    // `agespeed` is "age fraction added per sim frame"; ttl = 1 / agespeed.
+    const ageSpeed = props.getFloat('agespeed', 1 / 60);
+    const ttlFrames = ageSpeed > 0 ? Math.min(1 / ageSpeed, 240) : 90;
+    const ttlS = clamp(ttlFrames / SIM_HZ, 0.5, MAX_LIFETIME_S);
+    const startSize = clamp(props.getFloat('startsize', 6), 2, 60);
+    const expansionPerFrame = props.getFloat('sizeexpansion', 0.4);
+    const sizeEnd = clamp(startSize + expansionPerFrame * SIM_HZ * ttlS,
+                          startSize, 200);
+    // `color` is a single luminance value in Spring's smoke shader
+    // (0 = dark grey smoke, 1 = light cloud). Map to a grey RGB.
+    const lum = clamp(props.getFloat('color', 0.5), 0, 1);
+    return {
+        class: 'smoke',
+        count: 1,
+        lifetimeMin: ttlS, lifetimeMax: ttlS,
+        velocityBase: [0, 4, 0],
+        velocitySpread: 2,
+        velocityScale: 0,
+        gravity: -2,
+        sizeStart: startSize, sizeEnd,
+        colorStart: [lum, lum, lum, 0.6],
+        colorEnd:   [lum * 0.6, lum * 0.6, lum * 0.6, 0.0],
+        rotationSpeedMax: 0.8,
+    };
+}
+
+// ── CDirtProjectile ───────────────────────────────────────────────────────
+// Kicked-up debris chunk. Strong downward gravity, brown/grey colour,
+// short-lived. ZK uses it for explosion ground-debris fans alongside
+// CSimpleParticleSystem dirt sparks.
+
+function translateDirtProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSpawn | null {
+    const ttlFrames = props.getFloat('ttl', 45);
+    if (ttlFrames <= 0) return null;
+    const ttlS = clamp(ttlFrames / SIM_HZ, 0.2, MAX_LIFETIME_S);
+    const sizeStart = clamp(props.getFloat('size', 3), 0.5, 20);
+    const slowDown = props.getFloat('slowdown', 1);
+    // `slowdown` divides velocity each frame; we use it as a damping
+    // signal — higher slowdown → less spread to keep debris compact.
+    const spread = clamp(40 / Math.max(0.5, slowDown), 5, 80);
+    const c = props.getVec3('color', [0.5, 0.4, 0.3]);
+    const alpha = clamp(props.getFloat('alpha', 1), 0, 1);
+    return {
+        class: 'spark',
+        count: 1,
+        lifetimeMin: ttlS * 0.7, lifetimeMax: ttlS,
+        velocityBase: [0, 5, 0],
+        velocitySpread: spread,
+        velocityScale: 0,
+        gravity: 80,
+        sizeStart, sizeEnd: sizeStart * 0.5,
+        colorStart: [c[0], c[1], c[2], alpha],
+        colorEnd:   [c[0] * 0.4, c[1] * 0.4, c[2] * 0.4, 0.0],
+        rotationSpeedMax: 0.6,
+    };
+}
+
+// ── CSpherePartProjectile ─────────────────────────────────────────────────
+// Single sphere fragment fired from CSpherePartSpawner (or directly).
+// Properties: `expansionspeed` (radial growth), `ttl`, `color`, `alpha`.
+// Renders as a single growing flare puff.
+
+function translateSpherePartProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSpawn | null {
+    const ttlFrames = props.getFloat('ttl', 30);
+    if (ttlFrames <= 0) return null;
+    const ttlS = clamp(ttlFrames / SIM_HZ, 0.1, MAX_LIFETIME_S);
+    const expansion = clamp(props.getFloat('expansionspeed', 4), 0, 60);
+    const sizeStart = 1;
+    const sizeEnd = clamp(sizeStart + expansion * SIM_HZ * ttlS, 2, 200);
+    const c = props.getVec3('color', [1, 1, 1]);
+    const alpha = clamp(props.getFloat('alpha', 1), 0, 1);
+    return {
+        class: 'flare',
+        count: 1,
+        lifetimeMin: ttlS, lifetimeMax: ttlS,
+        velocityBase: [0, 0, 0],
+        velocitySpread: 0,
+        velocityScale: 0,
+        gravity: 0,
+        sizeStart, sizeEnd,
+        colorStart: [c[0], c[1], c[2], alpha],
+        colorEnd:   [c[0], c[1], c[2], 0.0],
+        rotationSpeedMax: 0,
+    };
+}
+
+// ── CGfxProjectile ────────────────────────────────────────────────────────
+// Generic textured billboard — Spring's catch-all "I just need a quad"
+// class. Honour `ttl`, `size`, `pos`, with a neutral white default.
+
+function translateGfxProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSpawn | null {
+    const ttlFrames = props.getFloat('ttl', 30);
+    if (ttlFrames <= 0) return null;
+    const ttlS = clamp(ttlFrames / SIM_HZ, 0.1, MAX_LIFETIME_S);
+    const sizeStart = clamp(props.getFloat('size', 6), 1, 40);
+    return {
+        class: 'flare',
+        count: 1,
+        lifetimeMin: ttlS, lifetimeMax: ttlS,
+        velocityBase: [0, 0, 0],
+        velocitySpread: 0,
+        velocityScale: 0,
+        gravity: 0,
+        sizeStart, sizeEnd: sizeStart,
+        colorStart: [1, 1, 1, 0.8],
+        colorEnd:   [1, 1, 1, 0.0],
+        rotationSpeedMax: 0.4,
+    };
+}
+
+// ── CGeoSquareProjectile ──────────────────────────────────────────────────
+// Geo vent puff — a small upward-drifting square sprite. Rare in ZK
+// (only on geothermal-themed maps). Honour `ttl`, `width`, `length`.
+
+function translateGeoSquareProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSpawn | null {
+    const ttlFrames = props.getFloat('ttl', 30);
+    if (ttlFrames <= 0) return null;
+    const ttlS = clamp(ttlFrames / SIM_HZ, 0.3, MAX_LIFETIME_S);
+    const size = clamp(Math.max(
+        props.getFloat('width', 4),
+        props.getFloat('length', 4)), 2, 40);
+    return {
+        class: 'flare',
+        count: 1,
+        lifetimeMin: ttlS, lifetimeMax: ttlS,
+        velocityBase: [0, 6, 0],
+        velocitySpread: 1,
+        velocityScale: 0,
+        gravity: -3,
+        sizeStart: size, sizeEnd: size * 0.7,
+        colorStart: [0.9, 0.6, 0.3, 0.7],
+        colorEnd:   [0.4, 0.2, 0.1, 0.0],
+        rotationSpeedMax: 0.5,
+    };
+}
+
+// ── CTracerProjectile ─────────────────────────────────────────────────────
+// Stretched-line tracer — Spring renders as a textured quad scaled
+// along the velocity axis. Lacking a dedicated stretched-quad pool
+// (Phase 4 deferred), we approximate with a short bright directional
+// flare cluster fired along the spawn direction. Visual signature
+// (bright streak following the line of fire) reads adequately at
+// typical RTS-camera zoom.
+
+function translateTracerProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSpawn | null {
+    const length = clamp(props.getFloat('length', 10), 4, 60);
+    const speed = clamp(props.getFloat('speed', 200), 50, 500);
+    return {
+        class: 'flare',
+        count: 2,
+        lifetimeMin: 0.08, lifetimeMax: 0.18,
+        velocityBase: [0, 0, 0],
+        velocitySpread: 0,
+        velocityScale: speed,
+        gravity: 0,
+        sizeStart: clamp(length * 0.3, 1, 8),
+        sizeEnd: clamp(length * 0.1, 0.5, 4),
+        colorStart: [1.0, 0.9, 0.4, 1.0],
+        colorEnd:   [1.0, 0.6, 0.1, 0.0],
+        rotationSpeedMax: 0,
+    };
+}
+
+// ── CExploSpikeProjectile ─────────────────────────────────────────────────
+// Directional radial spike — Spring fires N of these from an explosion
+// origin pointing outward, drawn as stretched quads along each spike's
+// direction. Without a stretched-quad pool, we render as a spark cluster
+// fired isotropically: the visual effect of "explosion spikes" reads
+// through the per-particle velocity spread.
+
+function translateExploSpikeProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSpawn | null {
+    const ttlFrames = props.getFloat('ttl', 15);
+    if (ttlFrames <= 0) return null;
+    const ttlS = clamp(ttlFrames / SIM_HZ, 0.1, 0.8);
+    const length = clamp(props.getFloat('length', 30), 5, 80);
+    return {
+        class: 'spark',
+        count: 1,
+        lifetimeMin: ttlS, lifetimeMax: ttlS,
+        velocityBase: [0, 0, 0],
+        velocitySpread: length * 4,
+        velocityScale: 0,
+        gravity: 0,
+        sizeStart: clamp(length * 0.1, 1, 6),
+        sizeEnd: 0.5,
+        colorStart: [1.0, 0.85, 0.3, 1.0],
+        colorEnd:   [1.0, 0.4, 0.1, 0.0],
+        rotationSpeedMax: 0,
+    };
+}
+
+// ── CSmokeTrailProjectile ─────────────────────────────────────────────────
+// Connected-segment smoke trail — Spring renders as a textured strip
+// along the projectile's path. The existing missile-trail renderer
+// (projectile-renderer.ts) already handles missile smoke; this class
+// would extract that into a shared pool. Phase 4 defers the extraction.
+// Approximate as a low-alpha smoke puff for the brief case where a CEG
+// directly spawns one (rare outside missile trails themselves).
+
+function translateSmokeTrailProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSpawn | null {
+    const ttlFrames = props.getFloat('ttl', 30);
+    if (ttlFrames <= 0) return null;
+    const ttlS = clamp(ttlFrames / SIM_HZ, 0.2, MAX_LIFETIME_S);
+    const size = clamp(props.getFloat('size', 6), 2, 30);
+    return {
+        class: 'smoke',
+        count: 1,
+        lifetimeMin: ttlS, lifetimeMax: ttlS,
+        velocityBase: [0, 1, 0],
+        velocitySpread: 1,
+        velocityScale: 0,
+        gravity: -1,
+        sizeStart: size, sizeEnd: size * 2,
+        colorStart: [0.5, 0.5, 0.5, 0.5],
+        colorEnd:   [0.3, 0.3, 0.3, 0.0],
+        rotationSpeedMax: 0.6,
+    };
+}
+
+// ── CBubbleProjectile ─────────────────────────────────────────────────────
+// Underwater bubble — small rising translucent sphere. Used in
+// water-themed weapon CEGs (torpedo wakes, depth-charge bursts).
+
+function translateBubbleProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSpawn | null {
+    const ttlFrames = props.getFloat('ttl', 60);
+    if (ttlFrames <= 0) return null;
+    const ttlS = clamp(ttlFrames / SIM_HZ, 0.3, MAX_LIFETIME_S);
+    const size = clamp(props.getFloat('size', 3), 1, 12);
+    return {
+        class: 'flare',
+        count: 1,
+        lifetimeMin: ttlS, lifetimeMax: ttlS,
+        velocityBase: [0, 6, 0],
+        velocitySpread: 1,
+        velocityScale: 0,
+        gravity: -5,
+        sizeStart: size, sizeEnd: size * 1.5,
+        colorStart: [0.7, 0.85, 1.0, 0.5],
+        colorEnd:   [0.5, 0.65, 0.85, 0.0],
+        rotationSpeedMax: 0,
+    };
+}
+
+// ── CWakeProjectile ───────────────────────────────────────────────────────
+// Water-surface wake decal. Spring draws as a ground-aligned quad
+// expanding radially; without a decal pool we approximate as a flat
+// low-alpha smoke puff sized to the wake's radius.
+
+function translateWakeProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSpawn | null {
+    const ttlFrames = props.getFloat('ttl', 60);
+    if (ttlFrames <= 0) return null;
+    const ttlS = clamp(ttlFrames / SIM_HZ, 0.3, MAX_LIFETIME_S);
+    const size = clamp(props.getFloat('size', 12), 4, 40);
+    return {
+        class: 'smoke',
+        count: 1,
+        lifetimeMin: ttlS, lifetimeMax: ttlS,
+        velocityBase: [0, 0, 0],
+        velocitySpread: 0,
+        velocityScale: 0,
+        gravity: 0,
+        sizeStart: size, sizeEnd: size * 2.5,
+        colorStart: [0.85, 0.9, 0.95, 0.45],
+        colorEnd:   [0.7, 0.75, 0.8, 0.0],
+        rotationSpeedMax: 0.3,
     };
 }
 
