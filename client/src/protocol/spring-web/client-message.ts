@@ -18,6 +18,7 @@ import { LogUnsubscribe, LogUnsubscribeT } from '../spring-web/log-unsubscribe.j
 import { LuaRulesMsg, LuaRulesMsgT } from '../spring-web/lua-rules-msg.js';
 import { Ping, PingT } from '../spring-web/ping.js';
 import { PlayerCommand, PlayerCommandT } from '../spring-web/player-command.js';
+import { PlayerCommandBatch, PlayerCommandBatchT } from '../spring-web/player-command-batch.js';
 import { ReconnectRequest, ReconnectRequestT } from '../spring-web/reconnect-request.js';
 import { RoomAddAI, RoomAddAIT } from '../spring-web/room-add-ai.js';
 import { RoomCloseRoom, RoomCloseRoomT } from '../spring-web/room-close-room.js';
@@ -32,6 +33,7 @@ import { RoomSetAITeam, RoomSetAITeamT } from '../spring-web/room-set-aiteam.js'
 import { RoomSetStartPos, RoomSetStartPosT } from '../spring-web/room-set-start-pos.js';
 import { RoomStartGame, RoomStartGameT } from '../spring-web/room-start-game.js';
 import { RoomTeamSelect, RoomTeamSelectT } from '../spring-web/room-team-select.js';
+import { SelectionState, SelectionStateT } from '../spring-web/selection-state.js';
 import { ViewportUpdate, ViewportUpdateT } from '../spring-web/viewport-update.js';
 
 
@@ -120,7 +122,7 @@ unpackTo(_o: ClientMessageT): void {
 export class ClientMessageT implements flatbuffers.IGeneratedObject {
 constructor(
   public payloadType: ClientPayload = ClientPayload.NONE,
-  public payload: AIListRequestT|AckT|AuthRequestT|ChatSendT|ConsoleCommandT|GameListRequestT|HandshakeT|LogIngestT|LogSubscribeT|LogUnsubscribeT|LuaRulesMsgT|PingT|PlayerCommandT|ReconnectRequestT|RoomAddAIT|RoomCloseRoomT|RoomCreateT|RoomEndGameT|RoomJoinT|RoomKickT|RoomLeaveT|RoomReadyT|RoomRemoveAIT|RoomSetAITeamT|RoomSetStartPosT|RoomStartGameT|RoomTeamSelectT|ViewportUpdateT|null = null
+  public payload: AIListRequestT|AckT|AuthRequestT|ChatSendT|ConsoleCommandT|GameListRequestT|HandshakeT|LogIngestT|LogSubscribeT|LogUnsubscribeT|LuaRulesMsgT|PingT|PlayerCommandBatchT|PlayerCommandT|ReconnectRequestT|RoomAddAIT|RoomCloseRoomT|RoomCreateT|RoomEndGameT|RoomJoinT|RoomKickT|RoomLeaveT|RoomReadyT|RoomRemoveAIT|RoomSetAITeamT|RoomSetStartPosT|RoomStartGameT|RoomTeamSelectT|SelectionStateT|ViewportUpdateT|null = null
 ){}
 
 

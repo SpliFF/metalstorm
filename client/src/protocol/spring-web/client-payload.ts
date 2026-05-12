@@ -15,6 +15,7 @@ import { LogUnsubscribe, LogUnsubscribeT } from '../spring-web/log-unsubscribe.j
 import { LuaRulesMsg, LuaRulesMsgT } from '../spring-web/lua-rules-msg.js';
 import { Ping, PingT } from '../spring-web/ping.js';
 import { PlayerCommand, PlayerCommandT } from '../spring-web/player-command.js';
+import { PlayerCommandBatch, PlayerCommandBatchT } from '../spring-web/player-command-batch.js';
 import { ReconnectRequest, ReconnectRequestT } from '../spring-web/reconnect-request.js';
 import { RoomAddAI, RoomAddAIT } from '../spring-web/room-add-ai.js';
 import { RoomCloseRoom, RoomCloseRoomT } from '../spring-web/room-close-room.js';
@@ -29,6 +30,7 @@ import { RoomSetAITeam, RoomSetAITeamT } from '../spring-web/room-set-aiteam.js'
 import { RoomSetStartPos, RoomSetStartPosT } from '../spring-web/room-set-start-pos.js';
 import { RoomStartGame, RoomStartGameT } from '../spring-web/room-start-game.js';
 import { RoomTeamSelect, RoomTeamSelectT } from '../spring-web/room-team-select.js';
+import { SelectionState, SelectionStateT } from '../spring-web/selection-state.js';
 import { ViewportUpdate, ViewportUpdateT } from '../spring-web/viewport-update.js';
 
 
@@ -61,13 +63,15 @@ export enum ClientPayload {
   LogSubscribe = 25,
   LogUnsubscribe = 26,
   ConsoleCommand = 27,
-  LuaRulesMsg = 28
+  LuaRulesMsg = 28,
+  PlayerCommandBatch = 29,
+  SelectionState = 30
 }
 
 export function unionToClientPayload(
   type: ClientPayload,
-  accessor: (obj:AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate|null
-): AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate|null {
+  accessor: (obj:AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|Ping|PlayerCommand|PlayerCommandBatch|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|Ping|PlayerCommand|PlayerCommandBatch|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|ViewportUpdate|null
+): AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|Ping|PlayerCommand|PlayerCommandBatch|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|ViewportUpdate|null {
   switch(ClientPayload[type]) {
     case 'NONE': return null; 
     case 'Handshake': return accessor(new Handshake())! as Handshake;
@@ -98,15 +102,17 @@ export function unionToClientPayload(
     case 'LogUnsubscribe': return accessor(new LogUnsubscribe())! as LogUnsubscribe;
     case 'ConsoleCommand': return accessor(new ConsoleCommand())! as ConsoleCommand;
     case 'LuaRulesMsg': return accessor(new LuaRulesMsg())! as LuaRulesMsg;
+    case 'PlayerCommandBatch': return accessor(new PlayerCommandBatch())! as PlayerCommandBatch;
+    case 'SelectionState': return accessor(new SelectionState())! as SelectionState;
     default: return null;
   }
 }
 
 export function unionListToClientPayload(
   type: ClientPayload, 
-  accessor: (index: number, obj:AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate|null, 
+  accessor: (index: number, obj:AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|Ping|PlayerCommand|PlayerCommandBatch|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|Ping|PlayerCommand|PlayerCommandBatch|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|ViewportUpdate|null, 
   index: number
-): AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|Ping|PlayerCommand|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|ViewportUpdate|null {
+): AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|Ping|PlayerCommand|PlayerCommandBatch|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|ViewportUpdate|null {
   switch(ClientPayload[type]) {
     case 'NONE': return null; 
     case 'Handshake': return accessor(index, new Handshake())! as Handshake;
@@ -137,6 +143,8 @@ export function unionListToClientPayload(
     case 'LogUnsubscribe': return accessor(index, new LogUnsubscribe())! as LogUnsubscribe;
     case 'ConsoleCommand': return accessor(index, new ConsoleCommand())! as ConsoleCommand;
     case 'LuaRulesMsg': return accessor(index, new LuaRulesMsg())! as LuaRulesMsg;
+    case 'PlayerCommandBatch': return accessor(index, new PlayerCommandBatch())! as PlayerCommandBatch;
+    case 'SelectionState': return accessor(index, new SelectionState())! as SelectionState;
     default: return null;
   }
 }

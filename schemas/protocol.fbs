@@ -57,6 +57,30 @@ table PlayerCommand {
     timeout_frames: uint32;     // 0 = no timeout
 }
 
+/// Multi-command batch sent atomically. Used for building drag-row /
+/// drag-rectangle placement (N PlayerCommand entries, same builder
+/// list, different positions), waypoint drag (CMD.INSERT + CMD.REMOVE
+/// pair against the same unit), and any sequence where dropping or
+/// reordering between entries would break intent. The server executes
+/// the contained commands in order on the same sim tick — no
+/// in-between state visible to other clients.
+table PlayerCommandBatch {
+    sequence: uint32;           // One sequence number for the whole batch
+    commands: [PlayerCommand];
+}
+
+/// Client → Server: the local player's current selection. Sent debounced
+/// (~50ms) on selection change. Server uses it to scope
+/// UnitCmdDescsUpdate to only the units the player has selected, and as
+/// the implicit target list for grouped commands when squad_ids is
+/// empty. Sending an empty list is valid (no selection). The server
+/// treats absent SelectionState as "selection unchanged" — resends are
+/// idempotent.
+table SelectionState {
+    sequence: uint32;           // Monotonic, mirrors PlayerCommand.sequence space
+    unit_ids: [uint32];         // Currently selected own-team units
+}
+
 table ViewportUpdate {
     viewport_id: uint8;
     center_x: float;
@@ -297,6 +321,8 @@ union ClientPayload {
     LogUnsubscribe,
     ConsoleCommand,
     LuaRulesMsg,
+    PlayerCommandBatch,
+    SelectionState,
 }
 
 table ClientMessage {
@@ -1355,14 +1381,42 @@ table UnitCommandQueuesUpdate {
 /// games attach build options dynamically per unit (via Spring.InsertUnitCmdDesc),
 /// so the static UnitDef.build_options list is not authoritative — the client
 /// needs the live cmd-desc list to know what each selected unit can build.
-/// Currently only build commands (cmd_id < 0) are streamed; standing-order
-/// toggles (FIRE_STATE, MOVE_STATE, etc.) come later.
+///
+/// The server streams **all** cmd-descs for selected units (build commands,
+/// standard orders like Move/Attack/Patrol, state toggles like FIRE_STATE).
+/// To keep bandwidth in check, UnitCmdDescsUpdate is scoped to the
+/// currently-selected units (see SelectionState).
 table UnitCmdDesc {
     /// Spring command id. Negative IDs are build commands where
     /// -cmd_id is the unit-def id to construct.
     cmd_id: int32;
     /// True if greyed-out (not currently buildable due to tech, resources, etc.).
     disabled: bool = false;
+    /// Human-readable name shown on the button ("Move", "Attack",
+    /// "Patrol"). For build commands this is the unit-def display name.
+    name: string;
+    /// Action binding name ("move", "areaattack", "buildunit_armcom").
+    /// Looked up by widgets to bind hotkeys via Spring.GetKeyBindings.
+    action: string;
+    /// Texture path / atlas key for the button glyph. May be an
+    /// engine-relative path ("Anims/cursormove.png"), a #-prefixed
+    /// generated icon ("#armcom" → ZK build-icon atlas), or empty.
+    texture: string;
+    /// Tooltip body shown on hover. May contain Spring's standard
+    /// markup (\n, color codes).
+    tooltip: string;
+    /// CMDTYPE_* constant (0=ICON, 5=ICON_MODE, 10=ICON_MAP, 12=ICON_UNIT,
+    /// 20=ICON_BUILDING, …). Drives the UI's interaction model: ICON
+    /// fires immediately, ICON_MAP cycles into ground-pick mode, etc.
+    type: int32 = 0;
+    /// Mode-specific parameter strings. For CMDTYPE_ICON_MODE, params[0]
+    /// is the current state index as a decimal string ("0", "1", "2")
+    /// and params[1..n] are the human labels ("Hold fire", "Return
+    /// fire", "Fire at will"). Empty for non-stateful commands.
+    params: [string];
+    /// True if the cmd-desc should be hidden from the command panel
+    /// (some widgets stash internal commands here).
+    hidden: bool = false;
 }
 
 table UnitCmdDescs {

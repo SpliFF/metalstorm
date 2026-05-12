@@ -11,8 +11,11 @@ import * as flatbuffers from 'flatbuffers';
  * games attach build options dynamically per unit (via Spring.InsertUnitCmdDesc),
  * so the static UnitDef.build_options list is not authoritative — the client
  * needs the live cmd-desc list to know what each selected unit can build.
- * Currently only build commands (cmd_id < 0) are streamed; standing-order
- * toggles (FIRE_STATE, MOVE_STATE, etc.) come later.
+ *
+ * The server streams **all** cmd-descs for selected units (build commands,
+ * standard orders like Move/Attack/Patrol, state toggles like FIRE_STATE).
+ * To keep bandwidth in check, UnitCmdDescsUpdate is scoped to the
+ * currently-selected units (see SelectionState).
  */
 export class UnitCmdDesc implements flatbuffers.IUnpackableObject<UnitCmdDescT> {
   bb: flatbuffers.ByteBuffer|null = null;
@@ -49,8 +52,90 @@ disabled():boolean {
   return offset ? !!this.bb!.readInt8(this.bb_pos + offset) : false;
 }
 
+/**
+ * Human-readable name shown on the button ("Move", "Attack",
+ * "Patrol"). For build commands this is the unit-def display name.
+ */
+name():string|null
+name(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+name(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 8);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
+/**
+ * Action binding name ("move", "areaattack", "buildunit_armcom").
+ * Looked up by widgets to bind hotkeys via Spring.GetKeyBindings.
+ */
+action():string|null
+action(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+action(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 10);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
+/**
+ * Texture path / atlas key for the button glyph. May be an
+ * engine-relative path ("Anims/cursormove.png"), a #-prefixed
+ * generated icon ("#armcom" → ZK build-icon atlas), or empty.
+ */
+texture():string|null
+texture(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+texture(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 12);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
+/**
+ * Tooltip body shown on hover. May contain Spring's standard
+ * markup (\n, color codes).
+ */
+tooltip():string|null
+tooltip(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+tooltip(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 14);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
+/**
+ * CMDTYPE_* constant (0=ICON, 5=ICON_MODE, 10=ICON_MAP, 12=ICON_UNIT,
+ * 20=ICON_BUILDING, …). Drives the UI's interaction model: ICON
+ * fires immediately, ICON_MAP cycles into ground-pick mode, etc.
+ */
+type():number {
+  const offset = this.bb!.__offset(this.bb_pos, 16);
+  return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
+}
+
+/**
+ * Mode-specific parameter strings. For CMDTYPE_ICON_MODE, params[0]
+ * is the current state index as a decimal string ("0", "1", "2")
+ * and params[1..n] are the human labels ("Hold fire", "Return
+ * fire", "Fire at will"). Empty for non-stateful commands.
+ */
+params(index: number):string
+params(index: number,optionalEncoding:flatbuffers.Encoding):string|Uint8Array
+params(index: number,optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 18);
+  return offset ? this.bb!.__string(this.bb!.__vector(this.bb_pos + offset) + index * 4, optionalEncoding) : null;
+}
+
+paramsLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 18);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
+/**
+ * True if the cmd-desc should be hidden from the command panel
+ * (some widgets stash internal commands here).
+ */
+hidden():boolean {
+  const offset = this.bb!.__offset(this.bb_pos, 20);
+  return offset ? !!this.bb!.readInt8(this.bb_pos + offset) : false;
+}
+
 static startUnitCmdDesc(builder:flatbuffers.Builder) {
-  builder.startObject(2);
+  builder.startObject(9);
 }
 
 static addCmdId(builder:flatbuffers.Builder, cmdId:number) {
@@ -61,22 +146,76 @@ static addDisabled(builder:flatbuffers.Builder, disabled:boolean) {
   builder.addFieldInt8(1, +disabled, +false);
 }
 
+static addName(builder:flatbuffers.Builder, nameOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(2, nameOffset, 0);
+}
+
+static addAction(builder:flatbuffers.Builder, actionOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(3, actionOffset, 0);
+}
+
+static addTexture(builder:flatbuffers.Builder, textureOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(4, textureOffset, 0);
+}
+
+static addTooltip(builder:flatbuffers.Builder, tooltipOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(5, tooltipOffset, 0);
+}
+
+static addType(builder:flatbuffers.Builder, type:number) {
+  builder.addFieldInt32(6, type, 0);
+}
+
+static addParams(builder:flatbuffers.Builder, paramsOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(7, paramsOffset, 0);
+}
+
+static createParamsVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startParamsVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
+static addHidden(builder:flatbuffers.Builder, hidden:boolean) {
+  builder.addFieldInt8(8, +hidden, +false);
+}
+
 static endUnitCmdDesc(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createUnitCmdDesc(builder:flatbuffers.Builder, cmdId:number, disabled:boolean):flatbuffers.Offset {
+static createUnitCmdDesc(builder:flatbuffers.Builder, cmdId:number, disabled:boolean, nameOffset:flatbuffers.Offset, actionOffset:flatbuffers.Offset, textureOffset:flatbuffers.Offset, tooltipOffset:flatbuffers.Offset, type:number, paramsOffset:flatbuffers.Offset, hidden:boolean):flatbuffers.Offset {
   UnitCmdDesc.startUnitCmdDesc(builder);
   UnitCmdDesc.addCmdId(builder, cmdId);
   UnitCmdDesc.addDisabled(builder, disabled);
+  UnitCmdDesc.addName(builder, nameOffset);
+  UnitCmdDesc.addAction(builder, actionOffset);
+  UnitCmdDesc.addTexture(builder, textureOffset);
+  UnitCmdDesc.addTooltip(builder, tooltipOffset);
+  UnitCmdDesc.addType(builder, type);
+  UnitCmdDesc.addParams(builder, paramsOffset);
+  UnitCmdDesc.addHidden(builder, hidden);
   return UnitCmdDesc.endUnitCmdDesc(builder);
 }
 
 unpack(): UnitCmdDescT {
   return new UnitCmdDescT(
     this.cmdId(),
-    this.disabled()
+    this.disabled(),
+    this.name(),
+    this.action(),
+    this.texture(),
+    this.tooltip(),
+    this.type(),
+    this.bb!.createScalarList<string>(this.params.bind(this), this.paramsLength()),
+    this.hidden()
   );
 }
 
@@ -84,20 +223,47 @@ unpack(): UnitCmdDescT {
 unpackTo(_o: UnitCmdDescT): void {
   _o.cmdId = this.cmdId();
   _o.disabled = this.disabled();
+  _o.name = this.name();
+  _o.action = this.action();
+  _o.texture = this.texture();
+  _o.tooltip = this.tooltip();
+  _o.type = this.type();
+  _o.params = this.bb!.createScalarList<string>(this.params.bind(this), this.paramsLength());
+  _o.hidden = this.hidden();
 }
 }
 
 export class UnitCmdDescT implements flatbuffers.IGeneratedObject {
 constructor(
   public cmdId: number = 0,
-  public disabled: boolean = false
+  public disabled: boolean = false,
+  public name: string|Uint8Array|null = null,
+  public action: string|Uint8Array|null = null,
+  public texture: string|Uint8Array|null = null,
+  public tooltip: string|Uint8Array|null = null,
+  public type: number = 0,
+  public params: (string)[] = [],
+  public hidden: boolean = false
 ){}
 
 
 pack(builder:flatbuffers.Builder): flatbuffers.Offset {
+  const name = (this.name !== null ? builder.createString(this.name!) : 0);
+  const action = (this.action !== null ? builder.createString(this.action!) : 0);
+  const texture = (this.texture !== null ? builder.createString(this.texture!) : 0);
+  const tooltip = (this.tooltip !== null ? builder.createString(this.tooltip!) : 0);
+  const params = UnitCmdDesc.createParamsVector(builder, builder.createObjectOffsetList(this.params));
+
   return UnitCmdDesc.createUnitCmdDesc(builder,
     this.cmdId,
-    this.disabled
+    this.disabled,
+    name,
+    action,
+    texture,
+    tooltip,
+    this.type,
+    params,
+    this.hidden
   );
 }
 }
