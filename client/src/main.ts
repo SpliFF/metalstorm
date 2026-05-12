@@ -1007,6 +1007,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     window.addEventListener('blur', () => commandPathRenderer?.setShiftHeld(false));
 
     // Input
+    let selectionStateTimer: number | null = null;
+    let pendingSelection: readonly number[] | null = null;
+    const SELECTION_DEBOUNCE_MS = 50;
     inputManager = new InputManager(scene, camera, entityRenderer, conn,
         (ids) => {
             minimap?.setSelection(ids);
@@ -1016,6 +1019,19 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             // appear immediately on a selection change instead of waiting
             // for the next 1-second UnitCommandQueuesUpdate broadcast.
             commandPathRenderer?.update(lastCommandQueues, ids);
+            // Mirror selection to the server (debounced). Server scopes
+            // its UnitCmdDescsUpdate broadcast to these ids so the
+            // command panel data only flows for what's selected.
+            pendingSelection = ids.slice();
+            if (selectionStateTimer === null) {
+                selectionStateTimer = window.setTimeout(() => {
+                    selectionStateTimer = null;
+                    if (pendingSelection) {
+                        conn.sendSelectionState(pendingSelection);
+                        pendingSelection = null;
+                    }
+                }, SELECTION_DEBOUNCE_MS);
+            }
         });
     inputManager.setDefCache(defCache);
     // Debug hook: expose inputManager + connection so chrome-devtools

@@ -3925,13 +3925,31 @@ self.onmessage = async (e: MessageEvent) => {
             // missing from the snapshot has no streamed cmd-descs.
             const updates = msg.units as Array<{
                 unitId: number;
-                cmds: Array<{ cmdId: number; disabled: boolean }>;
+                cmds: Array<{
+                    cmdId: number;
+                    disabled: boolean;
+                    name: string;
+                    action: string;
+                    texture: string;
+                    tooltip: string;
+                    type: number;
+                    params: string[];
+                    hidden: boolean;
+                }>;
             }> | undefined;
             if (!updates) break;
             liveState.unitCmdDescs.clear();
             for (const u of updates) {
                 liveState.unitCmdDescs.set(u.unitId, u.cmds.map(c => ({
-                    cmdId: c.cmdId, disabled: c.disabled,
+                    cmdId:    c.cmdId,
+                    disabled: c.disabled,
+                    name:     c.name    ?? '',
+                    action:   c.action  ?? '',
+                    texture:  c.texture ?? '',
+                    tooltip:  c.tooltip ?? '',
+                    type:     c.type    ?? 0,
+                    params:   c.params  ?? [],
+                    hidden:   c.hidden  ?? false,
                 })));
             }
             // Refresh the integral menu's command panel — Spring's

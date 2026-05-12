@@ -353,6 +353,22 @@ export interface UnitCmdDescStored {
     cmdId: number;
     /** Greyed-out flag (insufficient resources, tech, etc.). */
     disabled: boolean;
+    /** Display name shown on the button ("Move", "Attack", or build name). */
+    name: string;
+    /** Action binding name ("move", "areaattack", "buildunit_armcom"). */
+    action: string;
+    /** Texture / icon path. May be a #-prefixed atlas key. */
+    texture: string;
+    /** Tooltip body (may contain Spring markup). */
+    tooltip: string;
+    /** CMDTYPE_* constant. 0=ICON, 5=ICON_MODE, 10=ICON_MAP, etc. */
+    type: number;
+    /** Mode-specific param strings. For CMDTYPE_ICON_MODE, params[0] is
+     *  the current state index ("0"/"1"/"2"), params[1..n] are the
+     *  human labels ("Hold fire"/"Return fire"/"Fire at will"). */
+    params: string[];
+    /** True if hidden from the command panel. */
+    hidden: boolean;
 }
 
 /** One queued order — mirrors Spring's Command struct. */
@@ -2178,26 +2194,32 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             const stored = ls.unitCmdDescs.get(uid);
             if (!stored || stored.length === 0) return luaTable();
             const arr: LuaValue[] = stored.map(d => {
+                // Server now streams the full descriptor. For build
+                // commands we still fall back to the UnitDef name when
+                // the server payload's `name` field is empty — this
+                // covers older servers (pre-expanded schema) and lets
+                // pure-build entries inherit nicer human names.
+                let name = d.name;
+                let action = d.action;
+                let type = d.type;
                 if (d.cmdId < 0) {
                     const defId = -d.cmdId;
-                    const name  = ctx.getUnitDefName?.(defId) ?? String(defId);
-                    return {
-                        id:       d.cmdId,
-                        disabled: d.disabled,
-                        name,
-                        action:   `buildunit_${name.toLowerCase()}`,
-                        type:     20, // CMDTYPE_ICON_BUILDING
-                        queueing: true,
-                        params:   luaTable(),
-                    };
+                    const defName = ctx.getUnitDefName?.(defId) ?? String(defId);
+                    if (!name) name = defName;
+                    if (!action) action = `buildunit_${defName.toLowerCase()}`;
+                    if (!type) type = 20; // CMDTYPE_ICON_BUILDING
                 }
                 return {
                     id:       d.cmdId,
                     disabled: d.disabled,
-                    name:     `cmd_${d.cmdId}`,
-                    action:   '',
-                    type:     0, // CMDTYPE_ICON
-                    params:   luaTable(),
+                    hidden:   d.hidden,
+                    name,
+                    action,
+                    texture:  d.texture,
+                    tooltip:  d.tooltip,
+                    type,
+                    queueing: true,
+                    params:   d.params.length > 0 ? luaTable(...d.params) : luaTable(),
                 };
             });
             return luaTable(...arr);

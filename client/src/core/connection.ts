@@ -54,6 +54,7 @@ import { UnitOrder } from '../protocol/spring-web/unit-order.js';
 import { AuthRequest } from '../protocol/spring-web/auth-request.js';
 import { PlayerCommand } from '../protocol/spring-web/player-command.js';
 import { LuaRulesMsg } from '../protocol/spring-web/lua-rules-msg.js';
+import { SelectionState } from '../protocol/spring-web/selection-state.js';
 import { AuthResponse } from '../protocol/spring-web/auth-response.js';
 import { AuthStatus } from '../protocol/spring-web/auth-status.js';
 import { ServerClock } from './clock.js';
@@ -256,6 +257,13 @@ export interface UnitCmdDescInfo {
     /** Spring command id. Negative = build (-cmdId is the unit-def id). */
     cmdId: number;
     disabled: boolean;
+    name: string;
+    action: string;
+    texture: string;
+    tooltip: string;
+    type: number;
+    params: string[];
+    hidden: boolean;
 }
 
 export interface UnitCmdDescsInfo {
@@ -758,6 +766,20 @@ export class Connection {
         this.sendClientMessage(builder, ClientPayload.LuaRulesMsg, msg);
     }
 
+    /** Send the local player's current selection. The server uses this
+     *  to scope per-tick UnitCmdDescsUpdate broadcasts to only the
+     *  selected units. Caller is expected to debounce. */
+    sendSelectionState(unitIds: readonly number[]): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(64 + unitIds.length * 4);
+        const idsOff = SelectionState.createUnitIdsVector(
+            builder, unitIds as number[]);
+        this.commandSequence++;
+        const sel = SelectionState.createSelectionState(
+            builder, this.commandSequence, idsOff);
+        this.sendClientMessage(builder, ClientPayload.SelectionState, sel);
+    }
+
     /** Send a PlayerCommand (unit order) to the server. */
     sendPlayerCommand(
         commandId: number,
@@ -1232,7 +1254,21 @@ export class Connection {
                     for (let ci = 0; ci < u.cmdsLength(); ci++) {
                         const c = u.cmds(ci, new UnitCmdDesc());
                         if (!c) continue;
-                        cmds.push({ cmdId: c.cmdId(), disabled: !!c.disabled() });
+                        const params: string[] = [];
+                        for (let pi = 0; pi < c.paramsLength(); pi++) {
+                            params.push(c.params(pi) ?? '');
+                        }
+                        cmds.push({
+                            cmdId: c.cmdId(),
+                            disabled: !!c.disabled(),
+                            name:    c.name()    ?? '',
+                            action:  c.action()  ?? '',
+                            texture: c.texture() ?? '',
+                            tooltip: c.tooltip() ?? '',
+                            type:    c.type(),
+                            params,
+                            hidden:  !!c.hidden(),
+                        });
                     }
                     units.push({ unitId: u.unitId(), cmds });
                 }
