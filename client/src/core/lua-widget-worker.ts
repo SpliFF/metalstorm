@@ -3485,6 +3485,58 @@ function dispatchUnitCreated(unitId: number, defId: number, team: number): void 
     `, 'dispatchUnitCreated');
 }
 
+/** widgetHandler:UnitFromFactory(unitID, unitDefID, unitTeam,
+ *  factoryID, factoryDefID, userOrders) — fires when a factory
+ *  completes a unit. ZK's `unit_start_state` and `cmd_unit_mover`
+ *  depend on this. Sourced from the server's UnitLifecycleBatch — we
+ *  can't synthesise it client-side because the entity stream doesn't
+ *  carry the factory id. */
+function dispatchUnitFromFactory(
+    unitId: number, defId: number, team: number,
+    factoryId: number, factoryDefId: number, userOrders: boolean,
+): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.UnitFromFactory then
+            pcall(widgetHandler.UnitFromFactory, widgetHandler,
+                ${unitId}, ${defId}, ${team},
+                ${factoryId}, ${factoryDefId}, ${userOrders ? 'true' : 'false'})
+        end
+    `, 'dispatchUnitFromFactory');
+}
+
+/** widgetHandler:UnitTaken(unitID, unitDefID, oldTeam, newTeam) —
+ *  fires when a unit is transferred between teams (called BEFORE
+ *  UnitGiven, while the unit is still assigned to oldTeam). */
+function dispatchUnitTaken(
+    unitId: number, defId: number, oldTeam: number, newTeam: number,
+): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.UnitTaken then
+            pcall(widgetHandler.UnitTaken, widgetHandler,
+                ${unitId}, ${defId}, ${oldTeam}, ${newTeam})
+        end
+    `, 'dispatchUnitTaken');
+}
+
+/** widgetHandler:UnitGiven(unitID, unitDefID, newTeam, oldTeam) —
+ *  fires when a unit is transferred between teams (called AFTER
+ *  UnitTaken, after the team field has been updated). Spring's
+ *  argument order is `(unitId, defId, newTeam, oldTeam)` — note the
+ *  reversed team pair vs UnitTaken. */
+function dispatchUnitGiven(
+    unitId: number, defId: number, oldTeam: number, newTeam: number,
+): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.UnitGiven then
+            pcall(widgetHandler.UnitGiven, widgetHandler,
+                ${unitId}, ${defId}, ${newTeam}, ${oldTeam})
+        end
+    `, 'dispatchUnitGiven');
+}
+
 /** widgetHandler:DefaultCommand(targetType, targetID, engineCmd) — fires
  *  when the cursor's hover-target changes (a different unit/feature, or
  *  none). The first widget to return a non-nil cmdID overrides the
@@ -4395,6 +4447,28 @@ self.onmessage = async (e: MessageEvent) => {
                 liveState.stockpileState.set(u.unitId, {
                     ready: u.ready, queued: u.queued, buildPercent: u.buildPercent,
                 });
+            }
+            break;
+        }
+
+        case 'unitLifecycle': {
+            const events = msg.events as Array<{
+                kind: 'fromFactory' | 'taken' | 'given';
+                unitId: number; unitDefId: number; unitTeam: number;
+                factoryId: number; factoryDefId: number; userOrders: boolean;
+                oldTeam: number; newTeam: number;
+            }> | undefined;
+            if (!events || !runtime) break;
+            for (const e of events) {
+                if (e.kind === 'fromFactory') {
+                    dispatchUnitFromFactory(
+                        e.unitId, e.unitDefId, e.unitTeam,
+                        e.factoryId, e.factoryDefId, e.userOrders);
+                } else if (e.kind === 'taken') {
+                    dispatchUnitTaken(e.unitId, e.unitDefId, e.oldTeam, e.newTeam);
+                } else if (e.kind === 'given') {
+                    dispatchUnitGiven(e.unitId, e.unitDefId, e.oldTeam, e.newTeam);
+                }
             }
             break;
         }

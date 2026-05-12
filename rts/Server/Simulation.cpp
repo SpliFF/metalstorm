@@ -69,6 +69,7 @@ const std::unordered_map<int, std::string>* gAITeams = nullptr;
 
 #include "System/Scripting/ScriptEventDispatcher.h"
 #include "Server/IntelEventCollector.h"
+#include "Server/UnitLifecycleCollector.h"
 #include "Lua/LuaScriptContext.h"
 #include "Lua/LuaRules.h"
 #include "Lua/LuaGaia.h"
@@ -294,6 +295,17 @@ void CSimulation::InitScripting()
     if (intelEvents == nullptr) {
         intelEvents = new IntelEventCollector();
         intelEvents->Register();
+    }
+
+    // Lifecycle event collector — captures UnitFromFactory / UnitTaken /
+    // UnitGiven into a per-tick queue that server_main.cpp drains and
+    // broadcasts as UnitLifecycleBatch envelopes. These callins can't be
+    // derived from the entity stream client-side (UnitFromFactory needs
+    // factory id; UnitTaken/UnitGiven need the transfer cause), so the
+    // server emits them explicitly.
+    if (unitLifecycleEvents == nullptr) {
+        unitLifecycleEvents = new UnitLifecycleCollector();
+        unitLifecycleEvents->Register();
     }
 
     // Try to load LuaRules (game-wide synced gadgets) and LuaGaia

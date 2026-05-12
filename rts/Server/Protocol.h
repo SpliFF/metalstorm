@@ -13,6 +13,7 @@
 #include "ProjectileEventCollector.h"
 #include "SoundEventCollector.h"
 #include "IntelEventCollector.h"
+#include "UnitLifecycleCollector.h"
 #include "RoomManager.h"
 #include "MapMetadata.h"
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectileTypes.h"
@@ -560,6 +561,39 @@ inline std::vector<uint8_t> BuildUnitArmoredUpdate(const std::vector<CUnit*>& un
     auto upd = SpringWeb::CreateUnitArmoredUpdate(fbb, entriesVec);
     return BuildServerMessage(fbb,
         SpringWeb::ServerPayload_UnitArmoredUpdate, upd.Union());
+}
+
+/// Build a UnitLifecycleBatch from a drained event list. Returns an
+/// empty vector if `events` is empty so the caller can skip the send.
+inline std::vector<uint8_t> BuildUnitLifecycleBatch(
+    const std::vector<UnitLifecycleEventData>& events)
+{
+    if (events.empty()) return {};
+    flatbuffers::FlatBufferBuilder fbb(512);
+
+    std::vector<flatbuffers::Offset<SpringWeb::UnitLifecycleEvent>> entries;
+    entries.reserve(events.size());
+    for (const auto& e : events) {
+        SpringWeb::UnitLifecycleKind kind;
+        switch (e.kind) {
+            case UnitLifecycleKind::FromFactory:
+                kind = SpringWeb::UnitLifecycleKind_FromFactory; break;
+            case UnitLifecycleKind::Taken:
+                kind = SpringWeb::UnitLifecycleKind_Taken; break;
+            case UnitLifecycleKind::Given:
+                kind = SpringWeb::UnitLifecycleKind_Given; break;
+        }
+        entries.push_back(SpringWeb::CreateUnitLifecycleEvent(
+            fbb, kind,
+            e.unitId, e.unitDefId, e.unitTeam,
+            e.factoryId, e.factoryDefId, e.userOrders,
+            e.oldTeam, e.newTeam));
+    }
+
+    auto entriesVec = fbb.CreateVector(entries);
+    auto batch = SpringWeb::CreateUnitLifecycleBatch(fbb, entriesVec);
+    return BuildServerMessage(fbb,
+        SpringWeb::ServerPayload_UnitLifecycleBatch, batch.Union());
 }
 
 /// Build a GameInfo message (map, game, speed, frame, paused, env state).

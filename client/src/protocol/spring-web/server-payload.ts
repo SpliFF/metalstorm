@@ -32,6 +32,7 @@ import { ServerError, ServerErrorT } from '../spring-web/server-error.js';
 import { UnitArmoredUpdate, UnitArmoredUpdateT } from '../spring-web/unit-armored-update.js';
 import { UnitCmdDescsUpdate, UnitCmdDescsUpdateT } from '../spring-web/unit-cmd-descs-update.js';
 import { UnitCommandQueuesUpdate, UnitCommandQueuesUpdateT } from '../spring-web/unit-command-queues-update.js';
+import { UnitLifecycleBatch, UnitLifecycleBatchT } from '../spring-web/unit-lifecycle-batch.js';
 import { UnitSelfDUpdate, UnitSelfDUpdateT } from '../spring-web/unit-self-dupdate.js';
 import { UnitStockpileUpdate, UnitStockpileUpdateT } from '../spring-web/unit-stockpile-update.js';
 import { UnitTransportUpdate, UnitTransportUpdateT } from '../spring-web/unit-transport-update.js';
@@ -71,13 +72,14 @@ export enum ServerPayload {
   UnitTransportUpdate = 30,
   UnitSelfDUpdate = 31,
   UnitStockpileUpdate = 32,
-  UnitArmoredUpdate = 33
+  UnitArmoredUpdate = 33,
+  UnitLifecycleBatch = 34
 }
 
 export function unionToServerPayload(
   type: ServerPayload,
-  accessor: (obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|GameCegDefs|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|GameCegDefs|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null
-): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|GameCegDefs|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null {
+  accessor: (obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|GameCegDefs|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|GameCegDefs|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null
+): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|GameCegDefs|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null {
   switch(ServerPayload[type]) {
     case 'NONE': return null; 
     case 'AuthResponse': return accessor(new AuthResponse())! as AuthResponse;
@@ -113,15 +115,16 @@ export function unionToServerPayload(
     case 'UnitSelfDUpdate': return accessor(new UnitSelfDUpdate())! as UnitSelfDUpdate;
     case 'UnitStockpileUpdate': return accessor(new UnitStockpileUpdate())! as UnitStockpileUpdate;
     case 'UnitArmoredUpdate': return accessor(new UnitArmoredUpdate())! as UnitArmoredUpdate;
+    case 'UnitLifecycleBatch': return accessor(new UnitLifecycleBatch())! as UnitLifecycleBatch;
     default: return null;
   }
 }
 
 export function unionListToServerPayload(
   type: ServerPayload, 
-  accessor: (index: number, obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|GameCegDefs|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|GameCegDefs|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null, 
+  accessor: (index: number, obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|GameCegDefs|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|GameCegDefs|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null, 
   index: number
-): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|GameCegDefs|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null {
+): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|GameCegDefs|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|GameUnitDefs|GameWeaponDefs|LogBatch|MapData|MapListUpdate|PlayerLeft|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|ServerError|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null {
   switch(ServerPayload[type]) {
     case 'NONE': return null; 
     case 'AuthResponse': return accessor(index, new AuthResponse())! as AuthResponse;
@@ -157,6 +160,7 @@ export function unionListToServerPayload(
     case 'UnitSelfDUpdate': return accessor(index, new UnitSelfDUpdate())! as UnitSelfDUpdate;
     case 'UnitStockpileUpdate': return accessor(index, new UnitStockpileUpdate())! as UnitStockpileUpdate;
     case 'UnitArmoredUpdate': return accessor(index, new UnitArmoredUpdate())! as UnitArmoredUpdate;
+    case 'UnitLifecycleBatch': return accessor(index, new UnitLifecycleBatch())! as UnitLifecycleBatch;
     default: return null;
   }
 }

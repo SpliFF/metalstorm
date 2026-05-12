@@ -1943,6 +1943,22 @@ int main(int argc, char* argv[])
         }
         }
 
+        // Unit lifecycle events — UnitFromFactory / UnitTaken /
+        // UnitGiven. Drained each tick and broadcast to every session.
+        // These can't be derived from the entity stream: UnitFromFactory
+        // needs the factory id, and Taken/Given need the transfer cause
+        // (the entity stream only shows the new team). The worker
+        // dispatches widget callins from this batch.
+        if (unitLifecycleEvents != nullptr) {
+            auto lifecycle = unitLifecycleEvents->Drain();
+            if (!lifecycle.empty() && rtcServer.GetClientCount() > 0) {
+                auto msg = Protocol::BuildUnitLifecycleBatch(lifecycle);
+                if (!msg.empty()) {
+                    rtcServer.BroadcastReliable(msg.data(), msg.size());
+                }
+            }
+        }
+
         // Per-allyteam LOS bitmap stream (envelope 0x07). Sent 1 Hz
         // per session; each player gets their own ally team's bitmap.
         // Spectators receive every ally team's bitmap, round-robin

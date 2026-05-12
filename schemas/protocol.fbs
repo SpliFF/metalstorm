@@ -1509,6 +1509,43 @@ table UnitArmoredUpdate {
     units: [UnitArmoredInfo];
 }
 
+/// Classifies a UnitLifecycleEvent. Matches `UnitLifecycleKind` in
+/// `Server/UnitLifecycleCollector.h`. These are events that widgets
+/// need to learn about but can't be derived from the per-tick entity
+/// stream — UnitFromFactory needs the factory id, and Taken/Given
+/// need the transfer cause (the entity stream just shows the new team).
+enum UnitLifecycleKind : uint8 {
+    FromFactory = 0,
+    Taken       = 1,
+    Given       = 2,
+}
+
+table UnitLifecycleEvent {
+    kind: UnitLifecycleKind;
+    unit_id: uint32;
+    unit_def_id: uint16;
+    unit_team: uint8;
+    /// FromFactory: the factory unit id. 0 for Taken/Given.
+    factory_id: uint32 = 0;
+    /// FromFactory: the factory def id. 0 for Taken/Given.
+    factory_def_id: uint16 = 0;
+    /// FromFactory: true if the unit was built via a player-issued
+    /// build command, false if produced from a queued template.
+    user_orders: bool = false;
+    /// Taken/Given: pre-transfer team. -1 for FromFactory.
+    old_team: int8 = -1;
+    /// Taken/Given: post-transfer team. -1 for FromFactory.
+    new_team: int8 = -1;
+}
+
+/// Per-tick batch of lifecycle events. Typically empty on quiet ticks;
+/// populated on factory completion, AllowResourceTransfer, etc.
+/// Broadcast to all sessions — these events are server-authoritative
+/// and not visibility-filtered (transfers are public).
+table UnitLifecycleBatch {
+    events: [UnitLifecycleEvent];
+}
+
 // Union of all server→client message types
 union ServerPayload {
     AuthResponse,
@@ -1544,6 +1581,7 @@ union ServerPayload {
     UnitSelfDUpdate,
     UnitStockpileUpdate,
     UnitArmoredUpdate,
+    UnitLifecycleBatch,
 }
 
 table ServerMessage {

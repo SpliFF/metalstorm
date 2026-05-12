@@ -59,6 +59,9 @@ import { UnitStockpileUpdate } from '../protocol/spring-web/unit-stockpile-updat
 import { UnitStockpileInfo } from '../protocol/spring-web/unit-stockpile-info.js';
 import { UnitArmoredUpdate } from '../protocol/spring-web/unit-armored-update.js';
 import { UnitArmoredInfo } from '../protocol/spring-web/unit-armored-info.js';
+import { UnitLifecycleBatch } from '../protocol/spring-web/unit-lifecycle-batch.js';
+import { UnitLifecycleEvent } from '../protocol/spring-web/unit-lifecycle-event.js';
+import { UnitLifecycleKind } from '../protocol/spring-web/unit-lifecycle-kind.js';
 import { AuthRequest } from '../protocol/spring-web/auth-request.js';
 import { PlayerCommand } from '../protocol/spring-web/player-command.js';
 import { LuaRulesMsg } from '../protocol/spring-web/lua-rules-msg.js';
@@ -308,6 +311,26 @@ export interface UnitArmoredInfoMsg {
     armoredMultiple: number;
 }
 
+/** Discriminator on UnitLifecycleEventMsg.kind — matches the FlatBuffers enum. */
+export type UnitLifecycleKindStr = 'fromFactory' | 'taken' | 'given';
+
+/** One unit lifecycle event. `fromFactory` carries `factoryId` /
+ *  `factoryDefId` / `userOrders`; `taken` / `given` carry `oldTeam` /
+ *  `newTeam`. The unused fields for each kind are present but zeroed. */
+export interface UnitLifecycleEventMsg {
+    kind: UnitLifecycleKindStr;
+    unitId: number;
+    unitDefId: number;
+    unitTeam: number;
+    /** FromFactory only. */
+    factoryId: number;
+    factoryDefId: number;
+    userOrders: boolean;
+    /** Taken/Given only. */
+    oldTeam: number;
+    newTeam: number;
+}
+
 export interface WeaponDefInfo {
     defId: number;
     name: string;
@@ -485,6 +508,7 @@ export interface ConnectionEvents {
     onUnitSelfD?: (units: UnitSelfDInfoMsg[]) => void;
     onUnitStockpile?: (units: UnitStockpileInfoMsg[]) => void;
     onUnitArmored?: (units: UnitArmoredInfoMsg[]) => void;
+    onUnitLifecycle?: (events: UnitLifecycleEventMsg[]) => void;
     onProjectileState?: (snapshot: ProjectileStateSnapshot) => void;
     onPieceState?: (snapshot: PieceStateSnapshot) => void;
     onBuildActivity?: (snapshot: BuildActivitySnapshot) => void;
@@ -1354,6 +1378,32 @@ export class Connection {
                     });
                 }
                 this.events.onUnitStockpile?.(units);
+                break;
+            }
+            case ServerPayload.UnitLifecycleBatch: {
+                const fbBatch = msg.payload(new UnitLifecycleBatch()) as UnitLifecycleBatch;
+                const events: UnitLifecycleEventMsg[] = [];
+                for (let i = 0; i < fbBatch.eventsLength(); i++) {
+                    const e = fbBatch.events(i, new UnitLifecycleEvent());
+                    if (!e) continue;
+                    const k = e.kind();
+                    const kind: UnitLifecycleKindStr =
+                        k === UnitLifecycleKind.FromFactory ? 'fromFactory'
+                      : k === UnitLifecycleKind.Taken       ? 'taken'
+                      : 'given';
+                    events.push({
+                        kind,
+                        unitId:       e.unitId(),
+                        unitDefId:    e.unitDefId(),
+                        unitTeam:     e.unitTeam(),
+                        factoryId:    e.factoryId(),
+                        factoryDefId: e.factoryDefId(),
+                        userOrders:   !!e.userOrders(),
+                        oldTeam:      e.oldTeam(),
+                        newTeam:      e.newTeam(),
+                    });
+                }
+                this.events.onUnitLifecycle?.(events);
                 break;
             }
             case ServerPayload.UnitArmoredUpdate: {

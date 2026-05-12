@@ -731,6 +731,28 @@ export class LuaWidgetManager {
         })) });
     }
 
+    /** Push a per-tick batch of lifecycle events into the worker. The
+     *  worker dispatches `widget:UnitFromFactory` / `UnitTaken` /
+     *  `UnitGiven` callins from each entry. Typically empty on quiet
+     *  ticks. */
+    forwardUnitLifecycle(events: ReadonlyArray<{
+        kind: 'fromFactory' | 'taken' | 'given';
+        unitId: number;
+        unitDefId: number;
+        unitTeam: number;
+        factoryId: number;
+        factoryDefId: number;
+        userOrders: boolean;
+        oldTeam: number;
+        newTeam: number;
+    }>): void {
+        if (this.disposed || events.length === 0) return;
+        this.postToWorker({
+            type: 'unitLifecycle',
+            events: events.map(e => ({ ...e })),
+        });
+    }
+
     /** Push a batch of weapon defs into the worker. */
     forwardWeaponDefs(defs: ReadonlyArray<{
         defId: number; name: string; visualType: number;

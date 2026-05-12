@@ -999,6 +999,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         onUnitArmored(units) {
             currentWidgetManager?.forwardUnitArmored(units);
         },
+        onUnitLifecycle(events) {
+            currentWidgetManager?.forwardUnitLifecycle(events);
+        },
         onGameOver(frame) {
             showGameOver(frame);
             currentWidgetManager?.forwardGameInfo(frame, 0, true, true);
