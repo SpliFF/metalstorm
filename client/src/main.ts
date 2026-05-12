@@ -53,6 +53,7 @@ import { LobbyUI } from './lobby/lobby-ui.js';
 import { Minimap } from './core/minimap.js';
 import { LosBitmapStore } from './core/los-bitmap.js';
 import { CommandPathRenderer } from './core/command-path-renderer.js';
+import { WaypointMarkerRenderer } from './core/waypoint-marker-renderer.js';
 import { DebugTerrainGrid } from './core/debug-terrain-grid.js';
 import { Connection } from './core/connection.js';
 import { CONFIG, fetchBuildStamp, stampUrl } from './config.js';
@@ -94,12 +95,13 @@ let economyBar: EconomyBar | null = null;
 let lobbyUI: LobbyUI | null = null;
 let minimap: Minimap | null = null;
 let commandPathRenderer: CommandPathRenderer | null = null;
+let waypointMarkerRenderer: WaypointMarkerRenderer | null = null;
 let debugTerrainGrid: DebugTerrainGrid | null = null;
 /// Cached most-recent command-queue snapshot. Lets a selection change
 /// repaint the path overlay without waiting for the next server tick.
 let lastCommandQueues: ReadonlyArray<{
     unitId: number;
-    orders: ReadonlyArray<{ cmdId: number; params: number[] }>;
+    orders: ReadonlyArray<{ cmdId: number; params: number[]; tag?: number }>;
 }> = [];
 /// Game server connection. Non-null while a game is active. Hoisted out
 /// of startGame() so the quit-to-lobby handler can close it cleanly.
@@ -242,6 +244,8 @@ function quitToLobby(): void {
     economyBar = null;
     commandPathRenderer?.dispose();
     commandPathRenderer = null;
+    waypointMarkerRenderer?.dispose();
+    waypointMarkerRenderer = null;
     debugTerrainGrid?.dispose();
     debugTerrainGrid = null;
     lastCommandQueues = [];
@@ -543,6 +547,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         // can snap to spots derived from the metalmap.
         inputManager?.setMapData(map);
         commandPathRenderer?.setMapData(map);
+        waypointMarkerRenderer?.setMapData(map);
         debugTerrainGrid?.setMapData(map);
 
         // Apply map-wide reverb (mapinfo.lua → sound.preset). The
@@ -976,6 +981,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             currentWidgetManager?.forwardUnitCommandQueues(queues);
             inputManager?.onCommandQueuesUpdated(queues);
             commandPathRenderer?.update(queues, inputManager?.selection ?? []);
+            waypointMarkerRenderer?.update(queues, inputManager?.selection ?? []);
         },
         onUnitCmdDescs(units) {
             // Forward to chili widgets via Spring.GetUnitCmdDescs(uid).
@@ -1032,6 +1038,15 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     commandPathRenderer = new CommandPathRenderer(scene, entityRenderer);
     (window as unknown as { __cmdPath: unknown }).__cmdPath = commandPathRenderer;
 
+    // Waypoint markers — billboarded icons at each queued order's
+    // destination, paired with the connecting line. Shares the shift
+    // gesture and queue/selection snapshot with CommandPathRenderer.
+    // Hit-tests against marker meshes (`waypoint-marker-*`) drive the
+    // per-waypoint revocation + drag-to-reorder interactions.
+    waypointMarkerRenderer = new WaypointMarkerRenderer(scene, entityRenderer);
+    if (currentMapData) waypointMarkerRenderer.setMapData(currentMapData);
+    (window as unknown as { __waypointMarkers: unknown }).__waypointMarkers = waypointMarkerRenderer;
+
     // Debug overlay: terrain-following grid using the same tube +
     // X-ray material setup as CommandPathRenderer. Toggle from devtools:
     //   window.__terrainGrid.show()      // 256-elmo cells
@@ -1041,17 +1056,26 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     if (currentMapData) debugTerrainGrid.setMapData(currentMapData);
     (window as unknown as { __terrainGrid: unknown }).__terrainGrid = debugTerrainGrid;
     const cmdPathShiftDown = (e: KeyboardEvent) => {
-        if (e.key === 'Shift') commandPathRenderer?.setShiftHeld(true);
+        if (e.key === 'Shift') {
+            commandPathRenderer?.setShiftHeld(true);
+            waypointMarkerRenderer?.setShiftHeld(true);
+        }
     };
     const cmdPathShiftUp = (e: KeyboardEvent) => {
-        if (e.key === 'Shift') commandPathRenderer?.setShiftHeld(false);
+        if (e.key === 'Shift') {
+            commandPathRenderer?.setShiftHeld(false);
+            waypointMarkerRenderer?.setShiftHeld(false);
+        }
     };
     // Window-level so we catch the gesture regardless of which DOM
     // element has focus. The blur handler clears state if the window
     // loses focus mid-press, otherwise the overlay stays stuck on.
     window.addEventListener('keydown', cmdPathShiftDown);
     window.addEventListener('keyup', cmdPathShiftUp);
-    window.addEventListener('blur', () => commandPathRenderer?.setShiftHeld(false));
+    window.addEventListener('blur', () => {
+        commandPathRenderer?.setShiftHeld(false);
+        waypointMarkerRenderer?.setShiftHeld(false);
+    });
 
     // Input
     let selectionStateTimer: number | null = null;
@@ -1066,6 +1090,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             // appear immediately on a selection change instead of waiting
             // for the next 1-second UnitCommandQueuesUpdate broadcast.
             commandPathRenderer?.update(lastCommandQueues, ids);
+            waypointMarkerRenderer?.update(lastCommandQueues, ids);
             // Mirror selection to the server (debounced). Server scopes
             // its UnitCmdDescsUpdate broadcast to these ids so the
             // command panel data only flows for what's selected.
