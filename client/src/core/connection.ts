@@ -70,6 +70,8 @@ import { SelectionState } from '../protocol/spring-web/selection-state.js';
 import { PathRequest } from '../protocol/spring-web/path-request.js';
 import { PathRequestCancel } from '../protocol/spring-web/path-request-cancel.js';
 import { PathResponse } from '../protocol/spring-web/path-response.js';
+import { StandingOrderState } from '../protocol/spring-web/standing-order-state.js';
+import { StandingOrderType } from '../protocol/spring-web/standing-order-type.js';
 import { Vec3 } from '../protocol/spring-web/vec3.js';
 import { AuthResponse } from '../protocol/spring-web/auth-response.js';
 import { AuthStatus } from '../protocol/spring-web/auth-status.js';
@@ -319,6 +321,37 @@ export interface UnitArmoredInfoMsg {
 /** Discriminator on UnitLifecycleEventMsg.kind — matches the FlatBuffers enum. */
 export type UnitLifecycleKindStr = 'fromFactory' | 'taken' | 'given';
 
+/** Decoded conditions from a `StandingOrderInfo`. Mirrors the
+ *  FlatBuffers table, with empty arrays and zero-radius filters
+ *  treated as absent (they're not gating the assignment). */
+export interface StandingOrderConditionsInfo {
+    idleOnly: boolean;
+    squadTypes: number[];
+    withinCenter: readonly [number, number, number];
+    withinRadius: number;
+    outsideCenter: readonly [number, number, number];
+    outsideRadius: number;
+    minStrength: number;
+    hasCapabilities: string[];
+}
+
+/** One standing-order entry as broadcast in `StandingOrderState`.
+ *  Same data shape the worker's `Spring.GetStandingOrders` returns. */
+export interface StandingOrderInfoMsg {
+    orderId: number;
+    ownerTeam: number;
+    /** String name of the StandingOrderType enum value (e.g. "DefendArea"). */
+    type: string;
+    priority: number;
+    params: number[];
+    conditions: StandingOrderConditionsInfo;
+    assignedSquadCount: number;
+    active: boolean;
+    createdAtFrame: number;
+    /** Absolute sim frame the order auto-removes at. 0 = no expiry. */
+    expiresAtFrame: number;
+}
+
 /** Decoded server reply to a `Spring.PathRequest`. `waypoints` is the
  *  full path as `[x, y, z]` triples in elmo coordinates; empty array
  *  means the path manager couldn't find a route. */
@@ -528,6 +561,12 @@ export interface ConnectionEvents {
      *  `end`; empty if no path was found. `length` is the total path
      *  length in elmos. Fires exactly once per request_id. */
     onPathResponse?: (info: PathResponseInfo) => void;
+    /** Snapshot of all standing orders visible to this client (own
+     *  team + allied teams). Server pushes on any state change — never
+     *  per-tick — so widget code can treat the most-recent payload as
+     *  authoritative. Reading `Spring.GetStandingOrders` walks the
+     *  same data. */
+    onStandingOrders?: (orders: StandingOrderInfoMsg[]) => void;
     onProjectileState?: (snapshot: ProjectileStateSnapshot) => void;
     onPieceState?: (snapshot: PieceStateSnapshot) => void;
     onBuildActivity?: (snapshot: BuildActivitySnapshot) => void;
@@ -1548,6 +1587,61 @@ export class Connection {
                     waypoints,
                     length: fbResp.length(),
                 });
+                break;
+            }
+            case ServerPayload.StandingOrderState: {
+                const fbState = msg.payload(new StandingOrderState()) as StandingOrderState;
+                const out: StandingOrderInfoMsg[] = [];
+                for (let i = 0; i < fbState.ordersLength(); i++) {
+                    const o = fbState.orders(i);
+                    if (!o) continue;
+                    const params: number[] = [];
+                    for (let j = 0; j < o.paramsLength(); j++) {
+                        params.push(o.params(j) ?? 0);
+                    }
+                    const condsFb = o.conditions();
+                    const withinCenter = condsFb?.withinRadiusCenter();
+                    const outsideCenter = condsFb?.outsideRadiusCenter();
+                    const squadTypes: number[] = [];
+                    if (condsFb) {
+                        for (let j = 0; j < condsFb.squadTypesLength(); j++) {
+                            squadTypes.push(condsFb.squadTypes(j) ?? 0);
+                        }
+                    }
+                    const caps: string[] = [];
+                    if (condsFb) {
+                        for (let j = 0; j < condsFb.hasCapabilitiesLength(); j++) {
+                            const s = condsFb.hasCapabilities(j);
+                            if (s != null) caps.push(s);
+                        }
+                    }
+                    out.push({
+                        orderId: o.orderId(),
+                        ownerTeam: o.ownerTeam(),
+                        type: StandingOrderType[o.type()] ?? 'DefendArea',
+                        priority: o.priority(),
+                        params,
+                        conditions: {
+                            idleOnly: condsFb ? condsFb.idleOnly() : true,
+                            squadTypes,
+                            withinCenter: withinCenter
+                                ? [withinCenter.x(), withinCenter.y(), withinCenter.z()]
+                                : [0, 0, 0],
+                            withinRadius: condsFb?.withinRadiusRadius() ?? 0,
+                            outsideCenter: outsideCenter
+                                ? [outsideCenter.x(), outsideCenter.y(), outsideCenter.z()]
+                                : [0, 0, 0],
+                            outsideRadius: condsFb?.outsideRadiusRadius() ?? 0,
+                            minStrength: condsFb?.minStrength() ?? 0,
+                            hasCapabilities: caps,
+                        },
+                        assignedSquadCount: o.assignedSquadCount(),
+                        active: o.active(),
+                        createdAtFrame: o.createdAtFrame(),
+                        expiresAtFrame: o.expiresAtFrame(),
+                    });
+                }
+                this.events.onStandingOrders?.(out);
                 break;
             }
             case ServerPayload.GameRestarting:

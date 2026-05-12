@@ -411,6 +411,37 @@ export interface LiveState {
      *  the protocol; we keep request ids in the same positive-only
      *  space for consistency. */
     nextPathRequestId: number;
+    /** Most recent standing-order snapshot from the server, keyed by
+     *  order id. Updated wholesale on every `StandingOrderState` push —
+     *  no merging is needed because the server sends the full visible
+     *  set on every state change. Read by `Spring.GetStandingOrders`. */
+    standingOrders: Map<number, StandingOrderEntry>;
+}
+
+/** Per-order entry mirrored into LiveState.standingOrders. Mirrors
+ *  `StandingOrderInfoMsg` in connection.ts. */
+export interface StandingOrderConditionsEntry {
+    idleOnly: boolean;
+    squadTypes: number[];
+    withinCenter: readonly [number, number, number];
+    withinRadius: number;
+    outsideCenter: readonly [number, number, number];
+    outsideRadius: number;
+    minStrength: number;
+    hasCapabilities: string[];
+}
+
+export interface StandingOrderEntry {
+    orderId: number;
+    ownerTeam: number;
+    type: string;
+    priority: number;
+    params: number[];
+    conditions: StandingOrderConditionsEntry;
+    assignedSquadCount: number;
+    active: boolean;
+    createdAtFrame: number;
+    expiresAtFrame: number;
 }
 
 /** Stored LOS bitmap snapshot inside `LiveState`. Mirrors `LosBitmap`
@@ -794,6 +825,7 @@ export function createDefaultLiveState(): LiveState {
         armoredState: new Map(),
         pathResponses: new Map(),
         nextPathRequestId: 1,
+        standingOrders: new Map(),
     };
 }
 
@@ -1633,6 +1665,63 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             if (!Number.isFinite(id) || id <= 0) return;
             ls.pathResponses.delete(id);
             ctx.cancelPathRequest?.(id);
+        },
+        // Spring.GetStandingOrders(teamId?) — read-only list of standing
+        // orders visible to this client (own team + allied teams).
+        // Returns a Lua sequence of order tables matching the same
+        // shape as the server-side `Spring.GetStandingOrders` (id,
+        // type, priority, params, conditions, assigned, active,
+        // createdAtFrame, expiresAtFrame). With no argument, returns
+        // every visible order; with a `teamId` filters to that team.
+        // Widgets cannot create / update / remove standing orders
+        // client-side — they're server-authoritative; client must
+        // round-trip through `Spring.SendLuaRulesMsg` to a gadget if
+        // they need to mutate.
+        GetStandingOrders: (teamId: LuaValue) => {
+            const filter = (teamId === undefined || teamId === null)
+                ? null : (Number(teamId) | 0);
+            const out: Record<string, LuaValue>[] = [];
+            for (const o of ls.standingOrders.values()) {
+                if (filter != null && o.ownerTeam !== filter) continue;
+                const conds: Record<string, LuaValue> = {
+                    idleOnly: o.conditions.idleOnly,
+                    minStrength: o.conditions.minStrength,
+                };
+                if (o.conditions.squadTypes.length > 0)
+                    conds.squadTypes = [...o.conditions.squadTypes];
+                if (o.conditions.withinRadius > 0)
+                    conds.withinRadius = [
+                        o.conditions.withinCenter[0], o.conditions.withinCenter[1],
+                        o.conditions.withinCenter[2], o.conditions.withinRadius,
+                    ];
+                if (o.conditions.outsideRadius > 0)
+                    conds.outsideRadius = [
+                        o.conditions.outsideCenter[0], o.conditions.outsideCenter[1],
+                        o.conditions.outsideCenter[2], o.conditions.outsideRadius,
+                    ];
+                if (o.conditions.hasCapabilities.length > 0)
+                    conds.hasCapabilities = [...o.conditions.hasCapabilities];
+                out.push({
+                    id: o.orderId,
+                    ownerTeam: o.ownerTeam,
+                    type: o.type,
+                    priority: o.priority,
+                    params: [...o.params],
+                    conditions: conds,
+                    assigned: o.assignedSquadCount,
+                    active: o.active,
+                    createdAtFrame: o.createdAtFrame,
+                    expiresAtFrame: o.expiresAtFrame,
+                });
+            }
+            // Stable ordering: priority desc, then id asc, matches the
+            // server's GetTeamOrders.
+            out.sort((a, b) => {
+                const pa = a.priority as number, pb = b.priority as number;
+                if (pa !== pb) return pb - pa;
+                return (a.id as number) - (b.id as number);
+            });
+            return out;
         },
         // Spring.GetPathPosition(pathId, idx) — index-based reader used
         // by widgets that don't want to hold the proxy. 1-indexed.

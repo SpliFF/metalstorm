@@ -4524,6 +4524,51 @@ self.onmessage = async (e: MessageEvent) => {
             break;
         }
 
+        case 'standingOrders': {
+            // Server-pushed snapshot of every standing order visible to
+            // this client (own team + allied teams). Wholesale replace:
+            // the server sends the full set on every state change so we
+            // don't need to track diffs. Widgets read it via
+            // `Spring.GetStandingOrders` which walks the map directly.
+            const orders = Array.isArray(msg.orders) ? msg.orders as Array<Record<string, unknown>> : [];
+            liveState.standingOrders.clear();
+            for (const o of orders) {
+                const id = Number(o.orderId ?? 0) | 0;
+                if (id <= 0) continue;
+                const condsIn = (o.conditions ?? {}) as Record<string, unknown>;
+                const wc = condsIn.withinCenter as [number, number, number] | undefined;
+                const oc = condsIn.outsideCenter as [number, number, number] | undefined;
+                liveState.standingOrders.set(id, {
+                    orderId: id,
+                    ownerTeam: Number(o.ownerTeam ?? 0) | 0,
+                    type: String(o.type ?? 'DefendArea'),
+                    priority: Number(o.priority ?? 0) | 0,
+                    params: Array.isArray(o.params)
+                        ? (o.params as number[]).map(Number)
+                        : [],
+                    conditions: {
+                        idleOnly: Boolean(condsIn.idleOnly ?? true),
+                        squadTypes: Array.isArray(condsIn.squadTypes)
+                            ? (condsIn.squadTypes as number[]).map(n => Number(n) | 0)
+                            : [],
+                        withinCenter: wc ? [Number(wc[0]), Number(wc[1]), Number(wc[2])] : [0, 0, 0],
+                        withinRadius: Number(condsIn.withinRadius ?? 0),
+                        outsideCenter: oc ? [Number(oc[0]), Number(oc[1]), Number(oc[2])] : [0, 0, 0],
+                        outsideRadius: Number(condsIn.outsideRadius ?? 0),
+                        minStrength: Number(condsIn.minStrength ?? 0),
+                        hasCapabilities: Array.isArray(condsIn.hasCapabilities)
+                            ? (condsIn.hasCapabilities as string[]).map(String)
+                            : [],
+                    },
+                    assignedSquadCount: Number(o.assignedSquadCount ?? 0) | 0,
+                    active: Boolean(o.active ?? true),
+                    createdAtFrame: Number(o.createdAtFrame ?? 0) | 0,
+                    expiresAtFrame: Number(o.expiresAtFrame ?? 0) | 0,
+                });
+            }
+            break;
+        }
+
         case 'unitDefsUpdate': {
             const defs = msg.defs as MinimalUnitDefWire[] | undefined;
             if (!defs) break;

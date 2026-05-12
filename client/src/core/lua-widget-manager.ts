@@ -752,6 +752,48 @@ export class LuaWidgetManager {
         });
     }
 
+    /** Push a server StandingOrderState snapshot into the worker. Each
+     *  push replaces the worker's standing-order cache wholesale —
+     *  server sends the full visible set on every state change so no
+     *  diffing is needed. Widgets read via `Spring.GetStandingOrders`. */
+    forwardStandingOrders(orders: ReadonlyArray<{
+        orderId: number;
+        ownerTeam: number;
+        type: string;
+        priority: number;
+        params: number[];
+        conditions: {
+            idleOnly: boolean;
+            squadTypes: number[];
+            withinCenter: readonly [number, number, number];
+            withinRadius: number;
+            outsideCenter: readonly [number, number, number];
+            outsideRadius: number;
+            minStrength: number;
+            hasCapabilities: string[];
+        };
+        assignedSquadCount: number;
+        active: boolean;
+        createdAtFrame: number;
+        expiresAtFrame: number;
+    }>): void {
+        if (this.disposed) return;
+        this.postToWorker({
+            type: 'standingOrders',
+            orders: orders.map(o => ({
+                ...o,
+                params: [...o.params],
+                conditions: {
+                    ...o.conditions,
+                    squadTypes: [...o.conditions.squadTypes],
+                    withinCenter: [...o.conditions.withinCenter] as [number, number, number],
+                    outsideCenter: [...o.conditions.outsideCenter] as [number, number, number],
+                    hasCapabilities: [...o.conditions.hasCapabilities],
+                },
+            })),
+        });
+    }
+
     /** Push a per-tick batch of lifecycle events into the worker. The
      *  worker dispatches `widget:UnitFromFactory` / `UnitTaken` /
      *  `UnitGiven` callins from each entry. Typically empty on quiet

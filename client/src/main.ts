@@ -1012,6 +1012,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             currentWidgetManager?.forwardPathResponse(
                 info.requestId, info.waypoints, info.length);
         },
+        onStandingOrders(orders) {
+            currentWidgetManager?.forwardStandingOrders(orders);
+        },
         onGameOver(frame) {
             showGameOver(frame);
             currentWidgetManager?.forwardGameInfo(frame, 0, true, true);
