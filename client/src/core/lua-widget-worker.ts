@@ -3383,6 +3383,49 @@ function sameIdSet(a: ReadonlyArray<number>, b: ReadonlyArray<number>): boolean 
  *  explicitly when a streamed UnitCmdDescsUpdate or selection change
  *  invalidates the previous layout. Safe to call before the runtime is
  *  bootstrapped (no-op if widgetHandler isn't installed yet). */
+/** widgetHandler:SelectionChanged(newSelection) — Spring fires this when
+ *  the selected unit set changes (independent of CommandsChanged, which
+ *  fires when the *commands available* change). gui_chili_integral_menu,
+ *  gui_attackrange_gl4, unit_state_icons all register for this. */
+function dispatchSelectionChanged(ids: ReadonlyArray<number>): void {
+    if (!runtime) return;
+    const tableLit = ids.length === 0
+        ? '{}'
+        : '{' + ids.join(',') + '}';
+    runtime.doString(`
+        if widgetHandler and widgetHandler.SelectionChanged then
+            pcall(widgetHandler.SelectionChanged, widgetHandler, ${tableLit})
+        end
+    `, 'dispatchSelectionChanged');
+}
+
+/** widgetHandler:UnitCreated(unitID, unitDefID, unitTeam, builderID) —
+ *  fires once when a unit first appears in the local world. Without a
+ *  dedicated server event we synthesise it from the entity-state
+ *  stream: any id that wasn't in liveState.units before now counts as
+ *  newly seen. This conflates "created" with "entered LOS for the
+ *  first time", which is close enough for most widgets — Spring's own
+ *  UnitCreated also fires only when a unit becomes visible to LuaUI. */
+function dispatchUnitCreated(unitId: number, defId: number, team: number): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.UnitCreated then
+            pcall(widgetHandler.UnitCreated, widgetHandler, ${unitId}, ${defId}, ${team})
+        end
+    `, 'dispatchUnitCreated');
+}
+
+/** widgetHandler:UnitDestroyed(unitID, unitDefID, unitTeam) — fires on
+ *  the EntityDestroy event. */
+function dispatchUnitDestroyed(unitId: number, defId: number, team: number): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.UnitDestroyed then
+            pcall(widgetHandler.UnitDestroyed, widgetHandler, ${unitId}, ${defId}, ${team})
+        end
+    `, 'dispatchUnitDestroyed');
+}
+
 function dispatchCommandsChanged(): void {
     if (!runtime) return;
     // Spring exposes the union of every selected unit's cmd-descs as
@@ -3687,6 +3730,7 @@ self.onmessage = async (e: MessageEvent) => {
             // this, switching the selected unit would leave widgetHandler.
             // commands stale and the menu fixed on the previous unit.
             if (msg.selectedUnitIds && !sameIdSet(prevSel, liveState.selectedUnitIds)) {
+                dispatchSelectionChanged(liveState.selectedUnitIds);
                 dispatchCommandsChanged();
             }
             break;
@@ -3713,28 +3757,39 @@ self.onmessage = async (e: MessageEvent) => {
             // elmos/second. (We don't have a precise per-message timestamp
             // — adequate for HUD readouts and lead-shot calculations.)
             const tickRate = 30;
+            // Track newly-seen ids in this batch so we can fire
+            // UnitCreated callins after the merge completes. Spring's
+            // engine fires UnitCreated on initial visibility, so
+            // synthesising it from "id not in prior map" is the right
+            // shape for widgets like unit_state_icons that snapshot a
+            // unit's static metadata on creation.
+            const createdIds: Array<{ id: number; defId: number; team: number }> = [];
             if (!isDelta) {
                 // Full snapshot — rebuild. Only keep IDs in this snapshot.
+                const prevUnits = liveState.units;
                 const newUnits = new Map<number, UnitEntry>();
                 if (entityIds) {
                     for (let i = 0; i < count; i++) {
                         const id = entityIds[i];
-                        const prev = liveState.units.get(id);
+                        const prev = prevUnits.get(id);
                         const nx = posX ? posX[i] : 0;
                         const ny = posY ? posY[i] : 0;
                         const nz = posZ ? posZ[i] : 0;
+                        const defId = defIds ? defIds[i] : 0;
+                        const team = teams ? teams[i] : 0;
                         newUnits.set(id, {
                             x: nx, y: ny, z: nz,
                             heading: headings ? headings[i] : 0,
                             healthRatio: health ? health[i] / 65535 : 1,
-                            defId: defIds ? defIds[i] : 0,
-                            team: teams ? teams[i] : 0,
+                            defId,
+                            team,
                             vx: prev ? (nx - prev.x) * tickRate : 0,
                             vy: prev ? (ny - prev.y) * tickRate : 0,
                             vz: prev ? (nz - prev.z) * tickRate : 0,
                             stateBits: stateBits ? stateBits[i] : 0,
                             losState: losStates ? losStates[i] : 0x0F,
                         });
+                        if (!prev) createdIds.push({ id, defId, team });
                     }
                 }
                 liveState.units = newUnits;
@@ -3771,19 +3826,35 @@ self.onmessage = async (e: MessageEvent) => {
                         if (stateBits) entry.stateBits = stateBits[i];
                         if (losStates) entry.losState = losStates[i];
                         liveState.units.set(id, entry);
+                        if (!existing) {
+                            createdIds.push({ id, defId: entry.defId, team: entry.team });
+                        }
                     }
                 }
+            }
+            for (const c of createdIds) {
+                dispatchUnitCreated(c.id, c.defId, c.team);
             }
             break;
         }
 
-        case 'entityDestroy':
-            liveState.units.delete(msg.entityId as number);
-            liveState.unitRulesParams.delete(msg.entityId as number);
-            liveState.unitCommands.delete(msg.entityId as number);
-            liveState.unitCmdDescs.delete(msg.entityId as number);
-            liveState.sensorOverrides.delete(msg.entityId as number);
+        case 'entityDestroy': {
+            const id = msg.entityId as number;
+            const u = liveState.units.get(id);
+            // Snapshot the unit's defId / team before we drop it so the
+            // callin signature matches Spring's UnitDestroyed(unitID,
+            // unitDefID, unitTeam). Widgets that key off either need
+            // them — unit_state_icons clears its pip cache on this.
+            const defId = u?.defId ?? 0;
+            const team = u?.team ?? 0;
+            liveState.units.delete(id);
+            liveState.unitRulesParams.delete(id);
+            liveState.unitCommands.delete(id);
+            liveState.unitCmdDescs.delete(id);
+            liveState.sensorOverrides.delete(id);
+            dispatchUnitDestroyed(id, defId, team);
             break;
+        }
 
         case 'entitySensorUpdate': {
             // Per-unit sensor radius override emitted by
