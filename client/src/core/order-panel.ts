@@ -71,6 +71,34 @@ const ORDER_BUTTONS: OrderButton[] = [
 
 const BUTTON_BY_CMD = new Map<number, OrderButton>(ORDER_BUTTONS.map(b => [b.cmdId, b]));
 
+/// Spring `SCommandDescription::type == CMDTYPE_ICON_MODE` — a cycling
+/// stateful command. params[0] holds the current index (as a decimal
+/// string); params[1..] are the human-readable labels.
+const CMDTYPE_ICON_MODE = 5;
+
+/// Per-cmd colour ramps for state pips. Fire/move-state use the
+/// well-known traffic-light semantics (hold → red, return → yellow,
+/// roam/fire-at-will → green). Everything else cycles a single bright
+/// pip across slots so the player can see the count + which one's live.
+const PIP_PALETTES: Map<number, readonly string[]> = new Map([
+    [CMD.FIRE_STATE, ['#e25c5c', '#e6c244', '#5ed46a']],
+    [CMD.MOVE_STATE, ['#e25c5c', '#e6c244', '#5ed46a']],
+]);
+const PIP_DEFAULT_ACTIVE = '#6aa9ff';
+const PIP_INACTIVE       = '#2d3340';
+const PIP_MIXED          = '#777';
+
+/** Per-cmd state snapshot built from the cmdDescs streamed across the
+ *  current selection. `state == null` means the selected units disagree
+ *  on the current state index (Spring shows a "—" placeholder there). */
+interface CmdStateSnapshot {
+    cmdId: number;
+    /** Number of selectable values for the toggle (length of the label list). */
+    slotCount: number;
+    /** Current state index. null when the selection has mixed values. */
+    state: number | null;
+}
+
 export class OrderPanel {
     private root: HTMLDivElement;
     private grid: HTMLDivElement;
@@ -126,6 +154,10 @@ export class OrderPanel {
         // selected own-team units. Spring shows what any selected unit can
         // do; clicking issues to the matching subset.
         const available = new Set<number>();
+        // Per-cmd state snapshot for stateful toggle pips. Keyed by cmdId.
+        // We merge across selected units: matching state indices stay numeric;
+        // disagreements collapse to null ("mixed", rendered as a gray bar).
+        const stateInfo = new Map<number, CmdStateSnapshot>();
         let hasOwnUnit = false;
         for (const unitId of this.selection) {
             const meta = this.entityRenderer.getEntityMeta(unitId);
@@ -137,6 +169,29 @@ export class OrderPanel {
                 if (c.disabled) continue;
                 if (c.cmdId < 0) continue;       // skip build commands (BuildMenu owns those)
                 if (BUTTON_BY_CMD.has(c.cmdId)) available.add(c.cmdId);
+
+                // Stateful toggle? CMDTYPE_ICON_MODE (5) means params[0] is
+                // the current index as a decimal string and params[1..] are
+                // the labels. Some servers leave `type` at 0 for engine
+                // state commands but still ship params; treat any
+                // already-buttoned cmd with multi-entry params as stateful
+                // (build cmds are already filtered above).
+                const hasParams = Array.isArray(c.params) && c.params.length > 1;
+                if (!hasParams) continue;
+                if (c.type !== CMDTYPE_ICON_MODE && !PIP_PALETTES.has(c.cmdId) && !BUTTON_BY_CMD.has(c.cmdId)) continue;
+                const slotCount = c.params.length - 1;
+                const idx = Number.parseInt(c.params[0] ?? '', 10);
+                const thisState = Number.isFinite(idx) ? idx : null;
+                const prev = stateInfo.get(c.cmdId);
+                if (!prev) {
+                    stateInfo.set(c.cmdId, { cmdId: c.cmdId, slotCount, state: thisState });
+                } else if (prev.state !== thisState) {
+                    // Mixed selection → state collapses to null. We still
+                    // keep the slot count from the first contributor; if it
+                    // disagrees too, prefer the larger so every pip shows up.
+                    prev.state = null;
+                    if (slotCount > prev.slotCount) prev.slotCount = slotCount;
+                }
             }
         }
 
@@ -175,6 +230,15 @@ export class OrderPanel {
             cap.textContent = btn.label;
             tile.appendChild(cap);
 
+            // State-light pips for stateful toggles. Drawn as a horizontal
+            // strip along the bottom edge so the glyph + caption above
+            // stay readable. Mixed-state selections collapse to a single
+            // gray bar — Spring's exact behaviour.
+            const snap = stateInfo.get(btn.cmdId);
+            if (snap && snap.slotCount > 0) {
+                tile.appendChild(this.buildPipStrip(snap));
+            }
+
             tile.addEventListener('click', (e) => {
                 e.stopPropagation();
                 this.handleClick(btn);
@@ -187,6 +251,37 @@ export class OrderPanel {
         }
         this.grid.replaceChildren(...tiles);
         this.root.style.display = 'block';
+    }
+
+    /** Render an inline pip strip showing the current state index of a
+     *  stateful command. Mixed selections render as a single neutral
+     *  band. Active pip uses the cmd's palette if defined, otherwise a
+     *  generic accent colour. */
+    private buildPipStrip(snap: CmdStateSnapshot): HTMLElement {
+        const strip = document.createElement('span');
+        strip.className = 'order-panel-pips';
+        if (snap.state === null) {
+            // Spring shows a "—" for mixed selection. We draw a single
+            // gray bar spanning the strip so the player sees "stateful,
+            // but the units don't agree".
+            const mixed = document.createElement('span');
+            mixed.className = 'order-panel-pip order-panel-pip-mixed';
+            mixed.style.background = PIP_MIXED;
+            strip.appendChild(mixed);
+            return strip;
+        }
+        const palette = PIP_PALETTES.get(snap.cmdId);
+        for (let i = 0; i < snap.slotCount; i++) {
+            const pip = document.createElement('span');
+            pip.className = 'order-panel-pip';
+            if (i === snap.state) {
+                pip.style.background = palette?.[i] ?? PIP_DEFAULT_ACTIVE;
+            } else {
+                pip.style.background = PIP_INACTIVE;
+            }
+            strip.appendChild(pip);
+        }
+        return strip;
     }
 
     private handleClick(btn: OrderButton): void {
@@ -267,6 +362,26 @@ export class OrderPanel {
     color: #f0f0f0;
     text-shadow: 0 1px 0 #000;
     pointer-events: none;
+}
+.order-panel-pips {
+    position: absolute;
+    left: 4px;
+    right: 4px;
+    bottom: 3px;
+    height: 4px;
+    display: flex;
+    gap: 2px;
+    pointer-events: none;
+}
+.order-panel-pip {
+    flex: 1 1 0;
+    min-width: 0;
+    height: 100%;
+    border-radius: 1px;
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,0.55), 0 0 2px rgba(0,0,0,0.7);
+}
+.order-panel-pip-mixed {
+    border-radius: 2px;
 }
 `;
         const style = document.createElement('style');
