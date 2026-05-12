@@ -904,7 +904,8 @@ int main(int argc, char* argv[])
         }
 
         perfMetrics.BeginTick();
-        sessions.ResetTickCounters();
+        // Rate-limit token buckets now refill lazily on command arrival;
+        // no per-tick reset required. See ClientSession::TryConsumeCommandBudget.
 
         // Drain inbound messages from WebRTC data channels
         auto messages = rtcServer.DrainInbound();
@@ -1142,15 +1143,22 @@ int main(int argc, char* argv[])
                         break;
                     }
 
-                    // Rate limiting
-                    if (session->commandsThisTick >= SessionManager::MAX_COMMANDS_PER_TICK) {
+                    auto* cmd = clientMsg->payload_as_PlayerCommand();
+                    // Token-bucket rate limiting: drop early when the
+                    // client is over budget. squad_ids.size() is the
+                    // per-unit order count this command represents.
+                    const int squadCount = cmd && cmd->squad_ids()
+                        ? static_cast<int>(cmd->squad_ids()->size()) : 0;
+                    if (!SessionManager::TryConsumeCommandBudget(*session, squadCount)) {
                         auto err = Protocol::BuildServerError(429, "Command rate limit exceeded");
                         rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                        SLOG(SPRING_LOG_WARNING,
+                            "cmd: client %u (%s) rate-limit drop #%u (msgTokens=%.1f orderTokens=%.1f want=%d)",
+                            msg.clientId, session->username.c_str(),
+                            session->rateLimitDrops,
+                            session->cmdMessageTokens, session->cmdOrderTokens, squadCount);
                         break;
                     }
-                    session->commandsThisTick++;
-
-                    auto* cmd = clientMsg->payload_as_PlayerCommand();
 
                     // Sequence validation (must be monotonically increasing)
                     if (cmd->sequence() <= session->lastCommandSeq && session->lastCommandSeq > 0) {
@@ -1226,15 +1234,31 @@ int main(int argc, char* argv[])
                         break;
                     }
 
-                    if (session->commandsThisTick >= SessionManager::MAX_COMMANDS_PER_TICK) {
-                        auto err = Protocol::BuildServerError(429, "Command rate limit exceeded");
-                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
-                        break;
-                    }
-                    session->commandsThisTick++;
-
                     auto* batch = clientMsg->payload_as_PlayerCommandBatch();
                     if (!batch || !batch->commands()) break;
+
+                    // Sum squad_ids across the batch — a batch with N
+                    // inner commands and M unique targets across them
+                    // costs N+M tokens (1 message + sum of targets).
+                    // Cheapest correct cost in token-bucket terms: a
+                    // 12-tile build row across one builder spends 1
+                    // message + 12 orders.
+                    int batchSquadCount = 0;
+                    for (unsigned ci = 0; ci < batch->commands()->size(); ci++) {
+                        auto* c = batch->commands()->Get(ci);
+                        if (c && c->squad_ids())
+                            batchSquadCount += static_cast<int>(c->squad_ids()->size());
+                    }
+                    if (!SessionManager::TryConsumeCommandBudget(*session, batchSquadCount)) {
+                        auto err = Protocol::BuildServerError(429, "Command rate limit exceeded");
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                        SLOG(SPRING_LOG_WARNING,
+                            "cmd-batch: client %u (%s) rate-limit drop #%u (msgTokens=%.1f orderTokens=%.1f want=%d)",
+                            msg.clientId, session->username.c_str(),
+                            session->rateLimitDrops,
+                            session->cmdMessageTokens, session->cmdOrderTokens, batchSquadCount);
+                        break;
+                    }
 
                     if (batch->sequence() <= session->lastCommandSeq && session->lastCommandSeq > 0) {
                         auto err = Protocol::BuildServerError(400, "Stale command sequence");
