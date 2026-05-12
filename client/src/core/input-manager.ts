@@ -38,6 +38,7 @@ import type { DefCache } from './def-cache.js';
 import type { ParsedMapData } from './map-data.js';
 import { findMetalSpots, nearestMetalSpot, type MetalSpot } from './metal-spots.js';
 import type { AnimatedCursor } from './animated-cursor.js';
+import type { WaypointMarkerMeta } from './waypoint-marker-renderer.js';
 
 /// How close (in world elmos) a click has to be to a unit's XZ to
 /// count as selecting that unit. Accounts for pickWithRay landing
@@ -735,6 +736,15 @@ export class InputManager {
         // (e.g. tab-induced focus + Enter to fake a click) won't be caught,
         // but that's an edge case worth deferring.
         if (this.isOverUI()) return;
+
+        // Per-waypoint revocation: Ctrl+left-click on a waypoint marker
+        // sends CMD.REMOVE for that order's tag. Must run before build-
+        // placement / drag-select fall-through so the gesture isn't
+        // misinterpreted as a deselect or build commit.
+        if (evt.ctrlKey && !evt.shiftKey && !evt.altKey) {
+            if (this.tryRevokeWaypointAt(evt)) return;
+        }
+
         // Build placement: a left-click during placement issues the build
         // order at the ground point, not a unit selection.
         if (this.buildPlacement) {
@@ -748,6 +758,43 @@ export class InputManager {
         this.dragCurX = evt.clientX;
         this.dragCurY = evt.clientY;
         this.dragShift = evt.shiftKey;
+    }
+
+    /** Pick test against waypoint marker meshes. Returns true if a
+     *  marker was hit and CMD.REMOVE was sent — caller should bail out
+     *  of the rest of the left-click handler. */
+    private tryRevokeWaypointAt(evt: PointerEvent): boolean {
+        const canvas = this.scene.getEngine().getRenderingCanvas();
+        if (!canvas) return false;
+        const rect = canvas.getBoundingClientRect();
+        const cx = evt.clientX - rect.left;
+        const cy = evt.clientY - rect.top;
+        // scene.pick uses canvas-relative pixel coords; predicate filters
+        // out everything except marker instances. Markers are
+        // depth-always so even those hidden behind hills still pick.
+        const pick = this.scene.pick(cx, cy, (m) =>
+            m.isPickable && m.name.startsWith('waypoint-marker-'),
+        );
+        if (!pick?.hit || !pick.pickedMesh) return false;
+        const meta = (pick.pickedMesh.metadata as { waypoint?: WaypointMarkerMeta } | null)?.waypoint;
+        if (!meta || !meta.tag) {
+            // Untagged orders (tag = 0) shouldn't reach revocation — the
+            // server reserves tag 0 for "no tag". Bail without dropping
+            // through to selection.
+            return false;
+        }
+        // CMD.REMOVE params = [tag1, tag2, ...]. Plain REMOVE (no OPT.ALT)
+        // matches by tag — exactly one queued order is removed. Multi-
+        // unit revocation by position-match is deferred; revoking the
+        // picked marker's specific order is the simplest correct
+        // behaviour and matches Spring's per-tag REMOVE semantics.
+        this.commandBuffer.issueImmediate(
+            CMD.REMOVE,
+            [meta.unitId],
+            [meta.tag],
+            0,
+        );
+        return true;
     }
 
     private onDragMove(evt: PointerEvent): void {

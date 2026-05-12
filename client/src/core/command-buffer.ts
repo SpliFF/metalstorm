@@ -30,6 +30,18 @@ interface PendingCommand {
 /** Standard Spring command IDs. Mirrors rts/Sim/Units/CommandAI/Command.h. */
 export const CMD = {
     STOP: 0,
+    /** Insert an order before an existing queue slot. Params:
+     *    [insertPos, newCmdId, newOpts, ...newParams]
+     *  When OPT.ALT is set on the INSERT itself, `insertPos` is
+     *  interpreted as a TAG (look up the order with that tag, insert
+     *  before it) rather than a slot index. This is what waypoint-drag
+     *  uses to reorder atomically. See CommandAI::ExecuteInsert. */
+    INSERT: 1,
+    /** Remove queued orders by tag (default) or by cmdId (with OPT.ALT).
+     *  Params are the list of tags / cmdIds to drop. Per-waypoint
+     *  revocation uses this with a single tag and no flags. See
+     *  CommandAI::ExecuteRemove. */
+    REMOVE: 2,
     WAIT: 5,
     MOVE: 10,
     PATROL: 15,
