@@ -1920,9 +1920,11 @@ int main(int argc, char* argv[])
         }
         }
 
-        // Evaluate standing orders every ~1s (30 ticks)
+        // Evaluate standing orders every ~1s (30 ticks). Manager expires
+        // orders past their deadline against currentFrame and stamps
+        // notifications back through the change-notifier wired below.
         if (sim.GetFrameNum() > 0 && (sim.GetFrameNum() % 30) == 0) {
-            standingOrders.Evaluate();
+            standingOrders.Evaluate(static_cast<uint32_t>(sim.GetFrameNum()));
         }
 
         // Tick AI runtime and drain AI commands
