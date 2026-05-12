@@ -54,6 +54,7 @@ import { Minimap } from './core/minimap.js';
 import { LosBitmapStore } from './core/los-bitmap.js';
 import { CommandPathRenderer } from './core/command-path-renderer.js';
 import { WaypointMarkerRenderer } from './core/waypoint-marker-renderer.js';
+import { StandingOrderRenderer } from './core/standing-order-renderer.js';
 import { DebugTerrainGrid } from './core/debug-terrain-grid.js';
 import { Connection } from './core/connection.js';
 import { CONFIG, fetchBuildStamp, stampUrl } from './config.js';
@@ -96,6 +97,7 @@ let lobbyUI: LobbyUI | null = null;
 let minimap: Minimap | null = null;
 let commandPathRenderer: CommandPathRenderer | null = null;
 let waypointMarkerRenderer: WaypointMarkerRenderer | null = null;
+let standingOrderRenderer: StandingOrderRenderer | null = null;
 let debugTerrainGrid: DebugTerrainGrid | null = null;
 /// Cached most-recent command-queue snapshot. Lets a selection change
 /// repaint the path overlay without waiting for the next server tick.
@@ -246,6 +248,8 @@ function quitToLobby(): void {
     commandPathRenderer = null;
     waypointMarkerRenderer?.dispose();
     waypointMarkerRenderer = null;
+    standingOrderRenderer?.dispose();
+    standingOrderRenderer = null;
     debugTerrainGrid?.dispose();
     debugTerrainGrid = null;
     lastCommandQueues = [];
@@ -548,6 +552,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         inputManager?.setMapData(map);
         commandPathRenderer?.setMapData(map);
         waypointMarkerRenderer?.setMapData(map);
+        standingOrderRenderer?.setMapData(map);
         debugTerrainGrid?.setMapData(map);
 
         // Apply map-wide reverb (mapinfo.lua → sound.preset). The
@@ -837,6 +842,12 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             }
 
             inputManager?.setMyTeam(team);
+            // Push viewer identity into the standing-order renderer so it
+            // can colour own-team orders differently and honour the
+            // `setShowAllies(false)` toggle when set. Server-side
+            // visibility filtering still controls *which* orders we see;
+            // this only affects how we draw what we receive.
+            standingOrderRenderer?.setIdentity(team, team);
 
             // Native HUD panels — BuildMenu, OrderPanel, EconomyBar — are
             // disabled while ZK's chili widgets (gui_integral_menu.lua,
@@ -1014,6 +1025,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         },
         onStandingOrders(orders) {
             currentWidgetManager?.forwardStandingOrders(orders);
+            standingOrderRenderer?.update(orders);
         },
         onGameOver(frame) {
             showGameOver(frame);
@@ -1049,6 +1061,17 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     waypointMarkerRenderer = new WaypointMarkerRenderer(scene, entityRenderer);
     if (currentMapData) waypointMarkerRenderer.setMapData(currentMapData);
     (window as unknown as { __waypointMarkers: unknown }).__waypointMarkers = waypointMarkerRenderer;
+
+    // Standing-order map overlays — always visible (server already
+    // filters the broadcast to the viewer's team + allies). Unlike the
+    // shift-gated command-path overlay, strategic intent should always
+    // be readable. Allied display can be toggled off via
+    // `__standingOrders.setShowAllies(false)` (persists in
+    // localStorage). See PLAN-orders.md "Standing Order Visualisation
+    // (Client)" for per-type visual semantics.
+    standingOrderRenderer = new StandingOrderRenderer(scene);
+    if (currentMapData) standingOrderRenderer.setMapData(currentMapData);
+    (window as unknown as { __standingOrders: unknown }).__standingOrders = standingOrderRenderer;
 
     // Debug overlay: terrain-following grid using the same tube +
     // X-ray material setup as CommandPathRenderer. Toggle from devtools:
