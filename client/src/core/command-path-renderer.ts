@@ -128,6 +128,19 @@ const GLOW_ALPHA = 0.18;
 /// small white sphere that anchors the path visually.
 const START_MARKER_SIZE = 6;
 
+/// Dash pattern for queued (non-active) segments. Recoil renders the
+/// queued portion of a unit's path with stippling via
+/// `SetupLineStipple()` so the eye can tell at a glance which order is
+/// currently being executed (solid first segment) vs what comes after
+/// (dashed). Babylon's GreasedLine exposes the same control via
+/// `useDash` + `dashCount` + `dashRatio`. dashCount is "dashes per
+/// world-unit length of the polyline" — a value around 1/24 elmos lines
+/// up roughly with Recoil's `factor=2, stipple=0x1111` (~16-pixel dash
+/// at default zoom). dashRatio 0.55 leaves slightly more dash than gap
+/// which preserves continuity readability at low zoom.
+const DASH_PER_ELMO = 1 / 24;
+const DASH_RATIO = 0.55;
+
 function colorForCmd(cmdId: number): Color3 {
     if (cmdId < 0) return COLOR_BUILD;
     switch (cmdId) {
@@ -159,12 +172,18 @@ function destOf(order: OrderInfo): Vector3 | null {
 export class CommandPathRenderer {
     private scene: Scene;
     private entityRenderer: EntityRenderer;
-    /// Core (sharp, full-colour) line mesh.
-    private linesMesh: Mesh | null = null;
-    /// Glow halo mesh — same polylines, wider + dimmer, additive blend.
-    /// Drawn first (lower renderingGroupId equivalent via order) so the
-    /// core line sits inside the halo.
-    private glowMesh: Mesh | null = null;
+    /// Core (sharp, full-colour) line mesh for the *active* segment of
+    /// every selected unit's queue — solid, no dash. The active segment
+    /// is the one currently being executed (start → first waypoint).
+    private activeLinesMesh: Mesh | null = null;
+    /// Glow halo mesh for the active segment.
+    private activeGlowMesh: Mesh | null = null;
+    /// Core mesh for *queued* segments (the rest of the path after the
+    /// active one). Stippled via GreasedLine `useDash`. Matches Recoil's
+    /// `SetupLineStipple()` for queued waypoints.
+    private queuedLinesMesh: Mesh | null = null;
+    /// Glow halo for the queued segments. Stippled to match.
+    private queuedGlowMesh: Mesh | null = null;
     /// Start-point markers (one InstancedMesh per selected unit). Shares a
     /// single master plane + white-disc material.
     private startMaster: Mesh | null = null;
@@ -272,7 +291,7 @@ export class CommandPathRenderer {
         // the difference between a steady visible overlay and a 1 Hz
         // dispose/recreate flicker.
         const fp = this.fingerprint();
-        if (fp === this.renderedFingerprint && this.linesMesh) return;
+        if (fp === this.renderedFingerprint && (this.activeLinesMesh || this.queuedLinesMesh)) return;
 
         if (selection.length === 0) {
             this.disposeMesh();
@@ -282,12 +301,19 @@ export class CommandPathRenderer {
 
         const sel = new Set(selection);
 
-        /// Each selected unit's queue becomes one polyline (Vector3[]).
-        /// GreasedLine takes Vector3[][] for the multi-line case and
-        /// Color3[] (one per segment) for per-segment colouring. The
-        /// segment count = sum over all polylines of (points-1).
-        const polylines: Vector3[][] = [];
-        const segmentColors: Color3[] = [];
+        /// We split each queue into an *active* polyline (start → first
+        /// waypoint, solid) and a *queued* polyline (first → last
+        /// waypoint, stippled). Building them as separate GreasedLine
+        /// meshes is the only way to mix dash styles in one frame —
+        /// GreasedLine's `useDash` flag is per-material, not per-segment.
+        const activePolylines: Vector3[][] = [];
+        const activeColors: Color3[] = [];
+        /// Total queued path length in elmos. Drives `dashCount` so the
+        /// dash period stays roughly constant per world-unit regardless
+        /// of how long the queue is.
+        let queuedTotalLen = 0;
+        const queuedPolylines: Vector3[][] = [];
+        const queuedColors: Color3[] = [];
 
         for (const q of queues) {
             if (!sel.has(q.unitId)) continue;
@@ -318,22 +344,33 @@ export class CommandPathRenderer {
             }
 
             if (points.length < 2) continue;
-            polylines.push(points);
-            // GreasedLine auto-builds per-vertex colour pointers
-            // [0,0, 1,1, ..., N-1,N-1] and samples
-            //   texture.lookup = colorPointer / colorsWidth
-            // For a polyline of N points with N-1 segment colours, the
-            // last vertex's lookup is (N-1)/(N-1) = 1.0, which the
-            // default REPEAT wrap mode aliases back to colour[0] — the
-            // visible symptom is "every other segment colours wrong".
-            // Pad colours to length N (duplicate the last segment's
-            // colour onto the trailing vertex) and clamp wrap mode
-            // below to keep the lookup in-range.
-            for (const c of colors) segmentColors.push(c);
-            segmentColors.push(colors[colors.length - 1]);
+
+            // Active segment is always points[0] → points[1]. Push as a
+            // 2-vertex polyline; per-vertex colour pad is the same trick
+            // as the queued case below — N+1 colours for N points.
+            const activeSeg: Vector3[] = [points[0], points[1]];
+            activePolylines.push(activeSeg);
+            activeColors.push(colors[0]);
+            activeColors.push(colors[0]);
+
+            // Queued portion: points[1..end]. Skip if the queue had only
+            // one order (no segments after the active one).
+            if (points.length > 2) {
+                const queuedSeg: Vector3[] = points.slice(1);
+                queuedPolylines.push(queuedSeg);
+                // Per-segment colours for the queued portion. GreasedLine
+                // auto-builds per-vertex colour pointers; pad to length N
+                // (one colour per vertex) and clamp wrap mode below.
+                for (let i = 1; i < colors.length; i++) queuedColors.push(colors[i]);
+                queuedColors.push(colors[colors.length - 1]);
+                // Sum segment lengths for the global dashCount estimate.
+                for (let i = 1; i < queuedSeg.length; i++) {
+                    queuedTotalLen += Vector3.Distance(queuedSeg[i - 1], queuedSeg[i]);
+                }
+            }
         }
 
-        if (polylines.length === 0) {
+        if (activePolylines.length === 0 && queuedPolylines.length === 0) {
             this.disposeMesh();
             this.renderedFingerprint = fp;
             return;
@@ -343,44 +380,71 @@ export class CommandPathRenderer {
         // means the GPU never sees a frame with neither mesh present —
         // critical for stopping the 1 Hz flicker even when content
         // genuinely does change between broadcasts.
-        const oldLines = this.linesMesh;
-        const oldGlow = this.glowMesh;
+        const oldActiveLines = this.activeLinesMesh;
+        const oldActiveGlow = this.activeGlowMesh;
+        const oldQueuedLines = this.queuedLinesMesh;
+        const oldQueuedGlow = this.queuedGlowMesh;
 
-        // Glow pass first — drawn behind the core line. Wider, dimmer,
-        // additive blend. Gives the path a soft halo so the eye reads the
-        // colour as a glow rather than a sharp ribbon. Order in the
-        // scene matters: we use the same renderingGroupId but rely on
-        // creation order so the additive glow renders BEFORE the alpha
-        // core (Babylon iterates the active mesh list in creation order
-        // within a renderingGroup).
-        const glow = this.buildLineMesh(
-            'cmd-paths-glow',
-            polylines,
-            segmentColors,
-            LINE_WIDTH * GLOW_WIDTH_MULT,
-            GLOW_ALPHA,
-            /* additive */ true,
-        );
-
-        const core = this.buildLineMesh(
-            'cmd-paths',
-            polylines,
-            segmentColors,
-            LINE_WIDTH,
-            LINE_ALPHA,
-            /* additive */ false,
-        );
-
-        this.glowMesh = glow;
-        this.linesMesh = core;
-        if (oldLines) {
-            oldLines.material?.dispose();
-            oldLines.dispose();
+        // Active layer: solid glow + solid core.
+        let newActiveGlow: Mesh | null = null;
+        let newActiveCore: Mesh | null = null;
+        if (activePolylines.length > 0) {
+            newActiveGlow = this.buildLineMesh(
+                'cmd-paths-active-glow',
+                activePolylines,
+                activeColors,
+                LINE_WIDTH * GLOW_WIDTH_MULT,
+                GLOW_ALPHA,
+                /* additive */ true,
+                /* dash */ 0,
+            );
+            newActiveCore = this.buildLineMesh(
+                'cmd-paths-active',
+                activePolylines,
+                activeColors,
+                LINE_WIDTH,
+                LINE_ALPHA,
+                /* additive */ false,
+                /* dash */ 0,
+            );
         }
-        if (oldGlow) {
-            oldGlow.material?.dispose();
-            oldGlow.dispose();
+
+        // Queued layer: dashed glow + dashed core. dashCount scales with
+        // total queued length so the dash period stays roughly stable
+        // per world-unit regardless of how many waypoints are queued.
+        let newQueuedGlow: Mesh | null = null;
+        let newQueuedCore: Mesh | null = null;
+        if (queuedPolylines.length > 0) {
+            const dashCount = Math.max(4, Math.round(queuedTotalLen * DASH_PER_ELMO));
+            newQueuedGlow = this.buildLineMesh(
+                'cmd-paths-queued-glow',
+                queuedPolylines,
+                queuedColors,
+                LINE_WIDTH * GLOW_WIDTH_MULT,
+                GLOW_ALPHA,
+                /* additive */ true,
+                /* dash */ dashCount,
+            );
+            newQueuedCore = this.buildLineMesh(
+                'cmd-paths-queued',
+                queuedPolylines,
+                queuedColors,
+                LINE_WIDTH,
+                LINE_ALPHA,
+                /* additive */ false,
+                /* dash */ dashCount,
+            );
         }
+
+        this.activeGlowMesh = newActiveGlow;
+        this.activeLinesMesh = newActiveCore;
+        this.queuedGlowMesh = newQueuedGlow;
+        this.queuedLinesMesh = newQueuedCore;
+
+        if (oldActiveLines) { oldActiveLines.material?.dispose(); oldActiveLines.dispose(); }
+        if (oldActiveGlow)  { oldActiveGlow.material?.dispose();  oldActiveGlow.dispose();  }
+        if (oldQueuedLines) { oldQueuedLines.material?.dispose(); oldQueuedLines.dispose(); }
+        if (oldQueuedGlow)  { oldQueuedGlow.material?.dispose();  oldQueuedGlow.dispose();  }
 
         // Rebuild start-point markers. Tiny white discs at each selected
         // unit's mid-position — matches Recoil's `cmdColors.start` dot.
@@ -391,7 +455,11 @@ export class CommandPathRenderer {
 
     /** Build a single GreasedLine mesh with the desired width / alpha /
      *  blend mode. Used for both the core line and the glow halo —
-     *  identical geometry, different visual treatment. */
+     *  identical geometry, different visual treatment.
+     *
+     *  `dashCount > 0` enables GreasedLine's stipple pattern for the
+     *  queued portion of a path. `dashCount = 0` produces a solid line
+     *  (used for the active segment).  */
     private buildLineMesh(
         name: string,
         polylines: Vector3[][],
@@ -399,6 +467,7 @@ export class CommandPathRenderer {
         width: number,
         alpha: number,
         additive: boolean,
+        dashCount: number,
     ): Mesh {
         const mesh = CreateGreasedLine(
             name,
@@ -423,6 +492,17 @@ export class CommandPathRenderer {
                 // the actual shader-bound texture (held by the plugin)
                 // never reads — alpha bake-in silently has no effect.
                 materialType: GreasedLineMeshMaterialType.MATERIAL_TYPE_SIMPLE,
+                // Stipple for queued segments. GreasedLine's shader runs
+                // a frac() against gl_FragCoord against the per-vertex
+                // line-progression coordinate; dashCount controls how
+                // many on/off cycles fit along the polyline and dashRatio
+                // sets the on/off duty cycle. We only enable for queued
+                // segments — the active (currently-executing) segment is
+                // always solid so the player can read which order is
+                // "now" at a glance.
+                useDash: dashCount > 0,
+                dashCount: dashCount > 0 ? dashCount : 1,
+                dashRatio: DASH_RATIO,
             },
             this.scene,
         );
@@ -577,15 +657,25 @@ export class CommandPathRenderer {
     }
 
     private disposeMesh(): void {
-        if (this.linesMesh) {
-            this.linesMesh.material?.dispose();
-            this.linesMesh.dispose();
-            this.linesMesh = null;
+        if (this.activeLinesMesh) {
+            this.activeLinesMesh.material?.dispose();
+            this.activeLinesMesh.dispose();
+            this.activeLinesMesh = null;
         }
-        if (this.glowMesh) {
-            this.glowMesh.material?.dispose();
-            this.glowMesh.dispose();
-            this.glowMesh = null;
+        if (this.activeGlowMesh) {
+            this.activeGlowMesh.material?.dispose();
+            this.activeGlowMesh.dispose();
+            this.activeGlowMesh = null;
+        }
+        if (this.queuedLinesMesh) {
+            this.queuedLinesMesh.material?.dispose();
+            this.queuedLinesMesh.dispose();
+            this.queuedLinesMesh = null;
+        }
+        if (this.queuedGlowMesh) {
+            this.queuedGlowMesh.material?.dispose();
+            this.queuedGlowMesh.dispose();
+            this.queuedGlowMesh = null;
         }
         for (const m of this.startMarkers) m.dispose();
         this.startMarkers = [];
