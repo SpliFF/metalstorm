@@ -133,6 +133,16 @@ export class LuaWidgetManager {
     private fileCount = 0;
     private evalResolve: ((result: string) => void) | null = null;
 
+    /** Pending CommandNotify round-trips: id → resolver. Each
+     *  `notifyCommand()` posts a request to the worker and stores its
+     *  resolver here; the worker's `commandNotifyResult` reply pops the
+     *  resolver and feeds back the consumed flag. A 50ms timer drops
+     *  resolvers that never reply (worker stalled / shutting down) so the
+     *  main thread never blocks the command pipeline forever — fail-open
+     *  semantics: a timeout reports the command as NOT consumed. */
+    private pendingCommandNotifies = new Map<number, (consumed: boolean) => void>();
+    private commandNotifyRequestId = 0;
+
     /** Input listeners registered based on worker-reported callins */
     private inputCleanups: (() => void)[] = [];
     /** Last known mouse position for delta calculation */
@@ -545,6 +555,45 @@ export class LuaWidgetManager {
         this.selectedUnitIds = [...ids];
     }
 
+    /** Ask the worker to run the widget-side CommandNotify gate against a
+     *  proposed mouse-issued command. Returns true if any widget consumed
+     *  the order (caller must suppress the actual `sendPlayerCommand`).
+     *
+     *  Round-trips via postMessage, so adds ~ms-scale latency to every
+     *  mouse-issued order. Acceptable because the existing UI is
+     *  optimistic — the server state update will correct any visual
+     *  preview when the order lands.
+     *
+     *  Fail-open: if the worker hasn't booted, has shut down, or doesn't
+     *  reply within 50ms, the promise resolves to false. We'd rather send
+     *  an extra command than wedge the input pipeline waiting for a stalled
+     *  worker. */
+    notifyCommand(cmdId: number, params: readonly number[], options: number): Promise<boolean> {
+        if (this.disposed || !this.worker || !this.ready) {
+            return Promise.resolve(false);
+        }
+        const requestId = ++this.commandNotifyRequestId;
+        return new Promise<boolean>((resolve) => {
+            // 50ms cap matches roughly the per-frame budget at 60fps; a
+            // mouse-drag waypoint that takes longer than that to dispatch
+            // would be visible as lag.
+            const timer = setTimeout(() => {
+                if (this.pendingCommandNotifies.delete(requestId)) resolve(false);
+            }, 50);
+            this.pendingCommandNotifies.set(requestId, (consumed) => {
+                clearTimeout(timer);
+                resolve(consumed);
+            });
+            this.postToWorker({
+                type: 'commandNotify',
+                requestId,
+                cmdId,
+                params: [...params],
+                options,
+            });
+        });
+    }
+
     /** Push a batch of unit defs into the worker. Defs accumulate over
      *  the session — the server streams them on demand as the player
      *  encounters new entity types.
@@ -746,6 +795,8 @@ export class LuaWidgetManager {
             case 'widgetList':     summary = `widgetList (${String(msg.data ?? '').length} bytes)`; break;
             case 'worldGLCommands':summary = `worldGLCommands (${(msg.commands as unknown[])?.length ?? '?'} cmds)`; break;
             case 'giveOrder':      summary = `giveOrder cmd=${msg.cmdId} units=${(msg.unitIds as unknown[])?.length ?? 0} params=${(msg.params as unknown[])?.length ?? 0}`; break;
+            case 'commandNotify':       summary = `commandNotify cmd=${msg.cmdId} req=${msg.requestId} params=${(msg.params as unknown[])?.length ?? 0}`; break;
+            case 'commandNotifyResult': summary = `commandNotifyResult req=${msg.requestId} consumed=${msg.consumed}`; break;
             case 'sendLuaRulesMsg': summary = `sendLuaRulesMsg (${(msg.data as string)?.length ?? 0} bytes)`; break;
             case 'setSelection':   summary = `setSelection units=${(msg.unitIds as unknown[])?.length ?? 0}`; break;
             case 'setCameraTarget': summary = `setCameraTarget x=${msg.x} z=${msg.z} smooth=${msg.smoothness}`; break;
@@ -859,6 +910,17 @@ export class LuaWidgetManager {
                     this.evalResolve = null;
                 }
                 break;
+
+            case 'commandNotifyResult': {
+                const requestId = Number(msg.requestId | 0);
+                const consumed = msg.consumed === true;
+                const resolver = this.pendingCommandNotifies.get(requestId);
+                if (resolver) {
+                    this.pendingCommandNotifies.delete(requestId);
+                    resolver(consumed);
+                }
+                break;
+            }
 
             case 'worldGLCommands':
                 // TODO: replay command buffer on Babylon GL context
@@ -1589,6 +1651,14 @@ export class LuaWidgetManager {
             this.worker.terminate();
             this.worker = null;
         }
+        // Release any in-flight CommandNotify resolvers so awaiting
+        // CommandBuffer.sendCommand calls fail open and the connection
+        // still flushes (we don't want a torn-down widget manager to
+        // silently swallow late commands).
+        for (const resolver of this.pendingCommandNotifies.values()) {
+            try { resolver(false); } catch { /* ignore */ }
+        }
+        this.pendingCommandNotifies.clear();
         if (this.overlayCanvas) {
             this.overlayCanvas.remove();
             this.overlayCanvas = null;

@@ -197,6 +197,14 @@ export class InputManager {
         this.animatedCursor = cursor;
     }
 
+    /** Install (or clear) the CommandNotify gate on the CommandBuffer.
+     *  Wired from main.ts once the LuaWidgetManager exists — every
+     *  mouse-issued command then routes through widgetHandler.CommandNotify
+     *  before reaching the server. */
+    setCommandNotifier(fn: import('./command-buffer.js').CommandNotifier | null): void {
+        this.commandBuffer.setNotifier(fn);
+    }
+
     /** Set the player's team id after auth completes. Used by right-click
      *  target classification to distinguish friendly (Guard) from enemy
      *  (Attack) targets. */

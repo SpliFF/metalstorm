@@ -788,7 +788,18 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             // gl.DrawMiniMapEvents calls reach the native renderer.
             // PLAN-intel.md Phase 6.
             if (minimap) mgr.setMinimap(minimap);
-            (window as any).__widgetManagerDispose = () => { mgr.dispose(); };
+            // Route every mouse-issued command through the worker's
+            // CommandNotify dispatch so widgets that veto / rewrite
+            // orders (cmd_no_duplicate_orders, cmd_raw_move_issue,
+            // cmd_keep_target, …) see them before they hit the server.
+            // Widget-issued GiveOrder* already runs the same gate inside
+            // the worker (see lua-widget-worker.ts `giveOrder` cb).
+            inputManager?.setCommandNotifier(
+                (cmdId, params, options) => mgr.notifyCommand(cmdId, params, options));
+            (window as any).__widgetManagerDispose = () => {
+                inputManager?.setCommandNotifier(null);
+                mgr.dispose();
+            };
         }
     };
 

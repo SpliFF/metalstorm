@@ -399,6 +399,7 @@ function describeInboundMessage(msg: Record<string, unknown>): string {
         case 'losBitmap':     return `losBitmap allyTeam=${msg.allyTeam} ${msg.width}x${msg.height} frame=${msg.frame}`;
         case 'resourceUpdate':return `resourceUpdate team=${msg.team}`;
         case 'gameInfo':      return `gameInfo frame=${msg.frame}`;
+        case 'commandNotify': return `commandNotify cmd=${msg.cmdId} req=${msg.requestId} params=${(msg.params as unknown[])?.length ?? 0}`;
         default:              return t;
     }
 }
@@ -3795,6 +3796,30 @@ self.onmessage = async (e: MessageEvent) => {
                 `, 'callin:MouseRelease');
             }
             break;
+
+        case 'commandNotify': {
+            // Main thread asks the worker to run the CommandNotify gate
+            // before issuing a mouse-built command. Mirrors the synchronous
+            // path used by widget-issued GiveOrder*, but async because the
+            // main thread can't call into the Worker. Any widget that
+            // returns true from its CommandNotify handler consumes the
+            // order — we relay that decision back so the main thread can
+            // suppress the actual send. Failing open (consumed=false) on
+            // a runtime not-yet-ready / missing-handler is correct: the
+            // command should still go through.
+            const requestId = Number(msg.requestId | 0);
+            const cmdId = Number(msg.cmdId | 0);
+            const params = Array.isArray(msg.params) ? (msg.params as number[]) : [];
+            const options = Number(msg.options | 0);
+            let consumed = false;
+            try {
+                consumed = dispatchCommandNotify(cmdId, params, options);
+            } catch (err) {
+                postLog(3, `[CommandNotify] dispatch error: ${err}`);
+            }
+            postToMain({ type: 'commandNotifyResult', requestId, consumed });
+            break;
+        }
 
         case 'mousewheel':
             if (runtime) {

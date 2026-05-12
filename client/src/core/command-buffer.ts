@@ -82,13 +82,31 @@ function isPositionalCommand(cmdId: number): boolean {
            cmdId === CMD.AREA_ATTACK;
 }
 
+/** Async hook invoked before a command is sent to the server. Returns
+ *  true if any widget consumed the order — caller must drop the command.
+ *  Wired in main.ts to LuaWidgetManager.notifyCommand so widget-side
+ *  CommandNotify handlers (cmd_no_duplicate_orders, cmd_raw_move_issue,
+ *  cmd_keep_target, ...) can veto or rewrite mouse-issued orders. */
+export type CommandNotifier = (
+    cmdId: number,
+    params: readonly number[],
+    options: number,
+) => Promise<boolean>;
+
 export class CommandBuffer {
     private connection: Connection;
     private pending: PendingCommand | null = null;
     private flushTimer: ReturnType<typeof setTimeout> | null = null;
+    private notifier: CommandNotifier | null = null;
 
     constructor(connection: Connection) {
         this.connection = connection;
+    }
+
+    /** Install (or clear) the CommandNotify gate. Wired from main.ts once
+     *  both InputManager and LuaWidgetManager exist. */
+    setNotifier(fn: CommandNotifier | null): void {
+        this.notifier = fn;
     }
 
     /**
@@ -175,6 +193,33 @@ export class CommandBuffer {
         options: number,
         timeoutFrames: number,
     ): void {
+        // If a CommandNotify gate is wired, run it before sending. The
+        // gate round-trips through the worker so widgets that register
+        // widgetHandler.CommandNotify (cmd_no_duplicate_orders,
+        // cmd_raw_move_issue, cmd_keep_target, ...) can veto or rewrite
+        // the order. Returning true from any widget consumes the command
+        // — we drop it silently to match Spring's contract.
+        //
+        // Fire-and-forget: the InputManager call site doesn't (and can't)
+        // await, so we don't propagate the Promise. The notifier itself
+        // caps wait time at 50ms so a stalled worker never wedges
+        // commands — fail open.
+        if (this.notifier) {
+            const notify = this.notifier;
+            void (async () => {
+                let consumed = false;
+                try {
+                    consumed = await notify(commandId, params, options);
+                } catch {
+                    consumed = false;
+                }
+                if (consumed) return;
+                this.connection.sendPlayerCommand(
+                    commandId, squadIds, params, options, timeoutFrames);
+            })();
+            return;
+        }
+
         // Delegate to Connection.sendPlayerCommand so all client-issued
         // commands share a single monotonic sequence counter
         // (`Connection.commandSequence`). Without this, widget-issued
