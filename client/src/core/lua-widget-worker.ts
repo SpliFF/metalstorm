@@ -937,6 +937,16 @@ async function init(
         gameRulesParams: new Map(),
         getGameSeconds: () => (performance.now() / 1000) - startTime,
         giveOrder: (cmdId, unitIds, params, options) => {
+            // CommandNotify gate. Spring fires this on the widgetHandler
+            // for every player-issued order so widgets like
+            // cmd_no_duplicate_orders, cmd_keep_target, cmd_raw_move_issue
+            // can rewrite or veto. Returning true from any widget
+            // consumes the order. Widget-originated GiveOrder* calls
+            // route through here so a widget can intercept another
+            // widget's order issuance.
+            if (dispatchCommandNotify(cmdId, params, options)) {
+                return;
+            }
             postToMain({ type: 'giveOrder', cmdId, unitIds, params, options });
         },
         sendLuaRulesMsg: (data) => {
@@ -3413,6 +3423,47 @@ function dispatchUnitCreated(unitId: number, defId: number, team: number): void 
             pcall(widgetHandler.UnitCreated, widgetHandler, ${unitId}, ${defId}, ${team})
         end
     `, 'dispatchUnitCreated');
+}
+
+/** widgetHandler:CommandNotify(cmdID, cmdParams, cmdOptions) — Spring
+ *  fires this once for every player-issued command BEFORE it enters
+ *  the queue. Any widget that returns true consumes the command. ZK
+ *  uses this for ~17 widgets that veto duplicate build orders, rewrite
+ *  raw-move into formation-move, keep targets across queues, etc.
+ *
+ *  cmdOptions in Spring is a table with named flag keys ({alt=,
+ *  ctrl=, shift=, right=, meta=}). We rebuild that shape from the
+ *  flag bits the caller passes through. Returns true if any widget
+ *  consumed the order — caller should suppress the actual send. */
+function dispatchCommandNotify(
+    cmdId: number,
+    params: readonly number[],
+    optionBits: number,
+): boolean {
+    if (!runtime) return false;
+    const paramsLit = params.length === 0
+        ? '{}'
+        : '{' + params.map(n => Number.isFinite(n) ? String(n) : '0').join(',') + '}';
+    // Bit layout matches command-buffer.ts: META=1, RIGHT=4, CTRL=64,
+    // ALT=128, SHIFT=32. cawidgets.lua's CommandNotify dispatch reads
+    // the cmdOptions.{alt,ctrl,shift,right,meta} booleans, plus an
+    // internal `coded` int that some widgets check.
+    const alt    = (optionBits & 128) !== 0 ? 'true' : 'false';
+    const ctrl   = (optionBits & 64)  !== 0 ? 'true' : 'false';
+    const shift  = (optionBits & 32)  !== 0 ? 'true' : 'false';
+    const right  = (optionBits & 16)  !== 0 ? 'true' : 'false';
+    const meta   = (optionBits & 4)   !== 0 ? 'true' : 'false';
+    const consumed = runtime.evalString(`
+        if widgetHandler and widgetHandler.CommandNotify then
+            local ok, ret = pcall(widgetHandler.CommandNotify, widgetHandler,
+                ${cmdId | 0},
+                ${paramsLit},
+                { alt=${alt}, ctrl=${ctrl}, shift=${shift}, right=${right}, meta=${meta}, coded=${optionBits | 0} })
+            return ok and ret and "1" or "0"
+        end
+        return "0"
+    `);
+    return consumed === '1';
 }
 
 /** widgetHandler:UnitDestroyed(unitID, unitDefID, unitTeam) — fires on
