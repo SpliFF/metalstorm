@@ -1568,6 +1568,26 @@ int main(int argc, char* argv[])
                     auto descs = Protocol::BuildUnitCmdDescs(cmdDescTargets);
                     rtcServer.SendReliable(clientId, descs.data(), descs.size());
                 }
+
+                // Transport / self-destruct / stockpile / armored state.
+                // All four piggy-back on the same allied-team unit set used
+                // for command queues — emit each as a snapshot. The
+                // Build*Update helpers internally skip units that have no
+                // active state, so most ticks send tiny (often empty)
+                // payloads.
+                if (!visibleUnits.empty()) {
+                    auto transport = Protocol::BuildUnitTransportUpdate(visibleUnits);
+                    rtcServer.SendReliable(clientId, transport.data(), transport.size());
+
+                    auto selfd = Protocol::BuildUnitSelfDUpdate(visibleUnits);
+                    rtcServer.SendReliable(clientId, selfd.data(), selfd.size());
+
+                    auto stock = Protocol::BuildUnitStockpileUpdate(visibleUnits);
+                    rtcServer.SendReliable(clientId, stock.data(), stock.size());
+
+                    auto armor = Protocol::BuildUnitArmoredUpdate(visibleUnits);
+                    rtcServer.SendReliable(clientId, armor.data(), armor.size());
+                }
             });
         }
         }

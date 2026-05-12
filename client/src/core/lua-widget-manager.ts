@@ -651,16 +651,83 @@ export class LuaWidgetManager {
     }
 
     /** Push a per-unit command-descriptor snapshot into the worker.
-     *  Server streams build (cmdId<0) entries at ~1 Hz; widgets read
-     *  these via Spring.GetUnitCmdDescs to populate their build menus. */
+     *  Server streams the full SCommandDescription surface (name,
+     *  action, texture, tooltip, type, params, hidden, disabled) at
+     *  ~1 Hz; widgets read these via Spring.GetUnitCmdDescs to render
+     *  the integral menu and ZK's cmd_*.lua widgets. */
     forwardUnitCmdDescs(units: ReadonlyArray<{
         unitId: number;
-        cmds: ReadonlyArray<{ cmdId: number; disabled: boolean }>;
+        cmds: ReadonlyArray<{
+            cmdId: number; disabled: boolean;
+            name: string; action: string; texture: string; tooltip: string;
+            type: number; params: string[]; hidden: boolean;
+        }>;
     }>): void {
         if (this.disposed) return;
         this.postToWorker({ type: 'unitCmdDescs', units: units.map(u => ({
             unitId: u.unitId,
-            cmds: u.cmds.map(c => ({ cmdId: c.cmdId, disabled: c.disabled })),
+            cmds: u.cmds.map(c => ({
+                cmdId: c.cmdId, disabled: c.disabled,
+                name: c.name, action: c.action, texture: c.texture, tooltip: c.tooltip,
+                type: c.type, params: [...c.params], hidden: c.hidden,
+            })),
+        })) });
+    }
+
+    /** Push a transport-relationship snapshot into the worker.
+     *  Each entry lists a transporter and its currently-carried cargo;
+     *  transporters with empty cargo are absent. The worker treats
+     *  each snapshot as a complete replacement of its transport cache. */
+    forwardUnitTransports(transports: ReadonlyArray<{
+        transporterId: number;
+        cargo: number[];
+    }>): void {
+        if (this.disposed) return;
+        this.postToWorker({ type: 'unitTransports', transports: transports.map(t => ({
+            transporterId: t.transporterId,
+            cargo: [...t.cargo],
+        })) });
+    }
+
+    /** Push a per-unit self-destruct countdown snapshot into the worker.
+     *  Units not present in the snapshot are treated as not self-
+     *  destructing. */
+    forwardUnitSelfD(units: ReadonlyArray<{
+        unitId: number;
+        secondsRemaining: number;
+    }>): void {
+        if (this.disposed) return;
+        this.postToWorker({ type: 'unitSelfD', units: units.map(u => ({
+            unitId: u.unitId, secondsRemaining: u.secondsRemaining,
+        })) });
+    }
+
+    /** Push a per-unit stockpile-weapon state snapshot into the worker.
+     *  Units not present in the snapshot have no stockpile weapon (or
+     *  one with zero counters and zero in-flight progress). */
+    forwardUnitStockpile(units: ReadonlyArray<{
+        unitId: number;
+        ready: number;
+        queued: number;
+        buildPercent: number;
+    }>): void {
+        if (this.disposed) return;
+        this.postToWorker({ type: 'unitStockpile', units: units.map(u => ({
+            unitId: u.unitId, ready: u.ready, queued: u.queued, buildPercent: u.buildPercent,
+        })) });
+    }
+
+    /** Push a per-unit armored toggle snapshot into the worker. Units
+     *  not present have the default non-armored state (armored=false,
+     *  armoredMultiple=1.0). */
+    forwardUnitArmored(units: ReadonlyArray<{
+        unitId: number;
+        armored: boolean;
+        armoredMultiple: number;
+    }>): void {
+        if (this.disposed) return;
+        this.postToWorker({ type: 'unitArmored', units: units.map(u => ({
+            unitId: u.unitId, armored: u.armored, armoredMultiple: u.armoredMultiple,
         })) });
     }
 

@@ -32,8 +32,12 @@ import { RoomPlayerLeft, RoomPlayerLeftT } from '../spring-web/room-player-left.
 import { RoomStateUpdate, RoomStateUpdateT } from '../spring-web/room-state-update.js';
 import { ServerError, ServerErrorT } from '../spring-web/server-error.js';
 import { ServerPayload, unionToServerPayload, unionListToServerPayload } from '../spring-web/server-payload.js';
+import { UnitArmoredUpdate, UnitArmoredUpdateT } from '../spring-web/unit-armored-update.js';
 import { UnitCmdDescsUpdate, UnitCmdDescsUpdateT } from '../spring-web/unit-cmd-descs-update.js';
 import { UnitCommandQueuesUpdate, UnitCommandQueuesUpdateT } from '../spring-web/unit-command-queues-update.js';
+import { UnitSelfDUpdate, UnitSelfDUpdateT } from '../spring-web/unit-self-dupdate.js';
+import { UnitStockpileUpdate, UnitStockpileUpdateT } from '../spring-web/unit-stockpile-update.js';
+import { UnitTransportUpdate, UnitTransportUpdateT } from '../spring-web/unit-transport-update.js';
 
 
 export class ServerMessage implements flatbuffers.IUnpackableObject<ServerMessageT> {
@@ -113,7 +117,7 @@ unpackTo(_o: ServerMessageT): void {
 export class ServerMessageT implements flatbuffers.IGeneratedObject {
 constructor(
   public payloadType: ServerPayload = ServerPayload.NONE,
-  public payload: AIListUpdateT|AuthResponseT|ChatReceiveT|ConsoleResponseT|EntityCreateT|EntityDestroyT|EntitySensorUpdateT|GameCegDefsT|GameEventBatchT|GameInfoT|GameListUpdateT|GameRestartingT|GameStartedT|GameUnitDefsT|GameWeaponDefsT|LogBatchT|MapDataT|MapListUpdateT|PlayerLeftT|PongT|ReconnectResponseT|ResourceUpdateT|RoomListUpdateT|RoomPlayerJoinedT|RoomPlayerLeftT|RoomStateUpdateT|ServerErrorT|UnitCmdDescsUpdateT|UnitCommandQueuesUpdateT|null = null
+  public payload: AIListUpdateT|AuthResponseT|ChatReceiveT|ConsoleResponseT|EntityCreateT|EntityDestroyT|EntitySensorUpdateT|GameCegDefsT|GameEventBatchT|GameInfoT|GameListUpdateT|GameRestartingT|GameStartedT|GameUnitDefsT|GameWeaponDefsT|LogBatchT|MapDataT|MapListUpdateT|PlayerLeftT|PongT|ReconnectResponseT|ResourceUpdateT|RoomListUpdateT|RoomPlayerJoinedT|RoomPlayerLeftT|RoomStateUpdateT|ServerErrorT|UnitArmoredUpdateT|UnitCmdDescsUpdateT|UnitCommandQueuesUpdateT|UnitSelfDUpdateT|UnitStockpileUpdateT|UnitTransportUpdateT|null = null
 ){}
 
 

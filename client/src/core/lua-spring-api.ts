@@ -366,6 +366,23 @@ export interface LiveState {
          *  engineCmd when no widget overrode. */
         cmdId: number;
     };
+    /** Per-transporter cargo list. Keyed by transporter unit id, value
+     *  is an ordered list of cargo unit ids. Read by Spring.GetUnitIsTransporting.
+     *  Absence means "no cargo" (or "unit isn't a transporter at all"). */
+    transportCargo: Map<number, number[]>;
+    /** Reverse index: cargo unit id → its current transporter id. Read
+     *  by Spring.GetUnitTransporter. Absence means "not being transported". */
+    transportCarrier: Map<number, number>;
+    /** Self-destruct countdown in game-seconds, keyed by unit id.
+     *  Absence means "no active countdown". Read by Spring.GetUnitSelfDTime. */
+    selfDCountdown: Map<number, number>;
+    /** Stockpile weapon state keyed by unit id. Absence means
+     *  "no stockpile weapon, or zero state". Read by Spring.GetUnitStockpile. */
+    stockpileState: Map<number, { ready: number; queued: number; buildPercent: number }>;
+    /** Armored toggle state keyed by unit id. Absence means the default
+     *  non-armored state (armored=false, armoredMultiple=1.0). Read by
+     *  Spring.GetUnitArmored. */
+    armoredState: Map<number, { armored: boolean; armoredMultiple: number }>;
 }
 
 /** Stored LOS bitmap snapshot inside `LiveState`. Mirrors `LosBitmap`
@@ -742,6 +759,11 @@ export function createDefaultLiveState(): LiveState {
         minimapGeometry: undefined,
         sensorOverrides: new Map(),
         defaultCommand: { targetType: null, targetId: 0, engineCmd: 10 /* CMD_MOVE */, cmdId: 10 },
+        transportCargo: new Map(),
+        transportCarrier: new Map(),
+        selfDCountdown: new Map(),
+        stockpileState: new Map(),
+        armoredState: new Map(),
     };
 }
 
@@ -1277,6 +1299,58 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         },
         ValidUnitID: (id: LuaValue) => ls.units.has(Number(id)),
         GetUnitIsDead: (id: LuaValue) => !ls.units.has(Number(id)),
+
+        // --- Transport state (Spring.GetUnitIsTransporting / GetUnitTransporter) ---
+        // Spring's GetUnitIsTransporting returns a sequence of cargo
+        // unit ids; nil if the unit isn't a transporter at all. We
+        // return an empty Lua table when the unit exists but isn't
+        // carrying anything — matches the Spring contract.
+        GetUnitIsTransporting: (id: LuaValue) => {
+            const uid = Number(id);
+            if (!ls.units.has(uid)) return null;
+            const cargo = ls.transportCargo.get(uid);
+            return luaTable(cargo ?? []);
+        },
+        // GetUnitTransporter returns the carrier unit id, or nil if the
+        // unit isn't being carried.
+        GetUnitTransporter: (id: LuaValue) => {
+            const carrier = ls.transportCarrier.get(Number(id));
+            return carrier === undefined ? null : carrier;
+        },
+
+        // --- Self-destruct countdown ---
+        // Returns game-seconds remaining on the active self-destruct.
+        // Spring returns 0 when the unit isn't self-destructing — match
+        // that even though Spring's docs call the return optional.
+        GetUnitSelfDTime: (id: LuaValue) => {
+            const uid = Number(id);
+            if (!ls.units.has(uid)) return null;
+            return ls.selfDCountdown.get(uid) ?? 0;
+        },
+
+        // --- Stockpile weapon state ---
+        // Spring returns (numStockpiled, numStockpileQued, buildPercent).
+        // We return nil when the unit has no stockpile weapon at all
+        // (snapshot omitted the unit) — matches Spring's behaviour of
+        // returning nothing when stockpileWeapon is null.
+        GetUnitStockpile: (id: LuaValue) => {
+            const s = ls.stockpileState.get(Number(id));
+            if (!s) return null;
+            return [s.ready, s.queued, s.buildPercent];
+        },
+
+        // --- Armored toggle ---
+        // Spring returns (armoredState, armoredMultiple). We return the
+        // default (false, 1.0) for units that haven't been streamed —
+        // matches the server's omission rule (only non-default state is
+        // streamed) so absence == default.
+        GetUnitArmored: (id: LuaValue) => {
+            const uid = Number(id);
+            if (!ls.units.has(uid)) return null;
+            const s = ls.armoredState.get(uid);
+            if (!s) return [false, 1.0];
+            return [s.armored, s.armoredMultiple];
+        },
 
         GetUnitAllyTeam: (id: LuaValue) => {
             const u = ls.units.get(Number(id));

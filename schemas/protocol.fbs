@@ -1431,6 +1431,84 @@ table UnitCmdDescsUpdate {
     units: [UnitCmdDescs];
 }
 
+/// One transport relationship. Lists a transporter and the units it
+/// is currently carrying. Cargo unit ids appear in the order
+/// `CUnit::transportedUnits` holds them; a transporter with empty
+/// cargo is omitted from the update entirely.
+table UnitTransportInfo {
+    transporter_id: uint32;
+    cargo: [uint32];
+}
+
+/// Per-session broadcast: every transport relationship visible to the
+/// session. Sent every ~1 Hz alongside UnitCommandQueuesUpdate.
+/// The client treats each snapshot as a complete replacement of its
+/// transport cache: any transporter not listed has empty cargo, any
+/// cargo not listed has no transporter.
+///
+/// Visibility matches the UnitCommandQueuesUpdate filter (own-team +
+/// allied teams). The transport message is intentionally a full
+/// snapshot rather than per-event delta — at 1 Hz the bandwidth cost
+/// is negligible (most teams have 0..few transports), and snapshots
+/// are self-healing across packet loss / reconnect.
+table UnitTransportUpdate {
+    transports: [UnitTransportInfo];
+}
+
+/// One unit's self-destruct countdown state.
+table UnitSelfDInfo {
+    unit_id: uint32;
+    /// Game-seconds remaining on the self-destruct countdown. Matches
+    /// Spring's `CUnit::selfDCountdown` directly (decremented once per
+    /// game-second, not per frame). 0 = not self-destructing.
+    seconds_remaining: uint16;
+}
+
+/// Per-session broadcast: every visible unit with a non-zero
+/// self-destruct countdown. Snapshot semantics: any unit not listed
+/// has no active self-destruct. Sent every ~1 Hz.
+table UnitSelfDUpdate {
+    units: [UnitSelfDInfo];
+}
+
+/// One unit's stockpile-weapon state. Emitted only for units whose
+/// stockpileWeapon is non-null AND has non-zero counters or in-flight
+/// build progress (so most units never appear here).
+table UnitStockpileInfo {
+    unit_id: uint32;
+    /// Number of missiles currently ready to fire.
+    ready: uint16;
+    /// Number of additional missiles queued for production.
+    queued: uint16;
+    /// Build progress on the in-flight missile, 0.0..1.0.
+    /// Matches Spring's `CWeapon::buildPercent`.
+    build_percent: float;
+}
+
+/// Per-session broadcast: every visible unit with active stockpile
+/// state. Snapshot semantics. Sent every ~1 Hz.
+table UnitStockpileUpdate {
+    units: [UnitStockpileInfo];
+}
+
+/// One unit's armored toggle state. Spring tracks two fields per
+/// unit: a bool `armoredState` (currently armored?) and a float
+/// `armoredMultiple` (damage multiplier while armored, typically 0.5).
+/// Emitted only for units whose armoredState is true OR whose
+/// armoredMultiple differs from 1.0 — units in the default
+/// non-armored state with multiplier 1.0 are omitted entirely.
+table UnitArmoredInfo {
+    unit_id: uint32;
+    armored: bool;
+    armored_multiple: float;
+}
+
+/// Per-session broadcast: every visible unit with non-default armored
+/// state. Snapshot semantics. Sent every ~1 Hz.
+table UnitArmoredUpdate {
+    units: [UnitArmoredInfo];
+}
+
 // Union of all server→client message types
 union ServerPayload {
     AuthResponse,
@@ -1462,6 +1540,10 @@ union ServerPayload {
     UnitCommandQueuesUpdate,
     UnitCmdDescsUpdate,
     EntitySensorUpdate,
+    UnitTransportUpdate,
+    UnitSelfDUpdate,
+    UnitStockpileUpdate,
+    UnitArmoredUpdate,
 }
 
 table ServerMessage {

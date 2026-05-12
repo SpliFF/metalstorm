@@ -18,6 +18,7 @@
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectileTypes.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
+#include "Sim/Weapons/Weapon.h"
 #include "Sim/Weapons/WeaponDef.h"
 #include "Sim/Misc/GuiSoundSet.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
@@ -461,6 +462,104 @@ inline std::vector<uint8_t> BuildUnitCmdDescs(const std::vector<CUnit*>& units) 
     auto upd = SpringWeb::CreateUnitCmdDescsUpdate(fbb, unitsVec);
     return BuildServerMessage(fbb,
         SpringWeb::ServerPayload_UnitCmdDescsUpdate, upd.Union());
+}
+
+/// Build a UnitTransportUpdate. Walks `units` and emits an entry per
+/// transporter with non-empty cargo. Non-transport units and idle
+/// transports are skipped — the client treats absence as "no cargo".
+inline std::vector<uint8_t> BuildUnitTransportUpdate(const std::vector<CUnit*>& units) {
+    flatbuffers::FlatBufferBuilder fbb(256);
+
+    std::vector<flatbuffers::Offset<SpringWeb::UnitTransportInfo>> entries;
+    for (const CUnit* u : units) {
+        if (u == nullptr) continue;
+        if (u->transportedUnits.empty()) continue;
+        std::vector<uint32_t> cargo;
+        cargo.reserve(u->transportedUnits.size());
+        for (const CUnit::TransportedUnit& tu : u->transportedUnits) {
+            if (tu.unit != nullptr)
+                cargo.push_back(static_cast<uint32_t>(tu.unit->id));
+        }
+        if (cargo.empty()) continue;
+        auto cargoVec = fbb.CreateVector(cargo);
+        entries.push_back(SpringWeb::CreateUnitTransportInfo(
+            fbb, static_cast<uint32_t>(u->id), cargoVec));
+    }
+
+    auto entriesVec = fbb.CreateVector(entries);
+    auto upd = SpringWeb::CreateUnitTransportUpdate(fbb, entriesVec);
+    return BuildServerMessage(fbb,
+        SpringWeb::ServerPayload_UnitTransportUpdate, upd.Union());
+}
+
+/// Build a UnitSelfDUpdate. Emits an entry for every unit whose
+/// `selfDCountdown` is non-zero. Snapshot semantics: a unit not
+/// present is treated as having no active countdown.
+inline std::vector<uint8_t> BuildUnitSelfDUpdate(const std::vector<CUnit*>& units) {
+    flatbuffers::FlatBufferBuilder fbb(256);
+
+    std::vector<flatbuffers::Offset<SpringWeb::UnitSelfDInfo>> entries;
+    for (const CUnit* u : units) {
+        if (u == nullptr) continue;
+        if (u->selfDCountdown <= 0) continue;
+        const uint16_t secs = static_cast<uint16_t>(
+            std::min(u->selfDCountdown, 65535));
+        entries.push_back(SpringWeb::CreateUnitSelfDInfo(
+            fbb, static_cast<uint32_t>(u->id), secs));
+    }
+
+    auto entriesVec = fbb.CreateVector(entries);
+    auto upd = SpringWeb::CreateUnitSelfDUpdate(fbb, entriesVec);
+    return BuildServerMessage(fbb,
+        SpringWeb::ServerPayload_UnitSelfDUpdate, upd.Union());
+}
+
+/// Build a UnitStockpileUpdate. Emits an entry for every unit whose
+/// stockpileWeapon is non-null AND has non-zero counters or non-zero
+/// build progress. Snapshot semantics.
+inline std::vector<uint8_t> BuildUnitStockpileUpdate(const std::vector<CUnit*>& units) {
+    flatbuffers::FlatBufferBuilder fbb(256);
+
+    std::vector<flatbuffers::Offset<SpringWeb::UnitStockpileInfo>> entries;
+    for (const CUnit* u : units) {
+        if (u == nullptr || u->stockpileWeapon == nullptr) continue;
+        const CWeapon* w = u->stockpileWeapon;
+        const int ready  = w->numStockpiled;
+        const int queued = w->numStockpileQued;
+        const float bp   = w->buildPercent;
+        if (ready == 0 && queued == 0 && bp == 0.0f) continue;
+        entries.push_back(SpringWeb::CreateUnitStockpileInfo(
+            fbb, static_cast<uint32_t>(u->id),
+            static_cast<uint16_t>(std::clamp(ready,  0, 65535)),
+            static_cast<uint16_t>(std::clamp(queued, 0, 65535)),
+            bp));
+    }
+
+    auto entriesVec = fbb.CreateVector(entries);
+    auto upd = SpringWeb::CreateUnitStockpileUpdate(fbb, entriesVec);
+    return BuildServerMessage(fbb,
+        SpringWeb::ServerPayload_UnitStockpileUpdate, upd.Union());
+}
+
+/// Build a UnitArmoredUpdate. Emits an entry for every unit whose
+/// armored state is true OR whose armoredMultiple differs from 1.0
+/// (the default non-armored damage multiplier).
+inline std::vector<uint8_t> BuildUnitArmoredUpdate(const std::vector<CUnit*>& units) {
+    flatbuffers::FlatBufferBuilder fbb(256);
+
+    std::vector<flatbuffers::Offset<SpringWeb::UnitArmoredInfo>> entries;
+    for (const CUnit* u : units) {
+        if (u == nullptr) continue;
+        if (!u->armoredState && u->armoredMultiple == 1.0f) continue;
+        entries.push_back(SpringWeb::CreateUnitArmoredInfo(
+            fbb, static_cast<uint32_t>(u->id),
+            u->armoredState, u->armoredMultiple));
+    }
+
+    auto entriesVec = fbb.CreateVector(entries);
+    auto upd = SpringWeb::CreateUnitArmoredUpdate(fbb, entriesVec);
+    return BuildServerMessage(fbb,
+        SpringWeb::ServerPayload_UnitArmoredUpdate, upd.Union());
 }
 
 /// Build a GameInfo message (map, game, speed, frame, paused, env state).

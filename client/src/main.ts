@@ -987,6 +987,18 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             buildMenu?.setCmdDescs(units);
             orderPanel?.setCmdDescs(units);
         },
+        onUnitTransports(transports) {
+            currentWidgetManager?.forwardUnitTransports(transports);
+        },
+        onUnitSelfD(units) {
+            currentWidgetManager?.forwardUnitSelfD(units);
+        },
+        onUnitStockpile(units) {
+            currentWidgetManager?.forwardUnitStockpile(units);
+        },
+        onUnitArmored(units) {
+            currentWidgetManager?.forwardUnitArmored(units);
+        },
         onGameOver(frame) {
             showGameOver(frame);
             currentWidgetManager?.forwardGameInfo(frame, 0, true, true);

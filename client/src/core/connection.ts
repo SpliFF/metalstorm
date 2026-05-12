@@ -51,6 +51,14 @@ import { UnitCmdDescs } from '../protocol/spring-web/unit-cmd-descs.js';
 import { UnitCmdDesc } from '../protocol/spring-web/unit-cmd-desc.js';
 import { UnitCommandQueue } from '../protocol/spring-web/unit-command-queue.js';
 import { UnitOrder } from '../protocol/spring-web/unit-order.js';
+import { UnitTransportUpdate } from '../protocol/spring-web/unit-transport-update.js';
+import { UnitTransportInfo } from '../protocol/spring-web/unit-transport-info.js';
+import { UnitSelfDUpdate } from '../protocol/spring-web/unit-self-dupdate.js';
+import { UnitSelfDInfo } from '../protocol/spring-web/unit-self-dinfo.js';
+import { UnitStockpileUpdate } from '../protocol/spring-web/unit-stockpile-update.js';
+import { UnitStockpileInfo } from '../protocol/spring-web/unit-stockpile-info.js';
+import { UnitArmoredUpdate } from '../protocol/spring-web/unit-armored-update.js';
+import { UnitArmoredInfo } from '../protocol/spring-web/unit-armored-info.js';
 import { AuthRequest } from '../protocol/spring-web/auth-request.js';
 import { PlayerCommand } from '../protocol/spring-web/player-command.js';
 import { LuaRulesMsg } from '../protocol/spring-web/lua-rules-msg.js';
@@ -271,6 +279,35 @@ export interface UnitCmdDescsInfo {
     cmds: UnitCmdDescInfo[];
 }
 
+/** One transport relationship — a transporter and its current cargo. */
+export interface UnitTransportInfoMsg {
+    transporterId: number;
+    cargo: number[];
+}
+
+/** One unit's self-destruct countdown state. */
+export interface UnitSelfDInfoMsg {
+    unitId: number;
+    /** Game-seconds remaining; matches Spring's `selfDCountdown`. */
+    secondsRemaining: number;
+}
+
+/** One unit's stockpile-weapon state. */
+export interface UnitStockpileInfoMsg {
+    unitId: number;
+    ready: number;
+    queued: number;
+    /** 0.0..1.0 build progress on the in-flight missile. */
+    buildPercent: number;
+}
+
+/** One unit's armored toggle state. */
+export interface UnitArmoredInfoMsg {
+    unitId: number;
+    armored: boolean;
+    armoredMultiple: number;
+}
+
 export interface WeaponDefInfo {
     defId: number;
     name: string;
@@ -444,6 +481,10 @@ export interface ConnectionEvents {
     onCegDefs?: (defs: CegDefInfo[]) => void;
     onUnitCommandQueues?: (queues: UnitCommandQueueInfo[]) => void;
     onUnitCmdDescs?: (units: UnitCmdDescsInfo[]) => void;
+    onUnitTransports?: (transports: UnitTransportInfoMsg[]) => void;
+    onUnitSelfD?: (units: UnitSelfDInfoMsg[]) => void;
+    onUnitStockpile?: (units: UnitStockpileInfoMsg[]) => void;
+    onUnitArmored?: (units: UnitArmoredInfoMsg[]) => void;
     onProjectileState?: (snapshot: ProjectileStateSnapshot) => void;
     onPieceState?: (snapshot: PieceStateSnapshot) => void;
     onBuildActivity?: (snapshot: BuildActivitySnapshot) => void;
@@ -1273,6 +1314,61 @@ export class Connection {
                     units.push({ unitId: u.unitId(), cmds });
                 }
                 this.events.onUnitCmdDescs?.(units);
+                break;
+            }
+            case ServerPayload.UnitTransportUpdate: {
+                const fbUpd = msg.payload(new UnitTransportUpdate()) as UnitTransportUpdate;
+                const transports: UnitTransportInfoMsg[] = [];
+                for (let i = 0; i < fbUpd.transportsLength(); i++) {
+                    const t = fbUpd.transports(i, new UnitTransportInfo());
+                    if (!t) continue;
+                    const cargo: number[] = [];
+                    for (let ci = 0; ci < t.cargoLength(); ci++) cargo.push(t.cargo(ci) ?? 0);
+                    transports.push({ transporterId: t.transporterId(), cargo });
+                }
+                this.events.onUnitTransports?.(transports);
+                break;
+            }
+            case ServerPayload.UnitSelfDUpdate: {
+                const fbUpd = msg.payload(new UnitSelfDUpdate()) as UnitSelfDUpdate;
+                const units: UnitSelfDInfoMsg[] = [];
+                for (let i = 0; i < fbUpd.unitsLength(); i++) {
+                    const u = fbUpd.units(i, new UnitSelfDInfo());
+                    if (!u) continue;
+                    units.push({ unitId: u.unitId(), secondsRemaining: u.secondsRemaining() });
+                }
+                this.events.onUnitSelfD?.(units);
+                break;
+            }
+            case ServerPayload.UnitStockpileUpdate: {
+                const fbUpd = msg.payload(new UnitStockpileUpdate()) as UnitStockpileUpdate;
+                const units: UnitStockpileInfoMsg[] = [];
+                for (let i = 0; i < fbUpd.unitsLength(); i++) {
+                    const u = fbUpd.units(i, new UnitStockpileInfo());
+                    if (!u) continue;
+                    units.push({
+                        unitId: u.unitId(),
+                        ready: u.ready(),
+                        queued: u.queued(),
+                        buildPercent: u.buildPercent(),
+                    });
+                }
+                this.events.onUnitStockpile?.(units);
+                break;
+            }
+            case ServerPayload.UnitArmoredUpdate: {
+                const fbUpd = msg.payload(new UnitArmoredUpdate()) as UnitArmoredUpdate;
+                const units: UnitArmoredInfoMsg[] = [];
+                for (let i = 0; i < fbUpd.unitsLength(); i++) {
+                    const u = fbUpd.units(i, new UnitArmoredInfo());
+                    if (!u) continue;
+                    units.push({
+                        unitId: u.unitId(),
+                        armored: !!u.armored(),
+                        armoredMultiple: u.armoredMultiple(),
+                    });
+                }
+                this.events.onUnitArmored?.(units);
                 break;
             }
             case ServerPayload.GameRestarting:

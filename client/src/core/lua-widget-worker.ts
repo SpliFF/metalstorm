@@ -4353,6 +4353,66 @@ self.onmessage = async (e: MessageEvent) => {
             break;
         }
 
+        case 'unitTransports': {
+            // Snapshot replacement. Rebuild both directions of the
+            // transporter↔cargo index so widgets can look up either side
+            // (Spring.GetUnitIsTransporting / GetUnitTransporter).
+            const transports = msg.transports as Array<{
+                transporterId: number; cargo: number[];
+            }> | undefined;
+            if (!transports) break;
+            liveState.transportCargo.clear();
+            liveState.transportCarrier.clear();
+            for (const t of transports) {
+                liveState.transportCargo.set(t.transporterId, [...t.cargo]);
+                for (const cargoId of t.cargo) {
+                    liveState.transportCarrier.set(cargoId, t.transporterId);
+                }
+            }
+            break;
+        }
+
+        case 'unitSelfD': {
+            const units = msg.units as Array<{
+                unitId: number; secondsRemaining: number;
+            }> | undefined;
+            if (!units) break;
+            liveState.selfDCountdown.clear();
+            for (const u of units) {
+                if (u.secondsRemaining > 0)
+                    liveState.selfDCountdown.set(u.unitId, u.secondsRemaining);
+            }
+            break;
+        }
+
+        case 'unitStockpile': {
+            const units = msg.units as Array<{
+                unitId: number; ready: number; queued: number; buildPercent: number;
+            }> | undefined;
+            if (!units) break;
+            liveState.stockpileState.clear();
+            for (const u of units) {
+                liveState.stockpileState.set(u.unitId, {
+                    ready: u.ready, queued: u.queued, buildPercent: u.buildPercent,
+                });
+            }
+            break;
+        }
+
+        case 'unitArmored': {
+            const units = msg.units as Array<{
+                unitId: number; armored: boolean; armoredMultiple: number;
+            }> | undefined;
+            if (!units) break;
+            liveState.armoredState.clear();
+            for (const u of units) {
+                liveState.armoredState.set(u.unitId, {
+                    armored: u.armored, armoredMultiple: u.armoredMultiple,
+                });
+            }
+            break;
+        }
+
         case 'unitDefsUpdate': {
             const defs = msg.defs as MinimalUnitDefWire[] | undefined;
             if (!defs) break;
