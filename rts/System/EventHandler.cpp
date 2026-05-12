@@ -344,6 +344,13 @@ bool CEventHandler::AllowFeatureBuildStep(const CUnit* builder, const CFeature* 
 }
 
 
+bool CEventHandler::AllowStandingOrderAssign(unsigned int orderID, const CUnit* unit)
+{
+	ZoneScoped;
+	return ControlIterateDefTrue(listAllowStandingOrderAssign, &CEventClient::AllowStandingOrderAssign, orderID, unit);
+}
+
+
 bool CEventHandler::AllowResourceLevel(int teamID, const std::string& type, float level)
 {
 	ZoneScoped;

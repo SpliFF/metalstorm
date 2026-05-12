@@ -221,6 +221,14 @@ class CEventClient
 		virtual bool AllowDirectUnitControl(int playerID, const CUnit* unit) { return true; }
 		virtual bool AllowBuilderHoldFire(const CUnit* unit, int action) { return true; }
 		virtual bool AllowStartPosition(int playerID, int teamID, unsigned char readyState, const float3& clampedPos, const float3& rawPickPos) { return true; }
+		/// Server-side standing-order pre-assignment hook. Fires once
+		/// per (order, unit) pair right before the evaluator issues
+		/// the concrete command. Game-Lua can return false to veto —
+		/// useful for resolving `hasCapabilities` filters against
+		/// game-specific tagging the C++ evaluator can't see. Default
+		/// allows everything; PassesConditions has already enforced
+		/// the spatial / strength / squadTypes filters at this point.
+		virtual bool AllowStandingOrderAssign(unsigned int orderID, const CUnit* unit) { return true; }
 
 		virtual bool TerraformComplete(const CUnit* unit, const CUnit* build) { return false; }
 		virtual bool MoveCtrlNotify(const CUnit* unit, int data) { return false; }

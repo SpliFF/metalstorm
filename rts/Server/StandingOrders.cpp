@@ -8,6 +8,7 @@
 #include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Units/CommandAI/Command.h"
 #include "Sim/Misc/TeamHandler.h"
+#include "System/EventHandler.h"
 
 #include <algorithm>
 
@@ -282,6 +283,15 @@ void StandingOrderManager::Evaluate(uint32_t currentFrame)
             if (unit->team != order.team) continue;
             if (order.assigned.count(unit->id) != 0) continue;
             if (!PassesConditions(unit, order.conditions)) continue;
+
+            // Final game-Lua veto: gadget:AllowStandingOrderAssign
+            // can return false to block this (order, unit) pair —
+            // primary use is resolving the order's hasCapabilities
+            // tags against game-specific unit tagging the C++
+            // evaluator can't see. Default impl allows; only the
+            // synced LuaRules handle implements an override.
+            if (!eventHandler.AllowStandingOrderAssign(order.id, unit))
+                continue;
 
             if (IssueCommandFor(unit, order)) {
                 order.assigned.insert(unit->id);
