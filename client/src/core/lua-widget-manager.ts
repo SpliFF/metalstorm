@@ -796,10 +796,10 @@ export class LuaWidgetManager {
 
     /** Push a per-tick batch of lifecycle events into the worker. The
      *  worker dispatches `widget:UnitFromFactory` / `UnitTaken` /
-     *  `UnitGiven` callins from each entry. Typically empty on quiet
-     *  ticks. */
+     *  `UnitGiven` / `UnitCreated` callins from each entry. Typically
+     *  empty on quiet ticks. */
     forwardUnitLifecycle(events: ReadonlyArray<{
-        kind: 'fromFactory' | 'taken' | 'given';
+        kind: 'fromFactory' | 'taken' | 'given' | 'created';
         unitId: number;
         unitDefId: number;
         unitTeam: number;
@@ -808,6 +808,7 @@ export class LuaWidgetManager {
         userOrders: boolean;
         oldTeam: number;
         newTeam: number;
+        builderId: number;
     }>): void {
         if (this.disposed || events.length === 0) return;
         this.postToWorker({

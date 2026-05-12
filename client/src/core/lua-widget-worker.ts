@@ -3487,17 +3487,26 @@ function dispatchSelectionChanged(ids: ReadonlyArray<number>): void {
 }
 
 /** widgetHandler:UnitCreated(unitID, unitDefID, unitTeam, builderID) —
- *  fires once when a unit first appears in the local world. Without a
- *  dedicated server event we synthesise it from the entity-state
- *  stream: any id that wasn't in liveState.units before now counts as
- *  newly seen. This conflates "created" with "entered LOS for the
- *  first time", which is close enough for most widgets — Spring's own
- *  UnitCreated also fires only when a unit becomes visible to LuaUI. */
-function dispatchUnitCreated(unitId: number, defId: number, team: number): void {
+ *  fires once when a unit first appears in the local world. Two
+ *  sources can fire this:
+ *   - Server `UnitLifecycleKind.Created` event (own + allied teams,
+ *     carries builderId).
+ *   - Entity-stream first-visibility synthesis (every team; no
+ *     builderId — passed as nil).
+ *  The two sources are deduplicated by `serverFiredUnitCreated`: any
+ *  unit the server has already fired for is skipped by the synthesis
+ *  path, and allied-team entity-stream appearances are deferred by
+ *  one tick to let the server event arrive first. */
+function dispatchUnitCreated(
+    unitId: number, defId: number, team: number,
+    builderId: number,
+): void {
     if (!runtime) return;
+    const builderArg = builderId > 0 ? String(builderId) : 'nil';
     runtime.doString(`
         if widgetHandler and widgetHandler.UnitCreated then
-            pcall(widgetHandler.UnitCreated, widgetHandler, ${unitId}, ${defId}, ${team})
+            pcall(widgetHandler.UnitCreated, widgetHandler,
+                ${unitId}, ${defId}, ${team}, ${builderArg})
         end
     `, 'dispatchUnitCreated');
 }
@@ -4270,8 +4279,38 @@ self.onmessage = async (e: MessageEvent) => {
                     }
                 }
             }
+            // Flush any allied-team appearances that were deferred on
+            // the previous tick — if the server's UnitCreated event
+            // arrived in the meantime, the id is in
+            // serverFiredUnitCreated and we skip it; otherwise fire the
+            // synthesised callin (no builderId).
+            if (liveState.pendingSynthCreated.size > 0) {
+                for (const [id, entry] of liveState.pendingSynthCreated) {
+                    if (!liveState.serverFiredUnitCreated.has(id)) {
+                        dispatchUnitCreated(id, entry.defId, entry.team, 0);
+                        liveState.serverFiredUnitCreated.add(id);
+                    }
+                }
+                liveState.pendingSynthCreated.clear();
+            }
+            // New ids picked up from this batch. Allied-team ids are
+            // deferred one tick to let the server-side Created event
+            // arrive first; enemy ids fire immediately because the
+            // server intentionally doesn't broadcast Created for them.
+            const myAllyTeam = liveState.identity.myAllyTeam;
             for (const c of createdIds) {
-                dispatchUnitCreated(c.id, c.defId, c.team);
+                if (liveState.serverFiredUnitCreated.has(c.id)) continue;
+                const teamInfo = liveState.teams.get(c.team);
+                const allied = teamInfo
+                    ? teamInfo.allyTeam === myAllyTeam
+                    : false;
+                if (allied) {
+                    liveState.pendingSynthCreated.set(
+                        c.id, { defId: c.defId, team: c.team });
+                } else {
+                    dispatchUnitCreated(c.id, c.defId, c.team, 0);
+                    liveState.serverFiredUnitCreated.add(c.id);
+                }
             }
             for (const f of finishedIds) {
                 dispatchUnitFinished(f.id, f.defId, f.team);
@@ -4293,6 +4332,8 @@ self.onmessage = async (e: MessageEvent) => {
             liveState.unitCommands.delete(id);
             liveState.unitCmdDescs.delete(id);
             liveState.sensorOverrides.delete(id);
+            liveState.serverFiredUnitCreated.delete(id);
+            liveState.pendingSynthCreated.delete(id);
             dispatchUnitDestroyed(id, defId, team);
             break;
         }
@@ -4520,10 +4561,11 @@ self.onmessage = async (e: MessageEvent) => {
 
         case 'unitLifecycle': {
             const events = msg.events as Array<{
-                kind: 'fromFactory' | 'taken' | 'given';
+                kind: 'fromFactory' | 'taken' | 'given' | 'created';
                 unitId: number; unitDefId: number; unitTeam: number;
                 factoryId: number; factoryDefId: number; userOrders: boolean;
                 oldTeam: number; newTeam: number;
+                builderId: number;
             }> | undefined;
             if (!events || !runtime) break;
             for (const e of events) {
@@ -4535,6 +4577,17 @@ self.onmessage = async (e: MessageEvent) => {
                     dispatchUnitTaken(e.unitId, e.unitDefId, e.oldTeam, e.newTeam);
                 } else if (e.kind === 'given') {
                     dispatchUnitGiven(e.unitId, e.unitDefId, e.oldTeam, e.newTeam);
+                } else if (e.kind === 'created') {
+                    // Server-authoritative Created: own + allied teams
+                    // only, with builderId populated. Mark the id so the
+                    // entity-stream synthesis path skips it; drop any
+                    // pending deferred synth that was waiting for this.
+                    liveState.pendingSynthCreated.delete(e.unitId);
+                    if (!liveState.serverFiredUnitCreated.has(e.unitId)) {
+                        liveState.serverFiredUnitCreated.add(e.unitId);
+                        dispatchUnitCreated(
+                            e.unitId, e.unitDefId, e.unitTeam, e.builderId);
+                    }
                 }
             }
             break;

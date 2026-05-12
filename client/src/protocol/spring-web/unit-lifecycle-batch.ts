@@ -10,8 +10,9 @@ import { UnitLifecycleEvent, UnitLifecycleEventT } from '../spring-web/unit-life
 /**
  * Per-tick batch of lifecycle events. Typically empty on quiet ticks;
  * populated on factory completion, AllowResourceTransfer, etc.
- * Broadcast to all sessions — these events are server-authoritative
- * and not visibility-filtered (transfers are public).
+ * FromFactory / Taken / Given are broadcast unfiltered (transfers are
+ * public). Created is filtered per-session to the viewer's ally team
+ * (enemy UnitCreated is synthesised client-side from first-visibility).
  */
 export class UnitLifecycleBatch implements flatbuffers.IUnpackableObject<UnitLifecycleBatchT> {
   bb: flatbuffers.ByteBuffer|null = null;

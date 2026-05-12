@@ -584,12 +584,15 @@ inline std::vector<uint8_t> BuildUnitLifecycleBatch(
                 kind = SpringWeb::UnitLifecycleKind_Taken; break;
             case UnitLifecycleKind::Given:
                 kind = SpringWeb::UnitLifecycleKind_Given; break;
+            case UnitLifecycleKind::Created:
+                kind = SpringWeb::UnitLifecycleKind_Created; break;
         }
         entries.push_back(SpringWeb::CreateUnitLifecycleEvent(
             fbb, kind,
             e.unitId, e.unitDefId, e.unitTeam,
             e.factoryId, e.factoryDefId, e.userOrders,
-            e.oldTeam, e.newTeam));
+            e.oldTeam, e.newTeam,
+            e.builderId));
     }
 
     auto entriesVec = fbb.CreateVector(entries);

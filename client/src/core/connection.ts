@@ -322,7 +322,7 @@ export interface UnitArmoredInfoMsg {
 }
 
 /** Discriminator on UnitLifecycleEventMsg.kind — matches the FlatBuffers enum. */
-export type UnitLifecycleKindStr = 'fromFactory' | 'taken' | 'given';
+export type UnitLifecycleKindStr = 'fromFactory' | 'taken' | 'given' | 'created';
 
 /** Decoded conditions from a `StandingOrderInfo`. Mirrors the
  *  FlatBuffers table, with empty arrays and zero-radius filters
@@ -366,7 +366,8 @@ export interface PathResponseInfo {
 
 /** One unit lifecycle event. `fromFactory` carries `factoryId` /
  *  `factoryDefId` / `userOrders`; `taken` / `given` carry `oldTeam` /
- *  `newTeam`. The unused fields for each kind are present but zeroed. */
+ *  `newTeam`; `created` carries `builderId` (0 = no builder). The
+ *  unused fields for each kind are present but zeroed. */
 export interface UnitLifecycleEventMsg {
     kind: UnitLifecycleKindStr;
     unitId: number;
@@ -379,6 +380,8 @@ export interface UnitLifecycleEventMsg {
     /** Taken/Given only. */
     oldTeam: number;
     newTeam: number;
+    /** Created only. 0 = no builder. */
+    builderId: number;
 }
 
 /** Discriminator on UnitCommandEventMsg.kind — matches the FlatBuffers
@@ -1575,7 +1578,8 @@ export class Connection {
                     const kind: UnitLifecycleKindStr =
                         k === UnitLifecycleKind.FromFactory ? 'fromFactory'
                       : k === UnitLifecycleKind.Taken       ? 'taken'
-                      : 'given';
+                      : k === UnitLifecycleKind.Given       ? 'given'
+                      : 'created';
                     events.push({
                         kind,
                         unitId:       e.unitId(),
@@ -1586,6 +1590,7 @@ export class Connection {
                         userOrders:   !!e.userOrders(),
                         oldTeam:      e.oldTeam(),
                         newTeam:      e.newTeam(),
+                        builderId:    e.builderId(),
                     });
                 }
                 this.events.onUnitLifecycle?.(events);

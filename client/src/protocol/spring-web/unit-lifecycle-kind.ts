@@ -12,5 +12,13 @@
 export enum UnitLifecycleKind {
   FromFactory = 0,
   Taken = 1,
-  Given = 2
+  Given = 2,
+
+  /**
+   * Spring's synced `UnitCreated(unit, builder)`. Fires the moment
+   * construction starts (before nano-spray). For own + allied teams
+   * only — enemy UnitCreated is synthesised client-side from
+   * first-visibility in the entity stream.
+   */
+  Created = 3
 }

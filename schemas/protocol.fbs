@@ -1658,6 +1658,11 @@ enum UnitLifecycleKind : uint8 {
     FromFactory = 0,
     Taken       = 1,
     Given       = 2,
+    /// Spring's synced `UnitCreated(unit, builder)`. Fires the moment
+    /// construction starts (before nano-spray). For own + allied teams
+    /// only — enemy UnitCreated is synthesised client-side from
+    /// first-visibility in the entity stream.
+    Created     = 3,
 }
 
 table UnitLifecycleEvent {
@@ -1676,12 +1681,17 @@ table UnitLifecycleEvent {
     old_team: int8 = -1;
     /// Taken/Given: post-transfer team. -1 for FromFactory.
     new_team: int8 = -1;
+    /// Created: the initiating builder unit id. 0 = no builder
+    /// (Spring.CreateUnit without a builder argument, or unit produced
+    /// through some other code path). 0 for FromFactory/Taken/Given.
+    builder_id: uint32 = 0;
 }
 
 /// Per-tick batch of lifecycle events. Typically empty on quiet ticks;
 /// populated on factory completion, AllowResourceTransfer, etc.
-/// Broadcast to all sessions — these events are server-authoritative
-/// and not visibility-filtered (transfers are public).
+/// FromFactory / Taken / Given are broadcast unfiltered (transfers are
+/// public). Created is filtered per-session to the viewer's ally team
+/// (enemy UnitCreated is synthesised client-side from first-visibility).
 table UnitLifecycleBatch {
     events: [UnitLifecycleEvent];
 }

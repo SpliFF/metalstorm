@@ -86,8 +86,18 @@ newTeam():number {
   return offset ? this.bb!.readInt8(this.bb_pos + offset) : -1;
 }
 
+/**
+ * Created: the initiating builder unit id. 0 = no builder
+ * (Spring.CreateUnit without a builder argument, or unit produced
+ * through some other code path). 0 for FromFactory/Taken/Given.
+ */
+builderId():number {
+  const offset = this.bb!.__offset(this.bb_pos, 22);
+  return offset ? this.bb!.readUint32(this.bb_pos + offset) : 0;
+}
+
 static startUnitLifecycleEvent(builder:flatbuffers.Builder) {
-  builder.startObject(9);
+  builder.startObject(10);
 }
 
 static addKind(builder:flatbuffers.Builder, kind:UnitLifecycleKind) {
@@ -126,12 +136,16 @@ static addNewTeam(builder:flatbuffers.Builder, newTeam:number) {
   builder.addFieldInt8(8, newTeam, -1);
 }
 
+static addBuilderId(builder:flatbuffers.Builder, builderId:number) {
+  builder.addFieldInt32(9, builderId, 0);
+}
+
 static endUnitLifecycleEvent(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createUnitLifecycleEvent(builder:flatbuffers.Builder, kind:UnitLifecycleKind, unitId:number, unitDefId:number, unitTeam:number, factoryId:number, factoryDefId:number, userOrders:boolean, oldTeam:number, newTeam:number):flatbuffers.Offset {
+static createUnitLifecycleEvent(builder:flatbuffers.Builder, kind:UnitLifecycleKind, unitId:number, unitDefId:number, unitTeam:number, factoryId:number, factoryDefId:number, userOrders:boolean, oldTeam:number, newTeam:number, builderId:number):flatbuffers.Offset {
   UnitLifecycleEvent.startUnitLifecycleEvent(builder);
   UnitLifecycleEvent.addKind(builder, kind);
   UnitLifecycleEvent.addUnitId(builder, unitId);
@@ -142,6 +156,7 @@ static createUnitLifecycleEvent(builder:flatbuffers.Builder, kind:UnitLifecycleK
   UnitLifecycleEvent.addUserOrders(builder, userOrders);
   UnitLifecycleEvent.addOldTeam(builder, oldTeam);
   UnitLifecycleEvent.addNewTeam(builder, newTeam);
+  UnitLifecycleEvent.addBuilderId(builder, builderId);
   return UnitLifecycleEvent.endUnitLifecycleEvent(builder);
 }
 
@@ -155,7 +170,8 @@ unpack(): UnitLifecycleEventT {
     this.factoryDefId(),
     this.userOrders(),
     this.oldTeam(),
-    this.newTeam()
+    this.newTeam(),
+    this.builderId()
   );
 }
 
@@ -170,6 +186,7 @@ unpackTo(_o: UnitLifecycleEventT): void {
   _o.userOrders = this.userOrders();
   _o.oldTeam = this.oldTeam();
   _o.newTeam = this.newTeam();
+  _o.builderId = this.builderId();
 }
 }
 
@@ -183,7 +200,8 @@ constructor(
   public factoryDefId: number = 0,
   public userOrders: boolean = false,
   public oldTeam: number = -1,
-  public newTeam: number = -1
+  public newTeam: number = -1,
+  public builderId: number = 0
 ){}
 
 
@@ -197,7 +215,8 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     this.factoryDefId,
     this.userOrders,
     this.oldTeam,
-    this.newTeam
+    this.newTeam,
+    this.builderId
   );
 }
 }

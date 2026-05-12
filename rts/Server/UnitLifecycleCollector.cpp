@@ -24,6 +24,28 @@ std::vector<UnitLifecycleEventData> UnitLifecycleCollector::Drain() {
     return drained;
 }
 
+void UnitLifecycleCollector::UnitCreated(
+    const CUnit* unit, const CUnit* builder)
+{
+    if (unit == nullptr) return;
+    UnitLifecycleEventData e{};
+    e.kind      = UnitLifecycleKind::Created;
+    e.unitId    = static_cast<uint32_t>(unit->id);
+    e.unitDefId = (unit->unitDef != nullptr)
+        ? static_cast<uint16_t>(unit->unitDef->id) : 0;
+    e.unitTeam  = static_cast<uint8_t>(unit->team);
+    e.factoryId    = 0;
+    e.factoryDefId = 0;
+    e.userOrders   = false;
+    e.oldTeam      = -1;
+    e.newTeam      = -1;
+    e.builderId    = (builder != nullptr)
+        ? static_cast<uint32_t>(builder->id) : 0;
+
+    std::lock_guard<std::mutex> lock(mutex);
+    events.push_back(e);
+}
+
 void UnitLifecycleCollector::UnitFromFactory(
     const CUnit* unit, const CUnit* factory, bool userOrders)
 {
@@ -40,6 +62,7 @@ void UnitLifecycleCollector::UnitFromFactory(
     e.userOrders   = userOrders;
     e.oldTeam      = -1;
     e.newTeam      = -1;
+    e.builderId    = 0;
 
     std::lock_guard<std::mutex> lock(mutex);
     events.push_back(e);

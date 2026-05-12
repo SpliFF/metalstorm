@@ -28,6 +28,7 @@ enum class UnitLifecycleKind : uint8_t {
     FromFactory = 0,
     Taken       = 1,
     Given       = 2,
+    Created     = 3,
 };
 
 struct UnitLifecycleEventData {
@@ -35,13 +36,15 @@ struct UnitLifecycleEventData {
     uint32_t unitId;
     uint16_t unitDefId;
     uint8_t  unitTeam;          // unit's current team at emit time
-    // FromFactory-specific (zeroed for Taken/Given)
+    // FromFactory-specific (zeroed for Taken/Given/Created)
     uint32_t factoryId;
     uint16_t factoryDefId;
     bool     userOrders;
-    // Taken/Given-specific (-1 for FromFactory)
+    // Taken/Given-specific (-1 for FromFactory/Created)
     int8_t   oldTeam;
     int8_t   newTeam;
+    // Created-specific: initiating builder id (0 = none, or non-Created kinds).
+    uint32_t builderId;
 };
 
 class UnitLifecycleCollector : public CEventClient {
@@ -60,6 +63,7 @@ public:
     bool GetFullRead() const override { return true; }
     int  GetReadAllyTeam() const override { return AllAccessTeam; }
 
+    void UnitCreated(const CUnit* unit, const CUnit* builder) override;
     void UnitFromFactory(const CUnit* unit, const CUnit* factory, bool userOrders) override;
     void UnitTaken(const CUnit* unit, int oldTeam, int newTeam) override;
     void UnitGiven(const CUnit* unit, int oldTeam, int newTeam) override;

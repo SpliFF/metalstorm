@@ -1761,31 +1761,38 @@ enum UnitLifecycleKind : uint8_t {
   UnitLifecycleKind_FromFactory = 0,
   UnitLifecycleKind_Taken = 1,
   UnitLifecycleKind_Given = 2,
+  /// Spring's synced `UnitCreated(unit, builder)`. Fires the moment
+  /// construction starts (before nano-spray). For own + allied teams
+  /// only — enemy UnitCreated is synthesised client-side from
+  /// first-visibility in the entity stream.
+  UnitLifecycleKind_Created = 3,
   UnitLifecycleKind_MIN = UnitLifecycleKind_FromFactory,
-  UnitLifecycleKind_MAX = UnitLifecycleKind_Given
+  UnitLifecycleKind_MAX = UnitLifecycleKind_Created
 };
 
-inline const UnitLifecycleKind (&EnumValuesUnitLifecycleKind())[3] {
+inline const UnitLifecycleKind (&EnumValuesUnitLifecycleKind())[4] {
   static const UnitLifecycleKind values[] = {
     UnitLifecycleKind_FromFactory,
     UnitLifecycleKind_Taken,
-    UnitLifecycleKind_Given
+    UnitLifecycleKind_Given,
+    UnitLifecycleKind_Created
   };
   return values;
 }
 
 inline const char * const *EnumNamesUnitLifecycleKind() {
-  static const char * const names[4] = {
+  static const char * const names[5] = {
     "FromFactory",
     "Taken",
     "Given",
+    "Created",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameUnitLifecycleKind(UnitLifecycleKind e) {
-  if (::flatbuffers::IsOutRange(e, UnitLifecycleKind_FromFactory, UnitLifecycleKind_Given)) return "";
+  if (::flatbuffers::IsOutRange(e, UnitLifecycleKind_FromFactory, UnitLifecycleKind_Created)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesUnitLifecycleKind()[index];
 }
@@ -14941,6 +14948,7 @@ struct UnitLifecycleEventT : public ::flatbuffers::NativeTable {
   bool user_orders = false;
   int8_t old_team = -1;
   int8_t new_team = -1;
+  uint32_t builder_id = 0;
 };
 
 struct UnitLifecycleEvent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -14955,7 +14963,8 @@ struct UnitLifecycleEvent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table
     VT_FACTORY_DEF_ID = 14,
     VT_USER_ORDERS = 16,
     VT_OLD_TEAM = 18,
-    VT_NEW_TEAM = 20
+    VT_NEW_TEAM = 20,
+    VT_BUILDER_ID = 22
   };
   SpringWeb::UnitLifecycleKind kind() const {
     return static_cast<SpringWeb::UnitLifecycleKind>(GetField<uint8_t>(VT_KIND, 0));
@@ -14990,6 +14999,12 @@ struct UnitLifecycleEvent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table
   int8_t new_team() const {
     return GetField<int8_t>(VT_NEW_TEAM, -1);
   }
+  /// Created: the initiating builder unit id. 0 = no builder
+  /// (Spring.CreateUnit without a builder argument, or unit produced
+  /// through some other code path). 0 for FromFactory/Taken/Given.
+  uint32_t builder_id() const {
+    return GetField<uint32_t>(VT_BUILDER_ID, 0);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_KIND, 1) &&
@@ -15001,6 +15016,7 @@ struct UnitLifecycleEvent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table
            VerifyField<uint8_t>(verifier, VT_USER_ORDERS, 1) &&
            VerifyField<int8_t>(verifier, VT_OLD_TEAM, 1) &&
            VerifyField<int8_t>(verifier, VT_NEW_TEAM, 1) &&
+           VerifyField<uint32_t>(verifier, VT_BUILDER_ID, 4) &&
            verifier.EndTable();
   }
   UnitLifecycleEventT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -15039,6 +15055,9 @@ struct UnitLifecycleEventBuilder {
   void add_new_team(int8_t new_team) {
     fbb_.AddElement<int8_t>(UnitLifecycleEvent::VT_NEW_TEAM, new_team, -1);
   }
+  void add_builder_id(uint32_t builder_id) {
+    fbb_.AddElement<uint32_t>(UnitLifecycleEvent::VT_BUILDER_ID, builder_id, 0);
+  }
   explicit UnitLifecycleEventBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -15060,8 +15079,10 @@ inline ::flatbuffers::Offset<UnitLifecycleEvent> CreateUnitLifecycleEvent(
     uint16_t factory_def_id = 0,
     bool user_orders = false,
     int8_t old_team = -1,
-    int8_t new_team = -1) {
+    int8_t new_team = -1,
+    uint32_t builder_id = 0) {
   UnitLifecycleEventBuilder builder_(_fbb);
+  builder_.add_builder_id(builder_id);
   builder_.add_factory_id(factory_id);
   builder_.add_unit_id(unit_id);
   builder_.add_factory_def_id(factory_def_id);
@@ -15087,8 +15108,9 @@ struct UnitLifecycleBatchT : public ::flatbuffers::NativeTable {
 
 /// Per-tick batch of lifecycle events. Typically empty on quiet ticks;
 /// populated on factory completion, AllowResourceTransfer, etc.
-/// Broadcast to all sessions — these events are server-authoritative
-/// and not visibility-filtered (transfers are public).
+/// FromFactory / Taken / Given are broadcast unfiltered (transfers are
+/// public). Created is filtered per-session to the viewer's ally team
+/// (enemy UnitCreated is synthesised client-side from first-visibility).
 struct UnitLifecycleBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef UnitLifecycleBatchT NativeTableType;
   typedef UnitLifecycleBatchBuilder Builder;
@@ -20870,6 +20892,7 @@ inline void UnitLifecycleEvent::UnPackTo(UnitLifecycleEventT *_o, const ::flatbu
   { auto _e = user_orders(); _o->user_orders = _e; }
   { auto _e = old_team(); _o->old_team = _e; }
   { auto _e = new_team(); _o->new_team = _e; }
+  { auto _e = builder_id(); _o->builder_id = _e; }
 }
 
 inline ::flatbuffers::Offset<UnitLifecycleEvent> UnitLifecycleEvent::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const UnitLifecycleEventT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -20889,6 +20912,7 @@ inline ::flatbuffers::Offset<UnitLifecycleEvent> CreateUnitLifecycleEvent(::flat
   auto _user_orders = _o->user_orders;
   auto _old_team = _o->old_team;
   auto _new_team = _o->new_team;
+  auto _builder_id = _o->builder_id;
   return SpringWeb::CreateUnitLifecycleEvent(
       _fbb,
       _kind,
@@ -20899,7 +20923,8 @@ inline ::flatbuffers::Offset<UnitLifecycleEvent> CreateUnitLifecycleEvent(::flat
       _factory_def_id,
       _user_orders,
       _old_team,
-      _new_team);
+      _new_team,
+      _builder_id);
 }
 
 inline UnitLifecycleBatchT::UnitLifecycleBatchT(const UnitLifecycleBatchT &o) {

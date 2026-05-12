@@ -416,6 +416,18 @@ export interface LiveState {
      *  no merging is needed because the server sends the full visible
      *  set on every state change. Read by `Spring.GetStandingOrders`. */
     standingOrders: Map<number, StandingOrderEntry>;
+    /** Set of unit ids for which the server has already fired
+     *  `UnitLifecycleKind.Created` this game. The entity-stream
+     *  first-visibility synthesis path checks this set to avoid double
+     *  firing `widgetHandler:UnitCreated` for own + allied units. Once
+     *  added an id is never removed (`UnitDestroyed` clears it). */
+    serverFiredUnitCreated: Set<number>;
+    /** Allied-team entity-stream appearances waiting one tick for a
+     *  server-side `UnitLifecycleKind.Created` event. Maps unit id to
+     *  the synthesised event payload; flushed on the next entity-state
+     *  tick if the server event still hasn't arrived. Enemy units
+     *  bypass this map and fire immediately. */
+    pendingSynthCreated: Map<number, { defId: number; team: number }>;
 }
 
 /** Per-order entry mirrored into LiveState.standingOrders. Mirrors
@@ -826,6 +838,8 @@ export function createDefaultLiveState(): LiveState {
         pathResponses: new Map(),
         nextPathRequestId: 1,
         standingOrders: new Map(),
+        serverFiredUnitCreated: new Set(),
+        pendingSynthCreated: new Map(),
     };
 }
 

@@ -2274,18 +2274,59 @@ int main(int argc, char* argv[])
         }
         }
 
-        // Unit lifecycle events — UnitFromFactory / UnitTaken /
-        // UnitGiven. Drained each tick and broadcast to every session.
-        // These can't be derived from the entity stream: UnitFromFactory
-        // needs the factory id, and Taken/Given need the transfer cause
-        // (the entity stream only shows the new team). The worker
-        // dispatches widget callins from this batch.
+        // Unit lifecycle events — UnitCreated / UnitFromFactory /
+        // UnitTaken / UnitGiven. Drained each tick. FromFactory / Taken /
+        // Given are broadcast unfiltered (transfers are public). Created
+        // is filtered per-session to the viewer's ally team — enemy
+        // UnitCreated is synthesised client-side from first-visibility
+        // in the entity stream, so the server skips those.
         if (unitLifecycleEvents != nullptr) {
             auto lifecycle = unitLifecycleEvents->Drain();
             if (!lifecycle.empty() && rtcServer.GetClientCount() > 0) {
-                auto msg = Protocol::BuildUnitLifecycleBatch(lifecycle);
-                if (!msg.empty()) {
-                    rtcServer.BroadcastReliable(msg.data(), msg.size());
+                // Partition: public events (FromFactory/Taken/Given) go
+                // out as one broadcast; Created is per-session filtered.
+                std::vector<UnitLifecycleEventData> publicEvents;
+                std::vector<UnitLifecycleEventData> createdEvents;
+                publicEvents.reserve(lifecycle.size());
+                for (const auto& e : lifecycle) {
+                    if (e.kind == UnitLifecycleKind::Created) {
+                        createdEvents.push_back(e);
+                    } else {
+                        publicEvents.push_back(e);
+                    }
+                }
+
+                if (!publicEvents.empty()) {
+                    auto msg = Protocol::BuildUnitLifecycleBatch(publicEvents);
+                    if (!msg.empty()) {
+                        rtcServer.BroadcastReliable(msg.data(), msg.size());
+                    }
+                }
+
+                if (!createdEvents.empty()) {
+                    sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+                        std::vector<UnitLifecycleEventData> filtered;
+                        filtered.reserve(createdEvents.size());
+                        for (const auto& e : createdEvents) {
+                            if (session.team < 0) {
+                                // Spectator — sees every team's Created.
+                                filtered.push_back(e);
+                                continue;
+                            }
+                            if (!teamHandler.IsValidTeam(static_cast<int>(e.unitTeam)))
+                                continue;
+                            if (teamHandler.AlliedTeams(
+                                    session.team, static_cast<int>(e.unitTeam)))
+                            {
+                                filtered.push_back(e);
+                            }
+                        }
+                        if (filtered.empty()) return;
+                        auto msg = Protocol::BuildUnitLifecycleBatch(filtered);
+                        if (!msg.empty()) {
+                            rtcServer.SendReliable(clientId, msg.data(), msg.size());
+                        }
+                    });
                 }
             }
         }
