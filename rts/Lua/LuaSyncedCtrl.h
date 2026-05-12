@@ -276,6 +276,12 @@ class LuaSyncedCtrl
 		static int DumpTable(lua_State* L);
 		static int Inspect(lua_State* L);
 		static int Breakpoint(lua_State* L);
+
+		// Standing orders (PLAN-orders.md)
+		static int CreateStandingOrder(lua_State* L);
+		static int UpdateStandingOrder(lua_State* L);
+		static int RemoveStandingOrder(lua_State* L);
+		static int GetStandingOrders(lua_State* L);
 };
 
 

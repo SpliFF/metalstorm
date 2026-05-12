@@ -359,6 +359,7 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/CombatEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ProjectileEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/SoundEventCollector.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/StandingOrders.cpp
     )
     target_include_directories(spring-tests PRIVATE
         ${CMAKE_SOURCE_DIR}/rts

@@ -49,6 +49,8 @@
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectileFactory.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Server/CombatEventCollector.h"
+#include "Server/StandingOrders.h"
+#include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitHandler.h"
@@ -138,6 +140,11 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(AssignPlayerToTeam);
 	REGISTER_LUA_CFUNC(GameOver);
 	REGISTER_LUA_CFUNC(SetGlobalLos);
+
+	REGISTER_LUA_CFUNC(CreateStandingOrder);
+	REGISTER_LUA_CFUNC(UpdateStandingOrder);
+	REGISTER_LUA_CFUNC(RemoveStandingOrder);
+	REGISTER_LUA_CFUNC(GetStandingOrders);
 
 	REGISTER_LUA_CFUNC(AddTeamResource);
 	REGISTER_LUA_CFUNC(UseTeamResource);
@@ -7308,6 +7315,373 @@ int LuaSyncedCtrl::Breakpoint(lua_State* L)
 		label[0] ? ": " : "", label);
 	// TODO(Tier 9): actual breakpoint pause support
 	return 0;
+}
+
+
+/******************************************************************************/
+// Standing orders (PLAN-orders.md)
+//
+// LuaRules and gadgets create persistent, condition-based directives
+// that the server's standing-order evaluator (every 30 sim frames)
+// matches against idle squads. The same C++ manager backs both the
+// Lua surface here and the client-issued StandingOrderCreate/Update/
+// Remove FlatBuffer messages — gadgets and human players share one
+// pool per team.
+/******************************************************************************/
+
+namespace {
+
+/// Map a Lua "type" argument (string OR integer) to the C++ enum. Returns
+/// false on unknown strings.
+bool ParseStandingOrderType(lua_State* L, int idx, StandingOrderType& out)
+{
+	if (lua_isnumber(L, idx)) {
+		const int n = lua_toint(L, idx);
+		if (n < 0 || n > static_cast<int>(StandingOrderType::BuildBase)) return false;
+		out = static_cast<StandingOrderType>(n);
+		return true;
+	}
+	if (lua_isstring(L, idx)) {
+		const std::string s = lua_tostring(L, idx);
+		if (s == "DefendArea")  { out = StandingOrderType::DefendArea;  return true; }
+		if (s == "PatrolRoute") { out = StandingOrderType::PatrolRoute; return true; }
+		if (s == "RallyPoint")  { out = StandingOrderType::RallyPoint;  return true; }
+		if (s == "Fallback")    { out = StandingOrderType::Fallback;    return true; }
+		if (s == "Reinforce")   { out = StandingOrderType::Reinforce;   return true; }
+		if (s == "Screen")      { out = StandingOrderType::Screen;      return true; }
+		if (s == "SupplyRoute") { out = StandingOrderType::SupplyRoute; return true; }
+		if (s == "BuildBase")   { out = StandingOrderType::BuildBase;   return true; }
+	}
+	return false;
+}
+
+const char* StandingOrderTypeName(StandingOrderType t)
+{
+	switch (t) {
+		case StandingOrderType::DefendArea:  return "DefendArea";
+		case StandingOrderType::PatrolRoute: return "PatrolRoute";
+		case StandingOrderType::RallyPoint:  return "RallyPoint";
+		case StandingOrderType::Fallback:    return "Fallback";
+		case StandingOrderType::Reinforce:   return "Reinforce";
+		case StandingOrderType::Screen:      return "Screen";
+		case StandingOrderType::SupplyRoute: return "SupplyRoute";
+		case StandingOrderType::BuildBase:   return "BuildBase";
+	}
+	return "";
+}
+
+/// Read a numeric Lua array (params, squadTypes) into a vector. Returns
+/// false if the value at `idx` is not a table.
+template<typename T>
+bool ReadNumericArray(lua_State* L, int idx, std::vector<T>& out)
+{
+	if (!lua_istable(L, idx)) return false;
+	const int n = lua_objlen(L, idx);
+	out.reserve(static_cast<size_t>(n));
+	for (int i = 1; i <= n; ++i) {
+		lua_rawgeti(L, idx, i);
+		if (lua_isnumber(L, -1)) out.push_back(static_cast<T>(lua_tonumber(L, -1)));
+		lua_pop(L, 1);
+	}
+	return true;
+}
+
+bool ReadStringArray(lua_State* L, int idx, std::vector<std::string>& out)
+{
+	if (!lua_istable(L, idx)) return false;
+	const int n = lua_objlen(L, idx);
+	out.reserve(static_cast<size_t>(n));
+	for (int i = 1; i <= n; ++i) {
+		lua_rawgeti(L, idx, i);
+		if (lua_isstring(L, -1)) out.emplace_back(lua_tostring(L, -1));
+		lua_pop(L, 1);
+	}
+	return true;
+}
+
+/// Pull a {x,y,z,radius} sub-table out of conditions["withinRadius"] /
+/// ["outsideRadius"]. The radius is element 4; centre is elements 1..3.
+/// Missing/non-table → no-op (radius stays 0 = wildcard).
+void ReadSpatialFilter(lua_State* L, int condsIdx, const char* key,
+                       float3& centerOut, float& radiusOut)
+{
+	lua_getfield(L, condsIdx, key);
+	if (lua_istable(L, -1)) {
+		lua_rawgeti(L, -1, 1); const float x = static_cast<float>(luaL_optnumber(L, -1, 0)); lua_pop(L, 1);
+		lua_rawgeti(L, -1, 2); const float y = static_cast<float>(luaL_optnumber(L, -1, 0)); lua_pop(L, 1);
+		lua_rawgeti(L, -1, 3); const float z = static_cast<float>(luaL_optnumber(L, -1, 0)); lua_pop(L, 1);
+		lua_rawgeti(L, -1, 4); const float r = static_cast<float>(luaL_optnumber(L, -1, 0)); lua_pop(L, 1);
+		centerOut = float3(x, y, z);
+		radiusOut = r;
+	}
+	lua_pop(L, 1);
+}
+
+/// Parse the `conditions = {...}` sub-table of a Create/Update args
+/// table. Index points at the conditions table itself. Returns a
+/// default-constructed struct if the value is nil/missing.
+StandingOrderConditions ParseConditionsTable(lua_State* L, int idx)
+{
+	StandingOrderConditions out;
+	if (!lua_istable(L, idx)) return out;
+
+	lua_getfield(L, idx, "idleOnly");
+	if (lua_isboolean(L, -1)) out.idleOnly = lua_toboolean(L, -1);
+	lua_pop(L, 1);
+
+	lua_getfield(L, idx, "squadTypes");
+	if (lua_istable(L, -1)) {
+		std::vector<uint16_t> tmp;
+		ReadNumericArray(L, lua_gettop(L), tmp);
+		out.squadTypes = std::move(tmp);
+	}
+	lua_pop(L, 1);
+
+	ReadSpatialFilter(L, idx, "withinRadius",  out.withinCenter,  out.withinRadius);
+	ReadSpatialFilter(L, idx, "outsideRadius", out.outsideCenter, out.outsideRadius);
+
+	lua_getfield(L, idx, "minStrength");
+	if (lua_isnumber(L, -1)) out.minStrength = static_cast<float>(lua_tonumber(L, -1));
+	lua_pop(L, 1);
+
+	lua_getfield(L, idx, "hasCapabilities");
+	if (lua_istable(L, -1)) {
+		std::vector<std::string> tmp;
+		ReadStringArray(L, lua_gettop(L), tmp);
+		out.hasCapabilities = std::move(tmp);
+	}
+	lua_pop(L, 1);
+
+	return out;
+}
+
+/// Push a conditions struct as a Lua table onto the stack.
+void PushConditions(lua_State* L, const StandingOrderConditions& c)
+{
+	lua_newtable(L);
+	lua_pushboolean(L, c.idleOnly); lua_setfield(L, -2, "idleOnly");
+
+	if (!c.squadTypes.empty()) {
+		lua_newtable(L);
+		for (size_t i = 0; i < c.squadTypes.size(); ++i) {
+			lua_pushnumber(L, c.squadTypes[i]);
+			lua_rawseti(L, -2, static_cast<int>(i + 1));
+		}
+		lua_setfield(L, -2, "squadTypes");
+	}
+
+	if (c.withinRadius > 0.0f) {
+		lua_newtable(L);
+		lua_pushnumber(L, c.withinCenter.x); lua_rawseti(L, -2, 1);
+		lua_pushnumber(L, c.withinCenter.y); lua_rawseti(L, -2, 2);
+		lua_pushnumber(L, c.withinCenter.z); lua_rawseti(L, -2, 3);
+		lua_pushnumber(L, c.withinRadius);   lua_rawseti(L, -2, 4);
+		lua_setfield(L, -2, "withinRadius");
+	}
+	if (c.outsideRadius > 0.0f) {
+		lua_newtable(L);
+		lua_pushnumber(L, c.outsideCenter.x); lua_rawseti(L, -2, 1);
+		lua_pushnumber(L, c.outsideCenter.y); lua_rawseti(L, -2, 2);
+		lua_pushnumber(L, c.outsideCenter.z); lua_rawseti(L, -2, 3);
+		lua_pushnumber(L, c.outsideRadius);   lua_rawseti(L, -2, 4);
+		lua_setfield(L, -2, "outsideRadius");
+	}
+	if (c.minStrength > 0.0f) {
+		lua_pushnumber(L, c.minStrength);
+		lua_setfield(L, -2, "minStrength");
+	}
+	if (!c.hasCapabilities.empty()) {
+		lua_newtable(L);
+		for (size_t i = 0; i < c.hasCapabilities.size(); ++i) {
+			lua_pushstring(L, c.hasCapabilities[i].c_str());
+			lua_rawseti(L, -2, static_cast<int>(i + 1));
+		}
+		lua_setfield(L, -2, "hasCapabilities");
+	}
+}
+
+} // anonymous
+
+
+/*** Create a standing order owned by `teamId`.
+ *
+ * @function Spring.CreateStandingOrder
+ * @number teamId team that owns the order
+ * @tparam table desc { type = "DefendArea" | int, priority = 0..100,
+ *                      params = {floats...}, conditions = {...},
+ *                      expiresInFrames = 0 }
+ * @treturn number|nil orderId on success, nil on bad arguments
+ */
+int LuaSyncedCtrl::CreateStandingOrder(lua_State* L)
+{
+	const int teamId = luaL_checkint(L, 1);
+	if (!teamHandler.IsValidTeam(teamId)) {
+		luaL_error(L, "CreateStandingOrder: invalid teamId %d", teamId);
+		return 0;
+	}
+	if (!lua_istable(L, 2)) {
+		luaL_error(L, "CreateStandingOrder: second arg must be a description table");
+		return 0;
+	}
+
+	lua_getfield(L, 2, "type");
+	StandingOrderType type = StandingOrderType::DefendArea;
+	if (!ParseStandingOrderType(L, -1, type)) {
+		lua_pop(L, 1);
+		luaL_error(L, "CreateStandingOrder: missing or unknown 'type'");
+		return 0;
+	}
+	lua_pop(L, 1);
+
+	lua_getfield(L, 2, "priority");
+	const int priority = std::clamp(luaL_optint(L, -1, 0), 0, 255);
+	lua_pop(L, 1);
+
+	std::vector<float> params;
+	lua_getfield(L, 2, "params");
+	ReadNumericArray(L, lua_gettop(L), params);
+	lua_pop(L, 1);
+
+	lua_getfield(L, 2, "conditions");
+	StandingOrderConditions conds = ParseConditionsTable(L, lua_gettop(L));
+	lua_pop(L, 1);
+
+	lua_getfield(L, 2, "expiresInFrames");
+	const uint32_t expires = static_cast<uint32_t>(std::max(0, luaL_optint(L, -1, 0)));
+	lua_pop(L, 1);
+
+	const uint32_t id = standingOrders.Create(
+		teamId, type, static_cast<uint8_t>(priority),
+		std::move(params), std::move(conds), expires,
+		static_cast<uint32_t>(gs->frameNum));
+	lua_pushnumber(L, id);
+	return 1;
+}
+
+/*** Update an existing standing order in place.
+ *
+ * @function Spring.UpdateStandingOrder
+ * @number orderId
+ * @tparam table desc same fields as CreateStandingOrder. `team` cannot
+ *                    be changed — the caller must own the order.
+ *                    Includes an optional `active = bool` field.
+ * @treturn boolean true on success, false on id mismatch or
+ *                  cross-team attempt
+ */
+int LuaSyncedCtrl::UpdateStandingOrder(lua_State* L)
+{
+	const uint32_t orderId = static_cast<uint32_t>(luaL_checkint(L, 1));
+	if (!lua_istable(L, 2)) {
+		luaL_error(L, "UpdateStandingOrder: second arg must be a description table");
+		return 0;
+	}
+	// Look up the existing order to fetch its team — Lua-side updates
+	// don't pass team because LuaRules already enforces team scope
+	// elsewhere.
+	const StandingOrder* existing = nullptr;
+	for (const auto& o : standingOrders.GetAllOrders()) {
+		if (o.id == orderId) { existing = &o; break; }
+	}
+	if (existing == nullptr) {
+		lua_pushboolean(L, false);
+		return 1;
+	}
+
+	uint8_t priority = existing->priority;
+	std::vector<float> params = existing->params;
+	StandingOrderConditions conds = existing->conditions;
+	bool active = existing->active;
+
+	lua_getfield(L, 2, "priority");
+	if (lua_isnumber(L, -1)) priority = static_cast<uint8_t>(std::clamp(lua_toint(L, -1), 0, 255));
+	lua_pop(L, 1);
+
+	lua_getfield(L, 2, "params");
+	if (lua_istable(L, -1)) {
+		params.clear();
+		ReadNumericArray(L, lua_gettop(L), params);
+	}
+	lua_pop(L, 1);
+
+	lua_getfield(L, 2, "conditions");
+	if (lua_istable(L, -1)) conds = ParseConditionsTable(L, lua_gettop(L));
+	lua_pop(L, 1);
+
+	lua_getfield(L, 2, "active");
+	if (lua_isboolean(L, -1)) active = lua_toboolean(L, -1);
+	lua_pop(L, 1);
+
+	const bool ok = standingOrders.Update(
+		orderId, existing->team, priority, std::move(params), std::move(conds), active);
+	lua_pushboolean(L, ok);
+	return 1;
+}
+
+/*** Remove a standing order.
+ *
+ * @function Spring.RemoveStandingOrder
+ * @number orderId
+ * @treturn boolean true on success, false on id mismatch
+ */
+int LuaSyncedCtrl::RemoveStandingOrder(lua_State* L)
+{
+	const uint32_t orderId = static_cast<uint32_t>(luaL_checkint(L, 1));
+	const StandingOrder* existing = nullptr;
+	for (const auto& o : standingOrders.GetAllOrders()) {
+		if (o.id == orderId) { existing = &o; break; }
+	}
+	if (existing == nullptr) {
+		lua_pushboolean(L, false);
+		return 1;
+	}
+	const bool ok = standingOrders.Remove(orderId, existing->team);
+	lua_pushboolean(L, ok);
+	return 1;
+}
+
+/*** List standing orders for `teamId`, sorted by priority desc.
+ *
+ * @function Spring.GetStandingOrders
+ * @number teamId
+ * @treturn table[] entries: { id, type, priority, params, conditions,
+ *                             assigned, active, createdAtFrame,
+ *                             expiresAtFrame }
+ */
+int LuaSyncedCtrl::GetStandingOrders(lua_State* L)
+{
+	const int teamId = luaL_checkint(L, 1);
+	auto list = standingOrders.GetTeamOrders(teamId);
+
+	lua_newtable(L);
+	int n = 0;
+	for (const StandingOrder* o : list) {
+		++n;
+		lua_newtable(L);
+
+		lua_pushnumber(L, o->id);             lua_setfield(L, -2, "id");
+		lua_pushstring(L, StandingOrderTypeName(o->type)); lua_setfield(L, -2, "type");
+		lua_pushnumber(L, o->priority);       lua_setfield(L, -2, "priority");
+		lua_pushboolean(L, o->active);        lua_setfield(L, -2, "active");
+		lua_pushnumber(L, o->createdAtFrame); lua_setfield(L, -2, "createdAtFrame");
+		lua_pushnumber(L, o->expiresAtFrame); lua_setfield(L, -2, "expiresAtFrame");
+		lua_pushnumber(L, static_cast<lua_Number>(o->assigned.size()));
+		lua_setfield(L, -2, "assigned");
+
+		if (!o->params.empty()) {
+			lua_newtable(L);
+			for (size_t i = 0; i < o->params.size(); ++i) {
+				lua_pushnumber(L, o->params[i]);
+				lua_rawseti(L, -2, static_cast<int>(i + 1));
+			}
+			lua_setfield(L, -2, "params");
+		}
+
+		PushConditions(L, o->conditions);
+		lua_setfield(L, -2, "conditions");
+
+		lua_rawseti(L, -2, n);
+	}
+	return 1;
 }
 
 
