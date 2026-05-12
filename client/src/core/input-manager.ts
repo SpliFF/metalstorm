@@ -37,6 +37,7 @@ import type { Connection } from './connection.js';
 import type { DefCache } from './def-cache.js';
 import type { ParsedMapData } from './map-data.js';
 import { findMetalSpots, nearestMetalSpot, type MetalSpot } from './metal-spots.js';
+import type { AnimatedCursor } from './animated-cursor.js';
 
 /// How close (in world elmos) a click has to be to a unit's XZ to
 /// count as selecting that unit. Accounts for pickWithRay landing
@@ -186,6 +187,14 @@ export class InputManager {
     /** Wire the def cache after construction so build placement can size the ghost. */
     setDefCache(cache: DefCache): void {
         this.defCache = cache;
+    }
+
+    /** Optional AnimatedCursor — when set, cmd-mode changes drive the
+     *  animated overlay instead of falling back to CSS cursors. Wired
+     *  from main.ts once the lobby URL + game ID are known. */
+    private animatedCursor: AnimatedCursor | null = null;
+    setAnimatedCursor(cursor: AnimatedCursor | null): void {
+        this.animatedCursor = cursor;
     }
 
     /** Set the player's team id after auth completes. Used by right-click
@@ -1051,34 +1060,40 @@ export class InputManager {
     private fireStateCycle = 2;
 
     /** Reflect pendingCmd in the canvas cursor so the player can see they're
-     *  in a modal-command mode. Falls back to the default cursor when no
-     *  modal command is pending. */
+     *  in a modal-command mode. Prefers AnimatedCursor (loads ZK's PNG
+     *  cursor packs from `Anims/cursor*.txt`); falls back to generic CSS
+     *  cursors when no AnimatedCursor is wired or its load failed. */
     private updateCursorMode(): void {
         const canvas = this.scene.getEngine().getRenderingCanvas();
         if (!canvas) return;
+        // Map pendingCmd → Spring's canonical cursor name (the same
+        // strings ZK widgets pass to AssignMouseCursor / SetMouseCursor).
+        let cursorName: string | null = null;
+        let cssFallback = '';
         switch (this.pendingCmd) {
-            case CMD.FIGHT:
-            case CMD.ATTACK:
-            case CMD.MANUALFIRE:
-                canvas.style.cursor = 'crosshair';
-                break;
-            case CMD.PATROL:
-                canvas.style.cursor = 'cell';
-                break;
-            case CMD.MOVE:
-            case CMD.UNLOAD_UNITS:
-                canvas.style.cursor = 'move';
-                break;
-            case CMD.GUARD:
-            case CMD.REPAIR:
-            case CMD.RECLAIM:
-            case CMD.CAPTURE:
-            case CMD.RESURRECT:
-            case CMD.LOAD_UNITS:
-                canvas.style.cursor = 'pointer';
-                break;
-            default:
-                canvas.style.cursor = '';
+            case CMD.ATTACK:      cursorName = 'Attack';       cssFallback = 'crosshair'; break;
+            case CMD.AREA_ATTACK: cursorName = 'Area attack';  cssFallback = 'crosshair'; break;
+            case CMD.FIGHT:       cursorName = 'Fight';        cssFallback = 'crosshair'; break;
+            case CMD.MANUALFIRE:  cursorName = 'ManualFire';   cssFallback = 'crosshair'; break;
+            case CMD.PATROL:      cursorName = 'Patrol';       cssFallback = 'cell';      break;
+            case CMD.MOVE:        cursorName = 'Move';         cssFallback = 'move';      break;
+            case CMD.UNLOAD_UNITS: cursorName = 'Unload units'; cssFallback = 'move';     break;
+            case CMD.LOAD_UNITS:  cursorName = 'Load units';   cssFallback = 'pointer';   break;
+            case CMD.GUARD:       cursorName = 'Guard';        cssFallback = 'pointer';   break;
+            case CMD.REPAIR:      cursorName = 'Repair';       cssFallback = 'pointer';   break;
+            case CMD.RECLAIM:     cursorName = 'Reclaim';      cssFallback = 'pointer';   break;
+            case CMD.CAPTURE:     cursorName = 'Capture';      cssFallback = 'pointer';   break;
+            case CMD.RESURRECT:   cursorName = 'Resurrect';    cssFallback = 'pointer';   break;
+            case CMD.SELFD:       cursorName = 'SelfD';        cssFallback = 'crosshair'; break;
+            case CMD.WAIT:        cursorName = 'Wait';         cssFallback = 'progress';  break;
+        }
+        if (this.animatedCursor) {
+            this.animatedCursor.setActive(cursorName);
+            // CSS fallback covers the brief window before the manifest
+            // loads on first activation.
+            canvas.style.cursor = cursorName ? cssFallback : '';
+        } else {
+            canvas.style.cursor = cursorName ? cssFallback : '';
         }
     }
 

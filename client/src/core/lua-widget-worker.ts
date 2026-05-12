@@ -2861,8 +2861,50 @@ function installEngineGlobals(
     // Returning nothing is fine — these widgets gate on the result.
     (springGlobals.Spring as Record<string, LuaValue>).GetAIInfo = (_team: LuaValue) => [-1, '', '', '', '', {}];
     (springGlobals.Spring as Record<string, LuaValue>).GetSkirmishAIInfo = (_team: LuaValue) => [-1, '', '', '', '', {}];
-    (springGlobals.Spring as Record<string, LuaValue>).AssignMouseCursor = (_name: LuaValue, _file: LuaValue, _hotX: LuaValue, _hotY: LuaValue) => true;
-    (springGlobals.Spring as Record<string, LuaValue>).ReplaceMouseCursor = (_name: LuaValue, _file: LuaValue, _hotX: LuaValue, _hotY: LuaValue) => true;
+    // Spring.AssignMouseCursor(name, file, hotspotX?, hotspotY?, overwrite?)
+    // — register a cursor file under a logical name. ZK widgets call this
+    // at Initialize-time to swap in their own animated PNG packs over the
+    // engine defaults. We post the assignment to main thread which keeps
+    // the AnimatedCursor's per-name table in sync.
+    (springGlobals.Spring as Record<string, LuaValue>).AssignMouseCursor = (
+        name: LuaValue, file: LuaValue,
+        hotX: LuaValue, hotY: LuaValue, overwrite: LuaValue,
+    ) => {
+        const n = String(name ?? '');
+        const f = String(file ?? '');
+        if (!n || !f) return false;
+        postToMain({
+            type: 'assignMouseCursor',
+            name: n, file: f,
+            hotspotX: typeof hotX === 'number' ? hotX : null,
+            hotspotY: typeof hotY === 'number' ? hotY : null,
+            overwrite: overwrite === undefined ? true : !!overwrite,
+        });
+        return true;
+    };
+    // Spring.ReplaceMouseCursor — Spring documents this as a synonym for
+    // AssignMouseCursor with overwrite=true. Same forwarding path.
+    (springGlobals.Spring as Record<string, LuaValue>).ReplaceMouseCursor = (
+        name: LuaValue, file: LuaValue,
+        hotX: LuaValue, hotY: LuaValue,
+    ) => {
+        const n = String(name ?? '');
+        const f = String(file ?? '');
+        if (!n || !f) return false;
+        postToMain({
+            type: 'assignMouseCursor',
+            name: n, file: f,
+            hotspotX: typeof hotX === 'number' ? hotX : null,
+            hotspotY: typeof hotY === 'number' ? hotY : null,
+            overwrite: true,
+        });
+        return true;
+    };
+    // Spring.SetMouseCursor(name) — switch the active cursor. Pass empty
+    // string / nil to revert to the native arrow.
+    (springGlobals.Spring as Record<string, LuaValue>).SetMouseCursor = (name: LuaValue) => {
+        postToMain({ type: 'setMouseCursor', name: name == null ? '' : String(name) });
+    };
     (springGlobals.Spring as Record<string, LuaValue>).SetDrawSelectionInfo = (_show: LuaValue) => undefined;
     (springGlobals.Spring as Record<string, LuaValue>).SetDrawGroundDeprecated = (_show: LuaValue) => undefined;
     (springGlobals.Spring as Record<string, LuaValue>).GetFrameTimeOffset = () => 0;

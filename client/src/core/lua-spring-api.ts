@@ -1671,7 +1671,10 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             return [m.x, m.y, m.lmb, m.mmb, m.rmb, m.outsideSpring];
         },
         GetMouseCursor: () => ['', 1.0], // name, scale
-        SetMouseCursor: () => {},
+        SetMouseCursor: (_name: LuaValue) => {
+            // The worker overrides this with a postMessage to main; the
+            // bare lua-spring-api context (no worker bridge) is a no-op.
+        },
         IsAboveMiniMap: (x?: LuaValue, y?: LuaValue) => {
             // Spring's API takes optional screen coords; if omitted, the
             // engine substitutes the current mouse position. Coords are

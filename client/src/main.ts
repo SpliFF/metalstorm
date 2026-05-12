@@ -44,6 +44,7 @@ import { AudioManager } from './core/audio.js';
 import { SoundEventPlayer } from './core/sound-events.js';
 import { MusicDirector } from './core/music-director.js';
 import { InputManager } from './core/input-manager.js';
+import { AnimatedCursor } from './core/animated-cursor.js';
 import { BuildMenu } from './core/build-menu.js';
 import { OrderPanel } from './core/order-panel.js';
 import { EconomyBar } from './core/economy-bar.js';
@@ -86,6 +87,7 @@ let cegRuntime: CegRuntime | null = null;
 let combatFX: CombatFX | null = null;
 let audioManager: AudioManager | null = null;
 let inputManager: InputManager | null = null;
+let animatedCursor: AnimatedCursor | null = null;
 let buildMenu: BuildMenu | null = null;
 let orderPanel: OrderPanel | null = null;
 let economyBar: EconomyBar | null = null;
@@ -245,6 +247,8 @@ function quitToLobby(): void {
     lastCommandQueues = [];
     inputManager?.dispose();
     inputManager = null;
+    animatedCursor?.dispose();
+    animatedCursor = null;
     engine?.stopRenderLoop();
     engine?.dispose();
     engine = null;
@@ -699,6 +703,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             });
             mgr.setLiveDataSources(rtsCamera, conn, audioManager ?? undefined);
             mgr.setMusicDirector(musicDirector);
+            if (animatedCursor) mgr.setAnimatedCursor(animatedCursor);
             mgr.forwardMapFeatures(map.features);
             // Seed the worker with any defs that arrived before the
             // manager existed (def stream can race MapData arrival).
@@ -1034,6 +1039,16 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             }
         });
     inputManager.setDefCache(defCache);
+    // Animated cursor — loads ZK's `Anims/cursor*.txt` packs and renders
+    // them on a transparent overlay. Only constructable once we know the
+    // game data root; safe to skip when no game is loaded yet.
+    if (gameId) {
+        const canvasHost = scene.getEngine().getRenderingCanvas()?.parentElement
+            ?? document.body;
+        animatedCursor = new AnimatedCursor(canvasHost, lobbyHttpUrl, gameId);
+        inputManager.setAnimatedCursor(animatedCursor);
+        (window as unknown as { __animatedCursor: unknown }).__animatedCursor = animatedCursor;
+    }
     // Debug hook: expose inputManager + connection so chrome-devtools
     // automation can drive orders without touching the canvas.
     (window as unknown as { __inputManager: unknown }).__inputManager = inputManager;

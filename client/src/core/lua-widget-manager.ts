@@ -233,6 +233,15 @@ export class LuaWidgetManager {
     }
     private musicDirector: import('./music-director.js').MusicDirector | null = null;
 
+    /** Wire the AnimatedCursor so worker-side AssignMouseCursor /
+     *  SetMouseCursor calls reach a real cursor renderer. Without this
+     *  set, the cursor messages are silently dropped (the API still
+     *  returns true to widgets so Initialize() doesn't crash). */
+    setAnimatedCursor(cursor: import('./animated-cursor.js').AnimatedCursor): void {
+        this.animatedCursor = cursor;
+    }
+    private animatedCursor: import('./animated-cursor.js').AnimatedCursor | null = null;
+
     // ── Main entry point ────────────────────────────────────────────────
 
     async initialize(): Promise<void> {
@@ -905,6 +914,27 @@ export class LuaWidgetManager {
                 if (Number.isFinite(x) && Number.isFinite(z)) {
                     this.onCameraTargetRequest?.(x, z, smoothness);
                 }
+                break;
+            }
+
+            case 'assignMouseCursor': {
+                const cursor = this.animatedCursor;
+                if (!cursor) break;
+                const name = typeof msg.name === 'string' ? msg.name : '';
+                const file = typeof msg.file === 'string' ? msg.file : '';
+                if (!name || !file) break;
+                const hx = typeof msg.hotspotX === 'number' ? msg.hotspotX : null;
+                const hy = typeof msg.hotspotY === 'number' ? msg.hotspotY : null;
+                const overwrite = msg.overwrite !== false;
+                cursor.assign(name, file, hx, hy, overwrite);
+                break;
+            }
+
+            case 'setMouseCursor': {
+                const cursor = this.animatedCursor;
+                if (!cursor) break;
+                const name = typeof msg.name === 'string' ? msg.name : '';
+                cursor.setActive(name || null);
                 break;
             }
 
