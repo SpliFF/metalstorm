@@ -175,6 +175,13 @@ export interface UnitEntry {
     healthRatio: number;
     defId: number;
     team: number;
+    /** Build progress 0..1. 1 means the unit has finished construction.
+     *  Streamed via FIELD_BUILD_PROGRESS as a u8 (255 = 1.0); the
+     *  buildProgress < 1 → >= 1 transition fires UnitFinished. Defaults
+     *  to 1 for the rare case where the field is missing from a delta
+     *  (the unit was already done at first sight, so no transition to
+     *  fire). */
+    buildProgress: number;
     /** World-space velocity in elmos/second. Updated by the entityState
      *  handler from frame-to-frame position deltas. Zero on first frame. */
     vx: number; vy: number; vz: number;
@@ -1196,10 +1203,13 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         GetUnitHealth: (id: LuaValue) => {
             const u = ls.units.get(Number(id));
             if (!u) return null;
-            // healthRatio is 0-1; derive hp assuming max=1000 (best guess without def data)
+            // Spring returns (hp, maxHp, paralyzeDamage, captureProgress,
+            // buildProgress). hp / maxHp are best-effort without def data
+            // (we approximate maxHp = 1000); buildProgress is now real
+            // from FIELD_BUILD_PROGRESS.
             const maxHp = 1000;
             const hp = u.healthRatio * maxHp;
-            return [hp, maxHp, 0, u.healthRatio, 0];
+            return [hp, maxHp, 0, 0, u.buildProgress];
         },
         GetUnitStates: (id: LuaValue) => {
             const u = ls.units.get(Number(id));
@@ -2286,7 +2296,10 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         GetUnitIsBuilding: () => null,
         GetUnitIsBeingBuilt: (_id: LuaValue) => {
             const u = ls.units.get(Number(_id));
-            return u ? u.healthRatio < 1 : null;
+            // Spring returns (isBeingBuilt: bool, buildProgress: number).
+            // Real buildProgress now flows over the wire (FIELD_BUILD_PROGRESS);
+            // we no longer have to approximate from health.
+            return u ? [u.buildProgress < 1, u.buildProgress] : null;
         },
         // Spring.GetUnitCmdDescs(unitID) — return the unit's command
         // descriptors as a 1-indexed Lua array. Server streams the build

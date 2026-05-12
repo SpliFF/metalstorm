@@ -3535,6 +3535,20 @@ function dispatchUnitDestroyed(unitId: number, defId: number, team: number): voi
     `, 'dispatchUnitDestroyed');
 }
 
+/** widgetHandler:UnitFinished(unitID, unitDefID, unitTeam) — fires when
+ *  a unit completes construction. We derive it from a buildProgress
+ *  < 1 → >= 1 transition in the entity-state stream rather than waiting
+ *  for a dedicated server event; close enough for ZK widgets like
+ *  unit_building_starter, unit_start_state, cmd_no_duplicate_orders. */
+function dispatchUnitFinished(unitId: number, defId: number, team: number): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.UnitFinished then
+            pcall(widgetHandler.UnitFinished, widgetHandler, ${unitId}, ${defId}, ${team})
+        end
+    `, 'dispatchUnitFinished');
+}
+
 function dispatchCommandsChanged(): void {
     if (!runtime) return;
     // Spring exposes the union of every selected unit's cmd-descs as
@@ -3910,6 +3924,7 @@ self.onmessage = async (e: MessageEvent) => {
             const teams = msg.teams as Uint8Array | null;
             const stateBits = msg.stateBits as Uint8Array | null;
             const losStates = msg.losStates as Uint8Array | null;
+            const buildProgress = msg.buildProgress as Uint8Array | null;
 
             // Velocity is computed from frame-to-frame position deltas.
             // The sim ticks at 30 Hz so each entity-state batch nominally
@@ -3924,6 +3939,13 @@ self.onmessage = async (e: MessageEvent) => {
             // shape for widgets like unit_state_icons that snapshot a
             // unit's static metadata on creation.
             const createdIds: Array<{ id: number; defId: number; team: number }> = [];
+            // Track buildProgress < 1 → >= 1 transitions so we can fire
+            // UnitFinished after the merge. The server doesn't emit a
+            // dedicated build-complete event yet, so we derive it from
+            // the entity-state stream — close enough for ZK widgets like
+            // unit_building_starter and cmd_no_duplicate_orders.
+            const finishedIds: Array<{ id: number; defId: number; team: number }> = [];
+            const decodeProgress = (i: number) => buildProgress ? buildProgress[i] / 255 : 1;
             if (!isDelta) {
                 // Full snapshot — rebuild. Only keep IDs in this snapshot.
                 const prevUnits = liveState.units;
@@ -3937,12 +3959,14 @@ self.onmessage = async (e: MessageEvent) => {
                         const nz = posZ ? posZ[i] : 0;
                         const defId = defIds ? defIds[i] : 0;
                         const team = teams ? teams[i] : 0;
+                        const bp = decodeProgress(i);
                         newUnits.set(id, {
                             x: nx, y: ny, z: nz,
                             heading: headings ? headings[i] : 0,
                             healthRatio: health ? health[i] / 65535 : 1,
                             defId,
                             team,
+                            buildProgress: bp,
                             vx: prev ? (nx - prev.x) * tickRate : 0,
                             vy: prev ? (ny - prev.y) * tickRate : 0,
                             vz: prev ? (nz - prev.z) * tickRate : 0,
@@ -3950,6 +3974,9 @@ self.onmessage = async (e: MessageEvent) => {
                             losState: losStates ? losStates[i] : 0x0F,
                         });
                         if (!prev) createdIds.push({ id, defId, team });
+                        else if (prev.buildProgress < 1 && bp >= 1) {
+                            finishedIds.push({ id, defId, team });
+                        }
                     }
                 }
                 liveState.units = newUnits;
@@ -3961,7 +3988,8 @@ self.onmessage = async (e: MessageEvent) => {
                         const existing = liveState.units.get(id);
                         const entry: UnitEntry = existing ?? {
                             x: 0, y: 0, z: 0, heading: 0, healthRatio: 1,
-                            defId: 0, team: 0, vx: 0, vy: 0, vz: 0,
+                            defId: 0, team: 0, buildProgress: 1,
+                            vx: 0, vy: 0, vz: 0,
                             stateBits: 0, losState: 0x0F,
                         };
                         if (posX) {
@@ -3985,6 +4013,14 @@ self.onmessage = async (e: MessageEvent) => {
                         if (teams) entry.team = teams[i];
                         if (stateBits) entry.stateBits = stateBits[i];
                         if (losStates) entry.losState = losStates[i];
+                        if (buildProgress) {
+                            const prevBp = entry.buildProgress;
+                            const newBp = buildProgress[i] / 255;
+                            entry.buildProgress = newBp;
+                            if (existing && prevBp < 1 && newBp >= 1) {
+                                finishedIds.push({ id, defId: entry.defId, team: entry.team });
+                            }
+                        }
                         liveState.units.set(id, entry);
                         if (!existing) {
                             createdIds.push({ id, defId: entry.defId, team: entry.team });
@@ -3994,6 +4030,9 @@ self.onmessage = async (e: MessageEvent) => {
             }
             for (const c of createdIds) {
                 dispatchUnitCreated(c.id, c.defId, c.team);
+            }
+            for (const f of finishedIds) {
+                dispatchUnitFinished(f.id, f.defId, f.team);
             }
             break;
         }

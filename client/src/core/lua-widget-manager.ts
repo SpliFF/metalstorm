@@ -461,11 +461,12 @@ export class LuaWidgetManager {
             teams: snapshot.teams ? new Uint8Array(snapshot.teams) : null,
             stateBits: snapshot.stateBits ? new Uint8Array(snapshot.stateBits) : null,
             losStates: snapshot.losStates ? new Uint8Array(snapshot.losStates) : null,
+            buildProgress: snapshot.buildProgress ? new Uint8Array(snapshot.buildProgress) : null,
         };
 
         // Build transferable list from the copies
         const transfer: Transferable[] = [];
-        for (const key of ['entityIds', 'positionsX', 'positionsY', 'positionsZ', 'headings', 'health', 'defIds', 'teams', 'stateBits', 'losStates']) {
+        for (const key of ['entityIds', 'positionsX', 'positionsY', 'positionsZ', 'headings', 'health', 'defIds', 'teams', 'stateBits', 'losStates', 'buildProgress']) {
             const arr = msg[key] as ArrayBufferView | null;
             if (arr) transfer.push(arr.buffer);
         }
