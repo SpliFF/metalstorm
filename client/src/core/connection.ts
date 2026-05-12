@@ -62,6 +62,9 @@ import { UnitArmoredInfo } from '../protocol/spring-web/unit-armored-info.js';
 import { UnitLifecycleBatch } from '../protocol/spring-web/unit-lifecycle-batch.js';
 import { UnitLifecycleEvent } from '../protocol/spring-web/unit-lifecycle-event.js';
 import { UnitLifecycleKind } from '../protocol/spring-web/unit-lifecycle-kind.js';
+import { UnitCommandBatch } from '../protocol/spring-web/unit-command-batch.js';
+import { UnitCommandEvent } from '../protocol/spring-web/unit-command-event.js';
+import { UnitCommandKind } from '../protocol/spring-web/unit-command-kind.js';
 import { AuthRequest } from '../protocol/spring-web/auth-request.js';
 import { PlayerCommand } from '../protocol/spring-web/player-command.js';
 import { PlayerCommandBatch } from '../protocol/spring-web/player-command-batch.js';
@@ -378,6 +381,29 @@ export interface UnitLifecycleEventMsg {
     newTeam: number;
 }
 
+/** Discriminator on UnitCommandEventMsg.kind — matches the FlatBuffers
+ *  enum. `issued` fires after a command lands on a unit's queue;
+ *  `done` fires when the queued command completes or is cleared. */
+export type UnitCommandKindStr = 'issued' | 'done';
+
+/** One synced command event mirrored from the server. Shape matches
+ *  the LuaUI `widgetHandler:UnitCommand` / `UnitCmdDone` callin
+ *  argument lists so the worker can forward directly. */
+export interface UnitCommandEventMsg {
+    kind: UnitCommandKindStr;
+    unitId: number;
+    unitDefId: number;
+    unitTeam: number;
+    cmdId: number;
+    params: number[];
+    options: number;
+    tag: number;
+    /** Spring `playerNum`. `-1` for system / Lua / AI sources. */
+    playerId: number;
+    fromSynced: boolean;
+    fromLua: boolean;
+}
+
 export interface WeaponDefInfo {
     defId: number;
     name: string;
@@ -556,6 +582,12 @@ export interface ConnectionEvents {
     onUnitStockpile?: (units: UnitStockpileInfoMsg[]) => void;
     onUnitArmored?: (units: UnitArmoredInfoMsg[]) => void;
     onUnitLifecycle?: (events: UnitLifecycleEventMsg[]) => void;
+    /** Synced `UnitCommand` / `UnitCmdDone` events filtered to allied
+     *  teams. Forwarded to the widget worker so ZK widgets that
+     *  register the matching callins (`unit_state_icons`,
+     *  `cmd_stop_selfd`, `cmd_keep_target`, etc.) see commands as
+     *  they're issued and completed. */
+    onUnitCommand?: (events: UnitCommandEventMsg[]) => void;
     /** Async `Spring.PathRequest` reply from the server. `waypoints` is
      *  the full path from `start` to a point within `goal_radius` of
      *  `end`; empty if no path was found. `length` is the total path
@@ -1557,6 +1589,35 @@ export class Connection {
                     });
                 }
                 this.events.onUnitLifecycle?.(events);
+                break;
+            }
+            case ServerPayload.UnitCommandBatch: {
+                const fbBatch = msg.payload(new UnitCommandBatch()) as UnitCommandBatch;
+                const events: UnitCommandEventMsg[] = [];
+                for (let i = 0; i < fbBatch.eventsLength(); i++) {
+                    const e = fbBatch.events(i, new UnitCommandEvent());
+                    if (!e) continue;
+                    const kind: UnitCommandKindStr =
+                        e.kind() === UnitCommandKind.Issued ? 'issued' : 'done';
+                    const params: number[] = [];
+                    for (let p = 0; p < e.paramsLength(); p++) {
+                        params.push(e.params(p) ?? 0);
+                    }
+                    events.push({
+                        kind,
+                        unitId:     e.unitId(),
+                        unitDefId:  e.unitDefId(),
+                        unitTeam:   e.unitTeam(),
+                        cmdId:      e.cmdId(),
+                        params,
+                        options:    e.options(),
+                        tag:        e.tag(),
+                        playerId:   e.playerId(),
+                        fromSynced: !!e.fromSynced(),
+                        fromLua:    !!e.fromLua(),
+                    });
+                }
+                this.events.onUnitCommand?.(events);
                 break;
             }
             case ServerPayload.UnitArmoredUpdate: {

@@ -1019,6 +1019,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         onUnitLifecycle(events) {
             currentWidgetManager?.forwardUnitLifecycle(events);
         },
+        onUnitCommand(events) {
+            currentWidgetManager?.forwardUnitCommand(events);
+        },
         onPathResponse(info) {
             currentWidgetManager?.forwardPathResponse(
                 info.requestId, info.waypoints, info.length);

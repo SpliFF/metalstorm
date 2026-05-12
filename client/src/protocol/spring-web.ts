@@ -115,6 +115,9 @@ export { UnitArmoredUpdate, UnitArmoredUpdateT } from './spring-web/unit-armored
 export { UnitCmdDesc, UnitCmdDescT } from './spring-web/unit-cmd-desc.js';
 export { UnitCmdDescs, UnitCmdDescsT } from './spring-web/unit-cmd-descs.js';
 export { UnitCmdDescsUpdate, UnitCmdDescsUpdateT } from './spring-web/unit-cmd-descs-update.js';
+export { UnitCommandBatch, UnitCommandBatchT } from './spring-web/unit-command-batch.js';
+export { UnitCommandEvent, UnitCommandEventT } from './spring-web/unit-command-event.js';
+export { UnitCommandKind } from './spring-web/unit-command-kind.js';
 export { UnitCommandQueue, UnitCommandQueueT } from './spring-web/unit-command-queue.js';
 export { UnitCommandQueuesUpdate, UnitCommandQueuesUpdateT } from './spring-web/unit-command-queues-update.js';
 export { UnitLifecycleBatch, UnitLifecycleBatchT } from './spring-web/unit-lifecycle-batch.js';

@@ -70,6 +70,7 @@ const std::unordered_map<int, std::string>* gAITeams = nullptr;
 #include "System/Scripting/ScriptEventDispatcher.h"
 #include "Server/IntelEventCollector.h"
 #include "Server/UnitLifecycleCollector.h"
+#include "Server/UnitCommandCollector.h"
 #include "Lua/LuaScriptContext.h"
 #include "Lua/LuaRules.h"
 #include "Lua/LuaGaia.h"
@@ -306,6 +307,16 @@ void CSimulation::InitScripting()
     if (unitLifecycleEvents == nullptr) {
         unitLifecycleEvents = new UnitLifecycleCollector();
         unitLifecycleEvents->Register();
+    }
+
+    // Command event collector — captures UnitCommand / UnitCmdDone
+    // callins. Drained per tick and broadcast as UnitCommandBatch
+    // envelopes, filtered to the viewer's allied teams. Required by
+    // ZK widgets that need to observe commands as they're issued
+    // (unit_state_icons, cmd_stop_selfd, cmd_keep_target, etc.).
+    if (unitCommandEvents == nullptr) {
+        unitCommandEvents = new UnitCommandCollector();
+        unitCommandEvents->Register();
     }
 
     // Try to load LuaRules (game-wide synced gadgets) and LuaGaia

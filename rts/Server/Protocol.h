@@ -14,6 +14,7 @@
 #include "SoundEventCollector.h"
 #include "IntelEventCollector.h"
 #include "UnitLifecycleCollector.h"
+#include "UnitCommandCollector.h"
 #include "RoomManager.h"
 #include "MapMetadata.h"
 #include "StandingOrders.h"
@@ -595,6 +596,37 @@ inline std::vector<uint8_t> BuildUnitLifecycleBatch(
     auto batch = SpringWeb::CreateUnitLifecycleBatch(fbb, entriesVec);
     return BuildServerMessage(fbb,
         SpringWeb::ServerPayload_UnitLifecycleBatch, batch.Union());
+}
+
+/// Build a UnitCommandBatch from a drained event list. Caller is
+/// expected to have already filtered the events to ones the receiving
+/// session is allowed to see (allied teams). Returns an empty vector
+/// if `events` is empty.
+inline std::vector<uint8_t> BuildUnitCommandBatch(
+    const std::vector<UnitCommandEventData>& events)
+{
+    if (events.empty()) return {};
+    flatbuffers::FlatBufferBuilder fbb(1024);
+
+    std::vector<flatbuffers::Offset<SpringWeb::UnitCommandEvent>> entries;
+    entries.reserve(events.size());
+    for (const auto& e : events) {
+        SpringWeb::UnitCommandKind kind =
+            (e.kind == UnitCommandKind::Issued)
+                ? SpringWeb::UnitCommandKind_Issued
+                : SpringWeb::UnitCommandKind_Done;
+        auto paramsVec = fbb.CreateVector(e.params);
+        entries.push_back(SpringWeb::CreateUnitCommandEvent(
+            fbb, kind,
+            e.unitId, e.unitDefId, e.unitTeam,
+            e.cmdId, paramsVec, e.options, e.tag,
+            e.playerId, e.fromSynced, e.fromLua));
+    }
+
+    auto entriesVec = fbb.CreateVector(entries);
+    auto batch = SpringWeb::CreateUnitCommandBatch(fbb, entriesVec);
+    return BuildServerMessage(fbb,
+        SpringWeb::ServerPayload_UnitCommandBatch, batch.Union());
 }
 
 /// Build a PathResponse for a single path request. `waypoints` may be

@@ -1686,6 +1686,46 @@ table UnitLifecycleBatch {
     events: [UnitLifecycleEvent];
 }
 
+/// Classifies a UnitCommandEvent. `Issued` fires after the engine has
+/// added a command to a unit's queue (Spring's `UnitCommand` callin);
+/// `Done` fires when a queued command completes or is cleared
+/// (`UnitCmdDone`).
+enum UnitCommandKind : uint8 {
+    Issued = 0,
+    Done   = 1,
+}
+
+/// Server → Client: one per `UnitCommand` / `UnitCmdDone` event. Mirrors
+/// the arguments LuaUI widgets receive on the matching callins. The
+/// `tag` matches the value the queue snapshot reports for the same
+/// command — widgets can correlate an Issued event with its later Done.
+table UnitCommandEvent {
+    kind: UnitCommandKind;
+    unit_id: uint32;
+    unit_def_id: uint16;
+    unit_team: uint8;
+    cmd_id: int32;
+    params: [float];
+    options: uint8;
+    tag: uint32;
+    /// Spring's `playerNum`. `-1` (= 255 unsigned) for system / Lua / AI
+    /// issued commands; player-issued events carry the originating player.
+    player_id: int16 = -1;
+    /// True when the command was issued by sim Lua (LuaRules, gadget:),
+    /// false when issued by player input or the engine's own scheduling.
+    from_synced: bool = false;
+    /// True when the command was issued by any Lua context (synced or
+    /// unsynced), false for engine / network-decoded sources.
+    from_lua: bool = false;
+}
+
+/// Per-tick batch of command events. Filtered server-side to the union
+/// of every viewer's allied teams — widgets only see commands on units
+/// they're allowed to observe (own team + alliance).
+table UnitCommandBatch {
+    events: [UnitCommandEvent];
+}
+
 /// Server → Client: result of a `PathRequest`. The `request_id` matches
 /// the one the client supplied. `waypoints` is the full path from
 /// `start` to (a point within `goal_radius` of) `end`; empty if no
@@ -1775,6 +1815,7 @@ union ServerPayload {
     UnitStockpileUpdate,
     UnitArmoredUpdate,
     UnitLifecycleBatch,
+    UnitCommandBatch,
     PathResponse,
     StandingOrderState,
 }

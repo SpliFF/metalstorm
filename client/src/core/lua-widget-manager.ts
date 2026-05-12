@@ -816,6 +816,29 @@ export class LuaWidgetManager {
         });
     }
 
+    /** Push a per-tick batch of synced UnitCommand / UnitCmdDone events
+     *  into the worker. The worker dispatches `widget:UnitCommand` /
+     *  `widget:UnitCmdDone` from each entry. */
+    forwardUnitCommand(events: ReadonlyArray<{
+        kind: 'issued' | 'done';
+        unitId: number;
+        unitDefId: number;
+        unitTeam: number;
+        cmdId: number;
+        params: number[];
+        options: number;
+        tag: number;
+        playerId: number;
+        fromSynced: boolean;
+        fromLua: boolean;
+    }>): void {
+        if (this.disposed || events.length === 0) return;
+        this.postToWorker({
+            type: 'unitCommand',
+            events: events.map(e => ({ ...e, params: [...e.params] })),
+        });
+    }
+
     /** Push a batch of weapon defs into the worker. */
     forwardWeaponDefs(defs: ReadonlyArray<{
         defId: number; name: string; visualType: number;

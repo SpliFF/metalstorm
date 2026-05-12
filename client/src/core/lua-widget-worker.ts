@@ -3671,6 +3671,56 @@ function dispatchUnitFinished(unitId: number, defId: number, team: number): void
     `, 'dispatchUnitFinished');
 }
 
+/** Build a Lua table literal for an array of floats. Used to pass the
+ *  `cmdParams` argument of `widgetHandler:UnitCommand` / `UnitCmdDone`
+ *  callins; the worker can't construct a Lua array from JS-side any
+ *  other way without a marshalling shim. */
+function paramsTableLiteral(params: ReadonlyArray<number>): string {
+    if (params.length === 0) return '{}';
+    return '{' + params.map(p => Number.isFinite(p) ? String(p) : '0').join(',') + '}';
+}
+
+/** widgetHandler:UnitCommand(unitID, unitDefID, unitTeam, cmdID,
+ *  cmdParams, cmdOpts, cmdTag, playerID, fromSynced, fromLua) — fires
+ *  after the engine has added a command to a unit's queue. ZK
+ *  cawidgets accepts both the short (cmdTag only) and long form;
+ *  the worker emits the long form so widgets that read the optional
+ *  trailing args still get correct values. */
+function dispatchUnitCommand(
+    unitId: number, defId: number, team: number,
+    cmdId: number, params: ReadonlyArray<number>, options: number, tag: number,
+    playerId: number, fromSynced: boolean, fromLua: boolean,
+): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.UnitCommand then
+            pcall(widgetHandler.UnitCommand, widgetHandler,
+                ${unitId}, ${defId}, ${team},
+                ${cmdId}, ${paramsTableLiteral(params)}, ${options}, ${tag},
+                ${playerId}, ${fromSynced ? 'true' : 'false'}, ${fromLua ? 'true' : 'false'})
+        end
+    `, 'dispatchUnitCommand');
+}
+
+/** widgetHandler:UnitCmdDone(unitID, unitDefID, unitTeam, cmdID,
+ *  cmdParams, cmdOpts, cmdTag) — fires when a queued command
+ *  completes or is cleared from a unit's queue. ZK `cmd_keep_target`
+ *  uses it to know when to forget the target state it cached on
+ *  UnitCommand. */
+function dispatchUnitCmdDone(
+    unitId: number, defId: number, team: number,
+    cmdId: number, params: ReadonlyArray<number>, options: number, tag: number,
+): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.UnitCmdDone then
+            pcall(widgetHandler.UnitCmdDone, widgetHandler,
+                ${unitId}, ${defId}, ${team},
+                ${cmdId}, ${paramsTableLiteral(params)}, ${options}, ${tag})
+        end
+    `, 'dispatchUnitCmdDone');
+}
+
 function dispatchCommandsChanged(): void {
     if (!runtime) return;
     // Spring exposes the union of every selected unit's cmd-descs as
@@ -4485,6 +4535,29 @@ self.onmessage = async (e: MessageEvent) => {
                     dispatchUnitTaken(e.unitId, e.unitDefId, e.oldTeam, e.newTeam);
                 } else if (e.kind === 'given') {
                     dispatchUnitGiven(e.unitId, e.unitDefId, e.oldTeam, e.newTeam);
+                }
+            }
+            break;
+        }
+
+        case 'unitCommand': {
+            const events = msg.events as Array<{
+                kind: 'issued' | 'done';
+                unitId: number; unitDefId: number; unitTeam: number;
+                cmdId: number; params: number[]; options: number; tag: number;
+                playerId: number; fromSynced: boolean; fromLua: boolean;
+            }> | undefined;
+            if (!events || !runtime) break;
+            for (const e of events) {
+                if (e.kind === 'issued') {
+                    dispatchUnitCommand(
+                        e.unitId, e.unitDefId, e.unitTeam,
+                        e.cmdId, e.params, e.options, e.tag,
+                        e.playerId, e.fromSynced, e.fromLua);
+                } else {
+                    dispatchUnitCmdDone(
+                        e.unitId, e.unitDefId, e.unitTeam,
+                        e.cmdId, e.params, e.options, e.tag);
                 }
             }
             break;

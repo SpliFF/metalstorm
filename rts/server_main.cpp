@@ -2290,6 +2290,40 @@ int main(int argc, char* argv[])
             }
         }
 
+        // Unit command events — synced UnitCommand / UnitCmdDone
+        // callins. Filtered per-session to ally teams: a player only
+        // sees commands on units they're allowed to observe (own team
+        // + alliance). Spectators with team < 0 see every event.
+        // Drained once per tick regardless of subscribers.
+        if (unitCommandEvents != nullptr) {
+            auto cmdEvents = unitCommandEvents->Drain();
+            if (!cmdEvents.empty() && rtcServer.GetClientCount() > 0) {
+                sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+                    std::vector<UnitCommandEventData> filtered;
+                    filtered.reserve(cmdEvents.size());
+                    for (const auto& e : cmdEvents) {
+                        if (session.team < 0) {
+                            // Spectator — sees everything.
+                            filtered.push_back(e);
+                            continue;
+                        }
+                        if (!teamHandler.IsValidTeam(static_cast<int>(e.unitTeam)))
+                            continue;
+                        if (teamHandler.AlliedTeams(
+                                session.team, static_cast<int>(e.unitTeam)))
+                        {
+                            filtered.push_back(e);
+                        }
+                    }
+                    if (filtered.empty()) return;
+                    auto msg = Protocol::BuildUnitCommandBatch(filtered);
+                    if (!msg.empty()) {
+                        rtcServer.SendReliable(clientId, msg.data(), msg.size());
+                    }
+                });
+            }
+        }
+
         // Per-allyteam LOS bitmap stream (envelope 0x07). Sent 1 Hz
         // per session; each player gets their own ally team's bitmap.
         // Spectators receive every ally team's bitmap, round-robin
