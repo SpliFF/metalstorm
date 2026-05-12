@@ -128,6 +128,104 @@ table PathRequestCancel {
     request_id: uint32;
 }
 
+// ============================================================
+// Standing orders (PLAN-orders.md "Standing Orders" section)
+//
+// High-level strategic directives that apply to *any* squad matching
+// their conditions, not to specific units. The server's standing-order
+// manager evaluates these periodically (every N sim ticks) and assigns
+// matching idle squads to issue concrete CCommandAI orders. Player-
+// issued direct commands always take precedence — a directly commanded
+// squad leaves the standing-order pool until it becomes idle again.
+// ============================================================
+
+/// Type tag for a standing order. The `params: [float]` payload's
+/// meaning is determined by this value:
+///   DefendArea  → [x, y, z, radius]
+///   PatrolRoute → [x1, y1, z1, x2, y2, z2, ...]    (N waypoints)
+///   RallyPoint  → [x, y, z]
+///   Fallback    → [x, y, z]
+///   Reinforce   → [x, y, z, friendlyCountThreshold]
+///   Screen      → [x1, y1, z1, x2, y2, z2]         (line endpoints)
+///   SupplyRoute → [x1, y1, z1, x2, y2, z2]         (source, sink)
+///   BuildBase   → [x, y, z, buildDefId, ...]       (loose schedule)
+enum StandingOrderType : uint8 {
+    DefendArea = 0,
+    PatrolRoute = 1,
+    RallyPoint = 2,
+    Fallback = 3,
+    Reinforce = 4,
+    Screen = 5,
+    SupplyRoute = 6,
+    BuildBase = 7,
+}
+
+/// Squad-match conditions. A squad qualifies if it matches every
+/// populated field. Zero-radius spatial filters are wildcards (the
+/// `*_center` field is then ignored).
+table StandingOrderConditions {
+    /// Only consider squads with an empty command queue. Default true —
+    /// directly commanded squads are off-limits for standing orders
+    /// until they finish their queue.
+    idle_only: bool = true;
+    /// Allowed unit def IDs. Empty = any.
+    squad_types: [uint16];
+    /// "Must be inside this circle" filter on the squad's mid-position.
+    within_radius_center: Vec3;
+    within_radius_radius: float = 0;
+    /// "Must be outside this circle" filter on the squad's mid-position.
+    outside_radius_center: Vec3;
+    outside_radius_radius: float = 0;
+    /// Minimum aggregate squad strength (HP × count). 0 = no minimum.
+    min_strength: float = 0;
+    /// Capability tags the squad must have, e.g. "build", "repair",
+    /// "scout". Resolution against unit defs is server-side and may be
+    /// game-specific (Lua callback or unit-def category lookup).
+    has_capabilities: [string];
+}
+
+/// Client → Server: create a new standing order owned by the
+/// authenticated session's team. Server assigns an `order_id`,
+/// broadcasts the resulting StandingOrderState to all sessions whose
+/// allied-team view includes the owner team, and begins evaluation on
+/// the next standing-order tick.
+table StandingOrderCreate {
+    sequence: uint32;           // Mirrors PlayerCommand.sequence space
+    type: StandingOrderType;
+    /// 0..100. Higher = wins ties when multiple orders compete for the
+    /// same idle squad. See PLAN-orders.md "Standing Order Assignment
+    /// Priority" for the full tie-break ladder.
+    priority: uint8;
+    params: [float];
+    conditions: StandingOrderConditions;
+    /// 0 = no expiry. Otherwise the order auto-removes itself this
+    /// many sim frames after creation.
+    expires_in_frames: uint32;
+}
+
+/// Client → Server: modify an existing standing order. Fields are
+/// applied wholesale — the client must send the full conditions struct
+/// even when only one field changed. `order_id` must match a standing
+/// order owned by the authenticated session's team; the server rejects
+/// cross-team edits with a 403 ServerError.
+table StandingOrderUpdate {
+    sequence: uint32;
+    order_id: uint32;
+    priority: uint8;
+    params: [float];
+    conditions: StandingOrderConditions;
+    /// false = pause evaluation (order is preserved but no new squads
+    /// are assigned, existing assignments are released).
+    active: bool = true;
+}
+
+/// Client → Server: remove a standing order. Releases all assigned
+/// squads back to the idle pool. Same team-ownership rules as Update.
+table StandingOrderRemove {
+    sequence: uint32;
+    order_id: uint32;
+}
+
 table Ping {
     client_time: uint64;
 }
@@ -362,6 +460,9 @@ union ClientPayload {
     SelectionState,
     PathRequest,
     PathRequestCancel,
+    StandingOrderCreate,
+    StandingOrderUpdate,
+    StandingOrderRemove,
 }
 
 table ClientMessage {
@@ -1603,6 +1704,41 @@ table PathResponse {
     length: float;
 }
 
+/// Server → Client: per-standing-order snapshot of state visible to
+/// this client. Fields not derivable from the original Create message:
+///   - order_id   server-assigned, stable for the lifetime of the order
+///   - owner_team team that issued the order
+///   - assigned_squad_count   number of squads currently working it
+///   - created_at_frame       sim frame when the order was created
+///   - expires_at_frame       absolute sim frame the order auto-removes
+///                            (0 = no expiry)
+table StandingOrderInfo {
+    order_id: uint32;
+    owner_team: uint8;
+    type: StandingOrderType;
+    priority: uint8;
+    params: [float];
+    conditions: StandingOrderConditions;
+    assigned_squad_count: uint16;
+    active: bool = true;
+    expires_at_frame: uint32;
+    created_at_frame: uint32;
+}
+
+/// Server → Client: snapshot of all standing orders the client is
+/// allowed to see. Filtering rules:
+///   - Always include orders owned by the client's team.
+///   - Include allied-team orders (allies see each other's plans).
+///   - Enemy orders are never sent.
+/// Sent on any standing-order state change (create / update / remove /
+/// assignment-count change), NOT per-tick. The assigned_squad_count
+/// field on each StandingOrderInfo updates only when a squad is added
+/// or released — squad churn under a stable count does not push a
+/// snapshot.
+table StandingOrderState {
+    orders: [StandingOrderInfo];
+}
+
 // Union of all server→client message types
 union ServerPayload {
     AuthResponse,
@@ -1640,6 +1776,7 @@ union ServerPayload {
     UnitArmoredUpdate,
     UnitLifecycleBatch,
     PathResponse,
+    StandingOrderState,
 }
 
 table ServerMessage {

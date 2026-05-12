@@ -36,6 +36,9 @@ import { RoomSetStartPos, RoomSetStartPosT } from '../spring-web/room-set-start-
 import { RoomStartGame, RoomStartGameT } from '../spring-web/room-start-game.js';
 import { RoomTeamSelect, RoomTeamSelectT } from '../spring-web/room-team-select.js';
 import { SelectionState, SelectionStateT } from '../spring-web/selection-state.js';
+import { StandingOrderCreate, StandingOrderCreateT } from '../spring-web/standing-order-create.js';
+import { StandingOrderRemove, StandingOrderRemoveT } from '../spring-web/standing-order-remove.js';
+import { StandingOrderUpdate, StandingOrderUpdateT } from '../spring-web/standing-order-update.js';
 import { ViewportUpdate, ViewportUpdateT } from '../spring-web/viewport-update.js';
 
 
@@ -124,7 +127,7 @@ unpackTo(_o: ClientMessageT): void {
 export class ClientMessageT implements flatbuffers.IGeneratedObject {
 constructor(
   public payloadType: ClientPayload = ClientPayload.NONE,
-  public payload: AIListRequestT|AckT|AuthRequestT|ChatSendT|ConsoleCommandT|GameListRequestT|HandshakeT|LogIngestT|LogSubscribeT|LogUnsubscribeT|LuaRulesMsgT|PathRequestCancelT|PathRequestT|PingT|PlayerCommandBatchT|PlayerCommandT|ReconnectRequestT|RoomAddAIT|RoomCloseRoomT|RoomCreateT|RoomEndGameT|RoomJoinT|RoomKickT|RoomLeaveT|RoomReadyT|RoomRemoveAIT|RoomSetAITeamT|RoomSetStartPosT|RoomStartGameT|RoomTeamSelectT|SelectionStateT|ViewportUpdateT|null = null
+  public payload: AIListRequestT|AckT|AuthRequestT|ChatSendT|ConsoleCommandT|GameListRequestT|HandshakeT|LogIngestT|LogSubscribeT|LogUnsubscribeT|LuaRulesMsgT|PathRequestCancelT|PathRequestT|PingT|PlayerCommandBatchT|PlayerCommandT|ReconnectRequestT|RoomAddAIT|RoomCloseRoomT|RoomCreateT|RoomEndGameT|RoomJoinT|RoomKickT|RoomLeaveT|RoomReadyT|RoomRemoveAIT|RoomSetAITeamT|RoomSetStartPosT|RoomStartGameT|RoomTeamSelectT|SelectionStateT|StandingOrderCreateT|StandingOrderRemoveT|StandingOrderUpdateT|ViewportUpdateT|null = null
 ){}
 
 
