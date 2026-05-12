@@ -975,6 +975,22 @@ async function init(
                 default:            return undefined;
             }
         },
+        getUnitDefFootprint: (defId) => {
+            const d = unitDefMap.get(defId);
+            if (!d) return undefined;
+            const flags = d.flags ?? 0;
+            // Flag bit 1 = canMove (see buildLuaUnitDef above); a def is
+            // mobile if it has movement. Air units (bit 13) are also
+            // mobile but never block ground squares — treat them as
+            // non-blocking for build tests by reporting isMobile=true so
+            // the caller can choose to skip air-unit overlap entirely.
+            const canMove = (flags & (1 << 1)) !== 0;
+            return {
+                xsize: d.xsize ?? 0,
+                zsize: d.zsize ?? 0,
+                isMobile: canMove,
+            };
+        },
         setActiveCommand: (cmdId, mods) => {
             postToMain({ type: 'setActiveCommand', cmdId, mods });
         },
@@ -3484,6 +3500,12 @@ function dispatchCommandsChanged(): void {
     // shows both their build options. Picking only sel[1] used to hide
     // half the options in mixed-builder selections; dedupe by cmd id so
     // a build available on two units doesn't double up.
+    //
+    // After merging, defer to ZK's installed `LayoutButtons` global (set
+    // by widgetHandler:ConfigLayoutHandler from cmd_layout_handler.lua).
+    // The handler may inject custom commands (page-num button, build-
+    // queue strip), reorder, or override params — without this hook the
+    // integral menu's special buttons never appear.
     runtime.doString(`
         if widgetHandler then
             local sel = Spring.GetSelectedUnits()
@@ -3503,8 +3525,53 @@ function dispatchCommandsChanged(): void {
                     end
                 end
             end
-            widgetHandler.commands = merged
-            widgetHandler.commands.n = #merged
+
+            local commands = merged
+            local cmdCount = #merged
+
+            if type(_G.LayoutButtons) == "function" then
+                local ok, menuName, xIcons, yIcons,
+                      removeCmds, customCmds, onlyTexCmds, reTexCmds,
+                      reNamedCmds, reTooltipCmds, reParamsCmds, iconList
+                    = pcall(_G.LayoutButtons, 0, 0, cmdCount, commands)
+
+                if ok then
+                    -- LayoutButtons may have mutated widgetHandler.commands
+                    -- in-place (cmd_layout_handler.lua does exactly this).
+                    -- Trust the handler's authoritative copy if present.
+                    if type(widgetHandler.commands) == "table" then
+                        commands = widgetHandler.commands
+                    end
+
+                    if type(customCmds) == "table" then
+                        widgetHandler.customCommands = widgetHandler.customCommands or {}
+                        for i = 1, #customCmds do
+                            widgetHandler.customCommands[#widgetHandler.customCommands + 1] = customCmds[i]
+                        end
+                    end
+
+                    if type(reParamsCmds) == "table" and type(widgetHandler.customCommands) == "table" then
+                        for descID, paramsArr in pairs(reParamsCmds) do
+                            for i = 1, #widgetHandler.customCommands do
+                                if widgetHandler.customCommands[i].cmdDescID == descID then
+                                    widgetHandler.customCommands[i].params = paramsArr
+                                    break
+                                end
+                            end
+                        end
+                    end
+                    -- menuName / xIcons / yIcons / removeCmds / onlyTexCmds /
+                    -- reTexCmds / reNamedCmds / reTooltipCmds / iconList
+                    -- target Spring's native command panel, which we don't
+                    -- render — chili re-derives its own layout.
+                else
+                    Spring.Log("LuaUI", LOG.WARNING,
+                        "[LayoutButtons] handler errored: " .. tostring(menuName))
+                end
+            end
+
+            widgetHandler.commands = commands
+            widgetHandler.commands.n = #commands
             widgetHandler:CommandsChanged()
         end
     `, 'dispatchCommandsChanged');

@@ -93,6 +93,15 @@ export interface SpringAPIContext {
      */
     getUnitDefSensorRadius?(defId: number, type: string): number | undefined;
     /**
+     * Look up a unit-def's footprint dimensions in build squares (8 elmos
+     * per square). Used by `Spring.TestBuildOrder` and `Spring.Pos2BuildPos`
+     * for client-side placement checks. Also reports whether the def is
+     * mobile (has movement type) — TestBuildOrder distinguishes mobile-
+     * blocking from terrain-blocking. Returns `undefined` if the def
+     * isn't cached yet.
+     */
+    getUnitDefFootprint?(defId: number): { xsize: number; zsize: number; isMobile: boolean } | undefined;
+    /**
      * Per-allyteam radar position-error magnitude (in elmos). Matches
      * `Spring.GetAllyTeamRadarErrorSize`. Server-side this is the
      * baseline `radarErrorSize` multiplied by per-team modifiers; we
@@ -1703,6 +1712,103 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         },
         GetInvertQueueKey: () => false,
 
+        // Spring.TestBuildOrder(unitDefId, x, y, z, facing) → (status, featureId?)
+        // Client-side replica — see Spring's LuaSyncedRead::TestBuildOrder.
+        // Returns Lua's collapsed surface (Spring maps internal OPEN=3 →
+        // RECLAIMABLE=2 for backwards compat):
+        //   0 = blocked         (out of bounds or static building/feature in the way)
+        //   1 = occupied        (mobile unit footprint overlaps — could move out)
+        //   2 = buildable       (default; second return = featureID if a feature is overlapping)
+        // ZK widgets check either `~= 0` (any non-blocked) or `== 2`
+        // (fully buildable). Per-mouse-frame use means a server round-trip
+        // is unworkable; we approximate using `GameUnitDef` footprints +
+        // `ls.units` / `ls.features` AABB overlap.
+        TestBuildOrder: (defIdArg: LuaValue, xArg: LuaValue, _yArg: LuaValue, zArg: LuaValue, facingArg: LuaValue) => {
+            const defId = Number(defIdArg ?? 0) | 0;
+            if (defId <= 0) return 0;
+            const fp = ctx.getUnitDefFootprint?.(defId);
+            if (!fp || fp.xsize <= 0 || fp.zsize <= 0) {
+                // Def not yet cached — treat as buildable so the placement
+                // UI doesn't flash red on first hover before defs stream
+                // in. Worst case the server rejects the actual build order.
+                return 2;
+            }
+            const facing = (Number(facingArg ?? ls.buildFacing) | 0) & 3;
+            // facing 1 (east) and 3 (west) rotate the footprint 90°.
+            const xsize = (facing & 1) === 0 ? fp.xsize : fp.zsize;
+            const zsize = (facing & 1) === 0 ? fp.zsize : fp.xsize;
+
+            // Snap to build grid (matches Spring's Pos2BuildPos: even-
+            // footprint dims snap to the grid centre, odd dims snap to
+            // the grid corner). SQUARE_SIZE = 8 elmos; build squares are
+            // SQUARE_SIZE wide.
+            const SQ = ctx.squareSize || 8;
+            const halfX = xsize * SQ * 0.5;
+            const halfZ = zsize * SQ * 0.5;
+            const bx = snapBuildCoord(Number(xArg ?? 0), xsize, SQ);
+            const bz = snapBuildCoord(Number(zArg ?? 0), zsize, SQ);
+
+            // Out-of-map: any part of the footprint outside the world AABB
+            // is BUILDSQUARE_BLOCKED (matches Spring's mapDims check).
+            if (bx - halfX < 0 || bx + halfX > ctx.mapSizeX ||
+                bz - halfZ < 0 || bz + halfZ > ctx.mapSizeZ) {
+                return 0;
+            }
+
+            // Unit overlap check — distinguish mobile (OCCUPIED=1) from
+            // static (BLOCKED=0). Air units (isMobile=true with no ground
+            // footprint) would be treated as mobile-blocking by the
+            // approximation below; for now this is close enough — Spring
+            // itself filters air units out of the ground block map, so
+            // false-positives are rare in practice.
+            for (const u of ls.units.values()) {
+                if (u.defId === 0) continue;
+                const otherFp = ctx.getUnitDefFootprint?.(u.defId);
+                if (!otherFp) continue;
+                const oHalfX = otherFp.xsize * SQ * 0.5;
+                const oHalfZ = otherFp.zsize * SQ * 0.5;
+                if (Math.abs(u.x - bx) < halfX + oHalfX &&
+                    Math.abs(u.z - bz) < halfZ + oHalfZ) {
+                    return otherFp.isMobile ? 1 : 0;
+                }
+            }
+
+            // Feature overlap — Spring distinguishes reclaimable features
+            // (return 2 with featureID) from non-reclaimable. We don't
+            // stream feature-def blocking flags to the worker yet, so
+            // we treat every overlapping feature as reclaimable and
+            // surface its ID. Most map features are wrecks/rocks which
+            // *are* reclaimable in ZK, so the approximation is reasonable.
+            // The 8-elmo half-extent is a rough placeholder — proper
+            // footprint plumbing for features needs FeatureDef.xsize/zsize
+            // on the wire.
+            for (const f of ls.features.values()) {
+                const FH = SQ; // half-extent in elmos for a 1x1 feature
+                if (Math.abs(f.x - bx) < halfX + FH &&
+                    Math.abs(f.z - bz) < halfZ + FH) {
+                    return [2, f.defId];
+                }
+            }
+
+            return 2;
+        },
+
+        // Spring.Pos2BuildPos(unitDefId, x, y, z, facing?) — snaps a
+        // position to the build grid using the def's footprint. Returns
+        // the snapped (x, y, z).
+        Pos2BuildPos: (defIdArg: LuaValue, xArg: LuaValue, _yArg: LuaValue, zArg: LuaValue, facingArg: LuaValue) => {
+            const defId = Number(defIdArg ?? 0) | 0;
+            const fp = defId > 0 ? ctx.getUnitDefFootprint?.(defId) : undefined;
+            const facing = (Number(facingArg ?? 0) | 0) & 3;
+            const xsize = !fp ? 1 : ((facing & 1) === 0 ? fp.xsize : fp.zsize);
+            const zsize = !fp ? 1 : ((facing & 1) === 0 ? fp.zsize : fp.xsize);
+            const SQ = ctx.squareSize || 8;
+            const bx = snapBuildCoord(Number(xArg ?? 0), xsize, SQ);
+            const bz = snapBuildCoord(Number(zArg ?? 0), zsize, SQ);
+            const by = sampleHeight(ctx, bx, bz);
+            return [bx, by, bz];
+        },
+
         // --- Ground extremes ---
         GetGroundExtremes: () => [ctx.minHeight, ctx.maxHeight],
 
@@ -2261,13 +2367,6 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             return [Math.asin(-dy / len), Math.atan2(dx, dz), 0];
         },
 
-        // --- Pos to build grid ---
-        Pos2BuildPos: (_unitDefId: LuaValue, x: LuaValue, _y: LuaValue, z: LuaValue) => {
-            // Snap to grid (squareSize = 8 typically)
-            const sq = ctx.squareSize || 8;
-            return [Math.floor(Number(x) / sq) * sq + sq / 2, 0, Math.floor(Number(z) / sq) * sq + sq / 2];
-        },
-
         // --- View range ---
         GetViewRange: () => ls.camera.far,
 
@@ -2579,6 +2678,25 @@ function computeGroundNormal(ctx: SpringAPIContext, x: number, z: number): [numb
     const ix = nx / len, iy = ny / len, iz = nz / len;
     // Slope = 1 - dot(normal, up) — a flat surface returns 0.
     return [ix, iy, iz, 1 - iy];
+}
+
+/**
+ * Snap a world-space coordinate to the build grid for a unit with the
+ * given footprint size (in build squares). Mirrors Spring's
+ * `Pos2BuildPos`: even-footprint dims align to the SQ-grid corners
+ * (multiples of SQ), odd dims align to the SQ-grid centres (multiples
+ * of SQ offset by SQ/2). This guarantees the rendered footprint covers
+ * an integral number of build squares regardless of cursor pixel jitter.
+ */
+function snapBuildCoord(coord: number, footprint: number, sq: number): number {
+    if (footprint <= 0) return coord;
+    // Spring's actual formula (BuildInfo::Pos2BuildPos):
+    //   if (footprint & 1) coord = floor(coord / sq) * sq + sq/2;  // odd → centre
+    //   else               coord = floor((coord + sq/2) / sq) * sq; // even → corner
+    if ((footprint & 1) !== 0) {
+        return Math.floor(coord / sq) * sq + sq * 0.5;
+    }
+    return Math.floor((coord + sq * 0.5) / sq) * sq;
 }
 
 /**
