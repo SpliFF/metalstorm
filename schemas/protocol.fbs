@@ -91,6 +91,43 @@ table ViewportUpdate {
     zoom_level: float;
 }
 
+/// Client → Server: ask the server's IPathManager to compute a path.
+/// Mirrors Spring's native `Spring.PathRequest(moveType, sx, sy, sz, ex, ey,
+/// ez, radius)` Lua API but routed through the network. The server replies
+/// with a `PathResponse` carrying the full waypoint list — typically on
+/// the same sim tick, since `IPathManager::RequestPath` returns
+/// synchronously for HAPFS and within ~1 tick for QTPFS. `request_id` is
+/// client-assigned and must be unique per session; client-side widget
+/// code keys path results by this id so concurrent requests don't
+/// collide.
+///
+/// `move_type` matches `MoveDef::pathType` (resolved via
+/// `UnitDefs[unitDefID].moveDef.id` on the client). Air units have no
+/// move def — widgets must skip the request entirely rather than send a
+/// 0 move type.
+table PathRequest {
+    request_id: uint32;
+    start: Vec3;
+    end: Vec3;
+    /// Index into the server's MoveDefHandler (`MoveDef::pathType`).
+    /// Different unit types take different routes — a kbot can climb
+    /// hills a tank can't.
+    move_type: uint32;
+    /// Search radius around `end` — if the exact end is unreachable,
+    /// accept any reachable point within this distance. Spring's
+    /// default is 8.0 elmos.
+    goal_radius: float;
+}
+
+/// Client → Server: abort a pending request. Sent on `widget:Shutdown`
+/// or when a widget no longer cares about the result (e.g. the player
+/// cancelled the build queue that triggered the path preview). Server
+/// drops the request if it's still pending, ignores it otherwise.
+/// Abandoned requests age out after 5 seconds server-side regardless.
+table PathRequestCancel {
+    request_id: uint32;
+}
+
 table Ping {
     client_time: uint64;
 }
@@ -323,6 +360,8 @@ union ClientPayload {
     LuaRulesMsg,
     PlayerCommandBatch,
     SelectionState,
+    PathRequest,
+    PathRequestCancel,
 }
 
 table ClientMessage {
@@ -1546,6 +1585,24 @@ table UnitLifecycleBatch {
     events: [UnitLifecycleEvent];
 }
 
+/// Server → Client: result of a `PathRequest`. The `request_id` matches
+/// the one the client supplied. `waypoints` is the full path from
+/// `start` to (a point within `goal_radius` of) `end`; empty if no
+/// path was found within the requested constraints. `length` is the
+/// total path length in elmos — useful for build-time estimates and
+/// "is target reachable" checks (compare against straight-line
+/// distance + builder range).
+///
+/// Send-exactly-once semantics: every PathRequest produces exactly one
+/// PathResponse, even on failure (with empty `waypoints`). After
+/// PathResponse, the corresponding server-side path is released — the
+/// client must request a fresh path for any future query.
+table PathResponse {
+    request_id: uint32;
+    waypoints: [Vec3];
+    length: float;
+}
+
 // Union of all server→client message types
 union ServerPayload {
     AuthResponse,
@@ -1582,6 +1639,7 @@ union ServerPayload {
     UnitStockpileUpdate,
     UnitArmoredUpdate,
     UnitLifecycleBatch,
+    PathResponse,
 }
 
 table ServerMessage {

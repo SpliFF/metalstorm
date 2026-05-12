@@ -51,6 +51,8 @@
 #include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Units/CommandAI/Command.h"
 #include "Sim/Misc/GlobalConstants.h"
+#include "Sim/MoveTypes/MoveDefHandler.h"
+#include "Sim/Path/IPathManager.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/Wind.h"
 #include "Game/Players/PlayerHandler.h"
@@ -1394,6 +1396,81 @@ int main(int argc, char* argv[])
                             session->selectedUnits.insert(ids->Get(i));
                         }
                     }
+                    break;
+                }
+                case SpringWeb::ClientPayload_PathRequest: {
+                    // Honour the client's `Spring.PathRequest` call by
+                    // routing through the sim's IPathManager. The path
+                    // manager is sim-thread-local; this case runs on the
+                    // sim thread (network messages drain inside the
+                    // simulation step), so direct calls are safe.
+                    //
+                    // We compute the path synchronously (HAPFS is fully
+                    // sync; QTPFS may need 1-2 extra ticks but
+                    // GetPathWayPoints returns whatever is ready) and
+                    // immediately release the path with DeletePath —
+                    // long-lived paths aren't needed here because the
+                    // client caches waypoints in its own
+                    // request_id → response map. Spring's `:Next()`
+                    // semantics are emulated client-side by walking the
+                    // cached waypoint list.
+                    auto* session = sessions.GetSession(msg.clientId);
+                    if (!session) break;
+                    auto* req = clientMsg->payload_as_PathRequest();
+                    if (!req) break;
+                    const uint32_t requestId = req->request_id();
+                    const auto* startVec = req->start();
+                    const auto* endVec = req->end();
+                    if (!startVec || !endVec) {
+                        auto resp = Protocol::BuildPathResponse(requestId, {}, 0.0f);
+                        rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
+                        break;
+                    }
+                    const float3 start(startVec->x(), startVec->y(), startVec->z());
+                    const float3 end(endVec->x(), endVec->y(), endVec->z());
+                    const unsigned int moveType = req->move_type();
+                    const float radius = req->goal_radius() > 0.0f
+                        ? req->goal_radius() : 8.0f;
+
+                    std::vector<float3> waypoints;
+                    float length = 0.0f;
+                    if (pathManager != nullptr &&
+                        moveType < moveDefHandler.GetNumMoveDefs())
+                    {
+                        const MoveDef* moveDef =
+                            moveDefHandler.GetMoveDefByPathType(moveType);
+                        if (moveDef != nullptr) {
+                            // Unsynced request — widgets/UI must not
+                            // mutate the path manager's synced state.
+                            const unsigned int pathID =
+                                pathManager->RequestPath(
+                                    nullptr, moveDef, start, end,
+                                    radius, /*synced=*/false);
+                            if (pathID != 0) {
+                                std::vector<int> starts;
+                                pathManager->GetPathWayPoints(
+                                    pathID, waypoints, starts);
+                                for (size_t i = 1; i < waypoints.size(); ++i) {
+                                    const float3 d = waypoints[i] - waypoints[i - 1];
+                                    length += d.Length();
+                                }
+                                pathManager->DeletePath(pathID);
+                            }
+                        }
+                    }
+
+                    auto resp = Protocol::BuildPathResponse(
+                        requestId, waypoints, length);
+                    rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
+                    break;
+                }
+                case SpringWeb::ClientPayload_PathRequestCancel: {
+                    // No-op: paths are computed synchronously inside
+                    // ClientPayload_PathRequest and released
+                    // immediately, so there is nothing to cancel. The
+                    // cancel envelope still rides through the protocol
+                    // for forward compatibility (when QTPFS is enabled
+                    // we may keep multi-tick searches pending).
                     break;
                 }
                 default:

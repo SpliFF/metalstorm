@@ -596,6 +596,26 @@ inline std::vector<uint8_t> BuildUnitLifecycleBatch(
         SpringWeb::ServerPayload_UnitLifecycleBatch, batch.Union());
 }
 
+/// Build a PathResponse for a single path request. `waypoints` may be
+/// empty if the path manager couldn't find a path; the response still
+/// fires so the client can release its pending-request slot.
+inline std::vector<uint8_t> BuildPathResponse(
+    uint32_t requestId,
+    const std::vector<float3>& waypoints,
+    float length)
+{
+    flatbuffers::FlatBufferBuilder fbb(64 + waypoints.size() * 12);
+    std::vector<SpringWeb::Vec3> wps;
+    wps.reserve(waypoints.size());
+    for (const float3& p : waypoints) {
+        wps.emplace_back(p.x, p.y, p.z);
+    }
+    auto wpsVec = fbb.CreateVectorOfStructs(wps);
+    auto resp = SpringWeb::CreatePathResponse(fbb, requestId, wpsVec, length);
+    return BuildServerMessage(fbb,
+        SpringWeb::ServerPayload_PathResponse, resp.Union());
+}
+
 /// Build a GameInfo message (map, game, speed, frame, paused, env state).
 inline std::vector<uint8_t> BuildGameInfo(
     const std::string& mapId, const std::string& gameId,
