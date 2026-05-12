@@ -702,6 +702,24 @@ int main(int argc, char* argv[])
 
     sim.Init(smfPath);
 
+    // Push a current StandingOrderState snapshot to one client. Used
+    // both from the live-change notifier (broadcast scope) and from
+    // the auth paths (one-shot snapshot to a freshly connected
+    // session, so mid-game joiners see existing orders without
+    // waiting for the next mutation).
+    auto pushStandingOrdersTo = [&](ClientID clientId, int team) {
+        if (team < 0) return;
+        std::vector<int> allied;
+        const int activeTeams = teamHandler.ActiveTeams();
+        for (int t = 0; t < activeTeams; ++t) {
+            if (t == team) continue;
+            if (teamHandler.AlliedTeams(team, t)) allied.push_back(t);
+        }
+        auto msg = Protocol::BuildStandingOrderState(
+            team, allied, standingOrders.GetAllOrders());
+        rtcServer.SendReliable(clientId, msg.data(), msg.size());
+    };
+
     // Standing-order broadcast hook. Fires whenever an order is
     // created / updated / removed / its assigned-count changes. Pushes
     // a StandingOrderState snapshot to every session whose viewer team
@@ -709,21 +727,13 @@ int main(int argc, char* argv[])
     // captures rtcServer + sessions + teamHandler by reference so it
     // sees the live values at notification time — safe because
     // notifications fire from the sim-tick path on the main thread.
-    standingOrders.SetChangeNotifier([&](int changedTeam) {
+    standingOrders.SetChangeNotifier([&, pushStandingOrdersTo](int changedTeam) {
         sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
             if (session.team < 0) return;
             // Skip sessions that can't see this team's orders.
             if (changedTeam != session.team &&
                 !teamHandler.AlliedTeams(session.team, changedTeam)) return;
-            std::vector<int> allied;
-            const int activeTeams = teamHandler.ActiveTeams();
-            for (int t = 0; t < activeTeams; ++t) {
-                if (t == session.team) continue;
-                if (teamHandler.AlliedTeams(session.team, t)) allied.push_back(t);
-            }
-            auto msg = Protocol::BuildStandingOrderState(
-                session.team, allied, standingOrders.GetAllOrders());
-            rtcServer.SendReliable(clientId, msg.data(), msg.size());
+            pushStandingOrdersTo(clientId, session.team);
         });
     });
 
@@ -1031,6 +1041,12 @@ int main(int argc, char* argv[])
                                 playerHandler.AddPlayer(p);
                                 clientPlayerNum[msg.clientId] = pNum;
                             }
+                            // One-shot standing-order snapshot so a
+                            // mid-game reconnect sees existing orders
+                            // immediately, without waiting for the
+                            // next mutation to trigger the broadcast
+                            // hook.
+                            pushStandingOrdersTo(msg.clientId, team);
                             SLOG(SPRING_LOG_NOTICE,
                                 "client %u reconnected as '%s' (id=%lld) team=%d",
                                 msg.clientId, reconnectUser->username.c_str(),
@@ -1135,6 +1151,13 @@ int main(int argc, char* argv[])
                         playerHandler.AddPlayer(p);
                         clientPlayerNum[msg.clientId] = pNum;
                     }
+                    // One-shot standing-order snapshot for the freshly
+                    // authenticated session — mirrors the reconnect
+                    // path above. Without this, mid-game joins
+                    // wouldn't see existing orders until the next
+                    // create / update / remove fired the broadcast
+                    // hook.
+                    pushStandingOrdersTo(msg.clientId, team);
                     SLOG(SPRING_LOG_NOTICE, "client %u authenticated as '%s' (id=%lld) team=%d",
                         msg.clientId, username, user->id, team);
 
