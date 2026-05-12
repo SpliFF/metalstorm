@@ -46,6 +46,7 @@ const ORDER_BUTTONS: OrderButton[] = [
     { cmdId: CMD.MOVE,        label: 'Move',     glyph: 'M', tooltip: 'Move (M)',                       action: 'modal-ground' },
     { cmdId: CMD.STOP,        label: 'Stop',     glyph: 'S', tooltip: 'Stop (S)',                       action: 'instant', params: [] },
     { cmdId: CMD.ATTACK,      label: 'Attack',   glyph: 'A', tooltip: 'Attack target (A) — right-click target', action: 'modal-either' },
+    { cmdId: CMD.AREA_ATTACK, label: 'AreaAtk',  glyph: 'A⌖',tooltip: 'Area attack — left-drag to set centre + radius', action: 'modal-ground' },
     { cmdId: CMD.FIGHT,       label: 'Fight',    glyph: 'F', tooltip: 'Attack-move / Fight (F)',         action: 'modal-ground' },
     { cmdId: CMD.PATROL,      label: 'Patrol',   glyph: 'P', tooltip: 'Patrol (P) — shift to chain waypoints', action: 'modal-ground' },
     { cmdId: CMD.GUARD,       label: 'Guard',    glyph: 'G', tooltip: 'Guard (G) — escort a friendly unit', action: 'modal-unit' },

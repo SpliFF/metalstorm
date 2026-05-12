@@ -279,6 +279,27 @@ export class InputManager {
         this.buildSpacing = Math.max(0, n | 0);
     }
 
+    /// Active AREA_ATTACK drag, if any. Captured on left-down while
+    /// `pendingCmd === CMD.AREA_ATTACK`; mousemove updates the radius,
+    /// left-up commits CMD.AREA_ATTACK with params [x, y, z, radius].
+    /// previewRing is recreated each frame as the radius changes (cheap
+    /// at pointermove frequency; avoids the mesh-resize plumbing for a
+    /// short-lived gesture).
+    private areaAttackDrag: {
+        centerX: number;
+        centerY: number;
+        centerZ: number;
+        radius: number;
+        shift: boolean;
+        previewRing: Mesh | null;
+    } | null = null;
+    /// Minimum and maximum AREA_ATTACK radius in elmos. The cursor lives
+    /// in world space, so the radius scales with drag distance directly.
+    /// Floor at 16 elmos (= 1 build square) so a click without drag still
+    /// resolves to a tiny but valid area attack.
+    private static readonly AREA_ATTACK_MIN_RADIUS = 16;
+    private static readonly AREA_ATTACK_MAX_RADIUS = 4096;
+
     // Build placement state — non-null while the player has clicked a build
     // button and is choosing a ground location. Cancelled by ESC, right-click,
     // selection change, or a successful left-click placement (unless shift is
@@ -940,6 +961,22 @@ export class InputManager {
             }
             return;
         }
+
+        // AREA_ATTACK modal: left-down captures the centre, drag sets
+        // the radius, left-up commits. Right-click cancels (handled in
+        // issueOrderAtScreen via the existing pendingCmd unwind).
+        if (this.pendingCmd === CMD.AREA_ATTACK) {
+            const groundPos = this.pickGroundAt(evt.clientX, evt.clientY);
+            if (groundPos && this.selectedIds.length > 0) {
+                this.startAreaAttackDrag(groundPos, evt);
+                this.dragActive = true;
+                this.dragStartX = evt.clientX;
+                this.dragStartY = evt.clientY;
+                this.dragCurX = evt.clientX;
+                this.dragCurY = evt.clientY;
+            }
+            return;
+        }
         this.dragActive = true;
         this.dragStartX = evt.clientX;
         this.dragStartY = evt.clientY;
@@ -996,6 +1033,10 @@ export class InputManager {
             this.updateBuildDrag(evt);
             return;
         }
+        if (this.areaAttackDrag) {
+            this.updateAreaAttackDrag(evt);
+            return;
+        }
         const dx = this.dragCurX - this.dragStartX;
         const dy = this.dragCurY - this.dragStartY;
         if (Math.hypot(dx, dy) >= DRAG_THRESHOLD_PX) {
@@ -1014,6 +1055,11 @@ export class InputManager {
 
         if (this.buildDrag) {
             this.commitBuildDrag(evt);
+            return;
+        }
+
+        if (this.areaAttackDrag) {
+            this.commitAreaAttackDrag(evt);
             return;
         }
 
@@ -1389,6 +1435,114 @@ export class InputManager {
         });
     }
 
+    // ---- Area-attack drag ----
+
+    /** Capture the centre point and modifier state for an AREA_ATTACK
+     *  drag. Caller has already verified pendingCmd is AREA_ATTACK and
+     *  the selection is non-empty. Radius starts at the floor (16
+     *  elmos = 1 build square) so a click-without-drag still resolves
+     *  to a valid mini-area attack. */
+    private startAreaAttackDrag(groundPos: Vector3, evt: PointerEvent): void {
+        this.areaAttackDrag = {
+            centerX: groundPos.x,
+            centerY: groundPos.y,
+            centerZ: groundPos.z,
+            radius: InputManager.AREA_ATTACK_MIN_RADIUS,
+            shift: evt.shiftKey,
+            previewRing: null,
+        };
+        this.renderAreaAttackRing();
+    }
+
+    /** Update the preview ring as the cursor moves. Radius is the
+     *  world-space distance from the captured centre to the current
+     *  ground point. Clamped at MIN to keep the ring visible even at
+     *  zero drag and at MAX to keep the ring mesh-resize cheap. */
+    private updateAreaAttackDrag(evt: PointerEvent): void {
+        const drag = this.areaAttackDrag;
+        if (!drag) return;
+        const groundPos = this.pickGroundAt(evt.clientX, evt.clientY);
+        if (!groundPos) return;
+        const dx = groundPos.x - drag.centerX;
+        const dz = groundPos.z - drag.centerZ;
+        const r = Math.hypot(dx, dz);
+        drag.radius = Math.min(
+            InputManager.AREA_ATTACK_MAX_RADIUS,
+            Math.max(InputManager.AREA_ATTACK_MIN_RADIUS, r),
+        );
+        this.renderAreaAttackRing();
+    }
+
+    /** Commit the AREA_ATTACK drag — emit one CMD.AREA_ATTACK with
+     *  params [x, y, z, radius] for the current selection. Shift held
+     *  at down-time queues the order behind any existing commands. */
+    private commitAreaAttackDrag(_evt: PointerEvent): void {
+        const drag = this.areaAttackDrag;
+        if (!drag) return;
+        drag.previewRing?.dispose();
+        this.areaAttackDrag = null;
+
+        if (this.selectedIds.length === 0) {
+            // Selection cleared mid-drag — cancel silently.
+            this.pendingCmd = null;
+            this.updateCursorMode();
+            return;
+        }
+
+        const opts = drag.shift ? OPT_SHIFT : 0;
+        this.commandBuffer.issueImmediate(
+            CMD.AREA_ATTACK,
+            this.selectedIds.slice(),
+            [drag.centerX, drag.centerY, drag.centerZ, drag.radius],
+            opts,
+        );
+
+        // Disarm the modal after commit (Spring's standard one-shot
+        // semantics — re-arm via the panel or hotkey for the next one).
+        this.pendingCmd = null;
+        this.updateCursorMode();
+    }
+
+    /** (Re)create the ground ring mesh for the current AREA_ATTACK
+     *  centre + radius. Babylon's CreateTorus gives a 3D ring; we
+     *  flatten its Y scale so it lies on the ground. Recreated each
+     *  pointermove — torus mesh-resize without rebuild requires
+     *  per-vertex updates we don't need for a short-lived gesture. */
+    private renderAreaAttackRing(): void {
+        const drag = this.areaAttackDrag;
+        if (!drag) return;
+        drag.previewRing?.dispose();
+
+        // Tessellation scales with radius so the ring stays smooth at
+        // large radii without burning vertices on small ones.
+        const tess = Math.max(24, Math.min(96, Math.floor(drag.radius / 24)));
+        const thickness = Math.max(2, drag.radius * 0.012);
+        const ring = MeshBuilder.CreateTorus(
+            'area-attack-ring',
+            {
+                diameter: drag.radius * 2,
+                thickness,
+                tessellation: tess,
+            },
+            this.scene,
+        );
+        ring.scaling.y = 0.15;
+        ring.position.set(drag.centerX, drag.centerY + 2, drag.centerZ);
+
+        const mat = new StandardMaterial('area-attack-ring-mat', this.scene);
+        mat.diffuseColor = new Color3(0, 0, 0);
+        mat.emissiveColor = new Color3(1.0, 0.25, 0.25);
+        mat.specularColor = new Color3(0, 0, 0);
+        mat.disableLighting = true;
+        mat.alpha = 0.7;
+        ring.material = mat;
+        ring.isPickable = false;
+        // depth-always so the ring stays visible across hills (matches
+        // the path-renderer / waypoint-marker convention).
+        ring.renderingGroupId = 3;
+        drag.previewRing = ring;
+    }
+
     // ---- Single click ----
 
     private handleSingleClick(evt: PointerEvent): void {
@@ -1683,6 +1837,12 @@ export class InputManager {
                 let consumed = false;
                 if (this.buildPlacement) {
                     this.cancelBuildPlacement();
+                    consumed = true;
+                }
+                if (this.areaAttackDrag) {
+                    this.areaAttackDrag.previewRing?.dispose();
+                    this.areaAttackDrag = null;
+                    this.dragActive = false;
                     consumed = true;
                 }
                 if (this.pendingCmd !== null) {
