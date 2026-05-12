@@ -1087,6 +1087,8 @@ int main(int argc, char* argv[])
         std::string gameId = HttpAuth::JsonField(body, "game");
         if (name.empty()) name = "Game";
         if (gameId.empty() && !availableGames.empty()) gameId = availableGames[0].id;
+        if (mapId.empty())
+            return HttpAuth::JsonResponse(400, R"({"error":"map is required"})");
 
         std::string persistStr = HttpAuth::JsonField(body, "persistent");
         bool persistent = (persistStr == "true" || persistStr == "1");
