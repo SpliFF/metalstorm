@@ -251,6 +251,10 @@ export interface LiveState {
     modKeys: { alt: boolean; ctrl: boolean; meta: boolean; shift: boolean };
     /** Build facing direction (0-3, NESW) */
     buildFacing: number;
+    /** Persistent-build spacing in build squares. Q/E in ZK; widget-local
+     *  setting persisted across the session. Spring's default is 0
+     *  (touching). */
+    buildSpacing: number;
     /** Features on the map (static, set once from MapData) */
     features: Map<number, FeatureEntry>;
     /** Game-scoped rules params (Spring.GetGameRulesParam). */
@@ -667,6 +671,7 @@ export function createDefaultLiveState(): LiveState {
         selectedUnitIds: [],
         modKeys: { alt: false, ctrl: false, meta: false, shift: false },
         buildFacing: 0,
+        buildSpacing: 0,
         features: new Map(),
         gameRulesParams: new Map(),
         teamRulesParams: new Map(),
@@ -1336,6 +1341,23 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             return u.heading > 32767 ? u.heading - 65536 : u.heading;
         },
 
+        // Spring's heading is a 16-bit signed integer where:
+        //   heading 0       = +Z (north),
+        //   heading 16384   = +X (east),
+        //   heading -32768  = -Z (south),
+        //   heading -16384  = -X (west).
+        // atan2(x, z) returns the angle from +Z toward +X in radians; map
+        // it onto the heading range via the SHORTINT_MAX/pi scale. Match
+        // Spring's flooring behaviour so widgets get the same integer.
+        GetHeadingFromVector: (x: LuaValue, z: LuaValue) => {
+            const angle = Math.atan2(Number(x ?? 0), Number(z ?? 0));
+            let h = Math.floor((angle * 32768) / Math.PI);
+            // Clamp into Spring's signed-short range
+            if (h > 32767) h = 32767;
+            else if (h < -32768) h = -32768;
+            return h;
+        },
+
         // --- Team resources ---
         // Spring returns: current, storage, pull, income, expense, share,
         // sent, received. The Spring engine also pads with `excess` and
@@ -1658,6 +1680,11 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         SetBuildFacing: (_facing: LuaValue) => {
             ls.buildFacing = Number(_facing ?? 0) % 4;
         },
+        GetBuildSpacing: () => ls.buildSpacing,
+        SetBuildSpacing: (n: LuaValue) => {
+            const v = Number(n ?? 0) | 0;
+            ls.buildSpacing = Math.max(0, v);
+        },
         GetInvertQueueKey: () => false,
 
         // --- Ground extremes ---
@@ -1763,6 +1790,33 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             const ids = ls.selectedUnitIds.slice();
             if (ids.length === 0) return false;
             ctx.giveOrder(Number(cmdId) | 0, ids, orderParamsToArray(params), orderOptionsToBits(options));
+            return true;
+        },
+        // Spring.GiveOrderArrayToUnitArray(unitIds, [orders]) issues every
+        // order in the list to every unit in the list. Each order entry is
+        // { cmdId, params, options } (sequence form). Widgets use this for
+        // batch state-change scripts (cmd_keep_target, cmd_select_load).
+        // We currently loop and send one PlayerCommand per order — atomic
+        // batching will arrive with PlayerCommandBatch (Phase 0a).
+        GiveOrderArrayToUnitArray: (unitIds: LuaValue, orders: LuaValue) => {
+            if (!ctx.giveOrder) return false;
+            const ids = orderUnitIdsToArray(unitIds);
+            if (ids.length === 0) return false;
+            if (!Array.isArray(orders) || orders.length === 0) return false;
+            for (const entry of orders) {
+                if (!entry || typeof entry !== 'object') continue;
+                const seq = entry as Record<string | number, LuaValue>;
+                // Accept both 1-indexed Lua sequences ({[1]=cmdId, [2]=params,
+                // [3]=options}) — which Fengari surfaces as Arrays — and
+                // keyed tables ({cmdId=..., params=..., options=...}).
+                const cmdId = Number(
+                    Array.isArray(entry) ? entry[0] : (seq.cmdId ?? seq[1])
+                ) | 0;
+                const params = Array.isArray(entry) ? entry[1] : (seq.params ?? seq[2]);
+                const options = Array.isArray(entry) ? entry[2] : (seq.options ?? seq[3]);
+                ctx.giveOrder(cmdId, ids, orderParamsToArray(params as LuaValue),
+                              orderOptionsToBits(options as LuaValue));
+            }
             return true;
         },
         // Order queue readers — all backed by ls.unitCommands. Spring
