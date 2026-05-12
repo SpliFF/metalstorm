@@ -702,6 +702,31 @@ int main(int argc, char* argv[])
 
     sim.Init(smfPath);
 
+    // Standing-order broadcast hook. Fires whenever an order is
+    // created / updated / removed / its assigned-count changes. Pushes
+    // a StandingOrderState snapshot to every session whose viewer team
+    // is allied with the team that owns the changed order. The hook
+    // captures rtcServer + sessions + teamHandler by reference so it
+    // sees the live values at notification time — safe because
+    // notifications fire from the sim-tick path on the main thread.
+    standingOrders.SetChangeNotifier([&](int changedTeam) {
+        sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+            if (session.team < 0) return;
+            // Skip sessions that can't see this team's orders.
+            if (changedTeam != session.team &&
+                !teamHandler.AlliedTeams(session.team, changedTeam)) return;
+            std::vector<int> allied;
+            const int activeTeams = teamHandler.ActiveTeams();
+            for (int t = 0; t < activeTeams; ++t) {
+                if (t == session.team) continue;
+                if (teamHandler.AlliedTeams(session.team, t)) allied.push_back(t);
+            }
+            auto msg = Protocol::BuildStandingOrderState(
+                session.team, allied, standingOrders.GetAllOrders());
+            rtcServer.SendReliable(clientId, msg.data(), msg.size());
+        });
+    });
+
     // --- Bake def cache for HTTP delivery ---
     //
     // After sim.Init the engine has parsed gamedata/defs.lua (with the
@@ -1567,6 +1592,114 @@ int main(int argc, char* argv[])
                     // cancel envelope still rides through the protocol
                     // for forward compatibility (when QTPFS is enabled
                     // we may keep multi-tick searches pending).
+                    break;
+                }
+                case SpringWeb::ClientPayload_StandingOrderCreate: {
+                    auto* session = sessions.GetSession(msg.clientId);
+                    if (!session || session->team < 0) {
+                        auto err = Protocol::BuildServerError(401, "Not authenticated");
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                        break;
+                    }
+                    auto* req = clientMsg->payload_as_StandingOrderCreate();
+                    if (!req) break;
+                    // One message token per standing-order mutation. No
+                    // order-token cost: standing orders don't fan out to
+                    // squads at the protocol level — the evaluator does.
+                    if (!SessionManager::TryConsumeCommandBudget(*session, 0)) {
+                        auto err = Protocol::BuildServerError(429, "Command rate limit exceeded");
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                        break;
+                    }
+                    if (req->sequence() <= session->lastCommandSeq && session->lastCommandSeq > 0) {
+                        auto err = Protocol::BuildServerError(400, "Stale command sequence");
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                        break;
+                    }
+                    session->lastCommandSeq = req->sequence();
+
+                    std::vector<float> params;
+                    if (auto* p = req->params()) {
+                        params.reserve(p->size());
+                        for (unsigned i = 0; i < p->size(); ++i) params.push_back(p->Get(i));
+                    }
+                    auto conds = Protocol::ReadStandingOrderConditions(req->conditions());
+                    const uint32_t id = standingOrders.Create(
+                        session->team,
+                        static_cast<StandingOrderType>(req->type()),
+                        req->priority(),
+                        std::move(params),
+                        std::move(conds),
+                        req->expires_in_frames(),
+                        static_cast<uint32_t>(sim.GetFrameNum()));
+                    SLOG(SPRING_LOG_DEBUG,
+                        "standing-order: client %u (%s, team=%d) created order %u type=%u priority=%u",
+                        msg.clientId, session->username.c_str(), session->team,
+                        id, static_cast<unsigned>(req->type()), req->priority());
+                    break;
+                }
+                case SpringWeb::ClientPayload_StandingOrderUpdate: {
+                    auto* session = sessions.GetSession(msg.clientId);
+                    if (!session || session->team < 0) {
+                        auto err = Protocol::BuildServerError(401, "Not authenticated");
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                        break;
+                    }
+                    auto* req = clientMsg->payload_as_StandingOrderUpdate();
+                    if (!req) break;
+                    if (!SessionManager::TryConsumeCommandBudget(*session, 0)) {
+                        auto err = Protocol::BuildServerError(429, "Command rate limit exceeded");
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                        break;
+                    }
+                    if (req->sequence() <= session->lastCommandSeq && session->lastCommandSeq > 0) {
+                        auto err = Protocol::BuildServerError(400, "Stale command sequence");
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                        break;
+                    }
+                    session->lastCommandSeq = req->sequence();
+
+                    std::vector<float> params;
+                    if (auto* p = req->params()) {
+                        params.reserve(p->size());
+                        for (unsigned i = 0; i < p->size(); ++i) params.push_back(p->Get(i));
+                    }
+                    auto conds = Protocol::ReadStandingOrderConditions(req->conditions());
+                    const bool ok = standingOrders.Update(
+                        req->order_id(), session->team,
+                        req->priority(), std::move(params), std::move(conds),
+                        req->active());
+                    if (!ok) {
+                        auto err = Protocol::BuildServerError(403, "Not owner of standing order");
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                    }
+                    break;
+                }
+                case SpringWeb::ClientPayload_StandingOrderRemove: {
+                    auto* session = sessions.GetSession(msg.clientId);
+                    if (!session || session->team < 0) {
+                        auto err = Protocol::BuildServerError(401, "Not authenticated");
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                        break;
+                    }
+                    auto* req = clientMsg->payload_as_StandingOrderRemove();
+                    if (!req) break;
+                    if (!SessionManager::TryConsumeCommandBudget(*session, 0)) {
+                        auto err = Protocol::BuildServerError(429, "Command rate limit exceeded");
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                        break;
+                    }
+                    if (req->sequence() <= session->lastCommandSeq && session->lastCommandSeq > 0) {
+                        auto err = Protocol::BuildServerError(400, "Stale command sequence");
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                        break;
+                    }
+                    session->lastCommandSeq = req->sequence();
+                    const bool ok = standingOrders.Remove(req->order_id(), session->team);
+                    if (!ok) {
+                        auto err = Protocol::BuildServerError(403, "Not owner of standing order");
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                    }
                     break;
                 }
                 default:

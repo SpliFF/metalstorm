@@ -16,6 +16,7 @@
 #include "UnitLifecycleCollector.h"
 #include "RoomManager.h"
 #include "MapMetadata.h"
+#include "StandingOrders.h"
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectileTypes.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
@@ -614,6 +615,106 @@ inline std::vector<uint8_t> BuildPathResponse(
     auto resp = SpringWeb::CreatePathResponse(fbb, requestId, wpsVec, length);
     return BuildServerMessage(fbb,
         SpringWeb::ServerPayload_PathResponse, resp.Union());
+}
+
+/// Build a StandingOrderState snapshot for one viewer team. Includes
+/// orders owned by the viewer's team plus orders owned by every team
+/// in `alliedTeams` (which should NOT include the viewer's own team —
+/// the caller supplies the union). Enemy orders are never included.
+/// Sent on any standing-order state change, never per-tick.
+inline std::vector<uint8_t> BuildStandingOrderState(
+    int viewerTeam,
+    const std::vector<int>& alliedTeams,
+    const std::vector<StandingOrder>& allOrders)
+{
+    flatbuffers::FlatBufferBuilder fbb(256 + allOrders.size() * 64);
+
+    auto allowed = [&](int team) {
+        if (team == viewerTeam) return true;
+        for (int a : alliedTeams) if (a == team) return true;
+        return false;
+    };
+
+    std::vector<flatbuffers::Offset<SpringWeb::StandingOrderInfo>> infos;
+    infos.reserve(allOrders.size());
+    for (const StandingOrder& o : allOrders) {
+        if (!allowed(o.team)) continue;
+
+        // Build the conditions table. Empty/default fields stay default
+        // on the wire (FlatBuffers omits them in the table layout).
+        auto squadTypesVec = o.conditions.squadTypes.empty()
+            ? flatbuffers::Offset<flatbuffers::Vector<uint16_t>>()
+            : fbb.CreateVector(o.conditions.squadTypes);
+        std::vector<flatbuffers::Offset<flatbuffers::String>> capStrs;
+        capStrs.reserve(o.conditions.hasCapabilities.size());
+        for (const std::string& s : o.conditions.hasCapabilities)
+            capStrs.push_back(fbb.CreateString(s));
+        auto capsVec = capStrs.empty()
+            ? flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<flatbuffers::String>>>()
+            : fbb.CreateVector(capStrs);
+
+        SpringWeb::Vec3 within(o.conditions.withinCenter.x, o.conditions.withinCenter.y, o.conditions.withinCenter.z);
+        SpringWeb::Vec3 outside(o.conditions.outsideCenter.x, o.conditions.outsideCenter.y, o.conditions.outsideCenter.z);
+
+        SpringWeb::StandingOrderConditionsBuilder cb(fbb);
+        cb.add_idle_only(o.conditions.idleOnly);
+        if (!o.conditions.squadTypes.empty()) cb.add_squad_types(squadTypesVec);
+        cb.add_within_radius_center(&within);
+        cb.add_within_radius_radius(o.conditions.withinRadius);
+        cb.add_outside_radius_center(&outside);
+        cb.add_outside_radius_radius(o.conditions.outsideRadius);
+        cb.add_min_strength(o.conditions.minStrength);
+        if (!capStrs.empty()) cb.add_has_capabilities(capsVec);
+        auto condsOff = cb.Finish();
+
+        auto paramsVec = o.params.empty()
+            ? flatbuffers::Offset<flatbuffers::Vector<float>>()
+            : fbb.CreateVector(o.params);
+
+        SpringWeb::StandingOrderInfoBuilder ib(fbb);
+        ib.add_order_id(o.id);
+        ib.add_owner_team(static_cast<uint8_t>(o.team));
+        ib.add_type(static_cast<SpringWeb::StandingOrderType>(o.type));
+        ib.add_priority(o.priority);
+        if (!o.params.empty()) ib.add_params(paramsVec);
+        ib.add_conditions(condsOff);
+        ib.add_assigned_squad_count(static_cast<uint16_t>(o.assigned.size()));
+        ib.add_active(o.active);
+        ib.add_expires_at_frame(o.expiresAtFrame);
+        ib.add_created_at_frame(o.createdAtFrame);
+        infos.push_back(ib.Finish());
+    }
+
+    auto ordersVec = fbb.CreateVector(infos);
+    auto stateOff = SpringWeb::CreateStandingOrderState(fbb, ordersVec);
+    return BuildServerMessage(fbb,
+        SpringWeb::ServerPayload_StandingOrderState, stateOff.Union());
+}
+
+/// Read a StandingOrderConditions FlatBuffer table into the server
+/// struct. Missing fields fall back to defaults.
+inline StandingOrderConditions ReadStandingOrderConditions(
+    const SpringWeb::StandingOrderConditions* fb)
+{
+    StandingOrderConditions out;
+    if (fb == nullptr) return out;
+    out.idleOnly = fb->idle_only();
+    if (auto* st = fb->squad_types()) {
+        out.squadTypes.reserve(st->size());
+        for (unsigned i = 0; i < st->size(); i++) out.squadTypes.push_back(st->Get(i));
+    }
+    if (auto* wc = fb->within_radius_center()) out.withinCenter = float3(wc->x(), wc->y(), wc->z());
+    out.withinRadius = fb->within_radius_radius();
+    if (auto* oc = fb->outside_radius_center()) out.outsideCenter = float3(oc->x(), oc->y(), oc->z());
+    out.outsideRadius = fb->outside_radius_radius();
+    out.minStrength = fb->min_strength();
+    if (auto* caps = fb->has_capabilities()) {
+        out.hasCapabilities.reserve(caps->size());
+        for (unsigned i = 0; i < caps->size(); i++) {
+            if (auto* s = caps->Get(i)) out.hasCapabilities.emplace_back(s->str());
+        }
+    }
+    return out;
 }
 
 /// Build a GameInfo message (map, game, speed, frame, paused, env state).
