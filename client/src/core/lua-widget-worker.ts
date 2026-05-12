@@ -3561,6 +3561,22 @@ function dispatchCommandNotify(
     return consumed === '1';
 }
 
+/** widgetHandler:PlayerChanged(playerId) — Spring fires this when the
+ *  local player's team/spec status changes, when the leader changes,
+ *  or when another player on the team is reassigned. ZK's
+ *  unit_cloakfirestate2 uses it to re-fetch the local player's start
+ *  state; cmd_factory_plate_placer rebuilds its plate map. We dispatch
+ *  with the local playerId only; widgets that care about *other*
+ *  players' transitions filter the arg themselves. */
+function dispatchPlayerChanged(playerId: number): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.PlayerChanged then
+            pcall(widgetHandler.PlayerChanged, widgetHandler, ${playerId | 0})
+        end
+    `, 'dispatchPlayerChanged');
+}
+
 /** widgetHandler:UnitDestroyed(unitID, unitDefID, unitTeam) — fires on
  *  the EntityDestroy event. */
 function dispatchUnitDestroyed(unitId: number, defId: number, team: number): void {
@@ -3981,6 +3997,7 @@ self.onmessage = async (e: MessageEvent) => {
 
         case 'stateUpdate': {
             const prevSel = liveState.selectedUnitIds;
+            const prevIdentity = liveState.identity;
             // Camera, viewport, identity, gameFrame from main thread
             if (msg.camera) liveState.camera = msg.camera;
             if (msg.viewport) liveState.viewport = msg.viewport;
@@ -3998,6 +4015,20 @@ self.onmessage = async (e: MessageEvent) => {
             if (msg.selectedUnitIds && !sameIdSet(prevSel, liveState.selectedUnitIds)) {
                 dispatchSelectionChanged(liveState.selectedUnitIds);
                 dispatchCommandsChanged();
+            }
+            // Identity delta → fire widget:PlayerChanged. Spring fires
+            // this on team change, spec ↔ player toggle, leader change.
+            // We don't track leadership here, but myTeam / myPlayerId
+            // changes cover the cases ZK widgets (unit_cloakfirestate2,
+            // cmd_factory_plate_placer) actually care about. Don't fire
+            // on the initial auth (prevIdentity has the sentinel myPlayerId<=0),
+            // which would otherwise spam every widget before any state
+            // has loaded.
+            if (msg.identity && prevIdentity.myPlayerId > 0
+                && (prevIdentity.myTeam !== liveState.identity.myTeam
+                    || prevIdentity.myAllyTeam !== liveState.identity.myAllyTeam
+                    || prevIdentity.myPlayerId !== liveState.identity.myPlayerId)) {
+                dispatchPlayerChanged(liveState.identity.myPlayerId);
             }
             break;
         }
