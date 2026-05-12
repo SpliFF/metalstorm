@@ -796,8 +796,20 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             // the worker (see lua-widget-worker.ts `giveOrder` cb).
             inputManager?.setCommandNotifier(
                 (cmdId, params, options) => mgr.notifyCommand(cmdId, params, options));
+            // Route hover-target changes so widget:DefaultCommand fires
+            // and the resolved cmdId reaches Spring.GetDefaultCommand
+            // (cmd_mex_placement, unit_default_commands, the cursortip
+            // widget, …). InputManager filters to actual target changes;
+            // the manager also dedupes identical reports for safety.
+            // The worker's reply feeds back into InputManager so the
+            // next right-click honours the widget's override.
+            inputManager?.setHoverTargetCallback(
+                (info) => mgr.forwardDefaultCommandTarget(info));
+            mgr.onDefaultCommandResolved = (info) =>
+                inputManager?.setDefaultCommandOverride(info);
             (window as any).__widgetManagerDispose = () => {
                 inputManager?.setCommandNotifier(null);
+                inputManager?.setHoverTargetCallback(null);
                 mgr.dispose();
             };
         }

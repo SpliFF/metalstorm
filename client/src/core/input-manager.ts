@@ -205,6 +205,42 @@ export class InputManager {
         this.commandBuffer.setNotifier(fn);
     }
 
+    /** Latest cursor hover-target (unit under the pointer, or -1 for none).
+     *  Updated each pointermove that crosses a different entity; reset to
+     *  -1 when the cursor moves off all entities or onto UI. The change
+     *  callback fires only on transitions so the worker doesn't see a
+     *  flood of identical defaults during a stationary cursor. */
+    private hoveredEntityId = -1;
+    /** Spring contract: the engineCmd that the widget DefaultCommand
+     *  callin gets passed alongside the target type. We compute it
+     *  client-side from the unit's team relative to ours: friendly →
+     *  GUARD, enemy → ATTACK, no target → MOVE. This mirrors Spring's
+     *  CGuiHandler::GetDefaultCommand which picks the cmd that would
+     *  fire on right-click absent a widget override. */
+    private hoveredEngineCmd: number = CMD.MOVE;
+    private onHoverTargetChange:
+        ((info: { targetType: 'unit' | 'feature' | null; targetId: number; engineCmd: number }) => void)
+        | null = null;
+    /** Wired from main.ts to LuaWidgetManager.forwardDefaultCommandTarget
+     *  so the worker can dispatch widget:DefaultCommand on every
+     *  hover-target change. Pass null to disable. */
+    setHoverTargetCallback(
+        fn: ((info: { targetType: 'unit' | 'feature' | null; targetId: number; engineCmd: number }) => void) | null,
+    ): void {
+        this.onHoverTargetChange = fn;
+    }
+
+    /** Resolved default-command override for the current hover target.
+     *  Populated by main.ts from `LuaWidgetManager.onDefaultCommandResolved`
+     *  after the worker walked widget:DefaultCommand. Consulted by the
+     *  right-click handler so widgets like unit_default_commands /
+     *  cmd_mex_placement actually steer the issued cmd, not just the
+     *  cursor tooltip. */
+    private defaultCommandOverride: { cmdId: number; targetType: 'unit' | 'feature' | null; targetId: number } | null = null;
+    setDefaultCommandOverride(info: { cmdId: number; targetType: 'unit' | 'feature' | null; targetId: number } | null): void {
+        this.defaultCommandOverride = info;
+    }
+
     /** Set the player's team id after auth completes. Used by right-click
      *  target classification to distinguish friendly (Guard) from enemy
      *  (Attack) targets. */
@@ -676,6 +712,7 @@ export class InputManager {
                     break;
                 case PointerEventTypes.POINTERMOVE:
                     if (this.dragActive) this.onDragMove(evt);
+                    if (this.onHoverTargetChange) this.updateHoverTarget(evt);
                     break;
                 case PointerEventTypes.POINTERUP:
                     if (evt.button === 0 && this.dragActive) this.onLeftUp(evt);
@@ -889,19 +926,95 @@ export class InputManager {
             return;
         }
 
+        // Widget DefaultCommand override: if the cursor is over the same
+        // unit we tracked at hover time and a widget rewrote the
+        // engineCmd (cmd_mex_placement returning CMD_RECLAIM, etc.), use
+        // its cmdId in place of the engine default. The override is
+        // cleared when the hover target moves elsewhere, so a stale
+        // override never applies to a fresh click target.
+        const override = this.defaultCommandOverride;
+        const overrideAppliesToUnit =
+            override && override.targetType === 'unit' && nearest.id >= 0 && override.targetId === nearest.id;
+        const overrideAppliesToGround =
+            override && override.targetType === null && nearest.id < 0;
+
         if (nearest.id >= 0) {
             const isFriendly = this.myTeam >= 0 && nearest.team === this.myTeam;
             // Friendly → Guard (assist/escort). Enemy → Attack.
-            const cmd = isFriendly ? CMD.GUARD : CMD.ATTACK;
+            const engineCmd = isFriendly ? CMD.GUARD : CMD.ATTACK;
+            const cmd = overrideAppliesToUnit ? override!.cmdId : engineCmd;
+            // Unit-targeting cmds take [unitId]; ground-targeting cmds
+            // (RECLAIM, REPAIR, etc. can also accept a ground point with
+            // a radius) want [unitId] when applied to a unit. Stick with
+            // [unitId] for the override case — it matches Spring's
+            // CGuiHandler::ProcessLocalActions.
             this.commandBuffer.issueImmediate(cmd, this.selectedIds, [nearest.id], opts);
         } else {
-            this.commandBuffer.issueImmediate(CMD.MOVE, this.selectedIds, [groundPos.x, groundPos.y, groundPos.z], opts);
+            const cmd = overrideAppliesToGround ? override!.cmdId : CMD.MOVE;
+            this.commandBuffer.issueImmediate(cmd, this.selectedIds, [groundPos.x, groundPos.y, groundPos.z], opts);
         }
     }
 
     /** Pick the nearest non-selected entity within SELECT_RADIUS of a ground
      *  point. Returns id<0 when nothing matches. Used for right-click target
      *  classification and modal-command resolution. */
+    /** Throttled to fire on hover-target change only. The worker's
+     *  widget:DefaultCommand gets the (targetType, targetID, engineCmd)
+     *  triple — engineCmd is the cmd Spring would issue absent a widget
+     *  override (friendly→GUARD, enemy→ATTACK, none→MOVE). Feature
+     *  hovering isn't wired yet; targetType is 'unit' or null today. */
+    private updateHoverTarget(evt: PointerEvent): void {
+        if (this.isOverUI()) {
+            // Cursor over chili → no hover-target. Reset and emit a
+            // null transition so the worker clears any stale override.
+            if (this.hoveredEntityId !== -1 || this.hoveredEngineCmd !== CMD.MOVE) {
+                this.hoveredEntityId = -1;
+                this.hoveredEngineCmd = CMD.MOVE;
+                this.onHoverTargetChange?.({ targetType: null, targetId: 0, engineCmd: CMD.MOVE });
+            }
+            return;
+        }
+        const groundPos = this.pickGroundAt(evt.clientX, evt.clientY);
+        if (!groundPos) return;
+        const nearest = this.pickNearestEntityForHover(groundPos);
+        let targetType: 'unit' | 'feature' | null = null;
+        let targetId = 0;
+        let engineCmd: number = CMD.MOVE;
+        if (nearest.id > 0) {
+            targetType = 'unit';
+            targetId = nearest.id;
+            engineCmd = (nearest.team === this.myTeam) ? CMD.GUARD : CMD.ATTACK;
+        }
+        if (targetId === this.hoveredEntityId && engineCmd === this.hoveredEngineCmd) return;
+        this.hoveredEntityId = targetId;
+        this.hoveredEngineCmd = engineCmd;
+        this.onHoverTargetChange?.({ targetType, targetId, engineCmd });
+    }
+
+    /** Like pickNearestEntityAt but doesn't skip selected units — the
+     *  hover-target tracker wants to know about every unit under the
+     *  cursor (a widget might still rewrite the default command when
+     *  hovering one of your own selected units, e.g. cmd_stop_selfd
+     *  reading SelfD state). */
+    private pickNearestEntityForHover(groundPos: Vector3): { id: number; team: number } {
+        let id = -1;
+        let team = -1;
+        let bestSq = SELECT_RADIUS * SELECT_RADIUS;
+        for (const [eid, meta] of this.entityRenderer.getEntities()) {
+            const pos = this.entityRenderer.getEntityPosition(eid);
+            if (!pos) continue;
+            const dx = pos.x - groundPos.x;
+            const dz = pos.z - groundPos.z;
+            const distSq = dx * dx + dz * dz;
+            if (distSq < bestSq) {
+                bestSq = distSq;
+                id = eid;
+                team = meta.team;
+            }
+        }
+        return { id, team };
+    }
+
     private pickNearestEntityAt(groundPos: Vector3): { id: number; team: number } {
         let id = -1;
         let team = -1;

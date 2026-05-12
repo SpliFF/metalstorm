@@ -349,6 +349,23 @@ export interface LiveState {
      *  the UnitDef baseline so widgets such as `unit_stealth.lua` see
      *  the change immediately. */
     sensorOverrides: Map<number, Map<string, number>>;
+    /** Default-command snapshot for the unit/feature currently under the
+     *  cursor. Main thread runs the hover hit-test and pushes the (target,
+     *  engineCmd) pair to the worker; the worker dispatches
+     *  widget:DefaultCommand and stores any override here. Read by
+     *  `Spring.GetDefaultCommand`. `cmdId == 0` means "no override —
+     *  engineCmd applies"; `cmdId < 0` is the same negative-builds-as-IDs
+     *  convention used elsewhere. */
+    defaultCommand: {
+        targetType: 'unit' | 'feature' | null;
+        targetId: number;
+        /** What Spring would issue absent a widget override (MOVE / GUARD /
+         *  ATTACK / RECLAIM). Server-equivalent of CGuiHandler::GetDefaultCommand. */
+        engineCmd: number;
+        /** Final cmdId after widget DefaultCommand callins ran. Equals
+         *  engineCmd when no widget overrode. */
+        cmdId: number;
+    };
 }
 
 /** Stored LOS bitmap snapshot inside `LiveState`. Mirrors `LosBitmap`
@@ -724,6 +741,7 @@ export function createDefaultLiveState(): LiveState {
         losBitmaps: new Map(),
         minimapGeometry: undefined,
         sensorOverrides: new Map(),
+        defaultCommand: { targetType: null, targetId: 0, engineCmd: 10 /* CMD_MOVE */, cmdId: 10 },
     };
 }
 
@@ -2245,7 +2263,28 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         // `cmdDesc["type"]` directly — get nil for missing fields
         // instead of erroring on nil-indexing.
         GetActiveCmdDesc: () => luaTable(),
-        GetDefaultCommand: () => [0, 0, ''],
+        // Spring contract: returns (cmdIndex, cmdID, cmdType, cmdName).
+        // We don't (yet) keep an index into the active cmd-desc list, so
+        // return -1 for the index slot — ZK widgets that read just the
+        // 2nd return (cmdID) work; the chili tooltip widget will use the
+        // name and live without the index. cmdType is 0 (ICON) for all
+        // resolved engine cmds. The defaultCommand state is updated each
+        // hover-target change by the main thread; the worker dispatches
+        // widget:DefaultCommand before storing the final cmdId.
+        GetDefaultCommand: () => {
+            const dc = ls.defaultCommand;
+            const name =
+                dc.cmdId === 10  ? 'Move' :
+                dc.cmdId === 16  ? 'Fight' :
+                dc.cmdId === 20  ? 'Attack' :
+                dc.cmdId === 25  ? 'Guard' :
+                dc.cmdId === 40  ? 'Repair' :
+                dc.cmdId === 90  ? 'Reclaim' :
+                dc.cmdId === 125 ? 'Resurrect' :
+                dc.cmdId === 130 ? 'Capture' :
+                '';
+            return [-1, dc.cmdId, 0, name];
+        },
         // Spring.GetCmdDescIndex(cmdID) — return the 1-based position of
         // a cmd in the active selection's command desc list. The chili
         // integral menu uses the result to drive SetActiveCommand, so a

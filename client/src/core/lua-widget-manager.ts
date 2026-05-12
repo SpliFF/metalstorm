@@ -214,6 +214,12 @@ export class LuaWidgetManager {
      *  move/stop/attack are all routed via Spring.GiveOrderToUnit. */
     onSetActiveCommandRequest?: (cmdId: number, mods: { left: boolean; right: boolean; alt: boolean; ctrl: boolean; meta: boolean; shift: boolean }) => void;
 
+    /** Worker→main reply for a `defaultCommandTarget` dispatch. Carries
+     *  the cmdId after widget DefaultCommand overrides ran — caller (main.ts)
+     *  forwards it into InputManager so the next right-click honours the
+     *  override. */
+    onDefaultCommandResolved?: (info: { cmdId: number; targetType: 'unit' | 'feature' | null; targetId: number }) => void;
+
     constructor(
         scene: Scene,
         camera: FreeCamera,
@@ -555,6 +561,31 @@ export class LuaWidgetManager {
         this.selectedUnitIds = [...ids];
     }
 
+    /** Last hover target reported by the InputManager. Used as a dedupe
+     *  guard so identical reports during a stationary cursor (the
+     *  hit-test still re-fires on every mousemove) don't spam the worker. */
+    private lastHoverKey = '';
+    /** Push the current hover-target to the worker. Worker dispatches
+     *  widget:DefaultCommand and caches the resolved cmdId for
+     *  `Spring.GetDefaultCommand`. Filters out no-op reports so a stationary
+     *  cursor doesn't push the same target every frame. */
+    forwardDefaultCommandTarget(info: {
+        targetType: 'unit' | 'feature' | null;
+        targetId: number;
+        engineCmd: number;
+    }): void {
+        if (this.disposed) return;
+        const key = `${info.targetType ?? '-'}|${info.targetId}|${info.engineCmd}`;
+        if (key === this.lastHoverKey) return;
+        this.lastHoverKey = key;
+        this.postToWorker({
+            type: 'defaultCommandTarget',
+            targetType: info.targetType,
+            targetId: info.targetId,
+            engineCmd: info.engineCmd,
+        });
+    }
+
     /** Ask the worker to run the widget-side CommandNotify gate against a
      *  proposed mouse-issued command. Returns true if any widget consumed
      *  the order (caller must suppress the actual `sendPlayerCommand`).
@@ -797,6 +828,8 @@ export class LuaWidgetManager {
             case 'giveOrder':      summary = `giveOrder cmd=${msg.cmdId} units=${(msg.unitIds as unknown[])?.length ?? 0} params=${(msg.params as unknown[])?.length ?? 0}`; break;
             case 'commandNotify':       summary = `commandNotify cmd=${msg.cmdId} req=${msg.requestId} params=${(msg.params as unknown[])?.length ?? 0}`; break;
             case 'commandNotifyResult': summary = `commandNotifyResult req=${msg.requestId} consumed=${msg.consumed}`; break;
+            case 'defaultCommandTarget':   summary = `defaultCommandTarget type=${msg.targetType} id=${msg.targetId} engineCmd=${msg.engineCmd}`; break;
+            case 'defaultCommandResolved': summary = `defaultCommandResolved cmdId=${msg.cmdId} type=${msg.targetType} id=${msg.targetId}`; break;
             case 'sendLuaRulesMsg': summary = `sendLuaRulesMsg (${(msg.data as string)?.length ?? 0} bytes)`; break;
             case 'setSelection':   summary = `setSelection units=${(msg.unitIds as unknown[])?.length ?? 0}`; break;
             case 'setCameraTarget': summary = `setCameraTarget x=${msg.x} z=${msg.z} smooth=${msg.smoothness}`; break;
@@ -910,6 +943,16 @@ export class LuaWidgetManager {
                     this.evalResolve = null;
                 }
                 break;
+
+            case 'defaultCommandResolved': {
+                const cmdId = Number(msg.cmdId | 0);
+                const targetType = msg.targetType === 'unit' || msg.targetType === 'feature'
+                    ? msg.targetType as 'unit' | 'feature'
+                    : null;
+                const targetId = Number(msg.targetId | 0);
+                this.onDefaultCommandResolved?.({ cmdId, targetType, targetId });
+                break;
+            }
 
             case 'commandNotifyResult': {
                 const requestId = Number(msg.requestId | 0);

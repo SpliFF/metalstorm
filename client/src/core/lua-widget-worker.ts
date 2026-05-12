@@ -400,6 +400,7 @@ function describeInboundMessage(msg: Record<string, unknown>): string {
         case 'resourceUpdate':return `resourceUpdate team=${msg.team}`;
         case 'gameInfo':      return `gameInfo frame=${msg.frame}`;
         case 'commandNotify': return `commandNotify cmd=${msg.cmdId} req=${msg.requestId} params=${(msg.params as unknown[])?.length ?? 0}`;
+        case 'defaultCommandTarget': return `defaultCommandTarget type=${msg.targetType} id=${msg.targetId} engineCmd=${msg.engineCmd}`;
         default:              return t;
     }
 }
@@ -3484,6 +3485,41 @@ function dispatchUnitCreated(unitId: number, defId: number, team: number): void 
     `, 'dispatchUnitCreated');
 }
 
+/** widgetHandler:DefaultCommand(targetType, targetID, engineCmd) — fires
+ *  when the cursor's hover-target changes (a different unit/feature, or
+ *  none). The first widget to return a non-nil cmdID overrides the
+ *  default right-click action. ZK uses it for cmd_mex_placement,
+ *  unit_default_commands, gui_highlight_geos, and a handful of others.
+ *
+ *  We dispatch via widgetHandler.DefaultCommandList (the standard
+ *  cawidgets list) and return the resolved cmdId — fall back to
+ *  engineCmd when no widget overrode. */
+function dispatchDefaultCommand(
+    targetType: 'unit' | 'feature' | null,
+    targetId: number,
+    engineCmd: number,
+): number {
+    if (!runtime) return engineCmd;
+    const typeLit = targetType === null ? 'nil' : `"${targetType}"`;
+    const idLit = targetType === null ? 'nil' : String(targetId | 0);
+    // cawidgets.lua installs widgetHandler:DefaultCommand which iterates
+    // self.DefaultCommandList and returns the first numeric override (or
+    // nil if no widget claimed it). Returning nil → fall back to engineCmd.
+    const result = runtime.evalString(`
+        if not (widgetHandler and widgetHandler.DefaultCommand) then
+            return "${engineCmd | 0}"
+        end
+        local ok, ret = pcall(widgetHandler.DefaultCommand, widgetHandler,
+            ${typeLit}, ${idLit}, ${engineCmd | 0})
+        if ok and type(ret) == "number" then
+            return tostring(math.floor(ret))
+        end
+        return "${engineCmd | 0}"
+    `);
+    const parsed = Number.parseInt(typeof result === 'string' ? result : String(result ?? ''), 10);
+    return Number.isFinite(parsed) ? parsed : engineCmd;
+}
+
 /** widgetHandler:CommandNotify(cmdID, cmdParams, cmdOptions) — Spring
  *  fires this once for every player-issued command BEFORE it enters
  *  the queue. Any widget that returns true consumes the command. ZK
@@ -3796,6 +3832,37 @@ self.onmessage = async (e: MessageEvent) => {
                 `, 'callin:MouseRelease');
             }
             break;
+
+        case 'defaultCommandTarget': {
+            // Main thread reports a hover-target change. Dispatch the
+            // widget DefaultCommand callin chain so widgets like
+            // unit_default_commands / cmd_mex_placement / gui_highlight_geos
+            // can rewrite what right-click would do. Store the resolved
+            // cmdId in liveState so Spring.GetDefaultCommand returns the
+            // override, and post it back to main so InputManager can
+            // honour the override on actual right-click. Throttled
+            // main-side: the message only arrives on target change.
+            const targetType = (msg.targetType === 'unit' || msg.targetType === 'feature')
+                ? msg.targetType as 'unit' | 'feature'
+                : null;
+            const targetId = Number(msg.targetId | 0);
+            const engineCmd = Number(msg.engineCmd | 0);
+            const resolved = dispatchDefaultCommand(targetType, targetId, engineCmd);
+            liveState.defaultCommand = {
+                targetType,
+                targetId,
+                engineCmd,
+                cmdId: resolved,
+            };
+            postToMain({
+                type: 'defaultCommandResolved',
+                targetType,
+                targetId,
+                engineCmd,
+                cmdId: resolved,
+            });
+            break;
+        }
 
         case 'commandNotify': {
             // Main thread asks the worker to run the CommandNotify gate
