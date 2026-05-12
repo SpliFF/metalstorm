@@ -402,6 +402,7 @@ function describeInboundMessage(msg: Record<string, unknown>): string {
         case 'commandNotify': return `commandNotify cmd=${msg.cmdId} req=${msg.requestId} params=${(msg.params as unknown[])?.length ?? 0}`;
         case 'defaultCommandTarget': return `defaultCommandTarget type=${msg.targetType} id=${msg.targetId} engineCmd=${msg.engineCmd}`;
         case 'pathResponse':  return `pathResponse req=${msg.requestId} waypoints=${(msg.waypoints as unknown[])?.length ?? 0}`;
+        case 'visibleUnits':  return `visibleUnits +${(msg.added as unknown[])?.length ?? 0} -${(msg.removed as unknown[])?.length ?? 0}`;
         default:              return t;
     }
 }
@@ -3680,6 +3681,35 @@ function dispatchUnitFinished(unitId: number, defId: number, team: number): void
     `, 'dispatchUnitFinished');
 }
 
+/** widgetHandler:VisibleUnitAdded(unitID, unitDefID, unitTeam) — fires
+ *  when a unit enters the camera viewing frustum. Distinct from
+ *  UnitEnteredLos (vision-based) — VisibleUnitAdded is a render-side
+ *  hook so per-frame overlay widgets (gui_attackrange_gl4) only iterate
+ *  the units actually on screen. Sourced from main-thread frustum diff
+ *  in LuaWidgetManager.updateVisibleUnits. */
+function dispatchVisibleUnitAdded(
+    unitId: number, defId: number, team: number,
+): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.VisibleUnitAdded then
+            pcall(widgetHandler.VisibleUnitAdded, widgetHandler,
+                ${unitId}, ${defId}, ${team})
+        end
+    `, 'dispatchVisibleUnitAdded');
+}
+
+/** widgetHandler:VisibleUnitRemoved(unitID) — fires when a unit leaves
+ *  the camera viewing frustum. See dispatchVisibleUnitAdded for context. */
+function dispatchVisibleUnitRemoved(unitId: number): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.VisibleUnitRemoved then
+            pcall(widgetHandler.VisibleUnitRemoved, widgetHandler, ${unitId})
+        end
+    `, 'dispatchVisibleUnitRemoved');
+}
+
 /** Build a Lua table literal for an array of floats. Used to pass the
  *  `cmdParams` argument of `widgetHandler:UnitCommand` / `UnitCmdDone`
  *  callins; the worker can't construct a Lua array from JS-side any
@@ -4588,6 +4618,25 @@ self.onmessage = async (e: MessageEvent) => {
                         dispatchUnitCreated(
                             e.unitId, e.unitDefId, e.unitTeam, e.builderId);
                     }
+                }
+            }
+            break;
+        }
+
+        case 'visibleUnits': {
+            const added = msg.added as Array<{
+                id: number; defId: number; team: number;
+            }> | undefined;
+            const removed = msg.removed as number[] | undefined;
+            if (!runtime) break;
+            if (added) {
+                for (const u of added) {
+                    dispatchVisibleUnitAdded(u.id, u.defId, u.team);
+                }
+            }
+            if (removed) {
+                for (const id of removed) {
+                    dispatchVisibleUnitRemoved(id);
                 }
             }
             break;

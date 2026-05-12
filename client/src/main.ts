@@ -1216,6 +1216,30 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
 
         scene.render();
 
+        // VisibleUnitAdded / VisibleUnitRemoved widget callins. Built
+        // from the in-frustum diff against the previous tick. The
+        // manager throttles internally to 10 Hz so calling here every
+        // render frame is cheap. Runs after scene.render() so
+        // scene.frustumPlanes reflects this frame's camera.
+        if (currentWidgetManager && entityRenderer) {
+            const er = entityRenderer;
+            currentWidgetManager.updateVisibleUnits((function* () {
+                for (const [id, meta] of er.getEntities()) {
+                    const pos = er.getEntityPosition(id);
+                    if (!pos) continue;
+                    const def = defCache.getUnitDef(meta.defId);
+                    // Fall back to a generous radius when the def hasn't
+                    // streamed yet — keeps the unit in-set rather than
+                    // dropping it from the frustum during the boot race.
+                    const radius = def?.radius ?? 32;
+                    yield {
+                        id, defId: meta.defId, team: meta.team,
+                        x: pos.x, y: pos.y, z: pos.z, radius,
+                    };
+                }
+            })());
+        }
+
         if (now - lastViewportSend > 100) {
             sendCameraViewport(camera, conn);
             lastViewportSend = now;

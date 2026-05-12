@@ -186,6 +186,16 @@ export class LuaWidgetManager {
     /** Current game frame counter (updated by forwardEntityState) */
     private currentFrame = 0;
 
+    /** Ids currently inside the camera frustum, used to diff which
+     *  units entered/left view between updateVisibleUnits ticks. The
+     *  worker mirrors this set internally to dispatch widget callins
+     *  (gui_attackrange_gl4 reads it for per-frame range stencils). */
+    private visibleUnitSet = new Set<number>();
+    /** Wall-clock of the last updateVisibleUnits dispatch. 10 Hz cap —
+     *  units don't cross the frustum edge every render frame. Aliasing
+     *  isn't visible to widgets at this rate. */
+    private lastVisibleUnitsTick = 0;
+
     /** Synthesises UnitEnteredLos / LeftLos / EnteredRadar / LeftRadar /
      *  Cloaked / Decloaked widget callins by diffing snapshot losStates and
      *  stateBits. The server doesn't send transition events directly — see
@@ -500,7 +510,75 @@ export class LuaWidgetManager {
         // Drop the entity from the intel tracker so the next full snapshot
         // doesn't fire spurious Left* callins for a unit that just died.
         this.intelTracker.forget(entityId);
+        this.visibleUnitSet.delete(entityId);
         this.postToWorker({ type: 'entityDestroy', entityId });
+    }
+
+    /** Diff which units are inside the camera frustum and push the
+     *  added / removed ids to the worker. Worker dispatches
+     *  `widgetHandler:VisibleUnitAdded(unitId, defId, team)` and
+     *  `widgetHandler:VisibleUnitRemoved(unitId)` from the deltas.
+     *
+     *  Throttled to 10 Hz — units don't cross the frustum edge every
+     *  render frame and ZK widgets that consume the callin (notably
+     *  `gui_attackrange_gl4`) re-evaluate per render frame anyway, so
+     *  aliasing at this cadence is invisible. Callers can wire this
+     *  into the per-frame render hook unconditionally; the internal
+     *  rate-limit gates the actual work.
+     *
+     *  `iterUnits` yields one entry per live unit; only id / defId /
+     *  team / position / radius are touched. Frustum planes are read
+     *  from `this.scene.frustumPlanes`, which Babylon updates as part
+     *  of `scene.render()` — call this AFTER the render call to read
+     *  fresh planes, or pass a freshly built matrix if needed. */
+    updateVisibleUnits(iterUnits: Iterable<{
+        id: number; defId: number; team: number;
+        x: number; y: number; z: number; radius: number;
+    }>): void {
+        if (this.disposed) return;
+        const now = performance.now();
+        if (now - this.lastVisibleUnitsTick < 100) return;
+        this.lastVisibleUnitsTick = now;
+
+        const planes = this.scene.frustumPlanes;
+        if (!planes || planes.length < 6) return;
+
+        const prev = this.visibleUnitSet;
+        const next = new Set<number>();
+        const added: Array<{ id: number; defId: number; team: number }> = [];
+
+        for (const u of iterUnits) {
+            // AABB-vs-frustum test: a sphere of radius r at (x,y,z) is
+            // outside the frustum if it sits beyond any single plane by
+            // more than r. Plane normals point inward (Babylon
+            // convention); reject early on first outside plane.
+            let inside = true;
+            for (let i = 0; i < 6; i++) {
+                const p = planes[i];
+                const d = p.normal.x * u.x + p.normal.y * u.y + p.normal.z * u.z + p.d;
+                if (d < -u.radius) { inside = false; break; }
+            }
+            if (!inside) continue;
+
+            next.add(u.id);
+            if (!prev.has(u.id)) {
+                added.push({ id: u.id, defId: u.defId, team: u.team });
+            }
+        }
+
+        const removed: number[] = [];
+        for (const id of prev) {
+            if (!next.has(id)) removed.push(id);
+        }
+
+        this.visibleUnitSet = next;
+
+        if (added.length === 0 && removed.length === 0) return;
+        this.postToWorker({
+            type: 'visibleUnits',
+            added,
+            removed,
+        });
     }
 
     /** Forward a per-unit sensor radius override to the worker.
