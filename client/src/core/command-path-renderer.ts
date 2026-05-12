@@ -48,12 +48,15 @@ import {
     Color3,
     Vector3,
     Mesh,
+    MeshBuilder,
+    StandardMaterial,
     CreateGreasedLine,
     GreasedLineMeshColorMode,
     GreasedLineMeshMaterialType,
     RawTexture,
     Engine,
     Texture,
+    type InstancedMesh,
 } from '@babylonjs/core';
 import type { GreasedLineSimpleMaterial } from '@babylonjs/core/Materials/GreasedLine/greasedLineSimpleMaterial.js';
 import type { EntityRenderer } from './entity-renderer.js';
@@ -112,7 +115,18 @@ const LINE_WIDTH = 4;
 /// bakeAlphaIntoColorsTexture). Lower than Recoil's 0.7 default because
 /// our GreasedLine quads cover noticeably more screen pixels than the
 /// engine's 1.49-px lines, so the same alpha reads as much heavier ink.
-const LINE_ALPHA = 0.45;
+const LINE_ALPHA = 0.55;
+
+/// Glow halo pass: drawn behind the core line, wider and dimmer, with
+/// additive blending so overlapping path colours stack to white-ish at
+/// the centre. Looks like the soft bloom Recoil's lines get under FXAA.
+const GLOW_WIDTH_MULT = 2.4;
+const GLOW_ALPHA = 0.18;
+
+/// Diameter of the start-point marker drawn at the selected unit's
+/// origin. Recoil paints `cmdColors.start = (1,1,1,0.7)` here — a
+/// small white sphere that anchors the path visually.
+const START_MARKER_SIZE = 6;
 
 function colorForCmd(cmdId: number): Color3 {
     if (cmdId < 0) return COLOR_BUILD;
@@ -145,9 +159,17 @@ function destOf(order: OrderInfo): Vector3 | null {
 export class CommandPathRenderer {
     private scene: Scene;
     private entityRenderer: EntityRenderer;
-    /// One GreasedLine mesh per render — all selection paths flatten
-    /// into a single multi-line builder call so it's one draw call.
+    /// Core (sharp, full-colour) line mesh.
     private linesMesh: Mesh | null = null;
+    /// Glow halo mesh — same polylines, wider + dimmer, additive blend.
+    /// Drawn first (lower renderingGroupId equivalent via order) so the
+    /// core line sits inside the halo.
+    private glowMesh: Mesh | null = null;
+    /// Start-point markers (one InstancedMesh per selected unit). Shares a
+    /// single master plane + white-disc material.
+    private startMaster: Mesh | null = null;
+    private startMaterial: StandardMaterial | null = null;
+    private startMarkers: InstancedMesh[] = [];
     private mapData: ParsedMapData | null = null;
     /// Path overlay only shows while the player is holding shift —
     /// mirrors Spring/Recoil's "show queued orders" gesture.
@@ -317,26 +339,77 @@ export class CommandPathRenderer {
             return;
         }
 
-        // Build the new mesh BEFORE disposing the old one. Atomic swap
+        // Build the new meshes BEFORE disposing the old ones. Atomic swap
         // means the GPU never sees a frame with neither mesh present —
         // critical for stopping the 1 Hz flicker even when content
         // genuinely does change between broadcasts.
-        const oldMesh = this.linesMesh;
+        const oldLines = this.linesMesh;
+        const oldGlow = this.glowMesh;
 
-        // GreasedLine in MATERIAL_TYPE_SIMPLE multiplies the material
-        // base colour with the per-segment colour from the colours
-        // texture. We pick MATERIAL_TYPE_STANDARD-equivalent semantics
-        // by using SET mode so the segment colour wins outright.
-        const mesh = CreateGreasedLine(
+        // Glow pass first — drawn behind the core line. Wider, dimmer,
+        // additive blend. Gives the path a soft halo so the eye reads the
+        // colour as a glow rather than a sharp ribbon. Order in the
+        // scene matters: we use the same renderingGroupId but rely on
+        // creation order so the additive glow renders BEFORE the alpha
+        // core (Babylon iterates the active mesh list in creation order
+        // within a renderingGroup).
+        const glow = this.buildLineMesh(
+            'cmd-paths-glow',
+            polylines,
+            segmentColors,
+            LINE_WIDTH * GLOW_WIDTH_MULT,
+            GLOW_ALPHA,
+            /* additive */ true,
+        );
+
+        const core = this.buildLineMesh(
             'cmd-paths',
+            polylines,
+            segmentColors,
+            LINE_WIDTH,
+            LINE_ALPHA,
+            /* additive */ false,
+        );
+
+        this.glowMesh = glow;
+        this.linesMesh = core;
+        if (oldLines) {
+            oldLines.material?.dispose();
+            oldLines.dispose();
+        }
+        if (oldGlow) {
+            oldGlow.material?.dispose();
+            oldGlow.dispose();
+        }
+
+        // Rebuild start-point markers. Tiny white discs at each selected
+        // unit's mid-position — matches Recoil's `cmdColors.start` dot.
+        this.rebuildStartMarkers();
+
+        this.renderedFingerprint = fp;
+    }
+
+    /** Build a single GreasedLine mesh with the desired width / alpha /
+     *  blend mode. Used for both the core line and the glow halo —
+     *  identical geometry, different visual treatment. */
+    private buildLineMesh(
+        name: string,
+        polylines: Vector3[][],
+        segmentColors: Color3[],
+        width: number,
+        alpha: number,
+        additive: boolean,
+    ): Mesh {
+        const mesh = CreateGreasedLine(
+            name,
             {
                 points: polylines,
                 updatable: false,
             },
             {
-                width: LINE_WIDTH,
+                width,
                 // sizeAttenuation=false: width is in world (scene) units,
-                // so a 4-elmo line stays 4 elmos wide in 3D and gets
+                // so the line stays the configured width in 3D and gets
                 // smaller as the camera pulls back. That's the look Recoil
                 // gives — at high zoom the queued lines almost vanish.
                 sizeAttenuation: false,
@@ -361,36 +434,93 @@ export class CommandPathRenderer {
         if (mat) {
             mat.disableDepthWrite = true;
             mat.depthFunction = DEPTH_ALWAYS;
-            // GreasedLineSimple's fragment shader hardcodes alpha to 1
-            // when colorMode=SET (it overwrites gl_FragColor with the
-            // colors-texture sample, and the auto-built texture writes
-            // alpha=255 unconditionally). Two-part fix:
+            // Two-part alpha fix (see bakeAlphaIntoColorsTexture):
             //   1. Bake alpha into a replacement colors texture so the
             //      shader output has alpha < 1.
             //   2. Set `mat.alpha < 1` so GreasedLineSimpleMaterial's
-            //      needAlphaBlending() returns true (it's gated on
-            //      `this.alpha < 1.0`); without this WebGL never enables
-            //      blending and the source alpha is discarded.
+            //      needAlphaBlending() returns true.
+            // Premultiplied flag: for the core line, bake the RGB *
+            // alpha into the texture so the shader outputs premultiplied
+            // values. Babylon's default ALPHA_COMBINE blend
+            // (gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA) reads premultiplied
+            // RGBA correctly if we ALSO switch the blend mode to
+            // ALPHA_PREMULTIPLIED (gl.ONE, gl.ONE_MINUS_SRC_ALPHA). Result:
+            // the dark fringe artefact (premult-aware sampling against an
+            // unpremult texture) goes away.
+            const premultiplied = !additive;
             this.bakeAlphaIntoColorsTexture(
                 mat as unknown as GreasedLineSimpleMaterial,
                 segmentColors,
-                LINE_ALPHA,
+                alpha,
+                premultiplied,
             );
-            mat.alpha = LINE_ALPHA;
+            mat.alpha = alpha;
+            if (additive) {
+                // Additive blend: gl.ONE, gl.ONE. Overlapping path
+                // colours brighten where they cross, which reads as a
+                // soft glow that survives behind hills (depth-always).
+                mat.alphaMode = Engine.ALPHA_ADD;
+            } else {
+                mat.alphaMode = Engine.ALPHA_PREMULTIPLIED;
+            }
         }
         mesh.isPickable = false;
         mesh.alwaysSelectAsActiveMesh = true;
-        // Render after everything else so the X-ray draw sits on top.
         mesh.renderingGroupId = 3;
+        return mesh as unknown as Mesh;
+    }
 
-        // Swap last so the old mesh is visible right up until the new
-        // one is parented into the scene.
-        this.linesMesh = mesh as unknown as Mesh;
-        if (oldMesh) {
-            oldMesh.material?.dispose();
-            oldMesh.dispose();
+    /** Ensure the start-marker master mesh + material exist. A single
+     *  shared plane lying flat on the ground; instances inherit material
+     *  + geometry, so per-unit cost is one TransformMatrix. */
+    private ensureStartMaster(): Mesh {
+        if (this.startMaster) return this.startMaster;
+
+        const mat = new StandardMaterial('cmd-start-mat', this.scene);
+        mat.emissiveColor = new Color3(1, 1, 1);
+        mat.disableLighting = true;
+        mat.alpha = 0.85;
+        mat.backFaceCulling = false;
+        mat.disableDepthWrite = true;
+        mat.depthFunction = DEPTH_ALWAYS;
+        this.startMaterial = mat;
+
+        // Slim diamond/circle effect from a unit-square plane laid flat.
+        // Visually small enough to read as a dot, big enough to be
+        // visible against arbitrary terrain.
+        const master = MeshBuilder.CreatePlane('cmd-start-master',
+            { size: START_MARKER_SIZE, sideOrientation: Mesh.DOUBLESIDE },
+            this.scene,
+        );
+        master.rotation.x = Math.PI / 2;
+        master.material = mat;
+        master.isVisible = false;
+        master.isPickable = false;
+        master.renderingGroupId = 3;
+        master.alwaysSelectAsActiveMesh = true;
+        this.startMaster = master;
+        return master;
+    }
+
+    private rebuildStartMarkers(): void {
+        for (const m of this.startMarkers) m.dispose();
+        this.startMarkers = [];
+
+        const sel = new Set(this.lastSelection);
+        for (const q of this.lastQueues) {
+            if (!sel.has(q.unitId)) continue;
+            if (q.orders.length === 0) continue;
+            const start = this.entityRenderer.getEntityPosition(q.unitId);
+            if (!start) continue;
+            const master = this.ensureStartMaster();
+            const inst = master.createInstance(`cmd-start-${q.unitId}`);
+            inst.position.set(start.x, start.y + 10, start.z);
+            inst.rotation.x = Math.PI / 2;
+            inst.isPickable = false;
+            inst.alwaysSelectAsActiveMesh = true;
+            inst.renderingGroupId = 3;
+            this.startMarkers.push(inst);
         }
-        this.renderedFingerprint = fp;
     }
 
     /** Replace GreasedLineSimpleMaterial's auto-built colors texture
@@ -400,18 +530,29 @@ export class CommandPathRenderer {
      *  then leaves alpha at 1 regardless of `material.alpha`. By
      *  writing alpha=alpha*255 into the texture directly, the shader
      *  outputs the desired alpha and Babylon's alpha-blend pipeline
-     *  blends correctly against the framebuffer. */
+     *  blends correctly against the framebuffer.
+     *
+     *  When `premultiplied` is set we also multiply RGB by alpha before
+     *  packing — required to pair with `Engine.ALPHA_PREMULTIPLIED`
+     *  blending. Without this the line's quad antialiasing samples the
+     *  unpremultiplied colour against a transparent-black background,
+     *  producing a visible dark fringe at the quad edges. With
+     *  premultiplied data + premultiplied blend, the fringe disappears
+     *  because the "background" already encodes alpha=0 cleanly. */
     private bakeAlphaIntoColorsTexture(
         mat: GreasedLineSimpleMaterial,
         colors: ReadonlyArray<Color3>,
         alpha: number,
+        premultiplied: boolean,
     ): void {
-        const a8 = Math.round(Math.max(0, Math.min(1, alpha)) * 255);
+        const a = Math.max(0, Math.min(1, alpha));
+        const a8 = Math.round(a * 255);
+        const rgbMult = premultiplied ? a : 1;
         const data = new Uint8Array(colors.length * 4);
         for (let i = 0, j = 0; i < colors.length; i++) {
-            data[j++] = Math.round(colors[i].r * 255);
-            data[j++] = Math.round(colors[i].g * 255);
-            data[j++] = Math.round(colors[i].b * 255);
+            data[j++] = Math.round(colors[i].r * rgbMult * 255);
+            data[j++] = Math.round(colors[i].g * rgbMult * 255);
+            data[j++] = Math.round(colors[i].b * rgbMult * 255);
             data[j++] = a8;
         }
         const oldTex = mat.colorsTexture;
@@ -441,6 +582,13 @@ export class CommandPathRenderer {
             this.linesMesh.dispose();
             this.linesMesh = null;
         }
+        if (this.glowMesh) {
+            this.glowMesh.material?.dispose();
+            this.glowMesh.dispose();
+            this.glowMesh = null;
+        }
+        for (const m of this.startMarkers) m.dispose();
+        this.startMarkers = [];
     }
 
     clear(): void {
@@ -450,5 +598,13 @@ export class CommandPathRenderer {
 
     dispose(): void {
         this.clear();
+        if (this.startMaster) {
+            this.startMaster.dispose();
+            this.startMaster = null;
+        }
+        if (this.startMaterial) {
+            this.startMaterial.dispose();
+            this.startMaterial = null;
+        }
     }
 }
