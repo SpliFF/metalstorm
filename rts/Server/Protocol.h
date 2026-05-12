@@ -397,13 +397,19 @@ inline std::vector<uint8_t> BuildUnitCommandQueues(const std::vector<CUnit*>& un
         SpringWeb::ServerPayload_UnitCommandQueuesUpdate, upd.Union());
 }
 
-/// Serialize each unit's available build-command descriptors. Builds and
-/// factories often have build options assigned dynamically (Spring.InsertUnitCmdDesc
-/// from gadgets) so the static UnitDef.build_options list is not authoritative.
-/// We stream only the negative-id (build) entries — positional/standing-order
-/// command buttons are handled client-side from the CMD_* enum.
+/// Serialize each unit's available command descriptors. Streams the
+/// full SCommandDescription surface (name, action, texture, tooltip,
+/// type, params, hidden, disabled) so ZK's gui_chili_integral_menu and
+/// every cmd_*.lua widget has the data it needs to render and bind
+/// hotkeys.
+///
+/// Bandwidth: a unit has 10-40 cmd-descs; at ~50 bytes per entry that's
+/// ~2 KB per unit. Callers should restrict `units` to the player's
+/// current selection (see SelectionState) — broadcasting the union of
+/// every team unit's cmd-descs would be wasteful since only selected
+/// units' command panels are rendered.
 inline std::vector<uint8_t> BuildUnitCmdDescs(const std::vector<CUnit*>& units) {
-    flatbuffers::FlatBufferBuilder fbb(2048);
+    flatbuffers::FlatBufferBuilder fbb(4096);
 
     std::vector<flatbuffers::Offset<SpringWeb::UnitCmdDescs>> unitOffsets;
     unitOffsets.reserve(units.size());
@@ -415,17 +421,35 @@ inline std::vector<uint8_t> BuildUnitCmdDescs(const std::vector<CUnit*>& units) 
         std::vector<flatbuffers::Offset<SpringWeb::UnitCmdDesc>> cmdOffsets;
         cmdOffsets.reserve(descs.size());
         for (const SCommandDescription* d : descs) {
-            if (d == nullptr || d->hidden) continue;
-            // First pass: build commands only. Standing-order toggles
-            // come later when the client UI grows beyond build placement.
-            if (d->id >= 0) continue;
+            if (d == nullptr) continue;
+            // Send hidden descs too — widgets sometimes need to query
+            // them. The `hidden` field on the wire lets the renderer
+            // skip them.
+            auto nameOff    = fbb.CreateString(d->name);
+            auto actionOff  = fbb.CreateString(d->action);
+            auto textureOff = fbb.CreateString(d->iconname);
+            auto tooltipOff = fbb.CreateString(d->tooltip);
+
+            std::vector<flatbuffers::Offset<flatbuffers::String>> paramOffs;
+            paramOffs.reserve(d->params.size());
+            for (const auto& p : d->params) {
+                paramOffs.push_back(fbb.CreateString(p));
+            }
+            auto paramsVec = fbb.CreateVector(paramOffs);
+
             cmdOffsets.push_back(SpringWeb::CreateUnitCmdDesc(
                 fbb,
                 static_cast<int32_t>(d->id),
-                d->disabled));
+                d->disabled,
+                nameOff,
+                actionOff,
+                textureOff,
+                tooltipOff,
+                static_cast<int32_t>(d->type),
+                paramsVec,
+                d->hidden));
         }
 
-        // Skip units with no build-command descs to keep the payload tight.
         if (cmdOffsets.empty()) continue;
 
         auto cmdsVec = fbb.CreateVector(cmdOffsets);

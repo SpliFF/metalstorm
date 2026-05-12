@@ -43,6 +43,15 @@ struct ClientSession {
     /// Per-client viewports (indexed by viewport_id).
     std::array<Viewport, MAX_VIEWPORTS> viewports{};
 
+    /// Most recent SelectionState received from the client. Scopes the
+    /// per-unit cmd-desc broadcast so the server doesn't re-serialise
+    /// every own-team unit's command panel each tick — only the units
+    /// the player has selected. Empty set is interpreted as "no
+    /// selection set yet" → fall back to streaming every own-team unit
+    /// (degraded but functional for older clients).
+    std::unordered_set<uint32_t> selectedUnits;
+    uint32_t lastSelectionSeq = 0;
+
     /// Delta compression cache — tracks last-sent entity state.
     EntityDeltaCache deltaCache;
 

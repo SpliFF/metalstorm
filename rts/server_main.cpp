@@ -1378,6 +1378,24 @@ int main(int argc, char* argv[])
                     luaExecEngine.Push(std::move(req));
                     break;
                 }
+                case SpringWeb::ClientPayload_SelectionState: {
+                    auto* session = sessions.GetSession(msg.clientId);
+                    if (!session) break;
+                    auto* sel = clientMsg->payload_as_SelectionState();
+                    if (!sel) break;
+                    // Drop out-of-order updates — selection arrives debounced
+                    // so the latest sequence is authoritative.
+                    if (sel->sequence() < session->lastSelectionSeq) break;
+                    session->lastSelectionSeq = sel->sequence();
+                    session->selectedUnits.clear();
+                    if (auto* ids = sel->unit_ids()) {
+                        session->selectedUnits.reserve(ids->size());
+                        for (uint32_t i = 0; i < ids->size(); ++i) {
+                            session->selectedUnits.insert(ids->Get(i));
+                        }
+                    }
+                    break;
+                }
                 default:
                     break;
             }
@@ -1528,12 +1546,26 @@ int main(int argc, char* argv[])
                     rtcServer.SendReliable(clientId, msg.data(), msg.size());
                 }
 
-                // Cmd descs stay own-team — players can't issue build
-                // orders to allied units, so streaming their build
-                // options is wasted bandwidth.
+                // Cmd descs are scoped to the player's current
+                // selection. Each entry is ~50 bytes × ~30 commands × N
+                // selected units; sending the full own-team set every
+                // tick would dwarf the entity stream. We fall back to
+                // the full own-team list only when the client hasn't
+                // sent any SelectionState yet (older clients).
                 const auto& ownUnits = unitHandler.GetUnitsByTeam(session.team);
-                if (!ownUnits.empty()) {
-                    auto descs = Protocol::BuildUnitCmdDescs(ownUnits);
+                std::vector<CUnit*> cmdDescTargets;
+                if (!session.selectedUnits.empty()) {
+                    cmdDescTargets.reserve(session.selectedUnits.size());
+                    for (CUnit* u : ownUnits) {
+                        if (u && session.selectedUnits.count(static_cast<uint32_t>(u->id))) {
+                            cmdDescTargets.push_back(u);
+                        }
+                    }
+                } else if (session.lastSelectionSeq == 0) {
+                    cmdDescTargets = ownUnits;
+                }
+                if (!cmdDescTargets.empty()) {
+                    auto descs = Protocol::BuildUnitCmdDescs(cmdDescTargets);
                     rtcServer.SendReliable(clientId, descs.data(), descs.size());
                 }
             });
