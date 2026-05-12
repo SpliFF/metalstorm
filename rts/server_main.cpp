@@ -1205,6 +1205,78 @@ int main(int argc, char* argv[])
                     }
                     break;
                 }
+                case SpringWeb::ClientPayload_PlayerCommandBatch: {
+                    // Atomic execution of a sequence of PlayerCommand
+                    // entries on the same sim tick. Used by:
+                    //   - Waypoint drag (CMD.INSERT + CMD.REMOVE pair
+                    //     against the same unit, where dropping or
+                    //     reordering would break intent)
+                    //   - Build drag-row / drag-rectangle (N CMD_BUILD
+                    //     entries against the same builder list, all
+                    //     queued without intervening state transitions)
+                    // The batch consumes one sequence-number slot (the
+                    // batch's `sequence` field), not one per inner
+                    // command — sending stale or duplicate batches
+                    // bounces with the same 400 the per-command path
+                    // returns.
+                    auto* session = sessions.GetSession(msg.clientId);
+                    if (!session) {
+                        auto err = Protocol::BuildServerError(401, "Not authenticated");
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                        break;
+                    }
+
+                    if (session->commandsThisTick >= SessionManager::MAX_COMMANDS_PER_TICK) {
+                        auto err = Protocol::BuildServerError(429, "Command rate limit exceeded");
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                        break;
+                    }
+                    session->commandsThisTick++;
+
+                    auto* batch = clientMsg->payload_as_PlayerCommandBatch();
+                    if (!batch || !batch->commands()) break;
+
+                    if (batch->sequence() <= session->lastCommandSeq && session->lastCommandSeq > 0) {
+                        auto err = Protocol::BuildServerError(400, "Stale command sequence");
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                        break;
+                    }
+                    session->lastCommandSeq = batch->sequence();
+
+                    int totalRouted = 0;
+                    int totalRejectedTeam = 0;
+                    for (unsigned ci = 0; ci < batch->commands()->size(); ci++) {
+                        auto* cmd = batch->commands()->Get(ci);
+                        if (!cmd) continue;
+                        Command simCmd(cmd->command_id(),
+                                       static_cast<unsigned char>(cmd->options()));
+                        if (cmd->timeout_frames() > 0)
+                            simCmd.SetTimeOut(static_cast<int>(cmd->timeout_frames()));
+                        if (cmd->params()) {
+                            for (unsigned i = 0; i < cmd->params()->size(); i++)
+                                simCmd.PushParam(cmd->params()->Get(i));
+                        }
+                        if (!cmd->squad_ids()) continue;
+                        for (unsigned i = 0; i < cmd->squad_ids()->size(); i++) {
+                            uint32_t unitId = cmd->squad_ids()->Get(i);
+                            CUnit* unit = unitHandler.GetUnit(unitId);
+                            if (unit == nullptr || unit->isDead) continue;
+                            if (session->team >= 0 && unit->team != session->team) {
+                                totalRejectedTeam++;
+                                continue;
+                            }
+                            unit->commandAI->GiveCommand(simCmd);
+                            totalRouted++;
+                        }
+                    }
+                    SLOG(SPRING_LOG_DEBUG,
+                        "cmd-batch: client %u (%s, team=%d): seq=%u entries=%u routed=%d rejected=%d",
+                        msg.clientId, session->username.c_str(), session->team,
+                        batch->sequence(),
+                        batch->commands()->size(),
+                        totalRouted, totalRejectedTeam);
+                    break;
+                }
                 case SpringWeb::ClientPayload_ViewportUpdate: {
                     auto* session = sessions.GetSession(msg.clientId);
                     if (!session) {

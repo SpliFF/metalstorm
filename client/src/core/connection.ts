@@ -64,6 +64,7 @@ import { UnitLifecycleEvent } from '../protocol/spring-web/unit-lifecycle-event.
 import { UnitLifecycleKind } from '../protocol/spring-web/unit-lifecycle-kind.js';
 import { AuthRequest } from '../protocol/spring-web/auth-request.js';
 import { PlayerCommand } from '../protocol/spring-web/player-command.js';
+import { PlayerCommandBatch } from '../protocol/spring-web/player-command-batch.js';
 import { LuaRulesMsg } from '../protocol/spring-web/lua-rules-msg.js';
 import { SelectionState } from '../protocol/spring-web/selection-state.js';
 import { PathRequest } from '../protocol/spring-web/path-request.js';
@@ -924,6 +925,63 @@ export class Connection {
             timeoutFrames,
         );
         this.sendClientMessage(builder, ClientPayload.PlayerCommand, cmd);
+    }
+
+    /** Send a PlayerCommandBatch — atomic execution of N PlayerCommand
+     *  entries on the same sim tick. Used by waypoint-drag (an
+     *  INSERT+REMOVE pair against the same unit) and building drag-row
+     *  / drag-rectangle placement. Consumes one sequence-number slot
+     *  for the whole batch; the inner commands don't carry their own. */
+    sendPlayerCommandBatch(
+        commands: ReadonlyArray<{
+            commandId: number;
+            unitIds: number[];
+            params: number[];
+            options?: number;
+            timeoutFrames?: number;
+        }>,
+    ): void {
+        if (!this.authenticated) return;
+        if (commands.length === 0) return;
+        // Build each inner PlayerCommand into the same builder; flatbuffers
+        // requires nested objects to be finished before the table that
+        // references them, so we accumulate offsets first and only start
+        // the outer batch afterwards.
+        let totalUnits = 0;
+        let totalParams = 0;
+        for (const c of commands) {
+            totalUnits += c.unitIds.length;
+            totalParams += c.params.length;
+        }
+        const builder = new flatbuffers.Builder(
+            256 + commands.length * 32 + totalUnits * 4 + totalParams * 4,
+        );
+        const cmdOffsets: flatbuffers.Offset[] = [];
+        for (const c of commands) {
+            const squadIdsOff = PlayerCommand.createSquadIdsVector(builder, c.unitIds);
+            const paramsOff = PlayerCommand.createParamsVector(builder, c.params);
+            // Inner sequence numbers are ignored by the server (the
+            // batch's sequence number is the authoritative one) but the
+            // schema requires the field to be present — write 0.
+            const off = PlayerCommand.createPlayerCommand(
+                builder,
+                0,
+                c.commandId,
+                squadIdsOff,
+                paramsOff,
+                c.options ?? 0,
+                c.timeoutFrames ?? 0,
+            );
+            cmdOffsets.push(off);
+        }
+        const cmdsVec = PlayerCommandBatch.createCommandsVector(builder, cmdOffsets);
+        this.commandSequence++;
+        const batch = PlayerCommandBatch.createPlayerCommandBatch(
+            builder,
+            this.commandSequence,
+            cmdsVec,
+        );
+        this.sendClientMessage(builder, ClientPayload.PlayerCommandBatch, batch);
     }
 
     sendClientMessage(builder: flatbuffers.Builder, payloadType: ClientPayload, payloadOffset: number): void {

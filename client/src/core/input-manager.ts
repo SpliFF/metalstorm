@@ -122,6 +122,35 @@ export class InputManager {
     private dragShift = false;
     private dragOverlay: HTMLDivElement | null = null;
 
+    /// Latest broadcast of command queues, cached so the waypoint-drag
+    /// handler can read the dragged order's full params (tag alone isn't
+    /// enough — we preserve cmdId, options, and any trailing params like
+    /// build facing when sending the INSERT half of the drag-batch).
+    private lastQueues: ReadonlyArray<{
+        unitId: number;
+        orders: ReadonlyArray<{
+            cmdId: number;
+            params: number[];
+            tag?: number;
+            options?: number;
+        }>;
+    }> = [];
+
+    /// Active waypoint-drag, if any. Captured on shift+left-down over a
+    /// waypoint marker; committed on pointerup as an INSERT+REMOVE batch.
+    /// originalOrder is a snapshot of the dragged order from lastQueues
+    /// at the moment the drag began — preserves cmdId, options, and the
+    /// non-positional trailing params (e.g. build facing).
+    private waypointDrag: {
+        unitId: number;
+        tag: number;
+        cmdId: number;
+        originalParams: number[];
+        originalOptions: number;
+        ghostLine: Mesh | null;
+        markerMesh: Mesh | null;
+    } | null = null;
+
     // Build placement state — non-null while the player has clicked a build
     // button and is choosing a ground location. Cancelled by ESC, right-click,
     // selection change, or a successful left-click placement (unless shift is
@@ -167,6 +196,8 @@ export class InputManager {
     /// (handled in MobileCAI / BuilderCAI).
     private pendingCmdTarget: 'ground' | 'unit' | 'either' = 'ground';
 
+    private connection: Connection;
+
     constructor(
         scene: Scene,
         camera: FreeCamera,
@@ -177,6 +208,7 @@ export class InputManager {
         this.scene = scene;
         this.camera = camera;
         this.entityRenderer = entityRenderer;
+        this.connection = connection;
         this.commandBuffer = new CommandBuffer(connection);
         this.onSelectionChange = onSelectionChange;
 
@@ -609,8 +641,11 @@ export class InputManager {
      *  Drops any pending ghost whose corresponding build order is no
      *  longer in *any* of its owning units' command queues — that's our
      *  signal that construction has started (the order pops off the head
-     *  when the builder reaches the site) or the player cancelled it. */
-    onCommandQueuesUpdated(queues: ReadonlyArray<{ unitId: number; orders: ReadonlyArray<{ cmdId: number; params: number[] }> }>): void {
+     *  when the builder reaches the site) or the player cancelled it.
+     *  Also caches the queues so the waypoint-drag handler can look up
+     *  the original order's full params on commit. */
+    onCommandQueuesUpdated(queues: ReadonlyArray<{ unitId: number; orders: ReadonlyArray<{ cmdId: number; params: number[]; tag?: number; options?: number }> }>): void {
+        this.lastQueues = queues;
         if (this.pendingBuilds.length === 0) return;
         // Build a quick lookup: unitId → set of "build@x,z@defId" keys.
         const unitToBuilds = new Map<number, Set<string>>();
@@ -745,6 +780,13 @@ export class InputManager {
             if (this.tryRevokeWaypointAt(evt)) return;
         }
 
+        // Waypoint drag: Shift+left-down over a waypoint marker captures
+        // the drag. Commit happens on pointerup (onLeftUp). Must run
+        // before the regular shift-additive selection path.
+        if (evt.shiftKey && !evt.ctrlKey && !evt.altKey) {
+            if (this.tryStartWaypointDrag(evt)) return;
+        }
+
         // Build placement: a left-click during placement issues the build
         // order at the ground point, not a unit selection.
         if (this.buildPlacement) {
@@ -800,6 +842,10 @@ export class InputManager {
     private onDragMove(evt: PointerEvent): void {
         this.dragCurX = evt.clientX;
         this.dragCurY = evt.clientY;
+        if (this.waypointDrag) {
+            this.updateWaypointDrag(evt);
+            return;
+        }
         const dx = this.dragCurX - this.dragStartX;
         const dy = this.dragCurY - this.dragStartY;
         if (Math.hypot(dx, dy) >= DRAG_THRESHOLD_PX) {
@@ -811,6 +857,11 @@ export class InputManager {
         this.dragActive = false;
         this.hideDragOverlay();
 
+        if (this.waypointDrag) {
+            this.commitWaypointDrag(evt);
+            return;
+        }
+
         const dx = evt.clientX - this.dragStartX;
         const dy = evt.clientY - this.dragStartY;
         if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) {
@@ -821,6 +872,143 @@ export class InputManager {
             // inside the drag rectangle.
             this.handleBoxSelect(evt);
         }
+    }
+
+    /** Try to start a waypoint drag from a Shift+left-down. Returns true
+     *  if the gesture was captured (caller should bail). */
+    private tryStartWaypointDrag(evt: PointerEvent): boolean {
+        const canvas = this.scene.getEngine().getRenderingCanvas();
+        if (!canvas) return false;
+        const rect = canvas.getBoundingClientRect();
+        const cx = evt.clientX - rect.left;
+        const cy = evt.clientY - rect.top;
+        const pick = this.scene.pick(cx, cy, (m) =>
+            m.isPickable && m.name.startsWith('waypoint-marker-'),
+        );
+        if (!pick?.hit || !pick.pickedMesh) return false;
+        const meta = (pick.pickedMesh.metadata as { waypoint?: WaypointMarkerMeta } | null)?.waypoint;
+        if (!meta || !meta.tag) return false;
+
+        // Look up the original order in the cached queue snapshot so we
+        // preserve its full params + options when re-inserting. Bail if
+        // the queue cache hasn't received the order yet — the marker is
+        // stale and we can't issue a correct INSERT.
+        const queue = this.lastQueues.find((q) => q.unitId === meta.unitId);
+        const order = queue?.orders.find((o) => o.tag === meta.tag);
+        if (!order) return false;
+
+        // Set up drag state. Hide the picked marker so it doesn't
+        // re-appear at the original position while the user drags.
+        const markerMesh = pick.pickedMesh as Mesh;
+        markerMesh.isVisible = false;
+
+        this.waypointDrag = {
+            unitId: meta.unitId,
+            tag: meta.tag,
+            cmdId: meta.cmdId,
+            originalParams: order.params.slice(),
+            originalOptions: order.options ?? 0,
+            ghostLine: null,
+            markerMesh,
+        };
+
+        // Trigger drag-active state so onDragMove keeps firing. dragShift
+        // is irrelevant for a waypoint drag — we read evt.shiftKey on
+        // commit. Use a tiny epsilon delta so the drag-threshold check in
+        // onDragMove doesn't immediately fire the regular drag-overlay.
+        this.dragActive = true;
+        this.dragStartX = evt.clientX;
+        this.dragStartY = evt.clientY;
+        this.dragCurX = evt.clientX;
+        this.dragCurY = evt.clientY;
+        return true;
+    }
+
+    /** Update the ghost-line preview while a waypoint drag is in flight. */
+    private updateWaypointDrag(evt: PointerEvent): void {
+        const drag = this.waypointDrag;
+        if (!drag) return;
+        const groundPos = this.pickGroundAt(evt.clientX, evt.clientY);
+        if (!groundPos) return;
+
+        // Original world position (from the snapshotted params) →
+        // current cursor ground point. Simple 2-vertex line line — we
+        // recreate on every move rather than updating vertices in place;
+        // pointer-move frequency is low enough that re-allocation is
+        // cheaper than the bookkeeping for updateable meshes.
+        const oP = drag.originalParams;
+        if (oP.length < 3) return;
+        const start = new Vector3(oP[0], oP[1] + 6, oP[2]);
+        const end = new Vector3(groundPos.x, groundPos.y + 6, groundPos.z);
+
+        drag.ghostLine?.dispose();
+        const line = MeshBuilder.CreateLines(
+            'waypoint-drag-ghost',
+            { points: [start, end], updatable: false },
+            this.scene,
+        );
+        line.color = new Color3(1, 1, 1);
+        line.alpha = 0.85;
+        line.isPickable = false;
+        line.renderingGroupId = 3;
+        drag.ghostLine = line;
+    }
+
+    /** Commit the waypoint drag — send a PlayerCommandBatch with an
+     *  INSERT (new position, tagged via OPT.ALT to anchor before the
+     *  original order's slot) and a REMOVE (drop the original tag). The
+     *  batch guarantees atomic execution on a single sim tick so the
+     *  unit never sees an intermediate state with both orders queued. */
+    private commitWaypointDrag(evt: PointerEvent): void {
+        const drag = this.waypointDrag;
+        if (!drag) return;
+        // Always clear visual state first so an early bail-out below
+        // doesn't leak the ghost line or hidden marker.
+        drag.ghostLine?.dispose();
+        if (drag.markerMesh) drag.markerMesh.isVisible = true;
+        this.waypointDrag = null;
+
+        const groundPos = this.pickGroundAt(evt.clientX, evt.clientY);
+        if (!groundPos) return;
+
+        // Detect a no-op: cursor barely moved (treated as a click, not a
+        // drag). Cancel rather than committing a redundant batch.
+        const dx = evt.clientX - this.dragStartX;
+        const dy = evt.clientY - this.dragStartY;
+        if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
+
+        // Construct the new params: replace the first three (x, y, z)
+        // with the cursor's ground position, keep any trailing params
+        // (build facing, radius, etc.) untouched.
+        const newParams = drag.originalParams.slice();
+        newParams[0] = groundPos.x;
+        newParams[1] = groundPos.y;
+        newParams[2] = groundPos.z;
+
+        // INSERT params layout (see CommandAI.cpp ExecuteInsert):
+        //   [insertPos, newCmdId, newOpts, ...newParams]
+        // With OPT.ALT on the INSERT itself, insertPos is interpreted as
+        // a TAG: the server looks up the order with that tag and inserts
+        // the new order before it. Pair with a REMOVE on the same tag
+        // and the result is a positional rewrite of the dragged order
+        // (the original tag's slot is filled by the new INSERT, then
+        // the original is dropped).
+        const insertParams = [drag.tag, drag.cmdId, drag.originalOptions, ...newParams];
+
+        this.connection.sendPlayerCommandBatch([
+            {
+                commandId: CMD.INSERT,
+                unitIds: [drag.unitId],
+                params: insertParams,
+                options: OPT_ALT,
+            },
+            {
+                commandId: CMD.REMOVE,
+                unitIds: [drag.unitId],
+                params: [drag.tag],
+                options: 0,
+            },
+        ]);
     }
 
     // ---- Single click ----
