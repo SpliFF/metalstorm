@@ -179,48 +179,61 @@ maxDec():number {
   return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
 }
 
-losRadius():number {
+/**
+ * MoveDef pathType, the index ZK widgets read as
+ * `UnitDefs[id].moveDef.id`. Required by `Spring.RequestPath` to
+ * route the query through the correct mobility class (kbot vs tank
+ * vs hover, etc.). UINT32_MAX (4294967295) = unit has no MoveDef
+ * (air units, immobile buildings); widgets that resolve a move
+ * type via this field must skip the request entirely.
+ */
+moveDefPathType():number {
   const offset = this.bb!.__offset(this.bb_pos, 56);
-  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
+  return offset ? this.bb!.readUint32(this.bb_pos + offset) : 4294967295;
 }
 
-airLosRadius():number {
+losRadius():number {
   const offset = this.bb!.__offset(this.bb_pos, 58);
   return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
 }
 
-radarRadius():number {
+airLosRadius():number {
   const offset = this.bb!.__offset(this.bb_pos, 60);
-  return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
+  return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
 }
 
-sonarRadius():number {
+radarRadius():number {
   const offset = this.bb!.__offset(this.bb_pos, 62);
   return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
 }
 
-jammerRadius():number {
+sonarRadius():number {
   const offset = this.bb!.__offset(this.bb_pos, 64);
   return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
 }
 
-seismicRadius():number {
+jammerRadius():number {
   const offset = this.bb!.__offset(this.bb_pos, 66);
   return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
 }
 
-flags():number {
+seismicRadius():number {
   const offset = this.bb!.__offset(this.bb_pos, 68);
+  return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
+}
+
+flags():number {
+  const offset = this.bb!.__offset(this.bb_pos, 70);
   return offset ? this.bb!.readUint32(this.bb_pos + offset) : 0;
 }
 
 buildDistance():number {
-  const offset = this.bb!.__offset(this.bb_pos, 70);
+  const offset = this.bb!.__offset(this.bb_pos, 72);
   return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
 }
 
 buildSpeed():number {
-  const offset = this.bb!.__offset(this.bb_pos, 72);
+  const offset = this.bb!.__offset(this.bb_pos, 74);
   return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
 }
 
@@ -228,17 +241,17 @@ buildSpeed():number {
  * def_ids of every unit this builder can construct.
  */
 buildOptions(index: number):number|null {
-  const offset = this.bb!.__offset(this.bb_pos, 74);
+  const offset = this.bb!.__offset(this.bb_pos, 76);
   return offset ? this.bb!.readUint16(this.bb!.__vector(this.bb_pos + offset) + index * 2) : 0;
 }
 
 buildOptionsLength():number {
-  const offset = this.bb!.__offset(this.bb_pos, 74);
+  const offset = this.bb!.__offset(this.bb_pos, 76);
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
 buildOptionsArray():Uint16Array|null {
-  const offset = this.bb!.__offset(this.bb_pos, 74);
+  const offset = this.bb!.__offset(this.bb_pos, 76);
   return offset ? new Uint16Array(this.bb!.bytes().buffer, this.bb!.bytes().byteOffset + this.bb!.__vector(this.bb_pos + offset), this.bb!.__vector_len(this.bb_pos + offset)) : null;
 }
 
@@ -248,17 +261,17 @@ buildOptionsArray():Uint16Array|null {
  * already has via GameWeaponDef streaming.
  */
 weaponDefIds(index: number):number|null {
-  const offset = this.bb!.__offset(this.bb_pos, 76);
+  const offset = this.bb!.__offset(this.bb_pos, 78);
   return offset ? this.bb!.readUint16(this.bb!.__vector(this.bb_pos + offset) + index * 2) : 0;
 }
 
 weaponDefIdsLength():number {
-  const offset = this.bb!.__offset(this.bb_pos, 76);
+  const offset = this.bb!.__offset(this.bb_pos, 78);
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
 weaponDefIdsArray():Uint16Array|null {
-  const offset = this.bb!.__offset(this.bb_pos, 76);
+  const offset = this.bb!.__offset(this.bb_pos, 78);
   return offset ? new Uint16Array(this.bb!.bytes().buffer, this.bb!.bytes().byteOffset + this.bb!.__vector(this.bb_pos + offset), this.bb!.__vector_len(this.bb_pos + offset)) : null;
 }
 
@@ -269,12 +282,12 @@ weaponDefIdsArray():Uint16Array|null {
  * Empty unless the unitdef has any customParams entries.
  */
 customParams(index: number, obj?:CustomParam):CustomParam|null {
-  const offset = this.bb!.__offset(this.bb_pos, 78);
+  const offset = this.bb!.__offset(this.bb_pos, 80);
   return offset ? (obj || new CustomParam()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
 }
 
 customParamsLength():number {
-  const offset = this.bb!.__offset(this.bb_pos, 78);
+  const offset = this.bb!.__offset(this.bb_pos, 80);
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
@@ -282,22 +295,22 @@ customParamsLength():number {
  * Rare fields ZK widgets occasionally read. Default 0 / empty.
  */
 repairSpeed():number {
-  const offset = this.bb!.__offset(this.bb_pos, 80);
+  const offset = this.bb!.__offset(this.bb_pos, 82);
   return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
 }
 
 transportSize():number {
-  const offset = this.bb!.__offset(this.bb_pos, 82);
+  const offset = this.bb!.__offset(this.bb_pos, 84);
   return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
 }
 
 transportMass():number {
-  const offset = this.bb!.__offset(this.bb_pos, 84);
+  const offset = this.bb!.__offset(this.bb_pos, 86);
   return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
 }
 
 transportCapacity():number {
-  const offset = this.bb!.__offset(this.bb_pos, 86);
+  const offset = this.bb!.__offset(this.bb_pos, 88);
   return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
 }
 
@@ -307,7 +320,7 @@ transportCapacity():number {
 yardmap():string|null
 yardmap(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
 yardmap(optionalEncoding?:any):string|Uint8Array|null {
-  const offset = this.bb!.__offset(this.bb_pos, 88);
+  const offset = this.bb!.__offset(this.bb_pos, 90);
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
@@ -318,7 +331,7 @@ yardmap(optionalEncoding?:any):string|Uint8Array|null {
 script():string|null
 script(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
 script(optionalEncoding?:any):string|Uint8Array|null {
-  const offset = this.bb!.__offset(this.bb_pos, 90);
+  const offset = this.bb!.__offset(this.bb_pos, 92);
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
@@ -328,7 +341,7 @@ script(optionalEncoding?:any):string|Uint8Array|null {
 buildPic():string|null
 buildPic(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
 buildPic(optionalEncoding?:any):string|Uint8Array|null {
-  const offset = this.bb!.__offset(this.bb_pos, 92);
+  const offset = this.bb!.__offset(this.bb_pos, 94);
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
@@ -336,7 +349,7 @@ buildPic(optionalEncoding?:any):string|Uint8Array|null {
  * Maximum velocity (different from speed for some unit types).
  */
 maxVelocity():number {
-  const offset = this.bb!.__offset(this.bb_pos, 94);
+  const offset = this.bb!.__offset(this.bb_pos, 96);
   return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
 }
 
@@ -344,7 +357,7 @@ maxVelocity():number {
  * Build cost float (combined). Some widgets read this directly.
  */
 cost():number {
-  const offset = this.bb!.__offset(this.bb_pos, 96);
+  const offset = this.bb!.__offset(this.bb_pos, 98);
   return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
 }
 
@@ -352,7 +365,7 @@ cost():number {
  * Maximum range (max of all weapon ranges, derived).
  */
 maxWeaponRange():number {
-  const offset = this.bb!.__offset(this.bb_pos, 98);
+  const offset = this.bb!.__offset(this.bb_pos, 100);
   return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
 }
 
@@ -360,7 +373,7 @@ maxWeaponRange():number {
  * Maximum copies of this unit allowed per team. 0 = unlimited.
  */
 maxThisUnit():number {
-  const offset = this.bb!.__offset(this.bb_pos, 100);
+  const offset = this.bb!.__offset(this.bb_pos, 102);
   return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
 }
 
@@ -368,7 +381,7 @@ maxThisUnit():number {
  * Number of build power required to construct this unit.
  */
 canBeAssisted():boolean {
-  const offset = this.bb!.__offset(this.bb_pos, 102);
+  const offset = this.bb!.__offset(this.bb_pos, 104);
   return offset ? !!this.bb!.readInt8(this.bb_pos + offset) : true;
 }
 
@@ -376,7 +389,7 @@ canBeAssisted():boolean {
  * Whether this unit can self-destruct (separate from canKamikaze).
  */
 canSelfDestruct():boolean {
-  const offset = this.bb!.__offset(this.bb_pos, 104);
+  const offset = this.bb!.__offset(this.bb_pos, 106);
   return offset ? !!this.bb!.readInt8(this.bb_pos + offset) : true;
 }
 
@@ -384,7 +397,7 @@ canSelfDestruct():boolean {
  * Self-destruct countdown in seconds.
  */
 selfDCountdown():number {
-  const offset = this.bb!.__offset(this.bb_pos, 106);
+  const offset = this.bb!.__offset(this.bb_pos, 108);
   return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
 }
 
@@ -393,7 +406,7 @@ selfDCountdown():number {
  * Spring's category bitfield (terrain/movement/factory).
  */
 categoryBits():number {
-  const offset = this.bb!.__offset(this.bb_pos, 108);
+  const offset = this.bb!.__offset(this.bb_pos, 110);
   return offset ? this.bb!.readUint32(this.bb_pos + offset) : 0;
 }
 
@@ -403,17 +416,17 @@ categoryBits():number {
  * indexes into this array; empty when the unit has no sounds.
  */
 sounds(index: number, obj?:SoundRef):SoundRef|null {
-  const offset = this.bb!.__offset(this.bb_pos, 110);
+  const offset = this.bb!.__offset(this.bb_pos, 112);
   return offset ? (obj || new SoundRef()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
 }
 
 soundsLength():number {
-  const offset = this.bb!.__offset(this.bb_pos, 110);
+  const offset = this.bb!.__offset(this.bb_pos, 112);
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
 static startGameUnitDef(builder:flatbuffers.Builder) {
-  builder.startObject(54);
+  builder.startObject(55);
 }
 
 static addDefId(builder:flatbuffers.Builder, defId:number) {
@@ -520,44 +533,48 @@ static addMaxDec(builder:flatbuffers.Builder, maxDec:number) {
   builder.addFieldFloat32(25, maxDec, 0.0);
 }
 
+static addMoveDefPathType(builder:flatbuffers.Builder, moveDefPathType:number) {
+  builder.addFieldInt32(26, moveDefPathType, 4294967295);
+}
+
 static addLosRadius(builder:flatbuffers.Builder, losRadius:number) {
-  builder.addFieldFloat32(26, losRadius, 0.0);
+  builder.addFieldFloat32(27, losRadius, 0.0);
 }
 
 static addAirLosRadius(builder:flatbuffers.Builder, airLosRadius:number) {
-  builder.addFieldFloat32(27, airLosRadius, 0.0);
+  builder.addFieldFloat32(28, airLosRadius, 0.0);
 }
 
 static addRadarRadius(builder:flatbuffers.Builder, radarRadius:number) {
-  builder.addFieldInt32(28, radarRadius, 0);
+  builder.addFieldInt32(29, radarRadius, 0);
 }
 
 static addSonarRadius(builder:flatbuffers.Builder, sonarRadius:number) {
-  builder.addFieldInt32(29, sonarRadius, 0);
+  builder.addFieldInt32(30, sonarRadius, 0);
 }
 
 static addJammerRadius(builder:flatbuffers.Builder, jammerRadius:number) {
-  builder.addFieldInt32(30, jammerRadius, 0);
+  builder.addFieldInt32(31, jammerRadius, 0);
 }
 
 static addSeismicRadius(builder:flatbuffers.Builder, seismicRadius:number) {
-  builder.addFieldInt32(31, seismicRadius, 0);
+  builder.addFieldInt32(32, seismicRadius, 0);
 }
 
 static addFlags(builder:flatbuffers.Builder, flags:number) {
-  builder.addFieldInt32(32, flags, 0);
+  builder.addFieldInt32(33, flags, 0);
 }
 
 static addBuildDistance(builder:flatbuffers.Builder, buildDistance:number) {
-  builder.addFieldFloat32(33, buildDistance, 0.0);
+  builder.addFieldFloat32(34, buildDistance, 0.0);
 }
 
 static addBuildSpeed(builder:flatbuffers.Builder, buildSpeed:number) {
-  builder.addFieldFloat32(34, buildSpeed, 0.0);
+  builder.addFieldFloat32(35, buildSpeed, 0.0);
 }
 
 static addBuildOptions(builder:flatbuffers.Builder, buildOptionsOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(35, buildOptionsOffset, 0);
+  builder.addFieldOffset(36, buildOptionsOffset, 0);
 }
 
 static createBuildOptionsVector(builder:flatbuffers.Builder, data:number[]|Uint16Array):flatbuffers.Offset;
@@ -578,7 +595,7 @@ static startBuildOptionsVector(builder:flatbuffers.Builder, numElems:number) {
 }
 
 static addWeaponDefIds(builder:flatbuffers.Builder, weaponDefIdsOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(36, weaponDefIdsOffset, 0);
+  builder.addFieldOffset(37, weaponDefIdsOffset, 0);
 }
 
 static createWeaponDefIdsVector(builder:flatbuffers.Builder, data:number[]|Uint16Array):flatbuffers.Offset;
@@ -599,7 +616,7 @@ static startWeaponDefIdsVector(builder:flatbuffers.Builder, numElems:number) {
 }
 
 static addCustomParams(builder:flatbuffers.Builder, customParamsOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(37, customParamsOffset, 0);
+  builder.addFieldOffset(38, customParamsOffset, 0);
 }
 
 static createCustomParamsVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
@@ -615,67 +632,67 @@ static startCustomParamsVector(builder:flatbuffers.Builder, numElems:number) {
 }
 
 static addRepairSpeed(builder:flatbuffers.Builder, repairSpeed:number) {
-  builder.addFieldFloat32(38, repairSpeed, 0.0);
+  builder.addFieldFloat32(39, repairSpeed, 0.0);
 }
 
 static addTransportSize(builder:flatbuffers.Builder, transportSize:number) {
-  builder.addFieldInt32(39, transportSize, 0);
+  builder.addFieldInt32(40, transportSize, 0);
 }
 
 static addTransportMass(builder:flatbuffers.Builder, transportMass:number) {
-  builder.addFieldFloat32(40, transportMass, 0.0);
+  builder.addFieldFloat32(41, transportMass, 0.0);
 }
 
 static addTransportCapacity(builder:flatbuffers.Builder, transportCapacity:number) {
-  builder.addFieldInt32(41, transportCapacity, 0);
+  builder.addFieldInt32(42, transportCapacity, 0);
 }
 
 static addYardmap(builder:flatbuffers.Builder, yardmapOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(42, yardmapOffset, 0);
+  builder.addFieldOffset(43, yardmapOffset, 0);
 }
 
 static addScript(builder:flatbuffers.Builder, scriptOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(43, scriptOffset, 0);
+  builder.addFieldOffset(44, scriptOffset, 0);
 }
 
 static addBuildPic(builder:flatbuffers.Builder, buildPicOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(44, buildPicOffset, 0);
+  builder.addFieldOffset(45, buildPicOffset, 0);
 }
 
 static addMaxVelocity(builder:flatbuffers.Builder, maxVelocity:number) {
-  builder.addFieldFloat32(45, maxVelocity, 0.0);
+  builder.addFieldFloat32(46, maxVelocity, 0.0);
 }
 
 static addCost(builder:flatbuffers.Builder, cost:number) {
-  builder.addFieldFloat32(46, cost, 0.0);
+  builder.addFieldFloat32(47, cost, 0.0);
 }
 
 static addMaxWeaponRange(builder:flatbuffers.Builder, maxWeaponRange:number) {
-  builder.addFieldFloat32(47, maxWeaponRange, 0.0);
+  builder.addFieldFloat32(48, maxWeaponRange, 0.0);
 }
 
 static addMaxThisUnit(builder:flatbuffers.Builder, maxThisUnit:number) {
-  builder.addFieldInt32(48, maxThisUnit, 0);
+  builder.addFieldInt32(49, maxThisUnit, 0);
 }
 
 static addCanBeAssisted(builder:flatbuffers.Builder, canBeAssisted:boolean) {
-  builder.addFieldInt8(49, +canBeAssisted, +true);
+  builder.addFieldInt8(50, +canBeAssisted, +true);
 }
 
 static addCanSelfDestruct(builder:flatbuffers.Builder, canSelfDestruct:boolean) {
-  builder.addFieldInt8(50, +canSelfDestruct, +true);
+  builder.addFieldInt8(51, +canSelfDestruct, +true);
 }
 
 static addSelfDCountdown(builder:flatbuffers.Builder, selfDCountdown:number) {
-  builder.addFieldInt32(51, selfDCountdown, 0);
+  builder.addFieldInt32(52, selfDCountdown, 0);
 }
 
 static addCategoryBits(builder:flatbuffers.Builder, categoryBits:number) {
-  builder.addFieldInt32(52, categoryBits, 0);
+  builder.addFieldInt32(53, categoryBits, 0);
 }
 
 static addSounds(builder:flatbuffers.Builder, soundsOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(53, soundsOffset, 0);
+  builder.addFieldOffset(54, soundsOffset, 0);
 }
 
 static createSoundsVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
@@ -695,7 +712,7 @@ static endGameUnitDef(builder:flatbuffers.Builder):flatbuffers.Offset {
   return offset;
 }
 
-static createGameUnitDef(builder:flatbuffers.Builder, defId:number, nameOffset:flatbuffers.Offset, modelUrlOffset:flatbuffers.Offset, textureUrlOffset:flatbuffers.Offset, humanNameOffset:flatbuffers.Offset, tooltipOffset:flatbuffers.Offset, wreckNameOffset:flatbuffers.Offset, metalCost:number, energyCost:number, buildTime:number, metalMake:number, energyMake:number, metalUpkeep:number, energyUpkeep:number, metalStorage:number, energyStorage:number, extractsMetal:number, health:number, mass:number, radius:number, xsize:number, zsize:number, speed:number, turnRate:number, maxAcc:number, maxDec:number, losRadius:number, airLosRadius:number, radarRadius:number, sonarRadius:number, jammerRadius:number, seismicRadius:number, flags:number, buildDistance:number, buildSpeed:number, buildOptionsOffset:flatbuffers.Offset, weaponDefIdsOffset:flatbuffers.Offset, customParamsOffset:flatbuffers.Offset, repairSpeed:number, transportSize:number, transportMass:number, transportCapacity:number, yardmapOffset:flatbuffers.Offset, scriptOffset:flatbuffers.Offset, buildPicOffset:flatbuffers.Offset, maxVelocity:number, cost:number, maxWeaponRange:number, maxThisUnit:number, canBeAssisted:boolean, canSelfDestruct:boolean, selfDCountdown:number, categoryBits:number, soundsOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createGameUnitDef(builder:flatbuffers.Builder, defId:number, nameOffset:flatbuffers.Offset, modelUrlOffset:flatbuffers.Offset, textureUrlOffset:flatbuffers.Offset, humanNameOffset:flatbuffers.Offset, tooltipOffset:flatbuffers.Offset, wreckNameOffset:flatbuffers.Offset, metalCost:number, energyCost:number, buildTime:number, metalMake:number, energyMake:number, metalUpkeep:number, energyUpkeep:number, metalStorage:number, energyStorage:number, extractsMetal:number, health:number, mass:number, radius:number, xsize:number, zsize:number, speed:number, turnRate:number, maxAcc:number, maxDec:number, moveDefPathType:number, losRadius:number, airLosRadius:number, radarRadius:number, sonarRadius:number, jammerRadius:number, seismicRadius:number, flags:number, buildDistance:number, buildSpeed:number, buildOptionsOffset:flatbuffers.Offset, weaponDefIdsOffset:flatbuffers.Offset, customParamsOffset:flatbuffers.Offset, repairSpeed:number, transportSize:number, transportMass:number, transportCapacity:number, yardmapOffset:flatbuffers.Offset, scriptOffset:flatbuffers.Offset, buildPicOffset:flatbuffers.Offset, maxVelocity:number, cost:number, maxWeaponRange:number, maxThisUnit:number, canBeAssisted:boolean, canSelfDestruct:boolean, selfDCountdown:number, categoryBits:number, soundsOffset:flatbuffers.Offset):flatbuffers.Offset {
   GameUnitDef.startGameUnitDef(builder);
   GameUnitDef.addDefId(builder, defId);
   GameUnitDef.addName(builder, nameOffset);
@@ -723,6 +740,7 @@ static createGameUnitDef(builder:flatbuffers.Builder, defId:number, nameOffset:f
   GameUnitDef.addTurnRate(builder, turnRate);
   GameUnitDef.addMaxAcc(builder, maxAcc);
   GameUnitDef.addMaxDec(builder, maxDec);
+  GameUnitDef.addMoveDefPathType(builder, moveDefPathType);
   GameUnitDef.addLosRadius(builder, losRadius);
   GameUnitDef.addAirLosRadius(builder, airLosRadius);
   GameUnitDef.addRadarRadius(builder, radarRadius);
@@ -782,6 +800,7 @@ unpack(): GameUnitDefT {
     this.turnRate(),
     this.maxAcc(),
     this.maxDec(),
+    this.moveDefPathType(),
     this.losRadius(),
     this.airLosRadius(),
     this.radarRadius(),
@@ -841,6 +860,7 @@ unpackTo(_o: GameUnitDefT): void {
   _o.turnRate = this.turnRate();
   _o.maxAcc = this.maxAcc();
   _o.maxDec = this.maxDec();
+  _o.moveDefPathType = this.moveDefPathType();
   _o.losRadius = this.losRadius();
   _o.airLosRadius = this.airLosRadius();
   _o.radarRadius = this.radarRadius();
@@ -900,6 +920,7 @@ constructor(
   public turnRate: number = 0.0,
   public maxAcc: number = 0.0,
   public maxDec: number = 0.0,
+  public moveDefPathType: number = 4294967295,
   public losRadius: number = 0.0,
   public airLosRadius: number = 0.0,
   public radarRadius: number = 0,
@@ -973,6 +994,7 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     this.turnRate,
     this.maxAcc,
     this.maxDec,
+    this.moveDefPathType,
     this.losRadius,
     this.airLosRadius,
     this.radarRadius,

@@ -11337,6 +11337,7 @@ struct GameUnitDefT : public ::flatbuffers::NativeTable {
   float turn_rate = 0.0f;
   float max_acc = 0.0f;
   float max_dec = 0.0f;
+  uint32_t move_def_path_type = 4294967295;
   float los_radius = 0.0f;
   float air_los_radius = 0.0f;
   int32_t radar_radius = 0;
@@ -11410,34 +11411,35 @@ struct GameUnitDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_TURN_RATE = 50,
     VT_MAX_ACC = 52,
     VT_MAX_DEC = 54,
-    VT_LOS_RADIUS = 56,
-    VT_AIR_LOS_RADIUS = 58,
-    VT_RADAR_RADIUS = 60,
-    VT_SONAR_RADIUS = 62,
-    VT_JAMMER_RADIUS = 64,
-    VT_SEISMIC_RADIUS = 66,
-    VT_FLAGS = 68,
-    VT_BUILD_DISTANCE = 70,
-    VT_BUILD_SPEED = 72,
-    VT_BUILD_OPTIONS = 74,
-    VT_WEAPON_DEF_IDS = 76,
-    VT_CUSTOM_PARAMS = 78,
-    VT_REPAIR_SPEED = 80,
-    VT_TRANSPORT_SIZE = 82,
-    VT_TRANSPORT_MASS = 84,
-    VT_TRANSPORT_CAPACITY = 86,
-    VT_YARDMAP = 88,
-    VT_SCRIPT = 90,
-    VT_BUILD_PIC = 92,
-    VT_MAX_VELOCITY = 94,
-    VT_COST = 96,
-    VT_MAX_WEAPON_RANGE = 98,
-    VT_MAX_THIS_UNIT = 100,
-    VT_CAN_BE_ASSISTED = 102,
-    VT_CAN_SELF_DESTRUCT = 104,
-    VT_SELF_D_COUNTDOWN = 106,
-    VT_CATEGORY_BITS = 108,
-    VT_SOUNDS = 110
+    VT_MOVE_DEF_PATH_TYPE = 56,
+    VT_LOS_RADIUS = 58,
+    VT_AIR_LOS_RADIUS = 60,
+    VT_RADAR_RADIUS = 62,
+    VT_SONAR_RADIUS = 64,
+    VT_JAMMER_RADIUS = 66,
+    VT_SEISMIC_RADIUS = 68,
+    VT_FLAGS = 70,
+    VT_BUILD_DISTANCE = 72,
+    VT_BUILD_SPEED = 74,
+    VT_BUILD_OPTIONS = 76,
+    VT_WEAPON_DEF_IDS = 78,
+    VT_CUSTOM_PARAMS = 80,
+    VT_REPAIR_SPEED = 82,
+    VT_TRANSPORT_SIZE = 84,
+    VT_TRANSPORT_MASS = 86,
+    VT_TRANSPORT_CAPACITY = 88,
+    VT_YARDMAP = 90,
+    VT_SCRIPT = 92,
+    VT_BUILD_PIC = 94,
+    VT_MAX_VELOCITY = 96,
+    VT_COST = 98,
+    VT_MAX_WEAPON_RANGE = 100,
+    VT_MAX_THIS_UNIT = 102,
+    VT_CAN_BE_ASSISTED = 104,
+    VT_CAN_SELF_DESTRUCT = 106,
+    VT_SELF_D_COUNTDOWN = 108,
+    VT_CATEGORY_BITS = 110,
+    VT_SOUNDS = 112
   };
   uint16_t def_id() const {
     return GetField<uint16_t>(VT_DEF_ID, 0);
@@ -11516,6 +11518,15 @@ struct GameUnitDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   }
   float max_dec() const {
     return GetField<float>(VT_MAX_DEC, 0.0f);
+  }
+  /// MoveDef pathType, the index ZK widgets read as
+  /// `UnitDefs[id].moveDef.id`. Required by `Spring.RequestPath` to
+  /// route the query through the correct mobility class (kbot vs tank
+  /// vs hover, etc.). UINT32_MAX (4294967295) = unit has no MoveDef
+  /// (air units, immobile buildings); widgets that resolve a move
+  /// type via this field must skip the request entirely.
+  uint32_t move_def_path_type() const {
+    return GetField<uint32_t>(VT_MOVE_DEF_PATH_TYPE, 4294967295);
   }
   float los_radius() const {
     return GetField<float>(VT_LOS_RADIUS, 0.0f);
@@ -11660,6 +11671,7 @@ struct GameUnitDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<float>(verifier, VT_TURN_RATE, 4) &&
            VerifyField<float>(verifier, VT_MAX_ACC, 4) &&
            VerifyField<float>(verifier, VT_MAX_DEC, 4) &&
+           VerifyField<uint32_t>(verifier, VT_MOVE_DEF_PATH_TYPE, 4) &&
            VerifyField<float>(verifier, VT_LOS_RADIUS, 4) &&
            VerifyField<float>(verifier, VT_AIR_LOS_RADIUS, 4) &&
            VerifyField<int32_t>(verifier, VT_RADAR_RADIUS, 4) &&
@@ -11786,6 +11798,9 @@ struct GameUnitDefBuilder {
   void add_max_dec(float max_dec) {
     fbb_.AddElement<float>(GameUnitDef::VT_MAX_DEC, max_dec, 0.0f);
   }
+  void add_move_def_path_type(uint32_t move_def_path_type) {
+    fbb_.AddElement<uint32_t>(GameUnitDef::VT_MOVE_DEF_PATH_TYPE, move_def_path_type, 4294967295);
+  }
   void add_los_radius(float los_radius) {
     fbb_.AddElement<float>(GameUnitDef::VT_LOS_RADIUS, los_radius, 0.0f);
   }
@@ -11909,6 +11924,7 @@ inline ::flatbuffers::Offset<GameUnitDef> CreateGameUnitDef(
     float turn_rate = 0.0f,
     float max_acc = 0.0f,
     float max_dec = 0.0f,
+    uint32_t move_def_path_type = 4294967295,
     float los_radius = 0.0f,
     float air_los_radius = 0.0f,
     int32_t radar_radius = 0,
@@ -11964,6 +11980,7 @@ inline ::flatbuffers::Offset<GameUnitDef> CreateGameUnitDef(
   builder_.add_radar_radius(radar_radius);
   builder_.add_air_los_radius(air_los_radius);
   builder_.add_los_radius(los_radius);
+  builder_.add_move_def_path_type(move_def_path_type);
   builder_.add_max_dec(max_dec);
   builder_.add_max_acc(max_acc);
   builder_.add_turn_rate(turn_rate);
@@ -12023,6 +12040,7 @@ inline ::flatbuffers::Offset<GameUnitDef> CreateGameUnitDefDirect(
     float turn_rate = 0.0f,
     float max_acc = 0.0f,
     float max_dec = 0.0f,
+    uint32_t move_def_path_type = 4294967295,
     float los_radius = 0.0f,
     float air_los_radius = 0.0f,
     int32_t radar_radius = 0,
@@ -12092,6 +12110,7 @@ inline ::flatbuffers::Offset<GameUnitDef> CreateGameUnitDefDirect(
       turn_rate,
       max_acc,
       max_dec,
+      move_def_path_type,
       los_radius,
       air_los_radius,
       radar_radius,
@@ -19574,6 +19593,7 @@ inline GameUnitDefT::GameUnitDefT(const GameUnitDefT &o)
         turn_rate(o.turn_rate),
         max_acc(o.max_acc),
         max_dec(o.max_dec),
+        move_def_path_type(o.move_def_path_type),
         los_radius(o.los_radius),
         air_los_radius(o.air_los_radius),
         radar_radius(o.radar_radius),
@@ -19633,6 +19653,7 @@ inline GameUnitDefT &GameUnitDefT::operator=(GameUnitDefT o) FLATBUFFERS_NOEXCEP
   std::swap(turn_rate, o.turn_rate);
   std::swap(max_acc, o.max_acc);
   std::swap(max_dec, o.max_dec);
+  std::swap(move_def_path_type, o.move_def_path_type);
   std::swap(los_radius, o.los_radius);
   std::swap(air_los_radius, o.air_los_radius);
   std::swap(radar_radius, o.radar_radius);
@@ -19699,6 +19720,7 @@ inline void GameUnitDef::UnPackTo(GameUnitDefT *_o, const ::flatbuffers::resolve
   { auto _e = turn_rate(); _o->turn_rate = _e; }
   { auto _e = max_acc(); _o->max_acc = _e; }
   { auto _e = max_dec(); _o->max_dec = _e; }
+  { auto _e = move_def_path_type(); _o->move_def_path_type = _e; }
   { auto _e = los_radius(); _o->los_radius = _e; }
   { auto _e = air_los_radius(); _o->air_los_radius = _e; }
   { auto _e = radar_radius(); _o->radar_radius = _e; }
@@ -19763,6 +19785,7 @@ inline ::flatbuffers::Offset<GameUnitDef> CreateGameUnitDef(::flatbuffers::FlatB
   auto _turn_rate = _o->turn_rate;
   auto _max_acc = _o->max_acc;
   auto _max_dec = _o->max_dec;
+  auto _move_def_path_type = _o->move_def_path_type;
   auto _los_radius = _o->los_radius;
   auto _air_los_radius = _o->air_los_radius;
   auto _radar_radius = _o->radar_radius;
@@ -19819,6 +19842,7 @@ inline ::flatbuffers::Offset<GameUnitDef> CreateGameUnitDef(::flatbuffers::FlatB
       _turn_rate,
       _max_acc,
       _max_dec,
+      _move_def_path_type,
       _los_radius,
       _air_los_radius,
       _radar_radius,

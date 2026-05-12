@@ -1345,6 +1345,11 @@ inline flatbuffers::Offset<SpringWeb::GameUnitDef> BuildSingleUnitDef(
     b.add_turn_rate(ud.turnRate);
     b.add_max_acc(ud.maxAcc);
     b.add_max_dec(ud.maxDec);
+    // MoveDef::pathType — the index ZK widgets resolve as
+    // `UnitDefs[id].moveDef.id`. UnitDef stores -1U (UINT32_MAX) for
+    // air/immobile units; the wire default matches so widgets correctly
+    // see "no move def" and skip path requests.
+    b.add_move_def_path_type(ud.pathType);
     b.add_los_radius(ud.losRadius);
     b.add_air_los_radius(ud.airLosRadius);
     b.add_radar_radius(ud.radarRadius);

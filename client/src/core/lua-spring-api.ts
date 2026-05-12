@@ -1586,11 +1586,17 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         // frame and converge on the next tick.
         RequestPath: (moveType: LuaValue, sx: LuaValue, sy: LuaValue, sz: LuaValue,
                       ex: LuaValue, ey: LuaValue, ez: LuaValue, radius: LuaValue) => {
-            const mt = Number(moveType) | 0;
             // Air / sea-only / invalid: bail with nil so widgets fall
             // through to their "no pathing" branch (Spring's documented
-            // behaviour for unknown movedef ids).
-            if (mt < 0 || !Number.isFinite(mt)) return null;
+            // behaviour for unknown movedef ids). Treat nil/undefined
+            // and the UINT32_MAX sentinel (UnitDefs[id].moveDef.id for
+            // air units) the same — both mean "no movedef".
+            if (moveType == null) return null;
+            const mtNum = Number(moveType);
+            if (!Number.isFinite(mtNum)) return null;
+            const mt = mtNum | 0;
+            // UINT32_MAX coerced through `| 0` is -1; reject both forms.
+            if (mt < 0 || mtNum >= 0xFFFFFFFF) return null;
             const startX = Number(sx), startY = Number(sy), startZ = Number(sz);
             const endX   = Number(ex), endY   = Number(ey), endZ   = Number(ez);
             const r = Number(radius);

@@ -459,6 +459,9 @@ interface MinimalUnitDefWire {
     health?: number; mass?: number; radius?: number;
     xsize?: number; zsize?: number;
     speed?: number; turnRate?: number; maxAcc?: number; maxDec?: number;
+    /** MoveDef::pathType. UINT32_MAX (4294967295) = unit has no movedef
+     *  (air, immobile). Surfaced as `UnitDefs[id].moveDef.id` to ZK. */
+    moveDefPathType?: number;
     losRadius?: number; airLosRadius?: number;
     radarRadius?: number; sonarRadius?: number;
     jammerRadius?: number; seismicRadius?: number;
@@ -629,7 +632,17 @@ function buildLuaUnitDef(d: MinimalUnitDefWire): Record<string, LuaValue> {
         category: d.categoryBits ?? 0,
 
         modCategories: {} as Record<string, LuaValue>,
-        moveDef: {} as Record<string, LuaValue>,
+        // moveDef.id mirrors MoveDef::pathType. ZK widgets read this to
+        // route Spring.RequestPath through the correct mobility class
+        // (kbot vs tank vs hover). The wire sentinel UINT32_MAX means
+        // "no movedef" (air, immobile) — surface it as -1 here so the
+        // Lua-side `if moveDef.id < 0` and `if moveDef.id == nil` checks
+        // ZK widgets do both fail-close to "no pathing".
+        moveDef: ((): Record<string, LuaValue> => {
+            const pt = d.moveDefPathType ?? 0xFFFFFFFF;
+            if (pt === 0xFFFFFFFF) return {};
+            return { id: pt };
+        })(),
     };
 }
 

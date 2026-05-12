@@ -1249,6 +1249,13 @@ table GameUnitDef {
     turn_rate: float = 0;
     max_acc: float = 0;
     max_dec: float = 0;
+    /// MoveDef pathType, the index ZK widgets read as
+    /// `UnitDefs[id].moveDef.id`. Required by `Spring.RequestPath` to
+    /// route the query through the correct mobility class (kbot vs tank
+    /// vs hover, etc.). UINT32_MAX (4294967295) = unit has no MoveDef
+    /// (air units, immobile buildings); widgets that resolve a move
+    /// type via this field must skip the request entirely.
+    move_def_path_type: uint32 = 4294967295;
 
     // ── Sensor ranges ──────────────────────────────────────────────
     los_radius: float = 0;

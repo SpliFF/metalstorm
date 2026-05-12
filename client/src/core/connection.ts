@@ -226,6 +226,11 @@ export interface UnitDefInfo {
     turnRate: number;
     maxAcc: number;
     maxDec: number;
+    /** MoveDef::pathType. UINT32_MAX (4294967295) when the unit has no
+     *  movedef (air, immobile buildings). ZK widgets resolve this via
+     *  `UnitDefs[id].moveDef.id` to route `Spring.RequestPath` through
+     *  the correct mobility class. */
+    moveDefPathType: number;
     losRadius: number;
     airLosRadius: number;
     radarRadius: number;
@@ -1297,6 +1302,7 @@ export class Connection {
                         turnRate: d.turnRate(),
                         maxAcc: d.maxAcc(),
                         maxDec: d.maxDec(),
+                        moveDefPathType: d.moveDefPathType(),
                         losRadius: d.losRadius(),
                         airLosRadius: d.airLosRadius(),
                         radarRadius: d.radarRadius(),
