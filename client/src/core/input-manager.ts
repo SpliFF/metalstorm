@@ -29,6 +29,7 @@ import {
     StandardMaterial,
     Color3,
     PointerEventTypes,
+    Ray,
     type PointerInfo,
 } from '@babylonjs/core';
 import { EntityRenderer } from './entity-renderer.js';
@@ -83,6 +84,104 @@ function snapToBuildGrid(x: number, z: number, xsize: number, zsize: number): [n
         ? Math.floor(z / 16) * 16 + 8
         : Math.floor((z + 8) / 16) * 16;
     return [sx, sz];
+}
+
+/// Build-row / build-rect generator. Mirrors CGuiHandler::GetBuildPositions
+/// (rts/Game/UI/GuiHandler.cpp). One footprint = 8 elmos × xsize, so a row
+/// of touching buildings steps by `xsize * 8 + buildSpacing * 16` elmos per
+/// tile. Returns positions in placement order — for a filled rect, rows
+/// alternate direction so a single builder walks the rectangle in a snake
+/// pattern (matches Recoil's pathing-friendly ordering).
+///
+/// `mode`:
+///   'line'    — straight line from start → end, biased to the longer axis
+///   'rect'    — filled rectangle covering the start↔end AABB
+///   'hollow'  — perimeter-only rectangle (corners + edges, no interior)
+/// `buildSpacing` is in build-squares (Spring convention; one square = 16
+/// elmos = one engine pos unit). Default 0 = touching footprints.
+function computeBuildPositions(
+    startX: number, startZ: number,
+    endX: number, endZ: number,
+    xsize: number, zsize: number,
+    buildSpacing: number,
+    mode: 'line' | 'rect' | 'hollow',
+): Array<[number, number]> {
+    // Grid-snap both ends so step counts work in whole-tile units.
+    const [sx, sz] = snapToBuildGrid(startX, startZ, xsize, zsize);
+    const [ex, ez] = snapToBuildGrid(endX, endZ, xsize, zsize);
+
+    const stepX = xsize * 8 + buildSpacing * 16;
+    const stepZ = zsize * 8 + buildSpacing * 16;
+    const out: Array<[number, number]> = [];
+
+    if (mode === 'line') {
+        // Spring picks the longer axis; the other axis stays at the start
+        // value. Drag-along-X walks the row in 1-tile steps, ditto for Z.
+        const dx = Math.abs(ex - sx);
+        const dz = Math.abs(ez - sz);
+        if (dx >= dz) {
+            const dir = ex >= sx ? 1 : -1;
+            const count = Math.floor(dx / stepX) + 1;
+            for (let i = 0; i < count; i++) out.push([sx + dir * i * stepX, sz]);
+        } else {
+            const dir = ez >= sz ? 1 : -1;
+            const count = Math.floor(dz / stepZ) + 1;
+            for (let i = 0; i < count; i++) out.push([sx, sz + dir * i * stepZ]);
+        }
+        return out;
+    }
+
+    // Rectangle (filled or hollow): walk the X×Z AABB. Row direction
+    // alternates to give a continuous serpent path. Corners are emitted
+    // first for the hollow case so a single builder reaches them in order.
+    const xDir = ex >= sx ? 1 : -1;
+    const zDir = ez >= sz ? 1 : -1;
+    const xCount = Math.floor(Math.abs(ex - sx) / stepX) + 1;
+    const zCount = Math.floor(Math.abs(ez - sz) / stepZ) + 1;
+
+    if (mode === 'rect') {
+        for (let zi = 0; zi < zCount; zi++) {
+            const z = sz + zDir * zi * stepZ;
+            // Alternate row direction: even rows go +xDir, odd rows go -xDir.
+            const rowReverse = (zi & 1) === 1;
+            for (let xi = 0; xi < xCount; xi++) {
+                const realXi = rowReverse ? (xCount - 1 - xi) : xi;
+                out.push([sx + xDir * realXi * stepX, z]);
+            }
+        }
+        return out;
+    }
+
+    // Hollow: perimeter only. Walk top edge L→R, right edge top→bottom,
+    // bottom edge R→L, left edge bottom→top — single-loop serpent.
+    if (xCount === 1 || zCount === 1) {
+        // Degenerate: a 1-wide rect is a line. Reuse the rect path but
+        // skip the dedup logic — only one row or column exists.
+        for (let zi = 0; zi < zCount; zi++) {
+            const z = sz + zDir * zi * stepZ;
+            for (let xi = 0; xi < xCount; xi++) {
+                out.push([sx + xDir * xi * stepX, z]);
+            }
+        }
+        return out;
+    }
+    // Top edge
+    for (let xi = 0; xi < xCount; xi++) {
+        out.push([sx + xDir * xi * stepX, sz]);
+    }
+    // Right edge (skip the corner already placed)
+    for (let zi = 1; zi < zCount; zi++) {
+        out.push([sx + xDir * (xCount - 1) * stepX, sz + zDir * zi * stepZ]);
+    }
+    // Bottom edge (skip the corner already placed, walk R→L)
+    for (let xi = xCount - 2; xi >= 0; xi--) {
+        out.push([sx + xDir * xi * stepX, sz + zDir * (zCount - 1) * stepZ]);
+    }
+    // Left edge (skip both corners already placed)
+    for (let zi = zCount - 2; zi >= 1; zi--) {
+        out.push([sx, sz + zDir * zi * stepZ]);
+    }
+    return out;
 }
 
 export class InputManager {
@@ -150,6 +249,35 @@ export class InputManager {
         ghostLine: Mesh | null;
         markerMesh: Mesh | null;
     } | null = null;
+
+    /// Active build-drag, if any. Captured on left-down while
+    /// buildPlacement is set; populated on mousemove with the row /
+    /// rectangle preview ghost meshes; committed on left-up as either a
+    /// single-tile placement (no drag) or a PlayerCommandBatch with one
+    /// PlayerCommand per snapped position. Modifiers captured at
+    /// left-down decide the mode: plain → line, alt → rect, ctrl+alt →
+    /// hollow rect. Shift is the queue modifier (passed through to
+    /// each command's options).
+    private buildDrag: {
+        startX: number;
+        startZ: number;
+        startY: number;
+        shift: boolean;
+        alt: boolean;
+        ctrl: boolean;
+        mode: 'line' | 'rect' | 'hollow';
+        previewGhosts: TransformNode[];
+        previewPositions: Array<[number, number, number]>;
+    } | null = null;
+
+    /// Build-row spacing in 16-elmo squares. Wired through
+    /// `setBuildSpacing` from the worker's `LiveState.buildSpacing` so
+    /// ZK's persistent-build-spacing widget (Q/E hotkeys) keeps the
+    /// native drag-row in sync. Defaults to 0 (touching footprints).
+    private buildSpacing = 0;
+    setBuildSpacing(n: number): void {
+        this.buildSpacing = Math.max(0, n | 0);
+    }
 
     // Build placement state — non-null while the player has clicked a build
     // button and is choosing a ground location. Cancelled by ESC, right-click,
@@ -435,6 +563,13 @@ export class InputManager {
         if (this.buildPlacement) {
             this.buildPlacement.ghost.dispose();
             this.buildPlacement = null;
+        }
+        // Drop any in-flight drag-row preview too. Without this, an ESC
+        // mid-drag would leave a row of ghost meshes orphaned in the
+        // scene (they outlive the buildPlacement they reference).
+        if (this.buildDrag) {
+            for (const g of this.buildDrag.previewGhosts) g.dispose();
+            this.buildDrag = null;
         }
     }
 
@@ -787,11 +922,22 @@ export class InputManager {
             if (this.tryStartWaypointDrag(evt)) return;
         }
 
-        // Build placement: a left-click during placement issues the build
-        // order at the ground point, not a unit selection.
+        // Build placement: a left-click during placement starts a
+        // build-drag. If the cursor doesn't move past DRAG_THRESHOLD_PX
+        // before release, onLeftUp commits as a single-tile placement
+        // (matches the old click-to-place behaviour). On real drag,
+        // onDragMove paints a row / rectangle of ghosts and onLeftUp
+        // sends a PlayerCommandBatch.
         if (this.buildPlacement) {
             const groundPos = this.pickGroundAt(evt.clientX, evt.clientY);
-            if (groundPos) this.issueBuildAt(groundPos, evt.shiftKey);
+            if (groundPos) {
+                this.startBuildDrag(groundPos, evt);
+                this.dragActive = true;
+                this.dragStartX = evt.clientX;
+                this.dragStartY = evt.clientY;
+                this.dragCurX = evt.clientX;
+                this.dragCurY = evt.clientY;
+            }
             return;
         }
         this.dragActive = true;
@@ -846,6 +992,10 @@ export class InputManager {
             this.updateWaypointDrag(evt);
             return;
         }
+        if (this.buildDrag) {
+            this.updateBuildDrag(evt);
+            return;
+        }
         const dx = this.dragCurX - this.dragStartX;
         const dy = this.dragCurY - this.dragStartY;
         if (Math.hypot(dx, dy) >= DRAG_THRESHOLD_PX) {
@@ -859,6 +1009,11 @@ export class InputManager {
 
         if (this.waypointDrag) {
             this.commitWaypointDrag(evt);
+            return;
+        }
+
+        if (this.buildDrag) {
+            this.commitBuildDrag(evt);
             return;
         }
 
@@ -1009,6 +1164,229 @@ export class InputManager {
                 options: 0,
             },
         ]);
+    }
+
+    // ---- Build drag (row / rectangle placement) ----
+
+    /** Capture the start position and modifier state for a build-drag.
+     *  Mode is decided up front from the down-event modifiers:
+     *    plain      → line (longer-axis dominated row)
+     *    alt        → filled rectangle
+     *    ctrl+alt   → hollow rectangle perimeter
+     *  Shift is the queue modifier and is applied per-command at commit.
+     *  Mode is locked at down-time — releasing alt mid-drag doesn't
+     *  swap to line mode (matches Spring's GuiHandler behaviour). */
+    private startBuildDrag(groundPos: Vector3, evt: PointerEvent): void {
+        let mode: 'line' | 'rect' | 'hollow' = 'line';
+        if (evt.altKey && evt.ctrlKey) mode = 'hollow';
+        else if (evt.altKey) mode = 'rect';
+        this.buildDrag = {
+            startX: groundPos.x,
+            startZ: groundPos.z,
+            startY: groundPos.y,
+            shift: evt.shiftKey,
+            alt: evt.altKey,
+            ctrl: evt.ctrlKey,
+            mode,
+            previewGhosts: [],
+            previewPositions: [],
+        };
+    }
+
+    /** Recompute preview-ghost positions on every mousemove. The hover
+     *  ghost from buildPlacement is reused for the first tile; extras
+     *  are spawned via createGhostMesh / box fallback. We rebuild the
+     *  ghost list on every move rather than diff-update — pointermove
+     *  fires at most every 16ms and ghost counts are bounded by the
+     *  drag rectangle size (typically <100 tiles). */
+    private updateBuildDrag(evt: PointerEvent): void {
+        const drag = this.buildDrag;
+        const bp = this.buildPlacement;
+        if (!drag || !bp) return;
+        const groundPos = this.pickGroundAt(evt.clientX, evt.clientY);
+        if (!groundPos) return;
+
+        const def = this.defCache?.getUnitDef(bp.defId);
+        const xsize = def?.xsize ?? 4;
+        const zsize = def?.zsize ?? 4;
+
+        // Cancel any preview positions from the previous frame.
+        for (const g of drag.previewGhosts) g.dispose();
+        drag.previewGhosts = [];
+        drag.previewPositions = [];
+
+        // Tile positions for the current cursor. Mex builds don't get
+        // drag-row treatment — every tile must snap to a metal spot, which
+        // mostly defeats the purpose. Fall back to the hover ghost path
+        // so the single-tile mex placement still works.
+        if (bp.isMex) {
+            // Update the hover ghost via the regular code path so the
+            // mex snap + red-tint feedback still fires.
+            this.updateBuildGhost(evt.clientX, evt.clientY);
+            return;
+        }
+
+        const positions = computeBuildPositions(
+            drag.startX, drag.startZ,
+            groundPos.x, groundPos.z,
+            xsize, zsize,
+            this.buildSpacing,
+            drag.mode,
+        );
+
+        if (positions.length <= 1) {
+            // No actual drag yet — let the hover ghost track the cursor
+            // so the player sees the single-tile preview as a fallback.
+            this.updateBuildGhost(evt.clientX, evt.clientY);
+            return;
+        }
+
+        // Park the hover ghost off-screen — its position lives in the
+        // first preview ghost we render below.
+        bp.ghost.position.set(-1e6, 0, 0);
+
+        // Spawn one ghost per snapped position. Cheap for typical drag
+        // sizes; bail out at 200 tiles to keep huge drag-rect attempts
+        // from stalling the frame.
+        const limit = Math.min(positions.length, 200);
+        for (let i = 0; i < limit; i++) {
+            const [gx, gz] = positions[i];
+            const y = this.sampleTerrainY(gx, gz) ?? groundPos.y;
+            let ghost: TransformNode | null = null;
+            try {
+                ghost = this.entityRenderer.createGhostMesh(bp.defId, `build-drag-ghost-${i}`);
+            } catch {
+                ghost = null;
+            }
+            if (!ghost) {
+                ghost = makeBoxGhost(this.scene, bp.footprintX, bp.footprintZ, bp.defaultEmissive);
+            }
+            ghost.position.set(gx, y + 0.5, gz);
+            drag.previewGhosts.push(ghost);
+            drag.previewPositions.push([gx, y, gz]);
+        }
+    }
+
+    /** Best-effort terrain Y sample at a world XZ. Drops a downward ray
+     *  from far above the map onto the terrain mesh (same predicate that
+     *  pickGroundAt uses). Returns null on a miss so callers can fall
+     *  back to the cursor-pick Y. */
+    private sampleTerrainY(x: number, z: number): number | null {
+        const ray = new Ray(new Vector3(x, 1e6, z), new Vector3(0, -1, 0), 2e6);
+        const pick = this.scene.pickWithRay(ray, (m) => m.name === 'terrain');
+        if (pick?.hit && pick.pickedPoint) return pick.pickedPoint.y;
+        return null;
+    }
+
+    /** Commit a build-drag on left-up. Below the drag threshold this
+     *  falls through to the original single-tile issueBuildAt path so
+     *  click-to-place keeps working unchanged. Otherwise emits a
+     *  PlayerCommandBatch with one PlayerCommand per snapped position —
+     *  the batch lands atomically on a single sim tick. */
+    private commitBuildDrag(evt: PointerEvent): void {
+        const drag = this.buildDrag;
+        const bp = this.buildPlacement;
+        if (!drag || !bp) return;
+        // Clear preview ghosts before any early-out.
+        for (const g of drag.previewGhosts) g.dispose();
+        const positions = drag.previewPositions.slice();
+        this.buildDrag = null;
+
+        // Restore the hover ghost so chained-build mode (shift) keeps
+        // showing a preview after the batch lands.
+        const groundPos = this.pickGroundAt(evt.clientX, evt.clientY);
+
+        const dx = evt.clientX - this.dragStartX;
+        const dy = evt.clientY - this.dragStartY;
+        const dragged = Math.hypot(dx, dy) >= DRAG_THRESHOLD_PX;
+
+        if (!dragged || positions.length <= 1) {
+            // No drag (or row collapsed to a single tile) — fall back to
+            // the original click-to-place path. Use the modifier state
+            // captured at down-time so shift means "queue" same as before.
+            if (groundPos) this.issueBuildAt(groundPos, drag.shift);
+            return;
+        }
+
+        // Build a PlayerCommandBatch: one PlayerCommand per snapped
+        // position, all -defId (build), all targeted at the same
+        // builder selection. Shift on each command queues behind the
+        // previous one in the batch — without it, every entry would
+        // replace the queue and we'd end up with just the last tile.
+        // Spring's CGuiHandler issues the first tile non-queued (so the
+        // first click clears the queue if the player didn't shift-drag)
+        // and the rest queued.
+        const builders = this.selectedIds.slice();
+        if (builders.length === 0) return;
+        const defId = bp.defId;
+        const facing = 0;
+        const batch: Array<{
+            commandId: number;
+            unitIds: number[];
+            params: number[];
+            options?: number;
+        }> = [];
+        for (let i = 0; i < positions.length; i++) {
+            const [x, y, z] = positions[i];
+            // First tile: non-queued unless the player held shift at
+            // down-time. Remaining tiles: always queued.
+            const options = (i === 0 ? (drag.shift ? OPT_SHIFT : 0) : OPT_SHIFT);
+            batch.push({
+                commandId: -defId,
+                unitIds: builders,
+                params: [x, y, z, facing],
+                options,
+            });
+        }
+        this.connection.sendPlayerCommandBatch(batch);
+
+        // Promote each ghost into the pending-builds list so it lingers
+        // until the matching build order leaves the queue (same convention
+        // as single-tile issueBuildAt's promoteGhostToPending).
+        for (const [x, _y, z] of positions) {
+            this.spawnPendingBuildGhost(defId, x, z, builders);
+        }
+
+        // Stay in placement mode while shift was held, just like
+        // issueBuildAt. Otherwise exit placement.
+        if (!drag.shift) {
+            this.cancelBuildPlacement();
+        }
+    }
+
+    /** Create a pending-build ghost at a snapped position. Same visual
+     *  treatment as promoteGhostToPending (paler colour, alpha 0.25) but
+     *  spawns a fresh mesh instead of reusing the active hover ghost.
+     *  Used by the drag-row commit path to mark every tile in the batch. */
+    private spawnPendingBuildGhost(defId: number, x: number, z: number, owners: number[]): void {
+        if (!this.buildPlacement) return;
+        const bp = this.buildPlacement;
+        let ghost: TransformNode | null = null;
+        try {
+            ghost = this.entityRenderer.createGhostMesh(defId, `build-pending-${defId}-${x},${z}`);
+        } catch {
+            ghost = null;
+        }
+        if (!ghost) {
+            ghost = makeBoxGhost(this.scene, bp.footprintX, bp.footprintZ, new Color3(0.05, 0.2, 0.1));
+        }
+        const y = this.sampleTerrainY(x, z) ?? 0;
+        ghost.position.set(x, y + 0.5, z);
+        this.tintGhost(ghost, false, new Color3(0.05, 0.2, 0.1));
+        // Force alpha 0.25 to match the "queued" look. Mesh ghosts share a
+        // material across pieces (set up in createGhostMesh); update one
+        // child and the whole ghost picks it up.
+        for (const c of ghost.getChildMeshes()) {
+            const m = c.material as StandardMaterial | null;
+            if (m) { m.alpha = 0.25; break; }
+        }
+        this.pendingBuilds.push({
+            ghost,
+            defId,
+            gx: Math.round(x),
+            gz: Math.round(z),
+            owners: new Set(owners),
+        });
     }
 
     // ---- Single click ----
