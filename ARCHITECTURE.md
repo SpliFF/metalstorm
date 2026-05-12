@@ -154,9 +154,11 @@ Full CLI flag list (from `rts/server_main.cpp`):
 - `0x03` = Entity state delta (custom binary)
 - `0x04` = Projectile state snapshot (custom binary)
 
-**Key server→client messages:** AuthResponse, MapData, GameUnitDefs, GameWeaponDefs, EntityCreate, EntityDestroy, GameEventBatch (CombatEvents, projectile fired/impacts/trajectories, SoundEvents, SeismicPings, MusicEvents), GameInfo, RoomStateUpdate, RoomListUpdate, LogBatch, ConsoleResponse, GameStarted.
+**Key server→client messages:** AuthResponse, MapData, GameUnitDefs, GameWeaponDefs, EntityCreate, EntityDestroy, GameEventBatch (CombatEvents, projectile fired/impacts/trajectories, SoundEvents, SeismicPings, MusicEvents), GameInfo, RoomStateUpdate, RoomListUpdate, LogBatch, ConsoleResponse, GameStarted, UnitCommandQueuesUpdate (own + allied team order queues, ~1 Hz), UnitCmdDescsUpdate (selection-scoped command panel data — name/action/texture/tooltip/type/params/hidden per cmd, ~1 Hz).
 
-**Key client→server messages:** AuthRequest, PlayerCommand, ViewportUpdate, RoomCreate/Join/Leave/Ready/StartGame/EndGame, RoomAddAI/RemoveAI, LogIngest, LogSubscribe, LogUnsubscribe, ConsoleCommand.
+**Key client→server messages:** AuthRequest, PlayerCommand, PlayerCommandBatch (schema only, no emitter yet — for atomic build-row / INSERT+REMOVE pairs), SelectionState (debounced 50ms; scopes server's cmd-desc broadcast), ViewportUpdate, RoomCreate/Join/Leave/Ready/StartGame/EndGame, RoomAddAI/RemoveAI, LuaRulesMsg, LogIngest, LogSubscribe, LogUnsubscribe, ConsoleCommand.
+
+**Order plumbing (PLAN-orders.md):** Selection mirroring is one of two budget controls — `SelectionState` scopes the per-tick `UnitCmdDescsUpdate` to the player's current selection rather than every own-team unit, and the same set will eventually scope future selection-only streams. `UnitCmdDesc` carries the full Spring `SCommandDescription` surface so ZK's integral menu and `cmd_*.lua` widgets see real button names, icons, tooltips, and current-state-index params. `PlayerCommandBatch` exists in the schema for atomic multi-command sequences (waypoint drag, build-row drag) — neither client emitter nor server handler is wired yet.
 
 **IPC:** Pipe-based IPC removed. GameStarted is now a ServerPayload message sent over WebSocket.
 
@@ -522,6 +524,7 @@ first entity/projectile state update that references it.
 - **LuaUI Web Worker** (PLAN-widgets.md): `core/lua-widget-worker.ts` hosts Fengari Lua + OffscreenCanvas; `core/lua-widget-manager.ts` owns lifecycle on the main thread; `core/command-buffer.ts` transfers `gl.*` calls back to the renderer.
 - **Chili UI integration** (memory: `project_chili_rendering.md`): ortho/font/dlist fixes done, render test widget (`?widgetTest`) confirms gl bridge primitives. Post-DrawScreen still draws invisible — under investigation.
 - **Zero-K conversion** (PLAN-convert-zk.md): Phase A done — 197/236 gadgets boot, sim ticks at 30 Hz, commanders spawn from `start_unit_setup.lua`. Open: model multi-mesh polish, minimap orientation, full LuaUI parity.
+- **Order system Phase 0** (PLAN-orders.md, 2026-05-12): expanded `UnitCmdDesc` to carry the full Spring command-description surface (name/action/texture/tooltip/type/params/hidden), added `SelectionState` (client→server) so the server scopes per-tick cmd-desc broadcasts to the player's selection, added `PlayerCommandBatch` schema (no emitter yet). Widget worker now dispatches `SelectionChanged`/`UnitCreated`/`UnitDestroyed`/`CommandNotify` (widget-issued orders only). New `Spring.*` helpers: `GetHeadingFromVector`, `GiveOrderArrayToUnitArray`, `Get/SetBuildSpacing`. **Next:** `LayoutButtons` callback, client-side `Spring.TestBuildOrder`, animated cursor pipeline, mouse-issued `CommandNotify` route-through-worker, server-emitted `UnitFinished`/`UnitFromFactory`/transport/selfd/stockpile/armored events.
 
 **Debugging infrastructure (complete; surface documented in [docs/debugging.md](docs/debugging.md)):**
 - Unified logging (`libspringlog`) with console/file/network/SQLite sinks
