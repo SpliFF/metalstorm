@@ -731,6 +731,27 @@ export class LuaWidgetManager {
         })) });
     }
 
+    /** Deliver the server's `PathResponse` for a previously-sent
+     *  `Spring.PathRequest` to the worker. `waypoints` is the full
+     *  path or an empty list if the path manager couldn't find a
+     *  route. The worker keys cached responses by `requestId` so
+     *  concurrent requests don't collide. */
+    forwardPathResponse(
+        requestId: number,
+        waypoints: ReadonlyArray<readonly [number, number, number]>,
+        length: number,
+    ): void {
+        if (this.disposed) return;
+        this.postToWorker({
+            type: 'pathResponse',
+            requestId,
+            // Copy out of the source so we don't hold a reference to
+            // the connection's parse buffer.
+            waypoints: waypoints.map(w => [w[0], w[1], w[2]] as [number, number, number]),
+            length,
+        });
+    }
+
     /** Push a per-tick batch of lifecycle events into the worker. The
      *  worker dispatches `widget:UnitFromFactory` / `UnitTaken` /
      *  `UnitGiven` callins from each entry. Typically empty on quiet
@@ -920,6 +941,9 @@ export class LuaWidgetManager {
             case 'defaultCommandTarget':   summary = `defaultCommandTarget type=${msg.targetType} id=${msg.targetId} engineCmd=${msg.engineCmd}`; break;
             case 'defaultCommandResolved': summary = `defaultCommandResolved cmdId=${msg.cmdId} type=${msg.targetType} id=${msg.targetId}`; break;
             case 'sendLuaRulesMsg': summary = `sendLuaRulesMsg (${(msg.data as string)?.length ?? 0} bytes)`; break;
+            case 'pathRequest':       summary = `pathRequest req=${msg.requestId} moveType=${msg.moveType}`; break;
+            case 'pathRequestCancel': summary = `pathRequestCancel req=${msg.requestId}`; break;
+            case 'pathResponse':      summary = `pathResponse req=${msg.requestId} waypoints=${(msg.waypoints as unknown[])?.length ?? 0}`; break;
             case 'setSelection':   summary = `setSelection units=${(msg.unitIds as unknown[])?.length ?? 0}`; break;
             case 'setCameraTarget': summary = `setCameraTarget x=${msg.x} z=${msg.z} smooth=${msg.smoothness}`; break;
             case 'uiHover':        summary = `uiHover above=${msg.above}`; break;
@@ -1085,6 +1109,33 @@ export class LuaWidgetManager {
                 const data = typeof msg.data === 'string' ? msg.data : '';
                 if (!data) break;
                 conn.sendLuaRulesMsg(data);
+                break;
+            }
+
+            case 'pathRequest': {
+                // Worker → main: forward Spring.PathRequest to the server.
+                // The server replies asynchronously with a PathResponse
+                // which we route back through `forwardPathResponse`.
+                const conn = this.connection;
+                if (!conn) break;
+                const requestId = Number(msg.requestId | 0);
+                const sx = Number(msg.startX), sy = Number(msg.startY), sz = Number(msg.startZ);
+                const ex = Number(msg.endX),   ey = Number(msg.endY),   ez = Number(msg.endZ);
+                const moveType = Number(msg.moveType | 0);
+                const radius   = Number(msg.goalRadius);
+                if (requestId <= 0 || !Number.isFinite(sx) || !Number.isFinite(ex)) break;
+                conn.sendPathRequest(
+                    requestId, sx, sy, sz, ex, ey, ez,
+                    moveType, Number.isFinite(radius) ? radius : 8.0);
+                break;
+            }
+
+            case 'pathRequestCancel': {
+                const conn = this.connection;
+                if (!conn) break;
+                const requestId = Number(msg.requestId | 0);
+                if (requestId <= 0) break;
+                conn.sendPathRequestCancel(requestId);
                 break;
             }
 

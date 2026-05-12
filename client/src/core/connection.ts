@@ -66,6 +66,10 @@ import { AuthRequest } from '../protocol/spring-web/auth-request.js';
 import { PlayerCommand } from '../protocol/spring-web/player-command.js';
 import { LuaRulesMsg } from '../protocol/spring-web/lua-rules-msg.js';
 import { SelectionState } from '../protocol/spring-web/selection-state.js';
+import { PathRequest } from '../protocol/spring-web/path-request.js';
+import { PathRequestCancel } from '../protocol/spring-web/path-request-cancel.js';
+import { PathResponse } from '../protocol/spring-web/path-response.js';
+import { Vec3 } from '../protocol/spring-web/vec3.js';
 import { AuthResponse } from '../protocol/spring-web/auth-response.js';
 import { AuthStatus } from '../protocol/spring-web/auth-status.js';
 import { ServerClock } from './clock.js';
@@ -314,6 +318,15 @@ export interface UnitArmoredInfoMsg {
 /** Discriminator on UnitLifecycleEventMsg.kind — matches the FlatBuffers enum. */
 export type UnitLifecycleKindStr = 'fromFactory' | 'taken' | 'given';
 
+/** Decoded server reply to a `Spring.PathRequest`. `waypoints` is the
+ *  full path as `[x, y, z]` triples in elmo coordinates; empty array
+ *  means the path manager couldn't find a route. */
+export interface PathResponseInfo {
+    requestId: number;
+    waypoints: ReadonlyArray<readonly [number, number, number]>;
+    length: number;
+}
+
 /** One unit lifecycle event. `fromFactory` carries `factoryId` /
  *  `factoryDefId` / `userOrders`; `taken` / `given` carry `oldTeam` /
  *  `newTeam`. The unused fields for each kind are present but zeroed. */
@@ -509,6 +522,11 @@ export interface ConnectionEvents {
     onUnitStockpile?: (units: UnitStockpileInfoMsg[]) => void;
     onUnitArmored?: (units: UnitArmoredInfoMsg[]) => void;
     onUnitLifecycle?: (events: UnitLifecycleEventMsg[]) => void;
+    /** Async `Spring.PathRequest` reply from the server. `waypoints` is
+     *  the full path from `start` to a point within `goal_radius` of
+     *  `end`; empty if no path was found. `length` is the total path
+     *  length in elmos. Fires exactly once per request_id. */
+    onPathResponse?: (info: PathResponseInfo) => void;
     onProjectileState?: (snapshot: ProjectileStateSnapshot) => void;
     onPieceState?: (snapshot: PieceStateSnapshot) => void;
     onBuildActivity?: (snapshot: BuildActivitySnapshot) => void;
@@ -843,6 +861,44 @@ export class Connection {
         const sel = SelectionState.createSelectionState(
             builder, this.commandSequence, idsOff);
         this.sendClientMessage(builder, ClientPayload.SelectionState, sel);
+    }
+
+    /** Send a `Spring.PathRequest` to the server. The server replies
+     *  asynchronously with a `PathResponse` (delivered via
+     *  `onPathResponse`); the caller is responsible for matching by
+     *  `requestId`. */
+    sendPathRequest(
+        requestId: number,
+        startX: number, startY: number, startZ: number,
+        endX: number, endY: number, endZ: number,
+        moveType: number,
+        goalRadius: number,
+    ): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(96);
+        PathRequest.startPathRequest(builder);
+        PathRequest.addRequestId(builder, requestId);
+        PathRequest.addStart(builder,
+            Vec3.createVec3(builder, startX, startY, startZ));
+        PathRequest.addEnd(builder,
+            Vec3.createVec3(builder, endX, endY, endZ));
+        PathRequest.addMoveType(builder, moveType);
+        PathRequest.addGoalRadius(builder, goalRadius);
+        const off = PathRequest.endPathRequest(builder);
+        this.sendClientMessage(builder, ClientPayload.PathRequest, off);
+    }
+
+    /** Cancel a previously-sent `PathRequest`. Currently a hint — the
+     *  server processes paths inline and releases them immediately, so
+     *  cancel is a no-op in practice. Send it on `widget:Shutdown` for
+     *  forward compat with future async path scheduling. */
+    sendPathRequestCancel(requestId: number): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(32);
+        PathRequestCancel.startPathRequestCancel(builder);
+        PathRequestCancel.addRequestId(builder, requestId);
+        const off = PathRequestCancel.endPathRequestCancel(builder);
+        this.sendClientMessage(builder, ClientPayload.PathRequestCancel, off);
     }
 
     /** Send a PlayerCommand (unit order) to the server. */
@@ -1419,6 +1475,21 @@ export class Connection {
                     });
                 }
                 this.events.onUnitArmored?.(units);
+                break;
+            }
+            case ServerPayload.PathResponse: {
+                const fbResp = msg.payload(new PathResponse()) as PathResponse;
+                const waypoints: Array<readonly [number, number, number]> = [];
+                for (let i = 0; i < fbResp.waypointsLength(); i++) {
+                    const v = fbResp.waypoints(i);
+                    if (!v) continue;
+                    waypoints.push([v.x(), v.y(), v.z()]);
+                }
+                this.events.onPathResponse?.({
+                    requestId: fbResp.requestId(),
+                    waypoints,
+                    length: fbResp.length(),
+                });
                 break;
             }
             case ServerPayload.GameRestarting:

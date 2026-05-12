@@ -166,6 +166,20 @@ export interface SpringAPIContext {
      * Lines emit two pings — one per endpoint — so the bracket dots
      * frame the line on the minimap. Coords are world-space elmos. */
     addMinimapMarker?(x: number, z: number): void;
+    /**
+     * Forward a `Spring.RequestPath` / `Spring.PathRequest` call to the
+     * server. The host hands the request to the connection layer; the
+     * server's IPathManager computes the path and replies with a
+     * PathResponse routed back through `ingestPathResponse` on the
+     * worker. Optional — if absent the API returns nil.
+     */
+    requestPath?(requestId: number,
+                 startX: number, startY: number, startZ: number,
+                 endX: number, endY: number, endZ: number,
+                 moveType: number, goalRadius: number): void;
+    /** Cancel a pending path request (no-op until QTPFS multi-tick
+     *  search lands server-side). Optional. */
+    cancelPathRequest?(requestId: number): void;
 }
 
 /** Per-unit entry in the worker's unit store. */
@@ -383,6 +397,20 @@ export interface LiveState {
      *  non-armored state (armored=false, armoredMultiple=1.0). Read by
      *  Spring.GetUnitArmored. */
     armoredState: Map<number, { armored: boolean; armoredMultiple: number }>;
+    /** In-flight `Spring.RequestPath` results, keyed by client-assigned
+     *  request id. Each entry is the full waypoint list returned by the
+     *  server (empty if the path manager couldn't find a route) plus
+     *  the total path length in elmos. Entries arrive asynchronously
+     *  via the `pathResponse` postMessage; the path proxy returned by
+     *  `Spring.RequestPath` reads from here on every method call. The
+     *  proxy's `__gc` (and the explicit `Spring.DeletePath`) clears
+     *  the entry. */
+    pathResponses: Map<number, { waypoints: Array<[number, number, number]>; length: number }>;
+    /** Monotonic counter for client-assigned path request ids. Starts at
+     *  1 because a `tag = 0` reservation sentinel is used elsewhere in
+     *  the protocol; we keep request ids in the same positive-only
+     *  space for consistency. */
+    nextPathRequestId: number;
 }
 
 /** Stored LOS bitmap snapshot inside `LiveState`. Mirrors `LosBitmap`
@@ -764,6 +792,8 @@ export function createDefaultLiveState(): LiveState {
         selfDCountdown: new Map(),
         stockpileState: new Map(),
         armoredState: new Map(),
+        pathResponses: new Map(),
+        nextPathRequestId: 1,
     };
 }
 
@@ -1483,6 +1513,140 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             if (h > 32767) h = 32767;
             else if (h < -32768) h = -32768;
             return h;
+        },
+
+        // Spring.RequestPath / Spring.PathRequest — submit an async path
+        // query to the server's IPathManager. Spring's native API returns
+        // a userdata object with `:Next()` and `:GetPathWayPoints()`
+        // methods; we return an equivalent Lua table proxy keyed by a
+        // client-assigned request id. Methods read from
+        // `ls.pathResponses` on each call — empty until the server's
+        // `PathResponse` arrives, then populated for as long as the
+        // proxy lives.
+        //
+        // Caller form (matches Spring): RequestPath(moveType, sx, sy, sz,
+        // ex, ey, ez, [radius=8.0]). `moveType` is the move-def index
+        // (the field ZK reads as `UnitDefs[id].moveDef.id`). Returns nil
+        // when the host doesn't have a connection layer (test harness)
+        // or when no valid move type was given.
+        //
+        // Behaviour quirk vs Spring: the first call after issuing the
+        // request returns an empty waypoints list (the server reply
+        // hasn't arrived yet). The proxy keeps polling — subsequent
+        // GetPathWayPoints calls return the real result once the
+        // PathResponse lands. Widgets that fail-open on empty
+        // waypoints (ZK's IsTargetReachable does) handle this
+        // gracefully; widgets that don't will get one false-negative
+        // frame and converge on the next tick.
+        RequestPath: (moveType: LuaValue, sx: LuaValue, sy: LuaValue, sz: LuaValue,
+                      ex: LuaValue, ey: LuaValue, ez: LuaValue, radius: LuaValue) => {
+            const mt = Number(moveType) | 0;
+            // Air / sea-only / invalid: bail with nil so widgets fall
+            // through to their "no pathing" branch (Spring's documented
+            // behaviour for unknown movedef ids).
+            if (mt < 0 || !Number.isFinite(mt)) return null;
+            const startX = Number(sx), startY = Number(sy), startZ = Number(sz);
+            const endX   = Number(ex), endY   = Number(ey), endZ   = Number(ez);
+            const r = Number(radius);
+            const goalRadius = Number.isFinite(r) && r > 0 ? r : 8.0;
+
+            const requestId = ls.nextPathRequestId++;
+            // Seed an empty entry so GetPathWayPoints can read it before
+            // the server replies (returns []).
+            ls.pathResponses.set(requestId, { waypoints: [], length: 0 });
+
+            if (ctx.requestPath) {
+                ctx.requestPath(
+                    requestId, startX, startY, startZ,
+                    endX, endY, endZ, mt, goalRadius);
+            } else {
+                // No host wired — drop the stub and return nil so the
+                // widget treats it as "no path" rather than caching a
+                // never-resolving proxy.
+                ls.pathResponses.delete(requestId);
+                return null;
+            }
+
+            // Proxy: a table that mimics Spring's path userdata.
+            // ZK widgets call `path:GetPathWayPoints()` and `path:Next(x,y,z,minDist)`;
+            // both read from the live `pathResponses` map so the result
+            // updates in place once the server reply arrives.
+            const proxy: Record<string, LuaValue> = {};
+            const lookup = () => ls.pathResponses.get(requestId);
+
+            proxy.id = requestId;
+            // Both 1-arg (self) and 0-arg styles in case fengari calls
+            // method-form vs function-form.
+            proxy.GetPathWayPoints = (_self?: LuaValue) => {
+                void _self;
+                const entry = lookup();
+                if (!entry || entry.waypoints.length === 0) return luaTable();
+                // Return a 1-indexed Lua sequence of {x,y,z} triples,
+                // matching Spring's native shape.
+                const items: LuaValue[] = entry.waypoints.map(wp => {
+                    const t: Record<number, number> = {};
+                    t[1] = wp[0]; t[2] = wp[1]; t[3] = wp[2];
+                    return t as LuaValue;
+                });
+                return luaTable(...items);
+            };
+            // path:Next(callerX, callerY, callerZ, minDist) — returns the
+            // next waypoint past `minDist` from `callerPos`. Spring's
+            // native impl returns (x,y,z) tuple; nil tuple if no more
+            // waypoints. We walk the cached list forward from a stored
+            // cursor — there's no server round-trip here, all bookkeeping
+            // is client-side.
+            const cursor = { idx: 0 };
+            proxy.Next = (_self: LuaValue, callerX: LuaValue, callerY: LuaValue,
+                          callerZ: LuaValue, minDist: LuaValue) => {
+                void _self;
+                const entry = lookup();
+                if (!entry || entry.waypoints.length === 0) return null;
+                const cx = Number(callerX ?? 0);
+                const cy = Number(callerY ?? 0);
+                const cz = Number(callerZ ?? 0);
+                const md = Math.max(0, Number(minDist ?? 0));
+                const md2 = md * md;
+                while (cursor.idx < entry.waypoints.length) {
+                    const wp = entry.waypoints[cursor.idx];
+                    cursor.idx++;
+                    const dx = wp[0] - cx, dy = wp[1] - cy, dz = wp[2] - cz;
+                    if ((dx*dx + dy*dy + dz*dz) >= md2) {
+                        return [wp[0], wp[1], wp[2]];
+                    }
+                }
+                return null;
+            };
+            return proxy;
+        },
+        // `Spring.PathRequest` is bound after the Spring object closes —
+        // it shares the same closure as `RequestPath`.
+        // Release a path proxy. Spring's userdata calls this via `__gc`
+        // when the proxy is collected; widgets sometimes call it
+        // explicitly. We drop the cached waypoints + send the cancel
+        // hint to the server (currently a no-op, will matter once
+        // QTPFS multi-tick is wired).
+        DeletePath: (path: LuaValue) => {
+            const id = (path && typeof path === 'object' && (path as Record<string, LuaValue>).id != null)
+                ? Number((path as Record<string, LuaValue>).id)
+                : Number(path);
+            if (!Number.isFinite(id) || id <= 0) return;
+            ls.pathResponses.delete(id);
+            ctx.cancelPathRequest?.(id);
+        },
+        // Spring.GetPathPosition(pathId, idx) — index-based reader used
+        // by widgets that don't want to hold the proxy. 1-indexed.
+        GetPathPosition: (path: LuaValue, idx: LuaValue) => {
+            const id = (path && typeof path === 'object' && (path as Record<string, LuaValue>).id != null)
+                ? Number((path as Record<string, LuaValue>).id)
+                : Number(path);
+            const i = Number(idx) | 0;
+            if (!Number.isFinite(id) || id <= 0 || i < 1) return null;
+            const entry = ls.pathResponses.get(id);
+            if (!entry) return null;
+            const wp = entry.waypoints[i - 1];
+            if (!wp) return null;
+            return [wp[0], wp[1], wp[2]];
         },
 
         // --- Team resources ---
@@ -2590,6 +2754,11 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         },
         SendLuaGaiaMsg: () => {},
     };
+
+    // `Spring.PathRequest` is an alias for `Spring.RequestPath` — some
+    // upstream forks use the former name. Bound here so both refer to
+    // the same closure (and same `cursor` / liveState references).
+    Spring.PathRequest = Spring.RequestPath;
 
     // --- io stub ---
     //

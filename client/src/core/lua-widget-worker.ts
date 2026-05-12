@@ -401,6 +401,7 @@ function describeInboundMessage(msg: Record<string, unknown>): string {
         case 'gameInfo':      return `gameInfo frame=${msg.frame}`;
         case 'commandNotify': return `commandNotify cmd=${msg.cmdId} req=${msg.requestId} params=${(msg.params as unknown[])?.length ?? 0}`;
         case 'defaultCommandTarget': return `defaultCommandTarget type=${msg.targetType} id=${msg.targetId} engineCmd=${msg.engineCmd}`;
+        case 'pathResponse':  return `pathResponse req=${msg.requestId} waypoints=${(msg.waypoints as unknown[])?.length ?? 0}`;
         default:              return t;
     }
 }
@@ -1053,6 +1054,22 @@ async function init(
             // minimap.pushMarkerPing so the cyan event-layer ring pulses
             // at the drop site. Coordinates are world-space elmos.
             postToMain({ type: 'minimapMarker', x, z });
+        },
+        requestPath: (requestId, sx, sy, sz, ex, ey, ez, moveType, goalRadius) => {
+            // Spring.RequestPath path. The main thread forwards to the
+            // server via Connection.sendPathRequest; the server's
+            // IPathManager replies with a PathResponse routed back to
+            // the worker via the 'pathResponse' postMessage above.
+            postToMain({
+                type: 'pathRequest',
+                requestId,
+                startX: sx, startY: sy, startZ: sz,
+                endX: ex, endY: ey, endZ: ez,
+                moveType, goalRadius,
+            });
+        },
+        cancelPathRequest: (requestId) => {
+            postToMain({ type: 'pathRequestCancel', requestId });
         },
     };
 
@@ -4483,6 +4500,26 @@ self.onmessage = async (e: MessageEvent) => {
                 liveState.armoredState.set(u.unitId, {
                     armored: u.armored, armoredMultiple: u.armoredMultiple,
                 });
+            }
+            break;
+        }
+
+        case 'pathResponse': {
+            // Server reply to a `Spring.RequestPath` we sent earlier.
+            // The path proxy returned at request time reads `pathResponses`
+            // on every method call, so once we drop the result in here
+            // any future call observes the real waypoints. We never
+            // delete the entry on our own — the widget either calls
+            // `Spring.DeletePath` (which clears it) or drops its
+            // reference and we leak a small entry until shutdown.
+            const requestId = Number(msg.requestId | 0);
+            const waypoints = Array.isArray(msg.waypoints)
+                ? (msg.waypoints as Array<[number, number, number]>)
+                    .map(w => [Number(w[0]), Number(w[1]), Number(w[2])] as [number, number, number])
+                : [];
+            const length = Number(msg.length ?? 0);
+            if (requestId > 0) {
+                liveState.pathResponses.set(requestId, { waypoints, length });
             }
             break;
         }
