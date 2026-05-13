@@ -489,13 +489,20 @@ void CSimulation::SimFrame()
     helper->Update();
     mapDamage->Update();
     pathManager->Update();
+
+    // Unit script animations (COB/Lua piece turns, spins, moves).
+    // Tick BEFORE unitHandler.Update() so the piece transforms read by
+    // CWeapon::UpdateWeaponVectors (inside UpdateUnitWeapons) reflect the
+    // animation advances scheduled by the previous frame's AimWeapon call,
+    // rather than lagging one tick behind. Symptom this fixes: turrets
+    // that appear to aim one tick late and projectiles that spawn from
+    // last-frame's barrel pose. See PLAN-combat-vfx.md F1.
+    if (unitScriptEngine != nullptr)
+        unitScriptEngine->Tick(33); // 33ms ≈ 1 tick at 30Hz
+
     unitHandler.Update();
     projectileHandler.Update();
     featureHandler.Update();
-
-    // Unit script animations (COB/Lua piece turns, spins, moves)
-    if (unitScriptEngine != nullptr)
-        unitScriptEngine->Tick(33); // 33ms ≈ 1 tick at 30Hz
 
     // Environment (wind, tidal)
     envResHandler.Update();
