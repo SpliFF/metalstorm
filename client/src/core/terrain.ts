@@ -538,7 +538,12 @@ export class TerrainFog {
             this.mat.opacityTexture = this.texture;
         }
 
-        const ctx = this.texture.getContext() as CanvasRenderingContext2D;
+        // getContext() can transiently return null if the underlying
+        // offscreen canvas creation failed (Safari/Firefox edge cases) or
+        // if the scene's engine context was lost mid-frame. Skip this
+        // bitmap — the next LOS snapshot (~1 Hz) will retry.
+        const ctx = this.texture.getContext() as CanvasRenderingContext2D | null;
+        if (!ctx) return;
         const img = ctx.createImageData(width, height);
         const data = img.data;
         for (let row = 0; row < height; ++row) {

@@ -370,13 +370,14 @@ export class LuaWidgetManager {
         const conn = this.connection;
         const mainCanvas = this.scene.getEngine().getRenderingCanvas();
 
-        // Get view and projection matrices for WorldToScreenCoords
-        const viewMatrix = this.scene.activeCamera
-            ? new Float32Array(this.scene.getViewMatrix().toArray())
-            : undefined;
-        const projMatrix = this.scene.activeCamera
-            ? new Float32Array(this.scene.getProjectionMatrix().toArray())
-            : undefined;
+        // Get view and projection matrices for WorldToScreenCoords.
+        // Babylon's getViewMatrix/getProjectionMatrix can transiently return
+        // undefined before the first render frame after a scene rebuild
+        // (game restart, hot-reload), so guard both the matrix and toArray.
+        const rawView = this.scene.activeCamera ? this.scene.getViewMatrix() : undefined;
+        const rawProj = this.scene.activeCamera ? this.scene.getProjectionMatrix() : undefined;
+        const viewMatrix = rawView ? new Float32Array(rawView.asArray()) : undefined;
+        const projMatrix = rawProj ? new Float32Array(rawProj.asArray()) : undefined;
 
         this.postToWorker({
             type: 'stateUpdate',
