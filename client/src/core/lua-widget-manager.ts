@@ -216,6 +216,14 @@ export class LuaWidgetManager {
      *  `smoothness` is Spring's seconds-ish pacing hint; 0 = teleport. */
     onCameraTargetRequest?: (x: number, z: number, smoothness: number) => void;
 
+    /** Fired when a widget called the full Spring.SetCameraState form.
+     *  `state` is the same table the widget passed in, with any subset
+     *  of {px,py,pz, tx,ty,tz, rx,ry,rz, dist, height, fov} populated.
+     *  Main.ts maps these onto RTSCamera primitives — fields the host
+     *  can't honour are silently ignored. `smoothness` is the same
+     *  seconds-ish pacing hint as `onCameraTargetRequest`. */
+    onCameraStateRequest?: (state: Record<string, unknown>, smoothness: number) => void;
+
     /** Fired when a widget called Spring.SetActiveCommand and the API
      *  resolved it to a real cmdId (build cmdIds are negative). Main.ts
      *  wires this to InputManager — build commands enter ground placement
@@ -1091,6 +1099,7 @@ export class LuaWidgetManager {
             case 'pathResponse':      summary = `pathResponse req=${msg.requestId} waypoints=${(msg.waypoints as unknown[])?.length ?? 0}`; break;
             case 'setSelection':   summary = `setSelection units=${(msg.unitIds as unknown[])?.length ?? 0}`; break;
             case 'setCameraTarget': summary = `setCameraTarget x=${msg.x} z=${msg.z} smooth=${msg.smoothness}`; break;
+            case 'setCameraState':  summary = `setCameraState (${Object.keys(msg.state as Record<string, unknown> ?? {}).length} fields) smooth=${msg.smoothness}`; break;
             case 'uiHover':        summary = `uiHover above=${msg.above}`; break;
             case 'inputConsumed':  summary = `inputConsumed kind=${msg.kind} consumed=${msg.consumed}`; break;
             case 'minimapGeometry': summary = `minimapGeometry @${msg.x},${msg.y} ${msg.w}x${msg.h} visible=${msg.visible}`; break;
@@ -1305,6 +1314,14 @@ export class LuaWidgetManager {
                 if (Number.isFinite(x) && Number.isFinite(z)) {
                     this.onCameraTargetRequest?.(x, z, smoothness);
                 }
+                break;
+            }
+
+            case 'setCameraState': {
+                const state = (msg.state && typeof msg.state === 'object')
+                    ? msg.state as Record<string, unknown> : {};
+                const smoothness = Number(msg.smoothness) || 0;
+                this.onCameraStateRequest?.(state, smoothness);
                 break;
             }
 

@@ -76,6 +76,29 @@ export interface SpringAPIContext {
      * RTS camera maintains its own height. Optional.
      */
     setCameraTarget?(x: number, z: number, smoothness?: number): void;
+
+    /**
+     * Apply a full Spring-shape camera state. `state` is the same table
+     * Lua's `Spring.SetCameraState(state, transitionTime)` expects:
+     * `{px, py, pz}` set the camera position, `{tx, ty, tz}` (or `{rx,
+     * ry}`-derived direction) set the look-at, `dist`/`height` adjust
+     * orbit distance, `fov` sets vertical FOV in degrees. Fields the
+     * host can't honour are silently ignored. `smoothness` is the same
+     * seconds-ish hint as `setCameraTarget`. Optional.
+     */
+    setCameraState?(state: Record<string, unknown>, smoothness?: number): void;
+
+    /**
+     * Read the host's current camera pose. Used by `Spring.GetCameraState`
+     * so widgets see live coordinates regardless of when the host last
+     * pushed a synced snapshot via the lua-state bridge. Returns the
+     * structural `{pos, lookAt}` shape RTSCamera publishes; optional —
+     * absent hosts fall back to the cached `ls.camera` values.
+     */
+    getCameraPose?(): {
+        pos: { x: number; y: number; z: number };
+        lookAt: { x: number; y: number; z: number };
+    } | null;
     /**
      * Resolve a unit-def id to its internal name (e.g. 549 →
      * "staticmex"). Used by GetUnitCmdDescs to fill in cmd.name and
@@ -1858,25 +1881,53 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             // — pos must be the table (2nd return), not a coord scalar.
             return ['ground', luaTable(hit[0], hit[1], hit[2])];
         },
-        GetCameraPosition: () => [ls.camera.px, ls.camera.py, ls.camera.pz],
+        GetCameraPosition: () => {
+            const live = ctx.getCameraPose?.();
+            if (live) return [live.pos.x, live.pos.y, live.pos.z];
+            return [ls.camera.px, ls.camera.py, ls.camera.pz];
+        },
         GetCameraDirection: () => {
-            // Derive direction from position → target
-            const dx = ls.camera.tx - ls.camera.px;
-            const dy = ls.camera.ty - ls.camera.py;
-            const dz = ls.camera.tz - ls.camera.pz;
+            const live = ctx.getCameraPose?.();
+            const px = live ? live.pos.x : ls.camera.px;
+            const py = live ? live.pos.y : ls.camera.py;
+            const pz = live ? live.pos.z : ls.camera.pz;
+            const tx = live ? live.lookAt.x : ls.camera.tx;
+            const ty = live ? live.lookAt.y : ls.camera.ty;
+            const tz = live ? live.lookAt.z : ls.camera.tz;
+            const dx = tx - px;
+            const dy = ty - py;
+            const dz = tz - pz;
             const len = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
             return [dx / len, dy / len, dz / len];
         },
         GetCameraState: () => {
-            const dx = ls.camera.tx - ls.camera.px;
-            const dy = ls.camera.ty - ls.camera.py;
-            const dz = ls.camera.tz - ls.camera.pz;
+            const live = ctx.getCameraPose?.();
+            const px = live ? live.pos.x : ls.camera.px;
+            const py = live ? live.pos.y : ls.camera.py;
+            const pz = live ? live.pos.z : ls.camera.pz;
+            const tx = live ? live.lookAt.x : ls.camera.tx;
+            const ty = live ? live.lookAt.y : ls.camera.ty;
+            const tz = live ? live.lookAt.z : ls.camera.tz;
+            const dx = tx - px;
+            const dy = ty - py;
+            const dz = tz - pz;
             const len = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
             return {
-                px: ls.camera.px, py: ls.camera.py, pz: ls.camera.pz,
+                // Position (Spring's "px/py/pz" are camera coords, not the
+                // look-at — confusingly named but matches the engine).
+                px, py, pz,
+                // Look-at point. Not part of Spring's classic state shape
+                // but useful and matches Recoil's `target` extension —
+                // widgets that don't read these keys still work.
+                tx, ty, tz,
                 rx: Math.asin(-dy / len),
                 ry: Math.atan2(dx, dz),
                 rz: 0,
+                // Orbit distance — Spring's `dist` field.
+                dist: len,
+                // Camera height — same as py minus look-at.y; commonly
+                // queried separately by widgets.
+                height: py - ty,
                 // ZK's COFC camera tools (TraceCursorToGround,
                 // api_preselection) read cs.fov directly. Provide a
                 // sensible default in degrees.
@@ -1885,18 +1936,43 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
                 mode: 0,
             };
         },
-        // Spring.SetCameraState(state, smoothness) — partial implementation:
-        // we only handle the "move to (px,_,pz)" case, which is what ZK's
-        // SetCameraTargetBox / WG.COFC_SetCameraTarget fall back to. Other
-        // fields (rx, ry, height, mode, name) are no-ops; the RTS camera
-        // owns its own height and rotation.
+        // Spring.SetCameraState(state, smoothness) — full state push.
+        // Mirrors Recoil/Spring's contract: any subset of the canonical
+        // fields may be supplied and the host applies what it can.
+        //   {px,py,pz}        camera position
+        //   {tx,ty,tz}        look-at point (Recoil extension; widgets
+        //                     also commonly use {rx,ry} for direction)
+        //   dist / height     orbit distance (if no explicit position)
+        //   fov               vertical FOV in degrees
+        //   mode / name       camera mode hint — currently a no-op
+        //                     since this fork ships one RTS camera mode
+        // Falls back to the (px,pz) move-target shape when the caller
+        // only supplied the partial state ZK's SetCameraTargetBox /
+        // WG.COFC_SetCameraTarget historically used.
         SetCameraState: (state: LuaValue, smoothness: LuaValue) => {
             if (state == null || typeof state !== 'object' || Array.isArray(state)) return;
+            if (!ctx.setCameraState) {
+                // Host doesn't expose the full path; degrade to the
+                // historical px/pz-only target move.
+                const s = state as Record<string, LuaValue>;
+                const px = Number(s.px);
+                const pz = Number(s.pz);
+                if (!Number.isFinite(px) || !Number.isFinite(pz)) return;
+                ctx.setCameraTarget?.(px, pz, Number(smoothness) || 0);
+                return;
+            }
+            // Stringify keys + coerce values so the host doesn't have to
+            // re-parse the Lua-typed table. Empty / nil fields stay
+            // unset so the host can detect "no override for this field".
             const s = state as Record<string, LuaValue>;
-            const px = Number(s.px);
-            const pz = Number(s.pz);
-            if (!Number.isFinite(px) || !Number.isFinite(pz)) return;
-            ctx.setCameraTarget?.(px, pz, Number(smoothness) || 0);
+            const out: Record<string, unknown> = {};
+            for (const k of Object.keys(s)) {
+                const v = s[k];
+                if (typeof v === 'number') out[k] = v;
+                else if (typeof v === 'boolean') out[k] = v;
+                else if (typeof v === 'string') out[k] = v;
+            }
+            ctx.setCameraState(out, Number(smoothness) || 0);
         },
         // Spring.SetCameraTarget(x, y, z, smoothness) — focus the RTS
         // camera on the (x,z) ground point. Y is ignored (the camera

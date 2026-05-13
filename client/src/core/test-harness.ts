@@ -205,6 +205,67 @@ export class TestHarness {
         this.deps.camera.restoreView(view, 0);
     }
 
+    // ─── Programmatic camera API — mirrors window.camera ───────────────
+    //
+    // Tests routinely want a *precise* camera pose ("look at unit X from
+    // 200 elmos south at 40° pitch") rather than RTSCamera's
+    // ergonomic-but-fuzzy `focusOn`. These methods forward straight to
+    // the underlying RTSCamera primitives so the harness, JS console and
+    // Lua bridge all behave identically. All accept the same shapes as
+    // `window.camera.*`.
+
+    /** Get the current camera pose ({pos, lookAt} of {x,y,z}). */
+    cameraPose(): { pos: { x: number; y: number; z: number }; lookAt: { x: number; y: number; z: number } } {
+        return this.deps.camera.getPose();
+    }
+
+    /** Set the camera to a specific pose. */
+    async setCameraPose(pose: { pos: { x: number; y: number; z: number }; lookAt: { x: number; y: number; z: number } }, durationMs = 0): Promise<void> {
+        this.deps.camera.setPose(pose, durationMs);
+        if (durationMs > 0) await wait(durationMs + 16);
+    }
+
+    /** Orbit around the current look-at. opts: {yawDeg?, pitchDeg?, distance?, durationMs?} */
+    async cameraOrbit(opts: { yawDeg?: number; pitchDeg?: number; distance?: number; durationMs?: number } = {}): Promise<void> {
+        this.deps.camera.orbit(opts);
+        const d = opts.durationMs ?? 0;
+        if (d > 0) await wait(d + 16);
+    }
+
+    /** Look at a unit by ID — uses the entityRenderer's interpolated
+     *  client position. opts: {height?, pitchDeg?, durationMs?} */
+    async cameraSnapToUnit(unitId: number, opts: { height?: number; pitchDeg?: number; durationMs?: number } = {}): Promise<void> {
+        if (!this.deps.entityRenderer) throw new Error('[test] no entityRenderer');
+        const p = this.deps.entityRenderer.getEntityPosition(unitId);
+        if (!p) throw new Error(`[test] no client-side position for unit ${unitId}`);
+        this.deps.camera.snapToGround(p.x, p.z, opts);
+        const d = opts.durationMs ?? 0;
+        if (d > 0) await wait(d + 16);
+    }
+
+    /** Look at a ground point. opts: {height?, pitchDeg?, durationMs?} */
+    async cameraSnapToGround(x: number, z: number, opts: { height?: number; pitchDeg?: number; durationMs?: number } = {}): Promise<void> {
+        this.deps.camera.snapToGround(x, z, opts);
+        const d = opts.durationMs ?? 0;
+        if (d > 0) await wait(d + 16);
+    }
+
+    /** Top-down view of the entire map. */
+    async cameraFitMap(opts: { padding?: number; pitchDeg?: number; durationMs?: number } = {}): Promise<void> {
+        this.deps.camera.fitMap(opts);
+        const d = opts.durationMs ?? 0;
+        if (d > 0) await wait(d + 16);
+    }
+
+    /** Save the current pose into a numbered slot. */
+    cameraSaveSlot(slot: number): void { this.deps.camera.saveSlot(slot); }
+    /** Recall a numbered slot. Returns false when empty. */
+    async cameraLoadSlot(slot: number, durationMs = 0): Promise<boolean> {
+        const ok = this.deps.camera.loadSlot(slot, durationMs);
+        if (ok && durationMs > 0) await wait(durationMs + 16);
+        return ok;
+    }
+
     // ─── Render-loop pause + screenshots ────────────────────────────
 
     /** Stop the render loop. Sim continues on the server unless you

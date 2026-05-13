@@ -975,6 +975,15 @@ async function init(
         setCameraTarget: (x, z, smoothness) => {
             postToMain({ type: 'setCameraTarget', x, z, smoothness });
         },
+        setCameraState: (state, smoothness) => {
+            postToMain({ type: 'setCameraState', state, smoothness });
+        },
+        // `getCameraPose` is intentionally NOT forwarded: querying the
+        // host synchronously across the worker boundary would block the
+        // sim. The fallback path in lua-spring-api reads from `ls.camera`
+        // (the snapshot main.ts pushes each tick), which is accurate to
+        // within one frame and good enough for every existing widget.
+        getCameraPose: () => null,
         getUnitDefName: (defId) => unitDefMap.get(defId)?.name,
         getUnitDefSensorRadius: (defId, type) => {
             const d = unitDefMap.get(defId);

@@ -47,6 +47,25 @@ export interface RTSCameraConfig {
     edgeScrollPixels?: number;
     /** Radians of yaw / tilt per pixel of right-mouse drag. */
     orbitSpeed?: number;
+    /** Vertical clearance kept between the camera and the underlying
+     *  ground or water surface. Defaults to 20 elmos. */
+    terrainClearance?: number;
+}
+
+/** Shorthand for the world-space (x, y, z) triple shared by every
+ *  camera-pose entry-point. Accepts the Babylon Vector3 type structurally. */
+export interface Vec3Like {
+    x: number;
+    y: number;
+    z: number;
+}
+
+/** Full camera pose — camera position + look-at point. Returned by
+ *  getPose() / consumed by setPose(). Mirrors the saveView/restoreView
+ *  shape (which is kept as a backwards-compatible alias). */
+export interface CameraPose {
+    pos: { x: number; y: number; z: number };
+    lookAt: { x: number; y: number; z: number };
 }
 
 export class RTSCamera {
@@ -126,6 +145,27 @@ export class RTSCamera {
     // unit-distance point computed from rotation, which drifts when we move
     // the camera — so we keep our own copy to make zoom maths stable.
     private lookAt = new Vector3(0, 0, 0);
+
+    // Ground-height sampler — set by host (main.ts wires
+    // entityRenderer.getGroundHeight). Used by `clampAboveGround` so the
+    // camera (and animated transitions) never pierce terrain or dive
+    // below sea level. Optional; clamp is a no-op when unset.
+    private groundSampler: ((x: number, z: number) => number) | null = null;
+
+    /// Vertical buffer kept above the higher of ground and water (Y=0).
+    private terrainClearance: number;
+
+    /// Map size used by `fitMap()`. Populated when host calls
+    /// `setMapBounds(width, height)`; falls back to a generous 8 km² when
+    /// unset so `fitMap` still produces something usable.
+    private mapWidth = 8192;
+    private mapHeight = 8192;
+
+    /// Numbered saved-view slots (Spring's F2..F6 + Shift+F2..F6 idiom).
+    /// Slot 0 is the special "previous view" jump that pairs naturally
+    /// with `loadSlot`. Stored as plain pose-records so callers can
+    /// serialise the table.
+    private savedSlots = new Map<number, CameraPose>();
 
     // Bound handlers so we can remove them on dispose()
     private onKeyDown = (e: KeyboardEvent): void => {
@@ -365,6 +405,7 @@ export class RTSCamera {
         // 0.006 rad/px ≈ a full 360° sweep after dragging ~1050 px, which
         // feels roughly right for a 1080p-ish canvas.
         this.orbitSpeed = config.orbitSpeed ?? 0.006;
+        this.terrainClearance = config.terrainClearance ?? 20;
 
         // Detach Babylon's default input so it doesn't fight our handlers
         camera.detachControl();
@@ -460,6 +501,13 @@ export class RTSCamera {
         }
 
         this.applyZoomSmoothing(dt);
+
+        // Terrain protection: lift the camera if it ended up below the
+        // ground or under sea level after any of the above (pan / zoom /
+        // edge-scroll). Runs every tick whether the user provided input
+        // or not so the camera self-rights when the terrain rises beneath
+        // it during animated transitions or external pose changes.
+        this.clampAboveGround();
     }
 
     /**
@@ -854,6 +902,238 @@ export class RTSCamera {
         this.startTransition(endPos, endLookAt, durationMs);
     }
 
+    // ─── Pose primitives (programmatic API) ─────────────────────────────
+    //
+    // The methods below are the canonical entry points for scripted
+    // camera control: tests, debug consoles, MCP tooling and Lua widgets
+    // all route through them. They map onto the existing transition
+    // machinery so animation is uniform across every entry-point.
+
+    /** Read the current pose as a plain object. Pairs with `setPose`. */
+    getPose(): CameraPose {
+        return {
+            pos: { x: this.camera.position.x, y: this.camera.position.y, z: this.camera.position.z },
+            lookAt: { x: this.lookAt.x, y: this.lookAt.y, z: this.lookAt.z },
+        };
+    }
+
+    /** Set both camera position and look-at in one call. Equivalent to
+     *  `restoreView` but takes raw coordinates so callers don't have to
+     *  construct an opaque view object first. */
+    setPose(pose: CameraPose, durationMs = 0): void {
+        this.restoreView(pose, durationMs);
+    }
+
+    /** Look at a ground point, sampling the height when one isn't
+     *  supplied. `opts.height` is the camera Y offset above the target;
+     *  defaults to keeping the current camera-to-target Y delta. */
+    snapToGround(x: number, z: number, opts: {
+        height?: number;
+        pitchDeg?: number;
+        durationMs?: number;
+    } = {}): void {
+        const groundY = this.groundSampler ? Math.max(0, this.groundSampler(x, z)) : 0;
+        const targetY = groundY;
+        const wantedHeight = opts.height ?? (this.camera.position.y - this.lookAt.y);
+        const lookAt = { x, y: targetY, z };
+        const camPos = opts.pitchDeg !== undefined
+            ? this.cameraPosFromOrbit(lookAt, this.currentYawDeg(), opts.pitchDeg,
+                                      Math.max(this.minHeight, wantedHeight))
+            : { x, y: targetY + wantedHeight, z };
+        this.setPose({ pos: camPos, lookAt }, opts.durationMs ?? 0);
+    }
+
+    /** Look at an arbitrary 3D point. Mirrors `lookAtPosition` but in the
+     *  same `{x,y,z}` style as the rest of the new API. */
+    pointAt(p: Vec3Like, durationMs = 0): void {
+        this.lookAtPosition(p.x, p.y, p.z, durationMs);
+    }
+
+    /** Move the camera to an absolute world position; the look-at follows
+     *  by the same delta so the view direction is preserved. */
+    moveTo(p: Vec3Like, durationMs = 0): void {
+        const dx = p.x - this.camera.position.x;
+        const dy = p.y - this.camera.position.y;
+        const dz = p.z - this.camera.position.z;
+        this.moveBy({ x: dx, y: dy, z: dz }, durationMs);
+    }
+
+    /** Translate the camera (and its look-at) by `(dx, dy, dz)`. */
+    moveBy(delta: Vec3Like, durationMs = 0): void {
+        const pos = {
+            x: this.camera.position.x + delta.x,
+            y: this.camera.position.y + delta.y,
+            z: this.camera.position.z + delta.z,
+        };
+        const lookAt = {
+            x: this.lookAt.x + delta.x,
+            y: this.lookAt.y + delta.y,
+            z: this.lookAt.z + delta.z,
+        };
+        this.setPose({ pos, lookAt }, durationMs);
+    }
+
+    /** Orbit the camera around its current look-at, optionally also
+     *  changing the orbit distance. */
+    orbit(opts: {
+        yawDeg?: number;
+        pitchDeg?: number;
+        distance?: number;
+        durationMs?: number;
+    } = {}): void {
+        if (opts.distance !== undefined) {
+            this.targetDistance = this.clampDistance(opts.distance);
+        }
+        if (opts.yawDeg !== undefined || opts.pitchDeg !== undefined) {
+            this.rotateAroundTarget(opts.yawDeg ?? 0, opts.pitchDeg ?? 0,
+                                    opts.durationMs ?? 0);
+        }
+    }
+
+    /** Set the camera's heading (yaw) to face the given world direction.
+     *  Heading is degrees clockwise from +Z (Spring's convention). */
+    setHeading(yawDeg: number, durationMs = 0): void {
+        const delta = yawDeg - this.currentYawDeg();
+        // Wrap into (-180, 180] so we always take the short rotation.
+        const wrapped = ((delta + 540) % 360) - 180;
+        this.rotateAroundTarget(wrapped, 0, durationMs);
+    }
+
+    /** Set the camera's pitch (angle below horizontal looking down). */
+    setPitch(pitchDeg: number, durationMs = 0): void {
+        const delta = pitchDeg - this.currentPitchDeg();
+        this.rotateAroundTarget(0, delta, durationMs);
+    }
+
+    /** Set the camera-to-target distance. Eases over time when a duration
+     *  is supplied; instant otherwise. */
+    setDistance(distance: number, durationMs = 0): void {
+        const d = this.clampDistance(distance);
+        if (durationMs <= 0) {
+            const offset = this.camera.position.subtract(this.lookAt);
+            const len = offset.length();
+            if (len < 1e-4) return;
+            offset.scaleInPlace(d / len);
+            const endPos = this.lookAt.add(offset);
+            this.camera.position.copyFrom(endPos);
+            this.camera.setTarget(this.lookAt);
+            this.targetDistance = d;
+            this.updateAxes();
+            return;
+        }
+        // Reuse transition: compute endPos along current offset direction.
+        const offset = this.camera.position.subtract(this.lookAt);
+        const len = offset.length();
+        if (len < 1e-4) return;
+        offset.scaleInPlace(d / len);
+        const endPos = this.lookAt.add(offset);
+        this.startTransition(endPos, this.lookAt.clone(), durationMs);
+    }
+
+    /** Top-down framing of the entire map. The camera is placed directly
+     *  above the map centre at a height that puts the whole heightmap
+     *  inside the vertical FOV (with `padding` headroom). */
+    fitMap(opts: { padding?: number; pitchDeg?: number; durationMs?: number } = {}): void {
+        const padding = opts.padding ?? 1.05;
+        const pitch = opts.pitchDeg ?? 89;            // near-straight-down
+        const fovRad = this.camera.fov || (45 * Math.PI / 180);
+        const half = Math.max(this.mapWidth, this.mapHeight) * 0.5 * padding;
+        const distance = half / Math.tan(fovRad * 0.5);
+        const lookAt = { x: this.mapWidth * 0.5, y: 0, z: this.mapHeight * 0.5 };
+        // Place camera at (cx, distance·sin(pitch), cz - distance·cos(pitch))
+        // — a slight southward offset so non-90° pitches still frame the
+        // map without parallax skew.
+        const pr = pitch * Math.PI / 180;
+        const pos = {
+            x: lookAt.x,
+            y: lookAt.y + Math.sin(pr) * distance,
+            z: lookAt.z - Math.cos(pr) * distance,
+        };
+        this.setPose({ pos, lookAt }, opts.durationMs ?? 0);
+    }
+
+    /** Save the current pose into a numbered slot. Spring/Recoil binds
+     *  Shift+F2..F6 to save, F2..F6 to recall. */
+    saveSlot(slot: number): void {
+        this.savedSlots.set(slot, this.getPose());
+    }
+
+    /** Recall a numbered slot. Returns false when the slot hasn't been
+     *  populated yet. */
+    loadSlot(slot: number, durationMs = 0): boolean {
+        const pose = this.savedSlots.get(slot);
+        if (!pose) return false;
+        this.setPose(pose, durationMs);
+        return true;
+    }
+
+    /** Whether a save-slot has a stored pose. */
+    hasSlot(slot: number): boolean {
+        return this.savedSlots.has(slot);
+    }
+
+    /** Wire the heightmap sampler — used by terrain clamping in tick()
+     *  and by `snapToGround`. */
+    setGroundSampler(fn: (x: number, z: number) => number): void {
+        this.groundSampler = fn;
+    }
+
+    /** Tell the camera the map's playable extent so `fitMap` can size
+     *  itself. Both axes in elmos. */
+    setMapBounds(width: number, height: number): void {
+        if (width > 0) this.mapWidth = width;
+        if (height > 0) this.mapHeight = height;
+    }
+
+    // ─── Internals shared by the new API ────────────────────────────────
+
+    /** Lift the camera so it never penetrates terrain or sea level. Sea
+     *  level is fixed at Y=0 in Spring; ground comes from `groundSampler`
+     *  when wired. No-ops at the configured `terrainClearance` margin so
+     *  the lift doesn't fight a deliberate low-altitude pose. */
+    private clampAboveGround(): void {
+        if (!this.groundSampler) return;
+        const cx = this.camera.position.x;
+        const cz = this.camera.position.z;
+        const ground = this.groundSampler(cx, cz);
+        const floor = Math.max(ground, 0) + this.terrainClearance;
+        if (this.camera.position.y < floor) {
+            this.camera.position.y = floor;
+        }
+    }
+
+    /** Camera yaw expressed as a Spring-style world heading: 0° looks
+     *  toward +Z, +90° looks toward +X, etc. */
+    private currentYawDeg(): number {
+        const dx = this.lookAt.x - this.camera.position.x;
+        const dz = this.lookAt.z - this.camera.position.z;
+        return Math.atan2(dx, dz) * 180 / Math.PI;
+    }
+
+    /** Camera pitch (downward tilt) in degrees. */
+    private currentPitchDeg(): number {
+        const dy = this.camera.position.y - this.lookAt.y;
+        const dx = this.lookAt.x - this.camera.position.x;
+        const dz = this.lookAt.z - this.camera.position.z;
+        const horiz = Math.sqrt(dx * dx + dz * dz);
+        return Math.atan2(dy, horiz) * 180 / Math.PI;
+    }
+
+    /** Compute a camera world position from spherical-coords-around-lookAt. */
+    private cameraPosFromOrbit(lookAt: Vec3Like, yawDeg: number, pitchDeg: number,
+                                distance: number): { x: number; y: number; z: number } {
+        const yaw = yawDeg * Math.PI / 180;
+        const pitch = Math.max(this.minPitchRad,
+                               Math.min(this.maxPitchRad, pitchDeg * Math.PI / 180));
+        const horiz = distance * Math.cos(pitch);
+        const vert = distance * Math.sin(pitch);
+        return {
+            x: lookAt.x - horiz * Math.sin(yaw),
+            y: lookAt.y + vert,
+            z: lookAt.z - horiz * Math.cos(yaw),
+        };
+    }
+
     /**
      * Rotate the camera around the current look-at point.
      * @param yawDeg   Degrees to rotate horizontally (positive = clockwise when viewed from above)
@@ -971,6 +1251,8 @@ export class RTSCamera {
 
         Vector3.LerpToRef(t.startPos, t.endPos, alpha, this.camera.position);
         Vector3.LerpToRef(t.startLookAt, t.endLookAt, alpha, this.lookAt);
+        // Lift the camera if the interpolated path runs through ground.
+        this.clampAboveGround();
         this.camera.setTarget(this.lookAt);
 
         if (progress >= 1) {

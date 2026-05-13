@@ -432,7 +432,60 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // Expose camera API globally for JS console, LuaUI bridge, and automation.
     // All methods accept an optional durationMs parameter: 0 = instant jump,
     // >0 = animate over that many milliseconds with smooth ease-in-out.
+    //
+    // The surface deliberately covers four caller categories so each gets a
+    // single discoverable entry point:
+    //   - JS console / dev tools          (this object directly)
+    //   - chrome-devtools MCP             (via evaluate_script on this object)
+    //   - TestHarness / spring-test MCP   (forwards through these primitives)
+    //   - Lua widgets                     (Spring.SetCameraState / SetCameraTarget
+    //                                       /GetCameraState — wired in lua-spring-api)
     (window as any).camera = {
+        // ── Pose primitives ─────────────────────────────────────────
+        /** Read the current pose. */
+        getPose: () => rtsCamera.getPose(),
+        /** Set both camera position and look-at point. */
+        setPose: (pose: any, durationMs?: number) => rtsCamera.setPose(pose, durationMs),
+
+        // ── Snap / point ───────────────────────────────────────────
+        /** Snap to a ground point. opts: {height?, pitchDeg?, durationMs?} */
+        snapToGround: (x: number, z: number, opts: any = {}) => rtsCamera.snapToGround(x, z, opts),
+        /** Snap to a unit by ID. opts: {height?, pitchDeg?, durationMs?} */
+        snapToUnit: (unitId: number, opts: any = {}) => {
+            const p = entityRenderer?.getEntityPosition(unitId);
+            if (!p) throw new Error(`[camera] no client-side position for unit ${unitId}`);
+            rtsCamera.snapToGround(p.x, p.z, opts);
+        },
+        /** Look at an arbitrary 3D point ({x,y,z}). */
+        pointAt: (p: any, durationMs?: number) => rtsCamera.pointAt(p, durationMs),
+
+        // ── Movement ───────────────────────────────────────────────
+        /** Absolute camera position; preserves look direction. */
+        moveTo: (p: any, durationMs?: number) => rtsCamera.moveTo(p, durationMs),
+        /** Relative camera translation (also translates look-at). */
+        moveBy: (delta: any, durationMs?: number) => rtsCamera.moveBy(delta, durationMs),
+
+        // ── Orbit ──────────────────────────────────────────────────
+        /** Orbit around current look-at. opts: {yawDeg?, pitchDeg?, distance?, durationMs?} */
+        orbit: (opts: any = {}) => rtsCamera.orbit(opts),
+        /** Set heading (degrees CW from +Z). */
+        setHeading: (yawDeg: number, durationMs?: number) => rtsCamera.setHeading(yawDeg, durationMs),
+        /** Set downward pitch (degrees). */
+        setPitch: (pitchDeg: number, durationMs?: number) => rtsCamera.setPitch(pitchDeg, durationMs),
+        /** Set camera-to-target distance. */
+        setDistance: (d: number, durationMs?: number) => rtsCamera.setDistance(d, durationMs),
+
+        // ── Fit + saved slots ──────────────────────────────────────
+        /** Top-down view sized to the entire map. */
+        fitMap: (opts: any = {}) => rtsCamera.fitMap(opts),
+        /** Save current pose to a numbered slot (Spring F2..F6 convention). */
+        saveSlot: (slot: number) => rtsCamera.saveSlot(slot),
+        /** Recall a numbered slot. Returns false if empty. */
+        loadSlot: (slot: number, durationMs?: number) => rtsCamera.loadSlot(slot, durationMs),
+        /** True if a saved slot has a stored pose. */
+        hasSlot: (slot: number) => rtsCamera.hasSlot(slot),
+
+        // ── Legacy aliases (kept for backwards compat) ─────────────
         /** Move camera to look at world XZ position. */
         focusOn: (x: number, z: number, durationMs?: number) => rtsCamera.focusOn(x, z, durationMs),
         /** Move camera to look at a 3D world position, keeping current distance. */
@@ -584,6 +637,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             map.heightmap, map.mapx, map.mapy,
             map.minHeight, map.maxHeight, map.squareSize,
         );
+
+        // Wire the camera's terrain clamp + fitMap framing now that the
+        // heightmap and map dimensions are known. Both pulls come from
+        // EntityRenderer so the camera never holds its own copy.
+        if (entityRenderer) {
+            rtsCamera.setGroundSampler((x, z) => entityRenderer!.getGroundHeight(x, z));
+        }
+        rtsCamera.setMapBounds(map.widthElmos, map.heightElmos);
 
         // Absolute URL for HTTP resources (lobby-served)
         const mapBaseUrl = lobbyHttpUrl + map.mapDataUrl;
@@ -777,6 +838,34 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             mgr.onCameraTargetRequest = (x, z, smoothness) => {
                 const durationMs = smoothness > 0 ? Math.min(2000, smoothness * 1000) : 0;
                 rtsCamera.focusOn(x, z, durationMs);
+            };
+            // Full Spring.SetCameraState — translate the Recoil-shape
+            // table into our pose primitives. We honour every field the
+            // RTS camera understands; mode/name are silently ignored
+            // (this fork ships only one camera mode). Widgets typically
+            // pass either {tx,ty,tz} (target) or {px,py,pz} (position)
+            // or both; we accept any subset and fall back to the
+            // current value for missing components.
+            mgr.onCameraStateRequest = (state, smoothness) => {
+                const durationMs = smoothness > 0 ? Math.min(2000, smoothness * 1000) : 0;
+                const cur = rtsCamera.getPose();
+                const numF = (v: unknown, def: number) =>
+                    typeof v === 'number' && Number.isFinite(v) ? v : def;
+                const px = numF(state.px, cur.pos.x);
+                const py = numF(state.py, cur.pos.y);
+                const pz = numF(state.pz, cur.pos.z);
+                const tx = numF(state.tx, cur.lookAt.x);
+                const ty = numF(state.ty, cur.lookAt.y);
+                const tz = numF(state.tz, cur.lookAt.z);
+                rtsCamera.setPose({
+                    pos: { x: px, y: py, z: pz },
+                    lookAt: { x: tx, y: ty, z: tz },
+                }, durationMs);
+                // `dist` after a pose set lets widgets that only sent a
+                // target (no position) still adjust orbit distance.
+                if (typeof state.dist === 'number' && Number.isFinite(state.dist)) {
+                    rtsCamera.setDistance(state.dist, 0);
+                }
             };
             // The chili integral menu's build-button click resolves to
             // Spring.SetActiveCommand(idx, ...) for whatever build sits

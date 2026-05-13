@@ -639,6 +639,24 @@ export class EntityRenderer {
         this.mapSquareSize = squareSize;
     }
 
+    /** Public bilinear-height query at world (x, z). Returns 0 when the
+     *  heightmap hasn't streamed yet — callers that need to distinguish
+     *  "no data" from "sea level" should use `hasHeightmap()` first.
+     *  This is the same sampler the renderer uses internally; exposed so
+     *  rts-camera (terrain clamp), input-manager (pick targets) and the
+     *  Lua bridge (`Spring.GetGroundHeight`) can share a single source of
+     *  truth. */
+    getGroundHeight(x: number, z: number): number {
+        const h = this.sampleHeight(x, z);
+        return Number.isFinite(h) ? h : 0;
+    }
+
+    /** Whether the heightmap has been registered yet — false during the
+     *  brief window between game-start and the first `MapData` arrival. */
+    hasHeightmap(): boolean {
+        return this.mapHeightmap !== null;
+    }
+
     /** Bilinear height sample at world (x, z) from the cached heightmap.
      *  Returns NaN when the heightmap hasn't been registered yet — caller
      *  must check and skip re-projection in that case. */
