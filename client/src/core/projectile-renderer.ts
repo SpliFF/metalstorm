@@ -43,6 +43,12 @@ import type { WeaponDefInfo } from './connection.js';
 import { stampUrl } from '../config.js';
 import type { ProjectileTextureResolver } from './projectile-texture-resolver.js';
 import type { CegRuntime } from './ceg-runtime.js';
+import {
+    VisualType,
+    effectForFire,
+    effectForImpact,
+    impactContextFlags,
+} from './weapon-fx-dispatch.js';
 import { registerProjectileBeamShader } from './shaders/projectile-beam.js';
 import {
     type MissileTrailState,
@@ -54,16 +60,6 @@ import {
     isTrailFullyFaded,
     recordTrailPuff,
 } from './projectile-trails.js';
-
-/** Visual type enum — matches ProjectileVisualType in protocol.fbs */
-const enum VisualType {
-    Cannon = 0,
-    Laser = 1,
-    BeamLaser = 2,
-    Missile = 3,
-    Lightning = 4,
-    Flame = 5,
-}
 
 /** Default colors per visual type when weapon def doesn't specify one. */
 const DEFAULT_COLORS: Record<number, [number, number, number]> = {
@@ -1528,158 +1524,9 @@ function createFallbackVisual(
     };
 }
 
-// ── CEG effect dispatch ────────────────────────────────────────────────────
-//
-// Maps weapon visual types and impact kinds to named effects in the
-// CEG runtime's built-in library. Phase 5b will replace this with
-// per-weapon-def `cegtag` / `explosionGenerator` lookups streamed from
-// the server; for now the visual type is a coarse-but-useful proxy.
-
-/// Mirror of `SpringWeb::ProjectileImpactKind` in protocol.fbs (also
-/// duplicated in combat-fx.ts). Kept local to the file rather than
-/// shared because the impact kind is the only enum the renderer reads
-/// from the impact event and the protocol is stable.
-const enum ImpactKind {
-    Terrain = 0,
-    Unit = 1,
-    Feature = 2,
-    Shield = 3,
-    SelfDetonate = 4,
-    Intercepted = 5,
-    Other = 6,
-}
-
-/// Coarse archetype tag for a weapon def. Phase 5b dispatches the
-/// CEG library by archetype rather than raw visualType so a few
-/// hand-ported ZK CEG ports (`disintegrator` etc.) can override the
-/// generic muzzle/impact effects. The classifier is heuristic — ZK's
-/// real CEG dispatch goes through `cegtag` strings on the weapon def
-/// which we don't carry over the wire yet (lands with Phase 5c). For
-/// now we look at typeName, weapon name, and a couple of texture/
-/// size hints. Returns 'default' when nothing matches; callers fall
-/// back to visualType-keyed generic effects in that case.
-type WeaponArchetype =
-    | 'disintegrator'
-    | 'flame'
-    | 'lightninggun'
-    | 'largelaser'
-    | 'lightcannon'
-    | 'default';
-
-function classifyWeaponArchetype(def: WeaponDefInfo | undefined): WeaponArchetype {
-    if (!def) return 'default';
-    const name = (def.name || '').toLowerCase();
-    const tex1 = (def.texture1 || '').toLowerCase();
-    const typeName = (def.typeName || '').toLowerCase();
-    if (typeName === 'dgun' || name.includes('disintegrat')) return 'disintegrator';
-    if (typeName === 'flame' || def.visualType === VisualType.Flame) return 'flame';
-    if (typeName === 'lightningcannon' || def.visualType === VisualType.Lightning
-        || name.includes('lightning')) return 'lightninggun';
-    if (tex1.includes('largelaser')
-        || (def.visualType === VisualType.BeamLaser && def.size > 4)) {
-        return 'largelaser';
-    }
-    if (def.visualType === VisualType.Cannon && def.size <= 4) return 'lightcannon';
-    return 'default';
-}
-
-/// Per-archetype muzzle flash. Returning null skips the muzzle CEG
-/// entirely — used for beam/lightning weapons where the bolt itself
-/// is the muzzle visual and a separate flash would just add overdraw.
-const FIRE_EFFECT_BY_ARCHETYPE: Record<WeaponArchetype, string | null> = {
-    disintegrator: 'muzzleflash_disintegrator',
-    flame:         'muzzleflash_flame',
-    lightninggun:  'muzzleflash_lightninggun',
-    largelaser:    null,
-    lightcannon:   null,
-    default:       null,
-};
-
-/// Per-archetype impact effect. Each entry covers the most common
-/// terrain/feature/self-detonate impact case; shield deflections
-/// always render `impact_shield` regardless of archetype, and Unit
-/// impacts are ceded to combat-fx (see effectForImpact below).
-const IMPACT_EFFECT_BY_ARCHETYPE: Record<WeaponArchetype, string | null> = {
-    disintegrator: 'impact_disintegrator',
-    flame:         'impact_flame',
-    lightninggun:  'impact_lightninggun',
-    largelaser:    'impact_largelaser',
-    lightcannon:   'impact_lightcannon',
-    default:       null,
-};
-
-/// Map an impact event onto the CEG visibility-context bits — same
-/// bit layout as `CEG_FLAG_*` in ceg-runtime.ts (kept duplicated here
-/// to avoid a runtime-direction import cycle). Spring's water level
-/// is fixed at y = 0, so anything below is underwater / in-water,
-/// anything above is ground or air depending on impact kind. Unit
-/// impacts always carry the `unit` bit, which has no positional
-/// correlate.
-function impactContextFlags(impactKind: number, posY: number): number {
-    let flags = 0;
-    const inWater = posY < 0;
-    if (inWater) {
-        flags |= 1 << 2;             // CEG_FLAG_WATER
-        if (posY < -8) flags |= 1 << 4;   // CEG_FLAG_UNDERWATER
-    }
-    if (impactKind === 1 /* Unit */) {
-        flags |= 1 << 3;             // CEG_FLAG_UNIT
-    } else if (!inWater) {
-        // Treat non-unit non-water impacts as ground impacts. Air
-        // impacts are rare (interception, self-destruct in flight)
-        // and indistinguishable from ground without a terrain query
-        // we don't have here.
-        flags |= 1 << 0;             // CEG_FLAG_GROUND
-    }
-    return flags;
-}
-
-/// Pick the muzzle CEG name for a weapon. The streamed `cegTag`
-/// (Spring's per-frame trail CEG) is checked first — that's what
-/// game authors actually want fired in-flight; archetype/visualType
-/// fallbacks only run when no tag is set. Returning null skips the
-/// muzzle entirely (beam/lightning weapons where the bolt is the
-/// visual).
-function effectForFire(def: WeaponDefInfo | undefined): string | null {
-    if (def?.cegTag) return def.cegTag;
-    // Archetype fallback covers the five hand-ported ZK signatures.
-    // Weapons that match no archetype (`arch === 'default'`) and
-    // have no streamed cegTag render no muzzle visual — the CEG
-    // pipeline doesn't synthesise placeholders any more (Phase 8
-    // cleanup of PLAN-ceg.md). In practice every ZK weapon ships a
-    // cegTag; only unauthored test weapons would hit this null path.
-    const arch = classifyWeaponArchetype(def);
-    return FIRE_EFFECT_BY_ARCHETYPE[arch];
-}
-
-/// Pick the impact CEG name from impact kind + weapon archetype.
-/// Impact kind is checked first: shield deflections always render
-/// `impact_shield`; Unit impacts return null because combat-fx
-/// already spawns a kill explosion from the matching CombatEvent
-/// (doubling reads as a flash). Otherwise the archetype dispatch
-/// runs, with a final visualType-keyed fallback.
-function effectForImpact(
-    impactKind: number,
-    def: WeaponDefInfo | undefined,
-): string | null {
-    const kind = impactKind as ImpactKind;
-    if (kind === ImpactKind.Shield) return 'impact_shield';
-    if (kind === ImpactKind.Unit) return null;
-
-    // Streamed `explosionGenerator` wins over heuristic dispatch — it's
-    // the authored impact CEG the game's weapon def explicitly names.
-    // Falls through to archetype fallback when unset.
-    if (def?.explosionGenerator) return def.explosionGenerator;
-
-    // Archetype fallback covers the five hand-ported ZK impact
-    // signatures. Weapons that match no archetype and have no
-    // streamed explosionGenerator render no impact visual — the CEG
-    // pipeline no longer synthesises placeholder impacts (Phase 8
-    // cleanup of PLAN-ceg.md). The ImpactKind switch the old code
-    // used to seed impact_dirt / impact_explosion is gone with it.
-    const arch = classifyWeaponArchetype(def);
-    return IMPACT_EFFECT_BY_ARCHETYPE[arch];
-}
+// CEG effect dispatch helpers (effectForFire / effectForImpact /
+// impactContextFlags / classifyWeaponArchetype) live in
+// weapon-fx-dispatch.ts so combat-fx can share them.
 
 /// Build a unit-length direction. Prefers `vel` when non-zero; falls
 /// back to the launch→target offset; yields (0,1,0) when both are

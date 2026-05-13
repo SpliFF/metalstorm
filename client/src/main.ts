@@ -488,7 +488,6 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         });
     }
     audioManager = new AudioManager();
-    combatFX = new CombatFX(scene, audioManager);
 
     // SoundEventPlayer routes server SoundEvents → AudioManager. Built
     // here so it shares the same DefCache the renderers consume; the
@@ -505,6 +504,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // DefCache accumulates defs as the server streams them incrementally.
     // Listeners forward new defs to the renderers that need them.
     const defCache = new DefCache();
+    // CombatFX needs both cegRuntime (created above) and the def cache
+    // to look up the firing weapon's CEG name; construct after both
+    // are in hand so it doesn't fall back to procedural spheres for
+    // every impact.
+    combatFX = new CombatFX(scene, audioManager, cegRuntime, defCache);
     (window as unknown as { __defCache: unknown }).__defCache = defCache;
     defCache.onUnitDefs((newDefs) => {
         entityRenderer?.setUnitDefs(newDefs);
