@@ -32,7 +32,7 @@
  */
 
 import type { CegDefInfo, CegSpawnInfo, CegPropertyInfo } from './connection.js';
-import type { EffectDef, ParticleSpawn, SubCegSpawn, Expr } from './ceg-runtime.js';
+import type { EffectDef, GroundFlash, ParticleSpawn, SubCegSpawn, Expr } from './ceg-runtime.js';
 
 /// Spring's sim runs at 30 Hz; CEG `particlelife` and `ttl` are
 /// in sim frames, `particlespeed` is elmos/frame. Convert at
@@ -65,11 +65,34 @@ export function translateCegDef(def: CegDefInfo): EffectDef | null {
         if (s.flags) ps.flags = s.flags;
         spawns.push(ps);
     }
-    if (spawns.length === 0 && !def.useDefaultExplosions) return null;
+    const groundFlash = translateGroundFlashSubtable(def);
+    if (spawns.length === 0 && !def.useDefaultExplosions && !groundFlash) return null;
     return {
         name: def.tag,
         spawns,
         useDefaultExplosions: def.useDefaultExplosions,
+        groundFlash,
+    };
+}
+
+/// Convert the streamed `groundflash` subtable (sim-frames, world-units
+/// per frame) into the runtime's wall-clock representation. Returns
+/// undefined when the def didn't author one — keeping the `groundFlash`
+/// field absent rather than zero-valued lets the runtime branch on
+/// `!== undefined` without checking nine fields.
+function translateGroundFlashSubtable(def: CegDefInfo): GroundFlash | undefined {
+    const gf = def.groundFlash;
+    if (!gf || gf.ttl <= 0) return undefined;
+    return {
+        lifetimeS: clamp(gf.ttl / SIM_HZ, 0.05, MAX_LIFETIME_S),
+        flashSize: clamp(gf.flashSize, 1, 400),
+        flashAlpha: clamp(gf.flashAlpha, 0, 1),
+        circleAlpha: clamp(gf.circleAlpha, 0, 1),
+        circleGrowth: gf.circleGrowth * SIM_HZ, // frames → seconds
+        colorR: gf.colorR,
+        colorG: gf.colorG,
+        colorB: gf.colorB,
+        flags: gf.flags,
     };
 }
 

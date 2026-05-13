@@ -240,6 +240,24 @@ export interface SubCegSpawn {
     flags?: number;
 }
 
+/// Resolved `CStandardGroundFlash` parameters, converted from sim
+/// frames to wall-clock seconds at translate time. The runtime
+/// fires one of these on every CEG `spawn()` whose EffectDef
+/// carries the field — Spring's behaviour is to render the ground
+/// flash unconditionally alongside the regular spawns, not as part
+/// of the spawn list.
+export interface GroundFlash {
+    lifetimeS: number;     // ttl / SIM_HZ
+    flashSize: number;
+    flashAlpha: number;
+    circleAlpha: number;
+    circleGrowth: number;  // world-units per second (already converted)
+    colorR: number;
+    colorG: number;
+    colorB: number;
+    flags: number;
+}
+
 /// One named effect — what gets fired by `spawn(name, ...)`.
 export interface EffectDef {
     name: string;
@@ -251,6 +269,10 @@ export interface EffectDef {
     /// authoritative server that path is a no-op, so the client has
     /// to synthesise the visuals.
     useDefaultExplosions?: boolean;
+    /// Top-level `groundflash` subtable (NOT a spawn entry). Spring's
+    /// CCustomExplosionGenerator::Explosion renders this on every
+    /// fire. Absent when the CEG didn't author one.
+    groundFlash?: GroundFlash;
 }
 
 /// Per-class GPU + CPU state. Capacity is fixed at construction so
@@ -545,6 +567,19 @@ export class CegRuntime {
                 damage, contextFlags, depth + 1);
         }
 
+        // Top-level groundflash subtable — Spring renders this on
+        // every CEG fire (not as a spawn entry). Translate into a
+        // pair of slot writes: an outer flash quad sized to flashSize
+        // and an inner growing disc keyed off circleAlpha/Growth.
+        // Both go into the flare pool — they're billboarded ground-
+        // aligned in the existing shader, which reads close enough
+        // to Spring's `CStandardGroundFlash` quad at typical zoom.
+        // Only emitted at depth 0 so recursive sub-CEG chains don't
+        // stack a fresh flash on top of every chained explosion.
+        if (def.groundFlash && depth === 0) {
+            this.emitGroundFlash(def.groundFlash, x, y, z, contextFlags);
+        }
+
         for (const sp of def.spawns) {
             // Visibility gate. flags === 0 means "always emit"
             // (CEG author left every visibility bool false, which the
@@ -575,6 +610,68 @@ export class CegRuntime {
                 const slot = allocateSlot(cls);
                 writeParticle(cls, slot, sp, x, y, z, dx, dy, dz);
             }
+        }
+    }
+
+    /// Emit the outer flash + inner growing disc for a CEG's
+    /// `groundflash` subtable. Both go into the flare pool; the
+    /// `gf.flags` visibility byte is honoured against the caller's
+    /// context so an underwater-only groundflash drops cleanly.
+    private emitGroundFlash(
+        gf: GroundFlash,
+        x: number, y: number, z: number,
+        contextFlags: number,
+    ): void {
+        if (gf.flags && contextFlags && (gf.flags & contextFlags) === 0) return;
+
+        const cls = this.classes.get('flare');
+        if (!cls) return;
+
+        // Outer flash quad — short bright halo. flashAlpha == 0 means
+        // the CEG opted out of the outer flash; skip emission in that
+        // case rather than allocating a 0-alpha particle.
+        if (gf.flashAlpha > 0 && gf.flashSize > 0) {
+            const flash: ParticleSpawn = {
+                class: 'flare',
+                count: 1,
+                lifetimeMin: gf.lifetimeS,
+                lifetimeMax: gf.lifetimeS,
+                velocityBase: [0, 0, 0],
+                velocitySpread: 0,
+                velocityScale: 0,
+                gravity: 0,
+                sizeStart: gf.flashSize,
+                sizeEnd: gf.flashSize * 0.4,
+                colorStart: [gf.colorR, gf.colorG, gf.colorB, gf.flashAlpha],
+                colorEnd:   [gf.colorR, gf.colorG, gf.colorB, 0],
+                rotationSpeedMax: 0,
+            };
+            const slot = allocateSlot(cls);
+            writeParticle(cls, slot, flash, x, y + 0.5, z, 0, 1, 0);
+        }
+
+        // Inner circle — grows over the lifetime. circleAlpha == 0
+        // means no inner disc was authored.
+        if (gf.circleAlpha > 0) {
+            const start = Math.max(gf.flashSize * 0.25, 1);
+            const end = Math.max(start + gf.circleGrowth * gf.lifetimeS, start);
+            const circle: ParticleSpawn = {
+                class: 'flare',
+                count: 1,
+                lifetimeMin: gf.lifetimeS,
+                lifetimeMax: gf.lifetimeS,
+                velocityBase: [0, 0, 0],
+                velocitySpread: 0,
+                velocityScale: 0,
+                gravity: 0,
+                sizeStart: start,
+                sizeEnd: end,
+                colorStart: [gf.colorR, gf.colorG, gf.colorB, gf.circleAlpha],
+                colorEnd:   [gf.colorR, gf.colorG, gf.colorB, 0],
+                rotationSpeedMax: 0,
+            };
+            const slot = allocateSlot(cls);
+            writeParticle(cls, slot, circle, x, y + 0.3, z, 0, 1, 0);
         }
     }
 

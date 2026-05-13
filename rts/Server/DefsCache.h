@@ -70,7 +70,11 @@ inline std::string ComputeCacheKey(
     // per-`weaponType` defaults (PLAN-combat-vfx.md F3). Same schema,
     // bumped to invalidate pre-fix caches that still carried empty
     // texture names on ~half of the defs.
-    canonical += "schemaV11-protocol";
+    // 2026-05-14: v12 — GameCegDef carries a `ground_flash`
+    // GroundFlashInfo subtable (PLAN-combat-vfx.md Phase 4b /
+    // PLAN-ceg.md groundflash). Schema gained a new field; pre-v12
+    // caches don't carry it, so bumping forces a re-bake.
+    canonical += "schemaV12-protocol";
     canonical += '\n';
     canonical += gameId;
     canonical += '\n';

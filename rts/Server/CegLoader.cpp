@@ -5,6 +5,7 @@
 #include "Sim/Projectiles/ExplosionGenerator.h"
 #include "Lua/LuaParser.h"
 #include "System/Log/ILog.h"
+#include "System/float3.h"
 
 #include <flatbuffers/flatbuffers.h>
 
@@ -112,14 +113,49 @@ uint8_t ReadFlags(const LuaTable& spawn) {
 /// Skip-list for keys that aren't real spawn entries. `filename` is
 /// stamped on every CEG by springcontent's loader; `useDefaultExplosions`
 /// is consumed at the CEG level (we lift it out before iterating).
+/// `groundflash` is the top-level `CStandardGroundFlash` subtable —
+/// authored alongside spawn entries but parsed separately via
+/// ReadGroundFlash, so suppress it here to avoid synthesising a
+/// phantom spawn-class entry the client can't dispatch.
 bool IsReservedSpawnKey(const std::string& key) {
     if (key == "filename" || key == "useDefaultExplosions") return true;
-    // `groundflash` is a Spring shorthand the engine compiles into a
-    // CSimpleGroundFlash spawn — but only on the renderer. The headless
-    // server's CCustomExplosionGenerator::Load skips it explicitly.
-    // We still ship it: the client's CSimpleGroundFlash mapper handles
-    // it identically to an explicitly-classed spawn.
+    if (key == "groundflash" || key == "groundFlash") return true;
     return false;
+}
+
+/// Parse a top-level `groundflash` subtable into CegGroundFlash.
+/// Returns true when `ttl > 0` (the marker Recoil uses for "authored");
+/// false when missing / disabled so the caller can skip emission.
+bool ReadGroundFlash(const LuaTable& cegTable, CegGroundFlash& out) {
+    LuaTable gf = cegTable.SubTable("groundflash");
+    if (!gf.IsValid()) {
+        gf = cegTable.SubTable("groundFlash");
+        if (!gf.IsValid()) return false;
+    }
+
+    const int ttl = gf.GetInt("ttl", 0);
+    if (ttl <= 0) return false;
+
+    out.ttl          = ttl;
+    out.circleAlpha  = gf.GetFloat("circleAlpha",  0.0f);
+    out.flashSize    = gf.GetFloat("flashSize",    0.0f);
+    out.flashAlpha   = gf.GetFloat("flashAlpha",   0.0f);
+    out.circleGrowth = gf.GetFloat("circleGrowth", 0.0f);
+
+    // `color = {r, g, b}` is the common form; Spring also accepts a
+    // single greyscale value. LuaTable::GetFloat3 returns the default
+    // when the key isn't a 3-tuple, so we don't bother sniffing.
+    const float3 color = gf.GetFloat3("color", float3(1.0f, 1.0f, 0.8f));
+    out.colorR = color.x;
+    out.colorG = color.y;
+    out.colorB = color.z;
+
+    // Visibility flags. `CEG_FLAG_GROUND` is implicit (it's a ground
+    // flash by definition) but we don't OR it in here — the client
+    // dispatches by spawn flags regardless and the runtime renders
+    // unconditionally on every CEG fire that has a groundFlash entry.
+    out.flags = ReadFlags(gf);
+    return true;
 }
 
 /// One spawn = one sub-table inside a CEG. Returns false if the entry
@@ -189,6 +225,7 @@ std::vector<CegDef> LoadAllCegDefs()
         CegDef def;
         def.tag = ToLower(tag);
         def.useDefaultExplosions = cegTable.GetBool("useDefaultExplosions", false);
+        const bool hasGroundFlash = ReadGroundFlash(cegTable, def.groundFlash);
 
         std::vector<std::string> spawnKeys;
         cegTable.GetKeys(spawnKeys);
@@ -204,7 +241,7 @@ std::vector<CegDef> LoadAllCegDefs()
         // Skip CEGs with no usable spawns. Some authors leave commented-
         // out skeletons (filename + nothing else); shipping them wastes
         // bandwidth and the client would no-op anyway.
-        if (def.spawns.empty() && !def.useDefaultExplosions) continue;
+        if (def.spawns.empty() && !def.useDefaultExplosions && !hasGroundFlash) continue;
 
         result.push_back(std::move(def));
     }
@@ -250,10 +287,30 @@ std::vector<uint8_t> BuildGameCegDefs(const std::vector<CegDef>& defs)
         auto tagOff = fbb.CreateString(def.tag);
         auto spawnsVec = fbb.CreateVector(spawnOffsets);
 
+        // Pack the ground-flash subtable only when authored (ttl > 0).
+        // Recoil treats `ttl == 0` as "no ground flash"; passing the
+        // default-zero struct on every CEG would waste a few bytes
+        // per def and force the client to inspect ttl anyway.
+        flatbuffers::Offset<SpringWeb::GroundFlashInfo> gfOff{};
+        if (def.groundFlash.ttl > 0) {
+            SpringWeb::GroundFlashInfoBuilder gfb(fbb);
+            gfb.add_ttl(def.groundFlash.ttl);
+            gfb.add_circle_alpha(def.groundFlash.circleAlpha);
+            gfb.add_flash_size(def.groundFlash.flashSize);
+            gfb.add_flash_alpha(def.groundFlash.flashAlpha);
+            gfb.add_circle_growth(def.groundFlash.circleGrowth);
+            gfb.add_color_r(def.groundFlash.colorR);
+            gfb.add_color_g(def.groundFlash.colorG);
+            gfb.add_color_b(def.groundFlash.colorB);
+            gfb.add_flags(def.groundFlash.flags);
+            gfOff = gfb.Finish();
+        }
+
         SpringWeb::GameCegDefBuilder db(fbb);
         db.add_tag(tagOff);
         db.add_spawns(spawnsVec);
         db.add_use_default_explosions(def.useDefaultExplosions);
+        if (!gfOff.IsNull()) db.add_ground_flash(gfOff);
         defOffsets.push_back(db.Finish());
     }
 

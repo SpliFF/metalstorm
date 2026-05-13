@@ -51,12 +51,30 @@ struct CegSpawn {
     std::vector<CegProperty> properties;
 };
 
+/// Spring's `CStandardGroundFlash` parameters. Authored at the
+/// CEG-def top level as `groundflash = { ttl = …, … }`, NOT as a
+/// spawn entry. Mirrors Recoil's `ExpGenParams.groundFlash` from
+/// `Sim/Projectiles/ExplosionGenerator.cpp:1027-1038`. `ttl == 0`
+/// means "no ground flash authored".
+struct CegGroundFlash {
+    int32_t ttl          = 0;
+    float   circleAlpha  = 0.0f;
+    float   flashSize    = 0.0f;
+    float   flashAlpha   = 0.0f;
+    float   circleGrowth = 0.0f;
+    float   colorR       = 1.0f;
+    float   colorG       = 1.0f;
+    float   colorB       = 0.8f;
+    uint8_t flags        = 0;
+};
+
 /// One CEG. The `tag` is the name weapon defs reference via
 /// `cegTag` / `explosionGenerator` (lowercased on output).
 struct CegDef {
     std::string tag;
     std::vector<CegSpawn> spawns;
     bool useDefaultExplosions = false;
+    CegGroundFlash groundFlash; // `ttl == 0` = absent
 };
 
 /// Walk the engine's parsed explosion table and produce a flat list of

@@ -26,7 +26,11 @@ namespace DefsCache {
 // empty (PLAN-combat-vfx.md F3). Same FlatBuffer schema; the strings
 // just stop being empty so cached pre-v11 weapondefs.bin would still
 // ship flat-coloured projectiles. Bump to force a re-bake.
-static constexpr const char* DEFS_SCHEMA_VERSION = "v11";
+// 2026-05-14: v12 — GameCegDef gained a `ground_flash` GroundFlashInfo
+// table for Spring's `CStandardGroundFlash` parameters parsed from
+// the top-level `groundflash = {…}` subtable (PLAN-combat-vfx.md
+// Phase 4b). Pre-v12 caches don't carry the field; bump to re-bake.
+static constexpr const char* DEFS_SCHEMA_VERSION = "v12";
 
 std::string ComputeCacheKey(
     const std::string& gameId,
@@ -47,7 +51,7 @@ std::string ComputeCacheKey(
     // ComputeCacheKey copy in DefsCache.h — the two were drifting
     // apart and a single-site bump produced different cache keys
     // depending on which translation unit linked first.
-    canonical += "schemaV11-protocol";
+    canonical += "schemaV12-protocol";
     canonical += '\n';
     canonical += gameId;
     canonical += '\n';

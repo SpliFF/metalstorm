@@ -44,6 +44,7 @@ import { GameCegDefs } from '../protocol/spring-web/game-ceg-defs.js';
 import { GameCegDef } from '../protocol/spring-web/game-ceg-def.js';
 import { GameCegSpawn } from '../protocol/spring-web/game-ceg-spawn.js';
 import { CegProperty } from '../protocol/spring-web/ceg-property.js';
+import { GroundFlashInfo as GroundFlashInfoFb } from '../protocol/spring-web/ground-flash-info.js';
 import { CustomParam } from '../protocol/spring-web/custom-param.js';
 import { UnitCommandQueuesUpdate } from '../protocol/spring-web/unit-command-queues-update.js';
 import { UnitCmdDescsUpdate } from '../protocol/spring-web/unit-cmd-descs-update.js';
@@ -507,6 +508,22 @@ export interface CegSpawnInfo {
     properties: CegPropertyInfo[];
 }
 
+/// `CStandardGroundFlash` parameters. Authored as a top-level
+/// `groundflash = {…}` subtable on the CEG def (not a spawn entry).
+/// Recoil renders this on every CEG fire alongside the regular
+/// spawns; we treat it as a separate channel in CegRuntime.
+export interface GroundFlashInfo {
+    ttl: number;
+    circleAlpha: number;
+    flashSize: number;
+    flashAlpha: number;
+    circleGrowth: number;
+    colorR: number;
+    colorG: number;
+    colorB: number;
+    flags: number;
+}
+
 /// One streamed CEG def. `tag` is the lookup key on weapon defs
 /// (`cegTag`, `explosionGenerator`, `bounceExplosionGenerator`).
 /// All names are lowercased on the server before serialisation so
@@ -515,6 +532,10 @@ export interface CegDefInfo {
     tag: string;
     spawns: CegSpawnInfo[];
     useDefaultExplosions: boolean;
+    /// Optional `CStandardGroundFlash` subtable — present when the
+    /// CEG authored `groundflash = { ttl = N, … }`. Absent (null)
+    /// for the majority of CEGs that have no ground flash.
+    groundFlash: GroundFlashInfo | null;
 }
 
 export interface ResourceUpdateInfo {
@@ -1465,10 +1486,23 @@ export class Connection {
                                 properties: props,
                             });
                         }
+                        const gfFb = d.groundFlash(new GroundFlashInfoFb());
+                        const groundFlash: GroundFlashInfo | null = (gfFb && gfFb.ttl() > 0) ? {
+                            ttl: gfFb.ttl(),
+                            circleAlpha: gfFb.circleAlpha(),
+                            flashSize: gfFb.flashSize(),
+                            flashAlpha: gfFb.flashAlpha(),
+                            circleGrowth: gfFb.circleGrowth(),
+                            colorR: gfFb.colorR(),
+                            colorG: gfFb.colorG(),
+                            colorB: gfFb.colorB(),
+                            flags: gfFb.flags(),
+                        } : null;
                         defs.push({
                             tag: d.tag() ?? '',
                             spawns,
                             useDefaultExplosions: d.useDefaultExplosions(),
+                            groundFlash,
                         });
                     }
                     console.log(`[connection] received ${defs.length} CEG def(s)`);

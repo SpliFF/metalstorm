@@ -333,6 +333,10 @@ struct GameCegSpawn;
 struct GameCegSpawnBuilder;
 struct GameCegSpawnT;
 
+struct GroundFlashInfo;
+struct GroundFlashInfoBuilder;
+struct GroundFlashInfoT;
+
 struct GameCegDef;
 struct GameCegDefBuilder;
 struct GameCegDefT;
@@ -11130,11 +11134,168 @@ inline ::flatbuffers::Offset<GameCegSpawn> CreateGameCegSpawnDirect(
 
 ::flatbuffers::Offset<GameCegSpawn> CreateGameCegSpawn(::flatbuffers::FlatBufferBuilder &_fbb, const GameCegSpawnT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
+struct GroundFlashInfoT : public ::flatbuffers::NativeTable {
+  typedef GroundFlashInfo TableType;
+  int32_t ttl = 0;
+  float circle_alpha = 0.0f;
+  float flash_size = 0.0f;
+  float flash_alpha = 0.0f;
+  float circle_growth = 0.0f;
+  float color_r = 1.0f;
+  float color_g = 1.0f;
+  float color_b = 0.8f;
+  uint8_t flags = 0;
+};
+
+/// Spring's `CStandardGroundFlash` parameters. Authored as a
+/// top-level `groundflash = { … }` subtable on a CEG def — *not*
+/// a spawn entry, despite the name. Mirrors Recoil's
+/// `ExpGenParams.groundFlash` from `ExplosionGenerator.cpp`.
+///
+/// `ttl` of 0 / unset means "no ground flash"; the client checks
+/// this to decide whether to emit anything at all. Fields default
+/// to the same zero values Recoil uses for missing keys.
+struct GroundFlashInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef GroundFlashInfoT NativeTableType;
+  typedef GroundFlashInfoBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_TTL = 4,
+    VT_CIRCLE_ALPHA = 6,
+    VT_FLASH_SIZE = 8,
+    VT_FLASH_ALPHA = 10,
+    VT_CIRCLE_GROWTH = 12,
+    VT_COLOR_R = 14,
+    VT_COLOR_G = 16,
+    VT_COLOR_B = 18,
+    VT_FLAGS = 20
+  };
+  /// Lifetime in sim frames. Required (`ttl > 0`).
+  int32_t ttl() const {
+    return GetField<int32_t>(VT_TTL, 0);
+  }
+  /// Centre disc alpha at peak.
+  float circle_alpha() const {
+    return GetField<float>(VT_CIRCLE_ALPHA, 0.0f);
+  }
+  /// Outer flash quad world-space half-size.
+  float flash_size() const {
+    return GetField<float>(VT_FLASH_SIZE, 0.0f);
+  }
+  /// Outer flash quad alpha at peak.
+  float flash_alpha() const {
+    return GetField<float>(VT_FLASH_ALPHA, 0.0f);
+  }
+  /// Per-frame radial growth of the centre disc, in world units.
+  float circle_growth() const {
+    return GetField<float>(VT_CIRCLE_GROWTH, 0.0f);
+  }
+  /// RGB tint (alpha is the per-element flashAlpha / circleAlpha).
+  float color_r() const {
+    return GetField<float>(VT_COLOR_R, 1.0f);
+  }
+  float color_g() const {
+    return GetField<float>(VT_COLOR_G, 1.0f);
+  }
+  float color_b() const {
+    return GetField<float>(VT_COLOR_B, 0.8f);
+  }
+  /// Visibility flags — same bit layout as `GameCegSpawn.flags`
+  /// but with `CEG_FLAG_GROUND` always implicitly set.
+  uint8_t flags() const {
+    return GetField<uint8_t>(VT_FLAGS, 0);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<int32_t>(verifier, VT_TTL, 4) &&
+           VerifyField<float>(verifier, VT_CIRCLE_ALPHA, 4) &&
+           VerifyField<float>(verifier, VT_FLASH_SIZE, 4) &&
+           VerifyField<float>(verifier, VT_FLASH_ALPHA, 4) &&
+           VerifyField<float>(verifier, VT_CIRCLE_GROWTH, 4) &&
+           VerifyField<float>(verifier, VT_COLOR_R, 4) &&
+           VerifyField<float>(verifier, VT_COLOR_G, 4) &&
+           VerifyField<float>(verifier, VT_COLOR_B, 4) &&
+           VerifyField<uint8_t>(verifier, VT_FLAGS, 1) &&
+           verifier.EndTable();
+  }
+  GroundFlashInfoT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(GroundFlashInfoT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<GroundFlashInfo> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GroundFlashInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct GroundFlashInfoBuilder {
+  typedef GroundFlashInfo Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_ttl(int32_t ttl) {
+    fbb_.AddElement<int32_t>(GroundFlashInfo::VT_TTL, ttl, 0);
+  }
+  void add_circle_alpha(float circle_alpha) {
+    fbb_.AddElement<float>(GroundFlashInfo::VT_CIRCLE_ALPHA, circle_alpha, 0.0f);
+  }
+  void add_flash_size(float flash_size) {
+    fbb_.AddElement<float>(GroundFlashInfo::VT_FLASH_SIZE, flash_size, 0.0f);
+  }
+  void add_flash_alpha(float flash_alpha) {
+    fbb_.AddElement<float>(GroundFlashInfo::VT_FLASH_ALPHA, flash_alpha, 0.0f);
+  }
+  void add_circle_growth(float circle_growth) {
+    fbb_.AddElement<float>(GroundFlashInfo::VT_CIRCLE_GROWTH, circle_growth, 0.0f);
+  }
+  void add_color_r(float color_r) {
+    fbb_.AddElement<float>(GroundFlashInfo::VT_COLOR_R, color_r, 1.0f);
+  }
+  void add_color_g(float color_g) {
+    fbb_.AddElement<float>(GroundFlashInfo::VT_COLOR_G, color_g, 1.0f);
+  }
+  void add_color_b(float color_b) {
+    fbb_.AddElement<float>(GroundFlashInfo::VT_COLOR_B, color_b, 0.8f);
+  }
+  void add_flags(uint8_t flags) {
+    fbb_.AddElement<uint8_t>(GroundFlashInfo::VT_FLAGS, flags, 0);
+  }
+  explicit GroundFlashInfoBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<GroundFlashInfo> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<GroundFlashInfo>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<GroundFlashInfo> CreateGroundFlashInfo(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    int32_t ttl = 0,
+    float circle_alpha = 0.0f,
+    float flash_size = 0.0f,
+    float flash_alpha = 0.0f,
+    float circle_growth = 0.0f,
+    float color_r = 1.0f,
+    float color_g = 1.0f,
+    float color_b = 0.8f,
+    uint8_t flags = 0) {
+  GroundFlashInfoBuilder builder_(_fbb);
+  builder_.add_color_b(color_b);
+  builder_.add_color_g(color_g);
+  builder_.add_color_r(color_r);
+  builder_.add_circle_growth(circle_growth);
+  builder_.add_flash_alpha(flash_alpha);
+  builder_.add_flash_size(flash_size);
+  builder_.add_circle_alpha(circle_alpha);
+  builder_.add_ttl(ttl);
+  builder_.add_flags(flags);
+  return builder_.Finish();
+}
+
+::flatbuffers::Offset<GroundFlashInfo> CreateGroundFlashInfo(::flatbuffers::FlatBufferBuilder &_fbb, const GroundFlashInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
 struct GameCegDefT : public ::flatbuffers::NativeTable {
   typedef GameCegDef TableType;
   std::string tag{};
   std::vector<std::unique_ptr<SpringWeb::GameCegSpawnT>> spawns{};
   bool use_default_explosions = false;
+  std::unique_ptr<SpringWeb::GroundFlashInfoT> ground_flash{};
   GameCegDefT() = default;
   GameCegDefT(const GameCegDefT &o);
   GameCegDefT(GameCegDefT&&) FLATBUFFERS_NOEXCEPT = default;
@@ -11154,7 +11315,8 @@ struct GameCegDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_TAG = 4,
     VT_SPAWNS = 6,
-    VT_USE_DEFAULT_EXPLOSIONS = 8
+    VT_USE_DEFAULT_EXPLOSIONS = 8,
+    VT_GROUND_FLASH = 10
   };
   /// Bare tag (no `custom:` prefix). Lookup is case-insensitive on
   /// the client; the server lowercases on serialisation.
@@ -11171,6 +11333,13 @@ struct GameCegDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   bool use_default_explosions() const {
     return GetField<uint8_t>(VT_USE_DEFAULT_EXPLOSIONS, 0) != 0;
   }
+  /// Top-level `groundflash` subtable, when authored with `ttl > 0`.
+  /// Spring renders this as a `CStandardGroundFlash` on every CEG
+  /// fire (not a CegSpawn entry). Optional — absent when the CEG
+  /// has no ground flash.
+  const SpringWeb::GroundFlashInfo *ground_flash() const {
+    return GetPointer<const SpringWeb::GroundFlashInfo *>(VT_GROUND_FLASH);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_TAG) &&
@@ -11179,6 +11348,8 @@ struct GameCegDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVector(spawns()) &&
            verifier.VerifyVectorOfTables(spawns()) &&
            VerifyField<uint8_t>(verifier, VT_USE_DEFAULT_EXPLOSIONS, 1) &&
+           VerifyOffset(verifier, VT_GROUND_FLASH) &&
+           verifier.VerifyTable(ground_flash()) &&
            verifier.EndTable();
   }
   GameCegDefT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -11199,6 +11370,9 @@ struct GameCegDefBuilder {
   void add_use_default_explosions(bool use_default_explosions) {
     fbb_.AddElement<uint8_t>(GameCegDef::VT_USE_DEFAULT_EXPLOSIONS, static_cast<uint8_t>(use_default_explosions), 0);
   }
+  void add_ground_flash(::flatbuffers::Offset<SpringWeb::GroundFlashInfo> ground_flash) {
+    fbb_.AddOffset(GameCegDef::VT_GROUND_FLASH, ground_flash);
+  }
   explicit GameCegDefBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -11214,8 +11388,10 @@ inline ::flatbuffers::Offset<GameCegDef> CreateGameCegDef(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     ::flatbuffers::Offset<::flatbuffers::String> tag = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::GameCegSpawn>>> spawns = 0,
-    bool use_default_explosions = false) {
+    bool use_default_explosions = false,
+    ::flatbuffers::Offset<SpringWeb::GroundFlashInfo> ground_flash = 0) {
   GameCegDefBuilder builder_(_fbb);
+  builder_.add_ground_flash(ground_flash);
   builder_.add_spawns(spawns);
   builder_.add_tag(tag);
   builder_.add_use_default_explosions(use_default_explosions);
@@ -11226,14 +11402,16 @@ inline ::flatbuffers::Offset<GameCegDef> CreateGameCegDefDirect(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     const char *tag = nullptr,
     const std::vector<::flatbuffers::Offset<SpringWeb::GameCegSpawn>> *spawns = nullptr,
-    bool use_default_explosions = false) {
+    bool use_default_explosions = false,
+    ::flatbuffers::Offset<SpringWeb::GroundFlashInfo> ground_flash = 0) {
   auto tag__ = tag ? _fbb.CreateString(tag) : 0;
   auto spawns__ = spawns ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::GameCegSpawn>>(*spawns) : 0;
   return SpringWeb::CreateGameCegDef(
       _fbb,
       tag__,
       spawns__,
-      use_default_explosions);
+      use_default_explosions,
+      ground_flash);
 }
 
 ::flatbuffers::Offset<GameCegDef> CreateGameCegDef(::flatbuffers::FlatBufferBuilder &_fbb, const GameCegDefT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -19484,9 +19662,60 @@ inline ::flatbuffers::Offset<GameCegSpawn> CreateGameCegSpawn(::flatbuffers::Fla
       _properties);
 }
 
+inline GroundFlashInfoT *GroundFlashInfo::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<GroundFlashInfoT>(new GroundFlashInfoT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void GroundFlashInfo::UnPackTo(GroundFlashInfoT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = ttl(); _o->ttl = _e; }
+  { auto _e = circle_alpha(); _o->circle_alpha = _e; }
+  { auto _e = flash_size(); _o->flash_size = _e; }
+  { auto _e = flash_alpha(); _o->flash_alpha = _e; }
+  { auto _e = circle_growth(); _o->circle_growth = _e; }
+  { auto _e = color_r(); _o->color_r = _e; }
+  { auto _e = color_g(); _o->color_g = _e; }
+  { auto _e = color_b(); _o->color_b = _e; }
+  { auto _e = flags(); _o->flags = _e; }
+}
+
+inline ::flatbuffers::Offset<GroundFlashInfo> GroundFlashInfo::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GroundFlashInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateGroundFlashInfo(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<GroundFlashInfo> CreateGroundFlashInfo(::flatbuffers::FlatBufferBuilder &_fbb, const GroundFlashInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const GroundFlashInfoT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _ttl = _o->ttl;
+  auto _circle_alpha = _o->circle_alpha;
+  auto _flash_size = _o->flash_size;
+  auto _flash_alpha = _o->flash_alpha;
+  auto _circle_growth = _o->circle_growth;
+  auto _color_r = _o->color_r;
+  auto _color_g = _o->color_g;
+  auto _color_b = _o->color_b;
+  auto _flags = _o->flags;
+  return SpringWeb::CreateGroundFlashInfo(
+      _fbb,
+      _ttl,
+      _circle_alpha,
+      _flash_size,
+      _flash_alpha,
+      _circle_growth,
+      _color_r,
+      _color_g,
+      _color_b,
+      _flags);
+}
+
 inline GameCegDefT::GameCegDefT(const GameCegDefT &o)
       : tag(o.tag),
-        use_default_explosions(o.use_default_explosions) {
+        use_default_explosions(o.use_default_explosions),
+        ground_flash((o.ground_flash) ? new SpringWeb::GroundFlashInfoT(*o.ground_flash) : nullptr) {
   spawns.reserve(o.spawns.size());
   for (const auto &spawns_ : o.spawns) { spawns.emplace_back((spawns_) ? new SpringWeb::GameCegSpawnT(*spawns_) : nullptr); }
 }
@@ -19495,6 +19724,7 @@ inline GameCegDefT &GameCegDefT::operator=(GameCegDefT o) FLATBUFFERS_NOEXCEPT {
   std::swap(tag, o.tag);
   std::swap(spawns, o.spawns);
   std::swap(use_default_explosions, o.use_default_explosions);
+  std::swap(ground_flash, o.ground_flash);
   return *this;
 }
 
@@ -19510,6 +19740,7 @@ inline void GameCegDef::UnPackTo(GameCegDefT *_o, const ::flatbuffers::resolver_
   { auto _e = tag(); if (_e) _o->tag = _e->str(); }
   { auto _e = spawns(); if (_e) { _o->spawns.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->spawns[_i]) { _e->Get(_i)->UnPackTo(_o->spawns[_i].get(), _resolver); } else { _o->spawns[_i] = std::unique_ptr<SpringWeb::GameCegSpawnT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->spawns.resize(0); } }
   { auto _e = use_default_explosions(); _o->use_default_explosions = _e; }
+  { auto _e = ground_flash(); if (_e) { if(_o->ground_flash) { _e->UnPackTo(_o->ground_flash.get(), _resolver); } else { _o->ground_flash = std::unique_ptr<SpringWeb::GroundFlashInfoT>(_e->UnPack(_resolver)); } } else if (_o->ground_flash) { _o->ground_flash.reset(); } }
 }
 
 inline ::flatbuffers::Offset<GameCegDef> GameCegDef::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameCegDefT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -19523,11 +19754,13 @@ inline ::flatbuffers::Offset<GameCegDef> CreateGameCegDef(::flatbuffers::FlatBuf
   auto _tag = _o->tag.empty() ? 0 : _fbb.CreateString(_o->tag);
   auto _spawns = _o->spawns.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::GameCegSpawn>> (_o->spawns.size(), [](size_t i, _VectorArgs *__va) { return CreateGameCegSpawn(*__va->__fbb, __va->__o->spawns[i].get(), __va->__rehasher); }, &_va ) : 0;
   auto _use_default_explosions = _o->use_default_explosions;
+  auto _ground_flash = _o->ground_flash ? CreateGroundFlashInfo(_fbb, _o->ground_flash.get(), _rehasher) : 0;
   return SpringWeb::CreateGameCegDef(
       _fbb,
       _tag,
       _spawns,
-      _use_default_explosions);
+      _use_default_explosions,
+      _ground_flash);
 }
 
 inline GameCegDefsT::GameCegDefsT(const GameCegDefsT &o) {

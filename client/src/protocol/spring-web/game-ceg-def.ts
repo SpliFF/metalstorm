@@ -5,6 +5,7 @@
 import * as flatbuffers from 'flatbuffers';
 
 import { GameCegSpawn, GameCegSpawnT } from '../spring-web/game-ceg-spawn.js';
+import { GroundFlashInfo, GroundFlashInfoT } from '../spring-web/ground-flash-info.js';
 
 
 /**
@@ -68,8 +69,19 @@ useDefaultExplosions():boolean {
   return offset ? !!this.bb!.readInt8(this.bb_pos + offset) : false;
 }
 
+/**
+ * Top-level `groundflash` subtable, when authored with `ttl > 0`.
+ * Spring renders this as a `CStandardGroundFlash` on every CEG
+ * fire (not a CegSpawn entry). Optional — absent when the CEG
+ * has no ground flash.
+ */
+groundFlash(obj?:GroundFlashInfo):GroundFlashInfo|null {
+  const offset = this.bb!.__offset(this.bb_pos, 10);
+  return offset ? (obj || new GroundFlashInfo()).__init(this.bb!.__indirect(this.bb_pos + offset), this.bb!) : null;
+}
+
 static startGameCegDef(builder:flatbuffers.Builder) {
-  builder.startObject(3);
+  builder.startObject(4);
 }
 
 static addTag(builder:flatbuffers.Builder, tagOffset:flatbuffers.Offset) {
@@ -96,24 +108,22 @@ static addUseDefaultExplosions(builder:flatbuffers.Builder, useDefaultExplosions
   builder.addFieldInt8(2, +useDefaultExplosions, +false);
 }
 
+static addGroundFlash(builder:flatbuffers.Builder, groundFlashOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(3, groundFlashOffset, 0);
+}
+
 static endGameCegDef(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createGameCegDef(builder:flatbuffers.Builder, tagOffset:flatbuffers.Offset, spawnsOffset:flatbuffers.Offset, useDefaultExplosions:boolean):flatbuffers.Offset {
-  GameCegDef.startGameCegDef(builder);
-  GameCegDef.addTag(builder, tagOffset);
-  GameCegDef.addSpawns(builder, spawnsOffset);
-  GameCegDef.addUseDefaultExplosions(builder, useDefaultExplosions);
-  return GameCegDef.endGameCegDef(builder);
-}
 
 unpack(): GameCegDefT {
   return new GameCegDefT(
     this.tag(),
     this.bb!.createObjList<GameCegSpawn, GameCegSpawnT>(this.spawns.bind(this), this.spawnsLength()),
-    this.useDefaultExplosions()
+    this.useDefaultExplosions(),
+    (this.groundFlash() !== null ? this.groundFlash()!.unpack() : null)
   );
 }
 
@@ -122,6 +132,7 @@ unpackTo(_o: GameCegDefT): void {
   _o.tag = this.tag();
   _o.spawns = this.bb!.createObjList<GameCegSpawn, GameCegSpawnT>(this.spawns.bind(this), this.spawnsLength());
   _o.useDefaultExplosions = this.useDefaultExplosions();
+  _o.groundFlash = (this.groundFlash() !== null ? this.groundFlash()!.unpack() : null);
 }
 }
 
@@ -129,18 +140,22 @@ export class GameCegDefT implements flatbuffers.IGeneratedObject {
 constructor(
   public tag: string|Uint8Array|null = null,
   public spawns: (GameCegSpawnT)[] = [],
-  public useDefaultExplosions: boolean = false
+  public useDefaultExplosions: boolean = false,
+  public groundFlash: GroundFlashInfoT|null = null
 ){}
 
 
 pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const tag = (this.tag !== null ? builder.createString(this.tag!) : 0);
   const spawns = GameCegDef.createSpawnsVector(builder, builder.createObjectOffsetList(this.spawns));
+  const groundFlash = (this.groundFlash !== null ? this.groundFlash!.pack(builder) : 0);
 
-  return GameCegDef.createGameCegDef(builder,
-    tag,
-    spawns,
-    this.useDefaultExplosions
-  );
+  GameCegDef.startGameCegDef(builder);
+  GameCegDef.addTag(builder, tag);
+  GameCegDef.addSpawns(builder, spawns);
+  GameCegDef.addUseDefaultExplosions(builder, this.useDefaultExplosions);
+  GameCegDef.addGroundFlash(builder, groundFlash);
+
+  return GameCegDef.endGameCegDef(builder);
 }
 }

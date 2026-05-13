@@ -1176,6 +1176,34 @@ table GameCegSpawn {
     properties: [CegProperty];
 }
 
+/// Spring's `CStandardGroundFlash` parameters. Authored as a
+/// top-level `groundflash = { … }` subtable on a CEG def — *not*
+/// a spawn entry, despite the name. Mirrors Recoil's
+/// `ExpGenParams.groundFlash` from `ExplosionGenerator.cpp`.
+///
+/// `ttl` of 0 / unset means "no ground flash"; the client checks
+/// this to decide whether to emit anything at all. Fields default
+/// to the same zero values Recoil uses for missing keys.
+table GroundFlashInfo {
+    /// Lifetime in sim frames. Required (`ttl > 0`).
+    ttl: int32 = 0;
+    /// Centre disc alpha at peak.
+    circle_alpha: float = 0;
+    /// Outer flash quad world-space half-size.
+    flash_size: float = 0;
+    /// Outer flash quad alpha at peak.
+    flash_alpha: float = 0;
+    /// Per-frame radial growth of the centre disc, in world units.
+    circle_growth: float = 0;
+    /// RGB tint (alpha is the per-element flashAlpha / circleAlpha).
+    color_r: float = 1;
+    color_g: float = 1;
+    color_b: float = 0.8;
+    /// Visibility flags — same bit layout as `GameCegSpawn.flags`
+    /// but with `CEG_FLAG_GROUND` always implicitly set.
+    flags: uint8 = 0;
+}
+
 /// Definition of one CEG (Custom Explosion Generator) — referenced by
 /// `cegTag` / `explosionGenerator` strings on weapon defs. Authored as
 /// Lua tables under `gamedata/explosions.lua` (which itself loads
@@ -1193,6 +1221,11 @@ table GameCegDef {
     /// True if the original CEG had `useDefaultExplosions = true`
     /// (Spring fires its built-in standard explosion in addition).
     use_default_explosions: bool = false;
+    /// Top-level `groundflash` subtable, when authored with `ttl > 0`.
+    /// Spring renders this as a `CStandardGroundFlash` on every CEG
+    /// fire (not a CegSpawn entry). Optional — absent when the CEG
+    /// has no ground flash.
+    ground_flash: GroundFlashInfo;
 }
 
 /// Sent by the game server alongside GameUnitDefs / GameWeaponDefs.

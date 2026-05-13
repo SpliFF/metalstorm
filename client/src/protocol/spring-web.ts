@@ -35,6 +35,7 @@ export { GameUnitDef, GameUnitDefT } from './spring-web/game-unit-def.js';
 export { GameUnitDefs, GameUnitDefsT } from './spring-web/game-unit-defs.js';
 export { GameWeaponDef, GameWeaponDefT } from './spring-web/game-weapon-def.js';
 export { GameWeaponDefs, GameWeaponDefsT } from './spring-web/game-weapon-defs.js';
+export { GroundFlashInfo, GroundFlashInfoT } from './spring-web/ground-flash-info.js';
 export { Handshake, HandshakeT } from './spring-web/handshake.js';
 export { LobbyGameInfo, LobbyGameInfoT } from './spring-web/lobby-game-info.js';
 export { LogBatch, LogBatchT } from './spring-web/log-batch.js';
