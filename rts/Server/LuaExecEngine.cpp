@@ -11,10 +11,15 @@
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitDefHandler.h"
+#include "Sim/Weapons/Weapon.h"
+#include "Sim/Weapons/WeaponDef.h"
 #include "Sim/Weapons/WeaponDefHandler.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Server/LuaDebugger.h"
+#include "Server/DebugFlags.h"
+#include "Server/CombatEventCollector.h"
+#include "Server/SoundEventCollector.h"
 
 
 // Lua compiled as C++ in this project
@@ -25,6 +30,8 @@
 #include <sstream>
 #include <string>
 #include <cstring>
+#include <vector>
+#include <atomic>
 
 #define LOG_SECTION "exec"
 
@@ -215,6 +222,198 @@ std::string ExecuteServerCommand(const std::string& cmd) {
         }
         return ss.str();
     }
+
+    // -------- Test-harness verbs (PLAN: spring-test) --------
+    //
+    // These delegate to Spring.* via the LuaRules synced state so they
+    // honour AllowUnitCreation / AllowCommand veto rules and routing
+    // through ScriptEventDispatcher matches what a real player would
+    // get. Calling unitHandler / commandAI directly from the HTTP path
+    // would skip those hooks and produce subtly different sim state.
+    auto runOnLuaRules = [](const std::string& code) -> std::string {
+        if (!luaRules) return "error: LuaRules not loaded (no game running?)";
+        return ExecuteInLuaState(luaRules->syncedLuaHandle.GetLuaState(), code);
+    };
+
+    // log <subsystem> on|off|status
+    if (cmd.rfind("log ", 0) == 0) {
+        std::istringstream is(cmd.substr(4));
+        std::string subsystem, action;
+        is >> subsystem >> action;
+        if (subsystem.empty()) {
+            return "usage: log <combat|sound|weapon|explosion|order|unit|script> on|off|status";
+        }
+        // 'log status' alone reports every flag.
+        if (subsystem == "status" && action.empty()) {
+            std::ostringstream ss;
+            ss << "combat="    << (g_debugFlags.combat   .load() ? "on" : "off")
+               << " sound="    << (g_debugFlags.sound    .load() ? "on" : "off")
+               << " weapon="   << (g_debugFlags.weapon   .load() ? "on" : "off")
+               << " explosion="<< (g_debugFlags.explosion.load() ? "on" : "off")
+               << " order="    << (g_debugFlags.order    .load() ? "on" : "off")
+               << " unit="     << (g_debugFlags.unit     .load() ? "on" : "off")
+               << " script="   << (g_debugFlags.script   .load() ? "on" : "off");
+            return ss.str();
+        }
+        std::atomic<bool>* flag = DebugFlagByName(subsystem);
+        if (!flag) return "error: unknown subsystem '" + subsystem + "'";
+        if (action == "status" || action.empty()) {
+            return subsystem + "=" + (flag->load() ? "on" : "off");
+        }
+        if (action == "on" || action == "true" || action == "1") {
+            flag->store(true);
+            return subsystem + "=on";
+        }
+        if (action == "off" || action == "false" || action == "0") {
+            flag->store(false);
+            return subsystem + "=off";
+        }
+        return "usage: log " + subsystem + " on|off|status";
+    }
+
+    // spawn <defName> <x> <z> [team=0] [count=1]
+    if (cmd.rfind("spawn ", 0) == 0) {
+        std::istringstream is(cmd.substr(6));
+        std::string defName;
+        float x = 0, z = 0;
+        int team = 0, count = 1;
+        is >> defName >> x >> z >> team >> count;
+        if (defName.empty()) {
+            return "usage: spawn <defName> <x> <z> [team=0] [count=1]";
+        }
+        if (count < 1) count = 1;
+        if (count > 256) count = 256;
+        std::ostringstream lua;
+        lua << "local ids = {}\n"
+            << "for i = 1, " << count << " do\n"
+            << "  local ox, oz = 0, 0\n"
+            << "  if " << count << " > 1 then\n"
+            << "    local n = math.ceil(math.sqrt(" << count << "))\n"
+            << "    ox = ((i - 1) % n) * 48\n"
+            << "    oz = math.floor((i - 1) / n) * 48\n"
+            << "  end\n"
+            << "  local px, pz = " << x << " + ox, " << z << " + oz\n"
+            << "  local py = Spring.GetGroundHeight(px, pz)\n"
+            << "  local id = Spring.CreateUnit('" << defName << "', px, py, pz, 0, " << team << ")\n"
+            << "  if id then ids[#ids+1] = id end\n"
+            << "end\n"
+            << "return 'spawned ' .. #ids .. ' unit(s): ' .. table.concat(ids, ',')\n";
+        return runOnLuaRules(lua.str());
+    }
+
+    // kill <unitId> [selfDestruct=0] [reclaimed=0]
+    if (cmd.rfind("kill ", 0) == 0) {
+        std::istringstream is(cmd.substr(5));
+        int unitId = 0, selfD = 0, reclaim = 0;
+        is >> unitId >> selfD >> reclaim;
+        if (unitId <= 0) return "usage: kill <unitId> [selfDestruct=0] [reclaimed=0]";
+        std::ostringstream lua;
+        lua << "Spring.DestroyUnit(" << unitId << ", "
+            << (selfD ? "true" : "false") << ", "
+            << (reclaim ? "true" : "false") << ")\n"
+            << "return 'killed ' .. " << unitId;
+        return runOnLuaRules(lua.str());
+    }
+
+    // damage <unitId> <amount> [paralyze=0]
+    if (cmd.rfind("damage ", 0) == 0) {
+        std::istringstream is(cmd.substr(7));
+        int unitId = 0, paralyze = 0;
+        float amount = 0;
+        is >> unitId >> amount >> paralyze;
+        if (unitId <= 0 || amount <= 0) {
+            return "usage: damage <unitId> <amount> [paralyze=0]";
+        }
+        std::ostringstream lua;
+        lua << "Spring.AddUnitDamage(" << unitId << ", " << amount << ", "
+            << paralyze << ", -1, -1)\n"
+            << "local h = Spring.GetUnitHealth(" << unitId << ")\n"
+            << "return 'unit " << unitId << " hp=' .. tostring(h)";
+        return runOnLuaRules(lua.str());
+    }
+
+    // order <unitId> <cmdId> [param1] [param2] [param3] [param4] [opts=0]
+    // Numeric-only order issuance; for symbolic names, use exec_lua with
+    // CMD.MOVE etc. directly.
+    if (cmd.rfind("order ", 0) == 0) {
+        std::istringstream is(cmd.substr(6));
+        int unitId = 0, cmdId = 0, opts = 0;
+        std::vector<float> params;
+        is >> unitId >> cmdId;
+        if (unitId <= 0) return "usage: order <unitId> <cmdId> [params...] [opts=0]";
+        // Read up to 4 params + opts. The rule: if exactly 5 numbers
+        // remain after cmdId, the last is opts; otherwise everything is
+        // params and opts defaults to 0.
+        std::vector<float> rest;
+        float v;
+        while (is >> v) rest.push_back(v);
+        if (rest.size() == 5) {
+            params.assign(rest.begin(), rest.begin() + 4);
+            opts = (int)rest[4];
+        } else {
+            params = rest;
+        }
+        std::ostringstream lua;
+        lua << "Spring.GiveOrderToUnit(" << unitId << ", " << cmdId << ", {";
+        for (size_t i = 0; i < params.size(); ++i) {
+            if (i) lua << ", ";
+            lua << params[i];
+        }
+        lua << "}, " << opts << ")\n"
+            << "return 'order " << cmdId << " issued to " << unitId << "'";
+        return runOnLuaRules(lua.str());
+    }
+
+    // clear [team=-1]    — destroys all units (or all on a single team).
+    if (cmd.rfind("clear", 0) == 0) {
+        int team = -1;
+        if (cmd.size() > 6) team = std::atoi(cmd.c_str() + 6);
+        std::ostringstream lua;
+        if (team < 0) {
+            lua << "local ids = Spring.GetAllUnits()\n";
+        } else {
+            lua << "local ids = Spring.GetTeamUnits(" << team << ")\n";
+        }
+        lua << "for _, id in ipairs(ids) do Spring.DestroyUnit(id, false, true) end\n"
+            << "return 'cleared ' .. #ids .. ' unit(s)'";
+        return runOnLuaRules(lua.str());
+    }
+
+    // unit_state <unitId>  — dump health/pos/team/weapons.
+    if (cmd.rfind("unit_state ", 0) == 0) {
+        int unitId = std::atoi(cmd.c_str() + 11);
+        if (unitId <= 0) return "usage: unit_state <unitId>";
+        const CUnit* u = unitHandler.GetUnit((unsigned)unitId);
+        if (!u) return "no such unit";
+        std::ostringstream ss;
+        ss << "id=" << u->id
+           << " def=" << u->unitDef->name
+           << " team=" << u->team
+           << " hp=" << u->health << "/" << u->maxHealth
+           << " pos=(" << u->pos.x << "," << u->pos.y << "," << u->pos.z << ")"
+           << " heading=" << u->heading
+           << " weapons=" << u->weapons.size();
+        for (size_t i = 0; i < u->weapons.size(); ++i) {
+            const CWeapon* w = u->weapons[i];
+            if (!w || !w->weaponDef) continue;
+            ss << "\n  w" << i
+               << " def=" << w->weaponDef->name
+               << " range=" << w->range
+               << " reloadFrame=" << w->reloadStatus
+               << " hasTarget=" << (w->HaveTarget() ? "yes" : "no");
+        }
+        return ss.str();
+    }
+
+    // combat_summary  — recent combat / sound / death queue depths.
+    if (cmd == "combat_summary") {
+        std::ostringstream ss;
+        ss << "queued combat=" << combatEvents.Size()
+           << " sounds=" << soundEvents.Size()
+           << " (drained per-tick by server_main)";
+        return ss.str();
+    }
+
     return "unknown command: " + cmd;
 }
 

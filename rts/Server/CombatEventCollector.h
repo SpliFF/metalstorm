@@ -6,6 +6,8 @@
 #pragma once
 
 #include "System/float3.h"
+#include "Server/DebugFlags.h"
+#include "System/SpringLog/SpringLog.h"
 #include <cstdint>
 #include <mutex>
 #include <vector>
@@ -23,6 +25,14 @@ class CombatEventCollector {
 public:
     /// Record a combat event (thread-safe).
     void Push(const CombatEventData& event) {
+        if (g_debugFlags.combat.load(std::memory_order_relaxed)) {
+            static const char* const RESULT_NAMES[] = {"hit", "miss", "blocked", "kill"};
+            const char* r = (event.result < 4) ? RESULT_NAMES[event.result] : "?";
+            springlog_log(SPRING_LOG_INFO, "combat", "", springlog_get_frame(),
+                 "%s atk=%u tgt=%u w=%u dmg=%.1f @ (%.0f,%.0f,%.0f)",
+                 r, event.attackerId, event.targetId, (unsigned)event.weaponDefId,
+                 event.damage, event.position.x, event.position.y, event.position.z);
+        }
         std::lock_guard<std::mutex> lock(mutex);
         events.push_back(event);
     }

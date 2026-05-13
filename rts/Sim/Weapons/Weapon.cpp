@@ -26,8 +26,10 @@
 #include "Sim/Weapons/Cannon.h"
 #include "Sim/Weapons/NoWeapon.h"
 #include "Server/SoundEventCollector.h"
+#include "Server/DebugFlags.h"
 #include "System/EventHandler.h"
 #include "System/SpringMath.h"
+#include "System/SpringLog/SpringLog.h"
 #include "System/creg/DefTypes.h"
 #include "System/Log/ILog.h"
 
@@ -133,7 +135,7 @@ CWeapon::CWeapon(CUnit* owner, const WeaponDef* def):
 	// 20° early-trigger threshold so AimWeapon was being called only
 	// twice per second. ~233ms (GAME_SPEED >> 2) keeps the cost low while
 	// halving worst-case aim lag.
-	reaimTime(GAME_SPEED >> 2),
+	reaimTime(GAME_SPEED >> 1),
 	reloadTime(1),
 	reloadStatus(0),
 
@@ -1211,6 +1213,17 @@ void CWeapon::Fire(bool scriptCall)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	owner->lastFireWeapon = gs->frameNum;
+
+	if (g_debugFlags.weapon.load(std::memory_order_relaxed)) {
+		const float3& tp = currentTargetPos;
+		springlog_log(SPRING_LOG_INFO, "weapon", "", springlog_get_frame(),
+		     "fire frame=%d unit=%d def=%s w=%u type=%s "
+		     "muzzle=(%.0f,%.0f,%.0f) target=(%.0f,%.0f,%.0f) script=%d",
+		     gs->frameNum, owner->id, owner->unitDef->name.c_str(),
+		     (unsigned)weaponDef->id, weaponDef->type.c_str(),
+		     weaponMuzzlePos.x, weaponMuzzlePos.y, weaponMuzzlePos.z,
+		     tp.x, tp.y, tp.z, (int)scriptCall);
+	}
 
 	// Emit a fire sound event. Skipped silently when the weaponDef has
 	// no soundStart entries — the def's SoundRef array is empty in that

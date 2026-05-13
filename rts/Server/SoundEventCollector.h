@@ -7,6 +7,8 @@
 #pragma once
 
 #include "System/float3.h"
+#include "Server/DebugFlags.h"
+#include "System/SpringLog/SpringLog.h"
 #include <cstdint>
 #include <mutex>
 #include <vector>
@@ -54,6 +56,17 @@ struct SoundEventData {
 class SoundEventCollector {
 public:
     void Push(const SoundEventData& event) {
+        if (g_debugFlags.sound.load(std::memory_order_relaxed)) {
+            static const char* const KIND_NAMES[] = {"unit", "weapon", "feature", "global"};
+            const char* k = (event.sourceKind < 4) ? KIND_NAMES[event.sourceKind] : "?";
+            springlog_log(SPRING_LOG_INFO, "sound", "", springlog_get_frame(),
+                 "kind=%s defId=%u soundId=%u team=%u ch=%u "
+                 "vol=%.2f pitch=%.2f prio=%u @ (%.0f,%.0f,%.0f)",
+                 k, (unsigned)event.sourceDefId, (unsigned)event.soundId,
+                 (unsigned)event.team, (unsigned)event.channel,
+                 event.volume, event.pitch, (unsigned)event.priority,
+                 event.position.x, event.position.y, event.position.z);
+        }
         std::lock_guard<std::mutex> lock(mutex);
         events.push_back(event);
     }

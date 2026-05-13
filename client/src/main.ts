@@ -63,6 +63,7 @@ import { fetchAndIngestDefs } from './core/defs-fetch.js';
 import { renderMapFeatures } from './core/feature-renderer.js';
 import { RTSCamera } from './core/rts-camera.js';
 import { LuaWidgetManager } from './core/lua-widget-manager.js';
+import { TestHarness } from './core/test-harness.js';
 import { injectStyle, renderTemplate } from './ui/ui.js';
 import { debugConsole } from './core/debug-console.js';
 import { logIngest } from './core/log-ingest.js';
@@ -99,6 +100,12 @@ let commandPathRenderer: CommandPathRenderer | null = null;
 let waypointMarkerRenderer: WaypointMarkerRenderer | null = null;
 let standingOrderRenderer: StandingOrderRenderer | null = null;
 let debugTerrainGrid: DebugTerrainGrid | null = null;
+/// TestHarness on `window.test` — exposed in startGame(), torn down on
+/// quitToLobby(). The render loop checks `testRenderPaused` so a paused
+/// session continues to receive entity-state updates (the connection is
+/// independent of the render loop) while skipping `scene.render()`.
+let testHarness: TestHarness | null = null;
+let testRenderPaused = false;
 /// Cached most-recent command-queue snapshot. Lets a selection change
 /// repaint the path overlay without waiting for the next server tick.
 let lastCommandQueues: ReadonlyArray<{
@@ -261,6 +268,9 @@ function quitToLobby(): void {
     engine?.dispose();
     engine = null;
     delete (window as any).camera;
+    delete (window as any).test;
+    testHarness = null;
+    testRenderPaused = false;
     entityRenderer = null;
     projectileRenderer = null;
     buildBeamRenderer?.dispose();
@@ -1149,6 +1159,26 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // automation can drive orders without touching the canvas.
     (window as unknown as { __inputManager: unknown }).__inputManager = inputManager;
     (window as unknown as { __connection: unknown }).__connection = conn;
+
+    // window.test — high-level testing API. Reuses the existing
+    // /api/exec route on the lobby (which proxies to the game server)
+    // for spawn/kill/damage/order/log verbs, and drives the camera +
+    // engine directly for client-side focus / pause / screenshot. See
+    // docs/javascript.md and .claude/skills/spring-test/SKILL.md.
+    if (lobbyUI) {
+        testHarness = new TestHarness({
+            engine,
+            scene,
+            camera: rtsCamera,
+            entityRenderer,
+            connection: conn,
+            inputManager,
+            lobby: lobbyUI,
+            setPaused: (p) => { testRenderPaused = p; },
+            isPaused: () => testRenderPaused,
+        });
+        (window as unknown as { test: TestHarness }).test = testHarness;
+    }
     // Route ground-click suppression through the widget manager. The
     // widget manager is created later (when MapData arrives) so we read
     // it lazily — by the time the user clicks anything, the manager has
@@ -1193,6 +1223,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         const now = performance.now();
         const dt = (now - lastFrameTime) / 1000;
         lastFrameTime = now;
+
+        // window.test.pause() freezes rendering. Sim continues server-side
+        // (use test.simPause() to also stop ticks) and entity-state
+        // updates keep arriving so the harness can still query state.
+        if (testRenderPaused) return;
 
         rtsCamera.tick();
         entityRenderer?.tick();

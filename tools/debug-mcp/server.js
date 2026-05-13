@@ -591,6 +591,151 @@ const TOOLS = [
         },
     },
     {
+        name: 'spawn_unit',
+        description: 'Spawn one or more units of a given def at a world XZ position on a team. Wraps the LuaExecEngine `server spawn` verb (which delegates to Spring.CreateUnit on the LuaRules synced state, so Allow* veto rules apply). Y is auto-resolved via Spring.GetGroundHeight. When count > 1 the server lays them out in a square grid 48 elmos apart.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                defName: { type: 'string', description: 'Unit def name (e.g. "armcom1", "papertank").' },
+                x: { type: 'number', description: 'World X coordinate (elmos).' },
+                z: { type: 'number', description: 'World Z coordinate (elmos).' },
+                team: { type: 'number', description: 'Owning team ID', default: 0 },
+                count: { type: 'number', description: 'How many to spawn (max 256)', default: 1 },
+                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
+            },
+            required: ['defName', 'x', 'z'],
+        },
+    },
+    {
+        name: 'kill_unit',
+        description: 'Destroy a unit by ID via Spring.DestroyUnit. Optional self-destruct flag (plays the unit\'s death animation/explosion) and reclaim flag (drops a wreckage feature instead of nothing).',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                unitId: { type: 'number', description: 'Sim unit ID to destroy.' },
+                selfDestruct: { type: 'boolean', default: false },
+                reclaimed: { type: 'boolean', default: false },
+                roomId: { type: 'number' },
+            },
+            required: ['unitId'],
+        },
+    },
+    {
+        name: 'damage_unit',
+        description: 'Apply damage to a unit via Spring.AddUnitDamage. Returns the post-damage health.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                unitId: { type: 'number' },
+                amount: { type: 'number', description: 'HP of damage to apply.' },
+                paralyze: { type: 'boolean', default: false },
+                roomId: { type: 'number' },
+            },
+            required: ['unitId', 'amount'],
+        },
+    },
+    {
+        name: 'give_order',
+        description: 'Issue a single command to a unit via Spring.GiveOrderToUnit. Use the standard CMD.* numeric IDs (10=MOVE, 20=ATTACK, 0=STOP, 90=RECLAIM, 25=GUARD, 15=PATROL, 16=FIGHT, etc. — see client/src/core/command-buffer.ts for the full table).',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                unitId: { type: 'number' },
+                cmdId: { type: 'number', description: 'Spring command ID, e.g. 10=MOVE, 20=ATTACK.' },
+                params: { type: 'array', items: { type: 'number' }, description: 'Up to 4 numeric params (e.g. [x,y,z] for MOVE, [targetUnitId] for ATTACK).', default: [] },
+                opts: { type: 'number', description: 'Spring command-options bitfield (32=SHIFT/queue).', default: 0 },
+                roomId: { type: 'number' },
+            },
+            required: ['unitId', 'cmdId'],
+        },
+    },
+    {
+        name: 'clear_units',
+        description: 'Wipe every unit (or every unit on a team) via Spring.DestroyUnit on each. Useful between test cases.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                team: { type: 'number', description: 'Team ID. Omit to clear ALL units on every team.' },
+                roomId: { type: 'number' },
+            },
+        },
+    },
+    {
+        name: 'get_unit_state',
+        description: 'Dump health, position, team, weapons, and per-weapon target/range/reload state for a single unit. Reads sim state directly (no Lua round-trip).',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                unitId: { type: 'number' },
+                roomId: { type: 'number' },
+            },
+            required: ['unitId'],
+        },
+    },
+    {
+        name: 'set_debug_logging',
+        description: 'Toggle one or more debug-log subsystems on the game server. Logged lines surface via get_logs / search_logs (section= the subsystem name). Subsystems: combat (damage/hit/kill events), sound (every SoundEvent push), weapon (every CWeapon::Fire), explosion (planned), order (planned), unit (planned), script (planned). Returns the post-call status string.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                combat:    { type: 'boolean' },
+                sound:     { type: 'boolean' },
+                weapon:    { type: 'boolean' },
+                explosion: { type: 'boolean' },
+                order:     { type: 'boolean' },
+                unit:      { type: 'boolean' },
+                script:    { type: 'boolean' },
+                roomId:    { type: 'number' },
+            },
+        },
+    },
+    {
+        name: 'get_combat_summary',
+        description: 'Quick-look queue depths for combat events, sound events, and unit deaths still pending broadcast. Useful for sanity-checking that combat is actually happening.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                roomId: { type: 'number' },
+            },
+        },
+    },
+    {
+        name: 'pause_sim',
+        description: 'Pause / unpause the server simulation tick (gs->paused). Sim freezes; the client keeps rendering. Pair with `set_render_paused` (browser-side) when you want a fully-frozen scene for a screenshot.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                paused: { type: 'boolean' },
+                roomId: { type: 'number' },
+            },
+            required: ['paused'],
+        },
+    },
+    {
+        name: 'set_sim_speed',
+        description: 'Set the sim speed multiplier (range 0.05 – 100). 1 = normal, 2 = double, 0.1 = ten-times slower. Useful for slow-mo combat inspection or fast-forwarding past dead time in long tests.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                multiplier: { type: 'number' },
+                roomId:     { type: 'number' },
+            },
+            required: ['multiplier'],
+        },
+    },
+    {
+        name: 'browser_test',
+        description: 'Generate the chrome-devtools `evaluate_script` snippet for a TestHarness method on `window.test`. The harness lives only in the browser; this MCP tool returns the JS string for you to feed into mcp__chrome-devtools__evaluate_script. Methods: focus(unitId), focusOn(x,z), pause(), resume(), screenshot(), saveScreenshot(name), select([ids]), spawnAndFocus(def,x,z,team), stageCombat(atk,tgt,x,z), state(), units(team), unitState(id), highResScreenshot(w,h), simPause(), simResume(), simSpeed(n).',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                method: { type: 'string', description: 'TestHarness method name.' },
+                args:   { type: 'array', description: 'JSON-serialisable args. Strings become quoted, numbers/bools/arrays passed through.', default: [] },
+            },
+            required: ['method'],
+        },
+    },
+    {
         name: 'evaluate_widget_lua',
         description: 'Run a Lua snippet in the LuaUI widget worker (browser-side) via the chrome-devtools bridge. Use when you need to inspect WG, widgetHandler, _widgetErrors, or call any Spring.* function as the player would see it. Requires a connected browser tab; if none, returns an error and you should fall back to chrome-devtools eval directly.',
         inputSchema: {
@@ -923,6 +1068,86 @@ async function executeTool(name, args) {
                 url,
                 body: parsed,
             }, null, 2);
+        }
+
+        case 'spawn_unit': {
+            const cmd = `spawn ${args.defName} ${args.x} ${args.z} ${args.team ?? 0} ${args.count ?? 1}`;
+            const r = await execOnGameServer('server', cmd, args.roomId);
+            return r.success ? r.output : `Error: ${r.output}`;
+        }
+
+        case 'kill_unit': {
+            const cmd = `kill ${args.unitId} ${args.selfDestruct ? 1 : 0} ${args.reclaimed ? 1 : 0}`;
+            const r = await execOnGameServer('server', cmd, args.roomId);
+            return r.success ? r.output : `Error: ${r.output}`;
+        }
+
+        case 'damage_unit': {
+            const cmd = `damage ${args.unitId} ${args.amount} ${args.paralyze ? 1 : 0}`;
+            const r = await execOnGameServer('server', cmd, args.roomId);
+            return r.success ? r.output : `Error: ${r.output}`;
+        }
+
+        case 'give_order': {
+            const params = (args.params || []).join(' ');
+            const cmd = `order ${args.unitId} ${args.cmdId} ${params} ${args.opts ?? 0}`.replace(/\s+/g, ' ').trim();
+            const r = await execOnGameServer('server', cmd, args.roomId);
+            return r.success ? r.output : `Error: ${r.output}`;
+        }
+
+        case 'clear_units': {
+            const cmd = args.team !== undefined ? `clear ${args.team}` : 'clear';
+            const r = await execOnGameServer('server', cmd, args.roomId);
+            return r.success ? r.output : `Error: ${r.output}`;
+        }
+
+        case 'get_unit_state': {
+            const r = await execOnGameServer('server', `unit_state ${args.unitId}`, args.roomId);
+            return r.success ? r.output : `Error: ${r.output}`;
+        }
+
+        case 'set_debug_logging': {
+            const subsystems = ['combat', 'sound', 'weapon', 'explosion', 'order', 'unit', 'script'];
+            for (const s of subsystems) {
+                if (args[s] === undefined) continue;
+                await execOnGameServer('server', `log ${s} ${args[s] ? 'on' : 'off'}`, args.roomId);
+            }
+            const r = await execOnGameServer('server', 'log status', args.roomId);
+            return r.success ? r.output : `Error: ${r.output}`;
+        }
+
+        case 'get_combat_summary': {
+            const r = await execOnGameServer('server', 'combat_summary', args.roomId);
+            return r.success ? r.output : `Error: ${r.output}`;
+        }
+
+        case 'pause_sim': {
+            const r = await execOnGameServer('server', args.paused ? 'pause' : 'unpause', args.roomId);
+            return r.success ? r.output : `Error: ${r.output}`;
+        }
+
+        case 'set_sim_speed': {
+            const r = await execOnGameServer('server', `speed ${args.multiplier}`, args.roomId);
+            return r.success ? r.output : `Error: ${r.output}`;
+        }
+
+        case 'browser_test': {
+            // The TestHarness lives in the browser. Build the eval string
+            // for the user (or Claude) to feed into chrome-devtools.
+            const fmt = (v) => {
+                if (typeof v === 'string') return JSON.stringify(v);
+                if (Array.isArray(v) || (typeof v === 'object' && v !== null)) return JSON.stringify(v);
+                return String(v);
+            };
+            const argList = (args.args || []).map(fmt).join(', ');
+            const snippet = `(async () => { const r = await window.test.${args.method}(${argList}); return r === undefined ? 'ok' : r; })()`;
+            return [
+                `Browser-side TestHarness call. Feed this into mcp__chrome-devtools__evaluate_script:`,
+                ``,
+                `  ${snippet}`,
+                ``,
+                `Requires a game tab open at the client URL with a game in progress (window.test only exists after startGame()).`,
+            ].join('\n');
         }
 
         case 'evaluate_widget_lua': {

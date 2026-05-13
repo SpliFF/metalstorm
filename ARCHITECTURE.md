@@ -70,7 +70,8 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `Server/SoundEventCollector.h/.cpp` | Per-tick collector for `SoundEventData` (sound id, source def + kind, position, channel, priority). Drained into `GameEventBatch.sounds`. |
 | `Server/MusicStateTracker.h/.cpp` | Combat-intensity state machine (peace / tension / battle / victory / defeat). Sampled per tick by `BuildCombatEventBatch`; emits a `MusicEvent` on each state transition. |
 | `Server/ClientSession.h` | Per-client auth state, team, viewport. |
-| `Server/LuaExecEngine.h/.cpp` | Thread-safe console command queue + Lua/server scope execution. |
+| `Server/LuaExecEngine.h/.cpp` | Thread-safe console command queue + Lua/server scope execution. The `server` scope handles low-level commands (`frame`, `state`, `units`, `pause`, `unpause`, `speed`, debugger ops) plus the test-harness verbs (`spawn`, `kill`, `damage`, `order`, `clear`, `log`, `unit_state`, `combat_summary`). |
+| `Server/DebugFlags.h/.cpp` | Runtime-toggleable verbose-logging switches (`combat`, `sound`, `weapon`, `explosion`, `order`, `unit`, `script`). Toggled via `server log <subsystem> on\|off`; read by `Push()` in CombatEventCollector / SoundEventCollector and by `CWeapon::Fire`. |
 | `Server/LuaDebugger.h/.cpp` | Lua breakpoints, stack inspection, step/continue, sim pause. |
 | `Server/AI/AIRuntimePool.h/.cpp` | Pool of Lua AI runtimes, one per AI player. |
 | `Server/AI/AIDiscovery.h/.cpp` | Scans `content/engine/ai/` + game ai dirs for plugins. |
@@ -137,6 +138,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `core/log-ingest.ts` | Forwards client logs to the log server. |
 | `core/renderer-backend.ts` | Backend abstraction (currently WebGL via Babylon.js; placeholder for future WebGPU). |
 | `core/debug-console.ts` | Debug console: log viewer, scope-aware command input, log server WS, Babylon.js inspector toggle. |
+| `core/test-harness.ts` | `window.test` runtime API: spawn/kill/damage/order verbs through `/api/exec`, camera focus on a unit, render-loop pause, screenshot capture, debug-flag toggles. Paired with `.claude/skills/spring-test`. |
 | `core/net-inspector.ts` | Network message inspector: decodes WS envelope + FlatBuffer types for debug console. |
 | `lobby/lobby-ui.ts` | Full lobby UI: login, room browser, room setup, AI slots, start positions. |
 | `ui/ui.ts` | Shared helpers: `injectStyle()`, `renderTemplate()`. |
@@ -535,5 +537,6 @@ first entity/projectile state update that references it.
 - `Spring.Debug` / `Warn` / `Assert` / `DumpTable` / `Inspect` Lua API
 - SQL query proxy, process management API, game session tracking
 - MCP server for Claude integration (`tools/debug-mcp`)
+- **Test framework** (`window.test` + `.claude/skills/spring-test`): instant game launch (`launch_game` MCP tool), scripted spawn/kill/damage/order verbs, camera focus on a unit, render-loop pause + screenshot, runtime debug-flag toggles for combat/sound/weapon emission. See `client/src/core/test-harness.ts` and `rts/Server/DebugFlags.h`.
 
 **Not yet wired:** server-side AI plugin runtime (skeleton in `Server/AI/` exists but plugins don't boot reliably), spectator mode, Glicko-2 ratings, persistent world layer. GameOver → `MusicStateTracker::ForceState(victory|defeat)` hook is the only audio gap — the rest of the pipeline (state machine, MusicEvent broadcast, client crossfader) is live.

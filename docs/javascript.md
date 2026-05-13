@@ -111,6 +111,95 @@ widgets.list();                     // open/close the F9 overlay
 
 The widget list overlay (F9 or `widgets.list()`) shows checkboxes next to each widget for interactive enable/disable. Enabling a widget re-fetches its source from the lobby server, so toggling off→on serves as a reload action.
 
+## `window.test` — Test Harness
+
+In-game scripted-testing API. Available after `startGame()` completes; removed by `quitToLobby()`. Defined in [client/src/core/test-harness.ts](../client/src/core/test-harness.ts).
+
+The harness combines server-side actions (spawn / kill / damage / order / log toggles) with client-side controls (camera focus, render-loop pause, screenshots). Server actions go through `lobby.lobbyPost('/api/exec', …)` so they share auth + scope routing with the debug console.
+
+### Server-bound actions
+
+```js
+await test.spawn('papertank', 4096, 4096, 0, 4)  // def, x, z, team, count
+await test.kill(unitId, /*selfDestruct*/ true)
+await test.damage(unitId, 250)
+await test.order(unitId, 10 /*CMD.MOVE*/, [x, y, z])
+await test.clear(0)                              // wipe team 0; omit for all
+await test.lua('return Spring.GetTeamUnitCount(0)')
+```
+
+### Debug logging toggles
+
+```js
+await test.log('combat',  true)
+await test.log('weapon',  true)
+await test.setLogging({ combat: true, sound: true, weapon: false })
+await test.logStatus()                           // current flag state
+```
+
+Subsystems: `combat`, `sound`, `weapon`, `explosion`, `order`, `unit`, `script`. Each logged line lands under that subsystem name in the log server (`get_logs({section: 'combat'})`).
+
+### Read-only sim queries
+
+```js
+await test.state()        // 'frame=N teams=M units=K'
+await test.frame()        // current sim frame
+await test.units(0)       // 'id=… def=… team=0 hp=…/…' lines
+await test.unitState(42)  // dump health/pos/weapons for a unit
+await test.combatSummary()
+```
+
+### Sim time control
+
+```js
+await test.simPause()     // gs->paused = true (sim freezes)
+await test.simResume()
+await test.simSpeed(0.25) // slow-mo for combat inspection
+```
+
+### Camera
+
+```js
+await test.focus(unitId, { durationMs: 600, height: 800 })
+await test.focusOn(x, z, 600)
+test.setCameraHeight(800)
+```
+
+### Render-loop pause + screenshots
+
+```js
+test.pause()                    // freeze rendering (sim continues unless simPause())
+test.resume()
+test.paused                      // boolean
+
+test.screenshot()                // canvas → 'data:image/png;base64,…'
+test.saveScreenshot('shot.png')  // browser download
+await test.highResScreenshot(1920, 1080)  // off-screen render
+```
+
+### Selection
+
+```js
+test.select([42, 43])
+test.selection                  // readonly number[]
+```
+
+### Composite helpers
+
+```js
+const id = await test.spawnAndFocus('papertank', 4000, 4000, 0)
+const { attackerId, targetId } =
+    await test.stageCombat('papertank', 'papertank', 4096, 4096, /*atkTeam*/ 0, /*tgtTeam*/ 1)
+```
+
+Driven from `mcp__chrome-devtools__evaluate_script`:
+
+```js
+await window.test.spawn('papertank', 4096, 4096, 0, 4)
+```
+
+Or use the `browser_test` MCP tool (in the spring-debug server) to generate the snippet automatically.
+
 ## `window.debugConsole` — Debug Console
 
 The in-game debug console (opened with backtick `` ` ``). Provides:
