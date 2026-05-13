@@ -491,7 +491,17 @@ export class CegRuntime {
         damage: number = 0,
         contextFlags: number = 0,
     ): void {
-        this.spawnInternal(name, x, y, z, dx, dy, dz,
+        if (!name) return;
+        // CEG table keys are lowercased on the server; weapon-def
+        // `cegTag` / `explosionGenerator` strings are normalised to
+        // match in the same bake but mixed-case authors can still slip
+        // through Lua-side callers. Lowercasing here keeps both paths
+        // working without a second canonicalisation step in callers.
+        // Spring's documented sentinel `"none"` skips dispatch — it's
+        // common on weapon defs that opt out of CEGs explicitly.
+        const key = name.toLowerCase();
+        if (key === 'none') return;
+        this.spawnInternal(key, x, y, z, dx, dy, dz,
             damage, contextFlags, /*depth*/ 0);
     }
 

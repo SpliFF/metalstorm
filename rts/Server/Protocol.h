@@ -1605,17 +1605,25 @@ inline flatbuffers::Offset<SpringWeb::GameWeaponDef> BuildSingleWeaponDef(
     // Strip any `custom:` prefix the source tags carry — `LoadGenerator`
     // adds it internally but the bare tag is what indexes into the
     // explosion table.
-    auto stripCustom = [](const std::string& tag) -> std::string {
+    // Strip the `custom:` prefix `LoadGenerator` adds and lowercase
+    // the result. The CEG table is keyed lowercase on the wire (see
+    // CegLoader::LoadAllCegDefs); weapon-def cegTag strings must
+    // match, otherwise the client's runtime lookup misses on names
+    // like `TORPEDO_HIT` while a lowercased `torpedo_hit` entry sits
+    // unused in DefCache.
+    auto stripCustomLower = [](const std::string& tag) -> std::string {
         constexpr const char* kPrefix = "custom:";
         constexpr size_t kPrefixLen = 7;
-        if (tag.size() >= kPrefixLen
+        std::string s = (tag.size() >= kPrefixLen
             && std::strncmp(tag.c_str(), kPrefix, kPrefixLen) == 0)
-            return tag.substr(kPrefixLen);
-        return tag;
+            ? tag.substr(kPrefixLen) : tag;
+        std::transform(s.begin(), s.end(), s.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return s;
     };
-    auto cegTagOff = fbb.CreateString(stripCustom(wd.visuals.ptrailExpGenTag));
-    auto expGenOff = fbb.CreateString(stripCustom(wd.visuals.impactExpGenTag));
-    auto bounceOff = fbb.CreateString(stripCustom(wd.visuals.bounceExpGenTag));
+    auto cegTagOff = fbb.CreateString(stripCustomLower(wd.visuals.ptrailExpGenTag));
+    auto expGenOff = fbb.CreateString(stripCustomLower(wd.visuals.impactExpGenTag));
+    auto bounceOff = fbb.CreateString(stripCustomLower(wd.visuals.bounceExpGenTag));
 
     // Per-armor-class damage table. Element 0 is the default; we ship
     // the whole vector so widgets can compute "damage vs class N" the
