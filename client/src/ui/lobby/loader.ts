@@ -86,19 +86,33 @@ export async function loadGameLobbyTemplates(
     const result = getDefaultLobbyTemplates();
     // Game content (source + converted) is served from data/games/{id}/
     // via /api/games/data/*. Lobby UI overrides nest at <game>/ui/lobby/.
-    const base = `${httpBase}/api/games/data/${encodeURIComponent(gameId)}/ui/lobby`;
+    // The ui-manifest endpoint returns a JSON list of override files that
+    // actually exist (always 200, empty array when the game ships no
+    // ui/ directory). Without this we'd 404 every TEMPLATE_PATHS entry,
+    // polluting the devtools network panel — browsers log 4xx responses
+    // even though our `fetch().ok` check handles them silently.
+    let present: Set<string>;
+    try {
+        const res = await fetch(stampUrl(
+            `${httpBase}/api/games/${encodeURIComponent(gameId)}/ui-manifest`));
+        if (!res.ok) return result;
+        const json = await res.json() as { files?: string[] };
+        present = new Set(json.files ?? []);
+    } catch {
+        return result;
+    }
 
+    const base = `${httpBase}/api/games/data/${encodeURIComponent(gameId)}/ui/lobby`;
     const fetchOne = async (key: keyof LobbyTemplates) => {
         const path = TEMPLATE_PATHS[key];
+        if (!present.has(`lobby/${path}`)) return;
         try {
             const res = await fetch(stampUrl(`${base}/${path}`));
             if (res.ok) {
                 result[key] = await res.text();
             }
         } catch {
-            // Network error — keep the default. We log nothing here
-            // because games legitimately ship partial overrides and we
-            // don't want a 404 storm in the console.
+            // Network error — keep the default.
         }
     };
 

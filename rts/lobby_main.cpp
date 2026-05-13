@@ -1172,14 +1172,56 @@ int main(int argc, char* argv[])
     static std::mutex resourcesCacheMutex;
     static std::unordered_map<std::string, std::string> resourcesCache;
     net.AddHttpGet("/api/games/*", [&gamesDir](const std::string& url) -> HttpResponse {
-        // Match /api/games/<id>/resources.json. /api/games/data/*
-        // and /api/games (no trailing path) are handled by their
-        // own routes registered earlier — the wildcard here only
-        // sees URLs that those didn't match.
+        // Match /api/games/<id>/resources.json and /api/games/<id>/ui-manifest.
+        // /api/games/data/* and /api/games (no trailing path) are handled by
+        // their own routes registered earlier — the wildcard here only sees
+        // URLs that those didn't match.
         const std::string prefix = "/api/games/";
         if (url.size() <= prefix.size())
             return {.contentType = "text/plain", .body = {}, .status = 404};
         const std::string rest = url.substr(prefix.size());
+
+        // /api/games/<id>/ui-manifest — JSON list of override files present
+        // under data/games/<id>/ui/. Always 200; empty list when the dir
+        // is missing entirely. The client uses this to decide which per-
+        // file overrides to fetch, avoiding a 404 storm for games that
+        // ship no overrides at all.
+        const std::string uiSuffix = "/ui-manifest";
+        if (rest.size() > uiSuffix.size() &&
+            rest.compare(rest.size() - uiSuffix.size(), uiSuffix.size(), uiSuffix) == 0)
+        {
+            const std::string gameId = rest.substr(0, rest.size() - uiSuffix.size());
+            if (gameId.empty() || gameId.find('/') != std::string::npos ||
+                gameId.find("..") != std::string::npos)
+                return {.contentType = "text/plain", .body = {}, .status = 400};
+
+            namespace fs = std::filesystem;
+            const fs::path uiDir = fs::path(gamesDir) / gameId / "ui";
+            std::string json = "{\"files\":[";
+            std::error_code ec;
+            if (fs::is_directory(uiDir, ec)) {
+                bool first = true;
+                for (auto it = fs::recursive_directory_iterator(uiDir, ec);
+                     it != fs::recursive_directory_iterator(); it.increment(ec))
+                {
+                    if (ec) break;
+                    if (!it->is_regular_file(ec)) continue;
+                    const auto rel = fs::relative(it->path(), uiDir, ec).generic_string();
+                    if (rel.empty() || rel.find("..") != std::string::npos) continue;
+                    if (!first) json += ",";
+                    first = false;
+                    json += "\"" + HttpAuth::JsonEscape(rel) + "\"";
+                }
+            }
+            json += "]}";
+            std::vector<uint8_t> body(json.begin(), json.end());
+            return {
+                .contentType = "application/json",
+                .body = std::move(body),
+                .status = 200,
+            };
+        }
+
         const std::string suffix = "/resources.json";
         if (rest.size() <= suffix.size() ||
             rest.compare(rest.size() - suffix.size(), suffix.size(), suffix) != 0)

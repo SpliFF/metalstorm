@@ -69,10 +69,25 @@ export async function loadGameTemplates(
     httpBase: string,
 ): Promise<GameTemplates> {
     const result = getDefaultGameTemplates();
-    const base = `${httpBase}/api/games/data/${encodeURIComponent(gameId)}/ui`;
+    // The ui-manifest endpoint returns the set of override files that
+    // actually exist under data/games/<id>/ui/ (always 200, empty array
+    // when the game ships no ui/ directory). Without this we'd 404 every
+    // TEMPLATE_PATHS entry, polluting the devtools network panel.
+    let present: Set<string>;
+    try {
+        const res = await fetch(stampUrl(
+            `${httpBase}/api/games/${encodeURIComponent(gameId)}/ui-manifest`));
+        if (!res.ok) return result;
+        const json = await res.json() as { files?: string[] };
+        present = new Set(json.files ?? []);
+    } catch {
+        return result;
+    }
 
+    const base = `${httpBase}/api/games/data/${encodeURIComponent(gameId)}/ui`;
     const fetchOne = async (key: keyof GameTemplates) => {
         const path = TEMPLATE_PATHS[key];
+        if (!present.has(path)) return;
         try {
             const res = await fetch(stampUrl(`${base}/${path}`));
             if (res.ok) {
