@@ -1,14 +1,31 @@
-# RecoilEngine clangd configuration
+# Spring RTS Web clangd configuration.
+#
+# `compile_commands.json` is symlinked into the project root by CMake
+# (see CMakeLists.txt: file(CREATE_LINK …)) and tracks whichever
+# build preset was last configured. Pointing CompilationDatabase at
+# "." picks up that symlink directly — no need to hardcode the
+# preset-specific build/debug path.
 
 CompileFlags:
-  # Path to the build directory containing compile_commands.json
-  CompilationDatabase: build
-  # Fallback flags for the engine source tree
+  CompilationDatabase: .
+  # Fallback flags applied to translation units that aren't in the
+  # compilation database yet (e.g. headers viewed before their .cpp
+  # has been compiled). Keep in sync with CMakeLists.txt.
   Add:
-    - -std=c++23
+    - -std=c++20
     - -I./rts
-    - -DSYNCCHECK
+    - -I./rts/lib
+    - -I./rts/lib/lua/include
+    - -I./rts/lib/nowide/include
+    - -I./rts/lib/entt/src
+    - -I./rts/System/SpringLog
+    - -I./build/debug/generated
     - -DTHREADPOOL
+    - -DAUTHORITATIVE_SERVER
+    - -DBITMAP_NO_OPENGL
+    - -DNO_SOUND
+    - -DNOT_USING_CREG
+    - -DNGHTTP2_STATICLIB
 
 Index:
   Background: Build

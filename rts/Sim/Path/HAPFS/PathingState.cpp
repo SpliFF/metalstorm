@@ -105,8 +105,8 @@ void PathingState::Init(std::vector<IPathFinder*> pathFinderlist, PathingState* 
 	 	pathChecksum = 0;
 	 	fileHashCode = CalcHash(__func__);
 
-		offsetBlockNum = {mapDimensionsInBlocks.x * mapDimensionsInBlocks.y};
-		costBlockNum = {mapDimensionsInBlocks.x * mapDimensionsInBlocks.y};
+		offsetBlockNum = mapDimensionsInBlocks.x * mapDimensionsInBlocks.y;
+		costBlockNum = mapDimensionsInBlocks.x * mapDimensionsInBlocks.y;
 
 		vertexCosts.clear();
 		vertexCosts.resize(moveDefHandler.GetNumMoveDefs() * blockStates.GetSize() * PATH_DIRECTION_VERTICES, PATHCOST_INFINITY);
@@ -230,7 +230,7 @@ void PathingState::InitEstimator(const std::string& peFileName, const std::strin
 		};
 
 		{
-			sprintf(calcMsg, fmtStrs[numThreads==1], __func__, BLOCK_SIZE, numThreads);
+			snprintf(calcMsg, sizeof(calcMsg), fmtStrs[numThreads==1], __func__, BLOCK_SIZE, numThreads);
 			LOG("%s", calcMsg);
 		}
 
@@ -247,13 +247,13 @@ void PathingState::InitEstimator(const std::string& peFileName, const std::strin
 
 		std::for_each(nodeFlags.begin(), nodeFlags.end(), [](std::uint8_t& f){ f = 0; });
 
-		sprintf(calcMsg, fmtStrs[2], __func__, BLOCK_SIZE, peFileName.c_str(), fileHashCode);
-		LOG("%s", calcMsg, true);
+		snprintf(calcMsg, sizeof(calcMsg), fmtStrs[2], __func__, BLOCK_SIZE, peFileName.c_str(), fileHashCode);
+		LOG("%s", calcMsg);
 
 		WriteFile(peFileName, mapFileName);
 
-		sprintf(calcMsg, fmtStrs[3], __func__, BLOCK_SIZE, peFileName.c_str(), fileHashCode);
-		LOG("%s", calcMsg, true);
+		snprintf(calcMsg, sizeof(calcMsg), fmtStrs[3], __func__, BLOCK_SIZE, peFileName.c_str(), fileHashCode);
+		LOG("%s", calcMsg);
 	}
 
 	// calculate checksum over block-offsets and vertex-costs
@@ -369,7 +369,7 @@ void PathingState::EstimatePathCosts(unsigned int blockIdx, unsigned int threadN
 		nextCostMessageIdx = blockIdx + blockStates.GetSize() / 16;
 
 		char calcMsg[128];
-		sprintf(calcMsg, "[%s] precached %d of %d blocks", __func__, blockIdx, blockStates.GetSize());
+		snprintf(calcMsg, sizeof(calcMsg), "[%s] precached %d of %d blocks", __func__, blockIdx, blockStates.GetSize());
 
 		LOG("%s", calcMsg);
 	}
@@ -392,7 +392,7 @@ void PathingState::CalcVertexPathCosts(const MoveDef& moveDef, int2 block, unsig
 	// other four directions are stored at the adjacent vertices)
 	auto idx = BlockPosToIdx(block);
 	const uint8_t nodeLinksObsoleteFlags = blockStates.nodeLinksObsoleteFlags[idx]
-								  		 & (moveDef.allowDirectionalPathing) ? PATH_DIRECTIONS_MASK : PATH_DIRECTIONS_HALF_MASK;
+								  		 & (moveDef.allowDirectionalPathing ? PATH_DIRECTIONS_MASK : PATH_DIRECTIONS_HALF_MASK);
 
 	int pathdir = 0;
 	for (int checkBit = 1; checkBit <= PATHDIR_LEFT_DOWN_MASK; checkBit <<= 1, ++pathdir) {
@@ -508,7 +508,7 @@ bool PathingState::ReadFile(const std::string& peFileName, const std::string& ma
 	}
 
 	char calcMsg[512];
-	sprintf(calcMsg, "Reading Estimate PathCosts [%d]", BLOCK_SIZE);
+	snprintf(calcMsg, sizeof(calcMsg), "Reading Estimate PathCosts [%d]", BLOCK_SIZE);
 	LOG("%s", calcMsg);
 
 	const unsigned fid = upfile->FindFile("pathinfo");

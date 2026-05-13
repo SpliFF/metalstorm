@@ -176,7 +176,7 @@ int LuaMathExtra::round(lua_State* L) {
 		// round number to <n> decimals
 		// Spring's Lua interpreter uses 32-bit floats,
 		// therefore max. accuracy is ~7 decimal digits
-		const int i = std::min(7, int(sizeof(POWERS_OF_TEN) / sizeof(float)) - 1);
+		const int i = int(std::size(POWERS_OF_TEN)) - 1;
 		const int n = std::clamp(luaL_checkint(L, 2), 0, i);
 
 		const lua_Number xinteg = math::floor(x);

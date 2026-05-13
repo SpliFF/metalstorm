@@ -127,7 +127,7 @@ public:
 	const float3& GetGroundNormal(const float3&) const;
 	float GetGroundHeight(const float3&) const;
 
-	void SyncWaypoints() {
+	void SyncWaypoints() override {
 		if (moveFailed){
 			Fail(false);
 			moveFailed = false;
@@ -139,7 +139,7 @@ public:
 		if (!nextWayPoint.bitExactEquals(earlyNextWayPoint))
 			nextWayPoint = earlyNextWayPoint;
 	}
-	unsigned int GetPathId() { return pathID; }
+	unsigned int GetPathId() override { return pathID; }
 
 	float GetTurnRadius() {
 		const float absTurnSpeed = std::max(0.0001f, math::fabs(turnRate));

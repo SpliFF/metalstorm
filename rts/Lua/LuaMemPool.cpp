@@ -2,6 +2,7 @@
 
 #include <algorithm> // std::min
 #include <cstdint> // std::uint8_t
+#include <cinttypes> // PRIu64
 #include <cstring> // std::mem{cpy,set}
 #include <new>
 
@@ -208,7 +209,11 @@ void LuaMemPool::LogStats(const char* handle, const char* lctype)
 	const float avgAllocTimeE = static_cast<float>(allocStats[STAT_NTE]) / static_cast<float>(std::max(allocStats[STAT_NAE], one));
 	char msg[1024];
 	snprintf(msg, sizeof(msg),
-		"[LuaMemPool::%s][handle=%s (%s)] index=%u numAllocs{int+, int-, ext, int_p}={%lu, %lu, %lu, %.1f} allocedSize{int+, int-, ext}={%lu, %lu, %lu}, avgAllocTime{int+, int-, ext}={%.4f, %.4f, %.4f}",
+		"[LuaMemPool::%s][handle=%s (%s)] index=%zu"
+		" numAllocs{int+, int-, ext, int_p}="
+		"{%" PRIu64 ", %" PRIu64 ", %" PRIu64 ", %.1f}"
+		" allocedSize{int+, int-, ext}={%" PRIu64 ", %" PRIu64 ", %" PRIu64 "}"
+		", avgAllocTime{int+, int-, ext}={%.4f, %.4f, %.4f}",
 		__func__,
 		handle,
 		lctype,
