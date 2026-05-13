@@ -3810,10 +3810,17 @@ function dispatchCommandsChanged(): void {
             local cmdCount = #merged
 
             if type(_G.LayoutButtons) == "function" then
+                -- xIcons / yIcons size the engine's native command panel,
+                -- which we don't render — chili re-derives its own layout.
+                -- But ZK's default handler (LuaUI/layout.lua DefaultHandler)
+                -- computes \`ipp = xIcons * yIcons\` then does \`pos % ipp\`;
+                -- passing zeros makes the modulo throw. Use Spring's
+                -- standard 6x6 integral-menu grid so the math is safe
+                -- regardless of which handler the game installed.
                 local ok, menuName, xIcons, yIcons,
                       removeCmds, customCmds, onlyTexCmds, reTexCmds,
                       reNamedCmds, reTooltipCmds, reParamsCmds, iconList
-                    = pcall(_G.LayoutButtons, 0, 0, cmdCount, commands)
+                    = pcall(_G.LayoutButtons, 6, 6, cmdCount, commands)
 
                 if ok then
                     -- LayoutButtons may have mutated widgetHandler.commands
