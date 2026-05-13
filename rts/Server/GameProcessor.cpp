@@ -196,11 +196,22 @@ void Process(const std::string& gamePath,
         // config file. If the config is missing we still need to
         // rebuild so that modelimporter has a chance to write a
         // fresh .config.json.
+        //
+        // Modelimporter binary mtime is folded in too: when the
+        // converter itself changes (e.g. new material flag, new
+        // texture handling) every existing .glb in the cache is
+        // implicitly stale. Without this clause a rebuilt importer
+        // is invisible to the lobby until each source asset is
+        // hand-touched.
         bool needsRebuild = true;
         if (fs::exists(dstGlb) && hasConfig) {
             const auto srcMt = fs::last_write_time(src);
             const auto glbMt = fs::last_write_time(dstGlb);
-            if (srcMt <= glbMt) {
+            const fs::path importerBin(MODELIMPORTER_BINARY_PATH);
+            const auto importerMt = fs::exists(importerBin)
+                ? fs::last_write_time(importerBin)
+                : fs::file_time_type::min();
+            if (srcMt <= glbMt && importerMt <= glbMt) {
                 needsRebuild = false;
             }
         }

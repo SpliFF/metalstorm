@@ -65,7 +65,13 @@ namespace JsonWriter {
 /// modelimporter treats a configVersion strictly older than this
 /// as "needs regeneration" and overwrites the file on its next run,
 /// so trees of stale configs self-upgrade without --update-meta.
-constexpr int kCurrentConfigVersion = 3;
+///
+/// 2026-05-14: v4 — S3O importer emits `alphaMode: "MASK"` on the
+/// base material so alpha-cutout decals (tank-track wheels, fan
+/// blades) punch through instead of rendering as opaque black.
+/// Existing v3 .glb files don't carry the alphaMode key and need to
+/// be re-converted on the next gameconverter / lobby launch.
+constexpr int kCurrentConfigVersion = 4;
 
 /// Extract metadata from `scene` and write `outPath`, overwriting
 /// any existing file at that location. Callers are responsible for

@@ -1550,9 +1550,26 @@ export class EntityRenderer {
                     }
                 }
                 const rotation = (lerped.heading / 65535) * Math.PI * 2;
+                // Sign convention notes — both pitch and roll are negated:
+                //
+                // Spring packs `pitch = asin(frontdir.y)` and
+                // `roll = asin(rightdir.y)` — i.e. *world*-Y components of
+                // the unit's basis vectors. Positive pitch means nose-up,
+                // positive roll means Spring-right side up (Spring's
+                // rightdir is initialised to -RgtVector so its "right"
+                // points along local -X).
+                //
+                // Babylon's RotationYawPitchRoll in left-handed coords
+                // rotates local +Z toward -Y for positive pitch (nose
+                // DOWN), and tilts +Y toward -X for positive roll. Both
+                // are the opposite convention to Spring's, so we negate
+                // here. Without the flip, a tank on a slope rises with
+                // its top leaning INTO the hill — visually the unit is
+                // half-buried on the uphill side, which is the
+                // PLAN-combat-vfx.md F6 symptom.
                 const entityMatrix = Matrix.Compose(
                     new Vector3(1, 1, 1),
-                    Quaternion.RotationYawPitchRoll(rotation, lerped.pitch, lerped.roll),
+                    Quaternion.RotationYawPitchRoll(rotation, -lerped.pitch, -lerped.roll),
                     new Vector3(lerped.x, renderY + tmpl.yOffset, lerped.z),
                 );
 

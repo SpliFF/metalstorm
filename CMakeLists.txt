@@ -318,13 +318,20 @@ add_executable(spring-lobby
     ${LOBBY_LOG_SOURCES}
     rts/System/SafeCStrings.c
 )
-add_dependencies(spring-lobby generate_flatbuffers)
+add_dependencies(spring-lobby generate_flatbuffers modelimporter)
 target_include_directories(spring-lobby PRIVATE
     ${CMAKE_SOURCE_DIR}/rts
     ${CMAKE_SOURCE_DIR}/rts/lib
     ${CMAKE_SOURCE_DIR}/rts/lib/lua/include
     ${CMAKE_SOURCE_DIR}/rts/lib/lua/src
     ${GENERATED_DIR}
+)
+target_compile_definitions(spring-lobby PRIVATE
+    # Absolute path so GameProcessor / FeatureProcessor can shell out
+    # to the converter without relying on $PATH. Also lets the stale-
+    # glb detector mtime-compare against the actual binary the lobby
+    # would invoke, so a rebuilt importer invalidates the model cache.
+    MODELIMPORTER_BINARY_PATH="$<TARGET_FILE:modelimporter>"
 )
 target_link_libraries(spring-lobby PRIVATE lua nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite)
 if(UNIX)

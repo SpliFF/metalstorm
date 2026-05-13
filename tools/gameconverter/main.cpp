@@ -1433,7 +1433,7 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
         // even when the .glb itself is current. modelimporter exposes
         // its current schema version via the constant baked into every
         // emitted file as `configVersion`.
-        constexpr int kMinAcceptableConfigVersion = 3;
+        constexpr int kMinAcceptableConfigVersion = 4;
         bool needsRebuild = true;
         if (!force && fs::exists(outPath)) {
             const auto srcTime = fs::last_write_time(entry.path(), ec);

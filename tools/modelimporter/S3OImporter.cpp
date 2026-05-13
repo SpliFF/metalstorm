@@ -9,6 +9,7 @@
 #include <assimp/importerdesc.h>
 #include <assimp/scene.h>
 #include <assimp/material.h>
+#include <assimp/GltfMaterial.h>
 #include <assimp/DefaultLogger.hpp>
 #include <assimp/Importer.hpp>
 
@@ -349,6 +350,25 @@ void S3OImporter::InternReadFile(const std::string& pFile,
         // Treat S3O models as single-sided lit surfaces by default.
         int twoSided = 0;
         material->AddProperty(&twoSided, 1, AI_MATKEY_TWOSIDED);
+
+        // Spring's stock S3O shader does `glAlphaFunc(GL_GREATER, 0.5)` on
+        // the diffuse texture's alpha channel — used for the alpha-cutout
+        // decals authors layer onto pieces (tank-wheel windows visible
+        // through the tracks, fan blades on aircraft, etc.). glTF defaults
+        // every material to `alphaMode: "OPAQUE"`, which makes those
+        // black-keyed regions render as solid black. Emit MASK + 0.5
+        // cutoff so the glTF2 exporter writes the cutout into the .glb,
+        // and downstream renderers honour the punch-through. Texture-1
+        // alpha is the gameplay-relevant channel; texture-2 is the team-
+        // mask and its alpha is never used as a cutout. Setting MASK on
+        // a fully-opaque diffuse is a no-op (every alpha > 0.5 passes),
+        // so this is safe to always apply.
+        {
+            aiString alphaMode("MASK");
+            material->AddProperty(&alphaMode, AI_MATKEY_GLTF_ALPHAMODE);
+            float alphaCutoff = 0.5f;
+            material->AddProperty(&alphaCutoff, 1, AI_MATKEY_GLTF_ALPHACUTOFF);
+        }
     }
 
     pScene->mNumMaterials = 1;
