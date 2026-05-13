@@ -35,6 +35,10 @@
 
 #include "System/Misc/TracyDefs.h"
 
+#include <unordered_set>
+
+#define LOG_SECTION "combat"
+
 CR_BIND_DERIVED_POOL(CWeapon, CObject, , weaponMemPool.allocMem, weaponMemPool.freeMem)
 CR_REG_METADATA(CWeapon, (
 	CR_MEMBER(owner),
@@ -283,6 +287,31 @@ void CWeapon::UpdateWeaponVectors()
 
 	relAimFromPos = owner->script->GetPiecePos(aimFromPiece);
 	owner->script->GetEmitDirPos(muzzlePiece, relWeaponMuzzlePos, weaponDir);
+
+	// One-shot diagnostic: a unit-script that failed to bind a real
+	// piece for either aimFromWeapon or queryWeapon leaves the muzzle
+	// at the unit's centre, lifted to a fake elevation by the ground-
+	// clearance fallback below. The VFX then issues from a spot the
+	// player can't reconcile with the visible barrel. Surface this at
+	// load time so missing piece bindings get fixed at the source
+	// (unit script) rather than masquerading as renderer glitches.
+	// PLAN-combat-vfx.md F5 / Phase 6.
+	if (aimFromPiece < 0 || muzzlePiece < 0
+	    || (relAimFromPos == ZeroVector && relWeaponMuzzlePos == UpVector
+	        && weaponDir == UpVector))
+	{
+		static std::unordered_set<uint64_t> warned;
+		const uint64_t unitDefId = owner->unitDef ? owner->unitDef->id : 0;
+		const uint64_t key = (unitDefId << 32) | static_cast<uint32_t>(weaponNum);
+		if (warned.insert(key).second) {
+			SLOG(SPRING_LOG_WARNING,
+			    "weapon %d on unit '%s' has unbound muzzle/aim piece "
+			    "(aimFromPiece=%d, muzzlePiece=%d) — firing from unit centre",
+			    weaponNum,
+			    owner->unitDef ? owner->unitDef->name.c_str() : "<null>",
+			    aimFromPiece, muzzlePiece);
+		}
+	}
 
 	aimFromPos = owner->GetObjectSpacePos(relAimFromPos);
 	weaponMuzzlePos = owner->GetObjectSpacePos(relWeaponMuzzlePos);
