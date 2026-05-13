@@ -23,6 +23,7 @@
 #include "Sim/Misc/TeamHandler.h"
 #include "Server/DefsCache.h"
 #include "Server/CegLoader.h"
+#include "Server/ResourcesParser.h"
 #include "Server/StandingOrders.h"
 #include "Server/AI/AIRuntimePool.h"
 #include "Server/AI/AIDiscovery.h"
@@ -767,10 +768,25 @@ int main(int argc, char* argv[])
             SLOG(SPRING_LOG_NOTICE, "defs cache warm: gameId=%s key=%s",
                  gameId.c_str(), defsCacheKey.c_str());
         } else {
+            // Probe the game's gamedata/resources.lua for the set of
+            // projectile-texture names. The weapon-def baker uses this
+            // to choose between the primary and fallback name when
+            // applying Spring's per-weaponType defaults (e.g.
+            // `missileflaretexture` is preferred when defined,
+            // otherwise `flare`). With an empty set the baker still
+            // writes the primary; the client's resolver chases any
+            // remaining alias.
+            const std::string gameDir = "data/games/" + gameId;
+            const std::string engineBaseDir = "cont/base/springcontent";
+            const auto projTextureNames =
+                ResourcesParser::GetProjectileTextureNames(
+                    gameId, gameDir, engineBaseDir);
+
             auto udBytes = Protocol::BuildGameUnitDefs(
                 unitDefHandler->GetUnitDefsVec(), gameId);
             auto wdBytes = Protocol::BuildGameWeaponDefs(
-                weaponDefHandler->GetWeaponDefsVec(), gameId);
+                weaponDefHandler->GetWeaponDefsVec(), gameId,
+                &projTextureNames);
             // CEGs (Custom Explosion Generators). The engine's
             // explGenHandler has already parsed gamedata/explosions.lua;
             // CegLoader walks the resulting LuaTable into a flat list

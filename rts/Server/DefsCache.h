@@ -66,7 +66,11 @@ inline std::string ComputeCacheKey(
     // re-bakes with the third file. Keep this string in sync with the
     // .cpp side — the lobby and the server both inline the function
     // body, so a single-site bump misses one.
-    canonical += "schemaV10-protocol";
+    // 2026-05-14: v11 — weapon-def baker fills texture1..3 with
+    // per-`weaponType` defaults (PLAN-combat-vfx.md F3). Same schema,
+    // bumped to invalidate pre-fix caches that still carried empty
+    // texture names on ~half of the defs.
+    canonical += "schemaV11-protocol";
     canonical += '\n';
     canonical += gameId;
     canonical += '\n';

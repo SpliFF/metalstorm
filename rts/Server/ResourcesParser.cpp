@@ -42,6 +42,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 
 namespace fs = std::filesystem;
 
@@ -457,6 +458,65 @@ std::string ParseGameResources(const std::string& gameId,
     EncodeJson(L, -1, json);
     lua_close(L);
     return json;
+}
+
+std::unordered_set<std::string> GetProjectileTextureNames(
+    const std::string& gameId,
+    const std::string& gameDir,
+    const std::string& engineBaseDir)
+{
+    std::unordered_set<std::string> names;
+
+    lua_State* L = luaL_newstate();
+    if (!L) {
+        SLOG(SPRING_LOG_ERROR, "[%s] luaL_newstate failed", gameId.c_str());
+        return names;
+    }
+    luaL_openlibs(L);
+
+    lua_pushstring(L, gameDir.c_str());
+    lua_setfield(L, LUA_REGISTRYINDEX, kGameDirRegistryKey);
+    lua_pushstring(L, engineBaseDir.c_str());
+    lua_setfield(L, LUA_REGISTRYINDEX, kEngineDirRegistryKey);
+
+    InstallVFS(L);
+    InstallScript(L);
+
+    const fs::path target = Resolve(L, "gamedata/resources.lua", "ms");
+    if (target.empty()) {
+        lua_close(L);
+        return names;
+    }
+
+    if (luaL_loadfile(L, target.string().c_str()) != LUA_OK
+        || lua_pcall(L, 0, 1, 0) != LUA_OK
+        || !lua_istable(L, -1))
+    {
+        lua_close(L);
+        return names;
+    }
+
+    // Walk `result.graphics.projectiletextures` and collect string keys.
+    lua_getfield(L, -1, "graphics");
+    if (lua_istable(L, -1)) {
+        lua_getfield(L, -1, "projectiletextures");
+        if (lua_istable(L, -1)) {
+            lua_pushnil(L);
+            while (lua_next(L, -2) != 0) {
+                if (lua_type(L, -2) == LUA_TSTRING) {
+                    size_t kl;
+                    const char* ks = lua_tolstring(L, -2, &kl);
+                    names.emplace(ks, kl);
+                }
+                lua_pop(L, 1);
+            }
+        }
+        lua_pop(L, 1); // projectiletextures
+    }
+    lua_pop(L, 1); // graphics
+
+    lua_close(L);
+    return names;
 }
 
 } // namespace ResourcesParser

@@ -21,7 +21,12 @@ namespace DefsCache {
 // `cegdefs.bin` next to unitdefs.bin / weapondefs.bin. Bumping
 // invalidates older two-file caches so the lobby re-bakes with the
 // third file.
-static constexpr const char* DEFS_SCHEMA_VERSION = "v10";
+// 2026-05-14: v11 — Weapon-def baker fills `texture1..3` with Spring's
+// per-`weaponType` defaults when the source weapondef leaves the slot
+// empty (PLAN-combat-vfx.md F3). Same FlatBuffer schema; the strings
+// just stop being empty so cached pre-v11 weapondefs.bin would still
+// ship flat-coloured projectiles. Bump to force a re-bake.
+static constexpr const char* DEFS_SCHEMA_VERSION = "v11";
 
 std::string ComputeCacheKey(
     const std::string& gameId,
@@ -42,7 +47,7 @@ std::string ComputeCacheKey(
     // ComputeCacheKey copy in DefsCache.h — the two were drifting
     // apart and a single-site bump produced different cache keys
     // depending on which translation unit linked first.
-    canonical += "schemaV10-protocol";
+    canonical += "schemaV11-protocol";
     canonical += '\n';
     canonical += gameId;
     canonical += '\n';

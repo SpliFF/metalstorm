@@ -30,11 +30,14 @@
 #include "Sim/Units/CommandAI/CommandQueue.h"
 #include <flatbuffers/flatbuffers.h>
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Protocol {
@@ -1443,6 +1446,78 @@ inline std::vector<uint8_t> BuildGameUnitDefsSubset(
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameUnitDefs, msg.Union());
 }
 
+/// Apply Spring's per-`weaponType` projectile-texture defaults (the
+/// table originally lived in `CProjectileDrawer::LoadWeaponTextures`
+/// in upstream Recoil, which we deleted with the renderer). The
+/// defaults are only filled when the source `texNames[i]` is empty —
+/// author-supplied names always win.
+///
+/// `availableNames`, when non-null, is the set of keys in the parsed
+/// `graphics.projectiletextures` table. When a default has a
+/// fallback name (e.g. `missileflaretexture → flare`) and the
+/// primary is absent from `availableNames`, the fallback is written
+/// in its place. With `availableNames == nullptr` the primary is
+/// always used and the client's resolver picks up any further
+/// fallback.
+///
+/// Returns the four resolved texture-slot names. The FlatBuffer
+/// schema currently carries `texture1..3`; `slot[3]` is computed for
+/// completeness (matches Recoil's behaviour for large beam laser
+/// flares) but discarded until the schema grows the slot.
+inline std::array<std::string, 4> ResolveProjectileTextureDefaults(
+    const std::string& weaponType,
+    bool largeBeamLaser,
+    const std::array<std::string, 4>& source,
+    const std::unordered_set<std::string>* availableNames)
+{
+    std::array<std::string, 4> out = source;
+
+    auto pick = [&](const char* primary, const char* fallback) -> std::string {
+        if (!availableNames || !fallback) return primary;
+        if (availableNames->count(primary)) return primary;
+        return fallback;
+    };
+
+    // hashString isn't available here; a plain chain is fine — the
+    // baker runs once per game session.
+    if (weaponType == "Cannon" || weaponType == "EmgCannon"
+        || weaponType == "AircraftBomb" || weaponType == "TorpedoLauncher") {
+        if (out[0].empty()) out[0] = pick("plasmatexture", "circularthingy");
+    } else if (weaponType == "Shield") {
+        if (out[0].empty()) out[0] = "perlintex";
+    } else if (weaponType == "Flame") {
+        if (out[0].empty()) out[0] = "flame";
+    } else if (weaponType == "MissileLauncher") {
+        if (out[0].empty()) out[0] = pick("missileflaretexture", "flare");
+        if (out[1].empty()) out[1] = pick("missiletrailtexture", "smoketrail");
+    } else if (weaponType == "LaserCannon") {
+        if (out[0].empty()) out[0] = "laserfalloff";
+        if (out[1].empty()) out[1] = "laserend";
+    } else if (weaponType == "BeamLaser") {
+        if (largeBeamLaser) {
+            if (out[0].empty()) out[0] = "largebeam";
+            if (out[1].empty()) out[1] = "laserend";
+            if (out[2].empty()) out[2] = "muzzleside";
+            if (out[3].empty()) out[3] = pick("beamlaserflaretexture", "flare");
+        } else {
+            if (out[0].empty()) out[0] = "laserfalloff";
+            if (out[1].empty()) out[1] = "laserend";
+            if (out[2].empty()) out[2] = pick("beamlaserflaretexture", "flare");
+        }
+    } else if (weaponType == "LightningCannon") {
+        if (out[0].empty()) out[0] = "laserfalloff";
+    } else if (weaponType == "StarburstLauncher") {
+        if (out[0].empty()) out[0] = pick("sbflaretexture", "flare");
+        if (out[1].empty()) out[1] = pick("sbtrailtexture", "smoketrail");
+        if (out[2].empty()) out[2] = "explo";
+    } else {
+        // Unknown / `noweapon` — same default as the fallthrough in Recoil.
+        if (out[0].empty()) out[0] = "plasmatexture";
+        if (out[1].empty()) out[1] = "plasmatexture";
+    }
+    return out;
+}
+
 /// Map Spring's projectile type bitmask to the FlatBuffers ProjectileVisualType enum.
 inline SpringWeb::ProjectileVisualType MapProjectileVisualType(unsigned int projType) {
     if (projType & WEAPON_BEAMLASER_PROJECTILE)      return SpringWeb::ProjectileVisualType_BeamLaser;
@@ -1468,7 +1543,8 @@ inline flatbuffers::Offset<SpringWeb::GameWeaponDef> BuildSingleWeaponDef(
     flatbuffers::FlatBufferBuilder& fbb,
     const WeaponDefT& wd,
     const std::filesystem::path& modelsDir = {},
-    const std::string& gameId = {})
+    const std::string& gameId = {},
+    const std::unordered_set<std::string>* projectileTextureNames = nullptr)
 {
     namespace fs = std::filesystem;
     auto nameOff = fbb.CreateString(wd.name);
@@ -1495,16 +1571,30 @@ inline flatbuffers::Offset<SpringWeb::GameWeaponDef> BuildSingleWeaponDef(
     // texture1/2/3 — Spring's three projectile texture slots
     // (`texNames[0..2]`). texture1 is the main diffuse / beam middle;
     // texture2 is the beam end-cap or smoketrail; texture3 is the
-    // muzzle/flare exhaust. We send the bare logical name verbatim;
-    // the client looks it up in /api/games/<id>/resources.json
-    // (the parsed `graphics.projectiletextures` map) and resolves
-    // the file path to a `.ktx2` URL via the recursive bitmaps
-    // manifest. Selection/fallback rules live entirely on the client.
-    // (texNames[3] — large-beam flare — is unused by the current
-    // renderer; not streamed.)
-    auto texture1Off = fbb.CreateString(wd.visuals.texNames[0]);
-    auto texture2Off = fbb.CreateString(wd.visuals.texNames[1]);
-    auto texture3Off = fbb.CreateString(wd.visuals.texNames[2]);
+    // muzzle/flare exhaust.
+    //
+    // Empty source values get the per-`weaponType` defaults Recoil's
+    // CProjectileDrawer applied at draw time (we deleted that path
+    // with the renderer in Phase 0). Without this fallback, ~58% of
+    // ZK's weapon defs would ship with empty `texture1` and render
+    // as flat coloured quads — see PLAN-combat-vfx.md F3.
+    //
+    // The client then resolves the logical name against
+    // /api/games/<id>/resources.json (the parsed
+    // `graphics.projectiletextures` map) and the recursive bitmaps
+    // manifest. (`texNames[3]` — large-beam flare — is unused by the
+    // current renderer; not streamed.)
+    std::array<std::string, 4> srcTex{
+        wd.visuals.texNames[0],
+        wd.visuals.texNames[1],
+        wd.visuals.texNames[2],
+        wd.visuals.texNames[3],
+    };
+    const auto resolvedTex = ResolveProjectileTextureDefaults(
+        wd.type, wd.largeBeamLaser, srcTex, projectileTextureNames);
+    auto texture1Off = fbb.CreateString(resolvedTex[0]);
+    auto texture2Off = fbb.CreateString(resolvedTex[1]);
+    auto texture3Off = fbb.CreateString(resolvedTex[2]);
 
     // CEG tags. Spring's `cegTag` (every-frame trail) lives at
     // `visuals.ptrailExpGenTag`; `explosionGenerator` (impact) at
@@ -1675,8 +1765,11 @@ inline flatbuffers::Offset<SpringWeb::GameWeaponDef> BuildSingleWeaponDef(
 
 /// Build a GameWeaponDefs message listing every weapon type and its visual params.
 template<typename WeaponDefVec>
-inline std::vector<uint8_t> BuildGameWeaponDefs(const WeaponDefVec& defs,
-                                                const std::string& gameId = {}) {
+inline std::vector<uint8_t> BuildGameWeaponDefs(
+    const WeaponDefVec& defs,
+    const std::string& gameId = {},
+    const std::unordered_set<std::string>* projectileTextureNames = nullptr)
+{
     namespace fs = std::filesystem;
     flatbuffers::FlatBufferBuilder fbb(1024);
 
@@ -1685,7 +1778,8 @@ inline std::vector<uint8_t> BuildGameWeaponDefs(const WeaponDefVec& defs,
 
     std::vector<flatbuffers::Offset<SpringWeb::GameWeaponDef>> offsets;
     for (size_t i = 1; i < defs.size(); i++) {
-        offsets.push_back(BuildSingleWeaponDef(fbb, defs[i], modelsDir, gameId));
+        offsets.push_back(BuildSingleWeaponDef(
+            fbb, defs[i], modelsDir, gameId, projectileTextureNames));
     }
 
     auto defsVec = fbb.CreateVector(offsets);
@@ -1698,7 +1792,8 @@ template<typename WeaponDefVec>
 inline std::vector<uint8_t> BuildGameWeaponDefsSubset(
     const WeaponDefVec& allDefs,
     const std::vector<uint16_t>& defIds,
-    const std::string& gameId = {})
+    const std::string& gameId = {},
+    const std::unordered_set<std::string>* projectileTextureNames = nullptr)
 {
     namespace fs = std::filesystem;
     flatbuffers::FlatBufferBuilder fbb(512);
@@ -1709,7 +1804,8 @@ inline std::vector<uint8_t> BuildGameWeaponDefsSubset(
     std::vector<flatbuffers::Offset<SpringWeb::GameWeaponDef>> offsets;
     for (uint16_t id : defIds) {
         if (id > 0 && static_cast<size_t>(id) < allDefs.size()) {
-            offsets.push_back(BuildSingleWeaponDef(fbb, allDefs[id], modelsDir, gameId));
+            offsets.push_back(BuildSingleWeaponDef(
+                fbb, allDefs[id], modelsDir, gameId, projectileTextureNames));
         }
     }
 

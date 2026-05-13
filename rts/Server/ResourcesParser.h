@@ -19,6 +19,7 @@
 #pragma once
 
 #include <string>
+#include <unordered_set>
 
 namespace ResourcesParser {
 
@@ -32,5 +33,16 @@ namespace ResourcesParser {
 std::string ParseGameResources(const std::string& gameId,
                                const std::string& gameDir,
                                const std::string& engineBaseDir);
+
+/// Parse the same `gamedata/resources.lua` and return just the keys
+/// of `graphics.projectiletextures`. Used by the weapon-def baker to
+/// decide between a primary texture name and its fallback when
+/// applying Spring's per-`weaponType` defaults (Recoil's
+/// CProjectileDrawer::LoadWeaponTextures). Returns an empty set on
+/// any error.
+std::unordered_set<std::string> GetProjectileTextureNames(
+    const std::string& gameId,
+    const std::string& gameDir,
+    const std::string& engineBaseDir);
 
 } // namespace ResourcesParser
