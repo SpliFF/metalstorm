@@ -61,6 +61,7 @@ import {
     MeshBuilder,
     ShaderMaterial,
     Matrix,
+    Vector2,
     Vector3,
     Quaternion,
     Texture,
@@ -70,7 +71,7 @@ import { stampUrl } from '../config.js';
 import type { ProjectileTextureResolver } from './projectile-texture-resolver.js';
 import { registerCegParticleShader } from './shaders/ceg-particle.js';
 import type { CegDefInfo } from './connection.js';
-import { translateCegDef } from './ceg-translator.js';
+import { translateCegDef, parseAtlasDims } from './ceg-translator.js';
 
 /// Per-particle gravity is in elmos/sec² (positive pulls down).
 /// Sized to roughly match Spring's default gravity feel without
@@ -107,10 +108,18 @@ export interface ParticleSpawn {
     /// (which predate the SubCegSpawn variant) don't have to be
     /// updated. SubCegSpawn carries an explicit `kind: 'subceg'`.
     kind?: 'particle';
-    /// Name of the ParticleClass to allocate from. Must be a class
-    /// the runtime knows about — unknown classes are silently
-    /// skipped so adding new effects can't break the render loop.
-    class: string;
+    /// Logical texture name from the CEG's `texture = "..."` property.
+    /// One ParticleClass + thin-instance batch is allocated lazily per
+    /// unique name, then shared by every spawn referencing it. The
+    /// runtime asks `ProjectileTextureResolver` for the URL. Names with
+    /// an `_NxM` suffix (e.g. `FireBall02_8x8`) are parsed as sprite
+    /// atlases — see `parseAtlasDims` / Phase 5b.
+    ///
+    /// Common fallback names for CEGs that didn't author a texture:
+    ///   - `'flare'`     — generic glow (the catch-all default)
+    ///   - `'smoketrail'`— grey smoke puff (used by smoke/heatcloud classes)
+    /// These resolve against the engine's bitmaps manifest.
+    texture: string;
     /// Number of particles to allocate per spawn() call. Static; the
     /// translator clamps to MAX_PARTICLES_PER_SPAWN. For damage-scaled
     /// counts (`numparticles = "i1"`) set `countExpr` instead — the
@@ -160,6 +169,17 @@ export interface ParticleSpawn {
     /// caller's SpawnContext.flags has at least one common bit set.
     /// Translator copies the raw byte; the runtime gates dispatch.
     flags?: number;
+    /// Atlas animation override (Phase 5b). When the authored texture
+    /// name carries an `_NxM` suffix the runtime derives `cols`/`rows`
+    /// from the filename, with `frameCount = cols * rows` and a default
+    /// `fps` that fits one full cycle into the particle's lifetime.
+    /// CEGs may override the timing via the `animparams = "start end fps"`
+    /// property; when present, those values land here. Absent →
+    /// runtime uses suffix-derived defaults; non-atlas textures stay at
+    /// (1, 1, 0) and the shader path degrades to a single still frame.
+    animFrameStart?: number;
+    animFrameCount?: number;
+    animFps?: number;
 }
 
 /// Scalar evaluator for a Spring CEG property (Phase 2). The closure
@@ -280,18 +300,24 @@ export interface EffectDef {
 /// load and triggering GC pressure. Texture URL is resolved lazily —
 /// the binding may be null when the class is first materialised but
 /// gets attached the first time the resolver returns a real URL.
+///
+/// One class is materialised per unique authored texture name (Phase 5a).
+/// Atlas animation parameters (cols/rows) are decoded once at class
+/// creation from the texture name's `_NxM` suffix; per-particle anim
+/// state (current frame index) is recomputed each tick in buildBuffers.
 interface ParticleClass {
-    name: string;
-    capacity: number;
-    /// Resolver-key (logical texture name from `gamedata/resources.lua`)
-    /// — not a URL. The runtime calls `resolver.resolve(textureName)`
-    /// every time it tries to wire a texture, so a class created
-    /// before the resolver loaded picks up its real sprite once
-    /// resources.json + manifests settle.
+    /// Lowercased authored texture name (also the resolver key and the
+    /// `classes` map key). May refer to a sprite atlas — see `atlasCols`.
     textureName: string;
+    capacity: number;
     /// True once the resolver has handed back a real URL and we've
     /// bound the Texture; further resolves are skipped.
     textureBound: boolean;
+    /// Sprite-atlas dimensions parsed from the texture name's `_NxM`
+    /// suffix. (1, 1) for non-atlas textures — the shader's sub-rect
+    /// sampling path degrades to identity in that case.
+    atlasCols: number;
+    atlasRows: number;
     /// SoA particle data. Inactive slots have `lifetime[i] <= 0`.
     pos: Float32Array;            // capacity * 3
     vel: Float32Array;            // capacity * 3
@@ -308,6 +334,12 @@ interface ParticleClass {
     gravity: Float32Array;        // capacity
     rotation: Float32Array;       // capacity (rad)
     rotationSpeed: Float32Array;  // capacity (rad/sec)
+    /// Per-particle atlas-animation parameters. `animFps[i] == 0`
+    /// means "single frame" — the per-frame frameIdx computation is
+    /// skipped and the particle samples `animFrameStart[i]` once.
+    animFrameStart: Float32Array; // capacity (sub-rect index)
+    animFrameCount: Float32Array; // capacity (frames to cycle through)
+    animFps: Float32Array;        // capacity (cycle rate, 0 = static)
     /// Ring-buffer write cursor. Wraps mod capacity. Allocation is
     /// "always overwrite" — the oldest live particle gets clobbered
     /// when the pool is full. For class capacities sized above the
@@ -327,16 +359,39 @@ interface ParticleClass {
     /// because the JS-side reference is stable.
     matrixBuffer: Float32Array;
     tintBuffer: Float32Array;
+    /// Per-instance sub-rect offset for atlas sampling. vec2 packing
+    /// (col_norm, row_norm) in [0, 1) — multiplied with `atlasDimsInv`
+    /// in the shader before adding to the unit-quad UV. Buffer is
+    /// allocated for every class even when the texture is single-
+    /// frame so the shader doesn't have to branch on atlas presence —
+    /// the default zero vec2 gives the top-left tile, which for a
+    /// 1×1 atlas covers the whole texture.
+    frameOffsetBuffer: Float32Array;
 }
 
-/// Per-class capacity. Smoke is the longest-lived → biggest pool.
-/// Sparks/flares die quickly so 4k each is plenty for steady state.
-/// Total memory: ~3MB across all classes. Negligible at game scale.
-const CLASS_CAPACITIES: Record<string, number> = {
-    flare: 4096,
-    spark: 8192,
-    smoke: 8192,
+/// Default per-texture pool capacity. Phase 5a allocates pools lazily
+/// per unique authored texture name, so sizing has to cover the worst
+/// authored case across however many distinct sprites a game ships.
+/// 2048 keeps a single short-lived spawn comfortably below ring-buffer
+/// wraparound; the longest-lived puffs (smoke trails, multi-second
+/// fireballs) lap once or twice per peak engagement at this size,
+/// which is invisible at typical zoom.
+const DEFAULT_CLASS_CAPACITY = 2048;
+
+/// Hint table — per-texture-name capacity override for textures we
+/// know up front will be hot (heavy smoke trails, ground flashes).
+/// Unmapped names use DEFAULT_CLASS_CAPACITY. Sized empirically once
+/// content profiling lands; today the defaults are fine for ZK.
+const CAPACITY_HINTS: Record<string, number> = {
+    smoketrail: 4096,  // smoke is long-lived; bigger ring buffer for headroom
 };
+
+/// Pre-seeded fallback textures that the constructor materialises
+/// up front so the first spawn() doesn't hitch on mesh / shader
+/// creation. Other textures get pools allocated on first reference.
+/// Names match the engine's resources.lua `projectiletextures` table
+/// (engine bitmaps manifest); both resolve to .ktx2 via the resolver.
+const SEED_TEXTURES = ['flare', 'smoketrail'];
 
 /// Hard cap on sub-CEG recursion depth (Phase 1). A correctly-authored
 /// CEG tree is at most 3–4 levels deep (nuke → mushroom → smokejets →
@@ -387,17 +442,6 @@ interface PendingSpawn {
     contextFlags: number;
 }
 
-/// Engine-bitmap textureName per class. These are bare logical names
-/// that `ProjectileTextureResolver` looks up against the engine's
-/// `gamedata/resources.lua` `graphics.projectiletextures` table; the
-/// resolver's engine-fallback branch picks them up from the engine
-/// bitmaps manifest (`/api/engine/data/bitmaps/manifest.json`).
-const CLASS_TEXTURE_NAMES: Record<string, string> = {
-    flare: 'flare',
-    spark: 'flare',         // sparks reuse the flare bitmap (small + bright)
-    smoke: 'smoketrail',    // same texture trails use; works as a generic puff
-};
-
 export class CegRuntime {
     private scene: Scene;
     private resolver: ProjectileTextureResolver | null = null;
@@ -430,11 +474,14 @@ export class CegRuntime {
         this.scene = scene;
         registerCegParticleShader();
 
-        // Materialise the canonical classes up front so the first
-        // spawn() doesn't hitch on mesh creation. Texture binding
-        // happens later (resolver may not have loaded yet).
-        for (const className of Object.keys(CLASS_CAPACITIES)) {
-            this.ensureClass(className);
+        // Materialise the canonical fallback classes up front so the
+        // first spawn() (typically a CEG that authored no texture →
+        // falls back to 'flare') doesn't hitch on mesh + shader
+        // compile. Real textures get pools allocated on first
+        // reference via ensureClass(). Texture binding for these
+        // pre-seeded entries happens later once the resolver settles.
+        for (const seedName of SEED_TEXTURES) {
+            this.ensureClass(seedName);
         }
 
         // Register the built-in effect library.
@@ -594,7 +641,10 @@ export class CegRuntime {
                     damage, contextFlags, depth, nowMs);
                 continue;
             }
-            const cls = this.classes.get(sp.class);
+            // Lazy class creation keyed by authored texture name —
+            // first spawn referencing a new texture allocates its
+            // pool, subsequent spawns share the thin-instance batch.
+            const cls = this.ensureClass(sp.texture);
             if (!cls) continue;
             // Particle count is normally a static field; only resolve
             // through the Expr path when the translator opted in.
@@ -624,7 +674,10 @@ export class CegRuntime {
     ): void {
         if (gf.flags && contextFlags && (gf.flags & contextFlags) === 0) return;
 
-        const cls = this.classes.get('flare');
+        // Ground flashes use the generic flare bitmap — Spring's
+        // CStandardGroundFlash is a textured ground-aligned quad we
+        // approximate as a billboarded flare at the impact point.
+        const cls = this.ensureClass('flare');
         if (!cls) return;
 
         // Outer flash quad — short bright halo. flashAlpha == 0 means
@@ -632,7 +685,7 @@ export class CegRuntime {
         // case rather than allocating a 0-alpha particle.
         if (gf.flashAlpha > 0 && gf.flashSize > 0) {
             const flash: ParticleSpawn = {
-                class: 'flare',
+                texture: 'flare',
                 count: 1,
                 lifetimeMin: gf.lifetimeS,
                 lifetimeMax: gf.lifetimeS,
@@ -656,7 +709,7 @@ export class CegRuntime {
             const start = Math.max(gf.flashSize * 0.25, 1);
             const end = Math.max(start + gf.circleGrowth * gf.lifetimeS, start);
             const circle: ParticleSpawn = {
-                class: 'flare',
+                texture: 'flare',
                 count: 1,
                 lifetimeMin: gf.lifetimeS,
                 lifetimeMax: gf.lifetimeS,
@@ -834,17 +887,35 @@ export class CegRuntime {
         pending.length = writeIdx;
     }
 
-    private ensureClass(name: string): ParticleClass {
+    /// Lazily materialise a particle class for `textureName`. First
+    /// reference to a name allocates the mesh + material + SoA pool;
+    /// subsequent references return the cached entry. Names are
+    /// lowercased before keying so case differences between the CEG
+    /// author's `texture = "FireBall02_8x8"` and any other reference
+    /// to the same bitmap end up in the same batch.
+    ///
+    /// Atlas dims are decoded from the name's `_NxM` suffix at class
+    /// creation; the same dims are pushed to the shader as a
+    /// `atlasDimsInv` uniform so the fragment shader can compute the
+    /// sub-rect UV without per-instance scale data.
+    ///
+    /// Returns null only for empty / falsy names — every other name
+    /// gets a pool, even if the resolver can't find a URL for it
+    /// (the class renders untextured / tinted-only until the resolver
+    /// either resolves or the user gives up).
+    private ensureClass(rawName: string): ParticleClass | null {
+        if (!rawName) return null;
+        const name = rawName.toLowerCase();
         const existing = this.classes.get(name);
         if (existing) return existing;
 
-        const capacity = CLASS_CAPACITIES[name] ?? 4096;
-        const textureName = CLASS_TEXTURE_NAMES[name] ?? '';
+        const capacity = CAPACITY_HINTS[name] ?? DEFAULT_CLASS_CAPACITY;
+        const atlas = parseAtlasDims(name) ?? { cols: 1, rows: 1 };
 
         const mat = new ShaderMaterial(`cegParticleMat_${name}`, this.scene,
             'cegParticle', {
-                attributes: ['position', 'uv', 'tint'],
-                uniforms: ['world', 'viewProjection'],
+                attributes: ['position', 'uv', 'tint', 'frameOffset'],
+                uniforms: ['world', 'viewProjection', 'atlasDimsInv'],
                 samplers: ['particleTex'],
                 defines: ['#define INSTANCES', '#define THIN_INSTANCES'],
             });
@@ -852,6 +923,11 @@ export class CegRuntime {
         mat.alphaMode = 7;
         mat.backFaceCulling = false;
         mat.disableDepthWrite = true;
+        // Per-class atlas dims as inverse so the fragment shader can
+        // multiply rather than divide. (1/1, 1/1) for non-atlas
+        // textures degrades the sub-rect path to identity sampling.
+        mat.setVector2('atlasDimsInv',
+            new Vector2(1 / atlas.cols, 1 / atlas.rows));
 
         const mesh = MeshBuilder.CreatePlane(`cegParticle_${name}`,
             { width: 1, height: 1, sideOrientation: Mesh.DOUBLESIDE }, this.scene);
@@ -864,12 +940,15 @@ export class CegRuntime {
         // camera moves. alwaysSelectAsActiveMesh skips that check.
         mesh.alwaysSelectAsActiveMesh = true;
         mesh.alphaIndex = 1000;
-        // Per-instance tint (R, G, B, A) registered up front so the
-        // first buildBuffers can populate it without re-registering.
+        // Per-instance tint (R, G, B, A) + sub-rect offset (col_norm,
+        // row_norm). Registered up front so the first buildBuffers
+        // can populate the buffers without re-registering.
         mesh.thinInstanceRegisterAttribute('tint', 4);
+        mesh.thinInstanceRegisterAttribute('frameOffset', 2);
 
         const cls: ParticleClass = {
-            name, capacity, textureName, textureBound: false,
+            textureName: name, capacity, textureBound: false,
+            atlasCols: atlas.cols, atlasRows: atlas.rows,
             pos: new Float32Array(capacity * 3),
             vel: new Float32Array(capacity * 3),
             age: new Float32Array(capacity),
@@ -881,16 +960,30 @@ export class CegRuntime {
             gravity: new Float32Array(capacity),
             rotation: new Float32Array(capacity),
             rotationSpeed: new Float32Array(capacity),
+            animFrameStart: new Float32Array(capacity),
+            animFrameCount: new Float32Array(capacity),
+            animFps: new Float32Array(capacity),
             nextSlot: 0,
             mesh, material: mat,
             // Sized to capacity so a worst-case full pool never has
             // to reallocate. Each entry is mat4 (16 floats) + RGBA
-            // tint (4 floats); for the largest pool (smoke 8192)
-            // that's 8192 * 20 * 4 ≈ 640 KB total per class.
+            // tint (4 floats) + frameOffset (2 floats) ≈ 22 floats
+            // per slot. For a 4096-entry pool that's ~360 KB per
+            // class; well below GC pressure thresholds even with
+            // dozens of unique textures.
             matrixBuffer: new Float32Array(capacity * 16),
             tintBuffer: new Float32Array(capacity * 4),
+            frameOffsetBuffer: new Float32Array(capacity * 2),
         };
         this.classes.set(name, cls);
+
+        // If the resolver is already settled, bind the texture now —
+        // otherwise the lazy bind in tick() will pick it up once
+        // resolverReady flips. Pre-bind avoids one frame of untextured
+        // rendering on first reference to a new texture mid-game.
+        if (this.resolverReady) {
+            this.tryBindTexture(cls);
+        }
         return cls;
     }
 
@@ -959,6 +1052,33 @@ function writeParticle(
     cls.gravity[slot] = sp.gravity;
     cls.rotation[slot] = Math.random() * Math.PI * 2;
     cls.rotationSpeed[slot] = (Math.random() - 0.5) * 2 * sp.rotationSpeedMax;
+
+    // Atlas animation per-particle state. The translator stamps
+    // animFrameCount / animFps on spawns whose texture name carries a
+    // `_NxM` suffix (or that authored explicit `animparams`). When the
+    // spawn is silent we fall back to the class's natural frame count:
+    // single-frame textures stay at (start=0, count=1, fps=0) → static
+    // sample of the top-left tile, while undeclared atlas textures
+    // animate exactly once over the particle's lifetime.
+    const totalFrames = cls.atlasCols * cls.atlasRows;
+    cls.animFrameStart[slot] = sp.animFrameStart ?? 0;
+    if (sp.animFrameCount !== undefined) {
+        cls.animFrameCount[slot] = sp.animFrameCount;
+    } else {
+        cls.animFrameCount[slot] = totalFrames;
+    }
+    if (sp.animFps !== undefined) {
+        cls.animFps[slot] = sp.animFps;
+    } else if (totalFrames > 1) {
+        // No authored animparams: default to one full cycle over the
+        // particle's actual lifetime. Sampled here rather than in
+        // buildBuffers so the rate stays stable across the particle's
+        // life even if dt jitters between frames.
+        const lifeS = cls.lifetime[slot];
+        cls.animFps[slot] = lifeS > 0 ? totalFrames / lifeS : 0;
+    } else {
+        cls.animFps[slot] = 0;
+    }
 }
 
 // ── Per-tick CPU integration ────────────────────────────────────────────────
@@ -1018,6 +1138,7 @@ function buildClassBuffers(
     // unresponsive after a minute of combat.
     const matrices = cls.matrixBuffer;
     const tints = cls.tintBuffer;
+    const frameOffsets = cls.frameOffsetBuffer;
 
     const pos = cls.pos;
     const age = cls.age;
@@ -1025,6 +1146,11 @@ function buildClassBuffers(
     const color = cls.color;
     const colorEnd = cls.colorEnd;
     const rot = cls.rotation;
+    const animFps = cls.animFps;
+    const animFrameStart = cls.animFrameStart;
+    const animFrameCount = cls.animFrameCount;
+    const atlasCols = cls.atlasCols;
+    const atlasRows = cls.atlasRows;
 
     let dst = 0;
     for (let i = 0; i < cap; i++) {
@@ -1055,12 +1181,41 @@ function buildClassBuffers(
         tints[ds + 1] = g0 + (g1 - g0) * t;
         tints[ds + 2] = b0 + (b1 - b0) * t;
         tints[ds + 3] = (a0 + (a1 - a0) * t) * fade;
+
+        // Atlas sub-rect offset (Phase 5b). For single-frame textures
+        // animFps[i] is 0 and the offset stays at (0, 0) → top-left
+        // tile, which for a 1×1 atlas is the whole texture. For
+        // multi-frame atlas textures we step through frames at the
+        // authored (or lifetime-derived) rate, wrapping mod count so
+        // long-lived particles cycle.
+        const fos = dst * 2;
+        const fps = animFps[i];
+        if (fps > 0) {
+            const frameIdx = (Math.floor(age[i] * fps) % animFrameCount[i])
+                + animFrameStart[i];
+            const col = frameIdx % atlasCols;
+            const row = Math.floor(frameIdx / atlasCols) % atlasRows;
+            frameOffsets[fos + 0] = col / atlasCols;
+            frameOffsets[fos + 1] = row / atlasRows;
+        } else {
+            // Static texture (or 1×1 atlas): hold on the start frame.
+            // For non-atlas textures animFrameStart is 0 so we end up
+            // sampling the whole quad. For 1×1 atlases this is the
+            // identity path; for genuine atlases with animFps=0 it
+            // freezes on whatever frame the author specified.
+            const frameIdx = animFrameStart[i];
+            const col = frameIdx % atlasCols;
+            const row = Math.floor(frameIdx / atlasCols) % atlasRows;
+            frameOffsets[fos + 0] = col / atlasCols;
+            frameOffsets[fos + 1] = row / atlasRows;
+        }
         dst++;
     }
 
     cls.mesh.isVisible = true;
     cls.mesh.thinInstanceSetBuffer('matrix', matrices, 16, false);
     cls.mesh.thinInstanceSetBuffer('tint', tints, 4, false);
+    cls.mesh.thinInstanceSetBuffer('frameOffset', frameOffsets, 2, false);
     cls.mesh.thinInstanceCount = live;
 }
 
@@ -1130,7 +1285,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
         name: DEFAULT_EXPLOSION_NAME,
         spawns: [
             {
-                class: 'flare', count: 1,
+                texture: 'flare', count: 1,
                 lifetimeMin: 0.4, lifetimeMax: 0.6,
                 velocityBase: [0, 0, 0], velocitySpread: 0, velocityScale: 0,
                 gravity: 0,
@@ -1140,7 +1295,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
                 rotationSpeedMax: 0,
             },
             {
-                class: 'smoke', count: 2,
+                texture: 'smoketrail', count: 2,
                 lifetimeMin: 0.8, lifetimeMax: 1.4,
                 velocityBase: [0, 5, 0], velocitySpread: 3, velocityScale: 0,
                 gravity: -3,
@@ -1156,7 +1311,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
         name: 'impact_shield',
         spawns: [
             {
-                class: 'flare', count: 1,
+                texture: 'flare', count: 1,
                 lifetimeMin: 0.25, lifetimeMax: 0.35,
                 velocityBase: [0, 0, 0], velocitySpread: 0, velocityScale: 0,
                 gravity: 0,
@@ -1187,7 +1342,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
         name: 'muzzleflash_disintegrator',
         spawns: [
             {
-                class: 'flare', count: 2,
+                texture: 'flare', count: 2,
                 lifetimeMin: 0.25, lifetimeMax: 0.55,
                 velocityBase: [0, 5, 0], velocitySpread: 6, velocityScale: 4,
                 gravity: -2,
@@ -1196,7 +1351,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
                 rotationSpeedMax: 0.5,
             },
             {
-                class: 'flare', count: 1,
+                texture: 'flare', count: 1,
                 lifetimeMin: 0.4, lifetimeMax: 0.6,
                 velocityBase: [0, 0, 0], velocitySpread: 0, velocityScale: 0,
                 gravity: 0,
@@ -1205,7 +1360,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
                 rotationSpeedMax: 0,
             },
             {
-                class: 'spark', count: 5,
+                texture: 'flare', count: 5,
                 lifetimeMin: 0.35, lifetimeMax: 0.85,
                 velocityBase: [0, 0, 0], velocitySpread: 90, velocityScale: 60,
                 gravity: 0,
@@ -1214,7 +1369,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
                 rotationSpeedMax: 0,
             },
             {
-                class: 'smoke', count: 3,
+                texture: 'smoketrail', count: 3,
                 lifetimeMin: 0.3, lifetimeMax: 1.0,
                 velocityBase: [0, 0, 0], velocitySpread: 8, velocityScale: 0,
                 gravity: -2,
@@ -1233,7 +1388,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
         name: 'impact_disintegrator',
         spawns: [
             {
-                class: 'flare', count: 1,
+                texture: 'flare', count: 1,
                 lifetimeMin: 2.4, lifetimeMax: 2.8,
                 velocityBase: [0, 0, 0], velocitySpread: 0, velocityScale: 0,
                 gravity: 0,
@@ -1242,7 +1397,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
                 rotationSpeedMax: 0,
             },
             {
-                class: 'flare', count: 1,
+                texture: 'flare', count: 1,
                 lifetimeMin: 0.7, lifetimeMax: 1.1,
                 velocityBase: [0, 4, 0], velocitySpread: 0, velocityScale: 0,
                 gravity: -3,
@@ -1251,7 +1406,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
                 rotationSpeedMax: 0.3,
             },
             {
-                class: 'smoke', count: 4,
+                texture: 'smoketrail', count: 4,
                 lifetimeMin: 1.0, lifetimeMax: 2.0,
                 velocityBase: [0, 6, 0], velocitySpread: 6, velocityScale: 0,
                 gravity: -4,
@@ -1270,7 +1425,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
         name: 'impact_largelaser',
         spawns: [
             {
-                class: 'flare', count: 1,
+                texture: 'flare', count: 1,
                 lifetimeMin: 0.4, lifetimeMax: 0.6,
                 velocityBase: [0, 0, 0], velocitySpread: 0, velocityScale: 0,
                 gravity: 0,
@@ -1279,7 +1434,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
                 rotationSpeedMax: 0,
             },
             {
-                class: 'spark', count: 12,
+                texture: 'flare', count: 12,
                 lifetimeMin: 0.3, lifetimeMax: 0.7,
                 velocityBase: [0, 8, 0], velocitySpread: 60, velocityScale: 0,
                 gravity: 90,
@@ -1288,7 +1443,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
                 rotationSpeedMax: 0,
             },
             {
-                class: 'smoke', count: 3,
+                texture: 'smoketrail', count: 3,
                 lifetimeMin: 0.6, lifetimeMax: 1.2,
                 velocityBase: [0, 6, 0], velocitySpread: 4, velocityScale: 0,
                 gravity: -3,
@@ -1308,7 +1463,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
         name: 'impact_lightcannon',
         spawns: [
             {
-                class: 'flare', count: 1,
+                texture: 'flare', count: 1,
                 lifetimeMin: 0.18, lifetimeMax: 0.25,
                 velocityBase: [0, 0, 0], velocitySpread: 0, velocityScale: 0,
                 gravity: 0,
@@ -1317,7 +1472,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
                 rotationSpeedMax: 0,
             },
             {
-                class: 'spark', count: 8,
+                texture: 'flare', count: 8,
                 lifetimeMin: 0.25, lifetimeMax: 0.5,
                 velocityBase: [0, 8, 0], velocitySpread: 25, velocityScale: 0,
                 gravity: 80,
@@ -1326,7 +1481,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
                 rotationSpeedMax: 0,
             },
             {
-                class: 'smoke', count: 2,
+                texture: 'smoketrail', count: 2,
                 lifetimeMin: 0.5, lifetimeMax: 0.9,
                 velocityBase: [0, 6, 0], velocitySpread: 4, velocityScale: 0,
                 gravity: -3,
@@ -1345,7 +1500,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
         name: 'muzzleflash_lightninggun',
         spawns: [
             {
-                class: 'flare', count: 1,
+                texture: 'flare', count: 1,
                 lifetimeMin: 0.55, lifetimeMax: 0.7,
                 velocityBase: [0, 0, 0], velocitySpread: 0, velocityScale: 0,
                 gravity: 0,
@@ -1354,7 +1509,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
                 rotationSpeedMax: 0,
             },
             {
-                class: 'flare', count: 1,
+                texture: 'flare', count: 1,
                 lifetimeMin: 0.5, lifetimeMax: 0.7,
                 velocityBase: [0, 0, 0], velocitySpread: 0, velocityScale: 0,
                 gravity: 0,
@@ -1374,7 +1529,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
         name: 'impact_lightninggun',
         spawns: [
             {
-                class: 'flare', count: 1,
+                texture: 'flare', count: 1,
                 lifetimeMin: 0.35, lifetimeMax: 0.5,
                 velocityBase: [0, 0, 0], velocitySpread: 0, velocityScale: 0,
                 gravity: 0,
@@ -1383,7 +1538,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
                 rotationSpeedMax: 0,
             },
             {
-                class: 'spark', count: 10,
+                texture: 'flare', count: 10,
                 lifetimeMin: 0.3, lifetimeMax: 0.5,
                 velocityBase: [0, 0, 0], velocitySpread: 120, velocityScale: 0,
                 gravity: 0,
@@ -1392,7 +1547,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
                 rotationSpeedMax: 0,
             },
             {
-                class: 'flare', count: 1,
+                texture: 'flare', count: 1,
                 lifetimeMin: 0.4, lifetimeMax: 0.5,
                 velocityBase: [0, 0, 0], velocitySpread: 0, velocityScale: 0,
                 gravity: 0,
@@ -1412,7 +1567,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
         name: 'muzzleflash_flame',
         spawns: [
             {
-                class: 'flare', count: 4,
+                texture: 'flare', count: 4,
                 lifetimeMin: 0.18, lifetimeMax: 0.35,
                 velocityBase: [0, 0, 0], velocitySpread: 6, velocityScale: 60,
                 gravity: -2,
@@ -1421,7 +1576,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
                 rotationSpeedMax: 1.5,
             },
             {
-                class: 'flare', count: 1,
+                texture: 'flare', count: 1,
                 lifetimeMin: 0.12, lifetimeMax: 0.2,
                 velocityBase: [0, 0, 0], velocitySpread: 0, velocityScale: 30,
                 gravity: 0,
@@ -1430,7 +1585,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
                 rotationSpeedMax: 0,
             },
             {
-                class: 'smoke', count: 3,
+                texture: 'smoketrail', count: 3,
                 lifetimeMin: 0.6, lifetimeMax: 1.0,
                 velocityBase: [0, 4, 0], velocitySpread: 4, velocityScale: 20,
                 gravity: -4,
@@ -1449,7 +1604,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
         name: 'impact_flame',
         spawns: [
             {
-                class: 'flare', count: 2,
+                texture: 'flare', count: 2,
                 lifetimeMin: 0.4, lifetimeMax: 0.7,
                 velocityBase: [0, 4, 0], velocitySpread: 6, velocityScale: 0,
                 gravity: -2,
@@ -1458,7 +1613,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
                 rotationSpeedMax: 1.0,
             },
             {
-                class: 'spark', count: 4,
+                texture: 'flare', count: 4,
                 lifetimeMin: 0.3, lifetimeMax: 0.6,
                 velocityBase: [0, 6, 0], velocitySpread: 18, velocityScale: 0,
                 gravity: 50,
@@ -1467,7 +1622,7 @@ const BUILTIN_EFFECTS: EffectDef[] = [
                 rotationSpeedMax: 0,
             },
             {
-                class: 'smoke', count: 4,
+                texture: 'smoketrail', count: 4,
                 lifetimeMin: 1.0, lifetimeMax: 1.6,
                 velocityBase: [0, 5, 0], velocitySpread: 4, velocityScale: 0,
                 gravity: -5,

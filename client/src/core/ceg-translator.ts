@@ -1,30 +1,31 @@
 /**
  * ceg-translator — convert streamed Spring CEG defs into runtime
- * `EffectDef` shapes the existing CegRuntime pool can render.
+ * `EffectDef` shapes the CegRuntime can render.
  *
- * Phase 5c. The server parses every `gamedata/explosions.lua` /
- * `effects/*.lua` table into `CegDefInfo` records (one per cegtag,
- * each with N `CegSpawnInfo` sub-emitters carrying class + count +
- * raw Lua-source property strings). This module collapses each CEG
- * down to the three pool classes the runtime ships (`flare`,
- * `spark`, `smoke`) by:
+ * The server parses every `gamedata/explosions.lua` / `effects/*.lua`
+ * table into `CegDefInfo` records (one per cegtag, each with N
+ * `CegSpawnInfo` sub-emitters carrying class + count + raw Lua-source
+ * property strings). This module turns each spawn into a runtime
+ * `ParticleSpawn` (or `SubCegSpawn`) by:
  *
- *   - picking a pool per Spring class (`CSimpleParticleSystem` →
- *     flare or smoke depending on `texture`; `CSimpleGroundFlash`
- *     → flare; `CHeatCloudProjectile` → flare; etc.).
- *   - decoding the relevant properties (`numparticles`,
- *     `particlelife`, `particlespeed`, `gravity`, `colormap`,
- *     `sizegrowth`, …) into the runtime's per-spawn parameters.
- *   - converting Spring's frame-rate-relative units (life in
- *     frames, speed in elmos/frame) into the runtime's
- *     wall-clock seconds and elmos/sec.
+ *   - mapping the Spring class to a translator function (CSPS,
+ *     CHeatCloud, CSmokeProjectile, sub-CEG spawners, etc.).
+ *   - reading the authored `texture = "..."` property and passing it
+ *     straight through as `ParticleSpawn.texture`. The runtime
+ *     allocates a thin-instance batch per unique texture name (Phase
+ *     5a) — no more collapsing to three generic pools.
+ *   - decoding atlas dims from `_NxM` suffix names and authored
+ *     `animparams` (Phase 5b) for tile-grid sprite animation.
+ *   - decoding the rest (`numparticles`, `particlelife`,
+ *     `particlespeed`, `gravity`, `colormap`, `sizegrowth`, …) into
+ *     per-spawn runtime parameters, converting Spring's frame-rate-
+ *     relative units (life in frames, speed in elmos/frame) into the
+ *     runtime's wall-clock seconds and elmos/sec.
  *
- * Where a Spring class has no good pool match (e.g. `CExpGenSpawner`
- * which transitively emits another CEG, `explspike` which is a
- * one-off line projectile, `CBitmapMuzzleFlame` which is a stretched
- * model quad), the spawn is skipped — its absence reads as a
- * "lighter" version of the effect rather than a hole. Future phases
- * can add specialised pools or transitively resolve sub-CEGs.
+ * Where a Spring class has no translator (e.g. `CWakeProjectile`
+ * with no authored texture — defaults to a small wake puff;
+ * unrecognised classes — silently dropped), the spawn is skipped so
+ * the rest of the CEG still fires.
  *
  * Design constraint: this code runs once per game session at game
  * start, not per-frame. It can be permissive about parse failures
@@ -195,8 +196,13 @@ function translateSpawn(s: CegSpawnInfo): ParticleSpawn | SubCegSpawn | null {
 // texture (which decides which pool to allocate from).
 
 function translateParticleSystem(s: CegSpawnInfo, props: PropMap): ParticleSpawn | null {
-    const texture = props.getString('texture', '').toLowerCase();
-    const poolClass = pickPoolFromTexture(texture);
+    // Phase 5a: the authored texture name flows straight through to the
+    // runtime as the pool key. Empty / missing texture falls back to
+    // the generic `flare` bitmap — matches today's catch-all behaviour
+    // for CSPS-without-texture entries, and the runtime allocates a
+    // shared pool keyed off the name for cross-spawn batching.
+    const texture = props.getString('texture', '').toLowerCase() || 'flare';
+    const anim = parseAnimParams(props.getString('animparams', ''));
 
     const numParticles = props.getInt('numparticles', 1);
     if (numParticles <= 0) return null;
@@ -248,7 +254,7 @@ function translateParticleSystem(s: CegSpawnInfo, props: PropMap): ParticleSpawn
     const ramp = parseColormap(props.getString('colormap', ''));
 
     return {
-        class: poolClass,
+        texture,
         count: totalParticles,
         lifetimeMin: lifeMin,
         lifetimeMax: lifeMax,
@@ -261,6 +267,9 @@ function translateParticleSystem(s: CegSpawnInfo, props: PropMap): ParticleSpawn
         colorStart: ramp.start,
         colorEnd: ramp.end,
         rotationSpeedMax: 1.0,
+        animFrameStart: anim?.frameStart,
+        animFrameCount: anim?.frameCount,
+        animFps: anim?.fps,
     };
 }
 
@@ -282,9 +291,12 @@ function translateGroundFlash(_s: CegSpawnInfo, props: PropMap): ParticleSpawn |
         sizeStart + sizeGrowthPerFrame * SIM_HZ * ttlS);
 
     const ramp = parseColormap(props.getString('colormap', ''));
+    // CSimpleGroundFlash carries an optional `texture` property —
+    // honour it; bare flashes default to the engine's generic flare.
+    const texture = props.getString('texture', '').toLowerCase() || 'flare';
 
     return {
-        class: 'flare',
+        texture,
         count: 1,
         lifetimeMin: ttlS,
         lifetimeMax: ttlS,
@@ -314,9 +326,12 @@ function translateHeatCloud(_s: CegSpawnInfo, props: PropMap): ParticleSpawn | n
     const sizeEnd = Math.max(sizeStart,
         sizeStart + sizeGrowthPerFrame * SIM_HZ * ttlS);
     const c = props.getVec3('color', [1, 0.5, 0.2]);
+    // Heat clouds prefer a soft puff sprite when authored; fall back
+    // to the generic smoke trail bitmap for unspecified entries.
+    const texture = props.getString('texture', '').toLowerCase() || 'smoketrail';
 
     return {
-        class: 'smoke',
+        texture,
         count: 1,
         lifetimeMin: ttlS,
         lifetimeMax: ttlS,
@@ -346,9 +361,11 @@ function translateMuzzleFlame(_s: CegSpawnInfo, props: PropMap): ParticleSpawn |
     const sizeEnd   = clamp(props.getFloat('sizegrowth', sizeStart * 1.5), sizeStart, 60);
     const c = props.getVec3('color', [1, 0.85, 0.4]);
     const lengthFactor = props.getFloat('length', 30);
+    const texture = props.getString('texture', '').toLowerCase() || 'flare';
+    const anim = parseAnimParams(props.getString('animparams', ''));
 
     return {
-        class: 'flare',
+        texture,
         count: 3,
         lifetimeMin: lifeS,
         lifetimeMax: lifeS,
@@ -360,6 +377,9 @@ function translateMuzzleFlame(_s: CegSpawnInfo, props: PropMap): ParticleSpawn |
         sizeEnd,
         colorStart: [c[0], c[1], c[2], 1.0],
         rotationSpeedMax: 0,
+        animFrameStart: anim?.frameStart,
+        animFrameCount: anim?.frameCount,
+        animFps: anim?.fps,
     };
 }
 
@@ -387,8 +407,13 @@ function translateFireProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSpaw
     const ttlS = clamp(ttlFrames / SIM_HZ, 0.2, MAX_LIFETIME_S);
     const sizeStart = clamp(props.getFloat('size', 10), 2, 60);
     const sizeEnd = clamp(sizeStart * 0.4, 0.5, sizeStart);
+    // CFireProjectile authored textures are typically `flame` /
+    // `fireball` atlases; fall back to the generic flare bitmap for
+    // entries that didn't specify one.
+    const texture = props.getString('texture', '').toLowerCase() || 'flare';
+    const anim = parseAnimParams(props.getString('animparams', ''));
     return {
-        class: 'flare',
+        texture,
         count: 1,
         lifetimeMin: ttlS, lifetimeMax: ttlS,
         velocityBase: [0, 4, 0],
@@ -399,6 +424,9 @@ function translateFireProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSpaw
         colorStart: [1.0, 0.7, 0.2, 1.0],
         colorEnd:   [0.6, 0.2, 0.05, 0.0],
         rotationSpeedMax: 1.0,
+        animFrameStart: anim?.frameStart,
+        animFrameCount: anim?.frameCount,
+        animFps: anim?.fps,
     };
 }
 
@@ -422,8 +450,11 @@ function translateSmokeProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSpa
     // `color` is a single luminance value in Spring's smoke shader
     // (0 = dark grey smoke, 1 = light cloud). Map to a grey RGB.
     const lum = clamp(props.getFloat('color', 0.5), 0, 1);
+    // CSmokeProjectile sometimes carries an explicit texture; the
+    // default is the engine smoketrail bitmap (sized for puffy smoke).
+    const texture = props.getString('texture', '').toLowerCase() || 'smoketrail';
     return {
-        class: 'smoke',
+        texture,
         count: 1,
         lifetimeMin: ttlS, lifetimeMax: ttlS,
         velocityBase: [0, 4, 0],
@@ -453,8 +484,12 @@ function translateDirtProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSpaw
     const spread = clamp(40 / Math.max(0.5, slowDown), 5, 80);
     const c = props.getVec3('color', [0.5, 0.4, 0.3]);
     const alpha = clamp(props.getFloat('alpha', 1), 0, 1);
+    // CDirtProjectile authors often specify a `circularthingy` /
+    // `dirt` sprite; fall back to flare for the generic case (small
+    // bright kick).
+    const texture = props.getString('texture', '').toLowerCase() || 'flare';
     return {
-        class: 'spark',
+        texture,
         count: 1,
         lifetimeMin: ttlS * 0.7, lifetimeMax: ttlS,
         velocityBase: [0, 5, 0],
@@ -482,8 +517,9 @@ function translateSpherePartProjectile(_s: CegSpawnInfo, props: PropMap): Partic
     const sizeEnd = clamp(sizeStart + expansion * SIM_HZ * ttlS, 2, 200);
     const c = props.getVec3('color', [1, 1, 1]);
     const alpha = clamp(props.getFloat('alpha', 1), 0, 1);
+    const texture = props.getString('texture', '').toLowerCase() || 'flare';
     return {
-        class: 'flare',
+        texture,
         count: 1,
         lifetimeMin: ttlS, lifetimeMax: ttlS,
         velocityBase: [0, 0, 0],
@@ -506,8 +542,13 @@ function translateGfxProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSpawn
     if (ttlFrames <= 0) return null;
     const ttlS = clamp(ttlFrames / SIM_HZ, 0.1, MAX_LIFETIME_S);
     const sizeStart = clamp(props.getFloat('size', 6), 1, 40);
+    // CGfxProjectile is the generic "draw this texture as a quad"
+    // class; authored texture name flows straight through (or defaults
+    // to flare when blank). animparams overrides for atlases.
+    const texture = props.getString('texture', '').toLowerCase() || 'flare';
+    const anim = parseAnimParams(props.getString('animparams', ''));
     return {
-        class: 'flare',
+        texture,
         count: 1,
         lifetimeMin: ttlS, lifetimeMax: ttlS,
         velocityBase: [0, 0, 0],
@@ -518,6 +559,9 @@ function translateGfxProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSpawn
         colorStart: [1, 1, 1, 0.8],
         colorEnd:   [1, 1, 1, 0.0],
         rotationSpeedMax: 0.4,
+        animFrameStart: anim?.frameStart,
+        animFrameCount: anim?.frameCount,
+        animFps: anim?.fps,
     };
 }
 
@@ -532,8 +576,9 @@ function translateGeoSquareProjectile(_s: CegSpawnInfo, props: PropMap): Particl
     const size = clamp(Math.max(
         props.getFloat('width', 4),
         props.getFloat('length', 4)), 2, 40);
+    const texture = props.getString('texture', '').toLowerCase() || 'flare';
     return {
-        class: 'flare',
+        texture,
         count: 1,
         lifetimeMin: ttlS, lifetimeMax: ttlS,
         velocityBase: [0, 6, 0],
@@ -558,8 +603,9 @@ function translateGeoSquareProjectile(_s: CegSpawnInfo, props: PropMap): Particl
 function translateTracerProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSpawn | null {
     const length = clamp(props.getFloat('length', 10), 4, 60);
     const speed = clamp(props.getFloat('speed', 200), 50, 500);
+    const texture = props.getString('texture', '').toLowerCase() || 'flare';
     return {
-        class: 'flare',
+        texture,
         count: 2,
         lifetimeMin: 0.08, lifetimeMax: 0.18,
         velocityBase: [0, 0, 0],
@@ -586,8 +632,9 @@ function translateExploSpikeProjectile(_s: CegSpawnInfo, props: PropMap): Partic
     if (ttlFrames <= 0) return null;
     const ttlS = clamp(ttlFrames / SIM_HZ, 0.1, 0.8);
     const length = clamp(props.getFloat('length', 30), 5, 80);
+    const texture = props.getString('texture', '').toLowerCase() || 'flare';
     return {
-        class: 'spark',
+        texture,
         count: 1,
         lifetimeMin: ttlS, lifetimeMax: ttlS,
         velocityBase: [0, 0, 0],
@@ -615,8 +662,9 @@ function translateSmokeTrailProjectile(_s: CegSpawnInfo, props: PropMap): Partic
     if (ttlFrames <= 0) return null;
     const ttlS = clamp(ttlFrames / SIM_HZ, 0.2, MAX_LIFETIME_S);
     const size = clamp(props.getFloat('size', 6), 2, 30);
+    const texture = props.getString('texture', '').toLowerCase() || 'smoketrail';
     return {
-        class: 'smoke',
+        texture,
         count: 1,
         lifetimeMin: ttlS, lifetimeMax: ttlS,
         velocityBase: [0, 1, 0],
@@ -639,8 +687,9 @@ function translateBubbleProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSp
     if (ttlFrames <= 0) return null;
     const ttlS = clamp(ttlFrames / SIM_HZ, 0.3, MAX_LIFETIME_S);
     const size = clamp(props.getFloat('size', 3), 1, 12);
+    const texture = props.getString('texture', '').toLowerCase() || 'flare';
     return {
-        class: 'flare',
+        texture,
         count: 1,
         lifetimeMin: ttlS, lifetimeMax: ttlS,
         velocityBase: [0, 6, 0],
@@ -664,8 +713,9 @@ function translateWakeProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSpaw
     if (ttlFrames <= 0) return null;
     const ttlS = clamp(ttlFrames / SIM_HZ, 0.3, MAX_LIFETIME_S);
     const size = clamp(props.getFloat('size', 12), 4, 40);
+    const texture = props.getString('texture', '').toLowerCase() || 'smoketrail';
     return {
-        class: 'smoke',
+        texture,
         count: 1,
         lifetimeMin: ttlS, lifetimeMax: ttlS,
         velocityBase: [0, 0, 0],
@@ -750,23 +800,58 @@ function stripCustomPrefix(s: string): string {
     return s;
 }
 
-// ── Texture → pool mapping ─────────────────────────────────────────────────
+// ── Sprite atlas filename parser (Phase 5b) ────────────────────────────────
 //
-// Spring's projectile bitmaps come from `gamedata/resources.lua`'s
-// `graphics.projectiletextures` table. We don't carry that map
-// over the wire — instead we look at the bare logical name and
-// match common families. Unknown textures fall back to `flare`
-// (the most generic of the three pools).
+// Spring sprite atlases encode their tile grid in the filename:
+// `FireBall02_8x8` declares an 8-column × 8-row atlas. The runtime
+// allocates one `ParticleClass` per unique authored texture name, so
+// the atlas dims need only be parsed once at class creation.
+//
+// Case-insensitive on the `x` separator (`8X8` is just as legal as
+// `8x8`). Both dimensions must be ≥ 1 and ≤ 64 (no real atlas in
+// engine or game content exceeds this); impossible values return
+// null so the texture loads as a still.
 
-function pickPoolFromTexture(texture: string): 'flare' | 'spark' | 'smoke' {
-    if (!texture) return 'flare';
-    if (texture.includes('smoke') || texture.includes('cloud')
-        || texture.includes('dust') || texture.includes('fume'))
-        return 'smoke';
-    if (texture.includes('spark') || texture.includes('gunshot')
-        || texture.includes('debris') || texture === 'dot')
-        return 'spark';
-    return 'flare';
+export function parseAtlasDims(
+    name: string,
+): { cols: number; rows: number } | null {
+    if (!name) return null;
+    const m = name.match(/_(\d+)[xX](\d+)$/);
+    if (!m) return null;
+    const cols = parseInt(m[1], 10);
+    const rows = parseInt(m[2], 10);
+    if (!Number.isFinite(cols) || !Number.isFinite(rows)) return null;
+    if (cols < 1 || rows < 1) return null;
+    // Refuse absurd values (some hex-encoded names look like dims).
+    if (cols > 64 || rows > 64) return null;
+    return { cols, rows };
+}
+
+// ── Atlas animation params (Phase 5b) ──────────────────────────────────────
+//
+// Spring CEGs that use sprite-atlas textures (`FireBall02_8x8`, etc.)
+// may override the default "one full cycle per particle lifetime" with
+// an explicit `animparams` property. The string is "<startFrame>
+// <endFrame> <fps>" — startFrame is the first tile to display,
+// endFrame the last, fps the cycle rate in frames-per-second. Both
+// frame values are 0-indexed offsets into the atlas's row-major tile
+// grid (col-major would be `frame % cols`, `frame / cols`).
+//
+// Returns null when the property is empty or unparsable — caller
+// passes the resulting fields straight onto the ParticleSpawn,
+// `undefined` triggering the runtime's lifetime-derived defaults.
+function parseAnimParams(src: string): {
+    frameStart: number;
+    frameCount: number;
+    fps: number;
+} | null {
+    if (!src) return null;
+    const nums = parseNumberList(src);
+    if (nums.length < 3) return null;
+    const start = Math.max(0, Math.floor(nums[0]));
+    const end = Math.max(start, Math.floor(nums[1]));
+    const fps = Math.max(0, nums[2]);
+    return { frameStart: start, frameCount: end - start + 1, fps };
 }
 
 // ── Property accessor + parsers ─────────────────────────────────────────────

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parseExpr, parseVec3Expr, constExpr } from './ceg-translator';
+import { parseExpr, parseVec3Expr, constExpr, parseAtlasDims } from './ceg-translator';
 
 const ctx = (damage: number) => ({ damage });
 
@@ -100,5 +100,35 @@ describe('constExpr', () => {
         const e = constExpr(42);
         expect(e(ctx(0))).toBe(42);
         expect(e(ctx(9999))).toBe(42);
+    });
+});
+
+describe('parseAtlasDims', () => {
+    it('parses the _NxM suffix into cols/rows', () => {
+        expect(parseAtlasDims('FireBall02_8x8')).toEqual({ cols: 8, rows: 8 });
+        expect(parseAtlasDims('smokepuff_4x2')).toEqual({ cols: 4, rows: 2 });
+    });
+
+    it('accepts capital X separator', () => {
+        expect(parseAtlasDims('sprite_3X5')).toEqual({ cols: 3, rows: 5 });
+    });
+
+    it('returns null for plain names', () => {
+        expect(parseAtlasDims('flare')).toBeNull();
+        expect(parseAtlasDims('smoketrail')).toBeNull();
+    });
+
+    it('returns null for empty input', () => {
+        expect(parseAtlasDims('')).toBeNull();
+    });
+
+    it('rejects absurd dimensions', () => {
+        // Common false positive: hex-encoded names that look dimension-like.
+        expect(parseAtlasDims('abcdef_999x999')).toBeNull();
+    });
+
+    it('requires the suffix at end of string', () => {
+        // Mid-string dimension is not the trailing token; rejected.
+        expect(parseAtlasDims('foo_8x8_bar')).toBeNull();
     });
 });
