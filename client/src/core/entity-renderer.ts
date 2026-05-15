@@ -1301,12 +1301,18 @@ export class EntityRenderer {
         px: number; py: number; pz: number;
         rx: number; ry: number; rz: number;
     }): Matrix {
-        // Spring's per-piece transform: T(pos) * RY * RX * RZ.
+        // Spring's per-piece transform: T(pos) * R_yxz(-rot) — upstream
+        // composes via CQuaternion::FromEulerYPRNeg(-r) (see
+        // 3DModelPiece.cpp:206 and the comment at Quaternion.cpp:72).
+        // The negation lets script calls like Turn(piece, y_axis, +a)
+        // rotate the piece's +Z basis towards +X (left-handed yaw)
+        // instead of the opposite. Mirrors the server-side stub fix in
+        // rts/Sim/Units/Scripts/LocalModelPieceStub.h.
         // Babylon q1.multiply(q2) = q1*q2 applies q2 first then q1, so
         // qY * qX * qZ applies in order qZ → qX → qY (Spring's order).
-        const qZ = Quaternion.RotationAxis(new Vector3(0, 0, 1), ov.rz);
-        const qX = Quaternion.RotationAxis(new Vector3(1, 0, 0), ov.rx);
-        const qY = Quaternion.RotationAxis(new Vector3(0, 1, 0), ov.ry);
+        const qZ = Quaternion.RotationAxis(new Vector3(0, 0, 1), -ov.rz);
+        const qX = Quaternion.RotationAxis(new Vector3(1, 0, 0), -ov.rx);
+        const qY = Quaternion.RotationAxis(new Vector3(0, 1, 0), -ov.ry);
         const rot = qY.multiply(qX).multiply(qZ);
 
         return Matrix.Compose(

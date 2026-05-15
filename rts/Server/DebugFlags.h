@@ -38,3 +38,14 @@ inline std::atomic<bool>* DebugFlagByName(const std::string& name) {
     if (name == "script")    return &g_debugFlags.script;
     return nullptr;
 }
+
+/// True when at least one DebugFlag is currently on.
+inline bool AnyDebugFlagOn() {
+    return g_debugFlags.combat   .load(std::memory_order_relaxed)
+        || g_debugFlags.sound    .load(std::memory_order_relaxed)
+        || g_debugFlags.weapon   .load(std::memory_order_relaxed)
+        || g_debugFlags.explosion.load(std::memory_order_relaxed)
+        || g_debugFlags.order    .load(std::memory_order_relaxed)
+        || g_debugFlags.unit     .load(std::memory_order_relaxed)
+        || g_debugFlags.script   .load(std::memory_order_relaxed);
+}

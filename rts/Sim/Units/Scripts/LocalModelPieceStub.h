@@ -98,11 +98,16 @@ struct LocalModelPiece {
 	float3 GetAbsolutePos() const { return GetModelSpaceMatrix().GetPos(); }
 
 	/// Compose this piece's transform matrix walking up the parent
-	/// chain. Each level is `T(pos) * R(rot)` applied in YXZ Euler
-	/// order (Spring's `RotateEulerYXZ` convention), so the script's
-	/// Turn() / Move() ops on individual pieces compose into a final
-	/// world-relative pose just like the rendering side computes for
-	/// the visible model.
+	/// chain. Each level is `T(pos) * R(-rot)` applied in YXZ Euler
+	/// order to match upstream `S3DModelPiece::ComposeTransform`,
+	/// which builds the rotation via `CQuaternion::FromEulerYPRNeg(-r)`
+	/// — equivalent to `CMatrix44f::RotateEulerYXZ(-r)` per the comment
+	/// at `Quaternion.cpp:72` in upstream. Without the sign flip a
+	/// script-driven `Turn(piece, y_axis, +a)` rotates the piece by
+	/// `-a` instead — turrets aim the wrong way and shells launch on
+	/// the mirrored bearing. Caught by the ZK aim bench: tankarty's
+	/// barrel reported +63°E in model space when the script had told
+	/// the turret to face -17° (target straight north, unit yaw +17°E).
 	CMatrix44f GetModelSpaceMatrix() const {
 		CMatrix44f local;
 		local.Translate(pos);
@@ -110,7 +115,7 @@ struct LocalModelPiece {
 		// Almost every static decorative piece on a unit stays at
 		// rest, so this saves three trig calls per piece per frame.
 		if (rot.x != 0.0f || rot.y != 0.0f || rot.z != 0.0f)
-			local.RotateEulerYXZ(rot);
+			local.RotateEulerYXZ(-rot);
 		if (parent != nullptr)
 			return parent->GetModelSpaceMatrix() * local;
 		return local;

@@ -262,10 +262,21 @@ std::string ExecuteServerCommand(const std::string& cmd) {
         }
         if (action == "on" || action == "true" || action == "1") {
             flag->store(true);
+            // Most subsystem-gated SLOGs (CWeapon::Fire, CombatEventCollector,
+            // SoundEventCollector) emit at SPRING_LOG_INFO, which is below the
+            // default min level of SPRING_LOG_NOTICE — without lifting the
+            // floor here the toggle silently does nothing. Documented in
+            // memory/project_zk_aim_bench.md as the "debug-log gotcha".
+            springlog_set_min_level(SPRING_LOG_INFO);
             return subsystem + "=on";
         }
         if (action == "off" || action == "false" || action == "0") {
             flag->store(false);
+            // Restore the default floor only when every flag is now off, so
+            // that toggling one subsystem off doesn't mute another that's
+            // still enabled.
+            if (!AnyDebugFlagOn())
+                springlog_set_min_level(SPRING_LOG_NOTICE);
             return subsystem + "=off";
         }
         return "usage: log " + subsystem + " on|off|status";
