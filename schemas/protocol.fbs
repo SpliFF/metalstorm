@@ -1380,6 +1380,63 @@ table GameUnitDefs {
     base_url: string;
 }
 
+/// Definition of one feature type (wrecks, debris, geothermals, trees
+/// shared by the game). Parallel to GameUnitDef but for `CFeature`. Sent
+/// once at game start so the client can render any feature spawned at
+/// runtime (wrecks on unit death, debris from explosions). Map-placed
+/// features still arrive via `MapData.feature_defs` / `MapData.features`
+/// because their indices are map-local; this table covers the game-wide
+/// FeatureDef table the server's `featureDefHandler` owns.
+///
+/// `model_url` points at the converted `.glb` under
+/// `/api/games/data/<gameId>/models/<stem>.glb` and is empty when the
+/// def has no model (decals, geothermal vents) or the .glb wasn't
+/// converted — the client falls back to a placeholder cube.
+table GameFeatureDef {
+    def_id: uint32;
+    name: string;
+    model_url: string;
+    texture_url: string;
+    /// Spring's FeatureDef.drawType: 0=model, 1+=tree variants, -1=none.
+    /// Trees use procedural billboards rather than a .glb.
+    draw_type: int8 = 0;
+    footprint_x: uint16 = 0;
+    footprint_z: uint16 = 0;
+    height: float = 0;
+    radius: float = 0;
+    mass: float = 0;
+    /// Hit points (from SolidObjectDef.health).
+    health: float = 0;
+    blocking: bool = false;
+    reclaimable: bool = false;
+    destructable: bool = true;
+    burnable: bool = false;
+    floating: bool = false;
+    geo_thermal: bool = false;
+    /// Resources released on reclaim.
+    metal: float = 0;
+    energy: float = 0;
+    /// Chained death feature def id (wreck → heap → ash). 0 = none.
+    death_feature_def_id: uint32 = 0;
+    /// Frames after spawn that the wreck/feature smokes. 0 = no smoke.
+    smoke_time: int32 = 0;
+    reclaim_time: float = 0;
+    /// Optional script name (Spring's FeatureDef.scriptName) — used by
+    /// game-specific feature animation scripts. Empty for stock wrecks.
+    script_name: string;
+    /// Game-author customParams blob (mirrors the unit-def one — used by
+    /// ZK widgets that decorate corpses with overlays).
+    custom_params: [CustomParam];
+}
+
+/// Game-wide feature def table. Sent alongside `GameUnitDefs` /
+/// `GameWeaponDefs` / `GameCegDefs` from the same baked cache directory.
+table GameFeatureDefs {
+    defs: [GameFeatureDef];
+    /// Base URL for model/texture paths (matches GameUnitDefs.base_url).
+    base_url: string;
+}
+
 // ============================================================
 // Map messages
 // ============================================================
@@ -1736,6 +1793,42 @@ table UnitLifecycleBatch {
     events: [UnitLifecycleEvent];
 }
 
+/// One feature spawned on the server this tick. Covers wrecks created
+/// by `CFeatureHandler::CreateWreckage` on unit death, debris dropped
+/// by explosions, Lua `Spring.CreateFeature` calls, and any other
+/// runtime-spawned `CFeature`. Map-placed features arrive via
+/// `MapData.features` at game start, not here — only dynamic spawns.
+///
+/// `team` is the owning team (controls reclaim rights); -1 means
+/// gaia/neutral. `ally_team` lets the server filter visibility client-
+/// side (we still broadcast unfiltered for simplicity since wrecks are
+/// usually visible to everyone, but the field is here so per-team
+/// filtering can be added without a schema bump).
+table FeatureSpawn {
+    feature_id: uint32;
+    def_id: uint32;
+    x: float;
+    y: float;
+    z: float;
+    /// Spring heading: 16-bit fixed-point angle (0 = +Z, 16384 = +X).
+    heading: int16 = 0;
+    /// Build facing 0..3 (south/east/north/west), copied from the parent
+    /// unit's facing when the wreck inherits it.
+    build_facing: uint8 = 0;
+    team: int8 = -1;
+    ally_team: int8 = -1;
+}
+
+/// Per-tick batch of feature lifecycle events. Empty on quiet ticks;
+/// populated when units die (wreck spawn), buildings collapse, debris
+/// drops, or gadget code calls `Spring.CreateFeature` / `DestroyFeature`.
+table FeatureLifecycleBatch {
+    spawns: [FeatureSpawn];
+    /// Feature IDs removed this tick (reclaimed, destroyed, despawned).
+    /// Parallel to `spawns` order — the client just plays back both.
+    removed: [uint32];
+}
+
 /// Classifies a UnitCommandEvent. `Issued` fires after the engine has
 /// added a command to a unit's queue (Spring's `UnitCommand` callin);
 /// `Done` fires when a queued command completes or is cleared
@@ -1868,6 +1961,8 @@ union ServerPayload {
     UnitCommandBatch,
     PathResponse,
     StandingOrderState,
+    GameFeatureDefs,
+    FeatureLifecycleBatch,
 }
 
 table ServerMessage {

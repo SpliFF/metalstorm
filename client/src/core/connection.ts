@@ -42,6 +42,10 @@ import { MusicEvent } from '../protocol/spring-web/music-event.js';
 import { SoundRef } from '../protocol/spring-web/sound-ref.js';
 import { GameCegDefs } from '../protocol/spring-web/game-ceg-defs.js';
 import { GameCegDef } from '../protocol/spring-web/game-ceg-def.js';
+import { GameFeatureDefs } from '../protocol/spring-web/game-feature-defs.js';
+import { GameFeatureDef } from '../protocol/spring-web/game-feature-def.js';
+import { FeatureLifecycleBatch } from '../protocol/spring-web/feature-lifecycle-batch.js';
+import { FeatureSpawn as FeatureSpawnFb } from '../protocol/spring-web/feature-spawn.js';
 import { GameCegSpawn } from '../protocol/spring-web/game-ceg-spawn.js';
 import { CegProperty } from '../protocol/spring-web/ceg-property.js';
 import { GroundFlashInfo as GroundFlashInfoFb } from '../protocol/spring-web/ground-flash-info.js';
@@ -524,6 +528,57 @@ export interface GroundFlashInfo {
     flags: number;
 }
 
+/// One feature spawned this tick. Resolves to a renderable model via
+/// `FeatureDefInfo[defId]`. Heading is Spring's 16-bit fixed-point yaw
+/// (16384 = 90°). team=-1 means gaia/neutral (most wrecks). The
+/// feature_id is the server's `CFeature::id` — stable for the feature's
+/// lifetime, recycled after destroy.
+export interface FeatureSpawnInfo {
+    featureId: number;
+    defId: number;
+    x: number;
+    y: number;
+    z: number;
+    heading: number;
+    buildFacing: number;
+    team: number;
+    allyTeam: number;
+}
+
+/// One streamed feature def — wrecks, debris, trees, geothermals. Sent
+/// once at game start via the baked `featuredefs.bin` cache. Lookup by
+/// `defId`. `modelUrl` may be empty when the def has no model (a Spring
+/// "tree" entry with drawType > 0, or a decal-only feature) — the
+/// renderer falls back to a placeholder cube.
+export interface FeatureDefInfo {
+    defId: number;
+    name: string;
+    modelUrl: string;
+    textureUrl: string;
+    /// Spring's FeatureDef.drawType: 0=model, >=1=tree variants, -1=none.
+    drawType: number;
+    footprintX: number;
+    footprintZ: number;
+    height: number;
+    radius: number;
+    mass: number;
+    health: number;
+    blocking: boolean;
+    reclaimable: boolean;
+    destructable: boolean;
+    burnable: boolean;
+    floating: boolean;
+    geoThermal: boolean;
+    metal: number;
+    energy: number;
+    /// Chained death feature (wreck → heap → ash); 0 when the chain ends.
+    deathFeatureDefId: number;
+    smokeTime: number;
+    reclaimTime: number;
+    scriptName: string;
+    customParams: Record<string, string>;
+}
+
 /// One streamed CEG def. `tag` is the lookup key on weapon defs
 /// (`cegTag`, `explosionGenerator`, `bounceExplosionGenerator`).
 /// All names are lowercased on the server before serialisation so
@@ -604,6 +659,16 @@ export interface ConnectionEvents {
     onUnitDefs?: (defs: UnitDefInfo[]) => void;
     onWeaponDefs?: (defs: WeaponDefInfo[]) => void;
     onCegDefs?: (defs: CegDefInfo[]) => void;
+    /** Game feature defs (wrecks/debris/trees the game can spawn at
+     *  runtime). Sent once at game start via `featuredefs.bin`; the
+     *  client uses it to resolve `FeatureLifecycleBatch` spawn events
+     *  to renderable models. Map features come via `MapData`, not here. */
+    onFeatureDefs?: (defs: FeatureDefInfo[]) => void;
+    /** Per-tick batch of feature lifecycle events. `spawns` is a list of
+     *  new features (wrecks, debris, gadget-spawned); `removed` is feature
+     *  IDs that despawned (reclaimed, destroyed). Both lists are typically
+     *  empty on quiet ticks. */
+    onFeatureLifecycle?: (spawns: FeatureSpawnInfo[], removed: number[]) => void;
     onUnitCommandQueues?: (queues: UnitCommandQueueInfo[]) => void;
     onUnitCmdDescs?: (units: UnitCmdDescsInfo[]) => void;
     onUnitTransports?: (transports: UnitTransportInfoMsg[]) => void;
@@ -1509,6 +1574,80 @@ export class Connection {
                     this.events.onCegDefs?.(defs);
                 } catch (e) {
                     console.warn('[connection] GameCegDefs parse failed (continuing):', e);
+                }
+                break;
+            }
+            case ServerPayload.GameFeatureDefs: {
+                const fbDefs = msg.payload(new GameFeatureDefs()) as GameFeatureDefs;
+                const defs: FeatureDefInfo[] = [];
+                for (let i = 0; i < fbDefs.defsLength(); i++) {
+                    const d = fbDefs.defs(i, new GameFeatureDef());
+                    if (!d) continue;
+                    // customParams is optional + variable-length; build
+                    // map only when entries exist so the common-case
+                    // wreck (no customParams) doesn't allocate.
+                    const customParams: Record<string, string> = {};
+                    for (let pi = 0; pi < d.customParamsLength(); pi++) {
+                        const p = d.customParams(pi);
+                        if (!p) continue;
+                        const k = p.key(); const v = p.value();
+                        if (k != null) customParams[k] = v ?? '';
+                    }
+                    defs.push({
+                        defId: d.defId(),
+                        name: d.name() ?? '',
+                        modelUrl: d.modelUrl() ?? '',
+                        textureUrl: d.textureUrl() ?? '',
+                        drawType: d.drawType(),
+                        footprintX: d.footprintX(),
+                        footprintZ: d.footprintZ(),
+                        height: d.height(),
+                        radius: d.radius(),
+                        mass: d.mass(),
+                        health: d.health(),
+                        blocking: d.blocking(),
+                        reclaimable: d.reclaimable(),
+                        destructable: d.destructable(),
+                        burnable: d.burnable(),
+                        floating: d.floating(),
+                        geoThermal: d.geoThermal(),
+                        metal: d.metal(),
+                        energy: d.energy(),
+                        deathFeatureDefId: d.deathFeatureDefId(),
+                        smokeTime: d.smokeTime(),
+                        reclaimTime: d.reclaimTime(),
+                        scriptName: d.scriptName() ?? '',
+                        customParams,
+                    });
+                }
+                console.log(`[connection] received ${defs.length} feature def(s)`);
+                this.events.onFeatureDefs?.(defs);
+                break;
+            }
+            case ServerPayload.FeatureLifecycleBatch: {
+                const fb = msg.payload(new FeatureLifecycleBatch()) as FeatureLifecycleBatch;
+                const spawns: FeatureSpawnInfo[] = [];
+                for (let i = 0; i < fb.spawnsLength(); i++) {
+                    const s = fb.spawns(i, new FeatureSpawnFb());
+                    if (!s) continue;
+                    spawns.push({
+                        featureId: s.featureId(),
+                        defId: s.defId(),
+                        x: s.x(),
+                        y: s.y(),
+                        z: s.z(),
+                        heading: s.heading(),
+                        buildFacing: s.buildFacing(),
+                        team: s.team(),
+                        allyTeam: s.allyTeam(),
+                    });
+                }
+                const removed: number[] = [];
+                for (let i = 0; i < fb.removedLength(); i++) {
+                    removed.push(fb.removed(i) ?? 0);
+                }
+                if (spawns.length || removed.length) {
+                    this.events.onFeatureLifecycle?.(spawns, removed);
                 }
                 break;
             }

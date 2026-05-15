@@ -353,6 +353,14 @@ struct GameUnitDefs;
 struct GameUnitDefsBuilder;
 struct GameUnitDefsT;
 
+struct GameFeatureDef;
+struct GameFeatureDefBuilder;
+struct GameFeatureDefT;
+
+struct GameFeatureDefs;
+struct GameFeatureDefsBuilder;
+struct GameFeatureDefsT;
+
 struct MapStartPos;
 
 struct MapInfo;
@@ -446,6 +454,14 @@ struct UnitLifecycleEventT;
 struct UnitLifecycleBatch;
 struct UnitLifecycleBatchBuilder;
 struct UnitLifecycleBatchT;
+
+struct FeatureSpawn;
+struct FeatureSpawnBuilder;
+struct FeatureSpawnT;
+
+struct FeatureLifecycleBatch;
+struct FeatureLifecycleBatchBuilder;
+struct FeatureLifecycleBatchT;
 
 struct UnitCommandEvent;
 struct UnitCommandEventBuilder;
@@ -1874,11 +1890,13 @@ enum ServerPayload : uint8_t {
   ServerPayload_UnitCommandBatch = 35,
   ServerPayload_PathResponse = 36,
   ServerPayload_StandingOrderState = 37,
+  ServerPayload_GameFeatureDefs = 38,
+  ServerPayload_FeatureLifecycleBatch = 39,
   ServerPayload_MIN = ServerPayload_NONE,
-  ServerPayload_MAX = ServerPayload_StandingOrderState
+  ServerPayload_MAX = ServerPayload_FeatureLifecycleBatch
 };
 
-inline const ServerPayload (&EnumValuesServerPayload())[38] {
+inline const ServerPayload (&EnumValuesServerPayload())[40] {
   static const ServerPayload values[] = {
     ServerPayload_NONE,
     ServerPayload_AuthResponse,
@@ -1917,13 +1935,15 @@ inline const ServerPayload (&EnumValuesServerPayload())[38] {
     ServerPayload_UnitLifecycleBatch,
     ServerPayload_UnitCommandBatch,
     ServerPayload_PathResponse,
-    ServerPayload_StandingOrderState
+    ServerPayload_StandingOrderState,
+    ServerPayload_GameFeatureDefs,
+    ServerPayload_FeatureLifecycleBatch
   };
   return values;
 }
 
 inline const char * const *EnumNamesServerPayload() {
-  static const char * const names[39] = {
+  static const char * const names[41] = {
     "NONE",
     "AuthResponse",
     "EntityCreate",
@@ -1962,13 +1982,15 @@ inline const char * const *EnumNamesServerPayload() {
     "UnitCommandBatch",
     "PathResponse",
     "StandingOrderState",
+    "GameFeatureDefs",
+    "FeatureLifecycleBatch",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameServerPayload(ServerPayload e) {
-  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_StandingOrderState)) return "";
+  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_FeatureLifecycleBatch)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesServerPayload()[index];
 }
@@ -2125,6 +2147,14 @@ template<> struct ServerPayloadTraits<SpringWeb::StandingOrderState> {
   static const ServerPayload enum_value = ServerPayload_StandingOrderState;
 };
 
+template<> struct ServerPayloadTraits<SpringWeb::GameFeatureDefs> {
+  static const ServerPayload enum_value = ServerPayload_GameFeatureDefs;
+};
+
+template<> struct ServerPayloadTraits<SpringWeb::FeatureLifecycleBatch> {
+  static const ServerPayload enum_value = ServerPayload_FeatureLifecycleBatch;
+};
+
 template<typename T> struct ServerPayloadUnionTraits {
   static const ServerPayload enum_value = ServerPayload_NONE;
 };
@@ -2275,6 +2305,14 @@ template<> struct ServerPayloadUnionTraits<SpringWeb::PathResponseT> {
 
 template<> struct ServerPayloadUnionTraits<SpringWeb::StandingOrderStateT> {
   static const ServerPayload enum_value = ServerPayload_StandingOrderState;
+};
+
+template<> struct ServerPayloadUnionTraits<SpringWeb::GameFeatureDefsT> {
+  static const ServerPayload enum_value = ServerPayload_GameFeatureDefs;
+};
+
+template<> struct ServerPayloadUnionTraits<SpringWeb::FeatureLifecycleBatchT> {
+  static const ServerPayload enum_value = ServerPayload_FeatureLifecycleBatch;
 };
 
 struct ServerPayloadUnion {
@@ -2602,6 +2640,22 @@ struct ServerPayloadUnion {
   const SpringWeb::StandingOrderStateT *AsStandingOrderState() const {
     return type == ServerPayload_StandingOrderState ?
       reinterpret_cast<const SpringWeb::StandingOrderStateT *>(value) : nullptr;
+  }
+  SpringWeb::GameFeatureDefsT *AsGameFeatureDefs() {
+    return type == ServerPayload_GameFeatureDefs ?
+      reinterpret_cast<SpringWeb::GameFeatureDefsT *>(value) : nullptr;
+  }
+  const SpringWeb::GameFeatureDefsT *AsGameFeatureDefs() const {
+    return type == ServerPayload_GameFeatureDefs ?
+      reinterpret_cast<const SpringWeb::GameFeatureDefsT *>(value) : nullptr;
+  }
+  SpringWeb::FeatureLifecycleBatchT *AsFeatureLifecycleBatch() {
+    return type == ServerPayload_FeatureLifecycleBatch ?
+      reinterpret_cast<SpringWeb::FeatureLifecycleBatchT *>(value) : nullptr;
+  }
+  const SpringWeb::FeatureLifecycleBatchT *AsFeatureLifecycleBatch() const {
+    return type == ServerPayload_FeatureLifecycleBatch ?
+      reinterpret_cast<const SpringWeb::FeatureLifecycleBatchT *>(value) : nullptr;
   }
 };
 
@@ -12408,6 +12462,487 @@ inline ::flatbuffers::Offset<GameUnitDefs> CreateGameUnitDefsDirect(
 
 ::flatbuffers::Offset<GameUnitDefs> CreateGameUnitDefs(::flatbuffers::FlatBufferBuilder &_fbb, const GameUnitDefsT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
+struct GameFeatureDefT : public ::flatbuffers::NativeTable {
+  typedef GameFeatureDef TableType;
+  uint32_t def_id = 0;
+  std::string name{};
+  std::string model_url{};
+  std::string texture_url{};
+  int8_t draw_type = 0;
+  uint16_t footprint_x = 0;
+  uint16_t footprint_z = 0;
+  float height = 0.0f;
+  float radius = 0.0f;
+  float mass = 0.0f;
+  float health = 0.0f;
+  bool blocking = false;
+  bool reclaimable = false;
+  bool destructable = true;
+  bool burnable = false;
+  bool floating = false;
+  bool geo_thermal = false;
+  float metal = 0.0f;
+  float energy = 0.0f;
+  uint32_t death_feature_def_id = 0;
+  int32_t smoke_time = 0;
+  float reclaim_time = 0.0f;
+  std::string script_name{};
+  std::vector<std::unique_ptr<SpringWeb::CustomParamT>> custom_params{};
+  GameFeatureDefT() = default;
+  GameFeatureDefT(const GameFeatureDefT &o);
+  GameFeatureDefT(GameFeatureDefT&&) FLATBUFFERS_NOEXCEPT = default;
+  GameFeatureDefT &operator=(GameFeatureDefT o) FLATBUFFERS_NOEXCEPT;
+};
+
+/// Definition of one feature type (wrecks, debris, geothermals, trees
+/// shared by the game). Parallel to GameUnitDef but for `CFeature`. Sent
+/// once at game start so the client can render any feature spawned at
+/// runtime (wrecks on unit death, debris from explosions). Map-placed
+/// features still arrive via `MapData.feature_defs` / `MapData.features`
+/// because their indices are map-local; this table covers the game-wide
+/// FeatureDef table the server's `featureDefHandler` owns.
+///
+/// `model_url` points at the converted `.glb` under
+/// `/api/games/data/<gameId>/models/<stem>.glb` and is empty when the
+/// def has no model (decals, geothermal vents) or the .glb wasn't
+/// converted — the client falls back to a placeholder cube.
+struct GameFeatureDef FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef GameFeatureDefT NativeTableType;
+  typedef GameFeatureDefBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_DEF_ID = 4,
+    VT_NAME = 6,
+    VT_MODEL_URL = 8,
+    VT_TEXTURE_URL = 10,
+    VT_DRAW_TYPE = 12,
+    VT_FOOTPRINT_X = 14,
+    VT_FOOTPRINT_Z = 16,
+    VT_HEIGHT = 18,
+    VT_RADIUS = 20,
+    VT_MASS = 22,
+    VT_HEALTH = 24,
+    VT_BLOCKING = 26,
+    VT_RECLAIMABLE = 28,
+    VT_DESTRUCTABLE = 30,
+    VT_BURNABLE = 32,
+    VT_FLOATING = 34,
+    VT_GEO_THERMAL = 36,
+    VT_METAL = 38,
+    VT_ENERGY = 40,
+    VT_DEATH_FEATURE_DEF_ID = 42,
+    VT_SMOKE_TIME = 44,
+    VT_RECLAIM_TIME = 46,
+    VT_SCRIPT_NAME = 48,
+    VT_CUSTOM_PARAMS = 50
+  };
+  uint32_t def_id() const {
+    return GetField<uint32_t>(VT_DEF_ID, 0);
+  }
+  const ::flatbuffers::String *name() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_NAME);
+  }
+  const ::flatbuffers::String *model_url() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_MODEL_URL);
+  }
+  const ::flatbuffers::String *texture_url() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_TEXTURE_URL);
+  }
+  /// Spring's FeatureDef.drawType: 0=model, 1+=tree variants, -1=none.
+  /// Trees use procedural billboards rather than a .glb.
+  int8_t draw_type() const {
+    return GetField<int8_t>(VT_DRAW_TYPE, 0);
+  }
+  uint16_t footprint_x() const {
+    return GetField<uint16_t>(VT_FOOTPRINT_X, 0);
+  }
+  uint16_t footprint_z() const {
+    return GetField<uint16_t>(VT_FOOTPRINT_Z, 0);
+  }
+  float height() const {
+    return GetField<float>(VT_HEIGHT, 0.0f);
+  }
+  float radius() const {
+    return GetField<float>(VT_RADIUS, 0.0f);
+  }
+  float mass() const {
+    return GetField<float>(VT_MASS, 0.0f);
+  }
+  /// Hit points (from SolidObjectDef.health).
+  float health() const {
+    return GetField<float>(VT_HEALTH, 0.0f);
+  }
+  bool blocking() const {
+    return GetField<uint8_t>(VT_BLOCKING, 0) != 0;
+  }
+  bool reclaimable() const {
+    return GetField<uint8_t>(VT_RECLAIMABLE, 0) != 0;
+  }
+  bool destructable() const {
+    return GetField<uint8_t>(VT_DESTRUCTABLE, 1) != 0;
+  }
+  bool burnable() const {
+    return GetField<uint8_t>(VT_BURNABLE, 0) != 0;
+  }
+  bool floating() const {
+    return GetField<uint8_t>(VT_FLOATING, 0) != 0;
+  }
+  bool geo_thermal() const {
+    return GetField<uint8_t>(VT_GEO_THERMAL, 0) != 0;
+  }
+  /// Resources released on reclaim.
+  float metal() const {
+    return GetField<float>(VT_METAL, 0.0f);
+  }
+  float energy() const {
+    return GetField<float>(VT_ENERGY, 0.0f);
+  }
+  /// Chained death feature def id (wreck → heap → ash). 0 = none.
+  uint32_t death_feature_def_id() const {
+    return GetField<uint32_t>(VT_DEATH_FEATURE_DEF_ID, 0);
+  }
+  /// Frames after spawn that the wreck/feature smokes. 0 = no smoke.
+  int32_t smoke_time() const {
+    return GetField<int32_t>(VT_SMOKE_TIME, 0);
+  }
+  float reclaim_time() const {
+    return GetField<float>(VT_RECLAIM_TIME, 0.0f);
+  }
+  /// Optional script name (Spring's FeatureDef.scriptName) — used by
+  /// game-specific feature animation scripts. Empty for stock wrecks.
+  const ::flatbuffers::String *script_name() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_SCRIPT_NAME);
+  }
+  /// Game-author customParams blob (mirrors the unit-def one — used by
+  /// ZK widgets that decorate corpses with overlays).
+  const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::CustomParam>> *custom_params() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::CustomParam>> *>(VT_CUSTOM_PARAMS);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_DEF_ID, 4) &&
+           VerifyOffset(verifier, VT_NAME) &&
+           verifier.VerifyString(name()) &&
+           VerifyOffset(verifier, VT_MODEL_URL) &&
+           verifier.VerifyString(model_url()) &&
+           VerifyOffset(verifier, VT_TEXTURE_URL) &&
+           verifier.VerifyString(texture_url()) &&
+           VerifyField<int8_t>(verifier, VT_DRAW_TYPE, 1) &&
+           VerifyField<uint16_t>(verifier, VT_FOOTPRINT_X, 2) &&
+           VerifyField<uint16_t>(verifier, VT_FOOTPRINT_Z, 2) &&
+           VerifyField<float>(verifier, VT_HEIGHT, 4) &&
+           VerifyField<float>(verifier, VT_RADIUS, 4) &&
+           VerifyField<float>(verifier, VT_MASS, 4) &&
+           VerifyField<float>(verifier, VT_HEALTH, 4) &&
+           VerifyField<uint8_t>(verifier, VT_BLOCKING, 1) &&
+           VerifyField<uint8_t>(verifier, VT_RECLAIMABLE, 1) &&
+           VerifyField<uint8_t>(verifier, VT_DESTRUCTABLE, 1) &&
+           VerifyField<uint8_t>(verifier, VT_BURNABLE, 1) &&
+           VerifyField<uint8_t>(verifier, VT_FLOATING, 1) &&
+           VerifyField<uint8_t>(verifier, VT_GEO_THERMAL, 1) &&
+           VerifyField<float>(verifier, VT_METAL, 4) &&
+           VerifyField<float>(verifier, VT_ENERGY, 4) &&
+           VerifyField<uint32_t>(verifier, VT_DEATH_FEATURE_DEF_ID, 4) &&
+           VerifyField<int32_t>(verifier, VT_SMOKE_TIME, 4) &&
+           VerifyField<float>(verifier, VT_RECLAIM_TIME, 4) &&
+           VerifyOffset(verifier, VT_SCRIPT_NAME) &&
+           verifier.VerifyString(script_name()) &&
+           VerifyOffset(verifier, VT_CUSTOM_PARAMS) &&
+           verifier.VerifyVector(custom_params()) &&
+           verifier.VerifyVectorOfTables(custom_params()) &&
+           verifier.EndTable();
+  }
+  GameFeatureDefT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(GameFeatureDefT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<GameFeatureDef> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameFeatureDefT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct GameFeatureDefBuilder {
+  typedef GameFeatureDef Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_def_id(uint32_t def_id) {
+    fbb_.AddElement<uint32_t>(GameFeatureDef::VT_DEF_ID, def_id, 0);
+  }
+  void add_name(::flatbuffers::Offset<::flatbuffers::String> name) {
+    fbb_.AddOffset(GameFeatureDef::VT_NAME, name);
+  }
+  void add_model_url(::flatbuffers::Offset<::flatbuffers::String> model_url) {
+    fbb_.AddOffset(GameFeatureDef::VT_MODEL_URL, model_url);
+  }
+  void add_texture_url(::flatbuffers::Offset<::flatbuffers::String> texture_url) {
+    fbb_.AddOffset(GameFeatureDef::VT_TEXTURE_URL, texture_url);
+  }
+  void add_draw_type(int8_t draw_type) {
+    fbb_.AddElement<int8_t>(GameFeatureDef::VT_DRAW_TYPE, draw_type, 0);
+  }
+  void add_footprint_x(uint16_t footprint_x) {
+    fbb_.AddElement<uint16_t>(GameFeatureDef::VT_FOOTPRINT_X, footprint_x, 0);
+  }
+  void add_footprint_z(uint16_t footprint_z) {
+    fbb_.AddElement<uint16_t>(GameFeatureDef::VT_FOOTPRINT_Z, footprint_z, 0);
+  }
+  void add_height(float height) {
+    fbb_.AddElement<float>(GameFeatureDef::VT_HEIGHT, height, 0.0f);
+  }
+  void add_radius(float radius) {
+    fbb_.AddElement<float>(GameFeatureDef::VT_RADIUS, radius, 0.0f);
+  }
+  void add_mass(float mass) {
+    fbb_.AddElement<float>(GameFeatureDef::VT_MASS, mass, 0.0f);
+  }
+  void add_health(float health) {
+    fbb_.AddElement<float>(GameFeatureDef::VT_HEALTH, health, 0.0f);
+  }
+  void add_blocking(bool blocking) {
+    fbb_.AddElement<uint8_t>(GameFeatureDef::VT_BLOCKING, static_cast<uint8_t>(blocking), 0);
+  }
+  void add_reclaimable(bool reclaimable) {
+    fbb_.AddElement<uint8_t>(GameFeatureDef::VT_RECLAIMABLE, static_cast<uint8_t>(reclaimable), 0);
+  }
+  void add_destructable(bool destructable) {
+    fbb_.AddElement<uint8_t>(GameFeatureDef::VT_DESTRUCTABLE, static_cast<uint8_t>(destructable), 1);
+  }
+  void add_burnable(bool burnable) {
+    fbb_.AddElement<uint8_t>(GameFeatureDef::VT_BURNABLE, static_cast<uint8_t>(burnable), 0);
+  }
+  void add_floating(bool floating) {
+    fbb_.AddElement<uint8_t>(GameFeatureDef::VT_FLOATING, static_cast<uint8_t>(floating), 0);
+  }
+  void add_geo_thermal(bool geo_thermal) {
+    fbb_.AddElement<uint8_t>(GameFeatureDef::VT_GEO_THERMAL, static_cast<uint8_t>(geo_thermal), 0);
+  }
+  void add_metal(float metal) {
+    fbb_.AddElement<float>(GameFeatureDef::VT_METAL, metal, 0.0f);
+  }
+  void add_energy(float energy) {
+    fbb_.AddElement<float>(GameFeatureDef::VT_ENERGY, energy, 0.0f);
+  }
+  void add_death_feature_def_id(uint32_t death_feature_def_id) {
+    fbb_.AddElement<uint32_t>(GameFeatureDef::VT_DEATH_FEATURE_DEF_ID, death_feature_def_id, 0);
+  }
+  void add_smoke_time(int32_t smoke_time) {
+    fbb_.AddElement<int32_t>(GameFeatureDef::VT_SMOKE_TIME, smoke_time, 0);
+  }
+  void add_reclaim_time(float reclaim_time) {
+    fbb_.AddElement<float>(GameFeatureDef::VT_RECLAIM_TIME, reclaim_time, 0.0f);
+  }
+  void add_script_name(::flatbuffers::Offset<::flatbuffers::String> script_name) {
+    fbb_.AddOffset(GameFeatureDef::VT_SCRIPT_NAME, script_name);
+  }
+  void add_custom_params(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::CustomParam>>> custom_params) {
+    fbb_.AddOffset(GameFeatureDef::VT_CUSTOM_PARAMS, custom_params);
+  }
+  explicit GameFeatureDefBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<GameFeatureDef> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<GameFeatureDef>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<GameFeatureDef> CreateGameFeatureDef(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t def_id = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> name = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> model_url = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> texture_url = 0,
+    int8_t draw_type = 0,
+    uint16_t footprint_x = 0,
+    uint16_t footprint_z = 0,
+    float height = 0.0f,
+    float radius = 0.0f,
+    float mass = 0.0f,
+    float health = 0.0f,
+    bool blocking = false,
+    bool reclaimable = false,
+    bool destructable = true,
+    bool burnable = false,
+    bool floating = false,
+    bool geo_thermal = false,
+    float metal = 0.0f,
+    float energy = 0.0f,
+    uint32_t death_feature_def_id = 0,
+    int32_t smoke_time = 0,
+    float reclaim_time = 0.0f,
+    ::flatbuffers::Offset<::flatbuffers::String> script_name = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::CustomParam>>> custom_params = 0) {
+  GameFeatureDefBuilder builder_(_fbb);
+  builder_.add_custom_params(custom_params);
+  builder_.add_script_name(script_name);
+  builder_.add_reclaim_time(reclaim_time);
+  builder_.add_smoke_time(smoke_time);
+  builder_.add_death_feature_def_id(death_feature_def_id);
+  builder_.add_energy(energy);
+  builder_.add_metal(metal);
+  builder_.add_health(health);
+  builder_.add_mass(mass);
+  builder_.add_radius(radius);
+  builder_.add_height(height);
+  builder_.add_texture_url(texture_url);
+  builder_.add_model_url(model_url);
+  builder_.add_name(name);
+  builder_.add_def_id(def_id);
+  builder_.add_footprint_z(footprint_z);
+  builder_.add_footprint_x(footprint_x);
+  builder_.add_geo_thermal(geo_thermal);
+  builder_.add_floating(floating);
+  builder_.add_burnable(burnable);
+  builder_.add_destructable(destructable);
+  builder_.add_reclaimable(reclaimable);
+  builder_.add_blocking(blocking);
+  builder_.add_draw_type(draw_type);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<GameFeatureDef> CreateGameFeatureDefDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t def_id = 0,
+    const char *name = nullptr,
+    const char *model_url = nullptr,
+    const char *texture_url = nullptr,
+    int8_t draw_type = 0,
+    uint16_t footprint_x = 0,
+    uint16_t footprint_z = 0,
+    float height = 0.0f,
+    float radius = 0.0f,
+    float mass = 0.0f,
+    float health = 0.0f,
+    bool blocking = false,
+    bool reclaimable = false,
+    bool destructable = true,
+    bool burnable = false,
+    bool floating = false,
+    bool geo_thermal = false,
+    float metal = 0.0f,
+    float energy = 0.0f,
+    uint32_t death_feature_def_id = 0,
+    int32_t smoke_time = 0,
+    float reclaim_time = 0.0f,
+    const char *script_name = nullptr,
+    const std::vector<::flatbuffers::Offset<SpringWeb::CustomParam>> *custom_params = nullptr) {
+  auto name__ = name ? _fbb.CreateString(name) : 0;
+  auto model_url__ = model_url ? _fbb.CreateString(model_url) : 0;
+  auto texture_url__ = texture_url ? _fbb.CreateString(texture_url) : 0;
+  auto script_name__ = script_name ? _fbb.CreateString(script_name) : 0;
+  auto custom_params__ = custom_params ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::CustomParam>>(*custom_params) : 0;
+  return SpringWeb::CreateGameFeatureDef(
+      _fbb,
+      def_id,
+      name__,
+      model_url__,
+      texture_url__,
+      draw_type,
+      footprint_x,
+      footprint_z,
+      height,
+      radius,
+      mass,
+      health,
+      blocking,
+      reclaimable,
+      destructable,
+      burnable,
+      floating,
+      geo_thermal,
+      metal,
+      energy,
+      death_feature_def_id,
+      smoke_time,
+      reclaim_time,
+      script_name__,
+      custom_params__);
+}
+
+::flatbuffers::Offset<GameFeatureDef> CreateGameFeatureDef(::flatbuffers::FlatBufferBuilder &_fbb, const GameFeatureDefT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct GameFeatureDefsT : public ::flatbuffers::NativeTable {
+  typedef GameFeatureDefs TableType;
+  std::vector<std::unique_ptr<SpringWeb::GameFeatureDefT>> defs{};
+  std::string base_url{};
+  GameFeatureDefsT() = default;
+  GameFeatureDefsT(const GameFeatureDefsT &o);
+  GameFeatureDefsT(GameFeatureDefsT&&) FLATBUFFERS_NOEXCEPT = default;
+  GameFeatureDefsT &operator=(GameFeatureDefsT o) FLATBUFFERS_NOEXCEPT;
+};
+
+/// Game-wide feature def table. Sent alongside `GameUnitDefs` /
+/// `GameWeaponDefs` / `GameCegDefs` from the same baked cache directory.
+struct GameFeatureDefs FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef GameFeatureDefsT NativeTableType;
+  typedef GameFeatureDefsBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_DEFS = 4,
+    VT_BASE_URL = 6
+  };
+  const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::GameFeatureDef>> *defs() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::GameFeatureDef>> *>(VT_DEFS);
+  }
+  /// Base URL for model/texture paths (matches GameUnitDefs.base_url).
+  const ::flatbuffers::String *base_url() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_BASE_URL);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_DEFS) &&
+           verifier.VerifyVector(defs()) &&
+           verifier.VerifyVectorOfTables(defs()) &&
+           VerifyOffset(verifier, VT_BASE_URL) &&
+           verifier.VerifyString(base_url()) &&
+           verifier.EndTable();
+  }
+  GameFeatureDefsT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(GameFeatureDefsT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<GameFeatureDefs> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameFeatureDefsT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct GameFeatureDefsBuilder {
+  typedef GameFeatureDefs Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_defs(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::GameFeatureDef>>> defs) {
+    fbb_.AddOffset(GameFeatureDefs::VT_DEFS, defs);
+  }
+  void add_base_url(::flatbuffers::Offset<::flatbuffers::String> base_url) {
+    fbb_.AddOffset(GameFeatureDefs::VT_BASE_URL, base_url);
+  }
+  explicit GameFeatureDefsBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<GameFeatureDefs> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<GameFeatureDefs>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<GameFeatureDefs> CreateGameFeatureDefs(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::GameFeatureDef>>> defs = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> base_url = 0) {
+  GameFeatureDefsBuilder builder_(_fbb);
+  builder_.add_base_url(base_url);
+  builder_.add_defs(defs);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<GameFeatureDefs> CreateGameFeatureDefsDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const std::vector<::flatbuffers::Offset<SpringWeb::GameFeatureDef>> *defs = nullptr,
+    const char *base_url = nullptr) {
+  auto defs__ = defs ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::GameFeatureDef>>(*defs) : 0;
+  auto base_url__ = base_url ? _fbb.CreateString(base_url) : 0;
+  return SpringWeb::CreateGameFeatureDefs(
+      _fbb,
+      defs__,
+      base_url__);
+}
+
+::flatbuffers::Offset<GameFeatureDefs> CreateGameFeatureDefs(::flatbuffers::FlatBufferBuilder &_fbb, const GameFeatureDefsT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
 struct MapInfoT : public ::flatbuffers::NativeTable {
   typedef MapInfo TableType;
   std::string id{};
@@ -15366,6 +15901,247 @@ inline ::flatbuffers::Offset<UnitLifecycleBatch> CreateUnitLifecycleBatchDirect(
 
 ::flatbuffers::Offset<UnitLifecycleBatch> CreateUnitLifecycleBatch(::flatbuffers::FlatBufferBuilder &_fbb, const UnitLifecycleBatchT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
+struct FeatureSpawnT : public ::flatbuffers::NativeTable {
+  typedef FeatureSpawn TableType;
+  uint32_t feature_id = 0;
+  uint32_t def_id = 0;
+  float x = 0.0f;
+  float y = 0.0f;
+  float z = 0.0f;
+  int16_t heading = 0;
+  uint8_t build_facing = 0;
+  int8_t team = -1;
+  int8_t ally_team = -1;
+};
+
+/// One feature spawned on the server this tick. Covers wrecks created
+/// by `CFeatureHandler::CreateWreckage` on unit death, debris dropped
+/// by explosions, Lua `Spring.CreateFeature` calls, and any other
+/// runtime-spawned `CFeature`. Map-placed features arrive via
+/// `MapData.features` at game start, not here — only dynamic spawns.
+///
+/// `team` is the owning team (controls reclaim rights); -1 means
+/// gaia/neutral. `ally_team` lets the server filter visibility client-
+/// side (we still broadcast unfiltered for simplicity since wrecks are
+/// usually visible to everyone, but the field is here so per-team
+/// filtering can be added without a schema bump).
+struct FeatureSpawn FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef FeatureSpawnT NativeTableType;
+  typedef FeatureSpawnBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_FEATURE_ID = 4,
+    VT_DEF_ID = 6,
+    VT_X = 8,
+    VT_Y = 10,
+    VT_Z = 12,
+    VT_HEADING = 14,
+    VT_BUILD_FACING = 16,
+    VT_TEAM = 18,
+    VT_ALLY_TEAM = 20
+  };
+  uint32_t feature_id() const {
+    return GetField<uint32_t>(VT_FEATURE_ID, 0);
+  }
+  uint32_t def_id() const {
+    return GetField<uint32_t>(VT_DEF_ID, 0);
+  }
+  float x() const {
+    return GetField<float>(VT_X, 0.0f);
+  }
+  float y() const {
+    return GetField<float>(VT_Y, 0.0f);
+  }
+  float z() const {
+    return GetField<float>(VT_Z, 0.0f);
+  }
+  /// Spring heading: 16-bit fixed-point angle (0 = +Z, 16384 = +X).
+  int16_t heading() const {
+    return GetField<int16_t>(VT_HEADING, 0);
+  }
+  /// Build facing 0..3 (south/east/north/west), copied from the parent
+  /// unit's facing when the wreck inherits it.
+  uint8_t build_facing() const {
+    return GetField<uint8_t>(VT_BUILD_FACING, 0);
+  }
+  int8_t team() const {
+    return GetField<int8_t>(VT_TEAM, -1);
+  }
+  int8_t ally_team() const {
+    return GetField<int8_t>(VT_ALLY_TEAM, -1);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_FEATURE_ID, 4) &&
+           VerifyField<uint32_t>(verifier, VT_DEF_ID, 4) &&
+           VerifyField<float>(verifier, VT_X, 4) &&
+           VerifyField<float>(verifier, VT_Y, 4) &&
+           VerifyField<float>(verifier, VT_Z, 4) &&
+           VerifyField<int16_t>(verifier, VT_HEADING, 2) &&
+           VerifyField<uint8_t>(verifier, VT_BUILD_FACING, 1) &&
+           VerifyField<int8_t>(verifier, VT_TEAM, 1) &&
+           VerifyField<int8_t>(verifier, VT_ALLY_TEAM, 1) &&
+           verifier.EndTable();
+  }
+  FeatureSpawnT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(FeatureSpawnT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<FeatureSpawn> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const FeatureSpawnT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct FeatureSpawnBuilder {
+  typedef FeatureSpawn Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_feature_id(uint32_t feature_id) {
+    fbb_.AddElement<uint32_t>(FeatureSpawn::VT_FEATURE_ID, feature_id, 0);
+  }
+  void add_def_id(uint32_t def_id) {
+    fbb_.AddElement<uint32_t>(FeatureSpawn::VT_DEF_ID, def_id, 0);
+  }
+  void add_x(float x) {
+    fbb_.AddElement<float>(FeatureSpawn::VT_X, x, 0.0f);
+  }
+  void add_y(float y) {
+    fbb_.AddElement<float>(FeatureSpawn::VT_Y, y, 0.0f);
+  }
+  void add_z(float z) {
+    fbb_.AddElement<float>(FeatureSpawn::VT_Z, z, 0.0f);
+  }
+  void add_heading(int16_t heading) {
+    fbb_.AddElement<int16_t>(FeatureSpawn::VT_HEADING, heading, 0);
+  }
+  void add_build_facing(uint8_t build_facing) {
+    fbb_.AddElement<uint8_t>(FeatureSpawn::VT_BUILD_FACING, build_facing, 0);
+  }
+  void add_team(int8_t team) {
+    fbb_.AddElement<int8_t>(FeatureSpawn::VT_TEAM, team, -1);
+  }
+  void add_ally_team(int8_t ally_team) {
+    fbb_.AddElement<int8_t>(FeatureSpawn::VT_ALLY_TEAM, ally_team, -1);
+  }
+  explicit FeatureSpawnBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<FeatureSpawn> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<FeatureSpawn>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<FeatureSpawn> CreateFeatureSpawn(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t feature_id = 0,
+    uint32_t def_id = 0,
+    float x = 0.0f,
+    float y = 0.0f,
+    float z = 0.0f,
+    int16_t heading = 0,
+    uint8_t build_facing = 0,
+    int8_t team = -1,
+    int8_t ally_team = -1) {
+  FeatureSpawnBuilder builder_(_fbb);
+  builder_.add_z(z);
+  builder_.add_y(y);
+  builder_.add_x(x);
+  builder_.add_def_id(def_id);
+  builder_.add_feature_id(feature_id);
+  builder_.add_heading(heading);
+  builder_.add_ally_team(ally_team);
+  builder_.add_team(team);
+  builder_.add_build_facing(build_facing);
+  return builder_.Finish();
+}
+
+::flatbuffers::Offset<FeatureSpawn> CreateFeatureSpawn(::flatbuffers::FlatBufferBuilder &_fbb, const FeatureSpawnT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct FeatureLifecycleBatchT : public ::flatbuffers::NativeTable {
+  typedef FeatureLifecycleBatch TableType;
+  std::vector<std::unique_ptr<SpringWeb::FeatureSpawnT>> spawns{};
+  std::vector<uint32_t> removed{};
+  FeatureLifecycleBatchT() = default;
+  FeatureLifecycleBatchT(const FeatureLifecycleBatchT &o);
+  FeatureLifecycleBatchT(FeatureLifecycleBatchT&&) FLATBUFFERS_NOEXCEPT = default;
+  FeatureLifecycleBatchT &operator=(FeatureLifecycleBatchT o) FLATBUFFERS_NOEXCEPT;
+};
+
+/// Per-tick batch of feature lifecycle events. Empty on quiet ticks;
+/// populated when units die (wreck spawn), buildings collapse, debris
+/// drops, or gadget code calls `Spring.CreateFeature` / `DestroyFeature`.
+struct FeatureLifecycleBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef FeatureLifecycleBatchT NativeTableType;
+  typedef FeatureLifecycleBatchBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_SPAWNS = 4,
+    VT_REMOVED = 6
+  };
+  const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::FeatureSpawn>> *spawns() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::FeatureSpawn>> *>(VT_SPAWNS);
+  }
+  /// Feature IDs removed this tick (reclaimed, destroyed, despawned).
+  /// Parallel to `spawns` order — the client just plays back both.
+  const ::flatbuffers::Vector<uint32_t> *removed() const {
+    return GetPointer<const ::flatbuffers::Vector<uint32_t> *>(VT_REMOVED);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_SPAWNS) &&
+           verifier.VerifyVector(spawns()) &&
+           verifier.VerifyVectorOfTables(spawns()) &&
+           VerifyOffset(verifier, VT_REMOVED) &&
+           verifier.VerifyVector(removed()) &&
+           verifier.EndTable();
+  }
+  FeatureLifecycleBatchT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(FeatureLifecycleBatchT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<FeatureLifecycleBatch> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const FeatureLifecycleBatchT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct FeatureLifecycleBatchBuilder {
+  typedef FeatureLifecycleBatch Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_spawns(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::FeatureSpawn>>> spawns) {
+    fbb_.AddOffset(FeatureLifecycleBatch::VT_SPAWNS, spawns);
+  }
+  void add_removed(::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> removed) {
+    fbb_.AddOffset(FeatureLifecycleBatch::VT_REMOVED, removed);
+  }
+  explicit FeatureLifecycleBatchBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<FeatureLifecycleBatch> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<FeatureLifecycleBatch>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<FeatureLifecycleBatch> CreateFeatureLifecycleBatch(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::FeatureSpawn>>> spawns = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> removed = 0) {
+  FeatureLifecycleBatchBuilder builder_(_fbb);
+  builder_.add_removed(removed);
+  builder_.add_spawns(spawns);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<FeatureLifecycleBatch> CreateFeatureLifecycleBatchDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const std::vector<::flatbuffers::Offset<SpringWeb::FeatureSpawn>> *spawns = nullptr,
+    const std::vector<uint32_t> *removed = nullptr) {
+  auto spawns__ = spawns ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::FeatureSpawn>>(*spawns) : 0;
+  auto removed__ = removed ? _fbb.CreateVector<uint32_t>(*removed) : 0;
+  return SpringWeb::CreateFeatureLifecycleBatch(
+      _fbb,
+      spawns__,
+      removed__);
+}
+
+::flatbuffers::Offset<FeatureLifecycleBatch> CreateFeatureLifecycleBatch(::flatbuffers::FlatBufferBuilder &_fbb, const FeatureLifecycleBatchT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
 struct UnitCommandEventT : public ::flatbuffers::NativeTable {
   typedef UnitCommandEvent TableType;
   SpringWeb::UnitCommandKind kind = SpringWeb::UnitCommandKind_Issued;
@@ -16137,6 +16913,12 @@ struct ServerMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const SpringWeb::StandingOrderState *payload_as_StandingOrderState() const {
     return payload_type() == SpringWeb::ServerPayload_StandingOrderState ? static_cast<const SpringWeb::StandingOrderState *>(payload()) : nullptr;
   }
+  const SpringWeb::GameFeatureDefs *payload_as_GameFeatureDefs() const {
+    return payload_type() == SpringWeb::ServerPayload_GameFeatureDefs ? static_cast<const SpringWeb::GameFeatureDefs *>(payload()) : nullptr;
+  }
+  const SpringWeb::FeatureLifecycleBatch *payload_as_FeatureLifecycleBatch() const {
+    return payload_type() == SpringWeb::ServerPayload_FeatureLifecycleBatch ? static_cast<const SpringWeb::FeatureLifecycleBatch *>(payload()) : nullptr;
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_PAYLOAD_TYPE, 1) &&
@@ -16295,6 +17077,14 @@ template<> inline const SpringWeb::PathResponse *ServerMessage::payload_as<Sprin
 
 template<> inline const SpringWeb::StandingOrderState *ServerMessage::payload_as<SpringWeb::StandingOrderState>() const {
   return payload_as_StandingOrderState();
+}
+
+template<> inline const SpringWeb::GameFeatureDefs *ServerMessage::payload_as<SpringWeb::GameFeatureDefs>() const {
+  return payload_as_GameFeatureDefs();
+}
+
+template<> inline const SpringWeb::FeatureLifecycleBatch *ServerMessage::payload_as<SpringWeb::FeatureLifecycleBatch>() const {
+  return payload_as_FeatureLifecycleBatch();
 }
 
 struct ServerMessageBuilder {
@@ -20147,6 +20937,198 @@ inline ::flatbuffers::Offset<GameUnitDefs> CreateGameUnitDefs(::flatbuffers::Fla
       _base_url);
 }
 
+inline GameFeatureDefT::GameFeatureDefT(const GameFeatureDefT &o)
+      : def_id(o.def_id),
+        name(o.name),
+        model_url(o.model_url),
+        texture_url(o.texture_url),
+        draw_type(o.draw_type),
+        footprint_x(o.footprint_x),
+        footprint_z(o.footprint_z),
+        height(o.height),
+        radius(o.radius),
+        mass(o.mass),
+        health(o.health),
+        blocking(o.blocking),
+        reclaimable(o.reclaimable),
+        destructable(o.destructable),
+        burnable(o.burnable),
+        floating(o.floating),
+        geo_thermal(o.geo_thermal),
+        metal(o.metal),
+        energy(o.energy),
+        death_feature_def_id(o.death_feature_def_id),
+        smoke_time(o.smoke_time),
+        reclaim_time(o.reclaim_time),
+        script_name(o.script_name) {
+  custom_params.reserve(o.custom_params.size());
+  for (const auto &custom_params_ : o.custom_params) { custom_params.emplace_back((custom_params_) ? new SpringWeb::CustomParamT(*custom_params_) : nullptr); }
+}
+
+inline GameFeatureDefT &GameFeatureDefT::operator=(GameFeatureDefT o) FLATBUFFERS_NOEXCEPT {
+  std::swap(def_id, o.def_id);
+  std::swap(name, o.name);
+  std::swap(model_url, o.model_url);
+  std::swap(texture_url, o.texture_url);
+  std::swap(draw_type, o.draw_type);
+  std::swap(footprint_x, o.footprint_x);
+  std::swap(footprint_z, o.footprint_z);
+  std::swap(height, o.height);
+  std::swap(radius, o.radius);
+  std::swap(mass, o.mass);
+  std::swap(health, o.health);
+  std::swap(blocking, o.blocking);
+  std::swap(reclaimable, o.reclaimable);
+  std::swap(destructable, o.destructable);
+  std::swap(burnable, o.burnable);
+  std::swap(floating, o.floating);
+  std::swap(geo_thermal, o.geo_thermal);
+  std::swap(metal, o.metal);
+  std::swap(energy, o.energy);
+  std::swap(death_feature_def_id, o.death_feature_def_id);
+  std::swap(smoke_time, o.smoke_time);
+  std::swap(reclaim_time, o.reclaim_time);
+  std::swap(script_name, o.script_name);
+  std::swap(custom_params, o.custom_params);
+  return *this;
+}
+
+inline GameFeatureDefT *GameFeatureDef::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<GameFeatureDefT>(new GameFeatureDefT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void GameFeatureDef::UnPackTo(GameFeatureDefT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = def_id(); _o->def_id = _e; }
+  { auto _e = name(); if (_e) _o->name = _e->str(); }
+  { auto _e = model_url(); if (_e) _o->model_url = _e->str(); }
+  { auto _e = texture_url(); if (_e) _o->texture_url = _e->str(); }
+  { auto _e = draw_type(); _o->draw_type = _e; }
+  { auto _e = footprint_x(); _o->footprint_x = _e; }
+  { auto _e = footprint_z(); _o->footprint_z = _e; }
+  { auto _e = height(); _o->height = _e; }
+  { auto _e = radius(); _o->radius = _e; }
+  { auto _e = mass(); _o->mass = _e; }
+  { auto _e = health(); _o->health = _e; }
+  { auto _e = blocking(); _o->blocking = _e; }
+  { auto _e = reclaimable(); _o->reclaimable = _e; }
+  { auto _e = destructable(); _o->destructable = _e; }
+  { auto _e = burnable(); _o->burnable = _e; }
+  { auto _e = floating(); _o->floating = _e; }
+  { auto _e = geo_thermal(); _o->geo_thermal = _e; }
+  { auto _e = metal(); _o->metal = _e; }
+  { auto _e = energy(); _o->energy = _e; }
+  { auto _e = death_feature_def_id(); _o->death_feature_def_id = _e; }
+  { auto _e = smoke_time(); _o->smoke_time = _e; }
+  { auto _e = reclaim_time(); _o->reclaim_time = _e; }
+  { auto _e = script_name(); if (_e) _o->script_name = _e->str(); }
+  { auto _e = custom_params(); if (_e) { _o->custom_params.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->custom_params[_i]) { _e->Get(_i)->UnPackTo(_o->custom_params[_i].get(), _resolver); } else { _o->custom_params[_i] = std::unique_ptr<SpringWeb::CustomParamT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->custom_params.resize(0); } }
+}
+
+inline ::flatbuffers::Offset<GameFeatureDef> GameFeatureDef::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameFeatureDefT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateGameFeatureDef(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<GameFeatureDef> CreateGameFeatureDef(::flatbuffers::FlatBufferBuilder &_fbb, const GameFeatureDefT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const GameFeatureDefT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _def_id = _o->def_id;
+  auto _name = _o->name.empty() ? 0 : _fbb.CreateString(_o->name);
+  auto _model_url = _o->model_url.empty() ? 0 : _fbb.CreateString(_o->model_url);
+  auto _texture_url = _o->texture_url.empty() ? 0 : _fbb.CreateString(_o->texture_url);
+  auto _draw_type = _o->draw_type;
+  auto _footprint_x = _o->footprint_x;
+  auto _footprint_z = _o->footprint_z;
+  auto _height = _o->height;
+  auto _radius = _o->radius;
+  auto _mass = _o->mass;
+  auto _health = _o->health;
+  auto _blocking = _o->blocking;
+  auto _reclaimable = _o->reclaimable;
+  auto _destructable = _o->destructable;
+  auto _burnable = _o->burnable;
+  auto _floating = _o->floating;
+  auto _geo_thermal = _o->geo_thermal;
+  auto _metal = _o->metal;
+  auto _energy = _o->energy;
+  auto _death_feature_def_id = _o->death_feature_def_id;
+  auto _smoke_time = _o->smoke_time;
+  auto _reclaim_time = _o->reclaim_time;
+  auto _script_name = _o->script_name.empty() ? 0 : _fbb.CreateString(_o->script_name);
+  auto _custom_params = _o->custom_params.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::CustomParam>> (_o->custom_params.size(), [](size_t i, _VectorArgs *__va) { return CreateCustomParam(*__va->__fbb, __va->__o->custom_params[i].get(), __va->__rehasher); }, &_va ) : 0;
+  return SpringWeb::CreateGameFeatureDef(
+      _fbb,
+      _def_id,
+      _name,
+      _model_url,
+      _texture_url,
+      _draw_type,
+      _footprint_x,
+      _footprint_z,
+      _height,
+      _radius,
+      _mass,
+      _health,
+      _blocking,
+      _reclaimable,
+      _destructable,
+      _burnable,
+      _floating,
+      _geo_thermal,
+      _metal,
+      _energy,
+      _death_feature_def_id,
+      _smoke_time,
+      _reclaim_time,
+      _script_name,
+      _custom_params);
+}
+
+inline GameFeatureDefsT::GameFeatureDefsT(const GameFeatureDefsT &o)
+      : base_url(o.base_url) {
+  defs.reserve(o.defs.size());
+  for (const auto &defs_ : o.defs) { defs.emplace_back((defs_) ? new SpringWeb::GameFeatureDefT(*defs_) : nullptr); }
+}
+
+inline GameFeatureDefsT &GameFeatureDefsT::operator=(GameFeatureDefsT o) FLATBUFFERS_NOEXCEPT {
+  std::swap(defs, o.defs);
+  std::swap(base_url, o.base_url);
+  return *this;
+}
+
+inline GameFeatureDefsT *GameFeatureDefs::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<GameFeatureDefsT>(new GameFeatureDefsT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void GameFeatureDefs::UnPackTo(GameFeatureDefsT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = defs(); if (_e) { _o->defs.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->defs[_i]) { _e->Get(_i)->UnPackTo(_o->defs[_i].get(), _resolver); } else { _o->defs[_i] = std::unique_ptr<SpringWeb::GameFeatureDefT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->defs.resize(0); } }
+  { auto _e = base_url(); if (_e) _o->base_url = _e->str(); }
+}
+
+inline ::flatbuffers::Offset<GameFeatureDefs> GameFeatureDefs::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameFeatureDefsT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateGameFeatureDefs(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<GameFeatureDefs> CreateGameFeatureDefs(::flatbuffers::FlatBufferBuilder &_fbb, const GameFeatureDefsT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const GameFeatureDefsT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _defs = _o->defs.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::GameFeatureDef>> (_o->defs.size(), [](size_t i, _VectorArgs *__va) { return CreateGameFeatureDef(*__va->__fbb, __va->__o->defs[i].get(), __va->__rehasher); }, &_va ) : 0;
+  auto _base_url = _o->base_url.empty() ? 0 : _fbb.CreateString(_o->base_url);
+  return SpringWeb::CreateGameFeatureDefs(
+      _fbb,
+      _defs,
+      _base_url);
+}
+
 inline MapInfoT *MapInfo::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
   auto _o = std::unique_ptr<MapInfoT>(new MapInfoT());
   UnPackTo(_o.get(), _resolver);
@@ -21218,6 +22200,97 @@ inline ::flatbuffers::Offset<UnitLifecycleBatch> CreateUnitLifecycleBatch(::flat
   return SpringWeb::CreateUnitLifecycleBatch(
       _fbb,
       _events);
+}
+
+inline FeatureSpawnT *FeatureSpawn::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<FeatureSpawnT>(new FeatureSpawnT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void FeatureSpawn::UnPackTo(FeatureSpawnT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = feature_id(); _o->feature_id = _e; }
+  { auto _e = def_id(); _o->def_id = _e; }
+  { auto _e = x(); _o->x = _e; }
+  { auto _e = y(); _o->y = _e; }
+  { auto _e = z(); _o->z = _e; }
+  { auto _e = heading(); _o->heading = _e; }
+  { auto _e = build_facing(); _o->build_facing = _e; }
+  { auto _e = team(); _o->team = _e; }
+  { auto _e = ally_team(); _o->ally_team = _e; }
+}
+
+inline ::flatbuffers::Offset<FeatureSpawn> FeatureSpawn::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const FeatureSpawnT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateFeatureSpawn(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<FeatureSpawn> CreateFeatureSpawn(::flatbuffers::FlatBufferBuilder &_fbb, const FeatureSpawnT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const FeatureSpawnT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _feature_id = _o->feature_id;
+  auto _def_id = _o->def_id;
+  auto _x = _o->x;
+  auto _y = _o->y;
+  auto _z = _o->z;
+  auto _heading = _o->heading;
+  auto _build_facing = _o->build_facing;
+  auto _team = _o->team;
+  auto _ally_team = _o->ally_team;
+  return SpringWeb::CreateFeatureSpawn(
+      _fbb,
+      _feature_id,
+      _def_id,
+      _x,
+      _y,
+      _z,
+      _heading,
+      _build_facing,
+      _team,
+      _ally_team);
+}
+
+inline FeatureLifecycleBatchT::FeatureLifecycleBatchT(const FeatureLifecycleBatchT &o)
+      : removed(o.removed) {
+  spawns.reserve(o.spawns.size());
+  for (const auto &spawns_ : o.spawns) { spawns.emplace_back((spawns_) ? new SpringWeb::FeatureSpawnT(*spawns_) : nullptr); }
+}
+
+inline FeatureLifecycleBatchT &FeatureLifecycleBatchT::operator=(FeatureLifecycleBatchT o) FLATBUFFERS_NOEXCEPT {
+  std::swap(spawns, o.spawns);
+  std::swap(removed, o.removed);
+  return *this;
+}
+
+inline FeatureLifecycleBatchT *FeatureLifecycleBatch::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<FeatureLifecycleBatchT>(new FeatureLifecycleBatchT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void FeatureLifecycleBatch::UnPackTo(FeatureLifecycleBatchT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = spawns(); if (_e) { _o->spawns.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->spawns[_i]) { _e->Get(_i)->UnPackTo(_o->spawns[_i].get(), _resolver); } else { _o->spawns[_i] = std::unique_ptr<SpringWeb::FeatureSpawnT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->spawns.resize(0); } }
+  { auto _e = removed(); if (_e) { _o->removed.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->removed[_i] = _e->Get(_i); } } else { _o->removed.resize(0); } }
+}
+
+inline ::flatbuffers::Offset<FeatureLifecycleBatch> FeatureLifecycleBatch::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const FeatureLifecycleBatchT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateFeatureLifecycleBatch(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<FeatureLifecycleBatch> CreateFeatureLifecycleBatch(::flatbuffers::FlatBufferBuilder &_fbb, const FeatureLifecycleBatchT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const FeatureLifecycleBatchT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _spawns = _o->spawns.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::FeatureSpawn>> (_o->spawns.size(), [](size_t i, _VectorArgs *__va) { return CreateFeatureSpawn(*__va->__fbb, __va->__o->spawns[i].get(), __va->__rehasher); }, &_va ) : 0;
+  auto _removed = _o->removed.size() ? _fbb.CreateVector(_o->removed) : 0;
+  return SpringWeb::CreateFeatureLifecycleBatch(
+      _fbb,
+      _spawns,
+      _removed);
 }
 
 inline UnitCommandEventT *UnitCommandEvent::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
@@ -22427,6 +23500,14 @@ inline bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *o
       auto ptr = reinterpret_cast<const SpringWeb::StandingOrderState *>(obj);
       return verifier.VerifyTable(ptr);
     }
+    case ServerPayload_GameFeatureDefs: {
+      auto ptr = reinterpret_cast<const SpringWeb::GameFeatureDefs *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case ServerPayload_FeatureLifecycleBatch: {
+      auto ptr = reinterpret_cast<const SpringWeb::FeatureLifecycleBatch *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
     default: return true;
   }
 }
@@ -22594,6 +23675,14 @@ inline void *ServerPayloadUnion::UnPack(const void *obj, ServerPayload type, con
       auto ptr = reinterpret_cast<const SpringWeb::StandingOrderState *>(obj);
       return ptr->UnPack(resolver);
     }
+    case ServerPayload_GameFeatureDefs: {
+      auto ptr = reinterpret_cast<const SpringWeb::GameFeatureDefs *>(obj);
+      return ptr->UnPack(resolver);
+    }
+    case ServerPayload_FeatureLifecycleBatch: {
+      auto ptr = reinterpret_cast<const SpringWeb::FeatureLifecycleBatch *>(obj);
+      return ptr->UnPack(resolver);
+    }
     default: return nullptr;
   }
 }
@@ -22749,6 +23838,14 @@ inline ::flatbuffers::Offset<void> ServerPayloadUnion::Pack(::flatbuffers::FlatB
       auto ptr = reinterpret_cast<const SpringWeb::StandingOrderStateT *>(value);
       return CreateStandingOrderState(_fbb, ptr, _rehasher).Union();
     }
+    case ServerPayload_GameFeatureDefs: {
+      auto ptr = reinterpret_cast<const SpringWeb::GameFeatureDefsT *>(value);
+      return CreateGameFeatureDefs(_fbb, ptr, _rehasher).Union();
+    }
+    case ServerPayload_FeatureLifecycleBatch: {
+      auto ptr = reinterpret_cast<const SpringWeb::FeatureLifecycleBatchT *>(value);
+      return CreateFeatureLifecycleBatch(_fbb, ptr, _rehasher).Union();
+    }
     default: return 0;
   }
 }
@@ -22901,6 +23998,14 @@ inline ServerPayloadUnion::ServerPayloadUnion(const ServerPayloadUnion &u) : typ
     }
     case ServerPayload_StandingOrderState: {
       value = new SpringWeb::StandingOrderStateT(*reinterpret_cast<SpringWeb::StandingOrderStateT *>(u.value));
+      break;
+    }
+    case ServerPayload_GameFeatureDefs: {
+      value = new SpringWeb::GameFeatureDefsT(*reinterpret_cast<SpringWeb::GameFeatureDefsT *>(u.value));
+      break;
+    }
+    case ServerPayload_FeatureLifecycleBatch: {
+      value = new SpringWeb::FeatureLifecycleBatchT(*reinterpret_cast<SpringWeb::FeatureLifecycleBatchT *>(u.value));
       break;
     }
     default:
@@ -23092,6 +24197,16 @@ inline void ServerPayloadUnion::Reset() {
     }
     case ServerPayload_StandingOrderState: {
       auto ptr = reinterpret_cast<SpringWeb::StandingOrderStateT *>(value);
+      delete ptr;
+      break;
+    }
+    case ServerPayload_GameFeatureDefs: {
+      auto ptr = reinterpret_cast<SpringWeb::GameFeatureDefsT *>(value);
+      delete ptr;
+      break;
+    }
+    case ServerPayload_FeatureLifecycleBatch: {
+      auto ptr = reinterpret_cast<SpringWeb::FeatureLifecycleBatchT *>(value);
       delete ptr;
       break;
     }

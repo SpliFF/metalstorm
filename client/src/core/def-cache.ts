@@ -9,7 +9,7 @@
  * this cache rather than holding their own copy of the def list.
  */
 
-import type { UnitDefInfo, WeaponDefInfo, CegDefInfo } from './connection.js';
+import type { UnitDefInfo, WeaponDefInfo, CegDefInfo, FeatureDefInfo } from './connection.js';
 
 export type DefListener<T> = (newDefs: T[]) => void;
 
@@ -20,10 +20,15 @@ export class DefCache {
     /// `explosionGenerator` strings), unlike unit/weapon defs which
     /// are integer-keyed. Tags arrive lowercased from the server.
     private cegDefs = new Map<string, CegDefInfo>();
+    /// FeatureDefs are integer-keyed by the server's `CFeature::def->id`.
+    /// FeatureSpawn batch entries carry this id; renderer resolves the
+    /// model URL on first sight via this map.
+    private featureDefs = new Map<number, FeatureDefInfo>();
 
     private unitDefListeners: DefListener<UnitDefInfo>[] = [];
     private weaponDefListeners: DefListener<WeaponDefInfo>[] = [];
     private cegDefListeners: DefListener<CegDefInfo>[] = [];
+    private featureDefListeners: DefListener<FeatureDefInfo>[] = [];
 
     /** Merge a batch of unit defs (may contain defs already cached). */
     addUnitDefs(defs: UnitDefInfo[]): void {
@@ -68,9 +73,28 @@ export class DefCache {
         }
     }
 
+    /** Merge a batch of feature defs. Lookup is by `defId`. */
+    addFeatureDefs(defs: FeatureDefInfo[]): void {
+        const newDefs: FeatureDefInfo[] = [];
+        for (const d of defs) {
+            if (!this.featureDefs.has(d.defId)) {
+                this.featureDefs.set(d.defId, d);
+                newDefs.push(d);
+            }
+        }
+        if (newDefs.length > 0) {
+            for (const fn of this.featureDefListeners) fn(newDefs);
+        }
+    }
+
     /** Look up a single unit def. */
     getUnitDef(defId: number): UnitDefInfo | undefined {
         return this.unitDefs.get(defId);
+    }
+
+    /** Look up a single feature def by id. */
+    getFeatureDef(defId: number): FeatureDefInfo | undefined {
+        return this.featureDefs.get(defId);
     }
 
     /** Look up a single weapon def. */
@@ -115,13 +139,25 @@ export class DefCache {
         this.cegDefListeners.push(fn);
     }
 
+    /** Subscribe to new feature defs. Called with only newly added defs. */
+    onFeatureDefs(fn: DefListener<FeatureDefInfo>): void {
+        this.featureDefListeners.push(fn);
+    }
+
+    /** All cached feature defs. */
+    getAllFeatureDefs(): FeatureDefInfo[] {
+        return [...this.featureDefs.values()];
+    }
+
     /** Clear all cached defs and listeners (game session ended). */
     clear(): void {
         this.unitDefs.clear();
         this.weaponDefs.clear();
         this.cegDefs.clear();
+        this.featureDefs.clear();
         this.unitDefListeners.length = 0;
         this.weaponDefListeners.length = 0;
         this.cegDefListeners.length = 0;
+        this.featureDefListeners.length = 0;
     }
 }

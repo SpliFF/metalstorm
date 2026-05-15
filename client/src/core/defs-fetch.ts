@@ -32,21 +32,30 @@ export async function fetchAndIngestDefs(
 ): Promise<void> {
     if (!gameId || !cacheKey) return;
     const base = `${lobbyHttpUrl}/api/games/data/${gameId}/cache/defs/${cacheKey}`;
-    const [unitDefBytes, weaponDefBytes, cegDefBytes] = await Promise.all([
+    const [unitDefBytes, weaponDefBytes, cegDefBytes, featureDefBytes] = await Promise.all([
         fetchBin(`${base}/unitdefs.bin`),
         fetchBin(`${base}/weapondefs.bin`),
         fetchBinOptional(`${base}/cegdefs.bin`),
+        fetchBinOptional(`${base}/featuredefs.bin`),
     ]);
     conn.ingestFramedMessage(unitDefBytes);
     conn.ingestFramedMessage(weaponDefBytes);
-    // CEG defs are best-effort — a parse failure here should never
-    // black-screen the whole game. Swallow + log so the renderer's
-    // archetype dispatch keeps covering visuals.
+    // CEG and feature defs are best-effort — a parse failure here
+    // should never black-screen the whole game. Swallow + log so the
+    // archetype-based CEG dispatch and placeholder-cube wreck renderer
+    // keep covering for missing data.
     if (cegDefBytes) {
         try {
             conn.ingestFramedMessage(cegDefBytes);
         } catch (err) {
             console.warn('[defs-fetch] CEG ingest failed; falling back to BUILTIN_EFFECTS:', err);
+        }
+    }
+    if (featureDefBytes) {
+        try {
+            conn.ingestFramedMessage(featureDefBytes);
+        } catch (err) {
+            console.warn('[defs-fetch] FeatureDefs ingest failed; wrecks will render as placeholders:', err);
         }
     }
 }

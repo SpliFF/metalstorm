@@ -60,7 +60,7 @@ import { Connection } from './core/connection.js';
 import { CONFIG, fetchBuildStamp, stampUrl } from './config.js';
 import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
 import { fetchAndIngestDefs } from './core/defs-fetch.js';
-import { renderMapFeatures } from './core/feature-renderer.js';
+import { renderMapFeatures, DynamicFeatureRenderer } from './core/feature-renderer.js';
 import { RTSCamera } from './core/rts-camera.js';
 import { LuaWidgetManager } from './core/lua-widget-manager.js';
 import { TestHarness } from './core/test-harness.js';
@@ -86,6 +86,7 @@ let engine: Engine | null = null;
 let entityRenderer: EntityRenderer | null = null;
 let projectileRenderer: ProjectileRenderer | null = null;
 let buildBeamRenderer: BuildBeamRenderer | null = null;
+let dynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
 let cegRuntime: CegRuntime | null = null;
 let combatFX: CombatFX | null = null;
 let audioManager: AudioManager | null = null;
@@ -563,6 +564,16 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // every impact.
     combatFX = new CombatFX(scene, audioManager, cegRuntime, defCache);
     (window as unknown as { __defCache: unknown }).__defCache = defCache;
+
+    // Dynamic feature renderer — handles runtime-spawned features
+    // (wrecks from unit death, gadget-spawned debris, reclaim removals).
+    // Map-placed features still go through `renderMapFeatures` once on
+    // MapData. Both can share the same model .glb on disk; the dynamic
+    // renderer owns its own mesh pool so the static path's
+    // thin-instance buffer stays read-only.
+    dynamicFeatureRenderer = new DynamicFeatureRenderer(scene, defCache);
+    (window as unknown as { __dynamicFeatureRenderer: unknown }).__dynamicFeatureRenderer =
+        dynamicFeatureRenderer;
     defCache.onUnitDefs((newDefs) => {
         entityRenderer?.setUnitDefs(newDefs);
         currentWidgetManager?.forwardUnitDefs(newDefs);
@@ -1005,6 +1016,15 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         },
         onCegDefs(defs) {
             defCache.addCegDefs(defs);
+        },
+        onFeatureDefs(defs) {
+            defCache.addFeatureDefs(defs);
+        },
+        onFeatureLifecycle(spawns, removed) {
+            // Dynamic feature spawns (wrecks, debris) — forwarded to
+            // the feature renderer. Map-placed features come through
+            // onMapData and are owned by `renderMapFeatures` separately.
+            dynamicFeatureRenderer?.applyLifecycleBatch(spawns, removed);
         },
         onEntityState(snapshot, isDelta) {
             entityRenderer?.update(snapshot, isDelta);

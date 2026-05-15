@@ -762,7 +762,9 @@ int main(int argc, char* argv[])
         namespace fs = std::filesystem;
         const fs::path dir = DefsCache::CacheDir(gameId, defsCacheKey);
         const bool warm = fs::exists(dir / "unitdefs.bin")
-                       && fs::exists(dir / "weapondefs.bin");
+                       && fs::exists(dir / "weapondefs.bin")
+                       && fs::exists(dir / "cegdefs.bin")
+                       && fs::exists(dir / "featuredefs.bin");
 
         if (warm) {
             SLOG(SPRING_LOG_NOTICE, "defs cache warm: gameId=%s key=%s",
@@ -797,14 +799,32 @@ int main(int argc, char* argv[])
             // doesn't 404.
             auto cegDefs = CegLoader::LoadAllCegDefs();
             auto cdBytes = CegLoader::BuildGameCegDefs(cegDefs);
+            // FeatureDefs cover every wreck/debris/decoration the game
+            // can spawn at runtime. Map-placed features still ship in
+            // MapData; this one carries the post-startup spawn defs
+            // (wrecks from unit death, gadget-spawned features) so
+            // FeatureLifecycleBatch entries resolve to a renderable
+            // model client-side.
+            std::vector<uint8_t> fdBytes;
+            size_t fdDefCount = 0;
+            if (featureDefHandler != nullptr) {
+                const fs::path modelsDir = fs::path("data/games") / gameId / "models";
+                const auto& fdVec = featureDefHandler->GetFeatureDefsVec();
+                fdBytes = Protocol::BuildGameFeatureDefs(
+                    fdVec, gameId, modelsDir);
+                fdDefCount = fdVec.empty() ? 0 : fdVec.size() - 1;
+            }
             if (DefsCache::WriteIfMissing(gameId, defsCacheKey,
-                                          udBytes, wdBytes, cdBytes)) {
+                                          udBytes, wdBytes, cdBytes,
+                                          fdBytes)) {
                 SLOG(SPRING_LOG_NOTICE,
                      "defs cache baked: gameId=%s key=%s "
-                     "(unitdefs=%zu B, weapondefs=%zu B, cegdefs=%zu B/%zu defs)",
+                     "(unitdefs=%zu B, weapondefs=%zu B, cegdefs=%zu B/%zu defs, "
+                     "featuredefs=%zu B/%zu defs)",
                      gameId.c_str(), defsCacheKey.c_str(),
                      udBytes.size(), wdBytes.size(),
-                     cdBytes.size(), cegDefs.size());
+                     cdBytes.size(), cegDefs.size(),
+                     fdBytes.size(), fdDefCount);
             } else {
                 SLOG(SPRING_LOG_ERROR,
                      "defs cache write failed: gameId=%s key=%s "
@@ -2343,6 +2363,27 @@ int main(int argc, char* argv[])
                             rtcServer.SendReliable(clientId, msg.data(), msg.size());
                         }
                     });
+                }
+            }
+        }
+
+        // Feature lifecycle events — FeatureCreated / FeatureDestroyed.
+        // Drained each tick. Broadcast unfiltered: wrecks and debris
+        // are visible to everyone (LOS gating on dynamic features
+        // isn't gameplay-critical in Spring; gadgets can hide a feature
+        // via the AllowFeatureCreation hook before it ever spawns, so
+        // by the time a Spawn event reaches us it's already public).
+        if (featureLifecycleEvents != nullptr) {
+            std::vector<FeatureSpawnEventData> featSpawns;
+            std::vector<FeatureRemovedEventData> featRemoved;
+            featureLifecycleEvents->Drain(featSpawns, featRemoved);
+            if ((!featSpawns.empty() || !featRemoved.empty())
+                && rtcServer.GetClientCount() > 0)
+            {
+                auto msg = Protocol::BuildFeatureLifecycleBatch(
+                    featSpawns, featRemoved);
+                if (!msg.empty()) {
+                    rtcServer.BroadcastReliable(msg.data(), msg.size());
                 }
             }
         }

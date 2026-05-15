@@ -74,7 +74,11 @@ inline std::string ComputeCacheKey(
     // GroundFlashInfo subtable (PLAN-combat-vfx.md Phase 4b /
     // PLAN-ceg.md groundflash). Schema gained a new field; pre-v12
     // caches don't carry it, so bumping forces a re-bake.
-    canonical += "schemaV12-protocol";
+    // 2026-05-15: v13 — `GameFeatureDefs` payload added (wreck spawn
+    // streaming). The bake writes a fourth `featuredefs.bin` alongside
+    // unit/weapon/ceg. Pre-v13 three-file caches don't have it; bump
+    // forces a re-bake.
+    canonical += "schemaV13-protocol";
     canonical += '\n';
     canonical += gameId;
     canonical += '\n';
@@ -115,6 +119,7 @@ bool WriteIfMissing(
     const std::string& cacheKey,
     const std::vector<uint8_t>& unitDefBytes,
     const std::vector<uint8_t>& weaponDefBytes,
-    const std::vector<uint8_t>& cegDefBytes);
+    const std::vector<uint8_t>& cegDefBytes,
+    const std::vector<uint8_t>& featureDefBytes);
 
 } // namespace DefsCache

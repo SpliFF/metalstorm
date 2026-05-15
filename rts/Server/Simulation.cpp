@@ -70,6 +70,7 @@ const std::unordered_map<int, std::string>* gAITeams = nullptr;
 #include "System/Scripting/ScriptEventDispatcher.h"
 #include "Server/IntelEventCollector.h"
 #include "Server/UnitLifecycleCollector.h"
+#include "Server/FeatureLifecycleCollector.h"
 #include "Server/UnitCommandCollector.h"
 #include "Lua/LuaScriptContext.h"
 #include "Lua/LuaRules.h"
@@ -307,6 +308,16 @@ void CSimulation::InitScripting()
     if (unitLifecycleEvents == nullptr) {
         unitLifecycleEvents = new UnitLifecycleCollector();
         unitLifecycleEvents->Register();
+    }
+
+    // Feature lifecycle collector — captures FeatureCreated / FeatureDestroyed
+    // so server_main can stream wreck spawns and despawns to clients via
+    // FeatureLifecycleBatch envelopes. Wrecks (CFeatureHandler::CreateWreckage)
+    // are created on the server when units die but the renderer has no way
+    // to discover them without an explicit stream.
+    if (featureLifecycleEvents == nullptr) {
+        featureLifecycleEvents = new FeatureLifecycleCollector();
+        featureLifecycleEvents->Register();
     }
 
     // Command event collector — captures UnitCommand / UnitCmdDone

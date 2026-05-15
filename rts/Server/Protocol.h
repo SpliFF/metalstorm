@@ -14,6 +14,7 @@
 #include "SoundEventCollector.h"
 #include "IntelEventCollector.h"
 #include "UnitLifecycleCollector.h"
+#include "FeatureLifecycleCollector.h"
 #include "UnitCommandCollector.h"
 #include "RoomManager.h"
 #include "MapMetadata.h"
@@ -28,6 +29,8 @@
 #include "Sim/Units/CommandAI/Command.h"
 #include "Sim/Units/CommandAI/CommandDescription.h"
 #include "Sim/Units/CommandAI/CommandQueue.h"
+#include "Sim/Features/FeatureDef.h"
+#include "Sim/Features/FeatureDefHandler.h"
 #include <flatbuffers/flatbuffers.h>
 #include <algorithm>
 #include <array>
@@ -602,6 +605,132 @@ inline std::vector<uint8_t> BuildUnitLifecycleBatch(
     auto batch = SpringWeb::CreateUnitLifecycleBatch(fbb, entriesVec);
     return BuildServerMessage(fbb,
         SpringWeb::ServerPayload_UnitLifecycleBatch, batch.Union());
+}
+
+/// Build a GameFeatureDefs payload from `featureDefHandler->GetFeatureDefsVec()`.
+/// Mirrors BuildGameUnitDefs: model URLs are resolved against the game's
+/// preprocessed models directory (modelimporter output). Defs with no
+/// resolvable .glb ship an empty model_url and the client renders a
+/// placeholder cube.
+///
+/// `gameId` is the game's content directory name; URL prefix is
+/// `/api/games/data/<gameId>/`. `modelsDir` is the on-disk path to that
+/// `models/` directory so existence checks for the .glb can be cheap
+/// stat() calls done once at bake time.
+inline std::vector<uint8_t> BuildGameFeatureDefs(
+    const std::vector<FeatureDef>& defs,
+    const std::string& gameId,
+    const std::filesystem::path& modelsDir)
+{
+    namespace fs = std::filesystem;
+    flatbuffers::FlatBufferBuilder fbb(64 * 1024);
+
+    std::vector<flatbuffers::Offset<SpringWeb::GameFeatureDef>> entries;
+    entries.reserve(defs.size());
+
+    for (size_t i = 0; i < defs.size(); ++i) {
+        const FeatureDef& fd = defs[i];
+        // Slot 0 is the sentinel "no def"; skip so def_id 0 stays
+        // reserved for "no def" on the wire too.
+        if (fd.id <= 0) continue;
+
+        std::string modelUrl;
+        if (!fd.modelName.empty() && !gameId.empty()) {
+            std::string stem = fs::path(fd.modelName).stem().string();
+            fs::path glbPath = modelsDir / (stem + ".glb");
+            if (fs::exists(glbPath)) {
+                modelUrl = "/api/games/data/" + gameId + "/models/" + stem + ".glb";
+            }
+        }
+
+        auto nameOff   = fbb.CreateString(fd.name);
+        auto modelOff  = fbb.CreateString(modelUrl);
+        auto texOff    = fbb.CreateString("");
+        auto scriptOff = fbb.CreateString("");
+
+        std::vector<flatbuffers::Offset<SpringWeb::CustomParam>> cps;
+        cps.reserve(fd.customParams.size());
+        for (const auto& kv : fd.customParams) {
+            auto kOff = fbb.CreateString(kv.first);
+            auto vOff = fbb.CreateString(kv.second);
+            SpringWeb::CustomParamBuilder pb(fbb);
+            pb.add_key(kOff);
+            pb.add_value(vOff);
+            cps.push_back(pb.Finish());
+        }
+        auto cpsOff = fbb.CreateVector(cps);
+
+        SpringWeb::GameFeatureDefBuilder b(fbb);
+        b.add_def_id(static_cast<uint32_t>(fd.id));
+        b.add_name(nameOff);
+        b.add_model_url(modelOff);
+        b.add_texture_url(texOff);
+        b.add_draw_type(static_cast<int8_t>(fd.drawType));
+        b.add_footprint_x(static_cast<uint16_t>(fd.xsize));
+        b.add_footprint_z(static_cast<uint16_t>(fd.zsize));
+        b.add_radius(fd.GetModelRadius());
+        b.add_mass(fd.mass);
+        b.add_health(fd.health);
+        b.add_blocking(fd.collidable);
+        b.add_reclaimable(fd.reclaimable);
+        b.add_destructable(fd.destructable);
+        b.add_burnable(fd.burnable);
+        b.add_floating(fd.floating);
+        b.add_geo_thermal(fd.geoThermal);
+        b.add_metal(fd.cost.metal);
+        b.add_energy(fd.cost.energy);
+        b.add_death_feature_def_id(static_cast<uint32_t>(
+            std::max(0, fd.deathFeatureDefID)));
+        b.add_smoke_time(fd.smokeTime);
+        b.add_reclaim_time(fd.reclaimTime);
+        b.add_script_name(scriptOff);
+        b.add_custom_params(cpsOff);
+        entries.push_back(b.Finish());
+    }
+
+    auto defsVec = fbb.CreateVector(entries);
+    auto baseUrl = fbb.CreateString("");
+    auto payload = SpringWeb::CreateGameFeatureDefs(fbb, defsVec, baseUrl);
+    return BuildServerMessage(fbb,
+        SpringWeb::ServerPayload_GameFeatureDefs, payload.Union());
+}
+
+/// Build a FeatureLifecycleBatch from the per-tick spawn + remove lists.
+/// Returns an empty vector when both lists are empty so the caller can
+/// skip the send (most ticks have no feature churn).
+inline std::vector<uint8_t> BuildFeatureLifecycleBatch(
+    const std::vector<FeatureSpawnEventData>& spawns,
+    const std::vector<FeatureRemovedEventData>& removed)
+{
+    if (spawns.empty() && removed.empty()) return {};
+    flatbuffers::FlatBufferBuilder fbb(512);
+
+    std::vector<flatbuffers::Offset<SpringWeb::FeatureSpawn>> spawnOffs;
+    spawnOffs.reserve(spawns.size());
+    for (const auto& s : spawns) {
+        SpringWeb::FeatureSpawnBuilder b(fbb);
+        b.add_feature_id(s.featureId);
+        b.add_def_id(s.defId);
+        b.add_x(s.x);
+        b.add_y(s.y);
+        b.add_z(s.z);
+        b.add_heading(s.heading);
+        b.add_build_facing(s.buildFacing);
+        b.add_team(s.team);
+        b.add_ally_team(s.allyTeam);
+        spawnOffs.push_back(b.Finish());
+    }
+
+    std::vector<uint32_t> removedIds;
+    removedIds.reserve(removed.size());
+    for (const auto& r : removed) removedIds.push_back(r.featureId);
+
+    auto spawnsVec = fbb.CreateVector(spawnOffs);
+    auto removedVec = fbb.CreateVector(removedIds);
+    auto batch = SpringWeb::CreateFeatureLifecycleBatch(
+        fbb, spawnsVec, removedVec);
+    return BuildServerMessage(fbb,
+        SpringWeb::ServerPayload_FeatureLifecycleBatch, batch.Union());
 }
 
 /// Build a UnitCommandBatch from a drained event list. Caller is

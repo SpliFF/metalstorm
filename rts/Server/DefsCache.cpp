@@ -30,7 +30,11 @@ namespace DefsCache {
 // table for Spring's `CStandardGroundFlash` parameters parsed from
 // the top-level `groundflash = {…}` subtable (PLAN-combat-vfx.md
 // Phase 4b). Pre-v12 caches don't carry the field; bump to re-bake.
-static constexpr const char* DEFS_SCHEMA_VERSION = "v12";
+// 2026-05-15: v13 — new `GameFeatureDefs` payload (+ corresponding
+// FeatureLifecycleBatch on the wire). The bake writes a fourth
+// `featuredefs.bin` alongside unit/weapon/ceg. Bumping invalidates
+// pre-v13 three-file caches so the lobby re-bakes with the fourth.
+static constexpr const char* DEFS_SCHEMA_VERSION = "v13";
 
 std::string ComputeCacheKey(
     const std::string& gameId,
@@ -51,7 +55,7 @@ std::string ComputeCacheKey(
     // ComputeCacheKey copy in DefsCache.h — the two were drifting
     // apart and a single-site bump produced different cache keys
     // depending on which translation unit linked first.
-    canonical += "schemaV12-protocol";
+    canonical += "schemaV13-protocol";
     canonical += '\n';
     canonical += gameId;
     canonical += '\n';
@@ -108,18 +112,21 @@ bool WriteIfMissing(
     const std::string& cacheKey,
     const std::vector<uint8_t>& unitDefBytes,
     const std::vector<uint8_t>& weaponDefBytes,
-    const std::vector<uint8_t>& cegDefBytes)
+    const std::vector<uint8_t>& cegDefBytes,
+    const std::vector<uint8_t>& featureDefBytes)
 {
     namespace fs = std::filesystem;
     const fs::path dir = CacheDir(gameId, cacheKey);
     const fs::path udPath = dir / "unitdefs.bin";
     const fs::path wdPath = dir / "weapondefs.bin";
     const fs::path cdPath = dir / "cegdefs.bin";
+    const fs::path fdPath = dir / "featuredefs.bin";
 
     const bool udExists = fs::exists(udPath);
     const bool wdExists = fs::exists(wdPath);
     const bool cdExists = fs::exists(cdPath);
-    if (udExists && wdExists && cdExists) return true;
+    const bool fdExists = fs::exists(fdPath);
+    if (udExists && wdExists && cdExists && fdExists) return true;
 
     std::error_code ec;
     fs::create_directories(dir, ec);
@@ -127,10 +134,11 @@ bool WriteIfMissing(
 
     if (!udExists && !WriteFile(udPath, unitDefBytes)) return false;
     if (!wdExists && !WriteFile(wdPath, weaponDefBytes)) return false;
-    // CEG payload is optional in semantics but always written so the
-    // browser fetch path doesn't see a 404; an empty GameCegDefs frame
-    // is still ~16 bytes after envelope+headers, which is harmless.
+    // CEG / Feature payloads are optional in semantics but always
+    // written so the browser fetch path doesn't see a 404; an empty
+    // frame is still ~16 bytes after envelope+headers — harmless.
     if (!cdExists && !WriteFile(cdPath, cegDefBytes)) return false;
+    if (!fdExists && !WriteFile(fdPath, featureDefBytes)) return false;
     return true;
 }
 

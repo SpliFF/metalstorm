@@ -33,6 +33,8 @@ import {
 import '@babylonjs/loaders/glTF/index.js';
 
 import type { ParsedMapData, MapFeatureInstance, MapFeatureDefInfo } from './map-data.js';
+import type { FeatureDefInfo, FeatureSpawnInfo } from './connection.js';
+import type { DefCache } from './def-cache.js';
 import { stampUrl } from '../config.js';
 
 /// Hash a string to a stable RGB tint — used only for placeholder boxes
@@ -264,4 +266,307 @@ export async function renderMapFeatures(scene: Scene, map: ParsedMapData): Promi
         `${skippedTypes} decal-only type(s) skipped`,
     );
     return results;
+}
+
+// ── Dynamic feature renderer (wrecks / debris / runtime spawns) ───────────
+//
+// `renderMapFeatures` above handles the static map-placed feature set:
+// it loads each .glb once and thin-instances every placement, then
+// returns. There's no add/remove API because map features never spawn
+// or despawn after game start.
+//
+// Runtime-spawned features — wrecks from unit deaths,
+// `Spring.CreateFeature` calls, debris dropped by explosions — arrive
+// via the `FeatureLifecycleBatch` envelope. They share the same model
+// types as map features but the placement set churns: each unit death
+// spawns a new wreck, reclaim destroys it. `DynamicFeatureRenderer`
+// owns a separate per-defId mesh pool, accepts spawn/remove events,
+// and rebuilds the thin-instance matrix buffer on each batch.
+
+interface DynamicInstance {
+    featureId: number;
+    x: number;
+    y: number;
+    z: number;
+    /// Heading in radians (converted from Spring's 16-bit fixed-point).
+    headingRad: number;
+    /// Uniform scale — defaults to 1; we don't currently shrink wrecks
+    /// over their lifetime (Spring's "fade as smoke ages" is a renderer
+    /// concern that's out of scope for v1).
+    scale: number;
+}
+
+interface DefBucket {
+    /// Thin-instance template mesh. null until the .glb load resolves;
+    /// pending instances accumulate in `pending` and get committed once
+    /// the mesh is ready. A placeholder cube is created if loading fails.
+    mesh: Mesh | null;
+    /// Active instances keyed by featureId. We rebuild the matrix buffer
+    /// on every change — wrecks churn slowly enough that incremental
+    /// slot tracking would just be complexity for no measurable win.
+    instances: Map<number, DynamicInstance>;
+    /// Instances that arrived before the .glb resolved. Drained into
+    /// `instances` once `mesh` is non-null.
+    pending: DynamicInstance[];
+    /// True once we've started the load — guards against double-loading
+    /// when several spawns of the same def arrive in the same tick.
+    loadStarted: boolean;
+    /// Placeholder fallback flag. When true the mesh is a coloured cube
+    /// (the .glb either had no URL or failed to load); we still render
+    /// instances to make wrecks visible during dev.
+    isPlaceholder: boolean;
+}
+
+/// Spring heading is 16-bit fixed-point: 0 = facing +Z, 16384 = +X
+/// (90° clockwise looking down). 65536 = 360°. Convert to radians.
+const HEADING_TO_RAD = (2 * Math.PI) / 65536;
+
+export class DynamicFeatureRenderer {
+    private scene: Scene;
+    private defCache: DefCache;
+    private buckets = new Map<number, DefBucket>();
+    /// Reverse lookup so a Remove event can find the bucket without
+    /// scanning every def. Cleared on remove.
+    private featureToDef = new Map<number, number>();
+    /// Spawns that arrived before their FeatureDef was registered in
+    /// `DefCache` (the lifecycle batch raced ahead of `featuredefs.bin`,
+    /// or the def was missing from the bake). Replay-drained whenever
+    /// new defs come in.
+    private orphanedSpawns: FeatureSpawnInfo[] = [];
+
+    constructor(scene: Scene, defCache: DefCache) {
+        this.scene = scene;
+        this.defCache = defCache;
+        // Re-drain orphans every time a fresh def batch lands — a single
+        // featuredefs.bin payload typically registers everything up
+        // front, so this fires once and clears the queue, but the loop
+        // handles arbitrary-order arrival without special-casing.
+        this.defCache.onFeatureDefs(() => this.drainOrphans());
+    }
+
+    /// Apply a per-tick FeatureLifecycleBatch. Spawns whose def isn't
+    /// in DefCache yet are stashed in `orphanedSpawns`; everything else
+    /// gets a mesh slot synchronously (the .glb may still be loading,
+    /// but the matrix buffer rebuild defers).
+    applyLifecycleBatch(spawns: FeatureSpawnInfo[], removed: number[]): void {
+        // Removed before spawned: net no-op. Iterate removes first so a
+        // single-tick spawn+remove (rare but possible via Lua) doesn't
+        // leave a dangling instance.
+        const touchedBuckets = new Set<number>();
+        for (const id of removed) {
+            const defId = this.featureToDef.get(id);
+            if (defId === undefined) continue;
+            this.featureToDef.delete(id);
+            const bucket = this.buckets.get(defId);
+            if (!bucket) continue;
+            if (bucket.instances.delete(id)) {
+                touchedBuckets.add(defId);
+            } else {
+                // Could have still been in `pending` — drop from there too.
+                const idx = bucket.pending.findIndex(p => p.featureId === id);
+                if (idx >= 0) bucket.pending.splice(idx, 1);
+            }
+        }
+
+        for (const s of spawns) {
+            const def = this.defCache.getFeatureDef(s.defId);
+            if (!def) {
+                this.orphanedSpawns.push(s);
+                continue;
+            }
+            this.spawnInternal(s, def);
+            touchedBuckets.add(s.defId);
+        }
+
+        for (const defId of touchedBuckets) {
+            this.rebuildBucket(defId);
+        }
+    }
+
+    /// Drop every dynamic feature (game session ended / restart).
+    dispose(): void {
+        for (const bucket of this.buckets.values()) {
+            bucket.mesh?.dispose();
+        }
+        this.buckets.clear();
+        this.featureToDef.clear();
+        this.orphanedSpawns.length = 0;
+    }
+
+    // ── internal ────────────────────────────────────────────────────
+
+    private spawnInternal(s: FeatureSpawnInfo, def: FeatureDefInfo): void {
+        const instance: DynamicInstance = {
+            featureId: s.featureId,
+            x: s.x,
+            y: s.y,
+            z: s.z,
+            headingRad: s.heading * HEADING_TO_RAD,
+            // FeatureDef.radius lacks a `relativeSize` analogue and the
+            // server-side wreck scale is 1.0 — let the def's own model
+            // dimensions speak for themselves.
+            scale: 1.0,
+        };
+        this.featureToDef.set(s.featureId, s.defId);
+
+        let bucket = this.buckets.get(s.defId);
+        if (!bucket) {
+            bucket = {
+                mesh: null,
+                instances: new Map(),
+                pending: [],
+                loadStarted: false,
+                isPlaceholder: false,
+            };
+            this.buckets.set(s.defId, bucket);
+            this.beginLoad(s.defId, def, bucket);
+        }
+
+        if (bucket.mesh) {
+            bucket.instances.set(s.featureId, instance);
+        } else {
+            bucket.pending.push(instance);
+        }
+    }
+
+    private drainOrphans(): void {
+        if (this.orphanedSpawns.length === 0) return;
+        const ready: FeatureSpawnInfo[] = [];
+        const stillOrphaned: FeatureSpawnInfo[] = [];
+        for (const s of this.orphanedSpawns) {
+            if (this.defCache.getFeatureDef(s.defId)) ready.push(s);
+            else stillOrphaned.push(s);
+        }
+        this.orphanedSpawns = stillOrphaned;
+        if (ready.length > 0) {
+            // Replay through the normal path — defs are now resolvable.
+            this.applyLifecycleBatch(ready, []);
+        }
+    }
+
+    private beginLoad(defId: number, def: FeatureDefInfo, bucket: DefBucket): void {
+        if (bucket.loadStarted) return;
+        bucket.loadStarted = true;
+
+        // No model URL → placeholder cube. Spring-side this means the
+        // FeatureDef has drawType != 0 (tree / decal) or modelimporter
+        // didn't produce a .glb. Still render so wrecks are visible
+        // during dev; a future pass can swap in real tree billboards.
+        if (!def.modelUrl) {
+            bucket.mesh = this.makePlaceholder(def);
+            bucket.isPlaceholder = true;
+            this.commitPending(defId, bucket);
+            return;
+        }
+
+        const lastSlash = def.modelUrl.lastIndexOf('/');
+        const baseUrl = def.modelUrl.substring(0, lastSlash + 1);
+        const fileName = def.modelUrl.substring(lastSlash + 1);
+
+        SceneLoader.ImportMeshAsync('', baseUrl, stampUrl(fileName), this.scene)
+            .then((result) => {
+                if (this.scene.isDisposed) return;
+                const primary = pickPrimaryMesh(result.meshes);
+                if (!primary) {
+                    console.warn(`[feature-dyn] ${def.name}: glb has no geometry, using placeholder`);
+                    bucket.mesh = this.makePlaceholder(def);
+                    bucket.isPlaceholder = true;
+                    this.commitPending(defId, bucket);
+                    return;
+                }
+                for (const m of result.meshes) {
+                    if (m !== primary) m.setEnabled(false);
+                }
+                primary.parent = null;
+                primary.position.set(0, 0, 0);
+                primary.rotationQuaternion = Quaternion.Identity();
+                primary.scaling.set(1, 1, 1);
+                primary.isPickable = false;
+
+                // Use the same texture-application heuristic as the map
+                // path. FeatureDefInfo and MapFeatureDefInfo share the
+                // (modelUrl, textureUrl) shape so the helper just works.
+                if (def.textureUrl) {
+                    const tex = new Texture(def.textureUrl, this.scene);
+                    const mat = primary.material;
+                    if (mat instanceof StandardMaterial) {
+                        mat.diffuseTexture?.dispose();
+                        mat.diffuseTexture = tex;
+                        mat.backFaceCulling = false;
+                    } else if (mat instanceof PBRMaterial) {
+                        mat.albedoTexture?.dispose();
+                        mat.albedoTexture = tex;
+                        mat.backFaceCulling = false;
+                    } else {
+                        tex.dispose();
+                    }
+                }
+
+                bucket.mesh = primary;
+                this.commitPending(defId, bucket);
+            })
+            .catch((err) => {
+                if (this.scene.isDisposed) return;
+                console.warn(`[feature-dyn] ${def.name}: failed to load ${def.modelUrl}, using placeholder`, err);
+                bucket.mesh = this.makePlaceholder(def);
+                bucket.isPlaceholder = true;
+                this.commitPending(defId, bucket);
+            });
+    }
+
+    private commitPending(defId: number, bucket: DefBucket): void {
+        if (bucket.pending.length === 0) {
+            this.rebuildBucket(defId);
+            return;
+        }
+        for (const p of bucket.pending) {
+            bucket.instances.set(p.featureId, p);
+        }
+        bucket.pending.length = 0;
+        this.rebuildBucket(defId);
+    }
+
+    private rebuildBucket(defId: number): void {
+        const bucket = this.buckets.get(defId);
+        if (!bucket || !bucket.mesh) return;
+        const count = bucket.instances.size;
+        if (count === 0) {
+            bucket.mesh.thinInstanceCount = 0;
+            return;
+        }
+        const matrices = new Float32Array(count * 16);
+        let i = 0;
+        for (const inst of bucket.instances.values()) {
+            const rot = Quaternion.FromEulerAngles(0, inst.headingRad, 0);
+            const m = Matrix.Compose(
+                new Vector3(inst.scale, inst.scale, inst.scale),
+                rot,
+                new Vector3(inst.x, inst.y, inst.z),
+            );
+            m.copyToArray(matrices, i * 16);
+            i++;
+        }
+        bucket.mesh.thinInstanceSetBuffer('matrix', matrices, 16, true);
+        // Same frustum-culling guard as the map path: the template
+        // mesh's bounding info doesn't capture instance world bounds.
+        bucket.mesh.alwaysSelectAsActiveMesh = true;
+        bucket.mesh.thinInstanceRefreshBoundingInfo(false);
+    }
+
+    private makePlaceholder(def: FeatureDefInfo): Mesh {
+        // Footprint is in heightmap squares (SQUARE_SIZE=8 elmos). Pick
+        // the larger of footprint and a 32-elmo floor so even zero-
+        // footprint wrecks have a visible cube.
+        const size = Math.max(32, Math.max(def.footprintX, def.footprintZ) * 8);
+        const m = MeshBuilder.CreateBox(
+            `feature_dyn_placeholder_${def.defId}`, { size }, this.scene);
+        m.position.y = size / 2;
+        m.bakeCurrentTransformIntoVertices();
+        const mat = new StandardMaterial(`feature_dyn_mat_${def.defId}`, this.scene);
+        mat.diffuseColor = typeColour(def.name);
+        mat.specularColor = new Color3(0.1, 0.1, 0.1);
+        m.material = mat;
+        m.isPickable = false;
+        return m;
+    }
 }
