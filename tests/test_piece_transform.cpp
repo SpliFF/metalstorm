@@ -57,6 +57,35 @@ TEST_SUITE("LocalModelPiece transform") {
         CHECK(z.z == doctest::Approx(r).epsilon(kAimEps));
     }
 
+    TEST_CASE("positive pitch tilts +Z DOWN (Spring convention)") {
+        // Spring scripts pass `Turn(barrel, x_axis, -pitch)` where the
+        // engine's `pitch` is positive for targets above horizon.
+        // Target BELOW horizon → engine pitch < 0 → script applies
+        // +|pitch| to rot.x → barrel should pitch DOWN. Empirically
+        // verified at the ZK aim bench: turretlaser shooting at a
+        // damagesink 71 elmos below the muzzle should end up with
+        // barrel forward at +Z, -Y in world.
+        LocalModelPiece p;
+        p.SetRotation(float3(static_cast<float>(M_PI) * 0.25f, 0.0f, 0.0f));
+        const float3 z = RotatedZ(p);
+        const float r = std::sqrt(0.5f);
+        CHECK(z.x == doctest::Approx(0.0f).epsilon(kAimEps));
+        CHECK(z.y == doctest::Approx(-r).epsilon(kAimEps));  // DOWN
+        CHECK(z.z == doctest::Approx(r).epsilon(kAimEps));
+    }
+
+    TEST_CASE("negative pitch tilts +Z UP") {
+        // Mirror of the above: target ABOVE horizon → engine pitch > 0
+        // → script applies -|pitch| to rot.x → barrel pitches UP.
+        LocalModelPiece p;
+        p.SetRotation(float3(-static_cast<float>(M_PI) * 0.25f, 0.0f, 0.0f));
+        const float3 z = RotatedZ(p);
+        const float r = std::sqrt(0.5f);
+        CHECK(z.x == doctest::Approx(0.0f).epsilon(kAimEps));
+        CHECK(z.y == doctest::Approx(r).epsilon(kAimEps));  // UP
+        CHECK(z.z == doctest::Approx(r).epsilon(kAimEps));
+    }
+
     TEST_CASE("parent yaw composes with child translation") {
         // Mirrors ZK's tankarty chain: turret yawed -17deg, barrel offset
         // by +Z inside the turret. With the correct sign convention the
@@ -78,6 +107,34 @@ TEST_SUITE("LocalModelPiece transform") {
         const float3 dir = (m * float3(0.0f, 0.0f, 1.0f)) - origin;
         CHECK(dir.x == doctest::Approx(std::sin(yaw)).epsilon(kAimEps));
         CHECK(dir.z == doctest::Approx(std::cos(yaw)).epsilon(kAimEps));
+    }
+
+    TEST_CASE("multi-piece chain: turret yaw + barrel pitch composes correctly") {
+        // Mirrors the live ZK turretlaser chain that aims wrong in-game
+        // (PLAN-weapons.md P0). The headless engine reports the barrel
+        // pointing UP (+Y) when the target is below the muzzle; the
+        // single-piece pitch cases above all pass, so this test pins
+        // down whether the chained YXZ composition is the regression.
+        //
+        // Topology: root → turret(yaw=+π/2 at (0,40,0)) → barrel(pitch=+0.197 at (0,25.6,0))
+        // Expected barrel +Z in model space: (sin(0.197) projected onto X via the yaw,
+        // -sin(0.197) on Y, 0 on Z) = (~+0.981, ~-0.196, 0). The Y must be NEGATIVE —
+        // barrel pitching DOWN through the parent yaw.
+        LocalModelPiece root;
+        LocalModelPiece turret;
+        turret.SetPosition(float3(0.0f, 40.0f, 0.0f));
+        turret.SetRotation(float3(0.0f, static_cast<float>(M_PI) * 0.5f, 0.0f));
+        turret.parent = &root;
+
+        LocalModelPiece barrel;
+        barrel.SetPosition(float3(0.0f, 25.6f, 0.0f));
+        barrel.SetRotation(float3(0.197f, 0.0f, 0.0f));
+        barrel.parent = &turret;
+
+        const float3 dir = RotatedZ(barrel);
+        CHECK(dir.x == doctest::Approx(std::cos(0.197f)).epsilon(kAimEps));   // ~+0.981
+        CHECK(dir.y == doctest::Approx(-std::sin(0.197f)).epsilon(kAimEps));  // ~-0.196 (DOWN)
+        CHECK(dir.z == doctest::Approx(0.0f).epsilon(kAimEps));
     }
 
     TEST_CASE("GetEmitDirPos yields piece origin and rotated +Z") {

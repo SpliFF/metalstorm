@@ -111,10 +111,24 @@ export const PROJECTILE_BEAM_FRAGMENT = `
         vec2 uvSampled = vec2(vUV.x, fract(vUV.y * tileCount - scrollOffset));
         vec4 texel = texture2D(beamTex, uvSampled);
 
-        float alpha = texel.a * fade;
+        // Procedural cross-section: opaque centre, smooth shoulder
+        // taper to the edges. Acts as the fallback look when texture1
+        // is empty / didn't resolve (ZK LaserCannon defs ship without
+        // an explicit texture; an empty beamTex samples to a 1x1 black
+        // texel and would otherwise produce an invisible beam).
+        float dx = abs(vUV.x - 0.5) * 2.0;
+        float crossA = 1.0 - smoothstep(0.6, 1.0, dx);
+
+        // Texture present (any non-zero alpha anywhere): trust it and
+        // multiply by the procedural across-axis taper for clean edges.
+        // Absent: substitute the procedural taper directly and tint the
+        // beam with baseColor only.
+        bool textured = texel.a > 0.01;
+        float alpha = (textured ? texel.a * crossA : crossA) * fade;
+        vec3 col = textured ? (baseColor * texel.rgb) : baseColor;
         // Premultiplied alpha — paired with alphaMode = 7 in the
         // material (same convention as the build-beam shader).
-        gl_FragColor = vec4(baseColor * texel.rgb * alpha, alpha);
+        gl_FragColor = vec4(col * alpha, alpha);
     }
 `;
 

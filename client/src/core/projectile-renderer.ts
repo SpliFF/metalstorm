@@ -204,6 +204,16 @@ interface LiveBeam {
     lifeS: number;
 }
 
+/** Beam pass input: a single instance row in the per-def matrix
+ *  buffer. Fed from both `liveBeams` (hit-scan) and synthesised from
+ *  moving Laser-bolt entries in `this.live`. The beam pass only needs
+ *  these six positional floats plus the birth seconds for the fade. */
+interface BeamMatrixSource {
+    fromX: number; fromY: number; fromZ: number;
+    toX: number; toY: number; toZ: number;
+    bornSec: number;
+}
+
 /// Spring sim ticks per game-second.
 const SIM_TICKS_PER_SEC = 30;
 
@@ -715,15 +725,18 @@ export class ProjectileRenderer {
         }
 
         // 2. Group by weapon def and push thin-instance buffers.
-        //    Live projectiles whose weapon-def maps to a beam visual
-        //    fall back to the fallback mesh — a non-hitscan beam-typed
-        //    projectile is unusual and the procedural sphere is at
-        //    least drawable. Hitscan beams take the dedicated beam
-        //    pass below.
+        //    Live projectiles with a non-instanced visual kind go via
+        //    their own pass below:
+        //      - beam-kind (moving Laser bolts) → beam pass synthesises
+        //        per-frame endpoints from pos ± velDir * boltLength/2.
+        //      - lightning-kind → lightning pass.
+        //    Anything else with no visual at all falls into key=-1 so
+        //    it still draws as the procedural fallback sphere.
         const groups = new Map<number, LiveProjectile[]>();
         for (const p of this.live.values()) {
             const v = this.weaponVisuals.get(p.weaponDefId);
-            const key = v && v.kind === 'instanced' ? p.weaponDefId : -1;
+            if (v && (v.kind === 'beam' || v.kind === 'lightning')) continue;
+            const key = v ? p.weaponDefId : -1;
             let g = groups.get(key);
             if (!g) { g = []; groups.set(key, g); }
             g.push(p);
@@ -832,13 +845,53 @@ export class ProjectileRenderer {
         //    expects (axis vector, midpoint, halfWidth, birthSec
         //    packed into the matrix' free slots), and update the
         //    per-def `time` uniform.
-        const beamGroups = new Map<number, LiveBeam[]>();
+        //
+        //    Two sources feed this pass:
+        //      a) Hit-scan beams in `liveBeams` (BeamLaser / LargeBeamLaser).
+        //         from/to come straight off the Fired event.
+        //      b) Moving Laser-bolt projectiles in `this.live` whose
+        //         weapon visual is beam-kind. These don't have stable
+        //         endpoints — synthesize from current pos ± velDir *
+        //         boltLength/2 each frame. Without this branch the
+        //         regular tick group routes them to the tiny fallback
+        //         sphere (visual.kind !== 'instanced' → key -1).
+        const beamGroups = new Map<number, BeamMatrixSource[]>();
         for (const b of this.liveBeams) {
             const v = this.weaponVisuals.get(b.weaponDefId);
             if (!v || v.kind !== 'beam') continue;
             let g = beamGroups.get(b.weaponDefId);
             if (!g) { g = []; beamGroups.set(b.weaponDefId, g); }
-            g.push(b);
+            g.push({
+                fromX: b.fromX, fromY: b.fromY, fromZ: b.fromZ,
+                toX:   b.toX,   toY:   b.toY,   toZ:   b.toZ,
+                bornSec: b.bornAtMs / 1000,
+            });
+        }
+        for (const p of this.live.values()) {
+            const v = this.weaponVisuals.get(p.weaponDefId);
+            if (!v || v.kind !== 'beam') continue;
+            const speed = Math.hypot(p.vel.x, p.vel.y, p.vel.z);
+            // Bolt length: speed * visual duration gives a Spring-style
+            // dash. Floor at a couple of elmos so a near-stationary
+            // projectile (e.g. arcing laser at apex) still draws something.
+            const boltLen = Math.max(4, speed * v.duration);
+            const half = boltLen * 0.5;
+            const dx = speed > 1e-3 ? p.vel.x / speed : 0;
+            const dy = speed > 1e-3 ? p.vel.y / speed : 1;
+            const dz = speed > 1e-3 ? p.vel.z / speed : 0;
+            let g = beamGroups.get(p.weaponDefId);
+            if (!g) { g = []; beamGroups.set(p.weaponDefId, g); }
+            // Re-synthesised every frame, so birth = now keeps the
+            // shader's age-based fade at full alpha.
+            g.push({
+                fromX: p.pos.x - dx * half,
+                fromY: p.pos.y - dy * half,
+                fromZ: p.pos.z - dz * half,
+                toX:   p.pos.x + dx * half,
+                toY:   p.pos.y + dy * half,
+                toZ:   p.pos.z + dz * half,
+                bornSec: nowSec,
+            });
         }
 
         const beamUpdated = new Set<number>();
@@ -854,7 +907,7 @@ export class ProjectileRenderer {
                 const midX = (b.fromX + b.toX) * 0.5;
                 const midY = (b.fromY + b.toY) * 0.5;
                 const midZ = (b.fromZ + b.toZ) * 0.5;
-                const birthSec = b.bornAtMs / 1000;
+                const birthSec = b.bornSec;
                 const off = i * 16;
                 // Column 0: m[3] = halfWidth (vertex shader reads this
                 // as world0.w).
