@@ -1060,12 +1060,21 @@ std::string ResolveTextureByStem(const fs::path& dir, const std::string& stem) {
 /// auto-detects the source format (DDS-as-blocks for BC1/BC3/BC4/BC5,
 /// stb_image -> UASTC for everything else) and writes a single
 /// canonical KTX2 output regardless of input format.
+///
+/// Also emits a downscaled `.png` fallback alongside the KTX2 so the
+/// .glb pipeline can advertise a spec-compliant top-level image source
+/// for glTF readers that don't support KHR_texture_basisu (Blender,
+/// gltf-viewer, gltf-pipeline). Runtime always loads the KTX2; the
+/// PNG only has to be legible enough for third-party tools.
 bool ConvertTextureToKtx2(const std::string& srcPath,
                           const std::string& dstPath,
                           const fs::path& textureConverter) {
+    const std::string pngFallback =
+        fs::path(dstPath).replace_extension(".png").string();
     std::vector<std::string> argv = {
         textureConverter.string(),
         "--encoding", "uastc",
+        "--png-fallback", pngFallback,
         srcPath, dstPath,
     };
     std::string out;

@@ -25,10 +25,14 @@
 #define STBI_NO_LINEAR
 #include "stb_image.h"
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
 #include "System/SpringLog/SpringLog.h"
 
 #include <ktx.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -78,6 +82,29 @@ enum class Encoding { Uastc, Etc1s };
 static bool EncodeRgba8AsKtx2(const uint8_t* rgba, int w, int h,
                               const std::string& dstPath,
                               Encoding enc, bool genMips, bool zstd);
+
+/// Emit a PNG sidecar of an RGBA8 buffer alongside the canonical
+/// KTX2 output. Used as the universal fallback image for glTF readers
+/// that don't understand KHR_texture_basisu (Blender, gltf-viewer,
+/// the various web-based viewers). KTX2 is still the runtime-loaded
+/// asset; the PNG is the spec-required source on the texture entry.
+static bool WritePngFallback(const uint8_t* rgba, int w, int h,
+                             const std::string& dstPath) {
+    if (dstPath.empty()) return true;  // disabled
+    if (w <= 0 || h <= 0) return false;
+
+    std::error_code ec;
+    fs::path outDir = fs::path(dstPath).parent_path();
+    if (!outDir.empty()) fs::create_directories(outDir, ec);
+
+    if (!stbi_write_png(dstPath.c_str(), w, h, 4, rgba, w * 4)) {
+        SLOG(SPRING_LOG_WARNING,
+            "PNG fallback write failed for %s", dstPath.c_str());
+        return false;
+    }
+    SLOG(SPRING_LOG_INFO, "PNG fallback: %dx%d -> %s", w, h, dstPath.c_str());
+    return true;
+}
 
 // ============================================================
 // DDS wrap path — passthrough to libktx for a BC-format file
@@ -247,9 +274,15 @@ static bool DecodeDxtToRgba(const uint8_t* src, size_t srcLen,
 /// removed because Babylon's KTX2 transcoder rejects non-Basis files
 /// (it always routes through BasisLzEtc1sImageTranscoder.decodePalettes
 /// which throws on unexpected payload metadata).
+///
+/// `pngFallbackPath` (optional): when non-empty, also writes a
+/// downscaled PNG to that path from the same RGBA buffer so glTF
+/// loaders without KHR_texture_basisu have a usable image to fall
+/// back to. See WritePngFallback.
 static bool WrapDdsAsKtx2(const std::string& srcPath,
                           const std::string& dstPath,
-                          bool zstd) {
+                          bool zstd,
+                          const std::string& pngFallbackPath = {}) {
     std::vector<uint8_t> dds = ReadAllBytes(srcPath);
     if (dds.size() < sizeof(DdsHeader)) {
         SLOG(SPRING_LOG_ERROR, "DDS too small: %s", srcPath.c_str());
@@ -324,6 +357,8 @@ static bool WrapDdsAsKtx2(const std::string& srcPath,
 
     SLOG(SPRING_LOG_INFO, "DDS decode: %s (%ux%u) -> UASTC %s",
         srcPath.c_str(), h.width, h.height, dstPath.c_str());
+    WritePngFallback(rgba.data(), (int)h.width, (int)h.height,
+                     pngFallbackPath);
     return EncodeRgba8AsKtx2(rgba.data(), (int)h.width, (int)h.height,
                              dstPath, Encoding::Uastc, /*genMips*/ true, zstd);
 }
@@ -562,9 +597,11 @@ static bool IsDdsMagic(const std::string& path) {
 
 static int ConvertGeneric(const std::string& inputPath,
                           const std::string& outputPath,
-                          Encoding enc, bool genMips, bool zstd) {
+                          Encoding enc, bool genMips, bool zstd,
+                          const std::string& pngFallbackPath) {
     if (IsDdsMagic(inputPath)) {
-        return WrapDdsAsKtx2(inputPath, outputPath, zstd) ? 0 : 1;
+        return WrapDdsAsKtx2(inputPath, outputPath, zstd,
+                             pngFallbackPath) ? 0 : 1;
     }
     int w, h, channels;
     uint8_t* pixels = stbi_load(inputPath.c_str(), &w, &h, &channels, 4);
@@ -573,6 +610,7 @@ static int ConvertGeneric(const std::string& inputPath,
             inputPath.c_str(), stbi_failure_reason());
         return 1;
     }
+    WritePngFallback(pixels, w, h, pngFallbackPath);
     const bool ok = EncodeRgba8AsKtx2(pixels, w, h, outputPath,
                                        enc, genMips, zstd);
     stbi_image_free(pixels);
@@ -602,6 +640,8 @@ static void PrintUsage(const char* argv0) {
         "  --encoding uastc|etc1s   Encoder for non-DDS sources (default: uastc)\n"
         "  --mipmaps                Generate mip chain for encoded sources\n"
         "  --no-zstd                Disable Zstd supercompression\n"
+        "  --png-fallback <path>    Also write a downscaled PNG sidecar at <path>\n"
+        "                           (for glTF readers without KHR_texture_basisu)\n"
         "  --log-level <level>      debug/info/notice/warning/error\n",
         argv0, argv0, argv0);
 }
@@ -621,10 +661,13 @@ int main(int argc, char* argv[]) {
     bool rawDxt1 = false;
     bool smfMinimap = false;
     int rawW = 0, rawH = 0;
+    std::string pngFallbackPath;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
-        if (a == "--encoding" && i + 1 < argc) {
+        if (a == "--png-fallback" && i + 1 < argc) {
+            pngFallbackPath = argv[++i];
+        } else if (a == "--encoding" && i + 1 < argc) {
             const std::string v = argv[++i];
             if (v == "uastc") enc = Encoding::Uastc;
             else if (v == "etc1s") enc = Encoding::Etc1s;
@@ -683,7 +726,8 @@ int main(int argc, char* argv[]) {
         std::vector<uint8_t> bytes = ReadAllBytes(inputPath);
         rc = WrapRawDxt1AsKtx2(bytes, rawW, rawH, outputPath, zstd) ? 0 : 1;
     } else {
-        rc = ConvertGeneric(inputPath, outputPath, enc, genMips, zstd);
+        rc = ConvertGeneric(inputPath, outputPath, enc, genMips, zstd,
+                            pngFallbackPath);
     }
 
     springlog_shutdown();

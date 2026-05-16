@@ -176,26 +176,144 @@ void WriteU32LE(std::vector<uint8_t>& out, size_t off, uint32_t v) {
     std::memcpy(out.data() + off, &v, sizeof(v));
 }
 
-/// Walk the JSON chunk of a freshly-written .glb and rewrite every
-/// texture entry whose source image has a `.ktx2` URI so the source
-/// reference moves into `extensions.KHR_texture_basisu.source`.
+// --------------------------------------------------------------------
+// Minimal JSON-string scanning helpers used by FixGlbBasisuTextures.
+// We don't pull in a JSON library — the Assimp glb2 exporter output
+// has a well-known shape and we only need to read/replace a handful
+// of top-level fields. The helpers are local to this file so the
+// surface area stays small.
+// --------------------------------------------------------------------
+
+size_t SkipWs(const std::string& js, size_t i) {
+    while (i < js.size() && std::isspace(static_cast<unsigned char>(js[i]))) ++i;
+    return i;
+}
+
+std::string Trim(const std::string& s) {
+    size_t b = 0, e = s.size();
+    while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+    while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+    return s.substr(b, e - b);
+}
+
+/// Locate `"<key>"` followed by `:` (whitespace allowed) at the top
+/// level of `js` and return the position of the first non-whitespace
+/// character of the value. Returns npos if not found.
+size_t FindFieldValue(const std::string& js, const std::string& key) {
+    const std::string needle = "\"" + key + "\"";
+    size_t pos = 0;
+    while (true) {
+        size_t k = js.find(needle, pos);
+        if (k == std::string::npos) return std::string::npos;
+        size_t after = k + needle.size();
+        size_t colon = SkipWs(js, after);
+        if (colon < js.size() && js[colon] == ':') {
+            return SkipWs(js, colon + 1);
+        }
+        pos = k + 1;
+    }
+}
+
+/// Given the position of an opening `[` or `{` in `js`, find the
+/// matching close bracket, honouring nested brackets and string
+/// literals.
+size_t FindMatching(const std::string& js, size_t openPos) {
+    if (openPos >= js.size()) return std::string::npos;
+    const char open  = js[openPos];
+    const char close = (open == '[') ? ']' : '}';
+    int depth = 0;
+    bool inStr = false, esc = false;
+    for (size_t i = openPos; i < js.size(); ++i) {
+        const char c = js[i];
+        if (inStr) {
+            if (esc) esc = false;
+            else if (c == '\\') esc = true;
+            else if (c == '"') inStr = false;
+            continue;
+        }
+        if (c == '"') { inStr = true; continue; }
+        if (c == open)  ++depth;
+        else if (c == close) {
+            --depth;
+            if (depth == 0) return i;
+        }
+    }
+    return std::string::npos;
+}
+
+/// Split the contents of a JSON array (the text between `[` and `]`,
+/// exclusive) into its top-level entries. Whitespace is preserved
+/// inside each entry; callers should Trim() when they care.
+std::vector<std::string> SplitArrayEntries(const std::string& body) {
+    std::vector<std::string> out;
+    int depth = 0;
+    bool inStr = false, esc = false;
+    std::string cur;
+    for (char c : body) {
+        if (inStr) {
+            cur.push_back(c);
+            if (esc) esc = false;
+            else if (c == '\\') esc = true;
+            else if (c == '"') inStr = false;
+            continue;
+        }
+        if (c == '"') { cur.push_back(c); inStr = true; continue; }
+        if (c == '{' || c == '[') { ++depth; cur.push_back(c); continue; }
+        if (c == '}' || c == ']') { --depth; cur.push_back(c); continue; }
+        if (c == ',' && depth == 0) {
+            out.push_back(cur);
+            cur.clear();
+            continue;
+        }
+        cur.push_back(c);
+    }
+    out.push_back(cur);
+    // Drop trailing empty entries from a trailing comma or whitespace-only tail.
+    while (!out.empty() && Trim(out.back()).empty()) out.pop_back();
+    return out;
+}
+
+/// Extract the value of `"uri":"<string>"` from a JSON object literal
+/// (`{...}` as text). Returns empty if not found or not parseable.
+std::string ExtractUri(const std::string& objLiteral) {
+    const std::string k = "\"uri\"";
+    size_t p = objLiteral.find(k);
+    if (p == std::string::npos) return {};
+    size_t c = objLiteral.find(':', p + k.size());
+    if (c == std::string::npos) return {};
+    size_t q1 = objLiteral.find('"', c + 1);
+    if (q1 == std::string::npos) return {};
+    size_t q2 = objLiteral.find('"', q1 + 1);
+    if (q2 == std::string::npos) return {};
+    return objLiteral.substr(q1 + 1, q2 - q1 - 1);
+}
+
+/// Walk the JSON chunk of a freshly-written .glb and adapt it so the
+/// file is a spec-compliant glTF 2.0 document for every loader:
 ///
-/// Why we need this: Assimp's glb2 exporter emits texture entries as
-/// `{"source": N, "sampler": N}` and *also* lists `KHR_texture_basisu`
-/// in `extensionsRequired`. Per glTF spec these can't coexist —
-/// when the extension is required the top-level `source` must move
-/// into the extension. Babylon's strict glTF loader trips on the
-/// inconsistency and throws a `null.length` exception while resolving
-/// the texture, which silently demotes the projectile to a procedural
-/// cone visual. Walking the JSON chunk and patching it in place is
-/// cheaper than rewiring the Assimp exporter and keeps the BIN chunk
-/// (vertex/index buffers) untouched.
+///   1. Append a sibling `<stem>.png` image entry next to every
+///      `<stem>.ktx2` image entry — that's the fallback our pipeline
+///      ships for loaders without KHR_texture_basisu.
+///   2. Rewrite each `textures[]` entry so the top-level `source`
+///      points at the PNG fallback, and `extensions.KHR_texture_basisu.source`
+///      carries the KTX2 reference. (Assimp's exporter writes only
+///      the top-level source; runtimes that understand the extension
+///      use it preferentially, others see the PNG.)
+///   3. Remove `KHR_texture_basisu` from `extensionsRequired` — the
+///      PNG fallback means the extension is optional. Keep it in
+///      `extensionsUsed`.
 ///
-/// Hand-rolled JSON edits — no external dependency. The replacements
-/// are textual ("source":N → into extension shape), kept simple by
-/// the well-known structure Assimp produces. If a future Assimp version
-/// emits already-spec-compliant texture entries, the routine becomes a
-/// no-op (the `"source":` substring won't appear inside `"textures":`).
+/// Why this matters: Blender, gltf-viewer, gltf-pipeline, and any
+/// other spec-correct loader must refuse a file whose
+/// `extensionsRequired` lists an extension they don't implement.
+/// Before this routine landed, `KHR_texture_basisu` was required and
+/// no fallback existed, so every third-party tool rejected our .glbs.
+/// The PNG fallback closes that complaint without giving up the
+/// runtime KTX2 path.
+///
+/// Hand-rolled JSON edits — no external dependency. The shape of
+/// Assimp's output is well-known; the helpers above are sufficient.
+/// The BIN chunk (vertex/index buffers) is preserved verbatim.
 bool FixGlbBasisuTextures(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return false;
@@ -216,110 +334,193 @@ bool FixGlbBasisuTextures(const std::string& path) {
     std::string js(reinterpret_cast<const char*>(data.data() + 20), jsonLen);
     while (!js.empty() && js.back() == ' ') js.pop_back();
 
-    // Find the textures array and decide whether anything needs patching.
-    // The well-known shape of Assimp output:
-    //   "textures":[{"source":N,"sampler":N},…]
-    // We only patch when the JSON also references a .ktx2 image, which
-    // is the trigger Assimp uses to add KHR_texture_basisu in
-    // `extensionsRequired`. (Without .ktx2 sources the patched
-    // structure would actually be wrong — leave plain PNG/JPG textures
-    // alone.)
-    if (js.find(".ktx2") == std::string::npos) return false;
-    if (js.find("\"textures\":") == std::string::npos) return false;
+    // Early-out: nothing to do if there's no KTX2 reference anywhere.
+    if (js.find(".ktx2") == std::string::npos) return true;
 
-    // Replace each `{"source":N,"sampler":M}` (or `{"sampler":M,"source":N}`)
-    // with `{"sampler":M,"extensions":{"KHR_texture_basisu":{"source":N}}}`.
-    // We walk character-by-character looking for the texture-entry pattern
-    // so we don't accidentally rewrite occurrences in image URIs etc.
-    std::string out;
-    out.reserve(js.size() + 256);
-    size_t i = 0;
-    bool changed = false;
-    const std::string texturesKey = "\"textures\":";
-    const size_t texturesStart = js.find(texturesKey);
+    // ---- Step 1: enumerate images, find .ktx2 entries, build PNG siblings.
+    const size_t imgValPos = FindFieldValue(js, "images");
+    if (imgValPos == std::string::npos || js[imgValPos] != '[') return false;
+    const size_t imgClosePos = FindMatching(js, imgValPos);
+    if (imgClosePos == std::string::npos) return false;
+    const std::string imgBody = js.substr(imgValPos + 1,
+                                          imgClosePos - imgValPos - 1);
+    std::vector<std::string> imgEntries = SplitArrayEntries(imgBody);
 
-    if (texturesStart == std::string::npos) return false;
+    // Map from KTX2 image index → new PNG image index.
+    std::vector<int> ktx2Indices;
+    std::vector<std::string> pngEntries;
+    for (size_t i = 0; i < imgEntries.size(); ++i) {
+        const std::string uri = ExtractUri(imgEntries[i]);
+        if (uri.size() < 5) continue;
+        const std::string tail = uri.substr(uri.size() - 5);
+        // Lower-case compare so `.KTX2` etc. also match (Assimp lowercases
+        // but the source path the URI was rewritten from might not).
+        std::string tl = tail;
+        for (char& c : tl) c = static_cast<char>(std::tolower((unsigned char)c));
+        if (tl != ".ktx2") continue;
 
-    out.append(js, 0, texturesStart);
-    i = texturesStart;
-
-    // Walk through `"textures":[ … ]` and patch each `{ … }` entry.
-    out.append(texturesKey);
-    i += texturesKey.size();
-    if (i >= js.size() || js[i] != '[') {
-        // Unexpected structure — bail without modifying.
-        return false;
+        ktx2Indices.push_back(static_cast<int>(i));
+        const std::string pngUri = uri.substr(0, uri.size() - 5) + ".png";
+        pngEntries.push_back("{\"uri\":\"" + pngUri + "\"}");
     }
-    out.push_back('[');
-    i++;
-    int depth = 1;
-    std::string entry;
-    while (i < js.size() && depth > 0) {
-        const char c = js[i];
-        if (c == '{') {
-            if (entry.empty() && depth == 1) {
-                // Start of one texture entry.
-                entry.push_back(c);
-                i++;
-                int eDepth = 1;
-                while (i < js.size() && eDepth > 0) {
-                    const char ec = js[i];
-                    entry.push_back(ec);
-                    if (ec == '{') eDepth++;
-                    else if (ec == '}') eDepth--;
-                    i++;
-                }
-                // entry now holds the full `{…}` of this texture.
-                std::string patched = entry;
-                // Look for `"source":<digits>` inside the entry.
-                const size_t sPos = patched.find("\"source\":");
-                if (sPos != std::string::npos) {
-                    size_t numStart = sPos + 9;
-                    size_t numEnd = numStart;
-                    while (numEnd < patched.size()
-                           && std::isdigit(static_cast<unsigned char>(patched[numEnd])))
-                        numEnd++;
-                    if (numEnd > numStart) {
-                        const std::string src(patched, numStart, numEnd - numStart);
-                        // Erase `"source":N` plus an adjacent comma if any.
-                        size_t eraseStart = sPos;
-                        size_t eraseEnd = numEnd;
-                        if (eraseEnd < patched.size() && patched[eraseEnd] == ',') {
-                            eraseEnd++;
-                        } else if (eraseStart > 0 && patched[eraseStart - 1] == ',') {
-                            eraseStart--;
-                        }
-                        patched.erase(eraseStart, eraseEnd - eraseStart);
-                        // Insert the extensions block before the closing `}`.
-                        const size_t closeBrace = patched.find_last_of('}');
-                        const std::string insertion =
-                            std::string(patched.size() > 1 && patched[closeBrace - 1] != '{'
-                                        ? "," : "")
-                            + "\"extensions\":{\"KHR_texture_basisu\":{\"source\":"
-                            + src + "}}";
-                        patched.insert(closeBrace, insertion);
-                        if (patched != entry) changed = true;
-                    }
-                }
-                out.append(patched);
-                entry.clear();
-                continue;
+
+    if (ktx2Indices.empty()) return true;  // nothing to do
+
+    // ktx2 -> png lookup, sized inline for clarity.
+    auto pngIndexFor = [&](int ktx2Idx) -> int {
+        for (size_t p = 0; p < ktx2Indices.size(); ++p) {
+            if (ktx2Indices[p] == ktx2Idx) {
+                return static_cast<int>(imgEntries.size() + p);
             }
-        } else if (c == '[') {
-            depth++;
-        } else if (c == ']') {
-            depth--;
         }
-        out.push_back(c);
-        i++;
-    }
-    // Append the rest of the JSON verbatim.
-    out.append(js, i, std::string::npos);
+        return -1;
+    };
 
-    if (!changed) return true; // nothing to do — file already compliant
+    // Rebuild images array: existing entries verbatim + new PNG entries.
+    std::string newImgBody = "\n    ";
+    bool first = true;
+    for (auto& e : imgEntries) {
+        if (!first) newImgBody += ",\n    ";
+        newImgBody += Trim(e);
+        first = false;
+    }
+    for (auto& e : pngEntries) {
+        if (!first) newImgBody += ",\n    ";
+        newImgBody += e;
+        first = false;
+    }
+    newImgBody += "\n  ";
+    js = js.substr(0, imgValPos + 1) + newImgBody + js.substr(imgClosePos);
+
+    // ---- Step 2: rewrite textures[]. For each entry, locate the KTX2
+    // image index (either from a top-level `"source": N` Assimp left in
+    // place, or from `extensions.KHR_texture_basisu.source: N`). Insert
+    // a top-level `"source": pngIdx` and ensure the KHR extension
+    // references the KTX2 index.
+    const size_t txValPos = FindFieldValue(js, "textures");
+    if (txValPos == std::string::npos || js[txValPos] != '[') return false;
+    const size_t txClosePos = FindMatching(js, txValPos);
+    if (txClosePos == std::string::npos) return false;
+    const std::string txBody = js.substr(txValPos + 1,
+                                         txClosePos - txValPos - 1);
+    std::vector<std::string> txEntries = SplitArrayEntries(txBody);
+
+    auto findIntField = [](const std::string& obj, size_t startFrom,
+                           const std::string& key, int& outVal,
+                           size_t& outKeyPos, size_t& outValEnd) -> bool {
+        const std::string needle = "\"" + key + "\"";
+        size_t p = obj.find(needle, startFrom);
+        if (p == std::string::npos) return false;
+        size_t c = obj.find(':', p + needle.size());
+        if (c == std::string::npos) return false;
+        size_t s = SkipWs(obj, c + 1);
+        size_t e = s;
+        while (e < obj.size() && std::isdigit(static_cast<unsigned char>(obj[e]))) ++e;
+        if (e == s) return false;
+        outVal = std::stoi(obj.substr(s, e - s));
+        outKeyPos = p;
+        outValEnd = e;
+        return true;
+    };
+
+    std::vector<std::string> newTxEntries;
+    for (auto& raw : txEntries) {
+        std::string e = Trim(raw);
+        if (e.empty()) continue;
+
+        int ktx2Idx = -1;
+
+        // Case A: extension already in place (post-Assimp post-processing
+        // shape, or re-run of this fix). Find KHR_texture_basisu's source.
+        size_t basisuPos = e.find("\"KHR_texture_basisu\"");
+        if (basisuPos != std::string::npos) {
+            int v = -1; size_t kp = 0, ve = 0;
+            if (findIntField(e, basisuPos, "source", v, kp, ve)) {
+                ktx2Idx = v;
+            }
+        }
+
+        // Case B: bare Assimp output — top-level `"source": N` and no
+        // extension block yet. Lift the source into the extension and
+        // remember N for the PNG redirect.
+        if (ktx2Idx < 0) {
+            int v = -1; size_t kp = 0, ve = 0;
+            if (findIntField(e, 0, "source", v, kp, ve)) {
+                ktx2Idx = v;
+                // Erase the `"source": N` plus its adjacent comma.
+                size_t eraseStart = kp;
+                size_t eraseEnd = ve;
+                if (eraseEnd < e.size() && e[eraseEnd] == ',') ++eraseEnd;
+                else if (eraseStart > 0 && e[eraseStart - 1] == ',') --eraseStart;
+                e.erase(eraseStart, eraseEnd - eraseStart);
+                // Insert the extensions block before the closing `}`.
+                size_t closeBrace = e.find_last_of('}');
+                const std::string insertion =
+                    std::string(closeBrace > 0 && e[closeBrace - 1] != '{' ? "," : "")
+                    + "\"extensions\":{\"KHR_texture_basisu\":{\"source\":"
+                    + std::to_string(ktx2Idx) + "}}";
+                e.insert(closeBrace, insertion);
+            }
+        }
+
+        // Add the top-level PNG fallback `"source": pngIdx`. Insert
+        // before `"extensions"` so the field ordering stays
+        // human-readable.
+        if (ktx2Idx >= 0) {
+            const int pngIdx = pngIndexFor(ktx2Idx);
+            if (pngIdx >= 0) {
+                const std::string fallback =
+                    "\"source\":" + std::to_string(pngIdx) + ",";
+                size_t extPos = e.find("\"extensions\"");
+                if (extPos != std::string::npos) {
+                    e.insert(extPos, fallback);
+                } else {
+                    // Fallback insertion before closing brace.
+                    size_t closeBrace = e.find_last_of('}');
+                    e.insert(closeBrace, std::string(",") + fallback);
+                }
+            }
+        }
+
+        newTxEntries.push_back(e);
+    }
+
+    std::string newTxBody = "\n    ";
+    first = true;
+    for (auto& e : newTxEntries) {
+        if (!first) newTxBody += ",\n    ";
+        newTxBody += e;
+        first = false;
+    }
+    newTxBody += "\n  ";
+    // Recompute textures array bounds because Step 1 shifted positions.
+    const size_t txValPos2 = FindFieldValue(js, "textures");
+    const size_t txClosePos2 = FindMatching(js, txValPos2);
+    js = js.substr(0, txValPos2 + 1) + newTxBody + js.substr(txClosePos2);
+
+    // ---- Step 3: remove KHR_texture_basisu from extensionsRequired.
+    const size_t reqValPos = FindFieldValue(js, "extensionsRequired");
+    if (reqValPos != std::string::npos && js[reqValPos] == '[') {
+        const size_t reqClosePos = FindMatching(js, reqValPos);
+        const std::string reqBody = js.substr(reqValPos + 1,
+                                              reqClosePos - reqValPos - 1);
+        std::vector<std::string> reqEntries = SplitArrayEntries(reqBody);
+        std::vector<std::string> keep;
+        for (auto& r : reqEntries) {
+            const std::string t = Trim(r);
+            if (t == "\"KHR_texture_basisu\"" || t.empty()) continue;
+            keep.push_back(t);
+        }
+        std::string newReqBody;
+        for (size_t i = 0; i < keep.size(); ++i) {
+            if (i > 0) newReqBody += ",";
+            newReqBody += keep[i];
+        }
+        js = js.substr(0, reqValPos + 1) + newReqBody + js.substr(reqClosePos);
+    }
 
     // Re-pad to 4-byte alignment.
-    std::vector<uint8_t> jsonBytes(out.begin(), out.end());
+    std::vector<uint8_t> jsonBytes(js.begin(), js.end());
     while (jsonBytes.size() % 4 != 0) jsonBytes.push_back(' ');
 
     // Preserve the BIN chunk (and any subsequent chunks) verbatim.
@@ -329,16 +530,13 @@ bool FixGlbBasisuTextures(const std::string& path) {
                             + static_cast<uint32_t>(rest.size());
     std::vector<uint8_t> outFile;
     outFile.reserve(newTotal);
-    // Header.
     outFile.insert(outFile.end(), {'g','l','T','F'});
     outFile.resize(outFile.size() + 4); WriteU32LE(outFile, 4, 2);
     outFile.resize(outFile.size() + 4); WriteU32LE(outFile, 8, newTotal);
-    // JSON chunk header.
     outFile.resize(outFile.size() + 4);
     WriteU32LE(outFile, 12, static_cast<uint32_t>(jsonBytes.size()));
     outFile.insert(outFile.end(), {'J','S','O','N'});
     outFile.insert(outFile.end(), jsonBytes.begin(), jsonBytes.end());
-    // BIN chunk + tail.
     outFile.insert(outFile.end(), rest.begin(), rest.end());
 
     const std::string tmp = path + ".tmp";
