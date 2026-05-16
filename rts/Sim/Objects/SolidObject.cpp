@@ -297,8 +297,10 @@ void CSolidObject::SetDirVectorsEuler(const float3 angles)
 	RECOIL_DETAILED_TRACY_ZONE;
 	CMatrix44f matrix;
 
-	// our system is left-handed, so R(X)R(Y)R(Z) is really T(R(-Z)R(-Y)R(-X))
-	// whenever these angles are retrieved, the handedness is converted again
+	// PLAN-coordinate-system Phase 2: under RH, R(X)R(Y)R(Z) is the
+	// natural Euler composition — no LH→RH compensation hack. The basis
+	// vectors are extracted RH-canonical via SetDirVectors (no rightdir
+	// negation).
 	SetDirVectors(matrix.RotateEulerXYZ(angles));
 	SetHeadingFromDirection();
 	SetFacingFromHeading();

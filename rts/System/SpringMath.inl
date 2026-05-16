@@ -1,6 +1,6 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
-//                  F(N=2) = H(-32768 / 32767)
+//                  F(N=2) = H(0)               (RH: forward is -Z, heading=0 -> -Z)
 //
 //                         ^
 //                         |
@@ -10,13 +10,20 @@
 //                         |
 //                         v
 //
-//                  F(S=0) = H(0)
+//                  F(S=0) = H(-32768 / 32767)
+//
+// PLAN-coordinate-system Phase 2: heading=0 maps to FACING_NORTH because
+// the unit's forward vector at h=0 is -Z (glTF-native forward). Under the
+// old LH convention, heading=0 mapped to FACING_SOUTH (forward was +Z).
+// The integer values of the FacingMap enum (S=0, E=1, N=2, W=3) are kept
+// stable to avoid invalidating yardmap data files; what each label means
+// in world space is what flipped.
 inline short int GetHeadingFromFacing(const int facing)
 {
 	switch (facing) {
-		case FACING_SOUTH: return      0;
+		case FACING_NORTH: return      0;
 		case FACING_EAST : return  16384;
-		case FACING_NORTH: return  32767;
+		case FACING_SOUTH: return  32767;
 		case FACING_WEST : return -16384;
 		default          : return      0;
 	}
@@ -25,18 +32,24 @@ inline short int GetHeadingFromFacing(const int facing)
 inline int GetFacingFromHeading(const short int heading)
 {
 	if (heading >= 0) {
-		if (heading <  8192) { return FACING_SOUTH; }
+		if (heading <  8192) { return FACING_NORTH; }
 		if (heading < 24576) { return FACING_EAST ; }
-		return FACING_NORTH;
+		return FACING_SOUTH;
 	} else {
-		if (heading >=  -8192) { return FACING_SOUTH; }
+		if (heading >=  -8192) { return FACING_NORTH; }
 		if (heading >= -24576) { return FACING_WEST ; }
-		return FACING_NORTH;
+		return FACING_SOUTH;
 	}
 }
 
-inline float GetHeadingFromVectorF(const float dx, const float dz)
+// PLAN-coordinate-system Phase 2: RH conversion is a single sign flip on
+// (dx, dz) — the underlying math is unchanged. At heading=0 the new
+// convention faces -Z (was +Z under LH), so we measure the angle of the
+// negated input instead. Symmetric flip in GetVectorFromHeading below.
+inline float GetHeadingFromVectorF(const float dx_in, const float dz_in)
 {
+	const float dx = -dx_in;
+	const float dz = -dz_in;
 	float h = 0.0f;
 
 	if (dz != 0.0f) {
@@ -112,7 +125,10 @@ inline float3 GetVectorFromHeading(const short int heading)
 	const     int idx = heading / div + NUM_HEADINGS / 2;
 
 	const float2 vec = SpringMath::headingToVectorTable[idx];
-	return float3(vec.x, 0.0f, vec.y);
+	// RH: heading=0 -> -Z (glTF-native forward). The cached table still
+	// stores LH-canonical (sin, cos) entries — checksum stays valid —
+	// but the returned vector is negated component-wise.
+	return float3(-vec.x, 0.0f, -vec.y);
 }
 
 inline float3 CalcBeizer(const float i, const float3 p1, const float3 p2, const float3 p3, const float3 p4)

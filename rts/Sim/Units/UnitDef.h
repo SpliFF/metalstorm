@@ -41,7 +41,7 @@ struct UnitDefWeapon {
 	unsigned int badTargetCat = 0;
 	unsigned int onlyTargetCat = 0;
 
-	float3 mainDir = FwdVector;
+	float3 mainDir = -FwdVector;  // RH default: forward is -Z
 
 	bool fastAutoRetargeting = false; ///< pick new targets as soon as possible, don't wait for slow update
 	bool fastQueryPointUpdate = false;	///< check in with unitscript to get most current query piece before every friendly fire check, don't wait for slow update

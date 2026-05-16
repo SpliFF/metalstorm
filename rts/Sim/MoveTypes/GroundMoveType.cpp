@@ -457,7 +457,7 @@ CGroundMoveType::CGroundMoveType(CUnit* owner):
 	currWayPoint(ZeroVector),
 	nextWayPoint(ZeroVector),
 
-	flatFrontDir(FwdVector),
+	flatFrontDir(-FwdVector),  // RH: forward is -Z
 	lastAvoidanceDir(ZeroVector),
 	mainHeadingPos(ZeroVector),
 	skidRotVector(UpVector),

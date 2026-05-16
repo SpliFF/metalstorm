@@ -46,7 +46,7 @@ UnitDefWeapon::UnitDefWeapon(const WeaponDef* weaponDef, const LuaTable& weaponT
 	this->badTargetCat =                                   CCategoryHandler::Instance()->GetCategories(btcString);
 	this->onlyTargetCat = (otcString.empty())? 0xffffffff: CCategoryHandler::Instance()->GetCategories(otcString);
 
-	this->mainDir = weaponTable.GetFloat3("mainDir", FwdVector);
+	this->mainDir = weaponTable.GetFloat3("mainDir", -FwdVector);  // RH: forward is -Z
 	this->mainDir.SafeNormalize();
 
 	// multiplier weight applied to target selection based on how far the weapon has to turn to face the target.
@@ -450,7 +450,7 @@ UnitDef::UnitDef(const LuaTable& udTable, const std::string& unitName, int id)
 	flankingBonusMode = udTable.GetInt("flankingBonusMode", modInfo.flankingBonusModeDefault);
 	flankingBonusMax  = udTable.GetFloat("flankingBonusMax", modInfo.flankingBonusMaxDefault);
 	flankingBonusMin  = udTable.GetFloat("flankingBonusMin", modInfo.flankingBonusMinDefault);
-	flankingBonusDir  = udTable.GetFloat3("flankingBonusDir", FwdVector);
+	flankingBonusDir  = udTable.GetFloat3("flankingBonusDir", -FwdVector);  // RH: forward is -Z
 	flankingBonusMobilityAdd = udTable.GetFloat("flankingBonusMobilityAdd", 0.01f);
 
 	armoredMultiple = udTable.GetFloat("damageModifier", 1.0f);

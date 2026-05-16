@@ -188,7 +188,7 @@ CWeapon::CWeapon(CUnit* owner, const WeaponDef* def):
 	relWeaponMuzzlePos(UpVector),
 	weaponMuzzlePos(ZeroVector),
 	weaponDir(ZeroVector),
-	mainDir(FwdVector),
+	mainDir(-FwdVector),  // RH: default weapon main direction is -Z (forward)
 	wantedDir(UpVector),
 	lastRequestedDir(-UpVector),
 	salvoError(ZeroVector),

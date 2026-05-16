@@ -142,9 +142,13 @@ public:
 
 	void SetDirVectorsEuler(const float3 angles);
 	void SetDirVectors(const CMatrix44f& matrix) {
-		rightdir.x = -matrix[0]; updir.x = matrix[4]; frontdir.x = matrix[ 8];
-		rightdir.y = -matrix[1]; updir.y = matrix[5]; frontdir.y = matrix[ 9];
-		rightdir.z = -matrix[2]; updir.z = matrix[6]; frontdir.z = matrix[10];
+		// PLAN-coordinate-system Phase 2: RH basis. The rightdir column
+		// was negated under LH because the basis stored {rightdir, updir,
+		// frontdir} as a left-handed frame; in RH it's right-handed and
+		// the negation goes away.
+		rightdir.x = matrix[0]; updir.x = matrix[4]; frontdir.x = matrix[ 8];
+		rightdir.y = matrix[1]; updir.y = matrix[5]; frontdir.y = matrix[ 9];
+		rightdir.z = matrix[2]; updir.z = matrix[6]; frontdir.z = matrix[10];
 	}
 
 	void AddHeading(short deltaHeading, bool useGroundNormal, bool useObjectNormal, float dirSmoothing) { SetHeading(heading + deltaHeading, useGroundNormal, useObjectNormal, dirSmoothing); }
@@ -166,7 +170,9 @@ public:
 	void UpdateDirVectors(bool useGroundNormal, bool useObjectNormal, float dirSmoothing);
 	void UpdateDirVectors(const float3& uDir);
 
-	CMatrix44f ComposeMatrix(const float3& p) const { return (CMatrix44f(p, -rightdir, updir, frontdir)); }
+	// RH basis (Phase 2): rightdir is already right-handed, so the
+	// pre-negation that compensated for the LH frame is dropped.
+	CMatrix44f ComposeMatrix(const float3& p) const { return (CMatrix44f(p, rightdir, updir, frontdir)); }
 	virtual CMatrix44f GetTransformMatrix(bool synced = false, bool fullread = false) const { return CMatrix44f(); };
 
 
@@ -354,9 +360,14 @@ public:
 	CollisionVolume collisionVolume;
 	CollisionVolume selectionVolume;
 
-	///< object-local {z,x,y}-axes (in WS)
-	SyncedFloat3 frontdir =  FwdVector;
-	SyncedFloat3 rightdir = -RgtVector;
+	///< object-local {z,x,y}-axes (in WS).
+	///< PLAN-coordinate-system Phase 2: RH basis. frontdir defaults to
+	///< -Z (glTF-native forward). rightdir defaults to +X (right-handed
+	///< {right, up, front} frame where front × up = -right at heading 0
+	///< for an RH cross product). The previous LH defaults were
+	///< (+Z, -X, +Y).
+	SyncedFloat3 frontdir = -FwdVector;
+	SyncedFloat3 rightdir =  RgtVector;
 	SyncedFloat3    updir =   UpVector;
 
 	///< local-space vector from pos to midPos (read from model, used to initialize midPos)

@@ -98,16 +98,19 @@ struct LocalModelPiece {
 	float3 GetAbsolutePos() const { return GetModelSpaceMatrix().GetPos(); }
 
 	/// Compose this piece's transform matrix walking up the parent
-	/// chain. Each level is `T(pos) * R(-rot)` applied in YXZ Euler
-	/// order to match upstream `S3DModelPiece::ComposeTransform`,
-	/// which builds the rotation via `CQuaternion::FromEulerYPRNeg(-r)`
-	/// — equivalent to `CMatrix44f::RotateEulerYXZ(-r)` per the comment
-	/// at `Quaternion.cpp:72` in upstream. Without the sign flip a
-	/// script-driven `Turn(piece, y_axis, +a)` rotates the piece by
-	/// `-a` instead — turrets aim the wrong way and shells launch on
-	/// the mirrored bearing. Caught by the ZK aim bench: tankarty's
-	/// barrel reported +63°E in model space when the script had told
-	/// the turret to face -17° (target straight north, unit yaw +17°E).
+	/// chain. Each level is `T(pos) * R_yxz(rot.x, rot.y, -rot.z)`.
+	///
+	/// PLAN-coordinate-system Phase 2: under RH, Spring's LH-canonical
+	/// `Rotate{Y,X,Z}` primitives produce the right-handed rotation when
+	/// fed +rot for X/Y axes (the handedness flip of the world frame
+	/// compensates), while Z keeps the legacy -rot sign because the
+	/// rotation about the unit's forward axis is unchanged by the world
+	/// frame flip.
+	///
+	/// Pre-Phase-2 LH code used `RotateEulerYXZ(-rot)` to match upstream
+	/// `S3DModelPiece::ComposeTransform` (`CQuaternion::FromEulerYPRNeg`).
+	/// Without the X/Y sign flip in RH, a script-driven
+	/// `Turn(piece, y_axis, +a)` rotates the piece by `-a` instead.
 	CMatrix44f GetModelSpaceMatrix() const {
 		CMatrix44f local;
 		local.Translate(pos);
@@ -115,39 +118,41 @@ struct LocalModelPiece {
 		// Almost every static decorative piece on a unit stays at
 		// rest, so this saves three trig calls per piece per frame.
 		if (rot.x != 0.0f || rot.y != 0.0f || rot.z != 0.0f)
-			local.RotateEulerYXZ(-rot);
+			local.RotateEulerYXZ(float3(rot.x, rot.y, -rot.z));
 		if (parent != nullptr)
 			return parent->GetModelSpaceMatrix() * local;
 		return local;
 	}
 
 	/// `outPos` is the piece origin in model space; `outDir` is the
-	/// piece's local +Z (Spring's emit-axis convention) rotated by
-	/// the piece's accumulated transform — i.e. where a weapon's
-	/// muzzle is pointing in world-relative terms. Without this,
-	/// every weapon defaults to firing straight up because the
-	/// previous stub returned the local-Y axis verbatim.
+	/// piece's local -Z (glTF-native forward / RH emit-axis) rotated
+	/// by the piece's accumulated transform — i.e. where a weapon's
+	/// muzzle is pointing in world-relative terms.
+	///
+	/// PLAN-coordinate-system Phase 2: the emit axis flipped from
+	/// local +Z (Spring's LH convention) to local -Z to match the
+	/// glTF-native forward direction.
 	bool GetEmitDirPos(float3& outPos, float3& outDir) const {
 		const CMatrix44f mat = GetModelSpaceMatrix();
 		outPos = mat.GetPos();
-		// Multiply the local +Z basis vector through the rotation
+		// Multiply the local -Z basis vector through the rotation
 		// (treating it as a vector, not a point — subtract the
 		// translation back out). `mat * float3` is a point transform
 		// with implicit w=1.
-		outDir = (mat * float3(0.0f, 0.0f, 1.0f)) - outPos;
+		outDir = (mat * float3(0.0f, 0.0f, -1.0f)) - outPos;
 		return true;
 	}
 
 	const CollisionVolume* GetCollisionVolume() const { return &colvol; }
 	      CollisionVolume* GetCollisionVolume()       { return &colvol; }
 
-	/// Forward direction (local +Z) of the piece in model space.
+	/// Forward direction (local -Z, RH) of the piece in model space.
 	/// Used by a handful of unit-script utility callouts; matches
 	/// the dir component of GetEmitDirPos.
 	float3 GetDirection() const {
 		const CMatrix44f mat = GetModelSpaceMatrix();
 		const float3 origin = mat.GetPos();
-		return ((mat * float3(0.0f, 0.0f, 1.0f)) - origin).SafeNormalize();
+		return ((mat * float3(0.0f, 0.0f, -1.0f)) - origin).SafeNormalize();
 	}
 
 	int  GetLModelPieceIndex() const { return lmodelPieceIndex; }
