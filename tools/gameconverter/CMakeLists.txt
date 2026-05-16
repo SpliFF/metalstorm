@@ -15,6 +15,13 @@ add_dependencies(gameconverter modelimporter textureconverter)
 target_compile_definitions(gameconverter PRIVATE
     TEXTURECONVERTER_BINARY_PATH="$<TARGET_FILE:textureconverter>"
 )
+# Reads `JsonWriter::kCurrentConfigVersion` so the model-sidecar
+# stale-check stays in lock-step with whatever the importer is
+# currently writing — bumping the constant in one place is enough to
+# trigger a clean reconversion on next gameconverter run.
+target_include_directories(gameconverter PRIVATE
+    ${CMAKE_SOURCE_DIR}/tools/modelimporter
+)
 # audioconverter is optional at the top-level CMakeLists.txt (it
 # may be skipped if ffmpeg isn't installed). When present, plumb
 # the binary path through so gameconverter can shell out to it;

@@ -59,6 +59,13 @@
 #include "SpringLog.h"
 #include "SpringLogNet.h"
 
+// Pulls in JsonWriter::kCurrentConfigVersion so the
+// `.config.json` stale-check below stays in lock-step with whatever
+// schema the modelimporter is currently writing. Bump in one place
+// (JsonWriter.h), trigger a clean reconversion of every game's
+// models on next gameconverter run.
+#include "JsonWriter.h"
+
 #ifndef TEXTURECONVERTER_BINARY_PATH
 #define TEXTURECONVERTER_BINARY_PATH "textureconverter"
 #endif
@@ -1438,11 +1445,14 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
         // mtime check: skip if the output is newer than the source.
         // Also force a rebuild if the sibling .config.json is stale —
         // schema bumps inside modelimporter (e.g. when a new field is
-        // extracted from sources we used to ignore) need a regeneration
-        // even when the .glb itself is current. modelimporter exposes
-        // its current schema version via the constant baked into every
-        // emitted file as `configVersion`.
-        constexpr int kMinAcceptableConfigVersion = 4;
+        // extracted from sources we used to ignore, or when the
+        // coordinate convention flips as in v5) need a regeneration
+        // even when the .glb itself is current. Reading the constant
+        // straight from JsonWriter.h keeps the two in lock-step: a
+        // single edit there both bumps the emitted version and
+        // invalidates every cached sidecar below it on next run.
+        constexpr int kMinAcceptableConfigVersion =
+            JsonWriter::kCurrentConfigVersion;
         bool needsRebuild = true;
         if (!force && fs::exists(outPath)) {
             const auto srcTime = fs::last_write_time(entry.path(), ec);
