@@ -1495,6 +1495,11 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
                 }
                 if (version < kMinAcceptableConfigVersion) {
                     needsRebuild = true;
+                    SLOG(SPRING_LOG_NOTICE,
+                        "gameconverter: %s has configVersion=%d, rebuilding "
+                        "for v%d (PLAN-coordinate-system Phase 4b sweep)",
+                        jsonConfigPath.filename().string().c_str(),
+                        version, kMinAcceptableConfigVersion);
                 }
             }
         }
