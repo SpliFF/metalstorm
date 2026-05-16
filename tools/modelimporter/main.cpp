@@ -597,8 +597,34 @@ int main(int argc, char** argv) {
                                  texturePrefix);
     }
 
+    // Export-time LH → RH conversion. Spring's source-data convention
+    // (S3O author convention; +Z forward, LH cross-product) does not
+    // match glTF 2.0 which mandates RH (-Z forward, CCW winding from
+    // the front, UV origin upper-left). Passing these post-processing
+    // flags to Exporter::Export tells Assimp the *scene* data is in
+    // its native LH convention and must be flipped to RH before write.
+    //
+    // Per the Assimp docs (Exporter.hpp): "Specifying those flags for
+    // exporting has the opposite effect" — at import they convert
+    // RH→LH for users who want LH; at export they convert LH→RH so
+    // the emitted file matches the spec.
+    //
+    // Result: every .glb written from here on is a spec-compliant
+    // glTF 2.0 file that loads correctly in Blender, gltf-viewer, and
+    // any other third-party tool. The engine compensates on the
+    // sidecar side (JsonWriter negates Z so .config.json carries RH-
+    // canonical offsets) and on the loader side (ModelConfigLoader
+    // negates Z back to LH at read-time so engine internals are
+    // unaffected — Phase 1d bridge, removed in Phase 2 when the sim
+    // and client flip to RH natively).
+    constexpr unsigned int kExportFlags =
+        aiProcess_MakeLeftHanded   |   // LH source geometry → RH
+        aiProcess_FlipWindingOrder |   // compensate winding flip
+        aiProcess_FlipUVs;             // UV origin upper-left → lower-left
+
     Assimp::Exporter exporter;
-    const aiReturn rc = exporter.Export(scene, exporterId, outPath);
+    const aiReturn rc = exporter.Export(scene, exporterId, outPath,
+                                        kExportFlags);
     if (rc != aiReturn_SUCCESS) {
         SLOG(SPRING_LOG_ERROR, "glTF export failed: %s",
              exporter.GetErrorString());
