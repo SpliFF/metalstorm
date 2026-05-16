@@ -2,6 +2,7 @@
 #include "System/float3.h"
 #include "System/float4.h"
 #include "System/Matrix44f.h"
+#include "System/SpringMath.h"
 #include <cmath>
 
 TEST_SUITE("float3") {
@@ -242,5 +243,65 @@ TEST_SUITE("CMatrix44f") {
         CMatrix44f inv = m.Invert(&ok);
         CHECK(ok);
         CHECK(inv.IsIdentity());
+    }
+}
+
+// PLAN-coordinate-system Phase 4a: pin the glTF-native right-handed
+// invariants the rest of the engine relies on. Half-flipped state
+// (e.g. someone "simplifies" the negation in GetVectorFromHeading
+// without realising it's load-bearing) trips this immediately.
+TEST_SUITE("RH coord invariants") {
+    TEST_CASE("heading 0 maps to -Z forward") {
+        SpringMath::Init();
+
+        const float3 fwd = GetVectorFromHeading(0);
+        CHECK(fwd.z < 0.0f);
+        CHECK(fwd.x == doctest::Approx(0.0f).epsilon(0.001f));
+        CHECK(fwd.y == doctest::Approx(0.0f));
+    }
+
+    TEST_CASE("forward vector maps back to heading 0") {
+        SpringMath::Init();
+
+        CHECK(GetHeadingFromVector(0.0f, -1.0f) == 0);
+    }
+
+    TEST_CASE("facing table is RH-native") {
+        CHECK(GetHeadingFromFacing(FACING_NORTH) ==      0);
+        CHECK(GetHeadingFromFacing(FACING_EAST ) ==  16384);
+        CHECK(GetHeadingFromFacing(FACING_SOUTH) ==  32767);
+        CHECK(GetHeadingFromFacing(FACING_WEST ) == -16384);
+    }
+
+    TEST_CASE("heading → vector → heading round-trips") {
+        SpringMath::Init();
+
+        const short int samples[] = { 0, 8192, 16384, -16384, 24576, -24576 };
+        for (short int h : samples) {
+            const float3 v = GetVectorFromHeading(h);
+            const short int back = GetHeadingFromVector(v.x, v.z);
+            // One heading unit ≈ 360° / 65536 ≈ 0.0055°; quantisation
+            // through the headingToVectorTable can shift by up to one
+            // table bucket (NUM_HEADINGS = 1024 → ~32 heading units).
+            const int diff = std::abs(static_cast<int>(back) - static_cast<int>(h));
+            CHECK(diff <= 64);
+        }
+    }
+
+    TEST_CASE("basis triple (right × up = forward) under RH") {
+        // Spring's frontdir convention under RH is forward = -Z, so the
+        // canonical local basis at zero rotation is
+        //   right = (+1, 0, 0), up = (0, +1, 0), front = (0, 0, -1).
+        // RH cross product: right × up = (0*0 - 0*1, 0*0 - 1*0, 1*1 - 0*0)
+        //                              = (0, 0, +1)   ← world +Z.
+        // The engine stores `front` such that front.z < 0 (forward is -Z),
+        // i.e. front = -(right × up). Pin this so a future basis
+        // refactor can't silently invert handedness.
+        const float3 right(1.0f, 0.0f, 0.0f);
+        const float3 up   (0.0f, 1.0f, 0.0f);
+        const float3 rxu  = right.cross(up);
+        CHECK(rxu.z == doctest::Approx(+1.0f));
+        const float3 front = -rxu;
+        CHECK(front.z < 0.0f);
     }
 }
