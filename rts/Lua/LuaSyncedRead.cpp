@@ -5,6 +5,7 @@
 #include "LuaInclude.h"
 
 #include "LuaConfig.h"
+#include "LuaCoordAdapt.h"
 #include "LuaHandle.h"
 #include "LuaHashString.h"
 #include "LuaMetalMap.h"
@@ -505,20 +506,20 @@ static int GetSolidObjectPosition(lua_State* L, const CSolidObject* o, bool isFe
 	const bool returnMidPos = luaL_optboolean(L, 2, false);
 	const bool returnAimPos = luaL_optboolean(L, 3, false);
 
-	// base-position
+	// base-position (LuaCoordAdapt mirrors Z for legacy-LH widgets)
 	lua_pushnumber(L, o->pos.x + errorVec.x);
 	lua_pushnumber(L, o->pos.y + errorVec.y);
-	lua_pushnumber(L, o->pos.z + errorVec.z);
+	lua_pushnumber(L, LuaCoordAdapt::FlipZ(o->pos.z + errorVec.z));
 
 	if (returnMidPos) {
 		lua_pushnumber(L, o->midPos.x + errorVec.x);
 		lua_pushnumber(L, o->midPos.y + errorVec.y);
-		lua_pushnumber(L, o->midPos.z + errorVec.z);
+		lua_pushnumber(L, LuaCoordAdapt::FlipZ(o->midPos.z + errorVec.z));
 	}
 	if (returnAimPos) {
 		lua_pushnumber(L, o->aimPos.x + errorVec.x);
 		lua_pushnumber(L, o->aimPos.y + errorVec.y);
-		lua_pushnumber(L, o->aimPos.z + errorVec.z);
+		lua_pushnumber(L, LuaCoordAdapt::FlipZ(o->aimPos.z + errorVec.z));
 	}
 
 	return (3 + (3 * returnMidPos) + (3 * returnAimPos));
@@ -1387,7 +1388,10 @@ int LuaSyncedRead::GetModOptions(lua_State* L)
 int LuaSyncedRead::GetHeadingFromVector(lua_State* L)
 {
 	const float x = luaL_checkfloat(L, 1);
-	const float z = luaL_checkfloat(L, 2);
+	// Z arrives in legacy-LH coords when the bridge is active. Mirror
+	// before handing to the engine so the heading is computed against
+	// RH-canonical input.
+	const float z = LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 2));
 	const short int heading = ::GetHeadingFromVector(x, z);
 	lua_pushnumber(L, heading);
 	return 1;
@@ -1408,7 +1412,9 @@ int LuaSyncedRead::GetVectorFromHeading(lua_State* L)
 	const short int h = (short int)luaL_checknumber(L, 1);
 	const float3& vec = ::GetVectorFromHeading(h);
 	lua_pushnumber(L, vec.x);
-	lua_pushnumber(L, vec.z);
+	// Engine returns RH (heading=0 → -Z); legacy widgets expect LH
+	// (heading=0 → +Z). The Z-flip restores the legacy contract.
+	lua_pushnumber(L, LuaCoordAdapt::FlipZ(vec.z));
 	return 2;
 }
 
@@ -4310,11 +4316,14 @@ int LuaSyncedRead::GetUnitVectors(lua_State* L)
 	if (unit == nullptr)
 		return 0;
 
+	// LuaCoordAdapt flips Z on each basis vector when bridging
+	// LH-authored widgets. frontdir/rightdir/updir form an
+	// orthonormal triad in either frame after the bridge.
 #define PACK_VECTOR(n) \
-	lua_createtable(L, 3, 0);            \
-	lua_pushnumber(L, unit-> n .x); lua_rawseti(L, -2, 1); \
-	lua_pushnumber(L, unit-> n .y); lua_rawseti(L, -2, 2); \
-	lua_pushnumber(L, unit-> n .z); lua_rawseti(L, -2, 3)
+	lua_createtable(L, 3, 0);                                                              \
+	lua_pushnumber(L, unit-> n .x); lua_rawseti(L, -2, 1);                                 \
+	lua_pushnumber(L, unit-> n .y); lua_rawseti(L, -2, 2);                                 \
+	lua_pushnumber(L, LuaCoordAdapt::FlipZ(unit-> n .z)); lua_rawseti(L, -2, 3)
 
 	PACK_VECTOR(frontdir);
 	PACK_VECTOR(updir);
@@ -4355,7 +4364,7 @@ int LuaSyncedRead::GetUnitDirection(lua_State* L)
 
 	lua_pushnumber(L, unit->frontdir.x);
 	lua_pushnumber(L, unit->frontdir.y);
-	lua_pushnumber(L, unit->frontdir.z);
+	lua_pushnumber(L, LuaCoordAdapt::FlipZ(unit->frontdir.z));
 	return 3;
 }
 
@@ -8091,7 +8100,7 @@ static int GetSolidObjectPiecePosition(lua_State* L, const CSolidObject* o)
 
 	lua_pushnumber(L, pos.x);
 	lua_pushnumber(L, pos.y);
-	lua_pushnumber(L, pos.z);
+	lua_pushnumber(L, LuaCoordAdapt::FlipZ(pos.z));
 	return 3;
 }
 
@@ -8109,7 +8118,7 @@ static int GetSolidObjectPieceDirection(lua_State* L, const CSolidObject* o)
 
 	lua_pushnumber(L, dir.x);
 	lua_pushnumber(L, dir.y);
-	lua_pushnumber(L, dir.z);
+	lua_pushnumber(L, LuaCoordAdapt::FlipZ(dir.z));
 	return 3;
 }
 
@@ -8133,10 +8142,10 @@ static int GetSolidObjectPiecePosDir(lua_State* L, const CSolidObject* o)
 
 	lua_pushnumber(L, pos.x);
 	lua_pushnumber(L, pos.y);
-	lua_pushnumber(L, pos.z);
+	lua_pushnumber(L, LuaCoordAdapt::FlipZ(pos.z));
 	lua_pushnumber(L, dir.x);
 	lua_pushnumber(L, dir.y);
-	lua_pushnumber(L, dir.z);
+	lua_pushnumber(L, LuaCoordAdapt::FlipZ(dir.z));
 	return 6;
 }
 
@@ -8150,7 +8159,9 @@ static int GetSolidObjectPieceMatrix(lua_State* L, const CSolidObject* o)
 	if (lmp == nullptr)
 		return 0;
 
-	const CMatrix44f& mat = lmp->GetModelSpaceMatrix();
+	// Conjugate by diag(1,1,-1,1) when bridging legacy widgets so the
+	// returned 4×4 reads with LH semantics (Z row/col mirrored).
+	const CMatrix44f mat = LuaCoordAdapt::FlipMatrix(lmp->GetModelSpaceMatrix());
 
 	for (float mi: mat.m) {
 		lua_pushnumber(L, mi);
