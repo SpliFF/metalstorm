@@ -735,6 +735,32 @@ export class EntityRenderer {
                 '', baseUrl, stampUrl(fileName), this.scene,
             );
 
+            // Babylon's glTF loader assumes the file is right-handed (per
+            // spec) and inserts a hidden `__root__` node with
+            // rotation.y=π and scaling.z=-1 to convert into the
+            // left-handed scene. The composition nets to an X-axis
+            // mirror. Our GLBs come out of modelimporter with Spring
+            // S3O data (already left-handed, X right / Y up / Z forward)
+            // written verbatim, so the auto-conversion reflects every
+            // piece's X coordinate — putting lwheel / rwheel / firepoint
+            // on the opposite side from the server. Reset __root__'s
+            // transform so the data passes through unchanged. Spring's
+            // CCW winding matches Babylon's default front-face, so no
+            // winding flip is needed (the auto-X-mirror inverted both,
+            // and undoing it undoes both).
+            for (const n of result.meshes) {
+                if (n.name !== '__root__') continue;
+                if (n.rotationQuaternion) n.rotationQuaternion = Quaternion.Identity();
+                n.rotation.set(0, 0, 0);
+                n.scaling.set(1, 1, 1);
+            }
+            for (const n of result.transformNodes ?? []) {
+                if (n.name !== '__root__') continue;
+                if (n.rotationQuaternion) n.rotationQuaternion = Quaternion.Identity();
+                n.rotation.set(0, 0, 0);
+                n.scaling.set(1, 1, 1);
+            }
+
             // Build piece list from the imported hierarchy. We need to
             // map glb nodes to pieces, preserving parent relationships.
             // The glb node tree may contain TransformNodes (no geometry)
