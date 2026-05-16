@@ -87,11 +87,10 @@ bool ModelConfigLoader::LoadInto(S3DModel& out, const std::string& basePath) {
     // silently produce wrong data.
     //
     // v5 (2026-05-16) flipped the on-disk coordinate convention from
-    // Spring-native LH to glTF-native RH. Engine internals are still
-    // LH through Phase 1, so this loader applies a one-shot Z-flip
-    // bridge below for v5+ sidecars. Phase 2 deletes the bridge when
-    // the sim and client flip to RH natively. See
-    // PLAN-coordinate-system.md.
+    // Spring-native LH to glTF-native RH. Phase 2 made the sim RH
+    // internally, so v5+ sidecars are consumed as-is. v4 and earlier
+    // files are LH and are no longer supported — re-run gameconverter
+    // to regenerate.
     constexpr int kSupportedConfigVersion = 5;
     int configVersion = root.GetInt("configVersion", 0);
     if (configVersion == 0)
@@ -103,6 +102,11 @@ bool ModelConfigLoader::LoadInto(S3DModel& out, const std::string& basePath) {
             "versioned schema. Run `modelimporter --update-meta` to "
             "regenerate.",
             basePath.c_str());
+    } else if (configVersion < kSupportedConfigVersion) {
+        SLOG(SPRING_LOG_WARNING,
+            "%s: configVersion=%d is LH-era and is no longer supported. "
+            "Re-run gameconverter to regenerate at v%d (RH).",
+            basePath.c_str(), configVersion, kSupportedConfigVersion);
     } else if (configVersion > kSupportedConfigVersion) {
         SLOG(SPRING_LOG_NOTICE,
             "%s: configVersion=%d is newer than this engine "
@@ -110,36 +114,12 @@ bool ModelConfigLoader::LoadInto(S3DModel& out, const std::string& basePath) {
             basePath.c_str(), configVersion, kSupportedConfigVersion);
     }
 
-    // Phase 1d coordinate-system bridge: sidecars at v5+ carry
-    // RH-canonical values (-Z forward). The engine sim and the wire
-    // format still speak LH through Phase 1, so flip Z back here so
-    // internal state is unchanged. For min/max bounds this is a
-    // negate-AND-swap (the original LH min.z, the most-negative LH
-    // Z, became the new max.z under the writer's flip; the same
-    // operation is its own inverse).
-    const bool flipFromRh = (configVersion >= 5);
-    auto adaptOffsetOrMid = [flipFromRh](float3 v) {
-        if (flipFromRh) v.z = -v.z;
-        return v;
-    };
-    auto adaptMin = [flipFromRh](float3 mins, float3 maxs) {
-        if (flipFromRh) mins.z = -maxs.z;
-        return mins;
-    };
-    auto adaptMax = [flipFromRh](float3 mins, float3 maxs) {
-        if (flipFromRh) maxs.z = -mins.z;
-        return maxs;
-    };
-
     // ---- Top-level bounds ----
-    const float3 rawMid  = ReadFloat3Field(root, "midpos", float3(0, 0, 0));
-    const float3 rawMins = ReadFloat3Field(root, "mins",   float3(-1, -1, -1));
-    const float3 rawMaxs = ReadFloat3Field(root, "maxs",   float3( 1,  1,  1));
     out.radius    = root.GetFloat("radius", 1.0f);
     out.height    = root.GetFloat("height", 1.0f);
-    out.relMidPos = adaptOffsetOrMid(rawMid);
-    out.mins      = adaptMin(rawMins, rawMaxs);
-    out.maxs      = adaptMax(rawMins, rawMaxs);
+    out.relMidPos = ReadFloat3Field(root, "midpos", float3(0, 0, 0));
+    out.mins      = ReadFloat3Field(root, "mins",   float3(-1, -1, -1));
+    out.maxs      = ReadFloat3Field(root, "maxs",   float3( 1,  1,  1));
 
     // ---- Piece tree ----
     // Try pieces from the primary config first. If the primary config
@@ -173,13 +153,9 @@ bool ModelConfigLoader::LoadInto(S3DModel& out, const std::string& basePath) {
             S3DModelPiece piece;
             piece.name = p.GetString("name", "");
 
-            const float3 pOff  = ReadFloat3Field(p, "offset", float3(0, 0, 0));
-            const float3 pMins = ReadFloat3Field(p, "mins",   float3(0, 0, 0));
-            const float3 pMaxs = ReadFloat3Field(p, "maxs",   float3(0, 0, 0));
-            // Same Phase 1d RH→LH bridge as the top-level bounds.
-            piece.offset = adaptOffsetOrMid(pOff);
-            piece.mins   = adaptMin(pMins, pMaxs);
-            piece.maxs   = adaptMax(pMins, pMaxs);
+            piece.offset = ReadFloat3Field(p, "offset", float3(0, 0, 0));
+            piece.mins   = ReadFloat3Field(p, "mins",   float3(0, 0, 0));
+            piece.maxs   = ReadFloat3Field(p, "maxs",   float3(0, 0, 0));
 
             parentIndices.push_back(p.GetInt("parent", -1));
             out.pieces.push_back(std::move(piece));

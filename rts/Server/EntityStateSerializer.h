@@ -1,6 +1,14 @@
 /**
  * EntityStateSerializer — builds Tier 2 binary entity state updates.
  *
+ * COORDINATE SYSTEM: glTF-native right-handed (+X right, +Y up, -Z fwd).
+ * Per PLAN-coordinate-system.md Phase 2, positions and orientations on
+ * the wire are RH. `positions_z` carries the unit's world Z, where -Z
+ * is "into the map" / forward. `headings` map heading=0 to facing -Z;
+ * positive heading rotates +X toward -Z (CCW viewed from +Y). pitch /
+ * roll quantise the basis-vector y-components, which survive the RH
+ * flip unchanged — only positions_z and headings carry the new sign.
+ *
  * Per PLAN-network.md, the format is struct-of-arrays for zero-copy
  * TypedArray access on the client:
  *
@@ -12,8 +20,9 @@
  *     Bit 0: entity_ids    → u32[count]
  *     Bit 1: positions_x   → f32[count]
  *     Bit 2: positions_y   → f32[count]
- *     Bit 3: positions_z   → f32[count]
- *     Bit 4: headings      → u16[count]    (0-65535 → 0°-360°)
+ *     Bit 3: positions_z   → f32[count]    (RH: -Z is forward)
+ *     Bit 4: headings      → u16[count]    (0-65535 → 0°-360°,
+ *                                            heading=0 → -Z forward)
  *     Bit 5: health        → u16[count]    (0-65535 → 0%-100%)
  *     Bit 6: def_id        → u16[count]
  *     Bit 7: team          → u8[count]
