@@ -71,7 +71,18 @@ namespace JsonWriter {
 /// blades) punch through instead of rendering as opaque black.
 /// Existing v3 .glb files don't carry the alphaMode key and need to
 /// be re-converted on the next gameconverter / lobby launch.
-constexpr int kCurrentConfigVersion = 4;
+///
+/// 2026-05-16: v5 — coordinate system flipped from Spring-native LH
+/// (+X right, +Y up, +Z forward) to glTF-native RH (+X right, +Y up,
+/// -Z forward). Every Z value emitted by JsonWriter is now RH-canonical:
+/// offsets are negated, and min/max Z values are swapped-and-negated
+/// so the AABB stays valid under the flip. The .glb itself is also
+/// RH (modelimporter passes aiProcess_MakeLeftHanded on export). The
+/// engine compensates by re-negating Z in ModelConfigLoader at load
+/// time so internal sim state stays LH through Phase 1 — that bridge
+/// is removed in Phase 2 when the engine and client flip to RH
+/// natively. See PLAN-coordinate-system.md.
+constexpr int kCurrentConfigVersion = 5;
 
 /// Extract metadata from `scene` and write `outPath`, overwriting
 /// any existing file at that location. Callers are responsible for

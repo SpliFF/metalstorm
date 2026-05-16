@@ -374,12 +374,17 @@ bool JsonWriter::Write(const aiScene* scene,
     out << "  \"configVersion\": " << JsonWriter::kCurrentConfigVersion << ",\n";
     out << "\n";
 
-    // Bounds
+    // Bounds. Every Z value emitted here is RH-canonical (-Z forward,
+    // glTF native): we negate Z on midpos/offsets, and for min/max we
+    // also swap because the original min.z (most-negative LH Z value,
+    // i.e. furthest back in LH) becomes the new max under the flip.
+    // The engine compensates back to LH in ModelConfigLoader (Phase 1d
+    // bridge); see PLAN-coordinate-system.md for the full migration.
     out << "  \"radius\": " << JsonNumber(radius) << ",\n";
     out << "  \"height\": " << JsonNumber(height) << ",\n";
-    out << "  \"midpos\": " << Vec3(midX, midY, midZ) << ",\n";
-    out << "  \"mins\":   " << Vec3(bounds.minX, bounds.minY, bounds.minZ) << ",\n";
-    out << "  \"maxs\":   " << Vec3(bounds.maxX, bounds.maxY, bounds.maxZ) << ",\n";
+    out << "  \"midpos\": " << Vec3(midX, midY, -midZ) << ",\n";
+    out << "  \"mins\":   " << Vec3(bounds.minX, bounds.minY, -bounds.maxZ) << ",\n";
+    out << "  \"maxs\":   " << Vec3(bounds.maxX, bounds.maxY, -bounds.minZ) << ",\n";
 
     // Texture references — only emitted when present in the source.
     // These are bare filenames as recorded in the original model file
@@ -388,15 +393,17 @@ bool JsonWriter::Write(const aiScene* scene,
     if (!tex1.empty()) out << "\n  \"tex1\": " << JsonString(tex1) << ",\n";
     if (!tex2.empty()) out << "  \"tex2\": " << JsonString(tex2) << ",\n";
 
-    // Pieces — flat list ordered by pre-order walk.
+    // Pieces — flat list ordered by pre-order walk. Same RH-flip on Z
+    // as the top-level bounds above (negate offsets, negate-and-swap
+    // for min/max bounds).
     out << "\n  \"pieces\": [\n";
     for (size_t i = 0; i < pieces.size(); ++i) {
         const auto& p = pieces[i];
         out << "    { \"name\": " << JsonString(p.name)
             << ", \"parent\": " << p.parentIndex
-            << ", \"offset\": " << Vec3(p.offsetX, p.offsetY, p.offsetZ)
-            << ", \"mins\": "   << Vec3(p.localBounds.minX, p.localBounds.minY, p.localBounds.minZ)
-            << ", \"maxs\": "   << Vec3(p.localBounds.maxX, p.localBounds.maxY, p.localBounds.maxZ)
+            << ", \"offset\": " << Vec3(p.offsetX, p.offsetY, -p.offsetZ)
+            << ", \"mins\": "   << Vec3(p.localBounds.minX, p.localBounds.minY, -p.localBounds.maxZ)
+            << ", \"maxs\": "   << Vec3(p.localBounds.maxX, p.localBounds.maxY, -p.localBounds.minZ)
             << " }";
         if (i + 1 < pieces.size()) out << ",";
         out << "\n";
