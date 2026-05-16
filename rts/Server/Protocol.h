@@ -889,14 +889,16 @@ inline std::vector<uint8_t> BuildGameInfo(
     const std::string& mapId, const std::string& gameId,
     float speed, uint32_t frame, bool paused,
     float windX = 0, float windY = 0, float windZ = 0,
-    float windStrength = 0, float tidalStrength = 0)
+    float windStrength = 0, float tidalStrength = 0,
+    bool legacyCoordSystem = false)
 {
     flatbuffers::FlatBufferBuilder fbb(256);
     auto mapOff = fbb.CreateString(mapId);
     auto gameOff = fbb.CreateString(gameId);
     auto info = SpringWeb::CreateGameInfo(
         fbb, mapOff, gameOff, speed, frame, paused,
-        windX, windY, windZ, windStrength, tidalStrength);
+        windX, windY, windZ, windStrength, tidalStrength,
+        legacyCoordSystem);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameInfo, info.Union());
 }
 

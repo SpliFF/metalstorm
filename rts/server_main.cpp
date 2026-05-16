@@ -56,6 +56,7 @@
 #include "Sim/Path/IPathManager.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/Wind.h"
+#include "Sim/Misc/ModInfo.h"
 #include "Game/Players/PlayerHandler.h"
 #include "System/EventHandler.h"
 #include "Map/ReadMap.h"
@@ -1966,7 +1967,8 @@ int main(int argc, char* argv[])
                 static_cast<uint32_t>(curFrame), false,
                 wv.x, wv.y, wv.z,
                 envResHandler.GetCurrentWindStrength(),
-                envResHandler.GetCurrentTidalStrength());
+                envResHandler.GetCurrentTidalStrength(),
+                modInfo.legacyCoordSystem);
             rtcServer.BroadcastReliable(msg.data(), msg.size());
         }
         }

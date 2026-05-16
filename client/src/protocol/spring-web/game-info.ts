@@ -90,8 +90,21 @@ tidalStrength():number {
   return offset ? this.bb!.readFloat32(this.bb_pos + offset) : 0.0;
 }
 
+/**
+ * True when the active game ships with Lua content authored
+ * against Spring's legacy left-handed coord system. Clients pipe
+ * this flag into `lua-spring-api.ts` / `lua-gl-bridge.ts` so the
+ * LH-style values legacy widgets/gadgets expect bridge back to
+ * the RH internal state. Defaults to false for RH-native games.
+ * See PLAN-coordinate-system.md and docs/coordinate-system.md.
+ */
+legacyCoordSystem():boolean {
+  const offset = this.bb!.__offset(this.bb_pos, 24);
+  return offset ? !!this.bb!.readInt8(this.bb_pos + offset) : false;
+}
+
 static startGameInfo(builder:flatbuffers.Builder) {
-  builder.startObject(10);
+  builder.startObject(11);
 }
 
 static addMapId(builder:flatbuffers.Builder, mapIdOffset:flatbuffers.Offset) {
@@ -134,12 +147,16 @@ static addTidalStrength(builder:flatbuffers.Builder, tidalStrength:number) {
   builder.addFieldFloat32(9, tidalStrength, 0.0);
 }
 
+static addLegacyCoordSystem(builder:flatbuffers.Builder, legacyCoordSystem:boolean) {
+  builder.addFieldInt8(10, +legacyCoordSystem, +false);
+}
+
 static endGameInfo(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createGameInfo(builder:flatbuffers.Builder, mapIdOffset:flatbuffers.Offset, gameIdOffset:flatbuffers.Offset, gameSpeed:number, frame:number, paused:boolean, windX:number, windY:number, windZ:number, windStrength:number, tidalStrength:number):flatbuffers.Offset {
+static createGameInfo(builder:flatbuffers.Builder, mapIdOffset:flatbuffers.Offset, gameIdOffset:flatbuffers.Offset, gameSpeed:number, frame:number, paused:boolean, windX:number, windY:number, windZ:number, windStrength:number, tidalStrength:number, legacyCoordSystem:boolean):flatbuffers.Offset {
   GameInfo.startGameInfo(builder);
   GameInfo.addMapId(builder, mapIdOffset);
   GameInfo.addGameId(builder, gameIdOffset);
@@ -151,6 +168,7 @@ static createGameInfo(builder:flatbuffers.Builder, mapIdOffset:flatbuffers.Offse
   GameInfo.addWindZ(builder, windZ);
   GameInfo.addWindStrength(builder, windStrength);
   GameInfo.addTidalStrength(builder, tidalStrength);
+  GameInfo.addLegacyCoordSystem(builder, legacyCoordSystem);
   return GameInfo.endGameInfo(builder);
 }
 
@@ -165,7 +183,8 @@ unpack(): GameInfoT {
     this.windY(),
     this.windZ(),
     this.windStrength(),
-    this.tidalStrength()
+    this.tidalStrength(),
+    this.legacyCoordSystem()
   );
 }
 
@@ -181,6 +200,7 @@ unpackTo(_o: GameInfoT): void {
   _o.windZ = this.windZ();
   _o.windStrength = this.windStrength();
   _o.tidalStrength = this.tidalStrength();
+  _o.legacyCoordSystem = this.legacyCoordSystem();
 }
 }
 
@@ -195,7 +215,8 @@ constructor(
   public windY: number = 0.0,
   public windZ: number = 0.0,
   public windStrength: number = 0.0,
-  public tidalStrength: number = 0.0
+  public tidalStrength: number = 0.0,
+  public legacyCoordSystem: boolean = false
 ){}
 
 
@@ -213,7 +234,8 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     this.windY,
     this.windZ,
     this.windStrength,
-    this.tidalStrength
+    this.tidalStrength,
+    this.legacyCoordSystem
   );
 }
 }

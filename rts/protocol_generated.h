@@ -8421,6 +8421,7 @@ struct GameInfoT : public ::flatbuffers::NativeTable {
   float wind_z = 0.0f;
   float wind_strength = 0.0f;
   float tidal_strength = 0.0f;
+  bool legacy_coord_system = false;
 };
 
 struct GameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -8436,7 +8437,8 @@ struct GameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_WIND_Y = 16,
     VT_WIND_Z = 18,
     VT_WIND_STRENGTH = 20,
-    VT_TIDAL_STRENGTH = 22
+    VT_TIDAL_STRENGTH = 22,
+    VT_LEGACY_COORD_SYSTEM = 24
   };
   const ::flatbuffers::String *map_id() const {
     return GetPointer<const ::flatbuffers::String *>(VT_MAP_ID);
@@ -8474,6 +8476,15 @@ struct GameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   float tidal_strength() const {
     return GetField<float>(VT_TIDAL_STRENGTH, 0.0f);
   }
+  /// True when the active game ships with Lua content authored
+  /// against Spring's legacy left-handed coord system. Clients pipe
+  /// this flag into `lua-spring-api.ts` / `lua-gl-bridge.ts` so the
+  /// LH-style values legacy widgets/gadgets expect bridge back to
+  /// the RH internal state. Defaults to false for RH-native games.
+  /// See PLAN-coordinate-system.md and docs/coordinate-system.md.
+  bool legacy_coord_system() const {
+    return GetField<uint8_t>(VT_LEGACY_COORD_SYSTEM, 0) != 0;
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_MAP_ID) &&
@@ -8488,6 +8499,7 @@ struct GameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<float>(verifier, VT_WIND_Z, 4) &&
            VerifyField<float>(verifier, VT_WIND_STRENGTH, 4) &&
            VerifyField<float>(verifier, VT_TIDAL_STRENGTH, 4) &&
+           VerifyField<uint8_t>(verifier, VT_LEGACY_COORD_SYSTEM, 1) &&
            verifier.EndTable();
   }
   GameInfoT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -8529,6 +8541,9 @@ struct GameInfoBuilder {
   void add_tidal_strength(float tidal_strength) {
     fbb_.AddElement<float>(GameInfo::VT_TIDAL_STRENGTH, tidal_strength, 0.0f);
   }
+  void add_legacy_coord_system(bool legacy_coord_system) {
+    fbb_.AddElement<uint8_t>(GameInfo::VT_LEGACY_COORD_SYSTEM, static_cast<uint8_t>(legacy_coord_system), 0);
+  }
   explicit GameInfoBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -8551,7 +8566,8 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfo(
     float wind_y = 0.0f,
     float wind_z = 0.0f,
     float wind_strength = 0.0f,
-    float tidal_strength = 0.0f) {
+    float tidal_strength = 0.0f,
+    bool legacy_coord_system = false) {
   GameInfoBuilder builder_(_fbb);
   builder_.add_tidal_strength(tidal_strength);
   builder_.add_wind_strength(wind_strength);
@@ -8562,6 +8578,7 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfo(
   builder_.add_game_speed(game_speed);
   builder_.add_game_id(game_id);
   builder_.add_map_id(map_id);
+  builder_.add_legacy_coord_system(legacy_coord_system);
   builder_.add_paused(paused);
   return builder_.Finish();
 }
@@ -8577,7 +8594,8 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfoDirect(
     float wind_y = 0.0f,
     float wind_z = 0.0f,
     float wind_strength = 0.0f,
-    float tidal_strength = 0.0f) {
+    float tidal_strength = 0.0f,
+    bool legacy_coord_system = false) {
   auto map_id__ = map_id ? _fbb.CreateString(map_id) : 0;
   auto game_id__ = game_id ? _fbb.CreateString(game_id) : 0;
   return SpringWeb::CreateGameInfo(
@@ -8591,7 +8609,8 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfoDirect(
       wind_y,
       wind_z,
       wind_strength,
-      tidal_strength);
+      tidal_strength,
+      legacy_coord_system);
 }
 
 ::flatbuffers::Offset<GameInfo> CreateGameInfo(::flatbuffers::FlatBufferBuilder &_fbb, const GameInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -19435,6 +19454,7 @@ inline void GameInfo::UnPackTo(GameInfoT *_o, const ::flatbuffers::resolver_func
   { auto _e = wind_z(); _o->wind_z = _e; }
   { auto _e = wind_strength(); _o->wind_strength = _e; }
   { auto _e = tidal_strength(); _o->tidal_strength = _e; }
+  { auto _e = legacy_coord_system(); _o->legacy_coord_system = _e; }
 }
 
 inline ::flatbuffers::Offset<GameInfo> GameInfo::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -19455,6 +19475,7 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfo(::flatbuffers::FlatBufferB
   auto _wind_z = _o->wind_z;
   auto _wind_strength = _o->wind_strength;
   auto _tidal_strength = _o->tidal_strength;
+  auto _legacy_coord_system = _o->legacy_coord_system;
   return SpringWeb::CreateGameInfo(
       _fbb,
       _map_id,
@@ -19466,7 +19487,8 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfo(::flatbuffers::FlatBufferB
       _wind_y,
       _wind_z,
       _wind_strength,
-      _tidal_strength);
+      _tidal_strength,
+      _legacy_coord_system);
 }
 
 inline ReconnectResponseT *ReconnectResponse::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {

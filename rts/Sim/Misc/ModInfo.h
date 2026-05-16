@@ -232,6 +232,22 @@ public:
 
 	bool allowTake;
 	bool allowEnginePlayerlist;
+
+	/// Coordinate-system compatibility flag. Set by the game's
+	/// `modinfo.lua` (and surfaced via `game.config.lua`) when the
+	/// game ships with Lua scripts authored against Spring's legacy
+	/// left-handed coordinate system. When true, every coordinate-
+	/// touching Lua callout (`Spring.GetUnitPosition`,
+	/// `Spring.GiveOrderToUnit`, `gl.Translate`, etc.) routes through
+	/// `rts/Lua/LuaCoordAdapt.h` so legacy widgets/gadgets see
+	/// LH-style values even though the engine + wire format are now
+	/// glTF-native RH. New games leave this absent (defaults to
+	/// false) and incur no bridge overhead.
+	///
+	/// See [PLAN-coordinate-system.md](PLAN-coordinate-system.md)
+	/// Phase 3 for the full migration plan and the single mechanical
+	/// removal pass that drops the bridge once no game needs it.
+	bool legacyCoordSystem;
 };
 
 extern CModInfo modInfo;

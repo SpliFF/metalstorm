@@ -847,6 +847,13 @@ table GameInfo {
     /// Map's tidal energy multiplier; constant per map but cheaper to
     /// piggyback here than to add a one-shot message.
     tidal_strength: float = 0;
+    /// True when the active game ships with Lua content authored
+    /// against Spring's legacy left-handed coord system. Clients pipe
+    /// this flag into `lua-spring-api.ts` / `lua-gl-bridge.ts` so the
+    /// LH-style values legacy widgets/gadgets expect bridge back to
+    /// the RH internal state. Defaults to false for RH-native games.
+    /// See PLAN-coordinate-system.md and docs/coordinate-system.md.
+    legacy_coord_system: bool = false;
 }
 
 table ReconnectResponse {
