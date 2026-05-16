@@ -273,6 +273,32 @@ TEST_SUITE("RH coord invariants") {
         CHECK(GetHeadingFromFacing(FACING_WEST ) == -16384);
     }
 
+    // Phase 4c: pin the world-direction meaning of NORTH/SOUTH. The
+    // LuaCoordAdapt.h decision to leave FacingMap labels untouched
+    // (rather than adding a `FlipFacing` helper that would map
+    // NORTH↔SOUTH) relies on those labels naming the same world axis
+    // both before and after the RH flip.
+    //
+    // NOTE: the EAST/WEST X-axis test is intentionally not asserted
+    // here. The current `GetVectorFromHeading` negates BOTH x and z
+    // ("negated component-wise" in the SpringMath.inl comment); pair
+    // it with the matching x-negation in `GetHeadingFromVectorF` and
+    // the engine is internally consistent, but `heading 16384` maps
+    // to a world frontdir of (-1, 0, 0) instead of (+1, 0, 0). Many
+    // internal callers (MobileCAI, Weapon, Builder, Unit, Factory)
+    // round-trip heading↔frontdir through this pair and any one-sided
+    // fix would shift them all in lockstep. Tracked as a follow-up;
+    // the Phase 4 plan covers what we can pin safely today.
+    TEST_CASE("facing labels point at fixed Z-axis world directions") {
+        SpringMath::Init();
+
+        const float3 n = GetVectorFromHeading(GetHeadingFromFacing(FACING_NORTH));
+        const float3 s = GetVectorFromHeading(GetHeadingFromFacing(FACING_SOUTH));
+
+        CHECK(n.z < 0.0f);
+        CHECK(s.z > 0.0f);
+    }
+
     TEST_CASE("heading → vector → heading round-trips") {
         SpringMath::Init();
 

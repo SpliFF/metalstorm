@@ -23,6 +23,20 @@
  * `Spring.GetVectorFromHeading` / `Spring.GetHeadingFromVector`
  * callout boundaries).
  *
+ * FacingMap labels (FACING_NORTH/SOUTH/EAST/WEST) are also left alone
+ * for the same reason. The enum integer values were kept stable across
+ * the RH flip — what changed was which heading each label resolves to
+ * (`GetHeadingFromFacing` in SpringMath.inl: `FACING_NORTH → 0` now,
+ * was `FACING_SOUTH → 0`). But the world-direction meaning of each
+ * label is preserved: `FACING_NORTH` always names -Z, `FACING_SOUTH`
+ * always names +Z, etc. A legacy widget calling
+ * `Spring.CreateUnit(_, x, y, z, "N")` wanted "spawn a unit facing
+ * north" and gets exactly that in both LH and RH frames, with no
+ * bridge involvement. Adding a `FlipFacing` helper here would silently
+ * break those widgets by mapping NORTH ↔ SOUTH. Don't add one.
+ * (See Phase 4c of PLAN-coordinate-system: this was an open §7 item
+ * that resolved to a no-op once the label semantics were audited.)
+ *
  * The branch is a single bool test, branch-predictor friendly even
  * in tight unit-script loops. New games (legacyCoordSystem absent
  * or false) pay no overhead beyond the predicted-not-taken branch.
