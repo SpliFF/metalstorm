@@ -16,6 +16,7 @@
 #include "Sim/Weapons/WeaponDefHandler.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/GlobalSynced.h"
+#include "Sim/Misc/LosHandler.h"
 #include "Server/LuaDebugger.h"
 #include "Server/DebugFlags.h"
 #include "Server/CombatEventCollector.h"
@@ -413,6 +414,67 @@ std::string ExecuteServerCommand(const std::string& cmd) {
                << " reloadFrame=" << w->reloadStatus
                << " hasTarget=" << (w->HaveTarget() ? "yes" : "no");
         }
+        return ss.str();
+    }
+
+    // los [on|off|status]  — toggle globalLOS for every active ally team.
+    // Equivalent to typing `/globalLOS 1` in stock Spring for each ally team.
+    // No arg or "status" returns the current state (per-team).
+    if (cmd.rfind("los", 0) == 0 && (cmd.size() == 3 || cmd[3] == ' ')) {
+        std::string arg = cmd.size() > 4 ? cmd.substr(4) : "status";
+        if (!losHandler) return "error: LosHandler not initialised";
+        if (arg == "status") {
+            std::ostringstream ss;
+            for (int at = 0; at < teamHandler.ActiveAllyTeams(); ++at) {
+                if (at > 0) ss << " ";
+                ss << "ally" << at << "=" << (losHandler->GetGlobalLOS(at) ? "on" : "off");
+            }
+            return ss.str();
+        }
+        bool enable = (arg == "on" || arg == "true" || arg == "1");
+        for (int at = 0; at < teamHandler.ActiveAllyTeams(); ++at)
+            losHandler->SetGlobalLOS(at, enable);
+        return std::string("globalLOS=") + (enable ? "on" : "off")
+             + " (applied to " + std::to_string(teamHandler.ActiveAllyTeams()) + " ally team(s))";
+    }
+
+    // cheats [on|off|status]  — toggle gs->cheatEnabled and gs->godMode together.
+    // godMode is set to 7 (all flags: god build / god control / god vision) when on.
+    if (cmd.rfind("cheats", 0) == 0 && (cmd.size() == 6 || cmd[6] == ' ')) {
+        std::string arg = cmd.size() > 7 ? cmd.substr(7) : "status";
+        if (arg == "status") {
+            std::ostringstream ss;
+            ss << "cheatEnabled=" << (gs->cheatEnabled ? "on" : "off")
+               << " godMode=" << gs->godMode;
+            return ss.str();
+        }
+        bool enable = (arg == "on" || arg == "true" || arg == "1");
+        gs->cheatEnabled = enable;
+        gs->godMode = enable ? 7 : 0;
+        return std::string("cheats=") + (enable ? "on" : "off");
+    }
+
+    // invulnerable <unitId> [on|off]  — short-circuits CUnit::DoDamage when on.
+    // Default action when [on|off] is omitted is "on".
+    if (cmd.rfind("invulnerable", 0) == 0 && (cmd.size() == 12 || cmd[12] == ' ')) {
+        std::istringstream is(cmd.substr(12));
+        int unitId = 0;
+        std::string arg;
+        is >> unitId >> arg;
+        if (unitId <= 0) return "usage: invulnerable <unitId> [on|off]";
+        CUnit* u = unitHandler.GetUnit((unsigned)unitId);
+        if (!u) return "no such unit";
+        if (arg.empty() || arg == "on" || arg == "true" || arg == "1") {
+            u->invulnerable = true;
+        } else if (arg == "off" || arg == "false" || arg == "0") {
+            u->invulnerable = false;
+        } else if (arg == "status") {
+            // fall through to status return below
+        } else {
+            return "usage: invulnerable <unitId> [on|off|status]";
+        }
+        std::ostringstream ss;
+        ss << "unit " << unitId << " invulnerable=" << (u->invulnerable ? "on" : "off");
         return ss.str();
     }
 

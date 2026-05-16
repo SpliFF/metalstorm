@@ -33,6 +33,8 @@ bool IsUnitVisibleTo(const CUnit* u, int viewerAllyTeam) {
     if (viewerAllyTeam < 0) return true;
     const int unitAllyTeam = teamHandler.AllyTeam(u->team);
     if (unitAllyTeam == viewerAllyTeam) return true;
+    if (losHandler != nullptr && losHandler->GetGlobalLOS(viewerAllyTeam))
+        return true;
     constexpr uint8_t VISIBLE_MASK = LOS_INLOS | LOS_INRADAR | LOS_PREVLOS | LOS_CONTRADAR;
     return (u->losStatus[viewerAllyTeam] & VISIBLE_MASK) != 0;
 }

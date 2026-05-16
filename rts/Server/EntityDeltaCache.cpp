@@ -5,6 +5,7 @@
 #include "EntityDeltaCache.h"
 
 #include "EntityStateSerializer.h"
+#include "Sim/Misc/LosHandler.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
 #include "System/float3.h"
@@ -57,9 +58,14 @@ bool EntityDeltaCache::HasChanged(const CUnit* unit, int viewerAllyTeam) const {
 
     // LOS-state transition (radar↔los or first-sighting). Without this
     // the client could be stuck rendering a unit as a radar contact
-    // long after the player has gained LOS on it.
+    // long after the player has gained LOS on it. GlobalLOS pins the
+    // byte to 0x0F to match the serializer.
     if (viewerAllyTeam >= 0) {
-        const uint8_t losState = unit->losStatus[viewerAllyTeam] & 0x0F;
+        const bool global = losHandler != nullptr
+            && losHandler->GetGlobalLOS(viewerAllyTeam);
+        const uint8_t losState = global
+            ? 0x0F
+            : (unit->losStatus[viewerAllyTeam] & 0x0F);
         if (losState != c.losState)
             return true;
     }
@@ -78,9 +84,16 @@ void EntityDeltaCache::Update(const CUnit* unit, int viewerAllyTeam) {
     c.buildProgress = UnitBuildProgressU8(unit);
     c.defId = static_cast<uint16_t>(unit->unitDef->id);
     c.team = static_cast<uint8_t>(unit->team);
-    c.losState = (viewerAllyTeam >= 0)
-        ? (unit->losStatus[viewerAllyTeam] & 0x0F)
-        : 0x0F; // permissive sessions get "fully seen"
+    // Permissive sessions get "fully seen"; for normal sessions, mirror
+    // the serializer — globalLOS pins the byte to 0x0F so the cached
+    // value stays consistent across a /globalLOS toggle.
+    if (viewerAllyTeam < 0) {
+        c.losState = 0x0F;
+    } else if (losHandler != nullptr && losHandler->GetGlobalLOS(viewerAllyTeam)) {
+        c.losState = 0x0F;
+    } else {
+        c.losState = (unit->losStatus[viewerAllyTeam] & 0x0F);
+    }
 }
 
 void EntityDeltaCache::FindRemoved(

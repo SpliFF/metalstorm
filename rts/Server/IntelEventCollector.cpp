@@ -116,6 +116,16 @@ std::vector<uint8_t> IntelEventCollector::BuildLosBitmap(
         expDims = {dstW, dstH};
     }
 
+    // GlobalLOS (debug /globalLOS or `set_los on`) bypasses the per-
+    // square sample: every square reads as in-LOS, in-radar, and
+    // explored. The client's fog/minimap fades to fully visible.
+    const bool global = losHandler->GetGlobalLOS(allyTeam);
+    if (global) {
+        std::fill(inLosPlane.begin(), inLosPlane.end(), uint8_t{1});
+        std::fill(inRadarPlane.begin(), inRadarPlane.end(), uint8_t{1});
+        std::fill(exp.begin(), exp.end(), uint8_t{1});
+    }
+
     const float losXRatio = static_cast<float>(srcLosW) / static_cast<float>(dstW);
     const float losYRatio = static_cast<float>(srcLosH) / static_cast<float>(dstH);
     const float radXRatio = hasRadar ? (static_cast<float>(srcRadW) / static_cast<float>(dstW)) : 1.0f;
@@ -125,8 +135,9 @@ std::vector<uint8_t> IntelEventCollector::BuildLosBitmap(
 
     // Downsample with OR: a target square is "set" if *any* source
     // square in its block is set. Optimistic for the player; matches
-    // Recoil's minimap fog behaviour at the edges.
-    for (int dy = 0; dy < dstH; ++dy) {
+    // Recoil's minimap fog behaviour at the edges. Skipped entirely
+    // when globalLOS forces every plane to all-ones above.
+    for (int dy = 0; dy < dstH && !global; ++dy) {
         const int losY0 = static_cast<int>(dy * losYRatio);
         const int losY1 = std::min(srcLosH, static_cast<int>((dy + 1) * losYRatio + 0.5f));
         const int radY0 = hasRadar ? static_cast<int>(dy * radYRatio) : 0;

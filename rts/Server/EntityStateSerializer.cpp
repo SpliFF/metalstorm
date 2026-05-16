@@ -44,6 +44,10 @@ float3 GetViewedPos(const CUnit* u, int viewerAllyTeam) {
     if (viewerAllyTeam < 0) return u->pos;
     const int unitAllyTeam = teamHandler.AllyTeam(u->team);
     if (unitAllyTeam == viewerAllyTeam) return u->pos;
+    // GlobalLOS overrides the radar-error deception — debug verbs and
+    // /globalLOS cheat are expected to surface the true position.
+    if (losHandler != nullptr && losHandler->GetGlobalLOS(viewerAllyTeam))
+        return u->pos;
     const uint8_t los = u->losStatus[viewerAllyTeam];
     // Only deceive when contact is radar-only. INLOS and PREVLOS
     // (ghost building) report the true position per Recoil semantics.
@@ -174,9 +178,14 @@ std::vector<uint8_t> SerializeUnits(
     // engine's tracking state, mirroring Spring's "you can always see
     // your own units" behaviour.
     if (fieldMask & FIELD_LOS_STATE) {
+        const bool global = viewerAllyTeam >= 0
+            && losHandler != nullptr
+            && losHandler->GetGlobalLOS(viewerAllyTeam);
         for (const CUnit* u : units) {
             uint8_t losByte;
             if (viewerAllyTeam < 0) {
+                losByte = 0x0F;
+            } else if (global) {
                 losByte = 0x0F;
             } else {
                 const int unitAllyTeam = teamHandler.AllyTeam(u->team);
@@ -253,6 +262,11 @@ bool IsUnitVisibleTo(const CUnit* u, int viewerAllyTeam) {
     const int unitAllyTeam = teamHandler.AllyTeam(u->team);
     if (unitAllyTeam == viewerAllyTeam) return true;
     if (u->IsCloaked() && !u->alwaysVisible) return false;
+    // GlobalLOS (debug /globalLOS or `set_los on`) reveals every unit
+    // to the viewer ally team, including those that have never been
+    // touched by the per-team losStatus tracker.
+    if (losHandler != nullptr && losHandler->GetGlobalLOS(viewerAllyTeam))
+        return true;
     constexpr uint8_t VISIBLE_MASK = LOS_INLOS | LOS_INRADAR | LOS_PREVLOS | LOS_CONTRADAR;
     return (u->losStatus[viewerAllyTeam] & VISIBLE_MASK) != 0;
 }

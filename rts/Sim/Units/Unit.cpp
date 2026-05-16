@@ -1309,6 +1309,8 @@ void CUnit::DoDamage(
 ) {
 	if (isDead)
 		return;
+	if (invulnerable)
+		return;
 	if (IsCrashing() || IsInVoid())
 		return;
 

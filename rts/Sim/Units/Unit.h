@@ -510,6 +510,8 @@ public:
 	bool activated = false;
 	// prevent damage from hitting an already dead unit (causing multi wreck etc)
 	bool isDead = false;
+	// debug-tool toggle: short-circuits DoDamage so the unit takes no damage at all.
+	bool invulnerable = false;
 
 	bool armoredState = false;
 

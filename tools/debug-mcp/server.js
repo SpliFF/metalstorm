@@ -724,6 +724,55 @@ const TOOLS = [
         },
     },
     {
+        name: 'set_los',
+        description: 'Toggle global line-of-sight for every ally team (reveals the whole map for spectators and players alike). Wraps the `los on|off|status` server verb, which calls losHandler->SetGlobalLOS for each active ally team. Useful for debugging: with LOS off you can\'t see enemy units; with global LOS on the whole map streams to every viewport.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                enable: { type: 'boolean', description: 'true → reveal map; false → restore normal LOS; omit → return current state.' },
+                roomId: { type: 'number' },
+            },
+        },
+    },
+    {
+        name: 'set_cheats',
+        description: 'Toggle cheat mode on the game server (gs->cheatEnabled + gs->godMode). When on, Lua paths gated by `if gs->cheatEnabled` (Spring.SetUnitHealth above max, Spring.CreateUnit on any team, etc.) start working from any caller. Pairs with `set_unit_invulnerable` for sustained combat-FX testing.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                enable: { type: 'boolean', description: 'true → enable cheats; false → disable; omit → return current state.' },
+                roomId: { type: 'number' },
+            },
+        },
+    },
+    {
+        name: 'set_unit_invulnerable',
+        description: 'Make a specific unit immune to damage (toggles a CUnit::invulnerable flag that short-circuits DoDamage on the very first line). Survives weapon hits, AddUnitDamage, water damage, self-destruct attempts — everything funnels through DoDamage. Useful for keeping a damage target alive while you study impact CEGs or beam-hit FX.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                unitId: { type: 'number' },
+                invulnerable: { type: 'boolean', description: 'true → immune; false → restore normal damage; omit → return current state.' },
+                roomId: { type: 'number' },
+            },
+            required: ['unitId'],
+        },
+    },
+    {
+        name: 'spawn_at_camera',
+        description: 'Spawn one or more units at the current browser camera\'s look-at position. The camera lives in the browser, so this tool emits a `mcp__chrome-devtools__evaluate_script` snippet that reads `window.test.cameraPose().lookAt` and forwards to the server `spawn` verb via `window.test.spawn(...)`. Pattern matches `browser_test` — feed the returned snippet into chrome-devtools eval. Requires a game tab in focus with `startGame()` complete.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                defName: { type: 'string', description: 'Unit def name (e.g. "armcom1", "cloakraid").' },
+                team: { type: 'number', description: 'Owning team ID', default: 0 },
+                count: { type: 'number', description: 'How many to spawn (max 256)', default: 1 },
+                offset: { type: 'object', description: 'Optional XZ offset from camera look-at, e.g. {x:200, z:0} to spawn 200 elmos east.' },
+            },
+            required: ['defName'],
+        },
+    },
+    {
         name: 'browser_test',
         description: 'Generate the chrome-devtools `evaluate_script` snippet for a TestHarness method on `window.test`. The harness lives only in the browser; this MCP tool returns the JS string for you to feed into mcp__chrome-devtools__evaluate_script. Methods: focus(unitId), focusOn(x,z), pause(), resume(), screenshot(), saveScreenshot(name), select([ids]), spawnAndFocus(def,x,z,team), stageCombat(atk,tgt,x,z), state(), units(team), unitState(id), highResScreenshot(w,h), simPause(), simResume(), simSpeed(n).',
         inputSchema: {
@@ -1129,6 +1178,54 @@ async function executeTool(name, args) {
         case 'set_sim_speed': {
             const r = await execOnGameServer('server', `speed ${args.multiplier}`, args.roomId);
             return r.success ? r.output : `Error: ${r.output}`;
+        }
+
+        case 'set_los': {
+            const verb = args.enable === undefined ? 'los status'
+                       : args.enable ? 'los on' : 'los off';
+            const r = await execOnGameServer('server', verb, args.roomId);
+            return r.success ? r.output : `Error: ${r.output}`;
+        }
+
+        case 'set_cheats': {
+            const verb = args.enable === undefined ? 'cheats status'
+                       : args.enable ? 'cheats on' : 'cheats off';
+            const r = await execOnGameServer('server', verb, args.roomId);
+            return r.success ? r.output : `Error: ${r.output}`;
+        }
+
+        case 'set_unit_invulnerable': {
+            if (!args.unitId) return 'Error: unitId is required';
+            const tail = args.invulnerable === undefined ? 'status'
+                       : args.invulnerable ? 'on' : 'off';
+            const r = await execOnGameServer('server', `invulnerable ${args.unitId} ${tail}`, args.roomId);
+            return r.success ? r.output : `Error: ${r.output}`;
+        }
+
+        case 'spawn_at_camera': {
+            // The camera lives in the browser; emit the chrome-devtools
+            // snippet the caller pastes into mcp__chrome-devtools__evaluate_script.
+            // The harness `window.test.cameraPose()` returns {pos, lookAt} of {x,y,z}.
+            const defName = JSON.stringify(args.defName);
+            const team    = Number(args.team ?? 0);
+            const count   = Math.max(1, Math.min(256, Number(args.count ?? 1)));
+            const ox      = Number(args.offset?.x ?? 0);
+            const oz      = Number(args.offset?.z ?? 0);
+            const snippet =
+                `(async () => {`
+                + ` const p = window.test.cameraPose().lookAt;`
+                + ` const x = p.x + ${ox}, z = p.z + ${oz};`
+                + ` const out = await window.test.spawn(${defName}, x, z, ${team}, ${count});`
+                + ` return { x, z, response: out };`
+                + ` })()`;
+            return [
+                `Spawn-at-camera: paste this into mcp__chrome-devtools__evaluate_script:`,
+                ``,
+                `  ${snippet}`,
+                ``,
+                `Requires a game tab open at the client URL with a game in progress.`,
+                `Returns the camera lookAt (x, z) it used and the spawn response.`,
+            ].join('\n');
         }
 
         case 'browser_test': {
