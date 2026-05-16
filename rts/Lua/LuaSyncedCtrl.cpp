@@ -679,7 +679,7 @@ static int SetWorldObjectVelocity(lua_State* L, CWorldObject* o)
 	float3 speed;
 	speed.x = std::clamp(luaL_checkfloat(L, 2), -MAX_UNIT_SPEED, MAX_UNIT_SPEED);
 	speed.y = std::clamp(luaL_checkfloat(L, 3), -MAX_UNIT_SPEED, MAX_UNIT_SPEED);
-	speed.z = std::clamp(luaL_checkfloat(L, 4), -MAX_UNIT_SPEED, MAX_UNIT_SPEED);
+	speed.z = LuaCoordAdapt::FlipZ(std::clamp(luaL_checkfloat(L, 4), -MAX_UNIT_SPEED, MAX_UNIT_SPEED));
 
 	o->SetVelocityAndSpeed(speed);
 	return 0;
@@ -3885,7 +3885,7 @@ int LuaSyncedCtrl::AddUnitDamage(lua_State* L)
 	const int weaponDefID = luaL_optint(L, 5, -1);
 	const float3 impulse  = float3(std::clamp(luaL_optfloat(L, 6, 0.0f), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE),
 	                               std::clamp(luaL_optfloat(L, 7, 0.0f), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE),
-	                               std::clamp(luaL_optfloat(L, 8, 0.0f), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE));
+	                               LuaCoordAdapt::FlipZ(std::clamp(luaL_optfloat(L, 8, 0.0f), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE)));
 
 	CUnit* attacker = nullptr;
 
@@ -3929,7 +3929,7 @@ int LuaSyncedCtrl::AddUnitImpulse(lua_State* L)
 
 	const float3 impulse(std::clamp(luaL_checkfloat(L, 2), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE),
 	                     std::clamp(luaL_checkfloat(L, 3), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE),
-	                     std::clamp(luaL_checkfloat(L, 4), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE));
+	                     LuaCoordAdapt::FlipZ(std::clamp(luaL_checkfloat(L, 4), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE)));
 
 	unit->ApplyImpulse(impulse);
 	return 0;

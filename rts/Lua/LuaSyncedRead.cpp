@@ -474,7 +474,7 @@ static int GetWorldObjectVelocity(lua_State* L, const CWorldObject* o)
 
 	lua_pushnumber(L, o->speed.x);
 	lua_pushnumber(L, o->speed.y);
-	lua_pushnumber(L, o->speed.z);
+	lua_pushnumber(L, LuaCoordAdapt::FlipZ(o->speed.z));
 	lua_pushnumber(L, o->speed.w);
 	return 4;
 }
