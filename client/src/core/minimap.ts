@@ -185,6 +185,10 @@ export class Minimap {
 
         this.engine = new Engine(this.canvas, false, { preserveDrawingBuffer: false });
         this.scene = new Scene(this.engine);
+        // PLAN-coordinate-system Phase 2d: match the main scene's RH
+        // convention so unit blips drawn from RH wire data land at the
+        // expected XZ coordinates.
+        this.scene.useRightHandedSystem = true;
         this.scene.clearColor = new Color4(0.04, 0.06, 0.09, 1);
         // No lighting — minimap uses unlit emissive materials so the
         // terrain texture shows up at full brightness regardless of angle.

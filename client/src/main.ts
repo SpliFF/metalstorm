@@ -398,6 +398,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
 
     engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
     const scene = new Scene(engine);
+    // PLAN-coordinate-system Phase 2d: flip the Babylon scene to RH
+    // so the glTF loader passes data through unchanged (no __root__
+    // hack) and yaw/pitch/roll quaternions stay sign-correct under
+    // the server's RH wire format (Phase 2a).
+    scene.useRightHandedSystem = true;
     scene.clearColor = new Color4(0.05, 0.08, 0.12, 1);
 
     // Preserve the depth buffer across rendering groups so water

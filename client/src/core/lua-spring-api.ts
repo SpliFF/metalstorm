@@ -1921,7 +1921,8 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
                 // widgets that don't read these keys still work.
                 tx, ty, tz,
                 rx: Math.asin(-dy / len),
-                ry: Math.atan2(dx, dz),
+                // RH (Phase 2): ry=0 means looking toward -Z.
+                ry: Math.atan2(dx, -dz),
                 rz: 0,
                 // Orbit distance — Spring's `dist` field.
                 dist: len,
@@ -2830,7 +2831,10 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             const u = ls.units.get(Number(id));
             if (!u) return null;
             const h = u.heading / 65535 * Math.PI * 2;
-            return [Math.sin(h), 0, Math.cos(h)];
+            // RH (Phase 2): heading=0 → -Z. Mirror server's
+            // GetVectorFromHeading which negates the LH table entry
+            // componentwise.
+            return [-Math.sin(h), 0, -Math.cos(h)];
         },
         GetUnitResources: () => [0, 0, 0, 0, 0, 0], // metalMake, metalUse, energyMake, energyUse
         IsUnitVisible: (id: LuaValue) => ls.units.has(Number(id)),
@@ -2842,7 +2846,10 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             const dy = ls.camera.ty - ls.camera.py;
             const dz = ls.camera.tz - ls.camera.pz;
             const len = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
-            return [Math.asin(-dy / len), Math.atan2(dx, dz), 0];
+            // RH (Phase 2): ry=0 means looking toward -Z. The `-dz`
+            // flip aligns with RTSCamera.currentYawDeg and the server
+            // heading convention.
+            return [Math.asin(-dy / len), Math.atan2(dx, -dz), 0];
         },
 
         // --- View range ---

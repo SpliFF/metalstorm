@@ -735,31 +735,10 @@ export class EntityRenderer {
                 '', baseUrl, stampUrl(fileName), this.scene,
             );
 
-            // Babylon's glTF loader assumes the file is right-handed (per
-            // spec) and inserts a hidden `__root__` node with
-            // rotation.y=π and scaling.z=-1 to convert into the
-            // left-handed scene. The composition nets to an X-axis
-            // mirror. Our GLBs come out of modelimporter with Spring
-            // S3O data (already left-handed, X right / Y up / Z forward)
-            // written verbatim, so the auto-conversion reflects every
-            // piece's X coordinate — putting lwheel / rwheel / firepoint
-            // on the opposite side from the server. Reset __root__'s
-            // transform so the data passes through unchanged. Spring's
-            // CCW winding matches Babylon's default front-face, so no
-            // winding flip is needed (the auto-X-mirror inverted both,
-            // and undoing it undoes both).
-            for (const n of result.meshes) {
-                if (n.name !== '__root__') continue;
-                if (n.rotationQuaternion) n.rotationQuaternion = Quaternion.Identity();
-                n.rotation.set(0, 0, 0);
-                n.scaling.set(1, 1, 1);
-            }
-            for (const n of result.transformNodes ?? []) {
-                if (n.name !== '__root__') continue;
-                if (n.rotationQuaternion) n.rotationQuaternion = Quaternion.Identity();
-                n.rotation.set(0, 0, 0);
-                n.scaling.set(1, 1, 1);
-            }
+            // Phase 2d (PLAN-coordinate-system): with scene RH and the
+            // glTF already spec-RH on disk, Babylon's glTF loader
+            // passes the file through without inserting an axis-flip
+            // __root__. No reset hack needed.
 
             // Build piece list from the imported hierarchy. We need to
             // map glb nodes to pieces, preserving parent relationships.
@@ -1320,25 +1299,23 @@ export class EntityRenderer {
         return out;
     }
 
-    /** Build a parent-relative local matrix from a server piece pose.
-     *  Stays in Spring-aligned axes — the basis change is applied by the
-     *  ancestor chain (see comment on computePieceWorldMatrices). */
+    /** Build a parent-relative local matrix from a server piece pose. */
     private springToBabylonLocal(ov: {
         px: number; py: number; pz: number;
         rx: number; ry: number; rz: number;
     }): Matrix {
-        // Spring's per-piece transform: T(pos) * R_yxz(-rot) — upstream
-        // composes via CQuaternion::FromEulerYPRNeg(-r) (see
-        // 3DModelPiece.cpp:206 and the comment at Quaternion.cpp:72).
-        // The negation lets script calls like Turn(piece, y_axis, +a)
-        // rotate the piece's +Z basis towards +X (left-handed yaw)
-        // instead of the opposite. Mirrors the server-side stub fix in
-        // rts/Sim/Units/Scripts/LocalModelPieceStub.h.
+        // PLAN-coordinate-system Phase 2d: mirror the server-side
+        // RotateEulerYXZ(rot.x, rot.y, -rot.z) from
+        // rts/Sim/Units/Scripts/LocalModelPieceStub.h. Under RH, the
+        // X/Y axes pass through with their author sign and only Z
+        // keeps the legacy negation (rotation about the piece's
+        // forward axis is invariant to the world handedness flip).
+        //
         // Babylon q1.multiply(q2) = q1*q2 applies q2 first then q1, so
         // qY * qX * qZ applies in order qZ → qX → qY (Spring's order).
         const qZ = Quaternion.RotationAxis(new Vector3(0, 0, 1), -ov.rz);
-        const qX = Quaternion.RotationAxis(new Vector3(1, 0, 0), -ov.rx);
-        const qY = Quaternion.RotationAxis(new Vector3(0, 1, 0), -ov.ry);
+        const qX = Quaternion.RotationAxis(new Vector3(1, 0, 0), ov.rx);
+        const qY = Quaternion.RotationAxis(new Vector3(0, 1, 0), ov.ry);
         const rot = qY.multiply(qX).multiply(qZ);
 
         return Matrix.Compose(
@@ -1582,26 +1559,23 @@ export class EntityRenderer {
                     }
                 }
                 const rotation = (lerped.heading / 65535) * Math.PI * 2;
-                // Sign convention notes — both pitch and roll are negated:
+                // PLAN-coordinate-system Phase 2d sign convention:
                 //
-                // Spring packs `pitch = asin(frontdir.y)` and
-                // `roll = asin(rightdir.y)` — i.e. *world*-Y components of
-                // the unit's basis vectors. Positive pitch means nose-up,
-                // positive roll means Spring-right side up (Spring's
-                // rightdir is initialised to -RgtVector so its "right"
-                // points along local -X).
+                // Server packs `pitch = asin(frontdir.y)` and
+                // `roll = asin(rightdir.y)`. Under the RH server
+                // (Phase 2a), frontdir defaults to -Z and rightdir to
+                // +X, so positive pitch = nose-up and positive roll =
+                // right-side rises (CCW about local Z viewed forward).
                 //
-                // Babylon's RotationYawPitchRoll in left-handed coords
-                // rotates local +Z toward -Y for positive pitch (nose
-                // DOWN), and tilts +Y toward -X for positive roll. Both
-                // are the opposite convention to Spring's, so we negate
-                // here. Without the flip, a tank on a slope rises with
-                // its top leaning INTO the hill — visually the unit is
-                // half-buried on the uphill side, which is the
-                // PLAN-combat-vfx.md F6 symptom.
+                // Babylon's RotationYawPitchRoll in an RH scene (Phase
+                // 2d) maps the same convention directly: positive
+                // pitch is X-axis rotation that tilts local +Y toward
+                // local +Z (= nose-up when forward is local -Z), and
+                // positive roll is Z-axis rotation that tilts local
+                // +X toward local +Y. No negation needed.
                 const entityMatrix = Matrix.Compose(
                     new Vector3(1, 1, 1),
-                    Quaternion.RotationYawPitchRoll(rotation, -lerped.pitch, -lerped.roll),
+                    Quaternion.RotationYawPitchRoll(rotation, lerped.pitch, lerped.roll),
                     new Vector3(lerped.x, renderY + tmpl.yOffset, lerped.z),
                 );
 

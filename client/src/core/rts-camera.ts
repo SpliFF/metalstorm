@@ -1102,12 +1102,15 @@ export class RTSCamera {
         }
     }
 
-    /** Camera yaw expressed as a Spring-style world heading: 0° looks
-     *  toward +Z, +90° looks toward +X, etc. */
+    /** Camera yaw as a Spring-style world heading under RH (PLAN-
+     *  coordinate-system Phase 2d): 0° looks toward -Z (glTF forward),
+     *  +90° looks toward +X. The `-dz` flip aligns the camera basis
+     *  with the RH server convention so `cameraPose().yaw` matches the
+     *  unit heading wire field. */
     private currentYawDeg(): number {
         const dx = this.lookAt.x - this.camera.position.x;
         const dz = this.lookAt.z - this.camera.position.z;
-        return Math.atan2(dx, dz) * 180 / Math.PI;
+        return Math.atan2(dx, -dz) * 180 / Math.PI;
     }
 
     /** Camera pitch (downward tilt) in degrees. */
@@ -1119,7 +1122,9 @@ export class RTSCamera {
         return Math.atan2(dy, horiz) * 180 / Math.PI;
     }
 
-    /** Compute a camera world position from spherical-coords-around-lookAt. */
+    /** Compute a camera world position from spherical-coords-around-lookAt.
+     *  RH inverse of currentYawDeg: at yaw=0 the camera sits at +Z relative
+     *  to lookAt (so it looks toward -Z, the RH forward direction). */
     private cameraPosFromOrbit(lookAt: Vec3Like, yawDeg: number, pitchDeg: number,
                                 distance: number): { x: number; y: number; z: number } {
         const yaw = yawDeg * Math.PI / 180;
@@ -1130,7 +1135,7 @@ export class RTSCamera {
         return {
             x: lookAt.x - horiz * Math.sin(yaw),
             y: lookAt.y + vert,
-            z: lookAt.z - horiz * Math.cos(yaw),
+            z: lookAt.z + horiz * Math.cos(yaw),
         };
     }
 

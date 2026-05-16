@@ -86,12 +86,13 @@ export function buildTerrainMesh(
         }
     }
 
-    // Triangle indices. Wind CCW when viewed from +Y (above) so the
-    // computed normals point up. Cross product is (edge1) × (edge2):
-    // for the top-left triangle we want (tr - tl) × (bl - tl) which gives
-    // (+X) × (+Z) = +Y, i.e. up-pointing normal. That means the vertex
-    // order must be tl, tr, bl (the 2nd and 3rd operands come after the
-    // first vertex in the cross product).
+    // Triangle indices (PLAN-coordinate-system Phase 2d). The RH scene
+    // (`scene.useRightHandedSystem = true`) flips the front-face rule
+    // — Babylon now interprets CCW-from-camera as front. Cross-product
+    // math for normals is unchanged, so to land +Y normals (terrain
+    // facing up) the per-quad winding must be reversed from the LH
+    // version: (bl - tl) × (tr - tl) = (+Z) × (+X) = +Y. Order each
+    // triangle tl → bl → tr (and tr → bl → br for the second half).
     const numQuads = (gridW - 1) * (gridH - 1);
     const indices = new Uint32Array(numQuads * 6);
     let ti = 0;
@@ -101,8 +102,8 @@ export function buildTerrainMesh(
             const tr = tl + 1;
             const bl = (gz + 1) * gridW + gx;
             const br = bl + 1;
-            indices[ti++] = tl; indices[ti++] = tr; indices[ti++] = bl;
-            indices[ti++] = tr; indices[ti++] = br; indices[ti++] = bl;
+            indices[ti++] = tl; indices[ti++] = bl; indices[ti++] = tr;
+            indices[ti++] = tr; indices[ti++] = bl; indices[ti++] = br;
         }
     }
 
