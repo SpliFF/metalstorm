@@ -549,10 +549,21 @@ export class ProjectileRenderer {
 
         // Hit-scan weapons (beam laser, lightning) don't move — render
         // the bolt as a one-shot line from launch pos to impact pos and
-        // skip the live-projectile tracking entirely.
+        // skip the live-projectile tracking entirely. For beam-kind
+        // visuals the entry must stay in `liveBeams` exactly as long
+        // as the shader's age-based fade window (already floored at
+        // DEFAULT_BEAM_LIFE_S in buildBeamVisual); otherwise the entry
+        // is culled while still partly visible, or held past full
+        // fade-out. ZK BeamLaser defs ship with ttl=0 so the previous
+        // `ev.ttl/30 || DEFAULT_BEAM_LIFE_S` fallback gave a 0.12s
+        // entry life paired with a 0.05s shader fade — beam vanished
+        // visually at 50ms and only the impact CEG remained on screen.
         if (ev.hitscan) {
-            this.spawnBeam(ev.weaponDefId, ev.pos, ev.targetPos,
-                ev.ttl > 0 ? ev.ttl / SIM_TICKS_PER_SEC : DEFAULT_BEAM_LIFE_S);
+            const v = this.weaponVisuals.get(ev.weaponDefId);
+            const lifeS = v && v.kind === 'beam'
+                ? v.duration
+                : (ev.ttl > 0 ? ev.ttl / SIM_TICKS_PER_SEC : DEFAULT_BEAM_LIFE_S);
+            this.spawnBeam(ev.weaponDefId, ev.pos, ev.targetPos, lifeS);
             return;
         }
 
@@ -1243,11 +1254,17 @@ function buildBeamVisual(
     // isn't on our wire yet; size*2 produces visually similar beams for
     // ZK weapons until a per-def override is added.
     const halfWidth = Math.max(0.5, size * 2);
-    // Visible duration: prefer the weapon's beam duration, else the
-    // hit-scan default; cap at MAX_BEAM_DURATION_S to bound overdraw.
+    // Visible duration: floor at DEFAULT_BEAM_LIFE_S so the shader's
+    // age-based alpha fade always covers at least one or two render
+    // frames. ZK BeamLaser defs typically ship with `duration = 0.05`
+    // (≈1.5 sim frames at 30 Hz; 3 render frames at 60 Hz) — without
+    // the floor the beam fades to zero alpha before the eye catches it
+    // and the only thing visible is the impact CEG, leaving the laser
+    // looking like a stationary dot at the impact point.
     const duration = Math.min(
         MAX_BEAM_DURATION_S,
-        def.duration > 0 ? def.duration : DEFAULT_BEAM_LIFE_S,
+        Math.max(DEFAULT_BEAM_LIFE_S,
+                 def.duration > 0 ? def.duration : DEFAULT_BEAM_LIFE_S),
     );
     const isLargeBeam = (def.flags & FLAG_LARGE_BEAM_LASER) !== 0;
     // Recoil semantics: only the Large variant scrolls. scrollSpeed

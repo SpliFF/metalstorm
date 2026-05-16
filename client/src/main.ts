@@ -554,6 +554,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     (window as unknown as { __scene: unknown }).__scene = scene;
     (window as unknown as { __entityRenderer: unknown }).__entityRenderer = entityRenderer;
     (window as unknown as { __buildBeamRenderer: unknown }).__buildBeamRenderer = buildBeamRenderer;
+    (window as unknown as { __projectileRenderer: unknown }).__projectileRenderer = projectileRenderer;
 
     // DefCache accumulates defs as the server streams them incrementally.
     // Listeners forward new defs to the renderers that need them.

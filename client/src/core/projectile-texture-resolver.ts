@@ -131,25 +131,30 @@ export class ProjectileTextureResolver {
         const lower = name.toLowerCase();
         if (lower === 'none') return null;
 
-        const map = this.resources.graphics?.projectiletextures ?? {};
-
         // resources.lua keys are case-sensitive in the file but
         // Spring's runtime is case-insensitive for projectile texture
         // names (the engine lowercases on lookup). Honour that.
-        let relPath = map[name] ?? map[lower];
-        if (!relPath) {
-            // Some games miscase the key — try a linear scan.
-            for (const k of Object.keys(map)) {
-                if (k.toLowerCase() === lower) {
-                    relPath = map[k];
-                    break;
-                }
+        //
+        // Look in `projectiletextures` first; if not found, fall through
+        // to `groundfx` — authored CEGs legitimately reference names
+        // from that section (e.g. CSimpleGroundFlash with
+        // `texture = "groundflash"`).
+        const lookup = (m: Record<string, string>): string | undefined => {
+            let v = m[name] ?? m[lower];
+            if (v) return v;
+            for (const k of Object.keys(m)) {
+                if (k.toLowerCase() === lower) return m[k];
             }
-        }
+            return undefined;
+        };
+
+        const projTex = this.resources.graphics?.projectiletextures ?? {};
+        const groundFx = this.resources.graphics?.groundfx ?? {};
+        let relPath = lookup(projTex) ?? lookup(groundFx);
 
         if (!relPath) {
             this.warnOnce(`unmapped:${lower}`,
-                `[projTex] '${name}' not in graphics.projectiletextures`);
+                `[projTex] '${name}' not in graphics.projectiletextures or groundfx`);
             return null;
         }
 

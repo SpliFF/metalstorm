@@ -112,20 +112,25 @@ export const PROJECTILE_BEAM_FRAGMENT = `
         vec4 texel = texture2D(beamTex, uvSampled);
 
         // Procedural cross-section: opaque centre, smooth shoulder
-        // taper to the edges. Acts as the fallback look when texture1
-        // is empty / didn't resolve (ZK LaserCannon defs ship without
-        // an explicit texture; an empty beamTex samples to a 1x1 black
-        // texel and would otherwise produce an invisible beam).
+        // taper to the edges. Always drives the beam's primary alpha
+        // so the stretched-quad reads as a coherent stripe regardless
+        // of how the authored texture is patterned. ZK BeamLaser defs
+        // typically ship with a "falloff" sprite — round halo with
+        // alpha mostly zero — that, if used as the primary alpha,
+        // would render the beam as scattered halo dots tiled along
+        // the length instead of a connected line. The texture instead
+        // brightens / colours the beam where it has alpha, on top of
+        // the procedural shape.
         float dx = abs(vUV.x - 0.5) * 2.0;
         float crossA = 1.0 - smoothstep(0.6, 1.0, dx);
 
-        // Texture present (any non-zero alpha anywhere): trust it and
-        // multiply by the procedural across-axis taper for clean edges.
-        // Absent: substitute the procedural taper directly and tint the
-        // beam with baseColor only.
-        bool textured = texel.a > 0.01;
-        float alpha = (textured ? texel.a * crossA : crossA) * fade;
-        vec3 col = textured ? (baseColor * texel.rgb) : baseColor;
+        float alpha = crossA * fade;
+        // Texture contribution: where the texel is opaque, lerp from
+        // the flat base colour toward the texture-tinted colour.
+        // Where the texel is transparent (between halo dots, etc.)
+        // the beam stays at baseColor. The procedural alpha keeps
+        // the stripe visible end-to-end either way.
+        vec3 col = mix(baseColor, baseColor * texel.rgb, texel.a);
         // Premultiplied alpha — paired with alphaMode = 7 in the
         // material (same convention as the build-beam shader).
         gl_FragColor = vec4(col * alpha, alpha);

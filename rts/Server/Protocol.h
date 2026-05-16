@@ -1613,7 +1613,7 @@ inline std::array<std::string, 4> ResolveProjectileTextureDefaults(
         || weaponType == "AircraftBomb" || weaponType == "TorpedoLauncher") {
         if (out[0].empty()) out[0] = pick("plasmatexture", "circularthingy");
     } else if (weaponType == "Shield") {
-        if (out[0].empty()) out[0] = "perlintex";
+        if (out[0].empty()) out[0] = pick("perlintex", "flare");
     } else if (weaponType == "Flame") {
         if (out[0].empty()) out[0] = "flame";
     } else if (weaponType == "MissileLauncher") {
@@ -1640,9 +1640,13 @@ inline std::array<std::string, 4> ResolveProjectileTextureDefaults(
         if (out[1].empty()) out[1] = pick("sbtrailtexture", "smoketrail");
         if (out[2].empty()) out[2] = "explo";
     } else {
-        // Unknown / `noweapon` — same default as the fallthrough in Recoil.
-        if (out[0].empty()) out[0] = "plasmatexture";
-        if (out[1].empty()) out[1] = "plasmatexture";
+        // Unknown / `noweapon` — same default as the fallthrough in
+        // Recoil. ZK (and many other games) don't ship a
+        // `plasmatexture` mapping in resources.lua, so fall back to
+        // `circularthingy` (which both ZK and engine base ship) when
+        // the game manifest doesn't carry the primary name.
+        if (out[0].empty()) out[0] = pick("plasmatexture", "circularthingy");
+        if (out[1].empty()) out[1] = pick("plasmatexture", "circularthingy");
     }
     return out;
 }
