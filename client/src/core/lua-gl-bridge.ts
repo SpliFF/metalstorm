@@ -144,6 +144,30 @@ export class LuaGLBridge {
      *  the bridge silently no-ops in that case. */
     private minimapEmitter: ((cmd: MinimapBridgeCommand) => void) | null = null;
 
+    /** PLAN-coordinate-system Phase 3: when true, every world-space
+     *  `gl.*` call (Translate / Rotate / Vertex / LoadMatrix /
+     *  MultMatrix) mirrors Z (and the equivalent matrix entries) so
+     *  legacy-LH widgets keep drawing at their authored coordinates
+     *  even though the immediate-mode matrix stack is RH-native.
+     *  Default false (RH-native). Set on first GameInfo broadcast by
+     *  `setLegacyCoordSystem`. */
+    private legacyCoordSystem = false;
+
+    /** Toggle the legacy-LH coord bridge. Called from the worker once
+     *  the server's `GameInfo.legacy_coord_system` flag arrives. The
+     *  bridge looks at it on every `gl.*` call that consumes world Z,
+     *  so flipping mid-game is safe in principle — the assumption is
+     *  that the server treats the flag as immutable per game session,
+     *  matching the C++ side's `modInfo.legacyCoordSystem`. */
+    setLegacyCoordSystem(value: boolean): void {
+        this.legacyCoordSystem = value;
+    }
+
+    /** Convenience: mirror Z when bridging legacy LH widgets. */
+    private flipZ(z: number): number {
+        return this.legacyCoordSystem ? -z : z;
+    }
+
     constructor(gl: WebGL2RenderingContext, mapSourceUrl: string, engineTex: EngineTextures = {}) {
         this.gl = gl;
         this.mapSourceUrl = mapSourceUrl;
@@ -335,12 +359,15 @@ export class LuaGLBridge {
         gl['LoadIdentity'] = () => this.imm.loadIdentity();
         gl['LoadMatrix'] = (...args: LuaValue[]) => this.loadMatrix(args);
         gl['MultMatrix'] = (...args: LuaValue[]) => this.multMatrixGL(args);
+        // World-Z carrying matrix mutators: legacy-LH widgets pass
+        // values in their authoring frame; mirror Z so the RH matrix
+        // stack accumulates the correct transform.
         gl['Translate'] = (x: LuaValue, y: LuaValue, z: LuaValue) =>
-            this.imm.translate(Number(x), Number(y), Number(z ?? 0));
+            this.imm.translate(Number(x), Number(y), this.flipZ(Number(z ?? 0)));
         gl['Scale'] = (x: LuaValue, y: LuaValue, z: LuaValue) =>
             this.imm.scale(Number(x), Number(y), Number(z ?? 1));
         gl['Rotate'] = (angle: LuaValue, x: LuaValue, y: LuaValue, z: LuaValue) =>
-            this.imm.rotate(Number(angle), Number(x), Number(y), Number(z));
+            this.imm.rotate(Number(angle), Number(x), Number(y), this.flipZ(Number(z)));
         gl['Ortho'] = (l: LuaValue, r: LuaValue, b: LuaValue, t: LuaValue,
             n: LuaValue, f: LuaValue) =>
             this.imm.ortho(Number(l), Number(r), Number(b), Number(t),
@@ -644,6 +671,7 @@ export class LuaGLBridge {
         if (args.length >= 16) {
             const m = new Float32Array(16);
             for (let i = 0; i < 16; i++) m[i] = Number(args[i]);
+            this.applyLegacyMatrixFlip(m);
             this.imm.loadMatrix(m);
         }
     }
@@ -652,8 +680,26 @@ export class LuaGLBridge {
         if (args.length >= 16) {
             const m = new Float32Array(16);
             for (let i = 0; i < 16; i++) m[i] = Number(args[i]);
+            this.applyLegacyMatrixFlip(m);
             this.imm.multMatrix(m);
         }
+    }
+
+    /** Conjugate the matrix by diag(1, 1, -1, 1) when bridging legacy
+     *  LH widgets. Negates the Z row + Z column of the rotation block
+     *  plus the translation Z. Mirrors the same flip used by the
+     *  server-side `LuaCoordAdapt::FlipMatrix` helper so widgets that
+     *  read a piece matrix on the server and push it through
+     *  `gl.LoadMatrix` get the expected visual result. */
+    private applyLegacyMatrixFlip(m: Float32Array): void {
+        if (!this.legacyCoordSystem) return;
+        m[ 2] = -m[ 2];   // col 0, row 2
+        m[ 6] = -m[ 6];   // col 1, row 2
+        m[ 8] = -m[ 8];   // col 2, row 0
+        m[ 9] = -m[ 9];   // col 2, row 1
+        // m[10] flips twice — leave alone.
+        m[11] = -m[11];   // col 2, row 3
+        m[14] = -m[14];   // translation Z
     }
 
     private createList(fn: LuaValue, ...args: LuaValue[]): number {

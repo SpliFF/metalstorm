@@ -4925,6 +4925,14 @@ self.onmessage = async (e: MessageEvent) => {
             if (msg.paused !== undefined) liveState.gamePaused = msg.paused as boolean;
             if (msg.gameOver !== undefined) liveState.gameOver = msg.gameOver as boolean;
             if (msg.wind) liveState.wind = msg.wind as typeof liveState.wind;
+            // Coord-system mode lands here on the first GameInfo broadcast
+            // for the game. Flipping it mid-game is not supported — the
+            // server treats the flag as immutable per game session, and
+            // widget code paths cache its effects in matrices.
+            if (msg.legacyCoordSystem !== undefined) {
+                liveState.legacyCoordSystem = msg.legacyCoordSystem as boolean;
+                bridge?.setLegacyCoordSystem(msg.legacyCoordSystem as boolean);
+            }
             break;
 
         case 'mapFeatures': {

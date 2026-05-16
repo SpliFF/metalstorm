@@ -704,7 +704,8 @@ export interface ConnectionEvents {
     onLosBitmap?: (bitmap: LosBitmap) => void;
     onResourceUpdate?: (info: ResourceUpdateInfo) => void;
     onGameInfo?: (frame: number, speed: number, paused: boolean,
-                  wind?: { x: number; y: number; z: number; strength: number; tidal: number }) => void;
+                  wind?: { x: number; y: number; z: number; strength: number; tidal: number },
+                  legacyCoordSystem?: boolean) => void;
     onServerMessage?: (msg: ServerMessage) => void;
 }
 
@@ -1290,7 +1291,7 @@ export class Connection {
                     x: info.windX(), y: info.windY(), z: info.windZ(),
                     strength: info.windStrength(),
                     tidal: info.tidalStrength(),
-                });
+                }, info.legacyCoordSystem());
                 if (info.paused()) {
                     this.events.onGameOver?.(info.frame());
                 }

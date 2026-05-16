@@ -1113,8 +1113,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             currentWidgetManager?.forwardResourceUpdate(info);
             economyBar?.update(info);
         },
-        onGameInfo(frame, speed, paused, wind) {
-            currentWidgetManager?.forwardGameInfo(frame, speed, paused, false, wind);
+        onGameInfo(frame, speed, paused, wind, legacyCoordSystem) {
+            currentWidgetManager?.forwardGameInfo(frame, speed, paused, false, wind, legacyCoordSystem);
         },
         onUnitCommandQueues(queues) {
             lastCommandQueues = queues;
