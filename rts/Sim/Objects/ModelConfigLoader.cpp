@@ -91,7 +91,14 @@ bool ModelConfigLoader::LoadInto(S3DModel& out, const std::string& basePath) {
     // internally, so v5+ sidecars are consumed as-is. v4 and earlier
     // files are LH and are no longer supported — re-run gameconverter
     // to regenerate.
-    constexpr int kSupportedConfigVersion = 5;
+    //
+    // v6 (2026-05-17) switched modelimporter output from self-contained
+    // `.glb` to glTF Separate form (`.gltf` + sibling `.bin` + sibling
+    // `.ktx2` in the same models/ folder) and dropped the bogus
+    // aiProcess_FlipUVs flag. No field-shape changes from v5 — the
+    // sidecar JSON layout is identical, just a marker that the model's
+    // on-disk container has switched. Same loader, no behaviour change.
+    constexpr int kSupportedConfigVersion = 6;
     int configVersion = root.GetInt("configVersion", 0);
     if (configVersion == 0)
         configVersion = root.GetInt("metaVersion", 0);

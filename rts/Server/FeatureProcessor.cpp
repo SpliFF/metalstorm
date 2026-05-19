@@ -508,12 +508,20 @@ void ConvertAssetsForDef(MapMetadata& meta, MapFeatureDef& def) {
     }
     def.textureFile = convertedTextureName;
 
-    // ---- Model: modelimporter src.s3o features/Name.glb ----
-    // modelimporter's --texture-ext defaults to ktx2 — every glb URI
-    // is rewritten unconditionally.
+    // ---- Model: modelimporter src.s3o features/Name.gltf ----
+    // glTF Separate form (Phase X: .gltf + sibling .bin + sibling .ktx2
+    // in the same folder; see JsonWriter.h kCurrentConfigVersion=6).
+    // modelimporter's --texture-ext defaults to ktx2 — every URI is
+    // rewritten unconditionally.
     const std::string stem = fs::path(srcModel).stem().string();
-    const std::string dstName = stem + ".glb";
+    const std::string dstName = stem + ".gltf";
     const fs::path dst = featuresDir / dstName;
+    // One-shot cleanup of pre-v6 .glb outputs lingering in the cache.
+    const fs::path legacyGlb = featuresDir / (stem + ".glb");
+    if (fs::exists(legacyGlb)) {
+        std::error_code _ec;
+        fs::remove(legacyGlb, _ec);
+    }
     if (!fs::exists(dst) ||
         fs::last_write_time(srcModel) > fs::last_write_time(dst)) {
         std::string cmd = std::string("\"") + MODELIMPORTER_BINARY_PATH + "\"";

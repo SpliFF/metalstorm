@@ -181,9 +181,17 @@ void Process(const std::string& gamePath,
         }
 
         const std::string stem = src.stem().string();
-        const fs::path dstGlb     = outDir / (stem + ".glb");
+        // glTF Separate form (.gltf + sibling .bin + sibling .ktx2s).
+        // See JsonWriter.h kCurrentConfigVersion=6 changelog.
+        const fs::path dstGltf    = outDir / (stem + ".gltf");
         const fs::path dstJson    = outDir / (stem + ".config.json");
         const fs::path dstLua     = outDir / (stem + ".config.lua");
+        // One-shot cleanup of pre-v6 .glb outputs left in the cache.
+        const fs::path legacyGlb  = outDir / (stem + ".glb");
+        if (fs::exists(legacyGlb)) {
+            std::error_code _ec;
+            fs::remove(legacyGlb, _ec);
+        }
         const bool     hasConfig  = fs::exists(dstJson) || fs::exists(dstLua);
 
         // Idempotent skip: regenerate only when the glb is missing
@@ -204,9 +212,9 @@ void Process(const std::string& gamePath,
         // is invisible to the lobby until each source asset is
         // hand-touched.
         bool needsRebuild = true;
-        if (fs::exists(dstGlb) && hasConfig) {
+        if (fs::exists(dstGltf) && hasConfig) {
             const auto srcMt = fs::last_write_time(src);
-            const auto glbMt = fs::last_write_time(dstGlb);
+            const auto glbMt = fs::last_write_time(dstGltf);
             const fs::path importerBin(MODELIMPORTER_BINARY_PATH);
             const auto importerMt = fs::exists(importerBin)
                 ? fs::last_write_time(importerBin)
@@ -273,7 +281,7 @@ void Process(const std::string& gamePath,
         if (!convertedTextureName.empty()) {
             cmd += " --texture-ext png";
         }
-        cmd += " \"" + src.string() + "\" \"" + dstGlb.string() + "\" 2>&1";
+        cmd += " \"" + src.string() + "\" \"" + dstGltf.string() + "\" 2>&1";
         if (RunCommand(cmd) != 0) {
             SLOG(SPRING_LOG_ERROR, "%s: modelimporter failed on %s",
                 gameId.c_str(), src.filename().string().c_str());

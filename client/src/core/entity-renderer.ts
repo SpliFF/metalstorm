@@ -109,8 +109,11 @@ async function fetchModelConfig(modelUrl: string): Promise<ModelConfig | null> {
     // (tex1/tex2/invertteamcolor) and lean on the JSON for the piece
     // tree we need for animation indexing. ModelConfigLoader on the
     // server takes the same belt-and-braces approach.
-    const luaUrl  = modelUrl.replace(/\.glb$/, '.config.lua');
-    const jsonUrl = modelUrl.replace(/\.glb$/, '.config.json');
+    // Strip both .gltf (current — glTF Separate form, Phase X / config v6)
+    // and .glb (legacy — pre-v6 builds) so a mid-session cache from before
+    // the switch still resolves its sidecars.
+    const luaUrl  = modelUrl.replace(/\.(?:glb|gltf)$/, '.config.lua');
+    const jsonUrl = modelUrl.replace(/\.(?:glb|gltf)$/, '.config.json');
 
     // Consult the directory manifest before fetching: only ~3/659 ZK
     // models lack a `.config.json`, and 0/659 ship a `.config.lua`, so

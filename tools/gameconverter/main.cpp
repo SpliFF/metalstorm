@@ -1439,8 +1439,24 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
         if (!IsModelFile(entry.path())) continue;
 
         const std::string stem = entry.path().stem().string();
-        const fs::path outPath = modelsOut / (stem + ".glb");
+        // glTF Separate form (.gltf + .bin + sibling textures). The
+        // self-contained binary .glb container is no longer used — we
+        // keep textures as separate .ktx2 files in the same folder so
+        // third-party tools (Blender, gltf-viewer drag-folder) can
+        // read the asset without bundling, and so shared textures
+        // (wreck.ktx2 etc., referenced by hundreds of models) land on
+        // disk once rather than once per consuming model.
+        const fs::path outPath = modelsOut / (stem + ".gltf");
         const fs::path jsonConfigPath = modelsOut / (stem + ".config.json");
+        // Best-effort cleanup of legacy .glb outputs from before the
+        // .gltf switch. Pre-Phase-X gameconverter wrote `<stem>.glb`
+        // here; with the extension flip those become orphan files the
+        // dir-manifest would still advertise. One-shot delete on each
+        // run keeps the model directory honest.
+        const fs::path legacyGlb = modelsOut / (stem + ".glb");
+        if (fs::exists(legacyGlb)) {
+            fs::remove(legacyGlb, ec);
+        }
 
         // mtime check: skip if the output is newer than the source.
         // Also force a rebuild if the sibling .config.json is stale —

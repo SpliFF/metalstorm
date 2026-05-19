@@ -82,7 +82,17 @@ namespace JsonWriter {
 /// time so internal sim state stays LH through Phase 1 — that bridge
 /// is removed in Phase 2 when the engine and client flip to RH
 /// natively. See PLAN-coordinate-system.md.
-constexpr int kCurrentConfigVersion = 5;
+///
+/// 2026-05-17: v6 — output switched from self-contained `.glb` to
+/// glTF Separate form (`.gltf` + sibling `.bin` + sibling `.ktx2`s in
+/// the same `models/` folder, bare-filename URIs). Also drops the
+/// `aiProcess_FlipUVs` flag that was previously applied at .glb export
+/// time — glTF spec mandates upper-left V origin and that flag was
+/// inverting V coords into OpenGL's lower-left, making sampling faces
+/// hit the wrong half of every texture atlas (wheel patterns landed on
+/// vehicle bodies). Bumping the version forces regen of every v<6
+/// sidecar even when the source model file's mtime is unchanged.
+constexpr int kCurrentConfigVersion = 6;
 
 /// Extract metadata from `scene` and write `outPath`, overwriting
 /// any existing file at that location. Callers are responsible for

@@ -637,9 +637,9 @@ inline std::vector<uint8_t> BuildGameFeatureDefs(
         std::string modelUrl;
         if (!fd.modelName.empty() && !gameId.empty()) {
             std::string stem = fs::path(fd.modelName).stem().string();
-            fs::path glbPath = modelsDir / (stem + ".glb");
-            if (fs::exists(glbPath)) {
-                modelUrl = "/api/games/data/" + gameId + "/models/" + stem + ".glb";
+            fs::path gltfPath = modelsDir / (stem + ".gltf");
+            if (fs::exists(gltfPath)) {
+                modelUrl = "/api/games/data/" + gameId + "/models/" + stem + ".gltf";
             }
         }
 
@@ -1332,9 +1332,9 @@ inline flatbuffers::Offset<SpringWeb::GameUnitDef> BuildSingleUnitDef(
     std::string modelUrl;
     if (!ud.modelName.empty()) {
         std::string stem = fs::path(ud.modelName).stem().string();
-        fs::path glbPath = modelsDir / (stem + ".glb");
-        if (fs::exists(glbPath)) {
-            modelUrl = "/api/games/data/" + gameId + "/models/" + stem + ".glb";
+        fs::path gltfPath = modelsDir / (stem + ".gltf");
+        if (fs::exists(gltfPath)) {
+            modelUrl = "/api/games/data/" + gameId + "/models/" + stem + ".gltf";
         }
     }
     auto modelOff   = fbb.CreateString(modelUrl);
@@ -1696,9 +1696,9 @@ inline flatbuffers::Offset<SpringWeb::GameWeaponDef> BuildSingleWeaponDef(
     std::string modelUrl;
     if (!wd.visuals.modelName.empty() && !gameId.empty()) {
         const std::string stem = fs::path(wd.visuals.modelName).stem().string();
-        const fs::path glbPath = modelsDir / (stem + ".glb");
-        if (fs::exists(glbPath)) {
-            modelUrl = "/api/games/data/" + gameId + "/models/" + stem + ".glb";
+        const fs::path gltfPath = modelsDir / (stem + ".gltf");
+        if (fs::exists(gltfPath)) {
+            modelUrl = "/api/games/data/" + gameId + "/models/" + stem + ".gltf";
         }
     }
     auto modelUrlOff = fbb.CreateString(modelUrl);
