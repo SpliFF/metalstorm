@@ -86,7 +86,8 @@ target_include_directories(modelimporter PRIVATE
     ${assimp_SOURCE_DIR}/include
     ${assimp_BINARY_DIR}/include
 )
-target_link_libraries(modelimporter PRIVATE assimp springlog springlog-net)
+target_link_libraries(modelimporter PRIVATE assimp springlog springlog-net
+                                            nlohmann_json::nlohmann_json)
 set_target_properties(modelimporter PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED ON

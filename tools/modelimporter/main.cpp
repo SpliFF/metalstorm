@@ -32,6 +32,8 @@
 #include <assimp/DefaultLogger.hpp>
 #include <assimp/Logger.hpp>
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -40,6 +42,8 @@
 #include <string>
 #include <system_error>
 #include <vector>
+
+using json = nlohmann::json;
 
 namespace {
 
@@ -176,118 +180,6 @@ void WriteU32LE(std::vector<uint8_t>& out, size_t off, uint32_t v) {
     std::memcpy(out.data() + off, &v, sizeof(v));
 }
 
-// --------------------------------------------------------------------
-// Minimal JSON-string scanning helpers used by FixGlbBasisuTextures.
-// We don't pull in a JSON library — the Assimp glb2 exporter output
-// has a well-known shape and we only need to read/replace a handful
-// of top-level fields. The helpers are local to this file so the
-// surface area stays small.
-// --------------------------------------------------------------------
-
-size_t SkipWs(const std::string& js, size_t i) {
-    while (i < js.size() && std::isspace(static_cast<unsigned char>(js[i]))) ++i;
-    return i;
-}
-
-std::string Trim(const std::string& s) {
-    size_t b = 0, e = s.size();
-    while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
-    while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
-    return s.substr(b, e - b);
-}
-
-/// Locate `"<key>"` followed by `:` (whitespace allowed) at the top
-/// level of `js` and return the position of the first non-whitespace
-/// character of the value. Returns npos if not found.
-size_t FindFieldValue(const std::string& js, const std::string& key) {
-    const std::string needle = "\"" + key + "\"";
-    size_t pos = 0;
-    while (true) {
-        size_t k = js.find(needle, pos);
-        if (k == std::string::npos) return std::string::npos;
-        size_t after = k + needle.size();
-        size_t colon = SkipWs(js, after);
-        if (colon < js.size() && js[colon] == ':') {
-            return SkipWs(js, colon + 1);
-        }
-        pos = k + 1;
-    }
-}
-
-/// Given the position of an opening `[` or `{` in `js`, find the
-/// matching close bracket, honouring nested brackets and string
-/// literals.
-size_t FindMatching(const std::string& js, size_t openPos) {
-    if (openPos >= js.size()) return std::string::npos;
-    const char open  = js[openPos];
-    const char close = (open == '[') ? ']' : '}';
-    int depth = 0;
-    bool inStr = false, esc = false;
-    for (size_t i = openPos; i < js.size(); ++i) {
-        const char c = js[i];
-        if (inStr) {
-            if (esc) esc = false;
-            else if (c == '\\') esc = true;
-            else if (c == '"') inStr = false;
-            continue;
-        }
-        if (c == '"') { inStr = true; continue; }
-        if (c == open)  ++depth;
-        else if (c == close) {
-            --depth;
-            if (depth == 0) return i;
-        }
-    }
-    return std::string::npos;
-}
-
-/// Split the contents of a JSON array (the text between `[` and `]`,
-/// exclusive) into its top-level entries. Whitespace is preserved
-/// inside each entry; callers should Trim() when they care.
-std::vector<std::string> SplitArrayEntries(const std::string& body) {
-    std::vector<std::string> out;
-    int depth = 0;
-    bool inStr = false, esc = false;
-    std::string cur;
-    for (char c : body) {
-        if (inStr) {
-            cur.push_back(c);
-            if (esc) esc = false;
-            else if (c == '\\') esc = true;
-            else if (c == '"') inStr = false;
-            continue;
-        }
-        if (c == '"') { cur.push_back(c); inStr = true; continue; }
-        if (c == '{' || c == '[') { ++depth; cur.push_back(c); continue; }
-        if (c == '}' || c == ']') { --depth; cur.push_back(c); continue; }
-        if (c == ',' && depth == 0) {
-            out.push_back(cur);
-            cur.clear();
-            continue;
-        }
-        cur.push_back(c);
-    }
-    out.push_back(cur);
-    // Drop trailing empty entries from a trailing comma or whitespace-only tail.
-    while (!out.empty() && Trim(out.back()).empty()) out.pop_back();
-    return out;
-}
-
-/// Extract the value of `"uri":"<string>"` from a JSON object literal
-/// (`{...}` as text). Returns empty if not found or not parseable.
-std::string ExtractUri(const std::string& objLiteral) {
-    const std::string k = "\"uri\"";
-    size_t p = objLiteral.find(k);
-    if (p == std::string::npos) return {};
-    size_t c = objLiteral.find(':', p + k.size());
-    if (c == std::string::npos) return {};
-    size_t q1 = objLiteral.find('"', c + 1);
-    if (q1 == std::string::npos) return {};
-    size_t q2 = objLiteral.find('"', q1 + 1);
-    if (q2 == std::string::npos) return {};
-    return objLiteral.substr(q1 + 1, q2 - q1 - 1);
-}
-
 /// Adjust the JSON of a freshly-written .glb or .gltf so KTX2 textures
 /// are referenced through the KHR_texture_basisu extension exactly as
 /// the extension spec mandates:
@@ -295,10 +187,18 @@ std::string ExtractUri(const std::string& objLiteral) {
 ///   - Each `textures[]` entry whose `source` points at a `.ktx2` image
 ///     has the top-level `source` removed and replaced with
 ///     `"extensions":{"KHR_texture_basisu":{"source":N}}`.
+///   - Each KTX2 `images[]` entry gets `"mimeType": "image/ktx2"` —
+///     the spec mandates the field and the Blender KTX2 addon gates
+///     its decode hook on it.
 ///   - `KHR_texture_basisu` is added to both `extensionsRequired` and
 ///     `extensionsUsed` (creating the arrays if absent). Empty entries
 ///     left over by upstream tooling are pruned so the document
 ///     validates clean (no `EMPTY_ENTITY` warnings).
+///   - `alphaMode` is stripped from every material. In Spring S3O the
+///     diffuse alpha channel encodes team-color blend amount, not
+///     transparency; Assimp's MASK default would discard ~93% of
+///     fragments in a spec-compliant viewer (Phase 1 reinstates MASK
+///     with binarised alpha as part of the PBR-mapping work).
 ///
 /// No PNG fallback is emitted — our runtime (Babylon), Blender 4.2+,
 /// gltf-viewer.donmccurdy.com and three.js all support
@@ -311,8 +211,10 @@ std::string ExtractUri(const std::string& objLiteral) {
 /// supported so the post-fix is exporter-agnostic. The BIN chunk of a
 /// .glb (vertex/index buffers) is preserved verbatim.
 ///
-/// Hand-rolled JSON edits — no external dependency. The shape of
-/// Assimp's output is well-known and the helpers above are enough.
+/// JSON manipulation uses nlohmann/json — the operations below are
+/// structurally trivial DOM edits and the library's serialiser
+/// guarantees we never emit a stray trailing comma the way the
+/// previous hand-rolled surgery occasionally did.
 bool FixGlbBasisuTextures(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return false;
@@ -346,257 +248,119 @@ bool FixGlbBasisuTextures(const std::string& path) {
     // Early-out: nothing to do if there's no KTX2 reference anywhere.
     if (js.find(".ktx2") == std::string::npos) return true;
 
-    // ---- Step 1: identify which images are KTX2 so we know which
-    // textures need the extension lift.
-    const size_t imgValPos = FindFieldValue(js, "images");
-    if (imgValPos == std::string::npos || js[imgValPos] != '[') return false;
-    const size_t imgClosePos = FindMatching(js, imgValPos);
-    if (imgClosePos == std::string::npos) return false;
-    const std::string imgBody = js.substr(imgValPos + 1,
-                                          imgClosePos - imgValPos - 1);
-    std::vector<std::string> imgEntries = SplitArrayEntries(imgBody);
+    json doc;
+    try {
+        doc = json::parse(js);
+    } catch (const json::parse_error& e) {
+        SLOG(SPRING_LOG_ERROR, "FixGlbBasisuTextures: failed to parse JSON: %s",
+             e.what());
+        return false;
+    }
 
-    std::vector<bool> isKtx2(imgEntries.size(), false);
+    // ---- Step 1: identify which images are KTX2 so we know which
+    // textures need the extension lift, AND patch in mimeType.
+    if (!doc.contains("images") || !doc["images"].is_array()) return false;
+    json& images = doc["images"];
+
+    std::vector<bool> isKtx2(images.size(), false);
     bool sawAnyKtx2 = false;
-    for (size_t i = 0; i < imgEntries.size(); ++i) {
-        const std::string uri = ExtractUri(imgEntries[i]);
+    for (size_t i = 0; i < images.size(); ++i) {
+        json& img = images[i];
+        if (!img.is_object() || !img.contains("uri")) continue;
+        if (!img["uri"].is_string()) continue;
+        std::string uri = img["uri"].get<std::string>();
         if (uri.size() < 5) continue;
-        std::string tl = uri.substr(uri.size() - 5);
-        for (char& c : tl) c = static_cast<char>(std::tolower((unsigned char)c));
-        if (tl == ".ktx2") { isKtx2[i] = true; sawAnyKtx2 = true; }
+        std::string tail = uri.substr(uri.size() - 5);
+        for (char& c : tail) c = static_cast<char>(std::tolower((unsigned char)c));
+        if (tail != ".ktx2") continue;
+        isKtx2[i] = true;
+        sawAnyKtx2 = true;
+        // Stamp mimeType if absent (idempotent on re-runs).
+        if (!img.contains("mimeType")) {
+            img["mimeType"] = "image/ktx2";
+        }
     }
     if (!sawAnyKtx2) return true;
-
-    // ---- Step 1b: rewrite images[] so every KTX2 entry carries a
-    // `mimeType: "image/ktx2"`. The KHR_texture_basisu spec mandates
-    // this field on URI-referenced KTX2 images, and the Blender
-    // tonis2/glTF-KTX-texture addon gates its decode hook on
-    // `gltf_img.mime_type == "image/ktx2"` — without it, Blender's
-    // stock importer tries to load the .ktx2 as a regular image and
-    // ends up with an Empty datablock. Idempotent: entries that
-    // already carry the field pass through.
-    {
-        bool anyChanged = false;
-        for (size_t i = 0; i < imgEntries.size(); ++i) {
-            if (!isKtx2[i]) continue;
-            std::string& e = imgEntries[i];
-            if (e.find("\"mimeType\"") != std::string::npos) continue;
-            const size_t close = e.find_last_of('}');
-            if (close == std::string::npos) continue;
-            bool needsComma = false;
-            for (size_t k = close; k > 0; --k) {
-                char c = e[k - 1];
-                if (c == '{') break;
-                if (!std::isspace(static_cast<unsigned char>(c))) {
-                    needsComma = true;
-                    break;
-                }
-            }
-            const std::string insertion =
-                std::string(needsComma ? "," : "")
-                + "\"mimeType\":\"image/ktx2\"";
-            e.insert(close, insertion);
-            anyChanged = true;
-        }
-        if (anyChanged) {
-            std::string newImgBody = "\n    ";
-            bool first = true;
-            for (auto& e : imgEntries) {
-                const std::string t = Trim(e);
-                if (t.empty()) continue;
-                if (!first) newImgBody += ",\n    ";
-                newImgBody += t;
-                first = false;
-            }
-            newImgBody += "\n  ";
-            js = js.substr(0, imgValPos + 1) + newImgBody + js.substr(imgClosePos);
-        }
-    }
 
     // ---- Step 2: rewrite textures[]. For each entry whose top-level
     // `source` points at a KTX2 image, remove the top-level field and
     // move the reference into `extensions.KHR_texture_basisu.source`.
     // Entries that already have the extension in place are passed
     // through unchanged (idempotent on re-runs).
-    const size_t txValPos = FindFieldValue(js, "textures");
-    if (txValPos == std::string::npos || js[txValPos] != '[') return false;
-    const size_t txClosePos = FindMatching(js, txValPos);
-    if (txClosePos == std::string::npos) return false;
-    const std::string txBody = js.substr(txValPos + 1,
-                                         txClosePos - txValPos - 1);
-    std::vector<std::string> txEntries = SplitArrayEntries(txBody);
+    if (!doc.contains("textures") || !doc["textures"].is_array()) return false;
+    json& textures = doc["textures"];
 
-    auto findIntField = [](const std::string& obj, size_t startFrom,
-                           const std::string& key, int& outVal,
-                           size_t& outKeyPos, size_t& outValEnd) -> bool {
-        const std::string needle = "\"" + key + "\"";
-        size_t p = obj.find(needle, startFrom);
-        if (p == std::string::npos) return false;
-        size_t c = obj.find(':', p + needle.size());
-        if (c == std::string::npos) return false;
-        size_t s = SkipWs(obj, c + 1);
-        size_t e = s;
-        while (e < obj.size() && std::isdigit(static_cast<unsigned char>(obj[e]))) ++e;
-        if (e == s) return false;
-        outVal = std::stoi(obj.substr(s, e - s));
-        outKeyPos = p;
-        outValEnd = e;
-        return true;
-    };
-
-    std::vector<std::string> newTxEntries;
-    for (auto& raw : txEntries) {
-        std::string e = Trim(raw);
-        if (e.empty()) continue;
-
-        // Already in extension form — leave alone (idempotent on re-runs).
-        if (e.find("\"KHR_texture_basisu\"") != std::string::npos) {
-            newTxEntries.push_back(e);
+    for (auto& tx : textures) {
+        if (!tx.is_object()) continue;
+        // Already in extension form — leave alone.
+        if (tx.contains("extensions")
+            && tx["extensions"].is_object()
+            && tx["extensions"].contains("KHR_texture_basisu")) {
             continue;
         }
-
-        // Look for top-level "source": N pointing at a KTX2 image.
-        int srcIdx = -1; size_t keyPos = 0, valEnd = 0;
-        if (!findIntField(e, 0, "source", srcIdx, keyPos, valEnd)
-            || srcIdx < 0
-            || srcIdx >= static_cast<int>(isKtx2.size())
-            || !isKtx2[srcIdx])
-        {
-            newTxEntries.push_back(e);
+        if (!tx.contains("source") || !tx["source"].is_number_integer()) continue;
+        const int srcIdx = tx["source"].get<int>();
+        if (srcIdx < 0
+            || static_cast<size_t>(srcIdx) >= isKtx2.size()
+            || !isKtx2[srcIdx]) {
             continue;
         }
-
-        // Erase the top-level "source": N (plus an adjacent comma).
-        size_t eraseStart = keyPos;
-        size_t eraseEnd = valEnd;
-        if (eraseEnd < e.size() && e[eraseEnd] == ',') ++eraseEnd;
-        else if (eraseStart > 0 && e[eraseStart - 1] == ',') --eraseStart;
-        e.erase(eraseStart, eraseEnd - eraseStart);
-
-        // Insert the extension block before the closing brace. If the
-        // object still has other fields, prepend a comma.
-        size_t closeBrace = e.find_last_of('}');
-        bool needsComma = false;
-        for (size_t i = closeBrace; i > 0; --i) {
-            char c = e[i - 1];
-            if (c == '{') break;
-            if (!std::isspace(static_cast<unsigned char>(c))) {
-                needsComma = true;
-                break;
-            }
-        }
-        std::string insertion =
-            std::string(needsComma ? "," : "")
-            + "\"extensions\":{\"KHR_texture_basisu\":{\"source\":"
-            + std::to_string(srcIdx) + "}}";
-        e.insert(closeBrace, insertion);
-        newTxEntries.push_back(e);
+        tx.erase("source");
+        tx["extensions"]["KHR_texture_basisu"]["source"] = srcIdx;
     }
-
-    std::string newTxBody = "\n    ";
-    {
-        bool first = true;
-        for (auto& e : newTxEntries) {
-            if (!first) newTxBody += ",\n    ";
-            newTxBody += e;
-            first = false;
-        }
-        newTxBody += "\n  ";
-    }
-    js = js.substr(0, txValPos + 1) + newTxBody + js.substr(txClosePos);
 
     // ---- Step 3: ensure KHR_texture_basisu appears in both
     // extensionsRequired and extensionsUsed. Prune empty entries.
-    auto ensureExtListContains =
-        [&](const std::string& fieldName, const std::string& ext) {
-        const size_t fvPos = FindFieldValue(js, fieldName);
-        if (fvPos == std::string::npos) {
-            // Field missing — inject one right after the opening `{` of
-            // the document.
-            size_t docOpen = js.find('{');
-            if (docOpen == std::string::npos) return;
-            const std::string injection =
-                std::string("\"") + fieldName + "\":[\"" + ext + "\"],";
-            js.insert(docOpen + 1, injection);
-            return;
+    auto ensureExtListContains = [&](const char* fieldName, const char* ext) {
+        json arr = json::array();
+        if (doc.contains(fieldName) && doc[fieldName].is_array()) {
+            for (const auto& v : doc[fieldName]) {
+                if (v.is_string() && !v.get<std::string>().empty()) {
+                    arr.push_back(v);
+                }
+            }
         }
-        if (js[fvPos] != '[') return;  // unexpected shape — leave alone
-        const size_t fvClose = FindMatching(js, fvPos);
-        if (fvClose == std::string::npos) return;
-        const std::string body = js.substr(fvPos + 1, fvClose - fvPos - 1);
-        std::vector<std::string> entries = SplitArrayEntries(body);
-        std::vector<std::string> keep;
         bool hasExt = false;
-        const std::string quoted = "\"" + ext + "\"";
-        for (auto& r : entries) {
-            const std::string t = Trim(r);
-            if (t.empty()) continue;            // prune EMPTY_ENTITY
-            if (t == quoted) hasExt = true;
-            keep.push_back(t);
+        for (const auto& v : arr) {
+            if (v.is_string() && v.get<std::string>() == ext) {
+                hasExt = true;
+                break;
+            }
         }
-        if (!hasExt) keep.push_back(quoted);
-        std::string newBody;
-        for (size_t i = 0; i < keep.size(); ++i) {
-            if (i > 0) newBody += ",";
-            newBody += keep[i];
-        }
-        js = js.substr(0, fvPos + 1) + newBody + js.substr(fvClose);
+        if (!hasExt) arr.push_back(ext);
+        doc[fieldName] = std::move(arr);
     };
     ensureExtListContains("extensionsRequired", "KHR_texture_basisu");
     ensureExtListContains("extensionsUsed",     "KHR_texture_basisu");
 
-    // ---- Step 3b: strip `"alphaMode": "MASK"` from materials. Assimp
-    // emits MASK whenever the source diffuse texture has an alpha
+    // ---- Step 3b: strip `alphaMode` from every material. Assimp
+    // emits "MASK" whenever the source diffuse texture has an alpha
     // channel, but in Spring S3O the alpha channel encodes team-color
     // blend amount — NOT transparency. With MASK plus the default
-    // 0.5 cutoff, any glTF-spec-compliant viewer (Blender, Khronos
-    // sample, gltf-viewer.donmccurdy.com) discards ~93% of fragments
-    // and the unit appears almost fully invisible. Our runtime
-    // sampler reads alpha explicitly, so stripping the field
-    // (defaulting to OPAQUE) loses no information.
-    {
-        const std::string needle = "\"alphaMode\"";
-        size_t pos = 0;
-        while ((pos = js.find(needle, pos)) != std::string::npos) {
-            size_t colon = js.find(':', pos + needle.size());
-            if (colon == std::string::npos) break;
-            size_t vs = SkipWs(js, colon + 1);
-            if (vs >= js.size() || js[vs] != '"') { pos = colon + 1; continue; }
-            size_t ve = js.find('"', vs + 1);
-            if (ve == std::string::npos) break;
-            size_t eraseStart = pos;
-            size_t eraseEnd = ve + 1;
-            // Eat a trailing comma if there's another field after us.
-            // Else walk back over whitespace to absorb the preceding
-            // comma — pretty-printed JSON puts \n + indent between
-            // fields, so the comma is several chars before `pos`.
-            size_t afterWs = eraseEnd;
-            while (afterWs < js.size()
-                && std::isspace(static_cast<unsigned char>(js[afterWs])))
-                ++afterWs;
-            if (afterWs < js.size() && js[afterWs] == ',') {
-                eraseEnd = afterWs + 1;
-            } else {
-                size_t backWs = eraseStart;
-                while (backWs > 0
-                    && std::isspace(static_cast<unsigned char>(js[backWs - 1])))
-                    --backWs;
-                if (backWs > 0 && js[backWs - 1] == ',') {
-                    eraseStart = backWs - 1;
-                }
+    // 0.5 cutoff, any glTF-spec-compliant viewer discards ~93% of
+    // fragments. Our runtime sampler reads alpha explicitly, so
+    // stripping the field (defaulting to OPAQUE) loses no information.
+    if (doc.contains("materials") && doc["materials"].is_array()) {
+        for (auto& mat : doc["materials"]) {
+            if (mat.is_object()) {
+                mat.erase("alphaMode");
             }
-            js.erase(eraseStart, eraseEnd - eraseStart);
-            pos = eraseStart;
         }
     }
 
-    // ---- Step 4: write back. For .gltf this is a straight overwrite;
-    // for .glb we re-pad and re-emit the binary container.
+    // ---- Step 4: serialise and write back. For .gltf this is a
+    // straight overwrite; for .glb we re-pad and re-emit the binary
+    // container. Use indent=-1 for compact output matching what Assimp
+    // emits (one line per top-level field is too verbose for big arrays).
+    // The previous hand-rolled path emitted pretty-printed JSON with
+    // 2-space indent — keep that to preserve diff-friendliness.
+    const std::string outJson = doc.dump(2);
+
     const std::string tmp = path + ".tmp";
     std::ofstream of(tmp, std::ios::binary | std::ios::trunc);
     if (!of) return false;
     if (isGlb) {
-        std::vector<uint8_t> jsonBytes(js.begin(), js.end());
+        std::vector<uint8_t> jsonBytes(outJson.begin(), outJson.end());
         while (jsonBytes.size() % 4 != 0) jsonBytes.push_back(' ');
         const uint32_t newTotal = 12 + 8
             + static_cast<uint32_t>(jsonBytes.size())
@@ -614,7 +378,7 @@ bool FixGlbBasisuTextures(const std::string& path) {
         of.write(reinterpret_cast<const char*>(outFile.data()),
                  static_cast<std::streamsize>(outFile.size()));
     } else {
-        of.write(js.data(), static_cast<std::streamsize>(js.size()));
+        of.write(outJson.data(), static_cast<std::streamsize>(outJson.size()));
     }
     if (!of) return false;
     of.close();

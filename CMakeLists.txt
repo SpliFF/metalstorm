@@ -109,6 +109,23 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(flatbuffers)
 
+# === nlohmann/json (JSON DOM for modelimporter glTF surgery + engine
+# extension reads) ===
+# Header-only, MIT-licensed. Replaces hand-rolled JSON string surgery
+# in tools/modelimporter (FixGlbBasisuTextures, JsonWriter) ahead of
+# the PBR-mapping work that adds SPRINGRTS_team_color and
+# SPRINGRTS_geometry extensions. Also linked into spring-server so
+# ModelConfigLoader can extract SPRINGRTS_geometry from .gltf files.
+set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+set(JSON_Install    OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.11.3
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 # === libktx (KTX2 + Basis Universal encoder/transcoder) ===
 # Reference implementation from KhronosGroup. Linked into the texture
 # preprocessing tools (textureconverter, mapconverter, gameconverter).
@@ -275,7 +292,7 @@ target_include_directories(spring-server PRIVATE
     ${GENERATED_DIR}
 )
 find_package(ZLIB REQUIRED)
-target_link_libraries(spring-server PRIVATE lua smmalloc nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite LibDataChannel::LibDataChannelStatic)
+target_link_libraries(spring-server PRIVATE lua smmalloc nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite LibDataChannel::LibDataChannelStatic nlohmann_json::nlohmann_json)
 
 # Link platform libraries
 if(UNIX AND NOT APPLE)

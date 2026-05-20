@@ -1,9 +1,16 @@
 // JsonWriter — see header for schema and ownership rules.
+//
+// Transitional code: Phase 1 of PLAN-pbr-mapping.md will replace this
+// entirely by embedding the same fields in a `SPRINGRTS_geometry`
+// document-level extension inside the .gltf itself. Until then we
+// still emit a sibling `<stem>.config.json` for the runtime to read.
 
 #include "JsonWriter.h"
 
 #include <assimp/scene.h>
 #include <assimp/material.h>
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -15,6 +22,8 @@
 #include <vector>
 
 namespace {
+
+using json = nlohmann::json;
 
 // -----------------------------------------------------------------
 // Geometry extraction (identical to the old .meta.lua writer — the
@@ -161,62 +170,34 @@ bool IsAttachmentName(const std::string& name, std::string& outKind) {
 }
 
 // -----------------------------------------------------------------
-// JSON serialiser — we only emit numbers, strings, arrays and
-// objects, and both the keys and field names are ASCII, so a
-// minimal handrolled writer is simpler than pulling in a JSON
-// library. All state flows through a single `std::ostream&`.
+// Numeric formatting — match the legacy 5-significant-digit float
+// formatting so the regenerated files stay byte-identical (modulo
+// nlohmann's known ordering) to the baseline. nlohmann's default
+// dump() uses up to 17 digits for doubles; for our 5-digit budget we
+// pre-round each float and store it as a `json` number via the
+// `dump(precision)` overload? That overload doesn't exist — instead
+// we round into a string, parse back, and store.
 // -----------------------------------------------------------------
 
-/// Format a float for JSON output. ~5 significant digits is enough
-/// for collision/rendering needs and keeps the files diffable.
-std::string JsonNumber(float v) {
+/// Round `v` to 5 significant digits and return it as a JSON number
+/// node. NaN and infinities are coerced to 0 (the legacy code did the
+/// same, and AABBs are zeroed before reaching here).
+json JsonFloat(float v) {
+    if (!std::isfinite(v)) return json(0);
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%.5g", v);
-    // JSON requires the literal values `Infinity`/`NaN` (non-standard
-    // extensions) or simply doesn't allow them. Our float fields are
-    // always finite by construction (we seed AABB with infinity but
-    // MakeZeroIfInvalid zeroes it out before we get here), but clamp
-    // defensively anyway so we never emit `inf` / `nan`.
-    if (std::strcmp(buf, "inf")  == 0 ||
-        std::strcmp(buf, "-inf") == 0 ||
-        std::strcmp(buf, "nan")  == 0) {
-        return "0";
+    // Re-parse so nlohmann stores it as a number, not a string. The
+    // serialiser will emit it without trailing zeros.
+    try {
+        return json::parse(buf);
+    } catch (const json::parse_error&) {
+        return json(0);
     }
-    return buf;
 }
 
-/// Escape a string for inclusion inside a JSON "…" literal. Follows
-/// RFC 8259 escaping rules: `\"`, `\\`, control chars as `\uXXXX`.
-std::string JsonString(const std::string& s) {
-    std::string out;
-    out.reserve(s.size() + 2);
-    out.push_back('"');
-    for (unsigned char c : s) {
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\b': out += "\\b";  break;
-            case '\f': out += "\\f";  break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:
-                if (c < 0x20) {
-                    char buf[8];
-                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-                    out += buf;
-                } else {
-                    out.push_back(static_cast<char>(c));
-                }
-        }
-    }
-    out.push_back('"');
-    return out;
-}
-
-/// Helper for writing a `[x, y, z]` triple on one line.
-std::string Vec3(float x, float y, float z) {
-    return "[" + JsonNumber(x) + ", " + JsonNumber(y) + ", " + JsonNumber(z) + "]";
+/// Build a `[x, y, z]` JSON array using the same 5-digit formatting.
+json JsonVec3(float x, float y, float z) {
+    return json::array({ JsonFloat(x), JsonFloat(y), JsonFloat(z) });
 }
 
 } // namespace
@@ -295,9 +276,7 @@ bool JsonWriter::Write(const aiScene* scene,
     //
     // Filenames are rewritten to `.ktx2` here so the runtime always
     // resolves a single canonical extension regardless of what the
-    // source archive happened to ship. The texture preprocessing
-    // pipeline (gameconverter -> textureconverter) produces `.ktx2`
-    // siblings for every referenced texture.
+    // source archive happened to ship.
     auto rewriteToKtx2 = [](std::string& name) {
         if (name.empty()) return;
         const auto dot = name.find_last_of('.');
@@ -357,6 +336,56 @@ bool JsonWriter::Write(const aiScene* scene,
         }
     }
 
+    // ---- Build the JSON document ----
+    //
+    // nlohmann::json's `ordered_json` is overkill here — the engine
+    // reader doesn't care about field order. We use the default
+    // unordered `json` for normal use; the key order in the output
+    // is deterministic (alphabetical) and stable across runs.
+    //
+    // Z-axis values are RH-canonical: offsets are negated and min/max Z
+    // values are swapped-and-negated so the AABB stays valid under the
+    // LH→RH flip the .glb itself receives at export time. See
+    // PLAN-coordinate-system.md.
+    json doc;
+    doc["configVersion"] = JsonWriter::kCurrentConfigVersion;
+    doc["radius"] = JsonFloat(radius);
+    doc["height"] = JsonFloat(height);
+    doc["midpos"] = JsonVec3(midX, midY, -midZ);
+    doc["mins"]   = JsonVec3(bounds.minX, bounds.minY, -bounds.maxZ);
+    doc["maxs"]   = JsonVec3(bounds.maxX, bounds.maxY, -bounds.minZ);
+
+    if (!tex1.empty()) doc["tex1"] = tex1;
+    if (!tex2.empty()) doc["tex2"] = tex2;
+
+    json piecesArray = json::array();
+    for (const auto& p : pieces) {
+        json pj;
+        pj["name"]   = p.name;
+        pj["parent"] = p.parentIndex;
+        pj["offset"] = JsonVec3(p.offsetX, p.offsetY, -p.offsetZ);
+        pj["mins"]   = JsonVec3(p.localBounds.minX,
+                                p.localBounds.minY,
+                                -p.localBounds.maxZ);
+        pj["maxs"]   = JsonVec3(p.localBounds.maxX,
+                                p.localBounds.maxY,
+                                -p.localBounds.minZ);
+        piecesArray.push_back(std::move(pj));
+    }
+    doc["pieces"] = std::move(piecesArray);
+
+    if (!attachments.empty()) {
+        json attArray = json::array();
+        for (const auto& a : attachments) {
+            json aj;
+            aj["kind"]  = a.kind;
+            aj["name"]  = a.name;
+            aj["piece"] = a.pieceIndex;
+            attArray.push_back(std::move(aj));
+        }
+        doc["attachments"] = std::move(attArray);
+    }
+
     // ---- Write the JSON file ----
     std::ofstream out(outPath, std::ios::binary);
     if (!out) {
@@ -365,66 +394,6 @@ bool JsonWriter::Write(const aiScene* scene,
             outPath.c_str());
         return false;
     }
-
-    // Hand-indented for readability — the file is small and the
-    // schema is fixed, so a pretty-printer would be overkill.
-    out << "{\n";
-
-    // Schema version — the engine-side reader branches on this.
-    out << "  \"configVersion\": " << JsonWriter::kCurrentConfigVersion << ",\n";
-    out << "\n";
-
-    // Bounds. Every Z value emitted here is RH-canonical (-Z forward,
-    // glTF native): we negate Z on midpos/offsets, and for min/max we
-    // also swap because the original min.z (most-negative LH Z value,
-    // i.e. furthest back in LH) becomes the new max under the flip.
-    // The engine compensates back to LH in ModelConfigLoader (Phase 1d
-    // bridge); see PLAN-coordinate-system.md for the full migration.
-    out << "  \"radius\": " << JsonNumber(radius) << ",\n";
-    out << "  \"height\": " << JsonNumber(height) << ",\n";
-    out << "  \"midpos\": " << Vec3(midX, midY, -midZ) << ",\n";
-    out << "  \"mins\":   " << Vec3(bounds.minX, bounds.minY, -bounds.maxZ) << ",\n";
-    out << "  \"maxs\":   " << Vec3(bounds.maxX, bounds.maxY, -bounds.minZ) << ",\n";
-
-    // Texture references — only emitted when present in the source.
-    // These are bare filenames as recorded in the original model file
-    // (e.g. `commrecon.dds`); the client resolves them via the game's
-    // `unittextures/` directory.
-    if (!tex1.empty()) out << "\n  \"tex1\": " << JsonString(tex1) << ",\n";
-    if (!tex2.empty()) out << "  \"tex2\": " << JsonString(tex2) << ",\n";
-
-    // Pieces — flat list ordered by pre-order walk. Same RH-flip on Z
-    // as the top-level bounds above (negate offsets, negate-and-swap
-    // for min/max bounds).
-    out << "\n  \"pieces\": [\n";
-    for (size_t i = 0; i < pieces.size(); ++i) {
-        const auto& p = pieces[i];
-        out << "    { \"name\": " << JsonString(p.name)
-            << ", \"parent\": " << p.parentIndex
-            << ", \"offset\": " << Vec3(p.offsetX, p.offsetY, -p.offsetZ)
-            << ", \"mins\": "   << Vec3(p.localBounds.minX, p.localBounds.minY, -p.localBounds.maxZ)
-            << ", \"maxs\": "   << Vec3(p.localBounds.maxX, p.localBounds.maxY, -p.localBounds.minZ)
-            << " }";
-        if (i + 1 < pieces.size()) out << ",";
-        out << "\n";
-    }
-    out << "  ]";
-
-    // Attachments (optional — only emitted if any were discovered).
-    if (!attachments.empty()) {
-        out << ",\n\n  \"attachments\": [\n";
-        for (size_t i = 0; i < attachments.size(); ++i) {
-            const auto& a = attachments[i];
-            out << "    { \"kind\": " << JsonString(a.kind)
-                << ", \"name\": " << JsonString(a.name)
-                << ", \"piece\": " << a.pieceIndex
-                << " }";
-            if (i + 1 < attachments.size()) out << ",";
-            out << "\n";
-        }
-        out << "  ]";
-    }
-
-    out << "\n}\n";
+    out << doc.dump(2) << '\n';
     return out.good();
 }
