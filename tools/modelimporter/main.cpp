@@ -245,9 +245,6 @@ bool FixGlbBasisuTextures(const std::string& path,
         js.assign(data.begin(), data.end());
     }
 
-    // Early-out: nothing to do if there's no KTX2 reference anywhere.
-    if (js.find(".ktx2") == std::string::npos) return true;
-
     json doc;
     try {
         doc = json::parse(js);
@@ -257,60 +254,9 @@ bool FixGlbBasisuTextures(const std::string& path,
         return false;
     }
 
-    // ---- Step 1: identify which images are KTX2 so we know which
-    // textures need the extension lift, AND patch in mimeType.
-    if (!doc.contains("images") || !doc["images"].is_array()) return false;
-    json& images = doc["images"];
-
-    std::vector<bool> isKtx2(images.size(), false);
-    bool sawAnyKtx2 = false;
-    for (size_t i = 0; i < images.size(); ++i) {
-        json& img = images[i];
-        if (!img.is_object() || !img.contains("uri")) continue;
-        if (!img["uri"].is_string()) continue;
-        std::string uri = img["uri"].get<std::string>();
-        if (uri.size() < 5) continue;
-        std::string tail = uri.substr(uri.size() - 5);
-        for (char& c : tail) c = static_cast<char>(std::tolower((unsigned char)c));
-        if (tail != ".ktx2") continue;
-        isKtx2[i] = true;
-        sawAnyKtx2 = true;
-        // Stamp mimeType if absent (idempotent on re-runs).
-        if (!img.contains("mimeType")) {
-            img["mimeType"] = "image/ktx2";
-        }
-    }
-    if (!sawAnyKtx2) return true;
-
-    // ---- Step 2: rewrite textures[]. For each entry whose top-level
-    // `source` points at a KTX2 image, remove the top-level field and
-    // move the reference into `extensions.KHR_texture_basisu.source`.
-    // Entries that already have the extension in place are passed
-    // through unchanged (idempotent on re-runs).
-    if (!doc.contains("textures") || !doc["textures"].is_array()) return false;
-    json& textures = doc["textures"];
-
-    for (auto& tx : textures) {
-        if (!tx.is_object()) continue;
-        // Already in extension form — leave alone.
-        if (tx.contains("extensions")
-            && tx["extensions"].is_object()
-            && tx["extensions"].contains("KHR_texture_basisu")) {
-            continue;
-        }
-        if (!tx.contains("source") || !tx["source"].is_number_integer()) continue;
-        const int srcIdx = tx["source"].get<int>();
-        if (srcIdx < 0
-            || static_cast<size_t>(srcIdx) >= isKtx2.size()
-            || !isKtx2[srcIdx]) {
-            continue;
-        }
-        tx.erase("source");
-        tx["extensions"]["KHR_texture_basisu"]["source"] = srcIdx;
-    }
-
-    // ---- Step 3: ensure KHR_texture_basisu appears in both
-    // extensionsRequired and extensionsUsed. Prune empty entries.
+    // Helper to add `ext` to a top-level string-array field, creating
+    // the array if absent and pruning empty entries that upstream
+    // tooling sometimes leaves behind.
     auto ensureExtListContains = [&](const char* fieldName, const char* ext) {
         json arr = json::array();
         if (doc.contains(fieldName) && doc[fieldName].is_array()) {
@@ -330,8 +276,68 @@ bool FixGlbBasisuTextures(const std::string& path,
         if (!hasExt) arr.push_back(ext);
         doc[fieldName] = std::move(arr);
     };
-    ensureExtListContains("extensionsRequired", "KHR_texture_basisu");
-    ensureExtListContains("extensionsUsed",     "KHR_texture_basisu");
+
+    // Even when there are no KTX2 references to lift (e.g. a `.dae`
+    // source that gave Assimp nothing to bind), we still need to fall
+    // through for SPRINGRTS_geometry injection. The two KTX2 passes
+    // below early-skip cleanly when their arrays don't exist.
+    const bool hasImages   = doc.contains("images")   && doc["images"].is_array();
+    const bool hasTextures = doc.contains("textures") && doc["textures"].is_array();
+
+    if (hasImages) {
+        // ---- Step 1: identify which images are KTX2 so we know which
+        // textures need the extension lift, AND patch in mimeType.
+        json& images = doc["images"];
+        std::vector<bool> isKtx2(images.size(), false);
+        bool sawAnyKtx2 = false;
+        for (size_t i = 0; i < images.size(); ++i) {
+            json& img = images[i];
+            if (!img.is_object() || !img.contains("uri")) continue;
+            if (!img["uri"].is_string()) continue;
+            std::string uri = img["uri"].get<std::string>();
+            if (uri.size() < 5) continue;
+            std::string tail = uri.substr(uri.size() - 5);
+            for (char& c : tail) c = static_cast<char>(std::tolower((unsigned char)c));
+            if (tail != ".ktx2") continue;
+            isKtx2[i] = true;
+            sawAnyKtx2 = true;
+            // Stamp mimeType if absent (idempotent on re-runs).
+            if (!img.contains("mimeType")) {
+                img["mimeType"] = "image/ktx2";
+            }
+        }
+
+        if (sawAnyKtx2 && hasTextures) {
+            // ---- Step 2: rewrite textures[]. For each entry whose
+            // top-level `source` points at a KTX2 image, remove the
+            // top-level field and move the reference into
+            // `extensions.KHR_texture_basisu.source`. Entries that
+            // already have the extension in place are passed through
+            // unchanged (idempotent on re-runs).
+            for (auto& tx : doc["textures"]) {
+                if (!tx.is_object()) continue;
+                if (tx.contains("extensions")
+                    && tx["extensions"].is_object()
+                    && tx["extensions"].contains("KHR_texture_basisu")) {
+                    continue;
+                }
+                if (!tx.contains("source") || !tx["source"].is_number_integer()) continue;
+                const int srcIdx = tx["source"].get<int>();
+                if (srcIdx < 0
+                    || static_cast<size_t>(srcIdx) >= isKtx2.size()
+                    || !isKtx2[srcIdx]) {
+                    continue;
+                }
+                tx.erase("source");
+                tx["extensions"]["KHR_texture_basisu"]["source"] = srcIdx;
+            }
+
+            // ---- Step 3: ensure KHR_texture_basisu appears in both
+            // extensionsRequired and extensionsUsed.
+            ensureExtListContains("extensionsRequired", "KHR_texture_basisu");
+            ensureExtListContains("extensionsUsed",     "KHR_texture_basisu");
+        }
+    }
 
     // ---- Step 3a: inject the SPRINGRTS_geometry document-level
     // extension. Carries the simulation metadata (radius, midpos, piece

@@ -9,9 +9,11 @@
 #include <assimp/material.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <string>
@@ -169,6 +171,58 @@ void RewriteToKtx2(std::string& name) {
     }
 }
 
+/// Probe the Spring-conventional `<gameRoot>/unittextures/` directory
+/// for `<stem><N>.<ext>` where N is 1 or 2 and `<ext>` is one of the
+/// bitmap formats Spring archives typically ship. Used by `.dae` and
+/// other formats whose Assimp importer leaves the material slots
+/// empty and whose sidecar `.dae.lua` carries only geometry overrides
+/// (the `factoryveh` case in PLAN-pbr-mapping.md). Case-insensitive
+/// to tolerate mixed-case content authoring on Windows.
+void ProbeUnittexturesByConvention(const std::string& sourceModelPath,
+                                   std::string& tex1, std::string& tex2) {
+    if (sourceModelPath.empty()) return;
+    namespace fs = std::filesystem;
+    const fs::path src(sourceModelPath);
+    // <gameRoot>/Objects3d/<stem>.dae → <gameRoot>/unittextures/
+    const fs::path unittex = src.parent_path().parent_path() / "unittextures";
+    std::error_code ec;
+    if (!fs::is_directory(unittex, ec)) return;
+
+    const std::string stem = src.stem().string();
+    auto stemLower = [](std::string s) {
+        for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+
+    static const char* const kExts[] = {
+        ".png", ".dds", ".tga", ".bmp", ".jpg", ".jpeg", ".webp",
+    };
+
+    auto lookup = [&](int suffix) -> std::string {
+        const std::string targetStem = stem + std::to_string(suffix);
+        const std::string targetLower = stemLower(targetStem);
+        // Direct hit first — cheap path.
+        for (const char* ext : kExts) {
+            if (fs::exists(unittex / (targetStem + ext), ec)) {
+                return targetStem + ".ktx2";
+            }
+        }
+        // Case-insensitive directory walk fallback.
+        for (const auto& entry : fs::directory_iterator(unittex, ec)) {
+            if (!entry.is_regular_file()) continue;
+            const std::string fname = entry.path().filename().string();
+            const std::string fstem = entry.path().stem().string();
+            if (stemLower(fstem) == targetLower) {
+                return targetStem + ".ktx2";  // runtime canonical extension
+            }
+        }
+        return {};
+    };
+
+    if (tex1.empty()) tex1 = lookup(1);
+    if (tex2.empty()) tex2 = lookup(2);
+}
+
 /// Pull `tex1` / `tex2` strings out of a Spring author-config sibling
 /// (`<sourceModelPath>.lua`, e.g. `strikecom_1.dae.lua`). Legacy
 /// archives whose on-disk model format has no native Spring texture
@@ -265,6 +319,12 @@ nlohmann::json GeometryExtractor::BuildExtensionJson(const aiScene* scene,
     }
     if (tex1.empty() || tex2.empty()) {
         ReadSidecarTextures(sourceModelPath, tex1, tex2);
+    }
+    // Spring naming-convention fallback for assets that have neither
+    // an Assimp-extracted texture binding nor a `tex1=` sidecar field
+    // (e.g. `factoryveh.dae` whose .dae.lua only overrides geometry).
+    if (tex1.empty() || tex2.empty()) {
+        ProbeUnittexturesByConvention(sourceModelPath, tex1, tex2);
     }
 
     // Coordinate convention: RH-canonical. Z axis is negated, AABB
