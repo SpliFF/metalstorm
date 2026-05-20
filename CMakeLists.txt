@@ -112,10 +112,10 @@ FetchContent_MakeAvailable(flatbuffers)
 # === nlohmann/json (JSON DOM for modelimporter glTF surgery + engine
 # extension reads) ===
 # Header-only, MIT-licensed. Replaces hand-rolled JSON string surgery
-# in tools/modelimporter (FixGlbBasisuTextures, JsonWriter) ahead of
-# the PBR-mapping work that adds SPRINGRTS_team_color and
-# SPRINGRTS_geometry extensions. Also linked into spring-server so
-# ModelConfigLoader can extract SPRINGRTS_geometry from .gltf files.
+# in tools/modelimporter (FixGlbBasisuTextures, GeometryExtractor).
+# Linked into spring-server so ModelConfigLoader can extract
+# SPRINGRTS_geometry from .gltf files, and into gameconverter so its
+# pre-flight stale-version check can walk the same extension.
 set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
 set(JSON_Install    OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(

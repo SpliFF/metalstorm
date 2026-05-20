@@ -8,12 +8,12 @@
  * mid-position, per-piece offsets and the piece tree topology for
  * script animation and local coordinate transforms.
  *
- * These are populated from a preprocessed `<model>.config.json`
- * (or hand-authored `<model>.config.lua`) file written by the
- * modelimporter tool at content-preprocess time — see
- * tools/modelimporter/JsonWriter.cpp for the emitter and
- * rts/Sim/Objects/ModelConfigLoader.cpp for the reader, which
- * dispatches between the two forms via LuaConfig::Load.
+ * These are populated from a `SPRINGRTS_geometry` document-level
+ * extension embedded in the `<model>.gltf` written by modelimporter
+ * at content-preprocess time. Hand-authored `<model>.config.lua`
+ * files act as optional per-field overrides. See
+ * tools/modelimporter/GeometryExtractor.cpp for the emitter and
+ * rts/Sim/Objects/ModelConfigLoader.cpp for the reader.
  */
 
 #ifndef LOCAL_MODEL_PIECE_STUB_H

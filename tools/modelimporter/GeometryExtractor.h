@@ -11,6 +11,8 @@
 //       "midpos": [mx, my, mz],
 //       "mins":   [x1, y1, z1],
 //       "maxs":   [x2, y2, z2],
+//       "tex1": "armcom_color.ktx2",    // transitional; removed in Phase 1d
+//       "tex2": "armcom_color2.ktx2",   // transitional; removed in Phase 1d
 //       "pieces": [
 //         { "name": "base",   "parent": -1, "offset": [...], "mins": [...], "maxs": [...] },
 //         ...
@@ -21,16 +23,20 @@
 //       ]
 //     }
 //
+// `tex1` / `tex2` are kept in the extension while the gameconverter still
+// resolves the team mask (tex2) through a Spring-conventional bare-stem
+// lookup. Once Phase 1d wires tex2 in as a proper glTF image reference
+// under the `SPRINGRTS_team_color` extension, both fields drop out.
+//
 // Coordinate convention is RH-canonical (glTF-native): Z values are
 // negated relative to the LH source data. The on-disk .gltf is also
 // RH (modelimporter passes aiProcess_MakeLeftHanded at export).
-//
-// The extractor is pure: no filesystem access, no Lua, no logging.
-// Inputs are an aiScene; output is a nlohmann::json.
 
 #pragma once
 
 #include <nlohmann/json.hpp>
+
+#include <string>
 
 struct aiScene;
 
@@ -50,6 +56,14 @@ constexpr int kCurrentSchemaVersion = 7;
 /// Build the SPRINGRTS_geometry payload from `scene`. Returns a JSON
 /// object suitable for placement at `extensions.SPRINGRTS_geometry`
 /// in the document's root.
-nlohmann::json BuildExtensionJson(const aiScene* scene);
+///
+/// `sourceModelPath` is the path the importer read (e.g.
+/// `data/games/zk/Objects3d/armcom1.s3o`). When non-empty and Assimp's
+/// material slots leave tex1 / tex2 unset (true for `.dae` and similar
+/// archive formats), the extractor consults the sibling Spring author-
+/// config `<sourceModelPath>.lua` for tex1 / tex2 strings — matching
+/// the legacy JsonWriter behaviour.
+nlohmann::json BuildExtensionJson(const aiScene* scene,
+                                  const std::string& sourceModelPath = {});
 
 } // namespace GeometryExtractor

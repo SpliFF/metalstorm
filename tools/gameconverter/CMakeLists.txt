@@ -15,10 +15,10 @@ add_dependencies(gameconverter modelimporter textureconverter)
 target_compile_definitions(gameconverter PRIVATE
     TEXTURECONVERTER_BINARY_PATH="$<TARGET_FILE:textureconverter>"
 )
-# Reads `JsonWriter::kCurrentConfigVersion` so the model-sidecar
-# stale-check stays in lock-step with whatever the importer is
-# currently writing — bumping the constant in one place is enough to
-# trigger a clean reconversion on next gameconverter run.
+# Reads `GeometryExtractor::kCurrentSchemaVersion` so the in-gltf
+# SPRINGRTS_geometry stale-check stays in lock-step with whatever the
+# importer is currently writing — bumping the constant in one place is
+# enough to trigger a clean reconversion on next gameconverter run.
 target_include_directories(gameconverter PRIVATE
     ${CMAKE_SOURCE_DIR}/tools/modelimporter
 )
@@ -33,7 +33,8 @@ if(TARGET audioconverter)
         AUDIOCONVERTER_BINARY_PATH="$<TARGET_FILE:audioconverter>"
     )
 endif()
-target_link_libraries(gameconverter PRIVATE springlog springlog-net)
+target_link_libraries(gameconverter PRIVATE springlog springlog-net
+                                            nlohmann_json::nlohmann_json)
 set_target_properties(gameconverter PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED ON

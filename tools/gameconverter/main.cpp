@@ -59,12 +59,14 @@
 #include "SpringLog.h"
 #include "SpringLogNet.h"
 
-// Pulls in JsonWriter::kCurrentConfigVersion so the
-// `.config.json` stale-check below stays in lock-step with whatever
-// schema the modelimporter is currently writing. Bump in one place
-// (JsonWriter.h), trigger a clean reconversion of every game's
+// Pulls in GeometryExtractor::kCurrentSchemaVersion so the
+// SPRINGRTS_geometry stale-check below stays in lock-step with the
+// version the modelimporter currently writes. Bump in one place
+// (GeometryExtractor.h), trigger a clean reconversion of every game's
 // models on next gameconverter run.
-#include "JsonWriter.h"
+#include "GeometryExtractor.h"
+
+#include <nlohmann/json.hpp>
 
 #ifndef TEXTURECONVERTER_BINARY_PATH
 #define TEXTURECONVERTER_BINARY_PATH "textureconverter"
@@ -1233,9 +1235,43 @@ void ExtractConfigTextureRefs(const fs::path& glbPath,
         }
     }
 
-    // Step 3: machine-generated .config.json (only carries tex1/tex2
-    // for source formats Assimp's importer fills in, e.g. S3O).
-    if (fs::exists(jsonPath)) {
+    // Step 3: machine-generated `SPRINGRTS_geometry` extension inside
+    // the .gltf (only carries tex1 / tex2 for source formats Assimp's
+    // importer fills in, e.g. S3O). Uses nlohmann/json for a structured
+    // walk rather than the string-scan helper above — the .gltf itself
+    // is large and "tex1" might appear inside vertex-buffer base64
+    // payloads in a self-contained encoding, so a robust DOM lookup is
+    // worth the cost.
+    if (outTex1.empty() || outTex2.empty()) {
+        std::ifstream in(glbPath, std::ios::binary);
+        if (in) {
+            try {
+                nlohmann::json doc;
+                in >> doc;
+                if (doc.contains("extensions") &&
+                    doc["extensions"].is_object() &&
+                    doc["extensions"].contains("SPRINGRTS_geometry") &&
+                    doc["extensions"]["SPRINGRTS_geometry"].is_object()) {
+                    const auto& geom = doc["extensions"]["SPRINGRTS_geometry"];
+                    if (outTex1.empty() && geom.contains("tex1") &&
+                        geom["tex1"].is_string()) {
+                        outTex1 = geom["tex1"].get<std::string>();
+                    }
+                    if (outTex2.empty() && geom.contains("tex2") &&
+                        geom["tex2"].is_string()) {
+                        outTex2 = geom["tex2"].get<std::string>();
+                    }
+                }
+            } catch (const nlohmann::json::parse_error&) {
+                // Not a valid JSON .gltf; we have nothing to extract.
+            }
+        }
+    }
+
+    // Legacy fallback: pre-PBR-mapping models still on disk with a
+    // sibling `.config.json` (will be swept away on the next full
+    // regenerate). Keeps stale content readable in the interim.
+    if ((outTex1.empty() || outTex2.empty()) && fs::exists(jsonPath)) {
         const std::string txt = loadText(jsonPath);
         if (outTex1.empty()) outTex1 = readField(txt, "tex1", false);
         if (outTex2.empty()) outTex2 = readField(txt, "tex2", false);
@@ -1447,28 +1483,28 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
         // (wreck.ktx2 etc., referenced by hundreds of models) land on
         // disk once rather than once per consuming model.
         const fs::path outPath = modelsOut / (stem + ".gltf");
-        const fs::path jsonConfigPath = modelsOut / (stem + ".config.json");
-        // Best-effort cleanup of legacy .glb outputs from before the
-        // .gltf switch. Pre-Phase-X gameconverter wrote `<stem>.glb`
-        // here; with the extension flip those become orphan files the
-        // dir-manifest would still advertise. One-shot delete on each
-        // run keeps the model directory honest.
+        // Best-effort cleanup of legacy outputs from earlier pipeline
+        // generations: the self-contained `.glb` container before the
+        // .gltf switch, and the sibling `.config.json` sidecar before
+        // simulation metadata moved into the `SPRINGRTS_geometry` glTF
+        // extension. Both leak through the dir-manifest and confuse
+        // third-party tools if left behind. One-shot delete per run.
         const fs::path legacyGlb = modelsOut / (stem + ".glb");
         if (fs::exists(legacyGlb)) {
             fs::remove(legacyGlb, ec);
         }
+        const fs::path legacyJson = modelsOut / (stem + ".config.json");
+        if (fs::exists(legacyJson)) {
+            fs::remove(legacyJson, ec);
+        }
 
         // mtime check: skip if the output is newer than the source.
-        // Also force a rebuild if the sibling .config.json is stale —
-        // schema bumps inside modelimporter (e.g. when a new field is
-        // extracted from sources we used to ignore, or when the
-        // coordinate convention flips as in v5) need a regeneration
-        // even when the .glb itself is current. Reading the constant
-        // straight from JsonWriter.h keeps the two in lock-step: a
-        // single edit there both bumps the emitted version and
-        // invalidates every cached sidecar below it on next run.
-        constexpr int kMinAcceptableConfigVersion =
-            JsonWriter::kCurrentConfigVersion;
+        // Also force a rebuild if the embedded SPRINGRTS_geometry
+        // extension's schemaVersion is stale — bumping the constant in
+        // GeometryExtractor.h alone is enough to retire every cached
+        // model on next run.
+        constexpr int kMinAcceptableSchemaVersion =
+            GeometryExtractor::kCurrentSchemaVersion;
         bool needsRebuild = true;
         if (!force && fs::exists(outPath)) {
             const auto srcTime = fs::last_write_time(entry.path(), ec);
@@ -1477,46 +1513,55 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
                 needsRebuild = false;
             }
         }
-        // A missing .config.json (e.g. user deleted it, or an interrupted
-        // earlier run) is reason enough to rebuild even when the .glb
-        // mtime check says we're current — the client manifest entry will
-        // otherwise point at a phantom file and produce a 404.
-        if (!needsRebuild && !fs::exists(jsonConfigPath)) {
-            needsRebuild = true;
-        }
-        if (!needsRebuild && fs::exists(jsonConfigPath)) {
-            std::ifstream in(jsonConfigPath, std::ios::binary);
+        if (!needsRebuild) {
+            // Scan the .gltf for `"SPRINGRTS_geometry"` and read the
+            // `configVersion` integer that immediately follows. Cheap
+            // text scan; full nlohmann/json parse would be overkill for
+            // a single field on every loop iteration.
+            std::ifstream in(outPath, std::ios::binary);
+            int schemaVersion = -1;
+            bool foundExtension = false;
             if (in) {
                 const std::string contents{
                     std::istreambuf_iterator<char>(in),
                     std::istreambuf_iterator<char>()};
-                int version = -1;
-                size_t k = contents.find("\"configVersion\"");
-                if (k != std::string::npos) {
-                    size_t colon = contents.find(':', k);
-                    if (colon != std::string::npos) {
-                        size_t p = colon + 1;
-                        while (p < contents.size() && std::isspace(
-                                static_cast<unsigned char>(contents[p]))) ++p;
-                        version = 0;
-                        bool any = false;
-                        while (p < contents.size() && std::isdigit(
-                                static_cast<unsigned char>(contents[p]))) {
-                            version = version * 10 + (contents[p] - '0');
-                            ++p;
-                            any = true;
+                const size_t extKey = contents.find("\"SPRINGRTS_geometry\"");
+                if (extKey != std::string::npos) {
+                    foundExtension = true;
+                    const size_t verKey = contents.find("\"configVersion\"", extKey);
+                    if (verKey != std::string::npos) {
+                        size_t colon = contents.find(':', verKey);
+                        if (colon != std::string::npos) {
+                            size_t p = colon + 1;
+                            while (p < contents.size() && std::isspace(
+                                    static_cast<unsigned char>(contents[p]))) ++p;
+                            schemaVersion = 0;
+                            bool any = false;
+                            while (p < contents.size() && std::isdigit(
+                                    static_cast<unsigned char>(contents[p]))) {
+                                schemaVersion = schemaVersion * 10 + (contents[p] - '0');
+                                ++p;
+                                any = true;
+                            }
+                            if (!any) schemaVersion = -1;
                         }
-                        if (!any) version = -1;
                     }
                 }
-                if (version < kMinAcceptableConfigVersion) {
-                    needsRebuild = true;
-                    SLOG(SPRING_LOG_NOTICE,
-                        "gameconverter: %s has configVersion=%d, rebuilding "
-                        "for v%d (PLAN-coordinate-system Phase 4b sweep)",
-                        jsonConfigPath.filename().string().c_str(),
-                        version, kMinAcceptableConfigVersion);
-                }
+            }
+            if (!foundExtension) {
+                needsRebuild = true;
+                SLOG(SPRING_LOG_NOTICE,
+                    "gameconverter: %s has no SPRINGRTS_geometry extension, "
+                    "rebuilding for v%d",
+                    outPath.filename().string().c_str(),
+                    kMinAcceptableSchemaVersion);
+            } else if (schemaVersion < kMinAcceptableSchemaVersion) {
+                needsRebuild = true;
+                SLOG(SPRING_LOG_NOTICE,
+                    "gameconverter: %s has SPRINGRTS_geometry configVersion=%d, "
+                    "rebuilding for v%d",
+                    outPath.filename().string().c_str(),
+                    schemaVersion, kMinAcceptableSchemaVersion);
             }
         }
 

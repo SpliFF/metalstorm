@@ -509,8 +509,9 @@ void ConvertAssetsForDef(MapMetadata& meta, MapFeatureDef& def) {
     def.textureFile = convertedTextureName;
 
     // ---- Model: modelimporter src.s3o features/Name.gltf ----
-    // glTF Separate form (Phase X: .gltf + sibling .bin + sibling .ktx2
-    // in the same folder; see JsonWriter.h kCurrentConfigVersion=6).
+    // glTF Separate form (.gltf + sibling .bin + sibling .ktx2 in the
+    // same folder). Simulation metadata is embedded in the .gltf as a
+    // `SPRINGRTS_geometry` extension (see GeometryExtractor.h).
     // modelimporter's --texture-ext defaults to ktx2 — every URI is
     // rewritten unconditionally.
     const std::string stem = fs::path(srcModel).stem().string();

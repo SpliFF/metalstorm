@@ -14,7 +14,6 @@
 //     .glb   -> "glb2"  exporter (single binary file)
 
 #include "S3OImporter.h"
-#include "JsonWriter.h"
 #include "GeometryExtractor.h"
 #include "SpringLog.h"
 #include "SpringLogNet.h"
@@ -50,8 +49,8 @@ namespace {
 
 void PrintUsage(const char* argv0) {
     SLOG(SPRING_LOG_NOTICE,
-        "convert any model file to glTF 2.0 and emit\n"
-        "                a sibling .config.json engine-metadata file.\n"
+        "convert any model file to glTF 2.0 with embedded engine\n"
+        "                simulation metadata.\n"
         "\n"
         "usage: %s [options] <input> <output>\n"
         "\n"
@@ -66,29 +65,20 @@ void PrintUsage(const char* argv0) {
         "              .gltf  -> JSON + sidecar .bin\n"
         "              .glb   -> single binary file\n"
         "\n"
-        "            A sibling <stem>.config.json is also written with\n"
-        "            the engine metadata the synced sim needs at\n"
-        "            runtime (bounding sphere/box, piece tree,\n"
-        "            attachment points). Ownership rules:\n"
-        "              - If <stem>.config.lua exists, the importer\n"
-        "                writes nothing — the author owns the meta.\n"
-        "              - Else if <stem>.config.json exists, it's\n"
-        "                preserved unless --update-meta is passed.\n"
-        "              - Else a fresh .config.json is written.\n"
+        "            The output .gltf carries a document-level\n"
+        "            `SPRINGRTS_geometry` extension with the simulation\n"
+        "            metadata the engine reads at runtime (bounding\n"
+        "            sphere/box, piece tree, attachment points). A\n"
+        "            hand-authored `<stem>.config.lua` alongside the\n"
+        "            output overrides individual fields at load time;\n"
+        "            it stays untouched by this tool.\n"
         "\n"
         "options:\n"
         "  --texture-ext <ext>   Rewrite all referenced texture file\n"
-        "                        extensions to <ext> (e.g. \"png\", \"webp\").\n"
-        "                        Useful when the source file points at\n"
-        "                        legacy .tga assets that are being\n"
-        "                        converted in a sibling pipeline step.\n"
-        "  --update-meta         Overwrite the output .config.json even\n"
-        "                        if it already exists. Has no effect\n"
-        "                        if a .config.lua exists — that always\n"
-        "                        wins.\n"
-        "  --no-meta             Do not touch the sibling config file\n"
-        "                        at all. Only useful if the caller\n"
-        "                        manages metadata out-of-band.\n"
+        "                        extensions to <ext>. Currently only\n"
+        "                        'ktx2' is accepted.\n"
+        "  --texture-prefix <p>  Prepend <p> to every rewritten texture\n"
+        "                        URI (e.g. '../unittextures/').\n"
         "  --log-server <url>    Send logs to a springlog server.\n"
         "  --log-level <level>   Set minimum log level (debug/info/\n"
         "                        notice/warning/error).", argv0);
@@ -426,8 +416,6 @@ int main(int argc, char** argv) {
     // textures sit in the same directory.
     std::string texturePrefix;
     std::string logServerUrl;
-    bool emitMeta = true;
-    bool updateMeta = false;
 
     // Tiny hand-rolled arg parser — keeps the binary dependency-free.
     for (int i = 1; i < argc; ++i) {
@@ -447,10 +435,13 @@ int main(int argc, char** argv) {
             }
         } else if (a == "--texture-prefix" && i + 1 < argc) {
             texturePrefix = argv[++i];
-        } else if (a == "--no-meta") {
-            emitMeta = false;
-        } else if (a == "--update-meta") {
-            updateMeta = true;
+        } else if (a == "--no-meta" || a == "--update-meta") {
+            // No-op: legacy flags from the .config.json era. The
+            // SPRINGRTS_geometry extension is always emitted into the
+            // .gltf, and the .config.lua override file (when present)
+            // is consulted by the engine at load time, not at convert
+            // time. Kept as accepted-but-ignored so existing callers
+            // (gameconverter --update-meta) don't break.
         } else if (a == "--log-server" && i + 1 < argc) {
             logServerUrl = argv[++i];
         } else if (a == "--log-level" && i + 1 < argc) {
@@ -527,117 +518,35 @@ int main(int argc, char** argv) {
         return 3;
     }
 
-    // Handle the sibling <output>.config.json. The file follows the
-    // project-wide .config.lua / .config.json ownership rules, in
-    // priority order:
-    //
-    //   1. If <output>.config.lua exists → do nothing. The author has
-    //      taken full control of this model's metadata via Lua and we
-    //      never mix engine output into hand-edited files.
-    //   2. Else if <output>.config.json does not exist → write a fresh
-    //      extraction.
-    //   3. Else if its configVersion is older than kCurrentConfigVersion
-    //      → overwrite (auto-upgrade stale schemas).
-    //   4. Else if --update-meta was passed → overwrite.
-    //   5. Else → leave the existing .config.json untouched.
-    //
-    // The JSON write happens BEFORE RewriteTextureExtensions so the
-    // tex1/tex2 fields keep their original filenames (e.g.
-    // `commrecon.dds`) — the client resolves those through
-    // `unittextures/`, while the GLB itself references the rewritten
-    // `.png` URI for self-contained scene loading.
-    //
-    // --no-meta opts out of everything in this block.
-    if (emitMeta) {
+    // Sweep up any legacy `.config.json` sidecar from before the
+    // SPRINGRTS_geometry extension landed in the .gltf. The .gltf is now
+    // the canonical record; leaving the stale sidecar around would lead
+    // to silent drift on the next run (engine prefers the .gltf extension
+    // but third-party tools might still pick up the .json). A hand-
+    // authored `.config.lua` is left alone — it remains the override
+    // layer over the .gltf-embedded defaults.
+    {
         namespace fs = std::filesystem;
         const fs::path outP = outPath;
-        // .config.json isn't a single dotted extension to `replace_extension`;
-        // strip the .glb/.gltf with stem() and append the full suffix.
         const fs::path luaConfigPath  = outP.parent_path() / (outP.stem().string() + ".config.lua");
         const fs::path jsonConfigPath = outP.parent_path() / (outP.stem().string() + ".config.json");
 
-        const bool hasLua  = fs::exists(luaConfigPath);
-        const bool hasJson = fs::exists(jsonConfigPath);
-
-        // Detect stale configs (v1 written before tex1/tex2 extraction,
-        // or pre-rename files using `metaVersion`). Cheap text scan —
-        // we only need to find the integer; full JSON parsing would be
-        // overkill for a single field.
-        bool staleVersion = false;
-        if (hasJson) {
-            std::ifstream in(jsonConfigPath, std::ios::binary);
-            if (in) {
-                const std::string contents{
-                    std::istreambuf_iterator<char>(in),
-                    std::istreambuf_iterator<char>(),
-                };
-                auto findVersion = [&](const char* key) -> int {
-                    const std::string needle = std::string("\"") + key + "\"";
-                    auto p = contents.find(needle);
-                    if (p == std::string::npos) return -1;
-                    p = contents.find(':', p);
-                    if (p == std::string::npos) return -1;
-                    ++p;
-                    while (p < contents.size() && std::isspace(static_cast<unsigned char>(contents[p]))) ++p;
-                    int v = 0;
-                    bool any = false;
-                    while (p < contents.size() && std::isdigit(static_cast<unsigned char>(contents[p]))) {
-                        v = v * 10 + (contents[p] - '0');
-                        ++p;
-                        any = true;
-                    }
-                    return any ? v : -1;
-                };
-                int v = findVersion("configVersion");
-                if (v < 0) v = findVersion("metaVersion");
-                if (v < JsonWriter::kCurrentConfigVersion) staleVersion = true;
+        std::error_code ec;
+        if (fs::exists(jsonConfigPath)) {
+            fs::remove(jsonConfigPath, ec);
+            if (ec) {
+                SLOG(SPRING_LOG_WARNING,
+                    "failed to remove legacy %s: %s",
+                    jsonConfigPath.string().c_str(), ec.message().c_str());
             }
         }
 
-        const char* metaStatus = nullptr;
-        if (hasLua) {
-            metaStatus = " [author-owned .config.lua, skipped]";
-        } else if (!hasJson) {
-            if (!JsonWriter::Write(scene, jsonConfigPath.string(), inPath)) {
-                SLOG(SPRING_LOG_ERROR, "failed to write %s",
-                    jsonConfigPath.string().c_str());
-                Assimp::DefaultLogger::kill();
-                springlog_shutdown();
-                return 5;
-            }
-            metaStatus = " [fresh]";
-        } else if (staleVersion) {
-            if (!JsonWriter::Write(scene, jsonConfigPath.string(), inPath)) {
-                SLOG(SPRING_LOG_ERROR, "failed to write %s",
-                    jsonConfigPath.string().c_str());
-                Assimp::DefaultLogger::kill();
-                springlog_shutdown();
-                return 5;
-            }
-            metaStatus = " [upgraded]";
-        } else if (updateMeta) {
-            if (!JsonWriter::Write(scene, jsonConfigPath.string(), inPath)) {
-                SLOG(SPRING_LOG_ERROR, "failed to write %s",
-                    jsonConfigPath.string().c_str());
-                Assimp::DefaultLogger::kill();
-                springlog_shutdown();
-                return 5;
-            }
-            metaStatus = " [updated]";
-        } else {
-            metaStatus = " [kept existing]";
-        }
-
-        const fs::path& displayedPath = hasLua ? luaConfigPath : jsonConfigPath;
-        SLOG(SPRING_LOG_NOTICE, "%s -> %s (%u meshes, %u materials) + %s%s",
+        SLOG(SPRING_LOG_NOTICE, "%s -> %s (%u meshes, %u materials)%s",
             inPath.c_str(), outPath.c_str(),
             scene->mNumMeshes, scene->mNumMaterials,
-            displayedPath.filename().string().c_str(),
-            metaStatus);
-    } else {
-        SLOG(SPRING_LOG_NOTICE, "%s -> %s (%u meshes, %u materials)",
-            inPath.c_str(), outPath.c_str(),
-            scene->mNumMeshes, scene->mNumMaterials);
+            fs::exists(luaConfigPath)
+                ? " [.config.lua override present]"
+                : "");
     }
 
     // Rewrite texture URIs (e.g. `.dds` → `.png`) AFTER the JSON config
@@ -666,12 +575,10 @@ int main(int argc, char** argv) {
     //
     // Result: every .glb written from here on is a spec-compliant
     // glTF 2.0 file that loads correctly in Blender, gltf-viewer, and
-    // any other third-party tool. The engine compensates on the
-    // sidecar side (JsonWriter negates Z so .config.json carries RH-
-    // canonical offsets) and on the loader side (ModelConfigLoader
-    // negates Z back to LH at read-time so engine internals are
-    // unaffected — Phase 1d bridge, removed in Phase 2 when the sim
-    // and client flip to RH natively).
+    // any other third-party tool. The `SPRINGRTS_geometry` extension's
+    // numeric fields (offsets, mins/maxs) are also RH-canonical (see
+    // GeometryExtractor.cpp), so engine and renderer agree on a single
+    // glTF-native convention.
     // glTF 2.0 spec mandates UV origin (0,0) at the UPPER-LEFT of the
     // texture image — same convention as DirectX, KTX2 (rd orientation),
     // and the original S3O sources. Do NOT pass aiProcess_FlipUVs: it
@@ -709,7 +616,7 @@ int main(int argc, char** argv) {
     // .gltf becomes a complete record of mesh + materials + simulation
     // metadata in a single file.
     const nlohmann::json springGeometryJson =
-        GeometryExtractor::BuildExtensionJson(scene);
+        GeometryExtractor::BuildExtensionJson(scene, inPath);
     if (textureExt == "ktx2"
         && (EndsWith(outPath, ".glb") || EndsWith(outPath, ".gltf")))
     {

@@ -1,17 +1,18 @@
 // GeometryExtractor — see header for the produced schema.
 //
-// Lifted from JsonWriter.cpp (which is being retired). The same
-// numeric output is produced for any given scene; only the surrounding
-// container differs (in-gltf extension vs. sibling .config.json).
+// Builds the `SPRINGRTS_geometry` payload modelimporter embeds into
+// every output .gltf as a document-level extension.
 
 #include "GeometryExtractor.h"
 
 #include <assimp/scene.h>
+#include <assimp/material.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <vector>
@@ -150,7 +151,54 @@ json JsonVec3(float x, float y, float z) {
 
 } // namespace
 
-nlohmann::json GeometryExtractor::BuildExtensionJson(const aiScene* scene) {
+namespace {
+
+/// Rewrite a texture filename's extension to `.ktx2`. The runtime
+/// resolves a single canonical extension regardless of what the
+/// source archive happened to ship; gameconverter encodes the actual
+/// KTX2 in a separate pass.
+void RewriteToKtx2(std::string& name) {
+    if (name.empty()) return;
+    const auto dot = name.find_last_of('.');
+    const auto slash = name.find_last_of("/\\");
+    if (dot == std::string::npos ||
+        (slash != std::string::npos && dot < slash)) {
+        name += ".ktx2";
+    } else {
+        name = name.substr(0, dot) + ".ktx2";
+    }
+}
+
+/// Pull `tex1` / `tex2` strings out of a Spring author-config sibling
+/// (`<sourceModelPath>.lua`, e.g. `strikecom_1.dae.lua`). Legacy
+/// archives whose on-disk model format has no native Spring texture
+/// binding (.dae, .fbx) store the names here. The file is small and
+/// the keys are unambiguous, so plain string scanning suffices.
+void ReadSidecarTextures(const std::string& sourceModelPath,
+                         std::string& tex1, std::string& tex2) {
+    if (sourceModelPath.empty()) return;
+    const std::string springLua = sourceModelPath + ".lua";
+    std::ifstream lua(springLua, std::ios::binary);
+    if (!lua) return;
+    const std::string txt{std::istreambuf_iterator<char>(lua),
+                          std::istreambuf_iterator<char>()};
+    auto readField = [&](const std::string& key) -> std::string {
+        size_t k = txt.find(key);
+        if (k == std::string::npos) return {};
+        size_t q1 = txt.find('"', k + key.size());
+        if (q1 == std::string::npos) return {};
+        size_t q2 = txt.find('"', q1 + 1);
+        if (q2 == std::string::npos) return {};
+        return txt.substr(q1 + 1, q2 - q1 - 1);
+    };
+    if (tex1.empty()) { tex1 = readField("tex1"); RewriteToKtx2(tex1); }
+    if (tex2.empty()) { tex2 = readField("tex2"); RewriteToKtx2(tex2); }
+}
+
+} // namespace
+
+nlohmann::json GeometryExtractor::BuildExtensionJson(const aiScene* scene,
+                                                    const std::string& sourceModelPath) {
     Aabb bounds;
     if (scene != nullptr && scene->mRootNode != nullptr) {
         CollectWorldspaceVertices(scene, scene->mRootNode, aiMatrix4x4{}, bounds);
@@ -195,6 +243,30 @@ nlohmann::json GeometryExtractor::BuildExtensionJson(const aiScene* scene) {
         }
     }
 
+    // ---- Texture references (transitional; removed in Phase 1d) ----
+    //
+    // For S3O the importer fills aiTextureType_DIFFUSE (tex1) and
+    // aiTextureType_SPECULAR (tex2) on the first material; for `.dae`
+    // and similar formats neither slot is populated and the only
+    // source of texture filenames is a Spring author-config sibling
+    // `<sourceModelPath>.lua`.
+    std::string tex1, tex2;
+    if (scene != nullptr && scene->mNumMaterials > 0 && scene->mMaterials != nullptr) {
+        const aiMaterial* mat = scene->mMaterials[0];
+        aiString s;
+        if (mat->GetTexture(aiTextureType_DIFFUSE, 0, &s) == AI_SUCCESS) {
+            tex1.assign(s.C_Str(), s.length);
+            RewriteToKtx2(tex1);
+        }
+        if (mat->GetTexture(aiTextureType_SPECULAR, 0, &s) == AI_SUCCESS) {
+            tex2.assign(s.C_Str(), s.length);
+            RewriteToKtx2(tex2);
+        }
+    }
+    if (tex1.empty() || tex2.empty()) {
+        ReadSidecarTextures(sourceModelPath, tex1, tex2);
+    }
+
     // Coordinate convention: RH-canonical. Z axis is negated, AABB
     // min/max swap-and-negate to keep min <= max under the flip.
     json doc;
@@ -204,6 +276,8 @@ nlohmann::json GeometryExtractor::BuildExtensionJson(const aiScene* scene) {
     doc["midpos"] = JsonVec3(midX, midY, -midZ);
     doc["mins"]   = JsonVec3(bounds.minX, bounds.minY, -bounds.maxZ);
     doc["maxs"]   = JsonVec3(bounds.maxX, bounds.maxY, -bounds.minZ);
+    if (!tex1.empty()) doc["tex1"] = tex1;
+    if (!tex2.empty()) doc["tex2"] = tex2;
 
     json piecesArray = json::array();
     for (const auto& p : pieces) {

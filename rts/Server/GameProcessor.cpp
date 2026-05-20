@@ -182,37 +182,38 @@ void Process(const std::string& gamePath,
 
         const std::string stem = src.stem().string();
         // glTF Separate form (.gltf + sibling .bin + sibling .ktx2s).
-        // See JsonWriter.h kCurrentConfigVersion=6 changelog.
+        // Simulation metadata is embedded as a `SPRINGRTS_geometry`
+        // document-level extension in the .gltf (see
+        // tools/modelimporter/GeometryExtractor.h).
         const fs::path dstGltf    = outDir / (stem + ".gltf");
-        const fs::path dstJson    = outDir / (stem + ".config.json");
         const fs::path dstLua     = outDir / (stem + ".config.lua");
-        // One-shot cleanup of pre-v6 .glb outputs left in the cache.
+        // One-shot cleanup of pre-extension artefacts left in the
+        // cache: the self-contained .glb container and the legacy
+        // .config.json sidecar.
         const fs::path legacyGlb  = outDir / (stem + ".glb");
         if (fs::exists(legacyGlb)) {
             std::error_code _ec;
             fs::remove(legacyGlb, _ec);
         }
-        const bool     hasConfig  = fs::exists(dstJson) || fs::exists(dstLua);
+        const fs::path legacyJson = outDir / (stem + ".config.json");
+        if (fs::exists(legacyJson)) {
+            std::error_code _ec;
+            fs::remove(legacyJson, _ec);
+        }
 
-        // Idempotent skip: regenerate only when the glb is missing
-        // or older than the source. The config file's mtime is
-        // deliberately NOT part of this comparison — once the
-        // config exists on disk it's author-owned and modelimporter
-        // will refuse to touch it without --update-meta, so
-        // including it here would cause an infinite rebuild loop
-        // whenever the source is newer than a preserved-on-purpose
-        // config file. If the config is missing we still need to
-        // rebuild so that modelimporter has a chance to write a
-        // fresh .config.json.
+        // Idempotent skip: regenerate only when the .gltf is missing
+        // or older than the source. A hand-authored `.config.lua`
+        // alongside is treated as an override (engine reads it at
+        // load time) — its presence doesn't affect rebuild logic.
         //
         // Modelimporter binary mtime is folded in too: when the
         // converter itself changes (e.g. new material flag, new
-        // texture handling) every existing .glb in the cache is
+        // texture handling) every existing .gltf in the cache is
         // implicitly stale. Without this clause a rebuilt importer
         // is invisible to the lobby until each source asset is
         // hand-touched.
         bool needsRebuild = true;
-        if (fs::exists(dstGltf) && hasConfig) {
+        if (fs::exists(dstGltf)) {
             const auto srcMt = fs::last_write_time(src);
             const auto glbMt = fs::last_write_time(dstGltf);
             const fs::path importerBin(MODELIMPORTER_BINARY_PATH);
