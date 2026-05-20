@@ -318,7 +318,8 @@ bool ConvertLobbyConfig(const fs::path& gameDir, bool force) {
 // chunk self-contained.
 bool ConvertTextureToKtx2(const std::string& srcPath,
                           const std::string& dstPath,
-                          const fs::path& textureConverter);
+                          const fs::path& textureConverter,
+                          const std::string& channelOp = {});
 void WriteDirManifest(const fs::path& dir, bool recursive = false);
 
 // ---------------------------------------------------------------
@@ -1070,6 +1071,13 @@ std::string ResolveTextureByStem(const fs::path& dir, const std::string& stem) {
 /// stb_image -> UASTC for everything else) and writes a single
 /// canonical KTX2 output regardless of input format.
 ///
+/// `channelOp` (default `none`) selects a Spring S3O channel-split
+/// remap applied between decode and encode — see
+/// PLAN-pbr-mapping.md and `textureconverter --help`. The PNG
+/// fallback is only emitted in pass-through mode; for the channel-
+/// split outputs the file would carry engine-internal channel packing
+/// and confuse third-party viewers.
+///
 /// Also emits a downscaled `.png` fallback alongside the KTX2 so the
 /// .glb pipeline can advertise a spec-compliant top-level image source
 /// for glTF readers that don't support KHR_texture_basisu (Blender,
@@ -1077,15 +1085,23 @@ std::string ResolveTextureByStem(const fs::path& dir, const std::string& stem) {
 /// PNG only has to be legible enough for third-party tools.
 bool ConvertTextureToKtx2(const std::string& srcPath,
                           const std::string& dstPath,
-                          const fs::path& textureConverter) {
-    const std::string pngFallback =
-        fs::path(dstPath).replace_extension(".png").string();
+                          const fs::path& textureConverter,
+                          const std::string& channelOp) {
     std::vector<std::string> argv = {
         textureConverter.string(),
         "--encoding", "uastc",
-        "--png-fallback", pngFallback,
-        srcPath, dstPath,
     };
+    if (channelOp.empty()) {
+        const std::string pngFallback =
+            fs::path(dstPath).replace_extension(".png").string();
+        argv.push_back("--png-fallback");
+        argv.push_back(pngFallback);
+    } else {
+        argv.push_back("--channel-op");
+        argv.push_back(channelOp);
+    }
+    argv.push_back(srcPath);
+    argv.push_back(dstPath);
     std::string out;
     if (!RunCommand(argv, out)) {
         SLOG(SPRING_LOG_WARNING,
@@ -1094,6 +1110,36 @@ bool ConvertTextureToKtx2(const std::string& srcPath,
         return false;
     }
     return true;
+}
+
+/// Recognise the four PLAN-pbr-mapping channel-split suffixes on a
+/// glTF image URI (`<stem>_diffuse.ktx2`, etc.) and return the
+/// matching textureconverter `--channel-op` argument along with the
+/// underlying source stem (everything before the suffix). Returns an
+/// empty `op` for URIs without a recognised suffix — those are
+/// converted in pass-through mode against the URI's own stem.
+void ParseChannelOpFromUri(const std::string& uri,
+                           std::string& outOp, std::string& outSourceStem) {
+    outOp.clear();
+    outSourceStem.clear();
+    const fs::path p(uri);
+    const std::string stem = p.stem().string();
+    static const std::pair<const char*, const char*> kSuffixes[] = {
+        {"_diffuse",  "diffuse"},
+        {"_team",     "team"},
+        {"_emissive", "emissive"},
+        {"_orm",      "orm"},
+    };
+    for (const auto& [suffix, op] : kSuffixes) {
+        const size_t n = std::strlen(suffix);
+        if (stem.size() > n &&
+            stem.compare(stem.size() - n, n, suffix) == 0) {
+            outOp = op;
+            outSourceStem = stem.substr(0, stem.size() - n);
+            return;
+        }
+    }
+    outSourceStem = stem;
 }
 
 /// Pull `images[].uri` strings out of a .glb file's JSON chunk
@@ -1143,145 +1189,18 @@ std::vector<std::string> ExtractGlbImageUris(const fs::path& glbPath) {
     return uris;
 }
 
-/// Extract `tex1` / `tex2` filenames from a model's config sidecar.
-/// Three sources are consulted in priority order:
-///
-///   1. `<glbStem>.config.lua`   — hand-authored override at the
-///                                  output level (rare, but wins).
-///   2. `<sourceModel>.lua`      — Spring's author-config convention
-///                                  alongside the source model file
-///                                  (e.g. `strikecom_1.dae.lua`).
-///                                  Standard for Collada/legacy assets
-///                                  where the on-disk format has no
-///                                  native tex1/tex2 channel.
-///   3. `<glbStem>.config.json`  — what modelimporter writes; only
-///                                  carries tex1/tex2 when Assimp's
-///                                  importer for the source format
-///                                  populated them (true for S3O, not
-///                                  for `.dae`).
-///
-/// `sourceModelPath` may be empty if no source path is known — in
-/// that case we just skip step 2.
-void ExtractConfigTextureRefs(const fs::path& glbPath,
-                              const fs::path& sourceModelPath,
-                              std::string& outTex1, std::string& outTex2) {
-    outTex1.clear();
-    outTex2.clear();
-    const fs::path stem = glbPath.parent_path() / glbPath.stem();
-    const fs::path luaPath  = stem.string() + ".config.lua";
-    const fs::path jsonPath = stem.string() + ".config.json";
-
-    auto readField = [](const std::string& contents,
-                        const std::string& key,
-                        bool isLua) -> std::string {
-        // Lua source: `tex1 = "name.ktx2"`
-        // JSON:       `"tex1": "name.ktx2"`
-        // Both forms reduce to "find the key, then read the next
-        // double-quoted string after it".
-        const std::string needle = isLua ? key : ("\"" + key + "\"");
-        size_t k = contents.find(needle);
-        if (k == std::string::npos) return {};
-        size_t after = k + needle.size();
-        // Skip past the separator (`:` for JSON, `=` for Lua) and any
-        // whitespace, landing on the value's opening quote.
-        size_t q1 = contents.find('"', after);
-        if (q1 == std::string::npos) return {};
-        size_t q2 = contents.find('"', q1 + 1);
-        if (q2 == std::string::npos) return {};
-        return contents.substr(q1 + 1, q2 - q1 - 1);
-    };
-
-    auto loadText = [](const fs::path& p) -> std::string {
-        std::ifstream in(p, std::ios::binary);
-        if (!in) return {};
-        return std::string{std::istreambuf_iterator<char>(in),
-                           std::istreambuf_iterator<char>()};
-    };
-
-    auto rewriteToKtx2 = [](std::string& name) {
-        if (name.empty()) return;
-        const auto dot = name.find_last_of('.');
-        const auto slash = name.find_last_of("/\\");
-        if (dot == std::string::npos ||
-            (slash != std::string::npos && dot < slash)) {
-            name += ".ktx2";
-        } else {
-            name = name.substr(0, dot) + ".ktx2";
-        }
-    };
-
-    // Step 1: hand-authored output-level .config.lua override.
-    if (fs::exists(luaPath)) {
-        const std::string txt = loadText(luaPath);
-        outTex1 = readField(txt, "tex1", true);
-        outTex2 = readField(txt, "tex2", true);
-    }
-
-    // Step 2: Spring author-config alongside the source model
-    // (`<modelname>.<ext>.lua`, e.g. `strikecom_1.dae.lua`). Only
-    // checked if the higher-priority sources didn't already populate
-    // both fields. The on-disk filenames in these files are typically
-    // `.dds`/`.tga` — rewrite to `.ktx2` to match the runtime convention.
-    if ((outTex1.empty() || outTex2.empty()) && !sourceModelPath.empty()) {
-        const fs::path springLua = sourceModelPath.string() + ".lua";
-        if (fs::exists(springLua)) {
-            const std::string txt = loadText(springLua);
-            std::string t1 = readField(txt, "tex1", true);
-            std::string t2 = readField(txt, "tex2", true);
-            rewriteToKtx2(t1);
-            rewriteToKtx2(t2);
-            if (outTex1.empty()) outTex1 = t1;
-            if (outTex2.empty()) outTex2 = t2;
-        }
-    }
-
-    // Step 3: machine-generated `SPRINGRTS_geometry` extension inside
-    // the .gltf (only carries tex1 / tex2 for source formats Assimp's
-    // importer fills in, e.g. S3O). Uses nlohmann/json for a structured
-    // walk rather than the string-scan helper above — the .gltf itself
-    // is large and "tex1" might appear inside vertex-buffer base64
-    // payloads in a self-contained encoding, so a robust DOM lookup is
-    // worth the cost.
-    if (outTex1.empty() || outTex2.empty()) {
-        std::ifstream in(glbPath, std::ios::binary);
-        if (in) {
-            try {
-                nlohmann::json doc;
-                in >> doc;
-                if (doc.contains("extensions") &&
-                    doc["extensions"].is_object() &&
-                    doc["extensions"].contains("SPRINGRTS_geometry") &&
-                    doc["extensions"]["SPRINGRTS_geometry"].is_object()) {
-                    const auto& geom = doc["extensions"]["SPRINGRTS_geometry"];
-                    if (outTex1.empty() && geom.contains("tex1") &&
-                        geom["tex1"].is_string()) {
-                        outTex1 = geom["tex1"].get<std::string>();
-                    }
-                    if (outTex2.empty() && geom.contains("tex2") &&
-                        geom["tex2"].is_string()) {
-                        outTex2 = geom["tex2"].get<std::string>();
-                    }
-                }
-            } catch (const nlohmann::json::parse_error&) {
-                // Not a valid JSON .gltf; we have nothing to extract.
-            }
-        }
-    }
-
-    // Legacy fallback: pre-PBR-mapping models still on disk with a
-    // sibling `.config.json` (will be swept away on the next full
-    // regenerate). Keeps stale content readable in the interim.
-    if ((outTex1.empty() || outTex2.empty()) && fs::exists(jsonPath)) {
-        const std::string txt = loadText(jsonPath);
-        if (outTex1.empty()) outTex1 = readField(txt, "tex1", false);
-        if (outTex2.empty()) outTex2 = readField(txt, "tex2", false);
-    }
-}
-
 /// Convert a single referenced texture by filename (e.g.
 /// `3do2s3o_atlas_2.ktx2`) into the model's directory if missing.
 /// Resolves the source file by stem in `unittexturesSrc`. No-op on
 /// data URIs, missing extensions, or already-present targets.
+///
+/// Filenames carrying the PLAN-pbr-mapping channel-split suffixes
+/// (`<stem>_diffuse.ktx2`, `_team`, `_emissive`, `_orm`) trigger a
+/// channel-op conversion: textureconverter decodes the source once
+/// then routes the RGBA through the matching channel remap. The
+/// source file is found by the *un-suffixed* stem so a single
+/// `armcom_color.dds` produces `armcom_color_diffuse.ktx2` and
+/// `armcom_color_team.ktx2` from the same source.
 void EnsureSiblingTexture(const fs::path& glbPath,
                           const std::string& filename,
                           const fs::path& unittexturesSrc,
@@ -1295,38 +1214,46 @@ void EnsureSiblingTexture(const fs::path& glbPath,
             filename.c_str(), glbPath.filename().string().c_str());
         return;
     }
-    const std::string stem = target.stem().string();
-    const std::string srcTex = ResolveTextureByStem(unittexturesSrc, stem);
+    std::string channelOp, sourceStem;
+    ParseChannelOpFromUri(filename, channelOp, sourceStem);
+    const std::string srcTex = ResolveTextureByStem(unittexturesSrc, sourceStem);
     if (srcTex.empty()) {
         SLOG(SPRING_LOG_WARNING,
-            "texture '%s' (referenced by %s) not found in %s",
-            filename.c_str(), glbPath.filename().string().c_str(),
+            "texture '%s' (source stem '%s', referenced by %s) not found in %s",
+            filename.c_str(), sourceStem.c_str(),
+            glbPath.filename().string().c_str(),
             unittexturesSrc.string().c_str());
         return;
     }
     std::error_code ec;
     fs::create_directories(target.parent_path(), ec);
-    ConvertTextureToKtx2(srcTex, target.string(), textureConverter);
+    ConvertTextureToKtx2(srcTex, target.string(), textureConverter, channelOp);
 }
 
 /// Make sure every texture referenced by a freshly-written glb has a
 /// sibling `.ktx2` in `unittexturesOut`. Three reference sources:
 ///
-///   1. The glb's own `images[].uri` array — covers the diffuse (tex1)
-///      for source formats whose Assimp importer records textures
-///      (S3O, glTF, OBJ-with-MTL).
-///   2. The Spring author-config (`<sourceModel>.<ext>.lua`) — the
-///      canonical place for tex1 / tex2 in legacy archives whose model
-///      format has no native texture-binding (e.g. .dae / Collada).
-///   3. The sibling `.config.json` (or `.config.lua`) `tex1` / `tex2`
-///      fields — covers the team-colour mask (tex2) for S3O models.
-///      Source 2 supersedes this when present.
+///   1. The glb's own `images[].uri` array — covers every texture the
+///      model references. After Phase 1c of PLAN-pbr-mapping, the
+///      modelimporter synthesises four channel-split image entries per
+///      textured S3O / convention-discovered Spring asset (`_diffuse`,
+///      `_team`, `_emissive`, `_orm`), each routed through the matching
+///      textureconverter `--channel-op` on the source bitmap.
+///
+/// Earlier iterations of this function also consulted the Spring
+/// author-config sidecar and the `SPRINGRTS_geometry` extension's
+/// transitional `tex1`/`tex2` strings — those existed because Assimp's
+/// glTF exporter dropped the team-color mask silently. The Phase 1c
+/// rebuild emits both tex1 (diffuse + team) and tex2 (emissive + ORM)
+/// images explicitly in the .gltf, so the images[] array is now the
+/// complete source of truth and the fallback paths are redundant.
 ///
 /// `sourceModelPath` is the original input file passed to modelimporter;
-/// pass an empty path to skip source-side .lua lookup. Cheap on re-runs
-/// — the per-texture early exit is a single stat() call.
+/// retained on the signature for parity with the legacy callers but no
+/// longer consulted. Cheap on re-runs — the per-texture early exit in
+/// EnsureSiblingTexture is a single stat() call.
 void EnsureGlbTexturesAvailable(const fs::path& glbPath,
-                                const fs::path& sourceModelPath,
+                                const fs::path& /*sourceModelPath*/,
                                 const fs::path& unittexturesSrc,
                                 const fs::path& unittexturesOut,
                                 const fs::path& textureConverter) {
@@ -1334,17 +1261,9 @@ void EnsureGlbTexturesAvailable(const fs::path& glbPath,
     std::error_code ec;
     fs::create_directories(unittexturesOut, ec);
 
-    // 1. glb image URIs (diffuse).
     for (const std::string& uri : ExtractGlbImageUris(glbPath)) {
         EnsureSiblingTexture(glbPath, uri, unittexturesSrc, textureConverter);
     }
-
-    // 2 + 3. tex1 / tex2 declared in the source `.lua` author-config or
-    // the model's output config sidecar (team mask).
-    std::string tex1, tex2;
-    ExtractConfigTextureRefs(glbPath, sourceModelPath, tex1, tex2);
-    EnsureSiblingTexture(glbPath, tex1, unittexturesSrc, textureConverter);
-    EnsureSiblingTexture(glbPath, tex2, unittexturesSrc, textureConverter);
 }
 
 /// Write a flat directory-listing manifest the client can use as a

@@ -173,7 +173,8 @@ void WriteU32LE(std::vector<uint8_t>& out, size_t off, uint32_t v) {
 
 /// Adjust the JSON of a freshly-written .glb or .gltf so KTX2 textures
 /// are referenced through the KHR_texture_basisu extension exactly as
-/// the extension spec mandates:
+/// the extension spec mandates, and (for Spring S3O sources) synthesise
+/// the four-output PBR material layout described in PLAN-pbr-mapping.md:
 ///
 ///   - Each `textures[]` entry whose `source` points at a `.ktx2` image
 ///     has the top-level `source` removed and replaced with
@@ -185,11 +186,28 @@ void WriteU32LE(std::vector<uint8_t>& out, size_t off, uint32_t v) {
 ///     `extensionsUsed` (creating the arrays if absent). Empty entries
 ///     left over by upstream tooling are pruned so the document
 ///     validates clean (no `EMPTY_ENTITY` warnings).
-///   - `alphaMode` is stripped from every material. In Spring S3O the
-///     diffuse alpha channel encodes team-color blend amount, not
-///     transparency; Assimp's MASK default would discard ~93% of
-///     fragments in a spec-compliant viewer (Phase 1 reinstates MASK
-///     with binarised alpha as part of the PBR-mapping work).
+///   - When `springGeometry` carries `tex1` / `tex2` (Spring S3O-style
+///     channel packing), the function replaces the document's
+///     `images[]`, `textures[]`, and `materials[0]` arrays with the
+///     four-output PBR layout:
+///         baseColorTexture          → <tex1stem>_diffuse.ktx2
+///         emissiveTexture           → <tex2stem>_emissive.ktx2
+///         metallicRoughnessTexture  → <tex2stem>_orm.ktx2 (also referenced
+///         occlusionTexture            from occlusionTexture; the spec
+///                                     explicitly allows two slots to point
+///                                     at one texture)
+///         SPRINGRTS_team_color
+///           .maskTexture            → <tex1stem>_team.ktx2
+///     The material's `alphaMode` becomes `"MASK"` + `alphaCutoff: 0.5`
+///     — for S3O sources the binarised diffuse alpha *is* spec-correct
+///     cutout once the team-color mask is split out. The four KTX2
+///     files do not exist yet at modelimporter time; gameconverter
+///     produces them in a separate pass.
+///   - For documents without S3O-style channel packing
+///     (no `tex1` in `SPRINGRTS_geometry`), the legacy behaviour is
+///     preserved: `alphaMode` is stripped from every material to keep
+///     spec-compliant viewers from discarding ~93% of fragments based
+///     on Assimp's misleading MASK default.
 ///
 /// No PNG fallback is emitted — our runtime (Babylon), Blender 4.2+,
 /// gltf-viewer.donmccurdy.com and three.js all support
@@ -350,14 +368,170 @@ bool FixGlbBasisuTextures(const std::string& path,
         ensureExtListContains("extensionsUsed", "SPRINGRTS_geometry");
     }
 
-    // ---- Step 3b: strip `alphaMode` from every material. Assimp
-    // emits "MASK" whenever the source diffuse texture has an alpha
-    // channel, but in Spring S3O the alpha channel encodes team-color
-    // blend amount — NOT transparency. With MASK plus the default
-    // 0.5 cutoff, any glTF-spec-compliant viewer discards ~93% of
-    // fragments. Our runtime sampler reads alpha explicitly, so
-    // stripping the field (defaulting to OPAQUE) loses no information.
-    if (doc.contains("materials") && doc["materials"].is_array()) {
+    // ---- Step 3b: S3O-style PBR channel split + SPRINGRTS_team_color.
+    //
+    // When SPRINGRTS_geometry carries `tex1` (and optionally `tex2`),
+    // the source is a Spring S3O-style asset whose two source textures
+    // pack 8 channels of authoring data — diffuse RGB + team mask in
+    // tex1.A, glow + spec + reflectivity + translucency across tex2.
+    // Split those across four spec-compliant glTF PBR slots so a third-
+    // party viewer (Blender, gltf-viewer.donmccurdy.com) renders the
+    // unit correctly out of the box. The team mask is a first-class
+    // glTF texture referenced via the custom `SPRINGRTS_team_color`
+    // extension (optional — viewers without support still see the base
+    // color, just without team tinting).
+    //
+    // The four KTX2 outputs (<stem>_diffuse, <stem>_team, <stem>_emissive,
+    // <stem>_orm) do not exist on disk yet — gameconverter produces them
+    // in a subsequent pass by re-running textureconverter with the
+    // appropriate --channel-op. From the .gltf's perspective they are
+    // simply image URIs the runtime will fetch.
+    bool didChannelSplit = false;
+    if (springGeometry != nullptr && springGeometry->is_object()) {
+        auto stemOf = [](const std::string& ktx2Name) -> std::string {
+            const size_t dot = ktx2Name.find_last_of('.');
+            return (dot == std::string::npos) ? ktx2Name : ktx2Name.substr(0, dot);
+        };
+
+        std::string tex1, tex2;
+        if (springGeometry->contains("tex1") && (*springGeometry)["tex1"].is_string()) {
+            tex1 = (*springGeometry)["tex1"].get<std::string>();
+        }
+        if (springGeometry->contains("tex2") && (*springGeometry)["tex2"].is_string()) {
+            tex2 = (*springGeometry)["tex2"].get<std::string>();
+        }
+
+        if (!tex1.empty()) {
+            const std::string s1 = stemOf(tex1);
+            const std::string s2 = tex2.empty() ? std::string{} : stemOf(tex2);
+
+            // Replace images[] with the four channel-split entries.
+            // Order matters: indices below reference these slots.
+            json images = json::array();
+            images.push_back({
+                {"uri",      s1 + "_diffuse.ktx2"},
+                {"mimeType", "image/ktx2"},
+            });
+            const int diffuseImg = 0;
+            int emissiveImg = -1, ormImg = -1;
+            if (!s2.empty()) {
+                images.push_back({
+                    {"uri",      s2 + "_emissive.ktx2"},
+                    {"mimeType", "image/ktx2"},
+                });
+                emissiveImg = static_cast<int>(images.size()) - 1;
+                images.push_back({
+                    {"uri",      s2 + "_orm.ktx2"},
+                    {"mimeType", "image/ktx2"},
+                });
+                ormImg = static_cast<int>(images.size()) - 1;
+            }
+            images.push_back({
+                {"uri",      s1 + "_team.ktx2"},
+                {"mimeType", "image/ktx2"},
+            });
+            const int teamImg = static_cast<int>(images.size()) - 1;
+            doc["images"] = std::move(images);
+
+            // Reuse the existing sampler when present (Assimp emits one
+            // default sampler when textures are bound); fall back to
+            // sampler index 0 (the spec allows omitting the sampler ref
+            // entirely, but most viewers prefer an explicit index).
+            int samplerIdx = 0;
+            const bool hasSamplers = doc.contains("samplers")
+                                  && doc["samplers"].is_array()
+                                  && !doc["samplers"].empty();
+            if (!hasSamplers) {
+                doc["samplers"] = json::array({ json::object() });  // single default sampler
+            }
+
+            auto makeTexture = [&](int imgIdx) {
+                json tx = json::object();
+                if (hasSamplers || true) tx["sampler"] = samplerIdx;
+                tx["extensions"]["KHR_texture_basisu"]["source"] = imgIdx;
+                return tx;
+            };
+
+            json textures = json::array();
+            textures.push_back(makeTexture(diffuseImg));
+            const int diffuseTex = 0;
+            int emissiveTex = -1, ormTex = -1;
+            if (emissiveImg >= 0) {
+                textures.push_back(makeTexture(emissiveImg));
+                emissiveTex = static_cast<int>(textures.size()) - 1;
+            }
+            if (ormImg >= 0) {
+                textures.push_back(makeTexture(ormImg));
+                ormTex = static_cast<int>(textures.size()) - 1;
+            }
+            textures.push_back(makeTexture(teamImg));
+            const int teamTex = static_cast<int>(textures.size()) - 1;
+            doc["textures"] = std::move(textures);
+
+            // Rebuild materials[0]. S3O sources only ever emit one
+            // material (S3OImporter.cpp creates a single aiMaterial),
+            // so replacing index 0 is safe. If the document somehow
+            // has zero materials, create one.
+            if (!doc.contains("materials") || !doc["materials"].is_array()
+                || doc["materials"].empty()) {
+                doc["materials"] = json::array({ json::object() });
+            }
+            json& mat = doc["materials"][0];
+            // Preserve the material name if Assimp set one (the S3O
+            // importer stamps `s3o_<filename>`).
+            json preservedName;
+            if (mat.is_object() && mat.contains("name")) {
+                preservedName = mat["name"];
+            }
+            mat = json::object();
+            if (!preservedName.is_null()) mat["name"] = preservedName;
+
+            json pbr = json::object();
+            pbr["baseColorTexture"]  = { {"index", diffuseTex} };
+            pbr["metallicFactor"]    = 1.0;
+            pbr["roughnessFactor"]   = 1.0;
+            if (ormTex >= 0) {
+                pbr["metallicRoughnessTexture"] = { {"index", ormTex} };
+            }
+            mat["pbrMetallicRoughness"] = std::move(pbr);
+
+            if (emissiveTex >= 0) {
+                mat["emissiveTexture"] = { {"index", emissiveTex} };
+                mat["emissiveFactor"]  = json::array({ 1.0, 1.0, 1.0 });
+            }
+            if (ormTex >= 0) {
+                mat["occlusionTexture"] = { {"index", ormTex} };
+            }
+            mat["alphaMode"]   = "MASK";
+            mat["alphaCutoff"] = 0.5;
+
+            mat["extensions"]["SPRINGRTS_team_color"]["maskTexture"] =
+                json::object({ {"index", teamTex} });
+
+            // Every material we just synthesised references KTX2 images
+            // via KHR_texture_basisu — make sure it lands in both the
+            // used and required lists. SPRINGRTS_team_color goes to
+            // `used` only since viewers without it still render the
+            // base color (just without team tinting).
+            ensureExtListContains("extensionsRequired", "KHR_texture_basisu");
+            ensureExtListContains("extensionsUsed",     "KHR_texture_basisu");
+            ensureExtListContains("extensionsUsed",     "SPRINGRTS_team_color");
+
+            didChannelSplit = true;
+        }
+    }
+
+    // ---- Step 3c: strip `alphaMode` from every material UNLESS we
+    // just synthesised the PBR-split layout (which explicitly wants
+    // MASK + 0.5 cutoff on the binarised diffuse alpha). Assimp emits
+    // MASK whenever the source diffuse texture has an alpha channel,
+    // but in pre-PBR-mapping Spring S3O the alpha channel encoded
+    // team-color blend amount — NOT transparency. With MASK plus the
+    // default 0.5 cutoff, any spec-compliant viewer discards ~93% of
+    // fragments. The team-color shader reads alpha explicitly, so
+    // stripping the field (defaulting to OPAQUE) loses no information
+    // on legacy/non-split documents.
+    if (!didChannelSplit && doc.contains("materials") && doc["materials"].is_array()) {
         for (auto& mat : doc["materials"]) {
             if (mat.is_object()) {
                 mat.erase("alphaMode");

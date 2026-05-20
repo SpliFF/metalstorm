@@ -14,6 +14,10 @@
 //                    [--raw-dxt1 WxH]   # input is a raw DXT1 block stream
 //                    [--smf-minimap WxH] # input is an SMF; extract its DXT1
 //                                         minimap (1024x1024 unless overridden)
+//                    [--channel-op diffuse|team|emissive|orm]
+//                                         # remap channels from a Spring S3O
+//                                         # source texture before encoding;
+//                                         # see PLAN-pbr-mapping.md
 //
 // Outputs always end in `.ktx2`. The tool no longer produces PNGs,
 // no DDS-as-is copy, no minimap thumbnails — those responsibilities
@@ -78,10 +82,56 @@ static bool ParseDims(const std::string& s, int& w, int& h) {
 // RGBA-fallback branch can route through EncodeRgba8AsKtx2.
 enum class Encoding { Uastc, Etc1s };
 
+// Channel-remapping operations applied to an RGBA8 buffer between the
+// decode and encode stages. Used to split a Spring S3O source texture
+// into the four spec-compliant glTF PBR slots (see PLAN-pbr-mapping.md):
+//
+//   None      — pass-through; encode the source RGBA verbatim.
+//   Diffuse   — RGB pass-through, A binarised at 0.5 threshold so the
+//               glTF MASK alphaMode renders correctly. Source: S3O tex1.
+//   Team      — R = source.A (raw team-color blend amount). G,B,A = 0.
+//               Source: S3O tex1; consumed via SPRINGRTS_team_color.
+//   Emissive  — RGB = source.R replicated (grayscale glow). A = 255.
+//               Source: S3O tex2 (R = self-illumination).
+//   ORM       — R = 255 (no AO baked in), G = 255 - source.G (specular
+//               inverted to roughness), B = source.B (reflectivity →
+//               metallic), A = 255. Source: S3O tex2.
+enum class ChannelOp { None, Diffuse, Team, Emissive, Orm };
+
 // Forward decl — DDS RGBA fallback re-uses the encoder path.
 static bool EncodeRgba8AsKtx2(const uint8_t* rgba, int w, int h,
                               const std::string& dstPath,
                               Encoding enc, bool genMips, bool zstd);
+
+/// Apply one of the S3O channel-split operations to an RGBA8 buffer in
+/// place. Pixel count = w*h. No-op for ChannelOp::None.
+static void ApplyChannelOp(uint8_t* rgba, int w, int h, ChannelOp op) {
+    if (op == ChannelOp::None) return;
+    const size_t n = static_cast<size_t>(w) * static_cast<size_t>(h);
+    for (size_t i = 0; i < n; ++i) {
+        uint8_t* p = rgba + i * 4;
+        const uint8_t r = p[0], g = p[1], b = p[2], a = p[3];
+        switch (op) {
+            case ChannelOp::Diffuse:
+                p[0] = r; p[1] = g; p[2] = b;
+                p[3] = (a < 128) ? 0 : 255;        // binarised cutout
+                break;
+            case ChannelOp::Team:
+                p[0] = a; p[1] = 0; p[2] = 0; p[3] = 0;
+                break;
+            case ChannelOp::Emissive:
+                p[0] = r; p[1] = r; p[2] = r; p[3] = 255;
+                break;
+            case ChannelOp::Orm:
+                p[0] = 255;                         // AO = full bright
+                p[1] = static_cast<uint8_t>(255 - g);  // roughness
+                p[2] = b;                           // metallic
+                p[3] = 255;
+                break;
+            case ChannelOp::None: break;
+        }
+    }
+}
 
 /// Emit a PNG sidecar of an RGBA8 buffer alongside the canonical
 /// KTX2 output. Used as the universal fallback image for glTF readers
@@ -282,7 +332,8 @@ static bool DecodeDxtToRgba(const uint8_t* src, size_t srcLen,
 static bool WrapDdsAsKtx2(const std::string& srcPath,
                           const std::string& dstPath,
                           bool zstd,
-                          const std::string& pngFallbackPath = {}) {
+                          const std::string& pngFallbackPath = {},
+                          ChannelOp channelOp = ChannelOp::None) {
     std::vector<uint8_t> dds = ReadAllBytes(srcPath);
     if (dds.size() < sizeof(DdsHeader)) {
         SLOG(SPRING_LOG_ERROR, "DDS too small: %s", srcPath.c_str());
@@ -357,8 +408,13 @@ static bool WrapDdsAsKtx2(const std::string& srcPath,
 
     SLOG(SPRING_LOG_INFO, "DDS decode: %s (%ux%u) -> UASTC %s",
         srcPath.c_str(), h.width, h.height, dstPath.c_str());
+    // PNG fallback is written from the decoded source before any channel
+    // remap — the fallback exists for tools that can't read KTX2 and
+    // should reflect the source image, not the engine-internal channel
+    // packing. The channel op only applies to the KTX2 output.
     WritePngFallback(rgba.data(), (int)h.width, (int)h.height,
                      pngFallbackPath);
+    ApplyChannelOp(rgba.data(), (int)h.width, (int)h.height, channelOp);
     return EncodeRgba8AsKtx2(rgba.data(), (int)h.width, (int)h.height,
                              dstPath, Encoding::Uastc, /*genMips*/ true, zstd);
 }
@@ -598,10 +654,11 @@ static bool IsDdsMagic(const std::string& path) {
 static int ConvertGeneric(const std::string& inputPath,
                           const std::string& outputPath,
                           Encoding enc, bool genMips, bool zstd,
-                          const std::string& pngFallbackPath) {
+                          const std::string& pngFallbackPath,
+                          ChannelOp channelOp) {
     if (IsDdsMagic(inputPath)) {
         return WrapDdsAsKtx2(inputPath, outputPath, zstd,
-                             pngFallbackPath) ? 0 : 1;
+                             pngFallbackPath, channelOp) ? 0 : 1;
     }
     int w, h, channels;
     uint8_t* pixels = stbi_load(inputPath.c_str(), &w, &h, &channels, 4);
@@ -610,7 +667,10 @@ static int ConvertGeneric(const std::string& inputPath,
             inputPath.c_str(), stbi_failure_reason());
         return 1;
     }
+    // Fallback PNG mirrors the source image (pre-remap); see
+    // WrapDdsAsKtx2 for the matching comment.
     WritePngFallback(pixels, w, h, pngFallbackPath);
+    ApplyChannelOp(pixels, w, h, channelOp);
     const bool ok = EncodeRgba8AsKtx2(pixels, w, h, outputPath,
                                        enc, genMips, zstd);
     stbi_image_free(pixels);
@@ -642,6 +702,17 @@ static void PrintUsage(const char* argv0) {
         "  --no-zstd                Disable Zstd supercompression\n"
         "  --png-fallback <path>    Also write a downscaled PNG sidecar at <path>\n"
         "                           (for glTF readers without KHR_texture_basisu)\n"
+        "  --channel-op <op>        Remap channels from a Spring S3O source\n"
+        "                           texture before encoding. Modes:\n"
+        "                             diffuse  — RGB pass-through, alpha\n"
+        "                                        binarised at 128 (cutout)\n"
+        "                             team     — A → R; G,B,A = 0 (team mask)\n"
+        "                             emissive — R replicated to RGB; A=255\n"
+        "                             orm      — R=255 (no AO), G=255-G\n"
+        "                                        (specular → roughness),\n"
+        "                                        B=B (reflectivity → metallic)\n"
+        "                           See PLAN-pbr-mapping.md for the channel\n"
+        "                           contract.\n"
         "  --log-level <level>      debug/info/notice/warning/error\n",
         argv0, argv0, argv0);
 }
@@ -662,6 +733,7 @@ int main(int argc, char* argv[]) {
     bool smfMinimap = false;
     int rawW = 0, rawH = 0;
     std::string pngFallbackPath;
+    ChannelOp channelOp = ChannelOp::None;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -687,6 +759,19 @@ int main(int argc, char* argv[]) {
             }
         } else if (a == "--smf-minimap") {
             smfMinimap = true;
+        } else if (a == "--channel-op" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            if      (v == "diffuse")  channelOp = ChannelOp::Diffuse;
+            else if (v == "team")     channelOp = ChannelOp::Team;
+            else if (v == "emissive") channelOp = ChannelOp::Emissive;
+            else if (v == "orm")      channelOp = ChannelOp::Orm;
+            else if (v == "none")     channelOp = ChannelOp::None;
+            else {
+                SLOG(SPRING_LOG_ERROR, "bad --channel-op: %s "
+                    "(expected diffuse|team|emissive|orm|none)", v.c_str());
+                springlog_shutdown();
+                return 2;
+            }
         } else if (a == "--log-level" && i + 1 < argc) {
             const std::string lvl = argv[++i];
             if (lvl == "debug")        springlog_set_min_level(SPRING_LOG_DEBUG);
@@ -727,7 +812,7 @@ int main(int argc, char* argv[]) {
         rc = WrapRawDxt1AsKtx2(bytes, rawW, rawH, outputPath, zstd) ? 0 : 1;
     } else {
         rc = ConvertGeneric(inputPath, outputPath, enc, genMips, zstd,
-                            pngFallbackPath);
+                            pngFallbackPath, channelOp);
     }
 
     springlog_shutdown();
