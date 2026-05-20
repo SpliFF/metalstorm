@@ -81,6 +81,7 @@ add_executable(modelimporter
     main.cpp
     S3OImporter.cpp
     JsonWriter.cpp
+    GeometryExtractor.cpp
 )
 target_include_directories(modelimporter PRIVATE
     ${assimp_SOURCE_DIR}/include

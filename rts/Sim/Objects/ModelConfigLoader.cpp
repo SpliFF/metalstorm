@@ -9,9 +9,14 @@
 
 #define LOG_SECTION "model-config"
 
+#include <nlohmann/json.hpp>
+
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace {
 
@@ -30,6 +35,113 @@ float3 ReadFloat3Field(const LuaTable& parent, const char* key, const float3& fa
         t.Get(3, fallback.z));
 }
 
+/// Read `[x, y, z]` out of `node[key]`. Falls back cleanly when the
+/// key is absent or the value isn't a 3-element numeric array.
+float3 ReadFloat3FromJson(const nlohmann::json& node, const char* key, const float3& fallback) {
+    if (!node.contains(key)) return fallback;
+    const auto& arr = node[key];
+    if (!arr.is_array() || arr.size() < 3) return fallback;
+    auto pick = [](const nlohmann::json& v, float fb) -> float {
+        if (v.is_number()) return v.get<float>();
+        return fb;
+    };
+    return float3(
+        pick(arr[0], fallback.x),
+        pick(arr[1], fallback.y),
+        pick(arr[2], fallback.z));
+}
+
+/// Load an S3DModel from the SPRINGRTS_geometry document-level
+/// extension embedded in `<basePath>.gltf`. Returns true on success;
+/// false if the .gltf is absent, doesn't parse, or lacks the extension
+/// (caller falls back to the legacy .config.lua / .config.json path).
+bool LoadFromGltfExtension(S3DModel& out, const std::string& basePath) {
+    const std::string gltfPath = basePath + ".gltf";
+    std::ifstream in(gltfPath, std::ios::binary);
+    if (!in) return false;
+
+    nlohmann::json doc;
+    try {
+        in >> doc;
+    } catch (const nlohmann::json::parse_error& e) {
+        SLOG(SPRING_LOG_ERROR,
+            "%s: failed to parse glTF JSON: %s",
+            gltfPath.c_str(), e.what());
+        return false;
+    }
+
+    if (!doc.contains("extensions")) return false;
+    const auto& exts = doc["extensions"];
+    if (!exts.is_object() || !exts.contains("SPRINGRTS_geometry")) return false;
+    const auto& geom = exts["SPRINGRTS_geometry"];
+    if (!geom.is_object()) return false;
+
+    // Schema-version check. The engine accepts exactly the version it
+    // understands; newer files log a notice (forward-compatible by
+    // default) and older files are refused — they need re-conversion
+    // because the field shape may have changed.
+    constexpr int kSupportedSchemaVersion = 7;
+    int schemaVersion = 0;
+    if (geom.contains("configVersion") && geom["configVersion"].is_number_integer()) {
+        schemaVersion = geom["configVersion"].get<int>();
+    }
+    if (schemaVersion < kSupportedSchemaVersion) {
+        SLOG(SPRING_LOG_WARNING,
+            "%s: SPRINGRTS_geometry configVersion=%d is older than this "
+            "engine supports (%d). Re-run gameconverter to regenerate.",
+            gltfPath.c_str(), schemaVersion, kSupportedSchemaVersion);
+        return false;
+    }
+    if (schemaVersion > kSupportedSchemaVersion) {
+        SLOG(SPRING_LOG_NOTICE,
+            "%s: SPRINGRTS_geometry configVersion=%d is newer than this "
+            "engine understands (%d). Some fields may be ignored.",
+            gltfPath.c_str(), schemaVersion, kSupportedSchemaVersion);
+    }
+
+    out.radius    = geom.value("radius", 1.0f);
+    out.height    = geom.value("height", 1.0f);
+    out.relMidPos = ReadFloat3FromJson(geom, "midpos", float3(0, 0, 0));
+    out.mins      = ReadFloat3FromJson(geom, "mins",   float3(-1, -1, -1));
+    out.maxs      = ReadFloat3FromJson(geom, "maxs",   float3( 1,  1,  1));
+
+    out.pieces.clear();
+    if (geom.contains("pieces") && geom["pieces"].is_array()) {
+        const auto& piecesArr = geom["pieces"];
+        out.pieces.reserve(piecesArr.size());
+
+        std::vector<int> parentIndices;
+        parentIndices.reserve(piecesArr.size());
+
+        for (const auto& p : piecesArr) {
+            if (!p.is_object()) continue;
+            S3DModelPiece piece;
+            piece.name   = p.value("name", std::string{});
+            piece.offset = ReadFloat3FromJson(p, "offset", float3(0, 0, 0));
+            piece.mins   = ReadFloat3FromJson(p, "mins",   float3(0, 0, 0));
+            piece.maxs   = ReadFloat3FromJson(p, "maxs",   float3(0, 0, 0));
+            parentIndices.push_back(p.value("parent", -1));
+            out.pieces.push_back(std::move(piece));
+        }
+        // Second pass: link parent / children pointers. Indices are
+        // 0-based into the flat list; -1 marks the root.
+        for (size_t i = 0; i < out.pieces.size(); ++i) {
+            const int parentIdx = parentIndices[i];
+            if (parentIdx >= 0 && static_cast<size_t>(parentIdx) < out.pieces.size()) {
+                out.pieces[i].parent = &out.pieces[parentIdx];
+                out.pieces[parentIdx].children.push_back(&out.pieces[i]);
+            }
+        }
+        out.numPieces = static_cast<int>(out.pieces.size());
+    }
+
+    out.metaPath = basePath;
+    SLOG(SPRING_LOG_INFO,
+        "loaded %s.gltf (SPRINGRTS_geometry v%d): radius=%.2f height=%.2f pieces=%d",
+        basePath.c_str(), schemaVersion, out.radius, out.height, out.numPieces);
+    return true;
+}
+
 } // namespace
 
 S3DModel* ModelConfigLoader::Load(const std::string& basePath) {
@@ -44,6 +156,21 @@ S3DModel* ModelConfigLoader::Load(const std::string& basePath) {
 bool ModelConfigLoader::LoadInto(S3DModel& out, const std::string& basePath) {
     if (basePath.empty())
         return false;
+
+    // SPRINGRTS_geometry extension is the canonical source under
+    // PLAN-pbr-mapping.md. Try it first unless a hand-authored
+    // .config.lua exists (the Lua file always wins — author intent
+    // overrides machine-extracted data).
+    namespace fs = std::filesystem;
+    const std::string luaConfigPath = basePath + LuaConfig::kLuaSuffix;
+    if (!fs::exists(luaConfigPath)) {
+        if (LoadFromGltfExtension(out, basePath)) {
+            return true;
+        }
+        // No .gltf or no extension: fall through to the legacy
+        // .config.json path below. Once .config.json is retired in
+        // milestone B this becomes a hard failure.
+    }
 
     // LuaConfig::Load tries <basePath>.config.lua first, then
     // <basePath>.config.json. Both end up in the same LuaParser-backed

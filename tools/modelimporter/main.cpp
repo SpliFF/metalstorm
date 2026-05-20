@@ -15,6 +15,7 @@
 
 #include "S3OImporter.h"
 #include "JsonWriter.h"
+#include "GeometryExtractor.h"
 #include "SpringLog.h"
 #include "SpringLogNet.h"
 
@@ -215,7 +216,16 @@ void WriteU32LE(std::vector<uint8_t>& out, size_t off, uint32_t v) {
 /// structurally trivial DOM edits and the library's serialiser
 /// guarantees we never emit a stray trailing comma the way the
 /// previous hand-rolled surgery occasionally did.
-bool FixGlbBasisuTextures(const std::string& path) {
+///
+/// `springGeometry` is the SPRINGRTS_geometry payload to inject as a
+/// document-level extension (radius, height, midpos, mins, maxs,
+/// pieces[], attachments[]). When non-null it lands at
+/// `doc.extensions.SPRINGRTS_geometry` and the extension name is
+/// appended to `extensionsUsed`. `extensionsRequired` is NOT touched
+/// — third-party renderers don't need the extension to display the
+/// mesh; only the engine relies on it.
+bool FixGlbBasisuTextures(const std::string& path,
+                          const nlohmann::json* springGeometry) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return false;
     std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)),
@@ -332,6 +342,17 @@ bool FixGlbBasisuTextures(const std::string& path) {
     };
     ensureExtListContains("extensionsRequired", "KHR_texture_basisu");
     ensureExtListContains("extensionsUsed",     "KHR_texture_basisu");
+
+    // ---- Step 3a: inject the SPRINGRTS_geometry document-level
+    // extension. Carries the simulation metadata (radius, midpos, piece
+    // tree, attachment points) the engine needs at runtime. Third-party
+    // renderers ignore it — extensionsRequired is intentionally NOT
+    // touched. Idempotent on re-runs: overwrites any existing payload
+    // so the data stays in lock-step with the freshly-extracted scene.
+    if (springGeometry != nullptr && !springGeometry->is_null()) {
+        doc["extensions"]["SPRINGRTS_geometry"] = *springGeometry;
+        ensureExtListContains("extensionsUsed", "SPRINGRTS_geometry");
+    }
 
     // ---- Step 3b: strip `alphaMode` from every material. Assimp
     // emits "MASK" whenever the source diffuse texture has an alpha
@@ -682,10 +703,17 @@ int main(int argc, char** argv) {
     // which silently falls back to a procedural cone for every projectile.
     // Walk the freshly-written file's JSON and rewrite the texture
     // entries in place. Idempotent — running it again is a no-op.
+    //
+    // The same post-fix pass also injects the SPRINGRTS_geometry
+    // document-level extension built from the imported scene, so the
+    // .gltf becomes a complete record of mesh + materials + simulation
+    // metadata in a single file.
+    const nlohmann::json springGeometryJson =
+        GeometryExtractor::BuildExtensionJson(scene);
     if (textureExt == "ktx2"
         && (EndsWith(outPath, ".glb") || EndsWith(outPath, ".gltf")))
     {
-        if (!FixGlbBasisuTextures(outPath)) {
+        if (!FixGlbBasisuTextures(outPath, &springGeometryJson)) {
             SLOG(SPRING_LOG_WARNING,
                  "post-fix of KHR_texture_basisu textures in %s failed; "
                  "client may render projectile as procedural cone",
