@@ -61,6 +61,10 @@ interface ModelConfig {
     /** Team-color mask URI — `<tex1stem>_team.ktx2`, R = blend amount.
      *  Referenced via the `SPRINGRTS_team_color` material extension. */
     teamMaskUri?: string;
+    /** Optional normal-map URI — Spring `normaltex` author-config field
+     *  routed through to glTF `material.normalTexture`. RGB = tangent-
+     *  space normal in standard PBR convention. */
+    normalUri?: string;
     /** Inversion flag for the team mask: `false` (default) means high R
      *  → more team color, `true` flips the interpretation. */
     invertteamcolor?: boolean;
@@ -99,6 +103,10 @@ interface UnitTextures {
     emissive: Texture | null;
     orm: Texture | null;
     teamMask: Texture | null;
+    /** Tangent-space normal map (RGB → [-1,1]). When present the shader
+     *  perturbs the geometric normal per fragment via a derivative-based
+     *  TBN — no mesh tangents required. */
+    normal: Texture | null;
     invertTeamColor: boolean;
 }
 
@@ -146,6 +154,7 @@ async function fetchModelConfig(modelUrl: string): Promise<ModelConfig | null> {
     const emissiveUri = resolveTextureUri(mat?.emissiveTexture?.index);
     const ormUri      = resolveTextureUri(mat?.pbrMetallicRoughness?.metallicRoughnessTexture?.index);
     const teamMaskUri = resolveTextureUri(mat?.extensions?.SPRINGRTS_team_color?.maskTexture?.index);
+    const normalUri   = resolveTextureUri(mat?.normalTexture?.index);
     let invertteamcolor: boolean | undefined =
         mat?.extensions?.SPRINGRTS_team_color?.invertMask;
 
@@ -179,7 +188,7 @@ async function fetchModelConfig(modelUrl: string): Promise<ModelConfig | null> {
     }
 
     return {
-        diffuseUri, emissiveUri, ormUri, teamMaskUri, invertteamcolor,
+        diffuseUri, emissiveUri, ormUri, teamMaskUri, normalUri, invertteamcolor,
         pieceNames, pieceParents, minY, maxY, midY,
     };
 }
@@ -233,6 +242,7 @@ const TEAMCOLOR_VERTEX = `
 
     varying vec2 vUV;
     varying vec3 vNormal;
+    varying vec3 vWorldPos;
     varying float vBuildProgress;
     varying float vAboveGround;
 
@@ -245,6 +255,7 @@ const TEAMCOLOR_VERTEX = `
         vec4 wp = finalWorld * vec4(position, 1.0);
         vAboveGround = wp.y - groundY;
         vNormal = normalize(mat3(finalWorld) * normal);
+        vWorldPos = wp.xyz;
         vUV = uv;
         // wp.w is corrupted by our packed values — rebuild as homogeneous 1.
         gl_Position = viewProjection * vec4(wp.xyz, 1.0);
@@ -257,6 +268,7 @@ const TEAMCOLOR_FRAGMENT = `
     uniform sampler2D emissiveTex;
     uniform sampler2D ormTex;
     uniform sampler2D teamMaskTex;
+    uniform sampler2D normalTex;
     uniform vec3 teamColor;
     uniform float invertMask;
     uniform vec3 lightDir;
@@ -268,19 +280,43 @@ const TEAMCOLOR_FRAGMENT = `
     uniform float hasEmissive;
     uniform float hasOrm;
     uniform float hasTeamMask;
+    uniform float hasNormal;
 
     varying vec2 vUV;
     varying vec3 vNormal;
+    varying vec3 vWorldPos;
     varying float vBuildProgress;
     varying float vAboveGround;
 
+    // Tangent-space → world-space normal perturbation without per-vertex
+    // tangents. Uses screen-space derivatives of world position + UV to
+    // reconstruct a TBN frame at the fragment (Schüler / Mikkelsen). Robust
+    // for soft normal maps on low-poly RTS units; quality degrades at
+    // sharp UV seams which we don't have visible in the camera's typical
+    // distance. Cheaper than per-vertex tangents because the .gltf .bin
+    // payload stays smaller (no tangent attribute) — at the cost of two
+    // dFdx/dFdy pairs per fragment, which RTS overdraw budgets absorb fine.
+    vec3 perturbNormal(vec3 N, vec3 P, vec2 uv) {
+        vec3  dp1  = dFdx(P);
+        vec3  dp2  = dFdy(P);
+        vec2  duv1 = dFdx(uv);
+        vec2  duv2 = dFdy(uv);
+        vec3  dp2perp = cross(dp2, N);
+        vec3  dp1perp = cross(N, dp1);
+        vec3  T       = dp2perp * duv1.x + dp1perp * duv2.x;
+        vec3  B       = dp2perp * duv1.y + dp1perp * duv2.y;
+        float invmax  = inversesqrt(max(dot(T, T), dot(B, B)));
+        mat3  tbn     = mat3(T * invmax, B * invmax, N);
+        vec3  nmap    = texture2D(normalTex, uv).xyz * 2.0 - 1.0;
+        return normalize(tbn * nmap);
+    }
+
     void main() {
         vec4 base = texture2D(diffuseTex, vUV);
-        // glTF MASK alphaMode (PLAN-pbr-mapping.md): the channel-split
-        // pipeline binarises diffuse.A at the 0.5 threshold so an
-        // alpha < 0.5 fragment is genuinely cut out (tank-wheel windows,
-        // fan blades). Without the discard the cutout silhouette
-        // collapses to a solid rectangle in third-party viewers.
+        // glTF MASK alphaMode: diffuse.A carries Spring's canonical
+        // cutout (from tex2.A, overlayed by the textureconverter
+        // Diffuse op). Assets with no tex2 ship A=255 so the discard
+        // never fires — same end state as OPAQUE for legacy content.
         if (base.a < 0.5) discard;
 
         // Team-color mask now lives in a dedicated R8 KTX2 (teamMaskTex.r)
@@ -290,6 +326,13 @@ const TEAMCOLOR_FRAGMENT = `
         float mask = hasTeamMask > 0.5 ? texture2D(teamMaskTex, vUV).r : 0.0;
         if (invertMask > 0.5) mask = 1.0 - mask;
         vec3 color = mix(base.rgb, teamColor * base.rgb, mask);
+
+        // Normal-map perturbation. Falls back to the geometric (vertex-
+        // interpolated) normal for unit defs without a normal map.
+        vec3 N = normalize(vNormal);
+        if (hasNormal > 0.5) {
+            N = perturbNormal(N, vWorldPos, vUV);
+        }
 
         // Half-Lambert + hemispheric ambient. Plain N·L Lambert (with a
         // flat ambient floor) leaves the side faces of tall, thin units
@@ -301,8 +344,8 @@ const TEAMCOLOR_FRAGMENT = `
         // floor for upward-facing surfaces without crushing downward
         // ones. The combined output ranges roughly 0.55–1.05 so well-
         // lit faces stay visibly brighter than poorly-lit ones.
-        float halfLambert = dot(vNormal, lightDir) * 0.5 + 0.5;
-        float skyTint     = vNormal.y * 0.5 + 0.5;
+        float halfLambert = dot(N, lightDir) * 0.5 + 0.5;
+        float skyTint     = N.y * 0.5 + 0.5;
         vec3  lit         = color * (0.45 + 0.55 * halfLambert + 0.05 * skyTint);
 
         // PBR-ish specular driven by ORM.G (roughness) and ORM.B
@@ -397,8 +440,8 @@ function createTeamColorMaterial(
         attributes: ['position', 'normal', 'uv'],
         uniforms: ['world', 'viewProjection', 'teamColor',
                    'invertMask', 'lightDir', 'modelHeight',
-                   'hasEmissive', 'hasOrm', 'hasTeamMask'],
-        samplers: ['diffuseTex', 'emissiveTex', 'ormTex', 'teamMaskTex'],
+                   'hasEmissive', 'hasOrm', 'hasTeamMask', 'hasNormal'],
+        samplers: ['diffuseTex', 'emissiveTex', 'ormTex', 'teamMaskTex', 'normalTex'],
         defines: ['#define INSTANCES', '#define THIN_INSTANCES'],
     });
 
@@ -406,10 +449,11 @@ function createTeamColorMaterial(
     // Bind every sampler slot even when the actual texture is absent
     // — WebGL doesn't allow unbound samplers in a draw call. Reuse the
     // diffuse as a harmless placeholder; the `hasEmissive`/`hasOrm`/
-    // `hasTeamMask` flags gate sampling on the shader side.
+    // `hasTeamMask`/`hasNormal` flags gate sampling on the shader side.
     mat.setTexture('emissiveTex', textures.emissive ?? textures.diffuse);
     mat.setTexture('ormTex',      textures.orm      ?? textures.diffuse);
     mat.setTexture('teamMaskTex', textures.teamMask ?? textures.diffuse);
+    mat.setTexture('normalTex',   textures.normal   ?? textures.diffuse);
     mat.setColor3('teamColor', teamColor);
     mat.setVector3('lightDir', new Vector3(-0.5, 1.0, 0.3).normalize());
     mat.setFloat('modelHeight', modelHeight);
@@ -417,6 +461,7 @@ function createTeamColorMaterial(
     mat.setFloat('hasEmissive', textures.emissive ? 1.0 : 0.0);
     mat.setFloat('hasOrm',      textures.orm      ? 1.0 : 0.0);
     mat.setFloat('hasTeamMask', textures.teamMask ? 1.0 : 0.0);
+    mat.setFloat('hasNormal',   textures.normal   ? 1.0 : 0.0);
 
     // Keep the material fully opaque. The build-progress effect uses
     // discard-based stipple in the fragment shader instead of alpha
@@ -468,6 +513,7 @@ function loadUnitTextures(
         emissive: loadTex(config.emissiveUri),
         orm:      loadTex(config.ormUri),
         teamMask: loadTex(config.teamMaskUri),
+        normal:   loadTex(config.normalUri),
         invertTeamColor: config.invertteamcolor ?? false,
     };
 }
@@ -1193,7 +1239,7 @@ export class EntityRenderer {
                 mesh.material = createTeamColorMaterial(
                     matName,
                     { diffuse: fallbackDiffuse, emissive: null, orm: null,
-                      teamMask: null, invertTeamColor: false },
+                      teamMask: null, normal: null, invertTeamColor: false },
                     teamColor,
                     tmpl?.modelHeight ?? 1,
                     this.scene,

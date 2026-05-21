@@ -103,6 +103,15 @@ static bool EncodeRgba8AsKtx2(const uint8_t* rgba, int w, int h,
                               const std::string& dstPath,
                               Encoding enc, bool genMips, bool zstd);
 
+// Forward decls — used by WrapDdsAsKtx2 for the dual-source `--tex2`
+// alpha overlay path. Definitions live below near the dispatch code so
+// they sit next to IsDdsMagic, which they share decode logic with.
+static bool DecodeImageToRgba8(const std::string& path,
+                               std::vector<uint8_t>& rgba,
+                               int& w, int& h);
+static void OverlayAlphaFrom(uint8_t* dst, int dw, int dh,
+                             const uint8_t* src, int sw, int sh);
+
 /// Apply one of the S3O channel-split operations to an RGBA8 buffer in
 /// place. Pixel count = w*h. No-op for ChannelOp::None.
 static void ApplyChannelOp(uint8_t* rgba, int w, int h, ChannelOp op) {
@@ -113,8 +122,19 @@ static void ApplyChannelOp(uint8_t* rgba, int w, int h, ChannelOp op) {
         const uint8_t r = p[0], g = p[1], b = p[2], a = p[3];
         switch (op) {
             case ChannelOp::Diffuse:
-                p[0] = r; p[1] = g; p[2] = b;
-                p[3] = (a < 128) ? 0 : 255;        // binarised cutout
+                // RGB pass-through; A is forced opaque here because
+                // Spring's tex1.A is the team-color blend amount (a
+                // separate Team channel-op output captures it), NOT a
+                // cutout. The actual cutout — when present — lives in
+                // tex2.A per upstream Spring's ModelFragProg.glsl
+                // (`alpha = teamColor.a * extraColor.a`). If a tex2
+                // source path is passed to ConvertGeneric/WrapDdsAsKtx2
+                // alongside this op, its A channel is overlayed onto
+                // this 255-baseline AFTER ApplyChannelOp returns. Net
+                // effect: assets with no tex2 stay OPAQUE (cutoff never
+                // fires); assets with a tex2 get spec-compliant
+                // baseColorTexture.a for glTF MASK alphaMode.
+                p[0] = r; p[1] = g; p[2] = b; p[3] = 255;
                 break;
             case ChannelOp::Team:
                 p[0] = a; p[1] = 0; p[2] = 0; p[3] = 0;
@@ -333,7 +353,8 @@ static bool WrapDdsAsKtx2(const std::string& srcPath,
                           const std::string& dstPath,
                           bool zstd,
                           const std::string& pngFallbackPath = {},
-                          ChannelOp channelOp = ChannelOp::None) {
+                          ChannelOp channelOp = ChannelOp::None,
+                          const std::string& tex2Path = {}) {
     std::vector<uint8_t> dds = ReadAllBytes(srcPath);
     if (dds.size() < sizeof(DdsHeader)) {
         SLOG(SPRING_LOG_ERROR, "DDS too small: %s", srcPath.c_str());
@@ -415,6 +436,20 @@ static bool WrapDdsAsKtx2(const std::string& srcPath,
     WritePngFallback(rgba.data(), (int)h.width, (int)h.height,
                      pngFallbackPath);
     ApplyChannelOp(rgba.data(), (int)h.width, (int)h.height, channelOp);
+    // Dual-source overlay: for the Diffuse op, pull spec-compliant
+    // glTF MASK alpha from tex2.A (Spring's canonical cutout channel).
+    if (channelOp == ChannelOp::Diffuse && !tex2Path.empty()) {
+        std::vector<uint8_t> tex2Rgba;
+        int tw = 0, th = 0;
+        if (DecodeImageToRgba8(tex2Path, tex2Rgba, tw, th)) {
+            OverlayAlphaFrom(rgba.data(), (int)h.width, (int)h.height,
+                             tex2Rgba.data(), tw, th);
+        } else {
+            SLOG(SPRING_LOG_WARNING,
+                "tex2 alpha overlay skipped — could not decode %s",
+                tex2Path.c_str());
+        }
+    }
     return EncodeRgba8AsKtx2(rgba.data(), (int)h.width, (int)h.height,
                              dstPath, Encoding::Uastc, /*genMips*/ true, zstd);
 }
@@ -651,14 +686,123 @@ static bool IsDdsMagic(const std::string& path) {
     return f.gcount() == 4 && std::memcmp(magic, "DDS ", 4) == 0;
 }
 
+/// Decode any supported source format (DDS DXT1/3/5, DDS uncompressed
+/// 32-bit, or anything stb_image reads — PNG/TGA/JPG/BMP/PSD) to a
+/// tightly-packed RGBA8 buffer. Used by the dual-source `--tex2` path
+/// to pull the cutout alpha from Spring's tex2 alongside the tex1
+/// diffuse decode. Returns false (and logs) on any decode failure.
+static bool DecodeImageToRgba8(const std::string& path,
+                               std::vector<uint8_t>& rgba,
+                               int& w, int& h) {
+    if (IsDdsMagic(path)) {
+        std::vector<uint8_t> dds = ReadAllBytes(path);
+        if (dds.size() < sizeof(DdsHeader)) {
+            SLOG(SPRING_LOG_ERROR, "DDS too small: %s", path.c_str());
+            return false;
+        }
+        DdsHeader hdr;
+        std::memcpy(&hdr, dds.data(), sizeof(hdr));
+        if (hdr.magic != Fourcc("DDS ")) {
+            SLOG(SPRING_LOG_ERROR, "not a DDS file: %s", path.c_str());
+            return false;
+        }
+        const uint8_t* body = dds.data() + sizeof(DdsHeader);
+        const size_t bodyLen = dds.size() - sizeof(DdsHeader);
+        w = (int)hdr.width;
+        h = (int)hdr.height;
+        if (hdr.pixelFormat.fourCC == Fourcc("DXT1")) {
+            return DecodeDxtToRgba(body, bodyLen, hdr.width, hdr.height,
+                                   8, /*dxt1Alpha*/ true, false, rgba);
+        }
+        if (hdr.pixelFormat.fourCC == Fourcc("DXT3")) {
+            return DecodeDxtToRgba(body, bodyLen, hdr.width, hdr.height,
+                                   16, false, false, rgba);
+        }
+        if (hdr.pixelFormat.fourCC == Fourcc("DXT5")) {
+            return DecodeDxtToRgba(body, bodyLen, hdr.width, hdr.height,
+                                   16, false, /*isDxt5*/ true, rgba);
+        }
+        if (hdr.pixelFormat.fourCC == 0 && hdr.pixelFormat.rgbBitCount == 32) {
+            const size_t expect = (size_t)hdr.width * hdr.height * 4;
+            if (bodyLen < expect) {
+                SLOG(SPRING_LOG_ERROR, "DDS short read: %s", path.c_str());
+                return false;
+            }
+            rgba.assign(expect, 0);
+            const uint32_t rMask = hdr.pixelFormat.rMask;
+            const uint32_t gMask = hdr.pixelFormat.gMask;
+            const uint32_t bMask = hdr.pixelFormat.bMask;
+            const uint32_t aMask = hdr.pixelFormat.aMask;
+            auto shiftFor = [](uint32_t mask) {
+                if (mask == 0) return -1;
+                int s = 0;
+                while (((mask >> s) & 1) == 0) s++;
+                return s;
+            };
+            const int rShift = shiftFor(rMask);
+            const int gShift = shiftFor(gMask);
+            const int bShift = shiftFor(bMask);
+            const int aShift = shiftFor(aMask);
+            for (size_t i = 0; i < (size_t)hdr.width * hdr.height; ++i) {
+                uint32_t px;
+                std::memcpy(&px, body + i * 4, 4);
+                rgba[i*4+0] = rShift >= 0 ? (uint8_t)((px & rMask) >> rShift) : 0;
+                rgba[i*4+1] = gShift >= 0 ? (uint8_t)((px & gMask) >> gShift) : 0;
+                rgba[i*4+2] = bShift >= 0 ? (uint8_t)((px & bMask) >> bShift) : 0;
+                rgba[i*4+3] = aShift >= 0 ? (uint8_t)((px & aMask) >> aShift) : 255;
+            }
+            return true;
+        }
+        SLOG(SPRING_LOG_ERROR, "unsupported DDS fourCC 0x%08x in %s",
+            hdr.pixelFormat.fourCC, path.c_str());
+        return false;
+    }
+    int channels = 0;
+    uint8_t* px = stbi_load(path.c_str(), &w, &h, &channels, 4);
+    if (!px) {
+        SLOG(SPRING_LOG_ERROR, "stb_image failed on %s: %s",
+            path.c_str(), stbi_failure_reason());
+        return false;
+    }
+    rgba.assign(px, px + (size_t)w * h * 4);
+    stbi_image_free(px);
+    return true;
+}
+
+/// Overlay the alpha channel of `src` onto `dst`. Used by the dual-
+/// source `--tex2` path so the diffuse output carries spec-compliant
+/// glTF MASK alpha sourced from Spring's tex2.A (the canonical Spring
+/// cutout channel; see PLAN-pbr-mapping.md). Nearest-neighbour
+/// resampling handles dim mismatches — typical content authors tex1
+/// and tex2 at the same resolution; the fallback exists for tolerance
+/// rather than quality.
+static void OverlayAlphaFrom(uint8_t* dst, int dw, int dh,
+                             const uint8_t* src, int sw, int sh) {
+    if (sw == dw && sh == dh) {
+        for (size_t i = 0; i < (size_t)dw * dh; ++i) {
+            dst[i*4 + 3] = src[i*4 + 3];
+        }
+        return;
+    }
+    // Nearest-neighbour resample of src's A onto dst's A.
+    for (int y = 0; y < dh; ++y) {
+        const int sy = (int)((int64_t)y * sh / dh);
+        for (int x = 0; x < dw; ++x) {
+            const int sx = (int)((int64_t)x * sw / dw);
+            dst[(y*dw + x)*4 + 3] = src[(sy*sw + sx)*4 + 3];
+        }
+    }
+}
+
 static int ConvertGeneric(const std::string& inputPath,
                           const std::string& outputPath,
                           Encoding enc, bool genMips, bool zstd,
                           const std::string& pngFallbackPath,
-                          ChannelOp channelOp) {
+                          ChannelOp channelOp,
+                          const std::string& tex2Path) {
     if (IsDdsMagic(inputPath)) {
         return WrapDdsAsKtx2(inputPath, outputPath, zstd,
-                             pngFallbackPath, channelOp) ? 0 : 1;
+                             pngFallbackPath, channelOp, tex2Path) ? 0 : 1;
     }
     int w, h, channels;
     uint8_t* pixels = stbi_load(inputPath.c_str(), &w, &h, &channels, 4);
@@ -671,6 +815,18 @@ static int ConvertGeneric(const std::string& inputPath,
     // WrapDdsAsKtx2 for the matching comment.
     WritePngFallback(pixels, w, h, pngFallbackPath);
     ApplyChannelOp(pixels, w, h, channelOp);
+    // Dual-source overlay: see matching block in WrapDdsAsKtx2.
+    if (channelOp == ChannelOp::Diffuse && !tex2Path.empty()) {
+        std::vector<uint8_t> tex2Rgba;
+        int tw = 0, th = 0;
+        if (DecodeImageToRgba8(tex2Path, tex2Rgba, tw, th)) {
+            OverlayAlphaFrom(pixels, w, h, tex2Rgba.data(), tw, th);
+        } else {
+            SLOG(SPRING_LOG_WARNING,
+                "tex2 alpha overlay skipped — could not decode %s",
+                tex2Path.c_str());
+        }
+    }
     const bool ok = EncodeRgba8AsKtx2(pixels, w, h, outputPath,
                                        enc, genMips, zstd);
     stbi_image_free(pixels);
@@ -704,8 +860,9 @@ static void PrintUsage(const char* argv0) {
         "                           (for glTF readers without KHR_texture_basisu)\n"
         "  --channel-op <op>        Remap channels from a Spring S3O source\n"
         "                           texture before encoding. Modes:\n"
-        "                             diffuse  — RGB pass-through, alpha\n"
-        "                                        binarised at 128 (cutout)\n"
+        "                             diffuse  — RGB pass-through, A=255 by\n"
+        "                                        default (overlay --tex2.A\n"
+        "                                        for glTF MASK cutout)\n"
         "                             team     — A → R; G,B,A = 0 (team mask)\n"
         "                             emissive — R replicated to RGB; A=255\n"
         "                             orm      — R=255 (no AO), G=255-G\n"
@@ -713,6 +870,11 @@ static void PrintUsage(const char* argv0) {
         "                                        B=B (reflectivity → metallic)\n"
         "                           See PLAN-pbr-mapping.md for the channel\n"
         "                           contract.\n"
+        "  --tex2 <path>            Secondary source for `--channel-op diffuse`.\n"
+        "                           Its A channel overlays the output's A so\n"
+        "                           the diffuse texture carries Spring's\n"
+        "                           canonical cutout alpha (tex2.A), exposed\n"
+        "                           to glTF readers via alphaMode: MASK.\n"
         "  --log-level <level>      debug/info/notice/warning/error\n",
         argv0, argv0, argv0);
 }
@@ -734,6 +896,7 @@ int main(int argc, char* argv[]) {
     int rawW = 0, rawH = 0;
     std::string pngFallbackPath;
     ChannelOp channelOp = ChannelOp::None;
+    std::string tex2Path;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -772,6 +935,13 @@ int main(int argc, char* argv[]) {
                 springlog_shutdown();
                 return 2;
             }
+        } else if (a == "--tex2" && i + 1 < argc) {
+            // Secondary source for --channel-op diffuse: tex2.A is
+            // overlayed onto the output's A channel so the diffuse
+            // texture carries spec-compliant glTF MASK cutout alpha
+            // (Spring's canonical cutout channel is tex2.A; tex1.A is
+            // the separate team-color mask). Ignored for other ops.
+            tex2Path = argv[++i];
         } else if (a == "--log-level" && i + 1 < argc) {
             const std::string lvl = argv[++i];
             if (lvl == "debug")        springlog_set_min_level(SPRING_LOG_DEBUG);
@@ -812,7 +982,7 @@ int main(int argc, char* argv[]) {
         rc = WrapRawDxt1AsKtx2(bytes, rawW, rawH, outputPath, zstd) ? 0 : 1;
     } else {
         rc = ConvertGeneric(inputPath, outputPath, enc, genMips, zstd,
-                            pngFallbackPath, channelOp);
+                            pngFallbackPath, channelOp, tex2Path);
     }
 
     springlog_shutdown();

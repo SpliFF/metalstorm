@@ -88,6 +88,7 @@
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -319,7 +320,8 @@ bool ConvertLobbyConfig(const fs::path& gameDir, bool force) {
 bool ConvertTextureToKtx2(const std::string& srcPath,
                           const std::string& dstPath,
                           const fs::path& textureConverter,
-                          const std::string& channelOp = {});
+                          const std::string& channelOp = {},
+                          const std::string& tex2Path = {});
 void WriteDirManifest(const fs::path& dir, bool recursive = false);
 
 // ---------------------------------------------------------------
@@ -1086,7 +1088,8 @@ std::string ResolveTextureByStem(const fs::path& dir, const std::string& stem) {
 bool ConvertTextureToKtx2(const std::string& srcPath,
                           const std::string& dstPath,
                           const fs::path& textureConverter,
-                          const std::string& channelOp) {
+                          const std::string& channelOp,
+                          const std::string& tex2Path) {
     std::vector<std::string> argv = {
         textureConverter.string(),
         "--encoding", "uastc",
@@ -1099,6 +1102,14 @@ bool ConvertTextureToKtx2(const std::string& srcPath,
     } else {
         argv.push_back("--channel-op");
         argv.push_back(channelOp);
+    }
+    // Spring's canonical cutout channel is tex2.A. When the channel op
+    // is `diffuse` and tex2 is known, route it through `--tex2` so the
+    // diffuse output carries spec-compliant glTF MASK alpha. Ignored
+    // by textureconverter for non-diffuse ops.
+    if (!tex2Path.empty() && channelOp == "diffuse") {
+        argv.push_back("--tex2");
+        argv.push_back(tex2Path);
     }
     argv.push_back(srcPath);
     argv.push_back(dstPath);
@@ -1198,7 +1209,8 @@ std::vector<std::string> ExtractGlbImageUris(const fs::path& path) {
 void EnsureSiblingTexture(const fs::path& glbPath,
                           const std::string& filename,
                           const fs::path& unittexturesSrc,
-                          const fs::path& textureConverter) {
+                          const fs::path& textureConverter,
+                          const std::string& tex2Stem = {}) {
     if (filename.empty() || filename.find(':') != std::string::npos) return;
     const fs::path target = (glbPath.parent_path() / filename).lexically_normal();
     if (fs::exists(target)) return;
@@ -1219,9 +1231,17 @@ void EnsureSiblingTexture(const fs::path& glbPath,
             unittexturesSrc.string().c_str());
         return;
     }
+    // For the diffuse channel op, pair tex2 in as the cutout-alpha
+    // source. Resolve here rather than in the caller so missing tex2s
+    // simply skip the overlay (A=255 default) instead of erroring.
+    std::string tex2Path;
+    if (channelOp == "diffuse" && !tex2Stem.empty()) {
+        tex2Path = ResolveTextureByStem(unittexturesSrc, tex2Stem);
+    }
     std::error_code ec;
     fs::create_directories(target.parent_path(), ec);
-    ConvertTextureToKtx2(srcTex, target.string(), textureConverter, channelOp);
+    ConvertTextureToKtx2(srcTex, target.string(), textureConverter,
+                         channelOp, tex2Path);
 }
 
 /// Make sure every texture referenced by a freshly-written glb has a
@@ -1255,8 +1275,33 @@ void EnsureGlbTexturesAvailable(const fs::path& glbPath,
     std::error_code ec;
     fs::create_directories(unittexturesOut, ec);
 
+    // Read SPRINGRTS_geometry.tex2 (when present) so the `_diffuse`
+    // channel-split conversion can overlay tex2.A as glTF MASK cutout
+    // alpha. Empty stem (model has no tex2, or input was already
+    // Blender-authored glTF with no Spring metadata) skips the
+    // overlay — A stays at 255 and alphaMode MASK behaves like OPAQUE.
+    std::string tex2Stem;
+    {
+        std::ifstream f(glbPath, std::ios::binary);
+        if (f) {
+            try {
+                const nlohmann::json doc = nlohmann::json::parse(f);
+                const auto& geom = doc.value("extensions", nlohmann::json::object())
+                                      .value("SPRINGRTS_geometry", nlohmann::json::object());
+                if (geom.contains("tex2") && geom["tex2"].is_string()) {
+                    tex2Stem = fs::path(geom["tex2"].get<std::string>()).stem().string();
+                }
+            } catch (const nlohmann::json::parse_error&) {
+                // .glb container or malformed .gltf — ExtractGlbImageUris
+                // already handles those for the URI scan; here we just
+                // skip the optional tex2 lookup.
+            }
+        }
+    }
+
     for (const std::string& uri : ExtractGlbImageUris(glbPath)) {
-        EnsureSiblingTexture(glbPath, uri, unittexturesSrc, textureConverter);
+        EnsureSiblingTexture(glbPath, uri, unittexturesSrc,
+                             textureConverter, tex2Stem);
     }
 }
 
@@ -1514,6 +1559,38 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
         EnsureGlbTexturesAvailable(outPath, entry.path(),
                                    unittexturesSrc, modelsOut,
                                    textureConverter);
+    }
+
+    // Sweep orphaned KTX2 files from earlier pipeline generations:
+    // the single-output `<stem>.ktx2` files written before PLAN-pbr-
+    // mapping split each source texture into four channel-split
+    // siblings (`_diffuse`, `_team`, `_emissive`, `_orm`). The sweep
+    // is purely content-driven — it collects every `images[].uri`
+    // from every `.gltf` in models/ and removes any `.ktx2` not in
+    // that set. Failed models don't reference any textures so they
+    // don't constrain the sweep (their on-disk siblings would already
+    // be orphans of a previous run).
+    {
+        std::unordered_set<std::string> referenced;  // lowercased for case-insensitive match
+        for (const auto& e : fs::directory_iterator(modelsOut, ec)) {
+            if (!e.is_regular_file(ec) || e.path().extension() != ".gltf") continue;
+            for (const std::string& uri : ExtractGlbImageUris(e.path())) {
+                referenced.insert(ToLower(uri));
+            }
+        }
+        int swept = 0;
+        for (const auto& e : fs::directory_iterator(modelsOut, ec)) {
+            if (!e.is_regular_file(ec) || e.path().extension() != ".ktx2") continue;
+            const std::string fname = e.path().filename().string();
+            if (referenced.find(ToLower(fname)) == referenced.end()) {
+                fs::remove(e.path(), ec);
+                ++swept;
+            }
+        }
+        if (swept > 0) {
+            SLOG(SPRING_LOG_NOTICE, "%s: swept %d orphaned .ktx2 (legacy single-output)",
+                gameDir.string().c_str(), swept);
+        }
     }
 
     // Refresh the directory manifest after every run — even on a

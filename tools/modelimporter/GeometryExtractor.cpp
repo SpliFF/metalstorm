@@ -9,9 +9,11 @@
 #include <assimp/material.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -251,25 +253,49 @@ void ProbeUnittexturesByConvention(const std::string& sourceModelPath,
     }
 }
 
-/// Pull `tex1` / `tex2` strings out of a Spring author-config sibling
-/// (`<sourceModelPath>.lua`, e.g. `strikecom_1.dae.lua`). Legacy
-/// archives whose on-disk model format has no native Spring texture
-/// binding (.dae, .fbx) store the names here. The file is small and
-/// the keys are unambiguous, so plain string scanning suffices.
+/// Bag of optional author-overridable fields extracted from the Spring
+/// author-config sidecar (`<sourceModelPath>.lua`). Every field is
+/// `std::optional` so absence ("computed default wins") is distinct from
+/// presence ("author intent wins"). `std::nullopt` is the default.
+struct SidecarOverrides {
+    std::optional<float>                radius;
+    std::optional<float>                height;
+    std::optional<std::array<float, 3>> midpos;
+    std::optional<std::array<float, 3>> mins;
+    std::optional<std::array<float, 3>> maxs;
+    /// Bare filename of the normal map (e.g. `bomberheavy_normals.dds`).
+    /// Spring author convention; routed to glTF `material.normalTexture`
+    /// at synthesis time. RewriteToKtx2 is applied on read.
+    std::string                         normaltex;
+};
+
+/// Pull all author-overridable fields from a Spring author-config
+/// sibling (`<sourceModelPath>.lua`, e.g. `strikecom.dae.lua`). Legacy
+/// .dae/.fbx archives store texture bindings and engine-side overrides
+/// here because their native format has no slot for Spring metadata.
+/// The file is small and the keys are unambiguous, so plain string
+/// scanning suffices.
 ///
-/// Also reads the `invertteamcolor` boolean. The sidecar always wins
-/// over the naming-convention probe — passing the read-in value
-/// through unchanged when the key isn't present.
-void ReadSidecarTextures(const std::string& sourceModelPath,
-                         std::string& tex1, std::string& tex2,
-                         std::optional<bool>& invertTeamColor) {
+/// `tex1`/`tex2` are filled in only when the caller's value is empty
+/// (the naming-convention probe runs first and might already have
+/// resolved them). `invertteamcolor` always wins from the sidecar when
+/// present. The bound overrides (`radius`/`height`/`midpos`/`mins`/`maxs`)
+/// land in `overrides` as `std::optional` so the caller distinguishes
+/// "use sidecar value" from "fall back to computed".
+void ReadSidecarFields(const std::string& sourceModelPath,
+                       std::string& tex1, std::string& tex2,
+                       std::optional<bool>& invertTeamColor,
+                       SidecarOverrides& overrides) {
     if (sourceModelPath.empty()) return;
     const std::string springLua = sourceModelPath + ".lua";
     std::ifstream lua(springLua, std::ios::binary);
     if (!lua) return;
     const std::string txt{std::istreambuf_iterator<char>(lua),
                           std::istreambuf_iterator<char>()};
-    auto readField = [&](const std::string& key) -> std::string {
+
+    // Quoted-string field reader — matches `key = "..."` for the
+    // texture bindings.
+    auto readString = [&](const std::string& key) -> std::string {
         size_t k = txt.find(key);
         if (k == std::string::npos) return {};
         size_t q1 = txt.find('"', k + key.size());
@@ -278,28 +304,103 @@ void ReadSidecarTextures(const std::string& sourceModelPath,
         if (q2 == std::string::npos) return {};
         return txt.substr(q1 + 1, q2 - q1 - 1);
     };
-    if (tex1.empty()) { tex1 = readField("tex1"); RewriteToKtx2(tex1); }
-    if (tex2.empty()) { tex2 = readField("tex2"); RewriteToKtx2(tex2); }
+
+    // Scalar number reader — matches `key = <num>` (no quotes).
+    // Returns std::nullopt if the key isn't present or the value isn't
+    // parseable; the caller distinguishes that from a sidecar value of 0.
+    auto readNumber = [&](const std::string& key) -> std::optional<float> {
+        size_t k = txt.find(key);
+        if (k == std::string::npos) return std::nullopt;
+        size_t eq = txt.find('=', k + key.size());
+        if (eq == std::string::npos) return std::nullopt;
+        size_t v = eq + 1;
+        while (v < txt.size() && (txt[v] == ' ' || txt[v] == '\t')) ++v;
+        if (v >= txt.size()) return std::nullopt;
+        // Reject if the value starts a quote/brace — that's a string
+        // or table, not a number, and the key probably collided with a
+        // longer key by prefix match. (e.g. `radius` shouldn't pick up
+        // `radiusscale = "..."`.)
+        if (txt[v] == '"' || txt[v] == '{') return std::nullopt;
+        char* end = nullptr;
+        const float parsed = std::strtof(txt.c_str() + v, &end);
+        if (end == txt.c_str() + v) return std::nullopt;
+        return parsed;
+    };
+
+    // Vec3 reader — matches `key = { x, y, z }`. The .dae.lua dialect
+    // uses Lua-table syntax for vectors. Whitespace and trailing
+    // commas are tolerated.
+    auto readVec3 = [&](const std::string& key)
+        -> std::optional<std::array<float, 3>>
+    {
+        size_t k = txt.find(key);
+        if (k == std::string::npos) return std::nullopt;
+        size_t open = txt.find('{', k + key.size());
+        if (open == std::string::npos) return std::nullopt;
+        size_t close = txt.find('}', open + 1);
+        if (close == std::string::npos) return std::nullopt;
+        const std::string body = txt.substr(open + 1, close - open - 1);
+        std::array<float, 3> out{};
+        int n = 0;
+        size_t pos = 0;
+        while (pos < body.size() && n < 3) {
+            while (pos < body.size() &&
+                   (body[pos] == ' ' || body[pos] == '\t' || body[pos] == ',' ||
+                    body[pos] == '\n' || body[pos] == '\r')) ++pos;
+            if (pos >= body.size()) break;
+            char* end = nullptr;
+            out[n] = std::strtof(body.c_str() + pos, &end);
+            if (end == body.c_str() + pos) break;
+            pos = end - body.c_str();
+            ++n;
+        }
+        if (n != 3) return std::nullopt;
+        return out;
+    };
+
+    if (tex1.empty()) { tex1 = readString("tex1"); RewriteToKtx2(tex1); }
+    if (tex2.empty()) { tex2 = readString("tex2"); RewriteToKtx2(tex2); }
+
+    // Normaltex routes straight to glTF `material.normalTexture` at
+    // synthesis time; no team-color/AO-style channel surgery needed.
+    if (overrides.normaltex.empty()) {
+        overrides.normaltex = readString("normaltex");
+        RewriteToKtx2(overrides.normaltex);
+    }
 
     // Boolean lookup for invertteamcolor. Match `invertteamcolor`
     // followed by optional whitespace, `=`, more whitespace, and
     // `true` or `false`. The sidecar overrides anything the naming
     // probe set — if the key is present, take its value verbatim.
-    const std::string key = "invertteamcolor";
-    size_t kp = txt.find(key);
-    if (kp != std::string::npos) {
-        size_t eq = txt.find('=', kp + key.size());
-        if (eq != std::string::npos) {
-            size_t v = eq + 1;
-            while (v < txt.size() && (txt[v] == ' ' || txt[v] == '\t')) ++v;
-            if (txt.compare(v, 4, "true") == 0) {
-                invertTeamColor = true;
-            } else if (txt.compare(v, 5, "false") == 0) {
-                invertTeamColor = false;
+    {
+        const std::string key = "invertteamcolor";
+        size_t kp = txt.find(key);
+        if (kp != std::string::npos) {
+            size_t eq = txt.find('=', kp + key.size());
+            if (eq != std::string::npos) {
+                size_t v = eq + 1;
+                while (v < txt.size() && (txt[v] == ' ' || txt[v] == '\t')) ++v;
+                if (txt.compare(v, 4, "true") == 0) {
+                    invertTeamColor = true;
+                } else if (txt.compare(v, 5, "false") == 0) {
+                    invertTeamColor = false;
+                }
+                // else: malformed value — leave the caller's prior state.
             }
-            // else: malformed value — leave the caller's prior state.
         }
     }
+
+    // Bound overrides. Author intent supersedes the AABB-derived values
+    // computed by the caller. 91.6% of ZK .dae.lua sidecars carry a
+    // radius override that differs from the mesh AABB by >20% (skinny
+    // units with antennas, models with decorative outliers, gameplay-
+    // constant landing pads, etc.) — these are not vestigial values,
+    // they shape spatial queries / LOS / pathing in real ways.
+    if (auto v = readNumber("radius")) overrides.radius = *v;
+    if (auto v = readNumber("height")) overrides.height = *v;
+    if (auto v = readVec3("midpos"))   overrides.midpos = *v;
+    if (auto v = readVec3("mins"))     overrides.mins   = *v;
+    if (auto v = readVec3("maxs"))     overrides.maxs   = *v;
 }
 
 } // namespace
@@ -378,20 +479,89 @@ nlohmann::json GeometryExtractor::BuildExtensionJson(const aiScene* scene,
     // call them unconditionally so the flag gets discovered even when
     // tex1 / tex2 came from an Assimp material slot.
     std::optional<bool> invertTeamColor;
+    SidecarOverrides overrides;
     ProbeUnittexturesByConvention(sourceModelPath, tex1, tex2, invertTeamColor);
-    ReadSidecarTextures(sourceModelPath, tex1, tex2, invertTeamColor);
+    ReadSidecarFields(sourceModelPath, tex1, tex2, invertTeamColor, overrides);
+
+    // Snap the basename of tex1/tex2 to whatever casing the source file
+    // actually has on disk. Sidecars (.dae.lua) vary in case — staticrearm
+    // writes `tex1 = "core_color.dds"` while pad_jump writes
+    // `Core_color.dds` — but both resolve to the same `Core_color.dds`
+    // file. Without this normalisation, the channel-split outputs
+    // (`Core_color_diffuse.ktx2` etc.) get declared with whichever casing
+    // each sidecar happened to use, then 404 on case-sensitive Linux
+    // deployments where only one casing exists on disk.
+    if (!sourceModelPath.empty()) {
+        namespace fs = std::filesystem;
+        const fs::path unittex =
+            fs::path(sourceModelPath).parent_path().parent_path() / "unittextures";
+        std::error_code ec;
+        if (fs::is_directory(unittex, ec)) {
+            auto stemLower = [](std::string s) {
+                for (char& c : s)
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                return s;
+            };
+            auto snap = [&](std::string& name) {
+                if (name.empty()) return;
+                const fs::path p(name);
+                const std::string stem = p.stem().string();
+                const std::string want = stemLower(stem);
+                for (const auto& entry : fs::directory_iterator(unittex, ec)) {
+                    if (!entry.is_regular_file()) continue;
+                    const std::string fstem = entry.path().stem().string();
+                    if (stemLower(fstem) == want) {
+                        name = fstem + p.extension().string();  // p.extension == ".ktx2"
+                        return;
+                    }
+                }
+            };
+            snap(tex1);
+            snap(tex2);
+            snap(overrides.normaltex);
+        }
+    }
 
     // Coordinate convention: RH-canonical. Z axis is negated, AABB
     // min/max swap-and-negate to keep min <= max under the flip.
+    //
+    // Sidecar overrides supersede AABB-derived values where present —
+    // 91.6% of ZK .dae.lua sidecars carry a radius override that
+    // differs from the mesh AABB by >20% (skinny units with antennas,
+    // gameplay-constant landing pads, etc.) Sidecar values are stored
+    // in source coordinates (LH, matching .dae) so the Z-flip applies
+    // identically to whichever source wins.
+    auto flipZ = [](const std::array<float, 3>& v) {
+        return std::array<float, 3>{v[0], v[1], -v[2]};
+    };
+    // For mins/maxs the Z flip also swaps which one is "min" — the
+    // axis polarity inverts. Override mins.z becomes -override maxs.z
+    // for an axis-flipped consistent pair. Apply to overrides too so
+    // they land in the same RH frame as the computed values.
+    std::array<float, 3> outMins{
+        overrides.mins ? (*overrides.mins)[0] : bounds.minX,
+        overrides.mins ? (*overrides.mins)[1] : bounds.minY,
+        overrides.maxs ? -(*overrides.maxs)[2] : -bounds.maxZ,
+    };
+    std::array<float, 3> outMaxs{
+        overrides.maxs ? (*overrides.maxs)[0] : bounds.maxX,
+        overrides.maxs ? (*overrides.maxs)[1] : bounds.maxY,
+        overrides.mins ? -(*overrides.mins)[2] : -bounds.minZ,
+    };
+    std::array<float, 3> outMidpos = overrides.midpos
+        ? flipZ(*overrides.midpos)
+        : std::array<float, 3>{midX, midY, -midZ};
+
     json doc;
     doc["configVersion"] = GeometryExtractor::kCurrentSchemaVersion;
-    doc["radius"] = JsonFloat(radius);
-    doc["height"] = JsonFloat(height);
-    doc["midpos"] = JsonVec3(midX, midY, -midZ);
-    doc["mins"]   = JsonVec3(bounds.minX, bounds.minY, -bounds.maxZ);
-    doc["maxs"]   = JsonVec3(bounds.maxX, bounds.maxY, -bounds.minZ);
+    doc["radius"] = JsonFloat(overrides.radius.value_or(radius));
+    doc["height"] = JsonFloat(overrides.height.value_or(height));
+    doc["midpos"] = JsonVec3(outMidpos[0], outMidpos[1], outMidpos[2]);
+    doc["mins"]   = JsonVec3(outMins[0],   outMins[1],   outMins[2]);
+    doc["maxs"]   = JsonVec3(outMaxs[0],   outMaxs[1],   outMaxs[2]);
     if (!tex1.empty()) doc["tex1"] = tex1;
     if (!tex2.empty()) doc["tex2"] = tex2;
+    if (!overrides.normaltex.empty()) doc["normaltex"] = overrides.normaltex;
     // Transitional field: invertTeamColor goes into SPRINGRTS_geometry
     // here, then FixGlbBasisuTextures lifts it into the material's
     // SPRINGRTS_team_color block at synthesis time. Once .dae sources

@@ -395,12 +395,15 @@ bool FixGlbBasisuTextures(const std::string& path,
             return (dot == std::string::npos) ? ktx2Name : ktx2Name.substr(0, dot);
         };
 
-        std::string tex1, tex2;
+        std::string tex1, tex2, normaltex;
         if (springGeometry->contains("tex1") && (*springGeometry)["tex1"].is_string()) {
             tex1 = (*springGeometry)["tex1"].get<std::string>();
         }
         if (springGeometry->contains("tex2") && (*springGeometry)["tex2"].is_string()) {
             tex2 = (*springGeometry)["tex2"].get<std::string>();
+        }
+        if (springGeometry->contains("normaltex") && (*springGeometry)["normaltex"].is_string()) {
+            normaltex = (*springGeometry)["normaltex"].get<std::string>();
         }
 
         if (!tex1.empty()) {
@@ -433,6 +436,19 @@ bool FixGlbBasisuTextures(const std::string& path,
                 {"mimeType", "image/ktx2"},
             });
             const int teamImg = static_cast<int>(images.size()) - 1;
+            // Optional normal map — routed straight through as a regular
+            // pass-through KTX2 (no channel-split surgery). gameconverter
+            // doesn't recognise the URI's stem as a split suffix and
+            // falls back to a plain --no-channel-op encode against the
+            // source bitmap, preserving RGB for the normal map.
+            int normalImg = -1;
+            if (!normaltex.empty()) {
+                images.push_back({
+                    {"uri",      normaltex},
+                    {"mimeType", "image/ktx2"},
+                });
+                normalImg = static_cast<int>(images.size()) - 1;
+            }
             doc["images"] = std::move(images);
 
             // Reuse the existing sampler when present (Assimp emits one
@@ -468,6 +484,11 @@ bool FixGlbBasisuTextures(const std::string& path,
             }
             textures.push_back(makeTexture(teamImg));
             const int teamTex = static_cast<int>(textures.size()) - 1;
+            int normalTex = -1;
+            if (normalImg >= 0) {
+                textures.push_back(makeTexture(normalImg));
+                normalTex = static_cast<int>(textures.size()) - 1;
+            }
             doc["textures"] = std::move(textures);
 
             // Rebuild materials[0]. S3O sources only ever emit one
@@ -504,6 +525,19 @@ bool FixGlbBasisuTextures(const std::string& path,
             if (ormTex >= 0) {
                 mat["occlusionTexture"] = { {"index", ormTex} };
             }
+            if (normalTex >= 0) {
+                mat["normalTexture"] = { {"index", normalTex} };
+            }
+            // Spring's canonical cutout source is tex2.A (upstream
+            // ModelFragProg.glsl: `alpha = teamColor.a * extraColor.a`).
+            // The textureconverter's Diffuse op carries that alpha
+            // through `--tex2`, giving the baseColorTexture a spec-
+            // compliant cutout channel. Emit MASK + 0.5 cutoff
+            // unconditionally: assets without a tex2 (or with all-255
+            // tex2.A) ship A=255 in the diffuse output and the cutoff
+            // never fires, rendering identically to OPAQUE in any glTF
+            // viewer. Earlier revisions used tex1.A here and discarded
+            // every team-color pixel — that was the wrong source.
             mat["alphaMode"]   = "MASK";
             mat["alphaCutoff"] = 0.5;
 
