@@ -313,11 +313,11 @@ const TEAMCOLOR_FRAGMENT = `
 
     void main() {
         vec4 base = texture2D(diffuseTex, vUV);
-        // glTF MASK alphaMode: diffuse.A carries Spring's canonical
-        // cutout (from tex2.A, overlayed by the textureconverter
-        // Diffuse op). Assets with no tex2 ship A=255 so the discard
-        // never fires — same end state as OPAQUE for legacy content.
-        if (base.a < 0.5) discard;
+        // No discard. Spring's model shader computes alpha but only
+        // tests it when alphaCtrl is set for a specific pass (shadow
+        // gen, alpha-blend bin); default is "always pass". tex2.A is
+        // sparse engine-side data, not a cutout mask — discarding on
+        // it killed ~90% of fragments for most ZK content.
 
         // Team-color mask now lives in a dedicated R8 KTX2 (teamMaskTex.r)
         // rather than the diffuse alpha channel — so cutout and team

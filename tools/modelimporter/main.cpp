@@ -200,16 +200,18 @@ void WriteU32LE(std::vector<uint8_t>& out, size_t off, uint32_t v) {
 ///                                     at one texture)
 ///         SPRINGRTS_team_color
 ///           .maskTexture            → <tex1stem>_team.ktx2
-///     The material's `alphaMode` becomes `"MASK"` + `alphaCutoff: 0.5`
-///     — for S3O sources the binarised diffuse alpha *is* spec-correct
-///     cutout once the team-color mask is split out. The four KTX2
-///     files do not exist yet at modelimporter time; gameconverter
-///     produces them in a separate pass.
-///   - For documents without S3O-style channel packing
-///     (no `tex1` in `SPRINGRTS_geometry`), the legacy behaviour is
-///     preserved: `alphaMode` is stripped from every material to keep
-///     spec-compliant viewers from discarding ~93% of fragments based
-///     on Assimp's misleading MASK default.
+///     The four KTX2 files do not exist yet at modelimporter time;
+///     gameconverter produces them in a separate pass.
+///   - `alphaMode` (and `alphaCutoff`) are stripped from every material
+///     unconditionally. Spring's model shader gates alpha test on a
+///     runtime `alphaCtrl` uniform that defaults to "always pass" —
+///     the engine only toggles cutout for specific render passes
+///     (shadow gen, alpha-blend bin) that a static glTF can't
+///     replicate. tex1.A is the team-color mask and tex2.A is sparse
+///     engine-side data; neither is a transparency channel. Without
+///     this sweep, Assimp's eager MASK default discards ~90% of
+///     fragments on assets where tex2.A is mostly zero (most ZK
+///     content). Defaulting to OPAQUE matches the in-engine look.
 ///
 /// No PNG fallback is emitted — our runtime (Babylon), Blender 4.2+,
 /// gltf-viewer.donmccurdy.com and three.js all support
@@ -528,18 +530,19 @@ bool FixGlbBasisuTextures(const std::string& path,
             if (normalTex >= 0) {
                 mat["normalTexture"] = { {"index", normalTex} };
             }
-            // Spring's canonical cutout source is tex2.A (upstream
-            // ModelFragProg.glsl: `alpha = teamColor.a * extraColor.a`).
-            // The textureconverter's Diffuse op carries that alpha
-            // through `--tex2`, giving the baseColorTexture a spec-
-            // compliant cutout channel. Emit MASK + 0.5 cutoff
-            // unconditionally: assets without a tex2 (or with all-255
-            // tex2.A) ship A=255 in the diffuse output and the cutoff
-            // never fires, rendering identically to OPAQUE in any glTF
-            // viewer. Earlier revisions used tex1.A here and discarded
-            // every team-color pixel — that was the wrong source.
-            mat["alphaMode"]   = "MASK";
-            mat["alphaCutoff"] = 0.5;
+            // Render OPAQUE by default. Spring's model shader computes
+            // `alpha = teamCol.a * float(tex2.a >= 0.5)` then conditionally
+            // discards via an `alphaCtrl` uniform that defaults to
+            // "always pass" — so in normal opaque draws the alpha test
+            // never fires. The engine only enables it for specific
+            // passes (shadow gen, alpha-blend bin). A static glTF can't
+            // toggle per-pass, and emitting MASK + 0.5 unconditionally
+            // discarded ~90% of fragments for assets where tex2.A is
+            // sparse/zero (most ZK content, e.g. strikecom has 86% of
+            // tex2.A == 0). The tex2.A overlay still lands in
+            // baseColorTexture.A for future per-pass use, but stays
+            // ignored at render time. `alphaMode` is omitted (defaults
+            // to OPAQUE per glTF 2.0 §5.19.3).
 
             mat["extensions"]["SPRINGRTS_team_color"]["maskTexture"] =
                 json::object({ {"index", teamTex} });
@@ -567,20 +570,22 @@ bool FixGlbBasisuTextures(const std::string& path,
         }
     }
 
-    // ---- Step 3c: strip `alphaMode` from every material UNLESS we
-    // just synthesised the PBR-split layout (which explicitly wants
-    // MASK + 0.5 cutoff on the binarised diffuse alpha). Assimp emits
+    // ---- Step 3c: strip `alphaMode` from every material. Assimp emits
     // MASK whenever the source diffuse texture has an alpha channel,
-    // but in pre-PBR-mapping Spring S3O the alpha channel encoded
-    // team-color blend amount — NOT transparency. With MASK plus the
-    // default 0.5 cutoff, any spec-compliant viewer discards ~93% of
-    // fragments. The team-color shader reads alpha explicitly, so
-    // stripping the field (defaulting to OPAQUE) loses no information
-    // on legacy/non-split documents.
-    if (!didChannelSplit && doc.contains("materials") && doc["materials"].is_array()) {
+    // but in Spring S3O tex1.A encodes team-color blend amount and
+    // tex2.A is sparse engine-side data — NEITHER is a transparency
+    // mask. The Spring shader gates alpha test on a runtime uniform
+    // (`alphaCtrl`) that defaults to "always pass"; the engine only
+    // toggles cutout for specific render passes we can't replicate
+    // from a static glTF. Emitting MASK + 0.5 here discards ~90% of
+    // fragments on assets where tex2.A is mostly zero. The synthesised
+    // PBR layout doesn't emit alphaMode either, so this sweep covers
+    // both didChannelSplit and legacy/pass-through cases.
+    if (doc.contains("materials") && doc["materials"].is_array()) {
         for (auto& mat : doc["materials"]) {
             if (mat.is_object()) {
                 mat.erase("alphaMode");
+                mat.erase("alphaCutoff");
             }
         }
     }
