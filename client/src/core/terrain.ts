@@ -86,13 +86,13 @@ export function buildTerrainMesh(
         }
     }
 
-    // Triangle indices (PLAN-coordinate-system Phase 2d). The RH scene
-    // (`scene.useRightHandedSystem = true`) flips the front-face rule
-    // — Babylon now interprets CCW-from-camera as front. Cross-product
-    // math for normals is unchanged, so to land +Y normals (terrain
-    // facing up) the per-quad winding must be reversed from the LH
-    // version: (bl - tl) × (tr - tl) = (+Z) × (+X) = +Y. Order each
-    // triangle tl → bl → tr (and tr → bl → br for the second half).
+    // Triangle indices. PLAN-coordinate-system Phase 2d switched the
+    // scene to RH (`useRightHandedSystem = true`) so CCW-from-camera is
+    // now the front face. Per-quad winding is tl→bl→tr / tr→bl→br;
+    // that matches Babylon's default backface rule for terrain viewed
+    // from above. The `terrainTexMat` material has backface culling off
+    // anyway, but keeping the winding aligned avoids hidden ordering
+    // bugs if culling is ever turned on.
     const numQuads = (gridW - 1) * (gridH - 1);
     const indices = new Uint32Array(numQuads * 6);
     let ti = 0;
@@ -107,7 +107,15 @@ export function buildTerrainMesh(
         }
     }
 
+    // Babylon's VertexData.ComputeNormals uses (p2-p0) × (p1-p0) — the
+    // opposite of standard (p1-p0) × (p2-p0) — so feeding the indices
+    // above produces -Y face normals. Negate every component so terrain
+    // light contributions (HemisphericLight up-vector, DirectionalLight
+    // sun) hit the upward-facing side. Without this, hemispheric ambient
+    // grounds out near (0.21, 0.175, 0.14) (the groundColor term) and
+    // the sun's N·L collapses to ~0; map renders nearly black.
     VertexData.ComputeNormals(positions, indices, normals);
+    for (let i = 0; i < normals.length; i++) normals[i] = -normals[i];
 
     const mesh = new Mesh('terrain', scene);
     const vd = new VertexData();
