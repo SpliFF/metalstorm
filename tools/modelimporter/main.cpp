@@ -39,6 +39,8 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <functional>
+#include <set>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -508,6 +510,16 @@ bool FixGlbBasisuTextures(const std::string& path,
             mat["extensions"]["SPRINGRTS_team_color"]["maskTexture"] =
                 json::object({ {"index", teamTex} });
 
+            // Lift the optional `invertTeamColor` flag out of
+            // SPRINGRTS_geometry and onto the material extension where
+            // the spec puts it. Only emit when true — the default is
+            // false and omitting the key keeps the JSON tidy.
+            if (springGeometry->contains("invertTeamColor")
+                && (*springGeometry)["invertTeamColor"].is_boolean()
+                && (*springGeometry)["invertTeamColor"].get<bool>()) {
+                mat["extensions"]["SPRINGRTS_team_color"]["invertMask"] = true;
+            }
+
             // Every material we just synthesised references KTX2 images
             // via KHR_texture_basisu — make sure it lands in both the
             // used and required lists. SPRINGRTS_team_color goes to
@@ -537,6 +549,57 @@ bool FixGlbBasisuTextures(const std::string& path,
                 mat.erase("alphaMode");
             }
         }
+    }
+
+    // ---- Step 3d: prune `extensionsUsed` / `extensionsRequired` entries
+    // that no longer appear in any `extensions: {...}` block. Assimp's
+    // glTF exporter eagerly declares extensions it inferred from the
+    // source (KHR_materials_volume, KHR_materials_ior, KHR_materials_specular,
+    // FB_ngon_encoding) even when the resulting material/mesh data
+    // doesn't actually use them — and replacing materials[0] in step 3b
+    // strands those declarations. Khronos validator (correctly) warns
+    // about declared-but-unused extensions; this sweep keeps the list
+    // honest. Walk the document recursively, collect every name that
+    // appears as a key inside an `extensions` block, then filter the
+    // top-level lists against that set.
+    {
+        std::set<std::string> referenced;
+        std::function<void(const json&)> collect = [&](const json& node) {
+            if (node.is_object()) {
+                auto it = node.find("extensions");
+                if (it != node.end() && it->is_object()) {
+                    for (auto& kv : it->items()) {
+                        referenced.insert(kv.key());
+                    }
+                }
+                for (auto& kv : node.items()) {
+                    if (kv.key() == "extensions") continue;  // already walked
+                    collect(kv.value());
+                }
+            } else if (node.is_array()) {
+                for (const auto& v : node) collect(v);
+            }
+        };
+        collect(doc);
+
+        auto pruneList = [&](const char* fieldName) {
+            if (!doc.contains(fieldName) || !doc[fieldName].is_array()) return;
+            json keep = json::array();
+            for (const auto& v : doc[fieldName]) {
+                if (!v.is_string()) continue;
+                const std::string name = v.get<std::string>();
+                if (name.empty()) continue;
+                if (referenced.count(name) == 0) continue;
+                keep.push_back(name);
+            }
+            if (keep.empty()) {
+                doc.erase(fieldName);
+            } else {
+                doc[fieldName] = std::move(keep);
+            }
+        };
+        pruneList("extensionsUsed");
+        pruneList("extensionsRequired");
     }
 
     // ---- Step 4: serialise and write back. For .gltf this is a
@@ -596,6 +659,13 @@ int main(int argc, char** argv) {
     // textures sit in the same directory.
     std::string texturePrefix;
     std::string logServerUrl;
+    // Emit the raw Assimp glTF2 exporter output verbatim — skip our
+    // post-fix that rewrites texture references through
+    // `KHR_texture_basisu`, injects `SPRINGRTS_geometry` /
+    // `SPRINGRTS_team_color`, performs the S3O channel split, and
+    // prunes unused extensions. Used to capture minimal reproducers
+    // for upstream Assimp bug reports. Not a production code path.
+    bool noPostfix = false;
 
     // Tiny hand-rolled arg parser — keeps the binary dependency-free.
     for (int i = 1; i < argc; ++i) {
@@ -613,6 +683,8 @@ int main(int argc, char** argv) {
                 springlog_shutdown();
                 return 2;
             }
+        } else if (a == "--no-postfix") {
+            noPostfix = true;
         } else if (a == "--texture-prefix" && i + 1 < argc) {
             texturePrefix = argv[++i];
         } else if (a == "--no-meta" || a == "--update-meta") {
@@ -795,16 +867,18 @@ int main(int argc, char** argv) {
     // document-level extension built from the imported scene, so the
     // .gltf becomes a complete record of mesh + materials + simulation
     // metadata in a single file.
-    const nlohmann::json springGeometryJson =
-        GeometryExtractor::BuildExtensionJson(scene, inPath);
-    if (textureExt == "ktx2"
-        && (EndsWith(outPath, ".glb") || EndsWith(outPath, ".gltf")))
-    {
-        if (!FixGlbBasisuTextures(outPath, &springGeometryJson)) {
-            SLOG(SPRING_LOG_WARNING,
-                 "post-fix of KHR_texture_basisu textures in %s failed; "
-                 "client may render projectile as procedural cone",
-                 outPath.c_str());
+    if (!noPostfix) {
+        const nlohmann::json springGeometryJson =
+            GeometryExtractor::BuildExtensionJson(scene, inPath);
+        if (textureExt == "ktx2"
+            && (EndsWith(outPath, ".glb") || EndsWith(outPath, ".gltf")))
+        {
+            if (!FixGlbBasisuTextures(outPath, &springGeometryJson)) {
+                SLOG(SPRING_LOG_WARNING,
+                     "post-fix of KHR_texture_basisu textures in %s failed; "
+                     "client may render projectile as procedural cone",
+                     outPath.c_str());
+            }
         }
     }
 

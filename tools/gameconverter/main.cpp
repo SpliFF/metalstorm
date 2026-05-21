@@ -1148,43 +1148,37 @@ void ParseChannelOpFromUri(const std::string& uri,
 /// chunk is always JSON. We only need the image URIs so a small
 /// scan over the JSON text is sufficient — and it avoids dragging
 /// nlohmann/json into this otherwise dependency-light tool.
-std::vector<std::string> ExtractGlbImageUris(const fs::path& glbPath) {
-    std::ifstream f(glbPath, std::ios::binary);
+std::vector<std::string> ExtractGlbImageUris(const fs::path& path) {
+    std::ifstream f(path, std::ios::binary);
     if (!f) return {};
 
-    char header[12];
-    if (!f.read(header, 12)) return {};
-    if (std::memcmp(header, "glTF", 4) != 0) return {};
-
-    char chunkHdr[8];
-    if (!f.read(chunkHdr, 8)) return {};
-    uint32_t chunkLen = 0;
-    std::memcpy(&chunkLen, chunkHdr, 4);
-    if (std::memcmp(chunkHdr + 4, "JSON", 4) != 0) return {};
-
-    std::string json(chunkLen, '\0');
-    if (!f.read(json.data(), chunkLen)) return {};
-
-    auto imgKey = json.find("\"images\"");
-    if (imgKey == std::string::npos) return {};
-    auto arrStart = json.find('[', imgKey);
-    if (arrStart == std::string::npos) return {};
-    auto arrEnd = json.find(']', arrStart);
-    if (arrEnd == std::string::npos) return {};
+    // Both container forms are still supported. .glb (binary form) has
+    // the JSON chunk wrapped by a 12-byte header + 8-byte chunk marker;
+    // .gltf is plain JSON. Detect by the magic.
+    std::vector<char> buf((std::istreambuf_iterator<char>(f)),
+                          std::istreambuf_iterator<char>());
+    std::string jsonText;
+    if (buf.size() >= 20 && std::memcmp(buf.data(), "glTF", 4) == 0
+        && std::memcmp(buf.data() + 16, "JSON", 4) == 0) {
+        uint32_t chunkLen = 0;
+        std::memcpy(&chunkLen, buf.data() + 12, sizeof(chunkLen));
+        if (20u + chunkLen > buf.size()) return {};
+        jsonText.assign(buf.data() + 20, chunkLen);
+    } else {
+        jsonText.assign(buf.begin(), buf.end());
+    }
 
     std::vector<std::string> uris;
-    size_t p = arrStart;
-    while (p < arrEnd) {
-        auto k = json.find("\"uri\"", p);
-        if (k == std::string::npos || k >= arrEnd) break;
-        auto colon = json.find(':', k);
-        if (colon == std::string::npos || colon >= arrEnd) break;
-        auto q1 = json.find('"', colon + 1);
-        if (q1 == std::string::npos || q1 >= arrEnd) break;
-        auto q2 = json.find('"', q1 + 1);
-        if (q2 == std::string::npos || q2 >= arrEnd) break;
-        uris.emplace_back(json, q1 + 1, q2 - q1 - 1);
-        p = q2 + 1;
+    try {
+        const auto doc = nlohmann::json::parse(jsonText);
+        if (!doc.contains("images") || !doc["images"].is_array()) return uris;
+        for (const auto& img : doc["images"]) {
+            if (img.is_object() && img.contains("uri") && img["uri"].is_string()) {
+                uris.push_back(img["uri"].get<std::string>());
+            }
+        }
+    } catch (const nlohmann::json::parse_error&) {
+        return {};
     }
     return uris;
 }

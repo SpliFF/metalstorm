@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -178,8 +179,15 @@ void RewriteToKtx2(std::string& name) {
 /// empty and whose sidecar `.dae.lua` carries only geometry overrides
 /// (the `factoryveh` case in PLAN-pbr-mapping.md). Case-insensitive
 /// to tolerate mixed-case content authoring on Windows.
+///
+/// Also probes for `<stem>1_invert.<ext>` — a marker file Spring's
+/// convention uses to flip the team-mask interpretation. When found,
+/// sets `invertTeamColor=true`. The flag is only updated when a
+/// marker is found; absence leaves the caller's value unchanged so a
+/// sidecar override (which runs after this) wins on conflict.
 void ProbeUnittexturesByConvention(const std::string& sourceModelPath,
-                                   std::string& tex1, std::string& tex2) {
+                                   std::string& tex1, std::string& tex2,
+                                   std::optional<bool>& invertTeamColor) {
     if (sourceModelPath.empty()) return;
     namespace fs = std::filesystem;
     const fs::path src(sourceModelPath);
@@ -221,6 +229,26 @@ void ProbeUnittexturesByConvention(const std::string& sourceModelPath,
 
     if (tex1.empty()) tex1 = lookup(1);
     if (tex2.empty()) tex2 = lookup(2);
+
+    // Inversion marker: `<stem>1_invert.<ext>` next to the regular
+    // tex1. One ZK asset (factoryveh) ships this; the convention is
+    // documented in PLAN-pbr-mapping.md.
+    const std::string invertStem = stem + "1_invert";
+    const std::string invertStemLower = stemLower(invertStem);
+    for (const char* ext : kExts) {
+        if (fs::exists(unittex / (invertStem + ext), ec)) {
+            if (!invertTeamColor.has_value()) invertTeamColor = true;
+            return;
+        }
+    }
+    for (const auto& entry : fs::directory_iterator(unittex, ec)) {
+        if (!entry.is_regular_file()) continue;
+        const std::string fstem = entry.path().stem().string();
+        if (stemLower(fstem) == invertStemLower) {
+            if (!invertTeamColor.has_value()) invertTeamColor = true;
+            return;
+        }
+    }
 }
 
 /// Pull `tex1` / `tex2` strings out of a Spring author-config sibling
@@ -228,8 +256,13 @@ void ProbeUnittexturesByConvention(const std::string& sourceModelPath,
 /// archives whose on-disk model format has no native Spring texture
 /// binding (.dae, .fbx) store the names here. The file is small and
 /// the keys are unambiguous, so plain string scanning suffices.
+///
+/// Also reads the `invertteamcolor` boolean. The sidecar always wins
+/// over the naming-convention probe — passing the read-in value
+/// through unchanged when the key isn't present.
 void ReadSidecarTextures(const std::string& sourceModelPath,
-                         std::string& tex1, std::string& tex2) {
+                         std::string& tex1, std::string& tex2,
+                         std::optional<bool>& invertTeamColor) {
     if (sourceModelPath.empty()) return;
     const std::string springLua = sourceModelPath + ".lua";
     std::ifstream lua(springLua, std::ios::binary);
@@ -247,6 +280,26 @@ void ReadSidecarTextures(const std::string& sourceModelPath,
     };
     if (tex1.empty()) { tex1 = readField("tex1"); RewriteToKtx2(tex1); }
     if (tex2.empty()) { tex2 = readField("tex2"); RewriteToKtx2(tex2); }
+
+    // Boolean lookup for invertteamcolor. Match `invertteamcolor`
+    // followed by optional whitespace, `=`, more whitespace, and
+    // `true` or `false`. The sidecar overrides anything the naming
+    // probe set — if the key is present, take its value verbatim.
+    const std::string key = "invertteamcolor";
+    size_t kp = txt.find(key);
+    if (kp != std::string::npos) {
+        size_t eq = txt.find('=', kp + key.size());
+        if (eq != std::string::npos) {
+            size_t v = eq + 1;
+            while (v < txt.size() && (txt[v] == ' ' || txt[v] == '\t')) ++v;
+            if (txt.compare(v, 4, "true") == 0) {
+                invertTeamColor = true;
+            } else if (txt.compare(v, 5, "false") == 0) {
+                invertTeamColor = false;
+            }
+            // else: malformed value — leave the caller's prior state.
+        }
+    }
 }
 
 } // namespace
@@ -317,15 +370,16 @@ nlohmann::json GeometryExtractor::BuildExtensionJson(const aiScene* scene,
             RewriteToKtx2(tex2);
         }
     }
-    if (tex1.empty() || tex2.empty()) {
-        ReadSidecarTextures(sourceModelPath, tex1, tex2);
-    }
-    // Spring naming-convention fallback for assets that have neither
-    // an Assimp-extracted texture binding nor a `tex1=` sidecar field
-    // (e.g. `factoryveh.dae` whose .dae.lua only overrides geometry).
-    if (tex1.empty() || tex2.empty()) {
-        ProbeUnittexturesByConvention(sourceModelPath, tex1, tex2);
-    }
+    // `invertteamcolor` is layered across two sources: the naming-
+    // convention probe (presence of `<stem>1_invert.<ext>`) and the
+    // .dae.lua / .config.lua-style author sidecar. The sidecar always
+    // wins on conflict, so run the probe first and let the sidecar
+    // overwrite. Both helpers are no-ops when their inputs are absent;
+    // call them unconditionally so the flag gets discovered even when
+    // tex1 / tex2 came from an Assimp material slot.
+    std::optional<bool> invertTeamColor;
+    ProbeUnittexturesByConvention(sourceModelPath, tex1, tex2, invertTeamColor);
+    ReadSidecarTextures(sourceModelPath, tex1, tex2, invertTeamColor);
 
     // Coordinate convention: RH-canonical. Z axis is negated, AABB
     // min/max swap-and-negate to keep min <= max under the flip.
@@ -338,6 +392,14 @@ nlohmann::json GeometryExtractor::BuildExtensionJson(const aiScene* scene,
     doc["maxs"]   = JsonVec3(bounds.maxX, bounds.maxY, -bounds.minZ);
     if (!tex1.empty()) doc["tex1"] = tex1;
     if (!tex2.empty()) doc["tex2"] = tex2;
+    // Transitional field: invertTeamColor goes into SPRINGRTS_geometry
+    // here, then FixGlbBasisuTextures lifts it into the material's
+    // SPRINGRTS_team_color block at synthesis time. Once .dae sources
+    // are retired in favour of glTF-direct authoring, this hop
+    // disappears (the author writes SPRINGRTS_team_color directly).
+    if (invertTeamColor.has_value()) {
+        doc["invertTeamColor"] = *invertTeamColor;
+    }
 
     json piecesArray = json::array();
     for (const auto& p : pieces) {
