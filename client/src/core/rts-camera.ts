@@ -817,8 +817,10 @@ export class RTSCamera {
             const len = Math.sqrt(lenSq);
             this.forward.set(lx / len, 0, lz / len);
         }
-        // Right = forward × up (left-handed coords)
-        this.right.set(this.forward.z, 0, -this.forward.x);
+        // Right = forward × up. Under the RH scene (Phase 2d) this is
+        // (-fz, 0, fx); the pre-Phase-2 LH form (fz, 0, -fx) inverted
+        // horizontal pan on arrow keys, middle-drag, and edge-scroll.
+        this.right.set(-this.forward.z, 0, this.forward.x);
     }
 
     /**
