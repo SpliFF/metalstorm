@@ -53,6 +53,7 @@ const char* StatusText(int code) {
         case 401: return "401 Unauthorized";
         case 403: return "403 Forbidden";
         case 404: return "404 Not Found";
+        case 405: return "405 Method Not Allowed";
         case 409: return "409 Conflict";
         case 500: return "500 Internal Server Error";
         default:  return "500 Internal Server Error";
@@ -260,7 +261,7 @@ struct NetworkServer::Impl {
 
     // ── HTTP/1.1 helpers ──
 
-    void H1WriteResponse(ServerConn& c, const HttpResponse& resp) {
+    void H1WriteResponse(ServerConn& c, const HttpResponse& resp, bool omitBody = false) {
         std::string hdr;
         hdr += "HTTP/1.1 ";
         hdr += StatusText(resp.status);
@@ -269,7 +270,7 @@ struct NetworkServer::Impl {
         hdr += "\r\nContent-Length: ";
         hdr += std::to_string(resp.body.size());
         hdr += "\r\nAccess-Control-Allow-Origin: *";
-        hdr += "\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS";
+        hdr += "\r\nAccess-Control-Allow-Methods: GET, HEAD, POST, OPTIONS";
         hdr += "\r\nAccess-Control-Allow-Headers: Content-Type, Authorization";
         hdr += "\r\nCache-Control: ";
         hdr += resp.cacheControl;
@@ -279,13 +280,16 @@ struct NetworkServer::Impl {
         hdr += "\r\n\r\n";
 
         c.writeBuf += hdr;
-        c.writeBuf.append(reinterpret_cast<const char*>(resp.body.data()), resp.body.size());
+        // HEAD responses carry the same Content-Length the GET would, but
+        // RFC 9110 §9.3.2 requires the body itself to be omitted.
+        if (!omitBody)
+            c.writeBuf.append(reinterpret_cast<const char*>(resp.body.data()), resp.body.size());
     }
 
     void H1WriteCORSPreflight(ServerConn& c) {
         std::string hdr = "HTTP/1.1 204 No Content\r\n"
             "Access-Control-Allow-Origin: *\r\n"
-            "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+            "Access-Control-Allow-Methods: GET, HEAD, POST, OPTIONS\r\n"
             "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
             "Content-Length: 0\r\n"
             "Connection: keep-alive\r\n\r\n";
@@ -319,17 +323,21 @@ struct NetworkServer::Impl {
         // CORS preflight
         if (c.h1Method == "OPTIONS") {
             H1WriteCORSPreflight(c);
-        } else if (c.h1Method == "GET") {
-            // Check SSE first
-            int sseId = MatchSSEChannel(c.h1Path);
-            if (sseId >= 0) {
-                c.h1IsSSE = true;
-                c.h1SSEChannelId = (uint32_t)sseId;
-                H1WriteSSEHeaders(c);
-                return;  // Don't reset — keep connection open for SSE
+        } else if (c.h1Method == "GET" || c.h1Method == "HEAD") {
+            // Check SSE first (HEAD on an SSE endpoint is meaningless;
+            // fall through to a regular GET dispatch + body suppression).
+            const bool isHead = (c.h1Method == "HEAD");
+            if (!isHead) {
+                int sseId = MatchSSEChannel(c.h1Path);
+                if (sseId >= 0) {
+                    c.h1IsSSE = true;
+                    c.h1SSEChannelId = (uint32_t)sseId;
+                    H1WriteSSEHeaders(c);
+                    return;  // Don't reset — keep connection open for SSE
+                }
             }
             auto resp = DispatchGet(c.h1Path);
-            H1WriteResponse(c, resp);
+            H1WriteResponse(c, resp, /*omitBody=*/isHead);
         } else if (c.h1Method == "POST") {
             auto resp = DispatchPost(c.h1Path, c.h1ReadBuf.substr(
                 c.h1ReadBuf.find("\r\n\r\n") + 4, c.h1ContentLength), c.h1Headers);
@@ -524,17 +532,19 @@ struct NetworkServer::Impl {
             return;
         }
 
-        if (stream.method == "GET") {
-            // Check SSE
-            int sseId = MatchSSEChannel(stream.path);
-            if (sseId >= 0) {
-                stream.isSSE = true;
-                stream.sseChannelId = (uint32_t)sseId;
-                H2SubmitSSEHeaders(conn, stream);
-                return;
+        if (stream.method == "GET" || stream.method == "HEAD") {
+            const bool isHead = (stream.method == "HEAD");
+            if (!isHead) {
+                int sseId = MatchSSEChannel(stream.path);
+                if (sseId >= 0) {
+                    stream.isSSE = true;
+                    stream.sseChannelId = (uint32_t)sseId;
+                    H2SubmitSSEHeaders(conn, stream);
+                    return;
+                }
             }
             auto resp = DispatchGet(stream.path);
-            H2SubmitResponse(conn, stream, resp);
+            H2SubmitResponse(conn, stream, resp, /*omitBody=*/isHead);
         } else if (stream.method == "POST") {
             auto resp = DispatchPost(stream.path, stream.body, stream.headers);
             H2SubmitResponse(conn, stream, resp);
@@ -543,8 +553,11 @@ struct NetworkServer::Impl {
         }
     }
 
-    void H2SubmitResponse(ServerConn& conn, H2StreamData& stream, const HttpResponse& resp) {
-        stream.responseBody = resp.body;
+    void H2SubmitResponse(ServerConn& conn, H2StreamData& stream, const HttpResponse& resp, bool omitBody = false) {
+        // HEAD responses carry Content-Length but no body — clear the
+        // streamed payload while leaving the headers (including the
+        // original body size) intact.
+        stream.responseBody = omitBody ? std::vector<uint8_t>{} : resp.body;
         stream.responseOffset = 0;
 
         std::string statusStr = std::to_string(resp.status);
@@ -554,7 +567,7 @@ struct NetworkServer::Impl {
             {(uint8_t*)":status", (uint8_t*)statusStr.data(), 7, statusStr.size(), NGHTTP2_NV_FLAG_NO_COPY_NAME},
             {(uint8_t*)"content-type", (uint8_t*)resp.contentType.data(), 12, resp.contentType.size(), NGHTTP2_NV_FLAG_NO_COPY_NAME},
             {(uint8_t*)"access-control-allow-origin", (uint8_t*)"*", 27, 1, NGHTTP2_NV_FLAG_NO_COPY_NAME | NGHTTP2_NV_FLAG_NO_COPY_VALUE},
-            {(uint8_t*)"access-control-allow-methods", (uint8_t*)"GET, POST, OPTIONS", 28, 18, NGHTTP2_NV_FLAG_NO_COPY_NAME | NGHTTP2_NV_FLAG_NO_COPY_VALUE},
+            {(uint8_t*)"access-control-allow-methods", (uint8_t*)"GET, HEAD, POST, OPTIONS", 28, 24, NGHTTP2_NV_FLAG_NO_COPY_NAME | NGHTTP2_NV_FLAG_NO_COPY_VALUE},
             {(uint8_t*)"access-control-allow-headers", (uint8_t*)"Content-Type, Authorization", 28, 27, NGHTTP2_NV_FLAG_NO_COPY_NAME | NGHTTP2_NV_FLAG_NO_COPY_VALUE},
             {(uint8_t*)"cache-control", (uint8_t*)resp.cacheControl.data(), 13, resp.cacheControl.size(), NGHTTP2_NV_FLAG_NO_COPY_NAME},
             {(uint8_t*)"x-build-stamp", (uint8_t*)buildStamp.data(), 13, buildStamp.size(), NGHTTP2_NV_FLAG_NO_COPY_NAME},
