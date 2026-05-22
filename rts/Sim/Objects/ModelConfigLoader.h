@@ -1,22 +1,18 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 /**
- * ModelConfigLoader — populate an S3DModel from the project's
- * standard config-file convention (`.config.lua` / `.config.json`).
+ * ModelConfigLoader — populate an S3DModel from the canonical
+ * `<stem>.gltf` produced by tools/modelimporter.
  *
- * The sim never reads binary model files directly. At content-
- * preprocess time modelimporter converts each source model to a
- * `.glb` for the client and emits a sibling `<stem>.config.json`
- * containing the engine-relevant fields (bounding sphere, height,
- * mid-position, piece tree, attachment points). Authors who want
- * dynamic metadata can drop a `<stem>.config.lua` alongside; the
- * Lua form wins over the JSON form if both exist. Both are
- * resolved through `LuaConfig::Load`.
+ * The sim doesn't read mesh data — it pulls bounding sphere, height,
+ * mid-position, AABB, and piece tree (offsets, names, hierarchy) out
+ * of the document-level `SPRINGRTS_geometry` extension embedded in
+ * the `.gltf`. The legacy `.config.lua` / `.config.json` sidecars
+ * have been retired; the `.gltf` is the single source of truth.
  *
  * SolidObjectDef::LoadModel calls into this loader at unit/feature
- * spawn time to read whichever form is present. File parse errors
- * are logged to stderr and a default-initialised model is returned
- * so the sim keeps running.
+ * spawn time. File parse errors are logged and nullptr is returned
+ * so the caller can fall back to its own defaults.
  */
 
 #pragma once
@@ -28,13 +24,14 @@ struct S3DModel;
 namespace ModelConfigLoader {
 
 /// Load model config into a fresh `S3DModel`, given the *base path*
-/// (no `.config.lua`/`.config.json` suffix). Returns nullptr if
-/// neither form exists or parsing fails. Caller owns the result.
+/// (no `.gltf` suffix). Returns nullptr if the `.gltf` is missing,
+/// fails to parse, or lacks `SPRINGRTS_geometry`. Caller owns the
+/// result.
 S3DModel* Load(const std::string& basePath);
 
-/// Populate `out` (already allocated) from a model config file at
-/// `basePath`. Returns true on success, false on any error; leaves
-/// `out` in its default-initialised state on failure.
+/// Populate `out` (already allocated) from `<basePath>.gltf`. Returns
+/// true on success, false on any error; leaves `out` in its default-
+/// initialised state on failure.
 bool LoadInto(S3DModel& out, const std::string& basePath);
 
 } // namespace ModelConfigLoader
