@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -267,6 +268,14 @@ struct SidecarOverrides {
     /// Spring author convention; routed to glTF `material.normalTexture`
     /// at synthesis time. RewriteToKtx2 is applied on read.
     std::string                         normaltex;
+    /// Per-piece offset overrides from the sidecar `pieces` block.
+    /// In ZK content this is dominated by root-piece "Scene" overrides
+    /// (e.g. strikecom's `Scene.offset = {0, 31, 0}`) that lift the
+    /// model so its base sits on the ground; the .dae was authored
+    /// with origin at the model's centre, not its feet. Values are
+    /// in sidecar/Spring coords (Y-up, LH) — caller applies the Z
+    /// flip to land them in RH/glTF space.
+    std::map<std::string, std::array<float, 3>> pieceOffsets;
 };
 
 /// Pull all author-overridable fields from a Spring author-config
@@ -401,6 +410,105 @@ void ReadSidecarFields(const std::string& sourceModelPath,
     if (auto v = readVec3("midpos"))   overrides.midpos = *v;
     if (auto v = readVec3("mins"))     overrides.mins   = *v;
     if (auto v = readVec3("maxs"))     overrides.maxs   = *v;
+
+    // Piece offset overrides. Walks the `pieces = { ... }` block and
+    // captures every `<Name> = { ... offset = { x, y, z } ... }`
+    // pattern, regardless of nesting depth. The dominant case in ZK
+    // is a root-piece "Scene" entry on commander/`.dae`-sourced units
+    // whose author origin sits at the model's centre rather than its
+    // feet (strikecom family: `Scene.offset = {0, 31, 0}` lifts the
+    // model so its base lands on the ground). Sub-piece offsets in
+    // nested blocks (geo.dae.lua: `base.wheel.offset`) are picked up
+    // by the same scan — only matters when non-zero, which in ZK
+    // they aren't. Commented-out blocks (`--pieces = {`) are tolerated
+    // because the body scan still runs but no `<Name> = {` patterns
+    // emerge from a comment-prefixed body. The scan uses brace
+    // counting to find the matching close of `pieces = {`, then
+    // walks every `offset` keyword and resolves its enclosing block's
+    // identifier via reverse brace tracking.
+    {
+        const size_t piecesKw = txt.find("pieces");
+        if (piecesKw != std::string::npos) {
+            const size_t eq = txt.find('=', piecesKw + 6);
+            if (eq != std::string::npos) {
+                const size_t open = txt.find('{', eq);
+                if (open != std::string::npos) {
+                    int depth = 1;
+                    size_t pos = open + 1;
+                    while (pos < txt.size() && depth > 0) {
+                        if (txt[pos] == '{') ++depth;
+                        else if (txt[pos] == '}') {
+                            if (--depth == 0) break;
+                        }
+                        ++pos;
+                    }
+                    if (pos < txt.size()) {
+                        const std::string body = txt.substr(open + 1, pos - open - 1);
+                        size_t scan = 0;
+                        while (scan < body.size()) {
+                            const size_t offKw = body.find("offset", scan);
+                            if (offKw == std::string::npos) break;
+                            // Find immediately-enclosing '{' by walking
+                            // back with a brace counter.
+                            int d = 0;
+                            size_t bracePos = std::string::npos;
+                            for (long i = static_cast<long>(offKw) - 1; i >= 0; --i) {
+                                const char c = body[i];
+                                if (c == '}') ++d;
+                                else if (c == '{') {
+                                    if (d == 0) { bracePos = static_cast<size_t>(i); break; }
+                                    --d;
+                                }
+                            }
+                            if (bracePos == std::string::npos) { scan = offKw + 6; continue; }
+                            // Resolve `<name>` that precedes that '{'.
+                            long i = static_cast<long>(bracePos) - 1;
+                            while (i >= 0 && (body[i] == ' ' || body[i] == '\t' ||
+                                              body[i] == '\n' || body[i] == '\r')) --i;
+                            if (i < 0 || body[i] != '=') { scan = offKw + 6; continue; }
+                            --i;
+                            while (i >= 0 && (body[i] == ' ' || body[i] == '\t')) --i;
+                            const long nameEnd = i + 1;
+                            while (i >= 0 && (std::isalnum(static_cast<unsigned char>(body[i])) ||
+                                              body[i] == '_')) --i;
+                            const long nameStart = i + 1;
+                            if (nameStart >= nameEnd) { scan = offKw + 6; continue; }
+                            const std::string name = body.substr(nameStart, nameEnd - nameStart);
+                            // Parse `offset = { x, y, z }`.
+                            const size_t offEq = body.find('=', offKw + 6);
+                            if (offEq == std::string::npos) { scan = offKw + 6; continue; }
+                            const size_t offOpen = body.find('{', offEq);
+                            const size_t offClose = (offOpen != std::string::npos)
+                                ? body.find('}', offOpen) : std::string::npos;
+                            if (offOpen == std::string::npos || offClose == std::string::npos) {
+                                scan = offKw + 6;
+                                continue;
+                            }
+                            std::array<float, 3> vec{};
+                            int n = 0;
+                            size_t p = offOpen + 1;
+                            while (p < offClose && n < 3) {
+                                while (p < offClose &&
+                                       (body[p] == ' ' || body[p] == '\t' ||
+                                        body[p] == ',' || body[p] == '\n' ||
+                                        body[p] == '\r')) ++p;
+                                if (p >= offClose) break;
+                                char* endPtr = nullptr;
+                                vec[n] = std::strtof(body.c_str() + p, &endPtr);
+                                if (endPtr == body.c_str() + p) break;
+                                p = static_cast<size_t>(endPtr - body.c_str());
+                                ++n;
+                            }
+                            if (n == 3) {
+                                overrides.pieceOffsets[name] = vec;
+                            }
+                            scan = offClose + 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 } // namespace
@@ -576,7 +684,21 @@ nlohmann::json GeometryExtractor::BuildExtensionJson(const aiScene* scene,
         json pj;
         pj["name"]   = p.name;
         pj["parent"] = p.parentIndex;
-        pj["offset"] = JsonVec3(p.offsetX, p.offsetY, -p.offsetZ);
+        // Sidecar piece-offset override wins. Z is flipped here just
+        // like every other vector emit — sidecar values are in Spring
+        // LH coords, we land them in RH. The same override map also
+        // flows into a transitional `pieceOverrides` block below so
+        // FixGlbBasisuTextures can mirror the change onto the matching
+        // .gltf node's matrix (visual-side parity with the SPRINGRTS
+        // sim-side data here).
+        const auto pit = overrides.pieceOffsets.find(p.name);
+        if (pit != overrides.pieceOffsets.end()) {
+            pj["offset"] = JsonVec3(pit->second[0],
+                                    pit->second[1],
+                                    -pit->second[2]);
+        } else {
+            pj["offset"] = JsonVec3(p.offsetX, p.offsetY, -p.offsetZ);
+        }
         pj["mins"]   = JsonVec3(p.localBounds.minX,
                                 p.localBounds.minY,
                                 -p.localBounds.maxZ);
@@ -586,6 +708,21 @@ nlohmann::json GeometryExtractor::BuildExtensionJson(const aiScene* scene,
         piecesArray.push_back(std::move(pj));
     }
     doc["pieces"] = std::move(piecesArray);
+
+    // Transitional field consumed by FixGlbBasisuTextures: the same
+    // sidecar piece-offset overrides, Z-flipped to RH, keyed by piece
+    // name. Drives the .gltf node matrix update so the rendered model
+    // sits where the SPRINGRTS_geometry data says it does. Absent when
+    // the sidecar carries no piece overrides — keeps the JSON tidy.
+    if (!overrides.pieceOffsets.empty()) {
+        json pieceOverrides = json::object();
+        for (const auto& kv : overrides.pieceOffsets) {
+            pieceOverrides[kv.first] = JsonVec3(kv.second[0],
+                                                kv.second[1],
+                                                -kv.second[2]);
+        }
+        doc["pieceOverrides"] = std::move(pieceOverrides);
+    }
 
     if (!attachments.empty()) {
         json attArray = json::array();

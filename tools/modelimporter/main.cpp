@@ -641,6 +641,59 @@ bool FixGlbBasisuTextures(const std::string& path,
         pruneList("extensionsRequired");
     }
 
+    // ---- Step 3e: lift any sidecar piece-offset overrides onto the
+    // matching .gltf node's transform. The same overrides already
+    // reshape SPRINGRTS_geometry.pieces[] for sim-side consumers
+    // (server-side firing, attachment offsets) — this step mirrors
+    // them onto the visual side so the renderer agrees with the sim.
+    //
+    // Dominant case: strikecom-family commanders ship with the .dae
+    // origin at the model's centre rather than its feet, and the
+    // sidecar's `Scene.offset = {0, 31, 0}` is the author's lift to
+    // land the model on the ground. Without this mirror, the .gltf
+    // node hierarchy preserves Assimp's (0,0,0) translation on the
+    // Scene node and the visual model sinks halfway underground at
+    // runtime.
+    //
+    // Strategy: look up each piece name in `nodes[]`, then either
+    // patch the matrix translation (cols 12/13/14, col-major) if the
+    // node uses a matrix, or set the TRS `translation` field if not.
+    // Replaces — does not accumulate — so re-runs land idempotently.
+    if (springGeometry &&
+        springGeometry->contains("pieceOverrides") &&
+        (*springGeometry)["pieceOverrides"].is_object() &&
+        doc.contains("nodes") && doc["nodes"].is_array())
+    {
+        const auto& po = (*springGeometry)["pieceOverrides"];
+        auto& nodes = doc["nodes"];
+        for (auto it = po.begin(); it != po.end(); ++it) {
+            const std::string& name = it.key();
+            const auto& off = it.value();
+            if (!off.is_array() || off.size() != 3) continue;
+            if (!off[0].is_number() || !off[1].is_number() || !off[2].is_number())
+                continue;
+            const double ox = off[0].get<double>();
+            const double oy = off[1].get<double>();
+            const double oz = off[2].get<double>();
+            for (auto& node : nodes) {
+                if (!node.is_object()) continue;
+                auto nameIt = node.find("name");
+                if (nameIt == node.end() || !nameIt->is_string()) continue;
+                if (nameIt->get<std::string>() != name) continue;
+                if (node.contains("matrix") && node["matrix"].is_array() &&
+                    node["matrix"].size() == 16) {
+                    node["matrix"][12] = ox;
+                    node["matrix"][13] = oy;
+                    node["matrix"][14] = oz;
+                } else {
+                    node["translation"] = json::array({ox, oy, oz});
+                    node.erase("matrix");
+                }
+                break;
+            }
+        }
+    }
+
     // ---- Step 4: serialise and write back. For .gltf this is a
     // straight overwrite; for .glb we re-pad and re-emit the binary
     // container. Use indent=-1 for compact output matching what Assimp
