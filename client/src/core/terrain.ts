@@ -454,6 +454,9 @@ export class TerrainFog {
 
         const hRange = dims.maxHeight - dims.minHeight;
         const FOG_Y_OFFSET = 3;
+        // Match buildTerrainMesh's Z shift so fog vertices overlay the
+        // terrain in the new RH world frame `[-mapHeight, 0]`.
+        const minZ = -(dims.mapy * SQUARE_SIZE);
 
         for (let gz = 0; gz < gridH; gz++) {
             const srcZ = Math.min(gz * stepZ, hmH - 1);
@@ -465,7 +468,7 @@ export class TerrainFog {
 
                 positions[idx * 3 + 0] = srcX * SQUARE_SIZE;
                 positions[idx * 3 + 1] = worldY + FOG_Y_OFFSET;
-                positions[idx * 3 + 2] = srcZ * SQUARE_SIZE;
+                positions[idx * 3 + 2] = srcZ * SQUARE_SIZE + minZ;
 
                 uvs[idx * 2 + 0] = gx / (gridW - 1);
                 uvs[idx * 2 + 1] = gz / (gridH - 1);

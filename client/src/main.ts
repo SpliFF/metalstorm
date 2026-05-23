@@ -741,7 +741,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 height: map.heightElmos,
             }, scene);
             water.position.x = map.widthElmos / 2;
-            water.position.z = map.heightElmos / 2;
+            water.position.z = -map.heightElmos / 2;
             water.position.y = 0;
             water.isPickable = false;
             // Put water in its own rendering group *after* terrain
