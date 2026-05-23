@@ -169,7 +169,7 @@ CSolidObject* CGroundBlockingObjectMap::GroundBlocked(int x, int z) const {
 CSolidObject* CGroundBlockingObjectMap::GroundBlocked(const float3& pos) const {
 	RECOIL_DETAILED_TRACY_ZONE;
 	const int xSqr = int(pos.x / SQUARE_SIZE);
-	const int zSqr = int(pos.z / SQUARE_SIZE);
+	const int zSqr = int((pos.z - float3::minzpos) / SQUARE_SIZE);
 	return (GroundBlocked(xSqr, zSqr));
 }
 
@@ -201,7 +201,7 @@ bool CGroundBlockingObjectMap::GroundBlocked(const float3& pos, const CSolidObje
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	const int xSqr = static_cast<unsigned>(pos.x / SQUARE_SIZE);
-	const int zSqr = static_cast<unsigned>(pos.z / SQUARE_SIZE);
+	const int zSqr = static_cast<unsigned>((pos.z - float3::minzpos) / SQUARE_SIZE);
 	return (GroundBlocked(xSqr, zSqr, ignoreObj));
 }
 
@@ -210,7 +210,7 @@ CGroundBlockingObjectMap::BlockingMapCell CGroundBlockingObjectMap::GetCellUnsaf
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	const int xSqr = static_cast<unsigned>(pos.x / SQUARE_SIZE);
-	const int zSqr = static_cast<unsigned>(pos.z / SQUARE_SIZE);
+	const int zSqr = static_cast<unsigned>((pos.z - float3::minzpos) / SQUARE_SIZE);
 	return (GetCellUnsafeConst(zSqr * mapDims.mapx + xSqr));
 }
 

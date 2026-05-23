@@ -126,7 +126,7 @@ bool CCollisionHandler::CollisionFootPrint(const CSolidObject* o, const float3& 
 	// projectile might have tunneled across blocking squares to get to <p>)
 	// note: if we get here <v> is always a box
 	const int hmx = p.x / SQUARE_SIZE;
-	const int hmz = p.z / SQUARE_SIZE;
+	const int hmz = (p.z - float3::minzpos) / SQUARE_SIZE;
 	const int idx = hmx + hmz * mapDims.mapx;
 
 	return (groundBlockingObjectMap.ObjectInCell(idx, o));

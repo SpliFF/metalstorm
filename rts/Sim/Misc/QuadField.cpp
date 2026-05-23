@@ -253,7 +253,7 @@ void CQuadField::GetQuadsOnRay(QuadFieldQuery& qfq, const float3& start, const f
 	const float3 to = start + (dir * length);
 
 	const bool noXdir = (math::floor(start.x * invQuadSize.x) == math::floor(to.x * invQuadSize.x));
-	const bool noZdir = (math::floor(start.z * invQuadSize.y) == math::floor(to.z * invQuadSize.y));
+	const bool noZdir = (math::floor((start.z - float3::minzpos) * invQuadSize.y) == math::floor((to.z - float3::minzpos) * invQuadSize.y));
 
 
 	// special case

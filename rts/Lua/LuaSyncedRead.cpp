@@ -7276,7 +7276,7 @@ int LuaSyncedRead::GetGroundInfo(lua_State* L)
 	const float z = luaL_checkfloat(L, 2);
 
 	const int ix = std::clamp(x, 0.0f, float3::maxxpos) / (SQUARE_SIZE * 2);
-	const int iz = std::clamp(z, 0.0f, float3::maxzpos) / (SQUARE_SIZE * 2);
+	const int iz = (std::clamp(z, float3::minzpos, float3::maxzpos) - float3::minzpos) / (SQUARE_SIZE * 2);
 
 	const int maxIndex = (mapDims.hmapx * mapDims.hmapy) - 1;
 	const int sqrIndex = std::min(maxIndex, (mapDims.hmapx * iz) + ix);

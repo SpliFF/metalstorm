@@ -115,18 +115,20 @@ float2 GetMapBoundaryIntersectionPoints(const float3 start, const float3 dir)
 	const float rcpdirx = (dir.x != 0.0f)? (1.0f / dir.x): 10000.0f;
 	const float rcpdirz = (dir.z != 0.0f)? (1.0f / dir.z): 10000.0f;
 
-	const float mapwidth  = float3::maxxpos + 1.0f;
-	const float mapheight = float3::maxzpos + 1.0f;
+	const float mapxLo = 0.0f;
+	const float mapxHi = float3::maxxpos + 1.0f;
+	const float mapzLo = float3::minzpos;
+	const float mapzHi = float3::maxzpos + 1.0f;
 
 	// x-component
-	float xl1 = (    0.0f - start.x) * rcpdirx;
-	float xl2 = (mapwidth - start.x) * rcpdirx;
+	float xl1 = (mapxLo - start.x) * rcpdirx;
+	float xl2 = (mapxHi - start.x) * rcpdirx;
 	float xnear = std::min(xl1, xl2);
 	float xfar  = std::max(xl1, xl2);
 
 	// z-component
-	float zl1 = (     0.0f - start.z) * rcpdirz;
-	float zl2 = (mapheight - start.z) * rcpdirz;
+	float zl1 = (mapzLo - start.z) * rcpdirz;
+	float zl2 = (mapzHi - start.z) * rcpdirz;
 	float znear = std::min(zl1, zl2);
 	float zfar  = std::max(zl1, zl2);
 

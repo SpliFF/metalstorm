@@ -264,8 +264,8 @@ inline float CReadMap::SetHeightValue(float& heightRef, const int idx, const flo
 }
 
 
-static inline float3 CornerSqrToPosRaw(const float* hm, int sqx, int sqz) { return {sqx * SQUARE_SIZE * 1.0f, hm[(sqz * mapDims.mapxp1) + sqx], sqz * SQUARE_SIZE * 1.0f}; }
-static inline float3 CenterSqrToPosRaw(const float* hm, int sqx, int sqz) { return {sqx * SQUARE_SIZE * 1.0f, hm[(sqz * mapDims.mapx  ) + sqx], sqz * SQUARE_SIZE * 1.0f}; }
+static inline float3 CornerSqrToPosRaw(const float* hm, int sqx, int sqz) { return {sqx * SQUARE_SIZE * 1.0f, hm[(sqz * mapDims.mapxp1) + sqx], sqz * SQUARE_SIZE * 1.0f + float3::minzpos}; }
+static inline float3 CenterSqrToPosRaw(const float* hm, int sqx, int sqz) { return {sqx * SQUARE_SIZE * 1.0f, hm[(sqz * mapDims.mapx  ) + sqx], sqz * SQUARE_SIZE * 1.0f + float3::minzpos}; }
 
 static inline float3 CornerSqrToPos(const float* hm, int sqx, int sqz) { return (CornerSqrToPosRaw(hm, std::clamp(sqx, 0, mapDims.mapx  ), std::clamp(sqz, 0, mapDims.mapy  ))); }
 static inline float3 CenterSqrToPos(const float* hm, int sqx, int sqz) { return (CenterSqrToPosRaw(hm, std::clamp(sqx, 0, mapDims.mapxm1), std::clamp(sqz, 0, mapDims.mapym1))); }

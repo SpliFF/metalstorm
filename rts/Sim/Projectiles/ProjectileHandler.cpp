@@ -144,10 +144,13 @@ void CProjectileHandler::ConfigNotify(const std::string& key, const std::string&
 static void MAPPOS_SANITY_CHECK(const float3 v)
 {
 	v.AssertNaNs();
-	assert(v.x >= -(float3::maxxpos * 16.0f));
-	assert(v.x <=  (float3::maxxpos * 16.0f));
-	assert(v.z >= -(float3::maxzpos * 16.0f));
-	assert(v.z <=  (float3::maxzpos * 16.0f));
+	// Sanity bounds = map extent * 16 in either direction (RH-safe).
+	const float xExt = float3::maxxpos;
+	const float zExt = float3::maxzpos - float3::minzpos;
+	assert(v.x >= -(xExt * 16.0f));
+	assert(v.x <=  (xExt * 16.0f));
+	assert(v.z >= float3::minzpos - (zExt * 16.0f));
+	assert(v.z <= float3::maxzpos + (zExt * 16.0f));
 	assert(v.y >= -MAX_PROJECTILE_HEIGHT);
 	assert(v.y <=  MAX_PROJECTILE_HEIGHT);
 }
