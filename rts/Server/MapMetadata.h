@@ -11,7 +11,7 @@
 struct sqlite3;
 
 /// Increment to reprocess all maps.
-constexpr int MAP_FORMAT_VERSION = 12;
+constexpr int MAP_FORMAT_VERSION = 14;
 
 struct MapStartPosition {
     float x = 0, z = 0;
@@ -104,6 +104,15 @@ struct MapMetadata {
     std::string smfPath;
     std::string smtPath;
     bool hasLuaGaia = false;
+    /// `mapinfo.lua → legacyCoordSystem` — true (default) when the
+    /// map's source files (`mapinfo.lua`, `featureplacer/*.lua`, etc.)
+    /// are authored in Spring's legacy LH frame, i.e. `+Z` forward.
+    /// The importer mirrors `z` (and feature `rotation`) on read so
+    /// every record persisted here is RH-canonical regardless. The
+    /// flag is preserved so downstream Lua-VFS reads of raw map data
+    /// know whether the on-disk Lua source still speaks LH (legacy)
+    /// or RH (new content).
+    bool legacyCoordSystem = true;
 
     std::vector<MapStartPosition> startPositions;
     /// Type names — strings indexed by `MapFeatureData::featureType`.

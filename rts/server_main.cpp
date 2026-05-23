@@ -702,6 +702,9 @@ int main(int argc, char* argv[])
         sim.SetRoster(std::move(merged));
     }
 
+    if (!mapMeta.id.empty())
+        sim.SetMapMetadata(mapMeta);
+
     sim.Init(smfPath);
 
     // Push a current StandingOrderState snapshot to one client. Used

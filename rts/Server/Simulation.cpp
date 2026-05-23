@@ -186,6 +186,7 @@ bool CSimulation::LoadMap(const std::string& mapName)
     SLOG(SPRING_LOG_INFO, "map loaded: %dx%d (%dx%d elmos)",
         mapDims.mapx, mapDims.mapy,
         mapDims.mapx * SQUARE_SIZE, mapDims.mapy * SQUARE_SIZE);
+    loadedMapPath = smfPath;
     return true;
 }
 
@@ -418,22 +419,72 @@ void CSimulation::Init(const std::string& mapName)
 
         auto& teams = teamHandler.GetTeams();
         teams.resize(totalTeams);
+
+        // Resolve real start positions. Preferred source: the
+        // persisted `MapMetadata.startPositions` populated by
+        // mapconverter, whose Z values are already RH-canonical
+        // (MapProcessor flips them at conversion when the source map
+        // is `legacyCoordSystem = true`). Fallback: live-parse
+        // mapinfo.lua via MapParser and flip if legacy. Final
+        // fallback: map centre (sim never refuses to start).
+        const float3 mapCenter(
+            mapDims.mapx * SQUARE_SIZE * 0.5f, 0.0f,
+            mapDims.mapy * SQUARE_SIZE * 0.5f + float3::minzpos);
+        std::unique_ptr<MapParser> mapStartParser;
+        const bool useMetadata = haveMapMetadata && !mapMetadata.startPositions.empty();
+        if (!useMetadata && hasMap && !loadedMapPath.empty()) {
+            mapStartParser = std::make_unique<MapParser>(loadedMapPath);
+            if (!mapStartParser->IsValid()) mapStartParser.reset();
+        }
+
+        // The map's RH-flip flag: applies when the live mapinfo.lua
+        // path is taken (MapMetadata records are pre-flipped). Falls
+        // back to true (LH-source) for unknown maps so dev-test maps
+        // shipped under the old convention still work.
+        const bool mapIsLegacy = haveMapMetadata
+            ? mapMetadata.legacyCoordSystem
+            : true;
+
+        // Roster ordering matters here: the i-th roster entry slots
+        // into team i, and its `startPosIdx` indexes the map's teams[]
+        // array. We accept duplicates / -1 / out-of-range entries and
+        // fall back to map centre so the sim never refuses to start.
+        auto findRosterStartPos = [&](int teamId) -> int {
+            for (const auto& e : rosterEntries) {
+                if (e.team == teamId) return e.startPosIdx;
+            }
+            return -1;
+        };
+
         for (int i = 0; i < playerTeamCount; i++) {
             teams[i].teamNum = i;
             teams[i].teamAllyteam = i;
             teams[i].SetDefaultColor(i);
             teams[i].SetMaxUnits(MAX_UNITS / std::max(1, totalTeams));
-            if (hasMap) {
-                // Start positions are set for real in SetupTestGame
-                // once MapParser has had a chance to resolve them
-                // against the map's teams[] table. The placeholder
-                // here is only used by sim code that reads
-                // team->startPos before a unit has been spawned.
-                teams[i].SetStartPos(float3(
-                    mapDims.mapx * SQUARE_SIZE * 0.5f,
-                    0.0f,
-                    mapDims.mapy * SQUARE_SIZE * 0.5f));
+            if (!hasMap) continue;
+
+            float3 startPos = mapCenter;
+            const int posIdx = findRosterStartPos(i);
+
+            if (useMetadata && posIdx >= 0
+                && posIdx < static_cast<int>(mapMetadata.startPositions.size()))
+            {
+                const auto& sp = mapMetadata.startPositions[posIdx];
+                startPos.x = sp.x;
+                startPos.z = sp.z;
+            } else if (posIdx >= 0 && mapStartParser != nullptr) {
+                float3 mp;
+                if (mapStartParser->GetStartPos(posIdx, mp)) {
+                    // y unspecified by mapinfo.lua — units rely on
+                    // ground sampling for vertical placement; leave 0
+                    // here, the spawn path (CreateUnit → CUnit::PreInit)
+                    // clamps to ground. Apply the RH flip if the map
+                    // is legacy LH (no flag → assume legacy).
+                    startPos.x = mp.x;
+                    startPos.z = mapIsLegacy ? -mp.z : mp.z;
+                }
             }
+            teams[i].SetStartPos(startPos);
         }
 
         // Gaia team: neutral/environment, its own ally team, no allies

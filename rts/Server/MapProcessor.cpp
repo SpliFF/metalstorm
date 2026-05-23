@@ -148,6 +148,21 @@ bool MapProcessor::ReadMapInfo(const std::string& mapDir, MapMetadata& meta) {
                 meta.maxMetal = getFloat("maxmetal", "maxMetal", 2.0f);
                 meta.extractorRadius = getFloat("extractorradius", "extractorRadius", 100.0f);
 
+                // Per-map coordinate frame opt-in. Defaults to LH (`true`)
+                // when the field is absent so every existing Spring map
+                // (whose mapinfo.lua, featureplacer/*.lua, etc. were
+                // authored against +Z forward) gets its positions
+                // flipped on import. New RH-native maps set
+                // `legacyCoordSystem = false` to opt out. See
+                // PLAN-coordinate-system.md.
+                {
+                    lua_getfield(L, -1, "legacycoordsystem");
+                    if (lua_isnil(L, -1)) { lua_pop(L, 1); lua_getfield(L, -1, "legacyCoordSystem"); }
+                    if (!lua_isnil(L, -1))
+                        meta.legacyCoordSystem = lua_toboolean(L, -1) != 0;
+                    lua_pop(L, 1);
+                }
+
                 // voidWater lives at the root
                 lua_getfield(L, -1, "voidwater");
                 if (lua_isnil(L, -1)) { lua_pop(L, 1); lua_getfield(L, -1, "voidWater"); }
@@ -697,6 +712,32 @@ bool MapProcessor::ProcessMap(MapMetadata& meta) {
     ExtractMinimapWebP(meta);          // 1024² thumbnail for the lobby browser
     ExtractDecalTextures(meta);
     EnumerateWidgets(meta);
+
+    // RH content-preprocessing: legacy LH map source files (mapinfo.lua,
+    // featureplacer/*.lua, SMF-embedded features) speak +Z forward. The
+    // engine has been migrated to glTF-native RH with world Z in
+    // `[-mapy * SQUARE_SIZE, 0]`. We flip the Z component of every
+    // map-derived position here so the persisted MapMetadata record is
+    // RH-canonical regardless of the source convention — downstream
+    // consumers (lobby, sim, Lua bridge) all see the same RH-frame
+    // coordinates without any per-call adapter for map content.
+    //
+    // Feature rotations (heading units) are NOT flipped: under both
+    // conventions a given numeric heading names the same world
+    // direction (`heading = 0` originally meant +Z under LH and is
+    // now -Z under RH, i.e. the visual "front" direction; a feature
+    // authored with `rot = 16384` (90°) still faces +X / "east" in
+    // either frame).
+    if (meta.legacyCoordSystem) {
+        for (auto& sp : meta.startPositions)
+            sp.z = -sp.z;
+        for (auto& f : meta.features)
+            f.z = -f.z;
+        SLOG(SPRING_LOG_INFO,
+            "%s: legacyCoordSystem=true — flipped Z on %zu start positions and %zu features (LH → RH)",
+            meta.id.c_str(), meta.startPositions.size(), meta.features.size());
+    }
+
     return true;
 }
 

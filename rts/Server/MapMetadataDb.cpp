@@ -27,7 +27,7 @@ void MapMetadataDb::EnsureTable(sqlite3* db) {
     {
         sqlite3_stmt* stmt = nullptr;
         int rc = sqlite3_prepare_v2(db,
-            "SELECT sound_preset FROM maps LIMIT 1", -1, &stmt, nullptr);
+            "SELECT legacy_coord_system FROM maps LIMIT 1", -1, &stmt, nullptr);
         sqlite3_finalize(stmt);
         if (rc != SQLITE_OK) {
             sqlite3_exec(db, "DROP TABLE IF EXISTS maps", nullptr, nullptr, nullptr);
@@ -70,7 +70,14 @@ void MapMetadataDb::EnsureTable(sqlite3* db) {
             -- Map-wide reverb preset (mapinfo.lua → sound.preset). Empty
             -- or "default" means no reverb. Client maps the name to a
             -- ConvolverNode IR fetched from sounds/efx/<preset>.webm.
-            sound_preset TEXT
+            sound_preset TEXT,
+            -- True (default) when the map's source files (mapinfo.lua,
+            -- featureplacer/*.lua, SMF feature placements) are authored
+            -- against Spring's LH frame (+Z forward). Persisted only as
+            -- diagnostic / so Lua VFS reads of raw map content can pick
+            -- the right adapter — positions on the record itself are
+            -- already RH after the importer.
+            legacy_coord_system INTEGER
         );
     )", nullptr, nullptr, nullptr);
 }
@@ -158,11 +165,11 @@ void MapMetadataDb::StoreMetadata(sqlite3* db, const MapMetadata& m) {
          feature_types,features_blob,feature_defs,
          water_base_color,water_surface_color,water_min_color,
          water_surface_alpha,water_damage,void_water,
-         widgets,sound_preset)
+         widgets,sound_preset,legacy_coord_system)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?,?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?,
-                ?,?)
+                ?,?,?)
     )", -1, &stmt, nullptr);
 
     int i = 1;
@@ -214,6 +221,7 @@ void MapMetadataDb::StoreMetadata(sqlite3* db, const MapMetadata& m) {
     sqlite3_bind_int(stmt, i++, m.water.voidWater ? 1 : 0);
     sqlite3_bind_text(stmt, i++, widgetsStr.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, i++, m.soundPreset.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, i++, m.legacyCoordSystem ? 1 : 0);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 }
@@ -246,7 +254,8 @@ std::vector<MapMetadata> MapMetadataDb::GetAllMaps(sqlite3* db) {
         "detail_normal_tex,splat_scales,splat_mults,"
         "feature_types,features_blob,feature_defs,"
         "water_base_color,water_surface_color,water_min_color,"
-        "water_surface_alpha,water_damage,void_water,widgets,sound_preset FROM maps", -1, &stmt, nullptr);
+        "water_surface_alpha,water_damage,void_water,widgets,sound_preset,"
+        "legacy_coord_system FROM maps", -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
         SLOG(SPRING_LOG_ERROR, "GetAllMaps: SQL prepare failed: %s",
             sqlite3_errmsg(db));
@@ -397,6 +406,16 @@ std::vector<MapMetadata> MapMetadataDb::GetAllMaps(sqlite3* db) {
 
         // Map sound preset (mapinfo.lua → sound.preset).
         m.soundPreset = maybeStr(i++);
+
+        // legacyCoordSystem opt-in (defaults true if the column is NULL —
+        // i.e. data persisted by an older importer that pre-dated the
+        // field; those records were necessarily LH since RH is opt-in).
+        if (sqlite3_column_type(stmt, i) == SQLITE_NULL) {
+            m.legacyCoordSystem = true;
+            i++;
+        } else {
+            m.legacyCoordSystem = sqlite3_column_int(stmt, i++) != 0;
+        }
 
         result.push_back(std::move(m));
     }

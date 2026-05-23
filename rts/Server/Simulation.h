@@ -12,6 +12,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "Server/MapMetadata.h"
+
 /// Global pointer to the per-team AI name map, set by CSimulation::Init().
 /// Consumed by LuaSyncedRead (GetTeamInfo, GetTeamLuaAI) to report AI status.
 extern const std::unordered_map<int, std::string>* gAITeams;
@@ -41,6 +43,16 @@ public:
     /// after parsing --player / --ai args, before Init(). Passing an
     /// empty vector keeps the legacy 2-team dev fallback path.
     void SetRoster(std::vector<RosterEntry> roster) { rosterEntries = std::move(roster); }
+
+    /// Install the persisted MapMetadata record (read from SQLite by
+    /// mapconverter). Optional — when set, Init() reads team start
+    /// positions from this record. Start positions are already
+    /// RH-canonical (legacyCoordSystem maps had their Z flipped at
+    /// conversion time, see MapProcessor::ProcessMap).
+    void SetMapMetadata(MapMetadata meta) {
+        mapMetadata = std::move(meta);
+        haveMapMetadata = true;
+    }
 
     /// Initialise all sim subsystems. Must be called before SimFrame().
     /// mapName is the path to the .smf file (empty = no map).
@@ -91,6 +103,18 @@ private:
     /// teams at the map centre). Non-empty = one spawn per entry at
     /// the map's corresponding start position.
     std::vector<RosterEntry> rosterEntries;
+
+    /// Absolute path to the loaded SMF file, captured during LoadMap.
+    /// Lets later Init steps (e.g. start-position resolution) re-open
+    /// the map via MapParser without rediscovering it from disk.
+    std::string loadedMapPath;
+
+    /// Persisted map metadata installed via SetMapMetadata(). When
+    /// `haveMapMetadata` is true, Init() reads start positions from
+    /// `mapMetadata.startPositions` (already RH-canonical). Otherwise
+    /// it falls back to MapParser → mapinfo.lua live parsing.
+    MapMetadata mapMetadata;
+    bool haveMapMetadata = false;
 
 public:
     /// Per-team AI info, populated by Init() from rosterEntries.
