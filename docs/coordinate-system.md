@@ -33,7 +33,7 @@ Every layer adopts this convention internally:
 | Sidecar files (`.config.lua` / `.config.json` / `.meta.lua`) | RH | `configVersion = 5+`. |
 | Lua API surface (default)     | RH         | `Spring.GetUnitDirection` / `Spring.GetVectorFromHeading` etc. |
 
-## `legacyCoordSystem` — the per-game opt-in bridge
+## `legacyCoordSystem` — the per-game and per-map opt-in bridge
 
 Spring-derived games (Zero-K, Balanced Annihilation, …) ship with widgets
 and gadgets authored against the legacy LH convention: `heading = 0`
@@ -41,7 +41,42 @@ meant `+Z`, `lwheel.offset.z` is positive for the left wheel, etc. Porting
 every script by hand isn't feasible, so we run those scripts through a
 runtime adapter.
 
-### Opting in
+Maps ship separately from games and carry the same kind of legacy LH
+content (`mapinfo.lua → teams[N].startPos.z`, SMF feature placements,
+`featureplacer/*.lua`). They get the same opt-in field; the field is
+read by the **map importer** rather than at runtime so the persisted
+record is RH-canonical regardless. See "Per-map flag" below.
+
+### Per-map flag
+
+`mapinfo.lua` may declare:
+
+```lua
+return {
+    name = "Wanderlust",
+    ...
+    legacyCoordSystem = true,   -- LH source data (default if absent)
+}
+```
+
+`MapProcessor` parses the field and **flips the Z component of every
+start position and SMF/featureplacer feature placement** when it's true,
+so the persisted `MapMetadata` record is RH-canonical regardless of the
+source convention. Feature rotations stay numerically unchanged (the
+same heading number names the same world direction in both frames; only
+`GetVectorFromHeading` resolves to the new -Z axis).
+
+Engine world bounds are now `[minzpos, maxzpos] = [-(mapy * SQUARE_SIZE - 1), 0]`
+on the Z axis (`float3::minzpos`, `float3::maxzpos` in
+[`rts/System/float3.h`](../rts/System/float3.h)). Every spatial index in
+the sim (heightmap, QuadField, LOS, path finder, metal/blocking map,
+yardmaps, …) subtracts `minzpos` from a world Z before dividing by its
+grid pitch, so the underlying grid storage stays positive-indexed from 0
+upward — only the world↔grid mapping changed.
+
+`MAP_FORMAT_VERSION` was bumped to 14 alongside this change.
+
+### Per-game flag
 
 Add one field to the game's `modinfo.lua`:
 

@@ -1041,7 +1041,9 @@ export class RTSCamera {
         const fovRad = this.camera.fov || (45 * Math.PI / 180);
         const half = Math.max(this.mapWidth, this.mapHeight) * 0.5 * padding;
         const distance = half / Math.tan(fovRad * 0.5);
-        const lookAt = { x: this.mapWidth * 0.5, y: 0, z: this.mapHeight * 0.5 };
+        // Server world Z runs `[-mapHeight, 0]` under RH bounds; centre
+        // the lookAt at the map midpoint in that frame.
+        const lookAt = { x: this.mapWidth * 0.5, y: 0, z: -this.mapHeight * 0.5 };
         // Place camera at (cx, distance·sin(pitch), cz - distance·cos(pitch))
         // — a slight southward offset so non-90° pitches still frame the
         // map without parallax skew.

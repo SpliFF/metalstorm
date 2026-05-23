@@ -193,10 +193,12 @@ export class Minimap {
         // No lighting — minimap uses unlit emissive materials so the
         // terrain texture shows up at full brightness regardless of angle.
 
-        // Orthographic camera looking down
+        // Orthographic camera looking down. Server world Z runs from
+        // `-mapHeight` to `0` (RH-native, Option B); centre the camera
+        // at the map's middle in that frame.
         this.camera = new FreeCamera('minimapCam',
-            new Vector3(this.mapWidth / 2, 10000, this.mapHeight / 2), this.scene);
-        this.camera.setTarget(new Vector3(this.mapWidth / 2, 0, this.mapHeight / 2));
+            new Vector3(this.mapWidth / 2, 10000, -this.mapHeight / 2), this.scene);
+        this.camera.setTarget(new Vector3(this.mapWidth / 2, 0, -this.mapHeight / 2));
         this.camera.mode = FreeCamera.ORTHOGRAPHIC_CAMERA;
         this.updateOrthoBounds();
 
@@ -222,8 +224,8 @@ export class Minimap {
         this.mapWidth = widthElmos;
         this.mapHeight = heightElmos;
         this.camera.position.x = widthElmos / 2;
-        this.camera.position.z = heightElmos / 2;
-        this.camera.setTarget(new Vector3(widthElmos / 2, 0, heightElmos / 2));
+        this.camera.position.z = -heightElmos / 2;
+        this.camera.setTarget(new Vector3(widthElmos / 2, 0, -heightElmos / 2));
         this.updateOrthoBounds();
     }
 
@@ -258,7 +260,7 @@ export class Minimap {
                 width: this.mapWidth, height: this.mapHeight,
             }, this.scene);
             quad.position.x = this.mapWidth / 2;
-            quad.position.z = this.mapHeight / 2;
+            quad.position.z = -this.mapHeight / 2;
 
             const tex = new Texture(`${mapBaseUrl}/minimap.ktx2`, this.scene);
             const mat = new StandardMaterial('minimapMat', this.scene);
@@ -818,9 +820,11 @@ export class Minimap {
         const cx = (e.clientX - rect.left) / rect.width;
         const cz = (e.clientY - rect.top) / rect.height;
         // Map canvas coords to world space. The ortho camera is centred
-        // on the map, so 0..1 → full map extent.
+        // on the map; world X runs `[0, mapWidth]` and world Z (under
+        // RH bounds) runs `[-mapHeight, 0]`. Canvas Y=0 (top of minimap)
+        // corresponds to the most-negative world Z.
         const mx = cx * this.mapWidth;
-        const mz = cz * this.mapHeight;
+        const mz = (cz - 1) * this.mapHeight;
 
         if (e.button === 0) {
             // Left click — move main camera to this position

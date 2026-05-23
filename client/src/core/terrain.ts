@@ -67,6 +67,12 @@ export function buildTerrainMesh(
 
     const hRange = dims.maxHeight - dims.minHeight;
 
+    // Server world-Z range is `[-(mapy * SQUARE_SIZE - 1), 0]` (Option B
+    // from PLAN-coordinate-system.md). Terrain vertices need to sit in
+    // that same range so entity positions streamed from the server land
+    // on the visible ground. Shift every Z by `minZ = -(mapy * SQUARE_SIZE)`.
+    const minZ = -(dims.mapy * SQUARE_SIZE);
+
     for (let gz = 0; gz < gridH; gz++) {
         const srcZ = Math.min(gz * stepZ, hmH - 1);
         for (let gx = 0; gx < gridW; gx++) {
@@ -78,7 +84,7 @@ export function buildTerrainMesh(
 
             positions[idx * 3 + 0] = srcX * SQUARE_SIZE;
             positions[idx * 3 + 1] = worldY;
-            positions[idx * 3 + 2] = srcZ * SQUARE_SIZE;
+            positions[idx * 3 + 2] = srcZ * SQUARE_SIZE + minZ;
 
             // UV maps to full map extent (0..1)
             uvs[idx * 2 + 0] = gx / (gridW - 1);
