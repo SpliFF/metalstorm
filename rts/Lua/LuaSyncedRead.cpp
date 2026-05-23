@@ -1569,10 +1569,11 @@ int LuaSyncedRead::GetAllyTeamStartBox(lua_State* L)
 		return 0;
 
 	const AllyTeam& allyTeam = teamHandler.GetAllyTeam(allyTeamID);
+	const float mapHeight = mapDims.mapy * SQUARE_SIZE;
 	const float xmin = (mapDims.mapx * SQUARE_SIZE) * allyTeam.startRectLeft;
-	const float zmin = (mapDims.mapy * SQUARE_SIZE) * allyTeam.startRectTop;
+	const float zmin = float3::minzpos + mapHeight * allyTeam.startRectTop;
 	const float xmax = (mapDims.mapx * SQUARE_SIZE) * allyTeam.startRectRight;
-	const float zmax = (mapDims.mapy * SQUARE_SIZE) * allyTeam.startRectBottom;
+	const float zmax = float3::minzpos + mapHeight * allyTeam.startRectBottom;
 
 	lua_pushnumber(L, xmin);
 	lua_pushnumber(L, zmin);
@@ -7127,13 +7128,12 @@ int LuaSyncedRead::IsPosInMap(lua_State* L)
 	const float z = luaL_checkfloat(L, 2);
 
 	const float mapX = mapDims.mapx * SQUARE_SIZE;
-	const float mapZ = mapDims.mapy * SQUARE_SIZE;
 
 	const bool inMap
 		=  x >= 0
-		&& z >= 0
+		&& z >= float3::minzpos
 		&& x <= mapX
-		&& z <= mapZ
+		&& z <= float3::maxzpos + 1.0f
 	;
 
 	/* Currently, the engine does not support limiting

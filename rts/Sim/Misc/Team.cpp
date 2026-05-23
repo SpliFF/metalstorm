@@ -83,16 +83,20 @@ void CTeam::SetDefaultStartPos()
 	assert(allyTeam == teamAllyteam);
 
 	const AllyTeam& allyTeamData = teamHandler.GetAllyTeam(allyTeam);
-	// pick a spot near the center of our startbox
+	// pick a spot near the center of our startbox. startRect{Top,Bottom}
+	// are normalised ratios in [0, 1]; they map to world Z via
+	// `minzpos + ratio * mapHeight` so a ratio of 0 lands at the
+	// north (most-negative-Z) edge under RH bounds.
+	const float mapHeight = mapDims.mapy * SQUARE_SIZE;
 	const float xmin = (mapDims.mapx * SQUARE_SIZE) * allyTeamData.startRectLeft;
-	const float zmin = (mapDims.mapy * SQUARE_SIZE) * allyTeamData.startRectTop;
+	const float zmin = float3::minzpos + mapHeight * allyTeamData.startRectTop;
 	const float xmax = (mapDims.mapx * SQUARE_SIZE) * allyTeamData.startRectRight;
-	const float zmax = (mapDims.mapy * SQUARE_SIZE) * allyTeamData.startRectBottom;
+	const float zmax = float3::minzpos + mapHeight * allyTeamData.startRectBottom;
 	const float xcenter = (xmin + xmax) * 0.5f;
 	const float zcenter = (zmin + zmax) * 0.5f;
 
 	assert(xcenter >= 0 && xcenter < mapDims.mapx * SQUARE_SIZE);
-	assert(zcenter >= 0 && zcenter < mapDims.mapy * SQUARE_SIZE);
+	assert(zcenter >= float3::minzpos && zcenter < float3::maxzpos + 1.0f);
 
 	startPos.x = (teamNum - teamHandler.ActiveTeams()) * 4 * SQUARE_SIZE + xcenter;
 	startPos.z = (teamNum - teamHandler.ActiveTeams()) * 4 * SQUARE_SIZE + zcenter;
@@ -103,11 +107,12 @@ void CTeam::ClampStartPosInStartBox(float3* pos) const
 	RECOIL_DETAILED_TRACY_ZONE;
 	const int allyTeam = teamHandler.AllyTeam(teamNum);
 	const AllyTeam& allyTeamData = teamHandler.GetAllyTeam(allyTeam);
+	const float mapHeight = mapDims.mapy * SQUARE_SIZE;
 	const SRectangle rect(
 		allyTeamData.startRectLeft   * mapDims.mapx * SQUARE_SIZE,
-		allyTeamData.startRectTop    * mapDims.mapy * SQUARE_SIZE,
+		int(float3::minzpos + mapHeight * allyTeamData.startRectTop),
 		allyTeamData.startRectRight  * mapDims.mapx * SQUARE_SIZE,
-		allyTeamData.startRectBottom * mapDims.mapy * SQUARE_SIZE
+		int(float3::minzpos + mapHeight * allyTeamData.startRectBottom)
 	);
 
 	int2 ipos(pos->x, pos->z);

@@ -845,10 +845,11 @@ int LuaSyncedCtrl::SetAllyTeamStartBox(lua_State* L)
 		return 0;
 	}
 
+	const float mapHeight       = mapDims.mapy * SQUARE_SIZE;
 	const float startRectLeft   = xMin / (mapDims.mapx * SQUARE_SIZE);
-	const float startRectTop    = zMin / (mapDims.mapy * SQUARE_SIZE);
+	const float startRectTop    = (zMin - float3::minzpos) / mapHeight;
 	const float startRectRight  = xMax / (mapDims.mapx * SQUARE_SIZE);
-	const float startRectBottom = zMax / (mapDims.mapy * SQUARE_SIZE);
+	const float startRectBottom = (zMax - float3::minzpos) / mapHeight;
 
 	teamHandler.SetAllyTeamStartBox(allyTeamID, startRectLeft, startRectTop, startRectRight, startRectBottom);
 	return 0;
