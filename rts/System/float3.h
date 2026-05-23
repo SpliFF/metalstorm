@@ -847,15 +847,30 @@ public:
 	/**
 	 * @brief max x pos
 	 *
-	 * Static value containing the maximum x position (:= mapDims.mapx-1)
+	 * Static value containing the maximum x position (:= mapDims.mapx-1).
 	 * @note maxxpos is set after loading the map.
 	 */
 	static float maxxpos;
 
 	/**
+	 * @brief min z pos
+	 *
+	 * Static value containing the minimum z position. Under RH-native
+	 * world coords (Option B from PLAN-coordinate-system.md), this is
+	 * `-(mapDims.mapy * SQUARE_SIZE - 1)` so the world Z range is
+	 * `[minzpos, maxzpos] = [-mapZ, 0]`. Spatial indexers compute
+	 * grid Z via `(worldZ - minzpos) / squareSize`, which collapses
+	 * to `worldZ / squareSize` when `minzpos = 0`.
+	 * @note minzpos is set after loading the map.
+	 */
+	static float minzpos;
+
+	/**
 	 * @brief max z pos
 	 *
-	 * Static value containing the maximum z position (:= mapDims.mapy-1)
+	 * Static value containing the maximum z position. Under RH-native
+	 * world coords, the world's `+Z` boundary is at the origin and
+	 * the negative-Z extent reaches `minzpos`.
 	 * @note maxzpos is set after loading the map.
 	 */
 	static float maxzpos;

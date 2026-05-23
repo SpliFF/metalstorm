@@ -13,6 +13,7 @@ CR_REG_METADATA(float3, (CR_MEMBER(x), CR_MEMBER(y), CR_MEMBER(z)))
 
 //! gets initialized later when the map is loaded
 float float3::maxxpos = -1.0f;
+float float3::minzpos = 0.0f;
 float float3::maxzpos = -1.0f;
 
 float3 float3::PickNonParallel() const
@@ -31,7 +32,7 @@ bool float3::IsInBounds() const
 {
 	assert(maxxpos > 0.0f); // check if initialized
 
-	return ((x >= 0.0f && x <= maxxpos) && (z >= 0.0f && z <= maxzpos));
+	return ((x >= 0.0f && x <= maxxpos) && (z >= minzpos && z <= maxzpos));
 }
 
 
@@ -40,7 +41,7 @@ void float3::ClampInBounds()
 	assert(maxxpos > 0.0f); // check if initialized
 
 	x = std::clamp(x, 0.0f, maxxpos);
-	z = std::clamp(z, 0.0f, maxzpos);
+	z = std::clamp(z, minzpos, maxzpos);
 }
 
 
@@ -48,7 +49,7 @@ bool float3::IsInMap() const
 {
 	assert(maxxpos > 0.0f); // check if initialized
 
-	return ((x >= 0.0f && x <= maxxpos + 1) && (z >= 0.0f && z <= maxzpos + 1));
+	return ((x >= 0.0f && x <= maxxpos + 1) && (z >= minzpos - 1 && z <= maxzpos + 1));
 }
 
 
@@ -57,7 +58,7 @@ void float3::ClampInMap()
 	assert(maxxpos > 0.0f); // check if initialized
 
 	x = std::clamp(x, 0.0f, maxxpos + 1);
-	z = std::clamp(z, 0.0f, maxzpos + 1);
+	z = std::clamp(z, minzpos - 1, maxzpos + 1);
 }
 
 
