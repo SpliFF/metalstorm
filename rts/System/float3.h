@@ -875,6 +875,16 @@ public:
 	 */
 	static float maxzpos;
 
+	/// Translate a world-Z coordinate (range `[minzpos, maxzpos]`) into
+	/// the always-positive grid-Z frame (range `[0, maxzpos - minzpos]`)
+	/// used by every spatial index in the sim. Under Option B with
+	/// `minzpos = -mapZ` and `maxzpos = 0`, this is `worldZ + mapZ`; with
+	/// today's `minzpos = 0` it's a no-op.
+	static float worldToGridZ(float worldZ) { return worldZ - minzpos; }
+	/// Inverse of `worldToGridZ` — used when reconstructing a world
+	/// position from a grid-Z index (`sqz * SQUARE_SIZE + minzpos`).
+	static float gridToWorldZ(float gridZ) { return gridZ + minzpos; }
+
 
 public:
 	union {

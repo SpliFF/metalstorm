@@ -1197,9 +1197,9 @@ unsigned int QTPFS::PathManager::QueueSearch(
 		assert(object->pos.z == sourcePoint.z);
 	}
 	assert(targetPoint.x >= 0.f);
-	assert(targetPoint.z >= 0.f);
+	assert(targetPoint.z >= float3::minzpos);
 	assert(targetPoint.x / SQUARE_SIZE <= mapDims.mapx);
-	assert(targetPoint.z / SQUARE_SIZE <= mapDims.mapy);
+	assert((targetPoint.z - float3::minzpos) / SQUARE_SIZE <= mapDims.mapy);
 
 	assert(newPath != nullptr);
 	assert(newSearch != nullptr);

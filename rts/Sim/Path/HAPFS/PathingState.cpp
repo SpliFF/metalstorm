@@ -918,8 +918,8 @@ void PathingState::PromotePathForCurrentFrame(
 	)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	int2 strtBlock = {int(startPosition.x / BLOCK_PIXEL_SIZE), int(startPosition.z / BLOCK_PIXEL_SIZE)};;
-	int2 goalBlock = {int(goalPosition.x / BLOCK_PIXEL_SIZE), int(goalPosition.z / BLOCK_PIXEL_SIZE)};
+	int2 strtBlock = {int(startPosition.x / BLOCK_PIXEL_SIZE), int((startPosition.z - float3::minzpos) / BLOCK_PIXEL_SIZE)};;
+	int2 goalBlock = {int(goalPosition.x / BLOCK_PIXEL_SIZE), int((goalPosition.z - float3::minzpos) / BLOCK_PIXEL_SIZE)};
 
 	pathCache[synced]->AddPath(path, result, strtBlock, goalBlock, goalRadius, pathType);
 }

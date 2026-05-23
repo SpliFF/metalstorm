@@ -280,7 +280,7 @@ namespace QTPFS {
 			assert(p.x >= 0.f);
 			assert(p.z >= 0.f);
 			assert(p.x / SQUARE_SIZE <= mapDims.mapx);
-			assert(p.z / SQUARE_SIZE <= mapDims.mapy);
+			assert((p.z - float3::minzpos) / SQUARE_SIZE <= mapDims.mapy);
 		}
 
 		void SetOwner(const CSolidObject* o) { owner = o; }

@@ -320,7 +320,7 @@ bool IPathFinder::SetStartBlock(
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	mStartBlock.x  = startPos.x / BLOCK_PIXEL_SIZE;
-	mStartBlock.y  = startPos.z / BLOCK_PIXEL_SIZE;
+	mStartBlock.y  = (startPos.z - float3::minzpos) / BLOCK_PIXEL_SIZE;
 	mStartBlockIdx = BlockPosToIdx(mStartBlock);
 	mGoalBlockIdx  = mStartBlockIdx;
 
