@@ -1606,7 +1606,7 @@ int LuaSyncedRead::GetTeamStartPosition(lua_State* L)
 
 	lua_pushnumber(L, pos.x);
 	lua_pushnumber(L, pos.y);
-	lua_pushnumber(L, pos.z);
+	lua_pushnumber(L, LuaCoordAdapt::FlipZ(pos.z));
 	lua_pushboolean(L, team->HasValidStartPos());
 	return 4;
 }
@@ -5154,11 +5154,11 @@ int LuaSyncedRead::GetUnitWeaponVectors(lua_State* L)
 
 	lua_pushnumber(L, pos.x);
 	lua_pushnumber(L, pos.y);
-	lua_pushnumber(L, pos.z);
+	lua_pushnumber(L, LuaCoordAdapt::FlipZ(pos.z));
 
 	lua_pushnumber(L, dir->x);
 	lua_pushnumber(L, dir->y);
-	lua_pushnumber(L, dir->z);
+	lua_pushnumber(L, LuaCoordAdapt::FlipZ(dir->z));
 
 	return 6;
 }
@@ -7166,7 +7166,7 @@ int LuaSyncedRead::IsPosInMap(lua_State* L)
 int LuaSyncedRead::GetGroundHeight(lua_State* L)
 {
 	const float x = luaL_checkfloat(L, 1);
-	const float z = luaL_checkfloat(L, 2);
+	const float z = LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 2));
 	lua_pushnumber(L, CGround::GetHeightReal(x, z, CLuaHandle::GetHandleSynced(L)));
 	return 1;
 }
@@ -7217,7 +7217,7 @@ int LuaSyncedRead::GetWaterLevel(lua_State* L)
 int LuaSyncedRead::GetGroundOrigHeight(lua_State* L)
 {
 	const float x = luaL_checkfloat(L, 1);
-	const float z = luaL_checkfloat(L, 2);
+	const float z = LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 2));
 	lua_pushnumber(L, CGround::GetOrigHeight(x, z));
 	return 1;
 }
@@ -7237,7 +7237,7 @@ int LuaSyncedRead::GetGroundOrigHeight(lua_State* L)
 int LuaSyncedRead::GetGroundNormal(lua_State* L)
 {
 	const float x = luaL_checkfloat(L, 1);
-	const float z = luaL_checkfloat(L, 2);
+	const float z = LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 2));
 
 	// raw or smoothed center normal
 	const float3& normal = luaL_optboolean(L, 3, false)?
@@ -7246,7 +7246,7 @@ int LuaSyncedRead::GetGroundNormal(lua_State* L)
 
 	lua_pushnumber(L, normal.x);
 	lua_pushnumber(L, normal.y);
-	lua_pushnumber(L, normal.z);
+	lua_pushnumber(L, LuaCoordAdapt::FlipZ(normal.z));
 	// slope derives from face normals, include it here
 	lua_pushnumber(L, CGround::GetSlope(x, z, CLuaHandle::GetHandleSynced(L)));
 	return 4;
@@ -7273,7 +7273,7 @@ int LuaSyncedRead::GetGroundNormal(lua_State* L)
 int LuaSyncedRead::GetGroundInfo(lua_State* L)
 {
 	const float x = luaL_checkfloat(L, 1);
-	const float z = luaL_checkfloat(L, 2);
+	const float z = LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 2));
 
 	const int ix = std::clamp(x, 0.0f, float3::maxxpos) / (SQUARE_SIZE * 2);
 	const int iz = (std::clamp(z, float3::minzpos, float3::maxzpos) - float3::minzpos) / (SQUARE_SIZE * 2);
@@ -7437,7 +7437,7 @@ int LuaSyncedRead::GetGrass(lua_State* L)
 int LuaSyncedRead::GetSmoothMeshHeight(lua_State* L)
 {
 	const float x = luaL_checkfloat(L, 1);
-	const float z = luaL_checkfloat(L, 2);
+	const float z = LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 2));
 
 	lua_pushnumber(L, smoothGround.GetHeight(x, z));
 	return 1;
@@ -7483,8 +7483,8 @@ int LuaSyncedRead::TestMoveOrder(lua_State* L)
 		return 1;
 	}
 
-	const float3 pos(luaL_checkfloat(L, 2), luaL_checkfloat(L, 3), luaL_checkfloat(L, 4));
-	const float3 dir(luaL_optfloat(L, 5, 0.0f), luaL_optfloat(L, 6, 0.0f), luaL_optfloat(L, 7, 0.0f));
+	const float3 pos(luaL_checkfloat(L, 2), luaL_checkfloat(L, 3), LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 4)));
+	const float3 dir(luaL_optfloat(L, 5, 0.0f), luaL_optfloat(L, 6, 0.0f), LuaCoordAdapt::FlipZ(luaL_optfloat(L, 7, 0.0f)));
 
 	const bool testTerrain = luaL_optboolean(L, 8, true);
 	const bool testObjects = luaL_optboolean(L, 9, true);
@@ -7709,7 +7709,7 @@ int LuaSyncedRead::IsPosInLos(lua_State* L)
 {
 	const float3 pos(luaL_checkfloat(L, 1),
 	                 luaL_checkfloat(L, 2),
-	                 luaL_checkfloat(L, 3));
+	                 LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 3)));
 
 	const int allyTeamID = GetEffectiveLosAllyTeam(L, 4);
 	if (allyTeamID < 0) {
@@ -7735,7 +7735,7 @@ int LuaSyncedRead::IsPosInRadar(lua_State* L)
 {
 	const float3 pos(luaL_checkfloat(L, 1),
 	                 luaL_checkfloat(L, 2),
-	                 luaL_checkfloat(L, 3));
+	                 LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 3)));
 
 	const int allyTeamID = GetEffectiveLosAllyTeam(L, 4);
 	if (allyTeamID < 0) {
@@ -7761,7 +7761,7 @@ int LuaSyncedRead::IsPosInAirLos(lua_State* L)
 {
 	const float3 pos(luaL_checkfloat(L, 1),
 	                 luaL_checkfloat(L, 2),
-	                 luaL_checkfloat(L, 3));
+	                 LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 3)));
 
 	const int allyTeamID = GetEffectiveLosAllyTeam(L, 4);
 	if (allyTeamID < 0) {
