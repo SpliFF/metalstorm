@@ -133,8 +133,17 @@ export function staticDataPlugin(opts: StaticDataPluginOptions): Plugin {
                     }
 
                     const stat = statSync(resolved);
+                    if (stat.isDirectory()) {
+                        // The LuaUI Web Worker walks the game tree by
+                        // fetching directory paths (e.g. `LuaUI`,
+                        // `LuaRules/Configs`) and expects JSON
+                        // `[{name, type, size?}, ...]` back — the same
+                        // shape the lobby's deleted handler emitted.
+                        await serveDirectoryListing(resolved, res);
+                        return;
+                    }
                     if (!stat.isFile()) {
-                        return next();   // directory listings still go to the lobby
+                        return next();
                     }
 
                     await serveFile(resolved, req, res);
@@ -214,6 +223,40 @@ async function serveFile(
     }
 
     const body = await fs.readFile(resolved);
+    res.end(body);
+}
+
+/// Serve a JSON directory listing in the shape the LuaUI worker's BFS
+/// expects: `[{name, type, size?}, ...]`. No conditional-GET / caching
+/// — the worker walks each directory once per game session.
+async function serveDirectoryListing(
+    dir: string,
+    res: ServerResponse,
+): Promise<void> {
+    let entries: { name: string; type: 'dir' | 'file'; size?: number }[];
+    try {
+        const names = await fs.readdir(dir);
+        entries = [];
+        for (const name of names) {
+            let s;
+            try { s = statSync(path.join(dir, name)); } catch { continue; }
+            if (s.isDirectory()) {
+                entries.push({ name, type: 'dir' });
+            } else if (s.isFile()) {
+                entries.push({ name, type: 'file', size: s.size });
+            }
+        }
+    } catch {
+        res.statusCode = 500;
+        res.end();
+        return;
+    }
+    const body = Buffer.from(JSON.stringify(entries));
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Length', String(body.length));
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Access-Control-Allow-Origin', '*');
     res.end(body);
 }
 
