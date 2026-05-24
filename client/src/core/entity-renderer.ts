@@ -660,7 +660,18 @@ export class EntityRenderer {
 
     // --- Model loading ---
     private modelTemplates = new Map<number, ModelTemplate | null>();
-    private modelsReady: Promise<void> = Promise.resolve();
+    /// Registered UnitDefs awaiting their first render. Populated by
+    /// `setUnitDefs()`; consumed by `ensureModelLoaded()` on first
+    /// sighting of an entity / build-placement reference. Decoupling
+    /// def registration from model fetch is what makes load lazy —
+    /// the server now streams ~all defs early-ish but the client
+    /// only pays the per-def glb+texture cost when a unit actually
+    /// appears.
+    private defInfos = new Map<number, UnitDefInfo>();
+    /// Per-defId in-flight load promise. Dedups concurrent
+    /// `ensureModelLoaded` calls (every tick of every visible entity
+    /// of that def would otherwise re-fire the fetch).
+    private loadingModels = new Map<number, Promise<ModelTemplate | null>>();
     private defModelUrls = new Map<number, string>();
     /** Per-defId building flag from UnitDefInfo.flags bit 12. Drives the
      *  ghost-building behaviour: only buildings get PREVLOS frozen-pose
@@ -761,47 +772,73 @@ export class EntityRenderer {
     }
 
     /**
-     * Register unit defs and start loading their models.
+     * Register unit defs received from the server. Stores the metadata
+     * for later use but does NOT trigger model / texture fetches —
+     * those happen lazily on first sighting via `ensureModelLoaded()`.
+     *
+     * Eager loading at this point used to fire a glb + 4–5 ktx2
+     * fetches per def in the batch; with ZK's ~250 unit roster that
+     * easily saturates the browser's HTTP/1.1 6-connection limit and
+     * triggers spurious aborts (`status 0`) on textures that were
+     * already 100% queueable. Lazy loading keeps the load curve flat
+     * — only models actually used in the current match pay the cost.
      */
     setUnitDefs(defs: UnitDefInfo[]): void {
-        const loadPromises: Promise<void>[] = [];
-        let loaded = 0;
-        let skipped = 0;
+        let registered = 0;
         let alreadyKnown = 0;
 
         for (const def of defs) {
-            if (this.defModelUrls.has(def.defId)) {
+            if (this.defInfos.has(def.defId)) {
                 alreadyKnown++;
                 continue;
             }
 
+            this.defInfos.set(def.defId, def);
             this.defModelUrls.set(def.defId, def.modelUrl);
             if ((def.flags & UDF_FLAG_IS_BUILDING) !== 0) {
                 this.defIsBuilding.add(def.defId);
             }
 
+            // Defs without a model file get their template slot pinned
+            // to `null` now so the procedural-shape fallback path skips
+            // the load attempt entirely.
             if (!def.modelUrl) {
                 this.modelTemplates.set(def.defId, null);
-                skipped++;
-                continue;
             }
 
-            loadPromises.push(this.loadModel(def).then(tmpl => {
-                this.modelTemplates.set(def.defId, tmpl);
-                if (tmpl) loaded++;
-                else skipped++;
-            }));
+            registered++;
         }
 
-        if (loadPromises.length > 0 || skipped > 0) {
-            const batchReady = Promise.all(loadPromises).then(() => {
-                console.log(
-                    `[entity-renderer] defs batch: ${loaded} loaded, ${skipped} fallback` +
-                    (alreadyKnown > 0 ? `, ${alreadyKnown} already known` : '')
-                );
-            });
-            this.modelsReady = this.modelsReady.then(() => batchReady);
+        if (registered > 0 || alreadyKnown > 0) {
+            console.log(
+                `[entity-renderer] defs batch: ${registered} registered (lazy)` +
+                (alreadyKnown > 0 ? `, ${alreadyKnown} already known` : '')
+            );
         }
+    }
+
+    /**
+     * Kick off the model + texture fetch for `defId` if it hasn't been
+     * loaded or scheduled yet. Returns immediately; the loaded template
+     * lands in `modelTemplates` asynchronously. Until then, entities of
+     * this def render as procedural shapes (the existing fallback in
+     * the tick path).
+     *
+     * Idempotent and cheap: a stale Map lookup per call. Safe to invoke
+     * once per visible entity per tick.
+     */
+    private ensureModelLoaded(defId: number): void {
+        if (this.modelTemplates.has(defId)) return;   // already resolved (incl. null)
+        if (this.loadingModels.has(defId)) return;    // already in flight
+        const def = this.defInfos.get(defId);
+        if (!def || !def.modelUrl) return;            // no def registered, or no model
+
+        const p = this.loadModel(def).then(tmpl => {
+            this.modelTemplates.set(defId, tmpl);
+            this.loadingModels.delete(defId);
+            return tmpl;
+        });
+        this.loadingModels.set(defId, p);
     }
 
     private async loadModel(def: UnitDefInfo): Promise<ModelTemplate | null> {
@@ -1616,6 +1653,11 @@ export class EntityRenderer {
                 : this.interpolator.getInterpolated(id, now);
             if (!lerped) continue;
 
+            // Lazy-load: trigger the glb + texture fetch the first
+            // time we see an entity of this def. Until the load
+            // completes the entity falls through to the procedural
+            // shape branch below.
+            this.ensureModelLoaded(meta.defId);
             const tmpl = this.modelTemplates.get(meta.defId);
 
             if (tmpl) {
@@ -1892,6 +1934,10 @@ export class EntityRenderer {
      * starts going up.
      */
     createGhostMesh(defId: number, name: string): TransformNode | null {
+        // Build-placement hover queries this every frame the cursor is
+        // over a buildable tile — kick off the lazy load so the ghost
+        // shape replaces the null fallback as soon as the .glb lands.
+        this.ensureModelLoaded(defId);
         const tmpl = this.modelTemplates.get(defId);
         if (!tmpl || tmpl.pieces.length === 0) return null;
 
@@ -2017,6 +2063,8 @@ export class EntityRenderer {
             }
         }
         this.modelTemplates.clear();
+        this.defInfos.clear();
+        this.loadingModels.clear();
         if (this.selectionMesh) {
             this.selectionMesh.dispose();
             this.selectionMesh = null;
