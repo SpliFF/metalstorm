@@ -9,32 +9,14 @@
 
 namespace DefsCache {
 
-// Schema version. Bump this whenever GameUnitDef / GameWeaponDef in
-// schemas/protocol.fbs gains or removes fields. The version is mixed
-// into the cache key so old cached .bin files (and browser HTTP cache
-// entries keyed on the URL) become unreachable after a schema change.
-// Without this, a stale cache from a prior schema would silently
-// shadow the newly-bakable bytes.
-// 2026-05-10: v10 — GameWeaponDef gained ceg_tag, explosion_generator,
-// bounce_explosion_generator (strings); a new GameCegDefs message
-// was added carrying parsed CEG defs. The bake now writes a third
-// `cegdefs.bin` next to unitdefs.bin / weapondefs.bin. Bumping
-// invalidates older two-file caches so the lobby re-bakes with the
-// third file.
-// 2026-05-14: v11 — Weapon-def baker fills `texture1..3` with Spring's
-// per-`weaponType` defaults when the source weapondef leaves the slot
-// empty (PLAN-combat-vfx.md F3). Same FlatBuffer schema; the strings
-// just stop being empty so cached pre-v11 weapondefs.bin would still
-// ship flat-coloured projectiles. Bump to force a re-bake.
-// 2026-05-14: v12 — GameCegDef gained a `ground_flash` GroundFlashInfo
-// table for Spring's `CStandardGroundFlash` parameters parsed from
-// the top-level `groundflash = {…}` subtable (PLAN-combat-vfx.md
-// Phase 4b). Pre-v12 caches don't carry the field; bump to re-bake.
-// 2026-05-15: v13 — new `GameFeatureDefs` payload (+ corresponding
-// FeatureLifecycleBatch on the wire). The bake writes a fourth
-// `featuredefs.bin` alongside unit/weapon/ceg. Bumping invalidates
-// pre-v13 three-file caches so the lobby re-bakes with the fourth.
-static constexpr const char* DEFS_SCHEMA_VERSION = "v13";
+// Schema version. Bump this whenever the on-wire def shape changes.
+// Mixed into the cache key so old cached files become unreachable
+// after a schema change. Keep this string byte-for-byte identical
+// with the copy in DefsCache.h.
+//
+// 2026-05-25: v14-lua — defs migrated from FlatBuffer .bin to
+// brotli-compressed Lua source (.lua.br). See PLAN-defs.md.
+static constexpr const char* DEFS_SCHEMA_VERSION = "v14-lua";
 
 std::string ComputeCacheKey(
     const std::string& gameId,
@@ -55,7 +37,7 @@ std::string ComputeCacheKey(
     // ComputeCacheKey copy in DefsCache.h — the two were drifting
     // apart and a single-site bump produced different cache keys
     // depending on which translation unit linked first.
-    canonical += "schemaV13-protocol";
+    canonical += "schemaV14-lua";
     canonical += '\n';
     canonical += gameId;
     canonical += '\n';
@@ -117,10 +99,10 @@ bool WriteIfMissing(
 {
     namespace fs = std::filesystem;
     const fs::path dir = CacheDir(gameId, cacheKey);
-    const fs::path udPath = dir / "unitdefs.bin";
-    const fs::path wdPath = dir / "weapondefs.bin";
-    const fs::path cdPath = dir / "cegdefs.bin";
-    const fs::path fdPath = dir / "featuredefs.bin";
+    const fs::path udPath = dir / "unitdefs.lua.br";
+    const fs::path wdPath = dir / "weapondefs.lua.br";
+    const fs::path cdPath = dir / "cegdefs.lua.br";
+    const fs::path fdPath = dir / "featuredefs.lua.br";
 
     const bool udExists = fs::exists(udPath);
     const bool wdExists = fs::exists(wdPath);

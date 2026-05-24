@@ -126,6 +126,22 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
+# === brotli (encoder for HTTP-served compressed Lua def caches) ===
+# The lobby's static handler serves data/games/<id>/cache/defs/<key>/*.lua.br
+# with `Content-Encoding: br`; browsers decompress transparently. Only the
+# encoder is needed server-side (browser handles decode); we disable the
+# decoder + tests + CLI to keep the build small.
+set(BROTLI_DISABLE_TESTS ON CACHE BOOL "" FORCE)
+set(BROTLI_BUNDLED_MODE OFF CACHE BOOL "" FORCE)
+set(BROTLI_EMSCRIPTEN OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    brotli
+    GIT_REPOSITORY https://github.com/google/brotli.git
+    GIT_TAG v1.1.0
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(brotli)
+
 # === libktx (KTX2 + Basis Universal encoder/transcoder) ===
 # Reference implementation from KhronosGroup. Linked into the texture
 # preprocessing tools (textureconverter, mapconverter, gameconverter).
@@ -292,7 +308,7 @@ target_include_directories(spring-server PRIVATE
     ${GENERATED_DIR}
 )
 find_package(ZLIB REQUIRED)
-target_link_libraries(spring-server PRIVATE lua smmalloc nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite LibDataChannel::LibDataChannelStatic nlohmann_json::nlohmann_json)
+target_link_libraries(spring-server PRIVATE lua smmalloc nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite LibDataChannel::LibDataChannelStatic nlohmann_json::nlohmann_json brotlienc brotlicommon)
 
 # Link platform libraries
 if(UNIX AND NOT APPLE)

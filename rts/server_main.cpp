@@ -23,6 +23,7 @@
 #include "Sim/Misc/TeamHandler.h"
 #include "Server/DefsCache.h"
 #include "Server/CegLoader.h"
+#include "Server/LuaDefsSerializer.h"
 #include "Server/ResourcesParser.h"
 #include "Server/StandingOrders.h"
 #include "Server/AI/AIRuntimePool.h"
@@ -788,51 +789,53 @@ int main(int argc, char* argv[])
                 ResourcesParser::GetProjectileTextureNames(
                     gameId, gameDir, engineBaseDir);
 
-            auto udBytes = Protocol::BuildGameUnitDefs(
+            // Serialize each def category to Lua source, then brotli-
+            // compress. Output files end in `.lua.br` and are served
+            // with `Content-Encoding: br` so the browser decompresses
+            // transparently. See PLAN-defs.md for the rationale on
+            // Lua source vs FlatBuffer.
+            namespace L = LuaDefsSerializer;
+            std::string udSrc = L::SerializeUnitDefs(
                 unitDefHandler->GetUnitDefsVec(), gameId);
-            auto wdBytes = Protocol::BuildGameWeaponDefs(
+            std::string wdSrc = L::SerializeWeaponDefs(
                 weaponDefHandler->GetWeaponDefsVec(), gameId,
                 &projTextureNames);
-            // CEGs (Custom Explosion Generators). The engine's
-            // explGenHandler has already parsed gamedata/explosions.lua;
-            // CegLoader walks the resulting LuaTable into a flat list
-            // and BuildGameCegDefs frames it as a ServerMessage so the
-            // client can ingest via the same path as unit/weapon defs.
-            // Empty when no CEGs were authored or the parse failed —
-            // the file is still written so the eager HTTP fetch
-            // doesn't 404.
             auto cegDefs = CegLoader::LoadAllCegDefs();
-            auto cdBytes = CegLoader::BuildGameCegDefs(cegDefs);
-            // FeatureDefs cover every wreck/debris/decoration the game
-            // can spawn at runtime. Map-placed features still ship in
-            // MapData; this one carries the post-startup spawn defs
-            // (wrecks from unit death, gadget-spawned features) so
-            // FeatureLifecycleBatch entries resolve to a renderable
-            // model client-side.
-            std::vector<uint8_t> fdBytes;
+            std::string cdSrc = L::SerializeCegDefs(cegDefs);
+
+            std::string fdSrc;
             size_t fdDefCount = 0;
             if (featureDefHandler != nullptr) {
                 const fs::path modelsDir = fs::path("data/games") / gameId / "models";
                 const auto& fdVec = featureDefHandler->GetFeatureDefsVec();
-                fdBytes = Protocol::BuildGameFeatureDefs(
-                    fdVec, gameId, modelsDir);
+                fdSrc = L::SerializeFeatureDefs(fdVec, gameId, modelsDir);
                 fdDefCount = fdVec.empty() ? 0 : fdVec.size() - 1;
+            } else {
+                fdSrc = "return{base_url=[[]],defs={}}";
             }
+
+            auto udBytes = L::CompressBrotli(udSrc);
+            auto wdBytes = L::CompressBrotli(wdSrc);
+            auto cdBytes = L::CompressBrotli(cdSrc);
+            auto fdBytes = L::CompressBrotli(fdSrc);
+
             if (DefsCache::WriteIfMissing(gameId, defsCacheKey,
                                           udBytes, wdBytes, cdBytes,
                                           fdBytes)) {
                 SLOG(SPRING_LOG_NOTICE,
                      "defs cache baked: gameId=%s key=%s "
-                     "(unitdefs=%zu B, weapondefs=%zu B, cegdefs=%zu B/%zu defs, "
-                     "featuredefs=%zu B/%zu defs)",
+                     "(unitdefs=%zu B src/%zu B brotli, "
+                     "weapondefs=%zu B src/%zu B brotli, "
+                     "cegdefs=%zu B src/%zu B brotli/%zu defs, "
+                     "featuredefs=%zu B src/%zu B brotli/%zu defs)",
                      gameId.c_str(), defsCacheKey.c_str(),
-                     udBytes.size(), wdBytes.size(),
-                     cdBytes.size(), cegDefs.size(),
-                     fdBytes.size(), fdDefCount);
+                     udSrc.size(), udBytes.size(),
+                     wdSrc.size(), wdBytes.size(),
+                     cdSrc.size(), cdBytes.size(), cegDefs.size(),
+                     fdSrc.size(), fdBytes.size(), fdDefCount);
             } else {
                 SLOG(SPRING_LOG_ERROR,
-                     "defs cache write failed: gameId=%s key=%s "
-                     "(falling back to per-session WebRTC streaming)",
+                     "defs cache write failed: gameId=%s key=%s",
                      gameId.c_str(), defsCacheKey.c_str());
                 defsCacheKey.clear();
             }

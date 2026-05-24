@@ -1,5 +1,6 @@
-// DefsCache — bake UnitDefs/WeaponDefs FlatBuffer payloads to disk so
-// the lobby can serve them as static, browser-cacheable HTTP responses.
+// DefsCache — bake brotli-compressed Lua-source def payloads to disk
+// so the static handler can serve them as cacheable HTTP responses
+// (browser auto-decompresses via Content-Encoding: br).
 //
 // Why this exists: ZK (and any non-trivial Spring game) post-processes
 // the def tables based on modOptions inside `gamedata/defs.lua`. The
@@ -7,16 +8,19 @@
 // immutable for the lifetime of a game-server process, so we can
 // serialize them once at startup, write to a content-addressed path,
 // and let every connected client (and every future session with the
-// same modOptions) fetch via HTTP with `Cache-Control: immutable`.
+// same modOptions) fetch via HTTP.
 //
 // The cache key is a 64-bit XXH3 of the canonical inputs, hex-encoded
 // (16 chars). Path layout:
 //
-//   data/games/{gameId}/cache/defs/{cacheKey}/unitdefs.bin
-//   data/games/{gameId}/cache/defs/{cacheKey}/weapondefs.bin
+//   data/games/{gameId}/cache/defs/{cacheKey}/unitdefs.lua.br
+//   data/games/{gameId}/cache/defs/{cacheKey}/weapondefs.lua.br
+//   data/games/{gameId}/cache/defs/{cacheKey}/cegdefs.lua.br
+//   data/games/{gameId}/cache/defs/{cacheKey}/featuredefs.lua.br
 //
-// The lobby's existing `/api/games/data/*` static handler serves these
-// without further wiring.
+// Dev: served by client/vite-static-data-plugin.ts with
+// `Content-Encoding: br`. Production: nginx/CDN — see
+// PLAN-static-serving.md.
 #pragma once
 
 #include "lib/xxhash/xxh3.h"
@@ -50,35 +54,17 @@ inline std::string ComputeCacheKey(
 
     std::string canonical;
     canonical.reserve(64 + sorted.size() * 32);
-    // Schema version. Bump this whenever GameUnitDef / GameWeaponDef in
-    // schemas/protocol.fbs gains or removes fields, or whenever the
-    // Build* code in Protocol.h changes which fields it populates. The
-    // version is mixed into the cache key so old cached .bin files (and
-    // browser HTTP cache entries keyed on the URL) become unreachable
-    // after a schema change. Without this, a stale cache from a prior
-    // schema would silently shadow the newly-bakable bytes.
+    // Schema version. Bump this whenever the on-wire def shape
+    // changes — the version is mixed into the cache key so old
+    // cached files (and browser HTTP cache entries keyed on URL)
+    // become unreachable after a schema change. Keep this string
+    // byte-for-byte identical with the copy in DefsCache.cpp.
     //
-    // 2026-05-10: v10 — GameWeaponDef gained ceg_tag /
-    // explosion_generator / bounce_explosion_generator (strings); a new
-    // GameCegDefs message was added carrying the parsed CEG defs as
-    // cegdefs.bin alongside unitdefs.bin / weapondefs.bin. Bumping the
-    // schema invalidates older two-file cache directories so the lobby
-    // re-bakes with the third file. Keep this string in sync with the
-    // .cpp side — the lobby and the server both inline the function
-    // body, so a single-site bump misses one.
-    // 2026-05-14: v11 — weapon-def baker fills texture1..3 with
-    // per-`weaponType` defaults (PLAN-combat-vfx.md F3). Same schema,
-    // bumped to invalidate pre-fix caches that still carried empty
-    // texture names on ~half of the defs.
-    // 2026-05-14: v12 — GameCegDef carries a `ground_flash`
-    // GroundFlashInfo subtable (PLAN-combat-vfx.md Phase 4b /
-    // PLAN-ceg.md groundflash). Schema gained a new field; pre-v12
-    // caches don't carry it, so bumping forces a re-bake.
-    // 2026-05-15: v13 — `GameFeatureDefs` payload added (wreck spawn
-    // streaming). The bake writes a fourth `featuredefs.bin` alongside
-    // unit/weapon/ceg. Pre-v13 three-file caches don't have it; bump
-    // forces a re-bake.
-    canonical += "schemaV13-protocol";
+    // 2026-05-25: v14-lua — defs migrated from FlatBuffer .bin to
+    // brotli-compressed Lua source (.lua.br). Pre-v14 caches still
+    // exist on disk as orphans; `rm -rf data/games/*/cache/defs/`
+    // reclaims them. See PLAN-defs.md.
+    canonical += "schemaV14-lua";
     canonical += '\n';
     canonical += gameId;
     canonical += '\n';
@@ -101,19 +87,18 @@ inline std::string ComputeCacheKey(
 /// Absolute (relative-to-cwd) path to the directory holding the bin files.
 std::string CacheDir(const std::string& gameId, const std::string& cacheKey);
 
-/// Bake the UnitDefs/WeaponDefs/CegDefs FlatBuffer payloads to disk if
-/// not already present for this cacheKey. Skips writing if files already
-/// exist (cheap stat) — the second room with the same modOptions is a
-/// no-op. Returns true on success (or if the cache was already warm).
+/// Bake the brotli-compressed Lua-source payloads to disk if not
+/// already present for this cacheKey. Skips writing when files
+/// already exist (cheap stat) — the second room with the same
+/// modOptions is a no-op. Returns true on success (or if the cache
+/// was already warm).
 ///
-/// `unitDefBytes` / `weaponDefBytes` / `cegDefBytes` are the wire
-/// payloads as produced by Protocol::BuildGameUnitDefs /
-/// BuildGameWeaponDefs / CegLoader::BuildGameCegDefs (server-message
-/// envelope wrapper included; client deserialization is shared between
-/// HTTP fetch and any future stream channel). `cegDefBytes` may be
-/// empty — older games / boot states that haven't parsed any CEGs
-/// yet are written as a tiny empty payload so the client's eager fetch
-/// doesn't 404 and can fall through to BUILTIN_EFFECTS.
+/// Each vector is the brotli-compressed bytes of a Lua source string
+/// produced by LuaDefsSerializer::SerializeUnitDefs etc. and run
+/// through CompressBrotli. They land on disk as `unitdefs.lua.br`,
+/// `weapondefs.lua.br`, `cegdefs.lua.br`, `featuredefs.lua.br`.
+/// CEG / feature payloads may be empty when the game has none —
+/// the file is still written so the client's eager fetch doesn't 404.
 bool WriteIfMissing(
     const std::string& gameId,
     const std::string& cacheKey,
