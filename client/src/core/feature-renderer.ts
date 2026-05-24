@@ -35,7 +35,6 @@ import '@babylonjs/loaders/glTF/index.js';
 import type { ParsedMapData, MapFeatureInstance, MapFeatureDefInfo } from './map-data.js';
 import type { FeatureDefInfo, FeatureSpawnInfo } from './connection.js';
 import type { DefCache } from './def-cache.js';
-import { stampUrl } from '../config.js';
 
 /// Hash a string to a stable RGB tint — used only for placeholder boxes
 /// so each fallback type still gets a distinct colour.
@@ -204,8 +203,10 @@ export async function renderMapFeatures(scene: Scene, map: ParsedMapData): Promi
                 const baseUrl = def.modelUrl.substring(0, lastSlash + 1);
                 const fileName = def.modelUrl.substring(lastSlash + 1);
 
+                // Don't stamp model URLs — see comment in
+                // entity-renderer.ts loadModel().
                 const result = await SceneLoader.ImportMeshAsync(
-                    '', baseUrl, stampUrl(fileName), scene,
+                    '', baseUrl, fileName, scene,
                 );
 
                 const primary = pickPrimaryMesh(result.meshes);
@@ -463,7 +464,8 @@ export class DynamicFeatureRenderer {
         const baseUrl = def.modelUrl.substring(0, lastSlash + 1);
         const fileName = def.modelUrl.substring(lastSlash + 1);
 
-        SceneLoader.ImportMeshAsync('', baseUrl, stampUrl(fileName), this.scene)
+        // Don't stamp model URLs — see entity-renderer.ts loadModel().
+        SceneLoader.ImportMeshAsync('', baseUrl, fileName, this.scene)
             .then((result) => {
                 if (this.scene.isDisposed) return;
                 const primary = pickPrimaryMesh(result.meshes);

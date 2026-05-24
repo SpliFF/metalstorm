@@ -431,8 +431,9 @@ export class ProjectileRenderer {
         const baseUrl = modelUrl.substring(0, lastSlash + 1);
         const fileName = modelUrl.substring(lastSlash + 1);
 
+        // Don't stamp model URLs — see entity-renderer.ts loadModel().
         const result = await SceneLoader.ImportMeshAsync(
-            '', baseUrl, stampUrl(fileName), this.scene,
+            '', baseUrl, fileName, this.scene,
         );
 
         // The current visual may have been replaced or disposed (e.g.

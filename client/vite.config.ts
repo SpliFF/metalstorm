@@ -1,17 +1,34 @@
 import { defineConfig } from 'vite';
 import { resolve } from 'path';
+import { staticDataPlugin } from './vite-static-data-plugin.js';
 
-// In production the lobby server serves both the client bundle and
-// the REST API on the same port, so the client can fetch relative
-// URLs like `/api/maps/data/...` and have them resolve same-origin.
-// In dev the Vite server runs on a different port and would otherwise
-// serve its SPA index fallback for those paths, so we proxy any /api/*
-// request through to the lobby. This lets application code stay
-// origin-agnostic whether running against `vite dev` or the packaged
-// bundle served by spring-lobby itself.
+// Dev architecture:
+//   - Vite (this server) serves the client TS/JS bundle on port 8012
+//     and bundles `?raw` HTML/CSS imports, Svelte components, the
+//     Lua widget worker, etc.
+//   - `staticDataPlugin` intercepts `/api/games/data/*`,
+//     `/api/maps/data/*`, `/api/engine/data/*`, `/api/maps/thumb/*`
+//     and serves them directly from the repo's `data/` tree with
+//     native Last-Modified + ETag revalidation.
+//   - Everything else under `/api/*` (REST API, /api/rooms, /api/exec,
+//     etc.) proxies to spring-lobby on port 8011.
+//
+// Production architecture (deferred — see PLAN-static-serving.md):
+//   - An external static server (nginx / apache / CDN) must serve:
+//       * the built client bundle from `client/dist/`
+//       * `/api/games/data/*`, `/api/maps/data/*`,
+//         `/api/engine/data/*`, `/api/maps/thumb/*`
+//   - The same external server proxies `/api/*` (everything else) to
+//     spring-lobby for the REST API + WebRTC signalling.
+//   - spring-lobby itself no longer serves static assets — those four
+//     paths return 404 if hit directly.
 const GAME_SERVER_PORT = process.env.GAME_SERVER_PORT || '8011';
+const REPO_ROOT = resolve(__dirname, '..');
 
 export default defineConfig({
+    plugins: [
+        staticDataPlugin({ repoRoot: REPO_ROOT }),
+    ],
     server: {
         port: parseInt(process.env.WEB_SERVER_PORT || '8012'),
         proxy: {

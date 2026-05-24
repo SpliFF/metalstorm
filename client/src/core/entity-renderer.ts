@@ -42,7 +42,6 @@ import { EntityInterpolator } from './entity-interpolator.js';
 import type { UnitDefInfo } from './connection.js';
 import type { PieceStateSnapshot } from './piece-state.js';
 import type { LosBitmap } from './los-bitmap.js';
-import { stampUrl } from '../config.js';
 import { loadDirManifest, dirOfUrl } from './dir-manifest.js';
 
 /** Parsed model config — sourced from the .gltf's
@@ -132,7 +131,12 @@ interface UnitTextures {
 async function fetchModelConfig(modelUrl: string): Promise<ModelConfig | null> {
     let gltf: any;
     try {
-        const r = await fetch(stampUrl(modelUrl));
+        // Don't stamp model URLs — Babylon's glTF loader resolves
+        // sibling .bin / .ktx2 files relative to the document URL,
+        // and a `?v=` query string on the parent breaks that
+        // resolution. HTTP caching uses Last-Modified / ETag from
+        // the static-data Vite plugin (see client/vite.config.ts).
+        const r = await fetch(modelUrl);
         if (!r.ok) return null;
         gltf = await r.json();
     } catch {
@@ -847,8 +851,13 @@ export class EntityRenderer {
             const baseUrl = def.modelUrl.substring(0, lastSlash + 1);
             const fileName = def.modelUrl.substring(lastSlash + 1);
 
+            // Don't stamp model URLs — the glTF loader resolves
+            // sibling .bin / .ktx2 files relative to the document URL,
+            // and a `?v=` on the parent breaks that resolution. Cache
+            // validation comes from Last-Modified / ETag served by the
+            // Vite static-data plugin (see client/vite.config.ts).
             const result = await SceneLoader.ImportMeshAsync(
-                '', baseUrl, stampUrl(fileName), this.scene,
+                '', baseUrl, fileName, this.scene,
             );
 
             // Phase 2d (PLAN-coordinate-system): with scene RH and the

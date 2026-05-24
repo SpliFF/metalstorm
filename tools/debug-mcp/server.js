@@ -107,6 +107,31 @@ async function fetchJson(url) {
     return resp.json();
 }
 
+/// Resolve `rel` against `base`, falling back to case-insensitive
+/// component matching. Mirrors the behaviour the lobby's static
+/// handler used to provide for ZK-style mixed-case filenames
+/// referenced as lowercase. Returns the absolute path if resolved,
+/// or null if no candidate exists.
+function resolveCaseInsensitive(base, rel) {
+    if (rel.includes('..')) return null;
+    const direct = join(base, rel);
+    if (existsSync(direct)) return direct;
+    const wanted = rel.split('/').filter(Boolean);
+    let cur = base;
+    for (const seg of wanted) {
+        const candidate = join(cur, seg);
+        if (existsSync(candidate)) { cur = candidate; continue; }
+        if (!existsSync(cur)) return null;
+        let entries;
+        try { entries = readdirSync(cur); } catch { return null; }
+        const want = seg.toLowerCase();
+        const match = entries.find(e => e.toLowerCase() === want);
+        if (!match) return null;
+        cur = join(cur, match);
+    }
+    return existsSync(cur) ? cur : null;
+}
+
 async function execOnServer(serverUrl, scope, code) {
     const token = await ensureAuth();
     if (!token) throw new Error('Not authenticated — set SPRING_TOKEN or SPRING_USER/SPRING_PASS');
@@ -849,10 +874,21 @@ async function executeTool(name, args) {
         }
 
         case 'get_lua_source': {
-            const url = `${LOBBY_URL}/api/games/data/${args.gameId}/${args.filePath}`;
-            const resp = await fetch(url);
-            if (!resp.ok) return `Error: HTTP ${resp.status} fetching ${args.filePath}`;
-            return await resp.text();
+            // Read from filesystem directly — the lobby no longer serves
+            // static game data (Vite plugin handles it in dev, nginx/CDN
+            // in prod). Tools run on the same host as the data tree so
+            // they have direct fs access via PROJECT_ROOT.
+            const repoRoot = process.env.PROJECT_ROOT || '.';
+            const baseDir = resolve(repoRoot, 'data/games', args.gameId);
+            const resolved = resolveCaseInsensitive(baseDir, args.filePath);
+            if (!resolved || !existsSync(resolved)) {
+                return `Error: file not found: data/games/${args.gameId}/${args.filePath}`;
+            }
+            try {
+                return readFileSync(resolved, 'utf-8');
+            } catch (err) {
+                return `Error: reading ${args.filePath}: ${err.message}`;
+            }
         }
 
         case 'list_gadgets': {

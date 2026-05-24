@@ -20,7 +20,6 @@
 #include "Server/CacheControl.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogSqlite.h"
-#include <algorithm>
 #include <cctype>
 #include <set>
 
@@ -32,7 +31,6 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
-#include <fstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -230,7 +228,6 @@ int main(int argc, char* argv[])
     int port = 8011;
     std::string dbPath = "data/spring-server.db";
     std::string gamesDir = "data/games";
-    std::string mapsDir = "data/maps";
     std::string logFile;
     int logLevel = SPRING_LOG_NOTICE;
     bool debugMode = false;
@@ -240,7 +237,6 @@ int main(int argc, char* argv[])
         if (arg == "--port" && i + 1 < argc) port = std::atoi(argv[++i]);
         else if (arg == "--db" && i + 1 < argc) dbPath = argv[++i];
         else if (arg == "--games-dir" && i + 1 < argc) gamesDir = argv[++i];
-        else if (arg == "--maps" && i + 1 < argc) mapsDir = argv[++i];
         else if (arg == "--log-file" && i + 1 < argc) logFile = argv[++i];
         else if (arg == "--log-level" && i + 1 < argc) logLevel = std::atoi(argv[++i]);
         else if (arg == "--debug") { debugMode = true; logLevel = SPRING_LOG_DEBUG; }
@@ -445,29 +441,25 @@ int main(int argc, char* argv[])
         return {.contentType = "application/json", .body = std::move(body), .status = 200};
     });
 
-    // /api/maps/source/* and /api/vfs/game/* are retired — use
-    // /api/maps/data/* and /api/games/data/* for all content.
-    // The offline converters (tools/mapconverter, tools/gameconverter)
-    // copy source files + converted assets into data/.
-
-    // Serve processed map files (DXT1 tiles, heightmap, splat textures, etc.)
-    // These are static binary assets — safe to cache for long periods.
-    // Also serves a dynamically generated metadata.json for each map,
-    // containing all lightweight map info (dimensions, features, decals,
-    // water, etc.) so the client can fetch map data via HTTP instead of
-    // receiving it over the WebRTC data channel (which has a 256KB SCTP
-    // message size limit).
+    // Static map / game / engine assets are no longer served by the
+    // lobby. In dev the Vite plugin (client/vite-static-data-plugin.ts)
+    // serves them with proper Last-Modified / ETag revalidation. In
+    // production an external static server (nginx / apache / CDN) is
+    // required for `/api/games/data/*`, `/api/maps/data/*` (except
+    // the dynamic `metadata.json` below), `/api/engine/data/*` and
+    // `/api/maps/thumb/*`, plus the built client bundle from
+    // `client/dist/`. See CLAUDE.md for the production deployment notes.
+    //
+    // The only thing the lobby still serves under `/api/maps/data/*`
+    // is the dynamic `metadata.json` endpoint, because it pulls live
+    // map data out of the MapMetadataDb (SQLite) and composes URLs
+    // pointing at the static files.
     net.AddHttpGet("/api/maps/data/*", [mapDb](const std::string& url) -> HttpResponse {
-        // URL: /api/maps/data/{mapId}/{filename}
+        // URL: /api/maps/data/{mapId}/metadata.json
         std::string rest = url.substr(std::string("/api/maps/data/").size());
-
-        // Security: reject path traversal
         if (rest.find("..") != std::string::npos)
             return {.contentType = "text/plain", .body = {}, .status = 403};
 
-        // Dynamic metadata.json endpoint — returns JSON with all
-        // lightweight map info. Binary arrays (heightmap, tileindex,
-        // typemap, metalmap) are fetched separately as .bin files.
         auto slashPos = rest.find('/');
         if (slashPos != std::string::npos) {
             std::string mapId = rest.substr(0, slashPos);
@@ -622,265 +614,17 @@ int main(int argc, char* argv[])
             }
         }
 
-        // Serve the file from disk
-        std::string filePath = "data/maps/" + rest;
-        namespace fs = std::filesystem;
-        if (!fs::exists(filePath) || !fs::is_regular_file(filePath))
-            return {.contentType = "text/plain", .body = {}, .status = 404};
-
-        std::ifstream f(filePath, std::ios::binary);
-        std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
-                                   std::istreambuf_iterator<char>());
-
-        // Content type from extension
-        std::string ext = fs::path(filePath).extension().string();
-        std::string ct = "application/octet-stream";
-        if (ext == ".lua") ct = "text/x-lua; charset=utf-8";
-        else if (ext == ".json") ct = "application/json";
-        else if (ext == ".png") ct = "image/png";
-        else if (ext == ".jpg" || ext == ".jpeg") ct = "image/jpeg";
-        else if (ext == ".webp") ct = "image/webp";
-        else if (ext == ".ktx2") ct = "image/ktx2";
-        else if (ext == ".tga") ct = "image/x-tga";
-        else if (ext == ".dds") ct = "image/vnd-ms.dds";
-        else if (ext == ".glb") ct = "model/gltf-binary";
-        else if (ext == ".gltf") ct = "model/gltf+json";
-        else if (ext == ".html") ct = "text/html; charset=utf-8";
-        else if (ext == ".css") ct = "text/css; charset=utf-8";
-        else if (ext == ".js") ct = "application/javascript; charset=utf-8";
-        else if (ext == ".txt") ct = "text/plain; charset=utf-8";
-
-        return {
-            .contentType = ct,
-            .body = std::move(data),
-            .status = 200,
-            .cacheControl = CacheControl::StaticAssetHeader(),
-        };
-    });
-
-    // Serve processed game files (unit models, textures, etc.)
-    // Parallel to /api/maps/data/* but for game content preprocessed
-    // by GameProcessor into data/games/<gameId>/models/.
-    // Serve all game content from data/games/. The offline converter
-    // (tools/gameconverter) populates this with source + converted files.
-    net.AddHttpGet("/api/games/data/*", [](const std::string& url) -> HttpResponse {
-        std::string rest = url.substr(std::string("/api/games/data/").size());
-        if (rest.find("..") != std::string::npos)
-            return {.contentType = "text/plain", .body = {}, .status = 403};
-
-        std::string filePath = "data/games/" + rest;
-        namespace fs = std::filesystem;
-        if (!fs::exists(filePath)) {
-            // Case-insensitive fallback: ZK references like
-            // "sounds/weapon/lightningbolt.wav" don't match the on-disk
-            // "LightningBolt.wav" on case-sensitive filesystems. Walk the
-            // path components from the closest existing parent and try
-            // to resolve each segment by lowercased comparison.
-            std::error_code ec;
-            fs::path resolved;
-            const fs::path requested(filePath);
-            for (auto it = requested.begin(); it != requested.end(); ++it) {
-                fs::path candidate = resolved.empty() ? fs::path(*it) : resolved / *it;
-                if (fs::exists(candidate, ec)) {
-                    resolved = std::move(candidate);
-                    continue;
-                }
-                if (resolved.empty() || !fs::is_directory(resolved, ec)) {
-                    resolved.clear();
-                    break;
-                }
-                bool matched = false;
-                std::string want = it->string();
-                std::string wantLower = want;
-                std::transform(wantLower.begin(), wantLower.end(), wantLower.begin(),
-                    [](unsigned char c){ return std::tolower(c); });
-                for (const auto& entry : fs::directory_iterator(resolved, ec)) {
-                    std::string have = entry.path().filename().string();
-                    std::string haveLower = have;
-                    std::transform(haveLower.begin(), haveLower.end(), haveLower.begin(),
-                        [](unsigned char c){ return std::tolower(c); });
-                    if (haveLower == wantLower) {
-                        resolved = entry.path();
-                        matched = true;
-                        break;
-                    }
-                }
-                if (!matched) {
-                    resolved.clear();
-                    break;
-                }
-            }
-            if (!resolved.empty() && fs::exists(resolved, ec)) {
-                filePath = resolved.string();
-            } else {
-                return {.contentType = "text/plain", .body = {}, .status = 404};
-            }
-        }
-
-        // Directory listing: return JSON array of entries
-        if (fs::is_directory(filePath)) {
-            std::string json = "[";
-            bool first = true;
-            for (const auto& entry : fs::directory_iterator(filePath)) {
-                if (!first) json += ",";
-                first = false;
-                json += "{\"name\":\"" + entry.path().filename().string() + "\"";
-                json += ",\"type\":\"" + std::string(entry.is_directory() ? "dir" : "file") + "\"";
-                if (entry.is_regular_file())
-                    json += ",\"size\":" + std::to_string(entry.file_size());
-                json += "}";
-            }
-            json += "]";
-            std::vector<uint8_t> body(json.begin(), json.end());
-            return {
-                .contentType = "application/json",
-                .body = std::move(body),
-                .status = 200,
-            };
-        }
-
-        if (!fs::is_regular_file(filePath))
-            return {.contentType = "text/plain", .body = {}, .status = 404};
-
-        std::ifstream f(filePath, std::ios::binary);
-        std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
-                                   std::istreambuf_iterator<char>());
-
-        std::string ext = fs::path(filePath).extension().string();
-        std::string ct = "application/octet-stream";
-        if (ext == ".lua") ct = "text/x-lua; charset=utf-8";
-        else if (ext == ".json") ct = "application/json";
-        else if (ext == ".png") ct = "image/png";
-        else if (ext == ".jpg" || ext == ".jpeg") ct = "image/jpeg";
-        else if (ext == ".webp") ct = "image/webp";
-        else if (ext == ".ktx2") ct = "image/ktx2";
-        else if (ext == ".dds") ct = "image/vnd-ms.dds";
-        else if (ext == ".glb") ct = "model/gltf-binary";
-        else if (ext == ".gltf") ct = "model/gltf+json";
-        else if (ext == ".html") ct = "text/html; charset=utf-8";
-        else if (ext == ".css") ct = "text/css; charset=utf-8";
-        else if (ext == ".js") ct = "application/javascript; charset=utf-8";
-        else if (ext == ".wav") ct = "audio/wav";
-        else if (ext == ".ogg") ct = "audio/ogg";
-        else if (ext == ".opus") ct = "audio/ogg; codecs=opus";
-        else if (ext == ".webm") ct = "audio/webm";
-        else if (ext == ".mp3") ct = "audio/mpeg";
-
-        return {
-            .contentType = ct,
-            .body = std::move(data),
-            .status = 200,
-            .cacheControl = CacheControl::StaticAssetHeader(),
-        };
-    });
-
-    // Serve shared engine-base assets out of data/engine/. Today this is
-    // just the universal projectile-texture sprites converted from
-    // cont/base/bitmaps/ by gameconverter, which the Issue 3 resolver
-    // (rts/Server/Protocol.h ResolveProjectileTextureUrl) falls back to
-    // when a game does not ship its own copy of a texture name.
-    net.AddHttpGet("/api/engine/data/*", [](const std::string& url) -> HttpResponse {
-        std::string rest = url.substr(std::string("/api/engine/data/").size());
-        if (rest.find("..") != std::string::npos)
-            return {.contentType = "text/plain", .body = {}, .status = 403};
-
-        namespace fs = std::filesystem;
-        const std::string filePath = "data/engine/" + rest;
-        if (!fs::is_regular_file(filePath))
-            return {.contentType = "text/plain", .body = {}, .status = 404};
-
-        std::ifstream f(filePath, std::ios::binary);
-        std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
-                                   std::istreambuf_iterator<char>());
-
-        std::string ext = fs::path(filePath).extension().string();
-        std::string ct = "application/octet-stream";
-        if (ext == ".ktx2") ct = "image/ktx2";
-        else if (ext == ".png") ct = "image/png";
-        else if (ext == ".webp") ct = "image/webp";
-        else if (ext == ".dds") ct = "image/vnd-ms.dds";
-        else if (ext == ".json") ct = "application/json";
-
-        return {
-            .contentType = ct,
-            .body = std::move(data),
-            .status = 200,
-            .cacheControl = CacheControl::StaticAssetHeader(),
-        };
-    });
-
-    // Map thumbnail endpoint. Serves the preprocessed small PNG
-    // (aspect-correct, max 256px on the longer axis) that
-    // mapconverter wrote to data/maps/<id>/thumbnail.png at preprocess
-    // time. The full-size minimap.png sits next to it for consumers
-    // that want the larger version via the generic /api/maps/data/*.
-    //
-    // The shipped-*minimap.png/jpg fallback is preserved for maps
-    // where preprocess failed — most modern maps never hit it.
-    net.AddHttpGet("/api/maps/thumb/*", [&mapsDir](const std::string& url) -> HttpResponse {
-        const std::string mapId = url.substr(std::string("/api/maps/thumb/").size());
-        if (mapId.find("..") != std::string::npos)
-            return {.contentType = "text/plain", .body = {}, .status = 403};
-
-        namespace fs = std::filesystem;
-
-        // Primary: preprocessed small PNG (256px on the longer axis)
-        const fs::path processedPng =
-            fs::path("data") / "maps" / mapId / "thumbnail.png";
-        if (fs::is_regular_file(processedPng)) {
-            std::ifstream f(processedPng, std::ios::binary);
-            std::vector<uint8_t> data(
-                (std::istreambuf_iterator<char>(f)),
-                std::istreambuf_iterator<char>());
-            return {
-                .contentType = "image/png",
-                .body = std::move(data),
-                .status = 200,
-                .cacheControl = CacheControl::StaticAssetHeader(),
-            };
-        }
-        // Fallback: legacy WebP from previous mapconverter runs
-        const fs::path processedWebp =
-            fs::path("data") / "maps" / mapId / "thumbnail.webp";
-        if (fs::is_regular_file(processedWebp)) {
-            std::ifstream f(processedWebp, std::ios::binary);
-            std::vector<uint8_t> data(
-                (std::istreambuf_iterator<char>(f)),
-                std::istreambuf_iterator<char>());
-            return {
-                .contentType = "image/webp",
-                .body = std::move(data),
-                .status = 200,
-                .cacheControl = CacheControl::StaticAssetHeader(),
-            };
-        }
-
-        // Fallback: a *minimap.png/jpg shipped alongside the SMF by
-        // the map author. Kept for resilience against preprocess
-        // failure; most modern maps will never hit this path.
-        fs::path mapDir = fs::path(mapsDir) / mapId;
-        if (fs::is_directory(mapDir)) {
-            for (auto& entry : fs::recursive_directory_iterator(mapDir)) {
-                if (!entry.is_regular_file()) continue;
-                const auto fname = entry.path().filename().string();
-                const auto ext = entry.path().extension().string();
-                if (fname.find("minimap") != std::string::npos &&
-                    (ext == ".png" || ext == ".jpg")) {
-                    std::ifstream f(entry.path(), std::ios::binary);
-                    std::vector<uint8_t> data(
-                        (std::istreambuf_iterator<char>(f)),
-                        std::istreambuf_iterator<char>());
-                    return {
-                        .contentType = (ext == ".png") ? "image/png" : "image/jpeg",
-                        .body = std::move(data),
-                        .status = 200,
-                        .cacheControl = CacheControl::StaticAssetHeader(),
-                    };
-                }
-            }
-        }
+        // All other `/api/maps/data/*` paths are static assets served by
+        // the Vite plugin in dev / nginx-or-CDN in prod.
         return {.contentType = "text/plain", .body = {}, .status = 404};
     });
+
+    // The static handlers for `/api/games/data/*`, `/api/engine/data/*`,
+    // and `/api/maps/thumb/*` were removed (2026-05-25). Dev now uses
+    // the Vite static-data plugin (client/vite-static-data-plugin.ts)
+    // with native Last-Modified / ETag revalidation; production
+    // requires nginx/apache/CDN to serve those paths (see CLAUDE.md
+    // production deployment notes).
 
     // --- Process management API ---
     net.AddHttpGet("/api/processes", [&gameServers](const std::string&) -> HttpResponse {
