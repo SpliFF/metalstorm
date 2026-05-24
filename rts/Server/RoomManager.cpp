@@ -7,13 +7,323 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <sqlite3.h>
+
+// ============================================================
+// SQLite schema + write-through persistence
+// ============================================================
+//
+// Three tables — `rooms`, `room_members`, `room_ai_slots` — hold the
+// full lobby state so it survives a `spring-lobby` restart. Schema
+// versioning follows the same pattern as `maps`: probe for the
+// newest-added column; if it's missing, DROP+CREATE.
+//
+// Write-through: every mutation method that lands in this file
+// updates the in-memory `rooms` map first, then mirrors the change
+// into SQLite. Reads still come from memory — the DB is purely
+// durable storage and the source of truth for "what existed before
+// the lobby restarted".
+
+void RoomManager::SetDatabase(sqlite3* d) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    db = d;
+}
+
+void RoomManager::EnsureTables(sqlite3* db) {
+    if (!db) return;
+    // Probe for the newest-added column on each table. A failure means
+    // either the table is missing or its schema is stale; drop+recreate
+    // is acceptable in dev because this is process-local lobby state
+    // (no production-grade migration required for Phase A).
+    {
+        sqlite3_stmt* stmt = nullptr;
+        int rc = sqlite3_prepare_v2(db,
+            "SELECT persistent FROM rooms LIMIT 1", -1, &stmt, nullptr);
+        sqlite3_finalize(stmt);
+        if (rc != SQLITE_OK) {
+            sqlite3_exec(db, "DROP TABLE IF EXISTS rooms", nullptr, nullptr, nullptr);
+            sqlite3_exec(db, "DROP TABLE IF EXISTS room_members", nullptr, nullptr, nullptr);
+            sqlite3_exec(db, "DROP TABLE IF EXISTS room_ai_slots", nullptr, nullptr, nullptr);
+        }
+    }
+    sqlite3_exec(db, R"(
+        CREATE TABLE IF NOT EXISTS rooms (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            host_player_id INTEGER NOT NULL,
+            map_id TEXT,
+            game_id TEXT,
+            max_players INTEGER NOT NULL DEFAULT 8,
+            password TEXT NOT NULL DEFAULT '',
+            state INTEGER NOT NULL DEFAULT 1,
+            game_server_port INTEGER NOT NULL DEFAULT 0,
+            persistent INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        );
+    )", nullptr, nullptr, nullptr);
+    sqlite3_exec(db, R"(
+        CREATE TABLE IF NOT EXISTS room_members (
+            room_id INTEGER NOT NULL,
+            player_id INTEGER NOT NULL,
+            username TEXT NOT NULL DEFAULT '',
+            team INTEGER NOT NULL DEFAULT 0,
+            start_pos INTEGER NOT NULL DEFAULT -1,
+            ready INTEGER NOT NULL DEFAULT 0,
+            is_spectator INTEGER NOT NULL DEFAULT 0,
+            is_host INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (room_id, player_id)
+        );
+    )", nullptr, nullptr, nullptr);
+    sqlite3_exec(db, R"(
+        CREATE TABLE IF NOT EXISTS room_ai_slots (
+            room_id INTEGER NOT NULL,
+            slot_index INTEGER NOT NULL,
+            ai_id TEXT NOT NULL,
+            display_name TEXT NOT NULL DEFAULT '',
+            team INTEGER NOT NULL DEFAULT 0,
+            start_pos INTEGER NOT NULL DEFAULT -1,
+            PRIMARY KEY (room_id, slot_index)
+        );
+    )", nullptr, nullptr, nullptr);
+}
+
+// Helper: bind a std::string to a sqlite stmt parameter (1-based) as
+// transient — sqlite copies, so the source string can go out of scope.
+static void BindText(sqlite3_stmt* s, int idx, const std::string& v) {
+    sqlite3_bind_text(s, idx, v.c_str(), -1, SQLITE_TRANSIENT);
+}
+
+void RoomManager::PersistRoomLocked(const GameRoom& room) {
+    if (!db) return;
+    static const char* kSql =
+        "INSERT INTO rooms (id, name, host_player_id, map_id, game_id, "
+        "  max_players, password, state, game_server_port, persistent, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s','now')) "
+        "ON CONFLICT(id) DO UPDATE SET "
+        "  name=excluded.name, host_player_id=excluded.host_player_id, "
+        "  map_id=excluded.map_id, game_id=excluded.game_id, "
+        "  max_players=excluded.max_players, password=excluded.password, "
+        "  state=excluded.state, game_server_port=excluded.game_server_port, "
+        "  persistent=excluded.persistent, updated_at=strftime('%s','now')";
+    sqlite3_stmt* s = nullptr;
+    if (sqlite3_prepare_v2(db, kSql, -1, &s, nullptr) != SQLITE_OK) {
+        SLOG(SPRING_LOG_WARNING, "PersistRoom prepare failed: %s", sqlite3_errmsg(db));
+        return;
+    }
+    sqlite3_bind_int(s, 1, static_cast<int>(room.id));
+    BindText(s, 2, room.name);
+    sqlite3_bind_int(s, 3, static_cast<int>(room.hostPlayerId));
+    BindText(s, 4, room.mapId);
+    BindText(s, 5, room.gameId);
+    sqlite3_bind_int(s, 6, room.maxPlayers);
+    BindText(s, 7, room.password);
+    sqlite3_bind_int(s, 8, static_cast<int>(room.state));
+    sqlite3_bind_int(s, 9, room.gameServerPort);
+    sqlite3_bind_int(s, 10, room.persistent ? 1 : 0);
+    if (sqlite3_step(s) != SQLITE_DONE) {
+        SLOG(SPRING_LOG_WARNING, "PersistRoom step failed: %s", sqlite3_errmsg(db));
+    }
+    sqlite3_finalize(s);
+    PersistMembersLocked(room);
+    PersistAISlotsLocked(room);
+}
+
+void RoomManager::PersistMembersLocked(const GameRoom& room) {
+    if (!db) return;
+    // Simplest correct strategy: wipe + reinsert. Rosters are small
+    // (≤16 players) and this avoids upsert vs. delete bookkeeping per
+    // player. Wrap in a single transaction so a read-mid-write doesn't
+    // see an empty roster.
+    sqlite3_exec(db, "BEGIN", nullptr, nullptr, nullptr);
+    {
+        char sql[128];
+        snprintf(sql, sizeof(sql),
+            "DELETE FROM room_members WHERE room_id=%u", room.id);
+        sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
+    }
+    static const char* kInsert =
+        "INSERT INTO room_members (room_id, player_id, username, team, "
+        "start_pos, ready, is_spectator, is_host) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+    sqlite3_stmt* s = nullptr;
+    if (sqlite3_prepare_v2(db, kInsert, -1, &s, nullptr) == SQLITE_OK) {
+        for (const auto& p : room.players) {
+            sqlite3_reset(s);
+            sqlite3_bind_int(s, 1, static_cast<int>(room.id));
+            sqlite3_bind_int(s, 2, static_cast<int>(p.playerId));
+            BindText(s, 3, p.username);
+            sqlite3_bind_int(s, 4, p.team);
+            sqlite3_bind_int(s, 5, p.startPos);
+            sqlite3_bind_int(s, 6, p.ready ? 1 : 0);
+            sqlite3_bind_int(s, 7, p.isSpectator ? 1 : 0);
+            sqlite3_bind_int(s, 8, p.isHost ? 1 : 0);
+            if (sqlite3_step(s) != SQLITE_DONE) {
+                SLOG(SPRING_LOG_WARNING, "PersistMembers step: %s",
+                    sqlite3_errmsg(db));
+            }
+        }
+        sqlite3_finalize(s);
+    }
+    sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+}
+
+void RoomManager::PersistAISlotsLocked(const GameRoom& room) {
+    if (!db) return;
+    sqlite3_exec(db, "BEGIN", nullptr, nullptr, nullptr);
+    {
+        char sql[128];
+        snprintf(sql, sizeof(sql),
+            "DELETE FROM room_ai_slots WHERE room_id=%u", room.id);
+        sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
+    }
+    static const char* kInsert =
+        "INSERT INTO room_ai_slots (room_id, slot_index, ai_id, "
+        "display_name, team, start_pos) VALUES (?, ?, ?, ?, ?, ?)";
+    sqlite3_stmt* s = nullptr;
+    if (sqlite3_prepare_v2(db, kInsert, -1, &s, nullptr) == SQLITE_OK) {
+        for (size_t i = 0; i < room.aiSlots.size(); ++i) {
+            const auto& slot = room.aiSlots[i];
+            sqlite3_reset(s);
+            sqlite3_bind_int(s, 1, static_cast<int>(room.id));
+            sqlite3_bind_int(s, 2, static_cast<int>(i));
+            BindText(s, 3, slot.aiId);
+            BindText(s, 4, slot.displayName);
+            sqlite3_bind_int(s, 5, slot.team);
+            sqlite3_bind_int(s, 6, slot.startPos);
+            if (sqlite3_step(s) != SQLITE_DONE) {
+                SLOG(SPRING_LOG_WARNING, "PersistAISlots step: %s",
+                    sqlite3_errmsg(db));
+            }
+        }
+        sqlite3_finalize(s);
+    }
+    sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+}
+
+void RoomManager::DeleteRoomFromDb(uint32_t roomId) {
+    if (!db) return;
+    char sql[160];
+    snprintf(sql, sizeof(sql), "DELETE FROM rooms WHERE id=%u", roomId);
+    sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
+    snprintf(sql, sizeof(sql), "DELETE FROM room_members WHERE room_id=%u", roomId);
+    sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
+    snprintf(sql, sizeof(sql), "DELETE FROM room_ai_slots WHERE room_id=%u", roomId);
+    sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
+}
+
+void RoomManager::LoadFromDatabase() {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    if (!db) return;
+    rooms.clear();
+
+    // 1. Rooms
+    {
+        const char* kSql =
+            "SELECT id, name, host_player_id, map_id, game_id, max_players, "
+            "password, state, game_server_port, persistent FROM rooms";
+        sqlite3_stmt* s = nullptr;
+        if (sqlite3_prepare_v2(db, kSql, -1, &s, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(s) == SQLITE_ROW) {
+                GameRoom r;
+                r.id = static_cast<uint32_t>(sqlite3_column_int(s, 0));
+                const unsigned char* nm = sqlite3_column_text(s, 1);
+                r.name = nm ? reinterpret_cast<const char*>(nm) : "";
+                r.hostPlayerId = static_cast<uint32_t>(sqlite3_column_int(s, 2));
+                const unsigned char* mi = sqlite3_column_text(s, 3);
+                r.mapId = mi ? reinterpret_cast<const char*>(mi) : "";
+                const unsigned char* gi = sqlite3_column_text(s, 4);
+                r.gameId = gi ? reinterpret_cast<const char*>(gi) : "";
+                r.maxPlayers = static_cast<uint8_t>(sqlite3_column_int(s, 5));
+                const unsigned char* pw = sqlite3_column_text(s, 6);
+                r.password = pw ? reinterpret_cast<const char*>(pw) : "";
+                r.state = static_cast<ERoomState>(sqlite3_column_int(s, 7));
+                r.gameServerPort = static_cast<uint16_t>(sqlite3_column_int(s, 8));
+                r.persistent = (sqlite3_column_int(s, 9) != 0);
+                rooms[r.id] = std::move(r);
+            }
+            sqlite3_finalize(s);
+        }
+    }
+
+    // 2. Members
+    {
+        const char* kSql =
+            "SELECT room_id, player_id, username, team, start_pos, "
+            "ready, is_spectator, is_host FROM room_members";
+        sqlite3_stmt* s = nullptr;
+        if (sqlite3_prepare_v2(db, kSql, -1, &s, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(s) == SQLITE_ROW) {
+                uint32_t rid = static_cast<uint32_t>(sqlite3_column_int(s, 0));
+                auto it = rooms.find(rid);
+                if (it == rooms.end()) continue;
+                RoomPlayer p;
+                p.playerId = static_cast<uint32_t>(sqlite3_column_int(s, 1));
+                p.clientId = 0;  // re-established when the client reconnects
+                const unsigned char* un = sqlite3_column_text(s, 2);
+                p.username = un ? reinterpret_cast<const char*>(un) : "";
+                p.team = static_cast<uint8_t>(sqlite3_column_int(s, 3));
+                p.startPos = static_cast<int8_t>(sqlite3_column_int(s, 4));
+                p.ready = (sqlite3_column_int(s, 5) != 0);
+                p.isSpectator = (sqlite3_column_int(s, 6) != 0);
+                p.isHost = (sqlite3_column_int(s, 7) != 0);
+                it->second.players.push_back(std::move(p));
+            }
+            sqlite3_finalize(s);
+        }
+    }
+
+    // 3. AI slots — preserve slot_index ordering
+    {
+        const char* kSql =
+            "SELECT room_id, ai_id, display_name, team, start_pos "
+            "FROM room_ai_slots ORDER BY room_id, slot_index";
+        sqlite3_stmt* s = nullptr;
+        if (sqlite3_prepare_v2(db, kSql, -1, &s, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(s) == SQLITE_ROW) {
+                uint32_t rid = static_cast<uint32_t>(sqlite3_column_int(s, 0));
+                auto it = rooms.find(rid);
+                if (it == rooms.end()) continue;
+                RoomAISlot slot;
+                const unsigned char* ai = sqlite3_column_text(s, 1);
+                slot.aiId = ai ? reinterpret_cast<const char*>(ai) : "";
+                const unsigned char* dn = sqlite3_column_text(s, 2);
+                slot.displayName = dn ? reinterpret_cast<const char*>(dn) : "";
+                slot.team = static_cast<uint8_t>(sqlite3_column_int(s, 3));
+                slot.startPos = static_cast<int8_t>(sqlite3_column_int(s, 4));
+                it->second.aiSlots.push_back(std::move(slot));
+            }
+            sqlite3_finalize(s);
+        }
+    }
+
+    // 4. nextRoomId = MAX(id)+1 so we don't collide with adopted rooms.
+    nextRoomId = 1;
+    {
+        sqlite3_stmt* s = nullptr;
+        if (sqlite3_prepare_v2(db, "SELECT MAX(id) FROM rooms", -1, &s, nullptr)
+            == SQLITE_OK)
+        {
+            if (sqlite3_step(s) == SQLITE_ROW
+                && sqlite3_column_type(s, 0) != SQLITE_NULL)
+            {
+                nextRoomId = static_cast<uint32_t>(sqlite3_column_int(s, 0)) + 1;
+            }
+            sqlite3_finalize(s);
+        }
+    }
+
+    SLOG(SPRING_LOG_NOTICE, "loaded %zu room(s) from db, nextRoomId=%u",
+        rooms.size(), nextRoomId);
+}
 
 uint32_t RoomManager::CreateRoom(
     const std::string& name, const std::string& mapId,
     const std::string& gameId, uint8_t maxPlayers,
     const std::string& password,
     uint32_t hostPlayerId, ClientID hostClientId,
-    const std::string& hostUsername)
+    const std::string& hostUsername,
+    bool persistent)
 {
     std::lock_guard<std::recursive_mutex> lock(mutex);
 
@@ -26,6 +336,7 @@ uint32_t RoomManager::CreateRoom(
     room.maxPlayers = maxPlayers;
     room.password = password;
     room.hostPlayerId = hostPlayerId;
+    room.persistent = persistent;
     room.state = ERoomState::Filling;
 
     RoomPlayer host;
@@ -38,6 +349,7 @@ uint32_t RoomManager::CreateRoom(
 
     SLOG(SPRING_LOG_INFO, "created room %u '%s' (host=%s, map=%s)",
         id, name.c_str(), hostUsername.c_str(), mapId.c_str());
+    PersistRoomLocked(room);
     return id;
 }
 
@@ -58,7 +370,9 @@ bool RoomManager::JoinRoom(
     if (!isActive && room.state != ERoomState::Filling) return false;
     if (!room.password.empty() && password != room.password) return false;
 
-    // If player is already in the room, update their clientId (reconnection)
+    // If player is already in the room, update their clientId (reconnection).
+    // clientId itself isn't persisted (it's a transient session
+    // identifier), so there's nothing to flush to SQLite here.
     auto* existing = room.FindPlayer(playerId);
     if (existing) {
         existing->clientId = clientId;
@@ -106,6 +420,7 @@ bool RoomManager::JoinRoom(
     }
 
     room.players.push_back(player);
+    PersistMembersLocked(room);
     return true;
 }
 
@@ -138,11 +453,13 @@ LeaveResult RoomManager::LeaveRoom(uint32_t roomId, uint32_t playerId) {
             // Host stays set to the original host.
             SLOG(SPRING_LOG_INFO, "room %u: last human left (persistent, keeping)",
                 roomId);
+            PersistMembersLocked(room);
             return LeaveResult::StillPersistent;
         }
         SLOG(SPRING_LOG_INFO, "room %u: last human left, abandoning", roomId);
         // Don't erase here — caller needs the room data to find
-        // the game server. Caller calls DeleteRoom() after cleanup.
+        // the game server. Caller calls DeleteRoom() after cleanup,
+        // and DeleteRoom takes care of the SQLite cascade.
         return LeaveResult::Abandoned;
     }
 
@@ -154,9 +471,11 @@ LeaveResult RoomManager::LeaveRoom(uint32_t roomId, uint32_t playerId) {
         room.hostPlayerId = players[idx].playerId;
         SLOG(SPRING_LOG_INFO, "room %u: host left, promoted '%s'",
             roomId, players[idx].username.c_str());
+        PersistRoomLocked(room);   // host_player_id changed
         return LeaveResult::HostTransferred;
     }
 
+    PersistMembersLocked(room);
     return LeaveResult::Left;
 }
 
@@ -167,6 +486,7 @@ bool RoomManager::SetTeam(uint32_t roomId, uint32_t playerId, uint8_t team) {
     auto* player = it->second.FindPlayer(playerId);
     if (!player || player->isSpectator) return false;
     player->team = team;
+    PersistMembersLocked(it->second);
     return true;
 }
 
@@ -177,6 +497,7 @@ bool RoomManager::SetReady(uint32_t roomId, uint32_t playerId, bool ready) {
     auto* player = it->second.FindPlayer(playerId);
     if (!player) return false;
     player->ready = ready;
+    PersistMembersLocked(it->second);
     return true;
 }
 
@@ -223,6 +544,7 @@ bool RoomManager::AddAISlot(
 
     SLOG(SPRING_LOG_INFO, "room %u: host added AI '%s' to team %u (slots=%zu)",
         roomId, aiId.c_str(), static_cast<unsigned>(team), room.aiSlots.size());
+    PersistAISlotsLocked(room);
     return true;
 }
 
@@ -241,6 +563,7 @@ bool RoomManager::RemoveAISlot(
     room.aiSlots.erase(room.aiSlots.begin() + slotIndex);
     SLOG(SPRING_LOG_INFO, "room %u: host removed AI '%s' (slot %u)",
         roomId, removedId.c_str(), static_cast<unsigned>(slotIndex));
+    PersistAISlotsLocked(room);
     return true;
 }
 
@@ -263,6 +586,7 @@ bool RoomManager::SetAITeam(
         roomId, static_cast<unsigned>(slotIndex),
         room.aiSlots[slotIndex].aiId.c_str(),
         static_cast<unsigned>(team));
+    PersistAISlotsLocked(room);
     return true;
 }
 
@@ -324,6 +648,7 @@ bool RoomManager::SetPlayerStartPos(
     target->startPos = posIndex;
     SLOG(SPRING_LOG_DEBUG, "room %u: player %u start pos -> %d",
         roomId, actualTarget, static_cast<int>(posIndex));
+    PersistMembersLocked(room);
     return true;
 }
 
@@ -356,6 +681,7 @@ bool RoomManager::SetAIStartPos(
         roomId, static_cast<unsigned>(slotIndex),
         room.aiSlots[slotIndex].aiId.c_str(),
         static_cast<int>(posIndex));
+    PersistAISlotsLocked(room);
     return true;
 }
 
@@ -412,6 +738,8 @@ void RoomManager::AutoAssignStartPositions(
         SLOG(SPRING_LOG_INFO,
             "room %u: auto-assigned %d start position(s)",
             roomId, assigned);
+        PersistMembersLocked(room);
+        PersistAISlotsLocked(room);
     }
 }
 
@@ -421,6 +749,7 @@ void RoomManager::DeleteRoom(uint32_t roomId) {
     if (it == rooms.end()) return;
     SLOG(SPRING_LOG_INFO, "room %u: deleted (was '%s')",
         roomId, it->second.name.c_str());
+    DeleteRoomFromDb(roomId);
     rooms.erase(it);
 }
 
@@ -437,7 +766,11 @@ bool RoomManager::KickPlayer(uint32_t roomId, uint32_t requesterId, uint32_t tar
         std::remove_if(players.begin(), players.end(),
             [targetId](const RoomPlayer& p) { return p.playerId == targetId; }),
         players.end());
-    return players.size() < before;
+    if (players.size() < before) {
+        PersistMembersLocked(it->second);
+        return true;
+    }
+    return false;
 }
 
 bool RoomManager::StartGame(uint32_t roomId, uint32_t requesterId) {
@@ -451,6 +784,7 @@ bool RoomManager::StartGame(uint32_t roomId, uint32_t requesterId) {
 
     room.state = ERoomState::Loading;
     SLOG(SPRING_LOG_INFO, "room %u transitioning to LOADING", roomId);
+    PersistRoomLocked(room);
     return true;
 }
 
@@ -486,6 +820,7 @@ void RoomManager::ResetRoomForNextGame(uint32_t roomId) {
     room.originalRoster.clear();
 
     SLOG(SPRING_LOG_INFO, "room %u recycled for next game", roomId);
+    PersistRoomLocked(room);
 }
 
 void RoomManager::SetRoomState(uint32_t roomId, ERoomState newState) {
@@ -493,6 +828,17 @@ void RoomManager::SetRoomState(uint32_t roomId, ERoomState newState) {
     auto it = rooms.find(roomId);
     if (it == rooms.end()) return;
     it->second.state = newState;
+    PersistRoomLocked(it->second);
+}
+
+void RoomManager::PersistRoomGameSession(uint32_t roomId) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    auto it = rooms.find(roomId);
+    if (it == rooms.end()) return;
+    // Called after the lobby finalises gameServerPort and the auto-
+    // assigned start positions on the host's RoomStartGame path.
+    // Both pieces of state are already in memory; we just flush.
+    PersistRoomLocked(it->second);
 }
 
 GameRoom* RoomManager::GetRoom(uint32_t roomId) {

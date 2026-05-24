@@ -25,6 +25,7 @@
 
 #include <sqlite3.h>
 
+#include <cerrno>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -38,6 +39,8 @@
 #include <sys/types.h>
 #include <cstring>
 #include <sys/wait.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #include <unistd.h>
 
 #define LOG_SECTION "lobby"
@@ -61,12 +64,35 @@ struct GameServerInstance {
     enum State { Starting, Running, Ended, Crashed } state = Starting;
 };
 
-/// Find a free port by trying to bind briefly.
-static int findFreePort(int base = 9100) {
-    // Simple: increment from base, skip ports already in use
-    // A proper implementation would use SO_REUSEADDR + bind + close
-    static int nextPort = base;
-    return nextPort++;
+/// Find a free TCP port by actually trying to bind one. Caller can
+/// pass a `floor` to start the search higher than `base` — used to
+/// skip ports already held by adopted game-server processes whose
+/// rows we read out of the `game_servers` table at startup. A range
+/// of 1000 ports above the floor is searched; if nothing's free in
+/// that window we return -1 and the caller fails the game spawn.
+///
+/// SO_REUSEADDR is set so a port that's in TIME_WAIT after a recent
+/// `spring-server` exit can still be reused for the next room. Game
+/// servers themselves bind their own listen socket; the brief bind
+/// here is purely a "does anyone hold this?" probe.
+static int findFreePort(int base = 9100, int floor = 0) {
+    int start = (floor > base) ? floor : base;
+    for (int port = start; port < start + 1000; ++port) {
+        int s = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (s < 0) continue;
+        int one = 1;
+        setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = htons(static_cast<uint16_t>(port));
+        if (::bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+            ::close(s);
+            return port;
+        }
+        ::close(s);
+    }
+    return -1;
 }
 
 /// Spawn a spring-server process for a game room.
@@ -97,6 +123,11 @@ static GameServerInstance spawnGameServer(
     GameServerInstance inst;
     inst.roomId = roomId;
     inst.port = findFreePort();
+    if (inst.port < 0) {
+        SLOG(SPRING_LOG_ERROR, "no free port in [9100, 10100) for room %u", roomId);
+        inst.state = GameServerInstance::Crashed;
+        return inst;
+    }
     inst.mapId = mapId;
     inst.gameId = gameId;
 
@@ -198,12 +229,17 @@ static GameServerInstance spawnGameServer(
     return inst;
 }
 
-/// Check if a game server process is still running.
+/// Check if a process exists. Works for both children of this PID
+/// (which `waitpid(pid, &status, WNOHANG)` could answer for) and
+/// orphan processes that were re-parented to PID 1 after a previous
+/// lobby instance died — those are the ones we want to adopt on
+/// startup, and `waitpid` returns -1/ECHILD for them. `kill(pid, 0)`
+/// is the standard portable existence probe: returns 0 if the pid
+/// is alive, -1 with errno=ESRCH if it isn't.
 static bool isProcessAlive(pid_t pid) {
     if (pid <= 0) return false;
-    int status;
-    pid_t result = waitpid(pid, &status, WNOHANG);
-    return (result == 0); // 0 means still running
+    if (::kill(pid, 0) == 0) return true;
+    return (errno != ESRCH);  // EPERM means alive but not ours; still "alive"
 }
 
 int main(int argc, char* argv[])
@@ -291,6 +327,17 @@ int main(int argc, char* argv[])
     sqlite3* mapDb = nullptr;
     sqlite3_open(dbPath.c_str(), &mapDb);
 
+    // Attach the lobby's SQLite handle to the RoomManager so every room
+    // mutation is write-through. Tables are created (or dropped and
+    // recreated on schema bump) before LoadFromDatabase populates the
+    // in-memory `rooms` map from any rows that survived a previous
+    // lobby instance.
+    if (mapDb) {
+        RoomManager::EnsureTables(mapDb);
+        rooms.SetDatabase(mapDb);
+        rooms.LoadFromDatabase();
+    }
+
     // Create game_servers table — maintained in real-time so external tools
     // (MCP debug server, springcli) can discover running game server ports
     // without querying the lobby HTTP API.
@@ -305,22 +352,6 @@ int main(int argc, char* argv[])
             "  started_at INTEGER DEFAULT (strftime('%s','now')),"
             "  state TEXT DEFAULT 'starting'"
             ")", nullptr, nullptr, nullptr);
-        // Clean up stale entries whose processes are no longer alive
-        {
-            sqlite3_stmt* stmt = nullptr;
-            sqlite3_prepare_v2(mapDb, "SELECT room_id, pid FROM game_servers", -1, &stmt, nullptr);
-            std::vector<uint32_t> staleRooms;
-            while (sqlite3_step(stmt) == SQLITE_ROW) {
-                pid_t pid = sqlite3_column_int(stmt, 1);
-                if (!isProcessAlive(pid))
-                    staleRooms.push_back(sqlite3_column_int(stmt, 0));
-            }
-            sqlite3_finalize(stmt);
-            for (auto rid : staleRooms) {
-                std::string sql = "DELETE FROM game_servers WHERE room_id=" + std::to_string(rid);
-                sqlite3_exec(mapDb, sql.c_str(), nullptr, nullptr, nullptr);
-            }
-        }
     }
 
     // Helper: persist a game server entry to SQLite
@@ -377,6 +408,86 @@ int main(int argc, char* argv[])
 
     // --- Game server instances ---
     std::unordered_map<uint32_t, GameServerInstance> gameServers; // roomId → instance
+
+    // --- Adopt-or-reset live game servers across a lobby restart ---
+    //
+    // Walk the `game_servers` table. For each row we either:
+    //   - adopt the running process (re-populate gameServers[roomId])
+    //     so /api/processes and the room browser show it correctly
+    //     and we can SIGTERM it when its room is abandoned;
+    //   - or, if the pid is dead, reset the matching room back to
+    //     Filling and delete the stale row.
+    //
+    // This replaces the previous `waitpid(WNOHANG)` cleanup which
+    // only worked for processes that were children of *this* PID —
+    // every adopted orphan from a prior lobby instance fell through
+    // and got DELETEd as if it had crashed.
+    if (mapDb) {
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(mapDb,
+            "SELECT room_id, port, pid, map_id, game_id, state "
+            "FROM game_servers", -1, &stmt, nullptr);
+
+        std::vector<uint32_t> staleRooms;
+        size_t adopted = 0;
+        while (stmt && sqlite3_step(stmt) == SQLITE_ROW) {
+            uint32_t rid = sqlite3_column_int(stmt, 0);
+            int port = sqlite3_column_int(stmt, 1);
+            pid_t pid = sqlite3_column_int(stmt, 2);
+            const unsigned char* mid = sqlite3_column_text(stmt, 3);
+            const unsigned char* gid = sqlite3_column_text(stmt, 4);
+            const unsigned char* st  = sqlite3_column_text(stmt, 5);
+
+            if (!isProcessAlive(pid)) {
+                staleRooms.push_back(rid);
+                continue;
+            }
+
+            GameServerInstance inst;
+            inst.roomId = rid;
+            inst.port   = port;
+            inst.pid    = pid;
+            inst.mapId  = mid ? reinterpret_cast<const char*>(mid) : "";
+            inst.gameId = gid ? reinterpret_cast<const char*>(gid) : "";
+            // We don't know the live process's real state without
+            // talking to it. Trust the persisted state for now; the
+            // health-check loop downgrades to Ended if the pid dies.
+            const std::string stateStr =
+                st ? reinterpret_cast<const char*>(st) : "running";
+            if      (stateStr == "starting") inst.state = GameServerInstance::Starting;
+            else if (stateStr == "ended")    inst.state = GameServerInstance::Ended;
+            else if (stateStr == "crashed")  inst.state = GameServerInstance::Crashed;
+            else                             inst.state = GameServerInstance::Running;
+
+            gameServers[rid] = inst;
+            // Mirror the live port back into the in-memory room so the
+            // browser shows the right "Rejoin" target.
+            if (auto* room = rooms.GetRoom(rid)) {
+                room->gameServerPort = static_cast<uint16_t>(port);
+            }
+            adopted++;
+            SLOG(SPRING_LOG_NOTICE,
+                "adopted game server room=%u pid=%d port=%d (%s)",
+                rid, (int)pid, port, stateStr.c_str());
+        }
+        if (stmt) sqlite3_finalize(stmt);
+
+        for (auto rid : staleRooms) {
+            std::string sql = "DELETE FROM game_servers WHERE room_id="
+                + std::to_string(rid);
+            sqlite3_exec(mapDb, sql.c_str(), nullptr, nullptr, nullptr);
+            // Room metadata is persistent; if a row in `rooms` matches,
+            // reset it back to Filling so the host can launch again.
+            if (rooms.GetRoom(rid))
+                rooms.ResetRoomForNextGame(rid);
+            SLOG(SPRING_LOG_NOTICE,
+                "game_servers row room=%u was stale (pid dead) — cleared", rid);
+        }
+
+        SLOG(SPRING_LOG_NOTICE,
+            "startup: adopted %zu game server(s), cleaned %zu stale row(s)",
+            adopted, staleRooms.size());
+    }
 
     // --- Network ---
     NetworkServer net;
@@ -838,9 +949,9 @@ int main(int argc, char* argv[])
         bool persistent = (persistStr == "true" || persistStr == "1");
 
         uint32_t roomId = rooms.CreateRoom(name, mapId, gameId, 8, "",
-            static_cast<uint32_t>(userId), 0 /*no WS clientId*/, user->username);
+            static_cast<uint32_t>(userId), 0 /*no WS clientId*/, user->username,
+            persistent);
         auto* room = rooms.GetRoom(roomId);
-        if (room) room->persistent = persistent;
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(room));
     });

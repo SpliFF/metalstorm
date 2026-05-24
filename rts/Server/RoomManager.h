@@ -13,6 +13,8 @@
 #include <unordered_map>
 #include <vector>
 
+struct sqlite3;
+
 using ClientID = uint32_t;
 
 enum class ERoomState : uint8_t {
@@ -138,12 +140,38 @@ struct GameRoom {
 
 class RoomManager {
 public:
+    /// Attach a SQLite database for write-through persistence. When set,
+    /// every state-changing method writes to both the in-memory map and
+    /// the `rooms` / `room_members` / `room_ai_slots` tables.
+    ///
+    /// The lobby calls this once at startup. spring-server does not
+    /// (its RoomManager is process-local for the lifetime of the game
+    /// and should not race the lobby on the same tables).
+    ///
+    /// Caller owns the sqlite3* and must call this with nullptr (or
+    /// destroy the RoomManager) before closing the handle.
+    void SetDatabase(sqlite3* db);
+
+    /// Ensure the rooms / room_members / room_ai_slots tables exist
+    /// at the current schema version. If the schema is stale (probe
+    /// for the newest column fails) the tables are dropped and
+    /// recreated. Same pattern as MapMetadataDb::EnsureTable.
+    static void EnsureTables(sqlite3* db);
+
+    /// Replay the rooms / room_members / room_ai_slots tables into
+    /// memory. Called once at lobby startup before the main loop, so
+    /// the room browser is correct from the first request. Sets
+    /// nextRoomId to MAX(rooms.id)+1 so freshly-created rooms don't
+    /// reuse the id of a still-running game.
+    void LoadFromDatabase();
+
     /// Create a new room. Returns room ID.
     uint32_t CreateRoom(const std::string& name, const std::string& mapId,
                         const std::string& gameId, uint8_t maxPlayers,
                         const std::string& password,
                         uint32_t hostPlayerId, ClientID hostClientId,
-                        const std::string& hostUsername);
+                        const std::string& hostUsername,
+                        bool persistent = false);
 
     /// Join a room. Returns true on success.
     bool JoinRoom(uint32_t roomId, uint32_t playerId, ClientID clientId,
@@ -210,6 +238,11 @@ public:
                        uint8_t slotIndex, int8_t posIndex,
                        int8_t maxStartPos);
 
+    /// Persist `room.gameServerPort` and the host's `start_pos` after
+    /// AutoAssignStartPositions runs. Called by the lobby right
+    /// before spawning the game subprocess. No-op when no DB is set.
+    void PersistRoomGameSession(uint32_t roomId);
+
     /// Auto-assign unassigned start positions in the room. Called
     /// by the lobby at game-start time so any slot that still has
     /// `startPos == -1` gets a concrete index before the roster is
@@ -248,7 +281,14 @@ public:
     void RemoveClient(ClientID clientId);
 
 private:
+    // --- SQLite write-through helpers (no-op when db is null) ---
+    void PersistRoomLocked(const GameRoom& room);
+    void DeleteRoomFromDb(uint32_t roomId);
+    void PersistMembersLocked(const GameRoom& room);
+    void PersistAISlotsLocked(const GameRoom& room);
+
     std::recursive_mutex mutex;
     std::unordered_map<uint32_t, GameRoom> rooms;
     uint32_t nextRoomId = 1;
+    sqlite3* db = nullptr;
 };
