@@ -108,15 +108,15 @@ std::string StringMap(const std::vector<std::pair<std::string, std::string>>& kv
 
 // ─── Concrete serializers (non-template; types are stable) ────────
 
-/// Serialise the game's FeatureDef vector to Lua source. Mirrors
-/// Protocol::BuildGameFeatureDefs: model URLs resolve to existing
-/// `.gltf` files under `modelsDir`; empty URL when no model.
+/// Serialise the game's FeatureDef vector to Lua source. Model URLs
+/// resolve to existing `.gltf` files under `modelsDir`; empty URL
+/// when no model exists on disk.
 std::string SerializeFeatureDefs(
     const std::vector<FeatureDef>& defs,
     const std::string& gameId,
     const std::filesystem::path& modelsDir);
 
-/// Serialise CEG defs to Lua source. Mirrors CegLoader::BuildGameCegDefs.
+/// Serialise CEG defs to Lua source.
 std::string SerializeCegDefs(const std::vector<CegLoader::CegDef>& defs);
 
 // ─── Template serializers (header-only; UnitDef/WeaponDef types may

@@ -83,9 +83,4 @@ struct CegDef {
 /// safe to call once per game-server bake.
 std::vector<CegDef> LoadAllCegDefs();
 
-/// Build the framed `ServerMessage{GameCegDefs}` payload for shipping
-/// to clients. Same envelope convention as BuildGameUnitDefs /
-/// BuildGameWeaponDefs (see Protocol.h).
-std::vector<uint8_t> BuildGameCegDefs(const std::vector<CegDef>& defs);
-
 } // namespace CegLoader

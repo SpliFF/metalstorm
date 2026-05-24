@@ -101,9 +101,11 @@ if (mapId) {
     const img = new Image();
     img.onload = () => { mapThumb = img; };
     img.onerror = () => { /* fall back to grid */ };
-    // Lobby HTTP is on the same host as the game server but on the
-    // lobby's port. The configured CONFIG.httpUrl points there.
-    img.src = stampUrl(`${CONFIG.httpUrl}/api/maps/thumb/${encodeURIComponent(mapId)}`);
+    // Map thumbs are served by the static-data Vite plugin (dev) or
+    // the production static front (nginx/CDN), not by the lobby's
+    // dynamic-API process. A relative URL resolves against the page
+    // origin so both dev and prod work without per-environment config.
+    img.src = `/api/maps/thumb/${encodeURIComponent(mapId)}`;
 }
 const connection = new Connection({
     onStateChange(state) {

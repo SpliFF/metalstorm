@@ -20,12 +20,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-# Patterns are anchored to this repo root so we never touch unrelated
-# `vite`/`node` processes (e.g. the user's other projects).
-PAT_LOBBY="${REPO_ROOT}/build/debug/spring-lobby"
-PAT_SERVER="${REPO_ROOT}/build/debug/spring-server"
-PAT_LOGSERVER="${REPO_ROOT}/build/debug/spring-logserver"
-PAT_CLIENT="${REPO_ROOT}/client/node_modules/.bin/vite"
+# Patterns match the path tail so both absolute (`/abs/build/debug/...`)
+# and relative (`./build/debug/...`) invocations are caught. Picking a
+# repo-internal subpath keeps unrelated `vite`/`node` processes
+# (the user's other projects) out of the match.
+PAT_LOBBY="build/debug/spring-lobby"
+PAT_SERVER="build/debug/spring-server"
+PAT_LOGSERVER="build/debug/spring-logserver"
+PAT_CLIENT="client/node_modules/.bin/vite"
 
 # Find PIDs whose full command line contains $1. Returns nothing if
 # none match. We use -f (full command line) and -- to defang any user

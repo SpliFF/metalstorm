@@ -12,15 +12,11 @@ import { EntityCreate, EntityCreateT } from '../spring-web/entity-create.js';
 import { EntityDestroy, EntityDestroyT } from '../spring-web/entity-destroy.js';
 import { EntitySensorUpdate, EntitySensorUpdateT } from '../spring-web/entity-sensor-update.js';
 import { FeatureLifecycleBatch, FeatureLifecycleBatchT } from '../spring-web/feature-lifecycle-batch.js';
-import { GameCegDefs, GameCegDefsT } from '../spring-web/game-ceg-defs.js';
 import { GameEventBatch, GameEventBatchT } from '../spring-web/game-event-batch.js';
-import { GameFeatureDefs, GameFeatureDefsT } from '../spring-web/game-feature-defs.js';
 import { GameInfo, GameInfoT } from '../spring-web/game-info.js';
 import { GameListUpdate, GameListUpdateT } from '../spring-web/game-list-update.js';
 import { GameRestarting, GameRestartingT } from '../spring-web/game-restarting.js';
 import { GameStarted, GameStartedT } from '../spring-web/game-started.js';
-import { GameUnitDefs, GameUnitDefsT } from '../spring-web/game-unit-defs.js';
-import { GameWeaponDefs, GameWeaponDefsT } from '../spring-web/game-weapon-defs.js';
 import { LogBatch, LogBatchT } from '../spring-web/log-batch.js';
 import { MapData, MapDataT } from '../spring-web/map-data.js';
 import { MapListUpdate, MapListUpdateT } from '../spring-web/map-list-update.js';
@@ -123,7 +119,7 @@ unpackTo(_o: ServerMessageT): void {
 export class ServerMessageT implements flatbuffers.IGeneratedObject {
 constructor(
   public payloadType: ServerPayload = ServerPayload.NONE,
-  public payload: AIListUpdateT|AuthResponseT|ChatReceiveT|ConsoleResponseT|EntityCreateT|EntityDestroyT|EntitySensorUpdateT|FeatureLifecycleBatchT|GameCegDefsT|GameEventBatchT|GameFeatureDefsT|GameInfoT|GameListUpdateT|GameRestartingT|GameStartedT|GameUnitDefsT|GameWeaponDefsT|LogBatchT|MapDataT|MapListUpdateT|PathResponseT|PlayerLeftT|PongT|ReconnectResponseT|ResourceUpdateT|RoomListUpdateT|RoomPlayerJoinedT|RoomPlayerLeftT|RoomStateUpdateT|ServerErrorT|StandingOrderStateT|UnitArmoredUpdateT|UnitCmdDescsUpdateT|UnitCommandBatchT|UnitCommandQueuesUpdateT|UnitLifecycleBatchT|UnitSelfDUpdateT|UnitStockpileUpdateT|UnitTransportUpdateT|null = null
+  public payload: AIListUpdateT|AuthResponseT|ChatReceiveT|ConsoleResponseT|EntityCreateT|EntityDestroyT|EntitySensorUpdateT|FeatureLifecycleBatchT|GameEventBatchT|GameInfoT|GameListUpdateT|GameRestartingT|GameStartedT|LogBatchT|MapDataT|MapListUpdateT|PathResponseT|PlayerLeftT|PongT|ReconnectResponseT|ResourceUpdateT|RoomListUpdateT|RoomPlayerJoinedT|RoomPlayerLeftT|RoomStateUpdateT|ServerErrorT|StandingOrderStateT|UnitArmoredUpdateT|UnitCmdDescsUpdateT|UnitCommandBatchT|UnitCommandQueuesUpdateT|UnitLifecycleBatchT|UnitSelfDUpdateT|UnitStockpileUpdateT|UnitTransportUpdateT|null = null
 ){}
 
 

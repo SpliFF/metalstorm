@@ -531,7 +531,7 @@ export class LobbyUI {
             return renderTemplate(this.templates.browserMapCard, {
                 id: this.esc(m.id),
                 name: this.esc(m.name),
-                thumb_url: stampUrl(`${CONFIG.httpUrl}/api/maps/thumb/${encodeURIComponent(m.id)}`),
+                thumb_url: `/api/maps/thumb/${encodeURIComponent(m.id)}`,
                 size_label: `${m.mapx}×${m.mapy} (${sizeKm} km²)`,
                 selected_class: m.id === this.selectedMapId ? 'selected' : '',
             });

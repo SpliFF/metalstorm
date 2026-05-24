@@ -1018,18 +1018,6 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             localStorage.removeItem('springrts-token');
         },
         onMapData,
-        onUnitDefs(defs) {
-            defCache.addUnitDefs(defs);
-        },
-        onWeaponDefs(defs) {
-            defCache.addWeaponDefs(defs);
-        },
-        onCegDefs(defs) {
-            defCache.addCegDefs(defs);
-        },
-        onFeatureDefs(defs) {
-            defCache.addFeatureDefs(defs);
-        },
         onFeatureLifecycle(spawns, removed) {
             // Dynamic feature spawns (wrecks, debris) — forwarded to
             // the feature renderer. Map-placed features come through

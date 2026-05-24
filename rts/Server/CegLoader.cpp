@@ -1,13 +1,9 @@
 #include "CegLoader.h"
 
-#include "protocol_generated.h"
-
 #include "Sim/Projectiles/ExplosionGenerator.h"
 #include "Lua/LuaParser.h"
 #include "System/Log/ILog.h"
 #include "System/float3.h"
-
-#include <flatbuffers/flatbuffers.h>
 
 #include <algorithm>
 #include <cctype>
@@ -249,90 +245,6 @@ std::vector<CegDef> LoadAllCegDefs()
     LOG_L(L_NOTICE, "[CegLoader] loaded %zu CEG def(s) from explosion table",
           result.size());
     return result;
-}
-
-std::vector<uint8_t> BuildGameCegDefs(const std::vector<CegDef>& defs)
-{
-    flatbuffers::FlatBufferBuilder fbb(64 * 1024);
-
-    std::vector<flatbuffers::Offset<SpringWeb::GameCegDef>> defOffsets;
-    defOffsets.reserve(defs.size());
-
-    for (const CegDef& def : defs) {
-        std::vector<flatbuffers::Offset<SpringWeb::GameCegSpawn>> spawnOffsets;
-        spawnOffsets.reserve(def.spawns.size());
-
-        for (const CegSpawn& spawn : def.spawns) {
-            std::vector<flatbuffers::Offset<SpringWeb::CegProperty>> propOffsets;
-            propOffsets.reserve(spawn.properties.size());
-            for (const auto& prop : spawn.properties) {
-                auto kOff = fbb.CreateString(prop.key);
-                auto vOff = fbb.CreateString(prop.value);
-                propOffsets.push_back(SpringWeb::CreateCegProperty(fbb, kOff, vOff));
-            }
-
-            auto nameOff  = fbb.CreateString(spawn.spawnName);
-            auto classOff = fbb.CreateString(spawn.className);
-            auto propsVec = fbb.CreateVector(propOffsets);
-
-            SpringWeb::GameCegSpawnBuilder sb(fbb);
-            sb.add_spawn_name(nameOff);
-            sb.add_class_name(classOff);
-            sb.add_count(spawn.count);
-            sb.add_flags(spawn.flags);
-            sb.add_properties(propsVec);
-            spawnOffsets.push_back(sb.Finish());
-        }
-
-        auto tagOff = fbb.CreateString(def.tag);
-        auto spawnsVec = fbb.CreateVector(spawnOffsets);
-
-        // Pack the ground-flash subtable only when authored (ttl > 0).
-        // Recoil treats `ttl == 0` as "no ground flash"; passing the
-        // default-zero struct on every CEG would waste a few bytes
-        // per def and force the client to inspect ttl anyway.
-        flatbuffers::Offset<SpringWeb::GroundFlashInfo> gfOff{};
-        if (def.groundFlash.ttl > 0) {
-            SpringWeb::GroundFlashInfoBuilder gfb(fbb);
-            gfb.add_ttl(def.groundFlash.ttl);
-            gfb.add_circle_alpha(def.groundFlash.circleAlpha);
-            gfb.add_flash_size(def.groundFlash.flashSize);
-            gfb.add_flash_alpha(def.groundFlash.flashAlpha);
-            gfb.add_circle_growth(def.groundFlash.circleGrowth);
-            gfb.add_color_r(def.groundFlash.colorR);
-            gfb.add_color_g(def.groundFlash.colorG);
-            gfb.add_color_b(def.groundFlash.colorB);
-            gfb.add_flags(def.groundFlash.flags);
-            gfOff = gfb.Finish();
-        }
-
-        SpringWeb::GameCegDefBuilder db(fbb);
-        db.add_tag(tagOff);
-        db.add_spawns(spawnsVec);
-        db.add_use_default_explosions(def.useDefaultExplosions);
-        if (!gfOff.IsNull()) db.add_ground_flash(gfOff);
-        defOffsets.push_back(db.Finish());
-    }
-
-    auto defsVec = fbb.CreateVector(defOffsets);
-    auto msg = SpringWeb::CreateGameCegDefs(fbb, defsVec);
-
-    // Wrap in a ServerMessage envelope so the client's
-    // ingestFramedMessage path picks it up as a normal payload.
-    auto sm = SpringWeb::CreateServerMessage(fbb,
-        SpringWeb::ServerPayload_GameCegDefs, msg.Union());
-    fbb.Finish(sm);
-
-    // Prefix with the FlatBuffer envelope byte (0x01) — same as
-    // Protocol::BuildServerMessage.
-    constexpr uint8_t ENVELOPE_FLATBUFFERS = 0x01;
-    std::vector<uint8_t> out;
-    const uint8_t* fbBytes = fbb.GetBufferPointer();
-    const size_t fbSize = fbb.GetSize();
-    out.reserve(1 + fbSize);
-    out.push_back(ENVELOPE_FLATBUFFERS);
-    out.insert(out.end(), fbBytes, fbBytes + fbSize);
-    return out;
 }
 
 } // namespace CegLoader
