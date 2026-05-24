@@ -63,6 +63,11 @@ declare module 'fengari-web' {
     export const lauxlib: {
         luaL_newstate(): any;
         luaL_loadbuffer(L: any, buf: Uint8Array, size: number, name: Uint8Array): number;
+        /** Mode arg: "t" = source only, "b" = bytecode only, "bt" =
+         *  either (the default). Use "t" to reject bytecode chunks
+         *  when loading untrusted input. */
+        luaL_loadbufferx(L: any, buf: Uint8Array, size: number,
+                         name: Uint8Array, mode: Uint8Array | null): number;
         luaL_loadstring(L: any, s: Uint8Array): number;
         luaL_dostring(L: any, s: Uint8Array): number;
         luaL_error(L: any, msg: Uint8Array): number;

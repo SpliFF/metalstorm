@@ -999,7 +999,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             // forever for this (gameId, version, modOptions) combination.
             const mapPromise = fetchMapDataHttp(lobbyHttpUrl, mapId);
             const defsPromise = defsCacheKey
-                ? fetchAndIngestDefs(lobbyHttpUrl, gameId ?? '', defsCacheKey, conn)
+                ? fetchAndIngestDefs(lobbyHttpUrl, gameId ?? '', defsCacheKey, defCache)
                 : Promise.resolve();
 
             Promise.all([mapPromise, defsPromise])
