@@ -410,7 +410,7 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/lib/cereal/include
         ${GENERATED_DIR}
     )
-    target_link_libraries(spring-tests PRIVATE lua smmalloc ZLIB::ZLIB doctest::doctest springlog)
+    target_link_libraries(spring-tests PRIVATE lua smmalloc ZLIB::ZLIB doctest::doctest springlog nlohmann_json::nlohmann_json)
     if(UNIX AND NOT APPLE)
         target_link_libraries(spring-tests PRIVATE pthread dl)
     elseif(APPLE)
