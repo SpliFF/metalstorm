@@ -256,11 +256,16 @@ export class ProjectileRenderer {
     private live = new Map<number, LiveProjectile>();
     private liveBeams: LiveBeam[] = [];
     private lastTickMs = performance.now();
-    /// Per-def smoke trail visuals (PLAN §4.4). Entries are created in
-    /// setWeaponDefs only for missile-typed defs whose `texture2`
-    /// resolves to a URL; missiles of unconfigured defs render as a
-    /// .glb model + cone with no trail.
+    /// Per-def smoke trail visuals (PLAN §4.4). Entries are created
+    /// lazily on the first onFired event for a given missile def whose
+    /// `texture2` resolves to a URL; missiles of unconfigured defs
+    /// render as a .glb model + cone with no trail.
     private trailVisuals = new Map<number, MissileTrailVisual>();
+    /// Defs whose .glb / trail textures have been requested already.
+    /// Populated on first sighting (onFired / onTrajectory) so the
+    /// game-start path doesn't fan out an HTTP request per weapon def
+    /// in the roster — matches the entity-renderer lazy-load policy.
+    private assetsRequested = new Set<number>();
     /// Trail states whose missile died but whose puffs are still
     /// fading. Drained when `isTrailFullyFaded` reports the buffer
     /// is empty so the per-tick flush loop stays bounded.
@@ -322,11 +327,12 @@ export class ProjectileRenderer {
         this.scheduleResolverRebuild();
     }
 
-    /** Replace the per-weapon-def visual templates. Defs that reference
-     *  a real `.glb` model URL (e.g. ZK missiles, plasma cannons) get
-     *  their procedural placeholder swapped out asynchronously once the
-     *  model finishes loading; the rest stick with per-visual-type
-     *  procedural shapes. */
+    /** Register the per-weapon-def metadata and create procedural
+     *  visual placeholders. Model `.glb` and missile trail textures are
+     *  NOT fetched here — they load lazily on first fire of each def
+     *  via `ensureWeaponAssetsLoaded`. With ZK's ~500 weapon defs that
+     *  saves a fan-out of HTTP requests at game-start for weapons no
+     *  one will ever fire in this match. */
     setWeaponDefs(defs: WeaponDefInfo[]): void {
         this.lastDefs = defs;
 
@@ -343,6 +349,7 @@ export class ProjectileRenderer {
         for (const tv of this.trailVisuals.values()) disposeMissileTrailVisual(tv);
         this.trailVisuals.clear();
         this.orphanedTrails = [];
+        this.assetsRequested.clear();
         // Live projectiles' `trail` references now point at disposed
         // visuals — clear the field so a stale state doesn't leak
         // into the next flush. Bodies stay live; trails just stop.
@@ -352,30 +359,32 @@ export class ProjectileRenderer {
             const visual = this.createVisual(def);
             this.weaponVisuals.set(def.defId, visual);
             this.weaponDefs.set(def.defId, def);
-
-            // If the server announced a model URL, kick off a background
-            // load and swap the procedural mesh once it completes. The
-            // procedural shape stays in place during the load so the
-            // first few frames of fire still render something.
-            if (def.modelUrl) {
-                const size = Math.max(0.5, def.size > 0 ? def.size : 1.0);
-                this.swapInModel(def.defId, def.modelUrl, size).catch((e) => {
-                    console.warn(`[projectile] model load failed for def ${def.defId} (${def.modelUrl}):`, e);
-                });
-            }
-
-            // Trail visual is only built for missile-typed defs and
-            // only when the resolver hands back a real URL for the
-            // smoketrail slot. Other visual types either have no
-            // trail concept (cannon, beam) or already render their
-            // own (lightning is hit-scan and doesn't trail).
-            if (def.visualType === VisualType.Missile) {
-                const tv = buildMissileTrailVisual(def, this.scene, this.textureResolver);
-                if (tv) this.trailVisuals.set(def.defId, tv);
-            }
         }
 
         this.scheduleResolverRebuild();
+    }
+
+    /// Kick off the model + trail-texture fetch for `defId` if it
+    /// hasn't been requested yet. Idempotent and cheap — a Set lookup
+    /// per call. Called from onFired / onTrajectory so weapons that
+    /// never appear in this match never pay the load cost.
+    private ensureWeaponAssetsLoaded(defId: number): void {
+        if (this.assetsRequested.has(defId)) return;
+        const def = this.weaponDefs.get(defId);
+        if (!def) return;
+        this.assetsRequested.add(defId);
+
+        if (def.modelUrl) {
+            const size = Math.max(0.5, def.size > 0 ? def.size : 1.0);
+            this.swapInModel(defId, def.modelUrl, size).catch((e) => {
+                console.warn(`[projectile] model load failed for def ${defId} (${def.modelUrl}):`, e);
+            });
+        }
+
+        if (def.visualType === VisualType.Missile) {
+            const tv = buildMissileTrailVisual(def, this.scene, this.textureResolver);
+            if (tv) this.trailVisuals.set(defId, tv);
+        }
     }
 
     /// Visual builders that consult the texture resolver (4.1 sprite
@@ -529,6 +538,11 @@ export class ProjectileRenderer {
         gravity: number;
         hitscan: boolean;
     }): void {
+        // Lazy-load: first fire of a weapon def kicks off the .glb +
+        // trail-texture fetch. Until those settle the projectile
+        // renders as the procedural placeholder created in setWeaponDefs.
+        this.ensureWeaponAssetsLoaded(ev.weaponDefId);
+
         // Muzzle CEG. Direction is the firing axis derived from the
         // initial velocity; fall back to "toward target" when the
         // server reports zero velocity (e.g. shields/projectors).
