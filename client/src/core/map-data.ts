@@ -122,8 +122,12 @@ export interface ParsedMapData {
  * This replaces the previous approach of sending a 2+ MB MapData FlatBuffer
  * over WebRTC data channels, which exceeded the 256KB SCTP message size limit.
  */
-export async function fetchMapDataHttp(lobbyBaseUrl: string, mapId: string): Promise<ParsedMapData> {
-    const base = `${lobbyBaseUrl}/api/maps/data/${mapId}`;
+export async function fetchMapDataHttp(mapId: string): Promise<ParsedMapData> {
+    // Relative URL: resolves against the page origin so dev (Vite plugin
+    // at :8012) and prod (nginx/CDN fronting the SPA) both work without
+    // per-environment configuration. The lobby process no longer serves
+    // `/api/maps/data/*` after commit 78027e4004.
+    const base = `/api/maps/data/${mapId}`;
 
     const [metaResp, hmBuf, tmBuf, mmBuf] = await Promise.all([
         fetch(`${base}/metadata.json`).then(r => {

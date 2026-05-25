@@ -57,7 +57,7 @@ import { WaypointMarkerRenderer } from './core/waypoint-marker-renderer.js';
 import { StandingOrderRenderer } from './core/standing-order-renderer.js';
 import { DebugTerrainGrid } from './core/debug-terrain-grid.js';
 import { Connection } from './core/connection.js';
-import { CONFIG, fetchBuildStamp, stampUrl } from './config.js';
+import { fetchBuildStamp } from './config.js';
 import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
 import { fetchAndIngestDefs } from './core/defs-fetch.js';
 import { renderMapFeatures, DynamicFeatureRenderer } from './core/feature-renderer.js';
@@ -394,7 +394,13 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // Build game server URL
     const host = window.location.hostname || 'localhost';
     const gameHttpUrl = `http://${host}:${gameServerPort}`;
-    const lobbyHttpUrl = CONFIG.httpUrl; // static asset host
+    // Base URL prefix for `/api/*` paths. Empty string = relative URL,
+    // so the browser resolves against the page origin. In dev that's
+    // Vite (:8012) which serves the four static-data routes itself and
+    // proxies everything else to spring-lobby (:8011). In prod, nginx
+    // (or equivalent) fronts both. Hardcoding the lobby host here breaks
+    // static assets, which the lobby no longer serves (commit 78027e4004).
+    const lobbyHttpUrl = '';
 
     engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
     const scene = new Scene(engine);
@@ -997,9 +1003,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             // UnitDefs/WeaponDefs tables. Defs come from a content-addressed
             // path the server baked at startup; URL is browser-cacheable
             // forever for this (gameId, version, modOptions) combination.
-            const mapPromise = fetchMapDataHttp(lobbyHttpUrl, mapId);
+            const mapPromise = fetchMapDataHttp(mapId);
             const defsPromise = defsCacheKey
-                ? fetchAndIngestDefs(lobbyHttpUrl, gameId ?? '', defsCacheKey, defCache)
+                ? fetchAndIngestDefs(gameId ?? '', defsCacheKey, defCache)
                 : Promise.resolve();
 
             Promise.all([mapPromise, defsPromise])
@@ -1010,12 +1016,20 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         },
         onAuthFailed(msg: string) {
             console.error(`[game] auth failed: ${msg}`);
-            // Stale token is the most common failure path here — e.g.
-            // the lobby DB was wiped between sessions but localStorage
-            // still holds the old token. Drop it so the next login
-            // screen falls through to password auth instead of looping
-            // on an invalid token forever.
-            localStorage.removeItem('springrts-token');
+            // Only invalidate the stored token when the server says the
+            // *token itself* is unusable — "Session user missing" means
+            // the sessions table doesn't recognise it. Every other
+            // InvalidCredentials path (Not in this room's roster, Wrong
+            // password, Account banned, transient WebRTC errors) leaves
+            // the token alone: it's still valid for the lobby, and
+            // wiping it on every roster mismatch was breaking "Rejoin
+            // Game" because the user landed back on the password screen
+            // after one cross-room hiccup.
+            if (msg.includes('Session user missing') ||
+                msg.toLowerCase().includes('invalid token') ||
+                msg.toLowerCase().includes('session expired')) {
+                localStorage.removeItem('springrts-token');
+            }
         },
         onMapData,
         onFeatureLifecycle(spawns, removed) {
@@ -1475,11 +1489,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     // missing or partial override gracefully degrades.
     const initialGameId = resolveInitialGameId();
     if (initialGameId) {
-        loadGameLobbyTemplates(initialGameId, CONFIG.httpUrl)
+        // Empty base = relative URL; see scope-local `lobbyHttpUrl`
+        // comment above for rationale (commit 78027e4004 moved static
+        // assets off the lobby; relative paths route through Vite +
+        // proxy in dev and nginx in prod).
+        loadGameLobbyTemplates(initialGameId, '')
             .then((templates) => lobbyUI?.setTemplates(templates))
             .catch((err) => console.warn('[lobby] game UI override failed:', err));
 
-        loadGameTemplates(initialGameId, CONFIG.httpUrl)
+        loadGameTemplates(initialGameId, '')
             .then((templates) => {
                 gameTemplates = templates;
                 // Re-create HUD with the game's overridden templates. The

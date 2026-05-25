@@ -43,13 +43,15 @@ import type {
  *  (older bakes may be missing them — projectile renderer falls back
  *  to BUILTIN_EFFECTS, feature renderer to placeholder cubes). */
 export async function fetchAndIngestDefs(
-    lobbyHttpUrl: string,
     gameId: string,
     cacheKey: string,
     defCache: DefCache,
 ): Promise<void> {
     if (!gameId || !cacheKey) return;
-    const base = `${lobbyHttpUrl}/api/games/data/${gameId}/cache/defs/${cacheKey}`;
+    // Relative URL: served by the Vite static-data plugin in dev and
+    // by nginx/CDN in prod (the lobby dropped `/api/games/data/*` in
+    // commit 78027e4004).
+    const base = `/api/games/data/${gameId}/cache/defs/${cacheKey}`;
 
     const [unitSrc, weaponSrc, cegSrc, featureSrc] = await Promise.all([
         fetchLua(`${base}/unitdefs.lua.br`),
