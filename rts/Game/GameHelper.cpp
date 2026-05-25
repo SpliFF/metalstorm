@@ -1300,7 +1300,7 @@ CGameHelper::BuildSquareStatus CGameHelper::TestUnitBuildSquare(
 	      float3 sqrPos;
 
 	const int x1 = int(testPos.x / SQUARE_SIZE) - (xsize >> 1), x2 = x1 + xsize;
-	const int z1 = int((testPos.z - float3::minzpos) / SQUARE_SIZE) - (zsize >> 1), z2 = z1 + zsize;
+	const int z1 = int(testPos.z / SQUARE_SIZE) - (zsize >> 1), z2 = z1 + zsize;
 	const int2 xrange = int2(x1, x2);
 	const int2 zrange = int2(z1, z2);
 
@@ -1550,7 +1550,7 @@ bool CGameHelper::TestBlockSquareForBuildOnly(
 	auto soYardMap = so->GetBlockMap();
 	if (soYardMap != nullptr) {
 		const int sox1 = int(so->pos.x / SQUARE_SIZE) - (so->xsize >> 1), sox2 = sox1 + so->xsize;
-		const int soz1 = int((so->pos.z - float3::minzpos) / SQUARE_SIZE) - (so->zsize >> 1), soz2 = soz1 + so->zsize;
+		const int soz1 = int(so->pos.z / SQUARE_SIZE) - (so->zsize >> 1), soz2 = soz1 + so->zsize;
 		const int2 soxrange = int2(sox1, sox2);
 		const int2 sozrange = int2(soz1, soz2);
 

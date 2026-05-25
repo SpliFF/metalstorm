@@ -75,13 +75,15 @@ void CFeatureHandler::LoadFeaturesFromMap()
 
 		// SMF binary feature placements are always LH-authored (the
 		// file format predates the RH migration; no tooling writes
-		// negative-Z SMF features). Flip Z so they land inside the
-		// engine's RH world bounds `[minzpos, 0]`. PLAN-coordinate-
-		// system Option B / MapProcessor flips Lua-side map content
-		// (mapinfo.lua, featureplacer/*.lua) on import; this is the
-		// equivalent sim-side flip for the binary-blob path.
+		// SMF features in any other frame). Reflect Z through mapZ/2
+		// so the visual "north" half of the legacy map ends up at the
+		// low-Z (RH "north") half of the engine's positive-quadrant
+		// world bounds `[0, mapZ]`. Matches MapProcessor's
+		// conversion-time reflection for Lua-authored placements
+		// (mapinfo.lua, featureplacer/*.lua) so both code paths agree.
+		const float mapZ = static_cast<float>(mapDims.mapy * SQUARE_SIZE);
 		const float worldX = mfi[a].pos.x;
-		const float worldZ = -mfi[a].pos.z;
+		const float worldZ = mapZ - mfi[a].pos.z;
 
 		FeatureLoadParams params = {
 			nullptr,

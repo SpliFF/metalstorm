@@ -10,8 +10,14 @@
 
 struct sqlite3;
 
-/// Increment to reprocess all maps.
-constexpr int MAP_FORMAT_VERSION = 14;
+/// Increment to reprocess all maps. v15 changes legacy-Z conversion
+/// in MapProcessor::ProcessMap from negation (`z → -z`, putting values
+/// in `[-mapZ, 0]`) to reflection through mapZ/2 (`z → mapZ - z`,
+/// keeping values in `[0, mapZ]`) — same logical purpose (convert
+/// legacy LH author intent to engine RH convention) but the engine's
+/// world bounds are now positive-quadrant per PLAN-coordinate-system-
+/// option-a.md, so persisted MapMetadata records must follow suit.
+constexpr int MAP_FORMAT_VERSION = 15;
 
 struct MapStartPosition {
     float x = 0, z = 0;

@@ -23,7 +23,7 @@ namespace MoveTypes {
 
 		CheckCollisionQuery(const MoveDef* refMoveDef, float3 testPos);
 
-		void UpdateElevationForPos(float3 newPos) { UpdateElevationForPos({int(pos.x / SQUARE_SIZE), int((pos.z - float3::minzpos) / SQUARE_SIZE)}); };
+		void UpdateElevationForPos(float3 newPos) { UpdateElevationForPos({int(pos.x / SQUARE_SIZE), int(pos.z / SQUARE_SIZE)}); };
 		void UpdateElevationForPos(int2 sqr);
 
 		bool    HasPhysicalStateBit(unsigned int bit) const { return ((physicalState & bit) != 0); }
@@ -74,10 +74,10 @@ public:
 	static float GetPosSpeedMod(const MoveDef& moveDef, unsigned xSquare, unsigned zSquare);
 	static float GetPosSpeedMod(const MoveDef& moveDef, unsigned xSquare, unsigned zSquare, float3 moveDir);
 	static float GetPosSpeedMod(const MoveDef& moveDef, const float3& pos){
-		return (GetPosSpeedMod(moveDef, pos.x / SQUARE_SIZE, (pos.z - float3::minzpos) / SQUARE_SIZE));
+		return (GetPosSpeedMod(moveDef, pos.x / SQUARE_SIZE, pos.z / SQUARE_SIZE));
 	}
 	static float GetPosSpeedMod(const MoveDef& moveDef, const float3& pos, const float3& moveDir){
-		return (GetPosSpeedMod(moveDef, pos.x / SQUARE_SIZE, (pos.z - float3::minzpos) / SQUARE_SIZE, moveDir));
+		return (GetPosSpeedMod(moveDef, pos.x / SQUARE_SIZE, pos.z / SQUARE_SIZE, moveDir));
 	}
 	static float GetPosSpeedMod(const MoveDef& moveDef, unsigned squareIndex);
 
@@ -100,7 +100,7 @@ public:
 	// checks if a single square is accessable for any object which uses the given MoveDef
 	static BlockType SquareIsBlocked(const MoveDef& moveDef, int xSquare, int zSquare, MoveTypes::CheckCollisionQuery* collider);
 	static BlockType SquareIsBlocked(const MoveDef& moveDef, const float3& pos, MoveTypes::CheckCollisionQuery* collider) {
-		return (SquareIsBlocked(moveDef, pos.x / SQUARE_SIZE, (pos.z - float3::minzpos) / SQUARE_SIZE, collider));
+		return (SquareIsBlocked(moveDef, pos.x / SQUARE_SIZE, pos.z / SQUARE_SIZE, collider));
 	}
 	static BlockType RangeIsBlocked(int xmin, int xmax, int zmin, int zmax, const MoveTypes::CheckCollisionQuery* collider, int thread = 0);
 	static BlockType RangeIsBlockedTempNum(int xmin, int xmax, int zmin, int zmax, const MoveTypes::CheckCollisionQuery* collider, int tempNum, int thread);
@@ -134,7 +134,7 @@ inline CMoveMath::BlockType CMoveMath::IsBlocked(const MoveDef& moveDef, int xSq
 /* Converts a point-request into a square-positional request. */
 inline CMoveMath::BlockType CMoveMath::IsBlocked(const MoveDef& moveDef, const float3& pos, const CSolidObject* collider, int thread)
 {
-	return (IsBlocked(moveDef, pos.x / SQUARE_SIZE, (pos.z - float3::minzpos) / SQUARE_SIZE, collider, thread));
+	return (IsBlocked(moveDef, pos.x / SQUARE_SIZE, pos.z / SQUARE_SIZE, collider, thread));
 }
 
 inline CMoveMath::BlockType CMoveMath::IsBlockedStructure(const MoveDef& moveDef, int xSquare, int zSquare, const CSolidObject* collider, int thread) {

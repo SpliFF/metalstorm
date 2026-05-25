@@ -1041,17 +1041,15 @@ export class RTSCamera {
         const fovRad = this.camera.fov || (45 * Math.PI / 180);
         const half = Math.max(this.mapWidth, this.mapHeight) * 0.5 * padding;
         const distance = half / Math.tan(fovRad * 0.5);
-        // Server world Z runs `[-mapHeight, 0]` under RH bounds; centre
-        // the lookAt at the map midpoint in that frame.
-        const lookAt = { x: this.mapWidth * 0.5, y: 0, z: -this.mapHeight * 0.5 };
-        // Place camera at (cx, distance·sin(pitch), cz + distance·cos(pitch))
-        // — under RH bounds the camera sits south (positive Z) of the
-        // lookAt so it views toward -Z, the natural "forward" axis.
+        const lookAt = { x: this.mapWidth * 0.5, y: 0, z: this.mapHeight * 0.5 };
+        // Place camera at (cx, distance·sin(pitch), cz - distance·cos(pitch))
+        // — a slight southward offset so non-90° pitches still frame the
+        // map without parallax skew.
         const pr = pitch * Math.PI / 180;
         const pos = {
             x: lookAt.x,
             y: lookAt.y + Math.sin(pr) * distance,
-            z: lookAt.z + Math.cos(pr) * distance,
+            z: lookAt.z - Math.cos(pr) * distance,
         };
         this.setPose({ pos, lookAt }, opts.durationMs ?? 0);
     }

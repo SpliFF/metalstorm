@@ -638,7 +638,7 @@ bool CStrafeAirMoveType::HandleCollisions(bool checkCollisions) {
 			owner->Move(-RgtVector * 1.5f, true);
 		}
 
-		if (pos.z < float3::minzpos) {
+		if (pos.z < 0.0f) {
 			owner->Move( FwdVector * 1.5f, true);
 		} else if (pos.z > float3::maxzpos) {
 			owner->Move(-FwdVector * 1.5f, true);

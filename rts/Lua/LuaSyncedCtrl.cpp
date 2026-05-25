@@ -661,7 +661,7 @@ static int SetSolidObjectDirection(lua_State* L, CSolidObject* o)
 	const float3 newDir = float3(
 		luaL_checkfloat(L, 2),
 		luaL_checkfloat(L, 3),
-		LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 4))).SafeNormalize();
+		LuaCoordAdapt::FlipDirZ(luaL_checkfloat(L, 4))).SafeNormalize();
 
 	if (math::fabsf(newDir.SqLength() - 1.0f) > float3::cmp_eps()) {
 		luaL_error(L, "[%s] Invalid front-direction (%f, %f, %f), id = %d, model = %s, teamID = %d", __func__, newDir.x, newDir.y, newDir.z, o->id, o->model ? o->model->name.c_str() : "nullptr", o->team);
@@ -679,7 +679,7 @@ static int SetWorldObjectVelocity(lua_State* L, CWorldObject* o)
 	float3 speed;
 	speed.x = std::clamp(luaL_checkfloat(L, 2), -MAX_UNIT_SPEED, MAX_UNIT_SPEED);
 	speed.y = std::clamp(luaL_checkfloat(L, 3), -MAX_UNIT_SPEED, MAX_UNIT_SPEED);
-	speed.z = LuaCoordAdapt::FlipZ(std::clamp(luaL_checkfloat(L, 4), -MAX_UNIT_SPEED, MAX_UNIT_SPEED));
+	speed.z = LuaCoordAdapt::FlipDirZ(std::clamp(luaL_checkfloat(L, 4), -MAX_UNIT_SPEED, MAX_UNIT_SPEED));
 
 	o->SetVelocityAndSpeed(speed);
 	return 0;
@@ -845,11 +845,10 @@ int LuaSyncedCtrl::SetAllyTeamStartBox(lua_State* L)
 		return 0;
 	}
 
-	const float mapHeight       = mapDims.mapy * SQUARE_SIZE;
 	const float startRectLeft   = xMin / (mapDims.mapx * SQUARE_SIZE);
-	const float startRectTop    = (zMin - float3::minzpos) / mapHeight;
+	const float startRectTop    = zMin / (mapDims.mapy * SQUARE_SIZE);
 	const float startRectRight  = xMax / (mapDims.mapx * SQUARE_SIZE);
-	const float startRectBottom = (zMax - float3::minzpos) / mapHeight;
+	const float startRectBottom = zMax / (mapDims.mapy * SQUARE_SIZE);
 
 	teamHandler.SetAllyTeamStartBox(allyTeamID, startRectLeft, startRectTop, startRectRight, startRectBottom);
 	return 0;
@@ -1666,7 +1665,7 @@ int LuaSyncedCtrl::CreateUnit(lua_State* L)
 	const float3 pos(
 		luaL_checkfloat(L, 2),
 		luaL_checkfloat(L, 3),
-		LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 4))
+		LuaCoordAdapt::FlipPosZ(luaL_checkfloat(L, 4))
 	);
 	const int facing = LuaUtils::ParseFacing(L, __func__, 5);
 	const int teamID = luaL_optint(L, 6, CtrlTeam(L));
@@ -3710,11 +3709,11 @@ int LuaSyncedCtrl::SetUnitPosition(lua_State* L)
 		// 2=x, 3=y, 4=z
 		pos.x = luaL_checkfloat(L, 2);
 		pos.y = luaL_checkfloat(L, 3);
-		pos.z = LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 4));
+		pos.z = LuaCoordAdapt::FlipPosZ(luaL_checkfloat(L, 4));
 	} else {
 		// 2=x, 3=z, 4=bool
 		pos.x = luaL_checkfloat(L, 2);
-		pos.z = LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 3));
+		pos.z = LuaCoordAdapt::FlipPosZ(luaL_checkfloat(L, 3));
 
 		if (luaL_optboolean(L, 4, false)) {
 			pos.y = CGround::GetHeightAboveWater(pos.x, pos.z);
@@ -3886,7 +3885,7 @@ int LuaSyncedCtrl::AddUnitDamage(lua_State* L)
 	const int weaponDefID = luaL_optint(L, 5, -1);
 	const float3 impulse  = float3(std::clamp(luaL_optfloat(L, 6, 0.0f), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE),
 	                               std::clamp(luaL_optfloat(L, 7, 0.0f), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE),
-	                               LuaCoordAdapt::FlipZ(std::clamp(luaL_optfloat(L, 8, 0.0f), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE)));
+	                               LuaCoordAdapt::FlipDirZ(std::clamp(luaL_optfloat(L, 8, 0.0f), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE)));
 
 	CUnit* attacker = nullptr;
 
@@ -3930,7 +3929,7 @@ int LuaSyncedCtrl::AddUnitImpulse(lua_State* L)
 
 	const float3 impulse(std::clamp(luaL_checkfloat(L, 2), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE),
 	                     std::clamp(luaL_checkfloat(L, 3), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE),
-	                     LuaCoordAdapt::FlipZ(std::clamp(luaL_checkfloat(L, 4), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE)));
+	                     LuaCoordAdapt::FlipDirZ(std::clamp(luaL_checkfloat(L, 4), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE)));
 
 	unit->ApplyImpulse(impulse);
 	return 0;
@@ -5239,7 +5238,6 @@ int LuaSyncedCtrl::GiveOrderToUnit(lua_State* L)
 		luaL_error(L, "[%s] invalid unitID", __func__);
 
 	Command cmd = LuaUtils::ParseCommand(L, __func__, 2);
-	LuaCoordAdapt::FlipCommandPositionZ(cmd);
 
 	if (!CanControlUnit(L, unit)) {
 		lua_pushboolean(L, false);
@@ -5281,7 +5279,6 @@ int LuaSyncedCtrl::GiveOrderToUnitMap(lua_State* L)
 	}
 
 	Command cmd = LuaUtils::ParseCommand(L, __func__, 2);
-	LuaCoordAdapt::FlipCommandPositionZ(cmd);
 
 	if (inGiveOrder >= MAX_CMD_RECURSION_DEPTH)
 		luaL_error(L, "[%s] recursion not permitted, max depth: %d", __func__, MAX_CMD_RECURSION_DEPTH);
@@ -5325,7 +5322,6 @@ int LuaSyncedCtrl::GiveOrderToUnitArray(lua_State* L)
 	}
 
 	Command cmd = LuaUtils::ParseCommand(L, __func__, 2);
-	LuaCoordAdapt::FlipCommandPositionZ(cmd);
 
 	if (inGiveOrder >= MAX_CMD_RECURSION_DEPTH)
 		luaL_error(L, "[%s] recursion not permitted, max depth: %d", __func__, MAX_CMD_RECURSION_DEPTH);

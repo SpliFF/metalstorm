@@ -672,14 +672,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         // Absolute URL for HTTP resources (lobby-served)
         const mapBaseUrl = lobbyHttpUrl + map.mapDataUrl;
 
-        // Position camera at map centre. Server world Z runs
-        // `[-heightElmos, 0]` (RH-native, Option B from
-        // PLAN-coordinate-system.md), so the map midpoint lives at
-        // negative Z. The `cz - 1500` offset puts the camera south of
-        // the target — under RH that means towards +Z, i.e. past 0.
+        // Position camera at map centre
         const cx = map.widthElmos / 2;
-        const cz = -map.heightElmos / 2;
-        camera.position.set(cx, 1200, cz + 1500);
+        const cz = map.heightElmos / 2;
+        camera.position.set(cx, 1200, cz - 1500);
         camera.setTarget(new Vector3(cx, 0, cz));
         rtsCamera.recomputeAxes();
         rtsCamera.focusOn(cx, cz);
@@ -747,7 +743,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 height: map.heightElmos,
             }, scene);
             water.position.x = map.widthElmos / 2;
-            water.position.z = -map.heightElmos / 2;
+            water.position.z = map.heightElmos / 2;
             water.position.y = 0;
             water.isPickable = false;
             // Put water in its own rendering group *after* terrain

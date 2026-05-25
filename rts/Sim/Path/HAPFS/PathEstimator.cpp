@@ -116,7 +116,7 @@ bool CPathEstimator::SetStartBlock(
 
 	int2 nearestBlock;
 	nearestBlock.x = startPos.x / BLOCK_PIXEL_SIZE;
-	nearestBlock.y = (startPos.z - float3::minzpos) / BLOCK_PIXEL_SIZE;
+	nearestBlock.y = startPos.z / BLOCK_PIXEL_SIZE;
 
 	// support peDef.skipSubSearches - just take nearest point
 	if (peDef.skipSubSearches || !peDef.useVerifiedStartBlock) {

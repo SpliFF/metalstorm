@@ -360,7 +360,7 @@ bool MoveDef::DoRawSearch(
 
 	const int2 startBlock
 		( std::clamp(int(startPos.x / SQUARE_SIZE), 0, mapDims.mapxm1)
-		, std::clamp(int((startPos.z - float3::minzpos) / SQUARE_SIZE), 0, mapDims.mapym1)
+		, std::clamp(int(startPos.z / SQUARE_SIZE), 0, mapDims.mapym1)
 		);
 	const int2 endBlock
 		( std::clamp(int((endPos.x + rightDir) / SQUARE_SIZE), 0, mapDims.mapxm1)
@@ -624,7 +624,7 @@ bool MoveDef::TestMoveSquareRange(
 	assert(testTerrain || testObjects);
 
 	const int xmid = int(rangeMins.x / SQUARE_SIZE);
-	const int zmid = int((rangeMins.z - float3::minzpos) / SQUARE_SIZE);
+	const int zmid = int(rangeMins.z / SQUARE_SIZE);
 
 	const int xmin = xmid - xsizeh * (1 - centerOnly);
 	const int zmin = zmid - zsizeh * (1 - centerOnly);
@@ -677,7 +677,7 @@ bool MoveDef::TestMovePositionForObjects(
 ) const {
 	RECOIL_DETAILED_TRACY_ZONE;
 	const int xmid = int(testMovePos.x / SQUARE_SIZE);
-	const int zmid = int((testMovePos.z - float3::minzpos) / SQUARE_SIZE);
+	const int zmid = int(testMovePos.z / SQUARE_SIZE);
 
 	const int xmin = xmid - xsizeh;
 	const int zmin = zmid - zsizeh;
@@ -704,7 +704,7 @@ bool MoveDef::TestMovePositionForObjects(
 
 bool MoveDef::IsInExitOnly(const float3 testMovePos) const {
 	const int xmid = int(testMovePos.x / SQUARE_SIZE);
-	const int zmid = int((testMovePos.z - float3::minzpos) / SQUARE_SIZE);
+	const int zmid = int(testMovePos.z / SQUARE_SIZE);
 
 	return IsInExitOnly(xmid, zmid);
 }

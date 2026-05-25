@@ -181,16 +181,10 @@ void CUnit::SanityCheck() const
 	frontdir.AssertNaNs();
 
 	if (unitDef->IsGroundUnit()) {
-		// Generous sanity bounds: the map extent times 16 in either
-		// direction. Under RH bounds maxzpos may be 0 (and minzpos
-		// negative), so use the extent magnitude rather than maxzpos
-		// directly.
-		const float xExt = float3::maxxpos;
-		const float zExt = float3::maxzpos - float3::minzpos;
-		assert(pos.x >= -(xExt * 16.0f));
-		assert(pos.x <=  (xExt * 16.0f));
-		assert(pos.z >= float3::minzpos - (zExt * 16.0f));
-		assert(pos.z <= float3::maxzpos + (zExt * 16.0f));
+		assert(pos.x >= -(float3::maxxpos * 16.0f));
+		assert(pos.x <=  (float3::maxxpos * 16.0f));
+		assert(pos.z >= -(float3::maxzpos * 16.0f));
+		assert(pos.z <=  (float3::maxzpos * 16.0f));
 	}
 }
 

@@ -197,7 +197,7 @@ YardMapStatus CSolidObject::GetGroundBlockingMaskAtPos(float3 gpos) const
 
 	const int2 gPos2
 			{ int(gpos.x / SQUARE_SIZE)
-			, int((gpos.z - float3::minzpos) / SQUARE_SIZE)};
+			, int(gpos.z / SQUARE_SIZE)};
 	const int2 diff = gPos2 - (mapPos + hSize);
 
 	constexpr int2 rotationDirs[] = { {0,1}, {1,0}, {0,-1}, {-1,0}, {0,1} };

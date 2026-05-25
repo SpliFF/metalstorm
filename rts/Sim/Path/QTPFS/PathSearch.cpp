@@ -119,17 +119,17 @@ void QTPFS::PathSearch::Initialize(
 	// }
 
 	const uint32_t srcX = fwd.srcPoint.x / SQUARE_SIZE;
-	const uint32_t srcZ = (fwd.srcPoint.z - float3::minzpos) / SQUARE_SIZE;
+	const uint32_t srcZ = fwd.srcPoint.z / SQUARE_SIZE;
 	const uint32_t tgtX = fwd.tgtPoint.x / SQUARE_SIZE;
-	const uint32_t tgtZ = (fwd.tgtPoint.z - float3::minzpos) / SQUARE_SIZE;
+	const uint32_t tgtZ = fwd.tgtPoint.z / SQUARE_SIZE;
 
 	INode* srcNode = nodeLayer->GetNode(srcX, srcZ);
 	INode* tgtNode = nodeLayer->GetNode(tgtX, tgtZ);
 
 	assert(fwd.srcPoint.x / SQUARE_SIZE >= 0);
-	assert((fwd.srcPoint.z - float3::minzpos) / SQUARE_SIZE >= 0);
+	assert(fwd.srcPoint.z / SQUARE_SIZE >= 0);
 	assert(fwd.srcPoint.x / SQUARE_SIZE < mapDims.mapx);
-	assert((fwd.srcPoint.z - float3::minzpos) / SQUARE_SIZE < mapDims.mapy);
+	assert(fwd.srcPoint.z / SQUARE_SIZE < mapDims.mapy);
 
 	pathSearchHash = GenerateHash(srcNode, tgtNode);
 	pathPartialSearchHash = GenerateVirtualHash(srcNode, tgtNode);
@@ -218,16 +218,16 @@ void QTPFS::PathSearch::InitializeThread(SearchThreadData* threadData) {
 
 			return curNode;
 		}
-		return nodeLayer->GetNode(fwd.tgtPoint.x / SQUARE_SIZE, (fwd.tgtPoint.z - float3::minzpos) / SQUARE_SIZE);
+		return nodeLayer->GetNode(fwd.tgtPoint.x / SQUARE_SIZE, fwd.tgtPoint.z / SQUARE_SIZE);
 	};
 
-	INode* srcNode = nodeLayer->GetNode(fwd.srcPoint.x / SQUARE_SIZE, (fwd.srcPoint.z - float3::minzpos) / SQUARE_SIZE);
+	INode* srcNode = nodeLayer->GetNode(fwd.srcPoint.x / SQUARE_SIZE, fwd.srcPoint.z / SQUARE_SIZE);
 	INode* tgtNode = getTgtNode(doPathRepair);
 
 	// This shouldn't happen, but if it does for some reason, fall-back to full pathing.
 	if (doPathRepair && tgtNode->AllSquaresImpassable()){
 		assert(false);
-		tgtNode = nodeLayer->GetNode(fwd.tgtPoint.x / SQUARE_SIZE, (fwd.tgtPoint.z - float3::minzpos) / SQUARE_SIZE);
+		tgtNode = nodeLayer->GetNode(fwd.tgtPoint.x / SQUARE_SIZE, fwd.tgtPoint.z / SQUARE_SIZE);
 		doPathRepair = false;
 	}
 
@@ -243,7 +243,7 @@ void QTPFS::PathSearch::InitializeThread(SearchThreadData* threadData) {
 					, std::min(int(tgtNode->xmax()) + searchWidth, mapDims.mapx)
 					, std::min(int(tgtNode->zmax()) + searchWidth, mapDims.mapy)
 					)
-			, int2(fwd.tgtPoint.x / SQUARE_SIZE, (fwd.tgtPoint.z - float3::minzpos) / SQUARE_SIZE)
+			, int2(fwd.tgtPoint.x / SQUARE_SIZE, fwd.tgtPoint.z / SQUARE_SIZE)
 			, searchThreadData->tmpNodesStore
 		);
 		if (altTgtNode != nullptr) {
@@ -1763,7 +1763,7 @@ void QTPFS::PathSearch::TracePath(IPath* path) {
 				assert(prvPoint.x >= 0.f);
 				assert(prvPoint.z >= 0.f);
 				assert(prvPoint.x / SQUARE_SIZE < mapDims.mapx);
-				assert((prvPoint.z - float3::minzpos) / SQUARE_SIZE < mapDims.mapy);
+				assert(prvPoint.z / SQUARE_SIZE < mapDims.mapy);
 
 				assert(!math::isinf(prvPoint.x) && !math::isinf(prvPoint.z));
 				assert(!math::isnan(prvPoint.x) && !math::isnan(prvPoint.z));
@@ -1845,7 +1845,7 @@ void QTPFS::PathSearch::TracePath(IPath* path) {
 				assert(prvPoint.x >= 0.f);
 				assert(prvPoint.z >= 0.f);
 				assert(prvPoint.x / SQUARE_SIZE < mapDims.mapx);
-				assert((prvPoint.z - float3::minzpos) / SQUARE_SIZE < mapDims.mapy);
+				assert(prvPoint.z / SQUARE_SIZE < mapDims.mapy);
 
 				assert(!math::isinf(prvPoint.x) && !math::isinf(prvPoint.z));
 				assert(!math::isnan(prvPoint.x) && !math::isnan(prvPoint.z));
@@ -1951,7 +1951,7 @@ void QTPFS::PathSearch::TracePath(IPath* path) {
 			assert(tmpPoint.x >= 0.f);
 			assert(tmpPoint.z >= 0.f);
 			assert(tmpPoint.x / SQUARE_SIZE < mapDims.mapx);
-			assert((tmpPoint.z - float3::minzpos) / SQUARE_SIZE < mapDims.mapy);
+			assert(tmpPoint.z / SQUARE_SIZE < mapDims.mapy);
 
 			assert(!math::isinf(tmpPoint.x) && !math::isinf(tmpPoint.z));
 			assert(!math::isnan(tmpPoint.x) && !math::isnan(tmpPoint.z));
@@ -2667,7 +2667,7 @@ const QTPFS::PathHashType QTPFS::PathSearch::GenerateHash(const INode* srcNode, 
 		return BAD_HASH;
 
 	auto& fwd = directionalSearchData[SearchThreadData::SEARCH_FORWARD];
-	uint32_t srcNodeNumber = GenerateVirtualNodeNumber(*nodeLayer, srcNode, QTPFS_SHARE_PATH_MAX_SIZE, fwd.srcPoint.x / SQUARE_SIZE, (fwd.srcPoint.z - float3::minzpos) / SQUARE_SIZE);
+	uint32_t srcNodeNumber = GenerateVirtualNodeNumber(*nodeLayer, srcNode, QTPFS_SHARE_PATH_MAX_SIZE, fwd.srcPoint.x / SQUARE_SIZE, fwd.srcPoint.z / SQUARE_SIZE);
 
 	return GenerateHash2(srcNodeNumber, tgtNode->GetNodeNumber());
 }

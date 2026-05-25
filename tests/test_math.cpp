@@ -330,4 +330,35 @@ TEST_SUITE("RH coord invariants") {
         const float3 front = -rxu;
         CHECK(front.z < 0.0f);
     }
+
+    // Option A (PLAN-coordinate-system-option-a.md): world bounds are
+    // positive-quadrant `[0, mapX] × [0, mapY] × [0, mapZ]`. Pin both
+    // bounds positive after a fake-init, and IsInBounds rejecting any
+    // negative coordinate. A future regression that reintroduces the
+    // Option B negative-Z bounds (`minzpos = -mapZ`, `maxzpos = 0`)
+    // would make `IsInBounds(0, 0, 0)` fail or `IsInBounds(0, 0, -1)`
+    // pass — both trip this test immediately.
+    TEST_CASE("world bounds are positive-quadrant") {
+        // Save/restore the statics so this test doesn't leak into
+        // others (e.g. heading-table init shouldn't see fake bounds).
+        const float savedX = float3::maxxpos;
+        const float savedZ = float3::maxzpos;
+        float3::maxxpos = 4096.0f;
+        float3::maxzpos = 4096.0f;
+
+        CHECK(float3::maxxpos > 0.0f);
+        CHECK(float3::maxzpos > 0.0f);
+
+        CHECK(float3(   0.0f, 0.0f,    0.0f).IsInBounds());
+        CHECK(float3(2000.0f, 0.0f, 2000.0f).IsInBounds());
+        CHECK(float3(4096.0f, 0.0f, 4096.0f).IsInBounds());
+
+        CHECK_FALSE(float3(-1.0f, 0.0f,    0.0f).IsInBounds());
+        CHECK_FALSE(float3( 0.0f, 0.0f,   -1.0f).IsInBounds());
+        CHECK_FALSE(float3(4097.0f, 0.0f, 0.0f).IsInBounds());
+        CHECK_FALSE(float3( 0.0f, 0.0f, 4097.0f).IsInBounds());
+
+        float3::maxxpos = savedX;
+        float3::maxzpos = savedZ;
+    }
 }

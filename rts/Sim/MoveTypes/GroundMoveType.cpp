@@ -2378,7 +2378,7 @@ bool CGroundMoveType::HandleStaticObjectCollision(
 		const int zmid = (pos.z + vel.z) / SQUARE_SIZE;
 
 		const int xsquare = (pos.x / SQUARE_SIZE);
-		const int zsquare = ((pos.z - float3::minzpos) / SQUARE_SIZE);
+		const int zsquare = (pos.z / SQUARE_SIZE);
 
 		const int realMinX = xsquare + (-colliderMD->xsizeh);
 		const int realMinZ = zsquare + (-colliderMD->zsizeh);
@@ -3058,7 +3058,7 @@ void CGroundMoveType::UpdatePos(const CUnit* unit, const float3& moveDir, float3
 		virtualObject.DisableHeightChecks();
 
 	auto toMapSquare = [](float3 pos) {
-		return int2({int(pos.x / SQUARE_SIZE), int((pos.z - float3::minzpos) / SQUARE_SIZE)});
+		return int2({int(pos.x / SQUARE_SIZE), int(pos.z / SQUARE_SIZE)});
 	};
 
 	auto toSquareId = [](int2 square) {
@@ -3144,7 +3144,7 @@ void CGroundMoveType::UpdatePos(const CUnit* unit, const float3& moveDir, float3
 				offsetFromPrev.SafeNormalize2D() *= maxDisplacement;
 			}
 			float3 posToTest = prevPos + offsetFromPrev;
-			int curSquare = int((posToTest.z - float3::minzpos) / SQUARE_SIZE)*mapDims.mapx + int(posToTest.x / SQUARE_SIZE);
+			int curSquare = int(posToTest.z / SQUARE_SIZE)*mapDims.mapx + int(posToTest.x / SQUARE_SIZE);
 			if (curSquare != newPosStartSquare) {
 				bool updatePos = isSquareOpen(posToTest);
 				if (updatePos) {

@@ -423,13 +423,13 @@ void CSimulation::Init(const std::string& mapName)
         // Resolve real start positions. Preferred source: the
         // persisted `MapMetadata.startPositions` populated by
         // mapconverter, whose Z values are already RH-canonical
-        // (MapProcessor flips them at conversion when the source map
-        // is `legacyCoordSystem = true`). Fallback: live-parse
-        // mapinfo.lua via MapParser and flip if legacy. Final
-        // fallback: map centre (sim never refuses to start).
+        // (MapProcessor reflects them at conversion when the source map
+        // is `legacyCoordSystem = true` — see MapProcessor::ProcessMap).
+        // Fallback: live-parse mapinfo.lua via MapParser and reflect if
+        // legacy. Final fallback: map centre (sim never refuses to start).
         const float3 mapCenter(
             mapDims.mapx * SQUARE_SIZE * 0.5f, 0.0f,
-            mapDims.mapy * SQUARE_SIZE * 0.5f + float3::minzpos);
+            mapDims.mapy * SQUARE_SIZE * 0.5f);
         std::unique_ptr<MapParser> mapStartParser;
         const bool useMetadata = haveMapMetadata && !mapMetadata.startPositions.empty();
         if (!useMetadata && hasMap && !loadedMapPath.empty()) {
@@ -478,10 +478,13 @@ void CSimulation::Init(const std::string& mapName)
                     // y unspecified by mapinfo.lua — units rely on
                     // ground sampling for vertical placement; leave 0
                     // here, the spawn path (CreateUnit → CUnit::PreInit)
-                    // clamps to ground. Apply the RH flip if the map
-                    // is legacy LH (no flag → assume legacy).
+                    // clamps to ground. Reflect the Z through mapZ/2 if
+                    // the map is legacy LH (matches MapProcessor's
+                    // conversion-time reflection so the metadata path
+                    // and the live-parse path agree).
                     startPos.x = mp.x;
-                    startPos.z = mapIsLegacy ? -mp.z : mp.z;
+                    const float mapZ = static_cast<float>(mapDims.mapy * SQUARE_SIZE);
+                    startPos.z = mapIsLegacy ? (mapZ - mp.z) : mp.z;
                 }
             }
             teams[i].SetStartPos(startPos);

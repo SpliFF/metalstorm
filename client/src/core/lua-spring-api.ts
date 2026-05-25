@@ -877,45 +877,19 @@ export function createDefaultLiveState(): LiveState {
 /** Build the global-table set a Lua widget needs. */
 export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState): Record<string, LuaValue> {
     const ls = liveState ?? createDefaultLiveState();
-    // PLAN-coordinate-system Phase 3 legacy-LH bridge. Each callout
-    // that exchanges world Z with Lua passes its value through `flipZ`
-    // so legacy widgets keep the LH semantics (heading=0 → +Z) they
-    // were authored against. The closure reads `ls.legacyCoordSystem`
-    // on every call, so the flag can flip in (delivered via the first
-    // GameInfo broadcast) without rebuilding the globals table.
-    const flipZ = (z: number): number => (ls.legacyCoordSystem ? -z : z);
-
-    // Position-bearing command params lay out as (x, y, z[, radius])
-    // at indices 0..2. When the legacy bridge is active, mirror Z
-    // before forwarding to the server (which expects RH-native
-    // coords). Mirrors the same list as `LuaCoordAdapt::FlipCommandPositionZ`
-    // on the C++ side. Build commands have cmdId < 0 and place the
-    // build position at params[0..2] with facing at [3].
-    const POS_BEARING_CMD_IDS = new Set<number>([
-        10,  // CMD_MOVE
-        15,  // CMD_PATROL
-        16,  // CMD_FIGHT
-        20,  // CMD_ATTACK
-        21,  // CMD_AREA_ATTACK
-        40,  // CMD_REPAIR
-        75,  // CMD_LOAD_UNITS
-        80,  // CMD_UNLOAD_UNITS
-        81,  // CMD_UNLOAD_UNIT
-        90,  // CMD_RECLAIM
-        105, // CMD_MANUALFIRE
-        125, // CMD_RESURRECT
-        130, // CMD_CAPTURE
-    ]);
-    const flipCommandPositionZ = (cmdId: number, params: number[]): number[] => {
-        if (!ls.legacyCoordSystem) return params;
-        if (params.length < 3) return params;
-        if (cmdId < 0 || POS_BEARING_CMD_IDS.has(cmdId)) {
-            const out = params.slice();
-            out[2] = -out[2];
-            return out;
-        }
-        return params;
-    };
+    // PLAN-coordinate-system Option A legacy-LH bridge. Direction-vector
+    // Z components mirror at every callout that exchanges them with
+    // legacy widgets (`flipDirZ`). World *positions* stay in [0, mapZ]
+    // in both LH and RH frames — Spring's spatial bins index that range
+    // regardless of handedness, and the camera "up" vector is what makes
+    // "+Z = north = screen-top" visually consistent. `flipPosZ` is a
+    // no-op kept at every position-scalar callsite for explicit
+    // intent (position vs direction classification) and zero-cost.
+    // The closure reads `ls.legacyCoordSystem` on every call, so the
+    // flag can flip in (delivered via the first GameInfo broadcast)
+    // without rebuilding the globals table.
+    const flipDirZ = (z: number): number => (ls.legacyCoordSystem ? -z : z);
+    const flipPosZ = (z: number): number => z;
     // --- GL constants table. Only the values lava_layer touches. ---
     const GL: Record<string, LuaValue> = {
         // Draw primitives
@@ -1105,10 +1079,10 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         },
         GetTidal: () => ls.wind.tidal,
         GetGroundHeight: (x: LuaValue, z: LuaValue) => {
-            return sampleHeight(ctx, Number(x), flipZ(Number(z)));
+            return sampleHeight(ctx, Number(x), flipPosZ(Number(z)));
         },
         GetGroundOrigHeight: (x: LuaValue, z: LuaValue) => {
-            return sampleHeight(ctx, Number(x), flipZ(Number(z)));
+            return sampleHeight(ctx, Number(x), flipPosZ(Number(z)));
         },
         GetGameRulesParam: (key: LuaValue) => {
             const k = String(key);
@@ -1384,7 +1358,7 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         },
         GetUnitPosition: (id: LuaValue) => {
             const u = ls.units.get(Number(id));
-            return u ? [u.x, u.y, flipZ(u.z)] : null;
+            return u ? [u.x, u.y, flipPosZ(u.z)] : null;
         },
         GetUnitHealth: (id: LuaValue) => {
             const u = ls.units.get(Number(id));
@@ -1595,7 +1569,7 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             const u = ls.units.get(Number(id));
             if (!u) return null;
             const speed = Math.sqrt(u.vx * u.vx + u.vy * u.vy + u.vz * u.vz);
-            return [u.vx, u.vy, flipZ(u.vz), speed];
+            return [u.vx, u.vy, flipDirZ(u.vz), speed];
         },
         GetUnitShieldState: () => null,
 
@@ -1624,7 +1598,7 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         // (0, +1) input becomes the RH "facing -Z" sample → heading 0.
         GetHeadingFromVector: (x: LuaValue, z: LuaValue) => {
             const xn = Number(x ?? 0);
-            const zn = flipZ(Number(z ?? 0));
+            const zn = flipDirZ(Number(z ?? 0));
             const angle = Math.atan2(xn, -zn);
             let h = Math.floor((angle * 32768) / Math.PI);
             // Clamp into Spring's signed-short range
@@ -2006,7 +1980,7 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
                 // historical px/pz-only target move.
                 const s = state as Record<string, LuaValue>;
                 const px = Number(s.px);
-                const pz = flipZ(Number(s.pz));
+                const pz = flipPosZ(Number(s.pz));
                 if (!Number.isFinite(px) || !Number.isFinite(pz)) return;
                 ctx.setCameraTarget?.(px, pz, Number(smoothness) || 0);
                 return;
@@ -2022,7 +1996,7 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             for (const k of Object.keys(s)) {
                 const v = s[k];
                 if (typeof v === 'number') {
-                    out[k] = Z_FIELDS.has(k) ? flipZ(v) : v;
+                    out[k] = Z_FIELDS.has(k) ? flipPosZ(v) : v;
                 } else if (typeof v === 'boolean') {
                     out[k] = v;
                 } else if (typeof v === 'string') {
@@ -2038,7 +2012,7 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         // calls this with no smoothness for instant snap-to-commander.
         SetCameraTarget: (x: LuaValue, _y: LuaValue, z: LuaValue, smoothness: LuaValue) => {
             const cx = Number(x);
-            const cz = flipZ(Number(z));
+            const cz = flipPosZ(Number(z));
             if (!Number.isFinite(cx) || !Number.isFinite(cz)) return;
             ctx.setCameraTarget?.(cx, cz, Number(smoothness) || 0);
         },
@@ -2078,14 +2052,14 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             // Legacy widgets call with LH coords; sample against the
             // RH-internal heightmap, then mirror the returned normal's
             // Z back to the caller's frame.
-            const n = computeGroundNormal(ctx, Number(x), flipZ(Number(z)));
+            const n = computeGroundNormal(ctx, Number(x), flipPosZ(Number(z)));
             if (Array.isArray(n) && n.length >= 3) {
-                return [n[0], n[1], flipZ(Number(n[2])), n[3]];
+                return [n[0], n[1], flipDirZ(Number(n[2])), n[3]];
             }
             return n;
         },
         GetSmoothMeshHeight: (x: LuaValue, z: LuaValue) => {
-            return sampleHeight(ctx, Number(x), flipZ(Number(z)));
+            return sampleHeight(ctx, Number(x), flipPosZ(Number(z)));
         },
         // Point-LOS queries sample the per-allyteam fog-of-war bitmap
         // streamed by the server (envelope 0x07, ~1 Hz). Coordinates
@@ -2098,16 +2072,16 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         // in-radar plane on the wire — air-spotted squares are
         // server-marked as visible — Phase 7 will split them out.
         IsPosInLos: (x: LuaValue, _y: LuaValue, z: LuaValue, allyTeam?: LuaValue) => {
-            return sampleLosPlane(ctx, ls, 'los', Number(x), flipZ(Number(z)),
+            return sampleLosPlane(ctx, ls, 'los', Number(x), flipPosZ(Number(z)),
                 allyTeam !== undefined ? Number(allyTeam) : undefined);
         },
         IsPosInAirLos: (x: LuaValue, _y: LuaValue, z: LuaValue, allyTeam?: LuaValue) => {
             // Air-LOS is folded into the in-radar plane on the wire.
-            return sampleLosPlane(ctx, ls, 'radar', Number(x), flipZ(Number(z)),
+            return sampleLosPlane(ctx, ls, 'radar', Number(x), flipPosZ(Number(z)),
                 allyTeam !== undefined ? Number(allyTeam) : undefined);
         },
         IsPosInRadar: (x: LuaValue, _y: LuaValue, z: LuaValue, allyTeam?: LuaValue) => {
-            return sampleLosPlane(ctx, ls, 'radar', Number(x), flipZ(Number(z)),
+            return sampleLosPlane(ctx, ls, 'radar', Number(x), flipPosZ(Number(z)),
                 allyTeam !== undefined ? Number(allyTeam) : undefined);
         },
         // Area unit queries: legacy widgets pass LH Z bounds; mirror to
@@ -2115,8 +2089,8 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         // (= RH) coords.
         GetUnitsInRectangle: (x1: LuaValue, z1: LuaValue, x2: LuaValue, z2: LuaValue) => {
             const rx1 = Number(x1), rx2 = Number(x2);
-            let rz1 = flipZ(Number(z1));
-            let rz2 = flipZ(Number(z2));
+            let rz1 = flipPosZ(Number(z1));
+            let rz2 = flipPosZ(Number(z2));
             if (rz1 > rz2) [rz1, rz2] = [rz2, rz1];
             const ids: number[] = [];
             for (const [id, u] of ls.units) {
@@ -2125,7 +2099,7 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             return luaTable(...ids);
         },
         GetUnitsInCylinder: (x: LuaValue, z: LuaValue, r: LuaValue) => {
-            const cx = Number(x), cz = flipZ(Number(z)), rad = Number(r);
+            const cx = Number(x), cz = flipPosZ(Number(z)), rad = Number(r);
             const r2 = rad * rad;
             const ids: number[] = [];
             for (const [id, u] of ls.units) {
@@ -2135,7 +2109,7 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             return luaTable(...ids);
         },
         GetUnitsInSphere: (x: LuaValue, y: LuaValue, z: LuaValue, r: LuaValue) => {
-            const cx = Number(x), cy = Number(y), cz = flipZ(Number(z)), rad = Number(r);
+            const cx = Number(x), cy = Number(y), cz = flipPosZ(Number(z)), rad = Number(r);
             const r2 = rad * rad;
             const ids: number[] = [];
             for (const [id, u] of ls.units) {
@@ -2346,7 +2320,7 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         // cyan ring pulse where they dropped the marker. Real Spring
         // drops/erases markers within Spring.SQUARE_SIZE * 2.
         MarkerAddPoint: (x: LuaValue, y: LuaValue, z: LuaValue, label: LuaValue, _localOnly?: LuaValue) => {
-            const px = Number(x), pz = flipZ(Number(z));
+            const px = Number(x), pz = flipPosZ(Number(z));
             ls.markers.push({
                 kind: 'point',
                 x: px, y: Number(y), z: pz,
@@ -2357,8 +2331,8 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         },
         MarkerAddLine: (x1: LuaValue, y1: LuaValue, z1: LuaValue,
                         x2: LuaValue, y2: LuaValue, z2: LuaValue, _localOnly?: LuaValue) => {
-            const ax = Number(x1), az = flipZ(Number(z1));
-            const bx = Number(x2), bz = flipZ(Number(z2));
+            const ax = Number(x1), az = flipPosZ(Number(z1));
+            const bx = Number(x2), bz = flipPosZ(Number(z2));
             ls.markers.push({
                 kind: 'line',
                 x: ax, y: Number(y1), z: az,
@@ -2374,7 +2348,7 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         },
         MarkerErasePosition: (x: LuaValue, _y: LuaValue, z: LuaValue) => {
             const radius = (ctx.squareSize || 8) * 2;
-            const cx = Number(x), cz = flipZ(Number(z));
+            const cx = Number(x), cz = flipPosZ(Number(z));
             ls.markers = ls.markers.filter(m => {
                 const dx = m.x - cx, dz = m.z - cz;
                 return Math.sqrt(dx * dx + dz * dz) > radius;
@@ -2422,7 +2396,7 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             const id = Number(unitId) | 0;
             if (id <= 0) return false;
             const cid = Number(cmdId) | 0;
-            ctx.giveOrder(cid, [id], flipCommandPositionZ(cid, orderParamsToArray(params)), orderOptionsToBits(options));
+            ctx.giveOrder(cid, [id], orderParamsToArray(params), orderOptionsToBits(options));
             return true;
         },
         GiveOrderToUnitArray: (unitIds: LuaValue, cmdId: LuaValue, params: LuaValue, options: LuaValue) => {
@@ -2430,7 +2404,7 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             const ids = orderUnitIdsToArray(unitIds);
             if (ids.length === 0) return false;
             const cid = Number(cmdId) | 0;
-            ctx.giveOrder(cid, ids, flipCommandPositionZ(cid, orderParamsToArray(params)), orderOptionsToBits(options));
+            ctx.giveOrder(cid, ids, orderParamsToArray(params), orderOptionsToBits(options));
             return true;
         },
         GiveOrder: (cmdId: LuaValue, params: LuaValue, options: LuaValue) => {
@@ -2438,7 +2412,7 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             const ids = ls.selectedUnitIds.slice();
             if (ids.length === 0) return false;
             const cid = Number(cmdId) | 0;
-            ctx.giveOrder(cid, ids, flipCommandPositionZ(cid, orderParamsToArray(params)), orderOptionsToBits(options));
+            ctx.giveOrder(cid, ids, orderParamsToArray(params), orderOptionsToBits(options));
             return true;
         },
         // Spring.GiveOrderArrayToUnitArray(unitIds, [orders]) issues every
@@ -2464,7 +2438,7 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
                 const params = Array.isArray(entry) ? entry[1] : (seq.params ?? seq[2]);
                 const options = Array.isArray(entry) ? entry[2] : (seq.options ?? seq[3]);
                 ctx.giveOrder(cmdId, ids,
-                              flipCommandPositionZ(cmdId, orderParamsToArray(params as LuaValue)),
+                              orderParamsToArray(params as LuaValue),
                               orderOptionsToBits(options as LuaValue));
             }
             return true;
@@ -2908,7 +2882,7 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             // GetVectorFromHeading which negates the LH table entry
             // componentwise. Legacy-LH bridge mirrors Z back to +Z
             // so widgets reading frontdir see the LH convention.
-            return [-Math.sin(h), 0, flipZ(-Math.cos(h))];
+            return [-Math.sin(h), 0, flipDirZ(-Math.cos(h))];
         },
         GetUnitResources: () => [0, 0, 0, 0, 0, 0], // metalMake, metalUse, energyMake, energyUse
         IsUnitVisible: (id: LuaValue) => ls.units.has(Number(id)),

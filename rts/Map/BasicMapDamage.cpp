@@ -102,8 +102,8 @@ void CBasicMapDamage::Explosion(const float3& pos, float strength, float radius,
 	e.ttl = EXPLOSION_LIFETIME;
 	e.x1 = std::clamp <int> ((pos.x - radius) / SQUARE_SIZE, 1, mapDims.mapxm1);
 	e.x2 = std::clamp <int> ((pos.x + radius) / SQUARE_SIZE, 1, mapDims.mapxm1);
-	e.y1 = std::clamp <int> ((pos.z - radius - float3::minzpos) / SQUARE_SIZE, 1, mapDims.mapym1);
-	e.y2 = std::clamp <int> ((pos.z + radius - float3::minzpos) / SQUARE_SIZE, 1, mapDims.mapym1);
+	e.y1 = std::clamp <int> ((pos.z - radius) / SQUARE_SIZE, 1, mapDims.mapym1);
+	e.y2 = std::clamp <int> ((pos.z + radius) / SQUARE_SIZE, 1, mapDims.mapym1);
 	e.idx = explSquaresPoolIdx;
 
 	const float* curHeightMap = readMap->GetCornerHeightMapSynced();
@@ -188,7 +188,7 @@ void CBasicMapDamage::Explosion(const float3& pos, float strength, float radius,
 		for (int z = unit->mapPos.y; z < unit->mapPos.y + unit->zsize; z++) {
 			for (int x = unit->mapPos.x; x < unit->mapPos.x + unit->xsize; x++) {
 				// calculate the distance and normalize it
-				const float expDist = pos.distance2D(float3(x * SQUARE_SIZE, 0.0f, z * SQUARE_SIZE + float3::minzpos));
+				const float expDist = pos.distance2D(float3(x * SQUARE_SIZE, 0.0f, z * SQUARE_SIZE));
 				const float relDist = std::min(1.0f, expDist * invRadius);
 
 				const unsigned int tableIdx = relDist * CRATER_TABLE_SIZE;

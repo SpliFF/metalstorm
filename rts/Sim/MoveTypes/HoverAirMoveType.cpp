@@ -1104,7 +1104,7 @@ bool CHoverAirMoveType::HandleCollisions(bool checkCollisions)
 			owner->Move(-RgtVector * 0.6f, true);
 		}
 
-		if (pos.z < float3::minzpos) {
+		if (pos.z < 0.0f) {
 			owner->Move( FwdVector * 0.6f, true);
 		} else if (pos.z > float3::maxzpos) {
 			owner->Move(-FwdVector * 0.6f, true);

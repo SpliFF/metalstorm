@@ -144,27 +144,27 @@ export class LuaGLBridge {
      *  the bridge silently no-ops in that case. */
     private minimapEmitter: ((cmd: MinimapBridgeCommand) => void) | null = null;
 
-    /** PLAN-coordinate-system Phase 3: when true, every world-space
-     *  `gl.*` call (Translate / Rotate / Vertex / LoadMatrix /
-     *  MultMatrix) mirrors Z (and the equivalent matrix entries) so
-     *  legacy-LH widgets keep drawing at their authored coordinates
-     *  even though the immediate-mode matrix stack is RH-native.
-     *  Default false (RH-native). Set on first GameInfo broadcast by
-     *  `setLegacyCoordSystem`. */
+    /** PLAN-coordinate-system Option A: handedness is a *direction*
+     *  property, not a positional one. When the legacy-LH bridge is on,
+     *  direction-vector Z components mirror (gl.Rotate axis, LoadMatrix
+     *  rotation block); world positions pass through unchanged. The
+     *  immediate-mode stack is RH-native; legacy widgets reach it via
+     *  per-callout adapters. Default false (RH-native). Set on first
+     *  GameInfo broadcast by `setLegacyCoordSystem`. */
     private legacyCoordSystem = false;
 
     /** Toggle the legacy-LH coord bridge. Called from the worker once
      *  the server's `GameInfo.legacy_coord_system` flag arrives. The
-     *  bridge looks at it on every `gl.*` call that consumes world Z,
-     *  so flipping mid-game is safe in principle — the assumption is
+     *  bridge looks at it on every `gl.*` call that consumes a direction
+     *  Z, so flipping mid-game is safe in principle — the assumption is
      *  that the server treats the flag as immutable per game session,
      *  matching the C++ side's `modInfo.legacyCoordSystem`. */
     setLegacyCoordSystem(value: boolean): void {
         this.legacyCoordSystem = value;
     }
 
-    /** Convenience: mirror Z when bridging legacy LH widgets. */
-    private flipZ(z: number): number {
+    /** Mirror Z on a direction-vector component (rotation axis, etc.). */
+    private flipDirZ(z: number): number {
         return this.legacyCoordSystem ? -z : z;
     }
 
@@ -359,15 +359,16 @@ export class LuaGLBridge {
         gl['LoadIdentity'] = () => this.imm.loadIdentity();
         gl['LoadMatrix'] = (...args: LuaValue[]) => this.loadMatrix(args);
         gl['MultMatrix'] = (...args: LuaValue[]) => this.multMatrixGL(args);
-        // World-Z carrying matrix mutators: legacy-LH widgets pass
-        // values in their authoring frame; mirror Z so the RH matrix
-        // stack accumulates the correct transform.
+        // Translate carries a position; under Option A world positions
+        // stay in [0, mapZ] in both LH and RH frames so no Z flip is
+        // needed. Rotate's (x, y, z) is an axis vector — direction-style,
+        // so its Z mirrors when the legacy bridge is active.
         gl['Translate'] = (x: LuaValue, y: LuaValue, z: LuaValue) =>
-            this.imm.translate(Number(x), Number(y), this.flipZ(Number(z ?? 0)));
+            this.imm.translate(Number(x), Number(y), Number(z ?? 0));
         gl['Scale'] = (x: LuaValue, y: LuaValue, z: LuaValue) =>
             this.imm.scale(Number(x), Number(y), Number(z ?? 1));
         gl['Rotate'] = (angle: LuaValue, x: LuaValue, y: LuaValue, z: LuaValue) =>
-            this.imm.rotate(Number(angle), Number(x), Number(y), this.flipZ(Number(z)));
+            this.imm.rotate(Number(angle), Number(x), Number(y), this.flipDirZ(Number(z)));
         gl['Ortho'] = (l: LuaValue, r: LuaValue, b: LuaValue, t: LuaValue,
             n: LuaValue, f: LuaValue) =>
             this.imm.ortho(Number(l), Number(r), Number(b), Number(t),
@@ -685,12 +686,13 @@ export class LuaGLBridge {
         }
     }
 
-    /** Conjugate the matrix by diag(1, 1, -1, 1) when bridging legacy
-     *  LH widgets. Negates the Z row + Z column of the rotation block
-     *  plus the translation Z. Mirrors the same flip used by the
-     *  server-side `LuaCoordAdapt::FlipMatrix` helper so widgets that
-     *  read a piece matrix on the server and push it through
-     *  `gl.LoadMatrix` get the expected visual result. */
+    /** Conjugate the rotation block of a 4×4 by diag(1, 1, -1, 1) when
+     *  bridging legacy LH widgets. Negates the Z row + Z column,
+     *  excluding m[10] (flipped twice). Translation Z is NOT negated —
+     *  positions stay in [0, mapZ] under Option A. Mirrors the
+     *  server-side `LuaCoordAdapt::FlipMatrix` so widgets that read a
+     *  piece matrix on the server and push it through `gl.LoadMatrix`
+     *  get the expected visual result. */
     private applyLegacyMatrixFlip(m: Float32Array): void {
         if (!this.legacyCoordSystem) return;
         m[ 2] = -m[ 2];   // col 0, row 2
@@ -699,7 +701,7 @@ export class LuaGLBridge {
         m[ 9] = -m[ 9];   // col 2, row 1
         // m[10] flips twice — leave alone.
         m[11] = -m[11];   // col 2, row 3
-        m[14] = -m[14];   // translation Z
+        // m[14] (translation Z) — NOT negated; positions stay in [0, mapZ].
     }
 
     private createList(fn: LuaValue, ...args: LuaValue[]): number {

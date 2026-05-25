@@ -474,7 +474,7 @@ static int GetWorldObjectVelocity(lua_State* L, const CWorldObject* o)
 
 	lua_pushnumber(L, o->speed.x);
 	lua_pushnumber(L, o->speed.y);
-	lua_pushnumber(L, LuaCoordAdapt::FlipZ(o->speed.z));
+	lua_pushnumber(L, LuaCoordAdapt::FlipDirZ(o->speed.z));
 	lua_pushnumber(L, o->speed.w);
 	return 4;
 }
@@ -509,17 +509,17 @@ static int GetSolidObjectPosition(lua_State* L, const CSolidObject* o, bool isFe
 	// base-position (LuaCoordAdapt mirrors Z for legacy-LH widgets)
 	lua_pushnumber(L, o->pos.x + errorVec.x);
 	lua_pushnumber(L, o->pos.y + errorVec.y);
-	lua_pushnumber(L, LuaCoordAdapt::FlipZ(o->pos.z + errorVec.z));
+	lua_pushnumber(L, LuaCoordAdapt::FlipPosZ(o->pos.z + errorVec.z));
 
 	if (returnMidPos) {
 		lua_pushnumber(L, o->midPos.x + errorVec.x);
 		lua_pushnumber(L, o->midPos.y + errorVec.y);
-		lua_pushnumber(L, LuaCoordAdapt::FlipZ(o->midPos.z + errorVec.z));
+		lua_pushnumber(L, LuaCoordAdapt::FlipPosZ(o->midPos.z + errorVec.z));
 	}
 	if (returnAimPos) {
 		lua_pushnumber(L, o->aimPos.x + errorVec.x);
 		lua_pushnumber(L, o->aimPos.y + errorVec.y);
-		lua_pushnumber(L, LuaCoordAdapt::FlipZ(o->aimPos.z + errorVec.z));
+		lua_pushnumber(L, LuaCoordAdapt::FlipPosZ(o->aimPos.z + errorVec.z));
 	}
 
 	return (3 + (3 * returnMidPos) + (3 * returnAimPos));
@@ -1391,7 +1391,7 @@ int LuaSyncedRead::GetHeadingFromVector(lua_State* L)
 	// Z arrives in legacy-LH coords when the bridge is active. Mirror
 	// before handing to the engine so the heading is computed against
 	// RH-canonical input.
-	const float z = LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 2));
+	const float z = LuaCoordAdapt::FlipDirZ(luaL_checkfloat(L, 2));
 	const short int heading = ::GetHeadingFromVector(x, z);
 	lua_pushnumber(L, heading);
 	return 1;
@@ -1414,7 +1414,7 @@ int LuaSyncedRead::GetVectorFromHeading(lua_State* L)
 	lua_pushnumber(L, vec.x);
 	// Engine returns RH (heading=0 → -Z); legacy widgets expect LH
 	// (heading=0 → +Z). The Z-flip restores the legacy contract.
-	lua_pushnumber(L, LuaCoordAdapt::FlipZ(vec.z));
+	lua_pushnumber(L, LuaCoordAdapt::FlipDirZ(vec.z));
 	return 2;
 }
 
@@ -1569,11 +1569,10 @@ int LuaSyncedRead::GetAllyTeamStartBox(lua_State* L)
 		return 0;
 
 	const AllyTeam& allyTeam = teamHandler.GetAllyTeam(allyTeamID);
-	const float mapHeight = mapDims.mapy * SQUARE_SIZE;
 	const float xmin = (mapDims.mapx * SQUARE_SIZE) * allyTeam.startRectLeft;
-	const float zmin = float3::minzpos + mapHeight * allyTeam.startRectTop;
+	const float zmin = (mapDims.mapy * SQUARE_SIZE) * allyTeam.startRectTop;
 	const float xmax = (mapDims.mapx * SQUARE_SIZE) * allyTeam.startRectRight;
-	const float zmax = float3::minzpos + mapHeight * allyTeam.startRectBottom;
+	const float zmax = (mapDims.mapy * SQUARE_SIZE) * allyTeam.startRectBottom;
 
 	lua_pushnumber(L, xmin);
 	lua_pushnumber(L, zmin);
@@ -1606,7 +1605,7 @@ int LuaSyncedRead::GetTeamStartPosition(lua_State* L)
 
 	lua_pushnumber(L, pos.x);
 	lua_pushnumber(L, pos.y);
-	lua_pushnumber(L, LuaCoordAdapt::FlipZ(pos.z));
+	lua_pushnumber(L, LuaCoordAdapt::FlipPosZ(pos.z));
 	lua_pushboolean(L, team->HasValidStartPos());
 	return 4;
 }
@@ -4324,7 +4323,7 @@ int LuaSyncedRead::GetUnitVectors(lua_State* L)
 	lua_createtable(L, 3, 0);                                                              \
 	lua_pushnumber(L, unit-> n .x); lua_rawseti(L, -2, 1);                                 \
 	lua_pushnumber(L, unit-> n .y); lua_rawseti(L, -2, 2);                                 \
-	lua_pushnumber(L, LuaCoordAdapt::FlipZ(unit-> n .z)); lua_rawseti(L, -2, 3)
+	lua_pushnumber(L, LuaCoordAdapt::FlipDirZ(unit-> n .z)); lua_rawseti(L, -2, 3)
 
 	PACK_VECTOR(frontdir);
 	PACK_VECTOR(updir);
@@ -4365,7 +4364,7 @@ int LuaSyncedRead::GetUnitDirection(lua_State* L)
 
 	lua_pushnumber(L, unit->frontdir.x);
 	lua_pushnumber(L, unit->frontdir.y);
-	lua_pushnumber(L, LuaCoordAdapt::FlipZ(unit->frontdir.z));
+	lua_pushnumber(L, LuaCoordAdapt::FlipDirZ(unit->frontdir.z));
 	return 3;
 }
 
@@ -5154,11 +5153,11 @@ int LuaSyncedRead::GetUnitWeaponVectors(lua_State* L)
 
 	lua_pushnumber(L, pos.x);
 	lua_pushnumber(L, pos.y);
-	lua_pushnumber(L, LuaCoordAdapt::FlipZ(pos.z));
+	lua_pushnumber(L, LuaCoordAdapt::FlipPosZ(pos.z));
 
 	lua_pushnumber(L, dir->x);
 	lua_pushnumber(L, dir->y);
-	lua_pushnumber(L, LuaCoordAdapt::FlipZ(dir->z));
+	lua_pushnumber(L, LuaCoordAdapt::FlipDirZ(dir->z));
 
 	return 6;
 }
@@ -7128,12 +7127,13 @@ int LuaSyncedRead::IsPosInMap(lua_State* L)
 	const float z = luaL_checkfloat(L, 2);
 
 	const float mapX = mapDims.mapx * SQUARE_SIZE;
+	const float mapZ = mapDims.mapy * SQUARE_SIZE;
 
 	const bool inMap
 		=  x >= 0
-		&& z >= float3::minzpos
+		&& z >= 0
 		&& x <= mapX
-		&& z <= float3::maxzpos + 1.0f
+		&& z <= mapZ
 	;
 
 	/* Currently, the engine does not support limiting
@@ -7166,7 +7166,7 @@ int LuaSyncedRead::IsPosInMap(lua_State* L)
 int LuaSyncedRead::GetGroundHeight(lua_State* L)
 {
 	const float x = luaL_checkfloat(L, 1);
-	const float z = LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 2));
+	const float z = LuaCoordAdapt::FlipPosZ(luaL_checkfloat(L, 2));
 	lua_pushnumber(L, CGround::GetHeightReal(x, z, CLuaHandle::GetHandleSynced(L)));
 	return 1;
 }
@@ -7217,7 +7217,7 @@ int LuaSyncedRead::GetWaterLevel(lua_State* L)
 int LuaSyncedRead::GetGroundOrigHeight(lua_State* L)
 {
 	const float x = luaL_checkfloat(L, 1);
-	const float z = LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 2));
+	const float z = LuaCoordAdapt::FlipPosZ(luaL_checkfloat(L, 2));
 	lua_pushnumber(L, CGround::GetOrigHeight(x, z));
 	return 1;
 }
@@ -7237,7 +7237,7 @@ int LuaSyncedRead::GetGroundOrigHeight(lua_State* L)
 int LuaSyncedRead::GetGroundNormal(lua_State* L)
 {
 	const float x = luaL_checkfloat(L, 1);
-	const float z = LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 2));
+	const float z = LuaCoordAdapt::FlipPosZ(luaL_checkfloat(L, 2));
 
 	// raw or smoothed center normal
 	const float3& normal = luaL_optboolean(L, 3, false)?
@@ -7246,7 +7246,7 @@ int LuaSyncedRead::GetGroundNormal(lua_State* L)
 
 	lua_pushnumber(L, normal.x);
 	lua_pushnumber(L, normal.y);
-	lua_pushnumber(L, LuaCoordAdapt::FlipZ(normal.z));
+	lua_pushnumber(L, LuaCoordAdapt::FlipDirZ(normal.z));
 	// slope derives from face normals, include it here
 	lua_pushnumber(L, CGround::GetSlope(x, z, CLuaHandle::GetHandleSynced(L)));
 	return 4;
@@ -7273,10 +7273,10 @@ int LuaSyncedRead::GetGroundNormal(lua_State* L)
 int LuaSyncedRead::GetGroundInfo(lua_State* L)
 {
 	const float x = luaL_checkfloat(L, 1);
-	const float z = LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 2));
+	const float z = LuaCoordAdapt::FlipPosZ(luaL_checkfloat(L, 2));
 
 	const int ix = std::clamp(x, 0.0f, float3::maxxpos) / (SQUARE_SIZE * 2);
-	const int iz = (std::clamp(z, float3::minzpos, float3::maxzpos) - float3::minzpos) / (SQUARE_SIZE * 2);
+	const int iz = std::clamp(z, 0.0f, float3::maxzpos) / (SQUARE_SIZE * 2);
 
 	const int maxIndex = (mapDims.hmapx * mapDims.hmapy) - 1;
 	const int sqrIndex = std::min(maxIndex, (mapDims.hmapx * iz) + ix);
@@ -7437,7 +7437,7 @@ int LuaSyncedRead::GetGrass(lua_State* L)
 int LuaSyncedRead::GetSmoothMeshHeight(lua_State* L)
 {
 	const float x = luaL_checkfloat(L, 1);
-	const float z = LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 2));
+	const float z = LuaCoordAdapt::FlipPosZ(luaL_checkfloat(L, 2));
 
 	lua_pushnumber(L, smoothGround.GetHeight(x, z));
 	return 1;
@@ -7483,8 +7483,8 @@ int LuaSyncedRead::TestMoveOrder(lua_State* L)
 		return 1;
 	}
 
-	const float3 pos(luaL_checkfloat(L, 2), luaL_checkfloat(L, 3), LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 4)));
-	const float3 dir(luaL_optfloat(L, 5, 0.0f), luaL_optfloat(L, 6, 0.0f), LuaCoordAdapt::FlipZ(luaL_optfloat(L, 7, 0.0f)));
+	const float3 pos(luaL_checkfloat(L, 2), luaL_checkfloat(L, 3), LuaCoordAdapt::FlipPosZ(luaL_checkfloat(L, 4)));
+	const float3 dir(luaL_optfloat(L, 5, 0.0f), luaL_optfloat(L, 6, 0.0f), LuaCoordAdapt::FlipDirZ(luaL_optfloat(L, 7, 0.0f)));
 
 	const bool testTerrain = luaL_optboolean(L, 8, true);
 	const bool testObjects = luaL_optboolean(L, 9, true);
@@ -7532,7 +7532,12 @@ int LuaSyncedRead::TestBuildOrder(lua_State* L)
 	BuildInfo bi;
 	bi.buildFacing = LuaUtils::ParseFacing(L, __func__, 5);
 	bi.def = unitDef;
-	bi.pos = {luaL_checkfloat(L, 2), luaL_checkfloat(L, 3), luaL_checkfloat(L, 4)};
+	// FlipPosZ is a no-op under Option A: positions stay in [0, mapZ]
+	// in both LH and RH frames. The wrapper documents intent so the
+	// position-vs-direction classification stays explicit at every
+	// world-coord callsite.
+	bi.pos = {luaL_checkfloat(L, 2), luaL_checkfloat(L, 3),
+	          LuaCoordAdapt::FlipPosZ(luaL_checkfloat(L, 4))};
 	bi.pos = CGameHelper::Pos2BuildPos(bi, CLuaHandle::GetHandleSynced(L));
 	CFeature* feature;
 
@@ -7709,7 +7714,7 @@ int LuaSyncedRead::IsPosInLos(lua_State* L)
 {
 	const float3 pos(luaL_checkfloat(L, 1),
 	                 luaL_checkfloat(L, 2),
-	                 LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 3)));
+	                 LuaCoordAdapt::FlipPosZ(luaL_checkfloat(L, 3)));
 
 	const int allyTeamID = GetEffectiveLosAllyTeam(L, 4);
 	if (allyTeamID < 0) {
@@ -7735,7 +7740,7 @@ int LuaSyncedRead::IsPosInRadar(lua_State* L)
 {
 	const float3 pos(luaL_checkfloat(L, 1),
 	                 luaL_checkfloat(L, 2),
-	                 LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 3)));
+	                 LuaCoordAdapt::FlipPosZ(luaL_checkfloat(L, 3)));
 
 	const int allyTeamID = GetEffectiveLosAllyTeam(L, 4);
 	if (allyTeamID < 0) {
@@ -7761,7 +7766,7 @@ int LuaSyncedRead::IsPosInAirLos(lua_State* L)
 {
 	const float3 pos(luaL_checkfloat(L, 1),
 	                 luaL_checkfloat(L, 2),
-	                 LuaCoordAdapt::FlipZ(luaL_checkfloat(L, 3)));
+	                 LuaCoordAdapt::FlipPosZ(luaL_checkfloat(L, 3)));
 
 	const int allyTeamID = GetEffectiveLosAllyTeam(L, 4);
 	if (allyTeamID < 0) {
@@ -8100,7 +8105,7 @@ static int GetSolidObjectPiecePosition(lua_State* L, const CSolidObject* o)
 
 	lua_pushnumber(L, pos.x);
 	lua_pushnumber(L, pos.y);
-	lua_pushnumber(L, LuaCoordAdapt::FlipZ(pos.z));
+	lua_pushnumber(L, LuaCoordAdapt::FlipPosZ(pos.z));
 	return 3;
 }
 
@@ -8118,7 +8123,7 @@ static int GetSolidObjectPieceDirection(lua_State* L, const CSolidObject* o)
 
 	lua_pushnumber(L, dir.x);
 	lua_pushnumber(L, dir.y);
-	lua_pushnumber(L, LuaCoordAdapt::FlipZ(dir.z));
+	lua_pushnumber(L, LuaCoordAdapt::FlipDirZ(dir.z));
 	return 3;
 }
 
@@ -8142,10 +8147,10 @@ static int GetSolidObjectPiecePosDir(lua_State* L, const CSolidObject* o)
 
 	lua_pushnumber(L, pos.x);
 	lua_pushnumber(L, pos.y);
-	lua_pushnumber(L, LuaCoordAdapt::FlipZ(pos.z));
+	lua_pushnumber(L, LuaCoordAdapt::FlipPosZ(pos.z));
 	lua_pushnumber(L, dir.x);
 	lua_pushnumber(L, dir.y);
-	lua_pushnumber(L, LuaCoordAdapt::FlipZ(dir.z));
+	lua_pushnumber(L, LuaCoordAdapt::FlipDirZ(dir.z));
 	return 6;
 }
 

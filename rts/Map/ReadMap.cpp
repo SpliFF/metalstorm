@@ -297,17 +297,8 @@ void CReadMap::Initialize()
 	// set global map info
 	mapDims.Initialize();
 
-	// RH-native world bounds (PLAN-coordinate-system.md, Option B):
-	// X keeps the legacy `[0, mapx * SQUARE_SIZE - 1]` extent, Z runs
-	// from `-(mapy * SQUARE_SIZE - 1)` at the most-negative-Z (forward
-	// under glTF) edge to `0` at the +Z (back) edge. Every spatial
-	// index in the sim subtracts `minzpos` before dividing by its
-	// grid pitch, so the heightmap / quad / LOS / path / metal /
-	// blocking grids stay row-major from grid index 0 upward — only
-	// the world-coord <-> grid-coord mapping changes.
 	float3::maxxpos = mapDims.mapx * SQUARE_SIZE - 1;
-	float3::minzpos = -(mapDims.mapy * SQUARE_SIZE - 1);
-	float3::maxzpos = 0;
+	float3::maxzpos = mapDims.mapy * SQUARE_SIZE - 1;
 
 	boundingRadius = math::sqrt(Square(mapDims.mapx * SQUARE_SIZE) + Square(mapDims.mapy * SQUARE_SIZE)) * 0.5f;
 

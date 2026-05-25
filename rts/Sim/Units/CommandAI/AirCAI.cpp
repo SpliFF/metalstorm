@@ -86,9 +86,9 @@ void CAirCAI::GiveCommandReal(const Command& c, bool fromSynced)
 		return;
 
 	if (c.GetID() == CMD_MOVE && c.GetNumParams() >= 3 &&
-			(c.GetParam(0) < 0.0f || c.GetParam(2) < float3::minzpos
+			(c.GetParam(0) < 0.0f || c.GetParam(2) < 0.0f
 			 || c.GetParam(0) > (mapDims.mapx * SQUARE_SIZE)
-			 || c.GetParam(2) > float3::maxzpos + 1.0f))
+			 || c.GetParam(2) > (mapDims.mapy * SQUARE_SIZE)))
 	{
 		return;
 	}

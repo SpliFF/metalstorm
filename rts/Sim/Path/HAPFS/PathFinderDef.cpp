@@ -39,9 +39,9 @@ CPathFinderDef::CPathFinderDef(const float3& startPos, const float3& goalPos, fl
 , useVerifiedStartBlock(false)
 {
 	startSquareX = wsStartPos.x / SQUARE_SIZE;
-	startSquareZ = (wsStartPos.z - float3::minzpos) / SQUARE_SIZE;
+	startSquareZ = wsStartPos.z / SQUARE_SIZE;
 	goalSquareX = wsGoalPos.x / SQUARE_SIZE;
-	goalSquareZ = (wsGoalPos.z - float3::minzpos) / SQUARE_SIZE;
+	goalSquareZ = wsGoalPos.z / SQUARE_SIZE;
 
 	// make sure that the goal can be reached with 2-square resolution
 	sqGoalRadius = std::max(sqGoalRadius, SQUARE_SIZE * SQUARE_SIZE * 2.0f);
@@ -92,7 +92,7 @@ int2 CPathFinderDef::GoalSquareOffset(uint32_t blockSize) const {
 
 	int2 offset;
 		offset.x = (unsigned(wsGoalPos.x) % blockPixelSize) / SQUARE_SIZE;
-		offset.y = (unsigned(wsGoalPos.z - float3::minzpos) % blockPixelSize) / SQUARE_SIZE;
+		offset.y = (unsigned(wsGoalPos.z) % blockPixelSize) / SQUARE_SIZE;
 
 	return offset;
 }
@@ -113,12 +113,12 @@ CCircularSearchConstraint::CCircularSearchConstraint(
 	RECOIL_DETAILED_TRACY_ZONE;
 	// calculate the center and radius of the constrained area
 	const uint32_t startX = start.x / SQUARE_SIZE;
-	const uint32_t startZ = (start.z - float3::minzpos) / SQUARE_SIZE;
+	const uint32_t startZ = start.z / SQUARE_SIZE;
 
 	const float3 halfWay = (start + goal) * 0.5f;
 
 	halfWayX = halfWay.x / SQUARE_SIZE;
-	halfWayZ = (halfWay.z - float3::minzpos) / SQUARE_SIZE;
+	halfWayZ = halfWay.z / SQUARE_SIZE;
 
 	const int dx = startX - halfWayX;
 	const int dz = startZ - halfWayZ;
@@ -144,9 +144,9 @@ CRectangularSearchConstraint::CRectangularSearchConstraint(
 	// (nodes are constrained to these when a PE uses the max-res
 	// PF to cache costs)
 	uint32_t startBlockX = startPos.x / SQUARE_SIZE;
-	uint32_t startBlockZ = (startPos.z - float3::minzpos) / SQUARE_SIZE;
+	uint32_t startBlockZ = startPos.z / SQUARE_SIZE;
 	uint32_t  goalBlockX =  goalPos.x / SQUARE_SIZE;
-	uint32_t  goalBlockZ = ( goalPos.z - float3::minzpos) / SQUARE_SIZE;
+	uint32_t  goalBlockZ =  goalPos.z / SQUARE_SIZE;
 
 	// align to PE-grid
 	startBlockX -= (startBlockX % blockSize);

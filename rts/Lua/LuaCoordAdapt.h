@@ -3,54 +3,59 @@
 /**
  * LuaCoordAdapt — legacy-LH ↔ RH-native coord bridge for Lua callouts.
  *
- * Phase 3 of PLAN-coordinate-system.md. The engine + wire format now
- * speak glTF-native right-handed coords (+X right, +Y up, -Z forward).
- * Games whose Lua scripts were authored against Spring's legacy
- * left-handed frame (heading=0 → +Z, asymmetric piece offsets like
- * `lwheel.offset.z` positive for the left wheel) opt in via the
- * `legacyCoordSystem = true` flag in `modinfo.lua`.
+ * The engine + wire format speak glTF-native right-handed coords for
+ * direction vectors (+X right, +Y up, -Z forward) but keep world *positions*
+ * in `[0, mapX] × [0, mapY] × [0, mapZ]` — the same positive index space
+ * Spring's spatial bins (heightmap, QuadField, BlockingMap, LOS grids)
+ * use. Handed-ness is a basis-vector property: it changes the meaning of
+ * +Z (forward → backward) and the sign of rotation cross products, but
+ * does not move the world's origin or extents. The screen-space mapping
+ * (camera "up" vector) is what makes "+Z = north = screen-top" visually
+ * consistent with LH-authored content.
  *
- * Every coord-touching Lua callout funnels values through the
- * branch-on-flag inline helpers below. When the flag is true, vector
- * Z (and the equivalent matrix entries) get mirrored at the bridge
- * so legacy widgets/gadgets see LH-style values even though the
- * underlying engine state is RH.
+ * Games whose Lua scripts were authored against Spring's legacy LH
+ * frame (heading=0 → +Z, asymmetric piece offsets like `lwheel.offset.z`
+ * positive for the left wheel) opt in via the `legacyCoordSystem = true`
+ * flag in `modinfo.lua`. The bridge then mirrors Z on direction-vector
+ * components at every coord-touching callout — and *only* on direction
+ * components. World positions are passed through unchanged because they
+ * never flipped in the first place.
  *
- * Heading itself is left alone: it's an opaque u16 rotation index,
- * and the same numeric value names the same visual rotation in both
- * frames (only the heading → direction vector conversion has to be
- * adapted, which we handle by Z-flipping those vectors at the
- * `Spring.GetVectorFromHeading` / `Spring.GetHeadingFromVector`
- * callout boundaries).
+ * The two helpers below make the position-vs-direction distinction
+ * explicit at every callsite:
  *
- * FacingMap labels (FACING_NORTH/SOUTH/EAST/WEST) are also left alone
- * for the same reason. The enum integer values were kept stable across
- * the RH flip — what changed was which heading each label resolves to
- * (`GetHeadingFromFacing` in SpringMath.inl: `FACING_NORTH → 0` now,
- * was `FACING_SOUTH → 0`). But the world-direction meaning of each
- * label is preserved: `FACING_NORTH` always names -Z, `FACING_SOUTH`
- * always names +Z, etc. A legacy widget calling
- * `Spring.CreateUnit(_, x, y, z, "N")` wanted "spawn a unit facing
- * north" and gets exactly that in both LH and RH frames, with no
- * bridge involvement. Adding a `FlipFacing` helper here would silently
- * break those widgets by mapping NORTH ↔ SOUTH. Don't add one.
- * (See Phase 4c of PLAN-coordinate-system: this was an open §7 item
- * that resolved to a no-op once the label semantics were audited.)
+ *   FlipDirZ(z)  → -z when legacy active. Apply to direction-vector
+ *                  scalars: frontdir, updir, rightdir, velocity, impulse,
+ *                  ground normals, piece directions, weapon dir.
+ *   FlipPosZ(z)  → no-op. Apply to position scalars: GetUnitPosition,
+ *                  GetGroundHeight inputs, CreateUnit, SetUnitPosition,
+ *                  marker positions, command param[2] of MOVE/ATTACK/etc.
+ *                  (the helper exists purely as documentation — the
+ *                  callsites could just pass the scalar through.)
  *
- * The branch is a single bool test, branch-predictor friendly even
- * in tight unit-script loops. New games (legacyCoordSystem absent
- * or false) pay no overhead beyond the predicted-not-taken branch.
+ * Heading itself is left alone: it's an opaque u16 rotation index, and
+ * the same numeric value names the same visual rotation in both frames
+ * (only the heading↔direction-vector conversion has to be adapted,
+ * handled by FlipDirZ at the `Spring.GetVectorFromHeading` /
+ * `Spring.GetHeadingFromVector` boundaries).
  *
- * Removal: `grep -r legacyCoordSystem` finds every site touching
- * this adapter (helpers, callout uses, modinfo loader, the flag in
- * CModInfo and GameInfo). Deletion is one mechanical pass once no
- * game needs the bridge.
+ * FacingMap labels (FACING_NORTH/SOUTH/EAST/WEST) are also left alone.
+ * Enum integer values were kept stable across the RH flip — what
+ * changed was which heading each label resolves to (`GetHeadingFromFacing`
+ * in SpringMath.inl: `FACING_NORTH → 0` now, was `FACING_SOUTH → 0`).
+ * But the world-direction meaning of each label is preserved.
+ *
+ * The branch is a single bool test, branch-predictor friendly even in
+ * tight unit-script loops. New games (legacyCoordSystem absent or false)
+ * pay no overhead beyond the predicted-not-taken branch.
+ *
+ * Removal: `grep -r legacyCoordSystem` finds every site touching this
+ * adapter. Deletion is one mechanical pass once no game needs the bridge.
  */
 #ifndef LUA_COORD_ADAPT_H
 #define LUA_COORD_ADAPT_H
 
 #include "Sim/Misc/ModInfo.h"
-#include "Sim/Units/CommandAI/Command.h"
 #include "System/float3.h"
 #include "System/Matrix44f.h"
 
@@ -59,18 +64,27 @@ namespace LuaCoordAdapt {
 /// True when the active game opted into the legacy-LH bridge.
 inline bool IsLegacy() { return modInfo.legacyCoordSystem; }
 
-/// Mirror Z on input or output position/direction scalars.
-inline float FlipZ(float z) { return IsLegacy() ? -z : z; }
+/// Mirror Z on a direction-vector scalar (frontdir, normal, velocity,
+/// impulse, etc.). The handedness flip lives entirely in direction
+/// space; positions stay in [0, mapZ] and use FlipPosZ instead.
+inline float FlipDirZ(float z) { return IsLegacy() ? -z : z; }
 
-/// Mirror Z on a 3-vector (in place / pass-through both work).
-inline float3 FlipVec(float3 v) {
+/// No-op. Exists to make the position-vs-direction classification
+/// explicit at every world-position callsite. World positions never
+/// flipped under Option A — Spring's spatial bins index [0, mapZ] in
+/// both LH and RH frames, and the camera "up" vector is what makes
+/// "+Z = north = screen-top" visually consistent.
+inline float FlipPosZ(float z) { return z; }
+
+/// Mirror Z on a direction 3-vector (in place / pass-through both work).
+inline float3 FlipDirVec(float3 v) {
 	if (IsLegacy()) v.z = -v.z;
 	return v;
 }
 
-/// Conjugate a 4×4 transform by diag(1, 1, -1, 1). Equivalent to
-/// negating the Z row and Z column of the rotation block plus the
-/// translation Z. m[10] flips twice, so it stays put.
+/// Conjugate the rotation block of a 4×4 transform by diag(1, 1, -1, 1).
+/// Negates the Z row and Z column, excluding m[10] (flipped twice).
+/// Translation Z is NOT negated — positions don't flip under Option A.
 inline CMatrix44f FlipMatrix(CMatrix44f m) {
 	if (!IsLegacy()) return m;
 	// Rotation block: negate (row 2, col 2) ∪ (col 2, row 2), excluding (2,2).
@@ -80,58 +94,8 @@ inline CMatrix44f FlipMatrix(CMatrix44f m) {
 	m.m[ 9] = -m.m[ 9];   // col 2, row 1
 	// m.m[10] flips twice — leave alone.
 	m.m[11] = -m.m[11];   // col 2, row 3 (always 0 for an affine xform)
-	m.m[14] = -m.m[14];   // translation Z
+	// m.m[14] (translation Z) — NOT negated; world positions stay in [0, mapZ].
 	return m;
-}
-
-/// Flip the Z component of any position parameters embedded in a
-/// command's `params` array. Spring command params have a stable
-/// shape: position-bearing commands (CMD_MOVE, CMD_ATTACK, CMD_FIGHT,
-/// CMD_PATROL, CMD_REPAIR, CMD_RECLAIM, CMD_CAPTURE, CMD_RESURRECT,
-/// CMD_LOAD_UNITS, CMD_GUARD-with-pos, etc.) lay out as
-/// (x, y, z) at params[0..2], optionally followed by a radius for
-/// area commands. CMD_UNLOAD_UNIT shifts the position to params[0..2]
-/// with the unitID at [3]. Build commands (negative cmdID) place the
-/// build position at params[0..2] with facing at [3].
-///
-/// We piggy-back on `Command::IsMoveCommand()` / `IsBuildCommand()`
-/// from rts/Sim/Units/CommandAI/Command.h to detect the position-
-/// bearing shape and flip params[2] in place. Object-only variants
-/// (numParams 1 or 2) don't carry a position, so we leave those.
-inline void FlipCommandPositionZ(Command& cmd) {
-	if (!IsLegacy()) return;
-
-	const int id = cmd.GetID();
-	const unsigned int n = cmd.GetNumParams();
-
-	// Build commands: -id is the unitDefID; params layout is
-	// (x, y, z, facing). Build a unit at z=N (LH) → engine sees z=-N.
-	if (cmd.IsBuildCommand() && n >= 3) {
-		cmd.SetParam(2, -cmd.GetParam(2));
-		return;
-	}
-
-	switch (id) {
-		case CMD_MOVE:
-		case CMD_PATROL:
-		case CMD_FIGHT:
-		case CMD_ATTACK:
-		case CMD_AREA_ATTACK:
-		case CMD_MANUALFIRE:
-		case CMD_LOAD_UNITS:
-		case CMD_REPAIR:
-		case CMD_RECLAIM:
-		case CMD_RESURRECT:
-		case CMD_CAPTURE:
-		case CMD_RESTORE:
-		case CMD_UNLOAD_UNIT:
-		case CMD_UNLOAD_UNITS:
-			// Object-only variants (1–2 params) carry no position.
-			if (n >= 3)
-				cmd.SetParam(2, -cmd.GetParam(2));
-			break;
-		default: break;
-	}
 }
 
 } // namespace LuaCoordAdapt

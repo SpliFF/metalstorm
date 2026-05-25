@@ -714,27 +714,32 @@ bool MapProcessor::ProcessMap(MapMetadata& meta) {
     EnumerateWidgets(meta);
 
     // RH content-preprocessing: legacy LH map source files (mapinfo.lua,
-    // featureplacer/*.lua, SMF-embedded features) speak +Z forward. The
-    // engine has been migrated to glTF-native RH with world Z in
-    // `[-mapy * SQUARE_SIZE, 0]`. We flip the Z component of every
-    // map-derived position here so the persisted MapMetadata record is
-    // RH-canonical regardless of the source convention — downstream
-    // consumers (lobby, sim, Lua bridge) all see the same RH-frame
-    // coordinates without any per-call adapter for map content.
+    // featureplacer/*.lua, SMF-embedded features) author position Z in
+    // the visual-north-positive convention: low Z = top of the minimap.
+    // The engine runs in glTF-native RH (camera looks down -Z) but
+    // keeps world bounds positive-quadrant `[0, mapZ]` — so visual
+    // "north" sits at low world Z, and a legacy author who placed a
+    // spawn at `z = 2000` on a 4096-tall map meant the north half of
+    // the map. Reflect through mapZ/2 (i.e. `z → mapZ - z`) so the
+    // persisted MapMetadata record is RH-canonical regardless of
+    // source convention — downstream consumers (lobby, sim, Lua bridge)
+    // all see the same RH-frame positive-Z coordinates without any
+    // per-call adapter for map content.
     //
     // Feature rotations (heading units) are NOT flipped: under both
-    // conventions a given numeric heading names the same world
-    // direction (`heading = 0` originally meant +Z under LH and is
-    // now -Z under RH, i.e. the visual "front" direction; a feature
+    // conventions a given numeric heading names the same screen-top
+    // direction (`heading = 0` originally meant +Z under LH and is now
+    // -Z under RH, i.e. the visual "front" direction; a feature
     // authored with `rot = 16384` (90°) still faces +X / "east" in
     // either frame).
     if (meta.legacyCoordSystem) {
+        const float mapZ = static_cast<float>(meta.mapy * SQUARE_SIZE);
         for (auto& sp : meta.startPositions)
-            sp.z = -sp.z;
+            sp.z = mapZ - sp.z;
         for (auto& f : meta.features)
-            f.z = -f.z;
+            f.z = mapZ - f.z;
         SLOG(SPRING_LOG_INFO,
-            "%s: legacyCoordSystem=true — flipped Z on %zu start positions and %zu features (LH → RH)",
+            "%s: legacyCoordSystem=true — reflected Z through mapZ/2 on %zu start positions and %zu features (LH → RH)",
             meta.id.c_str(), meta.startPositions.size(), meta.features.size());
     }
 
