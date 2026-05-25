@@ -22,6 +22,7 @@
 #include "System/SpringLog/SpringLogSqlite.h"
 #include <cctype>
 #include <set>
+#include <unordered_set>
 
 #include <sqlite3.h>
 
@@ -75,9 +76,20 @@ struct GameServerInstance {
 /// `spring-server` exit can still be reused for the next room. Game
 /// servers themselves bind their own listen socket; the brief bind
 /// here is purely a "does anyone hold this?" probe.
-static int findFreePort(int base = 9100, int floor = 0) {
+///
+/// `excluded` is the set of ports already held by live game-server
+/// processes in the lobby's `gameServers` map. spring-server's
+/// listen socket sets SO_REUSEPORT (NetworkServer.cpp:873), which
+/// would otherwise allow the probe bind to succeed against a port
+/// another spring-server is actively listening on — the kernel
+/// then load-balances incoming connections across both, and clients
+/// auth'd for one room land on another room's roster ("Not in this
+/// room's roster"). Skipping known-busy ports avoids that collision.
+static int findFreePort(int base = 9100, int floor = 0,
+                        const std::unordered_set<int>& excluded = {}) {
     int start = (floor > base) ? floor : base;
     for (int port = start; port < start + 1000; ++port) {
+        if (excluded.count(port)) continue;
         int s = ::socket(AF_INET, SOCK_STREAM, 0);
         if (s < 0) continue;
         int one = 1;
@@ -118,11 +130,12 @@ static GameServerInstance spawnGameServer(
     const std::string& gameVersion,
     const std::string& mapId, const std::string& dbPath,
     const std::vector<RoomPlayer>& playerRoster,
-    const std::vector<RoomAISlot>& aiSlots)
+    const std::vector<RoomAISlot>& aiSlots,
+    const std::unordered_set<int>& excludedPorts = {})
 {
     GameServerInstance inst;
     inst.roomId = roomId;
-    inst.port = findFreePort();
+    inst.port = findFreePort(9100, 0, excludedPorts);
     if (inst.port < 0) {
         SLOG(SPRING_LOG_ERROR, "no free port in [9100, 10100) for room %u", roomId);
         inst.state = GameServerInstance::Crashed;
@@ -238,6 +251,14 @@ static GameServerInstance spawnGameServer(
 /// is alive, -1 with errno=ESRCH if it isn't.
 static bool isProcessAlive(pid_t pid) {
     if (pid <= 0) return false;
+    // Reap if it's a child of ours and has already exited — otherwise
+    // kill(pid, 0) returns success for zombie processes and the lobby
+    // never notices the game server has died. WNOHANG returns the pid
+    // for an exited child, 0 if still running, -1 (ECHILD) if not our
+    // child (e.g. adopted from the game_servers table across restart).
+    int status = 0;
+    pid_t r = ::waitpid(pid, &status, WNOHANG);
+    if (r == pid) return false;        // reaped zombie — definitely dead
     if (::kill(pid, 0) == 0) return true;
     return (errno != ESRCH);  // EPERM means alive but not ours; still "alive"
 }
@@ -487,6 +508,31 @@ int main(int argc, char* argv[])
         SLOG(SPRING_LOG_NOTICE,
             "startup: adopted %zu game server(s), cleaned %zu stale row(s)",
             adopted, staleRooms.size());
+    }
+
+    // Reset any room stuck in Loading/Active without a live game-server.
+    // Happens when the previous lobby was killed mid-game without a
+    // clean shutdown (so room.state was persisted as Loading), or when
+    // the game-server died while the lobby was running but its zombie
+    // kept isProcessAlive returning true (waitpid fix applied at the
+    // same time as this sweep). Without this, the room sits in
+    // "Loading" forever in the browser and the host can't relaunch.
+    {
+        size_t reset = 0;
+        for (auto* room : rooms.GetAllRooms()) {
+            const auto st = static_cast<int>(room->state);
+            const bool inFlight = (st >= 3 && st <= 4); // Loading, Active
+            if (!inFlight) continue;
+            if (gameServers.count(room->id) > 0) continue; // adopted; alive
+            SLOG(SPRING_LOG_NOTICE,
+                "room %u stuck in state=%d with no game-server — resetting",
+                room->id, st);
+            rooms.ResetRoomForNextGame(room->id);
+            reset++;
+        }
+        if (reset > 0) {
+            SLOG(SPRING_LOG_NOTICE, "startup: reset %zu orphaned room(s)", reset);
+        }
     }
 
     // --- Network ---
@@ -1329,9 +1375,19 @@ int main(int argc, char* argv[])
         if (it != gamePathsById.end()) {
             const auto vit = gameVersionsById.find(room->gameId);
             const std::string& gameVer = (vit != gameVersionsById.end()) ? vit->second : std::string();
+            // Skip ports currently held by live spring-server processes.
+            // Without this, the new game-server binds via SO_REUSEPORT
+            // alongside the old one and incoming WebRTC connections
+            // round-robin between the two — see findFreePort comment.
+            std::unordered_set<int> busyPorts;
+            for (const auto& [rid, gi] : gameServers) {
+                if (gi.pid > 0 && isProcessAlive(gi.pid)) {
+                    busyPorts.insert(gi.port);
+                }
+            }
             auto inst = spawnGameServer(room->id, room->gameId, gameVer,
                 room->mapId, dbPath,
-                room->players, room->aiSlots);
+                room->players, room->aiSlots, busyPorts);
             gameServers[room->id] = inst;
             persistGameServer(inst);
             room->gameServerPort = inst.port;
