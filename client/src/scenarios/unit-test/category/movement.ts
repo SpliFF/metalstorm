@@ -63,15 +63,36 @@ export async function runMovement(
     // gives the unit positive vertical speed — see PLAN-scenarios.md
     // "Open follow-ups"). Workaround: warp the unit to its
     // wantedHeight with Spring.MoveCtrl so it skips takeoff and
-    // UpdateFlying takes over immediately.
+    // UpdateFlying takes over immediately. Also seed direction +
+    // velocity toward the goal so the move type doesn't burn the
+    // wall budget banking and accelerating from a standstill — slow
+    // bombers in particular need every elmo of forward progress.
+    // Movement doesn't need an explicit CMD_MOVE kick like combat
+    // does, because the test issues CMD_MOVE itself a few lines
+    // below and that order is enough to drive CStrafeAirMoveType's
+    // StartMoving → TAKEOFF transition.
     if (unit.canFly) {
         await h.lua(`
             local ud = UnitDefs[${unit.defId}]
-            local h = (ud and ud.wantedHeight) or 100
+            -- Warp to the engine's internal cruise altitude
+            -- (def.wantedHeight * 1.5; see CStrafeAirMoveType::Init).
+            -- Spawning at the raw def value triggers a takeoff climb
+            -- which fights pathfinding and burns wall budget on
+            -- vertical motion instead of horizontal progress.
+            local defAlt = (ud and ud.wantedHeight) or 100
+            local h = defAlt * 1.5
+            local spd = (ud and ud.speed) or 0
             local x, _, z = Spring.GetUnitPosition(${unitId})
             Spring.MoveCtrl.Enable(${unitId})
             Spring.SetUnitPosition(${unitId}, x, h, z)
+            -- Face east toward the goal (UUT spawns west of it).
+            Spring.SetUnitDirection(${unitId}, 1, 0, 0)
             Spring.MoveCtrl.Disable(${unitId})
+            -- def.speed is elmos/second; engine velocity is per
+            -- sim-frame, so divide by GAME_SPEED (30).
+            if spd > 0 then
+                Spring.SetUnitVelocity(${unitId}, spd / 30, 0, 0)
+            end
         `);
     }
 
