@@ -379,6 +379,67 @@ export class InputManager {
         this.animatedCursor = cursor;
     }
 
+    /** Optional RTSCamera — when set, the tracking-camera toggle (T)
+     *  re-frames the current selection each tick via `fitPoints`. Wired
+     *  from main.ts after the camera is constructed. Typed structurally
+     *  so InputManager doesn't have to import the concrete class. */
+    private rtsCamera: {
+        fitPoints(points: { x: number; y: number; z: number }[], opts?: {
+            padding?: number; pitchDeg?: number; durationMs?: number; minDistance?: number;
+        }): void;
+    } | null = null;
+    private trackingActive = false;
+    setRTSCamera(cam: typeof this.rtsCamera): void {
+        this.rtsCamera = cam;
+    }
+    /** Whether the tracking-camera toggle is currently on. Read by
+     *  the HUD to render an indicator. */
+    isTrackingCamera(): boolean { return this.trackingActive; }
+    /** Programmatic toggle — used by scenarios that want to enable
+     *  tracking without simulating a `T` keypress. */
+    setTrackingCamera(on: boolean): void {
+        this.trackingActive = on;
+        if (on) this.refitTrackingNow();
+    }
+
+    /** Latest sim speed and pause state the server has reported via
+     *  GameInfo. Used to compute the next step when the player taps
+     *  `+`/`-` and to send the inverted state when they toggle pause.
+     *  Updated from main.ts's onGameInfo handler. */
+    private currentSimSpeed = 1;
+    private currentSimPaused = false;
+    setSimStatus(speed: number, paused: boolean): void {
+        if (speed > 0) this.currentSimSpeed = speed;
+        this.currentSimPaused = paused;
+    }
+
+    /** Step the sim speed one notch in `dir` (+1 = faster, -1 = slower).
+     *  Steps mirror Spring's classic `+`/`-` ladder: 0.1, 0.2, 0.5, 1,
+     *  2, 3, 5, 8, 10, 20, 50, 100. Sends via the same ConsoleCommand
+     *  channel the debug console uses. */
+    private bumpSimSpeed(dir: 1 | -1): void {
+        const ladder = [0.1, 0.2, 0.5, 1, 2, 3, 5, 8, 10, 20, 50, 100];
+        const cur = this.currentSimSpeed;
+        // Pick the next ladder rung in `dir` from the current value.
+        let next = cur;
+        if (dir > 0) {
+            for (const v of ladder) { if (v > cur + 1e-3) { next = v; break; } }
+        } else {
+            for (let i = ladder.length - 1; i >= 0; i--) {
+                if (ladder[i] < cur - 1e-3) { next = ladder[i]; break; }
+            }
+        }
+        if (Math.abs(next - cur) < 1e-3) return;
+        this.connection.sendConsoleCommand('server', `speed ${next}`);
+    }
+
+    /** Toggle the server-side pause. Sends `pause` or `unpause` —
+     *  the same verbs the debug console exposes. */
+    private toggleSimPaused(): void {
+        this.connection.sendConsoleCommand(
+            'server', this.currentSimPaused ? 'unpause' : 'pause');
+    }
+
     /** Install (or clear) the CommandNotify gate on the CommandBuffer.
      *  Wired from main.ts once the LuaWidgetManager exists — every
      *  mouse-issued command then routes through widgetHandler.CommandNotify
@@ -1825,11 +1886,80 @@ export class InputManager {
 
     // ---- Keyboard ----
 
+    /** Per-frame tick. Currently only used to refit the tracking
+     *  camera on the live selection. Cheap when tracking is off. */
+    tick(): void {
+        if (this.trackingActive) this.refitTrackingNow();
+    }
+
+    /** Run a single tracking refit immediately. Reads live positions
+     *  from EntityRenderer (already interpolated for the current
+     *  render frame) and asks RTSCamera to frame them. No-ops if
+     *  tracking is off, no camera is wired, or no selected unit has a
+     *  known client position yet. */
+    private refitTrackingNow(): void {
+        if (!this.rtsCamera || this.selectedIds.length === 0) return;
+        const pts: { x: number; y: number; z: number }[] = [];
+        for (const id of this.selectedIds) {
+            const p = this.entityRenderer.getEntityPosition(id);
+            if (p) pts.push(p);
+        }
+        if (pts.length === 0) return;
+        this.rtsCamera.fitPoints(pts, {
+            padding: 1.6,
+            pitchDeg: 55,
+            durationMs: 0,
+        });
+    }
+
     private setupKeyboardHandler(): void {
         window.addEventListener('keydown', (e) => {
             // Ignore if an input element has focus.
             const tag = (e.target as HTMLElement)?.tagName;
             if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+            // ─── Global hotkeys (work without a selection) ───
+            // Sim speed / pause go through the existing ConsoleCommand
+            // pathway the debug console uses — server scope, `speed N`
+            // / `pause` / `unpause` verbs in LuaExecEngine.cpp. The
+            // server broadcasts the new state back via GameInfo, which
+            // updates the HUD indicator automatically.
+            if (!e.ctrlKey && !e.altKey && !e.metaKey) {
+                // Spring traditional keys: `+` speed up, `-` slow down,
+                // `Pause`/`Break` toggles pause. `\` resets to 1× (also
+                // an old Spring binding). Use `e.key` so layout shifts
+                // (= / +) both work — `+` is shift-`=` on US.
+                if (e.key === '+' || e.key === '=') {
+                    this.bumpSimSpeed(+1);
+                    e.preventDefault();
+                    return;
+                }
+                if (e.key === '-' || e.key === '_') {
+                    this.bumpSimSpeed(-1);
+                    e.preventDefault();
+                    return;
+                }
+                if (e.key === '\\') {
+                    this.connection.sendConsoleCommand('server', 'speed 1');
+                    e.preventDefault();
+                    return;
+                }
+                if (e.key === 'Pause' || e.code === 'Pause') {
+                    this.toggleSimPaused();
+                    e.preventDefault();
+                    return;
+                }
+                // Tracking camera toggle — Spring binds Backspace; we use
+                // `T` since Backspace is the browser back-nav key on many
+                // setups. Local-only: reads selection + entity positions
+                // and asks the camera to fit them.
+                if (e.key === 't' || e.key === 'T') {
+                    this.trackingActive = !this.trackingActive;
+                    if (this.trackingActive) this.refitTrackingNow();
+                    e.preventDefault();
+                    return;
+                }
+            }
 
             // ESC cancels build placement and any pending modal command. The
             // main.ts ESC handler shows the quit dialog after we early-out.

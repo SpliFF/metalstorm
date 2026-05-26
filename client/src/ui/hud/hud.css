@@ -77,3 +77,16 @@
     font-size: 11px;
     color: #888;
 }
+
+#hud-speed {
+    position: absolute;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    font: bold 14px/1 system-ui, sans-serif;
+    background: rgba(0, 0, 0, 0.75);
+    color: #ffd07a;
+    padding: 4px 12px;
+    border-radius: 4px;
+    pointer-events: none;
+}

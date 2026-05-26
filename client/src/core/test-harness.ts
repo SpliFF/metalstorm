@@ -306,6 +306,38 @@ export class TestHarness {
         if (d > 0) await wait(d + 16);
     }
 
+    /** Programmatically toggle the player-facing tracking camera (the
+     *  `T` hotkey). When on, the camera re-fits the current selection
+     *  every frame. Scenarios use this to start in tracking mode
+     *  without needing the user to press the key. */
+    setTrackingCamera(on: boolean): void {
+        this.deps.inputManager?.setTrackingCamera(on);
+    }
+
+    /** Frame all of `unitIds` so they sit inside the vertical FOV. Used
+     *  by SFX/effects benches to keep both shooter and target visible
+     *  through projectile travel — the camera tilts to `pitchDeg`
+     *  (default 55°, side-on enough to see arcs) and distances out
+     *  according to the units' bounding box. Units that the renderer
+     *  doesn't yet know about are silently skipped. */
+    async cameraFitUnits(unitIds: number[], opts: {
+        padding?: number;
+        pitchDeg?: number;
+        durationMs?: number;
+        minDistance?: number;
+    } = {}): Promise<void> {
+        if (!this.deps.entityRenderer) throw new Error('[test] no entityRenderer');
+        const pts: { x: number; y: number; z: number }[] = [];
+        for (const id of unitIds) {
+            const p = this.deps.entityRenderer.getEntityPosition(id);
+            if (p) pts.push(p);
+        }
+        if (pts.length === 0) return;
+        this.deps.camera.fitPoints(pts, opts);
+        const d = opts.durationMs ?? 0;
+        if (d > 0) await wait(d + 16);
+    }
+
     /** Save the current pose into a numbered slot. */
     cameraSaveSlot(slot: number): void { this.deps.camera.saveSlot(slot); }
     /** Recall a numbered slot. Returns false when empty. */

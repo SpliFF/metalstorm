@@ -170,6 +170,24 @@ function updateHUD(entityCount: number, frame: number, selectedIds: readonly num
     }
 }
 
+/** Render the sim-speed / pause state in the HUD. Reads from the
+ *  authoritative `onGameInfo` broadcast so the indicator reflects what
+ *  the server actually applied (after clamping), not what the player
+ *  requested. Stays hidden at 1×/unpaused to avoid HUD clutter. */
+function updateSpeedHUD(speed: number, paused: boolean): void {
+    const el = document.getElementById('hud-speed');
+    if (!el) return;
+    if (paused) {
+        el.textContent = 'PAUSED';
+        el.style.display = '';
+    } else if (Math.abs(speed - 1) > 0.01) {
+        el.textContent = `${speed.toFixed(speed < 1 ? 2 : 1)}×`;
+        el.style.display = '';
+    } else {
+        el.style.display = 'none';
+    }
+}
+
 // --- Viewport ---
 
 function sendCameraViewport(camera: FreeCamera, connection: Connection): void {
@@ -1118,6 +1136,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         },
         onGameInfo(frame, speed, paused, wind, legacyCoordSystem) {
             currentWidgetManager?.forwardGameInfo(frame, speed, paused, false, wind, legacyCoordSystem);
+            // Tell InputManager about the latest speed/pause so its
+            // `+`/`-`/`Pause` hotkeys know which rung to step to and
+            // which verb to send on toggle. Also drives the HUD label.
+            inputManager?.setSimStatus(speed, paused);
+            updateSpeedHUD(speed, paused);
         },
         onUnitCommandQueues(queues) {
             lastCommandQueues = queues;
@@ -1267,6 +1290,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             }
         });
     inputManager.setDefCache(defCache);
+    // Tracking-camera target: InputManager calls rtsCamera.fitPoints
+    // every tick when tracking is on. Pure client-side feature — no
+    // server roundtrip needed since we already have selection + live
+    // entity positions locally.
+    inputManager.setRTSCamera(rtsCamera);
     // Animated cursor — loads ZK's `Anims/cursor*.txt` packs and renders
     // them on a transparent overlay. Only constructable once we know the
     // game data root; safe to skip when no game is loaded yet.
@@ -1352,6 +1380,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         if (testRenderPaused) return;
 
         rtsCamera.tick();
+        // InputManager.tick currently only refits the tracking camera
+        // on the live selection — cheap when tracking is off. Run it
+        // BEFORE other ticks so the camera move lands this frame; the
+        // entity/projectile renderers downstream see the new pose.
+        inputManager?.tick();
         entityRenderer?.tick();
         buildBeamRenderer?.tick();
         projectileRenderer?.tick();

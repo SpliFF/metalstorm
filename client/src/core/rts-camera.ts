@@ -1054,6 +1054,52 @@ export class RTSCamera {
         this.setPose({ pos, lookAt }, opts.durationMs ?? 0);
     }
 
+    /** Frame an arbitrary set of world points so they all fit inside the
+     *  vertical FOV. The look-at lands on the centroid; distance is
+     *  derived from the bounding-box half-extent + `padding`. `pitchDeg`
+     *  controls how steep the view is (lower = more side-on, useful for
+     *  watching projectile trajectories). */
+    fitPoints(points: Vec3Like[], opts: {
+        padding?: number;
+        pitchDeg?: number;
+        durationMs?: number;
+        minDistance?: number;
+    } = {}): void {
+        if (points.length === 0) return;
+        const padding = opts.padding ?? 1.4;
+        const pitch = opts.pitchDeg ?? 55;
+        let minX = Infinity, maxX = -Infinity;
+        let minZ = Infinity, maxZ = -Infinity;
+        let sumY = 0;
+        for (const p of points) {
+            if (p.x < minX) minX = p.x;
+            if (p.x > maxX) maxX = p.x;
+            if (p.z < minZ) minZ = p.z;
+            if (p.z > maxZ) maxZ = p.z;
+            sumY += p.y ?? 0;
+        }
+        const cx = (minX + maxX) * 0.5;
+        const cz = (minZ + maxZ) * 0.5;
+        const avgY = sumY / points.length;
+        const groundY = this.groundSampler ? Math.max(0, this.groundSampler(cx, cz)) : 0;
+        // Use the higher of ground or average y so air engagements aren't
+        // framed underground.
+        const targetY = Math.max(groundY, avgY);
+        // Minimum half-extent so a 1-unit framing doesn't put the camera
+        // inside the model.
+        const half = Math.max(40, Math.max(maxX - minX, maxZ - minZ) * 0.5) * padding;
+        const fovRad = this.camera.fov || (45 * Math.PI / 180);
+        const distance = Math.max(opts.minDistance ?? 200, half / Math.tan(fovRad * 0.5));
+        const lookAt = { x: cx, y: targetY, z: cz };
+        const pr = pitch * Math.PI / 180;
+        const pos = {
+            x: lookAt.x,
+            y: lookAt.y + Math.sin(pr) * distance,
+            z: lookAt.z - Math.cos(pr) * distance,
+        };
+        this.setPose({ pos, lookAt }, opts.durationMs ?? 0);
+    }
+
     /** Save the current pose into a numbered slot. Spring/Recoil binds
      *  Shift+F2..F6 to save, F2..F6 to recall. */
     saveSlot(slot: number): void {

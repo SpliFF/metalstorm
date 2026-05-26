@@ -5,6 +5,11 @@
     <span id="hud-entities">Entities: 0</span>
     <span id="hud-frame">Frame: 0</span>
 </div>
+<!-- Sim speed / pause indicator. Hidden at 1×/unpaused; shows the
+     current multiplier when the player has stepped sim speed via
+     +/- or paused via Pause. Lives outside #hud-top-bar so it stays
+     visible even when chili widgets cover the top bar. -->
+<div id="hud-speed" class="hud-panel" style="display:none"></div>
 <div id="hud-selection" class="hud-panel" style="display:none">
     <span id="hud-selected">No selection</span>
 </div>
