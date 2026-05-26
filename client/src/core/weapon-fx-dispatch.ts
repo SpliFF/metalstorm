@@ -22,18 +22,30 @@ export enum ImpactKind {
     Other = 6,
 }
 
-/// Mirrors `ProjectileVisualType` in protocol.fbs.
-export enum VisualType {
-    Cannon = 0,
-    Laser = 1,
-    BeamLaser = 2,
-    Missile = 3,
-    Lightning = 4,
-    Flame = 5,
+/// Mirrors Recoil's `WEAPON_*_PROJECTILE` bitmask in
+/// `rts/Sim/Projectiles/WeaponProjectiles/WeaponProjectileTypes.h`. The
+/// server emits this value directly from `WeaponDef::projectileType`,
+/// which Recoil's `CWeaponDef` populates per weapon-type. Each value
+/// names the projectile class that gets spawned, which is the right
+/// granularity for the renderer dispatch (BeamLaser ≠ LaserCannon,
+/// Starburst ≠ Missile, etc.).
+export enum ProjectileType {
+    Base           = 1 << 0,
+    BeamLaser      = 1 << 1,
+    Emg            = 1 << 2,
+    Explosive      = 1 << 3,   // Cannon, AircraftBomb
+    Fireball       = 1 << 4,   // DGun
+    Flame          = 1 << 5,
+    LargeBeamLaser = 1 << 6,   // BeamLaser with largeBeamLaser=true
+    Laser          = 1 << 7,   // LaserCannon
+    Lightning      = 1 << 8,
+    Missile        = 1 << 9,
+    Starburst      = 1 << 10,
+    Torpedo        = 1 << 11,
 }
 
 /// Coarse archetype tag for a weapon def. The CEG library dispatches
-/// by archetype rather than raw visualType so a few hand-ported ZK CEG
+/// by archetype rather than raw projectileType so a few hand-ported ZK CEG
 /// signatures can override the generic muzzle/impact effects.
 export type WeaponArchetype =
     | 'disintegrator'
@@ -47,16 +59,12 @@ export function classifyWeaponArchetype(def: WeaponDefInfo | undefined): WeaponA
     if (!def) return 'default';
     const name = (def.name || '').toLowerCase();
     const tex1 = (def.texture1 || '').toLowerCase();
-    const typeName = (def.typeName || '').toLowerCase();
-    if (typeName === 'dgun' || name.includes('disintegrat')) return 'disintegrator';
-    if (typeName === 'flame' || def.visualType === VisualType.Flame) return 'flame';
-    if (typeName === 'lightningcannon' || def.visualType === VisualType.Lightning
-        || name.includes('lightning')) return 'lightninggun';
-    if (tex1.includes('largelaser')
-        || (def.visualType === VisualType.BeamLaser && def.size > 4)) {
-        return 'largelaser';
-    }
-    if (def.visualType === VisualType.Cannon && def.size <= 4) return 'lightcannon';
+    const pt = def.projectileType;
+    if (pt === ProjectileType.Fireball) return 'disintegrator';
+    if (pt === ProjectileType.Flame) return 'flame';
+    if (pt === ProjectileType.Lightning || name.includes('lightning')) return 'lightninggun';
+    if (pt === ProjectileType.LargeBeamLaser || tex1.includes('largelaser')) return 'largelaser';
+    if (pt === ProjectileType.Explosive && def.size <= 4) return 'lightcannon';
     return 'default';
 }
 

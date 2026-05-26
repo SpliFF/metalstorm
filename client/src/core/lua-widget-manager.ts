@@ -930,7 +930,7 @@ export class LuaWidgetManager {
 
     /** Push a batch of weapon defs into the worker. */
     forwardWeaponDefs(defs: ReadonlyArray<{
-        defId: number; name: string; visualType: number;
+        defId: number; name: string; projectileType: number;
         projectileSpeed: number; range: number; aoe: number; size: number;
         intensity: number; colorR: number; colorG: number; colorB: number;
         duration: number; highTrajectory: boolean;

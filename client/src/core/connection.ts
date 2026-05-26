@@ -61,6 +61,7 @@ import { AuthRequest } from '../protocol/spring-web/auth-request.js';
 import { PlayerCommand } from '../protocol/spring-web/player-command.js';
 import { PlayerCommandBatch } from '../protocol/spring-web/player-command-batch.js';
 import { LuaRulesMsg } from '../protocol/spring-web/lua-rules-msg.js';
+import { ConsoleCommand } from '../protocol/spring-web/console-command.js';
 import { SelectionState } from '../protocol/spring-web/selection-state.js';
 import { PathRequest } from '../protocol/spring-web/path-request.js';
 import { PathRequestCancel } from '../protocol/spring-web/path-request-cancel.js';
@@ -407,7 +408,7 @@ export interface UnitCommandEventMsg {
 export interface WeaponDefInfo {
     defId: number;
     name: string;
-    visualType: number;
+    projectileType: number;
     projectileSpeed: number;
     range: number;
     aoe: number;
@@ -416,6 +417,20 @@ export interface WeaponDefInfo {
     colorR: number;
     colorG: number;
     colorB: number;
+    /** Inner-core colour for LaserCannon / BeamLaser bolts. Recoil
+     *  draws the bolt twice — outer at `color` × `thickness`, inner at
+     *  `color2` × `thickness * coreThickness`. */
+    color2R: number;
+    color2G: number;
+    color2B: number;
+    /** Outer half-width of laser bolts / beams, in elmos. */
+    thickness: number;
+    /** Inner-core width as a fraction of `thickness` (0..1). */
+    coreThickness: number;
+    /** LaserCannon: stop and contract at max-range instead of fading. */
+    laserHardStop: boolean;
+    /** Per-frame intensity falloff multiplier (non-hardstop lasers). */
+    falloffRate: number;
     duration: number;
     highTrajectory: boolean;
     typeName: string;
@@ -999,6 +1014,25 @@ export class Connection {
         const dataOff = LuaRulesMsg.createDataVector(builder, bytes);
         const msg = LuaRulesMsg.createLuaRulesMsg(builder, dataOff);
         this.sendClientMessage(builder, ClientPayload.LuaRulesMsg, msg);
+    }
+
+    /** Send a ConsoleCommand to the game server's exec engine (same
+     *  pathway debug-console.ts uses). `scope` picks the runtime —
+     *  `"server"` for built-in verbs (`pause`, `unpause`, `speed N`),
+     *  or `"LuaRules"` / `"LuaGaia"` / `"LuaAI:<id>"` for Lua. Fire-and-
+     *  forget: server's `ConsoleResponse` is ignored. Callers that need
+     *  the response should go through DebugConsole's request-tracking
+     *  path instead. */
+    sendConsoleCommand(scope: string, command: string): void {
+        if (!this.authenticated) return;
+        const ch = this.controlChannel;
+        if (!ch || ch.readyState !== 'open') return;
+        const builder = new flatbuffers.Builder(64 + command.length);
+        const scopeOff = builder.createString(scope);
+        const cmdOff = builder.createString(command);
+        // requestId=0 — we don't track the response.
+        const cc = ConsoleCommand.createConsoleCommand(builder, scopeOff, cmdOff, 0);
+        this.sendClientMessage(builder, ClientPayload.ConsoleCommand, cc);
     }
 
     /** Send the local player's current selection. The server uses this

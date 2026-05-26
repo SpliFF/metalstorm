@@ -488,7 +488,7 @@ interface MinimalUnitDefWire {
     categoryBits?: number;
 }
 interface MinimalWeaponDefWire {
-    defId: number; name: string; visualType: number;
+    defId: number; name: string; projectileType: number;
     projectileSpeed: number; range: number; aoe: number; size: number;
     intensity: number; colorR: number; colorG: number; colorB: number;
     duration: number; highTrajectory: boolean;
@@ -690,7 +690,7 @@ function buildLuaWeaponDef(d: MinimalWeaponDefWire): Record<string, LuaValue> {
         id: d.defId, name: d.name,
         type: d.typeName ?? '',
         description: d.description || d.name,
-        visualType: d.visualType,
+        projectileType: d.projectileType,
         projectilespeed: d.projectileSpeed,
         range: d.range,
         damageAreaOfEffect: d.aoe,

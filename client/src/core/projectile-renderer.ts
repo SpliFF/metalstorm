@@ -44,7 +44,7 @@ import { stampUrl } from '../config.js';
 import type { ProjectileTextureResolver } from './projectile-texture-resolver.js';
 import type { CegRuntime } from './ceg-runtime.js';
 import {
-    VisualType,
+    ProjectileType,
     effectForFire,
     effectForImpact,
     impactContextFlags,
@@ -61,14 +61,21 @@ import {
     recordTrailPuff,
 } from './projectile-trails.js';
 
-/** Default colors per visual type when weapon def doesn't specify one. */
+/** Default colors per projectile type when the weapon def doesn't
+ *  specify one. Keyed by `ProjectileType` (Recoil's
+ *  `WEAPON_*_PROJECTILE` bitmask). */
 const DEFAULT_COLORS: Record<number, [number, number, number]> = {
-    [VisualType.Cannon]:    [1.0, 0.8, 0.2],
-    [VisualType.Laser]:     [1.0, 0.2, 0.2],
-    [VisualType.BeamLaser]: [0.2, 1.0, 0.2],
-    [VisualType.Missile]:   [0.8, 0.8, 0.8],
-    [VisualType.Lightning]: [0.5, 0.5, 1.0],
-    [VisualType.Flame]:     [1.0, 0.4, 0.0],
+    [ProjectileType.Explosive]:      [1.0, 0.8, 0.2],
+    [ProjectileType.Emg]:            [1.0, 0.9, 0.3],
+    [ProjectileType.Laser]:          [1.0, 0.2, 0.2],
+    [ProjectileType.BeamLaser]:      [0.2, 1.0, 0.2],
+    [ProjectileType.LargeBeamLaser]: [0.4, 1.0, 0.4],
+    [ProjectileType.Missile]:        [0.8, 0.8, 0.8],
+    [ProjectileType.Starburst]:      [0.9, 0.9, 0.9],
+    [ProjectileType.Torpedo]:        [0.7, 0.8, 0.9],
+    [ProjectileType.Lightning]:      [0.5, 0.5, 1.0],
+    [ProjectileType.Flame]:          [1.0, 0.4, 0.0],
+    [ProjectileType.Fireball]:       [1.0, 0.5, 0.1],
 };
 
 /** How `tick()` builds the per-instance world matrix.
@@ -81,7 +88,7 @@ type ProjectileOrientation = 'velocity' | 'billboard';
 /** Common fields across every weapon-def visual. */
 interface BaseWeaponVisual {
     defId: number;
-    visualType: number;
+    projectileType: number;
     /// Average projectile size — used to scale the thin instance mesh in y.
     size: number;
 }
@@ -159,7 +166,54 @@ interface LightningWeaponVisual extends BaseWeaponVisual {
     jitter: number;
 }
 
-type WeaponVisual = InstancedWeaponVisual | BeamWeaponVisual | LightningWeaponVisual;
+/** Laser-bolt visual (Recoil's `CLaserProjectile::Draw`). The bolt is
+ *  a velocity-aligned stretched quad of the *current* length (which
+ *  grows 0 → maxLength as the bolt flies, then contracts after impact).
+ *  Up to four meshes per def:
+ *
+ *   - `shaftOuterMesh` — outer glow shaft, width=`thickness`, tinted `color`.
+ *   - `shaftCoreMesh`  — inner core shaft, width=`thickness * coreThickness`, tinted `color2`.
+ *   - `capOuterMesh`   — optional head/tail caps (one mesh, two thin instances per bolt).
+ *   - `capCoreMesh`    — optional core caps, drawn with `color2`.
+ *
+ *  Cap meshes are populated only when `def.texture2` resolves — Recoil
+ *  draws four cap quads per bolt when `validTextures[2]` (start + end,
+ *  each as outer+core); we approximate with two billboarded cap quads
+ *  per endpoint (outer + core) since our single-texture cap quad maps
+ *  onto Recoil's tex2 page.
+ *
+ *  Both texture and colour come from the weapon def. The per-tick pass
+ *  composes a basis `(perp_cam, dir, dir × perp_cam)` so the quad's
+ *  long axis lies along velocity and the short axis faces the camera,
+ *  matching Recoil's `dir1 = (pos-cam) × dir; dir2 = dif × dir1` setup.
+ */
+interface LaserBoltVisual extends BaseWeaponVisual {
+    kind: 'laserBolt';
+    shaftOuterMesh: Mesh;
+    shaftOuterMaterial: StandardMaterial;
+    shaftCoreMesh: Mesh;
+    shaftCoreMaterial: StandardMaterial;
+    capOuterMesh: Mesh | null;
+    capOuterMaterial: StandardMaterial | null;
+    capCoreMesh: Mesh | null;
+    capCoreMaterial: StandardMaterial | null;
+    /// Outer half-width (elmos). Per Recoil's `weaponDef->visuals.thickness`.
+    thickness: number;
+    /// Core width as a fraction of thickness (0..1).
+    coreThickness: number;
+    /// `duration × projectileSpeed × SIM_TICKS_PER_SEC` — max bolt length
+    /// in elmos. Per-frame `curLength` is clamped to this.
+    maxLength: number;
+    /// Cached projectile speed in elmos / second, used to grow curLength
+    /// per render tick.
+    speedf: number;
+    /// `weaponDef->laserHardStop` — controls post-impact behaviour.
+    hardStop: boolean;
+    /// Per-frame intensity decay rate (non-hardstop lasers only).
+    intensityFalloff: number;
+}
+
+type WeaponVisual = InstancedWeaponVisual | BeamWeaponVisual | LightningWeaponVisual | LaserBoltVisual;
 
 /** Visual-type → builder dispatch. Builders return a synchronous
  *  `WeaponVisual` ready to receive thin instances; any async upgrades
@@ -190,6 +244,20 @@ interface LiveProjectile {
     /// whose `texture2` resolved to a real URL). On Impact the state
     /// is moved to `orphanedTrails` so the puffs keep fading.
     trail: MissileTrailState | null;
+    /// LaserCannon bolt length in elmos (Recoil's `curLength`). Grows
+    /// at `speedf` per second from 0 to `maxLength` while in flight;
+    /// contracts back to 0 after impact (delayed by `stayTime` for
+    /// hardstop lasers). 0 for non-laser projectiles — the laser pass
+    /// is the only consumer.
+    curLength: number;
+    /// Recoil's `stayTime` for hardstop lasers — number of seconds the
+    /// bolt holds its current length before contracting after collision
+    /// is suppressed. 0 for non-laser / fading-laser projectiles.
+    stayTime: number;
+    /// Per-frame intensity for the fade-out path (non-hardstop lasers).
+    /// Starts at the weapon def's `intensity` (default 1.0) and decays
+    /// after impact. Drives the laser shaft + cap quad colour scale.
+    intensity: number;
 }
 
 /** Active beam: from-point, to-point and birth time. Each tick the
@@ -302,7 +370,7 @@ export class ProjectileRenderer {
 
     constructor(scene: Scene) {
         this.scene = scene;
-        this.fallbackVisual = createFallbackVisual(0, VisualType.Cannon, 1.0,
+        this.fallbackVisual = createFallbackVisual(0, ProjectileType.Explosive, 1.0,
             [1, 0.8, 0.2], 0.8, scene);
     }
 
@@ -381,7 +449,13 @@ export class ProjectileRenderer {
             });
         }
 
-        if (def.visualType === VisualType.Missile) {
+        // Smoke trails attach to anything that flies on a propellant arc
+        // — Missile (cruise), Starburst (ascent + tracker), Torpedo
+        // (underwater wake). Cannon shells and beams get no trail.
+        const pt = def.projectileType;
+        if (pt === ProjectileType.Missile
+            || pt === ProjectileType.Starburst
+            || pt === ProjectileType.Torpedo) {
             const tv = buildMissileTrailVisual(def, this.scene, this.textureResolver);
             if (tv) this.trailVisuals.set(defId, tv);
         }
@@ -428,7 +502,7 @@ export class ProjectileRenderer {
     /// (see swapInModel) — model-bearing weapons start as a procedural
     /// placeholder so the first frames of fire still render.
     private createVisual(def: WeaponDefInfo): WeaponVisual {
-        const builder = visualBuilders[def.visualType as VisualType] ?? buildBillboardVisual;
+        const builder = visualBuilders[def.projectileType] ?? buildBillboardVisual;
         return builder(def, this.scene, this.textureResolver);
     }
 
@@ -592,6 +666,13 @@ export class ProjectileRenderer {
         // the trailVisuals map.
         const trail = this.trailVisuals.has(ev.weaponDefId)
             ? createMissileTrailState() : null;
+        // Seed the bolt-state fields from the weapon def — for
+        // non-laser projectiles `curLength` stays 0 and the laser pass
+        // skips them. `intensity` defaults to 1.0 (Recoil's
+        // `weaponDef->intensity` default), so non-laser projectiles
+        // ignoring this field don't get a misleading value either.
+        const def = this.weaponDefs.get(ev.weaponDefId);
+        const intensity = def?.intensity && def.intensity > 0 ? def.intensity : 1.0;
         this.live.set(ev.projId, {
             id: ev.projId,
             weaponDefId: ev.weaponDefId,
@@ -603,6 +684,9 @@ export class ProjectileRenderer {
             targetPos: new Vector3(ev.targetPos.x, ev.targetPos.y, ev.targetPos.z),
             spawnedAtMs: performance.now(),
             trail,
+            curLength: 0,
+            stayTime: 0,
+            intensity,
         });
     }
 
@@ -736,6 +820,17 @@ export class ProjectileRenderer {
                 recordTrailPuff(p.trail, p.pos.x, p.pos.y, p.pos.z, nowSec);
             }
 
+            // LaserCannon bolts grow in length as they fly (Recoil's
+            // `curLength = min(curLength + speedf, maxLength)` in
+            // CLaserProjectile::UpdateLength). We integrate in real-time
+            // here using the visual's cached `speedf` (elmos/sec). The
+            // laser-bolt pass below reads `p.curLength` to size the
+            // per-instance shaft matrix.
+            const lv = this.weaponVisuals.get(p.weaponDefId);
+            if (lv && lv.kind === 'laserBolt') {
+                p.curLength = Math.min(p.curLength + lv.speedf * dt, lv.maxLength);
+            }
+
             if (p.ttl > 0) {
                 p.ttl -= dt;
                 if (p.ttl <= 0) dead.push(p.id);
@@ -759,9 +854,19 @@ export class ProjectileRenderer {
         //    Anything else with no visual at all falls into key=-1 so
         //    it still draws as the procedural fallback sphere.
         const groups = new Map<number, LiveProjectile[]>();
+        // Laser bolts get their own pass — same reason as beam/lightning
+        // (the per-instance matrix shape doesn't match the generic
+        // billboard/velocity composer).
+        const laserGroups = new Map<number, LiveProjectile[]>();
         for (const p of this.live.values()) {
             const v = this.weaponVisuals.get(p.weaponDefId);
             if (v && (v.kind === 'beam' || v.kind === 'lightning')) continue;
+            if (v && v.kind === 'laserBolt') {
+                let g = laserGroups.get(p.weaponDefId);
+                if (!g) { g = []; laserGroups.set(p.weaponDefId, g); }
+                g.push(p);
+                continue;
+            }
             const key = v ? p.weaponDefId : -1;
             let g = groups.get(key);
             if (!g) { g = []; groups.set(key, g); }
@@ -865,6 +970,135 @@ export class ProjectileRenderer {
             this.fallbackVisual.mesh.isVisible = false;
             this.fallbackVisual.mesh.thinInstanceCount = 0;
         }
+
+        // 3a. Laser-bolt pass — Recoil's `CLaserProjectile::Draw`
+        //     equivalent. For every live LaserCannon bolt, build the
+        //     basis (dir1 = (pos-cam) × velocity, dir = velocity,
+        //     dir2 = dir × dir1) and push four thin-instance matrices
+        //     per bolt: shaft outer (color × thickness), shaft core
+        //     (color2 × thickness × coreThickness), plus head + tail
+        //     caps when the def has texture2. Caps are emitted as two
+        //     thin instances per bolt on the same mesh.
+        const laserUpdated = new Set<number>();
+        for (const [defId, projs] of laserGroups) {
+            const v = this.weaponVisuals.get(defId)!;
+            if (v.kind !== 'laserBolt') continue;          // TS narrowing
+            const shaftOuterMats = new Float32Array(projs.length * 16);
+            const shaftCoreMats  = new Float32Array(projs.length * 16);
+            const hasCaps = v.capOuterMesh != null;
+            const capOuterMats = hasCaps ? new Float32Array(projs.length * 32) : null;
+            const capCoreMats  = hasCaps ? new Float32Array(projs.length * 32) : null;
+            for (let i = 0; i < projs.length; i++) {
+                const p = projs[i];
+                if (p.curLength <= 0.01) continue;          // not yet visible
+                // Unit velocity (Recoil's `dir`).
+                const speed = Math.hypot(p.vel.x, p.vel.y, p.vel.z);
+                const dx = speed > 1e-3 ? p.vel.x / speed : 0;
+                const dy = speed > 1e-3 ? p.vel.y / speed : 1;
+                const dz = speed > 1e-3 ? p.vel.z / speed : 0;
+                // Unit (pos - camera). Falls back to +Z when degenerate.
+                let difx = p.pos.x - camX, dify = p.pos.y - camY, difz = p.pos.z - camZ;
+                const difLen = Math.hypot(difx, dify, difz);
+                if (difLen > 1e-3) {
+                    difx /= difLen; dify /= difLen; difz /= difLen;
+                } else {
+                    difx = 0; dify = 0; difz = 1;
+                }
+                // dir1 = (dif × dir).normalize — width axis, perpendicular
+                // to both view ray and velocity (so the shaft is visible
+                // from any angle except looking down the velocity axis).
+                let ax1x = dify * dz - difz * dy;
+                let ax1y = difz * dx - difx * dz;
+                let ax1z = difx * dy - dify * dx;
+                let ax1Len = Math.hypot(ax1x, ax1y, ax1z);
+                if (ax1Len < 1e-3) {
+                    // Camera aligned with velocity — pick a stable
+                    // perpendicular. World +X is fine; the result
+                    // degenerates into a point at this viewpoint anyway.
+                    ax1x = 1; ax1y = 0; ax1z = 0; ax1Len = 1;
+                }
+                ax1x /= ax1Len; ax1y /= ax1Len; ax1z /= ax1Len;
+                // dir2 = dir1 × dir — the quad's front-face normal.
+                // Recoil uses `dif × dir1` for its tex2 cap layout, which
+                // is left-handed. Our Babylon scene is right-handed, so
+                // we form the third basis vector via `right × up` to keep
+                // the basis RH and avoid `RotationQuaternionFromAxisToRef`
+                // collapsing into a reflection.
+                const ax2x = ax1y * dz - ax1z * dy;
+                const ax2y = ax1z * dx - ax1x * dz;
+                const ax2z = ax1x * dy - ax1y * dx;
+                tmpRight.set(ax1x, ax1y, ax1z);    // local X = dir1 (width)
+                tmpUp.set(dx, dy, dz);             // local Y = dir   (length)
+                tmpFwd.set(ax2x, ax2y, ax2z);      // local Z = X × Y (normal)
+                Quaternion.RotationQuaternionFromAxisToRef(tmpRight, tmpUp, tmpFwd, tmpQ);
+                // Shaft midpoint = pos - dir × (curLength / 2)
+                const halfLen = p.curLength * 0.5;
+                const mx = p.pos.x - dx * halfLen;
+                const my = p.pos.y - dy * halfLen;
+                const mz = p.pos.z - dz * halfLen;
+                const midPos = new Vector3(mx, my, mz);
+                // Outer shaft: width = 2 × thickness (Recoil draws ±size).
+                tmpScale.set(v.thickness * 2, p.curLength, 1);
+                Matrix.Compose(tmpScale, tmpQ, midPos).copyToArray(shaftOuterMats, i * 16);
+                // Core shaft: width = 2 × thickness × coreThickness.
+                tmpScale.set(v.thickness * v.coreThickness * 2, p.curLength, 1);
+                Matrix.Compose(tmpScale, tmpQ, midPos).copyToArray(shaftCoreMats, i * 16);
+                if (capOuterMats && capCoreMats) {
+                    // Caps are square quads at head + tail, lying in the
+                    // same basis as the shaft (so they read as the bolt
+                    // tip pointing along velocity).
+                    const headPos = p.pos;
+                    const tailPos = new Vector3(
+                        p.pos.x - dx * p.curLength,
+                        p.pos.y - dy * p.curLength,
+                        p.pos.z - dz * p.curLength);
+                    tmpScale.set(v.thickness * 2, v.thickness * 2, 1);
+                    Matrix.Compose(tmpScale, tmpQ, headPos)
+                        .copyToArray(capOuterMats, i * 32);
+                    Matrix.Compose(tmpScale, tmpQ, tailPos)
+                        .copyToArray(capOuterMats, i * 32 + 16);
+                    tmpScale.set(v.thickness * v.coreThickness * 2,
+                                 v.thickness * v.coreThickness * 2, 1);
+                    Matrix.Compose(tmpScale, tmpQ, headPos)
+                        .copyToArray(capCoreMats, i * 32);
+                    Matrix.Compose(tmpScale, tmpQ, tailPos)
+                        .copyToArray(capCoreMats, i * 32 + 16);
+                }
+            }
+            v.shaftOuterMesh.isVisible = true;
+            v.shaftOuterMesh.thinInstanceSetBuffer('matrix', shaftOuterMats, 16, false);
+            v.shaftOuterMesh.thinInstanceCount = projs.length;
+            v.shaftCoreMesh.isVisible = true;
+            v.shaftCoreMesh.thinInstanceSetBuffer('matrix', shaftCoreMats, 16, false);
+            v.shaftCoreMesh.thinInstanceCount = projs.length;
+            if (capOuterMats && capCoreMats && v.capOuterMesh && v.capCoreMesh) {
+                v.capOuterMesh.isVisible = true;
+                v.capOuterMesh.thinInstanceSetBuffer('matrix', capOuterMats, 16, false);
+                v.capOuterMesh.thinInstanceCount = projs.length * 2;
+                v.capCoreMesh.isVisible = true;
+                v.capCoreMesh.thinInstanceSetBuffer('matrix', capCoreMats, 16, false);
+                v.capCoreMesh.thinInstanceCount = projs.length * 2;
+            }
+            laserUpdated.add(defId);
+        }
+        // Hide laser-bolt visuals with no live bolts.
+        for (const [defId, visual] of this.weaponVisuals) {
+            if (visual.kind !== 'laserBolt') continue;
+            if (laserUpdated.has(defId)) continue;
+            visual.shaftOuterMesh.isVisible = false;
+            visual.shaftOuterMesh.thinInstanceCount = 0;
+            visual.shaftCoreMesh.isVisible = false;
+            visual.shaftCoreMesh.thinInstanceCount = 0;
+            if (visual.capOuterMesh) {
+                visual.capOuterMesh.isVisible = false;
+                visual.capOuterMesh.thinInstanceCount = 0;
+            }
+            if (visual.capCoreMesh) {
+                visual.capCoreMesh.isVisible = false;
+                visual.capCoreMesh.thinInstanceCount = 0;
+            }
+        }
+        tmpScale.set(1, 1, 1);
 
         // 4. Beam pass — group live beams by weapon def, build the
         //    custom matrix layout that the projectile-beam shader
@@ -1117,7 +1351,7 @@ export class ProjectileRenderer {
 function resolveColor(def: WeaponDefInfo): [number, number, number] {
     const hasColor = def.colorR > 0 || def.colorG > 0 || def.colorB > 0;
     if (hasColor) return [def.colorR, def.colorG, def.colorB];
-    return DEFAULT_COLORS[def.visualType] ?? DEFAULT_COLORS[VisualType.Cannon];
+    return DEFAULT_COLORS[def.projectileType] ?? DEFAULT_COLORS[ProjectileType.Explosive];
 }
 
 function resolveSize(def: WeaponDefInfo): number {
@@ -1136,6 +1370,17 @@ function resolveIntensity(def: WeaponDefInfo): number {
 function disposeVisual(v: WeaponVisual): void {
     if (v.kind === 'lightning') {
         v.linesMesh?.dispose();
+        return;
+    }
+    if (v.kind === 'laserBolt') {
+        v.shaftOuterMesh.dispose();
+        v.shaftOuterMaterial.dispose();
+        v.shaftCoreMesh.dispose();
+        v.shaftCoreMaterial.dispose();
+        v.capOuterMesh?.dispose();
+        v.capOuterMaterial?.dispose();
+        v.capCoreMesh?.dispose();
+        v.capCoreMaterial?.dispose();
         return;
     }
     v.mesh.dispose();
@@ -1245,7 +1490,7 @@ function buildBillboardVisual(
     return {
         kind: 'instanced',
         defId: def.defId, mesh, material: mat,
-        visualType: def.visualType, size, orientation: 'billboard',
+        projectileType: def.projectileType, size, orientation: 'billboard',
     };
 }
 
@@ -1349,7 +1594,7 @@ function buildBeamVisual(
     return {
         kind: 'beam',
         defId: def.defId, mesh, material: mat,
-        visualType: def.visualType, size,
+        projectileType: def.projectileType, size,
         duration, halfWidth, tileLength: DEFAULT_BEAM_TILE_LENGTH, scrollRate,
         startCapMesh, startCapMaterial: startCapMat,
         endCapMesh, endCapMaterial: endCapMat,
@@ -1404,7 +1649,7 @@ function buildLightningVisual(
     return {
         kind: 'lightning',
         defId: def.defId,
-        visualType: def.visualType,
+        projectileType: def.projectileType,
         size: resolveSize(def),
         linesMesh: null,
         // Pre-multiply the tint by intensity so the per-vertex Color4
@@ -1565,21 +1810,130 @@ function buildMissileVisual(
     return {
         kind: 'instanced',
         defId: def.defId, mesh, material: mat,
-        visualType: def.visualType, size, orientation: 'velocity',
+        projectileType: def.projectileType, size, orientation: 'velocity',
     };
 }
 
-/// Module-level dispatch table keyed by visual type. The renderer's
+/// Recoil's `CLaserProjectile::Draw` — a velocity-aligned, length-
+/// extending bolt with outer glow + inner core, plus optional head /
+/// tail caps. `maxLength = duration × speed × SIM_TICKS_PER_SEC`
+/// (matches Recoil's `weaponDef->duration * (speedf * GAME_SPEED)`).
+/// curLength is integrated per render frame in `tick()` and consumed
+/// by the laser-bolt pass to build the per-instance matrix.
+///
+/// Each bolt contributes:
+///   - 1 shaft outer thin-instance (color, thickness)
+///   - 1 shaft core  thin-instance (color2, thickness * coreThickness)
+///   - 2 cap outer   thin-instances when capMesh present (head + tail)
+///   - 2 cap core    thin-instances when capMesh present
+function buildLaserBoltVisual(
+    def: WeaponDefInfo,
+    scene: Scene,
+    resolver: ProjectileTextureResolver | null,
+): WeaponVisual {
+    const color: [number, number, number] = resolveColor(def);
+    // Default color2 to white when the def doesn't override — matches
+    // Recoil's typical "white core inside coloured glow" appearance.
+    const color2: [number, number, number] = (def.color2R > 0 || def.color2G > 0 || def.color2B > 0)
+        ? [def.color2R, def.color2G, def.color2B]
+        : [1, 1, 1];
+    const intensity = resolveIntensity(def);
+    // Recoil defaults thickness/coreThickness to non-zero values when
+    // unset (see Sim/Weapons/WeaponDef.cpp). Use safe fallbacks here
+    // for weapons that ship without explicit values.
+    const thickness = def.thickness > 0 ? def.thickness : 2.0;
+    const coreThickness = def.coreThickness > 0 ? def.coreThickness : 0.5;
+    const maxLength = Math.max(1, def.duration * def.projectileSpeed * SIM_TICKS_PER_SEC);
+    const speedf = def.projectileSpeed * SIM_TICKS_PER_SEC;
+
+    // Helper: unit quad with additive material + emissive tint.
+    // Source mesh is a 1×1 plane centered at origin, lying in the
+    // local XY plane (front face = +Z). The per-frame matrix scales
+    // and orients it per bolt. `name` is per-mesh so the Babylon
+    // inspector can tell them apart.
+    const mkQuad = (
+        name: string,
+        tex: string,
+        c: [number, number, number],
+    ): { mesh: Mesh; mat: StandardMaterial } => {
+        const mat = makeMaterial(name + 'Mat', scene, c, intensity);
+        mat.disableLighting = true;
+        mat.alphaMode = 1;               // additive
+        mat.backFaceCulling = false;
+        mat.disableDepthWrite = true;
+        const url = resolver?.resolve(tex) ?? null;
+        if (url) {
+            const t = new Texture(stampUrl(url), scene, false, true,
+                Texture.TRILINEAR_SAMPLINGMODE);
+            t.hasAlpha = true;
+            mat.diffuseTexture = t;
+            mat.useAlphaFromDiffuseTexture = true;
+            mat.diffuseColor = new Color3(1, 1, 1);
+        }
+        const mesh = MeshBuilder.CreatePlane(name,
+            { size: 1, sideOrientation: Mesh.DOUBLESIDE }, scene);
+        mesh.material = mat;
+        mesh.isVisible = false;
+        mesh.thinInstanceEnablePicking = false;
+        mesh.alphaIndex = 1000;
+        return { mesh, mat };
+    };
+
+    const shaftOuter = mkQuad(`laserShaft_${def.defId}`, def.texture1, color);
+    const shaftCore  = mkQuad(`laserCore_${def.defId}`,  def.texture1, color2);
+
+    // Caps use texture2. When the def has no texture2 we skip caps —
+    // matches Recoil's `validTextures[2]` gate. The shaft alone still
+    // looks correct; caps are a polish layer.
+    let capOuterMesh: Mesh | null = null;
+    let capOuterMat: StandardMaterial | null = null;
+    let capCoreMesh: Mesh | null = null;
+    let capCoreMat: StandardMaterial | null = null;
+    if (def.texture2) {
+        const co = mkQuad(`laserCapOuter_${def.defId}`, def.texture2, color);
+        const cc = mkQuad(`laserCapCore_${def.defId}`,  def.texture2, color2);
+        capOuterMesh = co.mesh; capOuterMat = co.mat;
+        capCoreMesh  = cc.mesh; capCoreMat  = cc.mat;
+    }
+
+    return {
+        kind: 'laserBolt',
+        defId: def.defId,
+        projectileType: def.projectileType,
+        size: thickness,             // used by the generic fallback path
+        shaftOuterMesh: shaftOuter.mesh, shaftOuterMaterial: shaftOuter.mat,
+        shaftCoreMesh:  shaftCore.mesh,  shaftCoreMaterial:  shaftCore.mat,
+        capOuterMesh, capOuterMaterial: capOuterMat,
+        capCoreMesh,  capCoreMaterial:  capCoreMat,
+        thickness, coreThickness,
+        maxLength, speedf,
+        hardStop: def.laserHardStop,
+        intensityFalloff: intensity * (def.falloffRate > 0 ? def.falloffRate : 0.05),
+    };
+}
+
+/// Module-level dispatch table keyed by Recoil's
+/// `WEAPON_*_PROJECTILE` bitmask (`ProjectileType`). The renderer's
 /// createVisual method consults this and falls back to the billboard
-/// builder for unknown types (their look as a flat coloured quad is
-/// at least distinguishable from beams/missiles).
-const visualBuilders: Partial<Record<VisualType, VisualBuilder>> = {
-    [VisualType.Cannon]:    buildBillboardVisual,
-    [VisualType.Flame]:     buildBillboardVisual,
-    [VisualType.Laser]:     buildBeamVisual,
-    [VisualType.BeamLaser]: buildBeamVisual,
-    [VisualType.Lightning]: buildLightningVisual,
-    [VisualType.Missile]:   buildMissileVisual,
+/// builder for anything unmapped. Each entry mirrors which
+/// `CXxxProjectile::Draw` Recoil would invoke for that weapon class.
+///
+/// TODO: Starburst/Torpedo lean on the missile cone for now — close
+/// enough until their dedicated visuals land. Fireball (DGun) reuses
+/// the billboard placeholder; Recoil's CFireBallProjectile is a
+/// glowing sphere with an attached fire trail.
+const visualBuilders: Partial<Record<number, VisualBuilder>> = {
+    [ProjectileType.BeamLaser]:      buildBeamVisual,
+    [ProjectileType.LargeBeamLaser]: buildBeamVisual,
+    [ProjectileType.Lightning]:      buildLightningVisual,
+    [ProjectileType.Missile]:        buildMissileVisual,
+    [ProjectileType.Starburst]:      buildMissileVisual,
+    [ProjectileType.Torpedo]:        buildMissileVisual,
+    [ProjectileType.Explosive]:      buildBillboardVisual,
+    [ProjectileType.Emg]:            buildBillboardVisual,
+    [ProjectileType.Flame]:          buildBillboardVisual,
+    [ProjectileType.Fireball]:       buildBillboardVisual,
+    [ProjectileType.Laser]:          buildLaserBoltVisual,
 };
 
 /// Constructor-time fallback: a synthetic minimal def passed through
@@ -1590,7 +1944,7 @@ const visualBuilders: Partial<Record<VisualType, VisualBuilder>> = {
 /// just gives us a tinted quad.
 function createFallbackVisual(
     defId: number,
-    visualType: number,
+    projectileType: number,
     size: number,
     color: [number, number, number],
     intensity: number,
@@ -1605,7 +1959,7 @@ function createFallbackVisual(
     return {
         kind: 'instanced',
         defId, mesh, material: mat,
-        visualType, size, orientation: 'velocity',
+        projectileType, size, orientation: 'velocity',
     };
 }
 

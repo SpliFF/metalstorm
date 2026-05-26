@@ -286,34 +286,6 @@ inline std::string SerializeUnitDefs(
 
 // ─── Weapon defs ──────────────────────────────────────────────────
 
-// Mirrors MapProjectileVisualType in Protocol.h — uses the same
-// numeric mapping the client decoder expects.
-template<typename WeaponDefT>
-inline int MapProjectileVisualType_(const WeaponDefT& wd)
-{
-    // The mapping comes from the FB enum order; replicate exactly.
-    // 0=Unknown, 1=Cannon, 2=BeamLaser, 3=LightningGun,
-    // 4=MissileLauncher, 5=Rifle, 6=Flame, 7=Lightning,
-    // 8=LaserCannon, 9=Torpedo, 10=Melee, 11=AircraftBomb,
-    // 12=StarburstLauncher, 13=EmgCannon, 14=DGun
-    // We use wd.type (string) to map — same source-of-truth FB used.
-    const std::string& t = wd.type;
-    if (t == "Cannon")             return 1;
-    if (t == "BeamLaser")          return 2;
-    if (t == "LightningCannon")    return 3;
-    if (t == "MissileLauncher")    return 4;
-    if (t == "Rifle")              return 5;
-    if (t == "Flame")              return 6;
-    if (t == "LaserCannon")        return 8;
-    if (t == "TorpedoLauncher")    return 9;
-    if (t == "Melee")              return 10;
-    if (t == "AircraftBomb")       return 11;
-    if (t == "StarburstLauncher")  return 12;
-    if (t == "EmgCannon")          return 13;
-    if (t == "DGun")               return 14;
-    return 0;
-}
-
 template<typename WeaponDefT>
 inline std::string SerializeOneWeaponDef(
     const WeaponDefT& wd,
@@ -406,7 +378,11 @@ inline std::string SerializeOneWeaponDef(
     detail::LuaBuilder b;
     b.add_int("def_id", static_cast<long long>(wd.id));
     b.add_str("name", wd.name);
-    b.add_int("visual_type", MapProjectileVisualType_(wd));
+    // Recoil's WEAPON_*_PROJECTILE bitmask (see
+    // Sim/Projectiles/WeaponProjectiles/WeaponProjectileTypes.h). The
+    // client mirrors the same enum and dispatches each value to its
+    // own visual builder.
+    b.add_int("projectile_type", static_cast<int>(wd.projectileType));
     b.add_float("projectile_speed", wd.projectilespeed);
     b.add_float("range", wd.range);
     b.add_float("aoe", wd.damages.damageAreaOfEffect);
@@ -415,6 +391,20 @@ inline std::string SerializeOneWeaponDef(
     b.add_float("color_r", wd.visuals.color.x);
     b.add_float("color_g", wd.visuals.color.y);
     b.add_float("color_b", wd.visuals.color.z);
+    // Recoil renders the inner core of laser bolts / beams with a
+    // second colour. Defaults to white when the modder leaves it out.
+    b.add_float("color2_r", wd.visuals.color2.x);
+    b.add_float("color2_g", wd.visuals.color2.y);
+    b.add_float("color2_b", wd.visuals.color2.z);
+    // Outer half-width (elmos) and core-to-outer ratio. Used by the
+    // LaserCannon / BeamLaser builders to size the shaft + core quads.
+    b.add_float("thickness", wd.visuals.thickness);
+    b.add_float("core_thickness", wd.visuals.corethickness);
+    // Whether CLaserProjectile stops + contracts at max range instead
+    // of fading out. Drives the post-impact stayTime path.
+    b.add_bool("laser_hard_stop", wd.laserHardStop);
+    // Fade-out rate for non-hardstop lasers.
+    b.add_float("falloff_rate", wd.falloffRate);
     b.add_float("duration", wd.duration);
     b.add_bool("high_trajectory", wd.highTrajectory == 1);
 
