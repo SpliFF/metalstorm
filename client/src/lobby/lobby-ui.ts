@@ -257,6 +257,38 @@ export class LobbyUI {
     show(): void { this.container.style.display = 'flex'; }
     hide(): void { this.container.style.display = 'none'; }
 
+    /**
+     * Inject an already-acquired session token into the lobby. Used by
+     * the scenario runner, which performs its own /api/auth/login via
+     * fetch (the runner bypasses the saved-session auto-login path) but
+     * still needs the lobby to be in a "logged-in" state so:
+     *   - `lobbyPost` works (TestHarness uses it for /api/exec)
+     *   - the SSE stream is active and `onGameStart` fires when the
+     *     game server reports state=Active
+     *
+     * Safe to call repeatedly — it overwrites the token and (re-)starts
+     * polling. The lobby UI is not shown automatically; callers that
+     * want it visible should call `show()` themselves.
+     */
+    attachSession(token: string, userId: number, username: string): void {
+        this.authToken = token;
+        this.myPlayerId = userId;
+        localStorage.setItem('springrts-username', username);
+        localStorage.setItem('springrts-token', token);
+        this.startPolling();
+    }
+
+    /**
+     * Adopt an externally-fetched room JSON as the lobby's current room.
+     * Used by the scenario runner, which POSTs `/api/rooms` itself to
+     * keep its pipeline explicit but still needs the lobby to track
+     * `currentRoom` so the SSE handler will fire `onGameStart` when the
+     * room transitions to Active.
+     */
+    setCurrentRoomFromJson(roomJson: any): void {
+        this.updateCurrentRoomFromJson(roomJson);
+    }
+
     // ─── HTTP helpers for lobby operations ───
 
     async lobbyPost(path: string, body: Record<string, unknown> = {}): Promise<any> {

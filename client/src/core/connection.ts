@@ -702,6 +702,12 @@ export class Connection {
     private clock = new ServerClock();
     private pingInterval: ReturnType<typeof setInterval> | null = null;
     private httpBase = '';  // e.g. "http://localhost:9100"
+
+    /** Public read-only accessor for the game server HTTP base URL.
+     *  Used by TestHarness to POST `/api/exec` directly to the game
+     *  server (the lobby's /api/exec only handles sql/lobby scopes;
+     *  server / LuaRules / LuaGaia / LuaAI:* live on the game server). */
+    get gameHttpUrl(): string { return this.httpBase; }
     private rtcClientId = 0;
     private commandSequence = 0;
 

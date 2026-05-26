@@ -176,6 +176,11 @@ std::string ExecuteServerCommand(const std::string& cmd) {
     if (cmd.rfind("speed ", 0) == 0) {
         float spd = std::atof(cmd.c_str() + 6);
         if (spd > 0.0f && spd <= 100.0f) {
+            // Set both: `speedFactor` is the currently-applied speed
+            // (the upstream engine lowers it under lag); the sim loop
+            // in server_main.cpp reads `wantedSpeedFactor` every tick
+            // to recompute the tick interval. Keep them in sync.
+            gs->wantedSpeedFactor = spd;
             gs->speedFactor = spd;
             char buf[64];
             snprintf(buf, sizeof(buf), "speed set to %.1f", spd);
@@ -295,8 +300,24 @@ std::string ExecuteServerCommand(const std::string& cmd) {
         }
         if (count < 1) count = 1;
         if (count > 256) count = 256;
+        // Pre-revive a dead target team so Spring.CreateUnit doesn't
+        // raise a Lua error. ZK's game_over.lua flags teams isDead at
+        // frame 45 when they have no units (the scenario host never
+        // picks a faction, and the AI slot has no start_unit). After
+        // that, Spring.CreateUnit calls luaL_error and aborts the
+        // whole snippet; Spring.TransferUnit silently no-ops on a
+        // dead team. Resetting isDead at the C++ level here lets the
+        // straightforward `Spring.CreateUnit(...team)` path work.
+        if (team >= 0 && team < teamHandler.ActiveTeams()) {
+            CTeam* t = teamHandler.Team(team);
+            if (t && t->isDead) {
+                t->isDead = false;
+                SLOG(SPRING_LOG_NOTICE, "spawn: revived dead team %d", team);
+            }
+        }
         std::ostringstream lua;
-        lua << "local ids = {}\n"
+        lua << "local targetTeam = " << team << "\n"
+            << "local ids = {}\n"
             << "for i = 1, " << count << " do\n"
             << "  local ox, oz = 0, 0\n"
             << "  if " << count << " > 1 then\n"
@@ -306,11 +327,35 @@ std::string ExecuteServerCommand(const std::string& cmd) {
             << "  end\n"
             << "  local px, pz = " << x << " + ox, " << z << " + oz\n"
             << "  local py = Spring.GetGroundHeight(px, pz)\n"
-            << "  local id = Spring.CreateUnit('" << defName << "', px, py, pz, 0, " << team << ")\n"
-            << "  if id then ids[#ids+1] = id end\n"
+            << "  local ok, id = pcall(Spring.CreateUnit, '" << defName << "', px, py, pz, 0, targetTeam)\n"
+            << "  if ok and id then ids[#ids+1] = id end\n"
             << "end\n"
             << "return 'spawned ' .. #ids .. ' unit(s): ' .. table.concat(ids, ',')\n";
         return runOnLuaRules(lua.str());
+    }
+
+    // revive_team <teamId|all>  — flip team.isDead back to false. ZK's
+    // game_over.lua marks teams dead at frame 45 when they have no
+    // units; scenarios that want to spawn units onto those teams call
+    // this first. Combined with `cheats on` (which makes ZK skip the
+    // periodic check), this keeps the test world stable indefinitely.
+    if (cmd.rfind("revive_team", 0) == 0 && (cmd.size() == 11 || cmd[11] == ' ')) {
+        std::string arg = cmd.size() > 12 ? cmd.substr(12) : "all";
+        int revived = 0;
+        if (arg == "all") {
+            for (int i = 0; i < teamHandler.ActiveTeams(); ++i) {
+                CTeam* t = teamHandler.Team(i);
+                if (t && t->isDead) { t->isDead = false; revived++; }
+            }
+        } else {
+            int teamId = std::atoi(arg.c_str());
+            if (teamId < 0 || teamId >= teamHandler.ActiveTeams())
+                return "usage: revive_team <teamId|all>";
+            CTeam* t = teamHandler.Team(teamId);
+            if (!t) return "no such team";
+            if (t->isDead) { t->isDead = false; revived = 1; }
+        }
+        return std::string("revived ") + std::to_string(revived) + " team(s)";
     }
 
     // kill <unitId> [selfDestruct=0] [reclaimed=0]

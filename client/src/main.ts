@@ -64,6 +64,7 @@ import { renderMapFeatures, DynamicFeatureRenderer } from './core/feature-render
 import { RTSCamera } from './core/rts-camera.js';
 import { LuaWidgetManager } from './core/lua-widget-manager.js';
 import { TestHarness } from './core/test-harness.js';
+import { ScenarioRunner } from './scenarios/runner.js';
 import { injectStyle, renderTemplate } from './ui/ui.js';
 import { debugConsole } from './core/debug-console.js';
 import { logIngest } from './core/log-ingest.js';
@@ -1472,12 +1473,31 @@ document.addEventListener('DOMContentLoaded', async () => {
         showQuitConfirm();
     });
 
+    // Scenario mode (`?scenario=<name>`) hijacks the boot flow: clear
+    // any stale saved session so the lobby's auto-login doesn't race
+    // with the runner's fresh login, then let the runner orchestrate
+    // login → room → start.
+    const scenario = ScenarioRunner.fromUrl();
+    if (scenario) {
+        localStorage.removeItem('springrts-token');
+        localStorage.removeItem('springrts-username');
+        localStorage.removeItem('springrts-game-room');
+        localStorage.removeItem('springrts-game-port');
+    }
+
     // Show lobby with the engine-default templates immediately so the
     // login screen renders without waiting on a network round-trip.
     lobbyUI = new LobbyUI((gameServerPort: number, mapId: string, gameId: string) => {
         startGame(gameServerPort, mapId, gameId);
     }, getDefaultLobbyTemplates());
     (window as any).lobby = lobbyUI;
+
+    if (scenario) {
+        // Fire and forget — the runner publishes progress and results
+        // on `window.scenarioResults` for external pickup.
+        const runner = new ScenarioRunner(scenario, lobbyUI, () => testHarness);
+        runner.start();
+    }
 
     // If a game id is known up front, fire-and-forget the override
     // bundle fetch and hot-swap the templates as soon as it lands.

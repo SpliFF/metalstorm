@@ -951,8 +951,24 @@ int main(int argc, char* argv[])
         SLOG(SPRING_LOG_NOTICE, "no AI slots configured; human-only game");
     }
 
-    // --- Fixed-timestep loop at GAME_SPEED Hz (30 Hz) ---
-    const auto tickInterval = std::chrono::microseconds(1'000'000 / GAME_SPEED);
+    // --- Variable-speed loop, GAME_SPEED Hz × wantedSpeedFactor ---
+    //
+    // The tick interval is recomputed every iteration from
+    // `gs->wantedSpeedFactor` so the `speed N` exec verb (which
+    // mutates that field) takes effect on the next tick. Default 1.0×
+    // gives the canonical 30 Hz cadence; values >1 shrink the sleep
+    // for faster sims, values <1 lengthen it. Matches upstream
+    // Spring/RecoilEngine — see rts/Game/Game.cpp `wantedSpeedFactor`
+    // usage in the reference checkout.
+    auto computeTickInterval = []() {
+        // Clamp so a misbehaving caller can't divide by zero or push
+        // us into a busy-spin. 0.05× ≈ 1.5s/tick (matches the verb's
+        // own clamp); 100× ≈ 333µs/tick.
+        const float spd = std::clamp(gs->wantedSpeedFactor, 0.05f, 100.0f);
+        return std::chrono::microseconds(
+            static_cast<int64_t>(1'000'000.0 / (GAME_SPEED * spd)));
+    };
+    auto tickInterval = computeTickInterval();
     auto nextTick = std::chrono::steady_clock::now();
 
     if (sim.IsWaitingForPlayers()) {
@@ -962,6 +978,10 @@ int main(int argc, char* argv[])
     SLOG(SPRING_LOG_NOTICE, "entering sim loop at %d Hz (port %d)", GAME_SPEED, port);
 
     while (keepRunning.load()) {
+        // Re-read wantedSpeedFactor every tick so live speed changes
+        // (via the `speed` exec verb) apply immediately.
+        tickInterval = computeTickInterval();
+
         // Wait for next tick
         auto now = std::chrono::steady_clock::now();
         if (now < nextTick) {
@@ -1837,11 +1857,18 @@ int main(int argc, char* argv[])
             }
         }
 
-        // Check win condition every ~1s (30 ticks) after frame 30
+        // Check win condition every ~1s (30 ticks) after frame 30.
+        // Skipped when cheats are enabled — scenarios intentionally
+        // leave AI slots empty (NullAI has no startunit) and rely on
+        // cheats to keep the sim running indefinitely. Without this
+        // guard the hardcoded "team 0 or 1 empty → other wins" check
+        // fires at frame 60 of any scenario, terminates the sim, and
+        // every subsequent /api/exec call times out waiting for the
+        // sim thread.
         static int winningTeam = -1;
         {
         int frame = sim.GetFrameNum();
-        if (frame > 30 && (frame % 30) == 0 && winningTeam < 0) {
+        if (frame > 30 && (frame % 30) == 0 && winningTeam < 0 && !gs->cheatEnabled) {
             // Count alive units per team
             int alive[2] = {0, 0};
             const auto& activeUnits = unitHandler.GetActiveUnits();

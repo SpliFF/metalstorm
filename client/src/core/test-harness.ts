@@ -58,7 +58,8 @@ const DEFAULT_FOCUS_HEIGHT = 800;
 type ServerVerb =
     | 'spawn' | 'kill' | 'damage' | 'order' | 'clear'
     | 'log' | 'state' | 'units' | 'frame' | 'pause' | 'unpause'
-    | 'unit_state' | 'combat_summary' | 'defs';
+    | 'unit_state' | 'combat_summary' | 'defs'
+    | 'cheats' | 'revive_team';
 
 export class TestHarness {
     private deps: TestHarnessDeps;
@@ -68,14 +69,37 @@ export class TestHarness {
     }
 
     // ─── Server scope: structured exec helpers ───────────────────────
+    //
+    // Exec routing — the lobby's `/api/exec` only handles `sql` and
+    // `lobby` scopes; `server`, `LuaRules`, `LuaGaia`, and `LuaAI:*`
+    // live on the game server's HTTP listener. We POST to the game
+    // server URL directly (Connection exposes `gameHttpUrl`) with the
+    // lobby's auth token (the game server validates it against the
+    // shared SQLite user table).
+
+    private async execOnGameServer(scope: string, code: string): Promise<ExecResult> {
+        const base = this.deps.connection.gameHttpUrl;
+        if (!base) throw new Error('[test] connection.gameHttpUrl not set — game server not connected?');
+        const resp = await fetch(`${base}/api/exec`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${this.deps.lobby.token}`,
+            },
+            body: JSON.stringify({ scope, code }),
+        });
+        if (!resp.ok) {
+            const text = await resp.text();
+            throw new Error(`[test] exec ${scope} HTTP ${resp.status}: ${text}`);
+        }
+        return resp.json() as Promise<ExecResult>;
+    }
 
     /** Execute a verb in the `server` exec scope. Returns the raw text
      *  the server emitted. Throws when the request fails. */
     async server(verb: ServerVerb, ...args: (string | number)[]): Promise<string> {
         const code = [verb, ...args.map(String)].join(' ').trim();
-        const r = await this.deps.lobby.lobbyPost('/api/exec', {
-            scope: 'server', code,
-        }) as ExecResult;
+        const r = await this.execOnGameServer('server', code);
         if (!r.success) throw new Error(`[test] server "${code}" → ${r.output}`);
         return r.output;
     }
@@ -83,9 +107,7 @@ export class TestHarness {
     /** Execute a Lua snippet in the LuaRules synced state. Returns the
      *  text representation of the last expression. Throws on error. */
     async lua(code: string): Promise<string> {
-        const r = await this.deps.lobby.lobbyPost('/api/exec', {
-            scope: 'LuaRules', code,
-        }) as ExecResult;
+        const r = await this.execOnGameServer('LuaRules', code);
         if (!r.success) throw new Error(`[test] lua "${code}" → ${r.output}`);
         return r.output;
     }
@@ -107,14 +129,43 @@ export class TestHarness {
     }
 
     /** Issue a raw cmdId order to a single unit. Use the `CMD.*` table
-     *  from `command-buffer.ts` for the cmdId. `params` is up to 4 floats. */
+     *  from `command-buffer.ts` for the cmdId. `params` is up to 4 floats.
+     *
+     *  The server's `order` verb only treats the last argument as opts
+     *  when there are exactly 5 floats after the cmdId — otherwise
+     *  everything is interpreted as params. Calling `order(id, ATTACK,
+     *  [targetId], 0)` would emit `[targetId, 0]` and CMD_ATTACK
+     *  rejects 2-element params. So we only append opts when non-zero
+     *  AND we pad params with zeros up to 4 to hit the "exactly 5"
+     *  threshold.
+     */
     order(unitId: number, cmdId: number, params: number[] = [], opts = 0): Promise<string> {
-        return this.server('order', unitId, cmdId, ...params, opts);
+        if (opts !== 0) {
+            const padded = params.slice(0, 4);
+            while (padded.length < 4) padded.push(0);
+            return this.server('order', unitId, cmdId, ...padded, opts);
+        }
+        return this.server('order', unitId, cmdId, ...params);
     }
 
     /** Wipe all units (or all units on a single team). */
     clear(team?: number): Promise<string> {
         return team !== undefined ? this.server('clear', team) : this.server('clear');
+    }
+
+    /** Toggle Spring cheats. Required for many test verbs (spawn,
+     *  damage, set_los…) and also makes ZK's game_over.lua skip its
+     *  periodic "destroy alliance with no units" sweep — i.e. keeps
+     *  scenario teams alive even though no commander spawned. */
+    cheats(on = true): Promise<string> {
+        return this.server('cheats', on ? 'on' : 'off');
+    }
+
+    /** Reset `team.isDead` for the given team (or `'all'`). ZK marks
+     *  teams dead at frame 45 when they have no units; this revives
+     *  them so `Spring.CreateUnit` will accept them as a target. */
+    reviveTeam(teamId: number | 'all' = 'all'): Promise<string> {
+        return this.server('revive_team', String(teamId));
     }
 
     // ─── Debug logging toggles ──────────────────────────────────────
@@ -159,9 +210,7 @@ export class TestHarness {
     simResume(): Promise<string> { return this.server('unpause'); }
     /** Set sim speed multiplier. Range: (0, 100]. */
     async simSpeed(mult: number): Promise<string> {
-        const r = await this.deps.lobby.lobbyPost('/api/exec', {
-            scope: 'server', code: `speed ${mult}`,
-        }) as ExecResult;
+        const r = await this.execOnGameServer('server', `speed ${mult}`);
         if (!r.success) throw new Error(r.output);
         return r.output;
     }
