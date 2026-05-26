@@ -706,15 +706,20 @@ int LuaUtils::ParseStringVector(lua_State* L, int index, vector<string>& vec)
 
 int LuaUtils::PushModelHeight(lua_State* L, const SolidObjectDef* def, bool isUnitDef)
 {
-	// Model loading removed; height is not available server-side
-	lua_pushnumber(L, 0.0f);
+	// The server doesn't render but still loads each unit's piece tree from
+	// the gltf SPRINGRTS_geometry extension (see SolidObjectDef::LoadModel),
+	// which carries radius/height. ZK's unit_centeroffset.lua reads ud.height
+	// to seed Spring.SetUnitRadiusAndHeight; returning 0 here leaves projectile
+	// collision volumes 1 elmo tall and the target unhittable.
+	const S3DModel* m = (def != nullptr) ? def->LoadModel() : nullptr;
+	lua_pushnumber(L, (m != nullptr) ? m->height : 0.0f);
 	return 1;
 }
 
 int LuaUtils::PushModelRadius(lua_State* L, const SolidObjectDef* def, bool isUnitDef)
 {
-	// Model loading removed; radius is not available server-side
-	lua_pushnumber(L, 0.0f);
+	const S3DModel* m = (def != nullptr) ? def->LoadModel() : nullptr;
+	lua_pushnumber(L, (m != nullptr) ? m->radius : 0.0f);
 	return 1;
 }
 
@@ -751,23 +756,42 @@ int LuaUtils::PushModelPath(lua_State* L, const SolidObjectDef* def)
 
 
 int LuaUtils::PushModelTable(lua_State* L, const SolidObjectDef* def) {
-	// Model loading removed server-side; return zeroed table
+	// Pull bounds + midpos from the loaded model (SPRINGRTS_geometry extension
+	// in the .gltf). ZK's unit_centeroffset.lua reads `ud.model.midx/midy/midz`
+	// and feeds it straight into Spring.SetUnitMidAndAimPos — zero here leaves
+	// every unit's mid/aim sitting at its foot, which both breaks the visible
+	// aim point and (more importantly) parks the cylinder/sphere collision
+	// volume below the unit so projectiles fly straight through.
 	lua_newtable(L);
 
-	HSTR_PUSH_NUMBER(L, "minx", 0.0f);
-	HSTR_PUSH_NUMBER(L, "miny", 0.0f);
-	HSTR_PUSH_NUMBER(L, "minz", 0.0f);
-	HSTR_PUSH_NUMBER(L, "maxx", 0.0f);
-	HSTR_PUSH_NUMBER(L, "maxy", 0.0f);
-	HSTR_PUSH_NUMBER(L, "maxz", 0.0f);
+	const S3DModel* m = (def != nullptr) ? def->LoadModel() : nullptr;
+	if (m != nullptr) {
+		HSTR_PUSH_NUMBER(L, "minx", m->mins.x);
+		HSTR_PUSH_NUMBER(L, "miny", m->mins.y);
+		HSTR_PUSH_NUMBER(L, "minz", m->mins.z);
+		HSTR_PUSH_NUMBER(L, "maxx", m->maxs.x);
+		HSTR_PUSH_NUMBER(L, "maxy", m->maxs.y);
+		HSTR_PUSH_NUMBER(L, "maxz", m->maxs.z);
 
-	HSTR_PUSH_NUMBER(L, "midx", 0.0f);
-	HSTR_PUSH_NUMBER(L, "midy", 0.0f);
-	HSTR_PUSH_NUMBER(L, "midz", 0.0f);
+		HSTR_PUSH_NUMBER(L, "midx", m->relMidPos.x);
+		HSTR_PUSH_NUMBER(L, "midy", m->relMidPos.y);
+		HSTR_PUSH_NUMBER(L, "midz", m->relMidPos.z);
+	} else {
+		HSTR_PUSH_NUMBER(L, "minx", 0.0f);
+		HSTR_PUSH_NUMBER(L, "miny", 0.0f);
+		HSTR_PUSH_NUMBER(L, "minz", 0.0f);
+		HSTR_PUSH_NUMBER(L, "maxx", 0.0f);
+		HSTR_PUSH_NUMBER(L, "maxy", 0.0f);
+		HSTR_PUSH_NUMBER(L, "maxz", 0.0f);
+
+		HSTR_PUSH_NUMBER(L, "midx", 0.0f);
+		HSTR_PUSH_NUMBER(L, "midy", 0.0f);
+		HSTR_PUSH_NUMBER(L, "midz", 0.0f);
+	}
 
 	HSTR_PUSH(L, "textures");
 	lua_newtable(L);
-	// model["textures"] = {}
+	// model["textures"] = {} (rendering-side concept; not used on server)
 	lua_rawset(L, -3);
 
 	return 1;

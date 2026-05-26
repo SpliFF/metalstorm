@@ -13,13 +13,15 @@
  * cheats on the periodic check returns early, and with isDead reset
  * the fast `CreateUnit(team)` path works.
  *
- * **Open Phase-4 issue (2026-05-26):** the shieldraid weapon mount
- * piece is not bound at unit-script load (engine logs `weapon 0 on
- * unit 'shieldraid' has unbound muzzle/aim piece, firing from unit
- * centre`). The laser still fires but never lands a hit on the
- * stationary target, so the `target took damage` assertion is
- * reported but non-gating. aim-rotation (turretlaser as the firing
- * unit) is the canonical "combat works" assertion.
+ * **Open issue (2026-05-26):** `CLaserProjectile` vs `CUnit` collision
+ * never registers — the laser fires, the muzzle binding is correct, the
+ * projectile flies through the target's (correctly-sized) cylinder volume,
+ * but hp stays at 340/340. Same setup with turretlaser (BeamLaser hitscan)
+ * kills the target. Bug is in the LaserCannon-specific collision path,
+ * not piece binding (which was the earlier hypothesis, now invalidated
+ * after the ud.model.midpos fix in LuaUtils.cpp). See PLAN-scenarios.md
+ * "Open follow-ups" for the active hypothesis list. The damage assertion
+ * stays non-gating until the LaserProjectile bug closes.
  */
 
 import type { Scenario } from '../types.js';
@@ -99,18 +101,18 @@ const scenario: Scenario = {
                 ok: elapsed >= 100,
                 detail: `${elapsed} frames in 5s wall (expect ≥100)`,
             },
-            // Damage is reported but non-gating. The shieldraid script
-            // does not bind weapon aim/muzzle pieces in our Phase-4 Lua
-            // runtime — the engine logs `weapon 0 on unit 'shieldraid'
-            // has unbound muzzle/aim piece (aimFromPiece=-1,
-            // muzzlePiece=-1) — firing from unit centre`, and the beam
-            // never registers a hit on the target. aim-rotation (static
-            // turretlaser firing unit) is the canonical "combat works"
-            // assertion until the script piece-binding gap closes.
+            // Damage is reported but non-gating. The shieldraid_laser
+            // (LaserCannon → CLaserProjectile) collision path never
+            // registers hits even though the muzzle is bound, the
+            // trajectory is right, and the target's cylinder volume is
+            // sized/centred correctly post-fix. See PLAN-scenarios.md
+            // "Open follow-ups" for the live LaserCannon hypothesis list.
+            // aim-rotation (turretlaser, BeamLaser hitscan) remains the
+            // canonical "combat works" assertion.
             {
-                name: 'target took damage (blocked on shieldraid piece binding)',
+                name: 'target took damage (blocked on LaserCannon collision path)',
                 ok: true,
-                detail: `before=${before} after=${after} (Δ=${(before - after).toFixed(1)}); will gate strictly once Phase-4 unit-script piece API lands`,
+                detail: `before=${before} after=${after} (Δ=${(before - after).toFixed(1)}); will gate strictly once CLaserProjectile vs CUnit lands hits`,
             },
         ];
     },
