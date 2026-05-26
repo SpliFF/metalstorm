@@ -39,6 +39,11 @@ const TARGET_OFFSET = 200;
  *  (~3500) so a single shot won't outright delete it, and it sits at
  *  ground level on land (no water dependency). */
 const TARGET_DEF = 'staticheavyradar';
+/** Air target used when the UUT only has AA weapons. Drone has 360 HP,
+ *  spawns cheap, and gets MoveCtrl-pinned to altitude so AA testers
+ *  don't have to chase it. */
+const AIR_TARGET_DEF = 'dronefighter';
+const AIR_TARGET_ALT = 200;
 const TARGET_HP_FALLBACK = 1; // assertion bound — any drop counts
 
 export interface CategoryResult {
@@ -66,6 +71,34 @@ export async function runCombat(
 
     const { h, anchorX, anchorZ, team, enemyTeam } = ctx;
 
+    // Probe the UUT's weapons to decide: ground-attack target (default)
+    // or air-only target (for AA units). The catalog only tracks a
+    // boolean canShoot — the per-weapon `canAttackGround` flag and
+    // anti-air category bit live in the WeaponDef.
+    const wInfoRaw = await h.lua(`
+        local ud = UnitDefs[${unit.defId}]
+        if not ud or not ud.weapons then return 'none' end
+        local canGround, canAir = false, false
+        for _, w in ipairs(ud.weapons) do
+            local wd = w and w.weaponDef and WeaponDefs[w.weaponDef]
+            if wd then
+                -- canAttackGround defaults to true; explicit false means AA-only
+                if wd.canAttackGround ~= false then canGround = true end
+                -- onlyTargets / onlyTargetCategory hint at AA when 'vtol' is set
+                local otc = wd.onlyTargetCategory or ''
+                if (wd.canAttackGround == false)
+                    or (type(otc) == 'string' and otc:lower():find('vtol'))
+                    or wd.targetMoveErrorMult then
+                    canAir = true
+                end
+            end
+        end
+        return (canGround and 'G' or '') .. (canAir and 'A' or '')
+    `);
+    const targetsGround = /G/.test(wInfoRaw);
+    // AA-only when no ground-attack weapon was declared.
+    const useAirTarget = !targetsGround;
+
     // Target sits 800 elmos east of the anchor; UUT spawns 200 elmos
     // west of the target (so 600 east of the anchor). This clears the
     // mex cluster (easternmost mex is at anchor + 220, so the UUT now
@@ -77,10 +110,23 @@ export async function runCombat(
     const utX = targetX - TARGET_OFFSET;
     const utZ = targetZ;
 
-    const tSpawn = await h.spawn(TARGET_DEF, targetX, targetZ, enemyTeam, 1);
+    const targetDef = useAirTarget ? AIR_TARGET_DEF : TARGET_DEF;
+    const tSpawn = await h.spawn(targetDef, targetX, targetZ, enemyTeam, 1);
     const targetId = Number(tSpawn.match(/:\s*(\d+)/)?.[1] ?? 0);
     if (!targetId) {
-        return { applicable: true, pass: false, detail: `target spawn failed: ${tSpawn}` };
+        return { applicable: true, pass: false, detail: `target spawn (${targetDef}) failed: ${tSpawn}` };
+    }
+    if (useAirTarget) {
+        // Lift the air target to fixed altitude with MoveCtrl-enabled
+        // (the natural takeoff path doesn't fire — see PLAN-scenarios
+        // "Open follow-ups"). Leave MoveCtrl ON so the target stays put
+        // throughout the test instead of trying to land or drift.
+        try {
+            await h.lua(`
+                Spring.MoveCtrl.Enable(${targetId})
+                Spring.SetUnitPosition(${targetId}, ${targetX}, ${AIR_TARGET_ALT}, ${targetZ})
+            `);
+        } catch { /* MoveCtrl unavailable on some builds */ }
     }
     // Hold-position + hold-fire on the dummy so it doesn't shoot back
     // or wander out of range. Same workaround duel-attack uses for the
@@ -96,6 +142,22 @@ export async function runCombat(
     const utId = Number(utSpawn.match(/:\s*(\d+)/)?.[1] ?? 0);
     if (!utId) {
         return { applicable: true, pass: false, detail: `unit spawn failed: ${utSpawn}` };
+    }
+
+    // Air UUTs: warp to wantedHeight so they're in the FLYING state
+    // by the time we issue CMD_ATTACK (natural takeoff doesn't lift
+    // them — same workaround as the movement category).
+    if (unit.canFly) {
+        try {
+            await h.lua(`
+                local ud = UnitDefs[${unit.defId}]
+                local alt = (ud and ud.wantedHeight) or 100
+                local x, _, z = Spring.GetUnitPosition(${utId})
+                Spring.MoveCtrl.Enable(${utId})
+                Spring.SetUnitPosition(${utId}, x, alt, z)
+                Spring.MoveCtrl.Disable(${utId})
+            `);
+        } catch { /* MoveCtrl unavailable */ }
     }
 
     // Settle 1 sim tick so the unit's weapon refs initialise.
@@ -140,8 +202,10 @@ export async function runCombat(
     const pass = hit || fired || acquired;
     const reloadDelta = (beforeReload != null && finalReload != null)
         ? finalReload - beforeReload : null;
+    const targetTag = useAirTarget ? ' [air-target]' : '';
     const detail = `tier=${tier} hpΔ=${(beforeHp - finalHp).toFixed(0)}`
-        + (reloadDelta !== null ? ` reloadΔ=${reloadDelta.toFixed(0)}` : '');
+        + (reloadDelta !== null ? ` reloadΔ=${reloadDelta.toFixed(0)}` : '')
+        + targetTag;
     return { applicable: true, pass, detail };
 }
 

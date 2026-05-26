@@ -57,6 +57,24 @@ export async function runMovement(
     if (!unitId) {
         return { applicable: true, pass: false, detail: `spawn failed: ${spawnOut}` };
     }
+
+    // Air units: natural takeoff doesn't lift the unit off the ground
+    // in our headless build (HoverAirMoveType::UpdateTakeoff never
+    // gives the unit positive vertical speed — see PLAN-scenarios.md
+    // "Open follow-ups"). Workaround: warp the unit to its
+    // wantedHeight with Spring.MoveCtrl so it skips takeoff and
+    // UpdateFlying takes over immediately.
+    if (unit.canFly) {
+        await h.lua(`
+            local ud = UnitDefs[${unit.defId}]
+            local h = (ud and ud.wantedHeight) or 100
+            local x, _, z = Spring.GetUnitPosition(${unitId})
+            Spring.MoveCtrl.Enable(${unitId})
+            Spring.SetUnitPosition(${unitId}, x, h, z)
+            Spring.MoveCtrl.Disable(${unitId})
+        `);
+    }
+
     await sleep(150);
 
     const initialStateOut = await h.unitState(unitId);
@@ -65,7 +83,10 @@ export async function runMovement(
         return { applicable: true, pass: false, detail: 'no initial pos after spawn' };
     }
 
-    await h.order(unitId, CMD_MOVE, [goalX, 80, z], 0);
+    // Air units fly to goal at their wantedHeight; ground units use
+    // y=80 (anything above ground is fine — pathing snaps to surface).
+    const goalY = unit.canFly ? 200 : 80;
+    await h.order(unitId, CMD_MOVE, [goalX, goalY, z], 0);
 
     const deadline = performance.now() + MAX_WALL_MS;
     let lastPos = initial;
