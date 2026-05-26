@@ -91,7 +91,7 @@ bool ModelConfigLoader::LoadInto(S3DModel& out, const std::string& basePath) {
     // understands; newer files log a notice (forward-compatible by
     // default) and older files are refused — they need re-conversion
     // because the field shape may have changed.
-    constexpr int kSupportedSchemaVersion = 7;
+    constexpr int kSupportedSchemaVersion = 8;
     int schemaVersion = 0;
     if (geom.contains("configVersion") && geom["configVersion"].is_number_integer()) {
         schemaVersion = geom["configVersion"].get<int>();

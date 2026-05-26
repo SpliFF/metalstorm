@@ -51,7 +51,13 @@ namespace GeometryExtractor {
 ///     it lived as `configVersion: 6`) into a document-level glTF
 ///     extension on the model's `.gltf` file. The .config.json sidecar
 ///     is no longer emitted; the .gltf is now the complete record.
-constexpr int kCurrentSchemaVersion = 7;
+/// 8 — `radius` now computed as the AABB half-diagonal (Recoil's
+///     `(maxs - midpos).Length()`), matching the bounding sphere
+///     centred on `midpos` that Recoil uses for collisions. Older
+///     bumps used `length(maxs)` from the local origin, inflating the
+///     radius for ground-anchored / tall models (e.g. zenith went
+///     160 → 112).
+constexpr int kCurrentSchemaVersion = 8;
 
 /// Build the SPRINGRTS_geometry payload from `scene`. Returns a JSON
 /// object suitable for placement at `extensions.SPRINGRTS_geometry`

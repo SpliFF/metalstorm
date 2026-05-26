@@ -79,11 +79,16 @@ void CollectWorldspaceVertices(const aiScene* scene,
     }
 }
 
+// Bounding-sphere radius around the AABB centre (midpos), matching Recoil's
+// `S3DModel::SetMidAndRadius` (`(maxs - midpos).Length()`). The previous
+// formula used `length(maxs)` from the model's local origin (0,0,0), which
+// over-estimated by the midpos offset — e.g. zenith.s3o (132 tall,
+// ground-anchored) got radius 160 instead of the correct 112.
 float RadiusFromAabb(const Aabb& b) {
-    const float ax = std::max(std::fabs(b.minX), std::fabs(b.maxX));
-    const float ay = std::max(std::fabs(b.minY), std::fabs(b.maxY));
-    const float az = std::max(std::fabs(b.minZ), std::fabs(b.maxZ));
-    return std::sqrt(ax * ax + ay * ay + az * az);
+    const float hx = (b.maxX - b.minX) * 0.5f;
+    const float hy = (b.maxY - b.minY) * 0.5f;
+    const float hz = (b.maxZ - b.minZ) * 0.5f;
+    return std::sqrt(hx * hx + hy * hy + hz * hz);
 }
 
 struct PieceRecord {
