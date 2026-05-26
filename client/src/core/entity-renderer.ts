@@ -1433,18 +1433,21 @@ export class EntityRenderer {
         px: number; py: number; pz: number;
         rx: number; ry: number; rz: number;
     }): Matrix {
-        // PLAN-coordinate-system Phase 2d: mirror the server-side
-        // RotateEulerYXZ(rot.x, rot.y, -rot.z) from
-        // rts/Sim/Units/Scripts/LocalModelPieceStub.h. Under RH, the
-        // X/Y axes pass through with their author sign and only Z
-        // keeps the legacy negation (rotation about the piece's
-        // forward axis is invariant to the world handedness flip).
+        // Match the server's `RotateEulerYXZ(rot)` in
+        // rts/Sim/Units/Scripts/LocalModelPieceStub.h. Spring's LH
+        // primitive RotateY(+a) produces a matrix numerically equal to
+        // Babylon's RH RotationAxis(Y, -a) — same for X and Z — so the
+        // client negates every axis to land on the same world matrix
+        // the server uses for emit-dir and weapon spawn math. Without
+        // the negation a script-driven `Turn(piece, x_axis, +a)`
+        // intended as "pitch down" / "stand leg" renders as the
+        // opposite (legs flip up, turrets aim mirrored).
         //
         // Babylon q1.multiply(q2) = q1*q2 applies q2 first then q1, so
         // qY * qX * qZ applies in order qZ → qX → qY (Spring's order).
         const qZ = Quaternion.RotationAxis(new Vector3(0, 0, 1), -ov.rz);
-        const qX = Quaternion.RotationAxis(new Vector3(1, 0, 0), ov.rx);
-        const qY = Quaternion.RotationAxis(new Vector3(0, 1, 0), ov.ry);
+        const qX = Quaternion.RotationAxis(new Vector3(1, 0, 0), -ov.rx);
+        const qY = Quaternion.RotationAxis(new Vector3(0, 1, 0), -ov.ry);
         const rot = qY.multiply(qX).multiply(qZ);
 
         return Matrix.Compose(

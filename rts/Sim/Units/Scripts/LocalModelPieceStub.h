@@ -98,19 +98,23 @@ struct LocalModelPiece {
 	float3 GetAbsolutePos() const { return GetModelSpaceMatrix().GetPos(); }
 
 	/// Compose this piece's transform matrix walking up the parent
-	/// chain. Each level is `T(pos) * R_yxz(rot.x, rot.y, -rot.z)`.
+	/// chain. Each level is `T(pos) * RotateEulerYXZ(rot)`.
 	///
-	/// PLAN-coordinate-system Phase 2: under RH, Spring's LH-canonical
-	/// `Rotate{Y,X,Z}` primitives produce the right-handed rotation when
-	/// fed +rot for X/Y axes (the handedness flip of the world frame
-	/// compensates), while Z keeps the legacy -rot sign because the
-	/// rotation about the unit's forward axis is unchanged by the world
-	/// frame flip.
+	/// Spring's LH-canonical `RotateY(+a)` is numerically equivalent to
+	/// the right-handed `RotY(-a)`. In our RH world (post-Phase-2 basis
+	/// flip) the script convention `Turn(y_axis, +a) = turn right` maps
+	/// to RH RotY(-a) — exactly what the LH primitive produces when fed
+	/// +a. The same holds for X (pitch down) and Z (roll right). No
+	/// per-axis sign juggling is required: the LH primitive applied to
+	/// the raw script angle yields the correct RH matrix for the script's
+	/// intent, and the client mirrors this with Babylon's true-RH primitive
+	/// fed -rot.x / -rot.y / -rot.z in springToBabylonLocal.
 	///
-	/// Pre-Phase-2 LH code used `RotateEulerYXZ(-rot)` to match upstream
-	/// `S3DModelPiece::ComposeTransform` (`CQuaternion::FromEulerYPRNeg`).
-	/// Without the X/Y sign flip in RH, a script-driven
-	/// `Turn(piece, y_axis, +a)` rotates the piece by `-a` instead.
+	/// Phase 2a originally negated Z only (`R(rot.x, rot.y, -rot.z)`) on
+	/// the theory that handedness flip "compensates" X/Y but not Z. The
+	/// piece-transform tests caught the resulting sign error — legs swung
+	/// up instead of down, turrets aimed mirrored. Reverting to the
+	/// uniform `R(rot)` form fixes both.
 	CMatrix44f GetModelSpaceMatrix() const {
 		CMatrix44f local;
 		local.Translate(pos);
@@ -118,7 +122,7 @@ struct LocalModelPiece {
 		// Almost every static decorative piece on a unit stays at
 		// rest, so this saves three trig calls per piece per frame.
 		if (rot.x != 0.0f || rot.y != 0.0f || rot.z != 0.0f)
-			local.RotateEulerYXZ(float3(rot.x, rot.y, -rot.z));
+			local.RotateEulerYXZ(rot);
 		if (parent != nullptr)
 			return parent->GetModelSpaceMatrix() * local;
 		return local;
