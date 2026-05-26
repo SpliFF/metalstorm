@@ -1,9 +1,18 @@
 /**
  * unit-test-loop — iterate every land+air unit (or a `units=` URL
  * filter list) through one or more category tests and aggregate the
- * pass/fail per unit per category. v1 ships the movement category
- * only; other categories (combat, build, economy, recon) are stubbed
- * in PLAN-scenarios.md and will hook into the same per-unit loop.
+ * pass/fail per unit per category.
+ *
+ * Categories shipped today:
+ *   - movement — `canMove` units; assert arrival at a goal point.
+ *   - combat   — `canShoot` units; assert HP damage / firing / target acq.
+ *   - economy  — `producesResources` units; assert team income delta.
+ *   - recon    — units with radar/sonar/jammer; assert detection of
+ *                an enemy probe inside the recon radius.
+ *
+ * The selection filter widens to any unit that's relevant to ≥1
+ * category, so mexes, radars, fusion, sonar towers and jammers all
+ * cycle through the loop alongside mobile units.
  *
  * URL filters:
  *   ?scenario=unit-test-loop
@@ -27,6 +36,8 @@ import { loadCatalog, pickUnits, type UnitClassification } from '../unit-test/ca
 import { spawnEconomy } from '../unit-test/economy.js';
 import { runMovement, type CategoryResult } from '../unit-test/category/movement.js';
 import { runCombat } from '../unit-test/category/combat.js';
+import { runRecon } from '../unit-test/category/recon.js';
+import { runEconomy } from '../unit-test/category/economy.js';
 import {
     logHighWaterMark, fetchLogsSince, formatLogEntry, type LogEntry,
 } from '../lib/log-fetch.js';
@@ -43,6 +54,8 @@ interface PerUnitResult {
     categories: {
         movement?: CategoryResult;
         combat?: CategoryResult;
+        recon?: CategoryResult;
+        economy?: CategoryResult;
     };
     logs: LogEntry[];
     elapsedMs: number;
@@ -96,10 +109,11 @@ const scenario: Scenario = {
 
         const catalog = await loadCatalog(h);
         const requested = parseUnitsParam();
-        // Allow either canMove OR canShoot — combat covers static
-        // weapons (turrets, defences) that movement skips.
+        // Any unit relevant to at least one shipped category. Drops
+        // pure scaffolding / decorations (and `terraunit`, `wreck`-style
+        // pseudo-defs) but keeps mexes, fusion, radars and jammers.
         const units = pickUnits(catalog, requested, /*requireMovement*/ false)
-            .filter((u) => u.canMove || u.canShoot);
+            .filter((u) => u.canMove || u.canShoot || u.producesResources || u.extendsRecon);
 
         window.unitTestResults = {
             startedAt: Date.now(),
@@ -110,7 +124,7 @@ const scenario: Scenario = {
         };
         (this as any)._units = units;
 
-        console.log(`[unit-test-loop] catalog: ${catalog.length} total, ${units.length} selected (movement + combat)`);
+        console.log(`[unit-test-loop] catalog: ${catalog.length} total, ${units.length} selected (movement + combat + economy + recon)`);
         if (requested) console.log(`[unit-test-loop] URL filter: ${requested.join(', ')}`);
     },
 
@@ -212,6 +226,30 @@ async function runOneUnit(
         );
     } catch (err: any) {
         result.categories.combat = {
+            applicable: true, pass: false,
+            detail: `category threw: ${err?.message ?? err}`,
+        };
+    }
+
+    try {
+        result.categories.economy = await runEconomy(
+            { h, anchorX: ANCHOR_X, anchorZ: ANCHOR_Z, team: PLAYER_TEAM },
+            unit,
+        );
+    } catch (err: any) {
+        result.categories.economy = {
+            applicable: true, pass: false,
+            detail: `category threw: ${err?.message ?? err}`,
+        };
+    }
+
+    try {
+        result.categories.recon = await runRecon(
+            { h, anchorX: ANCHOR_X, anchorZ: ANCHOR_Z, team: PLAYER_TEAM, enemyTeam: ENEMY_TEAM },
+            unit,
+        );
+    } catch (err: any) {
+        result.categories.recon = {
             applicable: true, pass: false,
             detail: `category threw: ${err?.message ?? err}`,
         };

@@ -61,13 +61,26 @@ export async function loadCatalog(h: TestHarness): Promise<UnitClassification[]>
                 end
             end
             local canBuild = def.buildOptions and #def.buildOptions > 0 or false
+            -- ZK declares passive income via customParams (income_metal /
+            -- income_energy) rather than the legacy def.metalMake /
+            -- energyMake fields, and tags mexes with customParams.ismex
+            -- (the runtime metal_handler gadget adds income at spawn
+            -- based on the metalmap). The classic fields are kept as
+            -- a fallback for non-ZK games.
+            local cp = def.customParams or {}
+            local incomeM = tonumber(cp.income_metal or 0) or 0
+            local incomeE = tonumber(cp.income_energy or 0) or 0
+            local isMex = (cp.ismex == '1' or cp.ismex == 1)
             local producesResources = (def.metalMake or 0) > 0
                 or (def.energyMake or 0) > 0
                 or (def.extractsMetal or 0) > 0
                 or (def.windGenerator or 0) > 0
                 or (def.tidalGenerator or 0) > 0
-            local extendsRecon = (def.losRadius or 0) > 8
-                or (def.radarRadius or 0) > 0
+                or incomeM > 0 or incomeE > 0 or isMex
+            -- Only count active radar/sonar/jammer as recon extension.
+            -- Raw LOS (every unit has > 0) would match the whole catalog
+            -- and turn the recon test into noise.
+            local extendsRecon = (def.radarRadius or 0) > 0
                 or (def.jammerRadius or 0) > 0
                 or (def.sonarRadius or 0) > 0
             -- Ship filter: ZK's ship moveDefs have family == 'ship' OR
