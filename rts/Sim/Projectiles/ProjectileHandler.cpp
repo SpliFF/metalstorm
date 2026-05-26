@@ -328,9 +328,12 @@ static bool CheckProjectileCollisionFlags(const CProjectile* p, const CUnit* u)
 {
 	const unsigned int collFlags = p->GetCollisionFlags() * p->weapon;
 
-	// only weapon-projectiles can have non-zero flags
+	// `collFlags == 0` means: no exclusion bits set (the common case for
+	// most weapons) OR `p->weapon == 0` (a non-weapon projectile, which
+	// can't define flags). In both cases the candidate is accepted —
+	// the actual filtering happens in the bit-test branches below.
 	if (collFlags == 0)
-		return false;
+		return true;
 
 	// disregard everything else when this bit is set
 	// (ground and feature flags are tested elsewhere)

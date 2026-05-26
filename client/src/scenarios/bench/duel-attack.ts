@@ -2,9 +2,10 @@
  * duel-attack — 1v1 combat path sanity check.
  *
  * Spawn one shieldraid (Bandit) on team 0 and one on the opposing
- * NullAI team, 200 elmos apart. Order team 0 to attack team 1. After
- * a 5-second observation window, verify the order was accepted, the
- * attacker acquired a weapon target, and the sim advanced.
+ * NullAI team. Order team 0 to attack team 1. Within a 5-second
+ * observation window the attacker should acquire its target and the
+ * laser should deal lethal damage (shieldraid HP 340, laser DPS well
+ * over that across the window).
  *
  * Dead-team note: the runner enables cheats + `revive_team all` before
  * setup. ZK's game_over.lua otherwise flags teams 0 and 1 isDead at
@@ -12,16 +13,6 @@
  * a dead team raises a Lua error that aborts the spawn snippet. With
  * cheats on the periodic check returns early, and with isDead reset
  * the fast `CreateUnit(team)` path works.
- *
- * **Open issue (2026-05-26):** `CLaserProjectile` vs `CUnit` collision
- * never registers — the laser fires, the muzzle binding is correct, the
- * projectile flies through the target's (correctly-sized) cylinder volume,
- * but hp stays at 340/340. Same setup with turretlaser (BeamLaser hitscan)
- * kills the target. Bug is in the LaserCannon-specific collision path,
- * not piece binding (which was the earlier hypothesis, now invalidated
- * after the ud.model.midpos fix in LuaUtils.cpp). See PLAN-scenarios.md
- * "Open follow-ups" for the active hypothesis list. The damage assertion
- * stays non-gating until the LaserProjectile bug closes.
  */
 
 import type { Scenario } from '../types.js';
@@ -72,8 +63,16 @@ const scenario: Scenario = {
         const beforeT = await h.unitState(tId);
         const beforeHp = parseUnitField(beforeT, 'hp')?.split('/')[0];
 
-        // Wait ~5 sim seconds (150 frames @ 30 Hz) for shots to land.
-        await sleep(5000);
+        // Sample the attacker's targeting state mid-window so it isn't
+        // affected by the target dying before the assertions run (the
+        // shieldraid kills its dummy in ~1s now that LaserCannon hits
+        // land — by the 5s mark the attacker no longer has anything to
+        // aim at). 750ms / ~22 frames is well past the first reload.
+        await sleep(750);
+        const midA = await h.unitState(aId);
+        const midHasTarget = /hasTarget=yes/.test(midA);
+
+        await sleep(4250);
 
         const afterT = await h.unitState(tId);
         const afterHp = parseUnitField(afterT, 'hp')?.split('/')[0];
@@ -83,7 +82,8 @@ const scenario: Scenario = {
 
         const before = Number(beforeHp ?? '0');
         const after = Number(afterHp ?? '0');
-        const targetHasTarget = /hasTarget=yes/.test(afterA);
+        const targetDestroyed = !/id=\d+/.test(afterT);
+        const damageDealt = targetDestroyed ? before : (before - after);
 
         return [
             {
@@ -93,26 +93,20 @@ const scenario: Scenario = {
             },
             {
                 name: 'attacker acquired target',
-                ok: targetHasTarget,
-                detail: targetHasTarget ? 'w0 hasTarget=yes' : 'no weapon reports hasTarget=yes',
+                ok: midHasTarget,
+                detail: midHasTarget ? 'w0 hasTarget=yes (sampled @750ms)' : 'no weapon reports hasTarget=yes',
             },
             {
                 name: 'sim advanced',
                 ok: elapsed >= 100,
                 detail: `${elapsed} frames in 5s wall (expect ≥100)`,
             },
-            // Damage is reported but non-gating. The shieldraid_laser
-            // (LaserCannon → CLaserProjectile) collision path never
-            // registers hits even though the muzzle is bound, the
-            // trajectory is right, and the target's cylinder volume is
-            // sized/centred correctly post-fix. See PLAN-scenarios.md
-            // "Open follow-ups" for the live LaserCannon hypothesis list.
-            // aim-rotation (turretlaser, BeamLaser hitscan) remains the
-            // canonical "combat works" assertion.
             {
-                name: 'target took damage (blocked on LaserCannon collision path)',
-                ok: true,
-                detail: `before=${before} after=${after} (Δ=${(before - after).toFixed(1)}); will gate strictly once CLaserProjectile vs CUnit lands hits`,
+                name: 'target took damage',
+                ok: damageDealt > 0,
+                detail: targetDestroyed
+                    ? `target destroyed (hp ${before} → 0 in ${elapsed} frames)`
+                    : `before=${before} after=${after} (Δ=${damageDealt.toFixed(1)})`,
             },
         ];
     },
