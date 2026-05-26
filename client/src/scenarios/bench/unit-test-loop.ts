@@ -107,6 +107,14 @@ const scenario: Scenario = {
         // and let it land where it lands.
         await h.simSpeed(5);
 
+        // Frame the test playground so an observer can watch each unit
+        // run instead of looking at empty terrain. Height 1500 covers
+        // the full ±1200-elmo movement corridor plus the combat target
+        // 400 elmos east of anchor.
+        try {
+            await h.cameraSnapToGround(ANCHOR_X, ANCHOR_Z, { height: 1500, durationMs: 0 });
+        } catch { /* harness may not expose this verb on every build */ }
+
         const catalog = await loadCatalog(h);
         const requested = parseUnitsParam();
         // Any unit relevant to at least one shipped category. Drops

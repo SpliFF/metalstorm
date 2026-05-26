@@ -66,10 +66,13 @@ export async function runCombat(
 
     const { h, anchorX, anchorZ, team, enemyTeam } = ctx;
 
-    // Dummy target ~400 elmos east of the anchor, well clear of the
-    // mex cluster. Unit-under-test spawns 200 elmos west of the target
-    // (so 200 east of the anchor) — most weapons sit at 250–800 range.
-    const targetX = anchorX + 400;
+    // Target sits 800 elmos east of the anchor; UUT spawns 200 elmos
+    // west of the target (so 600 east of the anchor). This clears the
+    // mex cluster (easternmost mex is at anchor + 220, so the UUT now
+    // has 380 elmos of breathing room — units no longer spawn on top
+    // of a mex). 200-elmo UUT↔target gap keeps most ZK weapons (range
+    // 250–800) in range from frame 1 without a chase.
+    const targetX = anchorX + 800;
     const targetZ = anchorZ;
     const utX = targetX - TARGET_OFFSET;
     const utZ = targetZ;
