@@ -266,6 +266,14 @@ interface LiveProjectile {
     /// it crosses zero. Non-laser projectiles still delete immediately
     /// from onImpact and never see this flag flip.
     impacted: boolean;
+    /// Sim-time accumulator (seconds) for the per-tick `cegTag` emit.
+    /// Recoil's WeaponProjectile subclasses each call GenExplosion(cegID,
+    /// pos, speed, ...) once per sim tick while `ttl > 0`; we mirror that
+    /// with a sim-time accumulator so the emit cadence matches the server
+    /// clock at non-1× sim speeds (dt already factors simSpeed). Drained
+    /// in CEG_EMIT_PERIOD_S chunks per emit, capped at MAX_CEG_EMITS_PER_FRAME
+    /// to bound work at very high sim speed.
+    cegEmitAccumS: number;
 }
 
 /** Active beam: from-point, to-point and birth time. Each tick the
@@ -325,6 +333,25 @@ const FLAG_LARGE_BEAM_LASER = 1 << 18;
 /// at full curLength during this window then contracts to zero at the
 /// weapon's projectileSpeed.
 const LASER_HARDSTOP_HOLD_S = 3 / SIM_TICKS_PER_SEC;
+
+/// Per-tick in-flight CEG emit cadence. Recoil's WeaponProjectile
+/// subclasses (MissileProjectile, StarburstProjectile, TorpedoProjectile,
+/// FireBallProjectile, ExplosiveProjectile, FlameProjectile, EmgProjectile,
+/// LaserProjectile) each call `explGenHandler.GenExplosion(cegID, pos,
+/// speed, ttl, ...)` from their Update() while `ttl > 0`. That's once
+/// per sim tick, i.e. every 1/30 s of sim time. We match the cadence so
+/// authored CEG defs that bake spawn count + per-spawn variance assume
+/// the same emit rate.
+const CEG_EMIT_PERIOD_S = 1 / SIM_TICKS_PER_SEC;
+
+/// Per-render-frame cap on per-tick CEG emits for a single projectile.
+/// At very high sim speed the accumulator can build up multiple periods
+/// worth of debt per render frame (e.g. simSpeed=8 at 60 fps ≈ 4 periods
+/// per frame); without a cap, a 30-projectile salvo at 16× sim speed
+/// would spawn 256 particles in one frame and stall the GPU. 4 emits
+/// per frame keeps work bounded while still letting trails read as
+/// continuous at moderate fast-forward.
+const MAX_CEG_EMITS_PER_FRAME = 4;
 
 export class ProjectileRenderer {
     private scene: Scene;
@@ -720,6 +747,14 @@ export class ProjectileRenderer {
             stayTime: 0,
             intensity,
             impacted: false,
+            // Start at -CEG_EMIT_PERIOD_S so the first per-tick emit fires
+            // ~1 sim-tick *after* spawn rather than on the spawn frame —
+            // gives the muzzle CEG (which `effectForFire` already spawned
+            // via cegTag in onFire) a frame of breathing room before the
+            // in-flight emit starts overlaying it. Without this offset
+            // the missile spawns two near-identical bursts at the same
+            // position and reads as a single brighter flash.
+            cegEmitAccumS: -CEG_EMIT_PERIOD_S,
         });
     }
 
@@ -927,6 +962,48 @@ export class ProjectileRenderer {
             // per-instance shaft matrix.
             if (lv && lv.kind === 'laserBolt') {
                 p.curLength = Math.min(p.curLength + lv.speedf * dt, lv.maxLength);
+            }
+
+            // Per-tick in-flight CEG emit (Recoil's WeaponProjectile
+            // Update() pattern — exhaust flames for missiles, bubble
+            // trails for torpedoes, smoke wisps for cannon shells).
+            // Drained in fixed sim-time chunks so the emit rate matches
+            // the server clock at any sim speed. `effectForFire` already
+            // spawned a muzzle burst from the same cegTag in onFire; the
+            // cegEmitAccumS init offset (-CEG_EMIT_PERIOD_S) skips the
+            // first frame's emit so the two don't overlap at t=0.
+            if (this.cegRuntime && !p.impacted) {
+                const def = this.weaponDefs.get(p.weaponDefId);
+                const tag = def?.cegTag;
+                if (tag && tag.toLowerCase() !== 'none') {
+                    p.cegEmitAccumS += dt;
+                    let emits = 0;
+                    while (p.cegEmitAccumS >= CEG_EMIT_PERIOD_S
+                           && emits < MAX_CEG_EMITS_PER_FRAME) {
+                        p.cegEmitAccumS -= CEG_EMIT_PERIOD_S;
+                        emits++;
+                        // Emit direction = unit velocity. Recoil passes the
+                        // raw `speed` vector (with magnitude); the CEG def
+                        // is authored against a normalised direction in our
+                        // runtime (`spawn` signature is `dx,dy,dz` unit
+                        // vector). Skip the spawn if velocity is degenerate
+                        // — a stationary missile has nothing to trail from.
+                        const vmag = Math.hypot(p.vel.x, p.vel.y, p.vel.z);
+                        if (vmag < 1e-3) break;
+                        const inv = 1 / vmag;
+                        this.cegRuntime.spawn(tag,
+                            p.pos.x, p.pos.y, p.pos.z,
+                            p.vel.x * inv, p.vel.y * inv, p.vel.z * inv);
+                    }
+                    // Catastrophic catch-up guard: if a frame stalled and
+                    // the accumulator built up >> MAX_CEG_EMITS_PER_FRAME
+                    // periods of debt, drop the excess rather than carry
+                    // it forward — otherwise the next few frames burst-
+                    // spawn at the cap until the debt clears.
+                    if (p.cegEmitAccumS > CEG_EMIT_PERIOD_S * MAX_CEG_EMITS_PER_FRAME) {
+                        p.cegEmitAccumS = 0;
+                    }
+                }
             }
 
             if (p.ttl > 0) {
