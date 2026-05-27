@@ -33,7 +33,6 @@ import {
     MeshBuilder,
     ShaderMaterial,
     Color3,
-    Matrix,
     Vector3,
     Quaternion,
     Texture,
@@ -81,18 +80,18 @@ export interface MissileTrailState {
     lastSpawnSec: number;
 }
 
-/// Per-weapon-def GPU resources for trail puffs. The mesh and
+/// Per-weapon-def GPU resources for trail ribbons. The mesh and
 /// material are reused across every live and orphaned trail of this
-/// def; per-puff variance is encoded in the world matrix and the
-/// per-instance alpha attribute.
+/// def; per-segment variance is encoded in the world matrix plus
+/// the `uvRange` / `alphaRange` thin-instance attributes.
 export interface MissileTrailVisual {
     defId: number;
     mesh: Mesh;
     material: ShaderMaterial;
-    /// Per-puff base size in elmos (square quad side length). Carried
-    /// here so flushMissileTrailVisual doesn't need to look it up
-    /// from a WeaponDefInfo on every tick.
-    size: number;
+    /// Ribbon width in elmos. Per-segment matrices scale the unit-
+    /// quad's Y axis by this much so the strip's vertical extent
+    /// is constant across the trail.
+    width: number;
 }
 
 /// Allocate a fresh ring buffer for a missile that just spawned.
@@ -151,10 +150,19 @@ export function buildMissileTrailVisual(
     const mat = new ShaderMaterial(
         `projTrailMat_${def.defId}`, scene, 'projectileTrail',
         {
-            attributes: ['position', 'uv', 'alpha'],
+            attributes: ['position', 'uv', 'uvRange', 'alphaRange'],
             uniforms: ['world', 'viewProjection', 'tint'],
             samplers: ['trailTex'],
             defines: ['#define INSTANCES', '#define THIN_INSTANCES'],
+            // ShaderMaterial.needAlphaBlending() returns false by default
+            // (it only checks `this.alpha < 1.0` or this flag). Without
+            // it the mesh renders in the opaque pass with blending
+            // disabled — `alphaMode = 7` below would be silently ignored
+            // and the shader's premul output `vec4(rgb*a, a)` would
+            // write opaque black where the smoke texture's alpha is low.
+            // Flipping the flag puts the mesh into the alpha-blend pass
+            // where alphaMode is honoured.
+            needAlphaBlending: true,
         },
     );
 
@@ -177,13 +185,24 @@ export function buildMissileTrailVisual(
         /*invertY*/ true, Texture.TRILINEAR_SAMPLINGMODE,
         () => { mat.setTexture('trailTex', tex); });
     tex.hasAlpha = true;
+    // ZK *smoketrail.* textures are 320×24 horizontal strips meant to
+    // tile along the trail's length (Recoil's CSmokeTrailProjectile
+    // convention). Wrap U so successive ribbon segments can extend
+    // past U=1 and keep sampling the strip seamlessly.
+    tex.wrapU = Texture.WRAP_ADDRESSMODE;
+    tex.wrapV = Texture.CLAMP_ADDRESSMODE;
     // Premultiplied additive — same convention as the beam shader so
-    // faded puffs contribute zero to the framebuffer.
+    // faded ends contribute zero to the framebuffer.
     mat.alphaMode = 7;
     mat.backFaceCulling = false;
     mat.disableDepthWrite = true;
 
-    const baseSize = Math.max(2, (def.size > 0 ? def.size : 1) * 4);
+    // Ribbon half-width. `def.size` (engine elmos) is the projectile
+    // visual radius; the trail historically reads roughly 2× the
+    // projectile body, with a floor so the ribbon stays visible for
+    // tiny weapons. Used directly as scale on the ribbon Y axis when
+    // composing per-segment matrices.
+    const ribbonWidth = Math.max(2, (def.size > 0 ? def.size : 1) * 2);
     const mesh = MeshBuilder.CreatePlane(`projTrail_${def.defId}`,
         { width: 1, height: 1, sideOrientation: Mesh.DOUBLESIDE }, scene);
     mesh.material = mat;
@@ -193,12 +212,14 @@ export function buildMissileTrailVisual(
     mesh.alwaysSelectAsActiveMesh = true;
     mesh.alphaIndex = 1000;
 
-    // Register the per-instance alpha attribute up front so the first
-    // flush can populate it without re-registering. Stride 1 (one
-    // float per instance).
-    mesh.thinInstanceRegisterAttribute('alpha', 1);
+    // Per-instance attributes for the ribbon path. `uvRange` carries
+    // (uMin, uMax) so consecutive segments tile the strip texture by
+    // cumulative trail arc-length; `alphaRange` carries (a1, a2) so
+    // each segment fades smoothly from older end to younger end.
+    mesh.thinInstanceRegisterAttribute('uvRange', 2);
+    mesh.thinInstanceRegisterAttribute('alphaRange', 2);
 
-    return { defId: def.defId, mesh, material: mat, size: baseSize };
+    return { defId: def.defId, mesh, material: mat, width: ribbonWidth };
 }
 
 /// Tear down a trail visual. The renderer calls this from
@@ -242,95 +263,174 @@ export function isTrailFullyFaded(
     return true;
 }
 
+/// Texture tile length: the strip texture repeats once per this many
+/// elmos of trail arc-length. Smaller value = denser tiling (more
+/// visible repetitions along long trails); larger = sparser. 60 elmos
+/// reads as a continuous wispy ribbon at typical missile sizes.
+const TRAIL_TILE_LEN = 60;
+
 /// Flush one or more trail states into the per-def visual's thin-
-/// instance buffers. Builds a camera-facing matrix per live puff and
-/// the matching per-instance alpha (linear fade over TRAIL_LIFETIME_S).
-/// Hides the mesh when no puffs are live this frame.
+/// instance buffers as ribbon segments — one segment per pair of
+/// consecutive live puff positions in the ring buffer, matching
+/// Recoil's `CSmokeTrailProjectile::Draw` quad layout. Hides the
+/// mesh when there are no full segments to draw this frame.
 ///
 /// `tmp*` and the matrix scratch are passed in so callers can reuse
-/// allocations across the per-tick loop over multiple defs.
+/// allocations across the per-tick loop over multiple defs. The
+/// `Vector3` / `Quaternion` parameters are kept for API parity with
+/// the prior billboard implementation but only `tmpScale` is read.
 export function flushMissileTrailVisual(
     visual: MissileTrailVisual,
     states: MissileTrailState[],
     nowSec: number,
     camX: number, camY: number, camZ: number,
-    tmpRight: Vector3, tmpUp: Vector3, tmpFwd: Vector3,
-    tmpQ: Quaternion, tmpScale: Vector3,
+    _tmpRight: Vector3, _tmpUp: Vector3, _tmpFwd: Vector3,
+    _tmpQ: Quaternion, tmpScale: Vector3,
 ): void {
-    // Pass 1: count live puffs across every state for this def so we
-    // can size the matrix + alpha buffers exactly. Skipping faded
-    // puffs keeps GPU work proportional to visible count.
-    let liveCount = 0;
+    // Pass 1: per-state live-puff count → (count - 1) segments per
+    // state, summed across every state for this def. A state with
+    // 0 or 1 live puffs contributes nothing — a ribbon needs two
+    // endpoints.
+    let totalSegments = 0;
+    const perStateLive: number[] = [];
     for (const s of states) {
+        let live = 0;
         for (let i = 0; i < TRAIL_PUFF_COUNT; i++) {
             const birth = s.birthSecs[i];
             if (birth < 0) continue;
             if (nowSec - birth >= TRAIL_LIFETIME_S) continue;
-            liveCount++;
+            live++;
         }
+        perStateLive.push(live);
+        if (live >= 2) totalSegments += (live - 1);
     }
 
-    if (liveCount === 0) {
+    if (totalSegments === 0) {
         visual.mesh.isVisible = false;
         visual.mesh.thinInstanceCount = 0;
         return;
     }
 
-    const matrices = new Float32Array(liveCount * 16);
-    const alphas = new Float32Array(liveCount);
-    tmpScale.set(visual.size, visual.size, visual.size);
+    const matrices = new Float32Array(totalSegments * 16);
+    const uvRanges = new Float32Array(totalSegments * 2);
+    const alphaRanges = new Float32Array(totalSegments * 2);
+    const width = visual.width;
+
+    // Scratch arrays — reused per state. Sized for the worst case.
+    const orderedX = new Float32Array(TRAIL_PUFF_COUNT);
+    const orderedY = new Float32Array(TRAIL_PUFF_COUNT);
+    const orderedZ = new Float32Array(TRAIL_PUFF_COUNT);
+    const orderedAlpha = new Float32Array(TRAIL_PUFF_COUNT);
 
     let dst = 0;
-    for (const s of states) {
-        for (let i = 0; i < TRAIL_PUFF_COUNT; i++) {
+    for (let si = 0; si < states.length; si++) {
+        if (perStateLive[si] < 2) continue;
+        const s = states[si];
+
+        // Walk the ring buffer in chronological order (oldest first)
+        // and pack live puffs into the scratch arrays. nextSlot is
+        // the next-to-overwrite index, which is also the oldest slot
+        // once the buffer has been filled at least once.
+        let orderedCount = 0;
+        for (let k = 0; k < TRAIL_PUFF_COUNT; k++) {
+            const i = (s.nextSlot + k) % TRAIL_PUFF_COUNT;
             const birth = s.birthSecs[i];
             if (birth < 0) continue;
             const age = nowSec - birth;
             if (age >= TRAIL_LIFETIME_S) continue;
             const base = i * 3;
-            const px = s.positions[base + 0];
-            const py = s.positions[base + 1];
-            const pz = s.positions[base + 2];
-            composeBillboardMatrix(matrices, dst * 16, px, py, pz,
-                camX, camY, camZ,
-                tmpRight, tmpUp, tmpFwd, tmpQ, tmpScale);
-            alphas[dst] = 1 - age / TRAIL_LIFETIME_S;
+            orderedX[orderedCount] = s.positions[base + 0];
+            orderedY[orderedCount] = s.positions[base + 1];
+            orderedZ[orderedCount] = s.positions[base + 2];
+            orderedAlpha[orderedCount] = 1 - age / TRAIL_LIFETIME_S;
+            orderedCount++;
+        }
+
+        // Emit (orderedCount - 1) segments, accumulating arc length
+        // for tiling UV.x so the strip texture flows continuously
+        // along the trail rather than restarting per segment.
+        let cumLen = 0;
+        for (let k = 0; k < orderedCount - 1; k++) {
+            const x1 = orderedX[k],     y1 = orderedY[k],     z1 = orderedZ[k];
+            const x2 = orderedX[k + 1], y2 = orderedY[k + 1], z2 = orderedZ[k + 1];
+            const ex = x2 - x1, ey = y2 - y1, ez = z2 - z1;
+            const segLen = Math.hypot(ex, ey, ez);
+            if (segLen < 1e-3) continue; // degenerate; skip
+
+            // Ribbon "out" axis = (camera_to_midpoint × travel).normalize().
+            // Falls back to world up cross travel if camera is on the
+            // segment line — keeps the ribbon visible from any angle
+            // including straight overhead.
+            const mx = (x1 + x2) * 0.5, my = (y1 + y2) * 0.5, mz = (z1 + z2) * 0.5;
+            let cx = camX - mx, cy = camY - my, cz = camZ - mz;
+            let ox = cy * ez - cz * ey;
+            let oy = cz * ex - cx * ez;
+            let oz = cx * ey - cy * ex;
+            let olen = Math.hypot(ox, oy, oz);
+            if (olen < 1e-3) {
+                // Camera nearly on segment line — pick a stable
+                // fallback perpendicular by crossing travel with
+                // world up. Travel can't itself be (0,1,0) and yield
+                // zero here because that'd require segLen=0 already.
+                ox = ez; oy = 0; oz = -ex;
+                olen = Math.hypot(ox, oy, oz) || 1;
+            }
+            ox /= olen; oy /= olen; oz /= olen;
+
+            // Per-segment matrix (column-major):
+            //   col0 = edge vector (X → travel direction, length = segLen)
+            //   col1 = odir * width (Y → ribbon width)
+            //   col2 = ignored (flat quad; pick segment normal for
+            //          completeness so the matrix is non-degenerate)
+            //   col3 = midpoint
+            // The plane mesh's local positions are (±0.5, ±0.5, 0),
+            // so after this transform the four corners land at
+            // (pos1 ± 0.5*width*odir, pos2 ± 0.5*width*odir) —
+            // matching Recoil's `pos1 ± odir1*size1, pos2 ± odir2*size2`
+            // pattern (we collapse to a single odir per segment
+            // rather than per-endpoint — the visual difference is
+            // negligible at typical missile travel).
+            const off = dst * 16;
+            matrices[off + 0]  = ex;         matrices[off + 1]  = ey;         matrices[off + 2]  = ez;         matrices[off + 3]  = 0;
+            matrices[off + 4]  = ox * width; matrices[off + 5]  = oy * width; matrices[off + 6]  = oz * width; matrices[off + 7]  = 0;
+            // col2 = edge × out (segment-plane normal), unit length.
+            const nx = ey * oz - ez * oy;
+            const ny = ez * ox - ex * oz;
+            const nz = ex * oy - ey * ox;
+            const nlen = Math.hypot(nx, ny, nz) || 1;
+            matrices[off + 8]  = nx / nlen;  matrices[off + 9]  = ny / nlen;  matrices[off + 10] = nz / nlen;  matrices[off + 11] = 0;
+            matrices[off + 12] = mx;         matrices[off + 13] = my;         matrices[off + 14] = mz;         matrices[off + 15] = 1;
+
+            const uMin = cumLen / TRAIL_TILE_LEN;
+            cumLen += segLen;
+            const uMax = cumLen / TRAIL_TILE_LEN;
+            uvRanges[dst * 2 + 0] = uMin;
+            uvRanges[dst * 2 + 1] = uMax;
+            alphaRanges[dst * 2 + 0] = orderedAlpha[k];
+            alphaRanges[dst * 2 + 1] = orderedAlpha[k + 1];
+
             dst++;
         }
     }
 
-    visual.mesh.isVisible = true;
-    visual.mesh.thinInstanceSetBuffer('matrix', matrices, 16, false);
-    visual.mesh.thinInstanceSetBuffer('alpha', alphas, 1, false);
-    visual.mesh.thinInstanceCount = liveCount;
-}
+    // Loop above may have skipped degenerate segments; trim totals.
+    const finalCount = dst;
+    if (finalCount === 0) {
+        visual.mesh.isVisible = false;
+        visual.mesh.thinInstanceCount = 0;
+        return;
+    }
 
-/// Camera-facing billboard matrix at world (px,py,pz), scaled by
-/// `tmpScale`. Lifted from the renderer's beam end-cap helper so
-/// trail puffs share the same orthonormal-basis logic without
-/// importing across modules.
-function composeBillboardMatrix(
-    out: Float32Array, off: number,
-    px: number, py: number, pz: number,
-    camX: number, camY: number, camZ: number,
-    tmpRight: Vector3, tmpUp: Vector3, tmpFwd: Vector3,
-    tmpQ: Quaternion, tmpScale: Vector3,
-): void {
-    let fx = camX - px, fy = camY - py, fz = camZ - pz;
-    let flen = Math.hypot(fx, fy, fz);
-    if (flen < 1e-3) { fx = 0; fy = 0; fz = 1; flen = 1; }
-    fx /= flen; fy /= flen; fz /= flen;
-    let rx = fz, ry = 0, rz = -fx;
-    let rlen = Math.hypot(rx, ry, rz);
-    if (rlen < 1e-3) { rx = 1; ry = 0; rz = 0; rlen = 1; }
-    rx /= rlen; rz /= rlen;
-    const ux = fy * rz - fz * ry;
-    const uy = fz * rx - fx * rz;
-    const uz = fx * ry - fy * rx;
-    tmpRight.set(rx, ry, rz);
-    tmpUp.set(ux, uy, uz);
-    tmpFwd.set(fx, fy, fz);
-    Quaternion.RotationQuaternionFromAxisToRef(tmpRight, tmpUp, tmpFwd, tmpQ);
-    const m = Matrix.Compose(tmpScale, tmpQ, new Vector3(px, py, pz));
-    m.copyToArray(out, off);
+    // Avoid the unused-warning on tmpScale — kept in the signature
+    // for caller-side allocation reuse parity with peer flush paths.
+    void tmpScale;
+
+    visual.mesh.isVisible = true;
+    visual.mesh.thinInstanceSetBuffer('matrix',
+        finalCount === totalSegments ? matrices : matrices.subarray(0, finalCount * 16), 16, false);
+    visual.mesh.thinInstanceSetBuffer('uvRange',
+        finalCount === totalSegments ? uvRanges : uvRanges.subarray(0, finalCount * 2), 2, false);
+    visual.mesh.thinInstanceSetBuffer('alphaRange',
+        finalCount === totalSegments ? alphaRanges : alphaRanges.subarray(0, finalCount * 2), 2, false);
+    visual.mesh.thinInstanceCount = finalCount;
 }

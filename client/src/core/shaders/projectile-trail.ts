@@ -1,18 +1,26 @@
 /**
- * Projectile trail shader — billboard sprite with per-instance alpha.
+ * Projectile trail shader — ribbon segment with per-instance UV range
+ * and per-end alpha gradient.
  *
- * Geometry: a unit quad (1×1, centred on origin) thin-instanced once
- * per live trail puff. The CPU side composes a camera-facing world
- * matrix per puff and fills the standard `world0..3` thin-instance
- * attribute (same as the cannon billboard pass). A custom per-
- * instance attribute `alpha` carries each puff's age-derived fade,
- * computed CPU-side as `1 - age / lifetime` so the shader stays
- * stateless w.r.t. spawn time.
+ * Geometry: a unit XY plane thin-instanced once per ribbon segment
+ * (i.e. once per pair of consecutive trail nodes). The CPU composes
+ * a per-segment matrix whose X-axis is the (pos2 − pos1) edge vector
+ * and Y-axis is the ribbon "out" direction (camera × travel),
+ * matching Recoil's `CSmokeTrailProjectile::Draw` quad layout.
+ *
+ * Per-instance attributes:
+ *  - `uvRange.xy` (uMin, uMax) — sub-rect of the texture sampled
+ *    across the segment's long axis. Successive segments tile the
+ *    texture so the smoketrail strip appears continuous along the
+ *    trail; the U coordinate advances by `segLength / TILE_LEN`.
+ *  - `alphaRange.xy` (a1, a2) — alpha at pos1 / pos2 ends, lerped
+ *    across the segment so older end fades while younger end stays
+ *    bright. Without per-end alpha the segment would be uniformly
+ *    coloured and the visible boundary between live + dead puffs
+ *    would pop in/out.
  *
  * Output uses premultiplied-alpha additive (paired with alphaMode = 7
- * in the material, same convention as the beam and build-beam
- * shaders), so faded puffs contribute nothing to the framebuffer
- * once alpha hits zero.
+ * in the material), so faded ends contribute nothing.
  */
 
 import { Effect } from '@babylonjs/core';
@@ -22,7 +30,8 @@ export const PROJECTILE_TRAIL_VERTEX = `
 
     attribute vec3 position;
     attribute vec2 uv;
-    attribute float alpha;
+    attribute vec2 uvRange;
+    attribute vec2 alphaRange;
     #include<instancesDeclaration>
     uniform mat4 viewProjection;
 
@@ -31,8 +40,8 @@ export const PROJECTILE_TRAIL_VERTEX = `
 
     void main() {
         mat4 finalWorld = mat4(world0, world1, world2, world3);
-        vUV = uv;
-        vAlpha = alpha;
+        vUV = vec2(uvRange.x + uv.x * (uvRange.y - uvRange.x), uv.y);
+        vAlpha = mix(alphaRange.x, alphaRange.y, uv.x);
         gl_Position = viewProjection * finalWorld * vec4(position, 1.0);
     }
 `;

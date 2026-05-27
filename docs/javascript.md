@@ -200,6 +200,86 @@ await window.test.spawn('papertank', 4096, 4096, 0, 4)
 
 Or use the `browser_test` MCP tool (in the spring-debug server) to generate the snippet automatically.
 
+### Driving scenarios for iterative testing
+
+Scenarios live in [client/src/scenarios/](../client/src/scenarios/) and are launched via `?scenario=<name>` (e.g. `?scenario=weapon-showcase&only=missile&dwellMs=60000`). The runner ([client/src/scenarios/runner.ts](../client/src/scenarios/runner.ts)) auto-logs in as `test1:test`, creates a fresh room, waits for first frame, runs `scenario.setup(h)`, then `scenario.run(h)` if defined.
+
+**ZK cold-boot is ~150 s** because of unit-script loading. For iterative debugging (render/material/shader fixes), reloading the page for every change is painful.
+
+#### Pitfalls
+
+- **`wait_for` watches DOM text, not console logs.** Scenario progress is logged to the console, not painted to the page. Polling `window.scenarioResults` via `evaluate_script` is the only reliable completion signal.
+- **Editing any TypeScript file the scenario imports triggers Vite HMR → full page reload.** That kills the running game server's room association and the runner spins up a *new* room (another 150 s wait). For debug-and-verify loops, edit the source **once** to land the real fix, then drive verification via inline `evaluate_script` against `window.test`.
+- **`clearArena` leaves both teams empty.** ZK's game-over check (`game_over.lua`) flips the room to "Game Over" once an ally team has no units. The render canvas goes dark and synthetic injection has no visible background. Spawn at least one unit on team 0 *and* team 1 before clearing if you want to keep the game live across iterations.
+
+#### Polling scenario completion
+
+```js
+// In evaluate_script — returns null until runner publishes,
+// then { name, startedAt, status: 'running'|'pass'|'fail'|'error', finishedAt, assertions }.
+window.scenarioResults
+```
+
+Poll every 30–60 s instead of trying to time it. The `status` field is the canonical completion signal.
+
+#### Re-firing a single weapon entry without reload
+
+After a `weapon-showcase` cycle completes the renderer state survives. Re-fire any entry by calling the harness directly — no file edit, no reload:
+
+```js
+// In evaluate_script:
+const h = window.test, cx = 8704, cz = 8704;
+await h.clear();
+await new Promise(r => setTimeout(r, 300));
+const sId = Number((await h.spawn('staticnuke', cx - 800, cz, 0, 1)).match(/:\s*(\d+)/)[1]);
+const tId = Number((await h.spawn('damagesink', cx + 800, cz, 1, 1)).match(/:\s*(\d+)/)[1]);
+await h.lua(`
+  Spring.GiveOrderToUnit(${tId}, 50, {0}, 0)   -- hold-position
+  Spring.GiveOrderToUnit(${tId}, 45, {0}, 0)   -- hold-fire
+  Spring.SetUnitMaxHealth(${tId}, 1e9)
+  Spring.SetUnitHealth(${tId}, 1e9)
+`);
+await h.stockpile(sId, 4, 0);                  // for stockpile-gated weapons
+await h.cameraSnapToGround(cx, cz, { height: 1400, pitchDeg: 40, durationMs: 0 });
+await h.order(sId, 20 /*CMD_ATTACK*/, [cx + 800, 0, cz]);   // ground attack
+await h.simSpeed(0.1);
+```
+
+Combined with `set_sim_speed` and `pause_sim` from `mcp__spring-debug`, this gives a tight inspect → patch → re-fire loop in single-digit seconds per iteration.
+
+#### Synthetic renderer verification
+
+For verifying shader/material configuration without waiting for a live projectile, inject thin-instance data directly into the renderer's per-def visuals. Example for trail puffs:
+
+```js
+const pr = window.__projectileRenderer;
+const v = pr.trailVisuals.get(defId);          // existing visual from a prior fire
+const matrices = new Float32Array(N * 16);
+const alphas = new Float32Array(N);
+// ...compose camera-facing billboard matrices into `matrices`...
+v.mesh.thinInstanceSetBuffer('matrix', matrices, 16, false);
+v.mesh.thinInstanceSetBuffer('alpha', alphas, 1, false);
+v.mesh.thinInstanceCount = N;
+v.mesh.isVisible = true;
+// Repin in an interval if the per-tick flush clobbers it.
+```
+
+Useful for testing material flags (`needAlphaBlending`, `alphaMode`, `renderingGroupId`) without re-staging combat.
+
+#### Live-patching materials before source edit
+
+Before editing the source, validate the hypothesis live:
+
+```js
+const m = pr.trailVisuals.get(defId).material;
+m.needAlphaBlending = () => true;              // monkey-patch
+// take screenshot, compare
+m.needAlphaBlending = function() { return this.alpha < 1.0 || (this._options?.needAlphaBlending ?? false); };
+// revert, compare
+```
+
+If the patch flips the visual, the source fix is the canonical equivalent (in this case, `needAlphaBlending: true` in the `ShaderMaterial` constructor options).
+
 ## `window.debugConsole` — Debug Console
 
 The in-game debug console (opened with backtick `` ` ``). Provides:

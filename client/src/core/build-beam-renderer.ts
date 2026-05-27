@@ -387,6 +387,9 @@ export class BuildBeamRenderer {
                        'baseColor', 'time', 'intensityMul'],
             samplers: ['beamTex'],
             defines: ['#define INSTANCES', '#define THIN_INSTANCES'],
+            // Required for `mat.alphaMode = 7` below to take effect —
+            // ShaderMaterial defaults to opaque-pass rendering.
+            needAlphaBlending: true,
         });
         mat.setColor3('baseColor', new Color3(color[0], color[1], color[2]));
         mat.setFloat('time', 0);

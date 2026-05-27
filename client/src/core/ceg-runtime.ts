@@ -940,6 +940,11 @@ export class CegRuntime {
                 uniforms: ['world', 'viewProjection', 'atlasDimsInv'],
                 samplers: ['particleTex'],
                 defines: ['#define INSTANCES', '#define THIN_INSTANCES'],
+                // Without this `alphaMode = 7` below is silently ignored —
+                // mesh renders in the opaque pass with blending off and
+                // the premul output `vec4(rgb*a, a)` writes dark squares.
+                // See feedback_scenario_iteration.md / project_trail_alpha_blending.md.
+                needAlphaBlending: true,
             });
         // Premultiplied additive — same convention as trail/beam.
         mat.alphaMode = 7;

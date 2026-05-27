@@ -780,20 +780,33 @@ export class ProjectileRenderer {
         }
         if (!p) return;
 
-        // Laser bolts get a deferred deletion: Recoil's CLaserProjectile
-        // holds the bolt at impact for `stayTime` (hardstop) or fades it
-        // over an intensity ramp (non-hardstop) so the eye registers the
-        // hit before the bolt vanishes. The `tick()` laser pass owns the
-        // contraction; we just flip `impacted` here and seed `stayTime`
-        // for the hardstop path. Non-hardstop bolts already have a non-
-        // zero `intensity` from spawn — the tick loop will decay it via
-        // `intensityFalloff * dt`.
+        // Laser bolts get a deferred deletion so the eye registers the
+        // hit before the bolt vanishes. Recoil's CLaserProjectile drives
+        // this off two separate signals — hardstop bolts hold for
+        // `stayTime` then contract `curLength` to zero; non-hardstop
+        // bolts fade `intensity` to zero over ~5 frames via alpha. Our
+        // renderer has no per-instance alpha hookup (the material is
+        // built once at def-load), so a pure intensity fade would be
+        // invisible — bolts would just sit at full length until the
+        // 20-sim-second decay finally evicted them (we observed 80+
+        // bolts stacked on the impact point at 0.25× sim speed).
+        //
+        // Unify on the curLength-contraction path for both flavours:
+        // the tick loop shrinks the bolt back toward the impact point
+        // at `speedf` per second, which is fast enough to read as a
+        // snap-collapse and bounded enough to evict the entry. Hardstop
+        // still gets its hold window; non-hardstop contracts on the
+        // next tick.
         const v = this.weaponVisuals.get(p.weaponDefId);
         if (v && v.kind === 'laserBolt') {
             p.impacted = true;
-            if (v.hardStop) {
-                p.stayTime = LASER_HARDSTOP_HOLD_S;
-            }
+            p.stayTime = v.hardStop ? LASER_HARDSTOP_HOLD_S : 0;
+            // Leave `p.vel` intact even though motion is frozen — the
+            // impacted branch in tick() skips the integration step via
+            // `continue`, so the bolt stays anchored. The laser-bolt
+            // pass reads `p.vel` to build the shaft basis (dir = unit
+            // velocity); zeroing it makes the pass fall back to +Y and
+            // visibly rotates the contracting bolt during collapse.
             // Leave the entry in this.live; do not push trail to orphans
             // yet — laser bolts have no trail in the current builder.
             return;
@@ -868,23 +881,27 @@ export class ProjectileRenderer {
             const lv = this.weaponVisuals.get(p.weaponDefId);
 
             if (p.impacted && lv && lv.kind === 'laserBolt') {
-                // Post-impact laser bolt: hardstop holds-then-contracts,
-                // non-hardstop fades by intensity. No more motion / gravity
-                // / orphan checks — the bolt is anchored at impact pos.
-                if (lv.hardStop) {
-                    if (p.stayTime > 0) {
-                        p.stayTime -= dt;
-                    } else {
-                        p.curLength -= lv.speedf * dt;
-                        if (p.curLength <= 0) {
-                            p.curLength = 0;
-                            dead.push(p.id);
-                        }
-                    }
+                // Post-impact laser bolt: hold for `stayTime` then
+                // contract `curLength` at the same rate the bolt
+                // extended at spawn. The visible snap-back to the
+                // impact point is the death animation. Hardstop and
+                // non-hardstop both end up here (onImpact zeros vel
+                // and sets stayTime appropriately) — see the rationale
+                // in onImpact for why intensity-based fade was retired.
+                if (p.stayTime > 0) {
+                    p.stayTime -= dt;
                 } else {
-                    p.intensity -= lv.intensityFalloff * dt;
-                    if (p.intensity <= 0) dead.push(p.id);
+                    p.curLength -= lv.speedf * dt;
+                    if (p.curLength <= 0) {
+                        p.curLength = 0;
+                        dead.push(p.id);
+                    }
                 }
+                // Hard safety: evict any impacted bolt that's overstayed
+                // MAX_ORPHAN_LIFE_MS even if its contraction stalled
+                // (numerical edge or a tick storm). Without this the
+                // impacted branch had no upper bound on live-set size.
+                if (nowMs - p.spawnedAtMs > MAX_ORPHAN_LIFE_MS) dead.push(p.id);
                 continue;
             }
 
@@ -914,7 +931,21 @@ export class ProjectileRenderer {
 
             if (p.ttl > 0) {
                 p.ttl -= dt;
-                if (p.ttl <= 0) dead.push(p.id);
+                if (p.ttl <= 0) {
+                    // Laser bolts whose ttl expires without an impact
+                    // event = the bolt outflew its range. Flip to the
+                    // collapse path so the next tick contracts curLength
+                    // instead of vanishing the bolt mid-air. Keep `vel`
+                    // intact — the impacted branch skips integration via
+                    // `continue`, and the laser pass needs the direction
+                    // to orient the contracting shaft (see onImpact).
+                    if (lv && lv.kind === 'laserBolt') {
+                        p.impacted = true;
+                        p.stayTime = 0;
+                    } else {
+                        dead.push(p.id);
+                    }
+                }
             }
             if (nowMs - p.spawnedAtMs > MAX_ORPHAN_LIFE_MS) dead.push(p.id);
         }
@@ -1637,6 +1668,9 @@ function buildBeamVisual(
                    'baseColor', 'time', 'scrollRate', 'tileLength', 'duration'],
         samplers: ['beamTex'],
         defines: ['#define INSTANCES', '#define THIN_INSTANCES'],
+        // Required for `mat.alphaMode = 7` below to take effect —
+        // ShaderMaterial defaults to opaque-pass rendering.
+        needAlphaBlending: true,
     });
     mat.setColor3('baseColor', new Color3(color[0], color[1], color[2]));
     mat.setFloat('time', 0);
