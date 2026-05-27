@@ -4,6 +4,8 @@
 #include "StarburstProjectile.h"
 #include "Game/GlobalUnsynced.h"
 #include "Map/Ground.h"
+#include "Server/ProjectileEventCollector.h"
+#include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Projectiles/ExplosionGenerator.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Projectiles/ProjectileMemPool.h"
@@ -121,6 +123,27 @@ void CStarburstProjectile::Update()
 
 	if (ttl > 0)
 		explGenHandler.GenExplosion(cegID, pos, dir, ttl, damages->damageAreaOfEffect, 0.0f, nullptr, nullptr);
+
+	// Web client needs periodic trajectory snapshots so its local
+	// integrator can follow the 3-stage arc (launch up → turn → seek).
+	// The Fired event alone leaves the integrator running pos += vel*dt
+	// from the initial straight-up vector, which sends the missile off
+	// into orbit instead of arcing back to the target. Sampled at ~1 Hz
+	// (every 30 sim frames) so a 6-second nuke flight only adds 6
+	// trajectory messages — well below the ~10 Hz cap projectile state
+	// streaming used to consume. The `id % 30 == frame % 30` rotor
+	// staggers per-projectile emission across the tick so simultaneous
+	// salvos don't clump on one frame.
+	if (!luaMoveCtrl
+	    && (static_cast<int>(id) % 30) == (gs->frameNum % 30)) {
+		ProjectileTrajectoryEventData ev;
+		ev.projId = static_cast<uint32_t>(id);
+		ev.pos    = pos;
+		ev.vel    = float3(speed.x, speed.y, speed.z);
+		ev.reason = 1u; /* Steer */
+		ev.team   = static_cast<uint8_t>(teamID);
+		projectileEvents.PushTrajectory(ev);
+	}
 
 	UpdateTracerPart();
 	UpdateSmokeTrail();

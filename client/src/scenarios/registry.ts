@@ -13,6 +13,7 @@ import aimRotation from './bench/aim-rotation.js';
 import movePathing from './bench/move-pathing.js';
 import unitTestLoop from './bench/unit-test-loop.js';
 import weaponFx from './bench/weapon-fx.js';
+import weaponShowcase from './bench/weapon-showcase.js';
 
 const SCENARIOS: Scenario[] = [
     duelAttack,
@@ -20,6 +21,7 @@ const SCENARIOS: Scenario[] = [
     movePathing,
     unitTestLoop,
     weaponFx,
+    weaponShowcase,
 ];
 
 const BY_NAME = new Map<string, Scenario>(SCENARIOS.map((s) => [s.name, s]));

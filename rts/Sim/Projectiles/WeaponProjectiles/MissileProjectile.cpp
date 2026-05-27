@@ -4,6 +4,7 @@
 #include "Game/GameHelper.h"
 #include "Map/Ground.h"
 #include "MissileProjectile.h"
+#include "Server/ProjectileEventCollector.h"
 #include "Sim/Misc/GeometricObjects.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Projectiles/ExplosionGenerator.h"
@@ -182,6 +183,23 @@ void CMissileProjectile::Update()
 		SetPosition(pos + speed);
 
 	age++;
+
+	// Periodic trajectory snapshot for the web client's local
+	// integrator. Guided missiles steer mid-flight (wobble, dance,
+	// extraHeight apex, ground-bounce), so a single Fired event isn't
+	// enough — the client's pos += vel*dt would drift off-course.
+	// Rate matches StarburstProjectile: 1 Hz with an id-staggered
+	// rotor (~30 sim frames apart per projectile).
+	if (!luaMoveCtrl
+	    && (static_cast<int>(id) % 30) == (gs->frameNum % 30)) {
+		ProjectileTrajectoryEventData ev;
+		ev.projId = static_cast<uint32_t>(id);
+		ev.pos    = pos;
+		ev.vel    = float3(speed.x, speed.y, speed.z);
+		ev.reason = 1u; /* Steer */
+		ev.team   = static_cast<uint8_t>(teamID);
+		projectileEvents.PushTrajectory(ev);
+	}
 
 	UpdateInterception();
 	UpdateGroundBounce();

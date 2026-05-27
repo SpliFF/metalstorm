@@ -125,7 +125,14 @@ export class ScenarioRunner {
             // re-read it on every poll instead of caching the first
             // sight. Polling `frame()` confirms the server is both
             // listening and ticking.
-            const h = await this.waitForFirstFrame(120000);
+            //
+            // ZK boot is dominated by unit-script loading (~600 Lua
+            // files via LuaParser) and can take 150–180 s on a cold
+            // start. 240 s gives comfortable headroom; the shorter
+            // 120 s ceiling caused setup() to never run on a clean
+            // boot. If a sim genuinely never ticks the runner will
+            // still error after 4 wall minutes rather than hang.
+            const h = await this.waitForFirstFrame(240000);
 
             // Pre-setup: enable cheats + revive every team. Without this,
             // ZK's game_over.lua (game_over.lua ProcessLastAlly) flags
