@@ -1997,8 +1997,13 @@ int main(int argc, char* argv[])
         int curFrame = sim.GetFrameNum();
         if (curFrame >= 0 && (curFrame % 30) == 0 && rtcServer.GetClientCount() > 0 && winningTeam < 0) {
             const float3& wv = envResHandler.GetCurrentWindVec();
-            auto msg = Protocol::BuildGameInfo(mapId, gameId, 1.0f,
-                static_cast<uint32_t>(curFrame), false,
+            // gs->speedFactor is the live sim-speed multiplier (set by
+            // the `speed <N>` server command via LuaExecEngine). Broadcast
+            // it so the client's projectile integrator can scale its
+            // wall-clock dt to sim-time — otherwise bolts overshoot at
+            // slow-mo and fall short at fast-forward.
+            auto msg = Protocol::BuildGameInfo(mapId, gameId, gs->speedFactor,
+                static_cast<uint32_t>(curFrame), gs->paused,
                 wv.x, wv.y, wv.z,
                 envResHandler.GetCurrentWindStrength(),
                 envResHandler.GetCurrentTidalStrength(),

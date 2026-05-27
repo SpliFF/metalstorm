@@ -1141,6 +1141,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             // which verb to send on toggle. Also drives the HUD label.
             inputManager?.setSimStatus(speed, paused);
             updateSpeedHUD(speed, paused);
+            // Projectile integrator needs the current sim-speed so its
+            // wall-clock dt translates to sim-time motion / ttl decay.
+            // Treat paused as 0× so bolts freeze with the sim.
+            projectileRenderer?.setSimSpeed(paused ? 0 : speed);
         },
         onUnitCommandQueues(queues) {
             lastCommandQueues = queues;

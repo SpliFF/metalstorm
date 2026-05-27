@@ -2897,16 +2897,14 @@ void CGroundMoveType::KeepPointingTo(float3 pos, float distance, bool aggressive
 	if (owner->heading == heading)
 		return;
 
-	// NOTE:
-	//   by changing the progress-state here (which seems redundant),
-	//   SlowUpdate can suddenly request a new path for us even after
-	//   StopMoving (which clears pathID; CAI often calls StopMoving
-	//   before unit is at goalPos!)
-	//   for this reason StopMoving always updates goalPos so internal
-	//   GetNewPath's are no-ops (while CAI does not call StartMoving)
-	if (frontWeapon->TestRange(mainHeadingPos, SWeaponTarget(mainHeadingPos, true)))
-		return;
-
+	// Upstream Spring had a `frontWeapon->TestRange(...)` early-return
+	// here, which short-circuited body rotation whenever the weapon's
+	// arc could already hit the target. For omnidirectional turrets
+	// (maxMainDirAngleDif < 0 in CheckTargetAngleConstraint) that's
+	// every frame, so the body never turned to face the firing target.
+	// We want the body to align with the firing direction regardless of
+	// turret arc, so the early-return is dropped — the turret still
+	// aims at the target as before; the body just also rotates to follow.
 	progressState = Active;
 }
 
@@ -2952,9 +2950,9 @@ void CGroundMoveType::SetMainHeading() {
 	if (owner->heading == newHeading)
 		return;
 
-	if (frontWeapon->TestRange(mainHeadingPos, SWeaponTarget(mainHeadingPos, true)))
-		return;
-
+	// Sister to the drop in KeepPointingTo — if the body is misaligned
+	// from the firing direction we want to start rotating, even when the
+	// weapon's arc could already cover the target.
 	progressState = Active;
 }
 

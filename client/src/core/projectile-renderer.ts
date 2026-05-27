@@ -351,6 +351,16 @@ export class ProjectileRenderer {
     /// Null until injected; spawn calls are guarded.
     private cegRuntime: CegRuntime | null = null;
 
+    /// Current sim-speed multiplier (1 = 30 ticks/sec, 2 = 60, 0.5 = 15).
+    /// Updated from the server's GameInfo broadcast via main.ts. The
+    /// per-frame integrator scales wall-clock dt by this so projectile
+    /// motion and ttl decay stay in lockstep with the server clock —
+    /// otherwise at >1x bolts arrive at the impact event before the
+    /// integrator has reached the target (visually short), and at <1x
+    /// the integrator overshoots before the impact arrives (visually
+    /// long, then vanishes).
+    private simSpeed = 1;
+
     /// Most recent def list passed to setWeaponDefs. Retained so we
     /// can rebuild visuals after the resolver finishes loading
     /// resources.json + manifests — see the async-init race section
@@ -381,6 +391,13 @@ export class ProjectileRenderer {
     /// see effectForFire / effectForImpact at the bottom of this file.
     setCegRuntime(r: CegRuntime): void {
         this.cegRuntime = r;
+    }
+
+    /// Push the current sim-speed multiplier. Called from main.ts's
+    /// onGameInfo handler. 0 = paused (motion freezes), positive
+    /// scales motion by that factor; nonsense values are ignored.
+    setSimSpeed(speed: number): void {
+        if (Number.isFinite(speed) && speed >= 0) this.simSpeed = speed;
     }
 
     /// Inject the resolver after init(). Called once per game session
@@ -780,8 +797,14 @@ export class ProjectileRenderer {
      *  thin-instance buffers per weapon def. Call from the render loop. */
     tick(): void {
         const nowMs = performance.now();
-        const dt = Math.min((nowMs - this.lastTickMs) / 1000, 0.1);
+        const wallDt = Math.min((nowMs - this.lastTickMs) / 1000, 0.1);
         this.lastTickMs = nowMs;
+        // Sim-time delta drives projectile motion + ttl decay so they
+        // stay in lockstep with the server clock at non-1x speeds (see
+        // setSimSpeed). Wall-time delta is preserved separately for
+        // visuals that genuinely tick on wall-time (beam fade, trail
+        // puff age, orphan eviction).
+        const dt = wallDt * this.simSpeed;
 
         // 0. Cull expired beams. Fade is computed in the fragment
         //    shader from (now - bornAtMs) / lifeS; we just drop entries
