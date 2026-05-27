@@ -83,7 +83,7 @@ interface WeaponEntry {
     /// engine's stuck-on-ground takeoff path doesn't gate the test.
     shooterFlying?: boolean;
     /// `true` for stockpile-gated weapons (nukes). The scenario
-    /// pre-stockpiles via `Spring.SetUnitStockpile` and orders an
+    /// pre-stockpiles via the `stockpile` server verb and orders an
     /// attack-ground at the target instead of a unit-attack.
     stockpile?: boolean;
     /// `true` for manual-fire / DGun weapons. Switches the order
@@ -364,15 +364,11 @@ async function fireOneEntry(
 
     // Stockpile pre-fill for nukes: the live stockpile timer is in
     // minutes — without the cheat the scenario would time out long
-    // before the missile launched. The Spring.SetUnitStockpile API
-    // takes (unitId, count, queue) — give one ready + three queued
-    // so a second launch can happen if dwellMs is long enough.
+    // before the missile launched. The server `stockpile` verb sets
+    // numStockpiled directly and wires u->stockpileWeapon if it isn't
+    // yet, so this works the tick after spawn — no flaky sleep needed.
     if (w.stockpile) {
-        await h.lua(`
-            if Spring.SetUnitStockpile then
-                Spring.SetUnitStockpile(${sId}, 4, 0)
-            end
-        `);
+        await h.stockpile(sId, 4, 0);
     }
 
     // Issue the firing order. Stockpiled / manual-fire weapons take
@@ -448,7 +444,7 @@ const scenario: Scenario = {
                     flyAlt: w.targetMode === 'flying' ? (w.targetAlt ?? 220) : undefined,
                 });
                 if (w.stockpile) {
-                    await h.lua(`if Spring.SetUnitStockpile then Spring.SetUnitStockpile(${sId}, 4, 0) end`);
+                    await h.stockpile(sId, 4, 0);
                 }
                 if (w.stockpile || w.manualFire) {
                     await h.order(sId, CMD_MANUALFIRE, [cx + half, 0, MAP_CENTER]);

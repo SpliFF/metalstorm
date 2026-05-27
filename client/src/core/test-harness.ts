@@ -56,7 +56,7 @@ const DEFAULT_FOCUS_HEIGHT = 800;
 
 /** Server-scope shorthand verbs. Symbolic to keep call sites grep-friendly. */
 type ServerVerb =
-    | 'spawn' | 'kill' | 'damage' | 'order' | 'clear'
+    | 'spawn' | 'kill' | 'damage' | 'order' | 'clear' | 'stockpile'
     | 'log' | 'state' | 'units' | 'frame' | 'pause' | 'unpause'
     | 'unit_state' | 'combat_summary' | 'defs'
     | 'cheats' | 'revive_team';
@@ -151,6 +151,15 @@ export class TestHarness {
     /** Wipe all units (or all units on a single team). */
     clear(team?: number): Promise<string> {
         return team !== undefined ? this.server('clear', team) : this.server('clear');
+    }
+
+    /** Insta-fill a unit's stockpile weapon (nukes, anti-nukes, tactical
+     *  missiles). Sets `numStockpiled` directly so CMD_MANUALFIRE works on
+     *  the next tick; skips the natural multi-minute build cycle. Use
+     *  this in scenarios instead of `Spring.SetUnitStockpile`, which
+     *  silently no-ops when the stockpile weapon isn't wired yet. */
+    stockpile(unitId: number, count: number, queued = 0): Promise<string> {
+        return this.server('stockpile', unitId, count, queued);
     }
 
     /** Toggle Spring cheats. Required for many test verbs (spawn,

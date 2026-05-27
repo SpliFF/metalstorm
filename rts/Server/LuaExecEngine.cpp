@@ -11,6 +11,7 @@
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitDefHandler.h"
+#include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Weapons/Weapon.h"
 #include "Sim/Weapons/WeaponDef.h"
 #include "Sim/Weapons/WeaponDefHandler.h"
@@ -434,6 +435,49 @@ std::string ExecuteServerCommand(const std::string& cmd) {
         lua << "for _, id in ipairs(ids) do Spring.DestroyUnit(id, false, true) end\n"
             << "return 'cleared ' .. #ids .. ' unit(s)'";
         return runOnLuaRules(lua.str());
+    }
+
+    // stockpile <unitId> <count> [queued=0]  — insta-fill the unit's
+    // stockpile weapon. The natural build cycle takes minutes per missile;
+    // this skips it for test harness use. Sets `numStockpiled` directly so
+    // CMD_MANUALFIRE / CMD_ATTACK works on the next tick.
+    //
+    // Spring.SetUnitStockpile silently no-ops when stockpileWeapon is null,
+    // which is what made the Lua-only path flaky from `weapon-showcase`.
+    // Here we walk weapons[] to find the stockpile weapon if it isn't
+    // wired yet (it should be — CWeapon::Init() sets it during PostInit,
+    // synchronous with CreateUnit — but defensive search is cheap).
+    if (cmd.rfind("stockpile ", 0) == 0) {
+        std::istringstream is(cmd.substr(10));
+        int unitId = 0, count = 0, queued = 0;
+        is >> unitId >> count >> queued;
+        if (unitId <= 0 || count < 0) {
+            return "usage: stockpile <unitId> <count> [queued=0]";
+        }
+        CUnit* u = unitHandler.GetUnit((unsigned)unitId);
+        if (!u) return "no such unit";
+
+        CWeapon* w = u->stockpileWeapon;
+        if (w == nullptr) {
+            for (CWeapon* candidate : u->weapons) {
+                if (candidate && candidate->weaponDef && candidate->weaponDef->stockpile) {
+                    w = candidate;
+                    u->stockpileWeapon = candidate;
+                    break;
+                }
+            }
+        }
+        if (w == nullptr) return "unit has no stockpile weapon";
+
+        w->numStockpiled = count;
+        w->numStockpileQued = std::max(0, queued);
+        if (u->commandAI) u->commandAI->UpdateStockpileIcon();
+
+        std::ostringstream ss;
+        ss << "unit " << unitId
+           << " stockpile=" << w->numStockpiled
+           << " queued=" << w->numStockpileQued;
+        return ss.str();
     }
 
     // unit_state <unitId>  — dump health/pos/team/weapons.
