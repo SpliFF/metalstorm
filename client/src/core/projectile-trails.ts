@@ -28,6 +28,7 @@
 
 import {
     Scene,
+    Engine,
     Mesh,
     MeshBuilder,
     ShaderMaterial,
@@ -36,6 +37,7 @@ import {
     Vector3,
     Quaternion,
     Texture,
+    RawTexture,
 } from '@babylonjs/core';
 
 import type { WeaponDefInfo } from './connection.js';
@@ -109,6 +111,28 @@ export function createMissileTrailState(): MissileTrailState {
     };
 }
 
+/// Shared 1×1 white RawTexture, lazily allocated on first builder call.
+/// Used as the initial binding for every trail material so the shader
+/// samples (1,1,1,1) until the real .ktx2 finishes loading — without
+/// this, WebGL hands back (0,0,0,1) from the unbound sampler and the
+/// premul-additive blend (alphaMode 7) writes opaque black quads at
+/// every puff position. Same root cause and fix as the CEG runtime's
+/// `fallbackWhiteTex` (commit 5832b8be7a).
+let sharedTrailFallback: RawTexture | null = null;
+function getTrailFallback(scene: Scene): RawTexture {
+    if (sharedTrailFallback) return sharedTrailFallback;
+    const t = new RawTexture(
+        new Uint8Array([255, 255, 255, 255]),
+        1, 1, Engine.TEXTUREFORMAT_RGBA, scene,
+        /*generateMipMaps*/ false, /*invertY*/ false,
+        Texture.NEAREST_SAMPLINGMODE,
+    );
+    t.name = 'projTrail-fallback-white';
+    t.hasAlpha = true;
+    sharedTrailFallback = t;
+    return t;
+}
+
 /// Build the per-def trail visual. Returns null when the resolver
 /// can't supply a texture URL for `def.texture2` — caller should
 /// then skip trail tracking for missiles of this def entirely.
@@ -143,10 +167,16 @@ export function buildMissileTrailVisual(
         : new Color3(1, 1, 1);
     mat.setColor3('tint', tint);
 
+    // Bind the shared white fallback first so the very first puffs
+    // emitted (during the .ktx2 load window) sample (1,1,1,1) instead
+    // of WebGL's unbound-sampler (0,0,0,1). The real texture swaps in
+    // via the onLoad callback below.
+    mat.setTexture('trailTex', getTrailFallback(scene));
+
     const tex = new Texture(stampUrl(url), scene, /*noMipmap*/ false,
-        /*invertY*/ true, Texture.TRILINEAR_SAMPLINGMODE);
+        /*invertY*/ true, Texture.TRILINEAR_SAMPLINGMODE,
+        () => { mat.setTexture('trailTex', tex); });
     tex.hasAlpha = true;
-    mat.setTexture('trailTex', tex);
     // Premultiplied additive — same convention as the beam shader so
     // faded puffs contribute zero to the framebuffer.
     mat.alphaMode = 7;
