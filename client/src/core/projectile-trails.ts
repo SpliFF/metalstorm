@@ -110,6 +110,18 @@ export function createMissileTrailState(): MissileTrailState {
     };
 }
 
+/// Reset every slot to empty. Used on ProjectileTrajectoryEvent when the
+/// server-corrected position is far enough from the client's local
+/// extrapolation that the existing ring buffer is stale — the puffs
+/// were recorded along the wrong (pre-correction) trajectory and would
+/// bridge to the new trajectory via a long stray ribbon segment. The
+/// next recordTrailPuff seeds slot 0 at the corrected position.
+export function resetMissileTrailState(state: MissileTrailState): void {
+    state.birthSecs.fill(-1);
+    state.nextSlot = 0;
+    state.lastSpawnSec = -Infinity;
+}
+
 /// Shared 1×1 white RawTexture, lazily allocated on first builder call.
 /// Used as the initial binding for every trail material so the shader
 /// samples (1,1,1,1) until the real .ktx2 finishes loading — without

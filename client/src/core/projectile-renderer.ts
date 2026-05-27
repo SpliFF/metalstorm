@@ -59,6 +59,7 @@ import {
     flushMissileTrailVisual,
     isTrailFullyFaded,
     recordTrailPuff,
+    resetMissileTrailState,
 } from './projectile-trails.js';
 
 /** Default colors per projectile type when the weapon def doesn't
@@ -352,6 +353,16 @@ const CEG_EMIT_PERIOD_S = 1 / SIM_TICKS_PER_SEC;
 /// per frame keeps work bounded while still letting trails read as
 /// continuous at moderate fast-forward.
 const MAX_CEG_EMITS_PER_FRAME = 4;
+
+/// Squared position delta (elmos²) above which a trajectory snapshot
+/// is treated as a real course correction and the missile trail is
+/// reset. Below this threshold the snapshot just nudges the client
+/// extrapolation by a few elmos and the existing puffs are still close
+/// enough to the corrected path to read fine. 20² = 400 elmos² — two
+/// puff cadences of slip at typical missile speed (~100 elmos/s),
+/// which is the most a non-steering missile can drift from server
+/// truth between 1 Hz snapshots.
+const TRAIL_RESET_DELTA_SQ = 400;
 
 export class ProjectileRenderer {
     private scene: Scene;
@@ -871,6 +882,28 @@ export class ProjectileRenderer {
         const p = this.live.get(ev.projId);
         if (!p) return;
         const vps = SIM_TICKS_PER_SEC;
+        // Trajectory snapshots arrive once per second per missile
+        // (MissileProjectile.cpp's id-staggered rotor). Between snapshots
+        // the client straight-line extrapolates `pos += vel*dt`, so the
+        // missile's trail puff buffer accumulates puffs along the
+        // extrapolated path. When a guided missile steers mid-flight,
+        // the server-corrected pos diverges from the client extrapolation
+        // and `p.pos` gets teleported below. The puff buffer then bridges
+        // the stale extrapolated path to the new server position with a
+        // long stray ribbon segment that reads as the trail "going
+        // backwards" past the missile. Reset the trail when the delta is
+        // large enough to be a true correction rather than a tiny noise
+        // floor — preserves continuous trails for non-steering missiles
+        // (where extrapolation matched reality) without leaving stale
+        // puffs from aggressive guidance updates.
+        if (p.trail) {
+            const dx = ev.pos.x - p.pos.x;
+            const dy = ev.pos.y - p.pos.y;
+            const dz = ev.pos.z - p.pos.z;
+            if (dx * dx + dy * dy + dz * dz > TRAIL_RESET_DELTA_SQ) {
+                resetMissileTrailState(p.trail);
+            }
+        }
         p.pos.copyFromFloats(ev.pos.x, ev.pos.y, ev.pos.z);
         p.vel.copyFromFloats(ev.vel.x * vps, ev.vel.y * vps, ev.vel.z * vps);
     }
