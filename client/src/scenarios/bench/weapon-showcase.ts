@@ -371,11 +371,19 @@ async function fireOneEntry(
         await h.stockpile(sId, 4, 0);
     }
 
-    // Issue the firing order. Stockpiled / manual-fire weapons take
-    // CMD_MANUALFIRE against the target's ground position; everything
-    // else takes CMD_ATTACK against the unit id.
-    if (w.stockpile || w.manualFire) {
+    // Issue the firing order. Three flavours:
+    //   - DGun / true manual-fire (Commander) → CMD_MANUALFIRE at ground.
+    //     The def's `canManualFire = true` so CommandAI accepts it.
+    //   - Stockpile (staticnuke et al.) → CMD_ATTACK at ground. Even
+    //     though the unit *visually* fires its stockpile weapon, the
+    //     def has `canManualFire = false` so CommandAI silently drops a
+    //     MANUALFIRE order. Attack-ground routes through the stockpile
+    //     firing path.
+    //   - Everything else → CMD_ATTACK against the unit id.
+    if (w.manualFire) {
         await h.order(sId, CMD_MANUALFIRE, [tx, 0, tz]);
+    } else if (w.stockpile) {
+        await h.order(sId, CMD_ATTACK, [tx, 0, tz]);
     } else {
         await h.order(sId, CMD_ATTACK, [tId]);
     }
@@ -446,8 +454,11 @@ const scenario: Scenario = {
                 if (w.stockpile) {
                     await h.stockpile(sId, 4, 0);
                 }
-                if (w.stockpile || w.manualFire) {
+                if (w.manualFire) {
                     await h.order(sId, CMD_MANUALFIRE, [cx + half, 0, MAP_CENTER]);
+                } else if (w.stockpile) {
+                    // Attack-ground; stockpile units have canManualFire=false
+                    await h.order(sId, CMD_ATTACK, [cx + half, 0, MAP_CENTER]);
                 } else {
                     await h.order(sId, CMD_ATTACK, [tId]);
                 }
