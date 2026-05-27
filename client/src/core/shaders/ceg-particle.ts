@@ -71,22 +71,11 @@ export const CEG_PARTICLE_FRAGMENT = `
         vec2 sampleUV = vFrameOffset + vUV * atlasDimsInv;
         vec4 t = texture2D(particleTex, sampleUV);
 
-        // Untextured-class fallback: when the resolver couldn't find a
-        // .ktx2 for this class's authored name, no particleTex was
-        // bound and the WebGL default sampler returns transparent
-        // black. With the material's premul-alpha additive blend
-        // (alphaMode 7), an opaque-but-black RGBA would darken the
-        // framebuffer to a hard black quad. Substitute a flat soft-
-        // disc — same edge taper the projectile-beam shader uses for
-        // missing texture1 — so the per-instance tint colour shows
-        // through as a clean billboard.
-        if (t.a < 0.004) {
-            float dx = vUV.x - 0.5;
-            float dy = vUV.y - 0.5;
-            float r = sqrt(dx * dx + dy * dy) * 2.0;
-            float disc = 1.0 - smoothstep(0.4, 1.0, r);
-            t = vec4(1.0, 1.0, 1.0, disc);
-        }
+        // Untextured classes get a 1×1 white RawTexture bound at
+        // creation time (see CegRuntime.fallbackWhiteTex), so the
+        // sampler always returns a meaningful colour — the runtime
+        // never lets an unbound sampler default to (0,0,0,1) and the
+        // shader doesn't need a fallback branch.
 
         float a = t.a * vTint.a;
         gl_FragColor = vec4(t.rgb * vTint.rgb * a, a);

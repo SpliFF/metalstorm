@@ -65,6 +65,8 @@ import {
     Vector3,
     Quaternion,
     Texture,
+    RawTexture,
+    Engine,
 } from '@babylonjs/core';
 
 import { stampUrl } from '../config.js';
@@ -447,6 +449,16 @@ export class CegRuntime {
     private resolver: ProjectileTextureResolver | null = null;
     private classes = new Map<string, ParticleClass>();
     private effects = new Map<string, EffectDef>();
+    /// Shared 1×1 RGBA(255,255,255,255) sampler. Bound to every class's
+    /// `particleTex` slot at creation time so untextured classes render
+    /// as a clean tinted billboard instead of opaque black. WebGL's
+    /// default for an unbound sampler is (0,0,0,1) — multiplied by
+    /// per-instance tint, that yields a black hole under premul-additive
+    /// blending. The shared white texture makes the fragment shader's
+    /// `t.rgb * vTint.rgb` path collapse to a pure tint while we wait
+    /// for the resolver to settle. `tryBindTexture` later overwrites
+    /// the slot with the real texture once a URL is available.
+    private fallbackWhiteTex: RawTexture;
     /// Sub-CEG dispatch queue (Phase 1). FIFO; entries fire in the
     /// first tick() where `nowMs >= fireAtMs`. The drain replaces the
     /// queue with the entries that are still pending (one allocation
@@ -473,6 +485,15 @@ export class CegRuntime {
     constructor(scene: Scene) {
         this.scene = scene;
         registerCegParticleShader();
+
+        this.fallbackWhiteTex = new RawTexture(
+            new Uint8Array([255, 255, 255, 255]),
+            1, 1, Engine.TEXTUREFORMAT_RGBA, scene,
+            /*generateMipMaps*/ false, /*invertY*/ false,
+            Texture.NEAREST_SAMPLINGMODE,
+        );
+        this.fallbackWhiteTex.name = 'ceg-fallback-white';
+        this.fallbackWhiteTex.hasAlpha = true;
 
         // Materialise the canonical fallback classes up front so the
         // first spawn() (typically a CEG that authored no texture →
@@ -856,6 +877,7 @@ export class CegRuntime {
         }
         this.classes.clear();
         this.effects.clear();
+        this.fallbackWhiteTex.dispose();
         this.pending.length = 0;
         this.warnedDepth.clear();
         this.warnedOverflow = false;
@@ -977,8 +999,15 @@ export class CegRuntime {
         };
         this.classes.set(name, cls);
 
-        // If the resolver is already settled, bind the texture now —
-        // otherwise the lazy bind in tick() will pick it up once
+        // Bind the shared 1×1 white fallback so the shader samples
+        // (1,1,1,1) for unresolved classes — the per-instance tint
+        // then governs the visible colour. Without this, WebGL hands
+        // back (0,0,0,1) from the unbound sampler and the premul-
+        // additive blend produces opaque black quads.
+        mat.setTexture('particleTex', this.fallbackWhiteTex);
+
+        // If the resolver is already settled, swap the real texture in
+        // now — otherwise the lazy bind in tick() will pick it up once
         // resolverReady flips. Pre-bind avoids one frame of untextured
         // rendering on first reference to a new texture mid-game.
         if (this.resolverReady) {
@@ -1263,11 +1292,23 @@ function composeBillboardMatrix(
 
 // ── Built-in effect library ────────────────────────────────────────────────
 //
-// Hand-coded analogues of the most common Spring CEGs. Phase 5b will
-// flesh this out with concrete ports of `disintegrator` / `largelaser`
-// / `lightcannon` / `lightninggun` / `flame` from ZK's
-// `gamedata/particles/`. Phase 5c will replace this whole block with
-// server-streamed defs.
+// Built-in CEG fallbacks. Phase 8 cleanup pared this down to the two
+// effects the runtime *itself* references unconditionally:
+//
+//  - `__default_explosion` — fired by spawnInternal whenever a CEG opts
+//    into `useDefaultExplosions`, and by weapon-fx-dispatch when a
+//    weapondef doesn't author an `explosionGenerator`. Without it,
+//    terrain/feature impacts on un-authored weapons would silently
+//    no-op. Spring's CStdExplosionGenerator equivalent — a flare flash
+//    + a heat cloud puff sized for a generic mid-damage hit.
+//  - `impact_shield` — fired by combat-fx and projectile-renderer
+//    whenever an Impact event reports a shield deflection. Always-on
+//    bypass of the weapondef dispatch.
+//
+// Every other named effect (muzzleflash_*, impact_*) now comes from
+// the server-streamed CEG library (ingestCegDefs). The earlier hand-
+// ported placeholder library lived here during Phase 5b but was
+// duplicate work — game authors override via streamed defs anyway.
 //
 // Sizes are in elmos (Spring's world unit). Velocities in elmos/sec
 // (different from the per-frame numbers the projectile renderer
@@ -1275,12 +1316,6 @@ function composeBillboardMatrix(
 // Colours are RGBA in [0,1]; alpha at age 0, fades to 0 at lifetime.
 
 const BUILTIN_EFFECTS: EffectDef[] = [
-    // Phase 7: standard fallback explosion. Fired by spawnInternal
-    // whenever a CEG has `useDefaultExplosions = true`. Spring's
-    // CStdExplosionGenerator equivalent — a ground flash + a heat
-    // cloud puff. Sized for a generic mid-damage impact; CEG authors
-    // who want quieter or louder defaults override by registering a
-    // same-named EffectDef via the streamed CEG ingest path.
     {
         name: DEFAULT_EXPLOSION_NAME,
         spawns: [
@@ -1318,317 +1353,6 @@ const BUILTIN_EFFECTS: EffectDef[] = [
                 sizeStart: 14, sizeEnd: 22,
                 colorStart: [0.4, 0.7, 1.0, 0.9],
                 rotationSpeedMax: 0,
-            },
-        ],
-    },
-
-    // ── Phase 5b: per-archetype ports of named ZK CEGs ─────────────────
-    //
-    // These approximate the visual signature of five common ZK weapon
-    // archetypes the renderer can reach via `classifyWeaponArchetype`
-    // in projectile-renderer.ts. Numbers come from the corresponding
-    // `content/games/zk/effects/*.lua` defs (ZK's `particlelife` is in
-    // sim frames at 30 Hz; `particlespeed` is elmos/frame). Direct
-    // 1:1 ports would over-spawn vs. the SoA pool budgets — counts
-    // and per-particle sizes are scaled down where the original
-    // exceeds Phase 5a's per-effect ceiling (~24 particles total).
-
-    // Disintegrator muzzle (from `ataalaser`): purple flash + blue
-    // sparks + small purple ground smoke. The original spawns ~14
-    // particles across five sub-emitters; this port collapses them
-    // into the three pool classes while preserving the colour
-    // signature (R<G<B in the blue-violet band).
-    {
-        name: 'muzzleflash_disintegrator',
-        spawns: [
-            {
-                texture: 'flare', count: 2,
-                lifetimeMin: 0.25, lifetimeMax: 0.55,
-                velocityBase: [0, 5, 0], velocitySpread: 6, velocityScale: 4,
-                gravity: -2,
-                sizeStart: 6, sizeEnd: 26,
-                colorStart: [0.3, 0.2, 1.0, 0.9],
-                rotationSpeedMax: 0.5,
-            },
-            {
-                texture: 'flare', count: 1,
-                lifetimeMin: 0.4, lifetimeMax: 0.6,
-                velocityBase: [0, 0, 0], velocitySpread: 0, velocityScale: 0,
-                gravity: 0,
-                sizeStart: 12, sizeEnd: 18,
-                colorStart: [0.6, 0.25, 1.0, 1.0],
-                rotationSpeedMax: 0,
-            },
-            {
-                texture: 'flare', count: 5,
-                lifetimeMin: 0.35, lifetimeMax: 0.85,
-                velocityBase: [0, 0, 0], velocitySpread: 90, velocityScale: 60,
-                gravity: 0,
-                sizeStart: 6, sizeEnd: 1,
-                colorStart: [0.15, 0.25, 1.0, 1.0],
-                rotationSpeedMax: 0,
-            },
-            {
-                texture: 'smoketrail', count: 3,
-                lifetimeMin: 0.3, lifetimeMax: 1.0,
-                velocityBase: [0, 0, 0], velocitySpread: 8, velocityScale: 0,
-                gravity: -2,
-                sizeStart: 4, sizeEnd: 26,
-                colorStart: [0.3, 0.0, 0.5, 0.55],
-                rotationSpeedMax: 1.0,
-            },
-        ],
-    },
-
-    // Disintegrator impact (from `dguntrace`): one large lingering
-    // orange flare + heatcloud, no sparks. The original groundflash
-    // ttl=80 frames ≈ 2.6s; we render it as a slow-fading flare with
-    // the same colour ramp.
-    {
-        name: 'impact_disintegrator',
-        spawns: [
-            {
-                texture: 'flare', count: 1,
-                lifetimeMin: 2.4, lifetimeMax: 2.8,
-                velocityBase: [0, 0, 0], velocitySpread: 0, velocityScale: 0,
-                gravity: 0,
-                sizeStart: 20, sizeEnd: 28,
-                colorStart: [1.0, 0.3, 0.2, 1.0],
-                rotationSpeedMax: 0,
-            },
-            {
-                texture: 'flare', count: 1,
-                lifetimeMin: 0.7, lifetimeMax: 1.1,
-                velocityBase: [0, 4, 0], velocitySpread: 0, velocityScale: 0,
-                gravity: -3,
-                sizeStart: 32, sizeEnd: 14,
-                colorStart: [1.0, 0.5, 0.2, 0.9],
-                rotationSpeedMax: 0.3,
-            },
-            {
-                texture: 'smoketrail', count: 4,
-                lifetimeMin: 1.0, lifetimeMax: 2.0,
-                velocityBase: [0, 6, 0], velocitySpread: 6, velocityScale: 0,
-                gravity: -4,
-                sizeStart: 6, sizeEnd: 24,
-                colorStart: [0.3, 0.15, 0.1, 0.55],
-                rotationSpeedMax: 1.2,
-            },
-        ],
-    },
-
-    // Largelaser impact (from `flashlazer` / `lasers_melt2` / sparks):
-    // BeamLaser is the muzzle, so muzzle is null; the impact is a
-    // red-orange ground flash + sparks. Mirrors ZK's red molten-metal
-    // signature without the persistent decal.
-    {
-        name: 'impact_largelaser',
-        spawns: [
-            {
-                texture: 'flare', count: 1,
-                lifetimeMin: 0.4, lifetimeMax: 0.6,
-                velocityBase: [0, 0, 0], velocitySpread: 0, velocityScale: 0,
-                gravity: 0,
-                sizeStart: 14, sizeEnd: 26,
-                colorStart: [1.0, 0.4, 0.1, 1.0],
-                rotationSpeedMax: 0,
-            },
-            {
-                texture: 'flare', count: 12,
-                lifetimeMin: 0.3, lifetimeMax: 0.7,
-                velocityBase: [0, 8, 0], velocitySpread: 60, velocityScale: 0,
-                gravity: 90,
-                sizeStart: 1.6, sizeEnd: 0.3,
-                colorStart: [1.0, 0.7, 0.2, 1.0],
-                rotationSpeedMax: 0,
-            },
-            {
-                texture: 'smoketrail', count: 3,
-                lifetimeMin: 0.6, lifetimeMax: 1.2,
-                velocityBase: [0, 6, 0], velocitySpread: 4, velocityScale: 0,
-                gravity: -3,
-                sizeStart: 5, sizeEnd: 18,
-                colorStart: [0.4, 0.2, 0.15, 0.5],
-                rotationSpeedMax: 1.0,
-            },
-        ],
-    },
-
-    // Lightcannon impact: small kinetic burst — short flare + a few
-    // dirt sparks + thin smoke. Cannon archetypes don't have a single
-    // canonical CEG in ZK; this is a synthesis of `RAIDMUZZLE` /
-    // `LEVLRMUZZLE` impact halos sized for raider-class projectiles
-    // (size ≤ 4 elmo).
-    {
-        name: 'impact_lightcannon',
-        spawns: [
-            {
-                texture: 'flare', count: 1,
-                lifetimeMin: 0.18, lifetimeMax: 0.25,
-                velocityBase: [0, 0, 0], velocitySpread: 0, velocityScale: 0,
-                gravity: 0,
-                sizeStart: 8, sizeEnd: 18,
-                colorStart: [1.0, 0.7, 0.2, 1.0],
-                rotationSpeedMax: 0,
-            },
-            {
-                texture: 'flare', count: 8,
-                lifetimeMin: 0.25, lifetimeMax: 0.5,
-                velocityBase: [0, 8, 0], velocitySpread: 25, velocityScale: 0,
-                gravity: 80,
-                sizeStart: 1.2, sizeEnd: 0.25,
-                colorStart: [0.9, 0.6, 0.3, 1.0],
-                rotationSpeedMax: 0,
-            },
-            {
-                texture: 'smoketrail', count: 2,
-                lifetimeMin: 0.5, lifetimeMax: 0.9,
-                velocityBase: [0, 6, 0], velocitySpread: 4, velocityScale: 0,
-                gravity: -3,
-                sizeStart: 4, sizeEnd: 12,
-                colorStart: [0.4, 0.35, 0.3, 0.55],
-                rotationSpeedMax: 1.0,
-            },
-        ],
-    },
-
-    // Lightninggun muzzle (from `zeus_fire_fx` → `zeusmuzzle`):
-    // bright white-blue ball + ring expansion. Original uses three
-    // sub-emitters with distinct textures — collapsed into two
-    // overlaid flares in different colour bands.
-    {
-        name: 'muzzleflash_lightninggun',
-        spawns: [
-            {
-                texture: 'flare', count: 1,
-                lifetimeMin: 0.55, lifetimeMax: 0.7,
-                velocityBase: [0, 0, 0], velocitySpread: 0, velocityScale: 0,
-                gravity: 0,
-                sizeStart: 14, sizeEnd: 22,
-                colorStart: [1.0, 1.0, 1.0, 1.0],
-                rotationSpeedMax: 0,
-            },
-            {
-                texture: 'flare', count: 1,
-                lifetimeMin: 0.5, lifetimeMax: 0.7,
-                velocityBase: [0, 0, 0], velocitySpread: 0, velocityScale: 0,
-                gravity: 0,
-                sizeStart: 4, sizeEnd: 36,
-                colorStart: [0.3, 0.5, 1.0, 0.6],
-                rotationSpeedMax: 0,
-            },
-        ],
-    },
-
-    // Lightninggun impact (from `lightningplosion` / `bluebolts1`):
-    // bright white inner ball + radial blue sparks + groundflash.
-    // The original `electric thingies` spawns 10 size-15 puffs at
-    // particlespeed=20 elmos/frame (=600 elmos/sec); ours is scaled
-    // down so the spark fan reads cleanly at typical zoom.
-    {
-        name: 'impact_lightninggun',
-        spawns: [
-            {
-                texture: 'flare', count: 1,
-                lifetimeMin: 0.35, lifetimeMax: 0.5,
-                velocityBase: [0, 0, 0], velocitySpread: 0, velocityScale: 0,
-                gravity: 0,
-                sizeStart: 16, sizeEnd: 28,
-                colorStart: [0.7, 0.85, 1.0, 1.0],
-                rotationSpeedMax: 0,
-            },
-            {
-                texture: 'flare', count: 10,
-                lifetimeMin: 0.3, lifetimeMax: 0.5,
-                velocityBase: [0, 0, 0], velocitySpread: 120, velocityScale: 0,
-                gravity: 0,
-                sizeStart: 5, sizeEnd: 0.5,
-                colorStart: [0.5, 0.6, 1.0, 1.0],
-                rotationSpeedMax: 0,
-            },
-            {
-                texture: 'flare', count: 1,
-                lifetimeMin: 0.4, lifetimeMax: 0.5,
-                velocityBase: [0, 0, 0], velocitySpread: 0, velocityScale: 0,
-                gravity: 0,
-                sizeStart: 4, sizeEnd: 46,
-                colorStart: [0.5, 0.5, 1.0, 0.4],
-                rotationSpeedMax: 0,
-            },
-        ],
-    },
-
-    // Flame muzzle (from `large_muzzle_flash_fx`): a yellow→white
-    // tongue projected along the firing axis plus drifting smoke.
-    // The original `CBitmapMuzzleFlame` is a stretched quad — we
-    // approximate with a velocity-projected flare cluster so the
-    // muzzle "sticks" to the gun barrel for a frame or two.
-    {
-        name: 'muzzleflash_flame',
-        spawns: [
-            {
-                texture: 'flare', count: 4,
-                lifetimeMin: 0.18, lifetimeMax: 0.35,
-                velocityBase: [0, 0, 0], velocitySpread: 6, velocityScale: 60,
-                gravity: -2,
-                sizeStart: 8, sizeEnd: 22,
-                colorStart: [0.95, 0.7, 0.15, 1.0],
-                rotationSpeedMax: 1.5,
-            },
-            {
-                texture: 'flare', count: 1,
-                lifetimeMin: 0.12, lifetimeMax: 0.2,
-                velocityBase: [0, 0, 0], velocitySpread: 0, velocityScale: 30,
-                gravity: 0,
-                sizeStart: 14, sizeEnd: 6,
-                colorStart: [1.0, 0.95, 0.8, 1.0],
-                rotationSpeedMax: 0,
-            },
-            {
-                texture: 'smoketrail', count: 3,
-                lifetimeMin: 0.6, lifetimeMax: 1.0,
-                velocityBase: [0, 4, 0], velocitySpread: 4, velocityScale: 20,
-                gravity: -4,
-                sizeStart: 4, sizeEnd: 18,
-                colorStart: [0.35, 0.3, 0.25, 0.55],
-                rotationSpeedMax: 1.0,
-            },
-        ],
-    },
-
-    // Flame impact (from `burn` heatcloud + groundflash): warm
-    // halo + lingering low smoke. ZK's `burn` spawns 25 gfx +
-    // 6 heatclouds; ours shaves both counts to keep the per-burst
-    // particle budget reasonable when napalm tongues stack.
-    {
-        name: 'impact_flame',
-        spawns: [
-            {
-                texture: 'flare', count: 2,
-                lifetimeMin: 0.4, lifetimeMax: 0.7,
-                velocityBase: [0, 4, 0], velocitySpread: 6, velocityScale: 0,
-                gravity: -2,
-                sizeStart: 12, sizeEnd: 22,
-                colorStart: [1.0, 0.5, 0.1, 1.0],
-                rotationSpeedMax: 1.0,
-            },
-            {
-                texture: 'flare', count: 4,
-                lifetimeMin: 0.3, lifetimeMax: 0.6,
-                velocityBase: [0, 6, 0], velocitySpread: 18, velocityScale: 0,
-                gravity: 50,
-                sizeStart: 1.5, sizeEnd: 0.3,
-                colorStart: [1.0, 0.7, 0.2, 1.0],
-                rotationSpeedMax: 0,
-            },
-            {
-                texture: 'smoketrail', count: 4,
-                lifetimeMin: 1.0, lifetimeMax: 1.6,
-                velocityBase: [0, 5, 0], velocitySpread: 4, velocityScale: 0,
-                gravity: -5,
-                sizeStart: 6, sizeEnd: 22,
-                colorStart: [0.25, 0.2, 0.18, 0.6],
-                rotationSpeedMax: 1.2,
             },
         ],
     },

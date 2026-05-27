@@ -44,70 +44,39 @@ export enum ProjectileType {
     Torpedo        = 1 << 11,
 }
 
-/// Coarse archetype tag for a weapon def. The CEG library dispatches
-/// by archetype rather than raw projectileType so a few hand-ported ZK CEG
-/// signatures can override the generic muzzle/impact effects.
-export type WeaponArchetype =
-    | 'disintegrator'
-    | 'flame'
-    | 'lightninggun'
-    | 'largelaser'
-    | 'lightcannon'
-    | 'default';
-
-export function classifyWeaponArchetype(def: WeaponDefInfo | undefined): WeaponArchetype {
-    if (!def) return 'default';
-    const name = (def.name || '').toLowerCase();
-    const tex1 = (def.texture1 || '').toLowerCase();
-    const pt = def.projectileType;
-    if (pt === ProjectileType.Fireball) return 'disintegrator';
-    if (pt === ProjectileType.Flame) return 'flame';
-    if (pt === ProjectileType.Lightning || name.includes('lightning')) return 'lightninggun';
-    if (pt === ProjectileType.LargeBeamLaser || tex1.includes('largelaser')) return 'largelaser';
-    if (pt === ProjectileType.Explosive && def.size <= 4) return 'lightcannon';
-    return 'default';
-}
-
-/// Per-archetype muzzle flash. Returning null skips the muzzle CEG.
-export const FIRE_EFFECT_BY_ARCHETYPE: Record<WeaponArchetype, string | null> = {
-    disintegrator: 'muzzleflash_disintegrator',
-    flame:         'muzzleflash_flame',
-    lightninggun:  'muzzleflash_lightninggun',
-    largelaser:    null,
-    lightcannon:   null,
-    default:       null,
-};
-
-/// Per-archetype impact effect. Shield deflections always render
-/// `impact_shield` regardless of archetype, and Unit impacts are ceded
-/// to combat-fx's CombatEvent path (see effectForImpact below).
-export const IMPACT_EFFECT_BY_ARCHETYPE: Record<WeaponArchetype, string | null> = {
-    disintegrator: 'impact_disintegrator',
-    flame:         'impact_flame',
-    lightninggun:  'impact_lightninggun',
-    largelaser:    'impact_largelaser',
-    lightcannon:   'impact_lightcannon',
-    default:       null,
-};
+/// Name of the runtime's built-in fallback explosion. Mirrors the
+/// `DEFAULT_EXPLOSION_NAME` constant in ceg-runtime.ts (kept in sync
+/// by hand — the dispatch module shouldn't import from the runtime
+/// just to read one string). Used by `effectForImpact` when the
+/// weapondef doesn't author an `explosionGenerator` so terrain/feature
+/// hits always render *something* instead of silently no-opping.
+const DEFAULT_EXPLOSION_NAME = '__default_explosion';
 
 /// Pick the muzzle CEG name for a weapon firing event. Streamed
-/// `cegTag` wins over heuristic dispatch; null means render no muzzle.
+/// `cegTag` wins; weapons that didn't author one render no muzzle.
+/// (Before Phase 8 cleanup, archetype-keyed placeholders supplied a
+/// muzzle flash for every weapon — those have been removed in favour
+/// of relying on the streamed CEG library plus authored cegTag.)
 export function effectForFire(def: WeaponDefInfo | undefined): string | null {
-    if (def?.cegTag) {
-        const tag = def.cegTag;
-        // Spring's documented sentinel for "no CEG" — skip explicitly.
-        if (tag.toLowerCase() === 'none') return null;
-        return tag;
-    }
-    return FIRE_EFFECT_BY_ARCHETYPE[classifyWeaponArchetype(def)];
+    if (!def?.cegTag) return null;
+    const tag = def.cegTag;
+    // Spring's documented sentinel for "no CEG" — skip explicitly.
+    if (tag.toLowerCase() === 'none') return null;
+    return tag;
 }
 
-/// Pick the impact CEG name from impact kind + weapon archetype.
+/// Pick the impact CEG name from impact kind + weapondef.
 ///
 /// `forceWeaponDispatch=true` overrides the Unit-skip behaviour, which
 /// projectile-renderer needs (it cedes Unit impacts to combat-fx's
 /// CombatEvent path) but combat-fx itself needs to honour when it's
 /// the one driving the explosion.
+///
+/// Fallback chain (after Phase 8 cleanup): Shield → `impact_shield`;
+/// authored `explosionGenerator` → that tag; otherwise →
+/// `__default_explosion` so terrain/feature impacts always render the
+/// runtime's built-in flash + heat cloud. Unit impacts still cede to
+/// combat-fx unless `forceWeaponDispatch`.
 export function effectForImpact(
     impactKind: number,
     def: WeaponDefInfo | undefined,
@@ -122,7 +91,7 @@ export function effectForImpact(
         if (tag.toLowerCase() === 'none') return null;
         return tag;
     }
-    return IMPACT_EFFECT_BY_ARCHETYPE[classifyWeaponArchetype(def)];
+    return DEFAULT_EXPLOSION_NAME;
 }
 
 /// Map an impact event onto the CEG visibility-context bits — same
