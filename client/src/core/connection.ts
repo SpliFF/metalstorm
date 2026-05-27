@@ -763,8 +763,36 @@ export class Connection {
     private pendingUsername = '';
     private pendingPassword = '';
     private connectAttempts = 0;
-    private static readonly MAX_CONNECT_ATTEMPTS = 10;
+    /// The lobby fires onGameStart as soon as it sets `room.gameServerPort`,
+    /// which is *before* the forked spring-server has run `net.Start(port)`.
+    /// That bind happens after main() opens the SQLite DB, parses CLI args,
+    /// initialises HttpAuth, and constructs WebRTCServer — typically 1–3 s
+    /// on a cold boot, longer on macOS under heavy lobby load. Budget 60 s
+    /// at 500 ms per retry so even slow boots succeed without surfacing a
+    /// "can't connect" failure to the user.
+    private static readonly MAX_CONNECT_ATTEMPTS = 120;
     private static readonly CONNECT_RETRY_DELAY_MS = 500;
+    /// Quiet threshold: don't log per-attempt failures until this many
+    /// attempts have failed. Below this we expect transient
+    /// ERR_CONNECTION_REFUSED during the spawn race and stay silent so the
+    /// console doesn't read like a bug. Above this we surface a single
+    /// "still trying" message so the user knows we're not stuck.
+    private static readonly RETRY_QUIET_ATTEMPTS = 8;
+
+    /// Distinguish "game server isn't up yet" (network-layer error, expected
+    /// during spawn race) from "auth genuinely failed" (HTTP error response,
+    /// needs immediate surfacing). Network errors throw a plain TypeError
+    /// "Failed to fetch" in Chromium and a "Load failed" in Safari; either
+    /// way we retry quietly. Auth errors come back via the httpAuth path's
+    /// thrown Error with a status code in the message.
+    private isTransientNetworkError(err: unknown): boolean {
+        const msg = String(err);
+        return msg.includes('Failed to fetch')
+            || msg.includes('Load failed')
+            || msg.includes('NetworkError')
+            || msg.includes('ERR_CONNECTION_REFUSED')
+            || msg.includes('connection failed');
+    }
 
     private async tryConnect(): Promise<void> {
         this.connectAttempts++;
@@ -774,8 +802,25 @@ export class Connection {
         try {
             await this.httpAuth(this.pendingUsername, this.pendingPassword);
         } catch (err) {
+            const transient = this.isTransientNetworkError(err);
+            // Real auth errors (bad password, expired session, banned)
+            // come back as Error("Wrong password") etc. — surface those
+            // immediately rather than retrying 120× with bad creds.
+            if (!transient) {
+                console.error(`[connection] auth failed: ${err}`);
+                this.events.onAuthFailed?.(`${err}`);
+                this.setState('disconnected');
+                return;
+            }
             if (this.connectAttempts < Connection.MAX_CONNECT_ATTEMPTS) {
-                console.log(`[connection] auth attempt ${this.connectAttempts} failed (${err}), retrying...`);
+                // Only log when retries have crossed the quiet threshold,
+                // and even then only once per cycle of 8 to keep the
+                // console readable during a slow boot.
+                if (this.connectAttempts === Connection.RETRY_QUIET_ATTEMPTS
+                    || (this.connectAttempts > Connection.RETRY_QUIET_ATTEMPTS
+                        && this.connectAttempts % 8 === 0)) {
+                    console.log(`[connection] still waiting for game server (attempt ${this.connectAttempts}): ${err}`);
+                }
                 setTimeout(() => this.tryConnect(), Connection.CONNECT_RETRY_DELAY_MS);
                 return;
             }
@@ -790,12 +835,20 @@ export class Connection {
         try {
             await this.connectWebRTC();
         } catch (err) {
-            if (this.connectAttempts < Connection.MAX_CONNECT_ATTEMPTS) {
-                console.log(`[connection] WebRTC attempt ${this.connectAttempts} failed (${err}), retrying...`);
+            // Network-level WebRTC failures during boot are usually fixed
+            // by retrying the whole tryConnect cycle (the next iteration
+            // re-fetches /api/rtc/offer once the server has settled).
+            const transient = this.isTransientNetworkError(err);
+            if (this.connectAttempts < Connection.MAX_CONNECT_ATTEMPTS && transient) {
+                if (this.connectAttempts === Connection.RETRY_QUIET_ATTEMPTS
+                    || (this.connectAttempts > Connection.RETRY_QUIET_ATTEMPTS
+                        && this.connectAttempts % 8 === 0)) {
+                    console.log(`[connection] still waiting for WebRTC (attempt ${this.connectAttempts}): ${err}`);
+                }
                 setTimeout(() => this.tryConnect(), Connection.CONNECT_RETRY_DELAY_MS);
                 return;
             }
-            console.error(`[connection] giving up after ${this.connectAttempts} attempts`);
+            console.error(`[connection] giving up after ${this.connectAttempts} attempts: ${err}`);
             this.events.onAuthFailed?.(`WebRTC connection failed: ${err}`);
             this.setState('disconnected');
         }
