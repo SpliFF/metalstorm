@@ -1015,14 +1015,54 @@ export class EntityRenderer {
             // so descendants can still chain their parents correctly.
             let orderedPieces = pieces;
             if (config?.pieceNames && config.pieceParents) {
-                const byName = new Map<string, PieceInfo>();
-                for (const p of pieces) byName.set(p.name, p);
-
+                // The converter emits two parallel views of the piece
+                // tree: glTF nodes use unique names (the converter
+                // mirrors Recoil's `CAssParser::FindNewPieceName` and
+                // appends `_node` / `_node_0` / `_node_1` … to
+                // disambiguate duplicates so the file is spec-valid),
+                // while `SPRINGRTS_geometry.pieces[]` keeps the
+                // original S3O names with duplicates so unit scripts
+                // can still reference them.
+                //
+                // Babylon's glTF loader returns `result.meshes` first
+                // then `result.transformNodes`, so `pieces[]` is *not*
+                // in the same order as `config.pieceNames[]` (which is
+                // depth-first). We can't pair by index — we have to
+                // resolve by name. The previous version did a plain
+                // name lookup which collapsed every duplicate onto the
+                // first matching piece (hoveraa's cabin + rear pads
+                // never rendered — the visible "lying-down tower" was
+                // a duplicate of the front body that resolved through
+                // a `body` lookup).
+                //
+                // Resolution rule: strip the converter's `_node[_N]`
+                // suffix back to the canonical name, then bucket
+                // pieces under it. The Nth occurrence of a name in
+                // `config.pieceNames` consumes the Nth piece in its
+                // canonical bucket.
+                const stripSuffix = (n: string): string => {
+                    const m1 = n.match(/^(.+)_node_\d+$/);
+                    if (m1) return m1[1];
+                    const m2 = n.match(/^(.+)_node$/);
+                    if (m2) return m2[1];
+                    return n;
+                };
+                const byCanonical = new Map<string, PieceInfo[]>();
+                for (const p of pieces) {
+                    const canon = stripSuffix(p.name);
+                    let arr = byCanonical.get(canon);
+                    if (!arr) { arr = []; byCanonical.set(canon, arr); }
+                    arr.push(p);
+                }
+                const nameUsage = new Map<string, number>();
                 const ordered: PieceInfo[] = [];
                 for (let i = 0; i < config.pieceNames.length; i++) {
                     const name = config.pieceNames[i];
                     const parentIdx = config.pieceParents[i];
-                    const found = byName.get(name);
+                    const arr = byCanonical.get(name);
+                    const usage = nameUsage.get(name) ?? 0;
+                    nameUsage.set(name, usage + 1);
+                    const found = arr && usage < arr.length ? arr[usage] : undefined;
                     if (found) {
                         ordered.push({
                             mesh: found.mesh,
