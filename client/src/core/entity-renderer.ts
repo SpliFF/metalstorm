@@ -327,9 +327,19 @@ const TEAMCOLOR_FRAGMENT = `
         // rather than the diffuse alpha channel — so cutout and team
         // tinting don't compete for the same bits. Defaults to 0 (no
         // team color) for unit defs that don't supply a mask texture.
+        //
+        // Recoil's ModelFragProg.glsl and ZK's ModelFragProgGL4_CUS.glsl
+        // both express the team-color step as
+        //     mix(diffuse.rgb, teamColor.rgb, mask)
+        // — a straight *replace* of the diffuse with the team tint where
+        // the mask is full. The previous form here multiplied teamColor
+        // by base.rgb, which dimmed the team tint to ~zero on units
+        // whose authored decal area happens to be dark (a common
+        // pattern — the team-color decal sits on top of an unlit
+        // recessed panel). Replace, not modulate.
         float mask = hasTeamMask > 0.5 ? texture2D(teamMaskTex, vUV).r : 0.0;
         if (invertMask > 0.5) mask = 1.0 - mask;
-        vec3 color = mix(base.rgb, teamColor * base.rgb, mask);
+        vec3 color = mix(base.rgb, teamColor, mask);
 
         // Normal-map perturbation. Falls back to the geometric (vertex-
         // interpolated) normal for unit defs without a normal map.

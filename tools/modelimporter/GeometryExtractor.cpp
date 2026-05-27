@@ -241,19 +241,38 @@ void ProbeUnittexturesByConvention(const std::string& sourceModelPath,
     // Inversion marker: `<stem>1_invert.<ext>` next to the regular
     // tex1. One ZK asset (factoryveh) ships this; the convention is
     // documented in PLAN-pbr-mapping.md.
-    const std::string invertStem = stem + "1_invert";
-    const std::string invertStemLower = stemLower(invertStem);
-    for (const char* ext : kExts) {
-        if (fs::exists(unittex / (invertStem + ext), ec)) {
-            if (!invertTeamColor.has_value()) invertTeamColor = true;
-            return;
+    //
+    // Also probe for `<tex1stem>_invert.<ext>` — useful when many models
+    // share a single texture (the 3DO-to-S3O conversion atlas
+    // `3do2s3o_atlas_1.tga` is referenced by ~18 ZK S3Os whose tex1.A
+    // packs the team-mask in inverted polarity vs. the typical hand-
+    // authored S3O). One marker next to the shared atlas then flags
+    // every consumer, no per-model marker file required.
+    auto probeInvertMarker = [&](const std::string& stemForMarker) -> bool {
+        const std::string invStem = stemForMarker + "_invert";
+        const std::string invStemLower = stemLower(invStem);
+        for (const char* ext : kExts) {
+            if (fs::exists(unittex / (invStem + ext), ec)) return true;
         }
+        for (const auto& entry : fs::directory_iterator(unittex, ec)) {
+            if (!entry.is_regular_file()) continue;
+            const std::string fstem = entry.path().stem().string();
+            if (stemLower(fstem) == invStemLower) return true;
+        }
+        return false;
+    };
+
+    if (!invertTeamColor.has_value() && probeInvertMarker(stem + "1")) {
+        invertTeamColor = true;
+        return;
     }
-    for (const auto& entry : fs::directory_iterator(unittex, ec)) {
-        if (!entry.is_regular_file()) continue;
-        const std::string fstem = entry.path().stem().string();
-        if (stemLower(fstem) == invertStemLower) {
-            if (!invertTeamColor.has_value()) invertTeamColor = true;
+    if (!invertTeamColor.has_value() && !tex1.empty()) {
+        // tex1 carries the resolved name (e.g. `3do2s3o_atlas_1.ktx2`);
+        // strip both the runtime extension and any leading directories
+        // so we probe by basename stem.
+        fs::path tex1Path(tex1);
+        if (probeInvertMarker(tex1Path.stem().string())) {
+            invertTeamColor = true;
             return;
         }
     }
