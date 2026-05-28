@@ -87,6 +87,22 @@ void main() { gl_Position = gl_Vertex; }`;
         expect(out.diagnostics[0].line).toBe(2);
     });
 
+    it('keeps gl_Vertex-only sources on the reject path even with shim enabled', () => {
+        // Chili `gui_chili_minimap`'s fadeShader has no fixed-function
+        // matrices — it must keep falling back so the widget skips its
+        // shader path, since the immediate-mode renderer's flush() still
+        // overrides the bound program.
+        const src = `#version 150 compatibility
+varying vec2 texCoord;
+void main() {
+    texCoord = gl_Vertex.xy * 0.5 + 0.5;
+    gl_Position = vec4(gl_Vertex.xyz, 1.0);
+}`;
+        const out = translateGLSL(src, 'vertex', { legacyGL2Shim: true });
+        expect(out.ok).toBe(false);
+        expect(out.expectedReject).toBe(true);
+    });
+
     it('loudly rejects imageLoad with source line', () => {
         const src = `#version 310 es
 layout(rgba32f, binding=0) uniform image2D tex;
@@ -126,6 +142,126 @@ void main() { float t = 0.5 * gl_InstanceID; }`;
         const out = translateGLSL(src, 'vertex');
         expect(out.ok).toBe(true);
         expect(out.source).toContain('float(gl_InstanceID)');
+    });
+});
+
+describe('translateGLSL — legacy GL2 fixed-function shim', () => {
+    it('shims LUPS-style vertex shaders with matrices and varyings', () => {
+        // Trimmed from content/games/zk/lups/ParticleClasses/SimpleParticles2.lua.
+        const src = `#version 150 compatibility
+varying vec2 texCoord;
+void main() {
+    vec4 pos4 = gl_Vertex;
+    gl_Position = gl_ModelViewMatrix * pos4;
+    gl_Position = gl_ProjectionMatrix * gl_Position;
+    gl_FrontColor = vec4(1.0);
+    texCoord = gl_Vertex.xy;
+}`;
+        const out = translateGLSL(src, 'vertex', { legacyGL2Shim: true });
+        expect(out.ok).toBe(true);
+        expect(out.source.startsWith('#version 300 es\n')).toBe(true);
+        // gl_* renames into _leg* identifiers.
+        expect(out.source).toContain('_legVertex');
+        expect(out.source).toContain('_legModelViewMatrix');
+        expect(out.source).toContain('_legProjectionMatrix');
+        expect(out.source).toContain('_legColor');
+        expect(out.source).not.toMatch(/\bgl_Vertex\b/);
+        expect(out.source).not.toMatch(/\bgl_ModelViewMatrix\b/);
+        expect(out.source).not.toMatch(/\bgl_FrontColor\b/);
+        // Declarations injected for renamed identifiers.
+        expect(out.source).toContain('layout(location = 0) in vec4 _legVertex;');
+        expect(out.source).toContain('uniform mat4 _legModelViewMatrix;');
+        expect(out.source).toContain('uniform mat4 _legProjectionMatrix;');
+        expect(out.source).toContain('out vec4 _legColor;');
+        // gl_Position stays — it's a real ES 300 builtin.
+        expect(out.source).toContain('gl_Position');
+    });
+
+    it('shims fragment side: gl_Color and gl_FragColor', () => {
+        const src = `#version 150 compatibility
+uniform sampler2D tex0;
+varying vec2 texCoord;
+void main() {
+    gl_FragColor = texture2D(tex0, texCoord) * gl_Color;
+}`;
+        const out = translateGLSL(src, 'fragment', { legacyGL2Shim: true });
+        expect(out.ok).toBe(true);
+        // gl_Color → _legColor (in fragment, this is the varying coming
+        // from gl_FrontColor in vertex).
+        expect(out.source).toContain('_legColor');
+        expect(out.source).toContain('in vec4 _legColor;');
+        expect(out.source).not.toMatch(/\bgl_Color\b/);
+        // gl_FragColor handled by the existing legacy block.
+        expect(out.source).toContain('outFragColor');
+        expect(out.source).toContain('out vec4 outFragColor;');
+        expect(out.source).not.toContain('gl_FragColor');
+    });
+
+    it('declares gl_TexCoord array as a varying when used', () => {
+        const src = `#version 150 compatibility
+void main() {
+    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+    gl_TexCoord[0] = vec4(gl_Vertex.xy, 0.0, 1.0);
+}`;
+        const out = translateGLSL(src, 'vertex', { legacyGL2Shim: true });
+        expect(out.ok).toBe(true);
+        expect(out.source).toContain('_legTexCoord[0]');
+        expect(out.source).toContain('out vec4 _legTexCoord[8];');
+        expect(out.source).toContain('uniform mat4 _legModelViewProjectionMatrix;');
+    });
+
+    it('declares gl_MultiTexCoord0..3 only for slots that appear in source', () => {
+        const src = `#version 150 compatibility
+void main() {
+    vec4 a = gl_MultiTexCoord0;
+    vec4 b = gl_MultiTexCoord2;
+    gl_Position = gl_ModelViewMatrix * gl_Vertex;
+}`;
+        const out = translateGLSL(src, 'vertex', { legacyGL2Shim: true });
+        expect(out.ok).toBe(true);
+        expect(out.source).toContain('_legMultiTexCoord0');
+        expect(out.source).toContain('_legMultiTexCoord2');
+        expect(out.source).not.toContain('_legMultiTexCoord1');
+        expect(out.source).not.toContain('_legMultiTexCoord3');
+        // Slot 0 keeps location 2 (matches immediate-mode texcoord
+        // stream); higher slots get linker-assigned locations.
+        expect(out.source).toContain('layout(location = 2) in vec4 _legMultiTexCoord0;');
+    });
+
+    it('does not declare unused builtins', () => {
+        const src = `#version 150 compatibility
+void main() {
+    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+}`;
+        const out = translateGLSL(src, 'vertex', { legacyGL2Shim: true });
+        expect(out.ok).toBe(true);
+        expect(out.source).not.toContain('_legNormal');
+        expect(out.source).not.toContain('_legTexCoord');
+        expect(out.source).not.toContain('_legColor');
+        expect(out.source).not.toContain('_legProjectionMatrix');
+        expect(out.source).not.toContain('_legModelViewMatrix ');
+    });
+
+    it('can be explicitly disabled to force the reject path', () => {
+        // LUPS-style source with matrices, but caller opts out of the
+        // shim entirely — translator must take the reject path.
+        const src = `#version 150 compatibility
+void main() { gl_Position = gl_ModelViewMatrix * gl_Vertex; }`;
+        const out = translateGLSL(src, 'vertex', { legacyGL2Shim: false });
+        expect(out.ok).toBe(false);
+        expect(out.expectedReject).toBe(true);
+    });
+
+    it('translateAndInclude propagates the shim option', () => {
+        const src = `#version 150
+void main() { gl_Position = gl_ModelViewMatrix * gl_Vertex; }`;
+        const out = translateAndInclude(src, 'vertex', {
+            lookup: () => undefined,
+            legacyGL2Shim: true,
+        });
+        expect(out.ok).toBe(true);
+        expect(out.source).toContain('_legModelViewMatrix');
+        expect(out.source).toContain('_legVertex');
     });
 });
 

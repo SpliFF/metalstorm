@@ -22,10 +22,17 @@
  *                                     from PLAN-lighting.md L4).
  *
  * GL4-only features are rejected loudly with a source-line diagnostic.
- * Legacy `gl_Vertex` is rejected as *expected* — chili widgets like
- * `gui_chili_minimap`'s fadeShader use a nil compile result as the
- * signal to take the simple draw path, and we want that path selected,
- * not a console-warning storm.
+ * Legacy fixed-function inputs (`gl_Vertex`, `gl_ModelViewMatrix`, etc.)
+ * are handled two ways:
+ *   - With `legacyGL2Shim: true`, the translator rewrites them to
+ *     user-named attributes/uniforms/varyings (`_legVertex`,
+ *     `_legModelViewMatrix`, ...) bound to the immediate-mode renderer's
+ *     attribute slots (0 = position, 1 = color, 2 = texcoord0). LUPS
+ *     particle classes need this to make `gl.CreateShader` succeed.
+ *   - Without the flag, `gl_Vertex` triggers an `expectedReject` and the
+ *     caller falls back to its software draw path. Chili widgets like
+ *     `gui_chili_minimap`'s fadeShader rely on this: they check
+ *     `if shader == nil` and skip the shader pass.
  */
 
 export type GlslStage = 'vertex' | 'fragment';
@@ -38,6 +45,20 @@ export interface GlslDiagnostic {
     line?: number;
     file?: string;
     message: string;
+}
+
+export interface TranslateOptions {
+    /** Permit rewrites for GLSL 1.10 fixed-function builtins (`gl_Vertex`,
+     *  `gl_ModelViewMatrix`, `gl_TexCoord[]`, `gl_FrontColor`,
+     *  `gl_MultiTexCoord0..7`, etc.) to user-named ins/uniforms/varyings.
+     *  Required for ZK LUPS particle classes whose vertex shaders use
+     *  the fixed-function pipeline. Defaults to enabled. The translator
+     *  still only shims sources that touch fixed-function state beyond
+     *  bare `gl_Vertex` — chili widgets that only sample `gl_Vertex`
+     *  keep the legacy-reject behaviour so they fall back to their
+     *  software draw path. Set explicitly to `false` to force the
+     *  reject in all cases (test isolation, etc.). */
+    legacyGL2Shim?: boolean;
 }
 
 export interface TranslateResult {
@@ -345,16 +366,29 @@ function findLine(src: string, regex: RegExp): number | undefined {
  * by-design rejection pattern (legacy `gl_Vertex`, `#version 400+`),
  * in which case the bridge downgrades console reporting.
  */
-export function translateGLSL(src: string, stage: GlslStage): TranslateResult {
+export function translateGLSL(src: string, stage: GlslStage, opts: TranslateOptions = {}): TranslateResult {
     const diagnostics: GlslDiagnostic[] = [];
+    // Apply the shim only when the source touches fixed-function state
+    // beyond bare `gl_Vertex` — fixed-function matrices, multi-texcoords,
+    // legacy varyings, or `gl_TexCoord[]`. Chili widgets like
+    // `gui_chili_minimap`'s fadeShader use *only* `gl_Vertex` and rely on
+    // the rejection path to fall back to their software draw. LUPS
+    // particle classes always need at least `gl_ModelViewMatrix` (their
+    // shaders compose world transforms by hand), so this heuristic
+    // separates the two cleanly. Caller can still set `legacyGL2Shim`
+    // false to opt out completely.
+    const shimAllowed = opts.legacyGL2Shim !== false;
+    const needsShimForFixedFunc = /\bgl_(ModelViewMatrix|ProjectionMatrix|ModelViewProjectionMatrix|NormalMatrix|TexCoord|FrontColor|Color|MultiTexCoord[0-7])\b/.test(src);
+    const enableLegacyShim = shimAllowed && needsShimForFixedFunc;
 
     // ── Hard rejections (do these first; they look at the ORIGINAL
     //    source so line numbers are correct). ────────────────────────────
 
-    // Legacy `gl_Vertex` — see comment in lua-gl-bridge.ts: chili widgets
-    // use a nil CreateShader result as a signal to fall back to the
-    // simple draw path. Don't translate, don't warn loudly.
-    if (/\bgl_Vertex\b/.test(src)) {
+    // Legacy `gl_Vertex` — see header comment: chili widgets use a nil
+    // CreateShader result as a signal to fall back to the simple draw
+    // path. When the source uses other fixed-function state too we
+    // rewrite instead (LUPS pattern).
+    if (!enableLegacyShim && /\bgl_Vertex\b/.test(src)) {
         diagnostics.push({
             severity: 'info',
             line: findLine(src, /\bgl_Vertex\b/),
@@ -449,6 +483,107 @@ export function translateGLSL(src: string, stage: GlslStage): TranslateResult {
         }
     }
 
+    // ── Legacy GL2 fixed-function shim (opt-in via legacyGL2Shim) ─────
+    //
+    // ZK LUPS particle classes (SimpleParticles, RingParticles,
+    // ShockWave, Ribbon, ...) use the GLSL 1.10 fixed-function pipeline:
+    // `gl_Vertex`, `gl_Normal`, `gl_Color`, `gl_MultiTexCoord0..7`,
+    // `gl_ModelViewMatrix`, `gl_ProjectionMatrix`,
+    // `gl_ModelViewProjectionMatrix`, `gl_NormalMatrix`, `gl_TexCoord[]`,
+    // `gl_FrontColor`, `gl_FragColor`. GLSL ES 300 reserves `gl_*`
+    // identifiers and exposes only `gl_Position`, `gl_FragCoord`,
+    // `gl_VertexID`, `gl_InstanceID`, `gl_PointSize`, `gl_PointCoord`.
+    //
+    // We rename each used builtin to a `_leg*` identifier, then inject
+    // matching declarations after the precision header. Attribute slots
+    // follow the immediate-mode renderer's VAO (0 = position, 1 = color,
+    // 2 = texcoord0); other multi-texcoord units share slot 2 since the
+    // bridge doesn't carry per-particle aux streams yet — those classes
+    // will visually degrade until the bridge wires real per-particle
+    // VBOs, but the shader compiles and the LUPS class registers.
+    if (enableLegacyShim) {
+        const decls: string[] = [];
+
+        // Per-stage attributes / varyings.
+        const usedVertex = /\bgl_Vertex\b/.test(s);
+        const usedNormal = /\bgl_Normal\b/.test(s);
+        const usedColorAttr = stage === 'vertex' && /\bgl_Color\b/.test(s);
+        const usedFrontColor = /\bgl_FrontColor\b/.test(s);
+        const usedFragColorRead = stage === 'fragment' && /\bgl_Color\b/.test(s);
+        const usedTexCoord = /\bgl_TexCoord\s*\[/.test(s);
+
+        // Fixed-function matrices — always uniforms.
+        const usedMV = /\bgl_ModelViewMatrix\b/.test(s);
+        const usedProj = /\bgl_ProjectionMatrix\b/.test(s);
+        const usedMVP = /\bgl_ModelViewProjectionMatrix\b/.test(s);
+        const usedNormalMatrix = /\bgl_NormalMatrix\b/.test(s);
+
+        // gl_MultiTexCoord0..7.
+        const usedMultiTex: boolean[] = new Array(8).fill(false);
+        for (let i = 0; i < 8; i++) {
+            if (new RegExp('\\bgl_MultiTexCoord' + i + '\\b').test(s)) {
+                usedMultiTex[i] = true;
+            }
+        }
+
+        // Apply identifier renames. Done in one pass over the source —
+        // each replace is whole-word-anchored so they don't overlap.
+        const rename = (re: RegExp, to: string) => { s = s.replace(re, to); };
+        if (usedVertex) rename(/\bgl_Vertex\b/g, '_legVertex');
+        if (usedNormal) rename(/\bgl_Normal\b/g, '_legNormal');
+        if (usedColorAttr || usedFragColorRead) rename(/\bgl_Color\b/g, '_legColor');
+        if (usedFrontColor) rename(/\bgl_FrontColor\b/g, '_legColor');
+        if (usedTexCoord) rename(/\bgl_TexCoord\b/g, '_legTexCoord');
+        if (usedMV) rename(/\bgl_ModelViewMatrix\b/g, '_legModelViewMatrix');
+        if (usedProj) rename(/\bgl_ProjectionMatrix\b/g, '_legProjectionMatrix');
+        if (usedMVP) rename(/\bgl_ModelViewProjectionMatrix\b/g, '_legModelViewProjectionMatrix');
+        if (usedNormalMatrix) rename(/\bgl_NormalMatrix\b/g, '_legNormalMatrix');
+        for (let i = 0; i < 8; i++) {
+            if (usedMultiTex[i]) {
+                rename(new RegExp('\\bgl_MultiTexCoord' + i + '\\b', 'g'), '_legMultiTexCoord' + i);
+            }
+        }
+
+        // Build declaration block. Attribute slots match
+        // ImmediateModeRenderer's VAO (lua-gl-immediate.ts).
+        if (stage === 'vertex') {
+            if (usedVertex) decls.push('layout(location = 0) in vec4 _legVertex;');
+            if (usedColorAttr) decls.push('layout(location = 1) in vec4 _legColor;');
+            if (usedMultiTex[0]) decls.push('layout(location = 2) in vec4 _legMultiTexCoord0;');
+            // gl_Normal + gl_MultiTexCoord1..7 don't have a dedicated
+            // immediate-mode stream. Declare without explicit location so
+            // the linker assigns one; they'll read zero until the bridge
+            // wires real per-particle attributes.
+            if (usedNormal) decls.push('in vec3 _legNormal;');
+            for (let i = 1; i < 8; i++) {
+                if (usedMultiTex[i]) decls.push(`in vec4 _legMultiTexCoord${i};`);
+            }
+            if (usedTexCoord) decls.push('out vec4 _legTexCoord[8];');
+            if (usedFrontColor) decls.push('out vec4 _legColor;');
+        } else {
+            // Fragment stage: legacy gl_Color reads the gl_FrontColor
+            // varying. gl_TexCoord[] mirrors the vertex out.
+            if (usedFragColorRead || usedFrontColor) decls.push('in vec4 _legColor;');
+            if (usedTexCoord) decls.push('in vec4 _legTexCoord[8];');
+        }
+
+        if (usedMV) decls.push('uniform mat4 _legModelViewMatrix;');
+        if (usedProj) decls.push('uniform mat4 _legProjectionMatrix;');
+        if (usedMVP) decls.push('uniform mat4 _legModelViewProjectionMatrix;');
+        if (usedNormalMatrix) decls.push('uniform mat3 _legNormalMatrix;');
+
+        if (decls.length > 0) {
+            // Inject the legacy declarations after the precision header
+            // so the precision qualifiers are in scope. `outFragColor` is
+            // already injected by the legacy block above; do the same
+            // anchoring for consistency.
+            s = s.replace(
+                /(precision\s+highp\s+int;\n(?:precision[^;]+;\n)*)/,
+                '$1' + decls.join('\n') + '\n',
+            );
+        }
+    }
+
     // ── Int → float promotions ────────────────────────────────────────
     //
     // GLSL ES 300 is strict: you cannot assign an integer literal to a
@@ -533,7 +668,7 @@ export function translateGLSL(src: string, stage: GlslStage): TranslateResult {
 
 // ── Convenience: translate + include in one call ───────────────────────
 
-export interface TranslateAndIncludeOptions extends IncludeResolveOptions {}
+export interface TranslateAndIncludeOptions extends IncludeResolveOptions, TranslateOptions {}
 
 /**
  * Resolve includes first (so the input to translation is a single
@@ -556,7 +691,7 @@ export function translateAndInclude(
             included: inc.included,
         };
     }
-    const tx = translateGLSL(inc.source, stage);
+    const tx = translateGLSL(inc.source, stage, { legacyGL2Shim: opts.legacyGL2Shim });
     return {
         source: tx.source,
         ok: tx.ok,

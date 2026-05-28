@@ -962,6 +962,13 @@ export class LuaGLBridge {
     private translateGLSL(src: string, stage: 'vertex' | 'fragment'): string {
         const result = translateAndInclude(src, stage, {
             lookup: this.shaderIncludeResolver,
+            // Legacy GL2 shim unlocks LUPS particle classes whose vertex
+            // shaders use fixed-function state (gl_ModelViewMatrix,
+            // gl_TexCoord[], gl_FrontColor, etc.). Translator gates the
+            // rewrite on the presence of that state so chili widgets
+            // that only touch gl_Vertex still fall through to their
+            // software draw path. PLAN-weapon-fx Z1.
+            legacyGL2Shim: true,
         });
         if (!result.ok) {
             this.expectedShaderReject = result.expectedReject;
