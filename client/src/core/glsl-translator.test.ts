@@ -170,6 +170,161 @@ void main() { float t = 0.5 * gl_InstanceID; }`;
         expect(out.ok).toBe(true);
         expect(out.source).toContain('float(gl_InstanceID)');
     });
+
+    it('does NOT promote int literals inside array subscripts (ShieldSphereColorHQ)', () => {
+        // ZK's ShieldSphereColorHQ FS indexes a flat float array as
+        // `hitPoints[5 * hitPointIdx + 0]`. The expression inside the
+        // brackets must remain integer; promoting `5` or `0` to `5.0` /
+        // `0.0` would produce `'integer expression required'` at compile.
+        const src = `#version 150
+uniform float hitPoints[5 * 8];
+void main() {
+    int hitPointIdx = 2;
+    float a = hitPoints[5 * hitPointIdx + 0];
+    float b = hitPoints[5 * hitPointIdx + 3];
+}`;
+        const out = translateGLSL(src, 'fragment');
+        expect(out.ok).toBe(true);
+        // Subscript expressions stay integer.
+        expect(out.source).toContain('hitPoints[5 * hitPointIdx + 0]');
+        expect(out.source).toContain('hitPoints[5 * hitPointIdx + 3]');
+        // Array size declaration also stays integer.
+        expect(out.source).toContain('uniform float hitPoints[5 * 8]');
+        // Defence against regression: nothing inside `[...]` should
+        // carry `.0`.
+        expect(out.source).not.toMatch(/hitPoints\[[^\]]*\.\d+/);
+    });
+
+    it('still promotes int literals OUTSIDE array subscripts even on the same line', () => {
+        // The bracket-skip must not poison promotion elsewhere on the
+        // same line. Construct a line where one literal is inside `[]`
+        // and another is in float context — only the latter gets `.0`.
+        const src = `#version 150
+uniform float PI;
+uniform float buf[8];
+out vec4 fragColor;
+void main() {
+    int i = 1;
+    float x = buf[2 * i] + 2 * PI;
+    fragColor = vec4(x);
+}`;
+        const out = translateGLSL(src, 'fragment');
+        expect(out.ok).toBe(true);
+        // Inside [...] stays integer.
+        expect(out.source).toContain('buf[2 * i]');
+        // Outside, `2 * PI` promotes to `2.0 * PI`.
+        expect(out.source).toContain('2.0 * PI');
+    });
+
+    it('rewrites file-scope non-const initializers to #define (ShockWave)', () => {
+        // ShockWave / SphereDistortion FS define `float p1 =
+        // gl_ProjectionMatrix[2][2]` at file scope. After the legacy
+        // shim renames it, the initializer references a uniform — not
+        // a constant — so GLSL ES 300 rejects the global. Rewrite
+        // such declarations to `#define NAME (EXPR)`.
+        const src = `#version 150 compatibility
+varying float life;
+float p1 = gl_ProjectionMatrix[2][2];
+float p2 = gl_ProjectionMatrix[2][3];
+void main() {
+    float z = p1 + p2 * life;
+    gl_FragColor = vec4(z);
+}`;
+        const out = translateGLSL(src, 'fragment', { legacyGL2Shim: true });
+        expect(out.ok).toBe(true);
+        // p1 / p2 converted to macros.
+        expect(out.source).toMatch(/#define p1 \([^)]*_legProjectionMatrix\[2\]\[2\]\)/);
+        expect(out.source).toMatch(/#define p2 \([^)]*_legProjectionMatrix\[2\]\[3\]\)/);
+        // Original file-scope declarations gone.
+        expect(out.source).not.toMatch(/^\s*float\s+p1\s*=/m);
+        expect(out.source).not.toMatch(/^\s*float\s+p2\s*=/m);
+        // Use sites remain — they'll macro-expand at compile time.
+        expect(out.source).toMatch(/float\s+z\s*=\s*p1\s*\+\s*p2/);
+    });
+
+    it('leaves file-scope const declarations alone', () => {
+        // `const float PI = 3.14159;` is a real constant — must NOT
+        // get rewritten to a macro (loses the type) and must keep its
+        // const qualifier.
+        const src = `#version 150
+const float PI = 3.14159;
+out vec4 fragColor;
+void main() { fragColor = vec4(PI); }`;
+        const out = translateGLSL(src, 'fragment');
+        expect(out.ok).toBe(true);
+        expect(out.source).toContain('const float PI = 3.14159;');
+        expect(out.source).not.toMatch(/#define PI/);
+    });
+
+    it('leaves file-scope literal-only initializers alone', () => {
+        // `float k = 5.0;` is fine at global scope (literal is
+        // constant). Don't macro-rewrite it — keep the declaration.
+        const src = `#version 150
+float k = 5.0;
+out vec4 fragColor;
+void main() { fragColor = vec4(k); }`;
+        const out = translateGLSL(src, 'fragment');
+        expect(out.ok).toBe(true);
+        expect(out.source).toMatch(/^\s*float\s+k\s*=\s*5\.0\s*;/m);
+        expect(out.source).not.toMatch(/#define k/);
+    });
+
+    it('promotes int literal compared against a float intrinsic result', () => {
+        // ZK ShieldSphereColorHQ FS:
+        //     if (length(offset2) > 0) { ... }
+        // GLSL ES 300 strict rejects `float > int`. Rule 4b' must catch
+        // length() / distance() / dot() / etc. on the LHS and append
+        // `.0` to the integer RHS.
+        const src = `#version 150
+out vec4 fragColor;
+in vec2 offset2;
+in float val;
+void main() {
+    if (length(offset2) > 0) fragColor = vec4(1);
+    if (distance(offset2, vec2(0)) < 1) fragColor = vec4(0);
+    if (dot(offset2, offset2) >= 0) fragColor.r = 1.0;
+}`;
+        const out = translateGLSL(src, 'fragment');
+        expect(out.ok).toBe(true);
+        // Be lenient about the call-body: distance() carries a nested
+        // `vec2(0)`, so a `[^)]*` match can't span it. Just confirm the
+        // intrinsic name + comparison-with-promoted-literal pair.
+        expect(out.source).toContain('length(offset2) > 0.0');
+        expect(out.source).toContain('distance(offset2, vec2(0)) < 1.0');
+        expect(out.source).toContain('dot(offset2, offset2) >= 0.0');
+    });
+
+    it('does NOT promote literal compared against user-function call', () => {
+        // The intrinsic whitelist limits the rule to known
+        // float-returning functions. A user-defined function that
+        // returns int must NOT have its comparison RHS promoted.
+        const src = `#version 150
+int countItems() { return 0; }
+out vec4 fragColor;
+void main() {
+    if (countItems() > 0) fragColor = vec4(1);
+}`;
+        const out = translateGLSL(src, 'fragment');
+        expect(out.ok).toBe(true);
+        // The 0 must stay an int — `countItems() > 0`.
+        expect(out.source).toMatch(/countItems\(\)\s*>\s*0(?!\.)/);
+    });
+
+    it('does not rewrite identical-named declarations inside function scope', () => {
+        // A local `float p1 = ...` inside main() is a normal
+        // declaration — it must stay a declaration.
+        const src = `#version 150
+out vec4 fragColor;
+uniform float u;
+void main() {
+    float p1 = u * 2.0;
+    fragColor = vec4(p1);
+}`;
+        const out = translateGLSL(src, 'fragment');
+        expect(out.ok).toBe(true);
+        expect(out.source).toMatch(/float\s+p1\s*=\s*u\s*\*\s*2\.0\s*;/);
+        expect(out.source).not.toMatch(/#define p1/);
+    });
 });
 
 describe('translateGLSL — legacy GL2 fixed-function shim', () => {

@@ -356,6 +356,125 @@ function findLine(src: string, regex: RegExp): number | undefined {
     return line;
 }
 
+// ── Bracket-aware helper ───────────────────────────────────────────────
+
+/**
+ * Run a transform only over source ranges that aren't inside square
+ * brackets. Used by the int→float promotion pass to avoid mangling
+ * integer expressions in array subscripts / sizes (`buf[5 * idx + 0]`,
+ * `uniform float buf[5 * MAX_POINTS]`). Nested brackets count by
+ * depth; the transform is applied to depth-0 segments only.
+ *
+ * Quoted-string literals aren't a concern (GLSL has no string type),
+ * and comments are stripped before the int→float pass runs against the
+ * already-rewritten source — but the comment risk is also bracket-
+ * agnostic.
+ */
+function applyOutsideBrackets(src: string, transform: (chunk: string) => string): string {
+    let out = '';
+    let depth = 0;
+    let start = 0;
+    for (let i = 0; i < src.length; i++) {
+        const c = src.charCodeAt(i);
+        if (c === 91 /* [ */) {
+            if (depth === 0) {
+                out += transform(src.slice(start, i));
+                start = i;
+            }
+            depth++;
+        } else if (c === 93 /* ] */) {
+            depth--;
+            if (depth === 0) {
+                // Include the closing bracket in the verbatim chunk.
+                out += src.slice(start, i + 1);
+                start = i + 1;
+            }
+            if (depth < 0) {
+                // Unbalanced source — fall through and reset so we
+                // don't enter an inverted state. The shader will fail
+                // compilation in a more informative way.
+                depth = 0;
+                start = i + 1;
+            }
+        }
+    }
+    if (depth === 0) {
+        out += transform(src.slice(start));
+    } else {
+        out += src.slice(start);
+    }
+    return out;
+}
+
+// ── File-scope non-const initializer rewrite ───────────────────────────
+
+/**
+ * Rewrite file-scope variable declarations whose initializer is a
+ * non-constant expression to `#define` form, so the expression is
+ * textually substituted at every use site instead of being stored in a
+ * global. GLSL ES 300 forbids non-constant initializers at global
+ * scope; ZK's ShockWave / SphereDistortion fragment shaders rely on
+ * this pattern (`float p1 = gl_ProjectionMatrix[2][2];`).
+ *
+ * Heuristic for "needs rewrite":
+ *   - Declaration appears at brace depth 0 (we track `{` and `}` per
+ *     line; multi-line braces still work because depth carries across).
+ *   - Type is one of the basic GLSL scalar/vec/mat types.
+ *   - The line is NOT `const`-qualified (a real `const float PI = 3.14`
+ *     is legal — leave it alone).
+ *   - The initializer expression references at least one identifier
+ *     (purely-literal initializers like `vec3(1.0)` are also legal at
+ *     global scope; rewriting them to a macro is harmless but
+ *     unnecessary). Identifier presence is the simplest proxy for
+ *     "might be non-const".
+ *
+ * The function-form alternative (declare `float p1() { return EXPR; }`
+ * and replace `p1` with `p1()` at use sites) requires identifier
+ * tracking; the macro form gets us the same behaviour with a single
+ * line edit.
+ */
+function rewriteFileScopeNonConstInit(src: string): string {
+    const lines = src.split('\n');
+    const out: string[] = [];
+    let braceDepth = 0;
+
+    // `type name = expr;` where type is a GLSL primitive without array
+    // brackets. Macros can't carry an array type (would need #define
+    // foo arr[0], foo arr[1], ...) so we leave arrayed globals alone —
+    // those are typically already legal constants (e.g. `uniform float
+    // hitPoints[5*MAX_POINTS]` has no initializer).
+    const declRe = /^\s*(float|vec[234]|mat[234]|int|uint|ivec[234]|uvec[234]|bvec[234])\s+(\w+)\s*=\s*([^;]+);\s*$/;
+
+    for (const rawLine of lines) {
+        const wasAtFileScope = braceDepth === 0;
+        // Update brace depth for the next line. This is a coarse count
+        // — strings would lie about it, but GLSL has no strings.
+        for (let i = 0; i < rawLine.length; i++) {
+            const c = rawLine.charCodeAt(i);
+            if (c === 123 /* { */) braceDepth++;
+            else if (c === 125 /* } */) braceDepth--;
+        }
+
+        if (!wasAtFileScope) { out.push(rawLine); continue; }
+        if (/^\s*#/.test(rawLine)) { out.push(rawLine); continue; }
+        if (/\bconst\b/.test(rawLine)) { out.push(rawLine); continue; }
+
+        const m = rawLine.match(declRe);
+        if (!m) { out.push(rawLine); continue; }
+        const expr = m[3];
+
+        // Skip if the initializer is purely literal-arithmetic (no
+        // identifiers). Those are valid constant expressions and don't
+        // need rewriting.
+        const stripped = expr.replace(/\b(vec[234]|mat[234]|float|int|uint)\s*\(/g, '(');
+        if (!/[A-Za-z_]/.test(stripped)) { out.push(rawLine); continue; }
+
+        const name = m[2];
+        out.push(`#define ${name} (${expr})`);
+    }
+    return out.join('\n');
+}
+
 // ── Main translator ────────────────────────────────────────────────────
 
 /**
@@ -639,69 +758,116 @@ export function translateGLSL(src: string, stage: GlslStage, opts: TranslateOpti
         }
     }
 
+    // ── File-scope non-const initializer rewrite ──────────────────────
+    //
+    // GLSL ES 300 requires global initializers to be constant
+    // expressions. ZK's ShockWave / SphereDistortion fragment shaders
+    // define file-scope `float p1 = gl_ProjectionMatrix[2][2];` which
+    // is non-const after the legacy shim renames the matrix uniform.
+    // Convert each such declaration to `#define NAME (EXPR)` so the
+    // expression is textually substituted at every use site instead of
+    // stored as a global. Conservative: only rewrites when the right-
+    // hand side references at least one identifier (a constant-fold
+    // initializer like `vec3(0.0)` could legitimately stay as-is but
+    // also works as a macro, so we keep the rule simple and rewrite
+    // both). Skips `const`-qualified lines (those must remain
+    // declarations to be usable as constant operands elsewhere) and
+    // any declaration with array brackets (macros can't carry the
+    // array type).
+    s = rewriteFileScopeNonConstInit(s);
+
     // ── Int → float promotions ────────────────────────────────────────
     //
     // GLSL ES 300 is strict: you cannot assign an integer literal to a
     // float, multiply/divide an int by a float, or construct a float
     // array from mixed-type literals. Spring's 150-compat shaders do all
-    // of these. We rewrite them:
+    // of these. We rewrite them.
+    //
+    // **Bracket-aware:** the rules below promote int literals that look
+    // like float-context operands, but they must NOT touch literals
+    // inside array subscripts / sizes (`hitPoints[5 * idx + 0]`,
+    // `uniform float buf[5 * MAX_POINTS]`) where the result must stay
+    // an integer expression. `applyOutsideBrackets` runs the rule only
+    // on source ranges where bracket depth is zero.
+    s = applyOutsideBrackets(s, (chunk) => {
+        let c = chunk;
 
-    // 1. `const float NAME = -?INT;` → append `.0` to the literal.
-    s = s.replace(
-        /(\bconst\s+float\s+\w+\s*=\s*)(-?\d+)(\s*;)/g,
-        '$1$2.0$3',
-    );
-
-    // 2. Integer literals inside `float[N](...)` array constructors.
-    //    `float[NUM_LAYERS](1, 6.6, 8.4, ...)` must become
-    //    `float[NUM_LAYERS](1.0, 6.6, 8.4, ...)`. The look-ahead
-    //    `(?![\w.])` rejects any digit or dot that follows — critical
-    //    because otherwise `\d+` would backtrack from `34` to `3`,
-    //    then happily append `.0` and produce garbage `3.04.6` out of
-    //    `34.6`.
-    s = s.replace(
-        /(\bfloat\s*\[[^\]]*\]\s*\()([^)]*)(\))/g,
-        (_, start, body, end) => {
-            const fixed = body.replace(
-                /(^|[^\w.])(-?\d+)(?![\w.])/g,
-                '$1$2.0',
-            );
-            return start + fixed + end;
-        },
-    );
-
-    // 3. Bare int literal on LHS of arithmetic.
-    s = s.replace(
-        /(?<![\w.])(-?\d+)(?![\w.])(\s*[*/+\-])/g,
-        '$1.0$2',
-    );
-
-    // 4. Bare int literal on RHS of arithmetic after an identifier,
-    //    `)`, or member access.
-    s = s.replace(
-        /([A-Za-z_)](?:\.\w+)?\s*[*/+\-]\s*)(-?\d+)(?![\w.\]])/g,
-        '$1$2.0',
-    );
-
-    // 4b. Bare int literal on RHS of comparison with a float-valued
-    //    swizzle/member access. Plain-identifier comparisons may be
-    //    against an int varying so we *require* `.member` on the LHS.
-    s = s.replace(
-        /([A-Za-z_)]\.\w+\s*(?:>=|<=|==|!=|>|<)\s*)(-?\d+)(?![\w.\]])/g,
-        '$1$2.0',
-    );
-
-    // 4c. Assignment of bare int literal to a float variable. Apply
-    //    per-line and skip integer-typed declarations and for-loop
-    //    counters.
-    s = s.split('\n').map(line => {
-        if (/\b(int|uint|ivec[234]|uvec[234]|bvec[234])\b/.test(line)) return line;
-        if (/\bfor\s*\(/.test(line)) return line;
-        return line.replace(
-            /(\b\w+\s*=\s*)(-?\d+)(\s*;)/g,
+        // 1. `const float NAME = -?INT;` → append `.0` to the literal.
+        c = c.replace(
+            /(\bconst\s+float\s+\w+\s*=\s*)(-?\d+)(\s*;)/g,
             '$1$2.0$3',
         );
-    }).join('\n');
+
+        // 2. Integer literals inside `float[N](...)` array constructors.
+        //    `float[NUM_LAYERS](1, 6.6, 8.4, ...)` must become
+        //    `float[NUM_LAYERS](1.0, 6.6, 8.4, ...)`. The look-ahead
+        //    `(?![\w.])` rejects any digit or dot that follows —
+        //    critical because otherwise `\d+` would backtrack from
+        //    `34` to `3`, then happily append `.0` and produce garbage
+        //    `3.04.6` out of `34.6`.
+        c = c.replace(
+            /(\bfloat\s*\[[^\]]*\]\s*\()([^)]*)(\))/g,
+            (_, start, body, end) => {
+                const fixed = body.replace(
+                    /(^|[^\w.])(-?\d+)(?![\w.])/g,
+                    '$1$2.0',
+                );
+                return start + fixed + end;
+            },
+        );
+
+        // 3. Bare int literal on LHS of arithmetic.
+        c = c.replace(
+            /(?<![\w.])(-?\d+)(?![\w.])(\s*[*/+\-])/g,
+            '$1.0$2',
+        );
+
+        // 4. Bare int literal on RHS of arithmetic after an identifier,
+        //    `)`, or member access.
+        c = c.replace(
+            /([A-Za-z_)](?:\.\w+)?\s*[*/+\-]\s*)(-?\d+)(?![\w.\]])/g,
+            '$1$2.0',
+        );
+
+        // 4b. Bare int literal on RHS of comparison with a float-valued
+        //    swizzle/member access. Plain-identifier comparisons may be
+        //    against an int varying so we *require* `.member` on the LHS.
+        c = c.replace(
+            /([A-Za-z_)]\.\w+\s*(?:>=|<=|==|!=|>|<)\s*)(-?\d+)(?![\w.\]])/g,
+            '$1$2.0',
+        );
+
+        // 4b'. Bare int literal on RHS of comparison with a known
+        //    float-returning intrinsic. `length(x) > 0` is the canonical
+        //    case (ZK ShieldSphereColorHQ FS line 474), but the same
+        //    pattern shows up in `distance(a, vec2(0))`, `dot(x, y)`,
+        //    `mix(a, b, t)`, `smoothstep(0, 1, t)`, etc. Whitelist the
+        //    intrinsics whose return type is `float` so we don't
+        //    accidentally promote against an `int`-returning user
+        //    function. The body pattern allows one level of nested
+        //    parens (e.g. `distance(p, vec2(0))`) — deeper nesting needs
+        //    a real parser, but two-level nesting in a comparison is
+        //    vanishingly rare.
+        const FLOAT_INTRINSICS = '(?:length|distance|dot|smoothstep|fract|mod|pow|sqrt|inversesqrt|exp|log|exp2|log2|sin|cos|tan|asin|acos|atan|abs|sign|floor|ceil|round|min|max|step|clamp|mix)';
+        c = c.replace(
+            new RegExp(`(\\b${FLOAT_INTRINSICS}\\s*\\((?:[^()]|\\([^()]*\\))*\\)\\s*(?:>=|<=|==|!=|>|<)\\s*)(-?\\d+)(?![\\w.\\]])`, 'g'),
+            '$1$2.0',
+        );
+
+        // 4c. Assignment of bare int literal to a float variable. Apply
+        //    per-line and skip integer-typed declarations and for-loop
+        //    counters.
+        c = c.split('\n').map(line => {
+            if (/\b(int|uint|ivec[234]|uvec[234]|bvec[234])\b/.test(line)) return line;
+            if (/\bfor\s*\(/.test(line)) return line;
+            return line.replace(
+                /(\b\w+\s*=\s*)(-?\d+)(\s*;)/g,
+                '$1$2.0$3',
+            );
+        }).join('\n');
+
+        return c;
+    });
 
     // 5. `gl_InstanceID` used as a float operand.
     s = s.replace(
