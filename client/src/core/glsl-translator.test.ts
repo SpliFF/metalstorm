@@ -41,6 +41,33 @@ void main() { gl_FragColor = texture2D(tex, vUv); }`;
         expect(out.source).not.toContain('texture2D');
     });
 
+    it('rewrites textureCube/texture3D for legacy fragment sources', () => {
+        // ZK's UnitCloaker FS uses `textureCube(samplerCube, vec3)` —
+        // reserved in GLSL ES 300 and must be folded into the unified
+        // `texture()` overload. texture3D gets the same treatment.
+        const src = `#version 120
+uniform samplerCube envMap;
+uniform sampler3D volume;
+uniform sampler2D tex;
+varying vec3 vDir;
+varying vec3 vP;
+varying vec2 vUv;
+void main() {
+    vec4 a = textureCube(envMap, vDir);
+    vec4 b = texture3D(volume, vP);
+    vec4 c = texture2D(tex, vUv);
+    gl_FragColor = a + b + c;
+}`;
+        const out = translateGLSL(src, 'fragment');
+        expect(out.ok).toBe(true);
+        expect(out.source).not.toMatch(/\btextureCube\b/);
+        expect(out.source).not.toMatch(/\btexture3D\b/);
+        expect(out.source).not.toMatch(/\btexture2D\b/);
+        expect(out.source).toContain('texture(envMap, vDir)');
+        expect(out.source).toContain('texture(volume, vP)');
+        expect(out.source).toContain('texture(tex, vUv)');
+    });
+
     it('rewrites vertex attribute/varying for legacy sources', () => {
         const src = `#version 120
 attribute vec3 aPos;

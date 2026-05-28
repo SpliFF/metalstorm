@@ -1235,6 +1235,30 @@ async function init(
                 return -1 - (x or 0)
             end
         end
+        -- Spring/ZK adds math.bit_or/and/xor on top of Lua 5.1. LUPS
+        -- distortionFBO.lua calls math.bit_or at file scope; without
+        -- this shim the whole class file fails to load and every
+        -- distortion-dependent particle class (Jet, AirJet,
+        -- JitterParticles*, ShieldJitter, ShockWave, SphereDistortion,
+        -- UnitJitter) gets rejected as "hardware unsupported".
+        if not math.bit_or then
+            math.bit_or = function(a, b)
+                if bit32 and bit32.bor then return bit32.bor(a or 0, b or 0) end
+                return (a or 0) | (b or 0)
+            end
+        end
+        if not math.bit_and then
+            math.bit_and = function(a, b)
+                if bit32 and bit32.band then return bit32.band(a or 0, b or 0) end
+                return (a or 0) & (b or 0)
+            end
+        end
+        if not math.bit_xor then
+            math.bit_xor = function(a, b)
+                if bit32 and bit32.bxor then return bit32.bxor(a or 0, b or 0) end
+                return (a or 0) ~ (b or 0)
+            end
+        end
     `, 'math_round_fix');
     postLog(2, '[LuaUI] init step 6b/8 done: pre-guard installed');
 

@@ -464,6 +464,64 @@ export class LuaGLBridge {
             return [c.width, c.height];
         };
 
+        // gl.HasExtension(name) — Spring's desktop-GL extension probe.
+        // ZK's LUPS `distortionFBO`, `ShockWave`, `Groundflash`, and a
+        // handful of LuaShaders widgets read this at file-load time to
+        // gate FBO/RTT/float-texture paths. WebGL2 makes most of these
+        // core (NPOT, depth textures, sRGB, instanced arrays, float
+        // textures), so we report the desktop-GL extension *strings*
+        // ZK names as supported when their WebGL2 equivalent is core.
+        //
+        // Anything we don't recognise falls through to the underlying
+        // `getExtension(name)` truthiness check — which catches WebGL
+        // extensions like `EXT_color_buffer_float` when ZK queries by
+        // their WebGL name directly.
+        const KNOWN_DESKTOP_EXTENSIONS = new Set<string>([
+            // NPOT support — WebGL2 always supports non-power-of-two
+            // textures (no mipmap restriction for repeat wrapping).
+            'GL_ARB_texture_non_power_of_two',
+            // 32-bit + 16-bit float internal formats — WebGL2 ships
+            // them as core (RGBA32F / RGBA16F), with rendering enabled
+            // via EXT_color_buffer_float (queried separately below).
+            'GL_ARB_texture_float',
+            'GL_ARB_half_float_pixel',
+            'GL_OES_texture_float',
+            // Depth textures — core in WebGL2.
+            'GL_ARB_depth_texture',
+            'GL_OES_depth_texture',
+            // FBOs / MRTs — core.
+            'GL_ARB_framebuffer_object',
+            'GL_EXT_framebuffer_object',
+            'GL_EXT_framebuffer_blit',
+            'GL_ARB_draw_buffers',
+            // Instanced arrays — core.
+            'GL_ARB_instanced_arrays',
+            'GL_ARB_draw_instanced',
+            // VAO / VBO — core.
+            'GL_ARB_vertex_array_object',
+            'GL_ARB_vertex_buffer_object',
+            // GLSL — we expose ES 300 shaders, so report the families.
+            'GL_ARB_shader_objects',
+            'GL_ARB_vertex_shader',
+            'GL_ARB_fragment_shader',
+            'GL_ARB_shading_language_100',
+            // sRGB framebuffer — core.
+            'GL_ARB_framebuffer_sRGB',
+            'GL_EXT_framebuffer_sRGB',
+        ]);
+        gl['HasExtension'] = (name: LuaValue) => {
+            const s = String(name ?? '');
+            if (KNOWN_DESKTOP_EXTENSIONS.has(s)) return true;
+            // Last resort: try the underlying WebGL extension registry.
+            // ZK occasionally queries the WebGL-flavoured name directly
+            // (e.g. `EXT_color_buffer_float`).
+            try {
+                return !!this.gl.getExtension(s);
+            } catch {
+                return false;
+            }
+        };
+
         // gl.GetString(name) — Spring exposes the desktop-GL `glGetString`
         // for vendor / renderer / version reporting. ZK's `lups.lua` uses
         // it at load time (line 120-121) to detect Nvidia / ATI / Intel /

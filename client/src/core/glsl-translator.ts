@@ -470,7 +470,16 @@ export function translateGLSL(src: string, stage: GlslStage, opts: TranslateOpti
             s = s.replace(/\bvarying\b/g, 'out');
         } else {
             s = s.replace(/\bvarying\b/g, 'in');
-            s = s.replace(/\btexture2D\b/g, 'texture');
+            // GLSL ES 300 unified all sampler lookups under `texture()`.
+            // The legacy 1.10 family (`texture2D`, `texture3D`,
+            // `textureCube`) is reserved and the compiler rejects it
+            // outright. ZK's UnitCloaker FS calls `textureCube(samplerCube,
+            // vec3)`; other LUPS classes mix `texture2D` / `texture3D`.
+            s = s.replace(/\btexture(?:2D|3D|Cube)\b(?!Lod|Grad|Proj)/g, 'texture');
+            // Lod/Grad/Proj variants get the same treatment.
+            s = s.replace(/\btexture(?:2D|3D|Cube)Lod\b/g, 'textureLod');
+            s = s.replace(/\btexture(?:2D|3D|Cube)Grad\b/g, 'textureGrad');
+            s = s.replace(/\btexture(?:2D|Cube)Proj\b/g, 'textureProj');
             if (/\bgl_FragColor\b/.test(s)) {
                 s = s.replace(/\bgl_FragColor\b/g, 'outFragColor');
                 // Anchor after `precision highp int;` so the float
