@@ -3118,14 +3118,21 @@ function installEngineGlobals(
     }
     rt.setGlobal('gl', glGlobal);
 
-    // Spring.Orig — alias for Spring.* before widgetHandler hooks wrap any
-    // callouts. Real Spring exposes this as the unwrapped namespace so
-    // widgets can bypass other widgets' hooks. ZK's `lups.lua` calls
-    // `Spring.Orig.GetViewGeometry()` at load time (line 183); without
-    // this the whole include throws and LUPS never boots. Plain alias is
-    // correct semantics here because no widget has hooked the namespace
-    // yet. Set Lua-side to avoid a JS object cycle in pushValue.
-    rt.doString('Spring.Orig = Spring', 'engine_globals_spring_orig');
+    // Spring.Orig — snapshot of the unwrapped Spring.* callouts before
+    // any widget hooks them. Real Spring exposes this so widgets can
+    // bypass other widgets' wrappers. ZK's `lups.lua` calls
+    // `Spring.Orig.GetViewGeometry()` at load time (line 183) and ZK's
+    // `LuaRules/Utilities/function_override.lua` REPLACES
+    // `Spring.GetViewGeometry` with a wrapper that calls
+    // `Spring.Orig.GetViewGeometry()` — so Spring.Orig must be a
+    // SHALLOW COPY, not a reference. `Spring.Orig = Spring` would make
+    // the wrapper call itself and stack-overflow on first invocation.
+    rt.doString(
+        'local copy = {}\n' +
+        'for k, v in pairs(Spring) do copy[k] = v end\n' +
+        'Spring.Orig = copy\n',
+        'engine_globals_spring_orig',
+    );
 
     // gl.Utilities — table of helper draw functions used by some ZK widgets
     // (e.g. cmd_factory_plate_placer uses gl.Utilities.DrawCircle).
