@@ -182,6 +182,36 @@ The sun-visibility result attenuates ONLY the directional + specular
 terms — the ambient floor stays put, so shadows go darker but not
 black, matching how Spring / ZK shaders darken shadowed surfaces.
 
+### Per-game lighting style (`modinfo.lua` `lighting` field)
+
+The team-color fragment shader compiles two variants behind a
+`#define USE_HALF_LAMBERT` toggle. The choice is set per-game in
+`modinfo.lua`:
+
+```lua
+return {
+    name = 'Zero-K',
+    -- ...
+    lighting = 'gameplay',   -- or 'realistic'; omit for default
+}
+```
+
+| Value | Define set? | Formula | Best for |
+|---|---|---|---|
+| `'gameplay'` (default, omit = same) | yes | `halfLambert = N·L*0.5+0.5`; `ambient = 0.45`; `sun = 0.55*halfLambert + 0.05*skyTint` | RTS camera at 200–400 elmos — silhouettes stay readable when units are a few pixels tall |
+| `'realistic'` | no | `lambert = max(0, N·L)`; `ambient = 0.25 + 0.10*skyTint`; `sun = 0.70*lambert` | Close-up / cinematic — strong front/back contrast, side faces darken cleanly |
+
+Flow: `modinfo.lua → game.config.lua wrapper → GameDiscovery::GameInfo
+(C++) → LobbyGameInfo FlatBuffer + /api/games JSON → lobby-ui's
+AvailableGameInfo → setLightingStyle() in main.ts before
+EntityRenderer constructor`. The setter is **per-game-session**, not
+per-frame — picked once at game-start. Mid-game switching would require
+recompiling every existing ShaderMaterial program; not currently
+implemented.
+
+Unknown values fall back to `'gameplay'` so an unrecognised string
+from a future protocol revision doesn't render units flat-coloured.
+
 ## ⚠️ Gotcha: thin-instance matrix packing breaks shadow casting
 
 **Do not pack per-instance auxiliary data into a thin-instance world

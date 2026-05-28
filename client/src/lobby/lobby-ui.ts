@@ -85,6 +85,14 @@ interface AvailableGameInfo {
     displayName: string;
     description: string;
     version: string;
+    /// Shader-lighting style the game wants the entity renderer to use,
+    /// from `modinfo.lua`'s `lighting` field. `"gameplay"` (default) is
+    /// the half-Lambert + high-ambient formula tuned for silhouette
+    /// readability at typical RTS camera distance; `"realistic"` is true
+    /// Lambert with low ambient — stronger front/back contrast, closer
+    /// to what a third-party glTF viewer renders. Unknown values fall
+    /// back to gameplay on the renderer side.
+    lighting: string;
 }
 
 interface CurrentRoom {
@@ -1038,6 +1046,7 @@ export class LobbyUI {
                 this.availableGames = games.map((g: any) => ({
                     id: g.id ?? '', displayName: g.displayName ?? '',
                     description: g.description ?? '', version: g.version ?? '',
+                    lighting: g.lighting ?? 'gameplay',
                 }));
                 if (!this.selectedGameId && this.availableGames.length > 0) {
                     this.selectedGameId = this.availableGames[0].id;
@@ -1156,6 +1165,7 @@ export class LobbyUI {
                 displayName: g.displayName() ?? '',
                 description: g.description() ?? '',
                 version: g.version() ?? '',
+                lighting: g.lighting() ?? 'gameplay',
             });
         }
         // Auto-select the first game so a user who immediately

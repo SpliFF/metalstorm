@@ -9,7 +9,7 @@ import { Engine, Scene, FreeCamera, Mesh, MeshBuilder, StandardMaterial, Vector3
 // transcoder asset URLs to a CDN copy. After the KTX2 migration every
 // GPU texture (unit + feature + terrain + minimap) is `.ktx2`.
 import './core/ktx2-config.js';
-import { EntityRenderer } from './core/entity-renderer.js';
+import { EntityRenderer, setLightingStyle } from './core/entity-renderer.js';
 import { ProjectileRenderer } from './core/projectile-renderer.js';
 import { ProjectileTextureResolver } from './core/projectile-texture-resolver.js';
 import { CegRuntime } from './core/ceg-runtime.js';
@@ -312,6 +312,17 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // / Lua widget bridge. Lazy entity-renderer getter so snapToUnit works
     // even though entityRenderer is constructed a few lines below.
     installCameraWindowApi(rtsCamera, () => entityRenderer);
+
+    // Pick the per-game shader lighting style before the first team-color
+    // material is built. modinfo.lua's `lighting` field flows through
+    // GameDiscovery → LobbyGameInfo (FlatBuffer + /api/games JSON) →
+    // lobbyUI.games. Look it up by the current gameId; fall back to the
+    // default ('gameplay') when the lobby hasn't populated the list yet
+    // or when launching a scenario that bypasses the games browser.
+    const lightingStyle = gameId
+        ? (lobbyUI?.games.find((g) => g.id === gameId)?.lighting ?? 'gameplay')
+        : 'gameplay';
+    setLightingStyle(lightingStyle);
 
     entityRenderer = new EntityRenderer(scene);
     // PLAN-lighting L3: register the renderer with the sun shadow generator.

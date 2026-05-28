@@ -48,6 +48,23 @@ struct GameInfo {
     /// May be empty.
     std::string version;
 
+    /// Lighting style the game wants the client renderer to use. Read
+    /// from modinfo.lua's `lighting` field; defaults to `"gameplay"`.
+    /// Recognised values:
+    ///   - `"gameplay"`  half-Lambert + flat ambient floor. Tuned so
+    ///                    tall, thin units (radar masts, the Lotus
+    ///                    turret spire) keep readable silhouettes at
+    ///                    typical RTS camera distance. Side faces sit
+    ///                    around 45% brightness even when no sun hits.
+    ///   - `"realistic"` true Lambert + lower ambient + sky-tinted
+    ///                    upward bias. Strong front/back contrast on
+    ///                    units; closer to a third-party glTF viewer's
+    ///                    interpretation of the same model. Trades the
+    ///                    distance-readability for close-up shape.
+    /// Surfaced verbatim in the `/api/games` JSON; entity-renderer
+    /// converts it to a `#define` at material-compile time.
+    std::string lighting;
+
     /// Absolute path to the game folder on disk (e.g. "data/games/papertanks").
     /// Used for content loading and AI discovery.
     std::string folderPath;

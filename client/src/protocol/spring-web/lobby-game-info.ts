@@ -58,8 +58,24 @@ version(optionalEncoding?:any):string|Uint8Array|null {
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
+/**
+ * Shader-lighting style the game wants the entity renderer to
+ * use, from modinfo.lua's `lighting` field. Empty / unknown values
+ * fall back to "gameplay" on the client. Recognised values:
+ *   "gameplay"  — half-Lambert + flat ambient floor (default)
+ *   "realistic" — true Lambert + low ambient, stronger contrast
+ * Mirrors the field on GameDiscovery::GameInfo; the HTTP
+ * /api/games endpoint surfaces the same string verbatim.
+ */
+lighting():string|null
+lighting(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+lighting(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 12);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
 static startLobbyGameInfo(builder:flatbuffers.Builder) {
-  builder.startObject(4);
+  builder.startObject(5);
 }
 
 static addId(builder:flatbuffers.Builder, idOffset:flatbuffers.Offset) {
@@ -78,17 +94,22 @@ static addVersion(builder:flatbuffers.Builder, versionOffset:flatbuffers.Offset)
   builder.addFieldOffset(3, versionOffset, 0);
 }
 
+static addLighting(builder:flatbuffers.Builder, lightingOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(4, lightingOffset, 0);
+}
+
 static endLobbyGameInfo(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createLobbyGameInfo(builder:flatbuffers.Builder, idOffset:flatbuffers.Offset, displayNameOffset:flatbuffers.Offset, descriptionOffset:flatbuffers.Offset, versionOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createLobbyGameInfo(builder:flatbuffers.Builder, idOffset:flatbuffers.Offset, displayNameOffset:flatbuffers.Offset, descriptionOffset:flatbuffers.Offset, versionOffset:flatbuffers.Offset, lightingOffset:flatbuffers.Offset):flatbuffers.Offset {
   LobbyGameInfo.startLobbyGameInfo(builder);
   LobbyGameInfo.addId(builder, idOffset);
   LobbyGameInfo.addDisplayName(builder, displayNameOffset);
   LobbyGameInfo.addDescription(builder, descriptionOffset);
   LobbyGameInfo.addVersion(builder, versionOffset);
+  LobbyGameInfo.addLighting(builder, lightingOffset);
   return LobbyGameInfo.endLobbyGameInfo(builder);
 }
 
@@ -97,7 +118,8 @@ unpack(): LobbyGameInfoT {
     this.id(),
     this.displayName(),
     this.description(),
-    this.version()
+    this.version(),
+    this.lighting()
   );
 }
 
@@ -107,6 +129,7 @@ unpackTo(_o: LobbyGameInfoT): void {
   _o.displayName = this.displayName();
   _o.description = this.description();
   _o.version = this.version();
+  _o.lighting = this.lighting();
 }
 }
 
@@ -115,7 +138,8 @@ constructor(
   public id: string|Uint8Array|null = null,
   public displayName: string|Uint8Array|null = null,
   public description: string|Uint8Array|null = null,
-  public version: string|Uint8Array|null = null
+  public version: string|Uint8Array|null = null,
+  public lighting: string|Uint8Array|null = null
 ){}
 
 
@@ -124,12 +148,14 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const displayName = (this.displayName !== null ? builder.createString(this.displayName!) : 0);
   const description = (this.description !== null ? builder.createString(this.description!) : 0);
   const version = (this.version !== null ? builder.createString(this.version!) : 0);
+  const lighting = (this.lighting !== null ? builder.createString(this.lighting!) : 0);
 
   return LobbyGameInfo.createLobbyGameInfo(builder,
     id,
     displayName,
     description,
-    version
+    version,
+    lighting
   );
 }
 }

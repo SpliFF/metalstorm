@@ -1027,7 +1027,8 @@ int main(int argc, char* argv[])
             json += "{\"id\":\"" + HttpAuth::JsonEscape(g.id) + "\""
                 + ",\"displayName\":\"" + HttpAuth::JsonEscape(g.displayName) + "\""
                 + ",\"description\":\"" + HttpAuth::JsonEscape(g.description) + "\""
-                + ",\"version\":\"" + HttpAuth::JsonEscape(g.version) + "\"}";
+                + ",\"version\":\"" + HttpAuth::JsonEscape(g.version) + "\""
+                + ",\"lighting\":\"" + HttpAuth::JsonEscape(g.lighting) + "\"}";
         }
         json += "]";
         return HttpAuth::JsonResponse(200, json);

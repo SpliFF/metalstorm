@@ -868,8 +868,8 @@ inline std::vector<uint8_t> BuildAIListUpdate(const std::vector<AIInfoT>& ais) {
 /// by the lobby in response to GameListRequest. Templated on the
 /// caller's GameInfo type so we can pass in either the lobby's
 /// GameDiscovery::GameInfo directly or a thin proxy struct —
-/// anything with `id`, `displayName`, `description`, `version`
-/// string members works.
+/// anything with `id`, `displayName`, `description`, `version`,
+/// `lighting` string members works.
 template<typename GameInfoT>
 inline std::vector<uint8_t> BuildGameListUpdate(const std::vector<GameInfoT>& games) {
     flatbuffers::FlatBufferBuilder fbb(512);
@@ -880,8 +880,9 @@ inline std::vector<uint8_t> BuildGameListUpdate(const std::vector<GameInfoT>& ga
         auto nameOff = fbb.CreateString(g.displayName);
         auto descOff = fbb.CreateString(g.description);
         auto verOff = fbb.CreateString(g.version);
+        auto lightOff = fbb.CreateString(g.lighting);
         offsets.push_back(SpringWeb::CreateLobbyGameInfo(
-            fbb, idOff, nameOff, descOff, verOff));
+            fbb, idOff, nameOff, descOff, verOff, lightOff));
     }
     auto gamesVec = fbb.CreateVector(offsets);
     auto update = SpringWeb::CreateGameListUpdate(fbb, gamesVec);

@@ -927,6 +927,14 @@ table LobbyGameInfo {
     display_name: string;
     description: string;
     version: string;
+    /// Shader-lighting style the game wants the entity renderer to
+    /// use, from modinfo.lua's `lighting` field. Empty / unknown values
+    /// fall back to "gameplay" on the client. Recognised values:
+    ///   "gameplay"  — half-Lambert + flat ambient floor (default)
+    ///   "realistic" — true Lambert + low ambient, stronger contrast
+    /// Mirrors the field on GameDiscovery::GameInfo; the HTTP
+    /// /api/games endpoint surfaces the same string verbatim.
+    lighting: string;
 }
 
 /// Reply to GameListRequest. Lists every game the lobby

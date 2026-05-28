@@ -63,6 +63,13 @@ bool LoadOne(const fs::path& folder, GameDiscovery::GameInfo& out) {
     std::string name = cfg->GetString("name", "");
     std::string description = cfg->GetString("description", "");
     std::string version = cfg->GetString("version", "");
+    // `lighting` selects the client-side shader variant. Default
+    // `"gameplay"` matches the half-Lambert + 0.45-ambient formula the
+    // codebase shipped with; `"realistic"` switches to true Lambert
+    // with stronger front/back contrast. The lobby surfaces the value
+    // verbatim and lets the client decide how to interpret it — adding
+    // a new style is a client-only change here.
+    std::string lighting = cfg->GetString("lighting", "gameplay");
 
     // Fall back to the folder name if the config doesn't declare
     // one. Keeps the game visible even if an author forgot the
@@ -78,6 +85,7 @@ bool LoadOne(const fs::path& folder, GameDiscovery::GameInfo& out) {
     out.displayName = name;
     out.description = description;
     out.version = version;
+    out.lighting = lighting;
     out.folderPath = folder.string();
     return true;
 }

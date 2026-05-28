@@ -419,25 +419,55 @@ const TEAMCOLOR_FRAGMENT = `#version 300 es
             N = perturbNormal(N, vWorldPos, vUV);
         }
 
-        // Half-Lambert + hemispheric ambient. Plain N·L Lambert (with a
-        // flat ambient floor) leaves the side faces of tall, thin units
-        // — radar masts, the Lotus turret spire — sitting at the
-        // minimum 40% term whenever the camera is far enough away that
-        // their bright top face has shrunk to a few pixels. Half-Lambert
-        // shifts the diffuse range from [0..1] to [0.5..1] so dark
-        // sides keep some shape, and a small upward sky-tint lifts the
-        // floor for upward-facing surfaces without crushing downward
-        // ones. The combined output ranges roughly 0.55–1.05 so well-
-        // lit faces stay visibly brighter than poorly-lit ones.
-        // Half-Lambert + hemispheric ambient. Split into ambient (the
-        // floor) and directional (sun-lit + sky tint) so the sun shadow
-        // below only attenuates the directional half — full shadow still
-        // sees the ambient, matching how Spring/ZK shaders darken
-        // shadowed surfaces without crushing them to black.
-        float halfLambert = dot(N, lightDir) * 0.5 + 0.5;
+        // Per-game lighting style, selected by the "lighting" field in
+        // modinfo.lua. The two variants differ in how aggressively the
+        // sun-direction term modulates brightness:
+        //
+        //   USE_HALF_LAMBERT (default, "gameplay"):
+        //     Plain N·L Lambert (with a flat ambient floor) leaves the
+        //     side faces of tall, thin units — radar masts, the Lotus
+        //     turret spire — sitting at the minimum ~40% term whenever
+        //     the camera is far enough away that their bright top face
+        //     has shrunk to a few pixels. Half-Lambert shifts the
+        //     diffuse range from [0..1] to [0.5..1] so dark sides keep
+        //     some shape, and a small upward sky-tint lifts the floor
+        //     for upward-facing surfaces. Combined output ~0.55–1.00
+        //     keeps unit silhouettes readable at gameplay distance.
+        //
+        //   else ("realistic"):
+        //     True Lambert (max(0, N·L)) with a low ambient floor +
+        //     stronger sky-hemisphere bias. Side faces facing directly
+        //     away from the sun darken close to the ambient floor;
+        //     close-up shape reads cleanly. Trade-off: tall thin units
+        //     can flatten to near-silhouettes when their lit face has
+        //     shrunk to a few pixels.
+        //
+        // Both variants split ambient and sun terms so the sun-shadow
+        // factor (sunVis below) only attenuates the directional half —
+        // shadowed surfaces darken but never hit zero. Matches how
+        // Spring/ZK shaders express their groundShadowDensity term.
+    #ifdef USE_HALF_LAMBERT
+        float lambert     = dot(N, lightDir) * 0.5 + 0.5;
         float skyTint     = N.y * 0.5 + 0.5;
         float ambientTerm = 0.45;
-        float sunTerm     = 0.55 * halfLambert + 0.05 * skyTint;
+        float sunTerm     = 0.55 * lambert + 0.05 * skyTint;
+    #else
+        // Maximum-contrast tuning: zero ambient on downward / lateral
+        // normals, a tiny sky-tint on upward-facing surfaces so roofs
+        // and slope tops aren't pitch black under cloud cover (purely
+        // a wayfinding aid, the floor is still <10% of the sun term).
+        // Sun coefficient at 1.0 so unshadowed sun-facing surfaces
+        // hit full albedo. Dark-side surfaces drop to true black after
+        // sRGB encoding, which is the only way to make the front/back
+        // difference unmistakable on dark-albedo content (Spring's
+        // typical greyscale armour). If this is too harsh for shipping,
+        // raise the 0.0 floor a touch — 0.05 keeps the silhouettes
+        // visible against a black backdrop without flattening the look.
+        float lambert     = max(0.0, dot(N, lightDir));
+        float skyTint     = max(0.0, N.y);
+        float ambientTerm = 0.0 + 0.08 * skyTint;
+        float sunTerm     = 1.00 * lambert;
+    #endif
 
         // PBR-ish specular driven by ORM.G (roughness) and ORM.B
         // (metallic). Pure dielectric: spec base = 4% albedo-neutral;
@@ -454,7 +484,14 @@ const TEAMCOLOR_FRAGMENT = `#version 300 es
             float metallic  = mr.y;
             vec3  specBase  = mix(vec3(0.04), color, metallic);
             float shininess = mix(8.0, 128.0, 1.0 - roughness);
-            float specTerm  = pow(halfLambert, shininess) * (1.0 - roughness);
+            // Use the lighting-style-selected lambert term as the
+            // Blinn-Phong driver. Under USE_HALF_LAMBERT this carries
+            // the half-Lambert (0..1) curve, so back-facing fragments
+            // keep a faint highlight; under the realistic branch
+            // lambert is max(0, N·L) so pow() naturally returns 0
+            // for surfaces facing away from the sun — no spec on
+            // shadow-side panels.
+            float specTerm  = pow(lambert, shininess) * (1.0 - roughness);
             spec = specBase * specTerm;
         }
 
@@ -511,6 +548,32 @@ const TEAMCOLOR_FRAGMENT = `#version 300 es
 // Register the shader once
 Effect.ShadersStore['teamColorVertexShader'] = TEAMCOLOR_VERTEX;
 Effect.ShadersStore['teamColorFragmentShader'] = TEAMCOLOR_FRAGMENT;
+
+/**
+ * Per-game shader lighting style. Resolved at game-start from the
+ * `lighting` field surfaced by the lobby (`/api/games` / GameListUpdate
+ * FlatBuffer). Drives the `#define USE_HALF_LAMBERT` toggle in
+ * `createTeamColorMaterial` — every material built after the setter is
+ * called picks up the new value. Existing materials don't update mid-
+ * game (would need recompile of every ShaderMaterial program); the
+ * setting is expected to be set once before any unit materialises.
+ *
+ *   - "gameplay"  (default) — half-Lambert + 0.45 ambient floor.
+ *                  Optimised for silhouette readability at typical RTS
+ *                  camera distance.
+ *   - "realistic" — true Lambert + low ambient + sky-tinted bias.
+ *                   Closer to a third-party glTF viewer's interpretation
+ *                   of the same model; better for close-ups.
+ *
+ * Unknown values fall back to "gameplay" so a future protocol value the
+ * client doesn't recognise doesn't render units flat-coloured.
+ */
+type LightingStyle = 'gameplay' | 'realistic';
+let currentLightingStyle: LightingStyle = 'gameplay';
+
+export function setLightingStyle(style: string): void {
+    currentLightingStyle = (style === 'realistic') ? 'realistic' : 'gameplay';
+}
 
 // ── Sun + CSM material bind plumbing ───────────────────────────────────
 // See docs/lighting.md "teamColor ShaderMaterial" for the design.
@@ -645,6 +708,17 @@ function createTeamColorMaterial(
     modelHeight: number,
     scene: Scene,
 ): ShaderMaterial {
+    // `defines` are prepended verbatim to both shader sources at
+    // compile time, so `#define USE_HALF_LAMBERT` gates the matching
+    // `#ifdef` block in the fragment shader's lighting formula. The
+    // game-level lighting style was set by main.ts at startup; emitted
+    // here per-material so it lands on every program produced by this
+    // factory regardless of when each unit's first material is built.
+    const defines = ['#define INSTANCES', '#define THIN_INSTANCES'];
+    if (currentLightingStyle === 'gameplay') {
+        defines.push('#define USE_HALF_LAMBERT');
+    }
+
     const mat = new ShaderMaterial(name, scene, 'teamColor', {
         attributes: ['position', 'normal', 'uv'],
         uniforms: ['world', 'viewProjection', 'view', 'teamColor',
@@ -653,7 +727,7 @@ function createTeamColorMaterial(
                    'csmMatrices', 'csmSplits', 'shadowDarkness'],
         samplers: ['diffuseTex', 'emissiveTex', 'ormTex', 'teamMaskTex',
                    'normalTex', 'csmShadowMap'],
-        defines: ['#define INSTANCES', '#define THIN_INSTANCES'],
+        defines,
     });
 
     mat.setTexture('diffuseTex',  textures.diffuse);
