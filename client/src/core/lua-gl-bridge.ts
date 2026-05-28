@@ -1041,11 +1041,35 @@ export class LuaGLBridge {
             return null;
         }
         const rec = opts as Record<string, LuaValue>;
-        const vsSrc = rec['vertex'];
-        const fsSrc = rec['fragment'];
-        if (typeof vsSrc !== 'string' || typeof fsSrc !== 'string') {
+        let vsSrc: string = typeof rec['vertex'] === 'string' ? rec['vertex'] as string : '';
+        let fsSrc: string = typeof rec['fragment'] === 'string' ? rec['fragment'] as string : '';
+        // Spring's gl.CreateShader treats either stage as optional —
+        // missing ones default to fixed-function passthroughs. ZK LUPS
+        // `distortionFBO` and `UnitPieceLight` both ship fragment-only
+        // shaders that rely on this. We synthesize Spring's documented
+        // passthrough so the legacy-shim translator can re-emit it as
+        // valid GLSL ES 300 alongside the user's stage.
+        const haveVs = vsSrc.length > 0;
+        const haveFs = fsSrc.length > 0;
+        if (!haveVs && !haveFs) {
             this.lastShaderLog = 'CreateShader: missing vertex/fragment source';
             return null;
+        }
+        if (!haveVs) {
+            // Fixed-function passthrough VS: projects gl_Vertex and
+            // forwards gl_MultiTexCoord0 + gl_Color through the legacy
+            // varying slots the FS reads as gl_TexCoord[0] and gl_Color.
+            vsSrc = '#version 120\nvoid main() {\n' +
+                '    gl_Position = ftransform();\n' +
+                '    gl_TexCoord[0] = gl_MultiTexCoord0;\n' +
+                '    gl_FrontColor = gl_Color;\n' +
+                '}\n';
+        }
+        if (!haveFs) {
+            // Fixed-function passthrough FS: textured + per-vertex tint.
+            fsSrc = '#version 120\nuniform sampler2D tex0;\nvoid main() {\n' +
+                '    gl_FragColor = texture2D(tex0, gl_TexCoord[0].st) * gl_Color;\n' +
+                '}\n';
         }
         const gl = this.gl;
         // Reset the by-design rejection flag for this compile pass —
