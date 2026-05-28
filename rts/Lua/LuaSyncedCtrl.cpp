@@ -3357,18 +3357,36 @@ int LuaSyncedCtrl::SetUnitPieceParent(lua_State* L)
  *
  * @function Spring.SetUnitPieceMatrix
  *
- * If any of the first three elements are non-zero, and also blocks all script animations from modifying it until {0, 0, 0} is passed.
+ * If the matrix is a valid rotation (or rotation + translation), blocks
+ * all script animations from modifying the piece until the zero matrix
+ * is passed. The matrix itself is NOT consumed by the headless sim —
+ * piece-space draw lives client-side. The sim only honours the script-
+ * anim gate so a gadget that says "freeze this piece" actually freezes
+ * it for the duration.
  *
  * @number unitID
  * @number pieceNum
  * @tparam {number,...} matrix an array of 16 floats
- * @treturn nil
+ * @treturn bool valid — true while the gate is raised (matrix accepted
+ *         as a rot-or-rot+translation), false once cleared (zero matrix).
  */
 int LuaSyncedCtrl::SetUnitPieceMatrix(lua_State* L)
 {
-	// Model piece matrix manipulation is a rendering concern.
-	// On the headless server LocalModelPiece has no SetPieceSpaceMatrix — no-op.
-	return 0;
+	CUnit* unit = ParseUnit(L, __func__, 1);
+	if (unit == nullptr)
+		return 0;
+
+	LocalModelPiece* lmp = ParseObjectLocalModelPiece(L, unit, 2);
+	if (lmp == nullptr)
+		return 0;
+
+	CMatrix44f mat;
+	if (LuaUtils::ParseFloatArray(L, 3, &mat.m[0], 16) == -1)
+		return 0;
+
+	lmp->SetPieceSpaceMatrix(mat);
+	lua_pushboolean(L, lmp->blockScriptAnims);
+	return 1;
 }
 
 

@@ -82,8 +82,26 @@ struct S3DModel {
 struct LocalModelPiece {
 	float3 GetPosition() const { return pos; }
 	float3 GetRotation() const { return rot; }
-	void   SetPosition(const float3& p) { pos = p; dirty = true; }
-	void   SetRotation(const float3& r) { rot = r; dirty = true; }
+	/// Script-driven `Move`/`Turn`/`Spin` go through SetPosition/SetRotation.
+	/// When `blockScriptAnims` is set, both are no-ops — the piece is frozen
+	/// at whatever pose it had when the block was raised. Toggled by
+	/// `Spring.SetUnitPieceMatrix`: a valid rot-or-rot+translation matrix
+	/// raises the flag, a zero matrix clears it.
+	void   SetPosition(const float3& p) { if (blockScriptAnims) return; pos = p; dirty = true; }
+	void   SetRotation(const float3& r) { if (blockScriptAnims) return; rot = r; dirty = true; }
+
+	/// Faithful port of Recoil's `LocalModelPiece::SetPieceSpaceMatrix`.
+	/// The matrix itself is NOT stored — only its validity is checked. A
+	/// matrix that is a rotation (or rotation + translation, i.e. orthonormal
+	/// with determinant ≈ +1) raises `blockScriptAnims`; anything else
+	/// (including the zero matrix) clears it. The semantics of the Lua
+	/// callout are therefore "freeze this piece" / "unfreeze this piece",
+	/// not "force this transform" — the rendering-side variant of the
+	/// engine actually consumes the matrix for piece-space draw, but the
+	/// headless sim only needs the gate flag.
+	bool SetPieceSpaceMatrix(const CMatrix44f& mat) {
+		return blockScriptAnims = mat.IsRotOrRotTranMatrix();
+	}
 
 	/// Position of this piece in the model's coordinate frame, with
 	/// every ancestor's translation+rotation applied. Used by
@@ -167,6 +185,13 @@ struct LocalModelPiece {
 	bool dirty           = false;
 	void SetScriptVisible(bool b) { scriptSetVisible = b; }
 	bool scriptSetVisible = true;
+
+	/// Gate set by `Spring.SetUnitPieceMatrix` (via SetPieceSpaceMatrix
+	/// above). While true, `SetPosition`/`SetRotation` are no-ops — every
+	/// COB `Move`/`Turn`/`Spin` on this piece is silently dropped, leaving
+	/// the rest pose plus whatever explicit transform a future call to
+	/// SetPieceSpaceMatrix(zero) restores.
+	bool blockScriptAnims = false;
 
 	int lmodelPieceIndex = -1;
 	int scriptPieceIndex = -1;
