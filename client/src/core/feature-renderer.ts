@@ -25,6 +25,7 @@ import {
     Quaternion,
     Vector3,
     SceneLoader,
+    ShadowGenerator,
     Texture,
 } from '@babylonjs/core';
 // Side-effect import: registers the glTF loader plugin so SceneLoader
@@ -161,7 +162,9 @@ function renderPlaceholder(
  * Placements with `typeIndex` outside the `featureDefs` array are silently
  * dropped.
  */
-export async function renderMapFeatures(scene: Scene, map: ParsedMapData): Promise<Mesh[]> {
+export async function renderMapFeatures(
+    scene: Scene, map: ParsedMapData, shadowGenerator: ShadowGenerator | null = null,
+): Promise<Mesh[]> {
     // Bucket placements by type index.
     const buckets = new Map<number, MapFeatureInstance[]>();
     for (const f of map.features) {
@@ -261,6 +264,16 @@ export async function renderMapFeatures(scene: Scene, map: ParsedMapData): Promi
 
     await Promise.all(promises);
 
+    // PLAN-lighting L3: register every feature mesh as a sun-shadow
+    // caster + receiver. Static features dominate visual silhouette
+    // (trees, wrecks, geothermals) so they're the biggest visual win.
+    if (shadowGenerator) {
+        for (const mesh of results) {
+            shadowGenerator.addShadowCaster(mesh);
+            mesh.receiveShadows = true;
+        }
+    }
+
     console.log(
         `[features] rendered ${map.features.length} placement(s) across ` +
         `${modelTypes} model type(s), ${placeholderTypes} load-failure placeholder(s), ` +
@@ -335,6 +348,11 @@ export class DynamicFeatureRenderer {
     /// new defs come in.
     private orphanedSpawns: FeatureSpawnInfo[] = [];
 
+    /** Sun-shadow caster sink (PLAN-lighting L3). Per-bucket meshes are
+     *  registered once they finish loading (or when the placeholder
+     *  lands). Pre-existing buckets are bulk-added when this is set. */
+    private shadowGenerator: ShadowGenerator | null = null;
+
     constructor(scene: Scene, defCache: DefCache) {
         this.scene = scene;
         this.defCache = defCache;
@@ -381,6 +399,20 @@ export class DynamicFeatureRenderer {
 
         for (const defId of touchedBuckets) {
             this.rebuildBucket(defId);
+        }
+    }
+
+    /// Register the directional sun-shadow generator (PLAN-lighting L3).
+    /// Adds every already-built bucket mesh as a caster; new buckets
+    /// register themselves on load completion.
+    setShadowGenerator(csm: ShadowGenerator | null): void {
+        this.shadowGenerator = csm;
+        if (!csm) return;
+        for (const bucket of this.buckets.values()) {
+            if (bucket.mesh) {
+                csm.addShadowCaster(bucket.mesh);
+                bucket.mesh.receiveShadows = true;
+            }
         }
     }
 
@@ -517,6 +549,13 @@ export class DynamicFeatureRenderer {
     }
 
     private commitPending(defId: number, bucket: DefBucket): void {
+        // First time the bucket has a mesh — register as a shadow caster.
+        // Subsequent commits skip (caster list is per-mesh; instance count
+        // changes don't need re-registration).
+        if (bucket.mesh && this.shadowGenerator) {
+            this.shadowGenerator.addShadowCaster(bucket.mesh);
+            bucket.mesh.receiveShadows = true;
+        }
         if (bucket.pending.length === 0) {
             this.rebuildBucket(defId);
             return;

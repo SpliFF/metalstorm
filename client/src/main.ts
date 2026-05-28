@@ -4,35 +4,11 @@
  * Flow: Login → Room Browser → Room Setup → Game
  */
 
-import { Engine, Scene, FreeCamera, Mesh, MeshBuilder, StandardMaterial, Vector3, HemisphericLight, DirectionalLight, Color3, Color4 } from '@babylonjs/core';
-// Register the KTX2 / Basis Universal texture loader. After the
-// migration to KTX2 every GPU texture (unit + feature + terrain +
-// minimap) is `.ktx2`; the loader transcodes UASTC/ETC1S to whichever
-// compressed format the GPU prefers (BC7/ASTC/ETC2/BC3).
-import '@babylonjs/core/Materials/Textures/Loaders/ktxTextureLoader.js';
-import { KhronosTextureContainer2 } from '@babylonjs/core/Misc/khronosTextureContainer2.js';
-
-// Pin the KTX2 transcoder asset URLs. The decoder lazily downloads its
-// JS module + WASM transcoders + Zstd decoder on first KTX2 load; the
-// stock defaults leave `wasmZSTDDecoder` null and rely on each
-// transcoder's hard-coded fallback path, which has historically been
-// flaky (one missing module sinks every KTX2 load with the misleading
-// "BasisLzEtc1sImageTranscoder.decodePalettes — Cannot convert
-// undefined to unsigned int" error). Setting every URL explicitly
-// makes the dependency chain auditable in DevTools' Network tab.
-const KTX2_CDN = 'https://cdn.babylonjs.com';
-KhronosTextureContainer2.URLConfig = {
-    jsDecoderModule:        `${KTX2_CDN}/babylon.ktx2Decoder.js`,
-    wasmUASTCToASTC:        `${KTX2_CDN}/ktx2Transcoders/1/uastc_astc.wasm`,
-    wasmUASTCToBC7:         `${KTX2_CDN}/ktx2Transcoders/1/uastc_bc7.wasm`,
-    wasmUASTCToRGBA_UNORM:  `${KTX2_CDN}/ktx2Transcoders/1/uastc_rgba8_unorm_v2.wasm`,
-    wasmUASTCToRGBA_SRGB:   `${KTX2_CDN}/ktx2Transcoders/1/uastc_rgba8_srgb_v2.wasm`,
-    wasmUASTCToR8_UNORM:    `${KTX2_CDN}/ktx2Transcoders/1/uastc_r8_unorm.wasm`,
-    wasmUASTCToRG8_UNORM:   `${KTX2_CDN}/ktx2Transcoders/1/uastc_rg8_unorm.wasm`,
-    jsMSCTranscoder:        `${KTX2_CDN}/ktx2Transcoders/1/msc_basis_transcoder.js`,
-    wasmMSCTranscoder:      `${KTX2_CDN}/ktx2Transcoders/1/msc_basis_transcoder.wasm`,
-    wasmZSTDDecoder:        `${KTX2_CDN}/zstddec.wasm`,
-};
+import { Engine, Scene, FreeCamera, Mesh, MeshBuilder, StandardMaterial, Vector3, Color3, Color4 } from '@babylonjs/core';
+// Side-effect import: registers Babylon's KTX2 loader + pins the
+// transcoder asset URLs to a CDN copy. After the KTX2 migration every
+// GPU texture (unit + feature + terrain + minimap) is `.ktx2`.
+import './core/ktx2-config.js';
 import { EntityRenderer } from './core/entity-renderer.js';
 import { ProjectileRenderer } from './core/projectile-renderer.js';
 import { ProjectileTextureResolver } from './core/projectile-texture-resolver.js';
@@ -59,13 +35,19 @@ import { DebugTerrainGrid } from './core/debug-terrain-grid.js';
 import { Connection } from './core/connection.js';
 import { fetchBuildStamp } from './config.js';
 import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
+import { loadMapLighting, type MapLighting } from './core/map-lighting.js';
+import { applyMapLighting, createSceneLighting, type SceneLighting } from './core/scene-lighting.js';
+import { sendCameraViewport } from './core/viewport.js';
+import { installCameraWindowApi, uninstallCameraWindowApi } from './core/camera-window-api.js';
 import { fetchAndIngestDefs } from './core/defs-fetch.js';
 import { renderMapFeatures, DynamicFeatureRenderer } from './core/feature-renderer.js';
 import { RTSCamera } from './core/rts-camera.js';
 import { LuaWidgetManager } from './core/lua-widget-manager.js';
 import { TestHarness } from './core/test-harness.js';
 import { ScenarioRunner } from './scenarios/runner.js';
-import { injectStyle, renderTemplate } from './ui/ui.js';
+import { createHUD, showHUD, updateHUD, updateSpeedHUD } from './ui/hud/hud.js';
+import { showQuitConfirm } from './ui/quit-confirm/quit-confirm.js';
+import { showGameOver } from './ui/game-over/game-over.js';
 import { debugConsole } from './core/debug-console.js';
 import { logIngest } from './core/log-ingest.js';
 import {
@@ -127,107 +109,6 @@ let gameConn: Connection | null = null;
 /// canvas) for a game that no longer exists.
 let activeSession = 0;
 
-// --- HUD ---
-
-function createHUD(): void {
-    // Remove a previous HUD if present (e.g. after a template hot-swap).
-    document.getElementById('game-hud')?.remove();
-    document.getElementById('hud-style')?.remove();
-
-    injectStyle('hud-style', gameTemplates.hudCss);
-
-    const hud = document.createElement('div');
-    hud.id = 'game-hud';
-    hud.style.display = 'none'; // hidden until game starts
-    hud.innerHTML = gameTemplates.hudHtml;
-    document.body.appendChild(hud);
-
-    // Quit is reachable via ESC (toggle quit-confirm) and the in-game
-    // chili menu (F10 → widget list / game menu). The HUD's static Quit
-    // button was removed because it sat under the chili HUD bar; if a
-    // future template re-adds #hud-quit-btn this guard simply skips.
-    document.getElementById('hud-quit-btn')?.addEventListener('click', () => {
-        showQuitConfirm();
-    });
-}
-
-function showHUD(): void {
-    const hud = document.getElementById('game-hud');
-    if (hud) hud.style.display = 'block';
-}
-
-function updateHUD(entityCount: number, frame: number, selectedIds: readonly number[]): void {
-    const elEntities = document.getElementById('hud-entities');
-    const elFrame = document.getElementById('hud-frame');
-    const elSelected = document.getElementById('hud-selected');
-
-    if (elEntities) elEntities.textContent = `Entities: ${entityCount}`;
-    if (elFrame) elFrame.textContent = `Frame: ${frame}`;
-    if (elSelected) {
-        if (selectedIds.length === 0) elSelected.textContent = 'No selection';
-        else if (selectedIds.length === 1) elSelected.textContent = `Selected: unit ${selectedIds[0]}`;
-        else elSelected.textContent = `Selected: ${selectedIds.length} units`;
-    }
-}
-
-/** Render the sim-speed / pause state in the HUD. Reads from the
- *  authoritative `onGameInfo` broadcast so the indicator reflects what
- *  the server actually applied (after clamping), not what the player
- *  requested. Stays hidden at 1×/unpaused to avoid HUD clutter. */
-function updateSpeedHUD(speed: number, paused: boolean): void {
-    const el = document.getElementById('hud-speed');
-    if (!el) return;
-    if (paused) {
-        el.textContent = 'PAUSED';
-        el.style.display = '';
-    } else if (Math.abs(speed - 1) > 0.01) {
-        el.textContent = `${speed.toFixed(speed < 1 ? 2 : 1)}×`;
-        el.style.display = '';
-    } else {
-        el.style.display = 'none';
-    }
-}
-
-// --- Viewport ---
-
-function sendCameraViewport(camera: FreeCamera, connection: Connection): void {
-    if (!connection.authenticated) return;
-
-    // The server filters entity-state snapshots to only those inside
-    // the viewport rectangle. When we sized the rectangle off
-    // `camera.position.y * tan(fov/2)`, zooming in dropped the
-    // viewport to ~100 elmos wide — any unit outside that tiny box
-    // was filtered out, the client received an empty full-snapshot,
-    // and `EntityRenderer.update()` wiped its `entityMeta` map.
-    // Entity counter on the HUD dropped to 0 and every unit vanished
-    // until the camera zoomed back out enough for them to re-enter
-    // the box.
-    //
-    // Pragmatic fix: always send a viewport that comfortably covers
-    // an entire typical map. 16k elmos is bigger than wanderlust /
-    // scorched_crossing / pools_of_ilys, so the server effectively
-    // passes everything through. Proper frustum-on-ground math for
-    // the tilted camera is a future optimisation — when we start
-    // running maps or unit counts big enough that viewport filtering
-    // buys us real bandwidth, we can revisit.
-    const fov = camera.fov;
-    const height = Math.max(camera.position.y, 1);
-    const visibleHeight = 16384;
-    const visibleWidth = 16384;
-
-    const dir = camera.getTarget().subtract(camera.position).normalize();
-    const t = dir.y !== 0 ? -camera.position.y / dir.y : 0;
-    const groundX = camera.position.x + dir.x * Math.max(t, 0);
-    const groundZ = camera.position.z + dir.z * Math.max(t, 0);
-    const rotation = Math.atan2(dir.x, dir.z);
-    // zoomLevel is metadata for LOD selection on the server; keep the
-    // same height-based heuristic we used before.
-    const zoomLevel = Math.max(1, height / 100);
-    void fov;
-
-    connection.sendViewportUpdate(0, groundX, groundZ, visibleWidth, visibleHeight, rotation, zoomLevel);
-}
-
 // --- Game Scene ---
 
 let currentFrame = 0;
@@ -287,7 +168,7 @@ function quitToLobby(): void {
     engine?.stopRenderLoop();
     engine?.dispose();
     engine = null;
-    delete (window as any).camera;
+    uninstallCameraWindowApi();
     delete (window as any).test;
     testHarness = null;
     testRenderPaused = false;
@@ -315,44 +196,6 @@ function quitToLobby(): void {
     // fall through to the room browser.
     lobbyUI?.showAfterGame();
     lobbyUI?.show();
-}
-
-/// Show an "are you sure?" overlay with Quit / Cancel buttons. Toggle-safe:
-/// calling this while the overlay is already visible closes it instead
-/// (so ESC works as an open/close toggle).
-function showQuitConfirm(): void {
-    const existing = document.getElementById('quit-confirm-overlay');
-    if (existing) {
-        existing.remove();
-        return;
-    }
-
-    injectStyle('quit-confirm-style', gameTemplates.quitConfirmCss);
-
-    const overlay = document.createElement('div');
-    overlay.id = 'quit-confirm-overlay';
-    overlay.innerHTML = gameTemplates.quitConfirmHtml;
-    document.body.appendChild(overlay);
-
-    document.getElementById('quit-cancel-btn')?.addEventListener('click', () => {
-        overlay.remove();
-    });
-    document.getElementById('quit-confirm-btn')?.addEventListener('click', () => {
-        quitToLobby();
-    });
-}
-
-function showGameOver(frame: number): void {
-    injectStyle('game-over-style', gameTemplates.gameOverCss);
-
-    const overlay = document.createElement('div');
-    overlay.id = 'game-over-overlay';
-    overlay.innerHTML = renderTemplate(gameTemplates.gameOverHtml, { frame });
-    document.body.appendChild(overlay);
-
-    document.getElementById('return-lobby-btn')?.addEventListener('click', () => {
-        quitToLobby();
-    });
 }
 
 async function startGame(gameServerPort: number, mapId: string, gameId: string = ''): Promise<void> {
@@ -448,6 +291,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     camera.minZ = 1;
     camera.maxZ = 50000;
 
+    // Lighting + HDR pipeline. PLAN-lighting L1 (HDR/ACES) + L2 (map sun)
+    // both live in scene-lighting.ts; the per-map mapinfo.lua handler in
+    // onMapData below rewrites the sun/ambient via applyMapLighting().
+    const sceneLighting: SceneLighting = createSceneLighting(scene, camera);
+
     // RTS controls — WASD pan, wheel zoom, edge scrolling, and
     // middle-mouse drag to yaw/tilt. Replaces the default FreeCamera
     // mouse-look input.
@@ -460,94 +308,19 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         zoomStep: 0.08,
     });
 
-    // Expose camera API globally for JS console, LuaUI bridge, and automation.
-    // All methods accept an optional durationMs parameter: 0 = instant jump,
-    // >0 = animate over that many milliseconds with smooth ease-in-out.
-    //
-    // The surface deliberately covers four caller categories so each gets a
-    // single discoverable entry point:
-    //   - JS console / dev tools          (this object directly)
-    //   - chrome-devtools MCP             (via evaluate_script on this object)
-    //   - TestHarness / spring-test MCP   (forwards through these primitives)
-    //   - Lua widgets                     (Spring.SetCameraState / SetCameraTarget
-    //                                       /GetCameraState — wired in lua-spring-api)
-    (window as any).camera = {
-        // ── Pose primitives ─────────────────────────────────────────
-        /** Read the current pose. */
-        getPose: () => rtsCamera.getPose(),
-        /** Set both camera position and look-at point. */
-        setPose: (pose: any, durationMs?: number) => rtsCamera.setPose(pose, durationMs),
-
-        // ── Snap / point ───────────────────────────────────────────
-        /** Snap to a ground point. opts: {height?, pitchDeg?, durationMs?} */
-        snapToGround: (x: number, z: number, opts: any = {}) => rtsCamera.snapToGround(x, z, opts),
-        /** Snap to a unit by ID. opts: {height?, pitchDeg?, durationMs?} */
-        snapToUnit: (unitId: number, opts: any = {}) => {
-            const p = entityRenderer?.getEntityPosition(unitId);
-            if (!p) throw new Error(`[camera] no client-side position for unit ${unitId}`);
-            rtsCamera.snapToGround(p.x, p.z, opts);
-        },
-        /** Look at an arbitrary 3D point ({x,y,z}). */
-        pointAt: (p: any, durationMs?: number) => rtsCamera.pointAt(p, durationMs),
-
-        // ── Movement ───────────────────────────────────────────────
-        /** Absolute camera position; preserves look direction. */
-        moveTo: (p: any, durationMs?: number) => rtsCamera.moveTo(p, durationMs),
-        /** Relative camera translation (also translates look-at). */
-        moveBy: (delta: any, durationMs?: number) => rtsCamera.moveBy(delta, durationMs),
-
-        // ── Orbit ──────────────────────────────────────────────────
-        /** Orbit around current look-at. opts: {yawDeg?, pitchDeg?, distance?, durationMs?} */
-        orbit: (opts: any = {}) => rtsCamera.orbit(opts),
-        /** Set heading (degrees CW from +Z). */
-        setHeading: (yawDeg: number, durationMs?: number) => rtsCamera.setHeading(yawDeg, durationMs),
-        /** Set downward pitch (degrees). */
-        setPitch: (pitchDeg: number, durationMs?: number) => rtsCamera.setPitch(pitchDeg, durationMs),
-        /** Set camera-to-target distance. */
-        setDistance: (d: number, durationMs?: number) => rtsCamera.setDistance(d, durationMs),
-
-        // ── Fit + saved slots ──────────────────────────────────────
-        /** Top-down view sized to the entire map. */
-        fitMap: (opts: any = {}) => rtsCamera.fitMap(opts),
-        /** Save current pose to a numbered slot (Spring F2..F6 convention). */
-        saveSlot: (slot: number) => rtsCamera.saveSlot(slot),
-        /** Recall a numbered slot. Returns false if empty. */
-        loadSlot: (slot: number, durationMs?: number) => rtsCamera.loadSlot(slot, durationMs),
-        /** True if a saved slot has a stored pose. */
-        hasSlot: (slot: number) => rtsCamera.hasSlot(slot),
-
-        // ── Legacy aliases (kept for backwards compat) ─────────────
-        /** Move camera to look at world XZ position. */
-        focusOn: (x: number, z: number, durationMs?: number) => rtsCamera.focusOn(x, z, durationMs),
-        /** Move camera to look at a 3D world position, keeping current distance. */
-        lookAt: (x: number, y: number, z: number, durationMs?: number) => rtsCamera.lookAtPosition(x, y, z, durationMs),
-        /** Save current camera view for later restoration. */
-        saveView: () => rtsCamera.saveView(),
-        /** Restore a previously saved view. */
-        restoreView: (view: any, durationMs?: number) => rtsCamera.restoreView(view, durationMs),
-        /** Rotate camera around current target by degrees. Positive yaw = clockwise from above. */
-        rotateAroundTarget: (yawDeg: number, pitchDeg?: number, durationMs?: number) =>
-            rtsCamera.rotateAroundTarget(yawDeg, pitchDeg, durationMs),
-        /** Cancel any running camera animation. */
-        cancel: () => rtsCamera.cancelTransition(),
-        /** Whether an animation is currently running. */
-        get animating() { return rtsCamera.isAnimating; },
-        /** Current look-at position {x, y, z}. */
-        get target() { const t = rtsCamera.target; return { x: t.x, y: t.y, z: t.z }; },
-        /** Current camera position {x, y, z}. */
-        get position() { const p = rtsCamera.position; return { x: p.x, y: p.y, z: p.z }; },
-    };
-
-    const ambient = new HemisphericLight('ambient', new Vector3(0, 1, 0), scene);
-    ambient.intensity = 0.7;
-    ambient.diffuse = new Color3(0.8, 0.85, 1.0);
-    ambient.groundColor = new Color3(0.3, 0.25, 0.2);
-
-    const sun = new DirectionalLight('sun', new Vector3(-0.5, -1, 0.3).normalize(), scene);
-    sun.intensity = 1.5;
-    sun.diffuse = new Color3(1.0, 0.95, 0.85);
+    // Expose `window.camera` for JS console / chrome-devtools / TestHarness
+    // / Lua widget bridge. Lazy entity-renderer getter so snapToUnit works
+    // even though entityRenderer is constructed a few lines below.
+    installCameraWindowApi(rtsCamera, () => entityRenderer);
 
     entityRenderer = new EntityRenderer(scene);
+    // PLAN-lighting L3: register the renderer with the sun shadow generator.
+    // Adds every model/fallback mesh built later as a caster. Done up-front
+    // (before any def streams in) so we don't race the first ensureModel
+    // load. Pass the sun light too so PLAN-lighting L4 — the team-color
+    // material's CSM sampling — can read the live sun direction + cascade
+    // matrices each frame via its onBindObservable.
+    entityRenderer.setShadowGenerator(sceneLighting.csm, sceneLighting.sun);
     projectileRenderer = new ProjectileRenderer(scene);
     buildBeamRenderer = new BuildBeamRenderer(scene);
     buildBeamRenderer.setEntityRenderer(entityRenderer);
@@ -603,6 +376,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // renderer owns its own mesh pool so the static path's
     // thin-instance buffer stays read-only.
     dynamicFeatureRenderer = new DynamicFeatureRenderer(scene, defCache);
+    dynamicFeatureRenderer.setShadowGenerator(sceneLighting.csm);
     (window as unknown as { __dynamicFeatureRenderer: unknown }).__dynamicFeatureRenderer =
         dynamicFeatureRenderer;
     defCache.onUnitDefs((newDefs) => {
@@ -664,17 +438,33 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         standingOrderRenderer?.setMapData(map);
         debugTerrainGrid?.setMapData(map);
 
+        // Map source URL for any per-map file fetches below (reverb IR,
+        // mapinfo.lua lighting parse, ...). `mapSourceUrl` may already
+        // be absolute when it comes through the WebRTC info path; fall
+        // back to prepending the lobby HTTP origin otherwise.
+        const mapSourceAbs = map.mapSourceUrl.startsWith('http')
+            ? map.mapSourceUrl
+            : `${lobbyHttpUrl}${map.mapSourceUrl}`;
+
         // Apply map-wide reverb (mapinfo.lua → sound.preset). The
         // AudioManager fetches sounds/efx/<preset>.webm from the map's
         // content root; missing IRs stay in passthrough so a map that
         // names a preset without shipping the IR works as if no preset
         // were set. "default" / empty is a no-op.
         if (audioManager && map.soundPreset) {
-            const mapBaseUrl = map.mapSourceUrl.startsWith('http')
-                ? map.mapSourceUrl
-                : `${lobbyHttpUrl}${map.mapSourceUrl}`;
-            void audioManager.setReverbPreset(map.soundPreset, mapBaseUrl);
+            void audioManager.setReverbPreset(map.soundPreset, mapSourceAbs);
         }
+
+        // PLAN-lighting L2: parse `mapinfo.lua → lighting` on the client
+        // (server is headless — lighting is pure renderer data) and apply
+        // sun direction/colour, ambient sky/ground colours, and a sun
+        // intensity derived from the authored diffuse brightness. Runs
+        // fire-and-forget; if the fetch/parse fails the loader returns
+        // safe defaults so we never end up with a dark scene.
+        void loadMapLighting(mapSourceAbs).then((lighting: MapLighting) => {
+            if (session !== activeSession) return;  // user quit during fetch
+            applyMapLighting(lighting, sceneLighting);
+        });
         entityRenderer?.setMapHeightmap(
             map.heightmap, map.mapx, map.mapy,
             map.minHeight, map.maxHeight, map.squareSize,
@@ -706,6 +496,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             tilesX: map.tilesX, tilesZ: map.tilesZ,
         };
         terrainMesh = buildTerrainMesh(scene, mapDims, map.heightmap);
+        // PLAN-lighting L3: terrain catches every unit + feature shadow.
+        // Terrain itself doesn't cast — without normal mapping a single
+        // hill self-shadows oddly, and the sun direction is high enough
+        // that map-scale relief reads as ambient occlusion instead.
+        terrainMesh.receiveShadows = true;
         console.log('[client] terrain mesh built from MapData heightmap');
 
         // Open the music gate. Per PLAN-audio.md the gate covers
@@ -722,6 +517,15 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         // and units (group 2) draw on top.
         terrainFog = new TerrainFog();
         terrainFog.build(scene, mapDims, map.heightmap);
+        // PLAN-lighting L3: LOS overlay must never enter the shadow
+        // pipeline — the mesh is huge, flat, and sits slightly above
+        // terrain, so any caster role would project a map-sized blob
+        // into the shadow atlas. `TerrainFog.build` sets
+        // `receiveShadows = false` on its own; the explicit
+        // removeShadowCaster here is defensive against any future
+        // path that enrols scene-wide casters.
+        const fogMesh = terrainFog.getMesh();
+        if (fogMesh) sceneLighting.csm.removeShadowCaster(fogMesh, false);
         // Re-apply any bitmap that arrived before the mesh existed so
         // the fog paints on first frame rather than waiting for the
         // next per-second tick.
@@ -788,13 +592,21 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             wmat.alpha = Math.max(0.4, map.water.surfaceAlpha);
             wmat.backFaceCulling = false;
             water.material = wmat;
+            // PLAN-lighting L3: water is a pure visual overlay — never
+            // a caster (would project a map-sized blob into the shadow
+            // atlas) and never a receiver (a flat darken on water looks
+            // like fake ice). `removeShadowCaster` is defensive — water
+            // isn't added in the first place, but this guarantees it
+            // even if a future path enrols every scene mesh.
+            water.receiveShadows = false;
+            sceneLighting.csm.removeShadowCaster(water, false);
             console.log(`[water] plane rendered: baseColor=(${r.toFixed(2)},${g.toFixed(2)},${b.toFixed(2)}) damage=${map.water.damage} alpha=${wmat.alpha.toFixed(2)}`);
         }
 
         // Render features. Loads each unique feature def's .glb model
         // asynchronously and thin-instances every placement of that type.
         // Types without a converted model fall back to placeholder boxes.
-        renderMapFeatures(scene, map).catch((err) => {
+        renderMapFeatures(scene, map, sceneLighting.csm).catch((err) => {
             console.error('[features] renderMapFeatures failed', err);
         });
 
@@ -1190,7 +1002,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             standingOrderRenderer?.update(orders);
         },
         onGameOver(frame) {
-            showGameOver(frame);
+            showGameOver(gameTemplates, frame, { onReturnToLobby: quitToLobby });
             currentWidgetManager?.forwardGameInfo(frame, 0, true, true);
         },
     });
@@ -1481,7 +1293,7 @@ function resolveInitialGameId(): string | null {
 
 document.addEventListener('DOMContentLoaded', async () => {
     await fetchBuildStamp();
-    createHUD();
+    createHUD(gameTemplates, { onQuit: () => showQuitConfirm(gameTemplates, { onConfirm: quitToLobby }) });
     debugConsole.init();
     // Capture window.onerror, unhandledrejection, console.error/warn and
     // batch-POST them to the log server so every browser-side error is
@@ -1507,7 +1319,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!engine) return;
         if (inputManager?.isPlacingBuild || inputManager?.hasPendingCommand()) return;
         e.preventDefault();
-        showQuitConfirm();
+        showQuitConfirm(gameTemplates, { onConfirm: quitToLobby });
     });
 
     // Scenario mode (`?scenario=<name>`) hijacks the boot flow: clear
@@ -1557,7 +1369,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 // HUD was already built above with engine defaults — swap
                 // it now that the override has landed. Re-attaches the
                 // quit button listener.
-                createHUD();
+                createHUD(gameTemplates, { onQuit: () => showQuitConfirm(gameTemplates, { onConfirm: quitToLobby }) });
             })
             .catch((err) => console.warn('[game] game UI override failed:', err));
     }

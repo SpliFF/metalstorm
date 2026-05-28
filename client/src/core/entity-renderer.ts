@@ -23,6 +23,7 @@ import {
     TransformNode,
     Matrix,
     Vector3,
+    Vector4,
     Quaternion,
     StandardMaterial,
     ShaderMaterial,
@@ -33,6 +34,9 @@ import {
     Texture,
     RawTexture,
     Engine,
+    ShadowGenerator,
+    type CascadedShadowGenerator,
+    type DirectionalLight,
 } from '@babylonjs/core';
 import '@babylonjs/loaders/glTF/index.js';
 // KTX2 loader is registered in main.ts (the app entry). All unit
@@ -228,45 +232,68 @@ function resolveTextureUrl(modelUrl: string, textureName: string): string {
 // thin-instance support.
 
 // Nanoframe is encoded inline in the team-color shader so we don't
-// duplicate the per-piece pipeline. Two per-instance values ride along
-// in the 4x4 thin-instance matrix's normally-zero W row:
-//   m33 (column 3, row 3) = buildProgress (0..1, 1=finished)
-//   m31 (column 1, row 3) = groundY        (entity foot world Y)
-// Affine transforms always have m30=m31=m32=0 / m33=1, so packing
-// values there only corrupts wp.w — which we discard before projection.
-const TEAMCOLOR_VERTEX = `
+// duplicate the per-piece pipeline. Build-progress + groundY currently
+// hold neutral values (1.0 / 0.0) — the build-anim branch is a no-op
+// until a per-instance vertex attribute lands. See docs/lighting.md
+// "thin-instance matrix packing breaks shadow casting" for why we
+// can't just pack those values into the world matrix's W row again.
+const TEAMCOLOR_VERTEX = `#version 300 es
     precision highp float;
-    attribute vec3 position;
-    attribute vec3 normal;
-    attribute vec2 uv;
+    in vec3 position;
+    in vec3 normal;
+    in vec2 uv;
 
-    #include<instancesDeclaration>
+    // Inlined GLSL-300 equivalent of Babylon's instancesDeclaration /
+    // instancesVertex includes. The stock includes emit
+    //   attribute vec4 worldN;
+    // which is a reserved word in GLSL ES 3.00, breaking shader
+    // compile. Babylon ships no GLSL-300 variant — this is just the
+    // same code with attribute -> in. We only need the
+    // INSTANCES + THIN_INSTANCES path; we never set VELOCITY /
+    // PREPASS_VELOCITY / WORLD_UBO on this material.
+    in vec4 world0;
+    in vec4 world1;
+    in vec4 world2;
+    in vec4 world3;
+    uniform mat4 world;
 
     uniform mat4 viewProjection;
+    // View matrix is bound by the JS side every frame; we project the
+    // fragment's world position into view-space and pass its (positive)
+    // depth as a varying so the fragment shader can pick a CSM cascade
+    // without re-deriving it from gl_FragCoord.
+    uniform mat4 view;
 
-    varying vec2 vUV;
-    varying vec3 vNormal;
-    varying vec3 vWorldPos;
-    varying float vBuildProgress;
-    varying float vAboveGround;
+    out vec2 vUV;
+    out vec3 vNormal;
+    out vec3 vWorldPos;
+    out float vBuildProgress;
+    out float vAboveGround;
+    out float vViewZ;
 
     void main() {
-        #include<instancesVertex>
+        mat4 finalWorld = world * mat4(world0, world1, world2, world3);
 
-        vBuildProgress = finalWorld[3][3];
-        float groundY  = finalWorld[1][3];
+        // Neutral until per-instance attribute lands — see docs/lighting.md
+        // "thin-instance matrix packing breaks shadow casting".
+        vBuildProgress = 1.0;
+        float groundY  = 0.0;
 
         vec4 wp = finalWorld * vec4(position, 1.0);
         vAboveGround = wp.y - groundY;
         vNormal = normalize(mat3(finalWorld) * normal);
         vWorldPos = wp.xyz;
         vUV = uv;
-        // wp.w is corrupted by our packed values — rebuild as homogeneous 1.
-        gl_Position = viewProjection * vec4(wp.xyz, 1.0);
+        // RH scene + camera at +Y looking down -Z: view*wp has negative
+        // .z for visible fragments. Negate so vViewZ is a positive
+        // distance from the camera, matching Babylon's CSM split values
+        // which are stored as positive linear depths.
+        vViewZ = -(view * vec4(wp.xyz, 1.0)).z;
+        gl_Position = viewProjection * wp;
     }
 `;
 
-const TEAMCOLOR_FRAGMENT = `
+const TEAMCOLOR_FRAGMENT = `#version 300 es
     precision highp float;
     uniform sampler2D diffuseTex;
     uniform sampler2D emissiveTex;
@@ -286,11 +313,33 @@ const TEAMCOLOR_FRAGMENT = `
     uniform float hasTeamMask;
     uniform float hasNormal;
 
-    varying vec2 vUV;
-    varying vec3 vNormal;
-    varying vec3 vWorldPos;
-    varying float vBuildProgress;
-    varying float vAboveGround;
+    // PLAN-lighting L3 / L4 — directional sun shadow sampling.
+    //   csmShadowMap     — plain depth array (sampler2DArray). Babylon
+    //                       allocates this when usePercentageCloserFiltering
+    //                       is OFF. Sampled with .r returning linear depth
+    //                       in [0,1]. PCF-compare semantics avoided so the
+    //                       sampler binding is well-defined even before
+    //                       onBindObservable swaps in the real RTT.
+    //   csmMatrices[]    — light-space VP for each cascade (cascade 0 = nearest).
+    //   csmSplits        — far-Z (positive view-space distance) of each cascade.
+    //                       vec4 so we don't blow up the uniform count; first
+    //                       three components feed cascade selection, .w is the
+    //                       absolute max distance.
+    //   shadowDarkness   — Babylon convention: 0 = fully dark, 1 = no shadow.
+    //                       Used as the "fully shadowed" floor in the mix.
+    uniform highp sampler2DArray csmShadowMap;
+    uniform mat4 csmMatrices[4];
+    uniform vec4 csmSplits;
+    uniform float shadowDarkness;
+
+    in vec2 vUV;
+    in vec3 vNormal;
+    in vec3 vWorldPos;
+    in float vBuildProgress;
+    in float vAboveGround;
+    in float vViewZ;
+
+    out vec4 fragColor;
 
     // Tangent-space → world-space normal perturbation without per-vertex
     // tangents. Uses screen-space derivatives of world position + UV to
@@ -311,12 +360,34 @@ const TEAMCOLOR_FRAGMENT = `
         vec3  B       = dp2perp * duv1.y + dp1perp * duv2.y;
         float invmax  = inversesqrt(max(dot(T, T), dot(B, B)));
         mat3  tbn     = mat3(T * invmax, B * invmax, N);
-        vec3  nmap    = texture2D(normalTex, uv).xyz * 2.0 - 1.0;
+        vec3  nmap    = texture(normalTex, uv).xyz * 2.0 - 1.0;
         return normalize(tbn * nmap);
     }
 
+    // Pick the smallest cascade whose far-Z still contains us, then
+    // sample the cascade's depth layer and compare manually. Returns
+    // 1.0 if the fragment is out-of-cascade, outside the cascade UV
+    // bounds, or unshadowed; 0.0 if shadowed. A small constant bias
+    // keeps self-shadowing artefacts off near-horizontal surfaces.
+    float sampleCsmShadow() {
+        int cascade = 3;
+        if      (vViewZ < csmSplits.x) cascade = 0;
+        else if (vViewZ < csmSplits.y) cascade = 1;
+        else if (vViewZ < csmSplits.z) cascade = 2;
+        else if (vViewZ >= csmSplits.w) return 1.0; // past the last cascade
+
+        vec4 lp = csmMatrices[cascade] * vec4(vWorldPos, 1.0);
+        vec3 ndc = lp.xyz / lp.w;
+        vec3 uv = ndc * 0.5 + 0.5;
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
+        if (uv.z < 0.0 || uv.z > 1.0) return 1.0;
+        float bias = 0.0015;
+        float occluder = texture(csmShadowMap, vec3(uv.xy, float(cascade))).r;
+        return (uv.z - bias) > occluder ? 0.0 : 1.0;
+    }
+
     void main() {
-        vec4 base = texture2D(diffuseTex, vUV);
+        vec4 base = texture(diffuseTex, vUV);
         // No discard. Spring's model shader computes alpha but only
         // tests it when alphaCtrl is set for a specific pass (shadow
         // gen, alpha-blend bin); default is "always pass". tex2.A is
@@ -337,7 +408,7 @@ const TEAMCOLOR_FRAGMENT = `
         // whose authored decal area happens to be dark (a common
         // pattern — the team-color decal sits on top of an unlit
         // recessed panel). Replace, not modulate.
-        float mask = hasTeamMask > 0.5 ? texture2D(teamMaskTex, vUV).r : 0.0;
+        float mask = hasTeamMask > 0.5 ? texture(teamMaskTex, vUV).r : 0.0;
         if (invertMask > 0.5) mask = 1.0 - mask;
         vec3 color = mix(base.rgb, teamColor, mask);
 
@@ -358,9 +429,15 @@ const TEAMCOLOR_FRAGMENT = `
         // floor for upward-facing surfaces without crushing downward
         // ones. The combined output ranges roughly 0.55–1.05 so well-
         // lit faces stay visibly brighter than poorly-lit ones.
+        // Half-Lambert + hemispheric ambient. Split into ambient (the
+        // floor) and directional (sun-lit + sky tint) so the sun shadow
+        // below only attenuates the directional half — full shadow still
+        // sees the ambient, matching how Spring/ZK shaders darken
+        // shadowed surfaces without crushing them to black.
         float halfLambert = dot(N, lightDir) * 0.5 + 0.5;
         float skyTint     = N.y * 0.5 + 0.5;
-        vec3  lit         = color * (0.45 + 0.55 * halfLambert + 0.05 * skyTint);
+        float ambientTerm = 0.45;
+        float sunTerm     = 0.55 * halfLambert + 0.05 * skyTint;
 
         // PBR-ish specular driven by ORM.G (roughness) and ORM.B
         // (metallic). Pure dielectric: spec base = 4% albedo-neutral;
@@ -370,22 +447,38 @@ const TEAMCOLOR_FRAGMENT = `
         // default when tex2 is absent or its G channel is zero) gets
         // no highlight — matching how those legacy units rendered
         // before PBR mapping.
+        vec3 spec = vec3(0.0);
         if (hasOrm > 0.5) {
-            vec2  mr        = texture2D(ormTex, vUV).gb;
+            vec2  mr        = texture(ormTex, vUV).gb;
             float roughness = mr.x;
             float metallic  = mr.y;
             vec3  specBase  = mix(vec3(0.04), color, metallic);
             float shininess = mix(8.0, 128.0, 1.0 - roughness);
             float specTerm  = pow(halfLambert, shininess) * (1.0 - roughness);
-            lit += specBase * specTerm;
+            spec = specBase * specTerm;
         }
+
+        // CSM sun-visibility — 1.0 = unshadowed, shadowDarkness = full
+        // shadow. Apply ONLY to sun + specular contributions; the ambient
+        // floor stays so shadows are darker but not black.
+        //
+        // Clamp + sanitise: when the shadow map isn't bound yet (first
+        // frame before onBindObservable fires) or the cascade matrices
+        // haven't been refreshed, sampleCsmShadow() can produce NaN /
+        // Inf which would propagate through mix and zero the entire
+        // fragment. Clamping forces a safe sample in [0,1].
+        float rawShadow = clamp(sampleCsmShadow(), 0.0, 1.0);
+        float sunVis = mix(shadowDarkness, 1.0, rawShadow);
+
+        vec3 lit = color * (ambientTerm + sunTerm * sunVis) + spec * sunVis;
 
         // Additive self-illumination from S3O tex2.R (replicated to
         // grayscale RGB by the encoder). Most ZK units have no glow
         // regions and ship a black emissive map; the encoder/Zstd pair
-        // compresses that to a few hundred bytes per file.
+        // compresses that to a few hundred bytes per file. Emissive
+        // bypasses shadow — a glowing thruster is its own light.
         if (hasEmissive > 0.5) {
-            lit += texture2D(emissiveTex, vUV).rgb;
+            lit += texture(emissiveTex, vUV).rgb;
         }
 
         // Nanoframe pass — only active during construction. Below the
@@ -411,13 +504,114 @@ const TEAMCOLOR_FRAGMENT = `
             float bandIntensity = exp(-pow((vAboveGround - planeY) / 2.0, 2.0)) * 1.5;
             lit += teamColor * bandIntensity;
         }
-        gl_FragColor = vec4(lit, 1.0);
+        fragColor = vec4(lit, 1.0);
     }
 `;
 
 // Register the shader once
 Effect.ShadersStore['teamColorVertexShader'] = TEAMCOLOR_VERTEX;
 Effect.ShadersStore['teamColorFragmentShader'] = TEAMCOLOR_FRAGMENT;
+
+// ── Sun + CSM material bind plumbing ───────────────────────────────────
+// See docs/lighting.md "teamColor ShaderMaterial" for the design.
+// Babylon's stock light binding doesn't fire on plain ShaderMaterials,
+// so every team-color material's onBindObservable copies the active
+// sun + CSM uniforms from this module-local registry every draw.
+
+const DEFAULT_LIGHT_DIR = new Vector3(-0.5, 1.0, 0.3).normalize();
+const IDENTITY_CSM_MATRICES: Matrix[] = [
+    Matrix.Identity(), Matrix.Identity(), Matrix.Identity(), Matrix.Identity(),
+];
+
+interface ShadowBindState {
+    csm: CascadedShadowGenerator;
+    sun: DirectionalLight;
+    /// Reused per-bind: 4 matrix slots that mirror the active CSM cascade
+    /// transforms. `setMatrices` expects `Matrix[]`, so we hand a stable
+    /// array reference and copy into the same Matrix objects each frame.
+    matrices: Matrix[];
+    /// Far view-space Z for cascades 0..3. Cascade 3's value doubles as
+    /// the absolute max distance; fragments beyond it return "no shadow".
+    splits: Vector4;
+}
+
+let activeShadowBind: ShadowBindState | null = null;
+
+/**
+ * Hand the team-color material factory the active CascadedShadowGenerator
+ * + sun. Every existing AND future material's `onBindObservable` calls
+ * `bindShadowUniforms` which reads from this slot. Pass `null` during
+ * teardown to clear.
+ *
+ * Called once from `EntityRenderer.setShadowGenerator()`.
+ */
+function setActiveShadowGenerator(
+    csm: CascadedShadowGenerator | null, sun: DirectionalLight | null,
+): void {
+    if (!csm || !sun) {
+        activeShadowBind = null;
+        return;
+    }
+    activeShadowBind = {
+        csm,
+        sun,
+        matrices: [Matrix.Identity(), Matrix.Identity(), Matrix.Identity(), Matrix.Identity()],
+        splits: new Vector4(1e30, 1e30, 1e30, 1e30),
+    };
+}
+
+/**
+ * Refresh sun + CSM uniforms on a single team-color material. Called by
+ * the material's own `onBindObservable` once per draw. Skips the heavy
+ * lifting when no CSM is registered yet (the initial values from
+ * `createTeamColorMaterial` keep the shader well-defined).
+ */
+function bindShadowUniforms(mat: ShaderMaterial): void {
+    const bind = activeShadowBind;
+    if (!bind) return;
+    const { csm, sun, matrices, splits } = bind;
+
+    // Sun direction: shader expects the direction TO the light source
+    // (so N·L is positive for surfaces facing the sun). Babylon's
+    // DirectionalLight.direction is the direction LIGHT TRAVELS — negate.
+    const d = sun.direction;
+    const lx = -d.x, ly = -d.y, lz = -d.z;
+    const len = Math.hypot(lx, ly, lz) || 1;
+    mat.setVector3('lightDir', new Vector3(lx / len, ly / len, lz / len));
+
+    // Copy each cascade VP matrix into our scratch array (reused per
+    // bind so we don't allocate during the hot path).
+    for (let i = 0; i < 4; i++) {
+        const m = csm.getCascadeTransformMatrix(i);
+        if (m) matrices[i].copyFrom(m);
+    }
+    mat.setMatrices('csmMatrices', matrices);
+
+    // View matrix — vertex shader uses it to compute view-space Z. Babylon
+    // updates `scene.getViewMatrix()` per frame; reuse rather than caching.
+    const view = mat.getScene().getViewMatrix();
+    mat.setMatrix('view', view);
+
+    // Cascade far-Z splits live on CSM as `_viewSpaceFrustumsZ` (private).
+    // Each entry is a plain number — the cascade's far-edge distance in
+    // view space (positive, along the camera's forward axis). Babylon
+    // updates these every frame from the active camera's near/far + lambda.
+    const internal = csm as unknown as { _viewSpaceFrustumsZ?: number[] };
+    const frusta = internal._viewSpaceFrustumsZ;
+    if (frusta && frusta.length >= 4) {
+        splits.set(frusta[0], frusta[1], frusta[2], frusta[3]);
+        mat.setVector4('csmSplits', splits);
+    }
+
+    // Babylon's ShadowGenerator stores darkness as 0=full, 1=none.
+    mat.setFloat('shadowDarkness', csm.getDarkness());
+
+    // Shadow map — sampler2DArrayShadow is set up by Babylon when PCF is
+    // enabled. Pass the RTT through setTexture; Babylon binds it as the
+    // depth-compare sampler in the linked Effect.
+    const shadowMap = csm.getShadowMap();
+    if (shadowMap) mat.setTexture('csmShadowMap', shadowMap);
+}
 
 /// 1×1 RGBA(255,255,255,255) fallback diffuse for models without a
 /// texture sidecar. Cached per-scene so every textureless piece shares
@@ -439,9 +633,10 @@ function getWhiteFallbackDiffuse(scene: Scene): RawTexture {
 /**
  * Create a team-color material for a unit piece. Samples team mask from
  * a dedicated `teamMaskTex.R` channel (PLAN-pbr-mapping.md split layout).
- * Supports thin instances via Babylon's instancesDeclaration/instancesVertex
- * includes. Emissive / ORM bindings are optional and default to "no
- * contribution" via the `hasEmissive` / `hasOrm` boolean uniforms.
+ * Emissive / ORM / normal bindings are optional and default to "no
+ * contribution" via the `has*` boolean uniforms. Sun + CSM uniforms are
+ * refreshed every bind via `onBindObservable` → `bindShadowUniforms`;
+ * see docs/lighting.md "teamColor ShaderMaterial" for the wiring.
  */
 function createTeamColorMaterial(
     name: string,
@@ -452,10 +647,12 @@ function createTeamColorMaterial(
 ): ShaderMaterial {
     const mat = new ShaderMaterial(name, scene, 'teamColor', {
         attributes: ['position', 'normal', 'uv'],
-        uniforms: ['world', 'viewProjection', 'teamColor',
+        uniforms: ['world', 'viewProjection', 'view', 'teamColor',
                    'invertMask', 'lightDir', 'modelHeight',
-                   'hasEmissive', 'hasOrm', 'hasTeamMask', 'hasNormal'],
-        samplers: ['diffuseTex', 'emissiveTex', 'ormTex', 'teamMaskTex', 'normalTex'],
+                   'hasEmissive', 'hasOrm', 'hasTeamMask', 'hasNormal',
+                   'csmMatrices', 'csmSplits', 'shadowDarkness'],
+        samplers: ['diffuseTex', 'emissiveTex', 'ormTex', 'teamMaskTex',
+                   'normalTex', 'csmShadowMap'],
         defines: ['#define INSTANCES', '#define THIN_INSTANCES'],
     });
 
@@ -469,13 +666,24 @@ function createTeamColorMaterial(
     mat.setTexture('teamMaskTex', textures.teamMask ?? textures.diffuse);
     mat.setTexture('normalTex',   textures.normal   ?? textures.diffuse);
     mat.setColor3('teamColor', teamColor);
-    mat.setVector3('lightDir', new Vector3(-0.5, 1.0, 0.3).normalize());
     mat.setFloat('modelHeight', modelHeight);
     mat.setFloat('invertMask', textures.invertTeamColor ? 1.0 : 0.0);
     mat.setFloat('hasEmissive', textures.emissive ? 1.0 : 0.0);
     mat.setFloat('hasOrm',      textures.orm      ? 1.0 : 0.0);
     mat.setFloat('hasTeamMask', textures.teamMask ? 1.0 : 0.0);
     mat.setFloat('hasNormal',   textures.normal   ? 1.0 : 0.0);
+    // Initial values overwritten every frame by onBindObservable; set
+    // here so the first frame before the observable fires renders sane.
+    mat.setVector3('lightDir', DEFAULT_LIGHT_DIR);
+    mat.setMatrices('csmMatrices', IDENTITY_CSM_MATRICES);
+    mat.setVector4('csmSplits', new Vector4(1e30, 1e30, 1e30, 1e30));
+    mat.setFloat('shadowDarkness', 1.0);
+    // Bind the diffuse as a placeholder for the shadow sampler so the
+    // material survives the first frame before any CSM exists. The
+    // observable below swaps in the real depth array once available.
+    mat.setTexture('csmShadowMap', textures.diffuse);
+
+    mat.onBindObservable.add(() => bindShadowUniforms(mat));
 
     // Keep the material fully opaque. The build-progress effect uses
     // discard-based stipple in the fragment shader instead of alpha
@@ -720,6 +928,13 @@ export class EntityRenderer {
     private selectionMesh: Mesh | null = null;
     private selectedIds: number[] = [];
 
+    /** Directional-shadow caster sink (PLAN-lighting L3). Null until
+     *  `setShadowGenerator` is called from the bootstrap. Every newly-
+     *  created unit/piece/fallback/radar-blip mesh is registered here
+     *  on construction; meshes that pre-date the call are bulk-added by
+     *  the setter itself. */
+    private shadowGenerator: ShadowGenerator | null = null;
+
     constructor(scene: Scene) {
         this.scene = scene;
 
@@ -729,6 +944,26 @@ export class EntityRenderer {
             mat.specularColor = new Color3(0.3, 0.3, 0.3);
             this.teamMaterials.push(mat);
         }
+    }
+
+    /**
+     * Register the directional sun-shadow generator. Adds every existing
+     * render mesh as a caster; new meshes auto-register in their create
+     * sites. See docs/lighting.md "caster registration".
+     */
+    setShadowGenerator(
+        csm: ShadowGenerator | null,
+        sun: DirectionalLight | null = null,
+    ): void {
+        this.shadowGenerator = csm;
+        // Cast: CascadedShadowGenerator extends ShadowGenerator. If a
+        // plain ShadowGenerator is passed, the team-color shader uses
+        // its `csmShadowMap` slot as a placeholder (the cascade matrix
+        // path still runs but UV-out-of-bounds returns 1.0 everywhere).
+        setActiveShadowGenerator(csm as CascadedShadowGenerator | null, sun);
+        if (!csm) return;
+        for (const mesh of this.renderMeshes.values()) csm.addShadowCaster(mesh);
+        for (const mesh of this.shapeMeshes.values()) csm.addShadowCaster(mesh);
     }
 
     /** Hand the entity renderer the heightmap so it can re-project
@@ -983,10 +1218,6 @@ export class EntityRenderer {
                     mesh.isVisible = false;
                     mesh.thinInstanceEnablePicking = false;
                     mesh.alwaysSelectAsActiveMesh = true;
-                    mesh.setBoundingInfo(new BoundingInfo(
-                        new Vector3(-1e6, -1e6, -1e6),
-                        new Vector3(1e6, 1e6, 1e6),
-                    ));
                     mesh.renderingGroupId = 2;
 
                     pieces.push({
@@ -1254,11 +1485,9 @@ export class EntityRenderer {
         mesh.material = this.teamMaterials[team];
         mesh.thinInstanceEnablePicking = false;
         mesh.alwaysSelectAsActiveMesh = true;
-        mesh.setBoundingInfo(new BoundingInfo(
-            new Vector3(-1e6, -1e6, -1e6),
-            new Vector3(1e6, 1e6, 1e6),
-        ));
         mesh.renderingGroupId = 2;
+        mesh.receiveShadows = true;
+        this.shadowGenerator?.addShadowCaster(mesh);
         return mesh;
     }
 
@@ -1287,10 +1516,6 @@ export class EntityRenderer {
         mesh.material = this.teamMaterials[teamIdx];
         mesh.thinInstanceEnablePicking = false;
         mesh.alwaysSelectAsActiveMesh = true;
-        mesh.setBoundingInfo(new BoundingInfo(
-            new Vector3(-1e6, -1e6, -1e6),
-            new Vector3(1e6, 1e6, 1e6),
-        ));
         mesh.renderingGroupId = 2;
         this.radarBlipMeshes.set(team, mesh);
         // Track in renderMeshes so the per-tick activeKeys hide-pass
@@ -1314,16 +1539,13 @@ export class EntityRenderer {
             const teamColor = TEAM_COLORS[team % TEAM_COLORS.length];
             const matName = `unit_${defId}_t${team}_p${pieceIdx}_mat`;
 
-            // Always use the team-color shader. The thin-instance world
-            // matrix packs groundY into m31 and buildProgress into m33
-            // (see TEAMCOLOR_VERTEX comment). Babylon's default GPU
-            // pipeline divides by the corrupted wp.w during projection
-            // and renders the geometry as long streaks; only the
-            // teamColor shader knows to reconstruct gl_Position from
-            // wp.xyz alone. Skipping the replacement (the previous
-            // `else if (!mesh.material)` branch) left units without a
-            // texture sidecar — e.g. ZK's `factoryveh` — keeping the
-            // PBR material from the glTF import and rendering broken.
+            // Always use the team-color shader so every unit gets team
+            // tinting + the same lighting/shadow pipeline regardless of
+            // whether the model ships a texture sidecar. Skipping the
+            // replacement (the previous `else if (!mesh.material)`
+            // branch) left units without a sidecar — e.g. ZK's
+            // `factoryveh` — keeping the PBR material from the glTF
+            // import and rendering broken.
             if (tmpl?.textures) {
                 mesh.material = createTeamColorMaterial(
                     matName, tmpl.textures, teamColor, tmpl.modelHeight, this.scene);
@@ -1346,12 +1568,10 @@ export class EntityRenderer {
             mesh.isVisible = false;
             mesh.thinInstanceEnablePicking = false;
             mesh.alwaysSelectAsActiveMesh = true;
-            mesh.setBoundingInfo(new BoundingInfo(
-                new Vector3(-1e6, -1e6, -1e6),
-                new Vector3(1e6, 1e6, 1e6),
-            ));
             mesh.renderingGroupId = 2;
+            mesh.receiveShadows = true;
             this.renderMeshes.set(key, mesh);
+            this.shadowGenerator?.addShadowCaster(mesh);
         }
         return mesh;
     }
@@ -1390,10 +1610,6 @@ export class EntityRenderer {
 
         mesh.thinInstanceEnablePicking = false;
         mesh.alwaysSelectAsActiveMesh = true;
-        mesh.setBoundingInfo(new BoundingInfo(
-            new Vector3(-1e6, -1e6, -1e6),
-            new Vector3(1e6, 1e6, 1e6),
-        ));
         // Ring sits in the same rendering group as units so depth
         // testing hides the half that's behind the unit's geometry.
         // Previously this was group 3 (drawn after units regardless of
@@ -1795,12 +2011,11 @@ export class EntityRenderer {
                     const instanceMatrix = modelWorld.multiply(entityMatrix);
                     const arr = new Float32Array(16);
                     instanceMatrix.copyToArray(arr, 0);
-                    // Pack nanoframe inputs into the matrix's normally-zero
-                    // row 3 entries — see TEAMCOLOR_VERTEX comment. These
-                    // corrupt wp.w but the shader rebuilds the projection
-                    // input from wp.xyz so xyz transforms stay correct.
-                    arr[7] = renderY;             // m31 → groundY (entity foot Y)
-                    arr[15] = meta.buildProgress; // m33 → buildProgress
+                    // Keep the matrix a clean affine transform — do NOT
+                    // pack groundY / buildProgress into arr[7] / arr[15].
+                    // See docs/lighting.md "thin-instance matrix packing
+                    // breaks shadow casting".
+                    void renderY;
                     for (let j = 0; j < 16; j++) group.matrices.push(arr[j]);
                     group.count++;
                 }
@@ -1844,6 +2059,10 @@ export class EntityRenderer {
             const buf = new Float32Array(group.matrices);
             group.mesh.thinInstanceSetBuffer('matrix', buf, 16, false);
             group.mesh.thinInstanceCount = group.count;
+            // Required for the CSM cascade fitter to see where the live
+            // instances actually are — see docs/lighting.md "thin-instance
+            // bounds".
+            group.mesh.thinInstanceRefreshBoundingInfo(false);
         }
 
         // Hide meshes not active this frame

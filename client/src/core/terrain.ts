@@ -447,7 +447,13 @@ export class TerrainFog {
         const uvs = new Float32Array(numVerts * 2);
 
         const hRange = dims.maxHeight - dims.minHeight;
-        const FOG_Y_OFFSET = 3;
+        // One heightmap-square's worth of separation from terrain.
+        // 3 elmos was below the z-buffer's resolvable delta at far zoom
+        // (camera ~6000 elmos high) and produced visible stippling where
+        // the LOS overlay fought the terrain. 8 elmos sits below the
+        // shortest unit silhouette so the overlay still reads as glued
+        // to the ground at close zoom.
+        const FOG_Y_OFFSET = 8;
 
         for (let gz = 0; gz < gridH; gz++) {
             const srcZ = Math.min(gz * stepZ, hmH - 1);
@@ -494,6 +500,12 @@ export class TerrainFog {
         // terrain/water are already in the framebuffer.
         mesh.renderingGroupId = 1;
         mesh.alphaIndex = 100;
+        // PLAN-lighting L3: this is a pure visibility overlay — it must
+        // not receive sun shadows (they'd darken the LOS grid into a
+        // confusing checkerboard) and must not appear in any caster
+        // pass. The caller is also expected to never `addShadowCaster`
+        // on this mesh; setting the flag here documents the contract.
+        mesh.receiveShadows = false;
 
         const mat = new StandardMaterial('terrainFogMat', scene);
         mat.disableLighting = true;
@@ -583,6 +595,14 @@ export class TerrainFog {
      *  global handle exposed in main.ts for debug. */
     setVisible(v: boolean): void {
         if (this.mesh) this.mesh.isVisible = v;
+    }
+
+    /** Underlying overlay mesh (or null if not built yet). Exposed so
+     *  the bootstrap can call `csm.removeShadowCaster(fog.getMesh())`
+     *  as a belt-and-suspenders against any future code path that
+     *  accidentally enrols overlay surfaces as shadow casters. */
+    getMesh(): Mesh | null {
+        return this.mesh;
     }
 
     dispose(): void {
