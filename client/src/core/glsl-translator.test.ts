@@ -164,7 +164,7 @@ void main() {
         expect(out.source).toContain('_legVertex');
         expect(out.source).toContain('_legModelViewMatrix');
         expect(out.source).toContain('_legProjectionMatrix');
-        expect(out.source).toContain('_legColor');
+        expect(out.source).toContain('_legFrontColor');
         expect(out.source).not.toMatch(/\bgl_Vertex\b/);
         expect(out.source).not.toMatch(/\bgl_ModelViewMatrix\b/);
         expect(out.source).not.toMatch(/\bgl_FrontColor\b/);
@@ -172,7 +172,7 @@ void main() {
         expect(out.source).toContain('layout(location = 0) in vec4 _legVertex;');
         expect(out.source).toContain('uniform mat4 _legModelViewMatrix;');
         expect(out.source).toContain('uniform mat4 _legProjectionMatrix;');
-        expect(out.source).toContain('out vec4 _legColor;');
+        expect(out.source).toContain('out vec4 _legFrontColor;');
         // gl_Position stays — it's a real ES 300 builtin.
         expect(out.source).toContain('gl_Position');
     });
@@ -186,10 +186,10 @@ void main() {
 }`;
         const out = translateGLSL(src, 'fragment', { legacyGL2Shim: true });
         expect(out.ok).toBe(true);
-        // gl_Color → _legColor (in fragment, this is the varying coming
-        // from gl_FrontColor in vertex).
-        expect(out.source).toContain('_legColor');
-        expect(out.source).toContain('in vec4 _legColor;');
+        // gl_Color in FS reads the varying coming from gl_FrontColor in
+        // VS — both end up as the single `_legFrontColor` identifier.
+        expect(out.source).toContain('_legFrontColor');
+        expect(out.source).toContain('in vec4 _legFrontColor;');
         expect(out.source).not.toMatch(/\bgl_Color\b/);
         // gl_FragColor handled by the existing legacy block.
         expect(out.source).toContain('outFragColor');
@@ -226,6 +226,25 @@ void main() {
         // Slot 0 keeps location 2 (matches immediate-mode texcoord
         // stream); higher slots get linker-assigned locations.
         expect(out.source).toContain('layout(location = 2) in vec4 _legMultiTexCoord0;');
+        // Body references must be renamed, not just declarations
+        // (regression: ZK LUPS NanoLasers had `#define endpos
+        // gl_MultiTexCoord1` and the rename loop was missing, leaving
+        // the unrenamed identifier to fail GLSL ES 300 compile).
+        expect(out.source).not.toMatch(/\bgl_MultiTexCoord\d\b/);
+    });
+
+    it('renames gl_MultiTexCoord* inside #define bodies (NanoLasers regression)', () => {
+        const src = `#version 150 compatibility
+#define startpos gl_MultiTexCoord0
+#define endpos   gl_MultiTexCoord1
+void main() {
+    gl_Position = gl_ModelViewMatrix * (endpos - startpos);
+}`;
+        const out = translateGLSL(src, 'vertex', { legacyGL2Shim: true });
+        expect(out.ok).toBe(true);
+        expect(out.source).toContain('#define startpos _legMultiTexCoord0');
+        expect(out.source).toContain('#define endpos   _legMultiTexCoord1');
+        expect(out.source).not.toMatch(/\bgl_MultiTexCoord\d\b/);
     });
 
     it('does not declare unused builtins', () => {
@@ -250,6 +269,82 @@ void main() { gl_Position = gl_ModelViewMatrix * gl_Vertex; }`;
         const out = translateGLSL(src, 'vertex', { legacyGL2Shim: false });
         expect(out.ok).toBe(false);
         expect(out.expectedReject).toBe(true);
+    });
+
+    it('keeps gl_Color (VS input) and gl_FrontColor (VS varying) as distinct identifiers', () => {
+        // ZK NanoLasers/Ribbon/RingParticles VSs all do this:
+        // read the per-vertex colour input AND write to the varying.
+        // Both must compile without redefinition or l-value errors.
+        const src = `#version 150 compatibility
+void main() {
+    gl_FrontColor = gl_Color;
+    gl_FrontColor.rgb *= 2.0;
+    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+}`;
+        const out = translateGLSL(src, 'vertex', { legacyGL2Shim: true });
+        expect(out.ok).toBe(true);
+        // Two distinct declarations — input attribute and varying out.
+        expect(out.source).toContain('layout(location = 1) in vec4 _legColor;');
+        expect(out.source).toContain('out vec4 _legFrontColor;');
+        // No collapsed identifier (the original bug).
+        expect(out.source).not.toMatch(/in vec4 _legColor;\s*\n[^\n]*out vec4 _legColor;/);
+        // Assignment target is the varying, source is the attribute.
+        expect(out.source).toMatch(/_legFrontColor\s*=\s*_legColor/);
+    });
+
+    it('shims gl_FrontSecondaryColor + gl_SecondaryColor as a second varying', () => {
+        const vs = `#version 150 compatibility
+void main() {
+    gl_FrontSecondaryColor = vec4(0.5);
+    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+}`;
+        const vsOut = translateGLSL(vs, 'vertex', { legacyGL2Shim: true });
+        expect(vsOut.ok).toBe(true);
+        expect(vsOut.source).toContain('out vec4 _legFrontSecondaryColor;');
+        expect(vsOut.source).not.toMatch(/\bgl_FrontSecondaryColor\b/);
+
+        const fs = `#version 150 compatibility
+void main() {
+    gl_FragColor = gl_SecondaryColor;
+}`;
+        const fsOut = translateGLSL(fs, 'fragment', { legacyGL2Shim: true });
+        expect(fsOut.ok).toBe(true);
+        expect(fsOut.source).toContain('in vec4 _legFrontSecondaryColor;');
+        expect(fsOut.source).not.toMatch(/\bgl_SecondaryColor\b/);
+    });
+
+    it('shims gl_TextureMatrix[] as a uniform array (UnitSmoke)', () => {
+        const src = `#version 150 compatibility
+void main() {
+    gl_TexCoord[0] = gl_TextureMatrix[0] * gl_MultiTexCoord0;
+    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+}`;
+        const out = translateGLSL(src, 'vertex', { legacyGL2Shim: true });
+        expect(out.ok).toBe(true);
+        expect(out.source).toContain('uniform mat4 _legTextureMatrix[8];');
+        expect(out.source).toContain('_legTextureMatrix[0]');
+        expect(out.source).not.toMatch(/\bgl_TextureMatrix\b/);
+    });
+
+    it('shims ftransform() and gl_LightSource (UnitCloaker)', () => {
+        const src = `#version 150 compatibility
+void main() {
+    gl_FrontColor.rgb = gl_LightSource[0].diffuse.rgb + gl_LightSource[0].ambient.rgb;
+    gl_Position = ftransform();
+}`;
+        const out = translateGLSL(src, 'vertex', { legacyGL2Shim: true });
+        expect(out.ok).toBe(true);
+        // ftransform() replaced with explicit MVP × vertex multiply.
+        expect(out.source).toMatch(/_legModelViewProjectionMatrix\s*\*\s*_legVertex/);
+        expect(out.source).not.toMatch(/\bftransform\b/);
+        // gl_LightSource → struct uniform.
+        expect(out.source).toContain('struct _legLightSourceParameters');
+        expect(out.source).toContain('uniform _legLightSourceParameters _legLightSource[8];');
+        expect(out.source).not.toMatch(/\bgl_LightSource\b/);
+        // ftransform() should pull in _legVertex + MVP even though the
+        // source didn't reference them by name.
+        expect(out.source).toContain('layout(location = 0) in vec4 _legVertex;');
+        expect(out.source).toContain('uniform mat4 _legModelViewProjectionMatrix;');
     });
 
     it('translateAndInclude propagates the shim option', () => {

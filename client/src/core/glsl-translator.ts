@@ -378,7 +378,9 @@ export function translateGLSL(src: string, stage: GlslStage, opts: TranslateOpti
     // separates the two cleanly. Caller can still set `legacyGL2Shim`
     // false to opt out completely.
     const shimAllowed = opts.legacyGL2Shim !== false;
-    const needsShimForFixedFunc = /\bgl_(ModelViewMatrix|ProjectionMatrix|ModelViewProjectionMatrix|NormalMatrix|TexCoord|FrontColor|Color|MultiTexCoord[0-7])\b/.test(src);
+    const needsShimForFixedFunc =
+        /\bgl_(ModelViewMatrix|ProjectionMatrix|ModelViewProjectionMatrix|NormalMatrix|TexCoord|TextureMatrix|FrontColor|FrontSecondaryColor|SecondaryColor|Color|LightSource|MultiTexCoord[0-7])\b/.test(src)
+        || /\bftransform\s*\(/.test(src);
     const enableLegacyShim = shimAllowed && needsShimForFixedFunc;
 
     // ── Hard rejections (do these first; they look at the ORIGINAL
@@ -505,18 +507,36 @@ export function translateGLSL(src: string, stage: GlslStage, opts: TranslateOpti
         const decls: string[] = [];
 
         // Per-stage attributes / varyings.
+        //
+        // gl_Color and gl_FrontColor are *different* in fixed-function:
+        //   - gl_Color (VS) is a per-vertex input attribute (read-only).
+        //   - gl_FrontColor (VS) is a per-vertex output to FS.
+        //   - gl_Color (FS) is the varying coming from gl_FrontColor.
+        // The shim maps them to distinct identifiers so VS shaders that
+        // both read gl_Color and write gl_FrontColor compile cleanly.
         const usedVertex = /\bgl_Vertex\b/.test(s);
         const usedNormal = /\bgl_Normal\b/.test(s);
         const usedColorAttr = stage === 'vertex' && /\bgl_Color\b/.test(s);
         const usedFrontColor = /\bgl_FrontColor\b/.test(s);
+        const usedFrontSecondary = /\bgl_FrontSecondaryColor\b/.test(s);
         const usedFragColorRead = stage === 'fragment' && /\bgl_Color\b/.test(s);
+        const usedFragSecondaryRead = stage === 'fragment' && /\bgl_SecondaryColor\b/.test(s);
         const usedTexCoord = /\bgl_TexCoord\s*\[/.test(s);
+        const usedTextureMatrix = /\bgl_TextureMatrix\s*\[/.test(s);
 
         // Fixed-function matrices — always uniforms.
         const usedMV = /\bgl_ModelViewMatrix\b/.test(s);
         const usedProj = /\bgl_ProjectionMatrix\b/.test(s);
         const usedMVP = /\bgl_ModelViewProjectionMatrix\b/.test(s);
         const usedNormalMatrix = /\bgl_NormalMatrix\b/.test(s);
+
+        // Fixed-function lighting state and ftransform(). These don't
+        // map to anything live in our pipeline — we declare zero-value
+        // uniforms so the shader compiles. Visual fidelity for these
+        // classes (UnitCloaker, etc.) is intentionally degraded until
+        // someone wires per-class lighting params.
+        const usedLightSource = /\bgl_LightSource\b/.test(s);
+        const usedFtransform = /\bftransform\s*\(/.test(s);
 
         // gl_MultiTexCoord0..7.
         const usedMultiTex: boolean[] = new Array(8).fill(false);
@@ -531,23 +551,38 @@ export function translateGLSL(src: string, stage: GlslStage, opts: TranslateOpti
         const rename = (re: RegExp, to: string) => { s = s.replace(re, to); };
         if (usedVertex) rename(/\bgl_Vertex\b/g, '_legVertex');
         if (usedNormal) rename(/\bgl_Normal\b/g, '_legNormal');
-        if (usedColorAttr || usedFragColorRead) rename(/\bgl_Color\b/g, '_legColor');
-        if (usedFrontColor) rename(/\bgl_FrontColor\b/g, '_legColor');
+        // VS: gl_Color (input) → _legColor.
+        // FS: gl_Color reads the varying coming from VS gl_FrontColor.
+        if (usedColorAttr) rename(/\bgl_Color\b/g, '_legColor');
+        if (usedFragColorRead) rename(/\bgl_Color\b/g, '_legFrontColor');
+        if (usedFrontColor) rename(/\bgl_FrontColor\b/g, '_legFrontColor');
+        if (usedFrontSecondary) rename(/\bgl_FrontSecondaryColor\b/g, '_legFrontSecondaryColor');
+        if (usedFragSecondaryRead) rename(/\bgl_SecondaryColor\b/g, '_legFrontSecondaryColor');
         if (usedTexCoord) rename(/\bgl_TexCoord\b/g, '_legTexCoord');
+        if (usedTextureMatrix) rename(/\bgl_TextureMatrix\b/g, '_legTextureMatrix');
         if (usedMV) rename(/\bgl_ModelViewMatrix\b/g, '_legModelViewMatrix');
         if (usedProj) rename(/\bgl_ProjectionMatrix\b/g, '_legProjectionMatrix');
         if (usedMVP) rename(/\bgl_ModelViewProjectionMatrix\b/g, '_legModelViewProjectionMatrix');
         if (usedNormalMatrix) rename(/\bgl_NormalMatrix\b/g, '_legNormalMatrix');
+        if (usedLightSource) rename(/\bgl_LightSource\b/g, '_legLightSource');
         for (let i = 0; i < 8; i++) {
             if (usedMultiTex[i]) {
                 rename(new RegExp('\\bgl_MultiTexCoord' + i + '\\b', 'g'), '_legMultiTexCoord' + i);
             }
         }
+        if (usedFtransform) {
+            // Replace ftransform() with the projection of gl_Vertex.
+            // We also need _legVertex + _legModelViewProjectionMatrix
+            // declared, so flag them used.
+            s = s.replace(/\bftransform\s*\(\s*\)/g, '(_legModelViewProjectionMatrix * _legVertex)');
+        }
+        const needVertexDecl = usedVertex || usedFtransform;
+        const needMVPDecl = usedMVP || usedFtransform;
 
         // Build declaration block. Attribute slots match
         // ImmediateModeRenderer's VAO (lua-gl-immediate.ts).
         if (stage === 'vertex') {
-            if (usedVertex) decls.push('layout(location = 0) in vec4 _legVertex;');
+            if (needVertexDecl) decls.push('layout(location = 0) in vec4 _legVertex;');
             if (usedColorAttr) decls.push('layout(location = 1) in vec4 _legColor;');
             if (usedMultiTex[0]) decls.push('layout(location = 2) in vec4 _legMultiTexCoord0;');
             // gl_Normal + gl_MultiTexCoord1..7 don't have a dedicated
@@ -559,18 +594,29 @@ export function translateGLSL(src: string, stage: GlslStage, opts: TranslateOpti
                 if (usedMultiTex[i]) decls.push(`in vec4 _legMultiTexCoord${i};`);
             }
             if (usedTexCoord) decls.push('out vec4 _legTexCoord[8];');
-            if (usedFrontColor) decls.push('out vec4 _legColor;');
+            if (usedFrontColor) decls.push('out vec4 _legFrontColor;');
+            if (usedFrontSecondary) decls.push('out vec4 _legFrontSecondaryColor;');
         } else {
             // Fragment stage: legacy gl_Color reads the gl_FrontColor
             // varying. gl_TexCoord[] mirrors the vertex out.
-            if (usedFragColorRead || usedFrontColor) decls.push('in vec4 _legColor;');
+            if (usedFragColorRead || usedFrontColor) decls.push('in vec4 _legFrontColor;');
+            if (usedFragSecondaryRead || usedFrontSecondary) decls.push('in vec4 _legFrontSecondaryColor;');
             if (usedTexCoord) decls.push('in vec4 _legTexCoord[8];');
         }
 
         if (usedMV) decls.push('uniform mat4 _legModelViewMatrix;');
         if (usedProj) decls.push('uniform mat4 _legProjectionMatrix;');
-        if (usedMVP) decls.push('uniform mat4 _legModelViewProjectionMatrix;');
+        if (needMVPDecl) decls.push('uniform mat4 _legModelViewProjectionMatrix;');
         if (usedNormalMatrix) decls.push('uniform mat3 _legNormalMatrix;');
+        if (usedTextureMatrix) decls.push('uniform mat4 _legTextureMatrix[8];');
+        if (usedLightSource) {
+            // Minimal stub: matches the fields ZK shaders reference
+            // (ambient/diffuse/specular/position). Values are uniform
+            // zero unless someone binds them — acceptable visual
+            // degradation while the shader at least compiles.
+            decls.push('struct _legLightSourceParameters { vec4 ambient; vec4 diffuse; vec4 specular; vec4 position; };');
+            decls.push('uniform _legLightSourceParameters _legLightSource[8];');
+        }
 
         if (decls.length > 0) {
             // Inject the legacy declarations after the precision header
