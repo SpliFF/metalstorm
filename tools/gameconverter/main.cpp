@@ -1222,10 +1222,19 @@ void EnsureSiblingTexture(const fs::path& glbPath,
     }
     std::string channelOp, sourceStem;
     ParseChannelOpFromUri(filename, channelOp, sourceStem);
-    const std::string srcTex = ResolveTextureByStem(unittexturesSrc, sourceStem);
+    std::string srcTex = ResolveTextureByStem(unittexturesSrc, sourceStem);
+    if (srcTex.empty()) {
+        // Embedded-texture fallback. modelimporter dumps textures
+        // baked into a .glb / gltf-embedded source next to the
+        // output .gltf with the `<stem>__embN.<ext>` naming scheme;
+        // probe the .gltf's own directory before declaring the
+        // texture missing.
+        srcTex = ResolveTextureByStem(glbPath.parent_path(), sourceStem);
+    }
     if (srcTex.empty()) {
         SLOG(SPRING_LOG_WARNING,
-            "texture '%s' (source stem '%s', referenced by %s) not found in %s",
+            "texture '%s' (source stem '%s', referenced by %s) not found in %s "
+            "or in the model output directory",
             filename.c_str(), sourceStem.c_str(),
             glbPath.filename().string().c_str(),
             unittexturesSrc.string().c_str());
@@ -1237,6 +1246,9 @@ void EnsureSiblingTexture(const fs::path& glbPath,
     std::string tex2Path;
     if (channelOp == "diffuse" && !tex2Stem.empty()) {
         tex2Path = ResolveTextureByStem(unittexturesSrc, tex2Stem);
+        if (tex2Path.empty()) {
+            tex2Path = ResolveTextureByStem(glbPath.parent_path(), tex2Stem);
+        }
     }
     std::error_code ec;
     fs::create_directories(target.parent_path(), ec);

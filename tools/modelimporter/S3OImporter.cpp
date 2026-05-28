@@ -180,6 +180,13 @@ aiNode* S3OImporter::ReadPiece(const std::vector<uint8_t>& buf,
                 Read<float>(buf, vo + 12),
                 Read<float>(buf, vo + 16),
                 Read<float>(buf, vo + 20));
+            // UVs are passed through verbatim — the V-flip decision
+            // belongs to main.cpp's per-material sweep, not here.
+            // Whether a flip is needed depends on the source extension
+            // of tex1 (DDS → no flip, others → flip) and the effective
+            // `fliptextures` setting, both of which are easier to
+            // resolve once the scene is loaded and the sidecar has
+            // been parsed. See GeometryExtractor::ShouldFlipUv.
             mesh->mTextureCoords[0][i] = aiVector3D(
                 Read<float>(buf, vo + 24),
                 Read<float>(buf, vo + 28),

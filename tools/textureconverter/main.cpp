@@ -98,6 +98,28 @@ enum class Encoding { Uastc, Etc1s };
 //               metallic), A = 255. Source: S3O tex2.
 enum class ChannelOp { None, Diffuse, Team, Emissive, Orm };
 
+/// Stamp the standard KTX2 `KTXorientation=rd` key/value on a freshly
+/// created `ktxTexture2` so loaders that respect the metadata know our
+/// pixel data is laid out top-down (V increases downwards = glTF 2.0
+/// convention). Every output path in this tool — stb_image PNG/TGA/JPG
+/// decode, custom DXT decoder, raw DXT1 wrap, SMF minimap extract —
+/// produces pixel rows in that order, so the same value is correct
+/// across all branches.
+///
+/// Without this metadata loaders default to the KTX2 spec fallback
+/// (assume `rd` if absent) which happens to be the right answer for us
+/// today; the explicit stamp pins the assumption so a future loader
+/// that flips the default can't silently mirror every model texture.
+static void StampOrientationRd(ktxTexture2* tex) {
+    if (!tex) return;
+    static constexpr char kOrientationValue[] = "S=r,T=d";
+    ktxHashList_AddKVPair(
+        &tex->kvDataHead,
+        KTX_ORIENTATION_KEY,
+        static_cast<unsigned int>(sizeof(kOrientationValue)),
+        kOrientationValue);
+}
+
 // Forward decl — DDS RGBA fallback re-uses the encoder path.
 static bool EncodeRgba8AsKtx2(const uint8_t* rgba, int w, int h,
                               const std::string& dstPath,
@@ -501,6 +523,7 @@ static bool WrapRawDxt1AsKtx2(const std::vector<uint8_t>& srcBytes,
     if (zstd) {
         ktxTexture2_DeflateZstd(tex, 18);
     }
+    StampOrientationRd(tex);
     rc = ktxTexture_WriteToNamedFile(ktxTexture(tex), dstPath.c_str());
     ktxTexture_Destroy(ktxTexture(tex));
     if (rc != KTX_SUCCESS) {
@@ -615,6 +638,7 @@ static bool EncodeRgba8AsKtx2(const uint8_t* rgba, int w, int h,
     if (zstd) {
         ktxTexture2_DeflateZstd(tex, 18);
     }
+    StampOrientationRd(tex);
     rc = ktxTexture_WriteToNamedFile(ktxTexture(tex), dstPath.c_str());
     ktxTexture_Destroy(ktxTexture(tex));
     if (rc != KTX_SUCCESS) {

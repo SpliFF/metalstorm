@@ -72,4 +72,67 @@ constexpr int kCurrentSchemaVersion = 8;
 nlohmann::json BuildExtensionJson(const aiScene* scene,
                                   const std::string& sourceModelPath = {});
 
+/// Decide whether the V coordinate of texture coordinates should be
+/// flipped (V → 1.0 - V) at conversion time for the given source model
+/// and tex1 reference.
+///
+/// Encapsulates the per-asset rule that bridges Spring's per-format
+/// texture-loading conventions to our spec-compliant glTF+KTX2 output:
+///
+///   * Spring's nv_dds path always vertically flips DDS during load
+///     (Bitmap.cpp ddsimage.load(filename, flipDDS=true)), so DDS
+///     texture memory ends up bottom-up regardless of the parser's
+///     `invertAxis` flag. Effective UV V=0 in Spring lands on the
+///     visual bottom of the source DDS.
+///   * Spring's IL path loads TGA/PNG/JPG with IL_ORIGIN_UPPER_LEFT
+///     (top-down in memory). A subsequent bitmap->ReverseYAxis() is
+///     only invoked when the parser passes `invertAxis=true`
+///     (AssParser default true; S3OParser hardcodes false; GLTFParser
+///     default false). When ReverseYAxis runs the memory flips to
+///     bottom-up; otherwise it stays top-down. So effective Spring
+///     UV V=0 lands on the visual bottom for TGA/PNG with
+///     fliptextures=true, but on the visual top with fliptextures=false.
+///
+/// Our pipeline normalises every KTX2 to top-down storage (stb_image
+/// flips bottom-up TGAs on decode; the DXT decoder leaves DDS top-down).
+/// Babylon uploads textures with UNPACK_FLIP_Y_WEBGL=true (its
+/// `Texture(invertY=true)` constructor default), so WebGL UV V=0
+/// reliably samples the visual bottom of the source data for every
+/// `.ktx2` we ship.
+///
+/// Matching Spring therefore requires inverting the UV only when
+/// Spring would have sampled the visual top — non-DDS textures loaded
+/// without ReverseYAxis. The decision table:
+///
+///   tex1 ext   | effective fliptextures | UV flip needed
+///   -----------+------------------------+----------------
+///   .dds       | (any)                  | no
+///   non-.dds   | true                   | no
+///   non-.dds   | false                  | YES
+///
+/// `effective_fliptextures` is the sidecar `fliptextures = X` value
+/// when present, else the per-format default: false for `.s3o` and
+/// `.gltf`/`.glb` (matches Recoil's S3OParser hardcode and GLTFParser
+/// default), true for everything else (matches AssParser's "true is
+/// the incorrect default, but has to be retained to be compatible"
+/// comment at AssParser.cpp:591).
+///
+/// `sourceModelPath` is the file the importer read (e.g.
+/// `content/games/zk/Objects3d/noruas.s3o`); used to locate the
+/// `unittextures/` sibling and the `<sourceModelPath>.lua` author
+/// sidecar.
+///
+/// `tex1Name` is the bare tex1 filename from the Assimp material's
+/// `AI_MATKEY_TEXTURE_DIFFUSE(0)` (the S3OImporter populates this
+/// from the .s3o header; for `.dae` it usually comes from the sidecar
+/// after `ReadSidecarFields` runs). When empty, the function falls
+/// back to the Spring naming convention (`<modelStem>1.<ext>`) before
+/// declaring "no tex" (in which case the flip can't affect anything
+/// and the answer is false).
+///
+/// Returns true to flip every V coord on materials backed by this
+/// tex1; false to pass UVs through unchanged.
+bool ShouldFlipUv(const std::string& sourceModelPath,
+                  const std::string& tex1Name);
+
 } // namespace GeometryExtractor

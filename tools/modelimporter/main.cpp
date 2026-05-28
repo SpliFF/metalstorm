@@ -97,6 +97,129 @@ std::string ReplaceExtension(const std::string& path, const std::string& newExt)
     return path.substr(0, dot + 1) + newExt;
 }
 
+/// Rewrite a single string-typed material texture property in place.
+/// Reallocates `prop->mData` to fit `newName` and updates `mDataLength`.
+/// Shared by `RewriteTextureExtensions` and `ExtractEmbeddedTextures`.
+void OverwriteTextureProperty(aiMaterialProperty* prop, const std::string& newName) {
+    const uint32_t newLen = static_cast<uint32_t>(newName.size());
+    const size_t   newBytes = sizeof(uint32_t) + newLen + 1;
+    char* newData = new char[newBytes];
+    std::memcpy(newData, &newLen, sizeof(uint32_t));
+    std::memcpy(newData + sizeof(uint32_t), newName.data(), newLen);
+    newData[sizeof(uint32_t) + newLen] = '\0';
+
+    delete[] prop->mData;
+    prop->mData = newData;
+    prop->mDataLength = static_cast<unsigned int>(newBytes);
+}
+
+/// Walk every embedded texture in the scene and dump it to a file next
+/// to the output .gltf, then rewrite every material URI from Assimp's
+/// `"*N"` embedded-index reference to the on-disk filename. Covers the
+/// .glb and gltf-embedded-data-URI cases — Blender's default export
+/// path bakes textures into the .glb binary chunk so they ride along
+/// with the geometry. Without this pass the downstream pipeline can't
+/// see those textures (gameconverter only knows how to resolve sources
+/// from on-disk `.png` / `.dds` / etc.).
+///
+/// Compressed textures (PNG / JPG / DDS / etc., signalled by
+/// mHeight == 0) get their raw payload dumped verbatim using the
+/// loader's `achFormatHint` for the file extension. Uncompressed
+/// textures (mHeight > 0, raw ARGB8888 pixels) are skipped with a
+/// warning — modelimporter doesn't link a PNG/TGA encoder; that
+/// branch hasn't come up in real Blender exports yet.
+///
+/// `outPath` is the .gltf the importer is about to write. The
+/// extracted files land in its parent directory with a stable
+/// naming scheme: `<outStem>__emb<index>.<ext>`. The double-
+/// underscore separator keeps them visually distinct from the
+/// modelimporter's other sibling outputs (`<stem>_diffuse.ktx2`,
+/// etc.) and is reserved for this use.
+void ExtractEmbeddedTextures(aiScene* scene, const std::string& outPath) {
+    if (scene->mNumTextures == 0) return;
+    namespace fs = std::filesystem;
+    const fs::path outDir = fs::path(outPath).parent_path();
+    const std::string outStem = fs::path(outPath).stem().string();
+    std::error_code ec;
+    fs::create_directories(outDir, ec);
+
+    // Build the index → extracted-URI map first so material rewriting
+    // is a single pass that can also recognise textures it skipped.
+    std::vector<std::string> embeddedUris(scene->mNumTextures);
+    unsigned extracted = 0;
+    for (unsigned i = 0; i < scene->mNumTextures; ++i) {
+        const aiTexture* t = scene->mTextures[i];
+        if (!t) continue;
+
+        if (t->mHeight != 0) {
+            SLOG(SPRING_LOG_WARNING,
+                "embedded texture *%u is uncompressed (%ux%u) — skipping; "
+                "no in-tool PNG/TGA encoder is linked. Re-export the source "
+                "with compressed textures (PNG/JPG) if possible.",
+                i, t->mWidth, t->mHeight);
+            continue;
+        }
+
+        std::string ext = (t->achFormatHint[0] != 0)
+            ? std::string(t->achFormatHint) : std::string("bin");
+        // Some loaders pad achFormatHint with trailing whitespace; trim.
+        while (!ext.empty() && (ext.back() == ' ' || ext.back() == '\0')) {
+            ext.pop_back();
+        }
+        if (ext.empty()) ext = "bin";
+
+        const std::string fname = outStem + "__emb" + std::to_string(i) + "." + ext;
+        const fs::path target = outDir / fname;
+
+        std::ofstream f(target, std::ios::binary);
+        if (!f) {
+            SLOG(SPRING_LOG_ERROR,
+                "failed to write embedded texture: %s",
+                target.string().c_str());
+            continue;
+        }
+        f.write(reinterpret_cast<const char*>(t->pcData),
+                static_cast<std::streamsize>(t->mWidth));
+        f.close();
+
+        embeddedUris[i] = fname;
+        ++extracted;
+        SLOG(SPRING_LOG_INFO,
+            "extracted embedded texture *%u (%u bytes, .%s) -> %s",
+            i, t->mWidth, ext.c_str(), fname.c_str());
+    }
+    if (extracted == 0) return;
+
+    // Rewrite materials. Assimp encodes embedded references as a
+    // single asterisk followed by the decimal index — match that
+    // exact shape and look the index up in our map.
+    for (unsigned m = 0; m < scene->mNumMaterials; ++m) {
+        aiMaterial* mat = scene->mMaterials[m];
+        for (unsigned p = 0; p < mat->mNumProperties; ++p) {
+            aiMaterialProperty* prop = mat->mProperties[p];
+            if (prop->mType != aiPTI_String) continue;
+            if (std::strcmp(prop->mKey.C_Str(), _AI_MATKEY_TEXTURE_BASE) != 0) continue;
+            if (prop->mDataLength < sizeof(uint32_t) + 2) continue;
+
+            uint32_t len = 0;
+            std::memcpy(&len, prop->mData, sizeof(uint32_t));
+            if (len + sizeof(uint32_t) + 1 > prop->mDataLength) continue;
+            const char* s = prop->mData + sizeof(uint32_t);
+            if (len < 2 || s[0] != '*') continue;
+
+            unsigned idx = 0;
+            try {
+                idx = static_cast<unsigned>(std::stoul(std::string(s + 1, len - 1)));
+            } catch (...) {
+                continue;
+            }
+            if (idx >= embeddedUris.size() || embeddedUris[idx].empty()) continue;
+
+            OverwriteTextureProperty(prop, embeddedUris[idx]);
+        }
+    }
+}
+
 /// Walk every material in `scene` and rewrite each texture URI's
 /// extension to `newExt`, optionally prepending `prefix` so the URI
 /// resolves to a sibling directory rather than the model's own
@@ -132,18 +255,7 @@ void RewriteTextureExtensions(aiScene* scene, const std::string& newExt,
                 updated = prefix + updated;
             }
             if (updated == current) continue;
-
-            // Re-encode and replace the in-place buffer (grow if needed).
-            const uint32_t newLen = static_cast<uint32_t>(updated.size());
-            const size_t   newBytes = sizeof(uint32_t) + newLen + 1;
-            char* newData = new char[newBytes];
-            std::memcpy(newData, &newLen, sizeof(uint32_t));
-            std::memcpy(newData + sizeof(uint32_t), updated.data(), newLen);
-            newData[sizeof(uint32_t) + newLen] = '\0';
-
-            delete[] prop->mData;
-            prop->mData = newData;
-            prop->mDataLength = static_cast<unsigned int>(newBytes);
+            OverwriteTextureProperty(prop, updated);
         }
     }
 }
@@ -843,6 +955,13 @@ int main(int argc, char** argv) {
     // Common post-processing flags. Triangulate is critical (we already
     // emit triangles for S3O but other importers may not). The rest are
     // friendly defaults for downstream renderers.
+    //
+    // aiProcess_GenSmoothNormals is kept as the fallback for source
+    // meshes that ship without a NORMAL attribute (rare — most DCC
+    // tool exports include one). It's a no-op on meshes that already
+    // have normals (Assimp's GenVertexNormalsProcess explicitly skips
+    // them), so authored split edges + smoothing groups from
+    // Blender / Max / Maya survive intact.
     constexpr unsigned int kFlags =
         aiProcess_Triangulate                |
         aiProcess_JoinIdenticalVertices      |
@@ -860,6 +979,78 @@ int main(int argc, char** argv) {
         Assimp::DefaultLogger::kill();
         springlog_shutdown();
         return 3;
+    }
+
+    // Extract embedded textures from .glb / gltf-embedded sources to
+    // sibling files of the output .gltf, and rewrite Assimp's "*N"
+    // texture references to point at the on-disk filenames. The rest
+    // of the pipeline (RewriteTextureExtensions → KTX2 rename, the
+    // export, gameconverter's source-resolution probe) treats them
+    // identically to externally-referenced textures from there on.
+    ExtractEmbeddedTextures(const_cast<aiScene*>(scene), outPath);
+
+    // Decide per-material whether to flip every UV V coordinate, then
+    // apply the flip to each mesh that references a flagged material.
+    //
+    // Rationale: Spring's runtime convention for "what does UV V=0
+    // sample" varies per source texture format — nv_dds always flips
+    // DDS to bottom-up on load, while IL keeps TGA/PNG top-down unless
+    // a parser-driven ReverseYAxis runs. Our pipeline normalises every
+    // KTX2 to top-down storage, and Babylon uploads with FLIP_Y=true,
+    // so V=0 always lands on the visual bottom of the source data.
+    // Matching Spring's effective semantics therefore needs a flip
+    // only for the cases where Spring sampled the visual top — that's
+    // the case for non-DDS textures whose source parser had
+    // `fliptextures = false` in effect. See
+    // GeometryExtractor::ShouldFlipUv for the full decision table.
+    //
+    // A multi-material scene (rare in S3O, possible in .dae with mixed
+    // DDS + TGA materials) gets a per-material verdict so each mesh
+    // ends up with the right answer.
+    {
+        auto* mutScene = const_cast<aiScene*>(scene);
+        std::vector<bool> matFlip(mutScene->mNumMaterials, false);
+
+        // Read each material's tex1 reference and ask the helper.
+        // ShouldFlipUv falls back to the Spring naming convention
+        // (`<modelStem>1.<ext>`) when the material has no tex1 slot —
+        // which is the typical .dae path before the sidecar lookup
+        // runs in GeometryExtractor.
+        for (unsigned m = 0; m < mutScene->mNumMaterials; ++m) {
+            const aiMaterial* mat = mutScene->mMaterials[m];
+            std::string tex1;
+            if (mat != nullptr) {
+                aiString s;
+                if (mat->GetTexture(aiTextureType_DIFFUSE, 0, &s) == AI_SUCCESS) {
+                    tex1.assign(s.C_Str(), s.length);
+                } else if (mat->GetTexture(aiTextureType_BASE_COLOR, 0, &s) == AI_SUCCESS) {
+                    tex1.assign(s.C_Str(), s.length);
+                }
+            }
+            matFlip[m] = GeometryExtractor::ShouldFlipUv(inPath, tex1);
+        }
+
+        unsigned flippedMeshes = 0;
+        for (unsigned m = 0; m < mutScene->mNumMeshes; ++m) {
+            aiMesh* mesh = mutScene->mMeshes[m];
+            if (!mesh) continue;
+            if (mesh->mMaterialIndex >= matFlip.size()) continue;
+            if (!matFlip[mesh->mMaterialIndex]) continue;
+            for (unsigned ch = 0; ch < AI_MAX_NUMBER_OF_TEXTURECOORDS; ++ch) {
+                aiVector3D* uvs = mesh->mTextureCoords[ch];
+                if (!uvs) continue;
+                for (unsigned i = 0; i < mesh->mNumVertices; ++i) {
+                    uvs[i].y = 1.0f - uvs[i].y;
+                }
+            }
+            ++flippedMeshes;
+        }
+
+        if (flippedMeshes > 0) {
+            SLOG(SPRING_LOG_INFO,
+                "fliptextures: V-flipped %u/%u meshes in %s",
+                flippedMeshes, mutScene->mNumMeshes, inPath.c_str());
+        }
     }
 
     // Sweep up any legacy `.config.json` sidecar from before the
@@ -923,12 +1114,16 @@ int main(int argc, char** argv) {
     // numeric fields (offsets, mins/maxs) are also RH-canonical (see
     // GeometryExtractor.cpp), so engine and renderer agree on a single
     // glTF-native convention.
-    // glTF 2.0 spec mandates UV origin (0,0) at the UPPER-LEFT of the
-    // texture image — same convention as DirectX, KTX2 (rd orientation),
-    // and the original S3O sources. Do NOT pass aiProcess_FlipUVs: it
-    // inverts V into the lower-left (OpenGL) origin and makes every
-    // sampling face read from the wrong half of the texture atlas
-    // (wheel texture ends up on the body and similar symptoms).
+    //
+    // UV V flip is intentionally NOT delegated to aiProcess_FlipUVs.
+    // glTF 2.0 mandates V=0 at the UPPER-LEFT of the texture image,
+    // but Spring's effective V semantic varies per source texture
+    // format (DDS vs TGA/PNG) and per parser-supplied `fliptextures`
+    // value. The flip happens per material above (after ReadFile, in
+    // the GeometryExtractor::ShouldFlipUv loop), so each mesh ends
+    // up with UVs in the canonical glTF orientation. A blanket
+    // aiProcess_FlipUVs at export time would double-flip everything
+    // we already corrected and silently undo the per-material work.
     constexpr unsigned int kExportFlags =
         aiProcess_MakeLeftHanded   |   // LH source geometry → RH
         aiProcess_FlipWindingOrder;    // compensate winding flip

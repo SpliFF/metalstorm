@@ -241,38 +241,19 @@ void ProbeUnittexturesByConvention(const std::string& sourceModelPath,
     // Inversion marker: `<stem>1_invert.<ext>` next to the regular
     // tex1. One ZK asset (factoryveh) ships this; the convention is
     // documented in PLAN-pbr-mapping.md.
-    //
-    // Also probe for `<tex1stem>_invert.<ext>` — useful when many models
-    // share a single texture (the 3DO-to-S3O conversion atlas
-    // `3do2s3o_atlas_1.tga` is referenced by ~18 ZK S3Os whose tex1.A
-    // packs the team-mask in inverted polarity vs. the typical hand-
-    // authored S3O). One marker next to the shared atlas then flags
-    // every consumer, no per-model marker file required.
-    auto probeInvertMarker = [&](const std::string& stemForMarker) -> bool {
-        const std::string invStem = stemForMarker + "_invert";
-        const std::string invStemLower = stemLower(invStem);
-        for (const char* ext : kExts) {
-            if (fs::exists(unittex / (invStem + ext), ec)) return true;
+    const std::string invertStem = stem + "1_invert";
+    const std::string invertStemLower = stemLower(invertStem);
+    for (const char* ext : kExts) {
+        if (fs::exists(unittex / (invertStem + ext), ec)) {
+            if (!invertTeamColor.has_value()) invertTeamColor = true;
+            return;
         }
-        for (const auto& entry : fs::directory_iterator(unittex, ec)) {
-            if (!entry.is_regular_file()) continue;
-            const std::string fstem = entry.path().stem().string();
-            if (stemLower(fstem) == invStemLower) return true;
-        }
-        return false;
-    };
-
-    if (!invertTeamColor.has_value() && probeInvertMarker(stem + "1")) {
-        invertTeamColor = true;
-        return;
     }
-    if (!invertTeamColor.has_value() && !tex1.empty()) {
-        // tex1 carries the resolved name (e.g. `3do2s3o_atlas_1.ktx2`);
-        // strip both the runtime extension and any leading directories
-        // so we probe by basename stem.
-        fs::path tex1Path(tex1);
-        if (probeInvertMarker(tex1Path.stem().string())) {
-            invertTeamColor = true;
+    for (const auto& entry : fs::directory_iterator(unittex, ec)) {
+        if (!entry.is_regular_file()) continue;
+        const std::string fstem = entry.path().stem().string();
+        if (stemLower(fstem) == invertStemLower) {
+            if (!invertTeamColor.has_value()) invertTeamColor = true;
             return;
         }
     }
@@ -292,6 +273,18 @@ struct SidecarOverrides {
     /// Spring author convention; routed to glTF `material.normalTexture`
     /// at synthesis time. RewriteToKtx2 is applied on read.
     std::string                         normaltex;
+    /// `fliptextures` sidecar flag, mirrored from Recoil's AssParser.
+    /// In Recoil this asks the engine to call `bitmap->ReverseYAxis()`
+    /// on the loaded texture before upload; mathematically equivalent
+    /// to inverting V at UV-read time, which is what our pipeline does
+    /// (we emit static .gltf + .bin so flipping at conversion time is
+    /// cheaper than carrying a runtime flag and the result is identical).
+    /// Caller resolves the default per input format:
+    /// - S3O: handled inside S3OImporter (always flips, sidecar ignored)
+    /// - DAE/FBX/OBJ via Assimp: default `true` (legacy compatibility,
+    ///   matches Recoil's AssParser.cpp:591)
+    /// - glTF input: default `false` (matches GLTFParser.cpp:437)
+    std::optional<bool>                 flipTextures;
     /// Per-piece offset overrides from the sidecar `pieces` block.
     /// In ZK content this is dominated by root-piece "Scene" overrides
     /// (e.g. strikecom's `Scene.offset = {0, 31, 0}`) that lift the
@@ -401,27 +394,32 @@ void ReadSidecarFields(const std::string& sourceModelPath,
         RewriteToKtx2(overrides.normaltex);
     }
 
-    // Boolean lookup for invertteamcolor. Match `invertteamcolor`
-    // followed by optional whitespace, `=`, more whitespace, and
-    // `true` or `false`. The sidecar overrides anything the naming
-    // probe set — if the key is present, take its value verbatim.
-    {
-        const std::string key = "invertteamcolor";
+    // Generic boolean reader for `<key> = true|false`. Returns
+    // std::nullopt if the key is absent or the value isn't `true`
+    // / `false` verbatim — caller distinguishes "sidecar didn't say"
+    // from "sidecar said false".
+    auto readBool = [&](const std::string& key) -> std::optional<bool> {
         size_t kp = txt.find(key);
-        if (kp != std::string::npos) {
-            size_t eq = txt.find('=', kp + key.size());
-            if (eq != std::string::npos) {
-                size_t v = eq + 1;
-                while (v < txt.size() && (txt[v] == ' ' || txt[v] == '\t')) ++v;
-                if (txt.compare(v, 4, "true") == 0) {
-                    invertTeamColor = true;
-                } else if (txt.compare(v, 5, "false") == 0) {
-                    invertTeamColor = false;
-                }
-                // else: malformed value — leave the caller's prior state.
-            }
-        }
-    }
+        if (kp == std::string::npos) return std::nullopt;
+        size_t eq = txt.find('=', kp + key.size());
+        if (eq == std::string::npos) return std::nullopt;
+        size_t v = eq + 1;
+        while (v < txt.size() && (txt[v] == ' ' || txt[v] == '\t')) ++v;
+        if (txt.compare(v, 4, "true") == 0) return true;
+        if (txt.compare(v, 5, "false") == 0) return false;
+        return std::nullopt;
+    };
+
+    // `invertteamcolor` overrides anything the naming probe set —
+    // if the key is present, take its value verbatim.
+    if (auto b = readBool("invertteamcolor"); b.has_value())
+        invertTeamColor = *b;
+
+    // `fliptextures` — Spring's per-asset flag for textures that need
+    // the engine to vertically reverse them before upload. Routed to
+    // overrides for the caller to apply at UV-read time (equivalent).
+    if (auto b = readBool("fliptextures"); b.has_value())
+        overrides.flipTextures = *b;
 
     // Bound overrides. Author intent supersedes the AABB-derived values
     // computed by the caller. 91.6% of ZK .dae.lua sidecars carry a
@@ -761,4 +759,128 @@ nlohmann::json GeometryExtractor::BuildExtensionJson(const aiScene* scene,
     }
 
     return doc;
+}
+
+namespace {
+
+/// Locate the actual on-disk source file backing a tex1 reference and
+/// return its lowercase extension (without dot). Used by ShouldFlipUv
+/// to distinguish DDS (Spring path always nv_dds-flips → memory ends
+/// up bottom-up) from TGA/PNG/JPG (Spring IL keeps top-down unless
+/// ReverseYAxis runs). When the tex1 string is empty, falls back to
+/// the Spring naming convention `<modelStem>1.<ext>` so .dae models
+/// without a populated material slot still get a verdict. Returns
+/// empty when nothing matches — the caller treats "no texture" as
+/// "no flip needed".
+std::string LookupTex1SourceExt(const std::string& sourceModelPath,
+                                const std::string& tex1Name) {
+    if (sourceModelPath.empty()) return {};
+    namespace fs = std::filesystem;
+    const fs::path src(sourceModelPath);
+    const fs::path unittex = src.parent_path().parent_path() / "unittextures";
+    std::error_code ec;
+    if (!fs::is_directory(unittex, ec)) return {};
+
+    auto stemLower = [](std::string s) {
+        for (char& c : s)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+
+    // The tex1 string the caller passes in carries whichever extension
+    // the source archive happened to ship (`.dds`, `.tga`, `.ktx2` if
+    // the sidecar already pre-resolved, or empty). We only care about
+    // the stem; the extension on disk is what determines Spring's
+    // loader path, not the extension the model file claimed.
+    std::string stem;
+    if (!tex1Name.empty()) {
+        // Strip any directory and extension from tex1Name. Spring s3o /
+        // .dae sidecars typically carry bare filenames but tolerate a
+        // few archive-relative paths.
+        fs::path t(tex1Name);
+        stem = t.stem().string();
+    } else {
+        // Fall back to the naming-convention probe: <modelStem>1.
+        stem = src.stem().string() + "1";
+    }
+    if (stem.empty()) return {};
+    const std::string stemLow = stemLower(stem);
+
+    // Direct hit on common extensions first — fast path that avoids
+    // the directory walk for the typical case.
+    static const char* const kExts[] = {
+        "dds", "tga", "png", "bmp", "jpg", "jpeg", "webp",
+    };
+    for (const char* ext : kExts) {
+        if (fs::exists(unittex / (stem + "." + ext), ec)) return ext;
+    }
+    // Case-insensitive fallback — ZK content mixes `Core_color.dds`
+    // (file) with `core_color.dds` (sidecar reference) freely.
+    for (const auto& entry : fs::directory_iterator(unittex, ec)) {
+        if (!entry.is_regular_file()) continue;
+        const std::string fstem = entry.path().stem().string();
+        if (stemLower(fstem) != stemLow) continue;
+        std::string ext = entry.path().extension().string();
+        if (!ext.empty() && ext[0] == '.') ext.erase(0, 1);
+        return stemLower(std::move(ext));
+    }
+    return {};
+}
+
+/// Per-source-format default for `fliptextures`. Mirrors Recoil:
+///   - S3O               : false (S3OParser hardcodes invertAxis=false)
+///   - glTF / glb input  : false (GLTFParser.cpp:437)
+///   - DAE / FBX / OBJ / etc.: true (AssParser.cpp:591 — "true is the
+///     incorrect default, but has to be retained to be compatible")
+bool DefaultFlipTexturesForSource(const std::string& sourceModelPath) {
+    namespace fs = std::filesystem;
+    std::string ext = fs::path(sourceModelPath).extension().string();
+    for (char& c : ext)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (ext == ".s3o")  return false;
+    if (ext == ".gltf") return false;
+    if (ext == ".glb")  return false;
+    return true;
+}
+
+} // namespace
+
+bool GeometryExtractor::ShouldFlipUv(const std::string& sourceModelPath,
+                                     const std::string& tex1Name) {
+    if (sourceModelPath.empty()) return false;
+
+    // Resolve the effective fliptextures value: sidecar wins over the
+    // per-source-format default. Reuse the full sidecar reader so the
+    // parse rules live in one place; everything else it returns gets
+    // discarded.
+    std::string scratchTex1 = tex1Name;
+    std::string scratchTex2;
+    std::optional<bool> scratchInvertTeamColor;
+    SidecarOverrides scratchOverrides;
+    ReadSidecarFields(sourceModelPath,
+                      scratchTex1, scratchTex2,
+                      scratchInvertTeamColor,
+                      scratchOverrides);
+    const bool effectiveFlipTextures = scratchOverrides.flipTextures.value_or(
+        DefaultFlipTexturesForSource(sourceModelPath));
+
+    // Find the actual on-disk source extension for tex1. ReadSidecarFields
+    // may have filled scratchTex1 from the .dae.lua, so prefer that over
+    // the raw `tex1Name` the caller gave us.
+    const std::string srcExt = LookupTex1SourceExt(sourceModelPath, scratchTex1);
+
+    // The decision table from the header doc:
+    //   tex1 ext   | effective fliptextures | UV flip needed
+    //   .dds       | (any)                  | no
+    //   non-.dds   | true                   | no
+    //   non-.dds   | false                  | YES
+    //
+    // Unknown / missing source extension: assume the texture exists in
+    // some non-DDS form (typical for .dae sources that ship .png or
+    // .tga unittextures) and let the fliptextures value decide. This
+    // keeps the rule conservative — a model with no resolvable tex1
+    // gets the format-default behaviour rather than silently skipping.
+    const bool isDds = (srcExt == "dds");
+    if (isDds) return false;
+    return !effectiveFlipTextures;
 }
