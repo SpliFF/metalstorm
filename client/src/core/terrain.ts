@@ -334,7 +334,7 @@ export function applyWebGLTexture(
 ): void {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const engine = scene.getEngine() as any;
-    const internalTex = engine.wrapWebGLTexture(webglTex, false, 1 /* nearest */, width, height);
+    const internalTex = engine.wrapWebGLTexture(webglTex, false, 2 /* bilinear */, width, height);
 
     const texture = new Texture(null, scene);
     texture._texture = internalTex;
