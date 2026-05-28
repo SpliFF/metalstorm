@@ -21,12 +21,22 @@
 import { markOpaque, type LuaValue } from './lua-runtime.js';
 import { ImmediateModeRenderer } from './lua-gl-immediate.js';
 import { createLuaFontObject } from './lua-gl-font.js';
+import {
+    translateAndInclude,
+    hashSource,
+    type GlslDiagnostic,
+} from './glsl-translator.js';
 
 /** Handle returned by gl.CreateShader — opaque to Lua. */
 export interface LuaShaderHandle {
     __type: 'shader';
     program: WebGLProgram;
     uniforms: Map<string, WebGLUniformLocation>;
+    /** Key into LuaGLBridge.programRegistry. Identical translated source
+     *  collapses onto a single program; the key lets deleteShader
+     *  refcount-decrement the right entry. Unset for ad-hoc handles that
+     *  weren't registered. */
+    programKey?: string;
 }
 
 /** Handle returned by gl.CreateTexture. */
@@ -454,6 +464,38 @@ export class LuaGLBridge {
             return [c.width, c.height];
         };
 
+        // gl.GetString(name) — Spring exposes the desktop-GL `glGetString`
+        // for vendor / renderer / version reporting. ZK's `lups.lua` uses
+        // it at load time (line 120-121) to detect Nvidia / ATI / Intel /
+        // Microsoft software-renderer paths via `:lower():find(...)`. If
+        // it returns nil the chained `:lower()` crashes the whole include
+        // and LUPS never boots.
+        //
+        // WebGL2 has the equivalent constants and `getParameter(name)`
+        // returns the same strings (`WebGL Vendor`, `WebGL Renderer`,
+        // `OpenGL ES Version`). UNMASKED_VENDOR/RENDERER (when the
+        // WEBGL_debug_renderer_info extension is available) gives the
+        // underlying GPU string. We prefer the unmasked names so ZK's
+        // GPU-family heuristics actually match.
+        gl['GetString'] = (name: LuaValue) => {
+            const n = Number(name);
+            const dbg = this.gl.getExtension('WEBGL_debug_renderer_info');
+            switch (n) {
+                case 0x1F00 /* GL_VENDOR */:
+                    return (dbg && this.gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL)) ||
+                        this.gl.getParameter(this.gl.VENDOR) || 'WebGL2';
+                case 0x1F01 /* GL_RENDERER */:
+                    return (dbg && this.gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) ||
+                        this.gl.getParameter(this.gl.RENDERER) || 'WebGL2';
+                case 0x1F02 /* GL_VERSION */:
+                    return this.gl.getParameter(this.gl.VERSION) || 'WebGL 2.0';
+                case 0x8B8C /* GL_SHADING_LANGUAGE_VERSION */:
+                    return this.gl.getParameter(this.gl.SHADING_LANGUAGE_VERSION) || 'OpenGL ES GLSL ES 3.00';
+                default:
+                    return '';
+            }
+        };
+
         // gl.GetSun(param, [type]) — sun parameters used by shaders for
         // map/unit lighting. Returns either RGB triple, XYZ direction,
         // or a single scalar depending on param.
@@ -871,206 +913,61 @@ export class LuaGLBridge {
      */
     private expectedShaderReject = false;
 
+    /**
+     * Include resolver for `#include "path"` directives in shader
+     * source. Defaults to "no resolver" (returns undefined for every
+     * lookup) so the translator's built-in `ENGINE_SNIPPETS` still
+     * resolve but VFS-relative paths fail loudly. The worker host wires
+     * this to its VFS once asset prefetch is complete.
+     */
+    private shaderIncludeResolver: (path: string) => string | undefined = () => undefined;
+
+    /**
+     * Program registry: identical translated source (vertex + fragment,
+     * separated by `\0`) collapses onto a single WebGLProgram. Each
+     * gl.CreateShader handle still gets its own uniforms map, so the
+     * widget-level call site sees independent uniform state, but the
+     * underlying GL program is shared. Refcounted so gl.DeleteShader
+     * works correctly when one handle disposes.
+     */
+    private programRegistry = new Map<string, { program: WebGLProgram; refs: number }>();
+
+    /**
+     * Wire the `#include` resolver. Pass the worker's VFS lookup so
+     * shader source can `#include "lups/shaders/ribbons.glsl"` and
+     * pull from the preloaded ZK content tree. Built-in engine snippets
+     * (ENGINE_SNIPPETS in glsl-translator.ts, e.g. `engine/csm.glsl`)
+     * always take precedence over the VFS resolver.
+     */
+    setShaderIncludeResolver(fn: (path: string) => string | undefined): void {
+        this.shaderIncludeResolver = fn;
+    }
+
     // ============================================================
     // Shader management
     // ============================================================
 
     /**
      * Translate Spring's `#version 150 compatibility` GLSL into something
-     * WebGL2 (GLSL ES 300) accepts. Spring shaders use core-profile
-     * features (in/out, texture(), flat qualifier) that map cleanly to
-     * GLSL ES 300, but GLSL ES is strict about implicit int→float
-     * conversions that GLSL 150 allows. We do a pragmatic set of regex
-     * fixups that cover the patterns used in real map widgets (tested
-     * against scorched_crossing's lava_layer shader).
+     * WebGL2 (GLSL ES 300) accepts. Implementation lives in the standalone
+     * `glsl-translator.ts` module so the rewrite rules and `#include`
+     * resolver can be reused by ModelMaterials / weapon-FX code paths
+     * outside the Lua bridge.
+     *
+     * Side effects: stamps `lastShaderLog` and `expectedShaderReject` so
+     * `createShader`'s log formatter can downgrade by-design rejections
+     * (legacy `gl_Vertex`, `#version 400+`). Diagnostics emitted by the
+     * translator are surfaced verbatim to keep their source-line refs.
      */
     private translateGLSL(src: string, stage: 'vertex' | 'fragment'): string {
-        // Detect legacy GLSL 1.10/1.20 (gui_xrayhaloselect,
-        // map_edge_extension, etc.). They use `varying`, `attribute`,
-        // `gl_FragColor`, `texture2D` — all removed in GLSL ES 3.0. We
-        // rewrite them before the int→float pass below sees them.
-        //
-        // We deliberately do NOT translate `gl_Vertex` here. Spring's
-        // legacy shaders that reference it expect the vertex stream to
-        // be supplied by the caller's pipeline — but our immediate-mode
-        // bridge always uses its OWN program for draw calls (flush()
-        // unconditionally calls useProgram(this.program)). A user
-        // shader that compiles successfully would never actually run,
-        // and chili widgets like the minimap fadeShader use the
-        // non-nil compile result as a signal to enable an offscreen
-        // postprocess path that we don't support — see the
-        // CleanUpFBO/elseif branches in gui_chili_minimap.lua. Keep
-        // those shaders failing-compile so the simple path stays
-        // selected.
-        const isLegacy = /\bvarying\b|\battribute\b|\bgl_FragColor\b|\btexture2D\b/.test(src);
-        if (/\bgl_Vertex\b/.test(src)) {
-            this.lastShaderLog = 'CreateShader: legacy gl_Vertex not supported in immediate-mode bridge';
-            // Mark the rejection as expected so createShader's log
-            // formatter can downgrade the message — gui_chili_minimap's
-            // fadeShader (and a handful of other ZK widgets) hit this
-            // path on every game start, and they correctly fall back to
-            // the simple draw path when CreateShader returns nil.
-            this.expectedShaderReject = true;
-            return '#error legacy_gl_Vertex_unsupported';
+        const result = translateAndInclude(src, stage, {
+            lookup: this.shaderIncludeResolver,
+        });
+        if (!result.ok) {
+            this.expectedShaderReject = result.expectedReject;
+            this.lastShaderLog = formatShaderDiagnostics(stage, result.diagnostics);
         }
-        // GL4 shaders (#version 400+) use SSBOs, `layout(binding=...)`,
-        // and other features that only exist in GLSL ES 3.1+. WebGL2 is
-        // ES 3.0, so we can't translate them — reject early as expected
-        // so widgets (api_chili_draw_gl4, gfx_outline_shader_gl4, etc.)
-        // fall back to their non-gl4 path without warning spam.
-        const versionMatch = src.match(/#version\s+(\d+)/);
-        if (versionMatch && parseInt(versionMatch[1], 10) >= 400) {
-            this.lastShaderLog = 'CreateShader: GL4 shader (#version ' + versionMatch[1] + ') not supported on WebGL2/ES 3.0';
-            this.expectedShaderReject = true;
-            return '#error gl4_shader_unsupported';
-        }
-        // Strip Spring's version directive entirely.
-        let s = src.replace(/#version\s+\d+\s*(compatibility|core)?\s*/g, '');
-        // Strip `#extension` directives. They reference desktop-GL
-        // extensions (GL_ARB_*) that either don't exist in ES or are
-        // already core in ES 3.0. Leaving them in place also breaks the
-        // ordering rule — `#extension` must follow `#version` but
-        // precede any non-preprocessor token, and our injected
-        // precision qualifiers would push them out of order.
-        s = s.replace(/^[ \t]*#extension\s+[^\n]*\n?/gm, '');
-        // Inject ES 300 header with precision qualifiers. Fragment needs
-        // high precision for the lava math.
-        const header = stage === 'vertex'
-            ? '#version 300 es\nprecision highp float;\nprecision highp int;\n'
-            : '#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\nprecision highp sampler2DShadow;\n';
-        s = header + s;
-        // GLSL ES 300 doesn't support `sampler2DShadow` without a
-        // specific texture format — map it to a normal sampler2D; we
-        // stub the shadow texture anyway.
-        s = s.replace(/sampler2DShadow/g, 'sampler2D');
-
-        // ---- Legacy GLSL 1.10 → ES 300 rewrites ----
-        // Run before the int→float pass so the legacy keywords
-        // (`varying`, `gl_FragColor`, `texture2D`) are gone by the time
-        // the numeric promotion regexes run.
-        if (isLegacy) {
-            if (stage === 'vertex') {
-                // `attribute` → `in`, `varying` → `out` (vertex emits).
-                s = s.replace(/\battribute\b/g, 'in');
-                s = s.replace(/\bvarying\b/g, 'out');
-            } else {
-                // Fragment: `varying` → `in`. Add an explicit out
-                // variable to replace `gl_FragColor`. texture2D maps
-                // to the new unified texture() function.
-                s = s.replace(/\bvarying\b/g, 'in');
-                s = s.replace(/\btexture2D\b/g, 'texture');
-                if (/\bgl_FragColor\b/.test(s)) {
-                    s = s.replace(/\bgl_FragColor\b/g, 'outFragColor');
-                    // Anchor after `precision highp int;` so the float
-                    // precision is in scope by the time we declare the
-                    // vec4 out (otherwise GLSL ES errors on missing
-                    // precision). Don't anchor on sampler2DShadow — it
-                    // gets renamed to sampler2D by the regex above.
-                    s = s.replace(
-                        /(precision\s+highp\s+int;\n)/,
-                        '$1out vec4 outFragColor;\n',
-                    );
-                }
-            }
-        }
-
-        // ---- Int → float promotions ----
-        //
-        // GLSL ES 300 is strict: you cannot assign an integer literal to
-        // a float, multiply/divide an int by a float, or construct a
-        // float array from mixed-type literals. Spring's 150-compat
-        // shaders do all of these. We rewrite them:
-
-        // 1. `const float NAME = -?INT;` → append `.0` to the literal.
-        //    e.g. `const float MIN_HEIGHT = -100;` → `= -100.0;`
-        s = s.replace(
-            /(\bconst\s+float\s+\w+\s*=\s*)(-?\d+)(\s*;)/g,
-            '$1$2.0$3',
-        );
-
-        // 2. Integer literals inside `float[N](...)` array constructors.
-        //    `float[NUM_LAYERS](1, 6.6, 8.4, ...)` must become
-        //    `float[NUM_LAYERS](1.0, 6.6, 8.4, ...)`. We match the whole
-        //    constructor body and replace bare ints with `.0` form.
-        //    The look-ahead `(?![\w.])` rejects *any* digit or dot that
-        //    follows — critical because otherwise `\d+` would backtrack
-        //    from `34` to `3`, then happily append `.0` and produce the
-        //    garbage `3.04.6` out of `34.6`.
-        s = s.replace(
-            /(\bfloat\s*\[[^\]]*\]\s*\()([^)]*)(\))/g,
-            (_, start, body, end) => {
-                const fixed = body.replace(
-                    /(^|[^\w.])(-?\d+)(?![\w.])/g,
-                    '$1$2.0',
-                );
-                return start + fixed + end;
-            },
-        );
-
-        // 3. Bare int literal on LHS of arithmetic: `2*PI` → `2.0*PI`,
-        //    `1+ scalePeriodFactor` → `1.0+ scalePeriodFactor`,
-        //    `1 + 0.2*x` → `1.0 + 0.2*x`.
-        //    - Negative look-behind `(?<![\w.])` avoids `x1`, `.1`, `21`.
-        //    - Negative look-ahead `(?![\w.])` avoids `1.0`, `1e5`, `1x`.
-        //    - We don't require what comes *after* the operator, so
-        //      `1 + 0.2*x` matches (RHS is another number literal).
-        s = s.replace(
-            /(?<![\w.])(-?\d+)(?![\w.])(\s*[*/+\-])/g,
-            '$1.0$2',
-        );
-
-        // 4. Bare int literal on RHS of arithmetic after an identifier,
-        //    `)`, or member access: `/13` → `/13.0`, `gameSeconds/2` →
-        //    `gameSeconds/2.0`. Look-ahead avoids `10.0`, `10e5`, `10]`.
-        s = s.replace(
-            /([A-Za-z_)](?:\.\w+)?\s*[*/+\-]\s*)(-?\d+)(?![\w.\]])/g,
-            '$1$2.0',
-        );
-
-        // 4b. Bare int literal on RHS of comparison with a float-valued
-        //    swizzle/member access: `uvCoords.x >= 0` → `uvCoords.x >= 0.0`.
-        //    We *require* the `.member` on the LHS because plain-identifier
-        //    comparisons may be against an `int` varying (e.g. the lava
-        //    widget's `if (layerNumber < 4)` — `layerNumber` is `flat in int`
-        //    and must stay an integer comparison).
-        s = s.replace(
-            /([A-Za-z_)]\.\w+\s*(?:>=|<=|==|!=|>|<)\s*)(-?\d+)(?![\w.\]])/g,
-            '$1$2.0',
-        );
-
-        // 4c. Assignment of bare int literal to a float variable:
-        //    `fFactor = 0;` → `fFactor = 0.0;`. We can't distinguish
-        //    `int i = 0;` from `float f = 0;` via regex alone, so we
-        //    apply this per-line and skip any line that declares an
-        //    integer type (`int`, `uint`, `ivec*`, `uvec*`, `bvec*`) or
-        //    opens a for-loop counter. That rules out the declaration
-        //    cases while catching pure reassignments like the lava
-        //    widget's `fFactor = 0;`.
-        s = s.split('\n').map(line => {
-            if (/\b(int|uint|ivec[234]|uvec[234]|bvec[234])\b/.test(line)) return line;
-            if (/\bfor\s*\(/.test(line)) return line;
-            return line.replace(
-                /(\b\w+\s*=\s*)(-?\d+)(\s*;)/g,
-                '$1$2.0$3',
-            );
-        }).join('\n');
-
-        // 5. `gl_InstanceID` used as a float operand. It's still an int
-        //    (so array indexing `a[gl_InstanceID]` stays valid), but any
-        //    arithmetic op with a float identifier must cast it.
-        //    We catch the two canonical patterns `float_expr * gl_InstanceID`
-        //    and `gl_InstanceID * float_expr` — anything where the ID is
-        //    adjacent to an arithmetic operator outside a bracket context.
-        s = s.replace(
-            /([*/+\-])\s*gl_InstanceID\b(?!\s*\])/g,
-            '$1 float(gl_InstanceID)',
-        );
-        s = s.replace(
-            /\bgl_InstanceID\s*([*/+\-])/g,
-            'float(gl_InstanceID) $1',
-        );
-
-        return s;
+        return result.source;
     }
 
     private createShader(opts: LuaValue): LuaShaderHandle | null {
@@ -1097,44 +994,66 @@ export class LuaGLBridge {
                 console.warn('[gl.CreateShader]', msg);
             }
         };
-        const vs = gl.createShader(gl.VERTEX_SHADER)!;
-        gl.shaderSource(vs, this.translateGLSL(vsSrc, 'vertex'));
-        gl.compileShader(vs);
-        if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
-            this.lastShaderLog = 'VS: ' + (gl.getShaderInfoLog(vs) ?? '');
-            gl.deleteShader(vs);
-            reportShaderFailure(this.lastShaderLog);
-            return null;
-        }
-        const fs = gl.createShader(gl.FRAGMENT_SHADER)!;
-        gl.shaderSource(fs, this.translateGLSL(fsSrc, 'fragment'));
-        gl.compileShader(fs);
-        if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
-            this.lastShaderLog = 'FS: ' + (gl.getShaderInfoLog(fs) ?? '');
+
+        // Translate before compile so we can hash the *translated* source
+        // for the program registry. ZK ships several widgets that compile
+        // the same shader source from multiple call sites — sharing the
+        // GL program avoids the link-time hit on every CreateShader call.
+        const vsTranslated = this.translateGLSL(vsSrc, 'vertex');
+        const fsTranslated = this.translateGLSL(fsSrc, 'fragment');
+        const programKey = hashSource(vsTranslated + '\0' + fsTranslated);
+
+        // Registry hit: reuse the program. The handle is still fresh
+        // (independent uniforms cache, independent refcount slot) so
+        // widget-level state stays isolated.
+        const cached = this.programRegistry.get(programKey);
+        let program: WebGLProgram;
+        if (cached) {
+            cached.refs++;
+            program = cached.program;
+        } else {
+            const vs = gl.createShader(gl.VERTEX_SHADER)!;
+            gl.shaderSource(vs, vsTranslated);
+            gl.compileShader(vs);
+            if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
+                this.lastShaderLog = 'VS: ' + (gl.getShaderInfoLog(vs) ?? '');
+                gl.deleteShader(vs);
+                reportShaderFailure(this.lastShaderLog);
+                return null;
+            }
+            const fs = gl.createShader(gl.FRAGMENT_SHADER)!;
+            gl.shaderSource(fs, fsTranslated);
+            gl.compileShader(fs);
+            if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+                this.lastShaderLog = 'FS: ' + (gl.getShaderInfoLog(fs) ?? '');
+                gl.deleteShader(vs);
+                gl.deleteShader(fs);
+                reportShaderFailure(this.lastShaderLog);
+                return null;
+            }
+            const newProgram = gl.createProgram()!;
+            gl.attachShader(newProgram, vs);
+            gl.attachShader(newProgram, fs);
+            gl.linkProgram(newProgram);
+            if (!gl.getProgramParameter(newProgram, gl.LINK_STATUS)) {
+                this.lastShaderLog = 'LINK: ' + (gl.getProgramInfoLog(newProgram) ?? '');
+                gl.deleteProgram(newProgram);
+                gl.deleteShader(vs);
+                gl.deleteShader(fs);
+                reportShaderFailure(this.lastShaderLog);
+                return null;
+            }
             gl.deleteShader(vs);
             gl.deleteShader(fs);
-            reportShaderFailure(this.lastShaderLog);
-            return null;
+            program = newProgram;
+            this.programRegistry.set(programKey, { program, refs: 1 });
         }
-        const program = gl.createProgram()!;
-        gl.attachShader(program, vs);
-        gl.attachShader(program, fs);
-        gl.linkProgram(program);
-        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-            this.lastShaderLog = 'LINK: ' + (gl.getProgramInfoLog(program) ?? '');
-            gl.deleteProgram(program);
-            gl.deleteShader(vs);
-            gl.deleteShader(fs);
-            reportShaderFailure(this.lastShaderLog);
-            return null;
-        }
-        gl.deleteShader(vs);
-        gl.deleteShader(fs);
 
         const handle: LuaShaderHandle = markOpaque({
             __type: 'shader',
             program,
             uniforms: new Map(),
+            programKey,
         });
 
         // Apply default uniformInt and uniformFloat blocks from opts so
@@ -1190,6 +1109,18 @@ export class LuaGLBridge {
         if (!handle || typeof handle !== 'object' || Array.isArray(handle)) return;
         const h = handle as unknown as LuaShaderHandle;
         if (h.__type !== 'shader') return;
+        if (h.programKey) {
+            const entry = this.programRegistry.get(h.programKey);
+            if (entry) {
+                entry.refs--;
+                if (entry.refs <= 0) {
+                    this.gl.deleteProgram(entry.program);
+                    this.programRegistry.delete(h.programKey);
+                }
+                return;
+            }
+        }
+        // Untracked handle (e.g. test fixture) — delete directly.
         this.gl.deleteProgram(h.program);
     }
 
@@ -1883,4 +1814,23 @@ function clamp01(n: number): number {
     if (n < 0) return 0;
     if (n > 1) return 1;
     return n;
+}
+
+/** Render translator diagnostics as a single `lastShaderLog` string for
+ *  gl.GetShaderLog. Errors first, then warnings; line refs included when
+ *  the translator could pin them. */
+function formatShaderDiagnostics(stage: 'vertex' | 'fragment', diags: GlslDiagnostic[]): string {
+    if (diags.length === 0) return '';
+    const ordered = [...diags].sort((a, b) => severityRank(a.severity) - severityRank(b.severity));
+    const lines: string[] = [`[${stage}]`];
+    for (const d of ordered) {
+        const where = d.file && d.line ? `${d.file}:${d.line}` : (d.line ? `line ${d.line}` : '');
+        const prefix = where ? `${d.severity} (${where}):` : `${d.severity}:`;
+        lines.push(`  ${prefix} ${d.message}`);
+    }
+    return lines.join('\n');
+}
+
+function severityRank(s: 'error' | 'warning' | 'info'): number {
+    return s === 'error' ? 0 : s === 'warning' ? 1 : 2;
 }

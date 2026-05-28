@@ -176,6 +176,14 @@ async function prefetchAllGameFiles(baseUrl: string): Promise<void> {
         // descent the audio paths aren't indexed and every probe
         // returns false even though the bytes are on disk.
         'sounds',
+        // PLAN-weapon-fx Z3 — authored GLSL shaders. ZK ships engine
+        // shaders under `shaders/GLSL/` and widget-side helpers under
+        // `LuaUI/Widgets/Shaders/` (reached via the LuaUI descent).
+        // Also include `lups/` so the worker host can boot ZK's LUPS
+        // (Phase Z1) — its 30 ParticleClasses include inline shader
+        // source that's already covered by the .lua descent, but
+        // `lups/shaders/` (if any) needs the explicit root.
+        'shaders', 'shaders/GLSL', 'lups', 'lups/shaders',
     ];
     const visited = new Set<string>();
 
@@ -198,7 +206,17 @@ async function prefetchAllGameFiles(baseUrl: string): Promise<void> {
                 if (e.type === 'file') {
                     const lower = e.name.toLowerCase();
                     if (lower.endsWith('.lua') || lower.endsWith('.txt') ||
-                        lower.endsWith('.json')) {
+                        lower.endsWith('.json') ||
+                        // PLAN-weapon-fx Z3 — preload authored GLSL so
+                        // ModelMaterials templates and LuaShaders widgets
+                        // can `#include "path"` source through the
+                        // bridge's shader include resolver. Extensions
+                        // mirror ZK's content tree: `.glsl`, `.fs`/`.vs`
+                        // (legacy short forms), plus the compound forms
+                        // (`.frag.glsl`/`.vert.glsl`/`.geom.glsl`) which
+                        // already end with `.glsl`.
+                        lower.endsWith('.glsl') || lower.endsWith('.fs') ||
+                        lower.endsWith('.vs')) {
                         if (vfsFiles.has(fullPath)) continue;
                         toFetch.push(fullPath);
                     } else if (isAudioFile(lower)) {
@@ -899,6 +917,12 @@ async function init(
     runtime = new LuaRuntime('LuaUI');
     bridge = new LuaGLBridge(gl, mapData.mapSourceUrl);
     bridge.setGameBaseUrl(baseUrl);
+    // PLAN-weapon-fx Z3 — let shader source `#include "path"` against the
+    // worker's VFS so authored ModelMaterials / LuaShaders content can be
+    // composed from shared headers. The built-in `engine/csm.glsl`
+    // snippet (PLAN-lighting L4) always takes precedence over the VFS
+    // lookup; see ENGINE_SNIPPETS in glsl-translator.ts.
+    bridge.setShaderIncludeResolver(vfsLookup);
     // Resolve Spring's `'#' .. unitDefID` build-pic syntax to the unit's
     // buildPic filename — chili Image controls in the Core Selector and
     // FactoryBar pass `'#' .. id` as the texture file. Without this, every
@@ -2250,6 +2274,117 @@ defaultFont = activeFont
         end
     `, 'chili_force_enable');
 
+    // PLAN-weapon-fx Z1 — Boot LUPS (Lua Particle System).
+    //
+    // ZK loads LUPS via `LuaUI/Widgets/lups_wrapper.lua`, which does
+    // `VFS.Include("lups/lups.lua")` and lets the lups module attach
+    // its callins (Initialize, DrawWorld, etc.) to the enclosing widget
+    // table. The Initialize() callin walks `lups/ParticleClasses/*.lua`,
+    // calls each class's GetInfo() + Initialize(), and exposes the
+    // surviving classes via `WG.Lups.AddParticles` etc.
+    //
+    // If the wrapper widget isn't in `knownWidgets` (e.g. silent pcall
+    // failure during the bulk widget scan, or order-file disabled), we
+    // load it directly — same pattern as the Chili Framework fallback.
+    // After load we publish a diagnostic:
+    //   - LUPS classes registered vs. expected (30 ParticleClasses).
+    //   - Class-by-class HasParticleClass probe for the canonical names.
+    //   - The error log for classes rejected by hardware-cap checks or
+    //     their own Initialize() returning false.
+    //
+    // This is the cascade-investigation surface called out in the plan:
+    // we don't fix every class in one shot — we surface the failures so
+    // the next pass can pick them off one by one.
+    runtime.doString(`
+        if widgetHandler then
+            local function widgetReport(label, ok)
+                Spring.Echo("[LUPS] " .. label .. ": " .. (ok and "ok" or "MISSING"))
+            end
+
+            -- Force-load lups_wrapper.lua if widget discovery missed it.
+            local ki = widgetHandler.knownWidgets and widgetHandler.knownWidgets["Lups"]
+            if not ki then
+                Spring.Echo("[LUPS] widget 'Lups' missing from knownWidgets; force-loading lups_wrapper.lua")
+                local w = widgetHandler:LoadWidget("LuaUI/Widgets/lups_wrapper.lua")
+                if w then
+                    widgetHandler:InsertWidget(w)
+                    widgetHandler:SaveOrderList()
+                    Spring.Echo("[LUPS] lups_wrapper.lua loaded + inserted")
+                else
+                    Spring.Echo("[LUPS] direct LoadWidget for lups_wrapper.lua FAILED")
+                end
+            elseif not ki.active then
+                Spring.Echo("[LUPS] knownWidgets['Lups'] present but inactive; enabling")
+                widgetHandler:EnableWidget("Lups")
+            else
+                Spring.Echo("[LUPS] widget 'Lups' discovered by widgetHandler")
+            end
+
+            -- Diagnostic probe: did Initialize() populate WG.Lups?
+            if WG and WG.Lups then
+                local fnCount = 0
+                for _ in pairs(WG.Lups) do fnCount = fnCount + 1 end
+                Spring.Echo("[LUPS] WG.Lups populated with " .. tostring(fnCount) .. " entries")
+
+                -- Class-by-class probe. Names taken from
+                -- content/games/zk/lups/ParticleClasses/*.lua. HasParticleClass
+                -- lowercases internally, so case doesn't matter.
+                local probeClasses = {
+                    "Jet", "SimpleParticles", "SimpleParticles2",
+                    "JitterParticles", "JitterParticles2",
+                    "Ribbons", "RingParticles", "ShockWave",
+                    "Sphere", "SphereDistortion",
+                    "ShieldSphere", "ShieldSphereColor", "ShieldSphereColorHQ",
+                    "ShieldSphereColorFallback", "ShieldJitter",
+                    "NanoParticles", "NanoLasers", "NanoLasersNoShader",
+                    "Bursts", "Groundflash", "AirJet",
+                    "OverdriveParticles", "StaticParticles",
+                    "UnitSmoke", "UnitJitter",
+                    "UnitPieceLight", "UnitCloaker",
+                    "Sound", "distortionFBO", "gimmick1",
+                }
+                local present, missing = {}, {}
+                for _, name in ipairs(probeClasses) do
+                    if WG.Lups.HasParticleClass and WG.Lups.HasParticleClass(name) then
+                        present[#present + 1] = name
+                    else
+                        missing[#missing + 1] = name
+                    end
+                end
+                Spring.Echo(string.format("[LUPS] classes: %d/%d present",
+                    #present, #probeClasses))
+                if #present > 0 then
+                    Spring.Echo("[LUPS] present: " .. table.concat(present, ", "))
+                end
+                if #missing > 0 then
+                    Spring.Echo("[LUPS] missing: " .. table.concat(missing, ", "))
+                end
+
+                -- Surface LUPS's internal error log so class init failures
+                -- (hardware-cap rejections, shader compile errors, etc.)
+                -- end up in the console alongside the boot report. The
+                -- PRIO_LESS sink captures everything LUPS logs at the
+                -- "warning and below" verbosity.
+                if WG.Lups.GetErrorLog then
+                    local errlog = WG.Lups.GetErrorLog(5)
+                    if errlog and #errlog > 0 then
+                        Spring.Echo("[LUPS] error log:\\n" .. errlog)
+                    end
+                end
+            else
+                Spring.Echo("[LUPS] BOOT FAILED — WG.Lups is nil after wrapper load")
+                if widgetHandler.knownWidgets then
+                    local k = widgetHandler.knownWidgets["Lups"]
+                    if k then
+                        Spring.Echo(string.format(
+                            "[LUPS] knownWidgets['Lups']: active=%s, fromZip=%s",
+                            tostring(k.active), tostring(k.fromZip)))
+                    end
+                end
+            end
+        end
+    `, 'lups_boot');
+
     // Auto-enable a curated set of Chili widgets that ZK ships with
     // `enabled = false` by default but which provide important UI we
     // want active in our environment. Each is gated on
@@ -2899,6 +3034,10 @@ function installEngineGlobals(
     // object at push time; later JS mutations are not reflected.
     (springGlobals.Spring as Record<string, LuaValue>).Translate = (key: LuaValue) => String(key ?? '');
     (springGlobals.Spring as Record<string, LuaValue>).GetHumanName = (defName: LuaValue) => String(defName ?? '');
+    // Spring.Orig is installed Lua-side after setGlobal (see post-install
+    // doString below) — assigning it here would create a JS object cycle
+    // (Spring.Orig === Spring) and pushValue's recursive traversal has no
+    // cycle detection, so it would stack-overflow during init.
     // Stubs for Spring APIs ZK widgets call at Initialize-time.
     // Returning nothing is fine — these widgets gate on the result.
     (springGlobals.Spring as Record<string, LuaValue>).GetAIInfo = (_team: LuaValue) => [-1, '', '', '', '', {}];
@@ -2978,6 +3117,15 @@ function installEngineGlobals(
         rt.setGlobal(k, v);
     }
     rt.setGlobal('gl', glGlobal);
+
+    // Spring.Orig — alias for Spring.* before widgetHandler hooks wrap any
+    // callouts. Real Spring exposes this as the unwrapped namespace so
+    // widgets can bypass other widgets' hooks. ZK's `lups.lua` calls
+    // `Spring.Orig.GetViewGeometry()` at load time (line 183); without
+    // this the whole include throws and LUPS never boots. Plain alias is
+    // correct semantics here because no widget has hooked the namespace
+    // yet. Set Lua-side to avoid a JS object cycle in pushValue.
+    rt.doString('Spring.Orig = Spring', 'engine_globals_spring_orig');
 
     // gl.Utilities — table of helper draw functions used by some ZK widgets
     // (e.g. cmd_factory_plate_placer uses gl.Utilities.DrawCircle).
