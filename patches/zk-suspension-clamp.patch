@@ -1,0 +1,69 @@
+--- a/content/games/zk/scripts/vehraid.lua
++++ b/content/games/zk/scripts/vehraid.lua
+@@ -78,6 +78,14 @@
+ 				local ztilta = (s1r + s2r - s1l - s2l)/10000
+ 				ztiltv = ztiltv*0.99 + ztilta
+ 				ztilt = ztilt*0.99 + ztiltv
++				-- springrts-web: keep the integrator inside the small-angle
++				-- basin. Slight heightmap noise on otherwise-flat ground
++				-- accumulates past ~π/2, the feedback flips sign, and the
++				-- loop converges to the upside-down (±π) equilibrium where
++				-- pieces become symmetric again — leaving the vehicle stuck
++				-- on its side. ~34° gives normal slope tracking headroom.
++				if ztilt > 0.6 or ztilt < -0.6 then ztilt, ztiltv = 0, 0 end
++				if xtilt > 0.6 or xtilt < -0.6 then xtilt, xtiltv = 0, 0 end
+ 
+ 				local ya = (s1r + s2r + s1l + s2l)/1000
+ 				yv = yv*0.99 + ya
+--- a/content/games/zk/scripts/vehassault.lua
++++ b/content/games/zk/scripts/vehassault.lua
+@@ -64,6 +64,10 @@
+ 		ztilta = (s1r + s2r + s3r - s1l - s2l - s3l)/15000
+ 		ztiltv = ztiltv*0.99 + ztilta
+ 		ztilt = ztilt*0.99 + ztiltv
++		-- springrts-web: see vehraid.lua note. Clamp integrator to small-
++		-- angle basin so heightmap noise can't push it past the ±π wrap.
++		if ztilt > 0.6 or ztilt < -0.6 then ztilt, ztiltv = 0, 0 end
++		if xtilt > 0.6 or xtilt < -0.6 then xtilt, xtiltv = 0, 0 end
+ 
+ 		ya = (s1r + s2r + s3r + s1l + s2l + s3l)/1500
+ 		
+--- a/content/games/zk/scripts/vehsupport.lua
++++ b/content/games/zk/scripts/vehsupport.lua
+@@ -253,6 +253,10 @@
+ 				local ztilta = (s1r + s2r + s3r - s1l - s2l - s3l)/10000 + turnTilt
+ 				ztiltv = ztiltv*0.99 + ztilta
+ 				ztilt = ztilt*0.98 + ztiltv
++				-- springrts-web: see vehraid.lua note. Clamp integrator to
++				-- small-angle basin so heightmap noise can't push it past
++				-- the ±π wrap-around equilibrium.
++				if ztilt > 0.6 or ztilt < -0.6 then ztilt, ztiltv = 0, 0 end
+ 
+ 				local ya = (s1r + s2r + s3r + s1l + s2l + s3l)/1000
+ 				yv = yv*0.99 + ya
+--- a/content/games/zk/scripts/vehaa.lua
++++ b/content/games/zk/scripts/vehaa.lua
+@@ -152,6 +152,10 @@
+ 				local ztilta = (s1r + s2r - s1l - s2l)/10000 + turnTilt
+ 				ztiltv = ztiltv*0.99 + ztilta
+ 				ztilt = ztilt*0.98 + ztiltv
++				-- springrts-web: see vehraid.lua note. Clamp integrator to
++				-- small-angle basin so heightmap noise can't push it past
++				-- the ±π wrap-around equilibrium.
++				if ztilt > 0.6 or ztilt < -0.6 then ztilt, ztiltv = 0, 0 end
+ 
+ 				local ya = (s1r + s2r + s1l + s2l)/1000
+ 				yv = yv*0.99 + ya
+--- a/content/games/zk/scripts/vehriot.lua
++++ b/content/games/zk/scripts/vehriot.lua
+@@ -44,6 +44,10 @@
+ 		local ztilta = (s1r + s2r + s3r - s1l - s2l - s3l)/15000
+ 		ztiltv = ztiltv*0.99 + ztilta
+ 		ztilt = ztilt*0.99 + ztiltv
++		-- springrts-web: see vehraid.lua note. Clamp integrator to small-
++		-- angle basin so heightmap noise can't push it past the ±π wrap.
++		if ztilt > 0.6 or ztilt < -0.6 then ztilt, ztiltv = 0, 0 end
++		if xtilt > 0.6 or xtilt < -0.6 then xtilt, xtiltv = 0, 0 end
+ 
+ 		local ya = (s1r + s2r + s3r + s1l + s2l + s3l)/1500
+ 		yv = yv*0.99 + ya
