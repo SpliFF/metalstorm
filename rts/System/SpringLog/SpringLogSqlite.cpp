@@ -32,6 +32,8 @@ struct SqliteLogEntry {
     std::string process;
     std::string message;
     int frame;
+    uint32_t room_id;
+    std::string game_id;
 };
 
 static std::vector<SqliteLogEntry> g_queue;
@@ -53,6 +55,14 @@ static void FlushBatch(std::vector<SqliteLogEntry>& batch) {
         sqlite3_bind_text(g_insertStmt, 5, e.scope.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int(g_insertStmt, 6, e.frame);
         sqlite3_bind_text(g_insertStmt, 7, e.message.c_str(), -1, SQLITE_TRANSIENT);
+        // room_id/game_id: bind NULL when unset so untagged logs stay NULL
+        // (keeps "room_id = N" filters clean and "0 = all" semantics intact).
+        if (e.room_id != 0) sqlite3_bind_int(g_insertStmt, 8, (int)e.room_id);
+        else                sqlite3_bind_null(g_insertStmt, 8);
+        if (!e.game_id.empty())
+            sqlite3_bind_text(g_insertStmt, 9, e.game_id.c_str(), -1, SQLITE_TRANSIENT);
+        else
+            sqlite3_bind_null(g_insertStmt, 9);
         sqlite3_step(g_insertStmt);
     }
     sqlite3_exec(g_db, "COMMIT", nullptr, nullptr, nullptr);
@@ -85,7 +95,9 @@ static void SqliteSinkFn(const SpringLogRecord* record, void* /*userdata*/) {
         record->scope ? record->scope : "",
         record->process ? record->process : "",
         record->message ? record->message : "",
-        record->frame
+        record->frame,
+        record->room_id,
+        record->game_id ? record->game_id : ""
     });
     if (g_queue.size() >= BATCH_SIZE) g_queueCv.notify_one();
 }
@@ -123,8 +135,8 @@ int springlog_sqlite_init(const char* dbPath) {
 
     // Prepare insert statement
     const char* insertSql =
-        "INSERT INTO debug_logs (timestamp, process, level, section, scope, frame, message) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)";
+        "INSERT INTO debug_logs (timestamp, process, level, section, scope, frame, message, room_id, game_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
     sqlite3_prepare_v2(g_db, insertSql, -1, &g_insertStmt, nullptr);
 
     // Start flush thread

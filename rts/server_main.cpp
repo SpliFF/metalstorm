@@ -161,6 +161,7 @@ int main(int argc, char* argv[])
     }
 
     int port = 9001;
+    uint32_t roomId = 0;       // Owning lobby room (--room); tags this process's logs
     std::string gameId;
     std::string gameVersion;   // From modinfo.lua via lobby --game-version arg
     std::string gamesDir = "data/games";
@@ -232,6 +233,8 @@ int main(int argc, char* argv[])
         std::string arg = argv[i];
         if (arg == "--port" && i + 1 < argc) {
             port = std::atoi(argv[++i]);
+        } else if (arg == "--room" && i + 1 < argc) {
+            roomId = (uint32_t)std::strtoul(argv[++i], nullptr, 10);
         } else if (arg == "--game" && i + 1 < argc) {
             gameId = argv[++i];
         } else if (arg == "--game-version" && i + 1 < argc) {
@@ -345,6 +348,10 @@ int main(int argc, char* argv[])
         springlog_set_file(logFile.c_str());
         springlog_set_outputs(SPRING_LOG_OUTPUT_CONSOLE | SPRING_LOG_OUTPUT_FILE);
     }
+    // Tag every record from this process with its room + game so the
+    // shared debug.db can be filtered to a single room/game instance.
+    springlog_set_context(roomId, gameId.c_str());
+
     // Enable SQLite log sink — defaults to data/debug.db so the log
     // server can query game server logs. Override with --log-sqlite.
     if (logSqlite.empty()) logSqlite = "data/debug.db";

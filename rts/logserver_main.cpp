@@ -34,6 +34,8 @@ struct BufferedLogEntry {
     std::string process;
     std::string message;
     int frame;
+    uint32_t room_id;
+    std::string game_id;
 };
 
 class LogBuffer {
@@ -121,8 +123,24 @@ static std::string LogEntryToJson(const BufferedLogEntry& e) {
     json += R"(,"scope":")" + JsonEscape(e.scope) + "\"";
     json += R"(,"process":")" + JsonEscape(e.process) + "\"";
     json += R"(,"frame":)" + std::to_string(e.frame);
+    json += R"(,"room_id":)" + std::to_string(e.room_id);
+    json += R"(,"game_id":")" + JsonEscape(e.game_id) + "\"";
     json += R"(,"message":")" + JsonEscape(e.message) + "\"}";
     return json;
+}
+
+/// Escape a string for safe inclusion in a single-quoted SQL literal by
+/// doubling embedded quotes. Used for the optional game/section filters
+/// (these come from trusted local callers, but doubling keeps a stray
+/// quote from breaking the query).
+static std::string SqlEscape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c == '\'') out += "''";
+        else out += c;
+    }
+    return out;
 }
 
 /// Extract a path segment after a prefix. E.g. "/api/logs/42" with
@@ -134,11 +152,14 @@ static std::string ExtractPathSegment(const std::string& url, const std::string&
     return (qpos != std::string::npos) ? rest.substr(0, qpos) : rest;
 }
 
-/// Extract query parameter value from URL.
-static std::string QueryParam(const std::string& url, const std::string& key) {
-    auto qpos = url.find('?');
-    if (qpos == std::string::npos) return "";
-    std::string qs = url.substr(qpos + 1);
+/// Extract a query parameter value from the request currently being
+/// dispatched. The handler's `url` argument is the decoded path only (the
+/// NetworkServer strips the query string before routing), so we read the raw
+/// query string back from the thread-local stashed by the dispatcher. The
+/// `url` parameter is retained for call-site readability but unused.
+static std::string QueryParam(const std::string& /*url*/, const std::string& key) {
+    std::string qs = NetworkServer::CurrentQueryString();
+    if (qs.empty()) return "";
     std::string needle = key + "=";
     auto pos = qs.find(needle);
     while (pos != std::string::npos) {
@@ -170,6 +191,8 @@ static void logSinkCallback(const SpringLogRecord* rec, void* /*userdata*/) {
     entry.process = rec->process ? rec->process : "";
     entry.message = rec->message ? rec->message : "";
     entry.frame = rec->frame;
+    entry.room_id = rec->room_id;
+    entry.game_id = rec->game_id ? rec->game_id : "";
     g_logBuffer.Append(0, entry);
 
     std::string json = "{\"level\":" + std::to_string(entry.level)
@@ -177,7 +200,9 @@ static void logSinkCallback(const SpringLogRecord* rec, void* /*userdata*/) {
         + "\",\"scope\":\"" + JsonEscape(entry.scope)
         + "\",\"process\":\"" + JsonEscape(entry.process)
         + "\",\"frame\":" + std::to_string(entry.frame)
-        + ",\"message\":\"" + JsonEscape(entry.message) + "\"}";
+        + ",\"room_id\":" + std::to_string(entry.room_id)
+        + ",\"game_id\":\"" + JsonEscape(entry.game_id)
+        + "\",\"message\":\"" + JsonEscape(entry.message) + "\"}";
     g_server->SendSSE(g_logStreamChannel, json, "log");
 }
 
@@ -334,17 +359,26 @@ int main(int argc, char** argv) {
         // Parse query params
         int limit = 200;
         uint8_t minLevel = 0;
-        std::string section, scope;
+        std::string section, scope, game;
+        uint64_t since = 0;
         auto qLimit = QueryParam(url, "limit");
         if (!qLimit.empty()) limit = atoi(qLimit.c_str());
         auto qLevel = QueryParam(url, "level");
         if (!qLevel.empty()) minLevel = (uint8_t)atoi(qLevel.c_str());
         section = QueryParam(url, "section");
         scope = QueryParam(url, "scope");
+        game = QueryParam(url, "game");
+        auto qSince = QueryParam(url, "since");
+        if (!qSince.empty()) since = strtoull(qSince.c_str(), nullptr, 10);
 
-        // Try ring buffer first, fall back to SQLite
-        auto entries = g_logBuffer.Query(roomId, 0, limit, minLevel, section, scope);
+        // Ring buffer holds only this process's own + browser-ingested logs
+        // (game-server logs reach us via the shared SQLite file). Use it only
+        // for the aggregate (roomId 0) with no game/since narrowing — anything
+        // more specific goes straight to SQLite where the room/game tags live.
         std::string json;
+        auto entries = (roomId == 0 && game.empty() && since == 0)
+            ? g_logBuffer.Query(roomId, 0, limit, minLevel, section, scope)
+            : std::vector<BufferedLogEntry>{};
         if (!entries.empty()) {
             json = "[";
             for (size_t i = 0; i < entries.size(); i++) {
@@ -357,10 +391,13 @@ int main(int argc, char** argv) {
             sqlite3* db = nullptr;
             json = "[]";
             if (sqlite3_open_v2(g_dbPath.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK) {
-                std::string sql = "SELECT id, timestamp, level, section, scope, process, frame, message "
+                std::string sql = "SELECT id, timestamp, level, section, scope, process, frame, message, room_id, game_id "
                     "FROM debug_logs WHERE level >= " + std::to_string(minLevel);
-                if (!section.empty()) sql += " AND section = '" + section + "'";
-                if (!scope.empty()) sql += " AND scope = '" + scope + "'";
+                if (roomId != 0) sql += " AND room_id = " + std::to_string(roomId);
+                if (!game.empty()) sql += " AND game_id = '" + SqlEscape(game) + "'";
+                if (since != 0) sql += " AND timestamp >= " + std::to_string(since);
+                if (!section.empty()) sql += " AND section = '" + SqlEscape(section) + "'";
+                if (!scope.empty()) sql += " AND scope = '" + SqlEscape(scope) + "'";
                 sql += " ORDER BY id DESC LIMIT " + std::to_string(limit);
 
                 json = "[";
@@ -377,6 +414,8 @@ int main(int argc, char** argv) {
                     entry += R"(,"scope":")" + JsonEscape(vals[4] ? vals[4] : "") + "\"";
                     entry += R"(,"process":")" + JsonEscape(vals[5] ? vals[5] : "") + "\"";
                     entry += R"(,"frame":)" + std::string(vals[6] ? vals[6] : "0");
+                    entry += R"(,"room_id":)" + std::string(vals[8] ? vals[8] : "0");
+                    entry += R"(,"game_id":")" + JsonEscape(vals[9] ? vals[9] : "") + "\"";
                     entry += R"(,"message":")" + JsonEscape(vals[7] ? vals[7] : "") + "\"}";
                     *pair->first += entry;
                     return 0;
@@ -401,28 +440,44 @@ int main(int argc, char** argv) {
         if (!qLimit.empty()) limit = atoi(qLimit.c_str());
         auto qLevel = QueryParam(url, "level");
         if (!qLevel.empty()) minLevel = (uint8_t)atoi(qLevel.c_str());
+        // Optional scope filters — narrow a search to one room/game/section
+        // and/or a recent time window so results aren't a flood of history.
+        uint32_t room = (uint32_t)atoi(QueryParam(url, "room").c_str());
+        std::string game = QueryParam(url, "game");
+        std::string section = QueryParam(url, "section");
+        uint64_t since = strtoull(QueryParam(url, "since").c_str(), nullptr, 10);
 
-        // Try ring buffer first
+        // Try ring buffer first (logserver-own + browser-ingested logs)
         auto entries = g_logBuffer.Query(0, 0, limit * 5, minLevel);
         std::string json = "[";
         int count = 0;
         for (auto& e : entries) {
             if (count >= limit) break;
             if (!query.empty() && e.message.find(query) == std::string::npos) continue;
+            if (room != 0 && e.room_id != room) continue;
+            if (!game.empty() && e.game_id != game) continue;
+            if (!section.empty() && e.section != section) continue;
+            if (since != 0 && e.timestamp < since) continue;
             if (count > 0) json += ",";
             json += LogEntryToJson(e);
             count++;
         }
 
-        // Fall back to SQLite when ring buffer yields no results
-        if (count == 0 && !query.empty()) {
+        // Fall back to SQLite for the persisted store (game-server logs live
+        // only here). Hit it whenever the ring buffer came up empty and the
+        // caller gave at least one selector.
+        bool haveSelector = !query.empty() || room != 0 || !game.empty() || !section.empty();
+        if (count == 0 && haveSelector) {
             sqlite3* db = nullptr;
             if (sqlite3_open_v2(g_dbPath.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK) {
-                // Use parameterized LIKE for safety
-                std::string sql = "SELECT id, timestamp, level, section, scope, process, frame, message "
-                    "FROM debug_logs WHERE level >= " + std::to_string(minLevel) +
-                    " AND message LIKE '%" + query + "%'"
-                    " ORDER BY id DESC LIMIT " + std::to_string(limit);
+                std::string sql = "SELECT id, timestamp, level, section, scope, process, frame, message, room_id, game_id "
+                    "FROM debug_logs WHERE level >= " + std::to_string(minLevel);
+                if (!query.empty()) sql += " AND message LIKE '%" + SqlEscape(query) + "%'";
+                if (room != 0) sql += " AND room_id = " + std::to_string(room);
+                if (!game.empty()) sql += " AND game_id = '" + SqlEscape(game) + "'";
+                if (!section.empty()) sql += " AND section = '" + SqlEscape(section) + "'";
+                if (since != 0) sql += " AND timestamp >= " + std::to_string(since);
+                sql += " ORDER BY id DESC LIMIT " + std::to_string(limit);
                 bool first = true;
                 auto cb = [](void* data, int ncols, char** vals, char** /*names*/) -> int {
                     auto* pair = static_cast<std::pair<std::string*, bool*>*>(data);
@@ -436,6 +491,8 @@ int main(int argc, char** argv) {
                     entry += R"(,"scope":")" + JsonEscape(vals[4] ? vals[4] : "") + "\"";
                     entry += R"(,"process":")" + JsonEscape(vals[5] ? vals[5] : "") + "\"";
                     entry += R"(,"frame":)" + std::string(vals[6] ? vals[6] : "0");
+                    entry += R"(,"room_id":)" + std::string(vals[8] ? vals[8] : "0");
+                    entry += R"(,"game_id":")" + JsonEscape(vals[9] ? vals[9] : "") + "\"";
                     entry += R"(,"message":")" + JsonEscape(vals[7] ? vals[7] : "") + "\"}";
                     *pair->first += entry;
                     return 0;
@@ -507,10 +564,12 @@ int main(int argc, char** argv) {
         auto ingestOne = [](const std::string& obj) {
             int level = JsonGetInt(obj, "level", SPRING_LOG_NOTICE);
             int frame = JsonGetInt(obj, "frame", 0);
+            int roomId = JsonGetInt(obj, "room_id", 0);
             std::string section = JsonGetString(obj, "section");
             std::string scope = JsonGetString(obj, "scope");
             std::string process = JsonGetString(obj, "process");
             std::string message = JsonGetString(obj, "message");
+            std::string gameId = JsonGetString(obj, "game_id");
             if (section.empty()) section = "client";
             if (process.empty()) process = "browser";
 
@@ -524,6 +583,10 @@ int main(int argc, char** argv) {
             rec.process = process.c_str();
             rec.frame = frame;
             rec.message = message.c_str();
+            // Browser logs may carry their own room/game so client-side
+            // widget logs filter alongside server logs for the same room.
+            rec.room_id = (uint32_t)roomId;
+            rec.game_id = gameId.c_str();
             // springlog_emit preserves the caller-provided process tag and
             // dispatches to every registered sink (console + SQLite + our
             // ring-buffer/SSE sink) so the entry is discoverable via

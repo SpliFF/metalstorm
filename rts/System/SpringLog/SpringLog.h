@@ -38,6 +38,8 @@ typedef struct {
     const char* process;     // "spring-server", "spring-lobby", etc.
     int frame;               // sim frame, 0 if not in sim context
     const char* message;     // formatted message
+    uint32_t room_id;        // owning room/game instance, 0 if none (set via springlog_set_context)
+    const char* game_id;     // game content id ("zk", "papertanks"), "" if none
 } SpringLogRecord;
 
 // --- Pluggable sink interface ---
@@ -54,6 +56,13 @@ void springlog_set_outputs(uint32_t outputs);
 // --- Runtime state ---
 void springlog_set_frame(int frame);
 int  springlog_get_frame(void);
+
+// Tag every subsequent record from this process with a room/game instance.
+// Process-global (room/game are constant for a given game-server process);
+// records emitted via springlog_log() are stamped with these values so logs
+// from different rooms/games can be filtered apart in the shared store.
+// game_id is copied; pass "" or NULL to clear.
+void springlog_set_context(uint32_t room_id, const char* game_id);
 
 // --- Sink management ---
 int  springlog_add_sink(SpringLogSinkFn fn, void* userdata);

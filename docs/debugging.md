@@ -200,7 +200,7 @@ springlog_log(level, LOG_SECTION, "", springlog_get_frame(), fmt, ...)
 
 ### Optional Sinks
 
-**Network sink** (`springlog-net`) -- streams log entries to the log server. Each entry is wrapped in a `LogIngest` FlatBuffer message and pushed over a persistent WebSocket. The MCP server and HTTP query API (`/api/logs`, `/api/logs/search`) read from the same backing store, so logs from any connected source are queryable in one place.
+**Network sink** (`springlog-net`) -- intended to stream log entries to the log server over a persistent WebSocket. **Currently a collection-only stub** (`SpringLogNet.cpp`): it buffers entries but does not yet send them, and the lobby does not pass `--log-server` to spawned game servers. In practice, game-server and lobby logs reach the log server through the **shared SQLite file** (`data/debug.db`): every process enables the SQLite sink (defaulting to that path), and the log server reads the same file for its HTTP query/search endpoints. This is why room/game-scoped queries hit SQLite rather than the in-memory ring buffer (which only holds the log server's own logs plus browser logs POSTed to `/api/logs/ingest`).
 
 ```cpp
 #include "System/SpringLog/SpringLogNet.h"
@@ -263,7 +263,7 @@ All endpoints return JSON with `Access-Control-Allow-Origin: *`.
 
 **GET /api/logs/:roomId**
 
-Fetch recent log entries from the ring buffer.
+Fetch recent log entries. A non-zero `roomId` scopes results to a single game/room: each game server is launched with `--room <id>` and tags every log entry it writes with that room id (and its game id), so logs from concurrent or past games can be filtered apart in the shared store.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -272,6 +272,10 @@ Fetch recent log entries from the ring buffer.
 | `level` | int | 0 | Minimum log level |
 | `section` | string | | Filter by section (exact match) |
 | `scope` | string | | Filter by scope (exact match) |
+| `game` | string | | Filter by game content id (e.g. `zk`) |
+| `since` | int | | Only entries with `timestamp >= since` (ms epoch) |
+
+Returned entries now include `room_id` and `game_id` fields. The `room_id` filter is backed by the `idx_debug_logs_room` index. Note: a specific `roomId`/`game`/`since` always queries the persisted SQLite store (game-server logs live only there — see the network-sink note below).
 
 Response:
 
@@ -292,11 +296,15 @@ Response:
 
 **GET /api/logs/search**
 
-Full-text search across all log entries.
+Full-text search across log entries. Add a `room`/`game`/`section` selector and/or a `since` window to scope the search — without one, results span the entire history of every game ever run.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `q` | string | required | Search text (substring match on message) |
+| `q` | string | | Search text (substring match on message). Optional if `room`/`game`/`section` is given |
+| `room` | int | | Scope to one room/game instance |
+| `game` | string | | Filter by game content id |
+| `section` | string | | Filter by section (exact match) |
+| `since` | int | | Only entries with `timestamp >= since` (ms epoch) |
 | `limit` | int | 200 | Maximum results |
 | `level` | int | 0 | Minimum log level |
 
@@ -834,8 +842,8 @@ Configure in `.claude/settings.local.json`:
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `get_logs` | `roomId`, `level`, `section`, `scope`, `limit` | Fetch recent log entries from the log server |
-| `search_logs` | `query`, `roomId`, `level`, `limit` | Full-text search across all logs |
+| `get_logs` | `roomId`, `game`, `level`, `section`, `scope`, `sinceMinutes`, `limit` | Fetch recent log entries; `roomId` scopes to one game instance |
+| `search_logs` | `query`, `roomId`, `game`, `section`, `level`, `sinceMinutes`, `limit` | Search logs; scope with `roomId`/`game`/`sinceMinutes` to avoid a flood of history |
 | `exec_lua` | `scope`, `code`, `roomId` | Execute Lua code in a specific scope |
 | `get_game_state` | `roomId` | Get sim state summary |
 | `list_units` | `team`, `roomId` | List units, optionally by team |

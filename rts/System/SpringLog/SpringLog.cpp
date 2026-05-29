@@ -8,6 +8,7 @@
 #include <string.h>
 #include <time.h>
 #include <mutex>
+#include <string>
 #include <vector>
 
 // --- Internal state ---
@@ -17,6 +18,11 @@ static uint32_t g_outputs = SPRING_LOG_OUTPUT_CONSOLE;
 static int g_minLevel = SPRING_LOG_NOTICE;
 static FILE* g_logFile = nullptr;
 static std::mutex g_mutex;
+
+// Process-global instance context — stamped onto every record (see
+// springlog_set_context). room_id 0 / empty game_id == "no instance".
+static uint32_t g_roomId = 0;
+static std::string g_gameId;
 
 // Thread-local sim frame
 static thread_local int tl_frame = 0;
@@ -101,6 +107,12 @@ int springlog_get_frame(void) {
     return tl_frame;
 }
 
+void springlog_set_context(uint32_t room_id, const char* game_id) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_roomId = room_id;
+    g_gameId = game_id ? game_id : "";
+}
+
 int springlog_add_sink(SpringLogSinkFn fn, void* userdata) {
     std::lock_guard<std::mutex> lock(g_mutex);
     int id = g_nextSinkId++;
@@ -134,6 +146,8 @@ void springlog_logv(int level, const char* section, const char* scope,
     rec.process   = g_processName;
     rec.frame     = frame;
     rec.message   = g_msgBuf;
+    rec.room_id   = g_roomId;
+    rec.game_id   = g_gameId.c_str();
 
     // Console sink
     if (g_outputs & SPRING_LOG_OUTPUT_CONSOLE) {

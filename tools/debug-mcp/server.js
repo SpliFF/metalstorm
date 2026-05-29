@@ -387,30 +387,34 @@ function clearDefsCache(gameId) {
 const TOOLS = [
     {
         name: 'get_logs',
-        description: 'Get recent log entries from the log server. Returns structured log entries with level, section, scope, process, frame, and message.',
+        description: 'Get recent log entries from the log server. Returns structured log entries with level, section, scope, process, frame, room_id, game_id, and message. Pass roomId to scope to a single game/room (each game server tags its logs with its room).',
         inputSchema: {
             type: 'object',
             properties: {
-                roomId: { type: 'number', description: 'Room ID (0 for all)', default: 0 },
+                roomId: { type: 'number', description: 'Room ID — scope to one game instance (0 for all)', default: 0 },
+                game: { type: 'string', description: 'Filter by game content id (e.g. "zk", "papertanks")' },
                 level: { type: 'number', description: 'Minimum log level (0=DEBUG, 2=NOTICE, 4=ERROR)', default: 0 },
                 section: { type: 'string', description: 'Filter by section (e.g. "lua", "sim", "server")' },
                 scope: { type: 'string', description: 'Filter by scope (e.g. "LuaRules", "LuaGaia")' },
+                sinceMinutes: { type: 'number', description: 'Only entries from the last N minutes (recency window)' },
                 limit: { type: 'number', description: 'Max entries to return', default: 50 },
             },
         },
     },
     {
         name: 'search_logs',
-        description: 'Full-text search across all log entries. Use this to find specific errors, warnings, or patterns in game/sim logs.',
+        description: 'Full-text search across log entries. Scope a search to a single room/game and/or a recent time window to avoid a flood of historical logs — e.g. search_logs(query:"error", roomId:5, sinceMinutes:10).',
         inputSchema: {
             type: 'object',
             properties: {
-                query: { type: 'string', description: 'Search text (matches against message content)' },
-                roomId: { type: 'number', description: 'Room ID (0 for all)' },
+                query: { type: 'string', description: 'Search text (substring match on message). Optional if a roomId/game filter is given.' },
+                roomId: { type: 'number', description: 'Scope to one room/game instance (0 or omit for all)' },
+                game: { type: 'string', description: 'Filter by game content id (e.g. "zk")' },
+                section: { type: 'string', description: 'Filter by section (e.g. "lua", "sim")' },
                 level: { type: 'number', description: 'Minimum log level' },
+                sinceMinutes: { type: 'number', description: 'Only entries from the last N minutes (recency window)' },
                 limit: { type: 'number', description: 'Max entries', default: 50 },
             },
-            required: ['query'],
         },
     },
     {
@@ -830,6 +834,8 @@ async function executeTool(name, args) {
             if (args.level) params.set('level', String(args.level));
             if (args.section) params.set('section', args.section);
             if (args.scope) params.set('scope', args.scope);
+            if (args.game) params.set('game', args.game);
+            if (args.sinceMinutes) params.set('since', String(Date.now() - args.sinceMinutes * 60000));
             if (args.limit) params.set('limit', String(args.limit));
             const roomId = args.roomId || 0;
             const url = `${LOG_SERVER_URL}/api/logs/${roomId}?${params}`;
@@ -839,8 +845,14 @@ async function executeTool(name, args) {
 
         case 'search_logs': {
             const params = new URLSearchParams();
-            params.set('q', args.query);
+            if (args.query) params.set('q', args.query);
+            // roomId scopes the search to a single game instance; the
+            // logserver tags each entry with the owning room/game.
+            if (args.roomId) params.set('room', String(args.roomId));
+            if (args.game) params.set('game', args.game);
+            if (args.section) params.set('section', args.section);
             if (args.level) params.set('level', String(args.level));
+            if (args.sinceMinutes) params.set('since', String(Date.now() - args.sinceMinutes * 60000));
             if (args.limit) params.set('limit', String(args.limit));
             const url = `${LOG_SERVER_URL}/api/logs/search?${params}`;
             const data = await fetchJson(url);
@@ -1317,7 +1329,8 @@ function formatLogEntries(entries) {
         const level = LEVELS[e.level] || '???';
         const frame = e.frame > 0 ? `[${e.frame}] ` : '';
         const scope = e.scope ? `:${e.scope}` : '';
-        return `${frame}[${level}] [${e.process}:${e.section}${scope}] ${e.message}`;
+        const room = e.room_id ? `[room ${e.room_id}] ` : '';
+        return `${room}${frame}[${level}] [${e.process}:${e.section}${scope}] ${e.message}`;
     }).join('\n');
 }
 

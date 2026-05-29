@@ -198,6 +198,7 @@ static GameServerInstance spawnGameServer(
         }
 
         std::string portStr = std::to_string(inst.port);
+        std::string roomStr = std::to_string(roomId);
 
         // Build argv: fixed args first, then one "--player <spec>"
         // pair per human slot, then one "--ai <spec>" pair per AI
@@ -207,6 +208,7 @@ static GameServerInstance spawnGameServer(
         std::vector<const char*> argv;
         argv.push_back(serverBin.c_str());
         argv.push_back("--port"); argv.push_back(portStr.c_str());
+        argv.push_back("--room"); argv.push_back(roomStr.c_str());
         argv.push_back("--game"); argv.push_back(gameId.c_str());
         if (!gameVersion.empty()) {
             argv.push_back("--game-version");

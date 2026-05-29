@@ -40,6 +40,13 @@
 
 namespace {
 
+/// Raw query string of the request being dispatched on this thread. Set by
+/// DispatchGet/DispatchPost before each handler runs (handlers run
+/// synchronously on the network thread, so one request is in flight per
+/// thread at a time). Read via NetworkServer::CurrentQueryString().
+thread_local std::string tl_queryString;
+void SetCurrentQueryString(const std::string& qs) { tl_queryString = qs; }
+
 /// HTTP/2 connection preface (24 bytes).
 static const char H2_PREFACE[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 static constexpr size_t H2_PREFACE_LEN = 24;
@@ -219,11 +226,14 @@ struct NetworkServer::Impl {
 
     HttpResponse DispatchGet(const std::string& url) {
         // Strip query string and percent-decode — handlers receive the
-        // clean, decoded path only. Use QueryParam() if you need access
-        // to query parameters.
+        // clean, decoded path only. The raw query string is stashed on a
+        // thread-local so handlers can read params via
+        // NetworkServer::CurrentQueryString() without it corrupting
+        // path-segment extraction in wildcard routes.
         auto qpos = url.find('?');
         const std::string rawPath = (qpos != std::string::npos) ? url.substr(0, qpos) : url;
         const std::string path = UrlDecode(rawPath);
+        SetCurrentQueryString(qpos != std::string::npos ? url.substr(qpos + 1) : "");
         // Try exact matches first, then wildcards
         for (auto& [pattern, handler] : *getHandlers) {
             if (pattern.find('*') == std::string::npos && RouteMatch(pattern, path))
@@ -241,6 +251,7 @@ struct NetworkServer::Impl {
         auto qpos = url.find('?');
         const std::string rawPath = (qpos != std::string::npos) ? url.substr(0, qpos) : url;
         const std::string path = UrlDecode(rawPath);
+        SetCurrentQueryString(qpos != std::string::npos ? url.substr(qpos + 1) : "");
         for (auto& [pattern, handler] : *postHandlers) {
             if (pattern.find('*') == std::string::npos && RouteMatch(pattern, path))
                 return handler(path, body, hdrs);
@@ -802,6 +813,10 @@ void NetworkServer::AddHttpGet(const std::string& pattern, HttpGetHandler handle
 
 void NetworkServer::AddHttpPost(const std::string& pattern, HttpPostHandler handler) {
     httpPostHandlers.emplace_back(pattern, std::move(handler));
+}
+
+std::string NetworkServer::CurrentQueryString() {
+    return tl_queryString;
 }
 
 uint32_t NetworkServer::AddSSE(const std::string& pattern) {

@@ -81,6 +81,12 @@ public:
     void SendSSE(uint32_t channelId, const std::string& data,
                  const std::string& event = "");
 
+    /// Raw query string (everything after '?', undecoded) of the request
+    /// currently being dispatched on this thread, or "" if none. Handlers
+    /// receive only the decoded path as their `url` argument; call this to
+    /// read query parameters. Valid only for the duration of the handler.
+    static std::string CurrentQueryString();
+
 private:
     void NetworkThreadFunc(int port);
 
