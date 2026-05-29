@@ -25,7 +25,8 @@ import { BuildMenu } from './core/build-menu.js';
 import { OrderPanel } from './core/order-panel.js';
 import { EconomyBar } from './core/economy-bar.js';
 import { buildTerrainMesh, loadTerrainTextures, TerrainFog, type MapDimensions } from './core/terrain.js';
-import { DecalRenderer } from './core/decal-renderer.js';
+import { DecalOverlay, buildTrackTypeNames } from './core/decal-overlay.js';
+import { attachDecalOverlay } from './core/decal-overlay-plugin.js';
 import { LobbyUI } from './lobby/lobby-ui.js';
 import { Minimap } from './core/minimap.js';
 import { LosBitmapStore } from './core/los-bitmap.js';
@@ -73,7 +74,7 @@ let buildBeamRenderer: BuildBeamRenderer | null = null;
 let dynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
 let cegRuntime: CegRuntime | null = null;
 let combatFX: CombatFX | null = null;
-let decalRenderer: DecalRenderer | null = null;
+let decalOverlay: DecalOverlay | null = null;
 let audioManager: AudioManager | null = null;
 let inputManager: InputManager | null = null;
 let animatedCursor: AnimatedCursor | null = null;
@@ -364,20 +365,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         });
     }
 
-    // Ground decals (PLAN-decals.md D3/D6). Persistent scorch scars from
-    // weapon explosions, streamed by the server (envelope 0x08) and
-    // rendered as ground-pinned quads using ZK's authored scar textures
-    // (graphics.scars → .ktx2, same manifest path projectile textures
-    // use). init() fetches resources.json + manifests asynchronously;
-    // scars that arrive before it completes are queued. The terrain-height
-    // sampler is wired below once MapData's heightmap is parsed.
-    decalRenderer = new DecalRenderer(scene);
-    (window as unknown as { __decalRenderer: unknown }).__decalRenderer = decalRenderer;
-    if (gameId) {
-        decalRenderer.init(gameId, lobbyHttpUrl).catch((e) => {
-            console.warn('[decals] init failed:', e);
-        });
-    }
+    // Ground decals (PLAN-decals.md D7) use a persistent baked overlay —
+    // see the DecalOverlay created in onMapData once map dimensions are known.
 
     audioManager = new AudioManager();
 
@@ -538,23 +527,24 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         terrainMesh.receiveShadows = true;
         console.log('[client] terrain mesh built from MapData heightmap');
 
-        // Wire the decal renderer's terrain-height lookup so scars pin to
-        // the ground (the server ships unsnapped y — see ServerDecalHandler).
-        // Mirrors the heightmap sampling in terrain.ts buildTerrainMesh.
-        {
-            const hmW = mapDims.mapx + 1;
-            const hmH = mapDims.mapy + 1;
-            const hRange = mapDims.maxHeight - mapDims.minHeight;
-            const heights = map.heightmap;
-            const SQUARE = 8;
-            decalRenderer?.setHeightSampler((x, z) => {
-                let sx = Math.round(x / SQUARE);
-                let sz = Math.round(z / SQUARE);
-                if (sx < 0) sx = 0; else if (sx >= hmW) sx = hmW - 1;
-                if (sz < 0) sz = 0; else if (sz >= hmH) sz = hmH - 1;
-                const raw = heights[sz * hmW + sx] ?? 0;
-                return mapDims.minHeight + (raw / 65535) * hRange;
-            });
+        // Ground decals (PLAN-decals.md D7): a persistent baked overlay the
+        // size of the map. Scars + track segments (envelope 0x08) are blitted
+        // once into it; the terrain samples it every frame via a material
+        // plugin (perturbs normal + darkens albedo, lit live by sun + CSM).
+        // No per-decal height snap needed — the terrain samples the overlay at
+        // each fragment's real height/normal, so marks follow undulations.
+        decalOverlay?.dispose();
+        decalOverlay = new DecalOverlay(scene, map.widthElmos, map.heightElmos);
+        // Classify each wire trackTypeId → procedural pattern (tank tread vs
+        // bot footprints vs spider claws). Defs are fully loaded by now
+        // (onMapData runs after the def fetch resolves), so the client builds
+        // the same sorted track-name table the server indexed by.
+        decalOverlay.setTrackTypes(
+            buildTrackTypeNames(defCache.getAllUnitDefs().map(d => d.trackType)));
+        (window as unknown as { __decalOverlay: unknown }).__decalOverlay = decalOverlay;
+        if (terrainMesh?.material) {
+            attachDecalOverlay(terrainMesh.material, decalOverlay.texture,
+                map.widthElmos, map.heightElmos);
         }
 
         // Open the music gate. Per PLAN-audio.md the gate covers
@@ -946,7 +936,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             buildBeamRenderer?.onSnapshot(snapshot);
         },
         onDecals(snapshot) {
-            decalRenderer?.onSnapshot(snapshot.scars);
+            decalOverlay?.onSnapshot(snapshot.scars, snapshot.tracks);
         },
         onCombatEvents(events) {
             combatFX?.onCombatEvents(events);
@@ -1266,7 +1256,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         projectileRenderer?.tick();
         cegRuntime?.tick(dt);
         combatFX?.tick(dt);
-        decalRenderer?.tick(dt);
+        decalOverlay?.tick(dt);
 
         // Listener follows the camera every frame so HRTF stays in
         // sync with smooth camera motion. Previously this only fired

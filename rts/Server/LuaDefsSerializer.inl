@@ -183,6 +183,18 @@ inline std::string SerializeOneUnitDef(
     b.add_str("yardmap", yardmapStr);
     b.add_str("script", ud.scriptName);
     b.add_str("build_pic", ud.buildPicName);
+    // Vehicle tread-track type (lowercased) — only for track-leaving movers.
+    // The client builds the same sorted distinct set from these names to
+    // resolve the wire trackTypeId (envelope 0x08) → track texture. Omitted
+    // for non-track units so the client's distinct set matches the server's
+    // (ServerTrackEmitter) index-for-index. Not render-only data: it's a
+    // SolidObjectDecalDef field the sim already parses.
+    if (ud.decalDef.leaveTrackDecals && !ud.decalDef.trackDecalTypeName.empty()) {
+        std::string tt = ud.decalDef.trackDecalTypeName;
+        for (char& c : tt)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        b.add_str("track_type", tt);
+    }
     b.add_float("max_velocity", ud.speed);  // FB: same as speed
     b.add_float("cost", ud.cost.metal + ud.cost.energy);
     b.add_float("max_weapon_range", ud.maxWeaponRange);

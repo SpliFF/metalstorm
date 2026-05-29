@@ -250,6 +250,10 @@ export interface UnitDefInfo {
     yardmap: string;
     script: string;
     buildPic: string;
+    /// Vehicle tread-track type name (lowercased), e.g. "stdtank". Empty for
+    /// units that don't leave tracks. Used to resolve the wire trackTypeId
+    /// (envelope 0x08) to a track texture — see decal-renderer.ts.
+    trackType: string;
     maxVelocity: number;
     cost: number;
     maxWeaponRange: number;

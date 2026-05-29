@@ -19,6 +19,7 @@
 #include "Server/CombatEventCollector.h"
 #include "Server/DecalEventCollector.h"
 #include "Server/ServerDecalHandler.h"
+#include "Server/ServerTrackEmitter.h"
 #include "Server/SoundEventCollector.h"
 #include "Server/ProjectileEventCollector.h"
 #include "Sim/Misc/LosHandler.h"
@@ -2362,18 +2363,54 @@ int main(int argc, char* argv[])
 
         // Ground decals (scars from weapon explosions + track segments) —
         // envelope 0x08. The explosion listener self-registers once on first
-        // reach (no separate init site needed). Drained + broadcast each tick.
-        // Per-session LOS filtering is a follow-up; scars sit at explosion
-        // sites, which are almost always already in the player's view.
+        // reach (no separate init site needed). Drained once, then sent
+        // per-session with a LOS filter: each client only receives decals
+        // whose ground position its ally team can currently see (spectators
+        // and global-LOS see all). This stops scorch marks / treads from
+        // leaking enemy activity in unexplored fog. Reuses the same
+        // viewerAllyTeam + losHandler->InLos() machinery as the entity-state
+        // broadcast above.
         {
             static bool s_decalListenerReg = [](){ serverDecalHandler.Register(); return true; }();
             (void)s_decalListenerReg;
+            // Lay vehicle tread segments for track-leaving movers this tick;
+            // they join the scar drain below and share the LOS-filtered send.
+            serverTrackEmitter.Emit(sim.GetFrameNum());
             auto scarDrain = scarEvents.Drain();
             auto trackDrain = trackSegmentEvents.Drain();
             if ((!scarDrain.empty() || !trackDrain.empty()) && rtcServer.GetClientCount() > 0) {
                 const uint32_t decalFrame = static_cast<uint32_t>(sim.GetFrameNum());
-                const auto decalBatch = Protocol::BuildDecalBatch(decalFrame, scarDrain, trackDrain);
-                rtcServer.BroadcastReliable(decalBatch.data(), decalBatch.size());
+                sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+                    int viewerAllyTeam = -1;
+                    if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
+                        viewerAllyTeam = teamHandler.AllyTeam(session.team);
+
+                    // Spectators (no team) and global-LOS viewers see every
+                    // decal; everyone else is filtered to their LOS.
+                    const bool seeAll = (viewerAllyTeam < 0) ||
+                        (losHandler != nullptr && losHandler->GetGlobalLOS(viewerAllyTeam));
+
+                    std::vector<ScarEventData> visScars;
+                    std::vector<TrackSegmentEventData> visTracks;
+                    if (seeAll) {
+                        visScars = scarDrain;
+                        visTracks = trackDrain;
+                    } else if (losHandler != nullptr) {
+                        visScars.reserve(scarDrain.size());
+                        for (const auto& s : scarDrain)
+                            if (losHandler->InLos(s.pos, viewerAllyTeam))
+                                visScars.push_back(s);
+                        visTracks.reserve(trackDrain.size());
+                        for (const auto& t : trackDrain)
+                            if (losHandler->InLos(t.pos, viewerAllyTeam))
+                                visTracks.push_back(t);
+                    }
+                    if (visScars.empty() && visTracks.empty()) return;
+
+                    const auto decalBatch = Protocol::BuildDecalBatch(
+                        decalFrame, visScars, visTracks);
+                    rtcServer.SendReliable(clientId, decalBatch.data(), decalBatch.size());
+                });
             }
         }
 

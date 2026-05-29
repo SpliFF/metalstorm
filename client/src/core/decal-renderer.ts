@@ -50,7 +50,7 @@ import {
 } from '@babylonjs/core';
 import { stampUrl } from '../config.js';
 import { loadDirManifest, type DirManifest } from './dir-manifest.js';
-import type { ScarEvent } from './decal-events.js';
+import type { ScarEvent, TrackSegmentEvent } from './decal-events.js';
 
 const ENGINE_BASE = '/api/engine/data/bitmaps';
 
@@ -59,6 +59,19 @@ const DECAL_Y_LIFT = 1.0;
 
 /** Hard cap on live scars (Recoil-style ring buffer). Oldest evicted. */
 const MAX_SCARS = 4096;
+
+/** Hard cap on live track stamps (ring buffer; oldest evicted). Tracks are
+ *  laid one stamp per trackDecalWidth of travel, so a busy field of movers
+ *  fills this faster than scars — give it a larger budget. */
+const MAX_TRACKS = 8192;
+
+/** Track-stamp lifetime in seconds. Recoil ties track decay to
+ *  trackDecalStrength + the global decal level; we use a fixed base scaled by
+ *  the per-unit strength (carried on the wire). Tunable. */
+const TRACK_TTL_BASE = 28.0;
+
+/** Subdir (under the game's bitmaps/) holding ZK's authored track textures. */
+const TRACKS_SUBDIR = 'tracks';
 
 const DECAL_VERTEX = /* glsl */ `
 precision highp float;
@@ -112,6 +125,21 @@ interface LiveScar {
     layer: number; // index into this.textures
 }
 
+/** One laid-down tread stamp. Square (width × width) quad, oriented along the
+ *  unit's travel vector, stamped at the segment position; abutting stamps read
+ *  as a continuous tread strip. */
+interface LiveTrack {
+    x: number;
+    y: number;
+    z: number;
+    width: number;
+    yaw: number;   // travel heading about +Y
+    ttl: number;
+    age: number;
+    alpha0: number;
+    layer: number; // index into this.trackTextures (== wire trackTypeId)
+}
+
 type HeightSampler = (x: number, z: number) => number;
 
 export class DecalRenderer {
@@ -121,10 +149,22 @@ export class DecalRenderer {
     private meshes: Mesh[] = [];
     private textures: Texture[] = [];
     private scars: LiveScar[] = [];
+    /** trackTypeId → {ground quad mesh, texture}. Sparse: only track types
+     *  whose texture resolved get an entry, but the key is always the wire
+     *  trackTypeId so segments index in directly. */
+    private trackLayers = new Map<number, { mesh: Mesh; tex: Texture }>();
+    private tracks: LiveTrack[] = [];
+    private tracksReady = false;
+    /** Set synchronously on the first initTracks() call so repeated def
+     *  updates don't kick off concurrent texture loads (which would
+     *  double-build the layer meshes). */
+    private tracksInitStarted = false;
     private heightSampler: HeightSampler | null = null;
     private ready = false;
     /** Scars that arrived before textures finished loading. */
     private pending: ScarEvent[] = [];
+    /** Track segments that arrived before track textures finished loading. */
+    private pendingTracks: TrackSegmentEvent[] = [];
     private matrixScratch = Matrix.Identity();
     private scaleScratch = new Vector3(1, 1, 1);
     private posScratch = new Vector3(0, 0, 0);
@@ -231,9 +271,68 @@ export class DecalRenderer {
         for (const s of queued) this.addScar(s);
     }
 
-    /** Ingest one server decal frame. */
-    onSnapshot(scars: ScarEvent[]): void {
+    /**
+     * Load the game's authored track textures. `trackTypeNames` is the
+     * sorted distinct lowercased list of track-type names built from the
+     * unit defs (each def's `trackType` field) — its index is exactly the
+     * wire `trackTypeId` the server assigns (ServerTrackEmitter builds the
+     * same sorted set from the same defs). Each name resolves to
+     * `bitmaps/tracks/<name>.ktx2` (manifest + HTTP both case-insensitive,
+     * so the lowercased name matches ZK's `StdTank.ktx2` on disk).
+     */
+    async initTracks(trackTypeNames: string[], gameId: string, lobbyHttpUrl = ''): Promise<void> {
+        if (this.tracksInitStarted || !gameId || trackTypeNames.length === 0) return;
+        this.tracksInitStarted = true;
+        const base = lobbyHttpUrl || '';
+        // The bitmaps manifest is recursive and rooted at bitmaps/ (keys are
+        // paths relative to it, e.g. "tracks/StdTank.ktx2") — there's no
+        // per-subdir manifest. Mirror the scar resolver: load the root and
+        // probe with the "tracks/" prefix. has() + the HTTP server are both
+        // case-insensitive, so the lowercased name matches "StdTank.ktx2".
+        const bitmapsBase = `${base}/api/games/data/${gameId}/bitmaps`;
+        const manifest = await loadDirManifest(bitmapsBase);
+
+        let loaded = 0;
+        for (let layer = 0; layer < trackTypeNames.length; layer++) {
+            const name = trackTypeNames[layer];
+            const rel = `${TRACKS_SUBDIR}/${name}.ktx2`;
+            if (!manifest.has(rel)) {
+                console.warn(`[decals] track texture '${rel}' not in bitmaps manifest — type ${layer} skipped`);
+                continue;
+            }
+            const tex = new Texture(
+                stampUrl(`${bitmapsBase}/${rel}`), this.scene,
+                /*noMipmap*/ false, /*invertY*/ true,
+                Texture.TRILINEAR_SAMPLINGMODE,
+            );
+            tex.hasAlpha = true;
+            tex.wrapU = Texture.CLAMP_ADDRESSMODE;
+            tex.wrapV = Texture.CLAMP_ADDRESSMODE;
+
+            const mesh = buildGroundQuad(this.scene, `trackQuad${layer}`);
+            const mat = this.material.clone(`groundTrack${layer}`);
+            mat.setTexture('scarTex', tex);
+            mesh.material = mat;
+            mesh.isPickable = false;
+            mesh.alwaysSelectAsActiveMesh = true;
+            mesh.renderingGroupId = 1;
+            mesh.thinInstanceCount = 0;
+            this.trackLayers.set(layer, { mesh, tex });
+            loaded++;
+        }
+
+        this.tracksReady = true;
+        console.log(`[decals] loaded ${loaded}/${trackTypeNames.length} track textures`);
+
+        const queued = this.pendingTracks;
+        this.pendingTracks = [];
+        for (const t of queued) this.addTrackSegment(t);
+    }
+
+    /** Ingest one server decal frame (scars + track segments). */
+    onSnapshot(scars: ScarEvent[], tracks: TrackSegmentEvent[] = []): void {
         for (const s of scars) this.addScar(s);
+        for (const t of tracks) this.addTrackSegment(t);
     }
 
     private addScar(ev: ScarEvent): void {
@@ -265,9 +364,47 @@ export class DecalRenderer {
         this.scars.push(scar);
     }
 
+    private addTrackSegment(ev: TrackSegmentEvent): void {
+        if (!this.tracksReady) {
+            if (this.pendingTracks.length < 512) this.pendingTracks.push(ev);
+            return;
+        }
+        if (!this.trackLayers.has(ev.trackTypeId)) return; // texture missing
+
+        const y = this.heightSampler
+            ? this.heightSampler(ev.x, ev.z) + DECAL_Y_LIFT
+            : ev.y + DECAL_Y_LIFT;
+
+        // Heading about +Y from the XZ travel vector. Verified/tuned in-browser
+        // (square stamp, so a sign error only rotates the tread pattern 90°).
+        const yaw = Math.atan2(ev.dirX, ev.dirZ);
+        // Per-unit strength scales lifetime; default to the base when absent.
+        const ttl = ev.strength > 0
+            ? Math.min(TRACK_TTL_BASE * ev.strength, TRACK_TTL_BASE * 4)
+            : TRACK_TTL_BASE;
+
+        const track: LiveTrack = {
+            x: ev.x, y, z: ev.z,
+            width: ev.width > 0 ? ev.width : 24,
+            yaw,
+            ttl,
+            age: 0,
+            alpha0: 0.85,
+            layer: ev.trackTypeId,
+        };
+
+        if (this.tracks.length >= MAX_TRACKS) this.tracks.shift(); // evict oldest
+        this.tracks.push(track);
+    }
+
     /** Age scars, evict expired, rebuild thin-instance buffers. Call
      *  once per frame with the real frame delta in seconds. */
     tick(dtSeconds: number): void {
+        this.tickScars(dtSeconds);
+        this.tickTracks(dtSeconds);
+    }
+
+    private tickScars(dtSeconds: number): void {
         if (!this.ready || this.scars.length === 0) {
             for (const m of this.meshes) m.thinInstanceCount = 0;
             return;
@@ -328,13 +465,79 @@ export class DecalRenderer {
         }
     }
 
+    private tickTracks(dtSeconds: number): void {
+        if (!this.tracksReady || this.tracks.length === 0) {
+            for (const { mesh } of this.trackLayers.values()) mesh.thinInstanceCount = 0;
+            return;
+        }
+
+        // Age + compact.
+        let w = 0;
+        for (let i = 0; i < this.tracks.length; i++) {
+            const t = this.tracks[i];
+            t.age += dtSeconds;
+            if (t.age < t.ttl) this.tracks[w++] = t;
+        }
+        this.tracks.length = w;
+
+        // Bucket live stamps by trackTypeId.
+        const perLayer = new Map<number, LiveTrack[]>();
+        for (const t of this.tracks) {
+            let arr = perLayer.get(t.layer);
+            if (!arr) { arr = []; perLayer.set(t.layer, arr); }
+            arr.push(t);
+        }
+
+        for (const [layer, { mesh }] of this.trackLayers) {
+            const bucket = perLayer.get(layer);
+            const n = bucket ? bucket.length : 0;
+            if (n === 0) { mesh.thinInstanceCount = 0; continue; }
+
+            const matrices = new Float32Array(n * 16);
+            const colors = new Float32Array(n * 4);
+            for (let i = 0; i < n; i++) {
+                const t = bucket![i];
+                // Back-half linear fade, same curve as scars.
+                const f = t.age / t.ttl;
+                const fade = f < 0.5 ? 1 : 1 - (f - 0.5) * 2;
+                const alpha = t.alpha0 * Math.max(0, fade);
+
+                // Square stamp: width × width, oriented along travel.
+                this.scaleScratch.set(t.width, 1, t.width);
+                this.posScratch.set(t.x, t.y, t.z);
+                Quaternion.RotationYawPitchRollToRef(t.yaw, 0, 0, this.rotScratch);
+                Matrix.ComposeToRef(
+                    this.scaleScratch,
+                    this.rotScratch,
+                    this.posScratch,
+                    this.matrixScratch,
+                );
+                this.matrixScratch.copyToArray(matrices, i * 16);
+
+                // Neutral grey tint (0.5 → ×2 = 1.0 = texture as authored).
+                colors[i * 4 + 0] = 0.5;
+                colors[i * 4 + 1] = 0.5;
+                colors[i * 4 + 2] = 0.5;
+                colors[i * 4 + 3] = alpha;
+            }
+            mesh.thinInstanceSetBuffer('matrix', matrices, 16, false);
+            mesh.thinInstanceSetBuffer('color', colors, 4, false);
+            mesh.thinInstanceCount = n;
+        }
+    }
+
     dispose(): void {
         for (const m of this.meshes) m.dispose();
         for (const t of this.textures) t.dispose();
+        for (const { mesh, tex } of this.trackLayers.values()) { mesh.dispose(); tex.dispose(); }
         this.material.dispose();
         this.meshes = [];
         this.textures = [];
         this.scars = [];
+        this.trackLayers.clear();
+        this.tracks = [];
+        this.tracksReady = false;
+        this.tracksInitStarted = false;
         this.ready = false;
     }
 }

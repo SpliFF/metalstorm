@@ -313,6 +313,7 @@ function toUnitDefInfos(parsed: any): UnitDefInfo[] {
         yardmap: str(d.yardmap),
         script: str(d.script),
         buildPic: str(d.build_pic),
+        trackType: str(d.track_type),
         maxVelocity: num(d.max_velocity),
         cost: num(d.cost),
         maxWeaponRange: num(d.max_weapon_range),

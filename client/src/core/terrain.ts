@@ -23,6 +23,7 @@ import {
 } from '@babylonjs/core';
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture';
 import type { LosBitmap } from './los-bitmap.js';
+import { DecalOverlayPlugin, attachDecalOverlay } from './decal-overlay-plugin.js';
 
 const SQUARE_SIZE = 8;
 const TILE_PIXELS = 32;
@@ -351,7 +352,28 @@ export function applyWebGLTexture(
     mat.diffuseColor = new Color3(1, 1, 1);
     mat.specularColor = new Color3(0.05, 0.05, 0.05);
     mat.backFaceCulling = false;
+
+    // Carry the ground-decal overlay (PLAN-decals.md) onto the new material.
+    // The overlay plugin is attached to the *initial* terrain material in
+    // main.ts; this textured material is built later (once the map atlas
+    // finishes loading) and swapped in here. Without re-attaching, the
+    // textured terrain samples no overlay and scars/tracks never render.
+    const prev = mesh.material;
+    const prevPlugin = prev && prev.pluginManager
+        ? (prev.pluginManager as unknown as { _plugins?: unknown[] })._plugins
+            ?.find((p): p is DecalOverlayPlugin => p instanceof DecalOverlayPlugin)
+        : undefined;
     mesh.material = mat;
+    const prevTex = prevPlugin?.texture;
+    if (prevPlugin && prevTex) {
+        const next = attachDecalOverlay(
+            mat, prevTex, prevPlugin.worldW, prevPlugin.worldH);
+        // Preserve any live-tuned strengths from the previous plugin.
+        next.normalScale = prevPlugin.normalScale;
+        next.darken = prevPlugin.darken;
+        next.detailScale = prevPlugin.detailScale;
+        next.rubbleScale = prevPlugin.rubbleScale;
+    }
 }
 
 /**
