@@ -39,6 +39,7 @@ import { fetchBuildStamp } from './config.js';
 import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
 import { loadMapLighting, type MapLighting } from './core/map-lighting.js';
 import { applyMapLighting, createSceneLighting, type SceneLighting } from './core/scene-lighting.js';
+import { FxLightPool } from './core/fx-light-pool.js';
 import { sendCameraViewport } from './core/viewport.js';
 import { installCameraWindowApi, uninstallCameraWindowApi } from './core/camera-window-api.js';
 import { fetchAndIngestDefs } from './core/defs-fetch.js';
@@ -74,6 +75,7 @@ let buildBeamRenderer: BuildBeamRenderer | null = null;
 let dynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
 let cegRuntime: CegRuntime | null = null;
 let combatFX: CombatFX | null = null;
+let fxLightPool: FxLightPool | null = null;
 let decalOverlay: DecalOverlay | null = null;
 let audioManager: AudioManager | null = null;
 let inputManager: InputManager | null = null;
@@ -182,6 +184,8 @@ function quitToLobby(): void {
     cegRuntime?.dispose();
     cegRuntime = null;
     combatFX = null;
+    fxLightPool?.dispose();
+    fxLightPool = null;
     audioManager = null;
 
     // Hide the game canvas and HUD. Any in-flight overlays (quit confirm,
@@ -242,6 +246,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     cegRuntime?.dispose();
     cegRuntime = null;
     combatFX = null;
+    fxLightPool?.dispose();
+    fxLightPool = null;
     audioManager = null;
     inputManager = null;
     buildMenu?.dispose();
@@ -299,6 +305,12 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // onMapData below rewrites the sun/ambient via applyMapLighting().
     const sceneLighting: SceneLighting = createSceneLighting(scene, camera);
 
+    // Dynamic FX light pool (PLAN-weapon-fx-gaps Phase L). Fixed ring of
+    // point lights that weapon fire / explosions drive, picked up by the
+    // forward-lit stock materials (terrain/features) and bloomed by the
+    // HDR pipeline. Injected into the projectile + combat renderers below.
+    fxLightPool = new FxLightPool(scene);
+
     // RTS controls — WASD pan, wheel zoom, edge scrolling, and
     // middle-mouse drag to yaw/tilt. Replaces the default FreeCamera
     // mouse-look input.
@@ -351,6 +363,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // from inside the renderer's onFired/onImpact hooks once injected.
     cegRuntime = new CegRuntime(scene);
     projectileRenderer.setCegRuntime(cegRuntime);
+    projectileRenderer.setLightPool(fxLightPool);
 
     // Resolve weapon-def texture names → KTX2 URLs. Async load of
     // resources.json + the bitmaps manifests; the renderer can be
@@ -391,6 +404,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // are in hand so it doesn't fall back to procedural spheres for
     // every impact.
     combatFX = new CombatFX(scene, audioManager, cegRuntime, defCache);
+    combatFX.setLightPool(fxLightPool);
     (window as unknown as { __defCache: unknown }).__defCache = defCache;
 
     // Dynamic feature renderer — handles runtime-spawned features
@@ -1257,6 +1271,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         cegRuntime?.tick(dt);
         combatFX?.tick(dt);
         decalOverlay?.tick(dt);
+        // Age the dynamic FX lights after the emitters have run this frame
+        // and before scene.render() consumes the lighting.
+        fxLightPool?.update(dt, camera.position);
 
         // Listener follows the camera every frame so HRTF stays in
         // sync with smooth camera motion. Previously this only fired

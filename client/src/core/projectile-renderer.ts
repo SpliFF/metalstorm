@@ -43,6 +43,7 @@ import type { WeaponDefInfo } from './connection.js';
 import { stampUrl } from '../config.js';
 import type { ProjectileTextureResolver } from './projectile-texture-resolver.js';
 import type { CegRuntime } from './ceg-runtime.js';
+import type { FxLightPool } from './fx-light-pool.js';
 import {
     ProjectileType,
     effectForFire,
@@ -404,6 +405,11 @@ export class ProjectileRenderer {
     /// Null until injected; spawn calls are guarded.
     private cegRuntime: CegRuntime | null = null;
 
+    /// Dynamic FX light pool (PLAN-weapon-fx-gaps Phase L). Null until
+    /// injected from main.ts; emits a muzzle flash on fire and an
+    /// explosion light on impact. Guarded everywhere.
+    private lightPool: FxLightPool | null = null;
+
     /// Current sim-speed multiplier (1 = 30 ticks/sec, 2 = 60, 0.5 = 15).
     /// Updated from the server's GameInfo broadcast via main.ts. The
     /// per-frame integrator scales wall-clock dt by this so projectile
@@ -444,6 +450,10 @@ export class ProjectileRenderer {
     /// see effectForFire / effectForImpact at the bottom of this file.
     setCegRuntime(r: CegRuntime): void {
         this.cegRuntime = r;
+    }
+
+    setLightPool(pool: FxLightPool | null): void {
+        this.lightPool = pool;
     }
 
     /// Push the current sim-speed multiplier. Called from main.ts's
@@ -706,6 +716,18 @@ export class ProjectileRenderer {
             }
         }
 
+        // Muzzle-flash dynamic light (Phase L) — brief, bolt-coloured, at
+        // the firing position so the ground/units near the muzzle catch
+        // the flash. Emitted for every weapon (beams included) since the
+        // hitscan branch returns early below.
+        if (this.lightPool) {
+            const mdef = this.weaponDefs.get(ev.weaponDefId);
+            if (mdef) {
+                this.lightPool.emitMuzzle(ev.pos.x, ev.pos.y, ev.pos.z,
+                    resolveColor(mdef), 1);
+            }
+        }
+
         // Hit-scan weapons (beam laser, lightning) don't move — render
         // the bolt as a one-shot line from launch pos to impact pos and
         // skip the live-projectile tracking entirely. For beam-kind
@@ -824,6 +846,20 @@ export class ProjectileRenderer {
                     0, 1, 0, damage, ctxFlags);
             }
         }
+
+        // Impact explosion light (Phase L). Radius from the weapon's
+        // area-of-effect; warm blast colour biased toward the bolt hue.
+        // Emitted even when no live entry remains (free-floating death /
+        // self-destruct explosions carry their def on the event).
+        if (this.lightPool) {
+            const ldef = ev.weaponDefId
+                ? this.weaponDefs.get(ev.weaponDefId)
+                : (p ? this.weaponDefs.get(p.weaponDefId) : undefined);
+            const radius = Math.max(40, ldef?.aoe ?? 0);
+            this.lightPool.emitExplosion(ev.pos.x, ev.pos.y, ev.pos.z,
+                explosionLightColor(ldef), radius);
+        }
+
         if (!p) return;
 
         // Laser bolts get a deferred deletion so the eye registers the
@@ -1588,6 +1624,15 @@ function resolveColor(def: WeaponDefInfo): [number, number, number] {
     const hasColor = def.colorR > 0 || def.colorG > 0 || def.colorB > 0;
     if (hasColor) return [def.colorR, def.colorG, def.colorB];
     return DEFAULT_COLORS[def.projectileType] ?? DEFAULT_COLORS[ProjectileType.Explosive];
+}
+
+/// Dynamic-light colour for an impact/explosion. Uses the weapon's
+/// authored projectile colour when present, else a warm blast orange.
+function explosionLightColor(def: WeaponDefInfo | undefined): [number, number, number] {
+    if (def && (def.colorR > 0 || def.colorG > 0 || def.colorB > 0)) {
+        return [def.colorR, def.colorG, def.colorB];
+    }
+    return [1.0, 0.7, 0.35];
 }
 
 function resolveSize(def: WeaponDefInfo): number {

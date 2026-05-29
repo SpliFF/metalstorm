@@ -23,6 +23,7 @@ import type { CombatEventInfo, ProjectileImpactInfo } from './connection.js';
 import { AudioManager } from './audio.js';
 import type { CegRuntime } from './ceg-runtime.js';
 import type { DefCache } from './def-cache.js';
+import type { FxLightPool } from './fx-light-pool.js';
 import {
     ImpactKind,
     effectForImpact,
@@ -41,6 +42,7 @@ export class CombatFX {
     private audio: AudioManager | null;
     private cegRuntime: CegRuntime | null;
     private defCache: DefCache | null;
+    private lightPool: FxLightPool | null = null;
     private effects: ActiveEffect[] = [];
 
     // Procedural fallback materials. Used only when CEG dispatch
@@ -97,6 +99,24 @@ export class CombatFX {
         this.defCache = defCache;
     }
 
+    setLightPool(pool: FxLightPool | null): void {
+        this.lightPool = pool;
+    }
+
+    /// Pick a dynamic-light colour for a weapon's explosion. Uses the
+    /// weapon def's authored projectile colour when it has one; otherwise
+    /// a warm blast orange. Explosions read warm regardless, so even a
+    /// blue-bolt weapon gets a colour biased toward its hue but never
+    /// fully desaturated.
+    private weaponLightColor(weaponDefId: number): [number, number, number] {
+        const def = (weaponDefId && this.defCache)
+            ? this.defCache.getWeaponDef(weaponDefId) : undefined;
+        if (def && (def.colorR > 0 || def.colorG > 0 || def.colorB > 0)) {
+            return [def.colorR, def.colorG, def.colorB];
+        }
+        return [1.0, 0.7, 0.35];
+    }
+
     /// React to a projectile lifecycle Impact event. The projectile
     /// renderer also fires impact CEGs through its own dispatcher
     /// (for impacts not associated with a unit kill / damage event);
@@ -118,6 +138,8 @@ export class CombatFX {
                     if (!this.spawnCegImpact(e.impactKind, e.weaponDefId, x, y, z, true)) {
                         this.spawnFallbackAirburst(x, y, z);
                     }
+                    this.lightPool?.emitExplosion(x, y, z,
+                        this.weaponLightColor(e.weaponDefId), 60);
                     this.reportMissingSound('airburst');
                     break;
                 // Terrain/Feature/Unit impacts are handled by the
@@ -147,12 +169,19 @@ export class CombatFX {
                         evt.x, evt.y, evt.z, true, evt.damage)) {
                         this.spawnFallbackImpact(evt.x, evt.y, evt.z, evt.damage);
                     }
+                    // Small impact light, radius scaled by damage.
+                    this.lightPool?.emitExplosion(evt.x, evt.y, evt.z,
+                        this.weaponLightColor(evt.weaponDefId),
+                        Math.min(40 + evt.damage * 0.3, 120));
                     break;
                 case 3: // Kill
                     if (!this.spawnCegImpact(ImpactKind.Unit, evt.weaponDefId,
                         evt.x, evt.y, evt.z, true, evt.damage)) {
                         this.spawnFallbackExplosion(evt.x, evt.y, evt.z);
                     }
+                    // Bigger kill burst.
+                    this.lightPool?.emitExplosion(evt.x, evt.y, evt.z,
+                        this.weaponLightColor(evt.weaponDefId), 160);
                     break;
                 // Miss (1) and Blocked (2) — no visual.
             }
