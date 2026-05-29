@@ -2,6 +2,8 @@
 
 #include "AAirMoveType.h"
 
+#include "Components/MoveTypesComponents.h"
+#include "Sim/Ecs/Registry.h"
 #include "Game/GlobalUnsynced.h"
 #include "Map/Ground.h"
 #include "Map/MapInfo.h"
@@ -104,6 +106,12 @@ AAirMoveType::AAirMoveType(CUnit* unit): AMoveType(unit)
 		crashExpGenID = guRNG.NextInt(ud->GetCrashExpGenCount());
 		crashExpGenID = ud->GetCrashExpGenID(crashExpGenID);
 	}
+
+	// Register with the single-threaded GeneralMoveSystem so this air unit's
+	// moveType->Update() actually runs each sim frame. Without this the air
+	// state machine (takeoff/flying/landing) never ticks and ground-spawned
+	// fliers stay glued to the ground (project_air_takeoff_gap).
+	Sim::registry.emplace_or_replace<MoveTypes::GeneralMoveType>(owner->entityReference, owner->id);
 }
 
 
