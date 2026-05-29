@@ -127,7 +127,11 @@ void CBeamLaser::UpdatePosAndMuzzlePos()
 
 		relWeaponMuzzlePos = owner->script->GetPiecePos(weaponPiece);
 
-		aimFromPos = owner->GetObjectSpacePos(relWeaponPos * float3(-1.0f, 1.0f, -1.0f)); // ??
+		// PLAN-coordinate-system §4.5.1: the old `* float3(-1,1,-1)` was a
+		// workaround for the legacy +Z-forward GetObjectSpacePos — it fixed
+		// the Z but mirrored X (hence the "??"). With GetObjectSpacePos now
+		// glTF-native, the raw model-space piece pos transforms correctly.
+		aimFromPos = owner->GetObjectSpacePos(relWeaponPos);
 		weaponMuzzlePos = owner->GetObjectSpacePos(relWeaponMuzzlePos);
 
 		sweepFireState.SetSweepTempDir(newWeaponDir);

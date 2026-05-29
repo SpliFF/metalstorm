@@ -146,9 +146,12 @@ public:
 		// was negated under LH because the basis stored {rightdir, updir,
 		// frontdir} as a left-handed frame; in RH it's right-handed and
 		// the negation goes away.
-		rightdir.x = matrix[0]; updir.x = matrix[4]; frontdir.x = matrix[ 8];
-		rightdir.y = matrix[1]; updir.y = matrix[5]; frontdir.y = matrix[ 9];
-		rightdir.z = matrix[2]; updir.z = matrix[6]; frontdir.z = matrix[10];
+		// PLAN-coordinate-system §4.5.1: frontdir is the *negated* Z column.
+		// ComposeMatrix stores -frontdir in the Z column (model space is
+		// glTF-native, forward = -Z), so recovering frontdir negates it back.
+		rightdir.x = matrix[0]; updir.x = matrix[4]; frontdir.x = -matrix[ 8];
+		rightdir.y = matrix[1]; updir.y = matrix[5]; frontdir.y = -matrix[ 9];
+		rightdir.z = matrix[2]; updir.z = matrix[6]; frontdir.z = -matrix[10];
 	}
 
 	void AddHeading(short deltaHeading, bool useGroundNormal, bool useObjectNormal, float dirSmoothing) { SetHeading(heading + deltaHeading, useGroundNormal, useObjectNormal, dirSmoothing); }
@@ -172,7 +175,14 @@ public:
 
 	// RH basis (Phase 2): rightdir is already right-handed, so the
 	// pre-negation that compensated for the LH frame is dropped.
-	CMatrix44f ComposeMatrix(const float3& p) const { return (CMatrix44f(p, rightdir, updir, frontdir)); }
+	//
+	// PLAN-coordinate-system §4.5.1: the Z column is -frontdir, not frontdir.
+	// Model space is glTF-native (forward = -Z), so the matrix that maps a
+	// model point to world must send model +Z to -frontdir (equivalently
+	// model -Z, the model's forward, to +frontdir). This keeps the matrix
+	// form consistent with GetObjectSpacePos/Vec above. SetDirVectors is the
+	// inverse and negates the Z column back out.
+	CMatrix44f ComposeMatrix(const float3& p) const { return (CMatrix44f(p, rightdir, updir, -frontdir)); }
 	virtual CMatrix44f GetTransformMatrix(bool synced = false, bool fullread = false) const { return CMatrix44f(); };
 
 
@@ -196,9 +206,18 @@ public:
 	}
 
 
-	// these transform a point or vector to object-space
-	float3 GetObjectSpaceVec(const float3& v) const { return (      (frontdir * v.z) + (rightdir * v.x) + (updir * v.y)); }
-	float3 GetObjectSpacePos(const float3& p) const { return (pos + (frontdir * p.z) + (rightdir * p.x) + (updir * p.y)); }
+	// these transform a point or vector from model space to object/world space
+	//
+	// PLAN-coordinate-system §4.5.1: model space is glTF-native (forward = -Z).
+	// `frontdir` is the unit's facing = the world image of model -Z, so the
+	// forward component of a model point p is -p.z (a piece at p.z = -20 is 20
+	// elmos in *front*). The legacy formula used +frontdir*p.z (it assumed
+	// Spring's +Z-forward), which placed front-of-model pieces *behind* the
+	// unit — e.g. factory build pads spawned in the hangar instead of on the
+	// runway. The X (rightdir) and Y (updir) terms are unchanged (verified
+	// against the client heading->yaw render for all facings).
+	float3 GetObjectSpaceVec(const float3& v) const { return (      (rightdir * v.x) + (updir * v.y) - (frontdir * v.z)); }
+	float3 GetObjectSpacePos(const float3& p) const { return (pos + (rightdir * p.x) + (updir * p.y) - (frontdir * p.z)); }
 
 
 
