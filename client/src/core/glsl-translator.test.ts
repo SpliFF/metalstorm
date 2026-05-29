@@ -195,6 +195,33 @@ void main() {
         expect(out.source).not.toMatch(/hitPoints\[[^\]]*\.\d+/);
     });
 
+    it('does NOT promote int literals on preprocessor directive lines (cas.frag.glsl)', () => {
+        // ZK's cas.frag.glsl gates an AMD workaround behind `#if 0` with a
+        // trailing `// comment`. The int->float promotion must not touch
+        // preprocessor lines: `#if 0` requires an INTEGER constant
+        // expression, so `#if 0.0` is a syntax error. The trailing `//`
+        // is the trap — rule 3 read its first `/` as a division operator
+        // and rewrote `#if 0 // note` → `#if 0.0 // note`.
+        const src = `#version 330
+#line 20058
+uniform float sharpness;
+#if 0 // in case AMD drivers refuse to compile the shader
+    #define TEXEL_FETCH_OFFSET(t, c, l, o) texelFetch(t, c + o, l)
+#else
+    #define TEXEL_FETCH_OFFSET texelFetchOffset
+#endif
+void main() { float peak = 8 - 3 * sharpness; }`;
+        const out = translateGLSL(src, 'fragment');
+        expect(out.ok).toBe(true);
+        // The directive literal stays an integer.
+        expect(out.source).toContain('#if 0 // in case AMD drivers');
+        expect(out.source).not.toMatch(/#if\s+0\.0/);
+        // The #line directive is preserved verbatim (line-number fidelity).
+        expect(out.source).toContain('#line 20058');
+        // ...but ordinary float-context literals in code STILL promote.
+        expect(out.source).toMatch(/8\.0\s*-\s*3\.0\s*\*\s*sharpness/);
+    });
+
     it('still promotes int literals OUTSIDE array subscripts even on the same line', () => {
         // The bracket-skip must not poison promotion elsewhere on the
         // same line. Construct a line where one literal is inside `[]`

@@ -789,6 +789,20 @@ export function translateGLSL(src: string, stage: GlslStage, opts: TranslateOpti
     // `uniform float buf[5 * MAX_POINTS]`) where the result must stay
     // an integer expression. `applyOutsideBrackets` runs the rule only
     // on source ranges where bracket depth is zero.
+    //
+    // **Preprocessor-safe:** mask out `#`-directive lines (`#if`, `#elif`,
+    // `#define`, `#line`, ...) before promoting. The preprocessor requires
+    // *integer* constant expressions, so `#if 0` must NOT become `#if 0.0`
+    // (a syntax error). It also dodges a subtler trap: rule 3 below would
+    // read the `/` of a trailing `// comment` as a division operator and
+    // promote `#if 0 // note` → `#if 0.0 // note` (ZK's cas.frag.glsl).
+    const ppDirectiveLines: string[] = [];
+    s = s.replace(/^[ \t]*#[^\n]*$/gm, (m) => {
+        ppDirectiveLines.push(m);
+        // All-word-char token: the int->float rules' (?<![\w.]) / (?![\w.])
+        // boundaries never match the index digits embedded inside it.
+        return `__ppmask_${ppDirectiveLines.length - 1}__`;
+    });
     s = applyOutsideBrackets(s, (chunk) => {
         let c = chunk;
 
@@ -879,6 +893,9 @@ export function translateGLSL(src: string, stage: GlslStage, opts: TranslateOpti
 
         return c;
     });
+
+    // Restore the masked preprocessor directive lines verbatim.
+    s = s.replace(/__ppmask_(\d+)__/g, (_, i) => ppDirectiveLines[+i]);
 
     // 5. `gl_InstanceID` used as a float operand.
     s = s.replace(
