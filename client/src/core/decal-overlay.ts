@@ -42,10 +42,16 @@ import {
 import type { ScarEvent, TrackSegmentEvent } from './decal-events.js';
 
 /** Target overlay resolution; density is chosen so typical maps land near
- *  this and it's clamped here for huge maps (~67 MB at 4096² RGBA8). Crater
- *  detail (rim wobble, ejecta rays, floor roughness) needs the texels — at
- *  2048² over a 17 k-elmo map a scar was only ~75 px across and read blocky. */
-const OVERLAY_MAX_DIM = 4096;
+ *  this and it's clamped here for huge maps. Crater detail (rim wobble, ejecta
+ *  rays, floor roughness) needs the texels — at 2048² over a 17 k-elmo map a
+ *  scar was only ~75 px across and read blocky.
+ *
+ *  TEMPORARY: raised 4096→8192 to halve the elmos/texel on very large maps
+ *  (sharper tracks/scars) until the camera-clipmap lands — see
+ *  PLAN-decal-vt.md. Cost: the overlay RTT is ~256 MB at 8192² RGBA8 (vs
+ *  ~67 MB at 4096²), allocated regardless of how much of the map has decals.
+ *  The clipmap replaces this with a ~71 MB bounded cache. */
+const OVERLAY_MAX_DIM = 8192;
 /** Don't go below this even for tiny maps (keeps marks from being chunky). */
 const OVERLAY_MIN_DIM = 512;
 
