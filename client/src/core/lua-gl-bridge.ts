@@ -129,6 +129,9 @@ export class LuaGLBridge {
     private hasTextureUnit0 = false;
     /** RBO handles for gl.CreateRBO / gl.DeleteRBO. */
     private rboHandles = new Map<number, WebGLRenderbuffer>();
+    /** Lazily-created framebuffers for gl.RenderToTexture, one per texture
+     *  handle. WeakMap so they're collected when the texture handle is. */
+    private rttFBOs = new WeakMap<LuaTextureHandle, WebGLFramebuffer>();
     private nextRboId = 1;
 
     /** Base URL for game assets (e.g. http://localhost:8011/api/games/data/zk) */
@@ -265,6 +268,15 @@ export class LuaGLBridge {
         gl['ActiveFBO'] = (fbo: LuaValue, callback: LuaValue) => this.activeFBO(fbo, callback);
         gl['DeleteFBO'] = (h: LuaValue) => this.deleteFBO(h);
         gl['IsValidFBO'] = (h: LuaValue) => this.isValidFBO(h);
+        // gl.RenderToTexture(tex, fn, ...args) — bind `tex` as an FBO colour
+        // attachment, run `fn(...args)` with identity proj/modelview, restore.
+        // LUPS gates `canRTT` on this existing; Groundflash + distortionFBO
+        // both refuse to load without it.
+        gl['RenderToTexture'] = (tex: LuaValue, fn: LuaValue, ...args: LuaValue[]) =>
+            this.renderToTexture(tex, fn, args);
+        // gl.CopyToTexture(tex, xoff, yoff, x, y, w, h [, target, level]) —
+        // copyTexSubImage2D from the current framebuffer into `tex`.
+        gl['CopyToTexture'] = (...a: LuaValue[]) => this.copyToTexture(a);
         gl['CreateRBO'] = (w: LuaValue, h: LuaValue, opts: LuaValue) =>
             this.createRBO(w, h, opts);
         gl['DeleteRBO'] = (h: LuaValue) => this.deleteRBO(h);
@@ -1788,6 +1800,93 @@ export class LuaGLBridge {
         gl.bindFramebuffer(gl.FRAMEBUFFER, savedFBO);
         gl.viewport(savedViewport[0], savedViewport[1],
             savedViewport[2], savedViewport[3]);
+    }
+
+    /**
+     * gl.RenderToTexture(tex, fn, ...args) — Spring renders into a texture
+     * that was created with an attached FBO. Our gl.CreateTexture doesn't
+     * pre-create FBOs, so we lazily create + cache one framebuffer per
+     * texture handle (keyed via WeakMap) with the texture as COLOR_ATTACHMENT0.
+     *
+     * Mirrors LuaOpenGL::RenderToTexture: bind the FBO, set the viewport to
+     * the texture size, load identity projection + modelview, run the
+     * callback, then restore the previous framebuffer / viewport / matrices.
+     * Extra args after the function are forwarded to it (ZK uses this:
+     * `gl.RenderToTexture(sq, DrawTextureOnSquare, 0, 0, SIZE, ...)`).
+     */
+    private renderToTexture(texV: LuaValue, fnV: LuaValue, args: LuaValue[]): void {
+        if (!texV || typeof texV !== 'object' || Array.isArray(texV)) return;
+        const tex = texV as unknown as LuaTextureHandle;
+        if (tex.__type !== 'texture') return;
+        if (typeof fnV !== 'function') return;
+        const gl = this.gl;
+
+        let fbo = this.rttFBOs.get(tex);
+        if (!fbo) {
+            fbo = gl.createFramebuffer()!;
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0,
+                gl.TEXTURE_2D, tex.tex, 0);
+            const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            if (status !== gl.FRAMEBUFFER_COMPLETE) {
+                console.warn(`[gl.RenderToTexture] incomplete FBO: 0x${status.toString(16)}`);
+                gl.deleteFramebuffer(fbo);
+                return;
+            }
+            this.rttFBOs.set(tex, fbo);
+        }
+
+        const savedFBO = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+        const savedViewport = gl.getParameter(gl.VIEWPORT) as Int32Array;
+        const savedStack = this.imm.saveStackDepth();
+        const MM_PROJECTION = 0x1701;
+        const MM_MODELVIEW = 0x1700;
+
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+        gl.viewport(0, 0, tex.width, tex.height);
+        // Spring loads identity proj + modelview for the duration (RTT
+        // callbacks draw in NDC unless they set up their own matrices).
+        this.imm.matrixMode(MM_PROJECTION);
+        this.imm.loadIdentity();
+        this.imm.matrixMode(MM_MODELVIEW);
+        this.imm.loadIdentity();
+
+        try {
+            (fnV as (...a: LuaValue[]) => LuaValue | undefined)(...args);
+        } catch (e) {
+            console.warn('[gl.RenderToTexture] callback threw:', e);
+        }
+
+        this.imm.restoreStackDepth(savedStack);
+        this.imm.matrixMode(MM_MODELVIEW);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, savedFBO);
+        gl.viewport(savedViewport[0], savedViewport[1],
+            savedViewport[2], savedViewport[3]);
+    }
+
+    /**
+     * gl.CopyToTexture(tex, xoff, yoff, x, y, w, h [, target, level]) —
+     * copyTexSubImage2D from the framebuffer currently bound as the read
+     * source into `tex`. ZK's distortionFBO uses it to snapshot the screen
+     * (`glCopyToTexture(screenCopyTex, 0, 0, vpx, vpy, vsx, vsy)`).
+     */
+    private copyToTexture(a: LuaValue[]): void {
+        const texV = a[0];
+        if (!texV || typeof texV !== 'object' || Array.isArray(texV)) return;
+        const tex = texV as unknown as LuaTextureHandle;
+        if (tex.__type !== 'texture') return;
+        const gl = this.gl;
+        const xoff = Number(a[1] ?? 0);
+        const yoff = Number(a[2] ?? 0);
+        const x = Number(a[3] ?? 0);
+        const y = Number(a[4] ?? 0);
+        const w = Number(a[5] ?? 0);
+        const h = Number(a[6] ?? 0);
+        if (w <= 0 || h <= 0) return;
+        const level = Number(a[8] ?? 0);
+        gl.bindTexture(gl.TEXTURE_2D, tex.tex);
+        gl.copyTexSubImage2D(gl.TEXTURE_2D, level, xoff, yoff, x, y, w, h);
     }
 
     private deleteFBO(handle: LuaValue): void {
