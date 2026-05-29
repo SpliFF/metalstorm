@@ -1,0 +1,25 @@
+diff --git a/content/games/zk/LuaUI/Widgets/gui_chili_selections_and_cursortip.lua b/content/games/zk/LuaUI/Widgets/gui_chili_selections_and_cursortip.lua
+index dbd9d7d..e0b3b0e 100644
+--- a/content/games/zk/LuaUI/Widgets/gui_chili_selections_and_cursortip.lua
++++ b/content/games/zk/LuaUI/Widgets/gui_chili_selections_and_cursortip.lua
+@@ -2618,7 +2620,19 @@ local function UpdateTooltipContent(mx, my, dt, requiredOnly)
+ 	if chiliTooltip == NO_TOOLTIP then
+ 		return false
+ 	end
+-	
++
++	-- Widget-provided tooltips (widget:GetTooltip). Stock Spring polls
++	-- widgetHandler:GetTooltip every frame; the web client has no engine
++	-- tooltip renderer, so we consult it here as a fallback whenever no
++	-- chili control supplied a tooltip. Computed fresh each call (returns
++	-- "" off any element), so there is no staleness when the cursor leaves.
++	if (not chiliTooltip) and widgetHandler and widgetHandler.GetTooltip then
++		local okTip, widgetTip = pcall(widgetHandler.GetTooltip, widgetHandler, mx, my)
++		if okTip and type(widgetTip) == "string" and #widgetTip > 0 then
++			chiliTooltip = widgetTip
++		end
++	end
++
+ 	if chiliTooltip and string.find(chiliTooltip, "BuildUnit") then
+ 		local name = string.sub(chiliTooltip, 10)
+ 		local ud = name and UnitDefNames[name]

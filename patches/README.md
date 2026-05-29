@@ -14,6 +14,14 @@ hand-editing the files again.
   `vehriot`. See script comments for the bug explanation. Engine-side
   root cause (why our piece-position feedback diverges from Recoil's
   on the same script) is a separate follow-up.
+- **zk-tooltip-fallback.patch** — makes the cursor-tip widget
+  (`gui_chili_selections_and_cursortip.lua`) consult
+  `widgetHandler:GetTooltip(x, y)` as a fallback when no chili control
+  supplied a tooltip. Stock Spring's engine polls `widgetHandler:GetTooltip`
+  every frame; the web client has no engine tooltip renderer, so
+  widget-provided tooltips (nuke button, transport, gesture menu, unit
+  groups, …) never appeared. Computed fresh each call, so there is no
+  staleness when the cursor leaves an element.
 
 ## Apply / re-apply
 
