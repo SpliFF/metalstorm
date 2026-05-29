@@ -2410,6 +2410,109 @@ defaultFont = activeFont
         end
     `, 'lups_boot');
 
+    // PLAN-weapon-fx Phase Z5 — bridge WG.Lups → global GG.Lups + install
+    // the emission audit.
+    //
+    // (1) GG bridge. The producer gadgets (lups_projectiles.lua, lups_*.lua,
+    //     and unit-script-driven FX) read `GG['Lups']` from the global gadget
+    //     env, but lups.lua only ever populates `WG.Lups` (its line-138
+    //     `local GG = (widget and WG) or GG` resolves to WG when loaded via
+    //     the widget wrapper). Without this bridge every authored emitter
+    //     hits `attempt to index nil (global GG)` and dies inside its
+    //     DispatchSyncAction pcall — the wire is live (Z1.5) but the payload
+    //     never reaches AddParticles. Point GG.Lups at the same table.
+    //
+    // (2) Emission audit. Wrap AddParticles + AddParticlesArray to tally
+    //     unknown class names and malformed param shapes into a queryable
+    //     global (`WG.__lupsAudit`). Z5's exit gate is "zero [lups] unknown
+    //     class warnings across weapon-showcase + a 10-min skirmish"; this is
+    //     the instrument that measures it. HasParticleClass lowercases
+    //     internally so case-variant class names still resolve. The wrapper
+    //     is idempotent (guarded by __auditInstalled) and always calls
+    //     through, so it never changes emission behaviour.
+    runtime.doString(`
+        if WG and WG.Lups then
+            GG = GG or {}
+            GG.Lups = WG.Lups
+
+            local L = WG.Lups
+            if L.AddParticles and not L.__auditInstalled then
+                L.__auditInstalled = true
+                WG.__lupsAudit = {
+                    unknown = {}, badParams = {},
+                    totalAdd = 0, totalUnknown = 0, totalBad = 0,
+                }
+                local audit = WG.__lupsAudit
+                local has = L.HasParticleClass
+
+                local function record(Class, Options)
+                    audit.totalAdd = audit.totalAdd + 1
+                    if type(Class) ~= "string" then
+                        local k = "<non-string class:" .. type(Class) .. ">"
+                        audit.badParams[k] = (audit.badParams[k] or 0) + 1
+                        audit.totalBad = audit.totalBad + 1
+                    elseif has and not has(Class) then
+                        audit.unknown[Class] = (audit.unknown[Class] or 0) + 1
+                        audit.totalUnknown = audit.totalUnknown + 1
+                        Spring.Echo("[lups] unknown class '" .. Class .. "'")
+                    end
+                    if Options == nil then
+                        local k = "nil-options:" .. tostring(Class)
+                        audit.badParams[k] = (audit.badParams[k] or 0) + 1
+                        audit.totalBad = audit.totalBad + 1
+                    elseif type(Options) ~= "table" then
+                        local k = "non-table-options:" .. tostring(Class) ..
+                            ":" .. type(Options)
+                        audit.badParams[k] = (audit.badParams[k] or 0) + 1
+                        audit.totalBad = audit.totalBad + 1
+                    end
+                end
+
+                local origAdd = L.AddParticles
+                L.AddParticles = function(Class, Options, ...)
+                    record(Class, Options)
+                    return origAdd(Class, Options, ...)
+                end
+
+                if L.AddParticlesArray then
+                    local origArr = L.AddParticlesArray
+                    L.AddParticlesArray = function(array, ...)
+                        if type(array) == "table" then
+                            for i = 1, #array do
+                                local e = array[i]
+                                if type(e) == "table" then record(e.class, e) end
+                            end
+                        end
+                        return origArr(array, ...)
+                    end
+                end
+
+                -- Re-point GG.Lups (it captured the pre-wrap table above) so
+                -- gadgets calling GG.Lups.AddParticles hit the audited path.
+                GG.Lups = L
+
+                -- Convenience console dump.
+                _G.DumpLupsAudit = function()
+                    local a = WG.__lupsAudit
+                    Spring.Echo(string.format(
+                        "[lups] audit: %d adds, %d unknown-class, %d bad-param",
+                        a.totalAdd, a.totalUnknown, a.totalBad))
+                    for cls, n in pairs(a.unknown) do
+                        Spring.Echo("[lups]   unknown class '" .. cls ..
+                            "' x" .. n)
+                    end
+                    for k, n in pairs(a.badParams) do
+                        Spring.Echo("[lups]   bad param " .. k .. " x" .. n)
+                    end
+                end
+
+                Spring.Echo("[lups] Z5 emission audit installed; GG.Lups bridged")
+            end
+        else
+            Spring.Echo("[lups] Z5 audit skipped — WG.Lups absent")
+        end
+    `, 'lups_gg_bridge');
+
     // PLAN-weapon-fx Phase Z1.5 — Load the unsynced halves of every
     // LuaRules gadget whose `else`-branch produces visible particle /
     // shader / FX work. Each candidate is one of ZK's `lups_*.lua`,
@@ -5610,6 +5713,17 @@ function gadgetHandler:IsSyncedCode() return false end
 -- Top-level mirror — some gadgets check this before they've resolved
 -- gadgetHandler (legacy compat shim from upstream Spring).
 function IsSyncedCode() return false end
+
+-- Shared gadget table. In real ZK this is gadgets.lua's \`GG = {}\` field,
+-- injected into every gadget's env. We run the unsynced gadget halves in
+-- the single worker global env and use the stub instead of gadgets.lua, so
+-- GG would otherwise be nil — every \`GG.Lups\`, \`GG.lockPlayerIDs\`, etc.
+-- read would crash. Create it once here. \`GG.Lups\` is bridged from the
+-- widget-side \`WG.Lups\` after LUPS boots (see the lups_gg_bridge block);
+-- lups.lua's line 138 (\`local GG = (widget and WG) or GG\`) populates
+-- WG.Lups when loaded via the widget wrapper, not the global GG the
+-- producer gadgets read.
+GG = GG or {}
 
 function gadgetHandler:AddSyncAction(name, fn)
     if type(name) ~= "string" or type(fn) ~= "function" then return false end
