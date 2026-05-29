@@ -149,6 +149,10 @@ Toggle individually via `test.log("combat", true)` / `set_debug_logging({...})`.
 
 The MCP tools auto-authenticate as `admin/admin` (override via `SPRING_USER`/`SPRING_PASS` env). All `server` exec calls go through the lobby's `/api/exec` route, which proxies to the active game server — no need to discover the dynamic game-server port yourself when using these tools.
 
+**Dev accounts:** `admin` / `admin` and `test1` / `test`.
+
+**Browser ↔ game roster gotcha:** the game server builds a fixed player roster at launch from the room's host + AI slots. A browser session can only connect (WebRTC auth) if it is logged in as a user **in that roster** — otherwise the game logs `auth failed: Not in this room's roster` and the connection is rejected. So `launch_game` must run under the **same username the browser is logged in as**. The browser auto-logs in as `test1`; pass `username: "test1"` to `launch_game` (or re-login the browser as `admin` before launching with the default). After `launch_game` creates+starts the room, drive the browser with `window.lobby.joinRoom(<roomId>)` to connect and render.
+
 ## When to prefer this over alternatives
 
 - **Over the debug console**: scripted reproducible test cases beat hand-typed verbs.
