@@ -153,6 +153,8 @@ The MCP tools auto-authenticate as `admin/admin` (override via `SPRING_USER`/`SP
 
 **Browser ↔ game roster gotcha:** the game server builds a fixed player roster at launch from the room's host + AI slots. A browser session can only connect (WebRTC auth) if it is logged in as a user **in that roster** — otherwise the game logs `auth failed: Not in this room's roster` and the connection is rejected. So `launch_game` must run under the **same username the browser is logged in as**. The browser auto-logs in as `test1`; pass `username: "test1"` to `launch_game` (or re-login the browser as `admin` before launching with the default). After `launch_game` creates+starts the room, drive the browser with `window.lobby.joinRoom(<roomId>)` to connect and render.
 
+**Isolated browser sessions (concurrent Claude sessions):** the chrome-devtools MCP runs with `--isolated`, so each session gets its own fresh browser and several ZK games may be running at once. Always **track the `roomId` your own `launch_game` returned and only `joinRoom` that exact id** — never assume the only/first game in `list_processes` is yours, and only `kill_game` rooms you launched. The fresh profile also has no saved login: do a credential login + `lobby.attachSession(token, user_id, username)` **before** the first `joinRoom`, then launch + join immediately (no `leave()`/rejoin churn) or you get `no valid token` / `Not in this room's roster`. Full checklist in the **game-browser-test** skill ("Isolated mode + session discipline").
+
 ## When to prefer this over alternatives
 
 - **Over the debug console**: scripted reproducible test cases beat hand-typed verbs.

@@ -13,6 +13,54 @@ user-invocable: false
 
 The two MCP servers use different browser backends. Mixing them in a single session spawns a separate browser window, losing all page context. Even if claude-in-chrome tools are available, do not use them — use chrome-devtools exclusively.
 
+## Isolated mode + session discipline (READ FIRST)
+
+The chrome-devtools MCP is configured with `--isolated` in `.mcp.json`. Each
+MCP server launches its **own** browser on a throwaway profile that is
+discarded on exit. This lets several Claude sessions run browsers at once
+without fighting over the single shared `chrome-profile` lock (the
+`browser already running ... use --isolated` error). It also means:
+
+- **The profile is fresh every launch — no saved login.** You must
+  authenticate from scratch before connecting to a game (see below).
+- **Multiple games may be running at once** (yours + other sessions').
+  You are responsible for not crossing wires.
+
+**Discipline — track your own game, every time:**
+
+1. **Own the roomId.** Capture the `roomId` that *your* `launch_game`
+   returns and only ever `joinRoom(thatId)`. Never `joinRoom` a room you
+   didn't create, and never assume "the first/only game" is yours —
+   `list_processes` may show several. Joining another session's room fails
+   the roster check (`Not in this room's roster`) and, worse, could attach
+   you to the wrong game.
+2. **Match credentials to the roster.** The browser auto-logs in as
+   `test1`; `launch_game` must run as the **same** user (`username:'test1',
+   password:'test'`). Don't mix an `admin` browser with a `test1` game or
+   vice-versa — the roster is per-account. Dev accounts: `test1`/`test`,
+   `admin`/`admin`.
+3. **Fresh-login before the first join.** The stale auto-login token in a
+   fresh isolated profile causes `[connection] auth failed: no valid
+   token`. Do a credential login and attach it *before* joining:
+   ```js
+   const r = await fetch(`${location.origin}/api/auth/login`, {
+     method:'POST', headers:{'Content-Type':'application/json'},
+     body: JSON.stringify({ username:'test1', password:'test' }) });
+   const d = await r.json();                 // note: snake_case user_id
+   lobby.attachSession(d.token, d.user_id, d.username);
+   ```
+4. **Launch, then join immediately — no churn.** `launch_game({...})` →
+   grab `roomId` → `lobby.joinRoom(roomId)` right away. A `leave()`/rejoin
+   dance after a failed attempt yields `Not in this room's roster`; start
+   clean instead. Poll for `window.widgets && window.test` to confirm the
+   session (and LuaUI worker) came up.
+5. **Clean up only your rooms.** `kill_game(yourRoomId)` when done. Never
+   kill or restart a room you didn't launch.
+
+Worker-side Lua eval is `await window.widgets.eval("...lua...")` (the LuaUI
+widget worker). `window.test.lua(...)` is a **different** context (server
+LuaExec scope) and lacks `Spring.GetConfigInt` etc.
+
 ## chrome-devtools (Chrome DevTools MCP)
 
 Full Chrome DevTools Protocol access via Puppeteer. Handles all browser testing needs.
