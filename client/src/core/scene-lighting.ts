@@ -66,8 +66,20 @@ function createCsm(sun: DirectionalLight): CascadedShadowGenerator {
     csm.shadowMaxZ = 8000;
     csm.usePercentageCloserFiltering = true;
     csm.filteringQuality = ShadowGenerator.QUALITY_HIGH;
+    // See PLAN-shadow-zoom-fix.md. Without autoCalcDepthBounds the four
+    // cascades are spread across the full camera.minZ..shadowMaxZ slab
+    // (1..8000) every frame, regardless of where the units actually are.
+    // The RTS camera zooms out to ~6000 elmos, dropping units into the
+    // coarse far cascade (a ~6000-elmo slab in one 2048² map → texels
+    // several elmos across). The fixed normalBias then offsets the
+    // receiver sample far enough along its normal to skip past the
+    // caster's base → the contact band of the shadow detaches
+    // (peter-panning). Fitting the cascades to the visible depth slab
+    // each frame keeps texels tight at every zoom, so a smaller
+    // normalBias both kills the gap and still suppresses acne.
+    csm.autoCalcDepthBounds = true;
     csm.bias = 0.01;
-    csm.normalBias = 0.02;
+    csm.normalBias = 0.008;
 
     // See docs/lighting.md "customAllowRendering" — without this every
     // empty thin-instance template would project a unit-sized blob from
