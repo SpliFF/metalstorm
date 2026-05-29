@@ -16,11 +16,16 @@
  *   - CSM shadow sampling via `sampler2DArray` (matches the team-color
  *     material in entity-renderer.ts).
  *
- * The remaining ZK options (SHADOWMAPPING, NORMALMAPPING, FLASHLIGHTS,
- * UNITSFOG, VERTEX_AO) are honoured. POM / TREEWIND / METAL_HIGHLIGHT /
- * MOVING_THREADS / AUTONORMAL / NORMALMAP_FLIP compile out to no-ops —
- * they need per-piece UV metadata we don't ship today; tracked in
- * PLAN-weapon-fx.md Phase Z2b.
+ * The remaining ZK options (SHADOWMAPPING, NORMALMAPPING, AUTONORMAL,
+ * FLASHLIGHTS, UNITSFOG, VERTEX_AO) are honoured. Phase Z2b (faithful
+ * data-driven port) made per-unit option selection match
+ * `001_units_s3o_assimp.lua`'s `GetUnitMaterial` against the template
+ * defaults — see `zkOptionsFromCustomParams` — and ported ZK's exact
+ * `GetNormalFromDiffuse` autonormal formula (`zkNormalFromDiffuse`).
+ * Still compiled out to no-ops: POM / TREEWIND / METAL_HIGHLIGHT /
+ * MOVING_THREADS (need per-piece UV / wreck-metal metadata we don't ship)
+ * and NORMALMAP_FLIP (no ZK unit sets it — verified zero customParams
+ * occurrences across content/games/zk).
  */
 
 import {
@@ -29,6 +34,7 @@ import {
     Effect,
     Color3,
     Matrix,
+    Vector2,
     Vector3,
     Vector4,
     Texture,
@@ -80,9 +86,19 @@ export function zkOptionsFromCustomParams(
     else              opts |= ZKOption.AUTONORMAL;
 
     const cp = customParams ?? {};
-    // ZK convention: `cus_noflashlight = "1"` opts out. Everything else
-    // gets the pulsing self-illum modulation.
-    if (cp.cus_noflashlight !== '1') opts |= ZKOption.FLASHLIGHTS;
+    // Faithful port of 001_units_s3o_assimp.lua `GetUnitMaterial` combined
+    // with defaultMaterialTemplate.lua's defaults (Z2b). The template
+    // ships every option default-false EXCEPT shadowmapping; only the
+    // `unitsNewNormalMapFL` variant turns flashlights on. ZK's selection:
+    //   normalmap + !cus_noflashlight → unitsNewNormalMapFL   → flashlights ON
+    //   normalmap +  cus_noflashlight → unitsNewNormalMap     → default (off)
+    //   no-normal + (either)          → unitsNewNoNormalMap*  → off (the FL
+    //                                    no-normal variant explicitly sets
+    //                                    flashlights=false — the authored TODO)
+    // So flashlights is ON only when the unit is normal-mapped and hasn't
+    // opted out. The previous heuristic lit every non-opted-out unit,
+    // over-applying the self-illum pulse to flat-shaded (autonormal) units.
+    if (hasNormalMap && cp.cus_noflashlight !== '1') opts |= ZKOption.FLASHLIGHTS;
 
     return opts;
 }
@@ -231,6 +247,7 @@ uniform float shadowDarkness;
 uniform vec4 teamColor;
 uniform float invertMask;
 uniform int  simFrame;
+uniform vec2 autoNormalParams;  // {samplingDist, value} — ZK default {1.0, 0.002}
 
 in vec3 vWorldPos;
 in vec3 vWorldNormal;
@@ -245,10 +262,13 @@ in float vViewZ;
 
 out vec4 fragColor;
 
-// Derivative-TBN normal-map sampling (Schüler / Mikkelsen). Same code as
-// entity-renderer.ts perturbNormal — kept inline so this shader is self-
-// contained.
-vec3 perturbNormal(vec3 N, vec3 P, vec2 uv) {
+// Derivative-based TBN (Schüler / Mikkelsen). ZK's template builds its TBN
+// from per-vertex tangents (gl_MultiTexCoord5/6); our .glb pipeline doesn't
+// ship those, so we reconstruct the same worldTBN from screen-space
+// derivatives. Both the normal-map and autonormal paths transform their
+// tangent-space normal through this single TBN — matching ZK's
+// "N = worldTBN * tbnNormal" for both branches.
+mat3 computeTBN(vec3 N, vec3 P, vec2 uv) {
     vec3  dp1     = dFdx(P);
     vec3  dp2     = dFdy(P);
     vec2  duv1    = dFdx(uv);
@@ -258,24 +278,25 @@ vec3 perturbNormal(vec3 N, vec3 P, vec2 uv) {
     vec3  T       = dp2perp * duv1.x + dp1perp * duv2.x;
     vec3  B       = dp2perp * duv1.y + dp1perp * duv2.y;
     float invmax  = inversesqrt(max(dot(T, T), dot(B, B)));
-    mat3  tbn     = mat3(T * invmax, B * invmax, N);
-    vec3  nmap    = texture(normalTex, uv).xyz * 2.0 - 1.0;
-    return normalize(tbn * nmap);
+    return mat3(T * invmax, B * invmax, N);
 }
 
-// ZK's autonormal — derive a tangent-space normal from the diffuse
-// luminance gradient. Cheaper than a full normal map; the result is a
-// soft synthetic relief that's good enough for ZK's smaller props that
-// ship without authored normals.
-vec3 normalFromDiffuse(vec2 uv) {
+// ZK's autonormal — verbatim port of GetNormalFromDiffuse /
+// GetDiffuseGrad / GetDiffuseVal from defaultMaterialTemplate.lua. Derives
+// a tangent-space normal from the diffuse luminance gradient. The Z value
+// is 1.0/autoNormalParams.y (=500 with the authored 0.002), so the relief
+// is deliberately subtle. autoNormalParams = {samplingDist, value}.
+float zkDiffuseVal(vec2 uv) {
+    return length(texture(diffuseTex, fract(uv)).rgb);
+}
+vec3 zkNormalFromDiffuse(vec2 uv) {
     vec2 texDim = vec2(textureSize(diffuseTex, 0));
-    vec2 d = vec2(1.0 / texDim);
-    float lXn = length(texture(diffuseTex, uv - vec2(d.x, 0.0)).rgb);
-    float lXp = length(texture(diffuseTex, uv + vec2(d.x, 0.0)).rgb);
-    float lYn = length(texture(diffuseTex, uv - vec2(0.0, d.y)).rgb);
-    float lYp = length(texture(diffuseTex, uv + vec2(0.0, d.y)).rgb);
-    vec2 grad = vec2((lXp - lXn) * 0.5, (lYp - lYn) * 0.5);
-    return normalize(vec3(-grad * 8.0, 1.0));
+    vec2 delta  = vec2(autoNormalParams.x) / texDim;
+    vec2 grad   = vec2(
+        zkDiffuseVal(uv + vec2(delta.x, 0.0)) - zkDiffuseVal(uv - vec2(delta.x, 0.0)),
+        zkDiffuseVal(uv + vec2(0.0, delta.y)) - zkDiffuseVal(uv - vec2(0.0, delta.y))
+    ) / delta;
+    return normalize(vec3(grad, 1.0 / autoNormalParams.y));
 }
 
 // CSM sampling — copied verbatim from entity-renderer.ts so the two
@@ -306,20 +327,24 @@ void main() {
     myUV.y = 1.0 - myUV.y;
 #endif
 
-    // N — world-space surface normal, optionally perturbed.
+    // N — world-space surface normal. ZK's template selects exactly one
+    // of normalmap / autonormal / plain-normal (the BITMASK if/else-if/else
+    // at defaultMaterialTemplate.lua:567). Both perturbed branches share
+    // the derivative TBN and transform a tangent-space normal through it.
     vec3 N = normalize(vWorldNormal);
 #ifdef OPTION_NORMALMAPPING
     if (hasNormal > 0.5) {
-        N = perturbNormal(N, vWorldPos, myUV);
+        vec3 tbnNormal = texture(normalTex, myUV).xyz * 2.0 - 1.0;
+        N = normalize(computeTBN(N, vWorldPos, myUV) * tbnNormal);
     }
 #endif
 #ifdef OPTION_AUTONORMAL
     if (hasNormal <= 0.5) {
-        // Fall back to autonormal only when no real normal map is bound.
-        // Treats the derived normal as already world-space (cheap; the
-        // perturbation is subtle enough that skipping a TBN transform is
-        // acceptable for fallback geometry).
-        N = normalize(mix(N, normalFromDiffuse(myUV), 0.5));
+        // Only when no authored normal map is bound — matches ZK routing
+        // units without a _normals sibling / cp.normaltex to the
+        // autonormal variant.
+        vec3 tbnNormal = zkNormalFromDiffuse(myUV);
+        N = normalize(computeTBN(N, vWorldPos, myUV) * tbnNormal);
     }
 #endif
 
@@ -514,6 +539,7 @@ export function createZKMaterial(
             'sunSpecularParams', 'shadowDensity',
             'hasEmissive', 'hasOrm', 'hasTeamMask', 'hasNormal',
             'csmMatrices', 'csmSplits', 'shadowDarkness',
+            'autoNormalParams',
         ],
         samplers: [
             'diffuseTex', 'emissiveTex', 'ormTex', 'teamMaskTex',
@@ -539,6 +565,8 @@ export function createZKMaterial(
     mat.setVector3('sunSpecular', SUN_SPECULAR);
     mat.setVector3('sunSpecularParams', SUN_SPECULAR_PARAM);
     mat.setFloat('shadowDensity', 1.0);
+    // ZK authored autoNormalParams = {samplingDist=1.0, value=0.002}.
+    mat.setVector2('autoNormalParams', new Vector2(1.0, 0.002));
 
     // Initial values for shadow uniforms — overwritten every frame.
     mat.setVector3('sunDir', DEFAULT_SUN_DIR);

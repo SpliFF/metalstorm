@@ -184,8 +184,28 @@ function translateSpawn(s: CegSpawnInfo): ParticleSpawn | SubCegSpawn | null {
             return translateWakeProjectile(s, props);
 
         default:
+            // No translator for this Spring class. Record it so the
+            // Z4/Z5 verification gate can assert "no unknown CEG class"
+            // instead of silently dropping the spawn. The set is drained
+            // by takeUnknownClasses() at registration time.
+            if (cls) unknownClasses.set(cls, (unknownClasses.get(cls) ?? 0) + 1);
             return null;
     }
+}
+
+/// Classes encountered by translateSpawn that have no translator,
+/// counted by how many spawns referenced them. Populated during
+/// translateCegDef; read + cleared by takeUnknownClasses().
+const unknownClasses = new Map<string, number>();
+
+/// Drain the unknown-class tally accumulated since the last call.
+/// CegRuntime.ingestCegDefs reports this once after a batch so the
+/// Z4 verification gate ("a nuke runs every spawn class without an
+/// unknown-class warning") is observable rather than silent.
+export function takeUnknownClasses(): Map<string, number> {
+    const out = new Map(unknownClasses);
+    unknownClasses.clear();
+    return out;
 }
 
 // ── CSimpleParticleSystem ───────────────────────────────────────────────────

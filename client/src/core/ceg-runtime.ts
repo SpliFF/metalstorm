@@ -73,7 +73,7 @@ import { stampUrl } from '../config.js';
 import type { ProjectileTextureResolver } from './projectile-texture-resolver.js';
 import { registerCegParticleShader } from './shaders/ceg-particle.js';
 import type { CegDefInfo } from './connection.js';
-import { translateCegDef, parseAtlasDims } from './ceg-translator.js';
+import { translateCegDef, parseAtlasDims, takeUnknownClasses } from './ceg-translator.js';
 
 /// Per-particle gravity is in elmos/sec² (positive pulls down).
 /// Sized to roughly match Spring's default gravity feel without
@@ -542,6 +542,16 @@ export class CegRuntime {
         if (translated > 0) {
             console.log(`[ceg] registered ${translated} streamed effect(s) `
                 + `(${defs.length - translated} skipped, ${failed} errored)`);
+        }
+        // Z4/Z5 gate: report any CEG spawn class that has no client-side
+        // translator. Zero entries here is the Phase Z4 exit condition.
+        const unknown = takeUnknownClasses();
+        if (unknown.size > 0) {
+            const summary = [...unknown.entries()]
+                .sort((a, b) => b[1] - a[1])
+                .map(([cls, n]) => `${cls}×${n}`)
+                .join(', ');
+            console.warn(`[ceg] unknown spawn class(es) with no translator: ${summary}`);
         }
     }
 
