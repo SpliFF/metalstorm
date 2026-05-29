@@ -4378,12 +4378,13 @@ self.onmessage = async (e: MessageEvent) => {
     // Debug-level trace of inbound messages (skip high-frequency
     // channels to avoid drowning real log entries: pointer movement,
     // per-frame stateUpdate from the main thread's mouseState/camera
-    // tracker, gameInfo (frame/speed/wind ticking every frame), and
-    // the entityState snapshot stream).
+    // tracker, gameInfo (frame/speed/wind ticking every frame), the
+    // entityState snapshot stream, and the periodic losBitmap push).
     if (msg.type !== 'mousemove'
         && msg.type !== 'stateUpdate'
         && msg.type !== 'gameInfo'
-        && msg.type !== 'entityState') {
+        && msg.type !== 'entityState'
+        && msg.type !== 'losBitmap') {
         postLog(1, `[LuaUI:main→worker] ${describeInboundMessage(msg)}`);
     }
     switch (msg.type) {
