@@ -276,6 +276,11 @@ interface LiveProjectile {
     /// in CEG_EMIT_PERIOD_S chunks per emit, capped at MAX_CEG_EMITS_PER_FRAME
     /// to bound work at very high sim speed.
     cegEmitAccumS: number;
+    /// Sim-time accumulator (seconds) for the dynamic follow-light emit
+    /// (Phase L). Decoupled from the CEG cadence — follow-lights re-emit
+    /// on a slower period than the per-tick CEG trail so the pool isn't
+    /// churned every frame. Only used for emissive projectile types.
+    lightEmitAccumS: number;
 }
 
 /** Active beam: from-point, to-point and birth time. Each tick the
@@ -354,6 +359,17 @@ const CEG_EMIT_PERIOD_S = 1 / SIM_TICKS_PER_SEC;
 /// per frame keeps work bounded while still letting trails read as
 /// continuous at moderate fast-forward.
 const MAX_CEG_EMITS_PER_FRAME = 4;
+
+/// Dynamic follow-light cadence/shape for emissive in-flight projectiles
+/// (PLAN-weapon-fx-gaps Phase L). Re-emitted every FOLLOW_LIGHT_PERIOD_S
+/// of sim time at the projectile's current position. Peak is deliberately
+/// low so the pool's priority eviction keeps these subordinate to the
+/// brighter muzzle/explosion lights; ttl slightly exceeds the period so
+/// the glow reads as continuous rather than strobing.
+const FOLLOW_LIGHT_PERIOD_S = 0.09;
+const FOLLOW_LIGHT_TTL_S = 0.16;
+const FOLLOW_LIGHT_PEAK = 3;
+const FOLLOW_LIGHT_RANGE = 70;
 
 /// Squared position delta (elmos²) above which a trajectory snapshot
 /// is treated as a real course correction and the missile trail is
@@ -788,6 +804,7 @@ export class ProjectileRenderer {
             // the missile spawns two near-identical bursts at the same
             // position and reads as a single brighter flash.
             cegEmitAccumS: -CEG_EMIT_PERIOD_S,
+            lightEmitAccumS: 0,
         });
     }
 
@@ -1071,6 +1088,24 @@ export class ProjectileRenderer {
                     // spawn at the cap until the debt clears.
                     if (p.cegEmitAccumS > CEG_EMIT_PERIOD_S * MAX_CEG_EMITS_PER_FRAME) {
                         p.cegEmitAccumS = 0;
+                    }
+                }
+            }
+
+            // Dynamic follow-light (Phase L) for emissive projectile types
+            // — flame, plasma, lasers, lightning glow and should light the
+            // ground they pass over. Re-emitted on a slow cadence at the
+            // current position; the pool's priority system keeps these dim
+            // lights subordinate to muzzle/explosion bursts.
+            if (this.lightPool && !p.impacted) {
+                const ldef = this.weaponDefs.get(p.weaponDefId);
+                if (ldef && isEmissiveProjectile(ldef)) {
+                    p.lightEmitAccumS += dt;
+                    if (p.lightEmitAccumS >= FOLLOW_LIGHT_PERIOD_S) {
+                        p.lightEmitAccumS = 0;
+                        this.lightPool.emit(p.pos.x, p.pos.y, p.pos.z,
+                            resolveColor(ldef), FOLLOW_LIGHT_PEAK,
+                            FOLLOW_LIGHT_RANGE, FOLLOW_LIGHT_TTL_S);
                     }
                 }
             }
@@ -1633,6 +1668,23 @@ function explosionLightColor(def: WeaponDefInfo | undefined): [number, number, n
         return [def.colorR, def.colorG, def.colorB];
     }
     return [1.0, 0.7, 0.35];
+}
+
+/// True for projectile types that visibly glow in flight and so should
+/// carry a follow-light (Phase L). Missiles/starbursts/torpedoes are
+/// excluded — their exhaust trail is the light cue, not the body, and a
+/// follow-light on a long-lived cruise missile would dominate the pool.
+function isEmissiveProjectile(def: WeaponDefInfo): boolean {
+    switch (def.projectileType) {
+        case ProjectileType.Flame:
+        case ProjectileType.Fireball:
+        case ProjectileType.Laser:
+        case ProjectileType.Lightning:
+        case ProjectileType.Emg:
+            return true;
+        default:
+            return false;
+    }
 }
 
 function resolveSize(def: WeaponDefInfo): number {
