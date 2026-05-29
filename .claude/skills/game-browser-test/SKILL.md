@@ -56,6 +56,10 @@ without fighting over the single shared `chrome-profile` lock (the
    session (and LuaUI worker) came up.
 5. **Clean up only your rooms.** `kill_game(yourRoomId)` when done. Never
    kill or restart a room you didn't launch.
+6. **Scope log reads to your room.** `get_logs` and `search_logs` default
+   to `roomId: 0` (all rooms) — with concurrent sessions that returns
+   other games' entries and buries yours. Always pass your own
+   `roomId: <yourRoomId>` so you only see your game's logs.
 
 Worker-side Lua eval is `await window.widgets.eval("...lua...")` (the LuaUI
 widget worker). `window.test.lua(...)` is a **different** context (server
