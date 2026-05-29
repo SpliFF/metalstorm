@@ -310,6 +310,51 @@ void main() {
         expect(out.source).toMatch(/countItems\(\)\s*>\s*0(?!\.)/);
     });
 
+    it('does NOT promote plain `i = 1;` assignment when an int was declared elsewhere (UnitPieceLight BlurShader)', () => {
+        // ZK UnitPieceLight's BlurShader has:
+        //     int n, i;
+        //     i = 1;        // -- previously incorrectly promoted to i = 1.0;
+        //     for (...) { ++i; }
+        //     i = -7;
+        // GLSL ES 300 strict rejects `int = float`. Rule 4c now requires
+        // a float-family type on the same line as the assignment before
+        // promoting the literal.
+        const src = `#version 150
+out vec4 fragColor;
+void main() {
+    int n, i;
+    i = 1;
+    for (n = 6; n >= 0; --n) {
+        fragColor += vec4(float(i));
+        ++i;
+    }
+    i = -7;
+}`;
+        const out = translateGLSL(src, 'fragment');
+        expect(out.ok).toBe(true);
+        // Plain assignments to existing int locals stay integer.
+        expect(out.source).toMatch(/i\s*=\s*1\s*;/);
+        expect(out.source).toMatch(/i\s*=\s*-7\s*;/);
+        expect(out.source).not.toMatch(/i\s*=\s*1\.0/);
+        expect(out.source).not.toMatch(/i\s*=\s*-7\.0/);
+    });
+
+    it('still promotes `float k = 5;` declaration with int literal', () => {
+        // The intent of rule 4c is to catch float declarations with
+        // integer-literal initializers. Lines that DO declare a new
+        // float-family variable must still get the promotion.
+        const src = `#version 150
+out vec4 fragColor;
+void main() {
+    float k = 5;
+    vec2 v2 = vec2(0);
+    fragColor = vec4(k);
+}`;
+        const out = translateGLSL(src, 'fragment');
+        expect(out.ok).toBe(true);
+        expect(out.source).toMatch(/float\s+k\s*=\s*5\.0\s*;/);
+    });
+
     it('does not rewrite identical-named declarations inside function scope', () => {
         // A local `float p1 = ...` inside main() is a normal
         // declaration — it must stay a declaration.

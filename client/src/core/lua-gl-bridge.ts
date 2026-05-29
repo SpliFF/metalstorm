@@ -1072,10 +1072,22 @@ export class LuaGLBridge {
                 '}\n';
         }
         const gl = this.gl;
-        // Reset the by-design rejection flag for this compile pass —
-        // translateGLSL sets it when it returns an `#error` sentinel
-        // for legacy attributes we deliberately don't translate.
+        // Reset state for this compile pass.
+        //
+        // - `expectedShaderReject` — translateGLSL sets it when it
+        //   returns an `#error` sentinel for legacy attributes we
+        //   deliberately don't translate.
+        // - `lastShaderLog` — Spring's gl.GetShaderLog returns the log
+        //   of the **most recent** CreateShader call only. ZK LUPS
+        //   classes check `string.len(gl.GetShaderLog()) > 0` after a
+        //   successful compile and bail if the log is non-empty
+        //   (ShieldJitter pattern). Without this reset a successful
+        //   compile inherits the previous failure's log, killing
+        //   classes whose shaders are fine. Set immediately so any
+        //   intermediate `return null` paths (missing options, etc.)
+        //   still leave a coherent log.
         this.expectedShaderReject = false;
+        this.lastShaderLog = '';
         const reportShaderFailure = (msg: string) => {
             if (this.expectedShaderReject) {
                 console.debug('[gl.CreateShader]', msg);

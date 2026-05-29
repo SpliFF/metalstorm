@@ -70,5 +70,11 @@ describe('LUPS class shaders translate cleanly', () => {
         expect(out.source).not.toMatch(/hitPoints\[[^\]]*\.0/);
         // Array declaration size kept integer too: hitPoints[5 * MAX_POINTS]
         expect(out.source).toMatch(/hitPoints\[5\s*\*\s*MAX_POINTS\]/);
+        // The HQ FS body has `if (length(offset2) > 0) {` — rule 4b'
+        // should promote the integer 0 to 0.0 so the comparison
+        // type-checks against length()'s float return.
+        expect(out.source).toContain('length(offset2) > 0.0');
+        // Same pattern on a different line.
+        expect(out.source).toContain('smoothstep(0.0, 0.04, length(offset2))');
     });
 });

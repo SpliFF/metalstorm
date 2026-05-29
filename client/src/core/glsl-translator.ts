@@ -854,12 +854,23 @@ export function translateGLSL(src: string, stage: GlslStage, opts: TranslateOpti
             '$1$2.0',
         );
 
-        // 4c. Assignment of bare int literal to a float variable. Apply
-        //    per-line and skip integer-typed declarations and for-loop
-        //    counters.
+        // 4c. Declaration of a float-family variable with a bare int
+        //    literal initializer: `float k = 5;` → `float k = 5.0;`.
+        //    Apply per-line and skip:
+        //    - integer-typed declarations (the variable is intentionally
+        //      int, e.g. `int n = 0;`);
+        //    - for-loop counters (`for (int i = 0; i < 8; ...)`);
+        //    - lines that DON'T declare a new float-family variable.
+        //      A bare assignment like `i = 1;` to an existing int
+        //      variable (ZK UnitPieceLight BlurShader uses `int n, i;`
+        //      then `i = 1;` later) must NOT be promoted — we don't
+        //      track variable types, so requiring an explicit
+        //      `float|vec[234]|mat[234]` on the same line as the `=`
+        //      is the safest proxy for "this is a float declaration".
         c = c.split('\n').map(line => {
             if (/\b(int|uint|ivec[234]|uvec[234]|bvec[234])\b/.test(line)) return line;
             if (/\bfor\s*\(/.test(line)) return line;
+            if (!/\b(float|vec[234]|mat[234])\b/.test(line)) return line;
             return line.replace(
                 /(\b\w+\s*=\s*)(-?\d+)(\s*;)/g,
                 '$1$2.0$3',
