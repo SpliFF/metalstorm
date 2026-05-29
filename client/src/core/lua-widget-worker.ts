@@ -4131,8 +4131,52 @@ function dispatchUnitCmdDone(
     `, 'dispatchUnitCmdDone');
 }
 
-function dispatchCommandsChanged(): void {
+// Signature of everything the integral-menu rebuild actually depends on:
+// the selection, each selected unit's cmd-descs (id / disabled / hidden /
+// type / params), and each selected unit's order queue (drives the build-
+// queue count badges via GetRealBuildQueue / GetFactoryCommands). When this
+// is unchanged there is nothing for CommandsChanged to do, so we skip the
+// full panel teardown. Recomputed cheaply (~1 Hz) from worker-local state.
+let lastCommandSignature: string | null = null;
+
+function computeCommandSignature(): string {
+    const parts: string[] = [];
+    for (const id of liveState.selectedUnitIds) {
+        parts.push('u' + id);
+        const descs = liveState.unitCmdDescs.get(id);
+        if (descs) {
+            for (const d of descs) {
+                parts.push(
+                    d.cmdId + ':' + (d.disabled ? 1 : 0) + ':' +
+                    (d.hidden ? 1 : 0) + ':' + d.type + ':' + d.params.join(','),
+                );
+            }
+        }
+        const orders = liveState.unitCommands.get(id);
+        if (orders) {
+            // Only the cmd-id sequence matters for the build-queue strip;
+            // move-order progress (params unchanged until completed) won't
+            // perturb this, so we don't rebuild the palette on every tick a
+            // mobile unit is travelling.
+            for (const o of orders) parts.push('o' + o.cmdId);
+        }
+    }
+    return parts.join('|');
+}
+
+function dispatchCommandsChanged(force = false): void {
     if (!runtime) return;
+
+    // Spring fires CommandsChanged only when the command set actually
+    // changes. Our server snapshots arrive on a fixed ~1 Hz cadence, so
+    // without this gate the integral menu tore down and rebuilt its whole
+    // panel every second — flickering buttons, dropped hover, and (the
+    // reported bug) the build tab snapping back to "orders". Skip the
+    // rebuild when nothing relevant moved.
+    const sig = computeCommandSignature();
+    if (!force && sig === lastCommandSignature) return;
+    lastCommandSignature = sig;
+
     // Spring exposes the union of every selected unit's cmd-descs as
     // widgetHandler.commands — a builder selected alongside a factory
     // shows both their build options. Picking only sel[1] used to hide
@@ -4550,7 +4594,10 @@ self.onmessage = async (e: MessageEvent) => {
             // commands stale and the menu fixed on the previous unit.
             if (msg.selectedUnitIds && !sameIdSet(prevSel, liveState.selectedUnitIds)) {
                 dispatchSelectionChanged(liveState.selectedUnitIds);
-                dispatchCommandsChanged();
+                // Selection genuinely changed — always rebuild so the
+                // "newly selected factory" tab logic runs even if the new
+                // selection happens to expose an identical command set.
+                dispatchCommandsChanged(true);
             }
             // Identity delta → fire widget:PlayerChanged. Spring fires
             // this on team change, spec ↔ player toggle, leader change.
