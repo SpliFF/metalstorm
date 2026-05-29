@@ -141,11 +141,15 @@ export class DecalOverlayPlugin extends MaterialPluginBase {
                     // frequency, so it's the same crispness on a small scar or a
                     // huge one — no stretching.
                     float _reliefMag = length(_dec.rg - 0.5) * 2.0;
-                    // Disturbance mask = scorch (B) ∪ actual relief. Gating on
-                    // relief too means the crater WALLS / rim — which carry
-                    // relief but little scorch — also get roughened, instead of
-                    // staying smooth & shiny.
-                    float _mask = max(_dec.b, smoothstep(0.02, 0.18, _reliefMag));
+                    // Crater-detail mask = STRONG scorch ∪ STRONG relief. The
+                    // high thresholds are what separate craters/footprints (deep
+                    // scorch + steep walls → churn + rubble) from vehicle tracks
+                    // (shallow groove, light darkening → none): a smooth tread or
+                    // bike line must NOT collect crater rubble or it reads blurry
+                    // / diagonally hatched. Walls + rim (strong relief, little
+                    // scorch) still roughen via the relief term.
+                    float _mask = max(smoothstep(0.55, 0.80, _dec.b),
+                                      smoothstep(0.50, 0.85, _reliefMag));
                     if (_mask > 0.02) {
                         vec2 _wp = vPositionW.xz;
                         // strong multi-octave churn to break up smooth walls

@@ -332,9 +332,13 @@ void main() {
         float across = vLocalUv.x;
         float freq   = vParams.w;            // rung frequency along travel (tread)
 
-        // soft feathered quad edge — keeps abutting stamps seamless.
-        float edge = smoothstep(0.0, 0.08, across) * smoothstep(1.0, 0.92, across)
-                   * smoothstep(0.0, 0.04, along)  * smoothstep(1.0, 0.96, along);
+        // Feather the quad edges. Across (uv.x) is always feathered so the
+        // strip/print sides fade. The along (uv.y) ends are feathered ONLY for
+        // the discrete prints (foot/claw); continuous strips (tread/wheel) are
+        // elongated segment quads that overlap end-to-end, so feathering their
+        // ends would punch a dim seam at every joint.
+        float acrossEdge = smoothstep(0.0, 0.08, across) * smoothstep(1.0, 0.92, across);
+        float alongEdge  = smoothstep(0.0, 0.04, along)  * smoothstep(1.0, 0.96, along);
 
         float e = 0.02;
         vec2 nLocal = vec2(0.0);
@@ -347,16 +351,23 @@ void main() {
             float rutL = exp(-pow((across - 0.30) / 0.13, 2.0));
             float rutR = exp(-pow((across - 0.70) / 0.13, 2.0));
             float ruts = clamp(rutL + rutR, 0.0, 1.0);
-            float rung = 0.55 + 0.45 * sin(along * freq * 6.2831853);
-            disturb = clamp(disturb * (0.45 + 1.25 * ruts) * (0.7 + 0.3 * rung), 0.0, 0.95);
-            cov = edge;
+            float rung = 0.7 + 0.3 * sin(along * freq * 6.2831853);
+            // Capped low (≤0.45) so it stays a soft groove, not a black gouge,
+            // and below the plugin's scorch threshold so no crater rubble.
+            disturb = clamp(disturb * (0.5 + 0.8 * ruts) * rung, 0.0, 0.45);
+            // Coverage follows the ruts (transparent in the gap between them),
+            // NOT the full quad width. A crossing tread then only overwrites
+            // where its OWN ruts fall — its gap no longer wipes the track it
+            // crosses, so crossing treads interleave into a grid instead of
+            // erasing each other.
+            cov = acrossEdge * smoothstep(0.18, 0.45, ruts);
         } else if (cat < 1.5) {
             // WHEEL / bike: a single narrow continuous rut down the centre.
             float hax = wheelH(across + e) - wheelH(across - e);
             nLocal = -vec2(hax, 0.0) / (2.0 * e);
             float line = -wheelH(across);               // 0..1 depth
-            disturb = clamp(disturb * (0.3 + 1.4 * line), 0.0, 0.95);
-            cov = edge * smoothstep(0.05, 0.30, line);  // clear outside the line
+            disturb = clamp(disturb * (0.4 + 1.0 * line), 0.0, 0.45);
+            cov = acrossEdge * smoothstep(0.05, 0.30, line);  // clear outside the line
         } else if (cat < 2.5) {
             // FOOTPRINT: two discrete oval feet (fore-left / aft-right).
             float hx = feetH(vec2(across + e, along)) - feetH(vec2(across - e, along));
@@ -364,7 +375,7 @@ void main() {
             nLocal = -vec2(hx, hy) / (2.0 * e);
             float feet = -feetH(vec2(across, along));   // 0..1 depth
             disturb = clamp(disturb * (0.3 + 1.5 * feet), 0.0, 0.95);
-            cov = edge * smoothstep(0.05, 0.30, feet);  // discrete — gaps stay clean
+            cov = acrossEdge * alongEdge * smoothstep(0.05, 0.30, feet);  // discrete
         } else {
             // CLAW: chicken / spider three-toe splay, discrete per stamp.
             float hx = clawH(vec2(across + e, along)) - clawH(vec2(across - e, along));
@@ -372,7 +383,7 @@ void main() {
             nLocal = -vec2(hx, hy) / (2.0 * e);
             float claw = -clawH(vec2(across, along));
             disturb = clamp(disturb * (0.3 + 1.5 * claw), 0.0, 0.95);
-            cov = edge * smoothstep(0.05, 0.30, claw);
+            cov = acrossEdge * alongEdge * smoothstep(0.05, 0.30, claw);  // discrete
         }
 
         // map the local slope into world XZ via the quad's world axes
@@ -399,6 +410,14 @@ interface PendingMark {
     disturb: number;
     nStrength: number;
     treadFreq: number;
+    /** Optional explicit UV-space half-axis vectors for the quad's local +X
+     *  (across) and +Y (along). When present, uploadPending builds the
+     *  instance matrix from these instead of (rot, hu, hv) — used by the
+     *  connected track segments so an elongated quad maps correctly to world
+     *  XZ even on non-square maps (rotating in anisotropic UV space would
+     *  shear it). */
+    ax?: { u: number; v: number };
+    ay?: { u: number; v: number };
 }
 
 export class DecalOverlay {
@@ -412,6 +431,10 @@ export class DecalOverlay {
      *  trackTypeId). Empty until {@link setTrackTypes} is called; an unknown
      *  id then falls back to TREAD. */
     private trackCategories: number[] = [];
+    /** Last track-segment world position per unit, for connecting consecutive
+     *  continuous (tread/wheel) segments into one elongated quad instead of
+     *  isolated square stamps (which gap + jag on turns / at speed). */
+    private lastTrackPos = new Map<number, { x: number; z: number }>();
     /** world extent in elmos; world XZ → UV is (x/worldW, z/worldH). */
     private worldW = 1;
     private worldH = 1;
@@ -563,27 +586,73 @@ export class DecalOverlay {
 
     private addTrack(ev: TrackSegmentEvent): void {
         const w = ev.width > 0 ? ev.width : 24;
-        // Square stamp, half-size = w/2 in each axis (UV-scaled per axis).
+        const cat = this.trackCategories[ev.trackTypeId] ?? TRACK_TREAD;
+        // kind carries the pattern category (1=tread, 2=wheel, 3=foot, 4=claw)
+        // so the shader picks the right mark for the unit type.
+        const kind = KIND_TRACK_BASE + cat;
+
+        if (cat === TRACK_TREAD || cat === TRACK_WHEEL) {
+            // CONTINUOUS tracks: connect this segment to the unit's previous
+            // one into a single elongated quad (length = travel since the last
+            // segment), so the strip stays unbroken on turns and at speed
+            // instead of dropping isolated square stamps that gap + jag.
+            const last = this.lastTrackPos.get(ev.unitId);
+            this.lastTrackPos.set(ev.unitId, { x: ev.x, z: ev.z });
+            if (last) {
+                const dx = ev.x - last.x;
+                const dz = ev.z - last.z;
+                const len = Math.hypot(dx, dz);
+                // Drop degenerate / implausibly long links (a long gap means the
+                // unit was out of LOS, died + a new one reused the id, or
+                // teleported — bridging it would draw one giant streak).
+                if (len > 1e-3 && len < w * 8) {
+                    const tx = dx / len, tz = dz / len;          // travel unit vec
+                    // Overlap the joint slightly so consecutive segments meet
+                    // seamlessly (the shader no longer feathers strip ends).
+                    const halfLen = len * 0.5 + w * 0.15;
+                    const halfW = w * 0.5;
+                    // Build the quad's UV-space half-axes straight from the world
+                    // across/along vectors (across ⟂ travel = (tz,-tx)); avoids
+                    // the shear that rotating in anisotropic UV space causes for
+                    // a long quad on a non-square map.
+                    const ax = { u: (tz * halfW) / this.worldW, v: (-tx * halfW) / this.worldH };
+                    const ay = { u: (tx * halfLen) / this.worldW, v: (tz * halfLen) / this.worldH };
+                    this.pending.push({
+                        cu: (last.x + ev.x) * 0.5 / this.worldW,
+                        cv: (last.z + ev.z) * 0.5 / this.worldH,
+                        hu: 0, hv: 0, rot: 0, ax, ay,
+                        kind,
+                        // Light + shallow: continuous tracks read as a subtle
+                        // pressed groove, not a black gouge. Kept low so the
+                        // terrain plugin's crater churn/rubble (gated on strong
+                        // scorch/relief) never fires on them — that procedural
+                        // detail is what made the tread blurry + the bike line
+                        // look like diagonal hatching.
+                        disturb: 0.4,
+                        nStrength: 0.4,
+                        // Rung frequency = rungs over this segment, chosen for a
+                        // constant ~world spacing regardless of segment length.
+                        treadFreq: Math.max(1, len / Math.max(6, w * 0.5)),
+                    });
+                }
+            }
+            return; // first sighting (no last pos) lays nothing; the next links
+        }
+
+        // DISCRETE prints (foot / claw): one square stamp per segment, oriented
+        // along travel. The shapes tile across abutting stamps into a trail; we
+        // want them individual, so no segment-connecting here.
         const hu = (w * 0.5) / this.worldW;
         const hv = (w * 0.5) / this.worldH;
-        // Heading about the overlay plane so the quad's local +Y axis aligns
-        // with the XZ travel vector. The blit matrix maps local +Y to world
-        // (-sin rot, cos rot) in (X,Z); solving for travel (dirX, dirZ) gives
-        // rot = atan2(-dirX, dirZ). (Using atan2(dirX, dirZ) reflects the
-        // along-axis across Z — correct for axis-aligned travel but ~90° off on
-        // diagonals, which is why the tread didn't match direction.)
+        // Heading so the quad's local +Y axis aligns with the XZ travel vector.
+        // The blit matrix maps local +Y to (-sin rot, cos rot) in (X,Z); solving
+        // for travel (dirX, dirZ) gives rot = atan2(-dirX, dirZ).
         const rot = Math.atan2(-ev.dirX, ev.dirZ);
-        const cat = this.trackCategories[ev.trackTypeId] ?? TRACK_TREAD;
         this.pending.push({
             cu: ev.x / this.worldW,
             cv: ev.z / this.worldH,
             hu, hv, rot,
-            // kind carries the pattern category (1=tread, 2=wheel, 3=foot,
-            // 4=claw) so the shader picks the right mark for the unit type.
-            kind: KIND_TRACK_BASE + cat,
-            // Strong, clearly-visible mark: heavy albedo darkening in the ruts /
-            // prints (shader scales this up by shape presence) + pronounced
-            // relief.
+            kind,
             disturb: 0.7,
             nStrength: 1.4,
             treadFreq: 4.0,
@@ -600,15 +669,26 @@ export class DecalOverlay {
         const params = new Float32Array(n * 4);
         for (let i = 0; i < n; i++) {
             const m = this.pending[i];
-            // 2D transform in UV space: rotate+scale the unit quad, translate
-            // to (cu,cv). Column-major mat4 (Babylon thin-instance layout).
-            const c = Math.cos(m.rot), s = Math.sin(m.rot);
             const o = i * 16;
-            // columns: X axis, Y axis, Z, translation
-            matrices[o + 0] =  c * m.hu * 2; matrices[o + 1] =  s * m.hu * 2; matrices[o + 2] = 0; matrices[o + 3] = 0;
-            matrices[o + 4] = -s * m.hv * 2; matrices[o + 5] =  c * m.hv * 2; matrices[o + 6] = 0; matrices[o + 7] = 0;
-            matrices[o + 8] = 0;             matrices[o + 9] = 0;             matrices[o + 10] = 1; matrices[o + 11] = 0;
-            matrices[o + 12] = m.cu;         matrices[o + 13] = m.cv;         matrices[o + 14] = 0; matrices[o + 15] = 1;
+            // columns: X axis (across), Y axis (along), Z, translation.
+            // Column-major mat4 (Babylon thin-instance layout). The unit quad
+            // spans [-0.5,0.5], so a column of length L gives half-extent L/2 —
+            // hence the ×2 on the half-axes below.
+            let x0: number, x1: number, y0: number, y1: number;
+            if (m.ax && m.ay) {
+                // Explicit UV-space half-axes (connected track segments).
+                x0 = m.ax.u * 2; x1 = m.ax.v * 2;
+                y0 = m.ay.u * 2; y1 = m.ay.v * 2;
+            } else {
+                // 2D rotate+scale of the unit quad by (rot, hu, hv).
+                const c = Math.cos(m.rot), s = Math.sin(m.rot);
+                x0 =  c * m.hu * 2; x1 =  s * m.hu * 2;
+                y0 = -s * m.hv * 2; y1 =  c * m.hv * 2;
+            }
+            matrices[o + 0] = x0; matrices[o + 1] = x1; matrices[o + 2] = 0; matrices[o + 3] = 0;
+            matrices[o + 4] = y0; matrices[o + 5] = y1; matrices[o + 6] = 0; matrices[o + 7] = 0;
+            matrices[o + 8] = 0;  matrices[o + 9] = 0;  matrices[o + 10] = 1; matrices[o + 11] = 0;
+            matrices[o + 12] = m.cu; matrices[o + 13] = m.cv; matrices[o + 14] = 0; matrices[o + 15] = 1;
 
             params[i * 4 + 0] = m.kind;
             params[i * 4 + 1] = m.disturb;
@@ -630,6 +710,7 @@ export class DecalOverlay {
         this.blitMat.dispose();
         this.rttCamera.dispose();
         this.pending = [];
+        this.lastTrackPos.clear();
     }
 }
 
