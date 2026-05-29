@@ -58,6 +58,20 @@ export function createSceneLighting(scene: Scene, camera: Camera): SceneLighting
     renderPipeline.fxaaEnabled = clientSettings.getBool('gfx.fxaa', true);
     clientSettings.subscribe('gfx.msaaSamples', v => { renderPipeline.samples = Number(v); });
     clientSettings.subscribe('gfx.fxaa', v => { renderPipeline.fxaaEnabled = Boolean(v); });
+
+    // HDR bloom (PLAN-weapon-fx-gaps L1). The pipeline is HDR (RGBA16F)
+    // and ACES-tonemapped, so emissive FX — weapon bolts, explosion CEGs,
+    // and the dynamic FxLightPool lights — push values above 1.0. Bloom
+    // is what makes those read as glowing rather than merely bright. The
+    // threshold is high so only genuinely HDR pixels bloom (the lit
+    // terrain stays crisp); weight/kernel are conservative. All four are
+    // live-tunable via window.__renderPipeline.
+    renderPipeline.bloomEnabled = clientSettings.getBool('gfx.bloom', true);
+    renderPipeline.bloomThreshold = 0.85;
+    renderPipeline.bloomWeight = 0.35;
+    renderPipeline.bloomKernel = 64;
+    renderPipeline.bloomScale = 0.5;
+    clientSettings.subscribe('gfx.bloom', v => { renderPipeline.bloomEnabled = Boolean(v); });
     (window as unknown as { __renderPipeline: unknown }).__renderPipeline = renderPipeline;
 
     const csm = createCsm(sun);
