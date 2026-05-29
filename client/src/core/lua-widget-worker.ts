@@ -1085,6 +1085,15 @@ async function init(
         setMasterVolume: (volume) => {
             postToMain({ type: 'setMasterVolume', volume });
         },
+        // Spring.GetConfigInt / SetConfigInt store bridge. The worker has
+        // no localStorage; config lives in the main-thread ClientSettings
+        // store. Reads hit the worker-local storageCache (seeded at init
+        // with all springConfig.* keys); writes go through saveToStorage,
+        // which posts storage:set to main, where the springConfig.* key is
+        // mirrored into ClientSettings so native subscribers fire
+        // (PLAN-settings.md §2/§4). The host owns the springConfig. prefix.
+        configGet: (key) => loadFromStorage('springConfig.' + key),
+        configSet: (key, value) => saveToStorage('springConfig.' + key, value),
         setMinimapGeometry: (x, y, w, h) => {
             // Spring.SetMiniMapGeometry path (action handlers / direct
             // widget calls). gl.ConfigMiniMap reaches the host via the
@@ -3611,6 +3620,22 @@ function installIOStubs(rt: LuaRuntime, gameId: string): void {
     rt.setGlobal('_saveToStorage', (key: LuaValue, value: LuaValue) => {
         saveToStorage(String(key), String(value));
     });
+    // VFS storage fallback (PLAN-settings.md §3). VFS.FileExists / lookups
+    // consult this so files persisted via io.open (e.g. ZK's
+    // Config/ZK_data.lua settings, written by table.save) are visible
+    // after a reload — without it, FileExists returns false on the gated
+    // config load and saved settings never come back. The widget-ORDER
+    // files are excluded so the intentional "boot with all widgets
+    // enabled" default (the _writeCache clear at bootstrap) still holds.
+    const VFS_STORAGE_EXCLUDE = new Set([
+        'luaui/config/zk_order.lua',
+        'luaui/config/widget_data.lua',
+    ]);
+    rt.setGlobal('_vfsStorageLookup', (path: LuaValue) => {
+        const p = String(path);
+        if (VFS_STORAGE_EXCLUDE.has(p.toLowerCase())) return null;
+        return loadFromStorage(storagePrefix + p);
+    });
 
     rt.doString(`
         local _storagePrefix = "${escapeLuaString(storagePrefix)}"
@@ -5562,7 +5587,12 @@ end
 local function vfsLookup(path)
     local cached = VFS._writeCache[path]
     if cached then return cached end
-    return _vfsLookup(path)
+    local prefetched = _vfsLookup(path)
+    if prefetched then return prefetched end
+    -- PLAN-settings.md §3: fall back to persisted (io.open-written)
+    -- config so settings survive a reload. Excludes widget-order files.
+    if _vfsStorageLookup then return _vfsStorageLookup(path) end
+    return nil
 end
 
 -- Include-loop detection
@@ -5626,7 +5656,10 @@ VFS.FileExists = function(path, mode)
     if not path then return false end
     path = normalizePath(path)
     if VFS._writeCache[path] ~= nil then return true end
-    return _vfsExists(path)
+    if _vfsExists(path) then return true end
+    -- PLAN-settings.md §3: persisted config (e.g. Config/ZK_data.lua)
+    -- counts as existing so the gated load in cawidgets restores it.
+    return _vfsStorageLookup ~= nil and _vfsStorageLookup(path) ~= nil
 end
 
 VFS.LoadFile = function(path, mode)

@@ -1,0 +1,434 @@
+diff --git a/content/games/zk/LuaUI/Widgets/gui_web_graphics_settings.lua b/content/games/zk/LuaUI/Widgets/gui_web_graphics_settings.lua
+new file mode 100644
+index 0000000000..23952ee329
+--- /dev/null
++++ b/content/games/zk/LuaUI/Widgets/gui_web_graphics_settings.lua
+@@ -0,0 +1,205 @@
++function widget:GetInfo()
++	return {
++		name      = "Web Graphics Settings",
++		desc      = "Client-level graphics options (shadows, anti-aliasing) for the web client. Opened from Settings > Graphics > Edit Main Graphics Settings.",
++		author    = "spring-web",
++		date      = "2026",
++		license   = "GNU GPL v2",
++		layer     = 0,
++		enabled   = true,
++	}
++end
++
++-- This widget is injected via patches/ (zk-web-graphics-settings.patch).
++-- It is the web client's replacement for the native Recoil launcher /
++-- Lua-menu graphics page, which ZK delegates to but which does not exist
++-- in a browser. See PLAN-settings.md §6.
++--
++-- Every control reads/writes through the standard Spring config API
++-- (Spring.GetConfigInt / SetConfigInt). On the web client those calls
++-- land in the main-thread ClientSettings store (client-settings.ts), and
++-- the owning native subsystem (scene-lighting.ts for shadows + AA)
++-- subscribes to the key and applies the change. The widget itself is
++-- game-agnostic in spirit: it only talks to the config layer.
++
++local Chili
++local Window, ScrollPanel, StackPanel, Label, Trackbar, Checkbox, ComboBox
++local screen0
++local window  -- the panel window, nil while closed
++
++-- Mirrors PRESETS in client-settings.ts. Selecting a preset batch-sets
++-- the individual keys; the user can still override any single control.
++local PRESETS = {
++	{ name = "Low",    shadowMapSize = 1024, shadowFiltering = 0, msaaSamples = 1, fxaa = 0 },
++	{ name = "Medium", shadowMapSize = 2048, shadowFiltering = 1, msaaSamples = 2, fxaa = 1 },
++	{ name = "High",   shadowMapSize = 4096, shadowFiltering = 2, msaaSamples = 4, fxaa = 1 },
++}
++
++local SHADOW_SIZES   = { 1024, 2048, 4096 }
++local MSAA_SAMPLES   = { 1, 2, 4, 8 }
++local MSAA_LABELS    = { "Off", "2x", "4x", "8x" }
++local FILTER_LABELS  = { "Low", "Medium", "High" }  -- index-1 == gfx.shadowFiltering
++
++local B_HEIGHT = 30
++
++-- Find the array index whose value equals v (1-based), or `def`.
++local function indexOf(arr, v, def)
++	for i = 1, #arr do
++		if arr[i] == v then return i end
++	end
++	return def
++end
++
++local function getInt(key, def)
++	return Spring.GetConfigInt(key, def) or def
++end
++
++local function setInt(key, value)
++	Spring.SetConfigInt(key, value)
++end
++
++-- Apply a preset by batch-setting the underlying keys, then refresh the
++-- open panel's controls to match.
++local function applyPreset(preset)
++	setInt("gfx.shadowMapSize",   preset.shadowMapSize)
++	setInt("gfx.shadowFiltering", preset.shadowFiltering)
++	setInt("gfx.msaaSamples",     preset.msaaSamples)
++	setInt("gfx.fxaa",            preset.fxaa)
++end
++
++local function makeRow(labelText, control)
++	return StackPanel:New{
++		orientation = "horizontal",
++		autosize = true,
++		resizeItems = false,
++		width = "100%",
++		height = B_HEIGHT + 4,
++		children = {
++			Label:New{ caption = labelText, width = "45%", height = B_HEIGHT, valign = "center" },
++			control,
++		},
++	}
++end
++
++local function buildWindow()
++	local presetNames = {}
++	for i = 1, #PRESETS do presetNames[i] = PRESETS[i].name end
++
++	local presetCombo = ComboBox:New{
++		width = "50%", height = B_HEIGHT,
++		items = presetNames,
++		selected = 2,  -- Medium
++		OnSelect = { function(self, idx)
++			local preset = PRESETS[idx]
++			if preset then applyPreset(preset) end
++		end },
++	}
++
++	local shadowSizeCombo = ComboBox:New{
++		width = "50%", height = B_HEIGHT,
++		items = { "1024 (Low)", "2048 (Medium)", "4096 (High)" },
++		selected = indexOf(SHADOW_SIZES, getInt("gfx.shadowMapSize", 2048), 2),
++		OnSelect = { function(self, idx)
++			setInt("gfx.shadowMapSize", SHADOW_SIZES[idx] or 2048)
++		end },
++	}
++
++	local shadowFilterCombo = ComboBox:New{
++		width = "50%", height = B_HEIGHT,
++		items = FILTER_LABELS,
++		selected = getInt("gfx.shadowFiltering", 1) + 1,
++		OnSelect = { function(self, idx)
++			setInt("gfx.shadowFiltering", (idx or 2) - 1)
++		end },
++	}
++
++	local msaaCombo = ComboBox:New{
++		width = "50%", height = B_HEIGHT,
++		items = MSAA_LABELS,
++		selected = indexOf(MSAA_SAMPLES, getInt("gfx.msaaSamples", 2), 2),
++		OnSelect = { function(self, idx)
++			setInt("gfx.msaaSamples", MSAA_SAMPLES[idx] or 2)
++		end },
++	}
++
++	local fxaaCheck = Checkbox:New{
++		width = "50%", height = B_HEIGHT,
++		caption = "",
++		checked = getInt("gfx.fxaa", 1) ~= 0,
++		OnChange = { function(self, checked)
++			setInt("gfx.fxaa", checked and 1 or 0)
++		end },
++	}
++
++	local stack = StackPanel:New{
++		orientation = "vertical",
++		autosize = true,
++		resizeItems = false,
++		width = "100%",
++		children = {
++			Label:New{ caption = "Quality changes to shadow resolution and anti-aliasing samples take effect on the next game.", width = "100%", height = B_HEIGHT * 2, },
++			makeRow("Quality Preset", presetCombo),
++			makeRow("Shadow Resolution", shadowSizeCombo),
++			makeRow("Shadow Filtering", shadowFilterCombo),
++			makeRow("Anti-aliasing (MSAA)", msaaCombo),
++			makeRow("FXAA", fxaaCheck),
++		},
++	}
++
++	local scrW, scrH = Spring.GetViewGeometry()
++	window = Window:New{
++		caption = "Graphics Settings",
++		x = math.floor((scrW or 1280) / 2 - 200),
++		y = math.floor((scrH or 720) / 2 - 160),
++		width = 400,
++		height = 320,
++		minWidth = 300,
++		minHeight = 240,
++		classname = "main_window",
++		resizable = true,
++		draggable = true,
++		parent = screen0,
++		children = {
++			ScrollPanel:New{
++				x = 0, y = 0, right = 0, bottom = 0,
++				children = { stack },
++			},
++		},
++		OnDispose = { function() window = nil end },
++	}
++end
++
++local function openPanel()
++	if not Chili then return end
++	if window then
++		-- Already open — bring to front / recreate to refresh values.
++		window:Dispose()
++		window = nil
++	end
++	buildWindow()
++end
++
++function widget:Initialize()
++	if not WG.Chili then
++		-- No Chili (e.g. headless / minimal host) — nothing to show.
++		widgetHandler:RemoveWidget(widget)
++		return
++	end
++	Chili       = WG.Chili
++	Window      = Chili.Window
++	ScrollPanel = Chili.ScrollPanel
++	StackPanel  = Chili.StackPanel
++	Label       = Chili.Label
++	Trackbar    = Chili.Trackbar
++	Checkbox    = Chili.Checkbox
++	ComboBox    = Chili.ComboBox
++	screen0     = Chili.Screen0
++
++	-- The hook the patched "Edit Main Graphics Settings" button calls.
++	WG.OpenGraphicsPanel = openPanel
++end
++
++function widget:Shutdown()
++	if window then window:Dispose(); window = nil end
++	if WG.OpenGraphicsPanel == openPanel then WG.OpenGraphicsPanel = nil end
++end
+diff --git a/data/games/zk/LuaUI/Widgets/gui_web_graphics_settings.lua b/data/games/zk/LuaUI/Widgets/gui_web_graphics_settings.lua
+new file mode 100644
+index 0000000000..23952ee329
+--- /dev/null
++++ b/data/games/zk/LuaUI/Widgets/gui_web_graphics_settings.lua
+@@ -0,0 +1,205 @@
++function widget:GetInfo()
++	return {
++		name      = "Web Graphics Settings",
++		desc      = "Client-level graphics options (shadows, anti-aliasing) for the web client. Opened from Settings > Graphics > Edit Main Graphics Settings.",
++		author    = "spring-web",
++		date      = "2026",
++		license   = "GNU GPL v2",
++		layer     = 0,
++		enabled   = true,
++	}
++end
++
++-- This widget is injected via patches/ (zk-web-graphics-settings.patch).
++-- It is the web client's replacement for the native Recoil launcher /
++-- Lua-menu graphics page, which ZK delegates to but which does not exist
++-- in a browser. See PLAN-settings.md §6.
++--
++-- Every control reads/writes through the standard Spring config API
++-- (Spring.GetConfigInt / SetConfigInt). On the web client those calls
++-- land in the main-thread ClientSettings store (client-settings.ts), and
++-- the owning native subsystem (scene-lighting.ts for shadows + AA)
++-- subscribes to the key and applies the change. The widget itself is
++-- game-agnostic in spirit: it only talks to the config layer.
++
++local Chili
++local Window, ScrollPanel, StackPanel, Label, Trackbar, Checkbox, ComboBox
++local screen0
++local window  -- the panel window, nil while closed
++
++-- Mirrors PRESETS in client-settings.ts. Selecting a preset batch-sets
++-- the individual keys; the user can still override any single control.
++local PRESETS = {
++	{ name = "Low",    shadowMapSize = 1024, shadowFiltering = 0, msaaSamples = 1, fxaa = 0 },
++	{ name = "Medium", shadowMapSize = 2048, shadowFiltering = 1, msaaSamples = 2, fxaa = 1 },
++	{ name = "High",   shadowMapSize = 4096, shadowFiltering = 2, msaaSamples = 4, fxaa = 1 },
++}
++
++local SHADOW_SIZES   = { 1024, 2048, 4096 }
++local MSAA_SAMPLES   = { 1, 2, 4, 8 }
++local MSAA_LABELS    = { "Off", "2x", "4x", "8x" }
++local FILTER_LABELS  = { "Low", "Medium", "High" }  -- index-1 == gfx.shadowFiltering
++
++local B_HEIGHT = 30
++
++-- Find the array index whose value equals v (1-based), or `def`.
++local function indexOf(arr, v, def)
++	for i = 1, #arr do
++		if arr[i] == v then return i end
++	end
++	return def
++end
++
++local function getInt(key, def)
++	return Spring.GetConfigInt(key, def) or def
++end
++
++local function setInt(key, value)
++	Spring.SetConfigInt(key, value)
++end
++
++-- Apply a preset by batch-setting the underlying keys, then refresh the
++-- open panel's controls to match.
++local function applyPreset(preset)
++	setInt("gfx.shadowMapSize",   preset.shadowMapSize)
++	setInt("gfx.shadowFiltering", preset.shadowFiltering)
++	setInt("gfx.msaaSamples",     preset.msaaSamples)
++	setInt("gfx.fxaa",            preset.fxaa)
++end
++
++local function makeRow(labelText, control)
++	return StackPanel:New{
++		orientation = "horizontal",
++		autosize = true,
++		resizeItems = false,
++		width = "100%",
++		height = B_HEIGHT + 4,
++		children = {
++			Label:New{ caption = labelText, width = "45%", height = B_HEIGHT, valign = "center" },
++			control,
++		},
++	}
++end
++
++local function buildWindow()
++	local presetNames = {}
++	for i = 1, #PRESETS do presetNames[i] = PRESETS[i].name end
++
++	local presetCombo = ComboBox:New{
++		width = "50%", height = B_HEIGHT,
++		items = presetNames,
++		selected = 2,  -- Medium
++		OnSelect = { function(self, idx)
++			local preset = PRESETS[idx]
++			if preset then applyPreset(preset) end
++		end },
++	}
++
++	local shadowSizeCombo = ComboBox:New{
++		width = "50%", height = B_HEIGHT,
++		items = { "1024 (Low)", "2048 (Medium)", "4096 (High)" },
++		selected = indexOf(SHADOW_SIZES, getInt("gfx.shadowMapSize", 2048), 2),
++		OnSelect = { function(self, idx)
++			setInt("gfx.shadowMapSize", SHADOW_SIZES[idx] or 2048)
++		end },
++	}
++
++	local shadowFilterCombo = ComboBox:New{
++		width = "50%", height = B_HEIGHT,
++		items = FILTER_LABELS,
++		selected = getInt("gfx.shadowFiltering", 1) + 1,
++		OnSelect = { function(self, idx)
++			setInt("gfx.shadowFiltering", (idx or 2) - 1)
++		end },
++	}
++
++	local msaaCombo = ComboBox:New{
++		width = "50%", height = B_HEIGHT,
++		items = MSAA_LABELS,
++		selected = indexOf(MSAA_SAMPLES, getInt("gfx.msaaSamples", 2), 2),
++		OnSelect = { function(self, idx)
++			setInt("gfx.msaaSamples", MSAA_SAMPLES[idx] or 2)
++		end },
++	}
++
++	local fxaaCheck = Checkbox:New{
++		width = "50%", height = B_HEIGHT,
++		caption = "",
++		checked = getInt("gfx.fxaa", 1) ~= 0,
++		OnChange = { function(self, checked)
++			setInt("gfx.fxaa", checked and 1 or 0)
++		end },
++	}
++
++	local stack = StackPanel:New{
++		orientation = "vertical",
++		autosize = true,
++		resizeItems = false,
++		width = "100%",
++		children = {
++			Label:New{ caption = "Quality changes to shadow resolution and anti-aliasing samples take effect on the next game.", width = "100%", height = B_HEIGHT * 2, },
++			makeRow("Quality Preset", presetCombo),
++			makeRow("Shadow Resolution", shadowSizeCombo),
++			makeRow("Shadow Filtering", shadowFilterCombo),
++			makeRow("Anti-aliasing (MSAA)", msaaCombo),
++			makeRow("FXAA", fxaaCheck),
++		},
++	}
++
++	local scrW, scrH = Spring.GetViewGeometry()
++	window = Window:New{
++		caption = "Graphics Settings",
++		x = math.floor((scrW or 1280) / 2 - 200),
++		y = math.floor((scrH or 720) / 2 - 160),
++		width = 400,
++		height = 320,
++		minWidth = 300,
++		minHeight = 240,
++		classname = "main_window",
++		resizable = true,
++		draggable = true,
++		parent = screen0,
++		children = {
++			ScrollPanel:New{
++				x = 0, y = 0, right = 0, bottom = 0,
++				children = { stack },
++			},
++		},
++		OnDispose = { function() window = nil end },
++	}
++end
++
++local function openPanel()
++	if not Chili then return end
++	if window then
++		-- Already open — bring to front / recreate to refresh values.
++		window:Dispose()
++		window = nil
++	end
++	buildWindow()
++end
++
++function widget:Initialize()
++	if not WG.Chili then
++		-- No Chili (e.g. headless / minimal host) — nothing to show.
++		widgetHandler:RemoveWidget(widget)
++		return
++	end
++	Chili       = WG.Chili
++	Window      = Chili.Window
++	ScrollPanel = Chili.ScrollPanel
++	StackPanel  = Chili.StackPanel
++	Label       = Chili.Label
++	Trackbar    = Chili.Trackbar
++	Checkbox    = Chili.Checkbox
++	ComboBox    = Chili.ComboBox
++	screen0     = Chili.Screen0
++
++	-- The hook the patched "Edit Main Graphics Settings" button calls.
++	WG.OpenGraphicsPanel = openPanel
++end
++
++function widget:Shutdown()
++	if window then window:Dispose(); window = nil end
++	if WG.OpenGraphicsPanel == openPanel then WG.OpenGraphicsPanel = nil end
++end
+diff --git a/content/games/zk/LuaUI/Widgets/gui_simple_settings.lua b/content/games/zk/LuaUI/Widgets/gui_simple_settings.lua
+index 1111111..2222222 100644
+--- a/content/games/zk/LuaUI/Widgets/gui_simple_settings.lua
++++ b/content/games/zk/LuaUI/Widgets/gui_simple_settings.lua
+@@ -140,7 +140,7 @@
+ 	{
+ 		optionName = "moreOptionsButton",
+-		optionFunction = function(self) Spring.SendLuaMenuMsg("openSettingsTab Graphics") end,
++		optionFunction = function(self) if WG.OpenGraphicsPanel then WG.OpenGraphicsPanel() else Spring.SendLuaMenuMsg("openSettingsTab Graphics") end end,
+ 		name = "Edit Main Graphics Settings",
+ 		type = "button",
+ 		path = "Settings/Graphics",

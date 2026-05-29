@@ -14,7 +14,13 @@
  *     per-item gain / pitch / priority / maxconcurrent / maxdist /
  *     rolloff / in3d defaults
  *   - Must resume AudioContext on first user interaction
+ *
+ * Volume persistence lives in ClientSettings (`snd_vol*`, 0..100 — see
+ * PLAN-settings.md §7), the single source of truth shared with the
+ * in-game options menu. The old `audio.master` / `audio.channel.*`
+ * localStorage keys migrate into it once on first run.
  */
+import { clientSettings } from './client-settings.js';
 
 /// Mix channels. Indices match the SoundChannel enum in protocol.fbs
 /// so wire values cast straight through.
@@ -146,9 +152,21 @@ const ALL_CHANNELS: AudioChannel[] = [
     AudioChannel.BGMusic,
 ];
 
-/// localStorage key prefix for persisted per-channel volume.
+/// Legacy localStorage keys (pre-ClientSettings). Read once at startup to
+/// migrate, then no longer written. See PLAN-settings.md §7.
 const CHANNEL_VOL_STORAGE_PREFIX = 'audio.channel.';
 const MASTER_VOL_STORAGE_KEY = 'audio.master';
+
+/// ClientSettings volume keys (0..100). `snd_volmaster` is the master;
+/// the rest map per-channel. Mirrors VOLUME_CONFIG_KEYS in lua-spring-api.
+const MASTER_VOL_SETTING = 'snd_volmaster';
+const CHANNEL_VOL_SETTING: Record<AudioChannel, string> = {
+    [AudioChannel.General]:       'snd_volgeneral',
+    [AudioChannel.Battle]:        'snd_volbattle',
+    [AudioChannel.UnitReply]:     'snd_volunitreply',
+    [AudioChannel.UserInterface]: 'snd_volui',
+    [AudioChannel.BGMusic]:       'snd_volmusic',
+};
 
 const ZOOM_CLOSE_HEIGHT = 400;
 const ZOOM_FAR_HEIGHT = 3500;
@@ -244,9 +262,13 @@ export class AudioManager {
         this.ctx = new AudioContext();
         this.masterGain = this.ctx.createGain();
 
-        // Restore persisted master volume.
-        const persistedMaster = this.readNumber(MASTER_VOL_STORAGE_KEY, 1);
-        this.masterGain.gain.value = persistedMaster;
+        // One-time migration of legacy audio.* volume keys into
+        // ClientSettings (PLAN-settings.md §7). Done before the first read
+        // so migrated values win; idempotent (only fills unset keys).
+        this.migrateLegacyVolumes();
+
+        // Master volume from ClientSettings (0..100 → 0..1).
+        this.masterGain.gain.value = clientSettings.getInt(MASTER_VOL_SETTING, 100) / 100;
 
         // Master chain: master gain -> (wet/dry split through convolver)
         //               -> limiter -> destination.
@@ -282,15 +304,27 @@ export class AudioManager {
         this.channelActiveCount  = {} as Record<AudioChannel, number>;
         for (const ch of ALL_CHANNELS) {
             const bus = this.ctx.createGain();
-            const persisted = this.readNumber(
-                CHANNEL_VOL_STORAGE_PREFIX + CHANNEL_NAMES[ch],
-                ch === AudioChannel.BGMusic ? 0.3 : 1.0);
-            bus.gain.value = persisted;
+            // Channel volume from ClientSettings (0..100 → 0..1).
+            const vol = clientSettings.getInt(CHANNEL_VOL_SETTING[ch], 100) / 100;
+            bus.gain.value = vol;
             bus.connect(this.masterGain);
             this.channelBuses[ch] = bus;
-            this.channelVolumes[ch] = persisted;
+            this.channelVolumes[ch] = vol;
             this.channelEnabled[ch] = true;
             this.channelActiveCount[ch] = 0;
+        }
+
+        // Subscribe so any writer (in-game menu, our graphics/audio panel,
+        // a direct Spring.SetConfigInt) applies live through one path.
+        // The setters below persist by writing these same keys, so the
+        // subscriber is also their apply step — no separate apply call.
+        clientSettings.subscribe(MASTER_VOL_SETTING, v => {
+            this.masterGain.gain.value = Math.max(0, Math.min(1, Number(v) / 100));
+        });
+        for (const ch of ALL_CHANNELS) {
+            clientSettings.subscribe(CHANNEL_VOL_SETTING[ch], v => {
+                this.applyChannelVolume(ch, Math.max(0, Math.min(1, Number(v) / 100)));
+            });
         }
 
         // Pre-create voice pool. Each voice connects to a panner
@@ -456,11 +490,12 @@ export class AudioManager {
     // Channel volume + enable
     // ============================================================
 
-    /// Master volume (0..1). Persisted across sessions.
+    /// Master volume (0..1). Persists to ClientSettings (snd_volmaster,
+    /// 0..100); the subscriber installed in the constructor applies it to
+    /// the gain node, so persistence and apply share one path.
     setMasterVolume(v: number): void {
         const vol = Math.max(0, Math.min(1, v));
-        this.masterGain.gain.value = vol;
-        this.writeNumber(MASTER_VOL_STORAGE_KEY, vol);
+        clientSettings.set(MASTER_VOL_SETTING, Math.round(vol * 100));
     }
 
     /// Backwards-compatible alias for setMasterVolume.
@@ -472,16 +507,38 @@ export class AudioManager {
         return this.masterGain.gain.value;
     }
 
-    /// Per-channel volume (0..1). Persisted under
-    /// `audio.channel.<name>` in localStorage.
+    /// Per-channel volume (0..1). Persists to ClientSettings
+    /// (snd_vol<channel>, 0..100); the subscriber applies it.
     setChannelVolume(channel: AudioChannel, v: number): void {
         const vol = Math.max(0, Math.min(1, v));
+        clientSettings.set(CHANNEL_VOL_SETTING[channel], Math.round(vol * 100));
+    }
+
+    /// Apply a channel volume to the audio graph (0..1) without
+    /// persisting. Called by the ClientSettings subscriber.
+    private applyChannelVolume(channel: AudioChannel, vol: number): void {
         this.channelVolumes[channel] = vol;
         if (this.channelEnabled[channel]) {
             this.channelBuses[channel].gain.value = vol;
         }
-        this.writeNumber(
-            CHANNEL_VOL_STORAGE_PREFIX + CHANNEL_NAMES[channel], vol);
+    }
+
+    /// Migrate legacy audio.master / audio.channel.* localStorage keys
+    /// into ClientSettings (PLAN-settings.md §7). Only fills keys that
+    /// have no ClientSettings value yet, so it's a one-time, idempotent
+    /// move; the legacy keys are left in place but no longer read/written.
+    private migrateLegacyVolumes(): void {
+        const legacyMaster = this.readNumberOrNull(MASTER_VOL_STORAGE_KEY);
+        if (legacyMaster != null && !clientSettings.has(MASTER_VOL_SETTING)) {
+            clientSettings.set(MASTER_VOL_SETTING, Math.round(legacyMaster * 100));
+        }
+        for (const ch of ALL_CHANNELS) {
+            const legacy = this.readNumberOrNull(
+                CHANNEL_VOL_STORAGE_PREFIX + CHANNEL_NAMES[ch]);
+            if (legacy != null && !clientSettings.has(CHANNEL_VOL_SETTING[ch])) {
+                clientSettings.set(CHANNEL_VOL_SETTING[ch], Math.round(legacy * 100));
+            }
+        }
     }
 
     getChannelVolume(channel: AudioChannel): number {
@@ -842,18 +899,16 @@ export class AudioManager {
         return dx * dx + dy * dy + dz * dz;
     }
 
-    private readNumber(key: string, def: number): number {
+    /// Read a legacy numeric localStorage key, or null if unset/invalid.
+    /// Used only by migrateLegacyVolumes (PLAN-settings.md §7).
+    private readNumberOrNull(key: string): number | null {
         try {
             const raw = localStorage.getItem(key);
-            if (raw == null) return def;
+            if (raw == null) return null;
             const v = parseFloat(raw);
-            return Number.isFinite(v) ? v : def;
+            return Number.isFinite(v) ? v : null;
         } catch {
-            return def;
+            return null;
         }
-    }
-
-    private writeNumber(key: string, value: number): void {
-        try { localStorage.setItem(key, String(value)); } catch { /* ok */ }
     }
 }

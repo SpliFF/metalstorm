@@ -12,6 +12,14 @@ import {
     Scene, ShadowGenerator, Vector3,
 } from '@babylonjs/core';
 import { normaliseSunDir, type MapLighting } from './map-lighting.js';
+import { clientSettings } from './client-settings.js';
+
+/** gfx.shadowFiltering (0/1/2) → Babylon CSM filtering quality. */
+const SHADOW_FILTERING_QUALITY = [
+    ShadowGenerator.QUALITY_LOW,
+    ShadowGenerator.QUALITY_MEDIUM,
+    ShadowGenerator.QUALITY_HIGH,
+] as const;
 
 export interface SceneLighting {
     ambient: HemisphericLight;
@@ -38,13 +46,18 @@ export function createSceneLighting(scene: Scene, camera: Camera): SceneLighting
     sun.diffuse = new Color3(1.0, 0.95, 0.85);
 
     const renderPipeline = new DefaultRenderingPipeline('default', true, scene, [camera]);
-    renderPipeline.samples = 4;
+    // Anti-aliasing from ClientSettings (PLAN-settings.md §5). MSAA
+    // samples and FXAA apply live; the panel/menu can flip them without a
+    // restart. Default is the 'medium' preset (samples=2, fxaa on).
+    renderPipeline.samples = clientSettings.getInt('gfx.msaaSamples', 2);
     renderPipeline.imageProcessing.toneMappingEnabled = true;
     renderPipeline.imageProcessing.toneMappingType =
         ImageProcessingConfiguration.TONEMAPPING_ACES;
     renderPipeline.imageProcessing.exposure = 1.0;
     renderPipeline.imageProcessing.contrast = 1.0;
-    renderPipeline.fxaaEnabled = true;
+    renderPipeline.fxaaEnabled = clientSettings.getBool('gfx.fxaa', true);
+    clientSettings.subscribe('gfx.msaaSamples', v => { renderPipeline.samples = Number(v); });
+    clientSettings.subscribe('gfx.fxaa', v => { renderPipeline.fxaaEnabled = Boolean(v); });
     (window as unknown as { __renderPipeline: unknown }).__renderPipeline = renderPipeline;
 
     const csm = createCsm(sun);
@@ -58,14 +71,27 @@ export function createSceneLighting(scene: Scene, camera: Camera): SceneLighting
  * registration flow, and the customAllowRendering trap.
  */
 function createCsm(sun: DirectionalLight): CascadedShadowGenerator {
-    const csm = new CascadedShadowGenerator(2048, sun);
+    // Shadow-map resolution from ClientSettings (PLAN-settings.md §5).
+    // The CSM map size is fixed at construction — changing it needs a
+    // scene-lighting rebuild (the setting is flagged requiresRestart), so
+    // we read it here but don't subscribe for live changes. Default is the
+    // 'medium' preset (2048).
+    const shadowMapSize = clientSettings.getInt('gfx.shadowMapSize', 2048);
+    const csm = new CascadedShadowGenerator(shadowMapSize, sun);
     csm.numCascades = 4;
     csm.lambda = 0.85;
     csm.stabilizeCascades = true;
     csm.cascadeBlendPercentage = 0.05;
     csm.shadowMaxZ = 8000;
     csm.usePercentageCloserFiltering = true;
-    csm.filteringQuality = ShadowGenerator.QUALITY_HIGH;
+    // Filtering quality applies live (no rebuild needed).
+    const filtering = clientSettings.getInt('gfx.shadowFiltering', 1);
+    csm.filteringQuality = SHADOW_FILTERING_QUALITY[filtering]
+        ?? ShadowGenerator.QUALITY_MEDIUM;
+    clientSettings.subscribe('gfx.shadowFiltering', v => {
+        csm.filteringQuality = SHADOW_FILTERING_QUALITY[Number(v)]
+            ?? ShadowGenerator.QUALITY_MEDIUM;
+    });
     // See PLAN-shadow-zoom-fix.md. Without autoCalcDepthBounds the four
     // cascades are spread across the full camera.minZ..shadowMaxZ slab
     // (1..8000) every frame, regardless of where the units actually are.

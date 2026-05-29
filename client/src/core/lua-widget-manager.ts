@@ -21,6 +21,7 @@ import type { EntityStateSnapshot } from './entity-state.js';
 import type { AudioManager } from './audio.js';
 import { AudioChannel, rewriteAudioExtensionToWebm } from './audio.js';
 import { debugConsole } from './debug-console.js';
+import { clientSettings } from './client-settings.js';
 import { logIngest } from './log-ingest.js';
 import { IntelTransitionTracker } from './intel-transitions.js';
 import type { LosBitmap } from './los-bitmap.js';
@@ -318,12 +319,25 @@ export class LuaWidgetManager {
             mapSourceUrl: this.map.mapSourceUrl,
         };
 
-        // Collect all luaui:* localStorage entries so the worker can read config
+        // Collect localStorage entries the worker needs a synchronous copy
+        // of: luaui:* (widget config + saved state) and springConfig.*
+        // (Spring.GetConfigInt store, read through ctx.configGet — see
+        // PLAN-settings.md §2). The worker can't touch localStorage, so it
+        // seeds its storageCache from this snapshot. Also seed any
+        // ClientSettings defaults that have no stored value yet, so the
+        // worker's first GetConfigInt for a registered key returns the
+        // medium-preset default rather than the caller's fallback.
         const storageData: Record<string, string> = {};
         for (let i = 0; i < localStorage.length; i++) {
             const k = localStorage.key(i);
-            if (k?.startsWith('luaui:')) {
+            if (k?.startsWith('luaui:') || k?.startsWith('springConfig.')) {
                 storageData[k] = localStorage.getItem(k) ?? '';
+            }
+        }
+        for (const def of clientSettings.defs()) {
+            const storageKey = 'springConfig.' + def.key;
+            if (!(storageKey in storageData)) {
+                storageData[storageKey] = clientSettings.getStored(def.key);
             }
         }
 
@@ -1188,6 +1202,15 @@ export class LuaWidgetManager {
                 try {
                     localStorage.setItem(msg.key, msg.value);
                 } catch { /* silent */ }
+                // Mirror Spring config writes into ClientSettings so native
+                // subsystems (shadow quality, decals, particle caps, …) that
+                // subscribed to the key apply the change live (PLAN-settings.md
+                // §2/§4). ClientSettings re-persists under the same prefixed
+                // key — idempotent. Non-springConfig keys (luaui:*) are left
+                // to localStorage alone.
+                if (msg.key.startsWith('springConfig.')) {
+                    clientSettings.set(msg.key.slice('springConfig.'.length), msg.value);
+                }
                 break;
 
             case 'soundItems': {

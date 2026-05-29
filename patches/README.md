@@ -23,6 +23,20 @@ hand-editing the files again.
   groups, …) never appeared. Computed fresh each call, so there is no
   staleness when the cursor leaves an element.
 
+- **zk-web-graphics-settings.patch** — adds the web client's graphics
+  options panel (`gui_web_graphics_settings.lua`, a Chili window with
+  shadow-resolution / shadow-filtering / MSAA / FXAA controls + a quality
+  preset) and repoints ZK's "Edit Main Graphics Settings" button
+  (`gui_simple_settings.lua`) to open it via `WG.OpenGraphicsPanel`
+  instead of the no-op `Spring.SendLuaMenuMsg("openSettingsTab Graphics")`
+  (which targets the native Recoil launcher we don't have). Every control
+  reads/writes through `Spring.GetConfigInt`/`SetConfigInt`, which on the
+  web client land in the main-thread `ClientSettings` store; scene
+  lighting subscribes to the keys and applies them. See PLAN-settings.md
+  §6. The widget file is added to **both** `content/` and `data/` because
+  the content→data mirror below only copies files whose `data/` target
+  already exists.
+
 ## Apply / re-apply
 
 ```sh

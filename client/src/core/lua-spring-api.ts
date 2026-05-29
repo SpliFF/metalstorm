@@ -174,6 +174,17 @@ export interface SpringAPIContext {
     /** Master volume bridge — same plumbing for `snd_volmaster`. */
     setMasterVolume?(volume: number): void;
     /**
+     * Config store bridge. `Spring.GetConfigInt` / `SetConfigInt` etc.
+     * delegate here so the host decides where settings live. The worker
+     * routes these through its `storageCache` + `storage:set` bridge to
+     * the main-thread `ClientSettings` store (see PLAN-settings.md §2);
+     * keys are bare (no `springConfig.` prefix — the host adds it).
+     * Reads are synchronous against the worker's local cache. If absent,
+     * the API falls back to direct `localStorage` access.
+     */
+    configGet?(key: string): string | null;
+    configSet?(key: string, value: string): void;
+    /**
      * Forward a `Spring.SetMiniMapGeometry(x, y, w, h)` call to the host.
      * Coords are in Spring screen-space (Y-up, origin bottom-left, pixels).
      * The host converts to DOM-space and applies it to the native Minimap
@@ -548,21 +559,42 @@ export interface FeatureEntry {
 // Config store + audio-key side-effects
 // ────────────────────────────────────────────────────────────────────
 //
-// Spring.GetConfigInt / SetConfigInt persist across sessions in
-// localStorage under `springConfig.<key>`. The `snd_vol*` family also
-// fires a side-effect that pushes the value into AudioManager via
-// the host context, so chili's epicmenu trackbars work end-to-end
-// without source patches.
+// Spring.GetConfigInt / SetConfigInt persist across sessions. The store
+// itself lives on the main thread (ClientSettings, see PLAN-settings.md);
+// this code runs in the widget worker, which has no localStorage, so it
+// delegates through `ctx.configGet/configSet` — wired by the worker host
+// to its `storageCache` + `storage:set` bridge. The host owns the
+// `springConfig.` key prefix. The direct-localStorage path is only a
+// fallback for hosts that don't supply the hooks.
+//
+// The `snd_vol*` family additionally fires a side-effect that pushes the
+// value into AudioManager via the host context, so chili's epicmenu
+// trackbars work end-to-end without source patches.
 
-function readConfigStore(key: string): string | null {
+function readConfigStore(ctx: SpringAPIContext, key: string): string | null {
+    if (ctx.configGet) return ctx.configGet(key);
     try { return localStorage.getItem('springConfig.' + key); }
     catch { return null; }
 }
 
-function writeConfigStore(key: string, value: string): void {
+function writeConfigStore(ctx: SpringAPIContext, key: string, value: string): void {
+    if (ctx.configSet) { ctx.configSet(key, value); return; }
     try { localStorage.setItem('springConfig.' + key, value); }
     catch { /* silent */ }
 }
+
+// Engine graphics console verbs → ClientSettings config keys. ZK's
+// epicmenu fires the verb (e.g. `grounddecals 0`) in lockstep with the
+// `springsetting` write; we map it to the same config key the menu's
+// springsetting uses, so either path lands in the same store. The native
+// effect is applied by a main-thread subscriber (PLAN-settings.md §4).
+const ENGINE_GRAPHICS_VERBS: Record<string, string> = {
+    'grounddecals':    'GroundDecals',
+    'maxparticles':    'MaxParticles',
+    'distdraw':        'UnitLodDist',
+    'disticon':        'UnitIconDist',
+    'advmodelshading': 'AdvUnitShading',
+};
 
 const VOLUME_CONFIG_KEYS: Record<string, string> = {
     'snd_volmaster':     'master',
@@ -1152,11 +1184,21 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
                     const k = rest.slice(0, sp).trim();
                     const v = rest.slice(sp + 1).trim();
                     if (!k) return;
-                    writeConfigStore(k, v);
+                    writeConfigStore(ctx, k, v);
                     const n = parseFloat(v);
                     if (Number.isFinite(n)) {
                         applyConfigSideEffect(ctx, k, n);
                     }
+                } else if (ENGINE_GRAPHICS_VERBS[verb]) {
+                    // Engine graphics console verbs (grounddecals N,
+                    // maxparticles N, distdraw N, …). ZK's epicmenu fires
+                    // these alongside the springsetting write. Map the verb
+                    // to its config key and persist it — the native effect
+                    // fires on the main thread via a ClientSettings
+                    // subscriber (PLAN-settings.md §4).
+                    const configKey = ENGINE_GRAPHICS_VERBS[verb];
+                    const v = rest.split(/\s+/)[0] ?? '';
+                    if (v !== '') writeConfigStore(ctx, configKey, v);
                 }
             };
             for (const a of args) {
@@ -1166,7 +1208,7 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         GetConfigInt: (key: LuaValue, def: LuaValue) => {
             const k = typeof key === 'string' ? key : '';
             if (!k) return Number(def ?? 0);
-            const raw = readConfigStore(k);
+            const raw = readConfigStore(ctx, k);
             if (raw == null) return Number(def ?? 0);
             const n = parseInt(raw, 10);
             return Number.isFinite(n) ? n : Number(def ?? 0);
@@ -1174,7 +1216,7 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         GetConfigFloat: (key: LuaValue, def: LuaValue) => {
             const k = typeof key === 'string' ? key : '';
             if (!k) return Number(def ?? 0);
-            const raw = readConfigStore(k);
+            const raw = readConfigStore(ctx, k);
             if (raw == null) return Number(def ?? 0);
             const n = parseFloat(raw);
             return Number.isFinite(n) ? n : Number(def ?? 0);
@@ -1182,7 +1224,7 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         GetConfigString: (key: LuaValue, def: LuaValue) => {
             const k = typeof key === 'string' ? key : '';
             if (!k) return String(def ?? '');
-            const raw = readConfigStore(k);
+            const raw = readConfigStore(ctx, k);
             return raw ?? String(def ?? '');
         },
         GetModOptions: () => ({ ...ls.modOptions }),
@@ -1228,20 +1270,20 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             const k = typeof key === 'string' ? key : '';
             if (!k) return;
             const n = Number(val ?? 0) | 0;
-            writeConfigStore(k, String(n));
+            writeConfigStore(ctx, k, String(n));
             applyConfigSideEffect(ctx, k, n);
         },
         SetConfigFloat: (key: LuaValue, val: LuaValue) => {
             const k = typeof key === 'string' ? key : '';
             if (!k) return;
             const n = Number(val ?? 0);
-            writeConfigStore(k, String(n));
+            writeConfigStore(ctx, k, String(n));
             applyConfigSideEffect(ctx, k, n);
         },
         SetConfigString: (key: LuaValue, val: LuaValue) => {
             const k = typeof key === 'string' ? key : '';
             if (!k) return;
-            writeConfigStore(k, String(val ?? ''));
+            writeConfigStore(ctx, k, String(val ?? ''));
         },
 
         // --- Logging ---
