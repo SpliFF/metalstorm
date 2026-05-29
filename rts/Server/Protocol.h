@@ -9,6 +9,7 @@
 
 #include "protocol_generated.h"
 #include "CombatEventCollector.h"
+#include "DecalEventCollector.h"
 #include "MusicStateTracker.h"
 #include "ProjectileEventCollector.h"
 #include "SoundEventCollector.h"
@@ -49,6 +50,10 @@ constexpr uint8_t ENVELOPE_BUILD_ACTIVITY = 0x06;
 /// u8 height + u32 frame (LE) followed by three bit-packed planes
 /// of (width*height + 7) / 8 bytes each, MSB-first per byte.
 constexpr uint8_t ENVELOPE_LOS_BITMAP = 0x07;
+/// Ground decals (scars + track segments). Custom binary struct-of-arrays,
+/// write-once (no delta). Layout: u8 envelope + u32 frame + u16 scarCount +
+/// scars[] + u16 trackCount + tracks[]. See BuildDecalBatch below.
+constexpr uint8_t ENVELOPE_DECALS = 0x08;
 
 /// Build a framed ServerMessage (envelope byte + FlatBuffers payload).
 inline std::vector<uint8_t> BuildServerMessage(
@@ -1173,6 +1178,52 @@ inline std::vector<uint8_t> BuildRoomListUpdate(const std::vector<GameRoom*>& ro
     auto vec = fbb.CreateVector(entries);
     auto update = SpringWeb::CreateRoomListUpdate(fbb, vec);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_RoomListUpdate, update.Union());
+}
+
+/// Build a ground-decal batch (envelope 0x08). Scars + track segments for one
+/// frame, packed little-endian. Returns just the envelope byte + header when
+/// both lists are empty (caller should skip the send in that case).
+inline std::vector<uint8_t> BuildDecalBatch(
+    uint32_t frameNo,
+    const std::vector<ScarEventData>& scars,
+    const std::vector<TrackSegmentEventData>& tracks)
+{
+    std::vector<uint8_t> out;
+    auto putU8  = [&](uint8_t v) { out.push_back(v); };
+    auto putU16 = [&](uint16_t v) { out.push_back(uint8_t(v)); out.push_back(uint8_t(v >> 8)); };
+    auto putU32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) out.push_back(uint8_t(v >> (8 * i))); };
+    auto putF32 = [&](float v) { uint32_t b; std::memcpy(&b, &v, 4); putU32(b); };
+    auto putByte01 = [&](float c) {
+        const float x = c < 0.0f ? 0.0f : (c > 1.0f ? 1.0f : c);
+        out.push_back(uint8_t(x * 255.0f + 0.5f));
+    };
+
+    putU8(ENVELOPE_DECALS);
+    putU32(frameNo);
+
+    const size_t scarN = std::min<size_t>(scars.size(), 0xFFFF);
+    putU16(uint16_t(scarN));
+    for (size_t i = 0; i < scarN; ++i) {
+        const ScarEventData& s = scars[i];
+        putF32(s.pos.x); putF32(s.pos.y); putF32(s.pos.z);
+        putF32(s.radius); putF32(s.ttl); putF32(s.alpha);
+        putF32(s.glow); putF32(s.glowTtl);
+        putByte01(s.r); putByte01(s.g); putByte01(s.b); putByte01(s.a);
+    }
+
+    const size_t trackN = std::min<size_t>(tracks.size(), 0xFFFF);
+    putU16(uint16_t(trackN));
+    for (size_t i = 0; i < trackN; ++i) {
+        const TrackSegmentEventData& t = tracks[i];
+        putU32(t.unitId);
+        putF32(t.pos.x); putF32(t.pos.y); putF32(t.pos.z);
+        putF32(t.dirX); putF32(t.dirZ);
+        putF32(t.width); putF32(t.strength);
+        putU16(t.trackTypeId);
+        putU8(t.team);
+    }
+
+    return out;
 }
 
 } // namespace Protocol

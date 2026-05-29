@@ -25,6 +25,7 @@ import { BuildMenu } from './core/build-menu.js';
 import { OrderPanel } from './core/order-panel.js';
 import { EconomyBar } from './core/economy-bar.js';
 import { buildTerrainMesh, loadTerrainTextures, TerrainFog, type MapDimensions } from './core/terrain.js';
+import { DecalRenderer } from './core/decal-renderer.js';
 import { LobbyUI } from './lobby/lobby-ui.js';
 import { Minimap } from './core/minimap.js';
 import { LosBitmapStore } from './core/los-bitmap.js';
@@ -72,6 +73,7 @@ let buildBeamRenderer: BuildBeamRenderer | null = null;
 let dynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
 let cegRuntime: CegRuntime | null = null;
 let combatFX: CombatFX | null = null;
+let decalRenderer: DecalRenderer | null = null;
 let audioManager: AudioManager | null = null;
 let inputManager: InputManager | null = null;
 let animatedCursor: AnimatedCursor | null = null;
@@ -361,6 +363,22 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             console.warn('[main] projectile texture resolver init failed:', e);
         });
     }
+
+    // Ground decals (PLAN-decals.md D3/D6). Persistent scorch scars from
+    // weapon explosions, streamed by the server (envelope 0x08) and
+    // rendered as ground-pinned quads using ZK's authored scar textures
+    // (graphics.scars → .ktx2, same manifest path projectile textures
+    // use). init() fetches resources.json + manifests asynchronously;
+    // scars that arrive before it completes are queued. The terrain-height
+    // sampler is wired below once MapData's heightmap is parsed.
+    decalRenderer = new DecalRenderer(scene);
+    (window as unknown as { __decalRenderer: unknown }).__decalRenderer = decalRenderer;
+    if (gameId) {
+        decalRenderer.init(gameId, lobbyHttpUrl).catch((e) => {
+            console.warn('[decals] init failed:', e);
+        });
+    }
+
     audioManager = new AudioManager();
 
     // SoundEventPlayer routes server SoundEvents → AudioManager. Built
@@ -519,6 +537,25 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         // that map-scale relief reads as ambient occlusion instead.
         terrainMesh.receiveShadows = true;
         console.log('[client] terrain mesh built from MapData heightmap');
+
+        // Wire the decal renderer's terrain-height lookup so scars pin to
+        // the ground (the server ships unsnapped y — see ServerDecalHandler).
+        // Mirrors the heightmap sampling in terrain.ts buildTerrainMesh.
+        {
+            const hmW = mapDims.mapx + 1;
+            const hmH = mapDims.mapy + 1;
+            const hRange = mapDims.maxHeight - mapDims.minHeight;
+            const heights = map.heightmap;
+            const SQUARE = 8;
+            decalRenderer?.setHeightSampler((x, z) => {
+                let sx = Math.round(x / SQUARE);
+                let sz = Math.round(z / SQUARE);
+                if (sx < 0) sx = 0; else if (sx >= hmW) sx = hmW - 1;
+                if (sz < 0) sz = 0; else if (sz >= hmH) sz = hmH - 1;
+                const raw = heights[sz * hmW + sx] ?? 0;
+                return mapDims.minHeight + (raw / 65535) * hRange;
+            });
+        }
 
         // Open the music gate. Per PLAN-audio.md the gate covers
         // terrain + first entity batch + preload SoundItems; we use
@@ -908,6 +945,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         onBuildActivity(snapshot) {
             buildBeamRenderer?.onSnapshot(snapshot);
         },
+        onDecals(snapshot) {
+            decalRenderer?.onSnapshot(snapshot.scars);
+        },
         onCombatEvents(events) {
             combatFX?.onCombatEvents(events);
         },
@@ -1226,6 +1266,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         projectileRenderer?.tick();
         cegRuntime?.tick(dt);
         combatFX?.tick(dt);
+        decalRenderer?.tick(dt);
 
         // Listener follows the camera every frame so HRTF stays in
         // sync with smooth camera motion. Previously this only fired

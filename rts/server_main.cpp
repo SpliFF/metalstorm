@@ -17,6 +17,8 @@
 #include "Server/BuildActivitySerializer.h"
 #include "Server/ContentServer.h"
 #include "Server/CombatEventCollector.h"
+#include "Server/DecalEventCollector.h"
+#include "Server/ServerDecalHandler.h"
 #include "Server/SoundEventCollector.h"
 #include "Server/ProjectileEventCollector.h"
 #include "Sim/Misc/LosHandler.h"
@@ -2349,6 +2351,23 @@ int main(int argc, char* argv[])
                 upd.radius);
             rtcServer.BroadcastReliable(msg.data(), msg.size());
         }
+        }
+
+        // Ground decals (scars from weapon explosions + track segments) —
+        // envelope 0x08. The explosion listener self-registers once on first
+        // reach (no separate init site needed). Drained + broadcast each tick.
+        // Per-session LOS filtering is a follow-up; scars sit at explosion
+        // sites, which are almost always already in the player's view.
+        {
+            static bool s_decalListenerReg = [](){ serverDecalHandler.Register(); return true; }();
+            (void)s_decalListenerReg;
+            auto scarDrain = scarEvents.Drain();
+            auto trackDrain = trackSegmentEvents.Drain();
+            if ((!scarDrain.empty() || !trackDrain.empty()) && rtcServer.GetClientCount() > 0) {
+                const uint32_t decalFrame = static_cast<uint32_t>(sim.GetFrameNum());
+                const auto decalBatch = Protocol::BuildDecalBatch(decalFrame, scarDrain, trackDrain);
+                rtcServer.BroadcastReliable(decalBatch.data(), decalBatch.size());
+            }
         }
 
         // SendToUnsynced forwards — synced LuaRules gadgets call
