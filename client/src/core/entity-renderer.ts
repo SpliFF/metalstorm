@@ -47,6 +47,10 @@ import type { UnitDefInfo } from './connection.js';
 import type { PieceStateSnapshot } from './piece-state.js';
 import type { LosBitmap } from './los-bitmap.js';
 import { loadDirManifest, dirOfUrl } from './dir-manifest.js';
+import {
+    createZKMaterial, setActiveZKShadowGenerator, zkOptionsFromCustomParams,
+    type ZKUnitTextures,
+} from './zk-model-material.js';
 
 /** Parsed model config — sourced from the .gltf's
  *  `extensions.SPRINGRTS_geometry` block plus the PBR material slots
@@ -575,6 +579,31 @@ export function setLightingStyle(style: string): void {
     currentLightingStyle = (style === 'realistic') ? 'realistic' : 'gameplay';
 }
 
+/**
+ * PLAN-weapon-fx.md Phase Z2: route unit material creation through the
+ * ported ZK `defaultMaterialTemplate` instead of the built-in team-color
+ * shader. Toggled from main.ts based on the active game id (ZK opts in,
+ * others stay on the default shader). The setter only affects materials
+ * created AFTER the call — existing meshes keep their original program.
+ */
+let useZKMaterial = false;
+export function setUseZKMaterial(on: boolean): void { useZKMaterial = on; }
+
+function createUnitMaterial(
+    name: string,
+    textures: UnitTextures,
+    teamColor: Color3,
+    modelHeight: number,
+    scene: Scene,
+    customParams: Record<string, string> | undefined,
+): ShaderMaterial {
+    if (useZKMaterial) {
+        const opts = zkOptionsFromCustomParams(customParams, textures.normal !== null);
+        return createZKMaterial(name, textures as ZKUnitTextures, teamColor, scene, opts);
+    }
+    return createTeamColorMaterial(name, textures, teamColor, modelHeight, scene);
+}
+
 // ── Sun + CSM material bind plumbing ───────────────────────────────────
 // See docs/lighting.md "teamColor ShaderMaterial" for the design.
 // Babylon's stock light binding doesn't fire on plain ShaderMaterials,
@@ -1035,6 +1064,7 @@ export class EntityRenderer {
         // its `csmShadowMap` slot as a placeholder (the cascade matrix
         // path still runs but UV-out-of-bounds returns 1.0 everywhere).
         setActiveShadowGenerator(csm as CascadedShadowGenerator | null, sun);
+        setActiveZKShadowGenerator(csm as CascadedShadowGenerator | null, sun);
         if (!csm) return;
         for (const mesh of this.renderMeshes.values()) csm.addShadowCaster(mesh);
         for (const mesh of this.shapeMeshes.values()) csm.addShadowCaster(mesh);
@@ -1620,21 +1650,24 @@ export class EntityRenderer {
             // branch) left units without a sidecar — e.g. ZK's
             // `factoryveh` — keeping the PBR material from the glTF
             // import and rendering broken.
+            const customParams = this.defInfos.get(defId)?.customParams;
             if (tmpl?.textures) {
-                mesh.material = createTeamColorMaterial(
-                    matName, tmpl.textures, teamColor, tmpl.modelHeight, this.scene);
+                mesh.material = createUnitMaterial(
+                    matName, tmpl.textures, teamColor, tmpl.modelHeight,
+                    this.scene, customParams);
             } else {
                 // No texture sidecar — synthesise a white diffuse with
                 // alpha=1 so the unit renders as a flat team-coloured
                 // shape through the same shader as textured units.
                 const fallbackDiffuse = getWhiteFallbackDiffuse(this.scene);
-                mesh.material = createTeamColorMaterial(
+                mesh.material = createUnitMaterial(
                     matName,
                     { diffuse: fallbackDiffuse, emissive: null, orm: null,
                       teamMask: null, normal: null, invertTeamColor: false },
                     teamColor,
                     tmpl?.modelHeight ?? 1,
                     this.scene,
+                    customParams,
                 );
             }
 

@@ -9,7 +9,7 @@ import { Engine, Scene, FreeCamera, Mesh, MeshBuilder, StandardMaterial, Vector3
 // transcoder asset URLs to a CDN copy. After the KTX2 migration every
 // GPU texture (unit + feature + terrain + minimap) is `.ktx2`.
 import './core/ktx2-config.js';
-import { EntityRenderer, setLightingStyle } from './core/entity-renderer.js';
+import { EntityRenderer, setLightingStyle, setUseZKMaterial } from './core/entity-renderer.js';
 import { ProjectileRenderer } from './core/projectile-renderer.js';
 import { ProjectileTextureResolver } from './core/projectile-texture-resolver.js';
 import { CegRuntime } from './core/ceg-runtime.js';
@@ -323,6 +323,12 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         ? (lobbyUI?.games.find((g) => g.id === gameId)?.lighting ?? 'gameplay')
         : 'gameplay';
     setLightingStyle(lightingStyle);
+
+    // PLAN-weapon-fx.md Phase Z2: route ZK content through the ported
+    // defaultMaterialTemplate shader (zk-model-material.ts) instead of
+    // the built-in team-color material. Opt-in by game id so non-ZK
+    // games (incl. test scenarios) stay on the default pipeline.
+    setUseZKMaterial(gameId === 'zk');
 
     entityRenderer = new EntityRenderer(scene);
     // PLAN-lighting L3: register the renderer with the sun shadow generator.
