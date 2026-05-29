@@ -412,6 +412,7 @@ function describeInboundMessage(msg: Record<string, unknown>): string {
         case 'entityState':   return `entityState count=${msg.count} delta=${msg.isDelta}`;
         case 'entityDestroy': return `entityDestroy id=${msg.entityId}`;
         case 'entitySensorUpdate': return `entitySensorUpdate id=${msg.entityId} type=${msg.sensorType} r=${msg.radius}`;
+        case 'sendToUnsynced':     return `sendToUnsynced topic=${(msg.args as unknown[])?.[0] ? JSON.stringify((msg.args as Array<{ value?: unknown }>)[0]?.value) : '?'} argc=${(msg.args as unknown[])?.length ?? 0}`;
         case 'intelTransitions': return `intelTransitions (${(msg.events as unknown[])?.length ?? 0} events)`;
         case 'seismicPings':  return `seismicPings (${(msg.pings as unknown[])?.length ?? 0} pings)`;
         case 'losBitmap':     return `losBitmap allyTeam=${msg.allyTeam} ${msg.width}x${msg.height} frame=${msg.frame}`;
@@ -2409,6 +2410,46 @@ defaultFont = activeFont
         end
     `, 'lups_boot');
 
+    // PLAN-weapon-fx Phase Z1.5 — Load the unsynced halves of every
+    // LuaRules gadget whose `else`-branch produces visible particle /
+    // shader / FX work. Each candidate is one of ZK's `lups_*.lua`,
+    // `weapon_*.lua`, or similar where the synced half runs on the
+    // headless server and SendToUnsynced-bridges payload over to the
+    // client; here we load the dormant unsynced-side scope so the
+    // matching `gadgetHandler:AddSyncAction(topic, fn)` registrations
+    // happen and the DispatchSyncAction wire path lights up.
+    //
+    // Files with no `else` branch are pure-synced and skipped — they
+    // already run server-side via the headless LuaRules.
+    //
+    // Must run after LUPS boots (gadgets like lups_flame_jitter.lua
+    // capture `GG.Lups` in their Initialize) and after camain.lua so
+    // `Spring.*` is populated.
+    {
+        const candidatePaths: string[] = [];
+        for (const p of vfsFiles.keys()) {
+            if (!p.startsWith('LuaRules/Gadgets/')) continue;
+            if (!p.endsWith('.lua')) continue;
+            if (p.includes('/Include/')) continue;
+            const src = vfsFiles.get(p);
+            if (!src) continue;
+            // Cheap test: gadget files use `if (gadgetHandler:IsSyncedCode()) then`
+            // followed by `else` to gate the unsynced half. A file without
+            // that `else` keyword on a fresh line either is synced-only or
+            // didn't follow the convention — either way, nothing for us.
+            if (!/\nelse\b/.test(src)) continue;
+            candidatePaths.push(p);
+        }
+        candidatePaths.sort();
+        postLog(2, `[gadgetHandler] init step 7.5/8: loading ${candidatePaths.length} unsynced gadget halves`);
+        let loaded = 0;
+        for (const p of candidatePaths) {
+            const err = runtime.doString(gadgetLoaderLua(p), `load:${p}`);
+            if (!err) loaded++;
+        }
+        postLog(2, `[gadgetHandler] init step 7.5/8 done: ${loaded}/${candidatePaths.length} gadgets loaded`);
+    }
+
     // Auto-enable a curated set of Chili widgets that ZK ships with
     // `enabled = false` by default but which provide important UI we
     // want active in our environment. Each is gated on
@@ -2938,6 +2979,13 @@ function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext): void {
                 if widgetHandler and widgetHandler.GameFrame then
                     pcall(widgetHandler.GameFrame, widgetHandler, f)
                 end
+                -- PLAN-weapon-fx Z1.5 — fan-out to gadget unsynced halves
+                -- that registered \`function gadget:GameFrame(n)\`. The
+                -- handler is installed by GADGET_HANDLER_LUA before any
+                -- gadget loads.
+                if _SpringWebRunGadgetGameFrame then
+                    pcall(_SpringWebRunGadgetGameFrame, f)
+                end
             end
         end
 
@@ -3346,6 +3394,15 @@ function installEngineGlobals(
 
     rt.doString(CMD_GLOBALS_LUA, 'cmd_globals');
 
+    // PLAN-weapon-fx Phase Z1.5 — install gadgetHandler stub before any
+    // gadget unsynced halves load. Must be in place before camain.lua
+    // bootstraps widgets (LuaUI doesn't touch gadgetHandler today, but
+    // we want the global table to exist by the time any code references
+    // it). The gadget *files* themselves are loaded later, after LUPS
+    // boots, because most of them register GG.Lups.* sync actions and
+    // need WG.Lups already present.
+    rt.doString(GADGET_HANDLER_LUA, 'gadget_handler');
+
     rt.doString(`
         tracy = setmetatable({}, {
             __index = function() return function() end end
@@ -3425,6 +3482,13 @@ function installIOStubs(rt: LuaRuntime, gameId: string): void {
                 local stored = _loadFromStorage(_storagePrefix .. path)
                 if stored then source = stored end
             end
+            if not source and VFS and VFS.LoadFile then
+                -- Fall through to the VFS so loadfile() reaches prefetched
+                -- archive content (LuaRules/Gadgets/*.lua etc.), not just
+                -- runtime-written files. Without this Z1.5's unsynced
+                -- gadget loader silently fails for every candidate.
+                source = VFS.LoadFile(path)
+            end
             if not source then
                 return nil, "file not found: " .. path
             end
@@ -3471,6 +3535,9 @@ function installIOStubs(rt: LuaRuntime, gameId: string): void {
                     or VFS._writeCache[path:lower()])
                 if not content then
                     content = _loadFromStorage(_storagePrefix .. path)
+                end
+                if not content and VFS and VFS.LoadFile then
+                    content = VFS.LoadFile(path)
                 end
                 if not content then
                     return nil, "file not found: " .. path
@@ -4599,6 +4666,55 @@ self.onmessage = async (e: MessageEvent) => {
             break;
         }
 
+        case 'sendToUnsynced': {
+            // PLAN-weapon-fx Phase Z1.5 — forwarded Spring.SendToUnsynced
+            // call from a synced LuaRules gadget. Build a Lua call into
+            // gadgetHandler:DispatchSyncAction(topic, ...). args[0] is
+            // conventionally the topic string (matching upstream
+            // CUnsyncedLuaHandle::RecvFromSynced); we pass it both as
+            // the topic and as the first parameter so action handlers
+            // that follow the `function FlameShot(_, unitID, ...)` shape
+            // see their expected signature.
+            if (!runtime) break;
+            const args = msg.args as Array<
+                | { kind: 'nil' }
+                | { kind: 'bool'; value: boolean }
+                | { kind: 'number'; value: number }
+                | { kind: 'string'; value: string }
+            > | undefined;
+            if (!args || args.length === 0) break;
+            // Render args as Lua literals into a single doString.
+            // Strings go through escapeLuaString; numbers/bools serialise
+            // directly. Nil maps to the Lua `nil` literal.
+            const parts: string[] = [];
+            for (const a of args) {
+                switch (a.kind) {
+                    case 'nil':
+                        parts.push('nil');
+                        break;
+                    case 'bool':
+                        parts.push(a.value ? 'true' : 'false');
+                        break;
+                    case 'number':
+                        // Number.prototype.toString gives a finite Lua-valid
+                        // literal for any finite double. Non-finite drops to
+                        // nil (Lua's `0/0` would still parse but a nil keeps
+                        // the action handler from doing arithmetic on NaN).
+                        parts.push(Number.isFinite(a.value) ? String(a.value) : 'nil');
+                        break;
+                    case 'string':
+                        parts.push(`"${escapeLuaString(a.value)}"`);
+                        break;
+                }
+            }
+            runtime.doString(
+                `if gadgetHandler and gadgetHandler.DispatchSyncAction then ` +
+                `gadgetHandler:DispatchSyncAction(${parts.join(', ')}) end`,
+                'sendToUnsynced',
+            );
+            break;
+        }
+
         case 'intelTransitions': {
             // Synthesised LOS / radar / cloak transitions (see
             // intel-transitions.ts on the main thread). Each entry
@@ -5463,6 +5579,119 @@ CMDTYPE.ICON_UNIT_OR_RECTANGLE = 22; CMDTYPE.NUMBER = 23
 
 cmdColors = cmdColors or {}
 `;
+
+// PLAN-weapon-fx Phase Z1.5 — gadgetHandler stub for the unsynced halves
+// of LuaRules gadgets. The headless server kills the unsynced LuaRules
+// handle (rts/Lua/LuaHandleSynced.cpp:InitUnsynced), so the unsynced
+// `else`-branches of `lups_*.lua` / `weapon_*.lua` etc. need a host on
+// the client. This is the minimum surface those gadgets touch:
+//
+//   gadgetHandler:IsSyncedCode()            -- returns false
+//   gadgetHandler:AddSyncAction(name, fn)   -- per-topic handler
+//   gadgetHandler:RemoveSyncAction(name)
+//   gadgetHandler:RegisterGlobal(name, fn)  -- exposes a global function
+//   gadgetHandler:DeregisterGlobal(name)
+//   gadgetHandler:AddGadget(g, name)        -- tracked for GameFrame fan-out
+//   gadgetHandler:DispatchSyncAction(topic, ...) -- called from the worker
+//                                                   on each SendToUnsynced
+//
+// DispatchSyncAction matches CUnsyncedLuaHandle::RecvFromSynced's shape:
+// the topic is the first arg and is also forwarded as the action's first
+// parameter (ZK gadgets typically discard it via the param name `_`).
+const GADGET_HANDLER_LUA = `
+gadgetHandler = gadgetHandler or {
+    gadgets = {},
+    knownGadgets = {},
+    syncActions = {},
+    globals = {},
+}
+
+function gadgetHandler:IsSyncedCode() return false end
+-- Top-level mirror — some gadgets check this before they've resolved
+-- gadgetHandler (legacy compat shim from upstream Spring).
+function IsSyncedCode() return false end
+
+function gadgetHandler:AddSyncAction(name, fn)
+    if type(name) ~= "string" or type(fn) ~= "function" then return false end
+    self.syncActions[name] = fn
+    return true
+end
+
+function gadgetHandler:RemoveSyncAction(name)
+    if type(name) ~= "string" then return false end
+    self.syncActions[name] = nil
+    return true
+end
+
+function gadgetHandler:DispatchSyncAction(topic, ...)
+    if type(topic) ~= "string" then return end
+    local fn = self.syncActions[topic]
+    if not fn then return end
+    local ok, err = pcall(fn, topic, ...)
+    if not ok then
+        Spring.Echo("[gadgetHandler] sync action error in '" .. topic .. "': " .. tostring(err))
+    end
+end
+
+function gadgetHandler:RegisterGlobal(name, value)
+    if type(name) ~= "string" then return false end
+    self.globals[name] = value
+    _G[name] = value
+    return true
+end
+
+function gadgetHandler:DeregisterGlobal(name)
+    if type(name) ~= "string" then return false end
+    self.globals[name] = nil
+    _G[name] = nil
+    return true
+end
+
+function gadgetHandler:AddGadget(g, name)
+    self.gadgets[#self.gadgets + 1] = g
+    if name then self.knownGadgets[name] = g end
+    return true
+end
+
+-- Per-tick fan-out — called from the worker's GameFrame handler so
+-- gadgets with their own \`function gadget:GameFrame(n)\` callin fire.
+function _SpringWebRunGadgetGameFrame(n)
+    local gs = gadgetHandler.gadgets
+    for i = 1, #gs do
+        local g = gs[i]
+        if g.GameFrame then pcall(g.GameFrame, g, n) end
+    end
+end
+`;
+
+// Lua source executed once per LuaRules/Gadgets/*.lua file whose
+// unsynced half we want to host. Wraps the load in a per-file env so
+// the gadget table can be captured and the action handlers can register
+// before \`gadget:Initialize()\` runs. Errors are caught and surfaced to
+// the console instead of aborting the whole scan.
+function gadgetLoaderLua(path: string): string {
+    const escaped = escapeLuaString(path);
+    return `
+do
+    local _path = "${escaped}"
+    local _ok, _err = pcall(function()
+        gadget = {}
+        local _chunk, _cerr = loadfile(_path)
+        if not _chunk then error(_cerr or "no chunk") end
+        _chunk()
+        if not gadget.GetInfo then error("gadget.GetInfo missing") end
+        local _info = gadget:GetInfo()
+        gadget.whInfo = _info
+        if gadget.Initialize then gadget:Initialize() end
+        gadgetHandler:AddGadget(gadget, _info and _info.name)
+    end)
+    if not _ok then
+        Spring.Echo("[gadgetHandler] failed to load " .. _path .. ": " .. tostring(_err))
+    end
+    gadget = nil
+end
+`;
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────
 

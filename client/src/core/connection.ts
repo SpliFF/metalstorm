@@ -28,6 +28,9 @@ import { ProjectileImpactEvent } from '../protocol/spring-web/projectile-impact-
 import { ProjectileTrajectoryEvent } from '../protocol/spring-web/projectile-trajectory-event.js';
 import { EntityDestroy } from '../protocol/spring-web/entity-destroy.js';
 import { EntitySensorUpdate } from '../protocol/spring-web/entity-sensor-update.js';
+import { SendToUnsyncedEvent } from '../protocol/spring-web/send-to-unsynced-event.js';
+import { SendToUnsyncedArg } from '../protocol/spring-web/send-to-unsynced-arg.js';
+import { SendToUnsyncedArgKind } from '../protocol/spring-web/send-to-unsynced-arg-kind.js';
 import { GameInfo } from '../protocol/spring-web/game-info.js';
 import { ResourceUpdate } from '../protocol/spring-web/resource-update.js';
 import { MapData } from '../protocol/spring-web/map-data.js';
@@ -625,6 +628,17 @@ export interface ResourceUpdateInfo {
     energyExcess: number;
 }
 
+/** One decoded `Spring.SendToUnsynced(...)` argument forwarded from the
+ *  server. The server validated types to nil/bool/number/string before
+ *  putting the value on the wire, so consumers don't need to defend
+ *  against other JS types. `kind` mirrors `SendToUnsyncedArgKind` from
+ *  the FlatBuffers schema. */
+export type SendToUnsyncedArgInfo =
+    | { kind: 'nil' }
+    | { kind: 'bool'; value: boolean }
+    | { kind: 'number'; value: number }
+    | { kind: 'string'; value: string };
+
 export interface ConnectionEvents {
     onStateChange?: (state: ConnectionState) => void;
     /** Fires when the server accepts auth. `defsCacheKey` is the
@@ -655,6 +669,13 @@ export interface ConnectionEvents {
      *  3=sonar, 4=seismic, 5=radarJammer, 6=sonarJammer). `radius`
      *  is in elmos; 0 means the sensor was disabled. */
     onEntitySensorUpdate?: (entityId: number, sensorType: number, radius: number) => void;
+    /** Forwarded `Spring.SendToUnsynced(...)` from a synced LuaRules
+     *  gadget. The first arg is conventionally the topic string the
+     *  unsynced-side gadget registered via `gadgetHandler:AddSyncAction`;
+     *  consumers (the widget worker) peel it off and dispatch. The
+     *  server validated arg types so the variant covers
+     *  nil/bool/number/string only. */
+    onSendToUnsynced?: (args: SendToUnsyncedArgInfo[]) => void;
     onGameOver?: (frame: number) => void;
     onPlayerLeft?: (playerId: number, username: string, team: number, reason: number) => void;
     onMapData?: (map: ParsedMapData) => void;
@@ -1357,6 +1378,9 @@ export class Connection {
             case ServerPayload.EntitySensorUpdate:
                 this.handleEntitySensorUpdate(msg);
                 break;
+            case ServerPayload.SendToUnsyncedEvent:
+                this.handleSendToUnsynced(msg);
+                break;
             case ServerPayload.GameInfo: {
                 const info = msg.payload(new GameInfo()) as GameInfo;
                 this.events.onGameInfo?.(info.frame(), info.gameSpeed(), info.paused(), {
@@ -1858,5 +1882,38 @@ export class Connection {
             upd.sensorType(),
             upd.radius(),
         );
+    }
+
+    private handleSendToUnsynced(msg: ServerMessage): void {
+        if (!this.events.onSendToUnsynced) return;
+        const ev = msg.payload(new SendToUnsyncedEvent()) as SendToUnsyncedEvent;
+        const n = ev.argsLength();
+        if (n === 0) return;
+        const args: SendToUnsyncedArgInfo[] = new Array(n);
+        const tmp = new SendToUnsyncedArg();
+        for (let i = 0; i < n; i++) {
+            const a = ev.args(i, tmp);
+            if (!a) {
+                args[i] = { kind: 'nil' };
+                continue;
+            }
+            const k = a.kind();
+            switch (k) {
+                case SendToUnsyncedArgKind.Bool:
+                    args[i] = { kind: 'bool', value: a.boolVal() };
+                    break;
+                case SendToUnsyncedArgKind.Number:
+                    args[i] = { kind: 'number', value: a.numVal() };
+                    break;
+                case SendToUnsyncedArgKind.String:
+                    args[i] = { kind: 'string', value: (a.strVal() ?? '') as string };
+                    break;
+                case SendToUnsyncedArgKind.Nil:
+                default:
+                    args[i] = { kind: 'nil' };
+                    break;
+            }
+        }
+        this.events.onSendToUnsynced(args);
     }
 }

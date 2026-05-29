@@ -2351,6 +2351,24 @@ int main(int argc, char* argv[])
         }
         }
 
+        // SendToUnsynced forwards — synced LuaRules gadgets call
+        // Spring.SendToUnsynced(topic, ...) to hand work to their
+        // unsynced halves. The unsynced state on the headless server is
+        // killed (see CSplitLuaHandle::InitUnsynced), so each call is
+        // queued by CSyncedLuaHandle::SendToUnsynced into
+        // sendToUnsyncedEvents and dispatched to every client here. The
+        // widget worker peels arg[0] as the topic and routes it through
+        // gadgetHandler:AddSyncAction.
+        {
+        auto syncEvents = sendToUnsyncedEvents.Drain();
+        if (!syncEvents.empty() && rtcServer.GetClientCount() > 0) {
+            for (const auto& ev : syncEvents) {
+                auto msg = Protocol::BuildSendToUnsyncedEvent(ev);
+                rtcServer.BroadcastReliable(msg.data(), msg.size());
+            }
+        }
+        }
+
         // Unit lifecycle events — UnitCreated / UnitFromFactory /
         // UnitTaken / UnitGiven. Drained each tick. FromFactory / Taken /
         // Given are broadcast unfiltered (transfers are public). Created

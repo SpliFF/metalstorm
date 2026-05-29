@@ -10,6 +10,7 @@
 #include "System/SpringLog/SpringLog.h"
 #include <cstdint>
 #include <mutex>
+#include <string>
 #include <vector>
 
 struct CombatEventData {
@@ -134,3 +135,52 @@ private:
 };
 
 extern SensorUpdateCollector sensorUpdates;
+
+/// One forwarded argument from `Spring.SendToUnsynced(...)`. The synced
+/// callout in `CSyncedLuaHandle::SendToUnsynced` validates types to
+/// nil/bool/number/string before pushing, so the variant carries exactly
+/// those four cases. `numVal` is double so Lua-side number precision
+/// round-trips losslessly.
+struct SendToUnsyncedArgValue {
+    enum class Kind : uint8_t { Nil = 0, Bool = 1, Number = 2, String = 3 };
+    Kind kind = Kind::Nil;
+    bool boolVal = false;
+    double numVal = 0.0;
+    std::string strVal;
+};
+
+struct SendToUnsyncedEventData {
+    /// 0 = broadcast to every connected client (the only mode synced
+    /// `SendToUnsynced` supports today). Reserved for future per-player
+    /// fanout from a wrapping callout.
+    uint32_t clientId = 0;
+    std::vector<SendToUnsyncedArgValue> args;
+};
+
+/// Collects `Spring.SendToUnsynced` calls made from synced LuaRules
+/// gadgets. The headless server has no unsynced Lua handle to dispatch
+/// into (CSplitLuaHandle::InitUnsynced calls KillLua on it), so each
+/// call is captured here and the server's main loop drains the queue
+/// every tick into `SendToUnsyncedEvent` FlatBuffer broadcasts. The
+/// widget worker on the client side decodes the args and dispatches to
+/// the per-topic handler registered via gadgetHandler:AddSyncAction.
+class SendToUnsyncedEventCollector {
+public:
+    void Push(SendToUnsyncedEventData event) {
+        std::lock_guard<std::mutex> lock(mutex);
+        events.push_back(std::move(event));
+    }
+
+    std::vector<SendToUnsyncedEventData> Drain() {
+        std::lock_guard<std::mutex> lock(mutex);
+        std::vector<SendToUnsyncedEventData> drained;
+        drained.swap(events);
+        return drained;
+    }
+
+private:
+    std::mutex mutex;
+    std::vector<SendToUnsyncedEventData> events;
+};
+
+extern SendToUnsyncedEventCollector sendToUnsyncedEvents;

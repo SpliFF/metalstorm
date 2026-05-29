@@ -310,6 +310,39 @@ inline std::vector<uint8_t> BuildEntitySensorUpdate(
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_EntitySensorUpdate, upd.Union());
 }
 
+/// Build a SendToUnsyncedEvent — forwarded `Spring.SendToUnsynced(...)`
+/// from a synced LuaRules gadget. The variadic args were validated to
+/// nil/bool/number/string by the synced callout (see
+/// CSyncedLuaHandle::SendToUnsynced) so the variant kind drives a
+/// straight 1:1 serialise. First arg is conventionally the topic the
+/// widget worker dispatches on; the field is kept as a generic arg
+/// vector to match upstream's `RecvFromSynced(topic, ...)` shape.
+inline std::vector<uint8_t> BuildSendToUnsyncedEvent(
+    const SendToUnsyncedEventData& ev)
+{
+    flatbuffers::FlatBufferBuilder fbb(256);
+    std::vector<flatbuffers::Offset<SpringWeb::SendToUnsyncedArg>> argOffs;
+    argOffs.reserve(ev.args.size());
+    for (const auto& a : ev.args) {
+        flatbuffers::Offset<flatbuffers::String> strOff = 0;
+        if (a.kind == SendToUnsyncedArgValue::Kind::String)
+            strOff = fbb.CreateString(a.strVal);
+        SpringWeb::SendToUnsyncedArgBuilder ab(fbb);
+        ab.add_kind(static_cast<SpringWeb::SendToUnsyncedArgKind>(a.kind));
+        ab.add_num_val(a.numVal);
+        ab.add_bool_val(a.boolVal);
+        if (strOff.o != 0) ab.add_str_val(strOff);
+        argOffs.push_back(ab.Finish());
+    }
+    auto argsVec = fbb.CreateVector(argOffs);
+    SpringWeb::SendToUnsyncedEventBuilder eb(fbb);
+    eb.add_client_id(ev.clientId);
+    eb.add_args(argsVec);
+    auto evOff = eb.Finish();
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_SendToUnsyncedEvent,
+                              evOff.Union());
+}
+
 /// Build a PlayerLeft message (broadcast to remaining clients on disconnect).
 inline std::vector<uint8_t> BuildPlayerLeft(
     uint32_t playerId, const std::string& username, int8_t team, uint8_t reason)

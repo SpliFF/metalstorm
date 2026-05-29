@@ -45,6 +45,7 @@
 #include "Sim/Weapons/Weapon.h"
 #include "Sim/Weapons/WeaponDefHandler.h"
 #include "System/EventHandler.h"
+#include "Server/CombatEventCollector.h"
 #include "System/creg/SerializeLuaState.h"
 #include "System/FileSystem/FileHandler.h"
 #include "System/Log/ILog.h"
@@ -2085,8 +2086,54 @@ int CSyncedLuaHandle::SendToUnsynced(lua_State* L)
 		}
 	}
 
+	// In headless-server mode the unsynced handle is intentionally killed
+	// in CSplitLuaHandle::InitUnsynced — the unsynced halves of every
+	// LuaRules gadget live in the client's widget worker, not here. So
+	// the in-process RecvFromSynced dispatch upstream relied on is dead;
+	// capture the call into the collector and let server_main.cpp drain
+	// it onto the wire each tick. If the unsynced handle is alive (no
+	// path does this on the server today, but the call site is shared
+	// with hosts that might re-enable it), fall through to the legacy
+	// in-process path.
 	CUnsyncedLuaHandle* ulh = CSplitLuaHandle::GetUnsyncedHandle(L);
-	ulh->RecvFromSynced(L, args);
+	if (ulh != nullptr && ulh->IsValid()) {
+		ulh->RecvFromSynced(L, args);
+		return 0;
+	}
+
+	SendToUnsyncedEventData ev;
+	ev.clientId = 0;  // broadcast
+	ev.args.reserve(args);
+	for (int i = 1; i <= args; i++) {
+		SendToUnsyncedArgValue v;
+		const int t = lua_type(L, i);
+		switch (t) {
+			case LUA_TNIL:
+				v.kind = SendToUnsyncedArgValue::Kind::Nil;
+				break;
+			case LUA_TBOOLEAN:
+				v.kind = SendToUnsyncedArgValue::Kind::Bool;
+				v.boolVal = lua_toboolean(L, i) != 0;
+				break;
+			case LUA_TNUMBER:
+				v.kind = SendToUnsyncedArgValue::Kind::Number;
+				v.numVal = lua_tonumber(L, i);
+				break;
+			case LUA_TSTRING: {
+				v.kind = SendToUnsyncedArgValue::Kind::String;
+				size_t len = 0;
+				const char* s = lua_tolstring(L, i, &len);
+				v.strVal.assign(s, len);
+				break;
+			}
+			default:
+				// Already filtered above.
+				v.kind = SendToUnsyncedArgValue::Kind::Nil;
+				break;
+		}
+		ev.args.push_back(std::move(v));
+	}
+	sendToUnsyncedEvents.Push(std::move(ev));
 	return 0;
 }
 

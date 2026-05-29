@@ -953,6 +953,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         onEntitySensorUpdate(entityId, sensorType, radius) {
             currentWidgetManager?.forwardEntitySensorUpdate(entityId, sensorType, radius);
         },
+        onSendToUnsynced(args) {
+            currentWidgetManager?.forwardSendToUnsynced(args);
+        },
         onResourceUpdate(info) {
             currentWidgetManager?.forwardResourceUpdate(info);
             economyBar?.update(info);

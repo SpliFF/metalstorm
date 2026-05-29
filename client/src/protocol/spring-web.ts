@@ -86,6 +86,9 @@ export { RoomStateUpdate, RoomStateUpdateT } from './spring-web/room-state-updat
 export { RoomTeamSelect, RoomTeamSelectT } from './spring-web/room-team-select.js';
 export { SeismicPing, SeismicPingT } from './spring-web/seismic-ping.js';
 export { SelectionState, SelectionStateT } from './spring-web/selection-state.js';
+export { SendToUnsyncedArg, SendToUnsyncedArgT } from './spring-web/send-to-unsynced-arg.js';
+export { SendToUnsyncedArgKind } from './spring-web/send-to-unsynced-arg-kind.js';
+export { SendToUnsyncedEvent, SendToUnsyncedEventT } from './spring-web/send-to-unsynced-event.js';
 export { SensorType } from './spring-web/sensor-type.js';
 export { ServerError, ServerErrorT } from './spring-web/server-error.js';
 export { ServerMessage, ServerMessageT } from './spring-web/server-message.js';

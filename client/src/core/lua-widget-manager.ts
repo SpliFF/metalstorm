@@ -16,7 +16,7 @@ import type { Scene } from '@babylonjs/core/scene';
 import type { FreeCamera } from '@babylonjs/core/Cameras/freeCamera';
 import type { ParsedMapData } from './map-data.js';
 import type { RTSCamera } from './rts-camera.js';
-import type { Connection, ResourceUpdateInfo } from './connection.js';
+import type { Connection, ResourceUpdateInfo, SendToUnsyncedArgInfo } from './connection.js';
 import type { EntityStateSnapshot } from './entity-state.js';
 import type { AudioManager } from './audio.js';
 import { AudioChannel, rewriteAudioExtensionToWebm } from './audio.js';
@@ -600,6 +600,19 @@ export class LuaWidgetManager {
     forwardEntitySensorUpdate(entityId: number, sensorType: number, radius: number): void {
         if (this.disposed) return;
         this.postToWorker({ type: 'entitySensorUpdate', entityId, sensorType, radius });
+    }
+
+    /** Forward a server-side `Spring.SendToUnsynced(...)` call to the
+     *  worker. The worker peels `args[0]` as the topic string and
+     *  dispatches via `gadgetHandler:DispatchSyncAction(topic, ...)`.
+     *  Matches the upstream `CUnsyncedLuaHandle::RecvFromSynced` shape
+     *  so ZK gadgets like `lups_flame_jitter` (which register sync
+     *  actions for "flame_FlameShot", "flame_GameFrame", etc.) light up
+     *  unchanged. */
+    forwardSendToUnsynced(args: ReadonlyArray<SendToUnsyncedArgInfo>): void {
+        if (this.disposed) return;
+        if (args.length === 0) return;
+        this.postToWorker({ type: 'sendToUnsynced', args: args as SendToUnsyncedArgInfo[] });
     }
 
     /** Forward per-tick seismic ping events. Each ping is the deceived

@@ -431,6 +431,14 @@ struct StandingOrderState;
 struct StandingOrderStateBuilder;
 struct StandingOrderStateT;
 
+struct SendToUnsyncedArg;
+struct SendToUnsyncedArgBuilder;
+struct SendToUnsyncedArgT;
+
+struct SendToUnsyncedEvent;
+struct SendToUnsyncedEventBuilder;
+struct SendToUnsyncedEventT;
+
 struct ServerMessage;
 struct ServerMessageBuilder;
 struct ServerMessageT;
@@ -1682,6 +1690,47 @@ inline const char *EnumNameUnitCommandKind(UnitCommandKind e) {
   return EnumNamesUnitCommandKind()[index];
 }
 
+/// One variadic argument from `Spring.SendToUnsynced(...)`. The server
+/// validates synced-side that args are one of nil/bool/number/string
+/// (see CSyncedLuaHandle::SendToUnsynced) so the wire mirrors exactly
+/// those four cases. `num_val` is double to preserve Lua's full
+/// `number` precision.
+enum SendToUnsyncedArgKind : uint8_t {
+  SendToUnsyncedArgKind_Nil = 0,
+  SendToUnsyncedArgKind_Bool = 1,
+  SendToUnsyncedArgKind_Number = 2,
+  SendToUnsyncedArgKind_String = 3,
+  SendToUnsyncedArgKind_MIN = SendToUnsyncedArgKind_Nil,
+  SendToUnsyncedArgKind_MAX = SendToUnsyncedArgKind_String
+};
+
+inline const SendToUnsyncedArgKind (&EnumValuesSendToUnsyncedArgKind())[4] {
+  static const SendToUnsyncedArgKind values[] = {
+    SendToUnsyncedArgKind_Nil,
+    SendToUnsyncedArgKind_Bool,
+    SendToUnsyncedArgKind_Number,
+    SendToUnsyncedArgKind_String
+  };
+  return values;
+}
+
+inline const char * const *EnumNamesSendToUnsyncedArgKind() {
+  static const char * const names[5] = {
+    "Nil",
+    "Bool",
+    "Number",
+    "String",
+    nullptr
+  };
+  return names;
+}
+
+inline const char *EnumNameSendToUnsyncedArgKind(SendToUnsyncedArgKind e) {
+  if (::flatbuffers::IsOutRange(e, SendToUnsyncedArgKind_Nil, SendToUnsyncedArgKind_String)) return "";
+  const size_t index = static_cast<size_t>(e);
+  return EnumNamesSendToUnsyncedArgKind()[index];
+}
+
 enum ServerPayload : uint8_t {
   ServerPayload_NONE = 0,
   ServerPayload_AuthResponse = 1,
@@ -1719,11 +1768,12 @@ enum ServerPayload : uint8_t {
   ServerPayload_PathResponse = 33,
   ServerPayload_StandingOrderState = 34,
   ServerPayload_FeatureLifecycleBatch = 35,
+  ServerPayload_SendToUnsyncedEvent = 36,
   ServerPayload_MIN = ServerPayload_NONE,
-  ServerPayload_MAX = ServerPayload_FeatureLifecycleBatch
+  ServerPayload_MAX = ServerPayload_SendToUnsyncedEvent
 };
 
-inline const ServerPayload (&EnumValuesServerPayload())[36] {
+inline const ServerPayload (&EnumValuesServerPayload())[37] {
   static const ServerPayload values[] = {
     ServerPayload_NONE,
     ServerPayload_AuthResponse,
@@ -1760,13 +1810,14 @@ inline const ServerPayload (&EnumValuesServerPayload())[36] {
     ServerPayload_UnitCommandBatch,
     ServerPayload_PathResponse,
     ServerPayload_StandingOrderState,
-    ServerPayload_FeatureLifecycleBatch
+    ServerPayload_FeatureLifecycleBatch,
+    ServerPayload_SendToUnsyncedEvent
   };
   return values;
 }
 
 inline const char * const *EnumNamesServerPayload() {
-  static const char * const names[37] = {
+  static const char * const names[38] = {
     "NONE",
     "AuthResponse",
     "EntityCreate",
@@ -1803,13 +1854,14 @@ inline const char * const *EnumNamesServerPayload() {
     "PathResponse",
     "StandingOrderState",
     "FeatureLifecycleBatch",
+    "SendToUnsyncedEvent",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameServerPayload(ServerPayload e) {
-  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_FeatureLifecycleBatch)) return "";
+  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_SendToUnsyncedEvent)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesServerPayload()[index];
 }
@@ -1958,6 +2010,10 @@ template<> struct ServerPayloadTraits<SpringWeb::FeatureLifecycleBatch> {
   static const ServerPayload enum_value = ServerPayload_FeatureLifecycleBatch;
 };
 
+template<> struct ServerPayloadTraits<SpringWeb::SendToUnsyncedEvent> {
+  static const ServerPayload enum_value = ServerPayload_SendToUnsyncedEvent;
+};
+
 template<typename T> struct ServerPayloadUnionTraits {
   static const ServerPayload enum_value = ServerPayload_NONE;
 };
@@ -2100,6 +2156,10 @@ template<> struct ServerPayloadUnionTraits<SpringWeb::StandingOrderStateT> {
 
 template<> struct ServerPayloadUnionTraits<SpringWeb::FeatureLifecycleBatchT> {
   static const ServerPayload enum_value = ServerPayload_FeatureLifecycleBatch;
+};
+
+template<> struct ServerPayloadUnionTraits<SpringWeb::SendToUnsyncedEventT> {
+  static const ServerPayload enum_value = ServerPayload_SendToUnsyncedEvent;
 };
 
 struct ServerPayloadUnion {
@@ -2411,6 +2471,14 @@ struct ServerPayloadUnion {
   const SpringWeb::FeatureLifecycleBatchT *AsFeatureLifecycleBatch() const {
     return type == ServerPayload_FeatureLifecycleBatch ?
       reinterpret_cast<const SpringWeb::FeatureLifecycleBatchT *>(value) : nullptr;
+  }
+  SpringWeb::SendToUnsyncedEventT *AsSendToUnsyncedEvent() {
+    return type == ServerPayload_SendToUnsyncedEvent ?
+      reinterpret_cast<SpringWeb::SendToUnsyncedEventT *>(value) : nullptr;
+  }
+  const SpringWeb::SendToUnsyncedEventT *AsSendToUnsyncedEvent() const {
+    return type == ServerPayload_SendToUnsyncedEvent ?
+      reinterpret_cast<const SpringWeb::SendToUnsyncedEventT *>(value) : nullptr;
   }
 };
 
@@ -9315,6 +9383,7 @@ struct LobbyGameInfoT : public ::flatbuffers::NativeTable {
   std::string display_name{};
   std::string description{};
   std::string version{};
+  std::string lighting{};
 };
 
 /// One game plugin discovered under data/games. Shown in the
@@ -9328,7 +9397,8 @@ struct LobbyGameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_ID = 4,
     VT_DISPLAY_NAME = 6,
     VT_DESCRIPTION = 8,
-    VT_VERSION = 10
+    VT_VERSION = 10,
+    VT_LIGHTING = 12
   };
   const ::flatbuffers::String *id() const {
     return GetPointer<const ::flatbuffers::String *>(VT_ID);
@@ -9342,6 +9412,16 @@ struct LobbyGameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::String *version() const {
     return GetPointer<const ::flatbuffers::String *>(VT_VERSION);
   }
+  /// Shader-lighting style the game wants the entity renderer to
+  /// use, from modinfo.lua's `lighting` field. Empty / unknown values
+  /// fall back to "gameplay" on the client. Recognised values:
+  ///   "gameplay"  — half-Lambert + flat ambient floor (default)
+  ///   "realistic" — true Lambert + low ambient, stronger contrast
+  /// Mirrors the field on GameDiscovery::GameInfo; the HTTP
+  /// /api/games endpoint surfaces the same string verbatim.
+  const ::flatbuffers::String *lighting() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_LIGHTING);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_ID) &&
@@ -9352,6 +9432,8 @@ struct LobbyGameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(description()) &&
            VerifyOffset(verifier, VT_VERSION) &&
            verifier.VerifyString(version()) &&
+           VerifyOffset(verifier, VT_LIGHTING) &&
+           verifier.VerifyString(lighting()) &&
            verifier.EndTable();
   }
   LobbyGameInfoT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -9375,6 +9457,9 @@ struct LobbyGameInfoBuilder {
   void add_version(::flatbuffers::Offset<::flatbuffers::String> version) {
     fbb_.AddOffset(LobbyGameInfo::VT_VERSION, version);
   }
+  void add_lighting(::flatbuffers::Offset<::flatbuffers::String> lighting) {
+    fbb_.AddOffset(LobbyGameInfo::VT_LIGHTING, lighting);
+  }
   explicit LobbyGameInfoBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -9391,8 +9476,10 @@ inline ::flatbuffers::Offset<LobbyGameInfo> CreateLobbyGameInfo(
     ::flatbuffers::Offset<::flatbuffers::String> id = 0,
     ::flatbuffers::Offset<::flatbuffers::String> display_name = 0,
     ::flatbuffers::Offset<::flatbuffers::String> description = 0,
-    ::flatbuffers::Offset<::flatbuffers::String> version = 0) {
+    ::flatbuffers::Offset<::flatbuffers::String> version = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> lighting = 0) {
   LobbyGameInfoBuilder builder_(_fbb);
+  builder_.add_lighting(lighting);
   builder_.add_version(version);
   builder_.add_description(description);
   builder_.add_display_name(display_name);
@@ -9405,17 +9492,20 @@ inline ::flatbuffers::Offset<LobbyGameInfo> CreateLobbyGameInfoDirect(
     const char *id = nullptr,
     const char *display_name = nullptr,
     const char *description = nullptr,
-    const char *version = nullptr) {
+    const char *version = nullptr,
+    const char *lighting = nullptr) {
   auto id__ = id ? _fbb.CreateString(id) : 0;
   auto display_name__ = display_name ? _fbb.CreateString(display_name) : 0;
   auto description__ = description ? _fbb.CreateString(description) : 0;
   auto version__ = version ? _fbb.CreateString(version) : 0;
+  auto lighting__ = lighting ? _fbb.CreateString(lighting) : 0;
   return SpringWeb::CreateLobbyGameInfo(
       _fbb,
       id__,
       display_name__,
       description__,
-      version__);
+      version__,
+      lighting__);
 }
 
 ::flatbuffers::Offset<LobbyGameInfo> CreateLobbyGameInfo(::flatbuffers::FlatBufferBuilder &_fbb, const LobbyGameInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -13485,6 +13575,195 @@ inline ::flatbuffers::Offset<StandingOrderState> CreateStandingOrderStateDirect(
 
 ::flatbuffers::Offset<StandingOrderState> CreateStandingOrderState(::flatbuffers::FlatBufferBuilder &_fbb, const StandingOrderStateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
+struct SendToUnsyncedArgT : public ::flatbuffers::NativeTable {
+  typedef SendToUnsyncedArg TableType;
+  SpringWeb::SendToUnsyncedArgKind kind = SpringWeb::SendToUnsyncedArgKind_Nil;
+  double num_val = 0.0;
+  bool bool_val = false;
+  std::string str_val{};
+};
+
+struct SendToUnsyncedArg FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef SendToUnsyncedArgT NativeTableType;
+  typedef SendToUnsyncedArgBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_KIND = 4,
+    VT_NUM_VAL = 6,
+    VT_BOOL_VAL = 8,
+    VT_STR_VAL = 10
+  };
+  SpringWeb::SendToUnsyncedArgKind kind() const {
+    return static_cast<SpringWeb::SendToUnsyncedArgKind>(GetField<uint8_t>(VT_KIND, 0));
+  }
+  double num_val() const {
+    return GetField<double>(VT_NUM_VAL, 0.0);
+  }
+  bool bool_val() const {
+    return GetField<uint8_t>(VT_BOOL_VAL, 0) != 0;
+  }
+  const ::flatbuffers::String *str_val() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_STR_VAL);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint8_t>(verifier, VT_KIND, 1) &&
+           VerifyField<double>(verifier, VT_NUM_VAL, 8) &&
+           VerifyField<uint8_t>(verifier, VT_BOOL_VAL, 1) &&
+           VerifyOffset(verifier, VT_STR_VAL) &&
+           verifier.VerifyString(str_val()) &&
+           verifier.EndTable();
+  }
+  SendToUnsyncedArgT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(SendToUnsyncedArgT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<SendToUnsyncedArg> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const SendToUnsyncedArgT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct SendToUnsyncedArgBuilder {
+  typedef SendToUnsyncedArg Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_kind(SpringWeb::SendToUnsyncedArgKind kind) {
+    fbb_.AddElement<uint8_t>(SendToUnsyncedArg::VT_KIND, static_cast<uint8_t>(kind), 0);
+  }
+  void add_num_val(double num_val) {
+    fbb_.AddElement<double>(SendToUnsyncedArg::VT_NUM_VAL, num_val, 0.0);
+  }
+  void add_bool_val(bool bool_val) {
+    fbb_.AddElement<uint8_t>(SendToUnsyncedArg::VT_BOOL_VAL, static_cast<uint8_t>(bool_val), 0);
+  }
+  void add_str_val(::flatbuffers::Offset<::flatbuffers::String> str_val) {
+    fbb_.AddOffset(SendToUnsyncedArg::VT_STR_VAL, str_val);
+  }
+  explicit SendToUnsyncedArgBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<SendToUnsyncedArg> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<SendToUnsyncedArg>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<SendToUnsyncedArg> CreateSendToUnsyncedArg(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    SpringWeb::SendToUnsyncedArgKind kind = SpringWeb::SendToUnsyncedArgKind_Nil,
+    double num_val = 0.0,
+    bool bool_val = false,
+    ::flatbuffers::Offset<::flatbuffers::String> str_val = 0) {
+  SendToUnsyncedArgBuilder builder_(_fbb);
+  builder_.add_num_val(num_val);
+  builder_.add_str_val(str_val);
+  builder_.add_bool_val(bool_val);
+  builder_.add_kind(kind);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<SendToUnsyncedArg> CreateSendToUnsyncedArgDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    SpringWeb::SendToUnsyncedArgKind kind = SpringWeb::SendToUnsyncedArgKind_Nil,
+    double num_val = 0.0,
+    bool bool_val = false,
+    const char *str_val = nullptr) {
+  auto str_val__ = str_val ? _fbb.CreateString(str_val) : 0;
+  return SpringWeb::CreateSendToUnsyncedArg(
+      _fbb,
+      kind,
+      num_val,
+      bool_val,
+      str_val__);
+}
+
+::flatbuffers::Offset<SendToUnsyncedArg> CreateSendToUnsyncedArg(::flatbuffers::FlatBufferBuilder &_fbb, const SendToUnsyncedArgT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct SendToUnsyncedEventT : public ::flatbuffers::NativeTable {
+  typedef SendToUnsyncedEvent TableType;
+  uint32_t client_id = 0;
+  std::vector<std::unique_ptr<SpringWeb::SendToUnsyncedArgT>> args{};
+  SendToUnsyncedEventT() = default;
+  SendToUnsyncedEventT(const SendToUnsyncedEventT &o);
+  SendToUnsyncedEventT(SendToUnsyncedEventT&&) FLATBUFFERS_NOEXCEPT = default;
+  SendToUnsyncedEventT &operator=(SendToUnsyncedEventT o) FLATBUFFERS_NOEXCEPT;
+};
+
+/// Server → Client: forwarded `Spring.SendToUnsynced(...)` call from a
+/// synced LuaRules gadget. The first arg is conventionally the topic
+/// string (by ZK convention and matching upstream
+/// `CUnsyncedLuaHandle::RecvFromSynced` semantics); the worker peels
+/// args[0] and looks up the handler registered via
+/// `gadgetHandler:AddSyncAction(topic, fn)`. `client_id == 0` is
+/// broadcast to every client (today the only case — the synced call
+/// has no per-player addressing).
+struct SendToUnsyncedEvent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef SendToUnsyncedEventT NativeTableType;
+  typedef SendToUnsyncedEventBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_CLIENT_ID = 4,
+    VT_ARGS = 6
+  };
+  uint32_t client_id() const {
+    return GetField<uint32_t>(VT_CLIENT_ID, 0);
+  }
+  const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::SendToUnsyncedArg>> *args() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::SendToUnsyncedArg>> *>(VT_ARGS);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_CLIENT_ID, 4) &&
+           VerifyOffset(verifier, VT_ARGS) &&
+           verifier.VerifyVector(args()) &&
+           verifier.VerifyVectorOfTables(args()) &&
+           verifier.EndTable();
+  }
+  SendToUnsyncedEventT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(SendToUnsyncedEventT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<SendToUnsyncedEvent> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const SendToUnsyncedEventT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct SendToUnsyncedEventBuilder {
+  typedef SendToUnsyncedEvent Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_client_id(uint32_t client_id) {
+    fbb_.AddElement<uint32_t>(SendToUnsyncedEvent::VT_CLIENT_ID, client_id, 0);
+  }
+  void add_args(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::SendToUnsyncedArg>>> args) {
+    fbb_.AddOffset(SendToUnsyncedEvent::VT_ARGS, args);
+  }
+  explicit SendToUnsyncedEventBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<SendToUnsyncedEvent> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<SendToUnsyncedEvent>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<SendToUnsyncedEvent> CreateSendToUnsyncedEvent(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t client_id = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::SendToUnsyncedArg>>> args = 0) {
+  SendToUnsyncedEventBuilder builder_(_fbb);
+  builder_.add_args(args);
+  builder_.add_client_id(client_id);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<SendToUnsyncedEvent> CreateSendToUnsyncedEventDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t client_id = 0,
+    const std::vector<::flatbuffers::Offset<SpringWeb::SendToUnsyncedArg>> *args = nullptr) {
+  auto args__ = args ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::SendToUnsyncedArg>>(*args) : 0;
+  return SpringWeb::CreateSendToUnsyncedEvent(
+      _fbb,
+      client_id,
+      args__);
+}
+
+::flatbuffers::Offset<SendToUnsyncedEvent> CreateSendToUnsyncedEvent(::flatbuffers::FlatBufferBuilder &_fbb, const SendToUnsyncedEventT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
 struct ServerMessageT : public ::flatbuffers::NativeTable {
   typedef ServerMessage TableType;
   SpringWeb::ServerPayloadUnion payload{};
@@ -13608,6 +13887,9 @@ struct ServerMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   }
   const SpringWeb::FeatureLifecycleBatch *payload_as_FeatureLifecycleBatch() const {
     return payload_type() == SpringWeb::ServerPayload_FeatureLifecycleBatch ? static_cast<const SpringWeb::FeatureLifecycleBatch *>(payload()) : nullptr;
+  }
+  const SpringWeb::SendToUnsyncedEvent *payload_as_SendToUnsyncedEvent() const {
+    return payload_type() == SpringWeb::ServerPayload_SendToUnsyncedEvent ? static_cast<const SpringWeb::SendToUnsyncedEvent *>(payload()) : nullptr;
   }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -13759,6 +14041,10 @@ template<> inline const SpringWeb::StandingOrderState *ServerMessage::payload_as
 
 template<> inline const SpringWeb::FeatureLifecycleBatch *ServerMessage::payload_as<SpringWeb::FeatureLifecycleBatch>() const {
   return payload_as_FeatureLifecycleBatch();
+}
+
+template<> inline const SpringWeb::SendToUnsyncedEvent *ServerMessage::payload_as<SpringWeb::SendToUnsyncedEvent>() const {
+  return payload_as_SendToUnsyncedEvent();
 }
 
 struct ServerMessageBuilder {
@@ -16521,6 +16807,7 @@ inline void LobbyGameInfo::UnPackTo(LobbyGameInfoT *_o, const ::flatbuffers::res
   { auto _e = display_name(); if (_e) _o->display_name = _e->str(); }
   { auto _e = description(); if (_e) _o->description = _e->str(); }
   { auto _e = version(); if (_e) _o->version = _e->str(); }
+  { auto _e = lighting(); if (_e) _o->lighting = _e->str(); }
 }
 
 inline ::flatbuffers::Offset<LobbyGameInfo> LobbyGameInfo::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const LobbyGameInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -16535,12 +16822,14 @@ inline ::flatbuffers::Offset<LobbyGameInfo> CreateLobbyGameInfo(::flatbuffers::F
   auto _display_name = _o->display_name.empty() ? 0 : _fbb.CreateString(_o->display_name);
   auto _description = _o->description.empty() ? 0 : _fbb.CreateString(_o->description);
   auto _version = _o->version.empty() ? 0 : _fbb.CreateString(_o->version);
+  auto _lighting = _o->lighting.empty() ? 0 : _fbb.CreateString(_o->lighting);
   return SpringWeb::CreateLobbyGameInfo(
       _fbb,
       _id,
       _display_name,
       _description,
-      _version);
+      _version,
+      _lighting);
 }
 
 inline GameListUpdateT::GameListUpdateT(const GameListUpdateT &o) {
@@ -18055,6 +18344,82 @@ inline ::flatbuffers::Offset<StandingOrderState> CreateStandingOrderState(::flat
       _orders);
 }
 
+inline SendToUnsyncedArgT *SendToUnsyncedArg::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<SendToUnsyncedArgT>(new SendToUnsyncedArgT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void SendToUnsyncedArg::UnPackTo(SendToUnsyncedArgT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = kind(); _o->kind = _e; }
+  { auto _e = num_val(); _o->num_val = _e; }
+  { auto _e = bool_val(); _o->bool_val = _e; }
+  { auto _e = str_val(); if (_e) _o->str_val = _e->str(); }
+}
+
+inline ::flatbuffers::Offset<SendToUnsyncedArg> SendToUnsyncedArg::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const SendToUnsyncedArgT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateSendToUnsyncedArg(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<SendToUnsyncedArg> CreateSendToUnsyncedArg(::flatbuffers::FlatBufferBuilder &_fbb, const SendToUnsyncedArgT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const SendToUnsyncedArgT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _kind = _o->kind;
+  auto _num_val = _o->num_val;
+  auto _bool_val = _o->bool_val;
+  auto _str_val = _o->str_val.empty() ? 0 : _fbb.CreateString(_o->str_val);
+  return SpringWeb::CreateSendToUnsyncedArg(
+      _fbb,
+      _kind,
+      _num_val,
+      _bool_val,
+      _str_val);
+}
+
+inline SendToUnsyncedEventT::SendToUnsyncedEventT(const SendToUnsyncedEventT &o)
+      : client_id(o.client_id) {
+  args.reserve(o.args.size());
+  for (const auto &args_ : o.args) { args.emplace_back((args_) ? new SpringWeb::SendToUnsyncedArgT(*args_) : nullptr); }
+}
+
+inline SendToUnsyncedEventT &SendToUnsyncedEventT::operator=(SendToUnsyncedEventT o) FLATBUFFERS_NOEXCEPT {
+  std::swap(client_id, o.client_id);
+  std::swap(args, o.args);
+  return *this;
+}
+
+inline SendToUnsyncedEventT *SendToUnsyncedEvent::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<SendToUnsyncedEventT>(new SendToUnsyncedEventT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void SendToUnsyncedEvent::UnPackTo(SendToUnsyncedEventT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = client_id(); _o->client_id = _e; }
+  { auto _e = args(); if (_e) { _o->args.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->args[_i]) { _e->Get(_i)->UnPackTo(_o->args[_i].get(), _resolver); } else { _o->args[_i] = std::unique_ptr<SpringWeb::SendToUnsyncedArgT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->args.resize(0); } }
+}
+
+inline ::flatbuffers::Offset<SendToUnsyncedEvent> SendToUnsyncedEvent::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const SendToUnsyncedEventT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateSendToUnsyncedEvent(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<SendToUnsyncedEvent> CreateSendToUnsyncedEvent(::flatbuffers::FlatBufferBuilder &_fbb, const SendToUnsyncedEventT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const SendToUnsyncedEventT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _client_id = _o->client_id;
+  auto _args = _o->args.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::SendToUnsyncedArg>> (_o->args.size(), [](size_t i, _VectorArgs *__va) { return CreateSendToUnsyncedArg(*__va->__fbb, __va->__o->args[i].get(), __va->__rehasher); }, &_va ) : 0;
+  return SpringWeb::CreateSendToUnsyncedEvent(
+      _fbb,
+      _client_id,
+      _args);
+}
+
 inline ServerMessageT *ServerMessage::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
   auto _o = std::unique_ptr<ServerMessageT>(new ServerMessageT());
   UnPackTo(_o.get(), _resolver);
@@ -19014,6 +19379,10 @@ inline bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *o
       auto ptr = reinterpret_cast<const SpringWeb::FeatureLifecycleBatch *>(obj);
       return verifier.VerifyTable(ptr);
     }
+    case ServerPayload_SendToUnsyncedEvent: {
+      auto ptr = reinterpret_cast<const SpringWeb::SendToUnsyncedEvent *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
     default: return true;
   }
 }
@@ -19173,6 +19542,10 @@ inline void *ServerPayloadUnion::UnPack(const void *obj, ServerPayload type, con
       auto ptr = reinterpret_cast<const SpringWeb::FeatureLifecycleBatch *>(obj);
       return ptr->UnPack(resolver);
     }
+    case ServerPayload_SendToUnsyncedEvent: {
+      auto ptr = reinterpret_cast<const SpringWeb::SendToUnsyncedEvent *>(obj);
+      return ptr->UnPack(resolver);
+    }
     default: return nullptr;
   }
 }
@@ -19320,6 +19693,10 @@ inline ::flatbuffers::Offset<void> ServerPayloadUnion::Pack(::flatbuffers::FlatB
       auto ptr = reinterpret_cast<const SpringWeb::FeatureLifecycleBatchT *>(value);
       return CreateFeatureLifecycleBatch(_fbb, ptr, _rehasher).Union();
     }
+    case ServerPayload_SendToUnsyncedEvent: {
+      auto ptr = reinterpret_cast<const SpringWeb::SendToUnsyncedEventT *>(value);
+      return CreateSendToUnsyncedEvent(_fbb, ptr, _rehasher).Union();
+    }
     default: return 0;
   }
 }
@@ -19464,6 +19841,10 @@ inline ServerPayloadUnion::ServerPayloadUnion(const ServerPayloadUnion &u) : typ
     }
     case ServerPayload_FeatureLifecycleBatch: {
       value = new SpringWeb::FeatureLifecycleBatchT(*reinterpret_cast<SpringWeb::FeatureLifecycleBatchT *>(u.value));
+      break;
+    }
+    case ServerPayload_SendToUnsyncedEvent: {
+      value = new SpringWeb::SendToUnsyncedEventT(*reinterpret_cast<SpringWeb::SendToUnsyncedEventT *>(u.value));
       break;
     }
     default:
@@ -19645,6 +20026,11 @@ inline void ServerPayloadUnion::Reset() {
     }
     case ServerPayload_FeatureLifecycleBatch: {
       auto ptr = reinterpret_cast<SpringWeb::FeatureLifecycleBatchT *>(value);
+      delete ptr;
+      break;
+    }
+    case ServerPayload_SendToUnsyncedEvent: {
+      auto ptr = reinterpret_cast<SpringWeb::SendToUnsyncedEventT *>(value);
       delete ptr;
       break;
     }

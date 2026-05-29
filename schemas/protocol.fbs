@@ -1439,6 +1439,38 @@ table StandingOrderState {
     orders: [StandingOrderInfo];
 }
 
+/// One variadic argument from `Spring.SendToUnsynced(...)`. The server
+/// validates synced-side that args are one of nil/bool/number/string
+/// (see CSyncedLuaHandle::SendToUnsynced) so the wire mirrors exactly
+/// those four cases. `num_val` is double to preserve Lua's full
+/// `number` precision.
+enum SendToUnsyncedArgKind : uint8 {
+    Nil = 0,
+    Bool = 1,
+    Number = 2,
+    String = 3,
+}
+
+table SendToUnsyncedArg {
+    kind: SendToUnsyncedArgKind;
+    num_val: double;
+    bool_val: bool;
+    str_val: string;
+}
+
+/// Server → Client: forwarded `Spring.SendToUnsynced(...)` call from a
+/// synced LuaRules gadget. The first arg is conventionally the topic
+/// string (by ZK convention and matching upstream
+/// `CUnsyncedLuaHandle::RecvFromSynced` semantics); the worker peels
+/// args[0] and looks up the handler registered via
+/// `gadgetHandler:AddSyncAction(topic, fn)`. `client_id == 0` is
+/// broadcast to every client (today the only case — the synced call
+/// has no per-player addressing).
+table SendToUnsyncedEvent {
+    client_id: uint32;
+    args: [SendToUnsyncedArg];
+}
+
 // Union of all server→client message types
 union ServerPayload {
     AuthResponse,
@@ -1476,6 +1508,7 @@ union ServerPayload {
     PathResponse,
     StandingOrderState,
     FeatureLifecycleBatch,
+    SendToUnsyncedEvent,
 }
 
 table ServerMessage {
