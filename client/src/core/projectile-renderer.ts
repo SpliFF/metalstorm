@@ -45,6 +45,7 @@ import type { ProjectileTextureResolver } from './projectile-texture-resolver.js
 import type { CegRuntime } from './ceg-runtime.js';
 import type { FxLightPool } from './fx-light-pool.js';
 import type { DistortionRenderer } from './distortion-renderer.js';
+import { type MuzzleFlareRenderer, muzzleFlashColor } from './muzzle-flare-renderer.js';
 import {
     ProjectileType,
     effectForFire,
@@ -52,6 +53,7 @@ import {
     impactContextFlags,
 } from './weapon-fx-dispatch.js';
 import { registerProjectileBeamShader } from './shaders/projectile-beam.js';
+import { registerProjectileLaserShader } from './shaders/projectile-laser.js';
 import {
     type MissileTrailState,
     type MissileTrailVisual,
@@ -193,13 +195,13 @@ interface LightningWeaponVisual extends BaseWeaponVisual {
 interface LaserBoltVisual extends BaseWeaponVisual {
     kind: 'laserBolt';
     shaftOuterMesh: Mesh;
-    shaftOuterMaterial: StandardMaterial;
+    shaftOuterMaterial: ShaderMaterial;
     shaftCoreMesh: Mesh;
-    shaftCoreMaterial: StandardMaterial;
+    shaftCoreMaterial: ShaderMaterial;
     capOuterMesh: Mesh | null;
-    capOuterMaterial: StandardMaterial | null;
+    capOuterMaterial: ShaderMaterial | null;
     capCoreMesh: Mesh | null;
-    capCoreMaterial: StandardMaterial | null;
+    capCoreMaterial: ShaderMaterial | null;
     /// Outer half-width (elmos). Per Recoil's `weaponDef->visuals.thickness`.
     thickness: number;
     /// Core width as a fraction of thickness (0..1).
@@ -431,6 +433,10 @@ export class ProjectileRenderer {
     /// Null until injected; emits an explosion shockwave warp on impact.
     private distortion: DistortionRenderer | null = null;
 
+    /// Muzzle-flare flash renderer (PLAN-weapon-fx-gaps Phase F item 2).
+    /// Null until injected; emits a flash on fire for every weapon.
+    private muzzleFlare: MuzzleFlareRenderer | null = null;
+
     /// Current sim-speed multiplier (1 = 30 ticks/sec, 2 = 60, 0.5 = 15).
     /// Updated from the server's GameInfo broadcast via main.ts. The
     /// per-frame integrator scales wall-clock dt by this so projectile
@@ -479,6 +485,10 @@ export class ProjectileRenderer {
 
     setDistortion(distortion: DistortionRenderer | null): void {
         this.distortion = distortion;
+    }
+
+    setMuzzleFlare(flare: MuzzleFlareRenderer | null): void {
+        this.muzzleFlare = flare;
     }
 
     /// Push the current sim-speed multiplier. Called from main.ts's
@@ -753,6 +763,20 @@ export class ProjectileRenderer {
             }
         }
 
+        // Muzzle flare flash (Phase F item 2) — the visual companion to the
+        // muzzle light, sized by the weapon's blast (Recoil's
+        // `muzzleFlareSize`, derived from AoE) and biased toward white so it
+        // reads hot. Emitted for every weapon incl. beams (the hitscan
+        // branch returns below).
+        if (this.muzzleFlare) {
+            const mdef = this.weaponDefs.get(ev.weaponDefId);
+            if (mdef) {
+                const size = Math.min(Math.max((mdef.aoe ?? 0) * 0.2, 4), 30);
+                this.muzzleFlare.emit(ev.pos.x, ev.pos.y, ev.pos.z,
+                    muzzleFlashColor(resolveColor(mdef)), size);
+            }
+        }
+
         // Hit-scan weapons (beam laser, lightning) don't move — render
         // the bolt as a one-shot line from launch pos to impact pos and
         // skip the live-projectile tracking entirely. For beam-kind
@@ -893,19 +917,11 @@ export class ProjectileRenderer {
         // hit before the bolt vanishes. Recoil's CLaserProjectile drives
         // this off two separate signals — hardstop bolts hold for
         // `stayTime` then contract `curLength` to zero; non-hardstop
-        // bolts fade `intensity` to zero over ~5 frames via alpha. Our
-        // renderer has no per-instance alpha hookup (the material is
-        // built once at def-load), so a pure intensity fade would be
-        // invisible — bolts would just sit at full length until the
-        // 20-sim-second decay finally evicted them (we observed 80+
-        // bolts stacked on the impact point at 0.25× sim speed).
-        //
-        // Unify on the curLength-contraction path for both flavours:
-        // the tick loop shrinks the bolt back toward the impact point
-        // at `speedf` per second, which is fast enough to read as a
-        // snap-collapse and bounded enough to evict the entry. Hardstop
-        // still gets its hold window; non-hardstop contracts on the
-        // next tick.
+        // bolts fade `intensity` to zero. Both are now reproduced
+        // faithfully (Phase F item 3): the shaft shader carries a
+        // per-instance `iIntensity`, so a bolt can dim on its own. The
+        // tick loop applies the right death per `hardStop`; the fade is
+        // wall-time-bounded so bolts can't stack at low sim speed.
         const v = this.weaponVisuals.get(p.weaponDefId);
         if (v && v.kind === 'laserBolt') {
             p.impacted = true;
@@ -1012,26 +1028,40 @@ export class ProjectileRenderer {
             const lv = this.weaponVisuals.get(p.weaponDefId);
 
             if (p.impacted && lv && lv.kind === 'laserBolt') {
-                // Post-impact laser bolt: hold for `stayTime` then
-                // contract `curLength` at the same rate the bolt
-                // extended at spawn. The visible snap-back to the
-                // impact point is the death animation. Hardstop and
-                // non-hardstop both end up here (onImpact zeros vel
-                // and sets stayTime appropriately) — see the rationale
-                // in onImpact for why intensity-based fade was retired.
-                if (p.stayTime > 0) {
-                    p.stayTime -= dt;
+                // Post-impact laser bolt death animation, split by
+                // Recoil's `laserHardStop` (Phase F item 3 — now that the
+                // shaft has a per-instance alpha, the two flavours render
+                // their authored death over one shared draw path):
+                if (lv.hardStop) {
+                    // Hardstop: hold full length+intensity for `stayTime`,
+                    // then contract `curLength` to the impact point — the
+                    // visible snap-back. Intensity stays full throughout.
+                    if (p.stayTime > 0) {
+                        p.stayTime -= dt;
+                    } else {
+                        p.curLength -= lv.speedf * dt;
+                        if (p.curLength <= 0) {
+                            p.curLength = 0;
+                            dead.push(p.id);
+                        }
+                    }
                 } else {
-                    p.curLength -= lv.speedf * dt;
-                    if (p.curLength <= 0) {
-                        p.curLength = 0;
+                    // Non-hardstop: fade `intensity` in place (Recoil's
+                    // per-frame `intensity -= intensity*falloffRate`). The
+                    // per-instance shader alpha dims the bolt out while it
+                    // holds position. Decay is per wall-second (× the sim
+                    // tick rate), so it evicts in bounded wall time at any
+                    // sim speed — the old fix for bolts stacking at 0.25×.
+                    p.intensity -= lv.intensityFalloff * SIM_TICKS_PER_SEC * dt;
+                    if (p.intensity <= 0) {
+                        p.intensity = 0;
                         dead.push(p.id);
                     }
                 }
                 // Hard safety: evict any impacted bolt that's overstayed
-                // MAX_ORPHAN_LIFE_MS even if its contraction stalled
-                // (numerical edge or a tick storm). Without this the
-                // impacted branch had no upper bound on live-set size.
+                // MAX_ORPHAN_LIFE_MS even if its decay stalled (numerical
+                // edge or a tick storm). Without this the impacted branch
+                // had no upper bound on live-set size.
                 if (nowMs - p.spawnedAtMs > MAX_ORPHAN_LIFE_MS) dead.push(p.id);
                 continue;
             }
@@ -1289,12 +1319,28 @@ export class ProjectileRenderer {
             if (v.kind !== 'laserBolt') continue;          // TS narrowing
             const shaftOuterMats = new Float32Array(projs.length * 16);
             const shaftCoreMats  = new Float32Array(projs.length * 16);
+            // Per-instance intensity (Phase F item 3): the weapon-def
+            // intensity × the per-bolt death fade. Shafts: one per bolt;
+            // caps: two per bolt (head + tail). Slots left at 0 for bolts
+            // skipped below render invisible (their matrix is zeroed too).
+            const shaftOuterInten = new Float32Array(projs.length);
+            const shaftCoreInten  = new Float32Array(projs.length);
             const hasCaps = v.capOuterMesh != null;
             const capOuterMats = hasCaps ? new Float32Array(projs.length * 32) : null;
             const capCoreMats  = hasCaps ? new Float32Array(projs.length * 32) : null;
+            const capOuterInten = hasCaps ? new Float32Array(projs.length * 2) : null;
+            const capCoreInten  = hasCaps ? new Float32Array(projs.length * 2) : null;
             for (let i = 0; i < projs.length; i++) {
                 const p = projs[i];
                 if (p.curLength <= 0.01) continue;          // not yet visible
+                shaftOuterInten[i] = p.intensity;
+                shaftCoreInten[i]  = p.intensity;
+                if (capOuterInten && capCoreInten) {
+                    capOuterInten[i * 2] = p.intensity;
+                    capOuterInten[i * 2 + 1] = p.intensity;
+                    capCoreInten[i * 2] = p.intensity;
+                    capCoreInten[i * 2 + 1] = p.intensity;
+                }
                 // Unit velocity (Recoil's `dir`).
                 const speed = Math.hypot(p.vel.x, p.vel.y, p.vel.z);
                 const dx = speed > 1e-3 ? p.vel.x / speed : 0;
@@ -1384,16 +1430,21 @@ export class ProjectileRenderer {
             }
             v.shaftOuterMesh.isVisible = true;
             v.shaftOuterMesh.thinInstanceSetBuffer('matrix', shaftOuterMats, 16, false);
+            v.shaftOuterMesh.thinInstanceSetBuffer('iIntensity', shaftOuterInten, 1, false);
             v.shaftOuterMesh.thinInstanceCount = projs.length;
             v.shaftCoreMesh.isVisible = true;
             v.shaftCoreMesh.thinInstanceSetBuffer('matrix', shaftCoreMats, 16, false);
+            v.shaftCoreMesh.thinInstanceSetBuffer('iIntensity', shaftCoreInten, 1, false);
             v.shaftCoreMesh.thinInstanceCount = projs.length;
-            if (capOuterMats && capCoreMats && v.capOuterMesh && v.capCoreMesh) {
+            if (capOuterMats && capCoreMats && capOuterInten && capCoreInten
+                && v.capOuterMesh && v.capCoreMesh) {
                 v.capOuterMesh.isVisible = true;
                 v.capOuterMesh.thinInstanceSetBuffer('matrix', capOuterMats, 16, false);
+                v.capOuterMesh.thinInstanceSetBuffer('iIntensity', capOuterInten, 1, false);
                 v.capOuterMesh.thinInstanceCount = projs.length * 2;
                 v.capCoreMesh.isVisible = true;
                 v.capCoreMesh.thinInstanceSetBuffer('matrix', capCoreMats, 16, false);
+                v.capCoreMesh.thinInstanceSetBuffer('iIntensity', capCoreInten, 1, false);
                 v.capCoreMesh.thinInstanceCount = projs.length * 2;
             }
             laserUpdated.add(defId);
@@ -2272,6 +2323,7 @@ function buildLaserBoltVisual(
     scene: Scene,
     resolver: ProjectileTextureResolver | null,
 ): WeaponVisual {
+    registerProjectileLaserShader();
     const color: [number, number, number] = resolveColor(def);
     // Default color2 to white when the def doesn't override — matches
     // Recoil's typical "white core inside coloured glow" appearance.
@@ -2292,24 +2344,34 @@ function buildLaserBoltVisual(
     // local XY plane (front face = +Z). The per-frame matrix scales
     // and orients it per bolt. `name` is per-mesh so the Babylon
     // inspector can tell them apart.
+    // Per-instance-tinted laser shaft material (Phase F item 3). `baseColor`
+    // is the raw tint; the per-bolt `iIntensity` attribute folds in the
+    // weapon-def intensity *and* the death fade, so each bolt dims on its
+    // own over one shared draw path (no per-material special-casing).
     const mkQuad = (
         name: string,
         tex: string,
         c: [number, number, number],
-    ): { mesh: Mesh; mat: StandardMaterial } => {
-        const mat = makeMaterial(name + 'Mat', scene, c, intensity);
-        mat.disableLighting = true;
+    ): { mesh: Mesh; mat: ShaderMaterial } => {
+        const mat = new ShaderMaterial(name + 'Mat', scene, 'projectileLaser', {
+            attributes: ['position', 'uv', 'iIntensity'],
+            uniforms: ['viewProjection', 'baseColor', 'hasTex'],
+            samplers: ['tex'],
+            defines: ['#define INSTANCES', '#define THIN_INSTANCES'],
+            needAlphaBlending: true,
+        });
         mat.alphaMode = 1;               // additive
         mat.backFaceCulling = false;
         mat.disableDepthWrite = true;
+        mat.setColor3('baseColor', new Color3(c[0], c[1], c[2]));
+        mat.setFloat('hasTex', 0);
         const url = resolver?.resolve(tex) ?? null;
         if (url) {
             const t = new Texture(stampUrl(url), scene, false, true,
                 Texture.TRILINEAR_SAMPLINGMODE);
             t.hasAlpha = true;
-            mat.diffuseTexture = t;
-            mat.useAlphaFromDiffuseTexture = true;
-            mat.diffuseColor = new Color3(1, 1, 1);
+            mat.setTexture('tex', t);
+            mat.setFloat('hasTex', 1);
         }
         const mesh = MeshBuilder.CreatePlane(name,
             { size: 1, sideOrientation: Mesh.DOUBLESIDE }, scene);
@@ -2327,9 +2389,9 @@ function buildLaserBoltVisual(
     // matches Recoil's `validTextures[2]` gate. The shaft alone still
     // looks correct; caps are a polish layer.
     let capOuterMesh: Mesh | null = null;
-    let capOuterMat: StandardMaterial | null = null;
+    let capOuterMat: ShaderMaterial | null = null;
     let capCoreMesh: Mesh | null = null;
-    let capCoreMat: StandardMaterial | null = null;
+    let capCoreMat: ShaderMaterial | null = null;
     if (def.texture2) {
         const co = mkQuad(`laserCapOuter_${def.defId}`, def.texture2, color);
         const cc = mkQuad(`laserCapCore_${def.defId}`,  def.texture2, color2);

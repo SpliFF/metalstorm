@@ -41,6 +41,7 @@ import { loadMapLighting, type MapLighting } from './core/map-lighting.js';
 import { applyMapLighting, createSceneLighting, type SceneLighting } from './core/scene-lighting.js';
 import { FxLightPool } from './core/fx-light-pool.js';
 import { DistortionRenderer } from './core/distortion-renderer.js';
+import { MuzzleFlareRenderer } from './core/muzzle-flare-renderer.js';
 import { setActiveFxLightPool } from './core/zk-model-material.js';
 import { clientSettings } from './core/client-settings.js';
 import { setParticleBudget } from './core/ceg-translator.js';
@@ -81,6 +82,7 @@ let cegRuntime: CegRuntime | null = null;
 let combatFX: CombatFX | null = null;
 let fxLightPool: FxLightPool | null = null;
 let distortionRenderer: DistortionRenderer | null = null;
+let muzzleFlareRenderer: MuzzleFlareRenderer | null = null;
 let decalOverlay: DecalOverlay | null = null;
 let audioManager: AudioManager | null = null;
 let inputManager: InputManager | null = null;
@@ -193,6 +195,8 @@ function quitToLobby(): void {
     fxLightPool = null;
     distortionRenderer?.dispose();
     distortionRenderer = null;
+    muzzleFlareRenderer?.dispose();
+    muzzleFlareRenderer = null;
     audioManager = null;
 
     // Hide the game canvas and HUD. Any in-flight overlays (quit confirm,
@@ -257,6 +261,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     fxLightPool = null;
     distortionRenderer?.dispose();
     distortionRenderer = null;
+    muzzleFlareRenderer?.dispose();
+    muzzleFlareRenderer = null;
     audioManager = null;
     inputManager = null;
     buildMenu?.dispose();
@@ -328,6 +334,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // ring. Fed from the same explosion paths as FxLightPool (combat +
     // projectile renderers, below). Gated on `gfx.distortion`.
     distortionRenderer = new DistortionRenderer(scene, camera);
+
+    // Muzzle-flare flash (PLAN-weapon-fx-gaps Phase F item 2) — the visual
+    // companion to the muzzle light, emitted on weapon fire below.
+    muzzleFlareRenderer = new MuzzleFlareRenderer(scene, camera);
 
     // Phase G: gate the expensive FX through the graphics-quality presets.
     // `gfx.fxLights` toggles the pool live; `gfx.particleQuality` (tier
@@ -409,6 +419,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     projectileRenderer.setCegRuntime(cegRuntime);
     projectileRenderer.setLightPool(fxLightPool);
     projectileRenderer.setDistortion(distortionRenderer);
+    projectileRenderer.setMuzzleFlare(muzzleFlareRenderer);
 
     // Resolve weapon-def texture names → KTX2 URLs. Async load of
     // resources.json + the bitmaps manifests; the renderer can be
@@ -418,6 +429,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         const resolver = new ProjectileTextureResolver();
         projectileRenderer.setTextureResolver(resolver);
         cegRuntime.setTextureResolver(resolver);
+        muzzleFlareRenderer.setTextureResolver(resolver);
         resolver.init(gameId, lobbyHttpUrl).catch((e) => {
             console.warn('[main] projectile texture resolver init failed:', e);
         });
@@ -827,26 +839,34 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                     rtsCamera.setDistance(state.dist, 0);
                 }
             };
-            // The chili integral menu's build-button click resolves to
-            // Spring.SetActiveCommand(idx, ...) for whatever build sits
-            // at `idx` in the selected unit's cmd-descs. Route negative
-            // cmdIds (build commands) into InputManager so the click
-            // actually starts a build — without this, the chili API
-            // round-trips happily inside the worker but no order ever
-            // reaches the server. Non-build cmdIds are a no-op for now;
-            // widgets that want move/stop/attack/etc. call
-            // Spring.GiveOrderToUnit directly.
+            // The chili integral menu's command-button click resolves to
+            // Spring.SetActiveCommand(idx, ...) for whatever command sits at
+            // `idx` in the selected unit's cmd-descs. Route it into
+            // InputManager so the click actually issues — without this, the
+            // chili API round-trips happily inside the worker but no order
+            // ever reaches the server.
+            //   - Build commands (cmdId < 0) enter ground placement.
+            //   - Positive cmdIds with a world target (Move/Attack/Patrol/
+            //     Guard/Force-fire/…) arm a modal command resolved by the next
+            //     world click; `cmdType` (Spring CMDTYPE_*) tells InputManager
+            //     whether the target is ground / unit / either.
+            // Instant + state-toggle commands are issued in the worker before
+            // this fires, so they never arrive here.
             //
-            // Right-click on a build icon cancels the active placement,
-            // matching Spring's "RMB clears the active command" idiom.
-            mgr.onSetActiveCommandRequest = (cmdId, mods) => {
-                if (cmdId < 0 && inputManager) {
-                    if (mods.right) {
-                        inputManager.cancelBuildPlacement();
-                    } else {
-                        inputManager.startBuildPlacement(-cmdId, { shift: mods.shift, ctrl: mods.ctrl });
-                    }
+            // Right-click clears the active command, matching Spring's "RMB
+            // cancels the active command" idiom.
+            mgr.onSetActiveCommandRequest = (cmdId, mods, cmdType) => {
+                if (!inputManager) return;
+                if (cmdId < 0) {
+                    if (mods.right) inputManager.cancelBuildPlacement();
+                    else inputManager.startBuildPlacement(-cmdId, { shift: mods.shift, ctrl: mods.ctrl });
+                    return;
                 }
+                if (mods.right) {
+                    inputManager.cancelPendingCommand();
+                    return;
+                }
+                inputManager.activateCommandFromMenu(cmdId, cmdType);
             };
             void mgr.initialize().then(() => {
                 console.log(`[client] widget manager ready`);
@@ -1333,6 +1353,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         // renders (combat + projectile renderers emit during their ticks
         // above). The composite samples the result during scene.render().
         distortionRenderer?.tick(dt);
+        muzzleFlareRenderer?.tick(dt);
 
         // Listener follows the camera every frame so HRTF stays in
         // sync with smooth camera motion. Previously this only fired
