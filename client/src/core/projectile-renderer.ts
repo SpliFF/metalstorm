@@ -44,6 +44,7 @@ import { stampUrl } from '../config.js';
 import type { ProjectileTextureResolver } from './projectile-texture-resolver.js';
 import type { CegRuntime } from './ceg-runtime.js';
 import type { FxLightPool } from './fx-light-pool.js';
+import type { DistortionRenderer } from './distortion-renderer.js';
 import {
     ProjectileType,
     effectForFire,
@@ -426,6 +427,10 @@ export class ProjectileRenderer {
     /// explosion light on impact. Guarded everywhere.
     private lightPool: FxLightPool | null = null;
 
+    /// Screen-space distortion composite (PLAN-weapon-fx-gaps Phase D).
+    /// Null until injected; emits an explosion shockwave warp on impact.
+    private distortion: DistortionRenderer | null = null;
+
     /// Current sim-speed multiplier (1 = 30 ticks/sec, 2 = 60, 0.5 = 15).
     /// Updated from the server's GameInfo broadcast via main.ts. The
     /// per-frame integrator scales wall-clock dt by this so projectile
@@ -470,6 +475,10 @@ export class ProjectileRenderer {
 
     setLightPool(pool: FxLightPool | null): void {
         this.lightPool = pool;
+    }
+
+    setDistortion(distortion: DistortionRenderer | null): void {
+        this.distortion = distortion;
     }
 
     /// Push the current sim-speed multiplier. Called from main.ts's
@@ -875,6 +884,7 @@ export class ProjectileRenderer {
             const radius = Math.max(40, ldef?.aoe ?? 0);
             this.lightPool.emitExplosion(ev.pos.x, ev.pos.y, ev.pos.z,
                 explosionLightColor(ldef), radius);
+            this.distortion?.emitShockwave(ev.pos.x, ev.pos.y, ev.pos.z, radius);
         }
 
         if (!p) return;

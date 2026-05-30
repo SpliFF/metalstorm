@@ -2375,7 +2375,6 @@ defaultFont = activeFont
                     "OverdriveParticles", "StaticParticles",
                     "UnitSmoke", "UnitJitter",
                     "UnitPieceLight", "UnitCloaker",
-                    "Sound", "distortionFBO", "gimmick1",
                 }
                 local present, missing = {}, {}
                 for _, name in ipairs(probeClasses) do

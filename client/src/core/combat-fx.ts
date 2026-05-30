@@ -24,6 +24,7 @@ import { AudioManager } from './audio.js';
 import type { CegRuntime } from './ceg-runtime.js';
 import type { DefCache } from './def-cache.js';
 import type { FxLightPool } from './fx-light-pool.js';
+import type { DistortionRenderer } from './distortion-renderer.js';
 import {
     ImpactKind,
     effectForImpact,
@@ -43,6 +44,7 @@ export class CombatFX {
     private cegRuntime: CegRuntime | null;
     private defCache: DefCache | null;
     private lightPool: FxLightPool | null = null;
+    private distortion: DistortionRenderer | null = null;
     private effects: ActiveEffect[] = [];
 
     // Procedural fallback materials. Used only when CEG dispatch
@@ -103,6 +105,10 @@ export class CombatFX {
         this.lightPool = pool;
     }
 
+    setDistortion(distortion: DistortionRenderer | null): void {
+        this.distortion = distortion;
+    }
+
     /// Pick a dynamic-light colour for a weapon's explosion. Uses the
     /// weapon def's authored projectile colour when it has one; otherwise
     /// a warm blast orange. Explosions read warm regardless, so even a
@@ -140,6 +146,7 @@ export class CombatFX {
                     }
                     this.lightPool?.emitExplosion(x, y, z,
                         this.weaponLightColor(e.weaponDefId), 60);
+                    this.distortion?.emitShockwave(x, y, z, 60);
                     this.reportMissingSound('airburst');
                     break;
                 // Terrain/Feature/Unit impacts are handled by the
@@ -170,9 +177,12 @@ export class CombatFX {
                         this.spawnFallbackImpact(evt.x, evt.y, evt.z, evt.damage);
                     }
                     // Small impact light, radius scaled by damage.
-                    this.lightPool?.emitExplosion(evt.x, evt.y, evt.z,
-                        this.weaponLightColor(evt.weaponDefId),
-                        Math.min(40 + evt.damage * 0.3, 120));
+                    {
+                        const r = Math.min(40 + evt.damage * 0.3, 120);
+                        this.lightPool?.emitExplosion(evt.x, evt.y, evt.z,
+                            this.weaponLightColor(evt.weaponDefId), r);
+                        this.distortion?.emitShockwave(evt.x, evt.y, evt.z, r);
+                    }
                     break;
                 case 3: // Kill
                     if (!this.spawnCegImpact(ImpactKind.Unit, evt.weaponDefId,
@@ -182,6 +192,7 @@ export class CombatFX {
                     // Bigger kill burst.
                     this.lightPool?.emitExplosion(evt.x, evt.y, evt.z,
                         this.weaponLightColor(evt.weaponDefId), 160);
+                    this.distortion?.emitShockwave(evt.x, evt.y, evt.z, 160);
                     break;
                 // Miss (1) and Blocked (2) — no visual.
             }

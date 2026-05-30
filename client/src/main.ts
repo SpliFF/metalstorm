@@ -40,6 +40,7 @@ import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
 import { loadMapLighting, type MapLighting } from './core/map-lighting.js';
 import { applyMapLighting, createSceneLighting, type SceneLighting } from './core/scene-lighting.js';
 import { FxLightPool } from './core/fx-light-pool.js';
+import { DistortionRenderer } from './core/distortion-renderer.js';
 import { setActiveFxLightPool } from './core/zk-model-material.js';
 import { clientSettings } from './core/client-settings.js';
 import { setParticleBudget } from './core/ceg-translator.js';
@@ -79,6 +80,7 @@ let dynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
 let cegRuntime: CegRuntime | null = null;
 let combatFX: CombatFX | null = null;
 let fxLightPool: FxLightPool | null = null;
+let distortionRenderer: DistortionRenderer | null = null;
 let decalOverlay: DecalOverlay | null = null;
 let audioManager: AudioManager | null = null;
 let inputManager: InputManager | null = null;
@@ -189,6 +191,8 @@ function quitToLobby(): void {
     combatFX = null;
     fxLightPool?.dispose();
     fxLightPool = null;
+    distortionRenderer?.dispose();
+    distortionRenderer = null;
     audioManager = null;
 
     // Hide the game canvas and HUD. Any in-flight overlays (quit confirm,
@@ -251,6 +255,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     combatFX = null;
     fxLightPool?.dispose();
     fxLightPool = null;
+    distortionRenderer?.dispose();
+    distortionRenderer = null;
     audioManager = null;
     inputManager = null;
     buildMenu?.dispose();
@@ -317,17 +323,26 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // (not just terrain/features) light up under weapon fire.
     setActiveFxLightPool(fxLightPool);
 
+    // Screen-space distortion composite (PLAN-weapon-fx-gaps Phase D).
+    // Explosions warp the scene behind them via an expanding shockwave
+    // ring. Fed from the same explosion paths as FxLightPool (combat +
+    // projectile renderers, below). Gated on `gfx.distortion`.
+    distortionRenderer = new DistortionRenderer(scene, camera);
+
     // Phase G: gate the expensive FX through the graphics-quality presets.
     // `gfx.fxLights` toggles the pool live; `gfx.particleQuality` (tier
     // 0/1/2) sizes the CEG per-spawn budget — applied before CEG defs are
     // ingested (translation runs once per session, so this is a per-session
     // read; `requiresRestart` in the registry reflects that). `gfx.bloom`
-    // is consumed directly by scene-lighting.ts; `gfx.distortion` by the
-    // future Phase D composite.
+    // is consumed directly by scene-lighting.ts; `gfx.distortion` toggles
+    // the Phase D composite (full-screen pass detaches entirely when off).
     {
         const fxLights = fxLightPool;
         clientSettings.subscribe('gfx.fxLights',
             (v) => fxLights.setEnabled(Boolean(v)), /*fireNow*/ true);
+        const distortion = distortionRenderer;
+        clientSettings.subscribe('gfx.distortion',
+            (v) => distortion.setEnabled(Boolean(v)), /*fireNow*/ true);
         // tier → {maxPerSpawn, maxLifetimeS}
         const PARTICLE_TIERS: Array<[number, number]> = [
             [16, 4.0],   // 0 low
@@ -393,6 +408,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     cegRuntime = new CegRuntime(scene);
     projectileRenderer.setCegRuntime(cegRuntime);
     projectileRenderer.setLightPool(fxLightPool);
+    projectileRenderer.setDistortion(distortionRenderer);
 
     // Resolve weapon-def texture names → KTX2 URLs. Async load of
     // resources.json + the bitmaps manifests; the renderer can be
@@ -434,6 +450,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // every impact.
     combatFX = new CombatFX(scene, audioManager, cegRuntime, defCache);
     combatFX.setLightPool(fxLightPool);
+    combatFX.setDistortion(distortionRenderer);
     (window as unknown as { __defCache: unknown }).__defCache = defCache;
 
     // Dynamic feature renderer — handles runtime-spawned features
@@ -1312,6 +1329,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         // Age the dynamic FX lights after the emitters have run this frame
         // and before scene.render() consumes the lighting.
         fxLightPool?.update(dt, camera.position);
+        // Upload this frame's shockwave emissions before the offset RTT
+        // renders (combat + projectile renderers emit during their ticks
+        // above). The composite samples the result during scene.render().
+        distortionRenderer?.tick(dt);
 
         // Listener follows the camera every frame so HRTF stays in
         // sync with smooth camera motion. Previously this only fired
