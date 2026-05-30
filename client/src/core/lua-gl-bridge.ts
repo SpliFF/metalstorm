@@ -1071,11 +1071,17 @@ export class LuaGLBridge {
             // Fixed-function passthrough VS: projects gl_Vertex and
             // forwards gl_MultiTexCoord0 + gl_Color through the legacy
             // varying slots the FS reads as gl_TexCoord[0] and gl_Color.
-            vsSrc = '#version 120\nvoid main() {\n' +
-                '    gl_Position = ftransform();\n' +
-                '    gl_TexCoord[0] = gl_MultiTexCoord0;\n' +
-                '    gl_FrontColor = gl_Color;\n' +
-                '}\n';
+            //
+            // A fragment-only shader expects the *engine's* default unit VS
+            // to supply its custom varyings (`cameraDir`, `normalv`,
+            // `vertexWorldPos`, …). Our passthrough can't reproduce those,
+            // but every `varying` the FS reads must still have a matching
+            // VS output or the program fails to link ("FRAGMENT varying X
+            // does not match any VERTEX varying"). So we declare each and
+            // emit a zero — the shader links and runs (degenerate where it
+            // needed real per-vertex data, but these fragment-only shaders
+            // are already a fallback path with no authored VS).
+            vsSrc = synthesizePassthroughVS(fsSrc);
         }
         if (!haveFs) {
             // Fixed-function passthrough FS: textured + per-vertex tint.
@@ -2014,6 +2020,41 @@ function clamp01(n: number): number {
     if (n < 0) return 0;
     if (n > 1) return 1;
     return n;
+}
+
+/**
+ * Build a fixed-function passthrough vertex shader for a fragment-only
+ * `gl.CreateShader` call. Beyond the legacy `gl_Position` / `gl_TexCoord`
+ * / `gl_FrontColor` forwarding, it declares **every `varying` the FS
+ * reads** and emits a zero for it, so the program links. (A varying the
+ * VS outputs but the FS never reads is harmless; the failing direction is
+ * an FS `in` with no VS `out`.) The legacy-shim translator rewrites
+ * `varying`→`out` and lowers the fixed-function builtins to GLSL ES 300.
+ */
+function synthesizePassthroughVS(fsSrc: string): string {
+    // Scalar/vector/matrix `varying TYPE NAME;` declarations. Array
+    // varyings and `gl_*` builtins are handled by the legacy path, so a
+    // simple type+name match covers the user varyings these shaders use.
+    const re = /\bvarying\s+(float|vec[234]|mat[234])\s+(\w+)\s*;/g;
+    const seen = new Set<string>();
+    const decls: string[] = [];
+    const assigns: string[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(fsSrc)) !== null) {
+        const [, type, name] = m;
+        if (seen.has(name)) continue;
+        seen.add(name);
+        decls.push(`varying ${type} ${name};`);
+        assigns.push(`    ${name} = ${type}(0.0);`);
+    }
+    return '#version 120\n' +
+        decls.join('\n') + (decls.length ? '\n' : '') +
+        'void main() {\n' +
+        '    gl_Position = ftransform();\n' +
+        '    gl_TexCoord[0] = gl_MultiTexCoord0;\n' +
+        '    gl_FrontColor = gl_Color;\n' +
+        assigns.join('\n') + (assigns.length ? '\n' : '') +
+        '}\n';
 }
 
 /** Render translator diagnostics as a single `lastShaderLog` string for

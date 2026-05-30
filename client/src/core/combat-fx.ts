@@ -58,8 +58,6 @@ export class CombatFX {
     /// One-shot warning state per weapon def so a single missing CEG
     /// doesn't flood the console every frame the weapon fires.
     private warnedFallback = new Set<number>();
-    /// Once-per-kind warning gate for unwired sound categories.
-    private warnedKinds = new Set<string>();
 
     constructor(
         scene: Scene,
@@ -136,7 +134,6 @@ export class CombatFX {
                     if (!this.spawnCegImpact(e.impactKind, e.weaponDefId, x, y, z, true)) {
                         this.spawnFallbackShield(x, y, z);
                     }
-                    this.reportMissingSound('shield-hit');
                     break;
                 case ImpactKind.SelfDetonate:
                 case ImpactKind.Intercepted:
@@ -147,7 +144,6 @@ export class CombatFX {
                     this.lightPool?.emitExplosion(x, y, z,
                         this.weaponLightColor(e.weaponDefId), 60);
                     this.distortion?.emitShockwave(x, y, z, 60);
-                    this.reportMissingSound('airburst');
                     break;
                 // Terrain/Feature/Unit impacts are handled by the
                 // projectile renderer's own onImpact hook — see
@@ -260,15 +256,6 @@ export class CombatFX {
         mesh.position.set(x, y, z);
         mesh.material = this.impactMat;
         this.effects.push({ mesh, lifetime: 0.3 });
-    }
-
-    /// Log once per impact kind that has no server SoundEvent wired.
-    private reportMissingSound(kind: string): void {
-        if (this.warnedKinds.has(kind)) return;
-        this.warnedKinds.add(kind);
-        console.error(
-            `[combat-fx] no server SoundEvent for '${kind}'; ` +
-            'wire the emission server-side (Sim/Projectiles impact path).');
     }
 
     /**
