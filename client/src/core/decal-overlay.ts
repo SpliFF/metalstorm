@@ -633,9 +633,11 @@ export class DecalOverlay {
                         // terrain plugin's crater churn/rubble (gated on strong
                         // scorch/relief) never fires on them — that procedural
                         // detail is what made the tread blurry + the bike line
-                        // look like diagonal hatching.
-                        disturb: 0.4,
-                        nStrength: 0.4,
+                        // look like diagonal hatching. Pressure (darkening +
+                        // relief depth) per vehicle pass reduced by 2/3 (0.4→
+                        // 0.13) so a single vehicle leaves a faint mark.
+                        disturb: 0.13,
+                        nStrength: 0.13,
                         // Rung frequency = rungs over this segment, chosen for a
                         // constant ~world spacing regardless of segment length.
                         treadFreq: Math.max(1, len / Math.max(6, w * 0.5)),
@@ -659,8 +661,12 @@ export class DecalOverlay {
             cv: ev.z / this.worldH,
             hu, hv, rot,
             kind,
-            disturb: 0.7,
-            nStrength: 1.4,
+            // Bot footprints / spider claws were far darker than the (now
+            // faint) vehicle tracks — bring the darkening down to ~vehicle
+            // level. A little more relief than vehicles so the discrete prints
+            // stay legible, but gentle enough to drop the heavy crater rubble.
+            disturb: 0.12,
+            nStrength: 0.5,
             treadFreq: 4.0,
         });
     }
