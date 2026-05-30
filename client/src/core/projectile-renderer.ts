@@ -368,8 +368,8 @@ const MAX_CEG_EMITS_PER_FRAME = 4;
 /// the glow reads as continuous rather than strobing.
 const FOLLOW_LIGHT_PERIOD_S = 0.09;
 const FOLLOW_LIGHT_TTL_S = 0.16;
-const FOLLOW_LIGHT_PEAK = 3;
-const FOLLOW_LIGHT_RANGE = 70;
+const FOLLOW_LIGHT_PEAK = 5;
+const FOLLOW_LIGHT_RANGE = 80;
 
 /// Squared position delta (elmos²) above which a trajectory snapshot
 /// is treated as a real course correction and the missile trail is

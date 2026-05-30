@@ -106,7 +106,9 @@ export class FxLightPool {
      * weapon's bolt/tracer colour so the flash reads as the same source.
      */
     emitMuzzle(x: number, y: number, z: number, color: readonly [number, number, number], scale = 1): void {
-        this.emit(x, y, z, color, 6 * scale, 90 * scale, 0.12);
+        // Peak tuned live: 6 was barely visible against bright daylit
+        // terrain, ~10 reads as a clear flash without washing out.
+        this.emit(x, y, z, color, 10 * scale, 110 * scale, 0.12);
     }
 
     /**
@@ -117,7 +119,10 @@ export class FxLightPool {
         const r = Math.max(40, radius);
         // Intensity grows sub-linearly with radius so a nuke doesn't wash
         // the whole map to white; range tracks the blast more directly.
-        const peak = 8 + Math.min(24, r * 0.05);
+        // Peak floor/coeff tuned live (peak 6 read as nearly invisible in
+        // daylight, ~16+ reads clearly): a small airburst lands ~17, a
+        // big kill ~25, capped so massed explosions still tonemap.
+        const peak = 12 + Math.min(20, r * 0.08);
         const ttl = 0.25 + Math.min(0.45, r * 0.0015);
         this.emit(x, y, z, color, peak, r * 2.2, ttl);
     }
