@@ -249,6 +249,16 @@ uniform float invertMask;
 uniform int  simFrame;
 uniform vec2 autoNormalParams;  // {samplingDist, value} — ZK default {1.0, 0.002}
 
+// Dynamic FX point lights (Phase U). Fed each frame from FxLightPool so
+// units light up in weapon colour under muzzle flashes / explosions —
+// terrain & features already do via stock materials. Purely additive:
+// when fxLightCount == 0 the loop is skipped and the unit is unchanged,
+// so this can never darken or break the verified base shading.
+#define MAX_FX_LIGHTS 8
+uniform int  fxLightCount;
+uniform vec4 fxLightPos[MAX_FX_LIGHTS];   // xyz = world pos, w = range (elmos)
+uniform vec3 fxLightColor[MAX_FX_LIGHTS]; // rgb = colour * HDR intensity
+
 in vec3 vWorldPos;
 in vec3 vWorldNormal;
 in vec3 vWorldTangent;
@@ -410,6 +420,25 @@ void main() {
 
     vec3 finalColor = modelDiffuse * (lightADR + emissive) + lightSpecular;
 
+    // Additive dynamic FX lighting (Phase U). Diffuse-only point lights
+    // with quadratic-ish range falloff; HDR values (>1) are fine — bloom
+    // + ACES handle them. Tinted by the surface colour so it reads as the
+    // unit catching the weapon's glow.
+    vec3 fxLight = vec3(0.0);
+    for (int i = 0; i < MAX_FX_LIGHTS; i++) {
+        if (i >= fxLightCount) break;
+        float range = fxLightPos[i].w;
+        if (range <= 0.0) continue;
+        vec3  d    = fxLightPos[i].xyz - vWorldPos;
+        float dist = length(d);
+        float atten = clamp(1.0 - dist / range, 0.0, 1.0);
+        atten *= atten;
+        if (atten <= 0.0) continue;
+        vec3 Lp = d / max(dist, 1e-3);
+        fxLight += fxLightColor[i] * max(dot(N, Lp), 0.0) * atten;
+    }
+    finalColor += modelDiffuse * fxLight;
+
     fragColor = vec4(finalColor, 1.0);
 }
 `;
@@ -449,6 +478,41 @@ export function setActiveZKShadowGenerator(
         matrices: [Matrix.Identity(), Matrix.Identity(), Matrix.Identity(), Matrix.Identity()],
         splits: new Vector4(1e30, 1e30, 1e30, 1e30),
     };
+}
+
+// ── Dynamic FX-light bind (Phase U) ───────────────────────────────────
+// The unit material samples FxLightPool directly (not Babylon's stock
+// light uniforms) so the additive loop in the fragment shader stays
+// independent of Babylon's per-mesh light sorting. Set once from main.ts.
+
+const MAX_FX_LIGHTS = 8;
+
+/** Minimal shape we need from the pool — avoids a hard import dependency. */
+interface FxLightSource {
+    fillLightArrays(maxLights: number, outPos: number[], outColor: number[]): number;
+}
+
+let activeFxLightPool: FxLightSource | null = null;
+
+/** Module scratch — reused every bind so we don't allocate per material
+ *  per frame. Pre-sized to the shader's fixed array length. */
+const fxPosScratch: number[] = new Array(MAX_FX_LIGHTS * 4).fill(0);
+const fxColorScratch: number[] = new Array(MAX_FX_LIGHTS * 3).fill(0);
+
+export function setActiveFxLightPool(pool: FxLightSource | null): void {
+    activeFxLightPool = pool;
+}
+
+function bindFxLights(mat: ShaderMaterial): void {
+    let count = 0;
+    if (activeFxLightPool) {
+        count = activeFxLightPool.fillLightArrays(MAX_FX_LIGHTS, fxPosScratch, fxColorScratch);
+    }
+    mat.setInt('fxLightCount', count);
+    if (count > 0) {
+        mat.setArray4('fxLightPos', fxPosScratch);
+        mat.setArray3('fxLightColor', fxColorScratch);
+    }
 }
 
 const SUN_DIFFUSE        = new Vector3(1.10, 1.05, 0.95);
@@ -540,6 +604,7 @@ export function createZKMaterial(
             'hasEmissive', 'hasOrm', 'hasTeamMask', 'hasNormal',
             'csmMatrices', 'csmSplits', 'shadowDarkness',
             'autoNormalParams',
+            'fxLightCount', 'fxLightPos', 'fxLightColor',
         ],
         samplers: [
             'diffuseTex', 'emissiveTex', 'ormTex', 'teamMaskTex',
@@ -580,9 +645,14 @@ export function createZKMaterial(
     mat.setVector3('cameraPos', new Vector3(0, 0, 0));
     mat.setInt('simFrame', 0);
 
+    // Initial FX-light state — count 0 means the shader loop is skipped
+    // until the pool feeds real lights (overwritten every bind).
+    mat.setInt('fxLightCount', 0);
+
     mat.onBindObservable.add(() => {
         bindShadowUniforms(mat);
         bindCameraAndFrame(mat);
+        bindFxLights(mat);
     });
 
     mat.alpha = 1.0;

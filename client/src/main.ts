@@ -40,6 +40,9 @@ import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
 import { loadMapLighting, type MapLighting } from './core/map-lighting.js';
 import { applyMapLighting, createSceneLighting, type SceneLighting } from './core/scene-lighting.js';
 import { FxLightPool } from './core/fx-light-pool.js';
+import { setActiveFxLightPool } from './core/zk-model-material.js';
+import { clientSettings } from './core/client-settings.js';
+import { setParticleBudget } from './core/ceg-translator.js';
 import { sendCameraViewport } from './core/viewport.js';
 import { installCameraWindowApi, uninstallCameraWindowApi } from './core/camera-window-api.js';
 import { fetchAndIngestDefs } from './core/defs-fetch.js';
@@ -310,6 +313,32 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // forward-lit stock materials (terrain/features) and bloomed by the
     // HDR pipeline. Injected into the projectile + combat renderers below.
     fxLightPool = new FxLightPool(scene);
+    // Phase U: let the ZK unit material sample the pool directly so units
+    // (not just terrain/features) light up under weapon fire.
+    setActiveFxLightPool(fxLightPool);
+
+    // Phase G: gate the expensive FX through the graphics-quality presets.
+    // `gfx.fxLights` toggles the pool live; `gfx.particleQuality` (tier
+    // 0/1/2) sizes the CEG per-spawn budget — applied before CEG defs are
+    // ingested (translation runs once per session, so this is a per-session
+    // read; `requiresRestart` in the registry reflects that). `gfx.bloom`
+    // is consumed directly by scene-lighting.ts; `gfx.distortion` by the
+    // future Phase D composite.
+    {
+        const fxLights = fxLightPool;
+        clientSettings.subscribe('gfx.fxLights',
+            (v) => fxLights.setEnabled(Boolean(v)), /*fireNow*/ true);
+        // tier → {maxPerSpawn, maxLifetimeS}
+        const PARTICLE_TIERS: Array<[number, number]> = [
+            [16, 4.0],   // 0 low
+            [32, 8.0],   // 1 medium
+            [64, 12.0],  // 2 high
+        ];
+        clientSettings.subscribe('gfx.particleQuality', (v) => {
+            const tier = PARTICLE_TIERS[Math.max(0, Math.min(2, Number(v)))];
+            setParticleBudget(tier[0], tier[1]);
+        }, /*fireNow*/ true);
+    }
 
     // RTS controls — WASD pan, wheel zoom, edge scrolling, and
     // middle-mouse drag to yaw/tilt. Replaces the default FreeCamera

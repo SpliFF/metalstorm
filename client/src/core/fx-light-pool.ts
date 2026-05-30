@@ -213,6 +213,34 @@ export class FxLightPool {
         }
     }
 
+    /**
+     * Fill caller-provided flat arrays with the currently-lit slots, for
+     * shaders that sample the pool directly rather than through Babylon's
+     * stock light uniforms (the unit team-colour / ZK ShaderMaterials —
+     * Phase U). `outPos` packs vec4 (x, y, z, range) per light; `outColor`
+     * packs vec3 (r, g, b already multiplied by HDR intensity). Returns the
+     * number written, capped at `maxLights`. Brightest-first is not enforced
+     * — slot order is fine for the small N units sample.
+     */
+    fillLightArrays(maxLights: number, outPos: number[], outColor: number[]): number {
+        let n = 0;
+        for (const s of this.slots) {
+            if (n >= maxLights) break;
+            const lt = s.light;
+            if (!s.active || lt.intensity <= 0) continue;
+            const p = lt.position, d = lt.diffuse, I = lt.intensity;
+            outPos[n * 4 + 0] = p.x;
+            outPos[n * 4 + 1] = p.y;
+            outPos[n * 4 + 2] = p.z;
+            outPos[n * 4 + 3] = lt.range;
+            outColor[n * 3 + 0] = d.r * I;
+            outColor[n * 3 + 1] = d.g * I;
+            outColor[n * 3 + 2] = d.b * I;
+            n++;
+        }
+        return n;
+    }
+
     /** Number of currently-lit slots (debug / tuning). */
     get activeCount(): number {
         let n = 0;
