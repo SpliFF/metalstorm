@@ -1,30 +1,29 @@
 /**
- * DecalOverlay — persistent baked ground-decal system (PLAN-decals.md D7).
+ * DecalOverlay — persistent baked ground-decal system (PLAN-decals.md D7,
+ * depth-field accumulation per PLAN-decal-vt.md V0).
  *
- * Replaces the per-frame instanced decal quads with a single map-sized
- * accumulation texture. Each scar / track event is blitted **once** into the
- * overlay and then forgotten; the terrain samples the overlay every frame
- * through a Babylon material plugin. Per-frame cost is ~free and the mark
- * count is unbounded.
+ * A single map-sized accumulation texture. Each scar / track event is blitted
+ * into the overlay; the terrain samples it every frame through a Babylon
+ * material plugin. Per-frame cost is ~free and the mark count is unbounded.
  *
- * We bake the *normal perturbation + albedo disturbance*, NOT baked lighting,
- * so the terrain lights the perturbed normal live — sun movement re-shades
- * the grooves for free while marks stay one-time blits.
+ * We store a *depression depth + albedo darkening* (NOT a baked normal, NOT
+ * baked lighting). The terrain plugin derives the surface normal from the
+ * depth field's GRADIENT and lights it live, so the sun re-shades the grooves
+ * for free. Storing depth (a scalar that sums) is what lets overlapping marks
+ * ACCUMULATE additively — overlapping craters deepen, traffic darkens — which
+ * a signed 0.5-centered normal encoding could not do.
  *
- * Overlay channels (RGBA8):
- *   R,G  tangent-space normal offset, 0.5 = flat   (terrain perturbs N by this)
- *   B    albedo disturbance / darkening 0..1        (terrain darkens albedo)
- *   A    spare (unused; accumulates coverage)
- * Init/neutral = (0.5, 0.5, 0, 0).
+ * Overlay channels (RGBA8), ADDITIVE blend, init/neutral = (0,0,0,0):
+ *   R    depression depth 0..1   (plugin: normal = gradient; deeper = darker)
+ *   G    albedo darkening 0..1   (plugin: albedo *= 1 - G*cap, cap ~50%)
+ *   B,A  spare
+ * Both channels saturate at 1.0 = the cap; that bounds heavily-worked ground.
  *
- * Marks blit with alpha-over by coverage: recent mark wins on overlap, no
- * additive drift, saturates gracefully. A slow global decay pass lerps the
- * whole overlay back toward neutral over minutes.
- *
- * Accumulation mechanics: a single persistent RenderTargetTexture whose
- * per-frame clear is suppressed (no-op onClearObservable). A blit mesh holds
- * *this frame's* new marks as thin instances; after the RTT renders them the
- * instance count is reset to 0, so prior content persists untouched.
+ * Fade / "global reset": additive blending can't subtract over time, so fade
+ * comes from a periodic age-scaled REBUILD — every REBUILD_INTERVAL_S the
+ * overlay is cleared and the whole live mark list (a ring buffer of marks with
+ * birth times) is re-stamped with a coverage scaled by age; fully-faded marks
+ * are dropped. Between rebuilds new marks append onto the persistent overlay.
  */
 
 import {
@@ -101,9 +100,9 @@ export function buildTrackTypeNames(rawTrackTypes: (string | undefined)[]): stri
  *  periodically the overlay is cleared and every live mark re-stamped with an
  *  alpha scaled by its age, so old marks fade out and evicted ones vanish.
  *
- *  This is the foundation the V1 clipmap re-bake builds on. The accumulation /
- *  depth-field model (overlapping craters deepen, capped) is a separate later
- *  V0 step; this step keeps the existing alpha-over compositing. */
+ *  This is the foundation the V1 clipmap re-bake builds on, and composes with
+ *  the additive depth-field model (overlapping marks deepen/darken, capped):
+ *  the rebuild simply re-stamps the additive batch age-scaled. */
 const MARK_CAP = 8192;          // ring buffer size; oldest evicted past this
 const REBUILD_INTERVAL_S = 1.0; // how often fade is re-applied (rebuild cadence)
 const FADE_HOLD_S = 45;         // marks stay full-strength this long
@@ -126,7 +125,7 @@ attribute vec4 world0;
 attribute vec4 world1;
 attribute vec4 world2;
 attribute vec4 world3;
-attribute vec4 params;      // x=kind y=disturbance z=normalStrength w=treadFreq
+attribute vec4 params;      // x=kind y=darkAmp z=depthAmp w=treadFreq/seed
 attribute float fade;       // per-instance fade 0..1 (age-scaled on rebuild; 1 fresh)
 varying vec2 vLocalUv;
 varying vec4 vParams;
@@ -150,12 +149,12 @@ void main() {
 }
 `;
 
-// Blit fragment shader. Outputs the mark's encoded normal offset + disturbance
-// with alpha = coverage (alpha-over blend into the persistent overlay).
+// Blit fragment shader. Outputs depression depth (R) + darkening (G),
+// additively summed into the persistent overlay (PLAN-decal-vt.md V0).
 const BLIT_FRAG = /* glsl */ `
 precision highp float;
 varying vec2 vLocalUv;
-varying vec4 vParams;       // x=kind y=disturbance z=normalStrength w=seed/treadFreq
+varying vec4 vParams;       // x=kind y=darkAmp z=depthAmp w=treadFreq/seed
 varying float vFade;        // per-instance age fade 0..1 (scales coverage)
 varying vec2 vAcross;       // world-XZ dir across the track (tracks only)
 varying vec2 vAlong;        // world-XZ dir along travel (tracks only)
@@ -253,68 +252,44 @@ float craterH(float rr, float ang, float seed, float rimR) {
 
 void main() {
     float kind = vParams.x;
-    float disturb = vParams.y;
-    float nStrength = vParams.z;
+    float darkAmp = vParams.y;    // darkening amplitude (additive → G)
+    float depthAmp = vParams.z;   // depression amplitude (additive → R)
 
-    // Neutral-fill path (full-overlay init / decay) signalled by negative kind.
-    // MUST be checked FIRST: the init quad is map-sized and would otherwise
-    // fall through the scar branch below, whose radial discard clips it to a
-    // central disc — leaving the rest of the overlay at its uninitialised
-    // (0,0,0,0). The terrain plugin decodes those zero texels as a maximal
-    // normal offset + full disturbance mask, painting one giant crater over the
-    // whole map. Filling neutral here first keeps untouched ground clean.
-    if (kind < -0.5) {
-        gl_FragColor = vec4(0.5, 0.5, 0.0, vParams.w); // w carries decay alpha
-        return;
-    }
-
-    vec2 noff = vec2(0.0);
-    float cov;
+    // Depth-field accumulation model (PLAN-decal-vt.md V0): the blit outputs a
+    // depression depth (R) + darkening (G), both ADDITIVE, so overlapping marks
+    // deepen/darken and saturate at the cap (1.0). The terrain plugin derives
+    // the surface normal from the depth field's gradient and synthesises the
+    // crater rim — nothing is baked as a signed normal here (a signed encoding
+    // can't accumulate additively).
+    float depth = 0.0;  // depression magnitude → R
+    float dark = 0.0;   // darkening → G
 
     if (kind < 0.5) {
-        // SCAR: a round impact crater — depressed bowl, raised rim lip with
-        // random height, plus burnt ejecta rays radiating past the rim.
-        // Lighting runs after this in the terrain shader, so the sun shades
-        // the baked relief live.
+        // SCAR crater: a depression bowl (R) + scorch soot (G). The raised rim
+        // is synthesised in the plugin from the depth edge, so only the
+        // depression — a scalar that sums — is stored, and overlapping craters
+        // deepen.
         vec2 c = vLocalUv - 0.5;
         float dist = length(c);
-        float r = dist * 2.0;                 // 0 centre .. 1 mid-edge
+        float r = dist * 2.0;                 // 0 centre .. 1 edge
         float ang = atan(c.y, c.x);
         float seed = vParams.w;               // per-scar random seed
-        vec2 rad = c / max(dist, 1e-4);       // outward radial unit vector
 
-        // Rim radius: kept ROUND (small amplitude) but with HIGH-FREQUENCY
-        // crenellation — many small jags around a circle, not big lobes.
+        // Crater edge radius: round with small high-freq crenellation.
         float rimR = 0.45
             + 0.028 * (fbm(vec2(ang * 6.0 + seed * 3.0, seed)) - 0.5)
             + 0.020 * (fbm(vec2(ang * 14.0 + seed, 2.0)) - 0.5)
             + 0.012 * sin(ang * 23.0 + seed);
 
-        // --- RELIEF: shallow bowl + double jagged rim (drives the normal) ---
-        float dr = 0.012;
-        float slope = (craterH(r + dr, ang, seed, rimR)
-                     - craterH(r - dr, ang, seed, rimR)) / (2.0 * dr);
-        noff = -rad * clamp(slope, -4.0, 4.0) * 0.25 * nStrength;
+        // Depression: ~flat floor rising to 0 at the rim, slight floor noise so
+        // the bowl isn't glassy.
+        float bowl = 1.0 - smoothstep(rimR * 0.55, rimR, r);
+        bowl *= 0.85 + 0.30 * (fbm(vec2(ang * 3.0 + seed, r * 9.0)) - 0.5);
+        depth = clamp(bowl, 0.0, 1.0) * depthAmp;
 
-        // --- EJECTA BLANKET: broken, rubble-strewn ground OUTSIDE the rim that
-        // fades into undisturbed terrain. Baking outward broken-ground bumps
-        // here gives the annulus real relief, so the terrain plugin churns +
-        // rubbles it; the gentle taper also softens the rim→ground join so the
-        // crater base isn't a hard edge. ---
-        float ebBand = smoothstep(rimR * 0.85, rimR * 1.12, r)
-                     * (1.0 - smoothstep(rimR * 1.12, rimR * 1.95, r));
-        float ebN = fbm(vec2(ang * 28.0 + seed * 2.0, r * 10.0 + seed));
-        noff += rad * (ebN - 0.5) * 1.1 * nStrength * ebBand;
-        float covBlanket = ebBand * (0.30 + 0.5 * ebN);
-
-        // --- SCORCH: soot-blast decal pattern (darkening channel) ---
-        // Irregular interior scorch — kept LIGHT (the floor isn't a black pit);
-        // the darker soot is carried by the streaks layered over the top.
+        // Scorch soot (darkening): interior core + radial streaks + spatter.
         float core = (1.0 - smoothstep(0.0, rimR * 1.05, r));
         core *= 0.30 + 0.4 * fbm(vec2(ang * 4.0 + seed, r * 5.0));
-        // Radial soot streaks in TWO populations — sparse-thick + dense-thin —
-        // each with its own per-streak length, width and alpha, so spacing,
-        // reach and weight all vary (no two rays alike).
         float thickSel = smoothstep(0.46, 0.85, fbm(vec2(ang * 24.0 + seed * 7.0, seed)));
         float thinSel  = smoothstep(0.54, 0.92, fbm(vec2(ang * 60.0 + seed * 3.0, seed * 2.0)));
         float lenThick = rimR * (1.5 + 1.5 * fbm(vec2(ang * 24.0 + seed, 4.0)));
@@ -323,100 +298,63 @@ void main() {
                                  * (0.7 + 0.3 * fbm(vec2(ang * 24.0 + seed * 5.0, 7.0)))
                       + thinSel  * (1.0 - smoothstep(rimR * 0.42, lenThin,  r)) * 0.7;
         streaks = clamp(streaks, 0.0, 1.0);
-        // Particulate spatter flung outward.
         float spatter = smoothstep(0.72, 0.93, fbm(vLocalUv * 46.0 + seed * 3.0))
                       * (1.0 - smoothstep(rimR * 0.7, rimR * 2.4, r));
-        // Streaks read at full strength (they're the signature soot rays).
-        float scorch = max(core, max(streaks, spatter * 0.7));
+        float scorch = clamp(max(core, max(streaks, spatter * 0.7)), 0.0, 1.0);
+        dark = scorch * darkAmp;
 
-        // Coverage = scorch ∪ relief body ∪ ejecta blanket (so the rim/floor
-        // normal and the outer broken ground all blit, and the edge tapers).
-        float covBody = 1.0 - smoothstep(rimR * 0.92, rimR * 1.30, r);
-        cov = max(max(scorch, covBody * 0.7), covBlanket);
-        if (cov < 0.02) discard;
-
-        disturb = disturb * clamp(scorch, 0.0, 1.0);
-        // Faint scorch on the blanket so the plugin's mask (B) treats it as
-        // disturbed ground (→ churn + rubble) without darkening it heavily.
-        disturb = max(disturb, covBlanket * 0.4);
+        if (depth < 0.004 && dark < 0.004) discard;
     } else {
-        // TRACK: pattern chosen by category encoded in the kind value
+        // TRACK: depression + darkening by category encoded in the kind value
         //   1 = tread, 2 = wheel, 3 = footprint, 4 = claw.
-        // local uv.x = across width, uv.y = along travel. Relief is built in
-        // the WORLD frame (vAcross/vAlong) so a travel-rotated quad lights
-        // correctly. Tread/wheel are continuous (full-width coverage);
-        // footprint/claw are DISCRETE (coverage only where the shape is, so
-        // the gaps don't blit and they read as individual prints).
+        // A single 0..1 shape mask drives both channels. local uv.x = across
+        // width, uv.y = along travel. Tread/wheel are continuous; footprint/claw
+        // are DISCRETE (the mask is ~0 between prints, so additive adds nothing
+        // there and they read as individual marks).
         float cat    = kind - 1.0;
         float along  = vLocalUv.y;
         float across = vLocalUv.x;
         float freq   = vParams.w;            // rung frequency along travel (tread)
 
-        // Feather the quad edges. Across (uv.x) is always feathered so the
-        // strip/print sides fade. The along (uv.y) ends are feathered ONLY for
-        // the discrete prints (foot/claw); continuous strips (tread/wheel) are
-        // elongated segment quads that overlap end-to-end, so feathering their
-        // ends would punch a dim seam at every joint.
+        // Feather across always; feather the along ends only for discrete prints
+        // (continuous strips overlap end-to-end, so an end feather would seam).
         float acrossEdge = smoothstep(0.0, 0.08, across) * smoothstep(1.0, 0.92, across);
         float alongEdge  = smoothstep(0.0, 0.04, along)  * smoothstep(1.0, 0.96, along);
 
-        float e = 0.02;
-        vec2 nLocal = vec2(0.0);
-
+        float shape = 0.0;
         if (cat < 0.5) {
-            // TREAD: two gouged ruts with cross-rungs.
-            float hax = trackH(across + e, along, freq) - trackH(across - e, along, freq);
-            float hal = trackH(across, along + e, freq) - trackH(across, along - e, freq);
-            nLocal = -vec2(hax, hal) / (2.0 * e);
+            // TREAD: two ruts; transparent gap between so crossing treads
+            // interleave (each adds only where its own ruts fall) rather than
+            // erasing each other.
             float rutL = exp(-pow((across - 0.30) / 0.13, 2.0));
             float rutR = exp(-pow((across - 0.70) / 0.13, 2.0));
             float ruts = clamp(rutL + rutR, 0.0, 1.0);
             float rung = 0.7 + 0.3 * sin(along * freq * 6.2831853);
-            // Capped low (≤0.45) so it stays a soft groove, not a black gouge,
-            // and below the plugin's scorch threshold so no crater rubble.
-            disturb = clamp(disturb * (0.5 + 0.8 * ruts) * rung, 0.0, 0.45);
-            // Coverage follows the ruts (transparent in the gap between them),
-            // NOT the full quad width. A crossing tread then only overwrites
-            // where its OWN ruts fall — its gap no longer wipes the track it
-            // crosses, so crossing treads interleave into a grid instead of
-            // erasing each other.
-            cov = acrossEdge * smoothstep(0.18, 0.45, ruts);
+            shape = acrossEdge * smoothstep(0.18, 0.45, ruts) * rung;
         } else if (cat < 1.5) {
-            // WHEEL / bike: a single narrow continuous rut down the centre.
-            float hax = wheelH(across + e) - wheelH(across - e);
-            nLocal = -vec2(hax, 0.0) / (2.0 * e);
-            float line = -wheelH(across);               // 0..1 depth
-            disturb = clamp(disturb * (0.4 + 1.0 * line), 0.0, 0.45);
-            cov = acrossEdge * smoothstep(0.05, 0.30, line);  // clear outside the line
+            // WHEEL / bike: a single narrow central rut.
+            float line = -wheelH(across);
+            shape = acrossEdge * smoothstep(0.05, 0.30, line);
         } else if (cat < 2.5) {
-            // FOOTPRINT: two discrete oval feet (fore-left / aft-right).
-            float hx = feetH(vec2(across + e, along)) - feetH(vec2(across - e, along));
-            float hy = feetH(vec2(across, along + e)) - feetH(vec2(across, along - e));
-            nLocal = -vec2(hx, hy) / (2.0 * e);
-            float feet = -feetH(vec2(across, along));   // 0..1 depth
-            disturb = clamp(disturb * (0.3 + 1.5 * feet), 0.0, 0.95);
-            cov = acrossEdge * alongEdge * smoothstep(0.05, 0.30, feet);  // discrete
+            // FOOTPRINT: two discrete oval feet.
+            float feet = -feetH(vec2(across, along));
+            shape = acrossEdge * alongEdge * smoothstep(0.05, 0.30, feet);
         } else {
-            // CLAW: chicken / spider three-toe splay, discrete per stamp.
-            float hx = clawH(vec2(across + e, along)) - clawH(vec2(across - e, along));
-            float hy = clawH(vec2(across, along + e)) - clawH(vec2(across, along - e));
-            nLocal = -vec2(hx, hy) / (2.0 * e);
+            // CLAW: discrete three-toe splay.
             float claw = -clawH(vec2(across, along));
-            disturb = clamp(disturb * (0.3 + 1.5 * claw), 0.0, 0.95);
-            cov = acrossEdge * alongEdge * smoothstep(0.05, 0.30, claw);  // discrete
+            shape = acrossEdge * alongEdge * smoothstep(0.05, 0.30, claw);
         }
-
-        // map the local slope into world XZ via the quad's world axes
-        vec2 nWorld = vAcross * nLocal.x + vAlong * nLocal.y;
-        noff = clamp(nWorld, -1.0, 1.0) * nStrength;
+        depth = shape * depthAmp;
+        dark  = shape * darkAmp;
+        if (depth < 0.004 && dark < 0.004) discard;
     }
 
-    // Age fade scales coverage (the alpha-over weight): a faded mark blends
-    // less into the overlay on each rebuild, so it recovers toward neutral.
-    cov *= vFade;
-    if (cov < 0.02) discard;
-    vec3 enc = vec3(0.5 + clamp(noff, -1.0, 1.0) * 0.5, disturb);
-    gl_FragColor = vec4(enc, cov);
+    // Age fade scales the additive contribution; the rebuild re-stamps marks
+    // age-scaled so old marks contribute less and recover toward neutral.
+    depth *= vFade;
+    dark  *= vFade;
+    // Additive (ALPHA_ONEONE): R += depth, G += dark; both saturate at 1.0 = cap.
+    gl_FragColor = vec4(depth, dark, 0.0, 0.0);
 }
 `;
 
@@ -430,8 +368,10 @@ interface PendingMark {
     /** rotation about the overlay plane (radians) */
     rot: number;
     kind: number;
-    disturb: number;
-    nStrength: number;
+    /** Darkening amplitude added to G (additive; capped at 1.0 in-texture). */
+    darkAmp: number;
+    /** Depression depth amplitude added to R (additive; capped at 1.0). */
+    depthAmp: number;
     treadFreq: number;
     /** Optional explicit UV-space half-axis vectors for the quad's local +X
      *  (across) and +Y (along). When present, uploadPending builds the
@@ -510,8 +450,9 @@ export class DecalOverlay {
         );
         this.rtt.wrapU = Texture.CLAMP_ADDRESSMODE;
         this.rtt.wrapV = Texture.CLAMP_ADDRESSMODE;
-        // Neutral overlay value: (0.5,0.5,0,0) = flat normal, no disturbance.
-        this.rtt.clearColor = new Color4(0.5, 0.5, 0.0, 0.0);
+        // Neutral overlay value: (0,0,0,0) = no depression, no darkening
+        // (the depth-field accumulation model — additive, so neutral is zero).
+        this.rtt.clearColor = new Color4(0.0, 0.0, 0.0, 0.0);
         // The overlay is normally persistent (append-only, no per-frame clear).
         // It clears ONLY on the frames flagged by clearNextRender — frame 0
         // (init to neutral) and each fade rebuild (clear, then re-stamp the
@@ -533,7 +474,10 @@ export class DecalOverlay {
             },
         );
         this.blitMat.backFaceCulling = false;
-        this.blitMat.alphaMode = Constants.ALPHA_COMBINE; // src.a over dst
+        // Additive: R += depth, G += darkening. Overlapping marks sum (deepen /
+        // darken) and saturate at 1.0 = the cap. Fade comes from the age-scaled
+        // rebuild (additive can't subtract over time), not this blend.
+        this.blitMat.alphaMode = Constants.ALPHA_ONEONE;
 
         this.blitMesh = buildUnitQuadXY(scene, 'decalBlitQuad');
         this.blitMesh.material = this.blitMat;
@@ -640,8 +584,11 @@ export class DecalOverlay {
             // the per-scar `seed` (below), not from quad rotation.
             rot: 0,
             kind: KIND_SCAR,
-            disturb: Math.min(1, (ev.alpha > 0 ? ev.alpha : 0.85)),
-            nStrength: 0.9,
+            // Per-scar darkening + depression amplitudes (additive into G/R).
+            // ~0.5 each: one scar reads clearly, two overlapping reach the cap
+            // (deeper/darker pit). Scar darkening is heavier than tracks.
+            darkAmp: Math.min(0.6, (ev.alpha > 0 ? ev.alpha : 0.85) * 0.6),
+            depthAmp: 0.5,
             treadFreq: Math.random() * 100, // per-scar seed for crater noise
         });
     }
@@ -684,16 +631,12 @@ export class DecalOverlay {
                         cv: (last.z + ev.z) * 0.5 / this.worldH,
                         hu: 0, hv: 0, rot: 0, ax, ay,
                         kind,
-                        // Light + shallow: continuous tracks read as a subtle
-                        // pressed groove, not a black gouge. Kept low so the
-                        // terrain plugin's crater churn/rubble (gated on strong
-                        // scorch/relief) never fires on them — that procedural
-                        // detail is what made the tread blurry + the bike line
-                        // look like diagonal hatching. Pressure (darkening +
-                        // relief depth) per vehicle pass reduced by 2/3 (0.4→
-                        // 0.13) so a single vehicle leaves a faint mark.
-                        disturb: 0.13,
-                        nStrength: 0.13,
+                        // Light + shallow per pass; accumulates additively as
+                        // more vehicles drive the same ground (capped at the
+                        // plugin's max). One pass ≈ a faint groove; ~6 passes
+                        // reach the darkening cap. Depth stays shallow vs scars.
+                        darkAmp: 0.18,
+                        depthAmp: 0.06,
                         // Rung frequency = rungs over this segment, chosen for a
                         // constant ~world spacing regardless of segment length.
                         treadFreq: Math.max(1, len / Math.max(6, w * 0.5)),
@@ -717,12 +660,11 @@ export class DecalOverlay {
             cv: ev.z / this.worldH,
             hu, hv, rot,
             kind,
-            // Bot footprints / spider claws were far darker than the (now
-            // faint) vehicle tracks — bring the darkening down to ~vehicle
-            // level. A little more relief than vehicles so the discrete prints
-            // stay legible, but gentle enough to drop the heavy crater rubble.
-            disturb: 0.12,
-            nStrength: 0.5,
+            // Bot footprints / spider claws: ~vehicle-level darkening (not
+            // darker), a touch more depression so the discrete prints stay
+            // legible. Discrete marks rarely overlap, so they stay light.
+            darkAmp: 0.18,
+            depthAmp: 0.1,
             treadFreq: 4.0,
         });
     }
@@ -730,15 +672,15 @@ export class DecalOverlay {
     /** Build the thin-instance buffers and enable the blit mesh for this RTT
      *  render. Two modes:
      *   - normal: stamp only `pending` (new marks) onto the persistent overlay.
-     *   - rebuild (fadeQueued): clear the overlay and re-stamp the WHOLE live
+     *   - rebuild (rebuildQueued): clear the overlay and re-stamp the WHOLE live
      *     mark list, each age-scaled (fade) and expired ones dropped. */
     private uploadPending(): void {
         if (this.rebuildQueued) {
             this.rebuildQueued = false;
             this.clearNextRender = true; // the onClear handler wipes to neutral
             // Rebuild the batch from the live marks: drop the fully-faded,
-            // age-scale the rest. Order is preserved (oldest first) so the
-            // alpha-over layering matches the original lay order.
+            // age-scale the rest. (Additive blend is order-independent, so the
+            // overlay sums to the same result regardless of restamp order.)
             const live: StoredMark[] = [];
             const batch: PendingMark[] = [];
             for (const mk of this.marks) {
@@ -781,8 +723,8 @@ export class DecalOverlay {
             matrices[o + 12] = m.cu; matrices[o + 13] = m.cv; matrices[o + 14] = 0; matrices[o + 15] = 1;
 
             params[i * 4 + 0] = m.kind;
-            params[i * 4 + 1] = m.disturb;
-            params[i * 4 + 2] = m.nStrength;
+            params[i * 4 + 1] = m.darkAmp;
+            params[i * 4 + 2] = m.depthAmp;
             params[i * 4 + 3] = m.treadFreq;
             fades[i] = m.fade ?? 1;
         }

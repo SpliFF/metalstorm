@@ -24,9 +24,13 @@ export class DecalOverlayPlugin extends MaterialPluginBase {
     /** Map extent in elmos (world XZ → overlay UV). */
     worldW = 1;
     worldH = 1;
-    /** Strength of the baked macro relief (crater bowl + rim) from the overlay. */
-    normalScale = 1.0;
-    darken = 0.6;
+    /** Scales the depth-field gradient → normal tilt. Folds in the depth→world
+     *  height scale + the central-difference texel spacing; ~9 gives a readable
+     *  pit wall for a typical crater. */
+    normalScale = 9.0;
+    /** Max albedo darkening (G=1 → this fraction darker). ~0.5 = "50% darker"
+     *  cap the user asked for. */
+    darken = 0.5;
     /** Strength of the world-space churned-ground detail normal (crisp, full
      *  resolution — independent of the overlay texel size). */
     detailScale = 0.55;
@@ -66,6 +70,7 @@ export class DecalOverlayPlugin extends MaterialPluginBase {
                 { name: 'decalDarken', size: 1, type: 'float' },
                 { name: 'decalDetailScale', size: 1, type: 'float' },
                 { name: 'decalRubbleScale', size: 1, type: 'float' },
+                { name: 'decalTexel', size: 1, type: 'float' },
             ],
             fragment: `#ifdef DECAL_OVERLAY
                 uniform vec2 decalWorldSize;
@@ -73,6 +78,7 @@ export class DecalOverlayPlugin extends MaterialPluginBase {
                 uniform float decalDarken;
                 uniform float decalDetailScale;
                 uniform float decalRubbleScale;
+                uniform float decalTexel;     // 1 / overlay dimension (texel size in UV)
             #endif`,
         };
     }
@@ -85,6 +91,10 @@ export class DecalOverlayPlugin extends MaterialPluginBase {
         uniformBuffer.updateFloat('decalDarken', this.darken);
         uniformBuffer.updateFloat('decalDetailScale', this.detailScale);
         uniformBuffer.updateFloat('decalRubbleScale', this.rubbleScale);
+        // Texel size for the depth-gradient → normal sampling. Read live from
+        // the overlay RTT so it tracks OVERLAY_MAX_DIM without extra wiring.
+        const dim = this.texture ? (this.texture.getSize().width || 4096) : 4096;
+        uniformBuffer.updateFloat('decalTexel', 1.0 / dim);
         if (this.texture) uniformBuffer.setTexture('decalOverlay', this.texture);
     }
 
@@ -130,26 +140,30 @@ export class DecalOverlayPlugin extends MaterialPluginBase {
                 // StandardMaterial varying when lighting is on).
                 CUSTOM_FRAGMENT_BEFORE_LIGHTS: `#ifdef DECAL_OVERLAY
                     vec2 _duv = vPositionW.xz / decalWorldSize;
-                    vec4 _dec = texture2D(decalOverlay, _duv);
-                    // Macro relief baked in the overlay (crater bowl + rim lip).
-                    vec2 _dnoff = (_dec.rg - 0.5) * 2.0 * decalNormalScale;
-                    normalW = normalize(normalW + vec3(_dnoff.x, 0.0, _dnoff.y));
+                    // Depth-field overlay: R = depression depth, G = darkening.
+                    float _depth = texture2D(decalOverlay, _duv).r;
+                    float _dark  = texture2D(decalOverlay, _duv).g;
 
-                    // Disturbance (B) doubles as the crater/track mask: add crisp
-                    // world-space detail ONLY in disturbed ground so untouched
-                    // terrain stays clean. This detail is sampled at world
-                    // frequency, so it's the same crispness on a small scar or a
-                    // huge one — no stretching.
-                    float _reliefMag = length(_dec.rg - 0.5) * 2.0;
-                    // Crater-detail mask = STRONG scorch ∪ STRONG relief. The
-                    // high thresholds are what separate craters/footprints (deep
-                    // scorch + steep walls → churn + rubble) from vehicle tracks
-                    // (shallow groove, light darkening → none): a smooth tread or
-                    // bike line must NOT collect crater rubble or it reads blurry
-                    // / diagonally hatched. Walls + rim (strong relief, little
-                    // scorch) still roughen via the relief term.
-                    float _mask = max(smoothstep(0.55, 0.80, _dec.b),
-                                      smoothstep(0.50, 0.85, _reliefMag));
+                    // Derive the surface normal from the depth field's GRADIENT
+                    // (central difference across neighbour texels). The ground is
+                    // pushed DOWN by _depth, so height h = -depth and the tangent
+                    // normal tilt is +grad(depth): pit walls face inward + up, and
+                    // overlapping (summed) craters give one deeper, correctly-lit
+                    // pit. decalNormalScale folds in the depth→world-height scale.
+                    float _dxp = texture2D(decalOverlay, _duv + vec2(decalTexel, 0.0)).r;
+                    float _dxm = texture2D(decalOverlay, _duv - vec2(decalTexel, 0.0)).r;
+                    float _dzp = texture2D(decalOverlay, _duv + vec2(0.0, decalTexel)).r;
+                    float _dzm = texture2D(decalOverlay, _duv - vec2(0.0, decalTexel)).r;
+                    vec2 _dgrad = vec2(_dxp - _dxm, _dzp - _dzm) * decalNormalScale;
+                    _dgrad = clamp(_dgrad, -1.0, 1.0);
+                    normalW = normalize(normalW + vec3(_dgrad.x, 0.0, _dgrad.y));
+
+                    // Crater-detail mask keyed on DEPTH: craters (deep) get the
+                    // churn + rubble; vehicle/foot tracks (shallow, even when
+                    // accumulated) stay below the threshold and read clean — no
+                    // diagonal hatching / blur on smooth grooves.
+                    float _mask = smoothstep(0.40, 0.70, _depth);
+                    float _reliefMag = _depth;
                     if (_mask > 0.02) {
                         vec2 _wp = vPositionW.xz;
                         // strong multi-octave churn to break up smooth walls
@@ -180,8 +194,8 @@ export class DecalOverlayPlugin extends MaterialPluginBase {
                         baseColor.rgb *= (1.0 - 0.12 * _mask * (dDecNoise(_wp * 0.06) - 0.35));
                     }
 
-                    // Scorch darkening.
-                    baseColor.rgb *= (1.0 - _dec.b * decalDarken);
+                    // Darkening (G), capped by decalDarken (~0.5 = max 50%).
+                    baseColor.rgb *= (1.0 - min(_dark, 1.0) * decalDarken);
                 #endif`,
             };
         }
