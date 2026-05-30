@@ -1191,6 +1191,7 @@ export class LuaWidgetManager {
                 if (msg.callins) {
                     this.registerInputListeners(msg.callins as string[]);
                 }
+                this.applyStartupWidgetDisables();
                 break;
 
             case 'widgetList':
@@ -1959,6 +1960,34 @@ export class LuaWidgetManager {
         overlay.querySelector('.wl-close')?.addEventListener('click', () => {
             this.toggleWidgetList();
         });
+    }
+
+    /** Guards applyStartupWidgetDisables so a re-emitted `ready` (game
+     *  restart / reconnect on the same manager) doesn't re-run it. */
+    private startupDisablesApplied = false;
+
+    /**
+     * Disable widgets named in the `?disableWidgets=` URL param once the
+     * worker is ready. Value is a comma-separated list of widget GetInfo
+     * names (URL-decoded). Debug/test launches use this to suppress
+     * blocking startup overlays — chiefly ZK's "Startup Info and Selector"
+     * commander chooser — without affecting normal lobby launches (which
+     * never carry the param, so a real player still gets the selector).
+     * See the spring-debug skill for the canonical debug URL.
+     */
+    private applyStartupWidgetDisables(): void {
+        if (this.startupDisablesApplied) return;
+        this.startupDisablesApplied = true;
+        let raw: string | null = null;
+        try {
+            raw = new URLSearchParams(window.location.search).get('disableWidgets');
+        } catch { /* no window/search available */ }
+        if (!raw) return;
+        const names = raw.split(',').map(s => s.trim()).filter(Boolean);
+        for (const name of names) {
+            console.log(`[LuaUI] ?disableWidgets: disabling "${name}"`);
+            this.postToWorker({ type: 'disableWidget', name });
+        }
     }
 
     // ── window.widgets API ──────────────────────────────────────────────

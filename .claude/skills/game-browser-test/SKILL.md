@@ -61,6 +61,25 @@ without fighting over the single shared `chrome-profile` lock (the
    other games' entries and buries yours. Always pass your own
    `roomId: <yourRoomId>` so you only see your game's logs.
 
+**Suppress the startup commander overlay.** ZK's "Startup Info and
+Selector" widget pops a commander-chooser window over the field on game
+start — noise for most tests and it needs a click to dismiss. The client
+reads a `?disableWidgets=<name,name>` URL param (comma-separated widget
+GetInfo names) and switches those widgets off once the LuaUI worker is
+ready. So navigate to the client **with the param** unless you are
+specifically testing that overlay:
+
+```js
+// clear view on launch (default for debug/test):
+navigate_page("http://localhost:8012/?disableWidgets=Startup%20Info%20and%20Selector")
+// keep the overlay (only when testing the commander chooser itself):
+navigate_page("http://localhost:8012/")
+```
+
+`launch_game` returns a ready-made `browserUrl` with this applied (pass
+`testStartupSelector: true` to get the plain URL instead). The param
+persists across the in-page login/join, so set it on the initial navigate.
+
 Worker-side Lua eval is `await window.widgets.eval("...lua...")` (the LuaUI
 widget worker). `window.test.lua(...)` is a **different** context (server
 LuaExec scope) and lacks `Spring.GetConfigInt` etc.

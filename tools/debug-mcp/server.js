@@ -22,6 +22,15 @@ import { readFileSync, existsSync, readdirSync, unlinkSync, statSync } from 'fs'
 
 const LOG_SERVER_URL = process.env.LOG_SERVER_URL || 'http://localhost:8010';
 const LOBBY_URL = process.env.LOBBY_URL || 'http://localhost:8011';
+const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:8012';
+
+// ZK's "Startup Info and Selector" widget pops a commander-chooser overlay
+// at game start. It blocks the view and needs a click to dismiss, which is
+// noise for automated/debug launches. The client honours a
+// `?disableWidgets=<name,name>` URL param (see lua-widget-manager.ts) to
+// switch named widgets off once the worker is ready. launch_game suggests a
+// browser URL with this widget disabled unless `testStartupSelector` is set.
+const STARTUP_SELECTOR_WIDGET = 'Startup Info and Selector';
 const DB_PATH = process.env.SPRING_DB || resolve(process.env.PROJECT_ROOT || '.', 'data/spring-server.db');
 const AUTH_USER = process.env.SPRING_USER || 'admin';
 const AUTH_PASS = process.env.SPRING_PASS || 'admin';
@@ -591,6 +600,7 @@ const TOOLS = [
                 username: { type: 'string', description: 'Username to launch as. Defaults to admin / SPRING_USER.' },
                 password: { type: 'string', description: 'Password. Defaults to SPRING_PASS.' },
                 clearCache: { type: 'boolean', description: 'Delete the defs cache before launching to force a fresh bake.', default: false },
+                testStartupSelector: { type: 'boolean', description: 'Keep ZK\'s "Startup Info and Selector" commander-chooser overlay enabled. Default false — the suggested browserUrl disables it so the view is clear on launch. Set true only when specifically testing that overlay.', default: false },
             },
             required: ['mapId'],
         },
@@ -1102,13 +1112,21 @@ async function executeTool(name, args) {
             if (!startResp.ok) return `Start game failed (${startResp.status}): ${await startResp.text()}`;
             const started = await startResp.json();
 
+            // Suggested browser URL. Unless the caller is specifically
+            // testing the startup commander-chooser, disable it so the view
+            // is clear on launch (the client reads ?disableWidgets=).
+            const disable = args.testStartupSelector ? '' :
+                `?disableWidgets=${encodeURIComponent(STARTUP_SELECTOR_WIDGET)}`;
+            const browserUrl = `${CLIENT_URL}/${disable}`;
+
             return JSON.stringify({
                 roomId: started.id || room.id,
                 gameServerPort: started.gameServerPort,
                 gameId: args.gameId || 'zk',
                 mapId: args.mapId,
                 state: started.state,
-                hint: 'Use list_processes to confirm spring-server pid; the game will be reachable on gameServerPort once warm.',
+                browserUrl,
+                hint: 'Use list_processes to confirm spring-server pid; the game will be reachable on gameServerPort once warm. Open browserUrl to view — it disables the ZK commander-selector overlay (pass testStartupSelector=true to keep it).',
             }, null, 2);
         }
 
