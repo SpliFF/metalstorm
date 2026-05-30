@@ -125,11 +125,18 @@ export function buildTrackTypeNames(rawTrackTypes: (string | undefined)[]): stri
  *  that over-erased). Each mark is held in a ring buffer with its birth time;
  *  periodically each target is cleared and every live mark re-stamped with an
  *  alpha scaled by its age, so old marks fade out and evicted ones vanish. */
-const MARK_CAP = 8192;          // ring buffer size; oldest evicted past this
-const REBUILD_INTERVAL_S = 1.0; // how often fade is re-applied (rebuild cadence)
-const FADE_HOLD_S = 45;         // marks stay full-strength this long
-const FADE_OUT_S = 45;          // then fade linearly to 0 over this long
-const FADE_END_S = FADE_HOLD_S + FADE_OUT_S; // mark fully gone (evicted) after
+const MARK_CAP = 32768;         // ring buffer size; oldest evicted past this
+                                // (raised for the ~10 min retention below)
+const FADE_REBUILD_S = 3.0;     // how often fade is re-applied when idle (no new
+                                // marks). Slow fade → a 3 s cadence is smooth.
+const MARK_REBUILD_S = 0.12;    // when new marks arrive, re-bake within this long
+                                // (debounce). The overlay is ALWAYS the exact
+                                // composite of the mark list — there is no
+                                // additive "append" path, so a fresh mark shows
+                                // at its true value with no dark over-stamp flash.
+const FADE_HOLD_S = 300;        // marks stay full-strength this long (5 min)
+const FADE_OUT_S = 300;         // then fade linearly to 0 over this long (5 min)
+const FADE_END_S = FADE_HOLD_S + FADE_OUT_S; // fully gone (evicted) at ~10 min
 
 /** Private render layer for the blit mesh. The main scene camera's default
  *  mask (0x0FFFFFFF) excludes this bit, so the full-screen blit quad renders
@@ -290,14 +297,16 @@ void main() {
 
         float shape = 0.0;
         if (cat < 0.5) {
-            // TREAD: two ruts, transparent gap between so crossing treads
-            // interleave (each adds only where its own ruts fall) rather than
-            // erasing each other.
-            float rutL = exp(-pow((across - 0.30) / 0.13, 2.0));
-            float rutR = exp(-pow((across - 0.70) / 0.13, 2.0));
+            // TWO THIN wheel ruts (one per wheel) with a transparent gap
+            // between, so crossing tracks interleave rather than erase. The
+            // ruts are narrow (≈ wheel width, not the full track band) and sit
+            // at 0.27 / 0.73 across — the spacing between the wheels. Only a
+            // faint rung ripple (mostly a smooth line, not a tank-tread ladder).
+            float rutL = exp(-pow((across - 0.27) / 0.05, 2.0));
+            float rutR = exp(-pow((across - 0.73) / 0.05, 2.0));
             float ruts = clamp(rutL + rutR, 0.0, 1.0);
-            float rung = 0.7 + 0.3 * sin(along * freq * 6.2831853);
-            shape = acrossEdge * smoothstep(0.18, 0.45, ruts) * rung;
+            float rung = 0.88 + 0.12 * sin(along * freq * 6.2831853);
+            shape = acrossEdge * smoothstep(0.10, 0.40, ruts) * rung;
         } else if (cat < 1.5) {
             // WHEEL / bike: a single narrow central rut.
             float d = (across - 0.5) / 0.08;
@@ -388,7 +397,9 @@ export class DecalOverlay {
     private rttCamera: FreeCamera;
     private blitMesh: Mesh;
     private blitMat: ShaderMaterial;
-    private pending: PendingMark[] = [];
+    /** Set when a new mark was laid since the last re-bake — tick() then
+     *  schedules a (debounced) re-bake. Replaces the old additive append path. */
+    private dirty = false;
     /** Per-`trackTypeId` procedural pattern category (index == wire
      *  trackTypeId). Empty until {@link setTrackTypes} is called; an unknown
      *  id then falls back to TREAD. */
@@ -461,10 +472,10 @@ export class DecalOverlay {
         this.rttCamera = new FreeCamera('decalRttCam', Vector3.Zero(), scene);
         this.rttCamera.layerMask = BLIT_LAYER;
 
-        // Coarse renders FIRST, fine SECOND (array order). Each sets the mesh's
-        // instance buffer + per-target uniform in its own onBeforeRender; since
-        // renders are sequential, the shared mesh/material is reused per target.
-        // pending is cleared only after the fine (last) target consumes it.
+        // Coarse renders FIRST, fine SECOND (array order). Each re-bakes (or
+        // skips) the shared mesh in its own onBeforeRender; since renders are
+        // sequential, the shared mesh/material is reused per target. The fine
+        // (last) target releases the per-frame rebuild batch in onAfterRender.
         this.attachTargetRender(this.coarse, false);
         this.attachTargetRender(this.fine, true);
         scene.customRenderTargets.push(this.coarse.rtt);
@@ -514,11 +525,8 @@ export class DecalOverlay {
         t.rtt.onBeforeRenderObservable.add(() => this.prepareTarget(t));
         t.rtt.onAfterRenderObservable.add(() => {
             this.blitMesh.thinInstanceCount = 0;
-            if (isLast) {
-                // Both targets have consumed this frame's appends + rebuild batch.
-                this.pending = [];
-                this.frameRebuildBatch = null;
-            }
+            // Both targets have consumed this frame's rebuild batch (if any).
+            if (isLast) this.frameRebuildBatch = null;
         });
     }
 
@@ -545,13 +553,19 @@ export class DecalOverlay {
     tick(dtSeconds: number, focusX?: number, focusZ?: number, camHeight?: number): void {
         if (this.disposed) return;
         this.elapsed += dtSeconds;
-        if (this.fadeEnabled) {
-            this.sinceRebuild += dtSeconds;
-            if (this.sinceRebuild >= REBUILD_INTERVAL_S) {
-                this.sinceRebuild = 0;
-                this.coarse.rebuild = true;  // both re-bake age-scaled
-                this.fine.rebuild = true;
-            }
+        this.sinceRebuild += dtSeconds;
+        // Re-bake the whole overlay from the mark list either when new marks
+        // arrived (debounced by MARK_REBUILD_S so a burst coalesces into one
+        // re-bake) or periodically to advance the fade. Each re-bake is a clean
+        // clear-then-composite, so the texture is exactly the live mark list —
+        // no additive carry-over, no transient over-darkening.
+        const dirtyReady = this.dirty && this.sinceRebuild >= MARK_REBUILD_S;
+        const fadeReady = this.fadeEnabled && this.sinceRebuild >= FADE_REBUILD_S;
+        if (dirtyReady || fadeReady) {
+            this.sinceRebuild = 0;
+            this.dirty = false;
+            this.coarse.rebuild = true;
+            this.fine.rebuild = true;
         }
         if (focusX !== undefined && focusZ !== undefined && camHeight !== undefined) {
             this.updateWindow(focusX, focusZ, camHeight);
@@ -648,11 +662,12 @@ export class DecalOverlay {
         if (this.marks.length > MARK_CAP) this.marks.shift();
     }
 
-    /** Lay a mark: blit it this frame (append to both targets) AND retain it
-     *  for the age-scaled rebuild (fade). */
+    /** Lay a mark: retain it in the ring buffer and flag the overlay dirty so
+     *  the next tick re-bakes the composite (there is no separate append path —
+     *  the texture is always exactly the composited mark list). */
     private emit(m: PendingMark): void {
-        this.pending.push(m);
         this.remember(m);
+        this.dirty = true;
     }
 
     onSnapshot(scars: ScarEvent[], tracks: TrackSegmentEvent[] = []): void {
@@ -776,27 +791,24 @@ export class DecalOverlay {
     }
 
     /** Set the mesh's instance buffer + this target's world→clip uniform just
-     *  before the target's RTT draws. Two modes:
-     *   - append: stamp only `pending` (new marks) onto the persistent target.
-     *   - rebuild: clear the target and re-stamp the WHOLE live mark list,
-     *     age-scaled (fade) with expired marks dropped. */
+     *  before the target's RTT draws. When this target is flagged for re-bake,
+     *  clear it and stamp the WHOLE live mark list (age-scaled, expired dropped)
+     *  in one additive pass — the texture becomes exactly the composited list.
+     *  Otherwise draw nothing: the target persists its last re-bake. */
     private prepareTarget(t: TargetState): void {
-        // Per-target world→clip transform (the only thing that differs between
-        // the coarse full-map texture and the scrolling fine window).
-        this.uOrigin.set(t.originX, t.originZ);
-        this.uInvExtent.set(1 / t.extentX, 1 / t.extentZ);
-        this.blitMat.setVector2('uOrigin', this.uOrigin);
-        this.blitMat.setVector2('uInvExtent', this.uInvExtent);
-
-        let batch: PendingMark[];
         if (t.rebuild) {
             t.rebuild = false;
             t.clearNext = true;          // onClear wipes to neutral first
-            batch = this.getRebuildBatch();
+            // Per-target world→clip transform (the only thing that differs
+            // between the coarse full-map texture and the scrolling fine window).
+            this.uOrigin.set(t.originX, t.originZ);
+            this.uInvExtent.set(1 / t.extentX, 1 / t.extentZ);
+            this.blitMat.setVector2('uOrigin', this.uOrigin);
+            this.blitMat.setVector2('uInvExtent', this.uInvExtent);
+            this.uploadBatch(this.getRebuildBatch());
         } else {
-            batch = this.pending;        // append new marks onto the persistent target
+            this.uploadBatch([]);        // nothing to draw — texture persists
         }
-        this.uploadBatch(batch);
     }
 
     /** Upload a batch of marks as thin instances of the unit quad. */
@@ -842,7 +854,6 @@ export class DecalOverlay {
         this.blitMesh.dispose();
         this.blitMat.dispose();
         this.rttCamera.dispose();
-        this.pending = [];
         this.marks = [];
         this.lastTrackPos.clear();
     }
