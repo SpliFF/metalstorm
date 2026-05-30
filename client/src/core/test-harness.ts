@@ -154,12 +154,17 @@ export class TestHarness {
     }
 
     /** Insta-fill a unit's stockpile weapon (nukes, anti-nukes, tactical
-     *  missiles). Sets `numStockpiled` directly so CMD_MANUALFIRE works on
-     *  the next tick; skips the natural multi-minute build cycle. Use
-     *  this in scenarios instead of `Spring.SetUnitStockpile`, which
-     *  silently no-ops when the stockpile weapon isn't wired yet. */
+     *  missiles) so attack/manual-fire works without the multi-minute
+     *  build cycle. There is no server `stockpile` verb — set
+     *  `numStockpiled` directly through synced Lua's `Spring.SetUnitStockpile`
+     *  (3rd arg marks the in-progress missile 100% built). It no-ops only
+     *  while the unit's `stockpileWeapon` is still unwired; scenarios call
+     *  this well after spawn, by which point it's live. `queued` is
+     *  accepted for back-compat but unused. */
     stockpile(unitId: number, count: number, queued = 0): Promise<string> {
-        return this.server('stockpile', unitId, count, queued);
+        void queued;
+        return this.lua(
+            `if Spring.SetUnitStockpile then Spring.SetUnitStockpile(${unitId}, ${count}, 1) end`);
     }
 
     /** Toggle Spring cheats. Required for many test verbs (spawn,
