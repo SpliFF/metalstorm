@@ -95,10 +95,20 @@ export function buildTrackTypeNames(rawTrackTypes: (string | undefined)[]): stri
     return [...set].sort();
 }
 
-/** Seconds between global decay passes, and how much each fades toward
- *  neutral. ~28 s to substantially fade a mark (matches the old scar feel). */
-const DECAY_INTERVAL_S = 4;
-const DECAY_ALPHA = 0.06;
+/** PLAN-decal-vt.md Phase V0 — fade via age-scaled rebuild from a CPU mark
+ *  list (the correct "global reset", replacing the disabled running-decay pass
+ *  that over-erased). Each mark is held in a ring buffer with its birth time;
+ *  periodically the overlay is cleared and every live mark re-stamped with an
+ *  alpha scaled by its age, so old marks fade out and evicted ones vanish.
+ *
+ *  This is the foundation the V1 clipmap re-bake builds on. The accumulation /
+ *  depth-field model (overlapping craters deepen, capped) is a separate later
+ *  V0 step; this step keeps the existing alpha-over compositing. */
+const MARK_CAP = 8192;          // ring buffer size; oldest evicted past this
+const REBUILD_INTERVAL_S = 1.0; // how often fade is re-applied (rebuild cadence)
+const FADE_HOLD_S = 45;         // marks stay full-strength this long
+const FADE_OUT_S = 45;          // then fade linearly to 0 over this long
+const FADE_END_S = FADE_HOLD_S + FADE_OUT_S; // mark fully gone (evicted) after
 
 /** Private render layer for the blit mesh. The main scene camera's default
  *  mask (0x0FFFFFFF) excludes this bit, so the full-screen blit quad renders
@@ -117,8 +127,10 @@ attribute vec4 world1;
 attribute vec4 world2;
 attribute vec4 world3;
 attribute vec4 params;      // x=kind y=disturbance z=normalStrength w=treadFreq
+attribute float fade;       // per-instance fade 0..1 (age-scaled on rebuild; 1 fresh)
 varying vec2 vLocalUv;
 varying vec4 vParams;
+varying float vFade;
 // World-XZ unit directions of the quad's local axes. The overlay maps 1:1 to
 // world XZ, so the instance matrix's X/Y columns ARE the across/along world
 // directions. Tracks bake their tread relief in this WORLD frame so a rotated
@@ -131,6 +143,7 @@ void main() {
     vec4 p = m * vec4(position, 1.0);   // p.xy in overlay UV space [0,1]
     vLocalUv = uv;
     vParams = params;
+    vFade = fade;
     vAcross = normalize(vec2(world0.x, world0.y) + vec2(1e-6, 0.0));
     vAlong  = normalize(vec2(world1.x, world1.y) + vec2(0.0, 1e-6));
     gl_Position = vec4(p.xy * 2.0 - 1.0, 0.0, 1.0);
@@ -143,6 +156,7 @@ const BLIT_FRAG = /* glsl */ `
 precision highp float;
 varying vec2 vLocalUv;
 varying vec4 vParams;       // x=kind y=disturbance z=normalStrength w=seed/treadFreq
+varying float vFade;        // per-instance age fade 0..1 (scales coverage)
 varying vec2 vAcross;       // world-XZ dir across the track (tracks only)
 varying vec2 vAlong;        // world-XZ dir along travel (tracks only)
 
@@ -397,6 +411,9 @@ void main() {
         noff = clamp(nWorld, -1.0, 1.0) * nStrength;
     }
 
+    // Age fade scales coverage (the alpha-over weight): a faded mark blends
+    // less into the overlay on each rebuild, so it recovers toward neutral.
+    cov *= vFade;
     if (cov < 0.02) discard;
     vec3 enc = vec3(0.5 + clamp(noff, -1.0, 1.0) * 0.5, disturb);
     gl_FragColor = vec4(enc, cov);
@@ -424,6 +441,16 @@ interface PendingMark {
      *  shear it). */
     ax?: { u: number; v: number };
     ay?: { u: number; v: number };
+    /** Per-instance fade 0..1 (coverage multiplier). Undefined = 1 (fresh). Set
+     *  by the rebuild from the mark's age; fresh appends leave it 1. */
+    fade?: number;
+}
+
+/** A mark retained in the ring buffer so the overlay can be rebuilt from it
+ *  (age-scaled) for fade — see MARK_CAP / FADE_* and rebuildFromMarks(). It is
+ *  exactly the blit's PendingMark plus the birth timestamp. */
+interface StoredMark extends PendingMark {
+    birth: number; // value of this.elapsed (seconds) when laid
 }
 
 export class DecalOverlay {
@@ -444,9 +471,21 @@ export class DecalOverlay {
     /** world extent in elmos; world XZ → UV is (x/worldW, z/worldH). */
     private worldW = 1;
     private worldH = 1;
-    private decayAccum = 0;
-    /** Global fade pass — off until the over-eager-decay bug is reworked. */
-    decayEnabled = false;
+    /** Wall-clock seconds since construction (advanced by tick); marks store
+     *  their birth time against this so the rebuild can age-fade them. */
+    private elapsed = 0;
+    /** Ring buffer of every live mark, for the age-scaled rebuild (fade). */
+    private marks: StoredMark[] = [];
+    private sinceRebuild = 0;
+    /** Set when the next RTT render should clear-then-restamp the whole mark
+     *  list (a fade rebuild) instead of appending only new marks. */
+    private rebuildQueued = false;
+    /** Set true for exactly one RTT render so the onClear handler actually
+     *  clears (frame 0 init + each fade rebuild); otherwise the overlay is
+     *  persistent and only appends. */
+    private clearNextRender = true;
+    /** Master switch for the fade rebuild. On = the global reset runs. */
+    fadeEnabled = true;
     private disposed = false;
 
     constructor(scene: Scene, worldWidthElmos: number, worldHeightElmos: number) {
@@ -471,14 +510,24 @@ export class DecalOverlay {
         );
         this.rtt.wrapU = Texture.CLAMP_ADDRESSMODE;
         this.rtt.wrapV = Texture.CLAMP_ADDRESSMODE;
-        // Suppress the per-frame clear so the overlay accumulates.
-        this.rtt.onClearObservable.add(() => { /* no clear — persistent */ });
+        // Neutral overlay value: (0.5,0.5,0,0) = flat normal, no disturbance.
+        this.rtt.clearColor = new Color4(0.5, 0.5, 0.0, 0.0);
+        // The overlay is normally persistent (append-only, no per-frame clear).
+        // It clears ONLY on the frames flagged by clearNextRender — frame 0
+        // (init to neutral) and each fade rebuild (clear, then re-stamp the
+        // whole mark list age-scaled). uploadPending sets the flag + queues
+        // marks; this handler consumes it.
+        this.rtt.onClearObservable.add(() => {
+            if (!this.clearNextRender) return; // persistent: skip the clear
+            this.clearNextRender = false;
+            this.scene.getEngine().clear(this.rtt.clearColor, true, true, true);
+        });
 
         this.blitMat = new ShaderMaterial(
             'decalBlit', scene,
             { vertexSource: BLIT_VERT, fragmentSource: BLIT_FRAG },
             {
-                attributes: ['position', 'uv', 'world0', 'world1', 'world2', 'world3', 'params'],
+                attributes: ['position', 'uv', 'world0', 'world1', 'world2', 'world3', 'params', 'fade'],
                 uniforms: [],
                 needAlphaBlending: true,
             },
@@ -516,13 +565,8 @@ export class DecalOverlay {
             this.blitMesh.thinInstanceCount = 0;
         });
         scene.customRenderTargets.push(this.rtt);
-
-        // Frame 0: a full-overlay neutral fill so the (un-cleared) texture
-        // starts at (0.5,0.5,0,0) everywhere.
-        this.pending.push({
-            cu: 0.5, cv: 0.5, hu: 0.5, hv: 0.5, rot: 0,
-            kind: -1, disturb: 0, nStrength: 0, treadFreq: 1.0,
-        });
+        // Frame 0 clears to the neutral clearColor (clearNextRender starts true),
+        // so the overlay begins flat everywhere — no neutral-fill quad needed.
     }
 
     /** The accumulation texture, for binding into the terrain plugin. */
@@ -536,27 +580,39 @@ export class DecalOverlay {
         this.trackCategories = names.map(classifyTrackType);
     }
 
-    /** Per-frame tick: drives the slow global decay. The RTT itself renders
-     *  via Babylon's customRenderTargets pump. */
+    /** Per-frame tick: advances the clock and schedules the periodic fade
+     *  rebuild. The RTT itself renders via Babylon's customRenderTargets pump. */
     tick(dtSeconds: number): void {
         if (this.disposed) return;
-        // Decay disabled by default pending tuning: in-browser the full-overlay
-        // alpha-over neutral pass empirically erased marks within seconds even
-        // though the 4 s interval measured correct — likely the RTT re-applying
-        // the queued decay mark more than once per interval. Permanent marks
-        // (which the user accepted as an option) until the decay is reworked
-        // (candidate: a wall-clock-gated, much gentler pass, or a compute-style
-        // multiply that's frequency-independent).
-        if (!this.decayEnabled) return;
-        this.decayAccum += dtSeconds;
-        if (this.decayAccum >= DECAY_INTERVAL_S) {
-            this.decayAccum = 0;
-            // Full-overlay neutral fill at low alpha → lerps toward neutral.
-            this.pending.push({
-                cu: 0.5, cv: 0.5, hu: 0.5, hv: 0.5, rot: 0,
-                kind: -1, disturb: 0, nStrength: 0, treadFreq: DECAY_ALPHA,
-            });
+        this.elapsed += dtSeconds;
+        if (!this.fadeEnabled) return;
+        this.sinceRebuild += dtSeconds;
+        if (this.sinceRebuild >= REBUILD_INTERVAL_S) {
+            this.sinceRebuild = 0;
+            this.rebuildQueued = true; // uploadPending performs it next render
         }
+    }
+
+    /** Age → coverage multiplier: full strength until FADE_HOLD_S, then linear
+     *  to 0 at FADE_END_S. Marks past FADE_END_S are dropped by the rebuild. */
+    private fadeFor(age: number): number {
+        if (age <= FADE_HOLD_S) return 1;
+        if (age >= FADE_END_S) return 0;
+        return 1 - (age - FADE_HOLD_S) / FADE_OUT_S;
+    }
+
+    /** Record a mark for the age-scaled rebuild, evicting the oldest past the
+     *  ring-buffer cap. The mark is a snapshot of the blit params (+ birth). */
+    private remember(m: PendingMark): void {
+        this.marks.push({ ...m, birth: this.elapsed });
+        if (this.marks.length > MARK_CAP) this.marks.shift();
+    }
+
+    /** Lay a mark: blit it this frame (immediate) AND retain it for the
+     *  age-scaled rebuild (fade). */
+    private emit(m: PendingMark): void {
+        this.pending.push(m);
+        this.remember(m);
     }
 
     onSnapshot(scars: ScarEvent[], tracks: TrackSegmentEvent[] = []): void {
@@ -572,7 +628,7 @@ export class DecalOverlay {
         const PAD = 2.2;
         const hu = (ev.radius * PAD) / this.worldW;
         const hv = (ev.radius * PAD) / this.worldH;
-        this.pending.push({
+        this.emit({
             cu: ev.x / this.worldW,
             cv: ev.z / this.worldH,
             hu, hv,
@@ -623,7 +679,7 @@ export class DecalOverlay {
                     // a long quad on a non-square map.
                     const ax = { u: (tz * halfW) / this.worldW, v: (-tx * halfW) / this.worldH };
                     const ay = { u: (tx * halfLen) / this.worldW, v: (tz * halfLen) / this.worldH };
-                    this.pending.push({
+                    this.emit({
                         cu: (last.x + ev.x) * 0.5 / this.worldW,
                         cv: (last.z + ev.z) * 0.5 / this.worldH,
                         hu: 0, hv: 0, rot: 0, ax, ay,
@@ -656,7 +712,7 @@ export class DecalOverlay {
         // The blit matrix maps local +Y to (-sin rot, cos rot) in (X,Z); solving
         // for travel (dirX, dirZ) gives rot = atan2(-dirX, dirZ).
         const rot = Math.atan2(-ev.dirX, ev.dirZ);
-        this.pending.push({
+        this.emit({
             cu: ev.x / this.worldW,
             cv: ev.z / this.worldH,
             hu, hv, rot,
@@ -671,14 +727,36 @@ export class DecalOverlay {
         });
     }
 
-    /** Build the thin-instance buffers for the pending marks and enable the
-     *  blit mesh for this RTT render. */
+    /** Build the thin-instance buffers and enable the blit mesh for this RTT
+     *  render. Two modes:
+     *   - normal: stamp only `pending` (new marks) onto the persistent overlay.
+     *   - rebuild (fadeQueued): clear the overlay and re-stamp the WHOLE live
+     *     mark list, each age-scaled (fade) and expired ones dropped. */
     private uploadPending(): void {
+        if (this.rebuildQueued) {
+            this.rebuildQueued = false;
+            this.clearNextRender = true; // the onClear handler wipes to neutral
+            // Rebuild the batch from the live marks: drop the fully-faded,
+            // age-scale the rest. Order is preserved (oldest first) so the
+            // alpha-over layering matches the original lay order.
+            const live: StoredMark[] = [];
+            const batch: PendingMark[] = [];
+            for (const mk of this.marks) {
+                const f = this.fadeFor(this.elapsed - mk.birth);
+                if (f <= 0) continue; // expired → evicted by omission
+                live.push(mk);
+                batch.push({ ...mk, fade: f });
+            }
+            this.marks = live;
+            this.pending = batch;
+        }
+
         const n = this.pending.length;
         if (n === 0) { this.blitMesh.thinInstanceCount = 0; return; }
 
         const matrices = new Float32Array(n * 16);
         const params = new Float32Array(n * 4);
+        const fades = new Float32Array(n);
         for (let i = 0; i < n; i++) {
             const m = this.pending[i];
             const o = i * 16;
@@ -706,9 +784,11 @@ export class DecalOverlay {
             params[i * 4 + 1] = m.disturb;
             params[i * 4 + 2] = m.nStrength;
             params[i * 4 + 3] = m.treadFreq;
+            fades[i] = m.fade ?? 1;
         }
         this.blitMesh.thinInstanceSetBuffer('matrix', matrices, 16, true);
         this.blitMesh.thinInstanceSetBuffer('params', params, 4, true);
+        this.blitMesh.thinInstanceSetBuffer('fade', fades, 1, true);
         this.blitMesh.thinInstanceCount = n;
         this.pending = [];
     }
@@ -722,6 +802,7 @@ export class DecalOverlay {
         this.blitMat.dispose();
         this.rttCamera.dispose();
         this.pending = [];
+        this.marks = [];
         this.lastTrackPos.clear();
     }
 }
