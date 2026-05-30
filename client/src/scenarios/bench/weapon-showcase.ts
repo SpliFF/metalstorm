@@ -16,6 +16,7 @@
  *   - LaserCannon       (shieldraid → Bandit)
  *   - BeamLaser         (cloakaa → Gremlin, fires at flying drone)
  *   - Cannon            (staticheavyarty → Big Bertha)
+ *   - StarburstLauncher (vehheavyarty Impaler — ballistic missile rover)
  *   - StarburstLauncher (staticnuke → Trinity)        ← nuclear missile
  *   - MissileLauncher   (bomberstrike → Magpie)
  *   - LightningCannon   (shieldfelon → Felon)
@@ -122,6 +123,18 @@ interface WeaponEntry {
     /// SAMs) so the camera stays fixed and the arc plays through the
     /// frame instead of being chased.
     noTracking?: boolean;
+    /// Hold the (mobile) shooter in place so it fires from its spawn
+    /// position instead of advancing to optimal range. Needed for mobile
+    /// artillery (Impaler) — a ground-fit camera assumes the shooter
+    /// stays put. Bombers/aircraft must NOT set this (they need to move).
+    shooterHoldPos?: boolean;
+    /// Long-arc weapons (nuke, artillery, starburst) launch a projectile
+    /// that travels far from the shooter and lands off-frame. When set,
+    /// the camera pans to the impact point `delayMs` after the fire order
+    /// so the hit itself is on screen; the next entry restores the camera.
+    /// `delayMs` should roughly match the projectile's flight time at the
+    /// active sim speed.
+    impactCam?: { delayMs: number; height: number; pitchDeg?: number };
 }
 
 /// Default per-entry padding when an entry doesn't override it.
@@ -162,18 +175,27 @@ const WEAPONS: WeaponEntry[] = [
         // projectile arc has room to play out toward the target.
         padding: 3.0, pitchDeg: 50,
         noTracking: true,
+        // Plasma shell arcs 1200 elmos to the target — pan to the impact
+        // once it's mid-descent so the hit is on screen.
+        impactCam: { delayMs: 5000, height: 650, pitchDeg: 48 },
     },
     {
         key: 'starburst',
-        title: 'StarburstLauncher — ballistic missile (empmissile)',
-        shooter: 'empmissile', target: 'damagesink',
+        title: 'StarburstLauncher — ballistic missile (vehheavyarty Impaler)',
+        // empmissile ("Shockley") was a one-shot EMP *missile* unit — it
+        // rendered as a bare missile sitting on the ground with nothing to
+        // launch it. Impaler is a real artillery rover that fires a
+        // StarburstLauncher missile and stays put to reload.
+        shooter: 'vehheavyarty', target: 'damagesink',
         distance: 800, targetMode: 'ground',
+        shooterHoldPos: true,
         // Focus the camera mid-arc with extra height so the missile
         // climb + descent is visible end-to-end. Tracking off because
         // the projectile leaves the shooter quickly.
         cameraFocus: { x: MAP_CENTER, z: MAP_CENTER },
         cameraHeight: 1400, pitchDeg: 40,
         noTracking: true,
+        impactCam: { delayMs: 5500, height: 700, pitchDeg: 45 },
     },
     {
         key: 'nuke',
@@ -188,6 +210,9 @@ const WEAPONS: WeaponEntry[] = [
         cameraFocus: { x: MAP_CENTER, z: MAP_CENTER },
         cameraHeight: 2500, pitchDeg: 35,
         noTracking: true,
+        // The Trinity has a long flight — pan to the impact late so the
+        // detonation (and its huge CEG) fills the frame.
+        impactCam: { delayMs: 11000, height: 1400, pitchDeg: 45 },
     },
     {
         key: 'missile',
@@ -269,7 +294,7 @@ function numParam(name: string, fallback: number): number {
 async function spawnConfigured(
     h: TestHarness,
     def: string, x: number, z: number, team: number,
-    opts: { holdFire?: boolean; invulnerable?: boolean; flyAlt?: number } = {},
+    opts: { holdFire?: boolean; holdPos?: boolean; invulnerable?: boolean; flyAlt?: number } = {},
 ): Promise<number> {
     const out = await h.spawn(def, x, z, team, 1);
     const id = Number(out.match(/:\s*(\d+)/)?.[1] ?? 0);
@@ -280,6 +305,10 @@ async function spawnConfigured(
         // CMD_MOVE_STATE=50 (0=Hold), CMD_FIRE_STATE=45 (0=hold-fire)
         lua.push(`Spring.GiveOrderToUnit(${id}, ${CMD_MOVE_STATE}, {0}, 0)`);
         lua.push(`Spring.GiveOrderToUnit(${id}, ${CMD_FIRE_STATE}, {0}, 0)`);
+    } else if (opts.holdPos) {
+        // Hold position only (still fire-at-will) — a mobile shooter that
+        // should engage from its spawn spot rather than close the range.
+        lua.push(`Spring.GiveOrderToUnit(${id}, ${CMD_MOVE_STATE}, {0}, 0)`);
     }
     if (opts.invulnerable) {
         lua.push(`Spring.SetUnitMaxHealth(${id}, 1e9)`);
@@ -321,6 +350,7 @@ async function fireOneEntry(
 
     const sId = await spawnConfigured(h, w.shooter, sx, sz, 0, {
         flyAlt: w.shooterFlying ? 200 : undefined,
+        holdPos: w.shooterHoldPos,
     });
     const tId = await spawnConfigured(h, w.target, tx, tz, 1, {
         holdFire: true,
@@ -392,7 +422,24 @@ async function fireOneEntry(
 
     // Dwell. The scenario can be paused / resumed via the player's
     // own hotkeys — sleep() doesn't block those.
-    await sleep(dwellMs);
+    //
+    // Long-arc weapons pan the camera to the impact point partway through
+    // the dwell so the detonation is on screen rather than off-frame. The
+    // tracking camera (if any) is dropped first so it doesn't yank focus
+    // back to the shooter. The next entry re-frames from scratch, so the
+    // camera is implicitly "restored" for the following unit.
+    if (w.impactCam) {
+        const ic = w.impactCam;
+        const launchDwell = Math.min(ic.delayMs, dwellMs);
+        await sleep(launchDwell);
+        h.setTrackingCamera(false);
+        await h.cameraSnapToGround(tx, tz, {
+            height: ic.height, pitchDeg: ic.pitchDeg ?? 45, durationMs: 1400,
+        });
+        await sleep(Math.max(0, dwellMs - launchDwell));
+    } else {
+        await sleep(dwellMs);
+    }
 
     // Teardown happens in the outer loop via clearArena so failures
     // here still surface for the next entry.
@@ -421,6 +468,21 @@ const scenario: Scenario = {
         }
 
         await h.setLogging({ combat: true, weapon: true, explosion: true });
+
+        // ZK static weapons (e.g. staticheavyarty's "Very Heavy Plasma
+        // Cannon") are gated by the energy-grid low-power system in
+        // unit_mex_overdrive.lua: a pylon whose grid has no energy income
+        // is flagged `lowpower` and its weapon is disabled. The bench team
+        // has no economy, so static shooters never fire. Waiving the grid
+        // requirement globally forces every pylon back to `lowpower=0`.
+        // Mobile shooters aren't pylons, so they're unaffected.
+        try {
+            await h.lua(
+                'if GG and GG.Overdrive and GG.Overdrive.SetNoGridRequirement then ' +
+                'GG.Overdrive.SetNoGridRequirement(true) end');
+        } catch (err) {
+            console.warn('[weapon-showcase] grid-power waive failed:', err);
+        }
 
         try {
             await h.simSpeed(speed);
