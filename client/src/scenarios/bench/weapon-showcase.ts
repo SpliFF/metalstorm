@@ -364,6 +364,20 @@ async function fireOneEntry(
             .replace(/\$TID/g, String(tId)));
     }
 
+    // Power any grid-gated static weapon. ZK's mex_overdrive low-power
+    // system (unit_mex_overdrive.lua) flags a pylon as `lowpower` and
+    // disables its weapon when the pylon's energy grid has no income. The
+    // bench team has no economy, so static shooters (staticheavyarty's
+    // "Very Heavy Plasma Cannon", AA turrets) sit unpowered and never
+    // fire. Granting the shooter's own pylon a large `current_energyIncome`
+    // gives its grid enough capacity to cover the weapon's `neededLink`, so
+    // the gadget clears `lowpower` on its next slow-update. Set early — the
+    // gadget needs a cycle or two before the attack order lands — and
+    // harmless for mobile shooters, which aren't pylons.
+    await h.lua(
+        `Spring.SetUnitRulesParam(${sId}, "current_energyIncome", 1e6)\n` +
+        `Spring.SetUnitRulesParam(${sId}, "lowpower", 0)`);
+
     // Give the entity-renderer a frame to learn about the new units
     // before we ask the camera to frame them. Without this the
     // cameraFitUnits call hits the case where one or both ids aren't
@@ -469,21 +483,6 @@ const scenario: Scenario = {
 
         await h.setLogging({ combat: true, weapon: true, explosion: true });
 
-        // ZK static weapons (e.g. staticheavyarty's "Very Heavy Plasma
-        // Cannon") are gated by the energy-grid low-power system in
-        // unit_mex_overdrive.lua: a pylon whose grid has no energy income
-        // is flagged `lowpower` and its weapon is disabled. The bench team
-        // has no economy, so static shooters never fire. Waiving the grid
-        // requirement globally forces every pylon back to `lowpower=0`.
-        // Mobile shooters aren't pylons, so they're unaffected.
-        try {
-            await h.lua(
-                'if GG and GG.Overdrive and GG.Overdrive.SetNoGridRequirement then ' +
-                'GG.Overdrive.SetNoGridRequirement(true) end');
-        } catch (err) {
-            console.warn('[weapon-showcase] grid-power waive failed:', err);
-        }
-
         try {
             await h.simSpeed(speed);
         } catch (err) {
@@ -513,6 +512,10 @@ const scenario: Scenario = {
                     invulnerable: true,
                     flyAlt: w.targetMode === 'flying' ? (w.targetAlt ?? 220) : undefined,
                 });
+                // Power grid-gated static weapons (see fireOneEntry).
+                await h.lua(
+                    `Spring.SetUnitRulesParam(${sId}, "current_energyIncome", 1e6)\n` +
+                    `Spring.SetUnitRulesParam(${sId}, "lowpower", 0)`);
                 if (w.stockpile) {
                     await h.stockpile(sId, 4, 0);
                 }
