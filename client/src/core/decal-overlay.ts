@@ -61,10 +61,13 @@ import type { ScarEvent, TrackSegmentEvent } from './decal-events.js';
  *  world, so texel = winElmos / FINE_DIM; the window size is chosen from zoom
  *  to keep near-camera texels ≈ the map atlas (~1 elmo). ~67 MB at RGBA8. */
 const FINE_DIM = 4096;
-/** Coarse full-map texture dimension (square). Always resident; the low-res
- *  fallback. ~16 MB at 2048² RGBA8. Clamped down for small maps. */
+/** Coarse full-map texture dimension (square). Always resident; the far-LOD
+ *  fallback for huge maps (zoomed out, beyond the fine window). On small/medium
+ *  maps the fine window covers the whole map so coarse is barely used; it still
+ *  wants enough resolution that the feather edge and far-zoom fallback don't go
+ *  blocky. ~16 MB at 2048² RGBA8. */
 const COARSE_MAX_DIM = 2048;
-const COARSE_MIN_DIM = 512;
+const COARSE_MIN_DIM = 1024;
 
 /** Candidate world sizes (elmos) the fine window may cover, smallest first.
  *  The window tracks ~2.5× the visible span and snaps to one of these steps so
@@ -148,7 +151,7 @@ attribute vec4 world1;      // col1 = along half-axis (world XZ)
 attribute vec4 world2;
 attribute vec4 world3;      // col3 = world centre (X, Z)
 attribute vec4 params;      // x=kind y=darkAmp z=depthAmp w=treadFreq/seed
-attribute float fade;       // per-instance fade 0..1 (age-scaled on rebuild; 1 fresh)
+attribute float fade;       // per-instance fade 0..1 (age-scaled on rebuild, 1 fresh)
 uniform vec2 uOrigin;       // world XZ of this target's min corner
 uniform vec2 uInvExtent;    // 1 / (world extent covered by this target)
 varying vec2 vLocalUv;
@@ -195,7 +198,7 @@ float fbm(vec2 p) {
 }
 
 // Pressed-in oval depression: 1 inside the oval, 0 outside (we return a 0..1
-// mask; sign is handled by the caller). r = (across-radius, along-radius) in
+// mask, sign is handled by the caller). r = (across-radius, along-radius) in
 // local quad uv. Used for the discrete footprint / claw shapes.
 float ovalMask(vec2 p, vec2 c, vec2 r) {
     vec2 d = (p - c) / r;
@@ -272,7 +275,7 @@ void main() {
         // TRACK: depression + darkening by category encoded in the kind value
         //   1 = tread, 2 = wheel, 3 = footprint, 4 = claw.
         // A single 0..1 shape mask drives both channels. local uv.x = across
-        // width, uv.y = along travel. Tread/wheel are continuous; footprint/claw
+        // width, uv.y = along travel. Tread/wheel are continuous, footprint/claw
         // are DISCRETE (the mask is ~0 between prints, so additive adds nothing
         // there and they read as individual marks).
         float cat    = kind - 1.0;
@@ -280,14 +283,14 @@ void main() {
         float across = vLocalUv.x;
         float freq   = vParams.w;            // rung frequency along travel (tread)
 
-        // Feather across always; feather the along ends only for discrete prints
+        // Feather across always, feather the along ends only for discrete prints
         // (continuous strips overlap end-to-end, so an end feather would seam).
         float acrossEdge = smoothstep(0.0, 0.08, across) * smoothstep(1.0, 0.92, across);
         float alongEdge  = smoothstep(0.0, 0.04, along)  * smoothstep(1.0, 0.96, along);
 
         float shape = 0.0;
         if (cat < 0.5) {
-            // TREAD: two ruts; transparent gap between so crossing treads
+            // TREAD: two ruts, transparent gap between so crossing treads
             // interleave (each adds only where its own ruts fall) rather than
             // erasing each other.
             float rutL = exp(-pow((across - 0.30) / 0.13, 2.0));
@@ -312,11 +315,11 @@ void main() {
         if (depth < 0.004 && dark < 0.004) discard;
     }
 
-    // Age fade scales the additive contribution; the rebuild re-stamps marks
+    // Age fade scales the additive contribution, the rebuild re-stamps marks
     // age-scaled so old marks contribute less and recover toward neutral.
     depth *= vFade;
     dark  *= vFade;
-    // Additive (ALPHA_ONEONE): R += depth, G += dark; both saturate at 1.0 = cap.
+    // Additive (ALPHA_ONEONE): R += depth, G += dark, both saturate at 1.0 = cap.
     gl_FragColor = vec4(depth, dark, 0.0, 0.0);
 }
 `;
@@ -423,7 +426,7 @@ export class DecalOverlay {
         // the far/outside-window fallback, so it can be coarse.
         this.coarseDim = Math.min(
             COARSE_MAX_DIM,
-            Math.max(COARSE_MIN_DIM, ceilPow2(Math.max(this.worldW, this.worldH) / 16)),
+            Math.max(COARSE_MIN_DIM, ceilPow2(Math.max(this.worldW, this.worldH) / 8)),
         );
 
         this.coarse = this.makeTarget('decalCoarse', this.coarseDim, 0, 0, this.worldW, this.worldH);
@@ -550,42 +553,70 @@ export class DecalOverlay {
         }
     }
 
-    /** Size + re-centre the fine window from the camera. The window covers
-     *  ~2.5× the visible span, snapped to a WIN_STEPS size (zoom hysteresis),
-     *  and re-centres (full re-bake) when the focus drifts past RECENTER_FRAC of
-     *  the window. When the needed window would cover most of the map, the fine
-     *  layer is disabled and the plugin uses coarse only. */
+    /** Size + re-centre the fine window from the camera.
+     *
+     *  Three regimes:
+     *   - **covers-map**: the view (or the smallest covering step) spans the
+     *     whole map → the fine window simply covers the map, map-centred, at
+     *     FINE_DIM (a sharp full-map overlay; never recenters). This is the
+     *     common case for small/medium maps and the old single-overlay's job.
+     *   - **camera-tracking**: zoomed in enough that a sub-map window is sharper
+     *     → a WIN_STEPS-sized window snapped to the texel grid, re-baked when the
+     *     focus drifts past RECENTER_FRAC of the window (zoom hysteresis).
+     *   - **disabled**: huge map zoomed so far out that even the largest window
+     *     can't cover the view → coarse only. */
     private updateWindow(focusX: number, focusZ: number, camHeight: number): void {
         // Rough visible ground span ≈ 2× camera height (≈45° FOV). Window covers
         // ~2.5× that so there's pan margin before a recenter.
         const viewSpan = Math.max(1, camHeight) * 2.0;
         const want = viewSpan * 2.5;
-        // Smallest step that covers `want`; if none, the window would be huge —
-        // fall back to coarse only.
-        let win = 0;
-        for (const step of WIN_STEPS) {
-            if (step >= want) { win = step; break; }
-        }
         const mapMax = Math.max(this.worldW, this.worldH);
-        if (win === 0 || win >= mapMax) {
-            // No useful fine window — coarse already covers the whole map.
+        const maxStep = WIN_STEPS[WIN_STEPS.length - 1];
+
+        // Can't cover the view sharply (huge map, zoomed way out) → coarse only.
+        if (want > maxStep && mapMax > maxStep) {
             if (this.fineState.enabled !== 0) this.fineState.enabled = 0;
             return;
         }
 
-        const texel = win / FINE_DIM;
-        const half = win * 0.5;
-        const centreX = this.fine.originX + this.fine.extentX * 0.5;
-        const centreZ = this.fine.originZ + this.fine.extentZ * 0.5;
-        const drift = Math.max(Math.abs(focusX - centreX), Math.abs(focusZ - centreZ));
-        const sizeChanged = win !== this.fine.extentX;
-        const wasDisabled = this.fineState.enabled === 0;
+        let win: number;
+        let coversMap: boolean;
+        if (want >= mapMax) {
+            // The needed window spans the map — just cover the map exactly
+            // (unquantised: it never recenters, so hysteresis is moot, and an
+            // exact fit maximises resolution: texel = mapMax / FINE_DIM).
+            win = mapMax;
+            coversMap = true;
+        } else {
+            win = WIN_STEPS.find(s => s >= want) ?? maxStep;
+            coversMap = win >= mapMax;
+            if (coversMap) win = mapMax;
+        }
 
-        if (sizeChanged || wasDisabled || drift > RECENTER_FRAC * win) {
-            // Snap the origin to the texel grid so the window doesn't shimmer
-            // sub-texel; re-bake the whole window once.
-            this.fine.originX = Math.round((focusX - half) / texel) * texel;
-            this.fine.originZ = Math.round((focusZ - half) / texel) * texel;
+        let recenter = win !== this.fine.extentX || this.fineState.enabled === 0;
+        if (coversMap) {
+            // Centre the square window on the map (origin may be negative when
+            // the map is non-square / smaller than the window — harmless; the
+            // off-map margin just goes unused).
+            if (recenter) {
+                this.fine.originX = (this.worldW - win) * 0.5;
+                this.fine.originZ = (this.worldH - win) * 0.5;
+            }
+        } else {
+            const texel = win / FINE_DIM;
+            const half = win * 0.5;
+            const cx = this.fine.originX + this.fine.extentX * 0.5;
+            const cz = this.fine.originZ + this.fine.extentZ * 0.5;
+            const drift = Math.max(Math.abs(focusX - cx), Math.abs(focusZ - cz));
+            if (drift > RECENTER_FRAC * win) recenter = true;
+            if (recenter) {
+                // Snap the origin to the texel grid so it doesn't shimmer sub-texel.
+                this.fine.originX = Math.round((focusX - half) / texel) * texel;
+                this.fine.originZ = Math.round((focusZ - half) / texel) * texel;
+            }
+        }
+
+        if (recenter) {
             this.fine.extentX = win;
             this.fine.extentZ = win;
             this.fine.rebuild = true;
