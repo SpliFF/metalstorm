@@ -500,11 +500,16 @@ export class DecalOverlay {
             t.clearNext = false;
             this.scene.getEngine().clear(rtt.clearColor, true, true, true);
         });
-        rtt.renderList = [this.blitMesh];
+        // NOTE: renderList is set in attachTargetRender, NOT here — makeTarget
+        // runs before blitMesh exists, so assigning [this.blitMesh] here would
+        // bake an [undefined] render list and the RTT would draw nothing.
         return t;
     }
 
     private attachTargetRender(t: TargetState, isLast: boolean): void {
+        // Set the render list here (after blitMesh is constructed) — see the
+        // note in makeTarget about the init-order trap.
+        t.rtt.renderList = [this.blitMesh];
         t.rtt.activeCamera = this.rttCamera;
         t.rtt.onBeforeRenderObservable.add(() => this.prepareTarget(t));
         t.rtt.onAfterRenderObservable.add(() => {
