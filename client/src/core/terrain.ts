@@ -364,10 +364,11 @@ export function applyWebGLTexture(
             ?.find((p): p is DecalOverlayPlugin => p instanceof DecalOverlayPlugin)
         : undefined;
     mesh.material = mat;
-    const prevTex = prevPlugin?.texture;
-    if (prevPlugin && prevTex) {
+    if (prevPlugin && prevPlugin.coarseTexture && prevPlugin.fineTexture && prevPlugin.fineState) {
         const next = attachDecalOverlay(
-            mat, prevTex, prevPlugin.worldW, prevPlugin.worldH);
+            mat, prevPlugin.coarseTexture, prevPlugin.fineTexture, prevPlugin.fineState,
+            prevPlugin.coarseTexel, prevPlugin.fineTexel,
+            prevPlugin.worldW, prevPlugin.worldH);
         // Preserve any live-tuned strengths from the previous plugin.
         next.normalScale = prevPlugin.normalScale;
         next.darken = prevPlugin.darken;

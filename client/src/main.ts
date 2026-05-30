@@ -557,7 +557,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             buildTrackTypeNames(defCache.getAllUnitDefs().map(d => d.trackType)));
         (window as unknown as { __decalOverlay: unknown }).__decalOverlay = decalOverlay;
         if (terrainMesh?.material) {
-            attachDecalOverlay(terrainMesh.material, decalOverlay.texture,
+            attachDecalOverlay(terrainMesh.material,
+                decalOverlay.coarseTexture, decalOverlay.fineTexture, decalOverlay.fineState,
+                decalOverlay.coarseTexel, decalOverlay.fineTexel,
                 map.widthElmos, map.heightElmos);
         }
 
@@ -1270,7 +1272,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         projectileRenderer?.tick();
         cegRuntime?.tick(dt);
         combatFX?.tick(dt);
-        decalOverlay?.tick(dt);
+        // Feed the camera ground focus + height so the decal clipmap's fine
+        // window tracks the view (PLAN-decal-vt.md V1: sharp near-camera decals,
+        // VRAM bounded regardless of map size).
+        {
+            const camFocus = rtsCamera.target;
+            const camPos = rtsCamera.position;
+            decalOverlay?.tick(dt, camFocus.x, camFocus.z, Math.max(1, camPos.y - camFocus.y));
+        }
         // Age the dynamic FX lights after the emitters have run this frame
         // and before scene.render() consumes the lighting.
         fxLightPool?.update(dt, camera.position);

@@ -1,17 +1,33 @@
 /**
  * DecalOverlay — persistent baked ground-decal system (PLAN-decals.md D7,
- * depth-field accumulation per PLAN-decal-vt.md V0).
+ * depth-field accumulation per PLAN-decal-vt.md V0, camera-centered clipmap
+ * per PLAN-decal-vt.md V1).
  *
- * A single map-sized accumulation texture. Each scar / track event is blitted
- * into the overlay; the terrain samples it every frame through a Babylon
- * material plugin. Per-frame cost is ~free and the mark count is unbounded.
+ * Two accumulation textures, both fed from one CPU-authoritative mark list:
+ *   - COARSE: covers the whole map at low res (always resident); the fallback
+ *     for everything outside / beyond the fine window and at far zoom.
+ *   - FINE: a fixed-size texture covering a square WINDOW around the camera
+ *     focus, so near-camera decals stay sharp (≈1 elmo/texel) regardless of map
+ *     size. The window follows the camera and is re-baked when the camera pans
+ *     past a threshold or zoom changes the window size. VRAM is bounded by the
+ *     two textures (~71 MB), NOT by map area — this scales to arbitrarily large
+ *     maps. The terrain plugin samples fine inside the window (feathered) and
+ *     falls back to coarse outside / far away.
+ *
+ * Each scar / track event is a *mark* in WORLD space (centre + two half-axis
+ * vectors in elmos). The blit replays marks into a target via thin instances; a
+ * per-target world→clip uniform (origin + 1/extent) places each mark, so the
+ * SAME mark list bakes correctly into both the full-map coarse texture and the
+ * scrolling fine window. Off-target marks fall outside clip space and are
+ * rejected by the rasteriser, so baking "all marks" into the fine window costs
+ * ≈ the in-window subset.
  *
  * We store a *depression depth + albedo darkening* (NOT a baked normal, NOT
- * baked lighting). The terrain plugin derives the surface normal from the
- * depth field's GRADIENT and lights it live, so the sun re-shades the grooves
- * for free. Storing depth (a scalar that sums) is what lets overlapping marks
- * ACCUMULATE additively — overlapping craters deepen, traffic darkens — which
- * a signed 0.5-centered normal encoding could not do.
+ * baked lighting). The terrain plugin derives the surface normal from the depth
+ * field's GRADIENT and lights it live, so the sun re-shades the grooves for
+ * free. Storing depth (a scalar that sums) is what lets overlapping marks
+ * ACCUMULATE additively — overlapping craters deepen, traffic darkens — which a
+ * signed 0.5-centered normal encoding could not do.
  *
  * Overlay channels (RGBA8), ADDITIVE blend, init/neutral = (0,0,0,0):
  *   R    depression depth 0..1   (plugin: normal = gradient; deeper = darker)
@@ -20,10 +36,10 @@
  * Both channels saturate at 1.0 = the cap; that bounds heavily-worked ground.
  *
  * Fade / "global reset": additive blending can't subtract over time, so fade
- * comes from a periodic age-scaled REBUILD — every REBUILD_INTERVAL_S the
- * overlay is cleared and the whole live mark list (a ring buffer of marks with
+ * comes from a periodic age-scaled REBUILD — every REBUILD_INTERVAL_S each
+ * target is cleared and the whole live mark list (a ring buffer of marks with
  * birth times) is re-stamped with a coverage scaled by age; fully-faded marks
- * are dropped. Between rebuilds new marks append onto the persistent overlay.
+ * are dropped. Between rebuilds new marks append onto the persistent textures.
  */
 
 import {
@@ -36,27 +52,34 @@ import {
     Texture,
     Color4,
     FreeCamera,
+    Vector2,
     Vector3,
 } from '@babylonjs/core';
 import type { ScarEvent, TrackSegmentEvent } from './decal-events.js';
 
-/** Target overlay resolution; density is chosen so typical maps land near
- *  this and it's clamped here for huge maps. Crater detail (rim wobble, ejecta
- *  rays, floor roughness) needs the texels — at 2048² over a 17 k-elmo map a
- *  scar was only ~75 px across and read blocky.
- *
- *  TEMPORARY: raised 4096→8192 to halve the elmos/texel on very large maps
- *  (sharper tracks/scars) until the camera-clipmap lands — see
- *  PLAN-decal-vt.md. Cost: the overlay RTT is ~256 MB at 8192² RGBA8 (vs
- *  ~67 MB at 4096²), allocated regardless of how much of the map has decals.
- *  The clipmap replaces this with a ~71 MB bounded cache. */
-const OVERLAY_MAX_DIM = 8192;
-/** Don't go below this even for tiny maps (keeps marks from being chunky). */
-const OVERLAY_MIN_DIM = 512;
+/** Fine-window texture dimension (square). The window covers `winElmos` of
+ *  world, so texel = winElmos / FINE_DIM; the window size is chosen from zoom
+ *  to keep near-camera texels ≈ the map atlas (~1 elmo). ~67 MB at RGBA8. */
+const FINE_DIM = 4096;
+/** Coarse full-map texture dimension (square). Always resident; the low-res
+ *  fallback. ~16 MB at 2048² RGBA8. Clamped down for small maps. */
+const COARSE_MAX_DIM = 2048;
+const COARSE_MIN_DIM = 512;
 
-/** Mark kinds packed into the blit `params.x`. Scars are 0; the neutral
- *  fill/decay quad is -1; tracks are `KIND_TRACK_BASE + category` so the
- *  fragment shader picks the per-type tread pattern without a new attribute. */
+/** Candidate world sizes (elmos) the fine window may cover, smallest first.
+ *  The window tracks ~2.5× the visible span and snaps to one of these steps so
+ *  zooming only re-bakes when crossing a boundary (hysteresis). At FINE_DIM
+ *  4096 these give 0.5 / 1 / 2 / 4 elmos-per-texel respectively. */
+const WIN_STEPS = [2048, 4096, 8192, 16384];
+/** How far the camera focus may drift from the window centre (as a fraction of
+ *  winElmos) before the window re-centers + re-bakes. The window covers ~2.5×
+ *  the view, leaving margin so the visible area stays inside between recenters
+ *  without re-baking every frame during a pan. */
+const RECENTER_FRAC = 0.12;
+
+/** Mark kinds packed into the blit `params.x`. Scars are 0; tracks are
+ *  `KIND_TRACK_BASE + category` so the fragment shader picks the per-type tread
+ *  pattern without a new attribute. */
 const KIND_SCAR = 0;
 
 /** Procedural track-pattern categories. The wire `trackTypeId` indexes the
@@ -97,12 +120,8 @@ export function buildTrackTypeNames(rawTrackTypes: (string | undefined)[]): stri
 /** PLAN-decal-vt.md Phase V0 — fade via age-scaled rebuild from a CPU mark
  *  list (the correct "global reset", replacing the disabled running-decay pass
  *  that over-erased). Each mark is held in a ring buffer with its birth time;
- *  periodically the overlay is cleared and every live mark re-stamped with an
- *  alpha scaled by its age, so old marks fade out and evicted ones vanish.
- *
- *  This is the foundation the V1 clipmap re-bake builds on, and composes with
- *  the additive depth-field model (overlapping marks deepen/darken, capped):
- *  the rebuild simply re-stamps the additive batch age-scaled. */
+ *  periodically each target is cleared and every live mark re-stamped with an
+ *  alpha scaled by its age, so old marks fade out and evicted ones vanish. */
 const MARK_CAP = 8192;          // ring buffer size; oldest evicted past this
 const REBUILD_INTERVAL_S = 1.0; // how often fade is re-applied (rebuild cadence)
 const FADE_HOLD_S = 45;         // marks stay full-strength this long
@@ -111,41 +130,38 @@ const FADE_END_S = FADE_HOLD_S + FADE_OUT_S; // mark fully gone (evicted) after
 
 /** Private render layer for the blit mesh. The main scene camera's default
  *  mask (0x0FFFFFFF) excludes this bit, so the full-screen blit quad renders
- *  ONLY into the overlay RTT (via its own camera) and never paints over the
+ *  ONLY into the overlay RTTs (via their own camera) and never paints over the
  *  main view. */
 const BLIT_LAYER = 0x20000000;
 
-// Blit vertex shader. Camera-independent: the per-instance matrix places the
-// unit quad directly in overlay UV space [0,1]; we map that to clip space.
+// Blit vertex shader. The instance matrix places the unit quad in WORLD XZ
+// (centre + half-axis columns, in elmos); a per-target uniform maps world XZ to
+// that target's UV → clip space. The SAME instance buffer bakes into both the
+// coarse full-map texture and the scrolling fine window — only the uniform
+// differs — so the mark list is target-independent.
 const BLIT_VERT = /* glsl */ `
 precision highp float;
-attribute vec3 position;   // unit quad, x,y in [-0.5, 0.5], z = 0
+attribute vec3 position;    // unit quad, x,y in [-0.5, 0.5], z = 0
 attribute vec2 uv;          // [0,1] local
-attribute vec4 world0;
-attribute vec4 world1;
+attribute vec4 world0;      // instance matrix col0 = across half-axis (world XZ)
+attribute vec4 world1;      // col1 = along half-axis (world XZ)
 attribute vec4 world2;
-attribute vec4 world3;
+attribute vec4 world3;      // col3 = world centre (X, Z)
 attribute vec4 params;      // x=kind y=darkAmp z=depthAmp w=treadFreq/seed
 attribute float fade;       // per-instance fade 0..1 (age-scaled on rebuild; 1 fresh)
+uniform vec2 uOrigin;       // world XZ of this target's min corner
+uniform vec2 uInvExtent;    // 1 / (world extent covered by this target)
 varying vec2 vLocalUv;
 varying vec4 vParams;
 varying float vFade;
-// World-XZ unit directions of the quad's local axes. The overlay maps 1:1 to
-// world XZ, so the instance matrix's X/Y columns ARE the across/along world
-// directions. Tracks bake their tread relief in this WORLD frame so a rotated
-// (travel-aligned) quad still lights correctly — otherwise the local-frame
-// normal written into the world-space RG channels would be mis-oriented.
-varying vec2 vAcross;       // world-XZ dir of local +X (across the track)
-varying vec2 vAlong;        // world-XZ dir of local +Y (along travel)
 void main() {
     mat4 m = mat4(world0, world1, world2, world3);
-    vec4 p = m * vec4(position, 1.0);   // p.xy in overlay UV space [0,1]
+    vec4 p = m * vec4(position, 1.0);   // p.xy = world X, Z
+    vec2 tuv = (p.xy - uOrigin) * uInvExtent;  // target UV [0,1]
     vLocalUv = uv;
     vParams = params;
     vFade = fade;
-    vAcross = normalize(vec2(world0.x, world0.y) + vec2(1e-6, 0.0));
-    vAlong  = normalize(vec2(world1.x, world1.y) + vec2(0.0, 1e-6));
-    gl_Position = vec4(p.xy * 2.0 - 1.0, 0.0, 1.0);
+    gl_Position = vec4(tuv * 2.0 - 1.0, 0.0, 1.0);
 }
 `;
 
@@ -156,8 +172,6 @@ precision highp float;
 varying vec2 vLocalUv;
 varying vec4 vParams;       // x=kind y=darkAmp z=depthAmp w=treadFreq/seed
 varying float vFade;        // per-instance age fade 0..1 (scales coverage)
-varying vec2 vAcross;       // world-XZ dir across the track (tracks only)
-varying vec2 vAlong;        // world-XZ dir along travel (tracks only)
 
 // --- cheap value-noise FBM for procedural crater detail ---
 float hash21(vec2 p) {
@@ -180,74 +194,24 @@ float fbm(vec2 p) {
     return v;
 }
 
-// Radial crater height profile (arbitrary units): a depressed bowl floor that
-// rises to a RAISED RIM LIP, whose height + width vary by angle so the rim
-// isn't a uniform ring. Sampled at r±dr to get the slope → normal tilt.
-// One jagged rim ring: a gaussian ridge whose height is a low-freq swell times
-// sharp high-freq ridged peaks, and whose width jitters per angle, so it reads
-// as broken chunks rather than a smooth tube.
-float rimRing(float rr, float ang, float ringR, float seed,
-              float hfreq, float wfreq, float hscale) {
-    // Mostly-uniform height (keeps the ring round) modulated by sharp,
-    // high-frequency ridged peaks (keeps it jagged, not a smooth tube).
-    float swell  = 0.65 + 0.35 * fbm(vec2(ang * 5.0 + seed, 3.0));
-    float ridged = 1.0 - abs(2.0 * fbm(vec2(ang * hfreq + seed * 5.0, 7.0)) - 1.0);
-    float h = swell * (0.3 + 1.0 * ridged * ridged) * hscale;
-    float w = 0.035 + 0.05 * fbm(vec2(ang * wfreq + seed * 7.0, 9.0));
-    float t = (rr - ringR) / w;
-    return h * exp(-t * t);
-}
-
-// Tank-tread height field over the track quad. across,along in [0,1].
-// Two depressed ruts (left + right tread) with cross-rung corrugation. The
-// freq arg controls rung spacing along travel. Returns a NEGATIVE-ish height
-// (ruts are gouged into the ground); used for finite-difference normals.
-float trackH(float across, float along, float freq) {
-    // two ruts centred at 0.30 / 0.70 across the width
-    float rutL = exp(-pow((across - 0.30) / 0.13, 2.0));
-    float rutR = exp(-pow((across - 0.70) / 0.13, 2.0));
-    float ruts = clamp(rutL + rutR, 0.0, 1.0);
-    // tread rungs running across each rut
-    float rung = 0.5 + 0.5 * sin(along * freq * 6.2831853);
-    return -ruts * (0.65 + 0.35 * rung);
-}
-
-// Pressed-in oval depression: NEGATIVE height inside the oval, 0 outside.
-// r = (across-radius, along-radius) in local quad uv. Used for the discrete
-// footprint / claw shapes (union by min(), since deepest = most negative).
-float ovalH(vec2 p, vec2 c, vec2 r) {
+// Pressed-in oval depression: 1 inside the oval, 0 outside (we return a 0..1
+// mask; sign is handled by the caller). r = (across-radius, along-radius) in
+// local quad uv. Used for the discrete footprint / claw shapes.
+float ovalMask(vec2 p, vec2 c, vec2 r) {
     vec2 d = (p - c) / r;
-    return -clamp(1.0 - dot(d, d), 0.0, 1.0);
+    return clamp(1.0 - dot(d, d), 0.0, 1.0);
 }
-// Bipedal footprint pair: a fore-left + an aft-right oval. Abutting stamps
-// (one per trackDecalWidth of travel) tile these into an alternating trail.
-float feetH(vec2 p) {
-    return min(ovalH(p, vec2(0.37, 0.32), vec2(0.12, 0.20)),
-               ovalH(p, vec2(0.63, 0.72), vec2(0.12, 0.20)));
+// Bipedal footprint pair: a fore-left + an aft-right oval.
+float feetMask(vec2 p) {
+    return max(ovalMask(p, vec2(0.37, 0.32), vec2(0.12, 0.20)),
+               ovalMask(p, vec2(0.63, 0.72), vec2(0.12, 0.20)));
 }
 // Chicken / spider claw: three thin toes splayed forward.
-float clawH(vec2 p) {
-    float a = ovalH(p, vec2(0.34, 0.40), vec2(0.05, 0.17));
-    float b = ovalH(p, vec2(0.50, 0.50), vec2(0.05, 0.17));
-    float c = ovalH(p, vec2(0.66, 0.40), vec2(0.05, 0.17));
-    return min(min(a, b), c);
-}
-// Single narrow wheel/bike rut down the centre (continuous along travel).
-float wheelH(float across) {
-    float d = (across - 0.5) / 0.08;
-    return -clamp(1.0 - d * d, 0.0, 1.0);
-}
-
-float craterH(float rr, float ang, float seed, float rimR) {
-    // FLAT shallow floor that stays level across the interior, then rises
-    // SHARPLY close to the rim (sharp inner wall, not a gentle dish).
-    float bowl = -0.10 * (1.0 - smoothstep(rimR * 0.78, rimR, rr));
-    bowl += 0.05 * (fbm(vec2(ang * 3.0 + seed, rr * 9.0)) - 0.5);
-    // OUTER rim ring (the main raised lip) + a lower INNER ring tucked right up
-    // against the peak so the crater's inner edge is sharp.
-    float outer = rimRing(rr, ang, rimR,        seed,       20.0, 9.0,  1.0);
-    float inner = rimRing(rr, ang, rimR * 0.91, seed * 2.3, 27.0, 13.0, 0.5);
-    return bowl + outer + inner;
+float clawMask(vec2 p) {
+    float a = ovalMask(p, vec2(0.34, 0.40), vec2(0.05, 0.17));
+    float b = ovalMask(p, vec2(0.50, 0.50), vec2(0.05, 0.17));
+    float c = ovalMask(p, vec2(0.66, 0.40), vec2(0.05, 0.17));
+    return max(max(a, b), c);
 }
 
 void main() {
@@ -333,16 +297,15 @@ void main() {
             shape = acrossEdge * smoothstep(0.18, 0.45, ruts) * rung;
         } else if (cat < 1.5) {
             // WHEEL / bike: a single narrow central rut.
-            float line = -wheelH(across);
+            float d = (across - 0.5) / 0.08;
+            float line = clamp(1.0 - d * d, 0.0, 1.0);
             shape = acrossEdge * smoothstep(0.05, 0.30, line);
         } else if (cat < 2.5) {
             // FOOTPRINT: two discrete oval feet.
-            float feet = -feetH(vec2(across, along));
-            shape = acrossEdge * alongEdge * smoothstep(0.05, 0.30, feet);
+            shape = acrossEdge * alongEdge * smoothstep(0.05, 0.30, feetMask(vec2(across, along)));
         } else {
             // CLAW: discrete three-toe splay.
-            float claw = -clawH(vec2(across, along));
-            shape = acrossEdge * alongEdge * smoothstep(0.05, 0.30, claw);
+            shape = acrossEdge * alongEdge * smoothstep(0.05, 0.30, clawMask(vec2(across, along)));
         }
         depth = shape * depthAmp;
         dark  = shape * darkAmp;
@@ -359,43 +322,66 @@ void main() {
 `;
 
 interface PendingMark {
-    /** centre in overlay UV [0,1] */
-    cu: number;
-    cv: number;
-    /** half-size in overlay UV */
-    hu: number;
-    hv: number;
-    /** rotation about the overlay plane (radians) */
-    rot: number;
+    /** world centre (elmos) */
+    cx: number;
+    cz: number;
+    /** world-space half-axis of the quad's local +X (across), elmos */
+    axx: number;
+    axz: number;
+    /** world-space half-axis of the quad's local +Y (along), elmos */
+    azx: number;
+    azz: number;
     kind: number;
     /** Darkening amplitude added to G (additive; capped at 1.0 in-texture). */
     darkAmp: number;
     /** Depression depth amplitude added to R (additive; capped at 1.0). */
     depthAmp: number;
     treadFreq: number;
-    /** Optional explicit UV-space half-axis vectors for the quad's local +X
-     *  (across) and +Y (along). When present, uploadPending builds the
-     *  instance matrix from these instead of (rot, hu, hv) — used by the
-     *  connected track segments so an elongated quad maps correctly to world
-     *  XZ even on non-square maps (rotating in anisotropic UV space would
-     *  shear it). */
-    ax?: { u: number; v: number };
-    ay?: { u: number; v: number };
     /** Per-instance fade 0..1 (coverage multiplier). Undefined = 1 (fresh). Set
      *  by the rebuild from the mark's age; fresh appends leave it 1. */
     fade?: number;
 }
 
 /** A mark retained in the ring buffer so the overlay can be rebuilt from it
- *  (age-scaled) for fade — see MARK_CAP / FADE_* and rebuildFromMarks(). It is
+ *  (age-scaled) for fade — see MARK_CAP / FADE_* and getRebuildBatch(). It is
  *  exactly the blit's PendingMark plus the birth timestamp. */
 interface StoredMark extends PendingMark {
     birth: number; // value of this.elapsed (seconds) when laid
 }
 
+/** Per-target bake state. Coarse covers the whole map (static origin); fine is
+ *  the camera-tracking window (origin/extent move; re-baked on recenter). */
+interface TargetState {
+    rtt: RenderTargetTexture;
+    /** world XZ of the target's min corner */
+    originX: number;
+    originZ: number;
+    /** world extent covered (elmos) — coarse: (worldW, worldH); fine: square */
+    extentX: number;
+    extentZ: number;
+    /** queued full clear-then-restamp (fade rebuild, or fine recenter) */
+    rebuild: boolean;
+    /** consumed by the RTT onClear: clear to neutral for exactly one render */
+    clearNext: boolean;
+}
+
+/** Live fine-window state the terrain plugin reads each frame to decide where
+ *  to sample fine vs coarse. Shared by reference with the plugin so no per-frame
+ *  uniform plumbing is needed through DecalOverlay. */
+export interface FineWindowState {
+    originX: number;
+    originZ: number;
+    /** square window extent (elmos); 0 when disabled */
+    extent: number;
+    /** 1 = fine window valid, 0 = use coarse only (far zoom / window ≥ map) */
+    enabled: number;
+}
+
 export class DecalOverlay {
     private scene: Scene;
-    private rtt: RenderTargetTexture;
+    private coarse: TargetState;
+    private fine: TargetState;
+    private coarseDim: number;
     private rttCamera: FreeCamera;
     private blitMesh: Mesh;
     private blitMat: ShaderMaterial;
@@ -405,10 +391,9 @@ export class DecalOverlay {
      *  id then falls back to TREAD. */
     private trackCategories: number[] = [];
     /** Last track-segment world position per unit, for connecting consecutive
-     *  continuous (tread/wheel) segments into one elongated quad instead of
-     *  isolated square stamps (which gap + jag on turns / at speed). */
+     *  continuous (tread/wheel) segments into one elongated quad. */
     private lastTrackPos = new Map<number, { x: number; z: number }>();
-    /** world extent in elmos; world XZ → UV is (x/worldW, z/worldH). */
+    /** world extent in elmos. */
     private worldW = 1;
     private worldH = 1;
     /** Wall-clock seconds since construction (advanced by tick); marks store
@@ -417,59 +402,41 @@ export class DecalOverlay {
     /** Ring buffer of every live mark, for the age-scaled rebuild (fade). */
     private marks: StoredMark[] = [];
     private sinceRebuild = 0;
-    /** Set when the next RTT render should clear-then-restamp the whole mark
-     *  list (a fade rebuild) instead of appending only new marks. */
-    private rebuildQueued = false;
-    /** Set true for exactly one RTT render so the onClear handler actually
-     *  clears (frame 0 init + each fade rebuild); otherwise the overlay is
-     *  persistent and only appends. */
-    private clearNextRender = true;
+    /** Memoised age-scaled batch for the current frame (built once even when
+     *  both targets rebuild the same frame); reset after the fine target draws. */
+    private frameRebuildBatch: PendingMark[] | null = null;
     /** Master switch for the fade rebuild. On = the global reset runs. */
     fadeEnabled = true;
     private disposed = false;
+    /** Reusable uniform vectors (avoid per-frame allocation in onBeforeRender). */
+    private uOrigin = new Vector2(0, 0);
+    private uInvExtent = new Vector2(1, 1);
+    /** Shared with the terrain plugin (by reference) — updated each tick. */
+    readonly fineState: FineWindowState = { originX: 0, originZ: 0, extent: 0, enabled: 0 };
 
     constructor(scene: Scene, worldWidthElmos: number, worldHeightElmos: number) {
         this.scene = scene;
         this.worldW = Math.max(1, worldWidthElmos);
         this.worldH = Math.max(1, worldHeightElmos);
 
-        // Pick a square overlay sized to the larger map axis, clamped.
-        const dim = Math.min(
-            OVERLAY_MAX_DIM,
-            Math.max(OVERLAY_MIN_DIM, ceilPow2(Math.max(this.worldW, this.worldH) / 4)),
+        // Coarse: whole map at low res. Density ~ map/16, clamped — it's only
+        // the far/outside-window fallback, so it can be coarse.
+        this.coarseDim = Math.min(
+            COARSE_MAX_DIM,
+            Math.max(COARSE_MIN_DIM, ceilPow2(Math.max(this.worldW, this.worldH) / 16)),
         );
 
-        this.rtt = new RenderTargetTexture(
-            'decalOverlay', dim, scene,
-            {
-                generateMipMaps: false,
-                type: Constants.TEXTURETYPE_UNSIGNED_BYTE,
-                format: Constants.TEXTUREFORMAT_RGBA,
-                samplingMode: Texture.BILINEAR_SAMPLINGMODE,
-            },
-        );
-        this.rtt.wrapU = Texture.CLAMP_ADDRESSMODE;
-        this.rtt.wrapV = Texture.CLAMP_ADDRESSMODE;
-        // Neutral overlay value: (0,0,0,0) = no depression, no darkening
-        // (the depth-field accumulation model — additive, so neutral is zero).
-        this.rtt.clearColor = new Color4(0.0, 0.0, 0.0, 0.0);
-        // The overlay is normally persistent (append-only, no per-frame clear).
-        // It clears ONLY on the frames flagged by clearNextRender — frame 0
-        // (init to neutral) and each fade rebuild (clear, then re-stamp the
-        // whole mark list age-scaled). uploadPending sets the flag + queues
-        // marks; this handler consumes it.
-        this.rtt.onClearObservable.add(() => {
-            if (!this.clearNextRender) return; // persistent: skip the clear
-            this.clearNextRender = false;
-            this.scene.getEngine().clear(this.rtt.clearColor, true, true, true);
-        });
+        this.coarse = this.makeTarget('decalCoarse', this.coarseDim, 0, 0, this.worldW, this.worldH);
+        // Fine starts disabled (extent 0); updateWindow sizes + centres it on
+        // the first tick that supplies a camera focus.
+        this.fine = this.makeTarget('decalFine', FINE_DIM, 0, 0, WIN_STEPS[0], WIN_STEPS[0]);
 
         this.blitMat = new ShaderMaterial(
             'decalBlit', scene,
             { vertexSource: BLIT_VERT, fragmentSource: BLIT_FRAG },
             {
                 attributes: ['position', 'uv', 'world0', 'world1', 'world2', 'world3', 'params', 'fade'],
-                uniforms: [],
+                uniforms: ['uOrigin', 'uInvExtent'],
                 needAlphaBlending: true,
             },
         );
@@ -483,58 +450,151 @@ export class DecalOverlay {
         this.blitMesh.material = this.blitMat;
         this.blitMesh.isPickable = false;
         this.blitMesh.alwaysSelectAsActiveMesh = true; // never frustum-cull
-        // Private layer so the main camera never renders this full-screen quad
-        // — only the RTT (via rttCamera below) does.
         this.blitMesh.layerMask = BLIT_LAYER;
-
-        // Dedicated camera the RTT renders with: its layerMask matches the blit
-        // mesh so the RTT draws it, while the main camera (default mask) skips
-        // it. Its transform is irrelevant — the blit shader outputs clip space
-        // directly. Not added to scene.activeCamera(s), so it never hits screen.
-        this.rttCamera = new FreeCamera('decalRttCam', Vector3.Zero(), scene);
-        this.rttCamera.layerMask = BLIT_LAYER;
-        // Stay enabled for the whole session — Babylon decides the RTT's
-        // active-mesh list before onBeforeRender fires, so toggling enabled
-        // per-frame would exclude the mesh from the render it's meant for.
-        // We gate drawing purely via thinInstanceCount (0 = no-op draw).
         this.blitMesh.thinInstanceCount = 0;
 
-        this.rtt.renderList = [this.blitMesh];
-        this.rtt.activeCamera = this.rttCamera;
-        // Upload this frame's pending marks just before the RTT draws them,
-        // then clear the count right after so they're applied exactly once
-        // (the marks persist in the un-cleared overlay).
-        this.rtt.onBeforeRenderObservable.add(() => this.uploadPending());
-        this.rtt.onAfterRenderObservable.add(() => {
-            this.blitMesh.thinInstanceCount = 0;
-        });
-        scene.customRenderTargets.push(this.rtt);
-        // Frame 0 clears to the neutral clearColor (clearNextRender starts true),
-        // so the overlay begins flat everywhere — no neutral-fill quad needed.
+        // One camera for both RTTs (the blit shader outputs clip space directly,
+        // so the camera transform is irrelevant — only its layerMask matters).
+        this.rttCamera = new FreeCamera('decalRttCam', Vector3.Zero(), scene);
+        this.rttCamera.layerMask = BLIT_LAYER;
+
+        // Coarse renders FIRST, fine SECOND (array order). Each sets the mesh's
+        // instance buffer + per-target uniform in its own onBeforeRender; since
+        // renders are sequential, the shared mesh/material is reused per target.
+        // pending is cleared only after the fine (last) target consumes it.
+        this.attachTargetRender(this.coarse, false);
+        this.attachTargetRender(this.fine, true);
+        scene.customRenderTargets.push(this.coarse.rtt);
+        scene.customRenderTargets.push(this.fine.rtt);
     }
 
-    /** The accumulation texture, for binding into the terrain plugin. */
-    get texture(): RenderTargetTexture { return this.rtt; }
+    private makeTarget(
+        name: string, dim: number,
+        originX: number, originZ: number, extentX: number, extentZ: number,
+    ): TargetState {
+        const rtt = new RenderTargetTexture(
+            name, dim, this.scene,
+            {
+                generateMipMaps: false,
+                type: Constants.TEXTURETYPE_UNSIGNED_BYTE,
+                format: Constants.TEXTUREFORMAT_RGBA,
+                samplingMode: Texture.BILINEAR_SAMPLINGMODE,
+            },
+        );
+        rtt.wrapU = Texture.CLAMP_ADDRESSMODE;
+        rtt.wrapV = Texture.CLAMP_ADDRESSMODE;
+        // Neutral overlay value: (0,0,0,0) = no depression, no darkening
+        // (the depth-field accumulation model — additive, so neutral is zero).
+        rtt.clearColor = new Color4(0.0, 0.0, 0.0, 0.0);
+        const t: TargetState = {
+            rtt, originX, originZ, extentX, extentZ, rebuild: false, clearNext: true,
+        };
+        // The target is normally persistent (append-only, no per-frame clear).
+        // It clears ONLY on flagged frames — frame 0 (init to neutral) and each
+        // rebuild (fade, or fine recenter). prepareTarget sets clearNext.
+        rtt.onClearObservable.add(() => {
+            if (!t.clearNext) return; // persistent: skip the clear
+            t.clearNext = false;
+            this.scene.getEngine().clear(rtt.clearColor, true, true, true);
+        });
+        rtt.renderList = [this.blitMesh];
+        return t;
+    }
+
+    private attachTargetRender(t: TargetState, isLast: boolean): void {
+        t.rtt.activeCamera = this.rttCamera;
+        t.rtt.onBeforeRenderObservable.add(() => this.prepareTarget(t));
+        t.rtt.onAfterRenderObservable.add(() => {
+            this.blitMesh.thinInstanceCount = 0;
+            if (isLast) {
+                // Both targets have consumed this frame's appends + rebuild batch.
+                this.pending = [];
+                this.frameRebuildBatch = null;
+            }
+        });
+    }
+
+    /** The coarse full-map texture (far/outside-window fallback). */
+    get coarseTexture(): RenderTargetTexture { return this.coarse.rtt; }
+    /** The fine camera-window texture (sharp near-camera decals). */
+    get fineTexture(): RenderTargetTexture { return this.fine.rtt; }
+    /** 1 / coarse texture dimension (texel size for the gradient-normal taps). */
+    get coarseTexel(): number { return 1 / this.coarseDim; }
+    /** 1 / fine texture dimension. */
+    get fineTexel(): number { return 1 / FINE_DIM; }
 
     /** Supply the sorted track-type-name table (index == wire trackTypeId;
-     *  see {@link buildTrackTypeNames}). Each name is classified to a
-     *  procedural pattern so a track segment renders as the right kind of mark
-     *  (tank tread vs bot footprints vs spider claws). */
+     *  see {@link buildTrackTypeNames}). */
     setTrackTypes(names: string[]): void {
         this.trackCategories = names.map(classifyTrackType);
     }
 
-    /** Per-frame tick: advances the clock and schedules the periodic fade
-     *  rebuild. The RTT itself renders via Babylon's customRenderTargets pump. */
-    tick(dtSeconds: number): void {
+    /** Per-frame tick: advance the clock, schedule the periodic fade rebuild,
+     *  and track the camera window. `focusX/focusZ` = ground point under the
+     *  camera (elmos); `camHeight` = camera height above that point (elmos),
+     *  used to size the window. The RTTs render via Babylon's
+     *  customRenderTargets pump. */
+    tick(dtSeconds: number, focusX?: number, focusZ?: number, camHeight?: number): void {
         if (this.disposed) return;
         this.elapsed += dtSeconds;
-        if (!this.fadeEnabled) return;
-        this.sinceRebuild += dtSeconds;
-        if (this.sinceRebuild >= REBUILD_INTERVAL_S) {
-            this.sinceRebuild = 0;
-            this.rebuildQueued = true; // uploadPending performs it next render
+        if (this.fadeEnabled) {
+            this.sinceRebuild += dtSeconds;
+            if (this.sinceRebuild >= REBUILD_INTERVAL_S) {
+                this.sinceRebuild = 0;
+                this.coarse.rebuild = true;  // both re-bake age-scaled
+                this.fine.rebuild = true;
+            }
         }
+        if (focusX !== undefined && focusZ !== undefined && camHeight !== undefined) {
+            this.updateWindow(focusX, focusZ, camHeight);
+        }
+    }
+
+    /** Size + re-centre the fine window from the camera. The window covers
+     *  ~2.5× the visible span, snapped to a WIN_STEPS size (zoom hysteresis),
+     *  and re-centres (full re-bake) when the focus drifts past RECENTER_FRAC of
+     *  the window. When the needed window would cover most of the map, the fine
+     *  layer is disabled and the plugin uses coarse only. */
+    private updateWindow(focusX: number, focusZ: number, camHeight: number): void {
+        // Rough visible ground span ≈ 2× camera height (≈45° FOV). Window covers
+        // ~2.5× that so there's pan margin before a recenter.
+        const viewSpan = Math.max(1, camHeight) * 2.0;
+        const want = viewSpan * 2.5;
+        // Smallest step that covers `want`; if none, the window would be huge —
+        // fall back to coarse only.
+        let win = 0;
+        for (const step of WIN_STEPS) {
+            if (step >= want) { win = step; break; }
+        }
+        const mapMax = Math.max(this.worldW, this.worldH);
+        if (win === 0 || win >= mapMax) {
+            // No useful fine window — coarse already covers the whole map.
+            if (this.fineState.enabled !== 0) this.fineState.enabled = 0;
+            return;
+        }
+
+        const texel = win / FINE_DIM;
+        const half = win * 0.5;
+        const centreX = this.fine.originX + this.fine.extentX * 0.5;
+        const centreZ = this.fine.originZ + this.fine.extentZ * 0.5;
+        const drift = Math.max(Math.abs(focusX - centreX), Math.abs(focusZ - centreZ));
+        const sizeChanged = win !== this.fine.extentX;
+        const wasDisabled = this.fineState.enabled === 0;
+
+        if (sizeChanged || wasDisabled || drift > RECENTER_FRAC * win) {
+            // Snap the origin to the texel grid so the window doesn't shimmer
+            // sub-texel; re-bake the whole window once.
+            this.fine.originX = Math.round((focusX - half) / texel) * texel;
+            this.fine.originZ = Math.round((focusZ - half) / texel) * texel;
+            this.fine.extentX = win;
+            this.fine.extentZ = win;
+            this.fine.rebuild = true;
+        }
+
+        this.fineState.originX = this.fine.originX;
+        this.fineState.originZ = this.fine.originZ;
+        this.fineState.extent = win;
+        this.fineState.enabled = 1;
     }
 
     /** Age → coverage multiplier: full strength until FADE_HOLD_S, then linear
@@ -546,14 +606,14 @@ export class DecalOverlay {
     }
 
     /** Record a mark for the age-scaled rebuild, evicting the oldest past the
-     *  ring-buffer cap. The mark is a snapshot of the blit params (+ birth). */
+     *  ring-buffer cap. */
     private remember(m: PendingMark): void {
         this.marks.push({ ...m, birth: this.elapsed });
         if (this.marks.length > MARK_CAP) this.marks.shift();
     }
 
-    /** Lay a mark: blit it this frame (immediate) AND retain it for the
-     *  age-scaled rebuild (fade). */
+    /** Lay a mark: blit it this frame (append to both targets) AND retain it
+     *  for the age-scaled rebuild (fade). */
     private emit(m: PendingMark): void {
         this.pending.push(m);
         this.remember(m);
@@ -570,19 +630,15 @@ export class DecalOverlay {
         // the quad edge. The shader places the lip at r≈0.44, so PAD≈2.2 keeps
         // the effective crater radius ≈ ev.radius and gives the blast room.
         const PAD = 2.2;
-        const hu = (ev.radius * PAD) / this.worldW;
-        const hv = (ev.radius * PAD) / this.worldH;
+        const h = ev.radius * PAD; // square half-extent in WORLD elmos (isotropic)
         this.emit({
-            cu: ev.x / this.worldW,
-            cv: ev.z / this.worldH,
-            hu, hv,
-            // MUST be 0: the bake computes the bowl/rim normal in the quad's
-            // local frame and writes it into the overlay's world-space RG
-            // channels. A rotated quad would rotate every crater's relief, so
-            // each would be lit from a different apparent direction (the
-            // "lighting doesn't match the sun" bug). Pattern variety comes from
-            // the per-scar `seed` (below), not from quad rotation.
-            rot: 0,
+            cx: ev.x,
+            cz: ev.z,
+            // Axis-aligned square in world space (no rotation — pattern variety
+            // comes from the per-scar `seed`, not quad rotation; the depth field
+            // is a scalar so a rotated quad would gain nothing).
+            axx: h, axz: 0,
+            azx: 0, azz: h,
             kind: KIND_SCAR,
             // Per-scar darkening + depression amplitudes (additive into G/R).
             // ~0.5 each: one scar reads clearly, two overlapping reach the cap
@@ -620,16 +676,12 @@ export class DecalOverlay {
                     // seamlessly (the shader no longer feathers strip ends).
                     const halfLen = len * 0.5 + w * 0.15;
                     const halfW = w * 0.5;
-                    // Build the quad's UV-space half-axes straight from the world
-                    // across/along vectors (across ⟂ travel = (tz,-tx)); avoids
-                    // the shear that rotating in anisotropic UV space causes for
-                    // a long quad on a non-square map.
-                    const ax = { u: (tz * halfW) / this.worldW, v: (-tx * halfW) / this.worldH };
-                    const ay = { u: (tx * halfLen) / this.worldW, v: (tz * halfLen) / this.worldH };
+                    // World half-axes: across ⟂ travel = (tz,-tx); along = travel.
                     this.emit({
-                        cu: (last.x + ev.x) * 0.5 / this.worldW,
-                        cv: (last.z + ev.z) * 0.5 / this.worldH,
-                        hu: 0, hv: 0, rot: 0, ax, ay,
+                        cx: (last.x + ev.x) * 0.5,
+                        cz: (last.z + ev.z) * 0.5,
+                        axx: tz * halfW, axz: -tx * halfW,
+                        azx: tx * halfLen, azz: tz * halfLen,
                         kind,
                         // Light + shallow per pass; accumulates additively as
                         // more vehicles drive the same ground (capped at the
@@ -649,16 +701,16 @@ export class DecalOverlay {
         // DISCRETE prints (foot / claw): one square stamp per segment, oriented
         // along travel. The shapes tile across abutting stamps into a trail; we
         // want them individual, so no segment-connecting here.
-        const hu = (w * 0.5) / this.worldW;
-        const hv = (w * 0.5) / this.worldH;
-        // Heading so the quad's local +Y axis aligns with the XZ travel vector.
-        // The blit matrix maps local +Y to (-sin rot, cos rot) in (X,Z); solving
-        // for travel (dirX, dirZ) gives rot = atan2(-dirX, dirZ).
-        const rot = Math.atan2(-ev.dirX, ev.dirZ);
+        const halfW = w * 0.5;
+        // Travel direction (along = local +Y); across ⟂ travel = (dirZ,-dirX).
+        let tx = ev.dirX, tz = ev.dirZ;
+        const dl = Math.hypot(tx, tz);
+        if (dl > 1e-4) { tx /= dl; tz /= dl; } else { tx = 0; tz = 1; }
         this.emit({
-            cu: ev.x / this.worldW,
-            cv: ev.z / this.worldH,
-            hu, hv, rot,
+            cx: ev.x,
+            cz: ev.z,
+            axx: tz * halfW, axz: -tx * halfW,
+            azx: tx * halfW, azz: tz * halfW,
             kind,
             // Bot footprints / spider claws: ~vehicle-level darkening (not
             // darker), a touch more depression so the discrete prints stay
@@ -669,58 +721,68 @@ export class DecalOverlay {
         });
     }
 
-    /** Build the thin-instance buffers and enable the blit mesh for this RTT
-     *  render. Two modes:
-     *   - normal: stamp only `pending` (new marks) onto the persistent overlay.
-     *   - rebuild (rebuildQueued): clear the overlay and re-stamp the WHOLE live
-     *     mark list, each age-scaled (fade) and expired ones dropped. */
-    private uploadPending(): void {
-        if (this.rebuildQueued) {
-            this.rebuildQueued = false;
-            this.clearNextRender = true; // the onClear handler wipes to neutral
-            // Rebuild the batch from the live marks: drop the fully-faded,
-            // age-scale the rest. (Additive blend is order-independent, so the
-            // overlay sums to the same result regardless of restamp order.)
-            const live: StoredMark[] = [];
-            const batch: PendingMark[] = [];
-            for (const mk of this.marks) {
-                const f = this.fadeFor(this.elapsed - mk.birth);
-                if (f <= 0) continue; // expired → evicted by omission
-                live.push(mk);
-                batch.push({ ...mk, fade: f });
-            }
-            this.marks = live;
-            this.pending = batch;
+    /** Build (once per frame) the age-scaled batch of all live marks, pruning
+     *  fully-faded ones from the ring buffer. Memoised so both targets rebuilding
+     *  the same frame share it. */
+    private getRebuildBatch(): PendingMark[] {
+        if (this.frameRebuildBatch) return this.frameRebuildBatch;
+        const live: StoredMark[] = [];
+        const batch: PendingMark[] = [];
+        for (const mk of this.marks) {
+            const f = this.fadeFor(this.elapsed - mk.birth);
+            if (f <= 0) continue; // expired → evicted by omission
+            live.push(mk);
+            batch.push({ ...mk, fade: f });
         }
+        this.marks = live;
+        this.frameRebuildBatch = batch;
+        return batch;
+    }
 
-        const n = this.pending.length;
+    /** Set the mesh's instance buffer + this target's world→clip uniform just
+     *  before the target's RTT draws. Two modes:
+     *   - append: stamp only `pending` (new marks) onto the persistent target.
+     *   - rebuild: clear the target and re-stamp the WHOLE live mark list,
+     *     age-scaled (fade) with expired marks dropped. */
+    private prepareTarget(t: TargetState): void {
+        // Per-target world→clip transform (the only thing that differs between
+        // the coarse full-map texture and the scrolling fine window).
+        this.uOrigin.set(t.originX, t.originZ);
+        this.uInvExtent.set(1 / t.extentX, 1 / t.extentZ);
+        this.blitMat.setVector2('uOrigin', this.uOrigin);
+        this.blitMat.setVector2('uInvExtent', this.uInvExtent);
+
+        let batch: PendingMark[];
+        if (t.rebuild) {
+            t.rebuild = false;
+            t.clearNext = true;          // onClear wipes to neutral first
+            batch = this.getRebuildBatch();
+        } else {
+            batch = this.pending;        // append new marks onto the persistent target
+        }
+        this.uploadBatch(batch);
+    }
+
+    /** Upload a batch of marks as thin instances of the unit quad. */
+    private uploadBatch(batch: PendingMark[]): void {
+        const n = batch.length;
         if (n === 0) { this.blitMesh.thinInstanceCount = 0; return; }
 
         const matrices = new Float32Array(n * 16);
         const params = new Float32Array(n * 4);
         const fades = new Float32Array(n);
         for (let i = 0; i < n; i++) {
-            const m = this.pending[i];
+            const m = batch[i];
             const o = i * 16;
-            // columns: X axis (across), Y axis (along), Z, translation.
             // Column-major mat4 (Babylon thin-instance layout). The unit quad
             // spans [-0.5,0.5], so a column of length L gives half-extent L/2 —
-            // hence the ×2 on the half-axes below.
-            let x0: number, x1: number, y0: number, y1: number;
-            if (m.ax && m.ay) {
-                // Explicit UV-space half-axes (connected track segments).
-                x0 = m.ax.u * 2; x1 = m.ax.v * 2;
-                y0 = m.ay.u * 2; y1 = m.ay.v * 2;
-            } else {
-                // 2D rotate+scale of the unit quad by (rot, hu, hv).
-                const c = Math.cos(m.rot), s = Math.sin(m.rot);
-                x0 =  c * m.hu * 2; x1 =  s * m.hu * 2;
-                y0 = -s * m.hv * 2; y1 =  c * m.hv * 2;
-            }
-            matrices[o + 0] = x0; matrices[o + 1] = x1; matrices[o + 2] = 0; matrices[o + 3] = 0;
-            matrices[o + 4] = y0; matrices[o + 5] = y1; matrices[o + 6] = 0; matrices[o + 7] = 0;
+            // hence the ×2 on the world half-axes. col0=across, col1=along,
+            // col3=world centre (X,Z). The vertex shader maps world XZ → target
+            // UV via uOrigin/uInvExtent.
+            matrices[o + 0] = m.axx * 2; matrices[o + 1] = m.axz * 2; matrices[o + 2] = 0; matrices[o + 3] = 0;
+            matrices[o + 4] = m.azx * 2; matrices[o + 5] = m.azz * 2; matrices[o + 6] = 0; matrices[o + 7] = 0;
             matrices[o + 8] = 0;  matrices[o + 9] = 0;  matrices[o + 10] = 1; matrices[o + 11] = 0;
-            matrices[o + 12] = m.cu; matrices[o + 13] = m.cv; matrices[o + 14] = 0; matrices[o + 15] = 1;
+            matrices[o + 12] = m.cx; matrices[o + 13] = m.cz; matrices[o + 14] = 0; matrices[o + 15] = 1;
 
             params[i * 4 + 0] = m.kind;
             params[i * 4 + 1] = m.darkAmp;
@@ -732,14 +794,15 @@ export class DecalOverlay {
         this.blitMesh.thinInstanceSetBuffer('params', params, 4, true);
         this.blitMesh.thinInstanceSetBuffer('fade', fades, 1, true);
         this.blitMesh.thinInstanceCount = n;
-        this.pending = [];
     }
 
     dispose(): void {
         this.disposed = true;
-        const idx = this.scene.customRenderTargets.indexOf(this.rtt);
-        if (idx >= 0) this.scene.customRenderTargets.splice(idx, 1);
-        this.rtt.dispose();
+        for (const t of [this.coarse, this.fine]) {
+            const idx = this.scene.customRenderTargets.indexOf(t.rtt);
+            if (idx >= 0) this.scene.customRenderTargets.splice(idx, 1);
+            t.rtt.dispose();
+        }
         this.blitMesh.dispose();
         this.blitMat.dispose();
         this.rttCamera.dispose();
@@ -773,7 +836,3 @@ function ceilPow2(v: number): number {
     while (p < v) p <<= 1;
     return p;
 }
-
-// Re-export so the unused Color4 import (kept for future glow channel work)
-// doesn't trip noUnusedLocals.
-export const _DECAL_OVERLAY_NEUTRAL = new Color4(0.5, 0.5, 0, 0);
