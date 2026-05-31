@@ -6016,6 +6016,7 @@ gadgetHandler = gadgetHandler or {
     knownGadgets = {},
     syncActions = {},
     globals = {},
+    CMDIDs = {},
 }
 
 function gadgetHandler:IsSyncedCode() return false end
@@ -6033,6 +6034,20 @@ function IsSyncedCode() return false end
 -- WG.Lups when loaded via the widget wrapper, not the global GG the
 -- producer gadgets read.
 GG = GG or {}
+
+-- Spring.UnitRendering / FeatureRendering: ZK's custom unit/feature draw hooks
+-- (e.g. unit_enlarger calls \`Spring.UnitRendering.SetUnitLuaDraw\`). The worker
+-- has no Lua-driven custom-unit-draw path, so these are no-op stubs that let the
+-- gadgets load. The metatable returns a no-op for ANY method so we don't have to
+-- enumerate the full engine API. FIDELITY-STANDIN: revisit if a gadget's
+-- custom-render effect becomes visually important.
+local _renderingNoop = function() end
+Spring.UnitRendering = Spring.UnitRendering or setmetatable({}, {
+    __index = function() return _renderingNoop end,
+})
+Spring.FeatureRendering = Spring.FeatureRendering or setmetatable({}, {
+    __index = function() return _renderingNoop end,
+})
 
 function gadgetHandler:AddSyncAction(name, fn)
     if type(name) ~= "string" or type(fn) ~= "function" then return false end
@@ -6076,6 +6091,53 @@ function gadgetHandler:AddGadget(g, name)
     return true
 end
 
+-- Custom command IDs. ZK gadgets.lua:933 validates (>=1000, non-dup) then stores
+-- CMDIDs[id] = gadget. On the unsynced client there is no engine command to
+-- register; we only need the call to succeed and to remember the owner so
+-- RemoveGadget can clear it. Gadgets call this as \`gadgetHandler:RegisterCMDID(id)\`.
+function gadgetHandler:RegisterCMDID(id)
+    if id then self.CMDIDs[id] = gadget or true end
+    return true
+end
+
+-- Self-disable. ZK gadgets.lua:645 — gadgets call \`gadgetHandler:RemoveGadget()\`
+-- with no arg to remove themselves; the loader's global \`gadget\` is the one
+-- currently running. Run its Shutdown, drop it from the fan-out list, and clear
+-- any CMDIDs it owned.
+function gadgetHandler:RemoveGadget(g)
+    g = g or gadget
+    if not g then return end
+    if g.Shutdown then pcall(g.Shutdown, g) end
+    for i = #self.gadgets, 1, -1 do
+        if self.gadgets[i] == g then table.remove(self.gadgets, i) end
+    end
+    for id, owner in pairs(self.CMDIDs) do
+        if owner == g then self.CMDIDs[id] = nil end
+    end
+end
+
+-- Chat actions. ZK proxies \`gadget:AddChatAction\` to actionHandler (gadgets.lua:515).
+-- No chat-command dispatch is wired in the worker, so we store the handler (the
+-- call succeeds; the command is inert until a dispatch exists). FIDELITY-STANDIN.
+function gadgetHandler:AddChatAction(cmd, fn, help)
+    self.chatActions = self.chatActions or {}
+    if type(cmd) == "string" and type(fn) == "function" then
+        self.chatActions[cmd] = fn
+    end
+    return true
+end
+
+-- actionHandler: ZK's actions.lua module (gadgets.lua:43). dbg_* gadgets reach it
+-- as \`gadgetHandler.actionHandler.AddSyncAction(gadget, name, fn)\` — note the dot
+-- call with an explicit gadget first arg. Delegate to the sync-action table we own.
+gadgetHandler.actionHandler = gadgetHandler.actionHandler or {
+    AddSyncAction       = function(_g, name, fn) return gadgetHandler:AddSyncAction(name, fn) end,
+    RemoveSyncAction    = function(_g, name)     return gadgetHandler:RemoveSyncAction(name) end,
+    AddChatAction       = function(_g, cmd, fn, help) return gadgetHandler:AddChatAction(cmd, fn, help) end,
+    RemoveChatAction    = function(_g, cmd) if gadgetHandler.chatActions then gadgetHandler.chatActions[cmd] = nil end end,
+    RemoveGadgetActions = function(_g) end,
+}
+
 -- Per-tick fan-out — called from the worker's GameFrame handler so
 -- gadgets with their own \`function gadget:GameFrame(n)\` callin fire.
 function _SpringWebRunGadgetGameFrame(n)
@@ -6102,7 +6164,12 @@ do
         local _chunk, _cerr = loadfile(_path)
         if not _chunk then error(_cerr or "no chunk") end
         _chunk()
-        if not gadget.GetInfo then error("gadget.GetInfo missing") end
+        -- No GetInfo after running the chunk means the gadget is synced-only:
+        -- its top-level \`if not gadgetHandler:IsSyncedCode() then return end\`
+        -- early-returned, so nothing was defined. The \`\\nelse\` scan that picked
+        -- this file false-positived on an unrelated else branch. There is no
+        -- unsynced half to host — skip quietly (not an error).
+        if not gadget.GetInfo then return end
         local _info = gadget:GetInfo()
         gadget.whInfo = _info
         if gadget.Initialize then gadget:Initialize() end
