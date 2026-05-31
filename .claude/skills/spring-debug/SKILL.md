@@ -90,6 +90,33 @@ After rebuilding binaries, restart servers without disrupting the lobby room lif
 
 When testing the game in the browser, **always use `mcp__chrome-devtools__*` tools**. Never use `mcp__claude-in-chrome__*` tools — mixing the two spawns a separate browser window and breaks page context.
 
+## Room & session hygiene when testing
+
+Stale rooms are the single biggest time-sink in a test session. `list_processes` accumulates dozens of `ended`/`starting` rows, the browser silently rejoins a *dead* room, and MCP tools auto-target the *wrong* game. **Track the exact `roomId` you launched and pass it explicitly everywhere.**
+
+1. **Treat the `roomId` from `launch_game` as the single source of truth.** Pass it to *every* room-scoped MCP call (`get_game_state`, `exec_lua`, `spawn_unit`, `give_order`, `set_los`, `set_cheats`, `get_logs`, …). Do **not** rely on the "first active game" auto-detect — it will pick up a stale or someone else's room. When in doubt, `get_game_state(roomId)` and confirm `frame >= 0` (a live, ticking game) before driving it.
+
+2. **The browser does NOT reliably honor `?room=N&autojoin=1`.** Autojoin rejoins the logged-in user's **persisted "current room"** from a previous session, ignoring the URL param — so you end up in a stale/dead room. After navigating, **verify** `window.lobby.currentRoom.id === <your roomId>`; if not, force it:
+   ```js
+   await window.lobby.leave();
+   await window.lobby.joinRoom(<roomId>);   // the exact id launch_game returned
+   ```
+
+3. **Match the browser user to the room host (roster check).** A game server only admits clients in its **launch-time roster**. `launch_game` hosts as **admin** by default, but the browser auto-logs-in from a saved token that is often a *different* user (e.g. `test1`) → auth rejects with **"Not in this room's roster"**. Either launch as the browser's user, or log the browser in as the host. Dev creds are plaintext in the `users` table (`query_db "SELECT username,password_hash FROM users"`; typically `admin`/`admin`, `test1`/`test`). To switch the browser to admin:
+   ```js
+   const r = await fetch('/api/auth/login', {method:'POST', headers:{'Content-Type':'application/json'},
+     body: JSON.stringify({username:'admin', password:'admin'})}).then(x=>x.json());
+   localStorage.setItem('springrts-username','admin');
+   localStorage.setItem('springrts-token', r.token);
+   ```
+   (then navigate/join). Joining mid-game as a non-roster spectator will fail.
+
+4. **Connect promptly — a fresh server exits at frame -1 if no player connects in time.** A just-launched `spring-server` logs `waiting for N player(s) to connect` and **shuts down cleanly** if the browser doesn't attach within its timeout. Don't burn that window polling the *stale* room: launch → immediately `leave()` + `joinRoom(newId)` → *then* poll for boot. If `list_processes` shows your room `ended` right after launch and the log says `exited cleanly … (frame -1)`, you were too slow / joined the wrong room — relaunch and connect faster.
+
+5. **After `restart_lobby`, old game servers are gone but the browser's saved current-room still points at a dead room.** Expect autojoin to land on a corpse; reconcile with step 2. `restart_lobby` is the clean reset when room state is tangled.
+
+**Canonical loop:** `launch_game` → note `roomId` → `get_game_state(roomId)` confirms `frame>=0` → browser `leave()`+`joinRoom(roomId)` → verify `currentRoom.id` → poll for `window.test` → drive everything with that one `roomId`.
+
 ## Camera control
 
 The camera lives **only in the browser** (the `RTSCamera` instance, `client/src/core/rts-camera.ts`). There are no camera MCP tools — drive it by feeding JS into `mcp__chrome-devtools__evaluate_script`. Two equivalent surfaces back the same camera: `window.test.*` (the test harness) and `window.camera.*` (pose primitives). Read the live pose with `window.test.cameraPose()` → `{pos:{x,y,z}, lookAt:{x,y,z}}`; check `window.camera.animating` before a screenshot (a transition is mid-flight when `true`).
