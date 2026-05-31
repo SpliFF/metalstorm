@@ -84,6 +84,10 @@ let dynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
 let cegRuntime: CegRuntime | null = null;
 let combatFX: CombatFX | null = null;
 let fxLightPool: FxLightPool | null = null;
+// PLAN.md Stage B1: flips true once ZK's authored projectile lights start
+// arriving via the WG.DeferredLighting registry, so the projectile renderer
+// silences its invented muzzle/follow light stand-ins (drift #1).
+let authoredProjectileLightsActive = false;
 let distortionRenderer: DistortionRenderer | null = null;
 let muzzleFlareRenderer: MuzzleFlareRenderer | null = null;
 let decalOverlay: DecalOverlay | null = null;
@@ -925,6 +929,50 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                     return;
                 }
                 inputManager.activateCommandFromMenu(cmdId, cmdType);
+            };
+            // PLAN.md Stage B1 (faithful projectile lights). Feed ZK's authored
+            // deferred-light list (from gfx_projectile_lights.lua / gfx_unit_
+            // lights.lua via the WG.DeferredLighting registry, collected in the
+            // worker) into the forward FxLightPool.
+            // FIDELITY-STANDIN: GL4 deferred / segment lights -> WebGL2 forward
+            // point-light pool. Colour + radius are the game's authored light_*
+            // data; only the rendering *tech* is substituted (the documented
+            // GL4->WebGL2 allowance). Re-emitted each frame (collectors return
+            // the current live set), so a short ttl keeps a light from lingering
+            // past its projectile's death. On the first authored light we
+            // silence the projectile renderer's invented muzzle/follow stand-ins
+            // (drift #1).
+            mgr.onDeferredLights = (point, beam) => {
+                const pool = fxLightPool;
+                if (!pool) return;
+                if (!authoredProjectileLightsActive && (point.length > 0 || beam.length > 0)) {
+                    authoredProjectileLightsActive = true;
+                    projectileRenderer?.setAuthoredLightsActive(true);
+                }
+                const TTL = 0.05;
+                for (const r of point) {
+                    // [px,py,pz, r,g,b, radius]
+                    const peak = Math.max(r[3], r[4], r[5], 0.0001);
+                    const inv = 1 / peak;
+                    pool.emit(r[0], r[1], r[2],
+                        [r[3] * inv, r[4] * inv, r[5] * inv],
+                        peak, Math.max(40, r[6]), TTL);
+                }
+                for (const r of beam) {
+                    // [px,py,pz, r,g,b, radius, dx,dy,dz]
+                    const peak = Math.max(r[3], r[4], r[5], 0.0001);
+                    const inv = 1 / peak;
+                    const col: [number, number, number] =
+                        [r[3] * inv, r[4] * inv, r[5] * inv];
+                    const range = Math.max(40, r[6]);
+                    // Approximate ZK's GL4 segment light with 3 forward point
+                    // lights along the beam (start, mid, end).
+                    for (let t = 0; t <= 2; t++) {
+                        const f = t / 2;
+                        pool.emit(r[0] + r[7] * f, r[1] + r[8] * f, r[2] + r[9] * f,
+                            col, peak, range, TTL);
+                    }
+                }
             };
             void mgr.initialize().then(() => {
                 console.log(`[client] widget manager ready`);

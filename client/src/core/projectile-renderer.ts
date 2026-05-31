@@ -1284,7 +1284,10 @@ export class ProjectileRenderer {
             // ground they pass over. Re-emitted on a slow cadence at the
             // current position; the pool's priority system keeps these dim
             // lights subordinate to muzzle/explosion bursts.
-            if (this.lightPool && !p.impacted) {
+            // B1d: suppressed once ZK's authored projectile lights drive the
+            // pool — gfx_projectile_lights.lua lights the live projectile every
+            // frame, so this invented follow-light would double-count.
+            if (this.lightPool && !this.authoredLights && !p.impacted) {
                 const ldef = this.weaponDefs.get(p.weaponDefId);
                 if (ldef && isEmissiveProjectile(ldef)) {
                     p.lightEmitAccumS += dt;
