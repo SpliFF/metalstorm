@@ -443,6 +443,11 @@ export interface WeaponDefInfo {
     /** BeamLaser per-Update colour decay (`visuals.beamdecay`); the beam
      *  dims by this factor each sim tick over its TTL. */
     beamDecay: number;
+    /** BeamLaser / LightningCannon visual-sprite linger time in sim
+     *  frames (Recoil's `beamLaserTTL`, Lua field `beamTTL`). ZK's
+     *  gfx_projectile_lights.lua reads it to fade beam lights. 0 = no
+     *  linger. */
+    beamTtl: number;
     /** LaserCannon: stop and contract at max-range instead of fading. */
     laserHardStop: boolean;
     /** Per-frame intensity falloff multiplier (non-hardstop lasers). */

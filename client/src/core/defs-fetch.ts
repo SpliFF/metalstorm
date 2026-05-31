@@ -348,6 +348,7 @@ function toWeaponDefInfos(parsed: any): WeaponDefInfo[] {
         coreThickness: num(d.core_thickness),
         laserFlareSize: num(d.laser_flare_size),
         beamDecay: num(d.beam_decay),
+        beamTtl: num(d.beam_ttl),
         laserHardStop: bool(d.laser_hard_stop),
         falloffRate: num(d.falloff_rate),
         duration: num(d.duration),

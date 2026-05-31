@@ -511,6 +511,7 @@ interface MinimalWeaponDefWire {
     projectileSpeed: number; range: number; aoe: number; size: number;
     intensity: number; colorR: number; colorG: number; colorB: number;
     duration: number; highTrajectory: boolean;
+    beamTtl?: number;
     typeName?: string; description?: string;
     defaultDamage?: number; damages?: number[];
     reloadTime?: number; salvoSize?: number; salvoDelay?: number;
@@ -716,6 +717,17 @@ function buildLuaWeaponDef(d: MinimalWeaponDefWire): Record<string, LuaValue> {
         size: d.size,
         intensity: d.intensity,
         rgbColor: [d.colorR, d.colorG, d.colorB],
+        // Recoil exposes weapon colour under `WeaponDefs[i].visuals.colorR`
+        // (LuaWeaponDefs.cpp). ZK's gfx_projectile_lights.lua reads exactly
+        // that path (`weaponDef.visuals.colorR + 0.2`), so the `visuals`
+        // sub-table must exist or the widget errors on a nil index.
+        visuals: {
+            colorR: d.colorR, colorG: d.colorG, colorB: d.colorB,
+        },
+        // BeamLaser / LightningCannon sprite linger (sim frames). Recoil's
+        // `WeaponDefs[i].beamTTL`; projectile-lights fades beam lights when
+        // beamTTL > 2.
+        beamTTL: d.beamTtl ?? 0,
         duration: d.duration,
         highTrajectory: d.highTrajectory ? 1 : 0,
 

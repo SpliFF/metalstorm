@@ -418,6 +418,11 @@ inline std::string SerializeOneWeaponDef(
     // CBeamLaserProjectile::Draw; needed for a faithful beam.
     b.add_float("laser_flare_size", wd.visuals.laserflaresize);
     b.add_float("beam_decay", wd.visuals.beamdecay);
+    // BeamLaser / LightningCannon visual-sprite linger time, in sim
+    // frames (Recoil's `beamLaserTTL`, Lua field `beamTTL`). ZK's
+    // gfx_projectile_lights.lua reads `weaponDef.beamTTL` to decide
+    // whether a beam light should fade over its lifetime.
+    b.add_int("beam_ttl", wd.beamLaserTTL);
     // Whether CLaserProjectile stops + contracts at max range instead
     // of fading out. Drives the post-impact stayTime path.
     b.add_bool("laser_hard_stop", wd.laserHardStop);

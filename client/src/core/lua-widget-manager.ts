@@ -957,12 +957,20 @@ export class LuaWidgetManager {
         });
     }
 
-    /** Push a batch of weapon defs into the worker. */
+    /** Push a batch of weapon defs into the worker. The spread copies
+     *  every runtime field of the passed WeaponDefInfo objects (the
+     *  worker's MinimalWeaponDefWire picks the subset it surfaces as Lua
+     *  globals) — including `customParams`, `colorR/G/B`, `typeName`,
+     *  `range`, `size` and `beamTtl`, all of which ZK's
+     *  gfx_projectile_lights.lua reads off `WeaponDefs[id]`. The narrow
+     *  annotation only documents the always-present core fields. */
     forwardWeaponDefs(defs: ReadonlyArray<{
         defId: number; name: string; projectileType: number;
         projectileSpeed: number; range: number; aoe: number; size: number;
         intensity: number; colorR: number; colorG: number; colorB: number;
         duration: number; highTrajectory: boolean;
+        beamTtl?: number; typeName?: string;
+        customParams?: Record<string, string>;
     }>): void {
         if (this.disposed || defs.length === 0) return;
         this.postToWorker({ type: 'weaponDefsUpdate', defs: defs.map(d => ({ ...d })) });
