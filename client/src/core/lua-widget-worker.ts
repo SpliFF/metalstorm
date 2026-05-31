@@ -1347,6 +1347,30 @@ WG.initializeTranslation = function(_, _) return function(key) return tostring(k
 WG.langChanged = function() end
 WG.GetLang = function() return "en" end
 WG.SetLang = function() end
+-- PLAN.md Stage B1 (faithful projectile lights). ZK's GL4 deferred-light
+-- provider gfx_deferred_rendering.lua can't run on our 2D-overlay worker
+-- (it samples the depth buffer and self-removes when AllowDeferredMapRendering
+-- ~= 1, which is our case). Substitute its public registry HERE, before any
+-- widget Initialize runs, so consumers (gfx_projectile_lights.lua,
+-- gfx_unit_lights.lua) register collectors instead of self-removing with
+-- "Deferred rendering widget not found", and instead append their collectors
+-- to _G.__deferredLightCollectors.
+--
+-- B1 STATUS: registry half only. The consumer side (per-frame collect ->
+-- marshal the light list to the main thread -> feed the forward FxLightPool,
+-- the sanctioned GL4-deferred -> WebGL2-forward substitution fed by authored
+-- light_* data, then retire FxLightPool's invented muzzle/explosion emitters)
+-- is NOT wired yet, so registered collectors are currently never called. With
+-- just this edit the consumer widgets stay LOADED instead of self-removing —
+-- a prerequisite — but emit no lights yet. See memory
+-- project_faithful_proj_lights_progress for the remaining steps.
+_G.__deferredLightCollectors = _G.__deferredLightCollectors or {}
+WG.DeferredLighting_RegisterFunction = function(func)
+	if type(func) == "function" then
+		local c = _G.__deferredLightCollectors
+		c[#c + 1] = func
+	end
+end
 Spring.Utilities = {}
 Spring.Utilities.GetHumanName = function(ud, _unitID)
     if type(ud) == "table" then return ud.humanName or ud.name or "" end
