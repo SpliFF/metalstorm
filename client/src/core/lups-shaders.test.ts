@@ -58,6 +58,26 @@ describe('LUPS class shaders translate cleanly', () => {
         expect(out.ok).toBe(true);
     });
 
+    it('promotes bare-float compare/assign to a known float scalar (nightvision)', () => {
+        const src = extractFragment(
+            '/Users/shannon/WarriorHut/Projects/springrts-web/content/games/zk/LuaUI/Widgets/gfx_nightvision.lua');
+        const out = translateGLSL(src, 'fragment', { legacyGL2Shim: true });
+        expect(out.ok).toBe(true);
+        // `float intensity` is a known scalar → `intensity > 1` and the
+        // bare `intensity = 1;` both promote (rule 4d). Without the fix the
+        // GLSL ES compiler rejects `highp float > const int`.
+        expect(out.source).toContain('intensity > 1.0');
+        expect(out.source).toContain('intensity = 1.0');
+        // A real int counter must NOT be promoted by the same rule.
+        const intCase = translateGLSL(
+            'void main(){ int i; i = 1; for (int j = 0; j < 4; j++) {} }',
+            'fragment', { legacyGL2Shim: true });
+        expect(intCase.source).toContain('i = 1;');
+        expect(intCase.source).not.toContain('i = 1.0');
+        expect(intCase.source).toContain('j < 4');
+        expect(intCase.source).not.toContain('j < 4.0');
+    });
+
     it('ShieldSphereColorHQ FS keeps integer expressions intact inside array subscripts', () => {
         const src = extractFragment(path.join(ZK, 'ShieldSphereColorHQ.lua'));
         const out = translateGLSL(src, 'fragment', { legacyGL2Shim: true });

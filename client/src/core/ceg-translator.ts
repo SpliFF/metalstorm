@@ -34,23 +34,43 @@
 
 import type { CegDefInfo, CegSpawnInfo, CegPropertyInfo } from './connection.js';
 import type { EffectDef, GroundFlash, ParticleSpawn, SubCegSpawn, Expr } from './ceg-runtime.js';
+import { ORIENT_GROUND, ORIENT_STRETCH } from './ceg-orient.js';
 
 /// Spring's sim runs at 30 Hz; CEG `particlelife` and `ttl` are
 /// in sim frames, `particlespeed` is elmos/frame. Convert at
 /// this constant rate — the visual runtime uses wall-clock seconds.
 const SIM_HZ = 30;
 
-/// Hard cap on per-spawn particle count after translation. A few ZK
-/// CEGs author `numparticles = 30`+ across multiple sub-emitters; left
-/// unscaled, a single impact eats most of the pool's ring buffer in
-/// one frame. The cap keeps a single CEG from monopolising the pool
-/// without affecting visual fidelity at typical RTS-camera ranges.
-const MAX_PARTICLES_PER_SPAWN = 12;
+/// Per-spawn particle-count and lifetime budget (Phase T / G).
+///
+/// These were hardcoded `12` / `4.0s` placeholders that silently
+/// clamped every authored ZK CEG far below what Recoil renders (Recoil
+/// routinely spawns dozens per sub-emitter with multi-second lifetimes).
+/// They are now mutable module state seeded with generous high-tier
+/// defaults and re-pointed by Phase G's `gfx.particleQuality` setting at
+/// game load (translation re-runs per session via `ingestCegDefs`, so a
+/// per-session quality read is sufficient — live mid-game change is a
+/// non-goal, matching the `requiresRestart` convention for heavy knobs).
+///
+/// The values are still *caps*, not targets: they bound a pathological
+/// `numparticles = 10000` CEG and keep the longest-lived puffs from
+/// lapping the per-class ring buffer. Defaults are sized so no authored
+/// ZK CEG is clamped at the `high` tier.
+let MAX_PARTICLES_PER_SPAWN = 64;
+let MAX_LIFETIME_S = 12.0;
 
-/// Hard cap on lifetime in seconds. Some authored CEGs use
-/// `particlelife = 600` (20s) which is fine in Spring's wider pool
-/// budget but starves the runtime's ring buffer here.
-const MAX_LIFETIME_S = 4.0;
+/// Phase G hook: set the per-spawn particle budget before CEG defs are
+/// ingested/translated. Called from the quality-preset wiring with the
+/// tier's values; absent a call, the generous defaults above apply.
+export function setParticleBudget(maxPerSpawn: number, maxLifetimeS: number): void {
+    if (Number.isFinite(maxPerSpawn) && maxPerSpawn > 0) MAX_PARTICLES_PER_SPAWN = maxPerSpawn;
+    if (Number.isFinite(maxLifetimeS) && maxLifetimeS > 0) MAX_LIFETIME_S = maxLifetimeS;
+}
+
+/// Read-back for tests / Phase G diagnostics.
+export function getParticleBudget(): { maxPerSpawn: number; maxLifetimeS: number } {
+    return { maxPerSpawn: MAX_PARTICLES_PER_SPAWN, maxLifetimeS: MAX_LIFETIME_S };
+}
 
 /// Translate one streamed CEG into a runtime `EffectDef`. Returns
 /// null if the CEG has no spawns the runtime can render — caller can
@@ -624,19 +644,26 @@ function translateTracerProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSp
     const length = clamp(props.getFloat('length', 10), 4, 60);
     const speed = clamp(props.getFloat('speed', 200), 50, 500);
     const texture = props.getString('texture', '').toLowerCase() || 'flare';
+    // Phase T: render as a velocity-stretched streak (ORIENT_STRETCH)
+    // rather than a flare blob. width is the cross extent; `stretch`
+    // scales the along-velocity extent up to ~`length` elmos so the
+    // tracer reads as a bright line down the line of fire.
+    const width = clamp(length * 0.12, 0.5, 4);
     return {
         texture,
-        count: 2,
+        count: 1,
         lifetimeMin: 0.08, lifetimeMax: 0.18,
         velocityBase: [0, 0, 0],
         velocitySpread: 0,
         velocityScale: speed,
         gravity: 0,
-        sizeStart: clamp(length * 0.3, 1, 8),
-        sizeEnd: clamp(length * 0.1, 0.5, 4),
+        sizeStart: width,
+        sizeEnd: width * 0.5,
         colorStart: [1.0, 0.9, 0.4, 1.0],
         colorEnd:   [1.0, 0.6, 0.1, 0.0],
         rotationSpeedMax: 0,
+        orient: ORIENT_STRETCH,
+        stretch: length / width,
     };
 }
 
@@ -653,6 +680,11 @@ function translateExploSpikeProjectile(_s: CegSpawnInfo, props: PropMap): Partic
     const ttlS = clamp(ttlFrames / SIM_HZ, 0.1, 0.8);
     const length = clamp(props.getFloat('length', 30), 5, 80);
     const texture = props.getString('texture', '').toLowerCase() || 'flare';
+    // Phase T: each spike is a stretched quad aligned to its own random
+    // outward velocity (ORIENT_STRETCH). The per-particle velocitySpread
+    // gives each its radial direction; the stretch turns the resulting
+    // streaks into the spiky star-burst Spring draws.
+    const width = clamp(length * 0.08, 0.5, 4);
     return {
         texture,
         count: 1,
@@ -661,11 +693,13 @@ function translateExploSpikeProjectile(_s: CegSpawnInfo, props: PropMap): Partic
         velocitySpread: length * 4,
         velocityScale: 0,
         gravity: 0,
-        sizeStart: clamp(length * 0.1, 1, 6),
-        sizeEnd: 0.5,
+        sizeStart: width,
+        sizeEnd: width * 0.4,
         colorStart: [1.0, 0.85, 0.3, 1.0],
         colorEnd:   [1.0, 0.4, 0.1, 0.0],
         rotationSpeedMax: 0,
+        orient: ORIENT_STRETCH,
+        stretch: length / width,
     };
 }
 
@@ -734,6 +768,8 @@ function translateWakeProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSpaw
     const ttlS = clamp(ttlFrames / SIM_HZ, 0.3, MAX_LIFETIME_S);
     const size = clamp(props.getFloat('size', 12), 4, 40);
     const texture = props.getString('texture', '').toLowerCase() || 'smoketrail';
+    // Phase T: a wake is a ground-aligned expanding ring on the water
+    // surface (ORIENT_GROUND) — flat, not a camera billboard.
     return {
         texture,
         count: 1,
@@ -746,6 +782,7 @@ function translateWakeProjectile(_s: CegSpawnInfo, props: PropMap): ParticleSpaw
         colorStart: [0.85, 0.9, 0.95, 0.45],
         colorEnd:   [0.7, 0.75, 0.8, 0.0],
         rotationSpeedMax: 0.3,
+        orient: ORIENT_GROUND,
     };
 }
 

@@ -78,18 +78,17 @@ export const PROJECTILE_BEAM_FRAGMENT = `
 
     uniform sampler2D beamTex;
     uniform vec3 baseColor;
-    /// Wall-clock seconds; combined with vBirth for the fade and
-    /// with scrollRate for the UV pan.
+    /// Sim-time seconds, combined with vBirth for the fade and with
+    /// scrollRate for the texture/noise pan (advances with game speed).
     uniform float time;
     /// elmos/sec the texture pattern scrolls along the beam axis.
     /// Builder zeroes this for non-largeBeamLaser weapons so plain
     /// BeamLaser renders as a static stripe (Recoil parity).
     uniform float scrollRate;
     /// Texture footprint in elmos — one tile spans this much beam
-    /// length before the pattern repeats. Tunable per def; 200 is a
-    /// reasonable default for the standard largebeam texture.
+    /// length before the pattern repeats. Tunable per def.
     uniform float tileLength;
-    /// Lifetime in seconds. Fade-out is linear from full alpha at
+    /// Lifetime in seconds. Fade-out is linear from full intensity at
     /// birth to zero at birth + duration.
     uniform float duration;
 
@@ -97,43 +96,55 @@ export const PROJECTILE_BEAM_FRAGMENT = `
     varying float vBirth;
     varying float vLength;
 
+    // Cheap value noise (1-D) for the energy crackle along the beam.
+    float hash1(float n) { return fract(sin(n) * 43758.5453123); }
+    float vnoise(float x) {
+        float i = floor(x);
+        float f = fract(x);
+        return mix(hash1(i), hash1(i + 1.0), smoothstep(0.0, 1.0, f));
+    }
+
     void main() {
         float age = time - vBirth;
         float fade = clamp(1.0 - age / duration, 0.0, 1.0);
 
-        // Tile the texture along the length axis. tileCount ≥ 1 so a
-        // very short beam still shows the full pattern once.
-        float tileCount = max(vLength / max(tileLength, 1.0), 1.0);
-        // Scroll outward from the muzzle: as time advances, the same
-        // world position samples a lower texture coordinate, which
-        // reads as the pattern flowing toward the target.
-        float scrollOffset = time * scrollRate / max(tileLength, 1.0);
-        vec2 uvSampled = vec2(vUV.x, fract(vUV.y * tileCount - scrollOffset));
-        vec4 texel = texture2D(beamTex, uvSampled);
+        // Noise phase along the beam length, scrolling with sim-time so
+        // the turbulence flows along the beam. Two octaves.
+        float lu = vUV.y * max(vLength, 1.0) * 0.06;
+        float scroll = time * (scrollRate > 0.0 ? scrollRate * 0.02 : 1.0);
+        float n1 = vnoise(lu * 3.0 + scroll * 3.0);
+        float n2 = vnoise(lu * 9.0 - scroll * 5.0);
 
-        // Procedural cross-section: opaque centre, smooth shoulder
-        // taper to the edges. Always drives the beam's primary alpha
-        // so the stretched-quad reads as a coherent stripe regardless
-        // of how the authored texture is patterned. ZK BeamLaser defs
-        // typically ship with a "falloff" sprite — round halo with
-        // alpha mostly zero — that, if used as the primary alpha,
-        // would render the beam as scattered halo dots tiled along
-        // the length instead of a connected line. The texture instead
-        // brightens / colours the beam where it has alpha, on top of
-        // the procedural shape.
+        // FIDELITY-STANDIN: this procedural crackle noise is NOT from Recoil —
+        // Recoil's beam roughness comes from the authored beam TEXTURE
+        // (laserfalloff / largebeam), not a shader noise function. PLAN.md
+        // drift #4 / Stage D2: justify as an explicit allowance or remove in
+        // favour of the authored texture pattern.
+        // Now jitter the cross-position along the length so the glow EDGE
+        // wobbles like a flame — a silhouette change reads through bloom.
+        // Kept as a small +/- jitter around a SOLID base width so the beam
+        // stays thick and bright (the over-wide version wisped it away).
         float dx = abs(vUV.x - 0.5) * 2.0;
-        float crossA = 1.0 - smoothstep(0.6, 1.0, dx);
+        float dxJit = dx + (n1 - 0.5) * 0.16 + (n2 - 0.5) * 0.07;
+        float crossA = 1.0 - smoothstep(0.22, 1.0, dxJit);
 
-        float alpha = crossA * fade;
-        // Texture contribution: where the texel is opaque, lerp from
-        // the flat base colour toward the texture-tinted colour.
-        // Where the texel is transparent (between halo dots, etc.)
-        // the beam stays at baseColor. The procedural alpha keeps
-        // the stripe visible end-to-end either way.
-        vec3 col = mix(baseColor, baseColor * texel.rgb, texel.a);
-        // Premultiplied alpha — paired with alphaMode = 7 in the
-        // material (same convention as the build-beam shader).
-        gl_FragColor = vec4(col * alpha, alpha);
+        // Gentle density flicker on top, clamped so it never darkens.
+        float rough = mix(0.82, 1.0, n2);
+
+        // Authored texture (largebeam etc.) adds extra structure where it
+        // is opaque — additive only, so a dark texel can never subtract.
+        float tileCount = max(vLength / max(tileLength, 1.0), 1.0);
+        float scrollOffset = time * scrollRate / max(tileLength, 1.0);
+        vec4 texel = texture2D(beamTex, vec2(vUV.x, fract(vUV.y * tileCount - scrollOffset)));
+        float texAdd = texel.a * 0.35;
+
+        float intensity = crossA * fade * (rough + texAdd);
+
+        // PURE ADDITIVE output (paired with alphaMode = ONE_ONE in the
+        // material): a beam only ever ADDS light to the scene, so it can
+        // never darken the background — fixes the dark-band blend bug. The
+        // HDR baseColor (>1) lets the bloom pass blow the core to white.
+        gl_FragColor = vec4(baseColor * intensity, intensity);
     }
 `;
 

@@ -412,6 +412,12 @@ inline std::string SerializeOneWeaponDef(
     // LaserCannon / BeamLaser builders to size the shaft + core quads.
     b.add_float("thickness", wd.visuals.thickness);
     b.add_float("core_thickness", wd.visuals.corethickness);
+    // BeamLaser flare (camera-facing glow at the muzzle): edge size =
+    // thickness * laserflaresize, core = that * corethickness. And the
+    // per-Update colour decay that dims the beam over its TTL. Both drive
+    // CBeamLaserProjectile::Draw; needed for a faithful beam.
+    b.add_float("laser_flare_size", wd.visuals.laserflaresize);
+    b.add_float("beam_decay", wd.visuals.beamdecay);
     // Whether CLaserProjectile stops + contracts at max range instead
     // of fading out. Drives the post-impact stayTime path.
     b.add_bool("laser_hard_stop", wd.laserHardStop);

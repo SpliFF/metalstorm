@@ -436,6 +436,12 @@ export interface WeaponDefInfo {
     thickness: number;
     /** Inner-core width as a fraction of `thickness` (0..1). */
     coreThickness: number;
+    /** BeamLaser muzzle-flare size multiplier: flare edge =
+     *  `thickness * laserFlareSize` (`visuals.laserflaresize`). */
+    laserFlareSize: number;
+    /** BeamLaser per-Update colour decay (`visuals.beamdecay`); the beam
+     *  dims by this factor each sim tick over its TTL. */
+    beamDecay: number;
     /** LaserCannon: stop and contract at max-range instead of fading. */
     laserHardStop: boolean;
     /** Per-frame intensity falloff multiplier (non-hardstop lasers). */

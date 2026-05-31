@@ -228,10 +228,12 @@ export class LuaWidgetManager {
     /** Fired when a widget called Spring.SetActiveCommand and the API
      *  resolved it to a real cmdId (build cmdIds are negative). Main.ts
      *  wires this to InputManager — build commands enter ground placement
-     *  (or queue directly on a pure-factory selection). Non-build cmdIds
-     *  pass through but currently no widget hits that path through here:
-     *  move/stop/attack are all routed via Spring.GiveOrderToUnit. */
-    onSetActiveCommandRequest?: (cmdId: number, mods: { left: boolean; right: boolean; alt: boolean; ctrl: boolean; meta: boolean; shift: boolean }) => void;
+     *  (or queue directly on a pure-factory selection); positive cmdIds with
+     *  a world target arm a modal command resolved by the next world click.
+     *  `cmdType` is the Spring CMDTYPE_* constant (the host maps it to a
+     *  ground / unit / either target). Instant + state-toggle commands are
+     *  issued in the worker before this fires, so they don't arrive here. */
+    onSetActiveCommandRequest?: (cmdId: number, mods: { left: boolean; right: boolean; alt: boolean; ctrl: boolean; meta: boolean; shift: boolean }, cmdType: number) => void;
 
     /** Worker→main reply for a `defaultCommandTarget` dispatch. Carries
      *  the cmdId after widget DefaultCommand overrides ran — caller (main.ts)
@@ -1289,9 +1291,10 @@ export class LuaWidgetManager {
 
             case 'setActiveCommand': {
                 const cmdId = Number(msg.cmdId | 0);
+                const cmdType = Number(msg.cmdType | 0);
                 const mods = msg.mods as { left: boolean; right: boolean; alt: boolean; ctrl: boolean; meta: boolean; shift: boolean } | undefined;
                 if (!mods || cmdId === 0) break;
-                this.onSetActiveCommandRequest?.(cmdId, mods);
+                this.onSetActiveCommandRequest?.(cmdId, mods, cmdType);
                 break;
             }
 
@@ -1531,6 +1534,21 @@ export class LuaWidgetManager {
                 // mousemove. InputManager reads this via isCursorOverUI() to
                 // gate ground selection / orders on the next mousedown.
                 this.cursorOverUI = !!msg.above;
+                break;
+
+            case 'inputConsumed':
+                // Per-click authoritative answer from the worker's
+                // widgetHandler:MousePress. The mousemove-driven `cursorOverUI`
+                // flag lags the cursor by a postMessage round-trip and reads
+                // stale-false when a panel appears under a stationary cursor or
+                // a click beats the next mousemove. When the worker reports a
+                // widget actually consumed the press, latch `cursorOverUI` true
+                // so the matching pointerup's isCursorOverUI() check (in
+                // InputManager.onLeftUp) suppresses the ground deselect. The
+                // next real mousemove re-derives the true hover state.
+                if (msg.kind === 'mousepress' && msg.consumed) {
+                    this.cursorOverUI = true;
+                }
                 break;
 
             case 'minimapGeometry': {

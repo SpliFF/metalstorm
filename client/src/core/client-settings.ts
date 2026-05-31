@@ -230,6 +230,10 @@ export const PRESETS: Record<string, Record<string, SettingValue>> = {
         'gfx.fxaa':           false,
         'gfx.renderScale':    1.0,
         'gfx.anisotropy':     1,
+        'gfx.bloom':          false,
+        'gfx.particleQuality': 0,
+        'gfx.fxLights':       false,
+        'gfx.distortion':     false,
     },
     medium: {
         'gfx.shadowMapSize':  2048,
@@ -238,6 +242,10 @@ export const PRESETS: Record<string, Record<string, SettingValue>> = {
         'gfx.fxaa':           true,
         'gfx.renderScale':    1.0,
         'gfx.anisotropy':     4,
+        'gfx.bloom':          true,
+        'gfx.particleQuality': 1,
+        'gfx.fxLights':       true,
+        'gfx.distortion':     false,
     },
     high: {
         'gfx.shadowMapSize':  4096,
@@ -246,6 +254,10 @@ export const PRESETS: Record<string, Record<string, SettingValue>> = {
         'gfx.fxaa':           true,
         'gfx.renderScale':    1.0,
         'gfx.anisotropy':     8,
+        'gfx.bloom':          true,
+        'gfx.particleQuality': 2,
+        'gfx.fxLights':       true,
+        'gfx.distortion':     false,
     },
 };
 
@@ -271,6 +283,29 @@ const REGISTRY: SettingDef[] = [
       min: 0.5, max: 2.0, label: 'Render Scale', requiresRestart: true },
     { key: 'gfx.anisotropy', type: 'int', default: 4, scope: 'client',
       enum: [1, 2, 4, 8, 16], label: 'Anisotropic Filtering' },
+
+    // FX-quality knobs (PLAN-weapon-fx-gaps.md Phase G). These gate the
+    // expensive weapon/explosion effects so `low` runs on weak hardware
+    // / at MMO scale while `high` opens them up.
+    { key: 'gfx.bloom', type: 'bool', default: true, scope: 'client',
+      label: 'Bloom' },
+    // Particle density tier: 0=low, 1=medium, 2=high. Drives the CEG
+    // per-spawn particle-count + lifetime budget (setParticleBudget).
+    // requiresRestart because translation runs once per session at CEG
+    // ingest — see ceg-translator.ts setParticleBudget.
+    { key: 'gfx.particleQuality', type: 'int', default: 2, scope: 'client',
+      min: 0, max: 2, label: 'Particle Density', requiresRestart: true },
+    // Dynamic FX lighting (muzzle/explosion/projectile lights). Live-
+    // toggleable via FxLightPool.setEnabled.
+    { key: 'gfx.fxLights', type: 'bool', default: true, scope: 'client',
+      label: 'Dynamic FX Lights' },
+    // Screen-space distortion pass (heat-haze / cloak / shockwave warp).
+    // Phase D composite. DEFAULT OFF: it's experimental and its full-screen
+    // composite currently renders black when the sim is paused (the offset
+    // RTT/composite doesn't recover), which black-screened the whole game on
+    // pause. Off by default until that's fixed; the toggle stays in the panel.
+    { key: 'gfx.distortion', type: 'bool', default: false, scope: 'client',
+      label: 'Heat Distortion' },
 
     // Engine options a game's menu sets (PLAN-settings.md §4). Defaults
     // match Spring's so an unset key reads as "on/full".

@@ -60,13 +60,12 @@ import {
     Mesh,
     MeshBuilder,
     ShaderMaterial,
-    Matrix,
     Vector2,
     Vector3,
-    Quaternion,
     Texture,
     RawTexture,
     Engine,
+    type DepthRenderer,
 } from '@babylonjs/core';
 
 import { stampUrl } from '../config.js';
@@ -86,6 +85,12 @@ const DEFAULT_GRAVITY = 0;
 /// constant just to compute a delay).
 const SIM_HZ_RUNTIME = 30;
 
+/// Soft-particle fade distance in elmos (T3). A particle fragment fades
+/// to zero alpha as the opaque surface behind it comes within this range,
+/// killing the hard quad-intersection seam. ~24 elmos reads cleanly at
+/// RTS-camera height without visibly thinning mid-air puffs.
+const SOFT_PARTICLE_RANGE = 24;
+
 /// Name of the built-in fallback effect that fires when a CEG has
 /// `useDefaultExplosions = true`. Mirrors Spring's
 /// CStdExplosionGenerator chain — a ground flash + heat cloud is
@@ -101,6 +106,13 @@ const DEFAULT_EXPLOSION_NAME = '__default_explosion';
 /// `lifetime`. RGB stays constant for the particle's lifetime
 /// (Phase 5a — Phase 5c will add per-spawn color-over-life ramps).
 type RGBA = [number, number, number, number];
+
+// Per-particle orientation modes live in a dependency-free leaf so the
+// translator (and its unit tests) can share them without loading this
+// module's Babylon graph. Imported for local use + re-exported to
+// preserve this module's public API.
+import { ORIENT_BILLBOARD, ORIENT_GROUND, ORIENT_STRETCH } from './ceg-orient.js';
+export { ORIENT_BILLBOARD, ORIENT_GROUND, ORIENT_STRETCH };
 
 /// One spawn group inside an EffectDef. A single effect typically
 /// emits multiple groups (e.g. impact = flash + sparks + smoke).
@@ -182,6 +194,13 @@ export interface ParticleSpawn {
     animFrameStart?: number;
     animFrameCount?: number;
     animFps?: number;
+    /// Orientation mode (Phase T) — one of ORIENT_BILLBOARD (default) /
+    /// ORIENT_GROUND / ORIENT_STRETCH. Absent → billboard.
+    orient?: number;
+    /// Length-vs-width multiplier for ORIENT_STRETCH quads (the quad's
+    /// velocity-axis extent = size * stretch; the cross-axis stays
+    /// `size`). Ignored for the other modes. Default 1.
+    stretch?: number;
 }
 
 /// Scalar evaluator for a Spring CEG property (Phase 2). The closure
@@ -320,55 +339,40 @@ interface ParticleClass {
     /// sampling path degrades to identity in that case.
     atlasCols: number;
     atlasRows: number;
-    /// SoA particle data. Inactive slots have `lifetime[i] <= 0`.
-    pos: Float32Array;            // capacity * 3
-    vel: Float32Array;            // capacity * 3
-    age: Float32Array;            // capacity
-    lifetime: Float32Array;       // capacity, <=0 → free slot
-    sizeStart: Float32Array;      // capacity
-    sizeEnd: Float32Array;        // capacity
-    color: Float32Array;          // capacity * 4 (initial RGBA)
-    /// Per-particle end-of-life RGBA tint for the colour ramp. When
-    /// the spawn carries no `colorEnd` we copy `color` verbatim into
-    /// this slot so the per-frame lerp produces identity (and we
-    /// avoid branching in the hot per-particle buffer rebuild).
-    colorEnd: Float32Array;       // capacity * 4
-    gravity: Float32Array;        // capacity
-    rotation: Float32Array;       // capacity (rad)
-    rotationSpeed: Float32Array;  // capacity (rad/sec)
-    /// Per-particle atlas-animation parameters. `animFps[i] == 0`
-    /// means "single frame" — the per-frame frameIdx computation is
-    /// skipped and the particle samples `animFrameStart[i]` once.
-    animFrameStart: Float32Array; // capacity (sub-rect index)
-    animFrameCount: Float32Array; // capacity (frames to cycle through)
-    animFps: Float32Array;        // capacity (cycle rate, 0 = static)
-    /// Ring-buffer write cursor. Wraps mod capacity. Allocation is
-    /// "always overwrite" — the oldest live particle gets clobbered
-    /// when the pool is full. For class capacities sized above the
-    /// realistic worst-case live count, this never visibly clips.
+    /// Per-instance BIRTH state (Phase T2 — GPU integration). Written
+    /// once per particle at spawn, never touched again on the CPU; the
+    /// vertex shader integrates age/position/colour/orientation each
+    /// frame from these. Seven vec4 thin-instance attribute buffers,
+    /// `capacity` slots each. A free slot has `iPosLife[w] <= 0`
+    /// (lifetime ≤ 0) and is culled in the shader.
+    ///   iPosLife  = (birthPos.xyz, lifetime)
+    ///   iVelTime  = (birthVel.xyz, birthTime)
+    ///   iSize     = (sizeStart, sizeEnd, gravity, stretch)
+    ///   iRot      = (rotBase, rotSpeed, orient, animFps)
+    ///   iAnim     = (animFrameStart, animFrameCount, _, _)
+    ///   iColStart = colourStart RGBA
+    ///   iColEnd   = colourEnd RGBA
+    iPosLife: Float32Array;       // capacity * 4
+    iVelTime: Float32Array;       // capacity * 4
+    iSize: Float32Array;          // capacity * 4
+    iRot: Float32Array;           // capacity * 4
+    iAnim: Float32Array;          // capacity * 4
+    iColStart: Float32Array;      // capacity * 4
+    iColEnd: Float32Array;        // capacity * 4
+    /// Ring-buffer write cursor. Wraps mod capacity — oldest live
+    /// particle is clobbered when full (invisible at realistic sizes).
     nextSlot: number;
+    /// High-water mark of written slots; `thinInstanceCount`. Grows to
+    /// `capacity` once the ring has wrapped. Bounds the GPU upload +
+    /// vertex work to slots that have ever been used.
+    usedCount: number;
+    /// Set when a spawn wrote a slot since the last upload; tick()
+    /// re-uploads the instance buffers and clears it. Quiet frames (no
+    /// spawns) upload nothing — the per-frame cost is uniforms only.
+    dirty: boolean;
     /// GPU resources.
     mesh: Mesh;
     material: ShaderMaterial;
-    /// Persistent thin-instance upload buffers, reused across frames
-    /// so we don't allocate `Float32Array(live * 16)` + `(live * 4)`
-    /// every tick (which produced ~12 MB/s of GC churn at full
-    /// combat intensity once Phase 5c routed every ZK weapon's
-    /// cegTag through the runtime). Sized to `capacity` once at
-    /// class creation; the buffer-rebuild path slots only `live`
-    /// entries into the front and tells Babylon how many to draw
-    /// via `thinInstanceCount`. Babylon reuses the same GPU buffer
-    /// because the JS-side reference is stable.
-    matrixBuffer: Float32Array;
-    tintBuffer: Float32Array;
-    /// Per-instance sub-rect offset for atlas sampling. vec2 packing
-    /// (col_norm, row_norm) in [0, 1) — multiplied with `atlasDimsInv`
-    /// in the shader before adding to the unit-quad UV. Buffer is
-    /// allocated for every class even when the texture is single-
-    /// frame so the shader doesn't have to branch on atlas presence —
-    /// the default zero vec2 gives the top-left tile, which for a
-    /// 1×1 atlas covers the whole texture.
-    frameOffsetBuffer: Float32Array;
 }
 
 /// Default per-texture pool capacity. Phase 5a allocates pools lazily
@@ -378,14 +382,14 @@ interface ParticleClass {
 /// wraparound; the longest-lived puffs (smoke trails, multi-second
 /// fireballs) lap once or twice per peak engagement at this size,
 /// which is invisible at typical zoom.
-const DEFAULT_CLASS_CAPACITY = 2048;
+const DEFAULT_CLASS_CAPACITY = 4096;
 
 /// Hint table — per-texture-name capacity override for textures we
 /// know up front will be hot (heavy smoke trails, ground flashes).
 /// Unmapped names use DEFAULT_CLASS_CAPACITY. Sized empirically once
 /// content profiling lands; today the defaults are fine for ZK.
 const CAPACITY_HINTS: Record<string, number> = {
-    smoketrail: 4096,  // smoke is long-lived; bigger ring buffer for headroom
+    smoketrail: 8192,  // smoke is long-lived; bigger ring buffer for headroom
 };
 
 /// Pre-seeded fallback textures that the constructor materialises
@@ -468,14 +472,19 @@ export class CegRuntime {
     /// pathological CEG doesn't flood the console once per impact.
     private warnedOverflow = false;
     private warnedDepth = new Set<string>();
-    /// Reusable scratch — composed into per-particle billboard matrices
-    /// in buildBuffers. Allocated once per runtime to avoid GC churn
-    /// on per-tick rebuilds.
-    private tmpRight = new Vector3();
-    private tmpUp = new Vector3();
-    private tmpFwd = new Vector3();
-    private tmpQ = new Quaternion();
-    private tmpScale = new Vector3();
+    /// Runtime clock in seconds (= shader `uNow`). Accumulated in tick();
+    /// particles stamp their birthTime from it so the GPU sees age 0 on
+    /// the frame they spawn.
+    private nowS = 0;
+    /// Opaque-scene depth pre-pass for soft particles (T3). Lazily enabled
+    /// in tick() once a camera exists; its depth map is bound to every
+    /// class material. Phase D reuses the same pass.
+    private depthRenderer: DepthRenderer | null = null;
+    /// Reusable scratch for the per-frame uniform binds (no per-frame
+    /// Vector allocation).
+    private tmpCamPos = new Vector3();
+    private tmpNearFar = new Vector2();
+    private tmpScreen = new Vector2();
     /// True once `whenReady().then` has fired — all subsequent
     /// `spawn()` calls will look up textures synchronously through
     /// the resolver. Before this point, classes render untextured
@@ -689,7 +698,7 @@ export class CegRuntime {
             }
             for (let i = 0; i < n; i++) {
                 const slot = allocateSlot(cls);
-                writeParticle(cls, slot, sp, x, y, z, dx, dy, dz);
+                writeParticle(cls, slot, sp, x, y, z, dx, dy, dz, this.nowS);
             }
         }
     }
@@ -705,9 +714,13 @@ export class CegRuntime {
     ): void {
         if (gf.flags && contextFlags && (gf.flags & contextFlags) === 0) return;
 
-        // Ground flashes use the generic flare bitmap — Spring's
-        // CStandardGroundFlash is a textured ground-aligned quad we
-        // approximate as a billboarded flare at the impact point.
+        // Ground flashes use the generic flare bitmap. Spring's
+        // CStandardGroundFlash is a textured ground-aligned quad — we
+        // emit it with ORIENT_GROUND (Phase T) so it lies flat on the
+        // terrain at the impact point instead of facing the camera.
+        // (A flat quad doesn't conform to slopes the way the decal
+        // projector would, but it reads correctly at RTS-camera range
+        // and matches the scar pool's height-snap approach.)
         const cls = this.ensureClass('flare');
         if (!cls) return;
 
@@ -729,9 +742,11 @@ export class CegRuntime {
                 colorStart: [gf.colorR, gf.colorG, gf.colorB, gf.flashAlpha],
                 colorEnd:   [gf.colorR, gf.colorG, gf.colorB, 0],
                 rotationSpeedMax: 0,
+                orient: ORIENT_GROUND,
             };
             const slot = allocateSlot(cls);
-            writeParticle(cls, slot, flash, x, y + 0.5, z, 0, 1, 0);
+            // Small +y lift to avoid z-fighting with the terrain mesh.
+            writeParticle(cls, slot, flash, x, y + 1, z, 0, 1, 0, this.nowS);
         }
 
         // Inner circle — grows over the lifetime. circleAlpha == 0
@@ -753,9 +768,10 @@ export class CegRuntime {
                 colorStart: [gf.colorR, gf.colorG, gf.colorB, gf.circleAlpha],
                 colorEnd:   [gf.colorR, gf.colorG, gf.colorB, 0],
                 rotationSpeedMax: 0,
+                orient: ORIENT_GROUND,
             };
             const slot = allocateSlot(cls);
-            writeParticle(cls, slot, circle, x, y + 0.3, z, 0, 1, 0);
+            writeParticle(cls, slot, circle, x, y + 1, z, 0, 1, 0, this.nowS);
         }
     }
 
@@ -840,31 +856,66 @@ export class CegRuntime {
         }
     }
 
-    /// Advance every live particle by `dt` seconds, then rebuild thin-
-    /// instance buffers per class so the next render frame draws the
-    /// updated state. Single pass — particles that age past their
-    /// lifetime get marked free in the same loop that integrates
-    /// position, no separate sweep.
+    /// Advance the runtime clock, drain pending sub-CEGs, and feed each
+    /// class its per-frame uniforms. The particles themselves are
+    /// integrated entirely on the GPU (Phase T2) — the CPU only re-uploads
+    /// a class's birth-state buffers on frames where a spawn dirtied it.
     tick(dt: number): void {
         if (dt <= 0) return;
 
+        this.nowS += dt;
         this.drainPending();
 
         const cam = this.scene.activeCamera;
-        const camX = cam ? cam.position.x : 0;
-        const camY = cam ? cam.position.y : 0;
-        const camZ = cam ? cam.position.z : 0;
+        if (cam) this.tmpCamPos.copyFrom(cam.position);
+
+        // Lazily stand up the opaque-scene depth pre-pass for soft
+        // particles (T3) once a camera exists. storeNonLinearDepth=true →
+        // the map holds hardware depth, which the fragment linearises.
+        if (cam && !this.depthRenderer) {
+            this.depthRenderer = this.scene.enableDepthRenderer(cam, /*storeNonLinearDepth*/ true, false);
+        }
+        const depthMap = this.depthRenderer ? this.depthRenderer.getDepthMap() : null;
+        const engine = this.scene.getEngine();
+        this.tmpScreen.set(engine.getRenderWidth(), engine.getRenderHeight());
+        const near = cam ? cam.minZ : 1;
+        const far = cam ? cam.maxZ : 10000;
+        this.tmpNearFar.set(near, far);
+        const softRange = depthMap ? SOFT_PARTICLE_RANGE : 0;
 
         for (const cls of this.classes.values()) {
             // Lazy texture bind: classes created before the resolver
-            // settled stay un-textured until it does. The resolverReady
-            // gate avoids re-probing on every tick once we're past load.
+            // settled stay un-textured until it does.
             if (this.resolverReady && !cls.textureBound) {
                 this.tryBindTexture(cls);
             }
-            stepClass(cls, dt);
-            buildClassBuffers(cls, camX, camY, camZ,
-                this.tmpRight, this.tmpUp, this.tmpFwd, this.tmpQ, this.tmpScale);
+
+            // Re-upload birth-state buffers only when a spawn dirtied the
+            // class since the last frame; quiet frames upload nothing.
+            if (cls.dirty) {
+                const n4 = cls.usedCount * 4;
+                cls.mesh.thinInstanceSetBuffer('iPosLife',  cls.iPosLife.subarray(0, n4),  4, false);
+                cls.mesh.thinInstanceSetBuffer('iVelTime',  cls.iVelTime.subarray(0, n4),  4, false);
+                cls.mesh.thinInstanceSetBuffer('iSize',     cls.iSize.subarray(0, n4),     4, false);
+                cls.mesh.thinInstanceSetBuffer('iRot',      cls.iRot.subarray(0, n4),      4, false);
+                cls.mesh.thinInstanceSetBuffer('iAnim',     cls.iAnim.subarray(0, n4),     4, false);
+                cls.mesh.thinInstanceSetBuffer('iColStart', cls.iColStart.subarray(0, n4), 4, false);
+                cls.mesh.thinInstanceSetBuffer('iColEnd',   cls.iColEnd.subarray(0, n4),   4, false);
+                cls.mesh.thinInstanceCount = cls.usedCount;
+                cls.dirty = false;
+            }
+
+            // Per-frame uniforms: the clock + camera basis the vertex
+            // shader integrates from, plus the soft-particle depth inputs.
+            const mat = cls.material;
+            mat.setFloat('uNow', this.nowS);
+            mat.setVector3('camPos', this.tmpCamPos);
+            mat.setFloat('softRange', softRange);
+            if (depthMap) {
+                mat.setTexture('depthTex', depthMap);
+                mat.setVector2('camNearFar', this.tmpNearFar);
+                mat.setVector2('screenSize', this.tmpScreen);
+            }
         }
     }
 
@@ -872,9 +923,14 @@ export class CegRuntime {
     /// debug overlay; not part of the per-frame hot path.
     get liveCount(): number {
         let n = 0;
+        const now = this.nowS;
         for (const cls of this.classes.values()) {
-            for (let i = 0; i < cls.capacity; i++) {
-                if (cls.lifetime[i] > 0) n++;
+            for (let i = 0; i < cls.usedCount; i++) {
+                const b = i * 4;
+                const lifetime = cls.iPosLife[b + 3];
+                if (lifetime <= 0) continue;
+                const age = now - cls.iVelTime[b + 3];
+                if (age >= 0 && age < lifetime) n++;
             }
         }
         return n;
@@ -888,6 +944,10 @@ export class CegRuntime {
         this.classes.clear();
         this.effects.clear();
         this.fallbackWhiteTex.dispose();
+        if (this.depthRenderer) {
+            this.scene.disableDepthRenderer();
+            this.depthRenderer = null;
+        }
         this.pending.length = 0;
         this.warnedDepth.clear();
         this.warnedOverflow = false;
@@ -946,9 +1006,13 @@ export class CegRuntime {
 
         const mat = new ShaderMaterial(`cegParticleMat_${name}`, this.scene,
             'cegParticle', {
-                attributes: ['position', 'uv', 'tint', 'frameOffset'],
-                uniforms: ['world', 'viewProjection', 'atlasDimsInv'],
-                samplers: ['particleTex'],
+                attributes: ['position', 'uv',
+                    'iPosLife', 'iVelTime', 'iSize', 'iRot', 'iAnim',
+                    'iColStart', 'iColEnd'],
+                uniforms: ['world', 'viewProjection', 'atlasDimsInv',
+                    'uNow', 'camPos', 'atlasCols', 'atlasRows',
+                    'camNearFar', 'screenSize', 'softRange'],
+                samplers: ['particleTex', 'depthTex'],
                 defines: ['#define INSTANCES', '#define THIN_INSTANCES'],
                 // Without this `alphaMode = 7` below is silently ignored —
                 // mesh renders in the opaque pass with blending off and
@@ -960,59 +1024,65 @@ export class CegRuntime {
         mat.alphaMode = 7;
         mat.backFaceCulling = false;
         mat.disableDepthWrite = true;
-        // Per-class atlas dims as inverse so the fragment shader can
-        // multiply rather than divide. (1/1, 1/1) for non-atlas
-        // textures degrades the sub-rect path to identity sampling.
-        mat.setVector2('atlasDimsInv',
-            new Vector2(1 / atlas.cols, 1 / atlas.rows));
+        // Per-class atlas dims: inverse for the fragment sub-rect scale,
+        // and cols/rows for the vertex-shader frame→tile math. (1,1) for
+        // non-atlas textures degrades the path to identity.
+        mat.setVector2('atlasDimsInv', new Vector2(1 / atlas.cols, 1 / atlas.rows));
+        mat.setFloat('atlasCols', atlas.cols);
+        mat.setFloat('atlasRows', atlas.rows);
+        // Soft-particle uniforms start disabled (softRange 0); tick()
+        // feeds the real depth target + range once the camera exists.
+        mat.setFloat('softRange', 0);
+        mat.setTexture('depthTex', this.fallbackWhiteTex);
 
         const mesh = MeshBuilder.CreatePlane(`cegParticle_${name}`,
             { width: 1, height: 1, sideOrientation: Mesh.DOUBLESIDE }, this.scene);
         mesh.material = mat;
         mesh.isPickable = false;
-        mesh.isVisible = false;
+        mesh.isVisible = true;
         mesh.thinInstanceEnablePicking = false;
-        // Particles are camera-facing billboards; Babylon's frustum
-        // cull on a unit-quad bounding box would clip them as the
-        // camera moves. alwaysSelectAsActiveMesh skips that check.
+        // The quad's world transform is computed per-vertex from the
+        // birth attributes, so Babylon's unit-quad bounding box says
+        // nothing about where particles actually are — skip frustum cull.
         mesh.alwaysSelectAsActiveMesh = true;
         mesh.alphaIndex = 1000;
-        // Per-instance tint (R, G, B, A) + sub-rect offset (col_norm,
-        // row_norm). Registered up front so the first buildBuffers
-        // can populate the buffers without re-registering.
-        mesh.thinInstanceRegisterAttribute('tint', 4);
-        mesh.thinInstanceRegisterAttribute('frameOffset', 2);
 
         const cls: ParticleClass = {
             textureName: name, capacity, textureBound: false,
             atlasCols: atlas.cols, atlasRows: atlas.rows,
-            pos: new Float32Array(capacity * 3),
-            vel: new Float32Array(capacity * 3),
-            age: new Float32Array(capacity),
-            lifetime: new Float32Array(capacity),
-            sizeStart: new Float32Array(capacity),
-            sizeEnd: new Float32Array(capacity),
-            color: new Float32Array(capacity * 4),
-            colorEnd: new Float32Array(capacity * 4),
-            gravity: new Float32Array(capacity),
-            rotation: new Float32Array(capacity),
-            rotationSpeed: new Float32Array(capacity),
-            animFrameStart: new Float32Array(capacity),
-            animFrameCount: new Float32Array(capacity),
-            animFps: new Float32Array(capacity),
-            nextSlot: 0,
+            iPosLife:  new Float32Array(capacity * 4),
+            iVelTime:  new Float32Array(capacity * 4),
+            iSize:     new Float32Array(capacity * 4),
+            iRot:      new Float32Array(capacity * 4),
+            iAnim:     new Float32Array(capacity * 4),
+            iColStart: new Float32Array(capacity * 4),
+            iColEnd:   new Float32Array(capacity * 4),
+            nextSlot: 0, usedCount: 0, dirty: false,
             mesh, material: mat,
-            // Sized to capacity so a worst-case full pool never has
-            // to reallocate. Each entry is mat4 (16 floats) + RGBA
-            // tint (4 floats) + frameOffset (2 floats) ≈ 22 floats
-            // per slot. For a 4096-entry pool that's ~360 KB per
-            // class; well below GC pressure thresholds even with
-            // dozens of unique textures.
-            matrixBuffer: new Float32Array(capacity * 16),
-            tintBuffer: new Float32Array(capacity * 4),
-            frameOffsetBuffer: new Float32Array(capacity * 2),
         };
         this.classes.set(name, cls);
+
+        // Static identity matrix buffer drives Babylon's thin-instance
+        // draw path; written once, never per-frame. The shader applies it
+        // as a no-op and computes the real transform from birth state.
+        const identity = new Float32Array(capacity * 16);
+        for (let i = 0; i < capacity; i++) {
+            identity[i * 16 + 0] = 1;
+            identity[i * 16 + 5] = 1;
+            identity[i * 16 + 10] = 1;
+            identity[i * 16 + 15] = 1;
+        }
+        mesh.thinInstanceSetBuffer('matrix', identity, 16, /*staticBuffer*/ true);
+        // Register + seed the birth-state attribute buffers (zeroed →
+        // every slot free → culled in the shader until spawns write them).
+        mesh.thinInstanceSetBuffer('iPosLife',  cls.iPosLife,  4, false);
+        mesh.thinInstanceSetBuffer('iVelTime',  cls.iVelTime,  4, false);
+        mesh.thinInstanceSetBuffer('iSize',     cls.iSize,     4, false);
+        mesh.thinInstanceSetBuffer('iRot',      cls.iRot,      4, false);
+        mesh.thinInstanceSetBuffer('iAnim',     cls.iAnim,     4, false);
+        mesh.thinInstanceSetBuffer('iColStart', cls.iColStart, 4, false);
+        mesh.thinInstanceSetBuffer('iColEnd',   cls.iColEnd,   4, false);
+        mesh.thinInstanceCount = 0;
 
         // Bind the shared 1×1 white fallback so the shader samples
         // (1,1,1,1) for unresolved classes — the per-instance tint
@@ -1049,260 +1119,80 @@ export class CegRuntime {
 function allocateSlot(cls: ParticleClass): number {
     const slot = cls.nextSlot;
     cls.nextSlot = (slot + 1) % cls.capacity;
+    if (slot + 1 > cls.usedCount) cls.usedCount = slot + 1;
+    cls.dirty = true;
     return slot;
 }
 
+/// Pack one particle's BIRTH state into the class's seven instance
+/// buffers at `slot`. Stamped once; the vertex shader does everything
+/// from here. `nowS` is the runtime clock (= shader `uNow`), so the
+/// shader sees age 0 on the frame the particle is born.
 function writeParticle(
     cls: ParticleClass, slot: number,
     sp: ParticleSpawn,
     x: number, y: number, z: number,
     dx: number, dy: number, dz: number,
+    nowS: number,
 ): void {
-    const p3 = slot * 3;
-    cls.pos[p3 + 0] = x;
-    cls.pos[p3 + 1] = y;
-    cls.pos[p3 + 2] = z;
+    const b = slot * 4;
 
     const r1 = (Math.random() - 0.5) * 2;
     const r2 = (Math.random() - 0.5) * 2;
     const r3 = (Math.random() - 0.5) * 2;
-    cls.vel[p3 + 0] = sp.velocityBase[0]
-        + r1 * sp.velocitySpread + dx * sp.velocityScale;
-    cls.vel[p3 + 1] = sp.velocityBase[1]
-        + r2 * sp.velocitySpread + dy * sp.velocityScale;
-    cls.vel[p3 + 2] = sp.velocityBase[2]
-        + r3 * sp.velocitySpread + dz * sp.velocityScale;
+    const vx = sp.velocityBase[0] + r1 * sp.velocitySpread + dx * sp.velocityScale;
+    const vy = sp.velocityBase[1] + r2 * sp.velocitySpread + dy * sp.velocityScale;
+    const vz = sp.velocityBase[2] + r3 * sp.velocitySpread + dz * sp.velocityScale;
 
-    cls.lifetime[slot] = sp.lifetimeMin
+    const lifetime = sp.lifetimeMin
         + Math.random() * (sp.lifetimeMax - sp.lifetimeMin);
-    cls.age[slot] = 0;
-    cls.sizeStart[slot] = sp.sizeStart;
-    cls.sizeEnd[slot] = sp.sizeEnd;
 
-    const c4 = slot * 4;
-    cls.color[c4 + 0] = sp.colorStart[0];
-    cls.color[c4 + 1] = sp.colorStart[1];
-    cls.color[c4 + 2] = sp.colorStart[2];
-    cls.color[c4 + 3] = sp.colorStart[3];
-    // Spawn carries an end-of-life RGBA when the source CEG had a
-    // multi-keyframe colormap; otherwise the per-frame lerp degrades
-    // to identity by copying start into end.
-    const ce = sp.colorEnd ?? sp.colorStart;
-    cls.colorEnd[c4 + 0] = ce[0];
-    cls.colorEnd[c4 + 1] = ce[1];
-    cls.colorEnd[c4 + 2] = ce[2];
-    cls.colorEnd[c4 + 3] = ce[3];
-
-    cls.gravity[slot] = sp.gravity;
-    cls.rotation[slot] = Math.random() * Math.PI * 2;
-    cls.rotationSpeed[slot] = (Math.random() - 0.5) * 2 * sp.rotationSpeedMax;
-
-    // Atlas animation per-particle state. The translator stamps
-    // animFrameCount / animFps on spawns whose texture name carries a
-    // `_NxM` suffix (or that authored explicit `animparams`). When the
-    // spawn is silent we fall back to the class's natural frame count:
-    // single-frame textures stay at (start=0, count=1, fps=0) → static
-    // sample of the top-left tile, while undeclared atlas textures
-    // animate exactly once over the particle's lifetime.
+    // Atlas animation. Single-frame textures → fps 0 (static); undeclared
+    // atlas textures default to one full cycle over the lifetime.
     const totalFrames = cls.atlasCols * cls.atlasRows;
-    cls.animFrameStart[slot] = sp.animFrameStart ?? 0;
-    if (sp.animFrameCount !== undefined) {
-        cls.animFrameCount[slot] = sp.animFrameCount;
-    } else {
-        cls.animFrameCount[slot] = totalFrames;
-    }
-    if (sp.animFps !== undefined) {
-        cls.animFps[slot] = sp.animFps;
-    } else if (totalFrames > 1) {
-        // No authored animparams: default to one full cycle over the
-        // particle's actual lifetime. Sampled here rather than in
-        // buildBuffers so the rate stays stable across the particle's
-        // life even if dt jitters between frames.
-        const lifeS = cls.lifetime[slot];
-        cls.animFps[slot] = lifeS > 0 ? totalFrames / lifeS : 0;
-    } else {
-        cls.animFps[slot] = 0;
-    }
-}
+    const animFrameStart = sp.animFrameStart ?? 0;
+    const animFrameCount = sp.animFrameCount ?? totalFrames;
+    let animFps: number;
+    if (sp.animFps !== undefined) animFps = sp.animFps;
+    else if (totalFrames > 1) animFps = lifetime > 0 ? totalFrames / lifetime : 0;
+    else animFps = 0;
 
-// ── Per-tick CPU integration ────────────────────────────────────────────────
+    const ce = sp.colorEnd ?? sp.colorStart;
 
-function stepClass(cls: ParticleClass, dt: number): void {
-    const cap = cls.capacity;
-    const pos = cls.pos, vel = cls.vel;
-    const age = cls.age, life = cls.lifetime;
-    const grav = cls.gravity, rot = cls.rotation, rotSpd = cls.rotationSpeed;
-    for (let i = 0; i < cap; i++) {
-        const lt = life[i];
-        if (lt <= 0) continue;
-        const newAge = age[i] + dt;
-        if (newAge >= lt) {
-            life[i] = -1;
-            continue;
-        }
-        age[i] = newAge;
-        const p3 = i * 3;
-        pos[p3 + 0] += vel[p3 + 0] * dt;
-        pos[p3 + 1] += vel[p3 + 1] * dt;
-        pos[p3 + 2] += vel[p3 + 2] * dt;
-        // Gravity pulls down regardless of sign convention; matches the
-        // weapon-projectile integration in projectile-renderer.tick().
-        vel[p3 + 1] -= grav[i] * dt;
-        rot[i] += rotSpd[i] * dt;
-    }
-}
+    cls.iPosLife[b]     = x;
+    cls.iPosLife[b + 1] = y;
+    cls.iPosLife[b + 2] = z;
+    cls.iPosLife[b + 3] = lifetime;
 
-// ── Per-frame thin-instance buffer rebuild ──────────────────────────────────
+    cls.iVelTime[b]     = vx;
+    cls.iVelTime[b + 1] = vy;
+    cls.iVelTime[b + 2] = vz;
+    cls.iVelTime[b + 3] = nowS;
 
-function buildClassBuffers(
-    cls: ParticleClass,
-    camX: number, camY: number, camZ: number,
-    tmpRight: Vector3, tmpUp: Vector3, tmpFwd: Vector3,
-    tmpQ: Quaternion, tmpScale: Vector3,
-): void {
-    // Pass 1: count live particles. Skipping inactive slots keeps the
-    // GPU upload proportional to visible count rather than capacity.
-    const cap = cls.capacity;
-    const life = cls.lifetime;
-    let live = 0;
-    for (let i = 0; i < cap; i++) {
-        if (life[i] > 0) live++;
-    }
+    cls.iSize[b]     = sp.sizeStart;
+    cls.iSize[b + 1] = sp.sizeEnd;
+    cls.iSize[b + 2] = sp.gravity;
+    cls.iSize[b + 3] = sp.stretch ?? 1;
 
-    if (live === 0) {
-        cls.mesh.isVisible = false;
-        cls.mesh.thinInstanceCount = 0;
-        return;
-    }
+    cls.iRot[b]     = Math.random() * Math.PI * 2;             // rotBase
+    cls.iRot[b + 1] = (Math.random() - 0.5) * 2 * sp.rotationSpeedMax; // rotSpeed
+    cls.iRot[b + 2] = sp.orient ?? ORIENT_BILLBOARD;
+    cls.iRot[b + 3] = animFps;
 
-    // Reuse the persistent per-class buffers — see ParticleClass
-    // comment. Reallocating per frame produced multi-MB/sec of GC
-    // churn once Phase 5c started routing every weapon's cegTag
-    // through the pools; the symptom was the browser tab going
-    // unresponsive after a minute of combat.
-    const matrices = cls.matrixBuffer;
-    const tints = cls.tintBuffer;
-    const frameOffsets = cls.frameOffsetBuffer;
+    cls.iAnim[b]     = animFrameStart;
+    cls.iAnim[b + 1] = animFrameCount;
+    cls.iAnim[b + 2] = 0;
+    cls.iAnim[b + 3] = 0;
 
-    const pos = cls.pos;
-    const age = cls.age;
-    const sizeStart = cls.sizeStart, sizeEnd = cls.sizeEnd;
-    const color = cls.color;
-    const colorEnd = cls.colorEnd;
-    const rot = cls.rotation;
-    const animFps = cls.animFps;
-    const animFrameStart = cls.animFrameStart;
-    const animFrameCount = cls.animFrameCount;
-    const atlasCols = cls.atlasCols;
-    const atlasRows = cls.atlasRows;
+    cls.iColStart[b]     = sp.colorStart[0];
+    cls.iColStart[b + 1] = sp.colorStart[1];
+    cls.iColStart[b + 2] = sp.colorStart[2];
+    cls.iColStart[b + 3] = sp.colorStart[3];
 
-    let dst = 0;
-    for (let i = 0; i < cap; i++) {
-        const lt = life[i];
-        if (lt <= 0) continue;
-        const t = age[i] / lt; // 0 at birth, 1 at death
-        const size = sizeStart[i] + (sizeEnd[i] - sizeStart[i]) * t;
-        const fade = 1 - t;
-
-        const p3 = i * 3;
-        composeBillboardMatrix(matrices, dst * 16,
-            pos[p3 + 0], pos[p3 + 1], pos[p3 + 2],
-            camX, camY, camZ, size, rot[i],
-            tmpRight, tmpUp, tmpFwd, tmpQ, tmpScale);
-
-        // Per-frame colour-ramp lerp (Phase 3). Spawns without a
-        // colorEnd see the SoA slot pre-filled with colorStart, so
-        // this lerp degrades to identity at zero branch cost. Alpha
-        // is multiplied by the lifetime fade so authored "constant
-        // alpha" ramps still tail off cleanly.
-        const c4 = i * 4;
-        const ds = dst * 4;
-        const r0 = color[c4 + 0], r1 = colorEnd[c4 + 0];
-        const g0 = color[c4 + 1], g1 = colorEnd[c4 + 1];
-        const b0 = color[c4 + 2], b1 = colorEnd[c4 + 2];
-        const a0 = color[c4 + 3], a1 = colorEnd[c4 + 3];
-        tints[ds + 0] = r0 + (r1 - r0) * t;
-        tints[ds + 1] = g0 + (g1 - g0) * t;
-        tints[ds + 2] = b0 + (b1 - b0) * t;
-        tints[ds + 3] = (a0 + (a1 - a0) * t) * fade;
-
-        // Atlas sub-rect offset (Phase 5b). For single-frame textures
-        // animFps[i] is 0 and the offset stays at (0, 0) → top-left
-        // tile, which for a 1×1 atlas is the whole texture. For
-        // multi-frame atlas textures we step through frames at the
-        // authored (or lifetime-derived) rate, wrapping mod count so
-        // long-lived particles cycle.
-        const fos = dst * 2;
-        const fps = animFps[i];
-        if (fps > 0) {
-            const frameIdx = (Math.floor(age[i] * fps) % animFrameCount[i])
-                + animFrameStart[i];
-            const col = frameIdx % atlasCols;
-            const row = Math.floor(frameIdx / atlasCols) % atlasRows;
-            frameOffsets[fos + 0] = col / atlasCols;
-            frameOffsets[fos + 1] = row / atlasRows;
-        } else {
-            // Static texture (or 1×1 atlas): hold on the start frame.
-            // For non-atlas textures animFrameStart is 0 so we end up
-            // sampling the whole quad. For 1×1 atlases this is the
-            // identity path; for genuine atlases with animFps=0 it
-            // freezes on whatever frame the author specified.
-            const frameIdx = animFrameStart[i];
-            const col = frameIdx % atlasCols;
-            const row = Math.floor(frameIdx / atlasCols) % atlasRows;
-            frameOffsets[fos + 0] = col / atlasCols;
-            frameOffsets[fos + 1] = row / atlasRows;
-        }
-        dst++;
-    }
-
-    cls.mesh.isVisible = true;
-    cls.mesh.thinInstanceSetBuffer('matrix', matrices, 16, false);
-    cls.mesh.thinInstanceSetBuffer('tint', tints, 4, false);
-    cls.mesh.thinInstanceSetBuffer('frameOffset', frameOffsets, 2, false);
-    cls.mesh.thinInstanceCount = live;
-}
-
-/// Camera-facing billboard matrix at world (px,py,pz), scaled to `size`,
-/// with `rotRad` rotation applied around the view axis so individual
-/// puffs in a smoke cloud read as distinct rather than identical.
-/// Mirrors the orthonormal-basis trick the projectile renderer uses for
-/// its sprite billboards; rotation around forward is the only addition.
-function composeBillboardMatrix(
-    out: Float32Array, off: number,
-    px: number, py: number, pz: number,
-    camX: number, camY: number, camZ: number,
-    size: number, rotRad: number,
-    tmpRight: Vector3, tmpUp: Vector3, tmpFwd: Vector3,
-    tmpQ: Quaternion, tmpScale: Vector3,
-): void {
-    let fx = camX - px, fy = camY - py, fz = camZ - pz;
-    let flen = Math.hypot(fx, fy, fz);
-    if (flen < 1e-3) { fx = 0; fy = 0; fz = 1; flen = 1; }
-    fx /= flen; fy /= flen; fz /= flen;
-    let rx = fz, ry = 0, rz = -fx;
-    let rlen = Math.hypot(rx, ry, rz);
-    if (rlen < 1e-3) { rx = 1; ry = 0; rz = 0; rlen = 1; }
-    rx /= rlen; rz /= rlen;
-    const ux = fy * rz - fz * ry;
-    const uy = fz * rx - fx * rz;
-    const uz = fx * ry - fy * rx;
-    // Rotate the camera-plane basis around the view axis. Keeps the
-    // basis orthonormal so the subsequent quaternion build is valid.
-    const c = Math.cos(rotRad), s = Math.sin(rotRad);
-    const rrX = rx * c + ux * s;
-    const rrY = ry * c + uy * s;
-    const rrZ = rz * c + uz * s;
-    const ruX = ux * c - rx * s;
-    const ruY = uy * c - ry * s;
-    const ruZ = uz * c - rz * s;
-    tmpRight.set(rrX, rrY, rrZ);
-    tmpUp.set(ruX, ruY, ruZ);
-    tmpFwd.set(fx, fy, fz);
-    Quaternion.RotationQuaternionFromAxisToRef(tmpRight, tmpUp, tmpFwd, tmpQ);
-    tmpScale.set(size, size, size);
-    const m = Matrix.Compose(tmpScale, tmpQ, new Vector3(px, py, pz));
-    m.copyToArray(out, off);
+    cls.iColEnd[b]     = ce[0];
+    cls.iColEnd[b + 1] = ce[1];
+    cls.iColEnd[b + 2] = ce[2];
+    cls.iColEnd[b + 3] = ce[3];
 }
 
 // ── Built-in effect library ────────────────────────────────────────────────

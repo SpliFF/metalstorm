@@ -433,6 +433,42 @@ function applyOutsideBrackets(src: string, transform: (chunk: string) => string)
  * tracking; the macro form gets us the same behaviour with a single
  * line edit.
  */
+/**
+ * Collect the names of declared `float` *scalar* variables (not vec/mat,
+ * not arrays). Used by int→float rule 4d to safely promote bare int
+ * literals compared/assigned to a known float — without that gate the
+ * rule can't tell `float x; x = 1;` (promote) from `int i; i = 1;`
+ * (must not). Comments are stripped first so a `// float foo` note can't
+ * register a phantom name.
+ */
+function collectFloatScalarVars(src: string): Set<string> {
+    const clean = src
+        .replace(/\/\*[\s\S]*?\*\//g, ' ')
+        .replace(/\/\/[^\n]*/g, ' ');
+    const names = new Set<string>();
+    // `float a, b = 1.0, c = getX(p);` — declarator list up to `;`.
+    // Parens are allowed (initializers call functions); braces are not, so
+    // a function definition `float foo(args) { ... }` never matches (it has
+    // no `;` before its `{`). `float[N](...)` constructors don't match
+    // either (no whitespace after `float`).
+    const re = /\bfloat\s+([^;{}]+);/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(clean)) !== null) {
+        // Flatten parenthesised groups so call-argument commas don't split
+        // into phantom declarators (`mix(a, b)` must not register `b`).
+        let decl = m[1];
+        let prev: string;
+        do { prev = decl; decl = decl.replace(/\([^()]*\)/g, ''); } while (decl !== prev);
+        for (const part of decl.split(',')) {
+            const t = part.trim();
+            if (/^[A-Za-z_]\w*\s*\[/.test(t)) continue;   // array → keep int subscripts
+            const id = t.match(/^([A-Za-z_]\w*)/);
+            if (id) names.add(id[1]);
+        }
+    }
+    return names;
+}
+
 function rewriteFileScopeNonConstInit(src: string): string {
     const lines = src.split('\n');
     const out: string[] = [];
@@ -803,6 +839,14 @@ export function translateGLSL(src: string, stage: GlslStage, opts: TranslateOpti
         // boundaries never match the index digits embedded inside it.
         return `__ppmask_${ppDirectiveLines.length - 1}__`;
     });
+    // Names of declared `float` scalars. Lets rules 4b/4c reach the case
+    // they deliberately avoid for safety: a *bare* float variable compared
+    // or assigned a bare int literal (`if (intensity > 1) intensity = 1;`
+    // in ZK's colourblind shader). We can promote those iff we *know* the
+    // LHS is float — promoting an `int` var (`int i; i = 1;`) would break
+    // it. Type-tracking only float scalars keeps the rule both effective
+    // and safe (int / vec / mat names are excluded).
+    const floatVars = collectFloatScalarVars(s);
     s = applyOutsideBrackets(s, (chunk) => {
         let c = chunk;
 
@@ -890,6 +934,17 @@ export function translateGLSL(src: string, stage: GlslStage, opts: TranslateOpti
                 '$1$2.0$3',
             );
         }).join('\n');
+
+        // 4d. Known float scalar compared or assigned a bare int literal:
+        //    `intensity > 1` / `intensity = 1` → `... 1.0`. Gated on the
+        //    `floatVars` symbol table so we never promote an int variable.
+        //    Covers both directions rules 4b/4c skip (plain identifier LHS,
+        //    bare assignment to a pre-declared var). `.member` LHS is left
+        //    to rule 4b (the look-behind rejects it).
+        c = c.replace(
+            /(?<![\w.])([A-Za-z_]\w*)(\s*(?:>=|<=|==|!=|>|<|=)\s*)(-?\d+)(?![\w.\]])/g,
+            (whole, name, op, num) => floatVars.has(name) ? `${name}${op}${num}.0` : whole,
+        );
 
         return c;
     });
