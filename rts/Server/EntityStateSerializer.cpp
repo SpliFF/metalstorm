@@ -27,7 +27,7 @@ static void Write(std::vector<uint8_t>& buf, size_t& offset, T value) {
     offset += sizeof(T);
 }
 
-std::vector<uint8_t> SerializeAllUnits(uint16_t fieldMask) {
+std::vector<uint8_t> SerializeAllUnits(uint16_t fieldMask, uint32_t baseFrame) {
     const auto& activeUnits = unitHandler.GetActiveUnits();
 
     std::vector<CUnit*> units;
@@ -37,7 +37,7 @@ std::vector<uint8_t> SerializeAllUnits(uint16_t fieldMask) {
             units.push_back(u);
     }
 
-    return SerializeUnits(units, fieldMask, /*viewerAllyTeam*/ -1);
+    return SerializeUnits(units, fieldMask, /*viewerAllyTeam*/ -1, baseFrame);
 }
 
 float3 GetViewedPos(const CUnit* u, int viewerAllyTeam) {
@@ -62,7 +62,8 @@ float3 GetViewedPos(const CUnit* u, int viewerAllyTeam) {
 std::vector<uint8_t> SerializeUnits(
     const std::vector<CUnit*>& units,
     uint16_t fieldMask,
-    int viewerAllyTeam)
+    int viewerAllyTeam,
+    uint32_t baseFrame)
 {
     const uint16_t count = static_cast<uint16_t>(units.size());
 
@@ -76,7 +77,7 @@ std::vector<uint8_t> SerializeUnits(
     }
 
     // Calculate buffer size
-    size_t size = 4; // header
+    size_t size = 8; // header: u32 base_frame + u16 count + u16 field_mask
     if (fieldMask & FIELD_ENTITY_IDS)  size += count * sizeof(uint32_t);
     if (fieldMask & FIELD_POSITION_X)  size += count * sizeof(float);
     if (fieldMask & FIELD_POSITION_Y)  size += count * sizeof(float);
@@ -94,7 +95,9 @@ std::vector<uint8_t> SerializeUnits(
     std::vector<uint8_t> buf(size);
     size_t offset = 0;
 
-    // Header
+    // Header — base_frame first (matches PieceStateSerializer's frame-first
+    // convention), then count + field_mask.
+    Write(buf, offset, baseFrame);
     Write(buf, offset, count);
     Write(buf, offset, fieldMask);
 

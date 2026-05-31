@@ -997,7 +997,7 @@ export class Connection {
         };
         stateChannel.onmessage = (e) => {
             if (e.data instanceof ArrayBuffer) {
-                this.handleBinaryMessage(new Uint8Array(e.data));
+                this.receiveStateFrame(new Uint8Array(e.data));
             }
         };
 
@@ -1331,6 +1331,56 @@ export class Connection {
      *  would otherwise stream and pumps them through here. */
     public ingestFramedMessage(data: Uint8Array): void {
         this.handleBinaryMessage(data);
+    }
+
+    /**
+     * Artificial-latency injection for the unreliable state channel
+     * (PLAN-latency.md L0 — "THE validation tool for the whole stage").
+     * Reproduces intercontinental conditions on localhost so every L0/L1/L2
+     * mitigation can be A/B'd against "does it still look right at 200 ms ±
+     * jitter, 2 % loss?". Applied ONLY to the state channel (0x02/0x03 entity
+     * state etc.) — the reliable control channel is left untouched, matching
+     * reality (TCP-like reliability vs. lossy datagrams). Per-packet random
+     * jitter naturally produces reordering; the PresentationClock's base_frame
+     * sequence tracking detects the reorder/loss. */
+    private netSim = { enabled: false, delayMs: 0, jitterMs: 0, lossProb: 0 };
+
+    /** Configure (or disable) artificial latency on the state channel.
+     *  `{ delayMs, jitterMs, lossProb }` — lossProb in [0,1]. Enabled
+     *  whenever delay/jitter/loss is non-zero. */
+    setNetSim(cfg: { delayMs?: number; jitterMs?: number; lossProb?: number }): void {
+        if (cfg.delayMs != null) this.netSim.delayMs = Math.max(0, cfg.delayMs);
+        if (cfg.jitterMs != null) this.netSim.jitterMs = Math.max(0, cfg.jitterMs);
+        if (cfg.lossProb != null) this.netSim.lossProb = Math.min(1, Math.max(0, cfg.lossProb));
+        this.netSim.enabled =
+            this.netSim.delayMs > 0 || this.netSim.jitterMs > 0 || this.netSim.lossProb > 0;
+        console.log(`[netsim] ${this.netSim.enabled ? 'ON' : 'off'} delay=${this.netSim.delayMs}ms jitter=±${this.netSim.jitterMs}ms loss=${(this.netSim.lossProb * 100).toFixed(1)}%`);
+    }
+
+    /** Get the current artificial-latency config (for overlays / tooling). */
+    getNetSim(): Readonly<{ enabled: boolean; delayMs: number; jitterMs: number; lossProb: number }> {
+        return this.netSim;
+    }
+
+    /** Inbound state-channel frame — passes through the artificial-latency
+     *  simulator (when armed) before normal dispatch. */
+    private receiveStateFrame(data: Uint8Array): void {
+        if (!this.netSim.enabled) {
+            this.handleBinaryMessage(data);
+            return;
+        }
+        if (this.netSim.lossProb > 0 && Math.random() < this.netSim.lossProb) {
+            return; // dropped packet
+        }
+        const jitter = this.netSim.jitterMs > 0
+            ? (Math.random() * 2 - 1) * this.netSim.jitterMs
+            : 0;
+        const delay = Math.max(0, this.netSim.delayMs + jitter);
+        if (delay <= 0) {
+            this.handleBinaryMessage(data);
+        } else {
+            setTimeout(() => this.handleBinaryMessage(data), delay);
+        }
     }
 
     private handleBinaryMessage(data: Uint8Array): void {

@@ -43,6 +43,7 @@ import '@babylonjs/loaders/glTF/index.js';
 // textures resolve to `.ktx2` URIs after the texture pipeline migration.
 import type { EntityStateSnapshot } from './entity-state.js';
 import { EntityInterpolator } from './entity-interpolator.js';
+import type { PresentationClock } from './presentation-clock.js';
 import type { UnitDefInfo } from './connection.js';
 import type { PieceStateSnapshot } from './piece-state.js';
 import type { LosBitmap } from './los-bitmap.js';
@@ -969,6 +970,13 @@ interface PieceRenderEntry {
 export class EntityRenderer {
     private scene: Scene;
     private interpolator = new EntityInterpolator();
+    /** Presentation clock (PLAN-latency L0). Drives the cursor frame the
+     *  interpolator renders to. Null until wired by main.ts; the renderer
+     *  then falls back to the freshest received frame (no display delay). */
+    private presClock: PresentationClock | null = null;
+    /** Cursor frame recomputed each tick(); also used by between-tick
+     *  position queries (build beams etc.) so they agree with the render. */
+    private cursorFrame = 0;
     private entityMeta = new Map<number, EntityMeta>();
     private teamMaterials: StandardMaterial[] = [];
     /** Map heightmap data for terrain re-projection of ground units.
@@ -1047,6 +1055,13 @@ export class EntityRenderer {
             mat.specularColor = new Color3(0.3, 0.3, 0.3);
             this.teamMaterials.push(mat);
         }
+    }
+
+    /** Attach the presentation clock (PLAN-latency L0). Once set, the
+     *  renderer interpolates entities at the cursor frame `P` instead of
+     *  arrival wall-time. */
+    setPresentationClock(clock: PresentationClock): void {
+        this.presClock = clock;
     }
 
     /**
@@ -1727,7 +1742,7 @@ export class EntityRenderer {
         return mesh;
     }
 
-    private updateSelectionRings(now: number): void {
+    private updateSelectionRings(cursorFrame: number): void {
         if (this.selectedIds.length === 0) {
             if (this.selectionMesh) {
                 this.selectionMesh.isVisible = false;
@@ -1741,7 +1756,7 @@ export class EntityRenderer {
         let count = 0;
         const tmp = new Float32Array(16);
         for (const id of this.selectedIds) {
-            const p = this.interpolator.getInterpolated(id, now);
+            const p = this.interpolator.getInterpolated(id, cursorFrame);
             if (!p) continue;
             const m = Matrix.Compose(
                 new Vector3(1, 1, 1),
@@ -1864,9 +1879,15 @@ export class EntityRenderer {
 
     update(snapshot: EntityStateSnapshot, isDelta: boolean = false): void {
         const { count, entityIds, positionsX, positionsY, positionsZ, headings, health, defIds, teams, buildProgress, pitch, roll, losStates, stateBits } = snapshot;
+
+        // Advance the presentation clock to this snapshot's server frame
+        // (once per packet, before per-entity samples). Done before the
+        // early-return so empty delta packets still advance the leading edge.
+        this.presClock?.observeFrame(snapshot.baseFrame);
+
         if (!entityIds) return;
 
-        const now = performance.now();
+        const frame = snapshot.baseFrame;
         // Quanta → radians: server packs angles as i8 with 127 buckets
         // covering [-π/2, π/2]. Pre-compute the inverse scale once.
         const angleScale = 1.5707963267948966 / 127;
@@ -1893,11 +1914,11 @@ export class EntityRenderer {
             if (inLos || alwaysVisibleThisFrame) {
                 this.interpolator.pushState(
                     id,
+                    frame,
                     positionsX ? positionsX[i] : 0,
                     positionsY ? positionsY[i] : 0,
                     positionsZ ? positionsZ[i] : 0,
                     headings ? headings[i] : 0,
-                    now,
                     pitch ? pitch[i] * angleScale : 0,
                     roll  ? roll[i]  * angleScale : 0,
                 );
@@ -1973,7 +1994,14 @@ export class EntityRenderer {
     }
 
     tick(): void {
-        const now = performance.now();
+        // Advance the presentation cursor and snapshot the frame to render at.
+        // Before the clock anchors (or if unwired) fall back to the freshest
+        // received frame — i.e. render with no display delay.
+        this.presClock?.tick();
+        const cursorFrame = this.presClock?.isAnchored
+            ? this.presClock.P
+            : (this.presClock?.newestObservedFrame ?? Number.POSITIVE_INFINITY);
+        this.cursorFrame = cursorFrame;
 
         // Collect per-piece instance matrices.
         // Key: render mesh key → { mesh, matrices[], count }
@@ -2007,7 +2035,7 @@ export class EntityRenderer {
             // Radar-only contact: render a small team-coloured blip
             // instead of the full unit. Skip the model path entirely.
             if (!inLos && !ghost && inRadar) {
-                const lerpedR = this.interpolator.getInterpolated(id, now);
+                const lerpedR = this.interpolator.getInterpolated(id, cursorFrame);
                 if (!lerpedR) continue;
                 const groundYR = this.sampleHeight(lerpedR.x, lerpedR.z);
                 const blipY = Number.isNaN(groundYR) ? lerpedR.y : groundYR;
@@ -2035,7 +2063,7 @@ export class EntityRenderer {
             const lerped = ghost
                 ? { x: ghost.x, y: ghost.y, z: ghost.z, heading: ghost.heading,
                     pitch: ghost.pitch, roll: ghost.roll }
-                : this.interpolator.getInterpolated(id, now);
+                : this.interpolator.getInterpolated(id, cursorFrame);
             if (!lerped) continue;
 
             // Lazy-load: trigger the glb + texture fetch the first
@@ -2180,7 +2208,7 @@ export class EntityRenderer {
             }
         }
 
-        this.updateSelectionRings(now);
+        this.updateSelectionRings(cursorFrame);
     }
 
     get entityCount(): number {
@@ -2196,7 +2224,7 @@ export class EntityRenderer {
     }
 
     getEntityPosition(id: number): { x: number; y: number; z: number } | null {
-        return this.interpolator.getInterpolated(id);
+        return this.interpolator.getInterpolated(id, this.cursorFrame);
     }
 
     /**
@@ -2220,7 +2248,7 @@ export class EntityRenderer {
         if (!meta) return null;
         const tmpl = this.modelTemplates.get(meta.defId);
         if (!tmpl || pieceIdx < 0 || pieceIdx >= tmpl.pieces.length) return null;
-        const lerped = this.interpolator.getInterpolated(id);
+        const lerped = this.interpolator.getInterpolated(id, this.cursorFrame);
         if (!lerped) return null;
 
         const overrides = this.pieceOverrides.get(id);

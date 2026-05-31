@@ -3,7 +3,12 @@
  *
  * Wire format (struct-of-arrays, little-endian):
  *
- *   Header (4 bytes):
+ *   Header (8 bytes):
+ *     u32 base_frame      sim frame this snapshot was built on. The
+ *                         presentation clock interpolates by this, not by
+ *                         arrival wall-time (PLAN-latency.md L0). Monotonic +
+ *                         unique per packet, so it doubles as the unreliable-
+ *                         channel sequence number (reorder/loss detection).
  *     u16 entity_count
  *     u16 field_mask
  *
@@ -50,6 +55,10 @@ export const FIELD_ROLL       = 1 << 12;
 
 /** Parsed entity state snapshot — typed arrays are zero-copy views into the buffer. */
 export interface EntityStateSnapshot {
+    /** Sim frame this snapshot was built on (header `base_frame`). The
+     *  presentation clock interpolates by this. Monotonic + unique per
+     *  packet → also the sequence number for reorder/loss detection. */
+    baseFrame: number;
     count: number;
     fieldMask: number;
     entityIds:  Uint32Array  | null;
@@ -76,18 +85,20 @@ export interface EntityStateSnapshot {
  * Returns typed array views into the underlying ArrayBuffer — no copies.
  */
 export function parseEntityState(input: Uint8Array): EntityStateSnapshot | null {
-    if (input.byteLength < 4) return null;
+    if (input.byteLength < 8) return null;
 
     // Copy to an aligned buffer so typed array views work correctly
     const data = new Uint8Array(input.length);
     data.set(input);
 
     const view = new DataView(data.buffer, 0, data.byteLength);
-    const count = view.getUint16(0, true);
-    const fieldMask = view.getUint16(2, true);
+    const baseFrame = view.getUint32(0, true);
+    const count = view.getUint16(4, true);
+    const fieldMask = view.getUint16(6, true);
 
-    let offset = 4;
+    let offset = 8;
     const result: EntityStateSnapshot = {
+        baseFrame,
         count,
         fieldMask,
         entityIds: null,

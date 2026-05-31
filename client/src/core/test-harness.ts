@@ -229,6 +229,37 @@ export class TestHarness {
         return r.output;
     }
 
+    // ─── Network simulation (PLAN-latency L0 validation tool) ────────
+    //
+    // Reproduces WAN conditions on localhost so the latency mitigations can
+    // be A/B'd against "does it still look right at 200 ms ± jitter, 2 %
+    // loss?". Applies to the unreliable state channel only (entity state etc.).
+    // Watch the timing overlay (F11 → presentation-clock block) for P tracking
+    // E−D, the arrival-jitter histogram, and reorder/loss/correction counts.
+
+    /** Inject artificial latency/jitter/loss on the state channel.
+     *  `{ delayMs, jitterMs, lossProb }`. Call `netSim({})`-style with all
+     *  zeros (or `netSimOff()`) to disable. */
+    netSim(cfg: { delayMs?: number; jitterMs?: number; lossProb?: number }): void {
+        this.deps.connection.setNetSim(cfg);
+    }
+
+    /** Disable artificial latency. */
+    netSimOff(): void {
+        this.deps.connection.setNetSim({ delayMs: 0, jitterMs: 0, lossProb: 0 });
+    }
+
+    /** Named WAN presets. `lan` ≈ localhost; `wan` ≈ regional; `intercont`
+     *  ≈ the L0 exit-gate condition (200 ms ± 40 ms jitter, 2 % loss). */
+    netSimPreset(name: 'lan' | 'wan' | 'intercont'): void {
+        const presets = {
+            lan:       { delayMs: 5,   jitterMs: 2,  lossProb: 0 },
+            wan:       { delayMs: 80,  jitterMs: 15, lossProb: 0.005 },
+            intercont: { delayMs: 200, jitterMs: 40, lossProb: 0.02 },
+        } as const;
+        this.deps.connection.setNetSim(presets[name]);
+    }
+
     // ─── Camera ─────────────────────────────────────────────────────
 
     /** Move the camera to look down at the unit's current (interpolated)
