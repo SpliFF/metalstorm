@@ -1,9 +1,19 @@
 /**
  * Network message inspector — intercepts and decodes protocol messages
- * for display in the debug console's network tab.
+ * for display in the debug console's network tab, and maintains an
+ * always-on per-envelope bandwidth tally for PLAN-performance.md Phase 2
+ * (network packet-size / excessive-data review).
  *
- * Hooks into inbound/outbound data channel frames, decodes envelope
- * byte + FlatBuffer type, and logs to the debug console.
+ * Two concerns live here:
+ *   1. Debug-console logging of each frame (gated behind `enabled`).
+ *   2. A lightweight cumulative byte/count accumulator keyed by envelope
+ *      type (and, for FlatBuffers frames, by payload type). This runs
+ *      unconditionally because it's cheap (one byte read + a map bump,
+ *      plus a vtable lookup for 0x01 frames) and is what the PerfOverlay
+ *      reads to break bandwidth down by stream.
+ *
+ * Hook points (see connection.ts): `recordInbound` at the single
+ * `handleBinaryMessage` dispatch entry, `recordOutbound` at `sendOnControl`.
  */
 
 import * as flatbuffers from 'flatbuffers';
@@ -18,6 +28,10 @@ const ENVELOPE_NAMES: Record<number, string> = {
     0x02: 'EntityState',
     0x03: 'EntityDelta',
     0x04: 'ProjectileState',
+    0x05: 'PieceState',
+    0x06: 'BuildActivity',
+    0x07: 'LosBitmap',
+    0x08: 'Decals',
 };
 
 // Map enum values to type names
@@ -42,55 +56,107 @@ export function isNetInspectorEnabled(): boolean {
     return enabled;
 }
 
-/** Log an inbound (server→client) message */
-export function inspectInbound(data: Uint8Array): void {
-    if (!enabled || data.length < 1) return;
+// ─── Bandwidth accumulator (always on) ───
 
-    const envelope = data[0];
-    const envName = ENVELOPE_NAMES[envelope] || `0x${envelope.toString(16)}`;
-    const size = data.length;
-
-    if (envelope === 0x01 && data.length > 1) {
-        // Decode FlatBuffers type
-        try {
-            const buf = new flatbuffers.ByteBuffer(data.slice(1));
-            const msg = ServerMessage.getRootAsServerMessage(buf);
-            if (msg) {
-                const typeName = SERVER_PAYLOAD_NAMES[msg.payloadType()] || `unknown(${msg.payloadType()})`;
-                logNetMessage('←', envName, typeName, size);
-                return;
-            }
-        } catch { /* fall through */ }
-    }
-
-    logNetMessage('←', envName, '', size);
+export interface EnvelopeStat {
+    count: number;
+    bytes: number;
 }
 
-/** Log an outbound (client→server) message */
-export function inspectOutbound(data: Uint8Array): void {
-    if (!enabled || data.length < 1) return;
+/** A point-in-time copy of the cumulative counters. Consumers diff two
+ *  snapshots over a wall-clock window to derive per-second rates. */
+export interface NetStatsSnapshot {
+    inbound: Record<string, EnvelopeStat>;
+    outbound: Record<string, EnvelopeStat>;
+    inboundTotalBytes: number;
+    outboundTotalBytes: number;
+}
 
+const inboundStats: Record<string, EnvelopeStat> = {};
+const outboundStats: Record<string, EnvelopeStat> = {};
+let inboundTotalBytes = 0;
+let outboundTotalBytes = 0;
+
+function bump(map: Record<string, EnvelopeStat>, label: string, bytes: number): void {
+    const s = map[label];
+    if (s) {
+        s.count++;
+        s.bytes += bytes;
+    } else {
+        map[label] = { count: 1, bytes };
+    }
+}
+
+/** Resolve a stat-bucket label for a framed message. FlatBuffers frames
+ *  (0x01) are broken out by payload type so the bandwidth report shows
+ *  which message types cost bytes (e.g. `FB:GameUnitDefs`). The decode is
+ *  a cheap root + vtable read — no deep parse, no copy (subarray is a view). */
+function labelFor(data: Uint8Array, isServer: boolean): string {
     const envelope = data[0];
     const envName = ENVELOPE_NAMES[envelope] || `0x${envelope.toString(16)}`;
-    const size = data.length;
-
     if (envelope === 0x01 && data.length > 1) {
         try {
-            const buf = new flatbuffers.ByteBuffer(data.slice(1));
+            const buf = new flatbuffers.ByteBuffer(data.subarray(1));
+            if (isServer) {
+                const msg = ServerMessage.getRootAsServerMessage(buf);
+                return `FB:${SERVER_PAYLOAD_NAMES[msg.payloadType()] || msg.payloadType()}`;
+            }
             const msg = ClientMessage.getRootAsClientMessage(buf);
-            if (msg) {
-                const typeName = CLIENT_PAYLOAD_NAMES[msg.payloadType()] || `unknown(${msg.payloadType()})`;
-                logNetMessage('→', envName, typeName, size);
-                return;
-            }
-        } catch { /* fall through */ }
+            return `FB:${CLIENT_PAYLOAD_NAMES[msg.payloadType()] || msg.payloadType()}`;
+        } catch { /* fall through to envelope name */ }
     }
-
-    logNetMessage('→', envName, '', size);
+    return envName;
 }
 
-function logNetMessage(dir: string, envelope: string, typeName: string, size: number): void {
-    const typeStr = typeName ? ` ${typeName}` : '';
+/** Snapshot the cumulative counters (deep copy so the caller can diff). */
+export function snapshotNetStats(): NetStatsSnapshot {
+    const copy = (src: Record<string, EnvelopeStat>): Record<string, EnvelopeStat> => {
+        const out: Record<string, EnvelopeStat> = {};
+        for (const k in src) out[k] = { count: src[k].count, bytes: src[k].bytes };
+        return out;
+    };
+    return {
+        inbound: copy(inboundStats),
+        outbound: copy(outboundStats),
+        inboundTotalBytes,
+        outboundTotalBytes,
+    };
+}
+
+/** Zero the accumulator (e.g. at game start so per-game budgets are clean). */
+export function resetNetStats(): void {
+    for (const k in inboundStats) delete inboundStats[k];
+    for (const k in outboundStats) delete outboundStats[k];
+    inboundTotalBytes = 0;
+    outboundTotalBytes = 0;
+}
+
+// ─── Inbound / outbound hooks ───
+
+/** Record an inbound (server→client) frame: always tallies bandwidth,
+ *  and logs to the debug console when the inspector is enabled. */
+export function recordInbound(data: Uint8Array): void {
+    if (data.length < 1) return;
+    const label = labelFor(data, true);
+    bump(inboundStats, label, data.length);
+    inboundTotalBytes += data.length;
+    if (enabled) logNetMessage('←', label, data.length);
+}
+
+/** Record an outbound (client→server) frame. */
+export function recordOutbound(data: Uint8Array): void {
+    if (data.length < 1) return;
+    const label = labelFor(data, false);
+    bump(outboundStats, label, data.length);
+    outboundTotalBytes += data.length;
+    if (enabled) logNetMessage('→', label, data.length);
+}
+
+// Backwards-compatible aliases (the original log-only entry points).
+export const inspectInbound = recordInbound;
+export const inspectOutbound = recordOutbound;
+
+function logNetMessage(dir: string, label: string, size: number): void {
     debugConsole.addEntry({
         id: 0,
         timestamp: Date.now(),
@@ -98,7 +164,7 @@ function logNetMessage(dir: string, envelope: string, typeName: string, size: nu
         section: 'net',
         scope: '',
         process: 'client',
-        message: `${dir} [${envelope}]${typeStr} (${size} bytes)`,
+        message: `${dir} [${label}] (${size} bytes)`,
         frame: 0,
     });
 }

@@ -82,6 +82,7 @@ import { parseBuildActivity, type BuildActivitySnapshot } from './build-activity
 import { parseMapData, type ParsedMapData } from './map-data.js';
 import { parseLosBitmap, type LosBitmap } from './los-bitmap.js';
 import { parseDecals, type DecalSnapshot } from './decal-events.js';
+import { recordInbound, recordOutbound } from './net-inspector.js';
 
 const ENVELOPE_FLATBUFFERS = 0x01;
 const ENVELOPE_ENTITY_STATE_FULL = 0x02;
@@ -1276,6 +1277,7 @@ export class Connection {
 
     /** Send data on the control (reliable) channel. */
     private sendOnControl(data: Uint8Array): void {
+        recordOutbound(data);
         // Copy into a fresh ArrayBuffer for RTCDataChannel compatibility
         const buf = new ArrayBuffer(data.byteLength);
         new Uint8Array(buf).set(data);
@@ -1318,6 +1320,9 @@ export class Connection {
 
     private handleBinaryMessage(data: Uint8Array): void {
         if (data.length < 2) return;
+
+        // Always-on per-envelope bandwidth tally (PerfOverlay / PLAN-performance.md Phase 2).
+        recordInbound(data);
 
         const envelope = data[0];
         if (envelope === ENVELOPE_ENTITY_STATE_FULL || envelope === ENVELOPE_ENTITY_STATE_DELTA) {

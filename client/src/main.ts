@@ -39,6 +39,8 @@ import { fetchBuildStamp } from './config.js';
 import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
 import { loadMapLighting, type MapLighting } from './core/map-lighting.js';
 import { applyMapLighting, createSceneLighting, type SceneLighting } from './core/scene-lighting.js';
+import { PerfOverlay } from './core/perf-overlay.js';
+import { resetNetStats } from './core/net-inspector.js';
 import { FxLightPool } from './core/fx-light-pool.js';
 import { DistortionRenderer } from './core/distortion-renderer.js';
 import { MuzzleFlareRenderer } from './core/muzzle-flare-renderer.js';
@@ -74,6 +76,7 @@ import {
 let gameTemplates: GameTemplates = getDefaultGameTemplates();
 
 let engine: Engine | null = null;
+let perfOverlay: PerfOverlay | null = null;
 let entityRenderer: EntityRenderer | null = null;
 let projectileRenderer: ProjectileRenderer | null = null;
 let buildBeamRenderer: BuildBeamRenderer | null = null;
@@ -322,6 +325,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     const lobbyHttpUrl = '';
 
     engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
+    // Perf overlay (toggle F11). Created once; net-stats reset per game so
+    // the bandwidth breakdown reflects this session (PLAN-performance.md).
+    if (!perfOverlay) perfOverlay = new PerfOverlay();
+    resetNetStats();
     const scene = new Scene(engine);
     // PLAN-coordinate-system Phase 2d: flip the Babylon scene to RH
     // so the glTF loader passes data through unchanged (no __root__
@@ -1407,6 +1414,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         // (use test.simPause() to also stop ticks) and entity-state
         // updates keep arriving so the harness can still query state.
         if (testRenderPaused) return;
+
+        // Perf overlay (F11). Ticks on real render frames only (after the
+        // pause guard) for an accurate frame-time distribution; internally
+        // no-ops when hidden.
+        if (perfOverlay) {
+            perfOverlay.tick(dt * 1000);
+            perfOverlay.setEntityCount(entityRenderer?.entityCount ?? 0);
+        }
 
         // Sim-scaled delta for VISUAL FX aging — slows / freezes with the
         // game speed (fxSimSpeed). Camera + decal-clipmap ticks below keep
