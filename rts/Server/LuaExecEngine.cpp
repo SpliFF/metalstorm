@@ -6,6 +6,7 @@
 #include "Lua/LuaRules.h"
 #include "Lua/LuaGaia.h"
 #include "Lua/LuaHandle.h"
+#include "Lua/LuaCallInProfiler.h"
 
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/Unit.h"
@@ -565,6 +566,40 @@ std::string ExecuteServerCommand(const std::string& cmd) {
         std::ostringstream ss;
         ss << "unit " << unitId << " invulnerable=" << (u->invulnerable ? "on" : "off");
         return ss.str();
+    }
+
+    // lua profile [on|off|reset|status|<topN>]  — server-side synced Lua
+    // per-callin wall-time profiler (PLAN-performance.md Phase 4.1).
+    //   on     enable accumulation     off    disable (keeps samples)
+    //   reset  clear samples           status  one-line state
+    //   <none> or <N>  ranked report (top N rows, default 25)
+    if (cmd == "lua profile" || cmd.rfind("lua profile ", 0) == 0) {
+        std::string arg = (cmd.size() > 12) ? cmd.substr(12) : "";
+        // trim leading spaces
+        while (!arg.empty() && arg.front() == ' ') arg.erase(arg.begin());
+
+        if (arg == "on" || arg == "1" || arg == "true") {
+            LuaCallInProfiler::SetEnabled(true);
+            return "lua profile: on";
+        }
+        if (arg == "off" || arg == "0" || arg == "false") {
+            LuaCallInProfiler::SetEnabled(false);
+            return "lua profile: off (samples retained; `lua profile reset` to clear)";
+        }
+        if (arg == "reset" || arg == "clear") {
+            LuaCallInProfiler::Reset();
+            return "lua profile: samples cleared";
+        }
+        if (arg == "status") {
+            return std::string("lua profile: ") + (LuaCallInProfiler::IsEnabled() ? "on" : "off");
+        }
+        // Empty or numeric → report (numeric overrides the row cap).
+        int topN = 25;
+        if (!arg.empty()) {
+            int parsed = std::atoi(arg.c_str());
+            if (parsed > 0) topN = parsed;
+        }
+        return LuaCallInProfiler::Report(topN);
     }
 
     // combat_summary  — recent combat / sound / death queue depths.
