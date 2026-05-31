@@ -195,6 +195,30 @@ inline std::string SerializeOneUnitDef(
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         b.add_str("track_type", tt);
     }
+    // Building ground decal (PLAN-decals.md D5) — the authored AO/scorch plate
+    // a building paints under its footprint while it exists. Render-only data,
+    // but a SolidObjectDecalDef field the sim already parses. The texture name
+    // is reduced to a bare lowercased stem; the client resolves it to
+    // <stem>.ktx2 under the game's unittextures/ (gameconverter converts the
+    // referenced .dds there). Size is in map squares; the client builds the
+    // quad at Recoil's 2*size*SQUARE_SIZE world extent. Omitted unless the
+    // building actually opts in (useGroundDecal + a named texture).
+    if (ud.decalDef.useGroundDecal && !ud.decalDef.groundDecalTypeName.empty()) {
+        std::string gd = ud.decalDef.groundDecalTypeName;
+        // strip any directory prefix
+        const size_t slash = gd.find_last_of("/\\");
+        if (slash != std::string::npos) gd = gd.substr(slash + 1);
+        // strip extension
+        const size_t dot = gd.find_last_of('.');
+        if (dot != std::string::npos) gd = gd.substr(0, dot);
+        for (char& c : gd)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (!gd.empty()) {
+            b.add_str("ground_decal", gd);
+            b.add_int("ground_decal_sx", ud.decalDef.groundDecalSizeX);
+            b.add_int("ground_decal_sy", ud.decalDef.groundDecalSizeY);
+        }
+    }
     b.add_float("max_velocity", ud.speed);  // FB: same as speed
     b.add_float("cost", ud.cost.metal + ud.cost.energy);
     b.add_float("max_weapon_range", ud.maxWeaponRange);
@@ -418,6 +442,11 @@ inline std::string SerializeOneWeaponDef(
     // CBeamLaserProjectile::Draw; needed for a faithful beam.
     b.add_float("laser_flare_size", wd.visuals.laserflaresize);
     b.add_float("beam_decay", wd.visuals.beamdecay);
+    // BeamLaser / LightningCannon visual-sprite linger time, in sim
+    // frames (Recoil's `beamLaserTTL`, Lua field `beamTTL`). ZK's
+    // gfx_projectile_lights.lua reads `weaponDef.beamTTL` to decide
+    // whether a beam light should fade over its lifetime.
+    b.add_int("beam_ttl", wd.beamLaserTTL);
     // Whether CLaserProjectile stops + contracts at max range instead
     // of fading out. Drives the post-impact stayTime path.
     b.add_bool("laser_hard_stop", wd.laserHardStop);

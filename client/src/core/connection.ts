@@ -256,6 +256,15 @@ export interface UnitDefInfo {
     /// units that don't leave tracks. Used to resolve the wire trackTypeId
     /// (envelope 0x08) to a track texture — see decal-renderer.ts.
     trackType: string;
+    /// Building ground-decal (PLAN-decals.md D5): authored AO/scorch plate
+    /// texture stem (lowercased, no extension), resolved to `<stem>.ktx2`
+    /// under the game's `unittextures/`. Empty when the building authors none.
+    groundDecal: string;
+    /// Building ground-decal size in map squares. World half-extent is
+    /// `groundDecalSize * SQUARE_SIZE` (Recoil), so the full quad is
+    /// `2 * size * SQUARE_SIZE` elmos. 0 when there's no decal.
+    groundDecalSizeX: number;
+    groundDecalSizeY: number;
     maxVelocity: number;
     cost: number;
     maxWeaponRange: number;
@@ -444,6 +453,11 @@ export interface WeaponDefInfo {
     /** BeamLaser per-Update colour decay (`visuals.beamdecay`); the beam
      *  dims by this factor each sim tick over its TTL. */
     beamDecay: number;
+    /** BeamLaser / LightningCannon visual-sprite linger time in sim
+     *  frames (Recoil's `beamLaserTTL`, Lua field `beamTTL`). ZK's
+     *  gfx_projectile_lights.lua reads it to fade beam lights. 0 = no
+     *  linger. */
+    beamTtl: number;
     /** LaserCannon: stop and contract at max-range instead of fading. */
     laserHardStop: boolean;
     /** Per-frame intensity falloff multiplier (non-hardstop lasers). */

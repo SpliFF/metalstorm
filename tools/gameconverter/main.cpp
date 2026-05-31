@@ -85,6 +85,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -544,6 +545,110 @@ int ConvertProjectileTextures(const fs::path& gameDir,
             gameDir.string().c_str());
     }
     return totalFailed;
+}
+
+// ---------------------------------------------------------------
+// Step 3a-bis: building ground-decal textures (PLAN-decals.md D5)
+// ---------------------------------------------------------------
+//
+// Buildings paint an authored AO/scorch plate under their footprint
+// (unitdef `buildingGroundDecalType` / `groundDecalType`). Those textures
+// live in `unittextures/` as `.dds`, which the recursive `bitmaps/` pass
+// above never touches. Rather than convert the whole (large) unit-texture
+// tree, scan the unitdefs for the specific decal textures they reference and
+// convert just those to `.ktx2` siblings the client can fetch directly at
+// `/api/games/data/<id>/unittextures/<stem>.ktx2`.
+
+/// Collect the bare lowercased stems of every building ground-decal texture
+/// referenced by the game's unitdefs. A light text scan (no Lua eval): match
+/// `[building]groundDecalType = <string>` (case-insensitive) in `units/*.lua`,
+/// accepting `[[...]]`, `"..."`, or `'...'` value forms.
+std::unordered_set<std::string> CollectBuildingDecalStems(const fs::path& unitsDir) {
+    std::unordered_set<std::string> stems;
+    std::error_code ec;
+    if (unitsDir.empty() || !fs::is_directory(unitsDir, ec)) return stems;
+
+    static const std::regex re(
+        R"RX((?:building)?grounddecaltype\s*=\s*(?:\[\[(.*?)\]\]|"([^"]*)"|'([^']*)'))RX",
+        std::regex::icase);
+
+    for (const auto& entry : fs::recursive_directory_iterator(unitsDir, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec)) continue;
+        if (ToLower(entry.path().extension().string()) != ".lua") continue;
+
+        std::ifstream in(entry.path(), std::ios::binary);
+        if (!in) continue;
+        std::stringstream ss;
+        ss << in.rdbuf();
+        const std::string src = ss.str();
+
+        for (std::sregex_iterator it(src.begin(), src.end(), re), end; it != end; ++it) {
+            std::string name = (*it)[1].matched ? (*it)[1].str()
+                             : (*it)[2].matched ? (*it)[2].str()
+                                                : (*it)[3].str();
+            // bare filename → stem, lowercased (matches the server's
+            // LuaDefsSerializer `ground_decal` field).
+            const size_t slash = name.find_last_of("/\\");
+            if (slash != std::string::npos) name = name.substr(slash + 1);
+            const size_t dot = name.find_last_of('.');
+            if (dot != std::string::npos) name = name.substr(0, dot);
+            name = ToLower(name);
+            if (!name.empty()) stems.insert(name);
+        }
+    }
+    return stems;
+}
+
+/// Convert each referenced building-decal texture (data-side `unittextures/`)
+/// to a `.ktx2` sibling. Returns the number of conversion failures.
+int ConvertBuildingDecalTextures(const fs::path& gameDir, bool force) {
+    const fs::path unitsDir = ResolveSubDir(gameDir, "units");
+    const fs::path texDir   = ResolveSubDir(gameDir, "unittextures");
+    if (texDir.empty()) return 0;
+
+    const std::unordered_set<std::string> stems = CollectBuildingDecalStems(unitsDir);
+    if (stems.empty()) return 0;
+
+    const fs::path textureConverter = TEXTURECONVERTER_BINARY_PATH;
+    std::error_code ec;
+    int converted = 0, uptodate = 0, failed = 0, missing = 0;
+
+    for (const std::string& stem : stems) {
+        // Find the source file: <stem>.<supported ext>, case-insensitive.
+        fs::path src;
+        for (const auto& entry : fs::directory_iterator(texDir, ec)) {
+            if (ec) break;
+            if (!entry.is_regular_file(ec)) continue;
+            if (ToLower(entry.path().stem().string()) != stem) continue;
+            if (!IsBitmapFile(entry.path())) continue;
+            src = entry.path();
+            break;
+        }
+        if (src.empty()) { missing++; continue; }
+
+        fs::path dstPath = src;
+        dstPath.replace_extension(".ktx2");
+        if (!force && fs::exists(dstPath, ec)) {
+            const auto srcTime = fs::last_write_time(src, ec);
+            const auto dstTime = fs::last_write_time(dstPath, ec);
+            if (!ec && dstTime >= srcTime) { uptodate++; continue; }
+            ec.clear();
+        }
+        if (ConvertTextureToKtx2(src.string(), dstPath.string(), textureConverter))
+            converted++;
+        else
+            failed++;
+    }
+
+    if (converted + uptodate + failed + missing > 0) {
+        SLOG(SPRING_LOG_NOTICE,
+            "%s building decals: %zu referenced, %d converted, %d up-to-date, "
+            "%d missing, %d failed",
+            gameDir.filename().string().c_str(), stems.size(),
+            converted, uptodate, missing, failed);
+    }
+    return failed;
 }
 
 // ---------------------------------------------------------------
@@ -1911,6 +2016,9 @@ int main(int argc, char* argv[]) {
 
     if (!skipProjectileTextures) {
         failed += ConvertProjectileTextures(gameDir, fs::path(dataDir), force);
+        // Building ground-decal plates (PLAN-decals.md D5) — convert just the
+        // unitdef-referenced AO/scorch textures under unittextures/.
+        failed += ConvertBuildingDecalTextures(gameDir, force);
     }
 
     if (!skipAudio) {

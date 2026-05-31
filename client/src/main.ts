@@ -25,6 +25,7 @@ import { BuildMenu } from './core/build-menu.js';
 import { OrderPanel } from './core/order-panel.js';
 import { EconomyBar } from './core/economy-bar.js';
 import { buildTerrainMesh, loadTerrainTextures, TerrainFog, DeformableTerrain, type MapDimensions } from './core/terrain.js';
+import { BuildingPlateRenderer } from './core/building-plate-renderer.js';
 import { DecalOverlay, buildTrackTypeNames } from './core/decal-overlay.js';
 import { attachDecalOverlay } from './core/decal-overlay-plugin.js';
 import { LobbyUI } from './lobby/lobby-ui.js';
@@ -75,6 +76,7 @@ let gameTemplates: GameTemplates = getDefaultGameTemplates();
 
 let engine: Engine | null = null;
 let entityRenderer: EntityRenderer | null = null;
+let buildingPlateRenderer: BuildingPlateRenderer | null = null;
 let projectileRenderer: ProjectileRenderer | null = null;
 let buildBeamRenderer: BuildBeamRenderer | null = null;
 let dynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
@@ -218,6 +220,7 @@ function quitToLobby(): void {
     testHarness = null;
     testRenderPaused = false;
     entityRenderer = null;
+    buildingPlateRenderer = null;
     projectileRenderer = null;
     buildBeamRenderer?.dispose();
     buildBeamRenderer = null;
@@ -287,6 +290,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         gameConn = null;
     }
     entityRenderer = null;
+    buildingPlateRenderer = null;
     cegRuntime?.dispose();
     cegRuntime = null;
     combatFX = null;
@@ -458,6 +462,12 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // material's CSM sampling — can read the live sun direction + cascade
     // matrices each frame via its onBindObservable.
     entityRenderer.setShadowGenerator(sceneLighting.csm, sceneLighting.sun);
+    // PLAN-decals.md D5: static under-building ground decals (AO/scorch plates).
+    // Placed when a decal-authoring building first appears in entity state,
+    // removed on its death. Texture resolves to the game's unittextures/.
+    buildingPlateRenderer = new BuildingPlateRenderer(scene);
+    if (gameId) buildingPlateRenderer.setGame(gameId, lobbyHttpUrl);
+    (window as unknown as { __buildingPlates: unknown }).__buildingPlates = buildingPlateRenderer;
     projectileRenderer = new ProjectileRenderer(scene);
     buildBeamRenderer = new BuildBeamRenderer(scene);
     buildBeamRenderer.setEntityRenderer(entityRenderer);
@@ -528,6 +538,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         dynamicFeatureRenderer;
     defCache.onUnitDefs((newDefs) => {
         entityRenderer?.setUnitDefs(newDefs);
+        buildingPlateRenderer?.setUnitDefs(newDefs);
         currentWidgetManager?.forwardUnitDefs(newDefs);
     });
     defCache.onWeaponDefs((newDefs) => {
@@ -1051,6 +1062,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         },
         onEntityState(snapshot, isDelta) {
             entityRenderer?.update(snapshot, isDelta);
+            buildingPlateRenderer?.update(snapshot);
             currentWidgetManager?.forwardEntityState(snapshot, isDelta);
             currentFrame++;
         },
@@ -1134,6 +1146,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         },
         onEntityDestroy(entityId, x, y, z) {
             entityRenderer?.removeEntity(entityId);
+            buildingPlateRenderer?.remove(entityId);
             currentWidgetManager?.forwardEntityDestroy(entityId);
             combatFX?.onCombatEvents([{
                 attackerId: 0, targetId: entityId, weaponDefId: 0,
