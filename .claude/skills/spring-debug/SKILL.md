@@ -90,6 +90,40 @@ After rebuilding binaries, restart servers without disrupting the lobby room lif
 
 When testing the game in the browser, **always use `mcp__chrome-devtools__*` tools**. Never use `mcp__claude-in-chrome__*` tools — mixing the two spawns a separate browser window and breaks page context.
 
+## Camera control
+
+The camera lives **only in the browser** (the `RTSCamera` instance, `client/src/core/rts-camera.ts`). There are no camera MCP tools — drive it by feeding JS into `mcp__chrome-devtools__evaluate_script`. Two equivalent surfaces back the same camera: `window.test.*` (the test harness) and `window.camera.*` (pose primitives). Read the live pose with `window.test.cameraPose()` → `{pos:{x,y,z}, lookAt:{x,y,z}}`; check `window.camera.animating` before a screenshot (a transition is mid-flight when `true`).
+
+### Coordinate system (read this first)
+World positions are **positive** in `[0, mapX] × [0, mapZ]` (Option A — handedness is a *direction/basis* convention, not positional; see `PLAN-coordinate-system-option-a.md`). The camera shares the server's world coordinates — **no flip**. So a value from `Spring.GetUnitPosition(id)` feeds straight into the camera. `heading = 0` faces −Z; the map grows in +X/+Z.
+
+### Canonical methods (all on `window.test`)
+- **World point:** `cameraSnapToGround(x, z, {height, pitchDeg, durationMs})` — look-at lands on `(x, groundY, z)` with explicit framing. **Preferred** for precise, deterministic control.
+- `focusOn(x, z, durationMs)` — pans to world `(x, z)` but **keeps the current camera→look-at offset/distance**, so a far/zoomed-out camera stays far. Takes **two** world coords.
+- **A unit:** `cameraSnapToUnit(unitId, …)` / `focus(unitId)` — but see the viewport caveat below.
+- **A group:** `cameraFitUnits([id,…], {pitchDeg, padding, durationMs})` — frames the bounding box. The player-facing tracking camera (`setTrackingCamera(true)`, `T` key) re-fits the live **selection** every tick via the same path.
+
+### Pitfalls (all hit in practice)
+1. `focusOn(x, z)` takes **two world coords**. `focusOn(unitId)` is a bug — the id is read as `x`, `z` is `undefined`, and the camera flies off-map. To target a unit use `cameraSnapToUnit(id)` / `focus(id)`.
+2. **Never** set `scene.activeCamera.position` / `.setTarget(...)` directly. `RTSCamera` keeps its own `lookAt`; bypassing it desyncs that state, and the *next* animated `focusOn` computes `offset = camera.position − lookAt` from the stale value and hurls the camera thousands of elmos off-map (e.g. `x = −13197`). Always go through `window.test` / `window.camera`.
+3. Animated moves (`durationMs > 0`) preserve the current offset/distance. For a tight, deterministic frame use `cameraSnapToGround` / `cameraSnapToUnit` with explicit `height` + `pitchDeg` and `durationMs: 0`.
+4. The game camera controller does **not** fight a programmatic pose **unless tracking is on** (`window.test.setTrackingCamera(false)` to be sure) — tracking re-fits the selection every tick and will override your pose.
+
+### Unit/group targeting is viewport-bound — use server positions
+`cameraSnapToUnit` / `cameraFitUnits` / `focus(unitId)` resolve positions via the client's `getEntityPosition` — an **internal** renderer method (interpolated, viewport-streamed state), **not** a Spring API. The server **viewport-filters unit state**: it streams only units near the registered viewport. (Projectiles are *broadcast* to every client, so FX appear even where units don't — a unit can be invisible to the client while its shots are not.) So an off-screen unit — or a cheat/`spawn_unit`-spawned test unit the viewport never covered — has no client position, and these methods fail with `no client-side position for unit N` (observed: `entityMeta.size === 0`, zero units streamed).
+
+Reliable recipe — get the authoritative position from the server, then point the camera:
+```js
+// mcp__chrome-devtools__evaluate_script
+const r = await window.test.lua('local x,y,z=Spring.GetUnitPosition(ID) return x..","..z');
+const [x, z] = r.split(',').map(Number);
+await window.test.cameraSnapToGround(x, z, { height: 700, pitchDeg: 60, durationMs: 0 });
+```
+From the MCP side the same position comes from `exec_lua` (scope `LuaRules`, `return Spring.GetUnitPosition(ID)`). `Spring.GetUnitPosition` is server-authoritative and viewport-independent — prefer it over the client lookup for scripted camera framing.
+
+### FX visibility
+The forward FX light pool culls emissions **> 7000 elmos** from the camera. To see projectile / weapon-FX lights (and faithful deferred projectile lights), the camera must be near the action — frame the combat first, then observe.
+
 ## Troubleshooting
 
 If tools return connection errors, the servers aren't running. Start them:
