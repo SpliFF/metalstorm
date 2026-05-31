@@ -309,6 +309,11 @@ interface LiveProjectile {
  *  derived in the fragment shader from `(fxNow - bornSimSec) / lifeS`,
  *  both measured on the sim-time FX clock (see simClockSec). */
 interface LiveBeam {
+    /// Server projectile id of the Fired event that spawned this beam.
+    /// Kept so the A3 projectile-query seam (snapshotForWorker) can expose
+    /// beams to Lua under the same id space as point projectiles — ZK's
+    /// gfx_projectile_lights.lua reads GetProjectileVelocity(id) for beams.
+    id: number;
     weaponDefId: number;
     fromX: number; fromY: number; fromZ: number;
     toX: number; toY: number; toZ: number;
@@ -838,7 +843,7 @@ export class ProjectileRenderer {
             const lifeS = v && v.kind === 'beam'
                 ? v.duration
                 : (ev.ttl > 0 ? ev.ttl / SIM_TICKS_PER_SEC : DEFAULT_BEAM_LIFE_S);
-            this.spawnBeam(ev.weaponDefId, ev.pos, ev.targetPos, lifeS);
+            this.spawnBeam(ev.projId, ev.weaponDefId, ev.pos, ev.targetPos, lifeS);
             return;
         }
 
@@ -891,12 +896,14 @@ export class ProjectileRenderer {
      *  frame; expired beams are dropped when `now - bornAtMs > lifeS`.
      *  Beams whose weapon def doesn't have a beam visual still get
      *  recorded but are skipped at render time — the data is harmless. */
-    private spawnBeam(weaponDefId: number, from: { x: number; y: number; z: number },
+    private spawnBeam(id: number, weaponDefId: number,
+                      from: { x: number; y: number; z: number },
                       to: { x: number; y: number; z: number }, lifeS: number): void {
         // Cap visual duration; long-lived beams just overdraw without
         // adding information once the texture has scrolled fully.
         const clamped = Math.min(lifeS, MAX_BEAM_DURATION_S);
         this.liveBeams.push({
+            id,
             weaponDefId,
             fromX: from.x, fromY: from.y, fromZ: from.z,
             toX: to.x,     toY: to.y,     toZ: to.z,
