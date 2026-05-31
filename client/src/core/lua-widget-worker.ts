@@ -1375,14 +1375,16 @@ WG.SetLang = function() end
 -- "Deferred rendering widget not found", and instead append their collectors
 -- to _G.__deferredLightCollectors.
 --
--- B1 STATUS: registry half only. The consumer side (per-frame collect ->
--- marshal the light list to the main thread -> feed the forward FxLightPool,
--- the sanctioned GL4-deferred -> WebGL2-forward substitution fed by authored
--- light_* data, then retire FxLightPool's invented muzzle/explosion emitters)
--- is NOT wired yet, so registered collectors are currently never called. With
--- just this edit the consumer widgets stay LOADED instead of self-removing —
--- a prerequisite — but emit no lights yet. See memory
--- project_faithful_proj_lights_progress for the remaining steps.
+-- B1 STATUS: fully wired and verified in-browser (2026-06-01). The consumer
+-- side (per-frame collect -> marshal the light list to the main thread -> feed
+-- the forward FxLightPool, the sanctioned GL4-deferred -> WebGL2-forward
+-- substitution fed by authored light_* data, then retire FxLightPool's invented
+-- muzzle/follow emitters) runs each frame in the DrawScreen collect loop below.
+-- Two non-obvious fixes were needed for the chain to actually light projectiles:
+-- (1) VFS.FileExists became mode-aware so ZK's fromZip security gate lets
+-- gfx_projectile_lights receive SpringRestricted (see VFS.FileExists), and
+-- (2) Spring.GetVisibleProjectiles returns a Lua table, not a JS array.
+-- See memory project_faithful_proj_lights_progress.
 _G.__deferredLightCollectors = _G.__deferredLightCollectors or {}
 WG.DeferredLighting_RegisterFunction = function(func)
 	if type(func) == "function" then
@@ -5867,11 +5869,26 @@ end
 VFS.FileExists = function(path, mode)
     if not path then return false end
     path = normalizePath(path)
-    if VFS._writeCache[path] ~= nil then return true end
-    if _vfsExists(path) then return true end
-    -- PLAN-settings.md §3: persisted config (e.g. Config/ZK_data.lua)
-    -- counts as existing so the gated load in cawidgets restores it.
-    return _vfsStorageLookup ~= nil and _vfsStorageLookup(path) ~= nil
+    mode = mode or VFS.DEF_MODE
+    -- Mode-aware existence. RAW_ONLY / ZIP_ONLY must disambiguate which
+    -- layer a file came from — the distinction ZK's fromZip security gate
+    -- (cawidgets.lua: only archive-shipped widgets may access SpringRestricted)
+    -- depends on. In the web model every HTTP-served engine/game file is
+    -- archive-equivalent (ZIP); only io.open-written / localStorage-persisted
+    -- config is raw (user-writable, outside any archive). A stub that
+    -- returned true for BOTH _ONLY modes collapsed not FileExists(.., RAW_ONLY)
+    -- to false, so gfx_projectile_lights.lua never received SpringRestricted and
+    -- failed to load. PLAN-settings.md section 3: persisted config must still
+    -- count as existing (raw) so cawidgets default-mode gated load restores it.
+    local inArchive = _vfsExists(path)
+    local inRaw = (VFS._writeCache[path] ~= nil)
+        or (_vfsStorageLookup ~= nil and _vfsStorageLookup(path) ~= nil)
+    if mode == VFS.RAW_ONLY then
+        return inRaw
+    elseif mode == VFS.ZIP_ONLY then
+        return inArchive
+    end
+    return inArchive or inRaw
 end
 
 VFS.LoadFile = function(path, mode)

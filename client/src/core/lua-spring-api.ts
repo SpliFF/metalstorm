@@ -1443,10 +1443,13 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         GetVisibleProjectiles: () => {
             // Recoil filters by viewer vision; the client only holds
             // projectiles the server told it about (already LOS-filtered),
-            // so every live id is "visible".
+            // so every live id is "visible". MUST return a single Lua table —
+            // a plain JS array is unpacked into multiple return values, so
+            // ZK's `local p = spGetVisibleProjectiles(); #p` would capture only
+            // the first id (a number) and the collector loop never runs.
             const out: number[] = [];
             for (const id of ls.projectiles.keys()) out.push(id);
-            return out;
+            return luaTable(...out);
         },
         GetProjectilePosition: (id: LuaValue) => {
             const p = ls.projectiles.get(Number(id));
