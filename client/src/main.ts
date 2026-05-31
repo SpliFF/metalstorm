@@ -36,6 +36,8 @@ import { WaypointMarkerRenderer } from './core/waypoint-marker-renderer.js';
 import { StandingOrderRenderer } from './core/standing-order-renderer.js';
 import { DebugTerrainGrid } from './core/debug-terrain-grid.js';
 import { Connection } from './core/connection.js';
+import { PresentationClock } from './core/presentation-clock.js';
+import { TimingOverlay } from './core/timing-overlay.js';
 import { fetchBuildStamp } from './config.js';
 import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
 import { loadMapLighting, type MapLighting } from './core/map-lighting.js';
@@ -76,6 +78,16 @@ let gameTemplates: GameTemplates = getDefaultGameTemplates();
 
 let engine: Engine | null = null;
 let entityRenderer: EntityRenderer | null = null;
+/// Presentation clock — the L0 timing spine (PLAN-latency.md). Converts the
+/// frame-stamped snapshot stream into a smooth presentation cursor P that the
+/// entity renderer interpolates to. Created once; the per-game ServerClock is
+/// attached when the game connection opens. Exposed on window.__presClock for
+/// the perf overlay + the latency-injection test tool.
+const presentationClock = new PresentationClock();
+(window as unknown as { __presClock: PresentationClock }).__presClock = presentationClock;
+/// Timing telemetry panel for the presentation clock (F10). Separate from the
+/// perf overlay (F11). Created lazily in the bootstrap once the DOM exists.
+let timingOverlay: TimingOverlay | null = null;
 let buildingPlateRenderer: BuildingPlateRenderer | null = null;
 let projectileRenderer: ProjectileRenderer | null = null;
 let buildBeamRenderer: BuildBeamRenderer | null = null;
@@ -455,6 +467,15 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     setUseZKMaterial(gameId === 'zk');
 
     entityRenderer = new EntityRenderer(scene);
+    // PLAN-latency L0: interpolate entities at the presentation cursor P
+    // (server-frame keyed) instead of arrival wall-time.
+    entityRenderer.setPresentationClock(presentationClock);
+    // L0 timing telemetry panel (F10). Reads the live netSim config so the
+    // overlay shows the injected WAN condition while you tune against it.
+    if (!timingOverlay) {
+        timingOverlay = new TimingOverlay(presentationClock);
+        timingOverlay.setConnectionProvider(() => gameConn);
+    }
     // PLAN-lighting L3: register the renderer with the sun shadow generator.
     // Adds every model/fallback mesh built later as a caster. Done up-front
     // (before any def streams in) so we don't race the first ensureModel
@@ -1175,6 +1196,12 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             // Treat paused as 0× so bolts freeze with the sim.
             lastServerSpeed = speed;
             lastServerPaused = paused;
+            // PLAN-latency L0: drive the presentation cursor at the true sim
+            // speed (paused → 0 freezes P). Note this uses paused?0:speed, NOT
+            // the fxFrozen capture override — a capture freeze pauses the
+            // server too, so no new frames arrive and the cursor freezes on
+            // its own; we must not desync the cursor from the actual stream.
+            presentationClock.setSpeedFactor(paused ? 0 : speed);
             // fxFrozen (capture freeze) overrides the live speed → 0.
             const effSpeed = fxFrozen ? 0 : (paused ? 0 : speed);
             projectileRenderer?.setSimSpeed(effSpeed);
@@ -1232,6 +1259,12 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         },
     });
     gameConn = conn;
+
+    // PLAN-latency L0: attach this game's synced clock to the presentation
+    // clock (RTT/2 biases the cursor toward the true leading edge; the offset
+    // maps local↔server time) and reset the cursor for the new session.
+    presentationClock.reset();
+    presentationClock.setServerClock(conn.serverClock);
 
     // Auth against the game server using the same username + token
     // the user picked up from the lobby login. The game server shares
@@ -1444,7 +1477,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         // BEFORE other ticks so the camera move lands this frame; the
         // entity/projectile renderers downstream see the new pose.
         inputManager?.tick();
-        entityRenderer?.tick();
+        entityRenderer?.tick();   // also advances the presentation clock (L0)
+        timingOverlay?.tick();
         buildBeamRenderer?.tick();
         projectileRenderer?.tick();
         cegRuntime?.tick(fxDt);

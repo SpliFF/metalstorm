@@ -12,7 +12,15 @@
  * Per PLAN-network.md, the format is struct-of-arrays for zero-copy
  * TypedArray access on the client:
  *
- *   Header (4 bytes):
+ *   Header (8 bytes):
+ *     u32 base_frame        (sim frame number this snapshot was built on;
+ *                            the client's presentation clock interpolates
+ *                            by this, not by arrival wall-time — see
+ *                            PLAN-latency.md L0. Monotonic + unique per
+ *                            packet (one entity-state packet per 3-frame
+ *                            tick), so it also serves as the unreliable-
+ *                            channel sequence number for reorder/loss
+ *                            detection — no separate seq field needed.)
  *     u16 entity_count
  *     u16 field_mask        (which fields are present)
  *
@@ -87,16 +95,21 @@ constexpr uint16_t FIELD_ALL = 0x1FFF;
 
 /// Serialize all active units into the Tier 2 binary format.
 /// Returns a buffer ready to be sent (without envelope byte).
-std::vector<uint8_t> SerializeAllUnits(uint16_t fieldMask = FIELD_ALL);
+/// `baseFrame` stamps the snapshot header (see header doc / PLAN-latency L0).
+std::vector<uint8_t> SerializeAllUnits(uint16_t fieldMask = FIELD_ALL,
+    uint32_t baseFrame = 0);
 
 /// Serialize a specific set of units.
 /// `viewerAllyTeam` determines what gets written into the per-unit
 /// FIELD_LOS_STATE byte (Spring's losStatus[allyTeam]). Pass -1 for
 /// permissive sessions (everything reads as fully visible).
+/// `baseFrame` is the current sim frame; it is written into the snapshot
+/// header so the client interpolates by server frame, not arrival time.
 std::vector<uint8_t> SerializeUnits(
     const std::vector<CUnit*>& units,
     uint16_t fieldMask = FIELD_ALL,
-    int viewerAllyTeam = -1);
+    int viewerAllyTeam = -1,
+    uint32_t baseFrame = 0);
 
 /// Per-ally-team visibility check shared with EntityDeltaCache so the
 /// cache filters changes against the same predicate the serializer uses.

@@ -2065,7 +2065,8 @@ int main(int argc, char* argv[])
                 if (isFullSnapshot) {
                     envelope = 0x02;
                     stateData = EntityState::SerializeUnits(
-                        candidates, EntityState::FIELD_ALL, viewerAllyTeam);
+                        candidates, EntityState::FIELD_ALL, viewerAllyTeam,
+                        static_cast<uint32_t>(curFrame));
                     session.deltaCache.Clear();
                     for (CUnit* u : candidates)
                         session.deltaCache.Update(u, viewerAllyTeam);
@@ -2080,7 +2081,8 @@ int main(int argc, char* argv[])
 
                     envelope = 0x03;
                     stateData = EntityState::SerializeUnits(
-                        changed, EntityState::FIELD_ALL, viewerAllyTeam);
+                        changed, EntityState::FIELD_ALL, viewerAllyTeam,
+                        static_cast<uint32_t>(curFrame));
                 }
 
                 std::vector<uint8_t> frame;
