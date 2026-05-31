@@ -1843,9 +1843,15 @@ int main(int argc, char* argv[])
             }
         }
 
-        // Only tick the sim after GameStart has fired (all players in)
-        // Skip sim tick when debugger has paused at a breakpoint
-        if (sim.HasGameStarted() && !g_luaDebugger.IsPaused()) {
+        // Only tick the sim after GameStart has fired (all players in).
+        // Skip when the debugger has paused at a breakpoint, OR when the
+        // game is paused (`gs->paused`, set by the `pause` console command /
+        // the client Pause hotkey). The latter was previously NOT checked,
+        // so a "paused" game kept ticking — units kept moving, sounds and
+        // combat events kept streaming. Gating SimFrame here stops the sim
+        // cleanly while the loop keeps running (GameInfo still broadcasts
+        // paused=true, console commands still process).
+        if (sim.HasGameStarted() && !g_luaDebugger.IsPaused() && !gs->paused) {
             sim.SimFrame();
             springlog_set_frame(sim.GetFrameNum());
         }

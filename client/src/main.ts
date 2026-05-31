@@ -102,6 +102,39 @@ let debugTerrainGrid: DebugTerrainGrid | null = null;
 /// independent of the render loop) while skipping `scene.render()`.
 let testHarness: TestHarness | null = null;
 let testRenderPaused = false;
+/// Current sim-speed multiplier for VISUAL FX aging (0 when paused). The
+/// render loop scales its wall-clock dt by this before ticking the FX
+/// systems (CEG particles, dynamic lights, muzzle flares, distortion,
+/// combat FX) so every weapon effect plays out in sim time — slowing or
+/// freezing with the game speed. That makes transient FX capturable
+/// (drop the speed or pause and they linger) and is more faithful (the
+/// engine ages these by sim frame). Set from onGameInfo. Camera/UI ticks
+/// keep using the raw wall dt.
+let fxSimSpeed = 1;
+/// Capture aid: when armed (window.__captureOnFire), the next projectile
+/// fire freezes the client FX clock after a short delay so the beam +
+/// muzzle flash + impact all hang on screen for a screenshot — no race
+/// with the wall clock. Server keeps running; only the visual FX freeze.
+/// `window.__captureResume()` (or any speed change) thaws it.
+let fxFrozen = false;
+let captureOnFireDelayMs: number | null = null;
+/// Last server-reported sim speed (for thaw + the fxFrozen override).
+let lastServerSpeed = 1;
+let lastServerPaused = false;
+
+/// Freeze for capture. The SERVER is the single authority for pause/speed
+/// (server_main.cpp gates SimFrame on gs->paused), so freezing pauses the
+/// server — units, projectiles, sounds, combat events ALL stop coherently
+/// at the source, no client-side event gating needed. We also zero the
+/// client FX clock immediately so the frame freezes crisply before the
+/// pause round-trips. Thawed by window.__captureResume().
+function freezeFx(): void {
+    fxFrozen = true;
+    fxSimSpeed = 0;
+    projectileRenderer?.setSimSpeed(0);
+    void testHarness?.simPause();
+    console.log('[capture] frozen (server paused) — screenshot now; window.__captureResume() to thaw');
+}
 /// Cached most-recent command-queue snapshot. Lets a selection change
 /// repaint the path overlay without waiting for the next server tick.
 let lastCommandQueues: ReadonlyArray<{
@@ -338,6 +371,24 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // Muzzle-flare flash (PLAN-weapon-fx-gaps Phase F item 2) — the visual
     // companion to the muzzle light, emitted on weapon fire below.
     muzzleFlareRenderer = new MuzzleFlareRenderer(scene, camera);
+
+    // Phase V coverage handle. Lazy getters read the module-level FX
+    // systems at access time (cegRuntime / projectileRenderer are assigned
+    // later in this same function). Lets the visual-parity capture dump
+    // "which main-thread FX engaged" per archetype — the CEG/projectile/
+    // light side that the worker `WG.__lupsAudit` instrument can't see.
+    (window as unknown as { __fx: unknown }).__fx = {
+        get cegLive() { return cegRuntime?.liveCount ?? -1; },
+        get projectiles() { return projectileRenderer?.count ?? -1; },
+        get fxLights() { return fxLightPool?.activeCount ?? -1; },
+        snapshot() {
+            return {
+                cegLive: cegRuntime?.liveCount ?? -1,
+                projectiles: projectileRenderer?.count ?? -1,
+                fxLights: fxLightPool?.activeCount ?? -1,
+            };
+        },
+    };
 
     // Phase G: gate the expensive FX through the graphics-quality presets.
     // `gfx.fxLights` toggles the pool live; `gfx.particleQuality` (tier
@@ -998,10 +1049,19 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         },
         // The legacy 0x04 per-tick projectile state envelope is no longer
         // emitted by the server; ProjectileRenderer now drives off Fired /
-        // Impact / Trajectory events and integrates motion locally.
+        // Impact / Trajectory events and integrates motion locally. Events
+        // render on arrival; the server (pause/speed authority) controls the
+        // pace, so no client-side playback buffer is needed.
         onProjectileFired(events) {
             if (!projectileRenderer) return;
             for (const e of events) projectileRenderer.onFired(e);
+            // Capture aid: freeze a beat after the shot so the beam + muzzle
+            // + impact are all on screen, then hold (freezeFx pauses server).
+            if (captureOnFireDelayMs !== null && events.length > 0) {
+                const delay = captureOnFireDelayMs;
+                captureOnFireDelayMs = null;
+                window.setTimeout(freezeFx, delay);
+            }
         },
         onProjectileImpacts(events) {
             for (const e of events) projectileRenderer?.onImpact(e);
@@ -1088,7 +1148,15 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             // Projectile integrator needs the current sim-speed so its
             // wall-clock dt translates to sim-time motion / ttl decay.
             // Treat paused as 0× so bolts freeze with the sim.
-            projectileRenderer?.setSimSpeed(paused ? 0 : speed);
+            lastServerSpeed = speed;
+            lastServerPaused = paused;
+            // fxFrozen (capture freeze) overrides the live speed → 0.
+            const effSpeed = fxFrozen ? 0 : (paused ? 0 : speed);
+            projectileRenderer?.setSimSpeed(effSpeed);
+            // Same sim-speed drives all the other FX systems' aging in the
+            // render loop (see fxSimSpeed) so muzzle flares / lights / CEG
+            // particles / distortion slow + freeze with the game too.
+            fxSimSpeed = effSpeed;
         },
         onUnitCommandQueues(queues) {
             lastCommandQueues = queues;
@@ -1277,6 +1345,19 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         });
         (window as unknown as { test: TestHarness }).test = testHarness;
     }
+    // Capture helpers (see fxFrozen): arm a freeze on the next shot, or
+    // thaw. `__captureOnFire(delayMs)` then take_screenshot then
+    // `__captureResume()`. Deterministic — no racing transient FX.
+    (window as unknown as { __captureOnFire: (d?: number) => void }).__captureOnFire =
+        (delayMs = 140) => { captureOnFireDelayMs = delayMs; fxFrozen = false; };
+    (window as unknown as { __captureResume: () => void }).__captureResume = () => {
+        fxFrozen = false;
+        captureOnFireDelayMs = null;
+        void testHarness?.simResume();
+        const eff = lastServerPaused ? 0 : lastServerSpeed;
+        fxSimSpeed = eff;
+        projectileRenderer?.setSimSpeed(eff);
+    };
     // Route ground-click suppression through the widget manager. The
     // widget manager is created later (when MapData arrives) so we read
     // it lazily — by the time the user clicks anything, the manager has
@@ -1327,6 +1408,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         // updates keep arriving so the harness can still query state.
         if (testRenderPaused) return;
 
+        // Sim-scaled delta for VISUAL FX aging — slows / freezes with the
+        // game speed (fxSimSpeed). Camera + decal-clipmap ticks below keep
+        // the raw wall dt; only effect lifetimes use fxDt.
+        const fxDt = dt * fxSimSpeed;
+
         rtsCamera.tick();
         // InputManager.tick currently only refits the tracking camera
         // on the live selection — cheap when tracking is off. Run it
@@ -1336,8 +1422,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         entityRenderer?.tick();
         buildBeamRenderer?.tick();
         projectileRenderer?.tick();
-        cegRuntime?.tick(dt);
-        combatFX?.tick(dt);
+        cegRuntime?.tick(fxDt);
+        combatFX?.tick(fxDt);
         // Feed the camera ground focus + height so the decal clipmap's fine
         // window tracks the view (PLAN-decal-vt.md V1: sharp near-camera decals,
         // VRAM bounded regardless of map size).
@@ -1348,12 +1434,12 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         }
         // Age the dynamic FX lights after the emitters have run this frame
         // and before scene.render() consumes the lighting.
-        fxLightPool?.update(dt, camera.position);
+        fxLightPool?.update(fxDt, camera.position);
         // Upload this frame's shockwave emissions before the offset RTT
         // renders (combat + projectile renderers emit during their ticks
         // above). The composite samples the result during scene.render().
-        distortionRenderer?.tick(dt);
-        muzzleFlareRenderer?.tick(dt);
+        distortionRenderer?.tick(fxDt);
+        muzzleFlareRenderer?.tick(fxDt);
 
         // Listener follows the camera every frame so HRTF stays in
         // sync with smooth camera motion. Previously this only fired

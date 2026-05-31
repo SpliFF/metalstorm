@@ -257,7 +257,7 @@ export const PRESETS: Record<string, Record<string, SettingValue>> = {
         'gfx.bloom':          true,
         'gfx.particleQuality': 2,
         'gfx.fxLights':       true,
-        'gfx.distortion':     true,
+        'gfx.distortion':     false,
     },
 };
 
@@ -300,9 +300,11 @@ const REGISTRY: SettingDef[] = [
     { key: 'gfx.fxLights', type: 'bool', default: true, scope: 'client',
       label: 'Dynamic FX Lights' },
     // Screen-space distortion pass (heat-haze / cloak / shockwave warp).
-    // Consumed by Phase D's composite once it lands; the key exists now
-    // so presets are complete and the toggle is in the panel.
-    { key: 'gfx.distortion', type: 'bool', default: true, scope: 'client',
+    // Phase D composite. DEFAULT OFF: it's experimental and its full-screen
+    // composite currently renders black when the sim is paused (the offset
+    // RTT/composite doesn't recover), which black-screened the whole game on
+    // pause. Off by default until that's fixed; the toggle stays in the panel.
+    { key: 'gfx.distortion', type: 'bool', default: false, scope: 'client',
       label: 'Heat Distortion' },
 
     // Engine options a game's menu sets (PLAN-settings.md §4). Defaults

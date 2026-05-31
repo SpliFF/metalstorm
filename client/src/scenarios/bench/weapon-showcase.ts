@@ -51,6 +51,26 @@ const CMD_MANUALFIRE   = 105;
 // Map metrics: green_flat_x34_v3 is 17408×17408 elmos, completely flat.
 const MAP_CENTER = 8704;
 
+// Phase V capture hook. The cycle publishes the active archetype on
+// `window.__showcase` so an external driver (screenshot capture) can sync
+// to each entry instead of guessing at the 18 s dwell timing.
+interface ShowcaseProgress {
+    keys: string[]; total: number;
+    index: number; key: string; title: string;
+    phase: 'firing' | 'impact' | 'cleared' | 'done';
+    enteredAt: number;
+}
+function setShowcaseEntry(keys: string[], index: number, w: { key: string; title: string }): void {
+    (window as unknown as { __showcase?: ShowcaseProgress }).__showcase = {
+        keys, total: keys.length, index, key: w.key, title: w.title,
+        phase: 'firing', enteredAt: Date.now(),
+    };
+}
+function setShowcasePhase(phase: ShowcaseProgress['phase']): void {
+    const s = (window as unknown as { __showcase?: ShowcaseProgress }).__showcase;
+    if (s) { s.phase = phase; s.enteredAt = Date.now(); }
+}
+
 // Default sim-speed and per-pair dwell. 0.25× makes projectile travel
 // readable; 18 s of wall time = 4.5 s of sim time, comfortably more
 // than a reload for every weapon listed below except the nuke
@@ -433,6 +453,7 @@ async function fireOneEntry(
     }
 
     console.log(`[weapon-showcase] ► ${w.key}: ${w.title}`);
+    setShowcasePhase('firing');
 
     // Dwell. The scenario can be paused / resumed via the player's
     // own hotkeys — sleep() doesn't block those.
@@ -450,6 +471,7 @@ async function fireOneEntry(
         await h.cameraSnapToGround(tx, tz, {
             height: ic.height, pitchDeg: ic.pitchDeg ?? 45, durationMs: 1400,
         });
+        setShowcasePhase('impact');
         await sleep(Math.max(0, dwellMs - launchDwell));
     } else {
         await sleep(dwellMs);
@@ -539,16 +561,21 @@ const scenario: Scenario = {
 
         // Cycling mode: run each entry in turn. The whole loop owns
         // the dwellMs budget, and clears the arena between entries.
-        for (const w of entries) {
+        const keys = entries.map((w) => w.key);
+        for (let i = 0; i < entries.length; i++) {
+            const w = entries[i];
             await clearArena(h);
+            setShowcaseEntry(keys, i, w);
             try {
                 await fireOneEntry(h, w, dwellMs);
             } catch (err) {
                 console.error(`[weapon-showcase] entry "${w.key}" threw:`, err);
                 // Don't bail — try the next archetype.
             }
+            setShowcasePhase('cleared');
         }
 
+        setShowcasePhase('done');
         console.log(`[weapon-showcase] cycle complete. Reload the page to repeat.`);
     },
 };

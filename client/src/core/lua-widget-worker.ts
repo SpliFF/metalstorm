@@ -2449,9 +2449,30 @@ defaultFont = activeFont
                 WG.__lupsAudit = {
                     unknown = {}, badParams = {},
                     totalAdd = 0, totalUnknown = 0, totalBad = 0,
+                    -- Phase V per-class coverage. [lowerClassName] = {
+                    --   calls    = AddParticles invocations,
+                    --   created  = returned a live id (>0) => entered the
+                    --              RenderSequence => will be drawn,
+                    --   failed   = returned -1 (unknown class / invalid unit
+                    --              / Create returned nil) => draws nothing,
+                    --   maxAliveFx / maxAlivePart = peak live counts seen by
+                    --              SampleLupsAudit (GetStats snapshot). }
+                    byClass = {}, samples = 0,
                 }
                 local audit = WG.__lupsAudit
                 local has = L.HasParticleClass
+
+                local function bump(Class)
+                    if type(Class) ~= "string" then return nil end
+                    local k = string.lower(Class)
+                    local b = audit.byClass[k]
+                    if not b then
+                        b = { calls = 0, created = 0, failed = 0,
+                              maxAliveFx = 0, maxAlivePart = 0 }
+                        audit.byClass[k] = b
+                    end
+                    return b
+                end
 
                 local function record(Class, Options)
                     audit.totalAdd = audit.totalAdd + 1
@@ -2479,16 +2500,33 @@ defaultFont = activeFont
                 local origAdd = L.AddParticles
                 L.AddParticles = function(Class, Options, ...)
                     record(Class, Options)
-                    return origAdd(Class, Options, ...)
+                    local id = origAdd(Class, Options, ...)
+                    local b = bump(Class)
+                    if b then
+                        b.calls = b.calls + 1
+                        if type(id) == "number" and id > 0 then
+                            b.created = b.created + 1
+                        else
+                            b.failed = b.failed + 1
+                        end
+                    end
+                    return id
                 end
 
                 if L.AddParticlesArray then
                     local origArr = L.AddParticlesArray
                     L.AddParticlesArray = function(array, ...)
+                        -- origArr calls the module-local AddParticles (not our
+                        -- wrapped L.AddParticles), so per-element created/failed
+                        -- is not observable here; tally calls only.
                         if type(array) == "table" then
                             for i = 1, #array do
                                 local e = array[i]
-                                if type(e) == "table" then record(e.class, e) end
+                                if type(e) == "table" then
+                                    record(e.class, e)
+                                    local b = bump(e.class)
+                                    if b then b.calls = b.calls + 1 end
+                                end
                             end
                         end
                         return origArr(array, ...)
@@ -2499,22 +2537,65 @@ defaultFont = activeFont
                 -- gadgets calling GG.Lups.AddParticles hit the audited path.
                 GG.Lups = L
 
-                -- Convenience console dump.
-                _G.DumpLupsAudit = function()
-                    local a = WG.__lupsAudit
-                    Spring.Echo(string.format(
-                        "[lups] audit: %d adds, %d unknown-class, %d bad-param",
-                        a.totalAdd, a.totalUnknown, a.totalBad))
-                    for cls, n in pairs(a.unknown) do
-                        Spring.Echo("[lups]   unknown class '" .. cls ..
-                            "' x" .. n)
+                -- Phase V live-coverage sampler. Snapshots GetStats() (per-
+                -- class fx/particle counts as they sit in the RenderSequence)
+                -- and folds the peak into byClass. Call periodically during a
+                -- capture dwell to catch the alive peak, which lags emission.
+                _G.SampleLupsAudit = function()
+                    if not L.GetStats then return end
+                    local ok, count, layers, effects = pcall(L.GetStats)
+                    if not ok or type(effects) ~= "table" then return end
+                    audit.samples = audit.samples + 1
+                    audit.lastCount = count
+                    for name, t in pairs(effects) do
+                        local b = bump(name)
+                        if b then
+                            local fxN, partN = t[1] or 0, t[2] or 0
+                            if fxN > b.maxAliveFx then b.maxAliveFx = fxN end
+                            if partN > b.maxAlivePart then b.maxAlivePart = partN end
+                        end
                     end
-                    for k, n in pairs(a.badParams) do
-                        Spring.Echo("[lups]   bad param " .. k .. " x" .. n)
+                    return count
+                end
+
+                -- Per-class verdict string (also the evaluate_widget_lua
+                -- return payload). Each row: class | calls | created | failed |
+                -- peakFx | peakPart, so "645 calls / 4 live" resolves to which
+                -- classes fire, which create FX, and which silently fail.
+                _G.LupsAuditReport = function()
+                    local a = WG.__lupsAudit
+                    local rows = {}
+                    rows[#rows+1] = string.format(
+                        "[lups] %d adds | %d unknown | %d bad | %d samples",
+                        a.totalAdd, a.totalUnknown, a.totalBad, a.samples)
+                    rows[#rows+1] =
+                        "class | calls created failed peakFx peakPart"
+                    -- stable-ish: sort by calls desc via simple selection
+                    local keys = {}
+                    for k in pairs(a.byClass) do keys[#keys+1] = k end
+                    table.sort(keys, function(x, y)
+                        return a.byClass[x].calls > a.byClass[y].calls
+                    end)
+                    for _, k in ipairs(keys) do
+                        local b = a.byClass[k]
+                        rows[#rows+1] = string.format(
+                            "%s | %d %d %d %d %d", k,
+                            b.calls, b.created, b.failed,
+                            b.maxAliveFx, b.maxAlivePart)
+                    end
+                    return table.concat(rows, "\\n")
+                end
+
+                -- Convenience console dump (echoes the report line-by-line).
+                _G.DumpLupsAudit = function()
+                    _G.SampleLupsAudit()
+                    for line in string.gmatch(
+                            _G.LupsAuditReport() .. "\\n", "(.-)\\n") do
+                        if line ~= "" then Spring.Echo(line) end
                     end
                 end
 
-                Spring.Echo("[lups] Z5 emission audit installed; GG.Lups bridged")
+                Spring.Echo("[lups] Z5/Phase-V emission audit installed; GG.Lups bridged")
             end
         else
             Spring.Echo("[lups] Z5 audit skipped — WG.Lups absent")

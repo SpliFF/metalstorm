@@ -514,6 +514,66 @@ Defs are streamed on-demand: the server tracks `knownUnitDefs` and `knownWeaponD
 per ClientSession and sends each def exactly once per game session, just before the
 first entity/projectile state update that references it.
 
+## Weapon / Projectile Rendering Strategies (target model)
+
+> **Status:** design/target. Today the engine is effectively **Sim** for every
+> weapon (the server owns projectile state; Fired/Impact/Trajectory events drive
+> the client). **Mixed** and **Client** are not implemented yet, and the exact
+> wire format depends on the in-progress *client-server over-sharing reduction*
+> plan (another workstream) — **do not implement concretely until that lands.**
+> This section records the intended architecture so weapon-FX work plans toward it.
+
+**Goal:** offload most projectile/beam *rendering* decisions to the client so the
+server need not stream per-frame projectile positions/velocities. The server sends
+only the *unknowable* events a client can't predict — shield deflections,
+nuke/anti-nuke interception, chaff / re-targeting, and other game-rules outcomes —
+while the client predicts the deterministic trajectory itself. This cuts the
+dominant per-frame bandwidth (thousands of projectiles) to event-only traffic.
+
+**A per-weapon `weaponDef` field selects the strategy** (three values):
+
+1. **`sim`** (legacy / most faithful). The server simulates the projectile fully
+   and the client renders from server-authoritative state. Recoil's projectile
+   Lua queries (`Spring.GetProjectilePosition` / `GetProjectileVelocity` / etc.)
+   resolve against **server** state. Highest fidelity, highest bandwidth (per-frame
+   streaming). **Opt-in for heavy-hitters** where the exact authoritative path
+   matters and is worth the cost: artillery, ballistic missiles, nukes.
+
+2. **`mixed`** (new — **default for most weapons**). The server sends the **Fired**
+   event (weapon def, start pos, target/dir) plus the *unknowable* events above.
+   The client **computes the trajectory locally** from the weapon def (speed,
+   gravity, tracking, beamTTL…) — the same deterministic math Recoil's sim runs —
+   and renders from its own prediction, correcting on server events (hit here,
+   deflected there). Recoil's projectile Lua queries resolve against the
+   **client's** predicted projectile state (no server round-trip). For beams the
+   Fired event already carries `from`/`to`, so the client has both endpoints
+   immediately. Balanced: faithful-enough (client replicates Recoil's projectile
+   integration) while eliminating per-frame streaming. Would not change visible
+   behaviour for ZK/BAR-style trajectory combat.
+
+3. **`client`** (new — future games only). No server-synced projectile state; the
+   client owns the entire weapon path from assumptions/RNG. Reserved for future
+   games where combat *outcomes* are decided by RNG rather than a real assessment
+   of projectile trajectories/collisions. **Breaks** trajectory-based games like
+   Zero-K and BAR, so it is never their default.
+
+**How the projectile Lua API behaves per strategy.** Recoil's unsynced projectile
+queries are the seam. The client maintains projectile representations for rendering
+in every mode; the engine routes `Spring.GetProjectilePosition` /
+`GetProjectileVelocity` (note: for **beam**-type projectiles `GetProjectileVelocity`
+is overloaded to return the beam **endpoint delta**, not a velocity) / `GetProjectileDefID`
+to either server-streamed state (`sim`) or client-predicted state (`mixed`/`client`).
+This lets ZK's own projectile-FX widgets/gadgets (e.g. `gfx_projectile_lights.lua`,
+LUPS emitters) run **unchanged in the LuaUI worker** against whichever state the
+weapon's strategy provides — the faithful path for projectile lighting, trails, and
+particle FX, rather than hardcoded client stand-ins.
+
+**Allowance (called out):** ZK's projectile lights feed a **GL4 deferred** renderer
+that WebGL2 can't run; the *data and behaviour* (per-weapon `customParams.light_*`,
+beam-length segment lights, `beamTTL` fade) stay faithful, but the *rendering tech*
+is substituted with the forward-light pool (`fx-light-pool.ts`) — a GL4→WebGL2
+substitution, not a behavioural change.
+
 ## Current Status (2026-05-04)
 
 **Stable end-to-end loop:** lobby → create room → start game → fight → game-over → return to lobby. Player disconnect handling: server detects WebSocket close, fires `PlayerRemoved` Lua callin, broadcasts `PlayerLeft` to remaining clients, cleans up session. Default engine gadget ends the game when no humans remain.
