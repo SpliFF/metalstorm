@@ -24,7 +24,7 @@ import { AnimatedCursor } from './core/animated-cursor.js';
 import { BuildMenu } from './core/build-menu.js';
 import { OrderPanel } from './core/order-panel.js';
 import { EconomyBar } from './core/economy-bar.js';
-import { buildTerrainMesh, loadTerrainTextures, TerrainFog, type MapDimensions } from './core/terrain.js';
+import { buildTerrainMesh, loadTerrainTextures, TerrainFog, DeformableTerrain, type MapDimensions } from './core/terrain.js';
 import { DecalOverlay, buildTrackTypeNames } from './core/decal-overlay.js';
 import { attachDecalOverlay } from './core/decal-overlay-plugin.js';
 import { LobbyUI } from './lobby/lobby-ui.js';
@@ -555,6 +555,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
 
     // Terrain state — populated when MapData arrives
     let terrainMesh: Mesh | null = null;
+    let deformTerrain: DeformableTerrain | null = null;
     let terrainFog: TerrainFog | null = null;
     let currentMapData: ParsedMapData | null = null;
     let currentWidgetManager: LuaWidgetManager | null = null;
@@ -648,6 +649,12 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         // hill self-shadows oddly, and the sun direction is high enough
         // that map-scale relief reads as ambient occlusion instead.
         terrainMesh.receiveShadows = true;
+        // PLAN-deformable-terrain T3: live heightmap deformation. Server
+        // broadcasts changed corner-rects (envelope 0x09) as the terrain
+        // craters / terraforms; DeformableTerrain rewrites the affected mesh
+        // vertices + normals in place. Rebuilt with the mesh on every MapData.
+        deformTerrain = new DeformableTerrain(terrainMesh, mapDims);
+        (window as unknown as { __deformTerrain: unknown }).__deformTerrain = deformTerrain;
         console.log('[client] terrain mesh built from MapData heightmap');
 
         // Ground decals (PLAN-decals.md D7): a persistent baked overlay the
@@ -1079,6 +1086,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         },
         onDecals(snapshot) {
             decalOverlay?.onSnapshot(snapshot.scars, snapshot.tracks);
+        },
+        onHeightmapPatch(patch) {
+            // PLAN-deformable-terrain T3: apply a live heightmap deformation
+            // patch (envelope 0x09) to the terrain mesh.
+            deformTerrain?.applyPatch(patch);
         },
         onCombatEvents(events) {
             combatFX?.onCombatEvents(events);

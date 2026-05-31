@@ -2420,6 +2420,38 @@ int main(int argc, char* argv[])
             }
         }
 
+        // Heightmap deformation broadcast (PLAN-deformable-terrain T2).
+        // Every synced height change this tick (engine craters via
+        // CBasicMapDamage::Update→RecalcArea, and the Spring.*HeightMap Lua
+        // family) recorded its changed corner-rect in CReadMap. Drain them,
+        // coalesce into one bounding rect (the common case is a single crater
+        // or one contiguous terraform op per tick), read the current corner
+        // heights, and broadcast to every client. Terrain has no fog of war,
+        // so no per-session LOS filtering — one BroadcastReliable for all.
+        if (readMap != nullptr) {
+            // Always drain (bounds memory even with no clients connected);
+            // only build + broadcast when someone is listening.
+            auto dirty = readMap->DrainServerDirtyHeightRects();
+            if (!dirty.empty() && rtcServer.GetClientCount() > 0) {
+                int x1 = dirty[0].x1, z1 = dirty[0].z1;
+                int x2 = dirty[0].x2, z2 = dirty[0].z2;
+                for (const auto& r : dirty) {
+                    x1 = std::min(x1, r.x1); z1 = std::min(z1, r.z1);
+                    x2 = std::max(x2, r.x2); z2 = std::max(z2, r.z2);
+                }
+                // Clamp to inclusive corner bounds [0..mapx] x [0..mapy].
+                x1 = std::max(x1, 0); z1 = std::max(z1, 0);
+                x2 = std::min(x2, mapDims.mapx); z2 = std::min(z2, mapDims.mapy);
+                if (x2 >= x1 && z2 >= z1) {
+                    const auto hmBatch = Protocol::BuildHeightmapUpdate(
+                        static_cast<uint32_t>(sim.GetFrameNum()),
+                        x1, z1, x2, z2,
+                        readMap->GetCornerHeightMapSynced(), mapDims.mapxp1);
+                    rtcServer.BroadcastReliable(hmBatch.data(), hmBatch.size());
+                }
+            }
+        }
+
         // SendToUnsynced forwards — synced LuaRules gadgets call
         // Spring.SendToUnsynced(topic, ...) to hand work to their
         // unsynced halves. The unsynced state on the headless server is

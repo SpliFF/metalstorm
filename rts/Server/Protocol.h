@@ -54,6 +54,15 @@ constexpr uint8_t ENVELOPE_LOS_BITMAP = 0x07;
 /// write-once (no delta). Layout: u8 envelope + u32 frame + u16 scarCount +
 /// scars[] + u16 trackCount + tracks[]. See BuildDecalBatch below.
 constexpr uint8_t ENVELOPE_DECALS = 0x08;
+/// Heightmap deformation patch (PLAN-deformable-terrain T2). One changed
+/// corner-rect of the synced heightmap, broadcast to all clients each tick
+/// the terrain deforms (engine craters + Spring.*HeightMap terraforming).
+/// Terrain has no fog of war, so it is not LOS-filtered. Heights are int16
+/// quantised at 1/16 elmo (range +-2048 elmo). Layout: u8 envelope + u32
+/// frame + u16 x1 + u16 z1 + u16 x2 + u16 z2 (inclusive corner coords) +
+/// int16 heights[(x2-x1+1)*(z2-z1+1)] row-major (z outer, x inner).
+/// See BuildHeightmapUpdate below.
+constexpr uint8_t ENVELOPE_HEIGHTMAP = 0x09;
 
 /// Build a framed ServerMessage (envelope byte + FlatBuffers payload).
 inline std::vector<uint8_t> BuildServerMessage(
@@ -1223,6 +1232,44 @@ inline std::vector<uint8_t> BuildDecalBatch(
         putU8(t.team);
     }
 
+    return out;
+}
+
+// Heightmap deformation patch (envelope 0x09). Reads the current synced
+// corner heights for the inclusive corner-rect [x1..x2] x [z1..z2] and packs
+// them int16-quantised at 1/16 elmo. `cornerHeights` is the (mapx+1)-wide
+// corner heightmap (CReadMap::GetCornerHeightMapSynced()); `cornerStride` is
+// mapx+1. Caller has already merged/clamped the rect to valid corner bounds.
+inline std::vector<uint8_t> BuildHeightmapUpdate(
+    uint32_t frameNo,
+    int x1, int z1, int x2, int z2,
+    const float* cornerHeights, int cornerStride)
+{
+    std::vector<uint8_t> out;
+    auto putU8  = [&](uint8_t v) { out.push_back(v); };
+    auto putU16 = [&](uint16_t v) { out.push_back(uint8_t(v)); out.push_back(uint8_t(v >> 8)); };
+    auto putU32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) out.push_back(uint8_t(v >> (8 * i))); };
+    auto putI16 = [&](int16_t v) { uint16_t u = uint16_t(v); out.push_back(uint8_t(u)); out.push_back(uint8_t(u >> 8)); };
+
+    const int w = (x2 - x1 + 1);
+    const int h = (z2 - z1 + 1);
+
+    putU8(ENVELOPE_HEIGHTMAP);
+    putU32(frameNo);
+    putU16(uint16_t(x1)); putU16(uint16_t(z1));
+    putU16(uint16_t(x2)); putU16(uint16_t(z2));
+
+    out.reserve(out.size() + size_t(w) * size_t(h) * 2);
+    for (int z = z1; z <= z2; ++z) {
+        const float* row = cornerHeights + size_t(z) * cornerStride;
+        for (int x = x1; x <= x2; ++x) {
+            // int16 at 1/16 elmo; clamp to the representable +-2048 elmo range.
+            float q = row[x] * 16.0f;
+            if (q >  32767.0f) q =  32767.0f;
+            if (q < -32768.0f) q = -32768.0f;
+            putI16(int16_t(q >= 0.0f ? q + 0.5f : q - 0.5f));
+        }
+    }
     return out;
 }
 

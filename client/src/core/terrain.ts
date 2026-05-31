@@ -124,7 +124,10 @@ export function buildTerrainMesh(
     vd.indices = indices;
     vd.normals = normals;
     vd.uvs = uvs;
-    vd.applyToMesh(mesh);
+    // `updatable = true` keeps the position + normal buffers CPU-backed so
+    // DeformableTerrain (PLAN-deformable-terrain T3) can rewrite affected
+    // vertices in place on each heightmap patch without recreating the mesh.
+    vd.applyToMesh(mesh, true);
 
     // Default material (replaced when textures load)
     const mat = new StandardMaterial('terrainMat', scene);
@@ -135,6 +138,128 @@ export function buildTerrainMesh(
 
     console.log(`[terrain] mesh: ${gridW}x${gridH} vertices (step ${stepX})`);
     return mesh;
+}
+
+/**
+ * DeformableTerrain — applies live server heightmap patches (envelope 0x09,
+ * PLAN-deformable-terrain T3) to the terrain mesh built by `buildTerrainMesh`.
+ *
+ * The mesh is subsampled to ≤512 vertices per axis (see `buildTerrainMesh`):
+ * grid vertex (gx, gz) samples corner-heightmap cell (gx·stepX, gz·stepZ).
+ * A patch arrives in corner coordinates [x1..x2]×[z1..z2] with actual world-Y
+ * heights. For each grid vertex whose sampled corner falls inside the patch
+ * rect, we rewrite its Y, then recompute vertex normals over the affected
+ * region plus a one-vertex skirt using central differences over the
+ * heightfield (exact for a regular grid; matches the +Y-up orientation
+ * `buildTerrainMesh` produces by negating ComputeNormals output), and push
+ * just the position + normal buffers back to the GPU.
+ *
+ * **Subsample limitation (documented):** on large maps stepX/stepZ > 1, so a
+ * patch narrower than one grid step may contain no sampled corner and produce
+ * no visible change. This is the same subsampling the static mesh already
+ * accepts; full-resolution maps (the common test maps) deform exactly. A
+ * CDLOD / per-corner mesh is the v2 upgrade (PLAN-deformable-terrain T3 note).
+ */
+export class DeformableTerrain {
+    private positions: Float32Array;
+    private normals: Float32Array;
+    private readonly gridW: number;
+    private readonly gridH: number;
+    private readonly stepX: number;
+    private readonly stepZ: number;
+    private readonly hmW: number; // corner heightmap width  = mapx + 1
+    private readonly hmH: number; // corner heightmap height = mapy + 1
+    private patchCount = 0;
+
+    constructor(private mesh: Mesh, dims: MapDimensions) {
+        this.hmW = dims.mapx + 1;
+        this.hmH = dims.mapy + 1;
+        const MAX_VERTS = 512;
+        this.stepX = Math.max(1, Math.floor(this.hmW / MAX_VERTS));
+        this.stepZ = Math.max(1, Math.floor(this.hmH / MAX_VERTS));
+        this.gridW = Math.floor((this.hmW - 1) / this.stepX) + 1;
+        this.gridH = Math.floor((this.hmH - 1) / this.stepZ) + 1;
+
+        const pos = mesh.getVerticesData(VertexBuffer.PositionKind);
+        const nrm = mesh.getVerticesData(VertexBuffer.NormalKind);
+        if (!pos || !nrm) {
+            throw new Error('[terrain] DeformableTerrain: mesh has no position/normal data');
+        }
+        // getVerticesData may return a plain number[] depending on Babylon's
+        // backing store; normalise to Float32Array we own and write through.
+        this.positions = pos instanceof Float32Array ? pos : new Float32Array(pos);
+        this.normals = nrm instanceof Float32Array ? nrm : new Float32Array(nrm);
+    }
+
+    /** Apply one heightmap patch (corner coords, actual world-Y heights). */
+    applyPatch(p: { x1: number; z1: number; x2: number; z2: number; heights: Float32Array }): void {
+        const { x1, z1, x2, z2, heights } = p;
+        const pw = x2 - x1 + 1;
+
+        // Grid-vertex range whose sampled corner can fall inside the rect.
+        let gx0 = Math.ceil(x1 / this.stepX);
+        let gx1 = Math.floor(x2 / this.stepX);
+        let gz0 = Math.ceil(z1 / this.stepZ);
+        let gz1 = Math.floor(z2 / this.stepZ);
+        // Clamp to the last grid vertex (which clamps its source to hmW/H-1).
+        gx0 = Math.max(0, gx0); gx1 = Math.min(this.gridW - 1, gx1);
+        gz0 = Math.max(0, gz0); gz1 = Math.min(this.gridH - 1, gz1);
+        if (gx0 > gx1 || gz0 > gz1) return; // patch fell between grid samples
+
+        for (let gz = gz0; gz <= gz1; gz++) {
+            const srcZ = Math.min(gz * this.stepZ, this.hmH - 1);
+            if (srcZ < z1 || srcZ > z2) continue;
+            for (let gx = gx0; gx <= gx1; gx++) {
+                const srcX = Math.min(gx * this.stepX, this.hmW - 1);
+                if (srcX < x1 || srcX > x2) continue;
+                const worldY = heights[(srcZ - z1) * pw + (srcX - x1)];
+                this.positions[(gz * this.gridW + gx) * 3 + 1] = worldY;
+            }
+        }
+
+        // Recompute normals over the affected grid region + a 1-vertex skirt so
+        // the seam to undisturbed terrain stays smooth.
+        const nx0 = Math.max(0, gx0 - 1), nx1 = Math.min(this.gridW - 1, gx1 + 1);
+        const nz0 = Math.max(0, gz0 - 1), nz1 = Math.min(this.gridH - 1, gz1 + 1);
+        for (let gz = nz0; gz <= nz1; gz++) {
+            for (let gx = nx0; gx <= nx1; gx++) {
+                this.recomputeNormal(gx, gz);
+            }
+        }
+
+        this.mesh.updateVerticesData(VertexBuffer.PositionKind, this.positions, true);
+        this.mesh.updateVerticesData(VertexBuffer.NormalKind, this.normals, false);
+        this.patchCount++;
+    }
+
+    /** Number of patches applied so far (debug / verification handle). */
+    get appliedPatches(): number { return this.patchCount; }
+
+    /** Central-difference heightfield normal at grid vertex (gx, gz). The
+     *  world spacing between grid samples is stepX·SQUARE_SIZE (X) and
+     *  stepZ·SQUARE_SIZE (Z); forward/backward difference at the borders. */
+    private recomputeNormal(gx: number, gz: number): void {
+        const W = this.gridW, H = this.gridH;
+        const yAt = (x: number, z: number) => this.positions[(z * W + x) * 3 + 1];
+
+        const xm = gx > 0 ? gx - 1 : gx;
+        const xp = gx < W - 1 ? gx + 1 : gx;
+        const zm = gz > 0 ? gz - 1 : gz;
+        const zp = gz < H - 1 ? gz + 1 : gz;
+
+        const dx = (xp - xm) * this.stepX * SQUARE_SIZE;
+        const dz = (zp - zm) * this.stepZ * SQUARE_SIZE;
+        const dHdx = dx > 0 ? (yAt(xp, gz) - yAt(xm, gz)) / dx : 0;
+        const dHdz = dz > 0 ? (yAt(gx, zp) - yAt(gx, zm)) / dz : 0;
+
+        // Up-facing heightfield normal: normalize(-dHdx, 1, -dHdz).
+        let nx = -dHdx, ny = 1, nz = -dHdz;
+        const inv = 1 / Math.hypot(nx, ny, nz);
+        nx *= inv; ny *= inv; nz *= inv;
+
+        const o = (gz * W + gx) * 3;
+        this.normals[o] = nx; this.normals[o + 1] = ny; this.normals[o + 2] = nz;
+    }
 }
 
 /**
