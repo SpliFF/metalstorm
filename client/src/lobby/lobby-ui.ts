@@ -989,10 +989,25 @@ export class LobbyUI {
 
     async joinRoom(roomId: number): Promise<void> {
         if (!this.authToken) return;
-        const data = await this.lobbyPost('/api/rooms/join', { room_id: roomId });
+        let data: any = null;
+        try {
+            data = await this.lobbyPost('/api/rooms/join', { room_id: roomId });
+        } catch { /* network / non-JSON error — handled as a failed join below */ }
         if (data?.id) {
             this.updateCurrentRoomFromJson(data);
             if (this.currentRoom) this.showRoom();
+            return;
+        }
+        // Join failed (room deleted/reset, full, or no longer joinable).
+        // Self-heal the auto-reconnect: if this was the saved-room rejoin
+        // (tryAutoLogin), clear the stale `springrts-game-room` so we don't
+        // silently retry a corpse on every page load and strand the player
+        // in a dead room. An explicit user-driven join that fails leaves a
+        // valid current room's saved id untouched.
+        if (roomId === this.pendingRejoinRoomId) {
+            this.pendingRejoinRoomId = 0;
+            localStorage.removeItem('springrts-game-room');
+            console.warn(`[lobby] auto-rejoin of room ${roomId} failed (gone?); cleared stale saved room`);
         }
     }
 
