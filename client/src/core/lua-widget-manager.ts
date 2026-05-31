@@ -934,6 +934,23 @@ export class LuaWidgetManager {
         });
     }
 
+    /** Mirror the current live-projectile set into the worker so ZK's
+     *  authored projectile-FX widgets (gfx_projectile_lights.lua, LUPS
+     *  emitters) can read it via Spring.GetProjectile* (A3 seam). Called
+     *  once per render frame from main.ts with the renderer's snapshot.
+     *  The payload is a plain object array — projectile counts are modest
+     *  (tens–low-hundreds) so per-frame typed-array transfer isn't worth
+     *  the complexity; the worker rebuilds its `projectiles` map from it. */
+    forwardProjectileState(projectiles: ReadonlyArray<{
+        id: number; defId: number;
+        x: number; y: number; z: number;
+        vx: number; vy: number; vz: number;
+        ttl: number; isBeam: boolean;
+    }>): void {
+        if (this.disposed) return;
+        this.postToWorker({ type: 'projectileState', projectiles });
+    }
+
     /** Push a per-tick batch of synced UnitCommand / UnitCmdDone events
      *  into the worker. The worker dispatches `widget:UnitCommand` /
      *  `widget:UnitCmdDone` from each entry. */

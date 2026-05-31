@@ -30,6 +30,7 @@ import {
     type LiveState,
     type UnitEntry,
     type FeatureEntry,
+    type ProjectileEntry,
 } from './lua-spring-api.js';
 
 // Engine-bundled test widgets. Loaded only when `?widgetTest` is active.
@@ -5349,6 +5350,27 @@ self.onmessage = async (e: MessageEvent) => {
             }
             for (const d of defs) unitDefMap.set(d.defId, d);
             if (runtime) republishDefGlobals(runtime);
+            break;
+        }
+
+        case 'projectileState': {
+            // A3: rebuild the live-projectile mirror from the main-thread
+            // ProjectileRenderer snapshot. Full replace each frame — the set
+            // is small and short-lived, so a fresh Map is cheaper than
+            // diffing and avoids stale ids lingering after impact.
+            const projs = msg.projectiles as ReadonlyArray<ProjectileEntry & { id: number }> | undefined;
+            const next = new Map<number, ProjectileEntry>();
+            if (projs) {
+                for (const p of projs) {
+                    next.set(p.id, {
+                        defId: p.defId,
+                        x: p.x, y: p.y, z: p.z,
+                        vx: p.vx, vy: p.vy, vz: p.vz,
+                        ttl: p.ttl, isBeam: p.isBeam,
+                    });
+                }
+            }
+            liveState.projectiles = next;
             break;
         }
 

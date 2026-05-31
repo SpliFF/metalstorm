@@ -536,6 +536,64 @@ export class ProjectileRenderer {
         this.muzzleFlare = flare;
     }
 
+    /// A3 projectile-query seam. Snapshots the live projectile + beam set
+    /// into a plain array the LuaUI worker mirrors into
+    /// `liveState.projectiles`, so ZK's authored projectile-FX widgets
+    /// (gfx_projectile_lights.lua, LUPS emitters) read it via
+    /// Spring.GetProjectile*. Called once per render frame from main.ts.
+    ///
+    /// Units match Recoil's projectile Lua API:
+    ///  - point projectiles: velocity in elmos/sim-frame (live.vel is
+    ///    elmos/sec, so divided by SIM_TICKS_PER_SEC here);
+    ///  - beam projectiles: v* carries the beam endpoint delta (to - from),
+    ///    which is what GetProjectileVelocity returns for beam types;
+    ///  - ttl is remaining sim frames (-1 = no limit). live.ttl is stored
+    ///    in seconds (-1 = no limit), so it scales back to frames here.
+    /// Positions are render-space (same convention as streamed unit state);
+    /// the worker getters apply the legacy-coord Z flip exactly as they do
+    /// for GetUnitPosition.
+    snapshotForWorker(): Array<{
+        id: number; defId: number;
+        x: number; y: number; z: number;
+        vx: number; vy: number; vz: number;
+        ttl: number; isBeam: boolean;
+    }> {
+        const out: Array<{
+            id: number; defId: number;
+            x: number; y: number; z: number;
+            vx: number; vy: number; vz: number;
+            ttl: number; isBeam: boolean;
+        }> = [];
+        const invTick = 1 / SIM_TICKS_PER_SEC;
+        for (const p of this.live.values()) {
+            out.push({
+                id: p.id,
+                defId: p.weaponDefId,
+                x: p.pos.x, y: p.pos.y, z: p.pos.z,
+                // elmos/sec -> elmos/sim-frame for Recoil parity.
+                vx: p.vel.x * invTick, vy: p.vel.y * invTick, vz: p.vel.z * invTick,
+                // live.ttl is seconds (-1 = no limit) -> sim frames.
+                ttl: p.ttl < 0 ? -1 : p.ttl * SIM_TICKS_PER_SEC,
+                isBeam: false,
+            });
+        }
+        const now = this.simClockSec;
+        for (const b of this.liveBeams) {
+            const remainingS = Math.max(0, b.lifeS - (now - b.bornSimSec));
+            out.push({
+                id: b.id,
+                defId: b.weaponDefId,
+                // Beam "position" is the start point; velocity is the
+                // start->end delta (Recoil's beam GetProjectileVelocity).
+                x: b.fromX, y: b.fromY, z: b.fromZ,
+                vx: b.toX - b.fromX, vy: b.toY - b.fromY, vz: b.toZ - b.fromZ,
+                ttl: remainingS * SIM_TICKS_PER_SEC,
+                isBeam: true,
+            });
+        }
+        return out;
+    }
+
     /// Push the current sim-speed multiplier. Called from main.ts's
     /// onGameInfo handler. 0 = paused (motion freezes), positive
     /// scales motion by that factor; nonsense values are ignored.

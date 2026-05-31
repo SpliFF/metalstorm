@@ -1404,6 +1404,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     let lastViewportSend = 0;
     let lastFrameTime = performance.now();
     let hudCounter = 0;
+    // A3: tracks whether the previous frame's projectile snapshot was
+    // non-empty, so we send exactly one empty snapshot to clear the
+    // worker's mirror when the live set drains, then go quiet.
+    let lastProjectileSnapshotNonEmpty = false;
 
     engine.runRenderLoop(() => {
         const now = performance.now();
@@ -1437,6 +1441,18 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         entityRenderer?.tick();
         buildBeamRenderer?.tick();
         projectileRenderer?.tick();
+        // A3: mirror live projectiles into the LuaUI worker so ZK's authored
+        // projectile-FX widgets (gfx_projectile_lights.lua, LUPS emitters)
+        // can read them via Spring.GetProjectile*. Skip empty frames once
+        // the set has drained — but always send the first empty frame after
+        // a non-empty one so the worker clears its map.
+        if (projectileRenderer && currentWidgetManager) {
+            const projSnap = projectileRenderer.snapshotForWorker();
+            if (projSnap.length > 0 || lastProjectileSnapshotNonEmpty) {
+                currentWidgetManager.forwardProjectileState(projSnap);
+            }
+            lastProjectileSnapshotNonEmpty = projSnap.length > 0;
+        }
         cegRuntime?.tick(fxDt);
         combatFX?.tick(fxDt);
         // Feed the camera ground focus + height so the decal clipmap's fine
