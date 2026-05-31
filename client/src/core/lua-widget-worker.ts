@@ -30,6 +30,7 @@ import {
     type LiveState,
     type UnitEntry,
     type FeatureEntry,
+    type ProjectileEntry,
 } from './lua-spring-api.js';
 
 // Engine-bundled test widgets. Loaded only when `?widgetTest` is active.
@@ -511,6 +512,7 @@ interface MinimalWeaponDefWire {
     projectileSpeed: number; range: number; aoe: number; size: number;
     intensity: number; colorR: number; colorG: number; colorB: number;
     duration: number; highTrajectory: boolean;
+    beamTtl?: number;
     typeName?: string; description?: string;
     defaultDamage?: number; damages?: number[];
     reloadTime?: number; salvoSize?: number; salvoDelay?: number;
@@ -716,6 +718,17 @@ function buildLuaWeaponDef(d: MinimalWeaponDefWire): Record<string, LuaValue> {
         size: d.size,
         intensity: d.intensity,
         rgbColor: [d.colorR, d.colorG, d.colorB],
+        // Recoil exposes weapon colour under `WeaponDefs[i].visuals.colorR`
+        // (LuaWeaponDefs.cpp). ZK's gfx_projectile_lights.lua reads exactly
+        // that path (`weaponDef.visuals.colorR + 0.2`), so the `visuals`
+        // sub-table must exist or the widget errors on a nil index.
+        visuals: {
+            colorR: d.colorR, colorG: d.colorG, colorB: d.colorB,
+        },
+        // BeamLaser / LightningCannon sprite linger (sim frames). Recoil's
+        // `WeaponDefs[i].beamTTL`; projectile-lights fades beam lights when
+        // beamTTL > 2.
+        beamTTL: d.beamTtl ?? 0,
         duration: d.duration,
         highTrajectory: d.highTrajectory ? 1 : 0,
 
@@ -1160,6 +1173,25 @@ async function init(
     runtime.setGlobal('_addTextureSearchPath', (path: LuaValue) => {
         bridge!.addTextureSearchPaths(String(path));
     });
+
+    // PLAN.md Stage B1 (faithful projectile lights). The Lua-side collector
+    // (_SpringWebCollectDeferredLights, run once per frame from runFrame)
+    // gathers the lights ZK's gfx_projectile_lights.lua / gfx_unit_lights.lua
+    // produce, flattens them into two fixed-stride comma strings, and calls
+    // this hook. We post them to the main thread, which feeds the forward
+    // FxLightPool (the sanctioned GL4-deferred -> WebGL2-forward substitution,
+    // now driven by the game's authored light_* data). String marshalling is
+    // used deliberately: Lua tables cross to JS callbacks as lazy LuaTable
+    // objects, fragile for a per-frame variable-length list; a flat numeric
+    // string converts cleanly. Point stride 7: px,py,pz, r,g,b (colMult
+    // pre-applied), radius. Beam stride 10: + dx,dy,dz (start->end delta).
+    // Empty strings are skipped by the guard so a quiet frame costs nothing.
+    runtime.setGlobal('_SpringWebEmitDeferredLights',
+        (pointStr: LuaValue, beamStr: LuaValue) => {
+            const p = String(pointStr ?? '');
+            const b = String(beamStr ?? '');
+            postToMain({ type: 'deferredLights', point: p, beam: b });
+        });
     postLog(2, '[LuaUI] init step 4/8 done: engine globals installed');
 
     // 5. Install VFS callbacks
@@ -1334,6 +1366,30 @@ WG.initializeTranslation = function(_, _) return function(key) return tostring(k
 WG.langChanged = function() end
 WG.GetLang = function() return "en" end
 WG.SetLang = function() end
+-- PLAN.md Stage B1 (faithful projectile lights). ZK's GL4 deferred-light
+-- provider gfx_deferred_rendering.lua can't run on our 2D-overlay worker
+-- (it samples the depth buffer and self-removes when AllowDeferredMapRendering
+-- ~= 1, which is our case). Substitute its public registry HERE, before any
+-- widget Initialize runs, so consumers (gfx_projectile_lights.lua,
+-- gfx_unit_lights.lua) register collectors instead of self-removing with
+-- "Deferred rendering widget not found", and instead append their collectors
+-- to _G.__deferredLightCollectors.
+--
+-- B1 STATUS: registry half only. The consumer side (per-frame collect ->
+-- marshal the light list to the main thread -> feed the forward FxLightPool,
+-- the sanctioned GL4-deferred -> WebGL2-forward substitution fed by authored
+-- light_* data, then retire FxLightPool's invented muzzle/explosion emitters)
+-- is NOT wired yet, so registered collectors are currently never called. With
+-- just this edit the consumer widgets stay LOADED instead of self-removing —
+-- a prerequisite — but emit no lights yet. See memory
+-- project_faithful_proj_lights_progress for the remaining steps.
+_G.__deferredLightCollectors = _G.__deferredLightCollectors or {}
+WG.DeferredLighting_RegisterFunction = function(func)
+	if type(func) == "function" then
+		local c = _G.__deferredLightCollectors
+		c[#c + 1] = func
+	end
+end
 Spring.Utilities = {}
 Spring.Utilities.GetHumanName = function(ud, _unitID)
     if type(ud) == "table" then return ud.humanName or ud.name or "" end
@@ -3178,6 +3234,60 @@ function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext): void {
                 if _SpringWebRunGadgetGameFrame then
                     pcall(_SpringWebRunGadgetGameFrame, f)
                 end
+            end
+        end
+
+        -- PLAN.md Stage B1 (faithful projectile lights). Run the deferred-light
+        -- collectors ZK registered via WG.DeferredLighting_RegisterFunction
+        -- (gfx_projectile_lights.lua, gfx_unit_lights.lua), thread the standard
+        -- (beamLights, beamCount, pointLights, pointCount) accumulators across
+        -- them, then flatten to two fixed-stride comma strings and hand them to
+        -- _SpringWebEmitDeferredLights for the forward FxLightPool. colMult is
+        -- pre-applied here so the main thread consumes final colours. Point
+        -- stride 7: px,py,pz,r,g,b,radius. Beam stride 10: + dx,dy,dz.
+        do
+            local collectors = __deferredLightCollectors
+            if collectors and #collectors > 0 and _SpringWebEmitDeferredLights then
+                local beamLights, beamCount, pointLights, pointCount = {}, 0, {}, 0
+                for i = 1, #collectors do
+                    local ok, bl, bc, pl, pc = pcall(
+                        collectors[i], beamLights, beamCount, pointLights, pointCount)
+                    if ok and pc ~= nil then
+                        beamLights, beamCount, pointLights, pointCount = bl, bc, pl, pc
+                    end
+                end
+                local pParts, bParts = {}, {}
+                for i = 1, pointCount do
+                    local L = pointLights[i]
+                    local pr = type(L) == "table" and L.param
+                    if pr then
+                        local cm = L.colMult or 1
+                        pParts[#pParts + 1] = string.format(
+                            "%.2f,%.2f,%.2f,%.3f,%.3f,%.3f,%.1f",
+                            L.px or 0, L.py or 0, L.pz or 0,
+                            (tonumber(pr.r) or 0) * cm,
+                            (tonumber(pr.g) or 0) * cm,
+                            (tonumber(pr.b) or 0) * cm,
+                            tonumber(pr.radius) or 0)
+                    end
+                end
+                for i = 1, beamCount do
+                    local L = beamLights[i]
+                    local pr = type(L) == "table" and L.param
+                    if pr then
+                        local cm = L.colMult or 1
+                        bParts[#bParts + 1] = string.format(
+                            "%.2f,%.2f,%.2f,%.3f,%.3f,%.3f,%.1f,%.2f,%.2f,%.2f",
+                            L.px or 0, L.py or 0, L.pz or 0,
+                            (tonumber(pr.r) or 0) * cm,
+                            (tonumber(pr.g) or 0) * cm,
+                            (tonumber(pr.b) or 0) * cm,
+                            tonumber(pr.radius) or 0,
+                            L.dx or 0, L.dy or 0, L.dz or 0)
+                    end
+                end
+                _SpringWebEmitDeferredLights(
+                    table.concat(pParts, ";"), table.concat(bParts, ";"))
             end
         end
 
@@ -5337,6 +5447,27 @@ self.onmessage = async (e: MessageEvent) => {
             }
             for (const d of defs) unitDefMap.set(d.defId, d);
             if (runtime) republishDefGlobals(runtime);
+            break;
+        }
+
+        case 'projectileState': {
+            // A3: rebuild the live-projectile mirror from the main-thread
+            // ProjectileRenderer snapshot. Full replace each frame — the set
+            // is small and short-lived, so a fresh Map is cheaper than
+            // diffing and avoids stale ids lingering after impact.
+            const projs = msg.projectiles as ReadonlyArray<ProjectileEntry & { id: number }> | undefined;
+            const next = new Map<number, ProjectileEntry>();
+            if (projs) {
+                for (const p of projs) {
+                    next.set(p.id, {
+                        defId: p.defId,
+                        x: p.x, y: p.y, z: p.z,
+                        vx: p.vx, vy: p.vy, vz: p.vz,
+                        ttl: p.ttl, isBeam: p.isBeam,
+                    });
+                }
+            }
+            liveState.projectiles = next;
             break;
         }
 

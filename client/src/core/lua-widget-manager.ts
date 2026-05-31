@@ -241,6 +241,13 @@ export class LuaWidgetManager {
      *  override. */
     onDefaultCommandResolved?: (info: { cmdId: number; targetType: 'unit' | 'feature' | null; targetId: number }) => void;
 
+    /** PLAN.md Stage B1: per-frame authored deferred-light list from the
+     *  worker (ZK's gfx_projectile_lights.lua / gfx_unit_lights.lua via the
+     *  WG.DeferredLighting registry). `point` rows are stride-7
+     *  [px,py,pz,r,g,b,radius]; `beam` rows are stride-10 (+ dx,dy,dz =
+     *  start->end delta). main.ts feeds these into the forward FxLightPool. */
+    onDeferredLights?: (point: number[][], beam: number[][]) => void;
+
     constructor(
         scene: Scene,
         camera: FreeCamera,
@@ -934,6 +941,23 @@ export class LuaWidgetManager {
         });
     }
 
+    /** Mirror the current live-projectile set into the worker so ZK's
+     *  authored projectile-FX widgets (gfx_projectile_lights.lua, LUPS
+     *  emitters) can read it via Spring.GetProjectile* (A3 seam). Called
+     *  once per render frame from main.ts with the renderer's snapshot.
+     *  The payload is a plain object array — projectile counts are modest
+     *  (tens–low-hundreds) so per-frame typed-array transfer isn't worth
+     *  the complexity; the worker rebuilds its `projectiles` map from it. */
+    forwardProjectileState(projectiles: ReadonlyArray<{
+        id: number; defId: number;
+        x: number; y: number; z: number;
+        vx: number; vy: number; vz: number;
+        ttl: number; isBeam: boolean;
+    }>): void {
+        if (this.disposed) return;
+        this.postToWorker({ type: 'projectileState', projectiles });
+    }
+
     /** Push a per-tick batch of synced UnitCommand / UnitCmdDone events
      *  into the worker. The worker dispatches `widget:UnitCommand` /
      *  `widget:UnitCmdDone` from each entry. */
@@ -957,12 +981,20 @@ export class LuaWidgetManager {
         });
     }
 
-    /** Push a batch of weapon defs into the worker. */
+    /** Push a batch of weapon defs into the worker. The spread copies
+     *  every runtime field of the passed WeaponDefInfo objects (the
+     *  worker's MinimalWeaponDefWire picks the subset it surfaces as Lua
+     *  globals) — including `customParams`, `colorR/G/B`, `typeName`,
+     *  `range`, `size` and `beamTtl`, all of which ZK's
+     *  gfx_projectile_lights.lua reads off `WeaponDefs[id]`. The narrow
+     *  annotation only documents the always-present core fields. */
     forwardWeaponDefs(defs: ReadonlyArray<{
         defId: number; name: string; projectileType: number;
         projectileSpeed: number; range: number; aoe: number; size: number;
         intensity: number; colorR: number; colorG: number; colorB: number;
         duration: number; highTrajectory: boolean;
+        beamTtl?: number; typeName?: string;
+        customParams?: Record<string, string>;
     }>): void {
         if (this.disposed || defs.length === 0) return;
         this.postToWorker({ type: 'weaponDefsUpdate', defs: defs.map(d => ({ ...d })) });
@@ -1275,6 +1307,32 @@ export class LuaWidgetManager {
             case 'worldGLCommands':
                 // TODO: replay command buffer on Babylon GL context
                 break;
+
+            case 'deferredLights': {
+                // PLAN.md Stage B1 (faithful projectile lights). The worker ran
+                // ZK's registered deferred-light collectors and flattened them
+                // into two fixed-stride comma strings (point stride 7:
+                // px,py,pz,r,g,b,radius; beam stride 10: + dx,dy,dz). Hand the
+                // parsed records to main.ts, which feeds the forward FxLightPool
+                // (the sanctioned GL4-deferred -> WebGL2-forward substitution).
+                const parse = (s: unknown, stride: number): number[][] => {
+                    const str = typeof s === 'string' ? s : '';
+                    if (!str) return [];
+                    const out: number[][] = [];
+                    for (const rec of str.split(';')) {
+                        if (!rec) continue;
+                        const nums = rec.split(',').map(Number);
+                        if (nums.length >= stride && nums.every(n => Number.isFinite(n))) {
+                            out.push(nums);
+                        }
+                    }
+                    return out;
+                };
+                const point = parse(msg.point, 7);
+                const beam = parse(msg.beam, 10);
+                this.onDeferredLights?.(point, beam);
+                break;
+            }
 
             case 'giveOrder': {
                 const conn = this.connection;

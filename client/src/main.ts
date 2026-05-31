@@ -42,6 +42,8 @@ import { fetchBuildStamp } from './config.js';
 import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
 import { loadMapLighting, type MapLighting } from './core/map-lighting.js';
 import { applyMapLighting, createSceneLighting, type SceneLighting } from './core/scene-lighting.js';
+import { PerfOverlay } from './core/perf-overlay.js';
+import { resetNetStats } from './core/net-inspector.js';
 import { FxLightPool } from './core/fx-light-pool.js';
 import { DistortionRenderer } from './core/distortion-renderer.js';
 import { MuzzleFlareRenderer } from './core/muzzle-flare-renderer.js';
@@ -77,6 +79,7 @@ import {
 let gameTemplates: GameTemplates = getDefaultGameTemplates();
 
 let engine: Engine | null = null;
+let perfOverlay: PerfOverlay | null = null;
 let entityRenderer: EntityRenderer | null = null;
 /// Presentation clock — the L0 timing spine (PLAN-latency.md). Converts the
 /// frame-stamped snapshot stream into a smooth presentation cursor P that the
@@ -95,6 +98,10 @@ let dynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
 let cegRuntime: CegRuntime | null = null;
 let combatFX: CombatFX | null = null;
 let fxLightPool: FxLightPool | null = null;
+// PLAN.md Stage B1: flips true once ZK's authored projectile lights start
+// arriving via the WG.DeferredLighting registry, so the projectile renderer
+// silences its invented muzzle/follow light stand-ins (drift #1).
+let authoredProjectileLightsActive = false;
 let distortionRenderer: DistortionRenderer | null = null;
 let muzzleFlareRenderer: MuzzleFlareRenderer | null = null;
 let decalOverlay: DecalOverlay | null = null;
@@ -338,6 +345,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     const lobbyHttpUrl = '';
 
     engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
+    // Perf overlay (toggle F11). Created once; net-stats reset per game so
+    // the bandwidth breakdown reflects this session (PLAN-performance.md).
+    if (!perfOverlay) perfOverlay = new PerfOverlay();
+    resetNetStats();
     const scene = new Scene(engine);
     // PLAN-coordinate-system Phase 2d: flip the Babylon scene to RH
     // so the glTF loader passes data through unchanged (no __root__
@@ -958,6 +969,50 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 }
                 inputManager.activateCommandFromMenu(cmdId, cmdType);
             };
+            // PLAN.md Stage B1 (faithful projectile lights). Feed ZK's authored
+            // deferred-light list (from gfx_projectile_lights.lua / gfx_unit_
+            // lights.lua via the WG.DeferredLighting registry, collected in the
+            // worker) into the forward FxLightPool.
+            // FIDELITY-STANDIN: GL4 deferred / segment lights -> WebGL2 forward
+            // point-light pool. Colour + radius are the game's authored light_*
+            // data; only the rendering *tech* is substituted (the documented
+            // GL4->WebGL2 allowance). Re-emitted each frame (collectors return
+            // the current live set), so a short ttl keeps a light from lingering
+            // past its projectile's death. On the first authored light we
+            // silence the projectile renderer's invented muzzle/follow stand-ins
+            // (drift #1).
+            mgr.onDeferredLights = (point, beam) => {
+                const pool = fxLightPool;
+                if (!pool) return;
+                if (!authoredProjectileLightsActive && (point.length > 0 || beam.length > 0)) {
+                    authoredProjectileLightsActive = true;
+                    projectileRenderer?.setAuthoredLightsActive(true);
+                }
+                const TTL = 0.05;
+                for (const r of point) {
+                    // [px,py,pz, r,g,b, radius]
+                    const peak = Math.max(r[3], r[4], r[5], 0.0001);
+                    const inv = 1 / peak;
+                    pool.emit(r[0], r[1], r[2],
+                        [r[3] * inv, r[4] * inv, r[5] * inv],
+                        peak, Math.max(40, r[6]), TTL);
+                }
+                for (const r of beam) {
+                    // [px,py,pz, r,g,b, radius, dx,dy,dz]
+                    const peak = Math.max(r[3], r[4], r[5], 0.0001);
+                    const inv = 1 / peak;
+                    const col: [number, number, number] =
+                        [r[3] * inv, r[4] * inv, r[5] * inv];
+                    const range = Math.max(40, r[6]);
+                    // Approximate ZK's GL4 segment light with 3 forward point
+                    // lights along the beam (start, mid, end).
+                    for (let t = 0; t <= 2; t++) {
+                        const f = t / 2;
+                        pool.emit(r[0] + r[7] * f, r[1] + r[8] * f, r[2] + r[9] * f,
+                            col, peak, range, TTL);
+                    }
+                }
+            };
             void mgr.initialize().then(() => {
                 console.log(`[client] widget manager ready`);
             }).catch(e => {
@@ -1455,6 +1510,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     let lastViewportSend = 0;
     let lastFrameTime = performance.now();
     let hudCounter = 0;
+    // A3: tracks whether the previous frame's projectile snapshot was
+    // non-empty, so we send exactly one empty snapshot to clear the
+    // worker's mirror when the live set drains, then go quiet.
+    let lastProjectileSnapshotNonEmpty = false;
 
     engine.runRenderLoop(() => {
         const now = performance.now();
@@ -1465,6 +1524,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         // (use test.simPause() to also stop ticks) and entity-state
         // updates keep arriving so the harness can still query state.
         if (testRenderPaused) return;
+
+        // Perf overlay (F11). Ticks on real render frames only (after the
+        // pause guard) for an accurate frame-time distribution; internally
+        // no-ops when hidden.
+        if (perfOverlay) {
+            perfOverlay.tick(dt * 1000);
+            perfOverlay.setEntityCount(entityRenderer?.entityCount ?? 0);
+        }
 
         // Sim-scaled delta for VISUAL FX aging — slows / freezes with the
         // game speed (fxSimSpeed). Camera + decal-clipmap ticks below keep
@@ -1481,6 +1548,18 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         timingOverlay?.tick();
         buildBeamRenderer?.tick();
         projectileRenderer?.tick();
+        // A3: mirror live projectiles into the LuaUI worker so ZK's authored
+        // projectile-FX widgets (gfx_projectile_lights.lua, LUPS emitters)
+        // can read them via Spring.GetProjectile*. Skip empty frames once
+        // the set has drained — but always send the first empty frame after
+        // a non-empty one so the worker clears its map.
+        if (projectileRenderer && currentWidgetManager) {
+            const projSnap = projectileRenderer.snapshotForWorker();
+            if (projSnap.length > 0 || lastProjectileSnapshotNonEmpty) {
+                currentWidgetManager.forwardProjectileState(projSnap);
+            }
+            lastProjectileSnapshotNonEmpty = projSnap.length > 0;
+        }
         cegRuntime?.tick(fxDt);
         combatFX?.tick(fxDt);
         // Feed the camera ground focus + height so the decal clipmap's fine

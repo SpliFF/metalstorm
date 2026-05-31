@@ -309,6 +309,11 @@ interface LiveProjectile {
  *  derived in the fragment shader from `(fxNow - bornSimSec) / lifeS`,
  *  both measured on the sim-time FX clock (see simClockSec). */
 interface LiveBeam {
+    /// Server projectile id of the Fired event that spawned this beam.
+    /// Kept so the A3 projectile-query seam (snapshotForWorker) can expose
+    /// beams to Lua under the same id space as point projectiles — ZK's
+    /// gfx_projectile_lights.lua reads GetProjectileVelocity(id) for beams.
+    id: number;
     weaponDefId: number;
     fromX: number; fromY: number; fromZ: number;
     toX: number; toY: number; toZ: number;
@@ -456,6 +461,25 @@ export class ProjectileRenderer {
     /// explosion light on impact. Guarded everywhere.
     private lightPool: FxLightPool | null = null;
 
+    /// PLAN.md Stage B1d. Set true once ZK's authored projectile lights
+    /// (gfx_projectile_lights.lua via the WG.DeferredLighting registry) start
+    /// flowing into the same FxLightPool. While true, this renderer's INVENTED
+    /// IN-FLIGHT light emissions are suppressed so the authored data is the
+    /// single source for them (PLAN drift #1): the muzzle flash on fire and
+    /// the per-frame follow-light — both of which gfx_projectile_lights covers
+    /// by lighting the live projectile every frame.
+    ///
+    /// DELIBERATELY NOT suppressed: the impact explosion light. ZK's
+    /// gfx_projectile_lights widget lights only LIVE projectiles; it stops at
+    /// impact, so there is no authored replacement for the explosion flash
+    /// online in B1 (its faithful source is the explosion CEG groundflash /
+    /// LUPS, a separate path not yet wired). Suppressing it would make impacts
+    /// go dark — a silent degradation. It stays as a tagged stand-in until the
+    /// explosion-light authored path lands. The CEG / muzzle-flare / distortion
+    /// paths are also unaffected. Defaults false so a game WITHOUT the widget
+    /// keeps the full Phase-L stand-in behaviour.
+    private authoredLights = false;
+
     /// Screen-space distortion composite (PLAN-weapon-fx-gaps Phase D).
     /// Null until injected; emits an explosion shockwave warp on impact.
     private distortion: DistortionRenderer | null = null;
@@ -523,12 +547,76 @@ export class ProjectileRenderer {
         this.lightPool = pool;
     }
 
+    /// PLAN.md Stage B1d. Toggle suppression of this renderer's invented
+    /// FxLightPool emissions once ZK's authored projectile lights take over.
+    setAuthoredLightsActive(on: boolean): void {
+        this.authoredLights = on;
+    }
+
     setDistortion(distortion: DistortionRenderer | null): void {
         this.distortion = distortion;
     }
 
     setMuzzleFlare(flare: MuzzleFlareRenderer | null): void {
         this.muzzleFlare = flare;
+    }
+
+    /// A3 projectile-query seam. Snapshots the live projectile + beam set
+    /// into a plain array the LuaUI worker mirrors into
+    /// `liveState.projectiles`, so ZK's authored projectile-FX widgets
+    /// (gfx_projectile_lights.lua, LUPS emitters) read it via
+    /// Spring.GetProjectile*. Called once per render frame from main.ts.
+    ///
+    /// Units match Recoil's projectile Lua API:
+    ///  - point projectiles: velocity in elmos/sim-frame (live.vel is
+    ///    elmos/sec, so divided by SIM_TICKS_PER_SEC here);
+    ///  - beam projectiles: v* carries the beam endpoint delta (to - from),
+    ///    which is what GetProjectileVelocity returns for beam types;
+    ///  - ttl is remaining sim frames (-1 = no limit). live.ttl is stored
+    ///    in seconds (-1 = no limit), so it scales back to frames here.
+    /// Positions are render-space (same convention as streamed unit state);
+    /// the worker getters apply the legacy-coord Z flip exactly as they do
+    /// for GetUnitPosition.
+    snapshotForWorker(): Array<{
+        id: number; defId: number;
+        x: number; y: number; z: number;
+        vx: number; vy: number; vz: number;
+        ttl: number; isBeam: boolean;
+    }> {
+        const out: Array<{
+            id: number; defId: number;
+            x: number; y: number; z: number;
+            vx: number; vy: number; vz: number;
+            ttl: number; isBeam: boolean;
+        }> = [];
+        const invTick = 1 / SIM_TICKS_PER_SEC;
+        for (const p of this.live.values()) {
+            out.push({
+                id: p.id,
+                defId: p.weaponDefId,
+                x: p.pos.x, y: p.pos.y, z: p.pos.z,
+                // elmos/sec -> elmos/sim-frame for Recoil parity.
+                vx: p.vel.x * invTick, vy: p.vel.y * invTick, vz: p.vel.z * invTick,
+                // live.ttl is seconds (-1 = no limit) -> sim frames.
+                ttl: p.ttl < 0 ? -1 : p.ttl * SIM_TICKS_PER_SEC,
+                isBeam: false,
+            });
+        }
+        const now = this.simClockSec;
+        for (const b of this.liveBeams) {
+            const remainingS = Math.max(0, b.lifeS - (now - b.bornSimSec));
+            out.push({
+                id: b.id,
+                defId: b.weaponDefId,
+                // Beam "position" is the start point; velocity is the
+                // start->end delta (Recoil's beam GetProjectileVelocity).
+                x: b.fromX, y: b.fromY, z: b.fromZ,
+                vx: b.toX - b.fromX, vy: b.toY - b.fromY, vz: b.toZ - b.fromZ,
+                ttl: remainingS * SIM_TICKS_PER_SEC,
+                isBeam: true,
+            });
+        }
+        return out;
     }
 
     /// Push the current sim-speed multiplier. Called from main.ts's
@@ -795,7 +883,9 @@ export class ProjectileRenderer {
         // the firing position so the ground/units near the muzzle catch
         // the flash. Emitted for every weapon (beams included) since the
         // hitscan branch returns early below.
-        if (this.lightPool) {
+        // B1d: skip the invented muzzle light when ZK's authored projectile
+        // lights are driving the pool (the authored data covers muzzle glow).
+        if (this.lightPool && !this.authoredLights) {
             const mdef = this.weaponDefs.get(ev.weaponDefId);
             if (mdef) {
                 this.lightPool.emitMuzzle(ev.pos.x, ev.pos.y, ev.pos.z,
@@ -838,7 +928,7 @@ export class ProjectileRenderer {
             const lifeS = v && v.kind === 'beam'
                 ? v.duration
                 : (ev.ttl > 0 ? ev.ttl / SIM_TICKS_PER_SEC : DEFAULT_BEAM_LIFE_S);
-            this.spawnBeam(ev.weaponDefId, ev.pos, ev.targetPos, lifeS);
+            this.spawnBeam(ev.projId, ev.weaponDefId, ev.pos, ev.targetPos, lifeS);
             return;
         }
 
@@ -891,12 +981,14 @@ export class ProjectileRenderer {
      *  frame; expired beams are dropped when `now - bornAtMs > lifeS`.
      *  Beams whose weapon def doesn't have a beam visual still get
      *  recorded but are skipped at render time — the data is harmless. */
-    private spawnBeam(weaponDefId: number, from: { x: number; y: number; z: number },
+    private spawnBeam(id: number, weaponDefId: number,
+                      from: { x: number; y: number; z: number },
                       to: { x: number; y: number; z: number }, lifeS: number): void {
         // Cap visual duration; long-lived beams just overdraw without
         // adding information once the texture has scrolled fully.
         const clamped = Math.min(lifeS, MAX_BEAM_DURATION_S);
         this.liveBeams.push({
+            id,
             weaponDefId,
             fromX: from.x, fromY: from.y, fromZ: from.z,
             toX: to.x,     toY: to.y,     toZ: to.z,
@@ -1192,7 +1284,10 @@ export class ProjectileRenderer {
             // ground they pass over. Re-emitted on a slow cadence at the
             // current position; the pool's priority system keeps these dim
             // lights subordinate to muzzle/explosion bursts.
-            if (this.lightPool && !p.impacted) {
+            // B1d: suppressed once ZK's authored projectile lights drive the
+            // pool — gfx_projectile_lights.lua lights the live projectile every
+            // frame, so this invented follow-light would double-count.
+            if (this.lightPool && !this.authoredLights && !p.impacted) {
                 const ldef = this.weaponDefs.get(p.weaponDefId);
                 if (ldef && isEmissiveProjectile(ldef)) {
                     p.lightEmitAccumS += dt;

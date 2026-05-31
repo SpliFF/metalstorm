@@ -252,6 +252,29 @@ export interface UnitEntry {
     losState: number;
 }
 
+/** A single live projectile, mirrored from the main-thread
+ *  ProjectileRenderer (`live` + `liveBeams`) each render frame. Exposed
+ *  to Lua via the `Spring.GetProjectile*` family so ZK's authored
+ *  projectile-FX widgets (gfx_projectile_lights.lua, LUPS emitters) run
+ *  faithfully against client projectile state — the `mixed`-strategy read
+ *  seam from PLAN-weapon-rendering-strategies.md (also the latency-L2
+ *  seam). Coords use the same convention as `UnitEntry`; the getters
+ *  apply `flipPosZ`/`flipDirZ` exactly like the GetUnit* family. */
+export interface ProjectileEntry {
+    /** Weapon def id (Recoil's GetProjectileDefID). */
+    defId: number;
+    x: number; y: number; z: number;
+    /** Point projectiles: velocity in elmos/sim-frame (Recoil units).
+     *  Beam projectiles: the beam **endpoint delta** (to − from) — what
+     *  Recoil's GetProjectileVelocity returns for beam-type projectiles. */
+    vx: number; vy: number; vz: number;
+    /** Remaining time-to-live in sim frames (Recoil's
+     *  GetProjectileTimeToLive). -1 = no fixed lifetime. */
+    ttl: number;
+    /** True for hit-scan beam projectiles (BeamLaser / LightningCannon). */
+    isBeam: boolean;
+}
+
 /** Per-team resource entry. All `*Pull/Expense/Share/Sent/Received/Excess`
  *  fields are per-second rates derived from the previous-second
  *  accumulators on the server. They default to 0 when the server hasn't
@@ -320,6 +343,10 @@ export interface LiveState {
      *  server's `GameInfo.legacy_coord_system` flag on first arrival. */
     legacyCoordSystem: boolean;
     units: Map<number, UnitEntry>;
+    /** Live projectiles + beams, mirrored each frame from the main-thread
+     *  ProjectileRenderer. Keyed by projectile id. Drives the
+     *  Spring.GetProjectile* read family (A3 / mixed-strategy seam). */
+    projectiles: Map<number, ProjectileEntry>;
     resources: Map<number, ResourceEntry>;
     selectedUnitIds: number[];
     /** Modifier key state */
@@ -871,6 +898,7 @@ export function createDefaultLiveState(): LiveState {
         gameOver: false,
         legacyCoordSystem: false,
         units: new Map(),
+        projectiles: new Map(),
         resources: new Map(),
         selectedUnitIds: [],
         modKeys: { alt: false, ctrl: false, meta: false, shift: false },
@@ -1405,6 +1433,64 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         GetUnitPosition: (id: LuaValue) => {
             const u = ls.units.get(Number(id));
             return u ? [u.x, u.y, flipPosZ(u.z)] : null;
+        },
+        // ── Projectile reads (A3 / mixed-strategy seam) ──────────────
+        // Backed by `ls.projectiles`, mirrored each frame from the
+        // main-thread ProjectileRenderer (live + beams). These let ZK's
+        // authored projectile-FX widgets (gfx_projectile_lights.lua, LUPS
+        // emitters) run unchanged against client projectile state.
+        // Recoil parity: LuaSyncedRead.cpp / LuaUnsyncedRead.cpp.
+        GetVisibleProjectiles: () => {
+            // Recoil filters by viewer vision; the client only holds
+            // projectiles the server told it about (already LOS-filtered),
+            // so every live id is "visible".
+            const out: number[] = [];
+            for (const id of ls.projectiles.keys()) out.push(id);
+            return out;
+        },
+        GetProjectilePosition: (id: LuaValue) => {
+            const p = ls.projectiles.get(Number(id));
+            return p ? [p.x, p.y, flipPosZ(p.z)] : null;
+        },
+        GetProjectileVelocity: (id: LuaValue) => {
+            // For beam-type projectiles Recoil overloads this to return the
+            // beam **endpoint delta** (to − from), not a velocity; the
+            // ProjectileEntry already stores the right vector per type.
+            const p = ls.projectiles.get(Number(id));
+            return p ? [p.vx, p.vy, flipDirZ(p.vz)] : null;
+        },
+        GetProjectileDefID: (id: LuaValue) => {
+            const p = ls.projectiles.get(Number(id));
+            return p ? p.defId : null;
+        },
+        GetProjectileType: (id: LuaValue) => {
+            // Returns (weapon, piece) booleans. The client mirrors only
+            // weapon projectiles (incl. beams); piece projectiles (debris
+            // gibs) are not streamed, so `piece` is always false. Matches
+            // Recoil's GetProjectileType signature.
+            const p = ls.projectiles.get(Number(id));
+            if (!p) return null;
+            return [true, false];
+        },
+        GetProjectileTimeToLive: (id: LuaValue) => {
+            // Remaining time-to-live in sim frames (Recoil units). -1 for
+            // projectiles with no fixed lifetime.
+            const p = ls.projectiles.get(Number(id));
+            return p ? p.ttl : null;
+        },
+        GetPieceProjectileParams: (_id: LuaValue) => {
+            // Piece projectiles (unit-death debris) aren't streamed to the
+            // client, so this always returns nil. gfx_projectile_lights.lua
+            // only calls it inside its `if piece then` branch, which our
+            // GetProjectileType never enters.
+            return null;
+        },
+        GetProjectileTeamID: (id: LuaValue) => {
+            const p = ls.projectiles.get(Number(id));
+            // Team isn't carried on the client projectile representation
+            // yet; -1 (Gaia/none) is a Recoil-valid sentinel. Widgets that
+            // branch on team treat it as neutral.
+            return p ? -1 : null;
         },
         GetUnitHealth: (id: LuaValue) => {
             const u = ls.units.get(Number(id));
