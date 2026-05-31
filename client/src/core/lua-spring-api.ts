@@ -137,11 +137,15 @@ export interface SpringAPIContext {
      * calling `Spring.SetActiveCommand`). Build commands (cmdId<0) tell
      * InputManager to enter ground placement for the unit-def `-cmdId`,
      * or — if every selected unit is a factory — to push the build order
-     * directly with the queue / count multiplier modifiers. Other cmdIds
-     * are currently a no-op; widgets that need them call GiveOrderToUnit
-     * directly. Optional.
+     * directly with the queue / count multiplier modifiers. For positive
+     * cmdIds that need a world target (move/attack/patrol/guard/…), the
+     * host arms a modal command resolved by the next world click; `type`
+     * is the Spring `CMDTYPE_*` constant so the host knows whether the
+     * target is a ground point, a unit, or either. Instant + state-toggle
+     * commands are issued directly via `giveOrder` before reaching here.
+     * Optional.
      */
-    setActiveCommand?(cmdId: number, mods: { left: boolean; right: boolean; alt: boolean; ctrl: boolean; meta: boolean; shift: boolean }): void;
+    setActiveCommand?(cmdId: number, mods: { left: boolean; right: boolean; alt: boolean; ctrl: boolean; meta: boolean; shift: boolean }, type: number): void;
     /**
      * Play a sound effect. `path` is a VFS-relative game path (e.g.
      * "sounds/weapon/laser/pulse_laser_start.wav"). `pos` is optional —
@@ -2415,16 +2419,41 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
                 const stored = sel ? ls.unitCmdDescs.get(sel) : undefined;
                 const desc = stored?.[idx - 1]; // chili passes 1-based indices
                 const cmdId = desc?.cmdId ?? 0;
+                const cmdType = desc?.type ?? 0; // Spring CMDTYPE_*
                 ls.activeCommand = { index: idx, cmdId, cmdName: '' };
-                if (cmdId !== 0 && ctx.setActiveCommand) {
+                if (cmdId === 0) return true;
+
+                // Replicate CGuiHandler::SetActiveCommand: state toggles and
+                // no-target commands fire immediately; build + world-target
+                // commands are handed to the host to arm placement/targeting.
+                const right = !!rightArg;
+                // CMDTYPE_ICON_MODE (5): cycle to the next state index and
+                // issue right away. params[0] is the current index, params[1..]
+                // the human labels — so the option count is params.length-1.
+                if (cmdId >= 0 && cmdType === 5 && ctx.giveOrder) {
+                    const params = desc?.params ?? [];
+                    const count = Math.max(1, params.length - 1);
+                    const cur = parseInt(params[0] ?? '0', 10) || 0;
+                    const next = (((cur + (right ? -1 : 1)) % count) + count) % count;
+                    ctx.giveOrder(cmdId, ls.selectedUnitIds.slice(), [next], 0);
+                    return true;
+                }
+                // CMDTYPE_ICON (0): instant order with no target (Stop,
+                // Self-D, Stockpile, …).
+                if (cmdId >= 0 && cmdType === 0 && ctx.giveOrder) {
+                    ctx.giveOrder(cmdId, ls.selectedUnitIds.slice(), [], 0);
+                    return true;
+                }
+                // Build (cmdId < 0) and all world-target types → host.
+                if (ctx.setActiveCommand) {
                     ctx.setActiveCommand(cmdId, {
                         left:  !!leftArg,
-                        right: !!rightArg,
+                        right,
                         alt:   !!altArg,
                         ctrl:  !!ctrlArg,
                         meta:  !!metaArg,
                         shift: !!shiftArg,
-                    });
+                    }, cmdType);
                 }
             } else if (typeof a === 'string') {
                 ls.activeCommand = { index: -1, cmdId: 0, cmdName: a };

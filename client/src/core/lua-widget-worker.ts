@@ -1042,8 +1042,8 @@ async function init(
                 isMobile: canMove,
             };
         },
-        setActiveCommand: (cmdId, mods) => {
-            postToMain({ type: 'setActiveCommand', cmdId, mods });
+        setActiveCommand: (cmdId, mods, cmdType) => {
+            postToMain({ type: 'setActiveCommand', cmdId, mods, cmdType });
         },
         playSound: (path, volume, pos, channel) => {
             postToMain({

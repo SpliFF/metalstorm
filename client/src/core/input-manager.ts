@@ -69,6 +69,19 @@ const OPT_ALT   = 1 << 7;
 /// Bit 11 of UnitDef.flags marks a factory (see protocol.fbs).
 const UNITDEF_FLAG_IS_FACTORY = 1 << 11;
 
+/// Spring `CMDTYPE_*` constants (rts/Sim/Units/CommandAI/Command.h). Used to
+/// map a chili command button to a modal target class. Only the world-target
+/// types reach `activateCommandFromMenu` — instant (ICON) and state-toggle
+/// (ICON_MODE) commands are issued directly in the widget worker.
+const CMDTYPE_ICON_MAP                  = 10; // ground point
+const CMDTYPE_ICON_AREA                 = 11; // ground + radius
+const CMDTYPE_ICON_UNIT                 = 12; // unit
+const CMDTYPE_ICON_UNIT_OR_MAP          = 13; // unit or ground
+const CMDTYPE_ICON_FRONT                = 14; // ground (front formation)
+const CMDTYPE_ICON_UNIT_OR_AREA         = 16; // unit or ground+radius
+const CMDTYPE_ICON_UNIT_FEATURE_OR_AREA = 19; // unit/feature or ground+radius
+const CMDTYPE_ICON_UNIT_OR_RECTANGLE    = 22; // unit or ground rectangle
+
 /// Mirror of `CGameHelper::Pos2BuildPos` — snap a world position to Spring's
 /// 16-elmo build grid with a parity offset based on bit 1 of the unit's
 /// footprint (engine checks `xsize & 2`, NOT `xsize & 1`): xsize ∈ {2, 3, 6,
@@ -1124,9 +1137,26 @@ export class InputManager {
             return;
         }
 
+        // A press that ends over a chili control belongs to LuaUI, not the
+        // world — never select/deselect or issue an order beneath the panel.
+        // onLeftDown already bails when isOverUI() is true at press time, but
+        // the hover flag lags the cursor by a postMessage round-trip; the
+        // worker's per-click MousePress-consumed result latches the flag true
+        // (LuaWidgetManager 'inputConsumed') so this re-check catches a press
+        // that the stale flag missed.
+        if (this.isOverUI()) return;
+
         const dx = evt.clientX - this.dragStartX;
         const dy = evt.clientY - this.dragStartY;
         if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) {
+            // Armed modal command (hotkey or chili menu): a left-click issues
+            // it, matching Spring's "active command → LMB to place" idiom.
+            // A click that misses terrain keeps the command armed.
+            if (this.pendingCmd !== null) {
+                const groundPos = this.pickGroundAt(evt.clientX, evt.clientY);
+                if (groundPos) this.resolvePendingCommandAt(groundPos, evt.shiftKey);
+                return;
+            }
             // Single click — select nearest unit to the ground point.
             this.handleSingleClick(evt);
         } else {
@@ -1724,35 +1754,9 @@ export class InputManager {
         // by modal-cmd resolution and the default right-click behaviour.
         const nearest = this.pickNearestEntityAt(groundPos);
 
-        // Modal hotkey command (A=fight, P=patrol, R=repair, etc.). The
-        // pendingCmdTarget governs how the click resolves.
-        if (this.pendingCmd !== null) {
-            const cmd = this.pendingCmd;
-            this.pendingCmd = null;
-            this.updateCursorMode();
-
-            if (this.pendingCmdTarget === 'ground') {
-                this.commandBuffer.issueImmediate(
-                    cmd, this.selectedIds,
-                    [groundPos.x, groundPos.y, groundPos.z], opts);
-                return;
-            }
-            // unit-required: needs a target under the cursor; abort if none.
-            if (this.pendingCmdTarget === 'unit') {
-                if (nearest.id < 0) return;
-                this.commandBuffer.issueImmediate(cmd, this.selectedIds, [nearest.id], opts);
-                return;
-            }
-            // either: prefer unit if there is one nearby, else ground point.
-            if (nearest.id >= 0) {
-                this.commandBuffer.issueImmediate(cmd, this.selectedIds, [nearest.id], opts);
-            } else {
-                this.commandBuffer.issueImmediate(
-                    cmd, this.selectedIds,
-                    [groundPos.x, groundPos.y, groundPos.z], opts);
-            }
-            return;
-        }
+        // Modal command armed via hotkey or the chili command menu. The
+        // pendingCmdTarget governs how the click resolves (see helper).
+        if (this.resolvePendingCommandAt(groundPos, shift)) return;
 
         // Widget DefaultCommand override: if the cursor is over the same
         // unit we tracked at hover time and a widget rewrote the
@@ -1875,6 +1879,82 @@ export class InputManager {
     /** True if a modal command is currently armed. */
     hasPendingCommand(): boolean {
         return this.pendingCmd !== null;
+    }
+
+    /** Clear any armed modal command (Spring's "RMB / Esc cancels the active
+     *  command"). Safe to call when nothing is armed. */
+    cancelPendingCommand(): void {
+        if (this.pendingCmd === null) return;
+        this.pendingCmd = null;
+        this.updateCursorMode();
+    }
+
+    /** Activate a command chosen in the chili command menu
+     *  (Spring.SetActiveCommand → host). Only world-target commands arrive
+     *  here — instant + state-toggle commands are issued in the widget worker.
+     *  Maps the Spring CMDTYPE_* to a modal target class and arms it; the next
+     *  world click (left or right) resolves it via resolvePendingCommandAt. */
+    activateCommandFromMenu(cmdId: number, cmdType: number): void {
+        let target: 'ground' | 'unit' | 'either';
+        switch (cmdType) {
+            case CMDTYPE_ICON_MAP:
+            case CMDTYPE_ICON_AREA:
+            case CMDTYPE_ICON_FRONT:
+                target = 'ground';
+                break;
+            case CMDTYPE_ICON_UNIT:
+            case CMDTYPE_ICON_UNIT_OR_RECTANGLE:
+                target = 'unit';
+                break;
+            case CMDTYPE_ICON_UNIT_OR_MAP:
+            case CMDTYPE_ICON_UNIT_OR_AREA:
+            case CMDTYPE_ICON_UNIT_FEATURE_OR_AREA:
+            default:
+                // Unknown / custom ZK command types default to "either" — the
+                // resolver prefers a unit under the cursor, else a ground point.
+                target = 'either';
+                break;
+        }
+        this.armPendingCommand(cmdId, target);
+    }
+
+    /** Resolve an armed modal command at a world point. Returns true when a
+     *  command was armed (so the caller must not also select/deselect or issue
+     *  a default order). Shared by the right-click path (issueOrderAtScreen)
+     *  and the left-click path (onLeftUp) so an armed command issues on either
+     *  button, matching Spring. `pendingCmdTarget` decides how the click
+     *  resolves: ground point, unit under cursor, or either. */
+    private resolvePendingCommandAt(groundPos: Vector3, shift: boolean): boolean {
+        if (this.pendingCmd === null) return false;
+        const cmd = this.pendingCmd;
+        const opts = shift ? OPT_SHIFT : 0;
+        const nearest = this.pickNearestEntityAt(groundPos);
+        // Shift keeps the command armed so successive clicks chain waypoints
+        // (multi-point patrol, queued moves), matching Spring's "hold Shift to
+        // place a chain" behaviour. Without Shift the command deactivates after
+        // this single issue. pendingCmdTarget is left intact for the next click.
+        if (!shift) {
+            this.pendingCmd = null;
+            this.updateCursorMode();
+        }
+
+        // Unit-required: issue only if there's a target under the cursor;
+        // otherwise the click is still consumed (command cleared, no order).
+        if (this.pendingCmdTarget === 'unit') {
+            if (nearest.id >= 0) {
+                this.commandBuffer.issueImmediate(cmd, this.selectedIds, [nearest.id], opts);
+            }
+            return true;
+        }
+        // Either: prefer a unit under the cursor, else fall back to ground.
+        if (this.pendingCmdTarget === 'either' && nearest.id >= 0) {
+            this.commandBuffer.issueImmediate(cmd, this.selectedIds, [nearest.id], opts);
+            return true;
+        }
+        // Ground (and the either-with-no-unit fallback).
+        this.commandBuffer.issueImmediate(
+            cmd, this.selectedIds, [groundPos.x, groundPos.y, groundPos.z], opts);
+        return true;
     }
 
     /** Issue a command immediately — used by the order panel for instant
@@ -2026,9 +2106,13 @@ export class InputManager {
                     this.armPendingCommand(CMD.MOVE, 'ground');
                     break;
                 case 'a':
-                case 'f':
                     // Attack-move / Fight: ground target.
                     this.armPendingCommand(CMD.FIGHT, 'ground');
+                    break;
+                case 'f':
+                    // Force Fire — ZK names CMD.ATTACK "Force Fire" and binds
+                    // it to `f` (zk_keys.lua). Target a unit or ground point.
+                    this.armPendingCommand(CMD.ATTACK, 'either');
                     break;
                 case 'p':
                     // Patrol: ground waypoint.
