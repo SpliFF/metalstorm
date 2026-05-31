@@ -7,6 +7,7 @@
 #include "LuaUI.h"
 
 #include "LuaCallInCheck.h"
+#include "LuaCallInProfiler.h"
 #include "LuaConfig.h"
 #include "LuaHashString.h"
 #include "LuaOpenGL.h"
@@ -419,9 +420,19 @@ int CLuaHandle::RunCallInTraceback(
 		int error;
 	};
 
+	// Per-callin profiler (PLAN-performance.md Phase 4.1). When disabled this
+	// is a single bool load; when enabled, one spring_now() pair per callin.
+	const bool profileCallIn = LuaCallInProfiler::IsEnabled();
+	const spring_time profT0 = profileCallIn ? spring_now() : spring_time();
+
 	// TODO: use closure so we do not need to copy args
 	ScopedLuaCall call(this, L, (hs != nullptr)? hs->GetString(): "LUS::?", inArgs, outArgs, errFuncIndex, popErrorFunc);
 	call.CheckFixStack(*ts);
+
+	if (profileCallIn) {
+		LuaCallInProfiler::Record(GetName(), (hs != nullptr)? hs->GetString(): "LUS::?",
+		                          (spring_now() - profT0).toMicroSecsf());
+	}
 
 	return (call.GetError());
 }

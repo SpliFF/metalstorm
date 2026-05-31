@@ -357,6 +357,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     scene.useRightHandedSystem = true;
     scene.clearColor = new Color4(0.05, 0.08, 0.12, 1);
 
+    // ?perfprobe — attach Babylon render instrumentation (draw calls,
+    // triangles, GPU/active-mesh/render-target times) and force the perf
+    // overlay visible (PLAN-performance.md Phase 1.2). Opt-in: the GPU timer
+    // query has a small per-frame cost, so it's off by default.
+    if (perfOverlay && new URLSearchParams(location.search).has('perfprobe')) {
+        perfOverlay.enableSceneProbe(scene, engine);
+    }
+
     // Preserve the depth buffer across rendering groups so water
     // (group 1) depth-tests against the terrain already drawn in
     // group 0, and units (group 2) depth-test against both. Babylon
