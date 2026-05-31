@@ -10,8 +10,17 @@
  * surface the tail. The network breakdown reads the always-on accumulator
  * in net-inspector.ts and diffs two snapshots to derive per-second rates
  * per envelope / FlatBuffer type (Phase 2.2/2.3 bandwidth budget).
+ *
+ * The render-bottleneck lines (draw calls, triangles, GPU frame time,
+ * active-mesh eval, render-target time) are the `?perfprobe` piece of
+ * PLAN-performance.md Phase 1.2: they stay hidden until `enableSceneProbe()`
+ * attaches Babylon's `SceneInstrumentation` + `EngineInstrumentation`, which
+ * answers GPU-bound vs CPU-bound and exposes whether thin-instance batching
+ * holds at scale. Probe is opt-in (the `?perfprobe` query flag) because the
+ * GPU-time query has a small per-frame cost.
  */
 
+import { SceneInstrumentation, EngineInstrumentation, type Scene, type Engine } from '@babylonjs/core';
 import { snapshotNetStats, type NetStatsSnapshot } from './net-inspector.js';
 
 export class PerfOverlay {
@@ -25,6 +34,14 @@ export class PerfOverlay {
         triangles: -1,
         networkLatency: 0,
     };
+
+    // ?perfprobe: Babylon render instrumentation (opt-in — see file header).
+    private sceneInstr: SceneInstrumentation | null = null;
+    private engineInstr: EngineInstrumentation | null = null;
+    private probeScene: Scene | null = null;
+    private gpuFrameMs = -1;          // -1 = not available (no EXT_disjoint_timer_query)
+    private activeMeshesMs = -1;
+    private renderTargetsMs = -1;
 
     private frameCount = 0;
     private lastFpsUpdate = performance.now();
@@ -76,6 +93,64 @@ export class PerfOverlay {
         this.element.style.display = 'none';
     }
 
+    /**
+     * Attach Babylon render instrumentation (PLAN-performance.md Phase 1.2).
+     * Enables the draw-call / triangle / GPU-frame-time / active-mesh /
+     * render-target lines. Auto-shows the overlay so the flag is self-evident.
+     * Idempotent — a second call disposes the prior probe first.
+     */
+    enableSceneProbe(scene: Scene, engine: Engine): void {
+        this.disposeProbe();
+        this.probeScene = scene;
+
+        const si = new SceneInstrumentation(scene);
+        si.captureActiveMeshesEvaluationTime = true;
+        si.captureRenderTargetsRenderTime = true;
+        si.captureFrameTime = true;
+        this.sceneInstr = si;
+
+        // GPU frame time needs EXT_disjoint_timer_query; capture flag is a
+        // no-op (stays at -1 below) when the extension is unavailable.
+        const ei = new EngineInstrumentation(engine);
+        ei.captureGPUFrameTime = true;
+        this.engineInstr = ei;
+
+        this.show();
+    }
+
+    /** Pull the latest values out of the Babylon counters (every render). */
+    private readSceneProbe(): void {
+        const si = this.sceneInstr;
+        const scene = this.probeScene;
+        if (!si || !scene) return;
+
+        // Draw calls + drawn triangles: last-frame current is representative.
+        this.metrics.drawCalls = si.drawCallsCounter.current;
+        // totalActiveIndices = indices actually submitted this frame; /3 = tris.
+        this.metrics.triangles = Math.round(scene.totalActiveIndicesPerfCounter.current / 3);
+
+        // Times: lastSecAverage smooths the per-frame jitter.
+        this.activeMeshesMs = si.activeMeshesEvaluationTimeCounter.lastSecAverage;
+        this.renderTargetsMs = si.renderTargetsRenderTimeCounter.lastSecAverage;
+
+        const gpuNs = this.engineInstr?.gpuFrameTimeCounter.lastSecAverage ?? 0;
+        // 0 means the timer query never resolved (extension missing) — hide it.
+        this.gpuFrameMs = gpuNs > 0 ? gpuNs / 1e6 : -1;
+    }
+
+    private disposeProbe(): void {
+        this.sceneInstr?.dispose();
+        this.engineInstr?.dispose();
+        this.sceneInstr = null;
+        this.engineInstr = null;
+        this.probeScene = null;
+        this.metrics.drawCalls = -1;
+        this.metrics.triangles = -1;
+        this.gpuFrameMs = -1;
+        this.activeMeshesMs = -1;
+        this.renderTargetsMs = -1;
+    }
+
     /** Call every frame with delta time in ms. */
     tick(dtMs: number): void {
         if (!this.visible) return;
@@ -93,6 +168,7 @@ export class PerfOverlay {
                 : 0;
             this.frameCount = 0;
             this.lastFpsUpdate = now;
+            this.readSceneProbe();
             this.updateNetwork(now);
             this.render();
         }
@@ -150,6 +226,9 @@ export class PerfOverlay {
             `Entities: ${m.entityCount}\n`;
         if (m.drawCalls >= 0) txt += `Draw calls: ${m.drawCalls}\n`;
         if (m.triangles >= 0) txt += `Triangles: ${(m.triangles / 1000).toFixed(1)}K\n`;
+        if (this.gpuFrameMs >= 0) txt += `GPU frame: ${this.gpuFrameMs.toFixed(2)}ms\n`;
+        if (this.activeMeshesMs >= 0) txt += `Active-mesh eval: ${this.activeMeshesMs.toFixed(2)}ms\n`;
+        if (this.renderTargetsMs >= 0) txt += `Render targets: ${this.renderTargetsMs.toFixed(2)}ms\n`;
         txt += `Net: ${m.networkLatency}ms  ↓${this.inKBps.toFixed(1)} ↑${this.outKBps.toFixed(1)} KB/s`;
         if (this.netLines.length) txt += `\n${this.netLines.join('\n')}`;
 
@@ -157,6 +236,7 @@ export class PerfOverlay {
     }
 
     dispose(): void {
+        this.disposeProbe();
         this.element.remove();
     }
 }
