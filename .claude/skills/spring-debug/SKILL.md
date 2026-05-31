@@ -96,11 +96,7 @@ Stale rooms are the single biggest time-sink in a test session. `list_processes`
 
 1. **Treat the `roomId` from `launch_game` as the single source of truth.** Pass it to *every* room-scoped MCP call (`get_game_state`, `exec_lua`, `spawn_unit`, `give_order`, `set_los`, `set_cheats`, `get_logs`, …). Do **not** rely on the "first active game" auto-detect — it will pick up a stale or someone else's room. When in doubt, `get_game_state(roomId)` and confirm `frame >= 0` (a live, ticking game) before driving it.
 
-2. **The browser does NOT reliably honor `?room=N&autojoin=1`.** Autojoin rejoins the logged-in user's **persisted "current room"** from a previous session, ignoring the URL param — so you end up in a stale/dead room. After navigating, **verify** `window.lobby.currentRoom.id === <your roomId>`; if not, force it:
-   ```js
-   await window.lobby.leave();
-   await window.lobby.joinRoom(<roomId>);   // the exact id launch_game returned
-   ```
+2. **`?room=N` / `autojoin` / `hidestartup` URL params do NOTHING** — they are read **nowhere** in the client (a long-standing misconception; don't rely on them). The browser instead **auto-reconnects** to `localStorage['springrts-game-room']` (the last room you were in, written on join/start). That's why you keep landing in a stale/dead room. To put the browser in a *specific* room, call `await window.lobby.joinRoom(<roomId>)` (this also updates the saved room). To avoid a stale reconnect, `await window.lobby.leave()` first, or clear `localStorage.removeItem('springrts-game-room')`. After connecting, **verify** `window.lobby.currentRoom?.id === <your roomId>`. (Self-heal landed: a failed auto-reconnect now clears the stale saved room, so a *dead* room no longer re-attaches on every reload — but an already-attached stale room in the current tab still needs an explicit `leave()`.)
 
 3. **Match the browser user to the room host (roster check).** A game server only admits clients in its **launch-time roster**. `launch_game` hosts as **admin** by default, but the browser auto-logs-in from a saved token that is often a *different* user (e.g. `test1`) → auth rejects with **"Not in this room's roster"**. Either launch as the browser's user, or log the browser in as the host. Dev creds are plaintext in the `users` table (`query_db "SELECT username,password_hash FROM users"`; typically `admin`/`admin`, `test1`/`test`). To switch the browser to admin:
    ```js
@@ -113,9 +109,14 @@ Stale rooms are the single biggest time-sink in a test session. `list_processes`
 
 4. **Connect promptly — a fresh server exits at frame -1 if no player connects in time.** A just-launched `spring-server` logs `waiting for N player(s) to connect` and **shuts down cleanly** if the browser doesn't attach within its timeout. Don't burn that window polling the *stale* room: launch → immediately `leave()` + `joinRoom(newId)` → *then* poll for boot. If `list_processes` shows your room `ended` right after launch and the log says `exited cleanly … (frame -1)`, you were too slow / joined the wrong room — relaunch and connect faster.
 
-5. **After `restart_lobby`, old game servers are gone but the browser's saved current-room still points at a dead room.** Expect autojoin to land on a corpse; reconcile with step 2. `restart_lobby` is the clean reset when room state is tangled.
+5. **Don't churn sessions mid-test.** Repeatedly re-`POST /api/auth/login` for the same user, or mixing an MCP-`launch_game` (admin-hosted) room with an in-browser join *as a different user*, produces token / saved-room / roster confusion that looks like a lobby bug but isn't. Pick one identity and one room-creation path and stick with it. The most reliable browser flow is to create the room **in-browser as the already-logged-in user** (`createRoom` → `addAI` → `ready(true)` → `startGame`) — the host is always in the roster, so no "not in this room's roster". `restart_lobby` re-runs the same startup recovery as a cold start (adopt-or-reset); a fresh-launched game's roster handoff is *not* broken by it.
 
-**Canonical loop:** `launch_game` → note `roomId` → `get_game_state(roomId)` confirms `frame>=0` → browser `leave()`+`joinRoom(roomId)` → verify `currentRoom.id` → poll for `window.test` → drive everything with that one `roomId`.
+6. **Clean up games you're done with.** Stale rooms are the main time-sink — don't leave them behind:
+   - In the browser, `await window.lobby.leave()` when finished. Room lifecycle is **leave-only** by design (there is no force-end/close endpoint); when the last member leaves, the lobby `DeleteRoom`s it and reaps the game server.
+   - For a server stuck in `starting` (no client ever attached), use `kill_game(roomId)` — the lobby marks the room ended on its next health check.
+   - A just-launched server self-reaps at frame -1 if no one connects, so abandoned launches don't linger forever — but `leave()`/`kill_game` is immediate and keeps `list_processes` readable.
+
+**Canonical browser-test loop:** in-browser as the logged-in user → `createRoom` → `addAI` → `ready(true)` → `startGame` → poll `window.test.deps.connection.authenticated` → drive with `window.test.*`; `leave()` when done. **MCP-only loop (no browser):** `launch_game` → note `roomId` → `get_game_state(roomId)` confirms `frame >= 0` → drive every room-scoped tool with that one `roomId` → `kill_game(roomId)` when done.
 
 ## Camera control
 
