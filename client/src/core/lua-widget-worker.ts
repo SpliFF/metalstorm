@@ -1173,6 +1173,25 @@ async function init(
     runtime.setGlobal('_addTextureSearchPath', (path: LuaValue) => {
         bridge!.addTextureSearchPaths(String(path));
     });
+
+    // PLAN.md Stage B1 (faithful projectile lights). The Lua-side collector
+    // (_SpringWebCollectDeferredLights, run once per frame from runFrame)
+    // gathers the lights ZK's gfx_projectile_lights.lua / gfx_unit_lights.lua
+    // produce, flattens them into two fixed-stride comma strings, and calls
+    // this hook. We post them to the main thread, which feeds the forward
+    // FxLightPool (the sanctioned GL4-deferred -> WebGL2-forward substitution,
+    // now driven by the game's authored light_* data). String marshalling is
+    // used deliberately: Lua tables cross to JS callbacks as lazy LuaTable
+    // objects, fragile for a per-frame variable-length list; a flat numeric
+    // string converts cleanly. Point stride 7: px,py,pz, r,g,b (colMult
+    // pre-applied), radius. Beam stride 10: + dx,dy,dz (start->end delta).
+    // Empty strings are skipped by the guard so a quiet frame costs nothing.
+    runtime.setGlobal('_SpringWebEmitDeferredLights',
+        (pointStr: LuaValue, beamStr: LuaValue) => {
+            const p = String(pointStr ?? '');
+            const b = String(beamStr ?? '');
+            postToMain({ type: 'deferredLights', point: p, beam: b });
+        });
     postLog(2, '[LuaUI] init step 4/8 done: engine globals installed');
 
     // 5. Install VFS callbacks
@@ -3215,6 +3234,60 @@ function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext): void {
                 if _SpringWebRunGadgetGameFrame then
                     pcall(_SpringWebRunGadgetGameFrame, f)
                 end
+            end
+        end
+
+        -- PLAN.md Stage B1 (faithful projectile lights). Run the deferred-light
+        -- collectors ZK registered via WG.DeferredLighting_RegisterFunction
+        -- (gfx_projectile_lights.lua, gfx_unit_lights.lua), thread the standard
+        -- (beamLights, beamCount, pointLights, pointCount) accumulators across
+        -- them, then flatten to two fixed-stride comma strings and hand them to
+        -- _SpringWebEmitDeferredLights for the forward FxLightPool. colMult is
+        -- pre-applied here so the main thread consumes final colours. Point
+        -- stride 7: px,py,pz,r,g,b,radius. Beam stride 10: + dx,dy,dz.
+        do
+            local collectors = __deferredLightCollectors
+            if collectors and #collectors > 0 and _SpringWebEmitDeferredLights then
+                local beamLights, beamCount, pointLights, pointCount = {}, 0, {}, 0
+                for i = 1, #collectors do
+                    local ok, bl, bc, pl, pc = pcall(
+                        collectors[i], beamLights, beamCount, pointLights, pointCount)
+                    if ok and pc ~= nil then
+                        beamLights, beamCount, pointLights, pointCount = bl, bc, pl, pc
+                    end
+                end
+                local pParts, bParts = {}, {}
+                for i = 1, pointCount do
+                    local L = pointLights[i]
+                    local pr = type(L) == "table" and L.param
+                    if pr then
+                        local cm = L.colMult or 1
+                        pParts[#pParts + 1] = string.format(
+                            "%.2f,%.2f,%.2f,%.3f,%.3f,%.3f,%.1f",
+                            L.px or 0, L.py or 0, L.pz or 0,
+                            (tonumber(pr.r) or 0) * cm,
+                            (tonumber(pr.g) or 0) * cm,
+                            (tonumber(pr.b) or 0) * cm,
+                            tonumber(pr.radius) or 0)
+                    end
+                end
+                for i = 1, beamCount do
+                    local L = beamLights[i]
+                    local pr = type(L) == "table" and L.param
+                    if pr then
+                        local cm = L.colMult or 1
+                        bParts[#bParts + 1] = string.format(
+                            "%.2f,%.2f,%.2f,%.3f,%.3f,%.3f,%.1f,%.2f,%.2f,%.2f",
+                            L.px or 0, L.py or 0, L.pz or 0,
+                            (tonumber(pr.r) or 0) * cm,
+                            (tonumber(pr.g) or 0) * cm,
+                            (tonumber(pr.b) or 0) * cm,
+                            tonumber(pr.radius) or 0,
+                            L.dx or 0, L.dy or 0, L.dz or 0)
+                    end
+                end
+                _SpringWebEmitDeferredLights(
+                    table.concat(pParts, ";"), table.concat(bParts, ";"))
             end
         end
 

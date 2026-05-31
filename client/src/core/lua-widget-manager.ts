@@ -241,6 +241,13 @@ export class LuaWidgetManager {
      *  override. */
     onDefaultCommandResolved?: (info: { cmdId: number; targetType: 'unit' | 'feature' | null; targetId: number }) => void;
 
+    /** PLAN.md Stage B1: per-frame authored deferred-light list from the
+     *  worker (ZK's gfx_projectile_lights.lua / gfx_unit_lights.lua via the
+     *  WG.DeferredLighting registry). `point` rows are stride-7
+     *  [px,py,pz,r,g,b,radius]; `beam` rows are stride-10 (+ dx,dy,dz =
+     *  start->end delta). main.ts feeds these into the forward FxLightPool. */
+    onDeferredLights?: (point: number[][], beam: number[][]) => void;
+
     constructor(
         scene: Scene,
         camera: FreeCamera,
@@ -1300,6 +1307,32 @@ export class LuaWidgetManager {
             case 'worldGLCommands':
                 // TODO: replay command buffer on Babylon GL context
                 break;
+
+            case 'deferredLights': {
+                // PLAN.md Stage B1 (faithful projectile lights). The worker ran
+                // ZK's registered deferred-light collectors and flattened them
+                // into two fixed-stride comma strings (point stride 7:
+                // px,py,pz,r,g,b,radius; beam stride 10: + dx,dy,dz). Hand the
+                // parsed records to main.ts, which feeds the forward FxLightPool
+                // (the sanctioned GL4-deferred -> WebGL2-forward substitution).
+                const parse = (s: unknown, stride: number): number[][] => {
+                    const str = typeof s === 'string' ? s : '';
+                    if (!str) return [];
+                    const out: number[][] = [];
+                    for (const rec of str.split(';')) {
+                        if (!rec) continue;
+                        const nums = rec.split(',').map(Number);
+                        if (nums.length >= stride && nums.every(n => Number.isFinite(n))) {
+                            out.push(nums);
+                        }
+                    }
+                    return out;
+                };
+                const point = parse(msg.point, 7);
+                const beam = parse(msg.beam, 10);
+                this.onDeferredLights?.(point, beam);
+                break;
+            }
 
             case 'giveOrder': {
                 const conn = this.connection;

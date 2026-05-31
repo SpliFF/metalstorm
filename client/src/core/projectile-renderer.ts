@@ -461,6 +461,25 @@ export class ProjectileRenderer {
     /// explosion light on impact. Guarded everywhere.
     private lightPool: FxLightPool | null = null;
 
+    /// PLAN.md Stage B1d. Set true once ZK's authored projectile lights
+    /// (gfx_projectile_lights.lua via the WG.DeferredLighting registry) start
+    /// flowing into the same FxLightPool. While true, this renderer's INVENTED
+    /// IN-FLIGHT light emissions are suppressed so the authored data is the
+    /// single source for them (PLAN drift #1): the muzzle flash on fire and
+    /// the per-frame follow-light — both of which gfx_projectile_lights covers
+    /// by lighting the live projectile every frame.
+    ///
+    /// DELIBERATELY NOT suppressed: the impact explosion light. ZK's
+    /// gfx_projectile_lights widget lights only LIVE projectiles; it stops at
+    /// impact, so there is no authored replacement for the explosion flash
+    /// online in B1 (its faithful source is the explosion CEG groundflash /
+    /// LUPS, a separate path not yet wired). Suppressing it would make impacts
+    /// go dark — a silent degradation. It stays as a tagged stand-in until the
+    /// explosion-light authored path lands. The CEG / muzzle-flare / distortion
+    /// paths are also unaffected. Defaults false so a game WITHOUT the widget
+    /// keeps the full Phase-L stand-in behaviour.
+    private authoredLights = false;
+
     /// Screen-space distortion composite (PLAN-weapon-fx-gaps Phase D).
     /// Null until injected; emits an explosion shockwave warp on impact.
     private distortion: DistortionRenderer | null = null;
@@ -526,6 +545,12 @@ export class ProjectileRenderer {
 
     setLightPool(pool: FxLightPool | null): void {
         this.lightPool = pool;
+    }
+
+    /// PLAN.md Stage B1d. Toggle suppression of this renderer's invented
+    /// FxLightPool emissions once ZK's authored projectile lights take over.
+    setAuthoredLightsActive(on: boolean): void {
+        this.authoredLights = on;
     }
 
     setDistortion(distortion: DistortionRenderer | null): void {
@@ -858,7 +883,9 @@ export class ProjectileRenderer {
         // the firing position so the ground/units near the muzzle catch
         // the flash. Emitted for every weapon (beams included) since the
         // hitscan branch returns early below.
-        if (this.lightPool) {
+        // B1d: skip the invented muzzle light when ZK's authored projectile
+        // lights are driving the pool (the authored data covers muzzle glow).
+        if (this.lightPool && !this.authoredLights) {
             const mdef = this.weaponDefs.get(ev.weaponDefId);
             if (mdef) {
                 this.lightPool.emitMuzzle(ev.pos.x, ev.pos.y, ev.pos.z,
