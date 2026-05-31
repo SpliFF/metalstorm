@@ -502,6 +502,13 @@ void CReadMap::UpdateHeightMapSynced(const SRectangle& hgtMapRect)
 		#endif
 
 		HeightMapUpdateLOSCheck(cornerRect);
+
+		// PLAN-deformable-terrain T2: record the changed corner-rect for the
+		// headless game loop to broadcast to clients (envelope 0x09). The
+		// initialize case is skipped above — clients receive the base
+		// heightmap via /api/map/heightmap + MapData at load, so only runtime
+		// deformation (craters, Spring.*HeightMap terraforming) streams here.
+		serverDirtyHeightRects.push_back(cornerRect);
 	}
 }
 

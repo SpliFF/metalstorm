@@ -154,6 +154,19 @@ public:
 
 	bool GetHeightMapUpdated() const { return hmUpdated; }
 
+	/// Server-authoritative deformable-terrain broadcast (PLAN-deformable-terrain
+	/// T2). Every synced height change — engine craters (CBasicMapDamage::Update
+	/// → RecalcArea) and the Spring.*HeightMap Lua family — funnels through
+	/// UpdateHeightMapSynced(), which records the changed corner-rect here. The
+	/// headless game loop drains these once per tick and broadcasts the new
+	/// heights to clients (envelope 0x09). Single sim thread owns both push and
+	/// drain, so no locking. Rects are inclusive corner coords (0..mapx/mapy).
+	std::vector<SRectangle> DrainServerDirtyHeightRects() {
+		std::vector<SRectangle> out;
+		out.swap(serverDirtyHeightRects);
+		return out;
+	}
+
 	virtual int2 GetPatch(int hmx, int hmz) const = 0;
 	virtual const float3& GetUnsyncedHeightInfo(int patchX, int patchZ) const = 0;
 private:
@@ -211,6 +224,10 @@ protected:
 
 
 	CRectangleOverlapHandler unsyncedHeightMapUpdates;
+
+	/// see DrainServerDirtyHeightRects() — corner-rects changed since the last
+	/// per-tick broadcast drain. Not creg-serialised (transient per-tick state).
+	std::vector<SRectangle> serverDirtyHeightRects;
 
 	std::vector<float3> unsyncedHeightInfo; // per 128x128 HM patch
 private:

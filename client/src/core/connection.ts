@@ -82,6 +82,7 @@ import { parseBuildActivity, type BuildActivitySnapshot } from './build-activity
 import { parseMapData, type ParsedMapData } from './map-data.js';
 import { parseLosBitmap, type LosBitmap } from './los-bitmap.js';
 import { parseDecals, type DecalSnapshot } from './decal-events.js';
+import { parseHeightmapPatch, type HeightmapPatch } from './heightmap-events.js';
 
 const ENVELOPE_FLATBUFFERS = 0x01;
 const ENVELOPE_ENTITY_STATE_FULL = 0x02;
@@ -91,6 +92,7 @@ const ENVELOPE_PIECE_STATE = 0x05;
 const ENVELOPE_BUILD_ACTIVITY = 0x06;
 const ENVELOPE_LOS_BITMAP = 0x07;
 const ENVELOPE_DECALS = 0x08;
+const ENVELOPE_HEIGHTMAP = 0x09;
 export type ConnectionState = 'disconnected' | 'connecting' | 'handshake' | 'authenticating' | 'connected';
 
 export interface CombatEventInfo {
@@ -254,6 +256,15 @@ export interface UnitDefInfo {
     /// units that don't leave tracks. Used to resolve the wire trackTypeId
     /// (envelope 0x08) to a track texture — see decal-renderer.ts.
     trackType: string;
+    /// Building ground-decal (PLAN-decals.md D5): authored AO/scorch plate
+    /// texture stem (lowercased, no extension), resolved to `<stem>.ktx2`
+    /// under the game's `unittextures/`. Empty when the building authors none.
+    groundDecal: string;
+    /// Building ground-decal size in map squares. World half-extent is
+    /// `groundDecalSize * SQUARE_SIZE` (Recoil), so the full quad is
+    /// `2 * size * SQUARE_SIZE` elmos. 0 when there's no decal.
+    groundDecalSizeX: number;
+    groundDecalSizeY: number;
     maxVelocity: number;
     cost: number;
     maxWeaponRange: number;
@@ -442,6 +453,11 @@ export interface WeaponDefInfo {
     /** BeamLaser per-Update colour decay (`visuals.beamdecay`); the beam
      *  dims by this factor each sim tick over its TTL. */
     beamDecay: number;
+    /** BeamLaser / LightningCannon visual-sprite linger time in sim
+     *  frames (Recoil's `beamLaserTTL`, Lua field `beamTTL`). ZK's
+     *  gfx_projectile_lights.lua reads it to fade beam lights. 0 = no
+     *  linger. */
+    beamTtl: number;
     /** LaserCannon: stop and contract at max-range instead of fading. */
     laserHardStop: boolean;
     /** Per-frame intensity falloff multiplier (non-hardstop lasers). */
@@ -733,6 +749,7 @@ export interface ConnectionEvents {
      *  weapon explosions + vehicle track segments. Write-once events;
      *  consumed by `DecalRenderer`. */
     onDecals?: (snapshot: DecalSnapshot) => void;
+    onHeightmapPatch?: (patch: HeightmapPatch) => void;
     onResourceUpdate?: (info: ResourceUpdateInfo) => void;
     onGameInfo?: (frame: number, speed: number, paused: boolean,
                   wind?: { x: number; y: number; z: number; strength: number; tidal: number },
@@ -1359,6 +1376,13 @@ export class Connection {
             const snapshot = parseDecals(data.subarray(1));
             if (snapshot) {
                 this.events.onDecals?.(snapshot);
+            }
+            return;
+        }
+        if (envelope === ENVELOPE_HEIGHTMAP) {
+            const patch = parseHeightmapPatch(data.subarray(1));
+            if (patch) {
+                this.events.onHeightmapPatch?.(patch);
             }
             return;
         }
