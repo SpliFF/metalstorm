@@ -96,7 +96,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 
 | File | Purpose |
 |------|---------|
-| `main.ts` | App entry. Lobby init, `startGame()`, render loop, HUD wiring. |
+| `main.ts` | App entry. Lobby init, `startGame()`, HUD wiring. **GW4-c1**: `startGame()` now transfers `#game-canvas` to the game-processor worker (`gp:init`) and spawns it; the Babylon Engine + render loop + game connection live in the worker, not here (PLAN-game-worker.md). |
 | `config.ts` | Server URL, API base paths. |
 | `core/connection.ts` | WebTransport game-stream connection to server (over `WebTransportAdapter`). FlatBuffers dispatch. Events: `onMapData`, `onUnitDefs`, `onEntityState`, `onCombatEvents`, etc. GW4 relocates it into the game-processor worker (PLAN-game-worker.md). |
 | `core/transport.ts` | Transport abstraction over the game connection. `WebTransportAdapter` (QUIC/HTTP-3) — class-based send (`control`/`state`/`vision`/`bulk`/`datagram`), newest-wins state. WebRTC removed (PLAN-game-worker.md). |
@@ -132,7 +132,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `core/lua-gl-bridge.ts` + `lua-gl-immediate.ts` + `lua-gl-font.ts` | Lua `gl.*` bridge: command buffer, immediate-mode primitives, font/text rendering. |
 | `core/lua-widget.ts` | Lua widget definition + lifecycle wrapper. |
 | `core/lua-widget-host.ts` | Fengari host for map-side widgets (lava, water shaders). |
-| `core/lua-widget-worker.ts` | LuaUI Web Worker entry: Fengari + OffscreenCanvas, runs widgets off the main thread (PLAN-widgets.md). |
+| `core/lua-widget-worker.ts` | LuaUI Web Worker entry: Fengari + OffscreenCanvas, runs widgets off the main thread (PLAN-widgets.md). **GW4-c1**: also the game-processor worker — owns the Babylon `Engine` on the transferred `#game-canvas` (`gp:init` → empty clear-color scene; connection + decoders + render core fold in across c2–c6, PLAN-game-worker.md). |
 | `core/lua-widget-manager.ts` | Main-thread owner of the worker: lifecycle, message routing, input forwarding, VFS proxy. |
 | `core/widget-manager.ts` | Higher-level widget orchestration (load order, enable/disable, debug toggles). |
 | `core/command-buffer.ts` | Serialised `gl.*` command buffer transferred from worker to main-thread renderer. |
