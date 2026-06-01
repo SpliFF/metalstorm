@@ -97,6 +97,68 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(libdatachannel)
 
+# === QUIC / HTTP-3 / WebTransport (ngtcp2 + nghttp3 + OpenSSL 3.5+) ===
+# Stage 0 (PLAN-game-worker.md) moves the game stream onto WebTransport.
+# The QUIC stack needs OpenSSL >= 3.5 (native QUIC TLS API), ngtcp2 with
+# the ngtcp2_crypto_ossl backend, and nghttp3 for the HTTP/3 layer.
+#
+# Divergence from PLAN-game-worker.md GW1 (recorded deliberately): the plan
+# specced FetchContent for these. We instead consume the already-installed
+# Homebrew packages (libngtcp2 1.22, libnghttp3 1.15, openssl@3 3.6) via
+# pkg-config. Rationale: a from-scratch OpenSSL+ngtcp2 FetchContent build is
+# several minutes per clean configure and brittle on macOS; the system
+# packages are the same upstream releases. This is a build-system choice, not
+# an architecture change. CI / Linux can switch back to FetchContent later by
+# defining SPRING_QUIC_FETCHCONTENT.
+#
+# Discovery is best-effort: if the QUIC stack is absent, quic_deps is left
+# undefined and the WebTransport target is skipped (WebRTC still builds).
+find_package(PkgConfig QUIET)
+set(SPRING_HAVE_QUIC OFF)
+if(PkgConfig_FOUND)
+    # Prefer Homebrew's openssl@3 (system OpenSSL on macOS is LibreSSL).
+    foreach(_ossl_prefix /opt/homebrew/opt/openssl@3 /usr/local/opt/openssl@3)
+        if(EXISTS ${_ossl_prefix}/lib/pkgconfig)
+            list(APPEND CMAKE_PREFIX_PATH ${_ossl_prefix})
+            set(ENV{PKG_CONFIG_PATH} "${_ossl_prefix}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+        endif()
+    endforeach()
+    foreach(_qpkg libngtcp2 libngtcp2_crypto_ossl libnghttp3)
+        foreach(_qprefix /opt/homebrew/opt/${_qpkg} /usr/local/opt/${_qpkg})
+            if(EXISTS ${_qprefix}/lib/pkgconfig)
+                set(ENV{PKG_CONFIG_PATH} "${_qprefix}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+            endif()
+        endforeach()
+    endforeach()
+    pkg_check_modules(NGTCP2        QUIET libngtcp2)
+    pkg_check_modules(NGTCP2_CRYPTO QUIET libngtcp2_crypto_ossl)
+    pkg_check_modules(NGHTTP3       QUIET libnghttp3)
+    pkg_check_modules(OPENSSL_QUIC  QUIET libssl libcrypto)
+    if(NGTCP2_FOUND AND NGTCP2_CRYPTO_FOUND AND NGHTTP3_FOUND AND OPENSSL_QUIC_FOUND)
+        add_library(quic_deps INTERFACE)
+        target_include_directories(quic_deps INTERFACE
+            ${NGTCP2_INCLUDE_DIRS} ${NGTCP2_CRYPTO_INCLUDE_DIRS}
+            ${NGHTTP3_INCLUDE_DIRS} ${OPENSSL_QUIC_INCLUDE_DIRS})
+        target_link_libraries(quic_deps INTERFACE
+            ${NGTCP2_LINK_LIBRARIES} ${NGTCP2_CRYPTO_LINK_LIBRARIES}
+            ${NGHTTP3_LINK_LIBRARIES} ${OPENSSL_QUIC_LINK_LIBRARIES})
+        set(SPRING_HAVE_QUIC ON)
+        message(STATUS "QUIC stack found: ngtcp2 ${NGTCP2_VERSION}, nghttp3 ${NGHTTP3_VERSION}, openssl ${OPENSSL_QUIC_VERSION}")
+    endif()
+endif()
+if(NOT SPRING_HAVE_QUIC)
+    message(STATUS "QUIC stack not found — WebTransport target skipped (WebRTC unaffected)")
+endif()
+
+# Standalone GW1 de-risk harness: proves the QUIC/WebTransport toolchain
+# links and the core ngtcp2/OpenSSL server objects construct. Built only
+# when -DSPRING_BUILD_QUIC_DERISK=ON.
+option(SPRING_BUILD_QUIC_DERISK "Build the WebTransport QUIC de-risk harness" OFF)
+if(SPRING_BUILD_QUIC_DERISK AND SPRING_HAVE_QUIC)
+    add_executable(spring-quic-derisk rts/Server/WebTransport/derisk_main.cpp)
+    target_link_libraries(spring-quic-derisk PRIVATE quic_deps)
+endif()
+
 # === FlatBuffers (protocol serialisation) ===
 set(FLATBUFFERS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(FLATBUFFERS_INSTALL OFF CACHE BOOL "" FORCE)
