@@ -1,0 +1,102 @@
+// WebTransportServer — game-stream transport over HTTP/3 / WebTransport (QUIC).
+//
+// Stage 0 (PLAN-game-worker.md) replaces the WebRTC data-channel transport
+// (WebRTCServer) with WebTransport so the connection can live inside the
+// game-processor worker (RTCPeerConnection is main-thread-only) and so QUIC's
+// independent streams + RFC 9218 priorities stop low-priority bulk (decals,
+// heightmap) head-of-line-blocking per-frame entity state — which the single
+// WebRTC SCTP association cannot cleanly do.
+//
+// The seam deliberately mirrors WebRTCServer so server_main.cpp swaps in with
+// minimal churn: SendReliable/SendUnreliable/Broadcast*/DrainInbound/
+// DrainDisconnects/GetClientCount all carry over. It is *richer* in one way —
+// the GW2 priority tiers are exposed via StreamClass + SendStream/BroadcastStream
+// so the state-streaming sites can target Vision/Bulk tiers explicitly.
+//
+// Transport mapping (PLAN-game-worker.md GW2):
+//
+//   Tier            StreamClass  Carrier                 Urgency  Envelopes
+//   0 Control       Control      reliable bidi stream    0        0x01 FB, ACKs, chat
+//   1 Per-frame     State        newest-wins uni stream  1        0x02/0x03 entity, 0x05 piece
+//   2 Vision        Vision       reliable uni stream      3        0x07 LOS, 0x06 build-activity
+//   3 Bulk          Bulk         reliable uni stream      5        0x08 decals, 0x09 heightmap, blobs
+//   (datagram)      Datagram     unreliable datagram      —        future tiny self-contained signals
+//
+// "newest-wins" (State): on a new snapshot, RESET_STREAM any in-flight prior
+// State stream (stale positions are worthless) and open a fresh one. This gives
+// datagram-like skip-stale behaviour without app-level fragmentation, since
+// entity snapshots (6-8 KB) exceed the ~1200 B datagram limit.
+
+#pragma once
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+using ClientID = uint32_t;
+
+struct InboundMessage; // from NetworkServer.h
+
+/// Priority/reliability tier a payload is sent on. Values are the wire-stable
+/// ordering used by the client GameTransport class taxonomy
+/// (control/state/vision/bulk/datagram — see client/src/core/transport.ts).
+enum class StreamClass : uint8_t {
+    Control  = 0, // reliable, ordered, urgency 0 — never dropped
+    State    = 1, // newest-wins unreliable-ish, urgency 1 — skip-stale
+    Vision   = 2, // reliable, urgency 3
+    Bulk     = 3, // reliable, urgency 5 — must never block Control/State
+    Datagram = 4, // unreliable datagram (<~1200 B)
+};
+
+class WebTransportServer {
+public:
+    WebTransportServer();
+    ~WebTransportServer();
+
+    /// Bind the QUIC UDP socket on `port` and start the network thread.
+    /// `certPem`/`keyPem` are PEM strings; if empty an ephemeral self-signed
+    /// ECDSA cert is generated (dev) and its SHA-256 exposed via CertHash()
+    /// for the client's serverCertificateHashes pin.
+    bool Start(int port, const std::string& certPem = "", const std::string& keyPem = "");
+
+    /// SHA-256 of the DER cert (lower-case hex), for serverCertificateHashes.
+    std::string CertHash() const;
+
+    /// Send a payload to one client on a given tier.
+    void SendStream(ClientID clientId, StreamClass cls, const uint8_t* data, size_t len);
+
+    /// Send a payload to all connected clients on a given tier.
+    void BroadcastStream(StreamClass cls, const uint8_t* data, size_t len);
+
+    // --- WebRTCServer-compatible convenience wrappers (minimal server_main churn) ---
+    void SendReliable(ClientID clientId, const uint8_t* data, size_t len) {
+        SendStream(clientId, StreamClass::Control, data, len);
+    }
+    void SendUnreliable(ClientID clientId, const uint8_t* data, size_t len) {
+        SendStream(clientId, StreamClass::State, data, len);
+    }
+    void BroadcastReliable(const uint8_t* data, size_t len) {
+        BroadcastStream(StreamClass::Control, data, len);
+    }
+    void BroadcastUnreliable(const uint8_t* data, size_t len) {
+        BroadcastStream(StreamClass::State, data, len);
+    }
+
+    /// Drain inbound application messages (decoded from WebTransport streams +
+    /// datagrams). Same contract the sim loop already drains for WebRTC.
+    std::vector<InboundMessage> DrainInbound();
+
+    /// Drain client IDs whose session closed since the last call.
+    std::vector<ClientID> DrainDisconnects();
+
+    /// Number of established WebTransport sessions.
+    int GetClientCount() const;
+
+    /// Stop the network thread and close all sessions.
+    void Shutdown();
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
