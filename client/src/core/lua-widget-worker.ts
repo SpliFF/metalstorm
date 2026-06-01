@@ -21,6 +21,8 @@
  *     {type:'error', msg}
  */
 
+import { Engine, Scene, FreeCamera, Vector3, Color4 } from '@babylonjs/core';
+import type { GpInitToWorker } from './game-worker-protocol.js';
 import { LuaRuntime, type LuaValue, luaTable } from './lua-runtime.js';
 import { LuaGLBridge } from './lua-gl-bridge.js';
 import {
@@ -4563,6 +4565,69 @@ function shutdown(): void {
     bridge = null;
 }
 
+// ── Game-processor Babylon engine (PLAN-game-worker.md GW4) ─────────────
+//
+// GW4-c1: the worker owns the Babylon Engine on the transferred #game-canvas.
+// At c1 it renders only an empty clear-color scene with a default camera —
+// the connection, decoders, terrain, entities, FX and the LuaUI world pass
+// fold in across c2–c6. The pre-existing 2D widget gl-bridge (overlay canvas,
+// the `init` path) is dormant on the game-processor path until c6 repoints it
+// at this same GL context.
+let gpEngine: Engine | null = null;
+let gpScene: Scene | null = null;
+let gpCamera: FreeCamera | null = null;
+
+function gpInit(msg: GpInitToWorker): void {
+    if (gpEngine) {
+        postLog(2, '[gp] gp:init received but engine already up — ignoring');
+        return;
+    }
+    const canvas = msg.canvas;
+    // Size the backing store to the device-pixel resolution; Babylon reads
+    // width/height off the canvas. Main keeps CSS sizing on the DOM element.
+    canvas.width = Math.max(1, Math.floor(msg.width * msg.dpr));
+    canvas.height = Math.max(1, Math.floor(msg.height * msg.dpr));
+
+    const engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
+    const scene = new Scene(engine);
+    // RH scene so the glTF loader + the server's RH wire format line up
+    // (PLAN-coordinate-system) — same setup main.ts used before the move.
+    scene.useRightHandedSystem = true;
+    scene.clearColor = new Color4(0.05, 0.08, 0.12, 1);
+
+    // Default camera at origin — repositioned when MapData arrives (GW4-c3).
+    const camera = new FreeCamera('camera', new Vector3(0, 1200, -1500), scene);
+    camera.setTarget(new Vector3(0, 0, 0));
+    camera.minZ = 1;
+    camera.maxZ = 50000;
+
+    gpEngine = engine;
+    gpScene = scene;
+    gpCamera = camera;
+
+    engine.runRenderLoop(() => { scene.render(); });
+    postLog(1, '[gp] Babylon Engine up on transferred #game-canvas (GW4-c1, empty scene)');
+}
+
+function gpResize(width: number, height: number, dpr: number): void {
+    if (!gpEngine) return;
+    const c = gpEngine.getRenderingCanvas() as OffscreenCanvas | null;
+    if (c) {
+        c.width = Math.max(1, Math.floor(width * dpr));
+        c.height = Math.max(1, Math.floor(height * dpr));
+    }
+    gpEngine.resize();
+}
+
+function gpShutdown(): void {
+    gpEngine?.stopRenderLoop();
+    gpScene?.dispose();
+    gpEngine?.dispose();
+    gpEngine = null;
+    gpScene = null;
+    gpCamera = null;
+}
+
 // ── Message handler ────────────────────────────────────────────────────
 
 self.onmessage = async (e: MessageEvent) => {
@@ -4593,6 +4658,26 @@ self.onmessage = async (e: MessageEvent) => {
                 postLog(4, `Init failed: ${err}`);
                 postToMain({ type: 'error', msg: String(err) });
             }
+            break;
+
+        // PLAN-game-worker.md GW4: game-processor messages. At c1 only the
+        // Engine bootstrap + resize/shutdown are wired; connection, decoders,
+        // input and the scene-state feed land in c2–c5.
+        case 'gp:init':
+            try {
+                gpInit(msg as GpInitToWorker);
+            } catch (err) {
+                postLog(4, `gp:init failed: ${err}`);
+                postToMain({ type: 'error', msg: String(err) });
+            }
+            break;
+
+        case 'gp:resize':
+            gpResize(msg.width, msg.height, msg.dpr);
+            break;
+
+        case 'gp:shutdown':
+            gpShutdown();
             break;
 
         case 'keypress':
