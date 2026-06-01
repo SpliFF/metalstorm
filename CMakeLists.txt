@@ -111,50 +111,42 @@ FetchContent_MakeAvailable(libdatachannel)
 # an architecture change. CI / Linux can switch back to FetchContent later by
 # defining SPRING_QUIC_FETCHCONTENT.
 #
-# Discovery is best-effort: if the QUIC stack is absent, quic_deps is left
-# undefined and the WebTransport target is skipped (WebRTC still builds).
-find_package(PkgConfig QUIET)
-set(SPRING_HAVE_QUIC OFF)
-if(PkgConfig_FOUND)
-    # Prefer Homebrew's openssl@3 (system OpenSSL on macOS is LibreSSL).
-    foreach(_ossl_prefix /opt/homebrew/opt/openssl@3 /usr/local/opt/openssl@3)
-        if(EXISTS ${_ossl_prefix}/lib/pkgconfig)
-            list(APPEND CMAKE_PREFIX_PATH ${_ossl_prefix})
-            set(ENV{PKG_CONFIG_PATH} "${_ossl_prefix}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+# WebTransport is the *only* game transport (PLAN-game-worker.md drops WebRTC
+# entirely — no fallback by design). The QUIC stack is therefore a hard build
+# requirement: configuration fails if it is absent.
+find_package(PkgConfig REQUIRED)
+# Prefer Homebrew's openssl@3 (system OpenSSL on macOS is LibreSSL, no QUIC).
+foreach(_ossl_prefix /opt/homebrew/opt/openssl@3 /usr/local/opt/openssl@3)
+    if(EXISTS ${_ossl_prefix}/lib/pkgconfig)
+        list(APPEND CMAKE_PREFIX_PATH ${_ossl_prefix})
+        set(ENV{PKG_CONFIG_PATH} "${_ossl_prefix}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+    endif()
+endforeach()
+foreach(_qpkg libngtcp2 libngtcp2_crypto_ossl libnghttp3)
+    foreach(_qprefix /opt/homebrew/opt/${_qpkg} /usr/local/opt/${_qpkg})
+        if(EXISTS ${_qprefix}/lib/pkgconfig)
+            set(ENV{PKG_CONFIG_PATH} "${_qprefix}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
         endif()
     endforeach()
-    foreach(_qpkg libngtcp2 libngtcp2_crypto_ossl libnghttp3)
-        foreach(_qprefix /opt/homebrew/opt/${_qpkg} /usr/local/opt/${_qpkg})
-            if(EXISTS ${_qprefix}/lib/pkgconfig)
-                set(ENV{PKG_CONFIG_PATH} "${_qprefix}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
-            endif()
-        endforeach()
-    endforeach()
-    pkg_check_modules(NGTCP2        QUIET libngtcp2)
-    pkg_check_modules(NGTCP2_CRYPTO QUIET libngtcp2_crypto_ossl)
-    pkg_check_modules(NGHTTP3       QUIET libnghttp3)
-    pkg_check_modules(OPENSSL_QUIC  QUIET libssl libcrypto)
-    if(NGTCP2_FOUND AND NGTCP2_CRYPTO_FOUND AND NGHTTP3_FOUND AND OPENSSL_QUIC_FOUND)
-        add_library(quic_deps INTERFACE)
-        target_include_directories(quic_deps INTERFACE
-            ${NGTCP2_INCLUDE_DIRS} ${NGTCP2_CRYPTO_INCLUDE_DIRS}
-            ${NGHTTP3_INCLUDE_DIRS} ${OPENSSL_QUIC_INCLUDE_DIRS})
-        target_link_libraries(quic_deps INTERFACE
-            ${NGTCP2_LINK_LIBRARIES} ${NGTCP2_CRYPTO_LINK_LIBRARIES}
-            ${NGHTTP3_LINK_LIBRARIES} ${OPENSSL_QUIC_LINK_LIBRARIES})
-        set(SPRING_HAVE_QUIC ON)
-        message(STATUS "QUIC stack found: ngtcp2 ${NGTCP2_VERSION}, nghttp3 ${NGHTTP3_VERSION}, openssl ${OPENSSL_QUIC_VERSION}")
-    endif()
-endif()
-if(NOT SPRING_HAVE_QUIC)
-    message(STATUS "QUIC stack not found — WebTransport target skipped (WebRTC unaffected)")
-endif()
+endforeach()
+pkg_check_modules(NGTCP2        REQUIRED libngtcp2)
+pkg_check_modules(NGTCP2_CRYPTO REQUIRED libngtcp2_crypto_ossl)
+pkg_check_modules(NGHTTP3       REQUIRED libnghttp3)
+pkg_check_modules(OPENSSL_QUIC  REQUIRED libssl libcrypto)
+add_library(quic_deps INTERFACE)
+target_include_directories(quic_deps INTERFACE
+    ${NGTCP2_INCLUDE_DIRS} ${NGTCP2_CRYPTO_INCLUDE_DIRS}
+    ${NGHTTP3_INCLUDE_DIRS} ${OPENSSL_QUIC_INCLUDE_DIRS})
+target_link_libraries(quic_deps INTERFACE
+    ${NGTCP2_LINK_LIBRARIES} ${NGTCP2_CRYPTO_LINK_LIBRARIES}
+    ${NGHTTP3_LINK_LIBRARIES} ${OPENSSL_QUIC_LINK_LIBRARIES})
+message(STATUS "QUIC stack: ngtcp2 ${NGTCP2_VERSION}, nghttp3 ${NGHTTP3_VERSION}, openssl ${OPENSSL_QUIC_VERSION}")
 
 # Standalone GW1 de-risk harness: proves the QUIC/WebTransport toolchain
 # links and the core ngtcp2/OpenSSL server objects construct. Built only
 # when -DSPRING_BUILD_QUIC_DERISK=ON.
 option(SPRING_BUILD_QUIC_DERISK "Build the WebTransport QUIC de-risk harness" OFF)
-if(SPRING_BUILD_QUIC_DERISK AND SPRING_HAVE_QUIC)
+if(SPRING_BUILD_QUIC_DERISK)
     add_executable(spring-quic-derisk rts/Server/WebTransport/derisk_main.cpp)
     target_link_libraries(spring-quic-derisk PRIVATE quic_deps)
 endif()
@@ -346,8 +338,12 @@ file(GLOB_RECURSE LUA_BINDING_SOURCES rts/Lua/*.cpp)
 # Exclude rendering-only Lua bindings (GL buffers, VAO/VBO, Tracy extras)
 list(FILTER LUA_BINDING_SOURCES EXCLUDE REGEX "Lua(VBO|VAO|VBOImpl|VAOImpl|TracyExtra)\\.cpp$")
 
-# Server sources
+# Server sources (includes rts/Server/WebTransport/WebTransportServer.cpp —
+# WebTransport is the game transport, compiled in unconditionally). The
+# standalone de-risk harness has its own main() and its own target, so keep it
+# out of spring-server.
 file(GLOB_RECURSE SERVER_SOURCES rts/Server/*.cpp)
+list(FILTER SERVER_SOURCES EXCLUDE REGEX "rts/Server/WebTransport/derisk_main")
 
 # === spring-server executable ===
 add_executable(spring-server
@@ -370,7 +366,7 @@ target_include_directories(spring-server PRIVATE
     ${GENERATED_DIR}
 )
 find_package(ZLIB REQUIRED)
-target_link_libraries(spring-server PRIVATE lua smmalloc nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite LibDataChannel::LibDataChannelStatic nlohmann_json::nlohmann_json brotlienc brotlicommon)
+target_link_libraries(spring-server PRIVATE lua smmalloc nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite LibDataChannel::LibDataChannelStatic quic_deps nlohmann_json::nlohmann_json brotlienc brotlicommon)
 
 # Link platform libraries
 if(UNIX AND NOT APPLE)

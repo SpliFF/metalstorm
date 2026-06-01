@@ -36,7 +36,8 @@
 
 using ClientID = uint32_t;
 
-struct InboundMessage; // from NetworkServer.h
+struct InboundMessage;        // from NetworkServer.h
+struct WebTransportServerImpl; // QUIC/ngtcp2 implementation (WebTransportServer.cpp)
 
 /// Priority/reliability tier a payload is sent on. Values are the wire-stable
 /// ordering used by the client GameTransport class taxonomy
@@ -97,6 +98,5 @@ public:
     void Shutdown();
 
 private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
+    std::unique_ptr<WebTransportServerImpl> impl_;
 };
