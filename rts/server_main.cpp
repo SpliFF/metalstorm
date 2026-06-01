@@ -39,7 +39,7 @@
 #include "Lua/LuaRules.h"
 #include "Server/HttpAuth.h"
 #include "Server/CacheControl.h"
-#include "Server/WebRTCServer.h"
+#include "Server/WebTransport/WebTransportServer.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogNet.h"
 #include "System/SpringLog/SpringLogSqlite.h"
@@ -639,41 +639,25 @@ int main(int argc, char* argv[])
         return HttpAuth::JsonResponse(200, json);
     });
 
-    // --- WebRTC signaling endpoints ---
-    WebRTCServer rtcServer;
+    // --- Game transport: WebTransport (QUIC/HTTP-3) ---
+    //
+    // The realtime game stream runs over WebTransport (PLAN-game-worker.md,
+    // Stage 0), replacing WebRTC. Unlike WebRTC there is no HTTP signaling
+    // handshake: the browser connects straight to the QUIC endpoint (UDP, same
+    // port number as the HTTP server) and authenticates via an AuthRequest
+    // message over the control stream — the same auth path the loop already
+    // drives. `rtcServer` keeps its name so the ~80 SendReliable/Broadcast call
+    // sites are unchanged (the WebTransportServer seam mirrors WebRTCServer).
+    WebTransportServer rtcServer;
 
-    net.AddHttpPost("/api/rtc/offer", [&rtcServer, &db](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
-        int64_t userId = HttpAuth::ValidateToken(db, headers.authorization);
-        if (userId <= 0) {
-            return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
-        }
-        std::string sdpOffer = HttpAuth::JsonField(body, "sdp");
-        if (sdpOffer.empty()) {
-            return HttpAuth::JsonResponse(400, R"({"error":"missing sdp field"})");
-        }
-        auto result = rtcServer.HandleOffer(sdpOffer, headers.authorization);
-        if (!result.success) {
-            return HttpAuth::JsonResponse(500, "{\"error\":\"" + HttpAuth::JsonEscape(result.error) + "\"}");
-        }
-        std::string json = "{\"client_id\":" + std::to_string(result.clientId)
-            + ",\"sdp\":\"" + HttpAuth::JsonEscape(result.sdpAnswer) + "\"}";
+    // Cert-hash discovery: the client pins the dev server's ephemeral
+    // self-signed cert via serverCertificateHashes. It learns the hash (and the
+    // WT port) from this endpoint over the already-trusted HTTP plane.
+    net.AddHttpGet("/api/wt/info", [&rtcServer, port](const std::string&) -> HttpResponse {
+        std::string json = "{\"port\":" + std::to_string(rtcServer.Port())
+            + ",\"certHash\":\"" + rtcServer.CertHash() + "\""
+            + ",\"transport\":\"webtransport\"}";
         return HttpAuth::JsonResponse(200, json);
-    });
-
-    net.AddHttpPost("/api/rtc/candidate", [&rtcServer, &db](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
-        int64_t userId = HttpAuth::ValidateToken(db, headers.authorization);
-        if (userId <= 0) {
-            return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
-        }
-        std::string candidate = HttpAuth::JsonField(body, "candidate");
-        std::string mid = HttpAuth::JsonField(body, "mid");
-        std::string clientIdStr = HttpAuth::JsonField(body, "client_id");
-        uint32_t clientId = clientIdStr.empty() ? 0 : (uint32_t)std::atoi(clientIdStr.c_str());
-        if (clientId == 0) {
-            return HttpAuth::JsonResponse(400, R"({"error":"missing client_id"})");
-        }
-        bool ok = rtcServer.AddCandidate(clientId, candidate, mid);
-        return HttpAuth::JsonResponse(200, ok ? R"({"ok":true})" : R"({"ok":false})");
     });
 
     if (!net.Start(port)) {
@@ -681,6 +665,14 @@ int main(int argc, char* argv[])
         springlog_shutdown();
         return 1;
     }
+
+    // QUIC is a hard dependency (no WebRTC fallback) — fail fast if it can't bind.
+    if (!rtcServer.Start(port)) {
+        SLOG(SPRING_LOG_ERROR, "failed to start WebTransport (QUIC) server on udp/:%d", port);
+        springlog_shutdown();
+        return 1;
+    }
+    SLOG(SPRING_LOG_NOTICE, "WebTransport (QUIC) listening on udp/:%d", port);
 
     // --- Simulation ---
     // Find .smf file in the map directory

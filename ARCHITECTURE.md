@@ -55,7 +55,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `server_main.cpp` | Game server entry. Auth (registers CPlayer), message dispatch, disconnect handling (fires PlayerRemoved callin), sim loop, entity streaming, win detection. |
 | `lobby_main.cpp` | Lobby entry. Room management, game/map preprocessing, child process spawning, HTTP routes. |
 | `Server/Simulation.h/.cpp` | Initialises Spring subsystems, ticks physics/units/weapons/features each frame. |
-| `Server/NetworkServer.h/.cpp` | HTTP/2 (h2c via nghttp2) + HTTP/1.1 server. WebRTC data channels for game traffic (migrating to WebTransport — PLAN-game-worker.md). Send/broadcast helpers. |
+| `Server/NetworkServer.h/.cpp` | HTTP/2 (h2c via nghttp2) + HTTP/1.1 server (REST/SSE/assets only). Realtime game traffic now runs over WebTransport (`WebTransportServer`), not WebRTC. Send/broadcast helpers. |
 | `Server/WebTransport/WebTransportServer.h/.cpp` | **WebTransport (QUIC/HTTP-3) game transport** — Stage 0 replacement for WebRTC (PLAN-game-worker.md). ngtcp2 + nghttp3 + OpenSSL 3.5 QUIC TLS. Full stack landed + Chrome-verified (GW1-H3): QUIC handshake (ephemeral ECDSA-P256 self-signed cert, `CertHash()` for `serverCertificateHashes`), hand-rolled HTTP/3 framing + nghttp3 standalone QPACK, WebTransport draft-02 extended-CONNECT + stream/datagram demux (`0x54` uni / `0x41` bidi / quarter-stream-id). Mirrors the WebRTCServer seam + adds `StreamClass` priority tiers. QUIC stack is a **hard build dependency** (no WebRTC fallback). Echo-test it with `spring-quic-derisk serve <port>`. |
 | `Server/Protocol.h` | FlatBuffers message builders (BuildAuthResponse, BuildMapData, BuildGameUnitDefs, etc.). |
 | `Server/EntityStateSerializer.h/.cpp` | Serialises unit state to Tier 2 binary (struct-of-arrays, field-masked). |
@@ -458,6 +458,7 @@ data/
 | `/api/metrics` | JSON performance stats |
 | `/api/content/manifest` | JSON index of all servable assets |
 | `/api/content/assets/*` | Individual asset files from content roots |
+| `/api/wt/info` | JSON `{port, certHash, transport}` — WebTransport (QUIC) endpoint discovery; the client pins the dev cert via `serverCertificateHashes`. Replaces the removed `/api/rtc/offer` + `/api/rtc/candidate` WebRTC signaling. |
 
 ### Log server (`spring-logserver`)
 
