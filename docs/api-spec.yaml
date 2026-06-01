@@ -9,7 +9,7 @@ info:
 
     Three server types share this API:
     - **Lobby** (default port 8011): auth, rooms, maps, processes
-    - **Game server** (dynamic port): auth, exec, WebRTC signaling
+    - **Game server** (dynamic port): auth, exec, WebTransport discovery (`/api/wt/info`)
     - **Log server** (default port 8010): log queries, sessions, SSE streaming
 
 servers:
@@ -67,18 +67,6 @@ components:
         state: { type: string, enum: [starting, running, ended, crashed] }
         map: { type: string }
         game: { type: string }
-
-    RtcOffer:
-      type: object
-      required: [sdp]
-      properties:
-        sdp: { type: string, description: SDP offer from client }
-
-    RtcAnswer:
-      type: object
-      properties:
-        client_id: { type: integer }
-        sdp: { type: string, description: SDP answer from server }
 
     Room:
       type: object
@@ -350,41 +338,28 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Room" }
 
-  /api/rtc/offer:
-    post:
-      summary: WebRTC signaling — send SDP offer, receive answer
-      tags: [WebRTC]
-      security:
-        - bearerAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/RtcOffer" }
+  /api/wt/info:
+    get:
+      summary: WebTransport (QUIC) endpoint discovery
+      description: >
+        Returns the game server's WebTransport endpoint. The client opens a
+        WebTransport session to `https://<host>:<port>/`, pinning the dev cert
+        via `serverCertificateHashes`, then authenticates with an AuthRequest
+        over the control stream. Replaces the removed `/api/rtc/*` WebRTC
+        signaling (GW7, PLAN-game-worker.md).
+      tags: [Game]
       responses:
         "200":
-          description: SDP answer
+          description: WebTransport endpoint
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/RtcAnswer" }
-
-  /api/rtc/candidate:
-    post:
-      summary: WebRTC signaling — add ICE candidate
-      tags: [WebRTC]
-      security:
-        - bearerAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [client_id, candidate, mid]
-              properties:
-                client_id: { type: integer }
-                candidate: { type: string }
-                mid: { type: string }
+              schema:
+                type: object
+                required: [port, certHash, transport]
+                properties:
+                  port: { type: integer, description: QUIC/UDP port }
+                  certHash: { type: string, description: base64 SHA-256 of the dev cert (empty in prod) }
+                  transport: { type: string, enum: [webtransport] }
 
   /api/processes:
     get:

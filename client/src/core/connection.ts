@@ -1,15 +1,16 @@
 /**
- * Connection — manages HTTP auth + WebRTC data channels to the game server.
+ * Connection — manages HTTP auth + the WebTransport game stream.
  *
  * Auth flow:
  *   1. HTTP POST /api/auth/login → token
- *   2. Create RTCPeerConnection with two negotiated data channels
- *   3. HTTP POST /api/rtc/offer → SDP answer
- *   4. Data channels open → game begins
+ *   2. GET /api/wt/info → { port, certHash } for the QUIC endpoint
+ *   3. Open a WebTransport session (pinning certHash) via WebTransportAdapter
+ *   4. AuthRequest over the control stream → game begins
  *
- * Channels:
- *   "control" (id=0, reliable, ordered) — FlatBuffer messages
- *   "state"   (id=1, unreliable, unordered) — entity/projectile state
+ * Transport classes (see transport.ts / PLAN-game-worker.md GW2):
+ *   "control" — reliable, ordered bidi stream (FlatBuffer messages)
+ *   "state"   — newest-wins uni streams (entity/piece state)
+ *   "vision" / "bulk" — reliable uni streams at lower priority
  */
 
 import * as flatbuffers from 'flatbuffers';
@@ -807,7 +808,7 @@ export class Connection {
     /**
      * Connect to the game server.
      * `url` is the HTTP base URL (http://host:port) for auth and
-     * WebRTC signaling.
+     * the /api/wt/info WebTransport discovery.
      */
     connect(url: string, username: string, password: string, token?: string): void {
         if (this.transport) this.disconnect();
@@ -829,7 +830,7 @@ export class Connection {
     /// The lobby fires onGameStart as soon as it sets `room.gameServerPort`,
     /// which is *before* the forked spring-server has run `net.Start(port)`.
     /// That bind happens after main() opens the SQLite DB, parses CLI args,
-    /// initialises HttpAuth, and constructs WebRTCServer — typically 1–3 s
+    /// initialises HttpAuth, and constructs WebTransportServer — typically 1–3 s
     /// on a cold boot, longer on macOS under heavy lobby load. Budget 60 s
     /// at 500 ms per retry so even slow boots succeed without surfacing a
     /// "can't connect" failure to the user.
@@ -1274,7 +1275,7 @@ export class Connection {
     // ─── Message handling (transport-agnostic) ───
 
     /** Feed a framed binary message (envelope byte + FlatBuffer payload)
-     *  into the same dispatch path used for WebRTC frames. Used by the
+     *  into the same dispatch path used for WebTransport frames. Used by the
      *  HTTP def-fetch path, which downloads the same bytes the server
      *  would otherwise stream and pumps them through here. */
     public ingestFramedMessage(data: Uint8Array): void {

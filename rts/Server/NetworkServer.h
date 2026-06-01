@@ -10,7 +10,8 @@
  * SSE (Server-Sent Events) endpoints stream data to subscribers in
  * real-time. Works on both HTTP/1.1 and HTTP/2.
  *
- * WebRTC data channels handle real-time game traffic (see WebRTCServer).
+ * WebTransport (QUIC) handles real-time game traffic (see
+ * WebTransport/WebTransportServer).
  */
 #pragma once
 
@@ -25,7 +26,7 @@
 /// Identifies a connected client.
 using ClientID = uint32_t;
 
-/// An inbound message from a client (used by WebRTCServer).
+/// An inbound message from a client (used by WebTransportServer).
 struct InboundMessage {
     ClientID clientId;
     std::vector<uint8_t> data;

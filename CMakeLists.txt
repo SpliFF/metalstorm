@@ -57,7 +57,7 @@ include(FetchContent)
 
 # nghttp2: build only the static library, no tools/examples/docs.
 # Use manual FetchContent_Populate to scope variables without affecting
-# other dependencies (doctest, libdatachannel, etc.).
+# other dependencies (doctest, brotli, etc.).
 FetchContent_Declare(
     nghttp2
     GIT_REPOSITORY https://github.com/nghttp2/nghttp2.git
@@ -82,20 +82,11 @@ if(NOT nghttp2_POPULATED)
     set(BUILD_TESTING ${NGHTTP2_SAVE_BUILD_TESTING})
 endif()
 
-# === libdatachannel (WebRTC data channels) ===
-# Workaround: libdatachannel's plog dep uses old cmake_minimum_required
+# WebRTC (libdatachannel) was removed in GW7 (PLAN-game-worker.md) — the game
+# stream now runs on WebTransport (QUIC) only. See the QUIC block below.
+# Some FetchContent deps (e.g. plog) still declare an old cmake_minimum_required;
+# keep the policy floor so they configure under modern CMake.
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
-set(NO_MEDIA ON CACHE BOOL "" FORCE)          # data channels only, no audio/video
-set(NO_WEBSOCKET ON CACHE BOOL "" FORCE)      # we have our own HTTP, don't need WS
-set(NO_EXAMPLES ON CACHE BOOL "" FORCE)
-set(NO_TESTS ON CACHE BOOL "" FORCE)
-FetchContent_Declare(
-    libdatachannel
-    GIT_REPOSITORY https://github.com/paullouisageneau/libdatachannel.git
-    GIT_TAG v0.22.5
-    GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(libdatachannel)
 
 # === QUIC / HTTP-3 / WebTransport (ngtcp2 + nghttp3 + OpenSSL 3.5+) ===
 # Stage 0 (PLAN-game-worker.md) moves the game stream onto WebTransport.
@@ -286,7 +277,7 @@ list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Log/TracySink")
 list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Log/OutputDebugStringSink")
 list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "TraceMemory")
 list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Sync/DumpHistory")
-# Legacy P2P networking (replaced by WebRTC/HTTP)
+# Legacy P2P networking (replaced by WebTransport/HTTP)
 list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Net/UDPListener")
 list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Net/UDPConnection")
 list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Net/LocalConnection")
@@ -369,7 +360,7 @@ target_include_directories(spring-server PRIVATE
     ${GENERATED_DIR}
 )
 find_package(ZLIB REQUIRED)
-target_link_libraries(spring-server PRIVATE lua smmalloc nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite LibDataChannel::LibDataChannelStatic quic_deps nlohmann_json::nlohmann_json brotlienc brotlicommon)
+target_link_libraries(spring-server PRIVATE lua smmalloc nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite quic_deps nlohmann_json::nlohmann_json brotlienc brotlicommon)
 
 # Link platform libraries
 if(UNIX AND NOT APPLE)
@@ -557,7 +548,12 @@ if(UNIX)
 endif()
 
 # === libspringapi (standalone client library) ===
-set(SPRINGAPI_WEBRTC ON CACHE BOOL "Enable WebRTC in libspringapi" FORCE)
+# WebRTC removed in GW7 — the server is WebTransport-only, so libspringapi's
+# WebRTC game-connect path (connectRtc) is dead against it and is built out
+# (connectRtc returns nullptr). Lobby/HTTP functionality is unaffected.
+# Force OFF so a stale cache from a pre-GW7 build doesn't drag libdatachannel
+# back in. TODO: port libspringapi game-connect to a C++ WebTransport client.
+set(SPRINGAPI_WEBRTC OFF CACHE BOOL "WebRTC removed (GW7)" FORCE)
 add_subdirectory(libspringapi)
 
 # === springcli — CLI tool ===

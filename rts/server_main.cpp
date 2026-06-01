@@ -2,8 +2,9 @@
  * spring-server entry point
  *
  * Headless authoritative game server. Runs the simulation at a fixed
- * 30 Hz tick rate. Clients connect via WebRTC data channels (signaled
- * over HTTP). HTTP also serves map/game assets and REST API endpoints.
+ * 30 Hz tick rate. Clients connect over WebTransport (QUIC/HTTP-3); the
+ * endpoint is discovered via `GET /api/wt/info`. HTTP also serves map/game
+ * assets and REST API endpoints.
  */
 
 #include "Server/Simulation.h"
@@ -646,8 +647,9 @@ int main(int argc, char* argv[])
     // handshake: the browser connects straight to the QUIC endpoint (UDP, same
     // port number as the HTTP server) and authenticates via an AuthRequest
     // message over the control stream — the same auth path the loop already
-    // drives. `rtcServer` keeps its name so the ~80 SendReliable/Broadcast call
-    // sites are unchanged (the WebTransportServer seam mirrors WebRTCServer).
+    // drives. `rtcServer` keeps its (now-historical) name so the ~80
+    // SendReliable/Broadcast call sites carried over unchanged from the
+    // removed WebRTC server (GW7).
     WebTransportServer rtcServer;
 
     // Cert-hash discovery: the client pins the dev server's ephemeral
@@ -848,13 +850,13 @@ int main(int argc, char* argv[])
     // --- Player roster lookup ---
     //
     // Build a `username -> team` map from the --player args so the
-    // WebRTC auth handler can stamp the session's team on login.
+    // auth handler can stamp the session's team on login.
     std::unordered_map<std::string, int> playerTeamByUsername;
     for (const auto& rp : requestedPlayers) {
         playerTeamByUsername[rp.username] = rp.team;
     }
 
-    // Map WebRTC clientId -> Spring playerNum so we can fire
+    // Map WebTransport clientId -> Spring playerNum so we can fire
     // eventHandler.PlayerRemoved() with the correct id on disconnect.
     std::unordered_map<ClientID, int> clientPlayerNum;
     int nextPlayerNum = 0;
@@ -1008,7 +1010,7 @@ int main(int argc, char* argv[])
         // Rate-limit token buckets now refill lazily on command arrival;
         // no per-tick reset required. See ClientSession::TryConsumeCommandBudget.
 
-        // Drain inbound messages from WebRTC data channels
+        // Drain inbound messages from WebTransport streams
         auto messages = rtcServer.DrainInbound();
         for (auto& msg : messages) {
             auto* clientMsg = Protocol::ParseClientMessage(msg.data.data(), msg.data.size());
@@ -2643,7 +2645,7 @@ int main(int argc, char* argv[])
         auto msg = Protocol::BuildGameRestarting();
         rtcServer.BroadcastReliable(msg.data(), msg.size());
 
-        // Brief pause to let the message flush over WebRTC
+        // Brief pause to let the message flush over WebTransport
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
         net.Stop();

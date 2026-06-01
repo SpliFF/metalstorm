@@ -98,7 +98,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 |------|---------|
 | `main.ts` | App entry. Lobby init, `startGame()`, render loop, HUD wiring. |
 | `config.ts` | Server URL, API base paths. |
-| `core/connection.ts` | WebRTC data-channel connection to server (WebSocket removed). FlatBuffers dispatch. Events: `onMapData`, `onUnitDefs`, `onEntityState`, `onCombatEvents`, etc. Migrating to WebTransport in the game-processor worker (PLAN-game-worker.md). |
+| `core/connection.ts` | WebTransport game-stream connection to server (over `WebTransportAdapter`). FlatBuffers dispatch. Events: `onMapData`, `onUnitDefs`, `onEntityState`, `onCombatEvents`, etc. GW4 relocates it into the game-processor worker (PLAN-game-worker.md). |
 | `core/transport.ts` | Transport abstraction over the game connection. `WebTransportAdapter` (QUIC/HTTP-3) — class-based send (`control`/`state`/`vision`/`bulk`/`datagram`), newest-wins state. WebRTC removed (PLAN-game-worker.md). |
 | `core/entity-renderer.ts` | Per-piece thin-instanced unit renderer. Loads `.glb` via `setUnitDefs()`, groups by (defId, team, pieceIdx). Fallback: procedural shapes. |
 | `core/feature-renderer.ts` | Single-mesh thin-instanced map feature renderer. Pattern reference for entity-renderer. |
@@ -165,7 +165,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 
 **IPC:** Pipe-based IPC removed. The lobby↔game backchannel (e.g. GameStarted) is **not yet implemented** — `Simulation.cpp` carries a `TODO(Tier 2)` for it; when built it targets WebTransport (PLAN-game-worker.md), not WebSocket/WebRTC.
 
-**Transport:** All HTTP endpoints support both HTTP/2 (h2c, cleartext) and HTTP/1.1. Game state streaming runs over **WebTransport (QUIC/HTTP-3)** via `WebTransportServer` (GW1–GW3 landed; PLAN-game-worker.md, PLAN.md Stage 0). The client discovers the endpoint via `GET /api/wt/info`. WebRTC is removed from the game path (the `WebRTCServer.{h,cpp}` + libdatachannel code is now dead and slated for deletion in GW7). The remaining migration (GW4) relocates the connection + render core into the game-processor worker.
+**Transport:** All HTTP endpoints support both HTTP/2 (h2c, cleartext) and HTTP/1.1. Game state streaming runs over **WebTransport (QUIC/HTTP-3)** via `WebTransportServer` (GW1–GW3 landed; PLAN-game-worker.md, PLAN.md Stage 0). The client discovers the endpoint via `GET /api/wt/info`. WebRTC is **fully removed** (GW7): `WebRTCServer.{h,cpp}`, libdatachannel, and the `/api/rtc/*` signaling are gone; `libspringapi` no longer links libdatachannel (`connectRtc` is an inert stub pending a WebTransport port). The remaining migration (GW4) relocates the connection + render core into the game-processor worker.
 
 Generated bindings:
 - C++: `rts/protocol_generated.h`

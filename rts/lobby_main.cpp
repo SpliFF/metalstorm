@@ -1380,7 +1380,7 @@ int main(int argc, char* argv[])
             const std::string& gameVer = (vit != gameVersionsById.end()) ? vit->second : std::string();
             // Skip ports currently held by live spring-server processes.
             // Without this, the new game-server binds via SO_REUSEPORT
-            // alongside the old one and incoming WebRTC connections
+            // alongside the old one and incoming client connections
             // round-robin between the two — see findFreePort comment.
             std::unordered_set<int> busyPorts;
             for (const auto& [rid, gi] : gameServers) {

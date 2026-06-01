@@ -233,29 +233,28 @@ curl -X POST http://localhost:<game-port>/api/exec \
 | `step_over` / `n` | Step over |
 | `step_out` / `o` | Step out |
 
-### WebRTC Signaling
+### WebTransport Endpoint Discovery
 
-> **Note:** WebRTC (and these `/api/rtc/*` signaling endpoints) is being retired in
-> favour of **WebTransport-only** — see PLAN-game-worker.md (PLAN.md Stage 0).
-> WebTransport needs no SDP/ICE signaling; the lobby simply hands the client the
-> game server's WebTransport URL.
+WebRTC and its `/api/rtc/*` SDP/ICE signaling endpoints were **removed** (GW7,
+PLAN-game-worker.md / PLAN.md Stage 0). The realtime game stream now runs over
+**WebTransport (QUIC/HTTP-3)** — no signaling handshake. The client fetches the
+endpoint, then opens a WebTransport session straight to it.
 
-**POST /api/rtc/offer** (requires auth)
-
-```json
-// Request:  {"sdp":"v=0\r\no=- ..."}
-// Response: {"client_id":1,"sdp":"v=0\r\no=- ..."}
-```
-
-**POST /api/rtc/candidate** (requires auth)
+**GET /api/wt/info** (no auth)
 
 ```json
-{"client_id":1,"candidate":"candidate:...","mid":"0"}
+// Response: {"port":9100,"certHash":"<base64 SHA-256 of the dev cert>","transport":"webtransport"}
 ```
 
-Two data channels are negotiated:
-- Channel 0 `"control"`: reliable, ordered (FlatBuffer messages)
-- Channel 1 `"state"`: unreliable, unordered (entity/projectile snapshots)
+The client opens `https://<host>:<port>/` via `new WebTransport(url, {
+serverCertificateHashes:[{algorithm:"sha-256", value:<certHash>}] })` (dev pins
+the ephemeral self-signed cert; prod uses a CA cert and omits the hash), then
+authenticates with an `AuthRequest` FlatBuffer over the control stream.
+
+Transport classes / priority tiers (PLAN-game-worker.md GW2):
+- `control` — reliable, ordered bidi stream (FlatBuffer messages, commands, ACKs)
+- `state` — newest-wins uni streams (entity/piece snapshots)
+- `vision` / `bulk` — reliable uni streams at lower RFC 9218 urgency
 
 ---
 
@@ -365,7 +364,7 @@ springcli post http://localhost:8011/api/exec '{"scope":"lobby","code":"rooms"}'
 
 ---
 
-## FlatBuffers Protocol (WebRTC data channels; → WebTransport)
+## FlatBuffers Protocol (over WebTransport)
 
 Binary messages use an envelope byte prefix:
 
