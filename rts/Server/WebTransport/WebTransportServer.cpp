@@ -192,7 +192,22 @@ struct OutStream {
     bool finQueued = false;       // one-shot stream: FIN after pending drains
     bool finSent = false;
     bool blockedThisRound = false;
+    StreamClass cls = StreamClass::Control; // priority tier (drives flush order)
 };
+
+// RFC 9218 urgency for a tier — lower drains first. H3 control/qpack + the
+// CONNECT response + the control channel are Control (0); per-frame State (1)
+// outranks Vision (3) outranks Bulk (5), so a large Bulk transfer can never
+// schedule ahead of per-frame entity state on this connection.
+static int TierUrgency(StreamClass c) {
+    switch (c) {
+        case StreamClass::Control:  return 0;
+        case StreamClass::State:    return 1;
+        case StreamClass::Vision:   return 3;
+        case StreamClass::Bulk:     return 5;
+        default:                    return 1;
+    }
+}
 
 // Inbound classification + reassembly for one peer-initiated QUIC stream.
 struct RxStream {
@@ -234,6 +249,11 @@ struct WtConn {
 
     // Control frames queued before the control bidi stream exists.
     std::deque<std::vector<uint8_t>> pendingControl;
+
+    // Uni-stream sends (state/vision/bulk) that couldn't open a stream yet
+    // because the peer's uni-stream limit is momentarily exhausted (a burst).
+    // Retried as the peer raises the limit via MAX_STREAMS.
+    std::deque<std::pair<StreamClass, std::vector<uint8_t>>> pendingUni;
 };
 
 // ───────────────────────────────── Impl ─────────────────────────────────────
@@ -284,7 +304,9 @@ struct WebTransportServerImpl {
     OutStream& EnsureOut(WtConn* c, int64_t sid);
     void AppendOut(WtConn* c, int64_t sid, const uint8_t* d, size_t n);
     void SendControl(WtConn* c, const uint8_t* d, size_t n);
+    bool TryOpenUni(WtConn* c, StreamClass cls, const uint8_t* d, size_t n);
     void SendWtUni(WtConn* c, StreamClass cls, const uint8_t* d, size_t n);
+    void DrainPendingUni(WtConn* c);
     void SendDatagram(WtConn* c, const uint8_t* d, size_t n);
     void DrainPendingTx();
     void FlushConn(WtConn* c);
@@ -805,14 +827,17 @@ void WebTransportServerImpl::SendControl(WtConn* c, const uint8_t* d, size_t n) 
     AppendOut(c, c->controlBidiId, d, n);
 }
 
-void WebTransportServerImpl::SendWtUni(WtConn* c, StreamClass cls, const uint8_t* d, size_t n) {
-    if (c->sessionId < 0) return;
+// Open a fresh server uni stream, frame the payload (0x54 + sessionId), and
+// queue it for sending. Returns false if the peer's uni-stream limit is
+// momentarily exhausted (caller should buffer + retry).
+bool WebTransportServerImpl::TryOpenUni(WtConn* c, StreamClass cls, const uint8_t* d, size_t n) {
     int64_t sid = -1;
-    if (ngtcp2_conn_open_uni_stream(c->conn, &sid, nullptr) != 0) return; // stream limit; drop
+    if (ngtcp2_conn_open_uni_stream(c->conn, &sid, nullptr) != 0) return false;
     uint8_t hdr[16];
     size_t k = PutVarint(hdr, kWtUniStream);
     k += PutVarint(hdr + k, (uint64_t)c->sessionId);
     OutStream& o = EnsureOut(c, sid);
+    o.cls = cls;
     o.pending.reserve(k + n);
     o.pending.insert(o.pending.end(), hdr, hdr + k);
     o.pending.insert(o.pending.end(), d, d + n);
@@ -826,6 +851,31 @@ void WebTransportServerImpl::SendWtUni(WtConn* c, StreamClass cls, const uint8_t
                 ngtcp2_conn_shutdown_stream_write(c->conn, 0, c->lastStateUni, 0);
         }
         c->lastStateUni = sid;
+    }
+    return true;
+}
+
+void WebTransportServerImpl::SendWtUni(WtConn* c, StreamClass cls, const uint8_t* d, size_t n) {
+    if (c->sessionId < 0) return;
+    // Preserve order: if a backlog exists, queue behind it rather than jumping.
+    if (!c->pendingUni.empty() || !TryOpenUni(c, cls, d, n)) {
+        // Cap the backlog so a stalled client can't grow it without bound; drop
+        // the oldest State frame first (newest-wins makes stale positions cheap).
+        if (c->pendingUni.size() >= 512) {
+            for (auto it = c->pendingUni.begin(); it != c->pendingUni.end(); ++it) {
+                if (it->first == StreamClass::State) { c->pendingUni.erase(it); break; }
+            }
+            if (c->pendingUni.size() >= 512) c->pendingUni.pop_front();
+        }
+        c->pendingUni.emplace_back(cls, std::vector<uint8_t>(d, d + n));
+    }
+}
+
+void WebTransportServerImpl::DrainPendingUni(WtConn* c) {
+    while (!c->pendingUni.empty()) {
+        auto& f = c->pendingUni.front();
+        if (!TryOpenUni(c, f.first, f.second.data(), f.second.size())) break;
+        c->pendingUni.pop_front();
     }
 }
 
@@ -889,9 +939,13 @@ void WebTransportServerImpl::FlushConn(WtConn* c) {
     }
 
     for (;;) {
-        // Pick the next writable stream (has unsent bytes or a pending FIN).
+        // Pick the highest-priority writable stream (lowest urgency wins; ties
+        // break by insertion order). This is the server-side of GW2's RFC 9218
+        // priority tiers — combined with QUIC's independent streams it stops a
+        // bulk transfer head-of-line-blocking per-frame state.
         int64_t sid = -1;
         OutStream* os = nullptr;
+        int bestUrg = 1000;
         for (int64_t id : c->outOrder) {
             auto it = c->out.find(id);
             if (it == c->out.end()) continue;
@@ -899,7 +953,9 @@ void WebTransportServerImpl::FlushConn(WtConn* c) {
             if (o.blockedThisRound) continue;
             bool hasData = o.off < o.pending.size();
             bool needFin = o.finQueued && !o.finSent;
-            if (hasData || needFin) { sid = id; os = &o; break; }
+            if (!(hasData || needFin)) continue;
+            int u = TierUrgency(o.cls);
+            if (u < bestUrg) { bestUrg = u; sid = id; os = &o; if (u == 0) break; }
         }
 
         ngtcp2_vec datav{};
@@ -1036,6 +1092,7 @@ void WebTransportServerImpl::Run() {
             if (ngtcp2_conn_get_expiry(c->conn) <= NowNs()) {
                 if (ngtcp2_conn_handle_expiry(c->conn, NowNs()) != 0) { CloseConn(c); continue; }
             }
+            DrainPendingUni(c); // retry sends that were stream-limit-blocked
             FlushConn(c);
         }
     }
