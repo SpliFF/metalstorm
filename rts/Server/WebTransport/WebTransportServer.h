@@ -94,6 +94,14 @@ public:
     /// Number of established WebTransport sessions.
     int GetClientCount() const;
 
+    /// The UDP port the QUIC socket is bound to (0 until Start succeeds).
+    int Port() const;
+
+    /// Echo mode (GW1 de-risk harness only): instead of queueing inbound to
+    /// DrainInbound(), immediately echo each application message back to the
+    /// sender on the same class. Off by default. Must be set before Start().
+    void SetEchoMode(bool on);
+
     /// Stop the network thread and close all sessions.
     void Shutdown();
 

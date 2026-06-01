@@ -147,7 +147,10 @@ message(STATUS "QUIC stack: ngtcp2 ${NGTCP2_VERSION}, nghttp3 ${NGHTTP3_VERSION}
 # when -DSPRING_BUILD_QUIC_DERISK=ON.
 option(SPRING_BUILD_QUIC_DERISK "Build the WebTransport QUIC de-risk harness" OFF)
 if(SPRING_BUILD_QUIC_DERISK)
-    add_executable(spring-quic-derisk rts/Server/WebTransport/derisk_main.cpp)
+    add_executable(spring-quic-derisk
+        rts/Server/WebTransport/derisk_main.cpp
+        rts/Server/WebTransport/WebTransportServer.cpp)
+    target_include_directories(spring-quic-derisk PRIVATE rts)
     target_link_libraries(spring-quic-derisk PRIVATE quic_deps)
 endif()
 
