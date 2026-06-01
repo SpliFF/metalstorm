@@ -235,6 +235,11 @@ curl -X POST http://localhost:<game-port>/api/exec \
 
 ### WebRTC Signaling
 
+> **Note:** WebRTC (and these `/api/rtc/*` signaling endpoints) is being retired in
+> favour of **WebTransport-only** — see PLAN-game-worker.md (PLAN.md Stage 0).
+> WebTransport needs no SDP/ICE signaling; the lobby simply hands the client the
+> game server's WebTransport URL.
+
 **POST /api/rtc/offer** (requires auth)
 
 ```json
@@ -360,7 +365,7 @@ springcli post http://localhost:8011/api/exec '{"scope":"lobby","code":"rooms"}'
 
 ---
 
-## FlatBuffers Protocol (WebRTC / WebSocket)
+## FlatBuffers Protocol (WebRTC data channels; → WebTransport)
 
 Binary messages use an envelope byte prefix:
 

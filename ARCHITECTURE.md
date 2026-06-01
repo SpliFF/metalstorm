@@ -44,7 +44,7 @@ Game servers are spawned by the lobby with dynamically assigned ports. To discov
 ```
 
 Full CLI flag list (from `rts/server_main.cpp`):
-`--port`, `--game`, `--game-version`, `--map`, `--db`, `--log-file`, `--log-level`, `--log-server`, `--log-sqlite`, `--debug`, `--no-cache`, `--log-messages`, `--player username:team:pos` (repeatable), `--ai id:team:pos` (repeatable). The IPC pipe and `--event-fd` are gone — game→lobby state changes go over the WebSocket backchannel (see PLAN-lobby-game-connection.md).
+`--port`, `--game`, `--game-version`, `--map`, `--db`, `--log-file`, `--log-level`, `--log-server`, `--log-sqlite`, `--debug`, `--no-cache`, `--log-messages`, `--player username:team:pos` (repeatable), `--ai id:team:pos` (repeatable). The IPC pipe and `--event-fd` are gone; a game→lobby backchannel (PLAN-lobby-game-connection.md) is **not yet implemented** (TODO — targets WebTransport when built).
 
 ## Directory Map
 
@@ -55,7 +55,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `server_main.cpp` | Game server entry. Auth (registers CPlayer), message dispatch, disconnect handling (fires PlayerRemoved callin), sim loop, entity streaming, win detection. |
 | `lobby_main.cpp` | Lobby entry. Room management, game/map preprocessing, child process spawning, HTTP routes. |
 | `Server/Simulation.h/.cpp` | Initialises Spring subsystems, ticks physics/units/weapons/features each frame. |
-| `Server/NetworkServer.h/.cpp` | HTTP/2 (h2c via nghttp2) + HTTP/1.1 server. WebRTC data channels for game traffic. Send/broadcast helpers. |
+| `Server/NetworkServer.h/.cpp` | HTTP/2 (h2c via nghttp2) + HTTP/1.1 server. WebRTC data channels for game traffic (migrating to WebTransport — PLAN-game-worker.md). Send/broadcast helpers. |
 | `Server/Protocol.h` | FlatBuffers message builders (BuildAuthResponse, BuildMapData, BuildGameUnitDefs, etc.). |
 | `Server/EntityStateSerializer.h/.cpp` | Serialises unit state to Tier 2 binary (struct-of-arrays, field-masked). |
 | `Server/ProjectileStateSerializer.h/.cpp` | Serialises synced weapon projectiles to envelope 0x04 binary. |
@@ -97,8 +97,8 @@ Full CLI flag list (from `rts/server_main.cpp`):
 |------|---------|
 | `main.ts` | App entry. Lobby init, `startGame()`, render loop, HUD wiring. |
 | `config.ts` | Server URL, API base paths. |
-| `core/connection.ts` | WebSocket + WebRTC connection to server. FlatBuffers dispatch. Events: `onMapData`, `onUnitDefs`, `onEntityState`, `onCombatEvents`, etc. |
-| `core/transport.ts` | Transport abstraction over WebSocket and WebRTC data channels (PLAN-webrtc.md). |
+| `core/connection.ts` | WebRTC data-channel connection to server (WebSocket removed). FlatBuffers dispatch. Events: `onMapData`, `onUnitDefs`, `onEntityState`, `onCombatEvents`, etc. Migrating to WebTransport in the game-processor worker (PLAN-game-worker.md). |
+| `core/transport.ts` | Transport abstraction over the game connection. Current: WebRTC data channels. Planned: WebTransport-only (PLAN-game-worker.md). |
 | `core/entity-renderer.ts` | Per-piece thin-instanced unit renderer. Loads `.glb` via `setUnitDefs()`, groups by (defId, team, pieceIdx). Fallback: procedural shapes. |
 | `core/feature-renderer.ts` | Single-mesh thin-instanced map feature renderer. Pattern reference for entity-renderer. |
 | `core/projectile-renderer.ts` | Renders in-flight projectiles (thin instances, per-weapon-type shapes). |
@@ -150,7 +150,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 
 ### Protocol (`schemas/protocol.fbs`)
 
-**Wire format:** Every WebSocket frame starts with `u8 envelope`:
+**Wire format:** Every binary frame (WebRTC data channel today; → WebTransport, PLAN-game-worker.md) starts with `u8 envelope`:
 - `0x01` = FlatBuffers (root: ServerMessage or ClientMessage)
 - `0x02` = Entity state full snapshot (custom binary)
 - `0x03` = Entity state delta (custom binary)
@@ -162,9 +162,9 @@ Full CLI flag list (from `rts/server_main.cpp`):
 
 **Order plumbing (PLAN-orders.md):** Selection mirroring is one of two budget controls — `SelectionState` scopes the per-tick `UnitCmdDescsUpdate` to the player's current selection rather than every own-team unit, and the same set will eventually scope future selection-only streams. `UnitCmdDesc` carries the full Spring `SCommandDescription` surface so ZK's integral menu and `cmd_*.lua` widgets see real button names, icons, tooltips, and current-state-index params. `PlayerCommandBatch` exists in the schema for atomic multi-command sequences (waypoint drag, build-row drag) — neither client emitter nor server handler is wired yet.
 
-**IPC:** Pipe-based IPC removed. GameStarted is now a ServerPayload message sent over WebSocket.
+**IPC:** Pipe-based IPC removed. The lobby↔game backchannel (e.g. GameStarted) is **not yet implemented** — `Simulation.cpp` carries a `TODO(Tier 2)` for it; when built it targets WebTransport (PLAN-game-worker.md), not WebSocket/WebRTC.
 
-**Transport:** All HTTP endpoints support both HTTP/2 (h2c, cleartext) and HTTP/1.1. Game state streaming uses WebRTC data channels.
+**Transport:** All HTTP endpoints support both HTTP/2 (h2c, cleartext) and HTTP/1.1. Game state streaming uses WebRTC data channels today, migrating to WebTransport-only in the game-processor worker (PLAN-game-worker.md, PLAN.md Stage 0).
 
 Generated bindings:
 - C++: `rts/protocol_generated.h`
@@ -576,9 +576,9 @@ substitution, not a behavioural change.
 
 ## Current Status (2026-05-04)
 
-**Stable end-to-end loop:** lobby → create room → start game → fight → game-over → return to lobby. Player disconnect handling: server detects WebSocket close, fires `PlayerRemoved` Lua callin, broadcasts `PlayerLeft` to remaining clients, cleans up session. Default engine gadget ends the game when no humans remain.
+**Stable end-to-end loop:** lobby → create room → start game → fight → game-over → return to lobby. Player disconnect handling: server detects the peer/data-channel close, fires `PlayerRemoved` Lua callin, broadcasts `PlayerLeft` to remaining clients, cleans up session. Default engine gadget ends the game when no humans remain.
 
-**Transport:** HTTP/2 (h2c via nghttp2) + HTTP/1.1 on the same port; WebRTC data channels for game-state streaming (PLAN-webrtc.md). The IPC pipe and `--event-fd` are gone — game→lobby state changes go over a WebSocket backchannel using FlatBuffers (PLAN-lobby-game-connection.md).
+**Transport:** HTTP/2 (h2c via nghttp2) + HTTP/1.1 on the same port; WebRTC data channels for game-state streaming (PLAN-webrtc.md), migrating to WebTransport-only (PLAN-game-worker.md, PLAN.md Stage 0). The IPC pipe and `--event-fd` are gone; a game→lobby backchannel (PLAN-lobby-game-connection.md) is **not yet implemented** (TODO) — when built it targets WebTransport.
 
 **Active work areas (April–May 2026):**
 - **KTX2 / Basis Universal texture pipeline** (PLAN-textures.md): every GPU texture (units, features, terrain, minimap) is now `.ktx2` (UASTC + Zstd). KTX2 transcoder URLs are pinned in `client/src/main.ts` lines 8–35 against intermittent CDN fallbacks.

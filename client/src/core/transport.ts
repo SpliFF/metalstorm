@@ -1,14 +1,16 @@
 /**
  * GameTransport — abstract transport layer for server communication.
  *
- * Per PLAN-network.md, the protocol uses a transport abstraction that
- * decouples message framing from the underlying protocol. WebRTC data
- * channels are the current transport; WebTransport (QUIC) is a future
- * upgrade.
+ * The protocol abstraction decouples message framing from the underlying
+ * protocol. WebRTC data channels are the *current* transport; the planned
+ * migration (PLAN-game-worker.md, PLAN.md Stage 0) moves to **WebTransport-only**
+ * (drop WebRTC), running the connection inside the game-processor worker and
+ * using QUIC stream priorities. The `'webrtc'` arm is removed at that point.
  *
  * On WebRTC, the `reliable` flag maps to ordered vs. unordered data
- * channels. On WebTransport, unreliable messages use QUIC datagrams,
- * reliable messages use QUIC streams.
+ * channels. On WebTransport, per-frame state uses newest-wins QUIC streams
+ * (snapshots exceed the datagram MTU) and control uses prioritised streams;
+ * `send()` gains a priority/class arg then.
  */
 
 export interface TransportEvents {
@@ -36,11 +38,12 @@ export interface GameTransport {
 }
 
 /**
- * WebTransport implementation (stub for future QUIC support).
+ * WebTransport implementation (stub — real impl is PLAN-game-worker.md GW3).
  *
- * When browser support is stable (estimated 2027+), this will use
- * the WebTransport API for unreliable datagrams (entity state) and
- * reliable streams (commands, chat).
+ * WebTransport reached Baseline (Chrome/Firefox/Safari) in March 2026, so the
+ * old "estimated 2027+" wait is moot. The real adapter (per-class prioritised
+ * streams + datagrams, running in the game-processor worker) lands with the
+ * Stage-0 consolidation; this stub holds the seam until then.
  */
 export class WebTransportAdapter implements GameTransport {
     private events: TransportEvents;

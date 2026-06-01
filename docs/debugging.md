@@ -534,7 +534,7 @@ Available when scope is `server`:
 
 ### Network Inspector
 
-Toggle the **Net** checkbox in the console header to enable the network message inspector. When enabled, all inbound and outbound WebSocket messages are decoded and logged:
+Toggle the **Net** checkbox in the console header to enable the network message inspector. When enabled, all inbound and outbound game-connection messages (WebRTC data channels today; → WebTransport, PLAN-game-worker.md) are decoded and logged:
 
 ```
 [INFO] [client:net] <- [FlatBuffers] AuthResponse (128 bytes)
@@ -709,7 +709,7 @@ if (sim.HasGameStarted() && !g_luaDebugger.IsPaused()) {
 }
 ```
 
-While paused, the server still processes WebSocket messages (including console commands) but does not advance the simulation. This means the entire game halts -- all players see a frozen game state until the breakpoint is continued.
+While paused, the server still processes inbound network messages (including console commands) but does not advance the simulation. This means the entire game halts -- all players see a frozen game state until the breakpoint is continued.
 
 The debug hook is installed with `LUA_MASKLINE`, which fires on every Lua line. This has a performance cost -- only attach the hook when actively debugging.
 

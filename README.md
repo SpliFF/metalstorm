@@ -27,7 +27,7 @@ As a result this is pre-alpha code, interesting to play with but not actually a 
 ## Architecture
 
 ```
-┌─────────────────┐       WebSocket / WebRTC       ┌──────────────────────┐
+┌─────────────────┐    WebRTC (→ WebTransport)     ┌──────────────────────┐
 │  Browser Client  │◄─────────────────────────────►│    spring-server     │
 │  TypeScript +    │   FlatBuffers + custom binary  │  Headless C++ sim    │
 │  Babylon.js      │                                │  30 Hz tick rate     │
@@ -37,16 +37,16 @@ As a result this is pre-alpha code, interesting to play with but not actually a 
         ▼                                                    │
 ┌─────────────────┐                                ┌──────────────────────┐
 │  spring-lobby    │────────────────────────────────│  spring-logserver    │
-│  HTTP/2 + WS     │         log ingest             │  SQLite + SSE        │
+│  HTTP/2 + SSE    │         log ingest             │  SQLite + SSE        │
 │  Room management  │                               │  Log collection      │
 └─────────────────┘                                └──────────────────────┘
 ```
 
-**Server (C++):** Three executables &mdash; `spring-lobby` (HTTP/WebSocket lobby, map/game preprocessing, spawns game servers), `spring-server` (headless game sim, one per active room), and `spring-logserver` (centralized log collection and query).
+**Server (C++):** Three executables &mdash; `spring-lobby` (HTTP lobby, map/game preprocessing, spawns game servers), `spring-server` (headless game sim, one per active room), and `spring-logserver` (centralized log collection and query).
 
 **Client (TypeScript):** Babylon.js on WebGL 2 for rendering. HTML/CSS UI layered over the canvas. Fengari Lua runtime for map widgets. Web Audio for sound.
 
-**Protocol:** WebSocket frames with a `u8` envelope byte: `0x01` FlatBuffers messages, `0x02`/`0x03` entity state (full/delta), `0x04` projectile state. All custom binary uses struct-of-arrays layout. WebRTC data channels for real-time game traffic.
+**Protocol:** Binary frames with a `u8` envelope byte: `0x01` FlatBuffers messages, `0x02`/`0x03` entity state (full/delta), `0x05` piece state, `0x06` build activity, `0x07` LOS bitmap, `0x08` decals, `0x09` heightmap. All custom binary uses struct-of-arrays layout. Carried over WebRTC data channels today; migrating to WebTransport-only in the game-processor worker (PLAN-game-worker.md).
 
 ## Building
 
