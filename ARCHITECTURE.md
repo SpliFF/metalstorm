@@ -99,7 +99,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `main.ts` | App entry. Lobby init, `startGame()`, render loop, HUD wiring. |
 | `config.ts` | Server URL, API base paths. |
 | `core/connection.ts` | WebRTC data-channel connection to server (WebSocket removed). FlatBuffers dispatch. Events: `onMapData`, `onUnitDefs`, `onEntityState`, `onCombatEvents`, etc. Migrating to WebTransport in the game-processor worker (PLAN-game-worker.md). |
-| `core/transport.ts` | Transport abstraction over the game connection. Current: WebRTC data channels. Planned: WebTransport-only (PLAN-game-worker.md). |
+| `core/transport.ts` | Transport abstraction over the game connection. `WebTransportAdapter` (QUIC/HTTP-3) — class-based send (`control`/`state`/`vision`/`bulk`/`datagram`), newest-wins state. WebRTC removed (PLAN-game-worker.md). |
 | `core/entity-renderer.ts` | Per-piece thin-instanced unit renderer. Loads `.glb` via `setUnitDefs()`, groups by (defId, team, pieceIdx). Fallback: procedural shapes. |
 | `core/feature-renderer.ts` | Single-mesh thin-instanced map feature renderer. Pattern reference for entity-renderer. |
 | `core/projectile-renderer.ts` | Renders in-flight projectiles (thin instances, per-weapon-type shapes). |
@@ -151,7 +151,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 
 ### Protocol (`schemas/protocol.fbs`)
 
-**Wire format:** Every binary frame (WebRTC data channel today; → WebTransport, PLAN-game-worker.md) starts with `u8 envelope`:
+**Wire format:** Every binary frame (over WebTransport — PLAN-game-worker.md) starts with `u8 envelope`:
 - `0x01` = FlatBuffers (root: ServerMessage or ClientMessage)
 - `0x02` = Entity state full snapshot (custom binary)
 - `0x03` = Entity state delta (custom binary)
@@ -165,7 +165,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 
 **IPC:** Pipe-based IPC removed. The lobby↔game backchannel (e.g. GameStarted) is **not yet implemented** — `Simulation.cpp` carries a `TODO(Tier 2)` for it; when built it targets WebTransport (PLAN-game-worker.md), not WebSocket/WebRTC.
 
-**Transport:** All HTTP endpoints support both HTTP/2 (h2c, cleartext) and HTTP/1.1. Game state streaming uses WebRTC data channels today, migrating to WebTransport-only in the game-processor worker (PLAN-game-worker.md, PLAN.md Stage 0).
+**Transport:** All HTTP endpoints support both HTTP/2 (h2c, cleartext) and HTTP/1.1. Game state streaming runs over **WebTransport (QUIC/HTTP-3)** via `WebTransportServer` (GW1–GW3 landed; PLAN-game-worker.md, PLAN.md Stage 0). The client discovers the endpoint via `GET /api/wt/info`. WebRTC is removed from the game path (the `WebRTCServer.{h,cpp}` + libdatachannel code is now dead and slated for deletion in GW7). The remaining migration (GW4) relocates the connection + render core into the game-processor worker.
 
 Generated bindings:
 - C++: `rts/protocol_generated.h`
@@ -580,7 +580,7 @@ substitution, not a behavioural change.
 
 **Stable end-to-end loop:** lobby → create room → start game → fight → game-over → return to lobby. Player disconnect handling: server detects the peer/data-channel close, fires `PlayerRemoved` Lua callin, broadcasts `PlayerLeft` to remaining clients, cleans up session. Default engine gadget ends the game when no humans remain.
 
-**Transport:** HTTP/2 (h2c via nghttp2) + HTTP/1.1 on the same port; WebRTC data channels for game-state streaming (PLAN-webrtc.md), migrating to WebTransport-only (PLAN-game-worker.md, PLAN.md Stage 0). The IPC pipe and `--event-fd` are gone; a game→lobby backchannel (PLAN-lobby-game-connection.md) is **not yet implemented** (TODO) — when built it targets WebTransport.
+**Transport:** HTTP/2 (h2c via nghttp2) + HTTP/1.1 on the same port (REST/SSE/assets); game-state streaming runs over **WebTransport (QUIC/HTTP-3)** on UDP at the same port number (GW1–GW3 landed; PLAN-game-worker.md, PLAN.md Stage 0). WebRTC removed from the game path. The IPC pipe and `--event-fd` are gone; a game→lobby backchannel (PLAN-lobby-game-connection.md) is **not yet implemented** (TODO) — when built it targets WebTransport.
 
 **Active work areas (April–May 2026):**
 - **KTX2 / Basis Universal texture pipeline** (PLAN-textures.md): every GPU texture (units, features, terrain, minimap) is now `.ktx2` (UASTC + Zstd). KTX2 transcoder URLs are pinned in `client/src/main.ts` lines 8–35 against intermittent CDN fallbacks.
