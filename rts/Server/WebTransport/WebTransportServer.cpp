@@ -1109,10 +1109,17 @@ bool WebTransportServer::Start(int port, const std::string& certPem, const std::
         std::fprintf(stderr, "[webtransport] TLS setup failed\n");
         return false;
     }
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    // Dual-stack IPv6 socket (V6ONLY off) so one socket serves IPv4 and IPv6
+    // clients. This matters in dev: browsers resolve `localhost` to IPv6 `::1`,
+    // so an IPv4-only socket would silently never see the packets. IPv4 clients
+    // arrive as v4-mapped addresses, which ngtcp2's byte-wise path handling
+    // treats transparently.
+    int fd = socket(AF_INET6, SOCK_DGRAM, 0);
     if (fd < 0) return false;
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    int v6only = 0;
+    setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
     // Non-blocking: the recv loop must return to the flush/timer step once the
     // socket is drained (a blocking recvfrom would wedge the handshake — the
     // server would read the ClientHello and never send the ServerHello).
@@ -1120,10 +1127,10 @@ bool WebTransportServer::Start(int port, const std::string& certPem, const std::
         int fl = fcntl(fd, F_GETFL, 0);
         fcntl(fd, F_SETFL, fl | O_NONBLOCK);
     }
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons((uint16_t)port);
+    sockaddr_in6 addr{};
+    addr.sin6_family = AF_INET6;
+    addr.sin6_addr = in6addr_any;
+    addr.sin6_port = htons((uint16_t)port);
     if (bind(fd, (sockaddr*)&addr, sizeof(addr)) != 0) {
         std::fprintf(stderr, "[webtransport] bind(:%d) failed\n", port);
         close(fd);
@@ -1131,7 +1138,7 @@ bool WebTransportServer::Start(int port, const std::string& certPem, const std::
     }
     if (port == 0) {
         socklen_t alen = sizeof(addr);
-        if (getsockname(fd, (sockaddr*)&addr, &alen) == 0) port = ntohs(addr.sin_port);
+        if (getsockname(fd, (sockaddr*)&addr, &alen) == 0) port = ntohs(addr.sin6_port);
     }
     impl_->fd = fd;
     impl_->port = port;

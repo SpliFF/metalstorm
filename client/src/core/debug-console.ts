@@ -8,7 +8,7 @@
  *   - Programmatic API: debugConsole.exec(scope, code) for automation
  *   - Copy/paste: output is user-selectable, textarea supports clipboard
  *   - HTTP polling for log streaming
- *   - WebRTC data channel for command execution
+ *   - WebTransport control stream for command execution (via GameLink)
  *
  * Toggle with backtick (`) or call debugConsole.show().
  */
@@ -26,6 +26,14 @@ import { ConsoleCommand } from '../protocol/spring-web/console-command.js';
 import { ConsoleResponse } from '../protocol/spring-web/console-response.js';
 import { setNetInspectorEnabled } from './net-inspector.js';
 import type { Scene } from '@babylonjs/core';
+
+/** Transport-agnostic link to the game server's control channel. */
+export interface GameLink {
+    /** Send a pre-framed (envelope + payload) message on the control tier. */
+    send(data: Uint8Array): void;
+    /** Whether the control channel is currently usable. */
+    isOpen(): boolean;
+}
 
 const LEVEL_NAMES = ['DEBUG', 'INFO', 'NOTICE', 'WARN', 'ERROR', 'FATAL'];
 const LEVEL_CLASSES = ['debug', 'info', 'notice', 'warning', 'error', 'fatal'];
@@ -95,7 +103,7 @@ export class DebugConsole {
 
     private logServerUrl = '';
     private visible = false;
-    private gameChannel: RTCDataChannel | null = null;
+    private gameLink: GameLink | null = null;
     private scene: Scene | null = null;
     private nextRequestId = 1;
 
@@ -125,13 +133,18 @@ export class DebugConsole {
 
     setScene(scene: Scene): void { this.scene = scene; }
 
-    /** Set game channel for command forwarding via WebRTC data channel. */
-    setGameChannel(channel: RTCDataChannel): void {
-        this.gameChannel = channel;
-        channel.addEventListener('message', ((evt: MessageEvent) => {
-            if (!(evt.data instanceof ArrayBuffer)) return;
-            this.handleGameMessage(new Uint8Array(evt.data));
-        }) as EventListener);
+    /** Set the game-server control link for command forwarding. Inbound
+     *  control messages are fed in via {@link ingestGameMessage} (the
+     *  Connection taps its control stream — WebTransport delivers one onMessage
+     *  for the whole session, so the console can't read the raw stream itself). */
+    setGameLink(link: GameLink | null): void {
+        this.gameLink = link;
+    }
+
+    /** Feed a framed control message (envelope + payload) from the Connection's
+     *  control-stream tap, so ConsoleResponse can resolve pending exec()s. */
+    ingestGameMessage(data: Uint8Array): void {
+        this.handleGameMessage(data);
     }
 
     /**
@@ -714,7 +727,7 @@ body { background: #0f0f14; display: flex; flex-direction: column; }
         const frame = new Uint8Array(1 + fbBytes.length);
         frame[0] = 0x01;
         frame.set(fbBytes, 1);
-        this.gameChannel!.send(frame.buffer);
+        this.gameLink!.send(frame);
     }
 
     // ─── Message handling ───
@@ -971,7 +984,7 @@ body { background: #0f0f14; display: flex; flex-direction: column; }
     }
 
     private isChannelOpen(): boolean {
-        return this.gameChannel !== null && this.gameChannel.readyState === 'open';
+        return this.gameLink?.isOpen() ?? false;
     }
 
     private esc(s: string): string {

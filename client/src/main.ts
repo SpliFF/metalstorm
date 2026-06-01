@@ -1071,11 +1071,13 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         onAuthenticated(_playerId, token, team, defsCacheKey) {
             console.log(`[game] connected to game server on port ${gameServerPort} (team=${team}, defsKey=${defsCacheKey || '(none)'})`);
             if (token) localStorage.setItem('springrts-token', token);
-            // Wire debug console to game server for command execution
-            const channel = conn.getControlChannel();
-            if (channel) {
-                debugConsole.setGameChannel(channel);
-            }
+            // Wire debug console to game server for command execution over the
+            // WebTransport control stream.
+            debugConsole.setGameLink({
+                send: (d) => conn.sendControlRaw(d),
+                isOpen: () => conn.controlOpen,
+            });
+            conn.onControlMessage((d) => debugConsole.ingestGameMessage(d));
 
             inputManager?.setMyTeam(team);
             // Push viewer identity into the standing-order renderer so it

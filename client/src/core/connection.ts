@@ -13,6 +13,7 @@
  */
 
 import * as flatbuffers from 'flatbuffers';
+import { WebTransportAdapter, type GameTransport } from './transport.js';
 import { ClientMessage } from '../protocol/spring-web/client-message.js';
 import { ClientPayload } from '../protocol/spring-web/client-payload.js';
 import { ServerMessage } from '../protocol/spring-web/server-message.js';
@@ -758,10 +759,8 @@ export interface ConnectionEvents {
 }
 
 export class Connection {
-    // Transport — WebRTC only
-    private pc: RTCPeerConnection | null = null;
-    private controlChannel: RTCDataChannel | null = null;
-    private stateChannel: RTCDataChannel | null = null;
+    // Transport — WebTransport (QUIC/HTTP-3) only (PLAN-game-worker.md Stage 0).
+    private transport: GameTransport | null = null;
 
     private _state: ConnectionState = 'disconnected';
     private events: ConnectionEvents;
@@ -777,11 +776,21 @@ export class Connection {
      *  server (the lobby's /api/exec only handles sql/lobby scopes;
      *  server / LuaRules / LuaGaia / LuaAI:* live on the game server). */
     get gameHttpUrl(): string { return this.httpBase; }
-    private rtcClientId = 0;
     private commandSequence = 0;
 
-    /** Expose the control data channel for debug console. */
-    getControlChannel(): RTCDataChannel | null { return this.controlChannel; }
+    /** Whether the control channel is currently usable. */
+    get controlOpen(): boolean { return this.transport?.connected ?? false; }
+
+    /** Send a pre-framed binary message on the reliable control channel.
+     *  Used by the debug console (which builds its own ConsoleCommand frame). */
+    sendControlRaw(data: Uint8Array): void { this.sendOnControl(data); }
+
+    /** Observer for raw control-tier messages (envelope + payload), used by the
+     *  debug console to resolve ConsoleResponse. WebTransport delivers a single
+     *  onMessage for the whole session, so consumers that need the raw control
+     *  bytes tap them here instead of reading the stream directly. */
+    private controlObserver: ((data: Uint8Array) => void) | null = null;
+    onControlMessage(fn: ((data: Uint8Array) => void) | null): void { this.controlObserver = fn; }
 
     constructor(events: ConnectionEvents = {}) {
         this.events = events;
@@ -801,7 +810,7 @@ export class Connection {
      * WebRTC signaling.
      */
     connect(url: string, username: string, password: string, token?: string): void {
-        if (this.pc) this.disconnect();
+        if (this.transport) this.disconnect();
 
         if (token) this.sessionToken = token;
 
@@ -845,7 +854,12 @@ export class Connection {
             || msg.includes('Load failed')
             || msg.includes('NetworkError')
             || msg.includes('ERR_CONNECTION_REFUSED')
-            || msg.includes('connection failed');
+            || msg.includes('connection failed')
+            // WebTransport during the spawn race: HTTP is up but QUIC isn't
+            // bound yet, or the session drops mid-boot — retry quietly.
+            || msg.includes('Opening handshake failed')
+            || msg.includes('WebTransport')
+            || msg.includes('Connection lost');
     }
 
     private async tryConnect(): Promise<void> {
@@ -884,26 +898,26 @@ export class Connection {
             return;
         }
 
-        // Step 2: WebRTC data channels
+        // Step 2: WebTransport (QUIC) session
         this.setState('handshake');
         try {
-            await this.connectWebRTC();
+            await this.connectWebTransport();
         } catch (err) {
-            // Network-level WebRTC failures during boot are usually fixed
-            // by retrying the whole tryConnect cycle (the next iteration
-            // re-fetches /api/rtc/offer once the server has settled).
+            // Network-level failures during boot are usually fixed by retrying
+            // the whole tryConnect cycle (the next iteration re-fetches
+            // /api/wt/info once the server has bound its QUIC socket).
             const transient = this.isTransientNetworkError(err);
             if (this.connectAttempts < Connection.MAX_CONNECT_ATTEMPTS && transient) {
                 if (this.connectAttempts === Connection.RETRY_QUIET_ATTEMPTS
                     || (this.connectAttempts > Connection.RETRY_QUIET_ATTEMPTS
                         && this.connectAttempts % 8 === 0)) {
-                    console.log(`[connection] still waiting for WebRTC (attempt ${this.connectAttempts}): ${err}`);
+                    console.log(`[connection] still waiting for WebTransport (attempt ${this.connectAttempts}): ${err}`);
                 }
                 setTimeout(() => this.tryConnect(), Connection.CONNECT_RETRY_DELAY_MS);
                 return;
             }
             console.error(`[connection] giving up after ${this.connectAttempts} attempts: ${err}`);
-            this.events.onAuthFailed?.(`WebRTC connection failed: ${err}`);
+            this.events.onAuthFailed?.(`WebTransport connection failed: ${err}`);
             this.setState('disconnected');
         }
     }
@@ -962,120 +976,60 @@ export class Connection {
         this.myTeam = data.team ?? -1;
     }
 
-    // ─── WebRTC ───
+    // ─── WebTransport (QUIC) ───
 
-    private async connectWebRTC(): Promise<void> {
-        const pc = new RTCPeerConnection({
-            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-        });
-        this.pc = pc;
+    private async connectWebTransport(): Promise<void> {
+        // Discover the QUIC endpoint + dev cert hash over the trusted HTTP plane.
+        const infoResp = await fetch(`${this.httpBase}/api/wt/info`);
+        if (!infoResp.ok) throw new Error(`wt/info failed: HTTP ${infoResp.status}`);
+        const info = await infoResp.json();
+        if (!info.port || !info.certHash) throw new Error('wt/info missing port/certHash');
 
-        // Create negotiated data channels matching the server
-        const controlChannel = pc.createDataChannel('control', {
-            negotiated: true,
-            id: 0,
-            ordered: true,
-        });
-        controlChannel.binaryType = 'arraybuffer';
+        // QUIC runs on the same host as the HTTP server, UDP on info.port.
+        const host = new URL(this.httpBase).hostname;
+        const wtUrl = `https://${host}:${info.port}/`;
 
-        const stateChannel = pc.createDataChannel('state', {
-            negotiated: true,
-            id: 1,
-            ordered: false,
-            maxRetransmits: 0,
-        });
-        stateChannel.binaryType = 'arraybuffer';
-
-        this.controlChannel = controlChannel;
-        this.stateChannel = stateChannel;
-
-        // Wire message handlers
-        controlChannel.onmessage = (e) => {
-            if (e.data instanceof ArrayBuffer) {
-                this.handleBinaryMessage(new Uint8Array(e.data));
-            }
-        };
-        stateChannel.onmessage = (e) => {
-            if (e.data instanceof ArrayBuffer) {
-                this.receiveStateFrame(new Uint8Array(e.data));
-            }
-        };
-
-        // Wait for channels to open
-        const channelReady = new Promise<void>((resolve, reject) => {
-            let controlOpen = false;
-            let stateOpen = false;
-            const check = () => {
-                if (controlOpen && stateOpen) resolve();
-            };
-            controlChannel.onopen = () => { controlOpen = true; check(); };
-            stateChannel.onopen = () => { stateOpen = true; check(); };
-            controlChannel.onerror = (e) => reject(new Error('control channel error'));
-            pc.onconnectionstatechange = () => {
-                if (pc.connectionState === 'failed') reject(new Error('connection failed'));
-            };
-            setTimeout(() => reject(new Error('channel open timeout')), 10000);
-        });
-
-        // Create and send offer
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-
-        // Wait for ICE gathering to complete (or timeout)
-        await new Promise<void>((resolve) => {
-            if (pc.iceGatheringState === 'complete') { resolve(); return; }
-            pc.onicegatheringstatechange = () => {
-                if (pc.iceGatheringState === 'complete') resolve();
-            };
-            setTimeout(resolve, 3000); // don't wait forever
-        });
-
-        // Send offer to server via HTTP
-        const sdpOffer = pc.localDescription?.sdp;
-        if (!sdpOffer) throw new Error('no local SDP');
-
-        const resp = await fetch(`${this.httpBase}/api/rtc/offer`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${this.sessionToken}`,
+        const adapter = new WebTransportAdapter({
+            onMessage: (data) => this.routeIncoming(data),
+            onClose: (code, reason) => {
+                console.log(`[connection] WebTransport closed (${code}): ${reason}`);
             },
-            body: JSON.stringify({ sdp: sdpOffer }),
+            onError: (e) => console.warn(`[connection] WebTransport error: ${e}`),
         });
+        this.transport = adapter;
+        await adapter.connect(wtUrl, { certHash: info.certHash });
 
-        if (!resp.ok) {
-            throw new Error(`RTC offer failed: HTTP ${resp.status}`);
-        }
-
-        const answer = await resp.json();
-        if (!answer.sdp) throw new Error('no SDP in answer');
-
-        this.rtcClientId = answer.client_id;
-        await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
-
-        // Wait for data channels to open
-        await channelReady;
-
-        // Connected via WebRTC — send auth over the data channel so the
-        // game server creates a ClientSession for us. Don't fire
-        // onAuthenticated yet — wait for the server's AuthResponse
-        // which carries the correct team assignment.
-        console.log(`[connection] WebRTC connected (clientId=${this.rtcClientId})`);
+        // Connected — send auth over the control stream so the game server
+        // creates a ClientSession. Don't fire onAuthenticated yet — wait for the
+        // server's AuthResponse which carries the correct team assignment.
+        console.log(`[connection] WebTransport connected to ${wtUrl}`);
         this.sendAuthRequest();
 
         this.pingInterval = setInterval(() => this.sendPing(), 30000);
         this.sendPing();
     }
 
+    /** Route an inbound WebTransport message by envelope byte. Entity-state
+     *  frames pass through the artificial-latency sim (netsim); everything else
+     *  (FlatBuffers control, projectile/piece/decals/los/heightmap) dispatches
+     *  directly. The transport delivers each whole message regardless of which
+     *  QUIC stream/tier it arrived on. */
+    private routeIncoming(data: Uint8Array): void {
+        if (data.length < 1) return;
+        const env = data[0];
+        if (env === ENVELOPE_ENTITY_STATE_FULL || env === ENVELOPE_ENTITY_STATE_DELTA) {
+            this.receiveStateFrame(data);
+        } else {
+            this.handleBinaryMessage(data);
+            if (env === ENVELOPE_FLATBUFFERS) this.controlObserver?.(data);
+        }
+    }
+
     // ─── Send ───
 
     disconnect(): void {
-        if (this.controlChannel) { try { this.controlChannel.close(); } catch {} }
-        if (this.stateChannel) { try { this.stateChannel.close(); } catch {} }
-        if (this.pc) { try { this.pc.close(); } catch {} }
-        this.controlChannel = null;
-        this.stateChannel = null;
-        this.pc = null;
+        if (this.transport) { try { this.transport.disconnect(); } catch {} }
+        this.transport = null;
         this.cleanup();
         this.setState('disconnected');
     }
@@ -1132,8 +1086,7 @@ export class Connection {
      *  path instead. */
     sendConsoleCommand(scope: string, command: string): void {
         if (!this.authenticated) return;
-        const ch = this.controlChannel;
-        if (!ch || ch.readyState !== 'open') return;
+        if (!this.transport?.connected) return;
         const builder = new flatbuffers.Builder(64 + command.length);
         const scopeOff = builder.createString(scope);
         const cmdOff = builder.createString(command);
@@ -1291,14 +1244,9 @@ export class Connection {
         this.sendOnControl(frame);
     }
 
-    /** Send data on the control (reliable) channel. */
+    /** Send data on the control (reliable, ordered) tier. */
     private sendOnControl(data: Uint8Array): void {
-        // Copy into a fresh ArrayBuffer for RTCDataChannel compatibility
-        const buf = new ArrayBuffer(data.byteLength);
-        new Uint8Array(buf).set(data);
-        if (this.controlChannel?.readyState === 'open') {
-            this.controlChannel.send(buf);
-        }
+        this.transport?.send(data, 'control');
     }
 
     // ─── Internal ───
