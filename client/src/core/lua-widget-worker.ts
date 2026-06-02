@@ -67,6 +67,9 @@ import { attachDecalOverlay } from './decal-overlay-plugin.js';
 import { renderMapFeatures, DynamicFeatureRenderer } from './feature-renderer.js';
 import { RTSCamera } from './rts-camera.js';
 import { WorkerSelection } from './worker-selection.js';
+import { CommandPathRenderer } from './command-path-renderer.js';
+import { WaypointMarkerRenderer } from './waypoint-marker-renderer.js';
+import { StandingOrderRenderer } from './standing-order-renderer.js';
 import { LuaRuntime, type LuaValue, luaTable } from './lua-runtime.js';
 import { LuaGLBridge } from './lua-gl-bridge.js';
 import {
@@ -4637,6 +4640,21 @@ let gpSelection: WorkerSelection | null = null;
 /// Current device-pixel-ratio (CSS px → backing px). Set in gpInit, updated in
 /// gpResize; feeds the selection module's pick scaling.
 let gpDpr = 1;
+/// GW4-c5b-3: selection-driven order overlays (ports the three main-thread
+/// overlay renderers into the worker). Command-path + waypoint markers are
+/// shift-gated and redrawn on queue/selection change; standing orders are
+/// always-on (server already scopes to own+allied). Built in gpInit, fed by the
+/// in-worker connection's onUnitCommandQueues / onStandingOrders.
+let gpCommandPathRenderer: CommandPathRenderer | null = null;
+let gpWaypointMarkerRenderer: WaypointMarkerRenderer | null = null;
+let gpStandingOrderRenderer: StandingOrderRenderer | null = null;
+/// Latest command-queue snapshot (UnitCommandQueuesUpdate, ~1 Hz), cached so a
+/// selection change can re-render the path/waypoint overlays immediately rather
+/// than waiting for the next broadcast.
+let gpLastCommandQueues: import('./connection.js').UnitCommandQueueInfo[] = [];
+/// Shift-held state (drives the command-path / waypoint overlay gate). Tracked
+/// from the forwarded key/pointer `mods` bitmask (bit 0 = shift); cleared on blur.
+let gpShiftHeld = false;
 /// GW4-c3: sun + ambient + HDR pipeline + CSM. Created in gpInit (deferred
 /// from c1 — invisible on an empty scene), retuned by applyMapLighting once
 /// the map's `mapinfo.lua → lighting` is fetched + parsed.
@@ -4755,6 +4773,12 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
         map.heightmap, map.mapx, map.mapy,
         map.minHeight, map.maxHeight, map.squareSize,
     );
+
+    // GW4-c5b-3: the order overlays need the heightmap to terrain-follow their
+    // lines/markers/rings.
+    gpCommandPathRenderer?.setMapData(map);
+    gpWaypointMarkerRenderer?.setMapData(map);
+    gpStandingOrderRenderer?.setMapData(map);
 
     // GW4-c5b: frame the interactive camera over map centre and hand it the map
     // bounds (for fitMap / future edge clamping). recomputeAxes() re-seeds the
@@ -4879,6 +4903,10 @@ function gpConnect(msg: GpInitToWorker): void {
         onAuthenticated: (playerId, _token, team, defsCacheKey) => {
             postLog(1, `[gp] authenticated playerId=${playerId} team=${team} defsKey=${defsCacheKey || '(none)'}`);
             postToMain({ type: 'gp:authenticated', playerId, team });
+            // GW4-c5b-3: tell the standing-order overlay who "we" are so its
+            // own/allied filtering works (server already scopes the broadcast;
+            // this drives own-vs-allied styling + the show-allies toggle).
+            gpStandingOrderRenderer?.setIdentity(team, team);
             // GW4-c4: fetch the game's defs (unit/weapon/CEG/feature) over HTTP
             // from the content-addressed bake the server hands back. The
             // DefCache.onUnitDefs listener pushes them to the entity + plate
@@ -4935,6 +4963,19 @@ function gpConnect(msg: GpInitToWorker): void {
         },
         // GW4-c5: combat hit/kill events → combatFX (impact CEGs + lights).
         onCombatEvents: (events) => gpCombatFX?.onCombatEvents(events),
+        // GW4-c5b-3: per-unit command queues (~1 Hz) → command-path + waypoint
+        // overlays for the current selection (shift-gated). Cached so a
+        // selection change re-renders without waiting for the next broadcast.
+        // (Widget forward + the build-pending-ghost reaper land in c5c/c6.)
+        onUnitCommandQueues: (queues) => {
+            gpLastCommandQueues = queues;
+            const sel = gpSelection?.selection ?? [];
+            gpCommandPathRenderer?.update(queues, sel);
+            gpWaypointMarkerRenderer?.update(queues, sel);
+        },
+        // GW4-c5b-3: standing orders (always-on overlay; server scopes the
+        // broadcast to own + allied teams).
+        onStandingOrders: (orders) => gpStandingOrderRenderer?.update(orders),
         // GW4-c5: build/repair/reclaim progress (envelope 0x06) → build beams.
         onBuildActivity: (snapshot) => gpBuildBeamRenderer?.onSnapshot(snapshot),
         // GW4-c5: scar/track decal events (envelope 0x08) → ground decal overlay.
@@ -5181,10 +5222,33 @@ function gpInit(msg: GpInitToWorker): void {
     // (built in gpConnect) for order sends. Left-button gestures select; the
     // camera's right-tap routes through `onRightClickCommit` → an order. The
     // drag-box rectangle is posted to main (DOM overlay).
+    // GW4-c5b-3: selection-driven order overlays. Command-path + waypoint share
+    // the shift gate + queue/selection snapshot; standing orders are always-on.
+    const commandPathRenderer = new CommandPathRenderer(scene, entityRenderer);
+    gpCommandPathRenderer = commandPathRenderer;
+    const waypointMarkerRenderer = new WaypointMarkerRenderer(scene, entityRenderer);
+    gpWaypointMarkerRenderer = waypointMarkerRenderer;
+    // Bucket-3: seed show-allies from the gp:init value (lifted from main's
+    // localStorage) and route persistence back to main via gp:config — the
+    // worker's localStorage isn't the page's.
+    const standingOrderRenderer = new StandingOrderRenderer(scene, {
+        showAllies: msg.standingOrderShowAllies,
+        persistShowAllies: (show) =>
+            postToMain({ type: 'gp:config', key: 'standing-orders-show-allies', value: show }),
+    });
+    gpStandingOrderRenderer = standingOrderRenderer;
+
     const selection = new WorkerSelection(scene, entityRenderer, gpConnection!, {
         getCamera: (viewId) => (viewId === 0 ? camera : null),
         dpr: gpDpr,
         onDragBox: (box) => postToMain({ type: 'gp:dragBox', box }),
+        // Re-render the path/waypoint overlays from the cached queue snapshot so
+        // they appear immediately on a selection change (don't wait for the next
+        // ~1 Hz UnitCommandQueuesUpdate). (sceneState mirroring → main is c5c.)
+        onSelectionChange: (ids) => {
+            gpCommandPathRenderer?.update(gpLastCommandQueues, ids);
+            gpWaypointMarkerRenderer?.update(gpLastCommandQueues, ids);
+        },
     });
     gpSelection = selection;
     rtsCam.onRightClickCommit = (x, y, mods) =>
@@ -5196,6 +5260,16 @@ function gpInit(msg: GpInitToWorker): void {
     // GW4-c3: fetch map data over HTTP + build the terrain (independent of the
     // connection auth handshake — map data is on the asset plane).
     void gpLoadMap(msg);
+}
+
+/// GW4-c5b-3: update the shift-held gate that shows/hides the command-path +
+/// waypoint overlays (Spring's "hold Shift to see queued orders" gesture).
+/// Driven from the forwarded key/pointer `mods` bitmask (bit 0 = shift).
+function gpSetShift(held: boolean): void {
+    if (held === gpShiftHeld) return;
+    gpShiftHeld = held;
+    gpCommandPathRenderer?.setShiftHeld(held);
+    gpWaypointMarkerRenderer?.setShiftHeld(held);
 }
 
 function gpResize(width: number, height: number, dpr: number): void {
@@ -5219,6 +5293,14 @@ function gpShutdown(): void {
     gpViewCameras.clear();
     gpSelection?.dispose();
     gpSelection = null;
+    gpCommandPathRenderer?.dispose();
+    gpCommandPathRenderer = null;
+    gpWaypointMarkerRenderer?.dispose();
+    gpWaypointMarkerRenderer = null;
+    gpStandingOrderRenderer?.dispose();
+    gpStandingOrderRenderer = null;
+    gpLastCommandQueues = [];
+    gpShiftHeld = false;
     gpConnection?.disconnect();
     gpConnection = null;
     gpEntityRenderer?.dispose();
@@ -5337,13 +5419,17 @@ self.onmessage = async (e: MessageEvent) => {
         case 'gp:keydown':
             // RTSCamera matches lowercased KeyboardEvent.code (e.g. 'arrowup').
             gpViewCameras.get(msg.viewId ?? 0)?.keyDown(String(msg.code).toLowerCase());
+            // GW4-c5b-3: shift gates the command-path / waypoint overlays.
+            gpSetShift((msg.mods & 1) !== 0);
             break;
         case 'gp:keyup':
             gpViewCameras.get(msg.viewId ?? 0)?.keyUp(String(msg.code).toLowerCase());
+            gpSetShift((msg.mods & 1) !== 0);
             break;
         case 'gp:blur':
             gpViewCameras.get(msg.viewId ?? 0)?.blur();
             gpSelection?.blur();
+            gpSetShift(false);
             break;
 
         case 'gp:shutdown':

@@ -110,6 +110,12 @@ export class StandingOrderRenderer {
         }
     })();
 
+    /// GW4-c5b-3 (Bucket-3): in the game-processor worker `localStorage` is not
+    /// the page's, so persistence is injected. When set, `setShowAllies` calls
+    /// this (the worker posts `gp:config` to main) instead of writing
+    /// `localStorage` directly. Unset (main-thread legacy path) → localStorage.
+    private persistShowAllies: ((show: boolean) => void) | null = null;
+
     /** Active overlay meshes; disposed and rebuilt on every render. */
     private overlays: Mesh[] = [];
 
@@ -121,8 +127,17 @@ export class StandingOrderRenderer {
     private lastOrders: ReadonlyArray<StandingOrderInfoMsg> = [];
     private lastFingerprint = '';
 
-    constructor(scene: Scene) {
+    constructor(scene: Scene, opts?: {
+        /** Seed the show-allies flag (worker passes the value lifted from main's
+         *  localStorage via `gp:init`; overrides the localStorage default). */
+        showAllies?: boolean;
+        /** Persistence sink for `setShowAllies` (worker → `gp:config` to main).
+         *  When set, `setShowAllies` does NOT touch localStorage itself. */
+        persistShowAllies?: (show: boolean) => void;
+    }) {
         this.scene = scene;
+        if (opts?.showAllies !== undefined) this.showAllies = opts.showAllies;
+        this.persistShowAllies = opts?.persistShowAllies ?? null;
     }
 
     setMapData(map: ParsedMapData): void {
@@ -146,7 +161,12 @@ export class StandingOrderRenderer {
     setShowAllies(show: boolean): void {
         if (show === this.showAllies) return;
         this.showAllies = show;
-        try { localStorage.setItem(SHOW_ALLIES_KEY, show ? 'true' : 'false'); } catch { /* ignore */ }
+        if (this.persistShowAllies) {
+            // Worker path: hand persistence to main (writes the page's localStorage).
+            this.persistShowAllies(show);
+        } else {
+            try { localStorage.setItem(SHOW_ALLIES_KEY, show ? 'true' : 'false'); } catch { /* ignore */ }
+        }
         this.lastFingerprint = '';
         this.render();
     }

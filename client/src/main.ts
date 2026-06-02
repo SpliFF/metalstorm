@@ -444,6 +444,16 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             case 'gp:dragBox':
                 updateDragOverlay(m.box);
                 break;
+            // GW4-c5b-3 (Bucket-3): the worker has no access to the page's
+            // localStorage — persist worker-owned UI prefs here (e.g. the
+            // standing-order show-allies toggle). Booleans store as 'true'/'false'.
+            case 'gp:config':
+                try {
+                    const v = typeof m.value === 'boolean' ? String(m.value)
+                        : typeof m.value === 'string' ? m.value : JSON.stringify(m.value);
+                    localStorage.setItem(m.key, v);
+                } catch { /* ignore quota / private-mode */ }
+                break;
             // Worker postLog() output. Until the LuaWidgetManager's log bridge
             // is folded back in (GW5/GW8), surface it on the page console (and
             // thus the log server via logIngest) so the worker isn't a black box.
@@ -477,8 +487,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         height: window.innerHeight,
         dpr,
         gfx,
+        // Canonical key matches StandingOrderRenderer's SHOW_ALLIES_KEY; default
+        // true (only an explicit 'false' hides allies). The worker persists
+        // changes back here via a `gp:config` message (Bucket-3).
         standingOrderShowAllies:
-            localStorage.getItem('luaui:standing-order-show-allies') === 'true',
+            localStorage.getItem('standing-orders-show-allies') !== 'false',
     };
     gameWorker.postMessage(init, [offscreen]);
 
