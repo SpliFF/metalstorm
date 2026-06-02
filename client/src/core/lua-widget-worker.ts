@@ -4981,6 +4981,18 @@ function gpInit(msg: GpInitToWorker): void {
     scene.useRightHandedSystem = true;
     scene.clearColor = new Color4(0.05, 0.08, 0.12, 1);
 
+    // Preserve the depth buffer across rendering groups so meshes in a higher
+    // group still depth-test against the terrain (group 0). Babylon's DEFAULT is
+    // to clear depth/stencil before every rendering group, which would let the
+    // group-1 water plane (and group-2 units / group-3 command overlays) draw
+    // ON TOP of terrain that should occlude them. main.ts had these three calls
+    // pre-GW4; the c3 terrain port dropped them — restored here. See the
+    // renderingGroupId assignments in terrain.ts (fog), entity-renderer.ts
+    // (units), and the water block in gpLoadMap.
+    scene.setRenderingAutoClearDepthStencil(1, false, true, true);
+    scene.setRenderingAutoClearDepthStencil(2, false, true, true);
+    scene.setRenderingAutoClearDepthStencil(3, false, true, true);
+
     // Default camera at origin — repositioned when MapData arrives (GW4-c3).
     const camera = new FreeCamera('camera', new Vector3(0, 1200, -1500), scene);
     camera.setTarget(new Vector3(0, 0, 0));
