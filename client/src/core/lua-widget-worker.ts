@@ -21,12 +21,25 @@
  *     {type:'error', msg}
  */
 
-import { Engine, Scene, FreeCamera, Vector3, Color4 } from '@babylonjs/core';
+import { Engine, Scene, FreeCamera, Vector3, Color3, Color4, Mesh, MeshBuilder, StandardMaterial } from '@babylonjs/core';
 import type { GpInitToWorker } from './game-worker-protocol.js';
 // GW4-c2: the WebTransport game connection now lives in the worker. Connection
 // is host-agnostic (runs on WebTransportAdapter, no DOM refs after the
 // onServerRestart callback was extracted) so it imports + runs here unchanged.
 import { Connection } from './connection.js';
+// GW4-c3: terrain + lighting + map parse move into the worker so terrain
+// renders from here (first light). All of these are worker-safe (Babylon
+// DynamicTexture allocates an OffscreenCanvas in a worker; the dev-hook
+// `window.__*` injections in scene-lighting/client-settings were switched to
+// `globalThis` for this move — PLAN-game-worker.md GW4 Bucket-2).
+import {
+    buildTerrainMesh, loadTerrainTextures, TerrainFog, DeformableTerrain,
+    type MapDimensions,
+} from './terrain.js';
+import { fetchMapDataHttp, type ParsedMapData } from './map-data.js';
+import { loadMapLighting, type MapLighting } from './map-lighting.js';
+import { createSceneLighting, applyMapLighting, type SceneLighting } from './scene-lighting.js';
+import { LosBitmapStore } from './los-bitmap.js';
 import { LuaRuntime, type LuaValue, luaTable } from './lua-runtime.js';
 import { LuaGLBridge } from './lua-gl-bridge.js';
 import {
@@ -4580,16 +4593,127 @@ function shutdown(): void {
 let gpEngine: Engine | null = null;
 let gpScene: Scene | null = null;
 let gpCamera: FreeCamera | null = null;
+/// GW4-c3: sun + ambient + HDR pipeline + CSM. Created in gpInit (deferred
+/// from c1 — invisible on an empty scene), retuned by applyMapLighting once
+/// the map's `mapinfo.lua → lighting` is fetched + parsed.
+let gpSceneLighting: SceneLighting | null = null;
 /// GW4-c2: the game-server WebTransport connection, owned by the worker.
 /// Opened from `gp:init` creds; torn down on `gp:shutdown`. At c2 its
 /// callbacks only log decoded counts + bridge a few signals to main; the
 /// renderer/LuaUI dispatch wires up as those modules move in across c3–c6.
 let gpConnection: Connection | null = null;
+/// GW4-c3 terrain state, populated once the map data HTTP fetch resolves.
+/// Mirrors the pre-move main.ts `onMapData` terrain build.
+let gpTerrainMesh: Mesh | null = null;
+let gpTerrainFog: TerrainFog | null = null;
+let gpDeformTerrain: DeformableTerrain | null = null;
+let gpMapData: ParsedMapData | null = null;
+/// Holds the per-allyteam LOS bitmaps (envelope 0x07) so a bitmap that
+/// arrives before the fog mesh exists still paints on first build.
+const gpLosBitmapStore = new LosBitmapStore();
 /// Static full-map viewport resend timer. The camera→viewport path moves
 /// into the worker in c3; until then a fixed full-map viewport is resent on
 /// an interval so the server streams entity state (filtering is viewport-
 /// gated) and the QUIC session sees periodic traffic. Cleared on shutdown.
 let gpViewportTimer: ReturnType<typeof setInterval> | null = null;
+
+/// GW4-c3: fetch map data over HTTP (not the connection — server_main.cpp
+/// serves it on the asset plane) and build the terrain in the worker. This
+/// ports the terrain/water/fog/lighting half of main.ts's pre-move
+/// `onMapData` (the feature/widget/minimap halves stay on main / move in
+/// later checkpoints). Runs once per game; idempotent via `gpMapData`.
+///
+/// DEVIATION (documented in the c3 handoff): the interactive RTS camera +
+/// DOM input split (Bucket-3 `rts-camera` → CameraInput) is deferred to c5
+/// per the plan's c5 bullet. c3 only needs a *static framed* camera so
+/// terrain is visible ("first light"); the FreeCamera is positioned at map
+/// centre here. No ground-clamp / pan / zoom yet.
+async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
+    if (!gpScene || !gpEngine || !gpCamera || !gpSceneLighting) return;
+    if (gpMapData) { postLog(2, '[gp] gpLoadMap: map already built — ignoring'); return; }
+    const scene = gpScene;
+    const sceneLighting = gpSceneLighting;
+
+    let map: ParsedMapData;
+    try {
+        map = await fetchMapDataHttp(msg.mapId);
+    } catch (err) {
+        postLog(4, `[gp] map data fetch failed: ${err}`);
+        return;
+    }
+    if (!gpScene) return;  // shutdown raced the fetch
+    gpMapData = map;
+    postLog(1, `[gp] MapData received: ${map.mapx}x${map.mapy}, ${map.features.length} features`);
+
+    // `mapSourceUrl` is lobby-relative; lobbyUrl='' resolves it against the
+    // worker (page) origin, same as fetchMapDataHttp's `/api/*` paths.
+    const mapSourceAbs = map.mapSourceUrl.startsWith('http')
+        ? map.mapSourceUrl
+        : `${msg.lobbyUrl}${map.mapSourceUrl}`;
+    const mapBaseUrl = `${msg.lobbyUrl}${map.mapDataUrl}`;
+
+    const mapDims: MapDimensions = {
+        mapx: map.mapx, mapy: map.mapy,
+        minHeight: map.minHeight, maxHeight: map.maxHeight,
+        tilesX: map.tilesX, tilesZ: map.tilesZ,
+    };
+
+    // PLAN-lighting L2: parse `mapinfo.lua → lighting` on the client (server
+    // is headless) and apply sun/ambient. Fire-and-forget; failure falls back
+    // to the createSceneLighting defaults so the scene is never dark.
+    void loadMapLighting(mapSourceAbs).then((lighting: MapLighting) => {
+        if (gpSceneLighting === sceneLighting) applyMapLighting(lighting, sceneLighting);
+    });
+
+    // Terrain mesh from the embedded heightmap.
+    const terrainMesh = buildTerrainMesh(scene, mapDims, map.heightmap);
+    terrainMesh.receiveShadows = true;
+    gpTerrainMesh = terrainMesh;
+    gpDeformTerrain = new DeformableTerrain(terrainMesh, mapDims);
+    postLog(1, '[gp] terrain mesh built from MapData heightmap');
+
+    // Frame the camera over map centre (static — interactive camera = c5).
+    const cx = map.widthElmos / 2;
+    const cz = map.heightElmos / 2;
+    gpCamera.position.set(cx, 1200, cz - 1500);
+    gpCamera.setTarget(new Vector3(cx, 0, cz));
+
+    // Fog-of-war overlay (envelope 0x07). Sits just above terrain in
+    // renderingGroupId=1; never a shadow caster (map-sized blob).
+    const fog = new TerrainFog();
+    fog.build(scene, mapDims, map.heightmap);
+    gpTerrainFog = fog;
+    const fogMesh = fog.getMesh();
+    if (fogMesh) sceneLighting.csm.removeShadowCaster(fogMesh, false);
+    gpLosBitmapStore.forEach(bitmap => fog.apply(bitmap));
+
+    // DXT1/KTX2 tile textures over HTTP.
+    if (map.tilesX > 0 && map.tilesZ > 0) {
+        loadTerrainTextures(scene, terrainMesh, mapBaseUrl, mapDims).catch(e => {
+            postLog(2, `[gp] terrain texture loading failed: ${e}`);
+        });
+    }
+
+    // Fallback water plane (maps with voidWater=true ship their own fluid widget).
+    if (!map.water.voidWater) {
+        const water = MeshBuilder.CreateGround('water', {
+            width: map.widthElmos, height: map.heightElmos,
+        }, scene);
+        water.position.set(map.widthElmos / 2, 0, map.heightElmos / 2);
+        water.isPickable = false;
+        water.renderingGroupId = 1;
+        const wmat = new StandardMaterial('waterMat', scene);
+        const [r, g, b] = map.water.baseColor;
+        wmat.diffuseColor = new Color3(r, g, b);
+        wmat.emissiveColor = new Color3(r * 0.3, g * 0.3, b * 0.3);
+        wmat.specularColor = new Color3(0.2, 0.2, 0.2);
+        wmat.alpha = Math.max(0.4, map.water.surfaceAlpha);
+        wmat.backFaceCulling = false;
+        water.material = wmat;
+        water.receiveShadows = false;
+        sceneLighting.csm.removeShadowCaster(water, false);
+    }
+}
 
 /// GW4-c2 placeholder viewport. Map data is served over HTTP (not the
 /// connection — server_main.cpp), so Connection.onMapData never fires here;
@@ -4637,11 +4761,22 @@ function gpConnect(msg: GpInitToWorker): void {
         onServerError: (code, m) => postLog(4, `[gp] server error ${code}: ${m}`),
         onEntityState: (snapshot, isDelta) => {
             // c2 exit gate: prove the QUIC stream + decoder run in the worker.
+            // c4 wires this into the entity renderer/interpolator.
             postLog(1, `[gp] entityState count=${snapshot.count} frame=${snapshot.baseFrame} delta=${isDelta}`);
         },
+        // GW4-c3: live terrain deformation (envelope 0x09) → DeformableTerrain.
+        onHeightmapPatch: (patch) => gpDeformTerrain?.applyPatch(patch),
+        // GW4-c3: per-allyteam LOS bitmap (envelope 0x07) → fog-of-war overlay.
+        // Stored so a bitmap that arrives before gpLoadMap finishes still
+        // paints once the fog mesh exists.
+        onLosBitmap: (bitmap) => {
+            gpLosBitmapStore.set(bitmap);
+            gpTerrainFog?.apply(bitmap);
+        },
         // NOTE: Connection.onMapData is unused here — map data is served over
-        // HTTP, not the connection (server_main.cpp). The viewport is registered
-        // from onAuthenticated via gpRegisterViewport(); terrain build lands in c3.
+        // HTTP, not the connection (server_main.cpp). gpLoadMap (called from
+        // gpInit) fetches + builds the terrain; the viewport is registered from
+        // onAuthenticated via gpRegisterViewport().
         onGameOver: (frame) => postToMain({ type: 'gp:gameOver', frame }),
         onServerRestart: () => postToMain({ type: 'gp:reload' }),
     });
@@ -4677,14 +4812,19 @@ function gpInit(msg: GpInitToWorker): void {
     gpScene = scene;
     gpCamera = camera;
 
-    // GW4-c2 DIAGNOSTIC: render loop temporarily disabled to test whether the
-    // Babylon render loop in the worker starves the WebTransport read path under
-    // entity-stream load (intermittent "Connection lost"). REVERT after the test.
+    // GW4-c3: install sun + ambient + HDR pipeline + CSM (deferred from c1 —
+    // it was invisible on an empty scene and drags in the HDR pipeline).
+    // applyMapLighting retunes it once mapinfo.lua lighting is fetched.
+    gpSceneLighting = createSceneLighting(scene, camera);
+
     engine.runRenderLoop(() => { scene.render(); });
-    postLog(1, '[gp] Babylon Engine up on transferred #game-canvas (GW4-c1, empty scene)');
+    postLog(1, '[gp] Babylon Engine up on transferred #game-canvas (GW4-c3, lit scene)');
 
     // GW4-c2: open the game-server connection from inside the worker.
     gpConnect(msg);
+    // GW4-c3: fetch map data over HTTP + build the terrain (independent of the
+    // connection auth handshake — map data is on the asset plane).
+    void gpLoadMap(msg);
 }
 
 function gpResize(width: number, height: number, dpr: number): void {
@@ -4701,7 +4841,15 @@ function gpShutdown(): void {
     if (gpViewportTimer) { clearInterval(gpViewportTimer); gpViewportTimer = null; }
     gpConnection?.disconnect();
     gpConnection = null;
+    gpTerrainFog?.dispose();
+    gpTerrainFog = null;
+    gpTerrainMesh = null;
+    gpDeformTerrain = null;
+    gpMapData = null;
+    gpSceneLighting = null;
     gpEngine?.stopRenderLoop();
+    // scene.dispose() tears down the terrain mesh, fog, water, lights, CSM,
+    // and the HDR render pipeline created above.
     gpScene?.dispose();
     gpEngine?.dispose();
     gpEngine = null;

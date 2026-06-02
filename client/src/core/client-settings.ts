@@ -341,5 +341,7 @@ const REGISTRY: SettingDef[] = [
 export const clientSettings = new ClientSettingsStore();
 clientSettings.register(REGISTRY);
 
-// Expose for DevTools live-tuning (mirrors window.__csm etc.).
-(window as unknown as { __settings: unknown }).__settings = clientSettings;
+// Expose for DevTools live-tuning (mirrors window.__csm etc.). Uses
+// `globalThis` (not `window`) so this module loads inside the
+// game-processor worker too (PLAN-game-worker.md GW4 Bucket-2 touch).
+(globalThis as unknown as { __settings: unknown }).__settings = clientSettings;

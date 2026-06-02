@@ -72,7 +72,7 @@ export function createSceneLighting(scene: Scene, camera: Camera): SceneLighting
     renderPipeline.bloomKernel = 64;
     renderPipeline.bloomScale = 0.5;
     clientSettings.subscribe('gfx.bloom', v => { renderPipeline.bloomEnabled = Boolean(v); });
-    (window as unknown as { __renderPipeline: unknown }).__renderPipeline = renderPipeline;
+    (globalThis as unknown as { __renderPipeline: unknown }).__renderPipeline = renderPipeline;
 
     const csm = createCsm(sun);
 
@@ -130,7 +130,7 @@ function createCsm(sun: DirectionalLight): CascadedShadowGenerator {
         return true;
     };
 
-    (window as unknown as { __csm: unknown }).__csm = csm;
+    (globalThis as unknown as { __csm: unknown }).__csm = csm;
     return csm;
 }
 
@@ -168,7 +168,7 @@ export function applyMapLighting(lighting: MapLighting, scene: SceneLighting): v
     const meanDensity = (lighting.groundShadowDensity + lighting.unitShadowDensity) * 0.5;
     csm.setDarkness(Math.max(0, Math.min(1, 1 - meanDensity)));
 
-    (window as unknown as { __mapLighting: MapLighting }).__mapLighting = lighting;
+    (globalThis as unknown as { __mapLighting: MapLighting }).__mapLighting = lighting;
 
     console.log(
         `[lighting] applied: sunDir=${sx.toFixed(2)},${sy.toFixed(2)},${sz.toFixed(2)} ` +
