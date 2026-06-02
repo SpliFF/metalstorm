@@ -87,7 +87,8 @@ export class MuzzleFlareRenderer {
         this.mesh.thinInstanceSetBuffer('iColor', this.iColor, 4, false);
         this.mesh.thinInstanceCount = 0;
 
-        (window as unknown as { __muzzleFlare: unknown }).__muzzleFlare = this;
+        // GW4-c5: globalThis so it resolves in the game-processor worker too.
+        (globalThis as unknown as { __muzzleFlare: unknown }).__muzzleFlare = this;
     }
 
     /** Provide the texture resolver; the flare sprite binds lazily once

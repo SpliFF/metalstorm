@@ -123,7 +123,8 @@ export class DistortionRenderer {
             });
         });
 
-        (window as unknown as { __distortion: unknown }).__distortion = this;
+        // GW4-c5: globalThis so it resolves in the game-processor worker too.
+        (globalThis as unknown as { __distortion: unknown }).__distortion = this;
     }
 
     private buildEmitterMaterial(): ShaderMaterial {

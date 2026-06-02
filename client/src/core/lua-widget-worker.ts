@@ -49,6 +49,22 @@ import { BuildingPlateRenderer } from './building-plate-renderer.js';
 import { DefCache } from './def-cache.js';
 import { fetchAndIngestDefs } from './defs-fetch.js';
 import { PresentationClock } from './presentation-clock.js';
+// GW4-c5: weapon-FX / projectile / decal / build render modules fold into the
+// worker (audited worker-safe — no DOM/audio; the `window.__*` dev hooks they
+// set are switched to `globalThis`). Ported from main.ts@d6301137f7^.
+import { ProjectileRenderer } from './projectile-renderer.js';
+import { ProjectileTextureResolver } from './projectile-texture-resolver.js';
+import { CegRuntime } from './ceg-runtime.js';
+import { setParticleBudget } from './ceg-translator.js';
+import { BuildBeamRenderer } from './build-beam-renderer.js';
+import { CombatFX } from './combat-fx.js';
+import { FxLightPool } from './fx-light-pool.js';
+import { setActiveFxLightPool } from './zk-model-material.js';
+import { DistortionRenderer } from './distortion-renderer.js';
+import { MuzzleFlareRenderer } from './muzzle-flare-renderer.js';
+import { DecalOverlay, buildTrackTypeNames } from './decal-overlay.js';
+import { attachDecalOverlay } from './decal-overlay-plugin.js';
+import { renderMapFeatures, DynamicFeatureRenderer } from './feature-renderer.js';
 import { LuaRuntime, type LuaValue, luaTable } from './lua-runtime.js';
 import { LuaGLBridge } from './lua-gl-bridge.js';
 import {
@@ -4630,6 +4646,25 @@ let gpTerrainMesh: Mesh | null = null;
 let gpTerrainFog: TerrainFog | null = null;
 let gpDeformTerrain: DeformableTerrain | null = null;
 let gpMapData: ParsedMapData | null = null;
+/// GW4-c5: weapon-FX / projectile / decal / build render modules, owned by the
+/// worker. Ported from main.ts's pre-move construction (main.ts@d6301137f7^
+/// L391–595 + onMapData). Driven by the connection's combat/projectile/build/
+/// decal callbacks and aged in the render loop at the sim-scaled `gpFxSimSpeed`.
+let gpFxLightPool: FxLightPool | null = null;
+let gpDistortion: DistortionRenderer | null = null;
+let gpMuzzleFlare: MuzzleFlareRenderer | null = null;
+let gpProjectileRenderer: ProjectileRenderer | null = null;
+let gpCegRuntime: CegRuntime | null = null;
+let gpBuildBeamRenderer: BuildBeamRenderer | null = null;
+let gpCombatFX: CombatFX | null = null;
+let gpDecalOverlay: DecalOverlay | null = null;
+let gpDynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
+/// Sim-scaled delta multiplier for VISUAL FX aging — slows / freezes effect
+/// lifetimes with the game speed (paused → 0). Driven by onGameInfo. The
+/// camera + entity ticks keep raw wall dt; only FX lifetimes use it.
+let gpFxSimSpeed = 1;
+/// Wall-clock timestamp of the previous render frame, for the FX `dt`.
+let gpLastFrameTime = 0;
 /// Holds the per-allyteam LOS bitmaps (envelope 0x07) so a bitmap that
 /// arrives before the fog mesh exists still paints on first build.
 const gpLosBitmapStore = new LosBitmapStore();
@@ -4724,6 +4759,30 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
         });
     }
 
+    // GW4-c5: ground decal overlay (PLAN-decals.md D7) — craters from scar
+    // events + vehicle tracks, baked into a persistent clipmap sampled by the
+    // terrain material. Track classification reads the unit defs' trackType;
+    // the worker fetches defs independently of the map (no Promise.all gate),
+    // so if defs lag the map build, tracks stay unclassified until they land
+    // (scars are unaffected). DEVIATION from main's def-gated onMapData — noted.
+    gpDecalOverlay?.dispose();
+    const decalOverlay = new DecalOverlay(scene, map.widthElmos, map.heightElmos);
+    decalOverlay.setTrackTypes(
+        buildTrackTypeNames((gpDefCache?.getAllUnitDefs() ?? []).map(d => d.trackType)));
+    gpDecalOverlay = decalOverlay;
+    if (terrainMesh.material) {
+        attachDecalOverlay(terrainMesh.material,
+            decalOverlay.coarseTexture, decalOverlay.fineTexture, decalOverlay.fineState,
+            decalOverlay.coarseTexel, decalOverlay.fineTexel,
+            map.widthElmos, map.heightElmos);
+    }
+
+    // GW4-c5: static map-placed features (rocks, trees, wrecks) — thin-instanced
+    // .glb, registered as shadow casters. Runtime feature spawns go through the
+    // dynamic feature renderer (onFeatureLifecycle).
+    renderMapFeatures(scene, map, gpSceneLighting!.csm).catch((err) =>
+        postLog(2, `[gp] renderMapFeatures failed: ${err}`));
+
     // Fallback water plane (maps with voidWater=true ship their own fluid widget).
     if (!map.water.voidWater) {
         const water = MeshBuilder.CreateGround('water', {
@@ -4806,16 +4865,53 @@ function gpConnect(msg: GpInitToWorker): void {
         // GW4-c4: streamed piece transforms (envelope 0x05) → per-piece thin
         // instance matrices on the unit's model.
         onPieceState: (snapshot) => gpEntityRenderer?.applyPieceState(snapshot),
-        // GW4-c4: a unit/feature left view or died → drop its meshes + plate.
-        // (combatFX death burst + LuaUI forward wire up in c5/c6.)
-        onEntityDestroy: (entityId) => {
+        // GW4-c4/c5: a unit/feature left view or died → drop its meshes + plate
+        // and (c5) fire a combatFX death burst at its last position. (LuaUI
+        // forward to widgets wires up in c6.)
+        onEntityDestroy: (entityId, x, y, z) => {
             gpEntityRenderer?.removeEntity(entityId);
             gpBuildingPlateRenderer?.remove(entityId);
+            gpCombatFX?.onCombatEvents([{
+                attackerId: 0, targetId: entityId, weaponDefId: 0,
+                result: 3, damage: 500, x, y, z,
+            }]);
         },
+        // GW4-c5: runtime feature spawns (wrecks/debris/reclaim) → dynamic
+        // feature renderer. Map-placed features load via renderMapFeatures.
+        onFeatureLifecycle: (spawns, removed) => {
+            gpDynamicFeatureRenderer?.applyLifecycleBatch(spawns, removed);
+        },
+        // GW4-c5: weapon-fire / impact / trajectory events (envelopes inside
+        // GameEventBatch) drive the projectile renderer + combatFX. The legacy
+        // 0x04 per-tick projectile-state envelope is gone — the renderer
+        // integrates motion locally off these events.
+        onProjectileFired: (events) => {
+            if (!gpProjectileRenderer) return;
+            for (const e of events) gpProjectileRenderer.onFired(e);
+        },
+        onProjectileImpacts: (events) => {
+            for (const e of events) gpProjectileRenderer?.onImpact(e);
+            gpCombatFX?.onProjectileImpacts(events);
+        },
+        onProjectileTrajectories: (events) => {
+            if (!gpProjectileRenderer) return;
+            for (const e of events) gpProjectileRenderer.onTrajectory(e);
+        },
+        // GW4-c5: combat hit/kill events → combatFX (impact CEGs + lights).
+        onCombatEvents: (events) => gpCombatFX?.onCombatEvents(events),
+        // GW4-c5: build/repair/reclaim progress (envelope 0x06) → build beams.
+        onBuildActivity: (snapshot) => gpBuildBeamRenderer?.onSnapshot(snapshot),
+        // GW4-c5: scar/track decal events (envelope 0x08) → ground decal overlay.
+        onDecals: (snapshot) => gpDecalOverlay?.onSnapshot(snapshot.scars, snapshot.tracks),
         // PLAN-latency L0: drive the presentation cursor at the true sim speed
-        // (paused → 0 freezes P). Frame/wind forwarding to LuaUI lands in c6.
+        // (paused → 0 freezes P). GW4-c5: also drive the FX aging multiplier +
+        // the projectile integrator's sim-speed so bolts / particles / lights
+        // slow + freeze with the game. Frame/wind forwarding to LuaUI lands in c6.
         onGameInfo: (_frame, speed, paused) => {
-            gpPresentationClock?.setSpeedFactor(paused ? 0 : speed);
+            const eff = paused ? 0 : speed;
+            gpPresentationClock?.setSpeedFactor(eff);
+            gpFxSimSpeed = eff;
+            gpProjectileRenderer?.setSimSpeed(eff);
         },
         // GW4-c3: live terrain deformation (envelope 0x09) → DeformableTerrain.
         onHeightmapPatch: (patch) => gpDeformTerrain?.applyPatch(patch),
@@ -4875,6 +4971,17 @@ function gpInit(msg: GpInitToWorker): void {
     // applyMapLighting retunes it once mapinfo.lua lighting is fetched.
     gpSceneLighting = createSceneLighting(scene, camera);
 
+    // GW4-c5: dynamic FX light pool (PLAN-weapon-fx-gaps Phase L). Fixed ring
+    // of point lights driven by weapon fire / explosions, sampled by the
+    // forward-lit stock materials + bloomed by the HDR pipeline. Created BEFORE
+    // the ZK unit material so setActiveFxLightPool lets units (not just terrain)
+    // light up under fire (Phase U). Distortion + muzzle-flare share the same
+    // explosion/fire paths and need the camera, so they're built here too.
+    gpFxLightPool = new FxLightPool(scene);
+    setActiveFxLightPool(gpFxLightPool);
+    gpDistortion = new DistortionRenderer(scene, camera);
+    gpMuzzleFlare = new MuzzleFlareRenderer(scene, camera);
+
     // GW4-c4: world entity rendering (ports main.ts@d6301137f7^ L480–595).
     // The per-game shader lighting style normally comes from modinfo.lua's
     // `lighting` field via the lobby games list; the worker has no lobby list,
@@ -4902,23 +5009,108 @@ function gpInit(msg: GpInitToWorker): void {
     if (msg.gameId) buildingPlateRenderer.setGame(msg.gameId, msg.lobbyUrl);
     gpBuildingPlateRenderer = buildingPlateRenderer;
 
-    // DefCache accumulates the game's defs (fetched over HTTP on auth). New
-    // unit defs flow to the entity + plate renderers; weapon/CEG listeners
-    // wire up with the projectile/FX modules in c5.
+    // DefCache accumulates the game's defs (fetched over HTTP on auth).
     const defCache = new DefCache();
+    gpDefCache = defCache;
+
+    // GW4-c5: projectile renderer + CEG runtime + build-beam (ports
+    // main.ts@d6301137f7^ L511–537). The CEG runtime drives muzzle flashes /
+    // impact bursts / debris; the projectile renderer integrates motion locally
+    // off Fired/Impact/Trajectory events and injects the CEG runtime + FX
+    // light pool + distortion + muzzle flare for its hooks.
+    const projectileRenderer = new ProjectileRenderer(scene);
+    gpProjectileRenderer = projectileRenderer;
+    const buildBeamRenderer = new BuildBeamRenderer(scene);
+    buildBeamRenderer.setEntityRenderer(entityRenderer);
+    if (msg.gameId) buildBeamRenderer.setGameAssetsBaseUrl(msg.gameId);
+    gpBuildBeamRenderer = buildBeamRenderer;
+    const cegRuntime = new CegRuntime(scene);
+    gpCegRuntime = cegRuntime;
+    projectileRenderer.setCegRuntime(cegRuntime);
+    projectileRenderer.setLightPool(gpFxLightPool);
+    projectileRenderer.setDistortion(gpDistortion);
+    projectileRenderer.setMuzzleFlare(gpMuzzleFlare);
+
+    // Resolve weapon-def texture names → KTX2 URLs (shared by projectiles, CEG,
+    // muzzle flares). Async; the renderers consult it lazily when they first see
+    // a weapon def with a texture name.
+    if (msg.gameId) {
+        const resolver = new ProjectileTextureResolver();
+        projectileRenderer.setTextureResolver(resolver);
+        cegRuntime.setTextureResolver(resolver);
+        gpMuzzleFlare?.setTextureResolver(resolver);
+        resolver.init(msg.gameId, msg.lobbyUrl).catch((e) =>
+            postLog(2, `[gp] projectile texture resolver init failed: ${e}`));
+    }
+
+    // CombatFX — impact/death bursts + shockwaves. Needs cegRuntime + defCache
+    // to look up the firing weapon's CEG (else falls back to procedural
+    // spheres). audio is null here: visuals are self-contained; the
+    // SoundEvent → AudioManager bridge stays on main (GW4-c5c).
+    const combatFX = new CombatFX(scene, undefined, cegRuntime, defCache);
+    combatFX.setLightPool(gpFxLightPool);
+    combatFX.setDistortion(gpDistortion);
+    gpCombatFX = combatFX;
+
+    // Dynamic feature renderer — runtime-spawned features (wrecks, debris,
+    // reclaim removals). Map-placed features load once via renderMapFeatures
+    // in gpLoadMap.
+    const dynamicFeatureRenderer = new DynamicFeatureRenderer(scene, defCache);
+    dynamicFeatureRenderer.setShadowGenerator(gpSceneLighting.csm);
+    gpDynamicFeatureRenderer = dynamicFeatureRenderer;
+
+    // Phase G: size the CEG per-spawn budget. clientSettings degrades to
+    // registry defaults in the worker (no localStorage); the live gfx.* push
+    // is GW4-c5c polish — medium tier is the registry default.
+    setParticleBudget(32, 8.0);
+
+    // New defs → the renderers that consume them. (LuaUI forward to widgets is
+    // GW4-c6.)
     defCache.onUnitDefs((newDefs) => {
         gpEntityRenderer?.setUnitDefs(newDefs);
         gpBuildingPlateRenderer?.setUnitDefs(newDefs);
     });
-    gpDefCache = defCache;
+    defCache.onWeaponDefs((newDefs) => {
+        gpProjectileRenderer?.setWeaponDefs(newDefs);
+    });
+    // Streamed CEG defs override the BUILTIN_EFFECTS hand-ports for any tag the
+    // game defines; missing tags still resolve via the built-in archetypes.
+    defCache.onCegDefs((newDefs) => {
+        gpCegRuntime?.ingestCegDefs(newDefs);
+    });
 
+    gpLastFrameTime = performance.now();
     engine.runRenderLoop(() => {
+        const now = performance.now();
+        const dt = (now - gpLastFrameTime) / 1000;
+        gpLastFrameTime = now;
+        // Sim-scaled delta for VISUAL FX aging — slows / freezes with the game
+        // speed. Camera + entity ticks keep the raw wall dt; only FX lifetimes
+        // use fxDt (PLAN-weapon-fx-capture-arch fxDt).
+        const fxDt = dt * gpFxSimSpeed;
+
         // entityRenderer.tick() advances the presentation clock (L0) and
         // interpolates every unit to the presentation cursor before render.
         gpEntityRenderer?.tick();
+        gpBuildBeamRenderer?.tick();
+        gpProjectileRenderer?.tick();
+        gpCegRuntime?.tick(fxDt);
+        gpCombatFX?.tick(fxDt);
+        // Decal clipmap fine window tracks the camera focus + height.
+        {
+            const focus = camera.getTarget();
+            gpDecalOverlay?.tick(dt, focus.x, focus.z,
+                Math.max(1, camera.position.y - focus.y));
+        }
+        // Age the FX lights after the emitters ran this frame + before
+        // scene.render() consumes the lighting; then push distortion/muzzle
+        // uniforms.
+        gpFxLightPool?.update(fxDt, camera.position);
+        gpDistortion?.tick(fxDt);
+        gpMuzzleFlare?.tick(fxDt);
         scene.render();
     });
-    postLog(1, '[gp] Babylon Engine up on transferred #game-canvas (GW4-c4, entities)');
+    postLog(1, '[gp] Babylon Engine up on transferred #game-canvas (GW4-c5, weapon FX)');
 
     // GW4-c2: open the game-server connection from inside the worker.
     gpConnect(msg);
@@ -4952,6 +5144,27 @@ function gpShutdown(): void {
     gpDefCache?.clear();
     gpDefCache = null;
     gpPresentationClock = null;
+    // GW4-c5: weapon-FX / projectile / decal / build / feature modules.
+    gpProjectileRenderer?.dispose();
+    gpProjectileRenderer = null;
+    gpCegRuntime?.dispose();
+    gpCegRuntime = null;
+    gpBuildBeamRenderer?.dispose();
+    gpBuildBeamRenderer = null;
+    gpCombatFX?.dispose();
+    gpCombatFX = null;
+    gpDistortion?.dispose();
+    gpDistortion = null;
+    gpMuzzleFlare?.dispose();
+    gpMuzzleFlare = null;
+    gpFxLightPool?.dispose();
+    gpFxLightPool = null;
+    setActiveFxLightPool(null);
+    gpDecalOverlay?.dispose();
+    gpDecalOverlay = null;
+    gpDynamicFeatureRenderer?.dispose();
+    gpDynamicFeatureRenderer = null;
+    gpFxSimSpeed = 1;
     gpTerrainFog?.dispose();
     gpTerrainFog = null;
     gpTerrainMesh = null;
