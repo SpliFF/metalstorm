@@ -132,7 +132,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `core/lua-gl-bridge.ts` + `lua-gl-immediate.ts` + `lua-gl-font.ts` | Lua `gl.*` bridge: command buffer, immediate-mode primitives, font/text rendering. |
 | `core/lua-widget.ts` | Lua widget definition + lifecycle wrapper. |
 | `core/lua-widget-host.ts` | Fengari host for map-side widgets (lava, water shaders). |
-| `core/lua-widget-worker.ts` | LuaUI Web Worker entry: Fengari + OffscreenCanvas, runs widgets off the main thread (PLAN-widgets.md). **GW4-c1**: also the game-processor worker — owns the Babylon `Engine` on the transferred `#game-canvas` (`gp:init` → empty clear-color scene; connection + decoders + render core fold in across c2–c6, PLAN-game-worker.md). |
+| `core/lua-widget-worker.ts` | LuaUI Web Worker entry: Fengari + OffscreenCanvas, runs widgets off the main thread (PLAN-widgets.md). **GW4 (c1–c4 landed)**: also the game-processor worker — on `gp:init` owns the Babylon `Engine` on the transferred `#game-canvas`, the WebTransport `Connection` + decoders, the terrain + lighting, and the entity-renderer + def-cache + presentation-clock so units stream → interpolate → render from the worker. Remaining FX/UI render modules + camera/picking + LuaUI world pass land in c5–c6 (PLAN-game-worker.md). |
 | `core/lua-widget-manager.ts` | Main-thread owner of the worker: lifecycle, message routing, input forwarding, VFS proxy. |
 | `core/widget-manager.ts` | Higher-level widget orchestration (load order, enable/disable, debug toggles). |
 | `core/command-buffer.ts` | Serialised `gl.*` command buffer transferred from worker to main-thread renderer. |
@@ -166,7 +166,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 
 **IPC:** Pipe-based IPC removed. The lobby↔game backchannel (e.g. GameStarted) is **not yet implemented** — `Simulation.cpp` carries a `TODO(Tier 2)` for it; when built it targets WebTransport (PLAN-game-worker.md), not WebSocket/WebRTC.
 
-**Transport:** All HTTP endpoints support both HTTP/2 (h2c, cleartext) and HTTP/1.1. Game state streaming runs over **WebTransport (QUIC/HTTP-3)** via `WebTransportServer` (GW1–GW3 landed; PLAN-game-worker.md, PLAN.md Stage 0). The client discovers the endpoint via `GET /api/wt/info`. WebRTC is **fully removed** (GW7): `WebRTCServer.{h,cpp}`, libdatachannel, and the `/api/rtc/*` signaling are gone; `libspringapi` no longer links libdatachannel (`connectRtc` is an inert stub pending a WebTransport port). The remaining migration (GW4) relocates the connection + render core into the game-processor worker.
+**Transport:** All HTTP endpoints support both HTTP/2 (h2c, cleartext) and HTTP/1.1. Game state streaming runs over **WebTransport (QUIC/HTTP-3)** via `WebTransportServer` (GW1–GW3 landed; PLAN-game-worker.md, PLAN.md Stage 0). The client discovers the endpoint via `GET /api/wt/info`. WebRTC is **fully removed** (GW7): `WebRTCServer.{h,cpp}`, libdatachannel, and the `/api/rtc/*` signaling are gone; `libspringapi` no longer links libdatachannel (`connectRtc` is an inert stub pending a WebTransport port). The remaining migration (GW4) relocates the connection + render core into the game-processor worker — c1–c4 landed (connection, terrain, interpolated entities all render from the worker); c5–c6 (FX/UI + LuaUI world pass) pending.
 
 Generated bindings:
 - C++: `rts/protocol_generated.h`
