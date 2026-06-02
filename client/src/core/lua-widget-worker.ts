@@ -40,6 +40,15 @@ import { fetchMapDataHttp, type ParsedMapData } from './map-data.js';
 import { loadMapLighting, type MapLighting } from './map-lighting.js';
 import { createSceneLighting, applyMapLighting, type SceneLighting } from './scene-lighting.js';
 import { LosBitmapStore } from './los-bitmap.js';
+// GW4-c4: world entity rendering moves into the worker. Side-effect import
+// registers Babylon's KTX2 loader + pins the transcoder URLs (previously only
+// done in main.ts) so unit `.ktx2` textures transcode here.
+import './ktx2-config.js';
+import { EntityRenderer, setLightingStyle, setUseZKMaterial } from './entity-renderer.js';
+import { BuildingPlateRenderer } from './building-plate-renderer.js';
+import { DefCache } from './def-cache.js';
+import { fetchAndIngestDefs } from './defs-fetch.js';
+import { PresentationClock } from './presentation-clock.js';
 import { LuaRuntime, type LuaValue, luaTable } from './lua-runtime.js';
 import { LuaGLBridge } from './lua-gl-bridge.js';
 import {
@@ -4602,6 +4611,19 @@ let gpSceneLighting: SceneLighting | null = null;
 /// callbacks only log decoded counts + bridge a few signals to main; the
 /// renderer/LuaUI dispatch wires up as those modules move in across c3–c6.
 let gpConnection: Connection | null = null;
+/// GW4-c4: world entity rendering, owned by the worker. The entity renderer
+/// interpolates streamed snapshots at the presentation cursor P; the building-
+/// plate renderer places static under-building ground decals; the def cache
+/// accumulates the game's unit/weapon/CEG defs (fetched over HTTP, keyed by the
+/// `defsCacheKey` the server hands back in AuthResponse). Mirrors main.ts's
+/// pre-move construction (main.ts@d6301137f7^ L488–595).
+let gpEntityRenderer: EntityRenderer | null = null;
+let gpBuildingPlateRenderer: BuildingPlateRenderer | null = null;
+let gpDefCache: DefCache | null = null;
+/// PLAN-latency L0: interpolate entities at the presentation cursor (server-
+/// frame keyed) instead of arrival wall-time. Reset + anchored to the
+/// connection's ServerClock once `gpConnect` builds it.
+let gpPresentationClock: PresentationClock | null = null;
 /// GW4-c3 terrain state, populated once the map data HTTP fetch resolves.
 /// Mirrors the pre-move main.ts `onMapData` terrain build.
 let gpTerrainMesh: Mesh | null = null;
@@ -4671,6 +4693,14 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     gpTerrainMesh = terrainMesh;
     gpDeformTerrain = new DeformableTerrain(terrainMesh, mapDims);
     postLog(1, '[gp] terrain mesh built from MapData heightmap');
+
+    // GW4-c4: hand the heightmap to the entity renderer so units clamp to the
+    // ground + getGroundHeight / getMapSizeElmos resolve (the camera ground-
+    // sampler hooks up with the interactive camera in c5).
+    gpEntityRenderer?.setMapHeightmap(
+        map.heightmap, map.mapx, map.mapy,
+        map.minHeight, map.maxHeight, map.squareSize,
+    );
 
     // Frame the camera over map centre (static — interactive camera = c5).
     const cx = map.widthElmos / 2;
@@ -4751,18 +4781,41 @@ async function gpRegisterViewport(lobbyUrl: string, mapId: string): Promise<void
 function gpConnect(msg: GpInitToWorker): void {
     const conn = new Connection({
         onStateChange: (state) => postLog(1, `[gp] connection state: ${state}`),
-        onAuthenticated: (playerId, _token, team) => {
-            postLog(1, `[gp] authenticated playerId=${playerId} team=${team}`);
+        onAuthenticated: (playerId, _token, team, defsCacheKey) => {
+            postLog(1, `[gp] authenticated playerId=${playerId} team=${team} defsKey=${defsCacheKey || '(none)'}`);
             postToMain({ type: 'gp:authenticated', playerId, team });
+            // GW4-c4: fetch the game's defs (unit/weapon/CEG/feature) over HTTP
+            // from the content-addressed bake the server hands back. The
+            // DefCache.onUnitDefs listener pushes them to the entity + plate
+            // renderers as they ingest. (Server has no incremental def stream;
+            // this bulk fetch is the whole def supply — main did the same.)
+            if (defsCacheKey && gpDefCache) {
+                fetchAndIngestDefs(msg.gameId, defsCacheKey, gpDefCache)
+                    .then(() => postLog(1, `[gp] defs ingested (${gpDefCache?.getAllUnitDefs().length ?? 0} unit defs)`))
+                    .catch((e) => postLog(4, `[gp] defs fetch failed: ${e}`));
+            }
             // Register a viewport so the server starts streaming entity state.
             void gpRegisterViewport(msg.lobbyUrl, msg.mapId);
         },
         onAuthFailed: (m) => postLog(4, `[gp] auth failed: ${m}`),
         onServerError: (code, m) => postLog(4, `[gp] server error ${code}: ${m}`),
         onEntityState: (snapshot, isDelta) => {
-            // c2 exit gate: prove the QUIC stream + decoder run in the worker.
-            // c4 wires this into the entity renderer/interpolator.
-            postLog(1, `[gp] entityState count=${snapshot.count} frame=${snapshot.baseFrame} delta=${isDelta}`);
+            gpEntityRenderer?.update(snapshot, isDelta);
+            gpBuildingPlateRenderer?.update(snapshot);
+        },
+        // GW4-c4: streamed piece transforms (envelope 0x05) → per-piece thin
+        // instance matrices on the unit's model.
+        onPieceState: (snapshot) => gpEntityRenderer?.applyPieceState(snapshot),
+        // GW4-c4: a unit/feature left view or died → drop its meshes + plate.
+        // (combatFX death burst + LuaUI forward wire up in c5/c6.)
+        onEntityDestroy: (entityId) => {
+            gpEntityRenderer?.removeEntity(entityId);
+            gpBuildingPlateRenderer?.remove(entityId);
+        },
+        // PLAN-latency L0: drive the presentation cursor at the true sim speed
+        // (paused → 0 freezes P). Frame/wind forwarding to LuaUI lands in c6.
+        onGameInfo: (_frame, speed, paused) => {
+            gpPresentationClock?.setSpeedFactor(paused ? 0 : speed);
         },
         // GW4-c3: live terrain deformation (envelope 0x09) → DeformableTerrain.
         onHeightmapPatch: (patch) => gpDeformTerrain?.applyPatch(patch),
@@ -4772,6 +4825,11 @@ function gpConnect(msg: GpInitToWorker): void {
         onLosBitmap: (bitmap) => {
             gpLosBitmapStore.set(bitmap);
             gpTerrainFog?.apply(bitmap);
+            // Ghost preservation: a building killed out of LOS leaves a stale
+            // ghost; when its tile is re-LOSed and the server isn't re-
+            // streaming it, drop the ghost (it died while unseen).
+            const size = gpEntityRenderer?.getMapSizeElmos();
+            if (size) gpEntityRenderer?.clearGhostsInLos(bitmap, size.width, size.height);
         },
         // NOTE: Connection.onMapData is unused here — map data is served over
         // HTTP, not the connection (server_main.cpp). gpLoadMap (called from
@@ -4817,11 +4875,57 @@ function gpInit(msg: GpInitToWorker): void {
     // applyMapLighting retunes it once mapinfo.lua lighting is fetched.
     gpSceneLighting = createSceneLighting(scene, camera);
 
-    engine.runRenderLoop(() => { scene.render(); });
-    postLog(1, '[gp] Babylon Engine up on transferred #game-canvas (GW4-c3, lit scene)');
+    // GW4-c4: world entity rendering (ports main.ts@d6301137f7^ L480–595).
+    // The per-game shader lighting style normally comes from modinfo.lua's
+    // `lighting` field via the lobby games list; the worker has no lobby list,
+    // so default to 'gameplay' (main's own fallback). ZK routes through the
+    // ported defaultMaterialTemplate shader regardless (setUseZKMaterial),
+    // which is what matters for the primary target.
+    // DEVIATION (c4): lightingStyle is hardcoded 'gameplay' here — fold the
+    // real modinfo value into gp:init in a later checkpoint if a non-ZK game
+    // needs its authored built-in-material lighting style.
+    setLightingStyle('gameplay');
+    setUseZKMaterial(msg.gameId === 'zk');
+
+    gpPresentationClock = new PresentationClock();
+
+    const entityRenderer = new EntityRenderer(scene);
+    entityRenderer.setPresentationClock(gpPresentationClock);
+    // PLAN-lighting L3/L4: register with the sun shadow generator up-front
+    // (before any def streams in) so the first ensureModel load isn't raced;
+    // pass the sun so the team-color material can sample the live CSM.
+    entityRenderer.setShadowGenerator(gpSceneLighting.csm, gpSceneLighting.sun);
+    gpEntityRenderer = entityRenderer;
+
+    // PLAN-decals.md D5: static under-building ground plates (AO/scorch).
+    const buildingPlateRenderer = new BuildingPlateRenderer(scene);
+    if (msg.gameId) buildingPlateRenderer.setGame(msg.gameId, msg.lobbyUrl);
+    gpBuildingPlateRenderer = buildingPlateRenderer;
+
+    // DefCache accumulates the game's defs (fetched over HTTP on auth). New
+    // unit defs flow to the entity + plate renderers; weapon/CEG listeners
+    // wire up with the projectile/FX modules in c5.
+    const defCache = new DefCache();
+    defCache.onUnitDefs((newDefs) => {
+        gpEntityRenderer?.setUnitDefs(newDefs);
+        gpBuildingPlateRenderer?.setUnitDefs(newDefs);
+    });
+    gpDefCache = defCache;
+
+    engine.runRenderLoop(() => {
+        // entityRenderer.tick() advances the presentation clock (L0) and
+        // interpolates every unit to the presentation cursor before render.
+        gpEntityRenderer?.tick();
+        scene.render();
+    });
+    postLog(1, '[gp] Babylon Engine up on transferred #game-canvas (GW4-c4, entities)');
 
     // GW4-c2: open the game-server connection from inside the worker.
     gpConnect(msg);
+    // PLAN-latency L0: anchor the presentation clock to this connection's
+    // ServerClock (created per game connection by Connection).
+    gpPresentationClock.reset();
+    gpPresentationClock.setServerClock(gpConnection!.serverClock);
     // GW4-c3: fetch map data over HTTP + build the terrain (independent of the
     // connection auth handshake — map data is on the asset plane).
     void gpLoadMap(msg);
@@ -4841,6 +4945,13 @@ function gpShutdown(): void {
     if (gpViewportTimer) { clearInterval(gpViewportTimer); gpViewportTimer = null; }
     gpConnection?.disconnect();
     gpConnection = null;
+    gpEntityRenderer?.dispose();
+    gpEntityRenderer = null;
+    gpBuildingPlateRenderer?.dispose();
+    gpBuildingPlateRenderer = null;
+    gpDefCache?.clear();
+    gpDefCache = null;
+    gpPresentationClock = null;
     gpTerrainFog?.dispose();
     gpTerrainFog = null;
     gpTerrainMesh = null;
