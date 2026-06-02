@@ -4655,6 +4655,15 @@ let gpLastCommandQueues: import('./connection.js').UnitCommandQueueInfo[] = [];
 /// Shift-held state (drives the command-path / waypoint overlay gate). Tracked
 /// from the forwarded key/pointer `mods` bitmask (bit 0 = shift); cleared on blur.
 let gpShiftHeld = false;
+/// GW4-c5c: latest sim status (from onGameInfo) for the sceneState feed → main's
+/// HUD (entity count / frame / selection / speed-pause indicator). The HTML HUD
+/// is the only main-thread world-fact consumer reconnected here; ZK's economy /
+/// build-menu / order-panel are chili widgets (land with the c6 LuaUI world pass).
+let gpGameFrame = 0;
+let gpPaused = false;
+let gpSimSpeed = 1;
+/// Wall-clock of the last sceneState post (throttled to ~10 Hz).
+let gpLastSceneStatePost = 0;
 /// GW4-c3: sun + ambient + HDR pipeline + CSM. Created in gpInit (deferred
 /// from c1 — invisible on an empty scene), retuned by applyMapLighting once
 /// the map's `mapinfo.lua → lighting` is fetched + parsed.
@@ -4984,11 +4993,15 @@ function gpConnect(msg: GpInitToWorker): void {
         // (paused → 0 freezes P). GW4-c5: also drive the FX aging multiplier +
         // the projectile integrator's sim-speed so bolts / particles / lights
         // slow + freeze with the game. Frame/wind forwarding to LuaUI lands in c6.
-        onGameInfo: (_frame, speed, paused) => {
+        onGameInfo: (frame, speed, paused) => {
             const eff = paused ? 0 : speed;
             gpPresentationClock?.setSpeedFactor(eff);
             gpFxSimSpeed = eff;
             gpProjectileRenderer?.setSimSpeed(eff);
+            // GW4-c5c: cache for the sceneState feed (HUD frame / speed / pause).
+            gpGameFrame = frame;
+            gpSimSpeed = speed;
+            gpPaused = paused;
         },
         // GW4-c3: live terrain deformation (envelope 0x09) → DeformableTerrain.
         onHeightmapPatch: (patch) => gpDeformTerrain?.applyPatch(patch),
@@ -5212,6 +5225,8 @@ function gpInit(msg: GpInitToWorker): void {
         gpDistortion?.tick(fxDt);
         gpMuzzleFlare?.tick(fxDt);
         scene.render();
+        // GW4-c5c: feed the HTML HUD (entity count / frame / selection / speed).
+        gpPostSceneState(now);
     });
     postLog(1, '[gp] Babylon Engine up on transferred #game-canvas (GW4-c5, weapon FX)');
 
@@ -5270,6 +5285,37 @@ function gpSetShift(held: boolean): void {
     gpShiftHeld = held;
     gpCommandPathRenderer?.setShiftHeld(held);
     gpWaypointMarkerRenderer?.setShiftHeld(held);
+}
+
+/// GW4-c5c: post the consolidated scene-state feed to main (~10 Hz). This is the
+/// only channel the DOM layer reads world facts from — keep it to the frozen
+/// `GpSceneStateToMain` shape (game-worker-protocol.ts). Drives the HTML HUD
+/// (entity count / frame / selection / speed-pause); the camera pose is carried
+/// for the c5c-2 audio listener + c5c-3 minimap that build on this feed.
+function gpPostSceneState(now: number): void {
+    if (now - gpLastSceneStatePost < 100) return;  // ~10 Hz throttle
+    gpLastSceneStatePost = now;
+    const cam = gpCamera;
+    if (!cam) return;
+    const sel = gpSelection?.selection ?? [];
+    const target = cam.getTarget();
+    postToMain({
+        type: 'gp:sceneState',
+        selectedUnitIds: sel.slice(),
+        // Rich per-unit facts (health etc.) fill in when a consumer needs them
+        // (HUD today only reads ids + count); kept empty to stay cheap.
+        selected: [],
+        hovered: gpSelection && gpSelection.hovered > 0 ? { id: gpSelection.hovered } : null,
+        camera: {
+            x: cam.position.x, y: cam.position.y, z: cam.position.z,
+            tx: target.x, ty: target.y, tz: target.z,
+        },
+        gameFrame: gpGameFrame,
+        paused: gpPaused,
+        simSpeed: gpSimSpeed,
+        buildGhost: null,
+        entityCount: gpEntityRenderer?.entityCount ?? 0,
+    });
 }
 
 function gpResize(width: number, height: number, dpr: number): void {

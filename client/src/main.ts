@@ -432,6 +432,13 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             case 'gp:authenticated':
                 console.log(`[gameWorker] authenticated playerId=${m.playerId} team=${m.team}`);
                 break;
+            // GW4-c5c: consolidated scene-state feed → the HTML HUD (the only
+            // main-thread world-fact consumer reconnected here; ZK economy /
+            // build-menu / order-panel are chili widgets in the worker, c6).
+            case 'gp:sceneState':
+                updateHUD(m.entityCount, m.gameFrame, m.selectedUnitIds);
+                updateSpeedHUD(m.simSpeed, m.paused);
+                break;
             case 'gp:gameOver':
                 showGameOver(gameTemplates, m.frame, { onReturnToLobby: quitToLobby });
                 break;
