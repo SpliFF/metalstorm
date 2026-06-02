@@ -138,6 +138,13 @@ export type GpMessageToMain =
     | { type: 'gp:minimapFeed'; units: unknown; los: unknown }
     /** Worker asks main to persist a value to localStorage (e.g. SHOW_ALLIES). */
     | { type: 'gp:config'; key: string; value: unknown }
+    /**
+     * Drag-select rectangle for the main-thread overlay div (GW4-c5b-2). The
+     * worker owns selection/pick, but the box overlay is a DOM concern; main
+     * draws `#drag-select-overlay`. Coords are canvas-relative CSS px (top-left).
+     * `box: null` hides the overlay. `viewId` absent ⇒ view 0.
+     */
+    | { type: 'gp:dragBox'; box: { x0: number; y0: number; x1: number; y1: number } | null; viewId?: number }
     /** Game-over → main shows the results overlay. */
     | { type: 'gp:gameOver'; frame: number }
     /** Worker reached the game server + authed (mirrors connection onAuthenticated). */

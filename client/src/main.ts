@@ -118,6 +118,33 @@ let inputManager: InputManager | null = null;
 /// pointer/wheel/key events on #game-canvas and forwards them to the
 /// game-processor worker, where the interactive camera + scene.pick live.
 let cameraInput: CameraInput | null = null;
+/// GW4-c5b-2: the drag-select rectangle overlay. The worker computes the box
+/// (CSS px, canvas-relative) and posts `gp:dragBox`; we draw the div here.
+let dragOverlay: HTMLDivElement | null = null;
+function updateDragOverlay(box: { x0: number; y0: number; x1: number; y1: number } | null): void {
+    if (!box) { if (dragOverlay) dragOverlay.style.display = 'none'; return; }
+    if (!dragOverlay) {
+        const div = document.createElement('div');
+        div.id = 'drag-select-overlay';
+        div.style.position = 'fixed';
+        div.style.border = '1px solid rgba(255, 220, 60, 0.9)';
+        div.style.background = 'rgba(255, 220, 60, 0.12)';
+        div.style.pointerEvents = 'none';
+        div.style.zIndex = '50';
+        document.body.appendChild(div);
+        dragOverlay = div;
+    }
+    // Box coords are canvas-relative CSS px; offset by the canvas position so
+    // the fixed-position div lines up even if the canvas isn't at (0,0).
+    const rect = document.getElementById('game-canvas')?.getBoundingClientRect();
+    const ox = rect?.left ?? 0;
+    const oy = rect?.top ?? 0;
+    dragOverlay.style.display = 'block';
+    dragOverlay.style.left = `${ox + box.x0}px`;
+    dragOverlay.style.top = `${oy + box.y0}px`;
+    dragOverlay.style.width = `${box.x1 - box.x0}px`;
+    dragOverlay.style.height = `${box.y1 - box.y0}px`;
+}
 let animatedCursor: AnimatedCursor | null = null;
 let buildMenu: BuildMenu | null = null;
 let orderPanel: OrderPanel | null = null;
@@ -411,6 +438,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             case 'gp:reload':
                 console.log('[gameWorker] server restarting — reloading page');
                 window.location.reload();
+                break;
+            // GW4-c5b-2: the worker owns selection/pick but the drag-box overlay
+            // is a DOM concern — draw it here in CSS-pixel space.
+            case 'gp:dragBox':
+                updateDragOverlay(m.box);
                 break;
             // Worker postLog() output. Until the LuaWidgetManager's log bridge
             // is folded back in (GW5/GW8), surface it on the page console (and

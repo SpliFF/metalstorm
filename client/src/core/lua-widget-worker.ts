@@ -66,6 +66,7 @@ import { DecalOverlay, buildTrackTypeNames } from './decal-overlay.js';
 import { attachDecalOverlay } from './decal-overlay-plugin.js';
 import { renderMapFeatures, DynamicFeatureRenderer } from './feature-renderer.js';
 import { RTSCamera } from './rts-camera.js';
+import { WorkerSelection } from './worker-selection.js';
 import { LuaRuntime, type LuaValue, luaTable } from './lua-runtime.js';
 import { LuaGLBridge } from './lua-gl-bridge.js';
 import {
@@ -4626,6 +4627,16 @@ let gpCamera: FreeCamera | null = null;
 /// (id 0); the map keeps adding views cheap. The DOM-input split moved the event
 /// listeners to camera-input.ts on main; RTSCamera is now DOM-free.
 const gpViewCameras = new Map<number, RTSCamera>();
+/// GW4-c5b-2: worker-side selection / pick / order core (DOM-free port of the
+/// `input-manager.ts` selection/order seam). Left-button gestures select; the
+/// camera's `onRightClickCommit` routes a right-tap here as a move/attack/guard
+/// order, sent over the worker's own connection. Built in gpInit after the
+/// connection exists. Single instance for view 0 (multi-view: per-view picking
+/// goes through `getCamera`; the selection set stays shared).
+let gpSelection: WorkerSelection | null = null;
+/// Current device-pixel-ratio (CSS px → backing px). Set in gpInit, updated in
+/// gpResize; feeds the selection module's pick scaling.
+let gpDpr = 1;
 /// GW4-c3: sun + ambient + HDR pipeline + CSM. Created in gpInit (deferred
 /// from c1 — invisible on an empty scene), retuned by applyMapLighting once
 /// the map's `mapinfo.lua → lighting` is fetched + parsed.
@@ -4969,6 +4980,7 @@ function gpInit(msg: GpInitToWorker): void {
         return;
     }
     const canvas = msg.canvas;
+    gpDpr = msg.dpr > 0 ? msg.dpr : 1;
     // Size the backing store to the device-pixel resolution; Babylon reads
     // width/height off the canvas. Main keeps CSS sizing on the DOM element.
     canvas.width = Math.max(1, Math.floor(msg.width * msg.dpr));
@@ -5164,6 +5176,19 @@ function gpInit(msg: GpInitToWorker): void {
 
     // GW4-c2: open the game-server connection from inside the worker.
     gpConnect(msg);
+
+    // GW4-c5b-2: worker-side selection / pick / order. Needs the connection
+    // (built in gpConnect) for order sends. Left-button gestures select; the
+    // camera's right-tap routes through `onRightClickCommit` → an order. The
+    // drag-box rectangle is posted to main (DOM overlay).
+    const selection = new WorkerSelection(scene, entityRenderer, gpConnection!, {
+        getCamera: (viewId) => (viewId === 0 ? camera : null),
+        dpr: gpDpr,
+        onDragBox: (box) => postToMain({ type: 'gp:dragBox', box }),
+    });
+    gpSelection = selection;
+    rtsCam.onRightClickCommit = (x, y, mods) =>
+        selection.issueOrderAtScreen(x, y, mods.shift, 0);
     // PLAN-latency L0: anchor the presentation clock to this connection's
     // ServerClock (created per game connection by Connection).
     gpPresentationClock.reset();
@@ -5184,12 +5209,16 @@ function gpResize(width: number, height: number, dpr: number): void {
     // GW4-c5b: keep the camera's CSS-pixel viewport + dpr in sync so edge-scroll
     // bands and scene.pick (which scales by dpr) stay correct after a resize.
     for (const cam of gpViewCameras.values()) cam.setViewportSize(width, height, dpr);
+    // GW4-c5b-2: selection pick scaling also needs the live dpr.
+    if (dpr > 0) { gpDpr = dpr; gpSelection?.setDpr(dpr); }
 }
 
 function gpShutdown(): void {
     if (gpViewportTimer) { clearInterval(gpViewportTimer); gpViewportTimer = null; }
     for (const cam of gpViewCameras.values()) cam.dispose();
     gpViewCameras.clear();
+    gpSelection?.dispose();
+    gpSelection = null;
     gpConnection?.disconnect();
     gpConnection = null;
     gpEntityRenderer?.dispose();
@@ -5290,12 +5319,17 @@ self.onmessage = async (e: MessageEvent) => {
         // native screen space — see game-worker-protocol.ts).
         case 'gp:pointermove':
             gpViewCameras.get(msg.viewId ?? 0)?.pointerMove(msg.x, msg.y, msg.buttons);
+            // GW4-c5b-2: left-button drag-box growth + hover tracking.
+            gpSelection?.pointerMove(msg.x, msg.y, msg.buttons, msg.mods, msg.viewId ?? 0);
             break;
         case 'gp:pointerdown':
             gpViewCameras.get(msg.viewId ?? 0)?.pointerDown(msg.x, msg.y, msg.button, msg.mods);
+            // GW4-c5b-2: left-button selection (camera ignores button 0).
+            gpSelection?.pointerDown(msg.x, msg.y, msg.button, msg.mods, msg.viewId ?? 0);
             break;
         case 'gp:pointerup':
             gpViewCameras.get(msg.viewId ?? 0)?.pointerUp(msg.x, msg.y, msg.button, msg.mods);
+            gpSelection?.pointerUp(msg.x, msg.y, msg.button, msg.mods, msg.viewId ?? 0);
             break;
         case 'gp:wheel':
             gpViewCameras.get(msg.viewId ?? 0)?.wheel(msg.x, msg.y, msg.delta);
@@ -5309,6 +5343,7 @@ self.onmessage = async (e: MessageEvent) => {
             break;
         case 'gp:blur':
             gpViewCameras.get(msg.viewId ?? 0)?.blur();
+            gpSelection?.blur();
             break;
 
         case 'gp:shutdown':
