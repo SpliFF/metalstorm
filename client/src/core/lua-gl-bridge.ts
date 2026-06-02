@@ -773,7 +773,9 @@ export class LuaGLBridge {
     }
 
     private vertexGL(args: LuaValue[]): void {
-        this.imm.vertex(Number(args[0] ?? 0), Number(args[1] ?? 0));
+        // GW4-c6-2: Spring's gl.Vertex accepts (x,y) for 2D screen drawing or
+        // (x,y,z) for world-space DrawWorld geometry. z defaults to 0.
+        this.imm.vertex(Number(args[0] ?? 0), Number(args[1] ?? 0), Number(args[2] ?? 0));
     }
 
     private texCoordGL(args: LuaValue[]): void {
@@ -781,6 +783,19 @@ export class LuaGLBridge {
     }
 
     private loadMatrix(args: LuaValue[]): void {
+        // GW4-c6-2: Spring's gl.LoadMatrix(name) loads a named engine matrix into
+        // the active stack. The world-space pass loads "projection"/"view" so
+        // widgets draw in world space. These come straight from the Babylon
+        // camera (already correct RH/scene coords) so the legacy flip is NOT
+        // applied — unlike a widget-supplied 16-float matrix.
+        if (typeof args[0] === 'string') {
+            const name = args[0];
+            let mat: Float32Array | null = null;
+            if (name === 'projection') mat = this.projectionMatrix;
+            else if (name === 'view' || name === 'modelview' || name === 'camera') mat = this.viewMatrix;
+            if (mat) this.imm.loadMatrix(mat);
+            return;
+        }
         if (args.length >= 16) {
             const m = new Float32Array(16);
             for (let i = 0; i < 16; i++) m[i] = Number(args[i]);
@@ -1280,7 +1295,12 @@ export class LuaGLBridge {
         else if (args.length >= 4) gl.uniform4i(loc, Number(args[0]), Number(args[1]), Number(args[2]), Number(args[3]));
     }
 
-    /** Cached matrices fed into UniformMatrix("view"/"projection"). */
+    /** Cached camera matrices fed into UniformMatrix("view"/"projection") and
+     *  the world-space gl.LoadMatrix(name) path (GW4-c6-2). Column-major, taken
+     *  straight from the Babylon camera (scene coords == server world coords,
+     *  no flip — see the c6-2 coordinate analysis), so a world-space vertex at
+     *  Spring (x,y,z) projects correctly when these are loaded as PROJECTION ×
+     *  MODELVIEW. Refreshed each frame via setCameraMatrices (below). */
     viewMatrix: Float32Array | null = null;
     projectionMatrix: Float32Array | null = null;
 

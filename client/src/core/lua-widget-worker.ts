@@ -3271,7 +3271,7 @@ defaultFont = activeFont
     postToMain({ type: 'ready', fileCount: vfsFiles.size, callins: registeredCallins });
 }
 
-function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext, clearColor = true): void {
+function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext, clearColor = true, worldPass = false): void {
     // Set up GL state for 2D overlay rendering
     gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
     // GW4-c6: in shared mode (clearColor=false) the 3D world has already been
@@ -3436,6 +3436,31 @@ function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext, clearColor = true)
                 pcall(invalidateAll, s, 0)
                 Spring.Echo("[LuaUI] Invalidated all Chili display lists for texture rebuild")
             end
+        end
+
+        -- GW4-c6-2: world-space pass. The 3D world (terrain + units) is already
+        -- in this framebuffer with its depth buffer; load the camera matrices,
+        -- enable depth so overlays occlude behind hills/units, and run the
+        -- DrawWorld callins. widgetHandler exposes _G.DrawWorldPreUnit/_G.DrawWorld
+        -- when a widget registers them (same mechanism as DrawScreen). Spring
+        -- runs PreUnit before units; we can't interleave with Babylon's render,
+        -- so both run after the world (PreUnit draws on top — accepted deviation).
+        if ${worldPass ? 'true' : 'false'} and (DrawWorldPreUnit or DrawWorld) then
+            gl.MatrixMode(GL.PROJECTION)
+            gl.LoadMatrix("projection")
+            gl.MatrixMode(GL.MODELVIEW)
+            gl.LoadMatrix("view")
+            gl.DepthTest(true)
+            gl.Texture(false)
+            gl.Color(1, 1, 1, 1)
+            if DrawWorldPreUnit then pcall(DrawWorldPreUnit) end
+            if DrawWorld then pcall(DrawWorld) end
+            gl.DepthTest(false)
+            -- Reset matrices so the DrawScreen block's Ortho setup starts clean.
+            gl.MatrixMode(GL.PROJECTION)
+            gl.LoadIdentity()
+            gl.MatrixMode(GL.MODELVIEW)
+            gl.LoadIdentity()
         end
 
         if DrawScreen then
@@ -5810,8 +5835,20 @@ function gpRunUiPass(): void {
     // draw to the default framebuffer (the canvas the player sees).
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
 
+    // GW4-c6-2: feed the live camera view + projection to the GL bridge so the
+    // world-space DrawWorld pass (and UniformMatrix("view"/"projection")) draw
+    // in world space. scene coords == server world coords (no flip), so a
+    // widget's gl.Vertex(serverX,serverY,serverZ) projects correctly. Copy out
+    // of Babylon's internal arrays (it mutates them each frame).
+    if (gpScene && bridge) {
+        bridge.setCameraMatrices(
+            new Float32Array(gpScene.getViewMatrix().m),
+            new Float32Array(gpScene.getProjectionMatrix().m),
+        );
+    }
+
     try {
-        runFrame(runtime, gl, /*clearColor*/ false);
+        runFrame(runtime, gl, /*clearColor*/ false, /*worldPass*/ true);
     } catch (err) {
         postLog(4, `[gp] LuaUI pass error: ${err}`);
         gpLuaUiActive = false;  // stop after a hard failure rather than spam
@@ -5851,15 +5888,19 @@ async function gpBootLuaUI(map: ParsedMapData, mapSourceAbs: string, msg: GpInit
     // have published a populated def map first or those files hit nil and the
     // dependent widgets/gadgets boot degraded. The def fetch is usually faster
     // than the terrain build + VFS prefetch, so this rarely actually blocks.
-    // Cap the wait so a hung/slow game server can't strand the UI forever —
-    // on timeout we boot degraded (the later onUnitDefs republish still
-    // populates UnitDefNames for runtime reads, just not include-time configs).
+    // Cap the wait as a last resort so a truly dead connection (never auths →
+    // gpDefsReady never resolves) can't strand the UI forever. The defs fetch
+    // only starts AFTER auth, and a cold ZK game server can take 30–60 s to warm
+    // up before it answers AuthRequest, so the cap must be generous — an 8 s cap
+    // fired mid-cold-start and booted with empty UnitDefNames (the config-include
+    // nil-index spam c6-1b eliminated). On a healthy server defs resolve in well
+    // under this; on a dead one a degraded boot at the cap beats an infinite hang.
     await Promise.race([
         gpDefsReady,
         new Promise<void>((resolve) => setTimeout(() => {
-            postLog(3, '[gp] LuaUI boot: defs not ready after 8s — booting anyway');
+            postLog(3, '[gp] LuaUI boot: defs not ready after 90s — booting anyway (server never authed?)');
             resolve();
-        }, 8000)),
+        }, 90000)),
     ]);
     if (runtime || !gpEngine) return;  // a concurrent boot won the race while awaiting
     try {

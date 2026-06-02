@@ -16,7 +16,7 @@
 const VS_SOURCE = `#version 300 es
 precision highp float;
 
-layout(location = 0) in vec2 aPos;
+layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec4 aColor;
 layout(location = 2) in vec2 aTexCoord;
 
@@ -26,7 +26,7 @@ out vec4 vColor;
 out vec2 vTexCoord;
 
 void main() {
-    gl_Position = uMVP * vec4(aPos, 0.0, 1.0);
+    gl_Position = uMVP * vec4(aPos, 1.0);
     vColor = aColor;
     vTexCoord = aTexCoord;
 }
@@ -62,8 +62,10 @@ void main() {
 /** Max vertices per BeginEnd batch. 64K is generous for UI. */
 const MAX_VERTICES = 65536;
 
-/** Floats per vertex: x, y, r, g, b, a, s, t = 8 */
-const FLOATS_PER_VERTEX = 8;
+/** Floats per vertex: x, y, z, r, g, b, a, s, t = 9. GW4-c6-2: z added so
+ *  world-space DrawWorld widgets can draw 3D geometry (range rings on terrain,
+ *  command lines at unit height). z defaults to 0 for 2D screen-space drawing. */
+const FLOATS_PER_VERTEX = 9;
 
 /** Bytes per vertex */
 const BYTES_PER_VERTEX = FLOATS_PER_VERTEX * 4;
@@ -343,15 +345,15 @@ export class ImmediateModeRenderer {
         gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);
         gl.bufferData(gl.ARRAY_BUFFER, this.vertices.byteLength, gl.DYNAMIC_DRAW);
 
-        // aPos (location 0): 2 floats at offset 0
+        // aPos (location 0): 3 floats at offset 0
         gl.enableVertexAttribArray(0);
-        gl.vertexAttribPointer(0, 2, gl.FLOAT, false, BYTES_PER_VERTEX, 0);
-        // aColor (location 1): 4 floats at offset 8
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, BYTES_PER_VERTEX, 0);
+        // aColor (location 1): 4 floats at offset 12
         gl.enableVertexAttribArray(1);
-        gl.vertexAttribPointer(1, 4, gl.FLOAT, false, BYTES_PER_VERTEX, 8);
-        // aTexCoord (location 2): 2 floats at offset 24
+        gl.vertexAttribPointer(1, 4, gl.FLOAT, false, BYTES_PER_VERTEX, 12);
+        // aTexCoord (location 2): 2 floats at offset 28
         gl.enableVertexAttribArray(2);
-        gl.vertexAttribPointer(2, 2, gl.FLOAT, false, BYTES_PER_VERTEX, 24);
+        gl.vertexAttribPointer(2, 2, gl.FLOAT, false, BYTES_PER_VERTEX, 28);
 
         gl.bindVertexArray(null);
         gl.bindBuffer(gl.ARRAY_BUFFER, null);
@@ -543,24 +545,25 @@ export class ImmediateModeRenderer {
         this.curMultiT[unit] = t;
     }
 
-    vertex(x: number, y: number): void {
+    vertex(x: number, y: number, z = 0): void {
         if (this.vertexCount >= MAX_VERTICES) return;
         const i = this.vertexCount * FLOATS_PER_VERTEX;
         this.vertices[i] = x;
         this.vertices[i + 1] = y;
+        this.vertices[i + 2] = z;
         if (this.recordingList && !this.explicitColorInList) {
-            this.vertices[i + 2] = 1;
             this.vertices[i + 3] = 1;
             this.vertices[i + 4] = 1;
             this.vertices[i + 5] = 1;
+            this.vertices[i + 6] = 1;
         } else {
-            this.vertices[i + 2] = this.curR;
-            this.vertices[i + 3] = this.curG;
-            this.vertices[i + 4] = this.curB;
-            this.vertices[i + 5] = this.curA;
+            this.vertices[i + 3] = this.curR;
+            this.vertices[i + 4] = this.curG;
+            this.vertices[i + 5] = this.curB;
+            this.vertices[i + 6] = this.curA;
         }
-        this.vertices[i + 6] = this.curS;
-        this.vertices[i + 7] = this.curT;
+        this.vertices[i + 7] = this.curS;
+        this.vertices[i + 8] = this.curT;
         this.vertexCount++;
     }
 
@@ -871,10 +874,10 @@ export class ImmediateModeRenderer {
             const label = this.flushDebugLabel;
             const v0x = this.vertices[0];
             const v0y = this.vertices[1];
-            const v0r = this.vertices[2];
-            const v0g = this.vertices[3];
-            const v0b = this.vertices[4];
-            const v0a = this.vertices[5];
+            const v0r = this.vertices[3];
+            const v0g = this.vertices[4];
+            const v0b = this.vertices[5];
+            const v0a = this.vertices[6];
             // Multiply MVP * (v0x, v0y, 0, 1) — column-major
             const cx = mvp[0] * v0x + mvp[4] * v0y + mvp[12];
             const cy = mvp[1] * v0x + mvp[5] * v0y + mvp[13];
