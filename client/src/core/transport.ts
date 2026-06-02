@@ -158,7 +158,19 @@ export class WebTransportAdapter implements GameTransport {
         // Surface session close/error.
         wt.closed
             .then((info) => this.handleClosed(info.closeCode ?? 0, info.reason ?? ''))
-            .catch((err) => this.handleClosed(-1, String(err?.message ?? err)));
+            .catch((err) => {
+                // GW4-c2 diagnostic: WebTransportError carries source +
+                // streamErrorCode that the bare message hides. Log it so a
+                // session-vs-stream close (and the QUIC app error code) is visible.
+                try {
+                    console.warn('[transport] wt.closed rejected:',
+                        'name=', err?.name,
+                        'source=', (err as { source?: string })?.source,
+                        'streamErrorCode=', (err as { streamErrorCode?: number })?.streamErrorCode,
+                        'message=', err?.message);
+                } catch { /* ignore */ }
+                this.handleClosed(-1, String(err?.message ?? err));
+            });
 
         await wt.ready;
 

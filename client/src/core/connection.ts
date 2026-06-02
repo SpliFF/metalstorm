@@ -757,6 +757,13 @@ export interface ConnectionEvents {
                   wind?: { x: number; y: number; z: number; strength: number; tidal: number },
                   legacyCoordSystem?: boolean) => void;
     onServerMessage?: (msg: ServerMessage) => void;
+    /// Server signalled a restart (ServerPayload.GameRestarting). The host
+    /// decides how to react — on the main thread this reloads the page; from
+    /// the game-processor worker (GW4) `window` is unreachable, so the worker
+    /// posts a `gp:reload` to main. Keeping this a callback makes Connection
+    /// host-agnostic (no DOM reference), which is what lets it run in the
+    /// worker (PLAN-game-worker.md GW4-c2).
+    onServerRestart?: () => void;
 }
 
 export class Connection {
@@ -1741,8 +1748,8 @@ export class Connection {
                 break;
             }
             case ServerPayload.GameRestarting:
-                console.log('[connection] server restarting — reloading page');
-                window.location.reload();
+                console.log('[connection] server restarting — host will reload');
+                this.events.onServerRestart?.();
                 break;
             default:
                 this.events.onServerMessage?.(msg);

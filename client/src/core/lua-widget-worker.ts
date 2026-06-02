@@ -23,6 +23,10 @@
 
 import { Engine, Scene, FreeCamera, Vector3, Color4 } from '@babylonjs/core';
 import type { GpInitToWorker } from './game-worker-protocol.js';
+// GW4-c2: the WebTransport game connection now lives in the worker. Connection
+// is host-agnostic (runs on WebTransportAdapter, no DOM refs after the
+// onServerRestart callback was extracted) so it imports + runs here unchanged.
+import { Connection } from './connection.js';
 import { LuaRuntime, type LuaValue, luaTable } from './lua-runtime.js';
 import { LuaGLBridge } from './lua-gl-bridge.js';
 import {
@@ -4576,6 +4580,74 @@ function shutdown(): void {
 let gpEngine: Engine | null = null;
 let gpScene: Scene | null = null;
 let gpCamera: FreeCamera | null = null;
+/// GW4-c2: the game-server WebTransport connection, owned by the worker.
+/// Opened from `gp:init` creds; torn down on `gp:shutdown`. At c2 its
+/// callbacks only log decoded counts + bridge a few signals to main; the
+/// renderer/LuaUI dispatch wires up as those modules move in across c3–c6.
+let gpConnection: Connection | null = null;
+/// Static full-map viewport resend timer. The camera→viewport path moves
+/// into the worker in c3; until then a fixed full-map viewport is resent on
+/// an interval so the server streams entity state (filtering is viewport-
+/// gated) and the QUIC session sees periodic traffic. Cleared on shutdown.
+let gpViewportTimer: ReturnType<typeof setInterval> | null = null;
+
+/// GW4-c2 placeholder viewport. Map data is served over HTTP (not the
+/// connection — server_main.cpp), so Connection.onMapData never fires here;
+/// fetch the map metadata directly to size a full-map box, send it once the
+/// connection is authenticated, then resend periodically. c3 replaces this
+/// with real camera-frustum updates from the in-worker camera state machine.
+async function gpRegisterViewport(lobbyUrl: string, mapId: string): Promise<void> {
+    let centerX = 4096, centerZ = 4096;
+    try {
+        const resp = await fetch(`${lobbyUrl}/api/maps/data/${mapId}/metadata.json`);
+        if (resp.ok) {
+            const meta = await resp.json();
+            const sq = meta.squareSize ?? 8;
+            centerX = ((meta.mapx ?? 1024) * sq) / 2;
+            centerZ = ((meta.mapy ?? 1024) * sq) / 2;
+        }
+    } catch (err) {
+        postLog(2, `[gp] map metadata fetch failed (${err}); using default viewport center`);
+    }
+    // 16384² matches viewport.ts's pragmatic "cover any current map" box.
+    const send = () => gpConnection?.sendViewportUpdate(0, centerX, centerZ, 16384, 16384, 0, 1);
+    send();
+    if (gpViewportTimer) clearInterval(gpViewportTimer);
+    gpViewportTimer = setInterval(send, 1000);
+    postLog(1, `[gp] viewport registered (center ${centerX.toFixed(0)},${centerZ.toFixed(0)}, full-map) — entity stream should follow`);
+}
+
+/// GW4-c2: stand up the in-worker connection. Discovers `/api/wt/info` from
+/// `gameHttpUrl`, opens the WebTransport session, and auths with the init
+/// creds (token reconnect against the shared lobby SQLite). At c2 the
+/// callbacks are deliberately thin — the exit gate is "worker logs
+/// entityState count=N with no main-thread network code" (PLAN-game-worker.md
+/// GW4-c2). The full callback object (porting main.ts@32cf513619 L1070–1326)
+/// fills in as the renderers + LuaUI runtime come online in c3–c6.
+function gpConnect(msg: GpInitToWorker): void {
+    const conn = new Connection({
+        onStateChange: (state) => postLog(1, `[gp] connection state: ${state}`),
+        onAuthenticated: (playerId, _token, team) => {
+            postLog(1, `[gp] authenticated playerId=${playerId} team=${team}`);
+            postToMain({ type: 'gp:authenticated', playerId, team });
+            // Register a viewport so the server starts streaming entity state.
+            void gpRegisterViewport(msg.lobbyUrl, msg.mapId);
+        },
+        onAuthFailed: (m) => postLog(4, `[gp] auth failed: ${m}`),
+        onServerError: (code, m) => postLog(4, `[gp] server error ${code}: ${m}`),
+        onEntityState: (snapshot, isDelta) => {
+            // c2 exit gate: prove the QUIC stream + decoder run in the worker.
+            postLog(1, `[gp] entityState count=${snapshot.count} frame=${snapshot.baseFrame} delta=${isDelta}`);
+        },
+        // NOTE: Connection.onMapData is unused here — map data is served over
+        // HTTP, not the connection (server_main.cpp). The viewport is registered
+        // from onAuthenticated via gpRegisterViewport(); terrain build lands in c3.
+        onGameOver: (frame) => postToMain({ type: 'gp:gameOver', frame }),
+        onServerRestart: () => postToMain({ type: 'gp:reload' }),
+    });
+    gpConnection = conn;
+    conn.connect(msg.gameHttpUrl, msg.username, '', msg.token);
+}
 
 function gpInit(msg: GpInitToWorker): void {
     if (gpEngine) {
@@ -4605,8 +4677,14 @@ function gpInit(msg: GpInitToWorker): void {
     gpScene = scene;
     gpCamera = camera;
 
+    // GW4-c2 DIAGNOSTIC: render loop temporarily disabled to test whether the
+    // Babylon render loop in the worker starves the WebTransport read path under
+    // entity-stream load (intermittent "Connection lost"). REVERT after the test.
     engine.runRenderLoop(() => { scene.render(); });
     postLog(1, '[gp] Babylon Engine up on transferred #game-canvas (GW4-c1, empty scene)');
+
+    // GW4-c2: open the game-server connection from inside the worker.
+    gpConnect(msg);
 }
 
 function gpResize(width: number, height: number, dpr: number): void {
@@ -4620,6 +4698,9 @@ function gpResize(width: number, height: number, dpr: number): void {
 }
 
 function gpShutdown(): void {
+    if (gpViewportTimer) { clearInterval(gpViewportTimer); gpViewportTimer = null; }
+    gpConnection?.disconnect();
+    gpConnection = null;
     gpEngine?.stopRenderLoop();
     gpScene?.dispose();
     gpEngine?.dispose();

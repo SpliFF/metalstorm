@@ -388,6 +388,40 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             e.filename ? `${e.filename}:${e.lineno}:${e.colno}` : '',
             e.error?.stack ?? '');
     };
+    // Worker → main bridge (PLAN-game-worker.md GW4). The full sceneState /
+    // audio / minimap feeds land in GW5; at c2 only the connection-lifecycle
+    // signals the worker raises (auth, game-over, server-restart) are handled.
+    gameWorker.onmessage = (ev: MessageEvent) => {
+        const m = ev.data;
+        switch (m?.type) {
+            case 'gp:authenticated':
+                console.log(`[gameWorker] authenticated playerId=${m.playerId} team=${m.team}`);
+                break;
+            case 'gp:gameOver':
+                showGameOver(gameTemplates, m.frame, { onReturnToLobby: quitToLobby });
+                break;
+            case 'gp:reload':
+                console.log('[gameWorker] server restarting — reloading page');
+                window.location.reload();
+                break;
+            // Worker postLog() output. Until the LuaWidgetManager's log bridge
+            // is folded back in (GW5/GW8), surface it on the page console (and
+            // thus the log server via logIngest) so the worker isn't a black box.
+            case 'log': {
+                const lvl = m.level ?? 1;
+                const text = `[worker] ${m.msg}`;
+                if (lvl >= 4) console.error(text);
+                else if (lvl >= 3) console.warn(text);
+                else console.log(text);
+                break;
+            }
+            case 'error':
+                console.error(`[worker] ${m.msg}`);
+                break;
+            default:
+                break;
+        }
+    };
     const init: GpInitToWorker = {
         type: 'gp:init',
         canvas: offscreen,
