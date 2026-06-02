@@ -3454,6 +3454,11 @@ function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext, clearColor = true,
             if DrawWorldPreUnit then pcall(DrawWorldPreUnit) end
             if DrawWorld then pcall(DrawWorld) end
             gl.DepthTest(false)
+            -- Unbind any custom shader a world widget left active (e.g. if it
+            -- errored before its own gl.UseShader(0)) so it can't leak into the
+            -- DrawScreen chili pass — the bridge clears the immediate-mode
+            -- shader override here.
+            gl.UseShader(0)
             -- Reset matrices so the DrawScreen block's Ortho setup starts clean.
             gl.MatrixMode(GL.PROJECTION)
             gl.LoadIdentity()

@@ -1231,12 +1231,19 @@ export class LuaGLBridge {
         if (!handle || (typeof handle === 'number' && handle === 0)) {
             this.gl.useProgram(null);
             this.currentShader = null;
+            // Revert the immediate-mode renderer to its built-in program so
+            // subsequent gl.BeginEnd / gl.CallList draws use fixed-function.
+            this.imm.setShaderOverride(null);
             return;
         }
         const h = handle as LuaShaderHandle;
         if (h.__type !== 'shader') return;
         this.gl.useProgram(h.program);
         this.currentShader = h;
+        // Route immediate-mode geometry (gl.BeginEnd / gl.CallList) through this
+        // program too — Spring applies the bound shader to immediate draws, and
+        // ZK world widgets (Map Edge Extension's mirror shader, …) depend on it.
+        this.imm.setShaderOverride(h.program);
     }
 
     private deleteShader(handle: LuaValue): void {

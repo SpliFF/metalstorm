@@ -88,6 +88,30 @@ function mat4Identity(): Float32Array {
     return m;
 }
 
+/** Shared identity matrices for feeding legacy fixed-function uniforms that a
+ *  custom shader reads but the immediate-mode pipeline has no live value for
+ *  (the texture matrix and normal matrix are identity in immediate mode). */
+const IDENTITY_MAT4 = mat4Identity();
+const IDENTITY_MAT3 = (() => {
+    const m = new Float32Array(9);
+    m[0] = m[4] = m[8] = 1;
+    return m;
+})();
+
+/** Cached uniform locations for a custom shader bound via gl.UseShader. The
+ *  GLSL translator's legacy-GL2 shim renames fixed-function builtins to these
+ *  `_leg*` names (see glsl-translator.ts); `tex0` is the sampler the
+ *  synthesized passthrough fragment shader reads. Any may be null when the
+ *  shader doesn't reference that builtin. */
+interface OverrideUniformLocs {
+    mvp: WebGLUniformLocation | null;
+    mv: WebGLUniformLocation | null;
+    proj: WebGLUniformLocation | null;
+    texMat: WebGLUniformLocation | null;
+    normalMat: WebGLUniformLocation | null;
+    tex0: WebGLUniformLocation | null;
+}
+
 function mat4Copy(src: Float32Array): Float32Array {
     return new Float32Array(src);
 }
@@ -304,6 +328,19 @@ export class ImmediateModeRenderer {
     // Current texture binding tracked for immediate mode
     private currentBoundTexture: WebGLTexture | null = null;
     private isTextured = false;
+
+    // ── Custom shader override (gl.UseShader + immediate-mode draw) ──────
+    // When a widget binds its own GLSL program via gl.UseShader and then
+    // emits geometry (gl.BeginEnd / gl.CallList), Spring runs that program
+    // over the immediate-mode vertex stream instead of the fixed-function
+    // pipeline. We mirror that: the bridge sets this override; flush() then
+    // binds it and feeds the legacy fixed-function matrix uniforms the GLSL
+    // translator emits (`_legModelViewProjectionMatrix` etc.). The widget's
+    // own uniforms (mirrorX, brightness, …) are already set on the program
+    // by gl.Uniform before the draw. Used by ZK's Map Edge Extension mirror
+    // shader and other world widgets. NULL = use the built-in uMVP program.
+    private shaderOverride: WebGLProgram | null = null;
+    private overrideUniformCache = new Map<WebGLProgram, OverrideUniformLocs>();
 
     // Alpha test threshold (0 = disabled)
     private alphaThreshold = 0;
@@ -851,6 +888,50 @@ export class ImmediateModeRenderer {
 
     // ── Flush to WebGL ──────────────────────────────────────────────────
 
+    /** Bind a custom GLSL program (from gl.UseShader) over the immediate-mode
+     *  vertex stream, or pass null to revert to the built-in uMVP program.
+     *  flush() routes geometry through this program and feeds it the legacy
+     *  fixed-function matrix uniforms. */
+    setShaderOverride(program: WebGLProgram | null): void {
+        this.shaderOverride = program;
+    }
+
+    private overrideLocs(program: WebGLProgram): OverrideUniformLocs {
+        let e = this.overrideUniformCache.get(program);
+        if (!e) {
+            const gl = this.gl;
+            e = {
+                mvp: gl.getUniformLocation(program, '_legModelViewProjectionMatrix'),
+                mv: gl.getUniformLocation(program, '_legModelViewMatrix'),
+                proj: gl.getUniformLocation(program, '_legProjectionMatrix'),
+                // Array uniform: query the [0] element (the only one immediate
+                // mode supplies; texture units 1-7 have no fixed-function matrix).
+                texMat: gl.getUniformLocation(program, '_legTextureMatrix[0]'),
+                normalMat: gl.getUniformLocation(program, '_legNormalMatrix'),
+                tex0: gl.getUniformLocation(program, 'tex0'),
+            };
+            this.overrideUniformCache.set(program, e);
+        }
+        return e;
+    }
+
+    /** Feed the legacy fixed-function uniforms a custom shader reads. The
+     *  shader does its own `gl_Position = _legModelViewProjectionMatrix *
+     *  vertex`, so we supply proj×modelview (and the components). The texture
+     *  matrix MUST be identity, not the default zero — `gl_TexCoord[0] =
+     *  gl_TextureMatrix[0] * gl_MultiTexCoord0` collapses every texcoord to
+     *  the origin texel otherwise (a uniform flat-colour band). */
+    private applyOverrideUniforms(program: WebGLProgram, mvp: Float32Array): void {
+        const gl = this.gl;
+        const locs = this.overrideLocs(program);
+        if (locs.mvp) gl.uniformMatrix4fv(locs.mvp, false, mvp);
+        if (locs.mv) gl.uniformMatrix4fv(locs.mv, false, this.modelviewStack.current);
+        if (locs.proj) gl.uniformMatrix4fv(locs.proj, false, this.projectionStack.current);
+        if (locs.texMat) gl.uniformMatrix4fv(locs.texMat, false, IDENTITY_MAT4);
+        if (locs.normalMat) gl.uniformMatrix3fv(locs.normalMat, false, IDENTITY_MAT3);
+        if (locs.tex0) gl.uniform1i(locs.tex0, 0);
+    }
+
     private flush(
         mode: number,
         count: number,
@@ -863,11 +944,16 @@ export class ImmediateModeRenderer {
         const savedProgram = gl.getParameter(gl.CURRENT_PROGRAM);
         const savedVao = gl.getParameter(gl.VERTEX_ARRAY_BINDING);
 
-        gl.useProgram(this.program);
+        const override = this.shaderOverride;
+        gl.useProgram(override ?? this.program);
 
         // Upload MVP
         const mvp = this.computeMVP();
-        gl.uniformMatrix4fv(this.uMVP, false, mvp);
+        if (override) {
+            this.applyOverrideUniforms(override, mvp);
+        } else {
+            gl.uniformMatrix4fv(this.uMVP, false, mvp);
+        }
 
         // Debug instrumentation
         if (this.flushDebugLabel && this.flushDebugBudget > 0) {
@@ -923,22 +1009,27 @@ export class ImmediateModeRenderer {
             if (this.flushDebugBudget <= 0) this.flushDebugLabel = null;
         }
 
-        // Texture state
-        gl.uniform1i(this.uTextured, this.isTextured ? 1 : 0);
-        gl.uniform1i(this.uTex, 0); // texture unit 0
+        // Texture state. The texture is bound to unit 0 for both paths; the
+        // override program samples it via `tex0` (set in applyOverrideUniforms),
+        // the built-in program via uTex. The built-in-only uniforms (uTextured,
+        // uAlphaThreshold, uColor) don't exist on a custom program, so skip them.
         if (this.isTextured && this.currentBoundTexture) {
             gl.activeTexture(gl.TEXTURE0);
             gl.bindTexture(gl.TEXTURE_2D, this.currentBoundTexture);
         }
-        gl.uniform1f(this.uAlphaThreshold, this.alphaThreshold);
+        if (!override) {
+            gl.uniform1i(this.uTextured, this.isTextured ? 1 : 0);
+            gl.uniform1i(this.uTex, 0); // texture unit 0
+            gl.uniform1f(this.uAlphaThreshold, this.alphaThreshold);
 
-        // Color tint uniform: identity for live draws (vertex colors carry the
-        // value), external current color for replays of lists that had no
-        // explicit gl.Color recorded.
-        if (tint) {
-            gl.uniform4f(this.uColor, tint[0], tint[1], tint[2], tint[3]);
-        } else {
-            gl.uniform4f(this.uColor, 1, 1, 1, 1);
+            // Color tint uniform: identity for live draws (vertex colors carry
+            // the value), external current color for replays of lists that had
+            // no explicit gl.Color recorded.
+            if (tint) {
+                gl.uniform4f(this.uColor, tint[0], tint[1], tint[2], tint[3]);
+            } else {
+                gl.uniform4f(this.uColor, 1, 1, 1, 1);
+            }
         }
 
 
