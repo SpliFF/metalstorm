@@ -27,6 +27,7 @@ import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos } from './game-worker
 // is host-agnostic (runs on WebTransportAdapter, no DOM refs after the
 // onServerRestart callback was extracted) so it imports + runs here unchanged.
 import { Connection } from './connection.js';
+import type { EntityStateSnapshot } from './entity-state.js';
 // GW4-c3: terrain + lighting + map parse move into the worker so terrain
 // renders from here (first light). All of these are worker-safe (Babylon
 // DynamicTexture allocates an OffscreenCanvas in a worker; the dev-hook
@@ -4723,6 +4724,14 @@ let gpConnection: Connection | null = null;
 let gpEntityRenderer: EntityRenderer | null = null;
 let gpBuildingPlateRenderer: BuildingPlateRenderer | null = null;
 let gpDefCache: DefCache | null = null;
+/// GW4-c6-1b: resolves once the game's defs are ingested into the def cache (or
+/// immediately if the game ships none). gpBootLuaUI awaits this before running
+/// init(), so the Lua UnitDefs/UnitDefNames tables are already populated when
+/// ZK's config files (unitDefReplacements, dynamic_comm_defs, …) index
+/// UnitDefNames.<x> at include-time — otherwise they hit nil and the dependent
+/// widgets/gadgets boot degraded.
+let gpDefsReadyResolve: (() => void) | null = null;
+const gpDefsReady: Promise<void> = new Promise((resolve) => { gpDefsReadyResolve = resolve; });
 /// PLAN-latency L0: interpolate entities at the presentation cursor (server-
 /// frame keyed) instead of arrival wall-time. Reset + anchored to the
 /// connection's ServerClock once `gpConnect` builds it.
@@ -4957,6 +4966,255 @@ async function gpRegisterViewport(lobbyUrl: string, mapId: string): Promise<void
     postLog(1, `[gp] viewport registered (camera-tracked, default center ${centerX.toFixed(0)},${centerZ.toFixed(0)}) — entity stream should follow`);
 }
 
+/// GW4-c6-1b: merge an entity-state snapshot into `liveState.units` (the map
+/// behind Spring.GetAllUnits / GetUnitPosition / GetUnitDefID etc.) and
+/// synthesise the UnitCreated / UnitFinished callins LuaUI widgets expect.
+/// Extracted from the legacy `entityState` main→worker message handler so the
+/// in-worker connection's `onEntityState` callback feeds the Lua runtime
+/// directly (no main hop). The server has no dedicated build-complete event, so
+/// UnitFinished is derived from a buildProgress < 1 → >= 1 transition; allied
+/// UnitCreated is deferred one tick to let the server's own Created event win
+/// (enemy ids fire immediately — the server intentionally omits Created there).
+function applyEntityStateToLiveState(snap: EntityStateSnapshot, isDelta: boolean): void {
+    const count = snap.count;
+    const entityIds = snap.entityIds;
+    const posX = snap.positionsX;
+    const posY = snap.positionsY;
+    const posZ = snap.positionsZ;
+    const headings = snap.headings;
+    const health = snap.health;
+    const defIds = snap.defIds;
+    const teams = snap.teams;
+    const stateBits = snap.stateBits;
+    const losStates = snap.losStates;
+    const buildProgress = snap.buildProgress;
+
+    const tickRate = 30;
+    const createdIds: Array<{ id: number; defId: number; team: number }> = [];
+    const finishedIds: Array<{ id: number; defId: number; team: number }> = [];
+    const decodeProgress = (i: number) => buildProgress ? buildProgress[i] / 255 : 1;
+    if (!isDelta) {
+        const prevUnits = liveState.units;
+        const newUnits = new Map<number, UnitEntry>();
+        if (entityIds) {
+            for (let i = 0; i < count; i++) {
+                const id = entityIds[i];
+                const prev = prevUnits.get(id);
+                const nx = posX ? posX[i] : 0;
+                const ny = posY ? posY[i] : 0;
+                const nz = posZ ? posZ[i] : 0;
+                const defId = defIds ? defIds[i] : 0;
+                const team = teams ? teams[i] : 0;
+                const bp = decodeProgress(i);
+                newUnits.set(id, {
+                    x: nx, y: ny, z: nz,
+                    heading: headings ? headings[i] : 0,
+                    healthRatio: health ? health[i] / 65535 : 1,
+                    defId,
+                    team,
+                    buildProgress: bp,
+                    vx: prev ? (nx - prev.x) * tickRate : 0,
+                    vy: prev ? (ny - prev.y) * tickRate : 0,
+                    vz: prev ? (nz - prev.z) * tickRate : 0,
+                    stateBits: stateBits ? stateBits[i] : 0,
+                    losState: losStates ? losStates[i] : 0x0F,
+                });
+                if (!prev) createdIds.push({ id, defId, team });
+                else if (prev.buildProgress < 1 && bp >= 1) {
+                    finishedIds.push({ id, defId, team });
+                }
+            }
+        }
+        liveState.units = newUnits;
+    } else {
+        if (entityIds) {
+            for (let i = 0; i < count; i++) {
+                const id = entityIds[i];
+                const existing = liveState.units.get(id);
+                const entry: UnitEntry = existing ?? {
+                    x: 0, y: 0, z: 0, heading: 0, healthRatio: 1,
+                    defId: 0, team: 0, buildProgress: 1,
+                    vx: 0, vy: 0, vz: 0,
+                    stateBits: 0, losState: 0x0F,
+                };
+                if (posX) {
+                    const nx = posX[i];
+                    entry.vx = existing ? (nx - entry.x) * tickRate : 0;
+                    entry.x = nx;
+                }
+                if (posY) {
+                    const ny = posY[i];
+                    entry.vy = existing ? (ny - entry.y) * tickRate : 0;
+                    entry.y = ny;
+                }
+                if (posZ) {
+                    const nz = posZ[i];
+                    entry.vz = existing ? (nz - entry.z) * tickRate : 0;
+                    entry.z = nz;
+                }
+                if (headings) entry.heading = headings[i];
+                if (health) entry.healthRatio = health[i] / 65535;
+                if (defIds) entry.defId = defIds[i];
+                if (teams) entry.team = teams[i];
+                if (stateBits) entry.stateBits = stateBits[i];
+                if (losStates) entry.losState = losStates[i];
+                if (buildProgress) {
+                    const prevBp = entry.buildProgress;
+                    const newBp = buildProgress[i] / 255;
+                    entry.buildProgress = newBp;
+                    if (existing && prevBp < 1 && newBp >= 1) {
+                        finishedIds.push({ id, defId: entry.defId, team: entry.team });
+                    }
+                }
+                liveState.units.set(id, entry);
+                if (!existing) {
+                    createdIds.push({ id, defId: entry.defId, team: entry.team });
+                }
+            }
+        }
+    }
+    // Flush deferred allied appearances from the previous tick (skip any the
+    // server's own Created event has since covered).
+    if (liveState.pendingSynthCreated.size > 0) {
+        for (const [id, entry] of liveState.pendingSynthCreated) {
+            if (!liveState.serverFiredUnitCreated.has(id)) {
+                dispatchUnitCreated(id, entry.defId, entry.team, 0);
+                liveState.serverFiredUnitCreated.add(id);
+            }
+        }
+        liveState.pendingSynthCreated.clear();
+    }
+    const myAllyTeam = liveState.identity.myAllyTeam;
+    for (const c of createdIds) {
+        if (liveState.serverFiredUnitCreated.has(c.id)) continue;
+        const teamInfo = liveState.teams.get(c.team);
+        const allied = teamInfo ? teamInfo.allyTeam === myAllyTeam : false;
+        if (allied) {
+            liveState.pendingSynthCreated.set(c.id, { defId: c.defId, team: c.team });
+        } else {
+            dispatchUnitCreated(c.id, c.defId, c.team, 0);
+            liveState.serverFiredUnitCreated.add(c.id);
+        }
+    }
+    for (const f of finishedIds) {
+        dispatchUnitFinished(f.id, f.defId, f.team);
+    }
+}
+
+/// GW4-c6-1b: drop a unit from `liveState` and fire UnitDestroyed. Mirrors the
+/// legacy `entityDestroy` handler. NOTE: the connection's onEntityDestroy fires
+/// on "left view OR died" (pre-GW4 the main thread had the same conflation), so
+/// a unit leaving LOS also synthesises UnitDestroyed — acceptable parity until
+/// the server distinguishes the two.
+function removeUnitFromLiveState(id: number): void {
+    const u = liveState.units.get(id);
+    const defId = u?.defId ?? 0;
+    const team = u?.team ?? 0;
+    liveState.units.delete(id);
+    liveState.unitRulesParams.delete(id);
+    liveState.unitCommands.delete(id);
+    liveState.unitCmdDescs.delete(id);
+    liveState.sensorOverrides.delete(id);
+    liveState.serverFiredUnitCreated.delete(id);
+    liveState.pendingSynthCreated.delete(id);
+    dispatchUnitDestroyed(id, defId, team);
+}
+
+// GW4-c6-1b: input → LuaUI widget callins. The gp input messages carry
+// canvas-relative CSS px (top-left origin) + DOM button numbering + a packed
+// mods bitfield (1=shift,2=ctrl,4=alt,8=meta) + KeyboardEvent.code. Spring's
+// widget callins expect device px with a bottom-left origin, Spring button
+// numbering (left=1/middle=2/right=3) and SDL keysyms — translate here.
+
+/** DOM mouse button (0/1/2) → Spring button (1/2/3). */
+function domButtonToSpring(b: number): number {
+    return b === 0 ? 1 : b === 1 ? 2 : b === 2 ? 3 : b + 1;
+}
+
+/** KeyboardEvent.code → Spring/SDL keysym. Named keys are mapped; letters,
+ *  digits and numpad digits fall back to the ASCII code of the character they
+ *  produce (matching the lua-widget-manager springKeyCode table on main, which
+ *  worked off `.key` — here we derive the same numbers from `.code`). */
+function codeToSpringKeysym(code: string): number {
+    const m: Record<string, number> = {
+        Backspace: 8, Tab: 9, Enter: 13, NumpadEnter: 13, Escape: 27, Space: 32,
+        Delete: 127, ArrowLeft: 276, ArrowRight: 275, ArrowUp: 273, ArrowDown: 274,
+        Home: 278, End: 279, PageUp: 280, PageDown: 281, Insert: 277,
+        F1: 282, F2: 283, F3: 284, F4: 285, F5: 286, F6: 287,
+        F7: 288, F8: 289, F9: 290, F10: 291, F11: 292, F12: 293,
+        ShiftLeft: 304, ShiftRight: 303, ControlLeft: 306, ControlRight: 305,
+        AltLeft: 308, AltRight: 307, MetaLeft: 310, MetaRight: 309,
+    };
+    if (code in m) return m[code];
+    if (code.length === 4 && code.startsWith('Key')) return code.charCodeAt(3) + 32; // 'KeyA'→'a'
+    if (code.length === 6 && code.startsWith('Digit')) return code.charCodeAt(5);     // 'Digit5'→'5'
+    if (code.length === 7 && code.startsWith('Numpad')) return code.charCodeAt(6);    // 'Numpad5'→'5'
+    return 0;
+}
+
+/** CSS px (top-left) → Spring device px (bottom-left). The OffscreenCanvas
+ *  backing store is CSS × dpr, and liveState.viewport is in device px. */
+function gpToSpringCoords(x: number, y: number): { x: number; y: number } {
+    const dx = x * gpDpr;
+    const dy = y * gpDpr;
+    return { x: Math.round(dx), y: Math.round(liveState.viewport.height - dy) };
+}
+
+let gpLastMouseSpringX = 0;
+let gpLastMouseSpringY = 0;
+
+/** widgetHandler:MousePress — returns true if a widget consumed the press (→
+ *  the world selection/order is suppressed, Spring's mouse-capture semantics). */
+function gpDispatchMousePress(sx: number, sy: number, btn: number): boolean {
+    if (!runtime) return false;
+    const consumed = runtime.evalString(`
+        if widgetHandler and widgetHandler.MousePress then
+            local ok, ret = pcall(widgetHandler.MousePress, widgetHandler, ${sx}, ${sy}, ${btn})
+            return ok and ret and "1" or "0"
+        end
+        return "0"`);
+    return consumed === '1';
+}
+function gpDispatchMouseRelease(sx: number, sy: number, btn: number): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.MouseRelease then
+            pcall(widgetHandler.MouseRelease, widgetHandler, ${sx}, ${sy}, ${btn})
+        end`, 'callin:MouseRelease');
+}
+function gpDispatchMouseMove(sx: number, sy: number, dx: number, dy: number, btn: number): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.MouseMove then
+            pcall(widgetHandler.MouseMove, widgetHandler, ${sx}, ${sy}, ${dx}, ${dy}, ${btn})
+        end`, 'callin:MouseMove');
+}
+function gpDispatchMouseWheel(up: boolean, value: number): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.MouseWheel then
+            pcall(widgetHandler.MouseWheel, widgetHandler, ${up ? 'true' : 'false'}, ${value})
+        end`, 'callin:MouseWheel');
+}
+function gpDispatchKeyPress(keysym: number, mods: number): void {
+    if (!runtime || keysym === 0) return;
+    const alt = (mods & 4) !== 0, ctrl = (mods & 2) !== 0;
+    const meta = (mods & 8) !== 0, shift = (mods & 1) !== 0;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.KeyPress then
+            pcall(widgetHandler.KeyPress, widgetHandler, ${keysym}, { alt=${alt}, ctrl=${ctrl}, meta=${meta}, shift=${shift} }, false)
+        end`, 'callin:KeyPress');
+}
+function gpDispatchKeyRelease(keysym: number, mods: number): void {
+    if (!runtime || keysym === 0) return;
+    const alt = (mods & 4) !== 0, ctrl = (mods & 2) !== 0;
+    const meta = (mods & 8) !== 0, shift = (mods & 1) !== 0;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.KeyRelease then
+            pcall(widgetHandler.KeyRelease, widgetHandler, ${keysym}, { alt=${alt}, ctrl=${ctrl}, meta=${meta}, shift=${shift} })
+        end`, 'callin:KeyRelease');
+}
+
 /// GW4-c2: stand up the in-worker connection. Discovers `/api/wt/info` from
 /// `gameHttpUrl`, opens the WebTransport session, and auths with the init
 /// creds (token reconnect against the shared lobby SQLite). At c2 the
@@ -4970,6 +5228,12 @@ function gpConnect(msg: GpInitToWorker): void {
         onAuthenticated: (playerId, _token, team, defsCacheKey) => {
             postLog(1, `[gp] authenticated playerId=${playerId} team=${team} defsKey=${defsCacheKey || '(none)'}`);
             postToMain({ type: 'gp:authenticated', playerId, team });
+            // GW4-c6-1b: seed LuaUI identity so Spring.GetMyTeamID /
+            // GetLocalPlayerID / GetMyAllyTeamID resolve. AuthResponse carries
+            // no allyTeam, so default myAllyTeam to the team until the team
+            // table is wired (correct for single-team / AI cases; proper ally
+            // resolution from the team table is a later seam).
+            liveState.identity = { myTeam: team, myAllyTeam: team, myPlayerId: playerId };
             // GW4-c5b-3: tell the standing-order overlay who "we" are so its
             // own/allied filtering works (server already scopes the broadcast;
             // this drives own-vs-allied styling + the show-allies toggle).
@@ -4982,7 +5246,13 @@ function gpConnect(msg: GpInitToWorker): void {
             if (defsCacheKey && gpDefCache) {
                 fetchAndIngestDefs(msg.gameId, defsCacheKey, gpDefCache)
                     .then(() => postLog(1, `[gp] defs ingested (${gpDefCache?.getAllUnitDefs().length ?? 0} unit defs)`))
-                    .catch((e) => postLog(4, `[gp] defs fetch failed: ${e}`));
+                    .catch((e) => postLog(4, `[gp] defs fetch failed: ${e}`))
+                    // GW4-c6-1b: unblock the LuaUI boot once defs are in (or on
+                    // failure — boot anyway rather than hang the UI forever).
+                    .finally(() => gpDefsReadyResolve?.());
+            } else {
+                // No defs to fetch — don't make the LuaUI boot wait.
+                gpDefsReadyResolve?.();
             }
             // Register a viewport so the server starts streaming entity state.
             void gpRegisterViewport(msg.lobbyUrl, msg.mapId);
@@ -4992,6 +5262,9 @@ function gpConnect(msg: GpInitToWorker): void {
         onEntityState: (snapshot, isDelta) => {
             gpEntityRenderer?.update(snapshot, isDelta);
             gpBuildingPlateRenderer?.update(snapshot);
+            // GW4-c6-1b: also merge into liveState.units + synth the
+            // UnitCreated/UnitFinished callins so LuaUI widgets see the world.
+            applyEntityStateToLiveState(snapshot, isDelta);
         },
         // GW4-c4: streamed piece transforms (envelope 0x05) → per-piece thin
         // instance matrices on the unit's model.
@@ -5006,6 +5279,8 @@ function gpConnect(msg: GpInitToWorker): void {
                 attackerId: 0, targetId: entityId, weaponDefId: 0,
                 result: 3, damage: 500, x, y, z,
             }]);
+            // GW4-c6-1b: LuaUI UnitDestroyed + liveState cleanup.
+            removeUnitFromLiveState(entityId);
         },
         // GW4-c5: runtime feature spawns (wrecks/debris/reclaim) → dynamic
         // feature renderer. Map-placed features load via renderMapFeatures.
@@ -5077,6 +5352,12 @@ function gpConnect(msg: GpInitToWorker): void {
             gpGameFrame = frame;
             gpSimSpeed = speed;
             gpPaused = paused;
+            // GW4-c6-1b: advance the LuaUI clock so Spring.GetGameFrame()
+            // ticks → widgetHandler:GameFrame + gadget GameFrame fan-out
+            // (gpRunUiPass → runFrame reads Spring.GetGameFrame()).
+            liveState.gameFrame = frame;
+            liveState.gameSpeed = speed;
+            liveState.gamePaused = paused;
         },
         // GW4-c3: live terrain deformation (envelope 0x09) → DeformableTerrain.
         onHeightmapPatch: (patch) => gpDeformTerrain?.applyPatch(patch),
@@ -5289,14 +5570,22 @@ function gpInit(msg: GpInitToWorker): void {
         }, /*fireNow*/ true);
     }
 
-    // New defs → the renderers that consume them. (LuaUI forward to widgets is
-    // GW4-c6.)
+    // New defs → the renderers that consume them, and (GW4-c6-1b) the LuaUI
+    // def map behind UnitDefNames / WeaponDefNames / buildPic. UnitDefInfo and
+    // WeaponDefInfo are supersets of the Minimal*Wire shapes (same field
+    // names), so they slot straight into the def maps; republishDefGlobals
+    // rebuilds the Lua UnitDefs/UnitDefNames tables. Before this seam, every ZK
+    // config file logged `UnitDefNames.<x>` nil-index errors and panels read 0.
     defCache.onUnitDefs((newDefs) => {
         gpEntityRenderer?.setUnitDefs(newDefs);
         gpBuildingPlateRenderer?.setUnitDefs(newDefs);
+        for (const d of newDefs) unitDefMap.set(d.defId, d);
+        if (runtime) republishDefGlobals(runtime);
     });
     defCache.onWeaponDefs((newDefs) => {
         gpProjectileRenderer?.setWeaponDefs(newDefs);
+        for (const d of newDefs) weaponDefMap.set(d.defId, d);
+        if (runtime) republishDefGlobals(runtime);
     });
     // Streamed CEG defs override the BUILTIN_EFFECTS hand-ports for any tag the
     // game defines; missing tags still resolve via the built-in archetypes.
@@ -5383,6 +5672,11 @@ function gpInit(msg: GpInitToWorker): void {
         onSelectionChange: (ids) => {
             gpCommandPathRenderer?.update(gpLastCommandQueues, ids);
             gpWaypointMarkerRenderer?.update(gpLastCommandQueues, ids);
+            // GW4-c6-1b: feed LuaUI selection (Spring.GetSelectedUnits +
+            // widgetHandler:SelectionChanged) so build-menu / order panels
+            // react to what the player picked.
+            liveState.selectedUnitIds = ids.slice();
+            dispatchSelectionChanged(ids);
         },
     });
     gpSelection = selection;
@@ -5551,6 +5845,23 @@ async function gpBootLuaUI(map: ParsedMapData, mapSourceAbs: string, msg: GpInit
         widthElmos: map.widthElmos, heightElmos: map.heightElmos,
         heightmap: map.heightmap, mapSourceUrl: mapSourceAbs,
     };
+    // GW4-c6-1b: wait for defs to be ingested before booting. init() includes
+    // ZK's config files (unitDefReplacements, dynamic_comm_defs, integral_menu,
+    // …) which index UnitDefNames.<x> at load-time; republishDefGlobals must
+    // have published a populated def map first or those files hit nil and the
+    // dependent widgets/gadgets boot degraded. The def fetch is usually faster
+    // than the terrain build + VFS prefetch, so this rarely actually blocks.
+    // Cap the wait so a hung/slow game server can't strand the UI forever —
+    // on timeout we boot degraded (the later onUnitDefs republish still
+    // populates UnitDefNames for runtime reads, just not include-time configs).
+    await Promise.race([
+        gpDefsReady,
+        new Promise<void>((resolve) => setTimeout(() => {
+            postLog(3, '[gp] LuaUI boot: defs not ready after 8s — booting anyway');
+            resolve();
+        }, 8000)),
+    ]);
+    if (runtime || !gpEngine) return;  // a concurrent boot won the race while awaiting
     try {
         await init(null, msg.gameId, msg.lobbyUrl, mapDataTransfer, undefined, gl);
         // The bridge's one-time GL setup (shaders, font textures, VAOs) ran
@@ -5692,32 +6003,55 @@ self.onmessage = async (e: MessageEvent) => {
         // CameraInput. Routed per-view (multi-view); absent viewId ⇒ view 0.
         // Coordinates are canvas-relative CSS px, origin top-left (Babylon's
         // native screen space — see game-worker-protocol.ts).
-        case 'gp:pointermove':
+        case 'gp:pointermove': {
             gpViewCameras.get(msg.viewId ?? 0)?.pointerMove(msg.x, msg.y, msg.buttons);
             // GW4-c5b-2: left-button drag-box growth + hover tracking.
             gpSelection?.pointerMove(msg.x, msg.y, msg.buttons, msg.mods, msg.viewId ?? 0);
+            // GW4-c6-1b: widget MouseMove (drives chili hover). DOM buttons
+            // bitmask (1=left,2=right,4=middle) → Spring button being dragged.
+            const sp = gpToSpringCoords(msg.x, msg.y);
+            const dragBtn = (msg.buttons & 1) ? 1 : (msg.buttons & 4) ? 2 : (msg.buttons & 2) ? 3 : 0;
+            gpDispatchMouseMove(sp.x, sp.y, sp.x - gpLastMouseSpringX, sp.y - gpLastMouseSpringY, dragBtn);
+            gpLastMouseSpringX = sp.x; gpLastMouseSpringY = sp.y;
             break;
-        case 'gp:pointerdown':
+        }
+        case 'gp:pointerdown': {
+            // GW4-c6-1b: offer the press to widgets first; if a widget consumes
+            // it (cursor over a chili panel), suppress world selection so
+            // clicking the UI doesn't also box-select units.
+            const sp = gpToSpringCoords(msg.x, msg.y);
+            const consumed = gpDispatchMousePress(sp.x, sp.y, domButtonToSpring(msg.button));
             gpViewCameras.get(msg.viewId ?? 0)?.pointerDown(msg.x, msg.y, msg.button, msg.mods);
             // GW4-c5b-2: left-button selection (camera ignores button 0).
-            gpSelection?.pointerDown(msg.x, msg.y, msg.button, msg.mods, msg.viewId ?? 0);
+            if (!consumed) gpSelection?.pointerDown(msg.x, msg.y, msg.button, msg.mods, msg.viewId ?? 0);
             break;
-        case 'gp:pointerup':
+        }
+        case 'gp:pointerup': {
+            const sp = gpToSpringCoords(msg.x, msg.y);
+            gpDispatchMouseRelease(sp.x, sp.y, domButtonToSpring(msg.button));
             gpViewCameras.get(msg.viewId ?? 0)?.pointerUp(msg.x, msg.y, msg.button, msg.mods);
             gpSelection?.pointerUp(msg.x, msg.y, msg.button, msg.mods, msg.viewId ?? 0);
             break;
-        case 'gp:wheel':
+        }
+        case 'gp:wheel': {
             gpViewCameras.get(msg.viewId ?? 0)?.wheel(msg.x, msg.y, msg.delta);
+            // GW4-c6-1b: widget MouseWheel (deltaY < 0 = scroll up).
+            gpDispatchMouseWheel(msg.delta < 0, -msg.delta);
             break;
+        }
         case 'gp:keydown':
             // RTSCamera matches lowercased KeyboardEvent.code (e.g. 'arrowup').
             gpViewCameras.get(msg.viewId ?? 0)?.keyDown(String(msg.code).toLowerCase());
             // GW4-c5b-3: shift gates the command-path / waypoint overlays.
             gpSetShift((msg.mods & 1) !== 0);
+            // GW4-c6-1b: widget KeyPress (ZK hotkeys). Camera + widgets both
+            // see keys — coordinated split, additive.
+            gpDispatchKeyPress(codeToSpringKeysym(String(msg.code)), msg.mods);
             break;
         case 'gp:keyup':
             gpViewCameras.get(msg.viewId ?? 0)?.keyUp(String(msg.code).toLowerCase());
             gpSetShift((msg.mods & 1) !== 0);
+            gpDispatchKeyRelease(codeToSpringKeysym(String(msg.code)), msg.mods);
             break;
         case 'gp:blur':
             gpViewCameras.get(msg.viewId ?? 0)?.blur();
@@ -5987,179 +6321,35 @@ self.onmessage = async (e: MessageEvent) => {
         }
 
         case 'entityState': {
-            // Rebuild/merge the units Map from typed arrays
-            const count = msg.count as number;
-            const isDelta = msg.isDelta as boolean;
-            const entityIds = msg.entityIds as Uint32Array | null;
-            const posX = msg.positionsX as Float32Array | null;
-            const posY = msg.positionsY as Float32Array | null;
-            const posZ = msg.positionsZ as Float32Array | null;
-            const headings = msg.headings as Uint16Array | null;
-            const health = msg.health as Uint16Array | null;
-            const defIds = msg.defIds as Uint16Array | null;
-            const teams = msg.teams as Uint8Array | null;
-            const stateBits = msg.stateBits as Uint8Array | null;
-            const losStates = msg.losStates as Uint8Array | null;
-            const buildProgress = msg.buildProgress as Uint8Array | null;
-
-            // Velocity is computed from frame-to-frame position deltas.
-            // The sim ticks at 30 Hz so each entity-state batch nominally
-            // covers 1/30 s; multiplying the delta by the inverse gives
-            // elmos/second. (We don't have a precise per-message timestamp
-            // — adequate for HUD readouts and lead-shot calculations.)
-            const tickRate = 30;
-            // Track newly-seen ids in this batch so we can fire
-            // UnitCreated callins after the merge completes. Spring's
-            // engine fires UnitCreated on initial visibility, so
-            // synthesising it from "id not in prior map" is the right
-            // shape for widgets like unit_state_icons that snapshot a
-            // unit's static metadata on creation.
-            const createdIds: Array<{ id: number; defId: number; team: number }> = [];
-            // Track buildProgress < 1 → >= 1 transitions so we can fire
-            // UnitFinished after the merge. The server doesn't emit a
-            // dedicated build-complete event yet, so we derive it from
-            // the entity-state stream — close enough for ZK widgets like
-            // unit_building_starter and cmd_no_duplicate_orders.
-            const finishedIds: Array<{ id: number; defId: number; team: number }> = [];
-            const decodeProgress = (i: number) => buildProgress ? buildProgress[i] / 255 : 1;
-            if (!isDelta) {
-                // Full snapshot — rebuild. Only keep IDs in this snapshot.
-                const prevUnits = liveState.units;
-                const newUnits = new Map<number, UnitEntry>();
-                if (entityIds) {
-                    for (let i = 0; i < count; i++) {
-                        const id = entityIds[i];
-                        const prev = prevUnits.get(id);
-                        const nx = posX ? posX[i] : 0;
-                        const ny = posY ? posY[i] : 0;
-                        const nz = posZ ? posZ[i] : 0;
-                        const defId = defIds ? defIds[i] : 0;
-                        const team = teams ? teams[i] : 0;
-                        const bp = decodeProgress(i);
-                        newUnits.set(id, {
-                            x: nx, y: ny, z: nz,
-                            heading: headings ? headings[i] : 0,
-                            healthRatio: health ? health[i] / 65535 : 1,
-                            defId,
-                            team,
-                            buildProgress: bp,
-                            vx: prev ? (nx - prev.x) * tickRate : 0,
-                            vy: prev ? (ny - prev.y) * tickRate : 0,
-                            vz: prev ? (nz - prev.z) * tickRate : 0,
-                            stateBits: stateBits ? stateBits[i] : 0,
-                            losState: losStates ? losStates[i] : 0x0F,
-                        });
-                        if (!prev) createdIds.push({ id, defId, team });
-                        else if (prev.buildProgress < 1 && bp >= 1) {
-                            finishedIds.push({ id, defId, team });
-                        }
-                    }
-                }
-                liveState.units = newUnits;
-            } else {
-                // Delta — merge changed units
-                if (entityIds) {
-                    for (let i = 0; i < count; i++) {
-                        const id = entityIds[i];
-                        const existing = liveState.units.get(id);
-                        const entry: UnitEntry = existing ?? {
-                            x: 0, y: 0, z: 0, heading: 0, healthRatio: 1,
-                            defId: 0, team: 0, buildProgress: 1,
-                            vx: 0, vy: 0, vz: 0,
-                            stateBits: 0, losState: 0x0F,
-                        };
-                        if (posX) {
-                            const nx = posX[i];
-                            entry.vx = existing ? (nx - entry.x) * tickRate : 0;
-                            entry.x = nx;
-                        }
-                        if (posY) {
-                            const ny = posY[i];
-                            entry.vy = existing ? (ny - entry.y) * tickRate : 0;
-                            entry.y = ny;
-                        }
-                        if (posZ) {
-                            const nz = posZ[i];
-                            entry.vz = existing ? (nz - entry.z) * tickRate : 0;
-                            entry.z = nz;
-                        }
-                        if (headings) entry.heading = headings[i];
-                        if (health) entry.healthRatio = health[i] / 65535;
-                        if (defIds) entry.defId = defIds[i];
-                        if (teams) entry.team = teams[i];
-                        if (stateBits) entry.stateBits = stateBits[i];
-                        if (losStates) entry.losState = losStates[i];
-                        if (buildProgress) {
-                            const prevBp = entry.buildProgress;
-                            const newBp = buildProgress[i] / 255;
-                            entry.buildProgress = newBp;
-                            if (existing && prevBp < 1 && newBp >= 1) {
-                                finishedIds.push({ id, defId: entry.defId, team: entry.team });
-                            }
-                        }
-                        liveState.units.set(id, entry);
-                        if (!existing) {
-                            createdIds.push({ id, defId: entry.defId, team: entry.team });
-                        }
-                    }
-                }
-            }
-            // Flush any allied-team appearances that were deferred on
-            // the previous tick — if the server's UnitCreated event
-            // arrived in the meantime, the id is in
-            // serverFiredUnitCreated and we skip it; otherwise fire the
-            // synthesised callin (no builderId).
-            if (liveState.pendingSynthCreated.size > 0) {
-                for (const [id, entry] of liveState.pendingSynthCreated) {
-                    if (!liveState.serverFiredUnitCreated.has(id)) {
-                        dispatchUnitCreated(id, entry.defId, entry.team, 0);
-                        liveState.serverFiredUnitCreated.add(id);
-                    }
-                }
-                liveState.pendingSynthCreated.clear();
-            }
-            // New ids picked up from this batch. Allied-team ids are
-            // deferred one tick to let the server-side Created event
-            // arrive first; enemy ids fire immediately because the
-            // server intentionally doesn't broadcast Created for them.
-            const myAllyTeam = liveState.identity.myAllyTeam;
-            for (const c of createdIds) {
-                if (liveState.serverFiredUnitCreated.has(c.id)) continue;
-                const teamInfo = liveState.teams.get(c.team);
-                const allied = teamInfo
-                    ? teamInfo.allyTeam === myAllyTeam
-                    : false;
-                if (allied) {
-                    liveState.pendingSynthCreated.set(
-                        c.id, { defId: c.defId, team: c.team });
-                } else {
-                    dispatchUnitCreated(c.id, c.defId, c.team, 0);
-                    liveState.serverFiredUnitCreated.add(c.id);
-                }
-            }
-            for (const f of finishedIds) {
-                dispatchUnitFinished(f.id, f.defId, f.team);
-            }
+            // GW4-c6-1b: legacy main→worker path (unreachable in the gp worker —
+            // entity state now arrives via the in-worker connection's
+            // onEntityState callback). Kept delegating to the shared merge so
+            // there's no duplicated synth logic.
+            applyEntityStateToLiveState({
+                baseFrame: 0,
+                count: msg.count as number,
+                fieldMask: 0,
+                entityIds: msg.entityIds as Uint32Array | null,
+                positionsX: msg.positionsX as Float32Array | null,
+                positionsY: msg.positionsY as Float32Array | null,
+                positionsZ: msg.positionsZ as Float32Array | null,
+                headings: msg.headings as Uint16Array | null,
+                health: msg.health as Uint16Array | null,
+                defIds: msg.defIds as Uint16Array | null,
+                teams: msg.teams as Uint8Array | null,
+                stateBits: msg.stateBits as Uint8Array | null,
+                losStates: msg.losStates as Uint8Array | null,
+                buildProgress: msg.buildProgress as Uint8Array | null,
+                pitch: null,
+                roll: null,
+            }, msg.isDelta as boolean);
             break;
         }
 
         case 'entityDestroy': {
-            const id = msg.entityId as number;
-            const u = liveState.units.get(id);
-            // Snapshot the unit's defId / team before we drop it so the
-            // callin signature matches Spring's UnitDestroyed(unitID,
-            // unitDefID, unitTeam). Widgets that key off either need
-            // them — unit_state_icons clears its pip cache on this.
-            const defId = u?.defId ?? 0;
-            const team = u?.team ?? 0;
-            liveState.units.delete(id);
-            liveState.unitRulesParams.delete(id);
-            liveState.unitCommands.delete(id);
-            liveState.unitCmdDescs.delete(id);
-            liveState.sensorOverrides.delete(id);
-            liveState.serverFiredUnitCreated.delete(id);
-            liveState.pendingSynthCreated.delete(id);
-            dispatchUnitDestroyed(id, defId, team);
+            // GW4-c6-1b: legacy path (see entityState above). Delegates to the
+            // shared liveState cleanup + UnitDestroyed dispatch.
+            removeUnitFromLiveState(msg.entityId as number);
             break;
         }
 
