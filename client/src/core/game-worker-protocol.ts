@@ -83,10 +83,24 @@ export interface GpConfigToWorker {
     value: unknown;
 }
 
+/**
+ * Re-centre the worker camera on a world XZ position (GW4-c5c-3). Posted by
+ * the main-thread minimap on a left click — the minimap is a DOM/own-Engine
+ * element on main, but the world camera lives in the worker, so the focus
+ * intent crosses the boundary. `viewId` absent ⇒ view 0.
+ */
+export interface GpFocusWorldToWorker {
+    type: 'gp:focusWorld';
+    x: number;
+    z: number;
+    viewId?: number;
+}
+
 export type GpMessageToWorker =
     | GpInitToWorker
     | GpInputToWorker
     | GpConfigToWorker
+    | GpFocusWorldToWorker
     | { type: 'gp:shutdown' };
 
 // ─── worker → main ──────────────────────────────────────────────────────────
@@ -128,14 +142,52 @@ export interface GpSceneStateToMain {
     economy?: unknown;
 }
 
+/**
+ * Per-visible-unit minimap blips, struct-of-arrays for a cheap structured
+ * clone (GW4-c5c-3). The worker projects its entity renderer's live set down
+ * to the few fields the minimap dots need; fog-of-war-hidden units (los===0)
+ * are dropped server-side of this so the minimap never leaks their positions.
+ * `los` bit 0 = in-LOS (full dot) vs radar/ghost (dim dot). World XZ in elmos.
+ */
+export interface GpMinimapBlips {
+    count: number;
+    ids: Uint32Array;
+    teams: Uint16Array;
+    x: Float32Array;
+    z: Float32Array;
+    los: Uint8Array;
+}
+
+/** A per-allyteam LOS snapshot for the minimap fog overlay (envelope 0x07). */
+export interface GpMinimapLos {
+    width: number;
+    height: number;
+    inLos: Uint8Array;
+    inRadar: Uint8Array;
+    explored: Uint8Array;
+}
+
 export type GpMessageToMain =
     /** Decoded SoundEvents routed to the main-thread AudioManager/SoundEventPlayer. */
     | { type: 'gp:audioSoundEvents'; events: unknown }
     /** Music state transition routed to the main-thread MusicDirector. */
     | { type: 'gp:audioMusic'; state: unknown; fadeMs: number }
     | GpSceneStateToMain
-    /** Minimap data (main keeps its own Engine + DOM container until GW5 review). */
-    | { type: 'gp:minimapFeed'; units: unknown; los: unknown }
+    /**
+     * Minimap data (main keeps its own Engine + DOM container until a later
+     * review moves it to a second OffscreenCanvas). `los: null` ⇒ unchanged
+     * since the last feed (the bitmap only ships when a new snapshot arrives).
+     * `map` is present only on the first feed after the worker builds the
+     * terrain — it carries the dims + backdrop URL the minimap needs to size
+     * its ortho frustum and load the `minimap.ktx2` thumbnail (the worker owns
+     * the map fetch, so main learns the dims from here, not its own download).
+     */
+    | {
+          type: 'gp:minimapFeed';
+          blips: GpMinimapBlips;
+          los: GpMinimapLos | null;
+          map?: { width: number; height: number; baseUrl: string };
+      }
     /** Worker asks main to persist a value to localStorage (e.g. SHOW_ALLIES). */
     | { type: 'gp:config'; key: string; value: unknown }
     /**

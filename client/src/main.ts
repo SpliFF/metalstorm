@@ -127,6 +127,10 @@ let inputManager: InputManager | null = null;
 /// pointer/wheel/key events on #game-canvas and forwards them to the
 /// game-processor worker, where the interactive camera + scene.pick live.
 let cameraInput: CameraInput | null = null;
+/// GW4-c5c-3: unsubscribe handle for the gfx.* → worker `gp:config` push.
+/// Set in startGame, cleared on teardown so we don't leak a subscriber (or
+/// post to a terminated worker) across game sessions.
+let gfxConfigUnsub: (() => void) | null = null;
 /// GW4-c5b-2: the drag-select rectangle overlay. The worker computes the box
 /// (CSS px, canvas-relative) and posts `gp:dragBox`; we draw the div here.
 let dragOverlay: HTMLDivElement | null = null;
@@ -278,6 +282,8 @@ function quitToLobby(): void {
     inputManager = null;
     cameraInput?.dispose();
     cameraInput = null;
+    gfxConfigUnsub?.();
+    gfxConfigUnsub = null;
     animatedCursor?.dispose();
     animatedCursor = null;
     // Game-processor worker owns the Engine + transferred canvas (GW4).
@@ -391,6 +397,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     inputManager = null;
     cameraInput?.dispose();
     cameraInput = null;
+    gfxConfigUnsub?.();
+    gfxConfigUnsub = null;
     buildMenu?.dispose();
     buildMenu = null;
     orderPanel?.dispose();
@@ -455,12 +463,32 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             case 'gp:sceneState':
                 updateHUD(m.entityCount, m.gameFrame, m.selectedUnitIds);
                 updateSpeedHUD(m.simSpeed, m.paused);
+                // GW4-c5c-3: keep the minimap selection rings in sync with the
+                // worker's selection set (the minimap matches ids against blips).
+                minimap?.setSelection(m.selectedUnitIds);
                 // GW4-c5c-2: keep the audio listener glued to the camera so 3D
                 // panning matches the view. Forward = (target - position).
                 if (audioManager) {
                     const c = m.camera;
                     audioManager.setListenerPosition(
                         c.x, c.y, c.z, c.tx - c.x, c.ty - c.y, c.tz - c.z);
+                }
+                break;
+            // GW4-c5c-3: worker minimap feed → main-thread minimap (own Engine).
+            // `map` arrives once (dims + backdrop); `los` only when a new fog
+            // snapshot shipped; blips every feed. Render is driven here (~6 Hz)
+            // since main has no game render loop post-GW4.
+            case 'gp:minimapFeed':
+                if (minimap) {
+                    if (m.map) {
+                        minimap.setMapDimensions(m.map.width, m.map.height);
+                        void minimap.loadBackground(m.map.baseUrl);
+                    }
+                    if (m.los) {
+                        minimap.applyLosBitmap({ allyTeam: 0, frame: 0, ...m.los });
+                    }
+                    minimap.applyFeed(m.blips);
+                    minimap.render();
                 }
                 break;
             // GW4-c5c-2: resolved sound events / music transitions from the worker.
@@ -540,6 +568,35 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // render context was transferred). CameraInput captures them and forwards
     // canvas-relative input to the worker camera (view 0).
     cameraInput = new CameraInput(canvas, gameWorker, 0);
+
+    // GW4-c5c-3: live gfx.* settings → worker. The worker's clientSettings was
+    // seeded with the snapshot in `gp:init`; this forwards every later change so
+    // a quality toggle in the settings panel re-tunes the worker's render
+    // pipeline / FX gating without a restart (the worker routes it through its
+    // own clientSettings.set → subscribers). Only gfx.* keys cross — audio etc.
+    // are owned on main.
+    gfxConfigUnsub = clientSettings.subscribeAll((value, key) => {
+        if (key.startsWith('gfx.')) gameWorker?.postMessage({ type: 'gp:config', key, value });
+    });
+
+    // GW4-c5c-3: minimap on the main thread (own Babylon Engine + DOM canvas
+    // parented to #minimap-container). The entity renderer + connection live in
+    // the worker now, so the minimap takes neither — it renders from the
+    // worker's `gp:minimapFeed` (blips + fog + map dims) via applyFeed. Initial
+    // dims are placeholders; the first feed carries the real map size + backdrop.
+    const minimapContainer = document.getElementById('minimap-container');
+    if (minimapContainer) {
+        minimap = new Minimap(
+            { mapWidth: 8192, mapHeight: 8192, parentElement: minimapContainer, size: 200 },
+            null);
+        // Left-click → re-centre the worker's world camera (the camera is in the
+        // worker; the focus intent crosses the boundary as `gp:focusWorld`).
+        minimap.onCameraMove = (x, z) => {
+            gameWorker?.postMessage({ type: 'gp:focusWorld', x, z });
+        };
+        document.getElementById('detach-minimap-btn')
+            ?.addEventListener('click', () => minimap?.detach());
+    }
 
     // GW4-c5c-2: audio playback chain on the main thread (AudioContext is
     // main-only). The worker resolves SoundEvent → SoundRef against its def

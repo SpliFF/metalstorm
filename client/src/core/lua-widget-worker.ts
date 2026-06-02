@@ -22,7 +22,7 @@
  */
 
 import { Engine, Scene, FreeCamera, Vector3, Color3, Color4, Mesh, MeshBuilder, StandardMaterial } from '@babylonjs/core';
-import type { GpInitToWorker } from './game-worker-protocol.js';
+import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos } from './game-worker-protocol.js';
 // GW4-c2: the WebTransport game connection now lives in the worker. Connection
 // is host-agnostic (runs on WebTransportAdapter, no DOM refs after the
 // onServerRestart callback was extracted) so it imports + runs here unchanged.
@@ -39,7 +39,7 @@ import {
 import { fetchMapDataHttp, type ParsedMapData } from './map-data.js';
 import { loadMapLighting, type MapLighting } from './map-lighting.js';
 import { createSceneLighting, applyMapLighting, type SceneLighting } from './scene-lighting.js';
-import { LosBitmapStore } from './los-bitmap.js';
+import { LosBitmapStore, type LosBitmap } from './los-bitmap.js';
 // GW4-c4: world entity rendering moves into the worker. Side-effect import
 // registers Babylon's KTX2 loader + pins the transcoder URLs (previously only
 // done in main.ts) so unit `.ktx2` textures transcode here.
@@ -56,6 +56,7 @@ import { ProjectileRenderer } from './projectile-renderer.js';
 import { ProjectileTextureResolver } from './projectile-texture-resolver.js';
 import { CegRuntime } from './ceg-runtime.js';
 import { setParticleBudget } from './ceg-translator.js';
+import { clientSettings } from './client-settings.js';
 import { BuildBeamRenderer } from './build-beam-renderer.js';
 import { CombatFX } from './combat-fx.js';
 import { FxLightPool } from './fx-light-pool.js';
@@ -4665,6 +4666,19 @@ let gpPaused = false;
 let gpSimSpeed = 1;
 /// Wall-clock of the last sceneState post (throttled to ~10 Hz).
 let gpLastSceneStatePost = 0;
+/// GW4-c5c-3: minimap feed throttle (~6 Hz — unit dots only need to be roughly
+/// live) + LOS-dirty flag so the (relatively large) fog bitmap only ships when
+/// a new envelope-0x07 snapshot actually arrives, not on every feed.
+let gpLastMinimapPost = 0;
+let gpMinimapLosDirty = false;
+/// Most-recent per-allyteam LOS bitmap, for the minimap fog overlay. Mirrors
+/// the pre-GW4 main.ts behaviour (most-recent-wins; spectators round-robin
+/// ally teams and see one team's vision at a time).
+let gpLastLosBitmap: LosBitmap | null = null;
+/// Map dims + backdrop URL for the main-thread minimap, captured in gpLoadMap.
+/// Sent on the first minimap feed after the terrain is built, then cleared
+/// (`gpMinimapMapInfo = null` ⇒ already delivered).
+let gpMinimapMapInfo: { width: number; height: number; baseUrl: string } | null = null;
 /// GW4-c3: sun + ambient + HDR pipeline + CSM. Created in gpInit (deferred
 /// from c1 — invisible on an empty scene), retuned by applyMapLighting once
 /// the map's `mapinfo.lua → lighting` is fetched + parsed.
@@ -4755,6 +4769,11 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
         ? map.mapSourceUrl
         : `${msg.lobbyUrl}${map.mapSourceUrl}`;
     const mapBaseUrl = `${msg.lobbyUrl}${map.mapDataUrl}`;
+
+    // GW4-c5c-3: hand the main-thread minimap its dims + backdrop URL on the
+    // next feed (the worker owns the map fetch). loadBackground appends
+    // `/minimap.ktx2` to baseUrl, same as the pre-GW4 main path.
+    gpMinimapMapInfo = { width: map.widthElmos, height: map.heightElmos, baseUrl: mapBaseUrl };
 
     const mapDims: MapDimensions = {
         mapx: map.mapx, mapy: map.mapy,
@@ -5029,6 +5048,10 @@ function gpConnect(msg: GpInitToWorker): void {
         onLosBitmap: (bitmap) => {
             gpLosBitmapStore.set(bitmap);
             gpTerrainFog?.apply(bitmap);
+            // GW4-c5c-3: a fresh LOS snapshot → ship the fog bitmap on the next
+            // minimap feed.
+            gpLastLosBitmap = bitmap;
+            gpMinimapLosDirty = true;
             // Ghost preservation: a building killed out of LOS leaves a stale
             // ghost; when its tile is re-LOSed and the server isn't re-
             // streaming it, drop the ghost (it died while unseen).
@@ -5053,6 +5076,15 @@ function gpInit(msg: GpInitToWorker): void {
     }
     const canvas = msg.canvas;
     gpDpr = msg.dpr > 0 ? msg.dpr : 1;
+
+    // GW4-c5c-3: seed the worker's clientSettings cache with the main thread's
+    // gfx.* snapshot BEFORE createSceneLighting / the FX gating below read it.
+    // The worker has no localStorage (set() degrades to cache-only, try/caught),
+    // so without this seed every gfx read returns the registry default rather
+    // than the player's chosen quality. Live changes arrive via `gp:config`.
+    for (const [key, value] of Object.entries(msg.gfx ?? {})) {
+        clientSettings.set(key, value as never);
+    }
     // Size the backing store to the device-pixel resolution; Babylon reads
     // width/height off the canvas. Main keeps CSS sizing on the DOM element.
     canvas.width = Math.max(1, Math.floor(msg.width * msg.dpr));
@@ -5188,10 +5220,32 @@ function gpInit(msg: GpInitToWorker): void {
     dynamicFeatureRenderer.setShadowGenerator(gpSceneLighting.csm);
     gpDynamicFeatureRenderer = dynamicFeatureRenderer;
 
-    // Phase G: size the CEG per-spawn budget. clientSettings degrades to
-    // registry defaults in the worker (no localStorage); the live gfx.* push
-    // is GW4-c5c polish — medium tier is the registry default.
-    setParticleBudget(32, 8.0);
+    // Phase G: gate the expensive FX through the graphics-quality presets
+    // (ports main.ts@d6301137f7^ L434–451 — dropped in the c5a FX move, restored
+    // here now that the gfx snapshot + live `gp:config` push exist). `fireNow`
+    // applies the seeded value immediately; a later `gp:config` re-fires these
+    // via clientSettings.set → notify. `gfx.msaaSamples/fxaa/bloom/
+    // shadowFiltering` are owned by scene-lighting.ts's own subscriptions.
+    {
+        const fxLights = gpFxLightPool;
+        if (fxLights) clientSettings.subscribe('gfx.fxLights',
+            (v) => fxLights.setEnabled(Boolean(v)), /*fireNow*/ true);
+        const distortion = gpDistortion;
+        if (distortion) clientSettings.subscribe('gfx.distortion',
+            (v) => distortion.setEnabled(Boolean(v)), /*fireNow*/ true);
+        // tier → {maxPerSpawn, maxLifetimeS}. particleQuality is read once per
+        // session at CEG ingest (`requiresRestart`), so a live push only takes
+        // effect on the next ingestCegDefs — matching the main-thread semantics.
+        const PARTICLE_TIERS: Array<[number, number]> = [
+            [16, 4.0],   // 0 low
+            [32, 8.0],   // 1 medium
+            [64, 12.0],  // 2 high
+        ];
+        clientSettings.subscribe('gfx.particleQuality', (v) => {
+            const tier = PARTICLE_TIERS[Math.max(0, Math.min(2, Number(v)))];
+            setParticleBudget(tier[0], tier[1]);
+        }, /*fireNow*/ true);
+    }
 
     // New defs → the renderers that consume them. (LuaUI forward to widgets is
     // GW4-c6.)
@@ -5245,6 +5299,8 @@ function gpInit(msg: GpInitToWorker): void {
         scene.render();
         // GW4-c5c: feed the HTML HUD (entity count / frame / selection / speed).
         gpPostSceneState(now);
+        // GW4-c5c-3: feed the main-thread minimap (unit dots + fog overlay).
+        gpPostMinimapFeed(now);
     });
     postLog(1, '[gp] Babylon Engine up on transferred #game-canvas (GW4-c5, weapon FX)');
 
@@ -5334,6 +5390,62 @@ function gpPostSceneState(now: number): void {
         buildGhost: null,
         entityCount: gpEntityRenderer?.entityCount ?? 0,
     });
+}
+
+/// GW4-c5c-3: post the minimap feed to main (~6 Hz). The minimap is a DOM
+/// element with its own Babylon Engine on the main thread (it can't read the
+/// worker's entity renderer), so the worker projects the live entity set down
+/// to compact per-blip arrays. Fog-of-war-hidden units (los===0) are dropped
+/// here so the minimap never leaks their positions — mirrors the pre-GW4
+/// `Minimap.updateEntityInstances` filter, just moved to the producer side.
+/// The LOS fog bitmap only ships when a new envelope-0x07 snapshot arrived
+/// (gpMinimapLosDirty); otherwise `los: null` ⇒ main keeps its current overlay.
+function gpPostMinimapFeed(now: number): void {
+    if (now - gpLastMinimapPost < 160) return;  // ~6 Hz
+    gpLastMinimapPost = now;
+    const er = gpEntityRenderer;
+    if (!er) return;
+
+    // First pass: count visible blips so the typed arrays are exactly sized.
+    let n = 0;
+    for (const [, meta] of er.getEntities()) {
+        if (meta.losState !== 0) n++;
+    }
+    const ids = new Uint32Array(n);
+    const teams = new Uint16Array(n);
+    const xs = new Float32Array(n);
+    const zs = new Float32Array(n);
+    const los = new Uint8Array(n);
+    let i = 0;
+    for (const [id, meta] of er.getEntities()) {
+        if (meta.losState === 0) continue;       // fog of war — never leak
+        const pos = er.getEntityPosition(id);
+        if (!pos) continue;
+        ids[i] = id;
+        teams[i] = meta.team;
+        xs[i] = pos.x;
+        zs[i] = pos.z;
+        los[i] = meta.losState;
+        i++;
+    }
+    const blips: GpMinimapBlips = {
+        // i may be < n if a position was missing; report the filled count.
+        count: i, ids, teams, x: xs, z: zs, los,
+    };
+
+    let losPayload: GpMinimapLos | null = null;
+    if (gpMinimapLosDirty && gpLastLosBitmap) {
+        gpMinimapLosDirty = false;
+        const b = gpLastLosBitmap;
+        losPayload = {
+            width: b.width, height: b.height,
+            inLos: b.inLos, inRadar: b.inRadar, explored: b.explored,
+        };
+    }
+    // Deliver map dims + backdrop URL once (cleared after the first send).
+    const mapInfo = gpMinimapMapInfo ?? undefined;
+    if (gpMinimapMapInfo) gpMinimapMapInfo = null;
+    postToMain({ type: 'gp:minimapFeed', blips, los: losPayload, map: mapInfo });
 }
 
 function gpResize(width: number, height: number, dpr: number): void {
@@ -5494,6 +5606,24 @@ self.onmessage = async (e: MessageEvent) => {
             gpViewCameras.get(msg.viewId ?? 0)?.blur();
             gpSelection?.blur();
             gpSetShift(false);
+            break;
+
+        // GW4-c5c-3: live clientSettings/gfx.* push from main. Routing through
+        // clientSettings.set updates the worker's cache AND fires the subscribers
+        // (scene-lighting's msaa/fxaa/bloom/shadow + the FX-gating block in
+        // gpInit), so a quality toggle on main applies in the worker with no
+        // per-key switch here. (localStorage write inside set() is try/caught —
+        // the worker has none; main owns persistence.)
+        case 'gp:config':
+            try { clientSettings.set(msg.key, msg.value as never); }
+            catch (err) { postLog(2, `[gp] gp:config ${msg.key} failed: ${err}`); }
+            break;
+
+        // GW4-c5c-3: minimap left-click → re-centre the world camera. The
+        // minimap lives on main (own Engine) but the world camera is in the
+        // worker, so the focus intent crosses the boundary.
+        case 'gp:focusWorld':
+            gpViewCameras.get(msg.viewId ?? 0)?.focusOn(msg.x, msg.z);
             break;
 
         case 'gp:shutdown':
