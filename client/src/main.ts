@@ -113,6 +113,15 @@ let distortionRenderer: DistortionRenderer | null = null;
 let muzzleFlareRenderer: MuzzleFlareRenderer | null = null;
 let decalOverlay: DecalOverlay | null = null;
 let audioManager: AudioManager | null = null;
+/// GW4-c5c-2: audio playback stays on the main thread (AudioContext is main-only).
+/// The worker decodes SoundEvents + resolves their SoundRef against its def cache,
+/// then posts resolved pairs (`gp:audioSoundEvents`) / music transitions
+/// (`gp:audioMusic`) here for SoundEventPlayer / MusicDirector to play.
+let soundEventPlayer: SoundEventPlayer | null = null;
+let musicDirector: MusicDirector | null = null;
+/// MusicDirector.arm() gates music start on the scene being live; we open it on
+/// the first scene-state tick from the worker (terrain is up by then).
+let musicArmed = false;
 let inputManager: InputManager | null = null;
 /// GW4-c5b: thin main-thread DOM-input owner for the game view. Captures
 /// pointer/wheel/key events on #game-canvas and forwards them to the
@@ -297,6 +306,10 @@ function quitToLobby(): void {
     distortionRenderer = null;
     muzzleFlareRenderer?.dispose();
     muzzleFlareRenderer = null;
+    musicDirector = null;
+    soundEventPlayer = null;
+    musicArmed = false;
+    audioManager?.dispose();
     audioManager = null;
 
     // Hide the game canvas and HUD. Any in-flight overlays (quit confirm,
@@ -370,6 +383,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     distortionRenderer = null;
     muzzleFlareRenderer?.dispose();
     muzzleFlareRenderer = null;
+    musicDirector = null;
+    soundEventPlayer = null;
+    musicArmed = false;
+    audioManager?.dispose();
     audioManager = null;
     inputManager = null;
     cameraInput?.dispose();
@@ -438,6 +455,22 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             case 'gp:sceneState':
                 updateHUD(m.entityCount, m.gameFrame, m.selectedUnitIds);
                 updateSpeedHUD(m.simSpeed, m.paused);
+                // GW4-c5c-2: keep the audio listener glued to the camera so 3D
+                // panning matches the view. Forward = (target - position).
+                if (audioManager) {
+                    const c = m.camera;
+                    audioManager.setListenerPosition(
+                        c.x, c.y, c.z, c.tx - c.x, c.ty - c.y, c.tz - c.z);
+                }
+                break;
+            // GW4-c5c-2: resolved sound events / music transitions from the worker.
+            case 'gp:audioSoundEvents':
+                soundEventPlayer?.handleResolvedBatch(m.events);
+                break;
+            case 'gp:audioMusic':
+                // Open the music gate on the first transition (scene is live).
+                if (musicDirector && !musicArmed) { musicDirector.arm(); musicArmed = true; }
+                musicDirector?.handleMusicEvent(m.state, m.fadeMs);
                 break;
             case 'gp:gameOver':
                 showGameOver(gameTemplates, m.frame, { onReturnToLobby: quitToLobby });
@@ -507,6 +540,21 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // render context was transferred). CameraInput captures them and forwards
     // canvas-relative input to the worker camera (view 0).
     cameraInput = new CameraInput(canvas, gameWorker, 0);
+
+    // GW4-c5c-2: audio playback chain on the main thread (AudioContext is
+    // main-only). The worker resolves SoundEvent → SoundRef against its def
+    // cache and posts the resolved pairs (`gp:audioSoundEvents`); music
+    // transitions arrive as `gp:audioMusic`. The content base points at the
+    // game's preprocessed `data/games/<id>/` root (where the .webm SFX live).
+    const soundContentBaseUrl = gameId
+        ? `${lobbyHttpUrl}/api/games/data/${gameId}/`
+        : `${lobbyHttpUrl}/`;
+    audioManager = new AudioManager();
+    soundEventPlayer = new SoundEventPlayer(audioManager, soundContentBaseUrl);
+    musicDirector = new MusicDirector(audioManager, soundContentBaseUrl);
+    musicArmed = false;
+    // AudioContext can't start until a user gesture — resume on first click.
+    canvas.addEventListener('click', () => audioManager?.resume(), { once: true });
 
     // The worker owns the Engine + canvas now, so resize is forwarded to it.
     window.addEventListener('resize', () => {

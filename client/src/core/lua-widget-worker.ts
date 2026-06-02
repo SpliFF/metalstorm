@@ -67,6 +67,7 @@ import { attachDecalOverlay } from './decal-overlay-plugin.js';
 import { renderMapFeatures, DynamicFeatureRenderer } from './feature-renderer.js';
 import { RTSCamera } from './rts-camera.js';
 import { WorkerSelection } from './worker-selection.js';
+import { resolveSoundRef, type ResolvedSoundEvent } from './sound-events.js';
 import { CommandPathRenderer } from './command-path-renderer.js';
 import { WaypointMarkerRenderer } from './waypoint-marker-renderer.js';
 import { StandingOrderRenderer } from './standing-order-renderer.js';
@@ -4985,6 +4986,23 @@ function gpConnect(msg: GpInitToWorker): void {
         // GW4-c5b-3: standing orders (always-on overlay; server scopes the
         // broadcast to own + allied teams).
         onStandingOrders: (orders) => gpStandingOrderRenderer?.update(orders),
+        // GW4-c5c-2: audio bridge. The connection decodes SoundEvents here, but
+        // playback needs the main-thread AudioContext. Resolve each event's
+        // SoundRef against the in-worker def cache (the def-dependent step) and
+        // post the resolved pairs to main, where SoundEventPlayer does the
+        // SoundItem/URL resolution + AudioManager.play. Music events forward
+        // straight to main's MusicDirector.
+        onSoundEvents: (events) => {
+            if (!gpDefCache) return;
+            const resolved: ResolvedSoundEvent[] = [];
+            for (const e of events) {
+                const ref = resolveSoundRef(gpDefCache, e.sourceKind as 0 | 1 | 2 | 3,
+                    e.sourceDefId, e.soundId);
+                if (ref) resolved.push({ e, ref });
+            }
+            if (resolved.length) postToMain({ type: 'gp:audioSoundEvents', events: resolved });
+        },
+        onMusicEvent: (state, fadeMs) => postToMain({ type: 'gp:audioMusic', state, fadeMs }),
         // GW4-c5: build/repair/reclaim progress (envelope 0x06) → build beams.
         onBuildActivity: (snapshot) => gpBuildBeamRenderer?.onSnapshot(snapshot),
         // GW4-c5: scar/track decal events (envelope 0x08) → ground decal overlay.

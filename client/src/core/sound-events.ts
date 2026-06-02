@@ -26,26 +26,56 @@ import type { SoundEventInfo, SoundRefInfo } from './connection.js';
 
 type SourceKind = 0 /* Unit */ | 1 /* Weapon */ | 2 /* Feature */ | 3 /* Global */;
 
+/** A SoundEvent with its SoundRef already resolved against the def cache. The
+ *  ref lookup needs the unit/weapon defs; in the game-processor worker (GW4) the
+ *  defs live next to the connection, so the worker resolves the ref there and
+ *  posts these to main, where the AudioContext + AudioManager play them
+ *  (`gp:audioSoundEvents`). Structured-cloneable (both members are plain). */
+export interface ResolvedSoundEvent {
+    e: SoundEventInfo;
+    ref: SoundRefInfo;
+}
+
+/** Resolve the SoundRef for a SoundEvent from the def cache. Free function so
+ *  the worker (which owns the def cache) can resolve before posting to main —
+ *  the player itself no longer needs the def cache. */
+export function resolveSoundRef(
+    defCache: DefCache, kind: SourceKind, defId: number, soundId: number,
+): SoundRefInfo | undefined {
+    let sounds: SoundRefInfo[] | undefined;
+    if (kind === 1) {
+        sounds = defCache.getWeaponDef(defId)?.sounds;
+    } else if (kind === 0) {
+        sounds = defCache.getUnitDef(defId)?.sounds;
+    } else {
+        return undefined;
+    }
+    if (!sounds) return undefined;
+    if (soundId < sounds.length && sounds[soundId].id === soundId) {
+        return sounds[soundId];
+    }
+    return sounds.find((s) => s.id === soundId);
+}
+
 export class SoundEventPlayer {
     private audio: AudioManager;
-    private defCache: DefCache;
     private gameContentBaseUrl: string;
     private pending = new Map<string, Promise<AudioBuffer | null>>();
+    /// URLs that 404'd or failed to decode — never re-fetched (negative cache).
+    private failedUrls = new Set<string>();
 
-    constructor(audio: AudioManager, defCache: DefCache, gameContentBaseUrl: string) {
+    constructor(audio: AudioManager, gameContentBaseUrl: string) {
         this.audio = audio;
-        this.defCache = defCache;
         this.gameContentBaseUrl = gameContentBaseUrl.replace(/\/+$/, '') + '/';
     }
 
-    handleBatch(events: SoundEventInfo[]): void {
-        for (const e of events) this.handleOne(e);
+    /** Play a batch of pre-resolved sound events (refs resolved upstream — in
+     *  the worker for GW4, since the def cache lives there). */
+    handleResolvedBatch(items: ResolvedSoundEvent[]): void {
+        for (const it of items) this.playResolved(it.e, it.ref);
     }
 
-    private handleOne(e: SoundEventInfo): void {
-        const ref = this.lookupSoundRef(e.sourceKind as SourceKind, e.sourceDefId, e.soundId);
-        if (!ref) return;
-
+    private playResolved(e: SoundEventInfo, ref: SoundRefInfo): void {
         // Resolve SoundItem (per gamedata/sounds.lua) if a name is set.
         const item: SoundItem | undefined =
             ref.name ? this.audio.resolveSoundItem(ref.name) : undefined;
@@ -90,6 +120,12 @@ export class SoundEventPlayer {
         const rolloff = item?.rolloff;
         const maxDist = item?.maxdist;
 
+        // Negative cache: a sound whose .webm is missing (404) or fails to decode
+        // resolves to null. Without remembering that, every repeat of the event
+        // (e.g. a weapon firing each second) re-fetches the missing file —
+        // flooding the network + log server. Skip URLs we've already seen fail.
+        if (this.failedUrls.has(url)) return;
+
         const cached = this.audio.getBuffer(url);
         if (cached) {
             this.audio.play({
@@ -105,7 +141,7 @@ export class SoundEventPlayer {
         this.pending.set(url, promise);
         promise.then((buf) => {
             this.pending.delete(url);
-            if (!buf) return;
+            if (!buf) { this.failedUrls.add(url); return; }
             this.audio.play({
                 buffer: buf,
                 x: e.x, y: e.y, z: e.z,
@@ -115,19 +151,4 @@ export class SoundEventPlayer {
         });
     }
 
-    private lookupSoundRef(kind: SourceKind, defId: number, soundId: number): SoundRefInfo | undefined {
-        let sounds: SoundRefInfo[] | undefined;
-        if (kind === 1) {
-            sounds = this.defCache.getWeaponDef(defId)?.sounds;
-        } else if (kind === 0) {
-            sounds = this.defCache.getUnitDef(defId)?.sounds;
-        } else {
-            return undefined;
-        }
-        if (!sounds) return undefined;
-        if (soundId < sounds.length && sounds[soundId].id === soundId) {
-            return sounds[soundId];
-        }
-        return sounds.find((s) => s.id === soundId);
-    }
 }
