@@ -65,6 +65,7 @@ import { MuzzleFlareRenderer } from './muzzle-flare-renderer.js';
 import { DecalOverlay, buildTrackTypeNames } from './decal-overlay.js';
 import { attachDecalOverlay } from './decal-overlay-plugin.js';
 import { renderMapFeatures, DynamicFeatureRenderer } from './feature-renderer.js';
+import { RTSCamera } from './rts-camera.js';
 import { LuaRuntime, type LuaValue, luaTable } from './lua-runtime.js';
 import { LuaGLBridge } from './lua-gl-bridge.js';
 import {
@@ -4618,6 +4619,13 @@ function shutdown(): void {
 let gpEngine: Engine | null = null;
 let gpScene: Scene | null = null;
 let gpCamera: FreeCamera | null = null;
+/// GW4-c5b: interactive RTS cameras, keyed by viewId (multi-view, one Scene /
+/// N camera→canvas views — PLAN-game-worker.md). Each owns one Babylon camera +
+/// the pan/zoom/orbit state machine + scene.pick + viewport send, driven by the
+/// `gp:*` input the main-thread CameraInput forwards. c5b ships a single view
+/// (id 0); the map keeps adding views cheap. The DOM-input split moved the event
+/// listeners to camera-input.ts on main; RTSCamera is now DOM-free.
+const gpViewCameras = new Map<number, RTSCamera>();
 /// GW4-c3: sun + ambient + HDR pipeline + CSM. Created in gpInit (deferred
 /// from c1 — invisible on an empty scene), retuned by applyMapLighting once
 /// the map's `mapinfo.lua → lighting` is fetched + parsed.
@@ -4737,11 +4745,18 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
         map.minHeight, map.maxHeight, map.squareSize,
     );
 
-    // Frame the camera over map centre (static — interactive camera = c5).
+    // GW4-c5b: frame the interactive camera over map centre and hand it the map
+    // bounds (for fitMap / future edge clamping). recomputeAxes() re-seeds the
+    // RTSCamera's look-at + pan/right axes from the new pose so the first pan
+    // moves in the right direction. Keeps the same starting framing as c3–c5a;
+    // now pan/zoom/orbit are live off the forwarded input.
     const cx = map.widthElmos / 2;
     const cz = map.heightElmos / 2;
     gpCamera.position.set(cx, 1200, cz - 1500);
     gpCamera.setTarget(new Vector3(cx, 0, cz));
+    const rtsCam = gpViewCameras.get(0);
+    rtsCam?.setMapBounds(map.widthElmos, map.heightElmos);
+    rtsCam?.recomputeAxes();
 
     // Fog-of-war overlay (envelope 0x07). Sits just above terrain in
     // renderingGroupId=1; never a shadow caster (map-sized blob).
@@ -4822,12 +4837,22 @@ async function gpRegisterViewport(lobbyUrl: string, mapId: string): Promise<void
     } catch (err) {
         postLog(2, `[gp] map metadata fetch failed (${err}); using default viewport center`);
     }
-    // 16384² matches viewport.ts's pragmatic "cover any current map" box.
-    const send = () => gpConnection?.sendViewportUpdate(0, centerX, centerZ, 16384, 16384, 0, 1);
+    // GW4-c5b: track the interactive camera — centre the viewport on the camera
+    // look-at so the server filters around where the player is looking. The size
+    // stays a generous 16384² ("cover any current map", viewport.ts) so entities
+    // never pop on these test maps; a tighter frustum-derived box is a later
+    // optimisation that matters for large MMORTS maps, not c5b. Rotation 0 / zoom
+    // 1 are placeholders until the LOD path lands.
+    const send = () => {
+        const cam = gpViewCameras.get(0);
+        const t = cam?.target;
+        gpConnection?.sendViewportUpdate(
+            0, t ? t.x : centerX, t ? t.z : centerZ, 16384, 16384, 0, 1);
+    };
     send();
     if (gpViewportTimer) clearInterval(gpViewportTimer);
     gpViewportTimer = setInterval(send, 1000);
-    postLog(1, `[gp] viewport registered (center ${centerX.toFixed(0)},${centerZ.toFixed(0)}, full-map) — entity stream should follow`);
+    postLog(1, `[gp] viewport registered (camera-tracked, default center ${centerX.toFixed(0)},${centerZ.toFixed(0)}) — entity stream should follow`);
 }
 
 /// GW4-c2: stand up the in-worker connection. Discovers `/api/wt/info` from
@@ -5004,6 +5029,14 @@ function gpInit(msg: GpInitToWorker): void {
     entityRenderer.setShadowGenerator(gpSceneLighting.csm, gpSceneLighting.sun);
     gpEntityRenderer = entityRenderer;
 
+    // GW4-c5b: interactive RTS camera for view 0 (DOM-free; driven by the
+    // forwarded `gp:*` input). Ground sampler = the entity renderer's heightmap
+    // (resolves once gpLoadMap calls setMapHeightmap) so the camera never dives
+    // through terrain. Map bounds + initial framing are applied in gpLoadMap.
+    const rtsCam = new RTSCamera(camera, msg.width, msg.height, msg.dpr);
+    rtsCam.setGroundSampler((x, z) => gpEntityRenderer?.getGroundHeight(x, z) ?? 0);
+    gpViewCameras.set(0, rtsCam);
+
     // PLAN-decals.md D5: static under-building ground plates (AO/scorch).
     const buildingPlateRenderer = new BuildingPlateRenderer(scene);
     if (msg.gameId) buildingPlateRenderer.setGame(msg.gameId, msg.lobbyUrl);
@@ -5089,6 +5122,11 @@ function gpInit(msg: GpInitToWorker): void {
         // use fxDt (PLAN-weapon-fx-capture-arch fxDt).
         const fxDt = dt * gpFxSimSpeed;
 
+        // GW4-c5b: advance the interactive camera(s) first so this frame's
+        // render + pick + viewport use the updated pose. Raw wall dt (the camera
+        // is not sim-scaled). tick() handles its own per-call timing internally.
+        for (const cam of gpViewCameras.values()) cam.tick();
+
         // entityRenderer.tick() advances the presentation clock (L0) and
         // interpolates every unit to the presentation cursor before render.
         gpEntityRenderer?.tick();
@@ -5131,10 +5169,15 @@ function gpResize(width: number, height: number, dpr: number): void {
         c.height = Math.max(1, Math.floor(height * dpr));
     }
     gpEngine.resize();
+    // GW4-c5b: keep the camera's CSS-pixel viewport + dpr in sync so edge-scroll
+    // bands and scene.pick (which scales by dpr) stay correct after a resize.
+    for (const cam of gpViewCameras.values()) cam.setViewportSize(width, height, dpr);
 }
 
 function gpShutdown(): void {
     if (gpViewportTimer) { clearInterval(gpViewportTimer); gpViewportTimer = null; }
+    for (const cam of gpViewCameras.values()) cam.dispose();
+    gpViewCameras.clear();
     gpConnection?.disconnect();
     gpConnection = null;
     gpEntityRenderer?.dispose();
@@ -5227,6 +5270,33 @@ self.onmessage = async (e: MessageEvent) => {
 
         case 'gp:resize':
             gpResize(msg.width, msg.height, msg.dpr);
+            break;
+
+        // GW4-c5b: interactive camera input forwarded by the main-thread
+        // CameraInput. Routed per-view (multi-view); absent viewId ⇒ view 0.
+        // Coordinates are canvas-relative CSS px, origin top-left (Babylon's
+        // native screen space — see game-worker-protocol.ts).
+        case 'gp:pointermove':
+            gpViewCameras.get(msg.viewId ?? 0)?.pointerMove(msg.x, msg.y, msg.buttons);
+            break;
+        case 'gp:pointerdown':
+            gpViewCameras.get(msg.viewId ?? 0)?.pointerDown(msg.x, msg.y, msg.button, msg.mods);
+            break;
+        case 'gp:pointerup':
+            gpViewCameras.get(msg.viewId ?? 0)?.pointerUp(msg.x, msg.y, msg.button, msg.mods);
+            break;
+        case 'gp:wheel':
+            gpViewCameras.get(msg.viewId ?? 0)?.wheel(msg.x, msg.y, msg.delta);
+            break;
+        case 'gp:keydown':
+            // RTSCamera matches lowercased KeyboardEvent.code (e.g. 'arrowup').
+            gpViewCameras.get(msg.viewId ?? 0)?.keyDown(String(msg.code).toLowerCase());
+            break;
+        case 'gp:keyup':
+            gpViewCameras.get(msg.viewId ?? 0)?.keyUp(String(msg.code).toLowerCase());
+            break;
+        case 'gp:blur':
+            gpViewCameras.get(msg.viewId ?? 0)?.blur();
             break;
 
         case 'gp:shutdown':

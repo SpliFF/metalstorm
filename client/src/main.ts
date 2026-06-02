@@ -56,7 +56,7 @@ import { sendCameraViewport } from './core/viewport.js';
 import { installCameraWindowApi, uninstallCameraWindowApi } from './core/camera-window-api.js';
 import { fetchAndIngestDefs } from './core/defs-fetch.js';
 import { renderMapFeatures, DynamicFeatureRenderer } from './core/feature-renderer.js';
-import { RTSCamera } from './core/rts-camera.js';
+import { CameraInput } from './core/camera-input.js';
 import { LuaWidgetManager } from './core/lua-widget-manager.js';
 import { TestHarness } from './core/test-harness.js';
 import { ScenarioRunner } from './scenarios/runner.js';
@@ -114,6 +114,10 @@ let muzzleFlareRenderer: MuzzleFlareRenderer | null = null;
 let decalOverlay: DecalOverlay | null = null;
 let audioManager: AudioManager | null = null;
 let inputManager: InputManager | null = null;
+/// GW4-c5b: thin main-thread DOM-input owner for the game view. Captures
+/// pointer/wheel/key events on #game-canvas and forwards them to the
+/// game-processor worker, where the interactive camera + scene.pick live.
+let cameraInput: CameraInput | null = null;
 let animatedCursor: AnimatedCursor | null = null;
 let buildMenu: BuildMenu | null = null;
 let orderPanel: OrderPanel | null = null;
@@ -236,6 +240,8 @@ function quitToLobby(): void {
     lastCommandQueues = [];
     inputManager?.dispose();
     inputManager = null;
+    cameraInput?.dispose();
+    cameraInput = null;
     animatedCursor?.dispose();
     animatedCursor = null;
     // Game-processor worker owns the Engine + transferred canvas (GW4).
@@ -339,6 +345,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     muzzleFlareRenderer = null;
     audioManager = null;
     inputManager = null;
+    cameraInput?.dispose();
+    cameraInput = null;
     buildMenu?.dispose();
     buildMenu = null;
     orderPanel?.dispose();
@@ -441,6 +449,12 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             localStorage.getItem('luaui:standing-order-show-allies') === 'true',
     };
     gameWorker.postMessage(init, [offscreen]);
+
+    // GW4-c5b: the interactive camera + scene.pick live in the worker, but the
+    // canvas still receives DOM pointer/wheel events on the main thread (only its
+    // render context was transferred). CameraInput captures them and forwards
+    // canvas-relative input to the worker camera (view 0).
+    cameraInput = new CameraInput(canvas, gameWorker, 0);
 
     // The worker owns the Engine + canvas now, so resize is forwarded to it.
     window.addEventListener('resize', () => {

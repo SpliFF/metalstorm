@@ -54,20 +54,27 @@ export interface GpInitToWorker {
 }
 
 /**
- * Raw input forwarded from the main-thread DOM listeners. Coordinates are
- * canvas-relative and Y-flipped (origin bottom-left) — the same convention the
- * existing widget input-forward path already uses. `mods` is a bitmask:
- * 1=shift, 2=ctrl, 4=alt, 8=meta.
+ * Raw input forwarded from the main-thread `CameraInput` DOM listeners.
+ * Coordinates are canvas-relative CSS pixels, origin **top-left, y-down** —
+ * Babylon's native screen space (so `scene.pick` and the camera math consume
+ * them directly; the worker scales by dpr for picking). The LuaUI widget callins
+ * that want Spring's bottom-left convention get a single `canvasH - y` flip at
+ * the worker boundary (GW4-c6). `mods` is a bitmask: 1=shift, 2=ctrl, 4=alt,
+ * 8=meta.
+ *
+ * `viewId` routes the input to the matching WorkerCamera in the worker's
+ * `Map<viewId, WorkerCamera>` (multi-view, PLAN-game-worker.md). Optional;
+ * absent ⇒ view 0. c5b ships a single view (id 0).
  */
 export type GpInputToWorker =
-    | { type: 'gp:pointermove'; x: number; y: number; buttons: number; mods: number }
-    | { type: 'gp:pointerdown'; x: number; y: number; button: number; mods: number }
-    | { type: 'gp:pointerup'; x: number; y: number; button: number; mods: number }
-    | { type: 'gp:wheel'; x: number; y: number; delta: number; mods: number }
-    | { type: 'gp:keydown'; code: string; mods: number }
-    | { type: 'gp:keyup'; code: string; mods: number }
-    | { type: 'gp:blur' }
-    | { type: 'gp:resize'; width: number; height: number; dpr: number };
+    | { type: 'gp:pointermove'; x: number; y: number; buttons: number; mods: number; viewId?: number }
+    | { type: 'gp:pointerdown'; x: number; y: number; button: number; mods: number; viewId?: number }
+    | { type: 'gp:pointerup'; x: number; y: number; button: number; mods: number; viewId?: number }
+    | { type: 'gp:wheel'; x: number; y: number; delta: number; mods: number; viewId?: number }
+    | { type: 'gp:keydown'; code: string; mods: number; viewId?: number }
+    | { type: 'gp:keyup'; code: string; mods: number; viewId?: number }
+    | { type: 'gp:blur'; viewId?: number }
+    | { type: 'gp:resize'; width: number; height: number; dpr: number; viewId?: number };
 
 /** Live push of a single clientSettings/gfx key change (init carries the snapshot). */
 export interface GpConfigToWorker {
@@ -103,6 +110,8 @@ export interface GpSelectedUnit {
  */
 export interface GpSceneStateToMain {
     type: 'gp:sceneState';
+    /** Source view (multi-view, PLAN-game-worker.md). Absent ⇒ view 0. */
+    viewId?: number;
     selectedUnitIds: number[];
     selected: GpSelectedUnit[];
     hovered: { id: number } | null;
