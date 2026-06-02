@@ -53,7 +53,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -91,6 +93,27 @@ constexpr uint64_t kSetEnableConnectProtocol = 0x08;
 constexpr uint64_t kSetH3Datagram = 0x33;
 constexpr uint64_t kSetEnableWebtransport = 0x2b603742; // draft-02 (Chrome)
 constexpr uint64_t kSetWebtransportMaxSessions = 0xc671706a; // draft-04+ (belt-and-braces)
+
+// Verbose ngtcp2 transport logging, gated on the SPRING_QUIC_LOG env var so it
+// costs nothing in production. When on, ngtcp2's per-frame trace + our
+// CONNECTION_CLOSE dumps go to stderr — the fast path to reading exactly why a
+// peer (e.g. Chrome) tore the session down.
+bool QuicLogEnabled() {
+    static const bool on = []() {
+        const char* v = std::getenv("SPRING_QUIC_LOG");
+        return v && v[0] && v[0] != '0';
+    }();
+    return on;
+}
+
+void QuicLogCb(void* /*user_data*/, const char* fmt, ...) {
+    std::fputs("[quic] ", stderr);
+    va_list ap;
+    va_start(ap, fmt);
+    std::vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    std::fputc('\n', stderr);
+}
 
 ngtcp2_tstamp NowNs() {
     using namespace std::chrono;
@@ -238,7 +261,10 @@ struct WtConn {
     int64_t qpackDecId = -1;    // server QPACK decoder stream
     int64_t sessionId = -1;     // CONNECT request stream id (== WT session id)
     int64_t controlBidiId = -1; // client control bidi stream (server writes here too)
-    int64_t lastStateUni = -1;  // newest-wins: last server state uni stream
+    // newest-wins, keyed by lane: the last server State uni stream for each
+    // logical stream. A new State send on lane L resets only lastStateUni[L], so
+    // independent State streams (entity, piece) don't clobber one another.
+    std::unordered_map<uint32_t, int64_t> lastStateUni;
     bool wtEstablished = false;
 
     // Per-stream inbound + outbound.
@@ -253,7 +279,8 @@ struct WtConn {
     // Uni-stream sends (state/vision/bulk) that couldn't open a stream yet
     // because the peer's uni-stream limit is momentarily exhausted (a burst).
     // Retried as the peer raises the limit via MAX_STREAMS.
-    std::deque<std::pair<StreamClass, std::vector<uint8_t>>> pendingUni;
+    struct PendingUni { StreamClass cls; uint32_t lane; std::vector<uint8_t> data; };
+    std::deque<PendingUni> pendingUni;
 };
 
 // ───────────────────────────────── Impl ─────────────────────────────────────
@@ -279,7 +306,7 @@ struct WebTransportServerImpl {
     std::vector<ClientID> disconnects;
 
     std::mutex txMutex;
-    struct PendingTx { ClientID clientId; bool broadcast; StreamClass cls; std::vector<uint8_t> data; };
+    struct PendingTx { ClientID clientId; bool broadcast; StreamClass cls; uint32_t lane; std::vector<uint8_t> data; };
     std::vector<PendingTx> pendingTx;
 
     bool GenerateSelfSigned();
@@ -304,8 +331,8 @@ struct WebTransportServerImpl {
     OutStream& EnsureOut(WtConn* c, int64_t sid);
     void AppendOut(WtConn* c, int64_t sid, const uint8_t* d, size_t n);
     void SendControl(WtConn* c, const uint8_t* d, size_t n);
-    bool TryOpenUni(WtConn* c, StreamClass cls, const uint8_t* d, size_t n);
-    void SendWtUni(WtConn* c, StreamClass cls, const uint8_t* d, size_t n);
+    bool TryOpenUni(WtConn* c, StreamClass cls, uint32_t lane, const uint8_t* d, size_t n);
+    void SendWtUni(WtConn* c, StreamClass cls, uint32_t lane, const uint8_t* d, size_t n);
     void DrainPendingUni(WtConn* c);
     void SendDatagram(WtConn* c, const uint8_t* d, size_t n);
     void DrainPendingTx();
@@ -501,6 +528,7 @@ WtConn* WebTransportServerImpl::AcceptConn(const ngtcp2_pkt_hd& hd, const sockad
     ngtcp2_settings settings;
     ngtcp2_settings_default(&settings);
     settings.initial_ts = NowNs();
+    if (QuicLogEnabled()) settings.log_printf = QuicLogCb;
 
     ngtcp2_transport_params params;
     ngtcp2_transport_params_default(&params);
@@ -511,6 +539,13 @@ WtConn* WebTransportServerImpl::AcceptConn(const ngtcp2_pkt_hd& hd, const sockad
     params.initial_max_stream_data_uni = 512 * 1024;
     params.initial_max_data = 8 * 1024 * 1024;
     params.max_datagram_frame_size = 1500; // enable QUIC datagrams (WT datagrams)
+    // Advertise an idle timeout so a half-dead peer is reaped, and (paired with
+    // the keep-alive set below) so an *idle* session — e.g. a connected client
+    // not yet receiving entity state — is held open by PINGs rather than silently
+    // ageing out. Without this the effective timeout is solely the peer's, and a
+    // gap in traffic could drop the link (the "unstable even before streaming"
+    // symptom). 30 s is comfortably longer than the keep-alive interval.
+    params.max_idle_timeout = 30 * NGTCP2_SECONDS;
     params.original_dcid = hd.dcid;
     params.original_dcid_present = 1;
 
@@ -523,6 +558,10 @@ WtConn* WebTransportServerImpl::AcceptConn(const ngtcp2_pkt_hd& hd, const sockad
         SSL_free(c->ssl); ngtcp2_crypto_ossl_ctx_del(c->osslCtx); delete c; return nullptr;
     }
     ngtcp2_conn_set_tls_native_handle(c->conn, c->osslCtx);
+    // Keep an otherwise-idle connection alive with QUIC PINGs. The browser holds
+    // the session open even during lulls in the entity stream; without this the
+    // connection can idle out (see max_idle_timeout above). Interval < idle.
+    ngtcp2_conn_set_keep_alive_timeout(c->conn, 10 * NGTCP2_SECONDS);
 
     conns[c->clientId] = c;
     cidToClient[MakeCidKey(scid.data, scid.datalen)] = c->clientId;
@@ -794,7 +833,7 @@ void WebTransportServerImpl::OnAppMessage(WtConn* c, StreamClass cls,
         switch (cls) {
             case StreamClass::Control: SendControl(c, d, n); break;
             case StreamClass::Datagram: SendDatagram(c, d, n); break;
-            default: SendWtUni(c, cls, d, n); break;
+            default: SendWtUni(c, cls, 0, d, n); break;
         }
         return;
     }
@@ -830,7 +869,8 @@ void WebTransportServerImpl::SendControl(WtConn* c, const uint8_t* d, size_t n) 
 // Open a fresh server uni stream, frame the payload (0x54 + sessionId), and
 // queue it for sending. Returns false if the peer's uni-stream limit is
 // momentarily exhausted (caller should buffer + retry).
-bool WebTransportServerImpl::TryOpenUni(WtConn* c, StreamClass cls, const uint8_t* d, size_t n) {
+bool WebTransportServerImpl::TryOpenUni(WtConn* c, StreamClass cls, uint32_t lane,
+                                        const uint8_t* d, size_t n) {
     int64_t sid = -1;
     if (ngtcp2_conn_open_uni_stream(c->conn, &sid, nullptr) != 0) return false;
     uint8_t hdr[16];
@@ -844,37 +884,52 @@ bool WebTransportServerImpl::TryOpenUni(WtConn* c, StreamClass cls, const uint8_
     o.finQueued = true; // one-shot: FIN after payload
 
     if (cls == StreamClass::State) {
-        // Newest-wins: reset the prior in-flight state stream (stale positions).
-        if (c->lastStateUni >= 0 && c->lastStateUni != sid) {
-            auto it = c->out.find(c->lastStateUni);
-            if (it != c->out.end() && !it->second.finSent)
-                ngtcp2_conn_shutdown_stream_write(c->conn, 0, c->lastStateUni, 0);
+        // Newest-wins, per lane: reset the prior in-flight State stream *on this
+        // lane only* (stale positions). Keying on the lane is what lets several
+        // distinct State streams (entity, piece, …) coexist — a shared key would
+        // make each new send reset whichever State stream went out last, so the
+        // entity snapshot would be RESET by the piece snapshot sent right after
+        // it in the same tick and never reach the client.
+        int64_t& last = c->lastStateUni[lane];
+        if (last >= 0 && last != sid) {
+            auto it = c->out.find(last);
+            if (it != c->out.end() && !it->second.finSent) {
+                ngtcp2_conn_shutdown_stream_write(c->conn, 0, last, 0);
+                // Stop tracking the reset stream for flush: its app bytes are
+                // abandoned and ngtcp2 emits the RESET_STREAM frame itself. Left
+                // in c->out it would never reach finSent (we FIN-less reset it),
+                // so it would leak and force a STREAM_SHUT_WR retry every flush.
+                c->out.erase(it);
+                for (auto oit = c->outOrder.begin(); oit != c->outOrder.end(); ++oit)
+                    if (*oit == last) { c->outOrder.erase(oit); break; }
+            }
         }
-        c->lastStateUni = sid;
+        last = sid;
     }
     return true;
 }
 
-void WebTransportServerImpl::SendWtUni(WtConn* c, StreamClass cls, const uint8_t* d, size_t n) {
+void WebTransportServerImpl::SendWtUni(WtConn* c, StreamClass cls, uint32_t lane,
+                                      const uint8_t* d, size_t n) {
     if (c->sessionId < 0) return;
     // Preserve order: if a backlog exists, queue behind it rather than jumping.
-    if (!c->pendingUni.empty() || !TryOpenUni(c, cls, d, n)) {
+    if (!c->pendingUni.empty() || !TryOpenUni(c, cls, lane, d, n)) {
         // Cap the backlog so a stalled client can't grow it without bound; drop
         // the oldest State frame first (newest-wins makes stale positions cheap).
         if (c->pendingUni.size() >= 512) {
             for (auto it = c->pendingUni.begin(); it != c->pendingUni.end(); ++it) {
-                if (it->first == StreamClass::State) { c->pendingUni.erase(it); break; }
+                if (it->cls == StreamClass::State) { c->pendingUni.erase(it); break; }
             }
             if (c->pendingUni.size() >= 512) c->pendingUni.pop_front();
         }
-        c->pendingUni.emplace_back(cls, std::vector<uint8_t>(d, d + n));
+        c->pendingUni.push_back({cls, lane, std::vector<uint8_t>(d, d + n)});
     }
 }
 
 void WebTransportServerImpl::DrainPendingUni(WtConn* c) {
     while (!c->pendingUni.empty()) {
         auto& f = c->pendingUni.front();
-        if (!TryOpenUni(c, f.first, f.second.data(), f.second.size())) break;
+        if (!TryOpenUni(c, f.cls, f.lane, f.data.data(), f.data.size())) break;
         c->pendingUni.pop_front();
     }
 }
@@ -901,7 +956,7 @@ void WebTransportServerImpl::DrainPendingTx() {
             switch (tx.cls) {
                 case StreamClass::Control:  SendControl(c, tx.data.data(), tx.data.size()); break;
                 case StreamClass::Datagram: SendDatagram(c, tx.data.data(), tx.data.size()); break;
-                default:                    SendWtUni(c, tx.cls, tx.data.data(), tx.data.size()); break;
+                default:                    SendWtUni(c, tx.cls, tx.lane, tx.data.data(), tx.data.size()); break;
             }
         };
         if (tx.broadcast) {
@@ -983,6 +1038,8 @@ void WebTransportServerImpl::FlushConn(WtConn* c) {
                 if (os) os->blockedThisRound = true; // retry next FlushConn
                 continue;
             }
+            std::fprintf(stderr, "[webtransport] conn=%u writev_stream failed rv=%d (%s) — closing\n",
+                         c->clientId, (int)n, ngtcp2_strerror((int)n));
             CloseConn(c);
             return;
         }
@@ -1076,8 +1133,28 @@ void WebTransportServerImpl::Run() {
                 ngtcp2_pkt_info pi{};
                 int rrv = ngtcp2_conn_read_pkt(c->conn, &ps.path, &pi, buf, (size_t)rd, NowNs());
                 if (rrv != 0) {
-                    if (rrv == NGTCP2_ERR_DRAINING || rrv == NGTCP2_ERR_DROP_CONN)
+                    if (rrv == NGTCP2_ERR_DRAINING || rrv == NGTCP2_ERR_DROP_CONN) {
+                        // The peer sent a CONNECTION_CLOSE (or we must drop). Dump
+                        // the received close — for a Chrome-initiated teardown this
+                        // is exactly the error code + reason behind a JS-side
+                        // "source=session, Connection lost." (GW4-c2 blocker).
+                        const ngtcp2_ccerr* cc = ngtcp2_conn_get_ccerr(c->conn);
+                        if (cc) {
+                            std::fprintf(stderr,
+                                "[webtransport] conn=%u closed by peer: ccerr type=%d code=%llu frame=0x%llx reason=\"%.*s\"\n",
+                                c->clientId, (int)cc->type,
+                                (unsigned long long)cc->error_code,
+                                (unsigned long long)cc->frame_type,
+                                (int)cc->reasonlen, cc->reason ? (const char*)cc->reason : "");
+                        } else {
+                            std::fprintf(stderr, "[webtransport] conn=%u dropped (rv=%d)\n",
+                                         c->clientId, rrv);
+                        }
                         CloseConn(c);
+                    } else if (QuicLogEnabled()) {
+                        std::fprintf(stderr, "[webtransport] conn=%u read_pkt rv=%d (%s)\n",
+                                     c->clientId, rrv, ngtcp2_strerror(rrv));
+                    }
                     continue;
                 }
             }
@@ -1152,14 +1229,15 @@ bool WebTransportServer::Start(int port, const std::string& certPem, const std::
 std::string WebTransportServer::CertHash() const { return impl_->certHashHex; }
 
 void WebTransportServer::SendStream(ClientID clientId, StreamClass cls,
-                                    const uint8_t* data, size_t len) {
+                                    const uint8_t* data, size_t len, uint32_t lane) {
     std::lock_guard<std::mutex> lk(impl_->txMutex);
-    impl_->pendingTx.push_back({clientId, false, cls, std::vector<uint8_t>(data, data + len)});
+    impl_->pendingTx.push_back({clientId, false, cls, lane, std::vector<uint8_t>(data, data + len)});
 }
 
-void WebTransportServer::BroadcastStream(StreamClass cls, const uint8_t* data, size_t len) {
+void WebTransportServer::BroadcastStream(StreamClass cls, const uint8_t* data, size_t len,
+                                         uint32_t lane) {
     std::lock_guard<std::mutex> lk(impl_->txMutex);
-    impl_->pendingTx.push_back({0, true, cls, std::vector<uint8_t>(data, data + len)});
+    impl_->pendingTx.push_back({0, true, cls, lane, std::vector<uint8_t>(data, data + len)});
 }
 
 std::vector<InboundMessage> WebTransportServer::DrainInbound() {

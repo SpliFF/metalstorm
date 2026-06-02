@@ -2022,6 +2022,14 @@ int main(int argc, char* argv[])
         }
         }
 
+        // Newest-wins lanes for the State tier (WebTransportServer GW2). Each
+        // distinct logical State stream needs its own lane so a new send only
+        // supersedes the prior send of the *same* stream — sharing a lane would
+        // make the piece snapshot RESET the entity snapshot queued microseconds
+        // earlier in the same tick (and vice-versa), so neither would arrive.
+        constexpr uint32_t kStateLaneEntity = 0;
+        constexpr uint32_t kStateLanePiece  = 1;
+
         // Send entity state to connected clients every 3 ticks (~10 Hz)
         // Full snapshot every 30 ticks (~1s), delta updates otherwise.
         // Envelope: 0x02 = full snapshot, 0x03 = delta update.
@@ -2083,7 +2091,10 @@ int main(int argc, char* argv[])
                 frame.reserve(1 + stateData.size());
                 frame.push_back(envelope);
                 frame.insert(frame.end(), stateData.begin(), stateData.end());
-                rtcServer.SendUnreliable(clientId, frame.data(), frame.size());
+                // State tier, lane "entity": newest-wins against the prior entity
+                // snapshot only. Piece state uses a separate lane (below) so the
+                // two don't RESET each other before either transmits.
+                rtcServer.SendUnreliable(clientId, frame.data(), frame.size(), kStateLaneEntity);
             });
         }
         }
@@ -2130,7 +2141,9 @@ int main(int argc, char* argv[])
                 pieceFrame.reserve(1 + pieceData.size());
                 pieceFrame.push_back(Protocol::ENVELOPE_PIECE_STATE);
                 pieceFrame.insert(pieceFrame.end(), pieceData.begin(), pieceData.end());
-                rtcServer.SendUnreliable(clientId, pieceFrame.data(), pieceFrame.size());
+                // State tier, lane "piece": newest-wins independently of entity.
+                rtcServer.SendUnreliable(clientId, pieceFrame.data(), pieceFrame.size(),
+                                         kStateLanePiece);
             });
         }
         }
@@ -2160,7 +2173,12 @@ int main(int argc, char* argv[])
                 baFrame.reserve(1 + baData.size());
                 baFrame.push_back(Protocol::ENVELOPE_BUILD_ACTIVITY);
                 baFrame.insert(baFrame.end(), baData.begin(), baData.end());
-                rtcServer.SendUnreliable(clientId, baFrame.data(), baFrame.size());
+                // Vision tier (reliable uni, GW2): build progress must not be
+                // dropped/superseded — the client ages beams off the snapshot, and
+                // a skipped "build complete" frame would leave a ghost beam. Lower
+                // priority than per-frame State so it never blocks entity updates.
+                rtcServer.SendStream(clientId, StreamClass::Vision,
+                                     baFrame.data(), baFrame.size());
             });
         }
         }
@@ -2607,7 +2625,11 @@ int main(int argc, char* argv[])
                 if (viewerAllyTeam >= 0) {
                     auto bitmap = intelEvents->BuildLosBitmap(viewerAllyTeam, frameNo);
                     if (!bitmap.empty())
-                        rtcServer.SendReliable(clientId, bitmap.data(), bitmap.size());
+                        // Vision tier (reliable uni, GW2): a LOS bitmap can be
+                        // large; on its own stream it can't head-of-line-block
+                        // the control bidi (commands/ACKs/chat).
+                        rtcServer.SendStream(clientId, StreamClass::Vision,
+                                             bitmap.data(), bitmap.size());
                     return;
                 }
 
@@ -2619,7 +2641,8 @@ int main(int argc, char* argv[])
                     const int at = ((specSecond * specStride) + slot) % activeAllyTeams;
                     auto bitmap = intelEvents->BuildLosBitmap(at, frameNo);
                     if (!bitmap.empty())
-                        rtcServer.SendReliable(clientId, bitmap.data(), bitmap.size());
+                        rtcServer.SendStream(clientId, StreamClass::Vision,
+                                             bitmap.data(), bitmap.size());
                 }
             });
         }

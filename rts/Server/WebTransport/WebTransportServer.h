@@ -65,23 +65,32 @@ public:
     std::string CertHash() const;
 
     /// Send a payload to one client on a given tier.
-    void SendStream(ClientID clientId, StreamClass cls, const uint8_t* data, size_t len);
+    ///
+    /// `lane` selects the newest-wins lane for the State tier: each lane keeps
+    /// its own in-flight stream, so a new send only RESET_STREAMs the prior send
+    /// *on the same lane*. Distinct logical State streams (entity vs. piece) MUST
+    /// use distinct lanes or they clobber each other — the caller sends several
+    /// State messages per tick and a shared lane would reset the earlier ones
+    /// before they ever transmit. Ignored for non-State tiers.
+    void SendStream(ClientID clientId, StreamClass cls, const uint8_t* data, size_t len,
+                    uint32_t lane = 0);
 
-    /// Send a payload to all connected clients on a given tier.
-    void BroadcastStream(StreamClass cls, const uint8_t* data, size_t len);
+    /// Send a payload to all connected clients on a given tier. See SendStream
+    /// for `lane`.
+    void BroadcastStream(StreamClass cls, const uint8_t* data, size_t len, uint32_t lane = 0);
 
     // --- WebRTCServer-compatible convenience wrappers (minimal server_main churn) ---
     void SendReliable(ClientID clientId, const uint8_t* data, size_t len) {
         SendStream(clientId, StreamClass::Control, data, len);
     }
-    void SendUnreliable(ClientID clientId, const uint8_t* data, size_t len) {
-        SendStream(clientId, StreamClass::State, data, len);
+    void SendUnreliable(ClientID clientId, const uint8_t* data, size_t len, uint32_t lane = 0) {
+        SendStream(clientId, StreamClass::State, data, len, lane);
     }
     void BroadcastReliable(const uint8_t* data, size_t len) {
         BroadcastStream(StreamClass::Control, data, len);
     }
-    void BroadcastUnreliable(const uint8_t* data, size_t len) {
-        BroadcastStream(StreamClass::State, data, len);
+    void BroadcastUnreliable(const uint8_t* data, size_t len, uint32_t lane = 0) {
+        BroadcastStream(StreamClass::State, data, len, lane);
     }
 
     /// Drain inbound application messages (decoded from WebTransport streams +
