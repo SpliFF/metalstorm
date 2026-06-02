@@ -946,11 +946,17 @@ function republishDefGlobals(rt: LuaRuntime): void {
 }
 
 async function init(
-    canvas: OffscreenCanvas,
+    canvas: OffscreenCanvas | null,
     gameId: string,
     lobbyUrl: string,
     mapData: MapDataTransfer,
     soloWidget?: string,
+    /// GW4-c6: when set, the LuaUI runs on the game-processor worker's shared
+    /// Babylon GL context (one canvas, one context) instead of a private
+    /// OffscreenCanvas. In shared mode init does NOT create its own context
+    /// and does NOT start the 33 ms setInterval frame loop — the gp render
+    /// loop drives the UI pass after scene.render() (with state save/restore).
+    sharedGl?: WebGL2RenderingContext,
 ): Promise<void> {
     const baseUrl = `${lobbyUrl}/api/games/data/${gameId}`;
     initBaseUrl = baseUrl;
@@ -962,21 +968,27 @@ async function init(
     await prefetchAllGameFiles(baseUrl);
     postLog(2, `[LuaUI] init step 1/8 done: VFS ${vfsFiles.size} files prefetched`);
 
-    // 2. Create GL context on OffscreenCanvas for 2D UI rendering
-    const gl = canvas.getContext('webgl2', {
-        alpha: true,
-        premultipliedAlpha: false,
-        antialias: false,
-        preserveDrawingBuffer: true,
-    }) as WebGL2RenderingContext;
+    // 2. Obtain the GL context. GW4-c6 shared mode: reuse the game-processor
+    // worker's Babylon context (the LuaUI draws into the same framebuffer as
+    // the world, so DrawWorld widgets can depth-test against terrain + units).
+    // Legacy mode (no sharedGl): create a private context on the overlay
+    // OffscreenCanvas.
+    const gl = sharedGl ?? (canvas
+        ? canvas.getContext('webgl2', {
+            alpha: true,
+            premultipliedAlpha: false,
+            antialias: false,
+            preserveDrawingBuffer: true,
+        }) as WebGL2RenderingContext
+        : null);
 
     if (!gl) {
-        postLog(4, 'Failed to create WebGL2 context on OffscreenCanvas');
-        postToMain({ type: 'error', msg: 'No WebGL2 on OffscreenCanvas' });
+        postLog(4, 'Failed to obtain WebGL2 context for LuaUI');
+        postToMain({ type: 'error', msg: 'No WebGL2 context for LuaUI' });
         return;
     }
 
-    postLog(2, '[LuaUI] init step 2/8 done: WebGL2 context ready');
+    postLog(2, `[LuaUI] init step 2/8 done: WebGL2 context ready (${sharedGl ? 'shared/gp' : 'private/overlay'})`);
 
     // 3. Create Lua runtime and GL bridge
     runtime = new LuaRuntime('LuaUI');
@@ -3233,27 +3245,41 @@ defaultFont = activeFont
     // 8. Start frame loop (30fps — matches Spring's GAME_SPEED)
     // Guard against re-entry: if a previous frame is still running
     // (e.g. a widget's Update is slow), skip rather than stacking.
-    let frameRunning = false;
-    frameInterval = setInterval(() => {
-        if (!runtime || shuttingDown || frameRunning) return;
-        frameRunning = true;
-        try {
-            runFrame(runtime, gl);
-        } finally {
-            frameRunning = false;
-        }
-    }, 33);
+    // GW4-c6: in shared mode the gp render loop drives the UI pass
+    // (gpRunUiPass) after scene.render() instead — DO NOT start the
+    // independent setInterval (it would clear/draw the shared framebuffer
+    // out of sync with Babylon). Hand the gl + active flag to the gp loop.
+    if (sharedGl) {
+        gpUiGl = sharedGl;
+        gpLuaUiActive = true;
+    } else {
+        let frameRunning = false;
+        frameInterval = setInterval(() => {
+            if (!runtime || shuttingDown || frameRunning) return;
+            frameRunning = true;
+            try {
+                runFrame(runtime, gl);
+            } finally {
+                frameRunning = false;
+            }
+        }, 33);
+    }
 
     // Report which callins widgets registered so main thread only sends needed events
     const registeredCallins = getRegisteredCallins(runtime);
     postToMain({ type: 'ready', fileCount: vfsFiles.size, callins: registeredCallins });
 }
 
-function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext): void {
+function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext, clearColor = true): void {
     // Set up GL state for 2D overlay rendering
     gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    // GW4-c6: in shared mode (clearColor=false) the 3D world has already been
+    // drawn into this same framebuffer — clearing color here would erase it.
+    // The legacy private-overlay context owns its buffer and clears each frame.
+    if (clearColor) {
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+    }
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.disable(gl.DEPTH_TEST);
@@ -4726,6 +4752,11 @@ let gpDynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
 let gpFxSimSpeed = 1;
 /// Wall-clock timestamp of the previous render frame, for the FX `dt`.
 let gpLastFrameTime = 0;
+/// GW4-c6: the shared Babylon GL context the LuaUI draws into, + an active
+/// flag. Set once `init(..., sharedGl)` finishes booting the runtime; the gp
+/// render loop then runs the UI pass (gpRunUiPass) after scene.render().
+let gpUiGl: WebGL2RenderingContext | null = null;
+let gpLuaUiActive = false;
 /// Holds the per-allyteam LOS bitmaps (envelope 0x07) so a bitmap that
 /// arrives before the fog mesh exists still paints on first build.
 const gpLosBitmapStore = new LosBitmapStore();
@@ -4881,6 +4912,13 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
         water.receiveShadows = false;
         sceneLighting.csm.removeShadowCaster(water, false);
     }
+
+    // GW4-c6: boot the LuaUI runtime now that the map (source URL + heightmap)
+    // is available. It runs on this same Babylon GL context; the gp render loop
+    // drives its screen-space pass after scene.render(). Fire-and-forget — the
+    // bootstrap (VFS prefetch + camain.lua + gadget halves) is async and the
+    // world keeps rendering while it loads.
+    void gpBootLuaUI(map, mapSourceAbs, msg);
 }
 
 /// GW4-c2 placeholder viewport. Map data is served over HTTP (not the
@@ -5089,6 +5127,10 @@ function gpInit(msg: GpInitToWorker): void {
     // width/height off the canvas. Main keeps CSS sizing on the DOM element.
     canvas.width = Math.max(1, Math.floor(msg.width * msg.dpr));
     canvas.height = Math.max(1, Math.floor(msg.height * msg.dpr));
+    // GW4-c6: LuaUI lays out against Spring.GetViewSizes() = liveState.viewport,
+    // and the screen-space gl.Ortho maps [0,vsx]×[0,vsy] onto the device-pixel
+    // framebuffer — so view size must be the device-pixel backing store size.
+    liveState.viewport = { width: canvas.width, height: canvas.height };
 
     const engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
     const scene = new Scene(engine);
@@ -5297,6 +5339,10 @@ function gpInit(msg: GpInitToWorker): void {
         gpDistortion?.tick(fxDt);
         gpMuzzleFlare?.tick(fxDt);
         scene.render();
+        // GW4-c6: LuaUI screen-space pass on the SAME context, after the world
+        // is drawn (state save/restore + wipeCaches inside). World-space
+        // DrawWorld/DrawWorldPreUnit overlays land in c6-2.
+        gpRunUiPass();
         // GW4-c5c: feed the HTML HUD (entity count / frame / selection / speed).
         gpPostSceneState(now);
         // GW4-c5c-3: feed the main-thread minimap (unit dots + fog overlay).
@@ -5448,6 +5494,75 @@ function gpPostMinimapFeed(now: number): void {
     postToMain({ type: 'gp:minimapFeed', blips, los: losPayload, map: mapInfo });
 }
 
+/// GW4-c6: run the LuaUI screen-space pass on the shared Babylon context after
+/// scene.render(). Babylon caches GL state and assumes nothing else touches the
+/// context, so we snapshot the bits the bridge clobbers, run the pass, restore
+/// them, then `wipeCaches(true)` so Babylon re-uploads its state next frame
+/// (mirrors lua-widget-host.ts's postDraw). Without this the world render
+/// corrupts within a frame or two (wrong program/VAO/blend bound).
+function gpRunUiPass(): void {
+    if (!gpLuaUiActive || !runtime || !gpUiGl || !gpEngine) return;
+    const gl = gpUiGl;
+
+    const savedProgram = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null;
+    const savedVao = gl.getParameter(gl.VERTEX_ARRAY_BINDING) as WebGLVertexArrayObject | null;
+    const savedBlend = gl.getParameter(gl.BLEND) as boolean;
+    const savedDepthTest = gl.getParameter(gl.DEPTH_TEST) as boolean;
+    const savedDepthMask = gl.getParameter(gl.DEPTH_WRITEMASK) as boolean;
+    const savedCull = gl.getParameter(gl.CULL_FACE) as boolean;
+    const savedActiveTex = gl.getParameter(gl.ACTIVE_TEXTURE) as number;
+    const savedFBO = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+    // Babylon may leave a post-process render-target FBO bound; the UI must
+    // draw to the default framebuffer (the canvas the player sees).
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+
+    try {
+        runFrame(runtime, gl, /*clearColor*/ false);
+    } catch (err) {
+        postLog(4, `[gp] LuaUI pass error: ${err}`);
+        gpLuaUiActive = false;  // stop after a hard failure rather than spam
+    }
+
+    // Restore Babylon's expected state.
+    gl.useProgram(savedProgram);
+    gl.bindVertexArray(savedVao);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, savedFBO);
+    gl.activeTexture(savedActiveTex);
+    if (savedBlend) gl.enable(gl.BLEND); else gl.disable(gl.BLEND);
+    if (savedDepthTest) gl.enable(gl.DEPTH_TEST); else gl.disable(gl.DEPTH_TEST);
+    if (savedCull) gl.enable(gl.CULL_FACE); else gl.disable(gl.CULL_FACE);
+    gl.depthMask(savedDepthMask);
+    (gpEngine as unknown as { wipeCaches: (b?: boolean) => void }).wipeCaches(true);
+}
+
+/// GW4-c6: boot the Fengari LuaUI runtime against the shared Babylon context.
+/// Called once from gpLoadMap after the terrain is built (init needs the map's
+/// source URL + heightmap). Reuses the full legacy `init()` bootstrap (VFS
+/// prefetch, runtime, gl-bridge, widgetHandler, camain.lua, gadget halves) but
+/// in shared-context mode (no private canvas, no setInterval — the gp render
+/// loop drives the pass via gpRunUiPass).
+async function gpBootLuaUI(map: ParsedMapData, mapSourceAbs: string, msg: GpInitToWorker): Promise<void> {
+    if (runtime || !gpEngine) return;  // already booted (idempotent)
+    const gl = (gpEngine as unknown as { _gl: WebGL2RenderingContext })._gl;
+    if (!gl) { postLog(4, '[gp] LuaUI boot: no _gl on Babylon engine'); return; }
+    const mapDataTransfer: MapDataTransfer = {
+        mapx: map.mapx, mapy: map.mapy, squareSize: map.squareSize,
+        minHeight: map.minHeight, maxHeight: map.maxHeight,
+        widthElmos: map.widthElmos, heightElmos: map.heightElmos,
+        heightmap: map.heightmap, mapSourceUrl: mapSourceAbs,
+    };
+    try {
+        await init(null, msg.gameId, msg.lobbyUrl, mapDataTransfer, undefined, gl);
+        // The bridge's one-time GL setup (shaders, font textures, VAOs) ran
+        // outside the per-frame save/restore — force Babylon to re-upload its
+        // cached state next frame so boot doesn't corrupt the world render.
+        (gpEngine as unknown as { wipeCaches: (b?: boolean) => void }).wipeCaches(true);
+        postLog(1, '[gp] LuaUI booted on shared context (GW4-c6)');
+    } catch (err) {
+        postLog(4, `[gp] LuaUI boot failed: ${err}`);
+    }
+}
+
 function gpResize(width: number, height: number, dpr: number): void {
     if (!gpEngine) return;
     const c = gpEngine.getRenderingCanvas() as OffscreenCanvas | null;
@@ -5456,6 +5571,8 @@ function gpResize(width: number, height: number, dpr: number): void {
         c.height = Math.max(1, Math.floor(height * dpr));
     }
     gpEngine.resize();
+    // GW4-c6: keep the LuaUI view size in sync (device px — see gpInit).
+    if (c) liveState.viewport = { width: c.width, height: c.height };
     // GW4-c5b: keep the camera's CSS-pixel viewport + dpr in sync so edge-scroll
     // bands and scene.pick (which scales by dpr) stay correct after a resize.
     for (const cam of gpViewCameras.values()) cam.setViewportSize(width, height, dpr);
