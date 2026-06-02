@@ -17,7 +17,6 @@
  *     {type:'log', level, msg}
  *     {type:'ready', fileCount}
  *     {type:'widgetList', data}
- *     {type:'worldGLCommands', commands}  (future — command buffer for world-space rendering)
  *     {type:'error', msg}
  */
 
@@ -440,7 +439,6 @@ function describeMessage(msg: Record<string, unknown>): string {
         case 'error':      return `error: ${String(msg.msg ?? '')}`;
         case 'storage:set':return `storage:set key=${msg.key}`;
         case 'widgetList': return `widgetList (${String(msg.data ?? '').length} bytes)`;
-        case 'worldGLCommands': return `worldGLCommands (${(msg.commands as unknown[])?.length ?? '?'} cmds)`;
         default:           return t;
     }
 }

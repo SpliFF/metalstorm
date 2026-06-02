@@ -1149,7 +1149,6 @@ export class LuaWidgetManager {
             case 'setChannelVolume':   summary = `setChannelVolume ${msg.channel}=${msg.volume}`; break;
             case 'setMasterVolume':    summary = `setMasterVolume ${msg.volume}`; break;
             case 'widgetList':     summary = `widgetList (${String(msg.data ?? '').length} bytes)`; break;
-            case 'worldGLCommands':summary = `worldGLCommands (${(msg.commands as unknown[])?.length ?? '?'} cmds)`; break;
             case 'giveOrder':      summary = `giveOrder cmd=${msg.cmdId} units=${(msg.unitIds as unknown[])?.length ?? 0} params=${(msg.params as unknown[])?.length ?? 0}`; break;
             case 'commandNotify':       summary = `commandNotify cmd=${msg.cmdId} req=${msg.requestId} params=${(msg.params as unknown[])?.length ?? 0}`; break;
             case 'commandNotifyResult': summary = `commandNotifyResult req=${msg.requestId} consumed=${msg.consumed}`; break;
@@ -1303,10 +1302,6 @@ export class LuaWidgetManager {
                 }
                 break;
             }
-
-            case 'worldGLCommands':
-                // TODO: replay command buffer on Babylon GL context
-                break;
 
             case 'deferredLights': {
                 // PLAN.md Stage B1 (faithful projectile lights). The worker ran

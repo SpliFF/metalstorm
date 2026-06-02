@@ -6,8 +6,9 @@
  *
  * Architecture note (why this is main-thread, not the worker LUPS class):
  * ZK authors distortion as LUPS particle classes, but those run in the
- * LuaUI Web Worker whose world-space GL output is *not* wired to the
- * Babylon scene (`worldGLCommands` is a TODO no-op in lua-widget-manager).
+ * LuaUI Web Worker. As of GW4-c6, that worker renders world-space Lua GL
+ * directly onto the shared Babylon GL context (`DrawWorld`/`DrawWorldPreUnit`
+ * via the in-worker gl-bridge), not via a main-thread command buffer.
  * Every FX subsystem that actually reaches the screen — CegRuntime,
  * FxLightPool, CombatFX — is main-thread. So Phase D's "preferred design"
  * on this architecture is a main-thread composite fed by main-thread
