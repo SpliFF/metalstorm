@@ -773,7 +773,9 @@ export class LuaGLBridge {
     }
 
     private vertexGL(args: LuaValue[]): void {
-        this.imm.vertex(Number(args[0] ?? 0), Number(args[1] ?? 0));
+        // GW4-c6-2: Spring's gl.Vertex accepts (x,y) for 2D screen drawing or
+        // (x,y,z) for world-space DrawWorld geometry. z defaults to 0.
+        this.imm.vertex(Number(args[0] ?? 0), Number(args[1] ?? 0), Number(args[2] ?? 0));
     }
 
     private texCoordGL(args: LuaValue[]): void {
@@ -781,6 +783,19 @@ export class LuaGLBridge {
     }
 
     private loadMatrix(args: LuaValue[]): void {
+        // GW4-c6-2: Spring's gl.LoadMatrix(name) loads a named engine matrix into
+        // the active stack. The world-space pass loads "projection"/"view" so
+        // widgets draw in world space. These come straight from the Babylon
+        // camera (already correct RH/scene coords) so the legacy flip is NOT
+        // applied — unlike a widget-supplied 16-float matrix.
+        if (typeof args[0] === 'string') {
+            const name = args[0];
+            let mat: Float32Array | null = null;
+            if (name === 'projection') mat = this.projectionMatrix;
+            else if (name === 'view' || name === 'modelview' || name === 'camera') mat = this.viewMatrix;
+            if (mat) this.imm.loadMatrix(mat);
+            return;
+        }
         if (args.length >= 16) {
             const m = new Float32Array(16);
             for (let i = 0; i < 16; i++) m[i] = Number(args[i]);
@@ -1216,12 +1231,19 @@ export class LuaGLBridge {
         if (!handle || (typeof handle === 'number' && handle === 0)) {
             this.gl.useProgram(null);
             this.currentShader = null;
+            // Revert the immediate-mode renderer to its built-in program so
+            // subsequent gl.BeginEnd / gl.CallList draws use fixed-function.
+            this.imm.setShaderOverride(null);
             return;
         }
         const h = handle as LuaShaderHandle;
         if (h.__type !== 'shader') return;
         this.gl.useProgram(h.program);
         this.currentShader = h;
+        // Route immediate-mode geometry (gl.BeginEnd / gl.CallList) through this
+        // program too — Spring applies the bound shader to immediate draws, and
+        // ZK world widgets (Map Edge Extension's mirror shader, …) depend on it.
+        this.imm.setShaderOverride(h.program);
     }
 
     private deleteShader(handle: LuaValue): void {
@@ -1280,7 +1302,12 @@ export class LuaGLBridge {
         else if (args.length >= 4) gl.uniform4i(loc, Number(args[0]), Number(args[1]), Number(args[2]), Number(args[3]));
     }
 
-    /** Cached matrices fed into UniformMatrix("view"/"projection"). */
+    /** Cached camera matrices fed into UniformMatrix("view"/"projection") and
+     *  the world-space gl.LoadMatrix(name) path (GW4-c6-2). Column-major, taken
+     *  straight from the Babylon camera (scene coords == server world coords,
+     *  no flip — see the c6-2 coordinate analysis), so a world-space vertex at
+     *  Spring (x,y,z) projects correctly when these are loaded as PROJECTION ×
+     *  MODELVIEW. Refreshed each frame via setCameraMatrices (below). */
     viewMatrix: Float32Array | null = null;
     projectionMatrix: Float32Array | null = null;
 

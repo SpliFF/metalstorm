@@ -26,6 +26,7 @@ import { Texture } from '@babylonjs/core';
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture';
 import { EntityRenderer, type EntityMeta } from './entity-renderer.js';
 import type { LosBitmap } from './los-bitmap.js';
+import type { GpMinimapBlips } from './game-worker-protocol.js';
 import { CommandBuffer, CMD } from './command-buffer.js';
 import type { Connection } from './connection.js';
 import type { MapDimensions } from './terrain.js';
@@ -87,7 +88,13 @@ export class Minimap {
     private engine: Engine;
     private scene: Scene;
     private camera: FreeCamera;
-    private entityRenderer: EntityRenderer;
+    /** Live entity source for the in-process (same-thread) path — e.g. the
+     *  detached viewport. `null` in the GW4 game-processor split, where the
+     *  entity renderer lives in the worker and blips arrive via {@link applyFeed}. */
+    private entityRenderer: EntityRenderer | null;
+    /** GW4-c5c-3: the latest worker-fed blip snapshot, used when
+     *  `entityRenderer` is null (struct-of-arrays, fog-of-war already filtered). */
+    private fedBlips: GpMinimapBlips | null = null;
     private commandBuffer: CommandBuffer | null = null;
     private mapWidth: number;
     private mapHeight: number;
@@ -160,7 +167,7 @@ export class Minimap {
 
     constructor(
         config: MinimapConfig,
-        entityRenderer: EntityRenderer,
+        entityRenderer: EntityRenderer | null,
         connection?: Connection,
     ) {
         this.entityRenderer = entityRenderer;
@@ -243,7 +250,7 @@ export class Minimap {
      * — no per-tile atlas compositing needed for the minimap, since
      * the standalone 1024x1024 image already covers the whole map.
      */
-    async loadBackground(mapBaseUrl: string, _dims: MapDimensions): Promise<void> {
+    async loadBackground(mapBaseUrl: string, _dims?: MapDimensions): Promise<void> {
         // mapBaseUrl looks like "http://host:port/api/maps/data/<mapId>".
         // We just need the last path component for the detached viewport
         // backdrop fetch.
@@ -532,6 +539,13 @@ export class Minimap {
         this.fogTexture.update(false);
     }
 
+    /** GW4-c5c-3: ingest a worker-fed blip snapshot (struct-of-arrays, fog
+     *  already filtered). Used when the entity renderer lives in the worker;
+     *  the next {@link render} draws from it. */
+    applyFeed(blips: GpMinimapBlips): void {
+        this.fedBlips = blips;
+    }
+
     /** Render the minimap. Call at ~10Hz. */
     render(): void {
         this.updateEntityInstances();
@@ -696,21 +710,30 @@ export class Minimap {
         const perTeamRadar = new Map<number, { x: number; z: number }[]>();
         const selected: { x: number; z: number }[] = [];
 
-        for (const [id, meta] of this.entityRenderer.getEntities() as IterableIterator<[number, EntityMeta]>) {
-            const pos = this.entityRenderer.getEntityPosition(id);
-            if (!pos) continue;
-            const los = meta.losState;
-            if (los === 0) continue; // fog of war
-            const team = meta.team;
+        // One blip-classifier shared by both sources (in-process entity
+        // renderer = detached viewport; worker feed = GW4 game-processor split).
+        const classify = (id: number, team: number, los: number, x: number, z: number): void => {
+            if (los === 0) return; // fog of war
             const inLos = (los & 0x01) !== 0;
             const bucket = inLos ? perTeam : perTeamRadar;
             let b = bucket.get(team);
             if (!b) { b = []; bucket.set(team, b); }
-            b.push({ x: pos.x, z: pos.z });
+            b.push({ x, z });
             // Selection rings only for confirmed-LOS contacts (the only
             // ones the player can actually click & order anyway).
-            if (inLos && this.selectedIds.has(id)) {
-                selected.push({ x: pos.x, z: pos.z });
+            if (inLos && this.selectedIds.has(id)) selected.push({ x, z });
+        };
+
+        if (this.entityRenderer) {
+            for (const [id, meta] of this.entityRenderer.getEntities() as IterableIterator<[number, EntityMeta]>) {
+                const pos = this.entityRenderer.getEntityPosition(id);
+                if (!pos) continue;
+                classify(id, meta.team, meta.losState, pos.x, pos.z);
+            }
+        } else if (this.fedBlips) {
+            const f = this.fedBlips;
+            for (let i = 0; i < f.count; i++) {
+                classify(f.ids[i], f.teams[i], f.los[i], f.x[i], f.z[i]);
             }
         }
 

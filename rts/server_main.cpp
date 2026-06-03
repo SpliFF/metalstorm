@@ -2,8 +2,9 @@
  * spring-server entry point
  *
  * Headless authoritative game server. Runs the simulation at a fixed
- * 30 Hz tick rate. Clients connect via WebRTC data channels (signaled
- * over HTTP). HTTP also serves map/game assets and REST API endpoints.
+ * 30 Hz tick rate. Clients connect over WebTransport (QUIC/HTTP-3); the
+ * endpoint is discovered via `GET /api/wt/info`. HTTP also serves map/game
+ * assets and REST API endpoints.
  */
 
 #include "Server/Simulation.h"
@@ -39,7 +40,7 @@
 #include "Lua/LuaRules.h"
 #include "Server/HttpAuth.h"
 #include "Server/CacheControl.h"
-#include "Server/WebRTCServer.h"
+#include "Server/WebTransport/WebTransportServer.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogNet.h"
 #include "System/SpringLog/SpringLogSqlite.h"
@@ -639,41 +640,26 @@ int main(int argc, char* argv[])
         return HttpAuth::JsonResponse(200, json);
     });
 
-    // --- WebRTC signaling endpoints ---
-    WebRTCServer rtcServer;
+    // --- Game transport: WebTransport (QUIC/HTTP-3) ---
+    //
+    // The realtime game stream runs over WebTransport (PLAN-game-worker.md,
+    // Stage 0), replacing WebRTC. Unlike WebRTC there is no HTTP signaling
+    // handshake: the browser connects straight to the QUIC endpoint (UDP, same
+    // port number as the HTTP server) and authenticates via an AuthRequest
+    // message over the control stream — the same auth path the loop already
+    // drives. `rtcServer` keeps its (now-historical) name so the ~80
+    // SendReliable/Broadcast call sites carried over unchanged from the
+    // removed WebRTC server (GW7).
+    WebTransportServer rtcServer;
 
-    net.AddHttpPost("/api/rtc/offer", [&rtcServer, &db](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
-        int64_t userId = HttpAuth::ValidateToken(db, headers.authorization);
-        if (userId <= 0) {
-            return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
-        }
-        std::string sdpOffer = HttpAuth::JsonField(body, "sdp");
-        if (sdpOffer.empty()) {
-            return HttpAuth::JsonResponse(400, R"({"error":"missing sdp field"})");
-        }
-        auto result = rtcServer.HandleOffer(sdpOffer, headers.authorization);
-        if (!result.success) {
-            return HttpAuth::JsonResponse(500, "{\"error\":\"" + HttpAuth::JsonEscape(result.error) + "\"}");
-        }
-        std::string json = "{\"client_id\":" + std::to_string(result.clientId)
-            + ",\"sdp\":\"" + HttpAuth::JsonEscape(result.sdpAnswer) + "\"}";
+    // Cert-hash discovery: the client pins the dev server's ephemeral
+    // self-signed cert via serverCertificateHashes. It learns the hash (and the
+    // WT port) from this endpoint over the already-trusted HTTP plane.
+    net.AddHttpGet("/api/wt/info", [&rtcServer, port](const std::string&) -> HttpResponse {
+        std::string json = "{\"port\":" + std::to_string(rtcServer.Port())
+            + ",\"certHash\":\"" + rtcServer.CertHash() + "\""
+            + ",\"transport\":\"webtransport\"}";
         return HttpAuth::JsonResponse(200, json);
-    });
-
-    net.AddHttpPost("/api/rtc/candidate", [&rtcServer, &db](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
-        int64_t userId = HttpAuth::ValidateToken(db, headers.authorization);
-        if (userId <= 0) {
-            return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
-        }
-        std::string candidate = HttpAuth::JsonField(body, "candidate");
-        std::string mid = HttpAuth::JsonField(body, "mid");
-        std::string clientIdStr = HttpAuth::JsonField(body, "client_id");
-        uint32_t clientId = clientIdStr.empty() ? 0 : (uint32_t)std::atoi(clientIdStr.c_str());
-        if (clientId == 0) {
-            return HttpAuth::JsonResponse(400, R"({"error":"missing client_id"})");
-        }
-        bool ok = rtcServer.AddCandidate(clientId, candidate, mid);
-        return HttpAuth::JsonResponse(200, ok ? R"({"ok":true})" : R"({"ok":false})");
     });
 
     if (!net.Start(port)) {
@@ -681,6 +667,14 @@ int main(int argc, char* argv[])
         springlog_shutdown();
         return 1;
     }
+
+    // QUIC is a hard dependency (no WebRTC fallback) — fail fast if it can't bind.
+    if (!rtcServer.Start(port)) {
+        SLOG(SPRING_LOG_ERROR, "failed to start WebTransport (QUIC) server on udp/:%d", port);
+        springlog_shutdown();
+        return 1;
+    }
+    SLOG(SPRING_LOG_NOTICE, "WebTransport (QUIC) listening on udp/:%d", port);
 
     // --- Simulation ---
     // Find .smf file in the map directory
@@ -856,13 +850,13 @@ int main(int argc, char* argv[])
     // --- Player roster lookup ---
     //
     // Build a `username -> team` map from the --player args so the
-    // WebRTC auth handler can stamp the session's team on login.
+    // auth handler can stamp the session's team on login.
     std::unordered_map<std::string, int> playerTeamByUsername;
     for (const auto& rp : requestedPlayers) {
         playerTeamByUsername[rp.username] = rp.team;
     }
 
-    // Map WebRTC clientId -> Spring playerNum so we can fire
+    // Map WebTransport clientId -> Spring playerNum so we can fire
     // eventHandler.PlayerRemoved() with the correct id on disconnect.
     std::unordered_map<ClientID, int> clientPlayerNum;
     int nextPlayerNum = 0;
@@ -1016,7 +1010,7 @@ int main(int argc, char* argv[])
         // Rate-limit token buckets now refill lazily on command arrival;
         // no per-tick reset required. See ClientSession::TryConsumeCommandBudget.
 
-        // Drain inbound messages from WebRTC data channels
+        // Drain inbound messages from WebTransport streams
         auto messages = rtcServer.DrainInbound();
         for (auto& msg : messages) {
             auto* clientMsg = Protocol::ParseClientMessage(msg.data.data(), msg.data.size());
@@ -2028,6 +2022,14 @@ int main(int argc, char* argv[])
         }
         }
 
+        // Newest-wins lanes for the State tier (WebTransportServer GW2). Each
+        // distinct logical State stream needs its own lane so a new send only
+        // supersedes the prior send of the *same* stream — sharing a lane would
+        // make the piece snapshot RESET the entity snapshot queued microseconds
+        // earlier in the same tick (and vice-versa), so neither would arrive.
+        constexpr uint32_t kStateLaneEntity = 0;
+        constexpr uint32_t kStateLanePiece  = 1;
+
         // Send entity state to connected clients every 3 ticks (~10 Hz)
         // Full snapshot every 30 ticks (~1s), delta updates otherwise.
         // Envelope: 0x02 = full snapshot, 0x03 = delta update.
@@ -2089,7 +2091,10 @@ int main(int argc, char* argv[])
                 frame.reserve(1 + stateData.size());
                 frame.push_back(envelope);
                 frame.insert(frame.end(), stateData.begin(), stateData.end());
-                rtcServer.SendUnreliable(clientId, frame.data(), frame.size());
+                // State tier, lane "entity": newest-wins against the prior entity
+                // snapshot only. Piece state uses a separate lane (below) so the
+                // two don't RESET each other before either transmits.
+                rtcServer.SendUnreliable(clientId, frame.data(), frame.size(), kStateLaneEntity);
             });
         }
         }
@@ -2136,7 +2141,9 @@ int main(int argc, char* argv[])
                 pieceFrame.reserve(1 + pieceData.size());
                 pieceFrame.push_back(Protocol::ENVELOPE_PIECE_STATE);
                 pieceFrame.insert(pieceFrame.end(), pieceData.begin(), pieceData.end());
-                rtcServer.SendUnreliable(clientId, pieceFrame.data(), pieceFrame.size());
+                // State tier, lane "piece": newest-wins independently of entity.
+                rtcServer.SendUnreliable(clientId, pieceFrame.data(), pieceFrame.size(),
+                                         kStateLanePiece);
             });
         }
         }
@@ -2166,7 +2173,12 @@ int main(int argc, char* argv[])
                 baFrame.reserve(1 + baData.size());
                 baFrame.push_back(Protocol::ENVELOPE_BUILD_ACTIVITY);
                 baFrame.insert(baFrame.end(), baData.begin(), baData.end());
-                rtcServer.SendUnreliable(clientId, baFrame.data(), baFrame.size());
+                // Vision tier (reliable uni, GW2): build progress must not be
+                // dropped/superseded — the client ages beams off the snapshot, and
+                // a skipped "build complete" frame would leave a ghost beam. Lower
+                // priority than per-frame State so it never blocks entity updates.
+                rtcServer.SendStream(clientId, StreamClass::Vision,
+                                     baFrame.data(), baFrame.size());
             });
         }
         }
@@ -2613,7 +2625,11 @@ int main(int argc, char* argv[])
                 if (viewerAllyTeam >= 0) {
                     auto bitmap = intelEvents->BuildLosBitmap(viewerAllyTeam, frameNo);
                     if (!bitmap.empty())
-                        rtcServer.SendReliable(clientId, bitmap.data(), bitmap.size());
+                        // Vision tier (reliable uni, GW2): a LOS bitmap can be
+                        // large; on its own stream it can't head-of-line-block
+                        // the control bidi (commands/ACKs/chat).
+                        rtcServer.SendStream(clientId, StreamClass::Vision,
+                                             bitmap.data(), bitmap.size());
                     return;
                 }
 
@@ -2625,7 +2641,8 @@ int main(int argc, char* argv[])
                     const int at = ((specSecond * specStride) + slot) % activeAllyTeams;
                     auto bitmap = intelEvents->BuildLosBitmap(at, frameNo);
                     if (!bitmap.empty())
-                        rtcServer.SendReliable(clientId, bitmap.data(), bitmap.size());
+                        rtcServer.SendStream(clientId, StreamClass::Vision,
+                                             bitmap.data(), bitmap.size());
                 }
             });
         }
@@ -2651,7 +2668,7 @@ int main(int argc, char* argv[])
         auto msg = Protocol::BuildGameRestarting();
         rtcServer.BroadcastReliable(msg.data(), msg.size());
 
-        // Brief pause to let the message flush over WebRTC
+        // Brief pause to let the message flush over WebTransport
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
         net.Stop();

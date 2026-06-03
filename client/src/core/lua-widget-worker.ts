@@ -17,10 +17,63 @@
  *     {type:'log', level, msg}
  *     {type:'ready', fileCount}
  *     {type:'widgetList', data}
- *     {type:'worldGLCommands', commands}  (future — command buffer for world-space rendering)
  *     {type:'error', msg}
  */
 
+import { Engine, Scene, FreeCamera, Vector3, Color3, Color4, Mesh, MeshBuilder, StandardMaterial } from '@babylonjs/core';
+import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos } from './game-worker-protocol.js';
+// GW4-c2: the WebTransport game connection now lives in the worker. Connection
+// is host-agnostic (runs on WebTransportAdapter, no DOM refs after the
+// onServerRestart callback was extracted) so it imports + runs here unchanged.
+import { Connection } from './connection.js';
+import type { EntityStateSnapshot } from './entity-state.js';
+// GW4-c3: terrain + lighting + map parse move into the worker so terrain
+// renders from here (first light). All of these are worker-safe (Babylon
+// DynamicTexture allocates an OffscreenCanvas in a worker; the dev-hook
+// `window.__*` injections in scene-lighting/client-settings were switched to
+// `globalThis` for this move — PLAN-game-worker.md GW4 Bucket-2).
+import {
+    buildTerrainMesh, loadTerrainTextures, TerrainFog, DeformableTerrain,
+    type MapDimensions,
+} from './terrain.js';
+import { fetchMapDataHttp, type ParsedMapData } from './map-data.js';
+import { loadMapLighting, type MapLighting } from './map-lighting.js';
+import { createSceneLighting, applyMapLighting, type SceneLighting } from './scene-lighting.js';
+import { LosBitmapStore, type LosBitmap } from './los-bitmap.js';
+// GW4-c4: world entity rendering moves into the worker. Side-effect import
+// registers Babylon's KTX2 loader + pins the transcoder URLs (previously only
+// done in main.ts) so unit `.ktx2` textures transcode here.
+import './ktx2-config.js';
+import { EntityRenderer, setLightingStyle, setUseZKMaterial } from './entity-renderer.js';
+import { BuildingPlateRenderer } from './building-plate-renderer.js';
+import { DefCache } from './def-cache.js';
+import { fetchAndIngestDefs } from './defs-fetch.js';
+import { PresentationClock } from './presentation-clock.js';
+// GW4-c5: weapon-FX / projectile / decal / build render modules fold into the
+// worker (audited worker-safe — no DOM/audio; the `window.__*` dev hooks they
+// set are switched to `globalThis`). Ported from main.ts@d6301137f7^.
+import { ProjectileRenderer } from './projectile-renderer.js';
+import { ProjectileTextureResolver } from './projectile-texture-resolver.js';
+import { CegRuntime } from './ceg-runtime.js';
+import { setParticleBudget } from './ceg-translator.js';
+import { clientSettings } from './client-settings.js';
+import { CONFIG } from '../config.js';
+import { resetNetStats, snapshotNetStats } from './net-inspector.js';
+import { BuildBeamRenderer } from './build-beam-renderer.js';
+import { CombatFX } from './combat-fx.js';
+import { FxLightPool } from './fx-light-pool.js';
+import { setActiveFxLightPool } from './zk-model-material.js';
+import { DistortionRenderer } from './distortion-renderer.js';
+import { MuzzleFlareRenderer } from './muzzle-flare-renderer.js';
+import { DecalOverlay, buildTrackTypeNames } from './decal-overlay.js';
+import { attachDecalOverlay } from './decal-overlay-plugin.js';
+import { renderMapFeatures, DynamicFeatureRenderer } from './feature-renderer.js';
+import { RTSCamera } from './rts-camera.js';
+import { WorkerSelection } from './worker-selection.js';
+import { resolveSoundRef, type ResolvedSoundEvent } from './sound-events.js';
+import { CommandPathRenderer } from './command-path-renderer.js';
+import { WaypointMarkerRenderer } from './waypoint-marker-renderer.js';
+import { StandingOrderRenderer } from './standing-order-renderer.js';
 import { LuaRuntime, type LuaValue, luaTable } from './lua-runtime.js';
 import { LuaGLBridge } from './lua-gl-bridge.js';
 import {
@@ -388,7 +441,6 @@ function describeMessage(msg: Record<string, unknown>): string {
         case 'error':      return `error: ${String(msg.msg ?? '')}`;
         case 'storage:set':return `storage:set key=${msg.key}`;
         case 'widgetList': return `widgetList (${String(msg.data ?? '').length} bytes)`;
-        case 'worldGLCommands': return `worldGLCommands (${(msg.commands as unknown[])?.length ?? '?'} cmds)`;
         default:           return t;
     }
 }
@@ -895,11 +947,17 @@ function republishDefGlobals(rt: LuaRuntime): void {
 }
 
 async function init(
-    canvas: OffscreenCanvas,
+    canvas: OffscreenCanvas | null,
     gameId: string,
     lobbyUrl: string,
     mapData: MapDataTransfer,
     soloWidget?: string,
+    /// GW4-c6: when set, the LuaUI runs on the game-processor worker's shared
+    /// Babylon GL context (one canvas, one context) instead of a private
+    /// OffscreenCanvas. In shared mode init does NOT create its own context
+    /// and does NOT start the 33 ms setInterval frame loop — the gp render
+    /// loop drives the UI pass after scene.render() (with state save/restore).
+    sharedGl?: WebGL2RenderingContext,
 ): Promise<void> {
     const baseUrl = `${lobbyUrl}/api/games/data/${gameId}`;
     initBaseUrl = baseUrl;
@@ -911,21 +969,27 @@ async function init(
     await prefetchAllGameFiles(baseUrl);
     postLog(2, `[LuaUI] init step 1/8 done: VFS ${vfsFiles.size} files prefetched`);
 
-    // 2. Create GL context on OffscreenCanvas for 2D UI rendering
-    const gl = canvas.getContext('webgl2', {
-        alpha: true,
-        premultipliedAlpha: false,
-        antialias: false,
-        preserveDrawingBuffer: true,
-    }) as WebGL2RenderingContext;
+    // 2. Obtain the GL context. GW4-c6 shared mode: reuse the game-processor
+    // worker's Babylon context (the LuaUI draws into the same framebuffer as
+    // the world, so DrawWorld widgets can depth-test against terrain + units).
+    // Legacy mode (no sharedGl): create a private context on the overlay
+    // OffscreenCanvas.
+    const gl = sharedGl ?? (canvas
+        ? canvas.getContext('webgl2', {
+            alpha: true,
+            premultipliedAlpha: false,
+            antialias: false,
+            preserveDrawingBuffer: true,
+        }) as WebGL2RenderingContext
+        : null);
 
     if (!gl) {
-        postLog(4, 'Failed to create WebGL2 context on OffscreenCanvas');
-        postToMain({ type: 'error', msg: 'No WebGL2 on OffscreenCanvas' });
+        postLog(4, 'Failed to obtain WebGL2 context for LuaUI');
+        postToMain({ type: 'error', msg: 'No WebGL2 context for LuaUI' });
         return;
     }
 
-    postLog(2, '[LuaUI] init step 2/8 done: WebGL2 context ready');
+    postLog(2, `[LuaUI] init step 2/8 done: WebGL2 context ready (${sharedGl ? 'shared/gp' : 'private/overlay'})`);
 
     // 3. Create Lua runtime and GL bridge
     runtime = new LuaRuntime('LuaUI');
@@ -3182,27 +3246,41 @@ defaultFont = activeFont
     // 8. Start frame loop (30fps — matches Spring's GAME_SPEED)
     // Guard against re-entry: if a previous frame is still running
     // (e.g. a widget's Update is slow), skip rather than stacking.
-    let frameRunning = false;
-    frameInterval = setInterval(() => {
-        if (!runtime || shuttingDown || frameRunning) return;
-        frameRunning = true;
-        try {
-            runFrame(runtime, gl);
-        } finally {
-            frameRunning = false;
-        }
-    }, 33);
+    // GW4-c6: in shared mode the gp render loop drives the UI pass
+    // (gpRunUiPass) after scene.render() instead — DO NOT start the
+    // independent setInterval (it would clear/draw the shared framebuffer
+    // out of sync with Babylon). Hand the gl + active flag to the gp loop.
+    if (sharedGl) {
+        gpUiGl = sharedGl;
+        gpLuaUiActive = true;
+    } else {
+        let frameRunning = false;
+        frameInterval = setInterval(() => {
+            if (!runtime || shuttingDown || frameRunning) return;
+            frameRunning = true;
+            try {
+                runFrame(runtime, gl);
+            } finally {
+                frameRunning = false;
+            }
+        }, 33);
+    }
 
     // Report which callins widgets registered so main thread only sends needed events
     const registeredCallins = getRegisteredCallins(runtime);
     postToMain({ type: 'ready', fileCount: vfsFiles.size, callins: registeredCallins });
 }
 
-function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext): void {
+function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext, clearColor = true, worldPass = false): void {
     // Set up GL state for 2D overlay rendering
     gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    // GW4-c6: in shared mode (clearColor=false) the 3D world has already been
+    // drawn into this same framebuffer — clearing color here would erase it.
+    // The legacy private-overlay context owns its buffer and clears each frame.
+    if (clearColor) {
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+    }
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.disable(gl.DEPTH_TEST);
@@ -3358,6 +3436,36 @@ function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext): void {
                 pcall(invalidateAll, s, 0)
                 Spring.Echo("[LuaUI] Invalidated all Chili display lists for texture rebuild")
             end
+        end
+
+        -- GW4-c6-2: world-space pass. The 3D world (terrain + units) is already
+        -- in this framebuffer with its depth buffer; load the camera matrices,
+        -- enable depth so overlays occlude behind hills/units, and run the
+        -- DrawWorld callins. widgetHandler exposes _G.DrawWorldPreUnit/_G.DrawWorld
+        -- when a widget registers them (same mechanism as DrawScreen). Spring
+        -- runs PreUnit before units; we can't interleave with Babylon's render,
+        -- so both run after the world (PreUnit draws on top — accepted deviation).
+        if ${worldPass ? 'true' : 'false'} and (DrawWorldPreUnit or DrawWorld) then
+            gl.MatrixMode(GL.PROJECTION)
+            gl.LoadMatrix("projection")
+            gl.MatrixMode(GL.MODELVIEW)
+            gl.LoadMatrix("view")
+            gl.DepthTest(true)
+            gl.Texture(false)
+            gl.Color(1, 1, 1, 1)
+            if DrawWorldPreUnit then pcall(DrawWorldPreUnit) end
+            if DrawWorld then pcall(DrawWorld) end
+            gl.DepthTest(false)
+            -- Unbind any custom shader a world widget left active (e.g. if it
+            -- errored before its own gl.UseShader(0)) so it can't leak into the
+            -- DrawScreen chili pass — the bridge clears the immediate-mode
+            -- shader override here.
+            gl.UseShader(0)
+            -- Reset matrices so the DrawScreen block's Ortho setup starts clean.
+            gl.MatrixMode(GL.PROJECTION)
+            gl.LoadIdentity()
+            gl.MatrixMode(GL.MODELVIEW)
+            gl.LoadIdentity()
         end
 
         if DrawScreen then
@@ -4563,6 +4671,1496 @@ function shutdown(): void {
     bridge = null;
 }
 
+// ── Game-processor Babylon engine (PLAN-game-worker.md GW4) ─────────────
+//
+// GW4-c1: the worker owns the Babylon Engine on the transferred #game-canvas.
+// At c1 it renders only an empty clear-color scene with a default camera —
+// the connection, decoders, terrain, entities, FX and the LuaUI world pass
+// fold in across c2–c6. The pre-existing 2D widget gl-bridge (overlay canvas,
+// the `init` path) is dormant on the game-processor path until c6 repoints it
+// at this same GL context.
+let gpEngine: Engine | null = null;
+let gpScene: Scene | null = null;
+let gpCamera: FreeCamera | null = null;
+/// GW4-c5b: interactive RTS cameras, keyed by viewId (multi-view, one Scene /
+/// N camera→canvas views — PLAN-game-worker.md). Each owns one Babylon camera +
+/// the pan/zoom/orbit state machine + scene.pick + viewport send, driven by the
+/// `gp:*` input the main-thread CameraInput forwards. c5b ships a single view
+/// (id 0); the map keeps adding views cheap. The DOM-input split moved the event
+/// listeners to camera-input.ts on main; RTSCamera is now DOM-free.
+const gpViewCameras = new Map<number, RTSCamera>();
+/// GW4-c5b-2: worker-side selection / pick / order core (DOM-free port of the
+/// `input-manager.ts` selection/order seam). Left-button gestures select; the
+/// camera's `onRightClickCommit` routes a right-tap here as a move/attack/guard
+/// order, sent over the worker's own connection. Built in gpInit after the
+/// connection exists. Single instance for view 0 (multi-view: per-view picking
+/// goes through `getCamera`; the selection set stays shared).
+let gpSelection: WorkerSelection | null = null;
+/// Current device-pixel-ratio (CSS px → backing px). Set in gpInit, updated in
+/// gpResize; feeds the selection module's pick scaling.
+let gpDpr = 1;
+/// GW4-c5b-3: selection-driven order overlays (ports the three main-thread
+/// overlay renderers into the worker). Command-path + waypoint markers are
+/// shift-gated and redrawn on queue/selection change; standing orders are
+/// always-on (server already scopes to own+allied). Built in gpInit, fed by the
+/// in-worker connection's onUnitCommandQueues / onStandingOrders.
+let gpCommandPathRenderer: CommandPathRenderer | null = null;
+let gpWaypointMarkerRenderer: WaypointMarkerRenderer | null = null;
+let gpStandingOrderRenderer: StandingOrderRenderer | null = null;
+/// Latest command-queue snapshot (UnitCommandQueuesUpdate, ~1 Hz), cached so a
+/// selection change can re-render the path/waypoint overlays immediately rather
+/// than waiting for the next broadcast.
+let gpLastCommandQueues: import('./connection.js').UnitCommandQueueInfo[] = [];
+/// Shift-held state (drives the command-path / waypoint overlay gate). Tracked
+/// from the forwarded key/pointer `mods` bitmask (bit 0 = shift); cleared on blur.
+let gpShiftHeld = false;
+/// GW4-c5c: latest sim status (from onGameInfo) for the sceneState feed → main's
+/// HUD (entity count / frame / selection / speed-pause indicator). The HTML HUD
+/// is the only main-thread world-fact consumer reconnected here; ZK's economy /
+/// build-menu / order-panel are chili widgets (land with the c6 LuaUI world pass).
+let gpGameFrame = 0;
+let gpPaused = false;
+let gpSimSpeed = 1;
+/// GW8 (test harness): client-side render-loop freeze, distinct from `gpPaused`
+/// (which mirrors the *server* sim-pause from onGameInfo). `window.test.pause()`
+/// sets this so a screenshot captures a deterministic frame while the sim may
+/// still tick server-side. preserveDrawingBuffer keeps the last frame visible.
+let gpRenderPaused = false;
+/// Wall-clock of the last sceneState post (throttled to ~10 Hz).
+let gpLastSceneStatePost = 0;
+/// GW4-c5c-3: minimap feed throttle (~6 Hz — unit dots only need to be roughly
+/// live) + LOS-dirty flag so the (relatively large) fog bitmap only ships when
+/// a new envelope-0x07 snapshot actually arrives, not on every feed.
+let gpLastMinimapPost = 0;
+let gpMinimapLosDirty = false;
+/// Most-recent per-allyteam LOS bitmap, for the minimap fog overlay. Mirrors
+/// the pre-GW4 main.ts behaviour (most-recent-wins; spectators round-robin
+/// ally teams and see one team's vision at a time).
+let gpLastLosBitmap: LosBitmap | null = null;
+/// Map dims + backdrop URL for the main-thread minimap, captured in gpLoadMap.
+/// Sent on the first minimap feed after the terrain is built, then cleared
+/// (`gpMinimapMapInfo = null` ⇒ already delivered).
+let gpMinimapMapInfo: { width: number; height: number; baseUrl: string } | null = null;
+/// GW4-c3: sun + ambient + HDR pipeline + CSM. Created in gpInit (deferred
+/// from c1 — invisible on an empty scene), retuned by applyMapLighting once
+/// the map's `mapinfo.lua → lighting` is fetched + parsed.
+let gpSceneLighting: SceneLighting | null = null;
+/// GW4-c2: the game-server WebTransport connection, owned by the worker.
+/// Opened from `gp:init` creds; torn down on `gp:shutdown`. At c2 its
+/// callbacks only log decoded counts + bridge a few signals to main; the
+/// renderer/LuaUI dispatch wires up as those modules move in across c3–c6.
+let gpConnection: Connection | null = null;
+/// GW4-c4: world entity rendering, owned by the worker. The entity renderer
+/// interpolates streamed snapshots at the presentation cursor P; the building-
+/// plate renderer places static under-building ground decals; the def cache
+/// accumulates the game's unit/weapon/CEG defs (fetched over HTTP, keyed by the
+/// `defsCacheKey` the server hands back in AuthResponse). Mirrors main.ts's
+/// pre-move construction (main.ts@d6301137f7^ L488–595).
+let gpEntityRenderer: EntityRenderer | null = null;
+let gpBuildingPlateRenderer: BuildingPlateRenderer | null = null;
+let gpDefCache: DefCache | null = null;
+/// GW4-c6-1b: resolves once the game's defs are ingested into the def cache (or
+/// immediately if the game ships none). gpBootLuaUI awaits this before running
+/// init(), so the Lua UnitDefs/UnitDefNames tables are already populated when
+/// ZK's config files (unitDefReplacements, dynamic_comm_defs, …) index
+/// UnitDefNames.<x> at include-time — otherwise they hit nil and the dependent
+/// widgets/gadgets boot degraded.
+let gpDefsReadyResolve: (() => void) | null = null;
+const gpDefsReady: Promise<void> = new Promise((resolve) => { gpDefsReadyResolve = resolve; });
+/// PLAN-latency L0: interpolate entities at the presentation cursor (server-
+/// frame keyed) instead of arrival wall-time. Reset + anchored to the
+/// connection's ServerClock once `gpConnect` builds it.
+let gpPresentationClock: PresentationClock | null = null;
+/// GW4-c3 terrain state, populated once the map data HTTP fetch resolves.
+/// Mirrors the pre-move main.ts `onMapData` terrain build.
+let gpTerrainMesh: Mesh | null = null;
+let gpTerrainFog: TerrainFog | null = null;
+let gpDeformTerrain: DeformableTerrain | null = null;
+let gpMapData: ParsedMapData | null = null;
+/// GW4-c5: weapon-FX / projectile / decal / build render modules, owned by the
+/// worker. Ported from main.ts's pre-move construction (main.ts@d6301137f7^
+/// L391–595 + onMapData). Driven by the connection's combat/projectile/build/
+/// decal callbacks and aged in the render loop at the sim-scaled `gpFxSimSpeed`.
+let gpFxLightPool: FxLightPool | null = null;
+let gpDistortion: DistortionRenderer | null = null;
+let gpMuzzleFlare: MuzzleFlareRenderer | null = null;
+let gpProjectileRenderer: ProjectileRenderer | null = null;
+let gpCegRuntime: CegRuntime | null = null;
+let gpBuildBeamRenderer: BuildBeamRenderer | null = null;
+let gpCombatFX: CombatFX | null = null;
+let gpDecalOverlay: DecalOverlay | null = null;
+let gpDynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
+/// Sim-scaled delta multiplier for VISUAL FX aging — slows / freezes effect
+/// lifetimes with the game speed (paused → 0). Driven by onGameInfo. The
+/// camera + entity ticks keep raw wall dt; only FX lifetimes use it.
+let gpFxSimSpeed = 1;
+/// Wall-clock timestamp of the previous render frame, for the FX `dt`.
+let gpLastFrameTime = 0;
+/// GW4-c6: the shared Babylon GL context the LuaUI draws into, + an active
+/// flag. Set once `init(..., sharedGl)` finishes booting the runtime; the gp
+/// render loop then runs the UI pass (gpRunUiPass) after scene.render().
+let gpUiGl: WebGL2RenderingContext | null = null;
+let gpLuaUiActive = false;
+/// Holds the per-allyteam LOS bitmaps (envelope 0x07) so a bitmap that
+/// arrives before the fog mesh exists still paints on first build.
+const gpLosBitmapStore = new LosBitmapStore();
+/// Static full-map viewport resend timer. The camera→viewport path moves
+/// into the worker in c3; until then a fixed full-map viewport is resent on
+/// an interval so the server streams entity state (filtering is viewport-
+/// gated) and the QUIC session sees periodic traffic. Cleared on shutdown.
+let gpViewportTimer: ReturnType<typeof setInterval> | null = null;
+
+/// GW4-c3: fetch map data over HTTP (not the connection — server_main.cpp
+/// serves it on the asset plane) and build the terrain in the worker. This
+/// ports the terrain/water/fog/lighting half of main.ts's pre-move
+/// `onMapData` (the feature/widget/minimap halves stay on main / move in
+/// later checkpoints). Runs once per game; idempotent via `gpMapData`.
+///
+/// DEVIATION (documented in the c3 handoff): the interactive RTS camera +
+/// DOM input split (Bucket-3 `rts-camera` → CameraInput) is deferred to c5
+/// per the plan's c5 bullet. c3 only needs a *static framed* camera so
+/// terrain is visible ("first light"); the FreeCamera is positioned at map
+/// centre here. No ground-clamp / pan / zoom yet.
+async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
+    if (!gpScene || !gpEngine || !gpCamera || !gpSceneLighting) return;
+    if (gpMapData) { postLog(2, '[gp] gpLoadMap: map already built — ignoring'); return; }
+    const scene = gpScene;
+    const sceneLighting = gpSceneLighting;
+
+    let map: ParsedMapData;
+    try {
+        map = await fetchMapDataHttp(msg.mapId);
+    } catch (err) {
+        postLog(4, `[gp] map data fetch failed: ${err}`);
+        return;
+    }
+    if (!gpScene) return;  // shutdown raced the fetch
+    gpMapData = map;
+    postLog(1, `[gp] MapData received: ${map.mapx}x${map.mapy}, ${map.features.length} features`);
+
+    // `mapSourceUrl` is lobby-relative; lobbyUrl='' resolves it against the
+    // worker (page) origin, same as fetchMapDataHttp's `/api/*` paths.
+    const mapSourceAbs = map.mapSourceUrl.startsWith('http')
+        ? map.mapSourceUrl
+        : `${msg.lobbyUrl}${map.mapSourceUrl}`;
+    const mapBaseUrl = `${msg.lobbyUrl}${map.mapDataUrl}`;
+
+    // GW4-c5c-3: hand the main-thread minimap its dims + backdrop URL on the
+    // next feed (the worker owns the map fetch). loadBackground appends
+    // `/minimap.ktx2` to baseUrl, same as the pre-GW4 main path.
+    gpMinimapMapInfo = { width: map.widthElmos, height: map.heightElmos, baseUrl: mapBaseUrl };
+
+    const mapDims: MapDimensions = {
+        mapx: map.mapx, mapy: map.mapy,
+        minHeight: map.minHeight, maxHeight: map.maxHeight,
+        tilesX: map.tilesX, tilesZ: map.tilesZ,
+    };
+
+    // PLAN-lighting L2: parse `mapinfo.lua → lighting` on the client (server
+    // is headless) and apply sun/ambient. Fire-and-forget; failure falls back
+    // to the createSceneLighting defaults so the scene is never dark.
+    void loadMapLighting(mapSourceAbs).then((lighting: MapLighting) => {
+        if (gpSceneLighting === sceneLighting) applyMapLighting(lighting, sceneLighting);
+    });
+
+    // Terrain mesh from the embedded heightmap.
+    const terrainMesh = buildTerrainMesh(scene, mapDims, map.heightmap);
+    terrainMesh.receiveShadows = true;
+    gpTerrainMesh = terrainMesh;
+    gpDeformTerrain = new DeformableTerrain(terrainMesh, mapDims);
+    postLog(1, '[gp] terrain mesh built from MapData heightmap');
+
+    // GW4-c4: hand the heightmap to the entity renderer so units clamp to the
+    // ground + getGroundHeight / getMapSizeElmos resolve (the camera ground-
+    // sampler hooks up with the interactive camera in c5).
+    gpEntityRenderer?.setMapHeightmap(
+        map.heightmap, map.mapx, map.mapy,
+        map.minHeight, map.maxHeight, map.squareSize,
+    );
+
+    // GW4-c5b-3: the order overlays need the heightmap to terrain-follow their
+    // lines/markers/rings.
+    gpCommandPathRenderer?.setMapData(map);
+    gpWaypointMarkerRenderer?.setMapData(map);
+    gpStandingOrderRenderer?.setMapData(map);
+
+    // GW4-c5b: frame the interactive camera over map centre and hand it the map
+    // bounds (for fitMap / future edge clamping). recomputeAxes() re-seeds the
+    // RTSCamera's look-at + pan/right axes from the new pose so the first pan
+    // moves in the right direction. Keeps the same starting framing as c3–c5a;
+    // now pan/zoom/orbit are live off the forwarded input.
+    const cx = map.widthElmos / 2;
+    const cz = map.heightElmos / 2;
+    gpCamera.position.set(cx, 1200, cz - 1500);
+    gpCamera.setTarget(new Vector3(cx, 0, cz));
+    const rtsCam = gpViewCameras.get(0);
+    rtsCam?.setMapBounds(map.widthElmos, map.heightElmos);
+    rtsCam?.recomputeAxes();
+
+    // Fog-of-war overlay (envelope 0x07). Sits just above terrain in
+    // renderingGroupId=1; never a shadow caster (map-sized blob).
+    const fog = new TerrainFog();
+    fog.build(scene, mapDims, map.heightmap);
+    gpTerrainFog = fog;
+    const fogMesh = fog.getMesh();
+    if (fogMesh) sceneLighting.csm.removeShadowCaster(fogMesh, false);
+    gpLosBitmapStore.forEach(bitmap => fog.apply(bitmap));
+
+    // DXT1/KTX2 tile textures over HTTP.
+    if (map.tilesX > 0 && map.tilesZ > 0) {
+        loadTerrainTextures(scene, terrainMesh, mapBaseUrl, mapDims).catch(e => {
+            postLog(2, `[gp] terrain texture loading failed: ${e}`);
+        });
+    }
+
+    // GW4-c5: ground decal overlay (PLAN-decals.md D7) — craters from scar
+    // events + vehicle tracks, baked into a persistent clipmap sampled by the
+    // terrain material. Track classification reads the unit defs' trackType;
+    // the worker fetches defs independently of the map (no Promise.all gate),
+    // so if defs lag the map build, tracks stay unclassified until they land
+    // (scars are unaffected). DEVIATION from main's def-gated onMapData — noted.
+    gpDecalOverlay?.dispose();
+    const decalOverlay = new DecalOverlay(scene, map.widthElmos, map.heightElmos);
+    decalOverlay.setTrackTypes(
+        buildTrackTypeNames((gpDefCache?.getAllUnitDefs() ?? []).map(d => d.trackType)));
+    gpDecalOverlay = decalOverlay;
+    if (terrainMesh.material) {
+        attachDecalOverlay(terrainMesh.material,
+            decalOverlay.coarseTexture, decalOverlay.fineTexture, decalOverlay.fineState,
+            decalOverlay.coarseTexel, decalOverlay.fineTexel,
+            map.widthElmos, map.heightElmos);
+    }
+
+    // GW4-c5: static map-placed features (rocks, trees, wrecks) — thin-instanced
+    // .glb, registered as shadow casters. Runtime feature spawns go through the
+    // dynamic feature renderer (onFeatureLifecycle).
+    renderMapFeatures(scene, map, gpSceneLighting!.csm).catch((err) =>
+        postLog(2, `[gp] renderMapFeatures failed: ${err}`));
+
+    // Fallback water plane (maps with voidWater=true ship their own fluid widget).
+    if (!map.water.voidWater) {
+        const water = MeshBuilder.CreateGround('water', {
+            width: map.widthElmos, height: map.heightElmos,
+        }, scene);
+        water.position.set(map.widthElmos / 2, 0, map.heightElmos / 2);
+        water.isPickable = false;
+        water.renderingGroupId = 1;
+        const wmat = new StandardMaterial('waterMat', scene);
+        const [r, g, b] = map.water.baseColor;
+        wmat.diffuseColor = new Color3(r, g, b);
+        wmat.emissiveColor = new Color3(r * 0.3, g * 0.3, b * 0.3);
+        wmat.specularColor = new Color3(0.2, 0.2, 0.2);
+        wmat.alpha = Math.max(0.4, map.water.surfaceAlpha);
+        wmat.backFaceCulling = false;
+        water.material = wmat;
+        water.receiveShadows = false;
+        sceneLighting.csm.removeShadowCaster(water, false);
+    }
+
+    // GW4-c6: boot the LuaUI runtime now that the map (source URL + heightmap)
+    // is available. It runs on this same Babylon GL context; the gp render loop
+    // drives its screen-space pass after scene.render(). Fire-and-forget — the
+    // bootstrap (VFS prefetch + camain.lua + gadget halves) is async and the
+    // world keeps rendering while it loads.
+    void gpBootLuaUI(map, mapSourceAbs, msg);
+}
+
+/// GW4-c2 placeholder viewport. Map data is served over HTTP (not the
+/// connection — server_main.cpp), so Connection.onMapData never fires here;
+/// fetch the map metadata directly to size a full-map box, send it once the
+/// connection is authenticated, then resend periodically. c3 replaces this
+/// with real camera-frustum updates from the in-worker camera state machine.
+async function gpRegisterViewport(lobbyUrl: string, mapId: string): Promise<void> {
+    let centerX = 4096, centerZ = 4096;
+    try {
+        const resp = await fetch(`${lobbyUrl}/api/maps/data/${mapId}/metadata.json`);
+        if (resp.ok) {
+            const meta = await resp.json();
+            const sq = meta.squareSize ?? 8;
+            centerX = ((meta.mapx ?? 1024) * sq) / 2;
+            centerZ = ((meta.mapy ?? 1024) * sq) / 2;
+        }
+    } catch (err) {
+        postLog(2, `[gp] map metadata fetch failed (${err}); using default viewport center`);
+    }
+    // GW4-c5b: track the interactive camera — centre the viewport on the camera
+    // look-at so the server filters around where the player is looking. The size
+    // stays a generous 16384² ("cover any current map", viewport.ts) so entities
+    // never pop on these test maps; a tighter frustum-derived box is a later
+    // optimisation that matters for large MMORTS maps, not c5b. Rotation 0 / zoom
+    // 1 are placeholders until the LOD path lands.
+    const send = () => {
+        const cam = gpViewCameras.get(0);
+        const t = cam?.target;
+        gpConnection?.sendViewportUpdate(
+            0, t ? t.x : centerX, t ? t.z : centerZ, 16384, 16384, 0, 1);
+    };
+    send();
+    if (gpViewportTimer) clearInterval(gpViewportTimer);
+    gpViewportTimer = setInterval(send, 1000);
+    postLog(1, `[gp] viewport registered (camera-tracked, default center ${centerX.toFixed(0)},${centerZ.toFixed(0)}) — entity stream should follow`);
+}
+
+/// GW4-c6-1b: merge an entity-state snapshot into `liveState.units` (the map
+/// behind Spring.GetAllUnits / GetUnitPosition / GetUnitDefID etc.) and
+/// synthesise the UnitCreated / UnitFinished callins LuaUI widgets expect.
+/// Extracted from the legacy `entityState` main→worker message handler so the
+/// in-worker connection's `onEntityState` callback feeds the Lua runtime
+/// directly (no main hop). The server has no dedicated build-complete event, so
+/// UnitFinished is derived from a buildProgress < 1 → >= 1 transition; allied
+/// UnitCreated is deferred one tick to let the server's own Created event win
+/// (enemy ids fire immediately — the server intentionally omits Created there).
+function applyEntityStateToLiveState(snap: EntityStateSnapshot, isDelta: boolean): void {
+    const count = snap.count;
+    const entityIds = snap.entityIds;
+    const posX = snap.positionsX;
+    const posY = snap.positionsY;
+    const posZ = snap.positionsZ;
+    const headings = snap.headings;
+    const health = snap.health;
+    const defIds = snap.defIds;
+    const teams = snap.teams;
+    const stateBits = snap.stateBits;
+    const losStates = snap.losStates;
+    const buildProgress = snap.buildProgress;
+
+    const tickRate = 30;
+    const createdIds: Array<{ id: number; defId: number; team: number }> = [];
+    const finishedIds: Array<{ id: number; defId: number; team: number }> = [];
+    const decodeProgress = (i: number) => buildProgress ? buildProgress[i] / 255 : 1;
+    if (!isDelta) {
+        const prevUnits = liveState.units;
+        const newUnits = new Map<number, UnitEntry>();
+        if (entityIds) {
+            for (let i = 0; i < count; i++) {
+                const id = entityIds[i];
+                const prev = prevUnits.get(id);
+                const nx = posX ? posX[i] : 0;
+                const ny = posY ? posY[i] : 0;
+                const nz = posZ ? posZ[i] : 0;
+                const defId = defIds ? defIds[i] : 0;
+                const team = teams ? teams[i] : 0;
+                const bp = decodeProgress(i);
+                newUnits.set(id, {
+                    x: nx, y: ny, z: nz,
+                    heading: headings ? headings[i] : 0,
+                    healthRatio: health ? health[i] / 65535 : 1,
+                    defId,
+                    team,
+                    buildProgress: bp,
+                    vx: prev ? (nx - prev.x) * tickRate : 0,
+                    vy: prev ? (ny - prev.y) * tickRate : 0,
+                    vz: prev ? (nz - prev.z) * tickRate : 0,
+                    stateBits: stateBits ? stateBits[i] : 0,
+                    losState: losStates ? losStates[i] : 0x0F,
+                });
+                if (!prev) createdIds.push({ id, defId, team });
+                else if (prev.buildProgress < 1 && bp >= 1) {
+                    finishedIds.push({ id, defId, team });
+                }
+            }
+        }
+        liveState.units = newUnits;
+    } else {
+        if (entityIds) {
+            for (let i = 0; i < count; i++) {
+                const id = entityIds[i];
+                const existing = liveState.units.get(id);
+                const entry: UnitEntry = existing ?? {
+                    x: 0, y: 0, z: 0, heading: 0, healthRatio: 1,
+                    defId: 0, team: 0, buildProgress: 1,
+                    vx: 0, vy: 0, vz: 0,
+                    stateBits: 0, losState: 0x0F,
+                };
+                if (posX) {
+                    const nx = posX[i];
+                    entry.vx = existing ? (nx - entry.x) * tickRate : 0;
+                    entry.x = nx;
+                }
+                if (posY) {
+                    const ny = posY[i];
+                    entry.vy = existing ? (ny - entry.y) * tickRate : 0;
+                    entry.y = ny;
+                }
+                if (posZ) {
+                    const nz = posZ[i];
+                    entry.vz = existing ? (nz - entry.z) * tickRate : 0;
+                    entry.z = nz;
+                }
+                if (headings) entry.heading = headings[i];
+                if (health) entry.healthRatio = health[i] / 65535;
+                if (defIds) entry.defId = defIds[i];
+                if (teams) entry.team = teams[i];
+                if (stateBits) entry.stateBits = stateBits[i];
+                if (losStates) entry.losState = losStates[i];
+                if (buildProgress) {
+                    const prevBp = entry.buildProgress;
+                    const newBp = buildProgress[i] / 255;
+                    entry.buildProgress = newBp;
+                    if (existing && prevBp < 1 && newBp >= 1) {
+                        finishedIds.push({ id, defId: entry.defId, team: entry.team });
+                    }
+                }
+                liveState.units.set(id, entry);
+                if (!existing) {
+                    createdIds.push({ id, defId: entry.defId, team: entry.team });
+                }
+            }
+        }
+    }
+    // Flush deferred allied appearances from the previous tick (skip any the
+    // server's own Created event has since covered).
+    if (liveState.pendingSynthCreated.size > 0) {
+        for (const [id, entry] of liveState.pendingSynthCreated) {
+            if (!liveState.serverFiredUnitCreated.has(id)) {
+                dispatchUnitCreated(id, entry.defId, entry.team, 0);
+                liveState.serverFiredUnitCreated.add(id);
+            }
+        }
+        liveState.pendingSynthCreated.clear();
+    }
+    const myAllyTeam = liveState.identity.myAllyTeam;
+    for (const c of createdIds) {
+        if (liveState.serverFiredUnitCreated.has(c.id)) continue;
+        const teamInfo = liveState.teams.get(c.team);
+        const allied = teamInfo ? teamInfo.allyTeam === myAllyTeam : false;
+        if (allied) {
+            liveState.pendingSynthCreated.set(c.id, { defId: c.defId, team: c.team });
+        } else {
+            dispatchUnitCreated(c.id, c.defId, c.team, 0);
+            liveState.serverFiredUnitCreated.add(c.id);
+        }
+    }
+    for (const f of finishedIds) {
+        dispatchUnitFinished(f.id, f.defId, f.team);
+    }
+}
+
+/// GW4-c6-1b: drop a unit from `liveState` and fire UnitDestroyed. Mirrors the
+/// legacy `entityDestroy` handler. NOTE: the connection's onEntityDestroy fires
+/// on "left view OR died" (pre-GW4 the main thread had the same conflation), so
+/// a unit leaving LOS also synthesises UnitDestroyed — acceptable parity until
+/// the server distinguishes the two.
+function removeUnitFromLiveState(id: number): void {
+    const u = liveState.units.get(id);
+    const defId = u?.defId ?? 0;
+    const team = u?.team ?? 0;
+    liveState.units.delete(id);
+    liveState.unitRulesParams.delete(id);
+    liveState.unitCommands.delete(id);
+    liveState.unitCmdDescs.delete(id);
+    liveState.sensorOverrides.delete(id);
+    liveState.serverFiredUnitCreated.delete(id);
+    liveState.pendingSynthCreated.delete(id);
+    dispatchUnitDestroyed(id, defId, team);
+}
+
+// GW4-c6-1b: input → LuaUI widget callins. The gp input messages carry
+// canvas-relative CSS px (top-left origin) + DOM button numbering + a packed
+// mods bitfield (1=shift,2=ctrl,4=alt,8=meta) + KeyboardEvent.code. Spring's
+// widget callins expect device px with a bottom-left origin, Spring button
+// numbering (left=1/middle=2/right=3) and SDL keysyms — translate here.
+
+/** DOM mouse button (0/1/2) → Spring button (1/2/3). */
+function domButtonToSpring(b: number): number {
+    return b === 0 ? 1 : b === 1 ? 2 : b === 2 ? 3 : b + 1;
+}
+
+/** KeyboardEvent.code → Spring/SDL keysym. Named keys are mapped; letters,
+ *  digits and numpad digits fall back to the ASCII code of the character they
+ *  produce (matching the lua-widget-manager springKeyCode table on main, which
+ *  worked off `.key` — here we derive the same numbers from `.code`). */
+function codeToSpringKeysym(code: string): number {
+    const m: Record<string, number> = {
+        Backspace: 8, Tab: 9, Enter: 13, NumpadEnter: 13, Escape: 27, Space: 32,
+        Delete: 127, ArrowLeft: 276, ArrowRight: 275, ArrowUp: 273, ArrowDown: 274,
+        Home: 278, End: 279, PageUp: 280, PageDown: 281, Insert: 277,
+        F1: 282, F2: 283, F3: 284, F4: 285, F5: 286, F6: 287,
+        F7: 288, F8: 289, F9: 290, F10: 291, F11: 292, F12: 293,
+        ShiftLeft: 304, ShiftRight: 303, ControlLeft: 306, ControlRight: 305,
+        AltLeft: 308, AltRight: 307, MetaLeft: 310, MetaRight: 309,
+    };
+    if (code in m) return m[code];
+    if (code.length === 4 && code.startsWith('Key')) return code.charCodeAt(3) + 32; // 'KeyA'→'a'
+    if (code.length === 6 && code.startsWith('Digit')) return code.charCodeAt(5);     // 'Digit5'→'5'
+    if (code.length === 7 && code.startsWith('Numpad')) return code.charCodeAt(6);    // 'Numpad5'→'5'
+    return 0;
+}
+
+/** CSS px (top-left) → Spring device px (bottom-left). The OffscreenCanvas
+ *  backing store is CSS × dpr, and liveState.viewport is in device px. */
+function gpToSpringCoords(x: number, y: number): { x: number; y: number } {
+    const dx = x * gpDpr;
+    const dy = y * gpDpr;
+    return { x: Math.round(dx), y: Math.round(liveState.viewport.height - dy) };
+}
+
+let gpLastMouseSpringX = 0;
+let gpLastMouseSpringY = 0;
+
+/** widgetHandler:MousePress — returns true if a widget consumed the press (→
+ *  the world selection/order is suppressed, Spring's mouse-capture semantics). */
+function gpDispatchMousePress(sx: number, sy: number, btn: number): boolean {
+    if (!runtime) return false;
+    const consumed = runtime.evalString(`
+        if widgetHandler and widgetHandler.MousePress then
+            local ok, ret = pcall(widgetHandler.MousePress, widgetHandler, ${sx}, ${sy}, ${btn})
+            return ok and ret and "1" or "0"
+        end
+        return "0"`);
+    return consumed === '1';
+}
+function gpDispatchMouseRelease(sx: number, sy: number, btn: number): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.MouseRelease then
+            pcall(widgetHandler.MouseRelease, widgetHandler, ${sx}, ${sy}, ${btn})
+        end`, 'callin:MouseRelease');
+}
+function gpDispatchMouseMove(sx: number, sy: number, dx: number, dy: number, btn: number): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.MouseMove then
+            pcall(widgetHandler.MouseMove, widgetHandler, ${sx}, ${sy}, ${dx}, ${dy}, ${btn})
+        end`, 'callin:MouseMove');
+}
+function gpDispatchMouseWheel(up: boolean, value: number): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.MouseWheel then
+            pcall(widgetHandler.MouseWheel, widgetHandler, ${up ? 'true' : 'false'}, ${value})
+        end`, 'callin:MouseWheel');
+}
+function gpDispatchKeyPress(keysym: number, mods: number): void {
+    if (!runtime || keysym === 0) return;
+    const alt = (mods & 4) !== 0, ctrl = (mods & 2) !== 0;
+    const meta = (mods & 8) !== 0, shift = (mods & 1) !== 0;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.KeyPress then
+            pcall(widgetHandler.KeyPress, widgetHandler, ${keysym}, { alt=${alt}, ctrl=${ctrl}, meta=${meta}, shift=${shift} }, false)
+        end`, 'callin:KeyPress');
+}
+function gpDispatchKeyRelease(keysym: number, mods: number): void {
+    if (!runtime || keysym === 0) return;
+    const alt = (mods & 4) !== 0, ctrl = (mods & 2) !== 0;
+    const meta = (mods & 8) !== 0, shift = (mods & 1) !== 0;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.KeyRelease then
+            pcall(widgetHandler.KeyRelease, widgetHandler, ${keysym}, { alt=${alt}, ctrl=${ctrl}, meta=${meta}, shift=${shift} })
+        end`, 'callin:KeyRelease');
+}
+
+/// GW4-c2: stand up the in-worker connection. Discovers `/api/wt/info` from
+/// `gameHttpUrl`, opens the WebTransport session, and auths with the init
+/// creds (token reconnect against the shared lobby SQLite). At c2 the
+/// callbacks are deliberately thin — the exit gate is "worker logs
+/// entityState count=N with no main-thread network code" (PLAN-game-worker.md
+/// GW4-c2). The full callback object (porting main.ts@32cf513619 L1070–1326)
+/// fills in as the renderers + LuaUI runtime come online in c3–c6.
+function gpConnect(msg: GpInitToWorker): void {
+    // GW8: reset the per-envelope bandwidth tally for the new game session. The
+    // tally lives in THIS (worker) bundle's net-inspector instance, fed by the
+    // worker connection's routeIncoming/sendOnControl; surfaced to main via the
+    // gp:test 'netStats' pull (PLAN-performance PC-2).
+    resetNetStats();
+    const conn = new Connection({
+        onStateChange: (state) => postLog(1, `[gp] connection state: ${state}`),
+        onAuthenticated: (playerId, _token, team, defsCacheKey) => {
+            postLog(1, `[gp] authenticated playerId=${playerId} team=${team} defsKey=${defsCacheKey || '(none)'}`);
+            postToMain({ type: 'gp:authenticated', playerId, team });
+            // GW4-c6-1b: seed LuaUI identity so Spring.GetMyTeamID /
+            // GetLocalPlayerID / GetMyAllyTeamID resolve. AuthResponse carries
+            // no allyTeam, so default myAllyTeam to the team until the team
+            // table is wired (correct for single-team / AI cases; proper ally
+            // resolution from the team table is a later seam).
+            liveState.identity = { myTeam: team, myAllyTeam: team, myPlayerId: playerId };
+            // GW4-c5b-3: tell the standing-order overlay who "we" are so its
+            // own/allied filtering works (server already scopes the broadcast;
+            // this drives own-vs-allied styling + the show-allies toggle).
+            gpStandingOrderRenderer?.setIdentity(team, team);
+            // GW4-c4: fetch the game's defs (unit/weapon/CEG/feature) over HTTP
+            // from the content-addressed bake the server hands back. The
+            // DefCache.onUnitDefs listener pushes them to the entity + plate
+            // renderers as they ingest. (Server has no incremental def stream;
+            // this bulk fetch is the whole def supply — main did the same.)
+            if (defsCacheKey && gpDefCache) {
+                fetchAndIngestDefs(msg.gameId, defsCacheKey, gpDefCache)
+                    .then(() => postLog(1, `[gp] defs ingested (${gpDefCache?.getAllUnitDefs().length ?? 0} unit defs)`))
+                    .catch((e) => postLog(4, `[gp] defs fetch failed: ${e}`))
+                    // GW4-c6-1b: unblock the LuaUI boot once defs are in (or on
+                    // failure — boot anyway rather than hang the UI forever).
+                    .finally(() => gpDefsReadyResolve?.());
+            } else {
+                // No defs to fetch — don't make the LuaUI boot wait.
+                gpDefsReadyResolve?.();
+            }
+            // Register a viewport so the server starts streaming entity state.
+            void gpRegisterViewport(msg.lobbyUrl, msg.mapId);
+        },
+        onAuthFailed: (m) => postLog(4, `[gp] auth failed: ${m}`),
+        onServerError: (code, m) => postLog(4, `[gp] server error ${code}: ${m}`),
+        onEntityState: (snapshot, isDelta) => {
+            gpEntityRenderer?.update(snapshot, isDelta);
+            gpBuildingPlateRenderer?.update(snapshot);
+            // GW4-c6-1b: also merge into liveState.units + synth the
+            // UnitCreated/UnitFinished callins so LuaUI widgets see the world.
+            applyEntityStateToLiveState(snapshot, isDelta);
+        },
+        // GW4-c4: streamed piece transforms (envelope 0x05) → per-piece thin
+        // instance matrices on the unit's model.
+        onPieceState: (snapshot) => gpEntityRenderer?.applyPieceState(snapshot),
+        // GW4-c4/c5: a unit/feature left view or died → drop its meshes + plate
+        // and (c5) fire a combatFX death burst at its last position. (LuaUI
+        // forward to widgets wires up in c6.)
+        onEntityDestroy: (entityId, x, y, z) => {
+            gpEntityRenderer?.removeEntity(entityId);
+            gpBuildingPlateRenderer?.remove(entityId);
+            gpCombatFX?.onCombatEvents([{
+                attackerId: 0, targetId: entityId, weaponDefId: 0,
+                result: 3, damage: 500, x, y, z,
+            }]);
+            // GW4-c6-1b: LuaUI UnitDestroyed + liveState cleanup.
+            removeUnitFromLiveState(entityId);
+        },
+        // GW4-c5: runtime feature spawns (wrecks/debris/reclaim) → dynamic
+        // feature renderer. Map-placed features load via renderMapFeatures.
+        onFeatureLifecycle: (spawns, removed) => {
+            gpDynamicFeatureRenderer?.applyLifecycleBatch(spawns, removed);
+        },
+        // GW4-c5: weapon-fire / impact / trajectory events (envelopes inside
+        // GameEventBatch) drive the projectile renderer + combatFX. The legacy
+        // 0x04 per-tick projectile-state envelope is gone — the renderer
+        // integrates motion locally off these events.
+        onProjectileFired: (events) => {
+            if (!gpProjectileRenderer) return;
+            for (const e of events) gpProjectileRenderer.onFired(e);
+        },
+        onProjectileImpacts: (events) => {
+            for (const e of events) gpProjectileRenderer?.onImpact(e);
+            gpCombatFX?.onProjectileImpacts(events);
+        },
+        onProjectileTrajectories: (events) => {
+            if (!gpProjectileRenderer) return;
+            for (const e of events) gpProjectileRenderer.onTrajectory(e);
+        },
+        // GW4-c5: combat hit/kill events → combatFX (impact CEGs + lights).
+        onCombatEvents: (events) => gpCombatFX?.onCombatEvents(events),
+        // GW4-c5b-3: per-unit command queues (~1 Hz) → command-path + waypoint
+        // overlays for the current selection (shift-gated). Cached so a
+        // selection change re-renders without waiting for the next broadcast.
+        // (Widget forward + the build-pending-ghost reaper land in c5c/c6.)
+        onUnitCommandQueues: (queues) => {
+            gpLastCommandQueues = queues;
+            const sel = gpSelection?.selection ?? [];
+            gpCommandPathRenderer?.update(queues, sel);
+            gpWaypointMarkerRenderer?.update(queues, sel);
+        },
+        // GW4-c5b-3: standing orders (always-on overlay; server scopes the
+        // broadcast to own + allied teams).
+        onStandingOrders: (orders) => gpStandingOrderRenderer?.update(orders),
+        // GW4-c5c-2: audio bridge. The connection decodes SoundEvents here, but
+        // playback needs the main-thread AudioContext. Resolve each event's
+        // SoundRef against the in-worker def cache (the def-dependent step) and
+        // post the resolved pairs to main, where SoundEventPlayer does the
+        // SoundItem/URL resolution + AudioManager.play. Music events forward
+        // straight to main's MusicDirector.
+        onSoundEvents: (events) => {
+            if (!gpDefCache) return;
+            const resolved: ResolvedSoundEvent[] = [];
+            for (const e of events) {
+                const ref = resolveSoundRef(gpDefCache, e.sourceKind as 0 | 1 | 2 | 3,
+                    e.sourceDefId, e.soundId);
+                if (ref) resolved.push({ e, ref });
+            }
+            if (resolved.length) postToMain({ type: 'gp:audioSoundEvents', events: resolved });
+        },
+        onMusicEvent: (state, fadeMs) => postToMain({ type: 'gp:audioMusic', state, fadeMs }),
+        // GW4-c5: build/repair/reclaim progress (envelope 0x06) → build beams.
+        onBuildActivity: (snapshot) => gpBuildBeamRenderer?.onSnapshot(snapshot),
+        // GW4-c5: scar/track decal events (envelope 0x08) → ground decal overlay.
+        onDecals: (snapshot) => gpDecalOverlay?.onSnapshot(snapshot.scars, snapshot.tracks),
+        // PLAN-latency L0: drive the presentation cursor at the true sim speed
+        // (paused → 0 freezes P). GW4-c5: also drive the FX aging multiplier +
+        // the projectile integrator's sim-speed so bolts / particles / lights
+        // slow + freeze with the game. Frame/wind forwarding to LuaUI lands in c6.
+        onGameInfo: (frame, speed, paused) => {
+            const eff = paused ? 0 : speed;
+            gpPresentationClock?.setSpeedFactor(eff);
+            gpFxSimSpeed = eff;
+            gpProjectileRenderer?.setSimSpeed(eff);
+            // GW4-c5c: cache for the sceneState feed (HUD frame / speed / pause).
+            gpGameFrame = frame;
+            gpSimSpeed = speed;
+            gpPaused = paused;
+            // GW4-c6-1b: advance the LuaUI clock so Spring.GetGameFrame()
+            // ticks → widgetHandler:GameFrame + gadget GameFrame fan-out
+            // (gpRunUiPass → runFrame reads Spring.GetGameFrame()).
+            liveState.gameFrame = frame;
+            liveState.gameSpeed = speed;
+            liveState.gamePaused = paused;
+        },
+        // GW4-c3: live terrain deformation (envelope 0x09) → DeformableTerrain.
+        onHeightmapPatch: (patch) => gpDeformTerrain?.applyPatch(patch),
+        // GW4-c3: per-allyteam LOS bitmap (envelope 0x07) → fog-of-war overlay.
+        // Stored so a bitmap that arrives before gpLoadMap finishes still
+        // paints once the fog mesh exists.
+        onLosBitmap: (bitmap) => {
+            gpLosBitmapStore.set(bitmap);
+            gpTerrainFog?.apply(bitmap);
+            // GW4-c5c-3: a fresh LOS snapshot → ship the fog bitmap on the next
+            // minimap feed.
+            gpLastLosBitmap = bitmap;
+            gpMinimapLosDirty = true;
+            // Ghost preservation: a building killed out of LOS leaves a stale
+            // ghost; when its tile is re-LOSed and the server isn't re-
+            // streaming it, drop the ghost (it died while unseen).
+            const size = gpEntityRenderer?.getMapSizeElmos();
+            if (size) gpEntityRenderer?.clearGhostsInLos(bitmap, size.width, size.height);
+        },
+        // NOTE: Connection.onMapData is unused here — map data is served over
+        // HTTP, not the connection (server_main.cpp). gpLoadMap (called from
+        // gpInit) fetches + builds the terrain; the viewport is registered from
+        // onAuthenticated via gpRegisterViewport().
+        onGameOver: (frame) => postToMain({ type: 'gp:gameOver', frame }),
+        onServerRestart: () => postToMain({ type: 'gp:reload' }),
+    });
+    gpConnection = conn;
+    conn.connect(msg.gameHttpUrl, msg.username, '', msg.token);
+}
+
+function gpInit(msg: GpInitToWorker): void {
+    if (gpEngine) {
+        postLog(2, '[gp] gp:init received but engine already up — ignoring');
+        return;
+    }
+    const canvas = msg.canvas;
+    gpDpr = msg.dpr > 0 ? msg.dpr : 1;
+
+    // GW6: adopt the main thread's resolved build stamp. CONFIG is a module-level
+    // singleton; the render/def modules in this worker call stampUrl() (which
+    // reads CONFIG.buildStamp) for every .glb/.ktx2/.lua asset fetch. Main runs
+    // fetchBuildStamp() at startup, but the worker never did — so without this
+    // its CONFIG.buildStamp stayed 'dev' and stampUrl() was a no-op, dropping the
+    // ?v=<stamp> cache-bust the main thread applies. Seed it from gp:init so the
+    // worker's asset URLs match main's (no stale-cache skew on a new deploy, and
+    // a shared same-origin HTTP cache hit instead of two distinct URLs).
+    if (msg.buildStamp) CONFIG.buildStamp = msg.buildStamp;
+
+    // GW4-c5c-3: seed the worker's clientSettings cache with the main thread's
+    // gfx.* snapshot BEFORE createSceneLighting / the FX gating below read it.
+    // The worker has no localStorage (set() degrades to cache-only, try/caught),
+    // so without this seed every gfx read returns the registry default rather
+    // than the player's chosen quality. Live changes arrive via `gp:config`.
+    for (const [key, value] of Object.entries(msg.gfx ?? {})) {
+        clientSettings.set(key, value as never);
+    }
+    // Size the backing store to the device-pixel resolution; Babylon reads
+    // width/height off the canvas. Main keeps CSS sizing on the DOM element.
+    canvas.width = Math.max(1, Math.floor(msg.width * msg.dpr));
+    canvas.height = Math.max(1, Math.floor(msg.height * msg.dpr));
+    // GW4-c6: LuaUI lays out against Spring.GetViewSizes() = liveState.viewport,
+    // and the screen-space gl.Ortho maps [0,vsx]×[0,vsy] onto the device-pixel
+    // framebuffer — so view size must be the device-pixel backing store size.
+    liveState.viewport = { width: canvas.width, height: canvas.height };
+
+    const engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
+    const scene = new Scene(engine);
+    // RH scene so the glTF loader + the server's RH wire format line up
+    // (PLAN-coordinate-system) — same setup main.ts used before the move.
+    scene.useRightHandedSystem = true;
+    scene.clearColor = new Color4(0.05, 0.08, 0.12, 1);
+
+    // Preserve the depth buffer across rendering groups so meshes in a higher
+    // group still depth-test against the terrain (group 0). Babylon's DEFAULT is
+    // to clear depth/stencil before every rendering group, which would let the
+    // group-1 water plane (and group-2 units / group-3 command overlays) draw
+    // ON TOP of terrain that should occlude them. main.ts had these three calls
+    // pre-GW4; the c3 terrain port dropped them — restored here. See the
+    // renderingGroupId assignments in terrain.ts (fog), entity-renderer.ts
+    // (units), and the water block in gpLoadMap.
+    scene.setRenderingAutoClearDepthStencil(1, false, true, true);
+    scene.setRenderingAutoClearDepthStencil(2, false, true, true);
+    scene.setRenderingAutoClearDepthStencil(3, false, true, true);
+
+    // Default camera at origin — repositioned when MapData arrives (GW4-c3).
+    const camera = new FreeCamera('camera', new Vector3(0, 1200, -1500), scene);
+    camera.setTarget(new Vector3(0, 0, 0));
+    camera.minZ = 1;
+    camera.maxZ = 50000;
+
+    gpEngine = engine;
+    gpScene = scene;
+    gpCamera = camera;
+
+    // GW4-c3: install sun + ambient + HDR pipeline + CSM (deferred from c1 —
+    // it was invisible on an empty scene and drags in the HDR pipeline).
+    // applyMapLighting retunes it once mapinfo.lua lighting is fetched.
+    gpSceneLighting = createSceneLighting(scene, camera);
+
+    // GW4-c5: dynamic FX light pool (PLAN-weapon-fx-gaps Phase L). Fixed ring
+    // of point lights driven by weapon fire / explosions, sampled by the
+    // forward-lit stock materials + bloomed by the HDR pipeline. Created BEFORE
+    // the ZK unit material so setActiveFxLightPool lets units (not just terrain)
+    // light up under fire (Phase U). Distortion + muzzle-flare share the same
+    // explosion/fire paths and need the camera, so they're built here too.
+    gpFxLightPool = new FxLightPool(scene);
+    setActiveFxLightPool(gpFxLightPool);
+    gpDistortion = new DistortionRenderer(scene, camera);
+    gpMuzzleFlare = new MuzzleFlareRenderer(scene, camera);
+
+    // GW4-c4: world entity rendering (ports main.ts@d6301137f7^ L480–595).
+    // The per-game shader lighting style normally comes from modinfo.lua's
+    // `lighting` field via the lobby games list; the worker has no lobby list,
+    // so default to 'gameplay' (main's own fallback). ZK routes through the
+    // ported defaultMaterialTemplate shader regardless (setUseZKMaterial),
+    // which is what matters for the primary target.
+    // DEVIATION (c4): lightingStyle is hardcoded 'gameplay' here — fold the
+    // real modinfo value into gp:init in a later checkpoint if a non-ZK game
+    // needs its authored built-in-material lighting style.
+    setLightingStyle('gameplay');
+    setUseZKMaterial(msg.gameId === 'zk');
+
+    gpPresentationClock = new PresentationClock();
+
+    const entityRenderer = new EntityRenderer(scene);
+    entityRenderer.setPresentationClock(gpPresentationClock);
+    // PLAN-lighting L3/L4: register with the sun shadow generator up-front
+    // (before any def streams in) so the first ensureModel load isn't raced;
+    // pass the sun so the team-color material can sample the live CSM.
+    entityRenderer.setShadowGenerator(gpSceneLighting.csm, gpSceneLighting.sun);
+    gpEntityRenderer = entityRenderer;
+    // GW8: expose the scene-debug hooks on the worker globalThis so the main
+    // devtools console can reach them via window.__gp('__entityRenderer…')
+    // (the render-core move stranded these here). Mirrors the __fxLightPool /
+    // __renderPipeline / __csm hooks the render modules already set.
+    (globalThis as Record<string, unknown>).__entityRenderer = entityRenderer;
+
+    // GW4-c5b: interactive RTS camera for view 0 (DOM-free; driven by the
+    // forwarded `gp:*` input). Ground sampler = the entity renderer's heightmap
+    // (resolves once gpLoadMap calls setMapHeightmap) so the camera never dives
+    // through terrain. Map bounds + initial framing are applied in gpLoadMap.
+    const rtsCam = new RTSCamera(camera, msg.width, msg.height, msg.dpr);
+    rtsCam.setGroundSampler((x, z) => gpEntityRenderer?.getGroundHeight(x, z) ?? 0);
+    gpViewCameras.set(0, rtsCam);
+
+    // PLAN-decals.md D5: static under-building ground plates (AO/scorch).
+    const buildingPlateRenderer = new BuildingPlateRenderer(scene);
+    if (msg.gameId) buildingPlateRenderer.setGame(msg.gameId, msg.lobbyUrl);
+    gpBuildingPlateRenderer = buildingPlateRenderer;
+
+    // DefCache accumulates the game's defs (fetched over HTTP on auth).
+    const defCache = new DefCache();
+    gpDefCache = defCache;
+
+    // GW4-c5: projectile renderer + CEG runtime + build-beam (ports
+    // main.ts@d6301137f7^ L511–537). The CEG runtime drives muzzle flashes /
+    // impact bursts / debris; the projectile renderer integrates motion locally
+    // off Fired/Impact/Trajectory events and injects the CEG runtime + FX
+    // light pool + distortion + muzzle flare for its hooks.
+    const projectileRenderer = new ProjectileRenderer(scene);
+    gpProjectileRenderer = projectileRenderer;
+    (globalThis as Record<string, unknown>).__projectileRenderer = projectileRenderer;  // GW8 debug hook
+    const buildBeamRenderer = new BuildBeamRenderer(scene);
+    buildBeamRenderer.setEntityRenderer(entityRenderer);
+    if (msg.gameId) buildBeamRenderer.setGameAssetsBaseUrl(msg.gameId);
+    gpBuildBeamRenderer = buildBeamRenderer;
+    const cegRuntime = new CegRuntime(scene);
+    gpCegRuntime = cegRuntime;
+    projectileRenderer.setCegRuntime(cegRuntime);
+    projectileRenderer.setLightPool(gpFxLightPool);
+    projectileRenderer.setDistortion(gpDistortion);
+    projectileRenderer.setMuzzleFlare(gpMuzzleFlare);
+
+    // Resolve weapon-def texture names → KTX2 URLs (shared by projectiles, CEG,
+    // muzzle flares). Async; the renderers consult it lazily when they first see
+    // a weapon def with a texture name.
+    if (msg.gameId) {
+        const resolver = new ProjectileTextureResolver();
+        projectileRenderer.setTextureResolver(resolver);
+        cegRuntime.setTextureResolver(resolver);
+        gpMuzzleFlare?.setTextureResolver(resolver);
+        resolver.init(msg.gameId, msg.lobbyUrl).catch((e) =>
+            postLog(2, `[gp] projectile texture resolver init failed: ${e}`));
+    }
+
+    // CombatFX — impact/death bursts + shockwaves. Needs cegRuntime + defCache
+    // to look up the firing weapon's CEG (else falls back to procedural
+    // spheres). audio is null here: visuals are self-contained; the
+    // SoundEvent → AudioManager bridge stays on main (GW4-c5c).
+    const combatFX = new CombatFX(scene, undefined, cegRuntime, defCache);
+    combatFX.setLightPool(gpFxLightPool);
+    combatFX.setDistortion(gpDistortion);
+    gpCombatFX = combatFX;
+
+    // Dynamic feature renderer — runtime-spawned features (wrecks, debris,
+    // reclaim removals). Map-placed features load once via renderMapFeatures
+    // in gpLoadMap.
+    const dynamicFeatureRenderer = new DynamicFeatureRenderer(scene, defCache);
+    dynamicFeatureRenderer.setShadowGenerator(gpSceneLighting.csm);
+    gpDynamicFeatureRenderer = dynamicFeatureRenderer;
+
+    // Phase G: gate the expensive FX through the graphics-quality presets
+    // (ports main.ts@d6301137f7^ L434–451 — dropped in the c5a FX move, restored
+    // here now that the gfx snapshot + live `gp:config` push exist). `fireNow`
+    // applies the seeded value immediately; a later `gp:config` re-fires these
+    // via clientSettings.set → notify. `gfx.msaaSamples/fxaa/bloom/
+    // shadowFiltering` are owned by scene-lighting.ts's own subscriptions.
+    {
+        const fxLights = gpFxLightPool;
+        if (fxLights) clientSettings.subscribe('gfx.fxLights',
+            (v) => fxLights.setEnabled(Boolean(v)), /*fireNow*/ true);
+        const distortion = gpDistortion;
+        if (distortion) clientSettings.subscribe('gfx.distortion',
+            (v) => distortion.setEnabled(Boolean(v)), /*fireNow*/ true);
+        // tier → {maxPerSpawn, maxLifetimeS}. particleQuality is read once per
+        // session at CEG ingest (`requiresRestart`), so a live push only takes
+        // effect on the next ingestCegDefs — matching the main-thread semantics.
+        const PARTICLE_TIERS: Array<[number, number]> = [
+            [16, 4.0],   // 0 low
+            [32, 8.0],   // 1 medium
+            [64, 12.0],  // 2 high
+        ];
+        clientSettings.subscribe('gfx.particleQuality', (v) => {
+            const tier = PARTICLE_TIERS[Math.max(0, Math.min(2, Number(v)))];
+            setParticleBudget(tier[0], tier[1]);
+        }, /*fireNow*/ true);
+    }
+
+    // New defs → the renderers that consume them, and (GW4-c6-1b) the LuaUI
+    // def map behind UnitDefNames / WeaponDefNames / buildPic. UnitDefInfo and
+    // WeaponDefInfo are supersets of the Minimal*Wire shapes (same field
+    // names), so they slot straight into the def maps; republishDefGlobals
+    // rebuilds the Lua UnitDefs/UnitDefNames tables. Before this seam, every ZK
+    // config file logged `UnitDefNames.<x>` nil-index errors and panels read 0.
+    defCache.onUnitDefs((newDefs) => {
+        gpEntityRenderer?.setUnitDefs(newDefs);
+        gpBuildingPlateRenderer?.setUnitDefs(newDefs);
+        for (const d of newDefs) unitDefMap.set(d.defId, d);
+        if (runtime) republishDefGlobals(runtime);
+    });
+    defCache.onWeaponDefs((newDefs) => {
+        gpProjectileRenderer?.setWeaponDefs(newDefs);
+        for (const d of newDefs) weaponDefMap.set(d.defId, d);
+        if (runtime) republishDefGlobals(runtime);
+    });
+    // Streamed CEG defs override the BUILTIN_EFFECTS hand-ports for any tag the
+    // game defines; missing tags still resolve via the built-in archetypes.
+    defCache.onCegDefs((newDefs) => {
+        gpCegRuntime?.ingestCegDefs(newDefs);
+    });
+
+    gpLastFrameTime = performance.now();
+    engine.runRenderLoop(() => {
+        const now = performance.now();
+        const dt = (now - gpLastFrameTime) / 1000;
+        gpLastFrameTime = now;
+        // GW8: window.test.pause() freezes the client render loop for a
+        // deterministic screenshot. Keep gpLastFrameTime fresh (above) so resume
+        // doesn't see a huge dt; the preserved drawing buffer holds the frame.
+        if (gpRenderPaused) return;
+        // Sim-scaled delta for VISUAL FX aging — slows / freezes with the game
+        // speed. Camera + entity ticks keep the raw wall dt; only FX lifetimes
+        // use fxDt (PLAN-weapon-fx-capture-arch fxDt).
+        const fxDt = dt * gpFxSimSpeed;
+
+        // GW4-c5b: advance the interactive camera(s) first so this frame's
+        // render + pick + viewport use the updated pose. Raw wall dt (the camera
+        // is not sim-scaled). tick() handles its own per-call timing internally.
+        for (const cam of gpViewCameras.values()) cam.tick();
+
+        // entityRenderer.tick() advances the presentation clock (L0) and
+        // interpolates every unit to the presentation cursor before render.
+        gpEntityRenderer?.tick();
+        gpBuildBeamRenderer?.tick();
+        gpProjectileRenderer?.tick();
+        gpCegRuntime?.tick(fxDt);
+        gpCombatFX?.tick(fxDt);
+        // Decal clipmap fine window tracks the camera focus + height.
+        {
+            const focus = camera.getTarget();
+            gpDecalOverlay?.tick(dt, focus.x, focus.z,
+                Math.max(1, camera.position.y - focus.y));
+        }
+        // Age the FX lights after the emitters ran this frame + before
+        // scene.render() consumes the lighting; then push distortion/muzzle
+        // uniforms.
+        gpFxLightPool?.update(fxDt, camera.position);
+        gpDistortion?.tick(fxDt);
+        gpMuzzleFlare?.tick(fxDt);
+        scene.render();
+        // GW4-c6: LuaUI screen-space pass on the SAME context, after the world
+        // is drawn (state save/restore + wipeCaches inside). World-space
+        // DrawWorld/DrawWorldPreUnit overlays land in c6-2.
+        gpRunUiPass();
+        // GW4-c5c: feed the HTML HUD (entity count / frame / selection / speed).
+        gpPostSceneState(now);
+        // GW4-c5c-3: feed the main-thread minimap (unit dots + fog overlay).
+        gpPostMinimapFeed(now);
+    });
+    postLog(1, '[gp] Babylon Engine up on transferred #game-canvas (GW4-c5, weapon FX)');
+
+    // GW4-c2: open the game-server connection from inside the worker.
+    gpConnect(msg);
+
+    // GW4-c5b-2: worker-side selection / pick / order. Needs the connection
+    // (built in gpConnect) for order sends. Left-button gestures select; the
+    // camera's right-tap routes through `onRightClickCommit` → an order. The
+    // drag-box rectangle is posted to main (DOM overlay).
+    // GW4-c5b-3: selection-driven order overlays. Command-path + waypoint share
+    // the shift gate + queue/selection snapshot; standing orders are always-on.
+    const commandPathRenderer = new CommandPathRenderer(scene, entityRenderer);
+    gpCommandPathRenderer = commandPathRenderer;
+    const waypointMarkerRenderer = new WaypointMarkerRenderer(scene, entityRenderer);
+    gpWaypointMarkerRenderer = waypointMarkerRenderer;
+    // Bucket-3: seed show-allies from the gp:init value (lifted from main's
+    // localStorage) and route persistence back to main via gp:config — the
+    // worker's localStorage isn't the page's.
+    const standingOrderRenderer = new StandingOrderRenderer(scene, {
+        showAllies: msg.standingOrderShowAllies,
+        persistShowAllies: (show) =>
+            postToMain({ type: 'gp:config', key: 'standing-orders-show-allies', value: show }),
+    });
+    gpStandingOrderRenderer = standingOrderRenderer;
+
+    const selection = new WorkerSelection(scene, entityRenderer, gpConnection!, {
+        getCamera: (viewId) => (viewId === 0 ? camera : null),
+        dpr: gpDpr,
+        onDragBox: (box) => postToMain({ type: 'gp:dragBox', box }),
+        // Re-render the path/waypoint overlays from the cached queue snapshot so
+        // they appear immediately on a selection change (don't wait for the next
+        // ~1 Hz UnitCommandQueuesUpdate). (sceneState mirroring → main is c5c.)
+        onSelectionChange: (ids) => {
+            gpCommandPathRenderer?.update(gpLastCommandQueues, ids);
+            gpWaypointMarkerRenderer?.update(gpLastCommandQueues, ids);
+            // GW4-c6-1b: feed LuaUI selection (Spring.GetSelectedUnits +
+            // widgetHandler:SelectionChanged) so build-menu / order panels
+            // react to what the player picked.
+            liveState.selectedUnitIds = ids.slice();
+            dispatchSelectionChanged(ids);
+        },
+    });
+    gpSelection = selection;
+    rtsCam.onRightClickCommit = (x, y, mods) =>
+        selection.issueOrderAtScreen(x, y, mods.shift, 0);
+    // PLAN-latency L0: anchor the presentation clock to this connection's
+    // ServerClock (created per game connection by Connection).
+    gpPresentationClock.reset();
+    gpPresentationClock.setServerClock(gpConnection!.serverClock);
+    // GW4-c3: fetch map data over HTTP + build the terrain (independent of the
+    // connection auth handshake — map data is on the asset plane).
+    void gpLoadMap(msg);
+}
+
+/// GW4-c5b-3: update the shift-held gate that shows/hides the command-path +
+/// waypoint overlays (Spring's "hold Shift to see queued orders" gesture).
+/// Driven from the forwarded key/pointer `mods` bitmask (bit 0 = shift).
+function gpSetShift(held: boolean): void {
+    if (held === gpShiftHeld) return;
+    gpShiftHeld = held;
+    gpCommandPathRenderer?.setShiftHeld(held);
+    gpWaypointMarkerRenderer?.setShiftHeld(held);
+}
+
+/// GW4-c5c: post the consolidated scene-state feed to main (~10 Hz). This is the
+/// only channel the DOM layer reads world facts from — keep it to the frozen
+/// `GpSceneStateToMain` shape (game-worker-protocol.ts). Drives the HTML HUD
+/// (entity count / frame / selection / speed-pause); the camera pose is carried
+/// for the c5c-2 audio listener + c5c-3 minimap that build on this feed.
+function gpPostSceneState(now: number): void {
+    if (now - gpLastSceneStatePost < 100) return;  // ~10 Hz throttle
+    gpLastSceneStatePost = now;
+    const cam = gpCamera;
+    if (!cam) return;
+    const sel = gpSelection?.selection ?? [];
+    const target = cam.getTarget();
+    postToMain({
+        type: 'gp:sceneState',
+        selectedUnitIds: sel.slice(),
+        // Rich per-unit facts (health etc.) fill in when a consumer needs them
+        // (HUD today only reads ids + count); kept empty to stay cheap.
+        selected: [],
+        hovered: gpSelection && gpSelection.hovered > 0 ? { id: gpSelection.hovered } : null,
+        camera: {
+            x: cam.position.x, y: cam.position.y, z: cam.position.z,
+            tx: target.x, ty: target.y, tz: target.z,
+        },
+        gameFrame: gpGameFrame,
+        paused: gpPaused,
+        simSpeed: gpSimSpeed,
+        buildGhost: null,
+        entityCount: gpEntityRenderer?.entityCount ?? 0,
+    });
+}
+
+/// GW4-c5c-3: post the minimap feed to main (~6 Hz). The minimap is a DOM
+/// element with its own Babylon Engine on the main thread (it can't read the
+/// worker's entity renderer), so the worker projects the live entity set down
+/// to compact per-blip arrays. Fog-of-war-hidden units (los===0) are dropped
+/// here so the minimap never leaks their positions — mirrors the pre-GW4
+/// `Minimap.updateEntityInstances` filter, just moved to the producer side.
+/// The LOS fog bitmap only ships when a new envelope-0x07 snapshot arrived
+/// (gpMinimapLosDirty); otherwise `los: null` ⇒ main keeps its current overlay.
+function gpPostMinimapFeed(now: number): void {
+    if (now - gpLastMinimapPost < 160) return;  // ~6 Hz
+    gpLastMinimapPost = now;
+    const er = gpEntityRenderer;
+    if (!er) return;
+
+    // First pass: count visible blips so the typed arrays are exactly sized.
+    let n = 0;
+    for (const [, meta] of er.getEntities()) {
+        if (meta.losState !== 0) n++;
+    }
+    const ids = new Uint32Array(n);
+    const teams = new Uint16Array(n);
+    const xs = new Float32Array(n);
+    const zs = new Float32Array(n);
+    const los = new Uint8Array(n);
+    let i = 0;
+    for (const [id, meta] of er.getEntities()) {
+        if (meta.losState === 0) continue;       // fog of war — never leak
+        const pos = er.getEntityPosition(id);
+        if (!pos) continue;
+        ids[i] = id;
+        teams[i] = meta.team;
+        xs[i] = pos.x;
+        zs[i] = pos.z;
+        los[i] = meta.losState;
+        i++;
+    }
+    const blips: GpMinimapBlips = {
+        // i may be < n if a position was missing; report the filled count.
+        count: i, ids, teams, x: xs, z: zs, los,
+    };
+
+    let losPayload: GpMinimapLos | null = null;
+    if (gpMinimapLosDirty && gpLastLosBitmap) {
+        gpMinimapLosDirty = false;
+        const b = gpLastLosBitmap;
+        losPayload = {
+            width: b.width, height: b.height,
+            inLos: b.inLos, inRadar: b.inRadar, explored: b.explored,
+        };
+    }
+    // Deliver map dims + backdrop URL once (cleared after the first send).
+    const mapInfo = gpMinimapMapInfo ?? undefined;
+    if (gpMinimapMapInfo) gpMinimapMapInfo = null;
+    postToMain({ type: 'gp:minimapFeed', blips, los: losPayload, map: mapInfo });
+}
+
+/// GW4-c6: run the LuaUI screen-space pass on the shared Babylon context after
+/// scene.render(). Babylon caches GL state and assumes nothing else touches the
+/// context, so we snapshot the bits the bridge clobbers, run the pass, restore
+/// them, then `wipeCaches(true)` so Babylon re-uploads its state next frame
+/// (mirrors lua-widget-host.ts's postDraw). Without this the world render
+/// corrupts within a frame or two (wrong program/VAO/blend bound).
+function gpRunUiPass(): void {
+    if (!gpLuaUiActive || !runtime || !gpUiGl || !gpEngine) return;
+    const gl = gpUiGl;
+
+    const savedProgram = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null;
+    const savedVao = gl.getParameter(gl.VERTEX_ARRAY_BINDING) as WebGLVertexArrayObject | null;
+    const savedBlend = gl.getParameter(gl.BLEND) as boolean;
+    const savedDepthTest = gl.getParameter(gl.DEPTH_TEST) as boolean;
+    const savedDepthMask = gl.getParameter(gl.DEPTH_WRITEMASK) as boolean;
+    const savedCull = gl.getParameter(gl.CULL_FACE) as boolean;
+    const savedActiveTex = gl.getParameter(gl.ACTIVE_TEXTURE) as number;
+    const savedFBO = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+    // Babylon may leave a post-process render-target FBO bound; the UI must
+    // draw to the default framebuffer (the canvas the player sees).
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+
+    // GW4-c6-2: feed the live camera view + projection to the GL bridge so the
+    // world-space DrawWorld pass (and UniformMatrix("view"/"projection")) draw
+    // in world space. scene coords == server world coords (no flip), so a
+    // widget's gl.Vertex(serverX,serverY,serverZ) projects correctly. Copy out
+    // of Babylon's internal arrays (it mutates them each frame).
+    if (gpScene && bridge) {
+        bridge.setCameraMatrices(
+            new Float32Array(gpScene.getViewMatrix().m),
+            new Float32Array(gpScene.getProjectionMatrix().m),
+        );
+    }
+
+    try {
+        runFrame(runtime, gl, /*clearColor*/ false, /*worldPass*/ true);
+    } catch (err) {
+        postLog(4, `[gp] LuaUI pass error: ${err}`);
+        gpLuaUiActive = false;  // stop after a hard failure rather than spam
+    }
+
+    // Restore Babylon's expected state.
+    gl.useProgram(savedProgram);
+    gl.bindVertexArray(savedVao);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, savedFBO);
+    gl.activeTexture(savedActiveTex);
+    if (savedBlend) gl.enable(gl.BLEND); else gl.disable(gl.BLEND);
+    if (savedDepthTest) gl.enable(gl.DEPTH_TEST); else gl.disable(gl.DEPTH_TEST);
+    if (savedCull) gl.enable(gl.CULL_FACE); else gl.disable(gl.CULL_FACE);
+    gl.depthMask(savedDepthMask);
+    (gpEngine as unknown as { wipeCaches: (b?: boolean) => void }).wipeCaches(true);
+}
+
+/// GW4-c6: boot the Fengari LuaUI runtime against the shared Babylon context.
+/// Called once from gpLoadMap after the terrain is built (init needs the map's
+/// source URL + heightmap). Reuses the full legacy `init()` bootstrap (VFS
+/// prefetch, runtime, gl-bridge, widgetHandler, camain.lua, gadget halves) but
+/// in shared-context mode (no private canvas, no setInterval — the gp render
+/// loop drives the pass via gpRunUiPass).
+async function gpBootLuaUI(map: ParsedMapData, mapSourceAbs: string, msg: GpInitToWorker): Promise<void> {
+    if (runtime || !gpEngine) return;  // already booted (idempotent)
+    const gl = (gpEngine as unknown as { _gl: WebGL2RenderingContext })._gl;
+    if (!gl) { postLog(4, '[gp] LuaUI boot: no _gl on Babylon engine'); return; }
+    const mapDataTransfer: MapDataTransfer = {
+        mapx: map.mapx, mapy: map.mapy, squareSize: map.squareSize,
+        minHeight: map.minHeight, maxHeight: map.maxHeight,
+        widthElmos: map.widthElmos, heightElmos: map.heightElmos,
+        heightmap: map.heightmap, mapSourceUrl: mapSourceAbs,
+    };
+    // GW4-c6-1b: wait for defs to be ingested before booting. init() includes
+    // ZK's config files (unitDefReplacements, dynamic_comm_defs, integral_menu,
+    // …) which index UnitDefNames.<x> at load-time; republishDefGlobals must
+    // have published a populated def map first or those files hit nil and the
+    // dependent widgets/gadgets boot degraded. The def fetch is usually faster
+    // than the terrain build + VFS prefetch, so this rarely actually blocks.
+    // Cap the wait as a last resort so a truly dead connection (never auths →
+    // gpDefsReady never resolves) can't strand the UI forever. The defs fetch
+    // only starts AFTER auth, and a cold ZK game server can take 30–60 s to warm
+    // up before it answers AuthRequest, so the cap must be generous — an 8 s cap
+    // fired mid-cold-start and booted with empty UnitDefNames (the config-include
+    // nil-index spam c6-1b eliminated). On a healthy server defs resolve in well
+    // under this; on a dead one a degraded boot at the cap beats an infinite hang.
+    await Promise.race([
+        gpDefsReady,
+        new Promise<void>((resolve) => setTimeout(() => {
+            postLog(3, '[gp] LuaUI boot: defs not ready after 90s — booting anyway (server never authed?)');
+            resolve();
+        }, 90000)),
+    ]);
+    if (runtime || !gpEngine) return;  // a concurrent boot won the race while awaiting
+    try {
+        await init(null, msg.gameId, msg.lobbyUrl, mapDataTransfer, undefined, gl);
+        // The bridge's one-time GL setup (shaders, font textures, VAOs) ran
+        // outside the per-frame save/restore — force Babylon to re-upload its
+        // cached state next frame so boot doesn't corrupt the world render.
+        (gpEngine as unknown as { wipeCaches: (b?: boolean) => void }).wipeCaches(true);
+        postLog(1, '[gp] LuaUI booted on shared context (GW4-c6)');
+    } catch (err) {
+        postLog(4, `[gp] LuaUI boot failed: ${err}`);
+    }
+}
+
+function gpResize(width: number, height: number, dpr: number): void {
+    if (!gpEngine) return;
+    const c = gpEngine.getRenderingCanvas() as OffscreenCanvas | null;
+    if (c) {
+        c.width = Math.max(1, Math.floor(width * dpr));
+        c.height = Math.max(1, Math.floor(height * dpr));
+    }
+    gpEngine.resize();
+    // GW4-c6: keep the LuaUI view size in sync (device px — see gpInit).
+    if (c) liveState.viewport = { width: c.width, height: c.height };
+    // GW4-c5b: keep the camera's CSS-pixel viewport + dpr in sync so edge-scroll
+    // bands and scene.pick (which scales by dpr) stay correct after a resize.
+    for (const cam of gpViewCameras.values()) cam.setViewportSize(width, height, dpr);
+    // GW4-c5b-2: selection pick scaling also needs the live dpr.
+    if (dpr > 0) { gpDpr = dpr; gpSelection?.setDpr(dpr); }
+}
+
+function gpShutdown(): void {
+    if (gpViewportTimer) { clearInterval(gpViewportTimer); gpViewportTimer = null; }
+    for (const cam of gpViewCameras.values()) cam.dispose();
+    gpViewCameras.clear();
+    gpSelection?.dispose();
+    gpSelection = null;
+    gpCommandPathRenderer?.dispose();
+    gpCommandPathRenderer = null;
+    gpWaypointMarkerRenderer?.dispose();
+    gpWaypointMarkerRenderer = null;
+    gpStandingOrderRenderer?.dispose();
+    gpStandingOrderRenderer = null;
+    gpLastCommandQueues = [];
+    gpShiftHeld = false;
+    gpConnection?.disconnect();
+    gpConnection = null;
+    gpEntityRenderer?.dispose();
+    gpEntityRenderer = null;
+    gpBuildingPlateRenderer?.dispose();
+    gpBuildingPlateRenderer = null;
+    gpDefCache?.clear();
+    gpDefCache = null;
+    gpPresentationClock = null;
+    // GW4-c5: weapon-FX / projectile / decal / build / feature modules.
+    gpProjectileRenderer?.dispose();
+    gpProjectileRenderer = null;
+    gpCegRuntime?.dispose();
+    gpCegRuntime = null;
+    gpBuildBeamRenderer?.dispose();
+    gpBuildBeamRenderer = null;
+    gpCombatFX?.dispose();
+    gpCombatFX = null;
+    gpDistortion?.dispose();
+    gpDistortion = null;
+    gpMuzzleFlare?.dispose();
+    gpMuzzleFlare = null;
+    gpFxLightPool?.dispose();
+    gpFxLightPool = null;
+    setActiveFxLightPool(null);
+    gpDecalOverlay?.dispose();
+    gpDecalOverlay = null;
+    gpDynamicFeatureRenderer?.dispose();
+    gpDynamicFeatureRenderer = null;
+    gpFxSimSpeed = 1;
+    gpTerrainFog?.dispose();
+    gpTerrainFog = null;
+    gpTerrainMesh = null;
+    gpDeformTerrain = null;
+    gpMapData = null;
+    gpSceneLighting = null;
+    gpEngine?.stopRenderLoop();
+    // scene.dispose() tears down the terrain mesh, fog, water, lights, CSM,
+    // and the HDR render pipeline created above.
+    gpScene?.dispose();
+    gpEngine?.dispose();
+    gpEngine = null;
+    gpScene = null;
+    gpCamera = null;
+}
+
+// ── GW8: window.test client-bound bridge ───────────────────────────────
+//
+// The server-bound half of the test harness (spawn/kill/order/damage/log/…)
+// runs entirely on the MAIN thread over HTTP — it needs only the game-server
+// URL + auth token. The CLIENT-bound half (camera, selection, render-pause,
+// screenshot) needs the renderer + camera + connection, which now live here in
+// the worker. main posts `gp:test {id, method, args}`; this resolves it against
+// the worker-resident objects and posts `gp:testResult {id, ok, value/error}`.
+// Camera *animations* return immediately after starting — main awaits the
+// duration itself, exactly as the old in-process harness did. Composite ops
+// that resolve a unit's interpolated position (focusUnit etc.) run worker-side
+// in one shot to avoid an extra round-trip.
+async function gpTestDispatch(method: string, args: unknown[]): Promise<unknown> {
+    const cam = gpViewCameras.get(0);
+    const num = (i: number, d = 0): number => (typeof args[i] === 'number' ? args[i] as number : d);
+    const obj = <T>(i: number, d: T): T => (args[i] == null ? d : args[i] as T);
+    switch (method) {
+        // — network sim (PLAN-latency L0 validation) —
+        case 'setNetSim':
+            gpConnection?.setNetSim(obj(0, {} as Parameters<Connection['setNetSim']>[0]));
+            return null;
+        // — render-loop freeze for deterministic screenshots —
+        case 'pause':    gpRenderPaused = true;  return null;
+        case 'resume':   gpRenderPaused = false; return null;
+        case 'isPaused': return gpRenderPaused;
+        // — selection —
+        case 'select':
+            gpSelection?.setSelectionExternal(obj<number[]>(0, []));
+            return null;
+        case 'selection':
+            return gpSelection ? [...gpSelection.selection] : [];
+        // — entity position (interpolated, client-side) —
+        case 'getEntityPosition':
+            return gpEntityRenderer?.getEntityPosition(num(0)) ?? null;
+        // — per-envelope bandwidth tally (GW8 / PLAN-performance PC-2) —
+        case 'netStats':
+            return snapshotNetStats();
+        // — generic JS eval against the worker global scope (GW8). Lets the
+        //   main devtools console reach the worker-resident debug hooks
+        //   (globalThis.__entityRenderer / __fxLightPool / __renderPipeline /
+        //   __csm / __distortion / __muzzleFlare …) that the render-core move
+        //   stranded in the worker. Dev-only; the result is made clone-safe. —
+        case 'evalJs': {
+            // Indirect eval runs in global scope, where the __* hooks live.
+            const v = (0, eval)(String(args[0] ?? ''));  // eslint-disable-line no-eval
+            const resolved = v && typeof (v as { then?: unknown }).then === 'function'
+                ? await (v as Promise<unknown>) : v;
+            return gpCloneSafe(resolved);
+        }
+        // — camera (animations return once started; main awaits the duration) —
+        case 'focusOn':
+            cam?.focusOn(num(0), num(1), num(2));
+            return null;
+        case 'lookAtPosition':
+            cam?.lookAtPosition(num(0), num(1), num(2), num(3));
+            return null;
+        case 'setCameraHeight':
+            gpSetCameraHeight(cam, num(0));
+            return null;
+        case 'cameraPose':    return cam?.getPose() ?? null;
+        case 'setCameraPose': cam?.setPose(obj(0, { pos: { x: 0, y: 0, z: 0 }, lookAt: { x: 0, y: 0, z: 0 } }), num(1)); return null;
+        case 'cameraOrbit':   cam?.orbit(obj(0, {})); return null;
+        case 'cameraSnapToGround': cam?.snapToGround(num(0), num(1), obj(2, {})); return null;
+        case 'cameraFitMap':  cam?.fitMap(obj(0, {})); return null;
+        case 'cameraSaveSlot': cam?.saveSlot(num(0)); return null;
+        case 'cameraLoadSlot': return cam?.loadSlot(num(0), num(1)) ?? false;
+        case 'setTrackingCamera':
+            // DEFERRED (GW8): the tracking-camera state machine lived on the
+            // main-thread InputManager; not yet ported to the worker camera.
+            postLog(2, '[gp:test] setTrackingCamera not yet wired in the worker — ignoring');
+            return null;
+        // — composite: resolve unit position(s) worker-side, then frame —
+        case 'focusUnit': {
+            const p = gpEntityRenderer?.getEntityPosition(num(0));
+            if (!p || !cam) return false;
+            gpSetCameraHeight(cam, num(2, 800));
+            cam.lookAtPosition(p.x, p.y, p.z, num(1, 600));
+            return true;
+        }
+        case 'cameraSnapToUnit': {
+            const p = gpEntityRenderer?.getEntityPosition(num(0));
+            if (!p || !cam) return false;
+            cam.snapToGround(p.x, p.z, obj(1, {}));
+            return true;
+        }
+        case 'cameraFitUnits': {
+            if (!cam) return false;
+            const pts: { x: number; y: number; z: number }[] = [];
+            for (const id of obj<number[]>(0, [])) {
+                const p = gpEntityRenderer?.getEntityPosition(id);
+                if (p) pts.push(p);
+            }
+            if (!pts.length) return false;
+            cam.fitPoints(pts, obj(1, {}));
+            return true;
+        }
+        // — screenshot: OffscreenCanvas → PNG data URL (no FileReader in workers) —
+        case 'screenshot': {
+            const canvas = gpEngine?.getRenderingCanvas() as OffscreenCanvas | null;
+            if (!canvas) throw new Error('no rendering canvas');
+            const blob = await canvas.convertToBlob({ type: 'image/png' });
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            let binary = '';
+            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+            return `data:image/png;base64,${btoa(binary)}`;
+        }
+        default:
+            throw new Error(`unknown test method '${method}'`);
+    }
+}
+
+/// Make a worker-side value safe to postMessage (structured-clone) back to main.
+/// Babylon objects, functions, and circular graphs can't be cloned — JSON
+/// round-trip strips them; on failure fall back to a string description so the
+/// devtools console at least sees the type. (GW8 evalJs.)
+function gpCloneSafe(v: unknown): unknown {
+    if (v === null || v === undefined) return v;
+    const t = typeof v;
+    if (t === 'number' || t === 'string' || t === 'boolean') return v;
+    if (t === 'function') return `[function ${(v as { name?: string }).name || 'anonymous'}]`;
+    try { return JSON.parse(JSON.stringify(v)); }
+    catch { return `[unserializable ${t}: ${String(v).slice(0, 120)}]`; }
+}
+
+/// Force the worker camera to a fixed height above its look-at target (ports the
+/// old TestHarness.setCameraHeight; RTSCamera has no direct height setter).
+function gpSetCameraHeight(cam: RTSCamera | undefined, height: number): void {
+    if (!cam) return;
+    const dy = height - (cam.position.y - cam.target.y);
+    const view = cam.saveView();
+    view.pos.y += dy;
+    cam.restoreView(view, 0);
+}
+
 // ── Message handler ────────────────────────────────────────────────────
 
 self.onmessage = async (e: MessageEvent) => {
@@ -4594,6 +6192,117 @@ self.onmessage = async (e: MessageEvent) => {
                 postToMain({ type: 'error', msg: String(err) });
             }
             break;
+
+        // PLAN-game-worker.md GW4: game-processor messages. At c1 only the
+        // Engine bootstrap + resize/shutdown are wired; connection, decoders,
+        // input and the scene-state feed land in c2–c5.
+        case 'gp:init':
+            try {
+                gpInit(msg as GpInitToWorker);
+            } catch (err) {
+                postLog(4, `gp:init failed: ${err}`);
+                postToMain({ type: 'error', msg: String(err) });
+            }
+            break;
+
+        case 'gp:resize':
+            gpResize(msg.width, msg.height, msg.dpr);
+            break;
+
+        // GW4-c5b: interactive camera input forwarded by the main-thread
+        // CameraInput. Routed per-view (multi-view); absent viewId ⇒ view 0.
+        // Coordinates are canvas-relative CSS px, origin top-left (Babylon's
+        // native screen space — see game-worker-protocol.ts).
+        case 'gp:pointermove': {
+            gpViewCameras.get(msg.viewId ?? 0)?.pointerMove(msg.x, msg.y, msg.buttons);
+            // GW4-c5b-2: left-button drag-box growth + hover tracking.
+            gpSelection?.pointerMove(msg.x, msg.y, msg.buttons, msg.mods, msg.viewId ?? 0);
+            // GW4-c6-1b: widget MouseMove (drives chili hover). DOM buttons
+            // bitmask (1=left,2=right,4=middle) → Spring button being dragged.
+            const sp = gpToSpringCoords(msg.x, msg.y);
+            const dragBtn = (msg.buttons & 1) ? 1 : (msg.buttons & 4) ? 2 : (msg.buttons & 2) ? 3 : 0;
+            gpDispatchMouseMove(sp.x, sp.y, sp.x - gpLastMouseSpringX, sp.y - gpLastMouseSpringY, dragBtn);
+            gpLastMouseSpringX = sp.x; gpLastMouseSpringY = sp.y;
+            break;
+        }
+        case 'gp:pointerdown': {
+            // GW4-c6-1b: offer the press to widgets first; if a widget consumes
+            // it (cursor over a chili panel), suppress world selection so
+            // clicking the UI doesn't also box-select units.
+            const sp = gpToSpringCoords(msg.x, msg.y);
+            const consumed = gpDispatchMousePress(sp.x, sp.y, domButtonToSpring(msg.button));
+            gpViewCameras.get(msg.viewId ?? 0)?.pointerDown(msg.x, msg.y, msg.button, msg.mods);
+            // GW4-c5b-2: left-button selection (camera ignores button 0).
+            if (!consumed) gpSelection?.pointerDown(msg.x, msg.y, msg.button, msg.mods, msg.viewId ?? 0);
+            break;
+        }
+        case 'gp:pointerup': {
+            const sp = gpToSpringCoords(msg.x, msg.y);
+            gpDispatchMouseRelease(sp.x, sp.y, domButtonToSpring(msg.button));
+            gpViewCameras.get(msg.viewId ?? 0)?.pointerUp(msg.x, msg.y, msg.button, msg.mods);
+            gpSelection?.pointerUp(msg.x, msg.y, msg.button, msg.mods, msg.viewId ?? 0);
+            break;
+        }
+        case 'gp:wheel': {
+            gpViewCameras.get(msg.viewId ?? 0)?.wheel(msg.x, msg.y, msg.delta);
+            // GW4-c6-1b: widget MouseWheel (deltaY < 0 = scroll up).
+            gpDispatchMouseWheel(msg.delta < 0, -msg.delta);
+            break;
+        }
+        case 'gp:keydown':
+            // RTSCamera matches lowercased KeyboardEvent.code (e.g. 'arrowup').
+            gpViewCameras.get(msg.viewId ?? 0)?.keyDown(String(msg.code).toLowerCase());
+            // GW4-c5b-3: shift gates the command-path / waypoint overlays.
+            gpSetShift((msg.mods & 1) !== 0);
+            // GW4-c6-1b: widget KeyPress (ZK hotkeys). Camera + widgets both
+            // see keys — coordinated split, additive.
+            gpDispatchKeyPress(codeToSpringKeysym(String(msg.code)), msg.mods);
+            break;
+        case 'gp:keyup':
+            gpViewCameras.get(msg.viewId ?? 0)?.keyUp(String(msg.code).toLowerCase());
+            gpSetShift((msg.mods & 1) !== 0);
+            gpDispatchKeyRelease(codeToSpringKeysym(String(msg.code)), msg.mods);
+            break;
+        case 'gp:blur':
+            gpViewCameras.get(msg.viewId ?? 0)?.blur();
+            gpSelection?.blur();
+            gpSetShift(false);
+            break;
+
+        // GW4-c5c-3: live clientSettings/gfx.* push from main. Routing through
+        // clientSettings.set updates the worker's cache AND fires the subscribers
+        // (scene-lighting's msaa/fxaa/bloom/shadow + the FX-gating block in
+        // gpInit), so a quality toggle on main applies in the worker with no
+        // per-key switch here. (localStorage write inside set() is try/caught —
+        // the worker has none; main owns persistence.)
+        case 'gp:config':
+            try { clientSettings.set(msg.key, msg.value as never); }
+            catch (err) { postLog(2, `[gp] gp:config ${msg.key} failed: ${err}`); }
+            break;
+
+        // GW4-c5c-3: minimap left-click → re-centre the world camera. The
+        // minimap lives on main (own Engine) but the world camera is in the
+        // worker, so the focus intent crosses the boundary.
+        case 'gp:focusWorld':
+            gpViewCameras.get(msg.viewId ?? 0)?.focusOn(msg.x, msg.z);
+            break;
+
+        case 'gp:shutdown':
+            gpShutdown();
+            break;
+
+        // GW8: window.test client-bound request → resolve against the
+        // worker-resident camera/selection/renderer/connection, reply by id.
+        case 'gp:test': {
+            const id = msg.id as number;
+            try {
+                const value = await gpTestDispatch(String(msg.method), (msg.args ?? []) as unknown[]);
+                postToMain({ type: 'gp:testResult', id, ok: true, value });
+            } catch (err) {
+                postToMain({ type: 'gp:testResult', id, ok: false, error: String(err) });
+            }
+            break;
+        }
 
         case 'keypress':
             // Route through widgetHandler so its KeyPressList and the
@@ -4835,179 +6544,35 @@ self.onmessage = async (e: MessageEvent) => {
         }
 
         case 'entityState': {
-            // Rebuild/merge the units Map from typed arrays
-            const count = msg.count as number;
-            const isDelta = msg.isDelta as boolean;
-            const entityIds = msg.entityIds as Uint32Array | null;
-            const posX = msg.positionsX as Float32Array | null;
-            const posY = msg.positionsY as Float32Array | null;
-            const posZ = msg.positionsZ as Float32Array | null;
-            const headings = msg.headings as Uint16Array | null;
-            const health = msg.health as Uint16Array | null;
-            const defIds = msg.defIds as Uint16Array | null;
-            const teams = msg.teams as Uint8Array | null;
-            const stateBits = msg.stateBits as Uint8Array | null;
-            const losStates = msg.losStates as Uint8Array | null;
-            const buildProgress = msg.buildProgress as Uint8Array | null;
-
-            // Velocity is computed from frame-to-frame position deltas.
-            // The sim ticks at 30 Hz so each entity-state batch nominally
-            // covers 1/30 s; multiplying the delta by the inverse gives
-            // elmos/second. (We don't have a precise per-message timestamp
-            // — adequate for HUD readouts and lead-shot calculations.)
-            const tickRate = 30;
-            // Track newly-seen ids in this batch so we can fire
-            // UnitCreated callins after the merge completes. Spring's
-            // engine fires UnitCreated on initial visibility, so
-            // synthesising it from "id not in prior map" is the right
-            // shape for widgets like unit_state_icons that snapshot a
-            // unit's static metadata on creation.
-            const createdIds: Array<{ id: number; defId: number; team: number }> = [];
-            // Track buildProgress < 1 → >= 1 transitions so we can fire
-            // UnitFinished after the merge. The server doesn't emit a
-            // dedicated build-complete event yet, so we derive it from
-            // the entity-state stream — close enough for ZK widgets like
-            // unit_building_starter and cmd_no_duplicate_orders.
-            const finishedIds: Array<{ id: number; defId: number; team: number }> = [];
-            const decodeProgress = (i: number) => buildProgress ? buildProgress[i] / 255 : 1;
-            if (!isDelta) {
-                // Full snapshot — rebuild. Only keep IDs in this snapshot.
-                const prevUnits = liveState.units;
-                const newUnits = new Map<number, UnitEntry>();
-                if (entityIds) {
-                    for (let i = 0; i < count; i++) {
-                        const id = entityIds[i];
-                        const prev = prevUnits.get(id);
-                        const nx = posX ? posX[i] : 0;
-                        const ny = posY ? posY[i] : 0;
-                        const nz = posZ ? posZ[i] : 0;
-                        const defId = defIds ? defIds[i] : 0;
-                        const team = teams ? teams[i] : 0;
-                        const bp = decodeProgress(i);
-                        newUnits.set(id, {
-                            x: nx, y: ny, z: nz,
-                            heading: headings ? headings[i] : 0,
-                            healthRatio: health ? health[i] / 65535 : 1,
-                            defId,
-                            team,
-                            buildProgress: bp,
-                            vx: prev ? (nx - prev.x) * tickRate : 0,
-                            vy: prev ? (ny - prev.y) * tickRate : 0,
-                            vz: prev ? (nz - prev.z) * tickRate : 0,
-                            stateBits: stateBits ? stateBits[i] : 0,
-                            losState: losStates ? losStates[i] : 0x0F,
-                        });
-                        if (!prev) createdIds.push({ id, defId, team });
-                        else if (prev.buildProgress < 1 && bp >= 1) {
-                            finishedIds.push({ id, defId, team });
-                        }
-                    }
-                }
-                liveState.units = newUnits;
-            } else {
-                // Delta — merge changed units
-                if (entityIds) {
-                    for (let i = 0; i < count; i++) {
-                        const id = entityIds[i];
-                        const existing = liveState.units.get(id);
-                        const entry: UnitEntry = existing ?? {
-                            x: 0, y: 0, z: 0, heading: 0, healthRatio: 1,
-                            defId: 0, team: 0, buildProgress: 1,
-                            vx: 0, vy: 0, vz: 0,
-                            stateBits: 0, losState: 0x0F,
-                        };
-                        if (posX) {
-                            const nx = posX[i];
-                            entry.vx = existing ? (nx - entry.x) * tickRate : 0;
-                            entry.x = nx;
-                        }
-                        if (posY) {
-                            const ny = posY[i];
-                            entry.vy = existing ? (ny - entry.y) * tickRate : 0;
-                            entry.y = ny;
-                        }
-                        if (posZ) {
-                            const nz = posZ[i];
-                            entry.vz = existing ? (nz - entry.z) * tickRate : 0;
-                            entry.z = nz;
-                        }
-                        if (headings) entry.heading = headings[i];
-                        if (health) entry.healthRatio = health[i] / 65535;
-                        if (defIds) entry.defId = defIds[i];
-                        if (teams) entry.team = teams[i];
-                        if (stateBits) entry.stateBits = stateBits[i];
-                        if (losStates) entry.losState = losStates[i];
-                        if (buildProgress) {
-                            const prevBp = entry.buildProgress;
-                            const newBp = buildProgress[i] / 255;
-                            entry.buildProgress = newBp;
-                            if (existing && prevBp < 1 && newBp >= 1) {
-                                finishedIds.push({ id, defId: entry.defId, team: entry.team });
-                            }
-                        }
-                        liveState.units.set(id, entry);
-                        if (!existing) {
-                            createdIds.push({ id, defId: entry.defId, team: entry.team });
-                        }
-                    }
-                }
-            }
-            // Flush any allied-team appearances that were deferred on
-            // the previous tick — if the server's UnitCreated event
-            // arrived in the meantime, the id is in
-            // serverFiredUnitCreated and we skip it; otherwise fire the
-            // synthesised callin (no builderId).
-            if (liveState.pendingSynthCreated.size > 0) {
-                for (const [id, entry] of liveState.pendingSynthCreated) {
-                    if (!liveState.serverFiredUnitCreated.has(id)) {
-                        dispatchUnitCreated(id, entry.defId, entry.team, 0);
-                        liveState.serverFiredUnitCreated.add(id);
-                    }
-                }
-                liveState.pendingSynthCreated.clear();
-            }
-            // New ids picked up from this batch. Allied-team ids are
-            // deferred one tick to let the server-side Created event
-            // arrive first; enemy ids fire immediately because the
-            // server intentionally doesn't broadcast Created for them.
-            const myAllyTeam = liveState.identity.myAllyTeam;
-            for (const c of createdIds) {
-                if (liveState.serverFiredUnitCreated.has(c.id)) continue;
-                const teamInfo = liveState.teams.get(c.team);
-                const allied = teamInfo
-                    ? teamInfo.allyTeam === myAllyTeam
-                    : false;
-                if (allied) {
-                    liveState.pendingSynthCreated.set(
-                        c.id, { defId: c.defId, team: c.team });
-                } else {
-                    dispatchUnitCreated(c.id, c.defId, c.team, 0);
-                    liveState.serverFiredUnitCreated.add(c.id);
-                }
-            }
-            for (const f of finishedIds) {
-                dispatchUnitFinished(f.id, f.defId, f.team);
-            }
+            // GW4-c6-1b: legacy main→worker path (unreachable in the gp worker —
+            // entity state now arrives via the in-worker connection's
+            // onEntityState callback). Kept delegating to the shared merge so
+            // there's no duplicated synth logic.
+            applyEntityStateToLiveState({
+                baseFrame: 0,
+                count: msg.count as number,
+                fieldMask: 0,
+                entityIds: msg.entityIds as Uint32Array | null,
+                positionsX: msg.positionsX as Float32Array | null,
+                positionsY: msg.positionsY as Float32Array | null,
+                positionsZ: msg.positionsZ as Float32Array | null,
+                headings: msg.headings as Uint16Array | null,
+                health: msg.health as Uint16Array | null,
+                defIds: msg.defIds as Uint16Array | null,
+                teams: msg.teams as Uint8Array | null,
+                stateBits: msg.stateBits as Uint8Array | null,
+                losStates: msg.losStates as Uint8Array | null,
+                buildProgress: msg.buildProgress as Uint8Array | null,
+                pitch: null,
+                roll: null,
+            }, msg.isDelta as boolean);
             break;
         }
 
         case 'entityDestroy': {
-            const id = msg.entityId as number;
-            const u = liveState.units.get(id);
-            // Snapshot the unit's defId / team before we drop it so the
-            // callin signature matches Spring's UnitDestroyed(unitID,
-            // unitDefID, unitTeam). Widgets that key off either need
-            // them — unit_state_icons clears its pip cache on this.
-            const defId = u?.defId ?? 0;
-            const team = u?.team ?? 0;
-            liveState.units.delete(id);
-            liveState.unitRulesParams.delete(id);
-            liveState.unitCommands.delete(id);
-            liveState.unitCmdDescs.delete(id);
-            liveState.sensorOverrides.delete(id);
-            liveState.serverFiredUnitCreated.delete(id);
-            liveState.pendingSynthCreated.delete(id);
-            dispatchUnitDestroyed(id, defId, team);
+            // GW4-c6-1b: legacy path (see entityState above). Delegates to the
+            // shared liveState cleanup + UnitDestroyed dispatch.
+            removeUnitFromLiveState(msg.entityId as number);
             break;
         }
 

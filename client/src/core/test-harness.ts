@@ -4,26 +4,22 @@
  * exec scope verbs (spawn / kill / damage / order / log) and the
  * spring-debug MCP `test_*` tool family.
  *
- * Two halves:
- *   - server-bound: `spawn`, `order`, `kill`, `damage`, `clear`, `log`,
- *     `state`, `units`, `unitState` — all proxy through
- *     `lobby.lobbyPost('/api/exec', …)` so they go through the same
- *     auth + scope routing as the debug console.
- *   - client-bound: `focus`, `pause`, `resume`, `screenshot`, `select`,
- *     `selection` — read/write local renderer/camera/scene state.
+ * Two halves (GW8 split — the render core + camera + connection now live
+ * in the game-processor worker, PLAN-game-worker.md):
+ *   - **server-bound** (`spawn`, `order`, `kill`, `damage`, `clear`, `log`,
+ *     `state`, `units`, `unitState`, sim pause/speed, `lua`): pure HTTP to
+ *     the game server's `/api/exec` using the lobby auth token — runs
+ *     entirely on the **main thread**, no worker round-trip.
+ *   - **client-bound** (`focus`, camera*, `select`, `selection`, `netSim`,
+ *     `pause`/`resume`, `screenshot`): forwarded to the worker via
+ *     `workerCall()` (a `gp:test` request/`gp:testResult` reply), since the
+ *     camera/selection/renderer/connection all live there now. Read-only
+ *     getters (`selection`, `cameraPose`) are served synchronously from the
+ *     cached `gp:sceneState` feed to avoid a round-trip.
  *
- * Tests are expected to run after `startGame()` has wired up the camera
- * and entity renderer; `window.test` is replaced by a fresh instance on
- * every `startGame()` call and torn down by `quitToLobby()`.
+ * `window.test` is replaced by a fresh instance on every `startGame()` call
+ * and torn down by `quitToLobby()`.
  */
-
-import * as BABYLON from '@babylonjs/core';
-import type { Engine, Scene } from '@babylonjs/core';
-import type { RTSCamera } from './rts-camera.js';
-import type { EntityRenderer } from './entity-renderer.js';
-import type { Connection } from './connection.js';
-import type { InputManager } from './input-manager.js';
-import type { LobbyUI } from '../lobby/lobby-ui.js';
 
 /** A minimal subset of the lobby UI needed for `/api/exec` requests. */
 export interface TestLobbyHandle {
@@ -31,18 +27,21 @@ export interface TestLobbyHandle {
     token: string;
 }
 
+interface Vec3 { x: number; y: number; z: number; }
+interface CamPose { pos: Vec3; lookAt: Vec3; }
+
 export interface TestHarnessDeps {
-    engine: Engine;
-    scene: Scene;
-    camera: RTSCamera;
-    entityRenderer: EntityRenderer | null;
-    connection: Connection;
-    inputManager: InputManager | null;
-    lobby: TestLobbyHandle;
-    /** Called when pause()/resume() flips state — main.ts uses this to
-     *  short-circuit its render loop. */
-    setPaused: (paused: boolean) => void;
-    isPaused: () => boolean;
+    /** Game server base URL (`http://host:gamePort`) for `/api/exec`. */
+    gameHttpUrl: string;
+    /** Lobby auth token (validated by the game server's shared user table). */
+    token: string;
+    /** Issue a client-bound request to the game-processor worker; resolves
+     *  with the worker's reply value (or rejects with its error). */
+    workerCall: (method: string, args?: unknown[]) => Promise<unknown>;
+    /** Latest selection from the cached `gp:sceneState` feed (sync). */
+    getSelection: () => readonly number[];
+    /** Latest camera pose from the cached `gp:sceneState` feed (sync). */
+    getCameraPose: () => CamPose | null;
 }
 
 export interface ExecResult {
@@ -63,6 +62,9 @@ type ServerVerb =
 
 export class TestHarness {
     private deps: TestHarnessDeps;
+    /** Local mirror of the worker render-loop freeze (so the `paused` getter
+     *  stays synchronous; the harness is the only thing that flips it). */
+    private renderPaused = false;
 
     constructor(deps: TestHarnessDeps) {
         this.deps = deps;
@@ -73,18 +75,17 @@ export class TestHarness {
     // Exec routing — the lobby's `/api/exec` only handles `sql` and
     // `lobby` scopes; `server`, `LuaRules`, `LuaGaia`, and `LuaAI:*`
     // live on the game server's HTTP listener. We POST to the game
-    // server URL directly (Connection exposes `gameHttpUrl`) with the
-    // lobby's auth token (the game server validates it against the
-    // shared SQLite user table).
+    // server URL directly with the lobby's auth token (the game server
+    // validates it against the shared SQLite user table).
 
     private async execOnGameServer(scope: string, code: string): Promise<ExecResult> {
-        const base = this.deps.connection.gameHttpUrl;
-        if (!base) throw new Error('[test] connection.gameHttpUrl not set — game server not connected?');
+        const base = this.deps.gameHttpUrl;
+        if (!base) throw new Error('[test] gameHttpUrl not set — game server not connected?');
         const resp = await fetch(`${base}/api/exec`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${this.deps.lobby.token}`,
+                'Authorization': `Bearer ${this.deps.token}`,
             },
             body: JSON.stringify({ scope, code }),
         });
@@ -234,19 +235,25 @@ export class TestHarness {
     // Reproduces WAN conditions on localhost so the latency mitigations can
     // be A/B'd against "does it still look right at 200 ms ± jitter, 2 %
     // loss?". Applies to the unreliable state channel only (entity state etc.).
-    // Watch the timing overlay (F11 → presentation-clock block) for P tracking
-    // E−D, the arrival-jitter histogram, and reorder/loss/correction counts.
+    // Forwarded to the worker (the Connection lives there now). Watch the
+    // timing overlay (F10 → presentation-clock block) for P tracking E−D.
 
     /** Inject artificial latency/jitter/loss on the state channel.
-     *  `{ delayMs, jitterMs, lossProb }`. Call `netSim({})`-style with all
-     *  zeros (or `netSimOff()`) to disable. */
+     *  `{ delayMs, jitterMs, lossProb }`. Call `netSimOff()` to disable. */
     netSim(cfg: { delayMs?: number; jitterMs?: number; lossProb?: number }): void {
-        this.deps.connection.setNetSim(cfg);
+        void this.deps.workerCall('setNetSim', [cfg]);
     }
 
     /** Disable artificial latency. */
     netSimOff(): void {
-        this.deps.connection.setNetSim({ delayMs: 0, jitterMs: 0, lossProb: 0 });
+        void this.deps.workerCall('setNetSim', [{ delayMs: 0, jitterMs: 0, lossProb: 0 }]);
+    }
+
+    /** Per-envelope inbound/outbound bandwidth tally from the worker's
+     *  net-inspector (the connection lives there — GW8). Cumulative since the
+     *  game started; the data source for PLAN-performance PC-2's budget table. */
+    async netStats(): Promise<unknown> {
+        return this.deps.workerCall('netStats');
     }
 
     /** Named WAN presets. `lan` ≈ localhost; `wan` ≈ regional; `intercont`
@@ -257,71 +264,58 @@ export class TestHarness {
             wan:       { delayMs: 80,  jitterMs: 15, lossProb: 0.005 },
             intercont: { delayMs: 200, jitterMs: 40, lossProb: 0.02 },
         } as const;
-        this.deps.connection.setNetSim(presets[name]);
+        void this.deps.workerCall('setNetSim', [presets[name]]);
     }
 
     // ─── Camera ─────────────────────────────────────────────────────
+    //
+    // The camera lives in the worker; framing calls forward there and return
+    // once the animation has *started* — this.wait() then matches the duration
+    // on the main thread (exactly as the in-process harness did, where the
+    // animation ran on the shared render loop). Composite ops that need a
+    // unit's interpolated position resolve it worker-side in one round-trip.
 
     /** Move the camera to look down at the unit's current (interpolated)
      *  position. Resolves once the animation completes. */
     async focus(unitId: number, opts: { durationMs?: number; height?: number } = {}): Promise<void> {
-        if (!this.deps.entityRenderer) throw new Error('[test] no entityRenderer');
-        const pos = this.deps.entityRenderer.getEntityPosition(unitId);
-        if (!pos) throw new Error(`[test] no client-side position for unit ${unitId}`);
         const dur = opts.durationMs ?? DEFAULT_FOCUS_MS;
         const h = opts.height ?? DEFAULT_FOCUS_HEIGHT;
-        // Look-at lands on the unit; camera sits `h` elmos directly above.
-        // We use lookAtPosition which keeps the current view distance, so
-        // bump the camera high first via setCameraHeight.
-        this.setCameraHeight(h);
-        this.deps.camera.lookAtPosition(pos.x, pos.y, pos.z, dur);
+        const ok = await this.deps.workerCall('focusUnit', [unitId, dur, h]);
+        if (!ok) throw new Error(`[test] no client-side position for unit ${unitId}`);
         if (dur > 0) await wait(dur + 16);
     }
 
     /** Move the camera to (x, z). Resolves once the animation completes. */
     async focusOn(x: number, z: number, durationMs = DEFAULT_FOCUS_MS): Promise<void> {
-        this.deps.camera.focusOn(x, z, durationMs);
+        await this.deps.workerCall('focusOn', [x, z, durationMs]);
         if (durationMs > 0) await wait(durationMs + 16);
     }
 
     /** Force the camera to a specific height above the look-at target.
      *  Instant. Used by `focus()` to standardise top-down framing. */
     setCameraHeight(height: number): void {
-        const pos = this.deps.camera.position;
-        const tgt = this.deps.camera.target;
-        const dy = height - (pos.y - tgt.y);
-        this.deps.camera.lookAtPosition(tgt.x, tgt.y, tgt.z, 0);
-        // RTSCamera doesn't expose a direct height setter — re-establish
-        // by translating the camera up by `dy`. Save+restore round-trips
-        // through the public API.
-        const view = this.deps.camera.saveView();
-        view.pos.y += dy;
-        this.deps.camera.restoreView(view, 0);
+        void this.deps.workerCall('setCameraHeight', [height]);
     }
 
     // ─── Programmatic camera API — mirrors window.camera ───────────────
-    //
-    // Tests routinely want a *precise* camera pose ("look at unit X from
-    // 200 elmos south at 40° pitch") rather than RTSCamera's
-    // ergonomic-but-fuzzy `focusOn`. These methods forward straight to
-    // the underlying RTSCamera primitives so the harness, JS console and
-    // Lua bridge all behave identically. All accept the same shapes as
-    // `window.camera.*`.
 
-    /** Get the current camera pose ({pos, lookAt} of {x,y,z}). */
-    cameraPose(): { pos: { x: number; y: number; z: number }; lookAt: { x: number; y: number; z: number } } {
-        return this.deps.camera.getPose();
+    /** Get the current camera pose ({pos, lookAt} of {x,y,z}). Served from
+     *  the cached sceneState feed (sync). */
+    cameraPose(): CamPose {
+        const p = this.deps.getCameraPose();
+        if (!p) return { pos: { x: 0, y: 0, z: 0 }, lookAt: { x: 0, y: 0, z: 0 } };
+        return p;
     }
 
     /** Set the camera to a specific pose. */
-    async setCameraPose(pose: { pos: { x: number; y: number; z: number }; lookAt: { x: number; y: number; z: number } }, durationMs = 0): Promise<void> {
-        this.deps.camera.setPose(pose, durationMs);
+    async setCameraPose(pose: CamPose, durationMs = 0): Promise<void> {
+        await this.deps.workerCall('setCameraPose', [pose, durationMs]);
         if (durationMs > 0) await wait(durationMs + 16);
     }
 
     /** Orbit around the current look-at. opts: {yawDeg?, pitchDeg?, distance?, durationMs?} */
     async cameraOrbit(opts: { yawDeg?: number; pitchDeg?: number; distance?: number; durationMs?: number } = {}): Promise<void> {
-        this.deps.camera.orbit(opts);
+        await this.deps.workerCall('cameraOrbit', [opts]);
         const d = opts.durationMs ?? 0;
         if (d > 0) await wait(d + 16);
     }
@@ -329,92 +323,79 @@ export class TestHarness {
     /** Look at a unit by ID — uses the entityRenderer's interpolated
      *  client position. opts: {height?, pitchDeg?, durationMs?} */
     async cameraSnapToUnit(unitId: number, opts: { height?: number; pitchDeg?: number; durationMs?: number } = {}): Promise<void> {
-        if (!this.deps.entityRenderer) throw new Error('[test] no entityRenderer');
-        const p = this.deps.entityRenderer.getEntityPosition(unitId);
-        if (!p) throw new Error(`[test] no client-side position for unit ${unitId}`);
-        this.deps.camera.snapToGround(p.x, p.z, opts);
+        const ok = await this.deps.workerCall('cameraSnapToUnit', [unitId, opts]);
+        if (!ok) throw new Error(`[test] no client-side position for unit ${unitId}`);
         const d = opts.durationMs ?? 0;
         if (d > 0) await wait(d + 16);
     }
 
     /** Look at a ground point. opts: {height?, pitchDeg?, durationMs?} */
     async cameraSnapToGround(x: number, z: number, opts: { height?: number; pitchDeg?: number; durationMs?: number } = {}): Promise<void> {
-        this.deps.camera.snapToGround(x, z, opts);
+        await this.deps.workerCall('cameraSnapToGround', [x, z, opts]);
         const d = opts.durationMs ?? 0;
         if (d > 0) await wait(d + 16);
     }
 
     /** Top-down view of the entire map. */
     async cameraFitMap(opts: { padding?: number; pitchDeg?: number; durationMs?: number } = {}): Promise<void> {
-        this.deps.camera.fitMap(opts);
+        await this.deps.workerCall('cameraFitMap', [opts]);
         const d = opts.durationMs ?? 0;
         if (d > 0) await wait(d + 16);
     }
 
-    /** Programmatically toggle the player-facing tracking camera (the
-     *  `T` hotkey). When on, the camera re-fits the current selection
-     *  every frame. Scenarios use this to start in tracking mode
-     *  without needing the user to press the key. */
+    /** Programmatically toggle the player-facing tracking camera (the `T`
+     *  hotkey). DEFERRED in GW8 — the tracking-camera state machine lived on
+     *  InputManager (main thread); it has not been ported to the worker
+     *  camera yet. No-ops with a warning so scenarios don't throw. */
     setTrackingCamera(on: boolean): void {
-        this.deps.inputManager?.setTrackingCamera(on);
+        void this.deps.workerCall('setTrackingCamera', [on]);
     }
 
     /** Frame all of `unitIds` so they sit inside the vertical FOV. Used
      *  by SFX/effects benches to keep both shooter and target visible
-     *  through projectile travel — the camera tilts to `pitchDeg`
-     *  (default 55°, side-on enough to see arcs) and distances out
-     *  according to the units' bounding box. Units that the renderer
-     *  doesn't yet know about are silently skipped. */
+     *  through projectile travel. Units the renderer doesn't yet know
+     *  about are silently skipped (resolved worker-side). */
     async cameraFitUnits(unitIds: number[], opts: {
         padding?: number;
         pitchDeg?: number;
         durationMs?: number;
         minDistance?: number;
     } = {}): Promise<void> {
-        if (!this.deps.entityRenderer) throw new Error('[test] no entityRenderer');
-        const pts: { x: number; y: number; z: number }[] = [];
-        for (const id of unitIds) {
-            const p = this.deps.entityRenderer.getEntityPosition(id);
-            if (p) pts.push(p);
-        }
-        if (pts.length === 0) return;
-        this.deps.camera.fitPoints(pts, opts);
+        await this.deps.workerCall('cameraFitUnits', [unitIds, opts]);
         const d = opts.durationMs ?? 0;
         if (d > 0) await wait(d + 16);
     }
 
     /** Save the current pose into a numbered slot. */
-    cameraSaveSlot(slot: number): void { this.deps.camera.saveSlot(slot); }
+    cameraSaveSlot(slot: number): void { void this.deps.workerCall('cameraSaveSlot', [slot]); }
     /** Recall a numbered slot. Returns false when empty. */
     async cameraLoadSlot(slot: number, durationMs = 0): Promise<boolean> {
-        const ok = this.deps.camera.loadSlot(slot, durationMs);
+        const ok = await this.deps.workerCall('cameraLoadSlot', [slot, durationMs]) as boolean;
         if (ok && durationMs > 0) await wait(durationMs + 16);
         return ok;
     }
 
     // ─── Render-loop pause + screenshots ────────────────────────────
 
-    /** Stop the render loop. Sim continues on the server unless you
-     *  also call `simPause()`. The frozen frame remains visible so
-     *  you can take a screenshot at a deterministic moment. */
-    pause(): void { this.deps.setPaused(true); }
-    resume(): void { this.deps.setPaused(false); }
-    get paused(): boolean { return this.deps.isPaused(); }
+    /** Stop the worker render loop. Sim continues on the server unless you
+     *  also call `simPause()`. The frozen frame remains visible (the canvas
+     *  uses preserveDrawingBuffer) so you can screenshot a deterministic
+     *  moment. */
+    pause(): void { this.renderPaused = true; void this.deps.workerCall('pause'); }
+    resume(): void { this.renderPaused = false; void this.deps.workerCall('resume'); }
+    get paused(): boolean { return this.renderPaused; }
 
-    /** Capture the current canvas as a PNG. Returns a data-URL.
-     *  Use `download(url, name)` if you also want it written to disk
-     *  via the browser. The canvas was created with
-     *  `preserveDrawingBuffer: true` so this works without re-render. */
-    screenshot(): string {
-        const canvas = this.deps.engine.getRenderingCanvas();
-        if (!canvas) throw new Error('[test] no rendering canvas');
-        return canvas.toDataURL('image/png');
+    /** Capture the current canvas as a PNG data-URL. The worker reads its
+     *  OffscreenCanvas (created with preserveDrawingBuffer) and base64-encodes
+     *  the PNG. NOTE: async now (GW8) — the canvas lives in the worker.
+     *  For full-page captures prefer the chrome-devtools `take_screenshot`. */
+    async screenshot(): Promise<string> {
+        return await this.deps.workerCall('screenshot') as string;
     }
 
-    /** Save the current canvas to a downloaded PNG file. Triggers a
-     *  browser download to `<filename>.png` (default: `spring-test-<ts>.png`). */
-    saveScreenshot(filename?: string): string {
-        const url = this.screenshot();
+    /** Save the current canvas to a downloaded PNG file. */
+    async saveScreenshot(filename?: string): Promise<string> {
+        const url = await this.screenshot();
         const a = document.createElement('a');
         a.href = url;
         a.download = filename ?? `spring-test-${Date.now()}.png`;
@@ -424,29 +405,26 @@ export class TestHarness {
         return url;
     }
 
-    /** Babylon's built-in screenshot helper — writes a PNG of the
-     *  scene at a chosen resolution (independent of canvas size). */
+    /** High-resolution screenshot. DEFERRED in GW8 — the RTT screenshot
+     *  helper (BABYLON.Tools.CreateScreenshotUsingRenderTarget) needs the
+     *  engine + camera, which are in the worker; not yet wired for a custom
+     *  resolution. Falls back to the canvas-resolution `screenshot()`. */
     async highResScreenshot(width = 1920, height = 1080): Promise<string> {
-        const camera = this.deps.scene.activeCamera;
-        if (!camera) throw new Error('[test] no active camera');
-        return new Promise((resolve) => {
-            BABYLON.Tools.CreateScreenshotUsingRenderTarget(
-                this.deps.engine, camera, { width, height },
-                (data) => resolve(data),
-            );
-        });
+        void width; void height;
+        return this.screenshot();
     }
 
     // ─── Selection helpers ──────────────────────────────────────────
 
     /** Replace the client selection with the given unit IDs. */
     select(unitIds: number[]): void {
-        this.deps.inputManager?.setSelectionFromWidget(unitIds);
+        void this.deps.workerCall('select', [unitIds]);
     }
 
-    /** Read-only snapshot of currently selected unit IDs. */
+    /** Read-only snapshot of currently selected unit IDs. Served from the
+     *  cached sceneState feed (sync). */
     get selection(): readonly number[] {
-        return this.deps.inputManager?.selection ?? [];
+        return this.deps.getSelection();
     }
 
     // ─── Composite helpers ──────────────────────────────────────────
@@ -461,8 +439,8 @@ export class TestHarness {
         if (!m) throw new Error(`[test] could not parse spawn output: ${out}`);
         const id = Number(m[1]);
         // The first frame the unit exists in the client cache is one
-        // entity-state tick away (~100ms). Wait briefly so getEntityPosition
-        // doesn't return null on the first call.
+        // entity-state tick away (~100ms). Wait briefly so the worker's
+        // getEntityPosition doesn't return null on the first call.
         await wait(150);
         try {
             await this.focus(id, opts);

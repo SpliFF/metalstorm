@@ -1,8 +1,8 @@
 /**
  * Protocol helpers — envelope framing and message construction.
  *
- * Every binary frame starts with a u8 envelope byte (carried over WebRTC data
- * channels today; migrating to WebTransport — see PLAN-game-worker.md):
+ * Every binary frame starts with a u8 envelope byte (carried over WebTransport
+ * streams/datagrams — see PLAN-game-worker.md):
  *   0x01 = FlatBuffers message     0x02/0x03 = entity state (full/delta)
  *   0x05 = piece state  0x06 = build activity  0x07 = LOS bitmap
  *   0x08 = decals       0x09 = heightmap patch

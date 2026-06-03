@@ -70,7 +70,16 @@ export interface CameraPose {
 
 export class RTSCamera {
     private camera: FreeCamera;
-    private canvas: HTMLCanvasElement;
+    // GW4-c5b: RTSCamera runs INSIDE the game-processor worker — it owns no DOM
+    // element. The thin main-thread `CameraInput` (camera-input.ts) captures the
+    // raw DOM events on `#game-canvas` and forwards canvas-relative CSS-pixel
+    // intents (pointer/wheel/key) here via the input methods below. We keep the
+    // canvas *size* (CSS pixels) + device-pixel-ratio so the camera math (edge
+    // scroll, drag-pan span) and `scene.pick` (which wants backing-store pixels =
+    // CSS×dpr) both have what they need without a DOM canvas.
+    private canvasW: number;
+    private canvasH: number;
+    private dpr: number;
     private minHeight: number;
     private maxHeight: number;
     private panSpeed: number;
@@ -110,14 +119,15 @@ export class RTSCamera {
     private rightStartAlt = false;
     private rightCrossedThreshold = false;
     private rightPivot = new Vector3();
-    private capturedRightPointerId = -1;
     private readonly rightDragThresholdPx = 4;
     /// Optional UI hover probe — when set and returning true at right-down
-    /// time, the right-click is left to the UI and no drag/order fires.
+    /// time, the right-click is left to the UI and no drag/order fires. In the
+    /// worker this is wired to the LuaUI `IsAbove` check (GW4-c6); until then it
+    /// defaults false (no widgets drawn yet).
     private isOverUI: () => boolean = () => false;
-    /// Fired on right-click WITHOUT drag, after pointer up. The host (main.ts)
-    /// wires this to InputManager so an order is issued at the click point.
-    onRightClickCommit?: (clientX: number, clientY: number,
+    /// Fired on right-click WITHOUT drag, after pointer up. The worker wires this
+    /// to its pick→order handler. `x`/`y` are canvas-relative CSS px (top-left).
+    onRightClickCommit?: (x: number, y: number,
         mods: { shift: boolean; ctrl: boolean; alt: boolean }) => void;
     // Pitch is clamped so the camera never flattens past horizontal
     // (looking sideways is useless for an RTS) or tips right over the
@@ -167,25 +177,42 @@ export class RTSCamera {
     /// serialise the table.
     private savedSlots = new Map<number, CameraPose>();
 
-    // Bound handlers so we can remove them on dispose()
-    private onKeyDown = (e: KeyboardEvent): void => {
-        // Ignore if an input element has focus
-        const tag = (e.target as HTMLElement)?.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-        this.keys.add(e.key.toLowerCase());
-    };
+    // ─── Input intents (GW4-c5b) ────────────────────────────────────────────
+    //
+    // These replace the old DOM event handlers. The main-thread `CameraInput`
+    // owns the listeners + pointer capture and forwards canvas-relative CSS-pixel
+    // coordinates (origin top-left, y-down — Babylon's native screen space) plus
+    // a `buttons` bitmask. `mods` is 1=shift 2=ctrl 4=alt 8=meta. Drag state
+    // (middle-pan / right-orbit) is tracked here off the pointer stream because
+    // capture lives on main, so move/up keep arriving even off-canvas.
 
-    private onKeyUp = (e: KeyboardEvent): void => {
-        this.keys.delete(e.key.toLowerCase());
-    };
+    /** Update the cached viewport size (CSS px) + device-pixel-ratio. Call on
+     *  init and on every resize so edge-scroll, drag-pan and pick stay correct. */
+    setViewportSize(width: number, height: number, dpr: number): void {
+        if (width > 0) this.canvasW = width;
+        if (height > 0) this.canvasH = height;
+        if (dpr > 0) this.dpr = dpr;
+    }
 
-    private onBlur = (): void => {
+    /** Key down. `code` is a lowercased KeyboardEvent.code (e.g. 'arrowup'). */
+    keyDown(code: string): void {
+        this.keys.add(code);
+    }
+
+    keyUp(code: string): void {
+        this.keys.delete(code);
+    }
+
+    /** Focus loss — drop all held keys + cancel any active drag so the camera
+     *  doesn't keep panning after the tab/window loses focus. */
+    blur(): void {
         this.keys.clear();
-    };
+        this.middleDragging = false;
+        this.rightDragging = false;
+    }
 
-    private onWheel = (e: WheelEvent): void => {
-        if (e.target !== this.canvas) return;
-        e.preventDefault();
+    /** Mouse wheel. `delta` is the raw WheelEvent.deltaY. */
+    wheel(_x: number, _y: number, delta: number): void {
         // User scroll cancels any animated transition
         this.transition = null;
         // Initialise targetDistance on first wheel event from the actual
@@ -196,84 +223,83 @@ export class RTSCamera {
         // Normalise deltaY across browsers/devices: macOS trackpad gives
         // small per-event deltas, mouse wheels give larger ones. Clamp so
         // a single notch never moves the target by more than one step.
-        const norm = Math.max(-1, Math.min(1, e.deltaY / 100));
+        const norm = Math.max(-1, Math.min(1, delta / 100));
         const factor = Math.pow(1 + this.zoomStep, norm);
         this.targetDistance *= factor;
         this.targetDistance = this.clampDistance(this.targetDistance);
-    };
+    }
 
-    private onMouseMove = (e: MouseEvent): void => {
-        const rect = this.canvas.getBoundingClientRect();
-        this.mouseX = e.clientX - rect.left;
-        this.mouseY = e.clientY - rect.top;
-        this.mouseInCanvas =
-            this.mouseX >= 0 && this.mouseX < rect.width &&
-            this.mouseY >= 0 && this.mouseY < rect.height;
-    };
+    /** Pointer move. `x`/`y` are canvas-relative CSS px; `buttons` is the live
+     *  button bitmask (1=left, 2=right, 4=middle — DOM PointerEvent.buttons). */
+    pointerMove(x: number, y: number, _buttons: number): void {
+        this.mouseX = x;
+        this.mouseY = y;
+        this.mouseInCanvas = x >= 0 && x < this.canvasW && y >= 0 && y < this.canvasH;
 
-    private onMouseLeave = (): void => {
-        this.mouseInCanvas = false;
-    };
-
-    // Middle-mouse press on the canvas starts a pan drag. We use
-    // pointer events (not mouse events) because Babylon hooks pointer
-    // events via scene.onPointerObservable, and modern browsers don't
-    // always generate compatibility `mousedown` events for middle
-    // button on a canvas that already has a pointer-event listener.
-    // Pointer capture then guarantees that pointermove/pointerup keep
-    // being delivered to the canvas even when the cursor leaves it.
-    private capturedPointerId = -1;
-
-    private onPointerDown = (e: PointerEvent): void => {
-        if (e.button !== 1) return; // middle button only
-        // Swallow default middle-click behaviour (autoscroll marker,
-        // "open in new tab" compat click) and stop the event from
-        // reaching Babylon's pointer observable, so a stray middle-
-        // click can never be mistaken for a selection/command.
-        e.preventDefault();
-        e.stopPropagation();
-        this.middleDragging = true;
-        this.middleLastX = e.clientX;
-        this.middleLastY = e.clientY;
-        try {
-            this.canvas.setPointerCapture(e.pointerId);
-            this.capturedPointerId = e.pointerId;
-        } catch {
-            // setPointerCapture can throw if the pointer id is gone
-            // (very rare — e.g. if the browser released the pointer
-            // between dispatch and handler run). Fall back to window
-            // listeners so we still see move/up events.
-            window.addEventListener('pointermove', this.onPointerMove);
-            window.addEventListener('pointerup', this.onPointerUp);
-            return;
+        if (this.middleDragging) {
+            const dx = x - this.middleLastX;
+            const dy = y - this.middleLastY;
+            this.middleLastX = x;
+            this.middleLastY = y;
+            if (dx !== 0 || dy !== 0) this.middleDragPanBy(dx, dy);
         }
-        this.canvas.addEventListener('pointermove', this.onPointerMove);
-        this.canvas.addEventListener('pointerup', this.onPointerUp);
-    };
-
-    private onPointerMove = (e: PointerEvent): void => {
-        if (!this.middleDragging) return;
-        const dx = e.clientX - this.middleLastX;
-        const dy = e.clientY - this.middleLastY;
-        this.middleLastX = e.clientX;
-        this.middleLastY = e.clientY;
-        if (dx !== 0 || dy !== 0) {
-            this.middleDragPanBy(dx, dy);
+        if (this.rightDragging) {
+            if (!this.rightCrossedThreshold) {
+                const tx = x - this.rightStartX;
+                const ty = y - this.rightStartY;
+                if (Math.hypot(tx, ty) < this.rightDragThresholdPx) return;
+                this.rightCrossedThreshold = true;
+                this.transition = null;
+            }
+            const dx = x - this.rightLastX;
+            const dy = y - this.rightLastY;
+            this.rightLastX = x;
+            this.rightLastY = y;
+            if (dx !== 0 || dy !== 0) this.orbitAroundPivot(this.rightPivot, dx, dy);
         }
-    };
+    }
 
-    private onPointerUp = (e: PointerEvent): void => {
-        if (e.button !== 1) return;
-        this.middleDragging = false;
-        if (this.capturedPointerId >= 0) {
-            try { this.canvas.releasePointerCapture(this.capturedPointerId); } catch { /* already released */ }
-            this.capturedPointerId = -1;
+    /** Pointer down. `button` is 0=left 1=middle 2=right (DOM convention). */
+    pointerDown(x: number, y: number, button: number, mods: number): void {
+        if (button === 1) {
+            // Middle button → pan drag.
+            this.middleDragging = true;
+            this.middleLastX = x;
+            this.middleLastY = y;
+        } else if (button === 2) {
+            // Right button → ground-pivoted orbit (or a fall-through order on a
+            // click without drag). Leave it to the UI when over a widget.
+            if (this.isOverUI()) return;
+            this.rightDragging = true;
+            this.rightCrossedThreshold = false;
+            this.rightStartX = x;
+            this.rightStartY = y;
+            this.rightLastX = x;
+            this.rightLastY = y;
+            this.rightStartShift = (mods & 1) !== 0;
+            this.rightStartCtrl = (mods & 2) !== 0;
+            this.rightStartAlt = (mods & 4) !== 0;
+            const ground = this.pickGroundAt(x, y);
+            this.rightPivot.copyFrom(ground ?? this.lookAt);
         }
-        this.canvas.removeEventListener('pointermove', this.onPointerMove);
-        this.canvas.removeEventListener('pointerup', this.onPointerUp);
-        window.removeEventListener('pointermove', this.onPointerMove);
-        window.removeEventListener('pointerup', this.onPointerUp);
-    };
+    }
+
+    /** Pointer up. Mirrors `pointerDown`'s button codes. */
+    pointerUp(x: number, y: number, button: number, _mods: number): void {
+        if (button === 1) {
+            this.middleDragging = false;
+        } else if (button === 2) {
+            const wasClick = this.rightDragging && !this.rightCrossedThreshold;
+            this.rightDragging = false;
+            if (wasClick) {
+                this.onRightClickCommit?.(x, y, {
+                    shift: this.rightStartShift,
+                    ctrl: this.rightStartCtrl,
+                    alt: this.rightStartAlt,
+                });
+            }
+        }
+    }
 
     /** Translate the camera so the world point under the cursor follows
      *  the cursor 1:1 — i.e. dragging the mouse right scrolls the world
@@ -281,7 +307,7 @@ export class RTSCamera {
      *  screen pixels to world elmos uses the camera's vertical FOV and
      *  current height so the gluing is roughly correct at any zoom. */
     private middleDragPanBy(dxPx: number, dyPx: number): void {
-        const h = this.canvas.clientHeight || 1;
+        const h = this.canvasH || 1;
         // World-elmos per screen pixel at the look-at depth.
         // 2 * height * tan(fov/2) covers the visible vertical span at
         // ground level for a near-vertical overhead camera; spreading
@@ -300,103 +326,21 @@ export class RTSCamera {
         this.panBy(dx, dz);
     }
 
-    // Right-click drag: ground-pivoted orbit. We claim the event in the
-    // capture phase so InputManager's pointer observer never sees it; if
-    // the drag never crosses the click-vs-drag threshold, onPointerUp
-    // fires onRightClickCommit so the host can issue an order. If the
-    // cursor is over a chili UI element we leave the event alone so the
-    // widget can react (e.g. close a context menu).
-    private onRightDown = (e: PointerEvent): void => {
-        if (e.button !== 2) return;
-        if (this.isOverUI()) return;
-        e.preventDefault();
-        e.stopPropagation();
-
-        this.rightDragging = true;
-        this.rightCrossedThreshold = false;
-        this.rightStartX = e.clientX;
-        this.rightStartY = e.clientY;
-        this.rightLastX = e.clientX;
-        this.rightLastY = e.clientY;
-        this.rightStartShift = e.shiftKey;
-        this.rightStartCtrl = e.ctrlKey;
-        this.rightStartAlt = e.altKey;
-
-        // Pick the ground point under the cursor as the orbit pivot.
-        // Falls back to the current lookAt if the cursor is over the
-        // skybox (e.g. dragged off-map) so the rotation still works.
-        const ground = this.pickGroundAt(e.clientX, e.clientY);
-        this.rightPivot.copyFrom(ground ?? this.lookAt);
-
-        try {
-            this.canvas.setPointerCapture(e.pointerId);
-            this.capturedRightPointerId = e.pointerId;
-        } catch {
-            window.addEventListener('pointermove', this.onRightMove);
-            window.addEventListener('pointerup', this.onRightUp);
-            return;
-        }
-        this.canvas.addEventListener('pointermove', this.onRightMove);
-        this.canvas.addEventListener('pointerup', this.onRightUp);
-    };
-
-    private onRightMove = (e: PointerEvent): void => {
-        if (!this.rightDragging) return;
-        if (!this.rightCrossedThreshold) {
-            const tx = e.clientX - this.rightStartX;
-            const ty = e.clientY - this.rightStartY;
-            if (Math.hypot(tx, ty) < this.rightDragThresholdPx) return;
-            // Crossed the click-vs-drag threshold — commit to rotation.
-            this.rightCrossedThreshold = true;
-            // User is interacting; stop any animated transition.
-            this.transition = null;
-        }
-        const dx = e.clientX - this.rightLastX;
-        const dy = e.clientY - this.rightLastY;
-        this.rightLastX = e.clientX;
-        this.rightLastY = e.clientY;
-        if (dx !== 0 || dy !== 0) {
-            this.orbitAroundPivot(this.rightPivot, dx, dy);
-        }
-    };
-
-    private onRightUp = (e: PointerEvent): void => {
-        if (e.button !== 2) return;
-        const wasClick = this.rightDragging && !this.rightCrossedThreshold;
-        this.rightDragging = false;
-        if (this.capturedRightPointerId >= 0) {
-            try { this.canvas.releasePointerCapture(this.capturedRightPointerId); } catch { /* already released */ }
-            this.capturedRightPointerId = -1;
-        }
-        this.canvas.removeEventListener('pointermove', this.onRightMove);
-        this.canvas.removeEventListener('pointerup', this.onRightUp);
-        window.removeEventListener('pointermove', this.onRightMove);
-        window.removeEventListener('pointerup', this.onRightUp);
-
-        if (wasClick) {
-            this.onRightClickCommit?.(this.rightStartX, this.rightStartY, {
-                shift: this.rightStartShift,
-                ctrl: this.rightStartCtrl,
-                alt: this.rightStartAlt,
-            });
-        }
-    };
-
-    /// Ray-pick the visible terrain mesh under a screen pixel. Mirrors
-    /// InputManager.pickGroundAt — we duplicate it rather than reach into
-    /// InputManager so RTSCamera stays self-contained.
-    private pickGroundAt(clientX: number, clientY: number): Vector3 | null {
-        const rect = this.canvas.getBoundingClientRect();
-        const ox = clientX - rect.left;
-        const oy = clientY - rect.top;
+    /// Ray-pick the visible terrain mesh under a canvas-relative CSS-pixel point.
+    /// `scene.pick` works in backing-store pixels (= CSS × dpr), so we scale up.
+    private pickGroundAt(cssX: number, cssY: number): Vector3 | null {
         const scene = this.camera.getScene();
-        const pick = scene.pick(ox, oy, (m) => m.name === 'terrain', false, this.camera);
+        const pick = scene.pick(cssX * this.dpr, cssY * this.dpr,
+            (m) => m.name === 'terrain', false, this.camera);
         return (pick?.hit && pick.pickedPoint) ? pick.pickedPoint : null;
     }
 
-    constructor(camera: FreeCamera, canvas: HTMLCanvasElement, config: RTSCameraConfig = {}) {
+    constructor(camera: FreeCamera, width: number, height: number, dpr: number,
+                config: RTSCameraConfig = {}) {
         this.camera = camera;
-        this.canvas = canvas;
+        this.canvasW = Math.max(1, width);
+        this.canvasH = Math.max(1, height);
+        this.dpr = dpr > 0 ? dpr : 1;
         this.minHeight = config.minHeight ?? 100;
         this.maxHeight = config.maxHeight ?? 5000;
         this.panSpeed = config.panSpeed ?? 800;
@@ -407,7 +351,7 @@ export class RTSCamera {
         this.orbitSpeed = config.orbitSpeed ?? 0.006;
         this.terrainClearance = config.terrainClearance ?? 20;
 
-        // Detach Babylon's default input so it doesn't fight our handlers
+        // Detach Babylon's default input so it doesn't fight our intents
         camera.detachControl();
 
         // Seed our look-at point from the camera's current direction,
@@ -415,40 +359,16 @@ export class RTSCamera {
         this.lookAt.copyFrom(this.computeGroundLookAt());
         this.camera.setTarget(this.lookAt);
         this.updateAxes();
-
-        window.addEventListener('keydown', this.onKeyDown);
-        window.addEventListener('keyup', this.onKeyUp);
-        window.addEventListener('blur', this.onBlur);
-        canvas.addEventListener('wheel', this.onWheel, { passive: false });
-        canvas.addEventListener('mousemove', this.onMouseMove);
-        canvas.addEventListener('mouseleave', this.onMouseLeave);
-        // Pointerdown runs in the capture phase so it fires before any
-        // other canvas-attached pointer listener (e.g. Babylon's scene
-        // observable). That lets us stopPropagation on middle-button
-        // events without missing them ourselves. Same trick for the
-        // right-button drag handler — InputManager would otherwise see
-        // the down and dispatch an order on the spot.
-        canvas.addEventListener('pointerdown', this.onPointerDown, { capture: true });
-        canvas.addEventListener('pointerdown', this.onRightDown, { capture: true });
-        // Some browsers open an autoscroll marker on middle-click.
-        // auxclick is the cleanest way to suppress it without also
-        // breaking left/right click handling in InputManager.
-        canvas.addEventListener('auxclick', this.onAuxClick);
+        // No DOM listeners here — input arrives via the intent methods above,
+        // forwarded by the main-thread CameraInput (GW4-c5b).
     }
 
     /** Set the UI hover probe — used by right-click handling so a click
      *  on a chili control falls through to the widget instead of starting
-     *  a camera rotation. Mirrors InputManager.setUIHitTest. */
+     *  a camera rotation. Wired to LuaUI IsAbove in the worker (GW4-c6). */
     setUIHitTest(probe: () => boolean): void {
         this.isOverUI = probe;
     }
-
-    // Swallow middle-button auxclicks on the canvas so the browser
-    // doesn't interpret them as "open link in new tab" / autoscroll
-    // once the orbit drag ends.
-    private onAuxClick = (e: MouseEvent): void => {
-        if (e.button === 1) e.preventDefault();
-    };
 
     /**
      * Update the camera each frame. Call this from the render loop with
@@ -480,8 +400,8 @@ export class RTSCamera {
 
         // Edge scrolling
         if (this.edgeScrollPixels > 0 && this.mouseInCanvas) {
-            const w = this.canvas.clientWidth;
-            const h = this.canvas.clientHeight;
+            const w = this.canvasW;
+            const h = this.canvasH;
             const t = this.edgeScrollPixels;
             if (this.mouseX < t)       moveX -= 1;
             else if (this.mouseX > w - t) moveX += 1;
@@ -1316,41 +1236,11 @@ export class RTSCamera {
     }
 
     dispose(): void {
+        // No DOM listeners to detach (GW4-c5b: the main-thread CameraInput owns
+        // them). Just stop ticking and drop any active drag/transition state.
         this.disposed = true;
-        window.removeEventListener('keydown', this.onKeyDown);
-        window.removeEventListener('keyup', this.onKeyUp);
-        window.removeEventListener('blur', this.onBlur);
-        this.canvas.removeEventListener('wheel', this.onWheel);
-        this.canvas.removeEventListener('mousemove', this.onMouseMove);
-        this.canvas.removeEventListener('mouseleave', this.onMouseLeave);
-        this.canvas.removeEventListener('pointerdown', this.onPointerDown, { capture: true } as EventListenerOptions);
-        this.canvas.removeEventListener('pointerdown', this.onRightDown, { capture: true } as EventListenerOptions);
-        this.canvas.removeEventListener('auxclick', this.onAuxClick);
-        // Defensively detach any drag-time listeners in case the
-        // camera is disposed mid-drag. These are registered on
-        // either the canvas (normal path) or window (setPointerCapture
-        // fallback path) so we have to try both.
-        if (this.middleDragging) {
-            this.canvas.removeEventListener('pointermove', this.onPointerMove);
-            this.canvas.removeEventListener('pointerup', this.onPointerUp);
-            window.removeEventListener('pointermove', this.onPointerMove);
-            window.removeEventListener('pointerup', this.onPointerUp);
-            if (this.capturedPointerId >= 0) {
-                try { this.canvas.releasePointerCapture(this.capturedPointerId); } catch { /* already released */ }
-                this.capturedPointerId = -1;
-            }
-            this.middleDragging = false;
-        }
-        if (this.rightDragging) {
-            this.canvas.removeEventListener('pointermove', this.onRightMove);
-            this.canvas.removeEventListener('pointerup', this.onRightUp);
-            window.removeEventListener('pointermove', this.onRightMove);
-            window.removeEventListener('pointerup', this.onRightUp);
-            if (this.capturedRightPointerId >= 0) {
-                try { this.canvas.releasePointerCapture(this.capturedRightPointerId); } catch { /* already released */ }
-                this.capturedRightPointerId = -1;
-            }
-            this.rightDragging = false;
-        }
+        this.middleDragging = false;
+        this.rightDragging = false;
+        this.transition = null;
     }
 }

@@ -87,7 +87,9 @@ export class FxLightPool {
             });
         }
 
-        (window as unknown as { __fxLightPool: unknown }).__fxLightPool = this;
+        // GW4-c5: globalThis (not window) so this resolves in the game-processor
+        // worker too; re-proxied to main for devtools in GW8.
+        (globalThis as unknown as { __fxLightPool: unknown }).__fxLightPool = this;
     }
 
     /** Master on/off (e.g. a `gfx.fxLights` setting). Idles all slots. */

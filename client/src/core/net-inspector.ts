@@ -21,7 +21,23 @@ import { ServerMessage } from '../protocol/spring-web/server-message.js';
 import { ServerPayload } from '../protocol/spring-web/server-payload.js';
 import { ClientMessage } from '../protocol/spring-web/client-message.js';
 import { ClientPayload } from '../protocol/spring-web/client-payload.js';
-import { debugConsole } from './debug-console.js';
+
+// GW8: net-inspector must be worker-safe — the connection (and thus the
+// bandwidth tally) now lives in the game-processor worker. It used to `import
+// { debugConsole }` directly, which drags the DOM-constructing debug-console
+// singleton into the worker bundle (ReferenceError: window/document undefined
+// at module load). Inverted to a registered log sink: debug-console (main-only)
+// calls setNetLogSink(); the worker leaves it null and the gated logging no-ops
+// while the tally still runs. Dependency is now one-way (debug-console →
+// net-inspector), keeping net-inspector free of any DOM import.
+export interface NetLogEntry {
+    id: number; timestamp: number; level: number; section: string;
+    scope: string; process: string; message: string; frame: number;
+}
+let netLogSink: ((entry: NetLogEntry) => void) | null = null;
+export function setNetLogSink(sink: ((entry: NetLogEntry) => void) | null): void {
+    netLogSink = sink;
+}
 
 const ENVELOPE_NAMES: Record<number, string> = {
     0x01: 'FlatBuffers',
@@ -157,7 +173,7 @@ export const inspectInbound = recordInbound;
 export const inspectOutbound = recordOutbound;
 
 function logNetMessage(dir: string, label: string, size: number): void {
-    debugConsole.addEntry({
+    netLogSink?.({
         id: 0,
         timestamp: Date.now(),
         level: 1, // INFO

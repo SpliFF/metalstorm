@@ -57,7 +57,7 @@ include(FetchContent)
 
 # nghttp2: build only the static library, no tools/examples/docs.
 # Use manual FetchContent_Populate to scope variables without affecting
-# other dependencies (doctest, libdatachannel, etc.).
+# other dependencies (doctest, brotli, etc.).
 FetchContent_Declare(
     nghttp2
     GIT_REPOSITORY https://github.com/nghttp2/nghttp2.git
@@ -82,20 +82,68 @@ if(NOT nghttp2_POPULATED)
     set(BUILD_TESTING ${NGHTTP2_SAVE_BUILD_TESTING})
 endif()
 
-# === libdatachannel (WebRTC data channels) ===
-# Workaround: libdatachannel's plog dep uses old cmake_minimum_required
+# WebRTC (libdatachannel) was removed in GW7 (PLAN-game-worker.md) — the game
+# stream now runs on WebTransport (QUIC) only. See the QUIC block below.
+# Some FetchContent deps (e.g. plog) still declare an old cmake_minimum_required;
+# keep the policy floor so they configure under modern CMake.
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
-set(NO_MEDIA ON CACHE BOOL "" FORCE)          # data channels only, no audio/video
-set(NO_WEBSOCKET ON CACHE BOOL "" FORCE)      # we have our own HTTP, don't need WS
-set(NO_EXAMPLES ON CACHE BOOL "" FORCE)
-set(NO_TESTS ON CACHE BOOL "" FORCE)
-FetchContent_Declare(
-    libdatachannel
-    GIT_REPOSITORY https://github.com/paullouisageneau/libdatachannel.git
-    GIT_TAG v0.22.5
-    GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(libdatachannel)
+
+# === QUIC / HTTP-3 / WebTransport (ngtcp2 + nghttp3 + OpenSSL 3.5+) ===
+# Stage 0 (PLAN-game-worker.md) moves the game stream onto WebTransport.
+# The QUIC stack needs OpenSSL >= 3.5 (native QUIC TLS API), ngtcp2 with
+# the ngtcp2_crypto_ossl backend, and nghttp3 for the HTTP/3 layer.
+#
+# Divergence from PLAN-game-worker.md GW1 (recorded deliberately): the plan
+# specced FetchContent for these. We instead consume the already-installed
+# Homebrew packages (libngtcp2 1.22, libnghttp3 1.15, openssl@3 3.6) via
+# pkg-config. Rationale: a from-scratch OpenSSL+ngtcp2 FetchContent build is
+# several minutes per clean configure and brittle on macOS; the system
+# packages are the same upstream releases. This is a build-system choice, not
+# an architecture change. CI / Linux can switch back to FetchContent later by
+# defining SPRING_QUIC_FETCHCONTENT.
+#
+# WebTransport is the *only* game transport (PLAN-game-worker.md drops WebRTC
+# entirely — no fallback by design). The QUIC stack is therefore a hard build
+# requirement: configuration fails if it is absent.
+find_package(PkgConfig REQUIRED)
+# Prefer Homebrew's openssl@3 (system OpenSSL on macOS is LibreSSL, no QUIC).
+foreach(_ossl_prefix /opt/homebrew/opt/openssl@3 /usr/local/opt/openssl@3)
+    if(EXISTS ${_ossl_prefix}/lib/pkgconfig)
+        list(APPEND CMAKE_PREFIX_PATH ${_ossl_prefix})
+        set(ENV{PKG_CONFIG_PATH} "${_ossl_prefix}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+    endif()
+endforeach()
+foreach(_qpkg libngtcp2 libngtcp2_crypto_ossl libnghttp3)
+    foreach(_qprefix /opt/homebrew/opt/${_qpkg} /usr/local/opt/${_qpkg})
+        if(EXISTS ${_qprefix}/lib/pkgconfig)
+            set(ENV{PKG_CONFIG_PATH} "${_qprefix}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+        endif()
+    endforeach()
+endforeach()
+pkg_check_modules(NGTCP2        REQUIRED libngtcp2)
+pkg_check_modules(NGTCP2_CRYPTO REQUIRED libngtcp2_crypto_ossl)
+pkg_check_modules(NGHTTP3       REQUIRED libnghttp3)
+pkg_check_modules(OPENSSL_QUIC  REQUIRED libssl libcrypto)
+add_library(quic_deps INTERFACE)
+target_include_directories(quic_deps INTERFACE
+    ${NGTCP2_INCLUDE_DIRS} ${NGTCP2_CRYPTO_INCLUDE_DIRS}
+    ${NGHTTP3_INCLUDE_DIRS} ${OPENSSL_QUIC_INCLUDE_DIRS})
+target_link_libraries(quic_deps INTERFACE
+    ${NGTCP2_LINK_LIBRARIES} ${NGTCP2_CRYPTO_LINK_LIBRARIES}
+    ${NGHTTP3_LINK_LIBRARIES} ${OPENSSL_QUIC_LINK_LIBRARIES})
+message(STATUS "QUIC stack: ngtcp2 ${NGTCP2_VERSION}, nghttp3 ${NGHTTP3_VERSION}, openssl ${OPENSSL_QUIC_VERSION}")
+
+# Standalone GW1 de-risk harness: proves the QUIC/WebTransport toolchain
+# links and the core ngtcp2/OpenSSL server objects construct. Built only
+# when -DSPRING_BUILD_QUIC_DERISK=ON.
+option(SPRING_BUILD_QUIC_DERISK "Build the WebTransport QUIC de-risk harness" OFF)
+if(SPRING_BUILD_QUIC_DERISK)
+    add_executable(spring-quic-derisk
+        rts/Server/WebTransport/derisk_main.cpp
+        rts/Server/WebTransport/WebTransportServer.cpp)
+    target_include_directories(spring-quic-derisk PRIVATE rts)
+    target_link_libraries(spring-quic-derisk PRIVATE quic_deps)
+endif()
 
 # === FlatBuffers (protocol serialisation) ===
 set(FLATBUFFERS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -229,7 +277,7 @@ list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Log/TracySink")
 list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Log/OutputDebugStringSink")
 list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "TraceMemory")
 list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Sync/DumpHistory")
-# Legacy P2P networking (replaced by WebRTC/HTTP)
+# Legacy P2P networking (replaced by WebTransport/HTTP)
 list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Net/UDPListener")
 list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Net/UDPConnection")
 list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "Net/LocalConnection")
@@ -284,8 +332,12 @@ file(GLOB_RECURSE LUA_BINDING_SOURCES rts/Lua/*.cpp)
 # Exclude rendering-only Lua bindings (GL buffers, VAO/VBO, Tracy extras)
 list(FILTER LUA_BINDING_SOURCES EXCLUDE REGEX "Lua(VBO|VAO|VBOImpl|VAOImpl|TracyExtra)\\.cpp$")
 
-# Server sources
+# Server sources (includes rts/Server/WebTransport/WebTransportServer.cpp —
+# WebTransport is the game transport, compiled in unconditionally). The
+# standalone de-risk harness has its own main() and its own target, so keep it
+# out of spring-server.
 file(GLOB_RECURSE SERVER_SOURCES rts/Server/*.cpp)
+list(FILTER SERVER_SOURCES EXCLUDE REGEX "rts/Server/WebTransport/derisk_main")
 
 # === spring-server executable ===
 add_executable(spring-server
@@ -308,7 +360,7 @@ target_include_directories(spring-server PRIVATE
     ${GENERATED_DIR}
 )
 find_package(ZLIB REQUIRED)
-target_link_libraries(spring-server PRIVATE lua smmalloc nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite LibDataChannel::LibDataChannelStatic nlohmann_json::nlohmann_json brotlienc brotlicommon)
+target_link_libraries(spring-server PRIVATE lua smmalloc nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite quic_deps nlohmann_json::nlohmann_json brotlienc brotlicommon)
 
 # Link platform libraries
 if(UNIX AND NOT APPLE)
@@ -496,7 +548,12 @@ if(UNIX)
 endif()
 
 # === libspringapi (standalone client library) ===
-set(SPRINGAPI_WEBRTC ON CACHE BOOL "Enable WebRTC in libspringapi" FORCE)
+# WebRTC removed in GW7 — the server is WebTransport-only, so libspringapi's
+# WebRTC game-connect path (connectRtc) is dead against it and is built out
+# (connectRtc returns nullptr). Lobby/HTTP functionality is unaffected.
+# Force OFF so a stale cache from a pre-GW7 build doesn't drag libdatachannel
+# back in. TODO: port libspringapi game-connect to a C++ WebTransport client.
+set(SPRINGAPI_WEBRTC OFF CACHE BOOL "WebRTC removed (GW7)" FORCE)
 add_subdirectory(libspringapi)
 
 # === springcli — CLI tool ===

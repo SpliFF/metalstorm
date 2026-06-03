@@ -8,7 +8,10 @@ const gamePort = typeof __GAME_SERVER_PORT__ !== 'undefined'
     ? __GAME_SERVER_PORT__
     : '8011';
 
-const host = window.location.hostname || 'localhost';
+// `globalThis.location` resolves to Window.location on the main thread and
+// WorkerLocation in a worker (both expose `.hostname`) — GW4 imports the
+// def/render modules that pull in CONFIG into the game-processor worker.
+const host = globalThis.location.hostname || 'localhost';
 
 export const CONFIG = {
     gameServerPort: gamePort,
