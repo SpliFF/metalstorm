@@ -375,6 +375,18 @@ int main(int argc, char* argv[])
             "  started_at INTEGER DEFAULT (strftime('%s','now')),"
             "  state TEXT DEFAULT 'starting'"
             ")", nullptr, nullptr, nullptr);
+        // game_status — liveness/readiness published by each running game server
+        // (spring-server is the only writer; the lobby + tooling only read it).
+        // Created here too so reads work before the first game ever launches.
+        sqlite3_exec(mapDb,
+            "CREATE TABLE IF NOT EXISTS game_status ("
+            "  room_id INTEGER PRIMARY KEY,"
+            "  ready INTEGER NOT NULL DEFAULT 0,"
+            "  client_count INTEGER NOT NULL DEFAULT 0,"
+            "  pid INTEGER NOT NULL DEFAULT 0,"
+            "  port INTEGER NOT NULL DEFAULT 0,"
+            "  updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))"
+            ")", nullptr, nullptr, nullptr);
     }
 
     // Helper: persist a game server entry to SQLite
@@ -400,6 +412,29 @@ int main(int argc, char* argv[])
         if (!mapDb) return;
         std::string sql = "DELETE FROM game_servers WHERE room_id=" + std::to_string(roomId);
         sqlite3_exec(mapDb, sql.c_str(), nullptr, nullptr, nullptr);
+        // The game server normally clears its own game_status row on a clean
+        // exit, but a SIGKILL/crash can leave it behind — drop it here too so a
+        // dead room never looks "ready".
+        sql = "DELETE FROM game_status WHERE room_id=" + std::to_string(roomId);
+        sqlite3_exec(mapDb, sql.c_str(), nullptr, nullptr, nullptr);
+    };
+
+    // Read the readiness flag a running game server publishes into `game_status`
+    // (written only by spring-server; see server_main.cpp). Returns true once the
+    // server is accepting connections, which the health-check loop uses to flip
+    // the room Loading→Active. Missing table/row → not ready (false).
+    auto gameServerReady = [&](uint32_t roomId) -> bool {
+        if (!mapDb) return false;
+        sqlite3_stmt* s = nullptr;
+        bool ready = false;
+        if (sqlite3_prepare_v2(mapDb, "SELECT ready FROM game_status WHERE room_id=?",
+                -1, &s, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int(s, 1, static_cast<int>(roomId));
+            if (sqlite3_step(s) == SQLITE_ROW)
+                ready = sqlite3_column_int(s, 0) != 0;
+        }
+        if (s) sqlite3_finalize(s);
+        return ready;
     };
 
     // Map processing is handled offline by tools/mapconverter.
@@ -510,6 +545,25 @@ int main(int argc, char* argv[])
         SLOG(SPRING_LOG_NOTICE,
             "startup: adopted %zu game server(s), cleaned %zu stale row(s)",
             adopted, staleRooms.size());
+    }
+
+    // --- Reconcile rooms stuck mid-launch ---
+    // A room in Loading/Active state must be backed by a live game server.
+    // If the adoption pass above found none (the process died and its
+    // game_servers row was already gone — e.g. a lobby restart raced the
+    // bookkeeping), the room is orphaned: the health-check loop only watches
+    // adopted servers, and the reaper below deliberately skips Loading/Active.
+    // Reset any such room to Filling so it's usable again (and reapable if it
+    // turns out to be abandoned).
+    for (GameRoom* room : rooms.GetAllRooms()) {
+        if ((room->state == ERoomState::Loading ||
+             room->state == ERoomState::Active) &&
+            gameServers.find(room->id) == gameServers.end()) {
+            SLOG(SPRING_LOG_NOTICE,
+                "room %u: %s with no live game server — resetting to Filling",
+                room->id, room->state == ERoomState::Active ? "Active" : "Loading");
+            rooms.ResetRoomForNextGame(room->id);
+        }
     }
 
     // --- Reap abandoned rooms ---
@@ -1457,6 +1511,25 @@ int main(int argc, char* argv[])
                     // clear ready flags, zero gameServerPort, drop
                     // reconnection roster.
                     rooms.ResetRoomForNextGame(roomId);
+                    broadcastRooms();
+                    continue;
+                }
+
+                // Readiness handshake: when a Starting server publishes ready=1
+                // (it's accepting connections + the sim is up), promote it to
+                // Running and flip the room Loading→Active. Until now the
+                // Loading→Active transition was never driven, so rooms read as
+                // "Starting" forever and clients/launch_game raced a not-yet-
+                // listening port. game_status is the only honest ready signal.
+                if (inst.state == GameServerInstance::Starting && gameServerReady(roomId)) {
+                    inst.state = GameServerInstance::Running;
+                    persistGameServer(inst);  // game_servers.state → 'running'
+                    if (auto* room = rooms.GetRoom(roomId);
+                        room && room->state == ERoomState::Loading) {
+                        rooms.SetRoomState(roomId, ERoomState::Active);
+                    }
+                    SLOG(SPRING_LOG_NOTICE,
+                        "game server for room %u is ready — room now Active", roomId);
                     broadcastRooms();
                 }
             }

@@ -981,6 +981,61 @@ int main(int argc, char* argv[])
     }
     SLOG(SPRING_LOG_NOTICE, "entering sim loop at %d Hz (port %d)", GAME_SPEED, port);
 
+    // --- Lifetime: idle self-termination + readiness reporting ---
+    //
+    // The game server has no backchannel to the lobby (no HTTP client) — it can
+    // only reach the lobby through the shared SQLite db. Two jobs:
+    //  1. Read whether this room is persistent (persistent rooms never idle-out).
+    //  2. Publish liveness to a `game_status` table that ONLY this process writes
+    //     (the lobby only reads it). The lobby uses `ready` to flip the room
+    //     Loading→Active and `updated_at`/`client_count` for liveness; launch_game
+    //     polls it so automation gets a server that's actually accepting.
+    //
+    // Idle policy (non-persistent only): exit once there have been zero connected
+    // clients for kIdleExitSec, with a kStartupGraceSec window after launch so a
+    // freshly-spawned server waits for its first client. This is what makes a
+    // game stop on its own once everyone has left, instead of orphaning a process.
+    bool roomPersistent = false;
+    sqlite3* statusDb = nullptr;
+    if (sqlite3_open(dbPath.c_str(), &statusDb) == SQLITE_OK) {
+        sqlite3_busy_timeout(statusDb, 3000);
+        sqlite3_stmt* ps = nullptr;
+        if (sqlite3_prepare_v2(statusDb, "SELECT persistent FROM rooms WHERE id=?",
+                -1, &ps, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int(ps, 1, static_cast<int>(roomId));
+            if (sqlite3_step(ps) == SQLITE_ROW)
+                roomPersistent = sqlite3_column_int(ps, 0) != 0;
+        }
+        sqlite3_finalize(ps);
+        sqlite3_exec(statusDb,
+            "CREATE TABLE IF NOT EXISTS game_status ("
+            " room_id INTEGER PRIMARY KEY,"
+            " ready INTEGER NOT NULL DEFAULT 0,"
+            " client_count INTEGER NOT NULL DEFAULT 0,"
+            " pid INTEGER NOT NULL DEFAULT 0,"
+            " port INTEGER NOT NULL DEFAULT 0,"
+            " updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')))",
+            nullptr, nullptr, nullptr);
+    }
+    const int kStartupGraceSec = 120;   // wait this long for the first client
+    const int kIdleExitSec = 300;       // then exit after 5 min with no clients
+    auto writeGameStatus = [&](bool ready, int clients) {
+        if (!statusDb) return;
+        char sql[256];
+        snprintf(sql, sizeof(sql),
+            "INSERT OR REPLACE INTO game_status"
+            " (room_id, ready, client_count, pid, port, updated_at)"
+            " VALUES (%u, %d, %d, %d, %d, strftime('%%s','now'))",
+            roomId, ready ? 1 : 0, clients, static_cast<int>(getpid()), port);
+        sqlite3_exec(statusDb, sql, nullptr, nullptr, nullptr);
+    };
+    // The QUIC endpoint has been accepting since rtcServer.Start above and the sim
+    // is initialised — publish ready=1 so the lobby can mark the room Active.
+    writeGameStatus(true, 0);
+    const auto serverStartTime = std::chrono::steady_clock::now();
+    auto lastClientTime = serverStartTime;   // last instant clientCount > 0 (or launch)
+    auto lastStatusWrite = serverStartTime;
+
     while (keepRunning.load()) {
         // Re-read wantedSpeedFactor every tick so live speed changes
         // (via the `speed` exec verb) apply immediately.
@@ -1003,6 +1058,32 @@ int main(int argc, char* argv[])
             }
             if (skipped > 0) {
                 SLOG(SPRING_LOG_WARNING, "sim fell behind, skipped %d ticks", skipped);
+            }
+        }
+
+        // --- Lifetime bookkeeping (idle self-termination + heartbeat) ---
+        {
+            const auto wall = std::chrono::steady_clock::now();
+            const int clients = rtcServer.GetClientCount();
+            if (clients > 0) lastClientTime = wall;
+            // Heartbeat the status row ~every 2s (also refreshes client_count).
+            if (wall - lastStatusWrite >= std::chrono::seconds(2)) {
+                lastStatusWrite = wall;
+                writeGameStatus(true, clients);
+            }
+            // Idle exit: non-persistent rooms shut down once they've had no
+            // connected clients for kIdleExitSec (past the startup grace).
+            if (!roomPersistent) {
+                const auto sinceStart = std::chrono::duration_cast<std::chrono::seconds>(
+                    wall - serverStartTime).count();
+                const auto idleFor = std::chrono::duration_cast<std::chrono::seconds>(
+                    wall - lastClientTime).count();
+                if (sinceStart > kStartupGraceSec && idleFor > kIdleExitSec) {
+                    SLOG(SPRING_LOG_NOTICE,
+                        "no connected clients for %llds — shutting down idle game server",
+                        static_cast<long long>(idleFor));
+                    keepRunning.store(false);
+                }
             }
         }
 
@@ -2659,6 +2740,16 @@ int main(int argc, char* argv[])
             SLOG(SPRING_LOG_INFO, "frame %d (%.1fs) clients=%d",
                 frame, frame / (float)GAME_SPEED, rtcServer.GetClientCount());
         }
+    }
+
+    // Clear our liveness row so the lobby/launch_game stop treating us as a
+    // live, ready game server. On restart the re-exec'd process republishes it.
+    if (statusDb) {
+        char sql[96];
+        snprintf(sql, sizeof(sql), "DELETE FROM game_status WHERE room_id=%u", roomId);
+        sqlite3_exec(statusDb, sql, nullptr, nullptr, nullptr);
+        sqlite3_close(statusDb);
+        statusDb = nullptr;
     }
 
     if (restartRequested.load()) {
