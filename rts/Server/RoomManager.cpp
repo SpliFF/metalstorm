@@ -753,6 +753,58 @@ void RoomManager::DeleteRoom(uint32_t roomId) {
     rooms.erase(it);
 }
 
+std::vector<uint32_t> RoomManager::ReapStaleRooms(int64_t maxIdleSeconds) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    std::vector<uint32_t> reaped;
+    if (!db) return reaped;
+
+    // Cutoff time, computed in SQL so we compare against the same clock
+    // (strftime('%s','now')) that stamped rooms.updated_at on write.
+    int64_t cutoff = 0;
+    {
+        sqlite3_stmt* s = nullptr;
+        if (sqlite3_prepare_v2(db, "SELECT strftime('%s','now')", -1, &s, nullptr)
+                == SQLITE_OK
+            && sqlite3_step(s) == SQLITE_ROW) {
+            cutoff = sqlite3_column_int64(s, 0) - maxIdleSeconds;
+        }
+        if (s) sqlite3_finalize(s);
+    }
+
+    // Collect candidates first (don't mutate `rooms` mid-iteration).
+    for (auto& [id, room] : rooms) {
+        if (room.persistent) continue;             // explicitly kept alive
+        if (room.gameServerPort != 0) continue;    // hosting a live game
+        if (room.state == ERoomState::Loading ||
+            room.state == ERoomState::Active) continue;  // mid-game
+
+        // Read the persisted last-touched time. The in-memory GameRoom
+        // doesn't carry updated_at, so source it from the DB.
+        int64_t updatedAt = 0;
+        sqlite3_stmt* s = nullptr;
+        if (sqlite3_prepare_v2(db, "SELECT updated_at FROM rooms WHERE id=?",
+                -1, &s, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int(s, 1, static_cast<int>(id));
+            if (sqlite3_step(s) == SQLITE_ROW)
+                updatedAt = sqlite3_column_int64(s, 0);
+        }
+        if (s) sqlite3_finalize(s);
+
+        // No row (never persisted) or stale → reap.
+        if (updatedAt == 0 || updatedAt < cutoff)
+            reaped.push_back(id);
+    }
+
+    for (uint32_t id : reaped) {
+        SLOG(SPRING_LOG_NOTICE,
+            "room %u: reaped (abandoned, idle > %llds)",
+            id, static_cast<long long>(maxIdleSeconds));
+        DeleteRoomFromDb(id);
+        rooms.erase(id);
+    }
+    return reaped;
+}
+
 bool RoomManager::KickPlayer(uint32_t roomId, uint32_t requesterId, uint32_t targetId) {
     std::lock_guard<std::recursive_mutex> lock(mutex);
     auto it = rooms.find(roomId);

@@ -196,6 +196,24 @@ public:
     /// subprocess before calling this.
     void DeleteRoom(uint32_t roomId);
 
+    /// Reap abandoned rooms.
+    ///
+    /// The lobby is HTTP-only: there is no persistent lobby socket whose
+    /// disconnect could abandon a room (RemoveClient is never called), so
+    /// non-persistent rooms with no running game accumulate in the DB and
+    /// survive lobby restarts via LoadFromDatabase. This removes any room
+    /// that is (a) not persistent, (b) not hosting a live game
+    /// (gameServerPort == 0 and state ∉ {Loading, Active}), and (c) has not
+    /// been touched (`rooms.updated_at`) within `maxIdleSeconds`.
+    ///
+    /// Staleness is a proxy for player presence — the HTTP lobby tracks no
+    /// liveness signal, so a room is judged abandoned by how long since its
+    /// last mutation. Persistent rooms and rooms with a live game server are
+    /// always kept. `maxIdleSeconds <= 0` reaps every eligible room
+    /// regardless of age (force-clean). Returns the ids reaped so the caller
+    /// can release any associated resources and refresh the room browser.
+    std::vector<uint32_t> ReapStaleRooms(int64_t maxIdleSeconds);
+
     /// Add an AI slot to the room (host only). `aiId` / `displayName`
     /// are opaque strings from the lobby's AIDiscovery list; the
     /// caller is responsible for validating the id against the

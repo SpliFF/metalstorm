@@ -512,6 +512,21 @@ int main(int argc, char* argv[])
             adopted, staleRooms.size());
     }
 
+    // --- Reap abandoned rooms ---
+    // The lobby is HTTP-only — no persistent lobby socket means a closed
+    // browser never abandons its room, so non-persistent rooms with no live
+    // game pile up in the DB and reload on every restart. Sweep them on
+    // startup and periodically (below). Idle threshold is a proxy for player
+    // presence (the HTTP lobby tracks no liveness). Rooms hosting a live game
+    // and persistent rooms are always kept.
+    constexpr int64_t kRoomIdleReapSeconds = 30 * 60;  // 30 minutes
+    {
+        auto reaped = rooms.ReapStaleRooms(kRoomIdleReapSeconds);
+        if (!reaped.empty())
+            SLOG(SPRING_LOG_NOTICE, "startup: reaped %zu abandoned room(s)",
+                reaped.size());
+    }
+
     // Reset any room stuck in Loading/Active without a live game-server.
     // Happens when the previous lobby was killed mid-game without a
     // clean shutdown (so room.state was persisted as Loading), or when
@@ -1411,8 +1426,23 @@ int main(int argc, char* argv[])
     SLOG(SPRING_LOG_NOTICE, "running (port %d)", port);
 
     // --- Main loop (10 Hz for lobby — HTTP serving + process management) ---
+    int reapTick = 0;
     while (keepRunning.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        // Periodically reap abandoned rooms (~every 60s at 10 Hz). Catches
+        // rooms whose host closed the browser during a long-lived lobby,
+        // not just stale rows inherited at startup.
+        if (++reapTick >= 600) {
+            reapTick = 0;
+            auto reaped = rooms.ReapStaleRooms(kRoomIdleReapSeconds);
+            if (!reaped.empty()) {
+                for (uint32_t rid : reaped) removeGameServer(rid);  // safety
+                SLOG(SPRING_LOG_NOTICE, "reaped %zu abandoned room(s)",
+                    reaped.size());
+                broadcastRooms();
+            }
+        }
 
         // Check game server health every loop iteration
         for (auto& [roomId, inst] : gameServers) {
