@@ -839,10 +839,13 @@ export class Connection {
     /// which is *before* the forked spring-server has run `net.Start(port)`.
     /// That bind happens after main() opens the SQLite DB, parses CLI args,
     /// initialises HttpAuth, and constructs WebTransportServer — typically 1–3 s
-    /// on a cold boot, longer on macOS under heavy lobby load. Budget 60 s
-    /// at 500 ms per retry so even slow boots succeed without surfacing a
-    /// "can't connect" failure to the user.
-    private static readonly MAX_CONNECT_ATTEMPTS = 120;
+    /// on a cold boot, longer on macOS under heavy lobby load. A cold ZK game
+    /// server (defs bake + 200+ gadgets) has been observed taking 90 s+ before
+    /// it answers, so budget 150 s at 500 ms per retry — the browser connect can
+    /// fire while the room is still Loading (before the server is accepting), and
+    /// this must outlast that warm-up. (The launch_game tool gates on the
+    /// game_status ready flag instead, so automation doesn't rely on this.)
+    private static readonly MAX_CONNECT_ATTEMPTS = 300;
     private static readonly CONNECT_RETRY_DELAY_MS = 500;
     /// Quiet threshold: don't log per-attempt failures until this many
     /// attempts have failed. Below this we expect transient

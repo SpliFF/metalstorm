@@ -1112,6 +1112,28 @@ async function executeTool(name, args) {
             if (!startResp.ok) return `Start game failed (${startResp.status}): ${await startResp.text()}`;
             const started = await startResp.json();
 
+            // Wait for the game server to actually be accepting connections
+            // before returning. The lobby flips the room Loading→Active (state 4)
+            // once spring-server publishes ready=1 (game_status table). Without
+            // this, callers drove the browser into a not-yet-listening QUIC port
+            // and hit the connect-race / 90s defs timeout. ZK cold-start is slow,
+            // so poll up to ~120s.
+            const targetRoomId = started.id || room.id;
+            let ready = false;
+            let finalState = started.state;
+            const deadline = Date.now() + 120000;
+            while (Date.now() < deadline) {
+                await new Promise((r) => setTimeout(r, 1000));
+                const lr = await fetch(`${LOBBY_URL}/api/rooms`, { headers: authHdr });
+                if (!lr.ok) continue;
+                let list;
+                try { list = await lr.json(); } catch { continue; }
+                const me = (Array.isArray(list) ? list : []).find((r) => r.id === targetRoomId);
+                if (!me) continue;               // room gone (server died on boot)
+                finalState = me.state;
+                if (me.state >= 4) { ready = true; break; }   // 4 = Active = ready
+            }
+
             // Suggested browser URL. Unless the caller is specifically
             // testing the startup commander-chooser, disable it so the view
             // is clear on launch (the client reads ?disableWidgets=).
@@ -1120,13 +1142,16 @@ async function executeTool(name, args) {
             const browserUrl = `${CLIENT_URL}/${disable}`;
 
             return JSON.stringify({
-                roomId: started.id || room.id,
+                roomId: targetRoomId,
                 gameServerPort: started.gameServerPort,
                 gameId: args.gameId || 'zk',
                 mapId: args.mapId,
-                state: started.state,
+                state: finalState,
+                ready,
+                hint: ready
+                    ? 'Game server is accepting connections (room Active). Open browserUrl to view — it disables the ZK commander-selector overlay (pass testStartupSelector=true to keep it).'
+                    : 'WARNING: game server did not report ready within 120s (still warming or failed to boot). Check list_processes / get_logs before connecting a browser.',
                 browserUrl,
-                hint: 'Use list_processes to confirm spring-server pid; the game will be reachable on gameServerPort once warm. Open browserUrl to view — it disables the ZK commander-selector overlay (pass testStartupSelector=true to keep it).',
             }, null, 2);
         }
 
