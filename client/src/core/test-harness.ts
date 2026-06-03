@@ -249,6 +249,13 @@ export class TestHarness {
         void this.deps.workerCall('setNetSim', [{ delayMs: 0, jitterMs: 0, lossProb: 0 }]);
     }
 
+    /** Per-envelope inbound/outbound bandwidth tally from the worker's
+     *  net-inspector (the connection lives there — GW8). Cumulative since the
+     *  game started; the data source for PLAN-performance PC-2's budget table. */
+    async netStats(): Promise<unknown> {
+        return this.deps.workerCall('netStats');
+    }
+
     /** Named WAN presets. `lan` ≈ localhost; `wan` ≈ regional; `intercont`
      *  ≈ the L0 exit-gate condition (200 ms ± 40 ms jitter, 2 % loss). */
     netSimPreset(name: 'lan' | 'wan' | 'intercont'): void {

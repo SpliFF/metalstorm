@@ -58,6 +58,7 @@ import { CegRuntime } from './ceg-runtime.js';
 import { setParticleBudget } from './ceg-translator.js';
 import { clientSettings } from './client-settings.js';
 import { CONFIG } from '../config.js';
+import { resetNetStats, snapshotNetStats } from './net-inspector.js';
 import { BuildBeamRenderer } from './build-beam-renderer.js';
 import { CombatFX } from './combat-fx.js';
 import { FxLightPool } from './fx-light-pool.js';
@@ -5257,6 +5258,11 @@ function gpDispatchKeyRelease(keysym: number, mods: number): void {
 /// GW4-c2). The full callback object (porting main.ts@32cf513619 L1070–1326)
 /// fills in as the renderers + LuaUI runtime come online in c3–c6.
 function gpConnect(msg: GpInitToWorker): void {
+    // GW8: reset the per-envelope bandwidth tally for the new game session. The
+    // tally lives in THIS (worker) bundle's net-inspector instance, fed by the
+    // worker connection's routeIncoming/sendOnControl; surfaced to main via the
+    // gp:test 'netStats' pull (PLAN-performance PC-2).
+    resetNetStats();
     const conn = new Connection({
         onStateChange: (state) => postLog(1, `[gp] connection state: ${state}`),
         onAuthenticated: (playerId, _token, team, defsCacheKey) => {
@@ -6049,6 +6055,9 @@ async function gpTestDispatch(method: string, args: unknown[]): Promise<unknown>
         // — entity position (interpolated, client-side) —
         case 'getEntityPosition':
             return gpEntityRenderer?.getEntityPosition(num(0)) ?? null;
+        // — per-envelope bandwidth tally (GW8 / PLAN-performance PC-2) —
+        case 'netStats':
+            return snapshotNetStats();
         // — camera (animations return once started; main awaits the duration) —
         case 'focusOn':
             cam?.focusOn(num(0), num(1), num(2));

@@ -24,7 +24,7 @@ import { ClientMessage } from '../protocol/spring-web/client-message.js';
 import { ClientPayload } from '../protocol/spring-web/client-payload.js';
 import { ConsoleCommand } from '../protocol/spring-web/console-command.js';
 import { ConsoleResponse } from '../protocol/spring-web/console-response.js';
-import { setNetInspectorEnabled } from './net-inspector.js';
+import { setNetInspectorEnabled, setNetLogSink } from './net-inspector.js';
 import type { Scene } from '@babylonjs/core';
 
 /** Transport-agnostic link to the game server's control channel. */
@@ -995,3 +995,9 @@ body { background: #0f0f14; display: flex; flex-direction: column; }
 
 /** Singleton instance */
 export const debugConsole = new DebugConsole();
+
+// GW8: register the net-inspector log sink (main-thread only). net-inspector is
+// worker-safe and no longer imports debug-console; the gated per-frame net log
+// routes back here via this sink. The worker never imports debug-console, so it
+// leaves the sink null and the bandwidth tally runs without any DOM dependency.
+setNetLogSink((e) => debugConsole.addEntry(e));

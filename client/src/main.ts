@@ -45,7 +45,9 @@ import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
 import { loadMapLighting, type MapLighting } from './core/map-lighting.js';
 import { applyMapLighting, createSceneLighting, type SceneLighting } from './core/scene-lighting.js';
 import { PerfOverlay } from './core/perf-overlay.js';
-import { resetNetStats } from './core/net-inspector.js';
+// GW8: the per-envelope net tally now lives in the worker's net-inspector
+// instance (fed by the in-worker connection); read it via window.test.netStats().
+// The main-thread perf-overlay (F11) re-plumb is deferred to perf checkpoint PC-1.
 import { FxLightPool } from './core/fx-light-pool.js';
 import { DistortionRenderer } from './core/distortion-renderer.js';
 import { MuzzleFlareRenderer } from './core/muzzle-flare-renderer.js';

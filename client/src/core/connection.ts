@@ -85,6 +85,7 @@ import { parseMapData, type ParsedMapData } from './map-data.js';
 import { parseLosBitmap, type LosBitmap } from './los-bitmap.js';
 import { parseDecals, type DecalSnapshot } from './decal-events.js';
 import { parseHeightmapPatch, type HeightmapPatch } from './heightmap-events.js';
+import { recordInbound, recordOutbound } from './net-inspector.js';
 
 const ENVELOPE_FLATBUFFERS = 0x01;
 const ENVELOPE_ENTITY_STATE_FULL = 0x02;
@@ -1024,6 +1025,9 @@ export class Connection {
      *  QUIC stream/tier it arrived on. */
     private routeIncoming(data: Uint8Array): void {
         if (data.length < 1) return;
+        // GW8: per-envelope bandwidth tally (PLAN-performance PC-2). The single
+        // inbound dispatch — captures every stream/tier byte before netsim.
+        recordInbound(data);
         const env = data[0];
         if (env === ENVELOPE_ENTITY_STATE_FULL || env === ENVELOPE_ENTITY_STATE_DELTA) {
             this.receiveStateFrame(data);
@@ -1254,6 +1258,7 @@ export class Connection {
 
     /** Send data on the control (reliable, ordered) tier. */
     private sendOnControl(data: Uint8Array): void {
+        recordOutbound(data);  // GW8: outbound bandwidth tally (control tier)
         this.transport?.send(data, 'control');
     }
 
