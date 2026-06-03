@@ -1037,17 +1037,15 @@ export class ProjectileRenderer {
             }
         }
 
-        // Impact explosion light (Phase L). Radius from the weapon's
-        // area-of-effect; warm blast colour biased toward the bolt hue.
-        // Emitted even when no live entry remains (free-floating death /
-        // self-destruct explosions carry their def on the event).
-        if (this.lightPool) {
+        // No impact point-light — faithful to ZK (it authors no explosion
+        // deferred light; the glow is the authored CEG/groundflash + bloom).
+        // See fx-light-pool.ts. The distortion shockwave is a separate
+        // authored effect (LUPS SphereDistortion analogue); radius from AoE.
+        {
             const ldef = ev.weaponDefId
                 ? this.weaponDefs.get(ev.weaponDefId)
                 : (p ? this.weaponDefs.get(p.weaponDefId) : undefined);
             const radius = Math.max(40, ldef?.aoe ?? 0);
-            this.lightPool.emitExplosion(ev.pos.x, ev.pos.y, ev.pos.z,
-                explosionLightColor(ldef), radius);
             this.distortion?.emitShockwave(ev.pos.x, ev.pos.y, ev.pos.z, radius);
         }
 
@@ -1919,15 +1917,6 @@ function resolveColor(def: WeaponDefInfo): [number, number, number] {
     const hasColor = def.colorR > 0 || def.colorG > 0 || def.colorB > 0;
     if (hasColor) return [def.colorR, def.colorG, def.colorB];
     return DEFAULT_COLORS[def.projectileType] ?? DEFAULT_COLORS[ProjectileType.Explosive];
-}
-
-/// Dynamic-light colour for an impact/explosion. Uses the weapon's
-/// authored projectile colour when present, else a warm blast orange.
-function explosionLightColor(def: WeaponDefInfo | undefined): [number, number, number] {
-    if (def && (def.colorR > 0 || def.colorG > 0 || def.colorB > 0)) {
-        return [def.colorR, def.colorG, def.colorB];
-    }
-    return [1.0, 0.7, 0.35];
 }
 
 /// True for projectile types that visibly glow in flight and so should
