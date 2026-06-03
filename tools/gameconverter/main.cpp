@@ -1834,17 +1834,37 @@ void MigrateAIs(const fs::path& gameDir) {
 // Source tree copy
 // ---------------------------------------------------------------
 
+/// Directory names never needed for gameplay — skipped (and not
+/// descended into) by CopySourceTree. Kept deliberately minimal:
+/// `content/` is the unconverted source drop, so anything genuinely
+/// referenced by the sim/client/Lua must survive into `data/`. Only
+/// version-control plumbing is excluded for now; broader pruning of
+/// converted *asset* sources (png→ktx2, s3o→gltf, …) is handled per
+/// conversion step, not here.
+bool IsExcludedCopyDir(const std::string& name) {
+    return name == ".git";
+}
+
 /// Recursively copy `src` into `dst`, skipping files that already exist
-/// and are newer than the source (so converted outputs aren't clobbered).
+/// and are newer than the source (so converted outputs aren't clobbered)
+/// and skipping excluded directories (e.g. `.git`) entirely — we never
+/// descend into them, so a large repo's history doesn't get mirrored
+/// into `data/`.
 void CopySourceTree(const fs::path& src, const fs::path& dst) {
     std::error_code ec;
     fs::create_directories(dst, ec);
 
-    for (const auto& entry : fs::recursive_directory_iterator(src)) {
+    for (auto it = fs::recursive_directory_iterator(src);
+         it != fs::recursive_directory_iterator(); ++it) {
+        const auto& entry = *it;
         const auto rel = fs::relative(entry.path(), src, ec);
         const auto target = dst / rel;
 
         if (entry.is_directory()) {
+            if (IsExcludedCopyDir(entry.path().filename().string())) {
+                it.disable_recursion_pending();  // don't descend
+                continue;
+            }
             fs::create_directories(target, ec);
             continue;
         }

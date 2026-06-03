@@ -1242,19 +1242,61 @@ async function init(
     // (_SpringWebCollectDeferredLights, run once per frame from runFrame)
     // gathers the lights ZK's gfx_projectile_lights.lua / gfx_unit_lights.lua
     // produce, flattens them into two fixed-stride comma strings, and calls
-    // this hook. We post them to the main thread, which feeds the forward
-    // FxLightPool (the sanctioned GL4-deferred -> WebGL2-forward substitution,
-    // now driven by the game's authored light_* data). String marshalling is
-    // used deliberately: Lua tables cross to JS callbacks as lazy LuaTable
-    // objects, fragile for a per-frame variable-length list; a flat numeric
-    // string converts cleanly. Point stride 7: px,py,pz, r,g,b (colMult
-    // pre-applied), radius. Beam stride 10: + dx,dy,dz (start->end delta).
-    // Empty strings are skipped by the guard so a quiet frame costs nothing.
+    // this hook. We feed them straight into the in-worker forward FxLightPool
+    // (the sanctioned GL4-deferred -> WebGL2-forward substitution, now driven
+    // by the game's authored light_* data).
+    //
+    // Stage-0 regression fix (2026-06-04): the render core + FxLightPool moved
+    // into this worker in GW4, but this hook still posted the lights OUT to a
+    // main-thread `onDeferredLights` sink that GW4 left unassigned — so ZK's
+    // authored projectile lights never reached the worker pool, and the pool
+    // ran entirely on the invented muzzle/follow stand-ins. Feed the worker
+    // pool directly here (no dead round-trip) and flip the renderer's
+    // authored-lights guard on the first authored frame so its invented
+    // emitters suppress. Logic ported 1:1 from the old main.ts sink
+    // (commit a3546c61b2).
+    //
+    // String marshalling is used deliberately: Lua tables cross to JS
+    // callbacks as lazy LuaTable objects, fragile for a per-frame
+    // variable-length list; a flat numeric string converts cleanly. Point
+    // stride 7: px,py,pz, r,g,b (colMult pre-applied), radius. Beam stride 10:
+    // + dx,dy,dz (start->end delta). Empty strings cost nothing.
     runtime.setGlobal('_SpringWebEmitDeferredLights',
         (pointStr: LuaValue, beamStr: LuaValue) => {
-            const p = String(pointStr ?? '');
-            const b = String(beamStr ?? '');
-            postToMain({ type: 'deferredLights', point: p, beam: b });
+            const pool = gpFxLightPool;
+            if (!pool) return;
+            const point = parseDeferredLights(String(pointStr ?? ''), 7);
+            const beam = parseDeferredLights(String(beamStr ?? ''), 10);
+            if (!gpAuthoredLightsActive && (point.length > 0 || beam.length > 0)) {
+                gpAuthoredLightsActive = true;
+                gpProjectileRenderer?.setAuthoredLightsActive(true);
+            }
+            // Short TTL: the collectors re-post every frame, so each light only
+            // needs to live until the next frame's refresh.
+            const TTL = 0.05;
+            for (const r of point) {
+                // [px,py,pz, r,g,b, radius]
+                const peak = Math.max(r[3], r[4], r[5], 0.0001);
+                const inv = 1 / peak;
+                pool.emit(r[0], r[1], r[2],
+                    [r[3] * inv, r[4] * inv, r[5] * inv],
+                    peak, Math.max(40, r[6]), TTL);
+            }
+            for (const r of beam) {
+                // [px,py,pz, r,g,b, radius, dx,dy,dz]
+                const peak = Math.max(r[3], r[4], r[5], 0.0001);
+                const inv = 1 / peak;
+                const col: [number, number, number] =
+                    [r[3] * inv, r[4] * inv, r[5] * inv];
+                const range = Math.max(40, r[6]);
+                // Approximate ZK's GL4 segment light with 3 forward point
+                // lights along the beam (start, mid, end).
+                for (let t = 0; t <= 2; t++) {
+                    const f = t / 2;
+                    pool.emit(r[0] + r[7] * f, r[1] + r[8] * f, r[2] + r[9] * f,
+                        col, peak, range, TTL);
+                }
+            }
         });
     postLog(2, '[LuaUI] init step 4/8 done: engine globals installed');
 
@@ -4785,6 +4827,27 @@ let gpFxLightPool: FxLightPool | null = null;
 let gpDistortion: DistortionRenderer | null = null;
 let gpMuzzleFlare: MuzzleFlareRenderer | null = null;
 let gpProjectileRenderer: ProjectileRenderer | null = null;
+/// PLAN.md Stage B1: latches true on the first frame ZK's authored deferred
+/// lights produce anything, so the projectile renderer's invented muzzle/follow
+/// stand-ins suppress (see _SpringWebEmitDeferredLights).
+let gpAuthoredLightsActive = false;
+
+/// Parse one of the flattened deferred-light strings emitted by the Lua
+/// collector. Records are ';'-separated, fields ','-separated; a record is
+/// kept only if it has at least `stride` finite numbers. Point stride 7
+/// (px,py,pz,r,g,b,radius); beam stride 10 (+dx,dy,dz).
+function parseDeferredLights(str: string, stride: number): number[][] {
+    if (!str) return [];
+    const out: number[][] = [];
+    for (const rec of str.split(';')) {
+        if (!rec) continue;
+        const nums = rec.split(',').map(Number);
+        if (nums.length >= stride && nums.every((n) => Number.isFinite(n))) {
+            out.push(nums);
+        }
+    }
+    return out;
+}
 let gpCegRuntime: CegRuntime | null = null;
 let gpBuildBeamRenderer: BuildBeamRenderer | null = null;
 let gpCombatFX: CombatFX | null = null;

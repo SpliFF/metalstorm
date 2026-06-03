@@ -152,9 +152,13 @@ cmd_start_bg() {
 
     if [[ -z "$(pids_for "$PAT_LOBBY")" ]]; then
         echo "  lobby: starting"
+        # The lobby + game server read ONLY from data/ (converted output).
+        # content/ is the unconverted source drop, relevant only to the
+        # offline conversion tools (gameconverter / mapconverter). The
+        # lobby defaults to --games-dir data/games and resolves maps under
+        # data/maps, so no content/ paths are passed here.
         nohup ./build/debug/spring-lobby --no-cache --port 8011 \
-            --game content/games/papertanks --maps content/maps \
-            --games-dir content/games --db data/spring-server.db \
+            --db data/spring-server.db \
             >data/logs/lobby.out 2>&1 &
     else
         echo "  lobby: already running"

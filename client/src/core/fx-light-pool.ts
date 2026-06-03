@@ -103,15 +103,20 @@ export class FxLightPool {
         }
     }
 
-    /**
-     * Muzzle flash — short, bright, small radius. Colour should match the
-     * weapon's bolt/tracer colour so the flash reads as the same source.
-     */
-    emitMuzzle(x: number, y: number, z: number, color: readonly [number, number, number], scale = 1): void {
-        // Peak tuned live: 6 was barely visible against bright daylit
-        // terrain, ~10 reads as a clear flash without washing out.
-        this.emit(x, y, z, color, 10 * scale, 110 * scale, 0.12);
-    }
+    // NOTE — no muzzle-flash light by design (faithful to ZK, 2026-06-04).
+    // ZK adds deferred MUZZLE lights only via gfx_deferred_rendering_gl4.lua's
+    // `widget:Barrelfire`, keyed by `muzzleFlashLights[weaponID]` — but that
+    // table is built from `LuaUI/Configs/UnitLights/*.lua` `.muzzle` entries,
+    // and ZK's only UnitLights file (economy.lua) authors ZERO muzzle (and zero
+    // event) entries. So `muzzleFlashLights` is ALWAYS EMPTY in ZK content,
+    // exactly like `explosionLights` below — a ZK muzzle's glow is its authored
+    // muzzle CEG (effectForFire) + the muzzle-flare quad + bloom, NOT a
+    // terrain-flooding point light. The previous hardcoded `emitMuzzle`
+    // (peak 10, range 110, fired on every weapon's Fired event) was an
+    // invention with no authored basis (master-plan drift #1). Removed. ZK's
+    // authored in-flight projectile lights (gfx_projectile_lights.lua) DO feed
+    // this pool — via the deferred-light registry, not from here. See PLAN.md
+    // Stage B + _SpringWebEmitDeferredLights in lua-widget-worker.ts.
 
     // NOTE — no explosion light by design (faithful to ZK, 2026-06-04).
     // ZK adds deferred explosion point-lights only via
