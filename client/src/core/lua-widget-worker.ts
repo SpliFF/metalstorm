@@ -57,6 +57,7 @@ import { ProjectileTextureResolver } from './projectile-texture-resolver.js';
 import { CegRuntime } from './ceg-runtime.js';
 import { setParticleBudget } from './ceg-translator.js';
 import { clientSettings } from './client-settings.js';
+import { CONFIG } from '../config.js';
 import { BuildBeamRenderer } from './build-beam-renderer.js';
 import { CombatFX } from './combat-fx.js';
 import { FxLightPool } from './fx-light-pool.js';
@@ -5423,6 +5424,16 @@ function gpInit(msg: GpInitToWorker): void {
     }
     const canvas = msg.canvas;
     gpDpr = msg.dpr > 0 ? msg.dpr : 1;
+
+    // GW6: adopt the main thread's resolved build stamp. CONFIG is a module-level
+    // singleton; the render/def modules in this worker call stampUrl() (which
+    // reads CONFIG.buildStamp) for every .glb/.ktx2/.lua asset fetch. Main runs
+    // fetchBuildStamp() at startup, but the worker never did — so without this
+    // its CONFIG.buildStamp stayed 'dev' and stampUrl() was a no-op, dropping the
+    // ?v=<stamp> cache-bust the main thread applies. Seed it from gp:init so the
+    // worker's asset URLs match main's (no stale-cache skew on a new deploy, and
+    // a shared same-origin HTTP cache hit instead of two distinct URLs).
+    if (msg.buildStamp) CONFIG.buildStamp = msg.buildStamp;
 
     // GW4-c5c-3: seed the worker's clientSettings cache with the main thread's
     // gfx.* snapshot BEFORE createSceneLighting / the FX gating below read it.
