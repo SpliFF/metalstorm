@@ -86,6 +86,29 @@ let engine: Engine | null = null;
 /// on `engine` above (which stays declared but unused on main until the render
 /// modules + their disposal move into the worker across c2–c6).
 let gameWorker: Worker | null = null;
+/// GW8 tooling bridge. The test harness (window.test) + widget eval
+/// (window.widgets.eval) live on main but their state lives in the worker;
+/// `workerCall()` issues a `gp:test`/`evalLua` request and resolves the
+/// matching reply by id. `lastSceneState` caches the worker's ~10 Hz feed so
+/// the harness's read-only getters (selection, cameraPose) stay synchronous.
+let gpReqId = 0;
+const gpPending = new Map<number, { resolve: (v: unknown) => void; reject: (e: unknown) => void }>();
+let evalReqResolve: ((v: string) => void) | null = null;
+let lastSceneState: {
+    selectedUnitIds: number[];
+    camera: { x: number; y: number; z: number; tx: number; ty: number; tz: number };
+} | null = null;
+/// Issue a client-bound request to the game-processor worker (GW8). Resolves
+/// with the worker's reply value or rejects with its error string.
+function workerCall(method: string, args: unknown[] = []): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+        const w = gameWorker;
+        if (!w) { reject(new Error('[test] game worker not running')); return; }
+        const id = ++gpReqId;
+        gpPending.set(id, { resolve, reject });
+        w.postMessage({ type: 'gp:test', id, method, args });
+    });
+}
 let perfOverlay: PerfOverlay | null = null;
 let entityRenderer: EntityRenderer | null = null;
 /// Presentation clock — the L0 timing spine (PLAN-latency.md). Converts the
@@ -169,11 +192,10 @@ let waypointMarkerRenderer: WaypointMarkerRenderer | null = null;
 let standingOrderRenderer: StandingOrderRenderer | null = null;
 let debugTerrainGrid: DebugTerrainGrid | null = null;
 /// TestHarness on `window.test` — exposed in startGame(), torn down on
-/// quitToLobby(). The render loop checks `testRenderPaused` so a paused
-/// session continues to receive entity-state updates (the connection is
-/// independent of the render loop) while skipping `scene.render()`.
+/// quitToLobby(). GW8: server-bound verbs run on main over HTTP; client-bound
+/// (camera/selection/netSim/pause/screenshot) forward to the worker, where the
+/// render loop now lives (the client render-pause is `gpRenderPaused` there).
 let testHarness: TestHarness | null = null;
-let testRenderPaused = false;
 /// Current sim-speed multiplier for VISUAL FX aging (0 when paused). The
 /// render loop scales its wall-clock dt by this before ticking the FX
 /// systems (CEG particles, dynamic lights, muzzle flares, distortion,
@@ -296,8 +318,13 @@ function quitToLobby(): void {
     engine = null;
     uninstallCameraWindowApi();
     delete (window as any).test;
+    delete (window as any).widgets;
     testHarness = null;
-    testRenderPaused = false;
+    // GW8: drop any in-flight worker-bridge requests + cached feed.
+    for (const p of gpPending.values()) p.reject(new Error('[test] game ended'));
+    gpPending.clear();
+    evalReqResolve = null;
+    lastSceneState = null;
     entityRenderer = null;
     buildingPlateRenderer = null;
     projectileRenderer = null;
@@ -461,6 +488,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             // main-thread world-fact consumer reconnected here; ZK economy /
             // build-menu / order-panel are chili widgets in the worker, c6).
             case 'gp:sceneState':
+                // GW8: cache for the test harness's synchronous getters
+                // (window.test.selection / .cameraPose()).
+                lastSceneState = { selectedUnitIds: m.selectedUnitIds, camera: m.camera };
                 updateHUD(m.entityCount, m.gameFrame, m.selectedUnitIds);
                 updateSpeedHUD(m.simSpeed, m.paused);
                 // GW4-c5c-3: keep the minimap selection rings in sync with the
@@ -502,6 +532,21 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 break;
             case 'gp:gameOver':
                 showGameOver(gameTemplates, m.frame, { onReturnToLobby: quitToLobby });
+                break;
+            // GW8: reply to a window.test client-bound request.
+            case 'gp:testResult': {
+                const p = gpPending.get(m.id);
+                if (p) {
+                    gpPending.delete(m.id);
+                    if (m.ok) p.resolve(m.value);
+                    else p.reject(new Error(String(m.error ?? 'worker test error')));
+                }
+                break;
+            }
+            // GW8: reply to a window.widgets.eval() Lua eval (worker evalLua).
+            case 'evalResult':
+                evalReqResolve?.(String(m.result ?? 'nil'));
+                evalReqResolve = null;
                 break;
             case 'gp:reload':
                 console.log('[gameWorker] server restarting — reloading page');
@@ -622,6 +667,43 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             dpr: window.devicePixelRatio || 1,
         });
     });
+
+    // GW8: re-plumb the dev/test tooling for the worker split.
+    //   window.test     — server-bound verbs run on main over HTTP; camera /
+    //                      selection / netSim / pause / screenshot forward to
+    //                      the worker via workerCall(); selection + cameraPose
+    //                      read the cached gp:sceneState feed synchronously.
+    //   window.widgets  — Lua eval bridge to the in-worker LuaUI runtime
+    //                      (the spring-debug `evaluate_widget_lua` path).
+    testHarness = new TestHarness({
+        gameHttpUrl,
+        token: localStorage.getItem('springrts-token') ?? '',
+        workerCall,
+        getSelection: () => lastSceneState?.selectedUnitIds ?? [],
+        getCameraPose: () => {
+            const c = lastSceneState?.camera;
+            if (!c) return null;
+            return { pos: { x: c.x, y: c.y, z: c.z }, lookAt: { x: c.tx, y: c.ty, z: c.tz } };
+        },
+    });
+    (window as any).test = testHarness;
+
+    (window as any).widgets = {
+        /** Evaluate a Lua snippet in the in-worker LuaUI runtime; resolves with
+         *  the result's string form (or 'timeout'). Serialised — one in flight. */
+        eval(code: string): Promise<string> {
+            return new Promise((resolve) => {
+                if (!gameWorker) { resolve('no worker'); return; }
+                if (evalReqResolve) { resolve('busy'); return; }
+                let done = false;
+                evalReqResolve = (v) => { done = true; resolve(v); };
+                gameWorker.postMessage({ type: 'evalLua', code });
+                window.setTimeout(() => {
+                    if (!done) { evalReqResolve = null; resolve('timeout'); }
+                }, 5000);
+            });
+        },
+    };
 }
 
 // --- Boot ---

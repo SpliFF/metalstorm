@@ -4720,6 +4720,11 @@ let gpShiftHeld = false;
 let gpGameFrame = 0;
 let gpPaused = false;
 let gpSimSpeed = 1;
+/// GW8 (test harness): client-side render-loop freeze, distinct from `gpPaused`
+/// (which mirrors the *server* sim-pause from onGameInfo). `window.test.pause()`
+/// sets this so a screenshot captures a deterministic frame while the sim may
+/// still tick server-side. preserveDrawingBuffer keeps the last frame visible.
+let gpRenderPaused = false;
 /// Wall-clock of the last sceneState post (throttled to ~10 Hz).
 let gpLastSceneStatePost = 0;
 /// GW4-c5c-3: minimap feed throttle (~6 Hz — unit dots only need to be roughly
@@ -5637,6 +5642,10 @@ function gpInit(msg: GpInitToWorker): void {
         const now = performance.now();
         const dt = (now - gpLastFrameTime) / 1000;
         gpLastFrameTime = now;
+        // GW8: window.test.pause() freezes the client render loop for a
+        // deterministic screenshot. Keep gpLastFrameTime fresh (above) so resume
+        // doesn't see a huge dt; the preserved drawing buffer holds the frame.
+        if (gpRenderPaused) return;
         // Sim-scaled delta for VISUAL FX aging — slows / freezes with the game
         // speed. Camera + entity ticks keep the raw wall dt; only FX lifetimes
         // use fxDt (PLAN-weapon-fx-capture-arch fxDt).
@@ -6006,6 +6015,112 @@ function gpShutdown(): void {
     gpCamera = null;
 }
 
+// ── GW8: window.test client-bound bridge ───────────────────────────────
+//
+// The server-bound half of the test harness (spawn/kill/order/damage/log/…)
+// runs entirely on the MAIN thread over HTTP — it needs only the game-server
+// URL + auth token. The CLIENT-bound half (camera, selection, render-pause,
+// screenshot) needs the renderer + camera + connection, which now live here in
+// the worker. main posts `gp:test {id, method, args}`; this resolves it against
+// the worker-resident objects and posts `gp:testResult {id, ok, value/error}`.
+// Camera *animations* return immediately after starting — main awaits the
+// duration itself, exactly as the old in-process harness did. Composite ops
+// that resolve a unit's interpolated position (focusUnit etc.) run worker-side
+// in one shot to avoid an extra round-trip.
+async function gpTestDispatch(method: string, args: unknown[]): Promise<unknown> {
+    const cam = gpViewCameras.get(0);
+    const num = (i: number, d = 0): number => (typeof args[i] === 'number' ? args[i] as number : d);
+    const obj = <T>(i: number, d: T): T => (args[i] == null ? d : args[i] as T);
+    switch (method) {
+        // — network sim (PLAN-latency L0 validation) —
+        case 'setNetSim':
+            gpConnection?.setNetSim(obj(0, {} as Parameters<Connection['setNetSim']>[0]));
+            return null;
+        // — render-loop freeze for deterministic screenshots —
+        case 'pause':    gpRenderPaused = true;  return null;
+        case 'resume':   gpRenderPaused = false; return null;
+        case 'isPaused': return gpRenderPaused;
+        // — selection —
+        case 'select':
+            gpSelection?.setSelectionExternal(obj<number[]>(0, []));
+            return null;
+        case 'selection':
+            return gpSelection ? [...gpSelection.selection] : [];
+        // — entity position (interpolated, client-side) —
+        case 'getEntityPosition':
+            return gpEntityRenderer?.getEntityPosition(num(0)) ?? null;
+        // — camera (animations return once started; main awaits the duration) —
+        case 'focusOn':
+            cam?.focusOn(num(0), num(1), num(2));
+            return null;
+        case 'lookAtPosition':
+            cam?.lookAtPosition(num(0), num(1), num(2), num(3));
+            return null;
+        case 'setCameraHeight':
+            gpSetCameraHeight(cam, num(0));
+            return null;
+        case 'cameraPose':    return cam?.getPose() ?? null;
+        case 'setCameraPose': cam?.setPose(obj(0, { pos: { x: 0, y: 0, z: 0 }, lookAt: { x: 0, y: 0, z: 0 } }), num(1)); return null;
+        case 'cameraOrbit':   cam?.orbit(obj(0, {})); return null;
+        case 'cameraSnapToGround': cam?.snapToGround(num(0), num(1), obj(2, {})); return null;
+        case 'cameraFitMap':  cam?.fitMap(obj(0, {})); return null;
+        case 'cameraSaveSlot': cam?.saveSlot(num(0)); return null;
+        case 'cameraLoadSlot': return cam?.loadSlot(num(0), num(1)) ?? false;
+        case 'setTrackingCamera':
+            // DEFERRED (GW8): the tracking-camera state machine lived on the
+            // main-thread InputManager; not yet ported to the worker camera.
+            postLog(2, '[gp:test] setTrackingCamera not yet wired in the worker — ignoring');
+            return null;
+        // — composite: resolve unit position(s) worker-side, then frame —
+        case 'focusUnit': {
+            const p = gpEntityRenderer?.getEntityPosition(num(0));
+            if (!p || !cam) return false;
+            gpSetCameraHeight(cam, num(2, 800));
+            cam.lookAtPosition(p.x, p.y, p.z, num(1, 600));
+            return true;
+        }
+        case 'cameraSnapToUnit': {
+            const p = gpEntityRenderer?.getEntityPosition(num(0));
+            if (!p || !cam) return false;
+            cam.snapToGround(p.x, p.z, obj(1, {}));
+            return true;
+        }
+        case 'cameraFitUnits': {
+            if (!cam) return false;
+            const pts: { x: number; y: number; z: number }[] = [];
+            for (const id of obj<number[]>(0, [])) {
+                const p = gpEntityRenderer?.getEntityPosition(id);
+                if (p) pts.push(p);
+            }
+            if (!pts.length) return false;
+            cam.fitPoints(pts, obj(1, {}));
+            return true;
+        }
+        // — screenshot: OffscreenCanvas → PNG data URL (no FileReader in workers) —
+        case 'screenshot': {
+            const canvas = gpEngine?.getRenderingCanvas() as OffscreenCanvas | null;
+            if (!canvas) throw new Error('no rendering canvas');
+            const blob = await canvas.convertToBlob({ type: 'image/png' });
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            let binary = '';
+            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+            return `data:image/png;base64,${btoa(binary)}`;
+        }
+        default:
+            throw new Error(`unknown test method '${method}'`);
+    }
+}
+
+/// Force the worker camera to a fixed height above its look-at target (ports the
+/// old TestHarness.setCameraHeight; RTSCamera has no direct height setter).
+function gpSetCameraHeight(cam: RTSCamera | undefined, height: number): void {
+    if (!cam) return;
+    const dy = height - (cam.position.y - cam.target.y);
+    const view = cam.saveView();
+    view.pos.y += dy;
+    cam.restoreView(view, 0);
+}
+
 // ── Message handler ────────────────────────────────────────────────────
 
 self.onmessage = async (e: MessageEvent) => {
@@ -6135,6 +6250,19 @@ self.onmessage = async (e: MessageEvent) => {
         case 'gp:shutdown':
             gpShutdown();
             break;
+
+        // GW8: window.test client-bound request → resolve against the
+        // worker-resident camera/selection/renderer/connection, reply by id.
+        case 'gp:test': {
+            const id = msg.id as number;
+            try {
+                const value = await gpTestDispatch(String(msg.method), (msg.args ?? []) as unknown[]);
+                postToMain({ type: 'gp:testResult', id, ok: true, value });
+            } catch (err) {
+                postToMain({ type: 'gp:testResult', id, ok: false, error: String(err) });
+            }
+            break;
+        }
 
         case 'keypress':
             // Route through widgetHandler so its KeyPressList and the
