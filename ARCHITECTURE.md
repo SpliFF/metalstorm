@@ -430,7 +430,10 @@ content/
   engine/ai/                Engine-level AI plugins
 
 data/
-  spring-server.db          SQLite (accounts, sessions, maps table)
+  spring-server.db          SQLite: accounts, sessions, maps; rooms/room_members/
+                            room_ai_slots (lobby-written); game_servers (lobby-written
+                            pid/port); game_status (spring-server-written ready/clients
+                            heartbeat — the lobby↔game readiness rendezvous)
   maps/<mapId>/             Preprocessed: heightmap.bin, minimap.dxt1, tiles.dxt1, features/*.glb
   games/<gameId>/models/    Preprocessed: <unit>.glb, <unit>.config.json, <texture>.png
   games/<gameId>/sounds/    Preprocessed: *.webm (Opus, audioconverter output)
@@ -477,22 +480,28 @@ data/
 
 ### Auth + Game Start
 ```
-Client → lobby WS: AuthRequest (login)
-Client ← lobby WS: AuthResponse + RoomListUpdate
-Client → lobby WS: RoomCreate / RoomJoin
-Client → lobby WS: RoomReady / RoomStartGame
-  Lobby spawns spring-server subprocess
-  Sim boots, loads defs + map + gadgets (GameStart NOT yet fired)
-  Server waits for all --player roster entries to authenticate
-Client ← lobby WS: RoomStateUpdate (state=Loading, game_server_port=N)
-Client → game WS:  AuthRequest (token reconnect)
-Client ← game WS:  AuthResponse + MapData
-  (repeat for each player in roster)
+Client → lobby HTTP: POST /api/auth/login → token
+Client → lobby HTTP: POST /api/rooms (create) / /api/rooms/join
+Client → lobby HTTP: POST /api/rooms/ready / /api/rooms/start
+  Lobby forks+execs spring-server (--player roster, --ai, --map, --db)
+  → room state = Loading, game_server_port = N
+  Sim boots: loads defs + map + gadgets, binds QUIC, waits for roster auth
+  spring-server publishes game_status.ready=1 (shared SQLite) once accepting
+  Lobby health-check reads ready=1 → room state = Active
+    (the only honest Loading→Active driver — there is NO sim→lobby
+     socket/pipe; SQLite game_status is the rendezvous)
+Client (SSE room-state updates) sees state≥Loading + port>0 → connects:
+  Client → GET /api/wt/info (cert hash + WebTransport port)
+  Client → game WebTransport: AuthRequest (token); server checks roster
+  Client ← game: AuthResponse, then def stream (HTTP) + MapData
   All roster players connected → FireGameStart()
     → gadgets spawn starting units (start_unit_setup.lua)
-    → IPC pipe → GameStarted
-Client ← lobby WS: RoomStateUpdate (state=Active)
 ```
+**Game-server lifetime:** a non-persistent game server self-terminates after
+5 min with zero connected clients (120 s startup grace); persistent rooms run
+forever. The lobby reaps abandoned non-persistent rooms (no live game, idle
+>30 min) and, on startup, resets orphaned Loading/Active rooms (no adopted
+server) back to Filling. See PLAN-lobby-game-connection.md.
 
 ### Gameplay Loop
 ```
