@@ -130,10 +130,10 @@ let dynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
 let cegRuntime: CegRuntime | null = null;
 let combatFX: CombatFX | null = null;
 let fxLightPool: FxLightPool | null = null;
-// PLAN.md Stage B1: flips true once ZK's authored projectile lights start
-// arriving via the WG.DeferredLighting registry, so the projectile renderer
-// silences its invented muzzle/follow light stand-ins (drift #1).
-let authoredProjectileLightsActive = false;
+// PLAN.md Stage B1: ZK's authored projectile lights now feed the FxLightPool
+// inside the game-processor worker (GW4 moved the render core there), so the
+// authored-lights latch + the renderer's stand-in suppression live in
+// lua-widget-worker.ts now, not here.
 let distortionRenderer: DistortionRenderer | null = null;
 let muzzleFlareRenderer: MuzzleFlareRenderer | null = null;
 let decalOverlay: DecalOverlay | null = null;

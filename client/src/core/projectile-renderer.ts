@@ -879,19 +879,13 @@ export class ProjectileRenderer {
             }
         }
 
-        // Muzzle-flash dynamic light (Phase L) — brief, bolt-coloured, at
-        // the firing position so the ground/units near the muzzle catch
-        // the flash. Emitted for every weapon (beams included) since the
-        // hitscan branch returns early below.
-        // B1d: skip the invented muzzle light when ZK's authored projectile
-        // lights are driving the pool (the authored data covers muzzle glow).
-        if (this.lightPool && !this.authoredLights) {
-            const mdef = this.weaponDefs.get(ev.weaponDefId);
-            if (mdef) {
-                this.lightPool.emitMuzzle(ev.pos.x, ev.pos.y, ev.pos.z,
-                    resolveColor(mdef), 1);
-            }
-        }
+        // NOTE — no invented muzzle-flash dynamic light here (faithful to ZK,
+        // 2026-06-04). ZK authors no muzzle deferred light (`muzzleFlashLights`
+        // is always empty — see fx-light-pool.ts); the muzzle glow is the
+        // authored muzzle CEG (above) + the muzzle-flare quad (below) + bloom.
+        // The previous `lightPool.emitMuzzle` was an unfounded invention
+        // (master-plan drift #1) and is removed. ZK's in-flight projectile
+        // lights still feed the pool via the deferred-light registry.
 
         // Muzzle flare flash (Phase F item 2) — the visual companion to the
         // muzzle light, sized by the weapon's blast (Recoil's
