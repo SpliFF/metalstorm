@@ -5529,6 +5529,11 @@ function gpInit(msg: GpInitToWorker): void {
     // pass the sun so the team-color material can sample the live CSM.
     entityRenderer.setShadowGenerator(gpSceneLighting.csm, gpSceneLighting.sun);
     gpEntityRenderer = entityRenderer;
+    // GW8: expose the scene-debug hooks on the worker globalThis so the main
+    // devtools console can reach them via window.__gp('__entityRenderer…')
+    // (the render-core move stranded these here). Mirrors the __fxLightPool /
+    // __renderPipeline / __csm hooks the render modules already set.
+    (globalThis as Record<string, unknown>).__entityRenderer = entityRenderer;
 
     // GW4-c5b: interactive RTS camera for view 0 (DOM-free; driven by the
     // forwarded `gp:*` input). Ground sampler = the entity renderer's heightmap
@@ -5554,6 +5559,7 @@ function gpInit(msg: GpInitToWorker): void {
     // light pool + distortion + muzzle flare for its hooks.
     const projectileRenderer = new ProjectileRenderer(scene);
     gpProjectileRenderer = projectileRenderer;
+    (globalThis as Record<string, unknown>).__projectileRenderer = projectileRenderer;  // GW8 debug hook
     const buildBeamRenderer = new BuildBeamRenderer(scene);
     buildBeamRenderer.setEntityRenderer(entityRenderer);
     if (msg.gameId) buildBeamRenderer.setGameAssetsBaseUrl(msg.gameId);
@@ -6058,6 +6064,18 @@ async function gpTestDispatch(method: string, args: unknown[]): Promise<unknown>
         // — per-envelope bandwidth tally (GW8 / PLAN-performance PC-2) —
         case 'netStats':
             return snapshotNetStats();
+        // — generic JS eval against the worker global scope (GW8). Lets the
+        //   main devtools console reach the worker-resident debug hooks
+        //   (globalThis.__entityRenderer / __fxLightPool / __renderPipeline /
+        //   __csm / __distortion / __muzzleFlare …) that the render-core move
+        //   stranded in the worker. Dev-only; the result is made clone-safe. —
+        case 'evalJs': {
+            // Indirect eval runs in global scope, where the __* hooks live.
+            const v = (0, eval)(String(args[0] ?? ''));  // eslint-disable-line no-eval
+            const resolved = v && typeof (v as { then?: unknown }).then === 'function'
+                ? await (v as Promise<unknown>) : v;
+            return gpCloneSafe(resolved);
+        }
         // — camera (animations return once started; main awaits the duration) —
         case 'focusOn':
             cam?.focusOn(num(0), num(1), num(2));
@@ -6118,6 +6136,19 @@ async function gpTestDispatch(method: string, args: unknown[]): Promise<unknown>
         default:
             throw new Error(`unknown test method '${method}'`);
     }
+}
+
+/// Make a worker-side value safe to postMessage (structured-clone) back to main.
+/// Babylon objects, functions, and circular graphs can't be cloned — JSON
+/// round-trip strips them; on failure fall back to a string description so the
+/// devtools console at least sees the type. (GW8 evalJs.)
+function gpCloneSafe(v: unknown): unknown {
+    if (v === null || v === undefined) return v;
+    const t = typeof v;
+    if (t === 'number' || t === 'string' || t === 'boolean') return v;
+    if (t === 'function') return `[function ${(v as { name?: string }).name || 'anonymous'}]`;
+    try { return JSON.parse(JSON.stringify(v)); }
+    catch { return `[unserializable ${t}: ${String(v).slice(0, 120)}]`; }
 }
 
 /// Force the worker camera to a fixed height above its look-at target (ports the

@@ -321,6 +321,7 @@ function quitToLobby(): void {
     uninstallCameraWindowApi();
     delete (window as any).test;
     delete (window as any).widgets;
+    delete (window as any).__gp;
     testHarness = null;
     // GW8: drop any in-flight worker-bridge requests + cached feed.
     for (const p of gpPending.values()) p.reject(new Error('[test] game ended'));
@@ -689,6 +690,13 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         },
     });
     (window as any).test = testHarness;
+
+    // GW8: reach the worker-resident JS debug hooks (globalThis.__entityRenderer
+    // / __fxLightPool / __renderPipeline / __csm / …) from the main devtools
+    // console — e.g. `await window.__gp('__entityRenderer.getUnitCount()')`.
+    // The render-core move stranded these in the worker; this is the JS analogue
+    // of window.widgets.eval (Lua). Dev-only; results are made clone-safe.
+    (window as any).__gp = (expr: string): Promise<unknown> => workerCall('evalJs', [expr]);
 
     (window as any).widgets = {
         /** Evaluate a Lua snippet in the in-worker LuaUI runtime; resolves with
