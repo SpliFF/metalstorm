@@ -5588,7 +5588,8 @@ function gpInit(msg: GpInitToWorker): void {
     // spheres). audio is null here: visuals are self-contained; the
     // SoundEvent → AudioManager bridge stays on main (GW4-c5c).
     const combatFX = new CombatFX(scene, undefined, cegRuntime, defCache);
-    combatFX.setLightPool(gpFxLightPool);
+    // No light pool on CombatFX — ZK authors no explosion deferred light
+    // (fx-light-pool.ts); explosion glow is authored CEG/groundflash + bloom.
     combatFX.setDistortion(gpDistortion);
     gpCombatFX = combatFX;
 

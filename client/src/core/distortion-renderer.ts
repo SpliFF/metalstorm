@@ -12,8 +12,9 @@
  * Every FX subsystem that actually reaches the screen — CegRuntime,
  * FxLightPool, CombatFX — is main-thread. So Phase D's "preferred design"
  * on this architecture is a main-thread composite fed by main-thread
- * emitters, mirroring FxLightPool: emitters call `emitShockwave` from the
- * same explosion code paths that drive `FxLightPool.emitExplosion`.
+ * emitters: emitters call `emitShockwave` from the impact/explosion event
+ * paths in CombatFX / projectile-renderer (the same sites that used to
+ * drive the now-removed `FxLightPool.emitExplosion` flood light).
  *
  * Pipeline (all WebGL2-native):
  *   1. `offsetRT` — RGBA16F screen-sized target, cleared to 0 each frame.

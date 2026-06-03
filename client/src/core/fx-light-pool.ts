@@ -113,21 +113,21 @@ export class FxLightPool {
         this.emit(x, y, z, color, 10 * scale, 110 * scale, 0.12);
     }
 
-    /**
-     * Explosion — bigger, longer, scaled by the blast radius. `radius`
-     * is the explosion's area-of-effect in elmos.
-     */
-    emitExplosion(x: number, y: number, z: number, color: readonly [number, number, number], radius: number): void {
-        const r = Math.max(40, radius);
-        // Intensity grows sub-linearly with radius so a nuke doesn't wash
-        // the whole map to white; range tracks the blast more directly.
-        // Peak floor/coeff tuned live (peak 6 read as nearly invisible in
-        // daylight, ~16+ reads clearly): a small airburst lands ~17, a
-        // big kill ~25, capped so massed explosions still tonemap.
-        const peak = 12 + Math.min(20, r * 0.08);
-        const ttl = 0.25 + Math.min(0.45, r * 0.0015);
-        this.emit(x, y, z, color, peak, r * 2.2, ttl);
-    }
+    // NOTE — no explosion light by design (faithful to ZK, 2026-06-04).
+    // ZK adds deferred explosion point-lights only via
+    // gfx_deferred_rendering_gl4.lua's `widget:VisibleExplosion`, keyed by
+    // `explosionLights[weaponDefID]` — but that table is ALWAYS EMPTY in
+    // ZK's content (DeferredLightsGL4config seeds `explosionLights = {}`
+    // and the per-unit `UnitLights/*` loader only populates static/event/
+    // muzzle, never explosion). So a ZK explosion's glow comes from its
+    // authored CEG emissive particles + groundflash + bloom — NOT a
+    // terrain-flooding point light. The previous hardcoded `emitExplosion`
+    // (peak 12–32, range r*2.2, "tuned against bright daylit terrain") was
+    // an invention with no authored basis; on a normally-lit scene it
+    // flooded the whole battlefield yellow and blew firing units to white
+    // (master-plan drift #1). Removed. The authored per-weapon MUZZLE-flash
+    // path (Barrelfire/`muzzleFlashLights`) is the remaining faithful
+    // light-wiring follow-up; see PLAN.md Stage B.
 
     /**
      * Generic emission. Acquires a slot (evicting the lowest-priority one
