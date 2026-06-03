@@ -20,5 +20,5 @@
     "noFallthroughCasesInSwitch": true
   },
   "include": ["src"],
-  "exclude": ["src/protocol"]
+  "exclude": ["src/protocol", "src/**/*.test.ts"]
 }
