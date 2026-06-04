@@ -13,6 +13,7 @@
 #include "LuaOpenGL.h"
 #include "LuaBitOps.h"
 #include "LuaMathExtra.h"
+#include "LuaTableExtra.h"
 #include "LuaUtils.h"
 #include "LuaZip.h"
 #include "Game/GlobalUnsynced.h"
@@ -3701,6 +3702,14 @@ bool CLuaHandle::AddBasicCalls(lua_State* L)
 	lua_getglobal(L, "math");
 	LuaBitOps::PushEntries(L);
 	LuaMathExtra::PushEntries(L);
+	lua_pop(L, 1);
+
+	// extra table utilities (table.new etc.) — upstream registers these in
+	// every Lua handle (LuaHandle.cpp). Our port shipped LuaTableExtra but
+	// never installed it, so table.new was nil in synced gadgets (BAR's
+	// unit_reactive_armor.lua, unit_shield_behaviour.lua).
+	lua_getglobal(L, "table");
+	LuaTableExtra::PushEntries(L);
 	lua_pop(L, 1);
 
 	return true;

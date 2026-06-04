@@ -769,6 +769,11 @@ LUAMOD_API int luaopen_math (lua_State *L) {
   luaL_newlib(L, mathlib);
   lua_pushnumber(L, PI);
   lua_setfield(L, -2, "pi");
+  /* Recoil patches its math lib to also expose math.tau (= 2*pi); games use
+     it (BAR's unit_sunfacing.lua, unit_custom_weapons_behaviours.lua). Mirror
+     upstream's lmathlib (lua_setfield "tau") so the game's Lua runs unmodified. */
+  lua_pushnumber(L, PI * 2.0);
+  lua_setfield(L, -2, "tau");
   lua_pushnumber(L, (lua_Number)HUGE_VAL);
   lua_setfield(L, -2, "huge");
   lua_pushinteger(L, LUA_MAXINTEGER);

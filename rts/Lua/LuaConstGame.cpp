@@ -28,6 +28,10 @@ bool LuaConstGame::PushEntries(lua_State* L)
 		LuaPushNamedNumber(L, "maxPlayers", MAX_PLAYERS);
 		LuaPushNamedNumber(L, "gameSpeed" , GAME_SPEED );
 		LuaPushNamedNumber(L, "squareSize", SQUARE_SIZE);
+		// Build-grid footprint scale (Recoil LuaConstGame). BAR reads
+		// Game.footprintScale * Game.squareSize for build spacing
+		// (api_resource_spot_finder.lua, cmd_build_bugger_off.lua).
+		LuaPushNamedNumber(L, "footprintScale", SPRING_FOOTPRINT_SCALE);
 	}
 
 	if (CGameSetup::ScriptLoaded()) {
