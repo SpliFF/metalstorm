@@ -675,13 +675,31 @@ export class LuaGLBridge {
             };
         };
 
-        // gl.GetVBO([target]) — returns a buffer-object wrapper. We don't
-        // have a real VBO implementation yet (parallel to GetVAO would be
-        // significant work), so hand back a stub whose methods are all
-        // no-ops. Widgets that test "if vbo then ..." still see truthy;
-        // those that try to render via it silently no-op rather than
-        // raising on a method-call-on-nil.
+        // gl.GetVBO([target]) — returns a buffer-object wrapper. C3 (drift #9).
+        // FIDELITY-STANDIN: the methods are all no-ops. A full VBO + instanced
+        // draw implementation has NO reaching consumer on WebGL2 — every ZK
+        // GetVBO user is a GL4 widget (cus_gl4 / *_gl4 / the instancevbotable
+        // modules they pull in) that self-disables before any steady-state
+        // instanced draw: gfx_commander_skins bails on `not Platform.glHaveGL4`,
+        // and gui_attackrange_gl4 / gfx_paralyze_effect RemoveWidget when their
+        // #version 420 shaders fail to compile (post-merge finding 2). Building
+        // the buffer path now would be a mechanism with no driver; it is gated
+        // on the Stage-5 GL4 substitution decisions. Until then we keep the
+        // truthy stub (so `if vbo then` guards pass) but make the no-op LOUD —
+        // a one-time warn per the no-silent-GL-failures principle — so if a
+        // non-GL4 consumer ever appears it surfaces instead of silently
+        // dropping uploads.
+        let warnedGetVBO = false;
         gl['GetVBO'] = (_target?: LuaValue) => {
+            if (!warnedGetVBO) {
+                warnedGetVBO = true;
+                console.warn(
+                    '[gl.GetVBO] FIDELITY-STANDIN: returning a no-op buffer stub. ' +
+                    'VBO-based instancing is unimplemented (Stage C3 / gated on the ' +
+                    'GL4 substitution decisions). All current ZK callers are GL4 ' +
+                    'widgets that self-disable; uploads/draws via this VBO are dropped.',
+                );
+            }
             const stub: Record<string, LuaValue> = {};
             const noop = (..._a: LuaValue[]): LuaValue => null;
             for (const name of ['Define', 'Upload', 'Update', 'Read',
