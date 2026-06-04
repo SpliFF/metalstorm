@@ -6680,6 +6680,26 @@ self.onmessage = async (e: MessageEvent) => {
                 | { kind: 'string'; value: string }
             > | undefined;
             if (!args || args.length === 0) break;
+            // SendLuaRulesMsg forward (server LuaUnsyncedCtrl::SendLuaRulesMsg)
+            // — arg[0] is the "$RecvLuaMsg" sentinel topic, arg[1] the message
+            // string, arg[2] the playerID. Faithful routing: dispatch to every
+            // loaded unsynced gadget half's gadget:RecvLuaMsg(msg, playerID)
+            // (Spring's LuaRules message callin), not a registered sync action.
+            // BAR's game_autocolors unsynced half reads this to apply team
+            // colours.
+            if (args[0].kind === 'string' && args[0].value === '$RecvLuaMsg') {
+                const body = args[1] && args[1].kind === 'string' ? args[1].value : '';
+                const pid = args[2] && args[2].kind === 'number' && Number.isFinite(args[2].value)
+                    ? args[2].value : 0;
+                runtime.doString(
+                    `if gadgetHandler and gadgetHandler.gadgets then ` +
+                    `for _, g in ipairs(gadgetHandler.gadgets) do ` +
+                    `if g.RecvLuaMsg then pcall(g.RecvLuaMsg, g, "${escapeLuaString(body)}", ${pid}) end ` +
+                    `end end`,
+                    'recvLuaMsg',
+                );
+                break;
+            }
             // Render args as Lua literals into a single doString.
             // Strings go through escapeLuaString; numbers/bools serialise
             // directly. Nil maps to the Lua `nil` literal.
