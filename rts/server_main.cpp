@@ -170,6 +170,21 @@ int main(int argc, char* argv[])
     std::string mapId;
     std::string mapsDir = "data/maps";
     std::string dbPath = "data/spring-server.db";
+    // Idle self-termination tuning (non-persistent rooms only). A non-persistent
+    // server exits after idleExitSeconds with zero connected clients, but not
+    // before idleStartupGraceSeconds have passed (so it waits for the first
+    // client). idleExitSeconds <= 0 disables idle exit (run until killed).
+    //
+    // Precedence: --idle-exit-seconds flag > env SPRING_IDLE_EXIT_SECONDS >
+    // default. The env fallback lets the lobby (or mprocs) set a short timeout
+    // for testing that every spawned game server inherits via execvp, without
+    // the lobby having to forward the flag. Grace mirrors the same pattern.
+    auto envInt = [](const char* key, int def) {
+        const char* v = getenv(key);
+        return (v && *v) ? std::atoi(v) : def;
+    };
+    int idleExitSeconds = envInt("SPRING_IDLE_EXIT_SECONDS", 300);          // 5 min
+    int idleStartupGraceSeconds = envInt("SPRING_IDLE_STARTUP_GRACE_SECONDS", 120);  // 2 min
 
     // Human player roster from the lobby. Each `--player <username>:<team>:<pos>`
     // entry gets one slot here. The sim uses this for two things:
@@ -227,6 +242,7 @@ int main(int argc, char* argv[])
     bool logMessages = false;
 
     // Simple arg parsing: --port N, --game PATH, --map PATH, --db PATH,
+    // --idle-exit-seconds N (0 = never), --idle-startup-grace-seconds N,
     // --log-file PATH, --log-level LEVEL, --log-server URL,
     // --log-sqlite PATH, --debug, --log-messages,
     // --player username:team:pos (repeatable),
@@ -245,6 +261,10 @@ int main(int argc, char* argv[])
             mapId = argv[++i];
         } else if (arg == "--db" && i + 1 < argc) {
             dbPath = argv[++i];
+        } else if (arg == "--idle-exit-seconds" && i + 1 < argc) {
+            idleExitSeconds = std::atoi(argv[++i]);
+        } else if (arg == "--idle-startup-grace-seconds" && i + 1 < argc) {
+            idleStartupGraceSeconds = std::atoi(argv[++i]);
         } else if (arg == "--log-file" && i + 1 < argc) {
             logFile = argv[++i];
         } else if (arg == "--log-level" && i + 1 < argc) {
@@ -1017,8 +1037,13 @@ int main(int argc, char* argv[])
             " updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')))",
             nullptr, nullptr, nullptr);
     }
-    const int kStartupGraceSec = 120;   // wait this long for the first client
-    const int kIdleExitSec = 300;       // then exit after 5 min with no clients
+    // idleExitSeconds <= 0 → never idle-exit (treat like a persistent room).
+    const bool idleExitEnabled = idleExitSeconds > 0;
+    const int kStartupGraceSec = idleStartupGraceSeconds;  // wait for first client
+    const int kIdleExitSec = idleExitSeconds;              // then exit after no clients
+    if (!roomPersistent && idleExitEnabled)
+        SLOG(SPRING_LOG_NOTICE, "idle self-termination: exit after %ds with no "
+            "clients (%ds startup grace)", kIdleExitSec, kStartupGraceSec);
     auto writeGameStatus = [&](bool ready, int clients) {
         if (!statusDb) return;
         char sql[256];
@@ -1073,7 +1098,7 @@ int main(int argc, char* argv[])
             }
             // Idle exit: non-persistent rooms shut down once they've had no
             // connected clients for kIdleExitSec (past the startup grace).
-            if (!roomPersistent) {
+            if (!roomPersistent && idleExitEnabled) {
                 const auto sinceStart = std::chrono::duration_cast<std::chrono::seconds>(
                     wall - serverStartTime).count();
                 const auto idleFor = std::chrono::duration_cast<std::chrono::seconds>(
