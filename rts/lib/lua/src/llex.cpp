@@ -418,7 +418,19 @@ static void read_string (LexState *ls, int del, SemInfo *seminfo) {
             goto no_save;
           }
           default: {
-            esccheck(ls, lisdigit(ls->current), "invalid escape sequence");
+            /* Recoil-compat: tolerate unknown escape sequences instead of
+               raising "invalid escape sequence". Upstream Recoil patched its
+               Lua lexer so an unrecognised `\x` (x non-digit) drops the
+               backslash and keeps the char literally (`\ ` -> ` `). Recoil
+               games rely on this — e.g. BAR's modules/lava.lua:75 pattern
+               '^.*()\ [vV]*[%d%.]+'. Stock Lua 5.4 errors here; we mirror
+               Recoil so the game's Lua loads unmodified. Only decimal '\ddd'
+               keeps its special meaning. (Deliberate divergence from stock
+               Lua 5.4 — typos in our own Lua won't be flagged.) */
+            if (!lisdigit(ls->current)) {
+              c = ls->current;  /* keep the char, drop the backslash */
+              goto read_save;
+            }
             c = readdecesc(ls);  /* digital escape '\ddd' */
             goto only_save;
           }
