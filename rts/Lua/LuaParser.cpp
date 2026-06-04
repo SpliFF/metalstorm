@@ -12,6 +12,7 @@
 
 #include "LuaConstGame.h"
 #include "LuaConstEngine.h"
+#include "LuaMathExtra.h"
 #include "LuaUtils.h"
 #include "LuaJsonSrc.h" // generated: embeds rts/lib/lua/json-lua/json.lua
 
@@ -152,6 +153,14 @@ void LuaParser::SetupEnv(bool isSyncedCtxt, bool isDefsParser)
 
 	{
 		lua_getglobal(L, "math");
+		// Engine math extras (round/clamp/hypot/mix/sgn/smoothstep/bit_*/…) in
+		// EVERY LuaParser environment, matching upstream Recoil
+		// (LuaParser::SetupEnv → LuaMathExtra::PushEntries; the "mathextra in
+		// all lua environments" change our month-old port lacked). Without it
+		// the CEG parser (gamedata/explosions.lua) hit `math.round` nil while
+		// parsing BAR's effects/raptors/raptor-effects.lua. Operates on the
+		// math table currently on the stack top.
+		LuaMathExtra::PushEntries(L);
 		if (isSyncedCtxt) {
 			LuaPushNamedCFunc(L, "random", Random);
 			LuaPushNamedCFunc(L, "randomseed", RandomSeed);
