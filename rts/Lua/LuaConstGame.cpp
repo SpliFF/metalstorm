@@ -9,6 +9,7 @@
 #include "Game/GameSetup.h"
 #include "Map/MapDamage.h"
 #include "Map/MapInfo.h"
+#include "Map/MetalMap.h"
 #include "Map/ReadMap.h"
 #include "Sim/Misc/ModInfo.h"
 #include "Sim/Misc/CategoryHandler.h"
@@ -32,6 +33,9 @@ bool LuaConstGame::PushEntries(lua_State* L)
 		// Game.footprintScale * Game.squareSize for build spacing
 		// (api_resource_spot_finder.lua, cmd_build_bugger_off.lua).
 		LuaPushNamedNumber(L, "footprintScale", SPRING_FOOTPRINT_SCALE);
+		// Metalmap resolution (Recoil LuaConstGame). BAR's metal-spot finder
+		// (api_resource_spot_finder.lua) scans the metal map in these units.
+		LuaPushNamedNumber(L, "metalMapSquareSize", METAL_MAP_SQUARE_SIZE);
 	}
 
 	if (CGameSetup::ScriptLoaded()) {
