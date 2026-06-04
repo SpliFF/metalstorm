@@ -5,3 +5,4 @@ CombatEventCollector combatEvents;
 UnitDeathCollector unitDeaths;
 SensorUpdateCollector sensorUpdates;
 SendToUnsyncedEventCollector sendToUnsyncedEvents;
+LuaRulesMsgEventCollector luaRulesMsgEvents;

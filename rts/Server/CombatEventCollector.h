@@ -184,3 +184,38 @@ private:
 };
 
 extern SendToUnsyncedEventCollector sendToUnsyncedEvents;
+
+/// One `Spring.SendLuaRulesMsg(msg)` call captured for the server-synced
+/// LOOPBACK. In Spring the message round-trips the net and fires
+/// `gadget:RecvLuaMsg(msg, playerID)` on every synced state (including the
+/// sender's); on our headless server the synced LuaRules is local, so the
+/// loopback is delivered by server_main draining this queue. The CLIENT
+/// forward (clients' unsynced `gadget:RecvLuaMsg`) reuses the SendToUnsynced
+/// wire — SendLuaRulesMsg also pushes a SendToUnsyncedEventData with a
+/// "$RecvLuaMsg" topic that the widget worker routes to RecvLuaMsg instead of
+/// a sync action.
+struct LuaRulesMsgEventData {
+    std::string msg;
+    int playerID = 0;
+};
+
+class LuaRulesMsgEventCollector {
+public:
+    void Push(LuaRulesMsgEventData event) {
+        std::lock_guard<std::mutex> lock(mutex);
+        events.push_back(std::move(event));
+    }
+
+    std::vector<LuaRulesMsgEventData> Drain() {
+        std::lock_guard<std::mutex> lock(mutex);
+        std::vector<LuaRulesMsgEventData> drained;
+        drained.swap(events);
+        return drained;
+    }
+
+private:
+    std::mutex mutex;
+    std::vector<LuaRulesMsgEventData> events;
+};
+
+extern LuaRulesMsgEventCollector luaRulesMsgEvents;

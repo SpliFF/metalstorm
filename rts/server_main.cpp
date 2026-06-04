@@ -2590,6 +2590,18 @@ int main(int argc, char* argv[])
         }
         }
 
+        // SendLuaRulesMsg loopback — synced gadgets call
+        // Spring.SendLuaRulesMsg(msg); in Spring the message round-trips the
+        // net and fires gadget:RecvLuaMsg on every synced state including the
+        // sender's. The client forward rides the SendToUnsynced wire above
+        // ("$RecvLuaMsg" topic); here we deliver the same message to the
+        // server's own synced LuaRules (regardless of client count). Drained
+        // off the Lua stack so it isn't re-entrant with the originating call.
+        if (luaRules != nullptr) {
+            for (const auto& ev : luaRulesMsgEvents.Drain())
+                luaRules->RecvLuaMsg(ev.msg, ev.playerID);
+        }
+
         // Unit lifecycle events — UnitCreated / UnitFromFactory /
         // UnitTaken / UnitGiven. Drained each tick. FromFactory / Taken /
         // Given are broadcast unfiltered (transfers are public). Created

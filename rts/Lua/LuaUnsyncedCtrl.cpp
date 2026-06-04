@@ -12,6 +12,7 @@
 
 #include "LuaUnsyncedCtrl.h"
 #include "LuaUtils.h"
+#include "Server/CombatEventCollector.h"
 #include "System/SpringLog/SpringLog.h"
 
 #include <cstdio>
@@ -271,6 +272,52 @@ int EchoSpringLog(lua_State* L)
     return 0;
 }
 
+// Spring.SendLuaRulesMsg(msg) — deliver a string to LuaRules'
+// gadget:RecvLuaMsg. In Spring the message round-trips the P2P net and fires
+// RecvLuaMsg on every synced state (including the sender's) plus the unsynced
+// halves. That netcode is gone in our client-server model, so we route it two
+// ways (faithful to the same delivery set):
+//   - LOOPBACK to the server's synced LuaRules: queued into luaRulesMsgEvents
+//     and delivered by server_main's drain (off the Lua stack, so we don't
+//     re-enter the synced state from inside this callout).
+//   - FORWARD to clients' unsynced gadget halves: reuse the SendToUnsynced
+//     wire — push a SendToUnsynced event whose arg[0] is the "$RecvLuaMsg"
+//     topic; the widget worker routes that topic to RecvLuaMsg(msg, playerID)
+//     instead of a registered sync action.
+int SendLuaRulesMsg(lua_State* L)
+{
+    const std::string msg = luaL_checksstring(L, 1);
+    // The headless server has no local player (Spring uses gu->myPlayerNum);
+    // attribute synced-originated messages to the host/first player slot.
+    const int playerID = 0;
+
+    luaRulesMsgEvents.Push(LuaRulesMsgEventData{msg, playerID});
+
+    SendToUnsyncedEventData fwd;
+    fwd.clientId = 0;  // broadcast
+    fwd.args.reserve(3);
+    {
+        SendToUnsyncedArgValue topic;
+        topic.kind = SendToUnsyncedArgValue::Kind::String;
+        topic.strVal = "$RecvLuaMsg";
+        fwd.args.push_back(std::move(topic));
+    }
+    {
+        SendToUnsyncedArgValue body;
+        body.kind = SendToUnsyncedArgValue::Kind::String;
+        body.strVal = msg;
+        fwd.args.push_back(std::move(body));
+    }
+    {
+        SendToUnsyncedArgValue pid;
+        pid.kind = SendToUnsyncedArgValue::Kind::Number;
+        pid.numVal = playerID;
+        fwd.args.push_back(std::move(pid));
+    }
+    sendToUnsyncedEvents.Push(std::move(fwd));
+    return 0;
+}
+
 /// Register a noop stub for a rendering/client API function.
 #define REGISTER_NOOP_STUB(funcName) \
     lua_pushstring(L, #funcName); \
@@ -286,6 +333,7 @@ bool LuaUnsyncedCtrl::PushEntries(lua_State* L)
     LuaPushNamedCFunc(L, "Echo",  EchoSpringLog);
     LuaPushNamedCFunc(L, "Log",   Log);
     LuaPushNamedCFunc(L, "Error", Error);
+    LuaPushNamedCFunc(L, "SendLuaRulesMsg", SendLuaRulesMsg);
 
     // Server-side noop stubs for client/render/audio APIs.
     // See the ServerNoopStub template above for rationale.
