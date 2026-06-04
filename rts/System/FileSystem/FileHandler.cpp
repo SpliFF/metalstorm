@@ -204,10 +204,14 @@ static bool MatchGlob(const std::string& str, const std::string& pattern)
 
 std::vector<std::string> CFileHandler::DirList(
     const std::string& dir, const std::string& pattern,
-    const std::string& modes)
+    const std::string& modes, bool recursive)
 {
     std::vector<std::string> result;
     const std::string lcPattern = StringToLower(pattern);
+
+    std::string base = dir;
+    if (!base.empty() && base.back() != '/')
+        base += '/';
 
     auto roots = GetRootsForModes(modes);
     for (const auto& root : roots) {
@@ -215,18 +219,25 @@ std::vector<std::string> CFileHandler::DirList(
         if (!fs::is_directory(dirPath))
             continue;
 
-        for (const auto& entry : fs::directory_iterator(dirPath)) {
+        // The glob matches the filename only (Spring semantics), so a
+        // recursive "*.lua" still gathers nested files; the subdirectory
+        // prefix is preserved in the returned relative path. BAR loads its
+        // ~970 unit defs via VFS.DirList('units/', '*.lua', nil, true) where
+        // nearly all files live in units/<faction>/ subfolders.
+        const auto handleEntry = [&](const fs::directory_entry& entry) {
             if (!entry.is_regular_file())
-                continue;
+                return;
+            if (!MatchGlob(StringToLower(entry.path().filename().string()), lcPattern))
+                return;
+            result.push_back(base + fs::relative(entry.path(), dirPath).generic_string());
+        };
 
-            std::string fname = entry.path().filename().string();
-            if (MatchGlob(StringToLower(fname), lcPattern)) {
-                std::string relPath = dir;
-                if (!relPath.empty() && relPath.back() != '/')
-                    relPath += '/';
-                relPath += fname;
-                result.push_back(std::move(relPath));
-            }
+        if (recursive) {
+            for (const auto& entry : fs::recursive_directory_iterator(dirPath))
+                handleEntry(entry);
+        } else {
+            for (const auto& entry : fs::directory_iterator(dirPath))
+                handleEntry(entry);
         }
     }
 

@@ -247,8 +247,9 @@ int LuaVFS::DirList(lua_State* L, bool synced)
 
 	const std::string& pattern = luaL_optstring(L, 2, "*");
 	const std::string& modes = GetModes(L, 3, synced);
+	const bool recursive = luaL_optboolean(L, 4, false);
 
-	LuaUtils::PushStringVector(L, CFileHandler::DirList(dir, pattern, modes));
+	LuaUtils::PushStringVector(L, CFileHandler::DirList(dir, pattern, modes, recursive));
 	return 1;
 }
 

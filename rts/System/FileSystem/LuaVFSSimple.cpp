@@ -45,13 +45,14 @@ static int l_FileExists(lua_State* L) {
 }
 
 // ============================================================
-// VFS.DirList(dir [, pattern [, modes]]) → {string, ...}
+// VFS.DirList(dir [, pattern [, modes [, recursive]]]) → {string, ...}
 // ============================================================
 static int l_DirList(lua_State* L) {
     const char* dir = luaL_checkstring(L, 1);
     const char* pattern = luaL_optstring(L, 2, "*");
     const char* modes = luaL_optstring(L, 3, SPRING_VFS_MOD_BASE);
-    auto files = CFileHandler::DirList(dir, pattern, modes);
+    const bool recursive = lua_toboolean(L, 4);  // 4th arg, default false
+    auto files = CFileHandler::DirList(dir, pattern, modes, recursive);
     lua_createtable(L, files.size(), 0);
     for (size_t i = 0; i < files.size(); i++) {
         lua_pushlstring(L, files[i].data(), files[i].size());

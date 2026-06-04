@@ -145,9 +145,11 @@ public:
     }
 
     /// List files in a directory matching a glob pattern (case-insensitive).
+    /// When `recursive` is true, descends into subdirectories and returns
+    /// paths relative to `dir` (e.g. "units/ArmAircraft/armpeep.lua").
     static std::vector<std::string> DirList(
         const std::string& dir, const std::string& pattern = "*",
-        const std::string& modes = "");
+        const std::string& modes = "", bool recursive = false);
 
     /// List subdirectories matching a glob pattern (case-insensitive).
     static std::vector<std::string> SubDirs(
