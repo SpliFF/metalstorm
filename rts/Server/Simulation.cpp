@@ -97,12 +97,35 @@ bool CSimulation::LoadDefs()
 
     defsParser->SetupLua(true, true);
 
-    // Provide Spring.GetModOptions / Spring.GetMapOptions
-    // (returns empty tables until a real game setup is loaded)
+    // Customize the defs environment with a subset of LuaSyncedRead — the
+    // bare LuaParser has no access to it. Ported 1:1 from upstream Recoil
+    // Game::LoadDefs (rts/Game/Game.cpp, LSR_ADDFUNC block); our month-old
+    // port only had GetModOptions/GetMapOptions, which is why BAR's defs
+    // pipeline crashed: gamedata/unitdefs.lua calls
+    // Spring.Utilities.Gametype.IsScavengers() → teamFunctions.getSettings()
+    // → Spring.GetGaiaTeamID()/GetTeamInfo()/GetAllyTeamList()/... at parse
+    // time. These read the real team handler (game setup is loaded before
+    // defs parse), so scav/raptor/gametype detection gets correct values.
+    #define LSR_ADDFUNC(f) defsParser->AddFunc(#f, LuaSyncedRead::f)
     defsParser->GetTable("Spring");
-    defsParser->AddFunc("GetModOptions", LuaSyncedRead::GetModOptions);
-    defsParser->AddFunc("GetMapOptions", LuaSyncedRead::GetMapOptions);
+    LSR_ADDFUNC(GetModOptions);
+    LSR_ADDFUNC(GetModOption);
+    LSR_ADDFUNC(GetMapOptions);
+    LSR_ADDFUNC(GetMapOption);
+    LSR_ADDFUNC(GetTeamLuaAI);
+    LSR_ADDFUNC(GetTeamList);
+    LSR_ADDFUNC(GetGaiaTeamID);
+    LSR_ADDFUNC(GetPlayerList);
+    LSR_ADDFUNC(GetAllyTeamList);
+    LSR_ADDFUNC(GetTeamInfo);
+    LSR_ADDFUNC(GetAllyTeamInfo);
+    LSR_ADDFUNC(GetAIInfo);
+    LSR_ADDFUNC(GetTeamAllyTeamID);
+    LSR_ADDFUNC(AreTeamsAllied);
+    LSR_ADDFUNC(ArePlayersAllied);
+    LSR_ADDFUNC(GetSideData);
     defsParser->EndTable();
+    #undef LSR_ADDFUNC
 
     if (!defsParser->Execute()) {
         SLOG(SPRING_LOG_ERROR, "defs parser failed: %s",
