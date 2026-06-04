@@ -7664,6 +7664,15 @@ function IsSyncedCode() return false end
 -- producer gadgets read.
 GG = GG or {}
 
+-- gadgetHandler.GG is the SAME shared table as the global GG. Real ZK
+-- gadgets.lua makes \`GG\` a field of the handler (line 61, \`GG = {}\`) and
+-- injects \`gadget.GG = self.GG\` into every gadget env; the global and the
+-- handler field are one table. engine_compat_post.lua writes
+-- \`gadgetHandler.GG.Disable_RequestPath\` / \`gadgetHandler.GG._AddUnitDamage_teamID\`
+-- while producer gadgets read the global \`GG\` — alias them so both see the
+-- same state (without this, \`gadgetHandler.GG\` is nil → index-nil crash).
+gadgetHandler.GG = GG
+
 -- Spring.UnitRendering / FeatureRendering: ZK's custom unit/feature draw hooks
 -- (e.g. unit_enlarger calls \`Spring.UnitRendering.SetUnitLuaDraw\`). The worker
 -- has no Lua-driven custom-unit-draw path, so these are no-op stubs that let the
