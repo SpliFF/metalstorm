@@ -163,6 +163,18 @@ void LuaParser::SetupEnv(bool isSyncedCtxt, bool isDefsParser)
 		// Needed because TDF values and customParams are strings.
 		LuaPushNamedCFunc(L, "max", LuaUtils::Compat_math_max);
 		LuaPushNamedCFunc(L, "min", LuaUtils::Compat_math_min);
+		// Lua 5.1 math builtins removed in 5.3 that Recoil games still call
+		// directly during defs parsing (BAR's common/stringFunctions.lua does
+		// `local mathPow = math.pow`). The synced LuaRules/LuaGaia states get
+		// these via LuaUtils::Register51CompatShims, but the defs parser runs
+		// in its own LuaParser state that never installed them — so defs.lua
+		// hit `attempt to call a nil value (mathPow)` and the whole def set
+		// failed to parse. Mirror the same compat set here. (Faithful Lua-5.1
+		// surface, not a per-game branch.)
+		LuaPushNamedCFunc(L, "pow", LuaUtils::Compat_math_pow);
+		LuaPushNamedCFunc(L, "atan2", LuaUtils::Compat_math_atan2);
+		LuaPushNamedCFunc(L, "log10", LuaUtils::Compat_math_log10);
+		LuaPushNamedCFunc(L, "mod", LuaUtils::Compat_math_mod);
 		lua_pop(L, 1); // pop "math"
 	}
 

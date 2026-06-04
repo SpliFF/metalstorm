@@ -119,6 +119,24 @@ bool LuaConstGame::PushEntries(lua_State* L)
 	}
 
 	{
+		// Inline text-colour control codes (Recoil LuaConstGame.cpp). Games
+		// embed these bytes in strings to colour font output; BAR's
+		// common/springUtilities/color.lua reads Game.textColorCodes.Color /
+		// .ColorAndOutline at load time, so it must exist even on the headless
+		// server (which has no font renderer). Values are the *modern*
+		// indicators (Recoil's CglFont with disableOldColorIndicators); we have
+		// no fontHandler to pick old-vs-new, and modern Recoil games expect
+		// these. Color=0x11 (dc1), ColorAndOutline=0x12 (dc2), Reset=0x08 (\b)
+		// — from Rendering/Fonts/TextWrap.h.
+		lua_pushliteral(L, "textColorCodes");
+		lua_createtable(L, 0, 3);
+			LuaPushNamedChar(L, "Color"          , static_cast<char>(0x11));
+			LuaPushNamedChar(L, "ColorAndOutline", static_cast<char>(0x12));
+			LuaPushNamedChar(L, "Reset"          , static_cast<char>(0x08));
+		lua_rawset(L, -3);
+	}
+
+	{
 		// NB: instance is never null, but might not contain any data yet (e.g. in LuaIntro)
 		const std::vector<string>& cats = CCategoryHandler::Instance()->GetCategoryNames(~0);
 
