@@ -612,11 +612,33 @@ export function translateGLSL(src: string, stage: GlslStage, opts: TranslateOpti
         ? '#version 300 es\nprecision highp float;\nprecision highp int;\n'
         : '#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\nprecision highp sampler2DArray;\nprecision highp sampler2DShadow;\n';
     s = header + s;
-    // GLSL ES 300 doesn't support `sampler2DShadow` without depth-compare
-    // texture binding semantics that Spring widgets don't set up. Demote
-    // to plain `sampler2D` — the CSM snippet uses sampler2DArray directly
-    // and isn't affected.
-    s = s.replace(/sampler2DShadow/g, 'sampler2D');
+    // C1 (drift #7): `sampler2DShadow` IS a core GLSL ES 300 / WebGL2 type —
+    // keep it. The previous silent demotion to plain `sampler2D` was wrong:
+    // a depth-compare sampler and a colour sampler differ in BOTH the return
+    // type (float coefficient vs vec4 texel) and the lookup semantics, so the
+    // demotion broke any shader that fed the result to a float — e.g.
+    // map_lava's `float shadow = clamp(textureProj(sampler2DShadow,...), …)`
+    // stopped type-checking and the lava shader silently failed to compile.
+    // Real depth-compare requires the bound texture to carry
+    // TEXTURE_COMPARE_MODE = COMPARE_REF_TO_TEXTURE; the binding side
+    // (lua-gl-bridge `$shadow`/`$info`) is responsible for supplying a valid
+    // compare-mode depth texture (C2). The CSM snippet uses sampler2DArray
+    // directly and is unaffected by this change.
+    //
+    // Legacy GLSL 1.10/1.20 shadow builtins (`shadow2D`/`shadow2DProj`) were
+    // dropped in ES 300 — sampling a sampler2DShadow now goes through
+    // texture()/textureProj(), which return a *float* (the comparison
+    // coefficient) rather than the old vec4. Legacy code reads `.r`/`.stp`
+    // off the vec4 result, so wrap the modern call in vec4() to keep those
+    // swizzles valid. Injected as function-like #define macros so the GLSL
+    // preprocessor balances nested-paren arguments (e.g.
+    // `shadow2DProj(tex, gl_TexCoord[1] + vec4(...))`).
+    if (/\bshadow2D(?:Proj)?\b/.test(s)) {
+        const shadowMacros =
+            '#define shadow2D(s, c) vec4(texture((s), (c)))\n' +
+            '#define shadow2DProj(s, c) vec4(textureProj((s), (c)))\n';
+        s = s.replace(header, header + shadowMacros);
+    }
 
     // ── Legacy GLSL 1.10 → ES 300 rewrites ────────────────────────────
     if (isLegacy) {

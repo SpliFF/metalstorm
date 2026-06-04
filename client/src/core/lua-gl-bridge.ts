@@ -121,6 +121,20 @@ export class LuaGLBridge {
     /** 1x1 fallback textures. */
     private whiteTex: WebGLTexture | null = null;
     private blackTex: WebGLTexture | null = null;
+    /**
+     * C2 (drift #8): 1×1 DEPTH_COMPONENT stub with TEXTURE_COMPARE_MODE =
+     * COMPARE_REF_TO_TEXTURE, depth 1.0. Authored shaders sample `$shadow`
+     * as a `sampler2DShadow` (e.g. map_lava's `textureProj(shadowTex, …)`);
+     * a depth-compare sampler bound to a colour texture without compare mode
+     * is an INVALID_OPERATION at draw. The far-depth (1.0) value makes the
+     * compare resolve to "fully lit" (coefficient 1.0 = no shadow) — a valid,
+     * defined no-op rather than a crash. FIDELITY-STANDIN: this is NOT the
+     * real engine shadow map (our shadows go through the CSM sampler2DArray
+     * in zk-model-material; a single Spring `$shadow` map isn't rendered),
+     * so authored-shader shadows are absent, not wrong. Warned once below.
+     */
+    private shadowStubTex: WebGLTexture | null = null;
+    private warnedShadowStub = false;
     /** Immediate-mode renderer for gl.BeginEnd / gl.Rect / gl.TexRect etc. */
     private imm: ImmediateModeRenderer;
     /** Tracks the currently bound texture on unit 0 for immediate-mode textured flag. */
@@ -1359,6 +1373,35 @@ export class LuaGLBridge {
     }
 
     /**
+     * C2 (drift #8): lazily build the 1×1 depth-compare stub for `$shadow`.
+     * DEPTH_COMPONENT16, value 1.0 (far plane), compare mode REF_TO_TEXTURE
+     * with LEQUAL — so `texture(sampler2DShadow, vec3(uv, ref))` resolves to
+     * 1.0 ("fully lit") for any ref ≤ 1.0. Valid to bind to a sampler2DShadow
+     * (unlike the colour whiteTex, which would raise INVALID_OPERATION at
+     * draw now that the translator keeps the shadow sampler type — C1).
+     */
+    private getShadowStub(): WebGLTexture {
+        if (this.shadowStubTex) return this.shadowStubTex;
+        const gl = this.gl;
+        const tex = gl.createTexture()!;
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texImage2D(
+            gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT16, 1, 1, 0,
+            gl.DEPTH_COMPONENT, gl.UNSIGNED_SHORT,
+            new Uint16Array([0xffff]), // 1.0 in normalised 16-bit depth
+        );
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+        this.shadowStubTex = tex;
+        return tex;
+    }
+
+    /**
      * gl.CreateTexture has two forms:
      *   gl.CreateTexture(width, height, opts) — allocates an empty texture
      *   gl.CreateTexture(path)                — loads from an image path
@@ -1698,7 +1741,25 @@ export class LuaGLBridge {
             if (s.startsWith('$')) {
                 let tex: WebGLTexture | null = null;
                 if (s === '$heightmap') tex = this.engineTex.heightmap ?? this.whiteTex;
-                else if (s === '$shadow') tex = this.engineTex.shadow ?? this.whiteTex;
+                else if (s === '$shadow') {
+                    // Prefer a real engine shadow map if one is ever wired;
+                    // otherwise the compare-mode depth stub (C2). Never the
+                    // colour whiteTex — that's INVALID_OPERATION against a
+                    // sampler2DShadow now that C1 keeps the shadow type.
+                    tex = this.engineTex.shadow ?? this.getShadowStub();
+                    if (!this.engineTex.shadow && !this.warnedShadowStub) {
+                        this.warnedShadowStub = true;
+                        // FIDELITY-STANDIN — loud one-time gap notice per the
+                        // no-silent-GL-failures principle.
+                        console.warn(
+                            '[gl.Texture] $shadow: no engine shadow map is wired to ' +
+                            'authored shaders; binding a 1×1 compare-mode depth stub ' +
+                            '(fully-lit). Shadows from these shaders are absent, not ' +
+                            'wrong. Our scene shadows use the CSM sampler2DArray in ' +
+                            'zk-model-material; a single Spring $shadow map is not rendered.',
+                        );
+                    }
+                }
                 else if (s === '$info') tex = this.engineTex.info ?? this.blackTex;
                 gl.bindTexture(gl.TEXTURE_2D, tex);
                 trackAndRecord(tex);

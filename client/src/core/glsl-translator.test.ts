@@ -68,6 +68,58 @@ void main() {
         expect(out.source).toContain('texture(tex, vUv)');
     });
 
+    it('keeps sampler2DShadow (no demotion) so depth-compare type-checks (C1, map_lava)', () => {
+        // map_lava's lava shader (#version 330) feeds the depth-compare
+        // result to a float: `float shadow = clamp(textureProj(sampler2DShadow,
+        // vec4), 0, 1)`. Demoting the sampler to sampler2D makes textureProj
+        // return vec4 → the `float =` no longer type-checks and the shader
+        // silently failed to compile. The sampler type must be preserved.
+        const src = `#version 330
+uniform sampler2DShadow shadowTex;
+out vec4 fragColor;
+in vec4 shadowVertexPos;
+void main() {
+    float shadow = clamp(textureProj(shadowTex, shadowVertexPos), 0.0, 1.0);
+    fragColor = vec4(shadow);
+}`;
+        const out = translateGLSL(src, 'fragment');
+        expect(out.ok).toBe(true);
+        expect(out.source).toContain('sampler2DShadow shadowTex;');
+        expect(out.source).not.toMatch(/uniform sampler2D shadowTex/);
+    });
+
+    it('rewrites legacy shadow2D/shadow2DProj builtins to texture()/textureProj() (C1, default_tint)', () => {
+        // GLSL 1.10 shadow builtins were dropped in ES 300. default_tint reads
+        // `.r` off the old vec4 result, so the rewrite wraps the modern float
+        // return in vec4() and the GLSL preprocessor balances nested parens.
+        const src = `#version 120
+uniform sampler2DShadow shadowTex;
+varying vec4 vShadowCoord;
+void main() {
+    float coeff = shadow2DProj(shadowTex, vShadowCoord + vec4(0.0, 0.0, -0.00005, 0.0)).r;
+    float c2 = shadow2D(shadowTex, vec3(0.5, 0.5, 0.1)).r;
+    gl_FragColor = vec4(coeff * c2);
+}`;
+        const out = translateGLSL(src, 'fragment');
+        expect(out.ok).toBe(true);
+        expect(out.source).toContain('sampler2DShadow shadowTex;');
+        expect(out.source).toContain('#define shadow2D(s, c) vec4(texture((s), (c)))');
+        expect(out.source).toContain('#define shadow2DProj(s, c) vec4(textureProj((s), (c)))');
+        // The call sites are left intact for the preprocessor to expand.
+        expect(out.source).toContain('shadow2DProj(shadowTex,');
+    });
+
+    it('does not inject shadow macros when no shadow builtin is present', () => {
+        const src = `#version 330
+uniform sampler2DShadow shadowTex;
+out vec4 fragColor;
+in vec4 sp;
+void main() { fragColor = vec4(textureProj(shadowTex, sp)); }`;
+        const out = translateGLSL(src, 'fragment');
+        expect(out.ok).toBe(true);
+        expect(out.source).not.toContain('#define shadow2D');
+    });
+
     it('rewrites vertex attribute/varying for legacy sources', () => {
         const src = `#version 120
 attribute vec3 aPos;
