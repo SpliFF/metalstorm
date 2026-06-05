@@ -99,6 +99,7 @@ class LuaSyncedRead {
 		static int GetFeaturesInSphere(lua_State* L);
 		static int GetFeaturesInCylinder(lua_State* L);
 		static int GetProjectilesInRectangle(lua_State* L);
+		static int GetProjectilesInSphere(lua_State* L);
 
 		static int ValidUnitID(lua_State* L);
 		static int GetUnitTooltip(lua_State* L);
@@ -170,9 +171,11 @@ class LuaSyncedRead {
 		static int GetUnitMoveTypeData(lua_State* L);
 
 		static int GetUnitCommands(lua_State* L);
+		static int GetUnitCommandCount(lua_State* L);
 		static int GetUnitCurrentCommand(lua_State* L);
 		static int GetFactoryCounts(lua_State* L);
 		static int GetFactoryCommands(lua_State* L);
+		static int GetFactoryCommandCount(lua_State* L);
 
 		static int GetFactoryBuggerOff(lua_State* L);
 

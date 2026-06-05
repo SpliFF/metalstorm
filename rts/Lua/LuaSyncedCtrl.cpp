@@ -137,6 +137,8 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 
 	REGISTER_LUA_CFUNC(SetAlly);
 	REGISTER_LUA_CFUNC(SetAllyTeamStartBox);
+	REGISTER_LUA_CFUNC(SetTeamStartPosition);
+	REGISTER_LUA_CFUNC(TransferTeamMaxUnits);
 	REGISTER_LUA_CFUNC(KillTeam);
 	REGISTER_LUA_CFUNC(AssignPlayerToTeam);
 	REGISTER_LUA_CFUNC(GameOver);
@@ -207,6 +209,7 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(SetUnitLandGoal);
 	REGISTER_LUA_CFUNC(ClearUnitGoal);
 	REGISTER_LUA_CFUNC(SetUnitNeutral);
+	REGISTER_LUA_CFUNC(SetUnitLeavesGhost);
 	REGISTER_LUA_CFUNC(SetUnitTarget);
 	REGISTER_LUA_CFUNC(SetUnitMidAndAimPos);
 	REGISTER_LUA_CFUNC(SetUnitRadiusAndHeight);
@@ -231,6 +234,7 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(BuggerOff);
 
 	REGISTER_LUA_CFUNC(AddUnitDamage);
+	REGISTER_LUA_CFUNC(AddFeatureDamage);
 	REGISTER_LUA_CFUNC(AddUnitImpulse);
 	REGISTER_LUA_CFUNC(AddUnitSeismicPing);
 
@@ -279,6 +283,7 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(SetProjectileDamages);
 	REGISTER_LUA_CFUNC(SetProjectileIgnoreTrackingError);
 
+	REGISTER_LUA_CFUNC(SetProjectileTimeToLive);
 	REGISTER_LUA_CFUNC(SetProjectileGravity);
 	REGISTER_LUA_CFUNC(SetProjectileSpinAngle);
 	REGISTER_LUA_CFUNC(SetProjectileSpinSpeed);
@@ -852,6 +857,73 @@ int LuaSyncedCtrl::SetAllyTeamStartBox(lua_State* L)
 
 	teamHandler.SetAllyTeamStartBox(allyTeamID, startRectLeft, startRectTop, startRectRight, startRectBottom);
 	return 0;
+}
+
+
+/*** Sets a team's start position.
+ *
+ * @function Spring.SetTeamStartPosition
+ * @number teamID
+ * @number x
+ * @number y
+ * @number z
+ * @treturn bool success
+ */
+int LuaSyncedCtrl::SetTeamStartPosition(lua_State* L)
+{
+	const unsigned int teamID = luaL_checkint(L, 1);
+	float3 pickPos =
+		{ luaL_checkfloat(L, 2)
+		, luaL_checkfloat(L, 3)
+		, luaL_checkfloat(L, 4)
+	};
+
+	if (!teamHandler.IsValidTeam(teamID)) {
+		lua_pushboolean(L, false);
+		return 1;
+	}
+
+	CTeam* team = teamHandler.Team(teamID);
+	team->ClampStartPosInStartBox(&pickPos);
+	team->SetStartPos(pickPos);
+
+	lua_pushboolean(L, true);
+	return 1;
+}
+
+
+/*** Transfers a portion of one team's max-unit allowance to another team.
+ *
+ * @function Spring.TransferTeamMaxUnits
+ * @number fromTeamID
+ * @number toTeamID
+ * @number amount
+ * @treturn bool success
+ */
+int LuaSyncedCtrl::TransferTeamMaxUnits(lua_State* L)
+{
+	const int fromTeamID = luaL_checkint(L, 1);
+	if (!teamHandler.IsValidTeam(fromTeamID))
+		return 0;
+
+	const int newTeamID = luaL_checkint(L, 2);
+	if (!teamHandler.IsValidTeam(newTeamID))
+		return 0;
+
+	CTeam* fromTeam = teamHandler.Team(fromTeamID);
+	if (fromTeam == nullptr)
+		return 0;
+
+	CTeam* toTeam = teamHandler.Team(newTeamID);
+	if (toTeam == nullptr)
+		return 0;
+
+	const int transferAmnt = luaL_checkint(L, 3);
+
+	bool success = teamHandler.TransferTeamMaxUnits(fromTeam, toTeam, transferAmnt);
+
+	lua_pushboolean(L, success);
+	return 1;
 }
 
 
@@ -3153,6 +3225,35 @@ int LuaSyncedCtrl::SetUnitNeutral(lua_State* L)
 }
 
 
+/*** Controls whether a unit leaves a radar/render ghost when it leaves LOS.
+ *
+ * @function Spring.SetUnitLeavesGhost
+ * @number unitID
+ * @bool leavesGhost
+ * @bool[opt=false] leaveDeadGhost
+ * @treturn nil
+ *
+ * DIVERGENCE: building/radar "ghosts" (the faded last-seen render of an
+ * immobile unit that has left LOS) are a client-side render concept that this
+ * client-server engine does not model on the headless server — there is no
+ * per-unit leavesGhost state in the sim and no unitDrawer to notify. We accept
+ * and validate the call so BAR's unit_transported_building_ghost.lua does not
+ * error, but it has no synced effect. If ghost rendering is implemented later,
+ * wire the state through here. (Recoil: CUnit::SetLeavesGhost + unitDrawer.)
+ */
+int LuaSyncedCtrl::SetUnitLeavesGhost(lua_State* L)
+{
+	CUnit* unit = ParseUnit(L, __func__, 1);
+
+	if (unit == nullptr)
+		return 0;
+
+	(void)luaL_checkboolean(L, 2);
+	(void)luaL_optboolean(L, 3, false);
+	return 0;
+}
+
+
 /*** Defines a unit's target.
  *
  * @function Spring.SetUnitTarget
@@ -3925,6 +4026,57 @@ int LuaSyncedCtrl::AddUnitDamage(lua_State* L)
 		damages.paralyzeDamageTime = paralyze;
 
 	unit->DoDamage(damages, impulse, attacker, weaponDefID, -1);
+	return 0;
+}
+
+
+/***
+ * @function Spring.AddFeatureDamage
+ *
+ * @number featureID
+ * @number damage
+ * @number[opt=0] paralyze equals to the paralyzetime in the WeaponDef.
+ * @number[opt=-1] attackerID
+ * @number[opt=-1] weaponID
+ * @number[opt] impulseX
+ * @number[opt] impulseY
+ * @number[opt] impulseZ
+ * @treturn nil
+ */
+int LuaSyncedCtrl::AddFeatureDamage(lua_State* L)
+{
+	CFeature* feature = ParseFeature(L, __func__, 1);
+
+	if (feature == nullptr)
+		return 0;
+
+	const float damage    = luaL_checkfloat(L, 2);
+	const int paralyze    = luaL_optint(L, 3, 0);
+	const int attackerID  = luaL_optint(L, 4, -1);
+	const int weaponDefID = luaL_optint(L, 5, -1);
+	const float3 impulse  = float3(std::clamp(luaL_optfloat(L, 6, 0.0f), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE),
+	                               std::clamp(luaL_optfloat(L, 7, 0.0f), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE),
+	                               LuaCoordAdapt::FlipDirZ(std::clamp(luaL_optfloat(L, 8, 0.0f), -MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE)));
+
+	CUnit* attacker = nullptr;
+
+	if (attackerID >= 0) {
+		if (static_cast<size_t>(attackerID) >= unitHandler.MaxUnits())
+			return 0;
+
+		attacker = unitHandler.GetUnit(attackerID);
+	}
+
+	// -1 is allowed
+	if (weaponDefID >= int(weaponDefHandler->NumWeaponDefs()))
+		return 0;
+
+	DamageArray damages(damage);
+
+	if (paralyze)
+		damages.paralyzeDamageTime = paralyze;
+
+	feature->DoDamage(damages, impulse, attacker, weaponDefID, -1);
 	return 0;
 }
 
@@ -5096,6 +5248,28 @@ int LuaSyncedCtrl::SetProjectileIgnoreTrackingError(lua_State* L)
 		default: break;
 	}
 
+	return 0;
+}
+
+
+/***
+ * @function Spring.SetProjectileTimeToLive
+ * @number projectileID
+ * @number ttl new time-to-live in sim frames
+ * @treturn nil
+ */
+int LuaSyncedCtrl::SetProjectileTimeToLive(lua_State* L)
+{
+	CProjectile* proj = ParseProjectile(L, __func__, 1);
+
+	const int newTimeToLive = luaL_checkint(L, 2);
+
+	if (proj == nullptr || !proj->weapon)
+		return 0;
+
+	CWeaponProjectile* wproj = static_cast<CWeaponProjectile*>(proj);
+
+	wproj->SetTimeToLive(newTimeToLive);
 	return 0;
 }
 

@@ -195,6 +195,7 @@ bool LuaSyncedRead::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(GetFeaturesInSphere);
 	REGISTER_LUA_CFUNC(GetFeaturesInCylinder);
 	REGISTER_LUA_CFUNC(GetProjectilesInRectangle);
+	REGISTER_LUA_CFUNC(GetProjectilesInSphere);
 
 	REGISTER_LUA_CFUNC(GetUnitNearestAlly);
 	REGISTER_LUA_CFUNC(GetUnitNearestEnemy);
@@ -271,9 +272,11 @@ bool LuaSyncedRead::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(GetUnitMoveTypeData);
 
 	REGISTER_LUA_CFUNC(GetUnitCommands);
+	REGISTER_LUA_CFUNC(GetUnitCommandCount);
 	REGISTER_LUA_CFUNC(GetUnitCurrentCommand);
 	REGISTER_LUA_CFUNC(GetFactoryCounts);
 	REGISTER_LUA_CFUNC(GetFactoryCommands);
+	REGISTER_LUA_CFUNC(GetFactoryCommandCount);
 
 	REGISTER_LUA_CFUNC(GetFactoryBuggerOff);
 
@@ -3598,6 +3601,76 @@ int LuaSyncedRead::GetProjectilesInRectangle(lua_State* L)
 }
 
 
+/***
+ * @function Spring.GetProjectilesInSphere
+ * @number x
+ * @number y
+ * @number z
+ * @number radius
+ * @bool[opt=false] excludeWeaponProjectiles
+ * @bool[opt=false] excludePieceProjectiles
+ * @treturn {number,...} projectileIDs
+ */
+int LuaSyncedRead::GetProjectilesInSphere(lua_State* L)
+{
+	const float3 sphereCenter(luaL_checkfloat(L, 1), luaL_checkfloat(L, 2), luaL_checkfloat(L, 3));
+	const float radius = luaL_checkfloat(L, 4);
+
+	const bool excludeWeaponProjectiles = luaL_optboolean(L, 5, false);
+	const bool excludePieceProjectiles = luaL_optboolean(L, 6, false);
+
+	QuadFieldQuery qfQuery;
+	quadField.GetProjectilesExact(qfQuery, sphereCenter, radius);
+	const unsigned int projectileCount = qfQuery.projectiles->size();
+	unsigned int arrayIndex = 1;
+
+	lua_createtable(L, projectileCount, 0);
+
+	if (CLuaHandle::GetHandleReadAllyTeam(L) < 0) {
+		if (CLuaHandle::GetHandleFullRead(L)) {
+			for (unsigned int i = 0; i < projectileCount; i++) {
+				const CProjectile* pro = (*qfQuery.projectiles)[i];
+
+				// filter out unsynced projectiles, the SyncedRead
+				// projecile Get* functions accept only synced ID's
+				// (specifically they interpret all ID's as synced)
+				if (!pro->synced)
+					continue;
+
+				if (pro->weapon && excludeWeaponProjectiles)
+					continue;
+				if (pro->piece && excludePieceProjectiles)
+					continue;
+
+				lua_pushnumber(L, pro->id);
+				lua_rawseti(L, -2, arrayIndex++);
+			}
+		}
+	} else {
+		for (unsigned int i = 0; i < projectileCount; i++) {
+			const CProjectile* pro = (*qfQuery.projectiles)[i];
+
+			// see above
+			if (!pro->synced)
+				continue;
+
+			if (pro->weapon && excludeWeaponProjectiles)
+				continue;
+			if (pro->piece && excludePieceProjectiles)
+				continue;
+
+			if (!LuaUtils::IsProjectileVisible(L, pro))
+				continue;
+
+			lua_pushnumber(L, pro->id);
+			lua_rawseti(L, -2, arrayIndex++);
+		}
+	}
+
+	return 1;
+}
+
+
 /******************************************************************************
  * Unit state
  *
@@ -6002,6 +6075,30 @@ int LuaSyncedRead::GetUnitCommands(lua_State* L)
 	return 1;
 }
 
+/*** Get the number of commands in a unit's queue
+ *
+ * @function Spring.GetUnitCommandCount
+ *
+ * @number unitID
+ * @treturn number commandCount
+ */
+int LuaSyncedRead::GetUnitCommandCount(lua_State* L)
+{
+	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+
+	if (unit == nullptr)
+		return 0;
+
+	const CCommandAI* commandAI = unit->commandAI;
+	// send the new unit commands for factories, otherwise the normal commands
+	const CFactoryCAI* factoryCAI = dynamic_cast<const CFactoryCAI*>(commandAI);
+	const CCommandQueue* queue = (factoryCAI == nullptr)? &commandAI->commandQue : &factoryCAI->newUnitCommands;
+
+	lua_pushnumber(L, queue->size());
+
+	return 1;
+}
+
 /*** Get the number or list of commands for a factory
  *
  * @function Spring.GetFactoryCommands
@@ -6034,6 +6131,34 @@ int LuaSyncedRead::GetFactoryCommands(lua_State* L)
 	} else {
 		lua_pushnumber(L, commandQue.size());
 	}
+
+	return 1;
+}
+
+/*** Get the number of commands in a factory's queue
+ *
+ * @function Spring.GetFactoryCommandCount
+ *
+ * @number unitID
+ * @treturn number commandCount
+ */
+int LuaSyncedRead::GetFactoryCommandCount(lua_State* L)
+{
+	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+
+	if (unit == nullptr)
+		return 0;
+
+	const CCommandAI* commandAI = unit->commandAI;
+	const CFactoryCAI* factoryCAI = dynamic_cast<const CFactoryCAI*>(commandAI);
+
+	// bail if not a factory
+	if (factoryCAI == nullptr)
+		return 0;
+
+	const CCommandQueue& queue = commandAI->commandQue;
+
+	lua_pushnumber(L, queue.size());
 
 	return 1;
 }
