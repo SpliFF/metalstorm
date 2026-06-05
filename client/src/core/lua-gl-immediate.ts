@@ -552,6 +552,12 @@ export class ImmediateModeRenderer {
 
     // ── Vertex attribute state ──────────────────────────────────────────
 
+    /** Current vertex colour (r,g,b,a). Used by the global `gl.Text`, which
+     *  draws in the active raster colour (Spring's `gl.Text` convention). */
+    getColor(): [number, number, number, number] {
+        return [this.curR, this.curG, this.curB, this.curA];
+    }
+
     color(r: number, g: number, b: number, a: number): void {
         this.curR = r;
         this.curG = g;

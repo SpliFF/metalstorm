@@ -509,6 +509,30 @@ export class LuaGLBridge {
         gl['DeleteFont'] = (_handle: LuaValue) => {
             // Atlas cleanup handled by GC
         };
+        // Global gl.Text(text, x, y, size, options) — Spring's freestanding
+        // text call (distinct from the font:Print handle API). Many BAR
+        // widgets use it. Recoil draws it through the engine's default font
+        // in the *current raster colour*; we lazily build one default font
+        // object and delegate to its Print, seeding the text colour from the
+        // immediate-mode current colour so gl.Color before gl.Text works.
+        gl['Text'] = (text: LuaValue, x: LuaValue, y: LuaValue,
+            size?: LuaValue, options?: LuaValue) => {
+            const font = this.getDefaultFont();
+            if (!font) return;
+            const [r, g, b, a] = this.imm.getColor();
+            (font['SetTextColor'] as (s: LuaValue, r: LuaValue, g: LuaValue, b: LuaValue, a: LuaValue) => void)(
+                font, r, g, b, a);
+            (font['Print'] as (...args: LuaValue[]) => void)(
+                font, text, x, y, size ?? 12, options ?? '');
+        };
+        // gl.GetTextWidth(text) — freestanding metric over the default font
+        // (handle variant lives on the font object). Recoil returns the
+        // normalised width (multiply by font size for pixels).
+        gl['GetTextWidth'] = (text: LuaValue) => {
+            const font = this.getDefaultFont();
+            const fn = font && (font['GetTextWidth'] as ((s: LuaValue, t: LuaValue) => LuaValue) | undefined);
+            return fn ? fn(font, text) : 0;
+        };
 
         // ── Queries ─────────────────────────────────────────────────
         gl['GetViewSizes'] = () => {
@@ -991,6 +1015,24 @@ export class LuaGLBridge {
     }
 
     private warnedPointSize = false;
+    private defaultFont: Record<string, LuaValue> | null = null;
+
+    /** Lazily build + cache the engine default font (FreeSansBold) used by
+     *  the freestanding gl.Text / gl.GetTextWidth. Glyphs rasterise into one
+     *  atlas at a base size; Print's size arg scales the quads, so a single
+     *  font object serves every requested size. */
+    private getDefaultFont(): Record<string, LuaValue> | null {
+        if (!this.defaultFont) {
+            try {
+                this.defaultFont = createLuaFontObject(
+                    this.gl, this.imm, 'FreeSansBold.otf', 32, 0, 0);
+            } catch (e) {
+                console.warn('[gl.Text] default font init failed:', e);
+                return null;
+            }
+        }
+        return this.defaultFont;
+    }
 
     private culling(arg: LuaValue): void {
         const gl = this.gl;
