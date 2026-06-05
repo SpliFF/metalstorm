@@ -13,7 +13,7 @@
  *   - VFS is pre-populated with fetched .lua sources keyed by path so
  *     VFS.Include can be synchronous.
  */
-import { LuaRuntime, type LuaValue, luaTable } from './lua-runtime.js';
+import { LuaRuntime, type LuaValue, luaTable, isLuaTable } from './lua-runtime.js';
 import { lua, to_luastring } from 'fengari-web';
 
 /** Context passed in when constructing the Spring shim. */
@@ -136,6 +136,14 @@ export interface SpringAPIContext {
      * isn't cached yet.
      */
     getUnitDefFootprint?(defId: number): { xsize: number; zsize: number; isMobile: boolean } | undefined;
+    /**
+     * Look up a unit-def's collision/model radius (elmos). Backs
+     * `Spring.GetUnitRadius` — Recoil returns the live `unit->radius`,
+     * which for our streamed units equals the def radius (we don't model
+     * per-unit radius scaling). Returns `undefined` if the def isn't
+     * cached yet.
+     */
+    getUnitDefRadius?(defId: number): number | undefined;
     /**
      * Per-allyteam radar position-error magnitude (in elmos). Matches
      * `Spring.GetAllyTeamRadarErrorSize`. Server-side this is the
@@ -1283,6 +1291,18 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         GetWindowGeometry: () => {
             return [ls.viewport.width, ls.viewport.height, 0, 0];
         },
+        // Recoil: screenSizeX, screenSizeY, screenPosX, screenPosY (the
+        // whole display). In a single-canvas browser client the screen and
+        // the view coincide, so we report the canvas size at origin. The
+        // optional displayIndex / queryUsable args are accepted but ignored
+        // (we have one logical display). When queryUsable is truthy Recoil
+        // returns 8 values; mirror that shape so callers indexing [5..8]
+        // don't read nil.
+        GetScreenGeometry: (_displayIndex?: LuaValue, queryUsable?: LuaValue) => {
+            const base = [ls.viewport.width, ls.viewport.height, 0, 0];
+            return queryUsable ? [...base, ...base] : base;
+        },
+        GetNumDisplays: () => 1,
         GetSpectatingState: () => {
             // Spring returns: spec, fullView, fullSelect.
             // We don't model fullView/fullSelect so always emit false for those.
@@ -1696,6 +1716,15 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             const r = ctx.getUnitDefSensorRadius?.(u.defId, sensor);
             return r ?? 0;
         },
+        // Collision/model radius (elmos). Recoil returns the live
+        // `unit->radius`; our streamed units carry no per-unit radius
+        // scaling, so the def radius is the faithful value. nil for an
+        // unknown unit or a def that hasn't streamed in yet.
+        GetUnitRadius: (id: LuaValue) => {
+            const u = ls.units.get(Number(id));
+            if (!u) return null;
+            return ctx.getUnitDefRadius?.(u.defId) ?? null;
+        },
         // Per-unit position-error parameters (the wandering vector that
         // produces radar drift). Server-only state today — the client
         // never sees the raw vector, only the deceived position. Return
@@ -1992,6 +2021,21 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             }
             return luaTable(...ids);
         },
+        // Recoil signature: (x, z, radius) — a 2D (x/z-plane) cylinder.
+        // Matches the no-Z-flip convention of GetFeaturesInRectangle above
+        // (the feature family stays internally consistent regardless of the
+        // legacy-coord bridge; reconcile both together if a feature query
+        // ever shows a mirrored result on a legacy game).
+        GetFeaturesInCylinder: (x: LuaValue, z: LuaValue, r: LuaValue) => {
+            const cx = Number(x), cz = Number(z), rad = Number(r);
+            const r2 = rad * rad;
+            const ids: number[] = [];
+            for (const [id, f] of ls.features) {
+                const dx = f.x - cx, dz = f.z - cz;
+                if (dx * dx + dz * dz <= r2) ids.push(id);
+            }
+            return luaTable(...ids);
+        },
         GetFeatureDefID: (id: LuaValue) => {
             const f = ls.features.get(Number(id));
             return f ? f.defId : null;
@@ -2233,6 +2277,17 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             return sampleLosPlane(ctx, ls, 'radar', Number(x), flipPosZ(Number(z)),
                 allyTeam !== undefined ? Number(allyTeam) : undefined);
         },
+        // Recoil returns 4 booleans: (inLos||inRadar), inLos, inRadar,
+        // inJammer. We sample the per-allyteam LOS bitmap for the first
+        // three; jammer state isn't streamed yet so inJammer is always
+        // false (DEVIATION — flagged; needs a server-side jammer plane).
+        GetPositionLosState: (x: LuaValue, _y: LuaValue, z: LuaValue, allyTeam?: LuaValue) => {
+            const at = allyTeam !== undefined ? Number(allyTeam) : undefined;
+            const fz = flipPosZ(Number(z));
+            const inLos = sampleLosPlane(ctx, ls, 'los', Number(x), fz, at);
+            const inRadar = sampleLosPlane(ctx, ls, 'radar', Number(x), fz, at);
+            return [inLos || inRadar, inLos, inRadar, false];
+        },
         // Area unit queries: legacy widgets pass LH Z bounds; mirror to
         // RH before comparing against the unit store, which holds wire
         // (= RH) coords.
@@ -2288,6 +2343,25 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             }
             return sorted;
         },
+        // Recoil: (teamID, unitDefID | {unitDefID,...}) → array of the
+        // team's units matching any of the given defs. We hold full
+        // per-unit team+def, so this is a direct filter.
+        GetTeamUnitsByDefs: (_teamId: LuaValue, defs: LuaValue) => {
+            const tid = Number(_teamId ?? ls.identity.myTeam);
+            const wanted = new Set<number>();
+            if (typeof defs === 'number') {
+                wanted.add(defs);
+            } else if (isLuaTable(defs)) {
+                for (const v of defs.items) if (typeof v === 'number') wanted.add(v);
+            } else if (Array.isArray(defs)) {
+                for (const v of defs) if (typeof v === 'number') wanted.add(v);
+            }
+            const ids: number[] = [];
+            for (const [id, u] of ls.units) {
+                if (u.team === tid && wanted.has(u.defId)) ids.push(id);
+            }
+            return luaTable(...ids);
+        },
         GetTeamUnitDefCount: (_teamId: LuaValue, _defId: LuaValue) => {
             const tid = Number(_teamId ?? ls.identity.myTeam);
             const did = Number(_defId ?? 0);
@@ -2304,6 +2378,13 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
 
         // --- Game speed ---
         GetGameSpeed: () => [ls.gameSpeed, ls.gameSpeed, ls.gamePaused],
+        // Recoil: isDoneLoading, isSavedGame, isClientPaused, isSimLagging.
+        // In-game the client has finished loading; we don't support saved
+        // games and don't surface a sim-lag signal here, so the latter two
+        // are false. The local pause flag mirrors GetGameSpeed's 3rd value.
+        GetGameState: (_maxLatency?: LuaValue) => {
+            return [true, false, ls.gamePaused, false];
+        },
         IsGameOver: () => ls.gameOver,
 
         // --- GUI state ---

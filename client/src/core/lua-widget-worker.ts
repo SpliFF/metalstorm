@@ -1171,6 +1171,7 @@ async function init(
                 default:            return undefined;
             }
         },
+        getUnitDefRadius: (defId) => unitDefMap.get(defId)?.radius,
         getUnitDefFootprint: (defId) => {
             const d = unitDefMap.get(defId);
             if (!d) return undefined;
