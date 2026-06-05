@@ -3403,6 +3403,24 @@ function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext, clearColor = true,
 
         if Update then pcall(Update) end
 
+        -- GameStart dispatch (fires once). Spring fires widget:GameStart at
+        -- frame 1; we fire the first time the worker observes frame >= 1.
+        -- A late-booting worker that first sees a higher frame still fires
+        -- once — matching Spring's "missed it, fire on first opportunity"
+        -- behaviour for widgets loaded after the countdown.
+        do
+            local f = (Spring.GetGameFrame and Spring.GetGameFrame()) or 0
+            if f >= 1 and not _gameStartFired then
+                _gameStartFired = true
+                if widgetHandler and widgetHandler.GameStart then
+                    pcall(widgetHandler.GameStart, widgetHandler)
+                end
+                if _SpringWebRunGadgetCallin then
+                    pcall(_SpringWebRunGadgetCallin, 'GameStart')
+                end
+            end
+        end
+
         -- GameFrame dispatch. Server entity-state messages bump
         -- liveState.gameFrame; we forward the latest frame through to
         -- widgetHandler:GameFrame so widgets that gate on the modulo
@@ -5553,7 +5571,24 @@ function gpConnect(msg: GpInitToWorker): void {
         // HTTP, not the connection (server_main.cpp). gpLoadMap (called from
         // gpInit) fetches + builds the terrain; the viewport is registered from
         // onAuthenticated via gpRegisterViewport().
-        onGameOver: (frame) => postToMain({ type: 'gp:gameOver', frame }),
+        onGameOver: (frame) => {
+            postToMain({ type: 'gp:gameOver', frame });
+            // Drive widget:GameOver + gadget-half GameOver. Recoil's
+            // signature is GameOver(winningAllyTeams) — the worker doesn't
+            // receive the winners list (not on the wire), so we pass an
+            // empty table. DEVIATION: winner-dependent end-game widgets see
+            // no winners; revisit if a GameOver winners payload is added.
+            if (runtime) {
+                runtime.doString(
+                    `do local w = {} ` +
+                    `if widgetHandler and widgetHandler.GameOver then ` +
+                    `pcall(widgetHandler.GameOver, widgetHandler, w) end ` +
+                    `if _SpringWebRunGadgetCallin then ` +
+                    `pcall(_SpringWebRunGadgetCallin, 'GameOver', w) end end`,
+                    'gameOver',
+                );
+            }
+        },
         onServerRestart: () => postToMain({ type: 'gp:reload' }),
     });
     gpConnection = conn;
@@ -7878,6 +7913,17 @@ function _SpringWebRunGadgetGameFrame(n)
     for i = 1, #gs do
         local g = gs[i]
         if g.GameFrame then pcall(g.GameFrame, g, n) end
+    end
+end
+
+-- Generic per-callin fan-out to gadget unsynced halves. Used for
+-- GameStart/GameOver and any other low-frequency callin the worker
+-- forwards. Up to three positional args cover every current caller.
+function _SpringWebRunGadgetCallin(name, a, b, c)
+    local gs = gadgetHandler.gadgets
+    for i = 1, #gs do
+        local g = gs[i]
+        if g[name] then pcall(g[name], g, a, b, c) end
     end
 end
 `;
