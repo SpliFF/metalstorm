@@ -5997,6 +5997,10 @@ function gpRunUiPass(): void {
     const savedDepthTest = gl.getParameter(gl.DEPTH_TEST) as boolean;
     const savedDepthMask = gl.getParameter(gl.DEPTH_WRITEMASK) as boolean;
     const savedCull = gl.getParameter(gl.CULL_FACE) as boolean;
+    // A widget may call gl.Viewport / gl.PolygonOffset (BAR read-shim batch);
+    // snapshot so they can't leak into the next world render.
+    const savedViewport = gl.getParameter(gl.VIEWPORT) as Int32Array;
+    const savedPolyOffset = gl.getParameter(gl.POLYGON_OFFSET_FILL) as boolean;
     const savedActiveTex = gl.getParameter(gl.ACTIVE_TEXTURE) as number;
     const savedFBO = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
     // Babylon may leave a post-process render-target FBO bound; the UI must
@@ -6030,6 +6034,8 @@ function gpRunUiPass(): void {
     if (savedBlend) gl.enable(gl.BLEND); else gl.disable(gl.BLEND);
     if (savedDepthTest) gl.enable(gl.DEPTH_TEST); else gl.disable(gl.DEPTH_TEST);
     if (savedCull) gl.enable(gl.CULL_FACE); else gl.disable(gl.CULL_FACE);
+    if (savedPolyOffset) gl.enable(gl.POLYGON_OFFSET_FILL); else gl.disable(gl.POLYGON_OFFSET_FILL);
+    gl.viewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3]);
     gl.depthMask(savedDepthMask);
     (gpEngine as unknown as { wipeCaches: (b?: boolean) => void }).wipeCaches(true);
 }

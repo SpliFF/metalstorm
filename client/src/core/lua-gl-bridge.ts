@@ -322,6 +322,32 @@ export class LuaGLBridge {
         gl['PolygonMode'] = (_face: LuaValue, _mode: LuaValue) => {
             // WebGL2 doesn't support polygon mode — always fill
         };
+        // Recoil gl.Culling(bool) toggles GL_CULL_FACE; gl.Culling(mode)
+        // enables it and sets the cull face (GL_FRONT/GL_BACK).
+        gl['Culling'] = (arg: LuaValue) => this.culling(arg);
+        // Recoil gl.PolygonOffset(bool) | (factor, units). WebGL2 has only
+        // POLYGON_OFFSET_FILL (no LINE/POINT variants — desktop-GL only).
+        gl['PolygonOffset'] = (a: LuaValue, b?: LuaValue) => this.polygonOffset(a, b);
+        // Recoil gl.BlendEquation(mode) / BlendEquationSeparate(rgb, a).
+        gl['BlendEquation'] = (mode: LuaValue) => this.gl.blendEquation(Number(mode));
+        gl['BlendEquationSeparate'] = (rgb: LuaValue, a: LuaValue) =>
+            this.gl.blendEquationSeparate(Number(rgb), Number(a));
+        // Recoil gl.Viewport(x, y, w, h). Safe: gpRunUiPass saves/restores
+        // the viewport around the UI pass so a widget can't leak it into the
+        // world render.
+        gl['Viewport'] = (x: LuaValue, y: LuaValue, w: LuaValue, h: LuaValue) =>
+            this.gl.viewport(Number(x), Number(y), Math.max(0, Number(w)), Math.max(0, Number(h)));
+        // Recoil gl.PointSize(size) → glPointSize. WebGL2 has no glPointSize
+        // (point size is set via gl_PointSize in the vertex shader), and the
+        // bridge's immediate-mode renderer draws no GL_POINTS, so this is a
+        // documented no-op. FIDELITY-STANDIN.
+        gl['PointSize'] = (_size: LuaValue) => {
+            if (!this.warnedPointSize) {
+                this.warnedPointSize = true;
+                console.warn('[gl.PointSize] FIDELITY-STANDIN: no WebGL2 glPointSize; ' +
+                    'no-op (point sizing needs gl_PointSize in a shader).');
+            }
+        };
         gl['PushAttrib'] = (_bits: LuaValue) => { /* state snapshotted by host */ };
         gl['PopAttrib'] = () => { /* state restored by host */ };
         gl['Clear'] = (...args: LuaValue[]) => this.clear(args);
@@ -962,6 +988,32 @@ export class LuaGLBridge {
         // WebGL2 only supports lineWidth(1) on most implementations,
         // but we call it anyway for compliance.
         this.gl.lineWidth(Math.max(1, Number(w)));
+    }
+
+    private warnedPointSize = false;
+
+    private culling(arg: LuaValue): void {
+        const gl = this.gl;
+        if (typeof arg === 'boolean') {
+            if (arg) gl.enable(gl.CULL_FACE); else gl.disable(gl.CULL_FACE);
+        } else if (typeof arg === 'number') {
+            // gl.Culling(GL_FRONT|GL_BACK|GL_FRONT_AND_BACK) — enable + set face.
+            gl.enable(gl.CULL_FACE);
+            gl.cullFace(arg);
+        }
+    }
+
+    private polygonOffset(a: LuaValue, b?: LuaValue): void {
+        const gl = this.gl;
+        // Two-arg form sets the factor/units; one-arg boolean toggles.
+        if (b !== undefined) {
+            gl.enable(gl.POLYGON_OFFSET_FILL);
+            gl.polygonOffset(Number(a), Number(b));
+        } else if (a) {
+            gl.enable(gl.POLYGON_OFFSET_FILL);
+        } else {
+            gl.disable(gl.POLYGON_OFFSET_FILL);
+        }
     }
 
     private textureInfo(handleOrPath: LuaValue): Record<string, number> | null {
