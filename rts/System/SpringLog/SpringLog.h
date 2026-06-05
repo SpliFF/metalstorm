@@ -51,6 +51,10 @@ void springlog_init(const char* processName, uint32_t outputs);
 // --- Configuration ---
 void springlog_set_file(const char* path);
 void springlog_set_min_level(int level);
+// Set a per-section minimum level (Spring.SetLogSectionFilterLevel). Records in
+// `section` below `level` are dropped; sections without an override fall back to
+// the global min level. `level` is a SPRING_LOG_* value.
+void springlog_set_section_min_level(const char* section, int level);
 void springlog_set_outputs(uint32_t outputs);
 
 // --- Runtime state ---

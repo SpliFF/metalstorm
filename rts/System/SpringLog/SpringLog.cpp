@@ -7,8 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <atomic>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // --- Internal state ---
@@ -18,6 +20,26 @@ static uint32_t g_outputs = SPRING_LOG_OUTPUT_CONSOLE;
 static int g_minLevel = SPRING_LOG_NOTICE;
 static FILE* g_logFile = nullptr;
 static std::mutex g_mutex;
+
+// Per-section min-level overrides (Spring.SetLogSectionFilterLevel). A section
+// with an entry uses that threshold instead of the global g_minLevel — it may
+// be lower (more verbose for that section) or higher. The atomic flag keeps
+// the hot logging path lock-free in the common case (no overrides set).
+static std::unordered_map<std::string, int> g_sectionLevels;
+static std::mutex g_sectionMutex;
+static std::atomic<bool> g_haveSectionFilters{false};
+
+// Effective min level for a section: the per-section override if one is set,
+// otherwise the global default.
+static int EffectiveMinLevel(const char* section) {
+    if (!g_haveSectionFilters.load(std::memory_order_relaxed))
+        return g_minLevel;
+    if (section == nullptr)
+        return g_minLevel;
+    std::lock_guard<std::mutex> lock(g_sectionMutex);
+    const auto it = g_sectionLevels.find(section);
+    return (it != g_sectionLevels.end()) ? it->second : g_minLevel;
+}
 
 // Process-global instance context — stamped onto every record (see
 // springlog_set_context). room_id 0 / empty game_id == "no instance".
@@ -95,6 +117,13 @@ void springlog_set_min_level(int level) {
     g_minLevel = level;
 }
 
+void springlog_set_section_min_level(const char* section, int level) {
+    if (section == nullptr) return;
+    std::lock_guard<std::mutex> lock(g_sectionMutex);
+    g_sectionLevels[section] = level;
+    g_haveSectionFilters.store(true, std::memory_order_relaxed);
+}
+
 void springlog_set_outputs(uint32_t outputs) {
     g_outputs = outputs;
 }
@@ -129,8 +158,8 @@ void springlog_remove_sink(int id) {
 
 void springlog_logv(int level, const char* section, const char* scope,
                     int frame, const char* fmt, va_list args) {
-    if (level < g_minLevel) return;
     if (!section) section = "";
+    if (level < EffectiveMinLevel(section)) return;
     if (!scope) scope = "";
     if (frame < 0) frame = tl_frame;
 
@@ -175,7 +204,7 @@ void springlog_logv(int level, const char* section, const char* scope,
 
 void springlog_emit(const SpringLogRecord* record) {
     if (!record) return;
-    if (record->level < g_minLevel) return;
+    if (record->level < EffectiveMinLevel(record->section)) return;
 
     std::lock_guard<std::mutex> lock(g_mutex);
 

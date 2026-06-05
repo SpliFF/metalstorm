@@ -31,6 +31,36 @@ namespace {
 // that gadgets actually invoke. Routes through springlog_log so all
 // sinks (stderr, file, network) see the message. `level` can be a
 // string ("error"/"warning"/"info"/"debug") or an integer from the
+// Map a Lua log-level argument to a SPRING_LOG_* value. The LOG.* table binds
+// Spring's legacy 20..60 scale (LOG.INFO = 30, LOG.WARNING = 40, …); a level
+// name string ("info"/"warning"/…) is also accepted. Returns `dflt` if the
+// argument is neither a recognised number nor name.
+static int ParseSpringLogLevel(lua_State* L, int idx, int dflt)
+{
+    const int t = lua_type(L, idx);
+    if (t == LUA_TNUMBER) {
+        const int lvl = static_cast<int>(lua_tonumber(L, idx));
+        if      (lvl >= 60) return SPRING_LOG_FATAL;
+        else if (lvl >= 50) return SPRING_LOG_ERROR;
+        else if (lvl >= 40) return SPRING_LOG_WARNING;
+        else if (lvl >= 30) return SPRING_LOG_NOTICE;
+        else if (lvl >= 20) return SPRING_LOG_INFO;
+        else                return SPRING_LOG_DEBUG;
+    }
+    if (t == LUA_TSTRING) {
+        const char* s = lua_tostring(L, idx);
+        if (s) switch (s[0]) {
+            case 'f': case 'F': return SPRING_LOG_FATAL;
+            case 'e': case 'E': return SPRING_LOG_ERROR;
+            case 'w': case 'W': return SPRING_LOG_WARNING;
+            case 'n': case 'N': return SPRING_LOG_NOTICE;
+            case 'i': case 'I': return SPRING_LOG_INFO;
+            case 'd': case 'D': return SPRING_LOG_DEBUG;
+        }
+    }
+    return dflt;
+}
+
 // LOG table the engine already binds (LOG.INFO = 30, LOG.WARNING = 40, …).
 int Log(lua_State* L)
 {
@@ -43,32 +73,9 @@ int Log(lua_State* L)
         if (s && s[0] != '\0') section = s;
     }
 
-    // Map Lua level to SpringLogLevel. Distinguish number from string
-    // explicitly because lua_isstring returns true for numbers too in
-    // Lua 5.4 (auto-coerce).
-    int logLevel = SPRING_LOG_INFO;
-    const int levelType = lua_type(L, 2);
-    if (levelType == LUA_TNUMBER) {
-        const int lvl = static_cast<int>(lua_tonumber(L, 2));
-        if      (lvl >= 60) logLevel = SPRING_LOG_FATAL;
-        else if (lvl >= 50) logLevel = SPRING_LOG_ERROR;
-        else if (lvl >= 40) logLevel = SPRING_LOG_WARNING;
-        else if (lvl >= 30) logLevel = SPRING_LOG_NOTICE;
-        else if (lvl >= 20) logLevel = SPRING_LOG_INFO;
-        else                logLevel = SPRING_LOG_DEBUG;
-    } else if (levelType == LUA_TSTRING) {
-        const char* s = lua_tostring(L, 2);
-        if (s) {
-            switch (s[0]) {
-                case 'f': case 'F': logLevel = SPRING_LOG_FATAL;   break;
-                case 'e': case 'E': logLevel = SPRING_LOG_ERROR;   break;
-                case 'w': case 'W': logLevel = SPRING_LOG_WARNING; break;
-                case 'n': case 'N': logLevel = SPRING_LOG_NOTICE;  break;
-                case 'i': case 'I': logLevel = SPRING_LOG_INFO;    break;
-                case 'd': case 'D': logLevel = SPRING_LOG_DEBUG;   break;
-            }
-        }
-    }
+    // Map Lua level to SPRING_LOG_* (number on Spring's 20..60 scale, or a
+    // level-name string); default INFO for unrecognised values.
+    const int logLevel = ParseSpringLogLevel(L, 2, SPRING_LOG_INFO);
 
     // Build the message string from all remaining arguments.
     std::string msg;
@@ -318,6 +325,22 @@ int SendLuaRulesMsg(lua_State* L)
     return 0;
 }
 
+// Spring.SetLogSectionFilterLevel(section, level) — set the minimum log level
+// for a section so subsequent records below it are dropped (Recoil parity:
+// log_frontend_register_runtime_section). Wired into libspringlog's per-section
+// filter; the section a record carries is what gadgets pass to Spring.Log(...)
+// / the engine's LOG_SECTION, and is stored in the log server's `section`
+// column. BAR's game_initial_spawn.lua calls this in gadget:Initialize().
+int SetLogSectionFilterLevel(lua_State* L)
+{
+    const char* section = luaL_checkstring(L, 1);
+    const int level = ParseSpringLogLevel(L, 2, -1);
+    if (level < 0)
+        return luaL_error(L, "Incorrect arguments to Spring.SetLogSectionFilterLevel(section, level)");
+    springlog_set_section_min_level(section, level);
+    return 0;
+}
+
 /// Register a noop stub for a rendering/client API function.
 #define REGISTER_NOOP_STUB(funcName) \
     lua_pushstring(L, #funcName); \
@@ -334,6 +357,7 @@ bool LuaUnsyncedCtrl::PushEntries(lua_State* L)
     LuaPushNamedCFunc(L, "Log",   Log);
     LuaPushNamedCFunc(L, "Error", Error);
     LuaPushNamedCFunc(L, "SendLuaRulesMsg", SendLuaRulesMsg);
+    LuaPushNamedCFunc(L, "SetLogSectionFilterLevel", SetLogSectionFilterLevel);
 
     // Server-side noop stubs for client/render/audio APIs.
     // See the ServerNoopStub template above for rationale.
