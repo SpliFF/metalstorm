@@ -295,6 +295,45 @@ void CSimulation::FireGameStart()
     if (!scriptingLoaded || gameStarted)
         return;
 
+    // --- Assign team leaders (faithful to Recoil's GameSetup TeamLeader) ---
+    //
+    // Recoil populates every team's `leader` from the start script's
+    // `GAME\TEAM\X\TeamLeader` field before the sim runs: human teams get
+    // their controlling player, AI teams get their hosting player. We build no
+    // start script, so the leader stays at its -1 default and GetTeamInfo()
+    // reports "no leader" for every team. Games that gate liveness on it then
+    // misbehave: BAR's game_end.lua treats `hasLeader == false` as a wiped-out
+    // team, marks every allyteam dead, and fires a premature GameOver (~frame
+    // 120). Do the equivalent assignment here, now that the whole roster has
+    // connected — a team with active human players takes the lowest as leader
+    // (via CTeam::AddPlayer, the same join path Recoil uses); an AI team takes
+    // the host player (the lowest active human, our single-host model — matches
+    // the assumption already baked into GetAIInfo's hostPlayer = leader).
+    {
+        int hostPlayer = -1;
+        for (int p = 0; p < playerHandler.ActivePlayers(); ++p) {
+            const CPlayer* pl = playerHandler.Player(p);
+            if (pl != nullptr && pl->active && !pl->IsSpectator()) {
+                hostPlayer = p;
+                break;
+            }
+        }
+        const int numTeams = teamHandler.ActiveTeams();
+        for (int t = 0; t < numTeams; ++t) {
+            if (t == teamHandler.GaiaTeamID())
+                continue;
+            CTeam* team = teamHandler.Team(t);
+            if (team == nullptr || team->HasLeader())
+                continue;
+            const std::vector<int> teamPlayers = playerHandler.ActivePlayersInTeam(t);
+            if (!teamPlayers.empty()) {
+                team->AddPlayer(teamPlayers.front());
+            } else if (gAITeams != nullptr && gAITeams->count(t) > 0 && hostPlayer >= 0) {
+                team->SetLeader(hostPlayer);
+            }
+        }
+    }
+
     springlog_log(SPRING_LOG_NOTICE, "sim", "", springlog_get_frame(),
                   "firing GameStart");
     eventHandler.GameStart();
