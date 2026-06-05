@@ -969,6 +969,24 @@ async function init(
     await prefetchAllGameFiles(baseUrl);
     postLog(2, `[LuaUI] init step 1/8 done: VFS ${vfsFiles.size} files prefetched`);
 
+    // 1b. Fetch game identity from the lobby's /api/games discovery (reads
+    // the game's modinfo) so the Spring `Game` table reflects the real game
+    // instead of a hardcoded default (PLAN-bar.md A3). Best-effort: on any
+    // failure the Game table falls back to gameId.
+    let gameMeta: { displayName?: string; shortName?: string; version?: string; description?: string } = {};
+    try {
+        const resp = await fetch(`${lobbyUrl}/api/games`);
+        if (resp.ok) {
+            const games = await resp.json();
+            if (Array.isArray(games)) {
+                const g = games.find((x: any) => x?.id === gameId);
+                if (g) gameMeta = g;
+            }
+        }
+    } catch (e) {
+        postLog(2, `[LuaUI] /api/games fetch failed (${String(e)}) — Game table falls back to gameId`);
+    }
+
     // 2. Obtain the GL context. GW4-c6 shared mode: reuse the game-processor
     // worker's Babylon context (the LuaUI draws into the same framebuffer as
     // the world, so DrawWorld widgets can depth-test against terrain + units).
@@ -1053,6 +1071,11 @@ async function init(
         maxHeight: mapData.maxHeight,
         squareSize: mapData.squareSize,
         vfsFiles,
+        gameId,
+        modName: gameMeta.displayName,
+        modShortName: gameMeta.shortName,
+        modVersion: gameMeta.version,
+        modDesc: gameMeta.description,
         gameRulesParams: new Map(),
         getGameSeconds: () => (performance.now() / 1000) - startTime,
         giveOrder: (cmdId, unitIds, params, options) => {
@@ -5572,15 +5595,15 @@ function gpInit(msg: GpInitToWorker): void {
     gpMuzzleFlare = new MuzzleFlareRenderer(scene, camera);
 
     // GW4-c4: world entity rendering (ports main.ts@d6301137f7^ L480–595).
-    // The per-game shader lighting style normally comes from modinfo.lua's
-    // `lighting` field via the lobby games list; the worker has no lobby list,
-    // so default to 'gameplay' (main's own fallback). ZK routes through the
-    // ported defaultMaterialTemplate shader regardless (setUseZKMaterial),
-    // which is what matters for the primary target.
-    // DEVIATION (c4): lightingStyle is hardcoded 'gameplay' here — fold the
-    // real modinfo value into gp:init in a later checkpoint if a non-ZK game
-    // needs its authored built-in-material lighting style.
-    setLightingStyle('gameplay');
+    // The per-game shader lighting style comes from modinfo.lua's `lighting`
+    // field, surfaced via the lobby's /api/games and plumbed through gp:init
+    // (PLAN-bar.md A4). Defaults to 'gameplay' when absent (main's fallback).
+    setLightingStyle(msg.lighting || 'gameplay');
+    // DEVIATION: the ZK team-color material (zk-model-material.ts) is gated on
+    // the game id. BAR ships GL4 CUS materials we can't render on WebGL2 (§4),
+    // so it correctly falls to the engine-default material; only ZK has a
+    // ported material. A data-driven capability gate (PLAN-bar.md A4) is still
+    // owed — both current games resolve identically under it.
     setUseZKMaterial(msg.gameId === 'zk');
 
     gpPresentationClock = new PresentationClock();

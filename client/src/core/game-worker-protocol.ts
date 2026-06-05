@@ -39,6 +39,14 @@ export interface GpInitToWorker {
     token: string;
     gameId: string;
     mapId: string;
+    /**
+     * Team-color shader lighting style from the game's modinfo (`lighting`
+     * field), surfaced via the lobby's `/api/games`. `'gameplay'` (default)
+     * or `'realistic'`. Plumbed so the worker renders each game's authored
+     * style instead of a hardcoded default (PLAN-bar.md A4). Optional —
+     * absent ⇒ `'gameplay'`.
+     */
+    lighting?: string;
     /** Content-addressed defs path the server baked at startup (`''` = none). */
     defsCacheKey: string;
     /** Build stamp for `stampUrl()` asset versioning from inside the worker. */

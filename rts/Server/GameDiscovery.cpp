@@ -63,6 +63,11 @@ bool LoadOne(const fs::path& folder, GameDiscovery::GameInfo& out) {
     std::string name = cfg->GetString("name", "");
     std::string description = cfg->GetString("description", "");
     std::string version = cfg->GetString("version", "");
+    // modinfo authors differ on casing — ZK uses `shortname`, BAR uses
+    // `shortName`. GetString is case-sensitive, so try both.
+    std::string shortName = cfg->GetString("shortName", "");
+    if (shortName.empty())
+        shortName = cfg->GetString("shortname", "");
     // `lighting` selects the client-side shader variant. Default
     // `"gameplay"` matches the half-Lambert + 0.45-ambient formula the
     // codebase shipped with; `"realistic"` switches to true Lambert
@@ -83,6 +88,13 @@ bool LoadOne(const fs::path& folder, GameDiscovery::GameInfo& out) {
 
     out.id = ToLower(folder.filename().string());
     out.displayName = name;
+    // Fall back to the uppercased id when modinfo omits a short name.
+    if (shortName.empty()) {
+        shortName = out.id;
+        for (auto& c : shortName)
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    out.shortName = shortName;
     out.description = description;
     out.version = version;
     out.lighting = lighting;

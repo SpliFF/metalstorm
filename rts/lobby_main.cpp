@@ -1097,6 +1097,7 @@ int main(int argc, char* argv[])
             first = false;
             json += "{\"id\":\"" + HttpAuth::JsonEscape(g.id) + "\""
                 + ",\"displayName\":\"" + HttpAuth::JsonEscape(g.displayName) + "\""
+                + ",\"shortName\":\"" + HttpAuth::JsonEscape(g.shortName) + "\""
                 + ",\"description\":\"" + HttpAuth::JsonEscape(g.description) + "\""
                 + ",\"version\":\"" + HttpAuth::JsonEscape(g.version) + "\""
                 + ",\"lighting\":\"" + HttpAuth::JsonEscape(g.lighting) + "\"}";

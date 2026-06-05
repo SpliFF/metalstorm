@@ -449,6 +449,7 @@ data/
 | `/api/maps/source/<mapId>/*` | Raw map source files (Lua, images) |
 | `/api/maps/data/<mapId>/*` | Preprocessed map assets (heightmap, tiles, feature models) |
 | `/api/maps/thumb/<mapId>` | Map thumbnail (WebP/PNG) |
+| `/api/games` | JSON list of discovered games (`id`, `displayName`, `shortName`, `description`, `version`, `lighting` — from each game's modinfo via GameDiscovery). Drives the lobby dropdown and the worker's `Game` table (modName/modShortName/…) + lighting style. |
 | `/api/vfs/game/<gameId>/*` | Game source files (Lua scripts, images) |
 | `/api/games/data/<gameId>/*` | Preprocessed game assets (unit models, textures) |
 | `/api/processes` | JSON list of game server instances (pid, port, state, map, game) |

@@ -469,6 +469,21 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         if (def.key.startsWith('gfx.')) gfx[def.key] = clientSettings.get(def.key);
     }
 
+    // Fetch this game's team-color lighting style from the lobby discovery
+    // (modinfo `lighting`) so the worker renders the game's authored style
+    // instead of a hardcoded default (PLAN-bar.md A4). Best-effort.
+    let gameLighting = 'gameplay';
+    if (gameId) {
+        try {
+            const resp = await fetch(`${lobbyHttpUrl}/api/games`);
+            if (resp.ok) {
+                const games = await resp.json();
+                const g = Array.isArray(games) ? games.find((x: any) => x?.id === gameId) : null;
+                if (g?.lighting) gameLighting = g.lighting;
+            }
+        } catch { /* default 'gameplay' */ }
+    }
+
     const dpr = window.devicePixelRatio || 1;
     const offscreen = canvas.transferControlToOffscreen();
     gameWorker = new GameWorker();
@@ -597,6 +612,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         token: localStorage.getItem('springrts-token') ?? '',
         gameId,
         mapId,
+        lighting: gameLighting,
         defsCacheKey: '',
         buildStamp: CONFIG.buildStamp,
         width: window.innerWidth,

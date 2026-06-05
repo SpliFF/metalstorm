@@ -40,6 +40,11 @@ struct GameInfo {
     /// back to the folder name if the field is missing or empty.
     std::string displayName;
 
+    /// Short name from modinfo.lua's `shortName`/`shortname` field
+    /// (e.g. "ZK", "BYAR"). Surfaced as `Game.modShortName` to widgets.
+    /// Falls back to the uppercased `id` when the field is missing.
+    std::string shortName;
+
     /// Optional description from modinfo.lua's `description` field.
     /// May be empty.
     std::string description;

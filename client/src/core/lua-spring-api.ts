@@ -41,6 +41,18 @@ export interface SpringAPIContext {
      * synchronously.
      */
     vfsFiles: Map<string, string>;
+    /**
+     * Game identity from the lobby's `/api/games` discovery (which reads
+     * the game's modinfo). Used to populate the `Game` table's
+     * modName/modShortName/modVersion/modDesc/gameName so widgets see the
+     * real game (e.g. "Beyond All Reason") instead of a hardcoded default.
+     * All optional — fall back to gameId when absent.
+     */
+    gameId?: string;
+    modName?: string;
+    modShortName?: string;
+    modVersion?: string;
+    modDesc?: string;
     /** Optional game rules params (stubbed lookup). */
     gameRulesParams?: Map<string, number>;
     /** getGameSeconds callback — usually `() => Date.now()/1000 - startTime`. */
@@ -1059,13 +1071,15 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         mapDescription: '',
         extractorRadius: 0,
         maxUnits: 5000,
-        // Game metadata — engine provides these from the mod archive
-        modName: 'Zero-K',
-        modShortName: 'ZK',
-        modDesc: '',
-        modVersion: '1.0',
-        gameName: 'Zero-K',
-        gameVersion: '1.0',
+        // Game metadata — populated from the lobby's /api/games discovery
+        // (which reads the game's modinfo). Falls back to gameId, never a
+        // hardcoded game name (see PLAN-bar.md A3).
+        modName: ctx.modName || ctx.gameId || '',
+        modShortName: ctx.modShortName || (ctx.gameId ? ctx.gameId.toUpperCase() : ''),
+        modDesc: ctx.modDesc || '',
+        modVersion: ctx.modVersion || '',
+        gameName: ctx.modName || ctx.gameId || '',
+        gameVersion: ctx.modVersion || '',
         mapName: '',
         mapHumanName: '',
         // Armor types — indexed array; widgets use this to build damage tables
