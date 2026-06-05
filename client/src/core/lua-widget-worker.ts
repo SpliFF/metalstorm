@@ -119,6 +119,51 @@ const vfsPathMap = new Map<string, string>();
 const vfsDirCache = new Map<string, string[]>();
 const vfsSubdirCache = new Map<string, string[]>();
 
+// FIDELITY-STANDIN: pruned-audio DirList extension swap.
+//
+// The gameconverter re-encodes every `sounds/**` (+ `LuaUI/Sounds/**`)
+// source to `.webm` and DELETES the source (tools/gameconverter/main.cpp).
+// Games that *resolve* sound paths cope — audio.ts `normalizeSoundPath`
+// rewrites `.wav`/`.ogg`/… → `.webm` at playback — but games that *parse the
+// filename out of `VFS.DirList`* break: BAR's `gamedata/sounds.lua` does
+// `string.find(fileName, ".wav") - 1` and crashes (arithmetic on nil) on a
+// `.webm` entry. We present pruned audio under its authored extension so
+// DirList matches what the game shipped; the actual byte fetch still resolves
+// `.webm`. The original extension is unrecoverable once the source is pruned,
+// so we assume `.wav` (the dominant Spring convention; BAR ships only `.wav`).
+// The general fix is for the converter to record the source extension — until
+// then a pruned `.ogg`-only game would mis-present as `.wav` (warned once).
+// Applied ONLY when no sibling source file is present in the same directory,
+// so games that keep their sources (e.g. ZK) are left exactly as-is.
+const AUDIO_SOURCE_EXTS = ['.wav', '.ogg', '.mp3', '.flac', '.m4a', '.aac'];
+let warnedAudioDirSwap = false;
+function presentDirListEntries(dirKey: string, entries: string[]): string[] {
+    if (!dirKey.includes('sounds/')) return entries;
+    // Stems that already have a real (un-pruned) source file in this dir.
+    const sourceStems = new Set<string>();
+    for (const f of entries) {
+        const lf = f.toLowerCase();
+        for (const ext of AUDIO_SOURCE_EXTS) {
+            if (lf.endsWith(ext)) { sourceStems.add(lf.slice(0, -ext.length)); break; }
+        }
+    }
+    let swapped = false;
+    const out = entries.map(f => {
+        if (!f.toLowerCase().endsWith('.webm')) return f;
+        const stem = f.slice(0, -'.webm'.length);
+        if (sourceStems.has(stem.toLowerCase())) return f; // source kept → leave .webm
+        swapped = true;
+        return stem + '.wav';
+    });
+    if (swapped && !warnedAudioDirSwap) {
+        warnedAudioDirSwap = true;
+        postLog(2, '[VFS] FIDELITY-STANDIN: presenting pruned .webm audio as .wav in ' +
+            'VFS.DirList (source extension lost to converter prune; assuming .wav). ' +
+            'Playback still resolves .webm. General fix: record source ext in the converter.');
+    }
+    return out;
+}
+
 function vfsIndexPath(path: string): void {
     vfsPathMap.set(path.toLowerCase(), path);
 
@@ -4082,7 +4127,7 @@ function installVFS(rt: LuaRuntime): void {
 
     rt.setGlobal('_vfsDirList', (dir: LuaValue) => {
         const d = String(dir).toLowerCase();
-        return luaTable(...(vfsDirCache.get(d) ?? []));
+        return luaTable(...presentDirListEntries(d, vfsDirCache.get(d) ?? []));
     });
 
     rt.setGlobal('_vfsSubDirs', (dir: LuaValue) => {
