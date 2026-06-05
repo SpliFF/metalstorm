@@ -2266,8 +2266,39 @@ int LuaSyncedRead::GetPlayerControlledUnit(lua_State* L)
  */
 int LuaSyncedRead::GetAIInfo(lua_State* L)
 {
-	// ExternalAI system removed; no AI info available
-	return 0;
+	// The ExternalAI (skirmish) plumbing is removed, but AI teams ARE tracked
+	// in gAITeams (teamID -> AI name; see GetTeamInfo, which reports isAI=true
+	// for them). Games read this: BAR's game_end.lua does
+	// `select(3, GetAIInfo(teamID))` and indexes a table by that host playerID,
+	// so returning 0 values made it index `nil` and the whole synced LuaRules
+	// state failed to initialise. Mirror upstream's value ORDER
+	// (skirmishAIId, name, hostPlayer, shortName, version) with the info we
+	// have: the team's leader is the hosting player in our single-host model.
+	const int teamID = luaL_checkint(L, 1);
+	if (!teamHandler.IsValidTeam(teamID))
+		return 0;
+
+	std::string aiName;
+	if (gAITeams != nullptr) {
+		const auto it = gAITeams->find(teamID);
+		if (it == gAITeams->end())
+			return 0;  // not an AI team
+		aiName = it->second;
+	} else {
+		return 0;
+	}
+
+	const CTeam* team = teamHandler.Team(teamID);
+	int hostPlayer = (team != nullptr) ? team->GetLeader() : 0;
+	if (hostPlayer < 0)
+		hostPlayer = 0;  // host playerID must be non-nil (table index)
+
+	lua_pushnumber(L, teamID);            // skirmishAIId (synthetic — one AI/team)
+	lua_pushsstring(L, aiName);           // name
+	lua_pushnumber(L, hostPlayer);        // hostPlayer (the slot hosting the AI)
+	lua_pushsstring(L, aiName);           // shortName
+	lua_pushsstring(L, std::string("0.1")); // version
+	return 5;
 }
 
 

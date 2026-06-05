@@ -189,6 +189,13 @@ class CSplitLuaHandle
 		}
 
 		bool RecvLuaMsg(const std::string& msg, int playerID) {
+			// Guard against a dead synced state: if LuaRules/main.lua failed to
+			// initialise (KillLua → L == nullptr), RecvLuaMsg would deref a null
+			// lua_State and SIGSEGV. A client-sent LuaRulesMsg, or the
+			// SendLuaRulesMsg loopback, must not crash the server when the game's
+			// synced Lua never came up.
+			if (!syncedLuaHandle.IsValid())
+				return false;
 			return syncedLuaHandle.RecvLuaMsg(msg, playerID);
 		}
 
