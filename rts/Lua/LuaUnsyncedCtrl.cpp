@@ -382,6 +382,15 @@ bool LuaUnsyncedCtrl::PushEntries(lua_State* L)
     LuaPushNamedCFunc(L, "SetMouseCursor", SilentNoop);
     LuaPushNamedCFunc(L, "WarpMouse", SilentNoop);
 
+    // Top-level unit render/selection/minimap visibility controls — client
+    // side; no-ops on the headless server. These are distinct from the
+    // Spring.UnitRendering subtable below (BAR's game_initial_spawn calls the
+    // top-level Spring.SetUnitNoDraw during the commander spawn, not
+    // Spring.UnitRendering.SetUnitNoDraw).
+    LuaPushNamedCFunc(L, "SetUnitNoDraw", SilentNoop);
+    LuaPushNamedCFunc(L, "SetUnitNoSelect", SilentNoop);
+    LuaPushNamedCFunc(L, "SetUnitNoMinimap", SilentNoop);
+
     // Timing functions (used for profiling in gadgets)
     LuaPushNamedCFunc(L, "GetTimer", NoopGetTimer);
     LuaPushNamedCFunc(L, "DiffTimers", NoopDiffTimers);
