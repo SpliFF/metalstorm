@@ -568,8 +568,53 @@ int LuaParser::TimeCheck(lua_State* L)
 int LuaParser::RandomSeed(lua_State* L) { return (DummyRandomSeed(L)); }
 int LuaParser::Random(lua_State* L)
 {
-	lua_pushnumber(L, gsRNG.NextFloat());
-	return 1;
+	// Faithful 1:1 port of Recoil's LuaParser::Random — handle the 0/1/2
+	// argument forms (the old stub ignored args and always returned a float
+	// in [0,1), so `math.random(1, 2)` returned e.g. 0.37 and any def doing
+	// `t[math.random(1, n)]` indexed a nil slot — BAR's lootboxnano.lua
+	// crashed exactly this way during unitdef parsing). The defs parser runs
+	// in a synced context (Simulation.cpp SetupLua(true, true)), so this is
+	// the synced RNG path; non-synced parsers still get DummyRandom.
+	switch (lua_gettop(L)) {
+		case 0: {
+			lua_pushnumber(L, gsRNG.NextFloat());
+			return 1;
+		} break;
+
+		case 1: {
+			if (lua_isnumber(L, 1)) {
+				const int u = lua_toint(L, 1);
+
+				if (u < 1)
+					luaL_error(L, "error: too small upper limit (%d) given to math.random(), should be >= 1 {LuaParser}", u);
+
+				lua_pushnumber(L, 1 + gsRNG.NextInt(u));
+				return 1;
+			}
+		} break;
+
+		case 2: {
+			if (lua_isnumber(L, 1) && lua_isnumber(L, 2)) {
+				const int lower = lua_toint(L, 1);
+				const int upper = lua_toint(L, 2);
+
+				if (lower > upper)
+					luaL_error(L, "Empty interval in math.random() {LuaParser}");
+
+				const float diff = (upper - lower);
+				const float r = gsRNG.NextFloat();
+
+				lua_pushnumber(L, std::clamp(lower + int(r * (diff + 1)), lower, upper));
+				return 1;
+			}
+		} break;
+
+		default: {
+		} break;
+	}
+
+	luaL_error(L, "Incorrect arguments to math.random() {LuaParser}");
+	return 0;
 }
 
 int LuaParser::DummyRandomSeed(lua_State* L) { return 0; }
