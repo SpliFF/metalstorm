@@ -3708,8 +3708,26 @@ function installEngineGlobals(
     (springGlobals.Spring as Record<string, LuaValue>).SetDrawGroundDeprecated = (_show: LuaValue) => undefined;
     (springGlobals.Spring as Record<string, LuaValue>).GetFrameTimeOffset = () => 0;
     (springGlobals.Spring as Record<string, LuaValue>).IsGodModeEnabled = () => false;
-    (springGlobals.Spring as Record<string, LuaValue>).SetSunLighting = (_params: LuaValue) => undefined;
-    (springGlobals.Spring as Record<string, LuaValue>).SetAtmosphere = (_params: LuaValue) => undefined;
+    // ── Map-rendering runtime setters (LuaUnsyncedCtrl) ──────────────
+    // FIDELITY-STANDIN: BAR's lighting/water/atmosphere adjuster widgets
+    // (gui_options, map_lighting_adjuster, …) drive these ~96× to retune the
+    // scene at runtime. They're client-only rendering (sanctioned deviation —
+    // see feedback_lighting_client_only), but the worker scene-lighting bridge
+    // doesn't yet accept live param pushes, so we no-op rather than crash the
+    // caller (the worker Spring table has no catch-all → a nil call errors).
+    // Applying these to the live sun/ambient/fog/water is deferred rendering
+    // work (PLAN-lighting / PLAN.md Stage 1). Loud per the no-silent-failures
+    // principle; postLog de-dupes so it warns effectively once.
+    const mapRenderStandin = (fn: string) => (..._args: LuaValue[]) => {
+        postLog(2, `[Spring] FIDELITY-STANDIN: ${fn} not applied to the live ` +
+            `scene yet (client-only map rendering pending — PLAN.md Stage 1); no-op.`);
+        return undefined;
+    };
+    (springGlobals.Spring as Record<string, LuaValue>).SetSunLighting = mapRenderStandin('SetSunLighting');
+    (springGlobals.Spring as Record<string, LuaValue>).SetSunDirection = mapRenderStandin('SetSunDirection');
+    (springGlobals.Spring as Record<string, LuaValue>).SetAtmosphere = mapRenderStandin('SetAtmosphere');
+    (springGlobals.Spring as Record<string, LuaValue>).SetWaterParams = mapRenderStandin('SetWaterParams');
+    (springGlobals.Spring as Record<string, LuaValue>).SetMapRenderingParams = mapRenderStandin('SetMapRenderingParams');
     (springGlobals.Spring as Record<string, LuaValue>).SetCameraOffset = (_x: LuaValue, _y: LuaValue, _z: LuaValue, _tx: LuaValue, _ty: LuaValue, _tz: LuaValue) => undefined;
     // GetTeamStartPosition / GetAllyTeamStartBox are implemented in
     // buildSpringGlobals (lua-spring-api.ts), reading liveState fed by the
