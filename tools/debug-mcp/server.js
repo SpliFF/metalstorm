@@ -38,7 +38,13 @@ const AUTH_PASS = process.env.SPRING_PASS || 'admin';
 // --- Auth token cache ---
 let authToken = process.env.SPRING_TOKEN || '';
 
-async function ensureAuth() {
+// `force` clears any cached token first. Game/lobby session rows live in
+// data/spring-server.db and are wiped on a DB reset/migration or expire after
+// 24h; a long-lived MCP process otherwise keeps serving a dead token and every
+// authed call 401s until the MCP restarts. Callers retry once with force=true
+// on a 401 (see authedFetch) so the MCP self-heals.
+async function ensureAuth(force = false) {
+    if (force) authToken = '';
     if (authToken) return authToken;
     try {
         const resp = await fetch(`${LOBBY_URL}/api/auth/login`, {
@@ -64,6 +70,21 @@ async function ensureAuth() {
         }
     } catch { /* fall through */ }
     return '';
+}
+
+// Fetch with a Bearer token, transparently re-authing once on a 401. `makeReq`
+// receives the current token and returns the fetch Promise. This is the single
+// choke point that makes every authed MCP call (exec, api_request, restart)
+// recover from a stale cached token without a manual MCP restart.
+async function authedFetch(makeReq) {
+    let token = await ensureAuth();
+    if (!token) throw new Error('Not authenticated — set SPRING_TOKEN or SPRING_USER/SPRING_PASS');
+    let resp = await makeReq(token);
+    if (resp.status === 401) {
+        token = await ensureAuth(true);   // force a fresh login, drop the dead token
+        if (token) resp = await makeReq(token);
+    }
+    return resp;
 }
 
 // --- Game server discovery ---
@@ -142,16 +163,14 @@ function resolveCaseInsensitive(base, rel) {
 }
 
 async function execOnServer(serverUrl, scope, code) {
-    const token = await ensureAuth();
-    if (!token) throw new Error('Not authenticated — set SPRING_TOKEN or SPRING_USER/SPRING_PASS');
-    const resp = await fetch(`${serverUrl}/api/exec`, {
+    const resp = await authedFetch(token => fetch(`${serverUrl}/api/exec`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${token}`,
         },
         body: JSON.stringify({ scope, code }),
-    });
+    }));
     if (!resp.ok) {
         const text = await resp.text();
         throw new Error(`exec failed (${resp.status}): ${text}`);
@@ -960,14 +979,13 @@ async function executeTool(name, args) {
                     return 'No game servers found. Is the lobby running and is a game in progress?';
                 return `No active game server found. Available: ${servers.map(s => `room ${s.room_id} (${s.state})`).join(', ')}`;
             }
-            const token = await ensureAuth();
-            const resp = await fetch(`${server.url}/api/restart`, {
+            const resp = await authedFetch(token => fetch(`${server.url}/api/restart`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
                 },
-            });
+            }));
             if (!resp.ok) {
                 const text = await resp.text();
                 return `Restart failed (${resp.status}): ${text}`;
@@ -1180,10 +1198,6 @@ async function executeTool(name, args) {
             const method = (args.method || 'GET').toUpperCase();
             const headers = { ...(args.headers || {}) };
             const wantAuth = args.auth !== false;
-            if (wantAuth) {
-                const token = await ensureAuth();
-                if (token) headers['Authorization'] = `Bearer ${token}`;
-            }
 
             let body;
             if (args.body !== undefined && method !== 'GET' && method !== 'DELETE') {
@@ -1195,7 +1209,14 @@ async function executeTool(name, args) {
                 }
             }
 
-            const resp = await fetch(url, { method, headers, body });
+            // Authed requests re-auth once on a 401 via authedFetch; unauthed
+            // probes go straight through.
+            const doFetch = token => fetch(url, {
+                method,
+                headers: token ? { ...headers, 'Authorization': `Bearer ${token}` } : headers,
+                body,
+            });
+            const resp = wantAuth ? await authedFetch(doFetch) : await doFetch('');
             const text = await resp.text();
             const expectJson = args.expectJson !== false;
             let parsed = text;
