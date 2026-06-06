@@ -12,8 +12,8 @@
 //     base dir (BASE). Mode strings ('m', 's', 'ms', etc.) are
 //     respected to the extent that they decide whether to try MOD
 //     and/or BASE; any unrecognised mode defaults to MOD-then-BASE.
-//   - No DirList/SubDirs (resources.lua doesn't use them; if a future
-//     game does, add them here).
+//   - DirList is provided (BAR's resources.lua AutoAdd uses it); SubDirs
+//     is still omitted (no game data needs it yet).
 //
 // The Script global stubs out the engine-version check ZK's scars.lua
 // uses. We claim "always recent enough" because spring-web pretends
@@ -37,6 +37,7 @@
 #include "lauxlib.h"
 #include "lualib.h"
 
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -219,11 +220,106 @@ int L_VFS_LoadFile(lua_State* L) {
     return 1;
 }
 
+// Classic wildcard match: '*' = any run, '?' = any single char.
+// Case-insensitive (Spring matches archive filenames case-insensitively).
+// A null/empty pattern matches everything (handled by the caller).
+bool GlobMatch(const char* pat, const char* str) {
+    const char* star = nullptr;
+    const char* ss = nullptr;
+    auto lower = [](char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); };
+    while (*str) {
+        if (*pat == '?' || (*pat != '\0' && lower(*pat) == lower(*str))) {
+            ++pat; ++str;
+        } else if (*pat == '*') {
+            star = pat++; ss = str;
+        } else if (star) {
+            pat = star + 1; str = ++ss;
+        } else {
+            return false;
+        }
+    }
+    while (*pat == '*') ++pat;
+    return *pat == '\0';
+}
+
+// VFS.DirList(dir [, pattern [, modes [, recursive]]]) → sequence of VFS
+// paths (each prefixed with `dir`, forward slashes), aggregated across the
+// game + engine roots like Spring's VFS. `recursive` (4th arg, upstream
+// #926) walks subdirectories. BAR's gamedata/resources.lua AutoAdd helper
+// calls VFS.DirList("bitmaps/"..subDir, nil, nil, true) to enumerate its
+// projectile/ground FX textures — without this it errored (nil call) and
+// the whole resources parse returned empty (HTTP 500), forcing the client
+// onto procedural weapon-texture fallbacks. ZK's resources.lua doesn't use
+// it, which is why this surface was originally omitted.
+int L_VFS_DirList(lua_State* L) {
+    const char* dirArg = luaL_checkstring(L, 1);
+    const char* pattern = (lua_isstring(L, 2) && !lua_isnoneornil(L, 2)) ? lua_tostring(L, 2) : nullptr;
+    const char* modes = (lua_isstring(L, 3) && !lua_isnoneornil(L, 3)) ? lua_tostring(L, 3) : nullptr;
+    const bool recursive = lua_toboolean(L, 4) != 0;
+
+    const std::string gameDir   = GetRegistryString(L, kGameDirRegistryKey);
+    const std::string engineDir = GetRegistryString(L, kEngineDirRegistryKey);
+    const ModeFlags m = ParseMode(modes);
+
+    // Normalise the VFS-path prefix (strip trailing slashes).
+    std::string vfsDir = dirArg;
+    while (!vfsDir.empty() && (vfsDir.back() == '/' || vfsDir.back() == '\\'))
+        vfsDir.pop_back();
+
+    lua_newtable(L);
+    int outIdx = 0;
+    std::unordered_set<std::string> seen; // dedup VFS paths across roots
+
+    auto listRoot = [&](const std::string& root) {
+        if (root.empty()) return;
+        const fs::path base = fs::path(root) / vfsDir;
+        std::error_code ec;
+        if (!fs::is_directory(base, ec)) return;
+        auto emit = [&](const fs::path& p) {
+            std::error_code ec2;
+            if (!fs::is_regular_file(p, ec2)) return;
+            if (pattern && *pattern && !GlobMatch(pattern, p.filename().string().c_str()))
+                return;
+            const std::string rel = fs::relative(p, base, ec2).generic_string();
+            if (rel.empty() || rel.find("..") != std::string::npos) return;
+            const std::string vfsPath = vfsDir.empty() ? rel : (vfsDir + "/" + rel);
+            if (!seen.insert(vfsPath).second) return; // game root wins
+            lua_pushstring(L, vfsPath.c_str());
+            lua_rawseti(L, -2, ++outIdx);
+        };
+        if (recursive) {
+            for (auto it = fs::recursive_directory_iterator(base, ec);
+                 it != fs::recursive_directory_iterator(); it.increment(ec)) {
+                if (ec) break;
+                emit(it->path());
+            }
+        } else {
+            for (auto it = fs::directory_iterator(base, ec);
+                 it != fs::directory_iterator(); it.increment(ec)) {
+                if (ec) break;
+                emit(it->path());
+            }
+        }
+    };
+
+    // Honour mode order; game root is consulted first by default so its
+    // files shadow engine-base files of the same VFS path.
+    if (m.gameFirst) {
+        if (m.searchGame)   listRoot(gameDir);
+        if (m.searchEngine) listRoot(engineDir);
+    } else {
+        if (m.searchEngine) listRoot(engineDir);
+        if (m.searchGame)   listRoot(gameDir);
+    }
+    return 1;
+}
+
 void InstallVFS(lua_State* L) {
     lua_newtable(L);
     lua_pushcfunction(L, L_VFS_Include);    lua_setfield(L, -2, "Include");
     lua_pushcfunction(L, L_VFS_FileExists); lua_setfield(L, -2, "FileExists");
     lua_pushcfunction(L, L_VFS_LoadFile);   lua_setfield(L, -2, "LoadFile");
+    lua_pushcfunction(L, L_VFS_DirList);    lua_setfield(L, -2, "DirList");
     // Mode constants — strings, matching VFSModes.h.
     lua_pushstring(L, "r");   lua_setfield(L, -2, "RAW");
     lua_pushstring(L, "m");   lua_setfield(L, -2, "MOD");
