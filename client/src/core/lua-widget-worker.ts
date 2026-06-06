@@ -1073,6 +1073,10 @@ async function init(
         const d = unitDefMap.get(defId);
         return d?.buildPic ? d.buildPic : null;
     });
+    // Terrain-height sampler for gl.DrawGroundCircle (range rings hug the
+    // ground). Lazily reads gpEntityRenderer — it's null at bridge-build time
+    // and assigned later in the boot sequence — mirroring rtsCam's sampler.
+    bridge.setGroundSampler((x, z) => gpEntityRenderer?.getGroundHeight(x, z) ?? 0);
     postLog(2, '[LuaUI] init step 3/8 done: Lua runtime + GL bridge created');
 
     // 3b. Inject engine-bundled test widgets when solo mode is active.

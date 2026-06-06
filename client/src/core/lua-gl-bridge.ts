@@ -27,6 +27,31 @@ import {
     type GlslDiagnostic,
 } from './glsl-translator.js';
 
+/**
+ * Generate the world-space vertices of a terrain-following ground circle for
+ * `gl.DrawGroundCircle`. Returns a flat `[x,y,z, x,y,z, …]` array of `divs`
+ * points evenly spaced around a circle of radius `r` centred on (px, pz). Each
+ * Y is sampled from `sample(x,z)` (real terrain height) so the ring hugs the
+ * ground; when no sampler is wired the circle is drawn flat at `py`.
+ *
+ * Faithful to Recoil's glSurfaceCircle: angle `i/divs · 2π`, x = px + r·sin,
+ * z = pz + r·cos. Extracted as a pure function so the geometry is unit-testable
+ * without a WebGL2 context. `divs` is clamped to ≥3 by the caller.
+ */
+export function groundCircleVertices(
+    px: number, py: number, pz: number, r: number, divs: number,
+    sample: ((x: number, z: number) => number) | null,
+): number[] {
+    const out: number[] = [];
+    for (let i = 0; i < divs; i++) {
+        const a = (i / divs) * Math.PI * 2;
+        const x = px + Math.sin(a) * r;
+        const z = pz + Math.cos(a) * r;
+        out.push(x, sample ? sample(x, z) : py, z);
+    }
+    return out;
+}
+
 /** Handle returned by gl.CreateShader — opaque to Lua. */
 export interface LuaShaderHandle {
     __type: 'shader';
@@ -171,6 +196,16 @@ export class LuaGLBridge {
      *  the bridge silently no-ops in that case. */
     private minimapEmitter: ((cmd: MinimapBridgeCommand) => void) | null = null;
 
+    /** Samples terrain height at a world (x, z). Used by `gl.DrawGroundCircle`
+     *  to follow the ground (the whole point of the *Ground* variant vs a flat
+     *  `gl.DrawCircle`). The bridge has no heightmap of its own — the worker
+     *  owns it via the EntityRenderer — so the host wires this in. Null until
+     *  set (tests / lobby preview), in which case the circle is drawn flat at
+     *  the caller-supplied Y. */
+    private groundSampler: ((x: number, z: number) => number) | null = null;
+    /** One-time warn latch for the ballistic `gl.DrawGroundCircle` variant. */
+    private warnedBallisticCircle = false;
+
     /** PLAN-coordinate-system Option A: handedness is a *direction*
      *  property, not a positional one. When the legacy-LH bridge is on,
      *  direction-vector Z components mirror (gl.Rotate axis, LoadMatrix
@@ -210,6 +245,13 @@ export class LuaGLBridge {
      *  tests / lobby preview where no native minimap exists. */
     setMinimapEmitter(emitter: ((cmd: MinimapBridgeCommand) => void) | null): void {
         this.minimapEmitter = emitter;
+    }
+
+    /** Wire the terrain-height sampler for `gl.DrawGroundCircle`. The worker
+     *  passes a closure over its EntityRenderer heightmap. Without it the
+     *  ground circle falls back to a flat ring at the caller's Y. */
+    setGroundSampler(sampler: ((x: number, z: number) => number) | null): void {
+        this.groundSampler = sampler;
     }
 
     /** Resize the OffscreenCanvas owned by this bridge's GL context. */
@@ -444,6 +486,14 @@ export class LuaGLBridge {
         gl['BeginEnd'] = (mode: LuaValue, fn: LuaValue, ...extra: LuaValue[]) =>
             this.beginEnd(mode, fn, extra);
         gl['Vertex'] = (...args: LuaValue[]) => this.vertexGL(args);
+        // gl.DrawGroundCircle(px, py, pz, radius, resolution[, slope, gravity,
+        // weaponDefID]) — a terrain-following ring, drawn world-space in the
+        // current raster colour. Used by range-ring / area-command widgets in
+        // both BAR (12×) and ZK. The basic 5-arg form is faithful (vertices
+        // sample real ground height); the 8-arg ballistic form (weapon range
+        // that bends with terrain slope + projectile gravity) needs weapon-def
+        // ballistic data the bridge doesn't hold — see drawGroundCircle.
+        gl['DrawGroundCircle'] = (...args: LuaValue[]) => this.drawGroundCircle(args);
         gl['TexCoord'] = (...args: LuaValue[]) => this.texCoordGL(args);
         gl['MultiTexCoord'] = (unit: LuaValue, s: LuaValue, t: LuaValue) =>
             this.imm.multiTexCoord(Number(unit), Number(s), Number(t));
@@ -851,6 +901,45 @@ export class LuaGLBridge {
         this.imm.setTextured(this.hasTextureUnit0, this.boundTextureUnit0);
         this.imm.beginEnd(Number(mode), () => {
             (fn as (...a: LuaValue[]) => void)(...extra);
+        });
+    }
+
+    /** Faithful port of Recoil's `gl.DrawGroundCircle` (LuaOpenGL.cpp →
+     *  glSurfaceCircleLua): `resolution` line segments forming a closed loop
+     *  of radius `r` centred on (px, pz), each vertex lifted to the real
+     *  terrain height so the ring hugs the ground. Drawn untextured in the
+     *  current immediate-mode colour (Recoil reads GL_CURRENT_COLOR).
+     *
+     *  The 8-arg ballistic variant (px,py,pz,r,divs,slope,gravity,weaponDefID)
+     *  draws a *weapon-range* ring whose radius bends with terrain slope and
+     *  projectile gravity (glBallisticCircleLua). That needs the weapon def's
+     *  ballistic params, which this bridge doesn't carry — FIDELITY-STANDIN:
+     *  we fall back to the plain surface circle at the nominal radius and warn
+     *  once, so the overlay is visibly present (not silently dropped) but its
+     *  radius won't track slope. */
+    private drawGroundCircle(args: LuaValue[]): void {
+        const px = Number(args[0] ?? 0);
+        const py = Number(args[1] ?? 0);
+        const pz = Number(args[2] ?? 0);
+        const r = Number(args[3] ?? 0);
+        const divs = Math.max(3, Math.floor(Number(args[4] ?? 24)));
+
+        if (args.length >= 6 && typeof args[5] === 'number' && !this.warnedBallisticCircle) {
+            console.warn(
+                '[gl.DrawGroundCircle] FIDELITY-STANDIN: ballistic (slope/gravity) '
+                + 'variant not implemented — drawing a flat-radius surface ring '
+                + 'instead (radius will not track terrain slope).',
+            );
+            this.warnedBallisticCircle = true;
+        }
+
+        const verts = groundCircleVertices(px, py, pz, r, divs, this.groundSampler);
+        const GL_LINE_LOOP = 2;
+        this.imm.setTextured(false, null);
+        this.imm.beginEnd(GL_LINE_LOOP, () => {
+            for (let i = 0; i < verts.length; i += 3) {
+                this.imm.vertex(verts[i], verts[i + 1], verts[i + 2]);
+            }
         });
     }
 
