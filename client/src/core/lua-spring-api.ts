@@ -340,6 +340,45 @@ export interface TeamInfo {
     customKeys: Record<string, string>;
 }
 
+/** Player/team status event kinds — mirrors PlayerTeamEventItem.kind on the
+ *  wire and selects which Recoil LuaUI callin the worker fires. */
+export const enum PlayerTeamEventKind {
+    PlayerChanged = 0,
+    PlayerAdded   = 1,
+    PlayerRemoved = 2,
+    TeamDied      = 3,
+}
+
+/** Apply the roster side-effects of a player/team status event — only the
+ *  fields the event lets us derive with certainty, so a widget re-reading
+ *  Spring.GetPlayerInfo/GetTeamInfo after the callin sees the change.
+ *  Mutates the maps in place. PlayerChanged carries no certain field change
+ *  (the new spec/team isn't on the wire — see the worker's KNOWN GAP note),
+ *  so it's a no-op here; the callin still fires. */
+export function applyPlayerTeamRosterEffect(
+    players: Map<number, PlayerInfo>,
+    teams: Map<number, TeamInfo>,
+    event: { kind: number; id: number },
+): void {
+    switch (event.kind) {
+        case PlayerTeamEventKind.PlayerAdded: {
+            const p = players.get(event.id);
+            if (p) p.active = true;
+            break;
+        }
+        case PlayerTeamEventKind.PlayerRemoved: {
+            const p = players.get(event.id);
+            if (p) p.active = false;
+            break;
+        }
+        case PlayerTeamEventKind.TeamDied: {
+            const t = teams.get(event.id);
+            if (t) t.isDead = true;
+            break;
+        }
+    }
+}
+
 /** RGBA in 0..1. */
 export type TeamColor = [number, number, number, number];
 

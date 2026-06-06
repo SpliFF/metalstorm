@@ -84,6 +84,8 @@ import { LuaGLBridge } from './lua-gl-bridge.js';
 import {
     buildSpringGlobals,
     createDefaultLiveState,
+    applyPlayerTeamRosterEffect,
+    PlayerTeamEventKind,
     type SpringAPIContext,
     type LiveState,
     type UnitEntry,
@@ -4561,6 +4563,39 @@ function dispatchPlayerChanged(playerId: number): void {
     `, 'dispatchPlayerChanged');
 }
 
+/** widgetHandler:PlayerAdded(playerId) — Spring fires this when a player
+ *  (re)joins. No server call site emits it today, but the wire enum reserves
+ *  the kind so a future reconnect/join path lights it up without a code change. */
+function dispatchPlayerAdded(playerId: number): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.PlayerAdded then
+            pcall(widgetHandler.PlayerAdded, widgetHandler, ${playerId | 0})
+        end
+    `, 'dispatchPlayerAdded');
+}
+
+/** widgetHandler:PlayerRemoved(playerId, reason) — fires when a player leaves
+ *  (quit/kick/timeout). reason: 0=quit, 1=kicked, 2=timeout. */
+function dispatchPlayerRemoved(playerId: number, reason: number): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.PlayerRemoved then
+            pcall(widgetHandler.PlayerRemoved, widgetHandler, ${playerId | 0}, ${reason | 0})
+        end
+    `, 'dispatchPlayerRemoved');
+}
+
+/** widgetHandler:TeamDied(teamId) — fires when a team is eliminated. */
+function dispatchTeamDied(teamId: number): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.TeamDied then
+            pcall(widgetHandler.TeamDied, widgetHandler, ${teamId | 0})
+        end
+    `, 'dispatchTeamDied');
+}
+
 /** widgetHandler:UnitDestroyed(unitID, unitDefID, unitTeam) — fires on
  *  the EntityDestroy event. */
 function dispatchUnitDestroyed(unitId: number, defId: number, team: number): void {
@@ -5729,6 +5764,34 @@ function gpConnect(msg: GpInitToWorker): void {
                 liveState.allyStartBoxes.set(b.allyTeam, {
                     xmin: b.xmin, zmin: b.zmin, xmax: b.xmax, zmax: b.zmax,
                 });
+            }
+        },
+        // PLAN-bar.md §6: player/team status changes (PlayerTeamEventBatch) →
+        // the matching Recoil LuaUI callins. The server fires these into its
+        // own synced Lua via eventHandler; this carries them to the unsynced
+        // widgets. We update the roster state we can derive with certainty so a
+        // widget re-reading Spring.GetPlayerInfo/GetTeamInfo after the callin
+        // sees the change, then fan out.
+        //
+        // KNOWN GAP (documented, not silent): PlayerChanged carries only the
+        // playerID (faithful to Recoil's callin signature), but the player's
+        // *new* spectator/team values aren't streamed — liveState.players is
+        // seeded once from the lobby roster. So after a spec/team change a
+        // re-query still shows the old spec/team. Closing it needs a roster
+        // re-stream (or per-field deltas) on the wire; tracked in PLAN-bar.md.
+        // TeamDied (isDead) and PlayerRemoved (active=false) ARE applied.
+        onPlayerTeamEvents: (events) => {
+            for (const e of events) {
+                // Update the roster fields we can derive with certainty
+                // (active / isDead) so a post-callin re-query is consistent.
+                applyPlayerTeamRosterEffect(liveState.players, liveState.teams, e);
+                switch (e.kind) {
+                    case PlayerTeamEventKind.PlayerChanged: dispatchPlayerChanged(e.id); break;
+                    case PlayerTeamEventKind.PlayerAdded:   dispatchPlayerAdded(e.id); break;
+                    case PlayerTeamEventKind.PlayerRemoved: dispatchPlayerRemoved(e.id, e.reason); break;
+                    case PlayerTeamEventKind.TeamDied:      dispatchTeamDied(e.id); break;
+                    default: postLog(2, `[player-team] unknown event kind ${e.kind}`);
+                }
             }
         },
         // GW4-c3: live terrain deformation (envelope 0x09) → DeformableTerrain.

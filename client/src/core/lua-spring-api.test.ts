@@ -3,10 +3,14 @@ import {
     buildSpringGlobals,
     createDefaultLiveState,
     diffTimers,
+    applyPlayerTeamRosterEffect,
+    PlayerTeamEventKind,
     type SpringAPIContext,
     type LiveState,
     type UnitEntry,
     type FeatureEntry,
+    type PlayerInfo,
+    type TeamInfo,
 } from './lua-spring-api.js';
 import { isLuaTable, luaTable, type LuaValue } from './lua-runtime.js';
 
@@ -280,5 +284,49 @@ describe('BAR read shims', () => {
             const api = springApi(makeCtx(), withProjectiles());
             expect(ids(call(api.GetProjectilesInRectangle, 500, 500, 600, 600))).toEqual([]);
         });
+    });
+});
+
+describe('applyPlayerTeamRosterEffect', () => {
+    function makePlayer(over: Partial<PlayerInfo> = {}): PlayerInfo {
+        return {
+            name: 'p', active: true, spectator: false, team: 0, allyTeam: 0,
+            pingMs: 0, cpuUsage: 0, country: '', rank: 0, hasController: true,
+            customKeys: {}, ...over,
+        };
+    }
+    function makeTeam(over: Partial<TeamInfo> = {}): TeamInfo {
+        return { teamId: 0, leader: -1, isDead: false, isAiTeam: false, side: '', allyTeam: 0, customKeys: {}, ...over };
+    }
+
+    it('PlayerRemoved clears the active flag', () => {
+        const players = new Map([[3, makePlayer({ active: true })]]);
+        applyPlayerTeamRosterEffect(players, new Map(), { kind: PlayerTeamEventKind.PlayerRemoved, id: 3 });
+        expect(players.get(3)!.active).toBe(false);
+    });
+
+    it('PlayerAdded sets the active flag', () => {
+        const players = new Map([[3, makePlayer({ active: false })]]);
+        applyPlayerTeamRosterEffect(players, new Map(), { kind: PlayerTeamEventKind.PlayerAdded, id: 3 });
+        expect(players.get(3)!.active).toBe(true);
+    });
+
+    it('TeamDied marks the team dead', () => {
+        const teams = new Map([[5, makeTeam({ isDead: false })]]);
+        applyPlayerTeamRosterEffect(new Map(), teams, { kind: PlayerTeamEventKind.TeamDied, id: 5 });
+        expect(teams.get(5)!.isDead).toBe(true);
+    });
+
+    it('PlayerChanged is a no-op on the roster (new spec/team not on the wire)', () => {
+        const p = makePlayer({ active: true, spectator: false, team: 1 });
+        const players = new Map([[3, p]]);
+        applyPlayerTeamRosterEffect(players, new Map(), { kind: PlayerTeamEventKind.PlayerChanged, id: 3 });
+        expect(players.get(3)).toEqual(p);
+    });
+
+    it('tolerates an unknown id (no throw, no mutation)', () => {
+        const players = new Map([[3, makePlayer()]]);
+        expect(() => applyPlayerTeamRosterEffect(players, new Map(), { kind: PlayerTeamEventKind.PlayerRemoved, id: 99 })).not.toThrow();
+        expect(players.get(3)!.active).toBe(true);
     });
 });

@@ -35,6 +35,7 @@ import { SendToUnsyncedArg } from '../protocol/spring-web/send-to-unsynced-arg.j
 import { SendToUnsyncedArgKind } from '../protocol/spring-web/send-to-unsynced-arg-kind.js';
 import { GameInfo } from '../protocol/spring-web/game-info.js';
 import { TeamStartInfo } from '../protocol/spring-web/team-start-info.js';
+import { PlayerTeamEventBatch } from '../protocol/spring-web/player-team-event-batch.js';
 import { ResourceUpdate } from '../protocol/spring-web/resource-update.js';
 import { MapData } from '../protocol/spring-web/map-data.js';
 import { PlayerLeft } from '../protocol/spring-web/player-left.js';
@@ -175,6 +176,15 @@ export interface AllyStartBoxInfo {
 export interface TeamStartInfoData {
     teams: TeamStartPositionInfo[];
     boxes: AllyStartBoxInfo[];
+}
+
+/// One decoded player/team status change. `kind`: 0=PlayerChanged,
+/// 1=PlayerAdded, 2=PlayerRemoved, 3=TeamDied. `id` is a playerID (kinds 0-2)
+/// or teamID (kind 3); `reason` carries the PlayerRemoved reason (0 otherwise).
+export interface PlayerTeamEventInfo {
+    kind: number;
+    id: number;
+    reason: number;
 }
 
 /// Projectile lifecycle event info — decoded from the FlatBuffer batch and
@@ -790,6 +800,9 @@ export interface ConnectionEvents {
     /// Team start positions + ally start boxes (TeamStartInfo). Sent on auth
     /// and re-broadcast after GameStart with the final post-spawn values.
     onTeamStartInfo?: (data: TeamStartInfoData) => void;
+    /// Player/team status changes (PlayerTeamEventBatch) — drives
+    /// widget:PlayerChanged / PlayerAdded / PlayerRemoved / TeamDied.
+    onPlayerTeamEvents?: (events: PlayerTeamEventInfo[]) => void;
     onServerMessage?: (msg: ServerMessage) => void;
     /// Server signalled a restart (ServerPayload.GameRestarting). The host
     /// decides how to react — on the main thread this reloads the page; from
@@ -1508,6 +1521,17 @@ export class Connection {
                     });
                 }
                 this.events.onTeamStartInfo?.({ teams, boxes });
+                break;
+            }
+            case ServerPayload.PlayerTeamEventBatch: {
+                const batch = msg.payload(new PlayerTeamEventBatch()) as PlayerTeamEventBatch;
+                const events: PlayerTeamEventInfo[] = [];
+                for (let i = 0; i < batch.eventsLength(); i++) {
+                    const e = batch.events(i);
+                    if (!e) continue;
+                    events.push({ kind: e.kind(), id: e.id(), reason: e.reason() });
+                }
+                if (events.length > 0) this.events.onPlayerTeamEvents?.(events);
                 break;
             }
             case ServerPayload.ResourceUpdate: {
