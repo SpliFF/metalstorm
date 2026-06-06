@@ -26,7 +26,7 @@ import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos } from './game-worker
 // is host-agnostic (runs on WebTransportAdapter, no DOM refs after the
 // onServerRestart callback was extracted) so it imports + runs here unchanged.
 import { Connection } from './connection.js';
-import type { CombatEventInfo } from './connection.js';
+import type { CombatEventInfo, FeatureSpawnInfo } from './connection.js';
 import type { EntityStateSnapshot } from './entity-state.js';
 // GW4-c3: terrain + lighting + map parse move into the worker so terrain
 // renders from here (first light). All of these are worker-safe (Babylon
@@ -4547,6 +4547,37 @@ function dispatchUnitDamaged(events: CombatEventInfo[]): void {
     if (chunk) runtime.doString(chunk, 'dispatchUnitDamaged');
 }
 
+/** featureID → allyTeam, captured on spawn so FeatureDestroyed can pass the
+ *  same allyTeam Recoil supplies (the removed-stream carries only ids). */
+const gpFeatureAllyTeams = new Map<number, number>();
+
+/** widgetHandler:FeatureCreated(featureID, allyTeam) /
+ *  widgetHandler:FeatureDestroyed(featureID, allyTeam) — fired from the server
+ *  feature-lifecycle stream (runtime wrecks/debris/reclaim spawns + removals).
+ *  BAR's barwidgets.lua registers + fans these out (13 subscribing widgets);
+ *  ZK's cawidgets.lua does not register them, so the guarded call no-ops there.
+ *  Pre-placed map features are NOT re-fired here — widgets needing the full set
+ *  read Spring.GetAllFeatures() in Initialize, matching the engine's load
+ *  order. */
+function dispatchFeatureLifecycle(spawns: FeatureSpawnInfo[], removed: number[]): void {
+    if (!runtime) return;
+    let chunk = '';
+    for (const s of spawns) {
+        gpFeatureAllyTeams.set(s.featureId, s.allyTeam);
+        chunk += `if widgetHandler and widgetHandler.FeatureCreated then `
+            + `pcall(widgetHandler.FeatureCreated, widgetHandler, ${s.featureId}, `
+            + `${s.allyTeam}) end\n`;
+    }
+    for (const id of removed) {
+        const allyTeam = gpFeatureAllyTeams.get(id) ?? -1;
+        gpFeatureAllyTeams.delete(id);
+        chunk += `if widgetHandler and widgetHandler.FeatureDestroyed then `
+            + `pcall(widgetHandler.FeatureDestroyed, widgetHandler, ${id}, `
+            + `${allyTeam}) end\n`;
+    }
+    if (chunk) runtime.doString(chunk, 'dispatchFeatureLifecycle');
+}
+
 /** widgetHandler:VisibleUnitAdded(unitID, unitDefID, unitTeam) — fires
  *  when a unit enters the camera viewing frustum. Distinct from
  *  UnitEnteredLos (vision-based) — VisibleUnitAdded is a render-side
@@ -5517,6 +5548,9 @@ function gpConnect(msg: GpInitToWorker): void {
         // feature renderer. Map-placed features load via renderMapFeatures.
         onFeatureLifecycle: (spawns, removed) => {
             gpDynamicFeatureRenderer?.applyLifecycleBatch(spawns, removed);
+            // Fan out widget:FeatureCreated/FeatureDestroyed (BAR reclaim/blast
+            // widgets react to wrecks + debris). No-op for ZK (no handler).
+            dispatchFeatureLifecycle(spawns, removed);
         },
         // GW4-c5: weapon-fire / impact / trajectory events (envelopes inside
         // GameEventBatch) drive the projectile renderer + combatFX. The legacy
