@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { loadMapLighting, normaliseSunDir } from './map-lighting.js';
+import {
+    loadMapLighting, normaliseSunDir, defaultMapLighting,
+    mergeSunLighting, setSunDirectionLighting,
+} from './map-lighting.js';
 
 // A mapinfo.lua shaped like the real maps that broke: lighting is authored,
 // and the file ends with an UNGUARDED map-options merge block using getfenv()
@@ -101,5 +104,81 @@ describe('normaliseSunDir', () => {
     });
     it('falls back to up for a degenerate vector', () => {
         expect(normaliseSunDir([0, 0, 0])).toEqual([0, 1, 0]);
+    });
+});
+
+describe('mergeSunLighting (Spring.SetSunLighting)', () => {
+    it('maps Recoil colour keys onto the MapLighting fields', () => {
+        const base = defaultMapLighting();
+        const { lighting, unknown } = mergeSunLighting(base, {
+            groundAmbientColor: [0.1, 0.2, 0.3],
+            unitDiffuseColor: [1, 0.9, 0.8],
+            unitSpecularColor: { r: 0.5, g: 0.4, b: 0.3 },
+        });
+        expect(lighting.groundAmbient).toEqual([0.1, 0.2, 0.3]);
+        expect(lighting.unitDiffuse).toEqual([1, 0.9, 0.8]);
+        expect(lighting.unitSpecular).toEqual([0.5, 0.4, 0.3]);
+        expect(unknown).toEqual([]);
+    });
+
+    it('accepts the model* aliases for the unit* fields', () => {
+        const base = defaultMapLighting();
+        const { lighting } = mergeSunLighting(base, {
+            modelAmbientColor: [0.2, 0.2, 0.2],
+            modelDiffuseColor: [0.7, 0.7, 0.7],
+        });
+        expect(lighting.unitAmbient).toEqual([0.2, 0.2, 0.2]);
+        expect(lighting.unitDiffuse).toEqual([0.7, 0.7, 0.7]);
+    });
+
+    it('maps the scalar shadow/specular keys (model→unit)', () => {
+        const base = defaultMapLighting();
+        const { lighting } = mergeSunLighting(base, {
+            specularExponent: 42,
+            groundShadowDensity: 0.6,
+            modelShadowDensity: 0.5,
+        });
+        expect(lighting.specularExponent).toBe(42);
+        expect(lighting.groundShadowDensity).toBe(0.6);
+        expect(lighting.unitShadowDensity).toBe(0.5);
+    });
+
+    it('is case-insensitive and collects unknown keys', () => {
+        const base = defaultMapLighting();
+        const { lighting, unknown } = mergeSunLighting(base, {
+            grounddiffusecolor: [0.4, 0.4, 0.4],
+            bogusKey: 1,
+        });
+        expect(lighting.groundDiffuse).toEqual([0.4, 0.4, 0.4]);
+        expect(unknown).toEqual(['bogusKey']);
+    });
+
+    it('does not mutate the base lighting', () => {
+        const base = defaultMapLighting();
+        const before = [...base.groundAmbient];
+        mergeSunLighting(base, { groundAmbientColor: [9, 9, 9] });
+        expect(base.groundAmbient).toEqual(before);
+    });
+
+    it('tolerates a null/empty params table', () => {
+        const base = defaultMapLighting();
+        const { lighting, unknown } = mergeSunLighting(base, null);
+        expect(lighting.groundAmbient).toEqual(base.groundAmbient);
+        expect(unknown).toEqual([]);
+    });
+});
+
+describe('setSunDirectionLighting (Spring.SetSunDirection)', () => {
+    it('normalises the direction and preserves legacyCoordSystem', () => {
+        const base = defaultMapLighting();
+        const out = setSunDirectionLighting(base, 1, 0.81, -0.75);
+        expect(Math.hypot(...out.sunDir)).toBeCloseTo(1, 5);
+        expect(out.legacyCoordSystem).toBe(base.legacyCoordSystem);
+    });
+    it('keeps the authored shadow density (ignores the broken intensity arg)', () => {
+        const base = defaultMapLighting();
+        base.groundShadowDensity = 0.33;
+        const out = setSunDirectionLighting(base, 0, 1, 0);
+        expect(out.groundShadowDensity).toBe(0.33);
     });
 });

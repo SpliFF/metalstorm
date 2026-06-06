@@ -38,7 +38,10 @@ import {
     type MapDimensions,
 } from './terrain.js';
 import { fetchMapDataHttp, type ParsedMapData } from './map-data.js';
-import { loadMapLighting, type MapLighting } from './map-lighting.js';
+import {
+    loadMapLighting, defaultMapLighting, mergeSunLighting, setSunDirectionLighting,
+    type MapLighting,
+} from './map-lighting.js';
 import { createSceneLighting, applyMapLighting, type SceneLighting } from './scene-lighting.js';
 import { LosBitmapStore, type LosBitmap } from './los-bitmap.js';
 // GW4-c4: world entity rendering moves into the worker. Side-effect import
@@ -3709,22 +3712,44 @@ function installEngineGlobals(
     (springGlobals.Spring as Record<string, LuaValue>).GetFrameTimeOffset = () => 0;
     (springGlobals.Spring as Record<string, LuaValue>).IsGodModeEnabled = () => false;
     // ── Map-rendering runtime setters (LuaUnsyncedCtrl) ──────────────
-    // FIDELITY-STANDIN: BAR's lighting/water/atmosphere adjuster widgets
-    // (gui_options, map_lighting_adjuster, …) drive these ~96× to retune the
-    // scene at runtime. They're client-only rendering (sanctioned deviation —
-    // see feedback_lighting_client_only), but the worker scene-lighting bridge
-    // doesn't yet accept live param pushes, so we no-op rather than crash the
-    // caller (the worker Spring table has no catch-all → a nil call errors).
-    // Applying these to the live sun/ambient/fog/water is deferred rendering
-    // work (PLAN-lighting / PLAN.md Stage 1). Loud per the no-silent-failures
-    // principle; postLog de-dupes so it warns effectively once.
-    const mapRenderStandin = (fn: string) => (..._args: LuaValue[]) => {
-        postLog(2, `[Spring] FIDELITY-STANDIN: ${fn} not applied to the live ` +
-            `scene yet (client-only map rendering pending — PLAN.md Stage 1); no-op.`);
+    // BAR's lighting/water/atmosphere adjuster widgets (gui_options,
+    // map_lighting_adjuster, …) drive these ~96× to retune the scene at
+    // runtime. They're client-only rendering (sanctioned deviation — see
+    // feedback_lighting_client_only). Sun lighting + sun direction now apply
+    // to the live sun/ambient/CSM by merging into gpMapLighting and re-running
+    // applyMapLighting (the same mapping the authored mapinfo.lua uses, so
+    // there is one code path). Atmosphere/water/maprendering stay loud no-ops
+    // until the underlying renderer features exist (no fog/water/splat path
+    // yet — PLAN.md Stage 1). postLog de-dupes so the standins warn ~once.
+
+    // Spring.SetSunLighting{groundAmbientColor=…, unitDiffuseColor=…, …}
+    (springGlobals.Spring as Record<string, LuaValue>).SetSunLighting = (params: LuaValue) => {
+        const { lighting, unknown } = mergeSunLighting(
+            gpMapLighting, params as Record<string, LuaValue> | null);
+        gpMapLighting = lighting;
+        if (gpSceneLighting) applyMapLighting(lighting, gpSceneLighting);
+        if (unknown.length) {
+            postLog(2, `[Spring] SetSunLighting: ignored unknown key(s): ${unknown.join(', ')}`);
+        }
         return undefined;
     };
-    (springGlobals.Spring as Record<string, LuaValue>).SetSunLighting = mapRenderStandin('SetSunLighting');
-    (springGlobals.Spring as Record<string, LuaValue>).SetSunDirection = mapRenderStandin('SetSunDirection');
+    // Spring.SetSunDirection(x, y, z, intensity?)
+    (springGlobals.Spring as Record<string, LuaValue>).SetSunDirection = (
+        x: LuaValue, y: LuaValue, z: LuaValue, _intensity: LuaValue,
+    ) => {
+        gpMapLighting = setSunDirectionLighting(
+            gpMapLighting, Number(x) || 0, Number(y) || 0, Number(z) || 0);
+        if (gpSceneLighting) applyMapLighting(gpMapLighting, gpSceneLighting);
+        return undefined;
+    };
+
+    // FIDELITY-STANDIN: atmosphere/water/maprendering have no live renderer
+    // path yet (no fog tint, no water surface, no terrain splat controls).
+    const mapRenderStandin = (fn: string) => (..._args: LuaValue[]) => {
+        postLog(2, `[Spring] FIDELITY-STANDIN: ${fn} not applied to the live ` +
+            `scene yet (no fog/water/splat renderer path — PLAN.md Stage 1); no-op.`);
+        return undefined;
+    };
     (springGlobals.Spring as Record<string, LuaValue>).SetAtmosphere = mapRenderStandin('SetAtmosphere');
     (springGlobals.Spring as Record<string, LuaValue>).SetWaterParams = mapRenderStandin('SetWaterParams');
     (springGlobals.Spring as Record<string, LuaValue>).SetMapRenderingParams = mapRenderStandin('SetMapRenderingParams');
@@ -4976,6 +5001,12 @@ let gpMinimapMapInfo: { width: number; height: number; baseUrl: string } | null 
 /// from c1 — invisible on an empty scene), retuned by applyMapLighting once
 /// the map's `mapinfo.lua → lighting` is fetched + parsed.
 let gpSceneLighting: SceneLighting | null = null;
+/// The last-applied map lighting state. Seeded with the fallback defaults so
+/// runtime `Spring.SetSunLighting`/`SetSunDirection` have a base to patch even
+/// before `mapinfo.lua` resolves; replaced by the authored lighting once
+/// loadMapLighting lands. The runtime setters merge into this and re-run
+/// applyMapLighting (PLAN.md Stage 1 / PLAN-bar.md §3b map-render setters).
+let gpMapLighting: MapLighting = defaultMapLighting();
 /// GW4-c2: the game-server WebTransport connection, owned by the worker.
 /// Opened from `gp:init` creds; torn down on `gp:shutdown`. At c2 its
 /// callbacks only log decoded counts + bridge a few signals to main; the
@@ -5112,7 +5143,10 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     // is headless) and apply sun/ambient. Fire-and-forget; failure falls back
     // to the createSceneLighting defaults so the scene is never dark.
     void loadMapLighting(mapSourceAbs).then((lighting: MapLighting) => {
-        if (gpSceneLighting === sceneLighting) applyMapLighting(lighting, sceneLighting);
+        if (gpSceneLighting === sceneLighting) {
+            applyMapLighting(lighting, sceneLighting);
+            gpMapLighting = lighting;
+        }
     });
 
     // Terrain mesh from the embedded heightmap.

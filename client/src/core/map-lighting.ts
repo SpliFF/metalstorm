@@ -46,6 +46,12 @@ const DEFAULTS: MapLighting = {
     legacyCoordSystem: true,
 };
 
+/** A fresh copy of the fallback lighting (used as the base state for runtime
+ * `Spring.SetSunLighting`/`SetSunDirection` before `mapinfo.lua` resolves). */
+export function defaultMapLighting(): MapLighting {
+    return cloneMapLighting(DEFAULTS);
+}
+
 /** Case-insensitive table lookup — handles both `sunDir` and `sundir`. */
 function tget(t: Record<string, LuaValue> | null, key: string): LuaValue {
     if (!t) return null;
@@ -186,4 +192,102 @@ export function normaliseSunDir(v: [number, number, number]): [number, number, n
     const len = Math.hypot(v[0], v[1], v[2]);
     if (len < 1e-6) return [0, 1, 0];
     return [v[0] / len, v[1] / len, v[2] / len];
+}
+
+/** Deep-ish clone of a MapLighting (copies the colour arrays so a merge
+ * never aliases the previous frame's vectors). */
+export function cloneMapLighting(l: MapLighting): MapLighting {
+    return {
+        sunDir: [...l.sunDir],
+        groundAmbient: [...l.groundAmbient],
+        groundDiffuse: [...l.groundDiffuse],
+        groundSpecular: [...l.groundSpecular],
+        groundShadowDensity: l.groundShadowDensity,
+        unitAmbient: [...l.unitAmbient],
+        unitDiffuse: [...l.unitDiffuse],
+        unitSpecular: [...l.unitSpecular],
+        unitShadowDensity: l.unitShadowDensity,
+        specularExponent: l.specularExponent,
+        legacyCoordSystem: l.legacyCoordSystem,
+    };
+}
+
+/**
+ * Merge a `Spring.SetSunLighting{…}` params table into a MapLighting,
+ * returning a new object plus the list of unrecognised keys. Faithful to
+ * Recoil's `CSunLighting::SetValue` (rts/Rendering/Env/SunLighting.cpp):
+ * the colour keys (`groundAmbientColor`/`groundDiffuseColor`/
+ * `groundSpecularColor`/`unitAmbientColor`/`unitDiffuseColor`/
+ * `unitSpecularColor`, with `model*` aliases) and the scalar keys
+ * (`specularExponent`/`groundShadowDensity`/`modelShadowDensity`). Recoil
+ * `luaL_error`s on an unknown key; we collect them so the caller can warn
+ * without killing the widget. Key lookup is case-insensitive to tolerate the
+ * lowerkeys'd map path as well as raw widget-authored camelCase.
+ */
+export function mergeSunLighting(
+    base: MapLighting,
+    params: Record<string, LuaValue> | null,
+): { lighting: MapLighting; unknown: string[] } {
+    const out = cloneMapLighting(base);
+    const unknown: string[] = [];
+    if (!params || typeof params !== 'object') return { lighting: out, unknown };
+
+    // Recoil's CSunLighting uses `groundShadowDensity` for the ground term and
+    // `modelShadowDensity` for units; our single MapLighting splits the same
+    // way (`unitShadowDensity` ← model). The keys below are the union of
+    // Recoil's accepted names; the value side reuses asVec3/asNumber so the
+    // {r,g,b} and sequence shapes both parse.
+    const colourKeys: Record<string, keyof MapLighting> = {
+        groundambientcolor: 'groundAmbient',
+        grounddiffusecolor: 'groundDiffuse',
+        groundspecularcolor: 'groundSpecular',
+        unitambientcolor: 'unitAmbient',
+        modelambientcolor: 'unitAmbient',
+        unitdiffusecolor: 'unitDiffuse',
+        modeldiffusecolor: 'unitDiffuse',
+        unitspecularcolor: 'unitSpecular',
+        modelspecularcolor: 'unitSpecular',
+    };
+    const scalarKeys: Record<string, keyof MapLighting> = {
+        specularexponent: 'specularExponent',
+        groundshadowdensity: 'groundShadowDensity',
+        modelshadowdensity: 'unitShadowDensity',
+        unitshadowdensity: 'unitShadowDensity',
+    };
+
+    for (const rawKey of Object.keys(params)) {
+        const key = rawKey.toLowerCase();
+        const v = params[rawKey];
+        if (key in colourKeys) {
+            const field = colourKeys[key] as
+                'groundAmbient' | 'groundDiffuse' | 'groundSpecular'
+                | 'unitAmbient' | 'unitDiffuse' | 'unitSpecular';
+            out[field] = asVec3(v, out[field]);
+        } else if (key in scalarKeys) {
+            const field = scalarKeys[key] as
+                'specularExponent' | 'groundShadowDensity' | 'unitShadowDensity';
+            out[field] = asNumber(v, out[field]);
+        } else {
+            unknown.push(rawKey);
+        }
+    }
+    return { lighting: out, unknown };
+}
+
+/**
+ * Apply `Spring.SetSunDirection(x, y, z, intensity?)` to a MapLighting,
+ * returning a new object. Faithful to Recoil
+ * (`LuaUnsyncedCtrl::SetSunDirection` → `SetLightDir(float3(x,y,z).norm)`):
+ * the direction is the world→sun vector. `legacyCoordSystem` is preserved so
+ * the same Z-flip `applyMapLighting` applies to the authored `sunDir` also
+ * applies to the runtime one (consistent interpretation). The `intensity`
+ * 4th arg is intentionally ignored — Recoil notes it "seems broken atm, only
+ * toggles shadows off when set to 0" — so we keep the authored shadow density.
+ */
+export function setSunDirectionLighting(
+    base: MapLighting, x: number, y: number, z: number,
+): MapLighting {
+    const out = cloneMapLighting(base);
+    out.sunDir = normaliseSunDir([x, y, z]);
+    return out;
 }
