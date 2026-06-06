@@ -96,6 +96,27 @@ function asBool(v: LuaValue, fallback: boolean): boolean {
 function parseMapinfo(source: string, chunkName: string): Record<string, LuaValue> | null {
     const rt = new LuaRuntime(`mapinfo:${chunkName}`);
     try {
+        // Most maps end with a map-options merge block that, in-engine, runs
+        // against `getfenv()` (Lua 5.1) and a `VFS` global to pull lighting
+        // overrides from `mapconfig/mapinfo/*.lua`. fengari is Lua 5.3 (no
+        // getfenv/setfenv) and we install no VFS, so an *unguarded* block
+        // (e.g. pools_of_ilys) hits a nil call and the whole chunk errors
+        // before `return mapinfo` — the map then renders with dark default
+        // lighting. Install harmless stubs so the block runs to completion:
+        // VFS lists no config files, so the (rare) override path is skipped,
+        // exactly as documented in this module's header. `getfenv` returns a
+        // throwaway table — the block only uses it to expose `mapinfo` to the
+        // VFS.Include'd configs we're not loading. (Maps that guard the block
+        // with `if Spring then` are still skipped — we deliberately install no
+        // `Spring` global.) DirList must return an empty Lua *table* (`{}`),
+        // not a JS `[]`, since a function returning `[]` marshals to zero Lua
+        // values → `nil` → `table.sort(files)` would error.
+        rt.setGlobal('getfenv', () => ({}));
+        rt.setGlobal('setfenv', () => undefined);
+        rt.setGlobal('VFS', {
+            DirList: () => ({}),
+            Include: () => null,
+        });
         // The chunk returns the mapinfo table via `return mapinfo`.
         // evalString captures one return value.
         const result = rt.evalString(source, chunkName);
