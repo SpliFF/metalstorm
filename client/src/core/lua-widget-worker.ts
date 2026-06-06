@@ -26,6 +26,7 @@ import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos } from './game-worker
 // is host-agnostic (runs on WebTransportAdapter, no DOM refs after the
 // onServerRestart callback was extracted) so it imports + runs here unchanged.
 import { Connection } from './connection.js';
+import type { CombatEventInfo } from './connection.js';
 import type { EntityStateSnapshot } from './entity-state.js';
 // GW4-c3: terrain + lighting + map parse move into the worker so terrain
 // renders from here (first light). All of these are worker-safe (Babylon
@@ -4510,6 +4511,42 @@ function dispatchUnitFinished(unitId: number, defId: number, team: number): void
     `, 'dispatchUnitFinished');
 }
 
+/** widgetHandler:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer,
+ *  weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam) —
+ *  fired from the server CombatEvent stream (envelope inside GameEventBatch).
+ *  Both ZK (cawidgets.lua) and BAR (barwidgets.lua) implement the handler
+ *  fan-out, so one dispatch reaches every subscribed widget in either game.
+ *
+ *  Faithful subset — the wire carries weapon-combat hits only:
+ *    - non-weapon damage (falling, self-destruct, debris, terrain) is not
+ *      represented (no CombatEvent is emitted for it server-side);
+ *    - `paralyzer` is always false — CombatResult has no paralyze flag on the
+ *      wire (FIDELITY gap: ZK widgets like unit_morph/paralysis FX won't see
+ *      the EMP/non-EMP split until it's added to the schema);
+ *    - `projectileID` is -1 — projectile ids aren't carried on CombatEvent.
+ *  Target/attacker defID+team are resolved from liveState; an event whose
+ *  target is not a known live unit is skipped (a feature hit, or a unit
+ *  outside our vision — no widget keyed on it can care). */
+function dispatchUnitDamaged(events: CombatEventInfo[]): void {
+    if (!runtime) return;
+    let chunk = '';
+    for (const e of events) {
+        if (!(e.damage > 0) || !Number.isFinite(e.damage)) continue;
+        const target = liveState.units.get(e.targetId);
+        if (!target) continue;
+        const atk = e.attackerId ? liveState.units.get(e.attackerId) : undefined;
+        const attackerId = e.attackerId || -1;
+        const attackerDefId = atk ? atk.defId : -1;
+        const attackerTeam = atk ? atk.team : -1;
+        chunk += `if widgetHandler and widgetHandler.UnitDamaged then `
+            + `pcall(widgetHandler.UnitDamaged, widgetHandler, ${e.targetId}, `
+            + `${target.defId}, ${target.team}, ${e.damage}, false, `
+            + `${e.weaponDefId}, -1, ${attackerId}, ${attackerDefId}, `
+            + `${attackerTeam}) end\n`;
+    }
+    if (chunk) runtime.doString(chunk, 'dispatchUnitDamaged');
+}
+
 /** widgetHandler:VisibleUnitAdded(unitID, unitDefID, unitTeam) — fires
  *  when a unit enters the camera viewing frustum. Distinct from
  *  UnitEnteredLos (vision-based) — VisibleUnitAdded is a render-side
@@ -5498,7 +5535,13 @@ function gpConnect(msg: GpInitToWorker): void {
             for (const e of events) gpProjectileRenderer.onTrajectory(e);
         },
         // GW4-c5: combat hit/kill events → combatFX (impact CEGs + lights).
-        onCombatEvents: (events) => gpCombatFX?.onCombatEvents(events),
+        // Also fan out widget:UnitDamaged so intel/health/FX widgets in ZK
+        // and BAR react to damage (faithful weapon-combat subset; see
+        // dispatchUnitDamaged for the documented wire gaps).
+        onCombatEvents: (events) => {
+            gpCombatFX?.onCombatEvents(events);
+            dispatchUnitDamaged(events);
+        },
         // GW4-c5b-3: per-unit command queues (~1 Hz) → command-path + waypoint
         // overlays for the current selection (shift-gated). Cached so a
         // selection change re-renders without waiting for the next broadcast.
