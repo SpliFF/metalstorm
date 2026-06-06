@@ -52,6 +52,39 @@ export function groundCircleVertices(
     return out;
 }
 
+/**
+ * Synthesize a stable integer location id for gl.GetUniformLocation (WebGL2
+ * exposes only opaque WebGLUniformLocation, but Recoil's API hands Lua a GLint
+ * the widget caches and feeds back to gl.Uniform*). Dedupes repeat lookups per
+ * shader via `locIds`, appends new opaque locations to the global `registry`
+ * (index = id), and mirrors GL's -1 for an unknown/inactive uniform without
+ * burning a slot. Pure (generic over the opaque location type) so it's
+ * unit-testable without a GL context.
+ */
+export function internUniformLocation<T>(
+    locIds: Map<string, number>,
+    registry: (T | null)[],
+    name: string,
+    resolve: () => T | null,
+): number {
+    const cached = locIds.get(name);
+    if (cached !== undefined) return cached;
+    const loc = resolve();
+    if (!loc) { locIds.set(name, -1); return -1; }
+    const id = registry.length;
+    registry.push(loc);
+    locIds.set(name, id);
+    return id;
+}
+
+/** Look up an opaque location previously interned by {@link internUniformLocation}
+ *  by its integer id. Out-of-range / negative ids → null. */
+export function resolveRegisteredLocation<T>(
+    registry: (T | null)[], id: number,
+): T | null {
+    return (id >= 0 && id < registry.length) ? registry[id] : null;
+}
+
 /** Handle returned by gl.CreateShader — opaque to Lua. */
 export interface LuaShaderHandle {
     __type: 'shader';
@@ -62,6 +95,11 @@ export interface LuaShaderHandle {
      *  refcount-decrement the right entry. Unset for ad-hoc handles that
      *  weren't registered. */
     programKey?: string;
+    /** Uniform-name → integer location id handed out by gl.GetUniformLocation.
+     *  WebGL2 has no integer uniform locations (only opaque
+     *  WebGLUniformLocation), so the bridge synthesizes stable ids that index
+     *  LuaGLBridge.uniformLocations; this dedupes repeat lookups per shader. */
+    locIds?: Map<string, number>;
 }
 
 /** Handle returned by gl.CreateTexture. */
@@ -292,6 +330,13 @@ export class LuaGLBridge {
         gl['UseShader'] = (handle: LuaValue) => this.useShader(handle);
         gl['DeleteShader'] = (handle: LuaValue) => this.deleteShader(handle);
         gl['GetShaderLog'] = () => this.lastShaderLog;
+        // gl.GetUniformLocation(shader, name) — Recoil returns a GLint location
+        // for the named uniform (or -1). Shader-heavy widgets (103× in BAR)
+        // cache it once and feed it to gl.Uniform*(loc, …) in hot loops to skip
+        // the per-frame name lookup. WebGL2 has only opaque WebGLUniformLocation,
+        // so the bridge synthesizes a stable integer id (see getUniformLocId).
+        gl['GetUniformLocation'] = (shader: LuaValue, name: LuaValue) =>
+            this.getUniformLocId(shader, name);
         gl['Uniform'] = (name: LuaValue, ...args: LuaValue[]) =>
             this.setUniform(name, args);
         gl['UniformInt'] = (name: LuaValue, ...args: LuaValue[]) =>
@@ -1522,9 +1567,39 @@ export class LuaGLBridge {
         return loc;
     }
 
+    /** Global registry backing gl.GetUniformLocation. The integer location id
+     *  handed to Lua indexes this array; the stored WebGLUniformLocation
+     *  already encodes its program, so gl.Uniform*(loc:number, …) resolves
+     *  without needing to know which shader the id came from (the widget binds
+     *  the matching program via gl.UseShader before setting, exactly as GL
+     *  requires). */
+    private uniformLocations: (WebGLUniformLocation | null)[] = [];
+
+    /** gl.GetUniformLocation(shader, name) → stable integer id (or -1). */
+    private getUniformLocId(shaderArg: LuaValue, nameArg: LuaValue): number {
+        const shader = shaderArg as LuaShaderHandle | null;
+        if (!shader || shader.__type !== 'shader') return -1;
+        const name = String(nameArg ?? '');
+        if (!shader.locIds) shader.locIds = new Map<string, number>();
+        return internUniformLocation(
+            shader.locIds, this.uniformLocations, name,
+            () => this.getUniformLocation(shader, name),
+        );
+    }
+
+    /** Resolve a uniform first-arg that is either a name (string → look up on
+     *  the active shader) or a cached location id (number → the global
+     *  registry). Returns null when there's no active shader / unknown loc. */
+    private resolveUniformLoc(nameOrId: LuaValue): WebGLUniformLocation | null {
+        if (typeof nameOrId === 'number') {
+            return resolveRegisteredLocation(this.uniformLocations, nameOrId);
+        }
+        if (!this.currentShader) return null;
+        return this.getUniformLocation(this.currentShader, String(nameOrId));
+    }
+
     private setUniform(name: LuaValue, args: LuaValue[]): void {
-        if (!this.currentShader) return;
-        const loc = this.getUniformLocation(this.currentShader, String(name));
+        const loc = this.resolveUniformLoc(name);
         if (!loc) return;
         const gl = this.gl;
         // Spring's gl.Uniform handles both scalar and matching-value variants.
@@ -1542,8 +1617,7 @@ export class LuaGLBridge {
     }
 
     private setUniformInt(name: LuaValue, args: LuaValue[]): void {
-        if (!this.currentShader) return;
-        const loc = this.getUniformLocation(this.currentShader, String(name));
+        const loc = this.resolveUniformLoc(name);
         if (!loc) return;
         const gl = this.gl;
         if (args.length === 1) gl.uniform1i(loc, Number(args[0]));
@@ -1562,8 +1636,7 @@ export class LuaGLBridge {
     projectionMatrix: Float32Array | null = null;
 
     private setUniformMatrix(name: LuaValue, args: LuaValue[]): void {
-        if (!this.currentShader) return;
-        const loc = this.getUniformLocation(this.currentShader, String(name));
+        const loc = this.resolveUniformLoc(name);
         if (!loc) return;
         const gl = this.gl;
         // Spring accepts either a matrix name ("view"/"projection"/"camera"/
@@ -1584,8 +1657,8 @@ export class LuaGLBridge {
     }
 
     private setUniformArray(name: LuaValue, arr: LuaValue): void {
-        if (!this.currentShader || !arr) return;
-        const loc = this.getUniformLocation(this.currentShader, String(name));
+        if (!arr) return;
+        const loc = this.resolveUniformLoc(name);
         if (!loc) return;
         // Not used by lava_layer beyond constants — stub.
         void loc;

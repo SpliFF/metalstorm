@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { groundCircleVertices } from './lua-gl-bridge.js';
+import {
+    groundCircleVertices,
+    internUniformLocation,
+    resolveRegisteredLocation,
+} from './lua-gl-bridge.js';
 
 describe('groundCircleVertices (gl.DrawGroundCircle geometry)', () => {
     it('emits exactly `divs` vertices (3 floats each)', () => {
@@ -37,5 +41,49 @@ describe('groundCircleVertices (gl.DrawGroundCircle geometry)', () => {
         const v = groundCircleVertices(10, 0, 20, 64, 16, null);
         expect(v[0]).toBeCloseTo(10, 6);     // x = px + r·sin(0)
         expect(v[2]).toBeCloseTo(20 + 64, 6); // z = pz + r·cos(0)
+    });
+});
+
+describe('uniform location interning (gl.GetUniformLocation)', () => {
+    // String sentinels stand in for opaque WebGLUniformLocation objects.
+    it('allocates sequential ids and indexes the global registry', () => {
+        const reg: (string | null)[] = [];
+        const locIds = new Map<string, number>();
+        const a = internUniformLocation(locIds, reg, 'uColor', () => 'LOC_uColor');
+        const b = internUniformLocation(locIds, reg, 'uTime', () => 'LOC_uTime');
+        expect(a).toBe(0);
+        expect(b).toBe(1);
+        expect(resolveRegisteredLocation(reg, a)).toBe('LOC_uColor');
+        expect(resolveRegisteredLocation(reg, b)).toBe('LOC_uTime');
+    });
+
+    it('dedupes repeat lookups of the same name to one id/slot', () => {
+        const reg: (string | null)[] = [];
+        const locIds = new Map<string, number>();
+        let resolves = 0;
+        const r = () => { resolves++; return 'LOC'; };
+        const first = internUniformLocation(locIds, reg, 'uColor', r);
+        const again = internUniformLocation(locIds, reg, 'uColor', r);
+        expect(again).toBe(first);
+        expect(reg.length).toBe(1);
+        expect(resolves).toBe(1); // resolver only called once
+    });
+
+    it('mirrors GL -1 for unknown uniforms without burning a slot', () => {
+        const reg: (string | null)[] = [];
+        const locIds = new Map<string, number>();
+        const id = internUniformLocation(locIds, reg, 'uMissing', () => null);
+        expect(id).toBe(-1);
+        expect(reg.length).toBe(0);
+        // cached: a second lookup is still -1 and still doesn't allocate
+        expect(internUniformLocation(locIds, reg, 'uMissing', () => 'LATE')).toBe(-1);
+        expect(reg.length).toBe(0);
+    });
+
+    it('resolves out-of-range / negative ids to null', () => {
+        const reg: (string | null)[] = ['L0', 'L1'];
+        expect(resolveRegisteredLocation(reg, -1)).toBeNull();
+        expect(resolveRegisteredLocation(reg, 2)).toBeNull();
+        expect(resolveRegisteredLocation(reg, 0)).toBe('L0');
     });
 });
