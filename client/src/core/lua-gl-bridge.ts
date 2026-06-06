@@ -364,6 +364,42 @@ export class LuaGLBridge {
         gl['TextureInfo'] = (handleOrPath: LuaValue) =>
             this.textureInfo(handleOrPath);
 
+        // ── Texture atlas family (CreateTextureAtlas / AddAtlasTexture /
+        //    FinalizeTextureAtlas / GetAtlasTexture / DeleteTextureAtlas) ──
+        // FIDELITY-STANDIN (not a WebGL2 capability gap — atlasing is fully
+        // implementable here). The reason these are no-ops is the same as
+        // gl.GetVBO (C3 / drift #9): there is NO reaching consumer on the
+        // default widget set. Every game user is either a `*_gl4` widget that
+        // self-disables when `Platform.glHaveGL4` is nil, or the FlowUI
+        // atlas-maker (`flowui_atlas_gl4.lua`) which ships `enabled = false`.
+        // Building the real packing+upload path now would be a mechanism with
+        // no driver, so it is deferred to the Stage-5 GL4 substitution
+        // decisions. Until then we keep faithful return *shapes* (so a future
+        // non-GL4 caller doesn't crash on a nil) but make the gap LOUD once —
+        // no-silent-GL-failures — so such a caller surfaces instead of
+        // silently getting an empty atlas. Recoil signatures: LuaOpenGL.cpp
+        // CreateTextureAtlas/FinalizeTextureAtlas/GetAtlasTexture.
+        const ATLAS_STANDIN_ID = '$luatex_atlas_stub';
+        gl['CreateTextureAtlas'] = (_x: LuaValue, _y: LuaValue, _alloc?: LuaValue) => {
+            this.warnStandin('CreateTextureAtlas',
+                'texture atlasing has no reaching WebGL2 consumer (all callers ' +
+                'are GL4 or enabled=false widgets); returning an inert atlas id ' +
+                '(Stage-5 / GL4-substitution gated). Sub-textures resolve empty.');
+            return ATLAS_STANDIN_ID; // Recoil returns a string atlas name (truthy)
+        };
+        // AddAtlasTexture(atlas, subName) → no return value in Recoil.
+        gl['AddAtlasTexture'] = (..._args: LuaValue[]) => { /* inert */ };
+        // FinalizeTextureAtlas(atlas) → boolean "was it built". Honest: false.
+        gl['FinalizeTextureAtlas'] = (..._args: LuaValue[]) => false;
+        // GetAtlasTexture(atlas, subName) → (x1, x2, y1, y2, pageNum). The
+        // standin atlas holds nothing, so return a degenerate zero region
+        // (numbers, never nil, so `local x1,x2 = gl.GetAtlasTexture(...)`
+        // arithmetic stays valid).
+        gl['GetAtlasTexture'] = (..._args: LuaValue[]) => [0, 0, 0, 0, 0];
+        // DeleteTextureAtlas(atlas) → boolean. Accept the cleanup (Shutdown
+        // calls this on the inert id).
+        gl['DeleteTextureAtlas'] = (..._args: LuaValue[]) => true;
+
         // ── FBO / RBO ───────────────────────────────────────────────
         gl['CreateFBO'] = (opts: LuaValue) => this.createFBO(opts);
         gl['ActiveFBO'] = (fbo: LuaValue, callback: LuaValue) => this.activeFBO(fbo, callback);
