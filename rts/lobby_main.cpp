@@ -131,6 +131,7 @@ static GameServerInstance spawnGameServer(
     const std::string& mapId, const std::string& dbPath,
     const std::vector<RoomPlayer>& playerRoster,
     const std::vector<RoomAISlot>& aiSlots,
+    const std::unordered_map<std::string, std::string>& modOptions = {},
     const std::unordered_set<int>& excludedPorts = {})
 {
     GameServerInstance inst;
@@ -173,6 +174,12 @@ static GameServerInstance spawnGameServer(
             slot.aiId + ":" +
             std::to_string(static_cast<int>(slot.team)) + ":" +
             std::to_string(static_cast<int>(slot.startPos)));
+    }
+    // Room modoptions → one "--modoption key=value" pair each. (§5)
+    std::vector<std::string> modOptArgStorage;
+    modOptArgStorage.reserve(modOptions.size());
+    for (const auto& [key, value] : modOptions) {
+        modOptArgStorage.push_back(key + "=" + value);
     }
 
     pid_t pid = fork();
@@ -222,6 +229,10 @@ static GameServerInstance spawnGameServer(
         }
         for (const auto& spec : aiArgStorage) {
             argv.push_back("--ai");
+            argv.push_back(spec.c_str());
+        }
+        for (const auto& spec : modOptArgStorage) {
+            argv.push_back("--modoption");
             argv.push_back(spec.c_str());
         }
         argv.push_back(nullptr);
@@ -1019,7 +1030,15 @@ int main(int argc, char* argv[])
                 + ",\"team\":" + std::to_string(ai.team)
                 + ",\"start_pos\":" + std::to_string(ai.startPos) + "}";
         }
-        json += "]";
+        json += "],\"modoptions\":{";
+        first = true;
+        for (const auto& [key, value] : room->modOptions) {
+            if (!first) json += ",";
+            first = false;
+            json += "\"" + HttpAuth::JsonEscape(key) + "\":\""
+                + HttpAuth::JsonEscape(value) + "\"";
+        }
+        json += "}";
         if (room->gameServerPort > 0)
             json += ",\"game_server_port\":" + std::to_string(room->gameServerPort);
         if (room->persistent)
@@ -1386,6 +1405,21 @@ int main(int argc, char* argv[])
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
     });
 
+    // POST /api/rooms/modoption — host sets/clears one room modoption.
+    // Body: {"key":"...","value":"..."}. An empty/absent value clears it.
+    // (PLAN-bar.md §5.)
+    net.AddHttpPost("/api/rooms/modoption", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
+        if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
+        std::string key = HttpAuth::JsonField(body, "key");
+        std::string value = HttpAuth::JsonField(body, "value");
+        if (!rooms.SetModOption(room->id, static_cast<uint32_t>(userId), key, value))
+            return HttpAuth::JsonResponse(400, R"({"error":"cannot set modoption"})");
+        broadcastRooms();
+        return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
+    });
+
     // POST /api/rooms/ai/team — change an AI slot's team
     net.AddHttpPost("/api/rooms/ai/team", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
@@ -1460,7 +1494,7 @@ int main(int argc, char* argv[])
             }
             auto inst = spawnGameServer(room->id, room->gameId, gameVer,
                 room->mapId, dbPath,
-                room->players, room->aiSlots, busyPorts);
+                room->players, room->aiSlots, room->modOptions, busyPorts);
             gameServers[room->id] = inst;
             persistGameServer(inst);
             room->gameServerPort = inst.port;

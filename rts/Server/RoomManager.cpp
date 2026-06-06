@@ -567,6 +567,39 @@ bool RoomManager::RemoveAISlot(
     return true;
 }
 
+bool RoomManager::SetModOption(
+    uint32_t roomId, uint32_t requesterId,
+    const std::string& key, const std::string& value)
+{
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    auto it = rooms.find(roomId);
+    if (it == rooms.end()) return false;
+    GameRoom& room = it->second;
+
+    // Host-only, pre-game only. After the roster is handed off to
+    // spring-server (Loading/Active/Ended) the modoptions are already
+    // baked into the spawned process and the def-cache key, so a late
+    // change would have no effect.
+    if (room.hostPlayerId != requesterId) return false;
+    if (room.state != ERoomState::Filling &&
+        room.state != ERoomState::Configuring &&
+        room.state != ERoomState::ReadyCheck) {
+        return false;
+    }
+    if (key.empty()) return false;
+
+    if (value.empty()) {
+        room.modOptions.erase(key);
+        SLOG(SPRING_LOG_INFO, "room %u: host cleared modoption '%s'",
+            roomId, key.c_str());
+    } else {
+        room.modOptions[key] = value;
+        SLOG(SPRING_LOG_INFO, "room %u: host set modoption '%s'='%s'",
+            roomId, key.c_str(), value.c_str());
+    }
+    return true;
+}
+
 bool RoomManager::SetAITeam(
     uint32_t roomId, uint32_t requesterId,
     uint8_t slotIndex, uint8_t team)

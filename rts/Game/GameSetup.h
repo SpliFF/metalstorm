@@ -98,6 +98,14 @@ public:
 	// these act on the global GameSetup instance
 	static const spring::unordered_map<std::string, std::string>& GetMapOptions();
 	static const spring::unordered_map<std::string, std::string>& GetModOptions();
+	/// Set a single modoption on the global GameSetup instance. The
+	/// headless server builds no start script (CGameSetup::Init is never
+	/// run), so the `GAME\ModOptions` section that normally populates the
+	/// map is absent; the lobby instead passes the room's modoptions as
+	/// `--modoption key=value` args and the server seeds them here, before
+	/// sim init, so synced `Spring.GetModOptions()` and the defs-cache key
+	/// see them. (PLAN-bar.md §5.)
+	static void SetModOption(const std::string& key, const std::string& value);
 	static const std::vector<PlayerBase>& GetPlayerStartingData();
 	static const std::vector<TeamBase>& GetTeamStartingData();
 	static const std::vector<AllyTeam>& GetAllyStartingData();

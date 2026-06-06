@@ -293,6 +293,21 @@ int main(int argc, char* argv[])
             rq.team = parts[1].empty() ? 0 : std::atoi(parts[1].c_str());
             rq.startPos = parts[2].empty() ? -1 : std::atoi(parts[2].c_str());
             requestedPlayers.push_back(std::move(rq));
+        } else if (arg == "--modoption" && i + 1 < argc) {
+            // Format: key=value. The lobby passes the room's modoptions
+            // (FFA / commshare / multipliers / chicken-mode / …) so synced
+            // gadgets read them via Spring.GetModOptions() and the def-cache
+            // key reflects them. Seeded into the global CGameSetup before
+            // sim init. (PLAN-bar.md §5.)
+            const std::string kv = argv[++i];
+            const auto eq = kv.find('=');
+            if (eq == std::string::npos || eq == 0) {
+                SLOG(SPRING_LOG_WARNING,
+                    "ignoring malformed --modoption '%s' (expected key=value)",
+                    kv.c_str());
+                continue;
+            }
+            CGameSetup::SetModOption(kv.substr(0, eq), kv.substr(eq + 1));
         } else if (arg == "--ai" && i + 1 < argc) {
             // Format: <id>:<team>:<pos>. We parse here and resolve
             // later, once we have a discovered AI list to look up

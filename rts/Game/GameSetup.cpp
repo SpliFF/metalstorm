@@ -142,6 +142,11 @@ const spring::unordered_map<std::string, std::string>& CGameSetup::GetModOptions
 	return (gameSetup->GetModOptionsCont());
 }
 
+void CGameSetup::SetModOption(const std::string& key, const std::string& value)
+{
+	gameSetup->modOptions[key] = value;
+}
+
 
 const std::vector<PlayerBase>& CGameSetup::GetPlayerStartingData()
 {

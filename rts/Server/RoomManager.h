@@ -90,6 +90,13 @@ struct GameRoom {
     /// handed off to spring-server via --ai command-line args.
     std::vector<RoomAISlot> aiSlots;
 
+    /// Room-level modoptions (key→value), set by the host before game
+    /// start. Handed off to spring-server as `--modoption key=value` args
+    /// so synced gadgets read them via Spring.GetModOptions() and the
+    /// def-cache key reflects them. (PLAN-bar.md §5.) Empty until the host
+    /// sets one; both games' Lua degrade to defaults when absent.
+    std::unordered_map<std::string, std::string> modOptions;
+
     int countdownSeconds = 0;
     uint16_t gameServerPort = 0;   // set when game server is spawned
 
@@ -229,6 +236,12 @@ public:
     /// indices are silently ignored.
     bool RemoveAISlot(uint32_t roomId, uint32_t requesterId,
                       uint8_t slotIndex);
+
+    /// Set (or, with an empty value, clear) a single room modoption
+    /// (host only, pre-start). Returns false if the requester is not the
+    /// host or the room is past the pre-game states. (PLAN-bar.md §5.)
+    bool SetModOption(uint32_t roomId, uint32_t requesterId,
+                      const std::string& key, const std::string& value);
 
     /// Reassign the AI slot at `slotIndex` to a different team
     /// (host only). Start position is preserved. Returns false if
