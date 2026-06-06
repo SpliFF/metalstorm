@@ -1192,6 +1192,7 @@ async function init(
             }
         },
         getUnitDefRadius: (defId) => unitDefMap.get(defId)?.radius,
+        getSelectionBox: () => gpSelection?.getSelectionBoxScreen() ?? null,
         getUnitDefWeaponDefIds: (defId) => unitDefMap.get(defId)?.weaponDefIds,
         getWeaponDefStats: (weaponDefId) => {
             const w = weaponDefMap.get(weaponDefId);

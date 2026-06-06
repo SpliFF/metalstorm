@@ -165,6 +165,26 @@ export class WorkerSelection {
         if (this.dragActive) { this.dragActive = false; this.onDragBox(null); }
     }
 
+    /**
+     * Backs `Spring.GetSelectionBox`. Returns the active drag-select
+     * rectangle as `[left, top, right, bottom]` in Spring screen coords
+     * (device px, Y-up bottom-left origin — the same convention the worker
+     * uses for mouse callins + gl.* drawing), or `null` when no box is
+     * being drawn. Recoil only reports a box once the drag has actually
+     * grown past the click threshold (`dragMoved`), matching
+     * `CMouseHandler::GetSelectionBoxVertices`.
+     */
+    getSelectionBoxScreen(): [number, number, number, number] | null {
+        if (!this.dragActive || !this.dragMoved) return null;
+        const h = this.scene.getEngine().getRenderHeight();
+        const left  = Math.min(this.dragStartX, this.dragCurX) * this.dpr;
+        const right = Math.max(this.dragStartX, this.dragCurX) * this.dpr;
+        // CSS pointer coords are Y-down top-left; flip to Y-up bottom-left.
+        const top    = h - Math.min(this.dragStartY, this.dragCurY) * this.dpr;
+        const bottom = h - Math.max(this.dragStartY, this.dragCurY) * this.dpr;
+        return [left, top, right, bottom];
+    }
+
     // ---- Selection ----
 
     private setSelection(ids: number[]): void {

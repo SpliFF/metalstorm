@@ -430,3 +430,22 @@ describe('GetUnitWeaponState', () => {
         expect(call(api.GetUnitWeaponState, 42, 1, 'bogusKey')).toBeNull();
     });
 });
+
+describe('GetSelectionBox', () => {
+    it('returns [left, top, right, bottom] when a box is active', () => {
+        const ls = createDefaultLiveState();
+        const api = springApi(
+            makeCtx({ getSelectionBox: () => [10, 200, 110, 50] }), ls);
+        expect(call(api.GetSelectionBox)).toEqual([10, 200, 110, 50]);
+    });
+    it('returns nil when no box is being drawn', () => {
+        const ls = createDefaultLiveState();
+        const api = springApi(makeCtx({ getSelectionBox: () => null }), ls);
+        expect(call(api.GetSelectionBox)).toBeNull();
+    });
+    it('returns nil when the host provides no selection-box accessor', () => {
+        const ls = createDefaultLiveState();
+        const api = springApi(makeCtx(), ls);
+        expect(call(api.GetSelectionBox)).toBeNull();
+    });
+});

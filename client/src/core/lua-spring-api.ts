@@ -180,6 +180,14 @@ export interface SpringAPIContext {
      */
     getWeaponDefStats?(weaponDefId: number): WeaponDefStats | undefined;
     /**
+     * Active drag-select rectangle for `Spring.GetSelectionBox`, as
+     * `[left, top, right, bottom]` in Spring screen coords (device px,
+     * Y-up bottom-left origin), or `null` when no box is being drawn.
+     * Backed by the worker's `WorkerSelection`. Optional — if absent the
+     * API always reports no box.
+     */
+    getSelectionBox?(): [number, number, number, number] | null;
+    /**
      * Per-allyteam radar position-error magnitude (in elmos). Matches
      * `Spring.GetAllyTeamRadarErrorSize`. Server-side this is the
      * baseline `radarErrorSize` multiplied by per-team modifiers; we
@@ -1584,6 +1592,14 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         // --- Selection ---
         GetSelectedUnits: () => luaTable(...ls.selectedUnitIds),
         GetSelectedUnitsCount: () => ls.selectedUnitIds.length,
+        // Spring.GetSelectionBox() — the active drag-select rectangle in
+        // screen coords (left, top, right, bottom), or nil when no box is
+        // being drawn. Faithful to LuaUnsyncedRead::GetSelectionBox; backed
+        // by the worker's WorkerSelection (device px, Y-up bottom-left).
+        GetSelectionBox: () => {
+            const box = ctx.getSelectionBox?.();
+            return box ?? null; // [left, top, right, bottom] → 4 returns, else nil
+        },
         GetSelectedUnitsSorted: () => {
             const sorted: Record<number, number[]> = {};
             for (const id of ls.selectedUnitIds) {
