@@ -7,6 +7,7 @@
 #include "PlayerHandler.h"
 #include "Game/GlobalUnsynced.h"
 #include "Map/ReadMap.h"
+#include "Server/PlayerTeamEventCollector.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Units/Unit.h"
@@ -99,6 +100,7 @@ void CPlayer::StartSpectating()
 
 	StopControllingUnit();
 	eventHandler.PlayerChanged(playerNum);
+	playerTeamEvents.Push({PlayerTeamEventData::PlayerChanged, 0, static_cast<uint32_t>(playerNum)});
 }
 
 void CPlayer::JoinTeam(int newTeam)
@@ -117,6 +119,7 @@ void CPlayer::JoinTeam(int newTeam)
 	}
 
 	eventHandler.PlayerChanged(playerNum);
+	playerTeamEvents.Push({PlayerTeamEventData::PlayerChanged, 0, static_cast<uint32_t>(playerNum)});
 }
 
 void CPlayer::GameFrame(int frameNum)

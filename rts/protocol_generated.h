@@ -261,6 +261,12 @@ struct TeamStartInfo;
 struct TeamStartInfoBuilder;
 struct TeamStartInfoT;
 
+struct PlayerTeamEventItem;
+
+struct PlayerTeamEventBatch;
+struct PlayerTeamEventBatchBuilder;
+struct PlayerTeamEventBatchT;
+
 struct ReconnectResponse;
 struct ReconnectResponseBuilder;
 struct ReconnectResponseT;
@@ -1778,11 +1784,12 @@ enum ServerPayload : uint8_t {
   ServerPayload_FeatureLifecycleBatch = 35,
   ServerPayload_SendToUnsyncedEvent = 36,
   ServerPayload_TeamStartInfo = 37,
+  ServerPayload_PlayerTeamEventBatch = 38,
   ServerPayload_MIN = ServerPayload_NONE,
-  ServerPayload_MAX = ServerPayload_TeamStartInfo
+  ServerPayload_MAX = ServerPayload_PlayerTeamEventBatch
 };
 
-inline const ServerPayload (&EnumValuesServerPayload())[38] {
+inline const ServerPayload (&EnumValuesServerPayload())[39] {
   static const ServerPayload values[] = {
     ServerPayload_NONE,
     ServerPayload_AuthResponse,
@@ -1821,13 +1828,14 @@ inline const ServerPayload (&EnumValuesServerPayload())[38] {
     ServerPayload_StandingOrderState,
     ServerPayload_FeatureLifecycleBatch,
     ServerPayload_SendToUnsyncedEvent,
-    ServerPayload_TeamStartInfo
+    ServerPayload_TeamStartInfo,
+    ServerPayload_PlayerTeamEventBatch
   };
   return values;
 }
 
 inline const char * const *EnumNamesServerPayload() {
-  static const char * const names[39] = {
+  static const char * const names[40] = {
     "NONE",
     "AuthResponse",
     "EntityCreate",
@@ -1866,13 +1874,14 @@ inline const char * const *EnumNamesServerPayload() {
     "FeatureLifecycleBatch",
     "SendToUnsyncedEvent",
     "TeamStartInfo",
+    "PlayerTeamEventBatch",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameServerPayload(ServerPayload e) {
-  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_TeamStartInfo)) return "";
+  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_PlayerTeamEventBatch)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesServerPayload()[index];
 }
@@ -2029,6 +2038,10 @@ template<> struct ServerPayloadTraits<SpringWeb::TeamStartInfo> {
   static const ServerPayload enum_value = ServerPayload_TeamStartInfo;
 };
 
+template<> struct ServerPayloadTraits<SpringWeb::PlayerTeamEventBatch> {
+  static const ServerPayload enum_value = ServerPayload_PlayerTeamEventBatch;
+};
+
 template<typename T> struct ServerPayloadUnionTraits {
   static const ServerPayload enum_value = ServerPayload_NONE;
 };
@@ -2179,6 +2192,10 @@ template<> struct ServerPayloadUnionTraits<SpringWeb::SendToUnsyncedEventT> {
 
 template<> struct ServerPayloadUnionTraits<SpringWeb::TeamStartInfoT> {
   static const ServerPayload enum_value = ServerPayload_TeamStartInfo;
+};
+
+template<> struct ServerPayloadUnionTraits<SpringWeb::PlayerTeamEventBatchT> {
+  static const ServerPayload enum_value = ServerPayload_PlayerTeamEventBatch;
 };
 
 struct ServerPayloadUnion {
@@ -2507,6 +2524,14 @@ struct ServerPayloadUnion {
     return type == ServerPayload_TeamStartInfo ?
       reinterpret_cast<const SpringWeb::TeamStartInfoT *>(value) : nullptr;
   }
+  SpringWeb::PlayerTeamEventBatchT *AsPlayerTeamEventBatch() {
+    return type == ServerPayload_PlayerTeamEventBatch ?
+      reinterpret_cast<SpringWeb::PlayerTeamEventBatchT *>(value) : nullptr;
+  }
+  const SpringWeb::PlayerTeamEventBatchT *AsPlayerTeamEventBatch() const {
+    return type == ServerPayload_PlayerTeamEventBatch ?
+      reinterpret_cast<const SpringWeb::PlayerTeamEventBatchT *>(value) : nullptr;
+  }
 };
 
 bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *obj, ServerPayload type);
@@ -2651,6 +2676,49 @@ FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) AllyStartBox FLATBUFFERS_FINAL_CLASS {
   }
 };
 FLATBUFFERS_STRUCT_END(AllyStartBox, 20);
+
+/// One player- or team-status change, mirroring the matching Recoil
+/// eventHandler callins. `kind` selects which LuaUI callin the widget worker
+/// fires; `id` is a playerID (kinds 0-2) or teamID (kind 3); `reason` carries
+/// the PlayerRemoved reason (0 otherwise). Streamed as a per-tick batch so a
+/// team death (which demotes every member player to spectator) coalesces its
+/// PlayerChanged + TeamDied events into one message.
+FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) PlayerTeamEventItem FLATBUFFERS_FINAL_CLASS {
+ private:
+  uint8_t kind_;
+  uint8_t reason_;
+  int16_t padding0__;
+  uint32_t id_;
+
+ public:
+  PlayerTeamEventItem()
+      : kind_(0),
+        reason_(0),
+        padding0__(0),
+        id_(0) {
+    (void)padding0__;
+  }
+  PlayerTeamEventItem(uint8_t _kind, uint8_t _reason, uint32_t _id)
+      : kind_(::flatbuffers::EndianScalar(_kind)),
+        reason_(::flatbuffers::EndianScalar(_reason)),
+        padding0__(0),
+        id_(::flatbuffers::EndianScalar(_id)) {
+    (void)padding0__;
+  }
+  /// 0 = PlayerChanged, 1 = PlayerAdded, 2 = PlayerRemoved, 3 = TeamDied.
+  uint8_t kind() const {
+    return ::flatbuffers::EndianScalar(kind_);
+  }
+  /// PlayerRemoved reason (0=quit, 1=kicked, 2=timeout); 0 for other kinds.
+  uint8_t reason() const {
+    return ::flatbuffers::EndianScalar(reason_);
+  }
+  /// playerID for kinds 0-2, teamID for kind 3.
+  uint32_t id() const {
+    return ::flatbuffers::EndianScalar(id_);
+  }
+};
+FLATBUFFERS_STRUCT_END(PlayerTeamEventItem, 8);
 
 FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) MapStartPos FLATBUFFERS_FINAL_CLASS {
  private:
@@ -8512,6 +8580,72 @@ inline ::flatbuffers::Offset<TeamStartInfo> CreateTeamStartInfoDirect(
 
 ::flatbuffers::Offset<TeamStartInfo> CreateTeamStartInfo(::flatbuffers::FlatBufferBuilder &_fbb, const TeamStartInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
+struct PlayerTeamEventBatchT : public ::flatbuffers::NativeTable {
+  typedef PlayerTeamEventBatch TableType;
+  std::vector<SpringWeb::PlayerTeamEventItem> events{};
+};
+
+/// Batch of player/team status changes for one sim tick. Reliable. Drives
+/// widget:PlayerChanged / PlayerAdded / PlayerRemoved / TeamDied on the
+/// client LuaUI worker (the server's own synced Lua gets these via
+/// eventHandler directly; this carries them across the unsynced boundary).
+struct PlayerTeamEventBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef PlayerTeamEventBatchT NativeTableType;
+  typedef PlayerTeamEventBatchBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_EVENTS = 4
+  };
+  const ::flatbuffers::Vector<const SpringWeb::PlayerTeamEventItem *> *events() const {
+    return GetPointer<const ::flatbuffers::Vector<const SpringWeb::PlayerTeamEventItem *> *>(VT_EVENTS);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_EVENTS) &&
+           verifier.VerifyVector(events()) &&
+           verifier.EndTable();
+  }
+  PlayerTeamEventBatchT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(PlayerTeamEventBatchT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<PlayerTeamEventBatch> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerTeamEventBatchT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct PlayerTeamEventBatchBuilder {
+  typedef PlayerTeamEventBatch Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_events(::flatbuffers::Offset<::flatbuffers::Vector<const SpringWeb::PlayerTeamEventItem *>> events) {
+    fbb_.AddOffset(PlayerTeamEventBatch::VT_EVENTS, events);
+  }
+  explicit PlayerTeamEventBatchBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<PlayerTeamEventBatch> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<PlayerTeamEventBatch>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<PlayerTeamEventBatch> CreatePlayerTeamEventBatch(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::Vector<const SpringWeb::PlayerTeamEventItem *>> events = 0) {
+  PlayerTeamEventBatchBuilder builder_(_fbb);
+  builder_.add_events(events);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<PlayerTeamEventBatch> CreatePlayerTeamEventBatchDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const std::vector<SpringWeb::PlayerTeamEventItem> *events = nullptr) {
+  auto events__ = events ? _fbb.CreateVectorOfStructs<SpringWeb::PlayerTeamEventItem>(*events) : 0;
+  return SpringWeb::CreatePlayerTeamEventBatch(
+      _fbb,
+      events__);
+}
+
+::flatbuffers::Offset<PlayerTeamEventBatch> CreatePlayerTeamEventBatch(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerTeamEventBatchT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
 struct ReconnectResponseT : public ::flatbuffers::NativeTable {
   typedef ReconnectResponse TableType;
   uint8_t status = 0;
@@ -14115,6 +14249,9 @@ struct ServerMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const SpringWeb::TeamStartInfo *payload_as_TeamStartInfo() const {
     return payload_type() == SpringWeb::ServerPayload_TeamStartInfo ? static_cast<const SpringWeb::TeamStartInfo *>(payload()) : nullptr;
   }
+  const SpringWeb::PlayerTeamEventBatch *payload_as_PlayerTeamEventBatch() const {
+    return payload_type() == SpringWeb::ServerPayload_PlayerTeamEventBatch ? static_cast<const SpringWeb::PlayerTeamEventBatch *>(payload()) : nullptr;
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_PAYLOAD_TYPE, 1) &&
@@ -14273,6 +14410,10 @@ template<> inline const SpringWeb::SendToUnsyncedEvent *ServerMessage::payload_a
 
 template<> inline const SpringWeb::TeamStartInfo *ServerMessage::payload_as<SpringWeb::TeamStartInfo>() const {
   return payload_as_TeamStartInfo();
+}
+
+template<> inline const SpringWeb::PlayerTeamEventBatch *ServerMessage::payload_as<SpringWeb::PlayerTeamEventBatch>() const {
+  return payload_as_PlayerTeamEventBatch();
 }
 
 struct ServerMessageBuilder {
@@ -16646,6 +16787,32 @@ inline ::flatbuffers::Offset<TeamStartInfo> CreateTeamStartInfo(::flatbuffers::F
       _fbb,
       _teams,
       _boxes);
+}
+
+inline PlayerTeamEventBatchT *PlayerTeamEventBatch::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<PlayerTeamEventBatchT>(new PlayerTeamEventBatchT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void PlayerTeamEventBatch::UnPackTo(PlayerTeamEventBatchT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = events(); if (_e) { _o->events.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->events[_i] = *_e->Get(_i); } } else { _o->events.resize(0); } }
+}
+
+inline ::flatbuffers::Offset<PlayerTeamEventBatch> PlayerTeamEventBatch::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerTeamEventBatchT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreatePlayerTeamEventBatch(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<PlayerTeamEventBatch> CreatePlayerTeamEventBatch(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerTeamEventBatchT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const PlayerTeamEventBatchT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _events = _o->events.size() ? _fbb.CreateVectorOfStructs(_o->events) : 0;
+  return SpringWeb::CreatePlayerTeamEventBatch(
+      _fbb,
+      _events);
 }
 
 inline ReconnectResponseT *ReconnectResponse::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
@@ -19644,6 +19811,10 @@ inline bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *o
       auto ptr = reinterpret_cast<const SpringWeb::TeamStartInfo *>(obj);
       return verifier.VerifyTable(ptr);
     }
+    case ServerPayload_PlayerTeamEventBatch: {
+      auto ptr = reinterpret_cast<const SpringWeb::PlayerTeamEventBatch *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
     default: return true;
   }
 }
@@ -19811,6 +19982,10 @@ inline void *ServerPayloadUnion::UnPack(const void *obj, ServerPayload type, con
       auto ptr = reinterpret_cast<const SpringWeb::TeamStartInfo *>(obj);
       return ptr->UnPack(resolver);
     }
+    case ServerPayload_PlayerTeamEventBatch: {
+      auto ptr = reinterpret_cast<const SpringWeb::PlayerTeamEventBatch *>(obj);
+      return ptr->UnPack(resolver);
+    }
     default: return nullptr;
   }
 }
@@ -19966,6 +20141,10 @@ inline ::flatbuffers::Offset<void> ServerPayloadUnion::Pack(::flatbuffers::FlatB
       auto ptr = reinterpret_cast<const SpringWeb::TeamStartInfoT *>(value);
       return CreateTeamStartInfo(_fbb, ptr, _rehasher).Union();
     }
+    case ServerPayload_PlayerTeamEventBatch: {
+      auto ptr = reinterpret_cast<const SpringWeb::PlayerTeamEventBatchT *>(value);
+      return CreatePlayerTeamEventBatch(_fbb, ptr, _rehasher).Union();
+    }
     default: return 0;
   }
 }
@@ -20118,6 +20297,10 @@ inline ServerPayloadUnion::ServerPayloadUnion(const ServerPayloadUnion &u) : typ
     }
     case ServerPayload_TeamStartInfo: {
       value = new SpringWeb::TeamStartInfoT(*reinterpret_cast<SpringWeb::TeamStartInfoT *>(u.value));
+      break;
+    }
+    case ServerPayload_PlayerTeamEventBatch: {
+      value = new SpringWeb::PlayerTeamEventBatchT(*reinterpret_cast<SpringWeb::PlayerTeamEventBatchT *>(u.value));
       break;
     }
     default:
@@ -20309,6 +20492,11 @@ inline void ServerPayloadUnion::Reset() {
     }
     case ServerPayload_TeamStartInfo: {
       auto ptr = reinterpret_cast<SpringWeb::TeamStartInfoT *>(value);
+      delete ptr;
+      break;
+    }
+    case ServerPayload_PlayerTeamEventBatch: {
+      auto ptr = reinterpret_cast<SpringWeb::PlayerTeamEventBatchT *>(value);
       delete ptr;
       break;
     }

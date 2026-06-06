@@ -18,6 +18,7 @@
 #include "IntelEventCollector.h"
 #include "UnitLifecycleCollector.h"
 #include "FeatureLifecycleCollector.h"
+#include "PlayerTeamEventCollector.h"
 #include "UnitCommandCollector.h"
 #include "RoomManager.h"
 #include "MapMetadata.h"
@@ -866,6 +867,22 @@ inline std::vector<uint8_t> BuildTeamStartInfo(
     auto boxesOff = fbb.CreateVectorOfStructs(boxes);
     auto info = SpringWeb::CreateTeamStartInfo(fbb, teamsOff, boxesOff);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_TeamStartInfo, info.Union());
+}
+
+/// Build a PlayerTeamEventBatch from drained collector events. Reliable; the
+/// widget worker fans out to widget:PlayerChanged / PlayerAdded /
+/// PlayerRemoved / TeamDied.
+inline std::vector<uint8_t> BuildPlayerTeamEventBatch(
+    const std::vector<PlayerTeamEventData>& events)
+{
+    flatbuffers::FlatBufferBuilder fbb(128);
+    std::vector<SpringWeb::PlayerTeamEventItem> items;
+    items.reserve(events.size());
+    for (const auto& e : events)
+        items.emplace_back(e.kind, e.reason, e.id);
+    auto itemsOff = fbb.CreateVectorOfStructs(items);
+    auto batch = SpringWeb::CreatePlayerTeamEventBatch(fbb, itemsOff);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_PlayerTeamEventBatch, batch.Union());
 }
 
 /// Build a RoomStateUpdate message.

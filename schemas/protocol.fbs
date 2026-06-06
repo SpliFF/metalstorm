@@ -846,6 +846,29 @@ table TeamStartInfo {
     boxes: [AllyStartBox];
 }
 
+/// One player- or team-status change, mirroring the matching Recoil
+/// eventHandler callins. `kind` selects which LuaUI callin the widget worker
+/// fires; `id` is a playerID (kinds 0-2) or teamID (kind 3); `reason` carries
+/// the PlayerRemoved reason (0 otherwise). Streamed as a per-tick batch so a
+/// team death (which demotes every member player to spectator) coalesces its
+/// PlayerChanged + TeamDied events into one message.
+struct PlayerTeamEventItem {
+    /// 0 = PlayerChanged, 1 = PlayerAdded, 2 = PlayerRemoved, 3 = TeamDied.
+    kind: uint8;
+    /// PlayerRemoved reason (0=quit, 1=kicked, 2=timeout); 0 for other kinds.
+    reason: uint8;
+    /// playerID for kinds 0-2, teamID for kind 3.
+    id: uint32;
+}
+
+/// Batch of player/team status changes for one sim tick. Reliable. Drives
+/// widget:PlayerChanged / PlayerAdded / PlayerRemoved / TeamDied on the
+/// client LuaUI worker (the server's own synced Lua gets these via
+/// eventHandler directly; this carries them across the unsynced boundary).
+table PlayerTeamEventBatch {
+    events: [PlayerTeamEventItem];
+}
+
 table ReconnectResponse {
     status: uint8;              // 0=OK (delta), 1=FULL_SYNC
 }
@@ -1547,6 +1570,7 @@ union ServerPayload {
     FeatureLifecycleBatch,
     SendToUnsyncedEvent,
     TeamStartInfo,
+    PlayerTeamEventBatch,
 }
 
 table ServerMessage {

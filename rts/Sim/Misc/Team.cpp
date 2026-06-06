@@ -9,6 +9,7 @@
 #include "Game/GameSetup.h"
 #include "Game/GlobalUnsynced.h"
 #include "Map/ReadMap.h"
+#include "Server/PlayerTeamEventCollector.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitHandler.h"
@@ -260,6 +261,11 @@ void CTeam::Died(bool normalDeath)
 	// increase per-team unit-limit for each remaining team in _our_ allyteam
 	teamHandler.UpdateTeamUnitLimitsOnDeath(teamNum);
 	eventHandler.TeamDied(teamNum);
+
+	// Forward to the client LuaUI worker (widget:TeamDied). The per-member
+	// StartSpectating() calls above already queued their own PlayerChanged
+	// events into the same collector, so the batch arrives coalesced.
+	playerTeamEvents.Push({PlayerTeamEventData::TeamDied, 0, static_cast<uint32_t>(teamNum)});
 
 	isDead = true;
 }

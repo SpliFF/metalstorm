@@ -2006,6 +2006,9 @@ int main(int argc, char* argv[])
                     int pNum = pIt->second;
                     playerHandler.PlayerLeft(pNum, 0);
                     eventHandler.PlayerRemoved(pNum, 0);
+                    // Forward to the client LuaUI worker (widget:PlayerRemoved).
+                    playerTeamEvents.Push({PlayerTeamEventData::PlayerRemoved, 0,
+                                           static_cast<uint32_t>(pNum)});
                     clientPlayerNum.erase(pIt);
                 }
 
@@ -2658,6 +2661,22 @@ int main(int argc, char* argv[])
                 rtcServer.BroadcastReliable(msg.data(), msg.size());
             }
         }
+        }
+
+        // Player/team status changes — PlayerChanged (spec/team change),
+        // PlayerRemoved (disconnect), TeamDied. The server fires the matching
+        // eventHandler callins into its own synced Lua directly; this batch
+        // carries them across the network to the unsynced LuaUI worker, which
+        // updates its roster and fans out to the widget callins. Reliable,
+        // low-frequency, unfiltered (player/team identity + life/death are
+        // public). Drained even with zero clients so the queue can't grow
+        // unbounded in a connectionless game.
+        {
+            auto ptEvents = playerTeamEvents.Drain();
+            if (!ptEvents.empty() && rtcServer.GetClientCount() > 0) {
+                auto msg = Protocol::BuildPlayerTeamEventBatch(ptEvents);
+                rtcServer.BroadcastReliable(msg.data(), msg.size());
+            }
         }
 
         // SendLuaRulesMsg loopback — synced gadgets call

@@ -54,6 +54,8 @@ export { Ping, PingT } from './spring-web/ping.js';
 export { PlayerCommand, PlayerCommandT } from './spring-web/player-command.js';
 export { PlayerCommandBatch, PlayerCommandBatchT } from './spring-web/player-command-batch.js';
 export { PlayerLeft, PlayerLeftT } from './spring-web/player-left.js';
+export { PlayerTeamEventBatch, PlayerTeamEventBatchT } from './spring-web/player-team-event-batch.js';
+export { PlayerTeamEventItem, PlayerTeamEventItemT } from './spring-web/player-team-event-item.js';
 export { Pong, PongT } from './spring-web/pong.js';
 export { ProjectileFiredEvent, ProjectileFiredEventT } from './spring-web/projectile-fired-event.js';
 export { ProjectileImpactEvent, ProjectileImpactEventT } from './spring-web/projectile-impact-event.js';
