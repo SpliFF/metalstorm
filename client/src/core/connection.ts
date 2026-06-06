@@ -34,6 +34,7 @@ import { SendToUnsyncedEvent } from '../protocol/spring-web/send-to-unsynced-eve
 import { SendToUnsyncedArg } from '../protocol/spring-web/send-to-unsynced-arg.js';
 import { SendToUnsyncedArgKind } from '../protocol/spring-web/send-to-unsynced-arg-kind.js';
 import { GameInfo } from '../protocol/spring-web/game-info.js';
+import { TeamStartInfo } from '../protocol/spring-web/team-start-info.js';
 import { ResourceUpdate } from '../protocol/spring-web/resource-update.js';
 import { MapData } from '../protocol/spring-web/map-data.js';
 import { PlayerLeft } from '../protocol/spring-web/player-left.js';
@@ -145,6 +146,35 @@ export interface SeismicPingInfo {
     /// Listener ally team. Server filters per-session so this always
     /// matches the local viewer's ally team (or any team for spectators).
     allyTeam: number;
+}
+
+/// One team's start position (RH-canonical elmos). Feeds the LuaUI worker's
+/// Spring.GetTeamStartPosition. See protocol.fbs TeamStartPos.
+export interface TeamStartPositionInfo {
+    team: number;
+    allyTeam: number;
+    x: number;
+    y: number;
+    z: number;
+    valid: boolean;
+}
+
+/// One ally team's start box in elmos. Feeds Spring.GetAllyTeamStartBox.
+/// Defaults to the full map when the game sets no boxes. See protocol.fbs
+/// AllyStartBox.
+export interface AllyStartBoxInfo {
+    allyTeam: number;
+    xmin: number;
+    zmin: number;
+    xmax: number;
+    zmax: number;
+}
+
+/// Team start positions + ally start boxes — decoded from TeamStartInfo,
+/// sent on auth and re-broadcast after GameStart.
+export interface TeamStartInfoData {
+    teams: TeamStartPositionInfo[];
+    boxes: AllyStartBoxInfo[];
 }
 
 /// Projectile lifecycle event info — decoded from the FlatBuffer batch and
@@ -757,6 +787,9 @@ export interface ConnectionEvents {
     onGameInfo?: (frame: number, speed: number, paused: boolean,
                   wind?: { x: number; y: number; z: number; strength: number; tidal: number },
                   legacyCoordSystem?: boolean) => void;
+    /// Team start positions + ally start boxes (TeamStartInfo). Sent on auth
+    /// and re-broadcast after GameStart with the final post-spawn values.
+    onTeamStartInfo?: (data: TeamStartInfoData) => void;
     onServerMessage?: (msg: ServerMessage) => void;
     /// Server signalled a restart (ServerPayload.GameRestarting). The host
     /// decides how to react — on the main thread this reloads the page; from
@@ -1452,6 +1485,29 @@ export class Connection {
                 if (info.paused()) {
                     this.events.onGameOver?.(info.frame());
                 }
+                break;
+            }
+            case ServerPayload.TeamStartInfo: {
+                const tsi = msg.payload(new TeamStartInfo()) as TeamStartInfo;
+                const teams: TeamStartPositionInfo[] = [];
+                for (let i = 0; i < tsi.teamsLength(); i++) {
+                    const t = tsi.teams(i);
+                    if (!t) continue;
+                    teams.push({
+                        team: t.team(), allyTeam: t.allyTeam(),
+                        x: t.x(), y: t.y(), z: t.z(), valid: t.valid(),
+                    });
+                }
+                const boxes: AllyStartBoxInfo[] = [];
+                for (let i = 0; i < tsi.boxesLength(); i++) {
+                    const b = tsi.boxes(i);
+                    if (!b) continue;
+                    boxes.push({
+                        allyTeam: b.allyTeam(),
+                        xmin: b.xmin(), zmin: b.zmin(), xmax: b.xmax(), zmax: b.zmax(),
+                    });
+                }
+                this.events.onTeamStartInfo?.({ teams, boxes });
                 break;
             }
             case ServerPayload.ResourceUpdate: {

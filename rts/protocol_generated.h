@@ -253,6 +253,14 @@ struct GameInfo;
 struct GameInfoBuilder;
 struct GameInfoT;
 
+struct TeamStartPos;
+
+struct AllyStartBox;
+
+struct TeamStartInfo;
+struct TeamStartInfoBuilder;
+struct TeamStartInfoT;
+
 struct ReconnectResponse;
 struct ReconnectResponseBuilder;
 struct ReconnectResponseT;
@@ -1769,11 +1777,12 @@ enum ServerPayload : uint8_t {
   ServerPayload_StandingOrderState = 34,
   ServerPayload_FeatureLifecycleBatch = 35,
   ServerPayload_SendToUnsyncedEvent = 36,
+  ServerPayload_TeamStartInfo = 37,
   ServerPayload_MIN = ServerPayload_NONE,
-  ServerPayload_MAX = ServerPayload_SendToUnsyncedEvent
+  ServerPayload_MAX = ServerPayload_TeamStartInfo
 };
 
-inline const ServerPayload (&EnumValuesServerPayload())[37] {
+inline const ServerPayload (&EnumValuesServerPayload())[38] {
   static const ServerPayload values[] = {
     ServerPayload_NONE,
     ServerPayload_AuthResponse,
@@ -1811,13 +1820,14 @@ inline const ServerPayload (&EnumValuesServerPayload())[37] {
     ServerPayload_PathResponse,
     ServerPayload_StandingOrderState,
     ServerPayload_FeatureLifecycleBatch,
-    ServerPayload_SendToUnsyncedEvent
+    ServerPayload_SendToUnsyncedEvent,
+    ServerPayload_TeamStartInfo
   };
   return values;
 }
 
 inline const char * const *EnumNamesServerPayload() {
-  static const char * const names[38] = {
+  static const char * const names[39] = {
     "NONE",
     "AuthResponse",
     "EntityCreate",
@@ -1855,13 +1865,14 @@ inline const char * const *EnumNamesServerPayload() {
     "StandingOrderState",
     "FeatureLifecycleBatch",
     "SendToUnsyncedEvent",
+    "TeamStartInfo",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameServerPayload(ServerPayload e) {
-  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_SendToUnsyncedEvent)) return "";
+  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_TeamStartInfo)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesServerPayload()[index];
 }
@@ -2014,6 +2025,10 @@ template<> struct ServerPayloadTraits<SpringWeb::SendToUnsyncedEvent> {
   static const ServerPayload enum_value = ServerPayload_SendToUnsyncedEvent;
 };
 
+template<> struct ServerPayloadTraits<SpringWeb::TeamStartInfo> {
+  static const ServerPayload enum_value = ServerPayload_TeamStartInfo;
+};
+
 template<typename T> struct ServerPayloadUnionTraits {
   static const ServerPayload enum_value = ServerPayload_NONE;
 };
@@ -2160,6 +2175,10 @@ template<> struct ServerPayloadUnionTraits<SpringWeb::FeatureLifecycleBatchT> {
 
 template<> struct ServerPayloadUnionTraits<SpringWeb::SendToUnsyncedEventT> {
   static const ServerPayload enum_value = ServerPayload_SendToUnsyncedEvent;
+};
+
+template<> struct ServerPayloadUnionTraits<SpringWeb::TeamStartInfoT> {
+  static const ServerPayload enum_value = ServerPayload_TeamStartInfo;
 };
 
 struct ServerPayloadUnion {
@@ -2480,6 +2499,14 @@ struct ServerPayloadUnion {
     return type == ServerPayload_SendToUnsyncedEvent ?
       reinterpret_cast<const SpringWeb::SendToUnsyncedEventT *>(value) : nullptr;
   }
+  SpringWeb::TeamStartInfoT *AsTeamStartInfo() {
+    return type == ServerPayload_TeamStartInfo ?
+      reinterpret_cast<SpringWeb::TeamStartInfoT *>(value) : nullptr;
+  }
+  const SpringWeb::TeamStartInfoT *AsTeamStartInfo() const {
+    return type == ServerPayload_TeamStartInfo ?
+      reinterpret_cast<const SpringWeb::TeamStartInfoT *>(value) : nullptr;
+  }
 };
 
 bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *obj, ServerPayload type);
@@ -2513,6 +2540,117 @@ FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) Vec3 FLATBUFFERS_FINAL_CLASS {
   }
 };
 FLATBUFFERS_STRUCT_END(Vec3, 12);
+
+/// One team's start position, in RH-canonical elmos (the same convention
+/// as entity-state positions — the engine's `FlipPosZ` is a no-op). `valid`
+/// mirrors `CTeam::HasValidStartPos()`. Lets the in-game LuaUI worker answer
+/// `Spring.GetTeamStartPosition` (16× BAR widget callers, plus ZK).
+FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) TeamStartPos FLATBUFFERS_FINAL_CLASS {
+ private:
+  int16_t team_;
+  int16_t ally_team_;
+  float x_;
+  float y_;
+  float z_;
+  uint8_t valid_;
+  int8_t padding0__;  int16_t padding1__;
+
+ public:
+  TeamStartPos()
+      : team_(0),
+        ally_team_(0),
+        x_(0),
+        y_(0),
+        z_(0),
+        valid_(0),
+        padding0__(0),
+        padding1__(0) {
+    (void)padding0__;
+    (void)padding1__;
+  }
+  TeamStartPos(int16_t _team, int16_t _ally_team, float _x, float _y, float _z, bool _valid)
+      : team_(::flatbuffers::EndianScalar(_team)),
+        ally_team_(::flatbuffers::EndianScalar(_ally_team)),
+        x_(::flatbuffers::EndianScalar(_x)),
+        y_(::flatbuffers::EndianScalar(_y)),
+        z_(::flatbuffers::EndianScalar(_z)),
+        valid_(::flatbuffers::EndianScalar(static_cast<uint8_t>(_valid))),
+        padding0__(0),
+        padding1__(0) {
+    (void)padding0__;
+    (void)padding1__;
+  }
+  int16_t team() const {
+    return ::flatbuffers::EndianScalar(team_);
+  }
+  int16_t ally_team() const {
+    return ::flatbuffers::EndianScalar(ally_team_);
+  }
+  float x() const {
+    return ::flatbuffers::EndianScalar(x_);
+  }
+  float y() const {
+    return ::flatbuffers::EndianScalar(y_);
+  }
+  float z() const {
+    return ::flatbuffers::EndianScalar(z_);
+  }
+  bool valid() const {
+    return ::flatbuffers::EndianScalar(valid_) != 0;
+  }
+};
+FLATBUFFERS_STRUCT_END(TeamStartPos, 20);
+
+/// One ally team's start box in elmos (xmin, zmin, xmax, zmax) — matches
+/// `Spring.GetAllyTeamStartBox`. NB the current headless flow never calls
+/// `Spring.SetAllyTeamStartBox`, so every ally team carries the default
+/// full-map box (0,0 → mapWidth,mapHeight); the field is streamed faithfully
+/// so a game that *does* set boxes works without a second wire change.
+FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) AllyStartBox FLATBUFFERS_FINAL_CLASS {
+ private:
+  int16_t ally_team_;
+  int16_t padding0__;
+  float xmin_;
+  float zmin_;
+  float xmax_;
+  float zmax_;
+
+ public:
+  AllyStartBox()
+      : ally_team_(0),
+        padding0__(0),
+        xmin_(0),
+        zmin_(0),
+        xmax_(0),
+        zmax_(0) {
+    (void)padding0__;
+  }
+  AllyStartBox(int16_t _ally_team, float _xmin, float _zmin, float _xmax, float _zmax)
+      : ally_team_(::flatbuffers::EndianScalar(_ally_team)),
+        padding0__(0),
+        xmin_(::flatbuffers::EndianScalar(_xmin)),
+        zmin_(::flatbuffers::EndianScalar(_zmin)),
+        xmax_(::flatbuffers::EndianScalar(_xmax)),
+        zmax_(::flatbuffers::EndianScalar(_zmax)) {
+    (void)padding0__;
+  }
+  int16_t ally_team() const {
+    return ::flatbuffers::EndianScalar(ally_team_);
+  }
+  float xmin() const {
+    return ::flatbuffers::EndianScalar(xmin_);
+  }
+  float zmin() const {
+    return ::flatbuffers::EndianScalar(zmin_);
+  }
+  float xmax() const {
+    return ::flatbuffers::EndianScalar(xmax_);
+  }
+  float zmax() const {
+    return ::flatbuffers::EndianScalar(zmax_);
+  }
+};
+FLATBUFFERS_STRUCT_END(AllyStartBox, 20);
 
 FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) MapStartPos FLATBUFFERS_FINAL_CLASS {
  private:
@@ -8291,6 +8429,89 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfoDirect(
 
 ::flatbuffers::Offset<GameInfo> CreateGameInfo(::flatbuffers::FlatBufferBuilder &_fbb, const GameInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
+struct TeamStartInfoT : public ::flatbuffers::NativeTable {
+  typedef TeamStartInfo TableType;
+  std::vector<SpringWeb::TeamStartPos> teams{};
+  std::vector<SpringWeb::AllyStartBox> boxes{};
+};
+
+/// Team start positions + ally start boxes. Sent reliably to each client
+/// on auth (initial values) and re-broadcast once after GameStart (final
+/// values, since gadgets like BAR's game_initial_spawn.lua relocate teams
+/// via Spring.SetTeamStartPosition during the start sequence). Tiny and
+/// infrequent, so it is its own message rather than bloating per-second
+/// GameInfo.
+struct TeamStartInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef TeamStartInfoT NativeTableType;
+  typedef TeamStartInfoBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_TEAMS = 4,
+    VT_BOXES = 6
+  };
+  const ::flatbuffers::Vector<const SpringWeb::TeamStartPos *> *teams() const {
+    return GetPointer<const ::flatbuffers::Vector<const SpringWeb::TeamStartPos *> *>(VT_TEAMS);
+  }
+  const ::flatbuffers::Vector<const SpringWeb::AllyStartBox *> *boxes() const {
+    return GetPointer<const ::flatbuffers::Vector<const SpringWeb::AllyStartBox *> *>(VT_BOXES);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_TEAMS) &&
+           verifier.VerifyVector(teams()) &&
+           VerifyOffset(verifier, VT_BOXES) &&
+           verifier.VerifyVector(boxes()) &&
+           verifier.EndTable();
+  }
+  TeamStartInfoT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(TeamStartInfoT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<TeamStartInfo> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const TeamStartInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct TeamStartInfoBuilder {
+  typedef TeamStartInfo Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_teams(::flatbuffers::Offset<::flatbuffers::Vector<const SpringWeb::TeamStartPos *>> teams) {
+    fbb_.AddOffset(TeamStartInfo::VT_TEAMS, teams);
+  }
+  void add_boxes(::flatbuffers::Offset<::flatbuffers::Vector<const SpringWeb::AllyStartBox *>> boxes) {
+    fbb_.AddOffset(TeamStartInfo::VT_BOXES, boxes);
+  }
+  explicit TeamStartInfoBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<TeamStartInfo> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<TeamStartInfo>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<TeamStartInfo> CreateTeamStartInfo(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::Vector<const SpringWeb::TeamStartPos *>> teams = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<const SpringWeb::AllyStartBox *>> boxes = 0) {
+  TeamStartInfoBuilder builder_(_fbb);
+  builder_.add_boxes(boxes);
+  builder_.add_teams(teams);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<TeamStartInfo> CreateTeamStartInfoDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const std::vector<SpringWeb::TeamStartPos> *teams = nullptr,
+    const std::vector<SpringWeb::AllyStartBox> *boxes = nullptr) {
+  auto teams__ = teams ? _fbb.CreateVectorOfStructs<SpringWeb::TeamStartPos>(*teams) : 0;
+  auto boxes__ = boxes ? _fbb.CreateVectorOfStructs<SpringWeb::AllyStartBox>(*boxes) : 0;
+  return SpringWeb::CreateTeamStartInfo(
+      _fbb,
+      teams__,
+      boxes__);
+}
+
+::flatbuffers::Offset<TeamStartInfo> CreateTeamStartInfo(::flatbuffers::FlatBufferBuilder &_fbb, const TeamStartInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
 struct ReconnectResponseT : public ::flatbuffers::NativeTable {
   typedef ReconnectResponse TableType;
   uint8_t status = 0;
@@ -13891,6 +14112,9 @@ struct ServerMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const SpringWeb::SendToUnsyncedEvent *payload_as_SendToUnsyncedEvent() const {
     return payload_type() == SpringWeb::ServerPayload_SendToUnsyncedEvent ? static_cast<const SpringWeb::SendToUnsyncedEvent *>(payload()) : nullptr;
   }
+  const SpringWeb::TeamStartInfo *payload_as_TeamStartInfo() const {
+    return payload_type() == SpringWeb::ServerPayload_TeamStartInfo ? static_cast<const SpringWeb::TeamStartInfo *>(payload()) : nullptr;
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_PAYLOAD_TYPE, 1) &&
@@ -14045,6 +14269,10 @@ template<> inline const SpringWeb::FeatureLifecycleBatch *ServerMessage::payload
 
 template<> inline const SpringWeb::SendToUnsyncedEvent *ServerMessage::payload_as<SpringWeb::SendToUnsyncedEvent>() const {
   return payload_as_SendToUnsyncedEvent();
+}
+
+template<> inline const SpringWeb::TeamStartInfo *ServerMessage::payload_as<SpringWeb::TeamStartInfo>() const {
+  return payload_as_TeamStartInfo();
 }
 
 struct ServerMessageBuilder {
@@ -16389,6 +16617,35 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfo(::flatbuffers::FlatBufferB
       _wind_strength,
       _tidal_strength,
       _legacy_coord_system);
+}
+
+inline TeamStartInfoT *TeamStartInfo::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<TeamStartInfoT>(new TeamStartInfoT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void TeamStartInfo::UnPackTo(TeamStartInfoT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = teams(); if (_e) { _o->teams.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->teams[_i] = *_e->Get(_i); } } else { _o->teams.resize(0); } }
+  { auto _e = boxes(); if (_e) { _o->boxes.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->boxes[_i] = *_e->Get(_i); } } else { _o->boxes.resize(0); } }
+}
+
+inline ::flatbuffers::Offset<TeamStartInfo> TeamStartInfo::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const TeamStartInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateTeamStartInfo(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<TeamStartInfo> CreateTeamStartInfo(::flatbuffers::FlatBufferBuilder &_fbb, const TeamStartInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const TeamStartInfoT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _teams = _o->teams.size() ? _fbb.CreateVectorOfStructs(_o->teams) : 0;
+  auto _boxes = _o->boxes.size() ? _fbb.CreateVectorOfStructs(_o->boxes) : 0;
+  return SpringWeb::CreateTeamStartInfo(
+      _fbb,
+      _teams,
+      _boxes);
 }
 
 inline ReconnectResponseT *ReconnectResponse::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
@@ -19383,6 +19640,10 @@ inline bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *o
       auto ptr = reinterpret_cast<const SpringWeb::SendToUnsyncedEvent *>(obj);
       return verifier.VerifyTable(ptr);
     }
+    case ServerPayload_TeamStartInfo: {
+      auto ptr = reinterpret_cast<const SpringWeb::TeamStartInfo *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
     default: return true;
   }
 }
@@ -19546,6 +19807,10 @@ inline void *ServerPayloadUnion::UnPack(const void *obj, ServerPayload type, con
       auto ptr = reinterpret_cast<const SpringWeb::SendToUnsyncedEvent *>(obj);
       return ptr->UnPack(resolver);
     }
+    case ServerPayload_TeamStartInfo: {
+      auto ptr = reinterpret_cast<const SpringWeb::TeamStartInfo *>(obj);
+      return ptr->UnPack(resolver);
+    }
     default: return nullptr;
   }
 }
@@ -19697,6 +19962,10 @@ inline ::flatbuffers::Offset<void> ServerPayloadUnion::Pack(::flatbuffers::FlatB
       auto ptr = reinterpret_cast<const SpringWeb::SendToUnsyncedEventT *>(value);
       return CreateSendToUnsyncedEvent(_fbb, ptr, _rehasher).Union();
     }
+    case ServerPayload_TeamStartInfo: {
+      auto ptr = reinterpret_cast<const SpringWeb::TeamStartInfoT *>(value);
+      return CreateTeamStartInfo(_fbb, ptr, _rehasher).Union();
+    }
     default: return 0;
   }
 }
@@ -19845,6 +20114,10 @@ inline ServerPayloadUnion::ServerPayloadUnion(const ServerPayloadUnion &u) : typ
     }
     case ServerPayload_SendToUnsyncedEvent: {
       value = new SpringWeb::SendToUnsyncedEventT(*reinterpret_cast<SpringWeb::SendToUnsyncedEventT *>(u.value));
+      break;
+    }
+    case ServerPayload_TeamStartInfo: {
+      value = new SpringWeb::TeamStartInfoT(*reinterpret_cast<SpringWeb::TeamStartInfoT *>(u.value));
       break;
     }
     default:
@@ -20031,6 +20304,11 @@ inline void ServerPayloadUnion::Reset() {
     }
     case ServerPayload_SendToUnsyncedEvent: {
       auto ptr = reinterpret_cast<SpringWeb::SendToUnsyncedEventT *>(value);
+      delete ptr;
+      break;
+    }
+    case ServerPayload_TeamStartInfo: {
+      auto ptr = reinterpret_cast<SpringWeb::TeamStartInfoT *>(value);
       delete ptr;
       break;
     }

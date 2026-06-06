@@ -855,6 +855,19 @@ inline std::vector<uint8_t> BuildGameInfo(
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameInfo, info.Union());
 }
 
+/// Build a TeamStartInfo message from pre-built struct vectors (the caller
+/// owns the TeamHandler/AllyTeam iteration so Protocol.h stays sim-agnostic).
+inline std::vector<uint8_t> BuildTeamStartInfo(
+    const std::vector<SpringWeb::TeamStartPos>& teams,
+    const std::vector<SpringWeb::AllyStartBox>& boxes)
+{
+    flatbuffers::FlatBufferBuilder fbb(256);
+    auto teamsOff = fbb.CreateVectorOfStructs(teams);
+    auto boxesOff = fbb.CreateVectorOfStructs(boxes);
+    auto info = SpringWeb::CreateTeamStartInfo(fbb, teamsOff, boxesOff);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_TeamStartInfo, info.Union());
+}
+
 /// Build a RoomStateUpdate message.
 inline std::vector<uint8_t> BuildRoomStateUpdate(const GameRoom& room) {
     flatbuffers::FlatBufferBuilder fbb(512);

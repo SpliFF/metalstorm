@@ -175,4 +175,38 @@ describe('BAR read shims', () => {
             expect(r[3]).toBe(false);  // inJammer never streamed
         });
     });
+
+    describe('GetTeamStartPosition', () => {
+        it('returns x,y,z,valid for a known team', () => {
+            const ls = createDefaultLiveState();
+            ls.teamStartPositions.set(0, { x: 1024, y: 80, z: 2048, valid: true, allyTeam: 0 });
+            const api = springApi(makeCtx(), ls);
+            expect(call(api.GetTeamStartPosition, 0)).toEqual([1024, 80, 2048, true]);
+        });
+        it('reports an invalid start position via the 4th return', () => {
+            const ls = createDefaultLiveState();
+            ls.teamStartPositions.set(3, { x: 0, y: 0, z: 0, valid: false, allyTeam: 1 });
+            const api = springApi(makeCtx(), ls);
+            expect(call(api.GetTeamStartPosition, 3)).toEqual([0, 0, 0, false]);
+        });
+        it('returns nil for an unknown team', () => {
+            const ls = createDefaultLiveState();
+            const api = springApi(makeCtx(), ls);
+            expect(call(api.GetTeamStartPosition, 5)).toBeNull();
+        });
+    });
+
+    describe('GetAllyTeamStartBox', () => {
+        it('returns xmin,zmin,xmax,zmax for a known ally team', () => {
+            const ls = createDefaultLiveState();
+            ls.allyStartBoxes.set(1, { xmin: 0, zmin: 0, xmax: 4096, zmax: 4096 });
+            const api = springApi(makeCtx(), ls);
+            expect(call(api.GetAllyTeamStartBox, 1)).toEqual([0, 0, 4096, 4096]);
+        });
+        it('returns nil for an unknown ally team', () => {
+            const ls = createDefaultLiveState();
+            const api = springApi(makeCtx(), ls);
+            expect(call(api.GetAllyTeamStartBox, 0)).toBeNull();
+        });
+    });
 });

@@ -5,6 +5,7 @@
 export { AIListRequest, AIListRequestT } from './spring-web/ailist-request.js';
 export { AIListUpdate, AIListUpdateT } from './spring-web/ailist-update.js';
 export { Ack, AckT } from './spring-web/ack.js';
+export { AllyStartBox, AllyStartBoxT } from './spring-web/ally-start-box.js';
 export { AuthRequest, AuthRequestT } from './spring-web/auth-request.js';
 export { AuthResponse, AuthResponseT } from './spring-web/auth-response.js';
 export { AuthStatus } from './spring-web/auth-status.js';
@@ -103,6 +104,8 @@ export { StandingOrderRemove, StandingOrderRemoveT } from './spring-web/standing
 export { StandingOrderState, StandingOrderStateT } from './spring-web/standing-order-state.js';
 export { StandingOrderType } from './spring-web/standing-order-type.js';
 export { StandingOrderUpdate, StandingOrderUpdateT } from './spring-web/standing-order-update.js';
+export { TeamStartInfo, TeamStartInfoT } from './spring-web/team-start-info.js';
+export { TeamStartPos, TeamStartPosT } from './spring-web/team-start-pos.js';
 export { UnitArmoredInfo, UnitArmoredInfoT } from './spring-web/unit-armored-info.js';
 export { UnitArmoredUpdate, UnitArmoredUpdateT } from './spring-web/unit-armored-update.js';
 export { UnitCmdDesc, UnitCmdDescT } from './spring-web/unit-cmd-desc.js';

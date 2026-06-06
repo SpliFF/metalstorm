@@ -766,6 +766,43 @@ int main(int argc, char* argv[])
         rtcServer.SendReliable(clientId, msg.data(), msg.size());
     };
 
+    // Team start positions + ally start boxes (PLAN-bar.md §3b read shims:
+    // Spring.GetTeamStartPosition / GetAllyTeamStartBox). Built from the live
+    // TeamHandler/AllyTeam state. Positions are RH-canonical elmos (the
+    // engine's FlipPosZ is a no-op), matching entity-state positions and the
+    // synced Spring.GetTeamStartPosition. Ally boxes mirror
+    // Spring.GetAllyTeamStartBox (rect fractions × map size); the headless
+    // flow never calls Spring.SetAllyTeamStartBox, so they default to the
+    // full map — streamed faithfully so a game that does set boxes works
+    // without a second wire change.
+    auto buildTeamStartInfoMsg = [&]() -> std::vector<uint8_t> {
+        std::vector<SpringWeb::TeamStartPos> teamPositions;
+        const int activeTeams = teamHandler.ActiveTeams();
+        teamPositions.reserve(activeTeams);
+        for (int t = 0; t < activeTeams; ++t) {
+            const CTeam* team = teamHandler.Team(t);
+            if (team == nullptr) continue;
+            const float3& p = team->GetStartPos();
+            teamPositions.emplace_back(
+                static_cast<int16_t>(t),
+                static_cast<int16_t>(team->teamAllyteam),
+                p.x, p.y, p.z, team->HasValidStartPos());
+        }
+        std::vector<SpringWeb::AllyStartBox> allyBoxes;
+        const int activeAllyTeams = teamHandler.ActiveAllyTeams();
+        allyBoxes.reserve(activeAllyTeams);
+        const float mapW = static_cast<float>(mapDims.mapx * SQUARE_SIZE);
+        const float mapH = static_cast<float>(mapDims.mapy * SQUARE_SIZE);
+        for (int a = 0; a < activeAllyTeams; ++a) {
+            const ::AllyTeam& at = teamHandler.GetAllyTeam(a);
+            allyBoxes.emplace_back(
+                static_cast<int16_t>(a),
+                mapW * at.startRectLeft, mapH * at.startRectTop,
+                mapW * at.startRectRight, mapH * at.startRectBottom);
+        }
+        return Protocol::BuildTeamStartInfo(teamPositions, allyBoxes);
+    };
+
     // Standing-order broadcast hook. Fires whenever an order is
     // created / updated / removed / its assigned-count changes. Pushes
     // a StandingOrderState snapshot to every session whose viewer team
@@ -912,6 +949,14 @@ int main(int argc, char* argv[])
         SLOG(SPRING_LOG_NOTICE, "all %zu roster players connected, firing GameStart",
             rosterPlayersNeeded);
         sim.FireGameStart();
+        // Re-broadcast start positions: start gadgets (e.g. BAR's
+        // game_initial_spawn.lua) relocate teams via Spring.SetTeamStartPosition
+        // during FireGameStart, so the post-spawn values differ from the
+        // pre-game ones already sent on auth.
+        if (rtcServer.GetClientCount() > 0) {
+            auto tsi = buildTeamStartInfoMsg();
+            rtcServer.BroadcastReliable(tsi.data(), tsi.size());
+        }
     };
 
     // Dev-mode: no roster means no players to wait for
@@ -1347,6 +1392,16 @@ int main(int argc, char* argv[])
                     // create / update / remove fired the broadcast
                     // hook.
                     pushStandingOrdersTo(msg.clientId, team);
+
+                    // Initial team start positions + ally start boxes so the
+                    // in-game LuaUI worker can answer Spring.GetTeamStartPosition
+                    // / GetAllyTeamStartBox. Re-broadcast after GameStart for the
+                    // final post-spawn values (see checkAndFireGameStart).
+                    {
+                        auto tsi = buildTeamStartInfoMsg();
+                        rtcServer.SendReliable(msg.clientId, tsi.data(), tsi.size());
+                    }
+
                     SLOG(SPRING_LOG_NOTICE, "client %u authenticated as '%s' (id=%lld) team=%d",
                         msg.clientId, username, user->id, team);
 

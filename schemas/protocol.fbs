@@ -809,6 +809,43 @@ table GameInfo {
     legacy_coord_system: bool = false;
 }
 
+/// One team's start position, in RH-canonical elmos (the same convention
+/// as entity-state positions — the engine's `FlipPosZ` is a no-op). `valid`
+/// mirrors `CTeam::HasValidStartPos()`. Lets the in-game LuaUI worker answer
+/// `Spring.GetTeamStartPosition` (16× BAR widget callers, plus ZK).
+struct TeamStartPos {
+    team: int16;
+    ally_team: int16;
+    x: float;
+    y: float;
+    z: float;
+    valid: bool;
+}
+
+/// One ally team's start box in elmos (xmin, zmin, xmax, zmax) — matches
+/// `Spring.GetAllyTeamStartBox`. NB the current headless flow never calls
+/// `Spring.SetAllyTeamStartBox`, so every ally team carries the default
+/// full-map box (0,0 → mapWidth,mapHeight); the field is streamed faithfully
+/// so a game that *does* set boxes works without a second wire change.
+struct AllyStartBox {
+    ally_team: int16;
+    xmin: float;
+    zmin: float;
+    xmax: float;
+    zmax: float;
+}
+
+/// Team start positions + ally start boxes. Sent reliably to each client
+/// on auth (initial values) and re-broadcast once after GameStart (final
+/// values, since gadgets like BAR's game_initial_spawn.lua relocate teams
+/// via Spring.SetTeamStartPosition during the start sequence). Tiny and
+/// infrequent, so it is its own message rather than bloating per-second
+/// GameInfo.
+table TeamStartInfo {
+    teams: [TeamStartPos];
+    boxes: [AllyStartBox];
+}
+
 table ReconnectResponse {
     status: uint8;              // 0=OK (delta), 1=FULL_SYNC
 }
@@ -1509,6 +1546,7 @@ union ServerPayload {
     StandingOrderState,
     FeatureLifecycleBatch,
     SendToUnsyncedEvent,
+    TeamStartInfo,
 }
 
 table ServerMessage {

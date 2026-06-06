@@ -520,6 +520,14 @@ export interface LiveState {
      *  tick if the server event still hasn't arrived. Enemy units
      *  bypass this map and fire immediately. */
     pendingSynthCreated: Map<number, { defId: number; team: number }>;
+    /** Team start positions keyed by teamId (RH-canonical elmos). Sent by
+     *  the server on auth and re-broadcast after GameStart. Read by
+     *  `Spring.GetTeamStartPosition`. Absence means "unknown team". */
+    teamStartPositions: Map<number, { x: number; y: number; z: number; valid: boolean; allyTeam: number }>;
+    /** Ally team start boxes keyed by allyTeamId (elmos). Defaults to the
+     *  full map when the game sets no boxes. Read by
+     *  `Spring.GetAllyTeamStartBox`. */
+    allyStartBoxes: Map<number, { xmin: number; zmin: number; xmax: number; zmax: number }>;
 }
 
 /** Per-order entry mirrored into LiveState.standingOrders. Mirrors
@@ -955,6 +963,8 @@ export function createDefaultLiveState(): LiveState {
         standingOrders: new Map(),
         serverFiredUnitCreated: new Set(),
         pendingSynthCreated: new Map(),
+        teamStartPositions: new Map(),
+        allyStartBoxes: new Map(),
     };
 }
 
@@ -1303,6 +1313,23 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             return queryUsable ? [...base, ...base] : base;
         },
         GetNumDisplays: () => 1,
+        // PLAN-bar.md §3b: team start positions + ally start boxes, streamed
+        // by the server (TeamStartInfo) on auth and re-broadcast after
+        // GameStart. Faithful to Recoil's Spring.GetTeamStartPosition /
+        // GetAllyTeamStartBox return shapes. DEVIATION: no alliance gate
+        // (Recoil's synced reader gates on IsAlliedTeam) — the server streams
+        // every team's start position to every client, so the data is already
+        // shared and gating here would only hide data the client already holds.
+        GetTeamStartPosition: (teamId: LuaValue) => {
+            const sp = ls.teamStartPositions.get(Number(teamId));
+            if (!sp) return null;
+            return [sp.x, sp.y, flipPosZ(sp.z), sp.valid];
+        },
+        GetAllyTeamStartBox: (allyTeamId: LuaValue) => {
+            const box = ls.allyStartBoxes.get(Number(allyTeamId));
+            if (!box) return null;
+            return [box.xmin, box.zmin, box.xmax, box.zmax];
+        },
         GetSpectatingState: () => {
             // Spring returns: spec, fullView, fullSelect.
             // We don't model fullView/fullSelect so always emit false for those.

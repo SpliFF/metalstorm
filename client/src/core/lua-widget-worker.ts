@@ -3711,7 +3711,9 @@ function installEngineGlobals(
     (springGlobals.Spring as Record<string, LuaValue>).SetSunLighting = (_params: LuaValue) => undefined;
     (springGlobals.Spring as Record<string, LuaValue>).SetAtmosphere = (_params: LuaValue) => undefined;
     (springGlobals.Spring as Record<string, LuaValue>).SetCameraOffset = (_x: LuaValue, _y: LuaValue, _z: LuaValue, _tx: LuaValue, _ty: LuaValue, _tz: LuaValue) => undefined;
-    (springGlobals.Spring as Record<string, LuaValue>).GetTeamStartPosition = (_team: LuaValue) => [0, 0, 0];
+    // GetTeamStartPosition / GetAllyTeamStartBox are implemented in
+    // buildSpringGlobals (lua-spring-api.ts), reading liveState fed by the
+    // server's TeamStartInfo message — no stub override here (PLAN-bar.md §3b).
     (springGlobals.Spring as Record<string, LuaValue>).GetCurrentTooltip = () => '';
     (springGlobals.Spring as Record<string, LuaValue>).GetVisibleFeatures = (
         _allyTeamID: LuaValue,
@@ -5629,6 +5631,23 @@ function gpConnect(msg: GpInitToWorker): void {
             liveState.gameFrame = frame;
             liveState.gameSpeed = speed;
             liveState.gamePaused = paused;
+        },
+        // PLAN-bar.md §3b: team start positions + ally start boxes → liveState,
+        // read by Spring.GetTeamStartPosition / GetAllyTeamStartBox. Replaced
+        // wholesale on each arrival (auth + post-GameStart re-broadcast).
+        onTeamStartInfo: (data) => {
+            liveState.teamStartPositions.clear();
+            for (const t of data.teams) {
+                liveState.teamStartPositions.set(t.team, {
+                    x: t.x, y: t.y, z: t.z, valid: t.valid, allyTeam: t.allyTeam,
+                });
+            }
+            liveState.allyStartBoxes.clear();
+            for (const b of data.boxes) {
+                liveState.allyStartBoxes.set(b.allyTeam, {
+                    xmin: b.xmin, zmin: b.zmin, xmax: b.xmax, zmax: b.zmax,
+                });
+            }
         },
         // GW4-c3: live terrain deformation (envelope 0x09) → DeformableTerrain.
         onHeightmapPatch: (patch) => gpDeformTerrain?.applyPatch(patch),
