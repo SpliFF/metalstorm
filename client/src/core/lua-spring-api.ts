@@ -16,6 +16,16 @@
 import { LuaRuntime, type LuaValue, luaTable, isLuaTable } from './lua-runtime.js';
 import { lua, to_luastring } from 'fengari-web';
 
+/** One-time console.warn de-dupe for FIDELITY-STANDIN paths (per the
+ *  no-silent-GL-failures principle in PLAN.md — every stand-in must warn
+ *  once so it stays re-visitable). */
+const _warnedStandins = new Set<string>();
+function warnStandinOnce(key: string, message: string): void {
+    if (_warnedStandins.has(key)) return;
+    _warnedStandins.add(key);
+    console.warn(`[FIDELITY-STANDIN] ${message}`);
+}
+
 /** Context passed in when constructing the Spring shim. */
 export interface SpringAPIContext {
     /** Map width in elmos (world units). */
@@ -153,6 +163,23 @@ export interface SpringAPIContext {
      */
     getUnitDefRadius?(defId: number): number | undefined;
     /**
+     * Ordered weapon-def ids that make up a unit-def's weapon slots
+     * (Recoil's `unit->weapons`, built from the def's weapon list).
+     * Index 0 is weapon 1 (Lua's `weaponNum` is 1-based). Backs the
+     * static fields of `Spring.GetUnitWeaponState`. Returns `undefined`
+     * if the unit def isn't cached yet.
+     */
+    getUnitDefWeaponDefIds?(defId: number): number[] | undefined;
+    /**
+     * Static (def-derived) state of a weapon def, in the units
+     * `Spring.GetUnitWeaponState` reports them: reload/burst times in
+     * seconds, ranges in elmos, projectile speed in elmos/frame. Per-unit
+     * *dynamic* state (reload frame, salvo progress, stockpile) is NOT
+     * included — it isn't streamed; see `GetUnitWeaponState`. Returns
+     * `undefined` if the weapon def isn't cached yet.
+     */
+    getWeaponDefStats?(weaponDefId: number): WeaponDefStats | undefined;
+    /**
      * Per-allyteam radar position-error magnitude (in elmos). Matches
      * `Spring.GetAllyTeamRadarErrorSize`. Server-side this is the
      * baseline `radarErrorSize` multiplied by per-team modifiers; we
@@ -246,6 +273,32 @@ export interface SpringAPIContext {
     /** Cancel a pending path request (no-op until QTPFS multi-tick
      *  search lands server-side). Optional. */
     cancelPathRequest?(requestId: number): void;
+}
+
+/** Static, def-derived weapon state surfaced by `Spring.GetUnitWeaponState`.
+ *  Mirrors the subset of Recoil's `CWeapon` fields that are constant for a
+ *  given weapon def (the rest — reload frame, salvo progress, stockpile —
+ *  are per-unit dynamic state the client doesn't stream). Units match the
+ *  Lua API: seconds for times, elmos for ranges, elmos/frame for speed. */
+export interface WeaponDefStats {
+    /** `range` — max weapon range in elmos. */
+    range: number;
+    /** `reloadTime` — seconds between shots (Recoil `reload`). */
+    reloadTime: number;
+    /** `projectileSpeed` — elmos per sim frame. */
+    projectileSpeed: number;
+    /** `burst` — shots per salvo (Recoil `salvoSize`). */
+    salvoSize: number;
+    /** `burstRate` — seconds between shots within a salvo (Recoil `salvoDelay`). */
+    salvoDelay: number;
+    /** `accuracy` — base inaccuracy (no XP bonus modelled). */
+    accuracy: number;
+    /** `sprayAngle` — base spray angle. */
+    sprayAngle: number;
+    /** `targetMoveError` — extra inaccuracy against movers. */
+    targetMoveError: number;
+    /** `ttl` — projectile time-to-live in seconds (Recoil `flighttime`/GAME_SPEED). 0 if none. */
+    ttl: number;
 }
 
 /** Per-unit entry in the worker's unit store. */
@@ -1750,6 +1803,89 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             const s = ls.stockpileState.get(Number(id));
             if (!s) return null;
             return [s.ready, s.queued, s.buildPercent];
+        },
+
+        // Spring.GetUnitWeaponState(unitID, weaponNum, stateName?) — faithful
+        // port of LuaSyncedRead::GetUnitWeaponState. Most callers in BAR/ZK are
+        // synced gadgets (they run server-side where the real CWeapon state is
+        // available); the worker only needs this for a couple of display widgets
+        // (gui_info, gui_unit_stats) that read "range" / "reloadTime" /
+        // "reloadTimeXP". Those are STATIC weapon-def values the client already
+        // holds, so they're returned faithfully from the streamed weapon defs.
+        //
+        // Per-unit DYNAMIC state (reloadState/reloadFrame, salvoLeft, nextSalvo,
+        // numStockpiled, angleGood) is NOT streamed — the server doesn't put
+        // per-weapon reload progress on the wire. Those keys return a documented
+        // FIDELITY-STANDIN (weapon-ready) with a one-time warn; closing the gap
+        // needs a protocol extension (per-unit-weapon reload frame). See
+        // PLAN-bar.md §3b / PLAN.md drift principle.
+        GetUnitWeaponState: (id: LuaValue, weaponNum?: LuaValue, stateName?: LuaValue) => {
+            const u = ls.units.get(Number(id));
+            if (!u) return null;
+            // LUA_WEAPON_BASE_INDEX == 1 → Lua weaponNum is 1-based.
+            const wIdx = Math.floor(Number(weaponNum ?? 1)) - 1;
+            const weaponIds = ctx.getUnitDefWeaponDefIds?.(u.defId);
+            if (!weaponIds || wIdx < 0 || wIdx >= weaponIds.length) return null;
+            const w = ctx.getWeaponDefStats?.(weaponIds[wIdx]);
+            if (!w) return null;
+
+            const key = stateName != null ? String(stateName) : '';
+
+            // Backwards-compatible no-key form returns 5 values:
+            //   angleGood, reloaded, reloadStatus(frame), salvoLeft, numStockpiled
+            // Dynamic — all FIDELITY-STANDIN (weapon-ready, no salvo, no stockpile).
+            if (key === '') {
+                warnStandinOnce('GetUnitWeaponState:dynamic',
+                    'Spring.GetUnitWeaponState dynamic fields (reload/salvo/stockpile) ' +
+                    'are not streamed — returning weapon-ready defaults. Static def ' +
+                    'fields (range/reloadTime/burst/…) are faithful.');
+                return [true, true, 0, 0, 0];
+            }
+
+            switch (key) {
+                // ── Static, faithful from the streamed weapon def ──
+                case 'range':                return w.range;
+                case 'reloadTime':           return w.reloadTime;
+                // reloadSpeed (XP) isn't streamed → unit->reloadSpeed == 1, so
+                // reloadTimeXP == reloadTime. Faithful for un-veteran units.
+                case 'reloadTimeXP':         return w.reloadTime;
+                case 'projectileSpeed':      return w.projectileSpeed;
+                case 'burst':                return w.salvoSize;
+                case 'burstRate':            return w.salvoDelay;
+                case 'projectiles':          return 1; // projectilesPerShot not on wire (default 1)
+                case 'accuracy':             return w.accuracy;
+                case 'sprayAngle':           return w.sprayAngle;
+                case 'targetMoveError':      return w.targetMoveError;
+                case 'ttl':                  return w.ttl;
+
+                // ── Dynamic per-unit state — NOT streamed (FIDELITY-STANDIN) ──
+                case 'reloadState':
+                case 'reloadFrame': {
+                    warnStandinOnce('GetUnitWeaponState:reload',
+                        'Spring.GetUnitWeaponState("reloadFrame"/"reloadState") is not ' +
+                        'streamed — returning 0 (weapon ready). Reload bars will not ' +
+                        'animate. Needs a per-unit-weapon reload-frame protocol field.');
+                    return 0;
+                }
+                case 'salvoLeft':
+                case 'nextSalvo': {
+                    warnStandinOnce('GetUnitWeaponState:salvo',
+                        'Spring.GetUnitWeaponState("salvoLeft"/"nextSalvo") is not ' +
+                        'streamed — returning 0.');
+                    return 0;
+                }
+                case 'salvoError': {
+                    // {x,y,z} inaccuracy of the ongoing burst — not streamed.
+                    warnStandinOnce('GetUnitWeaponState:salvoError',
+                        'Spring.GetUnitWeaponState("salvoError") is not streamed — ' +
+                        'returning zero vector.');
+                    return luaTable(0, 0, 0);
+                }
+
+                default:
+                    // Recoil returns 0 values (→ nil) for unknown keys.
+                    return null;
+            }
         },
 
         // --- Armored toggle ---

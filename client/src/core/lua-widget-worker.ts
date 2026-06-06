@@ -1192,6 +1192,27 @@ async function init(
             }
         },
         getUnitDefRadius: (defId) => unitDefMap.get(defId)?.radius,
+        getUnitDefWeaponDefIds: (defId) => unitDefMap.get(defId)?.weaponDefIds,
+        getWeaponDefStats: (weaponDefId) => {
+            const w = weaponDefMap.get(weaponDefId);
+            if (!w) return undefined;
+            return {
+                range: w.range ?? 0,
+                // `reload_time` is serialized as WeaponDef.reload (seconds), which
+                // is exactly what Spring.GetUnitWeaponState("reloadTime") returns
+                // (weapon->reloadTime * INV_GAME_SPEED).
+                reloadTime: w.reloadTime ?? 0,
+                projectileSpeed: w.projectileSpeed ?? 0,
+                salvoSize: w.salvoSize ?? 1,
+                salvoDelay: w.salvoDelay ?? 0,
+                accuracy: w.accuracy ?? 0,
+                sprayAngle: w.sprayAngle ?? 0,
+                targetMoveError: w.targetMoveError ?? 0,
+                // `flight_time` (seconds) ≈ projectile ttl; 0 when the def has no
+                // fixed lifetime. Faithful enough for the display widgets.
+                ttl: w.flightTime ?? 0,
+            };
+        },
         getUnitDefFootprint: (defId) => {
             const d = unitDefMap.get(defId);
             if (!d) return undefined;

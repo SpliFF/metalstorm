@@ -366,3 +366,67 @@ describe('SendLuaUIMsg', () => {
         expect(sent).toEqual([]);
     });
 });
+
+describe('GetUnitWeaponState', () => {
+    // A unit with one weapon: def 7 → weapon def 100.
+    function wsApi() {
+        const ls = createDefaultLiveState();
+        ls.units.set(42, unit({ defId: 7 }));
+        const ctx = makeCtx({
+            getUnitDefWeaponDefIds: (d) => (d === 7 ? [100, 101] : undefined),
+            getWeaponDefStats: (w) => (w === 100 ? {
+                range: 480, reloadTime: 3.5, projectileSpeed: 9,
+                salvoSize: 3, salvoDelay: 0.2, accuracy: 0.05,
+                sprayAngle: 0.1, targetMoveError: 0.02, ttl: 1.5,
+            } : w === 101 ? {
+                range: 120, reloadTime: 1, projectileSpeed: 4,
+                salvoSize: 1, salvoDelay: 0, accuracy: 0,
+                sprayAngle: 0, targetMoveError: 0, ttl: 0,
+            } : undefined),
+        });
+        return springApi(ctx, ls);
+    }
+
+    it('returns faithful static def fields for weapon 1', () => {
+        const api = wsApi();
+        expect(call(api.GetUnitWeaponState, 42, 1, 'range')).toBe(480);
+        expect(call(api.GetUnitWeaponState, 42, 1, 'reloadTime')).toBe(3.5);
+        // No XP streamed → reloadTimeXP == reloadTime.
+        expect(call(api.GetUnitWeaponState, 42, 1, 'reloadTimeXP')).toBe(3.5);
+        expect(call(api.GetUnitWeaponState, 42, 1, 'projectileSpeed')).toBe(9);
+        expect(call(api.GetUnitWeaponState, 42, 1, 'burst')).toBe(3);
+        expect(call(api.GetUnitWeaponState, 42, 1, 'burstRate')).toBe(0.2);
+        expect(call(api.GetUnitWeaponState, 42, 1, 'ttl')).toBe(1.5);
+    });
+
+    it('indexes weapons 1-based (weapon 2 → second def)', () => {
+        const api = wsApi();
+        expect(call(api.GetUnitWeaponState, 42, 2, 'range')).toBe(120);
+    });
+
+    it('returns weapon-ready FIDELITY-STANDIN for dynamic reload state', () => {
+        const api = wsApi();
+        expect(call(api.GetUnitWeaponState, 42, 1, 'reloadFrame')).toBe(0);
+        expect(call(api.GetUnitWeaponState, 42, 1, 'reloadState')).toBe(0);
+        expect(call(api.GetUnitWeaponState, 42, 1, 'salvoLeft')).toBe(0);
+    });
+
+    it('salvoError returns a zero {x,y,z} table', () => {
+        const api = wsApi();
+        const v = call(api.GetUnitWeaponState, 42, 1, 'salvoError');
+        expect(isLuaTable(v)).toBe(true);
+        expect((v as { items: number[] }).items).toEqual([0, 0, 0]);
+    });
+
+    it('no-key form returns 5 values (angleGood, reloaded, frame, salvoLeft, stockpile)', () => {
+        const api = wsApi();
+        expect(call(api.GetUnitWeaponState, 42, 1)).toEqual([true, true, 0, 0, 0]);
+    });
+
+    it('returns nil for an unknown unit, out-of-range weapon, or unknown key', () => {
+        const api = wsApi();
+        expect(call(api.GetUnitWeaponState, 99, 1, 'range')).toBeNull();
+        expect(call(api.GetUnitWeaponState, 42, 9, 'range')).toBeNull();
+        expect(call(api.GetUnitWeaponState, 42, 1, 'bogusKey')).toBeNull();
+    });
+});
