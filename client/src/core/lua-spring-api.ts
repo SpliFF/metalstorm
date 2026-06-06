@@ -1517,6 +1517,14 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             const u = ls.units.get(Number(id));
             return u ? [u.x, u.y, flipPosZ(u.z)] : null;
         },
+        // Recoil's GetUnitBasePosition is literally `return GetUnitPosition(L)`
+        // (LuaSyncedRead.cpp:4453) — the same point, just without the optional
+        // midpoint return args. Our streamed unit position already IS the base
+        // (ground-anchored) point, so it's an exact alias.
+        GetUnitBasePosition: (id: LuaValue) => {
+            const u = ls.units.get(Number(id));
+            return u ? [u.x, u.y, flipPosZ(u.z)] : null;
+        },
         // ── Projectile reads (A3 / mixed-strategy seam) ──────────────
         // Backed by `ls.projectiles`, mirrored each frame from the
         // main-thread ProjectileRenderer (live + beams). These let ZK's
@@ -1532,6 +1540,26 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             // the first id (a number) and the collector loop never runs.
             const out: number[] = [];
             for (const id of ls.projectiles.keys()) out.push(id);
+            return luaTable(...out);
+        },
+        // Recoil's quad-field rectangle query (LuaSyncedRead.cpp:GetProjectilesInRectangle).
+        // Args: (xmin, zmin, xmax, zmax, excludeWeaponProjectiles?, excludePieceProjectiles?).
+        // We only mirror weapon projectiles (piece projectiles — debris gibs —
+        // aren't streamed), so `excludeWeaponProjectiles` yields an empty set and
+        // `excludePieceProjectiles` is a no-op. Positions are compared in the
+        // Lua-facing frame (flipPosZ — identity for positions).
+        GetProjectilesInRectangle: (
+            xmin: LuaValue, zmin: LuaValue, xmax: LuaValue, zmax: LuaValue,
+            excludeWeaponProjectiles?: LuaValue, _excludePieceProjectiles?: LuaValue,
+        ) => {
+            const out: number[] = [];
+            if (!excludeWeaponProjectiles) {
+                const x0 = Number(xmin), z0 = Number(zmin), x1 = Number(xmax), z1 = Number(zmax);
+                for (const [id, p] of ls.projectiles) {
+                    const pz = flipPosZ(p.z);
+                    if (p.x >= x0 && p.x <= x1 && pz >= z0 && pz <= z1) out.push(id);
+                }
+            }
             return luaTable(...out);
         },
         GetProjectilePosition: (id: LuaValue) => {

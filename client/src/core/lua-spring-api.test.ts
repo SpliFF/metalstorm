@@ -244,4 +244,41 @@ describe('BAR read shims', () => {
             expect(Number(dt)).toBeCloseTo(1.0, 9);
         });
     });
+
+    describe('GetUnitBasePosition', () => {
+        it('returns the same point as GetUnitPosition', () => {
+            const ls = createDefaultLiveState();
+            ls.units.set(42, unit({ x: 100, y: 25, z: 300 }));
+            const api = springApi(makeCtx(), ls);
+            expect(call(api.GetUnitBasePosition, 42)).toEqual(call(api.GetUnitPosition, 42));
+            expect(call(api.GetUnitBasePosition, 42)).toEqual([100, 25, 300]);
+        });
+        it('returns nil for an unknown unit', () => {
+            const api = springApi(makeCtx(), createDefaultLiveState());
+            expect(call(api.GetUnitBasePosition, 999)).toBeNull();
+        });
+    });
+
+    describe('GetProjectilesInRectangle', () => {
+        function withProjectiles(): LiveState {
+            const ls = createDefaultLiveState();
+            ls.projectiles.set(1, { defId: 0, x: 50, y: 0, z: 50, vx: 0, vy: 0, vz: 0, ttl: -1, isBeam: false });
+            ls.projectiles.set(2, { defId: 0, x: 150, y: 0, z: 150, vx: 0, vy: 0, vz: 0, ttl: -1, isBeam: false });
+            ls.projectiles.set(3, { defId: 0, x: 90, y: 0, z: 10, vx: 0, vy: 0, vz: 0, ttl: -1, isBeam: false });
+            return ls;
+        }
+        it('returns only projectiles inside the rectangle', () => {
+            const api = springApi(makeCtx(), withProjectiles());
+            // rect (0,0)-(100,100) contains ids 1 and 3, excludes 2
+            expect(ids(call(api.GetProjectilesInRectangle, 0, 0, 100, 100))).toEqual([1, 3]);
+        });
+        it('returns empty when weapon projectiles are excluded', () => {
+            const api = springApi(makeCtx(), withProjectiles());
+            expect(ids(call(api.GetProjectilesInRectangle, 0, 0, 1000, 1000, true))).toEqual([]);
+        });
+        it('returns empty for a rectangle covering no projectiles', () => {
+            const api = springApi(makeCtx(), withProjectiles());
+            expect(ids(call(api.GetProjectilesInRectangle, 500, 500, 600, 600))).toEqual([]);
+        });
+    });
 });
