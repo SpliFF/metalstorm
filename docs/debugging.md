@@ -863,6 +863,61 @@ Found 3 Lua errors:
   [142] [ERROR] [spring-server:lua:LuaRules] runtime error in 'GameFrame': ...
 ```
 
+### Reliable live game-drive verification
+
+The sim does **not** advance until a real client connects — the server logs
+`waiting for N player(s) to connect before starting game...` and idle-exits after
+~300s if none does (`game-<room>.log` ends with `shutting down idle game server`
+→ `exited cleanly`). So driving a game for verification needs an actual browser
+session, not just `launch_game`. Three recurring traps:
+
+1. **User mismatch.** `launch_game` (and the MCP tools) host as `admin`, but the
+   browser tab is often logged in as someone else (`test1`). A non-host username
+   is rejected by the game-server roster, so the browser never connects and the
+   server idle-exits. **Fix:** don't host with `launch_game` when you need a
+   browser in the loop — drive `createRoom → addAI → ready → startGame` *from the
+   already-logged-in browser* so that user is the host and auto-connects.
+2. **Stale game/lobby after a rebuild.** Replacing a binary on disk does not touch
+   a running process. After `ninja … spring-server`, kill the running game
+   (`kill_game`, or `pkill -f build/debug/spring-server`) before launching, or
+   you'll test the old binary. After rebuilding the lobby, `restart_lobby`.
+3. **Port/process leftovers.** All game servers bind `:9100`; a half-dead server
+   keeps the UDP/QUIC socket and the next launch exits immediately. Confirm it's
+   free (`lsof -nP -iUDP:9100`) and that no `spring-server` lingers before
+   relaunching. Ended rooms are auto-reaped by the lobby health check.
+
+Proven flow (browser already logged in, lobby + client + log server up):
+
+```js
+// In the browser tab (chrome-devtools evaluate_script), as the logged-in user:
+const L = window.lobby;
+L.selectedGameId = 'bar';
+await L.createRoom('verify', 'pools_of_ilys_1.0.0');  // small map — green_flat
+await L.addAI('null', 1);                              // is huge: slow QTPFS init
+await L.ready(true);
+await L.startGame();                                   // browser becomes host + connects
+```
+
+Then watch `game_status` flip to `ready=1, clients=1` (the server writes it to
+`data/spring-server.db` once a client is connected):
+
+```bash
+sqlite3 data/spring-server.db \
+  "SELECT ready, client_count, port FROM game_status WHERE room_id=<id>"
+```
+
+Once `clients=1`, the sim runs (`get_game_state` → `frame=` climbing) and you can
+drive it: `set_cheats`, `spawn_unit`, `give_order`, `exec_lua`. Inspect the
+client-side LuaUI worker (the `Spring.*`/`gl.*` API the player sees) with
+`window.widgets.eval('<lua>')` via chrome-devtools.
+
+> The MCP's authed tools cache the lobby token; if the session DB was reset they
+> used to 401 forever. The MCP now re-auths once on a 401 (`authedFetch` in
+> `tools/debug-mcp/server.js`) — but that self-heal only applies after the MCP
+> process restarts. If you still see `401 … use POST /api/auth/login first` from a
+> long-running MCP, restart the MCP server, or drive exec via a fresh
+> `curl`-obtained token directly against `:9100/api/exec`.
+
 ---
 
 ## springcli — Command-Line Tool
