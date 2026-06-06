@@ -18,6 +18,7 @@ import { GameListUpdate, GameListUpdateT } from '../spring-web/game-list-update.
 import { GameRestarting, GameRestartingT } from '../spring-web/game-restarting.js';
 import { GameStarted, GameStartedT } from '../spring-web/game-started.js';
 import { LogBatch, LogBatchT } from '../spring-web/log-batch.js';
+import { LuaUIMsgRelay, LuaUIMsgRelayT } from '../spring-web/lua-uimsg-relay.js';
 import { MapData, MapDataT } from '../spring-web/map-data.js';
 import { MapListUpdate, MapListUpdateT } from '../spring-web/map-list-update.js';
 import { PathResponse, PathResponseT } from '../spring-web/path-response.js';
@@ -122,7 +123,7 @@ unpackTo(_o: ServerMessageT): void {
 export class ServerMessageT implements flatbuffers.IGeneratedObject {
 constructor(
   public payloadType: ServerPayload = ServerPayload.NONE,
-  public payload: AIListUpdateT|AuthResponseT|ChatReceiveT|ConsoleResponseT|EntityCreateT|EntityDestroyT|EntitySensorUpdateT|FeatureLifecycleBatchT|GameEventBatchT|GameInfoT|GameListUpdateT|GameRestartingT|GameStartedT|LogBatchT|MapDataT|MapListUpdateT|PathResponseT|PlayerLeftT|PlayerTeamEventBatchT|PongT|ReconnectResponseT|ResourceUpdateT|RoomListUpdateT|RoomPlayerJoinedT|RoomPlayerLeftT|RoomStateUpdateT|SendToUnsyncedEventT|ServerErrorT|StandingOrderStateT|TeamStartInfoT|UnitArmoredUpdateT|UnitCmdDescsUpdateT|UnitCommandBatchT|UnitCommandQueuesUpdateT|UnitLifecycleBatchT|UnitSelfDUpdateT|UnitStockpileUpdateT|UnitTransportUpdateT|null = null
+  public payload: AIListUpdateT|AuthResponseT|ChatReceiveT|ConsoleResponseT|EntityCreateT|EntityDestroyT|EntitySensorUpdateT|FeatureLifecycleBatchT|GameEventBatchT|GameInfoT|GameListUpdateT|GameRestartingT|GameStartedT|LogBatchT|LuaUIMsgRelayT|MapDataT|MapListUpdateT|PathResponseT|PlayerLeftT|PlayerTeamEventBatchT|PongT|ReconnectResponseT|ResourceUpdateT|RoomListUpdateT|RoomPlayerJoinedT|RoomPlayerLeftT|RoomStateUpdateT|SendToUnsyncedEventT|ServerErrorT|StandingOrderStateT|TeamStartInfoT|UnitArmoredUpdateT|UnitCmdDescsUpdateT|UnitCommandBatchT|UnitCommandQueuesUpdateT|UnitLifecycleBatchT|UnitSelfDUpdateT|UnitStockpileUpdateT|UnitTransportUpdateT|null = null
 ){}
 
 

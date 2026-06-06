@@ -68,6 +68,8 @@ import { AuthRequest } from '../protocol/spring-web/auth-request.js';
 import { PlayerCommand } from '../protocol/spring-web/player-command.js';
 import { PlayerCommandBatch } from '../protocol/spring-web/player-command-batch.js';
 import { LuaRulesMsg } from '../protocol/spring-web/lua-rules-msg.js';
+import { LuaUIMsg } from '../protocol/spring-web/lua-uimsg.js';
+import { LuaUIMsgRelay } from '../protocol/spring-web/lua-uimsg-relay.js';
 import { ConsoleCommand } from '../protocol/spring-web/console-command.js';
 import { SelectionState } from '../protocol/spring-web/selection-state.js';
 import { PathRequest } from '../protocol/spring-web/path-request.js';
@@ -803,6 +805,10 @@ export interface ConnectionEvents {
     /// Player/team status changes (PlayerTeamEventBatch) — drives
     /// widget:PlayerChanged / PlayerAdded / PlayerRemoved / TeamDied.
     onPlayerTeamEvents?: (events: PlayerTeamEventInfo[]) => void;
+    /// A relayed `Spring.SendLuaUIMsg` (LuaUIMsgRelay). The server already
+    /// applied the audience filter; deliver unconditionally to
+    /// `widget:RecvLuaMsg(data, playerId)`. `data` preserves embedded NULs.
+    onLuaUIMsg?: (data: Uint8Array, playerId: number) => void;
     onServerMessage?: (msg: ServerMessage) => void;
     /// Server signalled a restart (ServerPayload.GameRestarting). The host
     /// decides how to react — on the main thread this reloads the page; from
@@ -1136,6 +1142,22 @@ export class Connection {
         const dataOff = LuaRulesMsg.createDataVector(builder, bytes);
         const msg = LuaRulesMsg.createLuaRulesMsg(builder, dataOff);
         this.sendClientMessage(builder, ClientPayload.LuaRulesMsg, msg);
+    }
+
+    /** Forward a `Spring.SendLuaUIMsg(msg, mode)` from a client widget. The
+     *  server relays it (filtered by `mode`) to every eligible client where
+     *  it surfaces as `widget:RecvLuaMsg(msg, playerID)` — the sending player
+     *  included (faithful loopback). `mode`: 0 = all, 97 (`'a'`) = allies,
+     *  115 (`'s'`) = spectators. Embedded NULs are preserved. */
+    sendLuaUIMsg(data: Uint8Array | string, mode: number): void {
+        if (!this.authenticated) return;
+        const bytes = typeof data === 'string'
+            ? new TextEncoder().encode(data)
+            : data;
+        const builder = new flatbuffers.Builder(64 + bytes.length);
+        const dataOff = LuaUIMsg.createDataVector(builder, bytes);
+        const msg = LuaUIMsg.createLuaUIMsg(builder, dataOff, mode & 0xff);
+        this.sendClientMessage(builder, ClientPayload.LuaUIMsg, msg);
     }
 
     /** Send a ConsoleCommand to the game server's exec engine (same
@@ -1532,6 +1554,15 @@ export class Connection {
                     events.push({ kind: e.kind(), id: e.id(), reason: e.reason() });
                 }
                 if (events.length > 0) this.events.onPlayerTeamEvents?.(events);
+                break;
+            }
+            case ServerPayload.LuaUIMsgRelay: {
+                const r = msg.payload(new LuaUIMsgRelay()) as LuaUIMsgRelay;
+                const arr = r.dataArray();
+                // Copy out of the FlatBuffer view (it aliases the receive
+                // buffer, reused next frame) before handing to the worker.
+                const data = arr ? arr.slice() : new Uint8Array(0);
+                this.events.onLuaUIMsg?.(data, r.playerId());
                 break;
             }
             case ServerPayload.ResourceUpdate: {

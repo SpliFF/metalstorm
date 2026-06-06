@@ -1757,6 +1757,72 @@ int main(int argc, char* argv[])
                     luaRules->RecvLuaMsg(payload, pIt->second);
                     break;
                 }
+                case SpringWeb::ClientPayload_LuaUIMsg: {
+                    // Player→player LuaUI broadcast (Spring.SendLuaUIMsg). Unlike
+                    // LuaRulesMsg this never touches synced state — the server
+                    // just relays it to every eligible client as a
+                    // LuaUIMsgRelay → widget:RecvLuaMsg(msg, playerID). The
+                    // audience filter (`mode`) is evaluated here per-receiver,
+                    // faithfully mirroring Recoil CLuaHandle::HandleLuaMsg
+                    // (LUA_HANDLE_ORDER_UI). The sender receives its own message
+                    // back (faithful loopback — Recoil relays to all incl self).
+                    auto* session = sessions.GetSession(msg.clientId);
+                    if (!session) {
+                        auto err = Protocol::BuildServerError(401, "Not authenticated");
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                        break;
+                    }
+                    auto sIt = clientPlayerNum.find(msg.clientId);
+                    if (sIt == clientPlayerNum.end()) {
+                        SLOG(SPRING_LOG_NOTICE,
+                             "[server] LuaUIMsg drop: no playerNum for client %u",
+                             msg.clientId);
+                        break;
+                    }
+                    const int senderPNum = sIt->second;
+                    auto* uim = clientMsg->payload_as_LuaUIMsg();
+                    auto* dataVec = uim ? uim->data() : nullptr;
+                    if (dataVec == nullptr) break;
+                    const uint8_t mode = uim->mode();
+
+                    std::string payload(reinterpret_cast<const char*>(dataVec->data()),
+                                        dataVec->size());
+                    const CPlayer* sender = playerHandler.Player(senderPNum);
+                    const bool senderSpec = (sender == nullptr) || sender->IsSpectator();
+                    const int senderAllyTeam =
+                        (sender != nullptr && !senderSpec)
+                            ? teamHandler.AllyTeam(sender->team) : -1;
+
+                    auto relay = Protocol::BuildLuaUIMsgRelay(payload, senderPNum);
+                    int delivered = 0;
+                    for (const auto& [rClientId, rPNum] : clientPlayerNum) {
+                        const CPlayer* recv = playerHandler.Player(rPNum);
+                        if (recv == nullptr) continue;
+                        const bool recvSpec = recv->IsSpectator();
+                        bool send = false;
+                        switch (mode) {
+                            case 0:   send = true; break;
+                            case 's': send = recvSpec; break;
+                            case 'a': {
+                                // Recoil: a full-view spectator sees all; if the
+                                // sender is a spectator only spectators receive;
+                                // otherwise allied-allyteam receivers receive.
+                                if (recvSpec)       send = true;
+                                else if (senderSpec) send = false;
+                                else send = teamHandler.Ally(
+                                    senderAllyTeam, teamHandler.AllyTeam(recv->team));
+                            } break;
+                            default: send = false; break;
+                        }
+                        if (!send) continue;
+                        rtcServer.SendReliable(rClientId, relay.data(), relay.size());
+                        ++delivered;
+                    }
+                    SLOG(SPRING_LOG_INFO,
+                         "[server] LuaUIMsg relay: sender=%d mode=%u bytes=%zu delivered=%d",
+                         senderPNum, static_cast<unsigned>(mode), payload.size(), delivered);
+                    break;
+                }
                 case SpringWeb::ClientPayload_ConsoleCommand: {
                     auto* cc = clientMsg->payload_as_ConsoleCommand();
                     if (!cc) break;

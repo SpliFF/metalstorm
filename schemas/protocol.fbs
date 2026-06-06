@@ -245,6 +245,21 @@ table LuaRulesMsg {
     data: [uint8];
 }
 
+/// Forwarded `Spring.SendLuaUIMsg(msg, mode)` call from a client widget.
+/// Unlike LuaRulesMsg (which feeds the server's synced LuaRules state), this
+/// is a player→player LuaUI broadcast: the server relays it to every eligible
+/// client as a `LuaUIMsgRelay` where it surfaces as
+/// `widget:RecvLuaMsg(msg, playerID)`. `mode` selects the audience and is
+/// resolved on the receiving end (Recoil `CLuaHandle::HandleLuaMsg`):
+/// 0 = everyone, 'a' (97) = allies only, 's' (115) = spectators only. The
+/// sending player also receives its own message back (faithful loopback).
+/// Bytes (not string) so embedded nulls survive. PlayerID is resolved
+/// server-side from the authenticated session, not trusted from the client.
+table LuaUIMsg {
+    data: [uint8];
+    mode: uint8;
+}
+
 table Ack {
     last_received_seq: uint32;
 }
@@ -463,6 +478,7 @@ union ClientPayload {
     StandingOrderCreate,
     StandingOrderUpdate,
     StandingOrderRemove,
+    LuaUIMsg,
 }
 
 table ClientMessage {
@@ -1531,6 +1547,17 @@ table SendToUnsyncedEvent {
     args: [SendToUnsyncedArg];
 }
 
+/// Server → Client: a relayed `Spring.SendLuaUIMsg` from another (or the
+/// same) player. The server has already applied the audience filter (the
+/// `mode` from the originating `LuaUIMsg`, evaluated against this receiver's
+/// team/spectator state per Recoil `CLuaHandle::HandleLuaMsg`), so the client
+/// dispatches unconditionally to `widget:RecvLuaMsg(data, player_id)`.
+/// `player_id` is the sender's player number (server-resolved).
+table LuaUIMsgRelay {
+    data: [uint8];
+    player_id: int32;
+}
+
 // Union of all server→client message types
 union ServerPayload {
     AuthResponse,
@@ -1571,6 +1598,7 @@ union ServerPayload {
     SendToUnsyncedEvent,
     TeamStartInfo,
     PlayerTeamEventBatch,
+    LuaUIMsgRelay,
 }
 
 table ServerMessage {

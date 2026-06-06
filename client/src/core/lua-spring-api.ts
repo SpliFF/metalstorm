@@ -72,6 +72,14 @@ export interface SpringAPIContext {
      */
     sendLuaRulesMsg?(data: string): void;
     /**
+     * Forward a `Spring.SendLuaUIMsg(msg, mode)` call to the server, which
+     * relays it (filtered by `mode`) to every eligible player's LuaUI as
+     * `widget:RecvLuaMsg(msg, playerID)`. `mode`: 0 = all, 97 (`'a'`) =
+     * allies, 115 (`'s'`) = spectators. Host wires this to
+     * `Connection.sendLuaUIMsg`. Optional — absent ⇒ no-op.
+     */
+    sendLuaUIMsg?(data: string, mode: number): void;
+    /**
      * Replace the player's current unit selection. Called by
      * `Spring.SelectUnit` / `SelectUnitArray` / `SelectUnitMap` /
      * `DeselectUnit`. The host wires this to InputManager so the
@@ -3362,10 +3370,19 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         // synced LuaRules state, where it surfaces as
         // `gadget:RecvLuaMsg(msg, playerID)`. ZK widgets (e.g.
         // gui_contextmenu) call this to reach commands gated to the
-        // authoritative side. SendLuaUIMsg/SendLuaGaiaMsg are still
-        // unwired — the former needs server-mediated broadcast to peer
-        // clients, the latter needs LuaGaia to be loaded.
-        SendLuaUIMsg: () => {},
+        // authoritative side. SendLuaUIMsg broadcasts to peer clients' LuaUI
+        // via the server (LuaUIMsg → LuaUIMsgRelay → widget:RecvLuaMsg);
+        // SendLuaGaiaMsg is still unwired (needs LuaGaia loaded).
+        SendLuaUIMsg: (msg: LuaValue, mode?: LuaValue) => {
+            if (msg == null) return;
+            // Recoil only inspects mode[0]; "" = all, 'a'/'allies', 's'/'specs'.
+            let modeByte = 0;
+            if (typeof mode === 'string' && mode.length > 0) {
+                const c = mode.charCodeAt(0);
+                if (c === 97 /* a */ || c === 115 /* s */) modeByte = c;
+            }
+            ctx.sendLuaUIMsg?.(String(msg), modeByte);
+        },
         SendLuaRulesMsg: (msg: LuaValue) => {
             if (msg == null) return;
             ctx.sendLuaRulesMsg?.(String(msg));

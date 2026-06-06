@@ -330,3 +330,39 @@ describe('applyPlayerTeamRosterEffect', () => {
         expect(players.get(3)!.active).toBe(true);
     });
 });
+
+describe('SendLuaUIMsg', () => {
+    function captureCtx() {
+        const sent: Array<{ data: string; mode: number }> = [];
+        const ctx = makeCtx({ sendLuaUIMsg: (data, mode) => sent.push({ data, mode }) });
+        const api = springApi(ctx, createDefaultLiveState());
+        return { sent, api };
+    }
+
+    it('defaults to mode 0 (all) when no mode given', () => {
+        const { sent, api } = captureCtx();
+        call(api.SendLuaUIMsg, 'hello');
+        expect(sent).toEqual([{ data: 'hello', mode: 0 }]);
+    });
+
+    it("maps 'a'/'allies' to byte 97 and 's'/'specs' to byte 115", () => {
+        const { sent, api } = captureCtx();
+        call(api.SendLuaUIMsg, 'x', 'a');
+        call(api.SendLuaUIMsg, 'y', 'allies');
+        call(api.SendLuaUIMsg, 'z', 's');
+        call(api.SendLuaUIMsg, 'w', 'specs');
+        expect(sent.map((s) => s.mode)).toEqual([97, 97, 115, 115]);
+    });
+
+    it('treats an unknown mode as 0 (all), not an error', () => {
+        const { sent, api } = captureCtx();
+        call(api.SendLuaUIMsg, 'x', 'q');
+        expect(sent).toEqual([{ data: 'x', mode: 0 }]);
+    });
+
+    it('ignores a nil message', () => {
+        const { sent, api } = captureCtx();
+        call(api.SendLuaUIMsg, null);
+        expect(sent).toEqual([]);
+    });
+});

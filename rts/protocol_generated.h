@@ -77,6 +77,10 @@ struct LuaRulesMsg;
 struct LuaRulesMsgBuilder;
 struct LuaRulesMsgT;
 
+struct LuaUIMsg;
+struct LuaUIMsgBuilder;
+struct LuaUIMsgT;
+
 struct Ack;
 struct AckBuilder;
 struct AckT;
@@ -453,6 +457,10 @@ struct SendToUnsyncedEvent;
 struct SendToUnsyncedEventBuilder;
 struct SendToUnsyncedEventT;
 
+struct LuaUIMsgRelay;
+struct LuaUIMsgRelayBuilder;
+struct LuaUIMsgRelayT;
+
 struct ServerMessage;
 struct ServerMessageBuilder;
 struct ServerMessageT;
@@ -591,11 +599,12 @@ enum ClientPayload : uint8_t {
   ClientPayload_StandingOrderCreate = 33,
   ClientPayload_StandingOrderUpdate = 34,
   ClientPayload_StandingOrderRemove = 35,
+  ClientPayload_LuaUIMsg = 36,
   ClientPayload_MIN = ClientPayload_NONE,
-  ClientPayload_MAX = ClientPayload_StandingOrderRemove
+  ClientPayload_MAX = ClientPayload_LuaUIMsg
 };
 
-inline const ClientPayload (&EnumValuesClientPayload())[36] {
+inline const ClientPayload (&EnumValuesClientPayload())[37] {
   static const ClientPayload values[] = {
     ClientPayload_NONE,
     ClientPayload_Handshake,
@@ -632,13 +641,14 @@ inline const ClientPayload (&EnumValuesClientPayload())[36] {
     ClientPayload_PathRequestCancel,
     ClientPayload_StandingOrderCreate,
     ClientPayload_StandingOrderUpdate,
-    ClientPayload_StandingOrderRemove
+    ClientPayload_StandingOrderRemove,
+    ClientPayload_LuaUIMsg
   };
   return values;
 }
 
 inline const char * const *EnumNamesClientPayload() {
-  static const char * const names[37] = {
+  static const char * const names[38] = {
     "NONE",
     "Handshake",
     "AuthRequest",
@@ -675,13 +685,14 @@ inline const char * const *EnumNamesClientPayload() {
     "StandingOrderCreate",
     "StandingOrderUpdate",
     "StandingOrderRemove",
+    "LuaUIMsg",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameClientPayload(ClientPayload e) {
-  if (::flatbuffers::IsOutRange(e, ClientPayload_NONE, ClientPayload_StandingOrderRemove)) return "";
+  if (::flatbuffers::IsOutRange(e, ClientPayload_NONE, ClientPayload_LuaUIMsg)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesClientPayload()[index];
 }
@@ -830,6 +841,10 @@ template<> struct ClientPayloadTraits<SpringWeb::StandingOrderRemove> {
   static const ClientPayload enum_value = ClientPayload_StandingOrderRemove;
 };
 
+template<> struct ClientPayloadTraits<SpringWeb::LuaUIMsg> {
+  static const ClientPayload enum_value = ClientPayload_LuaUIMsg;
+};
+
 template<typename T> struct ClientPayloadUnionTraits {
   static const ClientPayload enum_value = ClientPayload_NONE;
 };
@@ -972,6 +987,10 @@ template<> struct ClientPayloadUnionTraits<SpringWeb::StandingOrderUpdateT> {
 
 template<> struct ClientPayloadUnionTraits<SpringWeb::StandingOrderRemoveT> {
   static const ClientPayload enum_value = ClientPayload_StandingOrderRemove;
+};
+
+template<> struct ClientPayloadUnionTraits<SpringWeb::LuaUIMsgT> {
+  static const ClientPayload enum_value = ClientPayload_LuaUIMsg;
 };
 
 struct ClientPayloadUnion {
@@ -1283,6 +1302,14 @@ struct ClientPayloadUnion {
   const SpringWeb::StandingOrderRemoveT *AsStandingOrderRemove() const {
     return type == ClientPayload_StandingOrderRemove ?
       reinterpret_cast<const SpringWeb::StandingOrderRemoveT *>(value) : nullptr;
+  }
+  SpringWeb::LuaUIMsgT *AsLuaUIMsg() {
+    return type == ClientPayload_LuaUIMsg ?
+      reinterpret_cast<SpringWeb::LuaUIMsgT *>(value) : nullptr;
+  }
+  const SpringWeb::LuaUIMsgT *AsLuaUIMsg() const {
+    return type == ClientPayload_LuaUIMsg ?
+      reinterpret_cast<const SpringWeb::LuaUIMsgT *>(value) : nullptr;
   }
 };
 
@@ -1785,11 +1812,12 @@ enum ServerPayload : uint8_t {
   ServerPayload_SendToUnsyncedEvent = 36,
   ServerPayload_TeamStartInfo = 37,
   ServerPayload_PlayerTeamEventBatch = 38,
+  ServerPayload_LuaUIMsgRelay = 39,
   ServerPayload_MIN = ServerPayload_NONE,
-  ServerPayload_MAX = ServerPayload_PlayerTeamEventBatch
+  ServerPayload_MAX = ServerPayload_LuaUIMsgRelay
 };
 
-inline const ServerPayload (&EnumValuesServerPayload())[39] {
+inline const ServerPayload (&EnumValuesServerPayload())[40] {
   static const ServerPayload values[] = {
     ServerPayload_NONE,
     ServerPayload_AuthResponse,
@@ -1829,13 +1857,14 @@ inline const ServerPayload (&EnumValuesServerPayload())[39] {
     ServerPayload_FeatureLifecycleBatch,
     ServerPayload_SendToUnsyncedEvent,
     ServerPayload_TeamStartInfo,
-    ServerPayload_PlayerTeamEventBatch
+    ServerPayload_PlayerTeamEventBatch,
+    ServerPayload_LuaUIMsgRelay
   };
   return values;
 }
 
 inline const char * const *EnumNamesServerPayload() {
-  static const char * const names[40] = {
+  static const char * const names[41] = {
     "NONE",
     "AuthResponse",
     "EntityCreate",
@@ -1875,13 +1904,14 @@ inline const char * const *EnumNamesServerPayload() {
     "SendToUnsyncedEvent",
     "TeamStartInfo",
     "PlayerTeamEventBatch",
+    "LuaUIMsgRelay",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameServerPayload(ServerPayload e) {
-  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_PlayerTeamEventBatch)) return "";
+  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_LuaUIMsgRelay)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesServerPayload()[index];
 }
@@ -2042,6 +2072,10 @@ template<> struct ServerPayloadTraits<SpringWeb::PlayerTeamEventBatch> {
   static const ServerPayload enum_value = ServerPayload_PlayerTeamEventBatch;
 };
 
+template<> struct ServerPayloadTraits<SpringWeb::LuaUIMsgRelay> {
+  static const ServerPayload enum_value = ServerPayload_LuaUIMsgRelay;
+};
+
 template<typename T> struct ServerPayloadUnionTraits {
   static const ServerPayload enum_value = ServerPayload_NONE;
 };
@@ -2196,6 +2230,10 @@ template<> struct ServerPayloadUnionTraits<SpringWeb::TeamStartInfoT> {
 
 template<> struct ServerPayloadUnionTraits<SpringWeb::PlayerTeamEventBatchT> {
   static const ServerPayload enum_value = ServerPayload_PlayerTeamEventBatch;
+};
+
+template<> struct ServerPayloadUnionTraits<SpringWeb::LuaUIMsgRelayT> {
+  static const ServerPayload enum_value = ServerPayload_LuaUIMsgRelay;
 };
 
 struct ServerPayloadUnion {
@@ -2531,6 +2569,14 @@ struct ServerPayloadUnion {
   const SpringWeb::PlayerTeamEventBatchT *AsPlayerTeamEventBatch() const {
     return type == ServerPayload_PlayerTeamEventBatch ?
       reinterpret_cast<const SpringWeb::PlayerTeamEventBatchT *>(value) : nullptr;
+  }
+  SpringWeb::LuaUIMsgRelayT *AsLuaUIMsgRelay() {
+    return type == ServerPayload_LuaUIMsgRelay ?
+      reinterpret_cast<SpringWeb::LuaUIMsgRelayT *>(value) : nullptr;
+  }
+  const SpringWeb::LuaUIMsgRelayT *AsLuaUIMsgRelay() const {
+    return type == ServerPayload_LuaUIMsgRelay ?
+      reinterpret_cast<const SpringWeb::LuaUIMsgRelayT *>(value) : nullptr;
   }
 };
 
@@ -4216,6 +4262,91 @@ inline ::flatbuffers::Offset<LuaRulesMsg> CreateLuaRulesMsgDirect(
 }
 
 ::flatbuffers::Offset<LuaRulesMsg> CreateLuaRulesMsg(::flatbuffers::FlatBufferBuilder &_fbb, const LuaRulesMsgT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct LuaUIMsgT : public ::flatbuffers::NativeTable {
+  typedef LuaUIMsg TableType;
+  std::vector<uint8_t> data{};
+  uint8_t mode = 0;
+};
+
+/// Forwarded `Spring.SendLuaUIMsg(msg, mode)` call from a client widget.
+/// Unlike LuaRulesMsg (which feeds the server's synced LuaRules state), this
+/// is a player→player LuaUI broadcast: the server relays it to every eligible
+/// client as a `LuaUIMsgRelay` where it surfaces as
+/// `widget:RecvLuaMsg(msg, playerID)`. `mode` selects the audience and is
+/// resolved on the receiving end (Recoil `CLuaHandle::HandleLuaMsg`):
+/// 0 = everyone, 'a' (97) = allies only, 's' (115) = spectators only. The
+/// sending player also receives its own message back (faithful loopback).
+/// Bytes (not string) so embedded nulls survive. PlayerID is resolved
+/// server-side from the authenticated session, not trusted from the client.
+struct LuaUIMsg FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef LuaUIMsgT NativeTableType;
+  typedef LuaUIMsgBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_DATA = 4,
+    VT_MODE = 6
+  };
+  const ::flatbuffers::Vector<uint8_t> *data() const {
+    return GetPointer<const ::flatbuffers::Vector<uint8_t> *>(VT_DATA);
+  }
+  uint8_t mode() const {
+    return GetField<uint8_t>(VT_MODE, 0);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_DATA) &&
+           verifier.VerifyVector(data()) &&
+           VerifyField<uint8_t>(verifier, VT_MODE, 1) &&
+           verifier.EndTable();
+  }
+  LuaUIMsgT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(LuaUIMsgT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<LuaUIMsg> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const LuaUIMsgT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct LuaUIMsgBuilder {
+  typedef LuaUIMsg Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_data(::flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> data) {
+    fbb_.AddOffset(LuaUIMsg::VT_DATA, data);
+  }
+  void add_mode(uint8_t mode) {
+    fbb_.AddElement<uint8_t>(LuaUIMsg::VT_MODE, mode, 0);
+  }
+  explicit LuaUIMsgBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<LuaUIMsg> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<LuaUIMsg>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<LuaUIMsg> CreateLuaUIMsg(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> data = 0,
+    uint8_t mode = 0) {
+  LuaUIMsgBuilder builder_(_fbb);
+  builder_.add_data(data);
+  builder_.add_mode(mode);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<LuaUIMsg> CreateLuaUIMsgDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const std::vector<uint8_t> *data = nullptr,
+    uint8_t mode = 0) {
+  auto data__ = data ? _fbb.CreateVector<uint8_t>(*data) : 0;
+  return SpringWeb::CreateLuaUIMsg(
+      _fbb,
+      data__,
+      mode);
+}
+
+::flatbuffers::Offset<LuaUIMsg> CreateLuaUIMsg(::flatbuffers::FlatBufferBuilder &_fbb, const LuaUIMsgT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
 struct AckT : public ::flatbuffers::NativeTable {
   typedef Ack TableType;
@@ -6131,6 +6262,9 @@ struct ClientMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const SpringWeb::StandingOrderRemove *payload_as_StandingOrderRemove() const {
     return payload_type() == SpringWeb::ClientPayload_StandingOrderRemove ? static_cast<const SpringWeb::StandingOrderRemove *>(payload()) : nullptr;
   }
+  const SpringWeb::LuaUIMsg *payload_as_LuaUIMsg() const {
+    return payload_type() == SpringWeb::ClientPayload_LuaUIMsg ? static_cast<const SpringWeb::LuaUIMsg *>(payload()) : nullptr;
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_PAYLOAD_TYPE, 1) &&
@@ -6281,6 +6415,10 @@ template<> inline const SpringWeb::StandingOrderUpdate *ClientMessage::payload_a
 
 template<> inline const SpringWeb::StandingOrderRemove *ClientMessage::payload_as<SpringWeb::StandingOrderRemove>() const {
   return payload_as_StandingOrderRemove();
+}
+
+template<> inline const SpringWeb::LuaUIMsg *ClientMessage::payload_as<SpringWeb::LuaUIMsg>() const {
+  return payload_as_LuaUIMsg();
 }
 
 struct ClientMessageBuilder {
@@ -14119,6 +14257,87 @@ inline ::flatbuffers::Offset<SendToUnsyncedEvent> CreateSendToUnsyncedEventDirec
 
 ::flatbuffers::Offset<SendToUnsyncedEvent> CreateSendToUnsyncedEvent(::flatbuffers::FlatBufferBuilder &_fbb, const SendToUnsyncedEventT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
+struct LuaUIMsgRelayT : public ::flatbuffers::NativeTable {
+  typedef LuaUIMsgRelay TableType;
+  std::vector<uint8_t> data{};
+  int32_t player_id = 0;
+};
+
+/// Server → Client: a relayed `Spring.SendLuaUIMsg` from another (or the
+/// same) player. The server has already applied the audience filter (the
+/// `mode` from the originating `LuaUIMsg`, evaluated against this receiver's
+/// team/spectator state per Recoil `CLuaHandle::HandleLuaMsg`), so the client
+/// dispatches unconditionally to `widget:RecvLuaMsg(data, player_id)`.
+/// `player_id` is the sender's player number (server-resolved).
+struct LuaUIMsgRelay FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef LuaUIMsgRelayT NativeTableType;
+  typedef LuaUIMsgRelayBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_DATA = 4,
+    VT_PLAYER_ID = 6
+  };
+  const ::flatbuffers::Vector<uint8_t> *data() const {
+    return GetPointer<const ::flatbuffers::Vector<uint8_t> *>(VT_DATA);
+  }
+  int32_t player_id() const {
+    return GetField<int32_t>(VT_PLAYER_ID, 0);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_DATA) &&
+           verifier.VerifyVector(data()) &&
+           VerifyField<int32_t>(verifier, VT_PLAYER_ID, 4) &&
+           verifier.EndTable();
+  }
+  LuaUIMsgRelayT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(LuaUIMsgRelayT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<LuaUIMsgRelay> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const LuaUIMsgRelayT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct LuaUIMsgRelayBuilder {
+  typedef LuaUIMsgRelay Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_data(::flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> data) {
+    fbb_.AddOffset(LuaUIMsgRelay::VT_DATA, data);
+  }
+  void add_player_id(int32_t player_id) {
+    fbb_.AddElement<int32_t>(LuaUIMsgRelay::VT_PLAYER_ID, player_id, 0);
+  }
+  explicit LuaUIMsgRelayBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<LuaUIMsgRelay> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<LuaUIMsgRelay>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<LuaUIMsgRelay> CreateLuaUIMsgRelay(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> data = 0,
+    int32_t player_id = 0) {
+  LuaUIMsgRelayBuilder builder_(_fbb);
+  builder_.add_player_id(player_id);
+  builder_.add_data(data);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<LuaUIMsgRelay> CreateLuaUIMsgRelayDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const std::vector<uint8_t> *data = nullptr,
+    int32_t player_id = 0) {
+  auto data__ = data ? _fbb.CreateVector<uint8_t>(*data) : 0;
+  return SpringWeb::CreateLuaUIMsgRelay(
+      _fbb,
+      data__,
+      player_id);
+}
+
+::flatbuffers::Offset<LuaUIMsgRelay> CreateLuaUIMsgRelay(::flatbuffers::FlatBufferBuilder &_fbb, const LuaUIMsgRelayT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
 struct ServerMessageT : public ::flatbuffers::NativeTable {
   typedef ServerMessage TableType;
   SpringWeb::ServerPayloadUnion payload{};
@@ -14251,6 +14470,9 @@ struct ServerMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   }
   const SpringWeb::PlayerTeamEventBatch *payload_as_PlayerTeamEventBatch() const {
     return payload_type() == SpringWeb::ServerPayload_PlayerTeamEventBatch ? static_cast<const SpringWeb::PlayerTeamEventBatch *>(payload()) : nullptr;
+  }
+  const SpringWeb::LuaUIMsgRelay *payload_as_LuaUIMsgRelay() const {
+    return payload_type() == SpringWeb::ServerPayload_LuaUIMsgRelay ? static_cast<const SpringWeb::LuaUIMsgRelay *>(payload()) : nullptr;
   }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -14414,6 +14636,10 @@ template<> inline const SpringWeb::TeamStartInfo *ServerMessage::payload_as<Spri
 
 template<> inline const SpringWeb::PlayerTeamEventBatch *ServerMessage::payload_as<SpringWeb::PlayerTeamEventBatch>() const {
   return payload_as_PlayerTeamEventBatch();
+}
+
+template<> inline const SpringWeb::LuaUIMsgRelay *ServerMessage::payload_as<SpringWeb::LuaUIMsgRelay>() const {
+  return payload_as_LuaUIMsgRelay();
 }
 
 struct ServerMessageBuilder {
@@ -15044,6 +15270,35 @@ inline ::flatbuffers::Offset<LuaRulesMsg> CreateLuaRulesMsg(::flatbuffers::FlatB
   return SpringWeb::CreateLuaRulesMsg(
       _fbb,
       _data);
+}
+
+inline LuaUIMsgT *LuaUIMsg::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<LuaUIMsgT>(new LuaUIMsgT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void LuaUIMsg::UnPackTo(LuaUIMsgT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = data(); if (_e) { _o->data.resize(_e->size()); std::copy(_e->begin(), _e->end(), _o->data.begin()); } }
+  { auto _e = mode(); _o->mode = _e; }
+}
+
+inline ::flatbuffers::Offset<LuaUIMsg> LuaUIMsg::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const LuaUIMsgT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateLuaUIMsg(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<LuaUIMsg> CreateLuaUIMsg(::flatbuffers::FlatBufferBuilder &_fbb, const LuaUIMsgT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const LuaUIMsgT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _data = _o->data.size() ? _fbb.CreateVector(_o->data) : 0;
+  auto _mode = _o->mode;
+  return SpringWeb::CreateLuaUIMsg(
+      _fbb,
+      _data,
+      _mode);
 }
 
 inline AckT *Ack::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
@@ -18844,6 +19099,35 @@ inline ::flatbuffers::Offset<SendToUnsyncedEvent> CreateSendToUnsyncedEvent(::fl
       _args);
 }
 
+inline LuaUIMsgRelayT *LuaUIMsgRelay::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<LuaUIMsgRelayT>(new LuaUIMsgRelayT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void LuaUIMsgRelay::UnPackTo(LuaUIMsgRelayT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = data(); if (_e) { _o->data.resize(_e->size()); std::copy(_e->begin(), _e->end(), _o->data.begin()); } }
+  { auto _e = player_id(); _o->player_id = _e; }
+}
+
+inline ::flatbuffers::Offset<LuaUIMsgRelay> LuaUIMsgRelay::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const LuaUIMsgRelayT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateLuaUIMsgRelay(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<LuaUIMsgRelay> CreateLuaUIMsgRelay(::flatbuffers::FlatBufferBuilder &_fbb, const LuaUIMsgRelayT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const LuaUIMsgRelayT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _data = _o->data.size() ? _fbb.CreateVector(_o->data) : 0;
+  auto _player_id = _o->player_id;
+  return SpringWeb::CreateLuaUIMsgRelay(
+      _fbb,
+      _data,
+      _player_id);
+}
+
 inline ServerMessageT *ServerMessage::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
   auto _o = std::unique_ptr<ServerMessageT>(new ServerMessageT());
   UnPackTo(_o.get(), _resolver);
@@ -19018,6 +19302,10 @@ inline bool VerifyClientPayload(::flatbuffers::Verifier &verifier, const void *o
       auto ptr = reinterpret_cast<const SpringWeb::StandingOrderRemove *>(obj);
       return verifier.VerifyTable(ptr);
     }
+    case ClientPayload_LuaUIMsg: {
+      auto ptr = reinterpret_cast<const SpringWeb::LuaUIMsg *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
     default: return true;
   }
 }
@@ -19177,6 +19465,10 @@ inline void *ClientPayloadUnion::UnPack(const void *obj, ClientPayload type, con
       auto ptr = reinterpret_cast<const SpringWeb::StandingOrderRemove *>(obj);
       return ptr->UnPack(resolver);
     }
+    case ClientPayload_LuaUIMsg: {
+      auto ptr = reinterpret_cast<const SpringWeb::LuaUIMsg *>(obj);
+      return ptr->UnPack(resolver);
+    }
     default: return nullptr;
   }
 }
@@ -19324,6 +19616,10 @@ inline ::flatbuffers::Offset<void> ClientPayloadUnion::Pack(::flatbuffers::FlatB
       auto ptr = reinterpret_cast<const SpringWeb::StandingOrderRemoveT *>(value);
       return CreateStandingOrderRemove(_fbb, ptr, _rehasher).Union();
     }
+    case ClientPayload_LuaUIMsg: {
+      auto ptr = reinterpret_cast<const SpringWeb::LuaUIMsgT *>(value);
+      return CreateLuaUIMsg(_fbb, ptr, _rehasher).Union();
+    }
     default: return 0;
   }
 }
@@ -19468,6 +19764,10 @@ inline ClientPayloadUnion::ClientPayloadUnion(const ClientPayloadUnion &u) : typ
     }
     case ClientPayload_StandingOrderRemove: {
       value = new SpringWeb::StandingOrderRemoveT(*reinterpret_cast<SpringWeb::StandingOrderRemoveT *>(u.value));
+      break;
+    }
+    case ClientPayload_LuaUIMsg: {
+      value = new SpringWeb::LuaUIMsgT(*reinterpret_cast<SpringWeb::LuaUIMsgT *>(u.value));
       break;
     }
     default:
@@ -19652,6 +19952,11 @@ inline void ClientPayloadUnion::Reset() {
       delete ptr;
       break;
     }
+    case ClientPayload_LuaUIMsg: {
+      auto ptr = reinterpret_cast<SpringWeb::LuaUIMsgT *>(value);
+      delete ptr;
+      break;
+    }
     default: break;
   }
   value = nullptr;
@@ -19813,6 +20118,10 @@ inline bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *o
     }
     case ServerPayload_PlayerTeamEventBatch: {
       auto ptr = reinterpret_cast<const SpringWeb::PlayerTeamEventBatch *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case ServerPayload_LuaUIMsgRelay: {
+      auto ptr = reinterpret_cast<const SpringWeb::LuaUIMsgRelay *>(obj);
       return verifier.VerifyTable(ptr);
     }
     default: return true;
@@ -19986,6 +20295,10 @@ inline void *ServerPayloadUnion::UnPack(const void *obj, ServerPayload type, con
       auto ptr = reinterpret_cast<const SpringWeb::PlayerTeamEventBatch *>(obj);
       return ptr->UnPack(resolver);
     }
+    case ServerPayload_LuaUIMsgRelay: {
+      auto ptr = reinterpret_cast<const SpringWeb::LuaUIMsgRelay *>(obj);
+      return ptr->UnPack(resolver);
+    }
     default: return nullptr;
   }
 }
@@ -20145,6 +20458,10 @@ inline ::flatbuffers::Offset<void> ServerPayloadUnion::Pack(::flatbuffers::FlatB
       auto ptr = reinterpret_cast<const SpringWeb::PlayerTeamEventBatchT *>(value);
       return CreatePlayerTeamEventBatch(_fbb, ptr, _rehasher).Union();
     }
+    case ServerPayload_LuaUIMsgRelay: {
+      auto ptr = reinterpret_cast<const SpringWeb::LuaUIMsgRelayT *>(value);
+      return CreateLuaUIMsgRelay(_fbb, ptr, _rehasher).Union();
+    }
     default: return 0;
   }
 }
@@ -20301,6 +20618,10 @@ inline ServerPayloadUnion::ServerPayloadUnion(const ServerPayloadUnion &u) : typ
     }
     case ServerPayload_PlayerTeamEventBatch: {
       value = new SpringWeb::PlayerTeamEventBatchT(*reinterpret_cast<SpringWeb::PlayerTeamEventBatchT *>(u.value));
+      break;
+    }
+    case ServerPayload_LuaUIMsgRelay: {
+      value = new SpringWeb::LuaUIMsgRelayT(*reinterpret_cast<SpringWeb::LuaUIMsgRelayT *>(u.value));
       break;
     }
     default:
@@ -20497,6 +20818,11 @@ inline void ServerPayloadUnion::Reset() {
     }
     case ServerPayload_PlayerTeamEventBatch: {
       auto ptr = reinterpret_cast<SpringWeb::PlayerTeamEventBatchT *>(value);
+      delete ptr;
+      break;
+    }
+    case ServerPayload_LuaUIMsgRelay: {
+      auto ptr = reinterpret_cast<SpringWeb::LuaUIMsgRelayT *>(value);
       delete ptr;
       break;
     }

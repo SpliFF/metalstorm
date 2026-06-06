@@ -1152,6 +1152,13 @@ async function init(
         sendLuaRulesMsg: (data) => {
             postToMain({ type: 'sendLuaRulesMsg', data });
         },
+        // SendLuaUIMsg goes straight out on the worker's live game socket
+        // (gpConnection), like sendViewportUpdate — the server relays it back
+        // (filtered by mode) to every eligible client incl. this one, where
+        // onLuaUIMsg dispatches widget:RecvLuaMsg.
+        sendLuaUIMsg: (data, mode) => {
+            gpConnection?.sendLuaUIMsg(data, mode);
+        },
         setSelection: (unitIds) => {
             postToMain({ type: 'setSelection', unitIds });
         },
@@ -4596,6 +4603,36 @@ function dispatchTeamDied(teamId: number): void {
     `, 'dispatchTeamDied');
 }
 
+/** Build a binary-safe Lua string literal (incl. surrounding quotes) from
+ *  raw bytes. Printable ASCII passes through; `"`, `\` and every other byte
+ *  become `\ddd` decimal escapes — bulletproof for embedded NULs / high bytes
+ *  (ZK widgets occasionally pack binary fields into a LuaUI message). */
+function luaBytesLiteral(bytes: Uint8Array): string {
+    let out = '"';
+    for (let i = 0; i < bytes.length; i++) {
+        const b = bytes[i];
+        if (b >= 32 && b <= 126 && b !== 34 /* " */ && b !== 92 /* \ */) {
+            out += String.fromCharCode(b);
+        } else {
+            out += '\\' + b;
+        }
+    }
+    return out + '"';
+}
+
+/** widgetHandler:RecvLuaMsg(msg, playerID) — a relayed Spring.SendLuaUIMsg
+ *  from another (or this) player. Faithful to Recoil's LUA_HANDLE_ORDER_UI
+ *  dispatch: LuaUI messages go to widgets only (the LuaRules `$RecvLuaMsg`
+ *  path handles gadget halves separately). */
+function dispatchRecvLuaUIMsg(data: Uint8Array, playerId: number): void {
+    if (!runtime) return;
+    runtime.doString(`
+        if widgetHandler and widgetHandler.RecvLuaMsg then
+            pcall(widgetHandler.RecvLuaMsg, widgetHandler, ${luaBytesLiteral(data)}, ${playerId | 0})
+        end
+    `, 'dispatchRecvLuaUIMsg');
+}
+
 /** widgetHandler:UnitDestroyed(unitID, unitDefID, unitTeam) — fires on
  *  the EntityDestroy event. */
 function dispatchUnitDestroyed(unitId: number, defId: number, team: number): void {
@@ -5794,6 +5831,11 @@ function gpConnect(msg: GpInitToWorker): void {
                 }
             }
         },
+        // PLAN-bar.md §6: relayed Spring.SendLuaUIMsg (LuaUIMsgRelay). The
+        // server already applied the audience filter, so dispatch
+        // unconditionally to widget:RecvLuaMsg(msg, playerID). 107 BAR + 52 ZK
+        // widgets register RecvLuaMsg.
+        onLuaUIMsg: (data, playerId) => dispatchRecvLuaUIMsg(data, playerId),
         // GW4-c3: live terrain deformation (envelope 0x09) → DeformableTerrain.
         onHeightmapPatch: (patch) => gpDeformTerrain?.applyPatch(patch),
         // GW4-c3: per-allyteam LOS bitmap (envelope 0x07) → fog-of-war overlay.

@@ -360,6 +360,23 @@ inline std::vector<uint8_t> BuildSendToUnsyncedEvent(
                               evOff.Union());
 }
 
+/// Build a LuaUIMsgRelay (relayed `Spring.SendLuaUIMsg` → receiver's
+/// `widget:RecvLuaMsg(data, playerID)`). The audience filter has already
+/// been applied by the caller; this only frames the payload + sender id.
+inline std::vector<uint8_t> BuildLuaUIMsgRelay(
+    const std::string& data, int32_t playerId)
+{
+    flatbuffers::FlatBufferBuilder fbb(64 + data.size());
+    auto dataVec = fbb.CreateVector(
+        reinterpret_cast<const uint8_t*>(data.data()), data.size());
+    SpringWeb::LuaUIMsgRelayBuilder rb(fbb);
+    rb.add_data(dataVec);
+    rb.add_player_id(playerId);
+    auto off = rb.Finish();
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_LuaUIMsgRelay,
+                              off.Union());
+}
+
 /// Build a PlayerLeft message (broadcast to remaining clients on disconnect).
 inline std::vector<uint8_t> BuildPlayerLeft(
     uint32_t playerId, const std::string& username, int8_t team, uint8_t reason)
