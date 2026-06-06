@@ -912,6 +912,28 @@ function rulesParamsToTable(params: Map<string, RulesParamValue> | undefined): R
     return out;
 }
 
+/**
+ * Faithful port of Recoil's `Spring.DiffTimers` (LuaUnsyncedRead::DiffTimers).
+ *
+ * Recoil's timers are opaque light-userdata wrapping an integer time-point in
+ * either milliseconds (`GetTimer`) or microseconds (`GetTimerMicros`). We can't
+ * push light userdata through Fengari cheaply, so the timer *handle* is a plain
+ * number carrying the same raw count — `GetTimer()` → ms, `GetTimerMicros()` →
+ * µs. This helper reproduces the engine's unit conversion exactly:
+ *   - `fromMicroSecs` selects how the raw `t1 - t2` delta is interpreted.
+ *   - `returnMs` selects the result unit (milliseconds vs seconds).
+ * Default (both false) returns the elapsed time in **seconds**, matching Recoil.
+ */
+export function diffTimers(t1: number, t2: number, returnMs: boolean, fromMicroSecs: boolean): number {
+    const raw = t1 - t2; // most-recent minus start
+    if (fromMicroSecs) {
+        // delta is in microseconds
+        return returnMs ? raw / 1e3 : raw / 1e6;
+    }
+    // delta is in milliseconds
+    return returnMs ? raw : raw / 1e3;
+}
+
 /** Create a default LiveState with zeroed values. */
 export function createDefaultLiveState(): LiveState {
     return {
@@ -2087,8 +2109,15 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         ValidFeatureID: (id: LuaValue) => ls.features.has(Number(id)),
 
         // --- Misc ---
-        GetTimer: () => performance.now() / 1000,
-        DiffTimers: (t1: LuaValue, t2: LuaValue) => Number(t1 ?? 0) - Number(t2 ?? 0),
+        // Recoil timer handles: a raw integer time-point since page epoch.
+        // GetTimer → milliseconds, GetTimerMicros → microseconds (faithful to
+        // PushTimer in LuaUnsyncedRead.cpp). performance.now() is already ms
+        // with sub-ms resolution, so *1000 yields the micros count.
+        GetTimer: () => performance.now(),
+        GetTimerMicros: () => performance.now() * 1000,
+        // DiffTimers(endTimer, startTimer, returnMs?, fromMicroSecs?)
+        DiffTimers: (t1: LuaValue, t2: LuaValue, returnMs?: LuaValue, fromMicroSecs?: LuaValue) =>
+            diffTimers(Number(t1 ?? 0), Number(t2 ?? 0), !!returnMs, !!fromMicroSecs),
         GetDrawFrame: () => ls.gameFrame,
         GetFPS: () => 60,
         WorldToScreenCoords: (_x: LuaValue, _y: LuaValue, _z: LuaValue) => {

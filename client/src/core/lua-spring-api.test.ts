@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
     buildSpringGlobals,
     createDefaultLiveState,
+    diffTimers,
     type SpringAPIContext,
     type LiveState,
     type UnitEntry,
@@ -207,6 +208,40 @@ describe('BAR read shims', () => {
             const ls = createDefaultLiveState();
             const api = springApi(makeCtx(), ls);
             expect(call(api.GetAllyTeamStartBox, 0)).toBeNull();
+        });
+    });
+
+    // Faithful to Recoil LuaUnsyncedRead::DiffTimers — verifies the unit
+    // conversion matrix for both the millisecond (GetTimer) and microsecond
+    // (GetTimerMicros) timer handles BAR's profilers pass.
+    describe('DiffTimers', () => {
+        it('default: millisecond delta returned as seconds', () => {
+            // 1500 ms elapsed → 1.5 s
+            expect(diffTimers(2500, 1000, false, false)).toBeCloseTo(1.5, 9);
+        });
+        it('returnMs: millisecond delta returned as milliseconds', () => {
+            expect(diffTimers(2500, 1000, true, false)).toBeCloseTo(1500, 9);
+        });
+        it('fromMicroSecs: microsecond delta returned as seconds', () => {
+            // 1.5e6 µs elapsed → 1.5 s
+            expect(diffTimers(2_500_000, 1_000_000, false, true)).toBeCloseTo(1.5, 9);
+        });
+        it('fromMicroSecs + returnMs: microsecond delta returned as milliseconds', () => {
+            expect(diffTimers(2_500_000, 1_000_000, true, true)).toBeCloseTo(1500, 9);
+        });
+        it('GetTimerMicros handle is 1000x the GetTimer handle', () => {
+            const api = springApi(makeCtx(), createDefaultLiveState());
+            const ms = Number(call(api.GetTimer));
+            const us = Number(call(api.GetTimerMicros));
+            // same clock source; micros is ms*1000 (allow for the tiny gap
+            // between the two performance.now() reads)
+            expect(us).toBeGreaterThanOrEqual(ms * 1000 - 1);
+        });
+        it('Spring.DiffTimers honours the BAR profiler call shape', () => {
+            const api = springApi(makeCtx(), createDefaultLiveState());
+            // spDiffTimers(spGetTimer(), startTimer, nil, highres) with micros
+            const dt = call(api.DiffTimers, 5_000_000, 4_000_000, null, true);
+            expect(Number(dt)).toBeCloseTo(1.0, 9);
         });
     });
 });
