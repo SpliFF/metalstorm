@@ -390,6 +390,28 @@ export class LuaGLBridge {
                     'no-op (point sizing needs gl_PointSize in a shader).');
             }
         };
+        // WebGL2-unsupported fixed-function state. These all existed in
+        // Recoil's GL2/3 path but have no core WebGL2 equivalent, so they are
+        // documented no-op standins (vs. silently vanishing into the worker's
+        // gl-fallback metatable). The visible cost is small: stippled lines
+        // render solid, user clip planes don't cull, depth isn't clamped.
+        // gl.LineStipple(factor, pattern) | (false) | ("") — 12× in BAR.
+        // Faithful emulation would need a screen-space-distance fragment
+        // discard in the immediate-mode line shader (revisit if dashed
+        // overlays read wrong).
+        gl['LineStipple'] = (..._args: LuaValue[]) =>
+            this.warnStandin('LineStipple',
+                'no WebGL2 line stipple; lines draw solid (shader emulation TODO).');
+        // gl.ClipDistance(index, enable) — WebGL2 has no gl_ClipDistance.
+        gl['ClipDistance'] = (..._args: LuaValue[]) =>
+            this.warnStandin('ClipDistance', 'no WebGL2 clip distances; no-op.');
+        // gl.DepthClamp(enable) — no GL_DEPTH_CLAMP in WebGL2.
+        gl['DepthClamp'] = (_enable: LuaValue) =>
+            this.warnStandin('DepthClamp', 'no WebGL2 GL_DEPTH_CLAMP; no-op.');
+        // gl.ClipPlane(id, ...) — legacy fixed-function user clip planes,
+        // removed in GL3+/WebGL2.
+        gl['ClipPlane'] = (..._args: LuaValue[]) =>
+            this.warnStandin('ClipPlane', 'no WebGL2 fixed-function clip planes; no-op.');
         gl['PushAttrib'] = (_bits: LuaValue) => { /* state snapshotted by host */ };
         gl['PopAttrib'] = () => { /* state restored by host */ };
         gl['Clear'] = (...args: LuaValue[]) => this.clear(args);
@@ -1104,7 +1126,20 @@ export class LuaGLBridge {
     }
 
     private warnedPointSize = false;
+    /** One-time latch for WebGL2-unsupported fixed-function gl.* standins. */
+    private warnedUnsupportedGl = new Set<string>();
     private defaultFont: Record<string, LuaValue> | null = null;
+
+    /** Emit a one-time FIDELITY-STANDIN warning for a gl.* function that has
+     *  no WebGL2 equivalent and is implemented as a no-op. Keeps the worker's
+     *  silent gl-fallback metatable from hiding the gap (no-silent-GL-failures
+     *  principle): the function is *present* (so it doesn't fall through) but
+     *  loudly announces the substitution exactly once. */
+    private warnStandin(name: string, why: string): void {
+        if (this.warnedUnsupportedGl.has(name)) return;
+        this.warnedUnsupportedGl.add(name);
+        console.warn(`[gl.${name}] FIDELITY-STANDIN: ${why}`);
+    }
 
     /** Lazily build + cache the engine default font (FreeSansBold) used by
      *  the freestanding gl.Text / gl.GetTextWidth. Glyphs rasterise into one
