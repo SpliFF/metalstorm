@@ -14,6 +14,8 @@
 import {
     Scene,
     Mesh,
+    SubMesh,
+    MultiMaterial,
     VertexData,
     StandardMaterial,
     Texture,
@@ -350,56 +352,113 @@ async function fetchTileData(mapBaseUrl: string): Promise<{
 }
 
 /**
- * Atlas texture covering the whole map, built from DXT1 tiles.
+ * Atlas texture covering a tile sub-rectangle of the map, built from DXT1
+ * tiles. For maps that fit within MAX_TEXTURE_SIZE this is the whole map
+ * (one page); larger maps are split into a grid of pages (see
+ * `buildMapAtlasPages`) so no single texture exceeds the WebGL2 cap.
  */
 export interface MapAtlasTexture {
     webglTex: WebGLTexture;
     width: number;
     height: number;
+    /** Tile-space origin of this page within the full map. */
+    tileX0: number;
+    tileZ0: number;
+    /** Tile-space extent of this page. */
+    tileCountX: number;
+    tileCountZ: number;
+}
+
+/** A paged DXT1 atlas: a `pagesX × pagesZ` grid of `MapAtlasTexture` pages. */
+interface MapAtlasPages {
+    pages: MapAtlasTexture[];
+    pagesX: number;
+    pagesZ: number;
+    pageTilesX: number;
+    pageTilesZ: number;
+}
+
+/** Tile-space rectangle of one atlas page within the full map. */
+export interface AtlasPageRect {
+    tileX0: number;
+    tileZ0: number;
+    tileCountX: number;
+    tileCountZ: number;
+}
+
+/** The page grid + per-page tile rectangles for a map of `tilesX × tilesZ`. */
+export interface AtlasPagePlan {
+    pagesX: number;
+    pagesZ: number;
+    pageTilesX: number;
+    pageTilesZ: number;
+    rects: AtlasPageRect[];
 }
 
 /**
- * Build a single DXT1 atlas texture covering the whole map.
+ * Plan the smallest `pagesX × pagesZ` grid of atlas pages whose pages each fit
+ * within `maxTex` pixels. Pure (no GL) so the split + UV math is unit-tested.
  *
- * Each Spring tile is 32×32 px. The map has tilesX × tilesZ tiles.
- * Atlas dimensions = tilesX * 32 by tilesZ * 32 pixels.
- * Spring maps are typically 896×896 squares → 224×224 tiles → 7168×7168 px.
- * Max WebGL2 texture size is normally 16384, so this fits.
+ * The common case (`tilesX*32 ≤ maxTex`) returns a single full-map page.
  */
-export async function buildMapAtlasTexture(
-    gl: WebGL2RenderingContext,
-    mapBaseUrl: string,
-    dims: MapDimensions,
-): Promise<MapAtlasTexture | null> {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const ext = gl.getExtension('WEBGL_compressed_texture_s3tc') as any;
-    if (!ext) { console.warn('[terrain] S3TC not supported'); return null; }
+export function planAtlasPages(
+    tilesX: number, tilesZ: number, maxTex: number,
+): AtlasPagePlan {
+    const maxPageTiles = Math.max(1, Math.floor(maxTex / TILE_PIXELS));
+    const pagesX = Math.max(1, Math.ceil(tilesX / maxPageTiles));
+    const pagesZ = Math.max(1, Math.ceil(tilesZ / maxPageTiles));
+    // Balance the split evenly across pages (avoid one full + one sliver).
+    const pageTilesX = Math.ceil(tilesX / pagesX);
+    const pageTilesZ = Math.ceil(tilesZ / pagesZ);
 
-    const { tileIndex, tilesData } = await fetchTileData(mapBaseUrl);
-
-    const atlasW = dims.tilesX * TILE_PIXELS;
-    const atlasH = dims.tilesZ * TILE_PIXELS;
-    const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
-    if (atlasW > maxTex || atlasH > maxTex) {
-        console.warn(`[terrain] atlas ${atlasW}x${atlasH} exceeds MAX_TEXTURE_SIZE ${maxTex}`);
-        return null;
+    const rects: AtlasPageRect[] = [];
+    for (let pz = 0; pz < pagesZ; pz++) {
+        for (let px = 0; px < pagesX; px++) {
+            const tileX0 = px * pageTilesX;
+            const tileZ0 = pz * pageTilesZ;
+            rects.push({
+                tileX0, tileZ0,
+                tileCountX: Math.min(pageTilesX, tilesX - tileX0),
+                tileCountZ: Math.min(pageTilesZ, tilesZ - tileZ0),
+            });
+        }
     }
-    console.log(`[terrain] building atlas: ${atlasW}x${atlasH} (${dims.tilesX}x${dims.tilesZ} tiles)`);
+    return { pagesX, pagesZ, pageTilesX, pageTilesZ, rects };
+}
+
+/**
+ * Build one DXT1 atlas page covering tiles
+ * `[tileX0, tileX0+tileCountX) × [tileZ0, tileZ0+tileCountZ)`.
+ *
+ * Each Spring tile is 32×32 px, so the page is `tileCountX*32 × tileCountZ*32`.
+ */
+function buildAtlasPage(
+    gl: WebGL2RenderingContext,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ext: any,
+    dims: MapDimensions,
+    tileIndex: Int32Array,
+    tilesData: Uint8Array,
+    tileX0: number, tileZ0: number,
+    tileCountX: number, tileCountZ: number,
+): MapAtlasTexture {
+    const pageW = tileCountX * TILE_PIXELS;
+    const pageH = tileCountZ * TILE_PIXELS;
 
     const atlasTex = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_2D, atlasTex);
 
-    // Allocate the full DXT1 texture with zeroed blocks, then fill in tiles.
-    const atlasDxt1Size = (atlasW / 4) * (atlasH / 4) * DXT1_BLOCK_BYTES;
-    const blank = new Uint8Array(atlasDxt1Size);
+    // Allocate the full DXT1 page with zeroed blocks, then fill in tiles.
+    const pageDxt1Size = (pageW / 4) * (pageH / 4) * DXT1_BLOCK_BYTES;
+    const blank = new Uint8Array(pageDxt1Size);
     gl.compressedTexImage2D(
         gl.TEXTURE_2D, 0, ext.COMPRESSED_RGB_S3TC_DXT1_EXT,
-        atlasW, atlasH, 0, blank);
+        pageW, pageH, 0, blank);
 
     let placed = 0, skipped = 0;
-    for (let tz = 0; tz < dims.tilesZ; tz++) {
-        for (let tx = 0; tx < dims.tilesX; tx++) {
-            const tileIdx = tileIndex[tz * dims.tilesX + tx];
+    for (let tz = 0; tz < tileCountZ; tz++) {
+        for (let tx = 0; tx < tileCountX; tx++) {
+            const tileIdx = tileIndex[(tileZ0 + tz) * dims.tilesX + (tileX0 + tx)];
             if (tileIdx < 0) { skipped++; continue; }
 
             const tileOffset = tileIdx * TILE_DXT1_SIZE;
@@ -422,16 +481,62 @@ export async function buildMapAtlasTexture(
 
     const glErr = gl.getError();
     if (glErr !== gl.NO_ERROR) {
-        console.warn(`[terrain] gl error after atlas upload: 0x${glErr.toString(16)}`);
+        console.warn(`[terrain] gl error after page upload: 0x${glErr.toString(16)}`);
     }
     gl.bindTexture(gl.TEXTURE_2D, null);
 
-    console.log(`[terrain] atlas built: ${placed} tiles placed, ${skipped} skipped`);
-    return { webglTex: atlasTex, width: atlasW, height: atlasH };
+    console.log(`[terrain] page @(${tileX0},${tileZ0}) ${pageW}x${pageH}: ` +
+        `${placed} tiles placed, ${skipped} skipped`);
+    return { webglTex: atlasTex, width: pageW, height: pageH, tileX0, tileZ0, tileCountX, tileCountZ };
 }
 
 /**
- * Composite DXT1 tiles into a full-map atlas texture and apply to terrain.
+ * Build the DXT1 atlas as a grid of pages, each ≤ MAX_TEXTURE_SIZE.
+ *
+ * Spring maps are typically 896×896 squares → 224×224 tiles → 7168×7168 px,
+ * one page well under the 16384 cap. Larger maps (e.g. a 544×544-tile map →
+ * 17408 px) exceed the WebGL2 `MAX_TEXTURE_SIZE`, so they are split into the
+ * smallest `pagesX × pagesZ` grid whose pages each fit. The terrain mesh is
+ * then drawn as a MultiMaterial, one sub-material per page (see
+ * `applyPagedTextures`).
+ */
+async function buildMapAtlasPages(
+    gl: WebGL2RenderingContext,
+    mapBaseUrl: string,
+    dims: MapDimensions,
+): Promise<MapAtlasPages | null> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ext = gl.getExtension('WEBGL_compressed_texture_s3tc') as any;
+    if (!ext) { console.warn('[terrain] S3TC not supported'); return null; }
+
+    const { tileIndex, tilesData } = await fetchTileData(mapBaseUrl);
+
+    const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
+    const plan = planAtlasPages(dims.tilesX, dims.tilesZ, maxTex);
+
+    if (plan.pagesX > 1 || plan.pagesZ > 1) {
+        console.log(`[terrain] map ${dims.tilesX * TILE_PIXELS}x${dims.tilesZ * TILE_PIXELS} ` +
+            `exceeds MAX_TEXTURE_SIZE ${maxTex}; paging into ${plan.pagesX}x${plan.pagesZ} ` +
+            `(${plan.pageTilesX * TILE_PIXELS}px tiles/page)`);
+    } else {
+        console.log(`[terrain] building atlas: ${dims.tilesX * TILE_PIXELS}x` +
+            `${dims.tilesZ * TILE_PIXELS} (${dims.tilesX}x${dims.tilesZ} tiles)`);
+    }
+
+    const pages: MapAtlasTexture[] = plan.rects.map((r) => buildAtlasPage(
+        gl, ext, dims, tileIndex, tilesData,
+        r.tileX0, r.tileZ0, r.tileCountX, r.tileCountZ));
+
+    return {
+        pages,
+        pagesX: plan.pagesX, pagesZ: plan.pagesZ,
+        pageTilesX: plan.pageTilesX, pageTilesZ: plan.pageTilesZ,
+    };
+}
+
+/**
+ * Composite DXT1 tiles into per-page atlas textures and apply to terrain.
+ * One page for the common case; a MultiMaterial grid for over-cap maps.
  */
 export async function loadTerrainTextures(
     scene: Scene,
@@ -443,10 +548,15 @@ export async function loadTerrainTextures(
     const gl = (scene.getEngine() as any)._gl as WebGL2RenderingContext;
     if (!gl) { console.warn('[terrain] no WebGL context'); return; }
 
-    const atlas = await buildMapAtlasTexture(gl, mapBaseUrl, dims);
+    const atlas = await buildMapAtlasPages(gl, mapBaseUrl, dims);
     if (!atlas) return;
 
-    applyWebGLTexture(scene, terrainMesh, atlas.webglTex, atlas.width, atlas.height);
+    if (atlas.pages.length === 1) {
+        const p = atlas.pages[0];
+        applyWebGLTexture(scene, terrainMesh, p.webglTex, p.width, p.height);
+    } else {
+        applyPagedTextures(scene, terrainMesh, atlas, dims);
+    }
 }
 
 /**
@@ -483,23 +593,127 @@ export function applyWebGLTexture(
     // main.ts; this textured material is built later (once the map atlas
     // finishes loading) and swapped in here. Without re-attaching, the
     // textured terrain samples no overlay and scars/tracks never render.
-    const prev = mesh.material;
-    const prevPlugin = prev && prev.pluginManager
-        ? (prev.pluginManager as unknown as { _plugins?: unknown[] })._plugins
+    const prevPlugin = findDecalOverlayPlugin(mesh.material);
+    mesh.material = mat;
+    reattachDecalOverlay(mat, prevPlugin);
+}
+
+/** Locate the DecalOverlayPlugin attached to a material, if any. */
+function findDecalOverlayPlugin(
+    mat: Mesh['material'],
+): DecalOverlayPlugin | undefined {
+    return mat && mat.pluginManager
+        ? (mat.pluginManager as unknown as { _plugins?: unknown[] })._plugins
             ?.find((p): p is DecalOverlayPlugin => p instanceof DecalOverlayPlugin)
         : undefined;
-    mesh.material = mat;
+}
+
+/** Re-attach the ground-decal overlay (preserving live-tuned strengths). */
+function reattachDecalOverlay(
+    mat: StandardMaterial, prevPlugin: DecalOverlayPlugin | undefined,
+): void {
     if (prevPlugin && prevPlugin.coarseTexture && prevPlugin.fineTexture && prevPlugin.fineState) {
         const next = attachDecalOverlay(
             mat, prevPlugin.coarseTexture, prevPlugin.fineTexture, prevPlugin.fineState,
             prevPlugin.coarseTexel, prevPlugin.fineTexel,
             prevPlugin.worldW, prevPlugin.worldH);
-        // Preserve any live-tuned strengths from the previous plugin.
         next.normalScale = prevPlugin.normalScale;
         next.darken = prevPlugin.darken;
         next.detailScale = prevPlugin.detailScale;
         next.rubbleScale = prevPlugin.rubbleScale;
     }
+}
+
+/**
+ * Apply a paged DXT1 atlas (over-cap maps) as a MultiMaterial on a single
+ * terrain mesh. The mesh keeps its global 0..1 UVs; each page sub-material
+ * remaps that range onto its texture via Texture `uScale/uOffset` and the
+ * mesh triangles are regrouped into one SubMesh per page.
+ *
+ * Keeping a single mesh + StandardMaterial-per-page means lighting, CSM
+ * shadows, the decal overlay, picking and DeformableTerrain all keep working
+ * unchanged — only the draw is split by texture page.
+ */
+function applyPagedTextures(
+    scene: Scene, mesh: Mesh, atlas: MapAtlasPages, dims: MapDimensions,
+): void {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const engine = scene.getEngine() as any;
+
+    if (mesh.isVerticesDataPresent(VertexBuffer.ColorKind)) {
+        mesh.removeVerticesData(VertexBuffer.ColorKind);
+    }
+    mesh.hasVertexAlpha = false;
+
+    const prevPlugin = findDecalOverlayPlugin(mesh.material);
+
+    // Regroup triangles by which page their UV centroid falls in, so each
+    // page becomes a contiguous SubMesh index range.
+    const uvs = mesh.getVerticesData(VertexBuffer.UVKind)!;
+    const numVerts = uvs.length / 2;
+    const oldIdx = mesh.getIndices()!;
+    const numPages = atlas.pagesX * atlas.pagesZ;
+    const buckets: number[][] = Array.from({ length: numPages }, () => []);
+    const pageOf = (cu: number, cv: number): number => {
+        let px = Math.floor((cu * dims.tilesX) / atlas.pageTilesX);
+        let pz = Math.floor((cv * dims.tilesZ) / atlas.pageTilesZ);
+        px = Math.min(Math.max(px, 0), atlas.pagesX - 1);
+        pz = Math.min(Math.max(pz, 0), atlas.pagesZ - 1);
+        return pz * atlas.pagesX + px;
+    };
+    for (let t = 0; t < oldIdx.length; t += 3) {
+        const a = oldIdx[t], b = oldIdx[t + 1], c = oldIdx[t + 2];
+        const cu = (uvs[a * 2] + uvs[b * 2] + uvs[c * 2]) / 3;
+        const cv = (uvs[a * 2 + 1] + uvs[b * 2 + 1] + uvs[c * 2 + 1]) / 3;
+        buckets[pageOf(cu, cv)].push(a, b, c);
+    }
+
+    const newIdx = new Uint32Array(oldIdx.length);
+    const ranges: { page: number; start: number; count: number }[] = [];
+    let cursor = 0;
+    for (let p = 0; p < numPages; p++) {
+        const b = buckets[p];
+        if (b.length > 0) ranges.push({ page: p, start: cursor, count: b.length });
+        newIdx.set(b, cursor);
+        cursor += b.length;
+    }
+    mesh.setIndices(newIdx, numVerts);
+
+    // One StandardMaterial per page, remapping global UV onto the page.
+    const multi = new MultiMaterial('terrainMulti', scene);
+    for (let p = 0; p < numPages; p++) {
+        const page = atlas.pages[p];
+        const internalTex = engine.wrapWebGLTexture(
+            page.webglTex, false, 2 /* bilinear */, page.width, page.height);
+        const texture = new Texture(null, scene);
+        texture._texture = internalTex;
+        // Global UV u maps to page coord u*uScale + uOffset, landing in [0,1]
+        // across exactly this page's tile span (CLAMP so the boundary row,
+        // drawn by the neighbouring page, samples the edge, not the next page).
+        texture.uScale = dims.tilesX / page.tileCountX;
+        texture.vScale = dims.tilesZ / page.tileCountZ;
+        texture.uOffset = -page.tileX0 / page.tileCountX;
+        texture.vOffset = -page.tileZ0 / page.tileCountZ;
+        texture.wrapU = Texture.CLAMP_ADDRESSMODE;
+        texture.wrapV = Texture.CLAMP_ADDRESSMODE;
+
+        const mat = new StandardMaterial(`terrainTexMat_${p}`, scene);
+        mat.diffuseTexture = texture;
+        mat.diffuseColor = new Color3(1, 1, 1);
+        mat.specularColor = new Color3(0.05, 0.05, 0.05);
+        mat.backFaceCulling = false;
+        reattachDecalOverlay(mat, prevPlugin);
+        multi.subMaterials[p] = mat;
+    }
+    mesh.material = multi;
+
+    // Replace the default full-mesh submesh with one per non-empty page.
+    mesh.subMeshes = [];
+    for (const r of ranges) {
+        new SubMesh(r.page, 0, numVerts, r.start, r.count, mesh);
+    }
+    console.log(`[terrain] applied ${ranges.length} page submesh(es) ` +
+        `(${atlas.pagesX}x${atlas.pagesZ} grid)`);
 }
 
 /**
