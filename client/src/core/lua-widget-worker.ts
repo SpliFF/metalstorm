@@ -63,6 +63,7 @@ import { setParticleBudget } from './ceg-translator.js';
 import { clientSettings } from './client-settings.js';
 import { CONFIG } from '../config.js';
 import { resetNetStats, snapshotNetStats } from './net-inspector.js';
+import { md5Base64 } from './vfs-hash.js';
 import { BuildBeamRenderer } from './build-beam-renderer.js';
 import { CombatFX } from './combat-fx.js';
 import { FxLightPool } from './fx-light-pool.js';
@@ -141,6 +142,8 @@ const vfsSubdirCache = new Map<string, string[]>();
 // so games that keep their sources (e.g. ZK) are left exactly as-is.
 const AUDIO_SOURCE_EXTS = ['.wav', '.ogg', '.mp3', '.flac', '.m4a', '.aac'];
 let warnedAudioDirSwap = false;
+// One-time latch for the unimplemented VFS.CalculateHash SHA512 path.
+let warnedVfsSha = false;
 function presentDirListEntries(dirKey: string, entries: string[]): string[] {
     if (!dirKey.includes('sounds/')) return entries;
     // Stems that already have a real (un-pruned) source file in this dir.
@@ -4214,6 +4217,23 @@ function installVFS(rt: LuaRuntime): void {
         return luaTable(...(vfsSubdirCache.get(d) ?? []));
     });
 
+    // VFS.CalculateHash(input, 0) → base64(MD5). Reaching BAR/ZK consumers
+    // (barwidgets widget-hash table, gui_changelog_info "new since seen?",
+    // ana_report_widgets content id) all use type 0 for *local* dedup. Without
+    // this the call is `nil`, so those widgets die on load with "attempt to
+    // call a nil value". See vfs-hash.ts for the (documented) UTF-8-input
+    // deviation. type 1 (SHA512) has no reaching consumer → loud standin.
+    rt.setGlobal('_vfsCalculateHash', (input: LuaValue, hashType: LuaValue) => {
+        const ht = Number(hashType) || 0;
+        if (ht === 0) return md5Base64(String(input));
+        if (!warnedVfsSha) {
+            warnedVfsSha = true;
+            postLog(2, '[VFS] FIDELITY-STANDIN: VFS.CalculateHash type 1 (SHA512) ' +
+                'is not implemented (no reaching consumer); returning nil.');
+        }
+        return null;
+    });
+
     // Purge a file from the VFS cache so the next VFS.LoadFile re-fetches
     // it from the server. Used by enableWidget to force a reload.
     rt.setGlobal('_vfsPurge', (path: LuaValue) => {
@@ -7883,6 +7903,47 @@ VFS.SubDirs = function(path, pattern, mode)
     end
     return result
 end
+
+-- VFS.CalculateHash(input, hashType): type 0 = base64(MD5), type 1 = SHA512
+-- hex (Recoil rts/Lua/LuaVFS.cpp). Backed by vfs-hash.ts (MD5 only; type 1
+-- is a loud nil standin). Reaching BAR/ZK widgets call this at load time and
+-- die on a nil function without it.
+VFS.CalculateHash = function(input, hashType)
+    if input == nil then return nil end
+    return _vfsCalculateHash(input, hashType or 0)
+end
+
+-- VFS.GetNameFromRapidTag(tag): resolves a rapid (pool) package tag to an
+-- archive name. The web content model has no rapid system (all content is
+-- HTTP-served, pre-resolved), so there is nothing to resolve. Loud standin
+-- (no-silent-GL-failures spirit) returning nil — the 2 BAR callers fall back
+-- to their own defaults when this is nil.
+local _warnedRapidTag = false
+VFS.GetNameFromRapidTag = function(tag)
+    if not _warnedRapidTag then
+        _warnedRapidTag = true
+        Spring.Echo("[VFS.GetNameFromRapidTag] FIDELITY-STANDIN: no rapid/pool " ..
+            "system in the web content model; returning nil.")
+    end
+    return nil
+end
+
+-- VFS.ZlibCompress / VFS.ZlibDecompress: real zlib (RFC 1950) round-trip in
+-- Recoil. Deferred here: a synchronous zlib codec plus binary-safe Lua<->JS
+-- string marshaling is its own task, and the only reaching consumers are a
+-- telemetry widget (log_unitdefids) and a start-pos widget gated behind
+-- modoptions not yet fed to the worker. Present (not absent) but LOUD: raise a
+-- clear error rather than corrupt data with a passthrough, so a consumer that
+-- reaches them surfaces with a named reason instead of silently mangling
+-- compressed bytes. (Tracked: PLAN-bar.md §3b VFS.*.)
+local function _zlibUnimplemented(which)
+    return function()
+        error("VFS." .. which .. ": FIDELITY-STANDIN not implemented " ..
+            "(needs a synchronous zlib codec; see PLAN-bar.md VFS.*)", 2)
+    end
+end
+VFS.ZlibCompress = _zlibUnimplemented("ZlibCompress")
+VFS.ZlibDecompress = _zlibUnimplemented("ZlibDecompress")
 `;
 
 const CMD_GLOBALS_LUA = `
