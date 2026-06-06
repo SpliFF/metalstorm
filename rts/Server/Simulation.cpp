@@ -255,7 +255,14 @@ void CSimulation::InitSubsystems(bool hasMap)
 
     // --- Map-dependent subsystems ---
     if (hasMap) {
-        smoothGround.Init(int2(float3::maxxpos, float3::maxzpos), SQUARE_SIZE * 2, SQUARE_SIZE * 40);
+        // Faithful to Recoil (Game.cpp): the first arg is the corner-square
+        // count (mapDims.mapx/mapy), NOT world-elmo extents, and res/radius come
+        // from modInfo. Passing float3::maxxpos (= mapx*SQUARE_SIZE) and
+        // SQUARE_SIZE-scaled res/radius here over-scaled every argument by
+        // SQUARE_SIZE (8x), so GetRealGroundHeight's (x + y*mapxp1)*resolution
+        // index ran ~8x past the corner heightmap — an OOB read that SIGSEGV'd
+        // on large maps (green_flat 2176^2) and read garbage on small ones.
+        smoothGround.Init(int2(mapDims.mapx, mapDims.mapy), modInfo.smoothMeshResDivider, modInfo.smoothMeshSmoothRadius);
         quadField.Init(int2(mapDims.mapx, mapDims.mapy), CQuadField::BASE_QUAD_SIZE);
 
         // moveDefHandler already initialized above (before unitDefHandler)
