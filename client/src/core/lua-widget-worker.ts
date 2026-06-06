@@ -3919,7 +3919,16 @@ function installEngineGlobals(
 
     rt.setGlobal('LOG', { ERROR: 0, WARNING: 1, INFO: 2, DEBUG: 3 });
 
-    // Platform table — some GL4 widgets check this
+    // Platform table — GL4 widgets/gadgets gate on this. WebGL2 (GLSL ES
+    // 3.00) cannot do GL4's compute/SSBO/geometry/bindless path, so
+    // glHaveGL4 is explicitly false (PLAN-bar.md §4). It was previously
+    // omitted and relied on `nil` reading falsy — correct for the common
+    // `not Platform.glHaveGL4` / `~= true` gates, but a widget testing
+    // `Platform.glHaveGL4 == false` would NOT self-disable on nil. Setting
+    // it false also makes ZK/BAR's `cus_gl4.lua` print its own
+    // "No GL4 support … disabling" notice (the authored self-disable), and
+    // BAR units fall to the engine-default material. FIDELITY-STANDIN: GL4
+    // content (BAR's CUS material, *_gl4 overlays) is absent, not wrong.
     rt.setGlobal('Platform', {
         glVersionShort: 'WebGL 2.0',
         glVersion: 'WebGL 2.0',
@@ -3927,6 +3936,7 @@ function installEngineGlobals(
         glslVersion: '300 es',
         gpuVendor: 'WebGL',
         gpuName: 'WebGL2',
+        glHaveGL4: false,
         glSupportClipSpaceControl: false,
         glSupport24bitDepthBuffer: true,
         glSupportRestartPrimitive: false,
