@@ -117,7 +117,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `core/projectile-state.ts` | Parses envelope `0x04` binary projectile snapshots. |
 | `core/piece-state.ts` | Parses streamed piece transforms (turret rotation, walk cycles, etc.). |
 | `core/clock.ts` | Sim-tick clock + interpolation timing. (`clock.test.ts` covers it.) |
-| `core/terrain.ts` | Builds terrain mesh from heightmap uint16 array. |
+| `core/terrain.ts` | Builds terrain mesh from heightmap uint16 array. DXT1 tile atlas is paged into a MultiMaterial grid (`planAtlasPages`) when a map exceeds WebGL2 `MAX_TEXTURE_SIZE`. |
 | `core/terrain-texture.ts` | Streams the KTX2 terrain texture(s) and binds them onto the terrain mesh. |
 | `core/rts-camera.ts` | Orbital pan/zoom/rotate camera with viewport updates. **GW4-c5b**: now DOM-free and runs **inside** the game-processor worker (one per view, keyed by viewId); input arrives via intent methods, not DOM events. |
 | `core/camera-input.ts` | **GW4-c5b**: thin main-thread DOM-input owner. Captures pointer/wheel/key on `#game-canvas` and forwards canvas-relative CSS-pixel intents to the worker camera as `gp:*` messages tagged with `viewId` (multi-view). |
