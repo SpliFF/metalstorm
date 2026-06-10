@@ -167,15 +167,26 @@ int64_t Database::ValidateSession(const std::string& token, int maxAgeSeconds) {
         "AND created_at > datetime('now', '-' || ? || ' seconds')";
     sqlite3_stmt* stmt = nullptr;
 
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        // Distinct from "no matching row": this is a DB-level fault. Log it
+        // (callers still treat the 0 return as unauthenticated).
+        SLOG(SPRING_LOG_ERROR, "ValidateSession: prepare failed: %s",
+             sqlite3_errmsg(db));
         return 0;
+    }
 
     sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(stmt, 2, maxAgeSeconds);
 
     int64_t userId = 0;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
+    const int rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
         userId = sqlite3_column_int64(stmt, 0);
+    } else if (rc != SQLITE_DONE) {
+        // SQLITE_DONE == valid "no such session" (returns 0). Anything else is
+        // a real error worth surfacing, not silent unauthentication.
+        SLOG(SPRING_LOG_ERROR, "ValidateSession: step failed (%d): %s",
+             rc, sqlite3_errmsg(db));
     }
 
     sqlite3_finalize(stmt);
