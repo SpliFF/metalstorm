@@ -175,6 +175,35 @@ export interface GpMinimapLos {
     explored: Uint8Array;
 }
 
+// ─── worker inbound union (typed dispatcher) ────────────────────────────────
+
+/**
+ * Legacy (pre-GW4 / LuaWidgetManager-path) inbound messages.
+ * Narrow per-case as they are typed. The index-signature escape hatch lets
+ * the dispatcher read arbitrary fields without individual field declarations.
+ */
+export interface LegacyWorkerMessage {
+    type:
+        | 'init' | 'keypress' | 'keyrelease' | 'mousepress' | 'mouserelease'
+        | 'mousewheel' | 'mousemove' | 'defaultCommandTarget' | 'commandNotify'
+        | 'getWidgetList' | 'toggleWidget' | 'enableWidget' | 'disableWidget'
+        | 'resize' | 'evalLua' | 'musicStreamTime' | 'pauseFrames' | 'resumeFrames'
+        | 'stateUpdate' | 'entityState' | 'entityDestroy' | 'entitySensorUpdate'
+        | 'sendToUnsynced' | 'intelTransitions' | 'seismicPings' | 'losBitmap'
+        | 'unitCommandQueues' | 'unitCmdDescs' | 'unitTransports' | 'unitSelfD'
+        | 'unitStockpile' | 'unitLifecycle' | 'visibleUnits' | 'unitCommand'
+        | 'unitArmored' | 'pathResponse' | 'standingOrders' | 'unitDefsUpdate'
+        | 'projectileState' | 'weaponDefsUpdate' | 'rosterUpdate' | 'rulesParamUpdate'
+        | 'resourceUpdate' | 'gameInfo' | 'mapFeatures' | 'shutdown';
+    [k: string]: unknown;
+}
+
+/** All messages the worker can receive (gp:* + legacy). */
+export type WorkerInbound =
+    | GpMessageToWorker
+    | { type: 'gp:test'; id: number; method: string; args: unknown[] }
+    | LegacyWorkerMessage;
+
 export type GpMessageToMain =
     /** Decoded SoundEvents routed to the main-thread AudioManager/SoundEventPlayer. */
     | { type: 'gp:audioSoundEvents'; events: unknown }
@@ -208,4 +237,8 @@ export type GpMessageToMain =
     /** Game-over → main shows the results overlay. */
     | { type: 'gp:gameOver'; frame: number }
     /** Worker reached the game server + authed (mirrors connection onAuthenticated). */
-    | { type: 'gp:authenticated'; playerId: number; team: number };
+    | { type: 'gp:authenticated'; playerId: number; team: number }
+    /** Server restart detected — main reloads. */
+    | { type: 'gp:reload' }
+    /** Reply to a gp:test request from the main test harness. */
+    | { type: 'gp:testResult'; id: number; ok: boolean; value?: unknown; error?: string };
