@@ -1,3 +1,9 @@
+/** @deprecated GW4-c5b ported the selection/pick/order core to worker-selection.ts.
+ *  This main-thread manager remains ONLY for: build placement + ghosts, build-drag rows,
+ *  waypoint drag, area-attack drag, modal pending commands, animated cursors, metal-spot
+ *  snapping (see PLAN-game-worker.md). Port those to the worker, then delete this file.
+ *  Do not add new features here. */
+
 /**
  * InputManager — mouse + keyboard input for selection and commands.
  *
@@ -33,38 +39,14 @@ import {
     type PointerInfo,
 } from '@babylonjs/core';
 import { EntityRenderer } from './entity-renderer.js';
-import { CommandBuffer, CMD } from './command-buffer.js';
+import { CommandBuffer, CMD, OPT } from './command-buffer.js';
 import type { Connection } from './connection.js';
 import type { DefCache } from './def-cache.js';
 import type { ParsedMapData } from './map-data.js';
 import { findMetalSpots, nearestMetalSpot, type MetalSpot } from './metal-spots.js';
 import type { AnimatedCursor } from './animated-cursor.js';
+import { SELECT_PIXEL_RADIUS, SELECT_RADIUS, DRAG_THRESHOLD_PX } from './selection-core.js';
 import type { WaypointMarkerMeta } from './waypoint-marker-renderer.js';
-
-/// How close (in world elmos) a click has to be to a unit's XZ to
-/// count as selecting that unit. Accounts for pickWithRay landing
-/// slightly off the unit base on a tilted view. Used by right-click
-/// target classification (pickNearestEntityAt); single-click selection
-/// uses a screen-space pixel radius instead — see SELECT_PIXEL_RADIUS.
-const SELECT_RADIUS = 32;
-
-/// Single-click select tolerance, in screen pixels. World-space radii
-/// don't work for tall structures: clicking the top of a factory
-/// projects a ray that exits the back of the model and lands on terrain
-/// 100+ elmos behind the footprint, which then fails any ground-based
-/// proximity test. Comparing the click pixel to each unit's projected
-/// centre handles all unit shapes uniformly.
-const SELECT_PIXEL_RADIUS = 32;
-
-/// Pixel threshold for single-click vs drag. Below this, mousedown +
-/// mouseup is treated as a click; above, it's a drag-box select.
-const DRAG_THRESHOLD_PX = 6;
-
-/// Spring command-option bits. Match `Command.h`:
-///   META_KEY=4, INTERNAL=8, RIGHT_MOUSE=16, SHIFT=32, CTRL=64, ALT=128
-const OPT_SHIFT = 1 << 5;
-const OPT_CTRL  = 1 << 6;
-const OPT_ALT   = 1 << 7;
 
 /// Bit 11 of UnitDef.flags marks a factory (see protocol.fbs).
 const UNITDEF_FLAG_IS_FACTORY = 1 << 11;
@@ -584,7 +566,7 @@ export class InputManager {
 
         // Pure factory selection: queue immediately, skip ground placement.
         if (this.allSelectedAreFactories()) {
-            const options = (shift ? OPT_SHIFT : 0) | (ctrl ? OPT_CTRL : 0);
+            const options = (shift ? OPT.SHIFT : 0) | (ctrl ? OPT.CONTROL : 0);
             this.commandBuffer.issueImmediate(
                 -defId, this.selectedIds.slice(),
                 [],
@@ -791,7 +773,7 @@ export class InputManager {
         this.commandBuffer.issueImmediate(
             -defId, builders,
             [x, y, z, facing],
-            queue ? OPT_SHIFT : 0);
+            queue ? OPT.SHIFT : 0);
 
         // Promote the placement ghost into a "pending" marker that lingers
         // at the build site until construction starts (the unit will
@@ -1292,7 +1274,7 @@ export class InputManager {
                 commandId: CMD.INSERT,
                 unitIds: [drag.unitId],
                 params: insertParams,
-                options: OPT_ALT,
+                options: OPT.ALT,
             },
             {
                 commandId: CMD.REMOVE,
@@ -1467,7 +1449,7 @@ export class InputManager {
             const [x, y, z] = positions[i];
             // First tile: non-queued unless the player held shift at
             // down-time. Remaining tiles: always queued.
-            const options = (i === 0 ? (drag.shift ? OPT_SHIFT : 0) : OPT_SHIFT);
+            const options = (i === 0 ? (drag.shift ? OPT.SHIFT : 0) : OPT.SHIFT);
             batch.push({
                 commandId: -defId,
                 unitIds: builders,
@@ -1580,7 +1562,7 @@ export class InputManager {
             return;
         }
 
-        const opts = drag.shift ? OPT_SHIFT : 0;
+        const opts = drag.shift ? OPT.SHIFT : 0;
         this.commandBuffer.issueImmediate(
             CMD.AREA_ATTACK,
             this.selectedIds.slice(),
@@ -1748,7 +1730,7 @@ export class InputManager {
         const groundPos = this.pickGroundAt(clientX, clientY);
         if (!groundPos) return;
 
-        const opts = shift ? OPT_SHIFT : 0;
+        const opts = shift ? OPT.SHIFT : 0;
 
         // Find the nearest non-selected unit to the click point — used both
         // by modal-cmd resolution and the default right-click behaviour.
@@ -1927,7 +1909,7 @@ export class InputManager {
     private resolvePendingCommandAt(groundPos: Vector3, shift: boolean): boolean {
         if (this.pendingCmd === null) return false;
         const cmd = this.pendingCmd;
-        const opts = shift ? OPT_SHIFT : 0;
+        const opts = shift ? OPT.SHIFT : 0;
         const nearest = this.pickNearestEntityAt(groundPos);
         // Shift keeps the command armed so successive clicks chain waypoints
         // (multi-point patrol, queued moves), matching Spring's "hold Shift to
@@ -2073,7 +2055,7 @@ export class InputManager {
             // queue-mode and is handled per-command below where it makes sense.
             if (e.ctrlKey || e.altKey || e.metaKey) return;
 
-            const queue = e.shiftKey ? OPT_SHIFT : 0;
+            const queue = e.shiftKey ? OPT.SHIFT : 0;
 
             switch (e.key.toLowerCase()) {
                 // ---- Instant orders ----

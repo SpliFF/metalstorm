@@ -504,15 +504,19 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             case 'gp:dragBox':
                 updateDragOverlay(m.box);
                 break;
-            // GW4-c5b-3 (Bucket-3): the worker has no access to the page's
-            // localStorage — persist worker-owned UI prefs here (e.g. the
-            // standing-order show-allies toggle). Booleans store as 'true'/'false'.
-            case 'gp:config':
+            // GW4-c5b-3 / WP3b: all worker→main storage writes arrive here.
+            // Mirrors lua-widget-manager.ts:1228–1241 exactly so both paths
+            // (GW4 game-processor worker and legacy LuaWidgetManager) behave
+            // identically. springConfig.* writes are also mirrored into
+            // clientSettings so live subscribers (shadow quality, etc.) apply
+            // the change immediately.
+            case 'storage:set':
                 try {
-                    const v = typeof m.value === 'boolean' ? String(m.value)
-                        : typeof m.value === 'string' ? m.value : JSON.stringify(m.value);
-                    localStorage.setItem(m.key, v);
+                    localStorage.setItem(m.key, m.value);
                 } catch { /* ignore quota / private-mode */ }
+                if (m.key.startsWith('springConfig.')) {
+                    clientSettings.set(m.key.slice('springConfig.'.length), m.value);
+                }
                 break;
             // Worker postLog() output. Until the LuaWidgetManager's log bridge
             // is folded back in (GW5/GW8), surface it on the page console (and

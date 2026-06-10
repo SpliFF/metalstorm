@@ -37,17 +37,7 @@ import {
 import type { EntityRenderer } from './entity-renderer.js';
 import type { Connection } from './connection.js';
 import { CommandBuffer, CMD, OPT } from './command-buffer.js';
-
-/// Single-click select tolerance, in CSS pixels. Comparing the click pixel to
-/// each unit's projected centre handles tall structures uniformly (a ground
-/// ray would land far behind a factory footprint). Mirrors input-manager.ts.
-const SELECT_PIXEL_RADIUS = 32;
-
-/// How close (world elmos) a right-click has to be to a unit's XZ to target it.
-const SELECT_RADIUS = 32;
-
-/// Pixel threshold (CSS px) separating a single-click from a drag-box.
-const DRAG_THRESHOLD_PX = 6;
+import { SELECT_PIXEL_RADIUS, SELECT_RADIUS, DRAG_THRESHOLD_PX } from './selection-core.js';
 
 /** Canvas-relative CSS-pixel rectangle for the main-thread drag overlay. */
 export interface DragBox { x0: number; y0: number; x1: number; y1: number; }

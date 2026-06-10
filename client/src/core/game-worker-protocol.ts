@@ -225,8 +225,12 @@ export type GpMessageToMain =
           los: GpMinimapLos | null;
           map?: { width: number; height: number; baseUrl: string };
       }
-    /** Worker asks main to persist a value to localStorage (e.g. SHOW_ALLIES). */
-    | { type: 'gp:config'; key: string; value: unknown }
+    /** Worker asks main to persist a key/value to localStorage (WP3b: single
+     *  persistence channel — replaces the former gp:config worker→main direction).
+     *  The `springConfig.*` prefix also triggers a clientSettings.set side-effect
+     *  on main. Both the game-processor worker and legacy LuaWidgetManager paths
+     *  post this shape; main.ts and lua-widget-manager.ts handle it identically. */
+    | { type: 'storage:set'; key: string; value: string }
     /**
      * Drag-select rectangle for the main-thread overlay div (GW4-c5b-2). The
      * worker owns selection/pick, but the box overlay is a DOM concern; main
