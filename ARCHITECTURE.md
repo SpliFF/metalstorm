@@ -52,7 +52,12 @@ Full CLI flag list (from `rts/server_main.cpp`):
 
 | File | Purpose |
 |------|---------|
-| `server_main.cpp` | Game server entry. Auth (registers CPlayer), message dispatch, disconnect handling (fires PlayerRemoved callin), sim loop, entity streaming, win detection. |
+| `server_main.cpp` | Game server entry. After WP1 it owns only boot + wiring + the tick-loop skeleton: arg parsing, signal/logging init, content roots, DB/map open, sim init, def-cache bake, AI slot resolution, tick timing, idle-exit `game_status` heartbeat, shutdown. Per-tick broadcasts, the client-message switch, the HTTP routes, and the game-start lambdas are delegated to the four units below (all sharing a `GameServerContext`). |
+| `Server/GameServerContext.h` | **WP1**: header-only aggregation of references/pointers (net, rtcServer, sim, db, sessions, rooms, aiPool, luaExecEngine, identity/config, roster maps) that the extracted units share. No ownership, no logic. Also holds `RequestedPlayer`/`RequestedAI`. |
+| `Server/GameStartCoordinator.h/.cpp` | **WP1**: `PushStandingOrdersTo` / `BuildTeamStartInfoMsg` / `CheckAndFireGameStart` (formerly main()-scope lambdas). Drives the roster-complete → FireGameStart rendezvous. |
+| `Server/ClientMessageHandler.h/.cpp` | **WP1**: the inbound client-message dispatch switch (auth, player commands, viewport, room ops, Lua msgs, console, selection, path requests, standing orders) — one `Handle<Payload>` method per case. `main()`'s loop just calls `HandleMessage` per drained message. |
+| `Server/StateStreamer.h/.cpp` | **WP1**: the per-tick broadcast pipeline. `Tick(frameNum)` runs CheckWinCondition → resources → command queues → game-info → entity/piece state → build activity → standing-orders → AI → combat/deaths/sensors/decals/heightmap/sendToUnsynced/playerTeam/teamStats/luaRulesMsg/unit+feature lifecycle/unit commands → LOS bitmaps, in the exact original order (order is behaviour). |
+| `Server/GameHttpRoutes.h/.cpp` | **WP1**: `RegisterGameHttpRoutes(ctx, content, …, restartRequested&, keepRunning&)` — heightmap/map-info/maps/metrics/`/api/restart`/`/api/exec`/`/api/wt/info` registrations moved out of `main()`. |
 | `lobby_main.cpp` | Lobby entry. Room management, game/map preprocessing, child process spawning, HTTP routes. |
 | `Server/Simulation.h/.cpp` | Initialises Spring subsystems, ticks physics/units/weapons/features each frame. |
 | `Server/NetworkServer.h/.cpp` | HTTP/2 (h2c via nghttp2) + HTTP/1.1 server (REST/SSE/assets only). Realtime game traffic now runs over WebTransport (`WebTransportServer`), not WebRTC. Send/broadcast helpers. |
