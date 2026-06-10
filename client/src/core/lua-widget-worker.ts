@@ -3799,11 +3799,9 @@ function installEngineGlobals(
         _geos: LuaValue,
     ) => luaTable();
     (springGlobals.Spring as Record<string, LuaValue>).GetConsoleBuffer = (_count: LuaValue) => luaTable();
-    (springGlobals.Spring as Record<string, LuaValue>).GetTeamStatsHistory = (
-        _teamID: LuaValue,
-        startIndex: LuaValue,
-        _endIndex: LuaValue,
-    ) => (startIndex === undefined || startIndex === null ? 0 : luaTable());
+    // GetTeamStatsHistory is now a real read in buildSpringGlobals (lua-spring-api.ts),
+    // backed by liveState.teamStatsHistory (fed by the server's TeamStatsHistoryBatch
+    // stream) with Recoil's alliance gate — no stub override here (PLAN-bar §6).
 
     // Spring.Utilities — stub table; Lua-side code below adds CopyTable etc.
     (springGlobals.Spring as Record<string, LuaValue>).Utilities = {};

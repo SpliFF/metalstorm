@@ -1496,11 +1496,16 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             const history = ls.teamStatsHistory.get(tid);
             if (!history) return null;            // unknown team → nil (Recoil ParseTeam fail)
 
-            // Recoil: IsAlliedTeam(teamID) || game->IsGameOver().
+            // Recoil: IsAlliedTeam(teamID) || game->IsGameOver(). Resolve the
+            // team's allyTeam from the roster if present, else from the
+            // TeamStartInfo stream (ls.teams is often unpopulated in the worker,
+            // but teamStartPositions carries each team's allyTeam).
             const me = ls.players.get(ls.identity.myPlayerId);
             const isSpectator = me?.spectator ?? false;
-            const team = ls.teams.get(tid);
-            const allied = isSpectator || (team ? team.allyTeam === ls.identity.myAllyTeam : false);
+            const teamAlly = ls.teams.get(tid)?.allyTeam
+                ?? ls.teamStartPositions.get(tid)?.allyTeam;
+            const allied = isSpectator
+                || (teamAlly !== undefined && teamAlly === ls.identity.myAllyTeam);
             if (!allied && !ls.gameOver) return null;
 
             const count = history.length;

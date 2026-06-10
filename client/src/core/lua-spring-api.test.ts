@@ -537,4 +537,19 @@ describe('GetTeamStatsHistory', () => {
         const api = springApi(makeCtx(), ls);
         expect(call(api.GetTeamStatsHistory, 1)).toBe(2);
     });
+
+    it('resolves alliance from teamStartPositions when the team roster is empty', () => {
+        // Mirrors the live worker: ls.teams is unpopulated, but the
+        // TeamStartInfo stream supplies each team's allyTeam.
+        const ls = createDefaultLiveState();
+        ls.identity = { myTeam: 0, myAllyTeam: 0, myPlayerId: 0 };
+        ls.players.set(0, player({ team: 0, allyTeam: 0 }));
+        ls.teamStartPositions.set(0, { x: 0, y: 0, z: 0, valid: true, allyTeam: 0 });
+        ls.teamStartPositions.set(1, { x: 0, y: 0, z: 0, valid: true, allyTeam: 1 });
+        ls.teamStatsHistory.set(0, [statsEntry(), statsEntry()]);
+        ls.teamStatsHistory.set(1, [statsEntry()]);
+        const api = springApi(makeCtx(), ls);
+        expect(call(api.GetTeamStatsHistory, 0)).toBe(2);   // own ally → readable
+        expect(call(api.GetTeamStatsHistory, 1)).toBeNull(); // enemy ally → gated
+    });
 });
