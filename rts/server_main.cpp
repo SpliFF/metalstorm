@@ -46,6 +46,7 @@
 #include "System/SpringLog/SpringLogSqlite.h"
 #include "System/SpringLogBridge.h"
 #include <sqlite3.h>
+#include <nlohmann/json.hpp>
 
 #define LOG_SECTION "server"
 
@@ -661,8 +662,10 @@ int main(int argc, char* argv[])
             return HttpAuth::JsonResponse(401, R"({"error":"unauthorized — use POST /api/auth/login first"})");
         }
 
-        std::string scope = HttpAuth::JsonField(body, "scope");
-        std::string code = HttpAuth::JsonField(body, "code");
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        std::string scope = j.value("scope", "");
+        std::string code = j.value("code", "");
 
         if (scope.empty() || code.empty()) {
             return HttpAuth::JsonResponse(400, R"({"success":false,"output":"missing scope or code"})");

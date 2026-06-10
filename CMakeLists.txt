@@ -418,7 +418,7 @@ target_compile_definitions(spring-lobby PRIVATE
     # would invoke, so a rebuilt importer invalidates the model cache.
     MODELIMPORTER_BINARY_PATH="$<TARGET_FILE:modelimporter>"
 )
-target_link_libraries(spring-lobby PRIVATE lua nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite)
+target_link_libraries(spring-lobby PRIVATE lua nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite nlohmann_json::nlohmann_json)
 if(UNIX)
     target_link_libraries(spring-lobby PRIVATE pthread dl)
 endif()

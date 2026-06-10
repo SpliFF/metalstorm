@@ -43,6 +43,8 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <functional>
+#include <nlohmann/json.hpp>
 
 #define LOG_SECTION "lobby"
 
@@ -50,6 +52,25 @@ static std::atomic<bool> keepRunning{true};
 static std::atomic<bool> restartRequested{false};
 static void signalHandler(int) { keepRunning.store(false); }
 static void restartHandler(int) { restartRequested.store(true); keepRunning.store(false); }
+
+/// Prepare/bind/step/finalize a single write statement. The `bind` callback
+/// binds parameters onto the prepared statement before it is stepped once.
+static bool ExecPrepared(sqlite3* db, const char* sql,
+                         const std::function<void(sqlite3_stmt*)>& bind) {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        SLOG(SPRING_LOG_ERROR, "ExecPrepared prepare failed: %s", sqlite3_errmsg(db));
+        return false;
+    }
+    if (bind) bind(stmt);
+    const int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        SLOG(SPRING_LOG_ERROR, "ExecPrepared step failed (%d): %s", rc, sqlite3_errmsg(db));
+        return false;
+    }
+    return true;
+}
 
 // Saved for self-restart via execvp
 static int savedArgc = 0;
@@ -410,24 +431,28 @@ int main(int argc, char* argv[])
             case GameServerInstance::Ended:    stateStr = "ended"; break;
             case GameServerInstance::Crashed:  stateStr = "crashed"; break;
         }
-        char sql[512];
-        snprintf(sql, sizeof(sql),
+        ExecPrepared(mapDb,
             "INSERT OR REPLACE INTO game_servers (room_id, port, pid, map_id, game_id, state) "
-            "VALUES (%u, %d, %d, '%s', '%s', '%s')",
-            inst.roomId, inst.port, (int)inst.pid,
-            inst.mapId.c_str(), inst.gameId.c_str(), stateStr);
-        sqlite3_exec(mapDb, sql, nullptr, nullptr, nullptr);
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [&](sqlite3_stmt* s) {
+                sqlite3_bind_int(s, 1, static_cast<int>(inst.roomId));
+                sqlite3_bind_int(s, 2, inst.port);
+                sqlite3_bind_int(s, 3, static_cast<int>(inst.pid));
+                sqlite3_bind_text(s, 4, inst.mapId.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(s, 5, inst.gameId.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(s, 6, stateStr, -1, SQLITE_TRANSIENT);
+            });
     };
 
     auto removeGameServer = [&](uint32_t roomId) {
         if (!mapDb) return;
-        std::string sql = "DELETE FROM game_servers WHERE room_id=" + std::to_string(roomId);
-        sqlite3_exec(mapDb, sql.c_str(), nullptr, nullptr, nullptr);
+        ExecPrepared(mapDb, "DELETE FROM game_servers WHERE room_id=?",
+            [&](sqlite3_stmt* s) { sqlite3_bind_int(s, 1, static_cast<int>(roomId)); });
         // The game server normally clears its own game_status row on a clean
         // exit, but a SIGKILL/crash can leave it behind — drop it here too so a
         // dead room never looks "ready".
-        sql = "DELETE FROM game_status WHERE room_id=" + std::to_string(roomId);
-        sqlite3_exec(mapDb, sql.c_str(), nullptr, nullptr, nullptr);
+        ExecPrepared(mapDb, "DELETE FROM game_status WHERE room_id=?",
+            [&](sqlite3_stmt* s) { sqlite3_bind_int(s, 1, static_cast<int>(roomId)); });
     };
 
     // Read the readiness flag a running game server publishes into `game_status`
@@ -542,9 +567,8 @@ int main(int argc, char* argv[])
         if (stmt) sqlite3_finalize(stmt);
 
         for (auto rid : staleRooms) {
-            std::string sql = "DELETE FROM game_servers WHERE room_id="
-                + std::to_string(rid);
-            sqlite3_exec(mapDb, sql.c_str(), nullptr, nullptr, nullptr);
+            ExecPrepared(mapDb, "DELETE FROM game_servers WHERE room_id=?",
+                [&](sqlite3_stmt* s) { sqlite3_bind_int(s, 1, static_cast<int>(rid)); });
             // Room metadata is persistent; if a row in `rooms` matches,
             // reset it back to Filling so the host can launch again.
             if (rooms.GetRoom(rid))
@@ -627,55 +651,37 @@ int main(int argc, char* argv[])
     net.AddHttpGet("/api/maps", [mapDb](const std::string&) -> HttpResponse {
         MapMetadataDb db;
         auto maps = db.GetAllMaps(mapDb);
-        std::string json = "[";
-        bool first = true;
+        nlohmann::json arr = nlohmann::json::array();
         for (const auto& m : maps) {
-            if (!first) json += ",";
-            first = false;
-
-            // Start positions array
-            std::string spJson = "[";
-            for (size_t i = 0; i < m.startPositions.size(); i++) {
-                if (i > 0) spJson += ",";
-                char spBuf[64];
-                snprintf(spBuf, sizeof(spBuf), "{\"x\":%.0f,\"z\":%.0f}",
-                    m.startPositions[i].x, m.startPositions[i].z);
-                spJson += spBuf;
-            }
-            spJson += "]";
-
-            // Escape description for JSON (basic: replace " and newlines)
-            std::string desc = m.description;
-            for (size_t p = 0; (p = desc.find('"', p)) != std::string::npos; p += 2)
-                desc.replace(p, 1, "\\\"");
-            for (size_t p = 0; (p = desc.find('\n', p)) != std::string::npos; p += 2)
-                desc.replace(p, 1, "\\n");
-
-            char buf[1024];
-            snprintf(buf, sizeof(buf),
-                "{\"id\":\"%s\",\"name\":\"%s\",\"shortName\":\"%s\","
-                "\"description\":\"%s\",\"author\":\"%s\",\"version\":\"%s\","
-                "\"mapx\":%d,\"mapy\":%d,\"widthElmos\":%d,\"heightElmos\":%d,"
-                "\"minHeight\":%.1f,\"maxHeight\":%.1f,"
-                "\"gravity\":%.1f,\"tidalStrength\":%.1f,"
-                "\"maxMetal\":%.2f,\"extractorRadius\":%.1f,"
-                "\"tilesX\":%d,\"tilesZ\":%d,\"numTiles\":%d,"
-                "\"maxPlayers\":%zu,\"startPositions\":%s,"
-                "\"hasLuaGaia\":%s,"
-                "\"minimapUrl\":\"/api/maps/data/%s/minimap.ktx2\"}",
-                m.id.c_str(), m.name.c_str(), m.shortName.c_str(),
-                desc.c_str(), m.author.c_str(), m.version.c_str(),
-                m.mapx, m.mapy, m.widthElmos, m.heightElmos,
-                m.minHeight, m.maxHeight,
-                m.gravity, m.tidalStrength,
-                m.maxMetal, m.extractorRadius,
-                m.tilesX, m.tilesZ, m.numTiles,
-                m.startPositions.size(), spJson.c_str(),
-                m.hasLuaGaia ? "true" : "false",
-                m.id.c_str());
-            json += buf;
+            nlohmann::json mj;
+            mj["id"] = m.id;
+            mj["name"] = m.name;
+            mj["shortName"] = m.shortName;
+            mj["description"] = m.description;
+            mj["author"] = m.author;
+            mj["version"] = m.version;
+            mj["mapx"] = m.mapx;
+            mj["mapy"] = m.mapy;
+            mj["widthElmos"] = m.widthElmos;
+            mj["heightElmos"] = m.heightElmos;
+            mj["minHeight"] = m.minHeight;
+            mj["maxHeight"] = m.maxHeight;
+            mj["gravity"] = m.gravity;
+            mj["tidalStrength"] = m.tidalStrength;
+            mj["maxMetal"] = m.maxMetal;
+            mj["extractorRadius"] = m.extractorRadius;
+            mj["tilesX"] = m.tilesX;
+            mj["tilesZ"] = m.tilesZ;
+            mj["numTiles"] = m.numTiles;
+            mj["maxPlayers"] = m.startPositions.size();
+            mj["startPositions"] = nlohmann::json::array();
+            for (const auto& sp : m.startPositions)
+                mj["startPositions"].push_back({{"x", sp.x}, {"z", sp.z}});
+            mj["hasLuaGaia"] = m.hasLuaGaia;
+            mj["minimapUrl"] = "/api/maps/data/" + m.id + "/minimap.ktx2";
+            arr.push_back(std::move(mj));
         }
-        json += "]";
+        std::string json = arr.dump();
         std::vector<uint8_t> body(json.begin(), json.end());
         return {.contentType = "application/json", .body = std::move(body), .status = 200};
     });
@@ -710,139 +716,118 @@ int main(int argc, char* argv[])
                     return {.contentType = "text/plain", .body = {}, .status = 404};
 
                 // Build JSON metadata
-                std::string json = "{";
-                char buf[256];
-                snprintf(buf, sizeof(buf),
-                    "\"mapx\":%d,\"mapy\":%d,\"squareSize\":8,"
-                    "\"minHeight\":%.6f,\"maxHeight\":%.6f,"
-                    "\"tilesX\":%d,\"tilesZ\":%d,\"numTiles\":%d,\"tileSize\":32",
-                    m.mapx, m.mapy, m.minHeight, m.maxHeight,
-                    m.tilesX, m.tilesZ, m.numTiles);
-                json += buf;
+                nlohmann::json j;
+                j["mapx"] = m.mapx;
+                j["mapy"] = m.mapy;
+                j["squareSize"] = 8;
+                j["minHeight"] = m.minHeight;
+                j["maxHeight"] = m.maxHeight;
+                j["tilesX"] = m.tilesX;
+                j["tilesZ"] = m.tilesZ;
+                j["numTiles"] = m.numTiles;
+                j["tileSize"] = 32;
 
                 // Start positions
-                json += ",\"startPositions\":[";
-                for (size_t i = 0; i < m.startPositions.size(); i++) {
-                    if (i > 0) json += ",";
-                    snprintf(buf, sizeof(buf), "{\"x\":%.1f,\"z\":%.1f}",
-                        m.startPositions[i].x, m.startPositions[i].z);
-                    json += buf;
-                }
-                json += "]";
+                j["startPositions"] = nlohmann::json::array();
+                for (const auto& sp : m.startPositions)
+                    j["startPositions"].push_back({{"x", sp.x}, {"z", sp.z}});
 
                 // Feature types
-                json += ",\"featureTypes\":[";
-                for (size_t i = 0; i < m.featureTypes.size(); i++) {
-                    if (i > 0) json += ",";
-                    json += "\"" + HttpAuth::JsonEscape(m.featureTypes[i]) + "\"";
-                }
-                json += "]";
+                j["featureTypes"] = m.featureTypes;
 
                 // Features
-                json += ",\"features\":[";
-                for (size_t i = 0; i < m.features.size(); i++) {
-                    if (i > 0) json += ",";
-                    const auto& f = m.features[i];
-                    snprintf(buf, sizeof(buf),
-                        "{\"typeIndex\":%d,\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,"
-                        "\"rotation\":%.4f,\"relativeSize\":%.4f}",
-                        f.featureType, f.x, f.y, f.z, f.rotation, f.relativeSize);
-                    json += buf;
+                j["features"] = nlohmann::json::array();
+                for (const auto& f : m.features) {
+                    j["features"].push_back({
+                        {"typeIndex", f.featureType},
+                        {"x", f.x}, {"y", f.y}, {"z", f.z},
+                        {"rotation", f.rotation},
+                        {"relativeSize", f.relativeSize},
+                    });
                 }
-                json += "]";
 
                 // Feature defs
-                json += ",\"featureDefs\":[";
-                for (size_t i = 0; i < m.featureDefs.size(); i++) {
-                    if (i > 0) json += ",";
-                    const auto& d = m.featureDefs[i];
+                j["featureDefs"] = nlohmann::json::array();
+                for (const auto& d : m.featureDefs) {
                     std::string modelUrl = d.modelFile.empty()
                         ? "" : "/api/maps/data/" + m.id + "/features/" + d.modelFile;
                     std::string texUrl = d.textureFile.empty()
                         ? "" : "/api/maps/data/" + m.id + "/features/" + d.textureFile;
-                    json += "{\"name\":\"" + HttpAuth::JsonEscape(d.name) + "\""
-                        + ",\"modelUrl\":\"" + HttpAuth::JsonEscape(modelUrl) + "\""
-                        + ",\"textureUrl\":\"" + HttpAuth::JsonEscape(texUrl) + "\""
-                        + ",\"footprintX\":" + std::to_string(d.footprintX)
-                        + ",\"footprintZ\":" + std::to_string(d.footprintZ);
-                    snprintf(buf, sizeof(buf),
-                        ",\"height\":%.2f,\"radius\":%.2f,"
-                        "\"blocking\":%s,\"reclaimable\":%s,"
-                        "\"metal\":%d,\"energy\":%d,\"damage\":%d}",
-                        d.height, d.radius,
-                        d.blocking ? "true" : "false",
-                        d.reclaimable ? "true" : "false",
-                        d.metal, d.energy, d.damage);
-                    json += buf;
+                    j["featureDefs"].push_back({
+                        {"name", d.name},
+                        {"modelUrl", modelUrl},
+                        {"textureUrl", texUrl},
+                        {"footprintX", d.footprintX},
+                        {"footprintZ", d.footprintZ},
+                        {"height", d.height},
+                        {"radius", d.radius},
+                        {"blocking", d.blocking},
+                        {"reclaimable", d.reclaimable},
+                        {"metal", d.metal},
+                        {"energy", d.energy},
+                        {"damage", d.damage},
+                    });
                 }
-                json += "]";
 
                 // Decals
                 auto decalUrl = [&](const std::string& f) -> std::string {
                     if (f.empty()) return "";
                     return "/api/maps/data/" + m.id + "/" + f;
                 };
-                json += ",\"decals\":{"
-                    "\"detailTex\":\"" + HttpAuth::JsonEscape(decalUrl(m.decals.detailTex)) + "\""
-                    + ",\"specularTex\":\"" + HttpAuth::JsonEscape(decalUrl(m.decals.specularTex)) + "\""
-                    + ",\"splatDetailTex\":\"" + HttpAuth::JsonEscape(decalUrl(m.decals.splatDetailTex)) + "\""
-                    + ",\"splatDistrTex\":\"" + HttpAuth::JsonEscape(decalUrl(m.decals.splatDistrTex)) + "\""
-                    + ",\"splatNormal\":["
-                    + "\"" + HttpAuth::JsonEscape(decalUrl(m.decals.splatDetailNormalTex[0])) + "\""
-                    + ",\"" + HttpAuth::JsonEscape(decalUrl(m.decals.splatDetailNormalTex[1])) + "\""
-                    + ",\"" + HttpAuth::JsonEscape(decalUrl(m.decals.splatDetailNormalTex[2])) + "\""
-                    + ",\"" + HttpAuth::JsonEscape(decalUrl(m.decals.splatDetailNormalTex[3])) + "\""
-                    + "]"
-                    + ",\"detailNormalTex\":\"" + HttpAuth::JsonEscape(decalUrl(m.decals.detailNormalTex)) + "\"";
-                snprintf(buf, sizeof(buf),
-                    ",\"splatScales\":[%.6f,%.6f,%.6f,%.6f]"
-                    ",\"splatMults\":[%.6f,%.6f,%.6f,%.6f]}",
-                    m.decals.splatScales[0], m.decals.splatScales[1],
-                    m.decals.splatScales[2], m.decals.splatScales[3],
-                    m.decals.splatMults[0], m.decals.splatMults[1],
-                    m.decals.splatMults[2], m.decals.splatMults[3]);
-                json += buf;
+                {
+                    nlohmann::json dj;
+                    dj["detailTex"] = decalUrl(m.decals.detailTex);
+                    dj["specularTex"] = decalUrl(m.decals.specularTex);
+                    dj["splatDetailTex"] = decalUrl(m.decals.splatDetailTex);
+                    dj["splatDistrTex"] = decalUrl(m.decals.splatDistrTex);
+                    dj["splatNormal"] = {
+                        decalUrl(m.decals.splatDetailNormalTex[0]),
+                        decalUrl(m.decals.splatDetailNormalTex[1]),
+                        decalUrl(m.decals.splatDetailNormalTex[2]),
+                        decalUrl(m.decals.splatDetailNormalTex[3]),
+                    };
+                    dj["detailNormalTex"] = decalUrl(m.decals.detailNormalTex);
+                    dj["splatScales"] = {
+                        m.decals.splatScales[0], m.decals.splatScales[1],
+                        m.decals.splatScales[2], m.decals.splatScales[3],
+                    };
+                    dj["splatMults"] = {
+                        m.decals.splatMults[0], m.decals.splatMults[1],
+                        m.decals.splatMults[2], m.decals.splatMults[3],
+                    };
+                    j["decals"] = std::move(dj);
+                }
 
                 // Water
-                snprintf(buf, sizeof(buf),
-                    ",\"water\":{"
-                    "\"baseColor\":[%.6f,%.6f,%.6f]"
-                    ",\"surfaceColor\":[%.6f,%.6f,%.6f]"
-                    ",\"minColor\":[%.6f,%.6f,%.6f]"
-                    ",\"surfaceAlpha\":%.6f"
-                    ",\"damage\":%.6f"
-                    ",\"voidWater\":%s}",
-                    m.water.baseColor[0], m.water.baseColor[1], m.water.baseColor[2],
-                    m.water.surfaceColor[0], m.water.surfaceColor[1], m.water.surfaceColor[2],
-                    m.water.minColor[0], m.water.minColor[1], m.water.minColor[2],
-                    m.water.surfaceAlpha, m.water.damage,
-                    m.water.voidWater ? "true" : "false");
-                json += buf;
+                {
+                    nlohmann::json wj;
+                    wj["baseColor"] = {m.water.baseColor[0], m.water.baseColor[1], m.water.baseColor[2]};
+                    wj["surfaceColor"] = {m.water.surfaceColor[0], m.water.surfaceColor[1], m.water.surfaceColor[2]};
+                    wj["minColor"] = {m.water.minColor[0], m.water.minColor[1], m.water.minColor[2]};
+                    wj["surfaceAlpha"] = m.water.surfaceAlpha;
+                    wj["damage"] = m.water.damage;
+                    wj["voidWater"] = m.water.voidWater;
+                    j["water"] = std::move(wj);
+                }
 
                 // hasLuaGaia
-                json += std::string(",\"hasLuaGaia\":") + (m.hasLuaGaia ? "true" : "false");
+                j["hasLuaGaia"] = m.hasLuaGaia;
 
                 // Map sound preset (from mapinfo.lua's `sound = { preset = ... }`).
                 // Client maps this to AudioManager.setReverbPreset; missing
                 // / empty / "default" means no reverb.
-                json += ",\"soundPreset\":\"" + HttpAuth::JsonEscape(m.soundPreset) + "\"";
+                j["soundPreset"] = m.soundPreset;
 
                 // Widgets
-                json += ",\"widgets\":[";
-                for (size_t i = 0; i < m.widgets.size(); i++) {
-                    if (i > 0) json += ",";
-                    json += "\"" + HttpAuth::JsonEscape(m.widgets[i]) + "\"";
-                }
-                json += "]";
+                j["widgets"] = m.widgets;
 
                 // URLs for binary data and source assets
-                json += ",\"minimapUrl\":\"/api/maps/data/" + m.id + "/minimap.ktx2\"";
-                json += ",\"tilesUrl\":\"/api/maps/data/" + m.id + "/tiles.ktx2\"";
-                json += ",\"mapDataUrl\":\"/api/maps/data/" + m.id + "\"";
-                json += ",\"mapSourceUrl\":\"/api/maps/data/" + m.id + "\"";
+                j["minimapUrl"] = "/api/maps/data/" + m.id + "/minimap.ktx2";
+                j["tilesUrl"] = "/api/maps/data/" + m.id + "/tiles.ktx2";
+                j["mapDataUrl"] = "/api/maps/data/" + m.id;
+                j["mapSourceUrl"] = "/api/maps/data/" + m.id;
 
-                json += "}";
-
+                std::string json = j.dump();
                 std::vector<uint8_t> body(json.begin(), json.end());
                 return {
                     .contentType = "application/json",
@@ -867,11 +852,8 @@ int main(int argc, char* argv[])
 
     // --- Process management API ---
     net.AddHttpGet("/api/processes", [&gameServers](const std::string&) -> HttpResponse {
-        std::string json = "[";
-        bool first = true;
+        nlohmann::json arr = nlohmann::json::array();
         for (const auto& [roomId, inst] : gameServers) {
-            if (!first) json += ",";
-            first = false;
             const char* stateStr = "unknown";
             switch (inst.state) {
                 case GameServerInstance::Starting: stateStr = "starting"; break;
@@ -879,14 +861,16 @@ int main(int argc, char* argv[])
                 case GameServerInstance::Ended:    stateStr = "ended"; break;
                 case GameServerInstance::Crashed:  stateStr = "crashed"; break;
             }
-            char buf[256];
-            snprintf(buf, sizeof(buf),
-                R"({"room_id":%u,"port":%d,"pid":%d,"state":"%s","map":"%s","game":"%s"})",
-                roomId, inst.port, (int)inst.pid, stateStr,
-                inst.mapId.c_str(), inst.gameId.c_str());
-            json += buf;
+            arr.push_back({
+                {"room_id", roomId},
+                {"port", inst.port},
+                {"pid", (int)inst.pid},
+                {"state", stateStr},
+                {"map", inst.mapId},
+                {"game", inst.gameId},
+            });
         }
-        json += "]";
+        std::string json = arr.dump();
         return {.contentType = "application/json", .body = {json.begin(), json.end()}, .status = 200,
                 .cacheControl = "no-cache"};
     });
@@ -912,8 +896,10 @@ int main(int argc, char* argv[])
             return HttpAuth::JsonResponse(401, R"({"error":"unauthorized — use POST /api/auth/login first"})");
         }
 
-        std::string scope = HttpAuth::JsonField(body, "scope");
-        std::string code = HttpAuth::JsonField(body, "code");
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        std::string scope = j.value("scope", "");
+        std::string code = j.value("code", "");
         bool success = true;
         std::string output;
 
@@ -1003,48 +989,40 @@ int main(int argc, char* argv[])
     // Helper: JSON-serialize a room for API responses
     auto roomToJson = [](const GameRoom* room) -> std::string {
         if (!room) return "null";
-        std::string json = "{\"id\":" + std::to_string(room->id)
-            + ",\"name\":\"" + HttpAuth::JsonEscape(room->name) + "\""
-            + ",\"map\":\"" + HttpAuth::JsonEscape(room->mapId) + "\""
-            + ",\"game\":\"" + HttpAuth::JsonEscape(room->gameId) + "\""
-            + ",\"state\":" + std::to_string(static_cast<int>(room->state))
-            + ",\"players\":[";
-        bool first = true;
+        nlohmann::json j;
+        j["id"] = room->id;
+        j["name"] = room->name;
+        j["map"] = room->mapId;
+        j["game"] = room->gameId;
+        j["state"] = static_cast<int>(room->state);
+        j["players"] = nlohmann::json::array();
         for (const auto& p : room->players) {
-            if (!first) json += ",";
-            first = false;
-            json += "{\"player_id\":" + std::to_string(p.playerId)
-                + ",\"username\":\"" + HttpAuth::JsonEscape(p.username) + "\""
-                + ",\"team\":" + std::to_string(p.team)
-                + ",\"ready\":" + (p.ready ? "true" : "false")
-                + ",\"is_host\":" + (p.isHost ? "true" : "false")
-                + ",\"start_pos\":" + std::to_string(p.startPos) + "}";
+            nlohmann::json pj;
+            pj["player_id"] = p.playerId;
+            pj["username"] = p.username;
+            pj["team"] = p.team;
+            pj["ready"] = p.ready;
+            pj["is_host"] = p.isHost;
+            pj["start_pos"] = p.startPos;
+            j["players"].push_back(std::move(pj));
         }
-        json += "],\"ai_slots\":[";
-        first = true;
+        j["ai_slots"] = nlohmann::json::array();
         for (const auto& ai : room->aiSlots) {
-            if (!first) json += ",";
-            first = false;
-            json += "{\"ai_id\":\"" + HttpAuth::JsonEscape(ai.aiId) + "\""
-                + ",\"name\":\"" + HttpAuth::JsonEscape(ai.displayName) + "\""
-                + ",\"team\":" + std::to_string(ai.team)
-                + ",\"start_pos\":" + std::to_string(ai.startPos) + "}";
+            nlohmann::json aj;
+            aj["ai_id"] = ai.aiId;
+            aj["name"] = ai.displayName;
+            aj["team"] = ai.team;
+            aj["start_pos"] = ai.startPos;
+            j["ai_slots"].push_back(std::move(aj));
         }
-        json += "],\"modoptions\":{";
-        first = true;
-        for (const auto& [key, value] : room->modOptions) {
-            if (!first) json += ",";
-            first = false;
-            json += "\"" + HttpAuth::JsonEscape(key) + "\":\""
-                + HttpAuth::JsonEscape(value) + "\"";
-        }
-        json += "}";
+        j["modoptions"] = nlohmann::json::object();
+        for (const auto& [key, value] : room->modOptions)
+            j["modoptions"][key] = value;
         if (room->gameServerPort > 0)
-            json += ",\"game_server_port\":" + std::to_string(room->gameServerPort);
+            j["game_server_port"] = room->gameServerPort;
         if (room->persistent)
-            json += ",\"persistent\":true";
-        json += "}";
-        return json;
+            j["persistent"] = true;
+        return j.dump();
     };
 
     #define HTTP_ROOM_AUTH() \
@@ -1073,16 +1051,29 @@ int main(int argc, char* argv[])
         auto user = db.FindUserById(userId);
         if (!user) return HttpAuth::JsonResponse(500, R"({"error":"user not found"})");
 
-        std::string name = HttpAuth::JsonField(body, "name");
-        std::string mapId = HttpAuth::JsonField(body, "map");
-        std::string gameId = HttpAuth::JsonField(body, "game");
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        std::string name = j.value("name", "");
+        std::string mapId = j.value("map", "");
+        std::string gameId = j.value("game", "");
         if (name.empty()) name = "Game";
         if (gameId.empty() && !availableGames.empty()) gameId = availableGames[0].id;
         if (mapId.empty())
             return HttpAuth::JsonResponse(400, R"({"error":"map is required"})");
 
-        std::string persistStr = HttpAuth::JsonField(body, "persistent");
-        bool persistent = (persistStr == "true" || persistStr == "1");
+        // Accept both JSON string ("true"/"1") and JSON bool/number for `persistent`.
+        bool persistent = false;
+        if (j.contains("persistent")) {
+            const auto& pv = j["persistent"];
+            if (pv.is_string()) {
+                const std::string persistStr = pv.get<std::string>();
+                persistent = (persistStr == "true" || persistStr == "1");
+            } else if (pv.is_boolean()) {
+                persistent = pv.get<bool>();
+            } else if (pv.is_number()) {
+                persistent = (pv.get<double>() == 1.0);
+            }
+        }
 
         uint32_t roomId = rooms.CreateRoom(name, mapId, gameId, 8, "",
             static_cast<uint32_t>(userId), 0 /*no WS clientId*/, user->username,
@@ -1276,9 +1267,12 @@ int main(int argc, char* argv[])
         auto user = db.FindUserById(userId);
         if (!user) return HttpAuth::JsonResponse(500, R"({"error":"user not found"})");
 
-        std::string ridStr = HttpAuth::JsonField(body, "room_id");
-        uint32_t roomId = ridStr.empty() ? 0 : (uint32_t)std::atoi(ridStr.c_str());
-        std::string password = HttpAuth::JsonField(body, "password");
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        uint32_t roomId = j.contains("room_id") && j["room_id"].is_string()
+            ? (uint32_t)std::atoi(j["room_id"].get<std::string>().c_str())
+            : (uint32_t)j.value("room_id", 0);
+        std::string password = j.value("password", "");
 
         if (!rooms.JoinRoom(roomId, static_cast<uint32_t>(userId), 0, user->username, password))
             return HttpAuth::JsonResponse(403, R"({"error":"cannot join room"})");
@@ -1329,8 +1323,21 @@ int main(int argc, char* argv[])
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
-        std::string readyStr = HttpAuth::JsonField(body, "ready");
-        bool ready = (readyStr == "true" || readyStr == "1");
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        // Accept JSON string ("true"/"1") or JSON bool/number for `ready`.
+        bool ready = false;
+        if (j.contains("ready")) {
+            const auto& rv = j["ready"];
+            if (rv.is_string()) {
+                const std::string readyStr = rv.get<std::string>();
+                ready = (readyStr == "true" || readyStr == "1");
+            } else if (rv.is_boolean()) {
+                ready = rv.get<bool>();
+            } else if (rv.is_number()) {
+                ready = (rv.get<double>() == 1.0);
+            }
+        }
         rooms.SetReady(room->id, static_cast<uint32_t>(userId), ready);
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
@@ -1341,8 +1348,11 @@ int main(int argc, char* argv[])
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
-        std::string teamStr = HttpAuth::JsonField(body, "team");
-        uint8_t team = teamStr.empty() ? 0 : (uint8_t)std::atoi(teamStr.c_str());
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        uint8_t team = j.contains("team") && j["team"].is_string()
+            ? (uint8_t)std::atoi(j["team"].get<std::string>().c_str())
+            : (uint8_t)j.value("team", 0);
         rooms.SetTeam(room->id, static_cast<uint32_t>(userId), team);
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
@@ -1353,11 +1363,15 @@ int main(int argc, char* argv[])
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
-        std::string posStr = HttpAuth::JsonField(body, "pos");
-        int8_t pos = posStr.empty() ? 0 : (int8_t)std::atoi(posStr.c_str());
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        int8_t pos = j.contains("pos") && j["pos"].is_string()
+            ? (int8_t)std::atoi(j["pos"].get<std::string>().c_str())
+            : (int8_t)j.value("pos", 0);
         // Find the target player — default to self
-        std::string targetStr = HttpAuth::JsonField(body, "target_player_id");
-        uint32_t target = targetStr.empty() ? static_cast<uint32_t>(userId) : (uint32_t)std::atoi(targetStr.c_str());
+        uint32_t target = j.contains("target_player_id") && j["target_player_id"].is_string()
+            ? (uint32_t)std::atoi(j["target_player_id"].get<std::string>().c_str())
+            : (uint32_t)j.value("target_player_id", static_cast<uint32_t>(userId));
         rooms.SetPlayerStartPos(room->id, static_cast<uint32_t>(userId), target, pos, 6);
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
@@ -1368,8 +1382,11 @@ int main(int argc, char* argv[])
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
-        std::string targetStr = HttpAuth::JsonField(body, "target_player_id");
-        uint32_t target = targetStr.empty() ? 0 : (uint32_t)std::atoi(targetStr.c_str());
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        uint32_t target = j.contains("target_player_id") && j["target_player_id"].is_string()
+            ? (uint32_t)std::atoi(j["target_player_id"].get<std::string>().c_str())
+            : (uint32_t)j.value("target_player_id", 0);
         if (!rooms.KickPlayer(room->id, static_cast<uint32_t>(userId), target))
             return HttpAuth::JsonResponse(403, R"({"error":"cannot kick"})");
         broadcastRooms();
@@ -1381,11 +1398,14 @@ int main(int argc, char* argv[])
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
-        std::string aiId = HttpAuth::JsonField(body, "ai_id");
-        std::string aiName = HttpAuth::JsonField(body, "name");
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        std::string aiId = j.value("ai_id", "");
+        std::string aiName = j.value("name", "");
         if (aiName.empty()) aiName = aiId;
-        std::string teamStr = HttpAuth::JsonField(body, "team");
-        uint8_t team = teamStr.empty() ? 0 : (uint8_t)std::atoi(teamStr.c_str());
+        uint8_t team = j.contains("team") && j["team"].is_string()
+            ? (uint8_t)std::atoi(j["team"].get<std::string>().c_str())
+            : (uint8_t)j.value("team", 0);
         if (!rooms.AddAISlot(room->id, static_cast<uint32_t>(userId), aiId, aiName, team))
             return HttpAuth::JsonResponse(400, R"({"error":"cannot add AI"})");
         broadcastRooms();
@@ -1397,8 +1417,11 @@ int main(int argc, char* argv[])
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
-        std::string indexStr = HttpAuth::JsonField(body, "slot_index");
-        uint8_t slotIndex = indexStr.empty() ? 0 : (uint8_t)std::atoi(indexStr.c_str());
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        uint8_t slotIndex = j.contains("slot_index") && j["slot_index"].is_string()
+            ? (uint8_t)std::atoi(j["slot_index"].get<std::string>().c_str())
+            : (uint8_t)j.value("slot_index", 0);
         if (!rooms.RemoveAISlot(room->id, static_cast<uint32_t>(userId), slotIndex))
             return HttpAuth::JsonResponse(400, R"({"error":"cannot remove AI"})");
         broadcastRooms();
@@ -1412,8 +1435,10 @@ int main(int argc, char* argv[])
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
-        std::string key = HttpAuth::JsonField(body, "key");
-        std::string value = HttpAuth::JsonField(body, "value");
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        std::string key = j.value("key", "");
+        std::string value = j.value("value", "");
         if (!rooms.SetModOption(room->id, static_cast<uint32_t>(userId), key, value))
             return HttpAuth::JsonResponse(400, R"({"error":"cannot set modoption"})");
         broadcastRooms();
@@ -1425,10 +1450,14 @@ int main(int argc, char* argv[])
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
-        std::string indexStr = HttpAuth::JsonField(body, "slot_index");
-        std::string teamStr = HttpAuth::JsonField(body, "team");
-        uint8_t slotIndex = indexStr.empty() ? 0 : (uint8_t)std::atoi(indexStr.c_str());
-        uint8_t team = teamStr.empty() ? 0 : (uint8_t)std::atoi(teamStr.c_str());
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        uint8_t slotIndex = j.contains("slot_index") && j["slot_index"].is_string()
+            ? (uint8_t)std::atoi(j["slot_index"].get<std::string>().c_str())
+            : (uint8_t)j.value("slot_index", 0);
+        uint8_t team = j.contains("team") && j["team"].is_string()
+            ? (uint8_t)std::atoi(j["team"].get<std::string>().c_str())
+            : (uint8_t)j.value("team", 0);
         if (!rooms.SetAITeam(room->id, static_cast<uint32_t>(userId), slotIndex, team))
             return HttpAuth::JsonResponse(400, R"({"error":"cannot set AI team"})");
         broadcastRooms();
