@@ -271,6 +271,16 @@ struct PlayerTeamEventBatch;
 struct PlayerTeamEventBatchBuilder;
 struct PlayerTeamEventBatchT;
 
+struct TeamStatsEntry;
+
+struct TeamStatsHistoryItem;
+struct TeamStatsHistoryItemBuilder;
+struct TeamStatsHistoryItemT;
+
+struct TeamStatsHistoryBatch;
+struct TeamStatsHistoryBatchBuilder;
+struct TeamStatsHistoryBatchT;
+
 struct ReconnectResponse;
 struct ReconnectResponseBuilder;
 struct ReconnectResponseT;
@@ -1813,11 +1823,12 @@ enum ServerPayload : uint8_t {
   ServerPayload_TeamStartInfo = 37,
   ServerPayload_PlayerTeamEventBatch = 38,
   ServerPayload_LuaUIMsgRelay = 39,
+  ServerPayload_TeamStatsHistoryBatch = 40,
   ServerPayload_MIN = ServerPayload_NONE,
-  ServerPayload_MAX = ServerPayload_LuaUIMsgRelay
+  ServerPayload_MAX = ServerPayload_TeamStatsHistoryBatch
 };
 
-inline const ServerPayload (&EnumValuesServerPayload())[40] {
+inline const ServerPayload (&EnumValuesServerPayload())[41] {
   static const ServerPayload values[] = {
     ServerPayload_NONE,
     ServerPayload_AuthResponse,
@@ -1858,13 +1869,14 @@ inline const ServerPayload (&EnumValuesServerPayload())[40] {
     ServerPayload_SendToUnsyncedEvent,
     ServerPayload_TeamStartInfo,
     ServerPayload_PlayerTeamEventBatch,
-    ServerPayload_LuaUIMsgRelay
+    ServerPayload_LuaUIMsgRelay,
+    ServerPayload_TeamStatsHistoryBatch
   };
   return values;
 }
 
 inline const char * const *EnumNamesServerPayload() {
-  static const char * const names[41] = {
+  static const char * const names[42] = {
     "NONE",
     "AuthResponse",
     "EntityCreate",
@@ -1905,13 +1917,14 @@ inline const char * const *EnumNamesServerPayload() {
     "TeamStartInfo",
     "PlayerTeamEventBatch",
     "LuaUIMsgRelay",
+    "TeamStatsHistoryBatch",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameServerPayload(ServerPayload e) {
-  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_LuaUIMsgRelay)) return "";
+  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_TeamStatsHistoryBatch)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesServerPayload()[index];
 }
@@ -2076,6 +2089,10 @@ template<> struct ServerPayloadTraits<SpringWeb::LuaUIMsgRelay> {
   static const ServerPayload enum_value = ServerPayload_LuaUIMsgRelay;
 };
 
+template<> struct ServerPayloadTraits<SpringWeb::TeamStatsHistoryBatch> {
+  static const ServerPayload enum_value = ServerPayload_TeamStatsHistoryBatch;
+};
+
 template<typename T> struct ServerPayloadUnionTraits {
   static const ServerPayload enum_value = ServerPayload_NONE;
 };
@@ -2234,6 +2251,10 @@ template<> struct ServerPayloadUnionTraits<SpringWeb::PlayerTeamEventBatchT> {
 
 template<> struct ServerPayloadUnionTraits<SpringWeb::LuaUIMsgRelayT> {
   static const ServerPayload enum_value = ServerPayload_LuaUIMsgRelay;
+};
+
+template<> struct ServerPayloadUnionTraits<SpringWeb::TeamStatsHistoryBatchT> {
+  static const ServerPayload enum_value = ServerPayload_TeamStatsHistoryBatch;
 };
 
 struct ServerPayloadUnion {
@@ -2578,6 +2599,14 @@ struct ServerPayloadUnion {
     return type == ServerPayload_LuaUIMsgRelay ?
       reinterpret_cast<const SpringWeb::LuaUIMsgRelayT *>(value) : nullptr;
   }
+  SpringWeb::TeamStatsHistoryBatchT *AsTeamStatsHistoryBatch() {
+    return type == ServerPayload_TeamStatsHistoryBatch ?
+      reinterpret_cast<SpringWeb::TeamStatsHistoryBatchT *>(value) : nullptr;
+  }
+  const SpringWeb::TeamStatsHistoryBatchT *AsTeamStatsHistoryBatch() const {
+    return type == ServerPayload_TeamStatsHistoryBatch ?
+      reinterpret_cast<const SpringWeb::TeamStatsHistoryBatchT *>(value) : nullptr;
+  }
 };
 
 bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *obj, ServerPayload type);
@@ -2765,6 +2794,145 @@ FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) PlayerTeamEventItem FLATBUFFERS_FINAL_CLA
   }
 };
 FLATBUFFERS_STRUCT_END(PlayerTeamEventItem, 8);
+
+/// One team-statistics history entry, mirroring Recoil's `TeamStatistics`
+/// struct (rts/Sim/Misc/TeamStatistics.h). The server accumulates these in
+/// `CTeam::statHistory` — a new entry is finalised every
+/// `TeamStatistics::statsPeriod` (15) game-seconds, with the final (back())
+/// entry the live, still-accumulating one. Field order/units match the table
+/// `Spring.GetTeamStatsHistory` returns. `frame` is the sim frame at which the
+/// entry was finalised (for the live tail it is the *future* boundary frame;
+/// the worker overrides it to the current frame, as Recoil does).
+FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) TeamStatsEntry FLATBUFFERS_FINAL_CLASS {
+ private:
+  int32_t frame_;
+  float metal_used_;
+  float energy_used_;
+  float metal_produced_;
+  float energy_produced_;
+  float metal_excess_;
+  float energy_excess_;
+  float metal_received_;
+  float energy_received_;
+  float metal_sent_;
+  float energy_sent_;
+  float damage_dealt_;
+  float damage_received_;
+  int32_t units_produced_;
+  int32_t units_died_;
+  int32_t units_received_;
+  int32_t units_sent_;
+  int32_t units_captured_;
+  int32_t units_out_captured_;
+  int32_t units_killed_;
+
+ public:
+  TeamStatsEntry()
+      : frame_(0),
+        metal_used_(0),
+        energy_used_(0),
+        metal_produced_(0),
+        energy_produced_(0),
+        metal_excess_(0),
+        energy_excess_(0),
+        metal_received_(0),
+        energy_received_(0),
+        metal_sent_(0),
+        energy_sent_(0),
+        damage_dealt_(0),
+        damage_received_(0),
+        units_produced_(0),
+        units_died_(0),
+        units_received_(0),
+        units_sent_(0),
+        units_captured_(0),
+        units_out_captured_(0),
+        units_killed_(0) {
+  }
+  TeamStatsEntry(int32_t _frame, float _metal_used, float _energy_used, float _metal_produced, float _energy_produced, float _metal_excess, float _energy_excess, float _metal_received, float _energy_received, float _metal_sent, float _energy_sent, float _damage_dealt, float _damage_received, int32_t _units_produced, int32_t _units_died, int32_t _units_received, int32_t _units_sent, int32_t _units_captured, int32_t _units_out_captured, int32_t _units_killed)
+      : frame_(::flatbuffers::EndianScalar(_frame)),
+        metal_used_(::flatbuffers::EndianScalar(_metal_used)),
+        energy_used_(::flatbuffers::EndianScalar(_energy_used)),
+        metal_produced_(::flatbuffers::EndianScalar(_metal_produced)),
+        energy_produced_(::flatbuffers::EndianScalar(_energy_produced)),
+        metal_excess_(::flatbuffers::EndianScalar(_metal_excess)),
+        energy_excess_(::flatbuffers::EndianScalar(_energy_excess)),
+        metal_received_(::flatbuffers::EndianScalar(_metal_received)),
+        energy_received_(::flatbuffers::EndianScalar(_energy_received)),
+        metal_sent_(::flatbuffers::EndianScalar(_metal_sent)),
+        energy_sent_(::flatbuffers::EndianScalar(_energy_sent)),
+        damage_dealt_(::flatbuffers::EndianScalar(_damage_dealt)),
+        damage_received_(::flatbuffers::EndianScalar(_damage_received)),
+        units_produced_(::flatbuffers::EndianScalar(_units_produced)),
+        units_died_(::flatbuffers::EndianScalar(_units_died)),
+        units_received_(::flatbuffers::EndianScalar(_units_received)),
+        units_sent_(::flatbuffers::EndianScalar(_units_sent)),
+        units_captured_(::flatbuffers::EndianScalar(_units_captured)),
+        units_out_captured_(::flatbuffers::EndianScalar(_units_out_captured)),
+        units_killed_(::flatbuffers::EndianScalar(_units_killed)) {
+  }
+  int32_t frame() const {
+    return ::flatbuffers::EndianScalar(frame_);
+  }
+  float metal_used() const {
+    return ::flatbuffers::EndianScalar(metal_used_);
+  }
+  float energy_used() const {
+    return ::flatbuffers::EndianScalar(energy_used_);
+  }
+  float metal_produced() const {
+    return ::flatbuffers::EndianScalar(metal_produced_);
+  }
+  float energy_produced() const {
+    return ::flatbuffers::EndianScalar(energy_produced_);
+  }
+  float metal_excess() const {
+    return ::flatbuffers::EndianScalar(metal_excess_);
+  }
+  float energy_excess() const {
+    return ::flatbuffers::EndianScalar(energy_excess_);
+  }
+  float metal_received() const {
+    return ::flatbuffers::EndianScalar(metal_received_);
+  }
+  float energy_received() const {
+    return ::flatbuffers::EndianScalar(energy_received_);
+  }
+  float metal_sent() const {
+    return ::flatbuffers::EndianScalar(metal_sent_);
+  }
+  float energy_sent() const {
+    return ::flatbuffers::EndianScalar(energy_sent_);
+  }
+  float damage_dealt() const {
+    return ::flatbuffers::EndianScalar(damage_dealt_);
+  }
+  float damage_received() const {
+    return ::flatbuffers::EndianScalar(damage_received_);
+  }
+  int32_t units_produced() const {
+    return ::flatbuffers::EndianScalar(units_produced_);
+  }
+  int32_t units_died() const {
+    return ::flatbuffers::EndianScalar(units_died_);
+  }
+  int32_t units_received() const {
+    return ::flatbuffers::EndianScalar(units_received_);
+  }
+  int32_t units_sent() const {
+    return ::flatbuffers::EndianScalar(units_sent_);
+  }
+  int32_t units_captured() const {
+    return ::flatbuffers::EndianScalar(units_captured_);
+  }
+  int32_t units_out_captured() const {
+    return ::flatbuffers::EndianScalar(units_out_captured_);
+  }
+  int32_t units_killed() const {
+    return ::flatbuffers::EndianScalar(units_killed_);
+  }
+};
+FLATBUFFERS_STRUCT_END(TeamStatsEntry, 80);
 
 FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) MapStartPos FLATBUFFERS_FINAL_CLASS {
  private:
@@ -8784,6 +8952,172 @@ inline ::flatbuffers::Offset<PlayerTeamEventBatch> CreatePlayerTeamEventBatchDir
 
 ::flatbuffers::Offset<PlayerTeamEventBatch> CreatePlayerTeamEventBatch(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerTeamEventBatchT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
+struct TeamStatsHistoryItemT : public ::flatbuffers::NativeTable {
+  typedef TeamStatsHistoryItem TableType;
+  uint32_t team_id = 0;
+  uint32_t base_index = 0;
+  std::vector<SpringWeb::TeamStatsEntry> entries{};
+};
+
+/// Incremental stats-history update for one team. `base_index` is the 0-based
+/// position of `entries[0]` within the team's full `statHistory`; the client
+/// overwrites slots `[base_index ..]` so the previously-live tail (re-sent once
+/// it finalises) is replaced and the new live tail appended. In the steady
+/// state `entries` is just the single live tail (its resource/damage totals
+/// accumulate every frame); when a 15s boundary finalises an entry the next
+/// update carries both the now-final entry and the new tail.
+struct TeamStatsHistoryItem FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef TeamStatsHistoryItemT NativeTableType;
+  typedef TeamStatsHistoryItemBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_TEAM_ID = 4,
+    VT_BASE_INDEX = 6,
+    VT_ENTRIES = 8
+  };
+  uint32_t team_id() const {
+    return GetField<uint32_t>(VT_TEAM_ID, 0);
+  }
+  uint32_t base_index() const {
+    return GetField<uint32_t>(VT_BASE_INDEX, 0);
+  }
+  const ::flatbuffers::Vector<const SpringWeb::TeamStatsEntry *> *entries() const {
+    return GetPointer<const ::flatbuffers::Vector<const SpringWeb::TeamStatsEntry *> *>(VT_ENTRIES);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_TEAM_ID, 4) &&
+           VerifyField<uint32_t>(verifier, VT_BASE_INDEX, 4) &&
+           VerifyOffset(verifier, VT_ENTRIES) &&
+           verifier.VerifyVector(entries()) &&
+           verifier.EndTable();
+  }
+  TeamStatsHistoryItemT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(TeamStatsHistoryItemT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<TeamStatsHistoryItem> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const TeamStatsHistoryItemT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct TeamStatsHistoryItemBuilder {
+  typedef TeamStatsHistoryItem Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_team_id(uint32_t team_id) {
+    fbb_.AddElement<uint32_t>(TeamStatsHistoryItem::VT_TEAM_ID, team_id, 0);
+  }
+  void add_base_index(uint32_t base_index) {
+    fbb_.AddElement<uint32_t>(TeamStatsHistoryItem::VT_BASE_INDEX, base_index, 0);
+  }
+  void add_entries(::flatbuffers::Offset<::flatbuffers::Vector<const SpringWeb::TeamStatsEntry *>> entries) {
+    fbb_.AddOffset(TeamStatsHistoryItem::VT_ENTRIES, entries);
+  }
+  explicit TeamStatsHistoryItemBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<TeamStatsHistoryItem> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<TeamStatsHistoryItem>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<TeamStatsHistoryItem> CreateTeamStatsHistoryItem(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t team_id = 0,
+    uint32_t base_index = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<const SpringWeb::TeamStatsEntry *>> entries = 0) {
+  TeamStatsHistoryItemBuilder builder_(_fbb);
+  builder_.add_entries(entries);
+  builder_.add_base_index(base_index);
+  builder_.add_team_id(team_id);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<TeamStatsHistoryItem> CreateTeamStatsHistoryItemDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t team_id = 0,
+    uint32_t base_index = 0,
+    const std::vector<SpringWeb::TeamStatsEntry> *entries = nullptr) {
+  auto entries__ = entries ? _fbb.CreateVectorOfStructs<SpringWeb::TeamStatsEntry>(*entries) : 0;
+  return SpringWeb::CreateTeamStatsHistoryItem(
+      _fbb,
+      team_id,
+      base_index,
+      entries__);
+}
+
+::flatbuffers::Offset<TeamStatsHistoryItem> CreateTeamStatsHistoryItem(::flatbuffers::FlatBufferBuilder &_fbb, const TeamStatsHistoryItemT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct TeamStatsHistoryBatchT : public ::flatbuffers::NativeTable {
+  typedef TeamStatsHistoryBatch TableType;
+  std::vector<std::unique_ptr<SpringWeb::TeamStatsHistoryItemT>> teams{};
+  TeamStatsHistoryBatchT() = default;
+  TeamStatsHistoryBatchT(const TeamStatsHistoryBatchT &o);
+  TeamStatsHistoryBatchT(TeamStatsHistoryBatchT&&) FLATBUFFERS_NOEXCEPT = default;
+  TeamStatsHistoryBatchT &operator=(TeamStatsHistoryBatchT o) FLATBUFFERS_NOEXCEPT;
+};
+
+/// Per-second batch of stats-history deltas for every active team. Reliable.
+/// Streamed unfiltered (like TeamStartInfo / PlayerTeamEventBatch); the worker
+/// applies Recoil's alliance gate (`Spring.GetTeamStatsHistory` only returns
+/// non-allied teams once the game is over) at the read site.
+struct TeamStatsHistoryBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef TeamStatsHistoryBatchT NativeTableType;
+  typedef TeamStatsHistoryBatchBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_TEAMS = 4
+  };
+  const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::TeamStatsHistoryItem>> *teams() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::TeamStatsHistoryItem>> *>(VT_TEAMS);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_TEAMS) &&
+           verifier.VerifyVector(teams()) &&
+           verifier.VerifyVectorOfTables(teams()) &&
+           verifier.EndTable();
+  }
+  TeamStatsHistoryBatchT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(TeamStatsHistoryBatchT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<TeamStatsHistoryBatch> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const TeamStatsHistoryBatchT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct TeamStatsHistoryBatchBuilder {
+  typedef TeamStatsHistoryBatch Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_teams(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::TeamStatsHistoryItem>>> teams) {
+    fbb_.AddOffset(TeamStatsHistoryBatch::VT_TEAMS, teams);
+  }
+  explicit TeamStatsHistoryBatchBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<TeamStatsHistoryBatch> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<TeamStatsHistoryBatch>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<TeamStatsHistoryBatch> CreateTeamStatsHistoryBatch(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::TeamStatsHistoryItem>>> teams = 0) {
+  TeamStatsHistoryBatchBuilder builder_(_fbb);
+  builder_.add_teams(teams);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<TeamStatsHistoryBatch> CreateTeamStatsHistoryBatchDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const std::vector<::flatbuffers::Offset<SpringWeb::TeamStatsHistoryItem>> *teams = nullptr) {
+  auto teams__ = teams ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::TeamStatsHistoryItem>>(*teams) : 0;
+  return SpringWeb::CreateTeamStatsHistoryBatch(
+      _fbb,
+      teams__);
+}
+
+::flatbuffers::Offset<TeamStatsHistoryBatch> CreateTeamStatsHistoryBatch(::flatbuffers::FlatBufferBuilder &_fbb, const TeamStatsHistoryBatchT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
 struct ReconnectResponseT : public ::flatbuffers::NativeTable {
   typedef ReconnectResponse TableType;
   uint8_t status = 0;
@@ -14474,6 +14808,9 @@ struct ServerMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const SpringWeb::LuaUIMsgRelay *payload_as_LuaUIMsgRelay() const {
     return payload_type() == SpringWeb::ServerPayload_LuaUIMsgRelay ? static_cast<const SpringWeb::LuaUIMsgRelay *>(payload()) : nullptr;
   }
+  const SpringWeb::TeamStatsHistoryBatch *payload_as_TeamStatsHistoryBatch() const {
+    return payload_type() == SpringWeb::ServerPayload_TeamStatsHistoryBatch ? static_cast<const SpringWeb::TeamStatsHistoryBatch *>(payload()) : nullptr;
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_PAYLOAD_TYPE, 1) &&
@@ -14640,6 +14977,10 @@ template<> inline const SpringWeb::PlayerTeamEventBatch *ServerMessage::payload_
 
 template<> inline const SpringWeb::LuaUIMsgRelay *ServerMessage::payload_as<SpringWeb::LuaUIMsgRelay>() const {
   return payload_as_LuaUIMsgRelay();
+}
+
+template<> inline const SpringWeb::TeamStatsHistoryBatch *ServerMessage::payload_as<SpringWeb::TeamStatsHistoryBatch>() const {
+  return payload_as_TeamStatsHistoryBatch();
 }
 
 struct ServerMessageBuilder {
@@ -17068,6 +17409,74 @@ inline ::flatbuffers::Offset<PlayerTeamEventBatch> CreatePlayerTeamEventBatch(::
   return SpringWeb::CreatePlayerTeamEventBatch(
       _fbb,
       _events);
+}
+
+inline TeamStatsHistoryItemT *TeamStatsHistoryItem::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<TeamStatsHistoryItemT>(new TeamStatsHistoryItemT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void TeamStatsHistoryItem::UnPackTo(TeamStatsHistoryItemT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = team_id(); _o->team_id = _e; }
+  { auto _e = base_index(); _o->base_index = _e; }
+  { auto _e = entries(); if (_e) { _o->entries.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->entries[_i] = *_e->Get(_i); } } else { _o->entries.resize(0); } }
+}
+
+inline ::flatbuffers::Offset<TeamStatsHistoryItem> TeamStatsHistoryItem::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const TeamStatsHistoryItemT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateTeamStatsHistoryItem(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<TeamStatsHistoryItem> CreateTeamStatsHistoryItem(::flatbuffers::FlatBufferBuilder &_fbb, const TeamStatsHistoryItemT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const TeamStatsHistoryItemT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _team_id = _o->team_id;
+  auto _base_index = _o->base_index;
+  auto _entries = _o->entries.size() ? _fbb.CreateVectorOfStructs(_o->entries) : 0;
+  return SpringWeb::CreateTeamStatsHistoryItem(
+      _fbb,
+      _team_id,
+      _base_index,
+      _entries);
+}
+
+inline TeamStatsHistoryBatchT::TeamStatsHistoryBatchT(const TeamStatsHistoryBatchT &o) {
+  teams.reserve(o.teams.size());
+  for (const auto &teams_ : o.teams) { teams.emplace_back((teams_) ? new SpringWeb::TeamStatsHistoryItemT(*teams_) : nullptr); }
+}
+
+inline TeamStatsHistoryBatchT &TeamStatsHistoryBatchT::operator=(TeamStatsHistoryBatchT o) FLATBUFFERS_NOEXCEPT {
+  std::swap(teams, o.teams);
+  return *this;
+}
+
+inline TeamStatsHistoryBatchT *TeamStatsHistoryBatch::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<TeamStatsHistoryBatchT>(new TeamStatsHistoryBatchT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void TeamStatsHistoryBatch::UnPackTo(TeamStatsHistoryBatchT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = teams(); if (_e) { _o->teams.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->teams[_i]) { _e->Get(_i)->UnPackTo(_o->teams[_i].get(), _resolver); } else { _o->teams[_i] = std::unique_ptr<SpringWeb::TeamStatsHistoryItemT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->teams.resize(0); } }
+}
+
+inline ::flatbuffers::Offset<TeamStatsHistoryBatch> TeamStatsHistoryBatch::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const TeamStatsHistoryBatchT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateTeamStatsHistoryBatch(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<TeamStatsHistoryBatch> CreateTeamStatsHistoryBatch(::flatbuffers::FlatBufferBuilder &_fbb, const TeamStatsHistoryBatchT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const TeamStatsHistoryBatchT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _teams = _o->teams.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::TeamStatsHistoryItem>> (_o->teams.size(), [](size_t i, _VectorArgs *__va) { return CreateTeamStatsHistoryItem(*__va->__fbb, __va->__o->teams[i].get(), __va->__rehasher); }, &_va ) : 0;
+  return SpringWeb::CreateTeamStatsHistoryBatch(
+      _fbb,
+      _teams);
 }
 
 inline ReconnectResponseT *ReconnectResponse::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
@@ -20124,6 +20533,10 @@ inline bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *o
       auto ptr = reinterpret_cast<const SpringWeb::LuaUIMsgRelay *>(obj);
       return verifier.VerifyTable(ptr);
     }
+    case ServerPayload_TeamStatsHistoryBatch: {
+      auto ptr = reinterpret_cast<const SpringWeb::TeamStatsHistoryBatch *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
     default: return true;
   }
 }
@@ -20299,6 +20712,10 @@ inline void *ServerPayloadUnion::UnPack(const void *obj, ServerPayload type, con
       auto ptr = reinterpret_cast<const SpringWeb::LuaUIMsgRelay *>(obj);
       return ptr->UnPack(resolver);
     }
+    case ServerPayload_TeamStatsHistoryBatch: {
+      auto ptr = reinterpret_cast<const SpringWeb::TeamStatsHistoryBatch *>(obj);
+      return ptr->UnPack(resolver);
+    }
     default: return nullptr;
   }
 }
@@ -20462,6 +20879,10 @@ inline ::flatbuffers::Offset<void> ServerPayloadUnion::Pack(::flatbuffers::FlatB
       auto ptr = reinterpret_cast<const SpringWeb::LuaUIMsgRelayT *>(value);
       return CreateLuaUIMsgRelay(_fbb, ptr, _rehasher).Union();
     }
+    case ServerPayload_TeamStatsHistoryBatch: {
+      auto ptr = reinterpret_cast<const SpringWeb::TeamStatsHistoryBatchT *>(value);
+      return CreateTeamStatsHistoryBatch(_fbb, ptr, _rehasher).Union();
+    }
     default: return 0;
   }
 }
@@ -20622,6 +21043,10 @@ inline ServerPayloadUnion::ServerPayloadUnion(const ServerPayloadUnion &u) : typ
     }
     case ServerPayload_LuaUIMsgRelay: {
       value = new SpringWeb::LuaUIMsgRelayT(*reinterpret_cast<SpringWeb::LuaUIMsgRelayT *>(u.value));
+      break;
+    }
+    case ServerPayload_TeamStatsHistoryBatch: {
+      value = new SpringWeb::TeamStatsHistoryBatchT(*reinterpret_cast<SpringWeb::TeamStatsHistoryBatchT *>(u.value));
       break;
     }
     default:
@@ -20823,6 +21248,11 @@ inline void ServerPayloadUnion::Reset() {
     }
     case ServerPayload_LuaUIMsgRelay: {
       auto ptr = reinterpret_cast<SpringWeb::LuaUIMsgRelayT *>(value);
+      delete ptr;
+      break;
+    }
+    case ServerPayload_TeamStatsHistoryBatch: {
+      auto ptr = reinterpret_cast<SpringWeb::TeamStatsHistoryBatchT *>(value);
       delete ptr;
       break;
     }

@@ -36,6 +36,7 @@ import { SendToUnsyncedArgKind } from '../protocol/spring-web/send-to-unsynced-a
 import { GameInfo } from '../protocol/spring-web/game-info.js';
 import { TeamStartInfo } from '../protocol/spring-web/team-start-info.js';
 import { PlayerTeamEventBatch } from '../protocol/spring-web/player-team-event-batch.js';
+import { TeamStatsHistoryBatch } from '../protocol/spring-web/team-stats-history-batch.js';
 import { ResourceUpdate } from '../protocol/spring-web/resource-update.js';
 import { MapData } from '../protocol/spring-web/map-data.js';
 import { PlayerLeft } from '../protocol/spring-web/player-left.js';
@@ -187,6 +188,30 @@ export interface PlayerTeamEventInfo {
     kind: number;
     id: number;
     reason: number;
+}
+
+/// One team-statistics history entry (mirrors Recoil's TeamStatistics). Keys
+/// match the table Spring.GetTeamStatsHistory returns; `frame` is the entry's
+/// finalisation frame (future for the live tail — the worker overrides it).
+export interface TeamStatsEntryInfo {
+    frame: number;
+    metalUsed: number; energyUsed: number;
+    metalProduced: number; energyProduced: number;
+    metalExcess: number; energyExcess: number;
+    metalReceived: number; energyReceived: number;
+    metalSent: number; energySent: number;
+    damageDealt: number; damageReceived: number;
+    unitsProduced: number; unitsDied: number;
+    unitsReceived: number; unitsSent: number;
+    unitsCaptured: number; unitsOutCaptured: number; unitsKilled: number;
+}
+
+/// One team's incremental stats-history delta. The worker overwrites its
+/// per-team history array starting at `baseIndex`.
+export interface TeamStatsHistoryInfo {
+    teamId: number;
+    baseIndex: number;
+    entries: TeamStatsEntryInfo[];
 }
 
 /// Projectile lifecycle event info — decoded from the FlatBuffer batch and
@@ -805,6 +830,9 @@ export interface ConnectionEvents {
     /// Player/team status changes (PlayerTeamEventBatch) — drives
     /// widget:PlayerChanged / PlayerAdded / PlayerRemoved / TeamDied.
     onPlayerTeamEvents?: (events: PlayerTeamEventInfo[]) => void;
+    /// Per-second team stats-history deltas (TeamStatsHistoryBatch) — feeds
+    /// the worker's per-team history for Spring.GetTeamStatsHistory.
+    onTeamStatsHistory?: (teams: TeamStatsHistoryInfo[]) => void;
     /// A relayed `Spring.SendLuaUIMsg` (LuaUIMsgRelay). The server already
     /// applied the audience filter; deliver unconditionally to
     /// `widget:RecvLuaMsg(data, playerId)`. `data` preserves embedded NULs.
@@ -1554,6 +1582,35 @@ export class Connection {
                     events.push({ kind: e.kind(), id: e.id(), reason: e.reason() });
                 }
                 if (events.length > 0) this.events.onPlayerTeamEvents?.(events);
+                break;
+            }
+            case ServerPayload.TeamStatsHistoryBatch: {
+                const batch = msg.payload(new TeamStatsHistoryBatch()) as TeamStatsHistoryBatch;
+                const teams: TeamStatsHistoryInfo[] = [];
+                for (let i = 0; i < batch.teamsLength(); i++) {
+                    const t = batch.teams(i);
+                    if (!t) continue;
+                    const entries: TeamStatsEntryInfo[] = [];
+                    for (let j = 0; j < t.entriesLength(); j++) {
+                        const e = t.entries(j);
+                        if (!e) continue;
+                        entries.push({
+                            frame: e.frame(),
+                            metalUsed: e.metalUsed(),         energyUsed: e.energyUsed(),
+                            metalProduced: e.metalProduced(), energyProduced: e.energyProduced(),
+                            metalExcess: e.metalExcess(),     energyExcess: e.energyExcess(),
+                            metalReceived: e.metalReceived(), energyReceived: e.energyReceived(),
+                            metalSent: e.metalSent(),         energySent: e.energySent(),
+                            damageDealt: e.damageDealt(),     damageReceived: e.damageReceived(),
+                            unitsProduced: e.unitsProduced(), unitsDied: e.unitsDied(),
+                            unitsReceived: e.unitsReceived(), unitsSent: e.unitsSent(),
+                            unitsCaptured: e.unitsCaptured(), unitsOutCaptured: e.unitsOutCaptured(),
+                            unitsKilled: e.unitsKilled(),
+                        });
+                    }
+                    teams.push({ teamId: t.teamId(), baseIndex: t.baseIndex(), entries });
+                }
+                if (teams.length > 0) this.events.onTeamStatsHistory?.(teams);
                 break;
             }
             case ServerPayload.LuaUIMsgRelay: {

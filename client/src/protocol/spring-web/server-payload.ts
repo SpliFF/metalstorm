@@ -33,6 +33,7 @@ import { SendToUnsyncedEvent, SendToUnsyncedEventT } from '../spring-web/send-to
 import { ServerError, ServerErrorT } from '../spring-web/server-error.js';
 import { StandingOrderState, StandingOrderStateT } from '../spring-web/standing-order-state.js';
 import { TeamStartInfo, TeamStartInfoT } from '../spring-web/team-start-info.js';
+import { TeamStatsHistoryBatch, TeamStatsHistoryBatchT } from '../spring-web/team-stats-history-batch.js';
 import { UnitArmoredUpdate, UnitArmoredUpdateT } from '../spring-web/unit-armored-update.js';
 import { UnitCmdDescsUpdate, UnitCmdDescsUpdateT } from '../spring-web/unit-cmd-descs-update.js';
 import { UnitCommandBatch, UnitCommandBatchT } from '../spring-web/unit-command-batch.js';
@@ -83,13 +84,14 @@ export enum ServerPayload {
   SendToUnsyncedEvent = 36,
   TeamStartInfo = 37,
   PlayerTeamEventBatch = 38,
-  LuaUIMsgRelay = 39
+  LuaUIMsgRelay = 39,
+  TeamStatsHistoryBatch = 40
 }
 
 export function unionToServerPayload(
   type: ServerPayload,
-  accessor: (obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null
-): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null {
+  accessor: (obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|TeamStatsHistoryBatch|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|TeamStatsHistoryBatch|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null
+): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|TeamStatsHistoryBatch|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null {
   switch(ServerPayload[type]) {
     case 'NONE': return null; 
     case 'AuthResponse': return accessor(new AuthResponse())! as AuthResponse;
@@ -131,15 +133,16 @@ export function unionToServerPayload(
     case 'TeamStartInfo': return accessor(new TeamStartInfo())! as TeamStartInfo;
     case 'PlayerTeamEventBatch': return accessor(new PlayerTeamEventBatch())! as PlayerTeamEventBatch;
     case 'LuaUIMsgRelay': return accessor(new LuaUIMsgRelay())! as LuaUIMsgRelay;
+    case 'TeamStatsHistoryBatch': return accessor(new TeamStatsHistoryBatch())! as TeamStatsHistoryBatch;
     default: return null;
   }
 }
 
 export function unionListToServerPayload(
   type: ServerPayload, 
-  accessor: (index: number, obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null, 
+  accessor: (index: number, obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|TeamStatsHistoryBatch|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|TeamStatsHistoryBatch|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null, 
   index: number
-): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null {
+): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|TeamStatsHistoryBatch|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null {
   switch(ServerPayload[type]) {
     case 'NONE': return null; 
     case 'AuthResponse': return accessor(index, new AuthResponse())! as AuthResponse;
@@ -181,6 +184,7 @@ export function unionListToServerPayload(
     case 'TeamStartInfo': return accessor(index, new TeamStartInfo())! as TeamStartInfo;
     case 'PlayerTeamEventBatch': return accessor(index, new PlayerTeamEventBatch())! as PlayerTeamEventBatch;
     case 'LuaUIMsgRelay': return accessor(index, new LuaUIMsgRelay())! as LuaUIMsgRelay;
+    case 'TeamStatsHistoryBatch': return accessor(index, new TeamStatsHistoryBatch())! as TeamStatsHistoryBatch;
     default: return null;
   }
 }

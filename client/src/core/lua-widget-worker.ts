@@ -5853,6 +5853,22 @@ function gpConnect(msg: GpInitToWorker): void {
                 }
             }
         },
+        // PLAN-bar Spring.GetTeamStatsHistory: per-second incremental team
+        // stats-history deltas. Splice each team's entries into its history
+        // array starting at baseIndex (the previously-live tail is re-sent once
+        // finalised, then the new live tail appended), so the worker mirrors
+        // the server's CTeam::statHistory.
+        onTeamStatsHistory: (teams) => {
+            for (const t of teams) {
+                let hist = liveState.teamStatsHistory.get(t.teamId);
+                if (!hist) { hist = []; liveState.teamStatsHistory.set(t.teamId, hist); }
+                for (let i = 0; i < t.entries.length; i++) {
+                    hist[t.baseIndex + i] = t.entries[i];
+                }
+                // Trim any stale tail beyond what the server now reports.
+                hist.length = t.baseIndex + t.entries.length;
+            }
+        },
         // PLAN-bar.md §6: relayed Spring.SendLuaUIMsg (LuaUIMsgRelay). The
         // server already applied the audience filter, so dispatch
         // unconditionally to widget:RecvLuaMsg(msg, playerID). 107 BAR + 52 ZK

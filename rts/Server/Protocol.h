@@ -902,6 +902,36 @@ inline std::vector<uint8_t> BuildPlayerTeamEventBatch(
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_PlayerTeamEventBatch, batch.Union());
 }
 
+/// One team's stats-history delta, ready to serialise. The caller (server_main,
+/// which owns the TeamHandler) fills `entries` with SpringWeb::TeamStatsEntry
+/// values straight off each `CTeam::statHistory` slot so Protocol.h stays
+/// sim-agnostic. `baseIndex` is the 0-based slot of entries[0] in the full
+/// history.
+struct TeamStatsHistoryItemData {
+    uint32_t teamId = 0;
+    uint32_t baseIndex = 0;
+    std::vector<SpringWeb::TeamStatsEntry> entries;
+};
+
+/// Build a TeamStatsHistoryBatch (one item per changed team). Reliable; the
+/// widget worker splices the entries into its per-team history array and
+/// answers Spring.GetTeamStatsHistory from it (applying the alliance gate).
+inline std::vector<uint8_t> BuildTeamStatsHistoryBatch(
+    const std::vector<TeamStatsHistoryItemData>& teams)
+{
+    flatbuffers::FlatBufferBuilder fbb(512);
+    std::vector<flatbuffers::Offset<SpringWeb::TeamStatsHistoryItem>> items;
+    items.reserve(teams.size());
+    for (const auto& t : teams) {
+        auto entriesOff = fbb.CreateVectorOfStructs(t.entries);
+        items.push_back(SpringWeb::CreateTeamStatsHistoryItem(
+            fbb, t.teamId, t.baseIndex, entriesOff));
+    }
+    auto itemsOff = fbb.CreateVector(items);
+    auto batch = SpringWeb::CreateTeamStatsHistoryBatch(fbb, itemsOff);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_TeamStatsHistoryBatch, batch.Union());
+}
+
 /// Build a RoomStateUpdate message.
 inline std::vector<uint8_t> BuildRoomStateUpdate(const GameRoom& room) {
     flatbuffers::FlatBufferBuilder fbb(512);

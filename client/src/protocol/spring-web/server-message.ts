@@ -36,6 +36,7 @@ import { ServerError, ServerErrorT } from '../spring-web/server-error.js';
 import { ServerPayload, unionToServerPayload, unionListToServerPayload } from '../spring-web/server-payload.js';
 import { StandingOrderState, StandingOrderStateT } from '../spring-web/standing-order-state.js';
 import { TeamStartInfo, TeamStartInfoT } from '../spring-web/team-start-info.js';
+import { TeamStatsHistoryBatch, TeamStatsHistoryBatchT } from '../spring-web/team-stats-history-batch.js';
 import { UnitArmoredUpdate, UnitArmoredUpdateT } from '../spring-web/unit-armored-update.js';
 import { UnitCmdDescsUpdate, UnitCmdDescsUpdateT } from '../spring-web/unit-cmd-descs-update.js';
 import { UnitCommandBatch, UnitCommandBatchT } from '../spring-web/unit-command-batch.js';
@@ -123,7 +124,7 @@ unpackTo(_o: ServerMessageT): void {
 export class ServerMessageT implements flatbuffers.IGeneratedObject {
 constructor(
   public payloadType: ServerPayload = ServerPayload.NONE,
-  public payload: AIListUpdateT|AuthResponseT|ChatReceiveT|ConsoleResponseT|EntityCreateT|EntityDestroyT|EntitySensorUpdateT|FeatureLifecycleBatchT|GameEventBatchT|GameInfoT|GameListUpdateT|GameRestartingT|GameStartedT|LogBatchT|LuaUIMsgRelayT|MapDataT|MapListUpdateT|PathResponseT|PlayerLeftT|PlayerTeamEventBatchT|PongT|ReconnectResponseT|ResourceUpdateT|RoomListUpdateT|RoomPlayerJoinedT|RoomPlayerLeftT|RoomStateUpdateT|SendToUnsyncedEventT|ServerErrorT|StandingOrderStateT|TeamStartInfoT|UnitArmoredUpdateT|UnitCmdDescsUpdateT|UnitCommandBatchT|UnitCommandQueuesUpdateT|UnitLifecycleBatchT|UnitSelfDUpdateT|UnitStockpileUpdateT|UnitTransportUpdateT|null = null
+  public payload: AIListUpdateT|AuthResponseT|ChatReceiveT|ConsoleResponseT|EntityCreateT|EntityDestroyT|EntitySensorUpdateT|FeatureLifecycleBatchT|GameEventBatchT|GameInfoT|GameListUpdateT|GameRestartingT|GameStartedT|LogBatchT|LuaUIMsgRelayT|MapDataT|MapListUpdateT|PathResponseT|PlayerLeftT|PlayerTeamEventBatchT|PongT|ReconnectResponseT|ResourceUpdateT|RoomListUpdateT|RoomPlayerJoinedT|RoomPlayerLeftT|RoomStateUpdateT|SendToUnsyncedEventT|ServerErrorT|StandingOrderStateT|TeamStartInfoT|TeamStatsHistoryBatchT|UnitArmoredUpdateT|UnitCmdDescsUpdateT|UnitCommandBatchT|UnitCommandQueuesUpdateT|UnitLifecycleBatchT|UnitSelfDUpdateT|UnitStockpileUpdateT|UnitTransportUpdateT|null = null
 ){}
 
 

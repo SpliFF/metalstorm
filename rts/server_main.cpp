@@ -1121,6 +1121,16 @@ int main(int argc, char* argv[])
     auto lastClientTime = serverStartTime;   // last instant clientCount > 0 (or launch)
     auto lastStatusWrite = serverStartTime;
 
+    // Per-team stats-history send cursor (PLAN-bar Spring.GetTeamStatsHistory):
+    // index of the first not-yet-finalised entry already sent for each team.
+    // The live tail (statHistory.back()) is re-sent each cadence until it
+    // finalises, so we resend from this cursor and advance it to size()-1.
+    // The cursor is global (not per-client); when a client joins mid-game we
+    // reset it so the next batch re-sends each team's full history (idempotent
+    // index-overwrite for already-synced clients), covering the late joiner.
+    std::vector<uint32_t> lastSentStatFinalized;
+    int lastStatBroadcastClients = 0;
+
     while (keepRunning.load()) {
         // Re-read wantedSpeedFactor every tick so live speed changes
         // (via the `speed` exec verb) apply immediately.
@@ -2741,6 +2751,66 @@ int main(int argc, char* argv[])
             auto ptEvents = playerTeamEvents.Drain();
             if (!ptEvents.empty() && rtcServer.GetClientCount() > 0) {
                 auto msg = Protocol::BuildPlayerTeamEventBatch(ptEvents);
+                rtcServer.BroadcastReliable(msg.data(), msg.size());
+            }
+        }
+
+        // Team stats-history (PLAN-bar Spring.GetTeamStatsHistory). The sim
+        // already accumulates each team's TeamStatistics in CTeam::statHistory
+        // (a new entry finalises every TeamStatistics::statsPeriod=15s; the
+        // back() entry is the live, still-accumulating one). Stream it as a
+        // once-per-game-second incremental batch: for each active team send the
+        // slots from our last-finalised cursor through the live tail, so newly
+        // finalised entries and the freshest live tail both reach the worker.
+        // Unfiltered (like TeamStartInfo / PlayerTeamEventBatch); the worker
+        // applies Recoil's alliance gate at the read site. Skipped when nobody
+        // is connected — the cursor stays put and catches up on first connect.
+        if (sim.GetFrameNum() > 0 && (sim.GetFrameNum() % GAME_SPEED) == 0 &&
+            rtcServer.GetClientCount() > 0) {
+            const int activeTeams = teamHandler.ActiveTeams();
+            if (static_cast<int>(lastSentStatFinalized.size()) < activeTeams)
+                lastSentStatFinalized.resize(activeTeams, 0);
+
+            // A new client joined since the last broadcast → rewind every
+            // cursor so this batch carries each team's full history (the late
+            // joiner has none yet; existing clients overwrite by index).
+            const int statClients = rtcServer.GetClientCount();
+            if (statClients > lastStatBroadcastClients)
+                std::fill(lastSentStatFinalized.begin(), lastSentStatFinalized.end(), 0u);
+            lastStatBroadcastClients = statClients;
+
+            std::vector<Protocol::TeamStatsHistoryItemData> items;
+            for (int t = 0; t < activeTeams; ++t) {
+                const CTeam* team = teamHandler.Team(t);
+                if (team == nullptr || team->statHistory.empty()) continue;
+
+                const uint32_t fullCount = static_cast<uint32_t>(team->statHistory.size());
+                uint32_t base = lastSentStatFinalized[t];
+                if (base > fullCount - 1) base = fullCount - 1;  // history never shrinks, defensive
+
+                Protocol::TeamStatsHistoryItemData item;
+                item.teamId = static_cast<uint32_t>(t);
+                item.baseIndex = base;
+                item.entries.reserve(fullCount - base);
+                for (uint32_t i = base; i < fullCount; ++i) {
+                    const TeamStatistics& s = team->statHistory[i];
+                    item.entries.emplace_back(
+                        s.frame,
+                        s.metalUsed,     s.energyUsed,
+                        s.metalProduced, s.energyProduced,
+                        s.metalExcess,   s.energyExcess,
+                        s.metalReceived, s.energyReceived,
+                        s.metalSent,     s.energySent,
+                        s.damageDealt,   s.damageReceived,
+                        s.unitsProduced, s.unitsDied,
+                        s.unitsReceived, s.unitsSent,
+                        s.unitsCaptured, s.unitsOutCaptured, s.unitsKilled);
+                }
+                items.push_back(std::move(item));
+                lastSentStatFinalized[t] = fullCount - 1;  // tail stays resendable
+            }
+            if (!items.empty()) {
+                auto msg = Protocol::BuildTeamStatsHistoryBatch(items);
                 rtcServer.BroadcastReliable(msg.data(), msg.size());
             }
         }

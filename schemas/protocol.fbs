@@ -885,6 +885,58 @@ table PlayerTeamEventBatch {
     events: [PlayerTeamEventItem];
 }
 
+/// One team-statistics history entry, mirroring Recoil's `TeamStatistics`
+/// struct (rts/Sim/Misc/TeamStatistics.h). The server accumulates these in
+/// `CTeam::statHistory` — a new entry is finalised every
+/// `TeamStatistics::statsPeriod` (15) game-seconds, with the final (back())
+/// entry the live, still-accumulating one. Field order/units match the table
+/// `Spring.GetTeamStatsHistory` returns. `frame` is the sim frame at which the
+/// entry was finalised (for the live tail it is the *future* boundary frame;
+/// the worker overrides it to the current frame, as Recoil does).
+struct TeamStatsEntry {
+    frame: int32;
+    metal_used: float;
+    energy_used: float;
+    metal_produced: float;
+    energy_produced: float;
+    metal_excess: float;
+    energy_excess: float;
+    metal_received: float;
+    energy_received: float;
+    metal_sent: float;
+    energy_sent: float;
+    damage_dealt: float;
+    damage_received: float;
+    units_produced: int32;
+    units_died: int32;
+    units_received: int32;
+    units_sent: int32;
+    units_captured: int32;
+    units_out_captured: int32;
+    units_killed: int32;
+}
+
+/// Incremental stats-history update for one team. `base_index` is the 0-based
+/// position of `entries[0]` within the team's full `statHistory`; the client
+/// overwrites slots `[base_index ..]` so the previously-live tail (re-sent once
+/// it finalises) is replaced and the new live tail appended. In the steady
+/// state `entries` is just the single live tail (its resource/damage totals
+/// accumulate every frame); when a 15s boundary finalises an entry the next
+/// update carries both the now-final entry and the new tail.
+table TeamStatsHistoryItem {
+    team_id: uint32;
+    base_index: uint32;
+    entries: [TeamStatsEntry];
+}
+
+/// Per-second batch of stats-history deltas for every active team. Reliable.
+/// Streamed unfiltered (like TeamStartInfo / PlayerTeamEventBatch); the worker
+/// applies Recoil's alliance gate (`Spring.GetTeamStatsHistory` only returns
+/// non-allied teams once the game is over) at the read site.
+table TeamStatsHistoryBatch {
+    teams: [TeamStatsHistoryItem];
+}
+
 table ReconnectResponse {
     status: uint8;              // 0=OK (delta), 1=FULL_SYNC
 }
@@ -1599,6 +1651,7 @@ union ServerPayload {
     TeamStartInfo,
     PlayerTeamEventBatch,
     LuaUIMsgRelay,
+    TeamStatsHistoryBatch,
 }
 
 table ServerMessage {

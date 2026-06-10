@@ -636,6 +636,27 @@ export interface LiveState {
      *  full map when the game sets no boxes. Read by
      *  `Spring.GetAllyTeamStartBox`. */
     allyStartBoxes: Map<number, { xmin: number; zmin: number; xmax: number; zmax: number }>;
+    /** Per-team statistics history keyed by teamId, mirroring the server's
+     *  `CTeam::statHistory` (a new entry every 15 game-seconds; the final
+     *  element is the live, still-accumulating tail). Streamed incrementally
+     *  via TeamStatsHistoryBatch and read by `Spring.GetTeamStatsHistory`. */
+    teamStatsHistory: Map<number, TeamStatsHistoryEntry[]>;
+}
+
+/** One team-statistics history entry. Field names/units match the Lua table
+ *  `Spring.GetTeamStatsHistory` returns (sans the derived `time`/`frame`
+ *  overrides the read applies). Mirrors Recoil's `TeamStatistics`. */
+export interface TeamStatsHistoryEntry {
+    frame: number;
+    metalUsed: number; energyUsed: number;
+    metalProduced: number; energyProduced: number;
+    metalExcess: number; energyExcess: number;
+    metalReceived: number; energyReceived: number;
+    metalSent: number; energySent: number;
+    damageDealt: number; damageReceived: number;
+    unitsProduced: number; unitsDied: number;
+    unitsReceived: number; unitsSent: number;
+    unitsCaptured: number; unitsOutCaptured: number; unitsKilled: number;
 }
 
 /** Per-order entry mirrored into LiveState.standingOrders. Mirrors
@@ -1095,6 +1116,7 @@ export function createDefaultLiveState(): LiveState {
         pendingSynthCreated: new Map(),
         teamStartPositions: new Map(),
         allyStartBoxes: new Map(),
+        teamStatsHistory: new Map(),
     };
 }
 
@@ -1459,6 +1481,60 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             const box = ls.allyStartBoxes.get(Number(allyTeamId));
             if (!box) return null;
             return [box.xmin, box.zmin, box.xmax, box.zmax];
+        },
+        // PLAN-bar Spring.GetTeamStatsHistory. The server accumulates each
+        // team's TeamStatistics in CTeam::statHistory and streams it
+        // incrementally (TeamStatsHistoryBatch, once per game-second). Faithful
+        // 1:1 port of LuaSyncedRead::GetTeamStatsHistory: 1-arg form returns the
+        // entry count; the (start,end) form returns the 1-indexed slice of stats
+        // tables, and the live tail (last index) reports the *current* frame/time
+        // rather than its future finalisation frame (exactly as Recoil does).
+        // Alliance gate matches Recoil — a non-allied team's stats are hidden
+        // until the game is over (full-view spectators see all).
+        GetTeamStatsHistory: (teamId: LuaValue, startIndex?: LuaValue, endIndex?: LuaValue) => {
+            const tid = Number(teamId);
+            const history = ls.teamStatsHistory.get(tid);
+            if (!history) return null;            // unknown team → nil (Recoil ParseTeam fail)
+
+            // Recoil: IsAlliedTeam(teamID) || game->IsGameOver().
+            const me = ls.players.get(ls.identity.myPlayerId);
+            const isSpectator = me?.spectator ?? false;
+            const team = ls.teams.get(tid);
+            const allied = isSpectator || (team ? team.allyTeam === ls.identity.myAllyTeam : false);
+            if (!allied && !ls.gameOver) return null;
+
+            const count = history.length;
+            if (startIndex === undefined || startIndex === null) return count;  // 1-arg form
+
+            const clamp = (v: number) => Math.max(0, Math.min(count - 1, v));
+            const start = clamp(Number(startIndex) - 1);
+            const end = (endIndex === undefined || endIndex === null)
+                ? start : clamp(Number(endIndex) - 1);
+
+            const GAME_SPEED = 30;
+            const out: LuaValue[] = [];
+            for (let i = start; i <= end; i++) {
+                const s = history[i];
+                // For the live tail Recoil substitutes the current sim frame for
+                // the (future) finalisation frame the entry carries.
+                const isLive = (i + 1 === count);
+                const frame = isLive ? ls.gameFrame : s.frame;
+                out.push({
+                    time: frame / GAME_SPEED, frame,
+                    metalUsed: s.metalUsed, metalProduced: s.metalProduced,
+                    metalExcess: s.metalExcess, metalReceived: s.metalReceived,
+                    metalSent: s.metalSent,
+                    energyUsed: s.energyUsed, energyProduced: s.energyProduced,
+                    energyExcess: s.energyExcess, energyReceived: s.energyReceived,
+                    energySent: s.energySent,
+                    damageDealt: s.damageDealt, damageReceived: s.damageReceived,
+                    unitsProduced: s.unitsProduced, unitsDied: s.unitsDied,
+                    unitsReceived: s.unitsReceived, unitsSent: s.unitsSent,
+                    unitsCaptured: s.unitsCaptured, unitsOutCaptured: s.unitsOutCaptured,
+                    unitsKilled: s.unitsKilled,
+                });
+            }
+            return luaTable(...out);
         },
         GetSpectatingState: () => {
             // Spring returns: spec, fullView, fullSelect.

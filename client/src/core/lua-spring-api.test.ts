@@ -11,6 +11,7 @@ import {
     type FeatureEntry,
     type PlayerInfo,
     type TeamInfo,
+    type TeamStatsHistoryEntry,
 } from './lua-spring-api.js';
 import { isLuaTable, luaTable, type LuaValue } from './lua-runtime.js';
 
@@ -447,5 +448,93 @@ describe('GetSelectionBox', () => {
         const ls = createDefaultLiveState();
         const api = springApi(makeCtx(), ls);
         expect(call(api.GetSelectionBox)).toBeNull();
+    });
+});
+
+describe('GetTeamStatsHistory', () => {
+    function statsEntry(over: Partial<TeamStatsHistoryEntry> = {}): TeamStatsHistoryEntry {
+        return {
+            frame: 0,
+            metalUsed: 0, energyUsed: 0, metalProduced: 0, energyProduced: 0,
+            metalExcess: 0, energyExcess: 0, metalReceived: 0, energyReceived: 0,
+            metalSent: 0, energySent: 0, damageDealt: 0, damageReceived: 0,
+            unitsProduced: 0, unitsDied: 0, unitsReceived: 0, unitsSent: 0,
+            unitsCaptured: 0, unitsOutCaptured: 0, unitsKilled: 0,
+            ...over,
+        };
+    }
+    function teamInfo(over: Partial<TeamInfo>): TeamInfo {
+        return {
+            teamId: 0, leader: -1, isDead: false, isAiTeam: false,
+            side: '', allyTeam: 0, customKeys: {}, ...over,
+        };
+    }
+    function player(over: Partial<PlayerInfo>): PlayerInfo {
+        return {
+            name: '', active: true, spectator: false, team: 0, allyTeam: 0,
+            pingMs: 0, cpuUsage: 0, country: '', rank: 0, hasController: true,
+            customKeys: {}, ...over,
+        };
+    }
+    // An allied (own-team) viewer so the alliance gate passes.
+    function alliedLs(): LiveState {
+        const ls = createDefaultLiveState();
+        ls.identity = { myTeam: 0, myAllyTeam: 0, myPlayerId: 0 };
+        ls.players.set(0, player({ team: 0, allyTeam: 0 }));
+        ls.teams.set(0, teamInfo({ teamId: 0, allyTeam: 0 }));
+        ls.teams.set(1, teamInfo({ teamId: 1, allyTeam: 1 }));
+        return ls;
+    }
+
+    it('returns the entry count in the 1-arg form', () => {
+        const ls = alliedLs();
+        ls.teamStatsHistory.set(0, [statsEntry(), statsEntry(), statsEntry()]);
+        const api = springApi(makeCtx(), ls);
+        expect(call(api.GetTeamStatsHistory, 0)).toBe(3);
+    });
+
+    it('returns nil for an unknown team', () => {
+        const api = springApi(makeCtx(), alliedLs());
+        expect(call(api.GetTeamStatsHistory, 9)).toBeNull();
+    });
+
+    it('returns a 1-indexed slice of stats tables', () => {
+        const ls = alliedLs();
+        ls.gameFrame = 900;
+        ls.teamStatsHistory.set(0, [
+            statsEntry({ frame: 450, metalProduced: 10 }),
+            statsEntry({ frame: 1350, metalProduced: 25 }),  // live tail (future frame)
+        ]);
+        const api = springApi(makeCtx(), ls);
+        const res = call(api.GetTeamStatsHistory, 0, 1, 2);
+        if (!isLuaTable(res)) throw new Error('expected table');
+        const items = res.items as Array<Record<string, number>>;
+        expect(items).toHaveLength(2);
+        // finalised entry keeps its own frame/time
+        expect(items[0].frame).toBe(450);
+        expect(items[0].time).toBe(15);
+        expect(items[0].metalProduced).toBe(10);
+        // live tail reports the *current* frame, not its future finalisation frame
+        expect(items[1].frame).toBe(900);
+        expect(items[1].time).toBe(30);
+        expect(items[1].metalProduced).toBe(25);
+    });
+
+    it('hides a non-allied team until the game is over', () => {
+        const ls = alliedLs();
+        ls.teamStatsHistory.set(1, [statsEntry()]);   // enemy ally team
+        let api = springApi(makeCtx(), ls);
+        expect(call(api.GetTeamStatsHistory, 1)).toBeNull();
+        ls.gameOver = true;
+        api = springApi(makeCtx(), ls);
+        expect(call(api.GetTeamStatsHistory, 1)).toBe(1);
+    });
+
+    it('lets a full-view spectator read any team', () => {
+        const ls = alliedLs();
+        ls.players.set(0, player({ spectator: true }));
+        ls.teamStatsHistory.set(1, [statsEntry(), statsEntry()]);
+        const api = springApi(makeCtx(), ls);
+        expect(call(api.GetTeamStatsHistory, 1)).toBe(2);
     });
 });
