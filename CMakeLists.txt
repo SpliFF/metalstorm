@@ -549,11 +549,10 @@ endif()
 
 # === libspringapi (standalone client library) ===
 # WebRTC removed in GW7 — the server is WebTransport-only, so libspringapi's
-# WebRTC game-connect path (connectRtc) is dead against it and is built out
-# (connectRtc returns nullptr). Lobby/HTTP functionality is unaffected.
-# Force OFF so a stale cache from a pre-GW7 build doesn't drag libdatachannel
-# back in. TODO: port libspringapi game-connect to a C++ WebTransport client.
-set(SPRINGAPI_WEBRTC OFF CACHE BOOL "WebRTC removed (GW7)" FORCE)
+# WebRTC game-connect path was deleted (WP5.4): connectRtc is now an inert stub
+# returning nullptr, and the SPRINGAPI_WEBRTC option / libdatachannel dep are
+# gone. Lobby/HTTP functionality is unaffected.
+# TODO: port libspringapi game-connect to a C++ WebTransport client.
 add_subdirectory(libspringapi)
 
 # === springcli — CLI tool ===

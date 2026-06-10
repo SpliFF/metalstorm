@@ -5,8 +5,10 @@
 #   cmake --build build
 #
 # Options:
-#   -DSPRINGAPI_WEBRTC=ON    Enable WebRTC support (requires libdatachannel)
 #   -DSPRINGAPI_PYTHON=ON    Build Python bindings (requires pybind11)
+#
+# Note: WebRTC game-connect was removed (GW7). connectRtc is an inert stub
+# pending a WebTransport port (see PLAN-game-worker.md).
 
 cmake_minimum_required(VERSION 3.25)
 project(springapi LANGUAGES CXX)
@@ -14,7 +16,6 @@ project(springapi LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-option(SPRINGAPI_WEBRTC "Enable WebRTC data channel support" OFF)
 option(SPRINGAPI_PYTHON "Build Python bindings" OFF)
 
 # --- nghttp2 (HTTP/2 client support) ---
@@ -42,31 +43,6 @@ add_library(springapi STATIC
 )
 target_include_directories(springapi PUBLIC include)
 target_link_libraries(springapi PRIVATE nghttp2_static)
-
-# --- WebRTC support ---
-if(SPRINGAPI_WEBRTC)
-    # If building as part of the engine tree, libdatachannel is already available
-    if(TARGET LibDataChannel::LibDataChannelStatic)
-        target_link_libraries(springapi PRIVATE LibDataChannel::LibDataChannelStatic)
-    else()
-        # Standalone build: fetch libdatachannel
-        include(FetchContent)
-        set(NO_MEDIA ON CACHE BOOL "" FORCE)
-        set(NO_WEBSOCKET ON CACHE BOOL "" FORCE)
-        set(NO_EXAMPLES ON CACHE BOOL "" FORCE)
-        set(NO_TESTS ON CACHE BOOL "" FORCE)
-        set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
-        FetchContent_Declare(
-            libdatachannel
-            GIT_REPOSITORY https://github.com/paullouisageneau/libdatachannel.git
-            GIT_TAG v0.22.5
-            GIT_SHALLOW TRUE
-        )
-        FetchContent_MakeAvailable(libdatachannel)
-        target_link_libraries(springapi PRIVATE LibDataChannel::LibDataChannelStatic)
-    endif()
-    target_compile_definitions(springapi PRIVATE SPRINGAPI_HAS_WEBRTC)
-endif()
 
 # --- Python bindings ---
 if(SPRINGAPI_PYTHON)

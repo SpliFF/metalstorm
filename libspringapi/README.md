@@ -24,15 +24,6 @@ cmake --build build
 
 The core HTTP library has zero external dependencies (raw POSIX sockets).
 
-### With WebRTC
-
-```bash
-cmake -B build -DSPRINGAPI_WEBRTC=ON
-cmake --build build
-```
-
-Fetches [libdatachannel](https://github.com/paullouisageneau/libdatachannel) v0.22.5 via FetchContent.
-
 ### With Python bindings
 
 ```bash
@@ -149,46 +140,12 @@ std::string count = springapi::jsonExtract(json, "count");  // "42"
 std::string safe = springapi::jsonEscape("line1\nline2");   // "line1\\nline2"
 ```
 
-### WebRTC (optional, requires `-DSPRINGAPI_WEBRTC=ON`)
+### Game-connect (`connectRtc`) — removed (GW7)
 
-```cpp
-auto conn = springapi::connectRtc("http://localhost:<game-port>", auth.token);
-if (!conn) { /* connection failed */ }
-
-// Receive messages
-conn->onControlMessage([](const uint8_t* data, size_t len) {
-    // FlatBuffer message on reliable channel
-    // data[0] == 0x01 (envelope), data[1..] == FlatBuffer payload
-});
-
-conn->onStateMessage([](const uint8_t* data, size_t len) {
-    // Entity/projectile state on unreliable channel
-    // data[0] == 0x02/0x03/0x04 (envelope)
-});
-
-conn->onStateChange([](const std::string& state) {
-    // "connected", "disconnected", "failed", "closed"
-});
-
-// Send commands on the reliable channel
-conn->sendControl(data, len);
-
-// Send on the unreliable channel
-conn->sendState(data, len);
-
-// Check state
-if (conn->isOpen()) { ... }
-uint32_t id = conn->clientId();
-
-// Clean up
-conn->close();
-```
-
-The two data channels match the server's negotiated channels:
-- Channel 0 `"control"`: reliable, ordered
-- Channel 1 `"state"`: unreliable, unordered, maxRetransmits=0
-
-Signaling uses HTTP (`POST /api/rtc/offer` and `/api/rtc/candidate`). No WebSocket needed.
+The real-time game transport moved to WebTransport (HTTP/3 / QUIC) and the
+server's WebRTC plane was deleted. `springapi::connectRtc(...)` is retained as
+an inert stub that always returns `nullptr`, pending a C++ WebTransport client
+port. Lobby/HTTP functionality (auth, rooms, exec, logs) is unaffected.
 
 ## Python API
 
@@ -267,9 +224,8 @@ Your tool / lobby / bot
    │   ├── /api/logs/*
    │   └── /api/rooms/*
    │
-   └── WebRTC (optional, libdatachannel)
-       ├── channel 0: control (reliable)
-       └── channel 1: state (unreliable)
+   └── Game-connect (connectRtc) — removed (GW7); inert stub pending
+       a WebTransport client port
         │
         ▼
    Spring servers
