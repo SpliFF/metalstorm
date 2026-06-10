@@ -82,6 +82,8 @@ const ANCHOR_Z = 8704;
 const PLAYER_TEAM = 0;
 const ENEMY_TEAM = 1;
 
+let _units: UnitClassification[] = [];
+
 const scenario: Scenario = {
     name: 'unit-test-loop',
     description: 'Iterate land+air units through movement (v1) and record pass/fail. Use ?units=a,b,c to test a subset.',
@@ -130,14 +132,14 @@ const scenario: Scenario = {
             failed: 0,
             results: [],
         };
-        (this as any)._units = units;
+        _units = units;
 
         console.log(`[unit-test-loop] catalog: ${catalog.length} total, ${units.length} selected (movement + combat + economy + recon)`);
         if (requested) console.log(`[unit-test-loop] URL filter: ${requested.join(', ')}`);
     },
 
     async run(h): Promise<AssertionResult[]> {
-        const units = (this as any)._units as UnitClassification[];
+        const units = _units;
         const aggregate = window.unitTestResults!;
 
         for (let i = 0; i < units.length; i++) {

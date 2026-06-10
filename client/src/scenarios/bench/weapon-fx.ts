@@ -45,6 +45,9 @@ function numParam(name: string, fallback: number): number {
     return Number.isFinite(n) ? n : fallback;
 }
 
+let _sId = 0;
+let _tId = 0;
+
 const scenario: Scenario = {
     name: 'weapon-fx',
     description: 'Slow-motion engagement bench for diagnosing CEG / beam / projectile rendering. Use +/-/Pause to control speed, T to toggle tracking camera.',
@@ -73,8 +76,8 @@ const scenario: Scenario = {
         if (!sId || !tId) {
             throw new Error(`[weapon-fx] spawn parse failed: shooter=${sOut} target=${tOut}`);
         }
-        (this as any)._sId = sId;
-        (this as any)._tId = tId;
+        _sId = sId;
+        _tId = tId;
 
         // Hold target still + invulnerable so the engagement runs long
         // enough to observe trail/impact effects across many shots.
@@ -113,8 +116,8 @@ const scenario: Scenario = {
     },
 
     async run(h): Promise<AssertionResult[]> {
-        const sId = (this as any)._sId as number;
-        const tId = (this as any)._tId as number;
+        const sId = _sId;
+        const tId = _tId;
 
         // Long idle observation window — the user is here to watch
         // effects and capture screenshots, not race a timer. 5 wall

@@ -21,6 +21,9 @@ const CMD_MOVE = 10;
 const FLAT_MAP_CENTER = 8704;
 const ORBIT_RADIUS = 200;
 
+let _turretId = 0;
+let _targetId = 0;
+
 const scenario: Scenario = {
     name: 'aim-rotation',
     description: 'Static turretlaser fires at a shieldraid walking a square around it. Asserts the moving target takes sustained damage (i.e. the turret tracks).',
@@ -36,8 +39,8 @@ const scenario: Scenario = {
         const turretId = Number(turretOut.match(/:\s*(\d+)/)?.[1] ?? 0);
         const targetId = Number(targetOut.match(/:\s*(\d+)/)?.[1] ?? 0);
         if (!turretId || !targetId) throw new Error(`spawn parse failed: ${turretOut} / ${targetOut}`);
-        (this as any)._turretId = turretId;
-        (this as any)._targetId = targetId;
+        _turretId = turretId;
+        _targetId = targetId;
 
         await h.cameraSnapToGround(FLAT_MAP_CENTER, FLAT_MAP_CENTER, { height: 500, durationMs: 0 });
 
@@ -59,8 +62,8 @@ const scenario: Scenario = {
         }
     },
     async run(h) {
-        const turretId = (this as any)._turretId as number;
-        const targetId = (this as any)._targetId as number;
+        const turretId = _turretId;
+        const targetId = _targetId;
 
         const startFrame = await currentFrame(h);
         const before = await h.unitState(targetId);

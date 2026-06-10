@@ -19,7 +19,7 @@ import { staticDataPlugin } from './vite-static-data-plugin.js';
 //       * `/api/games/data/*`, `/api/maps/data/*`,
 //         `/api/engine/data/*`, `/api/maps/thumb/*`
 //   - The same external server proxies `/api/*` (everything else) to
-//     spring-lobby for the REST API + WebRTC signalling.
+//     spring-lobby for the REST API + SSE.
 //   - spring-lobby itself no longer serves static assets — those four
 //     paths return 404 if hit directly.
 const GAME_SERVER_PORT = process.env.GAME_SERVER_PORT || '8011';

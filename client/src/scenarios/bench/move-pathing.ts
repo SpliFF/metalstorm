@@ -16,6 +16,11 @@ import { sleep, parseUnitField, parseUnitPos, currentFrame } from '../types.js';
 
 const CMD_MOVE = 10;
 
+let _startX = 0;
+let _goalX = 0;
+let _z = 0;
+let _id = 0;
+
 const scenario: Scenario = {
     name: 'move-pathing',
     description: 'Single shieldraid traverses the flat map. Asserts arrival within a generous frame budget.',
@@ -34,22 +39,22 @@ const scenario: Scenario = {
         const startX = 5000;
         const goalX = 10000;
         const z = 8704;
-        (this as any)._startX = startX;
-        (this as any)._goalX = goalX;
-        (this as any)._z = z;
+        _startX = startX;
+        _goalX = goalX;
+        _z = z;
 
         const out = await h.spawn('shieldraid', startX, z, 0, 1);
         const id = Number(out.match(/:\s*(\d+)/)?.[1] ?? 0);
         if (!id) throw new Error(`spawn parse failed: ${out}`);
-        (this as any)._id = id;
+        _id = id;
 
         await h.cameraSnapToGround((startX + goalX) / 2, z, { height: 4000, durationMs: 0 });
         await h.order(id, CMD_MOVE, [goalX, 80, z], 0);
     },
     async run(h) {
-        const id = (this as any)._id as number;
-        const startX = (this as any)._startX as number;
-        const goalX = (this as any)._goalX as number;
+        const id = _id;
+        const startX = _startX;
+        const goalX = _goalX;
         const distance = goalX - startX;
         // 5000 elmos at 70 elmos/sec = ~71 sim seconds. At 5× sim
         // speed (set in setup) that's ~14s wall. Give 30s budget so
@@ -89,7 +94,7 @@ const scenario: Scenario = {
                 name: 'arrived at goal',
                 ok: arrived,
                 detail: lastPos
-                    ? `final pos=(${lastPos.x.toFixed(0)},${lastPos.z.toFixed(0)}) vs goal (${goalX},${(this as any)._z})`
+                    ? `final pos=(${lastPos.x.toFixed(0)},${lastPos.z.toFixed(0)}) vs goal (${goalX},${_z})`
                     : 'unit disappeared (no position)',
             },
             {

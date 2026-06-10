@@ -21,6 +21,9 @@ import { sleep, parseUnitField, currentFrame } from '../types.js';
 const CMD_ATTACK = 20;
 const FLAT_MAP_CENTER = 8704; // green_flat_x34_v3 is 17408×17408 elmos
 
+let _aId = 0;
+let _tId = 0;
+
 const scenario: Scenario = {
     name: 'duel-attack',
     description: '1v1 shieldraid attacker vs shieldraid target. Asserts target took damage and a shot was fired within the observation window.',
@@ -43,8 +46,8 @@ const scenario: Scenario = {
         const aId = Number(aOut.match(/:\s*(\d+)/)?.[1] ?? 0);
         const tId = Number(tOut.match(/:\s*(\d+)/)?.[1] ?? 0);
         if (!aId || !tId) throw new Error(`spawn parse failed: ${aOut} / ${tOut}`);
-        (this as any)._aId = aId;
-        (this as any)._tId = tId;
+        _aId = aId;
+        _tId = tId;
         // Hold-position + hold-fire the target so it's a stationary dummy.
         // Spring.SetUnit{Move,Fire}State aren't wired into our LuaSyncedCtrl
         // yet (Phase 4 API gap); use the CMD_*_STATE order verbs instead.
@@ -56,8 +59,8 @@ const scenario: Scenario = {
         await h.order(aId, CMD_ATTACK, [tId]);
     },
     async run(h) {
-        const aId = (this as any)._aId as number;
-        const tId = (this as any)._tId as number;
+        const aId = _aId;
+        const tId = _tId;
 
         const startFrame = await currentFrame(h);
         const beforeT = await h.unitState(tId);

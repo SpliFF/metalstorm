@@ -4,18 +4,11 @@
  * Flow: Login → Room Browser → Room Setup → Game
  */
 
-import { Engine, Scene, FreeCamera, Mesh, MeshBuilder, StandardMaterial, Vector3, Color3, Color4 } from '@babylonjs/core';
 // Side-effect import: registers Babylon's KTX2 loader + pins the
 // transcoder asset URLs to a CDN copy. After the KTX2 migration every
 // GPU texture (unit + feature + terrain + minimap) is `.ktx2`.
 import './core/ktx2-config.js';
-import { EntityRenderer, setLightingStyle, setUseZKMaterial } from './core/entity-renderer.js';
-import { ProjectileRenderer } from './core/projectile-renderer.js';
-import { ProjectileTextureResolver } from './core/projectile-texture-resolver.js';
-import { CegRuntime } from './core/ceg-runtime.js';
-import { BuildBeamRenderer } from './core/build-beam-renderer.js';
 import { DefCache } from './core/def-cache.js';
-import { CombatFX } from './core/combat-fx.js';
 import { AudioManager } from './core/audio.js';
 import { SoundEventPlayer } from './core/sound-events.js';
 import { MusicDirector } from './core/music-director.js';
@@ -25,7 +18,6 @@ import { BuildMenu } from './core/build-menu.js';
 import { OrderPanel } from './core/order-panel.js';
 import { EconomyBar } from './core/economy-bar.js';
 import { buildTerrainMesh, loadTerrainTextures, TerrainFog, DeformableTerrain, type MapDimensions } from './core/terrain.js';
-import { BuildingPlateRenderer } from './core/building-plate-renderer.js';
 import { DecalOverlay, buildTrackTypeNames } from './core/decal-overlay.js';
 import { attachDecalOverlay } from './core/decal-overlay-plugin.js';
 import { LobbyUI } from './lobby/lobby-ui.js';
@@ -48,18 +40,12 @@ import { PerfOverlay } from './core/perf-overlay.js';
 // GW8: the per-envelope net tally now lives in the worker's net-inspector
 // instance (fed by the in-worker connection); read it via window.test.netStats().
 // The main-thread perf-overlay (F11) re-plumb is deferred to perf checkpoint PC-1.
-import { FxLightPool } from './core/fx-light-pool.js';
-import { DistortionRenderer } from './core/distortion-renderer.js';
-import { MuzzleFlareRenderer } from './core/muzzle-flare-renderer.js';
-import { setActiveFxLightPool } from './core/zk-model-material.js';
 import { clientSettings } from './core/client-settings.js';
-import { setParticleBudget } from './core/ceg-translator.js';
 import { sendCameraViewport } from './core/viewport.js';
 import { installCameraWindowApi, uninstallCameraWindowApi } from './core/camera-window-api.js';
 import { fetchAndIngestDefs } from './core/defs-fetch.js';
 import { renderMapFeatures, DynamicFeatureRenderer } from './core/feature-renderer.js';
 import { CameraInput } from './core/camera-input.js';
-import { LuaWidgetManager } from './core/lua-widget-manager.js';
 import { TestHarness } from './core/test-harness.js';
 import { ScenarioRunner } from './scenarios/runner.js';
 import { createHUD, showHUD, updateHUD, updateSpeedHUD } from './ui/hud/hud.js';
@@ -82,11 +68,8 @@ import {
 // createHUD / showQuitConfirm / showGameOver read from this at call time.
 let gameTemplates: GameTemplates = getDefaultGameTemplates();
 
-let engine: Engine | null = null;
 /// Game-processor worker (PLAN-game-worker.md GW4). Owns the Babylon Engine on
-/// the transferred #game-canvas. From GW4-c1 the world render lives here, not
-/// on `engine` above (which stays declared but unused on main until the render
-/// modules + their disposal move into the worker across c2–c6).
+/// the transferred #game-canvas.
 let gameWorker: Worker | null = null;
 /// GW8 tooling bridge. The test harness (window.test) + widget eval
 /// (window.widgets.eval) live on main but their state lives in the worker;
@@ -112,7 +95,6 @@ function workerCall(method: string, args: unknown[] = []): Promise<unknown> {
     });
 }
 let perfOverlay: PerfOverlay | null = null;
-let entityRenderer: EntityRenderer | null = null;
 /// Presentation clock — the L0 timing spine (PLAN-latency.md). Converts the
 /// frame-stamped snapshot stream into a smooth presentation cursor P that the
 /// entity renderer interpolates to. Created once; the per-game ServerClock is
@@ -123,19 +105,7 @@ const presentationClock = new PresentationClock();
 /// Timing telemetry panel for the presentation clock (F10). Separate from the
 /// perf overlay (F11). Created lazily in the bootstrap once the DOM exists.
 let timingOverlay: TimingOverlay | null = null;
-let buildingPlateRenderer: BuildingPlateRenderer | null = null;
-let projectileRenderer: ProjectileRenderer | null = null;
-let buildBeamRenderer: BuildBeamRenderer | null = null;
 let dynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
-let cegRuntime: CegRuntime | null = null;
-let combatFX: CombatFX | null = null;
-let fxLightPool: FxLightPool | null = null;
-// PLAN.md Stage B1: ZK's authored projectile lights now feed the FxLightPool
-// inside the game-processor worker (GW4 moved the render core there), so the
-// authored-lights latch + the renderer's stand-in suppression live in
-// lua-widget-worker.ts now, not here.
-let distortionRenderer: DistortionRenderer | null = null;
-let muzzleFlareRenderer: MuzzleFlareRenderer | null = null;
 let decalOverlay: DecalOverlay | null = null;
 let audioManager: AudioManager | null = null;
 /// GW4-c5c-2: audio playback stays on the main thread (AudioContext is main-only).
@@ -156,6 +126,9 @@ let cameraInput: CameraInput | null = null;
 /// Set in startGame, cleared on teardown so we don't leak a subscriber (or
 /// post to a terminated worker) across game sessions.
 let gfxConfigUnsub: (() => void) | null = null;
+/// Named resize handler so it can be removed on teardown and not leak across
+/// game sessions (CODE-REVIEW C8).
+let onGameResize: (() => void) | null = null;
 /// GW4-c5b-2: the drag-select rectangle overlay. The worker computes the box
 /// (CSS px, canvas-relative) and posts `gp:dragBox`; we draw the div here.
 let dragOverlay: HTMLDivElement | null = null;
@@ -227,7 +200,6 @@ let lastServerPaused = false;
 function freezeFx(): void {
     fxFrozen = true;
     fxSimSpeed = 0;
-    projectileRenderer?.setSimSpeed(0);
     void testHarness?.simPause();
     console.log('[capture] frozen (server paused) — screenshot now; window.__captureResume() to thaw');
 }
@@ -280,11 +252,6 @@ function quitToLobby(): void {
     // and that container persists across game sessions. Without an
     // explicit dispose the next startGame() would append a second
     // canvas to the container.
-    // Widget manager — inside the startGame scope, but we stash a
-    // dispose callback on window so quitToLobby can reach it.
-    (window as any).__widgetManagerDispose?.();
-    delete (window as any).__widgetManagerDispose;
-
     minimap?.dispose();
     minimap = null;
     buildMenu?.dispose();
@@ -308,6 +275,7 @@ function quitToLobby(): void {
     cameraInput = null;
     gfxConfigUnsub?.();
     gfxConfigUnsub = null;
+    if (onGameResize) { window.removeEventListener('resize', onGameResize); onGameResize = null; }
     animatedCursor?.dispose();
     animatedCursor = null;
     // Game-processor worker owns the Engine + transferred canvas (GW4).
@@ -315,9 +283,6 @@ function quitToLobby(): void {
     // canvas itself is replaced with a fresh clone on the next startGame().
     gameWorker?.terminate();
     gameWorker = null;
-    engine?.stopRenderLoop();
-    engine?.dispose();
-    engine = null;
     uninstallCameraWindowApi();
     delete (window as any).test;
     delete (window as any).widgets;
@@ -328,20 +293,6 @@ function quitToLobby(): void {
     gpPending.clear();
     evalReqResolve = null;
     lastSceneState = null;
-    entityRenderer = null;
-    buildingPlateRenderer = null;
-    projectileRenderer = null;
-    buildBeamRenderer?.dispose();
-    buildBeamRenderer = null;
-    cegRuntime?.dispose();
-    cegRuntime = null;
-    combatFX = null;
-    fxLightPool?.dispose();
-    fxLightPool = null;
-    distortionRenderer?.dispose();
-    distortionRenderer = null;
-    muzzleFlareRenderer?.dispose();
-    muzzleFlareRenderer = null;
     musicDirector = null;
     soundEventPlayer = null;
     musicArmed = false;
@@ -384,13 +335,6 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // stay parented to #minimap-container and the new Minimap would
     // append a second canvas on top of it.
     //
-    // Also dispose any leftover widget manager from a previous session.
-    // Without this, startGame leaks a widget worker each call, and
-    // orphaned workers keep running their 30Hz frame loops in the
-    // background — a likely contributor to the widget shutdown loop.
-    (window as any).__widgetManagerDispose?.();
-    delete (window as any).__widgetManagerDispose;
-
     if (minimap) {
         minimap.dispose();
         minimap = null;
@@ -399,26 +343,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         gameWorker.terminate();
         gameWorker = null;
     }
-    if (engine) {
-        engine.stopRenderLoop();
-        engine.dispose();
-        engine = null;
-    }
     if (gameConn) {
         gameConn.disconnect();
         gameConn = null;
     }
-    entityRenderer = null;
-    buildingPlateRenderer = null;
-    cegRuntime?.dispose();
-    cegRuntime = null;
-    combatFX = null;
-    fxLightPool?.dispose();
-    fxLightPool = null;
-    distortionRenderer?.dispose();
-    distortionRenderer = null;
-    muzzleFlareRenderer?.dispose();
-    muzzleFlareRenderer = null;
     musicDirector = null;
     soundEventPlayer = null;
     musicArmed = false;
@@ -429,6 +357,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     cameraInput = null;
     gfxConfigUnsub?.();
     gfxConfigUnsub = null;
+    if (onGameResize) { window.removeEventListener('resize', onGameResize); onGameResize = null; }
     buildMenu?.dispose();
     buildMenu = null;
     orderPanel?.dispose();
@@ -678,14 +607,16 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     canvas.addEventListener('click', () => audioManager?.resume(), { once: true });
 
     // The worker owns the Engine + canvas now, so resize is forwarded to it.
-    window.addEventListener('resize', () => {
+    // Named callback so it can be removed on teardown (CODE-REVIEW C8).
+    onGameResize = () => {
         gameWorker?.postMessage({
             type: 'gp:resize',
             width: window.innerWidth,
             height: window.innerHeight,
             dpr: window.devicePixelRatio || 1,
         });
-    });
+    };
+    window.addEventListener('resize', onGameResize);
 
     // GW8: re-plumb the dev/test tooling for the worker split.
     //   window.test     — server-bound verbs run on main over HTTP; camera /
@@ -780,7 +711,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // the quit dialog at the same time.
     window.addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;
-        if (!engine) return;
+        if (!gameWorker) return;
         if (inputManager?.isPlacingBuild || inputManager?.hasPendingCommand()) return;
         e.preventDefault();
         showQuitConfirm(gameTemplates, { onConfirm: quitToLobby });

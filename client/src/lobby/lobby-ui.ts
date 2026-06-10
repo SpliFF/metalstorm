@@ -253,7 +253,7 @@ export class LobbyUI {
 
     getConnection(): Connection | null { return this.connection; }
 
-    /// Create a Connection for the game server (WebRTC). Only used
+    /// Create a Connection for the game server (WebTransport). Only used
     /// when a game starts — not for lobby operations.
     createGameConnection(): Connection {
         return new Connection({

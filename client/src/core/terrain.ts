@@ -12,6 +12,7 @@
  */
 
 import {
+    Engine,
     Scene,
     Mesh,
     SubMesh,
@@ -23,6 +24,7 @@ import {
     Vector3,
     VertexBuffer,
 } from '@babylonjs/core';
+import { getEngineGl } from './engine-gl.js';
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture';
 import type { LosBitmap } from './los-bitmap.js';
 import { DecalOverlayPlugin, attachDecalOverlay } from './decal-overlay-plugin.js';
@@ -544,9 +546,8 @@ export async function loadTerrainTextures(
     mapBaseUrl: string,
     dims: MapDimensions,
 ): Promise<void> {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const gl = (scene.getEngine() as any)._gl as WebGL2RenderingContext;
-    if (!gl) { console.warn('[terrain] no WebGL context'); return; }
+    let gl: WebGL2RenderingContext;
+    try { gl = getEngineGl(scene.getEngine() as Engine); } catch { console.warn('[terrain] no WebGL context'); return; }
 
     const atlas = await buildMapAtlasPages(gl, mapBaseUrl, dims);
     if (!atlas) return;
