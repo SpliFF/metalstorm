@@ -894,6 +894,25 @@ inline std::vector<uint8_t> BuildTeamStartInfo(
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_TeamStartInfo, info.Union());
 }
 
+/// Build a GameModOptions message from the game's modoption set. Sent reliably,
+/// once per client on auth (modoptions are immutable for the game-server's
+/// lifetime). The caller passes plain string pairs so Protocol.h stays free of
+/// the sim's `spring::unordered_map`.
+inline std::vector<uint8_t> BuildGameModOptions(
+    const std::vector<std::pair<std::string, std::string>>& options)
+{
+    flatbuffers::FlatBufferBuilder fbb(256);
+    std::vector<flatbuffers::Offset<SpringWeb::ModOption>> offs;
+    offs.reserve(options.size());
+    for (const auto& kv : options) {
+        offs.push_back(SpringWeb::CreateModOption(
+            fbb, fbb.CreateString(kv.first), fbb.CreateString(kv.second)));
+    }
+    auto vec = fbb.CreateVector(offs);
+    auto info = SpringWeb::CreateGameModOptions(fbb, vec);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameModOptions, info.Union());
+}
+
 /// Build a PlayerTeamEventBatch from drained collector events. Reliable; the
 /// widget worker fans out to widget:PlayerChanged / PlayerAdded /
 /// PlayerRemoved / TeamDied.

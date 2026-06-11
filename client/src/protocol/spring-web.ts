@@ -27,6 +27,7 @@ export { GameEventBatch, GameEventBatchT } from './spring-web/game-event-batch.j
 export { GameInfo, GameInfoT } from './spring-web/game-info.js';
 export { GameListRequest, GameListRequestT } from './spring-web/game-list-request.js';
 export { GameListUpdate, GameListUpdateT } from './spring-web/game-list-update.js';
+export { GameModOptions, GameModOptionsT } from './spring-web/game-mod-options.js';
 export { GameRestarting, GameRestartingT } from './spring-web/game-restarting.js';
 export { GameStarted, GameStartedT } from './spring-web/game-started.js';
 export { Handshake, HandshakeT } from './spring-web/handshake.js';
@@ -47,6 +48,7 @@ export { MapInfo, MapInfoT } from './spring-web/map-info.js';
 export { MapListUpdate, MapListUpdateT } from './spring-web/map-list-update.js';
 export { MapStartPos, MapStartPosT } from './spring-web/map-start-pos.js';
 export { MapWater, MapWaterT } from './spring-web/map-water.js';
+export { ModOption, ModOptionT } from './spring-web/mod-option.js';
 export { MusicEvent, MusicEventT } from './spring-web/music-event.js';
 export { MusicState } from './spring-web/music-state.js';
 export { PathRequest, PathRequestT } from './spring-web/path-request.js';

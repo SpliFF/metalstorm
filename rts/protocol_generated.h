@@ -281,6 +281,14 @@ struct TeamStatsHistoryBatch;
 struct TeamStatsHistoryBatchBuilder;
 struct TeamStatsHistoryBatchT;
 
+struct ModOption;
+struct ModOptionBuilder;
+struct ModOptionT;
+
+struct GameModOptions;
+struct GameModOptionsBuilder;
+struct GameModOptionsT;
+
 struct ReconnectResponse;
 struct ReconnectResponseBuilder;
 struct ReconnectResponseT;
@@ -1824,11 +1832,12 @@ enum ServerPayload : uint8_t {
   ServerPayload_PlayerTeamEventBatch = 38,
   ServerPayload_LuaUIMsgRelay = 39,
   ServerPayload_TeamStatsHistoryBatch = 40,
+  ServerPayload_GameModOptions = 41,
   ServerPayload_MIN = ServerPayload_NONE,
-  ServerPayload_MAX = ServerPayload_TeamStatsHistoryBatch
+  ServerPayload_MAX = ServerPayload_GameModOptions
 };
 
-inline const ServerPayload (&EnumValuesServerPayload())[41] {
+inline const ServerPayload (&EnumValuesServerPayload())[42] {
   static const ServerPayload values[] = {
     ServerPayload_NONE,
     ServerPayload_AuthResponse,
@@ -1870,13 +1879,14 @@ inline const ServerPayload (&EnumValuesServerPayload())[41] {
     ServerPayload_TeamStartInfo,
     ServerPayload_PlayerTeamEventBatch,
     ServerPayload_LuaUIMsgRelay,
-    ServerPayload_TeamStatsHistoryBatch
+    ServerPayload_TeamStatsHistoryBatch,
+    ServerPayload_GameModOptions
   };
   return values;
 }
 
 inline const char * const *EnumNamesServerPayload() {
-  static const char * const names[42] = {
+  static const char * const names[43] = {
     "NONE",
     "AuthResponse",
     "EntityCreate",
@@ -1918,13 +1928,14 @@ inline const char * const *EnumNamesServerPayload() {
     "PlayerTeamEventBatch",
     "LuaUIMsgRelay",
     "TeamStatsHistoryBatch",
+    "GameModOptions",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameServerPayload(ServerPayload e) {
-  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_TeamStatsHistoryBatch)) return "";
+  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_GameModOptions)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesServerPayload()[index];
 }
@@ -2093,6 +2104,10 @@ template<> struct ServerPayloadTraits<SpringWeb::TeamStatsHistoryBatch> {
   static const ServerPayload enum_value = ServerPayload_TeamStatsHistoryBatch;
 };
 
+template<> struct ServerPayloadTraits<SpringWeb::GameModOptions> {
+  static const ServerPayload enum_value = ServerPayload_GameModOptions;
+};
+
 template<typename T> struct ServerPayloadUnionTraits {
   static const ServerPayload enum_value = ServerPayload_NONE;
 };
@@ -2255,6 +2270,10 @@ template<> struct ServerPayloadUnionTraits<SpringWeb::LuaUIMsgRelayT> {
 
 template<> struct ServerPayloadUnionTraits<SpringWeb::TeamStatsHistoryBatchT> {
   static const ServerPayload enum_value = ServerPayload_TeamStatsHistoryBatch;
+};
+
+template<> struct ServerPayloadUnionTraits<SpringWeb::GameModOptionsT> {
+  static const ServerPayload enum_value = ServerPayload_GameModOptions;
 };
 
 struct ServerPayloadUnion {
@@ -2606,6 +2625,14 @@ struct ServerPayloadUnion {
   const SpringWeb::TeamStatsHistoryBatchT *AsTeamStatsHistoryBatch() const {
     return type == ServerPayload_TeamStatsHistoryBatch ?
       reinterpret_cast<const SpringWeb::TeamStatsHistoryBatchT *>(value) : nullptr;
+  }
+  SpringWeb::GameModOptionsT *AsGameModOptions() {
+    return type == ServerPayload_GameModOptions ?
+      reinterpret_cast<SpringWeb::GameModOptionsT *>(value) : nullptr;
+  }
+  const SpringWeb::GameModOptionsT *AsGameModOptions() const {
+    return type == ServerPayload_GameModOptions ?
+      reinterpret_cast<const SpringWeb::GameModOptionsT *>(value) : nullptr;
   }
 };
 
@@ -9118,6 +9145,161 @@ inline ::flatbuffers::Offset<TeamStatsHistoryBatch> CreateTeamStatsHistoryBatchD
 
 ::flatbuffers::Offset<TeamStatsHistoryBatch> CreateTeamStatsHistoryBatch(::flatbuffers::FlatBufferBuilder &_fbb, const TeamStatsHistoryBatchT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
+struct ModOptionT : public ::flatbuffers::NativeTable {
+  typedef ModOption TableType;
+  std::string key{};
+  std::string value{};
+};
+
+/// One game modoption (always a string key→value, exactly as the lobby
+/// passed it to the game server via `--modoption key=value` and as the
+/// synced side stores it in `CGameSetup::GetModOptions`). Values stay
+/// strings on the client too — Recoil's `Spring.GetModOptions()` pushes
+/// `lua_pushsstring(value)` and callers `tonumber()` numeric options
+/// themselves (LuaSyncedRead.cpp `PushAllOptions`).
+struct ModOption FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef ModOptionT NativeTableType;
+  typedef ModOptionBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_KEY = 4,
+    VT_VALUE = 6
+  };
+  const ::flatbuffers::String *key() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_KEY);
+  }
+  const ::flatbuffers::String *value() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_VALUE);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_KEY) &&
+           verifier.VerifyString(key()) &&
+           VerifyOffset(verifier, VT_VALUE) &&
+           verifier.VerifyString(value()) &&
+           verifier.EndTable();
+  }
+  ModOptionT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(ModOptionT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<ModOption> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ModOptionT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct ModOptionBuilder {
+  typedef ModOption Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_key(::flatbuffers::Offset<::flatbuffers::String> key) {
+    fbb_.AddOffset(ModOption::VT_KEY, key);
+  }
+  void add_value(::flatbuffers::Offset<::flatbuffers::String> value) {
+    fbb_.AddOffset(ModOption::VT_VALUE, value);
+  }
+  explicit ModOptionBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<ModOption> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<ModOption>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<ModOption> CreateModOption(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::String> key = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> value = 0) {
+  ModOptionBuilder builder_(_fbb);
+  builder_.add_value(value);
+  builder_.add_key(key);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<ModOption> CreateModOptionDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const char *key = nullptr,
+    const char *value = nullptr) {
+  auto key__ = key ? _fbb.CreateString(key) : 0;
+  auto value__ = value ? _fbb.CreateString(value) : 0;
+  return SpringWeb::CreateModOption(
+      _fbb,
+      key__,
+      value__);
+}
+
+::flatbuffers::Offset<ModOption> CreateModOption(::flatbuffers::FlatBufferBuilder &_fbb, const ModOptionT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct GameModOptionsT : public ::flatbuffers::NativeTable {
+  typedef GameModOptions TableType;
+  std::vector<std::unique_ptr<SpringWeb::ModOptionT>> options{};
+  GameModOptionsT() = default;
+  GameModOptionsT(const GameModOptionsT &o);
+  GameModOptionsT(GameModOptionsT&&) FLATBUFFERS_NOEXCEPT = default;
+  GameModOptionsT &operator=(GameModOptionsT o) FLATBUFFERS_NOEXCEPT;
+};
+
+/// The active game's modoptions. Sent reliably, once, per-client on auth
+/// (modoptions are immutable for the life of a game server, so there is no
+/// re-broadcast — a late joiner gets them on its own auth). Feeds the worker
+/// `liveState.modOptions` so the unsynced LuaUI `Spring.GetModOptions()`
+/// returns the same set the synced gadgets and the defs-cache key already see.
+struct GameModOptions FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef GameModOptionsT NativeTableType;
+  typedef GameModOptionsBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_OPTIONS = 4
+  };
+  const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::ModOption>> *options() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::ModOption>> *>(VT_OPTIONS);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_OPTIONS) &&
+           verifier.VerifyVector(options()) &&
+           verifier.VerifyVectorOfTables(options()) &&
+           verifier.EndTable();
+  }
+  GameModOptionsT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(GameModOptionsT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<GameModOptions> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameModOptionsT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct GameModOptionsBuilder {
+  typedef GameModOptions Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_options(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::ModOption>>> options) {
+    fbb_.AddOffset(GameModOptions::VT_OPTIONS, options);
+  }
+  explicit GameModOptionsBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<GameModOptions> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<GameModOptions>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<GameModOptions> CreateGameModOptions(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::ModOption>>> options = 0) {
+  GameModOptionsBuilder builder_(_fbb);
+  builder_.add_options(options);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<GameModOptions> CreateGameModOptionsDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const std::vector<::flatbuffers::Offset<SpringWeb::ModOption>> *options = nullptr) {
+  auto options__ = options ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::ModOption>>(*options) : 0;
+  return SpringWeb::CreateGameModOptions(
+      _fbb,
+      options__);
+}
+
+::flatbuffers::Offset<GameModOptions> CreateGameModOptions(::flatbuffers::FlatBufferBuilder &_fbb, const GameModOptionsT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
 struct ReconnectResponseT : public ::flatbuffers::NativeTable {
   typedef ReconnectResponse TableType;
   uint8_t status = 0;
@@ -14811,6 +14993,9 @@ struct ServerMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const SpringWeb::TeamStatsHistoryBatch *payload_as_TeamStatsHistoryBatch() const {
     return payload_type() == SpringWeb::ServerPayload_TeamStatsHistoryBatch ? static_cast<const SpringWeb::TeamStatsHistoryBatch *>(payload()) : nullptr;
   }
+  const SpringWeb::GameModOptions *payload_as_GameModOptions() const {
+    return payload_type() == SpringWeb::ServerPayload_GameModOptions ? static_cast<const SpringWeb::GameModOptions *>(payload()) : nullptr;
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_PAYLOAD_TYPE, 1) &&
@@ -14981,6 +15166,10 @@ template<> inline const SpringWeb::LuaUIMsgRelay *ServerMessage::payload_as<Spri
 
 template<> inline const SpringWeb::TeamStatsHistoryBatch *ServerMessage::payload_as<SpringWeb::TeamStatsHistoryBatch>() const {
   return payload_as_TeamStatsHistoryBatch();
+}
+
+template<> inline const SpringWeb::GameModOptions *ServerMessage::payload_as<SpringWeb::GameModOptions>() const {
+  return payload_as_GameModOptions();
 }
 
 struct ServerMessageBuilder {
@@ -17477,6 +17666,71 @@ inline ::flatbuffers::Offset<TeamStatsHistoryBatch> CreateTeamStatsHistoryBatch(
   return SpringWeb::CreateTeamStatsHistoryBatch(
       _fbb,
       _teams);
+}
+
+inline ModOptionT *ModOption::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<ModOptionT>(new ModOptionT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void ModOption::UnPackTo(ModOptionT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = key(); if (_e) _o->key = _e->str(); }
+  { auto _e = value(); if (_e) _o->value = _e->str(); }
+}
+
+inline ::flatbuffers::Offset<ModOption> ModOption::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ModOptionT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateModOption(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<ModOption> CreateModOption(::flatbuffers::FlatBufferBuilder &_fbb, const ModOptionT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const ModOptionT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _key = _o->key.empty() ? 0 : _fbb.CreateString(_o->key);
+  auto _value = _o->value.empty() ? 0 : _fbb.CreateString(_o->value);
+  return SpringWeb::CreateModOption(
+      _fbb,
+      _key,
+      _value);
+}
+
+inline GameModOptionsT::GameModOptionsT(const GameModOptionsT &o) {
+  options.reserve(o.options.size());
+  for (const auto &options_ : o.options) { options.emplace_back((options_) ? new SpringWeb::ModOptionT(*options_) : nullptr); }
+}
+
+inline GameModOptionsT &GameModOptionsT::operator=(GameModOptionsT o) FLATBUFFERS_NOEXCEPT {
+  std::swap(options, o.options);
+  return *this;
+}
+
+inline GameModOptionsT *GameModOptions::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<GameModOptionsT>(new GameModOptionsT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void GameModOptions::UnPackTo(GameModOptionsT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = options(); if (_e) { _o->options.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->options[_i]) { _e->Get(_i)->UnPackTo(_o->options[_i].get(), _resolver); } else { _o->options[_i] = std::unique_ptr<SpringWeb::ModOptionT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->options.resize(0); } }
+}
+
+inline ::flatbuffers::Offset<GameModOptions> GameModOptions::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameModOptionsT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateGameModOptions(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<GameModOptions> CreateGameModOptions(::flatbuffers::FlatBufferBuilder &_fbb, const GameModOptionsT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const GameModOptionsT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _options = _o->options.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::ModOption>> (_o->options.size(), [](size_t i, _VectorArgs *__va) { return CreateModOption(*__va->__fbb, __va->__o->options[i].get(), __va->__rehasher); }, &_va ) : 0;
+  return SpringWeb::CreateGameModOptions(
+      _fbb,
+      _options);
 }
 
 inline ReconnectResponseT *ReconnectResponse::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
@@ -20537,6 +20791,10 @@ inline bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *o
       auto ptr = reinterpret_cast<const SpringWeb::TeamStatsHistoryBatch *>(obj);
       return verifier.VerifyTable(ptr);
     }
+    case ServerPayload_GameModOptions: {
+      auto ptr = reinterpret_cast<const SpringWeb::GameModOptions *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
     default: return true;
   }
 }
@@ -20716,6 +20974,10 @@ inline void *ServerPayloadUnion::UnPack(const void *obj, ServerPayload type, con
       auto ptr = reinterpret_cast<const SpringWeb::TeamStatsHistoryBatch *>(obj);
       return ptr->UnPack(resolver);
     }
+    case ServerPayload_GameModOptions: {
+      auto ptr = reinterpret_cast<const SpringWeb::GameModOptions *>(obj);
+      return ptr->UnPack(resolver);
+    }
     default: return nullptr;
   }
 }
@@ -20883,6 +21145,10 @@ inline ::flatbuffers::Offset<void> ServerPayloadUnion::Pack(::flatbuffers::FlatB
       auto ptr = reinterpret_cast<const SpringWeb::TeamStatsHistoryBatchT *>(value);
       return CreateTeamStatsHistoryBatch(_fbb, ptr, _rehasher).Union();
     }
+    case ServerPayload_GameModOptions: {
+      auto ptr = reinterpret_cast<const SpringWeb::GameModOptionsT *>(value);
+      return CreateGameModOptions(_fbb, ptr, _rehasher).Union();
+    }
     default: return 0;
   }
 }
@@ -21047,6 +21313,10 @@ inline ServerPayloadUnion::ServerPayloadUnion(const ServerPayloadUnion &u) : typ
     }
     case ServerPayload_TeamStatsHistoryBatch: {
       value = new SpringWeb::TeamStatsHistoryBatchT(*reinterpret_cast<SpringWeb::TeamStatsHistoryBatchT *>(u.value));
+      break;
+    }
+    case ServerPayload_GameModOptions: {
+      value = new SpringWeb::GameModOptionsT(*reinterpret_cast<SpringWeb::GameModOptionsT *>(u.value));
       break;
     }
     default:
@@ -21253,6 +21523,11 @@ inline void ServerPayloadUnion::Reset() {
     }
     case ServerPayload_TeamStatsHistoryBatch: {
       auto ptr = reinterpret_cast<SpringWeb::TeamStatsHistoryBatchT *>(value);
+      delete ptr;
+      break;
+    }
+    case ServerPayload_GameModOptions: {
+      auto ptr = reinterpret_cast<SpringWeb::GameModOptionsT *>(value);
       delete ptr;
       break;
     }

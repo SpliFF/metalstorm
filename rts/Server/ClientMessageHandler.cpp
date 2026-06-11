@@ -21,6 +21,7 @@
 #include "Sim/MoveTypes/MoveDefHandler.h"
 #include "Sim/Path/IPathManager.h"
 #include "Game/Players/PlayerHandler.h"
+#include "Game/GameSetup.h"
 #include "System/SpringLog/SpringLog.h"
 
 #include <algorithm>
@@ -312,6 +313,20 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             {
                 auto tsi = start.BuildTeamStartInfoMsg();
                 rtcServer.SendReliable(msg.clientId, tsi.data(), tsi.size());
+            }
+
+            // The game's modoptions, so the in-game LuaUI worker's
+            // Spring.GetModOptions() returns the same set the synced
+            // gadgets (and the defs-cache key) already see. Immutable for
+            // the game-server's lifetime → one-shot per client, no
+            // re-broadcast (a late joiner gets them on its own auth).
+            {
+                const auto& opts = CGameSetup::GetModOptions();
+                std::vector<std::pair<std::string, std::string>> kvs;
+                kvs.reserve(opts.size());
+                for (const auto& kv : opts) kvs.emplace_back(kv.first, kv.second);
+                auto mo = Protocol::BuildGameModOptions(kvs);
+                rtcServer.SendReliable(msg.clientId, mo.data(), mo.size());
             }
 
             SLOG(SPRING_LOG_NOTICE, "client %u authenticated as '%s' (id=%lld) team=%d",

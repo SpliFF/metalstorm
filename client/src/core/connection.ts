@@ -37,6 +37,7 @@ import { GameInfo } from '../protocol/spring-web/game-info.js';
 import { TeamStartInfo } from '../protocol/spring-web/team-start-info.js';
 import { PlayerTeamEventBatch } from '../protocol/spring-web/player-team-event-batch.js';
 import { TeamStatsHistoryBatch } from '../protocol/spring-web/team-stats-history-batch.js';
+import { GameModOptions } from '../protocol/spring-web/game-mod-options.js';
 import { ResourceUpdate } from '../protocol/spring-web/resource-update.js';
 import { MapData } from '../protocol/spring-web/map-data.js';
 import { PlayerLeft } from '../protocol/spring-web/player-left.js';
@@ -841,6 +842,11 @@ export interface ConnectionEvents {
     /// Per-second team stats-history deltas (TeamStatsHistoryBatch) — feeds
     /// the worker's per-team history for Spring.GetTeamStatsHistory.
     onTeamStatsHistory?: (teams: TeamStatsHistoryInfo[]) => void;
+
+    /// The game's modoptions (GameModOptions). Sent reliably, once, on auth.
+    /// Feeds the worker's liveState.modOptions so Spring.GetModOptions()
+    /// matches the synced set. Values arrive as strings (engine convention).
+    onGameModOptions?: (options: Record<string, string>) => void;
     /// A relayed `Spring.SendLuaUIMsg` (LuaUIMsgRelay). The server already
     /// applied the audience filter; deliver unconditionally to
     /// `widget:RecvLuaMsg(data, playerId)`. `data` preserves embedded NULs.
@@ -1601,6 +1607,18 @@ export class Connection {
                     events.push({ kind: e.kind(), id: e.id(), reason: e.reason() });
                 }
                 if (events.length > 0) this.events.onPlayerTeamEvents?.(events);
+                break;
+            }
+            case ServerPayload.GameModOptions: {
+                const mo = msg.payload(new GameModOptions()) as GameModOptions;
+                const options: Record<string, string> = {};
+                for (let i = 0; i < mo.optionsLength(); i++) {
+                    const o = mo.options(i);
+                    if (!o) continue;
+                    const key = o.key();
+                    if (key) options[key] = o.value() ?? '';
+                }
+                this.events.onGameModOptions?.(options);
                 break;
             }
             case ServerPayload.TeamStatsHistoryBatch: {

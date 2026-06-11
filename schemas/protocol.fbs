@@ -945,6 +945,26 @@ table TeamStatsHistoryBatch {
     teams: [TeamStatsHistoryItem];
 }
 
+/// One game modoption (always a string key→value, exactly as the lobby
+/// passed it to the game server via `--modoption key=value` and as the
+/// synced side stores it in `CGameSetup::GetModOptions`). Values stay
+/// strings on the client too — Recoil's `Spring.GetModOptions()` pushes
+/// `lua_pushsstring(value)` and callers `tonumber()` numeric options
+/// themselves (LuaSyncedRead.cpp `PushAllOptions`).
+table ModOption {
+    key: string;
+    value: string;
+}
+
+/// The active game's modoptions. Sent reliably, once, per-client on auth
+/// (modoptions are immutable for the life of a game server, so there is no
+/// re-broadcast — a late joiner gets them on its own auth). Feeds the worker
+/// `liveState.modOptions` so the unsynced LuaUI `Spring.GetModOptions()`
+/// returns the same set the synced gadgets and the defs-cache key already see.
+table GameModOptions {
+    options: [ModOption];
+}
+
 table ReconnectResponse {
     status: uint8;              // 0=OK (delta), 1=FULL_SYNC
 }
@@ -1660,6 +1680,7 @@ union ServerPayload {
     PlayerTeamEventBatch,
     LuaUIMsgRelay,
     TeamStatsHistoryBatch,
+    GameModOptions,
 }
 
 table ServerMessage {

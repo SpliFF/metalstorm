@@ -690,6 +690,13 @@ function gpConnect(msg: GpInitToWorker): void {
                 });
             }
         },
+        // PLAN-bar.md §5 (5c): the game's modoptions → liveState.modOptions, read
+        // by the unsynced LuaUI Spring.GetModOptions(). Sent once on auth (they're
+        // immutable per game server). Values stay strings — faithful to Recoil's
+        // PushAllOptions (lua_pushsstring); widgets tonumber() numeric options.
+        onGameModOptions: (options) => {
+            liveState.modOptions = { ...options };
+        },
         // PLAN-bar.md §6: player/team status changes (PlayerTeamEventBatch) →
         // the matching Recoil LuaUI callins. The server fires these into its
         // own synced Lua via eventHandler; this carries them to the unsynced

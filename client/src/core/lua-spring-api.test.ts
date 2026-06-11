@@ -553,3 +553,56 @@ describe('GetTeamStatsHistory', () => {
         expect(call(api.GetTeamStatsHistory, 1)).toBeNull(); // enemy ally → gated
     });
 });
+
+describe('GetModOptions (PLAN-bar.md §5 5c)', () => {
+    it('returns the empty default before any GameModOptions arrives', () => {
+        const ls = createDefaultLiveState();
+        const api = springApi(makeCtx(), ls);
+        expect(call(api.GetModOptions)).toEqual({});
+    });
+
+    it('reflects liveState.modOptions and returns a copy (not the backing store)', () => {
+        const ls = createDefaultLiveState();
+        // onGameModOptions stores the decoded map verbatim (strings).
+        ls.modOptions = { ffa: '1', startmetal: '1000', map_waterlevel: '0' };
+        const api = springApi(makeCtx(), ls);
+        const out = call(api.GetModOptions) as Record<string, unknown>;
+        expect(out).toEqual({ ffa: '1', startmetal: '1000', map_waterlevel: '0' });
+        // Values stay strings — faithful to Recoil's PushAllOptions; callers
+        // tonumber() them. A mutation of the result must not leak back.
+        expect(typeof out.startmetal).toBe('string');
+        out.ffa = '0';
+        expect((call(api.GetModOptions) as Record<string, unknown>).ffa).toBe('1');
+    });
+});
+
+// Round-trips the GameModOptions FlatBuffer through the exact decode loop
+// connection.ts runs (build → getRootAs → optionsLength/options/key/value),
+// guarding the §5 5c wire end-to-end at the binding layer.
+describe('GameModOptions wire decode', () => {
+    it('builds and decodes a key→value map', async () => {
+        const flatbuffers = await import('flatbuffers');
+        const { GameModOptions } = await import('../protocol/spring-web/game-mod-options.js');
+        const { ModOption } = await import('../protocol/spring-web/mod-option.js');
+
+        const pairs: Array<[string, string]> = [['ffa', '1'], ['startmetal', '1000']];
+        const b = new flatbuffers.Builder(256);
+        const offs = pairs.map(([k, v]) =>
+            ModOption.createModOption(b, b.createString(k), b.createString(v)));
+        const vec = GameModOptions.createOptionsVector(b, offs);
+        GameModOptions.startGameModOptions(b);
+        GameModOptions.addOptions(b, vec);
+        b.finish(GameModOptions.endGameModOptions(b));
+
+        const mo = GameModOptions.getRootAsGameModOptions(
+            new flatbuffers.ByteBuffer(b.asUint8Array()));
+        const options: Record<string, string> = {};
+        for (let i = 0; i < mo.optionsLength(); i++) {
+            const o = mo.options(i);
+            if (!o) continue;
+            const key = o.key();
+            if (key) options[key] = o.value() ?? '';
+        }
+        expect(options).toEqual({ ffa: '1', startmetal: '1000' });
+    });
+});
