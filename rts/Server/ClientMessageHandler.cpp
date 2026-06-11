@@ -130,6 +130,28 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             };
             const bool rosterRequired = !playerTeamByUsername.empty();
 
+            // One-shots every authenticated session needs — fresh login AND
+            // token reconnect (the browser stores its lobby session token, so
+            // the reconnect path is the common case). Without sending these on
+            // reconnect, the in-game LuaUI worker never gets the modoptions
+            // (GetModOptions stays {}); TeamStartInfo otherwise only survives
+            // via its post-GameStart re-broadcast.
+            auto sendPostAuthOneShots = [&]() {
+                // Team start positions + ally start boxes →
+                // Spring.GetTeamStartPosition / GetAllyTeamStartBox.
+                auto tsi = start.BuildTeamStartInfoMsg();
+                rtcServer.SendReliable(msg.clientId, tsi.data(), tsi.size());
+                // The game's modoptions → worker Spring.GetModOptions(), the
+                // same set the synced gadgets + defs-cache key see. Immutable
+                // for the game server's lifetime → one-shot per client.
+                const auto& opts = CGameSetup::GetModOptions();
+                std::vector<std::pair<std::string, std::string>> kvs;
+                kvs.reserve(opts.size());
+                for (const auto& kv : opts) kvs.emplace_back(kv.first, kv.second);
+                auto mo = Protocol::BuildGameModOptions(kvs);
+                rtcServer.SendReliable(msg.clientId, mo.data(), mo.size());
+            };
+
             // Try token-based reconnection first
             const bool hasToken = auth->token() && auth->token()->size() > 0;
             if (hasToken) {
@@ -185,6 +207,7 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     // next mutation to trigger the broadcast
                     // hook.
                     start.PushStandingOrdersTo(msg.clientId, team);
+                    sendPostAuthOneShots();
                     SLOG(SPRING_LOG_NOTICE,
                         "client %u reconnected as '%s' (id=%lld) team=%d",
                         msg.clientId, reconnectUser->username.c_str(),
@@ -306,28 +329,10 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // hook.
             start.PushStandingOrdersTo(msg.clientId, team);
 
-            // Initial team start positions + ally start boxes so the
-            // in-game LuaUI worker can answer Spring.GetTeamStartPosition
-            // / GetAllyTeamStartBox. Re-broadcast after GameStart for the
-            // final post-spawn values (see checkAndFireGameStart).
-            {
-                auto tsi = start.BuildTeamStartInfoMsg();
-                rtcServer.SendReliable(msg.clientId, tsi.data(), tsi.size());
-            }
-
-            // The game's modoptions, so the in-game LuaUI worker's
-            // Spring.GetModOptions() returns the same set the synced
-            // gadgets (and the defs-cache key) already see. Immutable for
-            // the game-server's lifetime → one-shot per client, no
-            // re-broadcast (a late joiner gets them on its own auth).
-            {
-                const auto& opts = CGameSetup::GetModOptions();
-                std::vector<std::pair<std::string, std::string>> kvs;
-                kvs.reserve(opts.size());
-                for (const auto& kv : opts) kvs.emplace_back(kv.first, kv.second);
-                auto mo = Protocol::BuildGameModOptions(kvs);
-                rtcServer.SendReliable(msg.clientId, mo.data(), mo.size());
-            }
+            // Team start positions + ally start boxes (re-broadcast after
+            // GameStart for the final post-spawn values) and the game's
+            // modoptions. Shared with the reconnect path above.
+            sendPostAuthOneShots();
 
             SLOG(SPRING_LOG_NOTICE, "client %u authenticated as '%s' (id=%lld) team=%d",
                 msg.clientId, username, user->id, team);
