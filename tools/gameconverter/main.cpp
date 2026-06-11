@@ -166,7 +166,11 @@ bool RunCommand(const std::vector<std::string>& argv, std::string& output) {
         if (i) cmd += ' ';
         cmd += '"';
         for (char c : argv[i]) {
-            if (c == '"' || c == '\\') cmd += '\\';
+            // Inside double quotes the shell still expands $ and `...`
+            // and honours \ — so a filename like `wILLE$T '…'.mp3`
+            // would lose `$T`. Backslash-escape every char POSIX treats
+            // as special within double quotes.
+            if (c == '"' || c == '\\' || c == '$' || c == '`') cmd += '\\';
             cmd += c;
         }
         cmd += '"';
