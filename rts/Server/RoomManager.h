@@ -317,6 +317,7 @@ private:
     void DeleteRoomFromDb(uint32_t roomId);
     void PersistMembersLocked(const GameRoom& room);
     void PersistAISlotsLocked(const GameRoom& room);
+    void PersistModOptionsLocked(const GameRoom& room);
 
     std::recursive_mutex mutex;
     std::unordered_map<uint32_t, GameRoom> rooms;

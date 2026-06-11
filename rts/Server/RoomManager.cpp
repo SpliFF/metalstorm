@@ -44,6 +44,7 @@ void RoomManager::EnsureTables(sqlite3* db) {
             sqlite3_exec(db, "DROP TABLE IF EXISTS rooms", nullptr, nullptr, nullptr);
             sqlite3_exec(db, "DROP TABLE IF EXISTS room_members", nullptr, nullptr, nullptr);
             sqlite3_exec(db, "DROP TABLE IF EXISTS room_ai_slots", nullptr, nullptr, nullptr);
+            sqlite3_exec(db, "DROP TABLE IF EXISTS room_mod_options", nullptr, nullptr, nullptr);
         }
     }
     sqlite3_exec(db, R"(
@@ -84,6 +85,14 @@ void RoomManager::EnsureTables(sqlite3* db) {
             team INTEGER NOT NULL DEFAULT 0,
             start_pos INTEGER NOT NULL DEFAULT -1,
             PRIMARY KEY (room_id, slot_index)
+        );
+    )", nullptr, nullptr, nullptr);
+    sqlite3_exec(db, R"(
+        CREATE TABLE IF NOT EXISTS room_mod_options (
+            room_id INTEGER NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (room_id, key)
         );
     )", nullptr, nullptr, nullptr);
 }
@@ -127,6 +136,7 @@ void RoomManager::PersistRoomLocked(const GameRoom& room) {
     sqlite3_finalize(s);
     PersistMembersLocked(room);
     PersistAISlotsLocked(room);
+    PersistModOptionsLocked(room);
 }
 
 void RoomManager::PersistMembersLocked(const GameRoom& room) {
@@ -201,6 +211,34 @@ void RoomManager::PersistAISlotsLocked(const GameRoom& room) {
     sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
 }
 
+void RoomManager::PersistModOptionsLocked(const GameRoom& room) {
+    if (!db) return;
+    sqlite3_exec(db, "BEGIN", nullptr, nullptr, nullptr);
+    {
+        char sql[128];
+        snprintf(sql, sizeof(sql),
+            "DELETE FROM room_mod_options WHERE room_id=%u", room.id);
+        sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
+    }
+    static const char* kInsert =
+        "INSERT INTO room_mod_options (room_id, key, value) VALUES (?, ?, ?)";
+    sqlite3_stmt* s = nullptr;
+    if (sqlite3_prepare_v2(db, kInsert, -1, &s, nullptr) == SQLITE_OK) {
+        for (const auto& kv : room.modOptions) {
+            sqlite3_reset(s);
+            sqlite3_bind_int(s, 1, static_cast<int>(room.id));
+            BindText(s, 2, kv.first);
+            BindText(s, 3, kv.second);
+            if (sqlite3_step(s) != SQLITE_DONE) {
+                SLOG(SPRING_LOG_WARNING, "PersistModOptions step: %s",
+                    sqlite3_errmsg(db));
+            }
+        }
+        sqlite3_finalize(s);
+    }
+    sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+}
+
 void RoomManager::DeleteRoomFromDb(uint32_t roomId) {
     if (!db) return;
     char sql[160];
@@ -209,6 +247,8 @@ void RoomManager::DeleteRoomFromDb(uint32_t roomId) {
     snprintf(sql, sizeof(sql), "DELETE FROM room_members WHERE room_id=%u", roomId);
     sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
     snprintf(sql, sizeof(sql), "DELETE FROM room_ai_slots WHERE room_id=%u", roomId);
+    sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
+    snprintf(sql, sizeof(sql), "DELETE FROM room_mod_options WHERE room_id=%u", roomId);
     sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
 }
 
@@ -297,7 +337,27 @@ void RoomManager::LoadFromDatabase() {
         }
     }
 
-    // 4. nextRoomId = MAX(id)+1 so we don't collide with adopted rooms.
+    // 4. Mod options
+    {
+        const char* kSql =
+            "SELECT room_id, key, value FROM room_mod_options";
+        sqlite3_stmt* s = nullptr;
+        if (sqlite3_prepare_v2(db, kSql, -1, &s, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(s) == SQLITE_ROW) {
+                uint32_t rid = static_cast<uint32_t>(sqlite3_column_int(s, 0));
+                auto it = rooms.find(rid);
+                if (it == rooms.end()) continue;
+                const unsigned char* k = sqlite3_column_text(s, 1);
+                const unsigned char* v = sqlite3_column_text(s, 2);
+                if (!k) continue;
+                it->second.modOptions[reinterpret_cast<const char*>(k)] =
+                    v ? reinterpret_cast<const char*>(v) : "";
+            }
+            sqlite3_finalize(s);
+        }
+    }
+
+    // 5. nextRoomId = MAX(id)+1 so we don't collide with adopted rooms.
     nextRoomId = 1;
     {
         sqlite3_stmt* s = nullptr;
@@ -597,6 +657,7 @@ bool RoomManager::SetModOption(
         SLOG(SPRING_LOG_INFO, "room %u: host set modoption '%s'='%s'",
             roomId, key.c_str(), value.c_str());
     }
+    PersistModOptionsLocked(room);
     return true;
 }
 
