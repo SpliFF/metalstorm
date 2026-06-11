@@ -41,6 +41,14 @@
 
 namespace Protocol {
 
+/// Wire-protocol version negotiated in the Handshake (C1). Bump on any
+/// breaking change to the FlatBuffers schema or binary envelope formats; the
+/// server rejects clients that send a different value (a stale cached JS
+/// bundle against a changed schema is exactly the failure this prevents).
+/// Additive, default-valued FlatBuffers fields do NOT require a bump.
+/// Keep in sync with PROTOCOL_VERSION in client/src/core/connection.ts.
+constexpr uint16_t CURRENT_PROTOCOL_VERSION = 1;
+
 constexpr uint8_t ENVELOPE_FLATBUFFERS = 0x01;
 constexpr uint8_t ENVELOPE_ENTITY_STATE = 0x02;
 constexpr uint8_t ENVELOPE_PROJECTILE_STATE = 0x04;

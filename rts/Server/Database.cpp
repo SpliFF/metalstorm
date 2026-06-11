@@ -144,6 +144,22 @@ std::optional<UserRecord> Database::FindUserById(int64_t userId) {
     return user;
 }
 
+bool Database::UpdatePasswordHash(int64_t userId, const std::string& passwordHash) {
+    const char* sql = "UPDATE users SET password_hash = ? WHERE id = ?";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return false;
+
+    sqlite3_bind_text(stmt, 1, passwordHash.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, userId);
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    return rc == SQLITE_DONE;
+}
+
 bool Database::CreateSession(int64_t userId, const std::string& token) {
     const char* sql = "INSERT INTO sessions (token, user_id) VALUES (?, ?)";
     sqlite3_stmt* stmt = nullptr;
@@ -191,6 +207,20 @@ int64_t Database::ValidateSession(const std::string& token, int maxAgeSeconds) {
 
     sqlite3_finalize(stmt);
     return userId;
+}
+
+bool Database::EnsureAdminRole(const std::string& username) {
+    const char* sql = "UPDATE users SET role = 'admin' WHERE username = ?";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return false;
+
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    return rc == SQLITE_DONE && sqlite3_changes(db) > 0;
 }
 
 void Database::RevokeSession(const std::string& token) {

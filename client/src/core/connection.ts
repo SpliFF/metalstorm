@@ -66,6 +66,7 @@ import { UnitCommandBatch } from '../protocol/spring-web/unit-command-batch.js';
 import { UnitCommandEvent } from '../protocol/spring-web/unit-command-event.js';
 import { UnitCommandKind } from '../protocol/spring-web/unit-command-kind.js';
 import { AuthRequest } from '../protocol/spring-web/auth-request.js';
+import { Handshake } from '../protocol/spring-web/handshake.js';
 import { PlayerCommand } from '../protocol/spring-web/player-command.js';
 import { PlayerCommandBatch } from '../protocol/spring-web/player-command-batch.js';
 import { LuaRulesMsg } from '../protocol/spring-web/lua-rules-msg.js';
@@ -101,6 +102,13 @@ const ENVELOPE_BUILD_ACTIVITY = 0x06;
 const ENVELOPE_LOS_BITMAP = 0x07;
 const ENVELOPE_DECALS = 0x08;
 const ENVELOPE_HEIGHTMAP = 0x09;
+
+/** Wire-protocol version sent in the Handshake (C1). The game server rejects a
+ *  mismatch with AuthStatus.VersionMismatch — bump this in lockstep with
+ *  Protocol::CURRENT_PROTOCOL_VERSION (rts/Server/Protocol.h) on any breaking
+ *  schema / envelope change. */
+const PROTOCOL_VERSION = 1;
+
 export type ConnectionState = 'disconnected' | 'connecting' | 'handshake' | 'authenticating' | 'connected';
 
 export interface CombatEventInfo {
@@ -1095,6 +1103,9 @@ export class Connection {
         // creates a ClientSession. Don't fire onAuthenticated yet — wait for the
         // server's AuthResponse which carries the correct team assignment.
         console.log(`[connection] WebTransport connected to ${wtUrl}`);
+        // C1: the server gates auth on a protocol-compatible Handshake. Send it
+        // on the same ordered control stream, ahead of AuthRequest.
+        this.sendHandshake();
         this.sendAuthRequest();
 
         this.pingInterval = setInterval(() => this.sendPing(), 30000);
@@ -1127,6 +1138,14 @@ export class Connection {
         this.transport = null;
         this.cleanup();
         this.setState('disconnected');
+    }
+
+    private sendHandshake(): void {
+        const builder = new flatbuffers.Builder(64);
+        const clientVerOff = builder.createString(`springweb/${PROTOCOL_VERSION}`);
+        const hs = Handshake.createHandshake(builder, PROTOCOL_VERSION, clientVerOff);
+        this.sendClientMessage(builder, ClientPayload.Handshake, hs);
+        console.log(`[connection] sent Handshake (protocol v${PROTOCOL_VERSION})`);
     }
 
     private sendAuthRequest(): void {

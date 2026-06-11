@@ -66,4 +66,10 @@ struct GameServerContext {
     int&                                      nextPlayerNum;
     std::unordered_set<std::string>&          connectedRosterPlayers;
     size_t                                    rosterPlayersNeeded = 0;
+
+    // C1: clients that have sent a protocol-compatible Handshake. AuthRequest
+    // is refused until a matching handshake is recorded, so a client that
+    // skips the handshake (or sent an incompatible version) can't get a
+    // session. Cleared on disconnect alongside the other per-client maps.
+    std::unordered_set<ClientID>&             handshakedClients;
 };

@@ -133,6 +133,14 @@ target_link_libraries(quic_deps INTERFACE
     ${NGHTTP3_LINK_LIBRARIES} ${OPENSSL_QUIC_LINK_LIBRARIES})
 message(STATUS "QUIC stack: ngtcp2 ${NGTCP2_VERSION}, nghttp3 ${NGHTTP3_VERSION}, openssl ${OPENSSL_QUIC_VERSION}")
 
+# OpenSSL crypto for password hashing (scrypt) + secure random session tokens
+# (rts/Server/Crypto.cpp — S1/S3). Reuses the same OpenSSL the QUIC stack
+# located. spring-server gets libcrypto transitively via quic_deps; spring-lobby
+# (no QUIC link) and spring-tests link this leaner interface instead.
+add_library(openssl_crypto INTERFACE)
+target_include_directories(openssl_crypto INTERFACE ${OPENSSL_QUIC_INCLUDE_DIRS})
+target_link_libraries(openssl_crypto INTERFACE ${OPENSSL_QUIC_LINK_LIBRARIES})
+
 # Standalone GW1 de-risk harness: proves the QUIC/WebTransport toolchain
 # links and the core ngtcp2/OpenSSL server objects construct. Built only
 # when -DSPRING_BUILD_QUIC_DERISK=ON.
@@ -376,6 +384,7 @@ endif()
 # === spring-lobby executable (lightweight lobby server) ===
 set(LOBBY_SERVER_SOURCES
     rts/Server/Database.cpp
+    rts/Server/Crypto.cpp
     rts/Server/NetworkServer.cpp
     rts/Server/PerfMetrics.cpp
     rts/Server/RatingSystem.cpp
@@ -418,7 +427,7 @@ target_compile_definitions(spring-lobby PRIVATE
     # would invoke, so a rebuilt importer invalidates the model cache.
     MODELIMPORTER_BINARY_PATH="$<TARGET_FILE:modelimporter>"
 )
-target_link_libraries(spring-lobby PRIVATE lua nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite nlohmann_json::nlohmann_json)
+target_link_libraries(spring-lobby PRIVATE lua nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite nlohmann_json::nlohmann_json openssl_crypto)
 if(UNIX)
     target_link_libraries(spring-lobby PRIVATE pthread dl)
 endif()
@@ -449,7 +458,9 @@ if(TEST_SOURCES)
         ${MAP_SOURCES}
         ${LUA_BINDING_SOURCES}
         ${CMAKE_SOURCE_DIR}/rts/Server/CombatEventCollector.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/Crypto.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/DebugFlags.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/PlayerTeamEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ProjectileEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/SoundEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/StandingOrders.cpp
@@ -462,7 +473,7 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/lib/cereal/include
         ${GENERATED_DIR}
     )
-    target_link_libraries(spring-tests PRIVATE lua smmalloc ZLIB::ZLIB doctest::doctest springlog nlohmann_json::nlohmann_json)
+    target_link_libraries(spring-tests PRIVATE lua smmalloc ZLIB::ZLIB doctest::doctest springlog nlohmann_json::nlohmann_json openssl_crypto)
     if(UNIX AND NOT APPLE)
         target_link_libraries(spring-tests PRIVATE pthread dl)
     elseif(APPLE)
@@ -471,6 +482,13 @@ if(TEST_SOURCES)
             target_link_libraries(spring-tests PRIVATE ${COCOA_FRAMEWORK})
         endif()
     endif()
+
+    # CTest wiring (B2). `enable_testing()` + add_test() so `ctest` and the
+    # testPresets in CMakePresets.json actually run the doctest binary. The
+    # Makefile's `make test-cpp` runs this target too (was wrongly pointed at
+    # spring-server before).
+    enable_testing()
+    add_test(NAME spring-tests COMMAND spring-tests)
 endif()
 
 # === modelimporter — content preprocessing tool ===

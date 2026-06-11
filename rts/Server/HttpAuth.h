@@ -8,21 +8,16 @@
 
 #include "Database.h"
 #include "NetworkServer.h"
+#include "Crypto.h"
 
 #include <string>
-#include <random>
 
 namespace HttpAuth {
 
-/// Generate a random hex token.
-inline std::string GenerateToken(int length = 32) {
-    static const char hex[] = "0123456789abcdef";
-    static std::mt19937 rng(std::random_device{}());
-    std::uniform_int_distribution<int> dist(0, 15);
-    std::string token;
-    token.reserve(length);
-    for (int i = 0; i < length; i++) token += hex[dist(rng)];
-    return token;
+/// Generate a cryptographically-secure random hex session token (S3).
+/// 16 bytes of CSPRNG output → 32 hex chars (the previous token width).
+inline std::string GenerateToken() {
+    return Crypto::GenerateToken(16);
 }
 
 /// Extract a string field from a JSON body. Minimal parser, no nesting.
@@ -150,13 +145,21 @@ inline int64_t ValidateAuth(Database& db, const std::string& authHeader) {
     std::string username, password;
     if (ParseBasicAuth(authHeader, username, password)) {
         auto user = db.FindUser(username);
-        if (user && !user->isBanned && user->passwordHash == password) {
-            return user->id;
+        if (user && !user->isBanned) {
+            bool needsRehash = false;
+            if (Crypto::VerifyPassword(password, user->passwordHash, needsRehash)) {
+                if (needsRehash)
+                    db.UpdatePasswordHash(user->id, Crypto::HashPassword(password));
+                return user->id;
+            }
         }
     }
 
-    // Fallback: treat as raw token
-    return db.ValidateSession(authHeader, 86400);
+    // S6: no raw-token fallback. A header that is neither a valid Bearer token
+    // nor valid Basic credentials is unauthenticated — treating arbitrary
+    // header bytes as a session token let a malformed header impersonate a
+    // session and bypassed the Bearer/Basic structure entirely.
+    return 0;
 }
 
 /// Legacy alias — callers that used ValidateToken still work.
@@ -184,9 +187,13 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db) {
         if (user->isBanned) {
             return JsonResponse(403, R"({"error":"account banned"})");
         }
-        if (user->passwordHash != password) {
+        bool needsRehash = false;
+        if (!Crypto::VerifyPassword(password, user->passwordHash, needsRehash)) {
             return JsonResponse(401, R"({"error":"invalid credentials"})");
         }
+        // Transparently upgrade legacy plaintext / weaker hashes on success.
+        if (needsRehash)
+            db.UpdatePasswordHash(user->id, Crypto::HashPassword(password));
 
         std::string token = GenerateToken();
         db.CreateSession(user->id, token);
@@ -216,7 +223,12 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db) {
             return JsonResponse(409, R"({"error":"username already taken"})");
         }
 
-        int64_t userId = db.CreateUser(username, password);
+        // S1: store a scrypt hash, never the plaintext.
+        std::string hashed = Crypto::HashPassword(password);
+        if (hashed.empty()) {
+            return JsonResponse(500, R"({"error":"registration failed"})");
+        }
+        int64_t userId = db.CreateUser(username, hashed);
         if (userId == 0) {
             return JsonResponse(500, R"({"error":"registration failed"})");
         }

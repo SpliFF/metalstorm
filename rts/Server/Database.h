@@ -44,12 +44,23 @@ public:
     /// roster.
     std::optional<UserRecord> FindUserById(int64_t userId);
 
+    /// Replace a user's stored password hash. Used by the login path to
+    /// transparently upgrade legacy plaintext / weaker-parameter hashes
+    /// (Crypto::VerifyPassword reports needsRehash). Returns true on success.
+    bool UpdatePasswordHash(int64_t userId, const std::string& passwordHash);
+
     /// Store a session token for a user. Returns true on success.
     bool CreateSession(int64_t userId, const std::string& token);
 
     /// Validate a session token. Returns the user ID if valid, 0 if invalid.
     /// Tokens older than maxAgeSeconds are considered expired.
     int64_t ValidateSession(const std::string& token, int maxAgeSeconds = 86400);
+
+    /// Grant the "admin" role to an existing account by username. Used at
+    /// startup to provision the operator/admin account (privileged console
+    /// + /api/exec access, S2) without elevating ordinary registrations.
+    /// No-op if the user doesn't exist. Returns true if a row was updated.
+    bool EnsureAdminRole(const std::string& username);
 
     /// Revoke a session token.
     void RevokeSession(const std::string& token);

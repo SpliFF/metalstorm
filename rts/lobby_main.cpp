@@ -322,10 +322,15 @@ int main(int argc, char* argv[])
     std::string logFile;
     int logLevel = SPRING_LOG_NOTICE;
     bool debugMode = false;
+    // S2: one-shot admin provisioning. `--promote-admin <user>` grants the
+    // admin role to an existing account and exits without starting the server
+    // — an explicit, auditable op rather than auto-elevating on every boot.
+    std::string promoteAdmin;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "--port" && i + 1 < argc) port = std::atoi(argv[++i]);
+        else if (arg == "--promote-admin" && i + 1 < argc) promoteAdmin = argv[++i];
         else if (arg == "--db" && i + 1 < argc) dbPath = argv[++i];
         else if (arg == "--games-dir" && i + 1 < argc) gamesDir = argv[++i];
         else if (arg == "--log-file" && i + 1 < argc) logFile = argv[++i];
@@ -372,6 +377,27 @@ int main(int argc, char* argv[])
     // Clean up expired sessions on startup
     int cleaned = db.CleanExpiredSessions(86400); // 24h
     if (cleaned > 0) SLOG(SPRING_LOG_INFO, "cleaned %d expired session(s)", cleaned);
+
+    // S2: `--promote-admin <user>` one-shot. Grants the admin role to an
+    // already-registered account (privileged console / SQL exec gate) and
+    // exits — it never starts the server and never creates an account, so it
+    // can't forge credentials. Run once by the operator; ordinary
+    // registrations stay "player".
+    if (!promoteAdmin.empty()) {
+        const bool ok = db.EnsureAdminRole(promoteAdmin);
+        if (ok)
+            SLOG(SPRING_LOG_NOTICE, "granted admin role to '%s'", promoteAdmin.c_str());
+        else
+            SLOG(SPRING_LOG_ERROR, "no such account '%s' — register it first",
+                 promoteAdmin.c_str());
+        // The SQLite write is already committed. This is a one-shot utility
+        // invocation; skip the full server-shutdown path (springlog's async
+        // sink thread isn't started in a joinable state this early in init and
+        // aborts at teardown) and exit immediately with the result code.
+        db.Close();
+        std::fflush(stdout);
+        std::_Exit(ok ? 0 : 1);
+    }
 
     // --- Rooms ---
     RoomManager rooms;
@@ -894,6 +920,14 @@ int main(int argc, char* argv[])
         int64_t userId = HttpAuth::ValidateToken(db, headers.authorization);
         if (userId <= 0) {
             return HttpAuth::JsonResponse(401, R"({"error":"unauthorized — use POST /api/auth/login first"})");
+        }
+        // S2: /api/exec runs privileged SQL + lobby control commands. Gate on
+        // the admin role — a plain authenticated player must not reach it.
+        {
+            auto execUser = db.FindUserById(userId);
+            if (!execUser || execUser->role != "admin") {
+                return HttpAuth::JsonResponse(403, R"({"error":"forbidden — admin role required"})");
+            }
         }
 
         nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);

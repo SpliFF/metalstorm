@@ -512,6 +512,10 @@ int main(int argc, char* argv[])
     std::unordered_set<std::string> connectedRosterPlayers;
     const size_t rosterPlayersNeeded = requestedPlayers.size();
 
+    // C1: per-client handshake gate. A client must send a protocol-compatible
+    // Handshake before its AuthRequest is honoured.
+    std::unordered_set<ClientID> handshakedClients;
+
     // GameServerContext wires the long-lived objects to the extracted units.
     // Bound here, after all of net/rtcServer/sim/db/sessions/rooms/aiPool/
     // luaExecEngine are declared; defsCacheKey is assigned after the def-cache
@@ -521,7 +525,7 @@ int main(int argc, char* argv[])
         roomId, gameId, mapId, port, logMessages, /*defsCacheKey=*/std::string{},
         requestedPlayers, requestedAIs, playerTeamByUsername,
         clientPlayerNum, nextPlayerNum, connectedRosterPlayers,
-        rosterPlayersNeeded,
+        rosterPlayersNeeded, handshakedClients,
     };
 
     GameStartCoordinator gameStart(ctx);
@@ -939,6 +943,11 @@ int main(int argc, char* argv[])
         {
             auto disconnects = rtcServer.DrainDisconnects();
             for (ClientID dcId : disconnects) {
+                // C1: drop the handshake gate first — a client that handshook
+                // but disconnected before authenticating has no session, so
+                // this must run ahead of the no-session early-continue below.
+                handshakedClients.erase(dcId);
+
                 auto* session = sessions.GetSession(dcId);
                 if (!session) continue;
 
@@ -968,6 +977,7 @@ int main(int argc, char* argv[])
                     clientPlayerNum.erase(pIt);
                 }
 
+                handshakedClients.erase(dcId);
                 sessions.RemoveSession(dcId);
             }
         }

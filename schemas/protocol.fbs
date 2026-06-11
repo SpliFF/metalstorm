@@ -37,6 +37,14 @@ struct Vec3 {
 // Client → Server messages
 // ============================================================
 
+// First message on the game-server control stream (C1). The server enforces
+// protocol_version against its own CURRENT_PROTOCOL_VERSION and rejects a
+// mismatch (or a missing handshake) with AuthStatus.VersionMismatch before
+// honouring AuthRequest. The canonical version lives in two places that must
+// move together: Protocol::CURRENT_PROTOCOL_VERSION (rts/Server/Protocol.h)
+// and PROTOCOL_VERSION (client/src/core/connection.ts). Bump on any breaking
+// change to this schema or the binary envelope formats; additive,
+// default-valued fields do not require a bump.
 table Handshake {
     protocol_version: uint16;
     client_version: string;

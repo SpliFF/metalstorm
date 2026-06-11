@@ -177,7 +177,16 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
 
     // Restart-in-place: re-exec this binary with the same argv.
     // Clients get a GameRestarting message before the connection drops.
-    net.AddHttpPost("/api/restart", [&restartRequested, &keepRunning](const std::string&, const std::string&, const HttpRequestHeaders&) -> HttpResponse {
+    net.AddHttpPost("/api/restart", [&ctx, &restartRequested, &keepRunning](const std::string&, const std::string&, const HttpRequestHeaders& headers) -> HttpResponse {
+        // S2-adjacent: restarting the game server is a privileged action —
+        // admin only, same gate as /api/exec. Was previously unauthenticated.
+        int64_t userId = HttpAuth::ValidateToken(ctx.db, headers.authorization);
+        if (userId <= 0)
+            return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+        auto adminUser = ctx.db.FindUserById(userId);
+        if (!adminUser || adminUser->role != "admin")
+            return HttpAuth::JsonResponse(403, R"({"error":"forbidden — admin role required"})");
+
         SLOG(SPRING_LOG_NOTICE, "restart requested via /api/restart");
         restartRequested.store(true);
         keepRunning.store(false);
@@ -191,6 +200,13 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
         int64_t userId = HttpAuth::ValidateToken(ctx.db, headers.authorization);
         if (userId <= 0) {
             return HttpAuth::JsonResponse(401, R"({"error":"unauthorized — use POST /api/auth/login first"})");
+        }
+        // S2: ExecSync runs arbitrary Lua in synced scopes. Admin-only.
+        {
+            auto execUser = ctx.db.FindUserById(userId);
+            if (!execUser || execUser->role != "admin") {
+                return HttpAuth::JsonResponse(403, R"({"error":"forbidden — admin role required"})");
+            }
         }
 
         nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);

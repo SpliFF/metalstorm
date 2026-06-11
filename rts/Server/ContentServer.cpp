@@ -12,6 +12,25 @@
 
 namespace fs = std::filesystem;
 
+namespace {
+// True if an asset key contains a path-traversal attempt: a ".." path segment,
+// an absolute path, or a Windows drive/backslash escape. Checks segments so a
+// legitimate filename merely *containing* ".." (e.g. "a..b.glb") is allowed.
+bool HasTraversal(const std::string& key) {
+    if (key.empty()) return true;
+    if (key.front() == '/' || key.front() == '\\') return true;   // absolute
+    size_t start = 0;
+    for (size_t i = 0; i <= key.size(); ++i) {
+        if (i == key.size() || key[i] == '/' || key[i] == '\\') {
+            const std::string seg = key.substr(start, i - start);
+            if (seg == "..") return true;
+            start = i + 1;
+        }
+    }
+    return false;
+}
+} // namespace
+
 void ContentServer::Init(NetworkServer& net, const std::vector<std::string>& contentRoots) {
     roots = contentRoots;
 
@@ -38,6 +57,15 @@ void ContentServer::Init(NetworkServer& net, const std::vector<std::string>& con
             return {.contentType = "text/plain", .body = {}, .status = 404};
 
         std::string key = url.substr(prefix.size());
+
+        // S7: reject path-traversal keys explicitly. The lookup below is
+        // manifest-bound (only scanned assets resolve), but the file read
+        // joins `key`-derived paths against each root, so defend in depth —
+        // a `..` segment or absolute/leading-slash key must never be served.
+        // (Percent-decoding happens upstream in NetworkServer, so by here a
+        // traversal attempt appears as literal ".." segments.)
+        if (HasTraversal(key))
+            return {.contentType = "text/plain", .body = {}, .status = 403};
 
         auto it = assets.find(key);
         if (it == assets.end())

@@ -75,6 +75,17 @@ constexpr int kMaxCidLen = NGTCP2_MAX_CIDLEN;
 constexpr size_t kScidLen = 18;
 constexpr size_t kMaxUdpPayload = 1452; // conservative IPv4 path MTU
 
+// S5: ceiling on a single length-delimited control-bidi message. The 4-byte
+// length prefix is attacker-controlled; without a cap the receiver would
+// buffer toward an arbitrary u32 (up to 4 GB) before the frame ever completes.
+// Real control messages (auth, viewport, commands, console) are kilobytes.
+constexpr uint32_t kMaxControlMsg = 4u * 1024 * 1024; // 4 MB
+
+// S5: ceiling on simultaneously-tracked QUIC connections. A new Initial beyond
+// this is dropped (ngtcp2 will retransmit / the client retries); bounds the
+// per-connection TLS + stream-buffer memory a flood can pin.
+constexpr size_t kMaxWtConnections = 512;
+
 // HTTP/3 unidirectional stream types (RFC 9114 / 9204).
 constexpr uint64_t kH3StreamControl = 0x00;
 constexpr uint64_t kH3StreamQpackEnc = 0x02;
@@ -483,6 +494,10 @@ bool WebTransportServerImpl::SetupTls(const std::string& certPem, const std::str
 
 WtConn* WebTransportServerImpl::AcceptConn(const ngtcp2_pkt_hd& hd, const sockaddr* sa,
                                            socklen_t salen, const ngtcp2_path& path) {
+    // S5: refuse new connections past the cap (caller drops the packet).
+    if (conns.size() >= kMaxWtConnections)
+        return nullptr;
+
     auto* c = new WtConn();
     c->clientId = nextClientId++;
     std::memcpy(&c->remote, sa, salen);
@@ -813,6 +828,14 @@ void WebTransportServerImpl::ProcessControlBidi(WtConn* c, RxStream& rx) {
     for (;;) {
         if (rx.buf.size() < 4) break;
         uint32_t len = GetLe32(rx.buf.data());
+        // S5: reject an oversize declared frame before waiting to buffer it.
+        // A garbage/hostile length closes the connection rather than parking
+        // an ever-growing receive buffer.
+        if (len > kMaxControlMsg) {
+            CloseConn(c);
+            rx.buf.clear();
+            return;
+        }
         if (rx.buf.size() < 4 + (size_t)len) break;
         OnAppMessage(c, StreamClass::Control, rx.buf.data() + 4, len);
         rx.buf.erase(rx.buf.begin(), rx.buf.begin() + 4 + (size_t)len);

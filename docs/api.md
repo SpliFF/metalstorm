@@ -80,6 +80,26 @@ curl -X POST http://localhost:8011/api/exec \
 
 Basic auth validates credentials directly on every request — no login step needed. Bearer tokens are validated against the session table (24h expiry). Both work on all endpoints that require authentication.
 
+Passwords are hashed with scrypt (OpenSSL) and never stored in plaintext. Legacy plaintext rows are transparently re-hashed on the next successful login. Session tokens are generated with a CSPRNG (`RAND_bytes`).
+
+### Roles and admin access
+
+Accounts have a role: `player` (default for all registrations), `spectator`, or `admin`. Privileged endpoints — `/api/exec` (lobby and game server) and the game server's `/api/restart` — require the **admin** role. A non-admin token gets `403 forbidden`.
+
+Nothing auto-elevates. Grant the role with a one-shot CLI command on the lobby binary (it promotes an already-registered account and exits — it does not start the server, and it never creates accounts):
+
+```bash
+# 1. register the operator account (if it doesn't exist yet)
+curl -X POST http://localhost:8011/api/auth/register \
+  -d '{"username":"admin","password":"<password>"}'
+
+# 2. promote it (run once; safe to run directly, not via mprocs)
+./build/debug/spring-lobby --promote-admin admin
+# → "granted admin role to 'admin'"  (exit 0; exit 1 if the account doesn't exist)
+```
+
+A fresh or wiped `data/spring-server.db` needs step 2 re-run. The debug MCP tooling defaults to `admin`/`admin` (override via `SPRING_USER` / `SPRING_PASS`).
+
 ---
 
 ## Lobby Server (default :8011)
@@ -140,9 +160,9 @@ Room states: 0=Configuring, 1=Filling, 2=ReadyCheck, 3=Loading, 4=Active, 5=Ende
 
 ### Command Execution
 
-**POST /api/exec** (requires auth)
+**POST /api/exec** (requires admin)
 
-Execute commands in lobby scopes.
+Execute commands in lobby scopes. Admin role required (see [Roles and admin access](#roles-and-admin-access)).
 
 | Scope | Commands | Description |
 |-------|----------|-------------|
@@ -196,7 +216,9 @@ The lobby spawns a game server per room. Port is in the `RoomStateUpdate` messag
 
 ### Command Execution
 
-**POST /api/exec** (requires auth)
+**POST /api/exec** (requires admin)
+
+Admin role required (see [Roles and admin access](#roles-and-admin-access)). The same gate applies to **POST /api/restart** (re-execs the game server in place).
 
 | Scope | What it runs |
 |-------|-------------|

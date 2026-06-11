@@ -10,6 +10,7 @@
 #include "RoomManager.h"
 #include "StandingOrders.h"
 #include "LuaExecEngine.h"
+#include "Crypto.h"
 #include "WebTransport/WebTransportServer.h"
 #include "Lua/LuaRules.h"
 #include "Sim/Units/UnitHandler.h"
@@ -24,23 +25,17 @@
 
 #include <algorithm>
 #include <cstring>
-#include <random>
 #include <string>
 #include <vector>
 
 #define LOG_SECTION "server"
 
 namespace {
-/// Generate a random hex session token.
-std::string generateToken(int length = 32) {
-    static const char hex[] = "0123456789abcdef";
-    static std::mt19937 rng(std::random_device{}());
-    std::uniform_int_distribution<int> dist(0, 15);
-    std::string token;
-    token.reserve(length);
-    for (int i = 0; i < length; i++)
-        token += hex[dist(rng)];
-    return token;
+/// Generate a cryptographically-secure random hex session token (S3).
+/// Shares the single Crypto implementation — the old per-file std::mt19937
+/// duplicate was both predictable and a copy of HttpAuth's generator.
+std::string generateToken() {
+    return Crypto::GenerateToken(16);
 }
 } // namespace
 
@@ -80,13 +75,43 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
         }
         case SpringWeb::ClientPayload_Handshake: {
             auto* hs = clientMsg->payload_as_Handshake();
+            const uint16_t clientVer = hs->protocol_version();
             SLOG(SPRING_LOG_INFO, "handshake from client %u: v%d %s",
                 msg.clientId,
-                hs->protocol_version(),
+                clientVer,
                 hs->client_version() ? hs->client_version()->c_str() : "unknown");
+            // C1: enforce the protocol version. A mismatch (typically a stale
+            // cached JS bundle against a changed schema) is rejected with a
+            // VersionMismatch AuthResponse; the client closes on auth failure.
+            // We deliberately do NOT record the client as handshaked, so even
+            // if it ignores the response its AuthRequest is refused below.
+            if (clientVer != Protocol::CURRENT_PROTOCOL_VERSION) {
+                SLOG(SPRING_LOG_WARNING,
+                    "client %u protocol mismatch: client v%d, server v%d — rejecting",
+                    msg.clientId, clientVer, Protocol::CURRENT_PROTOCOL_VERSION);
+                auto resp = Protocol::BuildAuthResponse(
+                    SpringWeb::AuthStatus_VersionMismatch, "", 0,
+                    "Protocol version mismatch — reload the client");
+                rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
+                break;
+            }
+            ctx.handshakedClients.insert(msg.clientId);
             break;
         }
         case SpringWeb::ClientPayload_AuthRequest: {
+            // C1: refuse auth until a protocol-compatible Handshake arrived.
+            // Catches clients too old to send a handshake at all (a matching
+            // handshake is the only thing that adds the id to this set).
+            if (!ctx.handshakedClients.count(msg.clientId)) {
+                SLOG(SPRING_LOG_WARNING,
+                    "client %u sent AuthRequest without a valid handshake — rejecting",
+                    msg.clientId);
+                auto resp = Protocol::BuildAuthResponse(
+                    SpringWeb::AuthStatus_VersionMismatch, "", 0,
+                    "Protocol handshake required — reload the client");
+                rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
+                break;
+            }
             auto* auth = clientMsg->payload_as_AuthRequest();
             const char* username = auth->username() ? auth->username()->c_str() : "";
             const char* passHash = auth->password_hash() ? auth->password_hash()->c_str() : "";
@@ -194,8 +219,11 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // Look up or create user
             auto user = db.FindUser(username);
             if (!user) {
-                // Auto-register for now (Phase 1 MVP)
-                int64_t newId = db.CreateUser(username, passHash);
+                // Auto-register for now (Phase 1 MVP). S1: store a scrypt hash,
+                // never the raw password field.
+                std::string hashed = Crypto::HashPassword(passHash);
+                int64_t newId = hashed.empty()
+                    ? 0 : db.CreateUser(username, hashed);
                 if (newId == 0) {
                     auto resp = Protocol::BuildAuthResponse(
                         SpringWeb::AuthStatus_InvalidCredentials, "", 0,
@@ -206,13 +234,19 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 user = db.FindUser(username);
             }
 
-            // Check password
-            if (user->passwordHash != passHash) {
-                auto resp = Protocol::BuildAuthResponse(
-                    SpringWeb::AuthStatus_InvalidCredentials, "", 0,
-                    "Wrong password");
-                rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
-                break;
+            // Check password (S1: scrypt verify; transparently upgrade legacy
+            // plaintext / weaker hashes on a successful login).
+            {
+                bool needsRehash = false;
+                if (!Crypto::VerifyPassword(passHash, user->passwordHash, needsRehash)) {
+                    auto resp = Protocol::BuildAuthResponse(
+                        SpringWeb::AuthStatus_InvalidCredentials, "", 0,
+                        "Wrong password");
+                    rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
+                    break;
+                }
+                if (needsRehash)
+                    db.UpdatePasswordHash(user->id, Crypto::HashPassword(passHash));
             }
 
             // Check ban
@@ -704,6 +738,26 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
         case SpringWeb::ClientPayload_ConsoleCommand: {
             auto* cc = clientMsg->payload_as_ConsoleCommand();
             if (!cc) break;
+            // S2: ConsoleCommand pushes arbitrary code into LuaExecEngine
+            // (spawn units, pause, change speed, run Lua). Gate on the
+            // authenticated session's role — only admins may exec. A missing
+            // session or any non-admin role is rejected with a ConsoleResponse
+            // so the caller sees the denial rather than silent success.
+            auto* session = sessions.GetSession(msg.clientId);
+            if (!session || session->role != "admin") {
+                SLOG(SPRING_LOG_WARNING,
+                    "client %u denied ConsoleCommand (role=%s scope=%s)",
+                    msg.clientId,
+                    session ? session->role.c_str() : "<none>",
+                    cc->scope() ? cc->scope()->c_str() : "server");
+                auto resp = Protocol::BuildConsoleResponse(
+                    cc->request_id(),
+                    cc->scope() ? cc->scope()->str() : "server",
+                    /*success=*/false,
+                    "permission denied: admin role required", /*level=*/2);
+                rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
+                break;
+            }
             LuaExecRequest req;
             req.requestId = cc->request_id();
             req.scope = cc->scope() ? cc->scope()->str() : "server";

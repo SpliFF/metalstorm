@@ -24,16 +24,19 @@ build-release:
 	cmake --build build/release
 
 # Tests
-test: build
-	./build/debug/spring-tests
+# Build only the test target (not the whole game server) and run it via CTest
+# so `ctest`, the testPresets, and `make test-cpp` all exercise the same path.
+test-cpp:
+	cmake --build build/debug --target spring-tests
+	ctest --test-dir build/debug --output-on-failure
 
-test-cpp: build
-	./build/debug/spring-server
+# Back-compat alias for the C++ suite.
+test: test-cpp
 
 test-client:
 	cd client && npx vitest run
 
-test-all: test test-cpp test-client
+test-all: test-cpp test-client
 
 # Development
 dev-client:

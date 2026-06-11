@@ -166,6 +166,16 @@ struct H2StreamData {
     std::vector<std::string> sseQueue;
 };
 
+// Resource limits (S5). The HTTP plane serves the API + static assets; no
+// endpoint legitimately needs a multi-megabyte request body, and an unbounded
+// accept loop or read buffer is a trivial memory-exhaustion DoS.
+//   MAX_REQUEST_BODY — cap on a single request's buffered bytes (headers +
+//   body). Oversize requests get 413 and the connection is closed.
+//   MAX_CONNECTIONS  — cap on simultaneously-open TCP connections; excess
+//   accepts are closed immediately.
+static constexpr size_t MAX_REQUEST_BODY = 8 * 1024 * 1024;  // 8 MB
+static constexpr size_t MAX_CONNECTIONS  = 1024;
+
 struct ServerConn {
     int fd = -1;
     void* server = nullptr;  // back-pointer to NetworkServer::Impl (private type)
@@ -375,6 +385,18 @@ struct NetworkServer::Impl {
         // Already an SSE connection — ignore further client data
         if (c.h1IsSSE) return;
 
+        // S5: cap buffered request size. Covers both an oversize body and a
+        // header flood / bodyless stream that never completes (the parse loop
+        // would otherwise keep returning "need more data" while the buffer
+        // grows without bound).
+        if (c.h1ReadBuf.size() > MAX_REQUEST_BODY) {
+            HttpResponse resp = {.contentType = "text/plain",
+                                 .body = {'4','1','3'}, .status = 413};
+            H1WriteResponse(c, resp);
+            pendingClose.push_back(c.fd);
+            return;
+        }
+
         while (true) {
             if (!c.h1HeadersDone) {
                 auto hdrEnd = c.h1ReadBuf.find("\r\n\r\n");
@@ -413,6 +435,17 @@ struct NetworkServer::Impl {
                     pos = next + 2;
                 }
                 c.h1HeadersDone = true;
+
+                // S5: reject an oversize declared body up front rather than
+                // buffering toward the cap.
+                if (c.h1ContentLength > 0 &&
+                    static_cast<size_t>(c.h1ContentLength) > MAX_REQUEST_BODY) {
+                    HttpResponse resp = {.contentType = "text/plain",
+                                         .body = {'4','1','3'}, .status = 413};
+                    H1WriteResponse(c, resp);
+                    pendingClose.push_back(c.fd);
+                    return;
+                }
             }
 
             // Check if we have the full body
@@ -471,6 +504,13 @@ struct NetworkServer::Impl {
         auto* conn = static_cast<ServerConn*>(user_data);
         auto it = conn->h2streams.find(stream_id);
         if (it != conn->h2streams.end()) {
+            // S5: cap the buffered request body; reset the stream if a client
+            // streams more than the limit (HTTP/2 has no Content-Length gate).
+            if (it->second.body.size() + len > MAX_REQUEST_BODY) {
+                nghttp2_submit_rst_stream(session, NGHTTP2_FLAG_NONE, stream_id,
+                                          NGHTTP2_ENHANCE_YOUR_CALM);
+                return 0;
+            }
             it->second.body.append(reinterpret_cast<const char*>(data), len);
         }
         return 0;
@@ -654,6 +694,13 @@ struct NetworkServer::Impl {
             socklen_t addrlen = sizeof(addr);
             int fd = accept(listenFd, (struct sockaddr*)&addr, &addrlen);
             if (fd < 0) break;
+
+            // S5: cap concurrent connections. Drop the excess immediately
+            // rather than letting an attacker exhaust fds / memory.
+            if (connections.size() >= MAX_CONNECTIONS) {
+                ::close(fd);
+                continue;
+            }
 
             SetNonBlocking(fd);
             SetTcpNoDelay(fd);
