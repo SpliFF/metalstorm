@@ -46,6 +46,7 @@ import { installCameraWindowApi, uninstallCameraWindowApi } from './core/camera-
 import { fetchAndIngestDefs } from './core/defs-fetch.js';
 import { renderMapFeatures, DynamicFeatureRenderer } from './core/feature-renderer.js';
 import { CameraInput } from './core/camera-input.js';
+import { RmlOverlayManager } from './ui/rml/rml-overlay.js';
 import { TestHarness } from './core/test-harness.js';
 import { ScenarioRunner } from './scenarios/runner.js';
 import { createHUD, showHUD, updateHUD, updateSpeedHUD } from './ui/hud/hud.js';
@@ -132,6 +133,9 @@ let onGameResize: (() => void) | null = null;
 /// GW4-c5b-2: the drag-select rectangle overlay. The worker computes the box
 /// (CSS px, canvas-relative) and posts `gp:dragBox`; we draw the div here.
 let dragOverlay: HTMLDivElement | null = null;
+/// PLAN-rml.md: main-thread RmlUi DOM overlay (BAR RML widgets). Non-null while
+/// a game is active; replays `rml:ops` from the worker into real DOM nodes.
+let rmlOverlay: RmlOverlayManager | null = null;
 function updateDragOverlay(box: { x0: number; y0: number; x1: number; y1: number } | null): void {
     if (!box) { if (dragOverlay) dragOverlay.style.display = 'none'; return; }
     if (!dragOverlay) {
@@ -273,6 +277,8 @@ function quitToLobby(): void {
     inputManager = null;
     cameraInput?.dispose();
     cameraInput = null;
+    rmlOverlay?.dispose();
+    rmlOverlay = null;
     gfxConfigUnsub?.();
     gfxConfigUnsub = null;
     if (onGameResize) { window.removeEventListener('resize', onGameResize); onGameResize = null; }
@@ -355,6 +361,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     inputManager = null;
     cameraInput?.dispose();
     cameraInput = null;
+    rmlOverlay?.dispose();
+    rmlOverlay = null;
     gfxConfigUnsub?.();
     gfxConfigUnsub = null;
     if (onGameResize) { window.removeEventListener('resize', onGameResize); onGameResize = null; }
@@ -527,6 +535,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             case 'gp:dragBox':
                 updateDragOverlay(m.box);
                 break;
+            // PLAN-rml.md: a batch of RML DOM ops → the main-thread overlay.
+            case 'rml:ops':
+                rmlOverlay?.applyOps(m.ops);
+                break;
             // GW4-c5b-3 / WP3b: all worker→main storage writes arrive here.
             // Mirrors lua-widget-manager.ts:1228–1241 exactly so both paths
             // (GW4 game-processor worker and legacy LuaWidgetManager) behave
@@ -589,6 +601,15 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // render context was transferred). CameraInput captures them and forwards
     // canvas-relative input to the worker camera (view 0).
     cameraInput = new CameraInput(canvas, gameWorker, 0);
+
+    // PLAN-rml.md: main-thread DOM overlay for RmlUi-based widgets (BAR). The
+    // worker-side RmlUi proxy records DOM ops and posts them as `rml:ops`; this
+    // manager owns the real `#rml-root` nodes over the canvas. R0 mounts the
+    // root and accepts (ignores) the op stream; rendering lands in R1.
+    rmlOverlay = new RmlOverlayManager({
+        canvasId: 'game-canvas',
+        assetBaseUrl: gameId ? `${lobbyHttpUrl}/api/games/data/${gameId}` : '',
+    });
 
     // GW4-c5c-3: live gfx.* settings → worker. The worker's clientSettings was
     // seeded with the snapshot in `gp:init`; this forwards every later change so

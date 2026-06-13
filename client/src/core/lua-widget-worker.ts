@@ -22,6 +22,10 @@ import {
     gpHandleWheel, gpHandleKeyDown, gpHandleKeyUp, gpHandleBlur, gpHandlePointerLeave,
     gpHandleFocusWorld,
 } from './game-processor.js';
+// PLAN-rml.md: DOM events + viewport changes route straight into the RmlUi
+// bridge (no game-processor state needed).
+import { rmlHandleEvent, rmlResize } from '../ui/rml/rml-bridge.js';
+import type { RmlEventToWorker, RmlResizeToWorker } from '../ui/rml/rml-protocol.js';
 import {
     liveState, unitDefMap, weaponDefMap,
     postToMain, postLog, republishDefGlobals,
@@ -135,6 +139,16 @@ self.onmessage = async (e: MessageEvent<WorkerInbound>) => {
         // GW4-c5c-3: minimap left-click → re-centre the world camera.
         case 'gp:focusWorld':
             gpHandleFocusWorld(msg.x as number, msg.z as number, (msg.viewId as number) ?? 0);
+            break;
+
+        // PLAN-rml.md: native DOM events + viewport changes from the main-thread
+        // RML overlay, dispatched into the worker-side RmlUi bridge.
+        case 'rml:event':
+            rmlHandleEvent(msg as unknown as RmlEventToWorker);
+            break;
+
+        case 'rml:resize':
+            rmlResize(msg as unknown as RmlResizeToWorker);
             break;
 
         case 'gp:shutdown':

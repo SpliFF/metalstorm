@@ -17,6 +17,8 @@
  * manager (lua-widget-manager.ts) import these as they take on each role.
  */
 
+import type { RmlOpsToMain, RmlEventToWorker, RmlResizeToWorker } from '../ui/rml/rml-protocol.js';
+
 // ─── main → worker ──────────────────────────────────────────────────────────
 
 /**
@@ -118,6 +120,10 @@ export type GpMessageToWorker =
     | GpInputToWorker
     | GpConfigToWorker
     | GpFocusWorldToWorker
+    // PLAN-rml.md: DOM events + viewport changes routed back to the worker-side
+    // RmlUi proxy (rml-bridge.ts) for Lua listener dispatch / dp-ratio recompute.
+    | RmlEventToWorker
+    | RmlResizeToWorker
     | { type: 'gp:shutdown' };
 
 // ─── worker → main ──────────────────────────────────────────────────────────
@@ -254,4 +260,6 @@ export type GpMessageToMain =
     /** Server restart detected — main reloads. */
     | { type: 'gp:reload' }
     /** Reply to a gp:test request from the main test harness. */
-    | { type: 'gp:testResult'; id: number; ok: boolean; value?: unknown; error?: string };
+    | { type: 'gp:testResult'; id: number; ok: boolean; value?: unknown; error?: string }
+    /** PLAN-rml.md: a batch of RML DOM ops for the main-thread overlay manager. */
+    | RmlOpsToMain;

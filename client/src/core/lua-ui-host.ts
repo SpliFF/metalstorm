@@ -43,6 +43,7 @@ import {
     VFS_IMPLEMENTATION_LUA,
 } from './worker-vfs.js';
 import { gpCtx } from './gp-context.js';
+import { installRmlGlobal } from '../ui/rml/rml-bridge.js';
 
 // Engine-bundled test widgets. Loaded only when `?widgetTest` is active.
 import dbgRenderTestSrc from '../lua-test-widgets/dbg_render_test.lua?raw';
@@ -2259,6 +2260,12 @@ defaultFont = activeFont
         postLog(4, `[LuaUI] no recognised LuaUI entry point in VFS (tried ${LUAUI_ENTRY_CANDIDATES.join(', ')}) — no overlay will load`);
     }
     const entryToBoot = luaUiEntry ?? 'LuaUI/camain.lua';
+
+    // PLAN-rml.md R0: install the RmlUi global BEFORE the bootstrap. BAR's
+    // rml_setup.lua / RML widgets guard `if not RmlUi then return end`; with the
+    // global present they initialise and record DOM ops for the main-thread
+    // overlay. Harmless for ZK (camain.lua never touches RmlUi).
+    installRmlGlobal(runtime);
 
     postLog(2, `[LuaUI] init step 7/8: starting bootstrap (VFS.Include ${entryToBoot})...`);
     const bootStart = performance.now();

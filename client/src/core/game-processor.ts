@@ -92,6 +92,10 @@ import {
 } from './lua-spring-api.js';
 // WP2b: shared mutable seam refs (connection, selection, renderers, lighting).
 import { gpCtx } from './gp-context.js';
+// PLAN-rml.md: worker-side RmlUi bridge — flush the frame's DOM ops to main
+// (frame-loop tail) and reset on teardown. Event/resize routing lives in the
+// worker dispatcher (lua-widget-worker.ts), calling the bridge directly.
+import { rmlFlush, rmlReset } from '../ui/rml/rml-bridge.js';
 // WP2b: LuaUI half exports — getRuntime() host + all widget callins + liveState + defs.
 import {
     liveState, unitDefMap, weaponDefMap,
@@ -1323,6 +1327,12 @@ function gpRunUiPass(): void {
     gl.viewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3]);
     gl.depthMask(savedDepthMask);
     (gpEngine as unknown as { wipeCaches: (b?: boolean) => void }).wipeCaches(true);
+
+    // PLAN-rml.md §4.5: ship the frame's recorded RML DOM ops to the main-thread
+    // overlay in ONE message. Ordering: world pass → chili DrawScreen (runFrame
+    // above) → rmlFlush. RML widget callins ran inside runFrame and recorded
+    // their ops; this is the single batched flush.
+    rmlFlush();
 }
 
 /// GW4-c6: boot the Fengari LuaUI getRuntime() against the shared Babylon context.
@@ -1393,6 +1403,7 @@ export function gpResize(width: number, height: number, dpr: number): void {
 
 export function gpShutdown(): void {
     if (gpViewportTimer) { clearInterval(gpViewportTimer); gpViewportTimer = null; }
+    rmlReset();  // PLAN-rml.md: drop the bridge op queue + runtime ref.
     for (const cam of gpViewCameras.values()) cam.dispose();
     gpViewCameras.clear();
     gpCtx.selection?.dispose();
