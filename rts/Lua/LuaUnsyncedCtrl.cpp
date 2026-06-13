@@ -390,6 +390,11 @@ bool LuaUnsyncedCtrl::PushEntries(lua_State* L)
     LuaPushNamedCFunc(L, "SetUnitNoDraw", SilentNoop);
     LuaPushNamedCFunc(L, "SetUnitNoSelect", SilentNoop);
     LuaPushNamedCFunc(L, "SetUnitNoMinimap", SilentNoop);
+    // Whether a unit draws its far-zoom icon. Unsynced in Recoil
+    // (LuaUnsyncedCtrl), but BAR's synced unit_crashing_aircraft gadget
+    // calls Spring.SetUnitIconDraw, so it must exist in the gadget env.
+    // Pure rendering hint → no-op here, same as the siblings above.
+    LuaPushNamedCFunc(L, "SetUnitIconDraw", SilentNoop);
 
     // Timing functions (used for profiling in gadgets)
     LuaPushNamedCFunc(L, "GetTimer", NoopGetTimer);
