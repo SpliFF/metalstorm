@@ -450,15 +450,24 @@ function buildAtlasPage(
     const atlasTex = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_2D, atlasTex);
 
-    // Allocate the full DXT1 page with zeroed blocks, then fill in tiles.
-    const pageDxt1Size = (pageW / 4) * (pageH / 4) * DXT1_BLOCK_BYTES;
-    const blank = new Uint8Array(pageDxt1Size);
-    gl.compressedTexImage2D(
-        gl.TEXTURE_2D, 0, ext.COMPRESSED_RGB_S3TC_DXT1_EXT,
-        pageW, pageH, 0, blank);
+    // Assemble the whole DXT1 page in a CPU buffer (cheap block memcpy), then
+    // upload it in ONE compressedTexImage2D. The previous approach issued one
+    // gl.compressedTexSubImage2D per tile — 20k+ synchronous GPU calls for a
+    // large map (160×128 tiles), which stalled the worker render thread for
+    // seconds at load. A single upload of the same bytes is ~100× cheaper.
+    //
+    // DXT1 is 4×4-pixel block-compressed (8 bytes/block), stored block-row-major.
+    // A 32-px tile is 8×8 blocks; each of its 8 block-rows is 64 bytes and lands
+    // contiguously in the destination, so placing a tile is 8 row copies.
+    const atlasBlocksPerRow = pageW / 4;            // blocks across the page
+    const tileBlocks = TILE_PIXELS / 4;             // 8 blocks per tile side
+    const tileRowBytes = tileBlocks * DXT1_BLOCK_BYTES; // 64 bytes per block-row
+    const pageDxt1Size = atlasBlocksPerRow * (pageH / 4) * DXT1_BLOCK_BYTES;
+    const page = new Uint8Array(pageDxt1Size);      // zero-filled = blank blocks
 
     let placed = 0, skipped = 0;
     for (let tz = 0; tz < tileCountZ; tz++) {
+        const blockZ = tz * tileBlocks;
         for (let tx = 0; tx < tileCountX; tx++) {
             const tileIdx = tileIndex[(tileZ0 + tz) * dims.tilesX + (tileX0 + tx)];
             if (tileIdx < 0) { skipped++; continue; }
@@ -466,15 +475,19 @@ function buildAtlasPage(
             const tileOffset = tileIdx * TILE_DXT1_SIZE;
             if (tileOffset + TILE_DXT1_SIZE > tilesData.length) { skipped++; continue; }
 
-            const tileData = tilesData.subarray(tileOffset, tileOffset + TILE_DXT1_SIZE);
-            gl.compressedTexSubImage2D(
-                gl.TEXTURE_2D, 0,
-                tx * TILE_PIXELS, tz * TILE_PIXELS, TILE_PIXELS, TILE_PIXELS,
-                ext.COMPRESSED_RGB_S3TC_DXT1_EXT,
-                tileData);
+            const blockX = tx * tileBlocks;
+            for (let r = 0; r < tileBlocks; r++) {
+                const srcOff = tileOffset + r * tileRowBytes;
+                const dstOff = ((blockZ + r) * atlasBlocksPerRow + blockX) * DXT1_BLOCK_BYTES;
+                page.set(tilesData.subarray(srcOff, srcOff + tileRowBytes), dstOff);
+            }
             placed++;
         }
     }
+
+    gl.compressedTexImage2D(
+        gl.TEXTURE_2D, 0, ext.COMPRESSED_RGB_S3TC_DXT1_EXT,
+        pageW, pageH, 0, page);
 
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
