@@ -20,8 +20,25 @@
 #include <unordered_map>
 #include <mutex>
 #include <chrono>
+#include <atomic>
+#include <csignal>
+#include <cerrno>
 
 #define LOG_SECTION "logserver"
+
+// --- Lifecycle / self-restart -------------------------------------------
+//
+// Mirrors the lobby's in-place re-exec (spring-lobby): a restart replaces
+// this process image via execvp, so the PID is preserved and a process
+// manager (mprocs) keeps tracking the same pid instead of seeing a crash +
+// respawn. Triggered by SIGHUP or `POST /api/logs/restart` (used by the
+// MCP `restart_logserver` tool). SIGINT/SIGTERM are a plain clean stop.
+static std::atomic<bool> g_shutdown{false};
+static std::atomic<bool> g_restart{false};
+static int   g_savedArgc = 0;
+static char** g_savedArgv = nullptr;
+static void stopHandler(int)    { g_shutdown.store(true); }
+static void restartHandler(int) { g_restart.store(true); g_shutdown.store(true); }
 
 // --- Log ring buffer ---
 
@@ -292,6 +309,15 @@ static int JsonGetInt(const std::string& body, const std::string& key, int def) 
 
 int main(int argc, char** argv) {
     springlog_init("spring-logserver", SPRING_LOG_OUTPUT_CONSOLE);
+
+    // Saved for self-restart via execvp (see g_restart handling below).
+    g_savedArgc = argc;
+    g_savedArgv = argv;
+
+    // SIGINT/SIGTERM → clean stop; SIGHUP → restart-in-place (same pid).
+    std::signal(SIGINT,  stopHandler);
+    std::signal(SIGTERM, stopHandler);
+    std::signal(SIGHUP,  restartHandler);
 
     // Parse args
     for (int i = 1; i < argc; i++) {
@@ -656,14 +682,47 @@ int main(int argc, char** argv) {
                 .body = {resp.begin(), resp.end()}, .status = 200};
     });
 
+    // POST /api/logs/restart — re-exec this process in place (same pid).
+    // Used by the MCP `restart_logserver` tool after rebuilding the binary;
+    // keeps mprocs authoritative over the pid (no kill + respawn). Sets the
+    // restart flag + wakes the run loop; the actual execvp happens on the
+    // main thread once the network server has stopped.
+    net.AddHttpPost("/api/logs/restart", [](const std::string&, const std::string&,
+                                            const HttpRequestHeaders&) -> HttpResponse {
+        g_restart.store(true);
+        g_shutdown.store(true);
+        const char* resp = "{\"ok\":true,\"message\":\"restarting log server...\"}";
+        return {.contentType = "application/json",
+                .body = {resp, resp + strlen(resp)}, .status = 200};
+    });
+
     net.Start(g_port);
 
-    // Run until interrupted — the network thread handles everything
-    SLOG(SPRING_LOG_NOTICE, "log server running, press Ctrl-C to stop");
-    pause();  // Wait for signal
+    // Run until a stop/restart is requested. Poll the atomics rather than
+    // pause() so the HTTP restart endpoint (network thread) can wake us
+    // without relying on cross-thread signal delivery.
+    SLOG(SPRING_LOG_NOTICE,
+        "log server running (SIGINT=stop, SIGHUP/POST /api/logs/restart=re-exec)");
+    while (!g_shutdown.load()) {
+        struct timespec ts{0, 200L * 1000 * 1000};  // 200 ms
+        nanosleep(&ts, nullptr);
+    }
 
     net.Stop();
     g_server = nullptr;
+
+    // Re-exec in place if a restart was requested — replaces the process
+    // image so the pid is preserved (mprocs stays authoritative). Matches
+    // the lobby's execvp restart path.
+    if (g_restart.load()) {
+        SLOG(SPRING_LOG_NOTICE, "re-exec'ing: %s", g_savedArgv[0]);
+        springlog_sqlite_shutdown();
+        springlog_shutdown();
+        execvp(g_savedArgv[0], g_savedArgv);
+        // Only reached if execvp failed.
+        fprintf(stderr, "ERROR: log server restart failed: %s\n", strerror(errno));
+        return 1;
+    }
     springlog_sqlite_shutdown();
     springlog_shutdown();
     return 0;

@@ -23,7 +23,8 @@ The `spring-debug` MCP server (declared in `.mcp.json`) connects to the running 
 | `list_units` | List units, optionally by team | Debugging combat, spawning |
 | `list_gadgets` | List loaded Lua gadgets | Checking which gadgets are active |
 | `get_lua_source` | Read a Lua file via the lobby's VFS HTTP endpoint | Reading gadget source when debugging errors |
-| `restart_lobby` | Restart the lobby server in-place (re-exec, preserves game servers) | After rebuilding spring-lobby binary |
+| `restart_lobby` | Restart the lobby server in-place (re-exec, same PID, preserves game servers) | After rebuilding spring-lobby binary |
+| `restart_logserver` | Restart the log server (:8010) in-place (re-exec, same PID) | After rebuilding spring-logserver, or if the log pipeline stops responding |
 | `restart_game` | Restart a game server in-place (re-exec with same args, same PID) | After rebuilding spring-server binary |
 | `api_request` | Authenticated HTTP request to lobby/log/game server (auto-manages token) | Hitting endpoints without curl + manual token plumbing |
 
@@ -72,12 +73,19 @@ Prefer `exec_lua` for Lua snippets and `query_db` for SQL — `api_request` is t
 
 ## Restarting Servers In-Place
 
-After rebuilding binaries, restart servers without disrupting the lobby room lifecycle:
+After rebuilding binaries, restart servers without disrupting the lobby room lifecycle.
+
+All three restart tools **re-exec the process in place — the PID is preserved**, so an external process manager (mprocs) stays authoritative and never sees a crash + respawn. **Prefer these over `kill` + relaunch**: hand-launching outside mprocs leaves the mprocs-managed pane dead and can spawn duplicate listeners on the same port (SO_REUSEPORT round-robin), so requests hit a stale pre-rebuild binary. If you ever do end up with duplicate `spring-lobby`/`spring-logserver` processes, kill the extras and restart the surviving one via these tools (or the mprocs pane).
 
 **Lobby** (`restart_lobby`):
 - Re-execs the process with the same CLI arguments (PID is preserved)
 - Persists running game server PIDs/ports to SQLite so active games survive the restart
 - Also triggered via `SIGHUP` signal or `POST /api/exec` with `{"scope":"lobby","code":"restart"}`
+
+**Log server** (`restart_logserver`):
+- Re-execs the process with the same CLI arguments (PID is preserved)
+- Use after rebuilding `spring-logserver`, or to recover the log pipeline if `get_logs`/`search_logs` start failing with `fetch failed` (the log server on :8010 went down)
+- Also triggered via `SIGHUP` signal or `POST /api/logs/restart`
 
 **Game server** (`restart_game`):
 - Re-execs with the same CLI arguments (same PID, same port, fresh binary)

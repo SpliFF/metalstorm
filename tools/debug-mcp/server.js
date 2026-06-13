@@ -530,7 +530,15 @@ const TOOLS = [
     },
     {
         name: 'restart_lobby',
-        description: 'Restart the lobby server in-place (re-exec with same args). Running game servers are preserved. Use after rebuilding spring-lobby.',
+        description: 'Restart the lobby server in-place (re-exec with same args, same pid — mprocs stays authoritative). Running game servers are preserved. Use after rebuilding spring-lobby.',
+        inputSchema: {
+            type: 'object',
+            properties: {},
+        },
+    },
+    {
+        name: 'restart_logserver',
+        description: 'Restart the log server (:8010) in-place (re-exec with same args, same pid — mprocs stays authoritative). Use after rebuilding spring-logserver, or to recover the log pipeline if it stops responding.',
         inputSchema: {
             type: 'object',
             properties: {},
@@ -969,6 +977,23 @@ async function executeTool(name, args) {
         case 'restart_lobby': {
             const result = await execOnServer(LOBBY_URL, 'lobby', 'restart');
             return result.output || 'Restart command sent.';
+        }
+
+        case 'restart_logserver': {
+            // The log server re-execs itself in place (same pid) on this
+            // POST — mirrors the lobby's restart so mprocs keeps tracking
+            // the same process. No auth (the log server is unauthenticated).
+            let resp;
+            try {
+                resp = await fetch(`${LOG_SERVER_URL}/api/logs/restart`, { method: 'POST' });
+            } catch (e) {
+                return `Could not reach the log server at ${LOG_SERVER_URL}: ${e.message}. ` +
+                    `Is it running? (mprocs "logserver" pane)`;
+            }
+            if (!resp.ok)
+                return `Log server restart failed: HTTP ${resp.status}`;
+            const body = await resp.json().catch(() => ({}));
+            return body.message || 'Log server restart command sent (re-exec in place).';
         }
 
         case 'restart_game': {
