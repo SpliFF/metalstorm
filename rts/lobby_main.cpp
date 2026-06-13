@@ -1540,6 +1540,22 @@ int main(int argc, char* argv[])
         if (!rooms.StartGame(room->id, static_cast<uint32_t>(userId)))
             return HttpAuth::JsonResponse(400, R"({"error":"cannot start game"})");
 
+        // Give every still-unassigned slot a distinct map start position
+        // before spawning the game server. AutoAssignStartPositions skips
+        // slots that already picked a position (via /api/rooms/startpos)
+        // and no-ops on maps with no start positions (the sim then falls
+        // back to its map-centre default). This call was written for the
+        // start path but never wired in — without it every slot stays at
+        // startPos=-1, the sim spawns ALL teams at map centre, and enemy
+        // commanders overlap and immediately fight to a premature GameOver.
+        {
+            MapMetadataDb mdb;
+            const size_t spCount = mdb.GetMap(mapDb, room->mapId).startPositions.size();
+            const int8_t maxStartPos =
+                static_cast<int8_t>(spCount > 127 ? 127 : spCount);
+            rooms.AutoAssignStartPositions(room->id, maxStartPos);
+        }
+
         // Verify game exists before spawning
         auto it = gamePathsById.find(room->gameId);
 
