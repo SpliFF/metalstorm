@@ -243,6 +243,19 @@ function RmlUi.SetMouseCursorAlias(cssName, engineCursor)
   record({ op = 'cursorAlias', cssName = tostring(cssName), engineCursor = tostring(engineCursor) })
 end
 
+-- i18n translation dictionary. BAR's modules/i18n/i18n.lua repopulates this on
+-- every setLanguage: ClearTranslations() then AddTranslationString('!!'..key,
+-- value) for each string. Main keeps the map and resolves '!!key' text nodes in
+-- RML documents against it (PLAN-rml.md §5.3 / open-question #4 — the source of
+-- truth for !! is the game, fed through here).
+function RmlUi.ClearTranslations()
+  record({ op = 'i18nClear' })
+end
+
+function RmlUi.AddTranslationString(key, value)
+  record({ op = 'i18nAdd', key = tostring(key), value = tostring(value) })
+end
+
 -- Called by JS (rmlHandleEvent) on a native DOM event. Dispatch to the Lua
 -- listener; build the minimal event object BAR reads. StopPropagation is a
 -- worker-side flag: propagation is already resolved on main by the time we see

@@ -1249,6 +1249,12 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         modDesc: ctx.modDesc || '',
         modVersion: ctx.modVersion || '',
         gameName: ctx.modName || ctx.gameId || '',
+        // Recoil's Game table carries gameShortName alongside the legacy
+        // modShortName alias (sourced from modinfo `shortname`). BAR's
+        // barwidgets.lua builds its config path from it
+        // (`LuaUI/Config/<gameShortName>.lua`), so a nil here aborts the whole
+        // widget manager. Data-driven from /api/games (modinfo), never hardcoded.
+        gameShortName: ctx.modShortName || (ctx.gameId ? ctx.gameId.toUpperCase() : ''),
         gameVersion: ctx.modVersion || '',
         mapName: '',
         mapHumanName: '',

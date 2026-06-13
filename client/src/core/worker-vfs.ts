@@ -167,16 +167,30 @@ export function vfsLookup(path: string): string | undefined {
 // ── HTTP VFS prefetch ──────────────────────────────────────────────────
 
 export async function prefetchAllGameFiles(baseUrl: string): Promise<void> {
-    // Top-level game files that some widgets VFS.Include directly
-    // (e.g. ModOptions.lua, modinfo.lua). The BFS below starts from
-    // subdirectories so root files would otherwise never be fetched.
-    const ROOT_FILES = ['ModOptions.lua', 'modoptions.lua', 'modinfo.lua'];
-    await Promise.all(ROOT_FILES.map(async (fp) => {
-        try {
-            const fRes = await fetch(`${baseUrl}/${fp}`);
-            if (fRes.ok) vfsRegister(fp, await fRes.text());
-        } catch { /* silent */ }
-    }));
+    // Game-root code files that the LuaUI bootstrap VFS.Includes directly,
+    // before any subdirectory is touched. ZK reads `ModOptions.lua` / `modinfo`;
+    // BAR's `LuaUI/main.lua` includes the game-root `init.lua` (which installs
+    // Spring.I18N, Json, Spring.Utilities, Game.Commands, Spring.Lava and the
+    // graphics module) on its second line — without it the bootstrap crashes at
+    // `Spring.I18N.setLanguage()` and the whole widget framework never loads.
+    // The BFS below seeds curated subdirectories (not the game root) to keep
+    // boot cost bounded, so root files would otherwise never be fetched.
+    // Discover them generically: list the root and fetch every code file in it,
+    // rather than hardcoding per-game filenames.
+    try {
+        const rootRes = await fetch(`${baseUrl}/`);
+        if (rootRes.ok) {
+            const rootEntries = await rootRes.json() as { name: string; type: string }[];
+            await Promise.all(rootEntries
+                .filter((e) => e.type === 'file' && /\.(lua|txt|json)$/i.test(e.name))
+                .map(async (e) => {
+                    try {
+                        const fRes = await fetch(`${baseUrl}/${e.name}`);
+                        if (fRes.ok) vfsRegister(e.name, await fRes.text());
+                    } catch { /* silent */ }
+                }));
+        }
+    } catch { /* silent */ }
     const queue = [
         'LuaUI', 'LuaRules', 'LuaRules/Utilities',
         'LuaRules/Configs', 'Configs',
@@ -185,6 +199,14 @@ export async function prefetchAllGameFiles(baseUrl: string): Promise<void> {
         // into all Widget subdirectories quickly enough.
         'LuaUI/Widgets/chili', 'LuaUI/Widgets/chili_old',
         'gamedata',
+        // BAR's game-root `init.lua` chain pulls shared library code from these
+        // top-level trees: `common/` (number/string/table fns, Json, Spring
+        // overrides + utilities, platform fns, constants), `modules/` (i18n,
+        // commands, customcommands, lava, graphics) and `language/` (per-locale
+        // *.json the i18n module enumerates via VFS.SubDirs/DirList). Crawling
+        // `language` also indexes its subdirs so SubDirs('language')→{en,…} and
+        // DirList('language/en','*.json') resolve from the registered paths.
+        'common', 'modules', 'language',
         // ZK keeps shared library code in top-level dirs that root-BFS
         // would otherwise skip. modularCommAPI/ is referenced by
         // api_modularcomms.lua → drives WG.ModularCommAPI → drives

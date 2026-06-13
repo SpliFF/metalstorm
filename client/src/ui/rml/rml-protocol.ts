@@ -55,7 +55,13 @@ export type RmlOp =
     | { op: 'elAddListener'; elem: number; doc: number; event: string } // main attaches native listener → rml:event
     // ── document-scoped resources ──
     | { op: 'fontFace'; path: string; fallback: boolean }
-    | { op: 'cursorAlias'; cssName: string; engineCursor: string };
+    | { op: 'cursorAlias'; cssName: string; engineCursor: string }
+    // ── i18n translation dictionary (the `!!key` resolution source, §5.3) ──
+    // BAR's i18n module feeds RmlUi the active locale's strings via
+    // ClearTranslations()/AddTranslationString('!!'..key, value); main keeps the
+    // map and resolves `!!key` text in RML documents against it.
+    | { op: 'i18nClear' }
+    | { op: 'i18nAdd'; key: string; value: string };
 
 // ─── main → worker: a DOM event fired on a listened element ──────────────────
 

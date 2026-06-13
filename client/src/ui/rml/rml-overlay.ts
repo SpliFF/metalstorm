@@ -41,6 +41,10 @@ export class RmlOverlayManager {
     private reposition: () => void;
     /** R0 diagnostic: how many ops we've received but not yet rendered. */
     private ignoredOps = 0;
+    /** `!!key` → translated string for the active locale (PLAN-rml.md §5.3).
+     *  Populated from i18nClear/i18nAdd ops even in R0 (cheap; R1 resolves
+     *  `!!key` text nodes against it). */
+    private readonly i18n = new Map<string, string>();
 
     constructor(opts: RmlOverlayOptions) {
         this.canvasId = opts.canvasId;
@@ -78,10 +82,18 @@ export class RmlOverlayManager {
      * with the real DOM mutation switch (see PLAN-rml.md §5.1 `applyOps`).
      */
     applyOps(ops: RmlOp[]): void {
-        this.ignoredOps += ops.length;
-        // R0 no-op: deliberately not rendering. The op stream is verified live
-        // by confirming the 3 BAR RML widgets initialise and emit ops without
-        // throwing; rendering lands in R1.
+        // R0: still not rendering DOM (that lands in R1), but capture the i18n
+        // dictionary now — it's cheap and the `!!key` resolution in R1 needs it.
+        // BAR feeds the full active-locale string set on every setLanguage.
+        for (const op of ops) {
+            if (op.op === 'i18nClear') {
+                this.i18n.clear();
+            } else if (op.op === 'i18nAdd') {
+                this.i18n.set(op.key, op.value);
+            } else {
+                this.ignoredOps++;
+            }
+        }
     }
 
     /** Tear down: remove the root + listeners. Called from quitToLobby(). */
