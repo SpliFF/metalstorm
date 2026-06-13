@@ -2235,11 +2235,36 @@ defaultFont = activeFont
     postLog(2, '[LuaUI] init step 6.5/8: loading gamedata/sounds.lua...');
     loadAndPostSoundItems(runtime);
 
-    postLog(2, '[LuaUI] init step 7/8: starting bootstrap (VFS.Include camain.lua)...');
+    // Resolve the game's LuaUI entry point rather than assuming ZK's
+    // camain.lua. ZK ships LuaUI/camain.lua (its Chili-based cawidgets
+    // tree); BAR and stock Spring ship LuaUI/main.lua. Hardcoding camain.lua
+    // meant the include resolved to nothing for BAR, the widget handler never
+    // initialized, and no overlay rendered. Probe the prefetched VFS in
+    // priority order and boot the first entry that exists. vfsExists handles
+    // the LuaUI/ prefix + case-folding.
+    //
+    // NOTE: this only fixes entry-point detection. ZK's camain.lua loads the
+    // Chili framework that the worker GL bridge implements; BAR's main.lua
+    // loads an RML-based framework (barwidgets.lua / RmlWidgets) the bridge
+    // does NOT yet implement. Full BAR overlay parity is a larger
+    // PLAN-bar.md de-ZK-ing workstream — but de-hardcoding the entry gets the
+    // correct handler to initialize instead of silently including nothing.
+    const LUAUI_ENTRY_CANDIDATES = [
+        'LuaUI/camain.lua',  // Zero-K (Chili cawidgets tree)
+        'LuaUI/main.lua',    // BAR + stock Spring LuaUI entry
+        'LuaUI/gui.lua',     // legacy fallback seen in some games
+    ];
+    const luaUiEntry = LUAUI_ENTRY_CANDIDATES.find((p) => vfsExists(p));
+    if (!luaUiEntry) {
+        postLog(4, `[LuaUI] no recognised LuaUI entry point in VFS (tried ${LUAUI_ENTRY_CANDIDATES.join(', ')}) — no overlay will load`);
+    }
+    const entryToBoot = luaUiEntry ?? 'LuaUI/camain.lua';
+
+    postLog(2, `[LuaUI] init step 7/8: starting bootstrap (VFS.Include ${entryToBoot})...`);
     const bootStart = performance.now();
     const bootErr = runtime.doString(`
         local ok, err = pcall(function()
-            VFS.Include("LuaUI/camain.lua", nil, VFS.GAME)
+            VFS.Include(${JSON.stringify(entryToBoot)}, nil, VFS.GAME)
         end)
         if not ok then
             Spring.Echo("[LuaUI] Bootstrap failed: " .. tostring(err))
