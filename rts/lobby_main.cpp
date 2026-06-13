@@ -1144,7 +1144,8 @@ int main(int argc, char* argv[])
                 + ",\"shortName\":\"" + HttpAuth::JsonEscape(g.shortName) + "\""
                 + ",\"description\":\"" + HttpAuth::JsonEscape(g.description) + "\""
                 + ",\"version\":\"" + HttpAuth::JsonEscape(g.version) + "\""
-                + ",\"lighting\":\"" + HttpAuth::JsonEscape(g.lighting) + "\"}";
+                + ",\"lighting\":\"" + HttpAuth::JsonEscape(g.lighting) + "\""
+                + ",\"modelMaterialPort\":\"" + HttpAuth::JsonEscape(g.modelMaterialPort) + "\"}";
         }
         json += "]";
         return HttpAuth::JsonResponse(200, json);

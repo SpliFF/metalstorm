@@ -44,6 +44,17 @@ import { LosBitmapStore, type LosBitmap } from './los-bitmap.js';
 // done in main.ts) so unit `.ktx2` textures transcode here.
 import './ktx2-config.js';
 import { EntityRenderer, setLightingStyle, setUseZKMaterial } from './entity-renderer.js';
+
+/**
+ * The model-material port id that `zk-model-material.ts` reproduces
+ * (PLAN-bar.md A4). This client ships a hand-port of Zero-K's 939-line
+ * GL3 `modelmaterials/Templates/defaultMaterialTemplate.lua`. A game opts
+ * into that material by declaring `modelMaterialPort = 'zk-939'` in its
+ * modinfo; any other (or absent) value falls to the engine-default material.
+ * Bump the `-NNN` suffix if the hand-port is ever re-synced to a newer
+ * template revision so stale game configs surface as a loud mismatch.
+ */
+const ZK_MATERIAL_PORT_ID = 'zk-939';
 import { BuildingPlateRenderer } from './building-plate-renderer.js';
 import { DefCache } from './def-cache.js';
 import { fetchAndIngestDefs } from './defs-fetch.js';
@@ -877,12 +888,26 @@ export function gpInit(msg: GpInitToWorker): void {
     // field, surfaced via the lobby's /api/games and plumbed through gp:init
     // (PLAN-bar.md A4). Defaults to 'gameplay' when absent (main's fallback).
     setLightingStyle(msg.lighting || 'gameplay');
-    // DEVIATION: the ZK team-color material (zk-model-material.ts) is gated on
-    // the game id. BAR ships GL4 CUS materials we can't render on WebGL2 (§4),
-    // so it correctly falls to the engine-default material; only ZK has a
-    // ported material. A data-driven capability gate (PLAN-bar.md A4) is still
-    // owed — both current games resolve identically under it.
-    setUseZKMaterial(msg.gameId === 'zk');
+    // PLAN-bar.md A4 (decided 2026-06-11): apply the ZK team-color material
+    // (zk-model-material.ts) by a data-driven *port id*, not the `gameId`
+    // literal. zk-model-material.ts is a hand-port of Zero-K's specific
+    // 939-line `defaultMaterialTemplate.lua` (GL3 CUS); it is only faithful
+    // for a game that ships that exact template. The game declares which port
+    // its template matches via modinfo `modelMaterialPort` (→ /api/games →
+    // gp:init). BAR ships a different (GL4) template we can't render on WebGL2
+    // (§4) and omits the flag, so it correctly falls to the engine-default
+    // material. ACCEPTED LIMITATION: a plain flag (not a content hash) can't
+    // detect the live template drifting from this hand-port — ZK_MATERIAL_PORT_ID
+    // names the exact template version this port reproduces; bump it if the
+    // port is re-synced to a newer template.
+    const useZKPort = msg.modelMaterialPort === ZK_MATERIAL_PORT_ID;
+    if (msg.modelMaterialPort && !useZKPort) {
+        // A game asked for a material port the client doesn't implement →
+        // engine-default (no silent mis-render: surface the unmet request).
+        console.warn(`[gp] modelMaterialPort='${msg.modelMaterialPort}' has no ` +
+            `client port (have '${ZK_MATERIAL_PORT_ID}') — using engine-default material`);
+    }
+    setUseZKMaterial(useZKPort);
 
     gpPresentationClock = new PresentationClock();
 

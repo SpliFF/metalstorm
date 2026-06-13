@@ -47,6 +47,14 @@ export interface GpInitToWorker {
      * absent ⇒ `'gameplay'`.
      */
     lighting?: string;
+    /**
+     * Which client model-material *port* the game wants applied, from the
+     * game's modinfo (`modelMaterialPort`) via the lobby's `/api/games`
+     * (PLAN-bar.md A4). The worker applies its hand-ported material only
+     * when this matches the port id that port reproduces (e.g. `'zk-939'`),
+     * otherwise the engine-default material. Absent/empty ⇒ engine-default.
+     */
+    modelMaterialPort?: string;
     /** Content-addressed defs path the server baked at startup (`''` = none). */
     defsCacheKey: string;
     /** Build stamp for `stampUrl()` asset versioning from inside the worker. */

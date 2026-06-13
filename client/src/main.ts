@@ -402,6 +402,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // (modinfo `lighting`) so the worker renders the game's authored style
     // instead of a hardcoded default (PLAN-bar.md A4). Best-effort.
     let gameLighting = 'gameplay';
+    // The model-material port id (PLAN-bar.md A4): which client material
+    // hand-port (if any) this game's template matches. Empty ⇒ the worker
+    // uses the engine-default model material. Fetched in the same /api/games
+    // round-trip as `lighting`.
+    let gameModelMaterialPort = '';
     if (gameId) {
         try {
             const resp = await fetch(`${lobbyHttpUrl}/api/games`);
@@ -409,8 +414,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 const games = await resp.json();
                 const g = Array.isArray(games) ? games.find((x: any) => x?.id === gameId) : null;
                 if (g?.lighting) gameLighting = g.lighting;
+                if (g?.modelMaterialPort) gameModelMaterialPort = g.modelMaterialPort;
             }
-        } catch { /* default 'gameplay' */ }
+        } catch { /* default 'gameplay' / engine-default material */ }
     }
 
     const dpr = window.devicePixelRatio || 1;
@@ -546,6 +552,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         gameId,
         mapId,
         lighting: gameLighting,
+        modelMaterialPort: gameModelMaterialPort,
         defsCacheKey: '',
         buildStamp: CONFIG.buildStamp,
         width: window.innerWidth,

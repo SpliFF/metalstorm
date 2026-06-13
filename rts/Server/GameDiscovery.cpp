@@ -75,6 +75,13 @@ bool LoadOne(const fs::path& folder, GameDiscovery::GameInfo& out) {
     // verbatim and lets the client decide how to interpret it — adding
     // a new style is a client-only change here.
     std::string lighting = cfg->GetString("lighting", "gameplay");
+    // `modelMaterialPort` names the client model-material port the game
+    // wants applied (PLAN-bar.md A4). Empty default ⇒ engine-default
+    // material. The client decides whether its hand-port matches this id;
+    // the lobby just relays the string. Legacy games (ZK) hand-declare it
+    // in modinfo; the proper fix is for gameconverter to fingerprint the
+    // template and emit it at conversion time.
+    std::string modelMaterialPort = cfg->GetString("modelMaterialPort", "");
 
     // Fall back to the folder name if the config doesn't declare
     // one. Keeps the game visible even if an author forgot the
@@ -98,6 +105,7 @@ bool LoadOne(const fs::path& folder, GameDiscovery::GameInfo& out) {
     out.description = description;
     out.version = version;
     out.lighting = lighting;
+    out.modelMaterialPort = modelMaterialPort;
     out.folderPath = folder.string();
     return true;
 }

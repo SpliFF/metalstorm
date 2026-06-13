@@ -70,6 +70,26 @@ struct GameInfo {
     /// converts it to a `#define` at material-compile time.
     std::string lighting;
 
+    /// Identifies which game-specific model-material *port* the client
+    /// should apply, read from modinfo.lua's `modelMaterialPort` field
+    /// (PLAN-bar.md A4). Empty ⇒ the engine-default model material.
+    ///
+    /// The client ships hand-ports of specific games' GL3 CUS material
+    /// templates (e.g. `zk-model-material.ts` reproduces Zero-K's
+    /// `defaultMaterialTemplate.lua`). Each port targets one template
+    /// identity; the client applies its port only when this flag matches
+    /// the id the port reproduces (e.g. `"zk-939"` for ZK's 939-line
+    /// template), otherwise it falls back to the engine-default material.
+    /// BAR ships a different (GL4) template we can't render on WebGL2, so
+    /// it omits the flag and correctly gets the engine-default look.
+    ///
+    /// ACCEPTED LIMITATION (per the 2026-06-11 design call, simple flag
+    /// not a content hash): this does NOT detect the live template
+    /// drifting away from the hand-port — the client port must carry a
+    /// comment naming the exact template version/line-count it
+    /// reproduces. Surfaced verbatim in `/api/games`.
+    std::string modelMaterialPort;
+
     /// Absolute path to the game folder on disk (e.g. "data/games/papertanks").
     /// Used for content loading and AI discovery.
     std::string folderPath;
