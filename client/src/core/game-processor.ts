@@ -224,6 +224,12 @@ let gpDynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
 /// lifetimes with the game speed (paused → 0). Driven by onGameInfo. The
 /// camera + entity ticks keep raw wall dt; only FX lifetimes use it.
 let gpFxSimSpeed = 1;
+/// Long-frame profiler: when on, the render loop stamps per-phase timings and
+/// logs a breakdown for any frame exceeding GP_LONG_FRAME_MS, so worker stalls
+/// (model/atlas loads, GC, a runaway subsystem tick) are attributable instead
+/// of guessed. Cheap enough to leave on; only logs on genuine hitches.
+const gpFrameProfile = true;
+const GP_LONG_FRAME_MS = 150;
 /// Wall-clock timestamp of the previous render frame, for the FX `dt`.
 let gpLastFrameTime = 0;
 /// Holds the per-allyteam LOS bitmaps (envelope 0x07) so a bitmap that
@@ -1053,18 +1059,27 @@ export function gpInit(msg: GpInitToWorker): void {
         // use fxDt (PLAN-weapon-fx-capture-arch fxDt).
         const fxDt = dt * gpFxSimSpeed;
 
+        // Long-frame profiler: cheap performance.now() stamps per phase, only
+        // logged when a frame blows past the budget — pins a worker stall to a
+        // specific subsystem instead of guessing. Near-zero overhead otherwise.
+        const _pf = gpFrameProfile ? [] as [string, number][] : null;
+        const _mark = _pf ? (label: string) => _pf.push([label, performance.now()]) : () => {};
+
         // GW4-c5b: advance the interactive camera(s) first so this frame's
         // render + pick + viewport use the updated pose. Raw wall dt (the camera
         // is not sim-scaled). tick() handles its own per-call timing internally.
         for (const cam of gpViewCameras.values()) cam.tick();
+        _mark('camera');
 
         // entityRenderer.tick() advances the presentation clock (L0) and
         // interpolates every unit to the presentation cursor before render.
         gpCtx.entityRenderer?.tick();
+        _mark('entity');
         gpBuildBeamRenderer?.tick();
         gpCtx.projectileRenderer?.tick();
         gpCegRuntime?.tick(fxDt);
         gpCombatFX?.tick(fxDt);
+        _mark('fx');
         // Decal clipmap fine window tracks the camera focus + height.
         {
             const focus = camera.getTarget();
@@ -1077,15 +1092,27 @@ export function gpInit(msg: GpInitToWorker): void {
         gpCtx.fxLightPool?.update(fxDt, camera.position);
         gpDistortion?.tick(fxDt);
         gpMuzzleFlare?.tick(fxDt);
+        _mark('decals+lights');
         scene.render();
+        _mark('render');
         // GW4-c6: LuaUI screen-space pass on the SAME context, after the world
         // is drawn (state save/restore + wipeCaches inside). World-space
         // DrawWorld/DrawWorldPreUnit overlays land in c6-2.
         gpRunUiPass();
+        _mark('ui');
         // GW4-c5c: feed the HTML HUD (entity count / frame / selection / speed).
         gpPostSceneState(now);
         // GW4-c5c-3: feed the main-thread minimap (unit dots + fog overlay).
         gpPostMinimapFeed(now);
+
+        if (_pf) {
+            const total = performance.now() - now;
+            if (total > GP_LONG_FRAME_MS) {
+                let prev = now;
+                const parts = _pf.map(([label, t]) => { const d = (t - prev) | 0; prev = t; return `${label}=${d}`; });
+                postLog(2, `[gp] long frame ${total | 0}ms: ${parts.join(' ')}`);
+            }
+        }
     });
     postLog(1, '[gp] Babylon Engine up on transferred #game-canvas (GW4-c5, weapon FX)');
 
@@ -1598,6 +1625,10 @@ export function gpHandleKeyUp(code: string, mods: number, viewId: number): void 
     gpViewCameras.get(viewId)?.keyUp(String(code).toLowerCase());
     gpSetShift((mods & 1) !== 0);
     gpDispatchKeyRelease(codeToSpringKeysym(String(code)), mods);
+}
+
+export function gpHandlePointerLeave(viewId: number): void {
+    gpViewCameras.get(viewId)?.pointerLeave();
 }
 
 export function gpHandleBlur(viewId: number): void {

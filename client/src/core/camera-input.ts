@@ -42,6 +42,10 @@ export class CameraInput {
         canvas.addEventListener('pointermove', this.onPointerMove);
         canvas.addEventListener('pointerdown', this.onPointerDown);
         canvas.addEventListener('pointerup', this.onPointerUp);
+        // Cursor leaving the canvas (incl. leaving the window) must stop
+        // edge-scroll — otherwise the last edge-parked pointermove keeps the
+        // camera scrolling with no event to clear it.
+        canvas.addEventListener('pointerleave', this.onPointerLeave);
         canvas.addEventListener('wheel', this.onWheel, { passive: false });
         // Right-drag must not pop the browser context menu; middle-click must not
         // trigger autoscroll / "open in new tab".
@@ -107,6 +111,10 @@ export class CameraInput {
         this.send({ type: 'gp:keyup', code: e.code, mods: packMods(e) });
     };
 
+    private onPointerLeave = (): void => {
+        this.send({ type: 'gp:pointerleave' });
+    };
+
     private onBlur = (): void => {
         this.send({ type: 'gp:blur' });
     };
@@ -124,6 +132,7 @@ export class CameraInput {
         this.canvas.removeEventListener('pointermove', this.onPointerMove);
         this.canvas.removeEventListener('pointerdown', this.onPointerDown);
         this.canvas.removeEventListener('pointerup', this.onPointerUp);
+        this.canvas.removeEventListener('pointerleave', this.onPointerLeave);
         this.canvas.removeEventListener('wheel', this.onWheel);
         this.canvas.removeEventListener('contextmenu', this.preventDefault);
         this.canvas.removeEventListener('auxclick', this.onAuxClick);

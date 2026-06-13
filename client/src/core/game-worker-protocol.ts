@@ -89,6 +89,7 @@ export type GpInputToWorker =
     | { type: 'gp:wheel'; x: number; y: number; delta: number; mods: number; viewId?: number }
     | { type: 'gp:keydown'; code: string; mods: number; viewId?: number }
     | { type: 'gp:keyup'; code: string; mods: number; viewId?: number }
+    | { type: 'gp:pointerleave'; viewId?: number }
     | { type: 'gp:blur'; viewId?: number }
     | { type: 'gp:resize'; width: number; height: number; dpr: number; viewId?: number };
 

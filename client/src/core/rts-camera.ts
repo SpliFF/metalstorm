@@ -204,11 +204,23 @@ export class RTSCamera {
     }
 
     /** Focus loss — drop all held keys + cancel any active drag so the camera
-     *  doesn't keep panning after the tab/window loses focus. */
+     *  doesn't keep panning after the tab/window loses focus. Also clears the
+     *  in-canvas flag: a blur with the cursor parked over an edge would
+     *  otherwise leave edge-scroll running forever. */
     blur(): void {
         this.keys.clear();
         this.middleDragging = false;
         this.rightDragging = false;
+        this.mouseInCanvas = false;
+    }
+
+    /** Pointer left the canvas/window. Stops edge-scroll: without this the last
+     *  in-bounds pointermove (typically right at an edge) leaves `mouseInCanvas`
+     *  true with no further events to clear it, so the camera edge-scrolls into
+     *  the void. An active middle/right drag keeps tracking via pointer capture,
+     *  so we only gate edge-scroll here and leave drag state untouched. */
+    pointerLeave(): void {
+        this.mouseInCanvas = false;
     }
 
     /** Mouse wheel. `delta` is the raw WheelEvent.deltaY. */
@@ -428,6 +440,33 @@ export class RTSCamera {
         // or not so the camera self-rights when the terrain rises beneath
         // it during animated transitions or external pose changes.
         this.clampAboveGround();
+
+        // Keep the focus point on (or just past) the map. Belt-and-braces with
+        // the edge-scroll gating: even if some path runs the camera off the
+        // map, this rubber-bands the look-at back to within `edgePanMargin` of
+        // the playable area so we can never end up staring into the void.
+        this.clampToBounds();
+    }
+
+    /**
+     * Clamp the ground focus point (`lookAt`) to the map extent plus a small
+     * margin, carrying the camera by the same XZ delta so the view offset is
+     * preserved. The margin lets you nudge slightly past an edge to centre a
+     * corner unit, without allowing an unbounded run-off.
+     */
+    private clampToBounds(): void {
+        // 10% of the shorter map axis, floored so tiny maps still get slack.
+        const margin = Math.max(512, Math.min(this.mapWidth, this.mapHeight) * 0.1);
+        const cx = Math.max(-margin, Math.min(this.mapWidth + margin, this.lookAt.x));
+        const cz = Math.max(-margin, Math.min(this.mapHeight + margin, this.lookAt.z));
+        const dx = cx - this.lookAt.x;
+        const dz = cz - this.lookAt.z;
+        if (dx === 0 && dz === 0) return;
+        this.lookAt.x = cx;
+        this.lookAt.z = cz;
+        this.camera.position.x += dx;
+        this.camera.position.z += dz;
+        this.camera.setTarget(this.lookAt);
     }
 
     /**

@@ -19,7 +19,7 @@ import type { WorkerInbound } from './game-worker-protocol.js';
 import {
     gpInit, gpResize, gpShutdown, gpSetShift, gpTestDispatch,
     gpHandlePointerMove, gpHandlePointerDown, gpHandlePointerUp,
-    gpHandleWheel, gpHandleKeyDown, gpHandleKeyUp, gpHandleBlur,
+    gpHandleWheel, gpHandleKeyDown, gpHandleKeyUp, gpHandleBlur, gpHandlePointerLeave,
     gpHandleFocusWorld,
 } from './game-processor.js';
 import {
@@ -112,6 +112,10 @@ self.onmessage = async (e: MessageEvent<WorkerInbound>) => {
 
         case 'gp:keyup':
             gpHandleKeyUp(msg.code as string, msg.mods as number, (msg.viewId as number) ?? 0);
+            break;
+
+        case 'gp:pointerleave':
+            gpHandlePointerLeave((msg.viewId as number) ?? 0);
             break;
 
         case 'gp:blur':
