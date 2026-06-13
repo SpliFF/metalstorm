@@ -483,6 +483,23 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 if (musicDirector && !musicArmed) { musicDirector.arm(); musicArmed = true; }
                 musicDirector?.handleMusicEvent(m.state, m.fadeMs);
                 break;
+            // The worker parsed gamedata/sounds.lua and posted its SoundItems
+            // map. Ingest it so the AudioManager can resolve a SoundEvent's
+            // logical name to the authored file path. WITHOUT this, every
+            // server SoundEvent falls through to the SoundRef's bare server
+            // path (NormalizeSoundPath = `sounds/<name>`), which omits the
+            // `sounds/<subdir>/` component — so every sound that lives in a
+            // subdirectory (weapons/, bombs/, …) 404s. In the GW4 worker
+            // architecture this message lands here, not on the legacy
+            // LuaWidgetManager; mirror its handler (lua-widget-manager.ts).
+            case 'soundItems': {
+                const items = m.items as Record<string, import('./core/audio.js').SoundItem>;
+                const map = new Map<string, import('./core/audio.js').SoundItem>();
+                for (const [k, v] of Object.entries(items ?? {})) map.set(k, v);
+                audioManager?.ingestSoundItems(map, soundContentBaseUrl);
+                musicDirector?.ingestPlaylistsFromSoundItems(map);
+                break;
+            }
             case 'gp:gameOver':
                 showGameOver(gameTemplates, m.frame, { onReturnToLobby: quitToLobby });
                 break;
