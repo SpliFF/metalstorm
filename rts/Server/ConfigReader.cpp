@@ -381,4 +381,25 @@ bool Config::GetBool(const std::string& key, bool defaultValue) const {
     return out;
 }
 
+std::vector<std::string> Config::GetStringArray(const std::string& key) const {
+    std::vector<std::string> out;
+    if (!L) return out;
+    lua_getfield(L, 1, key.c_str());          // [ ... field ]
+    if (lua_istable(L, -1)) {
+        const int len = static_cast<int>(lua_rawlen(L, -1));
+        out.reserve(static_cast<size_t>(len));
+        for (int i = 1; i <= len; ++i) {
+            lua_rawgeti(L, -1, i);            // [ ... field elem ]
+            if (lua_isstring(L, -1)) {
+                size_t slen = 0;
+                const char* s = lua_tolstring(L, -1, &slen);
+                if (s) out.emplace_back(s, slen);
+            }
+            lua_pop(L, 1);                     // [ ... field ]
+        }
+    }
+    lua_pop(L, 1);                            // [ ... ]
+    return out;
+}
+
 } // namespace ConfigReader

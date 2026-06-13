@@ -110,8 +110,9 @@ bool ContainsCaseInsensitive(const std::string& haystack, const std::string& nee
 /// registry. Each entry is a `{name=..., desc=...}` table; the AI
 /// itself is not a standalone plugin — it's implemented inside the
 /// game's synced LuaRules gadgets, which discover it via
-/// `Spring.GetTeamLuaAI(teamId)`. We surface non-Chicken entries as
-/// AIInfo so the lobby can list them; the game server short-circuits
+/// `Spring.GetTeamLuaAI(teamId)`. We surface entries not on the game's
+/// `hiddenAIs` mode-gate list (A6) as AIInfo so the lobby can list them;
+/// the game server short-circuits
 /// the AddAI call for `isLuaAI = true` entries (the team roster
 /// already drives `GetTeamLuaAI`).
 ///
@@ -145,6 +146,19 @@ void ScanGameLuaAIFile(const std::string& gamePath,
         }
     }
     if (luaAIPath.empty()) return;
+
+    // PLAN-bar.md A6: the game declares which LuaAI entries are PvE
+    // *mode* toggles (selected by a gadget on a modoption, not by adding
+    // a player slot) and so must not appear as lobby AI options. Read the
+    // list from the game's config (`hiddenAIs` in modinfo, surfaced via
+    // game.config.lua) instead of hardcoding ZK's "chicken" — BAR gates
+    // raptors/scavengers, other games something else. A game that declares
+    // nothing gets all its AIs listed (safe default: clutter, not breakage).
+    // Match is case-insensitive substring so a token like "chicken" catches
+    // "Chicken: Survival" without the author enumerating every variant.
+    std::vector<std::string> hiddenAIs;
+    if (auto cfg = ConfigReader::Config::Load((fs::path(gamePath) / "game").string()))
+        hiddenAIs = cfg->GetStringArray("hiddenAIs");
 
     lua_State* L = luaL_newstate();
     if (!L) {
@@ -186,10 +200,15 @@ void ScanGameLuaAIFile(const std::string& gamePath,
 
         if (name.empty()) { skipped++; continue; }
 
-        // Chicken is a special PvE game mode — its "AI" is selected
-        // by the chicken_control gadget when modoptions enable it,
-        // not by adding a player slot. Don't expose it in the lobby.
-        if (ContainsCaseInsensitive(name, "chicken")) {
+        // PLAN-bar.md A6: skip game-declared mode-gated PvE "AIs" (ZK's
+        // chicken, BAR's raptors/scavengers, …) — they're selected by a
+        // gadget on a modoption, not by adding a player slot. Data-driven
+        // from the game's `hiddenAIs` config, not a hardcoded "chicken".
+        bool hidden = false;
+        for (const std::string& h : hiddenAIs) {
+            if (!h.empty() && ContainsCaseInsensitive(name, h)) { hidden = true; break; }
+        }
+        if (hidden) {
             skipped++;
             continue;
         }

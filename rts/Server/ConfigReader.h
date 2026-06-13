@@ -26,6 +26,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 struct lua_State;
 
@@ -66,6 +67,13 @@ public:
     /// Read a boolean field. Returns `defaultValue` if the field is
     /// missing or not a boolean.
     bool GetBool(const std::string& key, bool defaultValue = false) const;
+
+    /// Read a field that is a Lua array of strings (`{ "a", "b" }`),
+    /// returning its string elements in order. Missing field, non-table
+    /// value, and non-string elements all yield an empty vector / skip the
+    /// bad element — never throws. Used for small declarative lists like a
+    /// game's mode-gated AI names (PLAN-bar.md A6).
+    std::vector<std::string> GetStringArray(const std::string& key) const;
 
 private:
     Config();
