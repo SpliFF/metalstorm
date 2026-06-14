@@ -1391,8 +1391,16 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             return ctx.vfsFiles.get(normaliseSpringPath(String(path))) ?? null;
         },
         DirList: (_path: LuaValue, _pattern: LuaValue, _mode: LuaValue) => {
-            // Stub — returns empty table
-            return [];
+            // Stub — returns an empty Lua table. MUST be `{}` (JS object), not
+            // `[]` (JS array): a bound JS function returning `[]` marshals to
+            // *zero* Lua return values → `nil`, so a caller's
+            // `local files = VFS.DirList(...)` gets nil and the very next
+            // `table.sort(files)` errors. mapinfo.lua's tail merge block does
+            // exactly this (Wanderlust line 347-348), which broke the Game
+            // map-field parse. Same fix as map-lighting.ts's DirList stub.
+            // (No mapconfig/mapinfo override files exist in the web content
+            // model, so an empty listing is the faithful no-override result.)
+            return {};
         },
     };
 
@@ -4112,6 +4120,17 @@ function includeLuaFile(source: string, chunkName: string, ctx: SpringAPIContext
     // to recursively provide these.
     const subGlobals = buildSpringGlobals(ctx);
     for (const [k, v] of Object.entries(subGlobals)) sub.setGlobal(k, v);
+    // mapinfo.lua (and friends) end with a map-options merge block that, in
+    // engine, runs against `getfenv()` (Lua 5.1) to expose `mapinfo` to the
+    // VFS.Include'd `mapconfig/mapinfo/*.lua` overrides. fengari is Lua 5.3 (no
+    // getfenv/setfenv), so an *unguarded* block (e.g. Wanderlust at line 346)
+    // hits a nil call and the whole chunk errors before `return mapinfo` —
+    // parseMapInfoFields then falls back to engine defaults (mapHardness=100,
+    // mapName=""). Install harmless stubs so the block runs to completion, the
+    // same fix map-lighting.ts applies for the main-thread lighting parse.
+    // (buildSpringGlobals provides a real VFS but no getfenv/setfenv.)
+    if (subGlobals['getfenv'] === undefined) sub.setGlobal('getfenv', () => ({}));
+    if (subGlobals['setfenv'] === undefined) sub.setGlobal('setfenv', () => undefined);
     // Patch the source: many mapinfo.lua files end with `return mapinfo`
     // but some just define the global. If there's no explicit return,
     // append one so the chunk yields a value.

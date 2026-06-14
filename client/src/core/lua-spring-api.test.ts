@@ -670,6 +670,43 @@ describe('Game table map fields (PLAN-bar.md A12 residual)', () => {
         it('returns null when the chunk fails to yield a table', () => {
             expect(parseMapInfoFields('this is not lua ===', makeCtx())).toBeNull();
         });
+
+        // Regression: real mapinfo.lua (e.g. Wanderlust) ends with an
+        // unguarded map-options merge block that calls getfenv() and
+        // `table.sort(VFS.DirList(...))`. Before the fix, includeLuaFile's
+        // sub-runtime had no getfenv (→ nil-call) and VFS.DirList returned a
+        // JS `[]` that marshalled to zero values → nil → table.sort errored,
+        // so the whole parse failed and every Game.* map field defaulted
+        // silently. The earlier clean-MAPINFO test missed this entirely.
+        it('parses past the unguarded getfenv + VFS.DirList/sort merge tail', () => {
+            const withTail = `
+                local function lowerkeys(t) return t end
+                local function tmerge(a, b) end
+                local mapinfo = {
+                    name = "Wanderlust",
+                    maphardness = 200,
+                    gravity = 100,
+                }
+                do
+                    getfenv()["mapinfo"] = mapinfo
+                    local files = VFS.DirList("mapconfig/mapinfo/", "*.lua")
+                    table.sort(files)
+                    for i = 1, #files do
+                        local newcfg = VFS.Include(files[i])
+                        if newcfg then lowerkeys(newcfg); tmerge(mapinfo, newcfg) end
+                    end
+                    getfenv()["mapinfo"] = nil
+                end
+                return mapinfo
+            `;
+            const fields = parseMapInfoFields(withTail, makeCtx());
+            expect(fields).not.toBeNull();
+            expect(fields).toMatchObject({
+                mapName: 'Wanderlust',
+                mapHardness: 200,
+                gravity: 100,
+            });
+        });
     });
 
     describe('Game table population', () => {
