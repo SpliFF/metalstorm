@@ -736,6 +736,35 @@ export async function init(
     await prefetchAllGameFiles(baseUrl);
     postLog(2, `[LuaUI] init step 1/8 done: VFS ${vfsFiles.size} files prefetched`);
 
+    // 1a. Register the map's `mapinfo.lua` into the worker VFS. In real Spring
+    // the map archive is mounted in the VFS, so `VFS.Include("mapinfo.lua")`
+    // resolves to the map's authored table (maphardness, voidwater, gravity,
+    // water/atmosphere, …). Our worker only prefetches `/api/games/data` (the
+    // game tree), so the map file was absent and `VFS.Include("mapinfo.lua")`
+    // returned nil — breaking BAR's `modules/lava.lua` (reads `mapinfo.voidwater`),
+    // which cascades to every `Spring.Lava` consumer (cmd_context_build, gui_pip,
+    // map_edge_extension2) plus `gui_mapinfo` (`mapinfo.mapHardness`). This is a
+    // faithful gap, not a substitute: we serve the map's own authored file, the
+    // same source `map-lighting` already fetches for sun/ambient. The map's
+    // `mapinfo.lua` ends with a `getfenv()`/`VFS.DirList("mapconfig/mapinfo/")`
+    // merge block — the worker provides getfenv/setfenv shims and DirList returns
+    // [] when no per-map override configs are registered (the correct no-op).
+    // PLAN-bar.md (map-info VFS gap).
+    try {
+        const mapSrc = mapData.mapSourceUrl.startsWith('http')
+            ? mapData.mapSourceUrl
+            : `${lobbyUrl}${mapData.mapSourceUrl}`;
+        const res = await fetch(`${mapSrc}/mapinfo.lua`);
+        if (res.ok) {
+            vfsRegister('mapinfo.lua', await res.text());
+            postLog(2, '[LuaUI] step 1a: registered map mapinfo.lua into VFS');
+        } else {
+            postLog(2, `[LuaUI] step 1a: map mapinfo.lua fetch ${res.status} — map widgets degrade`);
+        }
+    } catch (e) {
+        postLog(2, `[LuaUI] step 1a: map mapinfo.lua fetch failed (${String(e)}) — map widgets degrade`);
+    }
+
     // 1b. Fetch game identity from the lobby's /api/games discovery (reads
     // the game's modinfo) so the Spring `Game` table reflects the real game
     // instead of a hardcoded default (PLAN-bar.md A3). Best-effort: on any
