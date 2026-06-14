@@ -22,6 +22,7 @@ import { LuaGLBridge } from './lua-gl-bridge.js';
 import {
     buildSpringGlobals,
     createDefaultLiveState,
+    parseMapInfoFields,
     type SpringAPIContext,
     type LiveState,
     type UnitEntry,
@@ -1086,6 +1087,34 @@ export async function init(
             postToMain({ type: 'pathRequestCancel', requestId });
         },
     };
+
+    // Populate the Game table's map physics/identity fields from the map's
+    // mapinfo.lua (registered into the worker VFS at step 1a). Recoil sources
+    // these from mapInfo->map/water/atmosphere (LuaConstGame.cpp); we reuse the
+    // same VFS.Include parse path. BAR's gui_gameinfo / gui_top_bar read
+    // Game.{mapHardness,gravity,tidal,windMin,windMax,waterDamage,mapName,
+    // mapDescription} — nil there threw. See PLAN-bar.md A12 residual.
+    const mapInfoSrc = vfsFiles.get('mapinfo.lua');
+    if (mapInfoSrc) {
+        const mi = parseMapInfoFields(mapInfoSrc, ctx);
+        if (mi) {
+            ctx.mapName = mi.mapName;
+            ctx.mapHumanName = mi.mapHumanName;
+            ctx.mapDescription = mi.mapDescription;
+            ctx.mapHardness = mi.mapHardness;
+            ctx.gravity = mi.gravity;
+            ctx.tidal = mi.tidal;
+            ctx.extractorRadius = mi.extractorRadius;
+            ctx.waterDamage = mi.waterDamage;
+            ctx.windMin = mi.windMin;
+            ctx.windMax = mi.windMax;
+            postLog(2, `[LuaUI] Game map fields from mapinfo.lua: ${mi.mapName} ` +
+                `hardness=${mi.mapHardness} gravity=${mi.gravity} tidal=${mi.tidal} ` +
+                `wind=${mi.windMin}-${mi.windMax}`);
+        } else {
+            postLog(2, '[LuaUI] mapinfo.lua parse for Game map fields failed — Game.* map fields use defaults');
+        }
+    }
 
     // gl.ConfigMiniMap / gl.DrawMiniMapEvents → main thread. The Lua-side
     // API stores the rect in liveState.minimapGeometry; we mirror that

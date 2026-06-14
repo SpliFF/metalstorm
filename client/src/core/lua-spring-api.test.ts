@@ -4,6 +4,7 @@ import {
     createDefaultLiveState,
     diffTimers,
     applyPlayerTeamRosterEffect,
+    parseMapInfoFields,
     PlayerTeamEventKind,
     type SpringAPIContext,
     type LiveState,
@@ -604,5 +605,91 @@ describe('GameModOptions wire decode', () => {
             if (key) options[key] = o.value() ?? '';
         }
         expect(options).toEqual({ ffa: '1', startmetal: '1000' });
+    });
+});
+
+describe('Game table map fields (PLAN-bar.md A12 residual)', () => {
+    const MAPINFO = `
+        local mapinfo = {
+            name = "Wanderlust",
+            shortname = "Wanderlust 2",
+            description = "Wanderlust. 1v1 to 3v3.",
+            maphardness = 200,
+            gravity = 100,
+            tidalStrength = 20,
+            extractorRadius = 80.0,
+            atmosphere = { minWind = 5, maxWind = 19 },
+            water = { damage = 100.0 },
+        }
+        return mapinfo
+    `;
+
+    describe('parseMapInfoFields', () => {
+        it('extracts physics + identity fields faithfully', () => {
+            const fields = parseMapInfoFields(MAPINFO, makeCtx());
+            expect(fields).not.toBeNull();
+            expect(fields).toMatchObject({
+                mapName: 'Wanderlust',
+                mapHumanName: 'Wanderlust',
+                mapDescription: 'Wanderlust. 1v1 to 3v3.',
+                mapHardness: 200,
+                gravity: 100,         // raw mapinfo value (not 100*900)
+                tidal: 20,
+                extractorRadius: 80,
+                waterDamage: 100,
+                windMin: 5,
+                windMax: 19,
+            });
+        });
+
+        it('falls back to Recoil defaults for an empty mapinfo', () => {
+            const fields = parseMapInfoFields('local mapinfo = {}\nreturn mapinfo', makeCtx());
+            expect(fields).toMatchObject({
+                mapName: '', mapDescription: '',
+                mapHardness: 100, gravity: 130, tidal: 0,
+                extractorRadius: 500, waterDamage: 0,
+                windMin: 5, windMax: 25,
+            });
+        });
+
+        it('returns null when the chunk fails to yield a table', () => {
+            expect(parseMapInfoFields('this is not lua ===', makeCtx())).toBeNull();
+        });
+    });
+
+    describe('Game table population', () => {
+        function gameTable(ctx: SpringAPIContext): Record<string, LuaValue> {
+            const ls = createDefaultLiveState();
+            return (buildSpringGlobals(ctx, ls) as Record<string, LuaValue>)
+                .Game as Record<string, LuaValue>;
+        }
+
+        it('sources map fields from ctx when present', () => {
+            const g = gameTable(makeCtx({
+                mapName: 'Wanderlust', mapHumanName: 'Wanderlust',
+                mapDescription: 'desc', mapHardness: 200, gravity: 100,
+                tidal: 20, extractorRadius: 80, waterDamage: 100,
+                windMin: 5, windMax: 19,
+            }));
+            expect(g.mapName).toBe('Wanderlust');
+            expect(g.mapDescription).toBe('desc');
+            expect(g.mapHardness).toBe(200);
+            expect(g.gravity).toBe(100);
+            expect(g.tidal).toBe(20);
+            expect(g.extractorRadius).toBe(80);
+            expect(g.waterDamage).toBe(100);
+            expect(g.windMin).toBe(5);
+            expect(g.windMax).toBe(19);
+        });
+
+        it('uses Recoil defaults when ctx map fields are absent', () => {
+            const g = gameTable(makeCtx());
+            expect(g.mapHardness).toBe(100);
+            expect(g.gravity).toBe(130);
+            expect(g.tidal).toBe(0);
+            expect(g.windMin).toBe(5);
+            expect(g.windMax).toBe(25);
+            expect(g.extractorRadius).toBe(500);
+        });
     });
 });

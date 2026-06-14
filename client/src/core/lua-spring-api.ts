@@ -63,6 +63,25 @@ export interface SpringAPIContext {
     modShortName?: string;
     modVersion?: string;
     modDesc?: string;
+    /**
+     * Map physics + identity fields Recoil exposes on the synced `Game` table
+     * (LuaConstGame.cpp, sourced from `mapInfo->map`/`water`/`atmosphere`).
+     * Parsed from the map's `mapinfo.lua` by {@link parseMapInfoFields} and
+     * fed in at ctx construction (the worker has the map archive in its VFS).
+     * All optional — absent ⇒ the Game table falls back to Recoil's defaults.
+     * See PLAN-bar.md A12 residual.
+     */
+    mapName?: string;
+    mapHumanName?: string;
+    mapDescription?: string;
+    mapHardness?: number;
+    /** Raw mapinfo gravity (e.g. 130) — see {@link parseMapInfoFields} note. */
+    gravity?: number;
+    tidal?: number;
+    extractorRadius?: number;
+    waterDamage?: number;
+    windMin?: number;
+    windMax?: number;
     /** Optional game rules params (stubbed lookup). */
     gameRulesParams?: Map<string, number>;
     /** getGameSeconds callback — usually `() => Date.now()/1000 - startTime`. */
@@ -1251,12 +1270,23 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         buildSquareSize: 16,      // BUILD_SQUARE_SIZE = SQUARE_SIZE * 2
         footprintScale: 2,        // SPRING_FOOTPRINT_SCALE
         gameSpeed: 30,
-        // Map physics — from mapdefaults.lua; epicmenu reads these
-        gravity: 130 * 900,     // 130 elmo/s² × (30 frames/s)²
-        waterDamage: 0,
-        tidal: 0,
-        mapDescription: '',
-        extractorRadius: 0,
+        // Map physics + identity — parsed from the map's mapinfo.lua and fed
+        // in via ctx (parseMapInfoFields), faithful to Recoil's LuaConstGame.cpp
+        // (sourced from mapInfo->map/water/atmosphere). Defaults match Recoil's
+        // MapInfo.cpp GetFloat fallbacks. NOTE: Game.gravity is the *raw*
+        // mapinfo value (e.g. 130); Recoil's `-(-g/GAME_SPEED²)*GAME_SPEED²`
+        // round-trips to the authored value (the old `130*900` hardcode was a
+        // 900× error). BAR's gui_gameinfo reads gravity/mapHardness/tidal/
+        // windMin/windMax/waterDamage/mapName/mapDescription; gui_top_bar reads
+        // windMin/windMax. See PLAN-bar.md A12 residual.
+        gravity: ctx.gravity ?? 130,
+        waterDamage: ctx.waterDamage ?? 0,
+        tidal: ctx.tidal ?? 0,
+        mapHardness: ctx.mapHardness ?? 100,
+        windMin: ctx.windMin ?? 5,
+        windMax: ctx.windMax ?? 25,
+        mapDescription: ctx.mapDescription ?? '',
+        extractorRadius: ctx.extractorRadius ?? 500,
         maxUnits: 5000,
         // Game metadata — populated from the lobby's /api/games discovery
         // (which reads the game's modinfo). Falls back to gameId, never a
@@ -1282,8 +1312,8 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         // Game.textColorCodes.{Color,ColorAndOutline} at load — a nil there
         // breaks Spring.Utilities.Color, which a large fraction of widgets use.
         textColorCodes,
-        mapName: '',
-        mapHumanName: '',
+        mapName: ctx.mapName ?? '',
+        mapHumanName: ctx.mapHumanName ?? '',
         // Armor types — indexed array; widgets use this to build damage tables
         armorTypes: { 0: 'default' },
     };
@@ -3972,6 +4002,75 @@ function sampleHeight(ctx: SpringAPIContext, x: number, z: number): number {
  * because loading source into it would pollute globals; executing in a
  * fresh state captures the return cleanly.
  */
+/**
+ * Map physics + identity fields parsed from a map's `mapinfo.lua`, mirroring
+ * the subset of Recoil's synced `Game` table that comes from the map archive
+ * (LuaConstGame.cpp lines 170–176, 152–153).
+ */
+export interface MapInfoFields {
+    mapName: string;
+    mapHumanName: string;
+    mapDescription: string;
+    mapHardness: number;
+    /** Raw mapinfo gravity (positive, e.g. 130) — see note below. */
+    gravity: number;
+    tidal: number;
+    extractorRadius: number;
+    waterDamage: number;
+    windMin: number;
+    windMax: number;
+}
+
+/**
+ * Parse a map's `mapinfo.lua` source for the physics/identity fields Recoil
+ * exposes on the synced `Game` table. Faithful field sourcing (Recoil
+ * `MapInfo.cpp` reads → `LuaConstGame.cpp` pushes), with Recoil's GetFloat
+ * defaults as fallbacks:
+ *   Game.mapHardness     <- maphardness               (default 100)
+ *   Game.gravity         <- gravity                   (default 130)
+ *   Game.tidal           <- tidalStrength             (default 0)
+ *   Game.extractorRadius <- extractorRadius           (default 500)
+ *   Game.waterDamage     <- water.damage              (default 0)
+ *   Game.windMin/windMax <- atmosphere.minWind/maxWind (defaults 5 / 25)
+ *   Game.mapName         <- name
+ *   Game.mapDescription  <- description
+ *
+ * NOTE on gravity: Recoil stores `map.gravity = -gravity / GAME_SPEED²` then
+ * `LuaConstGame` pushes `-map.gravity * GAME_SPEED²`, so the value seen by Lua
+ * is the *raw* authored mapinfo `gravity` (e.g. 130). We expose the raw value
+ * directly. (The previous `130*900` hardcode was a 900× error.)
+ *
+ * Reuses {@link includeLuaFile} (the same VFS.Include parse path A12 wired),
+ * so getfenv/VFS map-option merge blocks at the tail of mapinfo.lua run
+ * cleanly. Returns null if the chunk fails to parse.
+ */
+export function parseMapInfoFields(source: string, ctx: SpringAPIContext): MapInfoFields | null {
+    const mi = includeLuaFile(source, 'mapinfo.lua', ctx);
+    if (!mi || typeof mi !== 'object') return null;
+    const t = mi as Record<string, LuaValue>;
+    const num = (v: LuaValue, d: number): number => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : d;
+    };
+    const str = (v: LuaValue, d: string): string => (typeof v === 'string' ? v : d);
+    const atmosphere = (t.atmosphere && typeof t.atmosphere === 'object'
+        ? t.atmosphere : {}) as Record<string, LuaValue>;
+    const water = (t.water && typeof t.water === 'object'
+        ? t.water : {}) as Record<string, LuaValue>;
+    return {
+        mapName:         str(t.name, ''),
+        mapHumanName:    str(t.name, ''),
+        mapDescription:  str(t.description, ''),
+        mapHardness:     num(t.maphardness, 100),
+        gravity:         num(t.gravity, 130),
+        tidal:           num(t.tidalStrength, 0),
+        extractorRadius: num(t.extractorRadius, 500),
+        waterDamage:     num(water.damage, 0),
+        windMin:         num(atmosphere.minWind, 5),
+        windMax:         num(atmosphere.maxWind, 25),
+    };
+}
+
 function includeLuaFile(source: string, chunkName: string, ctx: SpringAPIContext): LuaValue {
     const sub = new LuaRuntime(`include:${chunkName}`);
     // Install the same stub surface the caller had. mapinfo.lua uses
