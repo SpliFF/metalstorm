@@ -2747,20 +2747,39 @@ defaultFont = activeFont
     `, 'shutdown_guard_apply');
     postLog(2, '[LuaUI] init done: shutdown recursion guard applied');
 
-    // Post-bootstrap API patches: ZK's bootstrap replaces Spring.Utilities
-    // with its own table, so any pre-bootstrap additions are lost. Add
-    // missing stubs that ZK widgets expect but ZK's own utilities don't provide.
+    // Post-bootstrap API patches: install our Spring.Utilities fallbacks AFTER
+    // the game's own bootstrap. This is fill-missing on purpose — a game that
+    // ships a complete Spring.Utilities (BAR via common/springFunctions.lua:
+    // Gametype, Color, GetTeamColor, …) keeps its own; ZK's cawidgets installs
+    // its table; a game with none (papertanks) gets ours created here. Running
+    // pre-bootstrap instead would shadow the game's table via its
+    // `Spring.Utilities = Spring.Utilities or X` idiom (drops BAR's Gametype).
     runtime.doString(`
-        if Spring.Utilities then
-            Spring.Utilities.GetHumanName = Spring.Utilities.GetHumanName or function(ud)
-                if type(ud) == "table" and ud.humanName then return ud.humanName end
-                if type(ud) == "table" and ud.name then return ud.name end
-                return tostring(ud or "")
-            end
-            Spring.Utilities.bit_inv = Spring.Utilities.bit_inv or function(x)
-                return bit32 and bit32.bnot(x) or (~x)
-            end
+        Spring.Utilities = Spring.Utilities or {}
+        local U = Spring.Utilities
+        U.GetHumanName = U.GetHumanName or function(ud)
+            if type(ud) == "table" and ud.humanName then return ud.humanName end
+            if type(ud) == "table" and ud.name then return ud.name end
+            return tostring(ud or "")
         end
+        U.bit_inv = U.bit_inv or function(x)
+            return bit32 and bit32.bnot(x) or (~x)
+        end
+        U.CopyTable = U.CopyTable or function(t, deep)
+            if type(t) ~= "table" then return t end
+            local copy = {}
+            for k, v in pairs(t) do
+                if deep and type(v) == "table" then copy[k] = U.CopyTable(v, true)
+                else copy[k] = v end
+            end
+            return copy
+        end
+        U.MergeTable = U.MergeTable or function(dst, src)
+            for k, v in pairs(src) do if dst[k] == nil then dst[k] = v end end
+            return dst
+        end
+        U.json = U.json or { encode = function() return "{}" end, decode = function() return {} end }
+        U.TableToString = U.TableToString or function(t) return tostring(t) end
         if not Spring.Translate then
             Spring.Translate = function(key) return tostring(key or "") end
         end
@@ -3574,8 +3593,12 @@ export function installEngineGlobals(
     // backed by liveState.teamStatsHistory (fed by the server's TeamStatsHistoryBatch
     // stream) with Recoil's alliance gate — no stub override here (PLAN-bar §6).
 
-    // Spring.Utilities — stub table; Lua-side code below adds CopyTable etc.
-    (springGlobals.Spring as Record<string, LuaValue>).Utilities = {};
+    // Spring.Utilities is intentionally NOT stubbed here. A game that ships its
+    // own (BAR's common/springFunctions.lua → Gametype, Color, …) installs it
+    // during bootstrap via `Spring.Utilities = Spring.Utilities or <theirs>`; a
+    // pre-set empty {} here is truthy and makes that `or` keep our empty table,
+    // dropping the game's helpers. Our fallback helpers are filled POST-bootstrap
+    // (fill-missing) so the game's table wins. See "Post-bootstrap API patches".
 
     // Install all globals except VFS (set up separately in Lua)
     for (const [k, v] of Object.entries(springGlobals)) {
@@ -3815,50 +3838,22 @@ export function installEngineGlobals(
 
     rt.doString(LUA_COMPAT_SHIM, 'compat_shim');
 
-    // Spring.Utilities Lua-side: needs metatables for CopyTable, json, etc.
+    // Spring.Translate / GetHumanName fallbacks (Spring.*, harmless pre-bootstrap
+    // so widgets that snapshot Spring before bootstrap see them). The
+    // Spring.Utilities helpers are installed POST-bootstrap as a fill-missing
+    // pass (see "Post-bootstrap API patches" below) — NOT here. A game that
+    // ships its own Spring.Utilities (BAR's common/springFunctions.lua provides
+    // Gametype, Color, etc.) does `Spring.Utilities = Spring.Utilities or
+    // springFunctions.Utilities`, so any stub we set pre-bootstrap would discard
+    // the game's full table. Creating it only post-bootstrap lets the game win.
     rt.doString(`
-        Spring.Utilities = Spring.Utilities or {}
-        Spring.Utilities.CopyTable = function(t, deep)
-            if type(t) ~= "table" then return t end
-            local copy = {}
-            for k, v in pairs(t) do
-                if deep and type(v) == "table" then
-                    copy[k] = Spring.Utilities.CopyTable(v, true)
-                else
-                    copy[k] = v
-                end
-            end
-            return copy
-        end
-        Spring.Utilities.MergeTable = function(dst, src)
-            for k, v in pairs(src) do
-                if dst[k] == nil then dst[k] = v end
-            end
-            return dst
-        end
-        Spring.Utilities.json = { encode = function() return "{}" end, decode = function() return {} end }
-        Spring.Utilities.TableToString = function(t) return tostring(t) end
-
-        -- Ensure Spring.Translate and GetHumanName are in the Lua table.
-        -- The JS-side assignment covers the initial push, but widgets that
-        -- snapshot Spring before this doString runs would miss them.
         if not Spring.Translate then
             Spring.Translate = function(key) return tostring(key or "") end
         end
         if not Spring.GetHumanName then
             Spring.GetHumanName = function(defName) return tostring(defName or "") end
         end
-        -- Spring.Utilities.GetHumanName — some ZK widgets call this path
-        Spring.Utilities.GetHumanName = Spring.Utilities.GetHumanName or function(ud)
-            if type(ud) == "table" and ud.humanName then return ud.humanName end
-            if type(ud) == "table" and ud.name then return ud.name end
-            return tostring(ud or "")
-        end
-        -- Bit operation helpers used by some ZK widgets
-        Spring.Utilities.bit_inv = Spring.Utilities.bit_inv or function(x)
-            return bit32 and bit32.bnot(x) or (~x)
-        end
-    `, 'spring_utilities');
+    `, 'spring_translate_stub');
 
     rt.setGlobal('os', {
         remove: () => [null, 'os.remove disabled in browser'],
@@ -4962,6 +4957,43 @@ if not table.getn then table.getn = function(t) return #t end end
 if not math.mod then math.mod = math.fmod end
 if not math.atan2 then math.atan2 = math.atan end
 if not math.pow then math.pow = function(x, y) return x ^ y end end
+-- Recoil LuaMathExtra (rts/Lua/LuaMathExtra.cpp) adds these to the math table;
+-- they are not standard Lua, so Fengari lacks them. BAR widgets use them
+-- heavily (gui_fonthandler:114 math.clamp breaks font sizing → cascades to
+-- every font-using widget). Faithful reproductions of the C++ definitions.
+if not math.clamp then
+    math.clamp = function(x, lo, hi)
+        if x < lo then return lo elseif x > hi then return hi else return x end
+    end
+end
+if not math.sgn then
+    math.sgn = function(x) if x > 0 then return 1 elseif x < 0 then return -1 else return 0 end end
+end
+if not math.mix then
+    math.mix = function(a, b, t) return a + (b - a) * t end
+end
+if not math.round then
+    math.round = function(x)
+        if x >= 0 then return math.floor(x + 0.5) else return math.ceil(x - 0.5) end
+    end
+end
+if not math.hypot then
+    math.hypot = function(a, b) return math.sqrt(a * a + b * b) end
+end
+if not math.diag then
+    math.diag = function(...)
+        local s = 0
+        for _, v in ipairs({...}) do s = s + v * v end
+        return math.sqrt(s)
+    end
+end
+if not math.smoothstep then
+    math.smoothstep = function(e0, e1, v)
+        local t = (v - e0) / (e1 - e0)
+        if t < 0 then t = 0 elseif t > 1 then t = 1 end
+        return t * t * (3 - 2 * t)
+    end
+end
 if not table.maxn then
     table.maxn = function(t)
         local n = 0

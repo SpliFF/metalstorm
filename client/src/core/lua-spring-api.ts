@@ -1226,6 +1226,14 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
     // Widgets use either depending on purpose; provide both so neither
     // tries to arithmetic on nil.
     const squareSize = ctx.squareSize || 8;
+    // Font colour-code control characters (Recoil LuaConstGame/LuaConstEngine
+    // textColorCodes). Shared by the Game and Engine globals. Default (old)
+    // indicators, matching our font/colour-code convention (0xFF = colour).
+    const textColorCodes = {
+        Color: String.fromCharCode(0xff),
+        ColorAndOutline: String.fromCharCode(0xfe),
+        Reset: String.fromCharCode(0x08),
+    };
     const Game: Record<string, LuaValue> = {
         mapSizeX: ctx.mapSizeX,
         mapSizeZ: ctx.mapSizeZ,
@@ -1233,6 +1241,15 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         mapX: Math.floor(ctx.mapSizeX / squareSize),
         mapY: Math.floor(ctx.mapSizeZ / squareSize),
         squareSize: squareSize,
+        // Map/metal/build resolution constants (Recoil GlobalConstants.h via
+        // LuaConstGame.cpp). BAR's metal-spot finder
+        // (common/upgets/api_resource_spot_finder.lua) computes
+        // precision = footprintScale * squareSize and indexes the metal map by
+        // metalMapSquareSize; a nil there breaks every metal-spot widget (mex
+        // placement, prospector, metalspots, pregame build, quick-build).
+        metalMapSquareSize: 16,   // METAL_MAP_SQUARE_SIZE = 2 * SQUARE_SIZE
+        buildSquareSize: 16,      // BUILD_SQUARE_SIZE = SQUARE_SIZE * 2
+        footprintScale: 2,        // SPRING_FOOTPRINT_SCALE
         gameSpeed: 30,
         // Map physics — from mapdefaults.lua; epicmenu reads these
         gravity: 130 * 900,     // 130 elmo/s² × (30 frames/s)²
@@ -1256,19 +1273,10 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         // widget manager. Data-driven from /api/games (modinfo), never hardcoded.
         gameShortName: ctx.modShortName || (ctx.gameId ? ctx.gameId.toUpperCase() : ''),
         gameVersion: ctx.modVersion || '',
-        // Font colour-code control characters (Recoil LuaConstGame.cpp
-        // textColorCodes). BAR's core colour utility (common/springUtilities/
-        // color.lua) indexes Game.textColorCodes.{Color,ColorAndOutline} at load
-        // — a nil there breaks Spring.Utilities.Color, which a large fraction of
-        // widgets depend on, so the whole HUD fails to come up. Default
-        // (old) indicators, which match our font/colour-code convention
-        // (0xFF = colour, the codepoint our string marshaller already carries
-        // byte-exact): Color=0xFF, ColorAndOutline=0xFE, Reset=0x08.
-        textColorCodes: {
-            Color: String.fromCharCode(0xff),
-            ColorAndOutline: String.fromCharCode(0xfe),
-            Reset: String.fromCharCode(0x08),
-        },
+        // BAR's core colour utility (common/springUtilities/color.lua) indexes
+        // Game.textColorCodes.{Color,ColorAndOutline} at load — a nil there
+        // breaks Spring.Utilities.Color, which a large fraction of widgets use.
+        textColorCodes,
         mapName: '',
         mapHumanName: '',
         // Armor types — indexed array; widgets use this to build damage tables
@@ -3673,8 +3681,52 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
     const LUAUI_DIRNAME = 'LuaUI/';
     const LUAUI_VERSION = 'spring-web LuaUI v0.1';
 
+    // Engine global (Recoil LuaConstEngine.cpp). BAR widgets gate GL4 code paths
+    // on Engine.FeatureSupport.* and read Engine.textColorCodes. Without it,
+    // LuaUI/Include/DrawPrimitiveAtUnit.lua throws at load and the ~10
+    // unit-icon / highlight widgets that include it fail. FeatureSupport mirrors
+    // Recoil EXCEPT transformsInGL4: we run WebGL2, not GL4, so we report false
+    // — capability-accurate (a deliberate divergence from Recoil's `true`) so
+    // those widgets take their non-GL4 fallback paths rather than compiling GL4
+    // (v420/v430) shaders WebGL2 cannot.
+    const Engine: Record<string, LuaValue> = {
+        // Version fields (Recoil SpringVersion). BAR's common/constants.lua does
+        // tonumber(Engine.versionMajor/Minor/PatchSet/commitsNumber) in its
+        // isEngineMinVersion gate, so all four must be present + numeric-parseable
+        // or constants.lua (a base dependency of many widgets) throws. We report
+        // 2025.6.14: recent enough to clear BAR's feature gates (e.g.
+        // targetBorderBug) without over-enabling bleeding-edge engine paths we
+        // don't implement — widgets gating on a newer version take their
+        // pre-that-version fallback, which is safer for our partial engine.
+        version: '2025.6.14',
+        versionFull: '2025.6.14',
+        versionMajor: '2025',
+        versionMinor: '6',
+        versionPatchSet: '14',
+        commitsNumber: '0',
+        buildFlags: '',
+        wordSize: 64,
+        gameSpeed: 30,
+        FeatureSupport: {
+            NegativeGetUnitCurrentCommand: true,
+            hasExitOnlyYardmaps: true,
+            rmlUiApiVersion: 1,
+            noAutoShowMetal: false,
+            maxPiecesPerModel: 65534,           // MAX_PIECES_PER_MODEL (uint16 max - 1)
+            transformsInGL4: false,             // WebGL2, not GL4 — see note above
+            gunshipCruiseAltitudeMultiplier: 1.5,
+            noRefundForConstructionDecay: false,
+            noRefundForFactoryCancel: false,
+            noOffsetForFeatureID: false,
+            noHandicapForReclaim: true,
+            groupAddDoesntSelect: true,
+            deadTeamsKeepUnitLimit: false,
+        },
+        textColorCodes,
+    };
+
     return {
-        GL, Game, VFS, Spring,
+        GL, Game, Engine, VFS, Spring,
         io,
         LUAUI_DIRNAME,
         LUAUI_VERSION,
