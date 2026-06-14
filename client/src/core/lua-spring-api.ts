@@ -1266,6 +1266,11 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         modDesc: ctx.modDesc || '',
         modVersion: ctx.modVersion || '',
         gameName: ctx.modName || ctx.gameId || '',
+        // Mutator name (Recoil LuaConstGame.cpp `gameMutator`/`modMutator` from
+        // modinfo.mutator). BAR's gui_gameinfo concatenates Game.gameMutator
+        // into its title string; nil throws. Empty = no mutator (the default).
+        gameMutator: '',
+        modMutator: '',
         // Recoil's Game table carries gameShortName alongside the legacy
         // modShortName alias (sourced from modinfo `shortname`). BAR's
         // barwidgets.lua builds its config path from it

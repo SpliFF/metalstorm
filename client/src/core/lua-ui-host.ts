@@ -2786,6 +2786,12 @@ defaultFont = activeFont
         if not Spring.GetHumanName then
             Spring.GetHumanName = function(defName) return tostring(defName or "") end
         end
+        -- Engine log-section verbosity control (Recoil Spring.SetLogSectionFilterLevel).
+        -- Pure logging hint with no client effect; stub so widgets that tune
+        -- their own log noise (map_start_position_suggestions) don't throw.
+        if not Spring.SetLogSectionFilterLevel then
+            Spring.SetLogSectionFilterLevel = function() end
+        end
     `, 'post_bootstrap_api_stubs');
 
     // Bridge bound-key → text-action. ZK widgets register most actions as
@@ -4994,6 +5000,12 @@ if not math.smoothstep then
         return t * t * (3 - 2 * t)
     end
 end
+-- Lua 5.1 had math.log10; 5.3 dropped it in favour of math.log(x, 10). BAR's
+-- gui_advplayerslist_music uses math.log10.
+if not math.log10 then math.log10 = function(x) return math.log(x, 10) end end
+-- math.tau (= 2*pi). Not standard, but BAR widgets (gui_projectile_target_aoe)
+-- read it as a circle constant.
+if not math.tau then math.tau = 2 * math.pi end
 if not table.maxn then
     table.maxn = function(t)
         local n = 0
