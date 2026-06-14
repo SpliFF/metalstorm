@@ -130,6 +130,15 @@ let gfxConfigUnsub: (() => void) | null = null;
 /// Named resize handler so it can be removed on teardown and not leak across
 /// game sessions (CODE-REVIEW C8).
 let onGameResize: (() => void) | null = null;
+/// Trailing-debounce timer + last-sent size for the resize handler. A real
+/// size change makes the worker's engine.resize() reallocate the framebuffer +
+/// the whole bloom/MSAA/CSM render-target chain on the next scene.render() (a
+/// ~190ms stall at retina resolution). Window-drag / devtools-dock / DPR-flip
+/// bursts fire dozens of resize events; without coalescing each one pays that
+/// realloc. Debounce so a burst collapses to one resize at the end, and skip
+/// the post entirely when the device size hasn't actually changed.
+let resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let lastSentResize = { w: 0, h: 0, dpr: 0 };
 /// GW4-c5b-2: the drag-select rectangle overlay. The worker computes the box
 /// (CSS px, canvas-relative) and posts `gp:dragBox`; we draw the div here.
 let dragOverlay: HTMLDivElement | null = null;
@@ -282,6 +291,7 @@ function quitToLobby(): void {
     gfxConfigUnsub?.();
     gfxConfigUnsub = null;
     if (onGameResize) { window.removeEventListener('resize', onGameResize); onGameResize = null; }
+    if (resizeDebounceTimer !== null) { clearTimeout(resizeDebounceTimer); resizeDebounceTimer = null; }
     animatedCursor?.dispose();
     animatedCursor = null;
     // Game-processor worker owns the Engine + transferred canvas (GW4).
@@ -366,6 +376,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     gfxConfigUnsub?.();
     gfxConfigUnsub = null;
     if (onGameResize) { window.removeEventListener('resize', onGameResize); onGameResize = null; }
+    if (resizeDebounceTimer !== null) { clearTimeout(resizeDebounceTimer); resizeDebounceTimer = null; }
     buildMenu?.dispose();
     buildMenu = null;
     orderPanel?.dispose();
@@ -658,14 +669,22 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // The worker owns the Engine + canvas now, so resize is forwarded to it.
     // Named callback so it can be removed on teardown (CODE-REVIEW C8).
     onGameResize = () => {
-        gameWorker?.postMessage({
-            type: 'gp:resize',
-            width: window.innerWidth,
-            height: window.innerHeight,
-            dpr: window.devicePixelRatio || 1,
-        });
+        if (resizeDebounceTimer !== null) clearTimeout(resizeDebounceTimer);
+        resizeDebounceTimer = setTimeout(() => {
+            resizeDebounceTimer = null;
+            const w = window.innerWidth;
+            const h = window.innerHeight;
+            const dpr = window.devicePixelRatio || 1;
+            // Skip no-op resizes: a same-size event still triggers the worker's
+            // canvas write + engine.resize() bookkeeping for nothing.
+            if (w === lastSentResize.w && h === lastSentResize.h && dpr === lastSentResize.dpr) return;
+            lastSentResize = { w, h, dpr };
+            gameWorker?.postMessage({ type: 'gp:resize', width: w, height: h, dpr });
+        }, 150);
     };
     window.addEventListener('resize', onGameResize);
+    // Seed the last-sent size so the first real resize is detected as a change.
+    lastSentResize = { w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio || 1 };
 
     // GW8: re-plumb the dev/test tooling for the worker split.
     //   window.test     — server-bound verbs run on main over HTTP; camera /
