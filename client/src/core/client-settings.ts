@@ -228,7 +228,7 @@ export const PRESETS: Record<string, Record<string, SettingValue>> = {
         'gfx.shadowFiltering': 0,   // 0=low 1=medium 2=high
         'gfx.msaaSamples':    1,
         'gfx.fxaa':           false,
-        'gfx.renderScale':    1.0,
+        'gfx.renderScale':    1.0,   // CSS resolution (no retina supersampling)
         'gfx.anisotropy':     1,
         'gfx.bloom':          false,
         'gfx.particleQuality': 0,
@@ -240,7 +240,7 @@ export const PRESETS: Record<string, Record<string, SettingValue>> = {
         'gfx.shadowFiltering': 1,
         'gfx.msaaSamples':    2,
         'gfx.fxaa':           true,
-        'gfx.renderScale':    1.0,
+        'gfx.renderScale':    1.5,   // cap retina at 1.5× (balanced)
         'gfx.anisotropy':     4,
         'gfx.bloom':          true,
         'gfx.particleQuality': 1,
@@ -252,7 +252,7 @@ export const PRESETS: Record<string, Record<string, SettingValue>> = {
         'gfx.shadowFiltering': 2,
         'gfx.msaaSamples':    4,
         'gfx.fxaa':           true,
-        'gfx.renderScale':    1.0,
+        'gfx.renderScale':    2.0,   // full retina
         'gfx.anisotropy':     8,
         'gfx.bloom':          true,
         'gfx.particleQuality': 2,
@@ -279,8 +279,15 @@ const REGISTRY: SettingDef[] = [
       enum: [1, 2, 4, 8], label: 'Anti-aliasing (MSAA)', requiresRestart: true },
     { key: 'gfx.fxaa', type: 'bool', default: true, scope: 'client',
       label: 'FXAA' },
-    { key: 'gfx.renderScale', type: 'float', default: 1.0, scope: 'client',
-      min: 0.5, max: 2.0, label: 'Render Scale', requiresRestart: true },
+    // Caps the render canvas's effective device-pixel-ratio (the backing-store
+    // size = CSS size × min(window.devicePixelRatio, gfx.renderScale)). The
+    // render is GPU-fillrate-bound, so on a retina (DPR 2) display this is the
+    // single highest-leverage perf lever: 2.0 = full retina, 1.5 ≈ −44% pixels
+    // (mild softening), 1.0 = CSS resolution. Applied live (main.ts re-sends
+    // gp:resize on change) — no restart. Default 1.5 trades a little sharpness
+    // for a large fps gain on hi-DPI displays.
+    { key: 'gfx.renderScale', type: 'float', default: 1.5, scope: 'client',
+      enum: [1.0, 1.5, 2.0], label: 'Render Resolution (max DPR)' },
     { key: 'gfx.anisotropy', type: 'int', default: 4, scope: 'client',
       enum: [1, 2, 4, 8, 16], label: 'Anisotropic Filtering' },
 

@@ -139,6 +139,15 @@ let onGameResize: (() => void) | null = null;
 /// the post entirely when the device size hasn't actually changed.
 let resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let lastSentResize = { w: 0, h: 0, dpr: 0 };
+/// Effective render device-pixel-ratio = the display DPR capped by the
+/// `gfx.renderScale` quality setting. The render is GPU-fillrate-bound, so on a
+/// retina display this cap is the highest-leverage perf knob (2.0 = full
+/// retina, 1.5 ≈ −44% pixels, 1.0 = CSS resolution). All canvas-size paths
+/// (gp:init + gp:resize) route through here so the setting drives the backing
+/// store size; changing it re-sends a resize (see onGameResize subscription).
+function effectiveDpr(): number {
+    return Math.min(window.devicePixelRatio || 1, clientSettings.getFloat('gfx.renderScale', 1.5));
+}
 /// GW4-c5b-2: the drag-select rectangle overlay. The worker computes the box
 /// (CSS px, canvas-relative) and posts `gp:dragBox`; we draw the div here.
 let dragOverlay: HTMLDivElement | null = null;
@@ -438,7 +447,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         } catch { /* default 'gameplay' / engine-default material */ }
     }
 
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = effectiveDpr();
     const offscreen = canvas.transferControlToOffscreen();
     gameWorker = new GameWorker();
     gameWorker.onerror = (e) => {
@@ -629,7 +638,12 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // own clientSettings.set → subscribers). Only gfx.* keys cross — audio etc.
     // are owned on main.
     gfxConfigUnsub = clientSettings.subscribeAll((value, key) => {
-        if (key.startsWith('gfx.')) gameWorker?.postMessage({ type: 'gp:config', key, value });
+        if (!key.startsWith('gfx.')) return;
+        gameWorker?.postMessage({ type: 'gp:config', key, value });
+        // gfx.renderScale changes the canvas backing-store size, which is driven
+        // by the gp:resize dpr (not gp:config). Re-run the resize path so the new
+        // effective DPR is applied live (debounced + deduped inside onGameResize).
+        if (key === 'gfx.renderScale') onGameResize?.();
     });
 
     // GW4-c5c-3: minimap on the main thread (own Babylon Engine + DOM canvas
@@ -674,7 +688,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             resizeDebounceTimer = null;
             const w = window.innerWidth;
             const h = window.innerHeight;
-            const dpr = window.devicePixelRatio || 1;
+            const dpr = effectiveDpr();
             // Skip no-op resizes: a same-size event still triggers the worker's
             // canvas write + engine.resize() bookkeeping for nothing.
             if (w === lastSentResize.w && h === lastSentResize.h && dpr === lastSentResize.dpr) return;
@@ -684,7 +698,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     };
     window.addEventListener('resize', onGameResize);
     // Seed the last-sent size so the first real resize is detected as a change.
-    lastSentResize = { w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio || 1 };
+    lastSentResize = { w: window.innerWidth, h: window.innerHeight, dpr: effectiveDpr() };
 
     // GW8: re-plumb the dev/test tooling for the worker split.
     //   window.test     — server-bound verbs run on main over HTTP; camera /
