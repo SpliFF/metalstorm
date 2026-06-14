@@ -44,6 +44,7 @@ import {
 } from './worker-vfs.js';
 import { gpCtx } from './gp-context.js';
 import { installRmlGlobal } from '../ui/rml/rml-bridge.js';
+import { fixLua51Escapes } from './lua51-escapes.js';
 
 // Engine-bundled test widgets. Loaded only when `?widgetTest` is active.
 import dbgRenderTestSrc from '../lua-test-widgets/dbg_render_test.lua?raw';
@@ -777,6 +778,33 @@ export async function init(
 
     // 3. Create Lua runtime and GL bridge
     runtime = new LuaRuntime('LuaUI');
+
+    // Lua 5.1 escape leniency. Recoil ships Lua 5.1, which silently drops the
+    // backslash on an unrecognised string escape; Fengari (5.3) rejects the
+    // whole chunk, so any game file with a 5.1-ism (lava.lua `\ `, badwords.lua
+    // `\s`) fails to load — and every widget that depends on it with it. Wrap
+    // the Lua `load`/`loadstring` globals (the path every VFS.Include and widget
+    // loadstring compiles through) to sanitise source first, faithfully matching
+    // Recoil's lexer (core/lua51-escapes.ts). Installed before the VFS impl and
+    // bootstrap so all game-content compilation is covered. Our own doString
+    // chunks bypass this (luaL_loadbuffer direct) and are clean regardless.
+    runtime.setGlobal('__fixLua51Escapes', (src: unknown) =>
+        typeof src === 'string' ? fixLua51Escapes(src) : src);
+    runtime.doString(`
+        local _realLoad = load
+        local _realLoadstring = loadstring
+        function load(chunk, chunkname, mode, env)
+            if type(chunk) == 'string' then chunk = __fixLua51Escapes(chunk) end
+            return _realLoad(chunk, chunkname, mode, env)
+        end
+        if _realLoadstring then
+            function loadstring(chunk, chunkname)
+                if type(chunk) == 'string' then chunk = __fixLua51Escapes(chunk) end
+                return _realLoadstring(chunk, chunkname)
+            end
+        end
+    `, 'lua51_escape_shim');
+
     bridge = new LuaGLBridge(gl, mapData.mapSourceUrl);
     bridge.setGameBaseUrl(baseUrl);
     // PLAN-weapon-fx Z3 — let shader source `#include "path"` against the

@@ -414,7 +414,31 @@ VFS.DirList = function(path, pattern, mode)
     path = path or ""
     path = path:gsub("\\\\", "/")
     if path:sub(-1) ~= "/" then path = path .. "/" end
-    local files = _vfsDirList(path)
+    mode = mode or VFS.DEF_MODE
+    -- Mode-aware listing (mirrors VFS.FileExists). In the web model every
+    -- HTTP-served engine/game file is archive-equivalent (ZIP); the only RAW
+    -- files are user-written (io.open / persisted config) in VFS._writeCache.
+    -- A RAW-layer list must NOT return game content, or Spring's RAW/ZIP
+    -- distinction collapses: BAR's barwidgets.lua scans WIDGET_DIRNAME with
+    -- VFS.RAW then VFS.ZIP and keys each widget's fromZip flag off which pass
+    -- found it; if the RAW pass returns the game's widgets they are all tagged
+    -- fromZip=false and the default-enable gate turns the entire HUD off. So
+    -- RAW/RAW_ONLY lists only the write-cache (empty for shipped content);
+    -- everything else lists the archive.
+    local files
+    if mode == VFS.RAW or mode == VFS.RAW_ONLY then
+        files = {}
+        for k in pairs(VFS._writeCache) do
+            if k:sub(1, #path) == path then
+                local rest = k:sub(#path + 1)
+                if rest ~= "" and not rest:find("/") then
+                    files[#files + 1] = rest
+                end
+            end
+        end
+    else
+        files = _vfsDirList(path)
+    end
     if not files or #files == 0 then return {} end
     if pattern then
         local ext = pattern:match("^%*(.+)$")

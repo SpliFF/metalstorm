@@ -1256,6 +1256,19 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         // widget manager. Data-driven from /api/games (modinfo), never hardcoded.
         gameShortName: ctx.modShortName || (ctx.gameId ? ctx.gameId.toUpperCase() : ''),
         gameVersion: ctx.modVersion || '',
+        // Font colour-code control characters (Recoil LuaConstGame.cpp
+        // textColorCodes). BAR's core colour utility (common/springUtilities/
+        // color.lua) indexes Game.textColorCodes.{Color,ColorAndOutline} at load
+        // — a nil there breaks Spring.Utilities.Color, which a large fraction of
+        // widgets depend on, so the whole HUD fails to come up. Default
+        // (old) indicators, which match our font/colour-code convention
+        // (0xFF = colour, the codepoint our string marshaller already carries
+        // byte-exact): Color=0xFF, ColorAndOutline=0xFE, Reset=0x08.
+        textColorCodes: {
+            Color: String.fromCharCode(0xff),
+            ColorAndOutline: String.fromCharCode(0xfe),
+            Reset: String.fromCharCode(0x08),
+        },
         mapName: '',
         mapHumanName: '',
         // Armor types — indexed array; widgets use this to build damage tables
