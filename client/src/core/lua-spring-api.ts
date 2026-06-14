@@ -2770,6 +2770,11 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             return luaTable(...ids);
         },
         IsSphereInView: () => true, // conservative — server already LOS-filters
+        // Recoil: camera->InView(mins, maxs) frustum test. We don't run a
+        // worker-side frustum cull here, so we return the conservative
+        // "in view" (same call as IsSphereInView) — widgets that use it to
+        // skip drawing (e.g. BAR gui_mapinfo.lua) just draw unconditionally.
+        IsAABBInView: () => true, // conservative — no worker frustum cull
         GetVisibleUnits: () => luaTable(...ls.units.keys()),
         GetAllUnits: () => luaTable(...ls.units.keys()),
         GetTeamUnits: (_teamId: LuaValue) => {
@@ -2985,7 +2990,15 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         },
 
         // --- Ground extremes ---
-        GetGroundExtremes: () => [ctx.minHeight, ctx.maxHeight],
+        // Recoil returns 4 values: (initMin, initMax, currMin, currMax) —
+        // GetInitMin/MaxHeight + GetCurrMin/MaxHeight (LuaSyncedRead.cpp).
+        // We track only the static map heightmap extremes (the "init" pair);
+        // the live min/max of the deformed heightmap isn't tracked in the
+        // worker, so curr == init. DEVIATION: under terrain deformation the
+        // curr pair would drift from these values. Returning 4 (not 2) is
+        // required by callers that read the curr pair, e.g. BAR's
+        // gui_top_bar.lua `select(3, Spring.GetGroundExtremes())`.
+        GetGroundExtremes: () => [ctx.minHeight, ctx.maxHeight, ctx.minHeight, ctx.maxHeight],
 
         // --- Custom command draw data ---
         SetCustomCommandDrawData: () => {},

@@ -148,6 +148,21 @@ describe('BAR read shims', () => {
         });
     });
 
+    describe('GetGroundExtremes', () => {
+        it('returns 4 values (initMin, initMax, currMin, currMax)', () => {
+            const ls = createDefaultLiveState();
+            const api = springApi(makeCtx({ minHeight: -42, maxHeight: 318 }), ls);
+            // Recoil returns 4; we mirror init→curr (no live deformed extremes).
+            expect(call(api.GetGroundExtremes)).toEqual([-42, 318, -42, 318]);
+        });
+        it('exposes the curr-min at select-index 3 (BAR gui_top_bar)', () => {
+            const ls = createDefaultLiveState();
+            const api = springApi(makeCtx({ minHeight: -10, maxHeight: 5 }), ls);
+            const ret = call(api.GetGroundExtremes) as number[];
+            expect(ret[2]).toBe(-10); // select(3, ...) — Lua 1-based 3rd value
+        });
+    });
+
     describe('GetGameState', () => {
         it('reports done-loading, not-saved, paused-flag, not-lagging', () => {
             const ls = createDefaultLiveState();
