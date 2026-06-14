@@ -38,9 +38,21 @@ import type { EntityRenderer } from './entity-renderer.js';
 import type { Connection } from './connection.js';
 import { CommandBuffer, CMD, OPT } from './command-buffer.js';
 import { SELECT_PIXEL_RADIUS, SELECT_RADIUS, DRAG_THRESHOLD_PX } from './selection-core.js';
+import { SoundCategory } from './sound-events.js';
 
 /** Canvas-relative CSS-pixel rectangle for the main-thread drag overlay. */
 export interface DragBox { x0: number; y0: number; x1: number; y1: number; }
+
+/** A unit-UI sound the selection/order code wants played. The worker selection
+ *  layer knows *when* (a click selected a unit, an order was issued) but not
+ *  *how* (def-cache lookup + AudioContext live on the worker's owner /
+ *  main thread); game-processor resolves + plays via `gp:audioSoundEvents`.
+ *   - `unit`: a unit-def category sound (select / ok), 3D at the unit.
+ *   - `item`: a named SoundItem (e.g. "MultiSelect"), 2D UI sound. */
+export type UiSoundReq =
+    | { kind: 'unit'; defId: number; category: number;
+        x: number; y: number; z: number }
+    | { kind: 'item'; name: string };
 
 export interface WorkerSelectionOpts {
     /** Resolve the FreeCamera for a viewId (per-view picking; c5b ships view 0). */
@@ -51,6 +63,10 @@ export interface WorkerSelectionOpts {
     onDragBox: (box: DragBox | null) => void;
     /** Notified whenever the selection set changes (feeds the c5c sceneState). */
     onSelectionChange?: (ids: readonly number[]) => void;
+    /** Play a unit-UI sound (select / order-ack / multi-select). Fired only
+     *  from real player gestures — not programmatic `setSelectionExternal`
+     *  (Recoil plays no select sound for widget-driven selection). */
+    onUiSound?: (req: UiSoundReq) => void;
 }
 
 export class WorkerSelection {
@@ -61,6 +77,7 @@ export class WorkerSelection {
     private readonly getCamera: (viewId: number) => FreeCamera | null;
     private readonly onDragBox: (box: DragBox | null) => void;
     private readonly onSelectionChange?: (ids: readonly number[]) => void;
+    private readonly onUiSound?: (req: UiSoundReq) => void;
     private dpr: number;
 
     private selectedIds: number[] = [];
@@ -94,6 +111,7 @@ export class WorkerSelection {
         this.getCamera = opts.getCamera;
         this.onDragBox = opts.onDragBox;
         this.onSelectionChange = opts.onSelectionChange;
+        this.onUiSound = opts.onUiSound;
         this.dpr = opts.dpr > 0 ? opts.dpr : 1;
     }
 
@@ -183,6 +201,28 @@ export class WorkerSelection {
         this.onSelectionChange?.(ids);
     }
 
+    /** Resolve an entity id to its unit defId + world position (for placing a
+     *  3D unit-reply sound at the unit). Linear scan over live entities —
+     *  only called on a click/order gesture, so the cost is negligible. */
+    private entityDefAndPos(id: number):
+        { defId: number; x: number; y: number; z: number } | null {
+        const pos = this.entityRenderer.getEntityPosition(id);
+        if (!pos) return null;
+        for (const [eid, meta] of this.entityRenderer.getEntities()) {
+            if (eid === id) return { defId: meta.defId, x: pos.x, y: pos.y, z: pos.z };
+        }
+        return null;
+    }
+
+    /** Play a unit's `category` sound (select / order-ack) at its position. */
+    private playUnitSound(id: number, category: number): void {
+        if (!this.onUiSound) return;
+        const dp = this.entityDefAndPos(id);
+        if (!dp) return;
+        this.onUiSound({ kind: 'unit', defId: dp.defId, category,
+            x: dp.x, y: dp.y, z: dp.z });
+    }
+
     /** Programmatic selection (widget `Spring.SelectUnit*`, scenarios). */
     setSelectionExternal(ids: readonly number[]): void {
         const seen = new Set<number>();
@@ -223,6 +263,8 @@ export class WorkerSelection {
             const next = this.dragShift ? this.selectedIds.slice() : [];
             if (!next.includes(nearestId)) next.push(nearestId);
             this.setSelection(next);
+            // Recoil plays the unit's `select` sound on a single-click select.
+            this.playUnitSound(nearestId, SoundCategory.Select);
         } else if (!this.dragShift) {
             this.setSelection([]);
         }
@@ -251,6 +293,14 @@ export class WorkerSelection {
         const next = this.dragShift ? this.selectedIds.slice() : [];
         for (const id of hits) if (!next.includes(id)) next.push(id);
         this.setSelection(next);
+        // Recoil's box-select sound switches on how many units the box caught:
+        // exactly one → that unit's `select`; two or more → the fixed
+        // "MultiSelect" UI sound (`SelectedUnitsHandler::HandleUnitBoxSelection`).
+        if (hits.length === 1) {
+            this.playUnitSound(hits[0], SoundCategory.Select);
+        } else if (hits.length >= 2) {
+            this.onUiSound?.({ kind: 'item', name: 'MultiSelect' });
+        }
     }
 
     // ---- Right-click orders ----
@@ -277,6 +327,9 @@ export class WorkerSelection {
                 CMD.MOVE, this.selectedIds.slice(),
                 [groundPos.x, groundPos.y, groundPos.z], opts);
         }
+        // Recoil acks an issued order with the first selected unit's `ok`
+        // sound (`SelectedUnitsHandler::GiveCommand` → `sounds.ok`).
+        this.playUnitSound(this.selectedIds[0], SoundCategory.OrderAck);
     }
 
     private pickNearestEntityAt(groundPos: Vector3): { id: number; team: number } {

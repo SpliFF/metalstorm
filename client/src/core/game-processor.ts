@@ -21,7 +21,9 @@ import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos } from './game-worker
 // is host-agnostic (runs on WebTransportAdapter, no DOM refs after the
 // onServerRestart callback was extracted) so it imports + runs here unchanged.
 import { Connection } from './connection.js';
-import type { CombatEventInfo, FeatureSpawnInfo } from './connection.js';
+import type { CombatEventInfo, FeatureSpawnInfo,
+    SoundEventInfo, SoundRefInfo } from './connection.js';
+import { AudioChannel } from './audio.js';
 import type { EntityStateSnapshot } from './entity-state.js';
 // GW4-c3: terrain + lighting + map parse move into the worker so terrain
 // renders from here (first light). All of these are worker-safe (Babylon
@@ -80,7 +82,8 @@ import { attachDecalOverlay } from './decal-overlay-plugin.js';
 import { renderMapFeatures, DynamicFeatureRenderer } from './feature-renderer.js';
 import { RTSCamera } from './rts-camera.js';
 import { WorkerSelection } from './worker-selection.js';
-import { resolveSoundRef, type ResolvedSoundEvent } from './sound-events.js';
+import { resolveSoundRef, pickUnitDefSound,
+    type ResolvedSoundEvent } from './sound-events.js';
 import { CommandPathRenderer } from './command-path-renderer.js';
 import { WaypointMarkerRenderer } from './waypoint-marker-renderer.js';
 import { StandingOrderRenderer } from './standing-order-renderer.js';
@@ -1164,6 +1167,38 @@ export function gpInit(msg: GpInitToWorker): void {
             // react to what the player picked.
             liveState.selectedUnitIds = ids.slice();
             dispatchSelectionChanged(ids);
+        },
+        // GW4: unit-UI sounds (select / order-ack / multi-select). These are
+        // unsynced in Recoil — the server emits no SoundEvent for them — so the
+        // worker synthesises a resolved sound here from the def cache (or a
+        // named SoundItem) and reuses the main-thread playback path.
+        onUiSound: (req) => {
+            let ev: ResolvedSoundEvent | null = null;
+            if (req.kind === 'unit') {
+                const def = gpDefCache?.getUnitDef(req.defId);
+                const ref = pickUnitDefSound(def?.sounds, req.category);
+                if (!ref) return;
+                const e: SoundEventInfo = {
+                    soundId: ref.id, sourceDefId: req.defId, sourceKind: 0,
+                    x: req.x, y: req.y, z: req.z, volume: 1, pitch: 1,
+                    priority: 128, team: 255, channel: AudioChannel.UnitReply,
+                };
+                ev = { e, ref };
+            } else {
+                // Named SoundItem (e.g. "MultiSelect") — a 2D UI sound resolved
+                // by name against gamedata/sounds.lua on the main thread.
+                const ref: SoundRefInfo = {
+                    id: -1, path: '', category: -1, volume: 1, pitch: 1,
+                    name: req.name,
+                };
+                const e: SoundEventInfo = {
+                    soundId: -1, sourceDefId: 0, sourceKind: 3,
+                    x: 0, y: 0, z: 0, volume: 1, pitch: 1,
+                    priority: 128, team: 255, channel: AudioChannel.UserInterface,
+                };
+                ev = { e, ref };
+            }
+            postToMain({ type: 'gp:audioSoundEvents', events: [ev] });
         },
     });
     gpCtx.selection = selection;

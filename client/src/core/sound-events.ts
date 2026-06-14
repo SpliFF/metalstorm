@@ -26,6 +26,40 @@ import type { SoundEventInfo, SoundRefInfo } from './connection.js';
 
 type SourceKind = 0 /* Unit */ | 1 /* Weapon */ | 2 /* Feature */ | 3 /* Global */;
 
+/** SoundCategory codes — the `category` field the server stamps on each
+ *  unit-def SoundRef (`LuaDefsSerializer.inl` / `schemas/protocol.fbs`
+ *  `SoundCategory`). Used client-side to pick the right sound for a UI
+ *  event (select / order-ack / cancel) since those are unsynced and the
+ *  server never emits a SoundEvent for them. */
+export const SoundCategory = {
+    Select: 0,
+    OrderAck: 1,   // "ok"
+    Move: 2,       // "arrived"
+    BuildStart: 3,
+    Working: 4,
+    UnderAttack: 5,
+    Cancel: 6,     // "cant"
+    Activate: 7,
+    Deactivate: 8,
+} as const;
+
+/** Pick a SoundRef of `category` from a unit-def's `sounds` array, choosing a
+ *  uniform-random variant when the category has several (faithful to Recoil
+ *  `AudioChannel::PlayRandomSample` → `guRNG.NextInt(NumSounds())`). Returns
+ *  null when the def authors no sound for that category. `rng` is injectable
+ *  for deterministic tests. */
+export function pickUnitDefSound(
+    sounds: readonly SoundRefInfo[] | undefined,
+    category: number,
+    rng: () => number = Math.random,
+): SoundRefInfo | null {
+    if (!sounds || sounds.length === 0) return null;
+    const variants = sounds.filter((s) => s.category === category);
+    if (variants.length === 0) return null;
+    if (variants.length === 1) return variants[0];
+    return variants[Math.floor(rng() * variants.length)];
+}
+
 /** A SoundEvent with its SoundRef already resolved against the def cache. The
  *  ref lookup needs the unit/weapon defs; in the game-processor worker (GW4) the
  *  defs live next to the connection, so the worker resolves the ref there and
@@ -116,7 +150,13 @@ export class SoundEventPlayer {
 
         const priority = item?.priority ?? e.priority;
         const channel: AudioChannel = e.channel as AudioChannel;
-        const spatial = item?.in3d !== false;
+        // UI-channel sounds (select-all "MultiSelect", failed-command) are
+        // always 2D in Recoil (`Channels::UserInterface->PlaySample` has no
+        // position); never spatialise them regardless of the SoundItem in3d
+        // flag. Other channels honour the SoundItem's in3d (default 3D).
+        const spatial = channel === AudioChannel.UserInterface
+            ? false
+            : (item?.in3d !== false);
         const rolloff = item?.rolloff;
         const maxDist = item?.maxdist;
 
