@@ -831,6 +831,15 @@ table GameInfo {
     /// the RH internal state. Defaults to false for RH-native games.
     /// See PLAN-coordinate-system.md and docs/coordinate-system.md.
     legacy_coord_system: bool = false;
+    /// The engine's global unit-ID ceiling — `unitHandler.MaxUnits()` =
+    /// Σ active teams of their per-team cap (the `maxunits` modoption clamped
+    /// to MAX_UNITS / numTeams). Immutable for the game-server's lifetime.
+    /// The client's `Game.maxUnits` MUST equal this exactly: it's the
+    /// unit/feature ID-space boundary order params pack against
+    /// (`featureID + maxUnits`), so a mismatch silently misdecodes every
+    /// feature-targeted reclaim/repair/resurrect order. 0 = not yet known.
+    /// See PLAN-bar.md (Game-table maxUnits thread).
+    max_units: uint32 = 0;
 }
 
 /// One team's start position, in RH-canonical elmos (the same convention

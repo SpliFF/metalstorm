@@ -832,7 +832,11 @@ export interface ConnectionEvents {
     onResourceUpdate?: (info: ResourceUpdateInfo) => void;
     onGameInfo?: (frame: number, speed: number, paused: boolean,
                   wind?: { x: number; y: number; z: number; strength: number; tidal: number },
-                  legacyCoordSystem?: boolean) => void;
+                  legacyCoordSystem?: boolean,
+                  /// The engine's global unit-ID ceiling (unitHandler.MaxUnits()).
+                  /// Immutable; the worker's `Game.maxUnits` ID-space boundary.
+                  /// 0 until the first GameInfo arrives. See PLAN-bar.md.
+                  maxUnits?: number) => void;
     /// Team start positions + ally start boxes (TeamStartInfo). Sent on auth
     /// and re-broadcast after GameStart with the final post-spawn values.
     onTeamStartInfo?: (data: TeamStartInfoData) => void;
@@ -1569,7 +1573,7 @@ export class Connection {
                     x: info.windX(), y: info.windY(), z: info.windZ(),
                     strength: info.windStrength(),
                     tidal: info.tidalStrength(),
-                }, info.legacyCoordSystem());
+                }, info.legacyCoordSystem(), info.maxUnits());
                 if (info.paused()) {
                     this.events.onGameOver?.(info.frame());
                 }

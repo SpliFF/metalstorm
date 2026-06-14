@@ -224,7 +224,7 @@ void StateStreamer::BroadcastGameInfo(int) {
             wv.x, wv.y, wv.z,
             envResHandler.GetCurrentWindStrength(),
             envResHandler.GetCurrentTidalStrength(),
-            modInfo.legacyCoordSystem);
+            modInfo.legacyCoordSystem, unitHandler.MaxUnits());
         rtcServer.BroadcastReliable(msg.data(), msg.size());
     }
 }

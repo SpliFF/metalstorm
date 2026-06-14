@@ -692,4 +692,24 @@ describe('Game table map fields (PLAN-bar.md A12 residual)', () => {
             expect(g.extractorRadius).toBe(500);
         });
     });
+
+    // Game.maxUnits is NOT a gameplay cap — it's the unit/feature ID-space
+    // boundary BAR widgets use to pack feature IDs into order params
+    // (`featureID + Game.maxUnits`), decoded server-side as
+    // `objID - unitHandler.MaxUnits()`. The client value MUST equal the
+    // server's streamed `GameInfo.max_units`. See PLAN-bar.md.
+    describe('Game.maxUnits (unit/feature ID-space boundary)', () => {
+        function gameWith(maxUnits: number): Record<string, LuaValue> {
+            const ls = createDefaultLiveState();
+            ls.maxUnits = maxUnits;
+            return (buildSpringGlobals(makeCtx(), ls) as Record<string, LuaValue>)
+                .Game as Record<string, LuaValue>;
+        }
+        it('uses the streamed server value (unitHandler.MaxUnits()) when present', () => {
+            expect(gameWith(16000).maxUnits).toBe(16000);
+        });
+        it('falls back to MAX_UNITS=32000 before GameInfo arrives (ls.maxUnits=0)', () => {
+            expect(gameWith(0).maxUnits).toBe(32000);
+        });
+    });
 });

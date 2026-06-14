@@ -677,6 +677,12 @@ self.onmessage = async (e: MessageEvent<WorkerInbound>) => {
                 liveState.legacyCoordSystem = msg.legacyCoordSystem as boolean;
                 getBridge()?.setLegacyCoordSystem(msg.legacyCoordSystem as boolean);
             }
+            // The engine's unit/feature ID-space boundary (unitHandler.MaxUnits());
+            // feeds Game.maxUnits. Guard > 0 so a not-yet-known 0 can't clobber
+            // a good value already set via the worker connection path. See PLAN-bar.md.
+            if (typeof msg.maxUnits === 'number' && msg.maxUnits > 0) {
+                liveState.maxUnits = msg.maxUnits;
+            }
             break;
 
         case 'mapFeatures': {

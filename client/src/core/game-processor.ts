@@ -678,7 +678,7 @@ function gpConnect(msg: GpInitToWorker): void {
         // (paused → 0 freezes P). GW4-c5: also drive the FX aging multiplier +
         // the projectile integrator's sim-speed so bolts / particles / lights
         // slow + freeze with the game. Frame/wind forwarding to LuaUI lands in c6.
-        onGameInfo: (frame, speed, paused) => {
+        onGameInfo: (frame, speed, paused, _wind, _legacyCoordSystem, maxUnits) => {
             const eff = paused ? 0 : speed;
             gpPresentationClock?.setSpeedFactor(eff);
             gpFxSimSpeed = eff;
@@ -693,6 +693,11 @@ function gpConnect(msg: GpInitToWorker): void {
             liveState.gameFrame = frame;
             liveState.gameSpeed = speed;
             liveState.gamePaused = paused;
+            // The engine's unit/feature ID-space boundary (unitHandler.MaxUnits()),
+            // immutable for the game. Sent reliably on auth so it's present
+            // before the Game table is built. Guard > 0 so a stray not-yet-known
+            // 0 can't clobber a good value. Feeds Game.maxUnits. See PLAN-bar.md.
+            if (maxUnits && maxUnits > 0) liveState.maxUnits = maxUnits;
         },
         // PLAN-bar.md §3b: team start positions + ally start boxes → liveState,
         // read by Spring.GetTeamStartPosition / GetAllyTeamStartBox. Replaced

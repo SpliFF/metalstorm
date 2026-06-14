@@ -3526,6 +3526,17 @@ export function installEngineGlobals(
     ctx: SpringAPIContext,
     gameId: string,
 ): void {
+    // Tripwire (no-silent-failures): Game.maxUnits is the unit/feature ID-space
+    // boundary that must match the server's unitHandler.MaxUnits() exactly, or
+    // feature-targeted orders misdecode. It's streamed via GameInfo.max_units,
+    // sent reliably on auth so it should be in liveState before this boot. If
+    // it isn't, the Game table falls back to MAX_UNITS=32000 — surface the race
+    // loudly rather than ship a silently-wrong boundary. See PLAN-bar.md.
+    if (liveState.maxUnits <= 0) {
+        postLog(1, '[LuaUI] WARN Game.maxUnits: GameInfo.max_units not received ' +
+            'before LuaUI boot — using MAX_UNITS=32000 fallback; feature-targeted ' +
+            'order IDs may misdecode if the server uses a different value (PLAN-bar.md).');
+    }
     const springGlobals = buildSpringGlobals(ctx, liveState);
     const glGlobal = glBridge.buildGlGlobal();
 

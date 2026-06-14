@@ -103,8 +103,23 @@ legacyCoordSystem():boolean {
   return offset ? !!this.bb!.readInt8(this.bb_pos + offset) : false;
 }
 
+/**
+ * The engine's global unit-ID ceiling — `unitHandler.MaxUnits()` =
+ * Σ active teams of their per-team cap (the `maxunits` modoption clamped
+ * to MAX_UNITS / numTeams). Immutable for the game-server's lifetime.
+ * The client's `Game.maxUnits` MUST equal this exactly: it's the
+ * unit/feature ID-space boundary order params pack against
+ * (`featureID + maxUnits`), so a mismatch silently misdecodes every
+ * feature-targeted reclaim/repair/resurrect order. 0 = not yet known.
+ * See PLAN-bar.md (Game-table maxUnits thread).
+ */
+maxUnits():number {
+  const offset = this.bb!.__offset(this.bb_pos, 26);
+  return offset ? this.bb!.readUint32(this.bb_pos + offset) : 0;
+}
+
 static startGameInfo(builder:flatbuffers.Builder) {
-  builder.startObject(11);
+  builder.startObject(12);
 }
 
 static addMapId(builder:flatbuffers.Builder, mapIdOffset:flatbuffers.Offset) {
@@ -151,12 +166,16 @@ static addLegacyCoordSystem(builder:flatbuffers.Builder, legacyCoordSystem:boole
   builder.addFieldInt8(10, +legacyCoordSystem, +false);
 }
 
+static addMaxUnits(builder:flatbuffers.Builder, maxUnits:number) {
+  builder.addFieldInt32(11, maxUnits, 0);
+}
+
 static endGameInfo(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createGameInfo(builder:flatbuffers.Builder, mapIdOffset:flatbuffers.Offset, gameIdOffset:flatbuffers.Offset, gameSpeed:number, frame:number, paused:boolean, windX:number, windY:number, windZ:number, windStrength:number, tidalStrength:number, legacyCoordSystem:boolean):flatbuffers.Offset {
+static createGameInfo(builder:flatbuffers.Builder, mapIdOffset:flatbuffers.Offset, gameIdOffset:flatbuffers.Offset, gameSpeed:number, frame:number, paused:boolean, windX:number, windY:number, windZ:number, windStrength:number, tidalStrength:number, legacyCoordSystem:boolean, maxUnits:number):flatbuffers.Offset {
   GameInfo.startGameInfo(builder);
   GameInfo.addMapId(builder, mapIdOffset);
   GameInfo.addGameId(builder, gameIdOffset);
@@ -169,6 +188,7 @@ static createGameInfo(builder:flatbuffers.Builder, mapIdOffset:flatbuffers.Offse
   GameInfo.addWindStrength(builder, windStrength);
   GameInfo.addTidalStrength(builder, tidalStrength);
   GameInfo.addLegacyCoordSystem(builder, legacyCoordSystem);
+  GameInfo.addMaxUnits(builder, maxUnits);
   return GameInfo.endGameInfo(builder);
 }
 
@@ -184,7 +204,8 @@ unpack(): GameInfoT {
     this.windZ(),
     this.windStrength(),
     this.tidalStrength(),
-    this.legacyCoordSystem()
+    this.legacyCoordSystem(),
+    this.maxUnits()
   );
 }
 
@@ -201,6 +222,7 @@ unpackTo(_o: GameInfoT): void {
   _o.windStrength = this.windStrength();
   _o.tidalStrength = this.tidalStrength();
   _o.legacyCoordSystem = this.legacyCoordSystem();
+  _o.maxUnits = this.maxUnits();
 }
 }
 
@@ -216,7 +238,8 @@ constructor(
   public windZ: number = 0.0,
   public windStrength: number = 0.0,
   public tidalStrength: number = 0.0,
-  public legacyCoordSystem: boolean = false
+  public legacyCoordSystem: boolean = false,
+  public maxUnits: number = 0
 ){}
 
 
@@ -235,7 +258,8 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     this.windZ,
     this.windStrength,
     this.tidalStrength,
-    this.legacyCoordSystem
+    this.legacyCoordSystem,
+    this.maxUnits
   );
 }
 }

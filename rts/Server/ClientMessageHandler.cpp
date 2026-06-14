@@ -18,6 +18,9 @@
 #include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Units/CommandAI/Command.h"
 #include "Sim/Misc/TeamHandler.h"
+#include "Sim/Misc/Wind.h"
+#include "Sim/Misc/GlobalSynced.h"
+#include "Sim/Misc/ModInfo.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
 #include "Sim/Path/IPathManager.h"
 #include "Game/Players/PlayerHandler.h"
@@ -150,6 +153,26 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 for (const auto& kv : opts) kvs.emplace_back(kv.first, kv.second);
                 auto mo = Protocol::BuildGameModOptions(kvs);
                 rtcServer.SendReliable(msg.clientId, mo.data(), mo.size());
+                // GameInfo carries the immutable game constants the in-game
+                // LuaUI worker's `Game` table snapshots at boot — crucially
+                // `max_units` (the unit/feature ID-space boundary feature-order
+                // params pack against; a client/server mismatch silently
+                // misdecodes every feature-targeted reclaim/repair order — see
+                // PLAN-bar.md) and `legacy_coord_system`. The periodic
+                // BroadcastGameInfo refines the live fields (frame/speed/wind),
+                // but a just-connected client wouldn't get one until the next
+                // 30-frame boundary — possibly after the worker has already
+                // booted and snapshotted Game.maxUnits. Sending it on auth
+                // guarantees it lands in liveState before boot.
+                const float3& wv = envResHandler.GetCurrentWindVec();
+                auto gi = Protocol::BuildGameInfo(
+                    ctx.mapId, ctx.gameId, gs->speedFactor,
+                    static_cast<uint32_t>(sim.GetFrameNum()), gs->paused,
+                    wv.x, wv.y, wv.z,
+                    envResHandler.GetCurrentWindStrength(),
+                    envResHandler.GetCurrentTidalStrength(),
+                    modInfo.legacyCoordSystem, unitHandler.MaxUnits());
+                rtcServer.SendReliable(msg.clientId, gi.data(), gi.size());
             };
 
             // Try token-based reconnection first

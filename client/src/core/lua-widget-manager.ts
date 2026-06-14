@@ -668,9 +668,9 @@ export class LuaWidgetManager {
     /** Forward game info (frame, speed, paused) to the worker. */
     forwardGameInfo(frame: number, speed: number, paused: boolean, gameOver: boolean,
                     wind?: { x: number; y: number; z: number; strength: number; tidal: number },
-                    legacyCoordSystem?: boolean): void {
+                    legacyCoordSystem?: boolean, maxUnits?: number): void {
         if (this.disposed) return;
-        this.postToWorker({ type: 'gameInfo', frame, speed, paused, gameOver, wind, legacyCoordSystem });
+        this.postToWorker({ type: 'gameInfo', frame, speed, paused, gameOver, wind, legacyCoordSystem, maxUnits });
     }
 
     /** Update the selection state from the main thread. */

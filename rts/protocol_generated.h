@@ -8637,6 +8637,7 @@ struct GameInfoT : public ::flatbuffers::NativeTable {
   float wind_strength = 0.0f;
   float tidal_strength = 0.0f;
   bool legacy_coord_system = false;
+  uint32_t max_units = 0;
 };
 
 struct GameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -8653,7 +8654,8 @@ struct GameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_WIND_Z = 18,
     VT_WIND_STRENGTH = 20,
     VT_TIDAL_STRENGTH = 22,
-    VT_LEGACY_COORD_SYSTEM = 24
+    VT_LEGACY_COORD_SYSTEM = 24,
+    VT_MAX_UNITS = 26
   };
   const ::flatbuffers::String *map_id() const {
     return GetPointer<const ::flatbuffers::String *>(VT_MAP_ID);
@@ -8700,6 +8702,17 @@ struct GameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   bool legacy_coord_system() const {
     return GetField<uint8_t>(VT_LEGACY_COORD_SYSTEM, 0) != 0;
   }
+  /// The engine's global unit-ID ceiling — `unitHandler.MaxUnits()` =
+  /// Σ active teams of their per-team cap (the `maxunits` modoption clamped
+  /// to MAX_UNITS / numTeams). Immutable for the game-server's lifetime.
+  /// The client's `Game.maxUnits` MUST equal this exactly: it's the
+  /// unit/feature ID-space boundary order params pack against
+  /// (`featureID + maxUnits`), so a mismatch silently misdecodes every
+  /// feature-targeted reclaim/repair/resurrect order. 0 = not yet known.
+  /// See PLAN-bar.md (Game-table maxUnits thread).
+  uint32_t max_units() const {
+    return GetField<uint32_t>(VT_MAX_UNITS, 0);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_MAP_ID) &&
@@ -8715,6 +8728,7 @@ struct GameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<float>(verifier, VT_WIND_STRENGTH, 4) &&
            VerifyField<float>(verifier, VT_TIDAL_STRENGTH, 4) &&
            VerifyField<uint8_t>(verifier, VT_LEGACY_COORD_SYSTEM, 1) &&
+           VerifyField<uint32_t>(verifier, VT_MAX_UNITS, 4) &&
            verifier.EndTable();
   }
   GameInfoT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -8759,6 +8773,9 @@ struct GameInfoBuilder {
   void add_legacy_coord_system(bool legacy_coord_system) {
     fbb_.AddElement<uint8_t>(GameInfo::VT_LEGACY_COORD_SYSTEM, static_cast<uint8_t>(legacy_coord_system), 0);
   }
+  void add_max_units(uint32_t max_units) {
+    fbb_.AddElement<uint32_t>(GameInfo::VT_MAX_UNITS, max_units, 0);
+  }
   explicit GameInfoBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -8782,8 +8799,10 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfo(
     float wind_z = 0.0f,
     float wind_strength = 0.0f,
     float tidal_strength = 0.0f,
-    bool legacy_coord_system = false) {
+    bool legacy_coord_system = false,
+    uint32_t max_units = 0) {
   GameInfoBuilder builder_(_fbb);
+  builder_.add_max_units(max_units);
   builder_.add_tidal_strength(tidal_strength);
   builder_.add_wind_strength(wind_strength);
   builder_.add_wind_z(wind_z);
@@ -8810,7 +8829,8 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfoDirect(
     float wind_z = 0.0f,
     float wind_strength = 0.0f,
     float tidal_strength = 0.0f,
-    bool legacy_coord_system = false) {
+    bool legacy_coord_system = false,
+    uint32_t max_units = 0) {
   auto map_id__ = map_id ? _fbb.CreateString(map_id) : 0;
   auto game_id__ = game_id ? _fbb.CreateString(game_id) : 0;
   return SpringWeb::CreateGameInfo(
@@ -8825,7 +8845,8 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfoDirect(
       wind_z,
       wind_strength,
       tidal_strength,
-      legacy_coord_system);
+      legacy_coord_system,
+      max_units);
 }
 
 ::flatbuffers::Offset<GameInfo> CreateGameInfo(::flatbuffers::FlatBufferBuilder &_fbb, const GameInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -17509,6 +17530,7 @@ inline void GameInfo::UnPackTo(GameInfoT *_o, const ::flatbuffers::resolver_func
   { auto _e = wind_strength(); _o->wind_strength = _e; }
   { auto _e = tidal_strength(); _o->tidal_strength = _e; }
   { auto _e = legacy_coord_system(); _o->legacy_coord_system = _e; }
+  { auto _e = max_units(); _o->max_units = _e; }
 }
 
 inline ::flatbuffers::Offset<GameInfo> GameInfo::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -17530,6 +17552,7 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfo(::flatbuffers::FlatBufferB
   auto _wind_strength = _o->wind_strength;
   auto _tidal_strength = _o->tidal_strength;
   auto _legacy_coord_system = _o->legacy_coord_system;
+  auto _max_units = _o->max_units;
   return SpringWeb::CreateGameInfo(
       _fbb,
       _map_id,
@@ -17542,7 +17565,8 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfo(::flatbuffers::FlatBufferB
       _wind_z,
       _wind_strength,
       _tidal_strength,
-      _legacy_coord_system);
+      _legacy_coord_system,
+      _max_units);
 }
 
 inline TeamStartInfoT *TeamStartInfo::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {

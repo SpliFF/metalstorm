@@ -489,6 +489,15 @@ export interface LiveState {
      *  against the now-RH-native client state. Sourced from the
      *  server's `GameInfo.legacy_coord_system` flag on first arrival. */
     legacyCoordSystem: boolean;
+    /** The engine's global unit-ID ceiling — `unitHandler.MaxUnits()` on the
+     *  server (Σ active teams of their per-team cap). Sourced from
+     *  `GameInfo.max_units`, sent reliably on auth so it's present before the
+     *  `Game` table is built. 0 until the first GameInfo arrives. This is the
+     *  unit/feature ID-space boundary: feature-targeted order params encode a
+     *  feature as `featureID + maxUnits`, and the server decodes them as
+     *  `objID - unitHandler.MaxUnits()`, so the client value MUST match the
+     *  server's exactly. See PLAN-bar.md. */
+    maxUnits: number;
     units: Map<number, UnitEntry>;
     /** Live projectiles + beams, mirrored each frame from the main-thread
      *  ProjectileRenderer. Keyed by projectile id. Drives the
@@ -1095,6 +1104,7 @@ export function createDefaultLiveState(): LiveState {
         gamePaused: false,
         gameOver: false,
         legacyCoordSystem: false,
+        maxUnits: 0,
         units: new Map(),
         projectiles: new Map(),
         resources: new Map(),
@@ -1287,7 +1297,18 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         windMax: ctx.windMax ?? 25,
         mapDescription: ctx.mapDescription ?? '',
         extractorRadius: ctx.extractorRadius ?? 500,
-        maxUnits: 5000,
+        // The engine's global unit-ID ceiling, streamed from the server
+        // (`GameInfo.max_units` = `unitHandler.MaxUnits()`), delivered reliably
+        // on auth so it's present before this table is built. This is NOT a
+        // gameplay cap — BAR widgets (cmd_commandinsert, unit_smart_area_reclaim)
+        // use it as the unit/feature ID-space boundary: a feature is addressed
+        // in order params as `featureID + Game.maxUnits`, which the server
+        // decodes as `objID - unitHandler.MaxUnits()`. A mismatch silently
+        // misdecodes every feature-targeted reclaim/repair/resurrect order, so
+        // the client value MUST equal the server's. The 32000 fallback (Recoil
+        // GlobalConstants.h MAX_UNITS) only applies if GameInfo hasn't arrived
+        // yet — logged loud so a real race surfaces. See PLAN-bar.md.
+        maxUnits: ls.maxUnits > 0 ? ls.maxUnits : 32000,
         // Game metadata — populated from the lobby's /api/games discovery
         // (which reads the game's modinfo). Falls back to gameId, never a
         // hardcoded game name (see PLAN-bar.md A3).
