@@ -69,8 +69,18 @@ constexpr int kCurrentSchemaVersion = 8;
 /// archive formats), the extractor consults the sibling Spring author-
 /// config `<sourceModelPath>.lua` for tex1 / tex2 strings — matching
 /// the legacy JsonWriter behaviour.
+///
+/// `normaltexOverride` lets a caller supply the normal-map texture for
+/// sources that carry no per-model sidecar `normaltex` — notably BAR,
+/// where the normal map is authored in the *unitDef* (`customParams.
+/// normaltex`), not the model. gameconverter scans the unitdefs and
+/// passes the model's normaltex here. Only the basename is used (the
+/// emitted glTF image URI is a bare `<stem>.ktx2` resolved against the
+/// models/ dir). When non-empty it takes precedence over any sidecar
+/// `normaltex`; empty leaves the existing sidecar path untouched.
 nlohmann::json BuildExtensionJson(const aiScene* scene,
-                                  const std::string& sourceModelPath = {});
+                                  const std::string& sourceModelPath = {},
+                                  const std::string& normaltexOverride = {});
 
 /// Decide whether the V coordinate of texture coordinates should be
 /// flipped (V → 1.0 - V) at conversion time for the given source model

@@ -536,7 +536,8 @@ void ReadSidecarFields(const std::string& sourceModelPath,
 } // namespace
 
 nlohmann::json GeometryExtractor::BuildExtensionJson(const aiScene* scene,
-                                                    const std::string& sourceModelPath) {
+                                                    const std::string& sourceModelPath,
+                                                    const std::string& normaltexOverride) {
     Aabb bounds;
     if (scene != nullptr && scene->mRootNode != nullptr) {
         CollectWorldspaceVertices(scene, scene->mRootNode, aiMatrix4x4{}, bounds);
@@ -610,6 +611,18 @@ nlohmann::json GeometryExtractor::BuildExtensionJson(const aiScene* scene,
     // tex1 / tex2 came from an Assimp material slot.
     std::optional<bool> invertTeamColor;
     SidecarOverrides overrides;
+    // Caller-supplied normal map (gameconverter feeding BAR's unitDef
+    // `customParams.normaltex`, which has no per-model sidecar). Seed it
+    // BEFORE ReadSidecarFields — that function only fills `normaltex`
+    // when it's still empty, so seeding here makes the authored unitDef
+    // value win and skips the sidecar read. Store just the basename
+    // (the emitted glTF image URI is a bare `<stem>.ktx2` resolved in
+    // models/); the casing snap below fixes it against unittextures/.
+    if (!normaltexOverride.empty()) {
+        overrides.normaltex =
+            std::filesystem::path(normaltexOverride).filename().string();
+        RewriteToKtx2(overrides.normaltex);
+    }
     ProbeUnittexturesByConvention(sourceModelPath, tex1, tex2, invertTeamColor);
     ReadSidecarFields(sourceModelPath, tex1, tex2, invertTeamColor, overrides);
 

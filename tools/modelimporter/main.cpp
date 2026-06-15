@@ -81,6 +81,10 @@ void PrintUsage(const char* argv0) {
         "                        'ktx2' is accepted.\n"
         "  --texture-prefix <p>  Prepend <p> to every rewritten texture\n"
         "                        URI (e.g. '../unittextures/').\n"
+        "  --normaltex <file>    Normal-map texture (basename) to lift into\n"
+        "                        the glTF material.normalTexture. For sources\n"
+        "                        whose normal map lives in the unitDef\n"
+        "                        (customParams.normaltex), not a sidecar.\n"
         "  --log-server <url>    Send logs to a springlog server.\n"
         "  --log-level <level>   Set minimum log level (debug/info/\n"
         "                        notice/warning/error).", argv0);
@@ -863,6 +867,13 @@ int main(int argc, char** argv) {
     // textures sit in the same directory.
     std::string texturePrefix;
     std::string logServerUrl;
+    // Normal-map texture for sources whose normal map is authored in the
+    // unitDef (`customParams.normaltex`) rather than a per-model sidecar
+    // — BAR's S3O units. gameconverter resolves the model→normaltex map
+    // from the unitdefs and passes it here. Lifted into the glTF
+    // `material.normalTexture` via SPRINGRTS_geometry, same as a sidecar
+    // `normaltex`. Empty for assets that carry their own sidecar.
+    std::string normaltexArg;
     // Emit the raw Assimp glTF2 exporter output verbatim — skip our
     // post-fix that rewrites texture references through
     // `KHR_texture_basisu`, injects `SPRINGRTS_geometry` /
@@ -891,6 +902,8 @@ int main(int argc, char** argv) {
             noPostfix = true;
         } else if (a == "--texture-prefix" && i + 1 < argc) {
             texturePrefix = argv[++i];
+        } else if (a == "--normaltex" && i + 1 < argc) {
+            normaltexArg = argv[++i];
         } else if (a == "--no-meta" || a == "--update-meta") {
             // No-op: legacy flags from the .config.json era. The
             // SPRINGRTS_geometry extension is always emitted into the
@@ -1156,7 +1169,7 @@ int main(int argc, char** argv) {
     // metadata in a single file.
     if (!noPostfix) {
         const nlohmann::json springGeometryJson =
-            GeometryExtractor::BuildExtensionJson(scene, inPath);
+            GeometryExtractor::BuildExtensionJson(scene, inPath, normaltexArg);
         if (textureExt == "ktx2"
             && (EndsWith(outPath, ".glb") || EndsWith(outPath, ".gltf")))
         {

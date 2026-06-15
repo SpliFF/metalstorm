@@ -89,6 +89,7 @@
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -1533,6 +1534,83 @@ bool IsModelFile(const fs::path& p) {
 /// `.ktx2` (the only legal value for `--texture-ext`); we then walk
 /// those URIs and produce a `.ktx2` sibling under `<gameDir>/unittextures/`
 /// for each one.
+/// Build a map from model stem → normal-map basename by scanning the
+/// unitdefs. BAR (and other modern Recoil games) author the unit normal
+/// map in the unitDef as `customParams.normaltex` — keyed to the unit's
+/// model, not stored in a per-model sidecar — so the modelimporter can't
+/// discover it on its own. We resolve it here and feed it to
+/// modelimporter via `--normaltex` so the existing normaltex → glTF
+/// `material.normalTexture` path lights up.
+///
+/// Light text scan (no Lua eval), mirroring CollectBuildingDecalStems:
+/// pull the first `objectname = <string>` (the model file) and the first
+/// `normaltex = <string>` from each `units/*.lua`. BAR is one-unit-per-
+/// file, so first-of-each is correct; a file with a normaltex but no
+/// objectname is skipped. The key is the lowercased model stem (matching
+/// the on-disk .s3o stem); the value is the normaltex basename.
+std::unordered_map<std::string, std::string>
+CollectModelNormalMaps(const fs::path& unitsDir) {
+    std::unordered_map<std::string, std::string> out;
+    std::error_code ec;
+    if (unitsDir.empty() || !fs::is_directory(unitsDir, ec)) return out;
+
+    static const std::regex reObject(
+        R"RX(objectname\s*=\s*(?:\[\[(.*?)\]\]|"([^"]*)"|'([^']*)'))RX",
+        std::regex::icase);
+    static const std::regex reNormal(
+        R"RX(normaltex\s*=\s*(?:\[\[(.*?)\]\]|"([^"]*)"|'([^']*)'))RX",
+        std::regex::icase);
+
+    auto firstMatch = [](const std::string& src, const std::regex& re,
+                         std::string& outVal) -> bool {
+        std::smatch m;
+        if (!std::regex_search(src, m, re)) return false;
+        outVal = m[1].matched ? m[1].str()
+               : m[2].matched ? m[2].str()
+                              : m[3].str();
+        return true;
+    };
+    auto baseName = [](std::string s) {
+        const size_t slash = s.find_last_of("/\\");
+        if (slash != std::string::npos) s = s.substr(slash + 1);
+        return s;
+    };
+
+    for (const auto& entry : fs::recursive_directory_iterator(unitsDir, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec)) continue;
+        if (ToLower(entry.path().extension().string()) != ".lua") continue;
+
+        std::ifstream in(entry.path(), std::ios::binary);
+        if (!in) continue;
+        std::stringstream ss;
+        ss << in.rdbuf();
+        const std::string src = ss.str();
+
+        std::string objectName, normalTex;
+        if (!firstMatch(src, reNormal, normalTex)) continue;
+        if (!firstMatch(src, reObject, objectName)) continue;
+        if (normalTex.empty() || objectName.empty()) continue;
+
+        std::string modelStem = baseName(objectName);
+        const size_t dot = modelStem.find_last_of('.');
+        if (dot != std::string::npos) modelStem = modelStem.substr(0, dot);
+        modelStem = ToLower(modelStem);
+        if (modelStem.empty()) continue;
+
+        const std::string nt = baseName(normalTex);
+        auto it = out.find(modelStem);
+        if (it != out.end() && it->second != nt) {
+            SLOG(SPRING_LOG_NOTICE,
+                "normaltex conflict for model '%s': '%s' vs '%s' — keeping first",
+                modelStem.c_str(), it->second.c_str(), nt.c_str());
+            continue;
+        }
+        out[modelStem] = nt;
+    }
+    return out;
+}
+
 int ConvertModels(const fs::path& gameDir, const std::string& gameId,
                   const fs::path& modelImporterBin, bool force) {
     const fs::path source = ResolveSubDir(gameDir, "objects3d");
@@ -1547,6 +1625,15 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
     const fs::path textureConverter = TEXTURECONVERTER_BINARY_PATH;
     std::error_code ec;
     fs::create_directories(modelsOut, ec);
+
+    // Model → normal-map basename, resolved from the unitdefs'
+    // `customParams.normaltex`. Empty for games that don't author one.
+    const std::unordered_map<std::string, std::string> normalMaps =
+        CollectModelNormalMaps(ResolveSubDir(gameDir, "units"));
+    if (!normalMaps.empty()) {
+        SLOG(SPRING_LOG_NOTICE, "%s: %zu models have an authored normaltex",
+            gameDir.filename().string().c_str(), normalMaps.size());
+    }
 
     int converted = 0, skipped = 0, failed = 0;
     for (const auto& entry : fs::recursive_directory_iterator(source)) {
@@ -1654,9 +1741,19 @@ int ConvertModels(const fs::path& gameDir, const std::string& gameId,
             std::vector<std::string> argv = {
                 modelImporterBin.string(),
                 "--texture-ext", "ktx2",
-                entry.path().string(),
-                outPath.string(),
             };
+            // Feed the unitDef-authored normal map (BAR) so modelimporter
+            // lifts it into the glTF material.normalTexture. Keyed by the
+            // lowercased model stem.
+            {
+                const auto nm = normalMaps.find(ToLower(stem));
+                if (nm != normalMaps.end()) {
+                    argv.push_back("--normaltex");
+                    argv.push_back(nm->second);
+                }
+            }
+            argv.push_back(entry.path().string());
+            argv.push_back(outPath.string());
             std::string output;
             if (!RunCommand(argv, output)) {
                 failed++;
