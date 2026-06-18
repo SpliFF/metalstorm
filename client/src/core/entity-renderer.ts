@@ -1490,47 +1490,27 @@ export class EntityRenderer {
             }
             const modelHeight = Math.max(1, bbMaxY - bbMinY);
 
-            // Pick yOffset based on Spring's authored model conventions.
+            // Faithful Recoil placement: the model's origin sits at the
+            // unit's ground position with NO vertical lift. Recoil authors
+            // models feet-at-origin and never re-seats them from a bounding
+            // box; the unit's world Y already places the origin on the
+            // terrain.
             //
-            // Authors use one of two origin styles:
-            //   A. Origin at physical base (typical for tall structures —
-            //      windmills, radars, factories). Often these have parts
-            //      that extend BELOW origin (foundations) which the
-            //      original engine relies on terrain to occlude. midpos.y
-            //      sits well above origin (in the body of the structure).
-            //      → render with no shift; trust terrain to clip the
-            //         foundation.
-            //   B. Origin near the visual centre / waist (typical for
-            //      humanoid mechs and walking units). midpos.y sits
-            //      near zero or below. The model's "feet" live well
-            //      below origin and would sink into the ground if drawn
-            //      unshifted.
-            //      → shift up by -minY so the feet land at ground level.
+            // The previous `-minY` heuristic lifted "mech-style" models so
+            // their AABB bottom met the ground. That AABB comes from the
+            // BIND pose, which is unreliable: BAR commanders park decorative
+            // pieces (medalsilver/bronze/gold at restY≈-50, crown at -46)
+            // far below the body, pulling minY to -66 while the actual body
+            // bottom is ≈0. The lift then launched the whole unit ~64 elmos
+            // off the ground, detached from its shadow. Removed per user
+            // decision 2026-06-19 (CORE directive: reproduce Recoil; don't
+            // keep a custom re-seating hack). If a unit now sinks, its model
+            // origin is mis-authored / mis-imported — fix that at the import,
+            // not with a render-time lift.
             //
-            // The midpos.y signal cleanly separates the two: structures
-            // have midpos high up in their body, mechs have it near the
-            // unit's centre-of-mass which is close to origin.
-            const minY = config?.minY ?? bbMinY;
-            const maxY = config?.maxY ?? bbMaxY;
-            const midY = config?.midY;
-            // Two structure flavours sit at origin and must NOT be shifted
-            // up by -minY (terrain occludes whatever sticks below):
-            //   1. Tall structures with body above origin and a small
-            //      foundation below. midpos.y sits high in the body.
-            //      e.g. radar: midY=+21, height=143, only -50 below.
-            //   2. Drill-style structures with a tiny cap above origin
-            //      and a long shaft buried below. midpos.y is way below
-            //      origin — the original heuristic mis-classified these
-            //      as mechs and rocketed the foundation skyward.
-            //      e.g. Mex: midY=-113, maxY=+8, minY=-234, height=243
-            //      (the "posts" foundation 234 elmos below was rendered
-            //      as four giant red columns towering over the surface).
-            // baseAtOrigin catches both: midY high in the model OR maxY
-            // is a small fraction of modelHeight (drill cap).
-            const baseAtOrigin =
-                (midY !== undefined && midY > modelHeight * 0.1) ||
-                maxY < modelHeight * 0.15;
-            const yOffset = baseAtOrigin ? 0 : Math.max(0, -minY);
+            // (bbMinY/bbMaxY are still computed above — `modelHeight` feeds
+            // the build-progress scan plane.)
+            const yOffset = 0;
 
             // Load textures (sharing across all teams; team color is
             // applied per-team via the shader uniform).
