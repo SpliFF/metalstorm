@@ -524,13 +524,20 @@ const TEAMCOLOR_FRAGMENT = `#version 300 es
         // sky-gradient tint whose strength comes from the model's own
         // metallic channel (ORM.B = Spring tex2 reflectivity). The boosted
         // specular stands in for cus_gl4's texColor2.g x 4 highlight.
-        // Result: metallic panels pick up a sky sheen + sharper glints
-        // instead of the flat matte engine-default look.
+        // Result: metallic panels pick up a subtle sky sheen + sharper
+        // glints instead of the flat matte engine-default look.
+        //
+        // Tuning (first live preview was too pale/washed on up-facing
+        // panels): keep the env reflection dim + subtle so metal reads as
+        // "darker base with sharp highlights" rather than a bright sky
+        // wash. The metallic read comes mostly from the boosted specular,
+        // which is already albedo-tinted (specBase = mix(0.04, color,
+        // metallic) above). Final values still want a real-BAR eyeball.
         float cusMetal = (hasOrm > 0.5) ? texture(ormTex, vUV).b : 0.0;
-        vec3  cusEnv   = mix(vec3(0.20, 0.25, 0.34),
-                             vec3(0.72, 0.82, 0.96), N.y * 0.5 + 0.5);
-        lit = mix(lit, cusEnv, cusMetal * 0.35);
-        lit += spec * 1.5 * sunVis;
+        vec3  cusEnv   = mix(vec3(0.10, 0.12, 0.16),
+                             vec3(0.42, 0.48, 0.56), N.y * 0.5 + 0.5);
+        lit = mix(lit, cusEnv, cusMetal * 0.20);
+        lit += spec * 2.0 * sunVis;
     #endif
 
         // Additive self-illumination from S3O tex2.R (replicated to
