@@ -45,7 +45,7 @@ import { LosBitmapStore, type LosBitmap } from './los-bitmap.js';
 // registers Babylon's KTX2 loader + pins the transcoder URLs (previously only
 // done in main.ts) so unit `.ktx2` textures transcode here.
 import './ktx2-config.js';
-import { EntityRenderer, setLightingStyle, setUseZKMaterial } from './entity-renderer.js';
+import { EntityRenderer, setLightingStyle, setModelMaterialPort } from './entity-renderer.js';
 
 /**
  * The model-material port id that `zk-model-material.ts` reproduces
@@ -56,7 +56,15 @@ import { EntityRenderer, setLightingStyle, setUseZKMaterial } from './entity-ren
  * Bump the `-NNN` suffix if the hand-port is ever re-synced to a newer
  * template revision so stale game configs surface as a loud mismatch.
  */
-const ZK_MATERIAL_PORT_ID = 'zk-939';
+// Client model-material ports the worker can satisfy. A game names one via
+// modinfo `modelMaterialPort`; anything outside this set falls to the
+// engine-default material (with a loud warn). Data-driven — no gameId
+// branches. See setModelMaterialPort in entity-renderer.ts.
+//   'zk-939'  — hand-port of Zero-K's 939-line GL3 CUS template.
+//   'cus-pbr' — Recoil cus_gl4 metallic look (env-reflection approx +
+//               boosted spec) on the engine-default material; BAR and any
+//               cus_gl4-based mod declare this.
+const CLIENT_MATERIAL_PORTS = new Set(['zk-939', 'cus-pbr']);
 import { BuildingPlateRenderer } from './building-plate-renderer.js';
 import { DefCache } from './def-cache.js';
 import { fetchAndIngestDefs } from './defs-fetch.js';
@@ -918,14 +926,14 @@ export function gpInit(msg: GpInitToWorker): void {
     // detect the live template drifting from this hand-port — ZK_MATERIAL_PORT_ID
     // names the exact template version this port reproduces; bump it if the
     // port is re-synced to a newer template.
-    const useZKPort = msg.modelMaterialPort === ZK_MATERIAL_PORT_ID;
-    if (msg.modelMaterialPort && !useZKPort) {
+    const port = msg.modelMaterialPort || '';
+    if (port && !CLIENT_MATERIAL_PORTS.has(port)) {
         // A game asked for a material port the client doesn't implement →
         // engine-default (no silent mis-render: surface the unmet request).
-        console.warn(`[gp] modelMaterialPort='${msg.modelMaterialPort}' has no ` +
-            `client port (have '${ZK_MATERIAL_PORT_ID}') — using engine-default material`);
+        console.warn(`[gp] modelMaterialPort='${port}' has no client port ` +
+            `(have ${[...CLIENT_MATERIAL_PORTS].join(', ')}) — using engine-default material`);
     }
-    setUseZKMaterial(useZKPort);
+    setModelMaterialPort(port);
 
     gpPresentationClock = new PresentationClock();
 

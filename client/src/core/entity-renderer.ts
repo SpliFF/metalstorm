@@ -514,6 +514,25 @@ const TEAMCOLOR_FRAGMENT = `#version 300 es
 
         vec3 lit = color * (ambientTerm + sunTerm * sunVis) + spec * sunVis;
 
+    #ifdef USE_CUS_PBR
+        // Recoil cus_gl4 metallic look. BAR draws units through cus_gl4,
+        // whose fragment shader adds an environment cubemap reflection
+        // (mixed by the spec/reflectivity channel) and a strong sun
+        // specular on top of the team-coloured albedo. WebGL2 has no
+        // cubemap-reflection pipeline here (same allowance the ZK material
+        // port takes), so approximate the env reflection with a vertical
+        // sky-gradient tint whose strength comes from the model's own
+        // metallic channel (ORM.B = Spring tex2 reflectivity). The boosted
+        // specular stands in for cus_gl4's texColor2.g x 4 highlight.
+        // Result: metallic panels pick up a sky sheen + sharper glints
+        // instead of the flat matte engine-default look.
+        float cusMetal = (hasOrm > 0.5) ? texture(ormTex, vUV).b : 0.0;
+        vec3  cusEnv   = mix(vec3(0.20, 0.25, 0.34),
+                             vec3(0.72, 0.82, 0.96), N.y * 0.5 + 0.5);
+        lit = mix(lit, cusEnv, cusMetal * 0.35);
+        lit += spec * 1.5 * sunVis;
+    #endif
+
         // Additive self-illumination from S3O tex2.R (replicated to
         // grayscale RGB by the encoder). Most ZK units have no glow
         // regions and ship a black emissive map; the encoder/Zstd pair
@@ -587,8 +606,24 @@ export function setLightingStyle(style: string): void {
  * others stay on the default shader). The setter only affects materials
  * created AFTER the call — existing meshes keep their original program.
  */
-let useZKMaterial = false;
-export function setUseZKMaterial(on: boolean): void { useZKMaterial = on; }
+// Data-driven model-material selection. A game declares which client
+// material "port" it wants via modinfo `modelMaterialPort` (→ /api/games
+// → gp:init → setModelMaterialPort). NO gameId hardcoding — any mod opts
+// in by naming a port:
+//   'zk-939'  → hand-ported ZK GL3 custom-unit-shader (zk-model-material).
+//   'cus-pbr' → Recoil cus_gl4 metallic look layered on the engine-default
+//               material (env-reflection approximation + boosted specular,
+//               driven by the model's own ORM/metallic channel). BAR and
+//               any cus_gl4-based mod declare this.
+//   ''/other  → engine-default material.
+let modelMaterialPort = '';
+export function setModelMaterialPort(port: string): void {
+    modelMaterialPort = port || '';
+}
+/** @deprecated kept for callers not yet migrated; maps to the ZK port. */
+export function setUseZKMaterial(on: boolean): void {
+    modelMaterialPort = on ? 'zk-939' : '';
+}
 
 function createUnitMaterial(
     name: string,
@@ -598,11 +633,13 @@ function createUnitMaterial(
     scene: Scene,
     customParams: Record<string, string> | undefined,
 ): ShaderMaterial {
-    if (useZKMaterial) {
+    if (modelMaterialPort === 'zk-939') {
         const opts = zkOptionsFromCustomParams(customParams, textures.normal !== null);
         return createZKMaterial(name, textures as ZKUnitTextures, teamColor, scene, opts);
     }
-    return createTeamColorMaterial(name, textures, teamColor, modelHeight, scene);
+    return createTeamColorMaterial(
+        name, textures, teamColor, modelHeight, scene,
+        modelMaterialPort === 'cus-pbr');
 }
 
 // ── Sun + CSM material bind plumbing ───────────────────────────────────
@@ -737,6 +774,7 @@ function createTeamColorMaterial(
     teamColor: Color3,
     modelHeight: number,
     scene: Scene,
+    cusPbr: boolean = false,
 ): ShaderMaterial {
     // `defines` are prepended verbatim to both shader sources at
     // compile time, so `#define USE_HALF_LAMBERT` gates the matching
@@ -747,6 +785,12 @@ function createTeamColorMaterial(
     const defines = ['#define INSTANCES', '#define THIN_INSTANCES'];
     if (currentLightingStyle === 'gameplay') {
         defines.push('#define USE_HALF_LAMBERT');
+    }
+    // Recoil cus_gl4 metallic sheen variant (BAR & other cus_gl4 mods,
+    // selected by modelMaterialPort === 'cus-pbr'). Adds an env-reflection
+    // approximation + boosted specular in the fragment shader.
+    if (cusPbr) {
+        defines.push('#define USE_CUS_PBR');
     }
 
     const mat = new ShaderMaterial(name, scene, 'teamColor', {
