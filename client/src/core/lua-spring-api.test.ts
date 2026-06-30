@@ -948,3 +948,58 @@ describe('Game table map fields (PLAN-bar.md A12 residual)', () => {
         });
     });
 });
+
+describe('GetPixelDir (PLAN-bar.md UI-2 — gui_pip:12763)', () => {
+    // Column-major OpenGL perspective; view = identity (camera at the
+    // origin looking down -Z). Mirrors the render camera the worker feeds
+    // into ls.viewMatrix/projMatrix.
+    function perspective(fovY: number, aspect: number, near: number, far: number): Float32Array {
+        const f = 1 / Math.tan(fovY / 2);
+        return new Float32Array([
+            f / aspect, 0, 0, 0,
+            0, f, 0, 0,
+            0, 0, (far + near) / (near - far), -1,
+            0, 0, (2 * far * near) / (near - far), 0,
+        ]);
+    }
+    const IDENTITY = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+
+    function setup(): Record<string, LuaValue> {
+        const ctx = makeCtx();
+        const ls = createDefaultLiveState();
+        ls.viewMatrix = IDENTITY;
+        ls.projMatrix = perspective(Math.PI / 3, 16 / 9, 1, 1000);
+        ls.viewport = { width: 1920, height: 1080 };
+        return springApi(ctx, ls);
+    }
+    function vec(v: LuaValue): [number, number, number] {
+        const a = v as number[];
+        return [a[0], a[1], a[2]];
+    }
+
+    it('center pixel points straight down -Z, unit length', () => {
+        const d = vec(call(setup().GetPixelDir, 960, 540));
+        expect(Math.hypot(d[0], d[1], d[2])).toBeCloseTo(1, 5);
+        expect(d[0]).toBeCloseTo(0, 5);
+        expect(d[1]).toBeCloseTo(0, 5);
+        expect(d[2]).toBeCloseTo(-1, 5);
+    });
+    it('left/right edges diverge symmetrically in x, still unit length', () => {
+        const api = setup();
+        const right = vec(call(api.GetPixelDir, 1919, 540));
+        const left = vec(call(api.GetPixelDir, 1, 540));
+        expect(right[0]).toBeGreaterThan(0);
+        expect(left[0]).toBeLessThan(0);
+        expect(right[0]).toBeCloseTo(-left[0], 4);
+        expect(right[2]).toBeLessThan(0); // still pointing into the scene
+        expect(Math.hypot(...right)).toBeCloseTo(1, 5);
+    });
+    it('returns a straight-down guard (never a nil component) before matrices arrive', () => {
+        const ctx = makeCtx();
+        const ls = createDefaultLiveState();
+        ls.viewMatrix = null;
+        ls.projMatrix = null;
+        const d = vec(call(springApi(ctx, ls).GetPixelDir, 960, 540));
+        expect(d).toEqual([0, -1, 0]);
+    });
+});

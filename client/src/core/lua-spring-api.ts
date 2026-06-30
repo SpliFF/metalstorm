@@ -2724,6 +2724,26 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             // — pos must be the table (2nd return), not a coord scalar.
             return ['ground', luaTable(hit[0], hit[1], hit[2])];
         },
+        // Spring.GetPixelDir(x, y) — normalised world-space ray direction
+        // through screen pixel (x, y). Faithful to Recoil's
+        // CCamera::CalcPixelDir (LuaUnsyncedRead::GetPixelDir), derived from
+        // the live view/projection matrices; screen y is Spring's bottom-up
+        // convention (same as TraceScreenRay). Recoil always returns three
+        // numbers (the camera always exists), so we mirror that: before the
+        // first render frame populates the matrices we return a straight-down
+        // guard so callers (e.g. BAR's gui_pip frustum-corner projection at
+        // :12763) never destructure a nil component.
+        GetPixelDir: (_x: LuaValue, _y: LuaValue) => {
+            if (ls.viewMatrix && ls.projMatrix) {
+                const dir = screenPixelDir(
+                    Number(_x), Number(_y),
+                    ls.viewMatrix, ls.projMatrix,
+                    ls.viewport.width, ls.viewport.height,
+                );
+                if (dir) return dir;
+            }
+            return [0, -1, 0];
+        },
         GetCameraPosition: () => {
             const live = ctx.getCameraPose?.();
             if (live) return [live.pos.x, live.pos.y, live.pos.z];
@@ -4072,12 +4092,20 @@ const _mvp   = new Float32Array(16);
  *
  * sx/sy are Spring screen coords: pixels with Y-up (y=0 at bottom).
  */
-function screenPointToGround(
+/**
+ * Unproject screen pixel (sx, sy) to its near (NDC z=-1) and far
+ * (NDC z=+1) world-space endpoints using the inverse view-projection.
+ * Screen y is Spring's bottom-up convention. Shared by `screenPointToGround`
+ * (ground intersection — `TraceScreenRay`/`ScreenToWorldCoords`) and
+ * `screenPixelDir` (ray direction — `GetPixelDir`) so both use exactly the
+ * same NDC/matrix conventions. Returns null when the view-projection is
+ * non-invertible or the unprojection is degenerate (w≈0).
+ */
+function unprojectScreenRay(
     sx: number, sy: number,
     view: Float32Array, proj: Float32Array,
     vpW: number, vpH: number,
-    ctx: SpringAPIContext,
-): [number, number, number] | null {
+): { near: [number, number, number]; far: [number, number, number] } | null {
     mat4Mul(proj, view, _mvp);
     if (!mat4Inverse(_mvp, _invVP)) return null;
 
@@ -4096,6 +4124,18 @@ function screenPointToGround(
     const near = unproject(-1);
     const far  = unproject(+1);
     if (!near || !far) return null;
+    return { near, far };
+}
+
+function screenPointToGround(
+    sx: number, sy: number,
+    view: Float32Array, proj: Float32Array,
+    vpW: number, vpH: number,
+    ctx: SpringAPIContext,
+): [number, number, number] | null {
+    const ray = unprojectScreenRay(sx, sy, view, proj, vpW, vpH);
+    if (!ray) return null;
+    const { near, far } = ray;
 
     const dx = far[0] - near[0];
     const dy = far[1] - near[1];
@@ -4112,6 +4152,33 @@ function screenPointToGround(
     const wz = near[2] + dz * t;
     const wy = sampleHeight(ctx, wx, wz);
     return [wx, wy, wz];
+}
+
+/**
+ * World-space ray direction through screen pixel (sx, sy), normalised.
+ * Backs `Spring.GetPixelDir`. Faithful to Recoil's
+ * `CCamera::CalcPixelDir` (`LuaUnsyncedRead::GetPixelDir`), which returns
+ * `(forward - up*dy + right*dx).Normalize()`; we derive the same
+ * direction from the live view/projection matrices (the actual render
+ * camera) by unprojecting the near/far NDC points and normalising
+ * far−near, so the result tracks our real projection rather than a
+ * re-derived fov/basis. Returns null when the matrices are unavailable or
+ * the ray is degenerate.
+ */
+function screenPixelDir(
+    sx: number, sy: number,
+    view: Float32Array, proj: Float32Array,
+    vpW: number, vpH: number,
+): [number, number, number] | null {
+    const ray = unprojectScreenRay(sx, sy, view, proj, vpW, vpH);
+    if (!ray) return null;
+    const { near, far } = ray;
+    const dx = far[0] - near[0];
+    const dy = far[1] - near[1];
+    const dz = far[2] - near[2];
+    const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (len < 1e-9) return null;
+    return [dx / len, dy / len, dz / len];
 }
 
 /**
