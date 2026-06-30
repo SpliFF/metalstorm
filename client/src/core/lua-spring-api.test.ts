@@ -233,6 +233,52 @@ describe('BAR read shims', () => {
         });
     });
 
+    // PLAN-bar.md §7 UI-2 — the worker had no team roster (liveState.teams was
+    // never seeded), so GetAllyTeamList()/GetTeamList()/GetTeamInfo() returned
+    // empty/nil and gui_ecostats built a nil-aID allyData entry → crash. With
+    // teams seeded (from TeamStartInfo, in the game-processor) the team reads
+    // resolve and Gaia is derived as the highest team id.
+    describe('team roster reads (UI-2 gui_ecostats crash root cause)', () => {
+        function seedTeam(over: Partial<TeamInfo>): TeamInfo {
+            return { teamId: 0, leader: -1, isDead: false, isAiTeam: false, side: '', allyTeam: 0, customKeys: {}, ...over };
+        }
+        function seededLs(): LiveState {
+            const ls = createDefaultLiveState();
+            // 2 players + Gaia (team 2 = last), the BAR/ZK 1v1+AI shape.
+            ls.teams.set(0, seedTeam({ teamId: 0, allyTeam: 0 }));
+            ls.teams.set(1, seedTeam({ teamId: 1, allyTeam: 1, isAiTeam: true }));
+            ls.teams.set(2, seedTeam({ teamId: 2, allyTeam: 2 }));
+            return ls;
+        }
+
+        it('GetAllyTeamList lists every ally team once (not empty)', () => {
+            const api = springApi(makeCtx(), seededLs());
+            expect(ids(call(api.GetAllyTeamList))).toEqual([0, 1, 2]);
+        });
+        it('GetTeamList returns the teams of one ally team', () => {
+            const api = springApi(makeCtx(), seededLs());
+            expect(ids(call(api.GetTeamList, 1))).toEqual([1]);
+        });
+        it('GetTeamInfo resolves a seeded team (allyTeam is the 6th return)', () => {
+            const api = springApi(makeCtx(), seededLs());
+            expect(call(api.GetTeamInfo, 1)).toEqual([1, -1, false, true, '', 1, {}]);
+        });
+        it('GetGaiaTeamID derives the highest team id (Recoil creates Gaia last)', () => {
+            const api = springApi(makeCtx(), seededLs());
+            expect(call(api.GetGaiaTeamID)).toBe(2);
+        });
+        it('GetGaiaTeamID is NOT the old hardcoded 1 when Gaia is team 2', () => {
+            const api = springApi(makeCtx(), seededLs());
+            expect(call(api.GetGaiaTeamID)).not.toBe(1);
+        });
+        it('GetGaiaTeamID returns -1 before any team roster is seeded', () => {
+            const api = springApi(makeCtx(), createDefaultLiveState());
+            expect(call(api.GetGaiaTeamID)).toBe(-1);
+            // Empty list (the pre-fix state) — the gui_ecostats crash trigger.
+            expect(ids(call(api.GetAllyTeamList))).toEqual([]);
+        });
+    });
+
     // Faithful to Recoil LuaUnsyncedRead::DiffTimers — verifies the unit
     // conversion matrix for both the millisecond (GetTimer) and microsecond
     // (GetTimerMicros) timer handles BAR's profilers pass.

@@ -571,7 +571,9 @@ export interface LiveState {
     activeCommand: { index: number; cmdId: number; cmdName: string };
     /** Roster: keyed by playerId. Includes spectators. */
     players: Map<number, PlayerInfo>;
-    /** Roster: keyed by teamId. Gaia (id=1 by default) is included. */
+    /** Roster: keyed by teamId, seeded from TeamStartInfo (team→allyTeam).
+     *  The Gaia team — the highest team id, since Recoil creates it last — is
+     *  included. */
     teams: Map<number, TeamInfo>;
     /** Per-team colour. Falls back to a deterministic palette when missing. */
     teamColors: Map<number, TeamColor>;
@@ -1680,7 +1682,21 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         IsReplay: () => false,
         GetLocalPlayerID: () => ls.identity.myPlayerId,
         GetMyPlayerID: () => ls.identity.myPlayerId,
-        GetGaiaTeamID: () => 1,
+        GetGaiaTeamID: () => {
+            // Recoil creates the Gaia team LAST (teamHandler), so it is the
+            // highest team id present. We don't stream gaiaTeamID explicitly,
+            // but every Gaia-enabled game (ZK and BAR both use LuaGaia) follows
+            // this invariant, so derive it from the seeded team roster rather
+            // than the old hardcoded `1` — which mis-identified the AI's ally
+            // team as Gaia and corrupted gui_ecostats' gaiaAllyID (it then
+            // skipped a real ally team and treated the true Gaia team as a
+            // player team). Returns -1 when no teams are known yet (pre-roster),
+            // matching "no Gaia". A definitive fix would stream gaiaTeamID; this
+            // derivation is correct for both supported games.
+            let gaia = -1;
+            for (const id of ls.teams.keys()) if (id > gaia) gaia = id;
+            return gaia;
+        },
         CreateDir: (_path: LuaValue) => true,
         // LOS view colours — arrays of 3 floats each. los_brightness_modifier
         // reads these at init. Defaults mirror Spring's hard-coded baselines.

@@ -719,6 +719,32 @@ function gpConnect(msg: GpInitToWorker): void {
                 liveState.teamStartPositions.set(t.team, {
                     x: t.x, y: t.y, z: t.z, valid: t.valid, allyTeam: t.allyTeam,
                 });
+                // PLAN-bar.md UI-2 (gui_ecostats nil-aID crash + every other
+                // team-aware HUD widget): the worker had NO team roster.
+                // liveState.teams was only ever filled by the never-called
+                // setRoster()/rosterUpdate path, so Spring.GetAllyTeamList()
+                // returned {} and GetTeamInfo() returned nil. In gui_ecostats
+                // that made setAllyData() build an allyData entry with a nil
+                // .aID (empty GetTeamList → early-return before .aID is set),
+                // which removeGuiShaderRects' pairs() then fed to isTeamReal(nil)
+                // → "table index is nil" at :250. TeamStartInfo is the one stream
+                // carrying every team's ally-team mapping, so seed liveState.teams
+                // from it — faithful to Recoil, whose LuaUI always knows the full
+                // team→allyTeam map. Upsert (don't clobber): leader/isDead/
+                // isAiTeam/side may already be set by a PlayerTeamEvent.
+                // KNOWN GAP (documented, not silent): leader / isAiTeam / side are
+                // NOT on TeamStartPos, so they keep defaults until a richer roster
+                // restream lands (PLAN-bar.md P1 — also covers team colours).
+                const prevTeam = liveState.teams.get(t.team);
+                liveState.teams.set(t.team, {
+                    teamId: t.team,
+                    leader: prevTeam?.leader ?? -1,
+                    isDead: prevTeam?.isDead ?? false,
+                    isAiTeam: prevTeam?.isAiTeam ?? false,
+                    side: prevTeam?.side ?? '',
+                    allyTeam: t.allyTeam,
+                    customKeys: prevTeam?.customKeys ?? {},
+                });
             }
             liveState.allyStartBoxes.clear();
             for (const b of data.boxes) {
