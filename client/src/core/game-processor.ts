@@ -745,6 +745,9 @@ function gpConnect(msg: GpInitToWorker): void {
                     isAiTeam: prevTeam?.isAiTeam ?? false,
                     side: prevTeam?.side ?? '',
                     allyTeam: t.allyTeam,
+                    // Recoil CTeam default; not on the TeamStartPos wire (same
+                    // documented gap as leader/side above) — see PLAN-bar.md P1.
+                    incomeMultiplier: prevTeam?.incomeMultiplier ?? 1,
                     customKeys: prevTeam?.customKeys ?? {},
                 });
             }

@@ -5666,7 +5666,8 @@ export function handleRosterUpdate(msg: Record<string, unknown>): void {
     }> | undefined;
     const teams = msg.teams as Array<{
         id: number; allyTeam?: number; leader?: number; isDead?: boolean;
-        isAi?: boolean; side?: string; customKeys?: Record<string, string>;
+        isAi?: boolean; side?: string; incomeMultiplier?: number;
+        customKeys?: Record<string, string>;
     }> | undefined;
     const teamColors = msg.teamColors as Array<{
         team: number; r: number; g: number; b: number; a?: number;
@@ -5701,6 +5702,7 @@ export function handleRosterUpdate(msg: Record<string, unknown>): void {
                 isAiTeam: t.isAi ?? false,
                 side: t.side ?? '',
                 allyTeam: t.allyTeam ?? t.id,
+                incomeMultiplier: t.incomeMultiplier ?? 1,
                 customKeys: t.customKeys ?? {},
             });
         }

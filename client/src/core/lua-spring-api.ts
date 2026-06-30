@@ -425,6 +425,12 @@ export interface TeamInfo {
     isAiTeam: boolean;
     side: string;
     allyTeam: number;
+    // Recoil CTeam::incomeMultiplier — a per-team metal/energy income scale,
+    // default 1.0 (set via game setup `incomemultiplier` / SetTeamRulesParam).
+    // It is the 7th return of Spring.GetTeamInfo, BEFORE customTeamKeys; our
+    // server doesn't stream it, so it stays at the faithful default until a
+    // richer roster restream lands (PLAN-bar.md P1).
+    incomeMultiplier: number;
     customKeys: Record<string, string>;
 }
 
@@ -1859,11 +1865,23 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             ids.sort((a, b) => a - b);
             return luaTable(...ids);
         },
-        GetTeamInfo: (_teamId: LuaValue) => {
+        GetTeamInfo: (_teamId: LuaValue, _getTeamKeys?: LuaValue) => {
             const tid = Number(_teamId ?? 0);
             const t = ls.teams.get(tid);
             if (!t) return [null];
-            return [t.teamId, t.leader, t.isDead, t.isAiTeam, t.side, t.allyTeam, t.customKeys];
+            // Recoil order (LuaSyncedRead::GetTeamInfo): teamNum, leader,
+            // isDead, hasAI, side, allyTeam, incomeMultiplier, customTeamKeys.
+            // incomeMultiplier (slot 7) MUST be a number — BAR's
+            // gui_advplayerslist.lua:2987 does `pDraw.incomeMultiplier > 1`,
+            // which crashes ("compare number with table") if the customKeys
+            // table lands in that slot.
+            const base = [t.teamId, t.leader, t.isDead, t.isAiTeam, t.side,
+                t.allyTeam, t.incomeMultiplier ?? 1];
+            // Recoil returns `7 + getTeamKeys` values — customTeamKeys (slot 8)
+            // only when the 2nd arg is truthy. Match luaL_optboolean: nil →
+            // default true; only an explicit Lua `false` (→ JS false) omits it.
+            const getTeamKeys = _getTeamKeys == null ? true : _getTeamKeys !== false;
+            return getTeamKeys ? [...base, t.customKeys] : base;
         },
         GetPlayerRulesParam: (playerId: LuaValue, key: LuaValue) => {
             const params = ls.playerRulesParams.get(Number(playerId));

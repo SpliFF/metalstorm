@@ -242,7 +242,7 @@ describe('BAR read shims', () => {
     // resolve and Gaia is derived as the highest team id.
     describe('team roster reads (UI-2 gui_ecostats crash root cause)', () => {
         function seedTeam(over: Partial<TeamInfo>): TeamInfo {
-            return { teamId: 0, leader: -1, isDead: false, isAiTeam: false, side: '', allyTeam: 0, customKeys: {}, ...over };
+            return { teamId: 0, leader: -1, isDead: false, isAiTeam: false, side: '', allyTeam: 0, incomeMultiplier: 1, customKeys: {}, ...over };
         }
         function seededLs(): LiveState {
             const ls = createDefaultLiveState();
@@ -261,9 +261,26 @@ describe('BAR read shims', () => {
             const api = springApi(makeCtx(), seededLs());
             expect(ids(call(api.GetTeamList, 1))).toEqual([1]);
         });
-        it('GetTeamInfo resolves a seeded team (allyTeam is the 6th return)', () => {
+        it('GetTeamInfo returns the Recoil tuple order, incomeMultiplier (number) in slot 7', () => {
             const api = springApi(makeCtx(), seededLs());
-            expect(call(api.GetTeamInfo, 1)).toEqual([1, -1, false, true, '', 1, {}]);
+            // Recoil LuaSyncedRead::GetTeamInfo order:
+            // teamNum, leader, isDead, hasAI, side, allyTeam, incomeMultiplier, customTeamKeys.
+            expect(call(api.GetTeamInfo, 1)).toEqual([1, -1, false, true, '', 1, 1, {}]);
+        });
+        it('GetTeamInfo slot 7 is the numeric incomeMultiplier, NOT the customKeys table', () => {
+            // Regression for BAR gui_advplayerslist.lua:2987 `pDraw.incomeMultiplier > 1`
+            // ("compare number with table"): the customKeys table used to land in slot 7.
+            const api = springApi(makeCtx(), seededLs());
+            const ret = call(api.GetTeamInfo, 1) as unknown[];
+            expect(typeof ret[6]).toBe('number');
+            expect(ret[6]).toBe(1);
+            expect(ret[7]).toEqual({}); // customTeamKeys, slot 8
+        });
+        it('GetTeamInfo(team, false) omits customTeamKeys (Recoil 7 + getTeamKeys)', () => {
+            // BAR gui_advplayerslist passes getTeamKeys=false → 7 returns,
+            // incomeMultiplier last; no trailing customKeys table.
+            const api = springApi(makeCtx(), seededLs());
+            expect(call(api.GetTeamInfo, 1, false)).toEqual([1, -1, false, true, '', 1, 1]);
         });
         it('GetGaiaTeamID derives the highest team id (Recoil creates Gaia last)', () => {
             const api = springApi(makeCtx(), seededLs());
@@ -362,7 +379,7 @@ describe('applyPlayerTeamRosterEffect', () => {
         };
     }
     function makeTeam(over: Partial<TeamInfo> = {}): TeamInfo {
-        return { teamId: 0, leader: -1, isDead: false, isAiTeam: false, side: '', allyTeam: 0, customKeys: {}, ...over };
+        return { teamId: 0, leader: -1, isDead: false, isAiTeam: false, side: '', allyTeam: 0, incomeMultiplier: 1, customKeys: {}, ...over };
     }
 
     it('PlayerRemoved clears the active flag', () => {
@@ -474,8 +491,8 @@ describe('reconcilePlayerAllyTeams', () => {
             { id: 2, name: 'foe', team: 1, spectator: false },
         ]);
         const teams = new Map<number, TeamInfo>([
-            [0, { teamId: 0, leader: 5, isDead: false, isAiTeam: false, side: '', allyTeam: 0, customKeys: {} }],
-            [1, { teamId: 1, leader: -1, isDead: false, isAiTeam: true, side: '', allyTeam: 1, customKeys: {} }],
+            [0, { teamId: 0, leader: 5, isDead: false, isAiTeam: false, side: '', allyTeam: 0, incomeMultiplier: 1, customKeys: {} }],
+            [1, { teamId: 1, leader: -1, isDead: false, isAiTeam: true, side: '', allyTeam: 1, incomeMultiplier: 1, customKeys: {} }],
         ]);
         reconcilePlayerAllyTeams(players, teams);
         expect(players.get(5)!.allyTeam).toBe(0);
