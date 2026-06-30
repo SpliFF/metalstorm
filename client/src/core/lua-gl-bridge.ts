@@ -26,6 +26,49 @@ import {
     hashSource,
     type GlslDiagnostic,
 } from './glsl-translator.js';
+import {
+    defaultMapAtmosphere,
+    mergeAtmosphere,
+    type MapAtmosphere,
+} from './map-lighting.js';
+
+/** The engine light direction returned by `gl.GetAtmosphere("pos")` / the
+ *  no-arg form (Recoil: `sky->GetLight()->GetLightDir()`). No BAR or ZK widget
+ *  reads it (verified), so this stays a fixed engine default — matching
+ *  `gl.GetSun("dir")` below — rather than the per-map sun direction, which
+ *  flows to the renderer through scene-lighting, not this read seam. */
+const ATMOSPHERE_LIGHT_DIR: readonly [number, number, number] = [0.5, -0.7, 0.5];
+
+/**
+ * Resolve a single `gl.GetAtmosphere(param)` query against the bridge's
+ * atmosphere store. Pure (testable without a GL context). Mirrors Recoil
+ * `LuaOpenGL::GetAtmosphere` (rts/Lua/LuaOpenGL.cpp): the no-arg / `"pos"` forms
+ * return the 3-component light direction; `fogStart`/`fogEnd` return one number;
+ * the colours / `skyAxisAngle` return their float3/float4 components. An
+ * unrecognised param returns `undefined` (Recoil's `monostate` pushes nothing).
+ *
+ * A returned array is spread into multiple Lua return values by the runtime
+ * marshaller, so `{ gl.GetAtmosphere("fogColor") }` yields `{r,g,b,a}` and
+ * `gl.GetAtmosphere("fogEnd") <= gl.GetAtmosphere("fogStart")` compares numbers.
+ */
+export function atmosphereReturn(
+    atmo: MapAtmosphere,
+    lightDir: readonly [number, number, number],
+    param?: string | null,
+): number | number[] | undefined {
+    if (param == null || param === '') return [...lightDir];
+    switch (param) {
+        case 'pos':          return [...lightDir];
+        case 'fogStart':     return atmo.fogStart;
+        case 'fogEnd':       return atmo.fogEnd;
+        case 'fogColor':     return [...atmo.fogColor];
+        case 'skyColor':     return [...atmo.skyColor];
+        case 'sunColor':     return [...atmo.sunColor];
+        case 'cloudColor':   return [...atmo.cloudColor];
+        case 'skyAxisAngle': return [...atmo.skyAxisAngle];
+        default:             return undefined;
+    }
+}
 
 /**
  * Generate the world-space vertices of a terrain-following ground circle for
@@ -338,6 +381,30 @@ export class LuaGLBridge {
      *  ground circle falls back to a flat ring at the caller's Y. */
     setGroundSampler(sampler: ((x: number, z: number) => number) | null): void {
         this.groundSampler = sampler;
+    }
+
+    /** The map's `atmosphere` table (fog + sky/sun/cloud colours), read by
+     *  `gl.GetAtmosphere` and written by `Spring.SetAtmosphere`. Initialised to
+     *  the Recoil defaults so reads always return numbers before the per-map
+     *  `mapinfo.lua` load resolves (see `setAtmosphere`). */
+    private atmosphere: MapAtmosphere = defaultMapAtmosphere();
+
+    /** Replace the atmosphere store with the map's authored values. The worker
+     *  host calls this once `loadMapAtmosphere(mapinfo.lua)` resolves. */
+    setAtmosphere(atmo: MapAtmosphere): void {
+        this.atmosphere = atmo;
+    }
+
+    /** Merge a `Spring.SetAtmosphere{…}` params table into the store so a
+     *  later `gl.GetAtmosphere` reads back the set value (faithful Get/Set
+     *  round-trip). Returns the unknown keys for the caller to warn about.
+     *  NB: this updates the read store only — there is no fog/sky renderer
+     *  path yet, so the visual effect is a documented FIDELITY-STANDIN handled
+     *  by the `Spring.SetAtmosphere` wrapper in lua-ui-host. */
+    setAtmosphereParams(params: Record<string, LuaValue> | null): string[] {
+        const { atmosphere, unknown } = mergeAtmosphere(this.atmosphere, params);
+        this.atmosphere = atmosphere;
+        return unknown;
     }
 
     /** Resize the OffscreenCanvas owned by this bridge's GL context. */
@@ -846,6 +913,17 @@ export class LuaGLBridge {
                 case 'shadowDensity':  return 0.7;
                 default:               return [1, 1, 1];
             }
+        };
+
+        // gl.GetAtmosphere([param]) — fog + sky/sun/cloud colours from the
+        // map's `atmosphere` table (`mapinfo.lua`). No arg / "pos" return the
+        // light direction. Sourced from the per-map store (setAtmosphere), so
+        // BAR's gui_options reads the real fog start/end at Initialize instead
+        // of crashing on `nil <= nil` (PLAN-bar UI-2). Faithful to Recoil
+        // LuaOpenGL::GetAtmosphere.
+        gl['GetAtmosphere'] = (param?: LuaValue) => {
+            const p = param == null ? null : String(param);
+            return atmosphereReturn(this.atmosphere, ATMOSPHERE_LIGHT_DIR, p);
         };
 
         // gl.GetWaterRendering(param) — water shader parameters. Real

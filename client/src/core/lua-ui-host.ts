@@ -32,7 +32,7 @@ import type { CombatEventInfo, FeatureSpawnInfo } from './connection.js';
 import type { EntityStateSnapshot } from './entity-state.js';
 import { applyMapLighting, type SceneLighting } from './scene-lighting.js';
 import {
-    mergeSunLighting, setSunDirectionLighting,
+    mergeSunLighting, setSunDirectionLighting, loadMapAtmosphere,
     type MapLighting,
 } from './map-lighting.js';
 import { md5Base64 } from './vfs-hash.js';
@@ -763,11 +763,11 @@ export async function init(
     // merge block — the worker provides getfenv/setfenv shims and DirList returns
     // [] when no per-map override configs are registered (the correct no-op).
     // PLAN-bar.md (map-info VFS gap).
+    const mapSrcAbs = mapData.mapSourceUrl.startsWith('http')
+        ? mapData.mapSourceUrl
+        : `${lobbyUrl}${mapData.mapSourceUrl}`;
     try {
-        const mapSrc = mapData.mapSourceUrl.startsWith('http')
-            ? mapData.mapSourceUrl
-            : `${lobbyUrl}${mapData.mapSourceUrl}`;
-        const res = await fetch(`${mapSrc}/mapinfo.lua`);
+        const res = await fetch(`${mapSrcAbs}/mapinfo.lua`);
         if (res.ok) {
             vfsRegister('mapinfo.lua', await res.text());
             postLog(2, '[LuaUI] step 1a: registered map mapinfo.lua into VFS');
@@ -868,6 +868,14 @@ export async function init(
     // ground). Lazily reads gpCtx.entityRenderer — it's null at bridge-build time
     // and assigned later in the boot sequence — mirroring rtsCam's sampler.
     bridge.setGroundSampler((x, z) => gpCtx.entityRenderer?.getGroundHeight(x, z) ?? 0);
+    // Feed the map's `atmosphere` table to gl.GetAtmosphere (fog start/end +
+    // sky/sun/cloud colours). The bridge starts on the Recoil defaults so reads
+    // never return nil; this fire-and-forget load swaps in the per-map values
+    // when mapinfo.lua resolves. Re-fetches the file the VFS-register step above
+    // already pulled, so it's an HTTP cache hit. PLAN-bar UI-2 (gui_options fog
+    // guard crashed on `nil <= nil`).
+    const atmoBridge = bridge;
+    void loadMapAtmosphere(mapSrcAbs).then((atmo) => atmoBridge.setAtmosphere(atmo));
     postLog(2, '[LuaUI] init step 3/8 done: Lua runtime + GL bridge created');
 
     // 3b. Inject engine-bundled test widgets when solo mode is active.
@@ -3659,7 +3667,22 @@ export function installEngineGlobals(
             `scene yet (no fog/water/splat renderer path — PLAN.md Stage 1); no-op.`);
         return undefined;
     };
-    (springGlobals.Spring as Record<string, LuaValue>).SetAtmosphere = mapRenderStandin('SetAtmosphere');
+    // Spring.SetAtmosphere{fogStart=…, fogColor={…}, …} — merge into the GL
+    // bridge's atmosphere store so a later gl.GetAtmosphere reads back the set
+    // value (faithful Get/Set round-trip, Recoil LuaUnsyncedCtrl::SetAtmosphere).
+    // The store is the read seam only — there is no fog/sky renderer path yet, so
+    // the *visual* effect remains a FIDELITY-STANDIN (warned once below).
+    (springGlobals.Spring as Record<string, LuaValue>).SetAtmosphere = (params: LuaValue) => {
+        const unknown = glBridge.setAtmosphereParams(
+            (params && typeof params === 'object' && !Array.isArray(params))
+                ? params as Record<string, LuaValue> : null);
+        postLog(2, `[Spring] FIDELITY-STANDIN: SetAtmosphere stored but not applied ` +
+            `to the live scene (no fog/sky renderer path — PLAN.md Stage 1).`);
+        if (unknown.length) {
+            postLog(2, `[Spring] SetAtmosphere: ignored unknown key(s): ${unknown.join(', ')}`);
+        }
+        return undefined;
+    };
     (springGlobals.Spring as Record<string, LuaValue>).SetWaterParams = mapRenderStandin('SetWaterParams');
     (springGlobals.Spring as Record<string, LuaValue>).SetMapRenderingParams = mapRenderStandin('SetMapRenderingParams');
     (springGlobals.Spring as Record<string, LuaValue>).SetCameraOffset = (_x: LuaValue, _y: LuaValue, _z: LuaValue, _tx: LuaValue, _ty: LuaValue, _tz: LuaValue) => undefined;

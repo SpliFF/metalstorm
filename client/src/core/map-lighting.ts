@@ -52,6 +52,43 @@ export function defaultMapLighting(): MapLighting {
     return cloneMapLighting(DEFAULTS);
 }
 
+/**
+ * The map's `atmosphere` table, as read by `gl.GetAtmosphere` / written by
+ * `Spring.SetAtmosphere`. Pure renderer data authored in `mapinfo.lua`'s
+ * `atmosphere` sub-table — the server has no involvement (same client-only
+ * model as the `lighting` table above; see feedback_lighting_client_only).
+ *
+ * Field shapes + defaults mirror Recoil `CMapInfo::ReadAtmosphere`
+ * (rts/Map/MapInfo.cpp) and the `ISky` storage types the engine reads them
+ * into: `fogColor` is a `float4` (alpha defaulted to 1), the named colours are
+ * `float3`, and `skyAxisAngle` is a `float4` (axis xyz + angle w).
+ */
+export interface MapAtmosphere {
+    fogStart: number;
+    fogEnd: number;
+    fogColor: [number, number, number, number];
+    skyColor: [number, number, number];
+    sunColor: [number, number, number];
+    cloudColor: [number, number, number];
+    skyAxisAngle: [number, number, number, number];
+}
+
+const ATMOSPHERE_DEFAULTS: MapAtmosphere = {
+    fogStart: 0.1,
+    fogEnd: 1.0,
+    fogColor: [0.7, 0.7, 0.8, 1.0],
+    skyColor: [0.1, 0.15, 0.7],
+    sunColor: [1.0, 1.0, 1.0],
+    cloudColor: [1.0, 1.0, 1.0],
+    skyAxisAngle: [0.0, 0.0, 1.0, 0.0],
+};
+
+/** A fresh copy of the Recoil-default atmosphere (used as the base store in the
+ * GL bridge before `mapinfo.lua` resolves, and as the fallback on parse fail). */
+export function defaultMapAtmosphere(): MapAtmosphere {
+    return cloneMapAtmosphere(ATMOSPHERE_DEFAULTS);
+}
+
 /** Case-insensitive table lookup — handles both `sunDir` and `sundir`. */
 function tget(t: Record<string, LuaValue> | null, key: string): LuaValue {
     if (!t) return null;
@@ -76,6 +113,20 @@ function asVec3(v: LuaValue, fallback: [number, number, number]): [number, numbe
         if (r !== null) {
             return [Number(r) || 0, Number(tget(o, 'g')) || 0, Number(tget(o, 'b')) || 0];
         }
+    }
+    return fallback;
+}
+
+function asVec4(
+    v: LuaValue, fallback: [number, number, number, number],
+): [number, number, number, number] {
+    if (Array.isArray(v) && v.length >= 4) {
+        return [Number(v[0]) || 0, Number(v[1]) || 0, Number(v[2]) || 0, Number(v[3]) || 0];
+    }
+    // A 3-vector authored where a float4 is expected (e.g. fogColor) keeps the
+    // fallback's 4th component — matches Recoil's float3→float4 widening (alpha 1).
+    if (Array.isArray(v) && v.length === 3) {
+        return [Number(v[0]) || 0, Number(v[1]) || 0, Number(v[2]) || 0, fallback[3]];
     }
     return fallback;
 }
@@ -290,4 +341,115 @@ export function setSunDirectionLighting(
     const out = cloneMapLighting(base);
     out.sunDir = normaliseSunDir([x, y, z]);
     return out;
+}
+
+// ── Atmosphere (gl.GetAtmosphere / Spring.SetAtmosphere) ───────────────────
+
+/** Copy a MapAtmosphere (fresh colour arrays so merges never alias). */
+export function cloneMapAtmosphere(a: MapAtmosphere): MapAtmosphere {
+    return {
+        fogStart: a.fogStart,
+        fogEnd: a.fogEnd,
+        fogColor: [...a.fogColor],
+        skyColor: [...a.skyColor],
+        sunColor: [...a.sunColor],
+        cloudColor: [...a.cloudColor],
+        skyAxisAngle: [...a.skyAxisAngle],
+    };
+}
+
+/** Extract the `atmosphere` sub-table from a parsed `mapinfo` table, filling any
+ * omitted field with the Recoil default. Pure — shared by `loadMapAtmosphere`. */
+export function extractAtmosphere(
+    mapinfo: Record<string, LuaValue> | null,
+): MapAtmosphere {
+    const atmo = tget(mapinfo, 'atmosphere');
+    const at = (atmo && typeof atmo === 'object' && !Array.isArray(atmo))
+        ? atmo as Record<string, LuaValue>
+        : null;
+    return {
+        fogStart:     asNumber(tget(at, 'fogStart'), ATMOSPHERE_DEFAULTS.fogStart),
+        fogEnd:       asNumber(tget(at, 'fogEnd'),   ATMOSPHERE_DEFAULTS.fogEnd),
+        fogColor:     asVec4(tget(at, 'fogColor'),     ATMOSPHERE_DEFAULTS.fogColor),
+        skyColor:     asVec3(tget(at, 'skyColor'),     ATMOSPHERE_DEFAULTS.skyColor),
+        sunColor:     asVec3(tget(at, 'sunColor'),     ATMOSPHERE_DEFAULTS.sunColor),
+        cloudColor:   asVec3(tget(at, 'cloudColor'),   ATMOSPHERE_DEFAULTS.cloudColor),
+        skyAxisAngle: asVec4(tget(at, 'skyAxisAngle'), ATMOSPHERE_DEFAULTS.skyAxisAngle),
+    };
+}
+
+/**
+ * Fetch `mapinfo.lua` and extract the `atmosphere` table. Returns the Recoil
+ * defaults for any field the map omits, and on any fetch/parse failure — so the
+ * GL bridge's `gl.GetAtmosphere` always has numeric values to return (the crash
+ * this fixes: BAR's `gui_options` compares `fogEnd <= fogStart` at Initialize).
+ *
+ * Note: this re-fetches the same `mapinfo.lua` that `loadMapLighting` reads; the
+ * file is small and HTTP-cached, so the second request is served from cache.
+ */
+export async function loadMapAtmosphere(mapSourceUrl: string): Promise<MapAtmosphere> {
+    const url = `${mapSourceUrl}/mapinfo.lua`;
+    let source: string;
+    try {
+        const res = await fetch(url);
+        if (!res.ok) {
+            console.warn(`[map-lighting] atmosphere ${url}: HTTP ${res.status}; using defaults`);
+            return defaultMapAtmosphere();
+        }
+        source = await res.text();
+    } catch (e) {
+        console.warn(`[map-lighting] atmosphere fetch ${url}: ${e}; using defaults`);
+        return defaultMapAtmosphere();
+    }
+
+    const mapinfo = parseMapinfo(source, url);
+    if (!mapinfo) {
+        console.warn(`[map-lighting] atmosphere ${url}: parse failed; using defaults`);
+        return defaultMapAtmosphere();
+    }
+    return extractAtmosphere(mapinfo);
+}
+
+/**
+ * Merge a `Spring.SetAtmosphere{…}` params table into a MapAtmosphere, returning
+ * a new object plus the list of unrecognised keys. Faithful to Recoil
+ * `LuaUnsyncedCtrl::SetAtmosphere` (rts/Lua/LuaUnsyncedCtrl.cpp): table values
+ * set the float4 colours / `skyAxisAngle`; number values set `fogStart`/`fogEnd`.
+ * Recoil `luaL_error`s on an unknown key; we collect them so the caller can warn
+ * without killing the widget.
+ */
+export function mergeAtmosphere(
+    base: MapAtmosphere,
+    params: Record<string, LuaValue> | null,
+): { atmosphere: MapAtmosphere; unknown: string[] } {
+    const out = cloneMapAtmosphere(base);
+    const unknown: string[] = [];
+    if (!params || typeof params !== 'object') return { atmosphere: out, unknown };
+
+    const colourKeys: Record<string, 'fogColor' | 'skyColor' | 'sunColor' | 'cloudColor' | 'skyAxisAngle'> = {
+        fogColor: 'fogColor',
+        skyColor: 'skyColor',
+        sunColor: 'sunColor',
+        cloudColor: 'cloudColor',
+        skyAxisAngle: 'skyAxisAngle',
+    };
+
+    for (const rawKey of Object.keys(params)) {
+        const v = params[rawKey];
+        if (rawKey === 'fogStart' || rawKey === 'fogEnd') {
+            // Recoil only accepts these as numbers; ignore a non-number silently
+            // (it falls through Recoil's `lua_isnumber` guard too).
+            if (typeof v === 'number') out[rawKey] = v;
+        } else if (rawKey in colourKeys) {
+            const field = colourKeys[rawKey];
+            if (field === 'fogColor' || field === 'skyAxisAngle') {
+                out[field] = asVec4(v, out[field]);
+            } else {
+                out[field] = asVec3(v, out[field]);
+            }
+        } else {
+            unknown.push(rawKey);
+        }
+    }
+    return { atmosphere: out, unknown };
 }

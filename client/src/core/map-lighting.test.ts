@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
     loadMapLighting, normaliseSunDir, defaultMapLighting,
     mergeSunLighting, setSunDirectionLighting,
+    loadMapAtmosphere, defaultMapAtmosphere, mergeAtmosphere,
 } from './map-lighting.js';
 
 // A mapinfo.lua shaped like the real maps that broke: lighting is authored,
@@ -164,6 +165,94 @@ describe('mergeSunLighting (Spring.SetSunLighting)', () => {
         const base = defaultMapLighting();
         const { lighting, unknown } = mergeSunLighting(base, null);
         expect(lighting.groundAmbient).toEqual(base.groundAmbient);
+        expect(unknown).toEqual([]);
+    });
+});
+
+const MAPINFO_WITH_ATMOSPHERE = `
+local mapinfo = {
+	name = "Test",
+	atmosphere = {
+		fogStart = 0.42,
+		fogEnd = 1.8,
+		fogColor = { 0.6, 0.65, 0.7 },
+		skyColor = { 0.2, 0.25, 0.6 },
+		sunColor = { 0.9, 0.8, 0.7 },
+		cloudColor = { 0.5, 0.5, 0.55 },
+		skyAxisAngle = { 0, 1, 0, 1.57 },
+	},
+}
+return mapinfo
+`;
+
+describe('loadMapAtmosphere (gl.GetAtmosphere data source)', () => {
+    it('extracts the authored atmosphere table', async () => {
+        stubFetch(MAPINFO_WITH_ATMOSPHERE);
+        const a = await loadMapAtmosphere('/api/maps/data/test');
+        expect(a.fogStart).toBeCloseTo(0.42, 5);
+        expect(a.fogEnd).toBeCloseTo(1.8, 5);
+        // float3 authored where a float4 is read → 4th (alpha) keeps the default 1.
+        expect(a.fogColor).toEqual([0.6, 0.65, 0.7, 1.0]);
+        expect(a.skyColor).toEqual([0.2, 0.25, 0.6]);
+        expect(a.sunColor).toEqual([0.9, 0.8, 0.7]);
+        expect(a.cloudColor).toEqual([0.5, 0.5, 0.55]);
+        expect(a.skyAxisAngle).toEqual([0, 1, 0, 1.57]);
+    });
+
+    it('falls back to Recoil defaults for an omitted atmosphere table', async () => {
+        stubFetch(`return { name = "NoAtmo" }`);
+        const a = await loadMapAtmosphere('/api/maps/data/noatmo');
+        expect(a).toEqual(defaultMapAtmosphere());
+        // Spot-check the Recoil MapInfo.cpp defaults.
+        expect(a.fogStart).toBe(0.1);
+        expect(a.fogEnd).toBe(1.0);
+        expect(a.skyColor).toEqual([0.1, 0.15, 0.7]);
+    });
+
+    it('falls back to defaults on HTTP error and on a broken chunk', async () => {
+        stubFetch('', false, 404);
+        expect(await loadMapAtmosphere('/api/maps/data/missing')).toEqual(defaultMapAtmosphere());
+        stubFetch('not lua = = =');
+        expect(await loadMapAtmosphere('/api/maps/data/broken')).toEqual(defaultMapAtmosphere());
+    });
+});
+
+describe('mergeAtmosphere (Spring.SetAtmosphere)', () => {
+    it('sets fogStart/fogEnd from numbers and colours from arrays', () => {
+        const { atmosphere, unknown } = mergeAtmosphere(defaultMapAtmosphere(), {
+            fogStart: 0.25,
+            fogEnd: 1.5,
+            fogColor: [0.1, 0.2, 0.3, 0.4],
+            skyColor: [0.4, 0.5, 0.6],
+        });
+        expect(atmosphere.fogStart).toBe(0.25);
+        expect(atmosphere.fogEnd).toBe(1.5);
+        expect(atmosphere.fogColor).toEqual([0.1, 0.2, 0.3, 0.4]);
+        expect(atmosphere.skyColor).toEqual([0.4, 0.5, 0.6]);
+        expect(unknown).toEqual([]);
+    });
+
+    it('ignores a non-number fogStart and collects unknown keys', () => {
+        const base = defaultMapAtmosphere();
+        const { atmosphere, unknown } = mergeAtmosphere(base, {
+            fogStart: 'oops',
+            bogus: 1,
+        });
+        expect(atmosphere.fogStart).toBe(base.fogStart); // unchanged
+        expect(unknown).toEqual(['bogus']);
+    });
+
+    it('does not mutate the base atmosphere', () => {
+        const base = defaultMapAtmosphere();
+        const before = [...base.fogColor];
+        mergeAtmosphere(base, { fogColor: [9, 9, 9, 9] });
+        expect(base.fogColor).toEqual(before);
+    });
+
+    it('tolerates a null params table', () => {
+        const base = defaultMapAtmosphere();
+        const { atmosphere, unknown } = mergeAtmosphere(base, null);
+        expect(atmosphere).toEqual(base);
         expect(unknown).toEqual([]);
     });
 });

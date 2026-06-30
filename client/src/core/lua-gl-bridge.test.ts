@@ -5,7 +5,9 @@ import {
     resolveRegisteredLocation,
     normaliseTexturePath,
     isGameAssetPath,
+    atmosphereReturn,
 } from './lua-gl-bridge.js';
+import { defaultMapAtmosphere } from './map-lighting.js';
 
 describe('normaliseTexturePath (Spring texture-spec modifier stripping)', () => {
     it('passes a plain path through unchanged', () => {
@@ -48,6 +50,46 @@ describe('isGameAssetPath (game vs map asset base selection)', () => {
     it('treats unknown roots as non-game (resolve against the map)', () => {
         expect(isGameAssetPath('detail/grass.png')).toBe(false);
         expect(isGameAssetPath('somemap/splat.png')).toBe(false);
+    });
+});
+
+describe('atmosphereReturn (gl.GetAtmosphere)', () => {
+    const DIR: [number, number, number] = [0.5, -0.7, 0.5];
+    const A = defaultMapAtmosphere();
+
+    it('returns the light direction for no param and "pos"', () => {
+        expect(atmosphereReturn(A, DIR)).toEqual([0.5, -0.7, 0.5]);
+        expect(atmosphereReturn(A, DIR, '')).toEqual([0.5, -0.7, 0.5]);
+        expect(atmosphereReturn(A, DIR, 'pos')).toEqual([0.5, -0.7, 0.5]);
+    });
+
+    it('returns a single number for fogStart/fogEnd (the gui_options crash path)', () => {
+        // The widget compares `fogEnd <= fogStart`; both must be numbers, not nil.
+        const fogEnd = atmosphereReturn(A, DIR, 'fogEnd');
+        const fogStart = atmosphereReturn(A, DIR, 'fogStart');
+        expect(typeof fogEnd).toBe('number');
+        expect(typeof fogStart).toBe('number');
+        expect(fogEnd as number <= (fogStart as number)).toBe(false); // 1.0 > 0.1
+    });
+
+    it('returns float3/float4 component arrays for the colours', () => {
+        expect(atmosphereReturn(A, DIR, 'fogColor')).toEqual([0.7, 0.7, 0.8, 1.0]);
+        expect(atmosphereReturn(A, DIR, 'skyColor')).toEqual([0.1, 0.15, 0.7]);
+        expect(atmosphereReturn(A, DIR, 'sunColor')).toEqual([1, 1, 1]);
+        expect(atmosphereReturn(A, DIR, 'cloudColor')).toEqual([1, 1, 1]);
+        expect(atmosphereReturn(A, DIR, 'skyAxisAngle')).toEqual([0, 0, 1, 0]);
+    });
+
+    it('returns undefined for an unknown param (Recoil pushes nothing)', () => {
+        expect(atmosphereReturn(A, DIR, 'bogus')).toBeUndefined();
+    });
+
+    it('reflects an updated store (Set/Get round-trip)', () => {
+        const a = defaultMapAtmosphere();
+        a.fogStart = 0.5;
+        a.fogColor = [0.1, 0.2, 0.3, 0.4];
+        expect(atmosphereReturn(a, DIR, 'fogStart')).toBe(0.5);
+        expect(atmosphereReturn(a, DIR, 'fogColor')).toEqual([0.1, 0.2, 0.3, 0.4]);
     });
 });
 
