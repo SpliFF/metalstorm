@@ -741,6 +741,19 @@ export class ImmediateModeRenderer {
     recordTextureBind(unit: number, texture: WebGLTexture | null): void {
         if (!this.recordingList) return;
         this.recordingList.entries.push({ type: 'texBind', unit, texture });
+        // Mirror a real bind: a subsequent recorded draw captures
+        // `currentBoundTexture` as its per-draw `boundTexture`, and at replay
+        // the draw RE-binds that (overriding this texBind). A draw that doesn't
+        // go through setTextured (raw `gl.BeginEnd` after `gl.Texture(...)`,
+        // common in display-list-cached widgets) would otherwise record a
+        // STALE texture and replay the wrong/placeholder one. `gl.TexRect`
+        // calls setTextured so it's already correct; this fixes the BeginEnd
+        // path. Unit 0 only, matching the immediate-mode sampler + the replay's
+        // own `entry.unit === 0` gating.
+        if (unit === 0) {
+            this.isTextured = texture !== null;
+            this.currentBoundTexture = texture;
+        }
     }
 
     /** Expose current texture state so the bridge can sync after callList. */
