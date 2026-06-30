@@ -3,7 +3,53 @@ import {
     groundCircleVertices,
     internUniformLocation,
     resolveRegisteredLocation,
+    normaliseTexturePath,
+    isGameAssetPath,
 } from './lua-gl-bridge.js';
+
+describe('normaliseTexturePath (Spring texture-spec modifier stripping)', () => {
+    it('passes a plain path through unchanged', () => {
+        expect(normaliseTexturePath('LuaUI/Images/metal.png')).toBe('LuaUI/Images/metal.png');
+    });
+    it('strips a single-flag modifier :l:', () => {
+        expect(normaliseTexturePath(':l:LuaUI/Images/barglow-center.png'))
+            .toBe('LuaUI/Images/barglow-center.png');
+    });
+    it('strips a multi-flag + resize modifier :lr104,104: (the BAR top-bar icon bug)', () => {
+        // Previously the <8 closing-colon cap left this prefix in place, so the
+        // path failed the luaui/ game-asset test and 404'd against the map base.
+        expect(normaliseTexturePath(':lr104,104:LuaUI/Images/metal.png'))
+            .toBe('LuaUI/Images/metal.png');
+        expect(normaliseTexturePath(':lr256,256:LuaUI/Images/energy.png'))
+            .toBe('LuaUI/Images/energy.png');
+    });
+    it('strips a tint modifier :t1,0,0:', () => {
+        expect(normaliseTexturePath(':t1,0,0:bitmaps/x.png')).toBe('bitmaps/x.png');
+    });
+    it('normalises backslashes and a leading slash', () => {
+        expect(normaliseTexturePath('\\LuaUI\\Images\\x.png')).toBe('LuaUI/Images/x.png');
+        expect(normaliseTexturePath('/LuaUI/Images/x.png')).toBe('LuaUI/Images/x.png');
+    });
+    it('leaves a build-pic ref (#123) and short names alone', () => {
+        expect(normaliseTexturePath('#123')).toBe('#123');
+        expect(normaliseTexturePath('tech_overlaywindow.png')).toBe('tech_overlaywindow.png');
+    });
+});
+
+describe('isGameAssetPath (game vs map asset base selection)', () => {
+    it('treats LuaUI/luarules/bitmaps/unittextures roots as game assets', () => {
+        expect(isGameAssetPath('luaui/images/metal.png')).toBe(true);
+        expect(isGameAssetPath('bitmaps/foo.png')).toBe(true);
+        expect(isGameAssetPath('unittextures/arm_color.dds')).toBe(true);
+    });
+    it('treats icons/ as a game asset (BAR icons/blank.png — was 404 vs map base)', () => {
+        expect(isGameAssetPath('icons/blank.png')).toBe(true);
+    });
+    it('treats unknown roots as non-game (resolve against the map)', () => {
+        expect(isGameAssetPath('detail/grass.png')).toBe(false);
+        expect(isGameAssetPath('somemap/splat.png')).toBe(false);
+    });
+});
 
 describe('groundCircleVertices (gl.DrawGroundCircle geometry)', () => {
     it('emits exactly `divs` vertices (3 floats each)', () => {

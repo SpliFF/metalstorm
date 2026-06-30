@@ -85,6 +85,54 @@ export function resolveRegisteredLocation<T>(
     return (id >= 0 && id < registry.length) ? registry[id] : null;
 }
 
+/**
+ * Normalise a Spring texture path: strip a leading texture-spec modifier
+ * group and normalise slashes. Recoil (`CNamedTextures`, NamedTextures.cpp)
+ * treats a leading ':' as the start of a flag group and reads chars until
+ * the NEXT ':' — filter flags (`n`/`l`/`a`/`i`/`g`/`c`/`b`/`m`), tint
+ * (`t<r>,<g>,<b>`) and resize (`r<w>,<h>`) — e.g. `:l:`, `:n:`,
+ * `:lr104,104:` (BAR's top-bar metal/energy icons: load + resize to NxN).
+ * The flags only affect filtering/sizing, never which file loads, so we drop
+ * the whole group to recover the asset path.
+ *
+ * (Previously this capped the closing ':' at index < 8, which silently
+ * failed for `:lr104,104:` — the unstripped `:lr104,104:LuaUI/Images/...`
+ * then failed the `luaui/` game-asset test in resolveTextureUrl, mis-resolved
+ * against the MAP base, and 404'd → magenta placeholder icons in the HUD.)
+ */
+export function normaliseTexturePath(path: string): string {
+    let p = path;
+    if (p.startsWith(':')) {
+        const end = p.indexOf(':', 1);
+        if (end > 0) p = p.substring(end + 1);
+    }
+    p = p.replace(/\\/g, '/');
+    if (p.startsWith('/')) p = p.substring(1);
+    return p;
+}
+
+/**
+ * Does a normalised (modifier-stripped, lowercased) directory-qualified
+ * texture path point at a GAME asset (vs. a map asset)? Game widgets ship
+ * their art under these roots; everything else resolves against the map
+ * source dir. The path MUST already be modifier-stripped (see
+ * normaliseTexturePath) or a leading `:flags:` defeats the prefix test.
+ */
+export function isGameAssetPath(lowerNormalised: string): boolean {
+    return (
+        lowerNormalised.startsWith('luaui/') ||
+        lowerNormalised.startsWith('luarules/') ||
+        lowerNormalised.startsWith('luagaia/') ||
+        lowerNormalised.startsWith('anims/') ||
+        lowerNormalised.startsWith('bitmaps/') ||
+        lowerNormalised.startsWith('icons/') ||
+        lowerNormalised.startsWith('models/') ||
+        lowerNormalised.startsWith('objects3d/') ||
+        lowerNormalised.startsWith('sounds/') ||
+        lowerNormalised.startsWith('unittextures/')
+    );
+}
+
 /** Handle returned by gl.CreateShader — opaque to Lua. */
 export interface LuaShaderHandle {
     __type: 'shader';
@@ -1808,20 +1856,7 @@ export class LuaGLBridge {
     }
 
     private normaliseTexturePath(path: string): string {
-        let p = path;
-        // Strip Spring texture modifiers: :c:, :cl:, :n:, :a:, :l:, etc.
-        // Format is :<modifier>:<path> where modifier can be multi-char.
-        while (p.startsWith(':') && p.length >= 3) {
-            const nextColon = p.indexOf(':', 1);
-            if (nextColon > 0 && nextColon < 8) {
-                p = p.substring(nextColon + 1);
-            } else {
-                break;
-            }
-        }
-        p = p.replace(/\\/g, '/');
-        if (p.startsWith('/')) p = p.substring(1);
-        return p;
+        return normaliseTexturePath(path);
     }
 
     /** Register an asset URL override. The key is the normalised texture path
@@ -1878,18 +1913,8 @@ export class LuaGLBridge {
         }
         // If the path has a directory component, use standard resolution
         if (normalised.includes('/')) {
-            const lower = normalised.toLowerCase();
-            const isGameAsset =
-                lower.startsWith('luaui/') ||
-                lower.startsWith('luarules/') ||
-                lower.startsWith('luagaia/') ||
-                lower.startsWith('anims/') ||
-                lower.startsWith('bitmaps/') ||
-                lower.startsWith('models/') ||
-                lower.startsWith('objects3d/') ||
-                lower.startsWith('sounds/') ||
-                lower.startsWith('unittextures/');
-            const baseUrl = isGameAsset ? this.gameBaseUrl : this.mapSourceUrl;
+            const baseUrl = isGameAssetPath(normalised.toLowerCase())
+                ? this.gameBaseUrl : this.mapSourceUrl;
             return `${baseUrl}/${normalised}`;
         }
         // Short name (no directory) — try search paths against game URL
