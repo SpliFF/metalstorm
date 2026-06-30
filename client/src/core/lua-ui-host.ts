@@ -1508,6 +1508,33 @@ Spring.Utilities.TableToString = function(t) return tostring(t) end`;
         }
     }
 
+    // Patch barwidgets.lua (BAR's widget handler) widgetFailure() to embed the
+    // failing widget's name in the error line. BAR echoes the error as
+    //   "Error in Initialize(): <err>"
+    // with the widget name only on a SEPARATE following line
+    //   "Removed widget: <name>"
+    // (barwidgets.lua:763-764). So a generic runtime error like
+    // "attempt to index a nil value" is byte-identical across every crashing
+    // widget, and the worker console's message de-dup collapses them all into
+    // one un-attributed entry — you can't tell WHICH widget failed. Splicing
+    // the name into the error line itself makes each line unique (defeats the
+    // collapse) and self-attributing. Diagnostic only: the RemoveWidget
+    // behaviour below is untouched. Mirrors the cawidgets.lua (ZK) name
+    // logging above. General mechanism, BAR-only path (ZK uses cawidgets).
+    // (PLAN-bar.md §7 UI-2 — un-attributed Initialize/ViewResize crashes.)
+    const barwidgetsPath = 'LuaUI/barwidgets.lua';
+    const barwidgetsSrc = vfsLookup(barwidgetsPath);
+    if (barwidgetsSrc) {
+        const anchor = `Spring.Echo(errorBase .. ' in ' .. funcName .. '(): ' .. tostring(errorMsg))`;
+        const replacement = `Spring.Echo(errorBase .. ' in ' .. funcName .. '() [' .. tostring(name) .. ']: ' .. tostring(errorMsg))`;
+        if (barwidgetsSrc.indexOf(anchor) !== -1) {
+            vfsRegister(barwidgetsPath, barwidgetsSrc.replace(anchor, replacement));
+            postLog(2, '[LuaUI] Patched barwidgets.lua: widgetFailure error line names the widget');
+        } else {
+            postLog(3, '[LuaUI] barwidgets.lua widgetFailure anchor not found');
+        }
+    }
+
     // Patch api_i18n.lua: when ZK's translator can't find a key, fall
     // back to returning the key itself instead of nil. Many widgets call
     // \`WG.Translate("foo", "bar") .. ":"\` at file scope and crash on
