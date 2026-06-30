@@ -5,22 +5,27 @@ export const vfsPathMap = new Map<string, string>();
 export const vfsDirCache = new Map<string, string[]>();
 export const vfsSubdirCache = new Map<string, string[]>();
 
-// FIDELITY-STANDIN: pruned-audio DirList extension swap.
+// FIDELITY-STANDIN: present the authored audio namespace in VFS.DirList.
 //
-// The gameconverter re-encodes every `sounds/**` (+ `LuaUI/Sounds/**`)
-// source to `.webm` and DELETES the source (tools/gameconverter/main.cpp).
-// Games that *resolve* sound paths cope — audio.ts `normalizeSoundPath`
-// rewrites `.wav`/`.ogg`/… → `.webm` at playback — but games that *parse the
-// filename out of `VFS.DirList`* break: BAR's `gamedata/sounds.lua` does
-// `string.find(fileName, ".wav") - 1` and crashes (arithmetic on nil) on a
-// `.webm` entry. We present pruned audio under its authored extension so
-// DirList matches what the game shipped; the actual byte fetch still resolves
-// `.webm`. The original extension is unrecoverable once the source is pruned,
-// so we assume `.wav` (the dominant Spring convention; BAR ships only `.wav`).
-// The general fix is for the converter to record the source extension — until
-// then a pruned `.ogg`-only game would mis-present as `.wav` (warned once).
-// Applied ONLY when no sibling source file is present in the same directory,
-// so games that keep their sources (e.g. ZK) are left exactly as-is.
+// The gameconverter re-encodes every `sounds/**` (+ `LuaUI/Sounds/**`) source
+// to `.webm` (tools/gameconverter/main.cpp). Real Spring's `VFS.DirList` only
+// ever returns the files the game *shipped* (`.wav`/`.ogg`); our `.webm` is a
+// browser-playback artifact, not part of the authored namespace. Games that
+// *resolve* sound paths cope — audio.ts `normalizeSoundPath` rewrites
+// `.wav`/`.ogg`/… → `.webm` at playback — but games that *parse the filename
+// out of `VFS.DirList`* break: BAR's `gamedata/sounds.lua` does
+// `string.find(fileName, ".wav") - 1` per entry and crashes (arithmetic on
+// nil) on any non-`.wav` entry, aborting its whole SoundItems build (→ 0
+// sounds). So for `sounds/` listings we make DirList faithful:
+//   • source sibling present (un-pruned import, e.g. BAR + ZK both ship
+//     `.wav`+`.webm` side by side) → HIDE the `.webm` and return only the
+//     source. (This is the case that regressed BAR: returning both crashed
+//     sounds.lua on the `.webm` half.)
+//   • source pruned away (only `.webm` left) → present it under the assumed
+//     `.wav` ext so the parser matches; the byte fetch still resolves `.webm`.
+//     The original ext is unrecoverable post-prune, so we assume `.wav` (the
+//     dominant Spring convention; warned once). General fix: have the converter
+//     record the source extension (or stop pruning).
 export const AUDIO_SOURCE_EXTS = ['.wav', '.ogg', '.mp3', '.flac', '.m4a', '.aac'];
 export let warnedAudioDirSwap = false;
 // One-time latch for the unimplemented VFS.CalculateHash SHA512 path.
@@ -68,18 +73,35 @@ export function presentDirListEntries(dirKey: string, entries: string[]): string
         }
     }
     let swapped = false;
-    const out = entries.map(f => {
-        if (!f.toLowerCase().endsWith('.webm')) return f;
+    let dropped = false;
+    const out: string[] = [];
+    for (const f of entries) {
+        if (!f.toLowerCase().endsWith('.webm')) { out.push(f); continue; }
         const stem = f.slice(0, -'.webm'.length);
-        if (sourceStems.has(stem.toLowerCase())) return f; // source kept → leave .webm
+        if (sourceStems.has(stem.toLowerCase())) {
+            // Authored source sibling present (e.g. foo.wav). The .webm is our
+            // converted *playback* artifact, NOT part of the VFS namespace the
+            // game shipped — HIDE it. A filename-parsing game (BAR's sounds.lua:
+            // `string.find(name, ".wav") - 1`) iterates every DirList entry, so a
+            // stray .webm crashes it (arithmetic on nil) and the whole SoundItems
+            // build aborts → 0 sounds. Real Spring's DirList only ever sees the
+            // source files. Playback still resolves .webm via normalizeSoundPath.
+            dropped = true;
+            continue;
+        }
+        // Source was pruned: only the .webm remains. Present it under the
+        // (assumed) authored .wav extension so the parser matches; the byte
+        // fetch still resolves .webm. (A pruned .ogg-only game would mis-present
+        // as .wav — warned; general fix is recording the source ext.)
         swapped = true;
-        return stem + '.wav';
-    });
-    if (swapped && !warnedAudioDirSwap) {
+        out.push(stem + '.wav');
+    }
+    if ((swapped || dropped) && !warnedAudioDirSwap) {
         warnedAudioDirSwap = true;
-        _vfsLogger(2, '[VFS] FIDELITY-STANDIN: presenting pruned .webm audio as .wav in ' +
-            'VFS.DirList (source extension lost to converter prune; assuming .wav). ' +
-            'Playback still resolves .webm. General fix: record source ext in the converter.');
+        _vfsLogger(2, '[VFS] FIDELITY-STANDIN: VFS.DirList(sounds/…) presents the authored ' +
+            'source audio (.wav/.ogg) and hides converted .webm artifacts (orphan .webm with ' +
+            'no source → presented as .wav). Playback resolves .webm via normalizeSoundPath. ' +
+            'General fix: record the source ext in the converter.');
     }
     return out;
 }
