@@ -1824,6 +1824,28 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         // a post-bootstrap stub lands too late and the widget crashes on load.
         SetLogSectionFilterLevel: (_section: LuaValue, _level: LuaValue) => {},
 
+        // Recoil LuaUnsyncedCtrl::SetNanoProjectileParams — sets the GLOBAL
+        // nano-spray projectile rotation visuals (rotation value / velocity /
+        // accel + their randomisation ranges, all in degrees). It writes static
+        // CNanoProjectile fields; purely render-side tuning with no synced
+        // effect and no companion getter. Like SetLogSectionFilterLevel it is a
+        // core engine fn widgets call from Initialize() (BAR gui_options.lua),
+        // so it must exist in the engine Spring table before the LuaUI
+        // bootstrap. FIDELITY-STANDIN: our nano-spray renderer
+        // (build-beam-renderer) does not yet model per-particle rotation, so the
+        // params are accepted but not applied — a documented stand-in, not a
+        // silent drop (per PLAN.md no-silent-failures).
+        SetNanoProjectileParams: (
+            _rotVal?: LuaValue, _rotVel?: LuaValue, _rotAcc?: LuaValue,
+            _rotValRng?: LuaValue, _rotVelRng?: LuaValue, _rotAccRng?: LuaValue,
+        ) => {
+            warnStandinOnce(
+                'SetNanoProjectileParams',
+                'Spring.SetNanoProjectileParams accepted but not applied — nano-spray ' +
+                'rotation is not modelled yet (build-beam-renderer has no per-particle spin).',
+            );
+        },
+
         // --- Player/Team API ---
         // NOTE: Functions returning Lua tables use luaTable() wrapper.
         // Plain JS arrays become multiple return values; luaTable() → single table.

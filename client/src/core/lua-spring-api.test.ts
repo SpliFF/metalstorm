@@ -555,6 +555,18 @@ describe('SetLogSectionFilterLevel (PLAN-bar.md §7 UI-2)', () => {
     });
 });
 
+describe('SetNanoProjectileParams (PLAN-bar.md §7 UI-2)', () => {
+    // Recoil engine fn (LuaUnsyncedCtrl) BAR gui_options.lua calls from
+    // Initialize(). Must live on the core engine Spring table; render-only
+    // tuning, accepted-but-not-applied stand-in (no per-particle nano spin yet).
+    it('exists on the core Spring table and accepts 0..6 args without throwing', () => {
+        const api = springApi(makeCtx(), createDefaultLiveState());
+        expect(typeof api.SetNanoProjectileParams).toBe('function');
+        expect(call(api.SetNanoProjectileParams)).toBeUndefined();
+        expect(call(api.SetNanoProjectileParams, 10, 20, 0, 5, 5, 0)).toBeUndefined();
+    });
+});
+
 describe('GetUnitWeaponState', () => {
     // A unit with one weapon: def 7 → weapon def 100.
     function wsApi() {
