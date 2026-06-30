@@ -690,6 +690,16 @@ export function republishDefGlobals(rt: LuaRuntime): void {
         local _wdFieldDefaults = setmetatable({
             customParams = {},
             damages = setmetatable({}, { __index = function() return 0 end }),
+            -- \`visuals\` is ALWAYS a sub-table in Recoil (LuaWeaponDefs.cpp:
+            -- thickness / colorR/G/B / ...). The catch-all __index below
+            -- returns the number 0 for any unlisted field, which makes a
+            -- \`wDef.visuals.thickness\` chain crash with "index a number
+            -- value" on the WeaponDefs[0] stub (and any def whose visuals
+            -- table wasn't built). Provide visuals as a table explicitly so
+            -- the chain resolves; missing scalars inside read 0. Real defs
+            -- carry their own visuals table from buildLuaWeaponDef and never
+            -- hit this default. (Fixes gui_pip.lua:7394 — BAR + ZK.)
+            visuals = setmetatable({}, { __index = function() return 0 end }),
         }, { __index = function(_, _) return 0 end })
         local _wdMeta = { __index = _wdFieldDefaults }
         local _emptyWeaponDef = setmetatable({
@@ -2844,12 +2854,10 @@ defaultFont = activeFont
         if not Spring.GetHumanName then
             Spring.GetHumanName = function(defName) return tostring(defName or "") end
         end
-        -- Engine log-section verbosity control (Recoil Spring.SetLogSectionFilterLevel).
-        -- Pure logging hint with no client effect; stub so widgets that tune
-        -- their own log noise (map_start_position_suggestions) don't throw.
-        if not Spring.SetLogSectionFilterLevel then
-            Spring.SetLogSectionFilterLevel = function() end
-        end
+        -- NOTE: Spring.SetLogSectionFilterLevel is installed in the core engine
+        -- Spring table (lua-spring-api.ts) BEFORE the LuaUI bootstrap, because
+        -- widgets call it from Initialize() (which runs during bootstrap). A
+        -- post-bootstrap stub here lands too late and the widget crashes on load.
     `, 'post_bootstrap_api_stubs');
 
     // Bridge bound-key → text-action. ZK widgets register most actions as

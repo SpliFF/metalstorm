@@ -1324,6 +1324,21 @@ export class LuaGLBridge {
             if (cached) {
                 return { xsize: cached.width, ysize: cached.height };
             }
+            // Engine-provided named textures ($info:los, $info:radar, $shadow,
+            // $heightmap, …) are backed by C++ subsystems (the info-texture
+            // handler, the shadow map). We don't implement the info-texture
+            // subsystem, so TextureInfo can't report a real size. Returning
+            // null here makes a widget that hard-depends on it (e.g.
+            // gui_infolos: `gl.TextureInfo("$info:los").xsize`) crash in
+            // Initialize and get removed by the handler error guard — that's
+            // the intended degrade, but make the gap LOUD per the
+            // no-silent-GL-failures principle rather than a bare nil.
+            if (handleOrPath.startsWith('$')) {
+                this.warnStandin(`TextureInfo(${handleOrPath})`,
+                    'engine named texture is not backed (no info-texture ' +
+                    'subsystem on WebGL2); returning nil. Widgets depending on ' +
+                    'it self-remove (Stage-5 / info-texture gated).');
+            }
         }
         return null;
     }

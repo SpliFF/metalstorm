@@ -384,6 +384,18 @@ describe('SendLuaUIMsg', () => {
     });
 });
 
+describe('SetLogSectionFilterLevel (PLAN-bar.md §7 UI-2)', () => {
+    // Recoil engine function widgets call from Initialize() (e.g.
+    // map_start_position_suggestions). It must live in the core engine Spring
+    // table so it exists BEFORE the LuaUI bootstrap runs widgets' Initialize.
+    it('exists on the core Spring table and is a no-op callable', () => {
+        const api = springApi(makeCtx(), createDefaultLiveState());
+        expect(typeof api.SetLogSectionFilterLevel).toBe('function');
+        // Accepts (section, level) and returns nothing without throwing.
+        expect(call(api.SetLogSectionFilterLevel, 'SomeWidget', 30)).toBeUndefined();
+    });
+});
+
 describe('GetUnitWeaponState', () => {
     // A unit with one weapon: def 7 → weapon def 100.
     function wsApi() {

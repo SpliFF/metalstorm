@@ -1685,6 +1685,13 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
         Log: (_section: LuaValue, _level: LuaValue, ...args: LuaValue[]) => {
             console.log('[Spring.Log]', ...args.map(a => String(a ?? '')));
         },
+        // Recoil LuaUnsyncedCtrl::SetLogSectionFilterLevel — engine-side
+        // per-section log-verbosity control. A pure logging hint with no
+        // client render effect, but it is a core engine function widgets call
+        // from Initialize() (e.g. map_start_position_suggestions), so it must
+        // exist in the engine Spring table BEFORE the LuaUI bootstrap runs —
+        // a post-bootstrap stub lands too late and the widget crashes on load.
+        SetLogSectionFilterLevel: (_section: LuaValue, _level: LuaValue) => {},
 
         // --- Player/Team API ---
         // NOTE: Functions returning Lua tables use luaTable() wrapper.
