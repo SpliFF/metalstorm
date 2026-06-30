@@ -98,6 +98,8 @@ import { StandingOrderRenderer } from './standing-order-renderer.js';
 import { getEngineGl } from './engine-gl.js';
 import {
     applyPlayerTeamRosterEffect,
+    seedPlayersFromRoster,
+    reconcilePlayerAllyTeams,
     PlayerTeamEventKind,
     type ProjectileEntry,
 } from './lua-spring-api.js';
@@ -746,6 +748,10 @@ function gpConnect(msg: GpInitToWorker): void {
                     customKeys: prevTeam?.customKeys ?? {},
                 });
             }
+            // PLAN-bar.md UI-2: now that the team→allyTeam map is known, correct
+            // each seeded player's allyTeam (seedPlayersFromRoster could only
+            // best-effort it at gp:init, before TeamStartInfo arrived).
+            reconcilePlayerAllyTeams(liveState.players, liveState.teams);
             liveState.allyStartBoxes.clear();
             for (const b of data.boxes) {
                 liveState.allyStartBoxes.set(b.allyTeam, {
@@ -889,6 +895,19 @@ export function gpInit(msg: GpInitToWorker): void {
     // and the screen-space gl.Ortho maps [0,vsx]×[0,vsy] onto the device-pixel
     // framebuffer — so view size must be the device-pixel backing store size.
     liveState.viewport = { width: canvas.width, height: canvas.height };
+
+    // PLAN-bar.md UI-2 (gui_chat:2647 + every other player-aware HUD widget):
+    // seed the human-player roster from the lobby room state NOW, before LuaUI
+    // boots, so Spring.GetPlayerList()/GetPlayerInfo(id) resolve every player
+    // when a widget's Initialize / first PlayerChanged runs (Recoil's
+    // playerHandler invariant). The worker's own setRoster/rosterUpdate path is
+    // dead (zero callers — same gap the team-roster fix found), so without this
+    // the roster is empty and gui_chat's PlayerChanged → GetPlayerInfo(id) → nil
+    // name → "table index is nil". allyTeam is corrected once TeamStartInfo
+    // lands (reconcilePlayerAllyTeams in onTeamStartInfo).
+    if (msg.players && msg.players.length) {
+        seedPlayersFromRoster(liveState.players, msg.players);
+    }
 
     const engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
     const scene = new Scene(engine);

@@ -69,6 +69,19 @@ export interface GpInitToWorker {
     gfx: Record<string, unknown>;
     /** Lifted from `localStorage` on main (standing-order-renderer SHOW_ALLIES). */
     standingOrderShowAllies: boolean;
+    /**
+     * Lobby room roster snapshot (human players only) taken at game start, so
+     * the worker seeds `liveState.players` BEFORE LuaUI boots — Recoil's
+     * playerHandler is always fully populated before widgets initialize.
+     * `id` is in the game-server playerID space (lobby player_id == the
+     * worker's Spring.GetMyPlayerID(), verified live). Without this the worker
+     * roster is empty (the setRoster/rosterUpdate path is dead) and every
+     * player-aware widget breaks — e.g. BAR gui_chat:2647 "table index is nil".
+     * AIs are excluded (they occupy teams without a player entry; queried via
+     * the team API). The server-streamed roster (mid-game joins/reconnects) is
+     * the documented P1 "richer roster restream". See PLAN-bar.md UI-2.
+     */
+    players?: { id: number; name: string; team: number; spectator: boolean }[];
 }
 
 /**

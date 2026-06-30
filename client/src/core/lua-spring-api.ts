@@ -506,6 +506,76 @@ export function ensurePlayerEntry(
     return p;
 }
 
+/** One human player from the lobby room roster, plumbed into the worker via
+ *  `gp:init`. Mirrors the certain-at-game-start subset of Recoil's
+ *  GetPlayerInfo tuple (name/team/spectator). The lobby player_id space
+ *  matches the game-server playerID (verified live: lobby playerId == the
+ *  worker's Spring.GetMyPlayerID()), so seeded ids resolve directly. */
+export interface RosterPlayer {
+    id: number;
+    name: string;
+    team: number;
+    spectator: boolean;
+}
+
+/** Seed `players` from the lobby room roster so Spring.GetPlayerList() /
+ *  GetPlayerInfo(id) resolve every human player BEFORE any widget loads —
+ *  reproducing Recoil's invariant that LuaUI's playerHandler is fully
+ *  populated before widget Initialize / the first PlayerChanged callin.
+ *
+ *  This is the real fix for the worker roster being empty: the
+ *  setRoster()/rosterUpdate path that used to fill `players` has no live
+ *  caller (same dead path the gui_ecostats teams fix found), so without this
+ *  every player-aware HUD widget saw an empty roster — e.g. BAR gui_chat's
+ *  PlayerChanged → GetPlayerInfo(id) returned a nil name → `playernames[nil]`
+ *  → "table index is nil" at gui_chat.lua:2647.
+ *
+ *  FAITHFULNESS NOTE (per the no-silent-deviation rule): Recoil's LuaUI
+ *  derives the roster from the synced game setup; our game server doesn't
+ *  stream player names to the client, so we source them from the lobby room
+ *  state on the main thread instead. Ids match, so it's behaviourally
+ *  faithful; a server-streamed roster (handling mid-game joins / reconnects)
+ *  is the documented P1 "richer roster restream". allyTeam is best-effort
+ *  here (team→allyTeam isn't known until TeamStartInfo arrives) and corrected
+ *  by reconcilePlayerAllyTeams(). AIs are intentionally excluded — they occupy
+ *  teams without a player entry and are queried via the team API. */
+export function seedPlayersFromRoster(
+    players: Map<number, PlayerInfo>,
+    roster: ReadonlyArray<RosterPlayer>,
+): void {
+    for (const r of roster) {
+        const prev = players.get(r.id);
+        players.set(r.id, {
+            name: r.name || `Player${r.id}`,
+            active: true,
+            spectator: r.spectator,
+            team: r.team,
+            allyTeam: prev?.allyTeam ?? r.team,
+            pingMs: prev?.pingMs ?? 0,
+            cpuUsage: prev?.cpuUsage ?? 0,
+            country: prev?.country ?? '',
+            rank: prev?.rank ?? 0,
+            hasController: !r.spectator,
+            customKeys: prev?.customKeys ?? {},
+        });
+    }
+}
+
+/** Propagate each player's allyTeam from its team once TeamStartInfo has
+ *  seeded `teams`. The roster is seeded at gp:init, before the team→allyTeam
+ *  map is known, so a player's allyTeam starts as a best-effort copy of its
+ *  team id; this corrects it. Faithful to Recoil, where a player's allyTeam
+ *  always follows its team's. No-op for players whose team isn't (yet) known. */
+export function reconcilePlayerAllyTeams(
+    players: Map<number, PlayerInfo>,
+    teams: Map<number, TeamInfo>,
+): void {
+    for (const p of players.values()) {
+        const t = teams.get(p.team);
+        if (t) p.allyTeam = t.allyTeam;
+    }
+}
+
 /** RGBA in 0..1. */
 export type TeamColor = [number, number, number, number];
 

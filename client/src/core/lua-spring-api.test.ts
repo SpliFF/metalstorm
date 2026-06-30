@@ -5,6 +5,8 @@ import {
     diffTimers,
     applyPlayerTeamRosterEffect,
     ensurePlayerEntry,
+    seedPlayersFromRoster,
+    reconcilePlayerAllyTeams,
     parseMapInfoFields,
     PlayerTeamEventKind,
     type SpringAPIContext,
@@ -419,6 +421,72 @@ describe('ensurePlayerEntry', () => {
         expect(p).toBe(existing);
         expect(p.name).toBe('test1');
         expect(p.team).toBe(1); // seed must not overwrite a real entry
+    });
+});
+
+describe('seedPlayersFromRoster', () => {
+    it('populates players from the lobby roster so GetPlayerInfo resolves a name', () => {
+        const players = new Map<number, PlayerInfo>();
+        seedPlayersFromRoster(players, [
+            { id: 5, name: 'test1', team: 0, spectator: false },
+            { id: 2, name: 'foe', team: 1, spectator: false },
+        ]);
+        expect(players.get(5)).toMatchObject({ name: 'test1', team: 0, active: true, spectator: false, allyTeam: 0 });
+        expect(players.get(2)).toMatchObject({ name: 'foe', team: 1, hasController: true });
+        // allyTeam best-effort = team until reconcile
+        expect(players.get(2)!.allyTeam).toBe(1);
+    });
+
+    it('marks spectators (no controller) and falls back to PlayerN for a blank name', () => {
+        const players = new Map<number, PlayerInfo>();
+        seedPlayersFromRoster(players, [{ id: 7, name: '', team: 3, spectator: true }]);
+        expect(players.get(7)).toMatchObject({ name: 'Player7', spectator: true, hasController: false });
+    });
+
+    it('preserves an existing entry\'s allyTeam/customKeys (idempotent re-seed)', () => {
+        const players = new Map<number, PlayerInfo>([[5, {
+            name: 'old', active: true, spectator: false, team: 0, allyTeam: 4,
+            pingMs: 9, cpuUsage: 0, country: 'x', rank: 2, hasController: true, customKeys: { k: 'v' },
+        }]]);
+        seedPlayersFromRoster(players, [{ id: 5, name: 'test1', team: 0, spectator: false }]);
+        const p = players.get(5)!;
+        expect(p.name).toBe('test1');      // name refreshed from roster
+        expect(p.allyTeam).toBe(4);        // prior allyTeam kept
+        expect(p.customKeys).toEqual({ k: 'v' });
+    });
+
+    it('makes Spring.GetPlayerInfo return a non-nil name (gui_chat:2647 root cause)', () => {
+        const ls = createDefaultLiveState();
+        seedPlayersFromRoster(ls.players, [{ id: 5, name: 'test1', team: 0, spectator: false }]);
+        const Spring = buildSpringGlobals(makeCtx(), ls).Spring as Record<string, (...a: LuaValue[]) => LuaValue[]>;
+        const [name] = Spring.GetPlayerInfo(5, false);
+        expect(name).toBe('test1'); // before the fix this was null → "table index is nil"
+        const list = Spring.GetPlayerList();
+        expect(isLuaTable(list)).toBe(true);
+    });
+});
+
+describe('reconcilePlayerAllyTeams', () => {
+    it('propagates allyTeam from each player\'s team once teams are known', () => {
+        const players = new Map<number, PlayerInfo>();
+        seedPlayersFromRoster(players, [
+            { id: 5, name: 'test1', team: 0, spectator: false },
+            { id: 2, name: 'foe', team: 1, spectator: false },
+        ]);
+        const teams = new Map<number, TeamInfo>([
+            [0, { teamId: 0, leader: 5, isDead: false, isAiTeam: false, side: '', allyTeam: 0, customKeys: {} }],
+            [1, { teamId: 1, leader: -1, isDead: false, isAiTeam: true, side: '', allyTeam: 1, customKeys: {} }],
+        ]);
+        reconcilePlayerAllyTeams(players, teams);
+        expect(players.get(5)!.allyTeam).toBe(0);
+        expect(players.get(2)!.allyTeam).toBe(1);
+    });
+
+    it('leaves a player whose team is not yet known untouched', () => {
+        const players = new Map<number, PlayerInfo>();
+        seedPlayersFromRoster(players, [{ id: 9, name: 'late', team: 4, spectator: false }]);
+        reconcilePlayerAllyTeams(players, new Map());
+        expect(players.get(9)!.allyTeam).toBe(4); // best-effort copy of team, unchanged
     });
 });
 

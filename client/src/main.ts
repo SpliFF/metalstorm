@@ -613,6 +613,17 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         // changes back here via a `gp:config` message (Bucket-3).
         standingOrderShowAllies:
             localStorage.getItem('standing-orders-show-allies') !== 'false',
+        // PLAN-bar.md UI-2: hand the worker the lobby room's player roster so it
+        // can populate Spring.GetPlayerList()/GetPlayerInfo before LuaUI boots
+        // (the worker's own roster stream is dead). Lobby player_id matches the
+        // game-server playerID. Spectators ARE players in Spring's playerHandler,
+        // so they're kept; AIs are excluded (no playerId; queried via the team API).
+        players: (lobbyUI?.room?.players ?? []).map((p) => ({
+            id: p.playerId,
+            name: p.username,
+            team: p.team,
+            spectator: p.isSpectator,
+        })),
     };
     gameWorker.postMessage(init, [offscreen]);
 
