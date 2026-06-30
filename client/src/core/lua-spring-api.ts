@@ -467,6 +467,45 @@ export function applyPlayerTeamRosterEffect(
     }
 }
 
+/** Ensure `players` holds an entry for `id`, creating a minimal placeholder if
+ *  absent, and return it. Mirrors Recoil's invariant that `playerHandler`
+ *  always contains a player when one of its callins fires: a widget's
+ *  PlayerChanged/PlayerAdded handler reads `Spring.GetPlayerInfo(id)` and must
+ *  get a valid name (not nil), or it crashes (e.g. BAR `gui_chat.lua`'s
+ *  `playernames[name] = {...}` → "table index is nil"). We must NOT fabricate
+ *  data inside GetPlayerInfo itself — that read stays nil for genuinely invalid
+ *  IDs, which other widget paths rely on. Instead the dispatch sites seed the
+ *  roster here before firing the callin. The wire PlayerTeamEvent carries only
+ *  the id (no name/team — the documented KNOWN GAP), so the placeholder uses
+ *  the same defaults as the initial roster seed; `seed` lets a caller supply
+ *  fields it knows for certain (e.g. the local player's team from identity). A
+ *  later `rosterUpdate` clears and re-seeds the map, overwriting this entry. */
+export function ensurePlayerEntry(
+    players: Map<number, PlayerInfo>,
+    id: number,
+    seed?: Partial<PlayerInfo>,
+): PlayerInfo {
+    let p = players.get(id);
+    if (!p) {
+        p = {
+            name: `Player${id}`,
+            active: true,
+            spectator: false,
+            team: 0,
+            allyTeam: 0,
+            pingMs: 0,
+            cpuUsage: 0,
+            country: '',
+            rank: 0,
+            hasController: true,
+            customKeys: {},
+            ...seed,
+        };
+        players.set(id, p);
+    }
+    return p;
+}
+
 /** RGBA in 0..1. */
 export type TeamColor = [number, number, number, number];
 

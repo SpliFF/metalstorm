@@ -22,6 +22,7 @@ import { LuaGLBridge } from './lua-gl-bridge.js';
 import {
     buildSpringGlobals,
     createDefaultLiveState,
+    ensurePlayerEntry,
     parseMapInfoFields,
     type SpringAPIContext,
     type LiveState,
@@ -4432,6 +4433,7 @@ export function dispatchCommandNotify(
  *  players' transitions filter the arg themselves. */
 export function dispatchPlayerChanged(playerId: number): void {
     if (!runtime) return;
+    ensureRosteredForCallin(playerId);
     runtime.doString(`
         if widgetHandler and widgetHandler.PlayerChanged then
             pcall(widgetHandler.PlayerChanged, widgetHandler, ${playerId | 0})
@@ -4439,11 +4441,27 @@ export function dispatchPlayerChanged(playerId: number): void {
     `, 'dispatchPlayerChanged');
 }
 
+/** Enforce Recoil's invariant before a player-status callin: the engine
+ *  always holds the player in `playerHandler` when PlayerChanged/PlayerAdded
+ *  fires, so a widget reading `Spring.GetPlayerInfo(id)` gets a valid name.
+ *  Our roster (`liveState.players`) is seeded from `rosterUpdate`, which can be
+ *  absent or late (e.g. the boot PlayerChanged for the local player, or a
+ *  cold-boot game where defs/roster never streamed). Seed a placeholder so the
+ *  read never returns nil; for the local player we know team/allyTeam from
+ *  identity. A later `rosterUpdate` overwrites it. See BAR gui_chat crash. */
+function ensureRosteredForCallin(playerId: number): void {
+    const seed = playerId === liveState.identity.myPlayerId
+        ? { team: liveState.identity.myTeam, allyTeam: liveState.identity.myAllyTeam }
+        : undefined;
+    ensurePlayerEntry(liveState.players, playerId, seed);
+}
+
 /** widgetHandler:PlayerAdded(playerId) — Spring fires this when a player
  *  (re)joins. No server call site emits it today, but the wire enum reserves
  *  the kind so a future reconnect/join path lights it up without a code change. */
 export function dispatchPlayerAdded(playerId: number): void {
     if (!runtime) return;
+    ensureRosteredForCallin(playerId);
     runtime.doString(`
         if widgetHandler and widgetHandler.PlayerAdded then
             pcall(widgetHandler.PlayerAdded, widgetHandler, ${playerId | 0})

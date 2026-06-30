@@ -4,6 +4,7 @@ import {
     createDefaultLiveState,
     diffTimers,
     applyPlayerTeamRosterEffect,
+    ensurePlayerEntry,
     parseMapInfoFields,
     PlayerTeamEventKind,
     type SpringAPIContext,
@@ -345,6 +346,33 @@ describe('applyPlayerTeamRosterEffect', () => {
         const players = new Map([[3, makePlayer()]]);
         expect(() => applyPlayerTeamRosterEffect(players, new Map(), { kind: PlayerTeamEventKind.PlayerRemoved, id: 99 })).not.toThrow();
         expect(players.get(3)!.active).toBe(true);
+    });
+});
+
+describe('ensurePlayerEntry', () => {
+    it('creates a minimal active placeholder for an unknown id', () => {
+        const players = new Map<number, PlayerInfo>();
+        const p = ensurePlayerEntry(players, 4);
+        expect(players.get(4)).toBe(p);
+        expect(p).toMatchObject({ name: 'Player4', active: true, spectator: false, team: 0, allyTeam: 0 });
+    });
+
+    it('applies the seed over the defaults (e.g. local player team/allyTeam)', () => {
+        const players = new Map<number, PlayerInfo>();
+        const p = ensurePlayerEntry(players, 0, { team: 7, allyTeam: 2 });
+        expect(p).toMatchObject({ name: 'Player0', team: 7, allyTeam: 2 });
+    });
+
+    it('returns the existing entry unchanged (idempotent, no clobber)', () => {
+        const existing: PlayerInfo = {
+            name: 'test1', active: true, spectator: false, team: 1, allyTeam: 1,
+            pingMs: 0, cpuUsage: 0, country: '', rank: 0, hasController: true, customKeys: {},
+        };
+        const players = new Map<number, PlayerInfo>([[3, existing]]);
+        const p = ensurePlayerEntry(players, 3, { team: 9 });
+        expect(p).toBe(existing);
+        expect(p.name).toBe('test1');
+        expect(p.team).toBe(1); // seed must not overwrite a real entry
     });
 });
 
