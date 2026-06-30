@@ -1,5 +1,9 @@
-import { describe, it, expect } from 'vitest';
-import { presentDirListEntries } from './worker-vfs.js';
+import { describe, it, expect, beforeEach } from 'vitest';
+import {
+    presentDirListEntries,
+    vfsRegister, vfsRegisterPath, vfsExists, vfsLoadBinary,
+    vfsCanonicalPath, setVfsBinaryFetcher, resetVfs,
+} from './worker-vfs.js';
 
 // presentDirListEntries makes VFS.DirList faithful for `sounds/` listings:
 // the game ships .wav/.ogg sources; our gameconverter ADDS a .webm playback
@@ -45,5 +49,64 @@ describe('presentDirListEntries', () => {
     it('passes non-sounds directories straight through (no audio rewrite)', () => {
         const entries = ['model.webm', 'tex.webm'];
         expect(presentDirListEntries('unittextures/', entries)).toEqual(['model.webm', 'tex.webm']);
+    });
+});
+
+// VFS.LoadFile must stay consistent with VFS.FileExists for binary assets.
+// Audio (and other binary) files are indexed path-only (vfsRegisterPath) so
+// vfsLookup returns undefined and FileExists(true)/LoadFile(nil) disagreed —
+// crashing widgets like BAR's common/wav.lua that read a .wav header. The
+// on-demand binary loader closes that gap (Recoil's LoadFile returns bytes
+// for any existing file). The sync transport is injected, so tests stub it.
+describe('vfsLoadBinary (on-demand binary VFS.LoadFile)', () => {
+    beforeEach(() => {
+        resetVfs();
+        setVfsBinaryFetcher(null as unknown as (p: string) => string | null);
+    });
+
+    it('loads bytes for a path-only (binary) file that FileExists reports present', () => {
+        vfsRegisterPath('sounds/voice/en/alert.wav');
+        expect(vfsExists('sounds/voice/en/alert.wav')).toBe(true);
+        const calls: string[] = [];
+        setVfsBinaryFetcher((disk) => { calls.push(disk); return 'RIFF\x00\xff'; });
+        expect(vfsLoadBinary('sounds/voice/en/alert.wav')).toBe('RIFF\x00\xff');
+        // fetched the canonical on-disk path
+        expect(calls).toEqual(['sounds/voice/en/alert.wav']);
+    });
+
+    it('caches bytes — a second read does not re-invoke the fetcher', () => {
+        vfsRegisterPath('sounds/x/beep.wav');
+        let n = 0;
+        setVfsBinaryFetcher(() => { n++; return 'DATA'; });
+        expect(vfsLoadBinary('sounds/x/beep.wav')).toBe('DATA');
+        expect(vfsLoadBinary('sounds/x/beep.wav')).toBe('DATA');
+        expect(n).toBe(1);
+    });
+
+    it('returns null and does not fetch for a file that does not exist', () => {
+        let fetched = false;
+        setVfsBinaryFetcher(() => { fetched = true; return 'NOPE'; });
+        expect(vfsLoadBinary('sounds/missing.wav')).toBeNull();
+        expect(fetched).toBe(false);
+    });
+
+    it('resolves a case-folded request to the original-case on-disk path', () => {
+        vfsRegisterPath('Sounds/Voice/EN/Foo.WAV');
+        expect(vfsCanonicalPath('sounds/voice/en/foo.wav')).toBe('Sounds/Voice/EN/Foo.WAV');
+        const calls: string[] = [];
+        setVfsBinaryFetcher((disk) => { calls.push(disk); return 'X'; });
+        expect(vfsLoadBinary('sounds/voice/en/foo.wav')).toBe('X');
+        expect(calls).toEqual(['Sounds/Voice/EN/Foo.WAV']);
+    });
+
+    it('does not reach the binary path for a text file already held in the VFS', () => {
+        vfsRegister('common/wav.lua', 'return 1');
+        let fetched = false;
+        setVfsBinaryFetcher(() => { fetched = true; return 'BIN'; });
+        // vfsLoadBinary is the fallback; the file has content so the Lua
+        // VFS.LoadFile resolves via vfsLookup first. Even if reached directly,
+        // a content-bearing file should not be re-fetched as binary.
+        expect(vfsLoadBinary('common/wav.lua')).toBe('return 1');
+        expect(fetched).toBe(false);
     });
 });

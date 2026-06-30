@@ -42,6 +42,7 @@ import {
     setVfsLogger, resetVfs,
     presentDirListEntries, vfsRegister,
     vfsExists, vfsLookup, prefetchAllGameFiles,
+    vfsLoadBinary, setVfsBinaryFetcher,
     VFS_IMPLEMENTATION_LUA,
 } from './worker-vfs.js';
 import { gpCtx } from './gp-context.js';
@@ -4073,9 +4074,59 @@ export function installIOStubs(rt: LuaRuntime, gameId: string): void {
 
 // ── VFS installation ───────────────────────────────────────────────────
 
+/// One-time notice that VFS.LoadFile is doing synchronous on-demand binary
+/// loads (per the no-silent-failures principle: a real but blocking path).
+let warnedSyncBinaryLoad = false;
+
+/// Synchronously fetch a file's raw bytes from the game asset plane,
+/// returned byte-1:1 (latin1). Used by VFS.LoadFile for binary assets that
+/// aren't held as text (audio/images indexed path-only). Synchronous because
+/// VFS.LoadFile's Lua contract is synchronous — there is no async seam. Sync
+/// XMLHttpRequest is permitted in a Worker (the response='arraybuffer'
+/// restriction only applies on a Window). Bytes are cached by worker-vfs so
+/// each file blocks at most once. Faithful to Recoil's LoadFile; the only
+/// cost is a brief worker stall on first touch of an un-cached binary file.
+function syncFetchBinary(baseUrl: string, diskPath: string): string | null {
+    if (!baseUrl) return null;
+    if (!warnedSyncBinaryLoad) {
+        warnedSyncBinaryLoad = true;
+        postLog(2, '[VFS] VFS.LoadFile is loading binary assets synchronously on ' +
+            'demand (e.g. .wav headers for sound scheduling); first read of each ' +
+            'file does a blocking fetch, cached thereafter.');
+    }
+    try {
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', `${baseUrl}/${diskPath}`, false); // sync — worker-only
+        xhr.responseType = 'arraybuffer';
+        xhr.send();
+        if (xhr.status < 200 || xhr.status >= 300) return null;
+        const buf = xhr.response as ArrayBuffer | null;
+        if (!buf) return null;
+        const u8 = new Uint8Array(buf);
+        // Build a byte-1:1 string in chunks (apply() has an arg-count cap).
+        let s = '';
+        const CHUNK = 0x8000;
+        for (let i = 0; i < u8.length; i += CHUNK) {
+            s += String.fromCharCode(...u8.subarray(i, i + CHUNK));
+        }
+        return s;
+    } catch {
+        return null;
+    }
+}
+
 export function installVFS(rt: LuaRuntime): void {
+    // Supply worker-vfs with the synchronous raw-byte transport so
+    // VFS.LoadFile can faithfully return bytes for path-only binary assets.
+    // initBaseUrl is module-level and set in init() before any widget runs.
+    setVfsBinaryFetcher((diskPath: string) => syncFetchBinary(initBaseUrl, diskPath));
+
     rt.setGlobal('_vfsLookup', (path: LuaValue) => {
         return vfsLookup(String(path)) ?? null;
+    });
+
+    rt.setGlobal('_vfsLoadBinary', (path: LuaValue) => {
+        return vfsLoadBinary(String(path)) ?? null;
     });
 
     /// Existence check that succeeds for path-only entries (audio,

@@ -5,6 +5,19 @@ export const vfsPathMap = new Map<string, string>();
 export const vfsDirCache = new Map<string, string[]>();
 export const vfsSubdirCache = new Map<string, string[]>();
 
+// On-demand binary load cache (canonical-lowercase path → byte-1:1 string).
+// Holds the bytes of indexed-but-path-only assets (audio/images not
+// prefetched as text) once VFS.LoadFile pulls them. See vfsLoadBinary.
+const vfsBinaryCache = new Map<string, string>();
+
+// Synchronous raw-byte fetcher seam. worker-vfs.ts is pure (no fetch / no
+// game base URL), so the host (lua-ui-host.ts) injects the actual transport
+// once at init. Returns a byte-1:1 (latin1) string or null. See vfsLoadBinary.
+let vfsBinaryFetcher: ((diskPath: string) => string | null) | null = null;
+export function setVfsBinaryFetcher(fn: (diskPath: string) => string | null): void {
+    vfsBinaryFetcher = fn;
+}
+
 // FIDELITY-STANDIN: present the authored audio namespace in VFS.DirList.
 //
 // The gameconverter re-encodes every `sounds/**` (+ `LuaUI/Sounds/**`) source
@@ -56,6 +69,7 @@ export function resetVfs(): void {
     vfsPathMap.clear();
     vfsDirCache.clear();
     vfsSubdirCache.clear();
+    vfsBinaryCache.clear();
     warnedAudioDirSwap = false;
     warnedVfsSha = false;
 }
@@ -184,6 +198,49 @@ export function vfsLookup(path: string): string | undefined {
     const canonicalPrefixed = vfsPathMap.get(('LuaUI/' + path).toLowerCase());
     if (canonicalPrefixed) return vfsFiles.get(canonicalPrefixed);
     return undefined;
+}
+
+/// Resolve the on-disk (original-case) path for an indexed file, or null
+/// if the path isn't known to exist. Mirrors vfsExists / vfsLookup
+/// resolution (exact, LuaUI/-prefixed, case-folded), so the URL a binary
+/// fetch uses matches what FileExists/DirList reported.
+export function vfsCanonicalPath(path: string): string | null {
+    if (vfsFiles.has(path)) return path;
+    if (vfsFiles.has('LuaUI/' + path)) return 'LuaUI/' + path;
+    const lower = path.toLowerCase();
+    const canonical = vfsPathMap.get(lower);
+    if (canonical) return canonical;
+    const canonicalPrefixed = vfsPathMap.get(('LuaUI/' + path).toLowerCase());
+    if (canonicalPrefixed) return canonicalPrefixed;
+    return null;
+}
+
+/// Synchronously load a file's raw bytes by VFS path, returned byte-1:1
+/// (latin1 — LuaRuntime.pushValue pushes such a string byte-exact). This is
+/// the faithful Recoil VFS.LoadFile behaviour for binary assets that aren't
+/// held as text in the worker: audio (.wav/.ogg…) and images are indexed
+/// path-only (vfsRegisterPath) to avoid prefetching megabytes the Lua side
+/// usually can't consume, so vfsLookup returns undefined for them. A widget
+/// that *does* read the bytes (e.g. BAR's common/wav.lua parsing a .wav
+/// header for sound-scheduling durations) hit the FileExists(true) /
+/// LoadFile(nil) inconsistency and crashed. Gated on vfsExists so LoadFile
+/// stays consistent with FileExists; results are cached so repeat reads
+/// don't re-fetch. Returns null if the file isn't indexed or the fetch fails.
+export function vfsLoadBinary(path: string): string | null {
+    // Prefer in-memory content — a file held as text is never re-fetched as
+    // binary (the Lua VFS.LoadFile already tries this, but stay self-consistent
+    // for any direct caller).
+    const held = vfsLookup(path);
+    if (held !== undefined) return held;
+    if (!vfsExists(path)) return null;
+    const disk = vfsCanonicalPath(path) ?? path;
+    const key = disk.toLowerCase();
+    const cached = vfsBinaryCache.get(key);
+    if (cached !== undefined) return cached;
+    if (!vfsBinaryFetcher) return null;
+    const bytes = vfsBinaryFetcher(disk);
+    if (bytes !== null) vfsBinaryCache.set(key, bytes);
+    return bytes;
 }
 
 // ── HTTP VFS prefetch ──────────────────────────────────────────────────
@@ -429,7 +486,17 @@ end
 VFS.LoadFile = function(path, mode)
     if not path then return nil end
     path = normalizePath(path)
-    return vfsLookup(path)
+    local content = vfsLookup(path)
+    if content ~= nil then return content end
+    -- Faithful fallback: a file can be indexed (FileExists==true) but held
+    -- path-only, i.e. without its bytes in the worker (binary audio/images).
+    -- Recoil's VFS.LoadFile returns raw bytes for ANY existing file, so load
+    -- them synchronously on demand (byte-exact). Keeps FileExists/LoadFile
+    -- consistent — e.g. common/wav.lua reads a .wav header for sound timing.
+    if _vfsLoadBinary then
+        return _vfsLoadBinary(path)
+    end
+    return nil
 end
 
 VFS.DirList = function(path, pattern, mode)
