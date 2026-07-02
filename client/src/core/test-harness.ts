@@ -256,6 +256,19 @@ export class TestHarness {
         return this.deps.workerCall('netStats');
     }
 
+    /** Per-phase frame-time distribution (mean/p50/p95/p99/max) over the last
+     *  `windowMs` (default 30 s) from the worker's permanent FrameProfiler —
+     *  the PLAN-perf P0 attribution matrix. Returns `{ frames, fps, phases,
+     *  table }`; log `.table` for a readable breakdown. */
+    async perfDump(windowMs?: number): Promise<unknown> {
+        return this.deps.workerCall('perfDump', windowMs == null ? [] : [windowMs]);
+    }
+
+    /** Clear the FrameProfiler's buffered samples before a fresh measurement. */
+    perfReset(): void {
+        void this.deps.workerCall('perfReset');
+    }
+
     /** Named WAN presets. `lan` ≈ localhost; `wan` ≈ regional; `intercont`
      *  ≈ the L0 exit-gate condition (200 ms ± 40 ms jitter, 2 % loss). */
     netSimPreset(name: 'lan' | 'wan' | 'intercont'): void {

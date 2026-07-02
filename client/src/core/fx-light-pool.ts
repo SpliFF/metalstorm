@@ -103,6 +103,34 @@ export class FxLightPool {
         }
     }
 
+    /** Live-resize the pool by disposing/creating PointLights so `scene.lights`
+     *  actually shrinks or grows. `setEnabled(false)` is not enough for the
+     *  PLAN-perf P0 light-pool isolation toggle: idled lights stay in
+     *  `scene.lights`, so every StandardMaterial mesh still pays the per-frame
+     *  light-selection sort over them. This removes them from the scene.
+     *  Returns the new slot count. */
+    setPoolCount(n: number): number {
+        n = Math.max(0, n | 0);
+        while (this.slots.length > n) {
+            this.slots.pop()!.light.dispose();  // dispose() removes it from scene.lights
+        }
+        while (this.slots.length < n) {
+            const i = this.slots.length;
+            const light = new PointLight(`fxLight${i}`, new Vector3(0, 0, 0), this.scene);
+            light.intensity = 0;
+            light.range = 1;
+            light.diffuse = new Color3(0, 0, 0);
+            light.specular = new Color3(0, 0, 0);
+            light.shadowEnabled = false;
+            this.slots.push({ light, active: false, age: 0, ttl: 0, peak: 0, priority: 0 });
+        }
+        this.opts.count = n;
+        return this.slots.length;
+    }
+
+    /** Current pooled-light count (P0 matrix read-back). */
+    get poolCount(): number { return this.slots.length; }
+
     // NOTE — no muzzle-flash light by design (faithful to ZK, 2026-06-04).
     // ZK adds deferred MUZZLE lights only via gfx_deferred_rendering_gl4.lua's
     // `widget:Barrelfire`, keyed by `muzzleFlashLights[weaponID]` — but that

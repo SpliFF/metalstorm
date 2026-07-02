@@ -32,6 +32,7 @@ import type { EntityStateSnapshot } from './entity-state.js';
 // `globalThis` for this move — PLAN-game-worker.md GW4 Bucket-2).
 import {
     buildTerrainMesh, loadTerrainTextures, TerrainFog, DeformableTerrain,
+    setTerrainDecalPluginEnabled,
     type MapDimensions,
 } from './terrain.js';
 import { fetchMapDataHttp, type ParsedMapData } from './map-data.js';
@@ -79,6 +80,7 @@ import { setParticleBudget } from './ceg-translator.js';
 import { clientSettings } from './client-settings.js';
 import { CONFIG } from '../config.js';
 import { resetNetStats, snapshotNetStats } from './net-inspector.js';
+import { FrameProfiler } from './frame-profiler.js';
 import { BuildBeamRenderer } from './build-beam-renderer.js';
 import { CombatFX } from './combat-fx.js';
 import { FxLightPool } from './fx-light-pool.js';
@@ -241,12 +243,29 @@ let gpDynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
 /// lifetimes with the game speed (paused → 0). Driven by onGameInfo. The
 /// camera + entity ticks keep raw wall dt; only FX lifetimes use it.
 let gpFxSimSpeed = 1;
-/// Long-frame profiler: when on, the render loop stamps per-phase timings and
-/// logs a breakdown for any frame exceeding GP_LONG_FRAME_MS, so worker stalls
-/// (model/atlas loads, GC, a runaway subsystem tick) are attributable instead
-/// of guessed. Cheap enough to leave on; only logs on genuine hitches.
+/// Long-frame profiler: the render loop stamps per-phase timings every frame
+/// into a permanent accumulator (`gpFrameProfiler`), which both (a) computes
+/// mean/p50/p95/p99 per phase over a rolling 30 s window on demand
+/// (`window.test.perfDump()` / `window.__gp('__frameProfiler.dump()')`, the
+/// PLAN-perf P0 attribution matrix) and (b) logs a breakdown for any frame
+/// exceeding GP_LONG_FRAME_MS so worker stalls (model/atlas loads, GC, a
+/// runaway subsystem tick) are attributable instead of guessed. Cheap enough
+/// to leave on: the hot path is a few typed-array writes with no allocation.
 const gpFrameProfile = true;
 const GP_LONG_FRAME_MS = 150;
+/// Permanent per-phase frame-time accumulator (PLAN-perf P0). 30 s default
+/// window. Exposed on globalThis (see gpInit) as `__frameProfiler`.
+const gpFrameProfiler = new FrameProfiler(30000);
+/// Allocation-free phase mark (module-level so the render loop doesn't build a
+/// closure per frame). `idx` follows FRAME_PHASES: 0 camera, 1 entity, 2 fx,
+/// 3 decals+lights, 4 render, 5 ui.
+function gpMark(idx: number): void {
+    if (gpFrameProfile) gpFrameProfiler.mark(idx, performance.now());
+}
+/// PLAN-perf P0 isolation toggle (hazard #5): when false the LuaUI screen pass
+/// is skipped, isolating its render-thread tax (12 gl.getParameter round-trips
+/// + Fengari runFrame + wipeCaches). Live proxy for a widget-less boot.
+let gpUiPassEnabled = true;
 /// Wall-clock timestamp of the previous render frame, for the FX `dt`.
 let gpLastFrameTime = 0;
 /// Holds the per-allyteam LOS bitmaps (envelope 0x07) so a bitmap that
@@ -997,6 +1016,37 @@ export function gpInit(msg: GpInitToWorker): void {
     // (the render-core move stranded these here). Mirrors the __fxLightPool /
     // __renderPipeline / __csm hooks the render modules already set.
     (globalThis as Record<string, unknown>).__entityRenderer = entityRenderer;
+    // PLAN-perf P0: reach the frame-phase accumulator from the main devtools
+    // console — `window.__gp('__frameProfiler.dump()')` (or window.test.perfDump).
+    (globalThis as Record<string, unknown>).__frameProfiler = gpFrameProfiler;
+    // PLAN-perf P0 isolation matrix: one handle for every runtime toggle the
+    // attribution run flips (terrain decal plugin, decal fade re-bake, light-
+    // pool count, render scale, LuaUI pass). Reach via
+    // `window.__gp('__perfToggles.terrainPlugin(false)')` etc. Each returns the
+    // applied value so the matrix run can confirm the toggle took.
+    (globalThis as Record<string, unknown>).__perfToggles = {
+        /** Hazard #1: the ~10-tap terrain decal-overlay fragment block. */
+        terrainPlugin: (on: boolean): boolean =>
+            setTerrainDecalPluginEnabled(gpTerrainMesh, on),
+        /** Hazard #2: the periodic + pan-driven full RTT re-stamp. */
+        decalFade: (on: boolean): boolean => {
+            if (!gpDecalOverlay) return false;
+            gpDecalOverlay.fadeEnabled = on;
+            return on;
+        },
+        /** Hazard #3: pooled point-light count (16→4→0 removes them from the
+         *  scene light list, not just idles them). Returns the new count. */
+        lightPool: (n: number): number =>
+            gpCtx.fxLightPool?.setPoolCount(n) ?? -1,
+        /** Fill-rate probe: engine hardware scaling ⇒ backing-store resolution.
+         *  scale 1.5 ≈ retina-capped baseline; 0.75 halves fill. */
+        renderScale: (scale: number): number => {
+            gpEngine?.setHardwareScalingLevel(1 / Math.max(0.1, scale));
+            return scale;
+        },
+        /** Hazard #5: skip the LuaUI render-thread pass. */
+        luaUi: (on: boolean): boolean => { gpUiPassEnabled = on; return on; },
+    };
 
     // GW4-c5b: interactive RTS camera for view 0 (DOM-free; driven by the
     // forwarded `gp:*` input). Ground sampler = the entity renderer's heightmap
@@ -1127,27 +1177,26 @@ export function gpInit(msg: GpInitToWorker): void {
         // use fxDt (PLAN-weapon-fx-capture-arch fxDt).
         const fxDt = dt * gpFxSimSpeed;
 
-        // Long-frame profiler: cheap performance.now() stamps per phase, only
-        // logged when a frame blows past the budget — pins a worker stall to a
-        // specific subsystem instead of guessing. Near-zero overhead otherwise.
-        const _pf = gpFrameProfile ? [] as [string, number][] : null;
-        const _mark = _pf ? (label: string) => _pf.push([label, performance.now()]) : () => {};
+        // Per-phase frame profiling (PLAN-perf P0). beginFrame/gpMark/endFrame
+        // write into the permanent accumulator (gpFrameProfiler) with no
+        // per-frame allocation; percentiles are computed only at dump time.
+        if (gpFrameProfile) gpFrameProfiler.beginFrame(now);
 
         // GW4-c5b: advance the interactive camera(s) first so this frame's
         // render + pick + viewport use the updated pose. Raw wall dt (the camera
         // is not sim-scaled). tick() handles its own per-call timing internally.
         for (const cam of gpViewCameras.values()) cam.tick();
-        _mark('camera');
+        gpMark(0);  // camera
 
         // entityRenderer.tick() advances the presentation clock (L0) and
         // interpolates every unit to the presentation cursor before render.
         gpCtx.entityRenderer?.tick();
-        _mark('entity');
+        gpMark(1);  // entity
         gpBuildBeamRenderer?.tick();
         gpCtx.projectileRenderer?.tick();
         gpCegRuntime?.tick(fxDt);
         gpCombatFX?.tick(fxDt);
-        _mark('fx');
+        gpMark(2);  // fx
         // Decal clipmap fine window tracks the camera focus + height.
         {
             const focus = camera.getTarget();
@@ -1160,25 +1209,24 @@ export function gpInit(msg: GpInitToWorker): void {
         gpCtx.fxLightPool?.update(fxDt, camera.position);
         gpDistortion?.tick(fxDt);
         gpMuzzleFlare?.tick(fxDt);
-        _mark('decals+lights');
+        gpMark(3);  // decals+lights
         scene.render();
-        _mark('render');
+        gpMark(4);  // render
         // GW4-c6: LuaUI screen-space pass on the SAME context, after the world
         // is drawn (state save/restore + wipeCaches inside). World-space
-        // DrawWorld/DrawWorldPreUnit overlays land in c6-2.
-        gpRunUiPass();
-        _mark('ui');
+        // DrawWorld/DrawWorldPreUnit overlays land in c6-2. Gated by the P0
+        // isolation toggle (gpUiPassEnabled).
+        if (gpUiPassEnabled) gpRunUiPass();
+        gpMark(5);  // ui
         // GW4-c5c: feed the HTML HUD (entity count / frame / selection / speed).
         gpPostSceneState(now);
         // GW4-c5c-3: feed the main-thread minimap (unit dots + fog overlay).
         gpPostMinimapFeed(now);
 
-        if (_pf) {
-            const total = performance.now() - now;
+        if (gpFrameProfile) {
+            const total = gpFrameProfiler.endFrame(performance.now());
             if (total > GP_LONG_FRAME_MS) {
-                let prev = now;
-                const parts = _pf.map(([label, t]) => { const d = (t - prev) | 0; prev = t; return `${label}=${d}`; });
-                postLog(2, `[gp] long frame ${total | 0}ms: ${parts.join(' ')}`);
+                postLog(2, `[gp] long frame ${total | 0}ms: ${gpFrameProfiler.formatLastFrame()}`);
             }
         }
     });
@@ -1595,6 +1643,14 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         // — per-envelope bandwidth tally (GW8 / PLAN-performance PC-2) —
         case 'netStats':
             return snapshotNetStats();
+        // — per-phase frame-time distribution (PLAN-perf P0 attribution) —
+        //   arg 0 = window ms (default 30 s); returns structured stats + a
+        //   pre-formatted table.
+        case 'perfDump':
+            return gpFrameProfiler.dump(num(0, gpFrameProfiler.windowMs));
+        case 'perfReset':
+            gpFrameProfiler.reset();
+            return null;
         // — generic JS eval against the worker global scope (GW8). Lets the
         //   main devtools console reach the worker-resident debug hooks
         //   (globalThis.__entityRenderer / __fxLightPool / __renderPipeline /

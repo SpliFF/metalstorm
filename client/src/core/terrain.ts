@@ -622,6 +622,18 @@ function findDecalOverlayPlugin(
         : undefined;
 }
 
+/** Enable/disable the terrain decal-overlay shader plugin on a terrain mesh —
+ *  the PLAN-perf P0 hazard-#1 isolation toggle (the ~10-tap per-fragment decal
+ *  block). Returns whether a plugin was found + toggled. */
+export function setTerrainDecalPluginEnabled(
+    mesh: Mesh | null, on: boolean,
+): boolean {
+    const plugin = mesh ? findDecalOverlayPlugin(mesh.material) : undefined;
+    if (!plugin) return false;
+    plugin.isEnabled = on;
+    return true;
+}
+
 /** Re-attach the ground-decal overlay (preserving live-tuned strengths). */
 function reattachDecalOverlay(
     mat: StandardMaterial, prevPlugin: DecalOverlayPlugin | undefined,
