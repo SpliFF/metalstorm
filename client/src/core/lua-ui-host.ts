@@ -958,11 +958,13 @@ export async function init(
         setCameraState: (state, smoothness) => {
             postToMain({ type: 'setCameraState', state, smoothness });
         },
-        // `getCameraPose` is intentionally NOT forwarded: querying the
-        // host synchronously across the worker boundary would block the
-        // sim. The fallback path in lua-spring-api reads from `ls.camera`
-        // (the snapshot main.ts pushes each tick), which is accurate to
-        // within one frame and good enough for every existing widget.
+        // `getCameraPose` stays null: post-GW4 the render camera lives in the
+        // game-processor worker (which imports this host, not vice-versa), so
+        // wiring a live accessor here would be a circular import for no gain.
+        // The fallback path in lua-spring-api reads `ls.camera`, which
+        // gpSyncCameraToLiveState() now refreshes from the real render camera
+        // every frame after scene.render() (U1) — one-frame-fresh, the same
+        // freshness a live pose accessor would give.
         getCameraPose: () => null,
         getUnitDefName: (defId) => unitDefMap.get(defId)?.name,
         getUnitDefSensorRadius: (defId, type) => {

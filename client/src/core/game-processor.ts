@@ -1212,6 +1212,13 @@ export function gpInit(msg: GpInitToWorker): void {
         gpMark(3);  // decals+lights
         scene.render();
         gpMark(4);  // render
+        // U1 (PLAN-bar §7): mirror the live render camera into the Spring-API
+        // liveState every frame, AFTER scene.render() (Babylon only refreshes
+        // getViewMatrix/getProjectionMatrix during render). Kept OUTSIDE the
+        // UI-pass toggle below so Spring.TraceScreenRay / GetCameraPosition /
+        // GetPixelDir / ScreenToWorldCoords read the real camera even when the
+        // LuaUI pass is isolated off (P0). Feeds the gl-bridge too (gpRunUiPass).
+        gpSyncCameraToLiveState();
         // GW4-c6: LuaUI screen-space pass on the SAME context, after the world
         // is drawn (state save/restore + wipeCaches inside). World-space
         // DrawWorld/DrawWorldPreUnit overlays land in c6-2. Gated by the P0
@@ -1414,6 +1421,35 @@ function gpPostMinimapFeed(now: number): void {
     postToMain({ type: 'gp:minimapFeed', blips, los: losPayload, map: mapInfo });
 }
 
+/// U1 (PLAN-bar §7): mirror the live worker render camera into the Spring-API
+/// liveState. Post-GW4 the render camera moved INTO this worker, but the only
+/// producer that fed `liveState.viewMatrix/projMatrix/camera` was the
+/// main-thread `stateUpdate` message (lua-widget-manager.pushStateToWorker),
+/// which is dead post-GW4 — so every screen-ray / camera read
+/// (Spring.TraceScreenRay, GetCameraPosition, GetPixelDir, ScreenToWorldCoords,
+/// GetCameraState) silently degraded to the zeroed liveState defaults. This
+/// re-establishes the producer at the real source: the worker's own Babylon
+/// scene + camera, refreshed each frame after scene.render(). The matrices are
+/// copied out because Babylon mutates its internal .m arrays in place each
+/// frame. Coordinate frame: scene coords == server world coords == the
+/// Lua-facing frame (flipPosZ is identity, game-processor world draws project
+/// server coords directly), so the unprojected results are already what widgets
+/// expect on BOTH legacy games (BAR + ZK) — no extra flip.
+function gpSyncCameraToLiveState(): void {
+    if (!gpScene || !gpCamera) return;
+    liveState.viewMatrix = new Float32Array(gpScene.getViewMatrix().m);
+    liveState.projMatrix = new Float32Array(gpScene.getProjectionMatrix().m);
+    const cam = gpCamera;
+    const tgt = cam.getTarget();
+    const c = liveState.camera;
+    c.px = cam.position.x; c.py = cam.position.y; c.pz = cam.position.z;
+    c.tx = tgt.x; c.ty = tgt.y; c.tz = tgt.z;
+    // fov stored in radians (GetCameraState converts to degrees on read).
+    c.fov = cam.fov;
+    c.near = cam.minZ;
+    c.far = cam.maxZ;
+}
+
 /// GW4-c6: run the LuaUI screen-space pass on the shared Babylon context after
 /// scene.render(). Babylon caches GL state and assumes nothing else touches the
 /// context, so we snapshot the bits the getBridge() clobbers, run the pass, restore
@@ -1443,13 +1479,12 @@ function gpRunUiPass(): void {
     // GW4-c6-2: feed the live camera view + projection to the GL getBridge() so the
     // world-space DrawWorld pass (and UniformMatrix("view"/"projection")) draw
     // in world space. scene coords == server world coords (no flip), so a
-    // widget's gl.Vertex(serverX,serverY,serverZ) projects correctly. Copy out
-    // of Babylon's internal arrays (it mutates them each frame).
-    if (gpScene && getBridge()) {
-        getBridge()!.setCameraMatrices(
-            new Float32Array(gpScene.getViewMatrix().m),
-            new Float32Array(gpScene.getProjectionMatrix().m),
-        );
+    // widget's gl.Vertex(serverX,serverY,serverZ) projects correctly. Reuse the
+    // exact matrix instances gpSyncCameraToLiveState() already copied out this
+    // frame (it runs just before us in the render loop) so the world-draw bridge
+    // and the Spring-API screen-ray reads share one source of truth.
+    if (getBridge() && liveState.viewMatrix && liveState.projMatrix) {
+        getBridge()!.setCameraMatrices(liveState.viewMatrix, liveState.projMatrix);
     }
 
     try {
