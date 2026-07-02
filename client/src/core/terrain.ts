@@ -28,6 +28,8 @@ import { getEngineGl } from './engine-gl.js';
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture';
 import type { LosBitmap } from './los-bitmap.js';
 import { DecalOverlayPlugin, attachDecalOverlay } from './decal-overlay-plugin.js';
+import { WaterAbsorptionPlugin, attachWaterAbsorption } from './water-absorption-plugin.js';
+import type { MapWaterAbsorption } from './map-lighting.js';
 
 const SQUARE_SIZE = 8;
 const TILE_PIXELS = 32;
@@ -608,8 +610,10 @@ export function applyWebGLTexture(
     // finishes loading) and swapped in here. Without re-attaching, the
     // textured terrain samples no overlay and scars/tracks never render.
     const prevPlugin = findDecalOverlayPlugin(mesh.material);
+    const prevWater = findWaterAbsorptionPlugin(mesh.material);
     mesh.material = mat;
     reattachDecalOverlay(mat, prevPlugin);
+    reattachWaterAbsorption(mat, prevWater);
 }
 
 /** Locate the DecalOverlayPlugin attached to a material, if any. */
@@ -650,6 +654,49 @@ function reattachDecalOverlay(
     }
 }
 
+/** Locate the WaterAbsorptionPlugin on a material (first sub-material for a
+ *  MultiMaterial — all pages carry identical colours). */
+function findWaterAbsorptionPlugin(
+    mat: Mesh['material'],
+): WaterAbsorptionPlugin | undefined {
+    if (mat instanceof MultiMaterial) mat = mat.subMaterials.find(m => !!m) ?? null;
+    return mat && mat.pluginManager
+        ? (mat.pluginManager as unknown as { _plugins?: unknown[] })._plugins
+            ?.find((p): p is WaterAbsorptionPlugin => p instanceof WaterAbsorptionPlugin)
+        : undefined;
+}
+
+/** Re-attach the underwater-absorption tint (carrying the map's colours). */
+function reattachWaterAbsorption(
+    mat: StandardMaterial, prevPlugin: WaterAbsorptionPlugin | undefined,
+): void {
+    if (prevPlugin) {
+        attachWaterAbsorption(mat, {
+            absorb: prevPlugin.absorb,
+            baseColor: prevPlugin.baseColor,
+            minColor: prevPlugin.minColor,
+        });
+    }
+}
+
+/** Attach the underwater terrain-absorption tint (Recoil SMF
+ *  `SMF_WATER_ABSORPTION`) to a terrain mesh's material(s) — handles both the
+ *  single-material and paged MultiMaterial forms, and survives later material
+ *  swaps via the reattach calls in applyTexture / applyPagedTextures. No-op if
+ *  already attached (idempotent for the async mapinfo-parse → attach path). */
+export function attachTerrainWaterAbsorption(
+    mesh: Mesh, colors: MapWaterAbsorption,
+): void {
+    const mats = mesh.material instanceof MultiMaterial
+        ? mesh.material.subMaterials
+        : [mesh.material];
+    for (const m of mats) {
+        if (m instanceof StandardMaterial && !findWaterAbsorptionPlugin(m)) {
+            attachWaterAbsorption(m, colors);
+        }
+    }
+}
+
 /**
  * Apply a paged DXT1 atlas (over-cap maps) as a MultiMaterial on a single
  * terrain mesh. The mesh keeps its global 0..1 UVs; each page sub-material
@@ -672,6 +719,7 @@ function applyPagedTextures(
     mesh.hasVertexAlpha = false;
 
     const prevPlugin = findDecalOverlayPlugin(mesh.material);
+    const prevWater = findWaterAbsorptionPlugin(mesh.material);
 
     // Regroup triangles by which page their UV centroid falls in, so each
     // page becomes a contiguous SubMesh index range.
@@ -729,6 +777,7 @@ function applyPagedTextures(
         mat.specularColor = new Color3(0.05, 0.05, 0.05);
         mat.backFaceCulling = false;
         reattachDecalOverlay(mat, prevPlugin);
+        reattachWaterAbsorption(mat, prevWater);
         multi.subMaterials[p] = mat;
     }
     mesh.material = multi;

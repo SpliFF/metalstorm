@@ -3,6 +3,7 @@ import {
     loadMapLighting, normaliseSunDir, defaultMapLighting,
     mergeSunLighting, setSunDirectionLighting,
     loadMapAtmosphere, defaultMapAtmosphere, mergeAtmosphere,
+    loadMapWaterAbsorption, defaultMapWaterAbsorption,
 } from './map-lighting.js';
 
 // A mapinfo.lua shaped like the real maps that broke: lighting is authored,
@@ -214,6 +215,60 @@ describe('loadMapAtmosphere (gl.GetAtmosphere data source)', () => {
         expect(await loadMapAtmosphere('/api/maps/data/missing')).toEqual(defaultMapAtmosphere());
         stubFetch('not lua = = =');
         expect(await loadMapAtmosphere('/api/maps/data/broken')).toEqual(defaultMapAtmosphere());
+    });
+});
+
+// The pools_of_ilys shape that produced G1a: a pink absorption base authored
+// for geothermal pools, with the standard lowerkeys() pass so keys land
+// lowercase (`basecolor`, `mincolor`) — the reader must be case-insensitive.
+const MAPINFO_WITH_WATER = `
+local mapinfo = {
+	name = "Test",
+	water = {
+		absorb    = { 0.011, 0.011, 0.015 },
+		baseColor = { 0.90, 0.38, 0.48 },
+		minColor  = { 0.0015, 0.0015, 0.0015 },
+		surfaceColor = { 0.90, 0.80, 0.65 },
+		surfaceAlpha = 0.2,
+	},
+}
+local function lowerkeys(ta)
+	local fix = {}
+	for i,v in pairs(ta) do
+		if (type(i) == "string") and (i ~= i:lower()) then fix[#fix+1] = i end
+		if (type(v) == "table") then lowerkeys(v) end
+	end
+	for i=1,#fix do local idx = fix[i]; ta[idx:lower()] = ta[idx]; ta[idx] = nil end
+end
+lowerkeys(mapinfo)
+return mapinfo
+`;
+
+describe('loadMapWaterAbsorption (SMF_WATER_ABSORPTION data source)', () => {
+    it('extracts the authored absorption colours past a lowerkeys pass', async () => {
+        stubFetch(MAPINFO_WITH_WATER);
+        const w = await loadMapWaterAbsorption('/api/maps/data/pools');
+        expect(w.absorb).toEqual([0.011, 0.011, 0.015]);
+        expect(w.baseColor).toEqual([0.9, 0.38, 0.48]);
+        expect(w.minColor).toEqual([0.0015, 0.0015, 0.0015]);
+    });
+
+    it('falls back to Recoil defaults (all-zero) for an omitted water table', async () => {
+        stubFetch(`return { name = "NoWater" }`);
+        const w = await loadMapWaterAbsorption('/api/maps/data/nowater');
+        expect(w).toEqual(defaultMapWaterAbsorption());
+        expect(w.absorb).toEqual([0, 0, 0]);
+        expect(w.baseColor).toEqual([0, 0, 0]);
+        expect(w.minColor).toEqual([0, 0, 0]);
+    });
+
+    it('falls back to defaults on HTTP error and on a broken chunk', async () => {
+        stubFetch('', false, 404);
+        expect(await loadMapWaterAbsorption('/api/maps/data/missing'))
+            .toEqual(defaultMapWaterAbsorption());
+        stubFetch('not lua = = =');
+        expect(await loadMapWaterAbsorption('/api/maps/data/broken'))
+            .toEqual(defaultMapWaterAbsorption());
     });
 });
 

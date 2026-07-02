@@ -235,6 +235,93 @@ export async function loadMapLighting(mapSourceUrl: string): Promise<MapLighting
 }
 
 /**
+ * The map's underwater-terrain absorption colours, from `mapinfo.lua`'s
+ * `water` sub-table. In Recoil these three drive the SMF ground shader's
+ * `SMF_WATER_ABSORPTION` block (shading of TERRAIN below the Y=0 water
+ * plane, graded by depth) — they are NOT the water surface colour, which
+ * is `surfaceColor`/`surfaceAlpha` (BumpWater). Same client-only model as
+ * `lighting`/`atmosphere` above (see feedback_lighting_client_only); the
+ * server's metadata.json carries the surface fields but not `absorb`.
+ *
+ * Defaults mirror Recoil `CMapInfo::ReadWater` (rts/Map/MapInfo.cpp):
+ * all-zero — on maps that author no absorption colours, deep water floors
+ * legitimately shade to black, exactly as in Recoil.
+ */
+export interface MapWaterAbsorption {
+    /** Absorption per elmo of depth, subtracted from `baseColor`. */
+    absorb: [number, number, number];
+    /** Shade at zero depth (the water "tint" on the terrain beneath). */
+    baseColor: [number, number, number];
+    /** Floor the depth-graded shade never darkens below. */
+    minColor: [number, number, number];
+}
+
+const WATER_ABSORPTION_DEFAULTS: MapWaterAbsorption = {
+    absorb: [0, 0, 0],
+    baseColor: [0, 0, 0],
+    minColor: [0, 0, 0],
+};
+
+/** A fresh copy of the Recoil-default water absorption. */
+export function defaultMapWaterAbsorption(): MapWaterAbsorption {
+    return {
+        absorb: [...WATER_ABSORPTION_DEFAULTS.absorb],
+        baseColor: [...WATER_ABSORPTION_DEFAULTS.baseColor],
+        minColor: [...WATER_ABSORPTION_DEFAULTS.minColor],
+    };
+}
+
+/** Extract the `water` absorption colours from a parsed `mapinfo` table,
+ * filling any omitted field with the Recoil default. Pure — shared by
+ * `loadMapWaterAbsorption`. */
+export function extractWaterAbsorption(
+    mapinfo: Record<string, LuaValue> | null,
+): MapWaterAbsorption {
+    const water = tget(mapinfo, 'water');
+    const wt = (water && typeof water === 'object' && !Array.isArray(water))
+        ? water as Record<string, LuaValue>
+        : null;
+    return {
+        absorb:    asVec3(tget(wt, 'absorb'),    WATER_ABSORPTION_DEFAULTS.absorb),
+        baseColor: asVec3(tget(wt, 'baseColor'), WATER_ABSORPTION_DEFAULTS.baseColor),
+        minColor:  asVec3(tget(wt, 'minColor'),  WATER_ABSORPTION_DEFAULTS.minColor),
+    };
+}
+
+/**
+ * Fetch `mapinfo.lua` and extract the `water` absorption colours. Returns
+ * Recoil defaults for omitted fields and on any fetch/parse failure.
+ *
+ * Note: this re-fetches the same `mapinfo.lua` that `loadMapLighting` reads;
+ * the file is small and HTTP-cached, so the second request is served from
+ * cache (same pattern as `loadMapAtmosphere`).
+ */
+export async function loadMapWaterAbsorption(
+    mapSourceUrl: string,
+): Promise<MapWaterAbsorption> {
+    const url = `${mapSourceUrl}/mapinfo.lua`;
+    let source: string;
+    try {
+        const res = await fetch(url);
+        if (!res.ok) {
+            console.warn(`[map-lighting] water ${url}: HTTP ${res.status}; using defaults`);
+            return defaultMapWaterAbsorption();
+        }
+        source = await res.text();
+    } catch (e) {
+        console.warn(`[map-lighting] water fetch ${url}: ${e}; using defaults`);
+        return defaultMapWaterAbsorption();
+    }
+
+    const mapinfo = parseMapinfo(source, url);
+    if (!mapinfo) {
+        console.warn(`[map-lighting] water ${url}: parse failed; using defaults`);
+        return defaultMapWaterAbsorption();
+    }
+    return extractWaterAbsorption(mapinfo);
+}
+
+/**
  * Normalise a 3-vector. Recoil's `sunDir` is documented as unit-length
  * but mappers routinely author values like {1, 0.7, 1} that aren't.
  * Falls back to {0,1,0} if the input is degenerate.

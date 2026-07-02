@@ -32,12 +32,12 @@ import type { EntityStateSnapshot } from './entity-state.js';
 // `globalThis` for this move — PLAN-game-worker.md GW4 Bucket-2).
 import {
     buildTerrainMesh, loadTerrainTextures, TerrainFog, DeformableTerrain,
-    setTerrainDecalPluginEnabled,
+    setTerrainDecalPluginEnabled, attachTerrainWaterAbsorption,
     type MapDimensions,
 } from './terrain.js';
 import { fetchMapDataHttp, type ParsedMapData } from './map-data.js';
 import {
-    loadMapLighting, defaultMapLighting,
+    loadMapLighting, defaultMapLighting, loadMapWaterAbsorption,
     type MapLighting,
 } from './map-lighting.js';
 import { createSceneLighting, applyMapLighting, type SceneLighting } from './scene-lighting.js';
@@ -412,7 +412,14 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     renderMapFeatures(scene, map, gpCtx.sceneLighting!.csm).catch((err) =>
         postLog(2, `[gp] renderMapFeatures failed: ${err}`));
 
-    // Fallback water plane (maps with voidWater=true ship their own fluid widget).
+    // Water plane at Y=0 (maps with voidWater=true ship their own fluid widget).
+    // FIDELITY-STANDIN: a flat alpha-blended plane instead of Recoil's BumpWater
+    // (reflection/refraction/waves). The tint follows BumpWater's SurfaceColor
+    // define exactly — surfaceColor * 0.4 at surfaceAlpha (BumpWater.cpp:429).
+    // water.baseColor is NOT the surface colour: it (with absorb/minColor) is
+    // the underwater TERRAIN shade, applied by WaterAbsorptionPlugin below.
+    // Using it here painted pools_of_ilys's pink absorb base across the whole
+    // surface at an invented 0.4 alpha floor — the G1a solid-magenta pools.
     if (!map.water.voidWater) {
         const water = MeshBuilder.CreateGround('water', {
             width: map.widthElmos, height: map.heightElmos,
@@ -421,15 +428,31 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
         water.isPickable = false;
         water.renderingGroupId = 1;
         const wmat = new StandardMaterial('waterMat', scene);
-        const [r, g, b] = map.water.baseColor;
-        wmat.diffuseColor = new Color3(r, g, b);
-        wmat.emissiveColor = new Color3(r * 0.3, g * 0.3, b * 0.3);
+        const [r, g, b] = map.water.surfaceColor;
+        wmat.diffuseColor = new Color3(r * 0.4, g * 0.4, b * 0.4);
+        wmat.emissiveColor = new Color3(r * 0.12, g * 0.12, b * 0.12);
         wmat.specularColor = new Color3(0.2, 0.2, 0.2);
-        wmat.alpha = Math.max(0.4, map.water.surfaceAlpha);
+        wmat.alpha = map.water.surfaceAlpha;
         wmat.backFaceCulling = false;
         water.material = wmat;
         water.receiveShadows = false;
         sceneLighting.csm.removeShadowCaster(water, false);
+        postLog(1, '[gp] water plane: flat surfaceColor stand-in (no BumpWater reflection/refraction)');
+    }
+
+    // Underwater terrain absorption (Recoil SMF_WATER_ABSORPTION): depth-graded
+    // pool-floor tint from mapinfo water.absorb/baseColor/minColor. Gated on
+    // Recoil's HasVisibleWater() condition; colours parsed client-side from
+    // mapinfo.lua (absorb is not in metadata.json — render-only data stays off
+    // the server per feedback_lighting_client_only). Fire-and-forget like the
+    // lighting parse; attach survives the later atlas material swaps via
+    // terrain.ts's reattach path.
+    if (map.minHeight < 0 && !map.water.voidWater) {
+        void loadMapWaterAbsorption(mapSourceAbs).then((colors) => {
+            if (gpTerrainMesh === terrainMesh && gpScene) {
+                attachTerrainWaterAbsorption(terrainMesh, colors);
+            }
+        });
     }
 
     // GW4-c6: boot the LuaUI getRuntime() now that the map (source URL + heightmap)
