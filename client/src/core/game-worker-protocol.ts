@@ -266,8 +266,10 @@ export type GpMessageToMain =
      * `box: null` hides the overlay. `viewId` absent ⇒ view 0.
      */
     | { type: 'gp:dragBox'; box: { x0: number; y0: number; x1: number; y1: number } | null; viewId?: number }
-    /** Game-over → main shows the results overlay. */
-    | { type: 'gp:gameOver'; frame: number }
+    /** Game-over → main shows the results overlay. `winningAllyTeams` is the
+     *  server's winners list (empty = undecided); `won` is the local player's
+     *  result (true/false), or null for a draw/undecided/spectator. */
+    | { type: 'gp:gameOver'; frame: number; winningAllyTeams: number[]; won: boolean | null }
     /** Worker reached the game server + authed (mirrors connection onAuthenticated). */
     | { type: 'gp:authenticated'; playerId: number; team: number }
     /** Server restart detected — main reloads. */

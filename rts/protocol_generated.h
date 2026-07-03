@@ -8638,6 +8638,8 @@ struct GameInfoT : public ::flatbuffers::NativeTable {
   float tidal_strength = 0.0f;
   bool legacy_coord_system = false;
   uint32_t max_units = 0;
+  bool game_over = false;
+  std::vector<uint8_t> winning_ally_teams{};
 };
 
 struct GameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -8655,7 +8657,9 @@ struct GameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_WIND_STRENGTH = 20,
     VT_TIDAL_STRENGTH = 22,
     VT_LEGACY_COORD_SYSTEM = 24,
-    VT_MAX_UNITS = 26
+    VT_MAX_UNITS = 26,
+    VT_GAME_OVER = 28,
+    VT_WINNING_ALLY_TEAMS = 30
   };
   const ::flatbuffers::String *map_id() const {
     return GetPointer<const ::flatbuffers::String *>(VT_MAP_ID);
@@ -8713,6 +8717,21 @@ struct GameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   uint32_t max_units() const {
     return GetField<uint32_t>(VT_MAX_UNITS, 0);
   }
+  /// True ONLY in the game-over broadcast (StateStreamer's last-team-standing
+  /// fallback, or a game gadget's `Spring.GameOver(winners)`). The client
+  /// shows the game-over overlay + fires `widget:GameOver` on THIS flag, never
+  /// on `paused` — a normal in-game pause must not end the game. Defaults false
+  /// for every ordinary GameInfo (auth snapshot, periodic refresh).
+  bool game_over() const {
+    return GetField<uint8_t>(VT_GAME_OVER, 0) != 0;
+  }
+  /// Winning allyteam IDs, as passed to `Spring.GameOver(allyTeamID1, …)`.
+  /// Empty when the result is undecided (e.g. host drop) or on a fallback win
+  /// with no ally mapping. Only meaningful when `game_over = true`. Mirrors
+  /// Recoil's `GameOver(winningAllyTeams)` callin argument.
+  const ::flatbuffers::Vector<uint8_t> *winning_ally_teams() const {
+    return GetPointer<const ::flatbuffers::Vector<uint8_t> *>(VT_WINNING_ALLY_TEAMS);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_MAP_ID) &&
@@ -8729,6 +8748,9 @@ struct GameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<float>(verifier, VT_TIDAL_STRENGTH, 4) &&
            VerifyField<uint8_t>(verifier, VT_LEGACY_COORD_SYSTEM, 1) &&
            VerifyField<uint32_t>(verifier, VT_MAX_UNITS, 4) &&
+           VerifyField<uint8_t>(verifier, VT_GAME_OVER, 1) &&
+           VerifyOffset(verifier, VT_WINNING_ALLY_TEAMS) &&
+           verifier.VerifyVector(winning_ally_teams()) &&
            verifier.EndTable();
   }
   GameInfoT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -8776,6 +8798,12 @@ struct GameInfoBuilder {
   void add_max_units(uint32_t max_units) {
     fbb_.AddElement<uint32_t>(GameInfo::VT_MAX_UNITS, max_units, 0);
   }
+  void add_game_over(bool game_over) {
+    fbb_.AddElement<uint8_t>(GameInfo::VT_GAME_OVER, static_cast<uint8_t>(game_over), 0);
+  }
+  void add_winning_ally_teams(::flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> winning_ally_teams) {
+    fbb_.AddOffset(GameInfo::VT_WINNING_ALLY_TEAMS, winning_ally_teams);
+  }
   explicit GameInfoBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -8800,8 +8828,11 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfo(
     float wind_strength = 0.0f,
     float tidal_strength = 0.0f,
     bool legacy_coord_system = false,
-    uint32_t max_units = 0) {
+    uint32_t max_units = 0,
+    bool game_over = false,
+    ::flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> winning_ally_teams = 0) {
   GameInfoBuilder builder_(_fbb);
+  builder_.add_winning_ally_teams(winning_ally_teams);
   builder_.add_max_units(max_units);
   builder_.add_tidal_strength(tidal_strength);
   builder_.add_wind_strength(wind_strength);
@@ -8812,6 +8843,7 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfo(
   builder_.add_game_speed(game_speed);
   builder_.add_game_id(game_id);
   builder_.add_map_id(map_id);
+  builder_.add_game_over(game_over);
   builder_.add_legacy_coord_system(legacy_coord_system);
   builder_.add_paused(paused);
   return builder_.Finish();
@@ -8830,9 +8862,12 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfoDirect(
     float wind_strength = 0.0f,
     float tidal_strength = 0.0f,
     bool legacy_coord_system = false,
-    uint32_t max_units = 0) {
+    uint32_t max_units = 0,
+    bool game_over = false,
+    const std::vector<uint8_t> *winning_ally_teams = nullptr) {
   auto map_id__ = map_id ? _fbb.CreateString(map_id) : 0;
   auto game_id__ = game_id ? _fbb.CreateString(game_id) : 0;
+  auto winning_ally_teams__ = winning_ally_teams ? _fbb.CreateVector<uint8_t>(*winning_ally_teams) : 0;
   return SpringWeb::CreateGameInfo(
       _fbb,
       map_id__,
@@ -8846,7 +8881,9 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfoDirect(
       wind_strength,
       tidal_strength,
       legacy_coord_system,
-      max_units);
+      max_units,
+      game_over,
+      winning_ally_teams__);
 }
 
 ::flatbuffers::Offset<GameInfo> CreateGameInfo(::flatbuffers::FlatBufferBuilder &_fbb, const GameInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -17531,6 +17568,8 @@ inline void GameInfo::UnPackTo(GameInfoT *_o, const ::flatbuffers::resolver_func
   { auto _e = tidal_strength(); _o->tidal_strength = _e; }
   { auto _e = legacy_coord_system(); _o->legacy_coord_system = _e; }
   { auto _e = max_units(); _o->max_units = _e; }
+  { auto _e = game_over(); _o->game_over = _e; }
+  { auto _e = winning_ally_teams(); if (_e) { _o->winning_ally_teams.resize(_e->size()); std::copy(_e->begin(), _e->end(), _o->winning_ally_teams.begin()); } }
 }
 
 inline ::flatbuffers::Offset<GameInfo> GameInfo::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -17553,6 +17592,8 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfo(::flatbuffers::FlatBufferB
   auto _tidal_strength = _o->tidal_strength;
   auto _legacy_coord_system = _o->legacy_coord_system;
   auto _max_units = _o->max_units;
+  auto _game_over = _o->game_over;
+  auto _winning_ally_teams = _o->winning_ally_teams.size() ? _fbb.CreateVector(_o->winning_ally_teams) : 0;
   return SpringWeb::CreateGameInfo(
       _fbb,
       _map_id,
@@ -17566,7 +17607,9 @@ inline ::flatbuffers::Offset<GameInfo> CreateGameInfo(::flatbuffers::FlatBufferB
       _wind_strength,
       _tidal_strength,
       _legacy_coord_system,
-      _max_units);
+      _max_units,
+      _game_over,
+      _winning_ally_teams);
 }
 
 inline TeamStartInfoT *TeamStartInfo::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {

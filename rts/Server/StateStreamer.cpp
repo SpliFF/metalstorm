@@ -8,6 +8,7 @@
 #include "PieceStateSerializer.h"
 #include "BuildActivitySerializer.h"
 #include "CombatEventCollector.h"
+#include "GameOverState.h"
 #include "DecalEventCollector.h"
 #include "ServerDecalHandler.h"
 #include "ServerTrackEmitter.h"
@@ -77,6 +78,33 @@ void StateStreamer::CheckWinCondition(int) {
     auto& rtcServer = ctx.rtcServer;
     auto& sim = ctx.sim;
     int frame = sim.GetFrameNum();
+    if (gameOverSent)
+        return;
+
+    // 1. Lua-declared game over — a game gadget called Spring.GameOver(winners)
+    //    (relayed here via GameOverState). This is the faithful path and must
+    //    fire regardless of cheats / team count, so it's checked every tick and
+    //    ahead of the hardcoded fallback below.
+    {
+        std::vector<uint8_t> winners;
+        if (gameOverRelay.ConsumePending(winners)) {
+            gameOverSent = true;
+            SLOG(SPRING_LOG_NOTICE,
+                "GAME OVER: Spring.GameOver declared, %zu winning allyteam(s) (frame %d)",
+                winners.size(), frame);
+            auto gameOver = Protocol::BuildGameInfo(
+                ctx.mapId, ctx.gameId, gs->speedFactor,
+                static_cast<uint32_t>(frame), gs->paused,
+                0, 0, 0, 0, 0, modInfo.legacyCoordSystem, unitHandler.MaxUnits(),
+                /*gameOver*/ true, winners);
+            rtcServer.BroadcastReliable(gameOver.data(), gameOver.size());
+            return;
+        }
+    }
+
+    // 2. Hardcoded last-team-standing fallback for games/scenarios with no
+    //    game_over gadget (2-team only). Skipped under cheats so scenarios that
+    //    empty a team on purpose don't self-terminate.
     if (frame > 30 && (frame % 30) == 0 && winningTeam < 0 && !gs->cheatEnabled) {
         // Count alive units per team
         int alive[2] = {0, 0};
@@ -90,11 +118,20 @@ void StateStreamer::CheckWinCondition(int) {
         else if (alive[1] == 0 && alive[0] > 0) winningTeam = 0;
 
         if (winningTeam >= 0) {
-            SLOG(SPRING_LOG_NOTICE, "GAME OVER: team %d wins (frame %d)",
-                winningTeam, frame);
-            // Broadcast GameInfo with paused=true to signal game over
-            auto gameOver = Protocol::BuildGameInfo("", "", 0.0f,
-                static_cast<uint32_t>(frame), true);
+            gameOverSent = true;
+            // Map the winning team to its allyteam so the client can name the
+            // winner (Spring winners are allyteams, not teams).
+            std::vector<uint8_t> winners = {
+                static_cast<uint8_t>(teamHandler.AllyTeam(winningTeam)) };
+            SLOG(SPRING_LOG_NOTICE, "GAME OVER: team %d (allyteam %d) wins (frame %d)",
+                winningTeam, teamHandler.AllyTeam(winningTeam), frame);
+            // Broadcast GameInfo with game_over=true (NOT via paused — a normal
+            // pause must not end the game) + the winning allyteam.
+            auto gameOver = Protocol::BuildGameInfo(
+                ctx.mapId, ctx.gameId, gs->speedFactor,
+                static_cast<uint32_t>(frame), gs->paused,
+                0, 0, 0, 0, 0, modInfo.legacyCoordSystem, unitHandler.MaxUnits(),
+                /*gameOver*/ true, winners);
             rtcServer.BroadcastReliable(gameOver.data(), gameOver.size());
         }
     }
@@ -212,7 +249,7 @@ void StateStreamer::BroadcastGameInfo(int) {
     auto& rtcServer = ctx.rtcServer;
     auto& sim = ctx.sim;
     int curFrame = sim.GetFrameNum();
-    if (curFrame >= 0 && (curFrame % 30) == 0 && rtcServer.GetClientCount() > 0 && winningTeam < 0) {
+    if (curFrame >= 0 && (curFrame % 30) == 0 && rtcServer.GetClientCount() > 0 && !gameOverSent) {
         const float3& wv = envResHandler.GetCurrentWindVec();
         // gs->speedFactor is the live sim-speed multiplier (set by
         // the `speed <N>` server command via LuaExecEngine). Broadcast

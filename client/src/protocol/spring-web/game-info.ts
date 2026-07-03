@@ -118,8 +118,41 @@ maxUnits():number {
   return offset ? this.bb!.readUint32(this.bb_pos + offset) : 0;
 }
 
+/**
+ * True ONLY in the game-over broadcast (StateStreamer's last-team-standing
+ * fallback, or a game gadget's `Spring.GameOver(winners)`). The client
+ * shows the game-over overlay + fires `widget:GameOver` on THIS flag, never
+ * on `paused` — a normal in-game pause must not end the game. Defaults false
+ * for every ordinary GameInfo (auth snapshot, periodic refresh).
+ */
+gameOver():boolean {
+  const offset = this.bb!.__offset(this.bb_pos, 28);
+  return offset ? !!this.bb!.readInt8(this.bb_pos + offset) : false;
+}
+
+/**
+ * Winning allyteam IDs, as passed to `Spring.GameOver(allyTeamID1, …)`.
+ * Empty when the result is undecided (e.g. host drop) or on a fallback win
+ * with no ally mapping. Only meaningful when `game_over = true`. Mirrors
+ * Recoil's `GameOver(winningAllyTeams)` callin argument.
+ */
+winningAllyTeams(index: number):number|null {
+  const offset = this.bb!.__offset(this.bb_pos, 30);
+  return offset ? this.bb!.readUint8(this.bb!.__vector(this.bb_pos + offset) + index) : 0;
+}
+
+winningAllyTeamsLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 30);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
+winningAllyTeamsArray():Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 30);
+  return offset ? new Uint8Array(this.bb!.bytes().buffer, this.bb!.bytes().byteOffset + this.bb!.__vector(this.bb_pos + offset), this.bb!.__vector_len(this.bb_pos + offset)) : null;
+}
+
 static startGameInfo(builder:flatbuffers.Builder) {
-  builder.startObject(12);
+  builder.startObject(14);
 }
 
 static addMapId(builder:flatbuffers.Builder, mapIdOffset:flatbuffers.Offset) {
@@ -170,12 +203,32 @@ static addMaxUnits(builder:flatbuffers.Builder, maxUnits:number) {
   builder.addFieldInt32(11, maxUnits, 0);
 }
 
+static addGameOver(builder:flatbuffers.Builder, gameOver:boolean) {
+  builder.addFieldInt8(12, +gameOver, +false);
+}
+
+static addWinningAllyTeams(builder:flatbuffers.Builder, winningAllyTeamsOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(13, winningAllyTeamsOffset, 0);
+}
+
+static createWinningAllyTeamsVector(builder:flatbuffers.Builder, data:number[]|Uint8Array):flatbuffers.Offset {
+  builder.startVector(1, data.length, 1);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addInt8(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startWinningAllyTeamsVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(1, numElems, 1);
+}
+
 static endGameInfo(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createGameInfo(builder:flatbuffers.Builder, mapIdOffset:flatbuffers.Offset, gameIdOffset:flatbuffers.Offset, gameSpeed:number, frame:number, paused:boolean, windX:number, windY:number, windZ:number, windStrength:number, tidalStrength:number, legacyCoordSystem:boolean, maxUnits:number):flatbuffers.Offset {
+static createGameInfo(builder:flatbuffers.Builder, mapIdOffset:flatbuffers.Offset, gameIdOffset:flatbuffers.Offset, gameSpeed:number, frame:number, paused:boolean, windX:number, windY:number, windZ:number, windStrength:number, tidalStrength:number, legacyCoordSystem:boolean, maxUnits:number, gameOver:boolean, winningAllyTeamsOffset:flatbuffers.Offset):flatbuffers.Offset {
   GameInfo.startGameInfo(builder);
   GameInfo.addMapId(builder, mapIdOffset);
   GameInfo.addGameId(builder, gameIdOffset);
@@ -189,6 +242,8 @@ static createGameInfo(builder:flatbuffers.Builder, mapIdOffset:flatbuffers.Offse
   GameInfo.addTidalStrength(builder, tidalStrength);
   GameInfo.addLegacyCoordSystem(builder, legacyCoordSystem);
   GameInfo.addMaxUnits(builder, maxUnits);
+  GameInfo.addGameOver(builder, gameOver);
+  GameInfo.addWinningAllyTeams(builder, winningAllyTeamsOffset);
   return GameInfo.endGameInfo(builder);
 }
 
@@ -205,7 +260,9 @@ unpack(): GameInfoT {
     this.windStrength(),
     this.tidalStrength(),
     this.legacyCoordSystem(),
-    this.maxUnits()
+    this.maxUnits(),
+    this.gameOver(),
+    this.bb!.createScalarList<number>(this.winningAllyTeams.bind(this), this.winningAllyTeamsLength())
   );
 }
 
@@ -223,6 +280,8 @@ unpackTo(_o: GameInfoT): void {
   _o.tidalStrength = this.tidalStrength();
   _o.legacyCoordSystem = this.legacyCoordSystem();
   _o.maxUnits = this.maxUnits();
+  _o.gameOver = this.gameOver();
+  _o.winningAllyTeams = this.bb!.createScalarList<number>(this.winningAllyTeams.bind(this), this.winningAllyTeamsLength());
 }
 }
 
@@ -239,13 +298,16 @@ constructor(
   public windStrength: number = 0.0,
   public tidalStrength: number = 0.0,
   public legacyCoordSystem: boolean = false,
-  public maxUnits: number = 0
+  public maxUnits: number = 0,
+  public gameOver: boolean = false,
+  public winningAllyTeams: (number)[] = []
 ){}
 
 
 pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const mapId = (this.mapId !== null ? builder.createString(this.mapId!) : 0);
   const gameId = (this.gameId !== null ? builder.createString(this.gameId!) : 0);
+  const winningAllyTeams = GameInfo.createWinningAllyTeamsVector(builder, this.winningAllyTeams);
 
   return GameInfo.createGameInfo(builder,
     mapId,
@@ -259,7 +321,9 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     this.windStrength,
     this.tidalStrength,
     this.legacyCoordSystem,
-    this.maxUnits
+    this.maxUnits,
+    this.gameOver,
+    winningAllyTeams
   );
 }
 }

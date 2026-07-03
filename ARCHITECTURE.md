@@ -294,7 +294,7 @@ Game scripts call engine functions via the `Spring` table. Key categories:
 
 | Category | Functions | Notes |
 |----------|-----------|-------|
-| **Game control** | `GameOver({winningAllyTeams})`, `KillTeam(teamId)`, `AssignPlayerToTeam(playerId, teamId)` | `GameOver` fires the `GameOver` callin then signals game end |
+| **Game control** | `GameOver({winningAllyTeams})`, `KillTeam(teamId)`, `AssignPlayerToTeam(playerId, teamId)` | `GameOver` fires the synced `GameOver` callin AND relays the winners (`GameOverState`) to the per-tick broadcast: `GameInfo{game_over=true, winning_ally_teams}` → client game-over overlay (names the winner) + unsynced `widget:GameOver(winners)`. Client keys the overlay on `game_over`, never on `paused`. StateStreamer's last-team-standing fallback uses the same broadcast (mapping the winning team → its allyteam). |
 | **Unit create/destroy** | `CreateUnit(defName, x, y, z, facing, team)`, `DestroyUnit(unitId, selfDestr, reclaimed)`, `TransferUnit(unitId, newTeam)` | |
 | **Unit commands** | `GiveOrderToUnit(unitId, cmdId, params, options)`, `GiveOrderToUnitArray(unitIds, cmdId, params, options)` | |
 | **Unit state** | `SetUnitHealth(unitId, health)`, `SetUnitMaxHealth(unitId, maxHealth)`, `SetUnitExperience(unitId, exp)`, `SetUnitPosition(unitId, x, y, z)`, `AddUnitDamage(unitId, damage)` | 50+ unit state setters |

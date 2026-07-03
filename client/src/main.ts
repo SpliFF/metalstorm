@@ -529,7 +529,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 break;
             }
             case 'gp:gameOver':
-                showGameOver(gameTemplates, m.frame, { onReturnToLobby: quitToLobby });
+                showGameOver(gameTemplates, m.frame, {
+                    winningAllyTeams: m.winningAllyTeams,
+                    won: m.won,
+                    onReturnToLobby: quitToLobby,
+                });
                 break;
             // GW8: reply to a window.test client-bound request.
             case 'gp:testResult': {

@@ -50,6 +50,7 @@
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectileFactory.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Server/CombatEventCollector.h"
+#include "Server/GameOverState.h"
 #include "Server/StandingOrders.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Units/Unit.h"
@@ -1044,8 +1045,14 @@ int LuaSyncedCtrl::GameOver(lua_State* L)
 		winningAllyTeams.push_back(allyTeamID);
 	}
 
-	// TODO: game->GameEnd() removed with Game.h; need server-side game-end mechanism
+	// Fire the synced eventHandler callin (server-side LuaRules/LuaGaia).
 	eventHandler.GameOver(winningAllyTeams);
+	// Replaces the removed CGame::GameEnd game-end mechanism: hand the winners
+	// to the server-side broadcast relay so StateStreamer sends a
+	// GameInfo{game_over=true, winning_ally_teams=…} to every client (which
+	// drives the game-over overlay + the widget:GameOver callin). See
+	// GameOverState.h.
+	gameOverRelay.Declare(winningAllyTeams);
 	// push the number of accepted allyteams
 	lua_pushnumber(L, winningAllyTeams.size());
 	return 1;

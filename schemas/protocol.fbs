@@ -840,6 +840,17 @@ table GameInfo {
     /// feature-targeted reclaim/repair/resurrect order. 0 = not yet known.
     /// See PLAN-bar.md (Game-table maxUnits thread).
     max_units: uint32 = 0;
+    /// True ONLY in the game-over broadcast (StateStreamer's last-team-standing
+    /// fallback, or a game gadget's `Spring.GameOver(winners)`). The client
+    /// shows the game-over overlay + fires `widget:GameOver` on THIS flag, never
+    /// on `paused` — a normal in-game pause must not end the game. Defaults false
+    /// for every ordinary GameInfo (auth snapshot, periodic refresh).
+    game_over: bool = false;
+    /// Winning allyteam IDs, as passed to `Spring.GameOver(allyTeamID1, …)`.
+    /// Empty when the result is undecided (e.g. host drop) or on a fallback win
+    /// with no ally mapping. Only meaningful when `game_over = true`. Mirrors
+    /// Recoil's `GameOver(winningAllyTeams)` callin argument.
+    winning_ally_teams: [ubyte];
 }
 
 /// One team's start position, in RH-canonical elmos (the same convention

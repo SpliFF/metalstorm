@@ -783,7 +783,9 @@ export interface ConnectionEvents {
      *  server validated arg types so the variant covers
      *  nil/bool/number/string only. */
     onSendToUnsynced?: (args: SendToUnsyncedArgInfo[]) => void;
-    onGameOver?: (frame: number) => void;
+    /** Fired on the server's game-over broadcast. `winningAllyTeams` is the
+     *  winners list from `Spring.GameOver(...)` (empty = undecided). */
+    onGameOver?: (frame: number, winningAllyTeams: number[]) => void;
     onPlayerLeft?: (playerId: number, username: string, team: number, reason: number) => void;
     onMapData?: (map: ParsedMapData) => void;
     /** Per-tick batch of feature lifecycle events. `spawns` is a list of
@@ -1574,8 +1576,17 @@ export class Connection {
                     strength: info.windStrength(),
                     tidal: info.tidalStrength(),
                 }, info.legacyCoordSystem(), info.maxUnits());
-                if (info.paused()) {
-                    this.events.onGameOver?.(info.frame());
+                // Game over is signalled by the explicit game_over flag, NOT by
+                // paused — a normal in-game pause reuses this GameInfo message and
+                // must not trigger the end-game overlay (the prior `info.paused()`
+                // check did, a latent bug; G2). winning_ally_teams carries the
+                // Spring.GameOver winners (empty = undecided).
+                if (info.gameOver()) {
+                    const winners: number[] = [];
+                    for (let i = 0; i < info.winningAllyTeamsLength(); i++) {
+                        winners.push(info.winningAllyTeams(i) ?? 0);
+                    }
+                    this.events.onGameOver?.(info.frame(), winners);
                 }
                 break;
             }

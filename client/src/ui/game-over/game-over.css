@@ -32,6 +32,18 @@
     margin: 0 0 24px;
 }
 
+#game-over-overlay .game-over-card .game-over-result {
+    color: #e0e0e0;
+    font-size: 17px;
+    margin: 0 0 8px;
+}
+
+#game-over-overlay .game-over-card .game-over-frame {
+    color: #888;
+    font-size: 13px;
+    margin: 0 0 24px;
+}
+
 #game-over-overlay .game-over-card button {
     padding: 12px 28px;
     border: none;

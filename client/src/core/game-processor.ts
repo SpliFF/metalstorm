@@ -896,16 +896,24 @@ function gpConnect(msg: GpInitToWorker): void {
         // HTTP, not the connection (server_main.cpp). gpLoadMap (called from
         // gpInit) fetches + builds the terrain; the viewport is registered from
         // onAuthenticated via gpRegisterViewport().
-        onGameOver: (frame) => {
-            postToMain({ type: 'gp:gameOver', frame });
-            // Drive widget:GameOver + gadget-half GameOver. Recoil's
-            // signature is GameOver(winningAllyTeams) — the worker doesn't
-            // receive the winners list (not on the wire), so we pass an
-            // empty table. DEVIATION: winner-dependent end-game widgets see
-            // no winners; revisit if a GameOver winners payload is added.
+        onGameOver: (frame, winningAllyTeams) => {
+            // G2: winners now arrive on the wire (GameInfo.winning_ally_teams).
+            // Decide victory/defeat here where both the winners and the local
+            // ally team (liveState.identity) are known; a spectator (myTeam < 0)
+            // gets a neutral result rather than a false "Defeat".
+            const myTeam = liveState.identity.myTeam;
+            const myAllyTeam = liveState.identity.myAllyTeam;
+            const won = winningAllyTeams.length === 0 || myTeam < 0
+                ? null
+                : winningAllyTeams.includes(myAllyTeam);
+            postToMain({ type: 'gp:gameOver', frame, winningAllyTeams, won });
+            // Drive widget:GameOver + gadget-half GameOver with the real winners
+            // table — Recoil's signature is GameOver(winningAllyTeams). The IDs
+            // are server-validated allyteam ints, safe to inline as a Lua list.
             { const rt = getRuntime(); if (rt) {
+                const w = `{${winningAllyTeams.join(',')}}`;
                 rt.doString(
-                    `do local w = {} ` +
+                    `do local w = ${w} ` +
                     `if widgetHandler and widgetHandler.GameOver then ` +
                     `pcall(widgetHandler.GameOver, widgetHandler, w) end ` +
                     `if _SpringWebRunGadgetCallin then ` +

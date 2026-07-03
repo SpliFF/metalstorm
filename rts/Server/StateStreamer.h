@@ -44,8 +44,15 @@ private:
 
     GameServerContext& ctx;
 
-    // Win-check latch (was a function-static int in the loop).
+    // Last-team-standing fallback latch (was a function-static int in the loop):
+    // the team the alive-unit count declared the winner, or -1 while undecided.
     int winningTeam = -1;
+    // Set once the game-over GameInfo has been broadcast (via either the Lua
+    // `Spring.GameOver` relay or the fallback). Gates the periodic BroadcastGameInfo
+    // off afterward and stops CheckWinCondition re-firing. Distinct from
+    // winningTeam so the Lua path (which has no single winning *team*) can latch
+    // game-over without claiming team 0 won.
+    bool gameOverSent = false;
 
     // Per-team stats-history send cursor (PLAN-bar Spring.GetTeamStatsHistory).
     std::vector<uint32_t> lastSentStatFinalized;
