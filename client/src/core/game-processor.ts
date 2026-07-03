@@ -133,6 +133,10 @@ import {
     pauseFramesHost, resumeFramesHost,
     type MapDataTransfer, type MinimalUnitDefWire, type MinimalWeaponDefWire,
 } from './lua-ui-host.js';
+import {
+    widgetProfileStart, widgetProfileStop, widgetProfileDump,
+    buildUiProfileReport, type UiTaxAccumulator,
+} from './widget-profiler.js';
 
 // ── GP module-level state ───────────────────────────────────────────────────
 
@@ -266,6 +270,16 @@ function gpMark(idx: number): void {
 /// is skipped, isolating its render-thread tax (12 gl.getParameter round-trips
 /// + Fengari runFrame + wipeCaches). Live proxy for a widget-less boot.
 let gpUiPassEnabled = true;
+/// PLAN-perf N1: always-on fixed-tax split of gpRunUiPass — total ms per
+/// slice (GL-state save / Fengari runFrame / restore / wipeCaches / rmlFlush)
+/// since the last reset. Costs 6 performance.now() calls per frame. Dump via
+/// window.test.uiProfileDump() (merged with the Lua-side per-widget profile
+/// when window.test.uiProfileStart() has installed it — widget-profiler.ts).
+const gpUiTax: UiTaxAccumulator = { frames: 0, save: 0, lua: 0, restore: 0, wipe: 0, rml: 0 };
+function gpUiTaxReset(): void {
+    gpUiTax.frames = 0; gpUiTax.save = 0; gpUiTax.lua = 0;
+    gpUiTax.restore = 0; gpUiTax.wipe = 0; gpUiTax.rml = 0;
+}
 /// Wall-clock timestamp of the previous render frame, for the FX `dt`.
 let gpLastFrameTime = 0;
 /// Holds the per-allyteam LOS bitmaps (envelope 0x07) so a bitmap that
@@ -1483,6 +1497,7 @@ function gpRunUiPass(): void {
     if (!gpCtx.luaUiActive || !getRuntime() || !gpCtx.uiGl || !gpEngine) return;
     const gl = gpCtx.uiGl;
 
+    const tSave = performance.now();
     const savedProgram = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null;
     const savedVao = gl.getParameter(gl.VERTEX_ARRAY_BINDING) as WebGLVertexArrayObject | null;
     const savedBlend = gl.getParameter(gl.BLEND) as boolean;
@@ -1510,6 +1525,7 @@ function gpRunUiPass(): void {
         getBridge()!.setCameraMatrices(liveState.viewMatrix, liveState.projMatrix);
     }
 
+    const tLua = performance.now();
     try {
         runFrame(getRuntime()!, gl, /*clearColor*/ false, /*worldPass*/ true);
     } catch (err) {
@@ -1518,6 +1534,7 @@ function gpRunUiPass(): void {
     }
 
     // Restore Babylon's expected state.
+    const tRestore = performance.now();
     gl.useProgram(savedProgram);
     gl.bindVertexArray(savedVao);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, savedFBO);
@@ -1528,13 +1545,23 @@ function gpRunUiPass(): void {
     if (savedPolyOffset) gl.enable(gl.POLYGON_OFFSET_FILL); else gl.disable(gl.POLYGON_OFFSET_FILL);
     gl.viewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3]);
     gl.depthMask(savedDepthMask);
+    const tWipe = performance.now();
     (gpEngine as unknown as { wipeCaches: (b?: boolean) => void }).wipeCaches(true);
 
     // PLAN-rml.md §4.5: ship the frame's recorded RML DOM ops to the main-thread
     // overlay in ONE message. Ordering: world pass → chili DrawScreen (runFrame
     // above) → rmlFlush. RML widget callins ran inside runFrame and recorded
     // their ops; this is the single batched flush.
+    const tRml = performance.now();
     rmlFlush();
+
+    const tEnd = performance.now();
+    gpUiTax.frames++;
+    gpUiTax.save += tLua - tSave;
+    gpUiTax.lua += tRestore - tLua;
+    gpUiTax.restore += tWipe - tRestore;
+    gpUiTax.wipe += tRml - tWipe;
+    gpUiTax.rml += tEnd - tRml;
 }
 
 /// GW4-c6: boot the Fengari LuaUI getRuntime() against the shared Babylon context.
@@ -1709,6 +1736,28 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         case 'perfReset':
             gpFrameProfiler.reset();
             return null;
+        // — per-widget LuaUI cost profile (PLAN-perf N1). start installs the
+        //   Lua-side timing wrappers (widget-profiler.ts) and zeroes the JS
+        //   fixed-tax accumulator; dump merges both into the P5-vs-Fengari
+        //   report; stop restores the original widget callins. —
+        case 'uiProfileStart': {
+            const rt = getRuntime();
+            if (!rt) return { error: 'LuaUI runtime not booted' };
+            gpUiTaxReset();
+            const err = widgetProfileStart(rt);
+            return err ? { error: err } : { ok: true };
+        }
+        case 'uiProfileStop': {
+            const rt = getRuntime();
+            if (!rt) return { error: 'LuaUI runtime not booted' };
+            const err = widgetProfileStop(rt);
+            return err ? { error: err } : { ok: true };
+        }
+        case 'uiProfileDump': {
+            const rt = getRuntime();
+            const dump = rt ? widgetProfileDump(rt) : null;
+            return buildUiProfileReport(gpUiTax, dump, num(0, 40));
+        }
         // — generic JS eval against the worker global scope (GW8). Lets the
         //   main devtools console reach the worker-resident debug hooks
         //   (globalThis.__entityRenderer / __fxLightPool / __renderPipeline /

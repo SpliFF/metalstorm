@@ -269,6 +269,27 @@ export class TestHarness {
         void this.deps.workerCall('perfReset');
     }
 
+    /** PLAN-perf N1 — start a per-widget LuaUI cost profile: wraps every
+     *  widget callin with a timing closure in the worker (widget-profiler.ts)
+     *  and zeroes the gpRunUiPass fixed-tax accumulator. Adds ~2 Lua→JS clock
+     *  crossings per widget callin while running — start, measure, dump, stop. */
+    async uiProfileStart(): Promise<unknown> {
+        return this.deps.workerCall('uiProfileStart');
+    }
+
+    /** Merged N1 report: gpRunUiPass slice means (GL save / Fengari / restore
+     *  / wipeCaches / rmlFlush), runFrame block means, and the ranked
+     *  per-widget callin cost table. Log `.table` for the readable form.
+     *  Leaves the profiler running (dump again for a longer window). */
+    async uiProfileDump(topN?: number): Promise<unknown> {
+        return this.deps.workerCall('uiProfileDump', topN == null ? [] : [topN]);
+    }
+
+    /** Restore the original widget callins (ends the N1 profile session). */
+    async uiProfileStop(): Promise<unknown> {
+        return this.deps.workerCall('uiProfileStop');
+    }
+
     /** Named WAN presets. `lan` ≈ localhost; `wan` ≈ regional; `intercont`
      *  ≈ the L0 exit-gate condition (200 ms ± 40 ms jitter, 2 % loss). */
     netSimPreset(name: 'lan' | 'wan' | 'intercont'): void {

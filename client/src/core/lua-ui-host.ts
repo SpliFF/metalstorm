@@ -3341,11 +3341,26 @@ export function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext, clearColor 
 
     // Callins: Update → GameFrame (per-tick) → DrawGenesis → DrawScreen
     rt.doString(`
+        -- PLAN-perf N1: while the widget profiler is active (__wprof set by
+        -- widget-profiler.ts via window.test.uiProfileStart) accumulate
+        -- per-block wall time so the Fengari slice of the LuaUI pass can be
+        -- attributed. Zero cost when not profiling (_wp is nil).
+        local _wp = __wprof
+        local _wpNow = _wp and _SpringWebPerfNow
+        local _wpT0 = _wp and _wpNow()
+        local function _wpAdd(k, t)
+            _wp.blocks[k] = (_wp.blocks[k] or 0) + (_wpNow() - t)
+        end
+        local _wpT
+
         -- Deferred Chili TaskHandler patch (runs once after WG.Chili exists)
         if _chiliTaskFix then _chiliTaskFix() end
 
+        if _wp then _wpT = _wpNow() end
         if Update then pcall(Update) end
+        if _wp then _wpAdd('update', _wpT) end
 
+        if _wp then _wpT = _wpNow() end
         -- GameStart dispatch (fires once). Spring fires widget:GameStart at
         -- frame 1; we fire the first time the worker observes frame >= 1.
         -- A late-booting worker that first sees a higher frame still fires
@@ -3388,7 +3403,9 @@ export function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext, clearColor 
                 end
             end
         end
+        if _wp then _wpAdd('gameFrame', _wpT) end
 
+        if _wp then _wpT = _wpNow() end
         -- PLAN.md Stage B1 (faithful projectile lights). Run the deferred-light
         -- collectors ZK registered via WG.DeferredLighting_RegisterFunction
         -- (gfx_projectile_lights.lua, gfx_unit_lights.lua), thread the standard
@@ -3442,8 +3459,13 @@ export function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext, clearColor 
                     table.concat(pParts, ";"), table.concat(bParts, ";"))
             end
         end
+        if _wp then _wpAdd('lightFlatten', _wpT) end
 
+        if _wp then _wpT = _wpNow() end
         if DrawGenesis then pcall(DrawGenesis) end
+        if _wp then _wpAdd('drawGenesis', _wpT) end
+
+        if _wp then _wpT = _wpNow() end
 
         -- Force-update any Chili controls stuck without display lists.
         -- The TaskHandler queue loses entries due to fengari's weak table
@@ -3509,7 +3531,9 @@ export function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext, clearColor 
                 Spring.Echo("[LuaUI] Invalidated all Chili display lists for texture rebuild")
             end
         end
+        if _wp then _wpAdd('chiliFix', _wpT) end
 
+        if _wp then _wpT = _wpNow() end
         -- GW4-c6-2: world-space pass. The 3D world (terrain + units) is already
         -- in this framebuffer with its depth buffer; load the camera matrices,
         -- enable depth so overlays occlude behind hills/units, and run the
@@ -3539,7 +3563,9 @@ export function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext, clearColor 
             gl.MatrixMode(GL.MODELVIEW)
             gl.LoadIdentity()
         end
+        if _wp then _wpAdd('drawWorld', _wpT) end
 
+        if _wp then _wpT = _wpNow() end
         if DrawScreen then
             local vsx, vsy = Spring.GetViewSizes()
             -- Spring's DrawScreen uses Y-up ortho (y=0 at bottom).
@@ -3561,6 +3587,14 @@ export function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext, clearColor 
             gl.DepthTest(false)
             gl.Color(1, 1, 1, 1)
             pcall(DrawScreen, vsx, vsy)
+        end
+        if _wp then
+            _wpAdd('drawScreen', _wpT)
+            -- Whole-chunk wall time. The JS-measured runFrame duration minus
+            -- this is the per-frame compile + doString dispatch overhead
+            -- (this chunk is re-parsed every frame).
+            _wpAdd('chunkExec', _wpT0)
+            _wp.frames = _wp.frames + 1
         end
     `, 'callin:frame');
 }
