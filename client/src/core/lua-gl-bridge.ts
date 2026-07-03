@@ -272,6 +272,13 @@ export class LuaGLBridge {
     /** Currently bound shader — tracked so gl.Uniform* calls target the right program. */
     private currentShader: LuaShaderHandle | null = null;
     private textureCache: TextureCache = new Map();
+    /** Bumped each time an async CreateTexture load resolves (image or DDS).
+     * Chili records skin 9-slice UVs from gl.TextureInfo, which reports the
+     * 1×1 placeholder until the real texture arrives; a cached `_own_dlist`
+     * bakes those stale UVs. The LuaUI host polls this counter and re-records
+     * dlists whenever it advances, so late-loading skins self-heal without a
+     * one-shot timer (PLAN-perf N2, bug #2). */
+    private textureLoadGeneration = 0;
     /** 1x1 fallback textures. */
     private whiteTex: WebGLTexture | null = null;
     private blackTex: WebGLTexture | null = null;
@@ -678,6 +685,11 @@ export class LuaGLBridge {
             const lines = this.imm.drainFlushDebugLog();
             return lines.join('\n') as unknown as LuaValue;
         };
+        // Monotonic counter of resolved async texture loads. The LuaUI host
+        // polls this to invalidate Chili display lists that baked 1×1
+        // placeholder UVs before their skin texture arrived (PLAN-perf N2).
+        gl['_textureLoadGeneration'] = () =>
+            this.textureLoadGeneration as unknown as LuaValue;
         gl['LoadIdentity'] = () => this.imm.loadIdentity();
         gl['LoadMatrix'] = (...args: LuaValue[]) => this.loadMatrix(args);
         gl['MultMatrix'] = (...args: LuaValue[]) => this.multMatrixGL(args);
@@ -1290,12 +1302,19 @@ export class LuaGLBridge {
 
     private scissor(x: LuaValue, y?: LuaValue, w?: LuaValue, h?: LuaValue): void {
         const gl = this.gl;
+        // Record into the active display list (if any) so a cached replay
+        // reproduces Chili's client-area clipping — PLAN-perf N2. Applying it
+        // live too is harmless during recording (no draw flushes there) and
+        // keeps GL state coherent for any interleaved live geometry.
         if (x === false || x === null || x === undefined) {
+            if (this.imm.isRecording()) this.imm.recordScissor(false);
             gl.disable(gl.SCISSOR_TEST);
             return;
         }
+        const nx = Number(x), ny = Number(y), nw = Number(w), nh = Number(h);
+        if (this.imm.isRecording()) this.imm.recordScissor(true, nx, ny, nw, nh);
         gl.enable(gl.SCISSOR_TEST);
-        gl.scissor(Number(x), Number(y), Number(w), Number(h));
+        gl.scissor(nx, ny, nw, nh);
     }
 
     private stencilTest(on: LuaValue): void {
@@ -2038,6 +2057,7 @@ export class LuaGLBridge {
             if (/\.dds(\?|$)/i.test(url)) {
                 const buf = await res.arrayBuffer();
                 if (this.uploadDDS(buf, handle)) {
+                    this.textureLoadGeneration++;
                     console.log(`[gl.CreateTexture] loaded DDS ${url} (${handle.width}x${handle.height})`);
                 }
                 return;
@@ -2055,6 +2075,7 @@ export class LuaGLBridge {
             gl.generateMipmap(gl.TEXTURE_2D);
             handle.width = bitmap.width;
             handle.height = bitmap.height;
+            this.textureLoadGeneration++;
             console.log(`[gl.CreateTexture] loaded ${url} (${bitmap.width}x${bitmap.height})`);
         } catch (e) {
             console.warn(`[gl.CreateTexture] ${url}: ${e}`);

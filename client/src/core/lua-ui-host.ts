@@ -1558,42 +1558,23 @@ Spring.Utilities.TableToString = function(t) return tostring(t) end`;
         }
     }
 
-    // Patch control.lua: disable _all_dlist caching. Chili's Control:Draw
-    // checks _all_dlist first and short-circuits, skipping _own_dlist and
-    // DrawChildren. The _all_dlist is recorded during Update (before
-    // DrawScreen sets up projection/modelview), so the captured content
-    // renders in the wrong matrix context. Disabling it forces the
-    // individual _own_dlist + DrawChildren path which draws live each frame.
-    const controlPath = 'LuaUI/Widgets/chili_old/controls/control.lua';
-    const controlSrc = vfsLookup(controlPath);
-    if (controlSrc) {
-        // Disable _UpdateAllDList so _all_dlist is never created
-        let patched = controlSrc.replace(
-            'self:_UpdateAllDList()',
-            '-- self:_UpdateAllDList() -- disabled: web renderer draws live',
-        );
-        // Also disable _children_dlist creation
-        patched = patched.replace(
-            'self._children_dlist = gl.CreateList(self.DrawChildrenForList,self)',
-            '-- self._children_dlist = gl.CreateList(self.DrawChildrenForList,self) -- disabled',
-        );
-        // Also disable _own_dlist caching. Skin draws (DrawWindow / DrawPanel
-        // etc.) call gl.TextureInfo to get TileImage dimensions for 9-slice
-        // UV math. The first invocation runs before the async-loaded skin
-        // texture has resolved, so TextureInfo returns the 1x1 placeholder
-        // dimensions and the recorded UVs are wrong (out of [0,1], producing
-        // a tiled-texture grid instead of a seamless 9-slice frame). Drawing
-        // live each frame avoids stale-UV recordings — the cost is one extra
-        // skin draw per frame per visible control.
-        patched = patched.replace(
-            'self._own_dlist = gl.CreateList(self.DrawControl, self)',
-            '-- self._own_dlist = gl.CreateList(self.DrawControl, self) -- disabled: live draw',
-        );
-        if (patched !== controlSrc) {
-            vfsRegister(controlPath, patched);
-            postLog(2, '[LuaUI] Patched control.lua: disabled all dlist caching (live draws)');
-        }
-    }
+    // Chili display-list caching is now LEFT ENABLED (faithful — real Spring
+    // runs Chili with dlists). PLAN-perf N1 measured Chili DrawScreen at
+    // 92 ms/frame precisely because a previous patch here disabled all three
+    // caches (_all_dlist / _own_dlist / _children_dlist), forcing the entire
+    // control tree to redraw live through the Fengari gl bridge every frame.
+    // The two record-time bugs that motivated disabling them are fixed at the
+    // bridge instead of by crippling the cache (PLAN-perf N2):
+    //   1. The "wrong matrix context" blamed on _all_dlist was really the gl
+    //      bridge not recording gl.Scissor into display lists, so cached child
+    //      draws lost their client-area clipping (safeOpengl = true is the
+    //      Control default). lua-gl-immediate now records + replays scissor
+    //      ops; matrix ops were already recorded relative and replay correctly.
+    //   2. Stale 1×1 skin UVs baked before async skin textures resolved are
+    //      healed by the texture-generation-driven dlist invalidation in the
+    //      per-frame chiliFix pass below (replacing the old one-shot 3 s
+    //      rebuild) — it re-records whenever a skin texture actually arrives.
+    // No control.lua edit needed: the shipped source keeps useDList = true.
 
     // Patch chili_old/Headers/links.lua: teach UnlinkSafe / CheckWeakLink
     // about our table-based newproxy polyfill. fengari does not implement
@@ -3503,21 +3484,27 @@ export function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext, clearColor 
                 pcall(fixTree, s, 0)
             end
 
-            -- Rebuild display lists after async texture loads complete.
-            -- Skin textures load asynchronously but gl.TextureInfo returns
-            -- placeholder dimensions (1x1) at first recording. The 9-slice
-            -- UV math uses texWidth/texHeight, so stale dimensions produce
-            -- wildly wrong UVs. We do a one-time full rebuild after textures
-            -- have had time to load (~3 seconds after init).
-            if not _chiliTextureRebuildDone and _chiliFixTimer > 90 then
-                _chiliTextureRebuildDone = true
+            -- Rebuild display lists when async skin textures resolve. Chili
+            -- records skin 9-slice UVs from gl.TextureInfo, which reports the
+            -- 1x1 placeholder until the real texture arrives; a dlist recorded
+            -- before then bakes stale UVs (a tiled grid instead of a seamless
+            -- frame). The gl bridge bumps a monotonic counter on every resolved
+            -- async load; whenever it advances we invalidate every control's
+            -- cached lists so Chili re-records at correct dimensions. This
+            -- self-heals late loads (superseding the old one-shot 3s rebuild)
+            -- and is debounced to at most ~once per 15 frames so a burst of
+            -- streaming loads at boot doesn't thrash. (PLAN-perf N2, bug #2.)
+            local texGen = (gl._textureLoadGeneration and gl._textureLoadGeneration()) or 0
+            if texGen ~= _chiliTexGen
+               and (_chiliFixTimer - (_chiliTexRebuildFrame or -100)) >= 15 then
+                _chiliTexGen = texGen
+                _chiliTexRebuildFrame = _chiliFixTimer
                 -- Invalidate all controls so Chili fully rebuilds every
                 -- display list (_own_dlist, _all_dlist, _children_dlist).
                 -- Control:Draw short-circuits on _all_dlist, so just
                 -- rebuilding _own_dlist is not enough.
                 local function invalidateAll(ctrl, depth)
-                    if depth > 10 then return end
-                    -- Delete ALL cached display lists
+                    if depth > 12 then return end
                     if ctrl._all_dlist then gl.DeleteList(ctrl._all_dlist); ctrl._all_dlist = nil end
                     if ctrl._own_dlist then gl.DeleteList(ctrl._own_dlist); ctrl._own_dlist = nil end
                     if ctrl._children_dlist then gl.DeleteList(ctrl._children_dlist); ctrl._children_dlist = nil end
@@ -3528,7 +3515,6 @@ export function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext, clearColor 
                     end
                 end
                 pcall(invalidateAll, s, 0)
-                Spring.Echo("[LuaUI] Invalidated all Chili display lists for texture rebuild")
             end
         end
         if _wp then _wpAdd('chiliFix', _wpT) end

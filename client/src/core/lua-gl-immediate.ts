@@ -282,7 +282,30 @@ interface DisplayListColorOp {
     a: number;
 }
 
-type DisplayListEntry = DisplayListDraw | DisplayListTexBind | DisplayListMatrixOp | DisplayListColorOp;
+/** A gl.Scissor call recorded inside a display list. Chili's client-area
+ * clipping (`safeOpengl = true` — the Control default) pushes a scissor rect
+ * around every control's children via PushScissor/PopScissor, which call
+ * gl.Scissor with absolute screen coords. Those coords are stable frame-to-
+ * frame (a moved control triggers _needRedraw → re-record), so recording the
+ * gl.Scissor calls verbatim and replaying them reproduces the clip. Without
+ * this, a cached `_all_dlist`/`_children_dlist` replays child draws with no
+ * clipping and content overflows its panel — the real reason Chili's dlist
+ * caches were disabled (PLAN-perf N2). */
+interface DisplayListScissorOp {
+    type: 'scissor';
+    enabled: boolean;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+}
+
+type DisplayListEntry =
+    | DisplayListDraw
+    | DisplayListTexBind
+    | DisplayListMatrixOp
+    | DisplayListColorOp
+    | DisplayListScissorOp;
 
 interface DisplayList {
     entries: DisplayListEntry[];
@@ -756,6 +779,14 @@ export class ImmediateModeRenderer {
         }
     }
 
+    /** Record a gl.Scissor call into the current display list (called by
+     * bridge). No-op when not recording — the bridge still applies it live.
+     * `enabled = false` records a scissor-disable (gl.Scissor(false)). */
+    recordScissor(enabled: boolean, x = 0, y = 0, w = 0, h = 0): void {
+        if (!this.recordingList) return;
+        this.recordingList.entries.push({ type: 'scissor', enabled, x, y, w, h });
+    }
+
     /** Expose current texture state so the bridge can sync after callList. */
     getTexturedState(): { textured: boolean; texture: WebGLTexture | null } {
         return { textured: this.isTextured, texture: this.currentBoundTexture };
@@ -842,6 +873,14 @@ export class ImmediateModeRenderer {
                 this.curG = entry.g;
                 this.curB = entry.b;
                 this.curA = entry.a;
+            } else if (entry.type === 'scissor') {
+                const gl = this.gl;
+                if (entry.enabled) {
+                    gl.enable(gl.SCISSOR_TEST);
+                    gl.scissor(entry.x, entry.y, entry.w, entry.h);
+                } else {
+                    gl.disable(gl.SCISSOR_TEST);
+                }
             } else {
                 // Draw call — set texture state for this draw
                 this.vertices.set(entry.vertexData);
@@ -959,10 +998,17 @@ export class ImmediateModeRenderer {
         if (count === 0) return;
         const gl = this.gl;
 
-        // Save state we'll overwrite
-        const savedProgram = gl.getParameter(gl.CURRENT_PROGRAM);
-        const savedVao = gl.getParameter(gl.VERTEX_ARRAY_BINDING);
-
+        // NOTE: no per-draw gl.getParameter(CURRENT_PROGRAM/VERTEX_ARRAY_BINDING)
+        // save/restore here. The immediate renderer only ever runs inside
+        // gpRunUiPass, which already snapshots program + VAO once before runFrame
+        // and restores them once after (plus engine.wipeCaches(true) so Babylon
+        // re-binds next frame), so a per-draw restore is pure redundant work.
+        // Removing it cut getParameter from ~1600/frame to ~26 — but measured
+        // 0 ms on this ANGLE/Metal driver (it caches these client-side; not a
+        // real stall). Kept because it's correct + helps drivers where it does
+        // stall + trims the residual for N3's redundant-state pass. The ~89 ms
+        // LuaUI cost is raw GL-call VOLUME (~4.7k calls/frame), not this or
+        // Fengari — see PLAN-perf N2/N3.
         const override = this.shaderOverride;
         gl.useProgram(override ?? this.program);
 
@@ -1088,10 +1134,8 @@ export class ImmediateModeRenderer {
             const glMode = this.mapMode(mode);
             gl.drawArrays(glMode, 0, count);
         }
-
-        // Restore state
-        gl.bindVertexArray(savedVao);
-        gl.useProgram(savedProgram);
+        // No per-draw program/VAO restore — see the note at the top of flush().
+        // gpRunUiPass restores both once after the whole pass.
     }
 
     private mapMode(mode: number): number {
