@@ -422,6 +422,14 @@ export class LuaGLBridge {
         this.gl.viewport(0, 0, width, height);
     }
 
+    /** N3: reset the immediate renderer's per-pass GL state shadow. Called once
+     *  at the top of each UI pass (runFrame) — Babylon's world render leaves
+     *  different program/VAO/buffer bindings between passes, so the shadow must
+     *  be invalidated so the pass's first flush re-issues all state. */
+    beginImmediatePass(): void {
+        this.imm.beginPass();
+    }
+
     /** Build the `gl` global for the Lua runtime. */
     /** Set the base URL for game assets (textures loaded by path). */
     setGameBaseUrl(url: string): void { this.gameBaseUrl = url; }
@@ -2504,6 +2512,9 @@ export class LuaGLBridge {
         gl.vertexAttribPointer(0, 1, gl.FLOAT, false, 0, 0);
         gl.bindVertexArray(null);
         gl.bindBuffer(gl.ARRAY_BUFFER, null);
+        // N3: this bound our own VAO + ARRAY_BUFFER mid-pass — tell the
+        // immediate renderer so its next flush re-binds its VAO/buffer.
+        this.imm.invalidateBindings();
 
         // GL4 attach methods (AttachVertexBuffer / AttachInstanceBuffer /
         // AttachIndexBuffer) are no-ops here — we don't model real VBO
@@ -2521,6 +2532,9 @@ export class LuaGLBridge {
                 gl.bindVertexArray(vao);
                 gl.drawArraysInstanced(m, f, c, ic);
                 gl.bindVertexArray(null);
+                // N3: foreign VAO bound + unbound mid-pass — invalidate the
+                // immediate renderer's VAO/buffer/program shadow.
+                this.imm.invalidateBindings();
             },
             DrawElements: noopAttach,
             AttachVertexBuffer: noopAttach,

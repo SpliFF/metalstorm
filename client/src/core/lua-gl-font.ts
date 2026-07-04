@@ -607,76 +607,91 @@ function renderString(
 
     const invW = 1 / ATLAS_SIZE;
     const invH = 1 / ATLAS_SIZE;
-    // Use local coordinates (0-based) since we translated to (x,y) above
-    let cursorX = 0;
-    let localY = 0;
 
-    for (let i = 0; i < text.length; i++) {
-        const ch = text[i];
+    // N3: emit every glyph quad inside ONE gl.BeginEnd batch. All glyphs of the
+    // string share the same modelview (the push/translate/scale above) and the
+    // same atlas texture, so they flush as a single drawArrays instead of one
+    // draw per glyph — the biggest immediate-mode GL-call-volume win in the HUD
+    // (PLAN-perf N3). Per-glyph colour changes (Spring \255 codes) are baked
+    // into the vertex colours, so batching preserves them. GL_TRIANGLES = 4.
+    imm.beginEnd(gl.TRIANGLES, () => {
+        // Use local coordinates (0-based) since we translated to (x,y) above
+        let cursorX = 0;
+        let localY = 0;
 
-        // Handle newlines
-        if (ch === '\n') {
-            cursorX = 0;
-            localY += atlas.lineheight * atlas.fontSize * scale;
-            continue;
+        for (let i = 0; i < text.length; i++) {
+            const ch = text[i];
+
+            // Handle newlines
+            if (ch === '\n') {
+                cursorX = 0;
+                localY += atlas.lineheight * atlas.fontSize * scale;
+                continue;
+            }
+
+            // Strip Spring color codes: \255\r\g\b
+            if (ch === '\xff' && i + 3 < text.length) {
+                const r = text.charCodeAt(i + 1) / 255;
+                const g = text.charCodeAt(i + 2) / 255;
+                const b = text.charCodeAt(i + 3) / 255;
+                imm.color(r, g, b, color[3] ?? 1);
+                i += 3;
+                continue;
+            }
+
+            // Spring "pop colour" marker (\b) restores the base colour. Other
+            // low-control bytes (apart from \t) have no glyph — skip them so
+            // Canvas2D doesn't render a tofu box.
+            const code = ch.charCodeAt(0);
+            if (code === 0x08) {
+                imm.color(color[0], color[1], color[2], color[3] ?? 1);
+                continue;
+            }
+            if (code < 0x20 && code !== 0x09) continue;
+
+            const glyph = atlas.getGlyph(ch);
+            if (glyph.w > 0 && glyph.h > 0) {
+                // Quad corners in local space (translate already applied).
+                // We anchor the line so that the visible top of a glyph with the
+                // font's full ascent (e.g. 'H') sits at qy=0 — i.e. the local
+                // origin. The line baseline is therefore at qy = ascent.
+                // Each glyph's quad top is offset from the baseline by its own
+                // bearingY (the height of the glyph above the baseline), so
+                // qy = (ascent - bearingY) - PAD
+                // The -PAD term accounts for the atlas-internal padding above
+                // each glyph in its cell (visible top vs cell top).
+                // Result: glyphs of different ascent share a baseline (so 'g'
+                // descends below the same line as 'A' rests on), while line
+                // top is at the local origin for "no flag" / 'a' / 't' semantics.
+                const qx = cursorX + glyph.bearingX * scale;
+                const qy = localY + (atlas.ascentPx - glyph.bearingY) * scale
+                    - GLYPH_PAD * scale;
+                const qw = glyph.w * scale;
+                const qh = glyph.h * scale;
+
+                // Texture coordinates
+                const u0 = glyph.x * invW;
+                const v0 = glyph.y * invH;
+                const u1 = (glyph.x + glyph.w) * invW;
+                const v1 = (glyph.y + glyph.h) * invH;
+
+                // Two triangles (matches ImmediateModeRenderer.texRect winding).
+                imm.texCoord(u0, v0); imm.vertex(qx, qy);
+                imm.texCoord(u1, v0); imm.vertex(qx + qw, qy);
+                imm.texCoord(u1, v1); imm.vertex(qx + qw, qy + qh);
+                imm.texCoord(u0, v0); imm.vertex(qx, qy);
+                imm.texCoord(u1, v1); imm.vertex(qx + qw, qy + qh);
+                imm.texCoord(u0, v1); imm.vertex(qx, qy + qh);
+            }
+
+            cursorX += glyph.advance * scale;
+
+            // Kerning
+            if (i + 1 < text.length) {
+                cursorX += atlas.getKerning(ch, text[i + 1]) * scale;
+            }
         }
-
-        // Strip Spring color codes: \255\r\g\b
-        if (ch === '\xff' && i + 3 < text.length) {
-            const r = text.charCodeAt(i + 1) / 255;
-            const g = text.charCodeAt(i + 2) / 255;
-            const b = text.charCodeAt(i + 3) / 255;
-            imm.color(r, g, b, color[3] ?? 1);
-            i += 3;
-            continue;
-        }
-
-        // Spring "pop colour" marker (\b) restores the base colour. Other
-        // low-control bytes (apart from \t) have no glyph — skip them so
-        // Canvas2D doesn't render a tofu box.
-        const code = ch.charCodeAt(0);
-        if (code === 0x08) {
-            imm.color(color[0], color[1], color[2], color[3] ?? 1);
-            continue;
-        }
-        if (code < 0x20 && code !== 0x09) continue;
-
-        const glyph = atlas.getGlyph(ch);
-        if (glyph.w > 0 && glyph.h > 0) {
-            // Quad corners in local space (translate already applied).
-            // We anchor the line so that the visible top of a glyph with the
-            // font's full ascent (e.g. 'H') sits at qy=0 — i.e. the local
-            // origin. The line baseline is therefore at qy = ascent.
-            // Each glyph's quad top is offset from the baseline by its own
-            // bearingY (the height of the glyph above the baseline), so
-            // qy = (ascent - bearingY) - PAD
-            // The -PAD term accounts for the atlas-internal padding above
-            // each glyph in its cell (visible top vs cell top).
-            // Result: glyphs of different ascent share a baseline (so 'g'
-            // descends below the same line as 'A' rests on), while line
-            // top is at the local origin for "no flag" / 'a' / 't' semantics.
-            const qx = cursorX + glyph.bearingX * scale;
-            const qy = localY + (atlas.ascentPx - glyph.bearingY) * scale
-                - GLYPH_PAD * scale;
-            const qw = glyph.w * scale;
-            const qh = glyph.h * scale;
-
-            // Texture coordinates
-            const u0 = glyph.x * invW;
-            const v0 = glyph.y * invH;
-            const u1 = (glyph.x + glyph.w) * invW;
-            const v1 = (glyph.y + glyph.h) * invH;
-
-            imm.texRect(qx, qy, qx + qw, qy + qh, u0, v0, u1, v1);
-        }
-
-        cursorX += glyph.advance * scale;
-
-        // Kerning
-        if (i + 1 < text.length) {
-            cursorX += atlas.getKerning(ch, text[i + 1]) * scale;
-        }
-    }
+    });
 
     // Restore previous texture binding
     gl.bindTexture(gl.TEXTURE_2D, savedTex);

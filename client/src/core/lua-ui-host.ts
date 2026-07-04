@@ -3307,6 +3307,11 @@ defaultFont = activeFont
 }
 
 export function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext, clearColor = true, worldPass = false): void {
+    // N3: reset the immediate renderer's per-pass GL state shadow. Babylon's
+    // world render (and gpRunUiPass's outer save/restore) leaves different
+    // program/VAO/buffer bindings between passes, so the first flush of this
+    // pass must re-issue all state rather than trust last pass's shadow.
+    bridge?.beginImmediatePass();
     // Set up GL state for 2D overlay rendering
     gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
     // GW4-c6: in shared mode (clearColor=false) the 3D world has already been

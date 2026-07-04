@@ -387,6 +387,46 @@ export class ImmediateModeRenderer {
      * gl.Color can tint the geometry at replay time via the uColor uniform. */
     private explicitColorInList = false;
 
+    // ── N3: per-pass GL state shadow (redundant-state elimination) ───────
+    // The immediate renderer issues ~9-10 GL calls per flush (useProgram,
+    // bindVertexArray, bindBuffer, 4 uniforms, texture bind, bufferSubData,
+    // drawArrays). Most of the state calls repeat unchanged between draws.
+    // We shadow the state WE set and skip no-op calls. PLAN-perf N2 measured
+    // the LuaUI pass as ~4.7k GL calls/frame (~89 ms); this cuts the count.
+    //
+    // Validity contract (why this is safe):
+    //  - beginPass() invalidates ALL shadow at the top of every UI pass, so
+    //    Babylon's world-render bindings (left between passes, restored by
+    //    gpRunUiPass) never leak in — the first flush re-issues everything.
+    //  - Built-in-program uniforms (uMVP/uTextured/uAlpha/uColor/uTex) persist
+    //    in the program object across useProgram switches, and ONLY flush()
+    //    touches them, so their shadow stays valid across custom-shader
+    //    (gl.UseShader) interludes — no invalidation on program switch needed.
+    //  - useProgram elision compares the TARGET program value, which is
+    //    self-correcting across every bridge program change (UseShader pairs
+    //    with setShaderOverride so the target differs; the bridge's uniform
+    //    save/restore is net-neutral to the current program).
+    //  - VAO/ARRAY_BUFFER elision is invalidated by invalidateBindings(),
+    //    which the bridge's GL4 VAO path (getVAO) calls after binding its own
+    //    VAO/buffer mid-pass. Texture binds are NOT shadowed (font + callList
+    //    bind unit-0 textures outside flush; text batching already removes the
+    //    redundant per-glyph binds).
+    private shProgram: WebGLProgram | null = null;
+    private shVao = false;
+    private shArrayBuf = false;
+    private shTexSamplerSet = false;
+    private shTextured = -1;
+    private shAlpha = Number.NaN;
+    private shColR = Number.NaN;
+    private shColG = Number.NaN;
+    private shColB = Number.NaN;
+    private shColA = Number.NaN;
+    /** Generation of the MVP last uploaded to the built-in program's uMVP.
+     * mvpGen bumps whenever computeMVP() recomputes (i.e. a matrix op changed
+     * the effective matrix); an unchanged gen means the uniform is still live. */
+    private shMvpGen = -1;
+    private mvpGen = 0;
+
     constructor(gl: WebGL2RenderingContext) {
         this.gl = gl;
 
@@ -569,8 +609,41 @@ export class ImmediateModeRenderer {
                 this.mvpCache,
             );
             this.mvpDirty = false;
+            // N3: bump so flush() can skip re-uploading uMVP for consecutive
+            // draws that share the same effective matrix.
+            this.mvpGen++;
         }
         return this.mvpCache;
+    }
+
+    // ── N3: per-pass shadow lifecycle ───────────────────────────────────
+
+    /** Reset all per-pass GL state shadow. Called once at the top of every
+     *  UI pass (runFrame). gpRunUiPass restores the outer program/VAO bindings
+     *  AFTER each pass and Babylon's world render rebinds everything before the
+     *  next, so the first flush of a pass must re-issue all state. */
+    beginPass(): void {
+        this.shProgram = null;
+        this.shVao = false;
+        this.shArrayBuf = false;
+        this.shTexSamplerSet = false;
+        this.shTextured = -1;
+        this.shAlpha = Number.NaN;
+        this.shColR = Number.NaN;
+        this.shColG = Number.NaN;
+        this.shColB = Number.NaN;
+        this.shColA = Number.NaN;
+        this.shMvpGen = -1;
+    }
+
+    /** Invalidate the program/VAO/ARRAY_BUFFER shadow after external code binds
+     *  its own VAO/buffer/program mid-pass (the bridge's GL4 getVAO path). The
+     *  next flush re-binds. Uniform shadows stay valid (per-program persistent,
+     *  only flush touches the built-in program). */
+    invalidateBindings(): void {
+        this.shProgram = null;
+        this.shVao = false;
+        this.shArrayBuf = false;
     }
 
     // ── Vertex attribute state ──────────────────────────────────────────
@@ -998,26 +1071,26 @@ export class ImmediateModeRenderer {
         if (count === 0) return;
         const gl = this.gl;
 
-        // NOTE: no per-draw gl.getParameter(CURRENT_PROGRAM/VERTEX_ARRAY_BINDING)
-        // save/restore here. The immediate renderer only ever runs inside
-        // gpRunUiPass, which already snapshots program + VAO once before runFrame
-        // and restores them once after (plus engine.wipeCaches(true) so Babylon
-        // re-binds next frame), so a per-draw restore is pure redundant work.
-        // Removing it cut getParameter from ~1600/frame to ~26 — but measured
-        // 0 ms on this ANGLE/Metal driver (it caches these client-side; not a
-        // real stall). Kept because it's correct + helps drivers where it does
-        // stall + trims the residual for N3's redundant-state pass. The ~89 ms
-        // LuaUI cost is raw GL-call VOLUME (~4.7k calls/frame), not this or
-        // Fengari — see PLAN-perf N2/N3.
+        // N3: redundant-state elimination. No per-draw gl.getParameter save/
+        // restore (gpRunUiPass snapshots program + VAO once per pass), and we
+        // shadow every state call so consecutive same-state draws skip it. The
+        // ~89 ms LuaUI cost is raw GL-call VOLUME (~4.7k calls/frame, PLAN-perf
+        // N2), not getParameter or Fengari — cutting the count is the lever.
         const override = this.shaderOverride;
-        gl.useProgram(override ?? this.program);
+        const targetProgram = override ?? this.program;
+        if (this.shProgram !== targetProgram) {
+            gl.useProgram(targetProgram);
+            this.shProgram = targetProgram;
+        }
 
-        // Upload MVP
+        // Upload MVP (built-in program: skip when the matrix is unchanged since
+        // the last built-in draw — uMVP persists in the program object).
         const mvp = this.computeMVP();
         if (override) {
             this.applyOverrideUniforms(override, mvp);
-        } else {
+        } else if (this.shMvpGen !== this.mvpGen) {
             gl.uniformMatrix4fv(this.uMVP, false, mvp);
+            this.shMvpGen = this.mvpGen;
         }
 
         // Debug instrumentation
@@ -1078,29 +1151,56 @@ export class ImmediateModeRenderer {
         // override program samples it via `tex0` (set in applyOverrideUniforms),
         // the built-in program via uTex. The built-in-only uniforms (uTextured,
         // uAlphaThreshold, uColor) don't exist on a custom program, so skip them.
+        // Texture binds are NOT shadow-elided (font + callList bind unit-0
+        // textures outside flush) — text batching already removes the redundant
+        // per-glyph binds.
         if (this.isTextured && this.currentBoundTexture) {
             gl.activeTexture(gl.TEXTURE0);
             gl.bindTexture(gl.TEXTURE_2D, this.currentBoundTexture);
         }
         if (!override) {
-            gl.uniform1i(this.uTextured, this.isTextured ? 1 : 0);
-            gl.uniform1i(this.uTex, 0); // texture unit 0
-            gl.uniform1f(this.uAlphaThreshold, this.alphaThreshold);
-
+            // N3: skip built-in uniform uploads that repeat unchanged. These
+            // uniforms persist in the program object, so a shadow tracks their
+            // live value across the whole pass (reset by beginPass()).
+            if (!this.shTexSamplerSet) {
+                gl.uniform1i(this.uTex, 0); // texture unit 0 — constant
+                this.shTexSamplerSet = true;
+            }
+            const desiredTextured = this.isTextured ? 1 : 0;
+            if (this.shTextured !== desiredTextured) {
+                gl.uniform1i(this.uTextured, desiredTextured);
+                this.shTextured = desiredTextured;
+            }
+            if (this.shAlpha !== this.alphaThreshold) {
+                gl.uniform1f(this.uAlphaThreshold, this.alphaThreshold);
+                this.shAlpha = this.alphaThreshold;
+            }
             // Color tint uniform: identity for live draws (vertex colors carry
             // the value), external current color for replays of lists that had
             // no explicit gl.Color recorded.
-            if (tint) {
-                gl.uniform4f(this.uColor, tint[0], tint[1], tint[2], tint[3]);
-            } else {
-                gl.uniform4f(this.uColor, 1, 1, 1, 1);
+            const cr = tint ? tint[0] : 1;
+            const cg = tint ? tint[1] : 1;
+            const cb = tint ? tint[2] : 1;
+            const ca = tint ? tint[3] : 1;
+            if (this.shColR !== cr || this.shColG !== cg
+                || this.shColB !== cb || this.shColA !== ca) {
+                gl.uniform4f(this.uColor, cr, cg, cb, ca);
+                this.shColR = cr; this.shColG = cg; this.shColB = cb; this.shColA = ca;
             }
         }
 
-
-        // Upload vertex data
-        gl.bindVertexArray(this.vao);
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);
+        // Upload vertex data. VAO + ARRAY_BUFFER stay bound across consecutive
+        // draws within a pass; the shadow skips the re-bind (invalidated by
+        // beginPass() per pass and invalidateBindings() when the bridge's GL4
+        // VAO path binds its own buffers mid-pass).
+        if (!this.shVao) {
+            gl.bindVertexArray(this.vao);
+            this.shVao = true;
+        }
+        if (!this.shArrayBuf) {
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);
+            this.shArrayBuf = true;
+        }
 
         if (mode === GL_QUADS) {
             // Convert quads to triangles
@@ -1134,8 +1234,9 @@ export class ImmediateModeRenderer {
             const glMode = this.mapMode(mode);
             gl.drawArrays(glMode, 0, count);
         }
-        // No per-draw program/VAO restore — see the note at the top of flush().
-        // gpRunUiPass restores both once after the whole pass.
+        // No per-draw program/VAO restore or unbind — the shadow keeps them
+        // bound across draws; gpRunUiPass restores the outer bindings once
+        // after the whole pass. See the N3 note at the top of flush().
     }
 
     private mapMode(mode: number): number {
