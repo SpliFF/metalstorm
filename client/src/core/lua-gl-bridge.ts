@@ -840,6 +840,25 @@ export class LuaGLBridge {
         gl['_stopRecording'] = () => this.imm.stopRecording();
         gl['_isRecording'] = () => this.imm.isRecording();
         gl['_inspectList'] = (id: LuaValue) => this.imm.inspectList(Number(id));
+        // Diagnostic hook (mirrors _isRecording / _inspectList): read raw GL
+        // state at the call site so per-widget Lua instrumentation can pinpoint
+        // which DrawScreen widget leaks a non-default framebuffer / scissor /
+        // viewport / program that clips or blanks the HUD. This is how U3b's
+        // "whole HUD blank" was traced to a null CURRENT_PROGRAM after a shader
+        // toggle (see the useShader invalidateBindings fix). Returns a compact
+        // string; keep for future GL-state regressions.
+        gl['_debugState'] = () => {
+            const g = this.gl;
+            const fbo = g.getParameter(g.DRAW_FRAMEBUFFER_BINDING);
+            const sc = g.getParameter(g.SCISSOR_TEST) as boolean;
+            const sb = g.getParameter(g.SCISSOR_BOX) as Int32Array;
+            const vp = g.getParameter(g.VIEWPORT) as Int32Array;
+            const prog = g.getParameter(g.CURRENT_PROGRAM);
+            return `fbo=${fbo ? 'NONDEFAULT' : 'default'} scissor=${sc ? 'ON' : 'off'}`
+                + ` sbox=${sb[0]},${sb[1]},${sb[2]},${sb[3]}`
+                + ` vp=${vp[0]},${vp[1]},${vp[2]},${vp[3]}`
+                + ` prog=${prog ? 'set' : 'null'}`;
+        };
         gl['CallList'] = (id: LuaValue) => {
             this.imm.callList(Number(id));
             // Sync bridge texture tracking — display lists may have changed
@@ -1800,6 +1819,15 @@ export class LuaGLBridge {
             // Revert the immediate-mode renderer to its built-in program so
             // subsequent gl.BeginEnd / gl.CallList draws use fixed-function.
             this.imm.setShaderOverride(null);
+            // U3b root-cause fix: this useProgram(null) changed the REAL GL
+            // program outside flush(), but the N3 per-pass program shadow
+            // (imm.shProgram) still believes the built-in program is bound. The
+            // next flush() would then skip its `useProgram` and draw with NO
+            // program — which blanked the entire BAR HUD after the first widget
+            // that toggled a shader off (Picture-in-Picture Minimap → Chat, Top
+            // Bar, build panel …). Invalidate the binding shadow so the next
+            // flush re-issues useProgram/VAO/buffer. See PLAN-bar §7 U3b.
+            this.imm.invalidateBindings();
             return;
         }
         const h = handle as LuaShaderHandle;
@@ -1810,6 +1838,9 @@ export class LuaGLBridge {
         // program too — Spring applies the bound shader to immediate draws, and
         // ZK world widgets (Map Edge Extension's mirror shader, …) depend on it.
         this.imm.setShaderOverride(h.program);
+        // Same shadow-staleness guard as the off branch: the real program just
+        // changed outside flush(), so force the next flush to re-bind.
+        this.imm.invalidateBindings();
     }
 
     private deleteShader(handle: LuaValue): void {
