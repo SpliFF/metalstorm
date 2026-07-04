@@ -7,6 +7,8 @@ import {
     isGameAssetPath,
     atmosphereReturn,
     textureCacheDumpRows,
+    listTextureDumpRows,
+    RttRebakeRegistry,
     type LuaTextureHandle,
 } from './lua-gl-bridge.js';
 import { defaultMapAtmosphere } from './map-lighting.js';
@@ -172,6 +174,141 @@ describe('textureCacheDumpRows (UI-1b texture-cache introspection)', () => {
         const rows = textureCacheDumpRows(cache);
         expect(rows.find((r) => r.key === 'a.png')?.loaded).toBe(true);
         expect(rows.find((r) => r.key === 'b.png')?.placeholder).toBe(true);
+    });
+});
+
+describe('listTextureDumpRows (U3c display-list texture-ref classification)', () => {
+    it('maps a recorded ref back to its cache key by WebGLTexture identity', () => {
+        const metal = texHandle(104, 104, {
+            resolvedUrl: 'u', loadedUrl: 'u', loaded: true, lastError: '',
+        });
+        const cache = new Map<string, LuaTextureHandle>([
+            ['LuaUI/Images/metal.png', metal],
+        ]);
+        const rows = listTextureDumpRows([
+            { listId: 7, entry: 0, kind: 'texBind', unit: 0, textured: true, texture: metal.tex },
+            { listId: 7, entry: 1, kind: 'draw', unit: 0, textured: true, texture: metal.tex },
+        ], cache);
+        expect(rows).toHaveLength(2);
+        expect(rows[0]).toMatchObject({
+            listId: 7, kind: 'texBind', cacheKey: 'LuaUI/Images/metal.png', loaded: true,
+        });
+        expect(rows[1]).toMatchObject({ kind: 'draw', cacheKey: 'LuaUI/Images/metal.png' });
+    });
+
+    it('flags a textured ref no cache handle owns as (uncached) — the orphan signal', () => {
+        const cache = new Map<string, LuaTextureHandle>([
+            ['LuaUI/Images/metal.png', texHandle(104, 104)],
+        ]);
+        const orphan = {} as WebGLTexture; // e.g. a stub whose cache entry was replaced
+        const [row] = listTextureDumpRows([
+            { listId: 3, entry: 2, kind: 'draw', unit: 0, textured: true, texture: orphan },
+        ], cache);
+        expect(row.cacheKey).toBe('(uncached)');
+        expect(row.loaded).toBe(false);
+    });
+
+    it('reports an untextured ref as (none)', () => {
+        const [row] = listTextureDumpRows([
+            { listId: 1, entry: 0, kind: 'texBind', unit: 0, textured: false, texture: null },
+        ], new Map());
+        expect(row.cacheKey).toBe('(none)');
+        expect(row.textured).toBe(false);
+    });
+
+    it('substring-filters on the classified cache key, case-insensitively', () => {
+        const metal = texHandle(104, 104);
+        const energy = texHandle(104, 104);
+        const cache = new Map<string, LuaTextureHandle>([
+            ['LuaUI/Images/metal.png', metal],
+            ['LuaUI/Images/energy.png', energy],
+        ]);
+        const refs = [
+            { listId: 1, entry: 0, kind: 'texBind' as const, unit: 0, textured: true, texture: metal.tex },
+            { listId: 2, entry: 0, kind: 'texBind' as const, unit: 0, textured: true, texture: energy.tex },
+        ];
+        expect(listTextureDumpRows(refs, cache, 'METAL').map((r) => r.listId)).toEqual([1]);
+        expect(listTextureDumpRows(refs, cache).length).toBe(2);
+    });
+});
+
+describe('RttRebakeRegistry (U3c async-texture re-bake bookkeeping)', () => {
+    const fn = () => undefined; // stands in for the Lua bake callback
+
+    it('queues a bake for re-run once its only pending texture loads', () => {
+        const reg = new RttRebakeRegistry();
+        const target = texHandle(512, 64);
+        const icon = texHandle(1, 1);
+        reg.register(target, fn, [], new Set([icon]));
+        expect(reg.pendingCount).toBe(1);
+        expect(reg.drain()).toEqual([]); // nothing ready yet
+        reg.onTextureLoaded(icon);
+        expect(reg.pendingCount).toBe(0);
+        const ready = reg.drain();
+        expect(ready).toHaveLength(1);
+        expect(ready[0].target).toBe(target);
+        expect(reg.drain()).toEqual([]); // one-shot
+    });
+
+    it('waits for ALL pending textures before queueing (BAR bakes metal+energy in one uiTex)', () => {
+        const reg = new RttRebakeRegistry();
+        const target = texHandle(512, 64);
+        const metal = texHandle(1, 1);
+        const energy = texHandle(1, 1);
+        reg.register(target, fn, [], new Set([metal, energy]));
+        reg.onTextureLoaded(metal);
+        expect(reg.drain()).toEqual([]);
+        reg.onTextureLoaded(energy);
+        expect(reg.drain()).toHaveLength(1);
+    });
+
+    it('does not re-run a bake whose every dependency failed to load', () => {
+        const reg = new RttRebakeRegistry();
+        const target = texHandle(512, 64);
+        const missing = texHandle(1, 1);
+        reg.register(target, fn, [], new Set([missing]));
+        reg.onTextureLoadFailed(missing);
+        expect(reg.pendingCount).toBe(0);
+        expect(reg.drain()).toEqual([]); // re-baking would redraw the same placeholder
+    });
+
+    it('re-runs when at least one dependency healed even if another failed', () => {
+        const reg = new RttRebakeRegistry();
+        const target = texHandle(512, 64);
+        const ok = texHandle(1, 1);
+        const bad = texHandle(1, 1);
+        reg.register(target, fn, [], new Set([ok, bad]));
+        reg.onTextureLoadFailed(bad);
+        reg.onTextureLoaded(ok);
+        expect(reg.drain()).toHaveLength(1);
+    });
+
+    it('a repeat bake of the same (target, fn) replaces the older registration', () => {
+        const reg = new RttRebakeRegistry();
+        const target = texHandle(512, 64);
+        const a = texHandle(1, 1);
+        const b = texHandle(1, 1);
+        reg.register(target, fn, [], new Set([a]));
+        reg.register(target, fn, [], new Set([b])); // widget re-baked; now waits on b only
+        expect(reg.pendingCount).toBe(1);
+        reg.onTextureLoaded(a); // settling the stale dependency queues nothing
+        expect(reg.drain()).toEqual([]);
+        reg.onTextureLoaded(b);
+        expect(reg.drain()).toHaveLength(1);
+    });
+
+    it('drops registrations and queued re-runs when the target is deleted', () => {
+        const reg = new RttRebakeRegistry();
+        const t1 = texHandle(512, 64);
+        const t2 = texHandle(512, 64);
+        const dep = texHandle(1, 1);
+        reg.register(t1, fn, [], new Set([dep]));
+        reg.register(t2, fn, [], new Set([dep]));
+        reg.onTargetDeleted(t1); // deleted while pending
+        reg.onTextureLoaded(dep);
+        expect(reg.readyCount).toBe(1);
+        reg.onTargetDeleted(t2); // deleted while queued
+        expect(reg.drain()).toEqual([]);
     });
 });
 

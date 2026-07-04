@@ -19,7 +19,7 @@
  * so Babylon's state cache stays in sync.
  */
 import { markOpaque, type LuaValue } from './lua-runtime.js';
-import { ImmediateModeRenderer } from './lua-gl-immediate.js';
+import { ImmediateModeRenderer, type ListTextureRef } from './lua-gl-immediate.js';
 import { createLuaFontObject } from './lua-gl-font.js';
 import {
     translateAndInclude,
@@ -211,6 +211,153 @@ export function textureCacheDumpRows(
     return out;
 }
 
+/**
+ * U3c: classify every texture reference recorded in display lists against the
+ * live texture cache. Pure (identity comparison only) so it's unit-testable
+ * without a GL context. A `draw`/`texBind` ref whose WebGLTexture IS a cache
+ * handle's `.tex` replays whatever that handle holds now (heals in place when
+ * the async image lands); a textured ref NOT in the cache (`cacheKey:
+ * '(uncached)'`) is either a legitimate non-path texture (RTT/atlas/font) or
+ * an orphaned placeholder stub that can never heal — the U3c magenta suspect.
+ * `LuaGLBridge.dumpListTextures` delegates here.
+ */
+export function listTextureDumpRows(
+    refs: readonly ListTextureRef[],
+    cache: ReadonlyMap<string, LuaTextureHandle>,
+    filter?: string,
+): ListTextureDump[] {
+    const byTex = new Map<WebGLTexture, { key: string; loaded: boolean }>();
+    for (const [key, h] of cache) {
+        byTex.set(h.tex, { key, loaded: h.diag?.loaded ?? (h.width > 1 || h.height > 1) });
+    }
+    const f = filter ? filter.toLowerCase() : null;
+    const out: ListTextureDump[] = [];
+    for (const r of refs) {
+        const hit = r.texture ? byTex.get(r.texture) : undefined;
+        const cacheKey = r.texture === null ? '(none)' : hit ? hit.key : '(uncached)';
+        if (f && !cacheKey.toLowerCase().includes(f)) continue;
+        out.push({
+            listId: r.listId,
+            entry: r.entry,
+            kind: r.kind,
+            unit: r.unit,
+            textured: r.textured,
+            cacheKey,
+            loaded: hit?.loaded ?? false,
+        });
+    }
+    return out;
+}
+
+/** One row of {@link LuaGLBridge.dumpListTextures} — clone-safe (no WebGL
+ *  refs) so it survives the worker→main structured-clone via window.__gp. */
+export interface ListTextureDump {
+    listId: number;
+    entry: number;
+    kind: 'texBind' | 'draw';
+    unit: number;
+    /** Whether the entry replays as a textured draw/bind. */
+    textured: boolean;
+    /** Cache key whose handle owns this WebGLTexture, or '(none)' for an
+     *  untextured ref, or '(uncached)' when no cache handle owns it. */
+    cacheKey: string;
+    /** The owning cache handle's load state (false for non-cache refs). */
+    loaded: boolean;
+}
+
+/**
+ * U3c root-cause fix — re-bake RenderToTexture targets when their async
+ * texture dependencies finish loading.
+ *
+ * Recoil's `gl.Texture(path)` loads synchronously (VFS read + upload before
+ * returning), so an RTT bake always captures real texture content. Our
+ * browser port loads images asynchronously: a bake that samples a
+ * still-loading texture captures the 1×1 magenta placeholder INTO the baked
+ * snapshot, and the loader's in-place heal can never reach that baked copy
+ * (BAR's gui_top_bar bakes its whole HUD strip into `uiTex` once at boot and
+ * only blits it afterwards — the resource-bar icons stayed magenta forever).
+ * This registry closes the async-vs-sync divergence: the bridge records
+ * which pending textures each bake sampled, and when all of them settle
+ * (loaded or failed) the bake callback is re-run — converging on the exact
+ * content a synchronous Recoil bake would have produced. Not a
+ * FIDELITY-STANDIN: same steady-state output, only later in wall-clock.
+ *
+ * Pure bookkeeping (no GL): unit-testable; the bridge owns one instance.
+ */
+export class RttRebakeRegistry {
+    private entries: Array<{
+        target: LuaTextureHandle;
+        fn: LuaValue;
+        args: LuaValue[];
+        pending: Set<LuaTextureHandle>;
+        /** Only re-run if at least one dependency actually loaded — if every
+         *  pending texture FAILED, a re-bake would reproduce the same output. */
+        anyHealed: boolean;
+    }> = [];
+    private ready: Array<{ target: LuaTextureHandle; fn: LuaValue; args: LuaValue[] }> = [];
+
+    /** Record a bake that sampled ≥1 still-loading texture. A repeat bake of
+     *  the same (target, fn) replaces the older registration — the newest run
+     *  defines the baked content. */
+    register(
+        target: LuaTextureHandle,
+        fn: LuaValue,
+        args: LuaValue[],
+        pending: ReadonlySet<LuaTextureHandle>,
+    ): void {
+        if (pending.size === 0) return;
+        this.entries = this.entries.filter((e) => !(e.target === target && e.fn === fn));
+        this.entries.push({ target, fn, args, pending: new Set(pending), anyHealed: false });
+    }
+
+    /** A texture finished loading — settle it and queue any bake whose
+     *  dependencies are now complete. */
+    onTextureLoaded(handle: LuaTextureHandle): void {
+        for (const e of this.entries) {
+            if (e.pending.delete(handle)) e.anyHealed = true;
+        }
+        this.settle();
+    }
+
+    /** A texture load failed terminally — settle it (never re-run for
+     *  failures alone; the placeholder is already what a re-bake would draw). */
+    onTextureLoadFailed(handle: LuaTextureHandle): void {
+        for (const e of this.entries) e.pending.delete(handle);
+        this.settle();
+    }
+
+    /** The widget deleted a bake target (e.g. ViewResize re-creates uiTex) —
+     *  drop every registration for it; re-baking a deleted texture is a GL
+     *  error and the widget's own fresh bake supersedes the content anyway. */
+    onTargetDeleted(target: LuaTextureHandle): void {
+        this.entries = this.entries.filter((e) => e.target !== target);
+        this.ready = this.ready.filter((e) => e.target !== target);
+    }
+
+    /** Take the bakes whose dependencies are all settled (with ≥1 heal). The
+     *  caller re-runs them at the next UI-pass start, where the GL baseline
+     *  matches the DrawScreen conditions the original bake ran under. */
+    drain(): Array<{ target: LuaTextureHandle; fn: LuaValue; args: LuaValue[] }> {
+        const out = this.ready;
+        this.ready = [];
+        return out;
+    }
+
+    /** Number of bakes still waiting on a texture load (diagnostics/tests). */
+    get pendingCount(): number { return this.entries.length; }
+    /** Number of bakes queued for re-run (diagnostics/tests). */
+    get readyCount(): number { return this.ready.length; }
+
+    private settle(): void {
+        const done = this.entries.filter((e) => e.pending.size === 0);
+        if (done.length === 0) return;
+        this.entries = this.entries.filter((e) => e.pending.size > 0);
+        for (const e of done) {
+            if (e.anyHealed) this.ready.push({ target: e.target, fn: e.fn, args: e.args });
+        }
+    }
+}
+
 /** Handle returned by gl.CreateShader — opaque to Lua. */
 export interface LuaShaderHandle {
     __type: 'shader';
@@ -378,6 +525,17 @@ export class LuaGLBridge {
      *  handle. WeakMap so they're collected when the texture handle is. */
     private rttFBOs = new WeakMap<LuaTextureHandle, WebGLFramebuffer>();
     private nextRboId = 1;
+    /** U3c: bakes waiting to re-run once their async textures settle (see
+     *  {@link RttRebakeRegistry} for the why). */
+    private rttRebakes = new RttRebakeRegistry();
+    /** Non-null while a gl.RenderToTexture callback runs — collects every
+     *  still-loading texture handle the bake samples (live binds AND display-
+     *  list replays), so the finished bake can be registered for a re-run. */
+    private rttPendingCapture: Set<LuaTextureHandle> | null = null;
+    /** Reverse map for the display-list replay observer: WebGLTexture of each
+     *  still-loading path texture → its handle. Entries are removed the moment
+     *  the load settles, so this stays tiny (boot-time loading burst only). */
+    private pendingTexToHandle = new Map<WebGLTexture, LuaTextureHandle>();
 
     /** Base URL for game assets (e.g. http://localhost:8011/api/games/data/zk) */
     private gameBaseUrl = '';
@@ -443,6 +601,15 @@ export class LuaGLBridge {
         this.whiteTex = this.createSolidTexture(255, 255, 255, 255);
         this.blackTex = this.createSolidTexture(0, 0, 0, 255);
         this.imm = new ImmediateModeRenderer(gl);
+        // U3c: display lists replay their texture binds inside the renderer
+        // (raw WebGLTexture refs, not handles), so a bake that draws a cached
+        // list — BAR's top bar bakes gl.CallList(iconList) into uiTex — would
+        // otherwise hide its still-loading dependencies from the capture set.
+        this.imm.setTexBindObserver((tex) => {
+            if (!this.rttPendingCapture || !tex) return;
+            const h = this.pendingTexToHandle.get(tex);
+            if (h) this.rttPendingCapture.add(h);
+        });
     }
 
     /** Wire the minimap-command sink. Called by the worker host once it
@@ -2052,6 +2219,7 @@ export class LuaGLBridge {
                 diag: { resolvedUrl: url, loadedUrl: '', loaded: false, lastError: '' },
             });
             const fallbacks = this.buildFallbackUrls(normalised, url);
+            this.pendingTexToHandle.set(tex, handle);
             // Fire off async load; replace data when ready.
             void this.loadImageInto(url, handle, fallbacks.length > 0 ? fallbacks : undefined);
             this.textureCache.set(normalised, handle);
@@ -2103,6 +2271,17 @@ export class LuaGLBridge {
      */
     dumpTextureCache(filter?: string): TextureCacheDump[] {
         return textureCacheDumpRows(this.textureCache, filter);
+    }
+
+    /**
+     * U3c instrumentation — classify every texture reference recorded inside
+     * display lists against the texture cache, exposed to the main-thread
+     * console via `window.__gp('__uiTextures.lists("metal")')`. Answers the
+     * record/replay question directly: does the CallList replay bind the
+     * (healed) cache handle, or an orphaned stub captured at record time?
+     */
+    dumpListTextures(filter?: string): ListTextureDump[] {
+        return listTextureDumpRows(this.imm.dumpListTextureRefs(), this.textureCache, filter);
     }
 
     private normaliseTexturePath(path: string): string {
@@ -2195,6 +2374,7 @@ export class LuaGLBridge {
             if (!res.ok) {
                 if (diag) diag.lastError = `HTTP ${res.status}`;
                 console.warn(`[gl.CreateTexture] ${url}: ${res.status}`);
+                this.settleTextureLoad(handle, false);
                 return;
             }
             // .dds → upload compressed blocks directly via S3TC, no
@@ -2204,9 +2384,11 @@ export class LuaGLBridge {
                 if (this.uploadDDS(buf, handle)) {
                     if (diag) { diag.loaded = true; diag.loadedUrl = loadedFrom; diag.lastError = ''; }
                     this.textureLoadGeneration++;
+                    this.settleTextureLoad(handle, true);
                     console.log(`[gl.CreateTexture] loaded DDS ${loadedFrom} (${handle.width}x${handle.height})`);
-                } else if (diag) {
-                    diag.lastError = 'DDS decode failed';
+                } else {
+                    if (diag) diag.lastError = 'DDS decode failed';
+                    this.settleTextureLoad(handle, false);
                 }
                 return;
             }
@@ -2225,11 +2407,22 @@ export class LuaGLBridge {
             handle.height = bitmap.height;
             if (diag) { diag.loaded = true; diag.loadedUrl = loadedFrom; diag.lastError = ''; }
             this.textureLoadGeneration++;
+            this.settleTextureLoad(handle, true);
             console.log(`[gl.CreateTexture] loaded ${loadedFrom} (${bitmap.width}x${bitmap.height})`);
         } catch (e) {
             if (diag) diag.lastError = String(e);
             console.warn(`[gl.CreateTexture] ${url}: ${e}`);
+            this.settleTextureLoad(handle, false);
         }
+    }
+
+    /** U3c: a path texture's async load reached a terminal state — retire it
+     *  from the pending reverse map and let the rebake registry settle any
+     *  RTT bake that sampled it while loading. */
+    private settleTextureLoad(handle: LuaTextureHandle, loaded: boolean): void {
+        this.pendingTexToHandle.delete(handle.tex);
+        if (loaded) this.rttRebakes.onTextureLoaded(handle);
+        else this.rttRebakes.onTextureLoadFailed(handle);
     }
 
     /**
@@ -2322,6 +2515,11 @@ export class LuaGLBridge {
         if (!handle || typeof handle !== 'object' || Array.isArray(handle)) return;
         const h = handle as unknown as LuaTextureHandle;
         if (h.__type !== 'texture') return;
+        // U3c: a deleted texture can no longer be a rebake target (the widget
+        // that deleted it re-bakes its replacement itself) nor a pending
+        // dependency worth waiting on.
+        this.rttRebakes.onTargetDeleted(h);
+        this.pendingTexToHandle.delete(h.tex);
         this.gl.deleteTexture(h.tex);
     }
 
@@ -2410,9 +2608,11 @@ export class LuaGLBridge {
                     diag: { resolvedUrl: primaryUrl, loadedUrl: '', loaded: false, lastError: '' },
                 });
                 this.textureCache.set(normalised, handle);
+                this.pendingTexToHandle.set(handle.tex, handle);
                 const fallbacks = this.buildFallbackUrls(normalised, primaryUrl);
                 void this.loadImageInto(primaryUrl, handle, fallbacks.length > 0 ? fallbacks : undefined);
             }
+            this.captureRttPending(handle);
             gl.bindTexture(gl.TEXTURE_2D, handle.tex);
             trackAndRecord(handle.tex);
             return;
@@ -2420,9 +2620,20 @@ export class LuaGLBridge {
         if (typeof handleOrPath === 'object' && handleOrPath !== null) {
             const h = handleOrPath as unknown as LuaTextureHandle;
             if (h.__type === 'texture') {
+                this.captureRttPending(h);
                 gl.bindTexture(gl.TEXTURE_2D, h.tex);
                 trackAndRecord(h.tex);
             }
+        }
+    }
+
+    /** U3c: while a gl.RenderToTexture callback runs, collect every bound
+     *  texture that is still async-loading — the bake snapshot captured its
+     *  placeholder, so the bake must re-run when the load settles. */
+    private captureRttPending(handle: LuaTextureHandle): void {
+        const d = handle.diag;
+        if (this.rttPendingCapture && d && !d.loaded && !d.lastError) {
+            this.rttPendingCapture.add(handle);
         }
     }
 
@@ -2581,10 +2792,24 @@ export class LuaGLBridge {
         this.imm.matrixMode(MM_MODELVIEW);
         this.imm.loadIdentity();
 
+        // U3c: capture every still-loading texture the bake samples. Nested
+        // bakes each get their own set (inner pendings are NOT merged out —
+        // the inner bake re-runs on its own registration; an outer bake that
+        // sampled the inner TARGET sees a settled RTT texture, not a pending
+        // path texture, so it has nothing to wait on).
+        const prevCapture = this.rttPendingCapture;
+        const capture = new Set<LuaTextureHandle>();
+        this.rttPendingCapture = capture;
+
         try {
             (fnV as (...a: LuaValue[]) => LuaValue | undefined)(...args);
         } catch (e) {
             console.warn('[gl.RenderToTexture] callback threw:', e);
+        }
+
+        this.rttPendingCapture = prevCapture;
+        if (capture.size > 0) {
+            this.rttRebakes.register(tex, fnV, args, capture);
         }
 
         this.imm.restoreStackDepth(savedStack);
@@ -2592,6 +2817,23 @@ export class LuaGLBridge {
         gl.bindFramebuffer(gl.FRAMEBUFFER, savedFBO);
         gl.viewport(savedViewport[0], savedViewport[1],
             savedViewport[2], savedViewport[3]);
+    }
+
+    /**
+     * U3c: re-run RenderToTexture bakes whose async texture dependencies have
+     * settled. Called once at the top of each UI pass (runFrame), where the
+     * GL baseline (blending, viewport, pass-fresh state shadows) matches the
+     * DrawScreen conditions the original bake ran under. Converges baked HUD
+     * snapshots onto the content a synchronous Recoil texture load would have
+     * produced first time (BAR gui_top_bar resource icons et al.).
+     */
+    runPendingRebakes(): void {
+        const ready = this.rttRebakes.drain();
+        if (ready.length === 0) return;
+        for (const e of ready) {
+            this.renderToTexture(e.target as unknown as LuaValue, e.fn, e.args);
+        }
+        console.log(`[gl.RenderToTexture] re-baked ${ready.length} target(s) after async texture loads`);
     }
 
     /**

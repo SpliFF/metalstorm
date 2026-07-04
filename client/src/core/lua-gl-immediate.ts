@@ -311,6 +311,20 @@ interface DisplayList {
     entries: DisplayListEntry[];
 }
 
+/** One texture reference recorded inside a display list (U3c diagnostic —
+ *  see {@link ImmediateModeRenderer.dumpListTextureRefs}). */
+export interface ListTextureRef {
+    listId: number;
+    /** Index of the entry within the list. */
+    entry: number;
+    /** 'texBind' = recorded gl.Texture call; 'draw' = the per-draw
+     *  boundTexture snapshot flush() re-binds at replay. */
+    kind: 'texBind' | 'draw';
+    unit: number;
+    textured: boolean;
+    texture: WebGLTexture | null;
+}
+
 // ── Main class ──────────────────────────────────────────────────────────
 
 export class ImmediateModeRenderer {
@@ -351,6 +365,9 @@ export class ImmediateModeRenderer {
     // Current texture binding tracked for immediate mode
     private currentBoundTexture: WebGLTexture | null = null;
     private isTextured = false;
+    /** U3c: bridge-installed observer for display-list-replayed texture binds
+     *  (see setTexBindObserver). Null outside RTT-bake dependency capture. */
+    private texBindObserver: ((tex: WebGLTexture | null) => void) | null = null;
 
     // ── Custom shader override (gl.UseShader + immediate-mode draw) ──────
     // When a widget binds its own GLSL program via gl.UseShader and then
@@ -865,6 +882,14 @@ export class ImmediateModeRenderer {
         return { textured: this.isTextured, texture: this.currentBoundTexture };
     }
 
+    /** U3c: notify the bridge of every texture bound during display-list
+     *  replay (raw WebGLTexture — the bridge resolves it to a handle). Lets a
+     *  gl.RenderToTexture bake that replays cached lists see which still-
+     *  loading textures it sampled, so the bake re-runs once they settle. */
+    setTexBindObserver(fn: ((tex: WebGLTexture | null) => void) | null): void {
+        this.texBindObserver = fn;
+    }
+
     createList(fn: () => void): number {
         const id = this.nextListId++;
         const list: DisplayList = { entries: [] };
@@ -928,6 +953,7 @@ export class ImmediateModeRenderer {
         for (const entry of list.entries) {
             if (entry.type === 'texBind') {
                 const gl = this.gl;
+                if (this.texBindObserver) this.texBindObserver(entry.texture);
                 gl.activeTexture(gl.TEXTURE0 + entry.unit);
                 if (entry.texture) {
                     gl.bindTexture(gl.TEXTURE_2D, entry.texture);
@@ -1003,6 +1029,33 @@ export class ImmediateModeRenderer {
 
     deleteList(id: number): void {
         this.displayLists.delete(id);
+    }
+
+    /** U3c diagnostic: every texture reference held by recorded display
+     *  lists — both explicit texBind entries and the per-draw boundTexture
+     *  snapshots that flush() re-binds at replay. Returns raw WebGLTexture
+     *  refs; the bridge classifies each against its texture cache (a
+     *  textured ref that is NOT a live cache handle can never heal in place
+     *  and replays whatever was captured at record time). */
+    dumpListTextureRefs(): ListTextureRef[] {
+        const rows: ListTextureRef[] = [];
+        for (const [listId, list] of this.displayLists) {
+            for (let i = 0; i < list.entries.length; i++) {
+                const e = list.entries[i];
+                if (e.type === 'texBind') {
+                    rows.push({
+                        listId, entry: i, kind: 'texBind', unit: e.unit,
+                        textured: e.texture !== null, texture: e.texture,
+                    });
+                } else if (e.type === 'draw') {
+                    rows.push({
+                        listId, entry: i, kind: 'draw', unit: 0,
+                        textured: e.textured, texture: e.boundTexture,
+                    });
+                }
+            }
+        }
+        return rows;
     }
 
     /** Debug: inspect display list contents. Returns entry type summary. */

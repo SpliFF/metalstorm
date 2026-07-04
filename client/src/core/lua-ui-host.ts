@@ -892,6 +892,10 @@ export async function init(
     (globalThis as Record<string, unknown>).__uiTextures = {
         dump: (filter?: string) => bridge?.dumpTextureCache(filter) ?? [],
         magenta: () => (bridge?.dumpTextureCache() ?? []).filter((t) => t.placeholder),
+        // U3c: texture refs recorded inside display lists, classified against
+        // the cache — `__uiTextures.lists('metal')` shows whether the Top Bar
+        // icon CallList replay binds the healed cache handle or an orphan.
+        lists: (filter?: string) => bridge?.dumpListTextures(filter) ?? [],
     };
     postLog(2, '[LuaUI] init step 3/8 done: Lua runtime + GL bridge created');
 
@@ -3341,6 +3345,13 @@ export function runFrame(rt: LuaRuntime, gl: WebGL2RenderingContext, clearColor 
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.disable(gl.DEPTH_TEST);
+
+    // U3c: re-run RenderToTexture bakes whose async textures finished loading
+    // since last frame (a bake that sampled a still-loading texture captured
+    // its magenta placeholder — BAR top-bar icons). Runs here, after the 2D
+    // baseline above, so the re-bake sees the same GL state as the widget's
+    // own DrawScreen-time bake.
+    bridge?.runPendingRebakes();
 
     // Callins: Update → GameFrame (per-tick) → DrawGenesis → DrawScreen
     rt.doString(`
