@@ -876,6 +876,17 @@ export async function init(
     // guard crashed on `nil <= nil`).
     const atmoBridge = bridge;
     void loadMapAtmosphere(mapSrcAbs).then((atmo) => atmoBridge.setAtmosphere(atmo));
+    // UI-1b (PLAN-bar §7): expose the gl-bridge texture cache on the worker
+    // global so the main-thread console can introspect HUD-texture load state:
+    //   await window.__gp('__uiTextures.dump()')      — all path-loaded textures
+    //   await window.__gp('__uiTextures.dump("metal")') — filter keys by substring
+    //   await window.__gp('__uiTextures.magenta()')    — only unresolved placeholders
+    // Prereq for the U3 resource-bar magenta root-cause. Mirrors the
+    // __entityRenderer / __frameProfiler / __perfToggles hooks in game-processor.
+    (globalThis as Record<string, unknown>).__uiTextures = {
+        dump: (filter?: string) => bridge?.dumpTextureCache(filter) ?? [],
+        magenta: () => (bridge?.dumpTextureCache() ?? []).filter((t) => t.placeholder),
+    };
     postLog(2, '[LuaUI] init step 3/8 done: Lua runtime + GL bridge created');
 
     // 3b. Inject engine-bundled test widgets when solo mode is active.

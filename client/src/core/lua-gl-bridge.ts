@@ -176,6 +176,38 @@ export function isGameAssetPath(lowerNormalised: string): boolean {
     );
 }
 
+/**
+ * UI-1b: transform the gl-bridge texture cache into clone-safe diagnostic rows.
+ * Pure (no WebGL refs touched) so it's unit-testable without a GL context and
+ * safe to structured-clone from the worker back to the main-thread console.
+ * `LuaGLBridge.dumpTextureCache` delegates here.
+ */
+export function textureCacheDumpRows(
+    cache: ReadonlyMap<string, LuaTextureHandle>,
+    filter?: string,
+): TextureCacheDump[] {
+    const f = filter ? filter.toLowerCase() : null;
+    const out: TextureCacheDump[] = [];
+    for (const [key, h] of cache) {
+        if (f && !key.toLowerCase().includes(f)) continue;
+        const d = h.diag;
+        // Fall back to size heuristics for entries that predate the diag field.
+        const loaded = d?.loaded ?? (h.width > 1 || h.height > 1);
+        out.push({
+            key,
+            resolvedUrl: d?.resolvedUrl ?? '',
+            loadedUrl: d?.loadedUrl ?? '',
+            width: h.width,
+            height: h.height,
+            loaded,
+            // A 1×1 texture that never loaded is the magenta fallback stub.
+            placeholder: !loaded && h.width <= 1 && h.height <= 1,
+            lastError: d?.lastError ?? '',
+        });
+    }
+    return out;
+}
+
 /** Handle returned by gl.CreateShader — opaque to Lua. */
 export interface LuaShaderHandle {
     __type: 'shader';
@@ -199,6 +231,41 @@ export interface LuaTextureHandle {
     tex: WebGLTexture;
     width: number;
     height: number;
+    /** UI-1b instrumentation — only present on path-loaded textures (the two
+     *  cache paths that fetch an image). Records what URL the path resolved to,
+     *  what URL the image actually loaded from (may be a fallback), and whether
+     *  the decode/upload succeeded. Lets a live `window.__gp('__uiTextures.…')`
+     *  eval see whether a HUD icon reached the visible draw or is still showing
+     *  the magenta 1×1 placeholder (the UI-1 root-cause the U3 magenta hunt needs). */
+    diag?: TextureDiag;
+}
+
+/** Per-texture load diagnostics attached to a path-loaded {@link LuaTextureHandle}. */
+export interface TextureDiag {
+    /** Primary URL {@link LuaGLBridge.resolveTextureUrl} produced for the key. */
+    resolvedUrl: string;
+    /** URL the image actually loaded from (primary or a fallback); '' until loaded. */
+    loadedUrl: string;
+    /** false while the magenta placeholder is still showing. */
+    loaded: boolean;
+    /** Last fetch/decode error, or '' on success / not-yet-attempted. */
+    lastError: string;
+}
+
+/** One row of {@link LuaGLBridge.dumpTextureCache} — clone-safe (no WebGL refs)
+ *  so it survives the worker→main structured-clone round-trip via window.__gp. */
+export interface TextureCacheDump {
+    /** Normalised cache key (the path the widget passed, lowered/slash-normalised). */
+    key: string;
+    resolvedUrl: string;
+    loadedUrl: string;
+    width: number;
+    height: number;
+    /** Image decoded + uploaded (real texture reaching draws). */
+    loaded: boolean;
+    /** Still the magenta 1×1 fallback (loaded=false, 1×1). */
+    placeholder: boolean;
+    lastError: string;
 }
 
 /** Handle returned by gl.CreateFBO. */
@@ -1932,12 +1999,13 @@ export class LuaGLBridge {
             const cached = this.textureCache.get(normalised);
             if (cached) return cached;
             const tex = this.createSolidTexture(255, 0, 255, 255); // magenta placeholder
+            const url = this.resolveTextureUrl(normalised);
             const handle: LuaTextureHandle = markOpaque({
                 __type: 'texture',
                 tex,
                 width: 1, height: 1,
+                diag: { resolvedUrl: url, loadedUrl: '', loaded: false, lastError: '' },
             });
-            const url = this.resolveTextureUrl(normalised);
             const fallbacks = this.buildFallbackUrls(normalised, url);
             // Fire off async load; replace data when ready.
             void this.loadImageInto(url, handle, fallbacks.length > 0 ? fallbacks : undefined);
@@ -1973,6 +2041,23 @@ export class LuaGLBridge {
             return markOpaque({ __type: 'texture' as const, tex, width, height });
         }
         return null;
+    }
+
+    /**
+     * UI-1b instrumentation — enumerate the path-loaded texture cache for live
+     * introspection. Reachable from the main-thread devtools console via
+     * `window.__gp('__uiTextures.dump()')` (the worker exposes a `__uiTextures`
+     * hook in lua-ui-host that delegates here). Returns a clone-safe array (no
+     * WebGL refs) so it survives the worker→main structured-clone round-trip.
+     *
+     * Each row reports the resolved URL, the URL the image actually loaded from
+     * (a fallback may have won), the current dimensions, and whether it decoded
+     * — so the U3 magenta hunt can tell whether a resource-bar icon reached the
+     * visible draw or is still the magenta 1×1 placeholder. Pass `filter` to
+     * substring-match keys (e.g. `dumpTextureCache('metal')`).
+     */
+    dumpTextureCache(filter?: string): TextureCacheDump[] {
+        return textureCacheDumpRows(this.textureCache, filter);
     }
 
     private normaliseTexturePath(path: string): string {
@@ -2048,25 +2133,35 @@ export class LuaGLBridge {
     }
 
     private async loadImageInto(url: string, handle: LuaTextureHandle, fallbackUrls?: string[]): Promise<void> {
+        // UI-1b: `loadedFrom` is the URL that actually served the image (the
+        // primary or a winning fallback) — recorded on handle.diag so a live
+        // introspection eval can see whether a HUD icon resolved to the right
+        // asset, decoded, and reached the visible draw (vs. staying magenta).
+        let loadedFrom = url;
+        const diag = handle.diag;
         try {
             let res = await fetch(url);
             if (!res.ok && fallbackUrls) {
                 for (const fb of fallbackUrls) {
                     res = await fetch(fb);
-                    if (res.ok) break;
+                    if (res.ok) { loadedFrom = fb; break; }
                 }
             }
             if (!res.ok) {
+                if (diag) diag.lastError = `HTTP ${res.status}`;
                 console.warn(`[gl.CreateTexture] ${url}: ${res.status}`);
                 return;
             }
             // .dds → upload compressed blocks directly via S3TC, no
             // browser-side decode (createImageBitmap rejects DDS).
-            if (/\.dds(\?|$)/i.test(url)) {
+            if (/\.dds(\?|$)/i.test(loadedFrom)) {
                 const buf = await res.arrayBuffer();
                 if (this.uploadDDS(buf, handle)) {
+                    if (diag) { diag.loaded = true; diag.loadedUrl = loadedFrom; diag.lastError = ''; }
                     this.textureLoadGeneration++;
-                    console.log(`[gl.CreateTexture] loaded DDS ${url} (${handle.width}x${handle.height})`);
+                    console.log(`[gl.CreateTexture] loaded DDS ${loadedFrom} (${handle.width}x${handle.height})`);
+                } else if (diag) {
+                    diag.lastError = 'DDS decode failed';
                 }
                 return;
             }
@@ -2083,9 +2178,11 @@ export class LuaGLBridge {
             gl.generateMipmap(gl.TEXTURE_2D);
             handle.width = bitmap.width;
             handle.height = bitmap.height;
+            if (diag) { diag.loaded = true; diag.loadedUrl = loadedFrom; diag.lastError = ''; }
             this.textureLoadGeneration++;
-            console.log(`[gl.CreateTexture] loaded ${url} (${bitmap.width}x${bitmap.height})`);
+            console.log(`[gl.CreateTexture] loaded ${loadedFrom} (${bitmap.width}x${bitmap.height})`);
         } catch (e) {
+            if (diag) diag.lastError = String(e);
             console.warn(`[gl.CreateTexture] ${url}: ${e}`);
         }
     }
@@ -2260,13 +2357,14 @@ export class LuaGLBridge {
             const normalised = this.normaliseTexturePath(s);
             let handle = this.textureCache.get(normalised);
             if (!handle) {
+                const primaryUrl = this.resolveTextureUrl(normalised);
                 handle = markOpaque({
                     __type: 'texture' as const,
                     tex: this.createSolidTexture(255, 0, 255, 255),
                     width: 1, height: 1,
+                    diag: { resolvedUrl: primaryUrl, loadedUrl: '', loaded: false, lastError: '' },
                 });
                 this.textureCache.set(normalised, handle);
-                const primaryUrl = this.resolveTextureUrl(normalised);
                 const fallbacks = this.buildFallbackUrls(normalised, primaryUrl);
                 void this.loadImageInto(primaryUrl, handle, fallbacks.length > 0 ? fallbacks : undefined);
             }

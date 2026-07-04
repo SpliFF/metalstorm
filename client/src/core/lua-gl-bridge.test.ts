@@ -6,8 +6,19 @@ import {
     normaliseTexturePath,
     isGameAssetPath,
     atmosphereReturn,
+    textureCacheDumpRows,
+    type LuaTextureHandle,
 } from './lua-gl-bridge.js';
 import { defaultMapAtmosphere } from './map-lighting.js';
+
+/** Build a texture-cache handle for the dump tests (tex ref is irrelevant). */
+function texHandle(
+    width: number,
+    height: number,
+    diag?: LuaTextureHandle['diag'],
+): LuaTextureHandle {
+    return { __type: 'texture', tex: {} as WebGLTexture, width, height, diag };
+}
 
 describe('normaliseTexturePath (Spring texture-spec modifier stripping)', () => {
     it('passes a plain path through unchanged', () => {
@@ -90,6 +101,77 @@ describe('atmosphereReturn (gl.GetAtmosphere)', () => {
         a.fogColor = [0.1, 0.2, 0.3, 0.4];
         expect(atmosphereReturn(a, DIR, 'fogStart')).toBe(0.5);
         expect(atmosphereReturn(a, DIR, 'fogColor')).toEqual([0.1, 0.2, 0.3, 0.4]);
+    });
+});
+
+describe('textureCacheDumpRows (UI-1b texture-cache introspection)', () => {
+    it('reports a loaded texture: real dims, loaded=true, not a placeholder', () => {
+        const cache = new Map<string, LuaTextureHandle>([
+            ['luaui/images/metal.png', texHandle(104, 104, {
+                resolvedUrl: 'http://x/game/luaui/images/metal.png',
+                loadedUrl: 'http://x/game/luaui/images/metal.png',
+                loaded: true, lastError: '',
+            })],
+        ]);
+        const [row] = textureCacheDumpRows(cache);
+        expect(row.key).toBe('luaui/images/metal.png');
+        expect(row.width).toBe(104);
+        expect(row.loaded).toBe(true);
+        expect(row.placeholder).toBe(false);
+        expect(row.loadedUrl).toBe('http://x/game/luaui/images/metal.png');
+        expect(row.lastError).toBe('');
+    });
+
+    it('flags the still-magenta 1×1 placeholder (the U3 root-cause signal)', () => {
+        const cache = new Map<string, LuaTextureHandle>([
+            ['luaui/images/energy.png', texHandle(1, 1, {
+                resolvedUrl: 'http://x/game/luaui/images/energy.png',
+                loadedUrl: '', loaded: false, lastError: 'HTTP 404',
+            })],
+        ]);
+        const [row] = textureCacheDumpRows(cache);
+        expect(row.loaded).toBe(false);
+        expect(row.placeholder).toBe(true);
+        expect(row.lastError).toBe('HTTP 404');
+        // resolvedUrl is still visible even though nothing loaded — the whole
+        // point of the instrumentation is to see WHERE it tried to load from.
+        expect(row.resolvedUrl).toBe('http://x/game/luaui/images/energy.png');
+    });
+
+    it('records a winning fallback URL distinct from the resolved URL', () => {
+        const cache = new Map<string, LuaTextureHandle>([
+            ['#42', texHandle(64, 64, {
+                resolvedUrl: 'http://x/game/unitpics/CommRecon.png',
+                loadedUrl: 'http://x/game/unitpics/commrecon.png', // case-fallback won
+                loaded: true, lastError: '',
+            })],
+        ]);
+        const [row] = textureCacheDumpRows(cache);
+        expect(row.loaded).toBe(true);
+        expect(row.loadedUrl).not.toBe(row.resolvedUrl);
+        expect(row.loadedUrl).toBe('http://x/game/unitpics/commrecon.png');
+    });
+
+    it('substring-filters keys case-insensitively', () => {
+        const cache = new Map<string, LuaTextureHandle>([
+            ['luaui/images/metal.png', texHandle(104, 104)],
+            ['luaui/images/energy.png', texHandle(104, 104)],
+            ['bitmaps/detailtex.png', texHandle(256, 256)],
+        ]);
+        expect(textureCacheDumpRows(cache, 'METAL').map((r) => r.key)).toEqual([
+            'luaui/images/metal.png',
+        ]);
+        expect(textureCacheDumpRows(cache, 'images').length).toBe(2);
+    });
+
+    it('falls back to size heuristics when a diag is absent (legacy entries)', () => {
+        const cache = new Map<string, LuaTextureHandle>([
+            ['a.png', texHandle(128, 128)], // no diag → loaded inferred from size
+            ['b.png', texHandle(1, 1)],     // 1×1 no diag → placeholder
+        ]);
+        const rows = textureCacheDumpRows(cache);
+        expect(rows.find((r) => r.key === 'a.png')?.loaded).toBe(true);
+        expect(rows.find((r) => r.key === 'b.png')?.placeholder).toBe(true);
     });
 });
 
