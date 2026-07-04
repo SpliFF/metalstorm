@@ -22,7 +22,7 @@ import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos } from './game-worker
 // onServerRestart callback was extracted) so it imports + runs here unchanged.
 import { Connection } from './connection.js';
 import type { CombatEventInfo, FeatureSpawnInfo,
-    SoundEventInfo, SoundRefInfo } from './connection.js';
+    SoundEventInfo, SoundRefInfo, ResourceUpdateInfo } from './connection.js';
 import { AudioChannel } from './audio.js';
 import type { EntityStateSnapshot } from './entity-state.js';
 // GW4-c3: terrain + lighting + map parse move into the worker so terrain
@@ -743,6 +743,30 @@ function gpConnect(msg: GpInitToWorker): void {
         onBuildActivity: (snapshot) => gpBuildBeamRenderer?.onSnapshot(snapshot),
         // GW4-c5: scar/track decal events (envelope 0x08) → ground decal overlay.
         onDecals: (snapshot) => gpDecalOverlay?.onSnapshot(snapshot.scars, snapshot.tracks),
+        // Team economy (envelope 0x01 ResourceUpdate, server sends every 10
+        // ticks to each session with team >= 0). Populates liveState.resources
+        // so Spring.GetTeamResources returns live metal/energy/income/etc.
+        // GW4-regression fix (U1-class): pre-GW4 the main-thread
+        // lua-widget-manager.forwardResourceUpdate fed liveState.resources via a
+        // worker message; post-GW4 the connection moved INTO this worker and
+        // LuaWidgetManager isn't instantiated, so onResourceUpdate had no
+        // consumer and GetTeamResources returned 0 on every client (top-bar
+        // resource bars, economy panels, income-gated widgets all read empty).
+        // ResourceUpdateInfo carries the same 18 numeric fields as ResourceEntry
+        // (+ team) — a straight copy, mirroring the old lua-widget-worker path.
+        onResourceUpdate: (info: ResourceUpdateInfo) => {
+            liveState.resources.set(info.team, {
+                metal: info.metal, maxMetal: info.maxMetal,
+                energy: info.energy, maxEnergy: info.maxEnergy,
+                metalIncome: info.metalIncome, energyIncome: info.energyIncome,
+                metalPull: info.metalPull, energyPull: info.energyPull,
+                metalExpense: info.metalExpense, energyExpense: info.energyExpense,
+                metalShare: info.metalShare, energyShare: info.energyShare,
+                metalSent: info.metalSent, energySent: info.energySent,
+                metalReceived: info.metalReceived, energyReceived: info.energyReceived,
+                metalExcess: info.metalExcess, energyExcess: info.energyExcess,
+            });
+        },
         // PLAN-latency L0: drive the presentation cursor at the true sim speed
         // (paused → 0 freezes P). GW4-c5: also drive the FX aging multiplier +
         // the projectile integrator's sim-speed so bolts / particles / lights
