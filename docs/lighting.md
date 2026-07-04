@@ -67,6 +67,23 @@ orientation: `diffuse = groundAmbient` (up-facing terrain), `groundColor
 = unitAmbient` (down-facing unit underbellies). Faithful per-material
 split is L3+ work.
 
+### Read/write round-trip (`gl.GetSun` ↔ `Spring.SetSunLighting`)
+
+The merged lighting store (`gpCtx.mapLighting`) is single-source: the
+map load seeds it, `Spring.SetSunLighting`/`SetSunDirection` merge into
+it, and `gl.GetSun` reads it live (bridge `setSunLightingReader`,
+`readSunParam` in map-lighting.ts — faithful to Recoil
+`LuaOpenGL::GetSun`). This matters because ZK's
+`gfx_sun_and_atmosphere` and BAR's lighting adjusters are
+read-modify-write: they read every sun value via `gl.GetSun` and write
+the lot back through `SetSunLighting`. With a live reader that cycle is
+the identity; when `gl.GetSun` returned fixed stubs it clobbered the
+authored map lighting a few frames after boot (PLAN-playable G1c —
+groundAmbient churn + darkened maps). `gl.GetSun("pos"/"dir")` returns
+the *raw stored* sunDir (no legacy Z-flip) so
+`Spring.SetSunDirection(gl.GetSun("pos"))` round-trips; the flip is
+applied once at scene-apply time.
+
 ## Cascaded shadow maps (L3)
 
 `CascadedShadowGenerator(2048, sun)` with 4 cascades, log-uniform splits

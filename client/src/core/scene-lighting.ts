@@ -170,12 +170,24 @@ export function applyMapLighting(lighting: MapLighting, scene: SceneLighting): v
 
     (globalThis as unknown as { __mapLighting: MapLighting }).__mapLighting = lighting;
 
-    console.log(
+    // Log only when the applied values actually changed. Widget
+    // read-modify-write cycles (ZK gfx_sun_and_atmosphere FullSunUpdate)
+    // legitimately re-apply the same state several times per burst; the
+    // apply itself stays unconditional (faithful — Recoil SetSunLighting
+    // never dedups), but one log line per *real* change is the useful signal
+    // (PLAN-playable G1c).
+    const logLine =
         `[lighting] applied: sunDir=${sx.toFixed(2)},${sy.toFixed(2)},${sz.toFixed(2)} ` +
         `unitDiffuse=[${lighting.unitDiffuse.map(n => n.toFixed(2)).join(',')}] ` +
         `groundAmbient=[${lighting.groundAmbient.map(n => n.toFixed(2)).join(',')}] ` +
-        `legacyCoord=${lighting.legacyCoordSystem}`,
-    );
+        `legacyCoord=${lighting.legacyCoordSystem}`;
+    if (logLine !== lastAppliedLogLine) {
+        lastAppliedLogLine = logLine;
+        console.log(logLine);
+    }
 
     void renderPipeline;
 }
+
+/** Last `[lighting] applied` line emitted — identical re-applies stay silent. */
+let lastAppliedLogLine = '';

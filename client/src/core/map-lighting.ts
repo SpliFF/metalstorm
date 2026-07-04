@@ -430,6 +430,38 @@ export function setSunDirectionLighting(
     return out;
 }
 
+/**
+ * Read one `gl.GetSun(param, mode)` value from a MapLighting. Faithful to
+ * Recoil `LuaOpenGL::GetSun` (rts/Lua/LuaOpenGL.cpp:6742): no param, "pos"
+ * and "dir" all return the (unit-length) world→sun light direction;
+ * "ambient"/"diffuse"/"specular"/"shadowDensity" return the *current* sun
+ * lighting state — the same store `Spring.SetSunLighting` writes — with
+ * mode "ground" (default) or "unit" selecting the ground/model variant
+ * (Recoil tests only `mode[0] == 'u'`). Unknown params return nothing.
+ * Triples come back as arrays (the Lua bridge unpacks arrays to multiple
+ * return values, matching Recoil's 3-value push).
+ *
+ * The direction is returned in the raw stored space (no legacy Z-flip) so a
+ * widget round-trip `SetSunDirection(gl.GetSun("pos"))` is the identity —
+ * the flip is applied once at scene-apply time (`applyMapLighting`).
+ */
+export function readSunParam(
+    l: MapLighting, param?: string | null, mode?: string | null,
+): number[] | number | undefined {
+    if (param == null) return normaliseSunDir(l.sunDir);
+    const unit = (mode ?? 'ground').charAt(0) === 'u';
+    switch (String(param)) {
+        case 'pos':
+        case 'dir':              return normaliseSunDir(l.sunDir);
+        case 'specularExponent': return l.specularExponent;
+        case 'shadowDensity':    return unit ? l.unitShadowDensity : l.groundShadowDensity;
+        case 'ambient':          return unit ? [...l.unitAmbient] : [...l.groundAmbient];
+        case 'diffuse':          return unit ? [...l.unitDiffuse] : [...l.groundDiffuse];
+        case 'specular':         return unit ? [...l.unitSpecular] : [...l.groundSpecular];
+        default:                 return undefined;
+    }
+}
+
 // ── Atmosphere (gl.GetAtmosphere / Spring.SetAtmosphere) ───────────────────
 
 /** Copy a MapAtmosphere (fresh colour arrays so merges never alias). */

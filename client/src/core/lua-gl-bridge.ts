@@ -28,15 +28,18 @@ import {
 } from './glsl-translator.js';
 import {
     defaultMapAtmosphere,
+    defaultMapLighting,
     mergeAtmosphere,
+    readSunParam,
     type MapAtmosphere,
+    type MapLighting,
 } from './map-lighting.js';
 
 /** The engine light direction returned by `gl.GetAtmosphere("pos")` / the
  *  no-arg form (Recoil: `sky->GetLight()->GetLightDir()`). No BAR or ZK widget
- *  reads it (verified), so this stays a fixed engine default — matching
- *  `gl.GetSun("dir")` below — rather than the per-map sun direction, which
- *  flows to the renderer through scene-lighting, not this read seam. */
+ *  reads it (verified), so this stays a fixed engine default rather than the
+ *  live sun direction (`gl.GetSun` *does* read the live store — see
+ *  `sunLightingReader`); wire it the same way if a reader ever appears. */
 const ATMOSPHERE_LIGHT_DIR: readonly [number, number, number] = [0.5, -0.7, 0.5];
 
 /**
@@ -455,6 +458,20 @@ export class LuaGLBridge {
      *  ground circle falls back to a flat ring at the caller's Y. */
     setGroundSampler(sampler: ((x: number, z: number) => number) | null): void {
         this.groundSampler = sampler;
+    }
+
+    /** Reads the *live* sun-lighting state for `gl.GetSun` — the same merged
+     *  store `Spring.SetSunLighting`/`SetSunDirection` write (Recoil's
+     *  `sunLighting` singleton). The worker host wires a closure over
+     *  gpCtx.mapLighting; null in tests / lobby preview, where GetSun falls
+     *  back to the engine-default MapLighting. Without a live reader, ZK's
+     *  gfx_sun_and_atmosphere read-modify-write cycle clobbers the authored
+     *  map lighting with stale constants (PLAN-playable G1c). */
+    private sunLightingReader: (() => MapLighting) | null = null;
+
+    /** Wire the live sun-lighting reader (see `sunLightingReader`). */
+    setSunLightingReader(reader: (() => MapLighting) | null): void {
+        this.sunLightingReader = reader;
     }
 
     /** The map's `atmosphere` table (fog + sky/sun/cloud colours), read by
@@ -1004,21 +1021,18 @@ export class LuaGLBridge {
             }
         };
 
-        // gl.GetSun(param, [type]) — sun parameters used by shaders for
-        // map/unit lighting. Returns either RGB triple, XYZ direction,
-        // or a single scalar depending on param.
-        gl['GetSun'] = (param: LuaValue, _type?: LuaValue) => {
-            const p = String(param ?? '');
-            switch (p) {
-                case 'pos':            return [500, 1000, 500];
-                case 'dir':            return [0.5, -0.7, 0.5];
-                case 'specular':       return [1, 1, 1];
-                case 'diffuse':        return [1, 1, 1];
-                case 'ambient':        return [0.3, 0.3, 0.3];
-                case 'specularExp':    return 16;
-                case 'shadowDensity':  return 0.7;
-                default:               return [1, 1, 1];
-            }
+        // gl.GetSun(param, [mode]) — the *live* sun lighting state, faithful
+        // to Recoil LuaOpenGL::GetSun: reads the same store SetSunLighting /
+        // SetSunDirection write, so widget read-modify-write cycles (ZK's
+        // gfx_sun_and_atmosphere, BAR's map_lighting_adjuster) round-trip
+        // instead of clobbering the authored map lighting (PLAN-playable G1c).
+        gl['GetSun'] = (param?: LuaValue, mode?: LuaValue) => {
+            const lighting = this.sunLightingReader?.() ?? defaultMapLighting();
+            return readSunParam(
+                lighting,
+                param == null ? null : String(param),
+                mode == null ? null : String(mode),
+            );
         };
 
         // gl.GetAtmosphere([param]) — fog + sky/sun/cloud colours from the

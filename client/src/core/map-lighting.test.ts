@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
     loadMapLighting, normaliseSunDir, defaultMapLighting,
-    mergeSunLighting, setSunDirectionLighting,
+    mergeSunLighting, setSunDirectionLighting, readSunParam,
     loadMapAtmosphere, defaultMapAtmosphere, mergeAtmosphere,
     loadMapWaterAbsorption, defaultMapWaterAbsorption,
 } from './map-lighting.js';
@@ -324,5 +324,76 @@ describe('setSunDirectionLighting (Spring.SetSunDirection)', () => {
         base.groundShadowDensity = 0.33;
         const out = setSunDirectionLighting(base, 0, 1, 0);
         expect(out.groundShadowDensity).toBe(0.33);
+    });
+});
+
+describe('readSunParam (gl.GetSun)', () => {
+    // The lighting a widget must round-trip: pools_of_ilys-style authored
+    // values, distinct per field so a ground/unit mixup fails the test.
+    function litBase() {
+        const l = defaultMapLighting();
+        l.sunDir = [0, 1, 0];
+        l.groundAmbient = [0.7, 1.0, 0.9];
+        l.groundDiffuse = [0.8, 0.7, 0.6];
+        l.groundSpecular = [0.1, 0.2, 0.3];
+        l.groundShadowDensity = 0.437;
+        l.unitAmbient = [0.35, 0.36, 0.37];
+        l.unitDiffuse = [1.0, 0.98, 0.92];
+        l.unitSpecular = [0.5, 0.5, 0.55];
+        l.unitShadowDensity = 0.62;
+        l.specularExponent = 30;
+        return l;
+    }
+
+    it('returns the light direction for no-arg, "pos" and "dir"', () => {
+        const l = litBase();
+        expect(readSunParam(l)).toEqual([0, 1, 0]);
+        expect(readSunParam(l, 'pos')).toEqual([0, 1, 0]);
+        expect(readSunParam(l, 'dir')).toEqual([0, 1, 0]);
+    });
+
+    it('normalises a non-unit stored direction (Recoil GetLightDir is unit)', () => {
+        const l = litBase();
+        l.sunDir = [0, 2, 0];
+        expect(readSunParam(l, 'pos')).toEqual([0, 1, 0]);
+    });
+
+    it('selects ground values by default and unit values for a "u…" mode', () => {
+        const l = litBase();
+        expect(readSunParam(l, 'ambient')).toEqual([0.7, 1.0, 0.9]);
+        expect(readSunParam(l, 'ambient', 'unit')).toEqual([0.35, 0.36, 0.37]);
+        expect(readSunParam(l, 'diffuse')).toEqual([0.8, 0.7, 0.6]);
+        expect(readSunParam(l, 'diffuse', 'unit')).toEqual([1.0, 0.98, 0.92]);
+        expect(readSunParam(l, 'specular', 'ground')).toEqual([0.1, 0.2, 0.3]);
+        expect(readSunParam(l, 'specular', 'unit')).toEqual([0.5, 0.5, 0.55]);
+        expect(readSunParam(l, 'shadowDensity')).toBe(0.437);
+        expect(readSunParam(l, 'shadowDensity', 'unit')).toBe(0.62);
+        expect(readSunParam(l, 'specularExponent')).toBe(30);
+    });
+
+    it('returns nothing for an unknown param (Recoil pushes 0 values)', () => {
+        expect(readSunParam(litBase(), 'nonsense')).toBeUndefined();
+    });
+
+    it('returns copies — mutating the result cannot corrupt the live store', () => {
+        const l = litBase();
+        const amb = readSunParam(l, 'ambient') as number[];
+        amb[0] = 99;
+        expect(l.groundAmbient[0]).toBe(0.7);
+    });
+
+    it('round-trips a SetSunLighting write (the ZK FullSunUpdate cycle)', () => {
+        // gfx_sun_and_atmosphere reads every sun value via gl.GetSun and
+        // writes the lot back through Spring.SetSunLighting. With a live
+        // reader that must be the identity — G1c's churn was this cycle
+        // reading stale stub constants instead.
+        const l = litBase();
+        const { lighting: after } = mergeSunLighting(l, {
+            groundAmbientColor: readSunParam(l, 'ambient') as number[],
+            unitDiffuseColor: readSunParam(l, 'diffuse', 'unit') as number[],
+            groundShadowDensity: readSunParam(l, 'shadowDensity') as number,
+            modelShadowDensity: readSunParam(l, 'shadowDensity', 'unit') as number,
+        });
+        expect(after).toEqual(l);
     });
 });

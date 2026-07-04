@@ -3498,16 +3498,8 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             return [ac.index, ac.cmdId, ac.cmdName];
         },
 
-        // --- Sun ---
-        GetSun: (_param: LuaValue) => {
-            const p = String(_param ?? '');
-            if (p === 'pos') return [500, 1000, 500];
-            if (p === 'dir') return [0.5, -0.7, 0.5];
-            if (p === 'specular') return [1, 1, 1];
-            if (p === 'diffuse') return [1, 1, 1];
-            if (p === 'ambient') return [0.3, 0.3, 0.3];
-            return [1, 1, 1];
-        },
+        // (No Spring.GetSun — it doesn't exist in Recoil; the sun read API is
+        // gl.GetSun on the GL bridge, which reads the live lighting store.)
 
         // --- Team rules params ---
         GetTeamRulesParam: (teamId: LuaValue, key: LuaValue) => {

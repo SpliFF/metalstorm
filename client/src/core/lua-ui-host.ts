@@ -868,6 +868,12 @@ export async function init(
     // ground). Lazily reads gpCtx.entityRenderer — it's null at bridge-build time
     // and assigned later in the boot sequence — mirroring rtsCam's sampler.
     bridge.setGroundSampler((x, z) => gpCtx.entityRenderer?.getGroundHeight(x, z) ?? 0);
+    // gl.GetSun reads the live merged lighting store — the one the map load
+    // seeds and Spring.SetSunLighting/SetSunDirection (below) merge into — so
+    // widget read-modify-write cycles (ZK gfx_sun_and_atmosphere, BAR
+    // map_lighting_adjuster) round-trip the authored values instead of
+    // clobbering them with stale defaults (PLAN-playable G1c).
+    bridge.setSunLightingReader(() => gpCtx.mapLighting);
     // Feed the map's `atmosphere` table to gl.GetAtmosphere (fog start/end +
     // sky/sun/cloud colours). The bridge starts on the Recoil defaults so reads
     // never return nil; this fire-and-forget load swaps in the per-map values
