@@ -89,3 +89,6 @@ infolog.txt
 # MCP tool
 tools/debug-mcp/node_modules/
 
+
+# chrome-devtools MCP screenshot output
+/.playwright-mcp/
