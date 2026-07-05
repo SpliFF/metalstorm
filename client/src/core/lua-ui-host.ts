@@ -835,9 +835,23 @@ export async function init(
     runtime.doString(`
         local _realLoad = load
         local _realLoadstring = loadstring
-        function load(chunk, chunkname, mode, env)
+        -- Must forward the EXACT argument count the caller used: Lua's load()
+        -- distinguishes "env omitted" (defaults to the global environment)
+        -- from "env explicitly nil" (chunk gets NO environment at all). Fixed
+        -- named params (chunk, chunkname, mode, env) can't tell those apart —
+        -- both collapse to a local env==nil — so a naive passthrough always
+        -- forwarded an explicit nil, giving every 3-arg load() a nil _ENV.
+        -- This broke 100% of the unsynced gadgetHandler loader's loadfile()
+        -- calls (all use the 3-arg form), silently emptying gadgetHandler.gadgets
+        -- despite each failure being individually pcall-caught and logged.
+        function load(...)
+            local n = select('#', ...)
+            local chunk, chunkname, mode, env = ...
             if type(chunk) == 'string' then chunk = __fixLua51Escapes(chunk) end
-            return _realLoad(chunk, chunkname, mode, env)
+            if n >= 4 then return _realLoad(chunk, chunkname, mode, env) end
+            if n == 3 then return _realLoad(chunk, chunkname, mode) end
+            if n == 2 then return _realLoad(chunk, chunkname) end
+            return _realLoad(chunk)
         end
         if _realLoadstring then
             function loadstring(chunk, chunkname)
