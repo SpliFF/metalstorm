@@ -1521,27 +1521,39 @@ function gpSyncCameraToLiveState(): void {
 
 /// GW4-c6: run the LuaUI screen-space pass on the shared Babylon context after
 /// scene.render(). Babylon caches GL state and assumes nothing else touches the
-/// context, so we snapshot the bits the getBridge() clobbers, run the pass, restore
-/// them, then `wipeCaches(true)` so Babylon re-uploads its state next frame
-/// (mirrors lua-widget-host.ts's postDraw). Without this the world render
-/// corrupts within a frame or two (wrong program/VAO/blend bound).
+/// context, so the pass ends with `wipeCaches(true)` (bruteForce) to force
+/// Babylon to re-verify + re-issue every cached GL call on its next real state
+/// change (mirrors lua-widget-host.ts's postDraw). Without this the world
+/// render corrupts within a frame or two (wrong program/VAO/blend bound).
+///
+/// PLAN-perf P5 (2026-07-05): this used to also snapshot 9 more GL values via
+/// `gl.getParameter` (program/VAO/blend/depthTest/depthMask/cull/viewport/
+/// polygonOffset/activeTexture) and restore them by hand before the
+/// `wipeCaches(true)` call. That was provably redundant: `wipeCaches(true)`
+/// (read Babylon's ThinEngine source — `_alphaState.reset()`,
+/// `_depthCullingState.reset()`, `resetTextureCache()`, `_currentProgram =
+/// null`, `_unbindVertexArrayObject()`, `_viewportCached` zeroed) marks every
+/// one of those caches dirty/sentinel, so Babylon reissues the real GL call
+/// the moment it next sets any of them — regardless of what raw state we
+/// leave behind. (The VAO restore was actively pointless: wipeCaches's own
+/// `_unbindVertexArrayObject()` unconditionally rebinds null right after,
+/// undoing it.) The ONE value wipeCaches does NOT track is the framebuffer
+/// binding (`_currentFramebuffer`) — that still needs a real save/restore,
+/// now read from Babylon's own cache instead of a `gl.getParameter` round
+/// trip. Kept `wipeCaches(true)` (not `false`): the weaker form skips exactly
+/// the resets this reasoning depends on, so downgrading would silently
+/// reintroduce the need for the removed restores. This narrows the 12
+/// `gl.getParameter` round-trips (N1-measured 0.55 ms/frame) to zero;
+/// `wipeCaches(true)`'s own downstream re-upload cost is untouched by design
+/// (already bounded by P0's ≤2 ms render-phase deltas, not this milestone).
 function gpRunUiPass(): void {
     if (!gpCtx.luaUiActive || !getRuntime() || !gpCtx.uiGl || !gpEngine) return;
     const gl = gpCtx.uiGl;
 
     const tSave = performance.now();
-    const savedProgram = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null;
-    const savedVao = gl.getParameter(gl.VERTEX_ARRAY_BINDING) as WebGLVertexArrayObject | null;
-    const savedBlend = gl.getParameter(gl.BLEND) as boolean;
-    const savedDepthTest = gl.getParameter(gl.DEPTH_TEST) as boolean;
-    const savedDepthMask = gl.getParameter(gl.DEPTH_WRITEMASK) as boolean;
-    const savedCull = gl.getParameter(gl.CULL_FACE) as boolean;
-    // A widget may call gl.Viewport / gl.PolygonOffset (BAR read-shim batch);
-    // snapshot so they can't leak into the next world render.
-    const savedViewport = gl.getParameter(gl.VIEWPORT) as Int32Array;
-    const savedPolyOffset = gl.getParameter(gl.POLYGON_OFFSET_FILL) as boolean;
-    const savedActiveTex = gl.getParameter(gl.ACTIVE_TEXTURE) as number;
-    const savedFBO = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+    // Babylon's own cached binding — see the function doc comment for why
+    // this is the one save that still needs to happen (not reset by wipeCaches).
+    const savedFBO = (gpEngine as unknown as { _currentFramebuffer: WebGLFramebuffer | null })._currentFramebuffer;
     // Babylon may leave a post-process render-target FBO bound; the UI must
     // draw to the default framebuffer (the canvas the player sees).
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
@@ -1565,18 +1577,12 @@ function gpRunUiPass(): void {
         gpCtx.luaUiActive = false;  // stop after a hard failure rather than spam
     }
 
-    // Restore Babylon's expected state.
+    // Restore Babylon's expected state. Only the framebuffer binding needs a
+    // manual restore here — see the function doc comment for why the other 9
+    // values that used to be saved/restored are made redundant by the
+    // `wipeCaches(true)` call below.
     const tRestore = performance.now();
-    gl.useProgram(savedProgram);
-    gl.bindVertexArray(savedVao);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, savedFBO);
-    gl.activeTexture(savedActiveTex);
-    if (savedBlend) gl.enable(gl.BLEND); else gl.disable(gl.BLEND);
-    if (savedDepthTest) gl.enable(gl.DEPTH_TEST); else gl.disable(gl.DEPTH_TEST);
-    if (savedCull) gl.enable(gl.CULL_FACE); else gl.disable(gl.CULL_FACE);
-    if (savedPolyOffset) gl.enable(gl.POLYGON_OFFSET_FILL); else gl.disable(gl.POLYGON_OFFSET_FILL);
-    gl.viewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3]);
-    gl.depthMask(savedDepthMask);
     const tWipe = performance.now();
     (gpEngine as unknown as { wipeCaches: (b?: boolean) => void }).wipeCaches(true);
 
