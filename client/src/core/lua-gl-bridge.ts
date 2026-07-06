@@ -18,7 +18,7 @@
  * programs or buffers we bound. The widget host snapshots/restores GL state
  * so Babylon's state cache stays in sync.
  */
-import { markOpaque, type LuaValue } from './lua-runtime.js';
+import { markOpaque, luaTable, type LuaValue } from './lua-runtime.js';
 import { ImmediateModeRenderer, type ListTextureRef } from './lua-gl-immediate.js';
 import { createLuaFontObject } from './lua-gl-font.js';
 import {
@@ -718,6 +718,13 @@ export class LuaGLBridge {
         // so the bridge synthesizes a stable integer id (see getUniformLocId).
         gl['GetUniformLocation'] = (shader: LuaValue, name: LuaValue) =>
             this.getUniformLocId(shader, name);
+        // gl.GetActiveUniforms(shaderID) — Recoil's LuaShaders::GetActiveUniforms
+        // (rts/Lua/LuaShaders.cpp). BAR's common/luaShader/LuaShader.lua calls
+        // this unconditionally at the end of every :Compile()/:Initialize() and
+        // iterates the result with ipairs (PLAN-bar U4: gfx_guishader.lua,
+        // gui_attack_aoe.lua, gfx_cas.lua all crashed here — the function didn't
+        // exist at all).
+        gl['GetActiveUniforms'] = (shader: LuaValue) => this.getActiveUniforms(shader);
         gl['Uniform'] = (name: LuaValue, ...args: LuaValue[]) =>
             this.setUniform(name, args);
         gl['UniformInt'] = (name: LuaValue, ...args: LuaValue[]) =>
@@ -2068,6 +2075,64 @@ export class LuaGLBridge {
             shader.locIds, this.uniformLocations, name,
             () => this.getUniformLocation(shader, name),
         );
+    }
+
+    /** Recoil's LuaShaders::UniformTypeString — lowercased `GL_*` constant
+     *  name. WebGL2's enum values match desktop GL for every case the engine's
+     *  switch covers; anything else (ES-only array/unsigned samplers) falls
+     *  back to "unknown_type" exactly like the engine's default case. */
+    private uniformTypeString(type: number): string {
+        const gl = this.gl;
+        switch (type) {
+            case gl.FLOAT: return 'float';
+            case gl.FLOAT_VEC2: return 'float_vec2';
+            case gl.FLOAT_VEC3: return 'float_vec3';
+            case gl.FLOAT_VEC4: return 'float_vec4';
+            case gl.FLOAT_MAT2: return 'float_mat2';
+            case gl.FLOAT_MAT3: return 'float_mat3';
+            case gl.FLOAT_MAT4: return 'float_mat4';
+            case gl.SAMPLER_2D: return 'sampler_2d';
+            case gl.SAMPLER_3D: return 'sampler_3d';
+            case gl.SAMPLER_CUBE: return 'sampler_cube';
+            case gl.SAMPLER_2D_SHADOW: return 'sampler_2d_shadow';
+            case gl.INT: return 'int';
+            case gl.INT_VEC2: return 'int_vec2';
+            case gl.INT_VEC3: return 'int_vec3';
+            case gl.INT_VEC4: return 'int_vec4';
+            case gl.BOOL: return 'bool';
+            case gl.BOOL_VEC2: return 'bool_vec2';
+            case gl.BOOL_VEC3: return 'bool_vec3';
+            case gl.BOOL_VEC4: return 'bool_vec4';
+            default: return 'unknown_type';
+        }
+    }
+
+    /** gl.GetActiveUniforms(shaderID) → ActiveUniform[] (Recoil:
+     *  `{name, type, length, size, location}` per entry). Must return via
+     *  `luaTable()` even when empty — an unwrapped empty JS array marshals as
+     *  *zero* Lua return values (see lua-runtime.ts pushValue), and `ipairs()`
+     *  taking its sole argument in single-value context coerces that to nil.
+     *  That was the exact U4 crash (`LuaShader.lua:896 ipairs(nil)`): shaders
+     *  with no active uniforms hit the zero-return path. */
+    private getActiveUniforms(shaderArg: LuaValue): LuaValue {
+        const shader = shaderArg as LuaShaderHandle | null;
+        if (!shader || shader.__type !== 'shader') return null;
+        const gl = this.gl;
+        const program = shader.program;
+        const count = (gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS) as number) || 0;
+        const rows: Record<string, LuaValue>[] = [];
+        for (let i = 0; i < count; i++) {
+            const info = gl.getActiveUniform(program, i);
+            if (!info) continue;
+            rows.push({
+                name: info.name,
+                type: this.uniformTypeString(info.type),
+                length: info.name.length,
+                size: info.size,
+                location: this.getUniformLocId(shader, info.name),
+            });
+        }
+        return luaTable(...rows);
     }
 
     /** Resolve a uniform first-arg that is either a name (string → look up on
