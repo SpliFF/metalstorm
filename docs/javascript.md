@@ -149,6 +149,37 @@ await test.unitState(42)  // dump health/pos/weapons for a unit
 await test.combatSummary()
 ```
 
+### Model harness: orbit rig + sun control (PLAN-model-harness)
+
+Dev/test camera + lighting verbs; both live worker-side (dispatch wrappers).
+While the orbit rig is active the RTS camera input path is suppressed —
+drag orbits (pitch clamped 5°–85°), wheel zooms (1.2×–10× of the target's
+bounding-sphere radius); `orbitStop()` restores the saved RTS pose.
+
+```js
+await test.orbit(unitId)                     // start + auto-frame; follow mode tracks the unit
+await test.orbit({ x, z, radius: 60 })       // static ground anchor (wreck inspection)
+await test.orbitSet({ yawDeg: 90, pitchDeg: 20, follow: false })
+await test.orbitFrame(0.7)                   // sphere fills 70% of the shorter viewport axis
+await test.orbitState()                      // { yawDeg, pitchDeg, distance, follow, anchor }
+await test.orbitStop()
+
+await test.sun({ azimuthDeg: 200, elevationDeg: 8 })  // low golden sun — shadow-acne check
+await test.sun({ elevationDeg: -20 })        // below horizon = night preset (ambient floor)
+await test.sunCycle(60)                      // full day–night every 60 s (0 = freeze)
+await test.sun(null)                         // restore the map's authored lighting
+await test.getSun()
+
+await test.listUnitDefs()                    // streamed defs (worker DefCache)
+await test.unitDefByName('cormaw')           // full wire UnitDefInfo or null
+await test.entityBounds(unitId)              // { x,y,z,radius, hasModel } — false = fallback shape
+test.setWireframe(true)
+```
+
+The sun override is purely client-side render state (the sim has no
+time-of-day — deliberately; see PLAN-model-harness §6) and re-applies every
+frame, so game Lua lighting churn can't clobber it.
+
 ### Sim time control
 
 ```js
@@ -221,6 +252,40 @@ window.scenarioResults
 ```
 
 Poll every 30–60 s instead of trying to time it. The `status` field is the canonical completion signal.
+
+#### model-viewer scenario (PLAN-model-harness)
+
+One unit centre-stage on the bench map, with derived showcase buttons, the
+orbit rig, the sun control, and headless capture presets:
+
+```
+?scenario=model-viewer&game=papertanks&def=lighttank        interactive (F8 panel)
+?scenario=model-viewer&game=zk&def=cormaw&capture=turntable  headless capture
+```
+
+Params: `game` (default: sticky dev game id, else `zk`), `def` (optional in
+interactive mode — the panel has a searchable picker), `map` (default
+`green_flat_x34_v3`), `capture` = `turntable` | `clips` | `sun`, `views`
+(turntable headings, default 8), `download=0` (manifest only, no file
+downloads).
+
+- **F8** toggles the dev panel (Unit / Showcases / Camera / Sun & light /
+  Render groups). Buttons are **derived** from the def's capability probe
+  (`client/src/scenarios/model-viewer/capability-probe.ts`) — a transport
+  shows Load/carry/unload, a factory shows Produce, etc.
+- Every routine ends in a stage reset (dummies cleared, sim speed restored,
+  stage respawned if destroyed, camera re-framed).
+- A def that spawns as a procedural fallback shape gets a loud
+  `fallback-model` badge — that *is* a test outcome (E1).
+- Progress + results: `window.modelViewer.state` (phase / running /
+  showcases / badge), `window.modelViewer.captures` (data-URL manifest for
+  MCP/CI pulls), `window.modelViewer.api` (`respawn(def)`, `run(id)`,
+  `stopReset()`, `capture(preset)`).
+
+Capture presets (`&capture=`): `turntable` = N headings at noon light (the
+beta-units golden / PoC judgment set), `clips` = 4-frame strip per
+movement/fire/build routine, `sun` = fixed pose × 5 elevations (shadow
+regression). Frames land as downloads plus the `captures` manifest.
 
 #### Re-firing a single weapon entry without reload
 

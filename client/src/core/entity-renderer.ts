@@ -1062,6 +1062,13 @@ export class EntityRenderer {
      *  rendering; mobile units in PREVLOS just disappear once they leave
      *  radar (mirrors Recoil). */
     private defIsBuilding = new Set<number>();
+    /** Per-defId model-space bounding sphere (centre relative to the model
+     *  origin, radius = rest-pose AABB half-diagonal — midpos-relative,
+     *  mirroring Recoil's RadiusFromAabb). Lazily computed for the orbit
+     *  rig's auto-frame (PLAN-model-harness §5). */
+    private defBoundsCache = new Map<number, {
+        cx: number; cy: number; cz: number; radius: number;
+    }>();
 
     // --- Render meshes ---
     // Per-piece thin-instance meshes, keyed by "model:{defId}:{team}:{pieceIdx}"
@@ -2256,6 +2263,81 @@ export class EntityRenderer {
 
     getEntityPosition(id: number): { x: number; y: number; z: number } | null {
         return this.interpolator.getInterpolated(id, this.cursorFrame);
+    }
+
+    /**
+     * World-space bounding sphere for one entity — the orbit rig's framing
+     * input (PLAN-model-harness §5). `hasModel` doubles as the E1
+     * fallback-shape probe: false = def pinned to a procedural shape
+     * (model missing), null = model still loading, true = real template.
+     *
+     * NOTE: the sphere comes from the BIND-pose AABB, which some models
+     * pollute with parked decorative pieces (see the yOffset comment in
+     * loadModelTemplate) — good enough for framing, not for physics.
+     */
+    getEntityBounds(id: number): {
+        x: number; y: number; z: number; radius: number; hasModel: boolean | null;
+    } | null {
+        const meta = this.entityMeta.get(id);
+        if (!meta) return null;
+        const lerped = this.interpolator.getInterpolated(id, this.cursorFrame);
+        if (!lerped) return null;
+        const tmpl = this.modelTemplates.get(meta.defId);
+        const hasModel = tmpl === undefined ? null : tmpl !== null;
+        let local = tmpl ? this.modelBoundsFor(meta.defId, tmpl) : null;
+        if (!local) {
+            // Fallback shape / still loading: def radius around the origin.
+            const defR = this.defInfos.get(meta.defId)?.radius ?? 0;
+            const r = Math.max(10, defR);
+            local = { cx: 0, cy: r * 0.5, cz: 0, radius: r };
+        }
+        // Rotate the model-space centre offset by the unit heading (yaw
+        // only — pitch/roll wobble is negligible for framing).
+        const yaw = (lerped.heading / 65535) * Math.PI * 2;
+        const cos = Math.cos(yaw), sin = Math.sin(yaw);
+        return {
+            x: lerped.x + local.cx * cos + local.cz * sin,
+            y: lerped.y + (tmpl?.yOffset ?? 0) + local.cy,
+            z: lerped.z - local.cx * sin + local.cz * cos,
+            radius: local.radius,
+            hasModel,
+        };
+    }
+
+    /** Rest-pose AABB of every geometry piece (all 8 corners through
+     *  restWorldMatrix — rest matrices can rotate pieces) → centre +
+     *  half-diagonal radius. Cached per defId. */
+    private modelBoundsFor(defId: number, tmpl: ModelTemplate):
+        { cx: number; cy: number; cz: number; radius: number } | null {
+        const cached = this.defBoundsCache.get(defId);
+        if (cached) return cached;
+        let minX = Infinity, minY = Infinity, minZ = Infinity;
+        let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+        const corner = new Vector3();
+        for (const p of tmpl.pieces) {
+            if (!p.mesh) continue;
+            const bb = p.mesh.getBoundingInfo().boundingBox;
+            const mn = bb.minimum, mx = bb.maximum;
+            for (let i = 0; i < 8; i++) {
+                corner.set(
+                    (i & 1) ? mx.x : mn.x,
+                    (i & 2) ? mx.y : mn.y,
+                    (i & 4) ? mx.z : mn.z);
+                const w = Vector3.TransformCoordinates(corner, p.restWorldMatrix);
+                if (w.x < minX) minX = w.x; if (w.x > maxX) maxX = w.x;
+                if (w.y < minY) minY = w.y; if (w.y > maxY) maxY = w.y;
+                if (w.z < minZ) minZ = w.z; if (w.z > maxZ) maxZ = w.z;
+            }
+        }
+        if (!Number.isFinite(minX)) return null;
+        const bounds = {
+            cx: (minX + maxX) / 2,
+            cy: (minY + maxY) / 2,
+            cz: (minZ + maxZ) / 2,
+            radius: Math.hypot(maxX - minX, maxY - minY, maxZ - minZ) / 2,
+        };
+        this.defBoundsCache.set(defId, bounds);
+        return bounds;
     }
 
     /**
