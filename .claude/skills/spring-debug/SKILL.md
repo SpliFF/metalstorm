@@ -28,6 +28,8 @@ The `spring-debug` MCP server (declared in `.mcp.json`) connects to the running 
 | `restart_game` | Restart a game server in-place (re-exec with same args, same PID) | After rebuilding spring-server binary |
 | `api_request` | Authenticated HTTP request to lobby/log/game server (auto-manages token) | Hitting endpoints without curl + manual token plumbing |
 
+This server also exposes browser-bridging tools (`browser_test`, `evaluate_widget_lua`) and the server-side test verbs (`spawn_unit`, `give_order`, etc.) — those, plus the performance-profiling tools (`perfDump`, `uiProfileStart/Dump/Stop`, `netSim*`), are documented in the **`spring-test`** skill and [docs/debugging-performance.md](../../../docs/debugging-performance.md), since they're really one `window.test` API surface rather than server-log/DB tooling.
+
 ## Server URLs
 
 - Lobby: `http://127.0.0.1:8011` (fixed)

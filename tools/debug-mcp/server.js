@@ -840,7 +840,7 @@ const TOOLS = [
     },
     {
         name: 'browser_test',
-        description: 'Generate the chrome-devtools `evaluate_script` snippet for a TestHarness method on `window.test`. The harness lives only in the browser; this MCP tool returns the JS string for you to feed into mcp__chrome-devtools__evaluate_script. Methods: focus(unitId), focusOn(x,z), pause(), resume(), screenshot(), saveScreenshot(name), select([ids]), spawnAndFocus(def,x,z,team), stageCombat(atk,tgt,x,z), state(), units(team), unitState(id), highResScreenshot(w,h), simPause(), simResume(), simSpeed(n).',
+        description: 'Generate the chrome-devtools `evaluate_script` snippet for a TestHarness method on `window.test`. The harness lives only in the browser; this MCP tool returns the JS string for you to feed into mcp__chrome-devtools__evaluate_script. Methods: focus(unitId), focusOn(x,z), pause(), resume(), screenshot(), saveScreenshot(name), select([ids]), spawnAndFocus(def,x,z,team), stageCombat(atk,tgt,x,z), state(), units(team), unitState(id), highResScreenshot(w,h), simPause(), simResume(), simSpeed(n). Performance profiling (see docs/debugging-performance.md): perfDump(windowMs?) / perfReset() — permanent per-phase (camera/entity/fx/render/ui/total) frame-time distribution; uiProfileStart() / uiProfileDump(topN?) / uiProfileStop() — per-widget LuaUI Fengari cost breakdown (call dump BEFORE stop, not after — stop clears the data); netSim({delayMs,jitterMs,lossProb}) / netSimOff() / netSimPreset("lan"|"wan"|"intercont") / netStats() — simulate WAN conditions and tally bandwidth per message type.',
         inputSchema: {
             type: 'object',
             properties: {
