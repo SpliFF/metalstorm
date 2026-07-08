@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { snapToBuildGrid } from './worker-build-placement.js';
+import { snapToBuildGrid, computeBuildPositions } from './worker-build-placement.js';
 
 /**
  * snapToBuildGrid is a byte-identical port of Recoil's CGameHelper::Pos2BuildPos:
@@ -42,5 +42,62 @@ describe('snapToBuildGrid (Pos2BuildPos parity)', () => {
     it('handles negative coordinates (floor toward -inf)', () => {
         expect(snapToBuildGrid(-10, -10, 4, 4)).toEqual([-16, -16]);
         expect(snapToBuildGrid(-10, -10, 6, 6)).toEqual([-8, -8]);
+    });
+});
+
+/**
+ * computeBuildPositions (G3b) — Spring CGuiHandler build-drag row/rect/hollow.
+ * Footprint step = xsize*8 elmos + buildSpacing*16; both ends grid-snapped. All
+ * cases use xsize=zsize=4 (32-elmo step at spacing 0), whose snap grid is the
+ * 16k grid — so tile centres land on multiples of 32 from the snapped origin.
+ */
+describe('computeBuildPositions (build-drag rows)', () => {
+    it('walks a line along the longer axis (X)', () => {
+        expect(computeBuildPositions(0, 0, 100, 0, 4, 4, 0, 'line'))
+            .toEqual([[0, 0], [32, 0], [64, 0], [96, 0]]);
+    });
+
+    it('walks a line along the longer axis (Z)', () => {
+        expect(computeBuildPositions(0, 0, 0, 100, 4, 4, 0, 'line'))
+            .toEqual([[0, 0], [0, 32], [0, 64], [0, 96]]);
+    });
+
+    it('collapses a zero-length drag to a single tile', () => {
+        expect(computeBuildPositions(50, 50, 50, 50, 4, 4, 0, 'line')).toHaveLength(1);
+    });
+
+    it('widens the footprint step by buildSpacing (16 elmos/square)', () => {
+        // step = 4*8 + 1*16 = 48; 96/48 = 2 → 3 tiles.
+        expect(computeBuildPositions(0, 0, 100, 0, 4, 4, 1, 'line'))
+            .toEqual([[0, 0], [48, 0], [96, 0]]);
+    });
+
+    it('serpent-walks a filled rectangle (rows alternate X direction)', () => {
+        expect(computeBuildPositions(0, 0, 96, 32, 4, 4, 0, 'rect')).toEqual([
+            [0, 0], [32, 0], [64, 0], [96, 0],     // row z=0 →
+            [96, 32], [64, 32], [32, 32], [0, 32], // row z=32 ← (reversed)
+        ]);
+    });
+
+    it('walks the perimeter only for a hollow rectangle', () => {
+        const hollow = computeBuildPositions(0, 0, 64, 64, 4, 4, 0, 'hollow');
+        // 3×3 grid → 8 perimeter tiles, centre skipped.
+        expect(hollow).toEqual([
+            [0, 0], [32, 0], [64, 0],   // top L→R
+            [64, 32], [64, 64],         // right ↓
+            [32, 64], [0, 64],          // bottom R→L
+            [0, 32],                    // left ↑
+        ]);
+        expect(hollow).not.toContainEqual([32, 32]); // centre excluded
+    });
+
+    it('treats a 1-wide hollow rect as a line', () => {
+        expect(computeBuildPositions(0, 0, 0, 64, 4, 4, 0, 'hollow'))
+            .toEqual([[0, 0], [0, 32], [0, 64]]);
+    });
+
+    it('respects drag direction (negative axis)', () => {
+        expect(computeBuildPositions(0, 0, -100, 0, 4, 4, 0, 'line'))
+            .toEqual([[0, 0], [-32, 0], [-64, 0], [-96, 0]]);
     });
 });

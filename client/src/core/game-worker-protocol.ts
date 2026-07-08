@@ -148,6 +148,12 @@ export interface GpCancelBuildPlacementToWorker {
     type: 'gp:cancelBuildPlacement';
 }
 
+/** Cancel an armed modal command / in-flight area-attack or waypoint drag
+ *  (ESC on main, PLAN-playable.md G3b). Mirrors GpCancelBuildPlacementToWorker. */
+export interface GpCancelCommandModeToWorker {
+    type: 'gp:cancelCommandMode';
+}
+
 export type GpMessageToWorker =
     | GpInitToWorker
     | GpInputToWorker
@@ -155,6 +161,7 @@ export type GpMessageToWorker =
     | GpFocusWorldToWorker
     | GpStartBuildPlacementToWorker
     | GpCancelBuildPlacementToWorker
+    | GpCancelCommandModeToWorker
     // PLAN-rml.md: DOM events + viewport changes routed back to the worker-side
     // RmlUi proxy (rml-bridge.ts) for Lua listener dispatch / dp-ratio recompute.
     | RmlEventToWorker
@@ -211,6 +218,9 @@ export interface GpSceneStateToMain {
     paused: boolean;
     simSpeed: number;
     buildGhost: { pos: [number, number, number]; defId: number; valid: boolean } | null;
+    /** PLAN-playable.md G3b: a modal command / area-attack is armed → main
+     *  swallows ESC to cancel it (before the build-ghost cancel + quit dialog). */
+    commandModeArmed?: boolean;
     entityCount: number;
     /** Resolved build-menu tiles for the current selection (PLAN-playable.md
      *  G3a); present only when the buildable set changed since the last feed.
@@ -309,6 +319,10 @@ export type GpMessageToMain =
      * `box: null` hides the overlay. `viewId` absent ⇒ view 0.
      */
     | { type: 'gp:dragBox'; box: { x0: number; y0: number; x1: number; y1: number } | null; viewId?: number }
+    /** PLAN-playable.md G3b: armed-command cursor mode. `name` = canonical Spring
+     *  cursor name (null → native arrow); `css` = the CSS-cursor fallback. Main
+     *  drives the AnimatedCursor overlay + `#game-canvas` cursor style. */
+    | { type: 'gp:cursorMode'; name: string | null; css: string }
     /** Game-over → main shows the results overlay. `winningAllyTeams` is the
      *  server's winners list (empty = undecided); `won` is the local player's
      *  result (true/false), or null for a draw/undecided/spectator. */

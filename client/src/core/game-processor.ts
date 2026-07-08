@@ -93,6 +93,7 @@ import { renderMapFeatures, DynamicFeatureRenderer } from './feature-renderer.js
 import { RTSCamera } from './rts-camera.js';
 import { WorkerSelection } from './worker-selection.js';
 import { WorkerBuildPlacement } from './worker-build-placement.js';
+import { WorkerCommandModes } from './worker-command-modes.js';
 import { findMetalSpots, type MetalSpot } from './metal-spots.js';
 import { resolveSoundRef, pickUnitDefSound,
     type ResolvedSoundEvent } from './sound-events.js';
@@ -128,7 +129,7 @@ import {
     dispatchVisibleUnitAdded, dispatchVisibleUnitRemoved,
     dispatchUnitCommand, dispatchUnitCmdDone,
     getWidgetList, toggleWidget, enableWidget, disableWidget, shutdown,
-    setMusicStreamTime, seedStorageCache,
+    setMusicStreamTime, seedStorageCache, setWorkerSetActiveCommandHandler,
     sameIdSet, escapeLuaStr, escapeLuaString, loadFromStorage, saveToStorage,
     luaBytesLiteral, paramsTableLiteral,
     describeMessage, describeInboundMessage,
@@ -168,6 +169,12 @@ let gpStandingOrderRenderer: StandingOrderRenderer | null = null;
 /// gp:startBuildPlacement. Pointer handlers route left-clicks here before
 /// selection when it is active.
 let gpBuildPlacement: WorkerBuildPlacement | null = null;
+/// PLAN-playable.md G3b: worker-side modal commands (arm-then-click), area-attack
+/// radius drag, waypoint reposition/revoke drag, and order hotkeys. Armed via the
+/// order menu (Spring.SetActiveCommand) or a hotkey; drives the main-thread cursor
+/// via gp:cursorMode. Pointer handlers route left-clicks here after build
+/// placement, before selection.
+let gpCommandModes: WorkerCommandModes | null = null;
 /// G3a: per-unit command descriptions (UnitCmdDescsUpdate, ~1 Hz, selection-
 /// scoped). Cached so the buildable-tile set can be recomputed on selection
 /// change without waiting for the next broadcast. Also mirrored into
@@ -750,6 +757,9 @@ function gpConnect(msg: GpInitToWorker): void {
             const sel = gpCtx.selection?.selection ?? [];
             gpCommandPathRenderer?.update(queues, sel);
             gpWaypointMarkerRenderer?.update(queues, sel);
+            // PLAN-playable.md G3b: reap pending build-ghosts whose order has
+            // left the queue (construction started / cancelled).
+            gpBuildPlacement?.onCommandQueuesUpdated(queues);
         },
         // PLAN-playable.md G3a: selection-scoped command descriptions (~1 Hz).
         // GW4-regression fix (U3/onResourceUpdate-class): pre-GW4 the main-thread
@@ -1479,12 +1489,40 @@ export function gpInit(msg: GpInitToWorker): void {
         getSelection: () => gpCtx.selection?.selection ?? [],
         getMetalSpots: () => gpMetalSpots,
         getMetalCellSize: () => gpMetalCellSize,
+        getBuildSpacing: () => liveState.buildSpacing,
+    });
+
+    // PLAN-playable.md G3b: worker-side modal commands + area/waypoint drags +
+    // order hotkeys. Shares the selection set + the ~1 Hz command-queue snapshot
+    // (for waypoint reposition). Emits cursor-mode changes to main.
+    gpCommandModes = new WorkerCommandModes(scene, entityRenderer, gpCtx.connection!, {
+        getCamera: (viewId) => (viewId === 0 ? camera : null),
+        getDpr: () => gpDpr,
+        getSelection: () => gpCtx.selection?.selection ?? [],
+        getLastCommandQueues: () => gpLastCommandQueues,
+        onCursorMode: (req) => postToMain({ type: 'gp:cursorMode', name: req.name, css: req.css }),
+    });
+
+    // G3b: route Spring.SetActiveCommand (order menu → widget worker shim) into
+    // the worker. Build commands (cmdId<0) arm ground placement (same as the
+    // native BuildMenu); world-target commands (cmdId>0) arm a modal. Instant /
+    // mode-cycle commands never arrive here (the shim issues those directly).
+    setWorkerSetActiveCommandHandler((cmdId, mods, cmdType) => {
+        if (cmdId < 0) {
+            gpBuildPlacement?.startBuildPlacement(-cmdId, { shift: mods.shift, ctrl: mods.ctrl });
+        } else if (cmdId > 0) {
+            gpCommandModes?.activateCommandFromMenu(cmdId, cmdType);
+        }
     });
 
     rtsCam.onRightClickCommit = (x, y, mods) => {
         // Spring convention: a right-click while placing cancels the placement
-        // rather than issuing a move order (input-manager.issueOrderAtScreen).
+        // (input-manager.issueOrderAtScreen). RMB also cancels an armed modal
+        // command / in-flight area-attack drag (Recoil CGuiHandler: RMB clears
+        // the active command). Only when nothing is armed does RMB issue the
+        // default context order (move / attack / guard).
         if (gpBuildPlacement?.isActive) { gpBuildPlacement.cancelBuildPlacement(); return; }
+        if (gpCommandModes?.tryHandleRightClick()) return;
         selection.issueOrderAtScreen(x, y, mods.shift, 0);
     };
     // PLAN-latency L0: anchor the presentation clock to this connection's
@@ -1592,6 +1630,9 @@ function gpPostSceneState(now: number): void {
         paused: gpPaused,
         simSpeed: gpSimSpeed,
         buildGhost: gpBuildPlacement?.getGhostState() ?? null,
+        // G3b: a modal command / area-attack armed → main swallows ESC to cancel
+        // it (before the build-ghost check + the quit dialog).
+        commandModeArmed: gpCommandModes?.isArmed() ?? false,
         entityCount: gpCtx.entityRenderer?.entityCount ?? 0,
         ...(buildOptions ? { buildOptions } : {}),
     });
@@ -1841,6 +1882,12 @@ export function gpShutdown(): void {
     // PLAN-playable.md G3a: dispose the build-placement controller + reset caches.
     gpBuildPlacement?.dispose();
     gpBuildPlacement = null;
+    // PLAN-playable.md G3b: dispose the command-modes controller + unregister the
+    // worker-side SetActiveCommand handler (the closure captured the now-dead
+    // controllers/connection).
+    gpCommandModes?.dispose();
+    gpCommandModes = null;
+    setWorkerSetActiveCommandHandler(null);
     gpUnitCmdDescs.clear();
     gpMetalSpots = [];
     gpBuildTiles = [];
@@ -2067,9 +2114,11 @@ function gpSetCameraHeight(cam: RTSCamera | undefined, height: number): void {
 
 export function gpHandlePointerMove(x: number, y: number, buttons: number, mods: number, viewId: number): void {
     gpViewCameras.get(viewId)?.pointerMove(x, y, buttons);
-    // PLAN-playable.md G3a: while a build placement is armed, the pointer drives
-    // the terrain-following ghost, not the selection hover/drag-box.
+    // PLAN-playable.md G3a/G3b: an armed build placement drives its ghost; an
+    // in-flight area-attack / waypoint drag drives its overlay; otherwise the
+    // pointer feeds selection hover / drag-box.
     if (gpBuildPlacement?.isActive) gpBuildPlacement.pointerMove(x, y, buttons, mods, viewId);
+    else if (gpCommandModes?.isDragging) gpCommandModes.pointerMove(x, y, buttons, mods, viewId);
     else gpCtx.selection?.pointerMove(x, y, buttons, mods, viewId);
     const sp = gpToSpringCoords(x, y);
     const dragBtn = (buttons & 1) ? 1 : (buttons & 4) ? 2 : (buttons & 2) ? 3 : 0;
@@ -2086,6 +2135,9 @@ export function gpHandlePointerDown(x: number, y: number, button: number, mods: 
     // click for placement (Spring's "active build command → LMB to place"),
     // before it can reach unit selection / drag-box (input-manager.onLeftDown).
     if (gpBuildPlacement?.pointerDown(x, y, button, mods, viewId)) return;
+    // G3b: waypoint revoke/drag + area-attack drag start consume the press; a
+    // plain armed modal does NOT (selection may still drag-box), resolving on up.
+    if (gpCommandModes?.pointerDown(x, y, button, mods, viewId)) return;
     gpCtx.selection?.pointerDown(x, y, button, mods, viewId);
 }
 
@@ -2095,6 +2147,10 @@ export function gpHandlePointerUp(x: number, y: number, button: number, mods: nu
     gpViewCameras.get(viewId)?.pointerUp(x, y, button, mods);
     // G3a: commit the build placement if one is armed (consumes the release).
     if (gpBuildPlacement?.pointerUp(x, y, button, mods, viewId)) return;
+    // G3b: commit an area-attack / waypoint drag, or resolve an armed modal on a
+    // click. When it consumes, cancel any drag-box the selection started on the
+    // same press (a plain-modal press let selection.pointerDown run).
+    if (gpCommandModes?.pointerUp(x, y, button, mods, viewId)) { gpCtx.selection?.blur(); return; }
     gpCtx.selection?.pointerUp(x, y, button, mods, viewId);
 }
 
@@ -2106,6 +2162,11 @@ export function gpHandleWheel(x: number, y: number, delta: number, viewId: numbe
 export function gpHandleKeyDown(code: string, mods: number, viewId: number): void {
     gpViewCameras.get(viewId)?.keyDown(String(code).toLowerCase());
     gpSetShift((mods & 1) !== 0);
+    // PLAN-playable.md G3b: order hotkeys (modal arms m/a/f/p/g/r/e/c/x/d/l/u +
+    // instant s/w/h/q/i). A convenience layer over the faithful SetActiveCommand
+    // path (see worker-command-modes header); fires alongside the LuaUI KeyPress
+    // dispatch. No WASD binding, so no conflict with the camera's arrow movement.
+    gpCommandModes?.handleOrderKey(String(code), mods);
     gpDispatchKeyPress(codeToSpringKeysym(String(code)), mods);
 }
 
@@ -2140,4 +2201,11 @@ export function gpHandleStartBuildPlacement(defId: number, mods: { shift?: boole
 /// Cancel an armed build placement (gp:cancelBuildPlacement — ESC on main).
 export function gpHandleCancelBuildPlacement(): void {
     gpBuildPlacement?.cancelBuildPlacement();
+}
+
+/// PLAN-playable.md G3b: cancel an armed modal command / in-flight area-attack
+/// or waypoint drag (gp:cancelCommandMode — ESC on main, checked before the
+/// build-ghost cancel + the quit dialog).
+export function gpHandleCancelCommandMode(): void {
+    gpCommandModes?.cancelAll();
 }

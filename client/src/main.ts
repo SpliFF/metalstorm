@@ -12,10 +12,8 @@ import { DefCache } from './core/def-cache.js';
 import { AudioManager } from './core/audio.js';
 import { SoundEventPlayer } from './core/sound-events.js';
 import { MusicDirector } from './core/music-director.js';
-import { InputManager } from './core/input-manager.js';
 import { AnimatedCursor } from './core/animated-cursor.js';
 import { BuildMenu } from './core/build-menu.js';
-import { OrderPanel } from './core/order-panel.js';
 import { EconomyBar } from './core/economy-bar.js';
 import { buildTerrainMesh, loadTerrainTextures, TerrainFog, DeformableTerrain, type MapDimensions } from './core/terrain.js';
 import { DecalOverlay, buildTrackTypeNames } from './core/decal-overlay.js';
@@ -86,9 +84,13 @@ let lastSceneState: {
 } | null = null;
 /// PLAN-playable.md G3a: mirrors whether the worker has a build placement armed
 /// (from gp:sceneState.buildGhost). Read by the global ESC handler so ESC
-/// cancels placement instead of opening the quit dialog — `inputManager` (the
-/// old ESC-state owner) is never instantiated post-GW4.
+/// cancels placement instead of opening the quit dialog. (The old main-thread
+/// InputManager that owned this state pre-GW4 was removed in G3b.)
 let buildPlacementArmed = false;
+/// PLAN-playable.md G3b: mirrors whether the worker has a modal command /
+/// area-attack armed (from gp:sceneState.commandModeArmed). ESC cancels it
+/// before the build-placement cancel + the quit dialog.
+let commandModeArmed = false;
 /// Issue a client-bound request to the game-processor worker (GW8). Resolves
 /// with the worker's reply value or rejects with its error string.
 function workerCall(method: string, args: unknown[] = []): Promise<unknown> {
@@ -123,7 +125,6 @@ let musicDirector: MusicDirector | null = null;
 /// MusicDirector.arm() gates music start on the scene being live; we open it on
 /// the first scene-state tick from the worker (terrain is up by then).
 let musicArmed = false;
-let inputManager: InputManager | null = null;
 /// GW4-c5b: thin main-thread DOM-input owner for the game view. Captures
 /// pointer/wheel/key events on #game-canvas and forwards them to the
 /// game-processor worker, where the interactive camera + scene.pick live.
@@ -184,8 +185,16 @@ function updateDragOverlay(box: { x0: number; y0: number; x1: number; y1: number
     dragOverlay.style.height = `${box.y1 - box.y0}px`;
 }
 let animatedCursor: AnimatedCursor | null = null;
+/// PLAN-playable.md G3b: apply an armed-command cursor. `name` is a canonical
+/// Spring cursor name (null → native arrow); `css` is the CSS-cursor fallback
+/// shown before/without the animated overlay. Drives both the AnimatedCursor
+/// overlay (Spring images) and the `#game-canvas` CSS cursor.
+function applyCursorMode(name: string | null, css: string): void {
+    animatedCursor?.setActive(name);
+    const canvas = document.getElementById('game-canvas');
+    if (canvas) canvas.style.cursor = name ? css : '';
+}
 let buildMenu: BuildMenu | null = null;
-let orderPanel: OrderPanel | null = null;
 let economyBar: EconomyBar | null = null;
 let lobbyUI: LobbyUI | null = null;
 let minimap: Minimap | null = null;
@@ -283,8 +292,6 @@ function quitToLobby(): void {
     minimap = null;
     buildMenu?.dispose();
     buildMenu = null;
-    orderPanel?.dispose();
-    orderPanel = null;
     economyBar?.dispose();
     economyBar = null;
     commandPathRenderer?.dispose();
@@ -296,8 +303,6 @@ function quitToLobby(): void {
     debugTerrainGrid?.dispose();
     debugTerrainGrid = null;
     lastCommandQueues = [];
-    inputManager?.dispose();
-    inputManager = null;
     cameraInput?.dispose();
     cameraInput = null;
     rmlOverlay?.dispose();
@@ -382,7 +387,6 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     musicArmed = false;
     audioManager?.dispose();
     audioManager = null;
-    inputManager = null;
     cameraInput?.dispose();
     cameraInput = null;
     rmlOverlay?.dispose();
@@ -393,8 +397,6 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     if (resizeDebounceTimer !== null) { clearTimeout(resizeDebounceTimer); resizeDebounceTimer = null; }
     buildMenu?.dispose();
     buildMenu = null;
-    orderPanel?.dispose();
-    orderPanel = null;
     economyBar?.dispose();
     economyBar = null;
 
@@ -484,6 +486,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 // and track whether a build placement is armed for the ESC handler.
                 if (m.buildOptions !== undefined) buildMenu?.setBuildOptions(m.buildOptions);
                 buildPlacementArmed = m.buildGhost != null;
+                // PLAN-playable.md G3b: track whether a modal command / area-attack
+                // is armed so ESC cancels it first (before build-ghost + quit).
+                commandModeArmed = m.commandModeArmed === true;
                 // GW4-c5c-3: keep the minimap selection rings in sync with the
                 // worker's selection set (the minimap matches ids against blips).
                 minimap?.setSelection(m.selectedUnitIds);
@@ -573,6 +578,22 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             case 'rml:ops':
                 rmlOverlay?.applyOps(m.ops);
                 break;
+            // PLAN-playable.md G3b: armed-command cursor mode. The worker owns the
+            // modal state; the cursor overlay is DOM (main). Drive the animated
+            // cursor (Spring images) + the CSS fallback on #game-canvas.
+            case 'gp:cursorMode':
+                applyCursorMode(m.name, m.css);
+                break;
+            // Spring.AssignMouseCursor / ReplaceMouseCursor (widgets, worker) →
+            // register a cursor pack under a logical name (ZK/BAR swap in their
+            // own animated PNGs over the engine defaults).
+            case 'assignMouseCursor':
+                animatedCursor?.assign(m.name, m.file, m.hotspotX, m.hotspotY, m.overwrite);
+                break;
+            // Spring.SetMouseCursor(name) — a widget forces a cursor directly.
+            case 'setMouseCursor':
+                animatedCursor?.setActive(m.name || null);
+                break;
             // GW4-c5b-3 / WP3b: all worker→main storage writes arrive here.
             // Mirrors lua-widget-manager.ts:1228–1241 exactly so both paths
             // (GW4 game-processor worker and legacy LuaWidgetManager) behave
@@ -646,6 +667,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // render context was transferred). CameraInput captures them and forwards
     // canvas-relative input to the worker camera (view 0).
     cameraInput = new CameraInput(canvas, gameWorker, 0);
+
+    // PLAN-playable.md G3b: the animated cursor overlay is DOM (main), but the
+    // modal-command state that decides which cursor is active lives in the worker
+    // (WorkerCommandModes). The worker posts `gp:cursorMode` (armed-command
+    // cursor name) + `assignMouseCursor`/`setMouseCursor` (widget cursor packs);
+    // this overlay renders them. Degrades gracefully to the CSS fallback if a
+    // Spring cursor manifest 404s.
+    animatedCursor = new AnimatedCursor(document.body, lobbyHttpUrl, gameId);
 
     // PLAN-rml.md: main-thread DOM overlay for RmlUi-based widgets (BAR). The
     // worker-side RmlUi proxy records DOM ops and posts them as `rml:ops`; this
@@ -826,15 +855,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     // active while a game is running (gameWorker non-null), so ESC stays free
     // for lobby UI dialogs.
     //
-    // PLAN-playable.md G3a: build placement now lives in the worker
-    // (WorkerBuildPlacement). When one is armed (tracked via
-    // gp:sceneState.buildGhost), ESC cancels it and swallows the event instead
-    // of opening the quit dialog — mirroring the pre-GW4 InputManager ESC
-    // behaviour. (`inputManager` itself is never instantiated post-GW4, so its
-    // old state check is inert; the worker-armed flag replaces it.)
+    // PLAN-playable.md G3a/G3b: build placement + modal commands now live in the
+    // worker (WorkerBuildPlacement / WorkerCommandModes). When one is armed
+    // (tracked via gp:sceneState.buildGhost / .commandModeArmed), ESC cancels it
+    // and swallows the event instead of opening the quit dialog — mirroring the
+    // pre-GW4 InputManager ESC behaviour (that main-thread class is now removed).
     window.addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;
         if (!gameWorker) return;
+        // PLAN-playable.md G3b: ESC cancels an armed modal command / area-attack
+        // drag first (worker owns the state), then a build placement, then opens
+        // the quit dialog.
+        if (commandModeArmed) {
+            gameWorker.postMessage({ type: 'gp:cancelCommandMode' });
+            commandModeArmed = false;
+            e.preventDefault();
+            return;
+        }
         if (buildPlacementArmed) {
             gameWorker.postMessage({ type: 'gp:cancelBuildPlacement' });
             buildPlacementArmed = false;

@@ -121,6 +121,27 @@ export function postToMain(msg: Record<string, unknown>, transfer?: Transferable
     }
 }
 
+/** Modifier bitmask flags that ride with a Spring.SetActiveCommand call. */
+export interface ActiveCommandMods {
+    left: boolean; right: boolean; alt: boolean; ctrl: boolean; meta: boolean; shift: boolean;
+}
+/// PLAN-playable.md G3b: an in-worker handler for `Spring.SetActiveCommand`
+/// world-target / build commands. Registered by game-processor so the modal /
+/// build-placement machine arms in the worker (where selection + scene.pick +
+/// the connection live) instead of a dead round-trip to main's old InputManager.
+/// Null until registered → falls back to the legacy postToMain path.
+let workerSetActiveCommand:
+    ((cmdId: number, mods: ActiveCommandMods, cmdType: number) => void) | null = null;
+export function setWorkerSetActiveCommandHandler(
+    fn: ((cmdId: number, mods: ActiveCommandMods, cmdType: number) => void) | null,
+): void {
+    workerSetActiveCommand = fn;
+}
+export function getWorkerSetActiveCommandHandler():
+    ((cmdId: number, mods: ActiveCommandMods, cmdType: number) => void) | null {
+    return workerSetActiveCommand;
+}
+
 // ── SoundItem ingestion ───────────────────────────────────────────────
 //
 // gamedata/sounds.lua returns a `Sounds` table whose `SoundItems` map
@@ -1058,6 +1079,10 @@ export async function init(
             };
         },
         setActiveCommand: (cmdId, mods, cmdType) => {
+            // PLAN-playable.md G3b: arm the modal / build placement in the worker
+            // (where selection + scene.pick + the connection live). Falls back to
+            // the legacy main round-trip only if no worker handler is registered.
+            if (workerSetActiveCommand) { workerSetActiveCommand(cmdId, mods, cmdType); return; }
             postToMain({ type: 'setActiveCommand', cmdId, mods, cmdType });
         },
         playSound: (path, volume, pos, channel) => {
