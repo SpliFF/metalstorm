@@ -1333,15 +1333,30 @@ export async function init(
             end
         end
     `, 'shutdown_guard_pre');
-    // Pre-install a nil-safe math.round. ZK's numberfunctions.lua
-    // defines one but it crashes on nil input, which happens during
-    // epicmenu's include chain. This version falls back to 0 for nil.
+    // Pre-install a nil-safe math.round. ZK's numberfunctions.lua defines
+    // one but it crashes on nil input, which happens during epicmenu's
+    // include chain — this version falls back to 0 for nil. BAR ships no
+    // numberfunctions.lua of its own, so BAR widgets get this baseline
+    // permanently (ZK's own file still overrides it once loaded, exactly
+    // as in real Spring). It must therefore match Recoil's engine-native
+    // math.round (rts/Lua/LuaMathExtra.cpp — arithmetic round-half-up to
+    // `idp` decimals via lua_pushnumber), NOT ZK's own Lua-authored version
+    // (`("%.Nf"):format(num)`, which returns a STRING). A previous version
+    // of this shim copied ZK's string-returning body verbatim, so every
+    // BAR call to math.round silently returned a string — crashing
+    // gui_info.lua's `math.min(speed, mathRoundResult)` with "attempt to
+    // compare string with number" (Lua's relational operators, unlike its
+    // arithmetic ones, never coerce strings; PLAN-bar.md U5).
     // Also install math.bit_inv — Spring engine adds it as part of its
     // bitops surface; ZK widgets call it at file scope.
     runtime.doString(`
         function math.round(num, idp)
             num = num or 0
-            return ("%." .. (((num==0) and 0) or idp or 0) .. "f"):format(num)
+            idp = idp or 0
+            local mult = 10 ^ idp
+            local xinteg = math.floor(num)
+            local xfract = num - xinteg
+            return xinteg + math.floor(xfract * mult + 0.5) / mult
         end
         if not math.bit_inv then
             math.bit_inv = function(x)
@@ -4015,6 +4030,23 @@ export function installEngineGlobals(
         glSupportRestartPrimitive: false,
         glSupportFragDepthLayout: false,
         numCompressedTexFormats: 0,
+        // FIDELITY-STANDIN: Recoil enumerates every OS-reported video mode per
+        // display (rts/Rendering/GL/myGL.cpp → globalRenderingInfo); a browser
+        // tab has no equivalent API (no display enumeration, no refresh-rate
+        // query). This was entirely absent, so `ipairs(Platform.availableVideoModes)`
+        // indexed nil and crashed BAR's cmd_resolution_switcher.lua on every boot
+        // (PLAN-bar.md U5). Report the one "mode" we actually have — the live
+        // canvas viewport — so the widget's resolution list is honest (one
+        // entry) instead of absent (crash). hz is a guess (60): no cross-browser
+        // API exposes display refresh rate.
+        availableVideoModes: [{
+            display: 1,
+            displayName: '',
+            w: liveState.viewport.width,
+            h: liveState.viewport.height,
+            bpp: 32,
+            hz: 60,
+        }],
     });
 
     // Publish whatever defs have already arrived (the def stream may
@@ -4641,9 +4673,16 @@ export function dispatchPlayerAdded(playerId: number): void {
 }
 
 /** widgetHandler:PlayerRemoved(playerId, reason) — fires when a player leaves
- *  (quit/kick/timeout). reason: 0=quit, 1=kicked, 2=timeout. */
+ *  (quit/kick/timeout). reason: 0=quit, 1=kicked, 2=timeout. Recoil's
+ *  `playerHandler` never deletes a departed player's entry (only marks it
+ *  inactive), so `Spring.GetPlayerInfo` still resolves a name inside this
+ *  callin — same invariant as PlayerChanged/PlayerAdded above. Missing this
+ *  guard crashed BAR's snd_notifications_addon_playerstatus.lua:29 ("table
+ *  index is nil") whenever PlayerRemoved fired for an id that raced ahead of
+ *  the roster seed (PLAN-bar.md U5). */
 export function dispatchPlayerRemoved(playerId: number, reason: number): void {
     if (!runtime) return;
+    ensureRosteredForCallin(playerId);
     runtime.doString(`
         if widgetHandler and widgetHandler.PlayerRemoved then
             pcall(widgetHandler.PlayerRemoved, widgetHandler, ${playerId | 0}, ${reason | 0})
