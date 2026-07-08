@@ -28,7 +28,8 @@ import {
     type LiveState,
     type UnitEntry,
 } from './lua-spring-api.js';
-import type { CombatEventInfo, FeatureSpawnInfo } from './connection.js';
+import type { CombatEventInfo, FeatureSpawnInfo, SoundRefInfo } from './connection.js';
+import { SoundCategory } from './sound-events.js';
 import type { EntityStateSnapshot } from './entity-state.js';
 import { applyMapLighting, type SceneLighting } from './scene-lighting.js';
 import {
@@ -326,6 +327,7 @@ export interface MinimalUnitDefWire {
     canSelfDestruct?: boolean;
     selfDCountdown?: number;
     categoryBits?: number;
+    sounds?: SoundRefInfo[];
 }
 export interface MinimalWeaponDefWire {
     defId: number; name: string; projectileType: number;
@@ -350,6 +352,55 @@ export interface MinimalWeaponDefWire {
 }
 export const unitDefMap = new Map<number, MinimalUnitDefWire>();
 export const weaponDefMap = new Map<number, MinimalWeaponDefWire>();
+
+/** Wire `SoundCategory` code (`sound-events.ts`) → the `UnitDef.sounds`
+ *  sub-table key Recoil authors (`LuaUnitDefs.cpp::SoundsTable`). The two
+ *  naming schemes diverge (`OrderAck`→`ok`, `Move`→`arrived`,
+ *  `BuildStart`→`build`, `Cancel`→`cant`) so this can't be derived by
+ *  lower-casing the enum name. */
+const SOUND_CATEGORY_LUA_KEY: Record<number, string> = {
+    [SoundCategory.Select]: 'select',
+    [SoundCategory.OrderAck]: 'ok',
+    [SoundCategory.Move]: 'arrived',
+    [SoundCategory.BuildStart]: 'build',
+    [SoundCategory.Working]: 'working',
+    [SoundCategory.UnderAttack]: 'underattack',
+    [SoundCategory.Cancel]: 'cant',
+    [SoundCategory.Activate]: 'activate',
+    [SoundCategory.Deactivate]: 'deactivate',
+};
+// Recoil always pushes all 10 keys (SoundsTable), incl. `repair` — which
+// has no wire category (neither our nor Recoil's own UnitDefHandler ever
+// populates UnitDef::SoundStruct::repair/working from unit Lua — verified
+// against ../RecoilEngine's UnitDefHandler.cpp — so `repair` faithfully
+// stays an always-empty table).
+const SOUND_CATEGORY_KEYS = [
+    'select', 'ok', 'arrived', 'build', 'repair', 'working',
+    'underattack', 'cant', 'activate', 'deactivate',
+];
+
+/** Build the Recoil-shaped `UnitDefs[id].sounds` sub-table: one key per
+ *  category, each a 1-indexed sequence of `{name, volume, id}` (matching
+ *  `LuaUnitDefs.cpp::PushGuiSoundSet` for an unsynced handle, which also
+ *  carries `id`). Must use `luaTable()` — a plain JS object with numeric
+ *  keys marshals as Lua *string* keys (`pushValue`'s generic object
+ *  branch uses `lua_setfield`), which would make `#sounds.underattack`
+ *  and `sounds.select[1]` fail even though the data is present. */
+function buildLuaUnitSounds(refs: SoundRefInfo[] | undefined): Record<string, LuaValue> {
+    const byKey = new Map<string, SoundRefInfo[]>();
+    for (const key of SOUND_CATEGORY_KEYS) byKey.set(key, []);
+    for (const ref of refs ?? []) {
+        const key = SOUND_CATEGORY_LUA_KEY[ref.category];
+        if (key) byKey.get(key)!.push(ref);
+    }
+    const sounds: Record<string, LuaValue> = {};
+    for (const [key, entries] of byKey) {
+        sounds[key] = luaTable(...entries.map((s): LuaValue => (
+            { name: s.name, volume: s.volume, id: s.id }
+        )));
+    }
+    return sounds;
+}
 
 /** Build the rich Lua-shaped UnitDef table from the wire form. The
  *  Tier 3 wire protocol carries real values for cost, health, sensor
@@ -454,6 +505,7 @@ function buildLuaUnitDef(d: MinimalUnitDefWire): Record<string, LuaValue> {
         buildSpeed: d.buildSpeed ?? 0,
         buildOptions: buildOptionsSeq,
         weapons,
+        sounds: buildLuaUnitSounds(d.sounds),
 
         // Tier 4 fields (custom params + rare attributes).
         customParams: (d.customParams ?? {}) as Record<string, LuaValue>,
