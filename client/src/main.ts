@@ -469,10 +469,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         switch (m?.type) {
             case 'gp:authenticated':
                 console.log(`[gameWorker] authenticated playerId=${m.playerId} team=${m.team}`);
+                // G4: the lobby-roster myTeamGuess used to construct economyBar
+                // can be stale/absent (spectator, late roster fetch); this is the
+                // authoritative value, so re-point the bar's team filter at it.
+                economyBar?.setTeam(m.team);
                 break;
-            // GW4-c5c: consolidated scene-state feed → the HTML HUD (the only
-            // main-thread world-fact consumer reconnected here; ZK economy /
-            // build-menu / order-panel are chili widgets in the worker, c6).
+            // GW4-c5c: consolidated scene-state feed → the HTML HUD + native
+            // build-menu (G3a) + native economy-bar (G4). The order-panel remains
+            // unbuilt (PLAN-playable.md G4 factory-queue note).
             case 'gp:sceneState':
                 // GW8: cache for the test harness's synchronous getters
                 // (window.test.selection / .cameraPose()).
@@ -484,6 +488,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 // and track whether a build placement is armed for the ESC handler.
                 if (m.buildOptions !== undefined) buildMenu?.setBuildOptions(m.buildOptions);
                 buildPlacementArmed = m.buildGhost != null;
+                // PLAN-playable.md G4: feed the native economy bar the worker's
+                // latest local-team ResourceUpdate (only present when a fresh one
+                // arrived since the last feed).
+                if (m.economy !== undefined) economyBar?.update(m.economy);
                 // GW4-c5c-3: keep the minimap selection rings in sync with the
                 // worker's selection set (the minimap matches ids against blips).
                 minimap?.setSelection(m.selectedUnitIds);
@@ -705,6 +713,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 type: 'gp:startBuildPlacement', defId, shift: mods.shift, ctrl: mods.ctrl });
         },
     });
+
+    // PLAN-playable.md G4: native economy-bar HUD (DOM, on main). GW4-regression
+    // fix — the component was fully built (economy-bar.ts) but never instantiated
+    // post-GW4, so metal/energy income was invisible in every game (flagged as
+    // dead code in the G3a field notes). `myTeamGuess` is the same best-effort
+    // lobby-roster lookup buildMenu uses; corrected to the authoritative value
+    // once `gp:authenticated` reports the real team below.
+    economyBar = new EconomyBar({ myTeam: myTeamGuess });
 
     // GW4-c5c-2: audio playback chain on the main thread (AudioContext is
     // main-only). The worker resolves SoundEvent → SoundRef against its def

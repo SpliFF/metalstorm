@@ -184,6 +184,11 @@ let gpMetalCellSize = 16;
 /// array only ships when the buildable set actually changed.
 let gpBuildTiles: BuildMenuTile[] = [];
 let gpBuildTilesDirty = false;
+/// G4: latest ResourceUpdate for the local team, posted to main's native
+/// EconomyBar via gp:sceneState.economy. Dirty-gated like gpBuildTiles so a
+/// snapshot only ships when a fresh ResourceUpdate for our own team arrived.
+let gpLastEconomy: ResourceUpdateInfo | null = null;
+let gpEconomyDirty = false;
 /// Latest command-queue snapshot (UnitCommandQueuesUpdate, ~1 Hz), cached so a
 /// selection change can re-render the path/waypoint overlays immediately rather
 /// than waiting for the next broadcast.
@@ -192,9 +197,10 @@ let gpLastCommandQueues: import('./connection.js').UnitCommandQueueInfo[] = [];
 /// from the forwarded key/pointer `mods` bitmask (bit 0 = shift); cleared on blur.
 let gpShiftHeld = false;
 /// GW4-c5c: latest sim status (from onGameInfo) for the sceneState feed → main's
-/// HUD (entity count / frame / selection / speed-pause indicator). The HTML HUD
-/// is the only main-thread world-fact consumer reconnected here; ZK's economy /
-/// build-menu / order-panel are chili widgets (land with the c6 LuaUI world pass).
+/// HUD (entity count / frame / selection / speed-pause indicator). Stale note
+/// removed 2026-07-09 (G4): the native build-menu (G3a) and EconomyBar (G4) are
+/// both reconnected main-thread consumers now, not chili widgets — only the
+/// order-panel remains unbuilt (see PLAN-playable.md G4 factory-queue note).
 let gpGameFrame = 0;
 let gpPaused = false;
 let gpSimSpeed = 1;
@@ -828,6 +834,16 @@ function gpConnect(msg: GpInitToWorker): void {
                 metalReceived: info.metalReceived, energyReceived: info.energyReceived,
                 metalExcess: info.metalExcess, energyExcess: info.energyExcess,
             });
+            // G4: same GW4-regression class as above, but for the *native*
+            // EconomyBar on main (a DOM panel, not a LuaUI widget) — nothing
+            // ever forwarded ResourceUpdate across the worker→main boundary,
+            // so the fully-built EconomyBar component was never fed. Only
+            // the local team's updates are worth the postMessage; other
+            // teams' economies aren't shown (see economy-bar.ts).
+            if (info.team === gpCtx.connection?.myTeam) {
+                gpLastEconomy = info;
+                gpEconomyDirty = true;
+            }
         },
         // PLAN-latency L0: drive the presentation cursor at the true sim speed
         // (paused → 0 freezes P). GW4-c5: also drive the FX aging multiplier +
@@ -1577,6 +1593,10 @@ function gpPostSceneState(now: number): void {
     // every post so main's HUD/ESC readout tracks it.
     const buildOptions = gpBuildTilesDirty ? gpBuildTiles.slice() : undefined;
     gpBuildTilesDirty = false;
+    // G4: ship the local team's latest ResourceUpdate only when a fresh one
+    // arrived (dirty-gated, same pattern as buildOptions).
+    const economy = gpEconomyDirty && gpLastEconomy ? gpLastEconomy : undefined;
+    gpEconomyDirty = false;
     postToMain({
         type: 'gp:sceneState',
         selectedUnitIds: sel.slice(),
@@ -1594,6 +1614,7 @@ function gpPostSceneState(now: number): void {
         buildGhost: gpBuildPlacement?.getGhostState() ?? null,
         entityCount: gpCtx.entityRenderer?.entityCount ?? 0,
         ...(buildOptions ? { buildOptions } : {}),
+        ...(economy ? { economy } : {}),
     });
 }
 
@@ -1845,6 +1866,8 @@ export function gpShutdown(): void {
     gpMetalSpots = [];
     gpBuildTiles = [];
     gpBuildTilesDirty = false;
+    gpLastEconomy = null;
+    gpEconomyDirty = false;
     gpCommandPathRenderer?.dispose();
     gpCommandPathRenderer = null;
     gpWaypointMarkerRenderer?.dispose();

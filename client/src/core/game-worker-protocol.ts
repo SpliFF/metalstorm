@@ -18,6 +18,7 @@
  */
 
 import type { RmlOpsToMain, RmlEventToWorker, RmlResizeToWorker } from '../ui/rml/rml-protocol.js';
+import type { ResourceUpdateInfo } from './connection.js';
 
 // ─── main → worker ──────────────────────────────────────────────────────────
 
@@ -217,8 +218,13 @@ export interface GpSceneStateToMain {
      *  (Was the never-populated `unitCmdDescs?: unknown` placeholder — renamed
      *  since it now carries resolved tiles, not raw cmd-descs.) */
     buildOptions?: BuildMenuTile[];
-    /** Economy/resource snapshot for the economy bar; present only when changed. */
-    economy?: unknown;
+    /** Local team's latest ResourceUpdate, for the native EconomyBar
+     *  (PLAN-playable.md G4); present only when a new snapshot arrived since
+     *  the last feed. GW4-regression fix: onResourceUpdate previously only
+     *  fed `liveState.resources` (the LuaUI Spring.GetTeamResources path) —
+     *  nothing forwarded it across the worker→main boundary, so the native
+     *  EconomyBar was permanently dark despite being fully built. */
+    economy?: ResourceUpdateInfo;
 }
 
 /**
