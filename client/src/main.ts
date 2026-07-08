@@ -516,9 +516,52 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                     if (m.los) {
                         minimap.applyLosBitmap({ allyTeam: 0, frame: 0, ...m.los });
                     }
+                    // PLAN-playable.md G4: metal-spot markers, delivered once
+                    // (same one-shot pattern as `map` above).
+                    if (m.metalSpots) {
+                        minimap.applyMetalSpots(m.metalSpots);
+                    }
                     minimap.applyFeed(m.blips);
                     minimap.render();
                 }
+                break;
+            // PLAN-playable.md G4 (bonus fix): gl.ConfigMiniMap / gl.DrawMiniMapEvents
+            // from a chili widget (e.g. gui_chili_minimap.lua) reach lua-ui-host's
+            // minimapEmitter and post these unprefixed legacy message types, but
+            // post-GW4 main.ts never had a case for them — same dead-producer class
+            // as onUnitCmdDescs/sendSelectionState/onResourceUpdate (G3a/U3/G4
+            // session 1). Without this the native minimap stays parked in its
+            // hidden default container forever (ownership only flips to 'widget'
+            // inside setGeometry) — so no ZK/BAR game ever showed a sidebar
+            // minimap post-GW4. Coords are Spring screen-space (Y-up from
+            // bottom-left) in the *backing-store* pixel grid — Spring.GetViewSizes
+            // (what the widget lays out against) mirrors liveState.viewport =
+            // canvas.width/height, i.e. CSS px × effectiveDpr(), not CSS px — so
+            // this also divides by the same scale factor main.ts used to size the
+            // canvas before flipping to DOM (CSS-px, top-down) space. The legacy
+            // lua-widget-manager.applyMinimapGeometry this replaces skipped that
+            // conversion (pre-GW4 the canvas may have been unscaled 1:1); ported
+            // forward correctly rather than reproducing that gap.
+            case 'minimapGeometry': {
+                if (minimap) {
+                    const visible = m.visible !== false && m.w > 0 && m.h > 0;
+                    if (!visible) {
+                        minimap.setVisible(false);
+                    } else {
+                        const dpr = effectiveDpr();
+                        const cssX = m.x / dpr;
+                        const cssY = m.y / dpr;
+                        const cssW = m.w / dpr;
+                        const cssH = m.h / dpr;
+                        const domY = window.innerHeight - cssY - cssH;
+                        minimap.setGeometry(cssX, domY, cssW, cssH);
+                        minimap.setVisible(true);
+                    }
+                }
+                break;
+            }
+            case 'minimapEvents':
+                minimap?.markEventsRequested();
                 break;
             // GW4-c5c-2: resolved sound events / music transitions from the worker.
             case 'gp:audioSoundEvents':

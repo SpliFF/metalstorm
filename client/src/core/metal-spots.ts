@@ -110,6 +110,16 @@ export function findMetalSpots(
 }
 
 /**
+ * Marker radius (world elmos) for a metal spot on the minimap overlay
+ * (PLAN-playable.md G4). Scales with the square root of the cluster's
+ * summed density so a handful of unusually rich spots don't dwarf the rest
+ * of the map, clamped to stay legible at both ends of the range.
+ */
+export function metalSpotMarkerRadius(totalMetal: number): number {
+    return Math.max(20, Math.min(90, 20 + Math.sqrt(Math.max(0, totalMetal)) * 3));
+}
+
+/**
  * Find the nearest metal spot to a world-space point, within a search radius.
  * Returns null when no spot is close enough — the caller can use that to tint
  * the build ghost red and reject the placement.

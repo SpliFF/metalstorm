@@ -16,7 +16,7 @@
  */
 
 import { Engine, Scene, FreeCamera, Vector3, Color3, Color4, Mesh, MeshBuilder, StandardMaterial } from '@babylonjs/core';
-import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos, BuildMenuTile } from './game-worker-protocol.js';
+import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos, GpMinimapMetalSpots, BuildMenuTile } from './game-worker-protocol.js';
 // GW4-c2: the WebTransport game connection now lives in the worker. Connection
 // is host-agnostic (runs on WebTransportAdapter, no DOM refs after the
 // onServerRestart callback was extracted) so it imports + runs here unchanged.
@@ -224,6 +224,11 @@ let gpLastLosBitmap: LosBitmap | null = null;
 /// Sent on the first minimap feed after the terrain is built, then cleared
 /// (`gpMinimapMapInfo = null` ⇒ already delivered).
 let gpMinimapMapInfo: { width: number; height: number; baseUrl: string } | null = null;
+/// PLAN-playable.md G4: metal-spot markers for the minimap overlay, captured
+/// in gpLoadMap from the same gpMetalSpots the mex build-ghost snap uses.
+/// Static per-map data — one-shot delivery like gpMinimapMapInfo, not resent
+/// every feed (`gpMinimapMetalSpotsInfo = null` ⇒ already delivered).
+let gpMinimapMetalSpotsInfo: GpMinimapMetalSpots | null = null;
 let gpBuildingPlateRenderer: BuildingPlateRenderer | null = null;
 let gpDefCache: DefCache | null = null;
 /// GW4-c6-1b: resolves once the game's defs are ingested into the def cache (or
@@ -361,6 +366,21 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     gpMetalSpots = findMetalSpots(
         map.metalmap, (map.mapx / 2) | 0, (map.mapy / 2) | 0, gpMetalCellSize);
     postLog(1, `[gp] ${gpMetalSpots.length} metal spots discovered`);
+
+    // PLAN-playable.md G4: same centroids, packed struct-of-arrays for the
+    // minimap's one-shot metal-spot feed (see gpPostMinimapFeed).
+    {
+        const n = gpMetalSpots.length;
+        const x = new Float32Array(n);
+        const z = new Float32Array(n);
+        const metal = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+            x[i] = gpMetalSpots[i].x;
+            z[i] = gpMetalSpots[i].z;
+            metal[i] = gpMetalSpots[i].totalMetal;
+        }
+        gpMinimapMetalSpotsInfo = { count: n, x, z, metal };
+    }
 
     // `mapSourceUrl` is lobby-relative; lobbyUrl='' resolves it against the
     // worker (page) origin, same as fetchMapDataHttp's `/api/*` paths.
@@ -1671,7 +1691,10 @@ function gpPostMinimapFeed(now: number): void {
     // Deliver map dims + backdrop URL once (cleared after the first send).
     const mapInfo = gpMinimapMapInfo ?? undefined;
     if (gpMinimapMapInfo) gpMinimapMapInfo = null;
-    postToMain({ type: 'gp:minimapFeed', blips, los: losPayload, map: mapInfo });
+    // Deliver metal-spot markers once — same one-shot pattern as mapInfo.
+    const metalSpots = gpMinimapMetalSpotsInfo ?? undefined;
+    if (gpMinimapMetalSpotsInfo) gpMinimapMetalSpotsInfo = null;
+    postToMain({ type: 'gp:minimapFeed', blips, los: losPayload, map: mapInfo, metalSpots });
 }
 
 /// U1 (PLAN-bar §7): mirror the live worker render camera into the Spring-API
@@ -1864,6 +1887,7 @@ export function gpShutdown(): void {
     gpBuildPlacement = null;
     gpUnitCmdDescs.clear();
     gpMetalSpots = [];
+    gpMinimapMetalSpotsInfo = null;
     gpBuildTiles = [];
     gpBuildTilesDirty = false;
     gpLastEconomy = null;

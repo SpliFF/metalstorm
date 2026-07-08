@@ -252,6 +252,22 @@ export interface GpMinimapLos {
     explored: Uint8Array;
 }
 
+/**
+ * Metal-spot centroids for the minimap overlay (PLAN-playable.md G4, ZK Phase D
+ * item 5/7 — "unit type icons at zoom, metal spot markers" / "mex spot display").
+ * Static per-map data (the same `findMetalSpots` clustering G3a already computed
+ * for the mex build-ghost snap), so like `map` on {@link GpMessageToMain}'s
+ * `gp:minimapFeed` this ships once and the minimap caches it locally.
+ */
+export interface GpMinimapMetalSpots {
+    count: number;
+    x: Float32Array;
+    z: Float32Array;
+    /** Sum of metalmap density in the cluster — scales marker size by richness,
+     *  same signal ZK's own `cmd_mex_placement.lua` minimap draw uses. */
+    metal: Float32Array;
+}
+
 // ─── worker inbound union (typed dispatcher) ────────────────────────────────
 
 /**
@@ -301,6 +317,7 @@ export type GpMessageToMain =
           blips: GpMinimapBlips;
           los: GpMinimapLos | null;
           map?: { width: number; height: number; baseUrl: string };
+          metalSpots?: GpMinimapMetalSpots;
       }
     /** Worker asks main to persist a key/value to localStorage (WP3b: single
      *  persistence channel — replaces the former gp:config worker→main direction).
